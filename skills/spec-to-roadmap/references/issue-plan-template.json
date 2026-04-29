@@ -1,0 +1,33 @@
+{
+  "repo": "owner/name",
+  "source_spec": "#203 or URL or docs/path.md",
+  "project": {
+    "owner": "owner-or-org",
+    "title": "Project Title",
+    "description": "Short project description",
+    "readme": "Project readme markdown"
+  },
+  "labels": [
+    {
+      "name": "spec:example",
+      "color": "5319e7",
+      "description": "Derived from the example spec"
+    }
+  ],
+  "tracker": {
+    "title": "[Example] Tracker: implementation roadmap",
+    "labels": ["spec:example", "type:tracker"],
+    "body": "Tracker body. Use {{child_list}} where generated child links should appear."
+  },
+  "issues": [
+    {
+      "key": "phase0-data-safety",
+      "title": "[Example Phase 0] Data safety",
+      "labels": ["spec:example", "llm-ready"],
+      "depends_on": ["#203"],
+      "unblocks": ["phase1-skeleton"],
+      "body": "Full issue body with Goal, Source spec, Depends on, Unblocks, Scope, Out of scope, Acceptance criteria."
+    }
+  ],
+  "source_comment": "Optional comment template. Use {{project_url}}, {{tracker_ref}}, and {{child_list}}."
+}
