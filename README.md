@@ -6,7 +6,7 @@ Reusable Codex skills for turning repeated workflows into durable, discoverable 
 
 | Skill | Purpose |
 | --- | --- |
-| [`spec-to-roadmap`](skills/spec-to-roadmap/SKILL.md) | Convert a product/spec issue or document into ordered GitHub issues, a GitHub Project, and an end-to-end branch/PR/merge execution loop. |
+| [`spec-to-roadmap`](skills/spec-to-roadmap/SKILL.md) | Convert a product/spec issue or document into a governed roadmap: master spec, LLM-ready issues, dependencies, project routing, and optional execution loop. |
 
 ## Repository Layout
 
@@ -52,3 +52,12 @@ python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/s
 ```
 
 Some environments require running that validator inside a virtual environment with `PyYAML` installed.
+
+The `spec-to-roadmap` helper also supports a local dry run before mutating
+GitHub:
+
+```bash
+python3 skills/spec-to-roadmap/scripts/create_github_roadmap.py \
+  skills/spec-to-roadmap/references/issue-plan-template.json \
+  --dry-run
+```

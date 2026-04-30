@@ -4,7 +4,7 @@
 
 - Path: [`skills/spec-to-roadmap`](skills/spec-to-roadmap)
 - Trigger: use when a user wants Codex to turn a product/spec issue or document into ordered GitHub issues, a GitHub Project, and an end-to-end branch/PR/merge execution loop.
-- Status: initial published skill.
+- Status: governed roadmap workflow with dry-run validation, project reuse, issue idempotency, dependency metadata, and roadmap hygiene checks.
 
 ## Future Skill Checklist
 

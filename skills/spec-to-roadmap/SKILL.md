@@ -7,7 +7,14 @@ description: Use when a user wants Codex to turn a product/spec issue or documen
 
 ## Overview
 
-Convert a large spec into small, ordered, LLM-executable GitHub issues, create or update a GitHub Project, then execute each issue through branch, implementation, self-review, PR, merge, project update, and issue closure.
+Convert a large spec into small, ordered, LLM-executable GitHub issues, create
+or update the related GitHub Project, then optionally execute each issue through
+branch, implementation, self-review, PR, merge, project update, and issue
+closure.
+
+The roadmap output is itself a durable engineering artifact. For multi-issue
+work, preserve a master spec and make every child issue a mini-spec that an LLM
+implementation agent can execute without rereading the full conversation.
 
 This is a high-side-effect workflow. Prefer GitHub plugin/app capabilities when available; use `gh` as the reliable fallback.
 
@@ -20,6 +27,10 @@ Determine these before acting:
 - Project owner/title: default to repo owner and a title derived from the spec.
 - Execution mode: default full end-to-end when the user asks to execute; otherwise generate roadmap only.
 - Merge policy: default to normal PR merge after self-review and verification, respecting branch protection.
+- Existing project routing: inspect current projects first and reuse the most
+  appropriate board unless the user explicitly requests a new one.
+- Dependency gate policy: identify global gates, prerequisite issues, and work
+  that can safely run in parallel.
 
 If the repository, spec source, or merge authority is unclear, ask one concise question. Do not ask for confirmation for ordinary issue/project/branch/PR steps after the user has requested the full workflow.
 
@@ -29,12 +40,16 @@ If the repository, spec source, or merge authority is unclear, ask one concise q
 
 1. Fetch the spec body and comments.
 2. Save or reference the canonical spec in an issue/doc if the spec currently exists only in chat.
+   - If the source is only conversation text, create a master spec document or
+     tracker issue before child issues.
+   - Keep the source spec path/URL in every child issue.
 3. Identify hard constraints, non-goals, destructive risks, external dependencies, and acceptance criteria.
 4. Inspect existing issues/projects to avoid duplicates.
 
 ### 2. Decompose Into LLM-Sized Issues
 
-Create a structured plan before creating issues. Each issue must fit one implementation context and include:
+Create a structured plan before creating issues. Each issue must fit one
+implementation context and include:
 
 - Title with product/phase prefix.
 - Goal.
@@ -44,22 +59,56 @@ Create a structured plan before creating issues. Each issue must fit one impleme
 - Implementation scope.
 - Out of scope.
 - Acceptance criteria.
+- Verification commands or fixture expectations.
 - Labels.
+- Project routing.
+- Parallelization/concurrency guidance.
 - Risk or safety guardrails when relevant.
 
-Prefer fewer, sharper issues over broad phase buckets. Add a tracker issue unless an authoritative tracker already exists.
+Prefer fewer, sharper issues over broad phase buckets. Add a tracker issue
+unless an authoritative tracker already exists.
+
+For service-agent, reliability, data pipeline, infrastructure, or automation
+work, decompose broad findings into these issue types where applicable:
+
+- schema/state foundation;
+- deterministic detector/scanner;
+- remediation/rebuild/orchestration;
+- API/NATS/frontend status contract;
+- current incident fixture;
+- quality gate/regression fixture;
+- project/issue governance.
 
 Use `references/issue-plan-template.json` as the output shape for the issue plan. Use `scripts/create_github_roadmap.py` to create the tracker, child issues, project, project items, and source-spec comment from that plan.
+
+### 2.5 Validate The Roadmap Plan
+
+Before mutating GitHub:
+
+1. Run the helper in `--dry-run` mode.
+2. Confirm every issue has the required mini-spec sections.
+3. Confirm issue keys are unique and dependency keys resolve.
+4. Confirm required labels exist in the plan.
+5. Confirm project routing is explicit and reuses an existing project when appropriate.
+6. Confirm global gates, blocked labels, and parallelization metadata are present.
+
+Do not create issues when dry-run validation reports missing dependencies,
+duplicate keys, missing required issue sections, or unclear project routing.
 
 ### 3. Create The GitHub Roadmap
 
 1. Ensure required labels exist.
-2. Create/update the tracker issue.
-3. Create child issues in dependency order.
-4. Create/update the GitHub Project.
+2. Reuse the existing project when the plan specifies a project number or matching title; otherwise create the project.
+3. Create/update the tracker issue.
+4. Create/update child issues in dependency order.
 5. Add the source spec, tracker, and all child issues to the project.
-6. Comment on the source spec with project/tracker/child issue links.
-7. Verify counts and links before reporting success.
+6. Backfill tracker and child bodies with final issue numbers, child lists, dependency references, and project URL.
+7. Comment on the source spec with project/tracker/child issue links when the source is a GitHub issue.
+8. Verify counts, project membership, and links before reporting success.
+
+Generated issues should be idempotent by exact title or configured
+`idempotency_key`. Existing issues should be updated/commented rather than
+duplicated.
 
 ### 4. Execute Each Issue End-To-End
 
@@ -104,6 +153,19 @@ If GitHub Project fields exist, update them opportunistically:
 
 If field updates are unavailable or brittle, adding items and using issue comments is sufficient. Do not block the workflow on optional Project field automation.
 
+## Roadmap Hygiene Checks
+
+Before reporting success, verify:
+
+- tracker exists and lists all children in execution order;
+- every child issue links the master spec;
+- every child issue includes dependency and unblocks metadata;
+- every child issue is assigned to the target project;
+- required labels are present;
+- global gates such as `blocked:cloud-rollout` are preserved when applicable;
+- duplicate titles/fingerprints were not created;
+- source spec or parent issue has a comment linking tracker, project, and children.
+
 ## Safety Gates
 
 Stop and ask only for:
@@ -124,6 +186,7 @@ Before reporting completion of a roadmap generation run:
 - Confirm tracker exists and lists all child issues.
 - Confirm project exists and contains source spec, tracker, and children.
 - Confirm source spec has a comment linking project/tracker/children.
+- Confirm dry-run validation passed before mutation, or explain why no helper was available.
 
 Before reporting completion of an execution run:
 
@@ -131,4 +194,3 @@ Before reporting completion of an execution run:
 - Confirm merged PR links exist.
 - Confirm default branch contains the merged work.
 - Confirm final tests/checks run or document why they could not.
-
