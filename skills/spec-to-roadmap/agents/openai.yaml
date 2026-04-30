@@ -1,4 +1,4 @@
 interface:
   display_name: "Spec to Roadmap"
-  short_description: "Create roadmap issues and execute them"
-  default_prompt: "Use this skill to split a spec into ordered LLM-sized GitHub issues, create or update the related project, then execute each issue through branch, PR, review, merge, and closure."
+  short_description: "Create governed implementation roadmaps"
+  default_prompt: "Use this skill to preserve a master spec, split it into ordered LLM-sized GitHub issues, reuse or create the related project, validate dependency/project hygiene, then optionally execute each issue through branch, PR, review, merge, and closure."
