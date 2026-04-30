@@ -57,7 +57,14 @@ The `spec-to-roadmap` helper also supports a local dry run before mutating
 GitHub:
 
 ```bash
+python3 skills/spec-to-roadmap/scripts/roadmap_plan_scaffold.py \
+  --spec docs/path.md \
+  --repo owner/name \
+  --project-owner owner \
+  --project-title "Project Title" \
+  --output /tmp/roadmap.json
+
 python3 skills/spec-to-roadmap/scripts/create_github_roadmap.py \
-  skills/spec-to-roadmap/references/issue-plan-template.json \
+  /tmp/roadmap.json \
   --dry-run
 ```

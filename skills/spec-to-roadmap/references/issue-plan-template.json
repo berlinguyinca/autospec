@@ -1,6 +1,8 @@
 {
   "repo": "owner/name",
   "source_spec": "#203 or URL or docs/path.md",
+  "source_spec_paths": ["docs/path.md"],
+  "source_spec_url": "https://github.com/owner/name/blob/main/docs/path.md",
   "project": {
     "owner": "owner-or-org",
     "number": null,
@@ -10,6 +12,7 @@
     "readme": "Project readme markdown"
   },
   "global_gates": ["#317"],
+  "existing_issue_links": ["#203"],
   "labels": [
     {
       "name": "spec:example",

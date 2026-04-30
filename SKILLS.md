@@ -4,7 +4,7 @@
 
 - Path: [`skills/spec-to-roadmap`](skills/spec-to-roadmap)
 - Trigger: use when a user wants Codex to turn a product/spec issue or document into ordered GitHub issues, create or update the matching GitHub Project/view, and optionally continue through the implementation loop.
-- Activation keywords: `spec to roadmap`, `turn this spec into GitHub issues`, `create roadmap issues from this spec`, `create/update the GitHub project for this spec`, `take this spec through implementation`, `ship this roadmap`
+- Activation keywords: `spec to roadmap`, `turn this spec into GitHub issues`, `create roadmap issues from this spec`, `create/update the GitHub project for this spec`, `take this spec through implementation`, `ship this roadmap`, `roadmap this spec file`, `create project board from this spec`, `split this spec into LLM issues`, `materialize this spec`, `turn this doc into a GitHub project`, `generate implementation issues from docs/path.md`, `run spec-to-roadmap on docs/path.md`
 - Status: governed roadmap workflow with dry-run validation, project reuse, issue idempotency, dependency metadata, and roadmap hygiene checks.
 
 ## Future Skill Checklist
