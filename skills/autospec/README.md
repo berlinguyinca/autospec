@@ -8,6 +8,38 @@ status deltas along the way.
 
 Works on **Claude Code**, **OpenCode**, and **Codex CLI**.
 
+## Quick install
+
+One-line install for all three supported agents (Claude Code, OpenCode, Codex CLI):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/codex-skills/main/skills/autospec/install.sh | sh -s -- --harness all
+```
+
+This installs autospec for all three supported agents at once. The installer
+auto-downloads the skill files from the same branch when piped, so you don't
+need to clone the repo first.
+
+> **Safety note.** Read the script before piping to `sh` if you don't trust the
+> source. The audited two-step equivalent is:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/berlinguyinca/codex-skills/main/skills/autospec/install.sh > install.sh
+> less install.sh
+> sh install.sh --harness all
+> ```
+
+Per-harness one-liners:
+
+```bash
+# Claude Code only
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/codex-skills/main/skills/autospec/install.sh | sh -s -- --harness claude
+# OpenCode only
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/codex-skills/main/skills/autospec/install.sh | sh -s -- --harness opencode
+# Codex CLI only
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/codex-skills/main/skills/autospec/install.sh | sh -s -- --harness codex
+```
+
 ## What it does
 
 The skill executes a 7-phase workflow (Phase 0 through Phase 6). The canonical body
@@ -87,9 +119,9 @@ Optional:
 - A pre-commit hook framework — the skill respects hooks (it never passes
   `--no-verify`).
 
-## Installation
+## Installation (from a clone)
 
-### One-shot installer
+If you've already cloned the repo, you can run the bundled installer directly:
 
 ```bash
 cd skills/autospec
