@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# uninstall.sh — remove the autonomous-feature-shipping skill from one or more
+# uninstall.sh — remove the autospec skill from one or more
 # agent harnesses (Claude Code, OpenCode, Codex CLI).
 #
 # Usage:
@@ -16,7 +16,7 @@
 
 set -eu
 
-SKILL_NAME="autonomous-feature-shipping"
+SKILL_NAME="autospec"
 
 HARNESS=""
 DRY_RUN=0

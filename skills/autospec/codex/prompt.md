@@ -1,9 +1,4 @@
----
-name: autonomous-feature-shipping
-description: Use when the user asks to ship a feature end-to-end — bootstrap repo if missing, brainstorm a design, decompose into linked GitHub issues, and run an autonomous implementation loop with auto-merge until done.
----
-
-# Autonomous-feature-shipping workflow (harness-neutral)
+# autospec workflow (harness-neutral)
 
 Take the following feature request and ship it through the full pipeline:
 **bootstrap repo (if missing) → investigate → design → spec → decomposed GitHub issues → autonomous implementation with auto-merge → periodic status updates → final report.**

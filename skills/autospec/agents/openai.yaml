@@ -1,4 +1,5 @@
 interface:
-  display_name: "Autonomous Feature Shipping"
-  short_description: "Bootstrap repo, design, decompose into linked GitHub issues, and run an autonomous implementation loop with auto-merge"
+  name: "autospec"
+  display_name: "autospec"
+  short_description: "Use when the user wants to ship a feature end-to-end across multiple commits — bootstraps repo if missing, brainstorms a design spec, decomposes into linked GitHub issues, and runs an autonomous implementation loop with auto-merge."
   default_prompt: "Use this skill to ship a feature end-to-end: optionally bootstrap the GitHub repo, run a delegated investigate/brainstorm/design pass, materialize the design into an EPIC plus auto-implement child issues with dependency metadata, then launch a background monitor that processes each ready issue (worktree, TDD, self-review, admin-merge) until the queue drains."

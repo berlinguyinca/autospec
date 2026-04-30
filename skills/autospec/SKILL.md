@@ -1,9 +1,9 @@
 ---
-description: Use when the user asks to ship a feature end-to-end — bootstrap repo if missing, brainstorm a design, decompose into linked GitHub issues, and run an autonomous implementation loop with auto-merge until done.
-mode: primary
+name: autospec
+description: Use when the user wants to ship a feature end-to-end across multiple commits — bootstraps repo if missing, brainstorms a design spec, decomposes into linked GitHub issues, and runs an autonomous implementation loop with auto-merge.
 ---
 
-# Autonomous-feature-shipping workflow (harness-neutral)
+# autospec workflow (harness-neutral)
 
 Take the following feature request and ship it through the full pipeline:
 **bootstrap repo (if missing) → investigate → design → spec → decomposed GitHub issues → autonomous implementation with auto-merge → periodic status updates → final report.**

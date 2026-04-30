@@ -6,8 +6,7 @@ Reusable Codex skills for turning repeated workflows into durable, discoverable 
 
 | Skill | Purpose |
 | --- | --- |
-| [`spec-to-roadmap`](skills/spec-to-roadmap/SKILL.md) | Convert a product/spec issue or document into a governed roadmap: master spec, LLM-ready issues, dependencies, GitHub Project/view routing, and optional implementation loop. |
-| [`autonomous-feature-shipping`](skills/autonomous-feature-shipping/README.md) | Ship a feature end-to-end: bootstrap repo if missing, brainstorm/design, decompose into linked GitHub issues, then run an autonomous implementation loop with admin auto-merge. Multi-harness (Claude Code, OpenCode, Codex CLI). |
+| [`autospec`](skills/autospec/README.md) | Ship a feature end-to-end: bootstrap repo if missing, brainstorm/design, decompose into linked GitHub issues, then run an autonomous implementation loop with admin auto-merge. Multi-harness (Claude Code, OpenCode, Codex CLI). |
 
 ## Repository Layout
 
@@ -34,25 +33,30 @@ Skills that target only Codex CLI can stick to the original layout (`SKILL.md` p
 
 ## Installing A Skill
 
+For multi-harness skills (Claude Code, OpenCode, Codex CLI), use the skill's
+bundled installer. The fastest path is the one-line installer described in the
+skill's README, e.g.:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/codex-skills/main/skills/autospec/install.sh | sh -s -- --harness all
+```
+
+Or run it from a clone:
+
+```bash
+cd skills/autospec
+./install.sh --harness all          # or claude / opencode / codex
+```
+
 For Codex-only skills, copy the skill directory into your Codex skills directory:
 
 ```bash
 mkdir -p ~/.codex/skills
-cp -R skills/spec-to-roadmap ~/.codex/skills/
+cp -R skills/<skill-name> ~/.codex/skills/
 ```
 
 Start a new Codex session after installation so the skill metadata is loaded.
-
-For multi-harness skills (Claude Code, OpenCode, Codex CLI), use the skill's
-bundled installer:
-
-```bash
-cd skills/autonomous-feature-shipping
-./install.sh --harness all          # or claude / opencode / codex
-```
-
-See the skill's own README for the per-harness install paths and manual
-fallbacks.
+See each skill's own README for per-harness install paths and manual fallbacks.
 
 ## Adding Future Skills
 
@@ -69,23 +73,7 @@ Avoid adding generated caches, local virtual environments, private credentials, 
 If the Codex skill-creator tools are installed locally, validate a skill with:
 
 ```bash
-python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/spec-to-roadmap
+python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/<skill-name>
 ```
 
 Some environments require running that validator inside a virtual environment with `PyYAML` installed.
-
-The `spec-to-roadmap` helper also supports a local dry run before mutating
-GitHub:
-
-```bash
-python3 skills/spec-to-roadmap/scripts/roadmap_plan_scaffold.py \
-  --spec docs/path.md \
-  --repo owner/name \
-  --project-owner owner \
-  --project-title "Project Title" \
-  --output /tmp/roadmap.json
-
-python3 skills/spec-to-roadmap/scripts/create_github_roadmap.py \
-  /tmp/roadmap.json \
-  --dry-run
-```

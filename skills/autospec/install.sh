@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# install.sh — install the autonomous-feature-shipping skill into one or more
+# install.sh — install the autospec skill into one or more
 # agent harnesses (Claude Code, OpenCode, Codex CLI).
 #
 # Usage:
@@ -8,22 +8,40 @@
 #   ./install.sh --symlink           # symlink instead of copy (updates propagate)
 #   ./install.sh --dry-run           # print what would be done; do nothing
 #
+# Can also be piped from curl:
+#   curl -fsSL https://raw.githubusercontent.com/berlinguyinca/codex-skills/main/skills/autospec/install.sh \
+#     | sh -s -- --harness all
+# When piped, the script auto-downloads the skill files from the same branch.
+#
 # Honors:
 #   CLAUDE_CONFIG_DIR    (default: $HOME/.claude)
 #   OPENCODE_CONFIG_DIR  (default: $HOME/.config/opencode)
 #   CODEX_HOME           (default: $HOME/.codex)
+#   AUTOSPEC_REF         (default: main) — git ref to fetch from when piped
+#   AUTOSPEC_RAW_BASE    (override the raw URL base entirely)
 #
 # Idempotent: re-running upgrades the install. Exits non-zero on hard failure;
 # exits zero with warnings on missing optional deps.
 
 set -eu
 
-SKILL_NAME="autonomous-feature-shipping"
-SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
+SKILL_NAME="autospec"
+SKILL_RAW_BASE="${AUTOSPEC_RAW_BASE:-https://raw.githubusercontent.com/berlinguyinca/codex-skills/${AUTOSPEC_REF:-main}/skills/autospec}"
+
+# Resolve the directory containing this script. When piped through stdin (e.g.
+# `curl ... | sh`), $0 will not be a real file — detect that and fall back to
+# downloading the source files from the raw GitHub URL.
+SCRIPT_PATH="${0:-}"
+if [ -n "$SCRIPT_PATH" ] && [ -f "$SCRIPT_PATH" ]; then
+    SKILL_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+else
+    SKILL_DIR=""
+fi
 
 HARNESS=""
 USE_SYMLINK=0
 DRY_RUN=0
+TMP_FETCH_DIR=""
 
 # ---------- helpers --------------------------------------------------------
 
@@ -55,6 +73,31 @@ run() {
     else
         eval "$@"
     fi
+}
+
+cleanup() {
+    if [ -n "${TMP_FETCH_DIR:-}" ] && [ -d "$TMP_FETCH_DIR" ]; then
+        rm -rf "$TMP_FETCH_DIR"
+    fi
+}
+trap cleanup EXIT INT TERM
+
+fetch_source_files() {
+    # Download the files we need into a temp dir and set SKILL_DIR to it.
+    if ! command -v curl >/dev/null 2>&1; then
+        err "curl is required when running from stdin (e.g. piped via 'curl | sh')."
+        exit 1
+    fi
+    TMP_FETCH_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t autospec)"
+    info "Fetching ${SKILL_NAME} source files from ${SKILL_RAW_BASE} ..."
+    mkdir -p "$TMP_FETCH_DIR/opencode" "$TMP_FETCH_DIR/codex"
+    for rel in SKILL.md opencode/agent.md codex/prompt.md; do
+        if ! curl -fsSL "$SKILL_RAW_BASE/$rel" -o "$TMP_FETCH_DIR/$rel"; then
+            err "failed to download $SKILL_RAW_BASE/$rel"
+            exit 1
+        fi
+    done
+    SKILL_DIR="$TMP_FETCH_DIR"
 }
 
 install_one() {
@@ -137,6 +180,25 @@ case "$HARNESS" in
     claude|opencode|codex|all) ;;
     *) err "invalid --harness: $HARNESS"; usage; exit 2 ;;
 esac
+
+# ---------- ensure source files are available ------------------------------
+
+# If we couldn't resolve a local SKILL_DIR (piped from curl) OR the local dir
+# doesn't actually contain the skill files, fall back to remote fetch.
+need_fetch=0
+if [ -z "$SKILL_DIR" ]; then
+    need_fetch=1
+elif [ ! -f "$SKILL_DIR/SKILL.md" ] || [ ! -f "$SKILL_DIR/opencode/agent.md" ] || [ ! -f "$SKILL_DIR/codex/prompt.md" ]; then
+    need_fetch=1
+fi
+
+if [ "$need_fetch" -eq 1 ]; then
+    if [ "$USE_SYMLINK" -eq 1 ]; then
+        err "--symlink requires running from a checkout of the codex-skills repo (no local files to symlink to)."
+        exit 2
+    fi
+    fetch_source_files
+fi
 
 # ---------- dependency checks ---------------------------------------------
 

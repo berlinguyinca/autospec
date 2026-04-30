@@ -1,4 +1,9 @@
-# Autonomous-feature-shipping workflow (harness-neutral)
+---
+description: Use when the user wants to ship a feature end-to-end across multiple commits — bootstraps repo if missing, brainstorms a design spec, decomposes into linked GitHub issues, and runs an autonomous implementation loop with auto-merge.
+mode: primary
+---
+
+# autospec workflow (harness-neutral)
 
 Take the following feature request and ship it through the full pipeline:
 **bootstrap repo (if missing) → investigate → design → spec → decomposed GitHub issues → autonomous implementation with auto-merge → periodic status updates → final report.**
