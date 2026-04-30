@@ -6,7 +6,7 @@ Reusable Codex skills for turning repeated workflows into durable, discoverable 
 
 | Skill | Purpose |
 | --- | --- |
-| [`spec-to-roadmap`](skills/spec-to-roadmap/SKILL.md) | Convert a product/spec issue or document into a governed roadmap: master spec, LLM-ready issues, dependencies, project routing, and optional execution loop. |
+| [`spec-to-roadmap`](skills/spec-to-roadmap/SKILL.md) | Convert a product/spec issue or document into a governed roadmap: master spec, LLM-ready issues, dependencies, GitHub Project/view routing, and optional implementation loop. |
 
 ## Repository Layout
 

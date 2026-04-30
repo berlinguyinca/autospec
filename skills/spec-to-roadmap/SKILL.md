@@ -1,6 +1,6 @@
 ---
 name: spec-to-roadmap
-description: Use when a user wants Codex to turn a product/spec issue or document into ordered GitHub issues, a GitHub Project, and an end-to-end branch/PR/merge execution loop.
+description: Use when a user wants Codex to turn a product/spec issue or document into ordered GitHub issues, create or update the matching GitHub Project view, and optionally continue through the implementation loop.
 ---
 
 # Spec To Roadmap
@@ -8,15 +8,33 @@ description: Use when a user wants Codex to turn a product/spec issue or documen
 ## Overview
 
 Convert a large spec into small, ordered, LLM-executable GitHub issues, create
-or update the related GitHub Project, then optionally execute each issue through
-branch, implementation, self-review, PR, merge, project update, and issue
-closure.
+or update the related GitHub Project plus its working view, then optionally
+execute each issue through branch, implementation, self-review, PR, merge,
+project update, and issue closure.
 
 The roadmap output is itself a durable engineering artifact. For multi-issue
 work, preserve a master spec and make every child issue a mini-spec that an LLM
 implementation agent can execute without rereading the full conversation.
 
 This is a high-side-effect workflow. Prefer GitHub plugin/app capabilities when available; use `gh` as the reliable fallback.
+
+When this skill is invoked for a real spec, do not stop after writing the issue plan unless the user explicitly asks for planning only. The default reusable behavior is:
+
+1. Read the spec.
+2. Generate the structured issue plan.
+3. Immediately materialize that plan into GitHub issues plus a GitHub Project/project view.
+4. Continue into the implementation loop only when the user explicitly asks to execute, implement, ship, or continue through delivery.
+
+## Activation Keywords
+
+Use this skill when the user says things like:
+
+- `spec to roadmap`
+- `turn this spec into GitHub issues`
+- `create roadmap issues from this spec`
+- `create/update the GitHub project for this spec`
+- `take this spec through implementation`
+- `ship this roadmap`
 
 ## Inputs
 
@@ -25,7 +43,8 @@ Determine these before acting:
 - Repository: from `git remote -v`, current GitHub context, or user input.
 - Spec source: GitHub issue, local file, PR body, markdown doc, or pasted text.
 - Project owner/title: default to repo owner and a title derived from the spec.
-- Execution mode: default full end-to-end when the user asks to execute; otherwise generate roadmap only.
+- Roadmap mode: default to full roadmap materialization, meaning issue-plan generation plus issue/project creation.
+- Execution mode: continue past roadmap creation only when the user asks to execute, implement, ship, continue, or otherwise requests delivery work.
 - Merge policy: default to normal PR merge after self-review and verification, respecting branch protection.
 - Existing project routing: inspect current projects first and reuse the most
   appropriate board unless the user explicitly requests a new one.
@@ -101,14 +120,17 @@ duplicate keys, missing required issue sections, or unclear project routing.
 2. Reuse the existing project when the plan specifies a project number or matching title; otherwise create the project.
 3. Create/update the tracker issue.
 4. Create/update child issues in dependency order.
-5. Add the source spec, tracker, and all child issues to the project.
-6. Backfill tracker and child bodies with final issue numbers, child lists, dependency references, and project URL.
-7. Comment on the source spec with project/tracker/child issue links when the source is a GitHub issue.
-8. Verify counts, project membership, and links before reporting success.
+5. Create/update a canonical project view when the available GitHub automation surface supports it.
+6. Add the source spec, tracker, and all child issues to the project.
+7. Backfill tracker and child bodies with final issue numbers, child lists, dependency references, and project URL.
+8. Comment on the source spec with project/tracker/child issue links when the source is a GitHub issue.
+9. Verify counts, project membership, and links before reporting success.
 
 Generated issues should be idempotent by exact title or configured
 `idempotency_key`. Existing issues should be updated/commented rather than
 duplicated.
+
+Treat this roadmap creation phase as the default completion target for the skill. Do not hand the user a plan and ask them to come back later just to perform the mechanical issue/project creation steps.
 
 ### 4. Execute Each Issue End-To-End
 
@@ -151,6 +173,8 @@ If GitHub Project fields exist, update them opportunistically:
 - Status: Todo, In Progress, In Review, Done.
 - Phase/order/workstream fields when names are obvious.
 
+If the Project API/tooling exposes views, prefer maintaining one obvious execution view such as backlog/table or board-by-status. Reuse an existing matching view before creating a new one.
+
 If field updates are unavailable or brittle, adding items and using issue comments is sufficient. Do not block the workflow on optional Project field automation.
 
 ## Roadmap Hygiene Checks
@@ -185,6 +209,7 @@ Before reporting completion of a roadmap generation run:
 
 - Confirm tracker exists and lists all child issues.
 - Confirm project exists and contains source spec, tracker, and children.
+- Confirm the intended project view exists or document why the active GitHub tooling could not automate it.
 - Confirm source spec has a comment linking project/tracker/children.
 - Confirm dry-run validation passed before mutation, or explain why no helper was available.
 
