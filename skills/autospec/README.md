@@ -1,4 +1,4 @@
-# autonomous-feature-shipping
+# autospec
 
 A multi-harness skill that takes a single feature request and ships it end-to-end:
 bootstrap the GitHub repo (if missing), investigate, brainstorm, write a design spec,
@@ -28,9 +28,6 @@ Reach for this skill when:
   if you're starting from nothing.
 - You want an opinionated TDD + branch-per-issue + admin-squash-merge loop, not a
   bespoke one.
-
-Skip this skill when you only want **planning** — `spec-to-roadmap` covers that
-without the auto-merge loop.
 
 ## Architecture (the 7 phases)
 
@@ -95,7 +92,7 @@ Optional:
 ### One-shot installer
 
 ```bash
-cd skills/autonomous-feature-shipping
+cd skills/autospec
 ./install.sh                    # interactive — prompts for harness
 ./install.sh --harness all      # install for Claude Code, OpenCode, and Codex CLI
 ./install.sh --harness claude   # Claude Code only
@@ -120,20 +117,20 @@ Honors `CLAUDE_CONFIG_DIR`, `OPENCODE_CONFIG_DIR`, and `CODEX_HOME` if set.
 #### Claude Code
 
 ```bash
-mkdir -p ~/.claude/skills/autonomous-feature-shipping
-cp skills/autonomous-feature-shipping/SKILL.md \
-   ~/.claude/skills/autonomous-feature-shipping/SKILL.md
+mkdir -p ~/.claude/skills/autospec
+cp skills/autospec/SKILL.md \
+   ~/.claude/skills/autospec/SKILL.md
 ```
 
-The skill becomes discoverable as `autonomous-feature-shipping` (or the user can
+The skill becomes discoverable as `autospec` (or the user can
 invoke it via the Skill tool).
 
 #### OpenCode
 
 ```bash
 mkdir -p ~/.config/opencode/agent
-cp skills/autonomous-feature-shipping/opencode/agent.md \
-   ~/.config/opencode/agent/autonomous-feature-shipping.md
+cp skills/autospec/opencode/agent.md \
+   ~/.config/opencode/agent/autospec.md
 ```
 
 OpenCode picks up agent markdown files from `~/.config/opencode/agent/`. The
@@ -145,12 +142,12 @@ when the file is loaded as a plain prompt.
 
 ```bash
 mkdir -p ~/.codex/prompts
-cp skills/autonomous-feature-shipping/codex/prompt.md \
-   ~/.codex/prompts/autonomous-feature-shipping.md
+cp skills/autospec/codex/prompt.md \
+   ~/.codex/prompts/autospec.md
 ```
 
 Codex CLI exposes any markdown file in `~/.codex/prompts/` as a slash command —
-in this case `/autonomous-feature-shipping`.
+in this case `/autospec`.
 
 ### Uninstall
 
@@ -165,7 +162,7 @@ Same flags as the installer.
 ### Claude Code
 
 ```
-/autonomous-feature-shipping Add a real-time presence indicator to the dashboard
+/autospec Add a real-time presence indicator to the dashboard
 ```
 
 Or invoke via the Skill tool with the same description.
@@ -173,7 +170,7 @@ Or invoke via the Skill tool with the same description.
 ### OpenCode
 
 ```
-@autonomous-feature-shipping Add a real-time presence indicator to the dashboard
+@autospec Add a real-time presence indicator to the dashboard
 ```
 
 (Or whichever invocation syntax your OpenCode version uses for primary agents.)
@@ -182,13 +179,13 @@ Or invoke via the Skill tool with the same description.
 
 ```
 codex
-> /autonomous-feature-shipping Add a real-time presence indicator to the dashboard
+> /autospec Add a real-time presence indicator to the dashboard
 ```
 
 ### Full example
 
 ```
-> /autonomous-feature-shipping Build a Slack bot that posts a daily standup digest
+> /autospec Build a Slack bot that posts a daily standup digest
   pulled from yesterday's merged PRs and closed issues across our org
 
 [Phase 0 — Bootstrap]

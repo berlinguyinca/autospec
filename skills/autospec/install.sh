@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# install.sh — install the autonomous-feature-shipping skill into one or more
+# install.sh — install the autospec skill into one or more
 # agent harnesses (Claude Code, OpenCode, Codex CLI).
 #
 # Usage:
@@ -18,7 +18,7 @@
 
 set -eu
 
-SKILL_NAME="autonomous-feature-shipping"
+SKILL_NAME="autospec"
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 HARNESS=""
