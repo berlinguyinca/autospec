@@ -35,6 +35,13 @@ Use this skill when the user says things like:
 - `create/update the GitHub project for this spec`
 - `take this spec through implementation`
 - `ship this roadmap`
+- `roadmap this spec file`
+- `create project board from this spec`
+- `split this spec into LLM issues`
+- `materialize this spec`
+- `turn this doc into a GitHub project`
+- `generate implementation issues from docs/path.md`
+- `run spec-to-roadmap on docs/path.md`
 
 ## Inputs
 
@@ -42,6 +49,8 @@ Determine these before acting:
 
 - Repository: from `git remote -v`, current GitHub context, or user input.
 - Spec source: GitHub issue, local file, PR body, markdown doc, or pasted text.
+  - For repo-local spec files, prefer the exact path relative to the repo root, for example `docs/superpowers/specs/topic.md`.
+  - Preserve every source spec path in the tracker and every generated child issue.
 - Project owner/title: default to repo owner and a title derived from the spec.
 - Roadmap mode: default to full roadmap materialization, meaning issue-plan generation plus issue/project creation.
 - Execution mode: continue past roadmap creation only when the user asks to execute, implement, ship, continue, or otherwise requests delivery work.
@@ -98,7 +107,23 @@ work, decompose broad findings into these issue types where applicable:
 - quality gate/regression fixture;
 - project/issue governance.
 
-Use `references/issue-plan-template.json` as the output shape for the issue plan. Use `scripts/create_github_roadmap.py` to create the tracker, child issues, project, project items, and source-spec comment from that plan.
+Use `references/issue-plan-template.json` as the output shape for the issue plan.
+
+For spec-file driven work, first generate a plan scaffold:
+
+```bash
+python3 skills/spec-to-roadmap/scripts/roadmap_plan_scaffold.py \
+  --spec docs/path.md \
+  --repo owner/name \
+  --project-owner owner \
+  --project-title "Project Title" \
+  --output /tmp/roadmap.json
+```
+
+Codex must then fill the scaffold with tracker text and child issue mini-specs.
+Use `scripts/create_github_roadmap.py` to create or update the tracker, child
+issues, labels, project, project items, and source-spec comments supported by
+the available GitHub API surface.
 
 ### 2.5 Validate The Roadmap Plan
 
@@ -110,6 +135,9 @@ Before mutating GitHub:
 4. Confirm required labels exist in the plan.
 5. Confirm project routing is explicit and reuses an existing project when appropriate.
 6. Confirm global gates, blocked labels, and parallelization metadata are present.
+7. For repo-local spec files, confirm `source_spec_paths` includes every source
+   document and `source_spec_url` points at the committed file location when
+   available.
 
 Do not create issues when dry-run validation reports missing dependencies,
 duplicate keys, missing required issue sections, or unclear project routing.
@@ -124,7 +152,8 @@ duplicate keys, missing required issue sections, or unclear project routing.
 6. Add the source spec, tracker, and all child issues to the project.
 7. Backfill tracker and child bodies with final issue numbers, child lists, dependency references, and project URL.
 8. Comment on the source spec with project/tracker/child issue links when the source is a GitHub issue.
-9. Verify counts, project membership, and links before reporting success.
+9. For repo-local spec files, verify tracker and child bodies link the path/URL.
+10. Verify counts, project membership, and links before reporting success.
 
 Generated issues should be idempotent by exact title or configured
 `idempotency_key`. Existing issues should be updated/commented rather than
@@ -189,6 +218,7 @@ Before reporting success, verify:
 - global gates such as `blocked:cloud-rollout` are preserved when applicable;
 - duplicate titles/fingerprints were not created;
 - source spec or parent issue has a comment linking tracker, project, and children.
+- repo-local source specs are referenced by path or committed blob URL in every issue.
 
 ## Safety Gates
 

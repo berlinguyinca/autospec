@@ -24,6 +24,7 @@ REQUIRED_ISSUE_SECTIONS = (
     "## Unblocks",
     "## Implementation scope",
     "## Out of scope",
+    "## Parallelization",
     "## Acceptance criteria",
     "## Verification",
 )
@@ -98,12 +99,18 @@ def validate_plan(plan: dict[str, Any]) -> list[str]:
             errors.append(f"{key}: missing labels")
         if not issue.get("parallelization"):
             errors.append(f"{key}: missing parallelization")
+        if plan.get("source_spec_paths"):
+            for path in plan["source_spec_paths"]:
+                if str(path) not in body:
+                    errors.append(f"{key}: missing source spec path {path}")
 
     project = plan.get("project", {})
     if not project.get("owner"):
         errors.append("project.owner is required")
     if not project.get("title") and not project.get("number"):
         errors.append("project.title or project.number is required")
+    if plan.get("source_spec_paths") and not isinstance(plan["source_spec_paths"], list):
+        errors.append("source_spec_paths must be a list when provided")
     return errors
 
 
@@ -254,10 +261,12 @@ def add_project_item_once(owner: str, project_number: int, url: str, existing_ur
     existing_urls.add(url)
 
 
-def source_spec_url(repo: str, source_spec: str) -> str | None:
+def source_spec_issue_or_pr_url(repo: str, source_spec: str) -> str | None:
     if source_spec.startswith("#"):
         return f"https://github.com/{repo}/issues/{source_spec[1:]}"
-    if source_spec.startswith("https://github.com/"):
+    if source_spec.startswith("https://github.com/") and (
+        "/issues/" in source_spec or "/pull/" in source_spec
+    ):
         return source_spec
     return None
 
@@ -323,7 +332,13 @@ def main() -> int:
     edit_project(owner, project_number, project)
     existing_project_urls = project_item_urls(owner, project_number)
 
-    common_values = {"source_spec": source, "project_url": project_url}
+    source_paths = "\n".join(f"- {path}" for path in plan.get("source_spec_paths", []))
+    common_values = {
+        "source_spec": source,
+        "source_spec_paths": source_paths,
+        "source_spec_url": str(plan.get("source_spec_url", "")),
+        "project_url": project_url,
+    }
     tracker_plan = plan["tracker"]
     tracker_ref = upsert_issue(
         repo,
@@ -367,7 +382,7 @@ def main() -> int:
             ]
         )
 
-    source_url = source_spec_url(repo, source)
+    source_url = source_spec_issue_or_pr_url(repo, source)
     if source_url:
         add_project_item_once(owner, project_number, source_url, existing_project_urls)
     add_project_item_once(owner, project_number, tracker_ref.url, existing_project_urls)

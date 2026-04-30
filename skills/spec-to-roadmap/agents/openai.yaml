@@ -1,4 +1,4 @@
 interface:
   display_name: "Spec to Roadmap"
   short_description: "Create governed roadmap issues, project view, and optional execution loop"
-  default_prompt: "Use this skill to preserve a master spec, split it into ordered LLM-sized GitHub issues, immediately reuse or create the related GitHub Project/view, validate dependency/project hygiene, then continue into branch, PR, review, merge, and closure only when the user asks for execution."
+  default_prompt: "Use this skill to preserve a master spec or repo-local spec file, split it into ordered LLM-sized GitHub issues, immediately reuse or create the related GitHub Project/view, validate dependency/project hygiene, then continue into branch, PR, review, merge, and closure only when the user asks for execution."
