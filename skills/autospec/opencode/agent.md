@@ -285,6 +285,31 @@ labels and patches each body with a `## Model fit` block.
 >    - dep warnings: <count>; circular cycles: <count>
 >    ```
 
+## Phase 3 pre-impl gate
+
+After Phase 3 decomposition completes (and Phase 3.5 review-and-label has
+applied `ctx:*` / `reasoning:*` labels), end Phase 3 by asking the user
+this verbatim question (no auto-launch — always ask explicitly, per spec
+§3.3):
+
+> `"Spec written, N issues filed. Start /autospec-run now, defer to your external daemon, or keep refining? [run / defer / refine]"`
+
+Substitute `N` with the actual issue count from Phase 3. Default highlight
+is **`run`** for `/autospec` (the umbrella end-to-end skill — the user
+invoked `/autospec` expecting end-to-end shipping, so the gate defaults
+to `run`).
+
+- **`run`** (default for `/autospec`) — proceed to Phase 4 (the existing
+  background autonomous monitor launch path below).
+- **`defer`** — print
+  `"Issues are ready. Your external monitor will pick them up. Exiting."`
+  and stop. For `/autospec`, this means skipping Phase 4–6 entirely; the
+  just-filed `auto-implement` queue persists on the GitHub side so an
+  external daemon (or a later `/autospec-run` invocation) can pick it up.
+- **`refine`** — re-enter Phase 2 from question 1 (Architecture).
+
+No daemon auto-detection — always ask explicitly.
+
 ## Phase 4 — Background autonomous monitor
 
 Record this durable preference in `AGENTS.md` (idempotent — skip if already present):
