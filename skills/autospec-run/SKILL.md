@@ -34,12 +34,54 @@ If no install path is detected, print `Self-update: no installed copy of autospe
 /autospec-run [--profile <name>]
 ```
 
-- `--profile <name>` — filter the candidate queue against `~/.autospec/model-profiles.yml` so only issues whose `ctx:*` and `reasoning:*` labels fit the named profile are picked up. Issues that exceed the profile on either axis are appended to a `Deferred` list and reported at run-end.
-- (no flag) — run with the file's `default:` profile if present; otherwise print `Profile filter inactive — running all auto-implement issues.` and continue without filtering.
-- If `~/.autospec/model-profiles.yml` is missing, the skill prints `Profile filter inactive — running all auto-implement issues.` and continues. (Auto-init of the file lands in PR B2; this skill plumbs the flag with no filter behaviour yet.)
-- `--profile <unknown>` — exit non-zero and print the available profile names.
+- `--profile <name>` — filter the candidate queue against `~/.autospec/model-profiles.yml` so only issues whose `ctx:*` and `reasoning:*` labels fit the named profile are picked up. Issues that exceed the profile on either axis are appended to a `deferred[]` list and printed in the run-end summary.
+- (no flag) — load `~/.autospec/model-profiles.yml`'s `default:` profile and run with it. If the file is missing, run auto-init (below) then exit so the user can review/edit before re-running.
+- `--profile <unknown>` — exit non-zero and print the list of available profile names from `~/.autospec/model-profiles.yml`.
 
-The actual filter logic, deferred-summary accumulation, and `model-profiles.yml` auto-init arrive in PR B2 (issue #15). This issue ships the skill structure with the flag plumbed but no filter yet.
+### Auto-init `~/.autospec/model-profiles.yml`
+
+If the file is missing on run start:
+
+1. Probe `ollama list 2>/dev/null` and grep for known local-model name patterns
+   (`qwen3`, `llama3`, `qwen2`, `mistral`, `phi3`, `gemma`). For each match, write
+   a profile keyed on the model name with conservative defaults:
+   `ctx: 64k`, `reasoning: medium`. (`qwen3:32b` → `qwen3-32b-laptop`.)
+2. If `ANTHROPIC_API_KEY` is set in the environment, append two cloud profiles:
+   `claude-sonnet-cloud` and `claude-opus-cloud`, both `ctx: 120k`,
+   `reasoning: deep`.
+3. If neither Ollama nor `ANTHROPIC_API_KEY` is detected, write a single
+   `claude-sonnet-cloud` default with `ctx: 120k, reasoning: deep` and an
+   `# edit-and-rerun` comment near the top of the file.
+4. Set the top-level `default:` key to whichever profile makes sense (prefer
+   the largest local profile if any, otherwise `claude-sonnet-cloud`).
+5. Print:
+   ```
+   Wrote ~/.autospec/model-profiles.yml. Edit `default:` and profile ceilings,
+   then re-run /autospec-run [--profile <name>].
+   ```
+   Exit 0; do not enter Phase 4.
+
+Sample auto-init output:
+
+```yaml
+# ~/.autospec/model-profiles.yml — autospec-run profile ceilings.
+# Edit `default:` and individual ceilings, then re-run.
+default: claude-sonnet-cloud
+profiles:
+  qwen3-32b-laptop:
+    ctx: 64k         # one of: 32k | 64k | 120k
+    reasoning: medium  # one of: shallow | medium | deep
+  claude-sonnet-cloud:
+    ctx: 120k
+    reasoning: deep
+```
+
+### Profile-filter ordinals
+
+- `ctx: 32k < 64k < 120k`
+- `reasoning: shallow < medium < deep`
+
+A profile P "fits" issue I when `I.ctx_label ≤ P.ctx` AND `I.reasoning_label ≤ P.reasoning` on these ordinals.
 
 ---
 
@@ -67,15 +109,34 @@ Then launch a **background subagent** with this prompt verbatim:
 
 > You are the auto-implement monitor for `{repo}`. Process every open `auto-implement` issue autonomously and auto-merge each PR. **You MUST stay running across many iterations. Do NOT exit after one issue.**
 >
+> **Profile load (run-start, once).** If `--profile <name>` was passed, look it up in `~/.autospec/model-profiles.yml`; if `<name>` is not a key under `profiles:`, exit non-zero and print the available names. If no flag was passed, load the file's `default:` profile. If the file is missing, run auto-init and exit (per the Invocation section).
+>
+> **Missing-label warning (run-start, once).** Count open `auto-implement` issues that lack either a `ctx:*` or a `reasoning:*` label. If non-zero, print `WARN: N issues lack model-fit labels (ctx:* / reasoning:*); they will be treated as ctx:64k, reasoning:medium. Run /autospec-classify to backfill.` Exactly once at run start.
+>
 > Outer loop:
 > ```
+> deferred = []   # issues skipped because they exceed the active profile
+>
 > while true:
->   ready = [open auto-implement issues whose Depends-on deps are all CLOSED, sorted ascending]
+>   candidates = [open auto-implement issues whose Depends-on deps are all CLOSED, sorted ascending]
+>
+>   ready = []
+>   for I in candidates:
+>     ctx_lbl       = I.ctx_label or "ctx:64k"           # default if unlabeled
+>     reasoning_lbl = I.reasoning_label or "reasoning:medium"
+>     if ctx_lbl <= profile.ctx AND reasoning_lbl <= profile.reasoning:  # ordinal compare
+>       ready.append(I)
+>     else:
+>       reason = []
+>       if ctx_lbl > profile.ctx:             reason.append(f"{ctx_lbl} > profile.ctx={profile.ctx}")
+>       if reasoning_lbl > profile.reasoning: reason.append(f"{reasoning_lbl} > profile.reasoning={profile.reasoning}")
+>       deferred.append({"issue": I.number, "reason": ", ".join(reason)})
+>
 >   if ready is empty:
 >     latest_close = most recent closedAt of any auto-implement issue
 >     open_count   = count of open auto-implement issues
->     if open_count == 0 AND latest_close > 1h ago: HARD SHUTDOWN — return final report
->     else: print state ("blocked: N unmet deps" / "drained, waiting 1h idle"), sleep 300, continue
+>     if open_count == 0 AND latest_close > 1h ago: HARD SHUTDOWN — emit final report (incl. deferred summary, see Phase 6)
+>     else: print state ("blocked: N unmet deps" / "deferred: M off-profile" / "drained, waiting 1h idle"), sleep 300, continue
 >   ISSUE = ready[0]
 >   gh label create in-progress-by-bot --color ededed --force
 >   gh issue edit ISSUE --remove-label auto-implement --add-label in-progress-by-bot
@@ -139,7 +200,17 @@ If your harness lacks self-paced wakeup: register a local `cron`/`launchd` job t
 
 ## Phase 6 — Final report
 
-When the monitor terminates, post a final summary to the user: every issue processed, every PR merged, total elapsed wall time, and any failures that need human attention.
+When the monitor terminates, post a final summary to the user: every issue processed, every PR merged, total elapsed wall time, and any failures that need human attention. Append the **Deferred summary** when `deferred[]` is non-empty:
+
+```
+Deferred (off-profile under <profile_name>: ctx=<P.ctx>, reasoning=<P.reasoning>):
+- #<N1>: <reason>
+- #<N2>: <reason>
+...
+Re-run with --profile <larger> to pick these up, or run /autospec-run on a host that fits the larger profile.
+```
+
+If `deferred[]` is empty, omit the section.
 
 ---
 
