@@ -38,10 +38,11 @@ If no install path is detected, print `Self-update: no installed copy of autospe
 - `--label <label>` — restrict to issues carrying a specific label
   (default: `auto-implement`).
 - `--apply-boards` — also assign issues to GitHub Projects per
-  `~/.autospec/project-map.yml`. **Currently a documented no-op** until PR B3
-  (issue #16) lands the project-map reader; the flag prints
-  `--apply-boards: project-map reader not yet implemented (lands in B3); skipping board assignment.`
-  and continues with labels-only behavior.
+  `~/.autospec/project-map.yml`. If the file is missing on first run, auto-init
+  writes a starter file keyed on the repo's labels with `null` project numbers
+  and exits with `Wrote ~/.autospec/project-map.yml. Edit project numbers
+  (currently null) and re-run.`. Without `--apply-boards` the project-map is
+  not consulted.
 - `--dry-run` — print proposed labels, model-fit blocks, and board assignments
   without calling `gh issue edit` or `gh project item-add`.
 
@@ -125,11 +126,42 @@ For each candidate issue:
    Apply via `gh issue edit <N> --body-file <tmp>`.
 
 5. **Board assignment** (only if `--apply-boards`):
-   - Today: print
-     `--apply-boards: project-map reader not yet implemented (lands in B3); skipping board assignment for issue <N>.`
-   - When B3 (issue #16) lands, this step reads `~/.autospec/project-map.yml`
-     and calls `gh project item-add` for each matching mapping. The reader will
-     be wired in by replacing this placeholder block.
+   - Read `~/.autospec/project-map.yml`. If the file is missing, auto-init it
+     (see below) and exit so the user can fill in project numbers.
+   - **File schema:**
+     ```yaml
+     # ~/.autospec/project-map.yml
+     multi_match: union          # `union` (assign to every match) or `first`
+     mappings:
+       ctx:32k: <project_number>
+       ctx:64k: <project_number>
+       ctx:120k: <project_number>
+       reasoning:shallow: <project_number>
+       reasoning:medium:  <project_number>
+       reasoning:deep:    <project_number>
+       <any-other-label>: <project_number>
+     ```
+   - **Reader procedure.** For each label L on the issue, look up
+     `mappings[L]`. Skip null / missing entries. With `multi_match: union`
+     (default), assign the issue to every matching project number; with
+     `multi_match: first`, assign only to the first match in label-order.
+     For each chosen `<P>`:
+     `gh project item-add <P> --owner <owner> --url <issue-url>`. The
+     command is idempotent so re-running this skill does not duplicate
+     project items.
+   - **Auto-init when the file is missing.** Probe
+     `gh project list --owner <owner> --format json` to confirm the user
+     can author projects. Probe
+     `gh label list --repo {repo} --json name -q '.[].name'` to enumerate
+     the repo's labels. Write a starter file with every label as a
+     `mappings:` key and `null` project numbers, plus `multi_match: union`
+     at the top. Print:
+     ```
+     Wrote ~/.autospec/project-map.yml. Edit project numbers (currently null) and re-run.
+     ```
+     Then **exit non-zero** (this is a hard stop unique to
+     `--apply-boards`; without the flag the run continues normally).
+   - Skip in `--dry-run`.
 
 ## Sibling normalization (forward reference)
 
@@ -150,7 +182,7 @@ autospec-classify run summary on {repo}
 - skipped (needs-autospec-template): M
 - ctx:32k=A  ctx:64k=B  ctx:120k=C
 - reasoning:shallow=X  reasoning:medium=Y  reasoning:deep=Z
-- boards assigned: 0  (project-map reader lands in B3)
+- boards assigned: <K>  (or "skipped — --apply-boards not set" / "skipped — no project-map.yml")
 ```
 
 ## Hard rules

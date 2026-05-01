@@ -215,12 +215,37 @@ labels and patches each body with a `## Model fit` block.
 >    markers, replace it in place. Never stack duplicates. Apply via
 >    `gh issue edit <N> --body-file <tmp>`.
 >
-> 6. **Board assignment (forward reference).** If `~/.autospec/project-map.yml`
->    exists, look up each issue's labels in `mappings:` and call
->    `gh project item-add <project_number> --owner <owner> --url <issue-url>`
->    for each match. If the file is missing, warn once and skip — do not fail
->    the phase. Full reader logic lands in PR B3 (#16); this step is a stub
->    today.
+> 6. **Board assignment** — read `~/.autospec/project-map.yml` and assign each
+>    just-classified child to the GitHub Projects mapped from its labels.
+>
+>    **File schema** (auto-init if missing — see below):
+>    ```yaml
+>    # ~/.autospec/project-map.yml
+>    multi_match: union          # `union` (assign to every match) or `first`
+>    mappings:
+>      ctx:32k: <project_number>
+>      ctx:64k: <project_number>
+>      ctx:120k: <project_number>
+>      reasoning:shallow: <project_number>
+>      reasoning:medium:  <project_number>
+>      reasoning:deep:    <project_number>
+>      <any-other-label>: <project_number>
+>    ```
+>
+>    **Reader procedure** for each issue I:
+>    - For each label L on I, look up `mappings[L]`. Skip null / missing entries.
+>    - With `multi_match: union` (default), collect all matching project numbers and assign to every one of them. With `multi_match: first`, take the first match in label-order and assign to that single project.
+>    - For each chosen `<P>`: `gh project item-add <P> --owner <owner> --url <issue-url>`. The `gh` command is idempotent — repeated calls do not duplicate items, so re-running Phase 3.5 is safe.
+>
+>    **Auto-init when the file is missing.** Probe `gh project list --owner <owner> --format json` to confirm the user can author projects. Probe `gh label list --repo {repo} --json name -q '.[].name'` to enumerate the repo's labels. Write a starter file with every label as a `mappings:` key and `null` project numbers, plus `multi_match: union` at the top. Print:
+>    ```
+>    Wrote ~/.autospec/project-map.yml. Edit project numbers (currently null) and re-run.
+>    ```
+>    Then **exit Phase 3.5** without assigning any boards (the labels and `## Model fit` blocks remain applied — only the assign step is deferred).
+>
+>    **Hard rules.**
+>    - Never call `gh project item-add` in `--dry-run`.
+>    - Missing file in `autospec` / `autospec-define` is non-fatal at run time once auto-init has populated it; if auto-init itself fails (e.g. `gh project list` denied), warn and skip board assignment for the rest of the run.
 >
 > 7. **Dependency-edge sanity checks.** After labeling, validate the dep graph
 >    of the just-created children:
