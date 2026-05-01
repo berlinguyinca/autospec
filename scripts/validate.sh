@@ -107,6 +107,29 @@ check_self_update() {
         || fail "$name: install.sh missing --update flag handling"
 }
 
+# Startup preflight invariants (introduced by issues #115–#119): every
+# multi-harness skill must carry a ## Startup self-update section whose bash
+# body is byte-identical to the canonical block in skills/autospec/SKILL.md
+# (modulo the SKILL_NAME= first line).
+check_startup_preflight() {
+    extract_block() {
+        awk '/^## Startup self-update/{f=1} f && /^```bash/{g=1; next} g && /^```/{g=0; f=0; next} g{print}' "$1" \
+            | grep -v '^SKILL_NAME='
+    }
+    canonical=$(extract_block skills/autospec/SKILL.md)
+    [ -n "$canonical" ] || fail "autospec SKILL.md missing ## Startup self-update section"
+    for s in autospec autospec-define autospec-run autospec-listen autospec-classify; do
+        for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
+            body=$(extract_block "$f")
+            [ -n "$body" ] || fail "$f missing ## Startup self-update section"
+            if ! diff <(printf '%s\n' "$canonical") <(printf '%s\n' "$body") >/dev/null 2>&1; then
+                diff <(printf '%s\n' "$canonical") <(printf '%s\n' "$body") | head -20 >&2
+                fail "$f preflight body diverges from canonical"
+            fi
+        done
+    done
+}
+
 # Two-tier subagent model selection invariants: every dispatching SKILL.md
 # must include the literal "**Model tier:**" directive at least once, every
 # such directive must specify either "Tier A (spec work)" or
@@ -236,6 +259,8 @@ main() {
         check_self_update "$skill_dir"
         check_subagent_model_tier "$skill_dir"
     done
+
+    check_startup_preflight
 
     check_agents_md_subagent_section
     check_autospec_listen_files
