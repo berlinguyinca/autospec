@@ -47,6 +47,14 @@ When Phase 3 completes the skill stops and prints:
 Phase 3 complete. Run /autospec-run --profile <name> to begin implementation.
 ```
 
+## Subagent model selection (Tier A only)
+
+This skill is the planning half — every subagent it dispatches (Phase 1 research, Phase 3 decomposition, Phase 3.5 review-and-label) runs on **Tier A** per `AGENTS.md`: top model with extended/maximum thinking. Spec quality is the bottleneck, so we pay for the top model here once rather than N times in cheap-implementer corrections downstream.
+
+Phase 2 has no subagent dispatch — invoke this skill with your top-tier model so the orchestrator itself writes the spec at full quality.
+
+The Tier B (cheaper + medium thinking) tier is **not used** by this skill; it's reserved for `autospec-run`'s implementation loop.
+
 ## Related skills
 
 | Skill | Purpose |

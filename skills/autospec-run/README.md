@@ -81,6 +81,12 @@ The filter excludes issues whose `ctx:*` / `reasoning:*` labels exceed the
 profile ceilings; excluded issues are appended to a `Deferred` list and reported
 at run-end.
 
+## Subagent model selection (Tier B only)
+
+This skill is the implementation half — every subagent it dispatches (Phase 4 `process(ISSUE)` implementer + inner-loop LGTM self-review) runs on **Tier B** per `AGENTS.md`: cheaper model with medium thinking. Implementation follows a well-specified contract from the planning half; the loop runs many times per spec, so cheaper-tier amortizes well.
+
+The Tier A (top + extended thinking) tier is **not used** by this skill; it lives in `autospec-define` / `autospec-classify` where spec quality is being authored.
+
 ## Related skills
 
 | Skill | Purpose |

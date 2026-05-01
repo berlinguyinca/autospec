@@ -15,7 +15,7 @@ Code**, **OpenCode**, and **Codex CLI**.
 | [`autospec-run`](skills/autospec-run/README.md) | 4–6 | Implementation half. Picks up the populated `auto-implement` queue and runs the autonomous monitor. Supports `--profile <name>` filtering against `~/.autospec/model-profiles.yml`. |
 | [`autospec-classify`](skills/autospec-classify/README.md) | retro | Standalone retro-labeler for already-existing `auto-implement` issues; applies the Phase 3.5 rubric to a queue that pre-dates Phase 3.5. |
 
-Subagent dispatches in every phase default to **cost-aware tier selection**: the cheaper-tier model in the active harness (Claude Code: `sonnet`; Codex CLI: `gpt-5.1-codex-spark`; OpenCode: smaller-tier `task` model) with **medium thinking/reasoning**, falling back UP the tier on unavailability. The orchestrator/monitor stays on whatever model the user invoked the skill with. See `AGENTS.md` for the full policy.
+Cost-aware **two-tier** subagent dispatch: spec/research/decompose/review subagents use the top model with extended thinking (Tier A — Claude Code: `opus` + `ultrathink`; Codex: top GPT + `reasoning_effort=high`; OpenCode: top task tier); implementer + LGTM-review subagents use the cheaper model with medium thinking (Tier B — Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark`; OpenCode: smaller task tier). Both tiers fall back UP on unavailability. The orchestrator runs whatever model you invoked the skill with — invoke it on top tier for best spec quality. See `AGENTS.md` for the full policy.
 
 ## Repository Layout
 
