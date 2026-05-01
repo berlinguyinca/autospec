@@ -169,6 +169,56 @@ check_agents_md_subagent_section() {
         || fail "AGENTS.md missing '### Tier B — Implementation work' subheading"
 }
 
+# Listener skill must ship a complete trio plus references/trigger-keywords.md
+# and a README. Per spec §6.1, validate enforces presence of every required
+# file so the skill is never partially shipped.
+check_autospec_listen_files() {
+    info "presence: skills/autospec-listen/"
+    listen_dir="skills/autospec-listen"
+    [ -d "$listen_dir" ] || fail "$listen_dir: directory missing"
+    for f in \
+        SKILL.md \
+        install.sh \
+        uninstall.sh \
+        opencode/agent.md \
+        codex/prompt.md \
+        references/trigger-keywords.md \
+        README.md
+    do
+        [ -f "$listen_dir/$f" ] || fail "$listen_dir/$f: required file missing"
+    done
+}
+
+# Examples must ship the canonical model-profiles.yml + project-map.yml so
+# users can copy them into ~/.autospec/ on day one (spec §6.1, §7.1).
+check_examples_dir() {
+    info "presence: examples/"
+    [ -d examples ] || fail "examples/: directory missing"
+    for f in model-profiles.yml project-map.yml README.md; do
+        [ -f "examples/$f" ] || fail "examples/$f: required file missing"
+    done
+}
+
+# Governance copy: the listener lifecycle and anti-loop guardrails must be
+# documented in AGENTS.md, and the listener skill must appear in both the
+# top-level README.md and SKILLS.md skill index. Spec §6.1, §7.1.
+check_governance_headings() {
+    info "governance headings: AGENTS.md / README.md / SKILLS.md"
+    [ -f AGENTS.md ] || fail "AGENTS.md: file missing at repo root"
+    grep -q '^## Anti-loop guardrails' AGENTS.md \
+        || fail "AGENTS.md: missing '## Anti-loop guardrails' heading"
+    grep -q '^## Listener-filed issues lifecycle' AGENTS.md \
+        || fail "AGENTS.md: missing '## Listener-filed issues lifecycle' heading"
+
+    [ -f README.md ] || fail "README.md: file missing at repo root"
+    grep -q 'autospec-listen' README.md \
+        || fail "README.md: missing 'autospec-listen' reference"
+
+    [ -f SKILLS.md ] || fail "SKILLS.md: file missing at repo root"
+    grep -q 'autospec-listen' SKILLS.md \
+        || fail "SKILLS.md: missing 'autospec-listen' reference"
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -188,6 +238,9 @@ main() {
     done
 
     check_agents_md_subagent_section
+    check_autospec_listen_files
+    check_examples_dir
+    check_governance_headings
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
