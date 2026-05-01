@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"echo \\\"=== autospec/codex/prompt.md head ===\\\" && head -3 skills/autospec/codex/prompt.md | cat -A && echo \\\"=== autospec/SKILL.md after frontmatter ===\\\" && awk '/^---$/{c++; next} c==2{p...",
-  "error": "Exit code 1\n=== autospec/codex/prompt.md head ===\ncat: illegal option -- A\nusage: cat [-belnstuv] [file ...]",
-  "timestamp": "2026-05-01T15:25:55.315Z",
-  "retry_count": 1
-}
