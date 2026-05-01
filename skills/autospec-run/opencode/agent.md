@@ -149,6 +149,8 @@ Then launch a **background subagent** with this prompt verbatim:
 > ```
 > **Model tier:** Tier B (implementation work) — cheaper model with medium thinking per AGENTS.md. Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark`; OpenCode: smaller task tier. Fall back UP on unavailability.
 >
+> **Hard limits.** Max 40 tool calls per issue. Max 3 self-review iterations. If you rewrite the same file twice with no test progress, abort: comment the blocker on the issue, release the lock label, exit. No wall-clock cap.
+>
 > Implement GitHub issue #<ISSUE>: "<TITLE>" on {repo}. Spec is the issue body below.
 >
 > ===ISSUE BODY===
