@@ -6,6 +6,24 @@ Take the populated `auto-implement` queue on the current GitHub repo and run the
 
 Manage your own context — never exceed 60%. Delegate to subagents whenever your harness supports it; do not investigate, write code, or design directly in the main conversation when a subagent can do it.
 
+## Self-update mode
+
+If the feature-request argument matches the regex `^\s*update\s*$` (case-insensitive, whitespace-padded), this skill enters self-update mode and does not run the normal pipeline:
+
+1. **Detect harness** by checking which install path exists for this skill:
+   - Claude Code: `~/.claude/skills/autospec-run/SKILL.md`
+   - OpenCode:    `~/.config/opencode/agent/autospec-run.md`
+   - Codex CLI:   `~/.codex/prompts/autospec-run.md`
+2. **Re-install from `main`** by piping the canonical installer:
+   ```bash
+   bash <(curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec-run/install.sh) --harness <detected> --update
+   ```
+   If multiple harness paths exist, run the one-liner once per detected harness.
+3. **Show the diff** between the prior installed file(s) and the freshly fetched copy (e.g. `diff <(cat <prior>) <(curl -fsSL ...SKILL.md)` or the equivalent recorded by the installer).
+4. **Stop.** Do not enter Phase 0 / Phase 1 / any pipeline phase. Print the upgrade summary and return to the user.
+
+If no install path is detected, print `Self-update: no installed copy of autospec-run found; run install.sh first.` and exit.
+
 ## Invocation
 
 ```

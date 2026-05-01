@@ -41,6 +41,7 @@ fi
 HARNESS=""
 USE_SYMLINK=0
 DRY_RUN=0
+UPDATE_MODE=0
 TMP_FETCH_DIR=""
 
 # ---------- helpers --------------------------------------------------------
@@ -51,7 +52,7 @@ info() { printf '%s\n' "$*"; }
 
 usage() {
     cat <<EOF
-Usage: $0 [--harness claude|opencode|codex|all] [--symlink] [--dry-run]
+Usage: $0 [--harness claude|opencode|codex|all] [--symlink] [--dry-run] [--update]
 
 Installs the ${SKILL_NAME} skill into the chosen harness's standard
 skill/agent/prompt directory.
@@ -64,6 +65,7 @@ Examples:
   $0 --harness codex          # Codex CLI only
   $0 --harness all --symlink  # symlink instead of copy
   $0 --dry-run --harness all  # print plan, change nothing
+  $0 --harness claude --update  # idempotent re-install (overwrite existing)
 EOF
 }
 
@@ -138,6 +140,9 @@ while [ $# -gt 0 ]; do
             ;;
         --dry-run)
             DRY_RUN=1
+            ;;
+        --update)
+            UPDATE_MODE=1
             ;;
         -h|--help)
             usage
@@ -272,7 +277,11 @@ info ""
 if [ "$DRY_RUN" -eq 1 ]; then
     info "Dry run complete. No files were written."
 else
-    info "Installed:"
+    if [ "$UPDATE_MODE" -eq 1 ]; then
+        info "Updated (idempotent overwrite):"
+    else
+        info "Installed:"
+    fi
     printf '%b' "$installed_paths"
     info ""
     info "Invoke with:"
