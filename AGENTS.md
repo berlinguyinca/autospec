@@ -60,6 +60,13 @@ Admin-merge `auto-implement` PRs (`gh pr merge <#> --admin --squash --delete-bra
 - The self-review subagent returned `LGTM`.
 - PR closes an `auto-implement` issue from a `feat/*` branch.
 
+Spec PRs (head branch matches `feat/spec-*` OR body contains a `Source spec` line
+referencing `docs/specs/`) carry the same admin-merge authority: orchestrators run
+`gh pr merge <#> --admin --squash --delete-branch` once required CI checks pass and
+the body matches one of those criteria.
+Escape hatch: set `AUTOSPEC_NO_AUTOMERGE_SPEC=1` to short-circuit the auto-merge and
+fall back to "open PR + ask user".
+
 ## Startup self-update
 
 Every multi-harness skill runs a preflight at startup that updates the installed copy
