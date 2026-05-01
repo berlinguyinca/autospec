@@ -1,0 +1,146 @@
+
+# autospec-classify (harness-neutral)
+
+Standalone retro-labeler. Walk every open `auto-implement` issue in the current
+GitHub repo (excluding `type:tracker`-labeled issues), apply the Phase 3.5
+model-fit rubric, and write a `## Model fit` block into the issue body. Default
+mode is labels-only; the `--apply-boards` flag opts into board assignment from
+`~/.autospec/project-map.yml`.
+
+Manage your own context — never exceed 60%. Delegate to subagents whenever your harness supports it.
+
+## Invocation
+
+```
+/autospec-classify [--issues N,N,N] [--label <label>] [--apply-boards] [--dry-run]
+```
+
+- `--issues N,N,N` — restrict to a comma-separated list of issue numbers (default:
+  every open issue in the current repo).
+- `--label <label>` — restrict to issues carrying a specific label
+  (default: `auto-implement`).
+- `--apply-boards` — also assign issues to GitHub Projects per
+  `~/.autospec/project-map.yml`. **Currently a documented no-op** until PR B3
+  (issue #16) lands the project-map reader; the flag prints
+  `--apply-boards: project-map reader not yet implemented (lands in B3); skipping board assignment.`
+  and continues with labels-only behavior.
+- `--dry-run` — print proposed labels, model-fit blocks, and board assignments
+  without calling `gh issue edit` or `gh project item-add`.
+
+The skill exits non-zero if `gh auth status` fails or the current cwd is not a
+GitHub-tracked repo.
+
+## Pre-flight
+
+1. Verify `gh auth status` is authenticated.
+2. Capture `{repo}` from `gh repo view --json nameWithOwner -q .nameWithOwner`.
+3. Resolve the candidate set:
+   - `gh issue list --repo {repo} --label <label> --state open --limit 500 --json number,title,labels,body,url`.
+   - Filter out any issue whose labels include `type:tracker`.
+   - Apply the `--issues` filter if provided.
+
+## Rubric
+
+### `ctx:*` — context-window axis
+
+Pick the smallest tier that holds the staged context (issue body + every file
+listed under `## Files to read first` + the relevant spec sections).
+
+| Label | Approx. token ceiling | Trigger |
+|---|---|---|
+| `ctx:32k`  | ~32k tokens of staged context | One canonical table or one shell script; ≤3 files in *Files to read first*; spec anchors are short. |
+| `ctx:64k`  | ~64k tokens                   | Multi-file change; 4-7 files staged; one trio + one installer; medium spec sections (~1-3 KB). |
+| `ctx:120k` | ~120k tokens                  | Cross-skill or cross-package; 8+ files; long spec excerpts; deep call graphs. |
+
+If unsure between two tiers, prefer the larger tier.
+
+### `reasoning:*` — reasoning-depth axis
+
+Pick the depth required to **derive** the implementation, not just transcribe it.
+
+| Label | Trigger |
+|---|---|
+| `reasoning:shallow` | Mechanical: copy-and-rename, regex-replace, README transcription, runbook authoring. Verbs in the issue: *copy*, *rename*, *transcribe*, *list*. |
+| `reasoning:medium`  | Template-following with judgment calls: synthesize a new SKILL.md by mirroring an existing one, modify a script with new flags, write tests for a documented contract. Verbs: *mirror*, *adapt*, *integrate*, *wire*. |
+| `reasoning:deep`    | Novel design choices: pick a new abstraction, resolve a contradiction in the spec, reconcile cross-cutting concerns. Verbs: *design*, *reconcile*, *resolve*, *redesign*. |
+
+Default for issues that lack any of these signals: `ctx:64k`, `reasoning:medium`.
+
+## Per-issue procedure
+
+For each candidate issue:
+
+1. **Sanity check.** Body must contain both `## Files to read first` and
+   `## Implementation scope`. If either is missing:
+   - Add label `needs-autospec-template` (idempotent, `gh label create --force`
+     once at the top of the run).
+   - Skip — do not modify body, do not assign a model-fit class.
+
+2. **Classify.** Apply the rubric to assign one `ctx:*` and one `reasoning:*`
+   label. Print the rationale in the dry-run preview.
+
+3. **Apply labels.**
+   - `gh label create ctx:32k --color c5def5 --force` (and ctx:64k, ctx:120k).
+   - `gh label create reasoning:shallow --color c2e0c6 --force`
+     (and reasoning:medium, reasoning:deep).
+   - `gh issue edit <N> --add-label "ctx:<tier>,reasoning:<depth>" --repo {repo}`.
+   - Skip in `--dry-run`.
+
+4. **Patch body.** Insert a `## Model fit` block immediately before the first
+   `## Dependencies` line (or, if absent, at end of body). Block format:
+
+   ```markdown
+   ## Model fit
+
+   - **ctx:** `ctx:<tier>` — <1-line rationale>.
+   - **reasoning:** `reasoning:<depth>` — <1-line rationale>.
+
+   <!-- autospec-classify:begin -->
+   *Auto-classified by `/autospec-classify` on YYYY-MM-DD.*
+   <!-- autospec-classify:end -->
+   ```
+
+   **Idempotency:** if a `## Model fit` block already exists (delimited by the
+   `<!-- autospec-classify:begin -->` / `<!-- autospec-classify:end -->`
+   markers), replace it in place. Never stack duplicate blocks.
+
+   Apply via `gh issue edit <N> --body-file <tmp>`.
+
+5. **Board assignment** (only if `--apply-boards`):
+   - Today: print
+     `--apply-boards: project-map reader not yet implemented (lands in B3); skipping board assignment for issue <N>.`
+   - When B3 (issue #16) lands, this step reads `~/.autospec/project-map.yml`
+     and calls `gh project item-add` for each matching mapping. The reader will
+     be wired in by replacing this placeholder block.
+
+## Sibling normalization (forward reference)
+
+When 5+ sibling issues share a structural criterion (e.g. all are
+"per-source-table writers"), harmonize their `ctx:*` and `reasoning:*` labels so
+the operator can run a single profile across the whole group. The full
+sibling-normalization prompt is part of Phase 3.5 (PR B1, issue #14); when it
+lands, this skill calls into it. Until then, classify each sibling
+independently.
+
+## Run-end summary
+
+Print:
+
+```
+autospec-classify run summary on {repo}
+- classified: N
+- skipped (needs-autospec-template): M
+- ctx:32k=A  ctx:64k=B  ctx:120k=C
+- reasoning:shallow=X  reasoning:medium=Y  reasoning:deep=Z
+- boards assigned: 0  (project-map reader lands in B3)
+```
+
+## Hard rules
+
+- Never modify the issue title.
+- Never remove existing labels — only add `ctx:*`, `reasoning:*`,
+  `needs-autospec-template`.
+- Never call `gh issue edit` in `--dry-run` mode.
+- Always idempotent — running twice on the same issue results in no diff after
+  the second run (same labels, same `## Model fit` block).
+- `gh` CLI only; no direct GraphQL.
