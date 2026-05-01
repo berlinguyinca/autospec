@@ -1,0 +1,201 @@
+#!/usr/bin/env bats
+# tests/unit/test_self_update_preflight.bats — exercise the startup preflight
+# bash block (§7.1 scenario matrix) from skills/autospec/SKILL.md.
+#
+# Each test extracts the block via awk and runs it in a sandboxed $HOME so no
+# real network calls ever leave the host. curl is shimmed where necessary.
+
+REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+
+setup() {
+    # Sandboxed home — wiped after each test.
+    export HOME
+    HOME="$(mktemp -d)"
+
+    # Extract the startup self-update bash block from the canonical source.
+    SKILL="$REPO_ROOT/skills/autospec/SKILL.md"
+    BLOCK="$(awk '/^## Startup self-update/{f=1} f && /^```bash/{g=1; next} g && /^```/{g=0; f=0; next} g{print}' "$SKILL")"
+
+    # Shim directory — prepended to PATH inside each test that needs it.
+    SHIMDIR="$(mktemp -d)"
+    export SHIMDIR
+    export BLOCK
+    export REPO_ROOT
+}
+
+teardown() {
+    rm -rf "$HOME"
+    rm -rf "${SHIMDIR:-}"
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+# Run the block with PATH prepended by SHIMDIR (for shim tests).
+_run_block_shimmed() {
+    local h="$HOME"
+    local sd="$SHIMDIR"
+    run bash -c "export HOME='${h}'; PATH='${sd}:${PATH}'; ${BLOCK}"
+}
+
+# Run the block with the real PATH (for non-shim tests).
+_run_block() {
+    local h="$HOME"
+    run bash -c "export HOME='${h}'; ${BLOCK}"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 1 — First run: empty HOME, curl fails → fail-open, exit 0
+# ---------------------------------------------------------------------------
+
+@test "first run: curl absent/fails -> fail-open WARN, exit 0" {
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "WARN:"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 2 — Within 24h rate-limit: last check was 1h ago → no network
+# ---------------------------------------------------------------------------
+
+@test "within 24h rate-limit: skips silently, exit 0, no WARN" {
+    mkdir -p "$HOME/.autospec"
+    # Write a timestamp 1 hour in the past.
+    date -u -v-1H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '1 hour ago' +'%Y-%m-%dT%H:%M:%SZ' \
+        > "$HOME/.autospec/last-update-check"
+
+    # Shim curl to fail loudly if invoked — should never be called.
+    printf '#!/usr/bin/env bash\necho "UNEXPECTED curl call" >&2\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "UNEXPECTED"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 3 — Past 24h: last check was 25h ago → network attempted
+# ---------------------------------------------------------------------------
+
+@test "past 24h rate-limit: network attempted, fail-open on failure" {
+    mkdir -p "$HOME/.autospec"
+    # Write a timestamp 25 hours in the past.
+    date -u -v-25H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '25 hours ago' +'%Y-%m-%dT%H:%M:%SZ' \
+        > "$HOME/.autospec/last-update-check"
+
+    # Shim curl to fail (simulating network down).
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "WARN:"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 4 — Opt-out env var: AUTOSPEC_NO_SELF_UPDATE=1 → silent skip
+# ---------------------------------------------------------------------------
+
+@test "AUTOSPEC_NO_SELF_UPDATE=1: silent skip, exit 0, no WARN" {
+    # Shim curl to fail loudly if invoked — should never be called.
+    printf '#!/usr/bin/env bash\necho "UNEXPECTED curl call" >&2\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+    local h="$HOME"
+    local sd="$SHIMDIR"
+    run bash -c "export HOME='${h}'; export AUTOSPEC_NO_SELF_UPDATE=1; PATH='${sd}:${PATH}'; ${BLOCK}"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "UNEXPECTED"
+    ! echo "$output" | grep -q "WARN:"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 5 — curl failure (network down): WARN logged, exit 0
+# ---------------------------------------------------------------------------
+
+@test "curl network failure: WARN logged, exit 0" {
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "WARN:"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 6 — install.sh non-zero: WARN logged, exit 0
+# ---------------------------------------------------------------------------
+
+@test "install.sh non-zero: WARN logged, exit 0" {
+    mkdir -p "$HOME/.autospec"
+    # Write a past timestamp so rate-limit gate passes.
+    date -u -v-25H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '25 hours ago' +'%Y-%m-%dT%H:%M:%SZ' \
+        > "$HOME/.autospec/last-update-check"
+    echo "oldsha1" > "$HOME/.autospec/installed-version"
+
+    # Shim curl: version endpoint returns a different SHA; install URL returns a
+    # script body that exits non-zero.
+    cat > "$SHIMDIR/curl" << 'CURLSHIM'
+#!/usr/bin/env bash
+# Detect which URL is being requested via args
+for arg in "$@"; do
+    case "$arg" in
+        *commits/main*)
+            printf '{"sha":"newsha99"}\n'
+            exit 0
+            ;;
+    esac
+done
+# Assume it's the install.sh fetch — emit a failing script.
+printf '#!/usr/bin/env bash\nexit 42\n'
+exit 0
+CURLSHIM
+    chmod +x "$SHIMDIR/curl"
+
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "WARN:"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 7 — Lock contention: lock dir already held → WARN, exit 0
+# ---------------------------------------------------------------------------
+
+@test "lock contention: WARN logged, exit 0" {
+    mkdir -p "$HOME/.autospec/.update.lock.d"   # simulate lock already held
+    # Shim curl to fail loudly if invoked — should never get past the lock.
+    printf '#!/usr/bin/env bash\necho "UNEXPECTED curl call" >&2\nexit 1\n' > "$SHIMDIR/curl"
+    chmod +x "$SHIMDIR/curl"
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "WARN:"
+    ! echo "$output" | grep -q "UNEXPECTED"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 8 — Up-to-date no-op: installed == remote → no WARN, no banner
+# ---------------------------------------------------------------------------
+
+@test "up-to-date no-op: no WARN, no banner" {
+    mkdir -p "$HOME/.autospec"
+    # Write a timestamp 25h in the past so the rate-limit gate passes.
+    date -u -v-25H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '25 hours ago' +'%Y-%m-%dT%H:%M:%SZ' \
+        > "$HOME/.autospec/last-update-check"
+    echo "abc1234" > "$HOME/.autospec/installed-version"
+
+    # Shim curl to return the same SHA as installed.
+    cat > "$SHIMDIR/curl" << 'CURLSHIM'
+#!/usr/bin/env bash
+printf '{"sha":"abc1234"}\n'
+exit 0
+CURLSHIM
+    chmod +x "$SHIMDIR/curl"
+
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "WARN:"
+    ! echo "$output" | grep -q "\[autospec\]"
+}
