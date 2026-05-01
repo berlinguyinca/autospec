@@ -1,0 +1,7 @@
+{
+  "tool_name": "Read",
+  "tool_input_preview": "{\"file_path\":\"/Users/wohlgemuth/IdeaProjects/autospec\"}",
+  "error": "EISDIR: illegal operation on a directory, read '/Users/wohlgemuth/IdeaProjects/autospec'",
+  "timestamp": "2026-05-01T06:52:52.705Z",
+  "retry_count": 1
+}
