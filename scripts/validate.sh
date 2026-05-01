@@ -107,6 +107,27 @@ check_self_update() {
         || fail "$name: install.sh missing --update flag handling"
 }
 
+# Cost-aware subagent model selection invariants: every dispatching SKILL.md
+# must include the literal "**Model tier:**" directive at least once and have
+# a "Subagent model tier" row in its harness-adapter table.
+check_subagent_model_tier() {
+    skill_dir="$1"
+    name="$(basename "$skill_dir")"
+    info "subagent model tier: $name"
+    grep -q -F '**Model tier:**' "$skill_dir/SKILL.md" \
+        || fail "$name: SKILL.md missing '**Model tier:**' directive on at least one subagent dispatch"
+    grep -q -E '^\| Subagent model tier ' "$skill_dir/SKILL.md" \
+        || fail "$name: SKILL.md harness-adapter table missing 'Subagent model tier' row"
+}
+
+# AGENTS.md must document the cost-aware subagent model selection policy.
+check_agents_md_subagent_section() {
+    info "AGENTS.md: subagent model selection section"
+    [ -f AGENTS.md ] || fail "AGENTS.md missing at repo root"
+    grep -q '^## Subagent model selection (cost-aware)$' AGENTS.md \
+        || fail "AGENTS.md missing '## Subagent model selection (cost-aware)' section"
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -122,7 +143,10 @@ main() {
         check_bash_syntax "$skill_dir/install.sh"
         check_bash_syntax "$skill_dir/uninstall.sh"
         check_self_update "$skill_dir"
+        check_subagent_model_tier "$skill_dir"
     done
+
+    check_agents_md_subagent_section
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.

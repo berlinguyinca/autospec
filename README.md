@@ -15,6 +15,8 @@ Code**, **OpenCode**, and **Codex CLI**.
 | [`autospec-run`](skills/autospec-run/README.md) | 4–6 | Implementation half. Picks up the populated `auto-implement` queue and runs the autonomous monitor. Supports `--profile <name>` filtering against `~/.autospec/model-profiles.yml`. |
 | [`autospec-classify`](skills/autospec-classify/README.md) | retro | Standalone retro-labeler for already-existing `auto-implement` issues; applies the Phase 3.5 rubric to a queue that pre-dates Phase 3.5. |
 
+Subagent dispatches in every phase default to **cost-aware tier selection**: the cheaper-tier model in the active harness (Claude Code: `sonnet`; Codex CLI: `gpt-5.1-codex-spark`; OpenCode: smaller-tier `task` model) with **medium thinking/reasoning**, falling back UP the tier on unavailability. The orchestrator/monitor stays on whatever model the user invoked the skill with. See `AGENTS.md` for the full policy.
+
 ## Repository Layout
 
 ```text

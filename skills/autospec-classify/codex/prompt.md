@@ -49,6 +49,19 @@ If no install path is detected, print `Self-update: no installed copy of autospe
 The skill exits non-zero if `gh auth status` fails or the current cwd is not a
 GitHub-tracked repo.
 
+## Required capabilities & harness adapter
+
+This workflow assumes a small set of capabilities. Map each one to your harness's actual tool. If a capability is missing, use the listed fallback.
+
+| Capability                  | Claude Code                          | OpenCode                                 | Codex CLI                                | Fallback if missing                                |
+|-----------------------------|--------------------------------------|------------------------------------------|------------------------------------------|----------------------------------------------------|
+| Read-only codebase research | `Agent` (subagent_type=Explore)      | `task` agent in read-only mode           | `apply_patch` read-only / shell `grep`   | Do the search in-thread with `rg`/`grep`           |
+| Foreground delegation       | `Agent` (subagent_type=general-purpose) | nested `task` agent, await output     | spawn nested CLI session                 | Do the work in-thread (more context cost)          |
+| Ask the user a question     | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn     |
+| Subagent model tier         | `sonnet` (model param on `Agent`); medium thinking | `task` agent with smaller-tier model + medium reasoning | `gpt-5.1-codex-spark` (or current spark); `reasoning_effort=medium` | Use harness default; never override to opus/gpt-5.1-pro/etc. unless required by issue body |
+
+**Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches default to the cheaper-tier model with medium thinking; the orchestrator keeps the user's invoked model. Fall back UP the tier on unavailability.
+
 ## Pre-flight
 
 1. Verify `gh auth status` is authenticated.
@@ -86,6 +99,8 @@ Pick the depth required to **derive** the implementation, not just transcribe it
 Default for issues that lack any of these signals: `ctx:64k`, `reasoning:medium`.
 
 ## Per-issue procedure
+
+> **Model tier:** dispatch with the cheaper subagent model per AGENTS.md (Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark` or current spark; OpenCode: smaller-tier `task` model); medium thinking/reasoning; fall back UP the tier on unavailability.
 
 For each candidate issue:
 

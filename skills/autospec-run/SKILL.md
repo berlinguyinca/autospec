@@ -96,8 +96,9 @@ This workflow assumes five capabilities. Map each one to your harness's actual t
 | Background delegation       | `Agent` with `run_in_background: true` | detached `task` agent                  | nohup'd CLI session writing to a logfile | Run the monitor in a separate terminal/tmux pane   |
 | Ask the user a question     | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn     |
 | Self-paced future wakeup    | `ScheduleWakeup` inside a `/loop`    | a recurring `task` or local `cron`       | local `cron`/`launchd` calling the CLI   | The user runs a status-update prompt manually      |
+| Subagent model tier         | `sonnet` (model param on `Agent`); medium thinking | `task` agent with smaller-tier model + medium reasoning | `gpt-5.1-codex-spark` (or current spark); `reasoning_effort=medium` | Use harness default; never override to opus/gpt-5.1-pro/etc. unless required by issue body |
 
-**Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there.
+**Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches default to the cheaper-tier model with medium thinking; the orchestrator keeps the user's invoked model. Fall back UP the tier on unavailability.
 
 ## Phase 4 — Background autonomous monitor
 
@@ -147,6 +148,8 @@ Then launch a **background subagent** with this prompt verbatim:
 > `process(ISSUE)` dispatches a **foreground subagent** (wait for return) with this prompt:
 >
 > ```
+> **Model tier:** dispatch with the cheaper subagent model per AGENTS.md (Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark` or current spark; OpenCode: smaller-tier `task` model); medium thinking/reasoning; fall back UP the tier on unavailability.
+>
 > Implement GitHub issue #<ISSUE>: "<TITLE>" on {repo}. Spec is the issue body below.
 >
 > ===ISSUE BODY===
@@ -163,7 +166,7 @@ Then launch a **background subagent** with this prompt verbatim:
 > 6. PR: gh pr create --base main --head <BRANCH> --title "<TITLE>" --body "Closes #<ISSUE>\n\n<summary>". Capture PR.
 > 7. Inner loop (max 3 iterations):
 >    - Run the **Primary smoke test** from the issue body. If it fails, fix and recommit before review.
->    - Dispatch a **foreground subagent** with brief: "You are a critical code reviewer. Review PR #<PR> via `gh pr diff` and `gh pr view`. Check correctness, edge cases, missing tests, AGENTS.md compliance. Output a numbered findings list, OR if none, return ONLY the token: LGTM"
+>    - Dispatch a **foreground subagent** with brief: "**Model tier:** dispatch with the cheaper subagent model per AGENTS.md (Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark` or current spark; OpenCode: smaller-tier `task` model); medium thinking/reasoning; fall back UP the tier on unavailability. You are a critical code reviewer. Review PR #<PR> via `gh pr diff` and `gh pr view`. Check correctness, edge cases, missing tests, AGENTS.md compliance. Output a numbered findings list, OR if none, return ONLY the token: LGTM"
 >    - If LGTM: run the **Operator/full verification** commands; sleep 30; `gh pr checks <PR>`. If all required checks pass (slow optional checks pending is OK per AGENTS.md): break SUCCESS.
 >    - Else: implement findings, commit, push, continue.
 > 8. SUCCESS: gh pr merge <PR> --admin --squash --delete-branch. Merge auto-closes the issue.
