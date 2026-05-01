@@ -287,6 +287,32 @@ labels and patches each body with a `## Model fit` block.
 
 ---
 
+## Phase 3 pre-impl gate
+
+After Phase 3 decomposition completes (and Phase 3.5 review-and-label has
+applied `ctx:*` / `reasoning:*` labels), end Phase 3 by asking the user
+this verbatim question (no auto-launch — always ask explicitly, per spec
+§3.3):
+
+> `"Spec written, N issues filed. Start /autospec-run now, defer to your external daemon, or keep refining? [run / defer / refine]"`
+
+Substitute `N` with the actual issue count from Phase 3. Default highlight
+is **`defer`** for `/autospec-define` (the plan-only skill — the user
+invoked `/autospec-define` expecting plan-only behavior, so the gate
+defaults to `defer`).
+
+- **`run`** — invoke `/autospec-run` in the current session.
+- **`defer`** (default for `/autospec-define`) — print
+  `"Issues are ready. Your external monitor will pick them up. Exiting."`
+  and stop without launching `/autospec-run`. The just-filed `auto-implement`
+  queue persists on the GitHub side so an external daemon (or a later
+  `/autospec-run` invocation) can pick it up.
+- **`refine`** — re-enter Phase 2 from question 1 (Architecture).
+
+No daemon auto-detection — always ask explicitly.
+
 ## Handoff
 
-Phase 3.5 complete. Run `/autospec-run --profile <name>` to begin implementation.
+If the gate answer was `run`, hand off to `/autospec-run --profile <name>`
+to begin implementation. If the answer was `defer`, the run ends here and
+the queue is left for an external monitor.
