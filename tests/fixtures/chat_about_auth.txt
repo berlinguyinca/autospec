@@ -1,0 +1,19 @@
+# tests/fixtures/chat_about_auth.txt
+# A 12-turn fixture conversation: user is sketching an OIDC migration
+# and eventually asks the listener to start a design spec. Format:
+# alternating "user:" / "assistant:" lines.
+
+user: We need to migrate the internal API gateway from JWT-only auth to OIDC.
+assistant: Are you keeping the existing JWT issuer alongside, or replacing it?
+user: Replacing it. The JWT issuer is end-of-life next quarter.
+assistant: Which OIDC provider are you targeting?
+user: Likely Okta. Most of the org already federates against it.
+assistant: Will service-to-service traffic also move to OIDC, or only user-facing auth?
+user: Both. We want one auth story instead of two.
+assistant: That implies adding a token-exchange step at the gateway and a JWKS cache for the local issuer.
+user: Right. Plus we need a sunset window where both issuers work in parallel.
+assistant: Typical approach: dual-validate during the cutover, alerting when JWT-only tokens are still seen.
+user: Yes. We also need an eject button if Okta misbehaves on launch day.
+assistant: Feature flag at the gateway, default off, ramp 5/25/100 with rollback alarms.
+user: Great. Can you write a design spec for this so we can review it as a team?
+assistant: Sure. Routing to /autospec-define for the planning flow.
