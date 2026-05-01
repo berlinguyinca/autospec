@@ -98,6 +98,17 @@ Reach for this skill when:
 | **5** | Periodic status updates | Self-paced ~25 min wakeups posting deltas (closed issues, merged PRs, failures, blockers); slows to ~50 min when quiet. |
 | **6** | Final report | When the monitor terminates, summarize every issue processed, PR merged, wall time, and any human-attention failures. |
 
+## Subagent model selection (two-tier)
+
+This skill spans both halves of the pipeline, so it dispatches subagents on **both tiers** per `AGENTS.md`:
+
+- **Tier A (top model + extended thinking)** for Phase 1 research, Phase 3 decomposition, and Phase 3.5 review-and-label. Spec quality is the bottleneck — Tier A pays for itself by saving N cheap-implementer cycles downstream.
+- **Tier B (cheaper model + medium thinking)** for Phase 4's `process(ISSUE)` implementer and the inner-loop LGTM self-review. Implementation follows a well-specified contract; this loop runs many times per spec.
+
+Phase 2 has no subagent dispatch — the orchestrator's own model writes the spec, so invoke this skill with your top-tier model for best spec quality.
+
+See `AGENTS.md` for the full policy and per-harness preferred-model table.
+
 ## Required capabilities & harness adapter
 
 The canonical body assumes five capabilities. The skill maps each one to your

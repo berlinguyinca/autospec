@@ -62,9 +62,9 @@ This workflow assumes a small set of capabilities. Map each one to your harness'
 | Read-only codebase research | `Agent` (subagent_type=Explore)      | `task` agent in read-only mode           | `apply_patch` read-only / shell `grep`   | Do the search in-thread with `rg`/`grep`           |
 | Foreground delegation       | `Agent` (subagent_type=general-purpose) | nested `task` agent, await output     | spawn nested CLI session                 | Do the work in-thread (more context cost)          |
 | Ask the user a question     | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn     |
-| Subagent model tier         | `sonnet` (model param on `Agent`); medium thinking | `task` agent with smaller-tier model + medium reasoning | `gpt-5.1-codex-spark` (or current spark); `reasoning_effort=medium` | Use harness default; never override to opus/gpt-5.1-pro/etc. unless required by issue body |
+| Subagent model tier         | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: `gpt-5.1-codex-spark` + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; fall back UP on unavailability |
 
-**Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches default to the cheaper-tier model with medium thinking; the orchestrator keeps the user's invoked model. Fall back UP the tier on unavailability.
+**Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches use a **two-tier policy**: Tier A (top model + extended thinking) for spec work — including this skill's per-issue review (review/label is spec-adjacent) — and Tier B (cheaper model + medium thinking) for implementation work (not used by this skill). The orchestrator keeps the user's invoked model. Fall back UP the tier on unavailability.
 
 ## Pre-flight
 
@@ -104,7 +104,7 @@ Default for issues that lack any of these signals: `ctx:64k`, `reasoning:medium`
 
 ## Per-issue procedure
 
-> **Model tier:** dispatch with the cheaper subagent model per AGENTS.md (Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark` or current spark; OpenCode: smaller-tier `task` model); medium thinking/reasoning; fall back UP the tier on unavailability.
+> **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
 
 For each candidate issue:
 

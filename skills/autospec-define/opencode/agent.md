@@ -44,9 +44,9 @@ This workflow assumes five capabilities. Map each one to your harness's actual t
 | Background delegation       | `Agent` with `run_in_background: true` | detached `task` agent                  | nohup'd CLI session writing to a logfile | Run the monitor in a separate terminal/tmux pane   |
 | Ask the user a question     | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn     |
 | Self-paced future wakeup    | `ScheduleWakeup` inside a `/loop`    | a recurring `task` or local `cron`       | local `cron`/`launchd` calling the CLI   | The user runs a status-update prompt manually      |
-| Subagent model tier         | `sonnet` (model param on `Agent`); medium thinking | `task` agent with smaller-tier model + medium reasoning | `gpt-5.1-codex-spark` (or current spark); `reasoning_effort=medium` | Use harness default; never override to opus/gpt-5.1-pro/etc. unless required by issue body |
+| Subagent model tier         | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: `gpt-5.1-codex-spark` + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; fall back UP on unavailability |
 
-**Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches default to the cheaper-tier model with medium thinking; the orchestrator keeps the user's invoked model. Fall back UP the tier on unavailability.
+**Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches use a **two-tier policy**: Tier A (top model + extended thinking) for spec work (research, decompose, review/label); Tier B (cheaper model + medium thinking) for implementation work (Phase 4 implementer + LGTM review — not used by this skill). The orchestrator keeps the user's invoked model. Fall back UP the tier on unavailability.
 
 
 ## Phase 0 — Bootstrap repo (if missing)
@@ -88,13 +88,15 @@ If a repo already exists (cwd is in a git tree with a `github.com:<owner>/<name>
 
 Spawn a **read-only research subagent** to map relevant files, schema, services. Get back a 300-word summary with file paths and line numbers. Do NOT read files directly from the main thread.
 
-> **Model tier:** dispatch with the cheaper subagent model per AGENTS.md (Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark` or current spark; OpenCode: smaller-tier `task` model); medium thinking/reasoning; fall back UP the tier on unavailability.
+> **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
 
 If the feature touches a remote system (DB, server, S3), run a real query against the actual data to confirm the problem statement before designing. Surface the concrete numbers in the design.
 
 For a freshly-bootstrapped empty repo, Phase 1 may be a no-op — proceed to Phase 2.
 
 ## Phase 2 — Brainstorm + design
+
+> **Spec quality is the bottleneck.** Phase 2's output drives every downstream cycle's cost; if you care about spec quality, invoke this skill with your top-tier model (Claude Code: `claude-code --model opus`; Codex: top GPT). Phase 2 itself runs in the orchestrator (no subagent dispatch) — your invocation model IS the spec model. Subagents in Phases 1, 3, 3.5 follow this lead by selecting Tier A; Phase 4 implementation work uses Tier B. See AGENTS.md.
 
 Run a structured brainstorm — one question at a time, get explicit approval after each section:
 
@@ -112,7 +114,7 @@ If this is a fresh repo, commit the spec to `main` directly (`git add docs/... &
 
 Dispatch a **foreground subagent** with this prompt (substitute the spec path and `{repo}`):
 
-> **Model tier:** dispatch with the cheaper subagent model per AGENTS.md (Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark` or current spark; OpenCode: smaller-tier `task` model); medium thinking/reasoning; fall back UP the tier on unavailability.
+> **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
 >
 > Create labels (idempotent with `--force`): `auto-implement` (#0e8a16), `epic` (#b60205), plus any domain labels the spec calls for. Then create exactly N issues — first an EPIC umbrella (no `auto-implement` label, just `epic` + domain), then N-1 children all carrying `auto-implement`. After creating children, edit the umbrella body with a checklist linking them. Return JSON: `{umbrella, children:[…], labels_created:[…]}`. Use `gh` CLI only. Do NOT modify code. Do NOT push branches. Do NOT create PRs.
 >
@@ -151,7 +153,7 @@ created in Phase 3 and apply the model-fit rubric. The subagent must NOT modify
 issue titles or remove existing labels; it only adds `ctx:*` and `reasoning:*`
 labels and patches each body with a `## Model fit` block.
 
-> **Model tier:** dispatch with the cheaper subagent model per AGENTS.md (Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark` or current spark; OpenCode: smaller-tier `task` model); medium thinking/reasoning; fall back UP the tier on unavailability.
+> **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
 >
 > Walk every child issue created in Phase 3 (skip any issue carrying the
 > `type:tracker` label). For each:

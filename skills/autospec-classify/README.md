@@ -85,6 +85,12 @@ See the [SKILL.md](./SKILL.md) Rubric section for the full table. Quick summary:
 
 Default for issues lacking signal: `ctx:64k`, `reasoning:medium`.
 
+## Subagent model selection (Tier A only)
+
+The per-issue review/label subagent dispatched by this skill runs on **Tier A** per `AGENTS.md`: top model with extended/maximum thinking. Review-and-label is spec-adjacent work — the `ctx:*` / `reasoning:*` labels and `## Model fit` block this skill writes drive every downstream `autospec-run --profile` decision, so spec-tier judgment is warranted.
+
+The Tier B (cheaper + medium thinking) tier is **not used** by this skill; it's reserved for `autospec-run`'s implementation loop.
+
 ## Related skills
 
 | Skill | Purpose |

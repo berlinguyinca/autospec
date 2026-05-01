@@ -107,9 +107,12 @@ check_self_update() {
         || fail "$name: install.sh missing --update flag handling"
 }
 
-# Cost-aware subagent model selection invariants: every dispatching SKILL.md
-# must include the literal "**Model tier:**" directive at least once and have
-# a "Subagent model tier" row in its harness-adapter table.
+# Two-tier subagent model selection invariants: every dispatching SKILL.md
+# must include the literal "**Model tier:**" directive at least once, every
+# such directive must specify either "Tier A (spec work)" or
+# "Tier B (implementation work)", and the SKILL.md harness-adapter table must
+# carry a "Subagent model tier" row. Per-skill Tier-A and Tier-B counts must
+# match the expected per-skill values to catch future drift.
 check_subagent_model_tier() {
     skill_dir="$1"
     name="$(basename "$skill_dir")"
@@ -118,14 +121,52 @@ check_subagent_model_tier() {
         || fail "$name: SKILL.md missing '**Model tier:**' directive on at least one subagent dispatch"
     grep -q -E '^\| Subagent model tier ' "$skill_dir/SKILL.md" \
         || fail "$name: SKILL.md harness-adapter table missing 'Subagent model tier' row"
+
+    # Every **Model tier:** line must label itself Tier A or Tier B.
+    bare="$(grep -F '**Model tier:**' "$skill_dir/SKILL.md" \
+        | grep -v -F 'Tier A (spec work)' \
+        | grep -v -F 'Tier B (implementation work)' || true)"
+    if [ -n "$bare" ]; then
+        printf '%s\n' "$bare" >&2
+        fail "$name: SKILL.md has '**Model tier:**' directive(s) without 'Tier A (spec work)' or 'Tier B (implementation work)' label"
+    fi
+
+    # Per-skill Tier-A / Tier-B count assertions.
+    a_count="$(grep -F '**Model tier:**' "$skill_dir/SKILL.md" \
+        | grep -c -F 'Tier A (spec work)' || true)"
+    b_count="$(grep -F '**Model tier:**' "$skill_dir/SKILL.md" \
+        | grep -c -F 'Tier B (implementation work)' || true)"
+    case "$name" in
+        autospec)
+            expected_a=3; expected_b=2 ;;
+        autospec-define)
+            expected_a=3; expected_b=0 ;;
+        autospec-run)
+            expected_a=0; expected_b=2 ;;
+        autospec-classify)
+            expected_a=1; expected_b=0 ;;
+        *)
+            expected_a=""; expected_b="" ;;
+    esac
+    if [ -n "$expected_a" ]; then
+        [ "$a_count" = "$expected_a" ] \
+            || fail "$name: expected $expected_a Tier-A dispatches, found $a_count"
+        [ "$b_count" = "$expected_b" ] \
+            || fail "$name: expected $expected_b Tier-B dispatches, found $b_count"
+    fi
 }
 
-# AGENTS.md must document the cost-aware subagent model selection policy.
+# AGENTS.md must document the two-tier subagent model selection policy with
+# both Tier A and Tier B subsection headings.
 check_agents_md_subagent_section() {
-    info "AGENTS.md: subagent model selection section"
+    info "AGENTS.md: two-tier subagent model selection section"
     [ -f AGENTS.md ] || fail "AGENTS.md missing at repo root"
-    grep -q '^## Subagent model selection (cost-aware)$' AGENTS.md \
-        || fail "AGENTS.md missing '## Subagent model selection (cost-aware)' section"
+    grep -q '^## Subagent model selection (two-tier, cost-aware)$' AGENTS.md \
+        || fail "AGENTS.md missing '## Subagent model selection (two-tier, cost-aware)' section"
+    grep -q '^### Tier A — Specification work' AGENTS.md \
+        || fail "AGENTS.md missing '### Tier A — Specification work' subheading"
+    grep -q '^### Tier B — Implementation work' AGENTS.md \
+        || fail "AGENTS.md missing '### Tier B — Implementation work' subheading"
 }
 
 main() {
