@@ -1,0 +1,38 @@
+name: validate
+
+# Run the repository-wide validation harness on every push and pull_request.
+# Spec ref: docs/specs/2026-05-01-autospec-meta-improvements-design.md §6.6.
+#
+# Steps:
+#   1. checkout the workspace
+#   2. dev-bootstrap (installs bats-core if missing; verifies gh/jq/python3)
+#   3. scripts/validate.sh — repository-wide presence and lock-step checks
+#   4. bats tests/unit tests/smoke — fast tests, target <60s wall time
+#
+# E2E tests are NOT run here — see .github/workflows/e2e.yml (gated on the
+# `e2e` PR label) for those.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    name: validate (bootstrap + validate.sh + bats unit/smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bootstrap dev environment (bats-core, tool checks)
+        shell: bash
+        run: bash scripts/dev-bootstrap.sh
+
+      - name: Run scripts/validate.sh
+        shell: bash
+        run: bash scripts/validate.sh
+
+      - name: Run bats unit + smoke tests
+        shell: bash
+        run: bats tests/unit tests/smoke
