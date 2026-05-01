@@ -9,7 +9,7 @@
 #   ./install.sh --dry-run           # print what would be done; do nothing
 #
 # Can also be piped from curl:
-#   curl -fsSL https://raw.githubusercontent.com/berlinguyinca/codex-skills/main/skills/autospec/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec/install.sh \
 #     | sh -s -- --harness all
 # When piped, the script auto-downloads the skill files from the same branch.
 #
@@ -26,7 +26,7 @@
 set -eu
 
 SKILL_NAME="autospec"
-SKILL_RAW_BASE="${AUTOSPEC_RAW_BASE:-https://raw.githubusercontent.com/berlinguyinca/codex-skills/${AUTOSPEC_REF:-main}/skills/autospec}"
+SKILL_RAW_BASE="${AUTOSPEC_RAW_BASE:-https://raw.githubusercontent.com/berlinguyinca/autospec/${AUTOSPEC_REF:-main}/skills/autospec}"
 
 # Resolve the directory containing this script. When piped through stdin (e.g.
 # `curl ... | sh`), $0 will not be a real file — detect that and fall back to
@@ -199,7 +199,7 @@ fi
 
 if [ "$need_fetch" -eq 1 ]; then
     if [ "$USE_SYMLINK" -eq 1 ]; then
-        err "--symlink requires running from a checkout of the codex-skills repo (no local files to symlink to)."
+        err "--symlink requires running from a checkout of the autospec repo (no local files to symlink to)."
         exit 2
     fi
     fetch_source_files
