@@ -45,4 +45,40 @@ This skill assumes four capabilities. Map each one to your harness's actual tool
 
 > **Model tier:** Tier B (implementation work) — this listener is a router; subagent dispatches inside its trigger flows (drafting issue bodies, summarizing recent conversation) use cheaper models per AGENTS.md. Spec-trigger handoff to `/autospec-define` lets the downstream skill apply its own tier policy.
 
-(Trigger-flow body is implemented in follow-up issues #44 and #45.)
+## Issue trigger flow
+
+When the user utters a phrase from the **Issue triggers** list (see `references/trigger-keywords.md`), run this 7-step procedure:
+
+1. **Read recent context.** Pull the last ~10 conversation turns from the harness's message buffer. If that capability is missing, ask the user to paste the relevant excerpt.
+2. **Synthesize draft body.** Build a markdown body with three sections:
+   - `## Goal` — exactly one sentence summarizing what the issue should achieve.
+   - `## Context` — relevant chat excerpts that motivate the issue (verbatim quotes, ≤6 lines).
+   - `## Suggested AC` — ≤3 bulleted acceptance-criteria checkboxes (`- [ ]` style).
+   The full body MUST be ≤400 words.
+3. **Print the draft inline** so the user can read it before approving.
+4. **Confirm via the harness primitive.** Ask exactly: `File this as a new issue? [yes / edit / cancel]`. Use `AskUserQuestion` on Claude Code, an inline prompt elsewhere; if no question primitive is available, ask in the response and wait for the next turn.
+5. **On `yes`**, infer the title and run:
+   ```bash
+   gh issue create --title "<inferred-title>" --body "<draft-body>" --label needs-classify
+   ```
+   Then post the resulting issue URL back to the chat. The `needs-classify` label keeps the issue out of the auto-implement queue until `/autospec-classify` sizes it.
+6. **On `edit`**, accept free-text revisions from the user, re-render the draft, and re-confirm (loop back to step 4).
+7. **On `cancel`**, print `OK, cancelled.` and silently exit. No persistence, no learning, no suppression list.
+
+### Title-inference rule
+
+Build the title from the Goal sentence using the following deterministic rule:
+
+1. Take the `## Goal` sentence verbatim.
+2. **Strip leading verbs** `Implement` / `Add` / `Fix` (case-insensitive, with any trailing whitespace) from the front of the sentence.
+3. **Truncate** the remainder to 80 characters total (after the prefix in step 4 is added).
+4. **Prefix with a conventional-commit tag** inferred from the original leading verb:
+   - `Add` / `Implement` / new behavior → `feat: `
+   - `Fix` / bug language → `fix: `
+   - documentation-only language → `docs: `
+   - refactoring language → `refactor: `
+   If inference is ambiguous, leave the tag off entirely and let `/autospec-classify` add one later.
+
+Example: Goal `Implement a /loop slash command that re-runs the last skill` → title `feat: a /loop slash command that re-runs the last skill`.
+
+(Spec-trigger flow body is implemented in follow-up issue #45.)
