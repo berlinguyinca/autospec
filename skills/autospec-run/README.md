@@ -92,10 +92,17 @@ at run-end.
 ## Self-update
 
 Once installed, run the skill with the literal argument `update` to refresh in
-place (self-update mode arrives in PR A4):
+place. The skill detects its harness, re-runs the canonical install one-liner
+with `--update`, shows the diff, and stops without entering Phase 4:
 
 ```
 /autospec-run update
+```
+
+Or re-run the per-skill installer with `--update`:
+
+```bash
+./install.sh --harness all --update
 ```
 
 ## License

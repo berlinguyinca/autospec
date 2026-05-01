@@ -57,11 +57,18 @@ Phase 3 complete. Run /autospec-run --profile <name> to begin implementation.
 
 ## Self-update
 
-Once installed, run the skill with the literal argument `update` to refresh in place
-(self-update mode arrives in PR A4):
+Once installed, run the skill with the literal argument `update` to refresh in
+place. The skill detects its harness, re-runs the canonical install one-liner
+with `--update`, shows the diff, and stops without entering Phase 0:
 
 ```
 /autospec-define update
+```
+
+Or re-run the per-skill installer with `--update`:
+
+```bash
+./install.sh --harness all --update
 ```
 
 ## Usage
