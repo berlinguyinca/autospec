@@ -2,7 +2,7 @@
 
 Multi-harness skill suite for shipping a feature end-to-end across many GitHub
 issues — design spec → decomposed `auto-implement` queue → autonomous
-implementation loop with admin auto-merge — split across four cooperating
+implementation loop with admin auto-merge — split across five cooperating
 skills so each invocation runs only the phases you need. Works on **Claude
 Code**, **OpenCode**, and **Codex CLI**.
 
@@ -14,6 +14,7 @@ Code**, **OpenCode**, and **Codex CLI**.
 | [`autospec-define`](skills/autospec-define/README.md) | 0–3.5 | Planning half. Stops after Phase 3.5 review-and-label step and hands off to `/autospec-run`. |
 | [`autospec-run`](skills/autospec-run/README.md) | 4–6 | Implementation half. Picks up the populated `auto-implement` queue and runs the autonomous monitor. Supports `--profile <name>` filtering against `~/.autospec/model-profiles.yml`. |
 | [`autospec-classify`](skills/autospec-classify/README.md) | retro | Standalone retro-labeler for already-existing `auto-implement` issues; applies the Phase 3.5 rubric to a queue that pre-dates Phase 3.5. |
+| [`autospec-listen`](skills/autospec-listen/README.md) | passive | Passive listener for chat-driven issue / spec triggers. On a phrase like "file an issue" or "write a spec", drafts a GitHub issue body for confirmation or routes to `/autospec-define`. |
 
 Cost-aware **two-tier** subagent dispatch: spec/research/decompose/review subagents use the top model with extended thinking (Tier A — Claude Code: `opus` + `ultrathink`; Codex: top GPT + `reasoning_effort=high`; OpenCode: top task tier); implementer + LGTM-review subagents use the cheaper model with medium thinking (Tier B — Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark`; OpenCode: smaller task tier). Both tiers fall back UP on unavailability. The orchestrator runs whatever model you invoked the skill with — invoke it on top tier for best spec quality. See `AGENTS.md` for the full policy.
 
@@ -109,3 +110,17 @@ python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/<
 ```
 
 Some environments require running that validator inside a virtual environment with `PyYAML` installed.
+
+## Examples
+
+Reference user-config files live under [`examples/`](examples/README.md):
+
+- [`examples/model-profiles.yml`](examples/model-profiles.yml) — sample profile file consumed by `/autospec-run --profile <name>`.
+- [`examples/project-map.yml`](examples/project-map.yml) — sample label-to-Projects-board map consumed by `/autospec-classify`.
+
+See [`examples/README.md`](examples/README.md) for the full schema and the auto-init behavior that lets skills seed `~/.autospec/` from these samples on first run.
+
+## Docs
+
+- [`docs/user-manual.md`](docs/user-manual.md) — narrative walkthrough of all five skills (what each does, when to use it, example output).
+- [`docs/architecture.md`](docs/architecture.md) — single-source-of-truth for the cross-cutting design rules: concurrency model, lock-step body rule, model tier policy, trigger keyword theory.
