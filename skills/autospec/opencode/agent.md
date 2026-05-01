@@ -90,6 +90,8 @@ Spawn a **read-only research subagent** to map relevant files, schema, services.
 
 > **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
 
+> **Hard limits.** Max 25 tool calls. If 3 consecutive read/grep calls return nothing useful, stop and write your best-effort summary even if incomplete. Do not retry the same query verbatim. No wall-clock cap.
+
 If the feature touches a remote system (DB, server, S3), run a real query against the actual data to confirm the problem statement before designing. Surface the concrete numbers in the design.
 
 For a freshly-bootstrapped empty repo, Phase 1 may be a no-op — proceed to Phase 2.
