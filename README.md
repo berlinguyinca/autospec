@@ -69,6 +69,14 @@ curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/
 
 Honors `CLAUDE_CONFIG_DIR`, `OPENCODE_CONFIG_DIR`, and `CODEX_HOME` if set.
 
+### Auto-update
+
+Each `/autospec*` skill checks `main` for a newer commit at most once per 24 hours at
+startup and reinstalls in place if there is one. The check is fail-open: any network
+or install error logs one `WARN:` line to stderr and proceeds normally.
+Set `AUTOSPEC_NO_SELF_UPDATE=1` to skip the check entirely. For the full contract
+see `## Startup self-update` in `AGENTS.md`.
+
 ## Self-update
 
 Each installed skill supports an in-place self-update: invoke the skill with

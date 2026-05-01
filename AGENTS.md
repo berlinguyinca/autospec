@@ -60,6 +60,15 @@ Admin-merge `auto-implement` PRs (`gh pr merge <#> --admin --squash --delete-bra
 - The self-review subagent returned `LGTM`.
 - PR closes an `auto-implement` issue from a `feat/*` branch.
 
+## Startup self-update
+
+Every multi-harness skill runs a preflight at startup that updates the installed copy
+from `main` at most once per 24 hours (fail-open: any network or install error logs a
+`WARN:` line and continues). Set `AUTOSPEC_NO_SELF_UPDATE=1` to skip. The canonical
+bash block lives in `skills/autospec/SKILL.md` (`## Startup self-update` section) and
+is mirrored byte-identically (modulo `SKILL_NAME=`) across all five skill trios.
+`scripts/validate.sh` (`check_startup_preflight`) enforces byte-identity.
+
 ## Small-LLM target
 
 Generated child issues are sized for 32B-class local LLMs. Pre-staged context, sectional spec anchors, checkbox AC, one Primary smoke test per inner loop.
