@@ -122,6 +122,31 @@ Cross-skill races (e.g. `/autospec-listen` and `/autospec` running at
 once) are serialized via `flock` on `~/.autospec/.update.lock`. If the
 lock is contended, the loser fails open with a one-line WARN.
 
+### 3.6 Spec-PR auto-merge authority
+
+Per user directive 2026-05-01, the autospec pipeline must run end-to-end
+without surfacing PR-merge questions for *spec* artifacts the same way
+AGENTS.md already grants Phase 4 auto-merge authority for
+`auto-implement` PRs. Concretely:
+
+- `AGENTS.md` `## Auto-merge authority` section grows a sibling
+  paragraph granting admin-merge for **spec PRs**, identified as PRs
+  whose head branch matches `feat/spec-*` *or* whose body contains a
+  `Source spec` line referencing `docs/specs/`.
+- `skills/autospec/SKILL.md` Phase 2 ends with the orchestrator
+  admin-merging the spec PR (`gh pr merge <#> --admin --squash
+  --delete-branch`) **before** dispatching the Phase 3 decomposer, so
+  child issues always reference a canonical `main` URL.
+- `skills/autospec-define/SKILL.md` mirrors the same Phase 2 step
+  (lock-step preserved).
+- The escape hatch `AUTOSPEC_NO_AUTOMERGE_SPEC=1` short-circuits the
+  auto-merge and falls back to today's "open PR + ask user" flow, for
+  contributors who want to keep humans in the loop.
+
+This is NOT a runtime feature — the bash preflight in §6 is unchanged.
+It's a workflow-doc + prompt-text change that piggybacks on the same
+delivery train.
+
 ## 4. Data model
 
 | Path                              | Format                       | Writer                       | Reader                        |
@@ -295,9 +320,13 @@ Children (each ≤400 words, ≤3 files, ≤30-line outline):
 | 7  | Extend `scripts/validate.sh` with `check_startup_preflight`             | 1                                | 6           |
 | 8  | Bats unit tests for preflight (rate-limit, opt-out, fail-open, lock)    | 1                                | 2           |
 | 9  | Bats e2e test (parent SHA → invoke → verify update applies)             | 1                                | 6           |
-| 10 | Doc updates: `README.md` + `AGENTS.md`                                  | 2                                | 6           |
+| 10 | Doc updates: `README.md` + `AGENTS.md` (auto-update behavior)           | 2                                | 6           |
+| 11 | Extend `AGENTS.md` `## Auto-merge authority` to cover spec PRs          | 1                                | —           |
+| 12 | Wire spec-PR auto-merge into `autospec` Phase 2 trio                    | 3 (trio)                         | 11          |
+| 13 | Wire spec-PR auto-merge into `autospec-define` Phase 2 trio             | 3 (trio)                         | 11          |
+| 14 | Bats unit test: spec-PR auto-merge happy path + opt-out env var         | 1                                | 12          |
 
-Total: 10 child issues + 1 umbrella.
+Total: 14 child issues + 1 umbrella.
 
 ## 10. Out of scope
 
