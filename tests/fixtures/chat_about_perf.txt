@@ -1,0 +1,19 @@
+# tests/fixtures/chat_about_perf.txt
+# A 10-turn fixture conversation: user is troubleshooting a slow
+# /metrics endpoint and eventually asks the listener to file an issue.
+# Format: alternating "user:" / "assistant:" lines. The listener under
+# test reads roughly the last 10 turns and drafts an issue body when
+# the trigger phrase fires.
+
+user: Our /metrics endpoint is taking 14 seconds to respond in production.
+assistant: That is much slower than the SLO. Have you looked at flame graphs from the last hour?
+user: Yes — most of the time is spent in PrometheusRegistry.collect across thirty registries.
+assistant: That is a known issue when histogram buckets are set per-route. How many routes do you have?
+user: Around 800 routes, each with a per-method histogram.
+assistant: 800 routes × 6 methods × 12 buckets is ~57k samples per scrape — that explains the latency.
+user: Can we collapse the per-route histograms into a single global histogram?
+assistant: Yes, drop the per-route label and keep status/method as labels. That cuts cardinality by ~800x.
+user: Will that lose the per-route p99?
+assistant: You will lose per-route p99 from /metrics, but you can keep it inside in-memory dashboards or sample it at trace level.
+user: Okay. I would like to file an issue to track this work — owner is the platform team.
+assistant: Okay. Drafting an issue body. Ready to confirm.
