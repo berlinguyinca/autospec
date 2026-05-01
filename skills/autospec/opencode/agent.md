@@ -135,6 +135,16 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > - **Dependencies** — `Depends on issue #N` lines (parsed by the monitor).
 >
 > Sizing rule: aim for ≤ 4 KB body. Issues that span more than 4 canonical tables, more than 3 packages, or schema-wide changes must be split — better to emit two children with a `Depends on` edge than one oversized child a small LLM can't hold in working memory.
+>
+> **Sizing caps (hard, per spec §3.4):**
+>
+> - **Body ≤400 words** including all sections.
+> - **Implementation outline ≤30 lines** (file paths + function signatures).
+> - **Files touched ≤3** per child issue.
+> - If a candidate child would exceed any cap, split into a parent + child pair with a `Depends on` edge.
+> - The whole spec + a single child issue body must fit comfortably in a 60–120k context window.
+>
+> Self-check each issue against the caps **before** calling `gh issue create`. If a cap is violated and a split is not feasible, surface the issue inline (print the over-cap body to the operator) instead of filing it.
 
 ### Small-LLM friendliness (applies to every child issue)
 
