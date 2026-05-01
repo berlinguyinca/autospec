@@ -1,0 +1,30 @@
+# examples/model-profiles.yml
+#
+# Sample model-profiles file consumed by `/autospec-run --profile <name>`.
+# Spec reference: docs/specs/2026-05-01-autospec-meta-improvements-design.md §4.3
+#
+# Schema (per profile entry):
+#   <profile-name>:
+#     model:      Model identifier the harness should resolve at dispatch time.
+#     ctx:        Context-window budget (tokens) the profile is rated for.
+#     reasoning:  Reasoning tier hint — one of `low`, `medium`, `high`.
+#     allowed:    Comma-separated list of issue labels this profile may pick up.
+#                 The Phase 4 dispatcher filters auto-implement issues by these
+#                 labels before scheduling work onto the profile.
+#
+# Two reference profiles are shipped: a cloud Claude Sonnet target with a
+# generous context window, and a 32B-class local Qwen target sized for a
+# laptop.  The laptop profile intentionally restricts itself to small-context
+# / low-reasoning issues so it never gets handed a job it cannot complete.
+
+claude-sonnet-cloud:
+  model: claude-sonnet-4-6
+  ctx: 200000
+  reasoning: medium
+  allowed: ctx:small,ctx:medium,reasoning:low,reasoning:medium
+
+qwen3-32b-laptop:
+  model: qwen3-32b-instruct
+  ctx: 32000
+  reasoning: low
+  allowed: ctx:small,reasoning:low
