@@ -1,0 +1,34 @@
+# examples/project-map.yml
+#
+# Sample project-map consumed by `/autospec-classify` to route classified
+# issues onto GitHub Projects boards.
+# Spec reference: docs/specs/2026-05-01-autospec-meta-improvements-design.md §4.3
+#
+# Schema:
+#   <label-key>:
+#     project: <int|null>   GitHub Projects v2 project number (null = unset).
+#     board:   <string>     Human-readable board / swimlane name.
+#
+# Known label keys (per §4.3):
+#   ctx:small / ctx:medium / ctx:large       — context-window classes
+#   reasoning:low / reasoning:medium / reasoning:high — reasoning-effort tiers
+#
+# `/autospec-classify` looks up each issue's labels in this map after Phase
+# 3.5 review-and-label completes. Setting `project: null` keeps the row in
+# the file as a placeholder until an operator wires it to a real project.
+
+ctx:small:
+  project: null
+  board: small-context
+
+ctx:medium:
+  project: null
+  board: medium-context
+
+reasoning:low:
+  project: null
+  board: mechanical
+
+reasoning:high:
+  project: null
+  board: design-heavy
