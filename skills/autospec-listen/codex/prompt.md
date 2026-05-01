@@ -77,4 +77,10 @@ Build the title from the Goal sentence using the following deterministic rule:
 
 Example: Goal `Implement a /loop slash command that re-runs the last skill` → title `feat: a /loop slash command that re-runs the last skill`.
 
-(Spec-trigger flow body is implemented in follow-up issue #45.)
+## Spec trigger flow
+
+When the user utters a phrase from the **Spec triggers** list (see `references/trigger-keywords.md`), this listener acts as a **router only** — it does NOT duplicate the Phase 2 brainstorming logic that lives in `/autospec-define`.
+
+1. **Confirm.** Ask exactly: `Start the autospec design Q&A on <inferred-topic>? [yes / cancel]`. Use `AskUserQuestion` on Claude Code, an inline prompt elsewhere; if no question primitive is available, ask in the response and wait for the next turn. The `<inferred-topic>` is a short noun phrase synthesized from the trigger phrase and the most recent user turn (≤10 words).
+2. **On `yes`**, hand off to `/autospec-define` via the harness's skill-invocation primitive (Claude Code: `Skill` tool; OpenCode: nested skill invocation; Codex CLI: emit the `/autospec-define` slash command). The downstream skill applies its own tier policy. Do NOT inline any Phase 2 questions here.
+3. **On `cancel`**, print `OK, cancelled.` and silently exit. No persistence, no learning, no suppression list.
