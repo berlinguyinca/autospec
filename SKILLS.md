@@ -8,6 +8,14 @@
 - Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
 - Status: 7-phase workflow (bootstrap → investigate → design → decompose → background monitor → status updates → final report) with admin-squash-merge of `auto-implement`-labeled PRs.
 
+## autospec-listen
+
+- Path: [`skills/autospec-listen`](skills/autospec-listen)
+- Trigger: passive listener that fires mid-conversation when the user mentions filing an issue or starting a spec — drafts a GitHub issue body for confirmation (issue trigger) or routes to `/autospec-define` (spec trigger). Bare nouns ("issue", "spec", "ticket") are NOT triggers.
+- Activation keywords: `file an issue`, `file this as an issue`, `new issue`, `open an issue`, `create a ticket`, `make an issue`, `write a spec`, `design spec`, `new spec`, `start a spec`, `write a design spec`
+- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
+- Status: trigger-listener for chat-driven issue / spec creation. Files issues with `needs-classify` label so `/autospec-classify` can transition them onto the `auto-implement` queue. See [`skills/autospec-listen/README.md`](skills/autospec-listen/README.md).
+
 ## Future Skill Checklist
 
 1. Create `skills/<skill-name>/SKILL.md`.
