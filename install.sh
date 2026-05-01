@@ -14,7 +14,7 @@
 #   ./install.sh --help                          # show this help
 #
 # Flags:
-#   --skill   one of: autospec | autospec-define | autospec-run | autospec-classify | all
+#   --skill   one of: autospec | autospec-define | autospec-run | autospec-classify | autospec-listen | all
 #             (default: all)
 #   --harness one of: claude | opencode | codex | all
 #             (default: all)
@@ -27,7 +27,7 @@ set -eu
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_DIR="$REPO_ROOT/skills"
 
-ALL_SKILLS="autospec autospec-define autospec-run autospec-classify"
+ALL_SKILLS="autospec autospec-define autospec-run autospec-classify autospec-listen"
 ALL_HARNESSES="claude opencode codex"
 
 SKILL_ARG="all"
@@ -75,10 +75,10 @@ done
 
 # Validate --skill
 case "$SKILL_ARG" in
-    all|autospec|autospec-define|autospec-run|autospec-classify) ;;
+    all|autospec|autospec-define|autospec-run|autospec-classify|autospec-listen) ;;
     *)
         err "invalid --skill: $SKILL_ARG"
-        err "must be one of: autospec | autospec-define | autospec-run | autospec-classify | all"
+        err "must be one of: autospec | autospec-define | autospec-run | autospec-classify | autospec-listen | all"
         exit 2
         ;;
 esac

@@ -1,8 +1,3 @@
----
-name: autospec-listen
-description: |
-  Use when the user mentions filing an issue or writing a spec mid-conversation. Trigger keywords are "file an issue", "new issue", "open an issue", "create a ticket", "write a spec", "design spec", "new spec", "start a spec". On an "issue" trigger, drafts a body from the last ~10 conversation turns and asks the user to approve before running gh issue create. On a "spec" trigger, hands off to /autospec-define. Lives at github.com/berlinguyinca/autospec/skills/autospec-listen.
----
 
 # autospec-listen (harness-neutral)
 

@@ -13,3 +13,9 @@ build/
 *.log
 *.tmp
 *.bak
+
+# Agent-state artifacts (codesight, omc, claude session state)
+.codesight/
+.omc/
+.claude/scheduled_tasks.lock
+**/.omc/
