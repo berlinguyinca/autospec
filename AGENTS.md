@@ -63,3 +63,51 @@ Admin-merge `auto-implement` PRs (`gh pr merge <#> --admin --squash --delete-bra
 ## Small-LLM target
 
 Generated child issues are sized for 32B-class local LLMs. Pre-staged context, sectional spec anchors, checkbox AC, one Primary smoke test per inner loop.
+
+## Anti-loop guardrails
+
+Per spec §5.1, both the Phase 1 research subagent and the Phase 4
+implementer subagent run under hard, no-wall-clock-cap limits to keep a
+runaway model from burning tokens or getting stuck rewriting the same
+file forever:
+
+- **Phase 1 research subagent.** Max **25 tool calls**. If 3 consecutive
+  read/grep calls return nothing useful, stop and write a best-effort
+  summary even if it is incomplete. Never retry the same query verbatim.
+- **Phase 4 implementer subagent.** Max **40 tool calls** per issue. Max
+  **3 self-review iterations**. If the implementer rewrites the same
+  file twice with no test progress, abort: comment the blocker on the
+  issue, release the `locked-by-autospec-processor` label, and exit.
+- **No wall-clock cap.** Both limits are tool-call / iteration based,
+  not time based, so stalled work is detected by behavior, not clock
+  time.
+- **Where they live.** These limits live inline in
+  `skills/autospec/SKILL.md` (Phases 1 and 4) and
+  `skills/autospec-run/SKILL.md` (Phase 4). The lock-step rule
+  replicates the same body to `opencode/agent.md` and
+  `codex/prompt.md`.
+
+## Listener-filed issues lifecycle
+
+Per spec §4.1 and §5.3, issues filed by `autospec-listen` follow a
+distinct two-step lifecycle on the way to the `auto-implement` queue:
+
+- **Step 1: listener creates with `needs-classify`.** When the listener
+  fires on an issue trigger and the user confirms, the resulting
+  `gh issue create` call carries `--label needs-classify` (color
+  `#fbca04`, idempotently created via
+  `gh label create needs-classify --color fbca04 --force`). The issue
+  is NOT yet on the implementation queue — it is a draft awaiting
+  classification.
+- **Step 2: classifier transitions to `auto-implement`.**
+  `/autospec-classify` walks BOTH `auto-implement` AND `needs-classify`
+  issues. After applying `ctx:*` / `reasoning:*` labels and inserting
+  the `## Model fit` block, on any issue carrying `needs-classify` it
+  ALSO performs:
+  `gh issue edit <N> --add-label auto-implement --remove-label needs-classify`.
+  Issues that already carried `auto-implement` (and not
+  `needs-classify`) are re-classified in place; no label transition.
+- **No auto-promotion.** There is no TTL-based promotion. Stuck
+  `needs-classify` issues are swept by re-running `/autospec-classify`
+  manually or via the sample crontab in
+  `docs/runbooks/needs-classify-sweep.md`.
