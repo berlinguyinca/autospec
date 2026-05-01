@@ -1,0 +1,37 @@
+name: e2e
+
+# Opt-in end-to-end tests. Runs only when:
+#   * a PR is labeled `e2e` (each fresh `labeled` event re-runs), or
+#   * triggered manually via `workflow_dispatch`.
+#
+# Per AGENTS.md, e2e tests are real-services-only — they create and tear
+# down throwaway gh repos using the workflow's GITHUB_TOKEN. Cleanup is
+# handled inside each bats file's `teardown()`/trap so a crashed run
+# never leaks.
+#
+# Spec ref: docs/specs/2026-05-01-autospec-meta-improvements-design.md §6.6.
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    name: e2e (bats tests/e2e)
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.label.name == 'e2e' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bootstrap dev environment (bats-core, tool checks)
+        shell: bash
+        run: bash scripts/dev-bootstrap.sh
+
+      - name: Run bats tests/e2e
+        shell: bash
+        run: bats tests/e2e
