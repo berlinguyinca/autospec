@@ -1,12 +1,19 @@
-# Codex Skills
+# autospec
 
-Reusable Codex skills for turning repeated workflows into durable, discoverable automation.
+Multi-harness skill suite for shipping a feature end-to-end across many GitHub
+issues — design spec → decomposed `auto-implement` queue → autonomous
+implementation loop with admin auto-merge — split across four cooperating
+skills so each invocation runs only the phases you need. Works on **Claude
+Code**, **OpenCode**, and **Codex CLI**.
 
 ## Skills
 
-| Skill | Purpose |
-| --- | --- |
-| [`autospec`](skills/autospec/README.md) | Ship a feature end-to-end: bootstrap repo if missing, brainstorm/design, decompose into linked GitHub issues, then run an autonomous implementation loop with admin auto-merge. Multi-harness (Claude Code, OpenCode, Codex CLI). |
+| Skill | Phases | Purpose |
+| --- | --- | --- |
+| [`autospec`](skills/autospec/README.md) | 0–6 (incl. **Phase 3.5**) | Full pipeline. Bootstrap repo if missing, design spec, decompose into issues, **review-and-label children with `ctx:*`/`reasoning:*` rubric (Phase 3.5)**, then run autonomous monitor with admin auto-merge. |
+| [`autospec-define`](skills/autospec-define/README.md) | 0–3.5 | Planning half. Stops after Phase 3.5 review-and-label step and hands off to `/autospec-run`. |
+| [`autospec-run`](skills/autospec-run/README.md) | 4–6 | Implementation half. Picks up the populated `auto-implement` queue and runs the autonomous monitor. Supports `--profile <name>` filtering against `~/.autospec/model-profiles.yml`. |
+| [`autospec-classify`](skills/autospec-classify/README.md) | retro | Standalone retro-labeler for already-existing `auto-implement` issues; applies the Phase 3.5 rubric to a queue that pre-dates Phase 3.5. |
 
 ## Repository Layout
 
@@ -31,32 +38,55 @@ Each skill should be self-contained. Keep shared documentation in this repositor
 
 Skills that target only Codex CLI can stick to the original layout (`SKILL.md` plus optional `agents/`, `scripts/`, `references/`, `assets/`). Skills that target multiple harnesses should add the `opencode/`, `codex/`, `install.sh`, `uninstall.sh`, and `README.md` files shown above.
 
-## Installing A Skill
+## Installation
 
-For multi-harness skills (Claude Code, OpenCode, Codex CLI), use the skill's
-bundled installer. The fastest path is the one-line installer described in the
-skill's README, e.g.:
+Install the whole suite into every supported harness in one call:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/berlinguyinca/codex-skills/main/skills/autospec/install.sh | sh -s -- --harness all
+git clone https://github.com/berlinguyinca/autospec.git
+cd autospec
+./install.sh --skill all --harness all
 ```
 
-Or run it from a clone:
+Or pick a subset:
 
 ```bash
-cd skills/autospec
-./install.sh --harness all          # or claude / opencode / codex
+./install.sh --skill autospec-run --harness claude   # one skill, one harness
+./install.sh --skill all          --harness opencode # every skill, one harness
+./install.sh --skill autospec     --harness all      # one skill, every harness
+./uninstall.sh --skill all --harness all             # symmetric uninstall
 ```
 
-For Codex-only skills, copy the skill directory into your Codex skills directory:
+Each per-skill installer remains standalone-callable, e.g.:
 
 ```bash
-mkdir -p ~/.codex/skills
-cp -R skills/<skill-name> ~/.codex/skills/
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec/install.sh \
+  | sh -s -- --harness all
 ```
 
-Start a new Codex session after installation so the skill metadata is loaded.
-See each skill's own README for per-harness install paths and manual fallbacks.
+Honors `CLAUDE_CONFIG_DIR`, `OPENCODE_CONFIG_DIR`, and `CODEX_HOME` if set.
+
+## Self-update
+
+Each installed skill supports an in-place self-update: invoke the skill with
+the literal argument `update` (case-insensitive) and it detects its harness,
+re-runs the canonical install one-liner with `--update`, shows the diff, and
+stops without entering the normal pipeline:
+
+```
+/autospec update
+/autospec-define update
+/autospec-run update
+/autospec-classify update
+```
+
+You can also re-run the suite installer with `--update`:
+
+```bash
+./install.sh --skill all --harness all --update
+```
+
+The flag forces an idempotent overwrite of every (skill, harness) pair.
 
 ## Adding Future Skills
 

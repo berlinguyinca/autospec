@@ -8,6 +8,30 @@ status deltas along the way.
 
 Works on **Claude Code**, **OpenCode**, and **Codex CLI**.
 
+## Related skills
+
+| Skill | Purpose |
+| --- | --- |
+| [`autospec-define`](../autospec-define/README.md) | Planning half (Phases 0–3.5). Stops after the review-and-label step and hands off to `autospec-run`. |
+| [`autospec-run`](../autospec-run/README.md) | Implementation half (Phases 4–6). Consumes the populated `auto-implement` queue; supports `--profile <name>` filtering. |
+| [`autospec-classify`](../autospec-classify/README.md) | Standalone retro-labeler. Applies the Phase 3.5 `ctx:*` / `reasoning:*` rubric to issues that pre-date Phase 3.5. |
+
+## Self-update
+
+Once installed, run the skill with the literal argument `update` to refresh in
+place. The skill detects its harness, re-runs the canonical install one-liner
+with `--update`, shows the diff, and stops without entering Phase 0:
+
+```
+/autospec update
+```
+
+Or re-run the per-skill installer with `--update`:
+
+```bash
+./install.sh --harness all --update
+```
+
 ## Quick install
 
 One-line install for all three supported agents (Claude Code, OpenCode, Codex CLI):
@@ -61,7 +85,7 @@ Reach for this skill when:
 - You want an opinionated TDD + branch-per-issue + admin-squash-merge loop, not a
   bespoke one.
 
-## Architecture (the 7 phases)
+## Architecture (the phases)
 
 | Phase | Name | One-liner |
 |---|---|---|
@@ -69,6 +93,7 @@ Reach for this skill when:
 | **1** | Investigate (delegate) | Read-only research subagent maps relevant files, schema, services. Real queries against remote systems if the feature touches them. |
 | **2** | Brainstorm + design | Structured 5-section brainstorm (architecture / API / data / errors / testing) with explicit per-section approval, written to `docs/specs/YYYY-MM-DD-<topic>-design.md`. |
 | **3** | Decompose into linked GitHub issues (delegate) | Foreground subagent creates labels, an EPIC umbrella, and N self-contained mini-specs sized for 32B-class local LLMs: file pointers, section anchors, checkbox AC, primary smoke test. |
+| **3.5** | Review and label (delegate) | Foreground subagent applies the `ctx:*` / `reasoning:*` rubric to each child, writes a `## Model fit` block into the body (idempotent), runs sibling-normalization across split children, and validates dep edges (closed-dep / child-less-tracker warnings; circular sibling-dep hard fail). Optional board assignment via `~/.autospec/project-map.yml` (full reader lands in PR B3 / #16). |
 | **4** | Background autonomous monitor | Background subagent loops: pick next ready issue → worktree → TDD → push → PR → self-review → admin-squash-merge → repeat until drained. |
 | **5** | Periodic status updates | Self-paced ~25 min wakeups posting deltas (closed issues, merged PRs, failures, blockers); slows to ~50 min when quiet. |
 | **6** | Final report | When the monitor terminates, summarize every issue processed, PR merged, wall time, and any human-attention failures. |
