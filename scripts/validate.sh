@@ -130,6 +130,20 @@ check_startup_preflight() {
     done
 }
 
+# Codex skills-dir install invariants (introduced by issues #129–#130): every
+# multi-harness skill's install.sh must write SKILL.md to both the legacy
+# prompts/ path AND the new skills/ slash-command registry path.
+check_codex_skills_install() {
+    info "codex skills-dir install: all skills"
+    for s in autospec autospec-define autospec-run autospec-listen autospec-classify; do
+        f="skills/$s/install.sh"
+        grep -q 'skills/\$SKILL_NAME/SKILL\.md' "$f" \
+            || fail "$f missing Codex skills-dir install (skills/\$SKILL_NAME/SKILL.md)"
+        grep -q 'prompts/\$SKILL_NAME\.md\|CODEX_DEST' "$f" \
+            || fail "$f missing legacy Codex prompts-file install"
+    done
+}
+
 # Two-tier subagent model selection invariants: every dispatching SKILL.md
 # must include the literal "**Model tier:**" directive at least once, every
 # such directive must specify either "Tier A (spec work)" or
@@ -261,6 +275,7 @@ main() {
     done
 
     check_startup_preflight
+    check_codex_skills_install
 
     check_agents_md_subagent_section
     check_autospec_listen_files
