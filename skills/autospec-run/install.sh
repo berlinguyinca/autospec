@@ -268,7 +268,9 @@ if [ "$HARNESS" = "codex" ] || [ "$HARNESS" = "all" ]; then
     info ""
     info "Codex CLI:"
     install_one "$CODEX_SRC" "$CODEX_DEST"
+    install_one "$CLAUDE_SRC" "$CODEX_DIR/skills/$SKILL_NAME/SKILL.md"
     installed_paths="${installed_paths}  Codex CLI:   ${CODEX_DEST}\n"
+    installed_paths="${installed_paths}  Codex skill: ${CODEX_DIR}/skills/${SKILL_NAME}/SKILL.md\n"
 fi
 
 # ---------- final summary --------------------------------------------------
