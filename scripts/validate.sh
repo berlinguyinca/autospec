@@ -92,6 +92,21 @@ check_required_files() {
     done
 }
 
+# Self-update invariants (introduced by issue #10): every multi-harness skill
+# must document `## Self-update mode` in all three trio files, and its
+# install.sh must accept the `--update` flag.
+check_self_update() {
+    skill_dir="$1"
+    name="$(basename "$skill_dir")"
+    info "self-update: $name"
+    for trio in SKILL.md opencode/agent.md codex/prompt.md; do
+        grep -q '^## Self-update mode' "$skill_dir/$trio" \
+            || fail "$name: $trio missing '## Self-update mode' section"
+    done
+    grep -q -- '--update' "$skill_dir/install.sh" \
+        || fail "$name: install.sh missing --update flag handling"
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -106,6 +121,7 @@ main() {
         check_frontmatter "$skill_dir/opencode/agent.md"
         check_bash_syntax "$skill_dir/install.sh"
         check_bash_syntax "$skill_dir/uninstall.sh"
+        check_self_update "$skill_dir"
     done
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
