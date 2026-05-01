@@ -154,6 +154,13 @@ Write the agreed design to `docs/specs/YYYY-MM-DD-<topic>-design.md`. Self-revie
 
 If this is a fresh repo, commit the spec to `main` directly (`git add docs/... && git commit -m "docs: <topic> design spec" && git push`) so subsequent issues can reference it as a tracked file.
 
+For an existing repo, land the spec via a short-lived PR so CI can validate it:
+1. Create branch `feat/spec-<topic>`, commit `docs/specs/...design.md`, push.
+2. `gh pr create --base main --head feat/spec-<topic> --title "docs: <topic> design spec" --body "Source spec: docs/specs/..."`
+3. Wait for required CI checks to pass (`gh pr checks <#> --repo {repo}`).
+4. Unless `AUTOSPEC_NO_AUTOMERGE_SPEC=1` is set, admin-merge: `gh pr merge <#> --admin --squash --delete-branch --repo {repo}`. If the env var is set, pause and ask the user to merge before continuing.
+5. Verify the spec is reachable at `https://github.com/{repo}/blob/main/docs/specs/...` before dispatching Phase 3.
+
 ## Phase 3 — Decompose into linked GitHub issues (delegate)
 
 Dispatch a **foreground subagent** with this prompt (substitute the spec path and `{repo}`):
