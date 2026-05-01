@@ -44,8 +44,9 @@ This workflow assumes five capabilities. Map each one to your harness's actual t
 | Background delegation       | `Agent` with `run_in_background: true` | detached `task` agent                  | nohup'd CLI session writing to a logfile | Run the monitor in a separate terminal/tmux pane   |
 | Ask the user a question     | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn     |
 | Self-paced future wakeup    | `ScheduleWakeup` inside a `/loop`    | a recurring `task` or local `cron`       | local `cron`/`launchd` calling the CLI   | The user runs a status-update prompt manually      |
+| Subagent model tier         | `sonnet` (model param on `Agent`); medium thinking | `task` agent with smaller-tier model + medium reasoning | `gpt-5.1-codex-spark` (or current spark); `reasoning_effort=medium` | Use harness default; never override to opus/gpt-5.1-pro/etc. unless required by issue body |
 
-**Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there.
+**Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches default to the cheaper-tier model with medium thinking; the orchestrator keeps the user's invoked model. Fall back UP the tier on unavailability.
 
 
 ## Phase 0 — Bootstrap repo (if missing)
@@ -87,6 +88,8 @@ If a repo already exists (cwd is in a git tree with a `github.com:<owner>/<name>
 
 Spawn a **read-only research subagent** to map relevant files, schema, services. Get back a 300-word summary with file paths and line numbers. Do NOT read files directly from the main thread.
 
+> **Model tier:** dispatch with the cheaper subagent model per AGENTS.md (Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark` or current spark; OpenCode: smaller-tier `task` model); medium thinking/reasoning; fall back UP the tier on unavailability.
+
 If the feature touches a remote system (DB, server, S3), run a real query against the actual data to confirm the problem statement before designing. Surface the concrete numbers in the design.
 
 For a freshly-bootstrapped empty repo, Phase 1 may be a no-op — proceed to Phase 2.
@@ -109,6 +112,8 @@ If this is a fresh repo, commit the spec to `main` directly (`git add docs/... &
 
 Dispatch a **foreground subagent** with this prompt (substitute the spec path and `{repo}`):
 
+> **Model tier:** dispatch with the cheaper subagent model per AGENTS.md (Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark` or current spark; OpenCode: smaller-tier `task` model); medium thinking/reasoning; fall back UP the tier on unavailability.
+>
 > Create labels (idempotent with `--force`): `auto-implement` (#0e8a16), `epic` (#b60205), plus any domain labels the spec calls for. Then create exactly N issues — first an EPIC umbrella (no `auto-implement` label, just `epic` + domain), then N-1 children all carrying `auto-implement`. After creating children, edit the umbrella body with a checklist linking them. Return JSON: `{umbrella, children:[…], labels_created:[…]}`. Use `gh` CLI only. Do NOT modify code. Do NOT push branches. Do NOT create PRs.
 >
 > Each child body must be a **self-contained mini-spec** sized for execution by a 32B-class local LLM, with these sections in order:
@@ -146,6 +151,8 @@ created in Phase 3 and apply the model-fit rubric. The subagent must NOT modify
 issue titles or remove existing labels; it only adds `ctx:*` and `reasoning:*`
 labels and patches each body with a `## Model fit` block.
 
+> **Model tier:** dispatch with the cheaper subagent model per AGENTS.md (Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark` or current spark; OpenCode: smaller-tier `task` model); medium thinking/reasoning; fall back UP the tier on unavailability.
+>
 > Walk every child issue created in Phase 3 (skip any issue carrying the
 > `type:tracker` label). For each:
 >
