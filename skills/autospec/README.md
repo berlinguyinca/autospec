@@ -47,7 +47,7 @@ is harness-neutral; each phase delegates to subagents whenever the host harness
 supports them, and falls back to in-thread execution when it doesn't. The whole
 pipeline runs from a single user invocation — the only required interactive step is
 the optional repo-bootstrap question (name, visibility, owner) when no GitHub remote
-is detected.
+is detected. Generated child issues are pre-staged for 32B-class local LLMs (Ollama qwen3-style on Mac/Linux), not just cloud agents — file pointers, section anchors, checkbox AC, and a single Primary smoke test per inner loop.
 
 ## Why use it
 
@@ -68,7 +68,7 @@ Reach for this skill when:
 | **0** | Bootstrap repo (if missing) | Detect missing git/GitHub remote, ask name/visibility/owner once, scaffold `.gitignore` + `AGENTS.md` + `README.md`, push. |
 | **1** | Investigate (delegate) | Read-only research subagent maps relevant files, schema, services. Real queries against remote systems if the feature touches them. |
 | **2** | Brainstorm + design | Structured 5-section brainstorm (architecture / API / data / errors / testing) with explicit per-section approval, written to `docs/specs/YYYY-MM-DD-<topic>-design.md`. |
-| **3** | Decompose into linked GitHub issues (delegate) | Foreground subagent creates labels, an EPIC umbrella, and N self-contained child mini-specs with `Depends on issue #N` dependency metadata. |
+| **3** | Decompose into linked GitHub issues (delegate) | Foreground subagent creates labels, an EPIC umbrella, and N self-contained mini-specs sized for 32B-class local LLMs: file pointers, section anchors, checkbox AC, primary smoke test. |
 | **4** | Background autonomous monitor | Background subagent loops: pick next ready issue → worktree → TDD → push → PR → self-review → admin-squash-merge → repeat until drained. |
 | **5** | Periodic status updates | Self-paced ~25 min wakeups posting deltas (closed issues, merged PRs, failures, blockers); slows to ~50 min when quiet. |
 | **6** | Final report | When the monitor terminates, summarize every issue processed, PR merged, wall time, and any human-attention failures. |
