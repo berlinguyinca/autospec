@@ -66,10 +66,30 @@ This workflow assumes a small set of capabilities. Map each one to your harness'
 
 1. Verify `gh auth status` is authenticated.
 2. Capture `{repo}` from `gh repo view --json nameWithOwner -q .nameWithOwner`.
-3. Resolve the candidate set:
-   - `gh issue list --repo {repo} --label <label> --state open --limit 500 --json number,title,labels,body,url`.
+3. Resolve the candidate set — walk **both** `auto-implement` AND
+   `needs-classify` issues (per spec §5.3, listener-filed issues land
+   labeled `needs-classify` and `/autospec-classify` is the entry point
+   that transitions them onto the implementation queue):
+   - `gh issue list --repo {repo} --label <label> --state open --limit 500 --json number,title,labels,body,url`
+     for the value of `--label` (default `auto-implement`).
+   - Additionally, `gh issue list --repo {repo} --label needs-classify --state open --limit 500 --json number,title,labels,body,url`.
+   - Merge both result sets, deduplicating by issue number (an issue may
+     carry both labels during a partial transition).
    - Filter out any issue whose labels include `type:tracker`.
    - Apply the `--issues` filter if provided.
+
+### Label transition for `needs-classify` issues
+
+For every issue in the candidate set whose labels include
+`needs-classify`, after Step 4 of the per-issue procedure (the label
+application step) ALSO perform the following transition:
+
+- `gh issue edit <N> --add-label auto-implement --remove-label needs-classify --repo {repo}`
+
+This moves the listener-filed issue from the `needs-classify` bucket
+into the implementation queue. Issues that were already labeled
+`auto-implement` (and not `needs-classify`) are re-classified in place;
+their labels do not change beyond the `ctx:*` / `reasoning:*` additions.
 
 ## Rubric
 
