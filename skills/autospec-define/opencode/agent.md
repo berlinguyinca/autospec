@@ -139,8 +139,107 @@ Children are written assuming the implementer is a 32B-class local model with **
 
 Capture the umbrella + child issue numbers.
 
+## Phase 3.5 — Review and label (delegate)
+
+Dispatch a **foreground subagent** to retro-review the child issues just
+created in Phase 3 and apply the model-fit rubric. The subagent must NOT modify
+issue titles or remove existing labels; it only adds `ctx:*` and `reasoning:*`
+labels and patches each body with a `## Model fit` block.
+
+> Walk every child issue created in Phase 3 (skip any issue carrying the
+> `type:tracker` label). For each:
+>
+> 1. **Stage context.** Read `gh issue view <N> --repo {repo} --json title,body,labels`. The
+>    body should already contain `## Files to read first` and
+>    `## Implementation scope`. If either is missing, add label
+>    `needs-autospec-template` (idempotent `gh label create --force` once at run
+>    start) and skip — do not classify or patch.
+>
+> 2. **Apply the rubric.** Pick the smallest `ctx:*` tier that holds the
+>    staged context (issue body + every file in `## Files to read first` +
+>    cited spec sections). Pick the `reasoning:*` depth required to derive
+>    (not just transcribe) the implementation.
+>
+>    **`ctx:*` — context-window axis**
+>
+>    | Label | Trigger |
+>    |---|---|
+>    | `ctx:32k`  | One canonical table or shell script; ≤3 files in *Files to read first*; short spec anchors. |
+>    | `ctx:64k`  | Multi-file change; 4-7 files staged; one trio + one installer; medium spec sections (~1-3 KB). |
+>    | `ctx:120k` | Cross-skill or cross-package; 8+ files; long spec excerpts; deep call graphs. |
+>
+>    **`reasoning:*` — reasoning-depth axis**
+>
+>    | Label | Trigger |
+>    |---|---|
+>    | `reasoning:shallow` | Mechanical: copy-and-rename, regex-replace, README transcription, runbook authoring. Verbs: *copy*, *rename*, *transcribe*, *list*. |
+>    | `reasoning:medium`  | Template-following with judgment: synthesize a SKILL.md mirroring an existing one, modify a script with new flags, write tests for a documented contract. Verbs: *mirror*, *adapt*, *integrate*, *wire*. |
+>    | `reasoning:deep`    | Novel design choices: pick a new abstraction, resolve a contradiction in the spec, reconcile cross-cutting concerns. Verbs: *design*, *reconcile*, *resolve*, *redesign*. |
+>
+>    Default for issues that lack any of these signals: `ctx:64k`,
+>    `reasoning:medium`. If unsure between two ctx tiers, prefer the larger.
+>
+> 3. **Sibling normalization.** When 5+ split children share a structural
+>    criterion (e.g. all per-source-table writers, all per-skill installers),
+>    harmonize their `ctx:*`/`reasoning:*` labels so the operator can run a
+>    single profile across the whole group. Override individual classifications
+>    only when the difference is a true outlier (e.g. one sibling pulls in a
+>    schema-wide refactor that no other sibling touches).
+>
+> 4. **Apply labels.** Idempotent at run start:
+>    `gh label create ctx:32k  --color c5def5 --force --repo {repo}`,
+>    `gh label create ctx:64k  --color c5def5 --force --repo {repo}`,
+>    `gh label create ctx:120k --color c5def5 --force --repo {repo}`,
+>    `gh label create reasoning:shallow --color c2e0c6 --force --repo {repo}`,
+>    `gh label create reasoning:medium  --color c2e0c6 --force --repo {repo}`,
+>    `gh label create reasoning:deep    --color c2e0c6 --force --repo {repo}`.
+>    Then per issue:
+>    `gh issue edit <N> --add-label "ctx:<tier>,reasoning:<depth>" --repo {repo}`.
+>
+> 5. **Patch body — `## Model fit` block.** Insert immediately before the first
+>    `## Dependencies` line (or at end of body if absent):
+>
+>    ```markdown
+>    ## Model fit
+>
+>    - **ctx:** `ctx:<tier>` — <1-line rationale>.
+>    - **reasoning:** `reasoning:<depth>` — <1-line rationale>.
+>
+>    <!-- autospec-classify:begin -->
+>    *Auto-classified by Phase 3.5 on YYYY-MM-DD.*
+>    <!-- autospec-classify:end -->
+>    ```
+>
+>    **Idempotency:** if a `## Model fit` block already exists between the
+>    `<!-- autospec-classify:begin -->` and `<!-- autospec-classify:end -->`
+>    markers, replace it in place. Never stack duplicates. Apply via
+>    `gh issue edit <N> --body-file <tmp>`.
+>
+> 6. **Board assignment (forward reference).** If `~/.autospec/project-map.yml`
+>    exists, look up each issue's labels in `mappings:` and call
+>    `gh project item-add <project_number> --owner <owner> --url <issue-url>`
+>    for each match. If the file is missing, warn once and skip — do not fail
+>    the phase. Full reader logic lands in PR B3 (#16); this step is a stub
+>    today.
+>
+> 7. **Dependency-edge sanity checks.** After labeling, validate the dep graph
+>    of the just-created children:
+>    - **closed-dep warning** — emit `WARN: child #<N> depends on closed issue #<M>` for each `Depends on #M` line where `gh issue view #<M> --json state` is `CLOSED`.
+>    - **child-less tracker dep warning** — emit `WARN: child #<N> depends on tracker #<M> with no children` when `#<M>` carries `type:tracker` and has no other open `auto-implement` deps pointing at it.
+>    - **circular sibling-dep hard fail** — exit non-zero if any cycle exists among the just-created children's `Depends on #N` edges.
+>
+> 8. **Run-end summary.** Print to stdout:
+>    ```
+>    Phase 3.5 summary on {repo}
+>    - classified: N
+>    - skipped (needs-autospec-template): M
+>    - ctx:32k=A  ctx:64k=B  ctx:120k=C
+>    - reasoning:shallow=X  reasoning:medium=Y  reasoning:deep=Z
+>    - boards assigned: <K> (or "skipped — no project-map.yml")
+>    - dep warnings: <count>; circular cycles: <count>
+>    ```
 
 
 ## Handoff
 
-Phase 3 complete. Run `/autospec-run --profile <name>` to begin implementation.
+Phase 3.5 complete. Run `/autospec-run --profile <name>` to begin implementation.
