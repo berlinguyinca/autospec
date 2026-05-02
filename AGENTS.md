@@ -127,3 +127,37 @@ distinct two-step lifecycle on the way to the `auto-implement` queue:
   `needs-classify` issues are swept by re-running `/autospec-classify`
   manually or via the sample crontab in
   `docs/runbooks/needs-classify-sweep.md`.
+
+## Issue-quality contract
+
+Every GitHub issue created by autospec (Phase 3 decomposer, Phase 3.5 reviewer, or
+`/autospec-classify`) must satisfy the three rules below before an implementation
+agent picks it up. The enforcer is `scripts/lint-issue.sh` (exits 0 on pass, N on
+fail where N = number of findings).
+
+### Goal concreteness
+
+The `## Goal` section must contain exactly one sentence (one terminal `.`, `?`, or
+`!`). It must NOT use bare vague verbs (`improve`, `enhance`, `optimize`, `polish`,
+`simplify`, `refactor`, `harden`) unless the same sentence also contains a concrete
+object (a file path, a backtick-quoted command/identifier, a number, or an
+`UPPER_SNAKE` label/env-var). It must NOT use hedging words (`should`, `might`,
+`could try`, `try to`).
+
+PASS: `Add \`scripts/lint-issue.sh\` that exits non-zero if the body fails the §3 quality contract.`
+
+FAIL: `Improve the decomposer prompt for better issue quality.`
+
+### AC machine-checkability
+
+Every non-blank line in the `## Acceptance criteria` section must start with
+`- [ ] ` followed by content. Each item must contain at least one of: a path-shaped
+token, a backtick-quoted span, an integer, or a regex literal. Each item must NOT
+use subjective adjectives (`looks`, `feels`, `seems`, `clean`, `elegant`). Each
+item ≤120 characters. Section must contain ≥1 item.
+
+### Primary smoke test shape
+
+The first fenced code block under `### Primary smoke test (inner loop)` must contain
+exactly one non-blank, non-comment line. It must NOT contain `...`, `<TODO>`, `TBD`,
+or `XXX`.
