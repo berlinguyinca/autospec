@@ -273,7 +273,8 @@ labels and patches each body with a `## Model fit` block.
 >    `gh label create ctx:120k --color c5def5 --force --repo {repo}`,
 >    `gh label create reasoning:shallow --color c2e0c6 --force --repo {repo}`,
 >    `gh label create reasoning:medium  --color c2e0c6 --force --repo {repo}`,
->    `gh label create reasoning:deep    --color c2e0c6 --force --repo {repo}`.
+>    `gh label create reasoning:deep    --color c2e0c6 --force --repo {repo}`,
+>    `gh label create needs-quality-bar --color fbca04 --force --repo {repo}`.
 >    Then per issue:
 >    `gh issue edit <N> --add-label "ctx:<tier>,reasoning:<depth>" --repo {repo}`.
 >
@@ -334,7 +335,27 @@ labels and patches each body with a `## Model fit` block.
 >    - **child-less tracker dep warning** — emit `WARN: child #<N> depends on tracker #<M> with no children` when `#<M>` carries `type:tracker` and has no other open `auto-implement` deps pointing at it.
 >    - **circular sibling-dep hard fail** — exit non-zero if any cycle exists among the just-created children's `Depends on #N` edges.
 >
-> 8. **Run-end summary.** Print to stdout:
+> 8. **Post-filing quality audit.** For each child issue (skip `type:tracker`):
+>    - Pull body: `gh issue view <N> --repo {repo} --json body -q .body > /tmp/audit-<N>.md`
+>    - Run: `bash scripts/lint-issue.sh /tmp/audit-<N>.md`
+>    - On non-zero exit (lint fails):
+>      - Apply label: `gh issue edit <N> --add-label needs-quality-bar --repo {repo}`
+>      - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. Block format:
+>        ```markdown
+>        ## Quality lint
+>
+>        - **GOAL** — <1-line finding>.
+>        - **AC#<n>** — <1-line finding>.
+>        - **SMOKE** — <1-line finding>.
+>
+>        <!-- autospec-quality:begin -->
+>        *Auto-linted by Phase 3.5 on YYYY-MM-DD.*
+>        <!-- autospec-quality:end -->
+>        ```
+>      - Comment findings: `gh issue comment <N> --body "<findings>" --repo {repo}`
+>    - Do NOT remove `auto-implement` label. Operator decides whether to proceed.
+>
+> 9. **Run-end summary.** Print to stdout:
 >    ```
 >    Phase 3.5 summary on {repo}
 >    - classified: N
