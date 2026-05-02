@@ -92,6 +92,23 @@ check_required_files() {
     done
 }
 
+# Stop mode invariants (introduced by the autospec-stop mechanism): every
+# multi-harness skill trio must carry a `## Stop mode` heading in all three
+# trio files (SKILL.md, opencode/agent.md, codex/prompt.md). Parallels
+# check_self_update. Applies to: autospec autospec-run autospec-stop (and
+# any future skill that dispatches stop sub-modes).
+check_stop_mode_section() {
+    for s in autospec autospec-run autospec-stop; do
+        skill_dir="skills/$s"
+        [ -d "$skill_dir" ] || continue
+        info "stop-mode: $s"
+        for trio in SKILL.md opencode/agent.md codex/prompt.md; do
+            grep -q '^## Stop mode' "$skill_dir/$trio" \
+                || fail "$s: $trio missing '## Stop mode' section"
+        done
+    done
+}
+
 # Self-update invariants (introduced by issue #10): every multi-harness skill
 # must document `## Self-update mode` in all three trio files, and its
 # install.sh must accept the `--update` flag.
@@ -296,6 +313,7 @@ main() {
     done
 
     check_startup_preflight
+    check_stop_mode_section
     check_codex_skills_install
 
     check_agents_md_subagent_section
