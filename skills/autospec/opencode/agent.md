@@ -414,6 +414,20 @@ Then launch a **background subagent** with this prompt verbatim:
 >     open_count   = count of open auto-implement issues
 >     if open_count == 0 AND latest_close > 1h ago: HARD SHUTDOWN — return final report
 >     else: print state ("blocked: N unmet deps" / "drained, waiting 1h idle"), sleep 300, continue
+>   # autospec-stop sentinel check — outer loop, top of each iteration
+>   if [ -f "$HOME/.autospec/stop.flag" ]; then
+>     MODE=$(head -1 "$HOME/.autospec/stop.flag" 2>/dev/null || echo "")
+>     TIMESTAMP=$(sed -n '2p' "$HOME/.autospec/stop.flag" 2>/dev/null | awk '{print $1}')
+>     AGE_SECS=$(( $(date -u +%s) - $(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$TIMESTAMP" +%s 2>/dev/null \
+>       || date -u -d "$TIMESTAMP" +%s 2>/dev/null || echo 0) ))
+>     if [ "$AGE_SECS" -gt 86400 ]; then
+>       echo "WARN: stale stop.flag ($AGE_SECS s old); ignoring" >&2
+>     elif [ "$MODE" = "graceful" ] || [ "$MODE" = "immediate" ]; then
+>       echo "[monitor] stop signal received: $MODE — exiting"
+>       # HARD SHUTDOWN with final report
+>       exit 0
+>     fi
+>   fi
 >   ISSUE = ready[0]
 >   gh label create in-progress-by-bot --color ededed --force
 >   gh issue edit ISSUE --remove-label auto-implement --add-label in-progress-by-bot
@@ -441,13 +455,41 @@ Then launch a **background subagent** with this prompt verbatim:
 > 3. Build + test green (use the project's test runner; for Go: `go build ./... && go test ./... -count=1`; for Node: `npm test`; for Python: `pytest`). 80%+ coverage on changed files.
 > 4. Conventional commits (feat:/fix:/test:/docs:/refactor:). NEVER bypass hooks. NEVER amend.
 > 5. Push: git push -u origin <BRANCH>
+>    ```bash
+>    # autospec-stop sentinel check — inside process(ISSUE), after each major step
+>    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
+>      bash scripts/autospec-stop.sh --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>      exit 0
+>    fi
+>    ```
 > 6. PR: gh pr create --base main --head <BRANCH> --title "<TITLE>" --body "Closes #<ISSUE>\n\n<summary>". Capture PR.
 > 7. Inner loop (max 3 iterations):
+>    ```bash
+>    # autospec-stop sentinel check — inside process(ISSUE), after each major step
+>    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
+>      bash scripts/autospec-stop.sh --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>      exit 0
+>    fi
+>    ```
 >    - Run the **Primary smoke test** from the issue body. If it fails, fix and recommit before review.
 >    - Dispatch a **foreground subagent** with brief: "**Model tier:** Tier B (implementation work) — cheaper model with medium thinking per AGENTS.md. Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark`; OpenCode: smaller task tier. Fall back UP on unavailability. You are a critical code reviewer. Review PR #<PR> via `gh pr diff` and `gh pr view`. Check correctness, edge cases, missing tests, AGENTS.md compliance. Output a numbered findings list, OR if none, return ONLY the token: LGTM"
 >    - If LGTM: run the **Operator/full verification** commands; sleep 30; `gh pr checks <PR>`. If all required checks pass (slow optional checks pending is OK per AGENTS.md): break SUCCESS.
 >    - Else: implement findings, commit, push, continue.
+>    ```bash
+>    # autospec-stop sentinel check — inside process(ISSUE), after each major step
+>    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
+>      bash scripts/autospec-stop.sh --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>      exit 0
+>    fi
+>    ```
 > 8. SUCCESS: gh pr merge <PR> --admin --squash --delete-branch. Merge auto-closes the issue.
+>    ```bash
+>    # autospec-stop sentinel check — inside process(ISSUE), after each major step
+>    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
+>      bash scripts/autospec-stop.sh --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>      exit 0
+>    fi
+>    ```
 > 9. FAILURE (loop exhausted): comment failure on issue, swap label `in-progress-by-bot` → `auto-implement`, `gh pr close <PR> --delete-branch`.
 > 10. Cleanup: cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force
 > 11. Report: PR number, outcome, one-paragraph summary.
