@@ -192,6 +192,21 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > - The whole spec + a single child issue body must fit comfortably in a 60–120k context window.
 >
 > Self-check each issue against the caps **before** calling `gh issue create`. If a cap is violated and a split is not feasible, surface the issue inline (print the over-cap body to the operator) instead of filing it.
+>
+> **Pre-filing lint loop (adaptive, MAX_LINT_RETRIES=5):** For each candidate child body, before calling `gh issue create`, write the body to `/tmp/draft-<slug>.md` and run `bash scripts/lint-issue.sh /tmp/draft-<slug>.md`. If the exit code is non-zero, map each `RULE_ID: <desc>` finding to an actionable directive using the table below, append all directives to the next generation prompt as cumulative context, and regenerate. Repeat up to `MAX_LINT_RETRIES=5` attempts. If attempt 5 still fails, print all 5 drafts plus accumulated findings inline and **skip** that child (do not file); continue to the next child. On pass (exit 0), proceed to `gh issue create` as normal.
+>
+> | Finding | Directive appended to next prompt |
+> |---|---|
+> | `GOAL_VAGUE: "improve" used without concrete object` | `AVOID: bare verb \`improve\` without naming a file path, command, label, or number in the same sentence.` |
+> | `GOAL_HEDGE: "should probably"` | `AVOID: hedging words \`should/might/could try/try to\`. State the outcome flatly.` |
+> | `GOAL_NOT_ONE_SENTENCE: N terminals` | `REWRITE: Goal must be exactly one sentence ending with a single . ? or !` |
+> | `AC_PROSE: line N not a checkbox` | `FORMAT: every AC line must start with \`- [ ] \` followed by content.` |
+> | `AC_SUBJECTIVE: "looks clean"` | `AVOID: subjective adjectives \`looks/feels/seems/clean/elegant\` in AC items. Use a \`grep\`/\`test\`/\`diff\`/\`bats\` command instead.` |
+> | `AC_TOO_LONG: N chars` | `SHORTEN: AC item exceeds 120 chars; split into two items or compress to one assertion.` |
+> | `AC_EMPTY` | `ADD: Acceptance criteria section must contain at least one \`- [ ] \` checkbox item.` |
+> | `SMOKE_MULTI_LINE: N lines` | `COLLAPSE: Primary smoke test must be exactly one command line. Use \`&&\` to chain or move setup to Operator/full verification.` |
+> | `SMOKE_PLACEHOLDER: contains "<TODO>"` | `RESOLVE: Replace placeholders \`<TODO>/TBD/XXX/...\` with the actual command before filing.` |
+> | `SMOKE_NOT_FENCED` | `ADD: Primary smoke test section must contain exactly one fenced code block.` |
 
 ### Small-LLM friendliness (applies to every child issue)
 
