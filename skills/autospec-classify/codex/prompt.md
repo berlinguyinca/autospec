@@ -179,6 +179,7 @@ For each candidate issue:
    - `gh label create ctx:32k --color c5def5 --force` (and ctx:64k, ctx:120k).
    - `gh label create reasoning:shallow --color c2e0c6 --force`
      (and reasoning:medium, reasoning:deep).
+   - `gh label create needs-quality-bar --color fbca04 --force --repo {repo}` (once at run start, idempotent).
    - `gh issue edit <N> --add-label "ctx:<tier>,reasoning:<depth>" --repo {repo}`.
    - Skip in `--dry-run`.
 
@@ -238,6 +239,27 @@ For each candidate issue:
      ```
      Then **exit non-zero** (this is a hard stop unique to
      `--apply-boards`; without the flag the run continues normally).
+   - Skip in `--dry-run`.
+
+6. **Quality audit.** After patching the `## Model fit` block:
+   - Pull body: `gh issue view <N> --repo {repo} --json body -q .body > /tmp/audit-<N>.md`
+   - Run: `bash scripts/lint-issue.sh /tmp/audit-<N>.md`
+   - On non-zero exit (lint fails):
+     - Apply label: `gh issue edit <N> --add-label needs-quality-bar --repo {repo}`
+     - Insert `## Quality lint` block (idempotent, between `<!-- autospec-quality:begin -->` and `<!-- autospec-quality:end -->` markers) via `gh issue edit <N> --body-file <tmp>`. Block format:
+       ```markdown
+       ## Quality lint
+
+       - **GOAL** — <1-line finding>.
+       - **AC#<n>** — <1-line finding>.
+       - **SMOKE** — <1-line finding>.
+
+       <!-- autospec-quality:begin -->
+       *Auto-linted by Phase 3.5 on YYYY-MM-DD.*
+       <!-- autospec-quality:end -->
+       ```
+     - Comment findings: `gh issue comment <N> --body "<findings>" --repo {repo}`
+   - Do NOT remove `auto-implement` label. Operator decides whether to proceed.
    - Skip in `--dry-run`.
 
 ## Sibling normalization (forward reference)
