@@ -67,6 +67,21 @@ the body matches one of those criteria.
 Escape hatch: set `AUTOSPEC_NO_AUTOMERGE_SPEC=1` to short-circuit the auto-merge and
 fall back to "open PR + ask user".
 
+## Stop mode authority
+
+Operators can halt a running autospec monitor in two ways, both leaving clean state:
+
+- **Graceful** (`/autospec-stop --graceful`, default): the monitor finishes the current `process(ISSUE)` to its natural end (success → admin-merge, or 3-iter failure → label restore + comment). The outer loop exits BEFORE dispatching the next issue.
+- **Immediate** (`/autospec-stop --immediate`): the current `process(ISSUE)` commits any uncommitted work (`chore: WIP — autospec stop`), pushes the branch, marks the issue `paused-by-user`, inserts a `## Resume context` block, and exits at the next major-step boundary.
+
+**Sentinel file**: `~/.autospec/stop.flag`. Two-line format: `<mode>\n<ISO8601> <user>@<host>`. Atomic write via `temp+mv`. Stale flags (>24h) are ignored with a WARN to stderr.
+
+**`paused-by-user` label**: color `#d4c5f9` (lavender), created idempotently by the abort path. Issues carrying this label are removed from the `auto-implement` queue until `/autospec-stop --resume` strips the label.
+
+**Resume procedure**: `/autospec-stop --resume` strips `paused-by-user` from every paused issue, restores `auto-implement`, and deletes `~/.autospec/stop.flag`. The `## Resume context` block is kept as an audit trail. The next `/autospec-run` invocation picks up the restored issues normally.
+
+**Inline sub-modes**: both `/autospec` and `/autospec-run` accept `stop [--flag]` as a feature-request argument (regex `^\s*stop(\s+--\w+)*\s*$`, case-insensitive), routing through the same `scripts/autospec-stop.sh`.
+
 ## Startup self-update
 
 Every multi-harness skill runs a preflight at startup that updates the installed copy
