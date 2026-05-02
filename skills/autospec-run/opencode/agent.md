@@ -70,6 +70,16 @@ If the feature-request argument matches the regex `^\s*update\s*$` (case-insensi
 
 If no install path is detected, print `Self-update: no installed copy of autospec-run found; run install.sh first.` and exit.
 
+## Stop mode
+
+If the feature-request argument matches the regex `^\s*stop(\s+--\w+)*\s*$`
+(case-insensitive), this skill enters stop mode and does not run the normal
+pipeline:
+
+1. Dispatch to `bash scripts/autospec-stop.sh <args>`.
+2. Print the helper's stdout to the user.
+3. Stop. Do not enter Phase 0 or any pipeline phase.
+
 ## Invocation
 
 ```
