@@ -236,6 +236,27 @@ check_examples_dir() {
     done
 }
 
+# Lint-issue helpers invariants (introduced by issue #152): scripts/lint-issue.sh
+# must pass bash syntax, --help must print a Usage: line, and the
+# tests/fixtures/issue-quality/ directory must contain good.md plus ≥4 bad-*.md
+# files. Mirrors the check_self_update pattern.
+check_lint_issue_helpers() {
+    info "lint-issue helpers: scripts/lint-issue.sh + fixtures"
+    [ -f scripts/lint-issue.sh ] \
+        || fail "scripts/lint-issue.sh: file missing"
+    bash -n scripts/lint-issue.sh \
+        || fail "scripts/lint-issue.sh: bash syntax error"
+    bash scripts/lint-issue.sh --help 2>/dev/null | grep -q '^Usage:' \
+        || fail "scripts/lint-issue.sh --help did not print a 'Usage:' line"
+    [ -d tests/fixtures/issue-quality ] \
+        || fail "tests/fixtures/issue-quality/: directory missing"
+    [ -f tests/fixtures/issue-quality/good.md ] \
+        || fail "tests/fixtures/issue-quality/good.md: fixture missing"
+    bad_count="$(ls tests/fixtures/issue-quality/bad-*.md 2>/dev/null | wc -l | tr -d ' ')"
+    [ "$bad_count" -ge 4 ] \
+        || fail "tests/fixtures/issue-quality/: need >=4 bad-*.md fixtures, found ${bad_count}"
+}
+
 # Governance copy: the listener lifecycle and anti-loop guardrails must be
 # documented in AGENTS.md, and the listener skill must appear in both the
 # top-level README.md and SKILLS.md skill index. Spec §6.1, §7.1.
@@ -281,6 +302,7 @@ main() {
     check_autospec_listen_files
     check_examples_dir
     check_governance_headings
+    check_lint_issue_helpers
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
