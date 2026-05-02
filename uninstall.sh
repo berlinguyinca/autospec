@@ -24,7 +24,7 @@
 
 set -eu
 
-ALL_SKILLS="autospec autospec-define autospec-run autospec-classify autospec-listen"
+ALL_SKILLS="autospec autospec-define autospec-run autospec-classify autospec-listen autospec-stop"
 ALL_HARNESSES="claude opencode codex"
 
 SKILL_ARG="all"
@@ -67,7 +67,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "$SKILL_ARG" in
-    all|autospec|autospec-define|autospec-run|autospec-classify|autospec-listen) ;;
+    all|autospec|autospec-define|autospec-run|autospec-classify|autospec-listen|autospec-stop) ;;
     *)
         err "invalid --skill: $SKILL_ARG"
         exit 2

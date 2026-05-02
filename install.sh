@@ -27,7 +27,7 @@ set -eu
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_DIR="$REPO_ROOT/skills"
 
-ALL_SKILLS="autospec autospec-define autospec-run autospec-classify autospec-listen"
+ALL_SKILLS="autospec autospec-define autospec-run autospec-classify autospec-listen autospec-stop"
 ALL_HARNESSES="claude opencode codex"
 
 SKILL_ARG="all"
@@ -75,10 +75,10 @@ done
 
 # Validate --skill
 case "$SKILL_ARG" in
-    all|autospec|autospec-define|autospec-run|autospec-classify|autospec-listen) ;;
+    all|autospec|autospec-define|autospec-run|autospec-classify|autospec-listen|autospec-stop) ;;
     *)
         err "invalid --skill: $SKILL_ARG"
-        err "must be one of: autospec | autospec-define | autospec-run | autospec-classify | autospec-listen | all"
+        err "must be one of: autospec | autospec-define | autospec-run | autospec-classify | autospec-listen | autospec-stop | all"
         exit 2
         ;;
 esac
