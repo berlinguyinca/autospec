@@ -477,7 +477,49 @@ Then launch a **background subagent** with this prompt verbatim:
 >      exit 0
 >    fi
 >    ```
->    - Run the **Primary smoke test** from the issue body. If it fails, fix and recommit before review.
+>    - Run the **Primary smoke test** from the issue body. If it fails, fix and recommit before guardian.
+>    - **Guardian gate**:
+>      <!-- guardian-block:begin -->
+>      If `AUTOSPEC_NO_GUARDIAN=1` is set: log `WARN: guardian disabled by AUTOSPEC_NO_GUARDIAN` and skip to LGTM dispatch.
+>      Otherwise:
+>        rm -f /tmp/guardian-<PR>.md
+>        bash scripts/lint-implementation.sh <PR> --issue <ISSUE> >> /tmp/guardian-<PR>.md
+>        det_exit=$?
+>        Dispatch a **foreground subagent** (Tier A) with this brief verbatim:
+>        > **Model tier:** Tier A (spec work) — guardian audit. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
+>        >
+>        > You are the implementation guardian for PR #<PR> on {repo}, derived from issue #<ISSUE>.
+>        >
+>        > 1. Read AGENTS.md `## Implementation-quality contract` for the RULE_ID table and directive map.
+>        > 2. Read issue #<ISSUE> body — note `## Implementation scope`, `## Implementation outline`, `## Tests required`, and any `Guardian: skip-*` lines.
+>        > 3. Read deterministic findings already in /tmp/guardian-<PR>.md.
+>        > 4. Run `gh pr diff <PR>` and `gh pr view <PR> --json files,title,body`.
+>        > 5. Apply the LLM-tier RULE_IDs (HALLUCINATED_API, DUPLICATE_CODE, DOC_OUT_OF_SYNC semantic pass, INVENTED_CONFIG). Append findings to /tmp/guardian-<PR>.md as `RULE_ID:<path>:<line>: <one-line description>`. Honor `Guardian: skip-*` opt-outs by emitting `INFO:` instead of blocking.
+>        > 6. Hard limits: max **20 tool calls**. If you cannot reach a verdict in 20 calls, append `RULE_ID:OUT_OF_SCOPE: guardian budget exhausted; PR needs human review` and exit.
+>        > 7. If you appended ZERO blocking findings (only INFO lines OK), return ONLY the token: `GUARDIAN_PASS`. Otherwise return ONLY: `GUARDIAN_FAIL`.
+>        If GUARDIAN_PASS && det_exit == 0:
+>          gh pr comment <PR> --body "<!-- guardian-block --> Guardian: clean. <!-- /-->"
+>          proceed to LGTM dispatch.
+>        Else:
+>          gh pr comment <PR> --edit-last --body "$(cat <<'GCMT'
+>          <!-- guardian-block:begin -->
+>          ## Guardian findings (iter <K>/3)
+>          $(cat /tmp/guardian-<PR>.md | grep -v '^#' | sed 's/^/- /')
+>          *Re-evaluated on every push. Last update: $(date -u +%Y-%m-%dT%H:%M:%SZ).*
+>          <!-- guardian-block:end -->
+>          GCMT
+>          )"
+>          Append findings to implementer retry context as:
+>          ## Guardian directives — clear before re-push
+>          $(cat /tmp/guardian-<PR>.md | grep -v '^INFO:' | grep -v '^#')
+>          Continue inner loop (counts toward 3-iter cap).
+>        On 3-iter exhaustion with GUARDIAN_FAIL:
+>          gh label create guardian-blocked --color e11d21 --force --repo {repo}
+>          gh issue edit <ISSUE> --add-label guardian-blocked
+>          Append ## Guardian audit (failed) block to issue body.
+>          Run existing failure cleanup (comment, swap label, close PR).
+>          rm -f /tmp/guardian-<PR>.md
+>      <!-- guardian-block:end -->
 >    - Dispatch a **foreground subagent** with brief: "**Model tier:** Tier B (implementation work) — cheaper model with medium thinking per AGENTS.md. Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark`; OpenCode: smaller task tier. Fall back UP on unavailability. You are a critical code reviewer. Review PR #<PR> via `gh pr diff` and `gh pr view`. Check correctness, edge cases, missing tests, AGENTS.md compliance. Output a numbered findings list, OR if none, return ONLY the token: LGTM"
 >    - If LGTM: run the **Operator/full verification** commands; sleep 30; `gh pr checks <PR>`. If all required checks pass (slow optional checks pending is OK per AGENTS.md): break SUCCESS.
 >    - Else: implement findings, commit, push, continue.
