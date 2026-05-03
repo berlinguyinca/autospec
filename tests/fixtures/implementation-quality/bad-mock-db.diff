@@ -1,0 +1,18 @@
+diff --git a/tests/unit/test_db.bats b/tests/unit/test_db.bats
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/test_db.bats
+@@ -0,0 +1,12 @@
++#!/usr/bin/env bats
++# tests/unit/test_db.bats — DB unit tests using mocks.
++
++@test "db query returns results" {
++    # mock the database connection
++    mock db.query "SELECT 1"
++    run query_data
++    assert_output "1"
++}
++
++@test "db insert works with stub" {
++    stub database "INSERT INTO foo VALUES (1)"
++}

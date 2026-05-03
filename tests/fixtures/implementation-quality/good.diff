@@ -1,0 +1,31 @@
+diff --git a/scripts/helper.sh b/scripts/helper.sh
+new file mode 100755
+--- /dev/null
++++ b/scripts/helper.sh
+@@ -0,0 +1,10 @@
++#!/usr/bin/env bash
++# scripts/helper.sh — small helper utility.
++set -eu
++
++# greet prints a greeting.
++greet() {
++    local name="$1"
++    printf 'Hello, %s\n' "$name"
++}
++
+diff --git a/tests/unit/test_helper.bats b/tests/unit/test_helper.bats
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/test_helper.bats
+@@ -0,0 +1,10 @@
++#!/usr/bin/env bats
++# tests/unit/test_helper.bats — unit tests for scripts/helper.sh.
++
++load '../test_helper/bats-support/load'
++load '../test_helper/bats-assert/load'
++
++@test "greet prints greeting" {
++    source scripts/helper.sh
++    run greet "World"
++    assert_output "Hello, World"
++}

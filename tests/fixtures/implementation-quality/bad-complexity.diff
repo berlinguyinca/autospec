@@ -1,0 +1,60 @@
+diff --git a/scripts/complex.sh b/scripts/complex.sh
+new file mode 100755
+--- /dev/null
++++ b/scripts/complex.sh
+@@ -0,0 +1,62 @@
++#!/usr/bin/env bash
++# scripts/complex.sh — overly complex function exceeding 50 LOC threshold.
++set -eu
++
++# do_everything is a function that violates the COMPLEXITY rule (>50 LOC).
++do_everything() {
++    local input="$1"
++    if [ -n "$input" ]; then
++        if [ "$input" = "a" ]; then
++            echo "branch a"
++        elif [ "$input" = "b" ]; then
++            echo "branch b"
++        elif [ "$input" = "c" ]; then
++            echo "branch c"
++        elif [ "$input" = "d" ]; then
++            echo "branch d"
++        elif [ "$input" = "e" ]; then
++            echo "branch e"
++        elif [ "$input" = "f" ]; then
++            echo "branch f"
++        elif [ "$input" = "g" ]; then
++            echo "branch g"
++        elif [ "$input" = "h" ]; then
++            echo "branch h"
++        elif [ "$input" = "i" ]; then
++            echo "branch i"
++        elif [ "$input" = "j" ]; then
++            echo "branch j"
++        elif [ "$input" = "k" ]; then
++            echo "branch k"
++        elif [ "$input" = "l" ]; then
++            echo "branch l"
++        elif [ "$input" = "m" ]; then
++            echo "branch m"
++        elif [ "$input" = "n" ]; then
++            echo "branch n"
++        elif [ "$input" = "o" ]; then
++            echo "branch o"
++        elif [ "$input" = "p" ]; then
++            echo "branch p"
++        elif [ "$input" = "q" ]; then
++            echo "branch q"
++        elif [ "$input" = "r" ]; then
++            echo "branch r"
++        elif [ "$input" = "s" ]; then
++            echo "branch s"
++        elif [ "$input" = "t" ]; then
++            echo "branch t"
++        elif [ "$input" = "u" ]; then
++            echo "branch u"
++        else
++            echo "branch other"
++        fi
++    fi
++}
