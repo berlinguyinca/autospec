@@ -274,6 +274,64 @@ check_lint_issue_helpers() {
         || fail "tests/fixtures/issue-quality/: need >=4 bad-*.md fixtures, found ${bad_count}"
 }
 
+# Lint-implementation helpers invariants (introduced by issue #212):
+# scripts/lint-implementation.sh must exist, be executable, pass bash -n, and
+# --help must list all 10 RULE_IDs. Mirrors the check_lint_issue_helpers pattern.
+check_lint_implementation_helpers() {
+    info "lint-implementation helpers: scripts/lint-implementation.sh"
+    [ -f scripts/lint-implementation.sh ] \
+        || fail "scripts/lint-implementation.sh: file missing"
+    bash -n scripts/lint-implementation.sh \
+        || fail "scripts/lint-implementation.sh: bash syntax error"
+    help_out="$(bash scripts/lint-implementation.sh --help 2>&1)"
+    for rule_id in OUT_OF_SCOPE MISSING_TEST COMPLEXITY SECURITY TODO_LEFT MOCK_DB \
+                   DOC_OUT_OF_SYNC HALLUCINATED_API DUPLICATE_CODE INVENTED_CONFIG; do
+        printf '%s\n' "$help_out" | grep -q "$rule_id" \
+            || fail "scripts/lint-implementation.sh --help missing RULE_ID: $rule_id"
+    done
+}
+
+# Phase 4 guardian block lock-step invariants (introduced by issue #212): the
+# outer guardian dispatch block (between <!-- guardian-block:begin --> and
+# <!-- guardian-block:end --> markers) must be byte-identical across all 6
+# Phase 4 trio files (autospec + autospec-run × SKILL.md/codex/opencode).
+# Per spec §5.2 lock-step trio.
+check_phase4_guardian_block_lockstep() {
+    info "phase4 guardian block lockstep: autospec + autospec-run trio"
+    extract_guardian_block() {
+        awk '
+            /<!-- guardian-block:begin -->/ { depth++; if (depth == 1) { next } }
+            /<!-- guardian-block:end -->/   { if (depth == 1) { depth=0; next } depth-- }
+            depth >= 1 { print }
+        ' "$1"
+    }
+    # Use autospec SKILL.md as the canonical reference
+    canonical_file="skills/autospec/SKILL.md"
+    [ -f "$canonical_file" ] || fail "guardian lockstep: $canonical_file missing"
+    canonical="$(extract_guardian_block "$canonical_file")"
+    [ -n "$canonical" ] \
+        || fail "guardian lockstep: no guardian block found in $canonical_file"
+    for trio_file in \
+        skills/autospec/codex/prompt.md \
+        skills/autospec/opencode/agent.md \
+        skills/autospec-run/SKILL.md \
+        skills/autospec-run/codex/prompt.md \
+        skills/autospec-run/opencode/agent.md
+    do
+        [ -f "$trio_file" ] || fail "guardian lockstep: $trio_file missing"
+        if ! diff -q \
+            <(printf '%s\n' "$canonical") \
+            <(extract_guardian_block "$trio_file") \
+            >/dev/null 2>&1; then
+            diff \
+                <(printf '%s\n' "$canonical") \
+                <(extract_guardian_block "$trio_file") | head -20 >&2
+            fail "guardian lockstep: $trio_file guardian block diverges from $canonical_file"
+        fi
+    done
+    info "guardian lockstep: all 6 trio files byte-identical"
+}
+
 # Governance copy: the listener lifecycle and anti-loop guardrails must be
 # documented in AGENTS.md, and the listener skill must appear in both the
 # top-level README.md and SKILLS.md skill index. Spec §6.1, §7.1.
@@ -321,6 +379,8 @@ main() {
     check_examples_dir
     check_governance_headings
     check_lint_issue_helpers
+    check_lint_implementation_helpers
+    check_phase4_guardian_block_lockstep
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
