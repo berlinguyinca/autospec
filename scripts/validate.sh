@@ -192,7 +192,7 @@ check_subagent_model_tier() {
         | grep -c -F 'Tier B (implementation work)' || true)"
     case "$name" in
         autospec)
-            expected_a=3; expected_b=2 ;;
+            expected_a=4; expected_b=2 ;;
         autospec-define)
             expected_a=3; expected_b=0 ;;
         autospec-run)
