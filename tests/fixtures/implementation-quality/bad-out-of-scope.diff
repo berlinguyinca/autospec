@@ -1,0 +1,18 @@
+diff --git a/scripts/helper.sh b/scripts/helper.sh
+new file mode 100755
+--- /dev/null
++++ b/scripts/helper.sh
+@@ -0,0 +1,5 @@
++#!/usr/bin/env bash
++# scripts/helper.sh — small helper utility.
++set -eu
++
++echo "helper"
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,4 @@
+ # autospec
++
++Extra line added outside the Implementation outline scope.
+

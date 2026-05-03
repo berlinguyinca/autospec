@@ -1,0 +1,13 @@
+diff --git a/scripts/helper.sh b/scripts/helper.sh
+new file mode 100755
+--- /dev/null
++++ b/scripts/helper.sh
+@@ -0,0 +1,8 @@
++#!/usr/bin/env bash
++# scripts/helper.sh — small helper utility.
++set -eu
++
++# TODO: handle errors properly
++greet() {
++    printf 'Hello\n'
++}
