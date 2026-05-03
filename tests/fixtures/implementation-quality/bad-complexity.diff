@@ -2,7 +2,7 @@ diff --git a/scripts/complex.sh b/scripts/complex.sh
 new file mode 100755
 --- /dev/null
 +++ b/scripts/complex.sh
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,72 @@
 +#!/usr/bin/env bash
 +# scripts/complex.sh — overly complex function exceeding 50 LOC threshold.
 +set -eu
@@ -53,6 +53,16 @@ new file mode 100755
 +            echo "branch t"
 +        elif [ "$input" = "u" ]; then
 +            echo "branch u"
++        elif [ "$input" = "v" ]; then
++            echo "branch v"
++        elif [ "$input" = "w" ]; then
++            echo "branch w"
++        elif [ "$input" = "x" ]; then
++            echo "branch x"
++        elif [ "$input" = "y" ]; then
++            echo "branch y"
++        elif [ "$input" = "z" ]; then
++            echo "branch z"
 +        else
 +            echo "branch other"
 +        fi
