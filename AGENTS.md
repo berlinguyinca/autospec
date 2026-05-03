@@ -52,6 +52,7 @@ If the preferred model name is rejected (deprecated, capacity, unauthorized), re
 | classify (per-issue review) | autospec-classify | A |
 | 4 — Implementer (process(ISSUE) in worktree) | autospec, autospec-run | B |
 | 4 — LGTM self-review | autospec, autospec-run | B |
+| 4 — Implementation guardian | autospec, autospec-run | A |
 
 ## Auto-merge authority for auto-implement PRs
 
@@ -176,3 +177,73 @@ item ≤120 characters. Section must contain ≥1 item.
 The first fenced code block under `### Primary smoke test (inner loop)` must contain
 exactly one non-blank, non-comment line. It must NOT contain `...`, `<TODO>`, `TBD`,
 or `XXX`.
+
+## Implementation-quality contract
+
+Every PR produced by an `auto-implement` agent must satisfy the rules below before
+the LGTM reviewer is dispatched. The enforcer is `scripts/lint-implementation.sh`
+(exits 0 on pass, N on fail where N = number of blocking findings, capped at 200).
+
+### RULE_ID table
+
+| RULE_ID | Detector | Tier | Threshold / regex |
+|---|---|---|---|
+| `OUT_OF_SCOPE` | det | path-list compare | files touched ∉ issue body `## Implementation outline` paths |
+| `MISSING_TEST` | det | path-prefix scan | required test type from issue body `## Tests required` not present in diff under `tests/{unit,integration,smoke,e2e}/` |
+| `COMPLEXITY` | det | line/regex scan | function >50 LOC, file >500 LOC, nesting >4 |
+| `SECURITY` | det | regex match | `eval\(`, `exec\(`, `--no-verify`, `git reset --hard`, `rm -rf /`, AWS-key shape `AKIA[0-9A-Z]{16}`, GitHub-token shape `gh[pousr]_[A-Za-z0-9]{36,}`, private-key markers `-----BEGIN [A-Z ]*PRIVATE KEY-----` |
+| `TODO_LEFT` | det | regex on non-test diff | `\b(TODO\|XXX\|FIXME)\b` |
+| `MOCK_DB` | det | regex on test diff | `\b(mock\|stub)\b` near DB-symbol heuristics (`db\.`, `database`, `DataSource`, `pg`, `mysql`, `sqlite`) |
+| `HALLUCINATED_API` | LLM | semantic | symbol referenced in diff not defined in diff, not in pre-PR repo (verifiable via repo search), not in dependency manifests |
+| `DUPLICATE_CODE` | LLM | semantic | new code mirrors an existing helper (must cite `<path>:<line>`) |
+| `DOC_OUT_OF_SYNC` | hybrid | det+LLM | det: any change to public surface (CLI flag, env var, exported function, config key) WITHOUT a touched doc file (`README*`, `AGENTS.md`, `docs/**`, `SKILL.md`); LLM: judges semantic accuracy when a doc IS touched |
+| `INVENTED_CONFIG` | LLM | semantic | flag/env-var/config-key introduced in diff not present in issue body or referenced spec |
+
+### Corrective directive map
+
+Each RULE_ID has a single-line corrective directive injected into the implementer's
+retry prompt as cumulative context.
+
+| RULE_ID | Directive |
+|---|---|
+| `OUT_OF_SCOPE` | "Restrict diff to files listed in issue's ## Implementation outline. Revert other changes or amend the issue body." |
+| `MISSING_TEST` | "Add a test under tests/<TIER>/ for the listed required test type before re-pushing." |
+| `COMPLEXITY` | "Split functions >50 LOC, files >500 LOC, nesting >4. No copy-paste branches." |
+| `SECURITY` | "Remove the flagged pattern. NEVER hardcode secrets, NEVER use --no-verify or git reset --hard, validate input at boundaries." |
+| `TODO_LEFT` | "Remove TODO/XXX/FIXME from non-test code. File a follow-up issue if the work is genuinely deferred." |
+| `MOCK_DB` | "Remove DB mock/stub. Use the real DB per AGENTS.md ## Engineering standards." |
+| `HALLUCINATED_API` | "The flagged symbol does not exist. Verify identifier names against the pre-PR repo and dependency manifests." |
+| `DUPLICATE_CODE` | "Reuse the existing helper at <path>:<line> instead of re-implementing." |
+| `DOC_OUT_OF_SYNC` | "Update the doc file(s) covering the changed public surface in this same PR." |
+| `INVENTED_CONFIG` | "Remove the invented flag/env/key, or amend the issue body to introduce it as scope." |
+
+### Per-issue opt-out grammar
+
+The issue body MAY declare per-RULE_ID opt-outs with mandatory justification.
+Parsed by both the deterministic script and the LLM guardian.
+
+```
+Guardian: skip-MISSING_TEST # docs-only refactor, no behavior change
+Guardian: skip-OUT_OF_SCOPE, skip-COMPLEXITY # large rename touching many files
+```
+
+Grammar (regex):
+
+```
+^Guardian:\s+(skip-[A-Z_]+(,\s*skip-[A-Z_]+)*)\s+#\s+\S.+$
+```
+
+Rules:
+
+- Justification (text after `#`) is **mandatory**. Bare `Guardian: skip-X` is
+  rejected (treated as malformed and ignored — RULE remains active).
+- Skipped RULE_IDs are still emitted by the linter as `INFO:RULE_ID...`
+  (audit-trail visibility) but do NOT block the merge.
+- Skips apply only to the specific PR derived from this issue; they do NOT cascade
+  to other issues.
+
+### Env-var contract
+
+- `AUTOSPEC_NO_GUARDIAN=1` — short-circuit guardian, fall back to LGTM-only path.
+  Mirrors `AUTOSPEC_NO_AUTOMERGE_SPEC=1` and `AUTOSPEC_NO_SELF_UPDATE=1`. Logged
+  as `WARN: guardian disabled by AUTOSPEC_NO_GUARDIAN` on every Phase 4 dispatch.
