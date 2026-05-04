@@ -252,7 +252,7 @@ Then launch a **background subagent** with this prompt verbatim:
 > Keep a progress heartbeat so the monitor can prove forward movement:
 > - Create/update `~/.autospec/process-heartbeats/<ISSUE>.json` at each major step:
 >   - `claimed`, `worktree_ready`, `tests_started`, `tests_passed`, `pr_created`, `smoke_retry`, `reviewed`, `merged`, `failed`
-> - Schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}"`
+> - Schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}"}`
 > - Delete this file on terminal SUCCESS/FAILURE in both clean and failure paths.
 > 
 > 1. Worktree off origin/main:
