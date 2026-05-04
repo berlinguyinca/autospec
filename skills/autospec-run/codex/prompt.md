@@ -52,7 +52,14 @@ echo "[autospec] updated ${LOCAL:-fresh} → $REMOTE"
 
 ## Self-update mode
 
-If the feature-request argument matches the regex `^\s*update\s*$` (case-insensitive, whitespace-padded), this skill enters self-update mode and does not run the normal pipeline:
+Decide this purely from the request text the harness handed you. Do NOT
+shell out (no `grep`, `sed`, `[[ =~ ]]`, command substitution, etc.) to
+test the user's free-form request — passing it through a shell is what
+historically tripped harness permission engines (e.g. parse errors near
+backtick/pipe characters in the user's prose). Read the request, normalize
+it in your reasoning (collapse whitespace, trim, lowercase), and if the result is
+exactly `update`, this skill enters self-update mode and does NOT run the
+normal pipeline.
 
 1. **Detect harness** by checking which install path exists for this skill:
    - Claude Code: `~/.claude/skills/autospec-run/SKILL.md`
@@ -70,9 +77,13 @@ If no install path is detected, print `Self-update: no installed copy of autospe
 
 ## Stop mode
 
-If the feature-request argument matches the regex `^\s*stop(\s+--\w+)*\s*$`
-(case-insensitive), this skill enters stop mode and does not run the normal
-pipeline:
+Apply the same read-and-normalize approach used for self-update mode (do
+NOT shell out the user's request). If the normalized request is exactly
+`stop`, or `stop` followed by one or more `--<word>` flags (examples:
+`stop`, `stop --graceful`, `stop --immediate`, `stop --status`,
+`stop --resume`, `stop --help`, `stop --flag`), this skill enters stop
+mode and does NOT run the normal pipeline. When dispatching, pass any
+`--<flag>` tokens the user provided as separate words to the helper.
 
 1. Dispatch to `bash scripts/autospec-stop.sh <args>`.
 2. Print the helper's stdout to the user.
@@ -92,10 +103,20 @@ pipeline:
 
 If the file is missing on run start:
 
-1. Probe `ollama list 2>/dev/null` and grep for known local-model name patterns
-   (`qwen3`, `llama3`, `qwen2`, `mistral`, `phi3`, `gemma`). For each match, write
-   a profile keyed on the model name with conservative defaults:
-   `ctx: 64k`, `reasoning: medium`. (`qwen3:32b` → `qwen3-32b-laptop`.)
+1. Probe local Ollama availability directly:
+   - Detect the binary robustly:
+     - macOS/Linux: `command -v ollama`
+     - Windows: `where.exe ollama`
+   - If present, run `ollama list 2>/dev/null` once and parse returned model rows
+     (ignore header/blank lines, capture first column only).
+   - For each discovered model, write a local profile using conservative defaults:
+     `ctx: 64k`, `reasoning: medium`.
+   - Normalize the profile key by lowercasing and replacing each of `:`, `/`, `.`,
+     and whitespace with `-`, then append `-laptop` (e.g. `qwen3:32b` →
+     `qwen3-32b-laptop`, `library/llama3:latest` → `library-llama3-latest-laptop`).
+   - If `ollama list` exits non-zero (e.g. daemon not running) or returns zero
+     usable model rows, treat as no local models (do not force a false-positive
+     local profile).
 2. If `ANTHROPIC_API_KEY` is set in the environment, append two cloud profiles:
    `claude-sonnet-cloud` and `claude-opus-cloud`, both `ctx: 120k`,
    `reasoning: deep`.
