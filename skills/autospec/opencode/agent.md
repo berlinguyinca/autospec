@@ -58,8 +58,8 @@ Decide this purely from the request text the harness handed you. Do NOT
 shell out (no `grep`, `sed`, `[[ =~ ]]`, command substitution, etc.) to
 test the user's free-form request — passing it through a shell is what
 historically tripped harness permission engines (e.g. parse errors near
-backtick/pipe characters in the user's prose). Read the request, mentally
-normalize it (collapse whitespace, trim, lowercase), and if the result is
+backtick/pipe characters in the user's prose). Read the request, normalize
+it in your reasoning (collapse whitespace, trim, lowercase), and if the result is
 exactly `update`, this skill enters self-update mode and does NOT run the
 normal pipeline.
 

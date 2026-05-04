@@ -60,8 +60,8 @@ Decide this purely from the request text the harness handed you. Do NOT
 shell out (no `grep`, `sed`, `[[ =~ ]]`, command substitution, etc.) to
 test the user's free-form request — passing it through a shell is what
 historically tripped harness permission engines (e.g. parse errors near
-backtick/pipe characters in the user's prose). Read the request, mentally
-normalize it (collapse whitespace, trim, lowercase), and if the result is
+backtick/pipe characters in the user's prose). Read the request, normalize
+it in your reasoning (collapse whitespace, trim, lowercase), and if the result is
 exactly `update`, this skill enters self-update mode and does NOT run the
 normal pipeline.
 
@@ -115,10 +115,12 @@ If the file is missing on run start:
      (ignore header/blank lines, capture first column only).
    - For each discovered model, write a local profile using conservative defaults:
      `ctx: 64k`, `reasoning: medium`.
-   - Normalize the profile key by lowercasing and replacing path/space punctuation
-     with `-`, then append `-laptop` (e.g. `qwen3:32b` → `qwen3-32b-laptop`).
-   - If `ollama` is installed but returns zero usable models, treat as no local models
-     (do not force a false-positive local profile).
+   - Normalize the profile key by lowercasing and replacing each of `:`, `/`, `.`,
+     and whitespace with `-`, then append `-laptop` (e.g. `qwen3:32b` →
+     `qwen3-32b-laptop`, `library/llama3:latest` → `library-llama3-latest-laptop`).
+   - If `ollama list` exits non-zero (e.g. daemon not running) or returns zero
+     usable model rows, treat as no local models (do not force a false-positive
+     local profile).
 2. If `ANTHROPIC_API_KEY` is set in the environment, append two cloud profiles:
    `claude-sonnet-cloud` and `claude-opus-cloud`, both `ctx: 120k`,
    `reasoning: deep`.
