@@ -435,7 +435,7 @@ Then launch a **background subagent** with this prompt verbatim:
 >   if ready is empty:
 >     latest_close = most recent closedAt of any auto-implement issue
 >     open_count   = count of open auto-implement issues
->     if open_count == 0 AND latest_close > 1h ago: HARD SHUTDOWN — return final report
+>     if open_count == 0 AND latest_close > 2h ago: HARD SHUTDOWN — return final report
 >     else: print state ("blocked: N unmet deps" / "drained, waiting 1h idle"), sleep 300, continue
 >   # autospec-stop sentinel check — outer loop, top of each iteration
 >   if [ -f "$HOME/.autospec/stop.flag" ]; then
