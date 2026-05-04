@@ -50,7 +50,14 @@ echo "[autospec] updated ${LOCAL:-fresh} → $REMOTE"
 
 ## Self-update mode
 
-If the feature-request argument matches the regex `^\s*update\s*$` (case-insensitive, whitespace-padded), this skill enters self-update mode and does not run the normal pipeline:
+Decide this purely from the request text the harness handed you. Do NOT
+shell out (no `grep`, `sed`, `[[ =~ ]]`, command substitution, etc.) to
+test the user's free-form request — passing it through a shell is what
+historically tripped harness permission engines (e.g. parse errors near
+backtick/pipe characters in the user's prose). Read the request, mentally
+normalize it (collapse whitespace, trim, lowercase), and if the result is
+exactly `update`, this skill enters self-update mode and does NOT run the
+normal pipeline.
 
 1. **Detect harness** by checking which install path exists for this skill:
    - Claude Code: `~/.claude/skills/autospec/SKILL.md`
@@ -68,9 +75,13 @@ If no install path is detected, print `Self-update: no installed copy of autospe
 
 ## Stop mode
 
-If the feature-request argument matches the regex `^\s*stop(\s+--\w+)*\s*$`
-(case-insensitive), this skill enters stop mode and does not run the normal
-pipeline:
+Apply the same read-and-normalize approach used for self-update mode (do
+NOT shell out the user's request). If the normalized request is exactly
+`stop`, or `stop` followed by one or more `--<word>` flags (examples:
+`stop`, `stop --graceful`, `stop --immediate`, `stop --status`,
+`stop --resume`, `stop --help`, `stop --flag`), this skill enters stop
+mode and does NOT run the normal pipeline. When dispatching, pass any
+`--<flag>` tokens the user provided as separate words to the helper.
 
 1. Dispatch to `bash scripts/autospec-stop.sh <args>`.
 2. Print the helper's stdout to the user.
