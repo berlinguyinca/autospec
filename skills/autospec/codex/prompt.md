@@ -401,6 +401,8 @@ to `run`).
 
 No daemon auto-detection — always ask explicitly.
 
+Once `run` is selected and `/autospec-run` starts, do not ask operator questions again for this run unless a true hard blocker requires explicit manual recovery.
+
 ## Phase 4 — Background autonomous monitor
 
 Record this durable preference in `AGENTS.md` (idempotent — skip if already present):
@@ -434,6 +436,30 @@ Then launch a **background subagent** with this prompt verbatim:
 >       exit 0
 >     fi
 >   fi
+>   # Service watch: check for stuck workers every 12 iterations so monitors don't hang indefinitely.
+>   monitor_tick=$((monitor_tick + 1))
+>   if [ "$monitor_tick" -ge 12 ]; then
+>     monitor_tick=0
+>     if [ -d "$HOME/.autospec/process-heartbeats" ]; then
+>       # Default reclaim window: 10800s (3h). For local single-threaded workers set
+>       # AUTOSPEC_WATCHDOG_RECLAIM_SECS=43200 (12h) before launch.
+>       WATCHDOG_RECLAIM_SECS="${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}"
+>       WATCHDOG_STALE_SECS="${AUTOSPEC_WATCHDOG_STALE_SECS:-1800}"
+>       # Cheap service wake-up pass: use low-cost model only.
+>       if command -v bash >/dev/null 2>&1; then
+>         # Dispatch one background watchdog helper (cheap model) to iterate stale entries.
+>         bash scripts/autospec-watchdog.sh
+>       elif command -v pwsh >/dev/null 2>&1; then
+>         # Windows fallback: PowerShell helper.
+>         pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/autospec-watchdog.ps1
+>       elif command -v powershell >/dev/null 2>&1; then
+>         # Windows fallback: classic PowerShell fallback.
+>         powershell -NoProfile -ExecutionPolicy Bypass -File scripts/autospec-watchdog.ps1
+>       else
+>         echo "[watchdog] neither bash nor powershell found; skipping service-watch pass."
+>       fi
+>     fi
+>   fi
 >   ISSUE = ready[0]
 >   gh label create in-progress-by-bot --color ededed --force
 >   gh issue edit ISSUE --remove-label auto-implement --add-label in-progress-by-bot
@@ -454,6 +480,12 @@ Then launch a **background subagent** with this prompt verbatim:
 > <BODY>
 > ===END===
 >
+> Keep a progress heartbeat so the monitor can prove forward movement:
+> - Create/update `~/.autospec/process-heartbeats/<ISSUE>.json` at each major step:
+>   - `claimed`, `worktree_ready`, `tests_started`, `tests_passed`, `pr_created`, `smoke_retry`, `reviewed`, `merged`, `failed`
+> - Schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}"}`
+> - Delete this file on terminal SUCCESS/FAILURE in both clean and failure paths.
+> 
 > 1. Worktree off origin/main:
 >    cd {repo_root} && git fetch origin
 >    git worktree add -b <BRANCH> /tmp/wt-<BRANCH> origin/main && cd /tmp/wt-<BRANCH>
