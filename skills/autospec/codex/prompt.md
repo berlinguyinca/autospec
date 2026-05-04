@@ -423,6 +423,19 @@ Record this durable preference in `AGENTS.md` (idempotent — skip if already pr
 Then launch a **background subagent** with this prompt verbatim:
 
 > You are the auto-implement monitor for `{repo}`. Process every open `auto-implement` issue autonomously and auto-merge each PR. **You MUST stay running across many iterations. Do NOT exit after one issue.**
+
+> **Harness adaptation (loop persistence).** The `while true:` below is pseudocode. In Claude Code, use `/loop` or `ScheduleWakeup` to persist across turns. In Codex CLI and OpenCode, you lack a built-in loop primitive — implement persistence via one of these patterns:
+> 1. **Shell wrapper (preferred):** `exec bash << 'EOF'
+> while true; do
+>   # ... monitor logic ...
+> done
+> EOF` — keeps a single bash process alive with your agent dispatching subcommands inside it.
+> 2. **nohup background process:** `nohup bash -c 'while true; do ...; sleep 1; done' > ~/.autospec/monitor.log 2>&1 &`
+> 3. **tmux pane:** `tmux new-window 'bash << '''HEREDOC'''
+> while true; do ...; done
+> HEREDOC'`
+> **Never exit after processing one issue** — the loop must persist until shutdown (idle timeout, stop.flag, or all issues resolved).
+
 >
 > Outer loop:
 > ```
@@ -472,8 +485,21 @@ Then launch a **background subagent** with this prompt verbatim:
 >     fi
 >   fi
 >   ISSUE = ready[0]
+>   # Claim check: verify the issue is still labeled auto-implement before processing.
+>   # Multiple monitors can query the same candidate list simultaneously;
+>   # the first to claim wins, others must skip to the next candidate.
+>   CURRENT_LABELS=$(gh issue view ISSUE --json labels --jq -r '.labels[].name')
+>   if ! echo "$CURRENT_LABELS" | grep -q "^auto-implement$"; then
+>     echo "[monitor] ISSUE $ISSUE already claimed (no auto-implement label); skipping"
+>     READY_REMOVE=$(printf "%s\n%s" "$READY_REMOVE" "$ISSUE" | grep -v "^${ISSUE}$" || true)
+>     ready=($READY_REMOVE)
+>     continue
+>   fi
 >   gh label create in-progress-by-bot --color ededed --force
->   gh issue edit ISSUE --remove-label auto-implement --add-label in-progress-by-bot
+>   if ! gh issue edit ISSUE --remove-label auto-implement --add-label in-progress-by-bot; then
+>     echo "[monitor] ISSUE $ISSUE claim failed (another monitor claimed it); skipping"
+>     continue
+>   fi
 >   process(ISSUE)   # foreground subagent — see template below
 >   # NO SLEEP — go straight to the next iteration; the merge may have unblocked another issue
 > ```
