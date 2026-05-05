@@ -102,3 +102,12 @@ EOF
     [ -f "$AUTOSPEC_WATCHDOG_DIR/410.json" ]
     jq -e '.issue == "410" and .pr == "" and .repo == ""' "$AUTOSPEC_WATCHDOG_DIR/410.json" >/dev/null
 }
+
+@test "missing jq fails open without deleting heartbeats" {
+    write_hb 410 tests_started 10
+    PATH="$STUB_BIN:/usr/bin:/bin" run bash "$SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [ -f "$AUTOSPEC_WATCHDOG_DIR/410.json" ]
+    echo "$output" | grep -q 'invalid_schema=0'
+}

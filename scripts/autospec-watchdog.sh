@@ -36,6 +36,12 @@ if [ ! -d "$WATCHDOG_DIR" ]; then
     exit 0
 fi
 
+if ! command -v jq >/dev/null 2>&1; then
+    echo "$WATCHDOG_LOG_PREFIX WARN: jq CLI not found; skipping heartbeat reconciliation" >&2
+    printf '%s\n' "service-watch: nudged=0 reclaimed=0 claimed_released=0 garbage_collected=0 invalid_schema=0 skipped=0"
+    exit 0
+fi
+
 now_ts="$(date -u +%s)"
 nudged=0
 reclaimed=0
