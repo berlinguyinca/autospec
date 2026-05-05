@@ -17,5 +17,6 @@ build/
 # Agent-state artifacts (codesight, omc, claude session state)
 .codesight/
 .omc/
+.omx/
 .claude/scheduled_tasks.lock
 **/.omc/

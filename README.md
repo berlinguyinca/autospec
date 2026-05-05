@@ -2,7 +2,7 @@
 
 Multi-harness skill suite for shipping a feature end-to-end across many GitHub
 issues — design spec → decomposed `auto-implement` queue → autonomous
-implementation loop with admin auto-merge — split across five cooperating
+implementation loop with admin auto-merge — split across six cooperating
 skills so each invocation runs only the phases you need. Works on **Claude
 Code**, **OpenCode**, and **Codex CLI**.
 
@@ -11,6 +11,7 @@ Code**, **OpenCode**, and **Codex CLI**.
 | Skill | Phases | Purpose |
 | --- | --- | --- |
 | [`autospec`](skills/autospec/README.md) | 0–6 (incl. **Phase 3.5**) | Full pipeline. Bootstrap repo if missing, design spec, decompose into issues, **review-and-label children with `ctx:*`/`reasoning:*` rubric (Phase 3.5)**, then run autonomous monitor with admin auto-merge. Also supports splitting an existing tracked `docs/specs/*.md` into issues. |
+| [`autosplit`](skills/autosplit/README.md) | 3–3.5 | Shortcut for splitting an existing tracked `docs/specs/*.md` into the same EPIC plus `auto-implement` child issue queue. Runs startup self-update before selecting the spec. |
 | [`autospec-define`](skills/autospec-define/README.md) | 0–3.5 | Planning half. Stops after Phase 3.5 review-and-label step and hands off to `/autospec-run`. Also supports splitting an existing tracked `docs/specs/*.md` into issues. |
 | [`autospec-run`](skills/autospec-run/README.md) | 4–6 | Implementation half. Picks up the populated `auto-implement` queue and runs the autonomous monitor. Supports `--profile <name>` filtering against `~/.autospec/model-profiles.yml`. |
 | [`autospec-classify`](skills/autospec-classify/README.md) | retro | Standalone retro-labeler for already-existing `auto-implement` issues; applies the Phase 3.5 rubric to a queue that pre-dates Phase 3.5. |
@@ -55,6 +56,7 @@ Or pick a subset:
 
 ```bash
 ./install.sh --skill autospec-run --harness claude   # one skill, one harness
+./install.sh --skill autosplit    --harness all      # install the split shortcut
 ./install.sh --skill all          --harness opencode # every skill, one harness
 ./install.sh --skill autospec     --harness all      # one skill, every harness
 ./uninstall.sh --skill all --harness all             # symmetric uninstall
@@ -86,6 +88,7 @@ stops without entering the normal pipeline:
 
 ```
 /autospec update
+/autosplit update
 /autospec-define update
 /autospec-run update
 /autospec-classify update
@@ -130,7 +133,7 @@ See [`examples/README.md`](examples/README.md) for the full schema and the auto-
 
 ## Docs
 
-- [`docs/user-manual.md`](docs/user-manual.md) — narrative walkthrough of all five skills (what each does, when to use it, example output).
+- [`docs/user-manual.md`](docs/user-manual.md) — narrative walkthrough of all suite skills (what each does, when to use it, example output).
 - [`docs/architecture.md`](docs/architecture.md) — single-source-of-truth for the cross-cutting design rules: concurrency model, lock-step body rule, model tier policy, trigger keyword theory.
 
 ## Quality gate
