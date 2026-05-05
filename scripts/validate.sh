@@ -351,6 +351,27 @@ check_phase4_guardian_block_lockstep() {
     info "guardian lockstep: all 6 trio files byte-identical"
 }
 
+# Phase 4 issue-start visibility: every monitor surface that can process
+# auto-implement issues must print a concise issue summary after claim and
+# before `process(ISSUE)` dispatch. This keeps long-running monitors observable.
+check_phase4_issue_start_summary() {
+    info "phase4 issue-start summary: autospec + autospec-run trio"
+    for s in autospec autospec-run; do
+        for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
+            grep -q 'Issue start summary' "$f" \
+                || fail "$f missing Issue start summary directive"
+            grep -q '\[monitor\] starting #\$ISSUE:' "$f" \
+                || fail "$f missing [monitor] starting issue summary line"
+            grep -q '\[monitor\] goal:' "$f" \
+                || fail "$f missing [monitor] goal summary line"
+            grep -q '\[monitor\] smoke:' "$f" \
+                || fail "$f missing [monitor] smoke summary line"
+            grep -q '\[monitor\] scope:' "$f" \
+                || fail "$f missing [monitor] scope summary line"
+        done
+    done
+}
+
 # Governance copy: the listener lifecycle and anti-loop guardrails must be
 # documented in AGENTS.md, and the listener skill must appear in both the
 # top-level README.md and SKILLS.md skill index. Spec §6.1, §7.1.
@@ -419,6 +440,7 @@ main() {
     check_lint_issue_helpers
     check_lint_implementation_helpers
     check_phase4_guardian_block_lockstep
+    check_phase4_issue_start_summary
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.

@@ -580,6 +580,35 @@ Then launch a **background subagent** with this prompt verbatim:
 >   fi
 >   mkdir -p "$HOME/.autospec/process-heartbeats"
 >   printf '{"issue":"%s","branch":"","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' "$ISSUE" "$(date -u +%s)" "{repo}" > "$HOME/.autospec/process-heartbeats/$ISSUE.json"
+>   # Issue start summary — print before dispatching process(ISSUE) so the operator
+>   # knows exactly what the monitor is about to work on.
+>   ISSUE_TITLE=$(gh issue view ISSUE --json title --jq .title 2>/dev/null || echo "")
+>   ISSUE_URL=$(gh issue view ISSUE --json url --jq .url 2>/dev/null || echo "")
+>   ISSUE_LABELS=$(gh issue view ISSUE --json labels --jq -r '[.labels[].name] | join(", ")' 2>/dev/null || echo "")
+>   ISSUE_BODY=$(gh issue view ISSUE --json body --jq .body 2>/dev/null || echo "")
+>   ISSUE_GOAL=$(printf '%s\n' "$ISSUE_BODY" | awk '
+>     BEGIN{in_goal=0}
+>     /^## Goal[[:space:]]*$/ {in_goal=1; next}
+>     /^## / && in_goal {exit}
+>     in_goal && NF {print; exit}
+>   ')
+>   [ -n "$ISSUE_GOAL" ] || ISSUE_GOAL=$(printf '%s\n' "$ISSUE_BODY" | awk 'NF && $0 !~ /^#/ {print; exit}')
+>   ISSUE_SMOKE=$(printf '%s\n' "$ISSUE_BODY" | awk '
+>     /### Primary smoke test/ {seen=1; next}
+>     seen && /^```/ {fence++; next}
+>     seen && fence==1 && NF && $0 !~ /^[[:space:]]*#/ {print; exit}
+>   ')
+>   ISSUE_SCOPE=$(printf '%s\n' "$ISSUE_BODY" | awk '
+>     /^## Implementation outline[[:space:]]*$/ {in_scope=1; next}
+>     /^## / && in_scope {exit}
+>     in_scope && /^- / {gsub(/^- /,""); print; count++; if (count>=3) exit}
+>   ' | paste -sd '; ' -)
+>   echo "[monitor] starting #$ISSUE: ${ISSUE_TITLE:-<untitled>}"
+>   echo "[monitor] url: ${ISSUE_URL:-<unknown>}"
+>   echo "[monitor] labels: ${ISSUE_LABELS:-<none>}"
+>   echo "[monitor] goal: ${ISSUE_GOAL:-<not provided>}"
+>   echo "[monitor] smoke: ${ISSUE_SMOKE:-<not provided>}"
+>   echo "[monitor] scope: ${ISSUE_SCOPE:-<not provided>}"
 >   process(ISSUE)   # foreground subagent — see template below
 >   # NO SLEEP — go straight to the next iteration; the merge may have unblocked another issue
 > ```
