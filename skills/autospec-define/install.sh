@@ -43,6 +43,7 @@ USE_SYMLINK=0
 DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
+SHARED_SCRIPT_FILES="autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh"
 
 # ---------- helpers --------------------------------------------------------
 
@@ -92,14 +93,46 @@ fetch_source_files() {
     fi
     TMP_FETCH_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t autospec)"
     info "Fetching ${SKILL_NAME} source files from ${SKILL_RAW_BASE} ..."
-    mkdir -p "$TMP_FETCH_DIR/opencode" "$TMP_FETCH_DIR/codex"
+    RAW_REPO_BASE="${SKILL_RAW_BASE%/skills/$SKILL_NAME}"
+    mkdir -p "$TMP_FETCH_DIR/opencode" "$TMP_FETCH_DIR/codex" "$TMP_FETCH_DIR/scripts"
     for rel in SKILL.md opencode/agent.md codex/prompt.md; do
         if ! curl -fsSL "$SKILL_RAW_BASE/$rel" -o "$TMP_FETCH_DIR/$rel"; then
             err "failed to download $SKILL_RAW_BASE/$rel"
             exit 1
         fi
     done
+    for rel in $SHARED_SCRIPT_FILES; do
+        if ! curl -fsSL "$RAW_REPO_BASE/scripts/$rel" -o "$TMP_FETCH_DIR/scripts/$rel"; then
+            err "failed to download $RAW_REPO_BASE/scripts/$rel"
+            exit 1
+        fi
+    done
     SKILL_DIR="$TMP_FETCH_DIR"
+}
+
+resolve_shared_scripts_dir() {
+    checkout_root="$(cd "$SKILL_DIR/../.." 2>/dev/null && pwd || true)"
+    if [ -n "$checkout_root" ] && [ -d "$checkout_root/scripts" ]; then
+        printf '%s\n' "$checkout_root/scripts"
+    elif [ -d "$SKILL_DIR/scripts" ]; then
+        printf '%s\n' "$SKILL_DIR/scripts"
+    else
+        printf ''
+    fi
+}
+
+install_shared_scripts() {
+    src_dir="$(resolve_shared_scripts_dir)"
+    if [ -z "$src_dir" ]; then
+        err "missing shared scripts directory; cannot install autospec helper scripts"
+        return 1
+    fi
+    for rel in $SHARED_SCRIPT_FILES; do
+        install_one "$src_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
+        case "$rel" in
+            *.sh) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;;
+        esac
+    done
 }
 
 install_one() {
@@ -231,6 +264,12 @@ fi
 if [ "$dep_warnings" -gt 0 ]; then
     warn "${dep_warnings} dependency warning(s) above. The skill files will still install."
 fi
+
+# ---------- install shared helper scripts ---------------------------------
+
+info ""
+info "Shared autospec helper scripts:"
+install_shared_scripts
 
 # ---------- per-harness paths ---------------------------------------------
 

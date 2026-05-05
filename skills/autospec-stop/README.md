@@ -45,7 +45,7 @@ cd skills/autospec-stop
 /autospec-run stop --graceful       # inline sub-mode in monitor skill
 ```
 
-All three paths route through `scripts/autospec-stop.sh`.
+All three paths route through the installed `autospec-stop.sh` helper in `~/.autospec/scripts` (or `AUTOSPEC_SCRIPTS_DIR`).
 
 ## Spec
 

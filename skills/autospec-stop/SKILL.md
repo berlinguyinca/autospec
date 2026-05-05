@@ -6,7 +6,7 @@ description: Use when the user wants to halt a running autospec monitor graceful
 # autospec-stop (harness-neutral)
 
 Halt a running autospec monitor gracefully or immediately. All paths route
-through `bash scripts/autospec-stop.sh "$@"`.
+through `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" "$@"`.
 
 Manage your own context — never exceed 60%. Delegate to subagents whenever your harness supports it.
 
@@ -76,7 +76,7 @@ If the feature-request argument matches the regex `^\s*stop(\s+--\w+)*\s*$`
 (case-insensitive), this skill enters stop mode and does not run the normal
 pipeline:
 
-1. Dispatch to `bash scripts/autospec-stop.sh <args>`.
+1. Dispatch to `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" <args>`.
 2. Print the helper's stdout to the user.
 3. Stop. Do not enter Phase 0 or any pipeline phase.
 
@@ -86,7 +86,7 @@ pipeline:
 /autospec-stop [--graceful|--immediate|--status|--resume|--help]
 ```
 
-Dispatches directly to `bash scripts/autospec-stop.sh "$@"`. All logic lives
+Dispatches directly to `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" "$@"`. All logic lives
 in the helper script.
 
 | Flag | Behaviour |
@@ -113,18 +113,18 @@ This workflow assumes a small set of capabilities. Map each one to your harness'
 
 1. Run startup self-update block above.
 2. Parse the user's invocation arguments (default to `--graceful` if no flag given).
-3. Execute: `bash scripts/autospec-stop.sh "$@"`
+3. Execute: `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" "$@"`
 4. Print stdout to user and exit.
 
-If `scripts/autospec-stop.sh` is not found, print:
+If `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh` is not found, print:
 ```
-autospec-stop: helper not found at scripts/autospec-stop.sh.
-Run from the autospec repo root, or re-install the skill.
+autospec-stop: helper not found at ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh.
+Reinstall autospec-stop from the autospec repo, then retry.
 ```
 and exit non-zero.
 
 ## Hard rules
 
-- Never call `scripts/autospec-stop.sh --abort-current-issue` from user invocation. That flag is internal.
+- Never call `autospec-stop.sh --abort-current-issue` from user invocation. That flag is internal.
 - Never modify issue bodies, labels, or PRs directly — the helper script owns all GitHub mutations.
 - This skill is a thin wrapper. All behaviour is in the helper script.

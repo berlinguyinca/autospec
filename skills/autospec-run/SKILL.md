@@ -89,7 +89,7 @@ NOT shell out the user's request). If the normalized request is exactly
 mode and does NOT run the normal pipeline. When dispatching, pass any
 `--<flag>` tokens the user provided as separate words to the helper.
 
-1. Dispatch to `bash scripts/autospec-stop.sh <args>`.
+1. Dispatch to `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" <args>`.
 2. Print the helper's stdout to the user.
 3. Stop. Do not enter Phase 0 or any pipeline phase.
 
@@ -202,12 +202,31 @@ Then launch a **background subagent** with this prompt verbatim:
 >
 > **Missing-label warning (run-start, once).** Count open `auto-implement` issues that lack either a `ctx:*` or a `reasoning:*` label. If non-zero, print `WARN: N issues lack model-fit labels (ctx:* / reasoning:*); they will be treated as ctx:64k, reasoning:medium. Run /autospec-classify to backfill.` Exactly once at run start.
 >
+> **Shared helper scripts.** Helper scripts live at `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}` after installation. Do not assume the target repository has an autospec `scripts/` directory.
+>
 > Outer loop:
 > ```
-> deferred = []   # issues skipped because they exceed the active profile
->
 > while true:
->   candidates = [open auto-implement issues whose Depends-on deps are all CLOSED, sorted ascending]
+>   deferred = []   # issues skipped because they exceed the active profile
+>
+>   # Startup/per-scan heartbeat reconciliation — run before candidate selection.
+>   # This deletes closed/merged/orphaned heartbeats, rejects old schemas like
+>   # {"issue":407,"status":"in_progress"}, normalizes current schemas, and
+>   # releases any `claimed` heartbeat older than AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS (default: 300).
+>   if [ -d "$HOME/.autospec/process-heartbeats" ]; then
+>     if command -v bash >/dev/null 2>&1; then
+>       bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-watchdog.sh"
+>     elif command -v pwsh >/dev/null 2>&1; then
+>       pwsh -NoProfile -ExecutionPolicy Bypass -File "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-watchdog.ps1"
+>     elif command -v powershell >/dev/null 2>&1; then
+>       powershell -NoProfile -ExecutionPolicy Bypass -File "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-watchdog.ps1"
+>     else
+>       echo "[watchdog] neither bash nor powershell found; skipping heartbeat reconciliation."
+>     fi
+>   fi
+>   all_open = [open auto-implement issues, sorted ascending by issue number]
+>   candidates = [all_open issues whose Depends-on deps are all CLOSED, sorted ascending]
+>   blocked = [all_open issues with unmet Depends-on deps]
 >
 >   ready = []
 >   for I in candidates:
@@ -220,6 +239,10 @@ Then launch a **background subagent** with this prompt verbatim:
 >       if ctx_lbl > profile.ctx:             reason.append(f"{ctx_lbl} > profile.ctx={profile.ctx}")
 >       if reasoning_lbl > profile.reasoning: reason.append(f"{reasoning_lbl} > profile.reasoning={profile.reasoning}")
 >       deferred.append({"issue": I.number, "reason": ", ".join(reason)})
+>
+>   claimed_issue, claimed_step = [newest valid heartbeat issue/step, or "-" / "-"]
+>   print "[monitor] queue scan: open=N ready=N blocked=N deferred=N claimed=#X step=Y order=ascending(oldest-first)"
+>   # GitHub may display newer/high-numbered issues first; autospec intentionally processes ready issues ascending.
 >
 >   if ready is empty:
 >     latest_close = most recent closedAt of any auto-implement issue
@@ -240,25 +263,25 @@ Then launch a **background subagent** with this prompt verbatim:
 >       exit 0
 >     fi
 >   fi
->   # Service watch: check for stuck workers every 12 iterations so monitors don't hang indefinitely.
+>   # Service watch: heartbeat reconciliation already runs before each candidate scan; every 12 iterations also runs a cheap nudge/reclaim pass for long-lived workers.
 >   monitor_tick=$((monitor_tick + 1))
 >   if [ "$monitor_tick" -ge 12 ]; then
 >     monitor_tick=0
 >     if [ -d "$HOME/.autospec/process-heartbeats" ]; then
 >       # Default reclaim window: 10800s (3h). For local single-threaded workers set
 >       # AUTOSPEC_WATCHDOG_RECLAIM_SECS=43200 (12h) before launch.
->       WATCHDOG_RECLAIM_SECS="${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}"
->       WATCHDOG_STALE_SECS="${AUTOSPEC_WATCHDOG_STALE_SECS:-1800}"
+>       export AUTOSPEC_WATCHDOG_RECLAIM_SECS="${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}"
+>       export AUTOSPEC_WATCHDOG_STALE_SECS="${AUTOSPEC_WATCHDOG_STALE_SECS:-1800}"
 >       # Cheap service wake-up pass: use low-cost model only.
 >       if command -v bash >/dev/null 2>&1; then
 >         # Dispatch one background watchdog helper (cheap model) to iterate stale entries.
->         bash scripts/autospec-watchdog.sh
+>         bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-watchdog.sh"
 >       elif command -v pwsh >/dev/null 2>&1; then
 >         # Windows fallback: PowerShell helper.
->         pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/autospec-watchdog.ps1
+>         pwsh -NoProfile -ExecutionPolicy Bypass -File "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-watchdog.ps1"
 >       elif command -v powershell >/dev/null 2>&1; then
 >         # Windows fallback: classic PowerShell fallback.
->         powershell -NoProfile -ExecutionPolicy Bypass -File scripts/autospec-watchdog.ps1
+>         powershell -NoProfile -ExecutionPolicy Bypass -File "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-watchdog.ps1"
 >       else
 >         echo "[watchdog] neither bash nor powershell found; skipping service-watch pass."
 >       fi
@@ -280,6 +303,8 @@ Then launch a **background subagent** with this prompt verbatim:
 >     echo "[monitor] ISSUE $ISSUE claim failed (another monitor claimed it); skipping"
 >     continue
 >   fi
+>   mkdir -p "$HOME/.autospec/process-heartbeats"
+>   printf '{"issue":"%s","branch":"","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' "$ISSUE" "$(date -u +%s)" "{repo}" > "$HOME/.autospec/process-heartbeats/$ISSUE.json"
 >   process(ISSUE)   # foreground subagent — see template below
 >   # NO SLEEP — go straight to the next iteration; the merge may have unblocked another issue
 > ```
@@ -313,7 +338,7 @@ Then launch a **background subagent** with this prompt verbatim:
 >    ```bash
 >    # autospec-stop sentinel check — inside process(ISSUE), after each major step
 >    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
->      bash scripts/autospec-stop.sh --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
 >      exit 0
 >    fi
 >    ```
@@ -322,7 +347,7 @@ Then launch a **background subagent** with this prompt verbatim:
 >    ```bash
 >    # autospec-stop sentinel check — inside process(ISSUE), after each major step
 >    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
->      bash scripts/autospec-stop.sh --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
 >      exit 0
 >    fi
 >    ```
@@ -332,7 +357,7 @@ Then launch a **background subagent** with this prompt verbatim:
 >      If `AUTOSPEC_NO_GUARDIAN=1` is set: log `WARN: guardian disabled by AUTOSPEC_NO_GUARDIAN` and skip to LGTM dispatch.
 >      Otherwise:
 >        rm -f /tmp/guardian-<PR>.md
->        bash scripts/lint-implementation.sh <PR> --issue <ISSUE> >> /tmp/guardian-<PR>.md
+>        bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh" <PR> --issue <ISSUE> >> /tmp/guardian-<PR>.md
 >        det_exit=$?
 >        Dispatch a **foreground subagent** (Tier A) with this brief verbatim:
 >        > **Model tier:** Tier A (spec work) — guardian audit. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
@@ -375,7 +400,7 @@ Then launch a **background subagent** with this prompt verbatim:
 >    ```bash
 >    # autospec-stop sentinel check — inside process(ISSUE), after each major step
 >    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
->      bash scripts/autospec-stop.sh --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
 >      exit 0
 >    fi
 >    ```
@@ -383,7 +408,7 @@ Then launch a **background subagent** with this prompt verbatim:
 >    ```bash
 >    # autospec-stop sentinel check — inside process(ISSUE), after each major step
 >    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
->      bash scripts/autospec-stop.sh --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
 >      exit 0
 >    fi
 >    ```
