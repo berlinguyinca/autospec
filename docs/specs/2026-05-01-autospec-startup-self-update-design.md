@@ -29,8 +29,8 @@ introducing a runtime version-pin file.
 Every multi-harness skill body grows a single `## Startup self-update`
 section, inserted **above** the existing `## Self-update mode` section.
 The section contains a small bash block (≤30 lines) the harness executes
-at startup. The block is byte-identical across all five skills (only the
-hard-coded `SKILL_NAME` differs) and **lock-stepped** across the trio
+at startup. The block is byte-identical across all multi-harness skills
+(only the hard-coded `SKILL_NAME` differs) and **lock-stepped** across the trio
 files (`SKILL.md` / `opencode/agent.md` / `codex/prompt.md`) per the
 existing repo invariant (`scripts/validate.sh:44`).
 

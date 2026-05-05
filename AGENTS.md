@@ -89,7 +89,7 @@ Every multi-harness skill runs a preflight at startup that updates the installed
 from `main` at most once per 24 hours (fail-open: any network or install error logs a
 `WARN:` line and continues). Set `AUTOSPEC_NO_SELF_UPDATE=1` to skip. The canonical
 bash block lives in `skills/autospec/SKILL.md` (`## Startup self-update` section) and
-is mirrored byte-identically (modulo `SKILL_NAME=`) across all five skill trios.
+is mirrored byte-identically (modulo `SKILL_NAME=`) across all multi-harness skill trios.
 `scripts/validate.sh` (`check_startup_preflight`) enforces byte-identity.
 
 ## Small-LLM target

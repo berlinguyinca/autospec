@@ -16,6 +16,14 @@
 - Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
 - Status: trigger-listener for chat-driven issue / spec creation. Files issues with `needs-classify` label so `/autospec-classify` can transition them onto the `auto-implement` queue. See [`skills/autospec-listen/README.md`](skills/autospec-listen/README.md).
 
+## autosplit
+
+- Path: [`skills/autosplit`](skills/autosplit)
+- Trigger: use when a user asks to split, materialize, roadmap, decompose, or turn an existing tracked `docs/specs/*.md` design spec into GitHub issues.
+- Activation keywords: `autosplit`, `split existing spec`, `split latest spec`, `turn this spec into GitHub issues`, `roadmap this spec`, `materialize this spec`
+- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
+- Status: existing-spec shortcut for Phase 3 plus Phase 3.5 with startup self-update before normal execution.
+
 ## Future Skill Checklist
 
 1. Create `skills/<skill-name>/SKILL.md`.

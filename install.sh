@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — top-level orchestrator for the autospec four-skill suite.
+# install.sh — top-level orchestrator for the autospec multi-skill suite.
 #
 # Delegates to per-skill installers under skills/<skill>/install.sh. Use this
 # script to install every skill into every harness in one call. The per-skill
@@ -14,7 +14,7 @@
 #   ./install.sh --help                          # show this help
 #
 # Flags:
-#   --skill   one of: autospec | autospec-define | autospec-run | autospec-classify | autospec-listen | all
+#   --skill   one of: autospec | autosplit | autospec-define | autospec-run | autospec-classify | autospec-listen | all
 #             (default: all)
 #   --harness one of: claude | opencode | codex | all
 #             (default: all)
@@ -27,7 +27,7 @@ set -eu
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_DIR="$REPO_ROOT/skills"
 
-ALL_SKILLS="autospec autospec-define autospec-run autospec-classify autospec-listen autospec-stop"
+ALL_SKILLS="autospec autosplit autospec-define autospec-run autospec-classify autospec-listen autospec-stop"
 ALL_HARNESSES="claude opencode codex"
 
 SKILL_ARG="all"
@@ -75,10 +75,10 @@ done
 
 # Validate --skill
 case "$SKILL_ARG" in
-    all|autospec|autospec-define|autospec-run|autospec-classify|autospec-listen|autospec-stop) ;;
+    all|autospec|autosplit|autospec-define|autospec-run|autospec-classify|autospec-listen|autospec-stop) ;;
     *)
         err "invalid --skill: $SKILL_ARG"
-        err "must be one of: autospec | autospec-define | autospec-run | autospec-classify | autospec-listen | autospec-stop | all"
+        err "must be one of: autospec | autosplit | autospec-define | autospec-run | autospec-classify | autospec-listen | autospec-stop | all"
         exit 2
         ;;
 esac

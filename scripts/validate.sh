@@ -135,7 +135,7 @@ check_startup_preflight() {
     }
     canonical=$(extract_block skills/autospec/SKILL.md)
     [ -n "$canonical" ] || fail "autospec SKILL.md missing ## Startup self-update section"
-    for s in autospec autospec-define autospec-run autospec-listen autospec-classify; do
+    for s in autospec autosplit autospec-define autospec-run autospec-listen autospec-classify autospec-stop; do
         for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
             body=$(extract_block "$f")
             [ -n "$body" ] || fail "$f missing ## Startup self-update section"
@@ -152,7 +152,7 @@ check_startup_preflight() {
 # prompts/ path AND the new skills/ slash-command registry path.
 check_codex_skills_install() {
     info "codex skills-dir install: all skills"
-    for s in autospec autospec-define autospec-run autospec-listen autospec-classify; do
+    for s in autospec autosplit autospec-define autospec-run autospec-listen autospec-classify autospec-stop; do
         f="skills/$s/install.sh"
         grep -q 'skills/\$SKILL_NAME/SKILL\.md' "$f" \
             || fail "$f missing Codex skills-dir install (skills/\$SKILL_NAME/SKILL.md)"
@@ -193,7 +193,7 @@ check_subagent_model_tier() {
     case "$name" in
         autospec)
             expected_a=4; expected_b=2 ;;
-        autospec-define)
+        autospec-define|autosplit)
             expected_a=3; expected_b=0 ;;
         autospec-run)
             expected_a=1; expected_b=2 ;;
@@ -352,12 +352,12 @@ check_governance_headings() {
         || fail "SKILLS.md: missing 'autospec-listen' reference"
 }
 
-# Existing spec mode invariants: autospec and autospec-define must expose the
+# Existing spec mode invariants: autospec, autosplit, and autospec-define must expose the
 # shortcut that skips Phase 1/2 and reuses Phase 3 + Phase 3.5 for a tracked
 # docs/specs/*.md file. Enforce all trio files so harness variants cannot drift.
 check_existing_spec_mode() {
-    info "existing-spec mode: autospec + autospec-define"
-    for s in autospec autospec-define; do
+    info "existing-spec mode: autospec + autosplit + autospec-define"
+    for s in autospec autosplit autospec-define; do
         for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
             grep -q '^## Existing spec mode' "$f" \
                 || fail "$f missing '## Existing spec mode' section"

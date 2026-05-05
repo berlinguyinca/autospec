@@ -1,12 +1,12 @@
 # Autospec user manual
 
-A narrative walkthrough of the five autospec skills. Use this manual
+A narrative walkthrough of the autospec skills. Use this manual
 as the "what does this do, when do I run it, what do I expect to see"
 companion to the per-skill `README.md` and `SKILL.md` files.
 
 The skills are presented in the order an end-to-end ship goes through
-them: umbrella → planning → classification → implementation → passive
-listener.
+them: umbrella → existing-spec split → planning → classification →
+implementation → passive listener.
 
 ## autospec
 
@@ -67,6 +67,32 @@ Spec written, 7 issues filed. Start /autospec-run now, defer to your
 external daemon, or keep refining? [run / defer / refine] (default: defer)
 > defer
 Issues are ready. Your external monitor will pick them up. Exiting.
+```
+
+## autosplit
+
+### What it does
+
+`/autosplit` is the existing-spec shortcut: it selects a tracked
+`docs/specs/*.md` file, skips Phases 1–2, decomposes that spec into an
+EPIC plus `auto-implement` child issues, runs Phase 3.5 review-and-label,
+then stops with the `/autospec-run` handoff.
+
+### When to use it
+
+Use `/autosplit` when the design spec already exists on `origin/main`
+and you only need to materialize it into GitHub issues. Use
+`/autospec-define` instead when the spec still needs to be written or
+landed.
+
+### Example output
+
+```
+/autosplit split latest spec
+selected docs/specs/2026-05-01-example-design.md
+Phase 3: decompose — 6 child issues filed (#130…#135)
+Phase 3.5: classify — labeled with ctx:* and reasoning:*
+Phase 3 complete. Run /autospec-run --profile <name> to begin implementation.
 ```
 
 ## autospec-run
