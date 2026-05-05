@@ -1,4 +1,4 @@
-# autosplit
+# autospec-split
 
 Existing-spec split shortcut for the **autospec** suite. It splits an already-written, tracked `docs/specs/*.md` into the same
 EPIC plus `auto-implement` child issue queue. Invoke with `split existing spec`,
@@ -10,30 +10,30 @@ Works on **Claude Code**, **OpenCode**, and **Codex CLI**.
 ## Quick install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autosplit/install.sh | sh -s -- --harness all
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec-split/install.sh | sh -s -- --harness all
 ```
 
 Per-harness:
 
 ```bash
 # Claude Code only
-curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autosplit/install.sh | sh -s -- --harness claude
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec-split/install.sh | sh -s -- --harness claude
 # OpenCode only
-curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autosplit/install.sh | sh -s -- --harness opencode
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec-split/install.sh | sh -s -- --harness opencode
 # Codex CLI only
-curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autosplit/install.sh | sh -s -- --harness codex
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec-split/install.sh | sh -s -- --harness codex
 ```
 
 From a clone:
 
 ```bash
-cd skills/autosplit
+cd skills/autospec-split
 ./install.sh --harness all
 ```
 
 ## What it does
 
-- **Startup self-update** — Refreshes the installed `autosplit` copy from `main`
+- **Startup self-update** — Refreshes the installed `autospec-split` copy from `main`
   before normal execution, using the same fail-open preflight as the other
   autospec skills.
 - **Phase 0** — Verifies the current directory is a GitHub-backed git repo.
@@ -68,7 +68,7 @@ The Tier B (cheaper + medium thinking) tier is **not used** by this skill; it's 
 | Skill | Purpose |
 | --- | --- |
 | [`autospec`](../autospec/README.md) | The full pipeline (Phases 0–6) when you want one skill that plans **and** ships. |
-| [`autospec-run`](../autospec-run/README.md) | Implementation half (Phases 4–6). Picks up where `autosplit` stops; supports `--profile <name>` filtering against `~/.autospec/model-profiles.yml`. |
+| [`autospec-run`](../autospec-run/README.md) | Implementation half (Phases 4–6). Picks up where `autospec-split` stops; supports `--profile <name>` filtering against `~/.autospec/model-profiles.yml`. |
 | [`autospec-classify`](../autospec-classify/README.md) | Standalone retro-labeler for already-existing `auto-implement` issues; applies the Phase 3.5 `ctx:*` / `reasoning:*` rubric. |
 
 ## Self-update
@@ -78,7 +78,7 @@ place. The skill detects its harness, re-runs the canonical install one-liner
 with `--update`, shows the diff, and stops without entering Phase 0:
 
 ```
-/autosplit update
+/autospec-split update
 ```
 
 Or re-run the per-skill installer with `--update`:
@@ -90,8 +90,8 @@ Or re-run the per-skill installer with `--update`:
 ## Usage
 
 ```
-/autosplit split latest spec
-/autosplit turn docs/specs/2026-05-01-example-design.md into GitHub issues
+/autospec-split split latest spec
+/autospec-split turn docs/specs/2026-05-01-example-design.md into GitHub issues
 ```
 
 (Replace `/` with `@` for OpenCode, or invoke through Codex CLI as a slash command.)

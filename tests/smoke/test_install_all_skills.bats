@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # tests/smoke/test_install_all_skills.bats — round-trip the top-level
 # install.sh --skill all into a per-test tmpdir HOME and assert that all
-# 5 skill bodies land for every harness, and uninstall removes them.
+# all suite skill bodies land for every harness, and uninstall removes them.
 #
 # Spec ref: docs/specs/2026-05-01-autospec-meta-improvements-design.md §6.2, §6.3.
 
@@ -17,7 +17,7 @@ setup() {
     export OPENCODE_CONFIG_DIR="$FAKE_HOME/.config/opencode"
     export CODEX_HOME="$FAKE_HOME/.codex"
 
-    SKILLS="autospec autospec-define autospec-run autospec-classify autospec-listen"
+    SKILLS="autospec autospec-split autospec-define autospec-run autospec-classify autospec-listen autospec-stop"
 }
 
 teardown() {
@@ -31,9 +31,9 @@ _claude_path() { printf '%s/.claude/skills/%s/SKILL.md' "$FAKE_HOME" "$1"; }
 _opencode_path() { printf '%s/.config/opencode/agent/%s.md' "$FAKE_HOME" "$1"; }
 _codex_path() { printf '%s/.codex/prompts/%s.md' "$FAKE_HOME" "$1"; }
 
-# ---- install all 5 skills -----------------------------------------------
+# ---- install all skills --------------------------------------------------
 
-@test "install --skill all places 5 skill bodies (one per skill, each harness)" {
+@test "install --skill all places every suite skill body in each harness" {
     run bash "$INSTALL" --skill all --harness all
     [ "$status" -eq 0 ]
     for s in $SKILLS; do

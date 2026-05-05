@@ -9,7 +9,7 @@
 #   ./install.sh --dry-run           # print what would be done; do nothing
 #
 # Can also be piped from curl:
-#   curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autosplit/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec-split/install.sh \
 #     | sh -s -- --harness all
 # When piped, the script auto-downloads the skill files from the same branch.
 #
@@ -17,16 +17,16 @@
 #   CLAUDE_CONFIG_DIR    (default: $HOME/.claude)
 #   OPENCODE_CONFIG_DIR  (default: $HOME/.config/opencode)
 #   CODEX_HOME           (default: $HOME/.codex)
-#   AUTOSPLIT_REF         (default: main) — git ref to fetch from when piped
-#   AUTOSPLIT_RAW_BASE    (override the raw URL base entirely)
+#   AUTOSPEC_SPLIT_REF         (default: main) — git ref to fetch from when piped
+#   AUTOSPEC_SPLIT_RAW_BASE    (override the raw URL base entirely)
 #
 # Idempotent: re-running upgrades the install. Exits non-zero on hard failure;
 # exits zero with warnings on missing optional deps.
 
 set -eu
 
-SKILL_NAME="autosplit"
-SKILL_RAW_BASE="${AUTOSPLIT_RAW_BASE:-https://raw.githubusercontent.com/berlinguyinca/autospec/${AUTOSPLIT_REF:-main}/skills/autosplit}"
+SKILL_NAME="autospec-split"
+SKILL_RAW_BASE="${AUTOSPEC_SPLIT_RAW_BASE:-https://raw.githubusercontent.com/berlinguyinca/autospec/${AUTOSPEC_SPLIT_REF:-main}/skills/autospec-split}"
 
 # Resolve the directory containing this script. When piped through stdin (e.g.
 # `curl ... | sh`), $0 will not be a real file — detect that and fall back to

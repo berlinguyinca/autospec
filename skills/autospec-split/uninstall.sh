@@ -16,7 +16,7 @@
 
 set -eu
 
-SKILL_NAME="autosplit"
+SKILL_NAME="autospec-split"
 
 HARNESS=""
 DRY_RUN=0

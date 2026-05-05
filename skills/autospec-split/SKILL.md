@@ -1,9 +1,13 @@
+---
+name: autospec-split
+description: Use when the user wants to split an existing tracked docs/specs/*.md design spec into GitHub issues, then stop after Phase 3.5 and hand off to /autospec-run.
+---
 
-# autosplit workflow (harness-neutral)
+# autospec-split workflow (harness-neutral)
 
 Take the following request and run the autospec existing-spec split shortcut: select a tracked `docs/specs/*.md` file, skip Phases 1-2, run Phase 3 and Phase 3.5 against that spec, then stop with the `/autospec-run` handoff.
 
-If the request does not identify an existing spec to split, resolve the newest `docs/specs/*.md` candidate using **Existing spec mode** below. Do not brainstorm or write a new spec from `/autosplit`; tell the user to use `/autospec-define` for new feature planning.
+If the request does not identify an existing spec to split, resolve the newest `docs/specs/*.md` candidate using **Existing spec mode** below. Do not brainstorm or write a new spec from `/autospec-split`; tell the user to use `/autospec-define` for new feature planning.
 
 Manage your own context — never exceed 60%. Delegate to subagents whenever your harness supports it; do not investigate, write code, or design directly in the main conversation when a subagent can do it.
 
@@ -13,7 +17,7 @@ Manage your own context — never exceed 60%. Delegate to subagents whenever you
 #!/usr/bin/env bash
 # autospec-startup-self-update — see docs/specs/2026-05-01-autospec-startup-self-update-design.md
 set +e
-SKILL_NAME=autosplit   # per-skill: autosplit / autospec-run / autospec-listen / autospec-classify
+SKILL_NAME=autospec-split   # per-skill: autospec-split / autospec-run / autospec-listen / autospec-classify
 if [ "${AUTOSPEC_NO_SELF_UPDATE:-0}" = "1" ]; then exit 0; fi
 mkdir -p "$HOME/.autospec"
 LOCKDIR="$HOME/.autospec/.update.lock.d"
@@ -54,23 +58,24 @@ echo "[autospec] updated ${LOCAL:-fresh} → $REMOTE"
 If the feature-request argument matches the regex `^\s*update\s*$` (case-insensitive, whitespace-padded), this skill enters self-update mode and does not run the normal pipeline:
 
 1. **Detect harness** by checking which install path exists for this skill:
-   - Claude Code: `~/.claude/skills/autosplit/SKILL.md`
-   - OpenCode:    `~/.config/opencode/agent/autosplit.md`
-   - Codex CLI:   `~/.codex/prompts/autosplit.md`
+   - Claude Code: `~/.claude/skills/autospec-split/SKILL.md`
+   - OpenCode:    `~/.config/opencode/agent/autospec-split.md`
+   - Codex CLI:   `~/.codex/prompts/autospec-split.md`
 2. **Re-install from `main`** by piping the canonical installer:
    ```bash
-   bash <(curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autosplit/install.sh) --harness <detected> --update
+   bash <(curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec-split/install.sh) --harness <detected> --update
    ```
    If multiple harness paths exist, run the one-liner once per detected harness.
 3. **Show the diff** between the prior installed file(s) and the freshly fetched copy (e.g. `diff <(cat <prior>) <(curl -fsSL ...SKILL.md)` or the equivalent recorded by the installer).
 4. **Stop.** Do not enter Phase 0 / Phase 1 / any pipeline phase. Print the upgrade summary and return to the user.
 
-If no install path is detected, print `Self-update: no installed copy of autosplit found; run install.sh first.` and exit.
+If no install path is detected, print `Self-update: no installed copy of autospec-split found; run install.sh first.` and exit.
 
 ## Feature request
 
 {FEATURE_DESCRIPTION}
 
+---
 
 ## Existing spec mode
 
@@ -129,6 +134,7 @@ This workflow assumes five capabilities. Map each one to your harness's actual t
 
 **Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches use a **two-tier policy**: Tier A (top model + extended thinking) for spec work (research, decompose, review/label); Tier B (cheaper model + medium thinking) for implementation work (Phase 4 implementer + LGTM review — not used by this skill). The orchestrator keeps the user's invoked model. Fall back UP the tier on unavailability.
 
+---
 
 ## Phase 0 — Bootstrap repo (if missing)
 
@@ -373,7 +379,7 @@ labels and patches each body with a `## Model fit` block.
 >
 >    **Hard rules.**
 >    - Never call `gh project item-add` in `--dry-run`.
->    - Missing file in `autospec` / `autosplit` is non-fatal at run time once auto-init has populated it; if auto-init itself fails (e.g. `gh project list` denied), warn and skip board assignment for the rest of the run.
+>    - Missing file in `autospec` / `autospec-split` is non-fatal at run time once auto-init has populated it; if auto-init itself fails (e.g. `gh project list` denied), warn and skip board assignment for the rest of the run.
 >
 > 7. **Dependency-edge sanity checks.** After labeling, validate the dep graph
 >    of the just-created children:
@@ -412,6 +418,7 @@ labels and patches each body with a `## Model fit` block.
 >    - dep warnings: <count>; circular cycles: <count>
 >    ```
 
+---
 
 ## Phase 3 pre-impl gate
 
@@ -423,12 +430,12 @@ this verbatim question (no auto-launch — always ask explicitly, per spec
 > `"Spec written, N issues filed. Start /autospec-run now, defer to your external daemon, or keep refining? [run / defer / refine]"`
 
 Substitute `N` with the actual issue count from Phase 3. Default highlight
-is **`defer`** for `/autosplit` (the plan-only skill — the user
-invoked `/autosplit` expecting plan-only behavior, so the gate
+is **`defer`** for `/autospec-split` (the plan-only skill — the user
+invoked `/autospec-split` expecting plan-only behavior, so the gate
 defaults to `defer`).
 
 - **`run`** — invoke `/autospec-run` in the current session.
-- **`defer`** (default for `/autosplit`) — print
+- **`defer`** (default for `/autospec-split`) — print
   `"Issues are ready. Your external monitor will pick them up. Exiting."`
   and stop without launching `/autospec-run`. The just-filed `auto-implement`
   queue persists on the GitHub side so an external daemon (or a later
