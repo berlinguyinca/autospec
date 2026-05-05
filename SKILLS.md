@@ -16,6 +16,14 @@
 - Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
 - Status: trigger-listener for chat-driven issue / spec creation. Files issues with `needs-classify` label so `/autospec-classify` can transition them onto the `auto-implement` queue. See [`skills/autospec-listen/README.md`](skills/autospec-listen/README.md).
 
+## autospec-story
+
+- Path: [`skills/autospec-story`](skills/autospec-story)
+- Trigger: use when a user asks for a complete repo story, implementation overview, product history, or state report from local specs plus GitHub issues and PRs.
+- Activation keywords: `autospec-story`, `repo story`, `application story`, `implementation state`, `what has been built`, `complete overview`, `state of the application`
+- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
+- Status: read-only synthesis mode. Produces a cited Markdown report that separates evidence, inference, open work, completed work, and unknowns. See [`skills/autospec-story/README.md`](skills/autospec-story/README.md).
+
 ## autospec-split
 
 - Path: [`skills/autospec-split`](skills/autospec-split)

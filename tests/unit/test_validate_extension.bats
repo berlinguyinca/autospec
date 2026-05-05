@@ -185,10 +185,28 @@ _run_scratch_validate() {
     echo "$output" | grep -F 'README.md'
 }
 
+@test "validate.sh: fails when README.md does not mention autospec-story" {
+    cp -R "$REPO_ROOT"/. "$SCRATCH"/
+    rm -rf "$SCRATCH/.git"
+    grep -v 'autospec-story' "$REPO_ROOT/README.md" > "$SCRATCH/README.md"
+    run bash -c "cd '$SCRATCH' && bash scripts/validate.sh 2>&1"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -F 'README.md'
+}
+
 @test "validate.sh: fails when SKILLS.md does not mention autospec-listen" {
     cp -R "$REPO_ROOT"/. "$SCRATCH"/
     rm -rf "$SCRATCH/.git"
     grep -v 'autospec-listen' "$REPO_ROOT/SKILLS.md" > "$SCRATCH/SKILLS.md"
+    run bash -c "cd '$SCRATCH' && bash scripts/validate.sh 2>&1"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -F 'SKILLS.md'
+}
+
+@test "validate.sh: fails when SKILLS.md does not mention autospec-story" {
+    cp -R "$REPO_ROOT"/. "$SCRATCH"/
+    rm -rf "$SCRATCH/.git"
+    grep -v 'autospec-story' "$REPO_ROOT/SKILLS.md" > "$SCRATCH/SKILLS.md"
     run bash -c "cd '$SCRATCH' && bash scripts/validate.sh 2>&1"
     [ "$status" -ne 0 ]
     echo "$output" | grep -F 'SKILLS.md'

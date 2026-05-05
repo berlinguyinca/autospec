@@ -15,6 +15,7 @@ Works on **Claude Code**, **OpenCode**, and **Codex CLI**.
 | [`autospec-define`](../autospec-define/README.md) | Planning half (Phases 0–3.5). Stops after the review-and-label step and hands off to `autospec-run`. |
 | [`autospec-run`](../autospec-run/README.md) | Implementation half (Phases 4–6). Consumes the populated `auto-implement` queue; supports `--profile <name>` filtering. |
 | [`autospec-classify`](../autospec-classify/README.md) | Standalone retro-labeler. Applies the Phase 3.5 `ctx:*` / `reasoning:*` rubric to issues that pre-date Phase 3.5. |
+| [`autospec-story`](../autospec-story/README.md) | Read-only story mode. Synthesizes local specs, GitHub issues/PRs, and git history into a cited product story and implementation-state overview. |
 
 ## Self-update
 

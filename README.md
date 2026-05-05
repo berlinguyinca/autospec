@@ -16,6 +16,7 @@ Code**, **OpenCode**, and **Codex CLI**.
 | [`autospec-run`](skills/autospec-run/README.md) | 4–6 | Implementation half. Picks up the populated `auto-implement` queue and runs the autonomous monitor. Supports `--profile <name>` filtering against `~/.autospec/model-profiles.yml`. |
 | [`autospec-classify`](skills/autospec-classify/README.md) | retro | Standalone retro-labeler for already-existing `auto-implement` issues; applies the Phase 3.5 rubric to a queue that pre-dates Phase 3.5. |
 | [`autospec-listen`](skills/autospec-listen/README.md) | passive | Passive listener for chat-driven issue / spec triggers. On a phrase like "file an issue" or "write a spec", drafts a GitHub issue body for confirmation or routes to `/autospec-define`. |
+| [`autospec-story`](skills/autospec-story/README.md) | story | Read-only repo narrative. Synthesizes local specs, GitHub issues/PRs, and recent git history into a cited application story and implementation-state overview. |
 | [`autospec-stop`](skills/autospec-stop/README.md) | control | Stop/resume utility for active autospec monitors. Supports graceful, immediate, status, and resume flows through the shared stop sentinel. |
 
 Cost-aware **two-tier** subagent dispatch: spec/research/decompose/review subagents use the top model with extended thinking (Tier A — Claude Code: `opus` + `ultrathink`; Codex: top GPT + `reasoning_effort=high`; OpenCode: top task tier); implementer + LGTM-review subagents use the cheaper model with medium thinking (Tier B — Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark`; OpenCode: smaller task tier). Both tiers fall back UP on unavailability. The orchestrator runs whatever model you invoked the skill with — invoke it on top tier for best spec quality. See `AGENTS.md` for the full policy.
@@ -94,6 +95,7 @@ stops without entering the normal pipeline:
 /autospec-run update
 /autospec-classify update
 /autospec-listen update
+/autospec-story update
 /autospec-stop update
 ```
 
