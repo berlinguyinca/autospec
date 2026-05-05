@@ -20,6 +20,9 @@
 #             (default: all)
 #   --update  forwarded to each per-skill installer; idempotent overwrite.
 #
+# Honors:
+#   AUTOSPEC_NO_STAR_PROMPT=1  skip the optional GitHub star prompt.
+#
 # Exits non-zero on any sub-installer failure; reports per-pair status.
 
 set -eu
@@ -35,10 +38,36 @@ HARNESS_ARG="all"
 UPDATE=0
 
 err()  { printf 'error: %s\n' "$*" >&2; }
+warn() { printf 'warn:  %s\n' "$*" >&2; }
 info() { printf '%s\n' "$*"; }
 
 usage() {
-    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+maybe_prompt_star() {
+    # Keep scripted installs quiet: no prompt during updates, CI, pipes, or when opted out.
+    [ "$UPDATE" -eq 0 ] || return 0
+    [ "${AUTOSPEC_NO_STAR_PROMPT:-0}" != "1" ] || return 0
+    [ "${CI:-}" = "" ] || return 0
+    [ -t 0 ] && [ -t 1 ] || return 0
+    command -v gh >/dev/null 2>&1 || return 0
+
+    info ""
+    printf 'Would you like to star https://github.com/berlinguyinca/autospec to support adoption? [y/N] '
+    read -r answer || return 0
+    case "$answer" in
+        y|Y|yes|YES|Yes)
+            if gh api -X PUT /user/starred/berlinguyinca/autospec >/dev/null 2>&1; then
+                info "Thanks — starred berlinguyinca/autospec."
+            else
+                warn "could not star berlinguyinca/autospec; continuing"
+            fi
+            ;;
+        *)
+            info "No problem — skipping GitHub star."
+            ;;
+    esac
 }
 
 while [ $# -gt 0 ]; do
@@ -148,4 +177,5 @@ info "Suite install summary: $succeeded/$total pairs OK ($failures failed)"
 if [ "$failures" -gt 0 ]; then
     exit 1
 fi
+maybe_prompt_star
 exit 0
