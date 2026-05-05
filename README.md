@@ -1,52 +1,74 @@
 # autospec
 
-Multi-harness skill suite for shipping a feature end-to-end across many GitHub
-issues — design spec → decomposed `auto-implement` queue → autonomous
-implementation loop with admin auto-merge — split across focused workflow
-skills so each invocation runs only the phases you need. Works on **Claude
-Code**, **OpenCode**, and **Codex CLI**.
+Autospec is a multi-harness AI workflow suite for turning product intent into
+tracked, reviewable, and explainable software changes.
+
+It helps an agent move from a feature request to a written spec, from that spec
+to a tree of GitHub issues sized for different model capabilities, and from
+those issues to autonomous pull requests with validation, review, and merge
+control. It also keeps the story behind the code available afterward: specs,
+issues, PRs, commits, and implementation state can be synthesized into a cited
+repo overview.
+
+Autospec works across **Claude Code**, **OpenCode**, and **Codex CLI**.
+
+## What It Solves
+
+AI-generated code can grow quickly without a clear record of why it exists, what
+spec produced it, which model worked on it, and which parts are actually
+implemented. Autospec makes that process auditable.
+
+It gives you:
+
+- A durable spec before implementation starts.
+- A linked 1:n issue tree instead of one oversized task.
+- Model-fit metadata on each issue with `ctx:*` and `reasoning:*` labels.
+- Implementation queues that can be filtered by model profile.
+- Quality gates for issue shape and implementation scope.
+- Autonomous PR creation, self-review, CI checks, and admin squash-merge.
+- Stop/resume controls for long-running monitors.
+- A read-only story mode that explains the current application state from local
+  docs plus GitHub issues and PRs.
+
+## Core Workflow
+
+```text
+feature request
+  -> investigation
+  -> design spec
+  -> EPIC issue
+  -> linked child issues
+  -> Phase 3.5 model-fit classification
+  -> implementation monitor
+  -> PR per issue
+  -> review + checks + merge
+  -> final report / repo story
+```
+
+Child issues are written for small and large models alike. They include staged
+context, files to read first, implementation scope, acceptance criteria, and one
+primary smoke test. The goal is to make every unit of work small enough for the
+selected model and harness to execute reliably.
 
 ## Skills
 
-| Skill | Phases | Purpose |
+| Skill | Use it when | Result |
 | --- | --- | --- |
-| [`autospec`](skills/autospec/README.md) | 0–6 (incl. **Phase 3.5**) | Full pipeline. Bootstrap repo if missing, design spec, decompose into issues, **review-and-label children with `ctx:*`/`reasoning:*` rubric (Phase 3.5)**, then run autonomous monitor with admin auto-merge. Also supports splitting an existing tracked `docs/specs/*.md` into issues. |
-| [`autospec-split`](skills/autospec-split/README.md) | 3–3.5 | Shortcut for splitting an existing tracked `docs/specs/*.md` into the same EPIC plus `auto-implement` child issue queue. Runs startup self-update before selecting the spec. |
-| [`autospec-define`](skills/autospec-define/README.md) | 0–3.5 | Planning half. Stops after Phase 3.5 review-and-label step and hands off to `/autospec-run`. Also supports splitting an existing tracked `docs/specs/*.md` into issues. |
-| [`autospec-run`](skills/autospec-run/README.md) | 4–6 | Implementation half. Picks up the populated `auto-implement` queue and runs the autonomous monitor. Supports `--profile <name>` filtering against `~/.autospec/model-profiles.yml`. |
-| [`autospec-classify`](skills/autospec-classify/README.md) | retro | Standalone retro-labeler for already-existing `auto-implement` issues; applies the Phase 3.5 rubric to a queue that pre-dates Phase 3.5. |
-| [`autospec-listen`](skills/autospec-listen/README.md) | passive | Passive listener for chat-driven issue / spec triggers. On a phrase like "file an issue" or "write a spec", drafts a GitHub issue body for confirmation or routes to `/autospec-define`. |
-| [`autospec-story`](skills/autospec-story/README.md) | story | Read-only repo narrative. Synthesizes local specs, GitHub issues/PRs, and recent git history into a cited application story and implementation-state overview. |
-| [`autospec-stop`](skills/autospec-stop/README.md) | control | Stop/resume utility for active autospec monitors. Supports graceful, immediate, status, and resume flows through the shared stop sentinel. |
+| [`autospec`](skills/autospec/README.md) | You want the full path from feature request to merged PRs. | Bootstraps if needed, investigates, writes a spec, creates issues, classifies them, runs implementation, and reports completion. |
+| [`autospec-define`](skills/autospec-define/README.md) | You want planning only before implementation starts. | Produces a design spec plus classified `auto-implement` issues, then hands off to `/autospec-run`. |
+| [`autospec-split`](skills/autospec-split/README.md) | You already have a tracked `docs/specs/*.md` design spec. | Turns the existing spec into an EPIC plus linked child issues, then stops after classification. |
+| [`autospec-run`](skills/autospec-run/README.md) | You already have an `auto-implement` queue. | Runs the implementation monitor, opens PRs, reviews, validates, and merges. |
+| [`autospec-classify`](skills/autospec-classify/README.md) | Existing issues need model-fit labels. | Adds `ctx:*` and `reasoning:*` labels, inserts a `## Model fit` block, and promotes `needs-classify` issues. |
+| [`autospec-listen`](skills/autospec-listen/README.md) | You want chat phrases like "file an issue" to become tracked work. | Drafts issues for approval or routes spec requests into `/autospec-define`. |
+| [`autospec-story`](skills/autospec-story/README.md) | You need a repo-level product and implementation-state overview. | Produces a cited Markdown story from local specs, docs, issues, PRs, and git history. |
+| [`autospec-stop`](skills/autospec-stop/README.md) | You need to halt or resume an active monitor. | Writes the shared stop sentinel, pauses issues safely, reports status, or resumes paused work. |
 
-Cost-aware **two-tier** subagent dispatch: spec/research/decompose/review subagents use the top model with extended thinking (Tier A — Claude Code: `opus` + `ultrathink`; Codex: top GPT + `reasoning_effort=high`; OpenCode: top task tier); implementer + LGTM-review subagents use the cheaper model with medium thinking (Tier B — Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark`; OpenCode: smaller task tier). Both tiers fall back UP on unavailability. The orchestrator runs whatever model you invoked the skill with — invoke it on top tier for best spec quality. See `AGENTS.md` for the full policy.
+See [`SKILLS.md`](SKILLS.md) for activation keywords and per-skill routing
+details.
 
-## Repository Layout
+## Install
 
-```text
-skills/
-  <skill-name>/
-    SKILL.md                # canonical body (Claude Code skill format)
-    agents/openai.yaml      # optional Codex UI metadata
-    scripts/                # optional helpers
-    references/             # optional supporting docs
-    assets/                 # optional static assets
-
-    # Multi-harness skills additionally include:
-    README.md               # human-facing docs (what / why / install / usage)
-    opencode/agent.md       # OpenCode-flavored variant
-    codex/prompt.md         # Codex CLI prompt-library variant
-    install.sh              # self-installer (--harness claude|opencode|codex|all)
-    uninstall.sh            # symmetrical uninstaller
-```
-
-Each skill should be self-contained. Keep shared documentation in this repository minimal so future skills remain portable into `~/.codex/skills`.
-
-Skills that target only Codex CLI can stick to the original layout (`SKILL.md` plus optional `agents/`, `scripts/`, `references/`, `assets/`). Skills that target multiple harnesses should add the `opencode/`, `codex/`, `install.sh`, `uninstall.sh`, and `README.md` files shown above.
-
-## Installation
-
-Install the whole suite into every supported harness in one call:
+Install the full suite into every supported harness:
 
 ```bash
 git clone https://github.com/berlinguyinca/autospec.git
@@ -54,44 +76,67 @@ cd autospec
 ./install.sh --skill all --harness all
 ```
 
-Or pick a subset:
+Install a subset:
 
 ```bash
-./install.sh --skill autospec-run --harness claude   # one skill, one harness
-./install.sh --skill autospec-split    --harness all      # install the split shortcut
-./install.sh --skill all          --harness opencode # every skill, one harness
-./install.sh --skill autospec     --harness all      # one skill, every harness
-./uninstall.sh --skill all --harness all             # symmetric uninstall
+./install.sh --skill autospec-run --harness claude
+./install.sh --skill autospec-split --harness all
+./install.sh --skill all --harness opencode
+./install.sh --skill autospec --harness all
 ```
 
-Each per-skill installer remains standalone-callable, e.g.:
+Uninstall symmetrically:
+
+```bash
+./uninstall.sh --skill all --harness all
+```
+
+The installer honors:
+
+| Variable | Purpose |
+| --- | --- |
+| `CLAUDE_CONFIG_DIR` | Override Claude Code install root. |
+| `OPENCODE_CONFIG_DIR` | Override OpenCode install root. |
+| `CODEX_HOME` | Override Codex install root. |
+| `AUTOSPEC_NO_STAR_PROMPT=1` | Skip the optional adoption star prompt. |
+
+After a successful interactive suite install, the top-level installer asks
+whether you want to star `berlinguyinca/autospec` to support adoption. It is
+skipped for non-interactive installs, `--update`, CI, missing `gh`, or
+`AUTOSPEC_NO_STAR_PROMPT=1`.
+
+Each per-skill installer is also standalone-callable:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec/install.sh \
   | sh -s -- --harness all
 ```
 
-Honors `CLAUDE_CONFIG_DIR`, `OPENCODE_CONFIG_DIR`, and `CODEX_HOME` if set.
+## Update
 
-### Auto-update
+Each installed suite skill runs a startup self-update check at most once every
+24 hours. It reinstalls from `main` when a newer commit is available. The check
+is fail-open: network or install errors log a `WARN:` line and the installed
+skill continues to run.
 
-Each installed suite skill checks `main` for a newer commit at most once per 24 hours at
-startup and reinstalls in place if there is one. The check is fail-open: any network
-or install error logs one `WARN:` line to stderr and proceeds normally.
-Set `AUTOSPEC_NO_SELF_UPDATE=1` to skip the check entirely. For the full contract
-see `## Startup self-update` in `AGENTS.md`.
+Disable startup self-update:
 
-## Self-update
-
-Each installed skill supports an in-place self-update: invoke the skill with
-the literal argument `update` (case-insensitive) and it detects its harness,
-re-runs the canonical install one-liner with `--update`, shows the diff, and
-stops without entering the normal pipeline:
-
+```bash
+AUTOSPEC_NO_SELF_UPDATE=1
 ```
+
+Force an in-place suite update:
+
+```bash
+./install.sh --skill all --harness all --update
+```
+
+Or invoke any installed skill with `update`:
+
+```text
 /autospec update
-/autospec-split update
 /autospec-define update
+/autospec-split update
 /autospec-run update
 /autospec-classify update
 /autospec-listen update
@@ -99,71 +144,186 @@ stops without entering the normal pipeline:
 /autospec-stop update
 ```
 
-You can also re-run the suite installer with `--update`:
+## Model Fit and Profiles
+
+Autospec classifies implementation issues along two axes:
+
+| Axis | Labels | Meaning |
+| --- | --- | --- |
+| Context window | `ctx:32k`, `ctx:64k`, `ctx:120k` | How much staged context the issue needs. |
+| Reasoning depth | `reasoning:shallow`, `reasoning:medium`, `reasoning:deep` | How much derivation the implementation requires. |
+
+`/autospec-run --profile <name>` filters the queue against
+`~/.autospec/model-profiles.yml`, so a smaller local model can pick only issues
+that fit its limits while larger cloud models can take deeper work.
+
+Example profile config:
 
 ```bash
-./install.sh --skill all --harness all --update
+mkdir -p ~/.autospec
+cp examples/model-profiles.yml ~/.autospec/model-profiles.yml
 ```
 
-The flag forces an idempotent overwrite of every (skill, harness) pair.
+## Quality Gates
 
-## Adding Future Skills
+Autospec validates both the work items and the resulting implementation.
 
-Use one folder per skill under `skills/`. A skill must include:
+Issue quality is checked by [`scripts/lint-issue.sh`](scripts/lint-issue.sh):
 
-- `SKILL.md` with `name` and `description` frontmatter.
-- Optional `agents/openai.yaml` for UI metadata.
-- Optional `scripts/`, `references/`, and `assets/` only when they directly support the skill.
+- `## Goal` must be concrete and one sentence.
+- Acceptance criteria must be checkbox items with machine-checkable anchors.
+- The primary smoke test must be one executable line.
 
-Avoid adding generated caches, local virtual environments, private credentials, or project-specific data.
+Implementation quality is checked by
+[`scripts/lint-implementation.sh`](scripts/lint-implementation.sh):
+
+- Scope must match the issue body.
+- Required tests must be present.
+- Complexity, security, TODO, mock DB, invented config, duplicate code, and doc
+  drift rules are enforced.
+
+Shared helper scripts are installed into `~/.autospec/scripts`, so target repos
+do not need to carry this repository's `scripts/` directory.
+
+## Running Implementation
+
+Typical split workflow:
+
+```text
+/autospec-define "add OIDC support behind a feature flag"
+# review generated spec and issues
+/autospec-run --profile claude-sonnet-cloud
+```
+
+Existing-spec workflow:
+
+```text
+/autospec-split split latest spec
+/autospec-run
+```
+
+Full end-to-end workflow:
+
+```text
+/autospec "add OIDC support behind a feature flag"
+```
+
+The monitor:
+
+- Reconciles stale process heartbeats at startup.
+- Prints live queue status after scans.
+- Prints an issue summary before working on each issue.
+- Claims one ready issue at a time.
+- Opens a branch and PR for each issue.
+- Runs self-review and implementation guardian checks.
+- Admin squash-merges `auto-implement` PRs when required checks pass and review
+  is `LGTM`.
+
+## Stop and Resume
+
+Gracefully stop after the current issue:
+
+```text
+/autospec-stop --graceful
+/autospec-run stop --graceful
+```
+
+Abort at the next major step boundary:
+
+```text
+/autospec-stop --immediate
+```
+
+Check or resume:
+
+```text
+/autospec-stop --status
+/autospec-stop --resume
+```
+
+Stop state is stored in `~/.autospec/stop.flag`. Immediate stops preserve resume
+context on the issue and mark it with `paused-by-user`.
+
+## Repo Story Mode
+
+Use `/autospec-story` when you need to understand what a repository is, what has
+been built, what remains conceptual, and which sources support that conclusion.
+
+```text
+/autospec-story
+/autospec-story --output docs/autospec-story.md
+/autospec-story --since 2026-05-01 --limit 200 --output docs/autospec-story.md
+```
+
+The report reconciles:
+
+- Local specs and docs.
+- Open and closed GitHub issues.
+- Open, merged, and closed PRs.
+- Recent git history.
+- Dirty worktree state.
+
+It separates evidence from inference so the output can be used in planning,
+reviews, handoffs, or leadership updates.
+
+## Repository Layout
+
+```text
+skills/
+  <skill-name>/
+    SKILL.md              # Claude Code skill format and canonical body
+    README.md             # human-facing docs
+    opencode/agent.md     # OpenCode variant
+    codex/prompt.md       # Codex CLI variant
+    install.sh            # per-skill installer
+    uninstall.sh          # per-skill uninstaller
+
+scripts/
+  lint-issue.sh
+  lint-implementation.sh
+  autospec-stop.sh
+  autospec-watchdog.sh
+  listener-match.sh
+  sizing-check.sh
+
+examples/
+  model-profiles.yml
+  project-map.yml
+```
+
+The lock-step rule keeps multi-harness skill bodies byte-identical across
+`SKILL.md`, `opencode/agent.md`, and `codex/prompt.md`. Only frontmatter may
+differ. [`scripts/validate.sh`](scripts/validate.sh) enforces this.
 
 ## Validation
 
-If the Codex skill-creator tools are installed locally, validate a skill with:
+This repository has no language-level test runner. Validation is shell and Bats
+based:
 
 ```bash
-python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/<skill-name>
+bash scripts/validate.sh
+bats tests/unit tests/smoke
 ```
 
-Some environments require running that validator inside a virtual environment with `PyYAML` installed.
+The validation suite checks:
 
-## Examples
+- Lock-step multi-harness skill bodies.
+- Frontmatter parsing.
+- Installer and uninstaller syntax.
+- Startup self-update block consistency.
+- Shared helper installation.
+- Model-tier directives.
+- Issue and implementation lint helpers.
+- Stop-mode and guardian invariants.
+- Top-level install and uninstall smoke behavior.
 
-Reference user-config files live under [`examples/`](examples/README.md):
+## More Docs
 
-- [`examples/model-profiles.yml`](examples/model-profiles.yml) — sample profile file consumed by `/autospec-run --profile <name>`.
-- [`examples/project-map.yml`](examples/project-map.yml) — sample label-to-Projects-board map consumed by `/autospec-classify`.
-
-See [`examples/README.md`](examples/README.md) for the full schema and the auto-init behavior that lets skills seed `~/.autospec/` from these samples on first run.
-
-## Docs
-
-- [`docs/user-manual.md`](docs/user-manual.md) — narrative walkthrough of all suite skills (what each does, when to use it, example output).
-- [`docs/architecture.md`](docs/architecture.md) — single-source-of-truth for the cross-cutting design rules: concurrency model, lock-step body rule, model tier policy, trigger keyword theory.
-
-## Quality gate
-
-Every issue filed by autospec is linted by the installed `lint-issue.sh` helper before it reaches the implementation queue. Skill installers copy shared helpers into `~/.autospec/scripts` (`AUTOSPEC_SCRIPTS_DIR` overrides this path), so target repositories do not need to carry autospec's `scripts/` directory. The Phase 3 decomposer runs an adaptive retry loop (up to `MAX_LINT_RETRIES=5` attempts) that accumulates lint findings as prompt directives, skipping a child only if attempt 5 still fails. Phase 3.5 and `/autospec-classify` run a one-shot post-filing audit: issues that fail the lint get the `needs-quality-bar` label (color `#fbca04`), an idempotent `## Quality lint` block inserted into their body, and a comment with the findings. The `auto-implement` label is never removed — the operator decides whether to proceed or hand-fix. See [`docs/specs/2026-05-01-autospec-issue-quality-gate-design.md`](docs/specs/2026-05-01-autospec-issue-quality-gate-design.md) for the full contract.
-
-## Existing Specs
-
-`/autospec-split`, `/autospec`, and `/autospec-define` can split an already-written
-spec into the same EPIC + `auto-implement` child issue queue used by the normal
-pipeline. Invoke with phrases such as `split existing spec`, `split latest spec`,
-or `turn docs/specs/2026-05-01-example-design.md into GitHub issues`. When no
-path is provided, the skills choose the newest `docs/specs/*.md` by filename
-date as the default; if multiple specs are available, they ask before filing
-issues. The selected spec must already be tracked on `origin/main` so child
-issues can cite a stable GitHub URL.
-
-## Stopping a run
-
-To halt a running autospec monitor, use the `/autospec-stop` skill or the inline sub-modes:
-
-```bash
-/autospec-stop --immediate          # abort at next step boundary; commit+push+mark paused
-/autospec stop --graceful           # finish current issue then exit monitor
-/autospec-run stop --status         # check current stop sentinel state
-```
-
-All three paths route through the installed `autospec-stop.sh` helper in `~/.autospec/scripts` (or `AUTOSPEC_SCRIPTS_DIR`). Use `--resume` to strip the `paused-by-user` label from paused issues and restart the queue. See [`AGENTS.md` § Stop mode authority](AGENTS.md) for the full contract.
+- [`docs/user-manual.md`](docs/user-manual.md) - narrative walkthrough of the
+  suite skills.
+- [`docs/architecture.md`](docs/architecture.md) - concurrency model,
+  lock-step rule, model tier policy, and trigger keyword theory.
+- [`examples/README.md`](examples/README.md) - config file schemas for model
+  profiles and project board mapping.
+- [`AGENTS.md`](AGENTS.md) - repository operating contract and merge authority
+  rules.

@@ -38,6 +38,7 @@ _helper_path() { printf '%s/.autospec/scripts/%s' "$FAKE_HOME" "$1"; }
 @test "install --skill all places every suite skill body in each harness" {
     run bash "$INSTALL" --skill all --harness all
     [ "$status" -eq 0 ]
+    [[ "$output" != *"Would you like to star"* ]]
     for s in $SKILLS; do
         [ -f "$(_claude_path "$s")" ]
         [ -f "$(_opencode_path "$s")" ]
@@ -49,6 +50,12 @@ _helper_path() { printf '%s/.autospec/scripts/%s' "$FAKE_HOME" "$1"; }
             *.sh) [ -x "$(_helper_path "$h")" ] ;;
         esac
     done
+}
+
+@test "install --skill all skips adoption star prompt when opted out" {
+    run env AUTOSPEC_NO_STAR_PROMPT=1 bash "$INSTALL" --skill all --harness all
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Would you like to star"* ]]
 }
 
 # ---- uninstall cleans up -------------------------------------------------
