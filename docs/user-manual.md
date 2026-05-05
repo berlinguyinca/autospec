@@ -69,18 +69,18 @@ external daemon, or keep refining? [run / defer / refine] (default: defer)
 Issues are ready. Your external monitor will pick them up. Exiting.
 ```
 
-## autosplit
+## autospec-split
 
 ### What it does
 
-`/autosplit` is the existing-spec shortcut: it selects a tracked
+`/autospec-split` is the existing-spec shortcut: it selects a tracked
 `docs/specs/*.md` file, skips Phases 1–2, decomposes that spec into an
 EPIC plus `auto-implement` child issues, runs Phase 3.5 review-and-label,
 then stops with the `/autospec-run` handoff.
 
 ### When to use it
 
-Use `/autosplit` when the design spec already exists on `origin/main`
+Use `/autospec-split` when the design spec already exists on `origin/main`
 and you only need to materialize it into GitHub issues. Use
 `/autospec-define` instead when the spec still needs to be written or
 landed.
@@ -88,7 +88,7 @@ landed.
 ### Example output
 
 ```
-/autosplit split latest spec
+/autospec-split split latest spec
 selected docs/specs/2026-05-01-example-design.md
 Phase 3: decompose — 6 child issues filed (#130…#135)
 Phase 3.5: classify — labeled with ctx:* and reasoning:*

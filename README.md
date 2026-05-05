@@ -2,7 +2,7 @@
 
 Multi-harness skill suite for shipping a feature end-to-end across many GitHub
 issues — design spec → decomposed `auto-implement` queue → autonomous
-implementation loop with admin auto-merge — split across six cooperating
+implementation loop with admin auto-merge — split across focused workflow
 skills so each invocation runs only the phases you need. Works on **Claude
 Code**, **OpenCode**, and **Codex CLI**.
 
@@ -11,11 +11,12 @@ Code**, **OpenCode**, and **Codex CLI**.
 | Skill | Phases | Purpose |
 | --- | --- | --- |
 | [`autospec`](skills/autospec/README.md) | 0–6 (incl. **Phase 3.5**) | Full pipeline. Bootstrap repo if missing, design spec, decompose into issues, **review-and-label children with `ctx:*`/`reasoning:*` rubric (Phase 3.5)**, then run autonomous monitor with admin auto-merge. Also supports splitting an existing tracked `docs/specs/*.md` into issues. |
-| [`autosplit`](skills/autosplit/README.md) | 3–3.5 | Shortcut for splitting an existing tracked `docs/specs/*.md` into the same EPIC plus `auto-implement` child issue queue. Runs startup self-update before selecting the spec. |
+| [`autospec-split`](skills/autospec-split/README.md) | 3–3.5 | Shortcut for splitting an existing tracked `docs/specs/*.md` into the same EPIC plus `auto-implement` child issue queue. Runs startup self-update before selecting the spec. |
 | [`autospec-define`](skills/autospec-define/README.md) | 0–3.5 | Planning half. Stops after Phase 3.5 review-and-label step and hands off to `/autospec-run`. Also supports splitting an existing tracked `docs/specs/*.md` into issues. |
 | [`autospec-run`](skills/autospec-run/README.md) | 4–6 | Implementation half. Picks up the populated `auto-implement` queue and runs the autonomous monitor. Supports `--profile <name>` filtering against `~/.autospec/model-profiles.yml`. |
 | [`autospec-classify`](skills/autospec-classify/README.md) | retro | Standalone retro-labeler for already-existing `auto-implement` issues; applies the Phase 3.5 rubric to a queue that pre-dates Phase 3.5. |
 | [`autospec-listen`](skills/autospec-listen/README.md) | passive | Passive listener for chat-driven issue / spec triggers. On a phrase like "file an issue" or "write a spec", drafts a GitHub issue body for confirmation or routes to `/autospec-define`. |
+| [`autospec-stop`](skills/autospec-stop/README.md) | control | Stop/resume utility for active autospec monitors. Supports graceful, immediate, status, and resume flows through the shared stop sentinel. |
 
 Cost-aware **two-tier** subagent dispatch: spec/research/decompose/review subagents use the top model with extended thinking (Tier A — Claude Code: `opus` + `ultrathink`; Codex: top GPT + `reasoning_effort=high`; OpenCode: top task tier); implementer + LGTM-review subagents use the cheaper model with medium thinking (Tier B — Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark`; OpenCode: smaller task tier). Both tiers fall back UP on unavailability. The orchestrator runs whatever model you invoked the skill with — invoke it on top tier for best spec quality. See `AGENTS.md` for the full policy.
 
@@ -56,7 +57,7 @@ Or pick a subset:
 
 ```bash
 ./install.sh --skill autospec-run --harness claude   # one skill, one harness
-./install.sh --skill autosplit    --harness all      # install the split shortcut
+./install.sh --skill autospec-split    --harness all      # install the split shortcut
 ./install.sh --skill all          --harness opencode # every skill, one harness
 ./install.sh --skill autospec     --harness all      # one skill, every harness
 ./uninstall.sh --skill all --harness all             # symmetric uninstall
@@ -73,7 +74,7 @@ Honors `CLAUDE_CONFIG_DIR`, `OPENCODE_CONFIG_DIR`, and `CODEX_HOME` if set.
 
 ### Auto-update
 
-Each `/autospec*` skill checks `main` for a newer commit at most once per 24 hours at
+Each installed suite skill checks `main` for a newer commit at most once per 24 hours at
 startup and reinstalls in place if there is one. The check is fail-open: any network
 or install error logs one `WARN:` line to stderr and proceeds normally.
 Set `AUTOSPEC_NO_SELF_UPDATE=1` to skip the check entirely. For the full contract
@@ -88,10 +89,12 @@ stops without entering the normal pipeline:
 
 ```
 /autospec update
-/autosplit update
+/autospec-split update
 /autospec-define update
 /autospec-run update
 /autospec-classify update
+/autospec-listen update
+/autospec-stop update
 ```
 
 You can also re-run the suite installer with `--update`:
@@ -142,14 +145,14 @@ Every issue filed by autospec is linted by `scripts/lint-issue.sh` before it rea
 
 ## Existing Specs
 
-`/autospec` and `/autospec-define` can split an already-written spec into the
-same EPIC + `auto-implement` child issue queue used by the normal pipeline.
-Invoke with phrases such as `split existing spec`, `split latest spec`, or
-`turn docs/specs/2026-05-01-example-design.md into GitHub issues`. When no path
-is provided, the skills choose the newest `docs/specs/*.md` by filename date as
-the default; if multiple specs are available, they ask before filing issues.
-The selected spec must already be tracked on `origin/main` so child issues can
-cite a stable GitHub URL.
+`/autospec-split`, `/autospec`, and `/autospec-define` can split an already-written
+spec into the same EPIC + `auto-implement` child issue queue used by the normal
+pipeline. Invoke with phrases such as `split existing spec`, `split latest spec`,
+or `turn docs/specs/2026-05-01-example-design.md into GitHub issues`. When no
+path is provided, the skills choose the newest `docs/specs/*.md` by filename
+date as the default; if multiple specs are available, they ask before filing
+issues. The selected spec must already be tracked on `origin/main` so child
+issues can cite a stable GitHub URL.
 
 ## Stopping a run
 

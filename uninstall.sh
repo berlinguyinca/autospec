@@ -12,7 +12,7 @@
 #   ./uninstall.sh --help                          # show this help
 #
 # Flags:
-#   --skill   one of: autospec | autosplit | autospec-define | autospec-run | autospec-classify | autospec-listen | all
+#   --skill   one of: autospec | autospec-split | autospec-define | autospec-run | autospec-classify | autospec-listen | all
 #             (default: all)
 #   --harness one of: claude | opencode | codex | all
 #             (default: all)
@@ -24,7 +24,7 @@
 
 set -eu
 
-ALL_SKILLS="autospec autosplit autospec-define autospec-run autospec-classify autospec-listen autospec-stop"
+ALL_SKILLS="autospec autospec-split autospec-define autospec-run autospec-classify autospec-listen autospec-stop"
 ALL_HARNESSES="claude opencode codex"
 
 SKILL_ARG="all"
@@ -67,7 +67,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "$SKILL_ARG" in
-    all|autospec|autosplit|autospec-define|autospec-run|autospec-classify|autospec-listen|autospec-stop) ;;
+    all|autospec|autospec-split|autospec-define|autospec-run|autospec-classify|autospec-listen|autospec-stop) ;;
     *)
         err "invalid --skill: $SKILL_ARG"
         exit 2
