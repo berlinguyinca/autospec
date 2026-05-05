@@ -374,6 +374,21 @@ check_phase4_issue_start_summary() {
     done
 }
 
+# Phase 4 cascade latency: after `process(ISSUE)` returns, the monitor must
+# immediately re-enter candidate selection. Sleeping after a completed issue
+# delays unblocked follow-up issues and slows recovery from failures.
+check_phase4_immediate_next_issue_pickup() {
+    info "phase4 immediate next-issue pickup: autospec + autospec-run trio"
+    for s in autospec autospec-run; do
+        for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
+            grep -q 'Immediate next-issue pickup: NO SLEEP after process(ISSUE)' "$f" \
+                || fail "$f missing immediate next-issue pickup directive"
+            grep -q 'fresh queue scan can pick any issue unblocked' "$f" \
+                || fail "$f missing fresh queue scan/unblocked issue rationale"
+        done
+    done
+}
+
 # Governance copy: the listener lifecycle and anti-loop guardrails must be
 # documented in AGENTS.md, and the listener skill must appear in both the
 # top-level README.md and SKILLS.md skill index. Spec §6.1, §7.1.
@@ -447,6 +462,7 @@ main() {
     check_lint_implementation_helpers
     check_phase4_guardian_block_lockstep
     check_phase4_issue_start_summary
+    check_phase4_immediate_next_issue_pickup
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.

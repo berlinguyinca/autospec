@@ -610,7 +610,9 @@ Then launch a **background subagent** with this prompt verbatim:
 >   echo "[monitor] smoke: ${ISSUE_SMOKE:-<not provided>}"
 >   echo "[monitor] scope: ${ISSUE_SCOPE:-<not provided>}"
 >   process(ISSUE)   # foreground subagent — see template below
->   # NO SLEEP — go straight to the next iteration; the merge may have unblocked another issue
+>   # Immediate next-issue pickup: NO SLEEP after process(ISSUE). Re-enter the top
+>   # of this loop immediately so the fresh queue scan can pick any issue unblocked
+>   # by the merge or failure cleanup that just completed.
 > ```
 >
 > `process(ISSUE)` dispatches a **foreground subagent** (wait for return) with this prompt:
