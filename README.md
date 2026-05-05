@@ -141,7 +141,7 @@ See [`examples/README.md`](examples/README.md) for the full schema and the auto-
 
 ## Quality gate
 
-Every issue filed by autospec is linted by `scripts/lint-issue.sh` before it reaches the implementation queue. The Phase 3 decomposer runs an adaptive retry loop (up to `MAX_LINT_RETRIES=5` attempts) that accumulates lint findings as prompt directives, skipping a child only if attempt 5 still fails. Phase 3.5 and `/autospec-classify` run a one-shot post-filing audit: issues that fail the lint get the `needs-quality-bar` label (color `#fbca04`), an idempotent `## Quality lint` block inserted into their body, and a comment with the findings. The `auto-implement` label is never removed — the operator decides whether to proceed or hand-fix. See [`docs/specs/2026-05-01-autospec-issue-quality-gate-design.md`](docs/specs/2026-05-01-autospec-issue-quality-gate-design.md) for the full contract.
+Every issue filed by autospec is linted by the installed `lint-issue.sh` helper before it reaches the implementation queue. Skill installers copy shared helpers into `~/.autospec/scripts` (`AUTOSPEC_SCRIPTS_DIR` overrides this path), so target repositories do not need to carry autospec's `scripts/` directory. The Phase 3 decomposer runs an adaptive retry loop (up to `MAX_LINT_RETRIES=5` attempts) that accumulates lint findings as prompt directives, skipping a child only if attempt 5 still fails. Phase 3.5 and `/autospec-classify` run a one-shot post-filing audit: issues that fail the lint get the `needs-quality-bar` label (color `#fbca04`), an idempotent `## Quality lint` block inserted into their body, and a comment with the findings. The `auto-implement` label is never removed — the operator decides whether to proceed or hand-fix. See [`docs/specs/2026-05-01-autospec-issue-quality-gate-design.md`](docs/specs/2026-05-01-autospec-issue-quality-gate-design.md) for the full contract.
 
 ## Existing Specs
 
@@ -164,4 +164,4 @@ To halt a running autospec monitor, use the `/autospec-stop` skill or the inline
 /autospec-run stop --status         # check current stop sentinel state
 ```
 
-All three paths route through `scripts/autospec-stop.sh`. Use `--resume` to strip the `paused-by-user` label from paused issues and restart the queue. See [`AGENTS.md` § Stop mode authority](AGENTS.md) for the full contract.
+All three paths route through the installed `autospec-stop.sh` helper in `~/.autospec/scripts` (or `AUTOSPEC_SCRIPTS_DIR`). Use `--resume` to strip the `paused-by-user` label from paused issues and restart the queue. See [`AGENTS.md` § Stop mode authority](AGENTS.md) for the full contract.

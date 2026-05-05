@@ -18,6 +18,7 @@ setup() {
     export CODEX_HOME="$FAKE_HOME/.codex"
 
     SKILLS="autospec autospec-split autospec-define autospec-run autospec-classify autospec-listen autospec-stop"
+    HELPERS="autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh"
 }
 
 teardown() {
@@ -30,6 +31,7 @@ teardown() {
 _claude_path() { printf '%s/.claude/skills/%s/SKILL.md' "$FAKE_HOME" "$1"; }
 _opencode_path() { printf '%s/.config/opencode/agent/%s.md' "$FAKE_HOME" "$1"; }
 _codex_path() { printf '%s/.codex/prompts/%s.md' "$FAKE_HOME" "$1"; }
+_helper_path() { printf '%s/.autospec/scripts/%s' "$FAKE_HOME" "$1"; }
 
 # ---- install all skills --------------------------------------------------
 
@@ -40,6 +42,12 @@ _codex_path() { printf '%s/.codex/prompts/%s.md' "$FAKE_HOME" "$1"; }
         [ -f "$(_claude_path "$s")" ]
         [ -f "$(_opencode_path "$s")" ]
         [ -f "$(_codex_path "$s")" ]
+    done
+    for h in $HELPERS; do
+        [ -f "$(_helper_path "$h")" ]
+        case "$h" in
+            *.sh) [ -x "$(_helper_path "$h")" ] ;;
+        esac
     done
 }
 
@@ -70,5 +78,11 @@ _codex_path() { printf '%s/.codex/prompts/%s.md' "$FAKE_HOME" "$1"; }
         [ -f "$(_claude_path "$s")" ]
         [ -f "$(_opencode_path "$s")" ]
         [ -f "$(_codex_path "$s")" ]
+    done
+    for h in $HELPERS; do
+        [ -f "$(_helper_path "$h")" ]
+        case "$h" in
+            *.sh) [ -x "$(_helper_path "$h")" ] ;;
+        esac
     done
 }

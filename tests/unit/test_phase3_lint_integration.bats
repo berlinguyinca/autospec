@@ -2,7 +2,7 @@
 # tests/unit/test_phase3_lint_integration.bats — grep assertions verifying that
 # every trio file in skills/autospec, skills/autospec-define, and
 # skills/autospec-classify mentions the Phase 3 lint loop and Phase 3.5 audit
-# keywords (scripts/lint-issue.sh, needs-quality-bar, ## Quality lint).
+# keywords (installed lint-issue.sh helper path, needs-quality-bar, ## Quality lint).
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -10,16 +10,16 @@ setup() {
 
 # ── skills/autospec ────────────────────────────────────────────────────────────
 
-@test "autospec Phase 3 trio: SKILL.md mentions scripts/lint-issue.sh" {
-    grep -q 'scripts/lint-issue.sh' "$REPO_ROOT/skills/autospec/SKILL.md"
+@test "autospec Phase 3 trio: SKILL.md mentions installed lint-issue.sh" {
+    grep -q 'AUTOSPEC_SCRIPTS_DIR.*lint-issue.sh' "$REPO_ROOT/skills/autospec/SKILL.md"
 }
 
-@test "autospec Phase 3 trio: codex/prompt.md mentions scripts/lint-issue.sh" {
-    grep -q 'scripts/lint-issue.sh' "$REPO_ROOT/skills/autospec/codex/prompt.md"
+@test "autospec Phase 3 trio: codex/prompt.md mentions installed lint-issue.sh" {
+    grep -q 'AUTOSPEC_SCRIPTS_DIR.*lint-issue.sh' "$REPO_ROOT/skills/autospec/codex/prompt.md"
 }
 
-@test "autospec Phase 3 trio: opencode/agent.md mentions scripts/lint-issue.sh" {
-    grep -q 'scripts/lint-issue.sh' "$REPO_ROOT/skills/autospec/opencode/agent.md"
+@test "autospec Phase 3 trio: opencode/agent.md mentions installed lint-issue.sh" {
+    grep -q 'AUTOSPEC_SCRIPTS_DIR.*lint-issue.sh' "$REPO_ROOT/skills/autospec/opencode/agent.md"
 }
 
 @test "autospec Phase 3.5 trio: SKILL.md mentions needs-quality-bar" {
@@ -40,16 +40,16 @@ setup() {
 
 # ── skills/autospec-define ────────────────────────────────────────────────────
 
-@test "autospec-define Phase 3 trio: SKILL.md mentions scripts/lint-issue.sh" {
-    grep -q 'scripts/lint-issue.sh' "$REPO_ROOT/skills/autospec-define/SKILL.md"
+@test "autospec-define Phase 3 trio: SKILL.md mentions installed lint-issue.sh" {
+    grep -q 'AUTOSPEC_SCRIPTS_DIR.*lint-issue.sh' "$REPO_ROOT/skills/autospec-define/SKILL.md"
 }
 
-@test "autospec-define Phase 3 trio: codex/prompt.md mentions scripts/lint-issue.sh" {
-    grep -q 'scripts/lint-issue.sh' "$REPO_ROOT/skills/autospec-define/codex/prompt.md"
+@test "autospec-define Phase 3 trio: codex/prompt.md mentions installed lint-issue.sh" {
+    grep -q 'AUTOSPEC_SCRIPTS_DIR.*lint-issue.sh' "$REPO_ROOT/skills/autospec-define/codex/prompt.md"
 }
 
-@test "autospec-define Phase 3 trio: opencode/agent.md mentions scripts/lint-issue.sh" {
-    grep -q 'scripts/lint-issue.sh' "$REPO_ROOT/skills/autospec-define/opencode/agent.md"
+@test "autospec-define Phase 3 trio: opencode/agent.md mentions installed lint-issue.sh" {
+    grep -q 'AUTOSPEC_SCRIPTS_DIR.*lint-issue.sh' "$REPO_ROOT/skills/autospec-define/opencode/agent.md"
 }
 
 @test "autospec-define Phase 3.5 trio: SKILL.md mentions needs-quality-bar" {
@@ -70,8 +70,8 @@ setup() {
 
 # ── skills/autospec-classify ──────────────────────────────────────────────────
 
-@test "autospec-classify audit trio: SKILL.md mentions scripts/lint-issue.sh" {
-    grep -q 'scripts/lint-issue.sh' "$REPO_ROOT/skills/autospec-classify/SKILL.md"
+@test "autospec-classify audit trio: SKILL.md mentions installed lint-issue.sh" {
+    grep -q 'AUTOSPEC_SCRIPTS_DIR.*lint-issue.sh' "$REPO_ROOT/skills/autospec-classify/SKILL.md"
 }
 
 @test "autospec-classify audit trio: SKILL.md mentions needs-quality-bar" {
@@ -92,8 +92,8 @@ setup() {
 
 # ── cross-skill lock-step parity ──────────────────────────────────────────────
 
-@test "lock-step: all 3 autospec-define harness files mention scripts/lint-issue.sh" {
-    COUNT=$(grep -rl 'scripts/lint-issue.sh' \
+@test "lock-step: all 3 autospec-define harness files mention installed lint-issue.sh" {
+    COUNT=$(grep -rl 'AUTOSPEC_SCRIPTS_DIR.*lint-issue.sh' \
         "$REPO_ROOT/skills/autospec-define/SKILL.md" \
         "$REPO_ROOT/skills/autospec-define/codex/prompt.md" \
         "$REPO_ROOT/skills/autospec-define/opencode/agent.md" | wc -l | tr -d ' ')

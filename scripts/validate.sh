@@ -161,6 +161,25 @@ check_codex_skills_install() {
     done
 }
 
+# Every per-skill installer must install shared helper scripts into
+# ~/.autospec/scripts so runtime commands work in target repositories that do
+# not contain this repo's scripts/ directory.
+check_shared_script_install() {
+    info "shared helper install: all skills"
+    helpers="autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh"
+    for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-stop; do
+        f="skills/$s/install.sh"
+        grep -q 'install_shared_scripts' "$f" \
+            || fail "$f missing install_shared_scripts function/call"
+        grep -q '\.autospec/scripts' "$f" \
+            || fail "$f missing ~/.autospec/scripts install target"
+        for helper in $helpers; do
+            grep -q "$helper" "$f" \
+                || fail "$f missing shared helper install entry: $helper"
+        done
+    done
+}
+
 # Two-tier subagent model selection invariants: every dispatching SKILL.md
 # must include the literal "**Model tier:**" directive at least once, every
 # such directive must specify either "Tier A (spec work)" or
@@ -390,6 +409,7 @@ main() {
     check_startup_preflight
     check_stop_mode_section
     check_codex_skills_install
+    check_shared_script_install
 
     check_agents_md_subagent_section
     check_autospec_listen_files
