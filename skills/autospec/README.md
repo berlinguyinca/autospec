@@ -73,11 +73,20 @@ pipeline runs from a single user invocation — the only required interactive st
 the optional repo-bootstrap question (name, visibility, owner) when no GitHub remote
 is detected. Generated child issues are pre-staged for 32B-class local LLMs (Ollama qwen3-style on Mac/Linux), not just cloud agents — file pointers, section anchors, checkbox AC, and a single Primary smoke test per inner loop.
 
+Existing spec mode skips investigation and design when a tracked
+`docs/specs/*.md` already exists. Invoke with `split existing spec`,
+`split latest spec`, or an explicit path such as
+`turn docs/specs/2026-05-01-example-design.md into GitHub issues`. If multiple
+specs are available and no path is supplied, autospec asks which one to split
+before filing issues.
+
 ## Why use it
 
 Reach for this skill when:
 
 - You have a non-trivial feature that decomposes into multiple sequenced PRs.
+- You already have a `docs/specs/*.md` design and want the normal EPIC plus
+  `auto-implement` issue queue generated from it.
 - You want the agent to ship the whole thing autonomously, not just plan it.
 - You'd rather review merged PRs than babysit a chat session.
 - You want repo bootstrap (`gh repo create`, scaffold, push) handled automatically

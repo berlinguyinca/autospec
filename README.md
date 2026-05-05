@@ -10,8 +10,8 @@ Code**, **OpenCode**, and **Codex CLI**.
 
 | Skill | Phases | Purpose |
 | --- | --- | --- |
-| [`autospec`](skills/autospec/README.md) | 0–6 (incl. **Phase 3.5**) | Full pipeline. Bootstrap repo if missing, design spec, decompose into issues, **review-and-label children with `ctx:*`/`reasoning:*` rubric (Phase 3.5)**, then run autonomous monitor with admin auto-merge. |
-| [`autospec-define`](skills/autospec-define/README.md) | 0–3.5 | Planning half. Stops after Phase 3.5 review-and-label step and hands off to `/autospec-run`. |
+| [`autospec`](skills/autospec/README.md) | 0–6 (incl. **Phase 3.5**) | Full pipeline. Bootstrap repo if missing, design spec, decompose into issues, **review-and-label children with `ctx:*`/`reasoning:*` rubric (Phase 3.5)**, then run autonomous monitor with admin auto-merge. Also supports splitting an existing tracked `docs/specs/*.md` into issues. |
+| [`autospec-define`](skills/autospec-define/README.md) | 0–3.5 | Planning half. Stops after Phase 3.5 review-and-label step and hands off to `/autospec-run`. Also supports splitting an existing tracked `docs/specs/*.md` into issues. |
 | [`autospec-run`](skills/autospec-run/README.md) | 4–6 | Implementation half. Picks up the populated `auto-implement` queue and runs the autonomous monitor. Supports `--profile <name>` filtering against `~/.autospec/model-profiles.yml`. |
 | [`autospec-classify`](skills/autospec-classify/README.md) | retro | Standalone retro-labeler for already-existing `auto-implement` issues; applies the Phase 3.5 rubric to a queue that pre-dates Phase 3.5. |
 | [`autospec-listen`](skills/autospec-listen/README.md) | passive | Passive listener for chat-driven issue / spec triggers. On a phrase like "file an issue" or "write a spec", drafts a GitHub issue body for confirmation or routes to `/autospec-define`. |
@@ -136,6 +136,17 @@ See [`examples/README.md`](examples/README.md) for the full schema and the auto-
 ## Quality gate
 
 Every issue filed by autospec is linted by `scripts/lint-issue.sh` before it reaches the implementation queue. The Phase 3 decomposer runs an adaptive retry loop (up to `MAX_LINT_RETRIES=5` attempts) that accumulates lint findings as prompt directives, skipping a child only if attempt 5 still fails. Phase 3.5 and `/autospec-classify` run a one-shot post-filing audit: issues that fail the lint get the `needs-quality-bar` label (color `#fbca04`), an idempotent `## Quality lint` block inserted into their body, and a comment with the findings. The `auto-implement` label is never removed — the operator decides whether to proceed or hand-fix. See [`docs/specs/2026-05-01-autospec-issue-quality-gate-design.md`](docs/specs/2026-05-01-autospec-issue-quality-gate-design.md) for the full contract.
+
+## Existing Specs
+
+`/autospec` and `/autospec-define` can split an already-written spec into the
+same EPIC + `auto-implement` child issue queue used by the normal pipeline.
+Invoke with phrases such as `split existing spec`, `split latest spec`, or
+`turn docs/specs/2026-05-01-example-design.md into GitHub issues`. When no path
+is provided, the skills choose the newest `docs/specs/*.md` by filename date as
+the default; if multiple specs are available, they ask before filing issues.
+The selected spec must already be tracked on `origin/main` so child issues can
+cite a stable GitHub URL.
 
 ## Stopping a run
 

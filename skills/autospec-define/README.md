@@ -5,6 +5,11 @@ Planning half of the **autospec** suite. Runs Phases 0–3 of the autospec pipel
 then stops with a handoff message pointing the user at `/autospec-run --profile <name>`
 to begin autonomous implementation.
 
+It can also split an already-written, tracked `docs/specs/*.md` into the same
+EPIC plus `auto-implement` child issue queue. Invoke with `split existing spec`,
+`split latest spec`, or an explicit path such as
+`turn docs/specs/2026-05-01-example-design.md into GitHub issues`.
+
 Works on **Claude Code**, **OpenCode**, and **Codex CLI**.
 
 ## Quick install
@@ -40,6 +45,11 @@ cd skills/autospec-define
   testing), written to `docs/specs/YYYY-MM-DD-<topic>-design.md`.
 - **Phase 3** — Foreground subagent decomposes the spec into an EPIC umbrella plus
   N self-contained children pre-staged for 32B-class local LLMs.
+
+In existing spec mode, the skill verifies the selected spec is present on
+`origin/main`, skips Phases 1–2, then runs Phase 3 and Phase 3.5 against that
+spec. If multiple specs are available and no path is supplied, it asks which
+spec to split before filing issues.
 
 When Phase 3 completes the skill stops and prints:
 
@@ -83,6 +93,8 @@ Or re-run the per-skill installer with `--update`:
 
 ```
 /autospec-define Build a Slack bot that posts a daily standup digest
+/autospec-define split latest spec
+/autospec-define turn docs/specs/2026-05-01-example-design.md into GitHub issues
 ```
 
 (Replace `/` with `@` for OpenCode, or invoke through Codex CLI as a slash command.)

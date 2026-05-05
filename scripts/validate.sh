@@ -352,6 +352,23 @@ check_governance_headings() {
         || fail "SKILLS.md: missing 'autospec-listen' reference"
 }
 
+# Existing spec mode invariants: autospec and autospec-define must expose the
+# shortcut that skips Phase 1/2 and reuses Phase 3 + Phase 3.5 for a tracked
+# docs/specs/*.md file. Enforce all trio files so harness variants cannot drift.
+check_existing_spec_mode() {
+    info "existing-spec mode: autospec + autospec-define"
+    for s in autospec autospec-define; do
+        for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
+            grep -q '^## Existing spec mode' "$f" \
+                || fail "$f missing '## Existing spec mode' section"
+            grep -q 'git cat-file -e origin/main:<spec-path>' "$f" \
+                || fail "$f missing origin/main selected-spec verification"
+            grep -q 'If Existing spec mode is active' "$f" \
+                || fail "$f missing Phase 3 selected-spec handoff"
+        done
+    done
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -378,6 +395,7 @@ main() {
     check_autospec_listen_files
     check_examples_dir
     check_governance_headings
+    check_existing_spec_mode
     check_lint_issue_helpers
     check_lint_implementation_helpers
     check_phase4_guardian_block_lockstep

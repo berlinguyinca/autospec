@@ -4,6 +4,11 @@
 Take the following feature request and ship it through the full pipeline:
 **bootstrap repo (if missing) → investigate → design → spec → decomposed GitHub issues → autonomous implementation with auto-merge → periodic status updates → final report.**
 
+If the request asks to split, materialize, roadmap, decompose, or turn an
+already-written spec into GitHub issues, use **Existing spec mode** below:
+select a tracked `docs/specs/*.md` file, skip Phases 1-2, run Phase 3 and
+Phase 3.5 against that spec, then continue to the Phase 3 pre-impl gate.
+
 Manage your own context — never exceed 60%. Delegate to subagents whenever your harness supports it; do not investigate, write code, or design directly in the main conversation when a subagent can do it.
 
 ## Startup self-update
@@ -91,6 +96,48 @@ mode and does NOT run the normal pipeline. When dispatching, pass any
 
 {FEATURE_DESCRIPTION}
 
+
+## Existing spec mode
+
+Use this mode when the request asks to split, materialize, roadmap, decompose,
+or turn an existing spec into GitHub issues. Examples:
+`split existing spec`, `split latest spec`, `turn this spec into GitHub issues`,
+`roadmap docs/specs/2026-05-01-example-design.md`, or
+`materialize the newest spec`.
+
+Do not run Phase 1 or Phase 2 in this mode. The design already exists; this
+mode is a shortcut into Phase 3 using the same issue decomposition and Phase 3.5
+classification path as the normal pipeline.
+
+1. **Verify repo.** Run the Phase 0 repo probes. If the current directory is
+   not a git repo with a GitHub remote, use Phase 0 bootstrap before selecting
+   a spec.
+2. **Resolve candidate specs.**
+   - If the request contains an explicit `docs/specs/*.md` path, use that file.
+   - Otherwise list tracked and untracked local files matching `docs/specs/*.md`.
+   - Sort by ISO date in the filename (`YYYY-MM-DD-...`) descending. For files
+     without a date prefix, sort after dated files by filesystem modified time.
+   - The first item is the default "newest" spec.
+3. **Ask on ambiguity.**
+   - If zero specs exist, stop with: `No docs/specs/*.md files found. Create or
+     point me at a spec before running existing spec mode.`
+   - If exactly one spec exists and no explicit path was provided, use it.
+   - If more than one spec exists and no explicit path was provided, ask the user
+     to confirm the default newest spec or choose another path. Show at most the
+     five newest candidates with relative paths. Do not file issues until the
+     user answers.
+4. **Verify selected spec is filed.**
+   - The selected path must be under `docs/specs/` and end in `.md`.
+   - The selected file must be tracked on `origin/main` before Phase 3, so child
+     issues can cite a stable GitHub URL. Verify with:
+     `git fetch origin` and `git cat-file -e origin/main:<spec-path>`.
+   - If the selected file is missing from `origin/main`, stop and tell the user:
+     `Selected spec is not on origin/main yet: <spec-path>. Land the spec first,
+     or run normal /autospec so Phase 2 can create and merge the spec PR.`
+5. **Continue at Phase 3.** Capture `{selected_spec_path}` and its GitHub URL as
+   `https://github.com/{repo}/blob/main/{selected_spec_path}`. Run Phase 3 and
+   Phase 3.5 using that selected spec. Then proceed to the existing Phase 3
+   pre-impl gate.
 
 ## Required capabilities & harness adapter
 
@@ -180,16 +227,21 @@ For an existing repo, land the spec via a short-lived PR so CI can validate it:
 
 ## Phase 3 — Decompose into linked GitHub issues (delegate)
 
+If Existing spec mode is active, use `{selected_spec_path}` and its GitHub URL.
+Otherwise use the spec path written and merged in Phase 2.
+
 Dispatch a **foreground subagent** with this prompt (substitute the spec path and `{repo}`):
 
 > **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
+>
+> Read the selected design spec at `<spec-path>` (`<spec-github-url>`) and split it into linked GitHub issues for {repo}.
 >
 > Create labels (idempotent with `--force`): `auto-implement` (#0e8a16), `epic` (#b60205), plus any domain labels the spec calls for. Then create exactly N issues — first an EPIC umbrella (no `auto-implement` label, just `epic` + domain), then N-1 children all carrying `auto-implement`. After creating children, edit the umbrella body with a checklist linking them. Return JSON: `{umbrella, children:[…], labels_created:[…]}`. Use `gh` CLI only. Do NOT modify code. Do NOT push branches. Do NOT create PRs.
 >
 > Each child body must be a **self-contained mini-spec** sized for execution by a 32B-class local LLM, with these sections in order:
 >
 > - **Goal** — 1 sentence outcome.
-> - **Source spec** — relative path + GitHub URL of the design doc this issue derives from (if any).
+> - **Source spec** — `<spec-path>` + `<spec-github-url>` of the design doc this issue derives from.
 > - **Files to read first** — 3–7 entries. Each entry is one of: a path with **section anchors** (do not say "read the whole spec"), the closest existing-file analogue to mirror, the test file or fixture pattern to follow, or a dependency issue with a one-line summary so the LLM doesn't fetch its body. Bias toward sectional anchors over full files.
 > - **Local-LLM execution notes** — one-line context-window recommendation (`32k routine`, `64k stretch`, or `split into N subagents along <criterion>` for issues exceeding ~30k tokens of staged context) and whether single-pass or subagent-split is recommended.
 > - **Implementation scope** and **Out of scope** as separate subsections (replaces the prior single "Scope" section).
