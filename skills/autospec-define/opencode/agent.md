@@ -138,6 +138,26 @@ This workflow assumes five capabilities. Map each one to your harness's actual t
 **Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches use a **two-tier policy**: Tier A (top model + extended thinking) for spec work (research, decompose, review/label); Tier B (cheaper model + medium thinking) for implementation work (Phase 4 implementer + LGTM review — not used by this skill). The orchestrator keeps the user's invoked model. Fall back UP the tier on unavailability.
 
 
+## Harness detection (run once at skill start, before Phase 0)
+
+Detect your harness by checking available tools before any phase:
+
+1. **Claude Code** — the `Agent` tool with a `subagent_type` parameter is available.
+   - `TIER_A` = `opus` + `ultrathink`  (model ID: claude-opus-4-7)
+   - `TIER_B` = `sonnet`               (model ID: claude-sonnet-4-6)
+
+2. **OpenCode** — a `task` tool with model/tier configuration is available (no `subagent_type`).
+   - `TIER_A` = top-tier task model + high reasoning
+   - `TIER_B` = smaller-tier task model + medium reasoning
+
+3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available; `apply_patch` is the primary edit tool.
+   - `TIER_A` = current top GPT model + `reasoning_effort=high`
+   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+
+**Fallback rule:** If `TIER_B` is not available in your harness (model unknown, tool absent, or tool call returns an error for that model), silently use `TIER_A` instead. Never ask the user.
+
+Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B" reference below resolves to these harness-specific values.
+
 ## Phase 0 — Bootstrap repo (if missing)
 
 Verify `gh auth status` is authenticated. If not, ask the user to run `gh auth login` and stop until they confirm.
@@ -177,7 +197,7 @@ If a repo already exists (cwd is in a git tree with a `github.com:<owner>/<name>
 
 Spawn a **read-only research subagent** to map relevant files, schema, services. Get back a 300-word summary with file paths and line numbers. Do NOT read files directly from the main thread.
 
-> **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
+> **Model tier:** `TIER_A` (spec work) — top model with extended thinking; resolved at startup.
 
 If the feature touches a remote system (DB, server, S3), run a real query against the actual data to confirm the problem statement before designing. Surface the concrete numbers in the design.
 
@@ -213,7 +233,7 @@ Otherwise use the spec path written and merged in Phase 2.
 
 Dispatch a **foreground subagent** with this prompt (substitute the spec path and `{repo}`):
 
-> **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
+> **Model tier:** `TIER_A` (spec work) — top model with extended thinking; resolved at startup.
 >
 > Read the selected design spec at `<spec-path>` (`<spec-github-url>`) and split it into linked GitHub issues for {repo}.
 >
@@ -279,7 +299,7 @@ created in Phase 3 and apply the model-fit rubric. The subagent must NOT modify
 issue titles or remove existing labels; it only adds `ctx:*` and `reasoning:*`
 labels and patches each body with a `## Model fit` block.
 
-> **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
+> **Model tier:** `TIER_A` (spec work) — top model with extended thinking; resolved at startup.
 >
 > Walk every child issue created in Phase 3 (skip any issue carrying the
 > `type:tracker` label). For each:
