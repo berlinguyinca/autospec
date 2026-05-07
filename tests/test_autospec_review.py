@@ -1,6 +1,7 @@
 # tests/test_autospec_review.py
 """Unit tests for scripts/autospec_review_audit.py."""
 import csv
+import re
 import sys
 from pathlib import Path
 import pytest
@@ -231,3 +232,12 @@ def test_merge_into_ledger_atomic_via_tmp(tmp_path):
     ara.write_per_run_csv(ledger, [_row()])
     ara.merge_into_ledger(ledger, [_row(gap_id="another")])
     assert not (tmp_path / "gaps.csv.tmp").exists()
+
+
+def test_run_id_format():
+    rid = ara.generate_run_id(short_sha="6c2e3a4")
+    assert re.match(r"^\d{8}T\d{4}Z-6c2e3a4$", rid)
+
+
+def test_run_id_includes_provided_sha():
+    assert ara.generate_run_id(short_sha="abc1234").endswith("-abc1234")
