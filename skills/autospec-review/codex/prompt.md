@@ -25,7 +25,29 @@ normal pipeline.
 |-----------------------------|--------------------------------------|------------------------------------------|------------------------------------------|----------------------------------------------------|
 | Subagent model tier          | Tier A: `opus` + ultrathink          | Tier A: top-tier `task` + max reasoning  | Tier A: `gpt-5.1-codex` + `reasoning_effort=high` | Fall back UP on unavailability |
 
-**Model tier:** Tier B (implementation work) — this skill orchestrates audit; subagents run at Tier A.
+**Model tier:** `TIER_B` (implementation work) — cheaper model with medium thinking; resolved at startup. Silently fall back to `TIER_A` if unavailable.
+
+
+## Harness detection (run once at skill start, before Phase 0)
+
+Detect your harness by checking available tools before any phase:
+
+1. **Claude Code** — the `Agent` tool with a `subagent_type` parameter is available.
+   - `TIER_A` = `opus` + `ultrathink`  (model ID: claude-opus-4-7)
+   - `TIER_B` = `sonnet`               (model ID: claude-sonnet-4-6)
+
+2. **OpenCode** — a `task` tool with model/tier configuration is available (no `subagent_type`).
+   - `TIER_A` = top-tier task model + high reasoning
+   - `TIER_B` = smaller-tier task model + medium reasoning
+
+3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available; `apply_patch` is the primary edit tool.
+   - `TIER_A` = current top GPT model + `reasoning_effort=high`
+   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+
+**Fallback rule:** If `TIER_B` is not available in your harness (model unknown, tool absent, or tool call returns an error for that model), silently use `TIER_A` instead. Never ask the user.
+
+Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B" reference below resolves to these harness-specific values.
+
 
 # autospec-review
 

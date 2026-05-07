@@ -104,6 +104,27 @@ This workflow assumes a small set of capabilities. Map each one to your harness'
 
 **Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches use a **two-tier policy**: Tier A (top model + extended thinking) for spec work — including this skill's per-issue review (review/label is spec-adjacent) — and Tier B (cheaper model + medium thinking) for implementation work (not used by this skill). The orchestrator keeps the user's invoked model. Fall back UP the tier on unavailability.
 
+
+## Harness detection (run once at skill start, before Phase 0)
+
+Detect your harness by checking available tools before any phase:
+
+1. **Claude Code** — the `Agent` tool with a `subagent_type` parameter is available.
+   - `TIER_A` = `opus` + `ultrathink`  (model ID: claude-opus-4-7)
+   - `TIER_B` = `sonnet`               (model ID: claude-sonnet-4-6)
+
+2. **OpenCode** — a `task` tool with model/tier configuration is available (no `subagent_type`).
+   - `TIER_A` = top-tier task model + high reasoning
+   - `TIER_B` = smaller-tier task model + medium reasoning
+
+3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available; `apply_patch` is the primary edit tool.
+   - `TIER_A` = current top GPT model + `reasoning_effort=high`
+   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+
+**Fallback rule:** If `TIER_B` is not available in your harness (model unknown, tool absent, or tool call returns an error for that model), silently use `TIER_A` instead. Never ask the user.
+
+Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B" reference below resolves to these harness-specific values.
+
 ## Pre-flight
 
 1. Verify `gh auth status` is authenticated.
@@ -162,7 +183,7 @@ Default for issues that lack any of these signals: `ctx:64k`, `reasoning:medium`
 
 ## Per-issue procedure
 
-> **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
+> **Model tier:** `TIER_A` (spec work) — top model with extended thinking; resolved at startup.
 
 For each candidate issue:
 
