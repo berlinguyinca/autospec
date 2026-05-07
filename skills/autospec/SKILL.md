@@ -161,6 +161,26 @@ This workflow assumes five capabilities. Map each one to your harness's actual t
 
 ---
 
+## Harness detection (run once at skill start, before Phase 0)
+
+Detect your harness by checking available tools before any phase:
+
+1. **Claude Code** — the `Agent` tool with a `subagent_type` parameter is available.
+   - `TIER_A` = `opus` + `ultrathink`  (model ID: claude-opus-4-7)
+   - `TIER_B` = `sonnet`               (model ID: claude-sonnet-4-6)
+
+2. **OpenCode** — a `task` tool with model/tier configuration is available (no `subagent_type`).
+   - `TIER_A` = top-tier task model + high reasoning
+   - `TIER_B` = smaller-tier task model + medium reasoning
+
+3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available; `apply_patch` is the primary edit tool.
+   - `TIER_A` = current top GPT model + `reasoning_effort=high`
+   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+
+**Fallback rule:** If `TIER_B` is not available in your harness (model unknown, tool absent, or tool call returns an error for that model), silently use `TIER_A` instead. Never ask the user.
+
+Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B" reference below resolves to these harness-specific values.
+
 ## Phase 0 — Bootstrap repo (if missing)
 
 Verify `gh auth status` is authenticated. If not, ask the user to run `gh auth login` and stop until they confirm.
@@ -200,7 +220,7 @@ If a repo already exists (cwd is in a git tree with a `github.com:<owner>/<name>
 
 Spawn a **read-only research subagent** to map relevant files, schema, services. Get back a 300-word summary with file paths and line numbers. Do NOT read files directly from the main thread.
 
-> **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
+> **Model tier:** `TIER_A` (spec work) — top model with extended thinking; resolved at startup.
 
 > **Hard limits.** Max 25 tool calls. If 3 consecutive read/grep calls return nothing useful, stop and write your best-effort summary even if incomplete. Do not retry the same query verbatim. No wall-clock cap.
 
@@ -238,7 +258,7 @@ Otherwise use the spec path written and merged in Phase 2.
 
 Dispatch a **foreground subagent** with this prompt (substitute the spec path and `{repo}`):
 
-> **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
+> **Model tier:** `TIER_A` (spec work) — top model with extended thinking; resolved at startup.
 >
 > Read the selected design spec at `<spec-path>` (`<spec-github-url>`) and split it into linked GitHub issues for {repo}.
 >
@@ -304,7 +324,7 @@ created in Phase 3 and apply the model-fit rubric. The subagent must NOT modify
 issue titles or remove existing labels; it only adds `ctx:*` and `reasoning:*`
 labels and patches each body with a `## Model fit` block.
 
-> **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
+> **Model tier:** `TIER_A` (spec work) — top model with extended thinking; resolved at startup.
 >
 > Walk every child issue created in Phase 3 (skip any issue carrying the
 > `type:tracker` label). For each:
@@ -620,7 +640,7 @@ Then launch a **background subagent** with this prompt verbatim:
 > `process(ISSUE)` dispatches a **foreground subagent** (wait for return) with this prompt:
 >
 > ```
-> **Model tier:** Tier B (implementation work) — cheaper model with medium thinking per AGENTS.md. Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark`; OpenCode: smaller task tier. Fall back UP on unavailability.
+> **Model tier:** `TIER_B` (implementation work) — cheaper model with medium thinking; resolved at startup. Silently fall back to `TIER_A` if unavailable.
 >
 > **Hard limits.** Max 40 tool calls per issue. Max 3 self-review iterations. If you rewrite the same file twice with no test progress, abort: comment the blocker on the issue, release the lock label, exit. No wall-clock cap.
 >
@@ -668,7 +688,7 @@ Then launch a **background subagent** with this prompt verbatim:
 >        bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh" <PR> --issue <ISSUE> >> /tmp/guardian-<PR>.md
 >        det_exit=$?
 >        Dispatch a **foreground subagent** (Tier A) with this brief verbatim:
->        > **Model tier:** Tier A (spec work) — guardian audit. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
+>        > **Model tier:** `TIER_A` (spec work) — top model with extended thinking; resolved at startup.
 >        >
 >        > You are the implementation guardian for PR #<PR> on {repo}, derived from issue #<ISSUE>.
 >        >
@@ -702,7 +722,7 @@ Then launch a **background subagent** with this prompt verbatim:
 >          Run existing failure cleanup (comment, swap label, close PR).
 >          rm -f /tmp/guardian-<PR>.md
 >      <!-- guardian-block:end -->
->    - Dispatch a **foreground subagent** with brief: "**Model tier:** Tier B (implementation work) — cheaper model with medium thinking per AGENTS.md. Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark`; OpenCode: smaller task tier. Fall back UP on unavailability. You are a critical code reviewer. Review PR #<PR> via `gh pr diff` and `gh pr view`. Check correctness, edge cases, missing tests, AGENTS.md compliance. Output a numbered findings list, OR if none, return ONLY the token: LGTM"
+>    - Dispatch a **foreground subagent** with brief: "**Model tier:** `TIER_B` (implementation work) — cheaper model with medium thinking; resolved at startup. Silently fall back to `TIER_A` if unavailable. You are a critical code reviewer. Review PR #<PR> via `gh pr diff` and `gh pr view`. Check correctness, edge cases, missing tests, AGENTS.md compliance. Output a numbered findings list, OR if none, return ONLY the token: LGTM"
 >    - If LGTM: run the **Operator/full verification** commands; sleep 30; `gh pr checks <PR>`. If all required checks pass (slow optional checks pending is OK per AGENTS.md): break SUCCESS.
 >    - Else: implement findings, commit, push, continue.
 >    ```bash

@@ -399,7 +399,7 @@ issues unblock the queue before continuing with normal feature work.
 >        bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh" <PR> --issue <ISSUE> >> /tmp/guardian-<PR>.md
 >        det_exit=$?
 >        Dispatch a **foreground subagent** (Tier A) with this brief verbatim:
->        > **Model tier:** Tier A (spec work) — guardian audit. Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`; OpenCode: top task tier. Fall back UP on unavailability.
+>        > **Model tier:** `TIER_A` (spec work) — top model with extended thinking; resolved at startup.
 >        >
 >        > You are the implementation guardian for PR #<PR> on {repo}, derived from issue #<ISSUE>.
 >        >
