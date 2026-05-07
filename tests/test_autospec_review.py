@@ -1,5 +1,6 @@
 # tests/test_autospec_review.py
 """Unit tests for scripts/autospec_review_audit.py."""
+import csv
 import sys
 from pathlib import Path
 import pytest
@@ -173,3 +174,60 @@ def test_validate_subagent_output_truncates_evidence():
     )
     assert len(cleaned["gaps"][0]["evidence"]) <= 500
     assert cleaned["gaps"][0]["evidence"].endswith("…")
+
+
+def _row(**overrides):
+    base = {
+        "gap_id": "abc123def0",
+        "run_id": "20260506T1430Z-deadbee",
+        "audit_date": "2026-05-06",
+        "repo": "owner/repo",
+        "spec_path": "docs/specs/foo.md",
+        "spec_topic": "foo",
+        "gap_type": "closed_missing_code",
+        "severity": "blocker",
+        "title": "missing thing",
+        "spec_anchor": "## H",
+        "evidence": "ev",
+        "suspected_issues": "#1 #2",
+        "remediation_issue": "",
+        "remediation_pr": "",
+        "status": "open",
+        "notes": "",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_write_per_run_csv_round_trip(tmp_path):
+    rows = [_row(), _row(gap_id="0000000000", title="other")]
+    out = tmp_path / "snapshot.csv"
+    ara.write_per_run_csv(out, rows)
+    with out.open() as f:
+        loaded = list(csv.DictReader(f))
+    assert len(loaded) == 2
+    assert loaded[0]["gap_id"] == "abc123def0"
+    assert list(loaded[0].keys()) == list(ara.CSV_COLUMNS)
+
+
+def test_merge_into_ledger_preserves_manual_status(tmp_path):
+    ledger = tmp_path / "gaps.csv"
+    existing = _row(gap_id="keep1", status="wontfix",
+                    notes="manual: not applicable for v1")
+    ara.write_per_run_csv(ledger, [existing])
+
+    new = _row(gap_id="keep1", status="open", notes="")
+    ara.merge_into_ledger(ledger, [new, _row(gap_id="newrow")])
+
+    with ledger.open() as f:
+        merged = {r["gap_id"]: r for r in csv.DictReader(f)}
+    assert merged["keep1"]["status"] == "wontfix"
+    assert merged["keep1"]["notes"] == "manual: not applicable for v1"
+    assert merged["newrow"]["status"] == "open"
+
+
+def test_merge_into_ledger_atomic_via_tmp(tmp_path):
+    ledger = tmp_path / "gaps.csv"
+    ara.write_per_run_csv(ledger, [_row()])
+    ara.merge_into_ledger(ledger, [_row(gap_id="another")])
+    assert not (tmp_path / "gaps.csv.tmp").exists()
