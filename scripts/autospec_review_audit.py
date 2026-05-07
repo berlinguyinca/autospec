@@ -196,3 +196,60 @@ def validate_subagent_output(
     cleaned = dict(payload)
     cleaned["gaps"] = cleaned_gaps
     return cleaned
+
+import csv
+import os
+
+CSV_COLUMNS: tuple[str, ...] = (
+    "gap_id", "run_id", "audit_date", "repo",
+    "spec_path", "spec_topic", "gap_type", "severity",
+    "title", "spec_anchor", "evidence", "suspected_issues",
+    "remediation_issue", "remediation_pr", "status", "notes",
+)
+PRESERVED_STATUSES = frozenset({"wontfix", "false_positive"})
+
+
+def write_per_run_csv(out_path: Path, rows: Iterable[dict]) -> None:
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in CSV_COLUMNS})
+
+
+def merge_into_ledger(ledger_path: Path, new_rows: Iterable[dict]) -> None:
+    """Merge new_rows into ledger keyed by gap_id, preserving manual edits.
+
+    Manual edits = rows whose existing ``status`` is in ``PRESERVED_STATUSES``,
+    OR whose ``notes`` field is non-empty.  Those rows' ``status`` and
+    ``notes`` columns are NOT overwritten by new_rows.  All other columns
+    are refreshed from new_rows.
+    """
+    ledger_path = Path(ledger_path)
+    existing: dict[str, dict] = {}
+    if ledger_path.exists():
+        with ledger_path.open(encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                existing[row["gap_id"]] = row
+
+    for new in new_rows:
+        gid = new["gap_id"]
+        prior = existing.get(gid)
+        if prior is None:
+            existing[gid] = {k: new.get(k, "") for k in CSV_COLUMNS}
+            continue
+        merged = {k: new.get(k, "") for k in CSV_COLUMNS}
+        if prior.get("status") in PRESERVED_STATUSES or prior.get("notes"):
+            merged["status"] = prior.get("status", merged["status"])
+            merged["notes"] = prior.get("notes", merged["notes"])
+        existing[gid] = merged
+
+    tmp_path = ledger_path.with_suffix(ledger_path.suffix + ".tmp")
+    with tmp_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        for row in existing.values():
+            writer.writerow({k: row.get(k, "") for k in CSV_COLUMNS})
+    os.replace(tmp_path, ledger_path)
