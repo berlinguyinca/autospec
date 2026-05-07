@@ -526,7 +526,26 @@ Re-run with --profile <larger> to pick these up, or run /autospec-run on a host 
 
 If `deferred[]` is empty, omit the section.
 
----
+## Post-batch audit (autospec-review interlock)
+
+Runs after the last issue in this batch closes/merges, before printing
+the final report.
+
+Skip when:
+
+- `~/.autospec/no-review.flag` exists, OR
+- `--no-postreview` was passed to autospec-run.
+
+Otherwise:
+
+```bash
+/autospec-review --since "${BATCH_START_DATE}"
+```
+
+On gaps found: post a comment to the autospec-run status thread
+summarising gap counts by spec. Do NOT block batch completion.
+Failures from `/autospec-review` log a warning but do not fail the
+overall run.
 
 ## Constraints (apply throughout)
 
