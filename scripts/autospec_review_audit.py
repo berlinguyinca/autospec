@@ -253,3 +253,40 @@ def merge_into_ledger(ledger_path: Path, new_rows: Iterable[dict]) -> None:
         for row in existing.values():
             writer.writerow({k: row.get(k, "") for k in CSV_COLUMNS})
     os.replace(tmp_path, ledger_path)
+
+import datetime as _dt
+import shutil
+import subprocess
+
+
+def generate_run_id(short_sha: str | None = None) -> str:
+    """``<UTC compact ISO>-<short_git_sha>`` — sortable + traceable."""
+    if short_sha is None:
+        short_sha = current_git_short_sha()
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%MZ")
+    return f"{ts}-{short_sha}"
+
+
+def current_git_short_sha() -> str:
+    return subprocess.check_output(
+        ["git", "rev-parse", "--short", "HEAD"], text=True
+    ).strip()
+
+
+def gh_issue_list(repo: str, *, state: str = "all", limit: int = 1000) -> list[dict]:
+    """Wrapper around ``gh issue list --json ...``.
+
+    Returns the parsed JSON list.  Raises ``RuntimeError`` if ``gh`` is
+    not on PATH.
+    """
+    if shutil.which("gh") is None:
+        raise RuntimeError("gh CLI not on PATH; install GitHub CLI")
+    out = subprocess.check_output([
+        "gh", "issue", "list",
+        "--repo", repo,
+        "--state", state,
+        "--limit", str(limit),
+        "--json", "number,state,title,body,labels,closedAt,url",
+    ], text=True)
+    import json
+    return json.loads(out)
