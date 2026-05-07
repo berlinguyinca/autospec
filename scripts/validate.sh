@@ -416,6 +416,50 @@ check_governance_headings() {
 # Existing spec mode invariants: autospec, autospec-split, and autospec-define must expose the
 # shortcut that skips Phase 1/2 and reuses Phase 3 + Phase 3.5 for a tracked
 # docs/specs/*.md file. Enforce all trio files so harness variants cannot drift.
+check_autospec_run_priority_sort_lockstep() {
+    info "autospec-run priority sort lockstep"
+    diff <(awk '/^---$/{c++; next} c>=2' skills/autospec-run/SKILL.md | grep -A 8 'Queue priority sort') \
+         <(awk '/^---$/{c++; next} c>=2' skills/autospec-run/opencode/agent.md | grep -A 8 'Queue priority sort') \
+        || fail "priority sort lockstep (opencode)"
+    diff <(awk '/^---$/{c++; next} c>=2' skills/autospec-run/SKILL.md | grep -A 8 'Queue priority sort') \
+         <(sed '1{/^$/d;}' skills/autospec-run/codex/prompt.md | grep -A 8 'Queue priority sort') \
+        || fail "priority sort lockstep (codex)"
+}
+
+check_autospec_run_regression_review_lockstep() {
+    info "autospec-run regression review lockstep"
+    for variant in "skills/autospec-run/opencode/agent.md" "skills/autospec-run/codex/prompt.md"; do
+        grep -q "Regression review escalation" "$variant" \
+            || fail "regression review block missing in $variant"
+        grep -q "Tier A (spec work)" "$variant" \
+            || fail "Tier A annotation missing in $variant"
+    done
+}
+
+check_autospec_review_skill_present() {
+    info "autospec-review skill present + lockstep"
+    for f in "skills/autospec-review/SKILL.md" \
+             "skills/autospec-review/opencode/agent.md" \
+             "skills/autospec-review/codex/prompt.md"; do
+        [ -f "$f" ] || fail "$f missing"
+    done
+    diff <(awk '/^---$/{c++; next} c>=2' skills/autospec-review/SKILL.md) \
+         <(awk '/^---$/{c++; next} c>=2' skills/autospec-review/opencode/agent.md) \
+        || fail "autospec-review opencode lockstep"
+    diff <(awk '/^---$/{c++; next} c>=2' skills/autospec-review/SKILL.md) \
+         <(cat skills/autospec-review/codex/prompt.md) \
+        || fail "autospec-review codex lockstep"
+}
+
+check_autospec_review_tier_a_directives() {
+    info "autospec-review Tier A directives"
+    grep -q "Tier A (spec work)" skills/autospec-review/SKILL.md \
+        || fail "missing 'Tier A (spec work)' directive in autospec-review/SKILL.md"
+    count=$(grep -c "Tier A (spec work)" skills/autospec-review/SKILL.md)
+    [ "$count" -ge 2 ] \
+        || fail "expected ≥2 'Tier A (spec work)' directives in autospec-review/SKILL.md, found $count"
+}
+
 check_existing_spec_mode() {
     info "existing-spec mode: autospec + autospec-split + autospec-define"
     for s in autospec autospec-split autospec-define; do
@@ -463,6 +507,10 @@ main() {
     check_phase4_guardian_block_lockstep
     check_phase4_issue_start_summary
     check_phase4_immediate_next_issue_pickup
+    check_autospec_run_priority_sort_lockstep
+    check_autospec_run_regression_review_lockstep
+    check_autospec_review_skill_present
+    check_autospec_review_tier_a_directives
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
