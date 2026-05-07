@@ -108,3 +108,91 @@ def link_issues(
             matched[num] = issue
             continue
     return [matched[n] for n in sorted(matched)]
+
+GAP_TYPES = frozenset({
+    "ac_no_issue", "closed_missing_code",
+    "closed_unchecked_ac", "section_no_coverage",
+})
+SEVERITIES = frozenset({"blocker", "major", "minor"})
+GAP_REQUIRED_FIELDS = (
+    "gap_type", "severity", "title", "spec_anchor",
+    "evidence", "suspected_issues", "remediation_hint",
+)
+EVIDENCE_MAX_CHARS = 500
+
+
+class SubagentSchemaError(ValueError):
+    """Raised when a subagent's JSON output fails the contract."""
+
+
+def validate_subagent_output(
+    payload: dict,
+    *,
+    expected_spec_path: str,
+    spec_text: str,
+    linked_numbers: set[int],
+) -> dict:
+    """Validate + normalise; return cleaned payload (truncated evidence).
+
+    Raises ``SubagentSchemaError`` on contract violations.
+    """
+    if not isinstance(payload, dict):
+        raise SubagentSchemaError("payload must be an object")
+
+    if payload.get("spec_path") != expected_spec_path:
+        raise SubagentSchemaError(
+            f"spec_path mismatch: expected {expected_spec_path!r}, "
+            f"got {payload.get('spec_path')!r}"
+        )
+
+    gaps = payload.get("gaps")
+    if not isinstance(gaps, list):
+        raise SubagentSchemaError("gaps must be a list")
+
+    cleaned_gaps: list[dict] = []
+    for idx, gap in enumerate(gaps):
+        if not isinstance(gap, dict):
+            raise SubagentSchemaError(f"gap[{idx}] must be object")
+        for field in GAP_REQUIRED_FIELDS:
+            if field not in gap:
+                raise SubagentSchemaError(
+                    f"gap[{idx}] missing field {field!r}"
+                )
+        if gap["gap_type"] not in GAP_TYPES:
+            raise SubagentSchemaError(
+                f"gap[{idx}] gap_type {gap['gap_type']!r} not in taxonomy"
+            )
+        if gap["severity"] not in SEVERITIES:
+            raise SubagentSchemaError(
+                f"gap[{idx}] severity {gap['severity']!r} unknown"
+            )
+        if gap["spec_anchor"] not in spec_text:
+            raise SubagentSchemaError(
+                f"gap[{idx}] spec_anchor {gap['spec_anchor']!r} "
+                "not found in spec_text"
+            )
+        if not isinstance(gap["suspected_issues"], list):
+            raise SubagentSchemaError(
+                f"gap[{idx}] suspected_issues must be a list"
+            )
+        for ref in gap["suspected_issues"]:
+            try:
+                num = int(str(ref).lstrip("#"))
+            except ValueError as e:
+                raise SubagentSchemaError(
+                    f"gap[{idx}] suspected_issues item {ref!r} not parseable"
+                ) from e
+            if num not in linked_numbers:
+                raise SubagentSchemaError(
+                    f"gap[{idx}] suspected_issues #{num} not in linked set"
+                )
+
+        cleaned_gap = dict(gap)
+        ev = cleaned_gap.get("evidence", "")
+        if len(ev) > EVIDENCE_MAX_CHARS:
+            cleaned_gap["evidence"] = ev[: EVIDENCE_MAX_CHARS - 1] + "…"
+        cleaned_gaps.append(cleaned_gap)
+
+    cleaned = dict(payload)
+    cleaned["gaps"] = cleaned_gaps
+    return cleaned

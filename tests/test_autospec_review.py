@@ -2,6 +2,7 @@
 """Unit tests for scripts/autospec_review_audit.py."""
 import sys
 from pathlib import Path
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -111,3 +112,64 @@ def test_link_issues_by_topic_label_or_title():
     linked = ara.link_issues(spec_text=spec_text, spec_path="docs/specs/x.md",
                              spec_topic="foo", all_issues=issues)
     assert sorted(i["number"] for i in linked) == [1, 2]
+
+
+VALID_GAP = {
+    "gap_type": "closed_missing_code",
+    "severity": "blocker",
+    "title": "x",
+    "spec_anchor": "## H",
+    "evidence": "...",
+    "suspected_issues": ["#472"],
+    "remediation_hint": "ship it",
+}
+
+
+def test_validate_subagent_output_accepts_minimal():
+    payload = {"spec_path": "docs/specs/foo.md", "gaps": [VALID_GAP]}
+    ara.validate_subagent_output(
+        payload,
+        expected_spec_path="docs/specs/foo.md",
+        spec_text="## H\n",
+        linked_numbers={472},
+    )
+
+
+def test_validate_subagent_output_rejects_unknown_severity():
+    bad = {**VALID_GAP, "severity": "wat"}
+    payload = {"spec_path": "docs/specs/foo.md", "gaps": [bad]}
+    with pytest.raises(ara.SubagentSchemaError, match="severity"):
+        ara.validate_subagent_output(
+            payload, expected_spec_path="docs/specs/foo.md",
+            spec_text="## H\n", linked_numbers={472},
+        )
+
+
+def test_validate_subagent_output_rejects_unknown_anchor():
+    payload = {"spec_path": "docs/specs/foo.md", "gaps": [VALID_GAP]}
+    with pytest.raises(ara.SubagentSchemaError, match="spec_anchor"):
+        ara.validate_subagent_output(
+            payload, expected_spec_path="docs/specs/foo.md",
+            spec_text="## DIFFERENT\n", linked_numbers={472},
+        )
+
+
+def test_validate_subagent_output_rejects_unknown_issue():
+    payload = {"spec_path": "docs/specs/foo.md", "gaps": [VALID_GAP]}
+    with pytest.raises(ara.SubagentSchemaError, match="suspected_issues"):
+        ara.validate_subagent_output(
+            payload, expected_spec_path="docs/specs/foo.md",
+            spec_text="## H\n", linked_numbers={1},
+        )
+
+
+def test_validate_subagent_output_truncates_evidence():
+    long = "x" * 600
+    gap = {**VALID_GAP, "evidence": long}
+    payload = {"spec_path": "docs/specs/foo.md", "gaps": [gap]}
+    cleaned = ara.validate_subagent_output(
+        payload, expected_spec_path="docs/specs/foo.md",
+        spec_text="## H\n", linked_numbers={472},
+    )
+    assert len(cleaned["gaps"][0]["evidence"]) <= 500
+    assert cleaned["gaps"][0]["evidence"].endswith("…")
