@@ -215,7 +215,7 @@ check_subagent_model_tier() {
         autospec-define|autospec-split)
             expected_a=3; expected_b=0 ;;
         autospec-run)
-            expected_a=1; expected_b=2 ;;
+            expected_a=2; expected_b=3 ;;
         autospec-classify)
             expected_a=1; expected_b=0 ;;
         autospec-story)
