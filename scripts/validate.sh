@@ -196,15 +196,23 @@ check_subagent_model_tier() {
         || fail "$name: SKILL.md harness-adapter table missing 'Subagent model tier' row"
 
     # Every **Model tier:** line must label itself Tier A or Tier B.
+    # Accept EITHER the legacy verbose format ("Tier A (spec work)" / "Tier B (implementation work)")
+    # OR the new TIER_A / TIER_B reference format introduced by the harness-aware model-tier design.
     bare="$(grep -F '**Model tier:**' "$skill_dir/SKILL.md" \
         | grep -v -F 'Tier A (spec work)' \
-        | grep -v -F 'Tier B (implementation work)' || true)"
+        | grep -v -F 'Tier B (implementation work)' \
+        | grep -v -E 'TIER_[AB]' || true)"
     if [ -n "$bare" ]; then
         printf '%s\n' "$bare" >&2
-        fail "$name: SKILL.md has '**Model tier:**' directive(s) without 'Tier A (spec work)' or 'Tier B (implementation work)' label"
+        fail "$name: SKILL.md has '**Model tier:**' directive(s) without 'Tier A (spec work)', 'Tier B (implementation work)', or TIER_A/TIER_B label"
     fi
 
-    # Per-skill Tier-A / Tier-B count assertions.
+    # Per-skill Tier-A / Tier-B count assertions — only enforced for legacy format.
+    # Skills using the new TIER_A/TIER_B reference format skip the hard count check.
+    if grep -q -E 'TIER_[AB]' "$skill_dir/SKILL.md"; then
+        return 0
+    fi
+
     a_count="$(grep -F '**Model tier:**' "$skill_dir/SKILL.md" \
         | grep -c -F 'Tier A (spec work)' || true)"
     b_count="$(grep -F '**Model tier:**' "$skill_dir/SKILL.md" \
@@ -229,6 +237,26 @@ check_subagent_model_tier() {
         [ "$b_count" = "$expected_b" ] \
             || fail "$name: expected $expected_b Tier-B dispatches, found $b_count"
     fi
+}
+
+# Harness detection block validation.
+# If a SKILL.md contains a "## Harness detection" heading, verify that the
+# section body includes TIER_A, TIER_B, and a "silently" fallback reference.
+# If the heading is absent, emit a WARN (not FAIL) to allow incremental migration.
+check_harness_detection_block() {
+    file="$1"
+    name="$(basename "$(dirname "$file")")"
+    if ! grep -q '## Harness detection' "$file"; then
+        printf 'validate: WARN — %s: missing ## Harness detection section (incremental migration OK)\n' "$name" >&2
+        return 0
+    fi
+    info "harness detection block: $name"
+    grep -q 'TIER_A' "$file" \
+        || fail "$name: ## Harness detection section present but missing TIER_A reference"
+    grep -q 'TIER_B' "$file" \
+        || fail "$name: ## Harness detection section present but missing TIER_B reference"
+    grep -q -i 'silently' "$file" \
+        || fail "$name: ## Harness detection section present but missing 'silently' fallback reference"
 }
 
 # AGENTS.md must document the two-tier subagent model selection policy with
@@ -490,6 +518,7 @@ main() {
         check_bash_syntax "$skill_dir/uninstall.sh"
         check_self_update "$skill_dir"
         check_subagent_model_tier "$skill_dir"
+        check_harness_detection_block "$skill_dir/SKILL.md"
     done
 
     check_startup_preflight
