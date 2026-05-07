@@ -437,6 +437,31 @@ issues unblock the queue before continuing with normal feature work.
 >          Run existing failure cleanup (comment, swap label, close PR).
 >          rm -f /tmp/guardian-<PR>.md
 >      <!-- guardian-block:end -->
+>    ### Regression review escalation
+>
+>    If the issue's labels include `regression` OR `priority:high`:
+>
+>    - **Model tier:** Tier A (spec work) — top model + ultrathink.
+>    - Run TWO reviewer passes in sequence:
+>
+>      **Pass 1.** Standard LGTM judgment. If FAIL, return to implementer
+>      with directives.
+>
+>      **Pass 2.** Meta-review prompt:
+>      > Would the Implementation Guardian or this LGTM reviewer have
+>      > caught the original gap during the first implementation? If yes,
+>      > what review questions failed? Add the missing checklist items to
+>      > `reports/autospec-review/reviewer-lessons.md` (one entry per item,
+>      > with parent gap_id and date) and re-review with the augmented
+>      > checklist.
+>
+>    - Both passes must approve before merge.
+>
+>    Otherwise (default path):
+>
+>    - **Model tier:** Tier B (implementation work).
+>    - Single LGTM pass.
+>
 >    - Dispatch a **foreground subagent** with brief: "**Model tier:** Tier B (implementation work) — cheaper model with medium thinking per AGENTS.md. Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark`; OpenCode: smaller task tier. Fall back UP on unavailability. You are a critical code reviewer. Review PR #<PR> via `gh pr diff` and `gh pr view`. Check correctness, edge cases, missing tests, AGENTS.md compliance. Output a numbered findings list, OR if none, return ONLY the token: LGTM"
 >    - If LGTM: run the **Operator/full verification** commands; sleep 30; `gh pr checks <PR>`. If all required checks pass (slow optional checks pending is OK per AGENTS.md): break SUCCESS.
 >    - Else: implement findings, commit, push, continue.
