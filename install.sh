@@ -14,11 +14,12 @@
 #   ./install.sh --help                          # show this help
 #
 # Flags:
-#   --skill   one of: autospec | autospec-split | autospec-define | autospec-run | autospec-classify | autospec-listen | autospec-story | autospec-stop | all
+#   --skill   one of: autospec | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | all
 #             (default: all)
 #   --harness one of: claude | opencode | codex | all
 #             (default: all)
 #   --update  forwarded to each per-skill installer; idempotent overwrite.
+#   --dry-run forwarded to each per-skill installer; print actions, write nothing.
 #
 # Honors:
 #   AUTOSPEC_NO_STAR_PROMPT=1  skip the optional GitHub star prompt.
@@ -30,12 +31,13 @@ set -eu
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_DIR="$REPO_ROOT/skills"
 
-ALL_SKILLS="autospec autospec-split autospec-define autospec-run autospec-classify autospec-listen autospec-story autospec-stop"
+ALL_SKILLS="autospec autospec-split autospec-define autospec-run autospec-review autospec-classify autospec-listen autospec-story autospec-stop"
 ALL_HARNESSES="claude opencode codex"
 
 SKILL_ARG="all"
 HARNESS_ARG="all"
 UPDATE=0
+DRY_RUN=0
 
 err()  { printf 'error: %s\n' "$*" >&2; }
 warn() { printf 'warn:  %s\n' "$*" >&2; }
@@ -89,6 +91,9 @@ while [ $# -gt 0 ]; do
         --update)
             UPDATE=1
             ;;
+        --dry-run)
+            DRY_RUN=1
+            ;;
         -h|--help)
             usage
             exit 0
@@ -104,10 +109,10 @@ done
 
 # Validate --skill
 case "$SKILL_ARG" in
-    all|autospec|autospec-split|autospec-define|autospec-run|autospec-classify|autospec-listen|autospec-story|autospec-stop) ;;
+    all|autospec|autospec-split|autospec-define|autospec-run|autospec-review|autospec-classify|autospec-listen|autospec-story|autospec-stop) ;;
     *)
         err "invalid --skill: $SKILL_ARG"
-        err "must be one of: autospec | autospec-split | autospec-define | autospec-run | autospec-classify | autospec-listen | autospec-story | autospec-stop | all"
+        err "must be one of: autospec | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | all"
         exit 2
         ;;
 esac
@@ -159,6 +164,9 @@ for skill in $SKILLS_TO_RUN; do
         cmd="bash \"$skill_installer\" --harness \"$harness\""
         if [ "$UPDATE" -eq 1 ]; then
             cmd="$cmd --update"
+        fi
+        if [ "$DRY_RUN" -eq 1 ]; then
+            cmd="$cmd --dry-run"
         fi
         if eval "$cmd"; then
             info "    OK: $skill ($harness)"
