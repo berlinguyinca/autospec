@@ -24,6 +24,14 @@
 - Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
 - Status: read-only synthesis mode. Produces a cited Markdown report that separates evidence, inference, open work, completed work, and unknowns. See [`skills/autospec-story/README.md`](skills/autospec-story/README.md).
 
+## autospec-review
+
+- Path: [`skills/autospec-review`](skills/autospec-review)
+- Trigger: use when a user wants to audit design specs against open and closed issues to find gaps, file high-priority regression issues, and feed them back through autospec. Auto-fires after each autospec-run batch unless `~/.autospec/no-review.flag` exists.
+- Activation keywords: `autospec-review`, `audit specs`, `find spec gaps`, `regression review`, `spec vs issues`, `find missing coverage`
+- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
+- Status: closes the spec-vs-code feedback loop; renders regression specs, dispatches Tier A reviewer subagent, and hands off to `/autospec-split` to file `[REGRESSION]` issues with `priority:high`.
+
 ## autospec-split
 
 - Path: [`skills/autospec-split`](skills/autospec-split)

@@ -62,6 +62,7 @@ selected model and harness to execute reliably.
 | [`autospec-listen`](skills/autospec-listen/README.md) | You want chat phrases like "file an issue" to become tracked work. | Drafts issues for approval or routes spec requests into `/autospec-define`. |
 | [`autospec-story`](skills/autospec-story/README.md) | You need a repo-level product and implementation-state overview. | Produces a cited Markdown story from local specs, docs, issues, PRs, and git history. |
 | [`autospec-stop`](skills/autospec-stop/README.md) | You need to halt or resume an active monitor. | Writes the shared stop sentinel, pauses issues safely, reports status, or resumes paused work. |
+| [`autospec-review`](skills/autospec-review/README.md) | You want to close the spec-vs-code feedback loop. | Audits specs against issues, finds gaps, files `[REGRESSION]` issues with `priority:high`. |
 
 See [`SKILLS.md`](SKILLS.md) for activation keywords and per-skill routing
 details.
