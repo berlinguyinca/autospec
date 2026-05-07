@@ -219,6 +219,19 @@ Then launch a **background subagent** with this prompt verbatim:
 >       echo "[watchdog] neither bash nor powershell found; skipping heartbeat reconciliation."
 >     fi
 >   fi
+
+### Queue priority sort (autospec-review interlock)
+
+When selecting the next `auto-implement` issue, sort:
+
+1. First: issues with label `priority:high` (e.g. `[REGRESSION]`
+   issues filed by autospec-review). Within `priority:high`, oldest
+   first.
+2. Then: all other `auto-implement` issues, oldest first.
+
+`priority:high` always wins over age. This guarantees regression
+issues unblock the queue before continuing with normal feature work.
+
 >   all_open = [open auto-implement issues, sorted ascending by issue number]
 >   candidates = [all_open issues whose Depends-on deps are all CLOSED, sorted ascending]
 >   blocked = [all_open issues with unmet Depends-on deps]
