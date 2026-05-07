@@ -10,7 +10,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Iterable, Sequence
 
 
 def compute_gap_id(spec_path: str, spec_anchor: str, gap_type: str) -> str:
@@ -63,3 +63,48 @@ def discover_specs(
                 spec_path=rel, spec_topic=topic, spec_date=date, abs_path=abs_path
             )
     return list(seen.values())
+
+_INLINE_ISSUE = re.compile(r"#(\d+)")
+
+
+def link_issues(
+    spec_text: str,
+    spec_path: str,
+    spec_topic: str,
+    all_issues: Iterable[dict],
+) -> list[dict]:
+    """Return issues linked to a spec by any of three signals.
+
+    1. Inline ``#nnn`` references in spec_text.
+    2. Spec path or its filename appearing in issue body.
+    3. Topic slug appearing in issue title (case-insensitive substring)
+       or in any of the issue's labels.
+
+    Order: stable, deduplicated, sorted by issue number.
+    """
+    inline_nums = {int(m) for m in _INLINE_ISSUE.findall(spec_text)}
+    spec_filename = spec_path.rsplit("/", 1)[-1]
+    topic_lc = spec_topic.lower()
+
+    matched: dict[int, dict] = {}
+    for issue in all_issues:
+        num = issue["number"]
+        if num in inline_nums:
+            matched[num] = issue
+            continue
+        body = issue.get("body") or ""
+        if spec_path in body or spec_filename in body:
+            matched[num] = issue
+            continue
+        if topic_lc and topic_lc in (issue.get("title") or "").lower():
+            matched[num] = issue
+            continue
+        labels = issue.get("labels") or []
+        label_names = {
+            (lbl["name"] if isinstance(lbl, dict) else lbl).lower()
+            for lbl in labels
+        }
+        if topic_lc in label_names:
+            matched[num] = issue
+            continue
+    return [matched[n] for n in sorted(matched)]
