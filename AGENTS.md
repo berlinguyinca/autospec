@@ -37,6 +37,28 @@ Reasoning: implementation follows a well-specified contract from Tier A. The wor
 | Codex CLI   | `gpt-5.1-codex-spark` (or current spark/cost-optimized variant) | `reasoning_effort=medium` | next-larger Codex → latest |
 | OpenCode    | smaller-tier task model | medium reasoning | next-larger configured tier |
 
+### Harness detection protocol
+
+Detect your harness by checking available tools before any phase, then resolve `TIER_A` and
+`TIER_B` once for the entire skill run. Every "Tier A" and "Tier B" reference in skill bodies
+maps to these harness-specific values.
+
+1. **Claude Code** — the `Agent` tool with a `subagent_type` parameter is available.
+   - `TIER_A` = `opus` + `ultrathink`  (see Tier A table row above)
+   - `TIER_B` = `sonnet`               (see Tier B table row above)
+
+2. **OpenCode** — a `task` tool with model/tier configuration is available (no `subagent_type`).
+   - `TIER_A` = top-tier task model + high reasoning
+   - `TIER_B` = smaller-tier task model + medium reasoning
+
+3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available; `apply_patch`
+   is the primary edit tool.
+   - `TIER_A` = current top GPT model + `reasoning_effort=high`
+   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+
+**Fallback rule:** If TIER_B is unavailable in your harness (model unknown, tool absent, or
+tool call returns an error for that model), silently use TIER_A instead. Never ask the user.
+
 ### Flexibility rule (both tiers)
 
 If the preferred model name is rejected (deprecated, capacity, unauthorized), retry with the next tier **UP** — never silently downgrade below the tier's intent. Never hard-code exact version strings in dispatch code; resolve "current Opus / Sonnet / spark / top GPT" at call time so the skill survives model-family churn.
