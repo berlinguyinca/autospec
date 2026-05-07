@@ -1,0 +1,39 @@
+---
+date: {{audit_date}}
+parent_spec: {{spec_path}}
+audit_run_id: {{run_id}}
+priority: high
+---
+# [REGRESSION] {{spec_topic}} — audit gaps {{audit_date}}
+
+This spec enumerates gaps found by autospec-review on {{audit_date}}
+against the parent spec. Each section corresponds to one row in
+`reports/autospec-review/gaps.csv` (`gap_id` shown).
+
+## Background
+
+{{parent_spec_summary}}
+
+## Gaps to remediate
+
+{{#each gaps}}
+### Gap {{gap_id}} — `{{gap_type}}` — {{severity}}
+
+**Parent spec anchor:** {{spec_anchor}}
+**Suspected closed issues:** {{suspected_issues}}
+**Evidence:**
+> {{evidence}}
+
+**What needs to ship:** {{remediation_hint}}
+
+**Acceptance criteria:**
+{{ac_bullets}}
+- [ ] Verification: {{verification_target}}
+
+{{/each}}
+
+## Verification
+
+- [ ] Test suite for affected modules passes.
+- [ ] Each gap_id's evidence no longer reproduces (verified via re-grep).
+- [ ] CSV rows flip from `status=filed` to `status=fixed` on next audit.
