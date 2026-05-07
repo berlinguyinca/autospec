@@ -290,3 +290,134 @@ def gh_issue_list(repo: str, *, state: str = "all", limit: int = 1000) -> list[d
     ], text=True)
     import json
     return json.loads(out)
+
+import argparse
+import json as _json
+import sys
+
+
+def _cli_discover(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo_root)
+    globs = (args.glob,) if args.glob else DEFAULT_SPEC_GLOBS
+    specs = discover_specs(repo_root, globs=globs)
+    if args.since:
+        specs = [s for s in specs if (s.spec_date or "9999") >= args.since]
+    payload = [
+        {"spec_path": s.spec_path, "spec_topic": s.spec_topic,
+         "spec_date": s.spec_date}
+        for s in specs
+    ]
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(_json.dumps(payload, indent=2))
+    return 0
+
+
+def _cli_link(args: argparse.Namespace) -> int:
+    specs_meta = _json.loads(Path(args.specs).read_text())
+    issues = gh_issue_list(args.repo, state="all", limit=args.limit)
+    repo_root = Path(args.repo_root or ".")
+    out_payload = []
+    for meta in specs_meta:
+        spec_text = (repo_root / meta["spec_path"]).read_text(encoding="utf-8")
+        linked = link_issues(
+            spec_text=spec_text,
+            spec_path=meta["spec_path"],
+            spec_topic=meta["spec_topic"],
+            all_issues=issues,
+        )
+        out_payload.append({
+            "spec_path": meta["spec_path"],
+            "spec_topic": meta["spec_topic"],
+            "spec_text": spec_text,
+            "linked_issues": linked,
+        })
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(_json.dumps(out_payload, indent=2))
+    return 0
+
+
+def _cli_validate_subagent(args: argparse.Namespace) -> int:
+    payload = _json.loads(Path(args.input).read_text())
+    spec_text = Path(args.spec_text_file).read_text(encoding="utf-8")
+    linked_numbers = {int(n) for n in args.linked_numbers.split()}
+    cleaned = validate_subagent_output(
+        payload,
+        expected_spec_path=args.spec_path,
+        spec_text=spec_text,
+        linked_numbers=linked_numbers,
+    )
+    Path(args.out or args.input).write_text(_json.dumps(cleaned, indent=2))
+    return 0
+
+
+def _cli_write_csv(args: argparse.Namespace) -> int:
+    rows = _json.loads(Path(args.rows).read_text())
+    write_per_run_csv(Path(args.snapshot), rows)
+    merge_into_ledger(Path(args.ledger), rows)
+    return 0
+
+
+def _cli_update_status(args: argparse.Namespace) -> int:
+    """In-place update: set status (and optionally remediation_issue) for gap_id."""
+    ledger = Path(args.ledger)
+    rows = list(csv.DictReader(ledger.open(encoding="utf-8")))
+    for row in rows:
+        if row["gap_id"] == args.gap_id:
+            row["status"] = args.status
+            if args.issue:
+                row["remediation_issue"] = args.issue
+            if args.pr:
+                row["remediation_pr"] = args.pr
+    write_per_run_csv(ledger, rows)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="autospec_review_audit")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("discover")
+    p.add_argument("--repo-root", default=".")
+    p.add_argument("--glob")
+    p.add_argument("--since")
+    p.add_argument("--out", required=True)
+    p.set_defaults(fn=_cli_discover)
+
+    p = sub.add_parser("link")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--repo-root", default=".")
+    p.add_argument("--specs", required=True)
+    p.add_argument("--limit", type=int, default=1000)
+    p.add_argument("--out", required=True)
+    p.set_defaults(fn=_cli_link)
+
+    p = sub.add_parser("validate-subagent")
+    p.add_argument("--input", required=True)
+    p.add_argument("--spec-path", required=True)
+    p.add_argument("--spec-text-file", required=True)
+    p.add_argument("--linked-numbers", required=True,
+                   help="space-separated issue numbers")
+    p.add_argument("--out")
+    p.set_defaults(fn=_cli_validate_subagent)
+
+    p = sub.add_parser("write-csv")
+    p.add_argument("--rows", required=True)
+    p.add_argument("--snapshot", required=True)
+    p.add_argument("--ledger", required=True)
+    p.set_defaults(fn=_cli_write_csv)
+
+    p = sub.add_parser("update-status")
+    p.add_argument("--ledger", required=True)
+    p.add_argument("--gap-id", required=True)
+    p.add_argument("--status", required=True,
+                   choices=("open", "filed", "fixed", "wontfix", "false_positive"))
+    p.add_argument("--issue")
+    p.add_argument("--pr")
+    p.set_defaults(fn=_cli_update_status)
+
+    args = parser.parse_args(argv)
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

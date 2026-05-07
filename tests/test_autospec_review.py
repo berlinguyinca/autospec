@@ -1,7 +1,9 @@
 # tests/test_autospec_review.py
 """Unit tests for scripts/autospec_review_audit.py."""
 import csv
+import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 import pytest
@@ -241,3 +243,43 @@ def test_run_id_format():
 
 def test_run_id_includes_provided_sha():
     assert ara.generate_run_id(short_sha="abc1234").endswith("-abc1234")
+
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "autospec_review_audit.py"
+
+
+def test_cli_discover_writes_json(tmp_path):
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "docs/specs/2026-04-30-foo-design.md").write_text("# foo\n")
+    out = tmp_path / "specs.json"
+    subprocess.check_call([
+        sys.executable, str(SCRIPT), "discover",
+        "--repo-root", str(tmp_path),
+        "--out", str(out),
+    ])
+    data = json.loads(out.read_text())
+    assert len(data) == 1
+    assert data[0]["spec_topic"] == "foo"
+
+
+def test_cli_unknown_subcommand_errors():
+    res = subprocess.run(
+        [sys.executable, str(SCRIPT), "wat"],
+        capture_output=True, text=True,
+    )
+    assert res.returncode != 0
+    assert "wat" in (res.stderr + res.stdout) or "invalid choice" in res.stderr
+
+
+def test_cli_write_csv_emits_snapshot_and_ledger(tmp_path):
+    rows_file = tmp_path / "rows.json"
+    rows_file.write_text(json.dumps([_row()]))
+    snapshot = tmp_path / "snap.csv"
+    ledger = tmp_path / "ledger.csv"
+    subprocess.check_call([
+        sys.executable, str(SCRIPT), "write-csv",
+        "--rows", str(rows_file),
+        "--snapshot", str(snapshot),
+        "--ledger", str(ledger),
+    ])
+    assert snapshot.exists() and ledger.exists()
