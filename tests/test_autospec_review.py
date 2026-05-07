@@ -72,3 +72,42 @@ def test_discover_specs_honors_glob_override(tmp_path):
         repo_root=tmp_path, globs=("weird/**/*.md",)
     )
     assert [p.spec_path for p in found] == ["weird/place/spec.md"]
+
+
+def test_link_issues_by_inline_number():
+    spec_text = "Tracker #260, fix #472, see also (#488)."
+    issues = [
+        {"number": 260, "state": "open",   "title": "x", "body": "", "labels": []},
+        {"number": 472, "state": "closed", "title": "y", "body": "", "labels": []},
+        {"number": 488, "state": "closed", "title": "z", "body": "", "labels": []},
+        {"number": 999, "state": "open",   "title": "irrelevant", "body": "", "labels": []},
+    ]
+    linked = ara.link_issues(spec_text=spec_text, spec_path="docs/specs/foo.md",
+                             spec_topic="foo", all_issues=issues)
+    nums = sorted(i["number"] for i in linked)
+    assert nums == [260, 472, 488]
+
+
+def test_link_issues_by_spec_path_in_body():
+    spec_text = ""
+    issues = [
+        {"number": 1, "state": "open", "title": "a", "body": "", "labels": []},
+        {"number": 2, "state": "open", "title": "b",
+         "body": "implements docs/specs/foo.md§3", "labels": []},
+    ]
+    linked = ara.link_issues(spec_text=spec_text, spec_path="docs/specs/foo.md",
+                             spec_topic="foo", all_issues=issues)
+    assert [i["number"] for i in linked] == [2]
+
+
+def test_link_issues_by_topic_label_or_title():
+    spec_text = ""
+    issues = [
+        {"number": 1, "state": "open", "title": "Add foo bar",      "body": "", "labels": []},
+        {"number": 2, "state": "open", "title": "Unrelated",        "body": "",
+         "labels": [{"name": "foo"}]},
+        {"number": 3, "state": "open", "title": "totally other",    "body": "", "labels": []},
+    ]
+    linked = ara.link_issues(spec_text=spec_text, spec_path="docs/specs/x.md",
+                             spec_topic="foo", all_issues=issues)
+    assert sorted(i["number"] for i in linked) == [1, 2]
