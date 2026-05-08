@@ -128,3 +128,29 @@ EOF
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "ALL_DONE"
 }
+
+# ===========================================================================
+# Test 6: AUTOSPEC_BATCH_SIZE=0 guard (guard against <=0 defaulting to batch-of-1)
+# ===========================================================================
+@test "check_monitor_batch_exit: SKILL.md with BATCH_SIZE guard for <=0 passes" {
+    local f="$SCRATCH/SKILL.md"
+    # Build a skill that has all required tokens including the guard line
+    cat > "$f" <<'EOF'
+---
+name: autospec-run
+version: 1.0.0
+---
+
+## Phase 4 — Background autonomous monitor
+
+> batch_issue_count=0; AUTOSPEC_BATCH_SIZE=${AUTOSPEC_BATCH_SIZE:-3}
+> [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null || BATCH_SIZE=3
+>
+> Write "$HOME/.autospec/batch-done.json" with status BATCH_COMPLETE after batch limit.
+> When queue drained write status ALL_DONE instead.
+EOF
+
+    run bash -c "source '$HELPER' && check_monitor_batch_exit '$f'" 2>&1
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "monitor-batch-exit"
+}

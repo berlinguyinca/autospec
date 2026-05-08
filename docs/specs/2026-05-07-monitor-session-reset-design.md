@@ -130,7 +130,7 @@ Values ≤ 0 or unset default to 3.
 | `skills/autospec-run/opencode/agent.md` | Lock-step sync with SKILL.md body |
 | `skills/autospec/codex/prompt.md` | Lock-step sync with SKILL.md body |
 | `skills/autospec/opencode/agent.md` | Lock-step sync with SKILL.md body |
-| `scripts/validate.sh` | No changes — existing bats runner picks up new test file automatically |
+| `scripts/validate.sh` | Add `check_monitor_batch_exit()` function + call in per-skill validation loop |
 | `tests/unit/test_monitor_batch_exit.bats` | New bats test file (see §6) |
 
 ---

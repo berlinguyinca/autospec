@@ -547,6 +547,7 @@ Pass the following prompt verbatim to each background subagent:
 > # Before the loop (run-once init):
 > #   batch_issue_count=0
 > #   BATCH_SIZE="${AUTOSPEC_BATCH_SIZE:-3}"
+> #   [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null || BATCH_SIZE=3   # guard against 0 or negative
 > #   rm -f "$HOME/.autospec/batch-done.json"   # clear stale file from prior crash
 >
 > while true:
@@ -590,6 +591,9 @@ Pass the following prompt verbatim to each background subagent:
 >     if [ "$AGE_SECS" -gt 86400 ]; then
 >       echo "WARN: stale stop.flag ($AGE_SECS s old); ignoring" >&2
 >     elif [ "$MODE" = "graceful" ] || [ "$MODE" = "immediate" ]; then
+>       printf '{"batch":%s,"processed":%s,"repo":"%s","ts":%s,"status":"ALL_DONE"}\n' \
+>         "${batch_num:-1}" "$batch_issue_count" "{repo}" "$(date -u +%s)" \
+>         > "$HOME/.autospec/batch-done.json"
 >       echo "[monitor] stop signal received: $MODE — exiting"
 >       # HARD SHUTDOWN with final report
 >       exit 0
