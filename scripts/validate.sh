@@ -259,6 +259,27 @@ check_harness_detection_block() {
         || fail "$name: ## Harness detection section present but missing 'silently' fallback reference"
 }
 
+check_monitor_batch_exit() {
+    local file="$1"
+    # Only enforce on skills that contain a Phase 4 monitor outer loop.
+    # Skills without Phase 4 (e.g. autospec-classify, autospec-review) are silently skipped.
+    if ! grep -q "^## Phase 4 — Background autonomous monitor" "$file" 2>/dev/null; then
+        return 0
+    fi
+    local name
+    name="$(basename "$(dirname "$file")")"
+    local missing=()
+    grep -q "batch_issue_count" "$file"   || missing+=("batch_issue_count")
+    grep -q "AUTOSPEC_BATCH_SIZE"  "$file" || missing+=("AUTOSPEC_BATCH_SIZE")
+    grep -q "batch-done.json"      "$file" || missing+=("batch-done.json")
+    grep -q "BATCH_COMPLETE"       "$file" || missing+=("BATCH_COMPLETE")
+    grep -q "ALL_DONE"             "$file" || missing+=("ALL_DONE")
+    if [ "${#missing[@]}" -gt 0 ]; then
+        fail "$name: monitor batch-exit missing: ${missing[*]}"
+    fi
+    info "monitor-batch-exit: $name"
+}
+
 # AGENTS.md must document the two-tier subagent model selection policy with
 # both Tier A and Tier B subsection headings.
 check_agents_md_subagent_section() {
@@ -519,6 +540,7 @@ main() {
         check_self_update "$skill_dir"
         check_subagent_model_tier "$skill_dir"
         check_harness_detection_block "$skill_dir/SKILL.md"
+        check_monitor_batch_exit "$skill_dir/SKILL.md"
     done
 
     check_startup_preflight
