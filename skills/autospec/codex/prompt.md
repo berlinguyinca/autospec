@@ -492,9 +492,34 @@ Record this durable preference in `AGENTS.md` (idempotent — skip if already pr
 
 > **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (`gh pr merge <#> --admin --squash --delete-branch`) when (a) all required CI checks pass — slow optional checks like TeamCity may be pending and that's acceptable, (b) the self-review subagent returned `LGTM`, (c) PR closes an `auto-implement` issue from a `feat/*` branch.
 
-Then launch a **background subagent** with this prompt verbatim:
+Then launch a **background monitor loop** — the orchestrator relaunches the monitor with fresh context after each batch of `AUTOSPEC_BATCH_SIZE` issues (default: 3). The monitor is stateless: all persistent state lives in GitHub labels and heartbeat files, so relaunches are always safe.
 
-> You are the auto-implement monitor for `{repo}`. Process every open `auto-implement` issue autonomously and auto-merge each PR. **You MUST stay running across many iterations. Do NOT exit after one issue.**
+```
+batch_num=1
+while true:
+  launch background subagent (pass batch_num; AUTOSPEC_BATCH_SIZE=${AUTOSPEC_BATCH_SIZE:-3})
+  wait for task-notification (monitor agent completes)
+
+  # Read and consume the batch-done signal.
+  if [ -f "$HOME/.autospec/batch-done.json" ]; then
+    status=$(jq -r .status "$HOME/.autospec/batch-done.json" 2>/dev/null || echo "BATCH_COMPLETE")
+    rm -f "$HOME/.autospec/batch-done.json"
+  else
+    status="BATCH_COMPLETE"   # monitor crashed / overflowed — safe to relaunch
+  fi
+
+  if [ "$status" = "ALL_DONE" ]; then
+    break   # proceed to Phase 6 final report
+  fi
+
+  batch_num=$((batch_num + 1))
+  echo "[orchestrator] batch $((batch_num - 1)) complete — relaunching monitor with fresh context (batch ${batch_num})"
+  # continue immediately, no sleep
+```
+
+Pass the following prompt verbatim to each background subagent:
+
+> You are the auto-implement monitor for `{repo}`. Process `auto-implement` issues one at a time. Exit after processing `AUTOSPEC_BATCH_SIZE` issues (default: 3) by writing `~/.autospec/batch-done.json` — the orchestrator will relaunch you with fresh context.
 
 > **Harness adaptation (loop persistence).** The `while true:` below is pseudocode. In Claude Code, use `/loop` or `ScheduleWakeup` to persist across turns. In Codex CLI and OpenCode, you lack a built-in loop primitive — implement persistence via one of these patterns:
 > 1. **Shell wrapper (preferred):** `exec bash << 'EOF'
@@ -506,13 +531,18 @@ Then launch a **background subagent** with this prompt verbatim:
 > 3. **tmux pane:** `tmux new-window 'bash << '''HEREDOC'''
 > while true; do ...; done
 > HEREDOC'`
-> **Never exit after processing one issue** — the loop must persist until shutdown (idle timeout, stop.flag, or all issues resolved).
+> **Session batching:** Exit after processing `AUTOSPEC_BATCH_SIZE` issues (default 3) by writing `~/.autospec/batch-done.json` with `status=BATCH_COMPLETE`. The orchestrator relaunches you with fresh context. When the queue is fully drained, write `status=ALL_DONE` instead. This keeps each monitor session short to prevent context overflow.
 
 >
 > **Shared helper scripts.** Helper scripts live at `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}` after installation. Do not assume the target repository has an autospec `scripts/` directory.
 >
 > Outer loop:
 > ```
+> # Before the loop (run-once init):
+> #   batch_issue_count=0
+> #   BATCH_SIZE="${AUTOSPEC_BATCH_SIZE:-3}"
+> #   rm -f "$HOME/.autospec/batch-done.json"   # clear stale file from prior crash
+>
 > while true:
 >   # Startup/per-scan heartbeat reconciliation — run before candidate selection.
 >   # This deletes closed/merged/orphaned heartbeats, rejects old schemas like
@@ -538,7 +568,12 @@ Then launch a **background subagent** with this prompt verbatim:
 >   if ready is empty:
 >     latest_close = most recent closedAt of any auto-implement issue
 >     open_count   = count of open auto-implement issues
->     if open_count == 0 AND latest_close > 2h ago: HARD SHUTDOWN — return final report
+>     if open_count == 0 AND latest_close > 2h ago:
+>       printf '{"batch":%s,"processed":%s,"repo":"%s","ts":%s,"status":"ALL_DONE"}\n' \
+>         "${batch_num:-1}" "$batch_issue_count" "{repo}" "$(date -u +%s)" \
+>         > "$HOME/.autospec/batch-done.json"
+>       echo "[monitor] all issues processed — writing ALL_DONE and exiting"
+>       HARD SHUTDOWN — return final report
 >     else: print state ("blocked: N unmet deps" / "drained, waiting 2h idle"), sleep 300, continue
 >   # autospec-stop sentinel check — outer loop, top of each iteration
 >   if [ -f "$HOME/.autospec/stop.flag" ]; then
@@ -626,6 +661,14 @@ Then launch a **background subagent** with this prompt verbatim:
 >   echo "[monitor] smoke: ${ISSUE_SMOKE:-<not provided>}"
 >   echo "[monitor] scope: ${ISSUE_SCOPE:-<not provided>}"
 >   process(ISSUE)   # foreground subagent — see template below
+>   batch_issue_count=$((batch_issue_count + 1))
+>   if [ "$batch_issue_count" -ge "$BATCH_SIZE" ]; then
+>     printf '{"batch":%s,"processed":%s,"repo":"%s","ts":%s,"status":"BATCH_COMPLETE"}\n' \
+>       "${batch_num:-1}" "$batch_issue_count" "{repo}" "$(date -u +%s)" \
+>       > "$HOME/.autospec/batch-done.json"
+>     echo "[monitor] batch ${batch_num:-1}: processed $batch_issue_count/$BATCH_SIZE issues — writing batch-done.json and exiting for fresh context"
+>     exit 0
+>   fi
 >   # Immediate next-issue pickup: NO SLEEP after process(ISSUE). Re-enter the top
 >   # of this loop immediately so the fresh queue scan can pick any issue unblocked
 >   # by the merge or failure cleanup that just completed.
