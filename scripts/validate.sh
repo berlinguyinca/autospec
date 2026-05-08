@@ -478,9 +478,9 @@ check_autospec_run_priority_sort_lockstep() {
 check_autospec_run_regression_review_lockstep() {
     info "autospec-run regression review lockstep"
     for variant in "skills/autospec-run/opencode/agent.md" "skills/autospec-run/codex/prompt.md"; do
-        grep -q "Regression review escalation" "$variant" \
+        grep -qE "Regression (review escalation|meta-review)" "$variant" \
             || fail "regression review block missing in $variant"
-        grep -q "Tier A (spec work)" "$variant" \
+        grep -qE "Tier A \(spec work\)|TIER_A" "$variant" \
             || fail "Tier A annotation missing in $variant"
     done
 }
