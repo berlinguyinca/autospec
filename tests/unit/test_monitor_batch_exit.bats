@@ -45,11 +45,10 @@ version: 1.0.0
 
 ## Phase 4 — Background autonomous monitor
 
-> batch_issue_count=0
-> AUTOSPEC_BATCH_SIZE=${AUTOSPEC_BATCH_SIZE:-3}
+> batch_issue_count=0; AUTOSPEC_BATCH_SIZE=${AUTOSPEC_BATCH_SIZE:-3}
 >
 > Write "$HOME/.autospec/batch-done.json" with status BATCH_COMPLETE after batch limit.
-> When queue drained write ALL_DONE.
+> When queue drained write status ALL_DONE instead.
 EOF
 }
 

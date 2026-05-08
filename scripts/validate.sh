@@ -263,7 +263,7 @@ check_monitor_batch_exit() {
     local file="$1"
     # Only enforce on skills that contain a Phase 4 monitor outer loop.
     # Skills without Phase 4 (e.g. autospec-classify, autospec-review) are silently skipped.
-    if ! grep -q "Phase 4" "$file" 2>/dev/null; then
+    if ! grep -q "^## Phase 4 — Background autonomous monitor" "$file" 2>/dev/null; then
         return 0
     fi
     local name
