@@ -498,6 +498,8 @@ Record this durable preference in `AGENTS.md` (idempotent — skip if already pr
 
 > **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (`gh pr merge <#> --admin --squash --delete-branch`) when (a) all required CI checks pass — slow optional checks like TeamCity may be pending and that's acceptable, (b) the self-review subagent returned `LGTM`, (c) PR closes an `auto-implement` issue from a `feat/*` branch.
 
+**Off-peak tip:** For queues of 10+ issues (8+ hour runs), consider launching at night or on weekends. Usage limits are shared across all sessions — running long batches off-peak preserves daytime tokens for interactive work.
+
 Then launch a **background monitor loop** — the orchestrator relaunches the monitor with fresh context after each batch of `AUTOSPEC_BATCH_SIZE` issues (default: 3). The monitor is stateless: all persistent state lives in GitHub labels and heartbeat files, so relaunches are always safe.
 
 ```
@@ -726,52 +728,52 @@ Pass the following prompt verbatim to each background subagent:
 >      exit 0
 >    fi
 >    ```
->    - Run the **Primary smoke test** from the issue body. If it fails, fix and recommit before guardian.
->    - **Guardian gate**:
+>    - Run the **Primary smoke test** from the issue body. If it fails, fix and recommit before review.
+>    - **Fused guardian + LGTM review** (one subagent does both — saves one dispatch per inner-loop iteration):
 >      <!-- guardian-block:begin -->
->      If `AUTOSPEC_NO_GUARDIAN=1` is set: log `WARN: guardian disabled by AUTOSPEC_NO_GUARDIAN` and skip to LGTM dispatch.
->      Otherwise:
+>      Run deterministic lint first (no subagent cost):
 >        rm -f /tmp/guardian-<PR>.md
->        bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh" <PR> --issue <ISSUE> >> /tmp/guardian-<PR>.md
+>        if [ "${AUTOSPEC_NO_GUARDIAN:-0}" != "1" ]; then
+>          bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh" <PR> --issue <ISSUE> >> /tmp/guardian-<PR>.md 2>&1
+>        fi
 >        det_exit=$?
->        Dispatch a **foreground subagent** (Tier A) with this brief verbatim:
->        > **Model tier:** `TIER_A` (spec work) — top model with extended thinking; resolved at startup.
+>
+>      **Model tier:** `TIER_B` for normal issues; `TIER_A` for `regression`/`priority:high` issues. Silently fall back to `TIER_A` if `TIER_B` unavailable.
+>
+>      Dispatch ONE **foreground subagent** with this brief:
+>        > You are the implementation reviewer for PR #<PR> on {repo}, closing issue #<ISSUE>.
 >        >
->        > You are the implementation guardian for PR #<PR> on {repo}, derived from issue #<ISSUE>.
->        >
+>        > **Part 1 — Guardian (contract compliance)** — skip if `AUTOSPEC_NO_GUARDIAN=1`:
 >        > 1. Read AGENTS.md `## Implementation-quality contract` for the RULE_ID table and directive map.
 >        > 2. Read issue #<ISSUE> body — note `## Implementation scope`, `## Implementation outline`, `## Tests required`, and any `Guardian: skip-*` lines.
->        > 3. Read deterministic findings already in /tmp/guardian-<PR>.md.
+>        > 3. Read deterministic findings in /tmp/guardian-<PR>.md (populated by lint-implementation.sh; may be empty if guardian disabled).
 >        > 4. Run `gh pr diff <PR>` and `gh pr view <PR> --json files,title,body`.
->        > 5. Apply the LLM-tier RULE_IDs (HALLUCINATED_API, DUPLICATE_CODE, DOC_OUT_OF_SYNC semantic pass, INVENTED_CONFIG). Append findings to /tmp/guardian-<PR>.md as `RULE_ID:<path>:<line>: <one-line description>`. Honor `Guardian: skip-*` opt-outs by emitting `INFO:` instead of blocking.
->        > 6. Hard limits: max **20 tool calls**. If you cannot reach a verdict in 20 calls, append `RULE_ID:OUT_OF_SCOPE: guardian budget exhausted; PR needs human review` and exit.
->        > 7. If you appended ZERO blocking findings (only INFO lines OK), return ONLY the token: `GUARDIAN_PASS`. Otherwise return ONLY: `GUARDIAN_FAIL`.
->        If GUARDIAN_PASS && det_exit == 0:
->          gh pr comment <PR> --body "<!-- guardian-block --> Guardian: clean. <!-- /-->"
->          proceed to LGTM dispatch.
->        Else:
->          gh pr comment <PR> --edit-last --body "$(cat <<'GCMT'
->          <!-- guardian-block:begin -->
->          ## Guardian findings (iter <K>/3)
->          $(cat /tmp/guardian-<PR>.md | grep -v '^#' | sed 's/^/- /')
->          *Re-evaluated on every push. Last update: $(date -u +%Y-%m-%dT%H:%M:%SZ).*
->          <!-- guardian-block:end -->
->          GCMT
->          )"
->          Append findings to implementer retry context as:
->          ## Guardian directives — clear before re-push
->          $(cat /tmp/guardian-<PR>.md | grep -v '^INFO:' | grep -v '^#')
->          Continue inner loop (counts toward 3-iter cap).
->        On 3-iter exhaustion with GUARDIAN_FAIL:
->          gh label create guardian-blocked --color e11d21 --force --repo {repo}
->          gh issue edit <ISSUE> --add-label guardian-blocked
->          Append ## Guardian audit (failed) block to issue body.
->          Run existing failure cleanup (comment, swap label, close PR).
->          rm -f /tmp/guardian-<PR>.md
+>        > 5. Apply LLM-tier RULE_IDs (HALLUCINATED_API, DUPLICATE_CODE, DOC_OUT_OF_SYNC semantic pass, INVENTED_CONFIG). Collect as `RULE_ID:<path>:<line>: <desc>`. Honor `Guardian: skip-*` with `INFO:` lines.
+>        >
+>        > **Part 2 — LGTM (correctness review):** Using the same diff and issue body already in context:
+>        > 6. Check correctness, edge cases, missing tests, AGENTS.md compliance (TDD, no mocks, conventional commits).
+>        > 7. Collect findings as a numbered list.
+>        >
+>        > **Hard limit:** max **25 tool calls total** (Parts 1 + 2 combined). If budget exhausted, append `RULE_ID:OUT_OF_SCOPE: reviewer budget exhausted; PR needs human review` and proceed to verdict.
+>        >
+>        > **Verdict:** If Part 1 has ZERO blocking findings (INFO lines OK) AND Part 2 has no findings: return ONLY the token: `LGTM`. Otherwise return a numbered findings list — RULE_ID findings first, then LGTM findings.
+>
+>      If `LGTM` && det_exit == 0:
+>        gh pr comment <PR> --body "<!-- guardian-block --> Review: clean. <!-- /-->"
+>        run **Operator/full verification**; sleep 30; `gh pr checks <PR>`; break SUCCESS if required checks pass.
+>      If `LGTM` but det_exit != 0:
+>        Treat deterministic findings as blocking. Comment, fix, recommit, push. Continue inner loop.
+>      If findings list:
+>        gh pr comment <PR> --edit-last --body "<!-- guardian-block:begin -->\n## Review findings (iter <K>/3)\n<findings>\n<!-- guardian-block:end -->"
+>        Append findings to implementer retry context. Continue inner loop (counts toward 3-iter cap).
+>      On 3-iter exhaustion with non-LGTM:
+>        gh label create guardian-blocked --color e11d21 --force --repo {repo}
+>        gh issue edit <ISSUE> --add-label guardian-blocked
+>        Run failure cleanup (comment, swap label, close PR).
+>        rm -f /tmp/guardian-<PR>.md
 >      <!-- guardian-block:end -->
->    - Dispatch a **foreground subagent** with brief: "**Model tier:** `TIER_B` (implementation work) — cheaper model with medium thinking; resolved at startup. Silently fall back to `TIER_A` if unavailable. You are a critical code reviewer. Review PR #<PR> via `gh pr diff` and `gh pr view`. Check correctness, edge cases, missing tests, AGENTS.md compliance. Output a numbered findings list, OR if none, return ONLY the token: LGTM"
->    - If LGTM: run the **Operator/full verification** commands; sleep 30; `gh pr checks <PR>`. If all required checks pass (slow optional checks pending is OK per AGENTS.md): break SUCCESS.
->    - Else: implement findings, commit, push, continue.
+>    - **Regression meta-review** (only for `regression`/`priority:high` issues, after LGTM passes): dispatch a second `TIER_A` subagent: "Would the fused reviewer have caught the original gap? If yes, add missing checklist items to `reports/autospec-review/reviewer-lessons.md` (entry per item, parent gap_id, date) and re-review. Both passes must approve before merge."
+>    - If LGTM (and meta-review passes if applicable): break SUCCESS.
 >    ```bash
 >    # autospec-stop sentinel check — inside process(ISSUE), after each major step
 >    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then

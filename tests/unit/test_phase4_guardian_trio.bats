@@ -26,8 +26,8 @@ extract_guardian_block() {
     [ -n "$block" ] || { echo "guardian block empty in autospec/SKILL.md"; return 1; }
     printf '%s\n' "$block" | grep -q 'AUTOSPEC_NO_GUARDIAN' \
         || { echo "missing AUTOSPEC_NO_GUARDIAN in autospec/SKILL.md guardian block"; return 1; }
-    printf '%s\n' "$block" | grep -q 'GUARDIAN_PASS' \
-        || { echo "missing GUARDIAN_PASS in autospec/SKILL.md guardian block"; return 1; }
+    printf '%s\n' "$block" | grep -qE 'GUARDIAN_PASS|LGTM' \
+        || { echo "missing GUARDIAN_PASS or LGTM verdict in autospec/SKILL.md guardian block"; return 1; }
 }
 
 @test "autospec codex prompt guardian block byte-equals SKILL.md" {
@@ -53,8 +53,8 @@ extract_guardian_block() {
     [ -n "$block" ] || { echo "guardian block empty in autospec-run/SKILL.md"; return 1; }
     printf '%s\n' "$block" | grep -q 'AUTOSPEC_NO_GUARDIAN' \
         || { echo "missing AUTOSPEC_NO_GUARDIAN in autospec-run/SKILL.md guardian block"; return 1; }
-    printf '%s\n' "$block" | grep -q 'GUARDIAN_PASS' \
-        || { echo "missing GUARDIAN_PASS in autospec-run/SKILL.md guardian block"; return 1; }
+    printf '%s\n' "$block" | grep -qE 'GUARDIAN_PASS|LGTM' \
+        || { echo "missing GUARDIAN_PASS or LGTM verdict in autospec-run/SKILL.md guardian block"; return 1; }
 }
 
 @test "autospec-run codex prompt guardian block byte-equals SKILL.md" {
