@@ -49,7 +49,7 @@ Detect your harness by checking available tools before any phase:
    - `TIER_A` = current top GPT model + `reasoning_effort=high`
    - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
 
-**Fallback rule:** If `TIER_B` is not available in your harness (model unknown, tool absent, or tool call returns an error for that model), silently use `TIER_A` instead. Never ask the user.
+**Fallback rule:** If `TIER_B` is not available in your harness (model unknown, quota/capacity failure, authorization failure, or tool call returns an error for that model), silently retry the same subagent dispatch with `TIER_A`. Preserve the parent context on retry; for Codex native subagents, fork/inherit the current conversation context and use the latest top GPT model instead of moving the work into the main session. Never ask the user.
 
 Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B" reference below resolves to these harness-specific values.
 

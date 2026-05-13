@@ -56,12 +56,23 @@ maps to these harness-specific values.
    - `TIER_A` = current top GPT model + `reasoning_effort=high`
    - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
 
-**Fallback rule:** If TIER_B is unavailable in your harness (model unknown, tool absent, or
-tool call returns an error for that model), silently use TIER_A instead. Never ask the user.
+**Fallback rule:** If TIER_B is unavailable in your harness (model unknown, quota/capacity
+failure, authorization failure, or tool call returns an error for that model), silently
+retry the same subagent dispatch with TIER_A instead. Never collapse the delegated work
+back into the main session solely because the Spark/cheap model failed.
+
+**Context preservation rule:** Model fallback must preserve the parent context. For Codex
+native subagents, fork/inherit the current conversation context when retrying on the
+latest top GPT model so the upgraded subagent sees the same task state, repository
+findings, and constraints as the failed Spark attempt.
 
 ### Flexibility rule (both tiers)
 
-If the preferred model name is rejected (deprecated, capacity, unauthorized), retry with the next tier **UP** — never silently downgrade below the tier's intent. Never hard-code exact version strings in dispatch code; resolve "current Opus / Sonnet / spark / top GPT" at call time so the skill survives model-family churn.
+If the preferred model name is rejected (deprecated, quota/capacity, unauthorized), retry
+the subagent with the next tier **UP** — never silently downgrade below the tier's intent
+and never switch to main-lane execution just because the cheaper model failed. Never
+hard-code exact version strings in dispatch code; resolve "current Opus / Sonnet / spark /
+top GPT" at call time so the skill survives model-family churn.
 
 ### Tier assignment by phase (quick reference)
 
