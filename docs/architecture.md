@@ -89,8 +89,11 @@ of two tiers:
   - OpenCode: smaller task tier.
 
 Fallback rule: on tier-unavailability, fall **UP** the tier (Tier B
-falls back UP to Tier A — never the other direction). The orchestrator
-itself stays at the user's invoked model.
+falls back UP to Tier A — never the other direction). Quota/capacity
+failures on Spark-class Codex subagents retry the same delegated task on
+the current top GPT model instead of moving the work back into the main
+session. The orchestrator itself stays at the user's invoked model, and
+the retried subagent must preserve the parent context.
 
 Per-skill counts (validated by `scripts/validate.sh`):
 

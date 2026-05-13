@@ -42,8 +42,11 @@ Detect your harness by checking available tools before any phase:
    TIER_A = current top GPT model + `reasoning_effort=high`
    TIER_B = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
 
-**Fallback rule:** If TIER_B is not available in your harness (model unknown, tool absent, or
-tool call returns an error for that model), silently use TIER_A instead. Never ask the user.
+**Fallback rule:** If TIER_B is not available in your harness (model unknown, quota/capacity
+failure, authorization failure, or tool call returns an error for that model), silently retry
+the same subagent dispatch with TIER_A instead. Preserve parent context on retry; for Codex,
+Spark quota/capacity failures move the subagent up to the current top GPT model instead of
+moving the work back into the main session. Never ask the user.
 
 Hold TIER_A and TIER_B for the entire skill run. Every "Tier A" and "Tier B" reference below
 resolves to these harness-specific values.
@@ -57,7 +60,7 @@ Replace every verbose multi-harness tier string in subagent dispatch `> **Model 
 ```
 > **Model tier:** Tier A (spec work) — top model with extended/maximum thinking per AGENTS.md.
 > Claude Code: `opus` + `ultrathink`; Codex: current top GPT + `reasoning_effort=high`;
-> OpenCode: top task tier. Fall back UP on unavailability.
+> OpenCode: top task tier. Fall back UP by retrying the same subagent with parent context.
 ```
 
 **Tier A brief (after):**
@@ -69,7 +72,7 @@ Replace every verbose multi-harness tier string in subagent dispatch `> **Model 
 ```
 > **Model tier:** Tier B (implementation work) — cheaper model with medium thinking per AGENTS.md.
 > Claude Code: `sonnet`; Codex: `gpt-5.1-codex-spark`; OpenCode: smaller task tier.
-> Fall back UP on unavailability.
+> Fall back UP by retrying the same subagent with parent context.
 ```
 
 **Tier B brief (after):**
@@ -85,7 +88,7 @@ The guardian audit brief (Tier A variant inside process(ISSUE)) follows the same
 Add a `### Harness detection protocol` subsection to the existing `## Subagent model selection (two-tier, cost-aware)` section that:
 
 1. Documents the three-step detection logic (mirrors §2.1 above).
-2. States the fallback rule explicitly: "If TIER_B is unavailable in your harness, silently use TIER_A. Do not ask the user."
+2. States the fallback rule explicitly: "If TIER_B is unavailable in your harness, silently retry the same subagent dispatch with TIER_A while preserving parent context. Do not ask the user."
 3. Cross-references the per-harness model names already listed in the tier table.
 
 The existing `## Subagent model selection` heading and tier table are preserved unchanged so `validate.sh` keeps passing.
