@@ -215,7 +215,14 @@ Run a structured brainstorm — one question at a time, get explicit approval af
 4. **Error handling** — failure modes, recovery, user-visible signals.
 5. **Testing** — unit / integration / e2e split, real services vs anything else (rule per AGENTS.md: real services).
 
-Write the agreed design to `docs/specs/YYYY-MM-DD-<topic>-design.md`. Self-review for placeholders, contradictions, ambiguity, scope. The spec must be implementable end-to-end by an agent reading only the spec.
+Write the agreed design to `docs/specs/YYYY-MM-DD-<topic>-design.md`, then run a **fresh-eyes self-review** before any issue is filed:
+
+1. **Placeholders** — grep the spec for `TBD`, `TODO`, `later`, `fixme`, `tbd`, `XXX`. Fill in or surface to the operator as an open question; do not file issues against an undecided spec.
+2. **Internal consistency** — re-read each section in order. Do any two sections contradict each other? Does the architecture match the feature descriptions? Fix inline.
+3. **Ambiguity** — could any requirement be interpreted two different ways? Pick one and make it explicit in the spec text.
+4. **Scope** — is this focused enough for a single multi-issue pipeline, or does it span independent subsystems that each need their own `/autospec-define` run? If the latter, stop and ask the operator to decompose before proceeding.
+
+The spec must be implementable end-to-end by an agent reading only the spec.
 
 If this is a fresh repo, commit the spec to `main` directly (`git add docs/... && git commit -m "docs: <topic> design spec" && git push`) so subsequent issues can reference it as a tracked file.
 
@@ -237,7 +244,15 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 >
 > Read the selected design spec at `<spec-path>` (`<spec-github-url>`) and split it into linked GitHub issues for {repo}.
 >
-> Create labels (idempotent with `--force`): `auto-implement` (#0e8a16), `epic` (#b60205), plus any domain labels the spec calls for. Then create exactly N issues — first an EPIC umbrella (no `auto-implement` label, just `epic` + domain), then N-1 children all carrying `auto-implement`. After creating children, edit the umbrella body with a checklist linking them. Return JSON: `{umbrella, children:[…], labels_created:[…]}`. Use `gh` CLI only. Do NOT modify code. Do NOT push branches. Do NOT create PRs.
+> Create labels (idempotent with `--force`): `auto-implement` (#0e8a16), `epic` (#b60205), `autospec:v2-flow` (#0e8a16, description: "Routes to absorbed-discipline Phase 4 implementer"), plus any domain labels the spec calls for. Then create exactly N issues — first an EPIC umbrella (no `auto-implement` label, just `epic` + domain), then N-1 children all carrying `auto-implement` **and `autospec:v2-flow`**. The `autospec:v2-flow` label routes the child to the Phase 4 implementer that absorbs turbo's expand → implement → finalize → peer-review → evaluate discipline; children filed without it fall back to the legacy implementer path. After creating children, edit the umbrella body with a checklist linking them. Return JSON: `{umbrella, children:[…], labels_created:[…]}`. Use `gh` CLI only. Do NOT modify code. Do NOT push branches. Do NOT create PRs.
+>
+> Before drafting each candidate child issue, ask yourself three shell-structure questions (internal — do NOT write them into the issue body):
+>
+> - **Produces** — What new files, exports, or behavior does this issue create? If the answer is "edits scattered across many existing files with no clear new contract", reconsider the boundary.
+> - **Consumes** — What existing files or outputs of earlier issues does this depend on? Each named dependency on an earlier issue translates to a `Depends on issue #N` line in the body.
+> - **Covers** — Which sections of the spec does this issue implement? If multiple unrelated sections, split. If no spec section, reconsider whether the issue belongs.
+>
+> If two adjacent candidate issues have heavy mutual Consumes/Produces overlap, they probably want to be merged. If one issue has more than ~5 named Produces, it probably wants to be split.
 >
 > Each child body must be a **self-contained mini-spec** sized for execution by a 32B-class local LLM, with these sections in order:
 >
