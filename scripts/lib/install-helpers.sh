@@ -18,6 +18,8 @@ merge_marked_block() {
     local content_file
     tmp=$(mktemp)
     content_file=$(mktemp)
+    # Clean both temp files on any return path (including mv failure under set -e).
+    trap 'rm -f "$tmp" "$content_file"' RETURN
 
     [ -f "$file" ] || touch "$file"
     printf '%s\n' "$content" > "$content_file"
@@ -49,7 +51,7 @@ merge_marked_block() {
     fi
 
     mv "$tmp" "$file"
-    rm -f "$content_file"
+    # Temp files cleaned by RETURN trap above.
 }
 
 # Check if a command exists on PATH.

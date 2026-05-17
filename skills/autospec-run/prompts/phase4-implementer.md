@@ -65,7 +65,7 @@ If Peer-review skipped: skip this step.
 
 Immediately before `gh pr create`:
 
-1. Re-check every `Depends on issue #N` line in the body. For each, run `gh pr list --search "linked:#<N>" --state merged --json number,mergedAt` and confirm the linked PR is merged with a non-null `mergedAt`. (Or use whatever lock-step check the monitor's outer loop uses; both must agree.)
+1. Re-check every `Depends on issue #N` line in the body. For each, run `gh issue view <N> --json state --jq .state` and confirm it returns `CLOSED`. This matches the monitor's outer-loop check exactly — both must agree, and a state-based check is robust to deps closed via revert / manual close / non-`Closes` PR keywords.
 2. If any lockstep dep is not yet merged: do NOT open the PR. Comment on the issue noting which dep is blocking, and exit. The monitor will pick this issue up again later.
 3. If all deps are merged: open the PR with `gh pr create`. PR body must include `Closes #<issue-N>`.
 
