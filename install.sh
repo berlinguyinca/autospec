@@ -281,7 +281,21 @@ info "  harness:  $HARNESSES_TO_RUN"
 [ "$DRY_RUN" -eq 1 ] && info "  mode:     --dry-run (no changes written)"
 info ""
 
-# Integration bootstrap: pull turbo + symlink, before per-skill installers run.
+pull_autospec() {
+    # Only runs under --update. Fast-forwards the autospec checkout if it has a
+    # remote tracking branch; otherwise leaves it alone with a warning.
+    [ "$UPDATE" -eq 1 ] || return 0
+    info "pull_autospec: fast-forwarding autospec checkout at $REPO_ROOT"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] pull_autospec: would git pull --ff-only in $REPO_ROOT"
+        return 0
+    fi
+    git -C "$REPO_ROOT" pull --ff-only 2>/dev/null \
+        || warn "pull_autospec: git pull failed (offline or no tracking branch); continuing"
+}
+
+# Integration bootstrap: pull autospec (if --update) + turbo, before per-skill installers run.
+pull_autospec
 bootstrap_turbo
 check_codex
 merge_claude_md
