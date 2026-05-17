@@ -113,6 +113,17 @@ curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/
   | sh -s -- --harness all
 ```
 
+### Turbo integration
+
+`install.sh` also bootstraps [tobihagemann/turbo](https://github.com/tobihagemann/turbo) as a peer skill family:
+
+- Clones (or fast-forward pulls) `~/.turbo/repo` and symlinks turbo skills into `~/.claude/skills/`.
+- Checks for the [Codex CLI](https://github.com/openai/codex). When present, autospec's Phase 4 implementer (issues labelled `autospec:v2-flow`) runs an inline peer-review pass on each diff before opening a PR. When absent, peer-review skips gracefully and the implementer continues.
+- Idempotently merges an `<!-- autospec-block -->` section into `~/.claude/CLAUDE.md` documenting both stacks' entrypoints.
+- Inside a git repo, offers to add `.autospec/` to `.gitignore` (auto-accept via `AUTOSPEC_AUTO_YES=1`).
+
+Turbo bootstrap failures are non-fatal: offline or no-remote setups continue using the cached turbo checkout.
+
 ## Update
 
 Each installed suite skill runs a startup self-update check at most once every
@@ -131,6 +142,8 @@ Force an in-place suite update:
 ```bash
 ./install.sh --skill all --harness all --update
 ```
+
+`--update` also fast-forwards the autospec checkout itself and pulls `~/.turbo/repo`, so a single command keeps both autospec and turbo current.
 
 Or invoke any installed skill with `update`:
 
