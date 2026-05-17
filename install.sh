@@ -64,6 +64,17 @@ run_or_report() {
     fi
 }
 
+check_codex() {
+    if command_present codex; then
+        info "check_codex: codex CLI present ($(command -v codex))"
+        return 0
+    fi
+    info "check_codex: codex CLI NOT found on PATH."
+    info "  Phase 4 peer-review will skip gracefully until codex is installed."
+    info "  Install: see https://github.com/openai/codex (or your package manager)."
+    return 0
+}
+
 bootstrap_turbo() {
     if [ -d "$TURBO_REPO_DIR/.git" ]; then
         run_or_report "bootstrap_turbo: pulling tobihagemann/turbo at $TURBO_REPO_DIR" \
@@ -206,6 +217,7 @@ info ""
 
 # Integration bootstrap: pull turbo + symlink, before per-skill installers run.
 bootstrap_turbo
+check_codex
 
 for skill in $SKILLS_TO_RUN; do
     skill_installer="$SKILLS_DIR/$skill/install.sh"
