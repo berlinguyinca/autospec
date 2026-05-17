@@ -421,6 +421,19 @@ issues unblock the queue before continuing with normal feature work.
 >   # by the merge or failure cleanup that just completed.
 > ```
 >
+> ### Implementer prompt selection (turbo-integration routing)
+>
+> Before dispatching, read the issue's labels:
+>
+> ```bash
+> labels=$(gh issue view <ISSUE> --json labels --jq '[.labels[].name] | join(",")')
+> ```
+>
+> - **If `labels` contains `autospec:v2-flow`** — load the prompt template from `skills/autospec-run/prompts/phase4-implementer.md` (relative to this skill's install location, or via `AUTOSPEC_SKILLS_DIR`/the harness's skill mount). That prompt embeds the absorbed-discipline path: expand → implement → finalize → peer-review (via `codex exec`) → evaluate-findings. Use it verbatim as the subagent prompt body.
+> - **Otherwise** — use the legacy inline prompt below (current behavior). Legacy path is retained until every pre-v2 issue has drained.
+>
+> Both paths share the same outer monitor loop (queue scan, lock-step compliance, label-based locking, heartbeat updates, post-process pickup). The selection only changes the inner subagent prompt body.
+>
 > `process(ISSUE)` dispatches a **foreground subagent** (wait for return) with this prompt:
 >
 > ```
