@@ -7,6 +7,7 @@
 - Activation keywords: `autospec`, `ship this feature`, `autonomous feature shipping`, `bootstrap repo and ship`, `decompose and auto-implement`, `run the autonomous loop`, `create issues and auto-merge`, `auto-implement this feature`, `ship end-to-end`, `turn this spec into GitHub issues`, `roadmap this spec`, `materialize this spec`, `split existing spec`, `split latest spec`
 - Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
 - Status: 7-phase workflow (bootstrap → investigate → design → decompose → background monitor → status updates → final report) with admin-squash-merge of `auto-implement`-labeled PRs.
+- Turbo integration (since 2026-05-17): `install.sh` bootstraps [tobihagemann/turbo](https://github.com/tobihagemann/turbo) as a peer skill family and `--update` keeps both stacks current. Issues filed by `/autospec-define` carry the `autospec:v2-flow` label, which routes the Phase 4 implementer to a prompt at `skills/autospec-run/prompts/phase4-implementer.md` that absorbs turbo's expand → implement → finalize → peer-review → evaluate-findings discipline inline. Peer-review uses Codex CLI; gracefully skips when absent. See [`docs/superpowers/specs/2026-05-17-turbo-autospec-integration-design.md`](docs/superpowers/specs/2026-05-17-turbo-autospec-integration-design.md).
 
 ## autospec-listen
 
