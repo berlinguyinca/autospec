@@ -31,6 +31,13 @@ set -eu
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_DIR="$REPO_ROOT/skills"
 
+# shellcheck source=scripts/lib/install-helpers.sh
+. "$REPO_ROOT/scripts/lib/install-helpers.sh"
+
+TURBO_REPO_DIR="${TURBO_REPO_DIR:-$HOME/.turbo/repo}"
+TURBO_REMOTE="https://github.com/tobihagemann/turbo.git"
+CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
+
 ALL_SKILLS="autospec autospec-split autospec-define autospec-run autospec-review autospec-classify autospec-listen autospec-story autospec-stop"
 ALL_HARNESSES="claude opencode codex"
 
@@ -45,6 +52,51 @@ info() { printf '%s\n' "$*"; }
 
 usage() {
     sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+run_or_report() {
+    description="$1"; shift
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] $description: $*"
+    else
+        info "$description"
+        "$@"
+    fi
+}
+
+bootstrap_turbo() {
+    if [ -d "$TURBO_REPO_DIR/.git" ]; then
+        run_or_report "bootstrap_turbo: pulling tobihagemann/turbo at $TURBO_REPO_DIR" \
+            git -C "$TURBO_REPO_DIR" pull --ff-only
+    else
+        run_or_report "bootstrap_turbo: cloning tobihagemann/turbo to $TURBO_REPO_DIR" \
+            git clone --depth 1 "$TURBO_REMOTE" "$TURBO_REPO_DIR"
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] bootstrap_turbo: would symlink turbo skills into $CLAUDE_SKILLS_DIR/"
+        return 0
+    fi
+
+    turbo_skills_src=""
+    for candidate in "$TURBO_REPO_DIR/claude/skills" "$TURBO_REPO_DIR/skills"; do
+        if [ -d "$candidate" ]; then
+            turbo_skills_src="$candidate"
+            break
+        fi
+    done
+    if [ -z "$turbo_skills_src" ]; then
+        warn "bootstrap_turbo: no skills directory found under $TURBO_REPO_DIR; turbo layout changed?"
+        return 0
+    fi
+
+    mkdir -p "$CLAUDE_SKILLS_DIR"
+    for skill_dir in "$turbo_skills_src"/*; do
+        [ -d "$skill_dir" ] || continue
+        skill_name="$(basename "$skill_dir")"
+        ln -sfn "$skill_dir" "$CLAUDE_SKILLS_DIR/$skill_name"
+    done
+    info "bootstrap_turbo: turbo skills symlinked into $CLAUDE_SKILLS_DIR/"
 }
 
 maybe_prompt_star() {
@@ -149,7 +201,11 @@ info "autospec suite installer"
 info "  skills:   $SKILLS_TO_RUN"
 info "  harness:  $HARNESSES_TO_RUN"
 [ "$UPDATE" -eq 1 ] && info "  mode:     --update (idempotent overwrite)"
+[ "$DRY_RUN" -eq 1 ] && info "  mode:     --dry-run (no changes written)"
 info ""
+
+# Integration bootstrap: pull turbo + symlink, before per-skill installers run.
+bootstrap_turbo
 
 for skill in $SKILLS_TO_RUN; do
     skill_installer="$SKILLS_DIR/$skill/install.sh"
