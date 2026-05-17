@@ -18,8 +18,6 @@ merge_marked_block() {
     local content_file
     tmp=$(mktemp)
     content_file=$(mktemp)
-    # Clean both temp files on any return path (including mv failure under set -e).
-    trap 'rm -f "$tmp" "$content_file"' RETURN
 
     [ -f "$file" ] || touch "$file"
     printf '%s\n' "$content" > "$content_file"
@@ -50,8 +48,15 @@ merge_marked_block() {
         } >> "$tmp"
     fi
 
-    mv "$tmp" "$file"
-    # Temp files cleaned by RETURN trap above.
+    # Inline cleanup. Avoid RETURN trap here: bash RETURN traps are shell-scoped
+    # by default and leak into caller frames, where $tmp would be unset and trip
+    # set -u in install.sh.
+    if mv "$tmp" "$file"; then
+        rm -f "$content_file"
+        return 0
+    fi
+    rm -f "$tmp" "$content_file"
+    return 1
 }
 
 # Check if a command exists on PATH.
