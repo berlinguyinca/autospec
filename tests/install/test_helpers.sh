@@ -22,4 +22,18 @@ grep -q "updated content" "$tmpfile" || { echo "FAIL: content not updated"; exit
 ! grep -q "test content" "$tmpfile" || { echo "FAIL: old content not removed"; exit 1; }
 
 rm "$tmpfile"
+
+# Test: incomplete-block input gets repaired (no closing marker synthesized and new content inserted)
+tmpfile2=$(mktemp)
+cat > "$tmpfile2" <<'EOF'
+header line
+<!-- testmarker -->
+old content (no closing tag)
+EOF
+merge_marked_block "$tmpfile2" "testmarker" "fresh content"
+grep -q "fresh content" "$tmpfile2" || { echo "FAIL: new content not inserted into incomplete block"; exit 1; }
+grep -q "<!-- /testmarker -->" "$tmpfile2" || { echo "FAIL: closing marker not synthesized"; exit 1; }
+grep -q "header line" "$tmpfile2" || { echo "FAIL: content before block lost after incomplete-block repair"; exit 1; }
+rm "$tmpfile2"
+
 echo "PASS"

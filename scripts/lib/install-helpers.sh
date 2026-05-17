@@ -17,18 +17,19 @@ merge_marked_block() {
     local tmp
     tmp=$(mktemp)
 
-    [[ -f "$file" ]] || touch "$file"
+    [ -f "$file" ] || touch "$file"
 
     if grep -q "$start" "$file"; then
         awk -v s="$start" -v e="$end" -v c="$content" '
             $0 == s { print; print c; in_block=1; next }
             $0 == e { in_block=0; print; next }
             !in_block { print }
+            END { if (in_block) print e }
         ' "$file" > "$tmp"
     else
         cat "$file" > "$tmp"
         {
-            [[ -s "$tmp" ]] && echo ""
+            [ -s "$tmp" ] && echo ""
             echo "$start"
             echo "$content"
             echo "$end"
@@ -49,6 +50,6 @@ command_present() {
 ensure_line_in_file() {
     local file="$1"
     local line="$2"
-    [[ -f "$file" ]] || touch "$file"
+    [ -f "$file" ] || touch "$file"
     grep -qxF "$line" "$file" || echo "$line" >> "$file"
 }
