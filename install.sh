@@ -64,6 +64,45 @@ run_or_report() {
     fi
 }
 
+offer_gitignore() {
+    # Offer to add `.autospec/` to the current repo's .gitignore so the integration
+    # scratch directory does not pollute git status. No-op outside a git repo.
+    git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+    repo_root="$(git rev-parse --show-toplevel)"
+    gitignore="$repo_root/.gitignore"
+    entry=".autospec/"
+
+    if [ -f "$gitignore" ] && grep -qxF "$entry" "$gitignore"; then
+        return 0
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] offer_gitignore: would add $entry to $gitignore"
+        return 0
+    fi
+
+    if [ "${AUTOSPEC_AUTO_YES:-0}" = "1" ]; then
+        ensure_line_in_file "$gitignore" "$entry"
+        info "offer_gitignore: added $entry to $gitignore"
+        return 0
+    fi
+
+    # Only prompt on real interactive TTYs; otherwise skip silently.
+    [ -t 0 ] && [ -t 1 ] || return 0
+
+    printf "offer_gitignore: add '%s' to %s? [y/N] " "$entry" "$gitignore"
+    read -r reply || return 0
+    case "$reply" in
+        y|Y|yes|YES|Yes)
+            ensure_line_in_file "$gitignore" "$entry"
+            info "offer_gitignore: added $entry to $gitignore"
+            ;;
+        *)
+            info "offer_gitignore: skipped"
+            ;;
+    esac
+}
+
 merge_claude_md() {
     claude_md="$HOME/.claude/CLAUDE.md"
     block_file="$REPO_ROOT/scripts/lib/claude-md-block.txt"
@@ -96,11 +135,19 @@ check_codex() {
 
 bootstrap_turbo() {
     if [ -d "$TURBO_REPO_DIR/.git" ]; then
-        run_or_report "bootstrap_turbo: pulling tobihagemann/turbo at $TURBO_REPO_DIR" \
-            git -C "$TURBO_REPO_DIR" pull --ff-only
+        info "bootstrap_turbo: pulling tobihagemann/turbo at $TURBO_REPO_DIR"
+        if [ "$DRY_RUN" -eq 0 ]; then
+            # Tolerate pull failures (no remote configured, offline, etc.) — turbo
+            # is a nice-to-have peer skill family; absence shouldn't block install.
+            git -C "$TURBO_REPO_DIR" pull --ff-only 2>/dev/null \
+                || warn "bootstrap_turbo: pull failed (no remote or offline); using cached turbo"
+        fi
     else
-        run_or_report "bootstrap_turbo: cloning tobihagemann/turbo to $TURBO_REPO_DIR" \
-            git clone --depth 1 "$TURBO_REMOTE" "$TURBO_REPO_DIR"
+        info "bootstrap_turbo: cloning tobihagemann/turbo to $TURBO_REPO_DIR"
+        if [ "$DRY_RUN" -eq 0 ]; then
+            git clone --depth 1 "$TURBO_REMOTE" "$TURBO_REPO_DIR" 2>/dev/null \
+                || { warn "bootstrap_turbo: clone failed; turbo skills will not be installed"; return 0; }
+        fi
     fi
 
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -238,6 +285,7 @@ info ""
 bootstrap_turbo
 check_codex
 merge_claude_md
+offer_gitignore
 
 for skill in $SKILLS_TO_RUN; do
     skill_installer="$SKILLS_DIR/$skill/install.sh"
