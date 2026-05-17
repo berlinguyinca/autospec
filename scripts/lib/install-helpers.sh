@@ -15,13 +15,25 @@ merge_marked_block() {
     local start="<!-- ${marker} -->"
     local end="<!-- /${marker} -->"
     local tmp
+    local content_file
     tmp=$(mktemp)
+    content_file=$(mktemp)
 
     [ -f "$file" ] || touch "$file"
+    printf '%s\n' "$content" > "$content_file"
 
     if grep -q "$start" "$file"; then
-        awk -v s="$start" -v e="$end" -v c="$content" '
-            $0 == s { print; print c; in_block=1; next }
+        # Replace existing block in place. Repairs unclosed blocks by emitting the
+        # closing marker in END if the input had no matching close. Reads content
+        # from a file (not awk -v) so multi-line content is preserved.
+        awk -v s="$start" -v e="$end" -v cf="$content_file" '
+            $0 == s {
+                print
+                while ((getline line < cf) > 0) print line
+                close(cf)
+                in_block=1
+                next
+            }
             $0 == e { in_block=0; print; next }
             !in_block { print }
             END { if (in_block) print e }
@@ -31,12 +43,13 @@ merge_marked_block() {
         {
             [ -s "$tmp" ] && echo ""
             echo "$start"
-            echo "$content"
+            cat "$content_file"
             echo "$end"
         } >> "$tmp"
     fi
 
     mv "$tmp" "$file"
+    rm -f "$content_file"
 }
 
 # Check if a command exists on PATH.

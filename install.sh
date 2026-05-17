@@ -64,6 +64,25 @@ run_or_report() {
     fi
 }
 
+merge_claude_md() {
+    claude_md="$HOME/.claude/CLAUDE.md"
+    block_file="$REPO_ROOT/scripts/lib/claude-md-block.txt"
+    if [ ! -f "$block_file" ]; then
+        warn "merge_claude_md: $block_file missing; skipping CLAUDE.md merge"
+        return 0
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] merge_claude_md: would update <!-- autospec-block --> in $claude_md"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$claude_md")"
+    content="$(cat "$block_file")"
+    merge_marked_block "$claude_md" "autospec-block" "$content"
+    info "merge_claude_md: updated $claude_md"
+}
+
 check_codex() {
     if command_present codex; then
         info "check_codex: codex CLI present ($(command -v codex))"
@@ -218,6 +237,7 @@ info ""
 # Integration bootstrap: pull turbo + symlink, before per-skill installers run.
 bootstrap_turbo
 check_codex
+merge_claude_md
 
 for skill in $SKILLS_TO_RUN; do
     skill_installer="$SKILLS_DIR/$skill/install.sh"

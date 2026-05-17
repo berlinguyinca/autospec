@@ -1,0 +1,17 @@
+## autospec + turbo integration
+
+This machine has both **autospec** and **turbo** skill families installed.
+
+**autospec entrypoints (autonomous, multi-issue pipelines):**
+- `/autospec-define` — plan a feature, decompose into GitHub issues
+- `/autospec-run` — run the implementation loop with auto-merge
+- `/autospec-review`, `/autospec-classify`, `/autospec-split`, `/autospec-story` — auxiliary skills
+
+**turbo entrypoints (interactive, single-task discipline):**
+- `/turboplan`, `/draft-spec`, `/finalize`, `/peer-review`, `/self-improve`
+
+**Per-issue Phase 4 implementer** (inside `/autospec-run`) absorbs turbo's expand → implement → finalize → peer-review → evaluate discipline inline. No skill calls from within the Phase 4 subagent.
+
+**Update both stacks**: `bash <autospec-repo>/install.sh --update`
+
+**Codex CLI** powers Phase 4 peer-review. If absent, peer-review skips gracefully and the implementer continues.
