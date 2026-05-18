@@ -574,16 +574,28 @@ main() {
 
 # tests/phase4/*.sh — exercise the v2-flow Phase 4 implementer prompt
 # (structure check, rebase-gate fixtures, migration-replay fixtures).
+# tests/docs/*.sh — content checks for operator-facing docs
+# (target-repo setup guide, etc.).
 # Each script is self-contained and exits 0 on PASS.
 check_phase4_tests() {
     info "phase4 tests: tests/phase4/*.sh"
-    [ -d tests/phase4 ] || return 0
-    for t in tests/phase4/*.sh; do
-        [ -f "$t" ] || continue
-        info "  running: $t"
-        bash "$t" >/tmp/validate-phase4.log 2>&1 \
-            || { cat /tmp/validate-phase4.log >&2; fail "$t: failed"; }
-    done
+    if [ -d tests/phase4 ]; then
+        for t in tests/phase4/*.sh; do
+            [ -f "$t" ] || continue
+            info "  running: $t"
+            bash "$t" >/tmp/validate-phase4.log 2>&1 \
+                || { cat /tmp/validate-phase4.log >&2; fail "$t: failed"; }
+        done
+    fi
+    info "docs tests: tests/docs/*.sh"
+    if [ -d tests/docs ]; then
+        for t in tests/docs/*.sh; do
+            [ -f "$t" ] || continue
+            info "  running: $t"
+            bash "$t" >/tmp/validate-docs.log 2>&1 \
+                || { cat /tmp/validate-docs.log >&2; fail "$t: failed"; }
+        done
+    fi
 }
 
 main "$@"
