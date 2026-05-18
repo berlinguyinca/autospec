@@ -113,6 +113,16 @@ curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/
   | sh -s -- --harness all
 ```
 
+### Target repo setup
+
+If you run autospec against your own codebase, see
+[`docs/target-repo-setup.md`](docs/target-repo-setup.md) for the
+operator-side opt-ins that pair with the Phase 4 implementer's
+cross-session safety gates: branch protection on `main` plus a
+migration-replay test convention. Both are voluntary; without them
+autospec keeps working but loses the safety net for issue #307's
+cross-session CI rot.
+
 ### Turbo integration
 
 `install.sh` also bootstraps [tobihagemann/turbo](https://github.com/tobihagemann/turbo) as a peer skill family:
