@@ -106,7 +106,18 @@ NPM_SHIM
 echo "STUB_PYTEST: \$*" > "$fix/picked"
 exit 0
 PYT_SHIM
-    chmod +x "$fix/bin/make" "$fix/bin/npm" "$fix/bin/pytest"
+    # Shim `git` so the diff-touches-migrations predicate returns a
+    # migration path (the test exercises detection on the assumption the
+    # caller has already determined the diff touches migrations).
+    cat > "$fix/bin/git" <<GIT_SHIM
+#!/usr/bin/env bash
+if [ "\$1" = "diff" ]; then
+    printf 'db/migrations/202605180001_add_x.sql\n'
+    exit 0
+fi
+exit 0
+GIT_SHIM
+    chmod +x "$fix/bin/make" "$fix/bin/npm" "$fix/bin/pytest" "$fix/bin/git"
 
     # Build a runner that wires PATH and substitutes the diff-trigger so the
     # detection block always runs (the diff-touches-migrations check is the
@@ -179,5 +190,94 @@ run_fixture "no_make_npm_wins" "npm run migrate:test" \
 run_fixture "bin_over_pytest" "bin/migrate-test" \
     "mkdir -p bin && printf '#!/usr/bin/env bash\necho ok\n' > bin/migrate-test && chmod +x bin/migrate-test" \
     "mkdir -p tests/migrations && printf '' > tests/migrations/test_x.py"
+
+# --- 4. Failure-path scenario: replay non-zero → comment + exit ----------
+#
+# Build a fixture where the chosen replay invocation exits non-zero, then
+# verify the gate exits non-zero (the comment uses the `<issue-N>`/`<PR>`
+# placeholders, which we substitute in the runner via a tiny gh stub).
+
+fail_fix="$TMPDIR_DETECT/fail_path"
+mkdir -p "$fail_fix/bin"
+(cd "$fail_fix" && printf 'migrate-test:\n\t@echo hi\n' > Makefile)
+cat > "$fail_fix/bin/make" <<'MAKE_FAIL'
+#!/usr/bin/env bash
+echo "boom: schema check regressed"
+exit 7
+MAKE_FAIL
+cat > "$fail_fix/bin/gh" <<'GH_FAIL'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
+    shift 2
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--body" ]; then shift; printf '%s' "$1" > "$FAIL_FIX/comment.body"; fi
+        shift
+    done
+    exit 0
+fi
+exit 0
+GH_FAIL
+cat > "$fail_fix/bin/git" <<'GIT_FAIL_SHIM'
+#!/usr/bin/env bash
+[ "$1" = "diff" ] && { printf 'db/migrations/x.sql\n'; exit 0; }
+exit 0
+GIT_FAIL_SHIM
+chmod +x "$fail_fix/bin/make" "$fail_fix/bin/gh" "$fail_fix/bin/git"
+
+fail_runner="$fail_fix/run.sh"
+{
+    printf '#!/usr/bin/env bash\nset +e\n'
+    printf 'export FAIL_FIX=%s\n' "$fail_fix"
+    printf 'export PATH=%s/bin:$PATH\n' "$fail_fix"
+    printf 'cd %s\n' "$fail_fix"
+    # Substitute placeholders so gh issue comment <issue-N> becomes a real call.
+    printf '%s\n' "$DETECT_BLOCK" | sed -e 's/<issue-N>/312/g' -e 's/<PR>/999/g'
+} > "$fail_runner"
+chmod +x "$fail_runner"
+
+set +e
+bash "$fail_runner" > "$fail_fix/out" 2>&1
+actual_exit=$?
+set -e
+[ "$actual_exit" != "0" ] || { echo "--- out ---" >&2; cat "$fail_fix/out" >&2; fail "failure scenario: expected non-zero exit"; }
+[ -f "$fail_fix/comment.body" ] \
+    || fail "failure scenario: expected an issue comment to be posted via gh"
+grep -qF "boom" "$fail_fix/comment.body" \
+    || { echo "--- comment.body ---" >&2; cat "$fail_fix/comment.body" >&2;
+         fail "failure scenario: expected replay output in posted comment"; }
+
+# --- 5. No-diff scenario: diff touches no migrations → silent skip --------
+
+skip_fix="$TMPDIR_DETECT/no_migrations_diff"
+mkdir -p "$skip_fix/bin"
+(cd "$skip_fix" && printf 'migrate-test:\n\t@echo hi\n' > Makefile)
+cat > "$skip_fix/bin/make" <<MAKE_SHIM2
+#!/usr/bin/env bash
+echo "STUB_MAKE: \$*" > "$skip_fix/picked"
+exit 0
+MAKE_SHIM2
+cat > "$skip_fix/bin/git" <<'GIT_NO_MIG'
+#!/usr/bin/env bash
+# No migration files in the diff.
+[ "$1" = "diff" ] && { printf 'src/foo.go\n'; exit 0; }
+exit 0
+GIT_NO_MIG
+chmod +x "$skip_fix/bin/make" "$skip_fix/bin/git"
+
+skip_runner="$skip_fix/run.sh"
+{
+    printf '#!/usr/bin/env bash\nset +e\n'
+    printf 'export PATH=%s/bin:$PATH\n' "$skip_fix"
+    printf 'cd %s\n' "$skip_fix"
+    printf '%s\n' "$DETECT_BLOCK"
+} > "$skip_runner"
+chmod +x "$skip_runner"
+
+set +e
+bash "$skip_runner" > "$skip_fix/out" 2>&1
+set -e
+[ -f "$skip_fix/picked" ] \
+    && { echo "--- picked ---" >&2; cat "$skip_fix/picked" >&2;
+         fail "no-diff scenario: detection should not have run when diff is non-migration"; }
 
 echo "PASS"

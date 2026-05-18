@@ -48,22 +48,40 @@ convention is detected, log the informational line and continue (the
 target repo has not opted in).
 
 ```bash
-# migration-replay detect: first-hit wins across 4 conventions.
-if [ -f Makefile ] && grep -qE '^migrate-test:' Makefile; then
-    echo "migration-replay: running make migrate-test"
-    make migrate-test
-elif [ -f package.json ] && command -v jq >/dev/null 2>&1 \
-        && [ "$(jq -r '.scripts."migrate:test" // empty' package.json)" != "" ]; then
-    echo "migration-replay: running npm run migrate:test"
-    npm run migrate:test
-elif [ -x bin/migrate-test ]; then
-    echo "migration-replay: running bin/migrate-test"
-    bin/migrate-test
-elif [ -d tests/migrations ]; then
-    echo "migration-replay: running pytest tests/migrations -x"
-    pytest tests/migrations -x
+# migration-replay hook (Change β, issue #307): only runs when the diff
+# touches a migration path; detection order is first-hit-wins across 4
+# conventions; non-zero replay exit → comment on the issue and abort
+# before `gh pr create`.
+diff_paths=$(git diff --name-only origin/main...HEAD || true)
+if printf '%s\n' "$diff_paths" | grep -qE '(^|/)migrations/|migration'; then
+    replay_log=$(mktemp)
+    replay_rc=0
+    if [ -f Makefile ] && grep -qE '^migrate-test:' Makefile; then
+        echo "migration-replay: running make migrate-test"
+        make migrate-test > "$replay_log" 2>&1 || replay_rc=$?
+    elif [ -f package.json ] && command -v jq >/dev/null 2>&1 \
+            && [ "$(jq -r '.scripts."migrate:test" // empty' package.json)" != "" ]; then
+        echo "migration-replay: running npm run migrate:test"
+        npm run migrate:test > "$replay_log" 2>&1 || replay_rc=$?
+    elif [ -x bin/migrate-test ]; then
+        echo "migration-replay: running bin/migrate-test"
+        bin/migrate-test > "$replay_log" 2>&1 || replay_rc=$?
+    elif [ -d tests/migrations ]; then
+        echo "migration-replay: running pytest tests/migrations -x"
+        pytest tests/migrations -x > "$replay_log" 2>&1 || replay_rc=$?
+    else
+        echo "migration-replay: target repo has not opted in (no migrate-test target found); continuing without replay check"
+    fi
+    if [ "$replay_rc" != "0" ]; then
+        # Capture output (last 200 lines to fit a GitHub comment) and post.
+        tail -n 200 "$replay_log" > "$replay_log.tail"
+        gh issue comment <issue-N> --body "$(printf 'PR #<PR> blocked: migration-replay test failed (exit %s). Last 200 lines:\n\n```\n%s\n```\n' "$replay_rc" "$(cat "$replay_log.tail")")"
+        rm -f "$replay_log" "$replay_log.tail"
+        exit 1
+    fi
+    rm -f "$replay_log"
 else
-    echo "migration-replay: target repo has not opted in (no migrate-test target found); continuing without replay check"
+    : # diff does not touch migrations — skip replay hook entirely
 fi
 ```
 
