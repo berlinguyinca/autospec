@@ -529,7 +529,52 @@ issues unblock the queue before continuing with normal feature work.
 >      exit 0
 >    fi
 >    ```
-> 8. SUCCESS: gh pr merge <PR> --admin --squash --delete-branch. Merge auto-closes the issue.
+> 8. SUCCESS: Run the **rebase-and-retest pre-merge gate** before admin-merging. Addresses cross-session CI rot (issue #307): two PRs each green against pre-merge main can together break main, so we re-prove this PR against post-merge main. Cap is `AUTOSPEC_REBASE_MAX_ATTEMPTS` (default 3). The gate ends with the admin-merge, so do NOT issue a second merge after the block.
+>    ```bash
+>    max_attempts="${AUTOSPEC_REBASE_MAX_ATTEMPTS:-3}"
+>    attempt=0
+>    wait_for_ci_green() {
+>        while :; do
+>            rollup=$(gh pr view <PR> --json statusCheckRollup --jq '.statusCheckRollup // []')
+>            pending=$(printf '%s' "$rollup" | jq '[.[] | select(.conclusion == null)] | length')
+>            bad=$(printf '%s' "$rollup" | jq '[.[] | select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED")] | length')
+>            total=$(printf '%s' "$rollup" | jq 'length')
+>            if [ "$bad" != "0" ]; then
+>                gh issue comment <ISSUE> --body "PR #<PR>: a required check failed after rebase-and-retest. Pausing for operator review."
+>                exit 1
+>            fi
+>            if [ "$total" != "0" ] && [ "$pending" = "0" ]; then return 0; fi
+>            sleep 30
+>        done
+>    }
+>    while [ "$attempt" -lt "$max_attempts" ]; do
+>        state=$(gh pr view <PR> --json mergeStateStatus --jq .mergeStateStatus)
+>        # mergeStateStatus values: CLEAN | BEHIND | BLOCKED | DIRTY | HAS_HOOKS | UNKNOWN | UNSTABLE
+>        case "$state" in
+>            CLEAN|HAS_HOOKS|UNSTABLE) break ;;
+>            BEHIND)
+>                if ! gh pr update-branch <PR>; then
+>                    gh issue comment <ISSUE> --body "PR #<PR>: \`gh pr update-branch\` failed (auth/api/conflict). Pausing for operator review."
+>                    exit 1
+>                fi
+>                wait_for_ci_green
+>                ;;
+>            DIRTY)
+>                gh issue comment <ISSUE> --body "PR #<PR> has a merge conflict against main; needs human resolution."
+>                exit 1
+>                ;;
+>            BLOCKED) sleep 30; wait_for_ci_green ;;
+>            *) sleep 15 ;;
+>        esac
+>        attempt=$((attempt + 1))
+>    done
+>    if [ "$attempt" -ge "$max_attempts" ]; then
+>        gh issue comment <ISSUE> --body "PR #<PR>: rebase-and-retest stalled after $max_attempts attempts; main is moving faster than CI completes. Pausing for operator review."
+>        exit 1
+>    fi
+>    gh pr merge <PR> --admin --squash --delete-branch
+>    ```
+>    The block ends with the admin-merge; merge auto-closes the issue.
 >    ```bash
 >    # autospec-stop sentinel check — inside process(ISSUE), after each major step
 >    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
