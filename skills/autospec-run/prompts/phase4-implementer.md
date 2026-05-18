@@ -84,6 +84,25 @@ The cap defaults to 3 attempts but is configurable via the
 ```bash
 max_attempts="${AUTOSPEC_REBASE_MAX_ATTEMPTS:-3}"
 attempt=0
+wait_for_ci_green() {
+    # Block until every check in the rollup has a non-null conclusion AND none
+    # is a FAILURE/CANCELLED/TIMED_OUT. A null conclusion means "still running"
+    # — counting nulls as SUCCESS would let the gate exit while CI is pending.
+    # An empty rollup also waits (a brand-new update-branch may not have
+    # registered its checks yet).
+    while :; do
+        rollup=$(gh pr view <PR> --json statusCheckRollup --jq '.statusCheckRollup // []')
+        pending=$(printf '%s' "$rollup" | jq '[.[] | select(.conclusion == null)] | length')
+        bad=$(printf '%s' "$rollup" | jq '[.[] | select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED")] | length')
+        total=$(printf '%s' "$rollup" | jq 'length')
+        if [ "$bad" != "0" ]; then
+            gh issue comment <issue> --body "PR #<PR>: a required check failed after rebase-and-retest (FAILURE/CANCELLED/TIMED_OUT). Pausing for operator review."
+            exit 1
+        fi
+        if [ "$total" != "0" ] && [ "$pending" = "0" ]; then return 0; fi
+        sleep 30
+    done
+}
 while [ "$attempt" -lt "$max_attempts" ]; do
     state=$(gh pr view <PR> --json mergeStateStatus --jq .mergeStateStatus)
     # mergeStateStatus values: CLEAN | BEHIND | BLOCKED | DIRTY | HAS_HOOKS | UNKNOWN | UNSTABLE
@@ -92,7 +111,11 @@ while [ "$attempt" -lt "$max_attempts" ]; do
             break                                                       # ready to merge
             ;;
         BEHIND)
-            gh pr update-branch <PR> 2>&1 || true
+            if ! gh pr update-branch <PR>; then
+                gh issue comment <issue> --body "PR #<PR>: \`gh pr update-branch\` failed (auth/api/conflict). Pausing for operator review."
+                exit 1
+            fi
+            wait_for_ci_green                                           # CI re-triggers after update; settle before re-querying state
             ;;
         DIRTY)
             gh issue comment <issue> --body "PR #<PR> has a merge conflict against main; needs human resolution."
@@ -100,15 +123,12 @@ while [ "$attempt" -lt "$max_attempts" ]; do
             ;;
         BLOCKED)
             sleep 30                                                    # required check still pending
+            wait_for_ci_green
             ;;
         *)
             sleep 15                                                    # UNKNOWN / transient
             ;;
     esac
-    # After update-branch (or BLOCKED wait), CI re-triggers. Wait for it to settle.
-    until [ "$(gh pr view <PR> --json statusCheckRollup --jq '[.statusCheckRollup[]?.conclusion] | all(. == "SUCCESS" or . == null)')" = "true" ]; do
-        sleep 30
-    done
     attempt=$((attempt + 1))
 done
 if [ "$attempt" -ge "$max_attempts" ]; then

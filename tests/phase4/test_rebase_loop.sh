@@ -83,12 +83,25 @@ run_scenario() {
     expect_exit="$2"
     expect_merge_count="$3"
     expect_comment_substr="$4"
+    name="$5"
+    # Optional 6th arg: update-branch exit code (default 0).
+    UPDATE_BRANCH_RC="${6:-0}"
+    # Optional 7th arg: a rollup JSON to serve. Defaults to one SUCCESS check.
+    # (Note: brace-default expansion stumbles on `}` inside the value, so set
+    # the default with a plain if.)
+    if [ "$#" -ge 7 ] && [ -n "$7" ]; then
+        ROLLUP_JSON="$7"
+    else
+        ROLLUP_JSON='[{"conclusion":"SUCCESS"}]'
+    fi
 
-    workdir="$TMPDIR_GATE/$5"
+    workdir="$TMPDIR_GATE/$name"
     mkdir -p "$workdir/bin"
     : > "$workdir/gh.log"
     : > "$workdir/comments.log"
     printf '%s\n' $sequence > "$workdir/state-sequence"
+    echo "$UPDATE_BRANCH_RC" > "$workdir/update-rc"
+    printf '%s' "$ROLLUP_JSON" > "$workdir/rollup.json"
 
     cat > "$workdir/bin/gh" <<'GHSHIM'
 #!/usr/bin/env bash
@@ -115,14 +128,15 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
             exit 0
             ;;
         *statusCheckRollup*)
-            # Always green so the inner CI-wait loop terminates immediately.
-            printf 'true\n'
+            # The real gate now does: --jq '.statusCheckRollup // []' and
+            # post-processes with jq. Return the rollup array verbatim.
+            cat "$WORKDIR/rollup.json"
             exit 0
             ;;
     esac
 fi
 if [ "$1" = "pr" ] && [ "$2" = "update-branch" ]; then
-    exit 0
+    exit "$(cat "$WORKDIR/update-rc" 2>/dev/null || echo 0)"
 fi
 if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
     echo "MERGED" >> "$WORKDIR/merge.log"
@@ -209,5 +223,11 @@ run_scenario "BEHIND BEHIND BEHIND BEHIND" 1 0 "stalled" "three_behind"
 # (d) Honor AUTOSPEC_REBASE_MAX_ATTEMPTS=1: a single BEHIND should already
 # escalate.
 AUTOSPEC_REBASE_MAX_ATTEMPTS=1 run_scenario "BEHIND BEHIND" 1 0 "stalled" "env_cap_one"
+
+# (e) update-branch fails: comment + non-zero exit, no merge.
+run_scenario "BEHIND" 1 0 "update-branch" "update_branch_fail" 1
+
+# (f) CI re-run reports FAILURE conclusion: comment + non-zero exit, no merge.
+run_scenario "BEHIND CLEAN" 1 0 "required check failed" "ci_failure" 0 '[{"conclusion":"FAILURE"}]'
 
 echo "PASS"
