@@ -69,6 +69,73 @@ Immediately before `gh pr create`:
 2. If any lockstep dep is not yet merged: do NOT open the PR. Comment on the issue noting which dep is blocking, and exit. The monitor will pick this issue up again later.
 3. If all deps are merged: open the PR with `gh pr create`. PR body must include `Closes #<issue-N>`.
 
+## Rebase-and-retest gate
+
+Immediately before `gh pr merge --admin --squash --delete-branch`, run the
+following loop. It addresses cross-session CI rot (issue #307): when two
+PRs are individually green but their combination breaks main, a stale
+branch at merge time silently corrupts main. By asking GitHub to update
+the branch when it is `BEHIND` main and waiting for CI to re-pass, the
+PR is proven against post-merge main before we admin-merge.
+
+The cap defaults to 3 attempts but is configurable via the
+`AUTOSPEC_REBASE_MAX_ATTEMPTS` env var.
+
+```bash
+max_attempts="${AUTOSPEC_REBASE_MAX_ATTEMPTS:-3}"
+attempt=0
+while [ "$attempt" -lt "$max_attempts" ]; do
+    state=$(gh pr view <PR> --json mergeStateStatus --jq .mergeStateStatus)
+    # mergeStateStatus values: CLEAN | BEHIND | BLOCKED | DIRTY | HAS_HOOKS | UNKNOWN | UNSTABLE
+    case "$state" in
+        CLEAN|HAS_HOOKS|UNSTABLE)
+            break                                                       # ready to merge
+            ;;
+        BEHIND)
+            gh pr update-branch <PR> 2>&1 || true
+            ;;
+        DIRTY)
+            gh issue comment <issue> --body "PR #<PR> has a merge conflict against main; needs human resolution."
+            exit 1
+            ;;
+        BLOCKED)
+            sleep 30                                                    # required check still pending
+            ;;
+        *)
+            sleep 15                                                    # UNKNOWN / transient
+            ;;
+    esac
+    # After update-branch (or BLOCKED wait), CI re-triggers. Wait for it to settle.
+    until [ "$(gh pr view <PR> --json statusCheckRollup --jq '[.statusCheckRollup[]?.conclusion] | all(. == "SUCCESS" or . == null)')" = "true" ]; do
+        sleep 30
+    done
+    attempt=$((attempt + 1))
+done
+if [ "$attempt" -ge "$max_attempts" ]; then
+    gh issue comment <issue> --body "PR #<PR>: rebase-and-retest stalled after $max_attempts attempts; main is moving faster than CI completes. Pausing for operator review."
+    exit 1
+fi
+gh pr merge <PR> --admin --squash --delete-branch
+```
+
+Notes:
+
+- `gh pr view --json mergeStateStatus` is the merge-state predicate.
+  `CLEAN`, `HAS_HOOKS`, and `UNSTABLE` all mean "safe to merge"
+  (UNSTABLE = optional checks pending, which autospec already tolerates).
+- `gh pr update-branch` is GitHub's first-party rebase mechanism — no
+  local checkout/rebase/force-push dance required.
+- `DIRTY` (merge conflict) → comment + exit immediately. Operator
+  resolves; autospec's auto-loop is the wrong tool for conflicts.
+- Three full CI cycles is the upper bound on reasonable wait. On the
+  4th `BEHIND` state, comment on the issue and exit — the queue has too
+  much churn for this PR to merge cleanly, and an operator should
+  intervene.
+- Lock-step deps are already checked immediately before `gh pr create`.
+  If a lock-step dep merges into main during the rebase window, that's
+  already-merged state being absorbed into this PR via update-branch —
+  the desired behavior.
+
 ## Exit conditions
 
 - **Success** — PR opened, all CI checks green, auto-merge enabled.
