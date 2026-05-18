@@ -20,3 +20,4 @@ build/
 .omx/
 .claude/scheduled_tasks.lock
 **/.omc/
+.autospec/
