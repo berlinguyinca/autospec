@@ -168,12 +168,41 @@ bootstrap_turbo() {
     fi
 
     mkdir -p "$CLAUDE_SKILLS_DIR"
+    linked=0
+    skipped_dir=0
+    cleaned_nested=0
     for skill_dir in "$turbo_skills_src"/*; do
         [ -d "$skill_dir" ] || continue
         skill_name="$(basename "$skill_dir")"
-        ln -sfn "$skill_dir" "$CLAUDE_SKILLS_DIR/$skill_name"
+        target="$CLAUDE_SKILLS_DIR/$skill_name"
+        # Clean up corruption from earlier `ln -sfn src dir` runs that placed a nested
+        # symlink at <target>/<skill_name> (instead of replacing the directory).
+        nested="$target/$skill_name"
+        if [ -L "$nested" ] && [ "$(readlink "$nested")" = "$skill_dir" ]; then
+            rm "$nested"
+            cleaned_nested=$((cleaned_nested + 1))
+        fi
+        if [ -L "$target" ]; then
+            # We previously created this symlink; refresh it (handles turbo path changes).
+            ln -sfn "$skill_dir" "$target"
+            linked=$((linked + 1))
+        elif [ ! -e "$target" ]; then
+            ln -sfn "$skill_dir" "$target"
+            linked=$((linked + 1))
+        else
+            # Pre-existing real directory (likely installed by hand or another tool).
+            # Do NOT replace — that would clobber the user's content. Skip silently;
+            # users who want autospec to manage these can `rm -rf $target` and re-run.
+            skipped_dir=$((skipped_dir + 1))
+        fi
     done
-    info "bootstrap_turbo: turbo skills symlinked into $CLAUDE_SKILLS_DIR/"
+    info "bootstrap_turbo: $linked turbo skills symlinked into $CLAUDE_SKILLS_DIR/"
+    if [ "$skipped_dir" -gt 0 ]; then
+        info "bootstrap_turbo: $skipped_dir pre-existing skill dirs left untouched (delete one + re-run to switch it to a turbo-managed symlink)"
+    fi
+    if [ "$cleaned_nested" -gt 0 ]; then
+        info "bootstrap_turbo: cleaned $cleaned_nested nested symlinks from earlier broken runs"
+    fi
 }
 
 maybe_prompt_star() {
