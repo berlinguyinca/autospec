@@ -107,22 +107,39 @@ After enabling the settings above, paste this one-liner to confirm both
 gates are wired:
 
 ```bash
-# Branch protection check
-gh api repos/<owner>/<repo>/branches/main/protection \
-  --jq '.required_status_checks.strict, .required_status_checks.contexts' \
-  && echo "branch protection OK"
+# Branch protection check — exits 0 only when strict=true AND at least
+# one required context is configured. `--jq` evaluates a predicate and
+# returns the boolean as text; gh exits non-zero when --jq's expression
+# raises, but `select` may emit nothing without raising, so we test the
+# stdout instead.
+strict_ok=$(gh api repos/<owner>/<repo>/branches/main/protection \
+  --jq '(.required_status_checks.strict == true) and ((.required_status_checks.contexts | length) > 0)' \
+  2>/dev/null)
+if [ "$strict_ok" = "true" ]; then
+  echo "branch protection OK"
+else
+  echo "branch protection NOT OK (need strict=true AND at least one required context)" >&2
+fi
 
-# Migration-replay target check
-make -n migrate-test 2>/dev/null \
-  || npm run --silent migrate:test --dry-run 2>/dev/null \
-  || test -x bin/migrate-test \
-  || test -d tests/migrations \
-  && echo "migration-replay target detected"
+# Migration-replay target check. Use metadata-only inspections — never
+# execute the migration test as part of detection. `npm run ... --dry-run`
+# does NOT mean "don't execute the script" — it still invokes node and
+# may fire the script's side effects. Inspect package.json with jq instead.
+{
+  ( [ -f Makefile ]    && grep -qE '^migrate-test:' Makefile ) \
+  || ( [ -f package.json ] && command -v jq >/dev/null 2>&1 \
+       && [ "$(jq -r '.scripts."migrate:test" // empty' package.json)" != "" ] ) \
+  || [ -x bin/migrate-test ] \
+  || [ -d tests/migrations ];
+} && echo "migration-replay target detected" \
+  || echo "migration-replay target NOT detected (target repo has not opted in)" >&2
 ```
 
-The first command exits zero only when `required_status_checks.strict`
-is `true` and lists at least one context. The second exits zero only
-when at least one of the four migration-replay conventions is present.
+The first block exits the `strict_ok == true` branch only when
+`required_status_checks.strict` is `true` AND at least one required
+context is listed. The second block uses metadata-only inspections
+(`grep`, `jq`, `test -x`, `test -d`) — it never invokes `make`, `npm`,
+or `pytest`, so running it against a target repo is side-effect-free.
 
 Once both lines print their `OK`/`detected` strings, autospec's
 Phase 4 implementer will run both gates against PRs targeting your
