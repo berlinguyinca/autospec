@@ -562,6 +562,7 @@ main() {
     check_autospec_run_regression_review_lockstep
     check_autospec_review_skill_present
     check_autospec_review_tier_a_directives
+    check_phase4_tests
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -569,6 +570,20 @@ main() {
     check_bash_syntax "uninstall.sh"
 
     info "OK — all validation checks passed."
+}
+
+# tests/phase4/*.sh — exercise the v2-flow Phase 4 implementer prompt
+# (structure check, rebase-gate fixtures, migration-replay fixtures).
+# Each script is self-contained and exits 0 on PASS.
+check_phase4_tests() {
+    info "phase4 tests: tests/phase4/*.sh"
+    [ -d tests/phase4 ] || return 0
+    for t in tests/phase4/*.sh; do
+        [ -f "$t" ] || continue
+        info "  running: $t"
+        bash "$t" >/tmp/validate-phase4.log 2>&1 \
+            || { cat /tmp/validate-phase4.log >&2; fail "$t: failed"; }
+    done
 }
 
 main "$@"

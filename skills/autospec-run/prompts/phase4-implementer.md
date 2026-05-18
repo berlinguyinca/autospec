@@ -31,6 +31,73 @@ Before changing any code:
 
 Before considering the work done:
 
+### Migration-replay pre-PR hook
+
+Cross-session CI rot (issue #307) shows that two parallel PRs can each
+pass per-PR migration tests against pre-merge `main` and yet, run in
+timestamp order on a fresh DB, regress each other (e.g. PR D's
+`DROP + ADD CHECK` silently strips a value PR C just added). To detect
+this before opening the PR, run the target repo's migration-replay test
+whenever the diff touches a migration path.
+
+If `git diff --name-only origin/main...HEAD` matches `*migrations/*` or
+contains `*migration*`, run the first-hit detection block below. On a
+non-zero exit, post the failure output as an issue comment and exit
+WITHOUT opening the PR — the migration must be fixed first. If no
+convention is detected, log the informational line and continue (the
+target repo has not opted in).
+
+```bash
+# migration-replay hook (Change β, issue #307): only runs when the diff
+# touches a migration path; detection order is first-hit-wins across 4
+# conventions; non-zero replay exit → comment on the issue and abort
+# before `gh pr create`.
+diff_paths=$(git diff --name-only origin/main...HEAD || true)
+if printf '%s\n' "$diff_paths" | grep -qE '(^|/)migrations/|migration'; then
+    replay_log=$(mktemp)
+    replay_rc=0
+    if [ -f Makefile ] && grep -qE '^migrate-test:' Makefile; then
+        echo "migration-replay: running make migrate-test"
+        make migrate-test > "$replay_log" 2>&1 || replay_rc=$?
+    elif [ -f package.json ] && command -v jq >/dev/null 2>&1 \
+            && [ "$(jq -r '.scripts."migrate:test" // empty' package.json)" != "" ]; then
+        echo "migration-replay: running npm run migrate:test"
+        npm run migrate:test > "$replay_log" 2>&1 || replay_rc=$?
+    elif [ -x bin/migrate-test ]; then
+        echo "migration-replay: running bin/migrate-test"
+        bin/migrate-test > "$replay_log" 2>&1 || replay_rc=$?
+    elif [ -d tests/migrations ]; then
+        echo "migration-replay: running pytest tests/migrations -x"
+        pytest tests/migrations -x > "$replay_log" 2>&1 || replay_rc=$?
+    else
+        echo "migration-replay: target repo has not opted in (no migrate-test target found); continuing without replay check"
+    fi
+    if [ "$replay_rc" != "0" ]; then
+        # Capture output (last 200 lines to fit a GitHub comment) and post.
+        tail -n 200 "$replay_log" > "$replay_log.tail"
+        gh issue comment <issue-N> --body "$(printf 'PR #<PR> blocked: migration-replay test failed (exit %s). Last 200 lines:\n\n```\n%s\n```\n' "$replay_rc" "$(cat "$replay_log.tail")")"
+        rm -f "$replay_log" "$replay_log.tail"
+        exit 1
+    fi
+    rm -f "$replay_log"
+else
+    : # diff does not touch migrations — skip replay hook entirely
+fi
+```
+
+Detection order — first hit wins:
+
+1. `make migrate-test` if `Makefile` exists and contains a `^migrate-test:` target.
+2. `npm run migrate:test` if `package.json` exists and `.scripts."migrate:test"` is non-null.
+3. `bin/migrate-test` if the script exists and is executable.
+4. `pytest tests/migrations -x` if the `tests/migrations/` directory exists.
+
+If the replay command exits non-zero, comment on the issue with the
+captured output and exit before `gh pr create`. Do NOT push a PR with
+a broken migration replay.
+
+### Standard finalize steps
+
 1. Run the project's test command (consult the repo's CI config or AGENTS.md). All tests must pass.
 2. Run the project's lint/format command. Fix or `git stash` any unrelated noise — do not include unrelated cleanups in this PR.
 3. Verify the diff matches the issue's scope. If you ended up touching more than the issue called for, either split the extra work into a separate issue or revert it from this branch.
