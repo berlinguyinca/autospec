@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-test-stage1-result.schema.json",
+  "title": "autospec-test Stage 1 gate result",
+  "description": "Output schema for gate-stage-unit.sh — the Stage 1 unit coverage gate.",
+  "type": "object",
+  "required": ["passed", "stage", "metrics"],
+  "properties": {
+    "passed": { "type": "boolean" },
+    "stage": { "type": "string", "const": "unit" },
+    "reason": {
+      "type": "string",
+      "description": "Present when passed=false; short machine-readable reason code.",
+      "enum": ["tests_red", "coverage_below_threshold", "function_presence_fail", "collector_error"]
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["unit"],
+      "properties": {
+        "unit": {
+          "type": "object",
+          "required": ["passed"],
+          "properties": {
+            "passed": { "type": "boolean" },
+            "lines": { "type": "number" },
+            "branches": { "type": "number" },
+            "functions": { "type": "number" },
+            "missing_function_tests": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "reason": { "type": "string" }
+          }
+        }
+      }
+    },
+    "test_run_summary": {
+      "type": "object",
+      "properties": {
+        "exit_code": { "type": "integer" },
+        "stdout_tail": { "type": "string" },
+        "stderr_tail": { "type": "string" }
+      }
+    }
+  },
+  "additionalProperties": false
+}
