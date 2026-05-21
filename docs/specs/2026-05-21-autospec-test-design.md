@@ -255,7 +255,6 @@ The classifier is pure AST/regex — no LLM judgment in the gate. LLM only write
 | `--config <yaml>` | Headless mode: read preset answers from YAML fragment instead of prompting |
 | `--ack-i-understand` | Headless acknowledgement flag (replaces interactive `I UNDERSTAND` prompt) |
 | `--dry-run` | Print resolved contract preview without writing any files |
-| `--output-dir <dir>` | Write `.autospec/test.yml` under this directory (default: `$PWD`) |
 
 **Helper scripts:**
 - `wizard-probe-backup.sh` — probes PATH for `zfs`, `pg_dump`, `mysqldump`; prints first detected driver name; exits 1 if none found.
