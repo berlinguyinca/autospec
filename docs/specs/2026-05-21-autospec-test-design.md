@@ -248,6 +248,19 @@ The classifier is pure AST/regex — no LLM judgment in the gate. LLM only write
 4. Dry-run preview — print the constraints that will apply; require operator to type `I UNDERSTAND` before writing
 5. Write `.autospec/test.yml` + initial `.autospec/.scoped-prod-acked-<sha>.lock` if Mode II; operator handles git add + push
 
+**CLI flags (wizard.sh init):**
+
+| Flag | Description |
+|---|---|
+| `--config <yaml>` | Headless mode: read preset answers from YAML fragment instead of prompting |
+| `--ack-i-understand` | Headless acknowledgement flag (replaces interactive `I UNDERSTAND` prompt) |
+| `--dry-run` | Print resolved contract preview without writing any files |
+| `--output-dir <dir>` | Write `.autospec/test.yml` under this directory (default: `$PWD`) |
+
+**Helper scripts:**
+- `wizard-probe-backup.sh` — probes PATH for `zfs`, `pg_dump`, `mysqldump`; prints first detected driver name; exits 1 if none found.
+- `wizard-preview.sh <config.yml>` — prints resolved contract YAML + constraint summary to stdout; does not write files.
+
 ## 6. Self-heal loop
 
 ### Iteration anatomy
