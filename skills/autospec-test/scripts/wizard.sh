@@ -2,7 +2,7 @@
 # wizard.sh — /autospec-test --init operator wizard.
 #
 # Usage:
-#   wizard.sh init [--config <yaml-fragment>] [--ack-i-understand] [--dry-run] [--output-dir <dir>]
+#   wizard.sh init [--config <yaml-fragment>] [--ack-i-understand] [--dry-run]
 #
 # Interactive mode: prompts for mode selection, scope tokens, backup driver.
 #   Requires operator to type exactly "I UNDERSTAND" before writing files.
@@ -19,6 +19,8 @@
 #   5. Require "I UNDERSTAND" (interactive) or --ack-i-understand (headless)
 #   6. Write .autospec/test.yml + initial ack lock if Mode II
 #
+# Output path: ./.autospec/test.yml (fixed; relative to CWD)
+#
 # Exit codes:
 #   0 = success (or dry-run preview shown)
 #   1 = refused (operator declined, driver missing, ack missing)
@@ -27,11 +29,17 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# ── Temporary files with cleanup ───────────────────────────────────────────────
+
+YQ_ERR_FILE=$(mktemp -t wizard-yq-err.XXXXXX)
+PROBE_ERR_FILE=$(mktemp -t wizard-probe-err.XXXXXX)
+trap 'rm -f "$YQ_ERR_FILE" "$PROBE_ERR_FILE"' EXIT
+
 # ── Argument parsing ───────────────────────────────────────────────────────────
 
 SUBCOMMAND="${1:-}"
 if [ "$SUBCOMMAND" != "init" ]; then
-    printf 'wizard: usage: wizard.sh init [--config <yml>] [--ack-i-understand] [--dry-run] [--output-dir <dir>]\n' >&2
+    printf 'wizard: usage: wizard.sh init [--config <yml>] [--ack-i-understand] [--dry-run]\n' >&2
     exit 1
 fi
 shift
@@ -39,7 +47,6 @@ shift
 CONFIG_FILE=""
 ACK_FLAG=false
 DRY_RUN=false
-OUTPUT_DIR="${PWD}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -55,10 +62,6 @@ while [ $# -gt 0 ]; do
             DRY_RUN=true
             shift
             ;;
-        --output-dir)
-            OUTPUT_DIR="${2:-}"
-            shift 2
-            ;;
         *)
             printf 'wizard: unknown flag: %s\n' "$1" >&2
             exit 1
@@ -66,7 +69,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-AUTOSPEC_OUT_DIR="${OUTPUT_DIR}/.autospec"
+AUTOSPEC_OUT_DIR="${PWD}/.autospec"
 
 # ── Determine headless vs interactive ─────────────────────────────────────────
 
@@ -96,9 +99,9 @@ if [ "$HEADLESS" = "true" ]; then
     fi
     # Parse YAML config
     CONFIG_JSON=""
-    if ! CONFIG_JSON=$(yq -o=json '.' "$CONFIG_FILE" 2>/tmp/wizard-yq-err.txt); then
+    if ! CONFIG_JSON=$(yq -o=json '.' "$CONFIG_FILE" 2>"$YQ_ERR_FILE"); then
         printf 'wizard: failed to parse config YAML:\n' >&2
-        cat /tmp/wizard-yq-err.txt >&2
+        cat "$YQ_ERR_FILE" >&2
         exit 1
     fi
     if [ -z "$CONFIG_JSON" ] || [ "$CONFIG_JSON" = "null" ]; then
@@ -135,10 +138,10 @@ if [ "$MODE" = "scoped_production" ]; then
         # Probe PATH for known drivers
         PROBE_OUT=""
         PROBE_EXIT=0
-        PROBE_OUT=$("$SCRIPT_DIR/wizard-probe-backup.sh" 2>/tmp/wizard-probe-err.txt) || PROBE_EXIT=$?
+        PROBE_OUT=$("$SCRIPT_DIR/wizard-probe-backup.sh" 2>"$PROBE_ERR_FILE") || PROBE_EXIT=$?
         if [ "$PROBE_EXIT" -ne 0 ]; then
             printf 'wizard: REFUSED: Mode II requires a backup driver, but none was found on PATH.\n' >&2
-            cat /tmp/wizard-probe-err.txt >&2
+            cat "$PROBE_ERR_FILE" >&2
             printf 'Install a backup tool or set driver: custom in your config with custom_snapshot_cmd/custom_restore_cmd.\n' >&2
             exit 1
         fi

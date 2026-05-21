@@ -6,12 +6,12 @@
 # Covers:
 #   - Strict-default headless happy path
 #   - Mode II headless happy path (with backup driver on PATH)
-#   - Mode II refused when no backup driver on PATH
-#   - Wrong ack literal refused (interactive simulation)
+#   - Mode II refused when no backup driver on PATH (genuine probe invocation)
+#   - Wrong ack literal refused (interactive stdin simulation)
 #   - Missing --ack-i-understand in headless mode refused
 #   - Dry-run preview prints contract without writing files
 #   - Ack-lock file created with correct sha format
-#   - Validate-contract integration (wizard output must validate)
+#   - validate-contract.sh integration (wizard output must pass validation)
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../../../.." && pwd)"
@@ -20,6 +20,7 @@ setup() {
     WIZARD="$SCRIPTS_DIR/wizard.sh"
     PROBE="$SCRIPTS_DIR/wizard-probe-backup.sh"
     PREVIEW="$SCRIPTS_DIR/wizard-preview.sh"
+    VALIDATE="$SCRIPTS_DIR/validate-contract.sh"
 
     TEST_TMPDIR="$(mktemp -d /tmp/autospec-wizard-bats-XXXXXX)"
     AUTOSPEC_DIR="$TEST_TMPDIR/.autospec"
@@ -48,20 +49,20 @@ add_fake_binary() {
 # ── Headless strict-default happy path ───────────────────────────────────────
 
 @test "wizard: headless strict-default writes test.yml with mode=strict_isolation" {
+    cd "$TEST_TMPDIR"
     run bash "$WIZARD" init \
         --config "$FIXTURES_DIR/wizard/strict-default.yml" \
-        --ack-i-understand \
-        --output-dir "$TEST_TMPDIR"
+        --ack-i-understand
     [ "$status" -eq 0 ]
     [ -f "$TEST_TMPDIR/.autospec/test.yml" ]
     grep -q "strict_isolation" "$TEST_TMPDIR/.autospec/test.yml"
 }
 
 @test "wizard: headless strict-default does NOT create ack-lock (strict mode)" {
+    cd "$TEST_TMPDIR"
     run bash "$WIZARD" init \
         --config "$FIXTURES_DIR/wizard/strict-default.yml" \
-        --ack-i-understand \
-        --output-dir "$TEST_TMPDIR"
+        --ack-i-understand
     [ "$status" -eq 0 ]
     # No ack-lock file for strict_isolation mode
     local lock_count
@@ -76,10 +77,10 @@ add_fake_binary() {
     fake_dir="$(fake_bin_dir)"
     add_fake_binary "$fake_dir" "pg_dump"
 
+    cd "$TEST_TMPDIR"
     PATH="$fake_dir:$PATH" run bash "$WIZARD" init \
         --config "$FIXTURES_DIR/wizard/mode-ii.yml" \
-        --ack-i-understand \
-        --output-dir "$TEST_TMPDIR"
+        --ack-i-understand
     [ "$status" -eq 0 ]
     [ -f "$TEST_TMPDIR/.autospec/test.yml" ]
     grep -q "scoped_production" "$TEST_TMPDIR/.autospec/test.yml"
@@ -96,10 +97,10 @@ add_fake_binary() {
     fake_dir="$(fake_bin_dir)"
     add_fake_binary "$fake_dir" "pg_dump"
 
+    cd "$TEST_TMPDIR"
     PATH="$fake_dir:$PATH" run bash "$WIZARD" init \
         --config "$FIXTURES_DIR/wizard/mode-ii.yml" \
-        --ack-i-understand \
-        --output-dir "$TEST_TMPDIR"
+        --ack-i-understand
     [ "$status" -eq 0 ]
     local lock_file
     lock_file=$(find "$TEST_TMPDIR/.autospec" -name '.scoped-prod-acked-*.lock' | head -1)
@@ -112,17 +113,34 @@ add_fake_binary() {
     rm -rf "$fake_dir"
 }
 
-# ── Refused when no backup driver on PATH (Mode II) ──────────────────────────
+# ── validate-contract.sh integration ─────────────────────────────────────────
 
-@test "wizard: refuses Mode II when no backup driver binary on PATH" {
-    # Set PATH to a dir with none of zfs/pg_dump/mysqldump
+@test "wizard: output passes validate-contract.sh for strict_isolation mode" {
+    cd "$TEST_TMPDIR"
+    run bash "$WIZARD" init \
+        --config "$FIXTURES_DIR/wizard/strict-default.yml" \
+        --ack-i-understand
+    [ "$status" -eq 0 ]
+    [ -f "$TEST_TMPDIR/.autospec/test.yml" ]
+    # Convert wizard YAML output to JSON and validate
+    local json_out
+    json_out=$(yq -o=json '.' "$TEST_TMPDIR/.autospec/test.yml")
+    run bash "$VALIDATE" - <<< "$json_out"
+    [ "$status" -eq 0 ]
+}
+
+# ── Refused when no backup driver on PATH (Mode II, genuine probe) ─────────────
+
+@test "wizard: refuses Mode II when no backup driver binary on PATH (genuine probe)" {
+    # Use mode-ii-no-driver.yml which has no backup.driver field,
+    # so wizard falls through to wizard-probe-backup.sh on an empty PATH.
     local empty_dir
     empty_dir="$(fake_bin_dir)"
 
+    cd "$TEST_TMPDIR"
     PATH="$empty_dir" run bash "$WIZARD" init \
-        --config "$FIXTURES_DIR/wizard/mode-ii.yml" \
-        --ack-i-understand \
-        --output-dir "$TEST_TMPDIR"
+        --config "$FIXTURES_DIR/wizard/mode-ii-no-driver.yml" \
+        --ack-i-understand
     [ "$status" -ne 0 ]
     [[ "$output" =~ [Bb]ackup|[Dd]river|[Rr]efus ]]
     # No test.yml should be written
@@ -131,12 +149,24 @@ add_fake_binary() {
     rm -rf "$empty_dir"
 }
 
+# ── Wrong ack literal refused (interactive stdin) ─────────────────────────────
+
+@test "wizard: interactive mode refuses wrong-cased ack literal 'i understand'" {
+    # Feed "i understand" (wrong casing) on stdin — must exit 1
+    cd "$TEST_TMPDIR"
+    run bash -c "printf '2\ni understand\n' | bash '$WIZARD' init"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ [Rr]efus|[Uu]nderstand ]]
+    # No test.yml should be written
+    [ ! -f "$TEST_TMPDIR/.autospec/test.yml" ]
+}
+
 # ── Headless refused without --ack-i-understand ───────────────────────────────
 
 @test "wizard: headless mode refused without --ack-i-understand flag" {
+    cd "$TEST_TMPDIR"
     run bash "$WIZARD" init \
-        --config "$FIXTURES_DIR/wizard/strict-default.yml" \
-        --output-dir "$TEST_TMPDIR"
+        --config "$FIXTURES_DIR/wizard/strict-default.yml"
     [ "$status" -ne 0 ]
     [[ "$output" =~ [Uu]nderstand|[Aa]ck ]]
     # No test.yml written
@@ -146,11 +176,11 @@ add_fake_binary() {
 # ── Dry-run preview ───────────────────────────────────────────────────────────
 
 @test "wizard: --dry-run prints contract preview without writing files" {
+    cd "$TEST_TMPDIR"
     run bash "$WIZARD" init \
         --config "$FIXTURES_DIR/wizard/strict-default.yml" \
         --ack-i-understand \
-        --dry-run \
-        --output-dir "$TEST_TMPDIR"
+        --dry-run
     [ "$status" -eq 0 ]
     # Output should contain mode
     [[ "$output" =~ mode ]]

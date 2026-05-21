@@ -15,6 +15,11 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# ── Temporary files with cleanup ───────────────────────────────────────────────
+
+PREVIEW_YQ_ERR=$(mktemp -t wizard-preview-yq-err.XXXXXX)
+trap 'rm -f "$PREVIEW_YQ_ERR"' EXIT
+
 CONFIG_FILE="${1:-}"
 
 if [ -z "$CONFIG_FILE" ]; then
@@ -35,9 +40,9 @@ fi
 
 # Parse YAML → JSON
 CONFIG_JSON=""
-if ! CONFIG_JSON=$(yq -o=json '.' "$CONFIG_FILE" 2>/tmp/wizard-preview-yq-err.txt); then
+if ! CONFIG_JSON=$(yq -o=json '.' "$CONFIG_FILE" 2>"$PREVIEW_YQ_ERR"); then
     printf 'wizard-preview: failed to parse config YAML:\n' >&2
-    cat /tmp/wizard-preview-yq-err.txt >&2
+    cat "$PREVIEW_YQ_ERR" >&2
     exit 1
 fi
 
