@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>every-modal-returns-to-body-scroll fail fixture</title>
+<style>
+  .modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); }
+  .modal.open { display:block; }
+</style>
+</head>
+<body>
+  <!-- Modal that opens but does NOT restore body scroll on close — bug fixture -->
+  <button id="open-modal" onclick="
+    document.getElementById('modal').classList.add('open');
+    document.body.style.overflow='hidden';
+  ">Open modal</button>
+
+  <div id="modal" class="modal" data-testid="test-modal">
+    <div style="background:white;padding:20px;margin:50px auto;width:300px;">
+      <p>Modal content</p>
+      <button id="close-modal" onclick="
+        document.getElementById('modal').classList.remove('open');
+        /* BUG: does NOT restore body overflow */
+      ">Close</button>
+    </div>
+  </div>
+</body>
+</html>

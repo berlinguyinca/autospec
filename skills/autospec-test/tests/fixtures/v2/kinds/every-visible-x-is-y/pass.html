@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>every-visible-x-is-y pass fixture</title></head>
+<body>
+  <!-- Items that have edit buttons that open dialogs -->
+  <div data-testid="done-item-row-1">
+    <span>Task 1</span>
+    <button aria-label="edit" onclick="document.getElementById('dialog').style.display='block'">edit</button>
+  </div>
+  <div data-testid="done-item-row-2">
+    <span>Task 2</span>
+    <button aria-label="edit" onclick="document.getElementById('dialog').style.display='block'">edit</button>
+  </div>
+
+  <!-- Dialog opened by clicking edit -->
+  <div id="dialog" data-testid="done-item-edit-dialog" style="display:none">
+    <p>Edit dialog</p>
+    <button onclick="document.getElementById('dialog').style.display='none'">close</button>
+  </div>
+</body>
+</html>
