@@ -32,6 +32,45 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 DEFAULT_SCHEMA="$REPO_ROOT/schemas/autospec-test-contract.schema.json"
 
+# _v2_route_covered_by_patterns <route> <patterns_newline_sep>
+# Returns 0 if route matches at least one pattern (anchors stripped), 1 otherwise.
+_v2_route_covered_by_patterns() {
+    local route="$1" patterns="$2" pattern clean_pattern
+    while IFS= read -r pattern; do
+        [ -z "$pattern" ] && continue
+        clean_pattern="${pattern#^}"
+        clean_pattern="${clean_pattern%\$}"
+        if echo "$route" | grep -qE "$clean_pattern" 2>/dev/null; then
+            return 0
+        fi
+    done <<< "$patterns"
+    return 1
+}
+
+# _v2_check_scope_routes <json_data>
+# Rule f: in scoped_production mode, every apply_on_routes entry must match a
+# route_filter allowed_path_pattern. Exits 2 on violation.
+_v2_check_scope_routes() {
+    local json_data="$1"
+    local allowed_patterns all_routes route
+    allowed_patterns=$(printf '%s' "$json_data" | jq -r '
+        [ .e2e.production_scoped_access.scope_tokens[]?
+          | select(.kind == "route_filter")
+          | .allowed_path_patterns[]? ] | .[]
+    ' 2>/dev/null || true)
+    [ -z "$allowed_patterns" ] && return 0
+    all_routes=$(printf '%s' "$json_data" | jq -r '
+        [ .e2e.invariants_v2.invariants[]?.apply_on_routes[]? ] | .[]
+    ' 2>/dev/null || true)
+    while IFS= read -r route; do
+        [ -z "$route" ] && continue
+        if ! _v2_route_covered_by_patterns "$route" "$allowed_patterns"; then
+            printf 'validate-contract: refuse-to-run: mode=scoped_production: apply_on_routes "%s" not covered by any route_filter allowed_path_patterns\n' "$route" >&2
+            exit 2
+        fi
+    done <<< "$all_routes"
+}
+
 validate_contract() {
     local input_file="${1:--}"
     local schema_file="${2:-$DEFAULT_SCHEMA}"
@@ -181,40 +220,9 @@ try {
 
         # ── Rule f: scope-allowed-routes (Mode II only) ───────────────────────
         # When mode=scoped_production + invariants_v2.enabled=true,
-        # all apply_on_routes must be a prefix-match subset of allowed_path_patterns
+        # all apply_on_routes must be covered by route_filter allowed_path_patterns
         if [ "$mode" = "scoped_production" ]; then
-            local allowed_patterns
-            allowed_patterns=$(printf '%s' "$json_data" | jq -r '
-                [ .e2e.production_scoped_access.scope_tokens[]?
-                  | select(.kind == "route_filter")
-                  | .allowed_path_patterns[]? ] | .[]
-            ' 2>/dev/null || true)
-
-            if [ -n "$allowed_patterns" ]; then
-                local all_routes
-                all_routes=$(printf '%s' "$json_data" | jq -r '
-                    [ .e2e.invariants_v2.invariants[]?.apply_on_routes[]? ] | .[]
-                ' 2>/dev/null || true)
-
-                while IFS= read -r route; do
-                    [ -z "$route" ] && continue
-                    local matched=0
-                    while IFS= read -r pattern; do
-                        [ -z "$pattern" ] && continue
-                        # Strip anchors for prefix matching
-                        local clean_pattern="${pattern#^}"
-                        clean_pattern="${clean_pattern%$}"
-                        if echo "$route" | grep -qE "$clean_pattern" 2>/dev/null; then
-                            matched=1
-                            break
-                        fi
-                    done <<< "$allowed_patterns"
-                    if [ "$matched" = "0" ]; then
-                        printf 'validate-contract: refuse-to-run: mode=scoped_production: apply_on_routes entry "%s" is not covered by any route_filter allowed_path_patterns\n' "$route" >&2
-                        exit 2
-                    fi
-                done <<< "$all_routes"
-            fi
+            _v2_check_scope_routes "$json_data"
         fi
 
     fi
