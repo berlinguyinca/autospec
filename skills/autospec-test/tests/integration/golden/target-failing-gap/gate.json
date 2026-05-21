@@ -1,0 +1,35 @@
+{
+  "target": "target-failing-gap",
+  "stage1": {
+    "passed": true,
+    "stage": "unit",
+    "metrics": {
+      "lines": 85,
+      "branches": 80,
+      "functions": 85
+    },
+    "test_run_summary": {
+      "total": 3,
+      "passed": 3,
+      "failed": 0
+    }
+  },
+  "stage2": {
+    "passed": false,
+    "stage": "e2e",
+    "reason": "missing_ui_elements,missing_behavior_categories",
+    "metrics": {
+      "ui_element_coverage": 0.75,
+      "missing_ui_elements": ["button[data-testid=drag-handle]"],
+      "behavior_categories_covered": ["navigation", "form_submit", "click", "display", "input", "keyboard", "scroll", "hover"],
+      "missing_behavior_categories": ["drag_drop"],
+      "assertion_shift": "none"
+    },
+    "test_run_summary": {
+      "total": 8,
+      "passed": 8,
+      "failed": 0
+    }
+  },
+  "overall_passed": false
+}

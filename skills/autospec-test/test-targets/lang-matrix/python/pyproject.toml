@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "lang-matrix-python"
+version = "1.0.0"
+description = "Language matrix: Python/pytest hello-world."
+
+[tool.pytest.ini_options]
+testpaths = ["src"]
