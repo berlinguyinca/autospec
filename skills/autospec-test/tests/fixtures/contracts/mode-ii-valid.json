@@ -1,0 +1,50 @@
+{
+  "mode": "scoped_production",
+  "i_understand_this_writes_to_production": true,
+  "unit": {
+    "test_cmd": "npm test -- --coverage",
+    "coverage_thresholds": {
+      "lines": 95,
+      "branches": 90,
+      "functions": 95
+    }
+  },
+  "e2e": {
+    "forbidden_url_patterns": [
+      "^https?://app\\.acme\\.com"
+    ],
+    "production_scoped_access": {
+      "scope_tokens": [
+        {
+          "kind": "row_filter",
+          "table": "families",
+          "column": "id",
+          "allowed_values": ["test-family-7a3f9c"],
+          "out_of_scope_action": "hard_fail"
+        },
+        {
+          "kind": "route_filter",
+          "methods": ["POST", "PUT", "PATCH", "DELETE"],
+          "allowed_path_patterns": [
+            "^/api/families/test-family-7a3f9c(/.*)?$"
+          ],
+          "action_on_violation": "hard_fail"
+        }
+      ]
+    },
+    "backup": {
+      "driver": "custom",
+      "pre_test_snapshot": true,
+      "restore_cmd": "cp /tmp/db.bak /tmp/db.sqlite",
+      "refuse_to_run_without_backup": true,
+      "custom_snapshot_cmd": "cp /tmp/db.sqlite /tmp/db.bak",
+      "custom_verify_cmd": "test -f /tmp/db.bak",
+      "custom_restore_cmd": "cp /tmp/db.bak /tmp/db.sqlite"
+    }
+  },
+  "budgets": {
+    "coding_time_minutes": 60,
+    "max_loop_iterations": 5,
+    "same_error_halt_threshold": 3
+  }
+}
