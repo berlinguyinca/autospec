@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-test-loop-state.schema.json",
+  "title": "autospec-test loop state",
+  "description": "State file for the autospec-test self-heal loop. Written after each iteration and used for resume-after-relaunch.",
+  "type": "object",
+  "required": ["pr_number", "started_at", "coding_time_used_seconds", "iterations"],
+  "properties": {
+    "pr_number": {
+      "type": "integer",
+      "description": "GitHub PR number being healed."
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 timestamp when the loop started."
+    },
+    "coding_time_used_seconds": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Total coding time used so far, in seconds. Excludes test-run time."
+    },
+    "coding_time_budget_seconds": {
+      "type": "number",
+      "minimum": 0,
+      "default": 3600,
+      "description": "Total coding time budget in seconds (default 3600 = 60 min)."
+    },
+    "last_coding_start": {
+      "type": ["string", "null"],
+      "description": "ISO-8601 timestamp when the last coding window started (null if paused)."
+    },
+    "iterations": {
+      "type": "array",
+      "description": "Ordered list of self-heal iterations.",
+      "items": {
+        "type": "object",
+        "required": ["n", "started_at", "ended_at", "classification", "gate_passed"],
+        "properties": {
+          "n": { "type": "integer", "minimum": 1 },
+          "started_at": { "type": "string", "format": "date-time" },
+          "ended_at": { "type": "string", "format": "date-time" },
+          "classification": {
+            "type": "string",
+            "enum": [
+              "missing_unit_test",
+              "missing_test",
+              "failing_unit_test",
+              "failing_test",
+              "flaky_test",
+              "selector_brittle",
+              "product_bug",
+              "empty_action"
+            ]
+          },
+          "files_changed": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "gate_passed": { "type": "boolean" },
+          "error_signature": {
+            "type": ["string", "null"],
+            "description": "SHA-256 hex digest of the normalized error text."
+          },
+          "commit_sha": {
+            "type": ["string", "null"]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "last_error_signature": {
+      "type": ["string", "null"],
+      "description": "SHA-256 hex digest of the last iteration's error."
+    },
+    "same_error_consecutive": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Count of consecutive iterations with the same error signature."
+    },
+    "empty_action_consecutive": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Count of consecutive iterations where the classifier produced no action."
+    },
+    "termination_reason": {
+      "type": ["string", "null"],
+      "description": "Set when the loop exits: gate_passed | budget_exhausted | max_iterations | same_error_halt | stop_flag | empty_action_halt"
+    }
+  },
+  "additionalProperties": false
+}
