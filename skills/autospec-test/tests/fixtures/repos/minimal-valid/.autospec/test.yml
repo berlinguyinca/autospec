@@ -1,0 +1,18 @@
+mode: strict_isolation
+
+unit:
+  test_cmd: "npm test -- --coverage"
+  coverage_thresholds:
+    lines: 95
+    branches: 90
+    functions: 95
+
+e2e:
+  forbidden_url_patterns:
+    - "^https?://app\\.acme\\.com"
+  clone_url_env: E2E_BASE_URL
+
+budgets:
+  coding_time_minutes: 60
+  max_loop_iterations: 5
+  same_error_halt_threshold: 3

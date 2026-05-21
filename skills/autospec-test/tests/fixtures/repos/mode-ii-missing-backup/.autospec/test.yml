@@ -1,0 +1,27 @@
+mode: scoped_production
+i_understand_this_writes_to_production: true
+
+unit:
+  test_cmd: "npm test -- --coverage"
+  coverage_thresholds:
+    lines: 95
+    branches: 90
+    functions: 95
+
+e2e:
+  forbidden_url_patterns:
+    - "^https?://app\\.acme\\.com"
+  clone_url_env: E2E_BASE_URL
+  production_scoped_access:
+    scope_tokens:
+      - kind: row_filter
+        table: families
+        column: id
+        allowed_values:
+          - "test-family-7a3f9c"
+        out_of_scope_action: hard_fail
+
+budgets:
+  coding_time_minutes: 60
+  max_loop_iterations: 5
+  same_error_halt_threshold: 3
