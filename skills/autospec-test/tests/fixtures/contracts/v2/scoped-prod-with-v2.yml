@@ -1,0 +1,41 @@
+# scoped-prod-with-v2.yml — Mode II (scoped_production) + invariants_v2 with scope-allowed routes
+# Expected: validate-contract.sh exits 0, ajv accepts
+
+mode: scoped_production
+i_understand_this_writes_to_production: true
+
+e2e:
+  forbidden_url_patterns:
+    - "^https?://external\\.example\\.com"
+  clone_url_env: E2E_BASE_URL
+
+  backup:
+    driver: pgdump
+    pre_test_snapshot: true
+    restore_cmd: "pg_restore --clean -d $DB_NAME /tmp/autospec-backup.dump"
+    on_test_catastrophe: restore_and_halt
+    refuse_to_run_without_backup: true
+
+  production_scoped_access:
+    scope_tokens:
+      - kind: route_filter
+        methods:
+          - GET
+        allowed_path_patterns:
+          - '^/api/household/timeline'
+          - '^/dashboard'
+          - '^/tasks'
+        action_on_violation: hard_fail
+
+  invariants_v2:
+    enabled: true
+    invariants:
+      - id: dashboard-done-items-editable
+        kind: every_visible_X_is_Y
+        visible: '[data-testid^="done-item-row-"]'
+        action: 'role=button[name=/edit/i]'
+        apply_on_routes:
+          - /dashboard
+        require_count_at_least: 1
+    thresholds:
+      invariants_required_pass_rate: 100

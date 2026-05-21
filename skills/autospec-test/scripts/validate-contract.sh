@@ -8,6 +8,7 @@
 #   0 = valid contract
 #   1 = fatal error (missing tool, unreadable file, internal error)
 #   2 = refuse-to-run: contract is invalid or missing required fields (operator-actionable)
+#   3 = shape-missing: edge_case_seeds enforcement=refuse_to_run_if_missing but no require_shapes provided
 #
 # Validation steps:
 #   1. JSON Schema validation via `ajv validate`
@@ -16,6 +17,13 @@
 #         AND e2e.backup.driver AND e2e.backup.restore_cmd
 #      b. Fail-closed rule: e2e.forbidden_url_patterns=[] without
 #         e2e.forbidden_url_patterns_intentionally_empty=true → exit 2
+#   3. v2 invariants_v2 cross-field rules:
+#      c. enabled-requires-metrics: invariants_v2.enabled=true requires at least one non-empty metric block
+#      d. refuse-requires-shapes: edge_case_seeds.enforcement=refuse_to_run_if_missing requires
+#         at least one entity with non-empty require_shapes → exit 3
+#      e. leading-slash-routes: all apply_on_routes entries must start with /
+#      f. scope-allowed-routes: when mode=scoped_production + invariants_v2.enabled=true,
+#         apply_on_routes must be a subset of scope_tokens route_filter allowed_path_patterns
 
 set -eu
 
@@ -55,17 +63,45 @@ validate_contract() {
     fi
 
     # Write to temp file for ajv (which needs a file argument)
+    # Use mktemp -t for macOS/BSD compatibility (no .json extension in template)
     local tmpfile
-    tmpfile=$(mktemp /tmp/autospec-test-contract-XXXXXX.json)
+    tmpfile=$(mktemp -t autospec-test-contract)
     # shellcheck disable=SC2064
     trap "rm -f '$tmpfile'" EXIT
     printf '%s' "$json_data" > "$tmpfile"
 
     # ── Step 1: JSON Schema validation ────────────────────────────────────────
-    local ajv_out
-    if ! ajv_out=$(ajv validate -s "$schema_file" -d "$tmpfile" --spec=draft2020 2>&1); then
-        printf 'validate-contract: schema validation failed:\n%s\n' "$ajv_out" >&2
-        exit 2
+    # ajv-cli 5.x --spec=draft2020 flag has a known CLI parsing bug; use Node/Ajv2020
+    # directly (the same module ajv-cli ships) for reliable draft-2020-12 validation.
+    local ajv_node
+    ajv_node=$(node -e "
+try {
+  var fs = require('fs');
+  // Prefer ajv-cli's bundled Ajv2020; fall back to system ajv
+  var Ajv2020;
+  try { Ajv2020 = require('ajv/dist/2020'); }
+  catch(e) {
+    var paths = [
+      '/opt/homebrew/lib/node_modules/ajv-cli/node_modules/ajv/dist/2020',
+      '/usr/local/lib/node_modules/ajv-cli/node_modules/ajv/dist/2020'
+    ];
+    for (var i = 0; i < paths.length; i++) {
+      try { Ajv2020 = require(paths[i]); break; } catch(e2) {}
+    }
+  }
+  if (!Ajv2020) { console.error('ajv/dist/2020 not found'); process.exit(1); }
+  var schema = JSON.parse(fs.readFileSync('$schema_file', 'utf8'));
+  var data   = JSON.parse(fs.readFileSync('$tmpfile',     'utf8'));
+  var ajv    = new Ajv2020({strict: false, allErrors: true});
+  var valid  = ajv.validate(schema, data);
+  if (valid) { console.log('valid'); process.exit(0); }
+  else { console.error(ajv.errorsText()); process.exit(2); }
+} catch(e) { console.error(e.message); process.exit(1); }
+" 2>&1)
+    local ajv_rc=$?
+    if [ "$ajv_rc" -ne 0 ]; then
+        printf 'validate-contract: schema validation failed:\n%s\n' "$ajv_node" >&2
+        exit "$ajv_rc"
     fi
 
     # ── Step 2a: Mode II conjunction check ────────────────────────────────────
@@ -107,6 +143,102 @@ validate_contract() {
         if [ "$ack_empty" != "true" ]; then
             printf 'validate-contract: refuse-to-run: e2e.forbidden_url_patterns is empty or missing without explicit ack. Set forbidden_url_patterns to at least one pattern, or set forbidden_url_patterns_intentionally_empty=true to acknowledge no URL restrictions apply.\n' >&2
             exit 2
+        fi
+    fi
+
+    # ── Step 3: v2 invariants_v2 cross-field rules ────────────────────────────
+    local v2_enabled
+    v2_enabled=$(printf '%s' "$json_data" | jq -r '.e2e.invariants_v2.enabled // false')
+
+    if [ "$v2_enabled" = "true" ]; then
+
+        # ── Rule c: enabled-requires-metrics ──────────────────────────────────
+        # At least one of: invariants (non-empty array), window_contracts (non-empty array),
+        # crawler.enabled=true, contract_symmetry (non-empty array)
+        local inv_count wc_count crawler_on cs_count
+        inv_count=$(printf '%s' "$json_data" | jq '.e2e.invariants_v2.invariants | length // 0')
+        wc_count=$(printf '%s' "$json_data" | jq '.e2e.invariants_v2.window_contracts | length // 0')
+        crawler_on=$(printf '%s' "$json_data" | jq -r '.e2e.invariants_v2.crawler.enabled // false')
+        cs_count=$(printf '%s' "$json_data" | jq '.e2e.invariants_v2.contract_symmetry | length // 0')
+
+        if [ "$inv_count" = "0" ] && [ "$wc_count" = "0" ] && [ "$crawler_on" != "true" ] && [ "$cs_count" = "0" ]; then
+            printf 'validate-contract: refuse-to-run: e2e.invariants_v2.enabled=true but no metric block is populated (invariants, window_contracts, crawler, or contract_symmetry must have at least one entry)\n' >&2
+            exit 2
+        fi
+
+        # ── Rule e: leading-slash-routes ──────────────────────────────────────
+        # All apply_on_routes entries must start with /
+        local bad_routes
+        bad_routes=$(printf '%s' "$json_data" | jq -r '
+            [ .e2e.invariants_v2.invariants[]?.apply_on_routes[]? ] |
+            map(select(startswith("/") | not)) |
+            .[]
+        ' 2>/dev/null || true)
+        if [ -n "$bad_routes" ]; then
+            printf 'validate-contract: refuse-to-run: all apply_on_routes entries must start with /. Found invalid routes:\n%s\n' "$bad_routes" >&2
+            exit 2
+        fi
+
+        # ── Rule f: scope-allowed-routes (Mode II only) ───────────────────────
+        # When mode=scoped_production + invariants_v2.enabled=true,
+        # all apply_on_routes must be a prefix-match subset of allowed_path_patterns
+        if [ "$mode" = "scoped_production" ]; then
+            local allowed_patterns
+            allowed_patterns=$(printf '%s' "$json_data" | jq -r '
+                [ .e2e.production_scoped_access.scope_tokens[]?
+                  | select(.kind == "route_filter")
+                  | .allowed_path_patterns[]? ] | .[]
+            ' 2>/dev/null || true)
+
+            if [ -n "$allowed_patterns" ]; then
+                local all_routes
+                all_routes=$(printf '%s' "$json_data" | jq -r '
+                    [ .e2e.invariants_v2.invariants[]?.apply_on_routes[]? ] | .[]
+                ' 2>/dev/null || true)
+
+                while IFS= read -r route; do
+                    [ -z "$route" ] && continue
+                    local matched=0
+                    while IFS= read -r pattern; do
+                        [ -z "$pattern" ] && continue
+                        # Strip anchors for prefix matching
+                        local clean_pattern="${pattern#^}"
+                        clean_pattern="${clean_pattern%$}"
+                        if echo "$route" | grep -qE "$clean_pattern" 2>/dev/null; then
+                            matched=1
+                            break
+                        fi
+                    done <<< "$allowed_patterns"
+                    if [ "$matched" = "0" ]; then
+                        printf 'validate-contract: refuse-to-run: mode=scoped_production: apply_on_routes entry "%s" is not covered by any route_filter allowed_path_patterns\n' "$route" >&2
+                        exit 2
+                    fi
+                done <<< "$all_routes"
+            fi
+        fi
+
+    fi
+
+    # ── Rule d: refuse-requires-shapes ────────────────────────────────────────
+    # Runs regardless of enabled flag — enforcement is a declaration-level contract
+    local enforcement
+    enforcement=$(printf '%s' "$json_data" | jq -r '.e2e.invariants_v2.edge_case_seeds.enforcement // empty')
+
+    if [ "$enforcement" = "refuse_to_run_if_missing" ]; then
+        # Count total require_shapes entries across all entity keys (excluding "enforcement")
+        local total_shapes
+        total_shapes=$(printf '%s' "$json_data" | jq '
+            [ .e2e.invariants_v2.edge_case_seeds
+              | to_entries[]
+              | select(.key != "enforcement")
+              | .value.require_shapes?
+              | length? // 0
+            ] | add // 0
+        ' 2>/dev/null || echo "0")
+
+        if [ "$total_shapes" = "0" ]; then
+            printf 'validate-contract: shape-missing: edge_case_seeds.enforcement=refuse_to_run_if_missing but no entity with non-empty require_shapes found. Provision seed shapes or change enforcement to warn_if_missing/skip_if_missing.\n' >&2
+            exit 3
         fi
     fi
 

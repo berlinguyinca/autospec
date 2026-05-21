@@ -181,6 +181,272 @@
             "refuse_to_run_without_backup": { "type": "boolean" }
           },
           "additionalProperties": false
+        },
+        "invariants_v2": {
+          "type": "object",
+          "description": "v2 Stage 2.5 invariants, window contracts, extended crawler, and contract symmetry. All v2 fields nest here to avoid clobbering v1 e2e.* fields.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Master switch. When false, Stage 2.5 is skipped entirely."
+            },
+            "invariants": {
+              "type": "array",
+              "description": "Metric F — Structural invariants. Each entry is a kind-tagged invariant declaration.",
+              "items": {
+                "type": "object",
+                "required": ["id", "kind", "apply_on_routes"],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "Unique identifier for this invariant."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "description": "Invariant kind. Built-in: every_visible_X_is_Y, every_foldout_opens_all_nested, every_row_has_required_actions, every_visible_X_has_accessible_name, every_modal_returns_to_body_scroll. Custom kinds registered via .autospec/invariant-kinds/<name>.mjs."
+                  },
+                  "apply_on_routes": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "description": "Routes where this invariant is enforced. Each entry must start with /."
+                  },
+                  "require_count_at_least": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Minimum number of elements the selector must match. Prevents vacuous truth."
+                  },
+                  "visible": {
+                    "type": "string",
+                    "description": "CSS/Playwright selector for the visible element (every_visible_X_is_Y)."
+                  },
+                  "action": {
+                    "type": "string",
+                    "description": "Selector for the action element within the visible element."
+                  },
+                  "verifies_open": {
+                    "type": "string",
+                    "description": "Selector that must be visible after clicking action."
+                  },
+                  "verifies_close": {
+                    "type": "string",
+                    "description": "Selector to click to close the opened element."
+                  },
+                  "foldout": {
+                    "type": "string",
+                    "description": "Selector for foldout elements (every_foldout_opens_all_nested)."
+                  },
+                  "nested_must_be_visible_after_open": {
+                    "type": "string",
+                    "description": "Selector for nested elements that must be visible after opening the foldout."
+                  },
+                  "row": {
+                    "type": "string",
+                    "description": "Selector for row elements (every_row_has_required_actions)."
+                  },
+                  "required_actions": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "List of action selectors that must be present on each row."
+                  }
+                },
+                "additionalProperties": true
+              }
+            },
+            "window_contracts": {
+              "type": "array",
+              "description": "Metric G — Window-contract symmetry declarations.",
+              "items": {
+                "type": "object",
+                "required": ["id", "ui_display", "api_query", "mismatch_action"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "ui_display": {
+                    "type": "object",
+                    "required": ["route", "widget", "window_days_attr"],
+                    "properties": {
+                      "route": { "type": "string" },
+                      "widget": { "type": "string" },
+                      "window_days_attr": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                  },
+                  "api_query": {
+                    "type": "object",
+                    "required": ["method", "path_pattern", "recorded_via"],
+                    "properties": {
+                      "method": { "type": "string" },
+                      "path_pattern": { "type": "string" },
+                      "window_params": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "object",
+                          "properties": {
+                            "type": { "type": "string" },
+                            "must_be": { "type": "string" },
+                            "tolerance_days": { "type": "integer", "minimum": 0 }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "recorded_via": {
+                        "type": "string",
+                        "enum": ["network_intercept"]
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "mismatch_action": {
+                    "type": "string",
+                    "enum": ["hard_fail", "warn_only"]
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "crawler": {
+              "type": "object",
+              "description": "Metric H — Extended crawler configuration.",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "bfs_max_routes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Maximum number of routes to crawl via BFS."
+                },
+                "open_all_foldouts": {
+                  "type": "boolean",
+                  "description": "When true, all foldouts are opened before checking affordances."
+                },
+                "affordance_patterns": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["element"],
+                    "properties": {
+                      "element": { "type": "string" },
+                      "opens": { "type": "string" },
+                      "closes_via": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "failure_threshold": {
+                  "type": "object",
+                  "properties": {
+                    "max_unaffordable_elements": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            },
+            "contract_symmetry": {
+              "type": "array",
+              "description": "Metric I — Data-source contract symmetry declarations.",
+              "items": {
+                "type": "object",
+                "required": ["id", "ui_source", "api_target", "mismatch_action"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "ui_source": {
+                    "type": "object",
+                    "required": ["route", "extract"],
+                    "properties": {
+                      "route": { "type": "string" },
+                      "extract": { "type": "string" },
+                      "per_match": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" }
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "api_target": {
+                    "type": "object",
+                    "required": ["method", "path_template"],
+                    "properties": {
+                      "method": { "type": "string" },
+                      "path_template": { "type": "string" },
+                      "must_contain": { "type": "string" },
+                      "must_be_editable": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                  },
+                  "mismatch_action": {
+                    "type": "string",
+                    "enum": ["hard_fail", "warn_only"]
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "edge_case_seeds": {
+              "type": "object",
+              "description": "Edge-case seed declarations. Named entity keys hold require_shapes arrays. enforcement key controls behavior when seeds are missing.",
+              "properties": {
+                "enforcement": {
+                  "type": "string",
+                  "enum": ["refuse_to_run_if_missing", "warn_if_missing", "skip_if_missing"],
+                  "description": "What to do when declared seed shapes are not provisioned."
+                }
+              },
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "require_shapes": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "required": ["name", "count_min"],
+                          "properties": {
+                            "name": { "type": "string" },
+                            "count_min": { "type": "integer", "minimum": 0 }
+                          },
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  { "type": "string" }
+                ]
+              }
+            },
+            "thresholds": {
+              "type": "object",
+              "description": "Pass-rate thresholds for each metric (0-100).",
+              "properties": {
+                "invariants_required_pass_rate": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "window_contracts_required_pass_rate": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "crawler_required_pass_rate": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "contract_symmetry_required_pass_rate": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

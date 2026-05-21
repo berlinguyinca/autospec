@@ -1,0 +1,21 @@
+# minimal-v2.yml — minimal valid v2 contract with one Metric F invariant
+# Expected: validate-contract.sh exits 0, ajv accepts
+
+mode: strict_isolation
+
+e2e:
+  forbidden_url_patterns:
+    - "^https?://app\\.acme\\.com"
+  clone_url_env: E2E_BASE_URL
+  invariants_v2:
+    enabled: true
+    invariants:
+      - id: items-editable
+        kind: every_visible_X_is_Y
+        visible: '[data-testid^="item-row-"]'
+        action: 'role=button[name=/edit/i]'
+        apply_on_routes:
+          - /dashboard
+        require_count_at_least: 1
+    thresholds:
+      invariants_required_pass_rate: 100
