@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Structural invariants fixture</title></head>
+<body>
+  <!-- 5 done-item rows. Row index 3 is a BUG: uses <span> instead of <button> for edit -->
+  <div data-testid="done-item-row-0">
+    <span class="label">Task 0</span>
+    <button aria-label="edit" onclick="document.getElementById('dialog').style.display='block'">edit</button>
+  </div>
+  <div data-testid="done-item-row-1">
+    <span class="label">Task 1</span>
+    <button aria-label="edit" onclick="document.getElementById('dialog').style.display='block'">edit</button>
+  </div>
+  <div data-testid="done-item-row-2">
+    <span class="label">Task 2</span>
+    <button aria-label="edit" onclick="document.getElementById('dialog').style.display='block'">edit</button>
+  </div>
+  <!-- ROW 3: BUG — span instead of button, not interactive -->
+  <div data-testid="done-item-row-3">
+    <span class="label">Task 3</span>
+    <span class="fake-edit">edit</span>
+  </div>
+  <div data-testid="done-item-row-4">
+    <span class="label">Task 4</span>
+    <button aria-label="edit" onclick="document.getElementById('dialog').style.display='block'">edit</button>
+  </div>
+
+  <!-- Dialog -->
+  <div id="dialog" data-testid="done-item-edit-dialog" style="display:none">
+    <p>Edit dialog</p>
+    <button id="close-dialog" onclick="document.getElementById('dialog').style.display='none'">close</button>
+  </div>
+
+  <!-- 3-level nested foldout for openAllFoldouts test -->
+  <div data-testid="foldout-level-1" aria-expanded="false">
+    <button onclick="
+      this.parentElement.setAttribute('aria-expanded','true');
+      this.parentElement.querySelector('.l1-content').style.display='block';
+    ">Level 1</button>
+    <div class="l1-content" style="display:none">
+      <div data-testid="foldout-level-2" aria-expanded="false">
+        <button onclick="
+          this.parentElement.setAttribute('aria-expanded','true');
+          this.parentElement.querySelector('.l2-content').style.display='block';
+        ">Level 2</button>
+        <div class="l2-content" style="display:none">
+          <div data-testid="foldout-level-3" aria-expanded="false">
+            <button onclick="
+              this.parentElement.setAttribute('aria-expanded','true');
+              this.parentElement.querySelector('.l3-content').style.display='block';
+            ">Level 3</button>
+            <div class="l3-content" style="display:none">
+              <span data-testid="deep-content">Deep content</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
