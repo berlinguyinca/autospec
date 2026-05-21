@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Window-contract mismatch fixture</title>
+</head>
+<body>
+  <!--
+    Mismatch fixture: UI declares data-window-days="7" (7-day window)
+    but the inline script fetches from=today-3d (3-day window).
+    Metric G run-window.mjs must detect this and emit a violation.
+  -->
+  <div
+    data-testid="streak-widget"
+    data-window-days="7"
+    data-loaded="true"
+    style="padding:8px;border:1px solid #ccc"
+  >
+    Streak widget (7-day window declared in UI)
+  </div>
+
+  <script>
+    // Deliberately fetches a 3-day window instead of the declared 7-day window.
+    // The test server or page.route handler in run-window.mjs intercepts this.
+    const today = new Date();
+    const from = new Date(today);
+    from.setDate(from.getDate() - 3);
+
+    const pad = n => String(n).padStart(2, '0');
+    const fmt = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+
+    fetch(`/api/household/timeline?from=${fmt(from)}&to=${fmt(today)}`).catch(() => {});
+  </script>
+</body>
+</html>
