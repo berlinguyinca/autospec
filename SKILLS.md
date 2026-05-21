@@ -41,6 +41,14 @@
 - Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
 - Status: existing-spec shortcut for Phase 3 plus Phase 3.5 with startup self-update before normal execution.
 
+## autospec-test
+
+- Path: [`skills/autospec-test`](skills/autospec-test)
+- Trigger: use when you want every Phase 4 PR gated on unit + E2E test coverage with an auto-heal loop, or to run ad-hoc coverage validation against any branch.
+- Activation keywords: `autospec-test`, `coverage gate`, `e2e gate`, `unit coverage`, `test gate`, `auto-heal tests`, `enforce test coverage`, `coverage enforcement`
+- Harnesses: Claude Code (`SKILL.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
+- Status: inline Phase 4 gate (runs after build + lint, before auto-merge) plus standalone `/autospec-test [PR#]` invocation. Two-stage: unit coverage → E2E coverage. Self-heal loop up to 5 iterations / 60 min coding time. Assertion-shift guardrail blocks LOOSENING rewrites. Mode II (scoped production) opt-in with mandatory backup/restore.
+
 ## Future Skill Checklist
 
 1. Create `skills/<skill-name>/SKILL.md`.

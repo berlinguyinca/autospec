@@ -144,3 +144,74 @@ or `pytest`, so running it against a target repo is side-effect-free.
 Once both lines print their `OK`/`detected` strings, autospec's
 Phase 4 implementer will run both gates against PRs targeting your
 `main`.
+
+## How to enable autospec-test
+
+`autospec-test` gates every Phase 4 PR on unit + E2E coverage and
+auto-heals gaps within a 60-minute coding budget. Enabling it requires
+three steps: install Playwright (if not already present), write
+`.autospec/test.yml`, and optionally run the wizard.
+
+### 1. Install Playwright in your target repo
+
+```bash
+npm init playwright@latest
+# Accept defaults; choose TypeScript if your repo uses it.
+# Commit playwright.config.ts and the generated test skeleton.
+```
+
+If your repo uses a different test framework for E2E (e.g. Cypress),
+the skill gates on Playwright only. Cypress repos should set
+`forbidden_url_patterns_intentionally_empty: true` and omit E2E stage
+until a Playwright suite is added.
+
+### 2. Write `.autospec/test.yml`
+
+Create `.autospec/test.yml` in your target repo with at minimum:
+
+```yaml
+# .autospec/test.yml
+mode: strict_isolation          # default; safe for all repos
+
+e2e:
+  clone_url_env: E2E_BASE_URL   # env var pointing at your isolated clone
+  forbidden_url_patterns:
+    - "^https?://app\\.example\\.com"      # your production URL(s)
+    - "^https?://.*\\.prod\\.example\\.internal"
+
+budgets:
+  coding_time_minutes: 60       # LLM coding time; test runtime is unbounded
+  max_loop_iterations: 5
+  same_error_halt_threshold: 3
+```
+
+**Fail-closed rule:** if `forbidden_url_patterns` is missing or empty
+(without `forbidden_url_patterns_intentionally_empty: true`), the skill
+refuses to run and labels the PR `e2e:contract-error`. Always declare
+at least one forbidden pattern covering your production URL.
+
+Commit `.autospec/test.yml` to your repo's default branch.
+
+### 3. Run the wizard (optional but recommended)
+
+```bash
+/autospec-test --init
+```
+
+The wizard walks through mode selection, detects backup drivers for
+Mode II (scoped production), prints a dry-run preview of constraints,
+and requires you to type `I UNDERSTAND` before writing any files.
+
+### What the labels mean
+
+| Label | Meaning |
+|---|---|
+| `e2e:passed` | Both stages green; auto-merge proceeds |
+| `e2e:healed` | Gate was red; self-heal loop fixed it; auto-merge proceeds (subject to assertion-shift guardrail) |
+| `e2e:blocked` | Loop exhausted budget or iteration cap; needs human review |
+| `e2e:stuck-error` | Same error in 3 consecutive iterations; needs human review |
+| `e2e:refused` | Skill refused to run (missing contract or forbidden URL check); fix `.autospec/test.yml` |
+| `e2e:contract-error` | Contract validation failed (missing `forbidden_url_patterns`, Playwright not found, etc.) |
+| `e2e:assertion-loosening` | Loop weakened a test assertion; needs human review before merge |
+| `needs-human-review` | Combined with any of the above blocked states |
+| `e2e:scoped-prod` | Mode II run (touches production under declared scope tokens) |
