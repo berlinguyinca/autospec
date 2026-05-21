@@ -1,0 +1,5 @@
+mode: strict_isolation
+
+e2e:
+  forbidden_url_patterns:
+    - "^https?://app\\.acme\\.com"

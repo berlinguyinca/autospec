@@ -1,0 +1,4 @@
+mode: strict_isolation
+  this is: [invalid yaml
+  because: the indentation is wrong
+  and the bracket is unclosed

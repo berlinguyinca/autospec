@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-test-contract.schema.json",
+  "title": "autospec-test contract",
+  "description": "Schema for .autospec/test.yml — the autospec-test skill contract file. Shared by Skills A (autospec-test), C (clone provisioner), and D (suite bootstrap).",
+  "type": "object",
+  "required": ["mode"],
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["strict_isolation", "scoped_production"],
+      "description": "Isolation mode. strict_isolation (default): all tests run against an isolated clone. scoped_production: opt-in to tightly scoped production access with mandatory backup/restore."
+    },
+    "i_understand_this_writes_to_production": {
+      "type": "boolean",
+      "description": "Required literal acknowledgement for Mode II (scoped_production). Must be true."
+    },
+    "unit": {
+      "type": "object",
+      "description": "Unit test gate configuration.",
+      "properties": {
+        "test_cmd": {
+          "type": "string",
+          "description": "Command to run unit tests. Auto-detected if omitted."
+        },
+        "coverage_collector": {
+          "type": "string",
+          "enum": ["istanbul", "c8", "coverage-py", "jacoco", "go-cover", "cargo-llvm-cov"],
+          "description": "Coverage collector adapter. Auto-detected from language markers if omitted."
+        },
+        "coverage_thresholds": {
+          "type": "object",
+          "properties": {
+            "lines": { "type": "number", "minimum": 0, "maximum": 100 },
+            "branches": { "type": "number", "minimum": 0, "maximum": 100 },
+            "functions": { "type": "number", "minimum": 0, "maximum": 100 }
+          },
+          "additionalProperties": false
+        },
+        "function_presence_check": {
+          "type": "boolean",
+          "description": "When true, every exported/public function must have at least one unit test."
+        },
+        "coverage_exclude_globs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Glob patterns for files to exclude from coverage measurement."
+        }
+      },
+      "additionalProperties": false
+    },
+    "e2e": {
+      "type": "object",
+      "description": "E2E test gate configuration.",
+      "properties": {
+        "clone_url_env": {
+          "type": "string",
+          "description": "Environment variable name that holds the base URL for the isolated clone. Auto-detected from E2E_BASE_URL, PLAYWRIGHT_BASE_URL, BASE_URL."
+        },
+        "start_cmd": {
+          "type": "string",
+          "description": "Command to start the application for E2E testing. Auto-detected from package.json scripts."
+        },
+        "playwright_cmd": {
+          "type": "string",
+          "description": "Command to run Playwright tests. Auto-detected."
+        },
+        "playwright_config": {
+          "type": "string",
+          "description": "Path to Playwright config file. Auto-detected via glob."
+        },
+        "coverage_cmd": {
+          "type": "string",
+          "description": "Command to run E2E tests with coverage enabled."
+        },
+        "coverage_collector": {
+          "type": "string",
+          "enum": ["istanbul", "c8", "coverage-py", "jacoco", "go-cover", "cargo-llvm-cov"],
+          "description": "Coverage collector for E2E runs."
+        },
+        "coverage_thresholds": {
+          "type": "object",
+          "properties": {
+            "lines": { "type": "number", "minimum": 0, "maximum": 100 },
+            "branches": { "type": "number", "minimum": 0, "maximum": 100 },
+            "functions": { "type": "number", "minimum": 0, "maximum": 100 },
+            "ui_elements": { "type": "number", "minimum": 0, "maximum": 100 },
+            "behavior_categories": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["sort", "scroll", "upload", "download", "filter", "paginate", "bulk_select", "keyboard_nav", "drag_drop"]
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "forbidden_url_patterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regex patterns for URLs that must never be contacted during tests. MANDATORY — fail-closed if missing or empty without explicit ack."
+        },
+        "forbidden_url_patterns_intentionally_empty": {
+          "type": "boolean",
+          "description": "Set to true to explicitly acknowledge that forbidden_url_patterns is intentionally empty (no URL restrictions). Requires deliberate operator action."
+        },
+        "egress_allowlist": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Optional egress allowlist for Layer C enforcement."
+        },
+        "production_scoped_access": {
+          "type": "object",
+          "description": "Mode II: production access scope tokens.",
+          "properties": {
+            "scope_tokens": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["row_filter", "method_allowlist", "route_filter"]
+                  },
+                  "table": { "type": "string" },
+                  "column": { "type": "string" },
+                  "allowed_values": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "out_of_scope_action": {
+                    "type": "string",
+                    "enum": ["hard_fail", "warn"]
+                  },
+                  "module": { "type": "string" },
+                  "allowed_methods": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "others_must_be": { "type": "string" },
+                  "methods": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "allowed_path_patterns": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "action_on_violation": {
+                    "type": "string",
+                    "enum": ["hard_fail", "warn"]
+                  }
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "backup": {
+          "type": "object",
+          "description": "Mode II: backup/restore configuration. Required for scoped_production mode.",
+          "required": ["driver", "restore_cmd"],
+          "properties": {
+            "driver": {
+              "type": "string",
+              "enum": ["zfs", "pgdump", "mysqldump", "custom_cmd"],
+              "description": "Backup driver to use."
+            },
+            "dataset": { "type": "string" },
+            "pre_test_snapshot": { "type": "boolean" },
+            "verify_snapshot_cmd": { "type": "string" },
+            "restore_cmd": {
+              "type": "string",
+              "description": "Command to restore from backup. Required."
+            },
+            "on_test_catastrophe": {
+              "type": "string",
+              "enum": ["restore_and_halt", "halt_only"]
+            },
+            "refuse_to_run_without_backup": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "budgets": {
+      "type": "object",
+      "description": "Self-heal loop budget configuration.",
+      "properties": {
+        "coding_time_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Wall-clock minutes allowed for coding during self-heal (pauses while tests run)."
+        },
+        "max_loop_iterations": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of self-heal loop iterations before blocking."
+        },
+        "same_error_halt_threshold": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of consecutive iterations with the same error before halting."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "if": {
+    "properties": { "mode": { "const": "scoped_production" } }
+  },
+  "then": {
+    "required": ["i_understand_this_writes_to_production"],
+    "properties": {
+      "i_understand_this_writes_to_production": { "const": true }
+    }
+  }
+}
