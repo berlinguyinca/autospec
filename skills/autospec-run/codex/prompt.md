@@ -454,6 +454,21 @@ issues unblock the queue before continuing with normal feature work.
 >    git worktree add -b <BRANCH> /tmp/wt-<BRANCH> origin/main && cd /tmp/wt-<BRANCH>
 > 2. TDD per AGENTS.md: failing test first → implement → refactor → commit. NO DB/external mocks. Follow file paths and signatures from the issue body verbatim.
 > 3. Build + test green (use the project's test runner; for Go: `go build ./... && go test ./... -count=1`; for Node: `npm test`; for Python: `pytest`). 80%+ coverage on changed files.
+> 3a. **autospec-test gate** (run when `skills/autospec-test/scripts/run-gate.sh` exists in the repo): invoke the gate against the PR's target repo root. Handle exit codes per spec §7a/§7b:
+>    ```bash
+>    GATE_SCRIPT="skills/autospec-test/scripts/run-gate.sh"
+>    if [ -f "$GATE_SCRIPT" ] && [ -f ".autospec/test.yml" ]; then
+>      GATE_JSON_OUT=$(mktemp -t autospec-gate-XXXXXX.json)
+>      trap 'rm -f "$GATE_JSON_OUT"' EXIT
+>      bash "$GATE_SCRIPT" . --output-gate "$GATE_JSON_OUT" --pr "<PR>" --repo "{repo}" || GATE_EXIT=$?
+>      case "${GATE_EXIT:-0}" in
+>        0) echo "[gate] autospec-test: passed" ;;
+>        1) echo "[gate] autospec-test: blocked — PR comment posted, labels applied; continuing review loop" ;;
+>        2) echo "[gate] autospec-test: fatal (exit 2) — halt batch"; exit 2 ;;
+>      esac
+>    fi
+>    ```
+>    Exit 0: proceed to merge. Exit 1: block PR (post comment + labels; do NOT merge; treat as review finding). Exit 2: halt entire batch (comment on issue, label `in-progress-by-bot` → `auto-implement`, exit monitor).
 > 4. Conventional commits (feat:/fix:/test:/docs:/refactor:). NEVER bypass hooks. NEVER amend.
 > 5. Push: git push -u origin <BRANCH>
 >    ```bash
