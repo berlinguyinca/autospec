@@ -1,0 +1,36 @@
+{
+  "target": "target-mode-ii-fixture",
+  "stage1": {
+    "passed": true,
+    "stage": "unit",
+    "metrics": {
+      "lines": 85,
+      "branches": 80,
+      "functions": 85
+    },
+    "test_run_summary": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0
+    }
+  },
+  "stage2": {
+    "passed": false,
+    "stage": "e2e",
+    "reason": "scope-violation",
+    "metrics": {
+      "ui_element_coverage": 1.0,
+      "behavior_categories_covered": ["navigation", "form_submit", "click", "display"],
+      "assertion_shift": "none",
+      "scope_violation": true,
+      "restore_invoked": true,
+      "restore_succeeded": true
+    },
+    "test_run_summary": {
+      "total": 4,
+      "passed": 3,
+      "failed": 1
+    }
+  },
+  "overall_passed": false
+}

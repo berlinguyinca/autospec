@@ -1,0 +1,13 @@
+{
+  "name": "target-failing-gap",
+  "version": "1.0.0",
+  "description": "Synthetic target: app with deliberate drag_drop test gap and untouched button.",
+  "scripts": {
+    "test": "jest --coverage",
+    "test:e2e": "npx playwright test"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0",
+    "@types/jest": "^29.0.0"
+  }
+}

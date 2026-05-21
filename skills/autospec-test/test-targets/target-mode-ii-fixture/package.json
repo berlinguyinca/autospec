@@ -1,0 +1,13 @@
+{
+  "name": "target-mode-ii-fixture",
+  "version": "1.0.0",
+  "description": "Synthetic target: Express+SQLite with scope-violation + cp-driver backup.",
+  "scripts": {
+    "test": "jest --coverage",
+    "test:e2e": "npx playwright test"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0",
+    "@types/jest": "^29.0.0"
+  }
+}

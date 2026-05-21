@@ -1,0 +1,34 @@
+{
+  "target": "target-greenwash-bait",
+  "stage1": {
+    "passed": true,
+    "stage": "unit",
+    "metrics": {
+      "lines": 90,
+      "branches": 85,
+      "functions": 90
+    },
+    "test_run_summary": {
+      "total": 4,
+      "passed": 4,
+      "failed": 0
+    }
+  },
+  "stage2": {
+    "passed": false,
+    "stage": "e2e",
+    "reason": "unjustified-shift",
+    "metrics": {
+      "ui_element_coverage": 1.0,
+      "behavior_categories_covered": ["navigation", "form_submit", "click", "display", "input", "drag_drop", "keyboard", "scroll", "hover"],
+      "assertion_shift": "LOOSENING",
+      "assertion_shift_details": "peak_detector test tolerance widened without JUSTIFICATION"
+    },
+    "test_run_summary": {
+      "total": 9,
+      "passed": 9,
+      "failed": 0
+    }
+  },
+  "overall_passed": false
+}
