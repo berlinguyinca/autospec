@@ -1,0 +1,118 @@
+# all-metrics.yml — all four metric blocks (F/G/H/I) plus edge_case_seeds
+# Expected: validate-contract.sh exits 0, ajv accepts
+
+mode: strict_isolation
+
+e2e:
+  forbidden_url_patterns:
+    - "^https?://app\\.acme\\.com"
+  clone_url_env: E2E_BASE_URL
+
+  invariants_v2:
+    enabled: true
+
+    # Metric F — Structural invariants
+    invariants:
+      - id: dashboard-done-items-editable
+        kind: every_visible_X_is_Y
+        visible: '[data-testid^="done-item-row-"]'
+        action: 'role=button[name=/edit/i]'
+        verifies_open: '[data-testid="done-item-edit-dialog"]'
+        verifies_close: 'role=button[name=/close/i]'
+        apply_on_routes:
+          - /dashboard
+          - /family
+        require_count_at_least: 1
+      - id: foldouts-all-open
+        kind: every_foldout_opens_all_nested
+        foldout: '[data-testid^="day-foldout-"]'
+        nested_must_be_visible_after_open: '[data-testid^="day-foldout-row-"]'
+        apply_on_routes:
+          - /dashboard
+      - id: list-items-have-actions
+        kind: every_row_has_required_actions
+        row: '[data-testid^="task-row-"]'
+        required_actions:
+          - 'role=button[name=/edit/i]'
+          - 'role=button[name=/delete/i]'
+        apply_on_routes:
+          - /tasks
+
+    # Metric G — Window-contract symmetry
+    window_contracts:
+      - id: dashboard-streak-window
+        ui_display:
+          route: /dashboard
+          widget: '[data-testid=streak-widget]'
+          window_days_attr: data-window-days
+        api_query:
+          method: GET
+          path_pattern: '^/api/household/timeline$'
+          window_params:
+            from:
+              type: iso_date
+              must_be: 'today - $N days'
+              tolerance_days: 1
+            to:
+              type: iso_date
+              must_be: today
+              tolerance_days: 1
+          recorded_via: network_intercept
+        mismatch_action: hard_fail
+
+    # Metric H — Extended crawler
+    crawler:
+      enabled: true
+      bfs_max_routes: 200
+      open_all_foldouts: true
+      affordance_patterns:
+        - element: '[data-testid^="done-item-row-"] role=button[name=/edit/i]'
+          opens: '[data-testid="done-item-edit-dialog"]'
+          closes_via: 'role=button[name=/close/i]'
+        - element: '[data-testid^="task-row-"] role=button[name=/delete/i]'
+          opens: '[data-testid="confirm-delete-dialog"]'
+          closes_via: 'role=button[name=/cancel/i]'
+      failure_threshold:
+        max_unaffordable_elements: 0
+
+    # Metric I — Data-source contract symmetry
+    contract_symmetry:
+      - id: streak-task-must-be-editable
+        ui_source:
+          route: /dashboard
+          extract: '[data-testid^="streak-task-"]'
+          per_match:
+            task_id: data-task-id
+            date: data-date
+        api_target:
+          method: GET
+          path_template: '/api/household/timeline?from=${date}&to=${date}&member_id=current'
+          must_contain: '$.events[?(@.task_id=="${task_id}")]'
+          must_be_editable: '$.events[?(@.task_id=="${task_id}")].editable == true'
+        mismatch_action: hard_fail
+
+    # Edge-case seeds
+    edge_case_seeds:
+      household_test_family:
+        require_shapes:
+          - name: task_done_today
+            count_min: 1
+          - name: task_done_yesterday
+            count_min: 1
+          - name: task_done_2_to_6_days_ago
+            count_min: 5
+          - name: task_done_around_midnight
+            count_min: 1
+          - name: multiple_tasks_same_day
+            count_min: 1
+          - name: task_in_collapsed_foldout
+            count_min: 1
+          - name: last_item_in_long_list
+            count_min: 1
+      enforcement: refuse_to_run_if_missing
+
+    thresholds:
+      invariants_required_pass_rate: 100
+      window_contracts_required_pass_rate: 100
+      crawler_required_pass_rate: 100
+      contract_symmetry_required_pass_rate: 100

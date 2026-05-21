@@ -1,0 +1,26 @@
+# missing-edge-seeds.yml — enforcement=refuse_to_run_if_missing but require_shapes is empty
+# Expected: validate-contract.sh exits 3 (shape-missing), stderr mentions "shape"
+
+mode: strict_isolation
+
+e2e:
+  forbidden_url_patterns:
+    - "^https?://app\\.acme\\.com"
+  clone_url_env: E2E_BASE_URL
+
+  invariants_v2:
+    enabled: true
+    invariants:
+      - id: items-editable
+        kind: every_visible_X_is_Y
+        visible: '[data-testid^="item-row-"]'
+        action: 'role=button[name=/edit/i]'
+        apply_on_routes:
+          - /dashboard
+        require_count_at_least: 1
+    edge_case_seeds:
+      household_test_family:
+        require_shapes: []
+      enforcement: refuse_to_run_if_missing
+    thresholds:
+      invariants_required_pass_rate: 100
