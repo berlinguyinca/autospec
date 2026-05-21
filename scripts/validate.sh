@@ -523,6 +523,21 @@ check_existing_spec_mode() {
     done
 }
 
+# autospec-test skill structural check (Phase 10): run per-skill validate.sh
+# to verify SKILL.md, codex/prompt.md, and structural section presence.
+check_autospec_test_skill_present() {
+    info "autospec-test skill structural lint"
+    local skill_dir="skills/autospec-test"
+    local validate_sh="$skill_dir/validate.sh"
+    [ -d "$skill_dir" ] || fail "$skill_dir: directory missing"
+    [ -f "$skill_dir/SKILL.md" ] || fail "$skill_dir/SKILL.md: required file missing"
+    [ -f "$skill_dir/codex/prompt.md" ] || fail "$skill_dir/codex/prompt.md: required file missing"
+    [ -f "$validate_sh" ] || fail "$validate_sh: per-skill validate.sh missing"
+    bash -n "$validate_sh" || fail "$validate_sh: bash syntax error"
+    bash "$validate_sh" >/dev/null 2>&1 \
+        || { bash "$validate_sh" >&2; fail "$validate_sh: structural lint failed"; }
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -562,6 +577,7 @@ main() {
     check_autospec_run_regression_review_lockstep
     check_autospec_review_skill_present
     check_autospec_review_tier_a_directives
+    check_autospec_test_skill_present
     check_phase4_tests
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
