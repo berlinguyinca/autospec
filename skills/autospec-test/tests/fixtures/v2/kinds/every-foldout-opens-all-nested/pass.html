@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>every-foldout-opens-all-nested pass fixture</title></head>
+<body>
+  <div data-testid="foldout-day-1" aria-expanded="false">
+    <button onclick="
+      this.parentElement.setAttribute('aria-expanded','true');
+      this.parentElement.querySelector('.nested').style.display='block';
+    ">Monday</button>
+    <div class="nested" style="display:none">
+      <div data-testid="nested-row-1-1">Task A</div>
+      <div data-testid="nested-row-1-2">Task B</div>
+    </div>
+  </div>
+  <div data-testid="foldout-day-2" aria-expanded="false">
+    <button onclick="
+      this.parentElement.setAttribute('aria-expanded','true');
+      this.parentElement.querySelector('.nested').style.display='block';
+    ">Tuesday</button>
+    <div class="nested" style="display:none">
+      <div data-testid="nested-row-2-1">Task C</div>
+    </div>
+  </div>
+</body>
+</html>

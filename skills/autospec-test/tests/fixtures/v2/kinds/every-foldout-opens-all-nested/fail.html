@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>every-foldout-opens-all-nested fail fixture</title></head>
+<body>
+  <!-- Foldout with no nested rows — should fail -->
+  <div data-testid="foldout-day-1" aria-expanded="false">
+    <button onclick="this.parentElement.setAttribute('aria-expanded','true')">Monday</button>
+    <!-- No nested rows matching the selector -->
+  </div>
+</body>
+</html>
