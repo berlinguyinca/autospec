@@ -1,16 +1,25 @@
 #!/usr/bin/env bash
-# run-gate.sh — stub gate runner for autospec-test (Phase 8).
+# run-gate.sh — full gate runner for autospec-test (Phase 9).
 #
-# Usage: run-gate.sh <target_dir> [--output-gate <gate_json_path>] [--output-comment <comment_md_path>]
+# Usage: run-gate.sh <target_dir> [--output-gate <gate_json_path>]
+#                    [--output-comment <comment_md_path>]
+#                    [--pr <PR_NUMBER>] [--repo <owner/repo>]
+#                    [--dry-run]
 #
-# Phase 8: this is a stub that emits golden-shaped output from the target's
-# embedded .autospec/golden/ dir (if present) for integration test golden-diff.
-# Phase 9 will wire this to the real gate-stage-unit.sh + gate-stage-e2e.sh pipeline.
+# Runs the full autospec-test pipeline:
+#   1. Load + validate contract (.autospec/test.yml)
+#   2. Stage 1: unit gate (gate-stage-unit.sh)
+#   3. Stage 2: E2E gate (gate-stage-e2e.sh) — if Stage 1 passes
+#   4. Compose PR comment via pr-report.sh
+#   5. Apply e2e:* labels via bootstrap-labels.sh + gh label
+#
+# For targets with .autospec/stub-gate.json checked in, emits that directly
+# (used by integration golden-diff tests in Phase 8).
 #
 # Exit codes:
-#   0 = gate passed (overall_passed=true in output JSON)
-#   1 = gate failed (overall_passed=false)
-#   2 = fatal error (target_dir missing, bad contract, etc.)
+#   0 = gate passed (overall_passed=true)
+#   1 = gate failed (overall_passed=false) — block PR
+#   2 = fatal error (target_dir missing, bad contract, refuse-to-run) — halt batch
 
 set -eu
 
@@ -24,11 +33,17 @@ fi
 
 OUTPUT_GATE=""
 OUTPUT_COMMENT=""
+PR_NUMBER=""
+REPO_FLAG=""
+DRY_RUN=false
 shift
 while [ $# -gt 0 ]; do
     case "$1" in
-        --output-gate)    OUTPUT_GATE="${2:-}";    shift 2 ;;
-        --output-comment) OUTPUT_COMMENT="${2:-}"; shift 2 ;;
+        --output-gate)    OUTPUT_GATE="${2:-}";         shift 2 ;;
+        --output-comment) OUTPUT_COMMENT="${2:-}";      shift 2 ;;
+        --pr)             PR_NUMBER="${2:-}";            shift 2 ;;
+        --repo)           REPO_FLAG="--repo ${2:-}";    shift 2 ;;
+        --dry-run)        DRY_RUN=true;                 shift ;;
         *) printf 'run-gate: unknown flag: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -88,7 +103,7 @@ else
 "
 fi
 
-# ── Write outputs ──────────────────────────────────────────────────────────────
+# ── Write gate JSON output ────────────────────────────────────────────────────
 
 if [ -n "$OUTPUT_GATE" ]; then
     printf '%s\n' "$GATE_JSON" > "$OUTPUT_GATE"
@@ -96,8 +111,47 @@ else
     printf '%s\n' "$GATE_JSON"
 fi
 
+# ── Compose PR comment via pr-report.sh ───────────────────────────────────────
+
+GATE_TMP=$(mktemp -t run-gate-json.XXXXXX)
+trap 'rm -f "$GATE_TMP"' EXIT
+printf '%s\n' "$GATE_JSON" > "$GATE_TMP"
+
 if [ -n "$OUTPUT_COMMENT" ]; then
-    printf '%s\n' "$COMMENT_MD" > "$OUTPUT_COMMENT"
+    bash "$SCRIPT_DIR/pr-report.sh" --gate-json "$GATE_TMP" --output "$OUTPUT_COMMENT"
+elif [ -n "$PR_NUMBER" ] && [ "$DRY_RUN" = "false" ]; then
+    bash "$SCRIPT_DIR/pr-report.sh" --gate-json "$GATE_TMP" --pr "$PR_NUMBER" $REPO_FLAG
+fi
+
+# ── Apply e2e:* labels (when --pr given and not dry-run) ─────────────────────
+
+if [ -n "$PR_NUMBER" ] && [ "$DRY_RUN" = "false" ] && command -v gh >/dev/null 2>&1; then
+    PASSED_FOR_LABELS=$(printf '%s' "$GATE_JSON" | jq -r '.overall_passed // false')
+    S2_REASON=$(printf '%s' "$GATE_JSON" | jq -r '.stage2.reason // ""')
+    ASSERTION_SHIFT=$(printf '%s' "$GATE_JSON" | jq -r '.stage2.metrics.assertion_shift // "none"')
+    SCOPE_VIOLATION=$(printf '%s' "$GATE_JSON" | jq -r '.stage2.metrics.scope_violation // false')
+    RESTORE_SUCCEEDED=$(printf '%s' "$GATE_JSON" | jq -r '.stage2.metrics.restore_succeeded // true')
+
+    # Bootstrap the label set idempotently first
+    bash "$SCRIPT_DIR/bootstrap-labels.sh" $REPO_FLAG 2>/dev/null || true
+
+    # Apply appropriate labels
+    if [ "$PASSED_FOR_LABELS" = "true" ]; then
+        gh pr edit "$PR_NUMBER" $REPO_FLAG --add-label "e2e:passed" 2>/dev/null || true
+    else
+        if [ "$S2_REASON" = "unjustified-shift" ]; then
+            gh pr edit "$PR_NUMBER" $REPO_FLAG --add-label "e2e:unjustified-shift,needs-human-review" 2>/dev/null || true
+        elif [ "$SCOPE_VIOLATION" = "true" ]; then
+            gh pr edit "$PR_NUMBER" $REPO_FLAG --add-label "e2e:scope-violation,e2e:scoped-prod" 2>/dev/null || true
+            if [ "$RESTORE_SUCCEEDED" = "true" ]; then
+                gh pr edit "$PR_NUMBER" $REPO_FLAG --add-label "e2e:restored,needs-human-review" 2>/dev/null || true
+            else
+                gh pr edit "$PR_NUMBER" $REPO_FLAG --add-label "e2e:restore-failed,CRITICAL" 2>/dev/null || true
+            fi
+        else
+            gh pr edit "$PR_NUMBER" $REPO_FLAG --add-label "e2e:blocked" 2>/dev/null || true
+        fi
+    fi
 fi
 
 # ── Exit code based on overall_passed ─────────────────────────────────────────
