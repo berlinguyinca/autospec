@@ -81,6 +81,7 @@ Exit: 0 = pass, non-zero = at least one rule triggered.
 <!-- autospec-doc-scope:
   src: ["tests/unit/test_lint_implementation.bats"]
   reason: "Bats unit tests for lint-implementation.sh rule detectors including vacuous-assertions"
+  mismatch_action: warn
   generated: false
 -->
 
