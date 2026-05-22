@@ -762,6 +762,11 @@ Pass the following prompt verbatim to each background subagent:
 >        gh pr comment <PR> --body "<!-- guardian-block --> Review: clean. <!-- /-->"
 >        run **Operator/full verification**
 >        bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ci-wait.sh" <PR>  # fire-and-forget sentinel
+>        if [ -f ".autospec/tokens-<ISSUE>-reviewer.json" ]; then
+>          bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/record-telemetry.sh" \
+>            --dispatch-id "<DISPATCH_ID>-reviewer" --role reviewer --issue "<ISSUE>" \
+>            --tokens-json ".autospec/tokens-<ISSUE>-reviewer.json"
+>        fi
 >        # monitor exits to parking state HERE — orchestrator relaunches when ~/.autospec/ci-state/<PR>.signal settles
 >        # On relaunch: run ci-wait-poll.sh <PR>; break SUCCESS if exit 0 (pass)
 >        break SUCCESS if required checks pass.

@@ -555,6 +555,14 @@ issues unblock the queue before continuing with normal feature work.
 >    fi
 >    ```
 > 6. PR: gh pr create --base main --head <BRANCH> --title "<TITLE>" --body "Closes #<ISSUE>\n\n<summary>". Capture PR.
+>    After the LLM subagent returns, record telemetry (tokens JSON written by the harness to `.autospec/tokens-<ISSUE>.json` if present):
+>    ```bash
+>    if [ -f ".autospec/tokens-<ISSUE>.json" ]; then
+>      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/record-telemetry.sh" \
+>        --dispatch-id "<DISPATCH_ID>" --role implementer --issue "<ISSUE>" \
+>        --tokens-json ".autospec/tokens-<ISSUE>.json"
+>    fi
+>    ```
 > 7. Inner loop (max 3 iterations):
 >    ```bash
 >    # autospec-stop sentinel check — inside process(ISSUE), after each major step
@@ -597,6 +605,11 @@ issues unblock the queue before continuing with normal feature work.
 >        gh pr comment <PR> --body "<!-- guardian-block --> Review: clean. <!-- /-->"
 >        run **Operator/full verification**
 >        bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ci-wait.sh" <PR>  # fire-and-forget sentinel
+>        if [ -f ".autospec/tokens-<ISSUE>-reviewer.json" ]; then
+>          bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/record-telemetry.sh" \
+>            --dispatch-id "<DISPATCH_ID>-reviewer" --role reviewer --issue "<ISSUE>" \
+>            --tokens-json ".autospec/tokens-<ISSUE>-reviewer.json"
+>        fi
 >        # monitor exits to parking state HERE — orchestrator relaunches when ~/.autospec/ci-state/<PR>.signal settles
 >        # On relaunch: run ci-wait-poll.sh <PR>; break SUCCESS if exit 0 (pass)
 >        break SUCCESS if required checks pass.
