@@ -1,0 +1,50 @@
+# Memory-tag manifest for autospec project memory files
+# Maps each feedback_*.md filename to a list of tags.
+# Used by apply-memory-tags.sh to prepend YAML frontmatter.
+# Tags are derived from filename slug words + 1-2 content keywords.
+#
+# Schema:
+#   <filename>:       (relative to AUTOSPEC_MEMORY_DIR, no path prefix)
+#     tags: [t1, t2, ...]
+
+feedback_admin_merge_denial.md:
+  tags: [admin-merge, permissions, harness, gh-cli, autospec-run]
+
+feedback_autospec_autonomy_scope.md:
+  tags: [autonomy, autospec-run, merge, orchestrator, workflow]
+
+feedback_autospec_decomposer_gotchas.md:
+  tags: [decomposer, lockstep, autospec-run, skill-creation, issues]
+
+feedback_autospec_design_prefs.md:
+  tags: [design, preferences, autospec, correctness, guardrails]
+
+feedback_autospec_no_shell_user_text.md:
+  tags: [mode-dispatch, shell, autospec, bash, skill-authoring]
+
+feedback_autospec_skill_per_capability.md:
+  tags: [skills, autospec, capability, slash-command, architecture]
+
+feedback_bash_return_trap_leak.md:
+  tags: [bash, trap, set-u, functions, scripting]
+
+feedback_bash_set_e_short_circuit.md:
+  tags: [bash, set-e, conditionals, scripting, install]
+
+feedback_llm_validator_adaptive_retry.md:
+  tags: [validator, adaptive-retry, llm, lint, quality]
+
+feedback_monitor_silent_exit.md:
+  tags: [monitor, autospec-run, silent-exit, recovery, orchestrator]
+
+feedback_omc_autopilot_misfire.md:
+  tags: [omc, autopilot, system-reminder, false-trigger, recovery]
+
+feedback_pre_pipeline_sync.md:
+  tags: [sync, git, pipeline, autospec, design]
+
+feedback_roi_check_new_components.md:
+  tags: [roi, components, architecture, skills, forking]
+
+feedback_validate_sh_lockstep_checks.md:
+  tags: [validate, lockstep, skill-authoring, prose, autospec-run]
