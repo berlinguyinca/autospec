@@ -1,0 +1,77 @@
+{
+  "schema_version": "1.0",
+  "repo": "berlinguyinca/autospec",
+  "generated_at": "<normalized>",
+  "commit": "<sha>",
+  "modules": [
+    {
+      "path": "src/cli.mjs",
+      "summary": "src-cli — javascript module with 1 export(s). Significance: has_exports, cli_entry.",
+      "public_api": [
+        {
+          "name": "main",
+          "signature": "export function main()",
+          "params": [],
+          "returns": "",
+          "usage_example": ""
+        }
+      ],
+      "depends_on": []
+    },
+    {
+      "path": "src/utils.mjs",
+      "summary": "src-utils — javascript module with 2 export(s). Significance: has_exports, imported_by_3+.",
+      "public_api": [
+        {
+          "name": "greet",
+          "signature": "export function greet(name)",
+          "params": [],
+          "returns": "",
+          "usage_example": ""
+        },
+        {
+          "name": "formatDate",
+          "signature": "export function formatDate(date)",
+          "params": [],
+          "returns": "",
+          "usage_example": ""
+        }
+      ],
+      "depends_on": [
+        "src/cli.mjs",
+        "src/parser.mjs",
+        "lib/config.mjs"
+      ]
+    },
+    {
+      "path": "src/parser.mjs",
+      "summary": "src-parser — javascript module with 1 export(s). Significance: has_exports.",
+      "public_api": [
+        {
+          "name": "parseArgs",
+          "signature": "export function parseArgs(argv)",
+          "params": [],
+          "returns": "",
+          "usage_example": ""
+        }
+      ],
+      "depends_on": []
+    }
+  ],
+  "cli_entry_points": [
+    {
+      "identifier": "cli.mjs",
+      "path": "src/cli.mjs",
+      "line": 1
+    }
+  ],
+  "http_endpoints": [
+    {
+      "route": "/api/parse",
+      "path": "src/parser.mjs",
+      "line": 20
+    }
+  ],
+  "concepts": [],
+  "faq": []
+}
