@@ -143,3 +143,93 @@ setup() {
     [ "$status" -ge 1 ]
     echo "$output" | grep -q "TODO_LEFT"
 }
+
+# ── --help documents new flags ────────────────────────────────────────────────
+
+@test "lint-implementation: --help documents --pre-commit" {
+    run bash "$LINT" --help
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "\-\-pre-commit"
+}
+
+@test "lint-implementation: --help documents --staged" {
+    run bash "$LINT" --help
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "\-\-staged"
+}
+
+@test "lint-implementation: --help documents --directives" {
+    run bash "$LINT" --help
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "\-\-directives"
+}
+
+# ── --staged mode ─────────────────────────────────────────────────────────────
+
+@test "lint-implementation: --staged exits 0 with clean staged diff" {
+    # Create a temp git repo, stage a clean file, run lint --staged
+    TMPDIR_REPO="$(mktemp -d)"
+    git -C "$TMPDIR_REPO" init -q
+    git -C "$TMPDIR_REPO" config user.email "t@t.com"
+    git -C "$TMPDIR_REPO" config user.name "T"
+    touch "$TMPDIR_REPO/README.md"
+    git -C "$TMPDIR_REPO" add README.md
+    git -C "$TMPDIR_REPO" commit -q -m "init"
+
+    # Stage a clean file
+    cat > "$TMPDIR_REPO/clean.sh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+echo "hello"
+EOF
+    git -C "$TMPDIR_REPO" add clean.sh
+
+    run bash -c "cd '$TMPDIR_REPO' && bash '$LINT' --staged"
+    rm -rf "$TMPDIR_REPO"
+    [ "$status" -eq 0 ]
+}
+
+@test "lint-implementation: --pre-commit --staged detects SECURITY in staged diff" {
+    TMPDIR_REPO="$(mktemp -d)"
+    git -C "$TMPDIR_REPO" init -q
+    git -C "$TMPDIR_REPO" config user.email "t@t.com"
+    git -C "$TMPDIR_REPO" config user.name "T"
+    touch "$TMPDIR_REPO/README.md"
+    git -C "$TMPDIR_REPO" add README.md
+    git -C "$TMPDIR_REPO" commit -q -m "init"
+
+    # Stage a file with a hardcoded AWS key
+    cat > "$TMPDIR_REPO/bad.sh" <<'EOF'
+#!/usr/bin/env bash
+AWS_KEY=AKIAIOSFODNN7EXAMPLE
+echo "$AWS_KEY"
+EOF
+    git -C "$TMPDIR_REPO" add bad.sh
+
+    run bash -c "cd '$TMPDIR_REPO' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$TMPDIR_REPO"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "SECURITY"
+}
+
+# ── --directives mode ─────────────────────────────────────────────────────────
+
+@test "lint-implementation: --directives outputs one directive per finding" {
+    run bash "$LINT" --diff-file "$FIX/bad-secret.diff" --directives
+    # Should have at least one Fix: line
+    echo "$output" | grep -q "^Fix "
+}
+
+@test "lint-implementation: --directives output starts with 'Fix <RULE_ID>:'" {
+    run bash "$LINT" --diff-file "$FIX/bad-secret.diff" --directives
+    # All output lines should match "Fix RULE_ID: ..."
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        echo "$line" | grep -qE "^Fix [A-Z_]+: "
+    done <<< "$output"
+}
+
+@test "lint-implementation: --directives with TODO_LEFT fixture emits Fix TODO_LEFT directive" {
+    run bash "$LINT" --diff-file "$FIX/bad-todo-left.diff" --directives
+    echo "$output" | grep -q "Fix TODO_LEFT"
+}
