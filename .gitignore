@@ -24,3 +24,6 @@ build/
 # Allow .autospec/ inside test fixtures (needed for skip_dirs tests)
 !skills/autospec-shared/tests/fixtures/**/.autospec/
 !skills/autospec-shared/tests/fixtures/**/.autospec/**
+# Allow .autospec/ inside synthetic test targets
+!skills/autospec-shared/test-targets/**/.autospec/
+!skills/autospec-shared/test-targets/**/.autospec/**

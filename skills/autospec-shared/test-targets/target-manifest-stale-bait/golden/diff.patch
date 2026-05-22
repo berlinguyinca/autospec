@@ -1,0 +1,16 @@
+diff --git a/src/lib.js b/src/lib.js
+index 0000001..0000002 100644
+--- a/src/lib.js
++++ b/src/lib.js
+@@ -1,6 +1,10 @@
+ // lib.js — exported utility functions
+ function greet(name) {
+   return `Hello, ${name}!`;
+ }
+
+-module.exports = { greet };
++function farewell(name) {
++  return `Goodbye, ${name}!`;
++}
++
++module.exports = { greet, farewell };

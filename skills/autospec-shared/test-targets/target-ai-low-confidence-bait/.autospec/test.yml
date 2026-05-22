@@ -1,0 +1,12 @@
+mode: drift_gate
+
+description: >
+  Synthetic target: deliberately mismatched doc + source.
+  src/auth.py changed (added new auth methods) but docs/AUTH.md was not updated.
+  check-doc-drift.sh must exit 1 with drift on docs/AUTH.md.
+  The AI reviewer would return low confidence for this section.
+
+drift_gate:
+  expected_exit_code: 1
+  expected_drift_doc: "docs/AUTH.md"
+  expected_drift_heading: "## Authentication API"

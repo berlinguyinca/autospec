@@ -1,0 +1,20 @@
+diff --git a/src/auth.py b/src/auth.py
+index 0000001..0000002 100644
+--- a/src/auth.py
++++ b/src/auth.py
+@@ -1,6 +1,16 @@
+ # auth.py — authentication module
+
+ def login(user, password):
+     """Authenticate user, returns session token."""
+     return f"token-{user}"
++
++
++def logout(token):
++    """Invalidate a session token."""
++    pass
++
++
++def refresh(token):
++    """Refresh a session token, returns new token."""
++    return f"refreshed-{token}"

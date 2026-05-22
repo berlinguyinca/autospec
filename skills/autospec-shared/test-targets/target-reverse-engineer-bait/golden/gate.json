@@ -1,0 +1,13 @@
+{
+  "passed": false,
+  "drift": [],
+  "missing_scope": [
+    {
+      "source_file": "src/router.js",
+      "suggestion": "no docs section declares scope for this path"
+    }
+  ],
+  "visual_stale": [],
+  "ai_review_stale": [],
+  "skipped": false
+}

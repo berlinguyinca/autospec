@@ -1,0 +1,11 @@
+mode: drift_gate
+
+description: >
+  Synthetic target: docs/USER_MANUAL.md was updated (its scope covers src/lib.js),
+  but the source file src/lib.js changed without the doc section being updated.
+  check-doc-drift.sh must exit 1 with drift pointing at the manifest section.
+
+drift_gate:
+  expected_exit_code: 1
+  expected_drift_doc: "docs/MANIFEST.md"
+  expected_drift_heading: "## Module Manifest"

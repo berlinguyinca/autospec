@@ -1,0 +1,15 @@
+diff --git a/src/dashboard.js b/src/dashboard.js
+index 0000001..0000002 100644
+--- a/src/dashboard.js
++++ b/src/dashboard.js
+@@ -1,5 +1,8 @@
+ // dashboard.js — metrics dashboard component
+ function renderDashboard(metrics) {
+-  return `<div class="dashboard">${metrics.map(m => `<div>${m}</div>`).join('')}</div>`;
++  return `<div class="dashboard dashboard--v2">${metrics.map(m => `<div class="metric">${m}</div>`).join('')}</div>`;
+ }
+-module.exports = { renderDashboard };
++function renderEmpty() {
++  return '<div class="dashboard--empty">No metrics</div>';
++}
++module.exports = { renderDashboard, renderEmpty };
