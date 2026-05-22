@@ -35,8 +35,7 @@
 (if_statement
   condition: (comparison_operator
     (identifier) @_name (#eq? @_name "__name__")
-    (string) @_main (#match? @_main "__main__"))
-  (#set! entry.kind "cli_command"))
+    (string) @entry.main (#match? @entry.main "__main__")))
 
 ; ── HTTP routes (Flask / FastAPI / Django patterns) ──────────────────────────
 

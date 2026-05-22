@@ -69,15 +69,9 @@
   (#set! entry.kind "http_route"))
 
 ; ── Import statements ─────────────────────────────────────────────────────────
+; Note: web-tree-sitter does not support non-field anonymous children in patterns,
+; so import names are extracted via node traversal in walker.mjs buildOutput().
+; We only capture the source here; names are resolved programmatically.
 
 (import_statement
-  source: (string (string_fragment) @import.source)
-  (import_clause
-    (named_imports
-      (import_specifier
-        name: (identifier) @import.name))))
-
-(import_statement
-  source: (string (string_fragment) @import.source)
-  (import_clause
-    (identifier) @import.name))
+  source: (string (string_fragment) @import.source))

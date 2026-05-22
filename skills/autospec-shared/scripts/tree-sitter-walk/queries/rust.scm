@@ -57,17 +57,15 @@
   (#set! entry.kind "http_route"))
 
 ; ── Use declarations ──────────────────────────────────────────────────────────
+; Capture the full path of each use declaration as import.source.
+; e.g. `use std::fs;` → import.source = "std::fs"
+;      `use std::collections::HashMap;` → import.source = "std::collections::HashMap"
 
 (use_declaration
-  argument: (scoped_identifier
-    path: (identifier) @import.source
-    name: (identifier) @import.name))
+  argument: (scoped_identifier) @import.source)
 
 (use_declaration
   argument: (identifier) @import.source)
 
 (use_declaration
-  argument: (scoped_use_list
-    path: (identifier) @import.source
-    list: (use_list
-      (identifier) @import.name)))
+  argument: (scoped_use_list) @import.source)

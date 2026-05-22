@@ -4,45 +4,43 @@
 ; ── Public classes ────────────────────────────────────────────────────────────
 
 (class_declaration
-  (modifiers
-    (modifier) @_pub (#eq? @_pub "public"))
+  (modifiers) @_mods
   name: (identifier) @export.name
+  (#match? @_mods "public")
   (#set! export.kind "class"))
 
 (interface_declaration
-  (modifiers
-    (modifier) @_pub (#eq? @_pub "public"))
+  (modifiers) @_mods
   name: (identifier) @export.name
+  (#match? @_mods "public")
   (#set! export.kind "type"))
 
 ; ── Public methods ────────────────────────────────────────────────────────────
 
 (method_declaration
-  (modifiers
-    (modifier) @_pub (#eq? @_pub "public"))
+  (modifiers) @_mods
   name: (identifier) @export.name
   parameters: (formal_parameters) @export.params
+  (#match? @_mods "public")
   (#set! export.kind "function"))
 
 ; ── Public constants (public static final) ───────────────────────────────────
 
 (field_declaration
-  (modifiers
-    (modifier) @_pub (#eq? @_pub "public")
-    (modifier) @_sta (#eq? @_sta "static")
-    (modifier) @_fin (#eq? @_fin "final"))
+  (modifiers) @_mods
   declarator: (variable_declarator
     name: (identifier) @export.name)
+  (#match? @_mods "public")
   (#set! export.kind "const"))
 
 ; ── CLI entry points (public static void main(String[] args)) ────────────────
 
 (method_declaration
-  (modifiers
-    (modifier) @_pub (#eq? @_pub "public")
-    (modifier) @_sta (#eq? @_sta "static"))
+  (modifiers) @_mods
   type: (void_type)
   name: (identifier) @entry.main
+  (#match? @_mods "public")
+  (#match? @_mods "static")
   (#eq? @entry.main "main")
   (#set! entry.kind "cli_command"))
 

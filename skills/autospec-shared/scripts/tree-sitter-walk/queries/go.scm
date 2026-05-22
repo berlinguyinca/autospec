@@ -50,10 +50,10 @@
   (#set! entry.kind "http_route"))
 
 ; ── Import statements ─────────────────────────────────────────────────────────
+; Capture the string content of each import spec.
+; web-tree-sitter: import_spec has no named fields; use child node traversal.
+; The interpreted_string_literal_content holds the path without quotes.
 
 (import_spec
-  path: (interpreted_string_literal) @import.source)
-
-(import_spec
-  name: (identifier) @import.name
-  path: (interpreted_string_literal) @import.source)
+  (interpreted_string_literal
+    (interpreted_string_literal_content) @import.source))
