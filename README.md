@@ -361,6 +361,21 @@ The reverse-engineer pipeline + doc generators are part of the autospec-shared t
 match a `<!-- autospec-doc-scope: ... -->` block must be accompanied by doc updates. Use
 `docs: skip` in the issue body to demote drift to warnings for a single PR.
 
+## Telemetry Dashboard
+
+Generate an HTML dashboard from the autospec telemetry log (`~/.autospec/telemetry.jsonl`):
+
+```bash
+bash skills/autospec-shared/scripts/gen-telemetry-dashboard.sh \
+  --input ~/.autospec/telemetry.jsonl \
+  --output ~/.autospec/telemetry-dashboard.html
+open ~/.autospec/telemetry-dashboard.html
+```
+
+The dashboard shows: daily cache hit-rate trend (Chart.js), per-role token cost breakdown,
+LGTM first-pass rate, and top-10 cost outliers by issue. To publish to GitHub Pages, push
+`~/.autospec/telemetry-dashboard.html` to your `gh-pages` branch manually.
+
 ## More Docs
 
 - [`docs/USER_MANUAL.md`](docs/USER_MANUAL.md) - operator-facing narrative walkthrough of the
