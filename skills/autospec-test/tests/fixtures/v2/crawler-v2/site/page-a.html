@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Page A — working affordance</title>
+</head>
+<body>
+  <nav>
+    <a href="/page-b.html">Go to B</a>
+    <a href="/page-c.html">Go to C</a>
+  </nav>
+
+  <!-- Working done-item with a functioning edit button -->
+  <div data-testid="done-item-row-1" role="listitem">
+    <span>Task completed today</span>
+    <button
+      role="button"
+      aria-label="Edit task"
+      id="edit-btn-a"
+      onclick="document.getElementById('done-item-edit-dialog').style.display='block'"
+    >Edit</button>
+  </div>
+
+  <!-- Edit dialog (opens + closes correctly) -->
+  <div
+    id="done-item-edit-dialog"
+    data-testid="done-item-edit-dialog"
+    role="dialog"
+    aria-modal="true"
+    style="display:none;padding:16px;border:1px solid #000;background:#fff"
+  >
+    <p>Edit task dialog</p>
+    <button
+      role="button"
+      aria-label="Close dialog"
+      onclick="document.getElementById('done-item-edit-dialog').style.display='none'"
+    >Close</button>
+  </div>
+</body>
+</html>
