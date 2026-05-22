@@ -86,7 +86,7 @@ teardown() {
   # bash tag matches bash_return_trap_leak but NOT design_prefs
   echo "$output" | grep -q "RETURN traps"
   # design_prefs should NOT appear (no matching tag)
-  echo "$output" | grep -qv "correctness over speed" || true
+  ! echo "$output" | grep -q "correctness over speed"
 }
 
 @test "assemble-impl-prompt.sh emits RULE_IDs heading" {

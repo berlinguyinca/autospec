@@ -113,7 +113,6 @@ if [ "$LOW_LEVEL" -eq 0 ]; then
   ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels,body 2>/dev/null)
   ISSUE_LABELS=$(printf '%s' "$ISSUE_JSON" | jq -r '[.labels[].name] | join(",")' 2>/dev/null || echo "")
   ISSUE_BODY_TMP=$(mktemp /tmp/assemble-ac-XXXXXX.md)
-  trap 'rm -f "$ISSUE_BODY_TMP"' EXIT
   printf '%s' "$ISSUE_JSON" | jq -r '.body' > "$ISSUE_BODY_TMP"
   AC_BODY="$ISSUE_BODY_TMP"
 
