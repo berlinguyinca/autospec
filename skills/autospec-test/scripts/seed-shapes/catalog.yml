@@ -1,0 +1,74 @@
+# seed-shapes/catalog.yml — Edge-case seed shape predicate catalog.
+#
+# Each shape defines:
+#   description:        Human-readable explanation of the shape.
+#   predicate_sql:      SQL WHERE clause fragment for relational DBs (postgres, mysql, sqlite).
+#                       Uses ANSI SQL date functions with SQLite-compatible syntax where possible.
+#   predicate_jsonpath: JSONPath filter expression for document stores.
+#
+# The 7 shapes are mandated by docs/specs/2026-05-21-autospec-test-invariants-design.md §3 edge_case_seeds.
+# Column/field names follow the canonical schema assumed by the spec:
+#   done_at            TEXT|DATETIME — ISO-8601 date or datetime when task was completed
+#   list_position      INTEGER       — 0-based position of this item in its list (higher = further down)
+#   foldout_collapsed  INTEGER|BOOL  — 1/true when the containing foldout is collapsed at page load
+
+task_done_today:
+  description: >
+    A task completed on the current calendar day (UTC). Exercises the streak
+    counter and "today" display grouping. count_min=1 ensures at least one
+    such task exists so the UI's today-group is non-empty.
+  predicate_sql: "done_at >= date('now') AND done_at < date('now', '+1 day')"
+  predicate_jsonpath: "$[?(@.done_at >= :today && @.done_at < :tomorrow)]"
+
+task_done_yesterday:
+  description: >
+    A task completed on the previous calendar day (UTC). Verifies that the
+    "yesterday" display group renders correctly and that streak counts include
+    the prior day.
+  predicate_sql: "done_at >= date('now', '-1 day') AND done_at < date('now')"
+  predicate_jsonpath: "$[?(@.done_at >= :yesterday && @.done_at < :today)]"
+
+task_done_2_to_6_days_ago:
+  description: >
+    Tasks completed between 2 and 6 calendar days ago (inclusive). Five rows
+    are required (count_min=5) to exercise the streak-window rendering path
+    where multiple historical days appear in the display without collapsing.
+  predicate_sql: "done_at >= date('now', '-6 days') AND done_at < date('now', '-1 day')"
+  predicate_jsonpath: "$[?(@.done_at >= :six_days_ago && @.done_at < :yesterday)]"
+
+task_done_around_midnight:
+  description: >
+    A task completed within 5 minutes of midnight UTC (23:55–00:05 window).
+    Exercises day-boundary edge cases in streak grouping and date arithmetic
+    that differ between time zones.
+  predicate_sql: "(strftime('%H:%M', done_at) >= '23:55' OR strftime('%H:%M', done_at) < '00:05')"
+  predicate_jsonpath: "$[?(@.done_at =~ /T23:5[5-9]|T00:0[0-4]/)]"
+
+multiple_tasks_same_day:
+  description: >
+    At least two tasks completed on the same calendar day. Verifies that the
+    UI groups multiple completions under a single day heading without
+    duplicating or omitting any entry.
+  predicate_sql: >
+    done_at IN (
+      SELECT done_at FROM tasks
+      GROUP BY date(done_at)
+      HAVING count(*) >= 2
+    )
+  predicate_jsonpath: "$[?(@.done_at == :multi_day)]"
+
+task_in_collapsed_foldout:
+  description: >
+    A task whose containing foldout section is collapsed on initial page load
+    (foldout_collapsed=1). Exercises the expand-foldout affordance and ensures
+    tasks inside collapsed sections are reachable via the UI crawler.
+  predicate_sql: "foldout_collapsed = 1"
+  predicate_jsonpath: "$[?(@.foldout_collapsed == true)]"
+
+last_item_in_long_list:
+  description: >
+    A task positioned beyond the 50th slot in its list (list_position > 50).
+    Exercises virtual scroll / pagination rendering so that end-of-list items
+    are visible and their actions (edit, delete) remain accessible.
+  predicate_sql: "list_position > 50"
+  predicate_jsonpath: "$[?(@.list_position > 50)]"
