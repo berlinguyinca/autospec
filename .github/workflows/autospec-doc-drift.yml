@@ -31,6 +31,14 @@ jobs:
         run: |
           # AUTOSPEC_SCRIPTS_PATH — rewritten by install-doc-drift-workflow.sh
           AUTOSPEC_SCRIPTS_PATH="${HOME}/.autospec/scripts"
+          mkdir -p "${AUTOSPEC_SCRIPTS_PATH}"
+          # Copy shared scripts from the checked-out autospec repo if present,
+          # otherwise fall back to scripts already in AUTOSPEC_SCRIPTS_PATH.
+          SHARED_SRC="${GITHUB_WORKSPACE}/skills/autospec-shared/scripts"
+          if [ -d "${SHARED_SRC}" ]; then
+            cp -R "${SHARED_SRC}/." "${AUTOSPEC_SCRIPTS_PATH}/"
+            find "${AUTOSPEC_SCRIPTS_PATH}" -maxdepth 2 \( -name '*.sh' -o -name '*.mjs' \) -exec chmod +x {} \;
+          fi
           echo "AUTOSPEC_SCRIPTS_DIR=${AUTOSPEC_SCRIPTS_PATH}" >> "$GITHUB_ENV"
 
       - name: Run doc-drift gate
