@@ -28,3 +28,12 @@ qwen3-32b-laptop:
   ctx: 32000
   reasoning: low
   allowed: ctx:small,reasoning:low
+
+# Phase 2 Haiku trial — cost-optimised tier for shallow/medium-reasoning implementer dispatches.
+# LGTM-first-pass rate and iteration count tracked in telemetry to gate rollback.
+# Rollback: set AUTOSPEC_TIER_B_PROFILE=claude-sonnet-cloud in ~/.autospec/env to revert.
+claude-haiku-cloud:
+  model: claude-haiku-4-5
+  ctx: 64000
+  reasoning: medium
+  allowed: ctx:small,ctx:medium,reasoning:shallow,reasoning:medium
