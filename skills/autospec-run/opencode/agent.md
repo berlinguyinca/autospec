@@ -516,6 +516,35 @@ issues unblock the queue before continuing with normal feature work.
 >    fi
 >    ```
 >    Exit 0: proceed to merge. Exit 1: block PR (post comment + labels; do NOT merge; treat as review finding). Exit 2: halt entire batch (comment on issue, label `in-progress-by-bot` → `auto-implement`, exit monitor).
+> 3b. <!-- docs-drift-gate:begin -->
+> ## Docs drift gate
+> Run after autospec-test gate, before LGTM review. Skip if issue body contains a line matching `^docs:\s*skip\s*$` (case-insensitive):
+>    ```bash
+>    if ! grep -qiE '^docs:[[:space:]]*skip[[:space:]]*$' <(gh issue view <ISSUE> --json body --jq .body 2>/dev/null || true); then
+>      DRIFT_JSON="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/check-doc-drift.sh" --pr "<PR>" 2>/tmp/drift-<PR>.err)"; drift_exit=$?
+>      case "$drift_exit" in
+>        0) ;;  # no drift — continue to LGTM
+>        1)
+>          # Drift detected — feed self-heal loop via docs-extension classifier
+>          node "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/loop-classifier-docs-extension.mjs" \
+>            --drift-json "$DRIFT_JSON" --issue "<ISSUE>" --pr "<PR>" 2>/dev/null || true
+>          gh pr comment <PR> --body "$(printf 'docs drift detected — self-heal queued:\n\n```json\n%s\n```' "$DRIFT_JSON")"
+>          gh issue edit <ISSUE> --add-label "docs:drift" 2>/dev/null || true
+>          ;;
+>        2)
+>          # Missing scope — needs human review
+>          gh pr comment <PR> --body "$(printf 'docs: missing scope — changed files not covered by any doc scope. Operator review needed.\n\n```json\n%s\n```' "$DRIFT_JSON")"
+>          gh issue edit <ISSUE> --add-label "docs:missing-scope" 2>/dev/null || true
+>          gh issue edit <ISSUE> --add-label "needs-human-review" 2>/dev/null || true
+>          exit 1
+>          ;;
+>      esac
+>    else
+>      gh pr comment <PR> --body "docs: drift check skipped (docs:skip in issue body)" 2>/dev/null || true
+>      gh issue edit <ISSUE> --add-label "docs:skipped" 2>/dev/null || true
+>    fi
+>    ```
+>    <!-- docs-drift-gate:end -->
 > 4. <!-- RETRY-LOOP:begin --> Adaptive commit loop (MAX_IMPL_RETRIES):
 >    ```bash
 >    attempt=1

@@ -488,3 +488,45 @@ No daemon auto-detection — always ask explicitly.
 If the gate answer was `run`, hand off to `/autospec-run --profile <name>`
 to begin implementation. If the answer was `defer`, the run ends here and
 the queue is left for an external monitor.
+
+## Init mode
+
+Triggered by `--init` flag or auto-detected when code exists but `docs/specs/` is empty or no doc carries an `autospec-doc-scope` annotation.
+
+### Auto-detect prompt
+
+When auto-detecting, ask once:
+
+> This repo has source code but no autospec docs. Run reverse-engineer first?
+> **[yes / no / always-this-repo]**
+
+- `yes` — run `--init` once for this invocation.
+- `no` — skip; proceed to Phase 1 normally.
+- `always-this-repo` — run `--init` and write `.autospec/init-done.flag`; future invocations skip this prompt.
+
+If `.autospec/init-done.flag` exists, skip the prompt entirely.
+
+### --init execution
+
+1. Run tree-sitter scan across the repo source tree to enumerate modules, public symbols, and entry points.
+2. Emit one ARCHITECTURE-level spec to `docs/specs/<repo-slug>-architecture.md`.
+3. Emit per-module specs to `docs/specs/<module>-spec.md` for each discovered module.
+4. Generate initial docs via `gen-docs-from-spec.mjs`:
+   - `docs/USER_MANUAL.md`
+   - `docs/API_REFERENCE.md`
+   - `docs/ARCHITECTURE.md`
+   - `llms.txt`
+   - `.llm-manifest.json`
+5. Open a `feat/spec-reverse-engineer-init` PR with all generated artifacts.
+6. Admin-merge the doc PR before proceeding to Phase 3 decomposition.
+
+### Auto-docs step (after spec PR merges)
+
+After any spec PR merges in normal `autospec-define` flow, invoke:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/gen-docs-from-spec.mjs" \
+  --spec "<spec-path>" --out docs/
+```
+
+Open a `docs/` update PR and admin-merge it before Phase 3 begins. Skip if the spec change touches only non-public implementation details (no change to public API surface, no new CLI flags, no new env vars).
