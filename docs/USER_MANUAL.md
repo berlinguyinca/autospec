@@ -6,6 +6,7 @@
 <!-- autospec-doc-scope:
   src: ["README.md", "install.sh", "skills/autospec/SKILL.md"]
   reason: "Top-level user manual covering all operator-facing skills"
+  mismatch_action: warn
   generated: true
 -->
 

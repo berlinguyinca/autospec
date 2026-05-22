@@ -226,6 +226,7 @@ touch "$WORK_DIR/covered_sources.txt"
 
 # Drift entries (newline-delimited JSON objects)
 touch "$WORK_DIR/drift_entries.txt"
+touch "$WORK_DIR/drift_warn_entries.txt"
 touch "$WORK_DIR/visual_stale_entries.txt"
 
 if [ -d "$DOCS_DIR" ]; then
@@ -260,6 +261,7 @@ process.stdout.write(JSON.stringify({
   reason: e.reason||'',
   visual_glob: e.visual_glob||'',
   src_globs: e.src_globs||[],
+  mismatch_action: e.mismatch_action||'hard_fail',
   byte_start: e.byte_range[0],
   byte_end: e.byte_range[1]
 }));
@@ -268,6 +270,7 @@ process.stdout.write(JSON.stringify({
             heading="$(echo "$entry_json" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).heading)" 2>/dev/null)"
             reason="$(echo "$entry_json" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).reason)" 2>/dev/null)"
             visual_glob="$(echo "$entry_json" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).visual_glob)" 2>/dev/null)"
+            mismatch_action="$(echo "$entry_json" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).mismatch_action)" 2>/dev/null)"
             byte_start="$(echo "$entry_json" | node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).byte_start))" 2>/dev/null)"
             byte_end="$(echo "$entry_json" | node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).byte_end))" 2>/dev/null)"
             src_globs_str="$(echo "$entry_json" | node -e "
@@ -341,8 +344,14 @@ process.stdout.write(d.src_globs.join('\n'));
                 # Escape heading and reason for JSON
                 h_esc="$(echo "$heading" | sed 's/"/\\"/g')"
                 r_esc="$(echo "$reason" | sed 's/"/\\"/g')"
-                printf '{"doc_file":"%s","heading":"%s","matching_source_files":[%s],"reason":"%s"}\n' \
-                    "$rel_docfile" "$h_esc" "$src_arr" "$r_esc" >> "$WORK_DIR/drift_entries.txt"
+                # Bucket by mismatch_action: warn → drift_warn, hard_fail → drift
+                if [ "${mismatch_action:-hard_fail}" = "warn" ]; then
+                    printf '{"doc_file":"%s","heading":"%s","matching_source_files":[%s],"reason":"%s"}\n' \
+                        "$rel_docfile" "$h_esc" "$src_arr" "$r_esc" >> "$WORK_DIR/drift_warn_entries.txt"
+                else
+                    printf '{"doc_file":"%s","heading":"%s","matching_source_files":[%s],"reason":"%s"}\n' \
+                        "$rel_docfile" "$h_esc" "$src_arr" "$r_esc" >> "$WORK_DIR/drift_entries.txt"
+                fi
             fi
 
             # Visual staleness check
@@ -412,6 +421,7 @@ build_json_array() {
 }
 
 drift_arr="$(build_json_array "$WORK_DIR/drift_entries.txt")"
+drift_warn_arr="$(build_json_array "$WORK_DIR/drift_warn_entries.txt")"
 missing_arr="$(build_json_array "$WORK_DIR/missing_scope_entries.txt")"
 vstale_arr="$(build_json_array "$WORK_DIR/visual_stale_entries.txt")"
 
@@ -422,12 +432,14 @@ if $DOCS_SKIP; then
     exit_code=0
     skipped_val=true
     drift_arr="[]"
+    drift_warn_arr="[]"
 else
     drift_count=0
     missing_count=0
     [ -s "$WORK_DIR/drift_entries.txt" ] && drift_count="$(wc -l < "$WORK_DIR/drift_entries.txt" | tr -d ' \n')" || drift_count=0
     [ -s "$WORK_DIR/missing_scope_entries.txt" ] && missing_count="$(wc -l < "$WORK_DIR/missing_scope_entries.txt" | tr -d ' \n')" || missing_count=0
 
+    # Exit 1 only when hard_fail drift entries are present; warn-only drift does not block
     if [ "${drift_count:-0}" -gt 0 ]; then
         passed=false
         exit_code=1
@@ -447,6 +459,7 @@ cat <<JSON
 {
   "passed": ${passed},
   "drift": ${drift_arr},
+  "drift_warn": ${drift_warn_arr},
   "missing_scope": ${missing_arr},
   "visual_stale": ${vstale_arr},
   "ai_review_stale": [],

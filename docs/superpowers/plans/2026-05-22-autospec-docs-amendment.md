@@ -133,12 +133,13 @@ Note: `skills/autospec-shared/` is a new directory housing cross-skill tooling. 
 ### Tasks
 
 <!-- autospec-doc-scope:
-  src: ["skills/autospec-shared/scripts/scan-doc-scope.mjs", "skills/autospec-shared/scripts/check-doc-drift.sh"]
+  src: ["skills/autospec-shared/scripts/scan-doc-scope.mjs", "skills/autospec-shared/scripts/check-doc-drift.sh", "tests/unit/test_doc_drift_mismatch_action.bats", ".github/workflows/autospec-doc-drift.yml"]
   reason: "Phase 2 tasks cover scan-doc-scope.mjs and check-doc-drift.sh implementation"
+  mismatch_action: warn
   generated: false
 -->
 
-- [ ] **2.1** Write `scan-doc-scope.mjs` exporting `parse(markdownPath): Array<{ heading_path: string, src_globs: string[], visual_glob?: string, generated?: boolean, reason?: string, byte_range: [start, end] }>`. Parses `<!-- autospec-doc-scope: ... -->` blocks. Uses YAML inside the comment for structured fields. The `byte_range` covers the section body (from after the comment to the next same-or-higher heading).
+- [ ] **2.1** Write `scan-doc-scope.mjs` exporting `parse(markdownPath): Array<{ heading_path: string, src_globs: string[], visual_glob?: string, generated?: boolean, reason?: string, mismatch_action: 'hard_fail'|'warn', byte_range: [start, end] }>`. Parses `<!-- autospec-doc-scope: ... -->` blocks. Uses YAML inside the comment for structured fields. The `byte_range` covers the section body (from after the comment to the next same-or-higher heading). The `mismatch_action` field defaults to `hard_fail` when absent.
 
 - [ ] **2.2** Fixture markdown files covering: valid scope, multiple sections, malformed YAML inside scope (must error cleanly), section with `generated: true`, section with `visual:` glob, file with no scope at all (returns empty array).
 
