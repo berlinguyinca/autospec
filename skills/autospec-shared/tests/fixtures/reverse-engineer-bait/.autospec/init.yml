@@ -1,0 +1,4 @@
+# .autospec/init.yml — autospec configuration for the reverse-engineer bait fixture
+skip_dirs:
+  - vendor
+  - generated
