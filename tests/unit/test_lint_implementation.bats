@@ -233,3 +233,231 @@ EOF
     run bash "$LINT" --diff-file "$FIX/bad-todo-left.diff" --directives
     echo "$output" | grep -q "Fix TODO_LEFT"
 }
+
+# ── --vacuous-assertions: POSITIVE fixtures (8 detections) ───────────────────
+
+# _vac_diff FPATH LINE1 [LINE2 ...] — write a minimal added-lines diff to a temp file,
+# print the temp file path. Caller must rm the file.
+_vac_tmpfile=""
+_vac_diff() {
+    local fpath="$1"; shift
+    _vac_tmpfile="$(mktemp -t lint-vac-XXXXXX.diff)"
+    {
+        printf 'diff --git a/%s b/%s\nnew file mode 100644\n--- /dev/null\n+++ b/%s\n@@ -0,0 +1,%s @@\n' \
+            "$fpath" "$fpath" "$fpath" "$#"
+        for line in "$@"; do
+            printf '+%s\n' "$line"
+        done
+    } > "$_vac_tmpfile"
+}
+
+@test "vacuous: VACUOUS_GREP_INVERSE_OR_TRUE detected in test file" {
+    _vac_diff 'tests/unit/test_x.bats' \
+        '#!/usr/bin/env bats' \
+        '@test "x" {' \
+        '  grep -qv "foo" file.txt || true' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "VACUOUS_GREP_INVERSE_OR_TRUE"
+}
+
+@test "vacuous: VACUOUS_OR_TRUE detected when assertion ends with || true" {
+    _vac_diff 'tests/unit/test_x.bats' \
+        '#!/usr/bin/env bats' \
+        '@test "x" {' \
+        '  run some_cmd' \
+        '  [ "$status" -eq 0 ] || true' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "VACUOUS_OR_TRUE"
+}
+
+@test "vacuous: VACUOUS_TAUTOLOGY detected for assert True" {
+    _vac_diff 'tests/unit/test_x.bats' \
+        '#!/usr/bin/env bats' \
+        '@test "x" {' \
+        '  assert True' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "VACUOUS_TAUTOLOGY"
+}
+
+@test "vacuous: VACUOUS_TAUTOLOGY detected for expect(true).toBe(true)" {
+    _vac_diff 'tests/unit/test_x.js' \
+        "it('x', () => {" \
+        '  expect(true).toBe(true);' \
+        '});'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "VACUOUS_TAUTOLOGY"
+}
+
+@test "vacuous: VACUOUS_AC_STUB detected for skip auto-stub in tests/ac/" {
+    _vac_diff 'tests/ac/test_foo.bats' \
+        '#!/usr/bin/env bats' \
+        '@test "AC-1: does something" {' \
+        '  skip "auto-stub"' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "VACUOUS_AC_STUB"
+}
+
+@test "vacuous: VACUOUS_EMPTY_TEST detected for it(..., () => {}) in JS" {
+    _vac_diff 'tests/unit/test_x.js' \
+        "it('does something', () => {});"
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "VACUOUS_EMPTY_TEST"
+}
+
+@test "vacuous: VACUOUS_TAUTOLOGY detected for xit(...)" {
+    _vac_diff 'tests/unit/test_x.js' \
+        "xit('pending test', () => {" \
+        '  expect(1).toBe(1);' \
+        '});'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "VACUOUS_TAUTOLOGY"
+}
+
+@test "vacuous: VACUOUS_NO_ASSERT detected for bats test with no assertions" {
+    _vac_diff 'tests/unit/test_x.bats' \
+        '#!/usr/bin/env bats' \
+        '@test "empty test no assert" {' \
+        '  echo "hello"' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    echo "$output" | grep -q "VACUOUS_NO_ASSERT"
+}
+
+# ── --vacuous-assertions: NEGATIVE fixtures (8 no false positives) ────────────
+
+@test "vacuous: no VACUOUS_GREP_INVERSE_OR_TRUE for legitimate ! grep -q" {
+    _vac_diff 'tests/unit/test_x.bats' \
+        '#!/usr/bin/env bats' \
+        '@test "x" {' \
+        '  ! grep -q "foo" file.txt' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    ! echo "$output" | grep -q "VACUOUS_GREP_INVERSE_OR_TRUE"
+}
+
+@test "vacuous: no VACUOUS_OR_TRUE for || true in non-test cleanup line" {
+    _vac_diff 'scripts/helper.sh' \
+        '#!/usr/bin/env bash' \
+        'rm -f /tmp/work.tmp || true'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    ! echo "$output" | grep -q "VACUOUS_OR_TRUE"
+}
+
+@test "vacuous: no VACUOUS_TAUTOLOGY for legitimate assert with variable" {
+    _vac_diff 'tests/unit/test_x.bats' \
+        '#!/usr/bin/env bats' \
+        '@test "x" {' \
+        '  run my_cmd' \
+        '  assert_output "expected"' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    ! echo "$output" | grep -q "VACUOUS_TAUTOLOGY"
+}
+
+@test "vacuous: no VACUOUS_AC_STUB for skip with real reason outside tests/ac/" {
+    _vac_diff 'tests/unit/test_x.bats' \
+        '#!/usr/bin/env bats' \
+        '@test "x" {' \
+        '  skip "needs network"' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    ! echo "$output" | grep -q "VACUOUS_AC_STUB"
+}
+
+@test "vacuous: no VACUOUS_EMPTY_TEST for it() with non-empty body" {
+    _vac_diff 'tests/unit/test_x.js' \
+        "it('does something', () => {" \
+        "  expect(result).toBe('value');" \
+        '});'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    ! echo "$output" | grep -q "VACUOUS_EMPTY_TEST"
+}
+
+@test "vacuous: no VACUOUS_TAUTOLOGY for expect(result).toBe(expected) with variables" {
+    _vac_diff 'tests/unit/test_x.js' \
+        'const result = fn();' \
+        'expect(result).toBe(expected);'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    ! echo "$output" | grep -q "VACUOUS_TAUTOLOGY"
+}
+
+@test "vacuous: no VACUOUS_NO_ASSERT for test with run + status check" {
+    _vac_diff 'tests/unit/test_x.bats' \
+        '#!/usr/bin/env bats' \
+        '@test "runs fine" {' \
+        '  run my_command arg' \
+        '  [ "$status" -eq 0 ]' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    ! echo "$output" | grep -q "VACUOUS_NO_ASSERT"
+}
+
+@test "vacuous: no VACUOUS_GREP_INVERSE_OR_TRUE for grep -qv without || true" {
+    _vac_diff 'tests/unit/test_x.bats' \
+        '#!/usr/bin/env bats' \
+        '@test "x" {' \
+        '  grep -qv "foo" file.txt && echo "pattern absent on some lines"' \
+        '}'
+    run bash "$LINT" --diff-file "$_vac_tmpfile" --vacuous-assertions
+    rm -f "$_vac_tmpfile"
+    ! echo "$output" | grep -q "VACUOUS_GREP_INVERSE_OR_TRUE"
+}
+
+@test "vacuous: no VACUOUS findings on clean diff file" {
+    run bash "$LINT" --diff-file "$FIX/good.diff" --vacuous-assertions
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -qE "^VACUOUS_"
+}
+
+# ── --pre-commit bundles --vacuous-assertions ─────────────────────────────────
+
+@test "vacuous: --pre-commit invokes vacuous-assertions check" {
+    TMPDIR_REPO="$(mktemp -d)"
+    git -C "$TMPDIR_REPO" init -q
+    git -C "$TMPDIR_REPO" config user.email "t@t.com"
+    git -C "$TMPDIR_REPO" config user.name "T"
+    touch "$TMPDIR_REPO/README.md"
+    git -C "$TMPDIR_REPO" add README.md
+    git -C "$TMPDIR_REPO" commit -q -m "init"
+
+    # Stage a test file with a vacuous grep pattern
+    mkdir -p "$TMPDIR_REPO/tests/unit"
+    cat > "$TMPDIR_REPO/tests/unit/test_bad.bats" << 'BATS'
+#!/usr/bin/env bats
+@test "vacuous grep" {
+  grep -qv "foo" somefile || true
+}
+BATS
+    git -C "$TMPDIR_REPO" add tests/unit/test_bad.bats
+
+    run bash -c "cd '$TMPDIR_REPO' && bash '$LINT' --pre-commit --staged"
+    rm -rf "$TMPDIR_REPO"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "VACUOUS_GREP_INVERSE_OR_TRUE"
+}
