@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "repo": "berlinguyinca/autospec",
+  "generated_at": "2026-05-22T16:43:17.266Z",
+  "commit": "c5cd632",
+  "modules": [],
+  "cli_entry_points": [],
+  "http_endpoints": [],
+  "concepts": [
+    {
+      "name": "<name>",
+      "definition": "- `faq:` array empty on first generation; populated by Phase 8 AI reviewer when it has high-confidence Q&A pairs",
+      "source_anchor": "docs/superpowers/plans/2026-05-22-autospec-docs-amendment.md#L341"
+    }
+  ],
+  "faq": []
+}

@@ -545,6 +545,29 @@ check_existing_spec_mode() {
     done
 }
 
+# Docs amendment presence checks (Phase 10c): every install of autospec that
+# has run the docs pipeline must ship the 7 generated artifacts. validate.sh
+# fails if any are absent so the lockstep invariant is enforced on every CI run.
+#
+# Checks:
+#   1. docs/USER_MANUAL.md present
+#   2. llms.txt present
+#   3. docs/.llm-manifest.json present
+#   4. skills/autospec-test/SKILL.md carries the Stage 2.5 composition note
+check_docs_amendment_presence() {
+    info "docs amendment presence: generated artifacts"
+    [ -f "docs/USER_MANUAL.md" ] \
+        || fail "docs/USER_MANUAL.md: missing — run reverse-engineer.sh + gen-docs-from-spec.mjs to regenerate"
+    [ -f "llms.txt" ] \
+        || fail "llms.txt: missing — run gen-llms-txt.sh --repo-root . to regenerate"
+    [ -f "docs/.llm-manifest.json" ] \
+        || fail "docs/.llm-manifest.json: missing — run gen-llm-manifest.mjs to regenerate"
+    info "docs amendment presence: autospec-test Stage 2.5 composition note"
+    grep -q 'drift.gate\|drift gate\|drift-gate\|check-doc-drift\|doc.*drift\|Stage 2\.5.*drift\|drift.*Stage 2\.5' \
+        "skills/autospec-test/SKILL.md" \
+        || fail "skills/autospec-test/SKILL.md: missing Stage 2.5 drift-gate composition note (docs amendment §10)"
+}
+
 # autospec-test skill structural check (Phase 10): run per-skill validate.sh
 # to verify SKILL.md, codex/prompt.md, and structural section presence.
 check_autospec_test_skill_present() {
@@ -601,6 +624,7 @@ main() {
     check_autospec_review_skill_present
     check_autospec_review_tier_a_directives
     check_autospec_test_skill_present
+    check_docs_amendment_presence
     check_phase4_tests
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
