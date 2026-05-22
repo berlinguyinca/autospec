@@ -42,5 +42,7 @@ jobs:
           echo "AUTOSPEC_SCRIPTS_DIR=${AUTOSPEC_SCRIPTS_PATH}" >> "$GITHUB_ENV"
 
       - name: Run doc-drift gate
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           bash "${AUTOSPEC_SCRIPTS_DIR}/check-doc-drift.sh" --pr "${{ github.event.pull_request.number }}"
