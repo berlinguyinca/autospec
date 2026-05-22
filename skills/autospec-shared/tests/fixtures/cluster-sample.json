@@ -1,0 +1,155 @@
+{
+  "significant": [
+    {
+      "slug": "lib-config",
+      "files": [
+        "/tmp/wt-autospec-docs-phase5-doc-generators/skills/autospec-shared/tests/fixtures/reverse-engineer-bait/lib/config.mjs"
+      ],
+      "language": "javascript",
+      "exports": [
+        {
+          "name": "DEFAULT_CONFIG",
+          "kind": "const",
+          "signature": "export const DEFAULT_CONFIG = {",
+          "line": 8
+        },
+        {
+          "name": "loadConfig",
+          "kind": "function",
+          "signature": "export function loadConfig() {",
+          "line": 17
+        }
+      ],
+      "entry_points": [],
+      "importedBy": [],
+      "reasons": [
+        "has_exports"
+      ]
+    },
+    {
+      "slug": "lib-validator",
+      "files": [
+        "/tmp/wt-autospec-docs-phase5-doc-generators/skills/autospec-shared/tests/fixtures/reverse-engineer-bait/lib/validator.py"
+      ],
+      "language": "python",
+      "exports": [
+        {
+          "name": "validate_name",
+          "kind": "function",
+          "signature": "def validate_name(name: str) -> bool:",
+          "line": 6
+        },
+        {
+          "name": "validate_timeout",
+          "kind": "function",
+          "signature": "def validate_timeout(timeout: int) -> bool:",
+          "line": 11
+        },
+        {
+          "name": "ConfigValidator",
+          "kind": "const",
+          "signature": "class ConfigValidator:",
+          "line": 16
+        },
+        {
+          "name": "is_valid",
+          "kind": "function",
+          "signature": "def is_valid(self) -> bool:",
+          "line": 22
+        }
+      ],
+      "entry_points": [
+        {
+          "kind": "cli_command",
+          "identifier": "__main__",
+          "line": 30
+        }
+      ],
+      "importedBy": [],
+      "reasons": [
+        "has_exports",
+        "cli_entry"
+      ]
+    },
+    {
+      "slug": "src-cli",
+      "files": [
+        "/tmp/wt-autospec-docs-phase5-doc-generators/skills/autospec-shared/tests/fixtures/reverse-engineer-bait/src/cli.mjs"
+      ],
+      "language": "javascript",
+      "exports": [
+        {
+          "name": "main",
+          "kind": "function",
+          "signature": "export function main() {",
+          "line": 10
+        }
+      ],
+      "entry_points": [
+        {
+          "kind": "cli_command",
+          "identifier": "cli.mjs",
+          "line": 1
+        }
+      ],
+      "importedBy": [],
+      "reasons": [
+        "has_exports",
+        "cli_entry"
+      ]
+    },
+    {
+      "slug": "src-parser",
+      "files": [
+        "/tmp/wt-autospec-docs-phase5-doc-generators/skills/autospec-shared/tests/fixtures/reverse-engineer-bait/src/parser.mjs"
+      ],
+      "language": "javascript",
+      "exports": [
+        {
+          "name": "parseArgs",
+          "kind": "function",
+          "signature": "export function parseArgs(argv) {",
+          "line": 10
+        }
+      ],
+      "entry_points": [],
+      "importedBy": [
+        "/tmp/wt-autospec-docs-phase5-doc-generators/skills/autospec-shared/tests/fixtures/reverse-engineer-bait/lib/config.mjs",
+        "/tmp/wt-autospec-docs-phase5-doc-generators/skills/autospec-shared/tests/fixtures/reverse-engineer-bait/src/cli.mjs"
+      ],
+      "reasons": [
+        "has_exports"
+      ]
+    },
+    {
+      "slug": "src-utils",
+      "files": [
+        "/tmp/wt-autospec-docs-phase5-doc-generators/skills/autospec-shared/tests/fixtures/reverse-engineer-bait/src/utils.mjs"
+      ],
+      "language": "javascript",
+      "exports": [
+        {
+          "name": "greet",
+          "kind": "function",
+          "signature": "export function greet(name) {",
+          "line": 8
+        },
+        {
+          "name": "formatDate",
+          "kind": "function",
+          "signature": "export function formatDate(date) {",
+          "line": 17
+        }
+      ],
+      "entry_points": [],
+      "importedBy": [
+        "/tmp/wt-autospec-docs-phase5-doc-generators/skills/autospec-shared/tests/fixtures/reverse-engineer-bait/src/cli.mjs",
+        "/tmp/wt-autospec-docs-phase5-doc-generators/skills/autospec-shared/tests/fixtures/reverse-engineer-bait/src/parser.mjs"
+      ],
+      "reasons": [
+        "has_exports"
+      ]
+    }
+  ],
+  "trivial": []
+}
