@@ -451,20 +451,28 @@ issues unblock the queue before continuing with normal feature work.
 > `process(ISSUE)` dispatches a **foreground subagent** (wait for return) with this prompt:
 >
 > **Prompt construction (cache-prefix + dynamic suffix):**
-> Before dispatch, the orchestrator builds the subagent prompt in two parts:
+> Before dispatch, the orchestrator builds the subagent prompt using `bundle-and-dispatch.sh`:
 >
-> 1. **Static cached prefix** — call `bundle-static-context.sh` to emit the static blob:
+> 1. **Static cached prefix + dynamic suffix** — call `bundle-and-dispatch.sh` to assemble the combined prompt:
 >    ```bash
->    static_prefix=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/bundle-static-context.sh" \
+>    # Write dynamic suffix to a temp file first
+>    _suffix_file=$(mktemp -t autospec-suffix-XXXXXX.txt)
+>    trap 'rm -f "$_suffix_file"' EXIT
+>    printf '%s\n' "<ISSUE_BODY_AND_DIRECTIVES>" > "$_suffix_file"
+>    combined_prompt=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/bundle-and-dispatch.sh" \
 >      --role implementer \
->      --issue-labels "<ISSUE_LABELS>")
+>      --issue-labels "<ISSUE_LABELS>" \
+>      --dynamic-suffix-file "$_suffix_file")
 >    ```
->    The blob is framed by `<!-- CACHE BOUNDARY -->` markers and contains:
->    SKILL.md + AGENTS.md + RULE_ID table + tag-filtered saved-memory + lockstep rules + implementer scaffolding.
->    Pass this blob as the first content block of the subagent prompt with `cache_control: { type: "ephemeral" }`
->    so Anthropic's prompt cache can reuse it across dispatches in the same monitor session (5-min TTL).
+>    `bundle-and-dispatch.sh` calls `bundle-static-context.sh` internally to emit the static cached
+>    prefix (framed by `<!-- CACHE BOUNDARY -->` markers, containing SKILL.md + AGENTS.md + RULE_ID
+>    table + tag-filtered saved-memory + lockstep rules + implementer scaffolding), then appends the
+>    dynamic suffix verbatim after the closing marker.
+>    Pass the prefix block (up to and including the closing `<!-- CACHE BOUNDARY -->`) with
+>    `cache_control: { type: "ephemeral" }` so Anthropic's prompt cache can reuse it across
+>    dispatches in the same monitor session (5-min TTL).
 >
-> 2. **Dynamic uncached suffix** — append after the cached prefix:
+> 2. **Dynamic uncached suffix** — appended by `bundle-and-dispatch.sh` after the cached prefix:
 >    the issue body, per-iteration findings (if retry > 1), branch name, and "begin coding now".
 >
 > The combined prompt sent to the subagent is:
