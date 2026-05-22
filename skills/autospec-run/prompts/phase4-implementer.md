@@ -103,6 +103,31 @@ a broken migration replay.
 3. Verify the diff matches the issue's scope. If you ended up touching more than the issue called for, either split the extra work into a separate issue or revert it from this branch.
 4. Commit message follows the repo's existing style (see recent `git log --oneline`).
 
+### Docs drift gate
+
+After tests pass and before creating the PR, run `check-doc-drift.sh --pr` on the branch diff to detect documentation drift. Skip if the issue body contains a line matching `^docs:\s*skip` (case-insensitive).
+
+```bash
+# check-doc-drift.sh --pr mode requires gh CLI and an open PR.
+# For pre-PR use, run with --working-tree to check against HEAD:
+if ! grep -qiE '^docs:[[:space:]]*skip' <(gh issue view <ISSUE> --json body --jq .body 2>/dev/null || true); then
+  DRIFT_JSON="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/check-doc-drift.sh" \
+    --working-tree 2>/dev/null)"; drift_exit=$?
+  case "$drift_exit" in
+    0) echo "[drift] docs clean" ;;
+    1)
+      echo "[drift] doc drift detected — self-heal loop will handle after PR opens"
+      ;;
+    2)
+      echo "[drift] missing doc scope — post comment and pause"
+      gh issue comment <ISSUE> --body "$(printf 'docs: missing scope. Operator review needed before merge.\n\n```json\n%s\n```' "$DRIFT_JSON")" 2>/dev/null || true
+      ;;
+  esac
+fi
+```
+
+Exit 0: continue. Exit 1: log drift, continue (the Phase 4 monitor's reviewer dispatch handles it post-PR). Exit 2: comment on issue, continue (non-fatal in implementer path; monitor handles escalation).
+
 ## Peer-review
 
 If the `codex` CLI is on PATH, get a second opinion on the diff:
