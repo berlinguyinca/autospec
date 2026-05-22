@@ -4,12 +4,17 @@
 # Usage:
 #   scripts/lint-implementation.sh <PR> --issue <N>   # deterministic only, via gh pr diff
 #   scripts/lint-implementation.sh --diff-file <path> # offline / pre-push
+#   scripts/lint-implementation.sh --pre-commit --staged  # staged diff (pre-commit hook mode)
+#   scripts/lint-implementation.sh --directives       # reformat findings as directive lines
 #   scripts/lint-implementation.sh --help             # print rules summary
 #
 # Output (default): one finding per stdout line, format:
 #   RULE_ID:<path>:<line>: <one-line description>
 # or for INFO (skipped):
 #   INFO:RULE_ID:<path>:<line>: <opt-out: justification>
+#
+# With --directives: one imperative directive per finding:
+#   Fix <RULE_ID>: <imperative action>
 #
 # Exit code = number of blocking findings (0 = pass), capped at min(N, 64).
 # If findings exceed 200, exits 200 with a scope-explosion message.
@@ -18,7 +23,16 @@ set -eu
 
 HELP_TEXT="Usage: scripts/lint-implementation.sh <PR> --issue <N>
        scripts/lint-implementation.sh --diff-file <path>
+       scripts/lint-implementation.sh --pre-commit --staged
+       scripts/lint-implementation.sh [--directives]
        scripts/lint-implementation.sh --help
+
+Flags:
+  --pre-commit      Run in pre-commit mode (reads staged diff instead of PR diff)
+  --staged          Alias for --pre-commit; use git diff --cached as diff source
+  --directives      Reformat each finding as an imperative directive line:
+                    \"Fix <RULE_ID>: <imperative action>\"
+                    Suitable for injecting into implementer retry prompts.
 
 RULE_IDs enforced (deterministic detectors):
 
@@ -46,6 +60,9 @@ Exit 200 means too many findings (scope explosion)."
 PR_NUMBER=""
 ISSUE_NUMBER=""
 DIFF_FILE=""
+PRE_COMMIT=0
+STAGED=0
+DIRECTIVES=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -69,6 +86,19 @@ while [ $# -gt 0 ]; do
             DIFF_FILE="$2"
             shift 2
             ;;
+        --pre-commit)
+            PRE_COMMIT=1
+            STAGED=1
+            shift
+            ;;
+        --staged)
+            STAGED=1
+            shift
+            ;;
+        --directives)
+            DIRECTIVES=1
+            shift
+            ;;
         -*)
             printf 'lint-implementation.sh: unknown option: %s\n' "$1" >&2
             exit 1
@@ -85,14 +115,14 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Validate: must have PR_NUMBER XOR DIFF_FILE
+# Validate: must have PR_NUMBER XOR DIFF_FILE XOR --staged
 if [ -n "$PR_NUMBER" ] && [ -n "$DIFF_FILE" ]; then
     printf 'lint-implementation.sh: --diff-file and <PR> are mutually exclusive\n' >&2
     exit 1
 fi
 
-if [ -z "$PR_NUMBER" ] && [ -z "$DIFF_FILE" ]; then
-    printf 'lint-implementation.sh: must supply <PR> or --diff-file <path>\n' >&2
+if [ "$STAGED" -eq 0 ] && [ -z "$PR_NUMBER" ] && [ -z "$DIFF_FILE" ]; then
+    printf 'lint-implementation.sh: must supply <PR>, --diff-file <path>, or --staged\n' >&2
     printf '%s\n' "$HELP_TEXT" >&2
     exit 1
 fi
@@ -175,6 +205,16 @@ trap 'rm -f "$TMP_DIFF" "$TMP_ISSUE"' EXIT INT TERM
 
 if [ -n "$DIFF_FILE" ]; then
     cp "$DIFF_FILE" "$TMP_DIFF"
+elif [ "$STAGED" -eq 1 ]; then
+    # Pre-commit / staged mode: read from git diff --cached
+    git diff --cached > "$TMP_DIFF" 2>/dev/null || {
+        printf 'ERROR: failed to get staged diff (git diff --cached)\n' >&2
+        exit 1
+    }
+    if [ ! -s "$TMP_DIFF" ]; then
+        printf 'lint-implementation.sh: no staged changes found\n' >&2
+        exit 0
+    fi
 else
     # Fetch diff from GitHub
     gh pr diff "$PR_NUMBER" > "$TMP_DIFF" 2>/dev/null || {
@@ -611,15 +651,64 @@ $diff_files
 EOF
 }
 
+# ── directives output mode ────────────────────────────────────────────────────
+# Maps each RULE_ID to a short imperative directive line.
+
+rule_directive() {
+    local rule_id="$1"
+    case "$rule_id" in
+        OUT_OF_SCOPE)    printf 'Restrict diff to files listed in the issue ## Implementation outline; revert or amend the issue body for any extra files.' ;;
+        MISSING_TEST)    printf 'Add a test under tests/<tier>/ for the missing required test type before re-pushing.' ;;
+        COMPLEXITY)      printf 'Split functions >50 LOC, files >500 LOC, or nesting >4 — no copy-paste branches.' ;;
+        SECURITY)        printf 'Remove the flagged pattern: never hardcode secrets, never use --no-verify or git reset --hard, validate all inputs.' ;;
+        TODO_LEFT)       printf 'Remove TODO/XXX/FIXME from non-test code; file a follow-up issue for genuinely deferred work.' ;;
+        MOCK_DB)         printf 'Remove DB mock/stub; use the real database per AGENTS.md ## Engineering standards.' ;;
+        DOC_OUT_OF_SYNC) printf 'Update the doc file(s) covering the changed public surface (CLI flag/env var/export) in this same PR.' ;;
+        HALLUCINATED_API) printf 'Verify the flagged symbol exists in the repo or dependency manifests before using it.' ;;
+        DUPLICATE_CODE)  printf 'Reuse the existing helper instead of re-implementing the same logic.' ;;
+        INVENTED_CONFIG) printf 'Remove the invented flag/env/key, or amend the issue body to introduce it as in-scope.' ;;
+        *)               printf 'Fix the flagged %s violation before re-pushing.' "$rule_id" ;;
+    esac
+}
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
-detect_out_of_scope
-detect_missing_test
-detect_complexity
-detect_security
-detect_todo_left
-detect_mock_db
-detect_doc_out_of_sync
+if [ "$DIRECTIVES" -eq 1 ]; then
+    # Capture findings to a temp file, then reformat as directives
+    TMP_FINDINGS="$(mktemp -t lint-impl-findings.XXXXXX)"
+    trap 'rm -f "$TMP_DIFF" "$TMP_ISSUE" "$TMP_FINDINGS"' EXIT INT TERM
+
+    # Run detectors with stdout going to TMP_FINDINGS
+    {
+        detect_out_of_scope
+        detect_missing_test
+        detect_complexity
+        detect_security
+        detect_todo_left
+        detect_mock_db
+        detect_doc_out_of_sync
+    } > "$TMP_FINDINGS" 2>&1
+
+    # Reformat each finding as a directive line
+    while IFS= read -r finding; do
+        # Extract RULE_ID from "RULE_ID:path:line: desc" format
+        rule_id="$(printf '%s' "$finding" | cut -d: -f1)"
+        # Skip INFO lines
+        if [ "$rule_id" = "INFO" ]; then
+            continue
+        fi
+        directive="$(rule_directive "$rule_id")"
+        printf 'Fix %s: %s\n' "$rule_id" "$directive"
+    done < "$TMP_FINDINGS"
+else
+    detect_out_of_scope
+    detect_missing_test
+    detect_complexity
+    detect_security
+    detect_todo_left
+    detect_mock_db
+    detect_doc_out_of_sync
+fi
 
 # Exit with min(FINDINGS_COUNT, FINDINGS_EXIT_CAP)
 if [ "$FINDINGS_COUNT" -eq 0 ]; then
