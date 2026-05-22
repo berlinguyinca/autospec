@@ -82,6 +82,21 @@ S2_MISSING_CATS=$(printf '%s' "$GATE_JSON" | jq -r '.stage2.metrics.missing_beha
 S2_MISSING_ELEMS=$(printf '%s' "$GATE_JSON" | jq -r '.stage2.metrics.missing_ui_elements // [] | join(", ")')
 S2_COVERED_CATS=$(printf '%s' "$GATE_JSON" | jq -r '.stage2.metrics.behavior_categories_covered // [] | join(", ")')
 
+# Stage 2.5
+S25_PRESENT=$(printf '%s' "$GATE_JSON" | jq 'has("stage2_5")')
+S25_PASSED=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.passed // false')
+S25_SKIPPED=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.skipped // false')
+S25_F_PASSED=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.F.passed // true')
+S25_F_SKIPPED=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.F.skipped // false')
+S25_G_PASSED=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.G.passed // true')
+S25_G_SKIPPED=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.G.skipped // false')
+S25_H_PASSED=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.H.passed // true')
+S25_H_SKIPPED=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.H.skipped // false')
+S25_I_PASSED=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.I.passed // true')
+S25_I_SKIPPED=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.I.skipped // false')
+S25_SEEDS_OK=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.seeds_ok // true')
+S25_SEEDS_COUNT=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.seeds_count // 0')
+
 # ── Determine mode ─────────────────────────────────────────────────────────────
 
 MODE="strict-isolation"
@@ -109,6 +124,12 @@ COMMENT="<!-- autospec-test-report-marker -->
 if [ "$S2_PRESENT" = "true" ]; then
     COMMENT="$COMMENT
 **Stage 2 (E2E):** $S2_STATUS"
+fi
+
+if [ "$S25_PRESENT" = "true" ] && [ "$S25_SKIPPED" != "true" ]; then
+    S25_STATUS=$([ "$S25_PASSED" = "true" ] && echo "passed" || echo "failed")
+    COMMENT="$COMMENT
+**Stage 2.5 (Invariants):** $S25_STATUS"
 fi
 
 # Coverage
@@ -168,6 +189,95 @@ if [ -n "$S2_COVERED_CATS" ]; then
 
 ### Behavior categories covered
 $S2_COVERED_CATS"
+fi
+
+# Stage 2.5 subsection (spec §6a) — appended after Stage 2 section
+if [ "$S25_PRESENT" = "true" ] && [ "$S25_SKIPPED" != "true" ]; then
+    COMMENT="$COMMENT
+
+### Stage 2.5 — Invariants & contracts"
+
+    # Metric F — Structural invariants
+    if [ "$S25_F_SKIPPED" = "true" ]; then
+        COMMENT="$COMMENT
+**Metric F — Structural invariants:** skipped (runner not installed)"
+    else
+        F_ICON=$([ "$S25_F_PASSED" = "true" ] && echo "✅" || echo "❌")
+        F_REASON=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.F.reason // ""')
+        COMMENT="$COMMENT
+**Metric F — Structural invariants:** $F_ICON"
+        if [ -n "$F_REASON" ] && [ "$S25_F_PASSED" != "true" ]; then
+            COMMENT="$COMMENT
+- $F_REASON"
+        fi
+        while IFS= read -r detail; do
+            [ -n "$detail" ] && COMMENT="$COMMENT
+- ❌ $detail"
+        done < <(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.F.details[]? // empty' 2>/dev/null)
+    fi
+
+    # Metric G — Window-contract symmetry
+    if [ "$S25_G_SKIPPED" = "true" ]; then
+        COMMENT="$COMMENT
+**Metric G — Window contracts:** skipped (runner not installed)"
+    else
+        G_ICON=$([ "$S25_G_PASSED" = "true" ] && echo "✅" || echo "❌")
+        G_REASON=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.G.reason // ""')
+        COMMENT="$COMMENT
+**Metric G — Window contracts:** $G_ICON"
+        if [ -n "$G_REASON" ] && [ "$S25_G_PASSED" != "true" ]; then
+            COMMENT="$COMMENT
+- $G_REASON"
+        fi
+        while IFS= read -r detail; do
+            [ -n "$detail" ] && COMMENT="$COMMENT
+- ❌ $detail"
+        done < <(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.G.details[]? // empty' 2>/dev/null)
+    fi
+
+    # Metric H — Extended crawler
+    if [ "$S25_H_SKIPPED" = "true" ]; then
+        COMMENT="$COMMENT
+**Metric H — Extended crawler:** skipped (runner not installed)"
+    else
+        H_ICON=$([ "$S25_H_PASSED" = "true" ] && echo "✅" || echo "❌")
+        H_UNAFFORDABLE=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.H.unaffordable_count // 0')
+        H_THRESHOLD=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.H.threshold // 0')
+        COMMENT="$COMMENT
+**Metric H — Extended crawler:** $H_ICON"
+        if [ "$S25_H_PASSED" != "true" ] && [ "$H_UNAFFORDABLE" != "0" ]; then
+            COMMENT="$COMMENT ($H_UNAFFORDABLE unaffordable elements, threshold: $H_THRESHOLD)"
+        fi
+        while IFS= read -r detail; do
+            [ -n "$detail" ] && COMMENT="$COMMENT
+- ❌ $detail"
+        done < <(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.H.details[]? // empty' 2>/dev/null)
+    fi
+
+    # Metric I — Contract symmetry
+    if [ "$S25_I_SKIPPED" = "true" ]; then
+        COMMENT="$COMMENT
+**Metric I — Contract symmetry:** skipped (runner not installed)"
+    else
+        I_ICON=$([ "$S25_I_PASSED" = "true" ] && echo "✅" || echo "❌")
+        I_PASSED_COUNT=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.I.passed_count // "?"')
+        I_TOTAL_COUNT=$(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.I.total_count // "?"')
+        COMMENT="$COMMENT
+**Metric I — Contract symmetry:** $I_ICON $I_PASSED_COUNT/$I_TOTAL_COUNT passed"
+        while IFS= read -r detail; do
+            [ -n "$detail" ] && COMMENT="$COMMENT
+- ❌ $detail"
+        done < <(printf '%s' "$GATE_JSON" | jq -r '.stage2_5.metrics.I.details[]? // empty' 2>/dev/null)
+    fi
+
+    # Edge-case seeds handshake
+    if [ "$S25_SEEDS_COUNT" != "0" ] && [ "$S25_SEEDS_COUNT" != "null" ]; then
+        SEEDS_ICON=$([ "$S25_SEEDS_OK" = "true" ] && echo "✅" || echo "❌")
+        SEEDS_LABEL=$([ "$S25_SEEDS_OK" = "true" ] && echo "all $S25_SEEDS_COUNT shapes present" || echo "missing shapes — re-run Skill C provisioning")
+        COMMENT="$COMMENT
+
+**Edge-case seeds (Skill C handshake):** $SEEDS_ICON $SEEDS_LABEL"
+    fi
 fi
 
 # ── Write or post ──────────────────────────────────────────────────────────────

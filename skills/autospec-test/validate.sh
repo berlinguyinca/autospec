@@ -119,4 +119,19 @@ if [ "$first_char" != "0a" ]; then
     fail "codex/prompt.md does not start with a leading blank line (first byte: $first_char, expected 0a)"
 fi
 
+# ── 8. SKILL.md: v2 invariants_v2 example block ─────────────────────────────
+info "checking invariants_v2 example block in SKILL.md"
+grep -q 'invariants_v2:' "$SKILL_MD" \
+    || fail "SKILL.md missing 'invariants_v2:' example block (required for v2 lockstep)"
+
+# ── 9. SKILL.md: edge_case_seeds example block ───────────────────────────────
+info "checking edge_case_seeds example block in SKILL.md"
+grep -q 'edge_case_seeds:' "$SKILL_MD" \
+    || fail "SKILL.md missing 'edge_case_seeds:' example block (required for v2 lockstep)"
+
+# ── 10. SKILL.md: v2 adapter row present (Stage 2.5 metrics table) ───────────
+info "checking v2 adapter row in SKILL.md"
+grep -q 'Stage 2\.5' "$SKILL_MD" \
+    || fail "SKILL.md missing Stage 2.5 adapter row (required v2 lockstep check)"
+
 info "OK — all autospec-test structural checks passed."

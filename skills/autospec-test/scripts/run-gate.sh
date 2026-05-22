@@ -72,8 +72,8 @@ if [ -f "$STUB_GATE" ]; then
     GATE_JSON="$(cat "$STUB_GATE")"
     COMMENT_MD="$(cat "$STUB_COMMENT" 2>/dev/null || echo '<!-- autospec-test-report-marker -->')"
 else
-    # No stub: run real Stage 1 (unit tests) via gate-stage-unit.sh
-    # Stage 2 wiring deferred to Phase 9.
+    # No stub: run real Stage 1 (unit tests) via gate-stage-unit.sh,
+    # Stage 2 (E2E) via gate-stage-e2e.sh, and Stage 2.5 (invariants) via gate-stage-2-5.sh.
     CONTRACT_JSON=""
     if command -v yq >/dev/null 2>&1; then
         CONTRACT_JSON="$(yq -o=json '.' "$CONTRACT_YML" 2>/dev/null || echo '{}')"
@@ -89,17 +89,72 @@ else
         STAGE1_RESULT='{"passed":false,"stage":"unit","reason":"gate-stage-unit failed"}'
     fi
 
-    OVERALL=$([ "$S1_PASSED" = "true" ] && echo "true" || echo "false")
+    # Stage 2: E2E gate (only if Stage 1 passed)
+    STAGE2_RESULT=""
+    S2_PASSED=false
+    if [ "$S1_PASSED" = "true" ] && [ -f "$SCRIPT_DIR/gate-stage-e2e.sh" ]; then
+        if STAGE2_RESULT=$(bash "$SCRIPT_DIR/gate-stage-e2e.sh" "$TARGET_DIR" 2>/dev/null); then
+            S2_PASSED=$(printf '%s' "$STAGE2_RESULT" | jq -r '.passed // false')
+        else
+            S2_PASSED=false
+            STAGE2_RESULT='{"passed":false,"stage":"e2e","reason":"gate-stage-e2e failed"}'
+        fi
+    elif [ "$S1_PASSED" = "true" ]; then
+        # gate-stage-e2e.sh not yet installed — treat as passed (v1 compat)
+        S2_PASSED=true
+        STAGE2_RESULT='{"passed":true,"stage":"e2e","skipped":true,"reason":"gate-stage-e2e not installed"}'
+    else
+        STAGE2_RESULT='{"passed":false,"stage":"e2e","skipped":true,"reason":"stage1 failed"}'
+    fi
+
+    # Stage 2.5: invariants gate (only if Stage 2 passed)
+    STAGE25_RESULT=""
+    S25_PASSED=false
+    S25_EXIT=0
+    if [ "$S2_PASSED" = "true" ] && [ -f "$SCRIPT_DIR/gate-stage-2-5.sh" ]; then
+        if STAGE25_RESULT=$(bash "$SCRIPT_DIR/gate-stage-2-5.sh" "$TARGET_DIR" 2>/dev/null); then
+            S25_PASSED=$(printf '%s' "$STAGE25_RESULT" | jq -r '.passed // true')
+            S25_EXIT=0
+        else
+            S25_EXIT=$?
+            S25_PASSED=false
+            if [ "$S25_EXIT" -eq 2 ]; then
+                # gate-stage-2-5.sh refused to run (e.g. missing seeds)
+                STAGE25_RESULT='{"metric":"2.5","passed":false,"refused":true,"reason":"stage-2-5 refused to run"}'
+            else
+                STAGE25_RESULT=$(printf '%s' "$STAGE25_RESULT" | jq '.' 2>/dev/null \
+                    || echo '{"metric":"2.5","passed":false,"reason":"stage-2-5 failed"}')
+            fi
+        fi
+    elif [ "$S2_PASSED" = "true" ]; then
+        # gate-stage-2-5.sh not yet installed — treat as passed (v1 compat)
+        S25_PASSED=true
+        STAGE25_RESULT='{"metric":"2.5","passed":true,"skipped":true,"reason":"gate-stage-2-5 not installed"}'
+    else
+        S25_PASSED=false
+        STAGE25_RESULT='{"metric":"2.5","passed":false,"skipped":true,"reason":"stage2 failed"}'
+    fi
+
+    OVERALL=$([ "$S1_PASSED" = "true" ] && [ "$S2_PASSED" = "true" ] && [ "$S25_PASSED" = "true" ] \
+        && echo "true" || echo "false")
+
+    STAGE2_JSON=$(printf '%s' "$STAGE2_RESULT" | jq '.' 2>/dev/null || echo 'null')
+    STAGE25_JSON=$(printf '%s' "$STAGE25_RESULT" | jq '.' 2>/dev/null || echo 'null')
+
     GATE_JSON=$(jq -n \
         --arg target "$TARGET_NAME" \
         --argjson stage1 "$STAGE1_RESULT" \
+        --argjson stage2 "$STAGE2_JSON" \
+        --argjson stage25 "$STAGE25_JSON" \
         --argjson overall "$OVERALL" \
-        '{"target":$target,"stage1":$stage1,"overall_passed":$overall}')
+        '{"target":$target,"stage1":$stage1,"stage2":$stage2,"stage25":$stage25,"overall_passed":$overall}')
     COMMENT_MD="<!-- autospec-test-report-marker -->
 ## autospec-test — $([ "$OVERALL" = "true" ] && echo "✅ Passed" || echo "❌ Blocked")
 
 **Mode:** strict-isolation
 **Stage 1 (unit):** $([ "$S1_PASSED" = "true" ] && echo "passed" || echo "failed")
+**Stage 2 (E2E):** $([ "$S2_PASSED" = "true" ] && echo "passed" || echo "failed")
+**Stage 2.5 (invariants):** $([ "$S25_PASSED" = "true" ] && echo "passed" || echo "failed")
 "
 fi
 

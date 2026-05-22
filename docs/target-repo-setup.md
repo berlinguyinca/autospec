@@ -202,6 +202,100 @@ The wizard walks through mode selection, detects backup drivers for
 Mode II (scoped production), prints a dry-run preview of constraints,
 and requires you to type `I UNDERSTAND` before writing any files.
 
+## Enabling autospec-test v2
+
+Stage 2.5 is an optional extension that catches a specific class of regressions where Playwright suites pass green but the user-visible product still breaks — missing edit affordances, frontend-display windows that don't match backend query windows, broken interactive elements, and UI claims the API cannot back.
+
+### Prerequisites
+
+- autospec-test v1 already configured (`.autospec/test.yml` with `forbidden_url_patterns`)
+- Playwright ≥ 1.40 installed in your target repo
+- autospec-e2e-clone (Skill C) provisioned if you declare `edge_case_seeds`
+
+### Step 1: Install the helper library
+
+```bash
+npm install --save-dev @autospec/test
+```
+
+Or let the wizard handle it:
+
+```bash
+/autospec-test --init
+```
+
+### Step 2: Extend `.autospec/test.yml` with v2 namespace
+
+Add the `e2e.invariants_v2` block to your existing contract:
+
+```yaml
+e2e:
+  clone_url_env: E2E_BASE_URL
+  forbidden_url_patterns:
+    - "^https?://app\\.example\\.com"
+
+  invariants_v2:
+    enabled: true
+
+    # Metric F: every selector row must have an edit affordance
+    structural_invariants:
+      - name: dashboard-done-items-editable
+        selector: "[data-done-item]"
+        require_affordance: edit
+        routes:
+          - /dashboard
+
+    # Metric G: UI window attribute must match API query window (±1 day tolerance)
+    window_contracts:
+      - name: dashboard-streak-window
+        ui_attribute: data-window-days
+        api_param: from
+        tolerance_days: 1
+
+    # Metric I: UI claims must be backed by API responses
+    contract_symmetry:
+      - name: streak-task-must-be-editable
+        ui_selector: "[data-task-id]"
+        api_endpoint: /api/timeline
+        require_field: editable
+
+    # Edge-case seeds handshake with Skill C (clone provisioner)
+    # Omit this block if you have not set up Skill C
+    edge_case_seeds:
+      enforcement: refuse_to_run_if_missing
+      require_shapes:
+        - kind: done_item
+          count_at_least: 3
+        - kind: streak_gap
+          count_at_least: 1
+```
+
+### Step 3: Add Stage 2.5 invariant tests (optional but recommended)
+
+Use the `@autospec/test` helpers to write the same checks imperatively in your Playwright suite:
+
+```typescript
+import { checkStructuralInvariant, verifyWindowContract } from '@autospec/test';
+
+test('dashboard done items are editable', async ({ page }) => {
+  await page.goto('/dashboard');
+  await checkStructuralInvariant(page, {
+    selector: '[data-done-item]',
+    requireAffordance: 'edit',
+  });
+});
+```
+
+### Stage 2.5 failure labels
+
+| Label | Meaning |
+|---|---|
+| `e2e:blocked-stage25` | One or more v2 metrics failed; v1 may have passed |
+| `e2e:window-mismatch` | Metric G: UI window ≠ API window |
+| `e2e:unaffordable-elements` | Metric H: interactive elements did not respond |
+| `e2e:contract-mismatch` | Metric I: UI claims not backed by API |
+| `e2e:seed-missing` | edge_case_seeds shapes absent in clone; re-run Skill C |
+
 ### What the labels mean
 
 | Label | Meaning |
