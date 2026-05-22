@@ -740,6 +740,15 @@ Pass the following prompt verbatim to each background subagent:
 >
 >      **Model tier:** `TIER_B` for normal issues; `TIER_A` for `regression`/`priority:high` issues. Silently fall back to `TIER_A` if `TIER_B` unavailable.
 >
+>      **Static cached prefix** — call `bundle-static-context.sh` to emit the reviewer blob:
+>      ```bash
+>      reviewer_prefix=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/bundle-static-context.sh" \
+>        --role reviewer \
+>        --issue-labels "<ISSUE_LABELS>")
+>      ```
+>      Pass this blob as the first content block of the reviewer subagent prompt with `cache_control: { type: "ephemeral" }`.
+>      Append the dynamic suffix: deterministic lint findings from `/tmp/guardian-<PR>.md`, PR diff, issue body, previous-iteration findings (if iter > 1).
+>
 >      Dispatch ONE **foreground subagent** with this brief:
 >        > You are the implementation reviewer for PR #<PR> on {repo}, closing issue #<ISSUE>.
 >        >
