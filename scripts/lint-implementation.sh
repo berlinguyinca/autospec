@@ -725,51 +725,46 @@ EOF
 }
 
 # _vacuous_scan_no_assert FILE — warn when a test file has added test blocks with no assert/expect
+# _vacuous_emit_no_assert — emit VACUOUS_NO_ASSERT if test has no assertions
+_vacuous_emit_no_assert() {
+    local diff_file="$1" test_start="$2" test_name="$3" has_assert="$4"
+    if [ "$has_assert" -eq 0 ] && [ -n "$test_name" ]; then
+        emit_capped "VACUOUS_NO_ASSERT" "$diff_file" "$test_start" \
+            "Test '${test_name}' has no assert/run/grep assertion (WARN)."
+    fi
+}
+
+# _vacuous_scan_no_assert FILE — warn when added bats test blocks lack assertions
 _vacuous_scan_no_assert() {
     local diff_file="$1"
-    local in_test=0
-    local test_start=0
-    local has_assert=0
-    local test_name=""
+    local in_test=0 test_start=0 has_assert=0 test_name=""
 
     while IFS=: read -r lineno content; do
-        # Detect bats @test start
+        # New @test block: flush previous if open
         if printf '%s' "$content" | grep -qE '^[[:space:]]*@test[[:space:]]'; then
-            if [ "$in_test" -eq 1 ] && [ "$has_assert" -eq 0 ] && [ -n "$test_name" ]; then
-                emit_capped "VACUOUS_NO_ASSERT" "$diff_file" "$test_start" \
-                    "Test '${test_name}' has no assert/run/grep assertion (WARN)."
+            if [ "$in_test" -eq 1 ]; then
+                _vacuous_emit_no_assert "$diff_file" "$test_start" "$test_name" "$has_assert"
             fi
-            in_test=1
-            has_assert=0
-            test_start="$lineno"
+            in_test=1; has_assert=0; test_start="$lineno"
             test_name="$(printf '%s' "$content" | grep -oE '"[^"]+"' | head -1 | tr -d '"')"
             continue
         fi
-        if [ "$in_test" -eq 1 ]; then
-            # Closing brace ends test block
-            if printf '%s' "$content" | grep -qE '^[[:space:]]*\}[[:space:]]*$'; then
-                if [ "$has_assert" -eq 0 ] && [ -n "$test_name" ]; then
-                    emit_capped "VACUOUS_NO_ASSERT" "$diff_file" "$test_start" \
-                        "Test '${test_name}' has no assert/run/grep assertion (WARN)."
-                fi
-                in_test=0
-                has_assert=0
-                test_name=""
-                continue
-            fi
-            # Any assert/expect/run/grep counts as assertion presence
-            if printf '%s' "$content" | grep -qE \
-                '\b(assert|expect|run|grep|check|verify)\b'; then
-                has_assert=1
-            fi
+        [ "$in_test" -eq 0 ] && continue
+        # Closing brace: flush and reset
+        if printf '%s' "$content" | grep -qE '^[[:space:]]*\}[[:space:]]*$'; then
+            _vacuous_emit_no_assert "$diff_file" "$test_start" "$test_name" "$has_assert"
+            in_test=0; has_assert=0; test_name=""; continue
+        fi
+        # Assert/expect/run/grep counts as assertion presence
+        if printf '%s' "$content" | grep -qE '\b(assert|expect|run|grep|check|verify)\b'; then
+            has_assert=1
         fi
     done <<EOF
 $(get_added_lines_with_lineno "$diff_file")
 EOF
-    # Flush last open test
-    if [ "$in_test" -eq 1 ] && [ "$has_assert" -eq 0 ] && [ -n "$test_name" ]; then
-        emit_capped "VACUOUS_NO_ASSERT" "$diff_file" "$test_start" \
-            "Test '${test_name}' has no assert/run/grep assertion (WARN)."
+    # Flush last open test block
+    if [ "$in_test" -eq 1 ]; then
+        _vacuous_emit_no_assert "$diff_file" "$test_start" "$test_name" "$has_assert"
     fi
 }
 
