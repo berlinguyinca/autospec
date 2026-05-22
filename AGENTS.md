@@ -318,3 +318,7 @@ Replaces synchronous `gh pr checks --watch` with a fire-and-forget background po
 Signal file: `~/.autospec/ci-state/<PR>.signal` — JSON `{pr, state, checks, settled_at}`.
 State values: `pending | pass | fail | stalled`.
 Exit codes from `ci-wait-poll.sh`: 0=pass, 1=fail/stalled, 2=pending, 3=no sentinel.
+
+## Batch size policy
+
+Default `AUTOSPEC_BATCH_SIZE=3`; force batch=1 when the next ready issue is `reasoning:deep` (high blast-radius work runs one-at-a-time per monitor session).
