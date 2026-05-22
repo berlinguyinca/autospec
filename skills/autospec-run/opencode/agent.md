@@ -448,6 +448,25 @@ issues unblock the queue before continuing with normal feature work.
 >
 > `process(ISSUE)` dispatches a **foreground subagent** (wait for return) with this prompt:
 >
+> **Prompt construction (cache-prefix + dynamic suffix):**
+> Before dispatch, the orchestrator builds the subagent prompt in two parts:
+>
+> 1. **Static cached prefix** — call `bundle-static-context.sh` to emit the static blob:
+>    ```bash
+>    static_prefix=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/bundle-static-context.sh" \
+>      --role implementer \
+>      --issue-labels "<ISSUE_LABELS>")
+>    ```
+>    The blob is framed by `<!-- CACHE BOUNDARY -->` markers and contains:
+>    SKILL.md + AGENTS.md + RULE_ID table + tag-filtered saved-memory + lockstep rules + implementer scaffolding.
+>    Pass this blob as the first content block of the subagent prompt with `cache_control: { type: "ephemeral" }`
+>    so Anthropic's prompt cache can reuse it across dispatches in the same monitor session (5-min TTL).
+>
+> 2. **Dynamic uncached suffix** — append after the cached prefix:
+>    the issue body, per-iteration findings (if retry > 1), branch name, and "begin coding now".
+>
+> The combined prompt sent to the subagent is:
+>
 > ```
 > **Model tier:** `TIER_B` (implementation work) — cheaper model with medium thinking; resolved at startup. Silently fall back to `TIER_A` if unavailable.
 >
@@ -467,11 +486,11 @@ issues unblock the queue before continuing with normal feature work.
 >
 > ## Project rules you MUST honor
 >
-> <verbatim concatenation of relevant feedback_*.md bodies — injected by assemble-impl-prompt.sh before dispatch>
+> <verbatim concatenation of relevant feedback_*.md bodies — injected by bundle-static-context.sh --role implementer before dispatch>
 >
 > ## RULE_IDs (from AGENTS.md ## Implementation-quality contract)
 >
-> <verbatim RULE_ID table from AGENTS.md — injected by assemble-impl-prompt.sh>
+> <verbatim RULE_ID table from AGENTS.md — injected by bundle-static-context.sh --role implementer>
 >
 > ## Acceptance criteria as constraints
 >
