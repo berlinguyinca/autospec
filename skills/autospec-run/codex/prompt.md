@@ -493,7 +493,40 @@ issues unblock the queue before continuing with normal feature work.
 >    fi
 >    ```
 >    Exit 0: proceed to merge. Exit 1: block PR (post comment + labels; do NOT merge; treat as review finding). Exit 2: halt entire batch (comment on issue, label `in-progress-by-bot` → `auto-implement`, exit monitor).
-> 4. Conventional commits (feat:/fix:/test:/docs:/refactor:). NEVER bypass hooks. NEVER amend.
+> 4. <!-- RETRY-LOOP:begin --> Adaptive commit loop (MAX_IMPL_RETRIES):
+>    ```bash
+>    attempt=1
+>    MAX_IMPL_RETRIES="${MAX_IMPL_RETRIES:-5}"
+>    directive_context=""
+>    while [ "$attempt" -le "$MAX_IMPL_RETRIES" ]; do
+>      # Conventional commits (feat:/fix:/test:/docs:/refactor:). NEVER bypass hooks. NEVER amend.
+>      if git commit -m "<conventional-commit-message>"; then
+>        # pre-commit hook passed — verify AC bats tests are green
+>        if bats tests/ac/issue-<ISSUE>.bats 2>/dev/null; then
+>          break  # success
+>        fi
+>        # AC tests still failing — treat as lint failure, roll back commit
+>        git reset HEAD~1
+>      fi
+>      # Capture lint directives for next attempt
+>      findings=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh" --pre-commit --staged --directives 2>/dev/null || true)
+>      if [ -n "$findings" ]; then
+>        directive_context="${directive_context}
+>
+> ## Retry attempt ${attempt} findings
+> ${findings}
+>
+> Fix these BEFORE the next code generation."
+>      fi
+>      attempt=$((attempt + 1))
+>    done
+>    if [ "$attempt" -gt "$MAX_IMPL_RETRIES" ]; then
+>      gh issue comment <ISSUE> --body "Implementer hit max retries; manual intervention needed"
+>      gh issue edit <ISSUE> --remove-label "auto-implement-active" 2>/dev/null || true
+>      exit 1
+>    fi
+>    ```
+>    <!-- RETRY-LOOP:end -->
 > 5. Push: git push -u origin <BRANCH>
 >    ```bash
 >    # autospec-stop sentinel check — inside process(ISSUE), after each major step

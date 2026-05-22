@@ -438,6 +438,28 @@ check_phase4_immediate_next_issue_pickup() {
     done
 }
 
+# Phase 4 adaptive-retry loop: the implementer prompt block must contain the
+# MAX_IMPL_RETRIES while-loop with directive_context accumulation and an
+# exhaustion branch that posts a manual-intervention comment. All three trio
+# files (SKILL.md, codex/prompt.md, opencode/agent.md) must be in sync.
+check_phase4_adaptive_retry() {
+    info "phase4 adaptive-retry loop: autospec-run trio"
+    for f in "skills/autospec-run/SKILL.md" "skills/autospec-run/codex/prompt.md" "skills/autospec-run/opencode/agent.md"; do
+        grep -q 'RETRY-LOOP:begin' "$f" \
+            || fail "$f missing RETRY-LOOP:begin marker"
+        grep -q 'MAX_IMPL_RETRIES' "$f" \
+            || fail "$f missing MAX_IMPL_RETRIES variable"
+        grep -q 'directive_context' "$f" \
+            || fail "$f missing directive_context variable"
+        grep -q 'Retry attempt' "$f" \
+            || fail "$f missing 'Retry attempt' findings block"
+        grep -q 'Implementer hit max retries; manual intervention needed' "$f" \
+            || fail "$f missing manual-intervention exhaustion comment"
+        grep -q 'auto-implement-active' "$f" \
+            || fail "$f missing lock-label release on exhaustion"
+    done
+}
+
 # Governance copy: the listener lifecycle and anti-loop guardrails must be
 # documented in AGENTS.md, and the listener skill must appear in both the
 # top-level README.md and SKILLS.md skill index. Spec §6.1, §7.1.
@@ -573,6 +595,7 @@ main() {
     check_phase4_guardian_block_lockstep
     check_phase4_issue_start_summary
     check_phase4_immediate_next_issue_pickup
+    check_phase4_adaptive_retry
     check_autospec_run_priority_sort_lockstep
     check_autospec_run_regression_review_lockstep
     check_autospec_review_skill_present
