@@ -280,3 +280,16 @@ Rules:
 - `AUTOSPEC_NO_GUARDIAN=1` — short-circuit guardian, fall back to LGTM-only path.
   Mirrors `AUTOSPEC_NO_AUTOMERGE_SPEC=1` and `AUTOSPEC_NO_SELF_UPDATE=1`. Logged
   as `WARN: guardian disabled by AUTOSPEC_NO_GUARDIAN` on every Phase 4 dispatch.
+
+## Memory management scripts
+
+Scripts for managing project memory files under `AUTOSPEC_MEMORY_DIR`
+(`~/.claude/projects/-Users-<user>-IdeaProjects-autospec/memory/`).
+
+| Script | Purpose | Flags |
+|---|---|---|
+| `scripts/memory-tags.yml` | Manifest mapping each `feedback_*.md` to 4–5 tags | — (data file) |
+| `scripts/apply-memory-tags.sh` | Idempotent tagger: prepends `tags:` YAML frontmatter to each `feedback_*.md` | `--dry-run`, `--memory-dir DIR`, `--manifest FILE` |
+
+`AUTOSPEC_MEMORY_DIR` — override for the memory directory path (default: auto-detected
+from `$HOME/.claude/projects/`).
