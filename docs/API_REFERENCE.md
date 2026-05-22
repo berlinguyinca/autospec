@@ -15,16 +15,38 @@ Installed to `~/.autospec/scripts/` by every skill's `install.sh`.
 
 ### `autospec-watchdog.sh`
 
-Reclaims stalled monitor workers by reconciling `process-heartbeats/*.json` files.
+Reclaims stalled monitor workers by reconciling `process-heartbeats/<repo-slug>/*.json` files.
+Runs flat-format migration on each tick: files with a `repo` field move to `<repo-slug>/`;
+stale files without a `repo` field (older than 1 hour) are deleted.
 
 ```
 Usage: bash autospec-watchdog.sh
-Env:   AUTOSPEC_WATCHDOG_REPO        override repo for gh calls
+Env:   AUTOSPEC_WATCHDOG_REPO        override repo for gh calls (derives <repo-slug>)
        AUTOSPEC_WATCHDOG_STALE_SECS   stale threshold (default: 1800)
        AUTOSPEC_WATCHDOG_RECLAIM_SECS reclaim threshold (default: 10800)
 ```
 
 Exit: always 0. Prints `service-watch: nudged=N reclaimed=N ...` summary.
+
+### `heartbeat-write.sh`
+
+Writes a per-repo-scoped heartbeat to `~/.autospec/process-heartbeats/<repo-slug>/<issue>.json`.
+
+```
+Usage: heartbeat-write.sh --issue <N> --step <step> [--branch <b>] [--pr <p>] [--repo <owner/repo>]
+Env:   AUTOSPEC_REPO   repo override (owner/repo format)
+```
+
+### `heartbeat-read.sh`
+
+Reads heartbeat files from the caller's repo-slug subdir only (zero cross-repo bleed).
+
+```
+Usage: heartbeat-read.sh [--issue <N>] [--repo <owner/repo>]
+```
+
+Without `--issue`: prints all heartbeat file paths in the repo's subdir (one per line).
+With `--issue`: prints the JSON content of that heartbeat, or empty if not found.
 
 ### `lint-issue.sh`
 

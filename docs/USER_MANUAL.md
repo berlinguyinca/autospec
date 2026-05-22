@@ -51,7 +51,7 @@ Turns a feature description into a spec PR and a GitHub issue tree.
 ### `/autospec-run`
 
 <!-- autospec-doc-scope:
-  src: ["skills/autospec-run/SKILL.md", "skills/autospec-run/install.sh"]
+  src: ["skills/autospec-run/SKILL.md", "skills/autospec-run/install.sh", "skills/autospec-run/codex/prompt.md", "skills/autospec-run/opencode/agent.md", "skills/autospec-run/scripts/heartbeat-write.sh", "skills/autospec-run/scripts/heartbeat-read.sh", "tests/heartbeat.bats"]
   reason: "User-facing invocation docs for autospec-run"
   generated: true
 -->
@@ -63,6 +63,8 @@ admin-squash-merges the PR.
 **Triggers:** `autospec-run`, `run the queue`, `implement issues`, `start the monitor`
 
 **Batch exit:** writes `~/.autospec/batch-done.json` when the queue is fully drained.
+
+**Heartbeat layout:** `~/.autospec/process-heartbeats/<repo-slug>/<issue>.json` (repo-scoped since phase2-p2).
 
 ### `/autospec-test`
 

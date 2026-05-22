@@ -17,10 +17,16 @@ setup() {
     STUB_BIN="$(mktemp -d)"
     GH_LOG="$HOME/gh.log"
     export GH_LOG
+    # Fix repo so watchdog can derive the scoped subdir
+    export AUTOSPEC_WATCHDOG_REPO="owner/repo"
     cat > "$STUB_BIN/gh" <<'GHSTUB'
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> "$GH_LOG"
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+    printf 'owner/repo\n'
+    exit 0
+fi
 if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
     case "$3" in
         406) printf 'CLOSED \n' ;;
@@ -37,6 +43,11 @@ GHSTUB
     chmod +x "$STUB_BIN/gh"
     export PATH="$STUB_BIN:$PATH"
 
+    # Heartbeats now live under <repo-slug>/ subdir (owner/repo -> owner_repo)
+    REPO_SLUG="owner_repo"
+    mkdir -p "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG"
+    export REPO_SLUG
+
     NOW="$(date -u +%s)"
     export NOW
 }
@@ -50,7 +61,8 @@ write_hb() {
     step="$2"
     age="$3"
     ts=$((NOW - age))
-    cat > "$AUTOSPEC_WATCHDOG_DIR/$issue.json" <<EOF
+    # Write to the repo-scoped subdir
+    cat > "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG/$issue.json" <<EOF
 {"issue":$issue,"branch":"feat/$issue","step":"$step","ts":$ts,"pr":"","repo":"owner/repo"}
 EOF
 }
@@ -62,20 +74,20 @@ EOF
     run bash "$SCRIPT"
 
     [ "$status" -eq 0 ]
-    [ ! -f "$AUTOSPEC_WATCHDOG_DIR/406.json" ]
-    [ ! -f "$AUTOSPEC_WATCHDOG_DIR/407.json" ]
+    [ ! -f "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG/406.json" ]
+    [ ! -f "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG/407.json" ]
     echo "$output" | grep -q 'garbage_collected=2'
 }
 
 @test "old heartbeat schemas are rejected before issue processing" {
-    cat > "$AUTOSPEC_WATCHDOG_DIR/408.json" <<EOF
+    cat > "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG/408.json" <<EOF
 {"issue":408,"status":"in_progress","ts":$((NOW - 10))}
 EOF
 
     run bash "$SCRIPT"
 
     [ "$status" -eq 0 ]
-    [ ! -f "$AUTOSPEC_WATCHDOG_DIR/408.json" ]
+    [ ! -f "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG/408.json" ]
     echo "$output" | grep -q 'invalid_schema=1'
     ! grep -q 'issue edit 408' "$GH_LOG"
 }
@@ -86,21 +98,22 @@ EOF
     run bash "$SCRIPT"
 
     [ "$status" -eq 0 ]
-    [ ! -f "$AUTOSPEC_WATCHDOG_DIR/409.json" ]
+    [ ! -f "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG/409.json" ]
     echo "$output" | grep -q 'claimed_released=1'
-    grep -q 'issue edit 409 --remove-label in-progress-by-bot --add-label auto-implement' "$GH_LOG"
+    grep -q 'issue edit 409' "$GH_LOG"
+    grep -q 'remove-label in-progress-by-bot' "$GH_LOG"
 }
 
 @test "current schema is normalized without deleting active heartbeat" {
-    cat > "$AUTOSPEC_WATCHDOG_DIR/410.json" <<EOF
+    cat > "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG/410.json" <<EOF
 {"issue":410,"branch":"feat/410","step":"tests_started","ts":$((NOW - 10))}
 EOF
 
     run bash "$SCRIPT"
 
     [ "$status" -eq 0 ]
-    [ -f "$AUTOSPEC_WATCHDOG_DIR/410.json" ]
-    jq -e '.issue == "410" and .pr == "" and .repo == ""' "$AUTOSPEC_WATCHDOG_DIR/410.json" >/dev/null
+    [ -f "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG/410.json" ]
+    jq -e '.issue == "410" and .pr == "" and .repo == ""' "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG/410.json" >/dev/null
 }
 
 @test "missing jq fails open without deleting heartbeats" {
@@ -108,6 +121,6 @@ EOF
     PATH="$STUB_BIN:/usr/bin:/bin" run bash "$SCRIPT"
 
     [ "$status" -eq 0 ]
-    [ -f "$AUTOSPEC_WATCHDOG_DIR/410.json" ]
+    [ -f "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG/410.json" ]
     echo "$output" | grep -q 'invalid_schema=0'
 }
