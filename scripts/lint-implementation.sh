@@ -669,57 +669,56 @@ EOF
 # Detects 8 vacuous-test patterns where assertions always pass regardless of behavior.
 # Active when --vacuous-assertions or --pre-commit flag is set.
 
-# _vacuous_scan_file FILE — scan a single file's added lines for vacuous patterns
+# _vacuous_grep_or_true FILE LINENO CONTENT — check GREP_INVERSE and OR_TRUE patterns
+_vacuous_grep_or_true() {
+    local diff_file="$1" lineno="$2" content="$3"
+    if printf '%s' "$content" | grep -qE 'grep -qv .* \|\| true'; then
+        emit_capped "VACUOUS_GREP_INVERSE_OR_TRUE" "$diff_file" "$lineno" \
+            "\`grep -qv\` with \`|| true\` is a no-op assertion. Use \`! grep -q\` instead."
+        return
+    fi
+    # VACUOUS_OR_TRUE: || true at end of line — only flag in test files
+    if is_test_file "$diff_file"; then
+        if printf '%s' "$content" | grep -qE '\|\| true[[:space:]]*$'; then
+            emit_capped "VACUOUS_OR_TRUE" "$diff_file" "$lineno" \
+                "\`|| true\` at end of assertion masks failure — assertion always exits 0."
+        fi
+    fi
+}
+
+# _vacuous_tautology_and_stubs FILE LINENO CONTENT — check TAUTOLOGY, AC_STUB, EMPTY_TEST
+_vacuous_tautology_and_stubs() {
+    local diff_file="$1" lineno="$2" content="$3"
+    local taut_pat='expect\((true|1)\)\.(toBe|toEqual|toStrictEqual)\(\1\)|assert\(1\s*===?\s*1\)|assert True[[:space:]]*$|xit\(|assert\.ok\(true\)|t\.true\(true\)'
+    if printf '%s' "$content" | grep -qE "$taut_pat"; then
+        emit_capped "VACUOUS_TAUTOLOGY" "$diff_file" "$lineno" \
+            "Tautological assertion — always passes regardless of code under test."
+    fi
+    case "$diff_file" in
+        tests/ac/*)
+            if printf '%s' "$content" | grep -qE 'skip[[:space:]]+"?auto-stub"?'; then
+                emit_capped "VACUOUS_AC_STUB" "$diff_file" "$lineno" \
+                    "Auto-generated stub test with skip — replace with a real assertion."
+            fi ;;
+    esac
+    local empty_js='it\([[:space:]]*["'"'"'][^"'"'"']+["'"'"'][[:space:]]*,[[:space:]]*\(\)[[:space:]]*=>[[:space:]]*\{[[:space:]]*\}'
+    local empty_bats='^[[:space:]]*@test[[:space:]]+"[^"]+"[[:space:]]*\{[[:space:]]*\}[[:space:]]*$'
+    if printf '%s' "$content" | grep -qE "$empty_js"; then
+        emit_capped "VACUOUS_EMPTY_TEST" "$diff_file" "$lineno" \
+            "Empty test body — it() callback has no assertions."
+    fi
+    if printf '%s' "$content" | grep -qE "$empty_bats"; then
+        emit_capped "VACUOUS_EMPTY_TEST" "$diff_file" "$lineno" \
+            "Empty bats @test body — no assertions."
+    fi
+}
+
+# _vacuous_scan_file FILE — dispatch per-line vacuous pattern checks
 _vacuous_scan_file() {
     local diff_file="$1"
-
     while IFS=: read -r lineno content; do
-        # VACUOUS_GREP_INVERSE_OR_TRUE: grep -qv "X" || true
-        if printf '%s' "$content" | grep -qE 'grep -qv .* \|\| true'; then
-            emit_capped "VACUOUS_GREP_INVERSE_OR_TRUE" "$diff_file" "$lineno" \
-                "\`grep -qv\` succeeds when ANY line lacks the pattern; \`|| true\` makes the assertion a no-op. Use \`! grep -q\` instead."
-        fi
-
-        # VACUOUS_OR_TRUE: assertion lines ending in || true — only in test files
-        # (non-test scripts legitimately use || true for cleanup/fallback)
-        if is_test_file "$diff_file"; then
-            if printf '%s' "$content" | grep -qE '\|\| true[[:space:]]*$'; then
-                if ! printf '%s' "$content" | grep -qE 'grep -qv .* \|\| true'; then
-                    emit_capped "VACUOUS_OR_TRUE" "$diff_file" "$lineno" \
-                        "\`|| true\` at end of assertion masks failure — assertion always exits 0."
-                fi
-            fi
-        fi
-
-        # VACUOUS_TAUTOLOGY: expect(true).toBe(true), expect(1).toBe(1), assert(1===1), assert True, xit(...)
-        if printf '%s' "$content" | grep -qE \
-            'expect\((true|1|"[^"]*")\)\.(toBe|toEqual|toStrictEqual)\(\1\)|assert\((1\s*===?\s*1|true)\)|assert True[[:space:]]*$|xit\(|assert\.ok\(true\)|t\.true\(true\)'; then
-            emit_capped "VACUOUS_TAUTOLOGY" "$diff_file" "$lineno" \
-                "Tautological assertion — always passes regardless of code under test."
-        fi
-
-        # VACUOUS_AC_STUB: @test ... { skip "auto-stub" } in tests/ac/
-        case "$diff_file" in
-            tests/ac/*)
-                if printf '%s' "$content" | grep -qE 'skip[[:space:]]+"?auto-stub"?'; then
-                    emit_capped "VACUOUS_AC_STUB" "$diff_file" "$lineno" \
-                        "Auto-generated stub test with skip — replace with a real assertion."
-                fi
-                ;;
-        esac
-
-        # VACUOUS_EMPTY_TEST: it("...", () => {}) — empty arrow-function body
-        if printf '%s' "$content" | grep -qE 'it\([[:space:]]*["'"'"'][^"'"'"']+["'"'"'][[:space:]]*,[[:space:]]*\(\)[[:space:]]*=>[[:space:]]*\{[[:space:]]*\}'; then
-            emit_capped "VACUOUS_EMPTY_TEST" "$diff_file" "$lineno" \
-                "Empty test body — it() callback has no assertions."
-        fi
-
-        # VACUOUS_EMPTY_TEST (bats): @test "..." { } with nothing between braces on same line
-        if printf '%s' "$content" | grep -qE '^[[:space:]]*@test[[:space:]]+"[^"]+"[[:space:]]*\{[[:space:]]*\}[[:space:]]*$'; then
-            emit_capped "VACUOUS_EMPTY_TEST" "$diff_file" "$lineno" \
-                "Empty bats @test body — no assertions."
-        fi
-
+        _vacuous_grep_or_true "$diff_file" "$lineno" "$content"
+        _vacuous_tautology_and_stubs "$diff_file" "$lineno" "$content"
     done <<EOF
 $(get_added_lines_with_lineno "$diff_file")
 EOF
