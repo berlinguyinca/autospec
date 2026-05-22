@@ -16,7 +16,7 @@
 
 set -eu
 
-WATCHDOG_DIR="${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}"
+WATCHDOG_BASE="${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}"
 WATCHDOG_REPO="${AUTOSPEC_WATCHDOG_REPO:-${AUTOSPEC_REPO:-}}"
 WATCHDOG_STALE_SECS="${AUTOSPEC_WATCHDOG_STALE_SECS:-1800}"
 WATCHDOG_RECLAIM_SECS="${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}"
@@ -31,7 +31,28 @@ if ! command -v gh >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ ! -d "$WATCHDOG_DIR" ]; then
+# ── Derive repo slug and scoped heartbeat dir ─────────────────────────────────
+
+_resolve_repo_slug() {
+    local repo="${WATCHDOG_REPO:-}"
+    if [ -z "$repo" ]; then
+        repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
+    fi
+    if [ -z "$repo" ]; then
+        printf '' # fallback: empty slug → use base dir directly
+        return
+    fi
+    printf '%s' "$repo" | tr '/' '_'
+}
+
+REPO_SLUG="$(_resolve_repo_slug)"
+if [ -n "$REPO_SLUG" ]; then
+    WATCHDOG_DIR="${WATCHDOG_BASE}/${REPO_SLUG}"
+else
+    WATCHDOG_DIR="$WATCHDOG_BASE"
+fi
+
+if [ ! -d "$WATCHDOG_BASE" ]; then
     printf '%s\n' "service-watch: nudged=0 reclaimed=0 claimed_released=0 garbage_collected=0 invalid_schema=0 skipped=0"
     exit 0
 fi
@@ -42,7 +63,58 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 0
 fi
 
+# ── Migration: flat-format heartbeats → repo-scoped subdirs ──────────────────
+# On each watchdog tick, scan WATCHDOG_BASE for flat-format *.json files (i.e.,
+# files directly under WATCHDOG_BASE, not under a subdir).  Files with a `repo`
+# field are moved to the correct <repo-slug>/ subdir; files older than 1 hour
+# with no `repo` field are deleted.
+
+FLAT_MIGRATION_STALE_SECS=3600
+_migrate_flat_heartbeats() {
+    local base="$1"
+    local now="$2"
+    for flat_hb in "$base"/*.json; do
+        [ -f "$flat_hb" ] || continue
+        local flat_issue
+        flat_issue="$(basename "$flat_hb" .json)"
+        if [[ ! "$flat_issue" =~ ^[0-9]+$ ]]; then
+            continue
+        fi
+        local flat_repo
+        flat_repo="$(jq -r '.repo // empty' "$flat_hb" 2>/dev/null || true)"
+        if [ -n "$flat_repo" ]; then
+            # Move to correct subdir
+            local dest_slug
+            dest_slug="$(printf '%s' "$flat_repo" | tr '/' '_')"
+            local dest_dir="${base}/${dest_slug}"
+            mkdir -p "$dest_dir"
+            mv "$flat_hb" "${dest_dir}/${flat_issue}.json"
+            echo "$WATCHDOG_LOG_PREFIX migrated flat heartbeat #${flat_issue} → ${dest_slug}/" >&2
+        else
+            # No repo field: delete if older than 1 hour
+            local flat_ts
+            flat_ts="$(jq -r '.ts // empty' "$flat_hb" 2>/dev/null || true)"
+            if [ -n "$flat_ts" ] && [[ "$flat_ts" =~ ^[0-9]+$ ]]; then
+                local age=$(( now - flat_ts ))
+                if [ "$age" -ge "$FLAT_MIGRATION_STALE_SECS" ]; then
+                    rm -f "$flat_hb"
+                    echo "$WATCHDOG_LOG_PREFIX deleted stale flat heartbeat #${flat_issue} (age=${age}s)" >&2
+                fi
+            else
+                # Unparseable ts — delete
+                rm -f "$flat_hb"
+            fi
+        fi
+    done
+}
+
 now_ts="$(date -u +%s)"
+
+_migrate_flat_heartbeats "$WATCHDOG_BASE" "$now_ts"
+
+# Create scoped dir if needed
+mkdir -p "$WATCHDOG_DIR"
+
 nudged=0
 reclaimed=0
 claimed_released=0

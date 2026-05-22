@@ -271,6 +271,28 @@ info ""
 info "Shared autospec helper scripts:"
 install_shared_scripts
 
+# ---------- install skill-specific helper scripts -------------------------
+
+info ""
+info "autospec-run skill helper scripts:"
+SKILL_SCRIPT_FILES="heartbeat-write.sh heartbeat-read.sh"
+for rel in $SKILL_SCRIPT_FILES; do
+    skill_scripts_src=""
+    if [ -d "$SKILL_DIR/scripts" ]; then
+        skill_scripts_src="$SKILL_DIR/scripts/$rel"
+    fi
+    if [ -n "$skill_scripts_src" ] && [ -f "$skill_scripts_src" ]; then
+        install_one "$skill_scripts_src" "$HOME/.autospec/scripts/$rel" || true
+        run "chmod +x \"$HOME/.autospec/scripts/$rel\""
+    elif [ -n "${TMP_FETCH_DIR:-}" ]; then
+        # When installed via curl, fetch from skill's scripts/ directory
+        if curl -fsSL "$SKILL_RAW_BASE/scripts/$rel" -o "$HOME/.autospec/scripts/$rel" 2>/dev/null; then
+            run "chmod +x \"$HOME/.autospec/scripts/$rel\""
+            info "  installed: $HOME/.autospec/scripts/$rel"
+        fi
+    fi
+done
+
 # ---------- per-harness paths ---------------------------------------------
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"

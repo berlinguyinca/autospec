@@ -388,8 +388,9 @@ issues unblock the queue before continuing with normal feature work.
 >     echo "[monitor] ISSUE $ISSUE claim failed (another monitor claimed it); skipping"
 >     continue
 >   fi
->   mkdir -p "$HOME/.autospec/process-heartbeats"
->   printf '{"issue":"%s","branch":"","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' "$ISSUE" "$(date -u +%s)" "{repo}" > "$HOME/.autospec/process-heartbeats/$ISSUE.json"
+>   _hb_slug="$(printf '%s' "{repo}" | tr '/' '_')"
+>   mkdir -p "$HOME/.autospec/process-heartbeats/$_hb_slug"
+>   printf '{"issue":"%s","branch":"","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' "$ISSUE" "$(date -u +%s)" "{repo}" > "$HOME/.autospec/process-heartbeats/$_hb_slug/$ISSUE.json"
 >   # Issue start summary — print before dispatching process(ISSUE) so the operator
 >   # knows exactly what the monitor is about to work on.
 >   ISSUE_TITLE=$(gh issue view ISSUE --json title --jq .title 2>/dev/null || echo "")
@@ -479,7 +480,7 @@ issues unblock the queue before continuing with normal feature work.
 > ===END===
 >
 > Keep a progress heartbeat so the monitor can prove forward movement:
-> - Create/update `~/.autospec/process-heartbeats/<ISSUE>.json` at each major step:
+> - Create/update `~/.autospec/process-heartbeats/<repo-slug>/<ISSUE>.json` at each major step:
 >   - `claimed`, `worktree_ready`, `tests_started`, `tests_passed`, `pr_created`, `smoke_retry`, `reviewed`, `merged`, `failed`
 > - Schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}"}`
 > - Delete this file on terminal SUCCESS/FAILURE in both clean and failure paths.
