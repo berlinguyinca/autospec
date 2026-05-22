@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Page C — foldout with hidden broken affordance</title>
+</head>
+<body>
+  <nav>
+    <a href="/page-a.html">Go to A</a>
+    <a href="/page-b.html">Go to B</a>
+  </nav>
+
+  <!-- Foldout that hides a broken done-item row -->
+  <details aria-expanded="false" id="foldout-c">
+    <summary>Show completed tasks (click to expand)</summary>
+
+    <!-- Hidden behind foldout: broken affordance only visible after open -->
+    <div data-testid="done-item-row-3" role="listitem">
+      <span>Hidden task behind foldout</span>
+      <button
+        role="button"
+        aria-label="Edit task"
+        id="edit-btn-c"
+        onclick="/* intentionally does nothing */"
+      >Edit</button>
+    </div>
+    <!-- No dialog — broken affordance, only discoverable with open_all_foldouts -->
+  </details>
+</body>
+</html>

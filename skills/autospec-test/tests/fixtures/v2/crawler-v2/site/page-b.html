@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Page B — broken affordance (button opens nothing)</title>
+</head>
+<body>
+  <nav>
+    <a href="/page-a.html">Go to A</a>
+    <a href="/page-c.html">Go to C</a>
+  </nav>
+
+  <!-- Broken done-item: edit button exists but opens no dialog -->
+  <div data-testid="done-item-row-2" role="listitem">
+    <span>Task with broken edit button</span>
+    <button
+      role="button"
+      aria-label="Edit task"
+      id="edit-btn-b"
+      onclick="/* intentionally does nothing */"
+    >Edit</button>
+  </div>
+
+  <!-- The dialog is never shown — this is the bug -->
+  <!-- No done-item-edit-dialog present on this page -->
+</body>
+</html>
