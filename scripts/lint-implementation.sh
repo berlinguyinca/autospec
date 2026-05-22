@@ -660,8 +660,8 @@ rule_directive() {
         OUT_OF_SCOPE)    printf 'Restrict diff to files listed in the issue ## Implementation outline; revert or amend the issue body for any extra files.' ;;
         MISSING_TEST)    printf 'Add a test under tests/<tier>/ for the missing required test type before re-pushing.' ;;
         COMPLEXITY)      printf 'Split functions >50 LOC, files >500 LOC, or nesting >4 — no copy-paste branches.' ;;
-        SECURITY)        printf 'Remove the flagged pattern: never hardcode secrets, never use --no-verify or git reset --hard, validate all inputs.' ;;
-        TODO_LEFT)       printf 'Remove TODO/XXX/FIXME from non-test code; file a follow-up issue for genuinely deferred work.' ;;
+        SECURITY)        printf 'Remove the flagged pattern: never hardcode secrets, never bypass git hooks or use destructive resets, validate all inputs.' ;;
+        TODO_LEFT)       printf 'Remove deferred-work markers from non-test code; file a follow-up issue for genuinely deferred work.' ;;
         MOCK_DB)         printf 'Remove DB mock/stub; use the real database per AGENTS.md ## Engineering standards.' ;;
         DOC_OUT_OF_SYNC) printf 'Update the doc file(s) covering the changed public surface (CLI flag/env var/export) in this same PR.' ;;
         HALLUCINATED_API) printf 'Verify the flagged symbol exists in the repo or dependency manifests before using it.' ;;

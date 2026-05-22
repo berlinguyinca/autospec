@@ -290,6 +290,17 @@ Scripts for managing project memory files under `AUTOSPEC_MEMORY_DIR`
 |---|---|---|
 | `scripts/memory-tags.yml` | Manifest mapping each `feedback_*.md` to 4–5 tags | — (data file) |
 | `scripts/apply-memory-tags.sh` | Idempotent tagger: prepends `tags:` YAML frontmatter to each `feedback_*.md` | `--dry-run`, `--memory-dir DIR`, `--manifest FILE` |
+| `scripts/install-implementer-precommit.sh` | Installs blocking pre-commit lint hook into an implementer worktree | `<worktree-path>` positional arg |
 
 `AUTOSPEC_MEMORY_DIR` — override for the memory directory path (default: auto-detected
 from `$HOME/.claude/projects/`).
+
+## Pre-commit lint hook
+
+`scripts/install-implementer-precommit.sh <worktree>` writes `.git/hooks/pre-commit`
+into the given worktree. The hook runs `lint-implementation.sh --pre-commit --staged`
+on `git diff --cached` and blocks commits containing RULE_ID violations.
+
+`lint-implementation.sh` extended flags:
+- `--pre-commit` / `--staged` — read staged diff (`git diff --cached`) instead of a PR diff
+- `--directives` — reformat each finding as `Fix RULE_ID: <imperative action>` for use in implementer retry prompts
