@@ -1,0 +1,11 @@
+{
+  "name": "target-window-mismatch-bait",
+  "version": "1.0.0",
+  "description": "Synthetic target: UI claims 7-day window but backend queries only 3 days. Metric G catches it.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/window-mismatch.test.mjs",
+    "serve": "node server.mjs"
+  },
+  "devDependencies": {}
+}

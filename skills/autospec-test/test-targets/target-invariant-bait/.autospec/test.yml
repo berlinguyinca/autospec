@@ -1,0 +1,24 @@
+mode: strict_isolation
+
+unit:
+  test_cmd: "node --test tests/invariant-bait.test.mjs"
+
+e2e:
+  forbidden_url_patterns:
+    - "^https?://prod\\.example\\.com"
+
+  invariants_v2:
+    enabled: true
+
+    invariants:
+      - id: done-items-editable
+        kind: every_visible_X_is_Y
+        visible: '[data-testid^="done-item-row-"]'
+        action: 'role=button[name=/edit/i]'
+        verifies_open: '[data-testid="done-item-edit-dialog"]'
+        verifies_close: 'role=button[name=/close/i]'
+        apply_on_routes: ['/']
+        require_count_at_least: 1
+
+    thresholds:
+      invariants_required_pass_rate: 100

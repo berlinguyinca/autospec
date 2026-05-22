@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<!--
+  target-invariant-bait/src/index.html
+  Bait: 5 done-item rows. Items 0-3 have an accessible edit <button>.
+  Item 4 (last) is rendered as a <span> — no edit button — deliberately breaking the invariant.
+  Metric F (every_visible_X_is_Y) should catch the violation at index 4.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Target: Invariant Bait</title>
+</head>
+<body>
+  <h1>Done Items</h1>
+
+  <!-- Items 0–3: correctly render an edit button inside the row -->
+  <div data-testid="done-item-row-0" class="done-item">
+    <span class="task-title">Task A (completed)</span>
+    <button aria-label="Edit Task A">Edit</button>
+  </div>
+
+  <div data-testid="done-item-row-1" class="done-item">
+    <span class="task-title">Task B (completed)</span>
+    <button aria-label="Edit Task B">Edit</button>
+  </div>
+
+  <div data-testid="done-item-row-2" class="done-item">
+    <span class="task-title">Task C (completed)</span>
+    <button aria-label="Edit Task C">Edit</button>
+  </div>
+
+  <div data-testid="done-item-row-3" class="done-item">
+    <span class="task-title">Task D (completed)</span>
+    <button aria-label="Edit Task D">Edit</button>
+  </div>
+
+  <!-- Item 4: BAIT — renders as <span> instead of <button>; no edit affordance -->
+  <div data-testid="done-item-row-4" class="done-item done-item--broken">
+    <span class="task-title">Task E (completed)</span>
+    <!-- Intentionally missing: <button>Edit</button> -->
+    <span class="fake-edit" aria-hidden="true">Edit</span>
+  </div>
+
+  <!-- Edit dialog (used by items 0-3) -->
+  <dialog data-testid="done-item-edit-dialog" id="editDialog">
+    <h2>Edit Task</h2>
+    <button aria-label="Close">Close</button>
+  </dialog>
+
+  <script type="module">
+    // Wire up edit buttons for items 0-3 only
+    document.querySelectorAll('[data-testid^="done-item-row-"] button[aria-label^="Edit"]')
+      .forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.getElementById('editDialog').showModal();
+        });
+      });
+    document.querySelector('#editDialog button[aria-label="Close"]')
+      ?.addEventListener('click', () => {
+        document.getElementById('editDialog').close();
+      });
+  </script>
+</body>
+</html>

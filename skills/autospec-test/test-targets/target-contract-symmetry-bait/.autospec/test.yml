@@ -1,0 +1,27 @@
+mode: strict_isolation
+
+unit:
+  test_cmd: "node --test tests/symmetry-bait.test.mjs"
+
+e2e:
+  forbidden_url_patterns:
+    - "^https?://prod\\.example\\.com"
+
+  invariants_v2:
+    enabled: true
+
+    contract_symmetry:
+      - id: streak-task-must-be-editable
+        ui_source:
+          route: /
+          extract: '[data-testid^="streak-task-"]'
+          per_match: { task_id: 'data-task-id', date: 'data-date' }
+        api_target:
+          method: GET
+          path_template: '/api/household/timeline?from=${date}&to=${date}&task_id=${task_id}'
+          must_contain: '$.events[?(@.task_id=="${task_id}")]'
+          must_be_editable: '$.events[?(@.task_id=="${task_id}")].editable == true'
+        mismatch_action: hard_fail
+
+    thresholds:
+      contract_symmetry_required_pass_rate: 100

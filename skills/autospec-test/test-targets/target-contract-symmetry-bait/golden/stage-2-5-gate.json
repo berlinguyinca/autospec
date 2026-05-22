@@ -1,0 +1,32 @@
+{
+  "metric": "I",
+  "passed": false,
+  "target": "target-contract-symmetry-bait",
+  "contracts": [
+    {
+      "id": "streak-task-must-be-editable",
+      "passed": false,
+      "tuples_checked": 3,
+      "violations": [
+        {
+          "ui_claim": { "task_id": "t-3", "date": "2026-05-14" },
+          "reason": "API returned empty events array for task_id=t-3",
+          "api_response_summary": "{\"events\":[]}"
+        }
+      ]
+    }
+  ],
+  "violations": [
+    {
+      "ui_claim": { "task_id": "t-3", "date": "2026-05-14" },
+      "reason": "API returned empty events array for task_id=t-3",
+      "api_response_summary": "{\"events\":[]}"
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "passed_count": 0,
+    "failed_count": 1,
+    "violation_count": 1
+  }
+}
