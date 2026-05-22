@@ -199,6 +199,13 @@ Stage 2.5 (Invariants & contracts) — skipped if invariants_v2.enabled != true
 Auto-merge (all pass) or block (any fail)
 ```
 
+**Stage 2.5 + docs drift-gate composition:** When the docs amendment is active (Phase 10c), the
+drift-gate (`check-doc-drift.sh`) runs immediately after Stage 2.5 and shares its exit-code
+routing. A `failing_doc_drift` result feeds the same self-heal loop as a Stage 2.5 metric
+failure — the loop classifier routes it to `failing_doc_drift` → doc-section edit, not a
+test rewrite. Both gates must pass before the fused guardian+LGTM step proceeds. If Stage 2.5
+is skipped (`invariants_v2.enabled` absent), the drift gate still runs independently.
+
 ## Contract: invariants_v2
 
 Add the `e2e.invariants_v2` namespace to `.autospec/test.yml` to enable Stage 2.5:

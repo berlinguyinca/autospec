@@ -49,6 +49,27 @@
 - Harnesses: Claude Code (`SKILL.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
 - Status: inline Phase 4 gate (runs after build + lint, before auto-merge) plus standalone `/autospec-test [PR#]` invocation. Two-stage: unit coverage → E2E coverage. Self-heal loop up to 5 iterations / 60 min coding time. Assertion-shift guardrail blocks LOOSENING rewrites. Mode II (scoped production) opt-in with mandatory backup/restore.
 
+## Docs amendment (Phase 10c)
+
+The autospec docs amendment ships first-class documentation artifacts to every target repo.
+Run `bash skills/autospec-shared/scripts/reverse-engineer.sh --repo-root .` to regenerate.
+
+Generated artifacts committed to this repo (autospec dogfooding its own pipeline):
+
+| File | Generator |
+|---|---|
+| [`docs/USER_MANUAL.md`](docs/USER_MANUAL.md) | `gen-docs-from-spec.mjs` |
+| [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | `gen-docs-from-spec.mjs` |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | `gen-docs-from-spec.mjs` + `gen-arch-diagram.mjs` |
+| [`docs/ASSISTANT_PROMPT.md`](docs/ASSISTANT_PROMPT.md) | `gen-assistant-prompt.mjs` |
+| [`docs/.llm-manifest.json`](docs/.llm-manifest.json) | `gen-llm-manifest.mjs` |
+| [`llms.txt`](llms.txt) | `gen-llms-txt.sh` |
+| [`llms-full.txt`](llms-full.txt) | `gen-llms-txt.sh` |
+
+`scripts/validate.sh` enforces presence of `docs/USER_MANUAL.md`, `llms.txt`, and
+`docs/.llm-manifest.json` on every CI run. Deleting any of these artifacts causes
+`validate.sh` to exit non-zero.
+
 ## Future Skill Checklist
 
 1. Create `skills/<skill-name>/SKILL.md`.

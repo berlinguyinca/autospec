@@ -342,12 +342,33 @@ The validation suite checks:
 - Stop-mode and guardian invariants.
 - Top-level install and uninstall smoke behavior.
 
+## Docs amendment
+
+Every autospec run produces first-class documentation artifacts committed to the target repo.
+The reverse-engineer pipeline + doc generators are part of the autospec-shared tooling:
+
+| Artifact | Description |
+|---|---|
+| `docs/USER_MANUAL.md` | Operator-facing narrative (skills, installation, usage) |
+| `docs/API_REFERENCE.md` | Per-symbol reference for all public CLI surfaces and scripts |
+| `docs/ARCHITECTURE.md` | System shape, module graph (mermaid), component responsibilities |
+| `docs/ASSISTANT_PROMPT.md` | Paste-ready system prompt for Claude/GPT repo assistant |
+| `docs/.llm-manifest.json` | Structured per-symbol manifest (schema v1.0) |
+| `llms.txt` | Short curated index ≤200 lines (llmstxt.org convention) |
+| `llms-full.txt` | Full concatenated doc content for context-window ingestion |
+
+**Doc-drift gate:** every Phase 4 PR is checked by `check-doc-drift.sh`. Source changes that
+match a `<!-- autospec-doc-scope: ... -->` block must be accompanied by doc updates. Use
+`docs: skip` in the issue body to demote drift to warnings for a single PR.
+
 ## More Docs
 
-- [`docs/user-manual.md`](docs/user-manual.md) - narrative walkthrough of the
-  suite skills.
-- [`docs/architecture.md`](docs/architecture.md) - concurrency model,
-  lock-step rule, model tier policy, and trigger keyword theory.
+- [`docs/USER_MANUAL.md`](docs/USER_MANUAL.md) - operator-facing narrative walkthrough of the
+  suite skills (generated).
+- [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) - per-symbol reference for all scripts (generated).
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) - concurrency model, lock-step rule, module graph (generated).
+- [`docs/user-manual.md`](docs/user-manual.md) - legacy narrative walkthrough.
+- [`docs/architecture.md`](docs/architecture.md) - legacy architecture notes.
 - [`examples/README.md`](examples/README.md) - config file schemas for model
   profiles and project board mapping.
 - [`AGENTS.md`](AGENTS.md) - repository operating contract and merge authority

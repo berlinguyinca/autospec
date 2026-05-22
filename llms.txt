@@ -1,0 +1,32 @@
+# wt-feat-autospec-docs-phase10c
+
+## Summary
+
+# autospec
+
+Autospec is a multi-harness AI workflow suite for turning product intent into
+tracked, reviewable, and explainable software changes.
+
+## Key Documentation
+
+- docs/ARCHITECTURE.md
+
+## Design Specifications
+
+- docs/specs/2026-05-01-autospec-issue-quality-gate-design.md
+- docs/specs/2026-05-01-autospec-meta-improvements-design.md
+- docs/specs/2026-05-01-autospec-startup-self-update-design.md
+- docs/specs/2026-05-01-autospec-stop-mechanism-design.md
+- docs/specs/2026-05-02-autospec-implementation-guardian-design.md
+- docs/specs/2026-05-06-autospec-review-design.md
+- docs/specs/2026-05-07-harness-aware-model-tier-design.md
+- docs/specs/2026-05-07-monitor-session-reset-design.md
+- docs/specs/2026-05-17-cross-session-ci-rot-design.md
+- docs/specs/2026-05-21-autospec-test-design.md
+
+## LLM Artifacts
+
+- llms.txt — this file (short index)
+- llms-full.txt — full docs for context-window ingestion
+- docs/.llm-manifest.json — per-symbol structured manifest
+- docs/ASSISTANT_PROMPT.md — paste-ready system prompt
