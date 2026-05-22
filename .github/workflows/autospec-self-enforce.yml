@@ -1,0 +1,121 @@
+name: autospec self-enforce
+
+# Run autospec-run Phase 4 QA chain on every PR touching autospec-protected paths.
+# Detects RULE_ID violations (SECURITY, COMPLEXITY, OUT_OF_SCOPE, etc.) early and
+# posts a structured findings comment on the PR.
+#
+# Bootstrap exception: add "[skip self-enforce]" to the PR body to bypass this gate.
+# This token is intentionally available for the PR that introduces this workflow itself,
+# since it cannot pre-satisfy gates it is creating.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+    paths:
+      - 'skills/**'
+      - 'scripts/**'
+      - 'docs/specs/**'
+
+jobs:
+  self-enforce:
+    name: autospec self-enforce QA
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bootstrap dev environment
+        shell: bash
+        run: bash scripts/dev-bootstrap.sh
+
+      - name: Fetch PR diff
+        id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          DIFF_FILE="${RUNNER_TEMP}/pr-${PR_NUMBER}.diff"
+          gh pr diff "$PR_NUMBER" > "$DIFF_FILE" 2>/dev/null || \
+            git diff "origin/${{ github.base_ref }}...HEAD" > "$DIFF_FILE"
+          echo "diff_file=$DIFF_FILE" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Run self-enforce QA chain
+        id: qa
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          PR_BODY="${{ github.event.pull_request.body }}"
+          DIFF_FILE="${{ steps.diff.outputs.diff_file }}"
+          PR_NUMBER="${{ steps.diff.outputs.pr_number }}"
+
+          set +e
+          QA_OUTPUT=$(bash scripts/self-enforce-qa.sh \
+            --diff-file "$DIFF_FILE" \
+            --pr-body "$PR_BODY" \
+            --pr "$PR_NUMBER" 2>&1)
+          QA_EXIT=$?
+          set -e
+
+          # Save output for comment step
+          printf '%s\n' "$QA_OUTPUT" > "${RUNNER_TEMP}/qa-findings.txt"
+          echo "qa_exit=$QA_EXIT" >> "$GITHUB_OUTPUT"
+
+          if [ "$QA_EXIT" -ne 0 ]; then
+            echo "::error::autospec self-enforce: $QA_EXIT blocking finding(s) detected"
+          fi
+
+      - name: Post structured PR comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          PR_NUMBER="${{ steps.diff.outputs.pr_number }}"
+          QA_EXIT="${{ steps.qa.outputs.qa_exit }}"
+          FINDINGS_FILE="${RUNNER_TEMP}/qa-findings.txt"
+
+          if [ "${QA_EXIT:-0}" -eq 0 ]; then
+            BODY="<!-- autospec-self-enforce -->
+## autospec self-enforce: passed
+
+QA chain found no blocking findings."
+          else
+            FINDINGS=$(cat "$FINDINGS_FILE" 2>/dev/null || echo "(no details)")
+            BODY="<!-- autospec-self-enforce -->
+## autospec self-enforce: ${QA_EXIT} blocking finding(s)
+
+\`\`\`
+${FINDINGS}
+\`\`\`
+
+Fix the findings above before merging. To bypass (bootstrap exception only), add \`[skip self-enforce]\` to the PR body."
+          fi
+
+          # Find and update existing comment, or create new one
+          EXISTING=$(gh api \
+            "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --jq '.[] | select(.body | startswith("<!-- autospec-self-enforce -->")) | .id' \
+            2>/dev/null | head -1 || echo "")
+
+          if [ -n "$EXISTING" ]; then
+            gh api --method PATCH \
+              "repos/${{ github.repository }}/issues/comments/${EXISTING}" \
+              --field "body=${BODY}" > /dev/null
+          else
+            gh pr comment "$PR_NUMBER" --body "$BODY"
+          fi
+
+      - name: Fail if blocking findings
+        if: steps.qa.outputs.qa_exit != '0'
+        shell: bash
+        run: |
+          echo "autospec self-enforce: blocking findings detected (exit ${{ steps.qa.outputs.qa_exit }})"
+          exit 1
