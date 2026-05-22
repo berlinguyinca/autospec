@@ -1,0 +1,10 @@
+mode: drift_gate
+
+description: >
+  Synthetic target: source file (src/api.sh) changed without updating docs/USER_MANUAL.md.
+  check-doc-drift.sh must exit 1 with drift entry pointing at docs/USER_MANUAL.md.
+
+drift_gate:
+  expected_exit_code: 1
+  expected_drift_doc: "docs/USER_MANUAL.md"
+  expected_drift_heading: "## API Reference"

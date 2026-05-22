@@ -1,0 +1,11 @@
+mode: drift_gate
+
+description: >
+  Synthetic target: dashboard component (src/dashboard.js) changed but the
+  screenshot docs/assets/dashboard.png was not regenerated.
+  check-doc-drift.sh must exit 1 with a visual_stale entry.
+
+drift_gate:
+  expected_exit_code: 1
+  expected_drift_doc: "docs/DASHBOARD.md"
+  expected_drift_heading: "## Dashboard Overview"

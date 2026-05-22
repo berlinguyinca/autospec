@@ -1,0 +1,15 @@
+{
+  "passed": false,
+  "drift": [
+    {
+      "doc_file": "docs/DASHBOARD.md",
+      "heading": "## Dashboard Overview",
+      "matching_source_files": ["src/dashboard.js"],
+      "reason": "Dashboard docs must reflect current component layout"
+    }
+  ],
+  "missing_scope": [],
+  "visual_stale": [],
+  "ai_review_stale": [],
+  "skipped": false
+}

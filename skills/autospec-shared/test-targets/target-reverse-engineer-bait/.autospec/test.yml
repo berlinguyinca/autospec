@@ -1,0 +1,11 @@
+mode: drift_gate
+
+description: >
+  Synthetic target: a tiny repo with source but NO docs directory.
+  check-doc-drift.sh returns exit 2 (missing scope) because source files
+  are changed but no doc section declares scope for them.
+  This simulates a repo that needs reverse-engineer.sh run first.
+
+drift_gate:
+  expected_exit_code: 2
+  expected_missing_scope_file: "src/router.js"

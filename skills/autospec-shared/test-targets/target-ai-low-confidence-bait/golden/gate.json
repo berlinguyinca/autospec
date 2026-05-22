@@ -1,0 +1,15 @@
+{
+  "passed": false,
+  "drift": [
+    {
+      "doc_file": "docs/AUTH.md",
+      "heading": "## Authentication API",
+      "matching_source_files": ["src/auth.py"],
+      "reason": "Auth API docs must match the methods and parameters in src/auth.py"
+    }
+  ],
+  "missing_scope": [],
+  "visual_stale": [],
+  "ai_review_stale": [],
+  "skipped": false
+}

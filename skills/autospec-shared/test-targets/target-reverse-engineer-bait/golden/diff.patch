@@ -1,0 +1,18 @@
+diff --git a/src/router.js b/src/router.js
+index 0000001..0000002 100644
+--- a/src/router.js
++++ b/src/router.js
+@@ -1,8 +1,11 @@
+ // router.js — URL router
+ function route(path, handler) {
+   return { path, handler };
+ }
+ function dispatch(routes, url) {
+   const match = routes.find(r => url.startsWith(r.path));
+   return match ? match.handler(url) : null;
+ }
+-module.exports = { route, dispatch };
++function middleware(fn) {
++  return (url) => fn(url);
++}
++module.exports = { route, dispatch, middleware };
