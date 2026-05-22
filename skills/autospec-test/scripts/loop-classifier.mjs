@@ -17,6 +17,24 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// ── Docs-amendment extension (Phase 3) ───────────────────────────────────────
+// Route docs-gate JSON through the docs classifier before v1 fallback.
+// Path: skills/autospec-shared/scripts/loop-classifier-docs-extension.mjs
+let _docsClassify = null;
+try {
+    const docsExtPath = path.resolve(
+        __dirname,
+        '../../../autospec-shared/scripts/loop-classifier-docs-extension.mjs'
+    );
+    if (fs.existsSync(docsExtPath)) {
+        const { classify: dc } = await import(`file://${docsExtPath}`);
+        _docsClassify = dc;
+    }
+} catch {
+    // Extension not installed — degrade gracefully; v1 logic runs unmodified.
+}
 
 /** Priority rank per spec §6 (higher = more urgent) */
 const PRIORITY_RANK = {
@@ -170,6 +188,23 @@ export function classify(options) {
                 suggested_files: ['playwright.config.ts', 'playwright.config.js', 'tests/'],
                 estimated_minutes: 10,
                 priority: PRIORITY_RANK.flaky_test,
+            });
+        }
+    }
+
+    // ── docs-amendment extension (Phase 3) ───────────────────────────────────
+    // If the gate JSON looks like a doc-drift result, route to docs classifier.
+    // Doc findings are inserted ahead of the v1 fallback but after all v1
+    // signal-based candidates so existing priority ordering is preserved.
+    if (_docsClassify) {
+        const docsResult = _docsClassify(gate_json, last_3_iterations);
+        if (docsResult) {
+            candidates.push({
+                classification: docsResult.classification,
+                target_failures: docsResult.target_files || [],
+                suggested_files: docsResult.target_files || [],
+                estimated_minutes: docsResult.estimated_minutes,
+                priority: docsResult.priority,
             });
         }
     }
