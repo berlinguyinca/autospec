@@ -197,7 +197,7 @@ Exit: 0 = all checks pass, non-zero = first failure with diagnostic.
 fixture directories in `tests/fixtures/lockstep-{trio-pass,duo-pass,duo-divergence}/`.
 
 <!-- autospec-doc-scope:
-  src: ["tests/validate.bats", "tests/fixtures/lockstep-trio-pass", "tests/fixtures/lockstep-duo-pass", "tests/fixtures/lockstep-duo-divergence", "skills/autospec-test/codex/prompt.md"]
+  src: ["tests/validate.bats", "tests/fixtures/lockstep-trio-pass/SKILL.md", "tests/fixtures/lockstep-trio-pass/codex/prompt.md", "tests/fixtures/lockstep-trio-pass/opencode/agent.md", "tests/fixtures/lockstep-duo-pass/SKILL.md", "tests/fixtures/lockstep-duo-pass/codex/prompt.md", "tests/fixtures/lockstep-duo-divergence/SKILL.md", "tests/fixtures/lockstep-duo-divergence/codex/prompt.md", "skills/autospec-test/codex/prompt.md"]
   reason: "Bats unit tests and fixtures for validate.sh lockstep checks"
   generated: false
 -->
