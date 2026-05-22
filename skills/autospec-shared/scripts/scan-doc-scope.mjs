@@ -219,9 +219,15 @@ export function parse(markdownPath) {
             const byteStart = bodyStartLine < lineOffsets.length ? lineOffsets[bodyStartLine] : content.length;
             const byteEnd = bodyEndLine < lineOffsets.length ? lineOffsets[bodyEndLine] : content.length;
 
+            // Parse mismatch_action field (default: hard_fail for backward compat)
+            const rawMismatchAction = parsed.mismatch_action;
+            const mismatch_action =
+                rawMismatchAction === 'warn' ? 'warn' : 'hard_fail';
+
             const entry = {
                 heading_path: currentHeading || '(root)',
                 src_globs,
+                mismatch_action,
                 byte_range: [byteStart, byteEnd],
             };
             if (parsed.visual) entry.visual_glob = String(parsed.visual);

@@ -81,6 +81,7 @@ Schema (parsed deterministically):
 - `reason:` optional one-line note
 - `visual:` optional glob pointing to companion screenshot(s) — see §6
 - `generated: true` — section is fully auto-regenerated; never expected to be hand-edited
+- `mismatch_action: warn | hard_fail` — (default: `hard_fail`) controls drift gate behaviour for this scope. `hard_fail` blocks the PR (exit 1); `warn` emits the finding to `drift_warn[]` without blocking (exit 0). Use `warn` for over-broad scopes that are intentionally wide until narrowing ships.
 - One block per section; section delimited by markdown headings, scope applies until the next same-or-higher heading.
 
 ### 3b. Drift detection algorithm

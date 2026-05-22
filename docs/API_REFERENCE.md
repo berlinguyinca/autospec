@@ -6,6 +6,7 @@
 <!-- autospec-doc-scope:
   src: ["scripts/**/*.sh", "skills/autospec-shared/scripts/**/*.mjs", "skills/autospec-shared/scripts/**/*.sh"]
   reason: "API reference for all autospec shared scripts and CLI surfaces"
+  mismatch_action: warn
   generated: true
 -->
 
@@ -189,6 +190,7 @@ Extends the Phase 4 self-heal loop classifier with doc-drift categories:
 <!-- autospec-doc-scope:
   src: ["scripts/validate.sh"]
   reason: "Operator reference for validate.sh checks"
+  mismatch_action: warn
   generated: true
 -->
 
