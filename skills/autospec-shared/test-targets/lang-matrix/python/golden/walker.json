@@ -1,0 +1,68 @@
+[
+  {
+    "language": "python",
+    "exports": [
+      {
+        "name": "main",
+        "kind": "function",
+        "signature": "def main(name: str) -> None:",
+        "line": 9
+      }
+    ],
+    "entry_points": [
+      {
+        "kind": "cli_command",
+        "identifier": "__main__",
+        "line": 14
+      }
+    ],
+    "imports": [
+      {
+        "source": "click",
+        "names": []
+      }
+    ],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/python/src/cli.py"
+  },
+  {
+    "language": "python",
+    "exports": [
+      {
+        "name": "greet_endpoint",
+        "kind": "function",
+        "signature": "def greet_endpoint(name: str) -> dict:",
+        "line": 9
+      }
+    ],
+    "entry_points": [
+      {
+        "kind": "http_route",
+        "identifier": "/greet/{name}",
+        "line": 8
+      }
+    ],
+    "imports": [
+      {
+        "source": "fastapi",
+        "names": [
+          "FastAPI"
+        ]
+      }
+    ],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/python/src/server.py"
+  },
+  {
+    "language": "python",
+    "exports": [
+      {
+        "name": "greet",
+        "kind": "function",
+        "signature": "def greet(name: str) -> str:",
+        "line": 4
+      }
+    ],
+    "entry_points": [],
+    "imports": [],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/python/src/lib.py"
+  }
+]

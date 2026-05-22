@@ -1,0 +1,75 @@
+[
+  {
+    "language": "typescript",
+    "exports": [],
+    "entry_points": [
+      {
+        "kind": "cli_command",
+        "identifier": "cli.ts",
+        "line": 1
+      }
+    ],
+    "imports": [
+      {
+        "source": "commander",
+        "names": [
+          "Command"
+        ]
+      },
+      {
+        "source": "./lib.js",
+        "names": [
+          "greet"
+        ]
+      }
+    ],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/node/src/cli.ts"
+  },
+  {
+    "language": "typescript",
+    "exports": [
+      {
+        "name": "startServer",
+        "kind": "function",
+        "signature": "export function startServer(port = 3000) {",
+        "line": 11
+      }
+    ],
+    "entry_points": [
+      {
+        "kind": "http_route",
+        "identifier": "/greet/:name",
+        "line": 7
+      }
+    ],
+    "imports": [
+      {
+        "source": "express",
+        "names": [
+          "express"
+        ]
+      },
+      {
+        "source": "./lib.js",
+        "names": [
+          "greet"
+        ]
+      }
+    ],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/node/src/server.ts"
+  },
+  {
+    "language": "typescript",
+    "exports": [
+      {
+        "name": "greet",
+        "kind": "function",
+        "signature": "export function greet(name: string): string {",
+        "line": 2
+      }
+    ],
+    "entry_points": [],
+    "imports": [],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/node/src/lib.ts"
+  }
+]

@@ -1,0 +1,57 @@
+[
+  {
+    "language": "go",
+    "exports": [],
+    "entry_points": [
+      {
+        "kind": "cli_command",
+        "identifier": "main",
+        "line": 11
+      }
+    ],
+    "imports": [
+      {
+        "source": "fmt",
+        "names": []
+      },
+      {
+        "source": "os",
+        "names": []
+      },
+      {
+        "source": "github.com/spf13/cobra",
+        "names": []
+      }
+    ],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/go/cmd/cli/main.go"
+  },
+  {
+    "language": "go",
+    "exports": [
+      {
+        "name": "StartServer",
+        "kind": "function",
+        "signature": "func StartServer(addr string) error {",
+        "line": 11
+      }
+    ],
+    "entry_points": [
+      {
+        "kind": "http_route",
+        "identifier": "/greet/:name",
+        "line": 13
+      }
+    ],
+    "imports": [
+      {
+        "source": "net/http",
+        "names": []
+      },
+      {
+        "source": "github.com/gin-gonic/gin",
+        "names": []
+      }
+    ],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/go/internal/server.go"
+  }
+]

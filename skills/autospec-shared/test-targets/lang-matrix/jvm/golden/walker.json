@@ -1,0 +1,106 @@
+[
+  {
+    "language": "java",
+    "exports": [
+      {
+        "name": "Cli",
+        "kind": "class",
+        "signature": "public class Cli {",
+        "line": 4
+      },
+      {
+        "name": "main",
+        "kind": "function",
+        "signature": "public static void main(String[] args) {",
+        "line": 5
+      }
+    ],
+    "entry_points": [
+      {
+        "kind": "cli_command",
+        "identifier": "main",
+        "line": 5
+      }
+    ],
+    "imports": [],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/jvm/src/main/java/com/example/Cli.java"
+  },
+  {
+    "language": "java",
+    "exports": [
+      {
+        "name": "Server",
+        "kind": "class",
+        "signature": "public class Server {",
+        "line": 12
+      },
+      {
+        "name": "main",
+        "kind": "function",
+        "signature": "public static void main(String[] args) {",
+        "line": 13
+      },
+      {
+        "name": "greet",
+        "kind": "function",
+        "signature": "public String greet(@PathVariable String name) {",
+        "line": 18
+      }
+    ],
+    "entry_points": [
+      {
+        "kind": "cli_command",
+        "identifier": "main",
+        "line": 13
+      },
+      {
+        "kind": "http_route",
+        "identifier": "/greet/{name}",
+        "line": 17
+      }
+    ],
+    "imports": [
+      {
+        "source": "org.springframework.boot.SpringApplication",
+        "names": []
+      },
+      {
+        "source": "org.springframework.boot.autoconfigure.SpringBootApplication",
+        "names": []
+      },
+      {
+        "source": "org.springframework.web.bind.annotation.GetMapping",
+        "names": []
+      },
+      {
+        "source": "org.springframework.web.bind.annotation.PathVariable",
+        "names": []
+      },
+      {
+        "source": "org.springframework.web.bind.annotation.RestController",
+        "names": []
+      }
+    ],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/jvm/src/main/java/com/example/Server.java"
+  },
+  {
+    "language": "java",
+    "exports": [
+      {
+        "name": "Lib",
+        "kind": "class",
+        "signature": "public class Lib {",
+        "line": 4
+      },
+      {
+        "name": "greet",
+        "kind": "function",
+        "signature": "public static String greet(String name) {",
+        "line": 5
+      }
+    ],
+    "entry_points": [],
+    "imports": [],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/jvm/src/main/java/com/example/Lib.java"
+  }
+]
