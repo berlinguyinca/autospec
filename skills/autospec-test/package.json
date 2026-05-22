@@ -1,0 +1,50 @@
+{
+  "name": "@autospec/test",
+  "version": "1.0.0",
+  "description": "Imperative Playwright helper library for autospec-test v2 structural invariants, window contracts, and contract symmetry.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./invariants": {
+      "import": "./dist/invariants.js",
+      "types": "./dist/invariants.d.ts"
+    }
+  },
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
+    "pack": "npm pack"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.40.0"
+  },
+  "peerDependenciesMeta": {
+    "@playwright/test": {
+      "optional": false
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "autospec",
+    "playwright",
+    "testing",
+    "invariants",
+    "structural-testing"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/berlinguyinca/autospec.git",
+    "directory": "skills/autospec-test"
+  }
+}
