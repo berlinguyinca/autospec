@@ -93,3 +93,24 @@ _tokens_json() {
   [ "$status" -eq 0 ]
   [ -f "$deep_dir/telemetry.jsonl" ]
 }
+
+@test "record-telemetry.sh stores profile_id when --profile-id given" {
+  tokens_file=$(_tokens_json "profile" '{"input_tokens":500,"output_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}')
+  run "$SCRIPT" --dispatch-id "pid-test" --role "implementer" --issue "417" \
+      --tokens-json "$tokens_file" --profile-id "claude-haiku-cloud"
+  [ "$status" -eq 0 ]
+  line="$(tail -1 "$TELEMETRY_FILE")"
+  profile="$(printf '%s\n' "$line" | jq -r '.profile_id')"
+  [ "$profile" = "claude-haiku-cloud" ]
+}
+
+@test "record-telemetry.sh profile_id defaults to empty string when omitted" {
+  tokens_file=$(_tokens_json "no-profile" '{"input_tokens":100,"output_tokens":20}')
+  run "$SCRIPT" --dispatch-id "no-pid" --role "implementer" --issue "417" \
+      --tokens-json "$tokens_file"
+  [ "$status" -eq 0 ]
+  line="$(tail -1 "$TELEMETRY_FILE")"
+  # profile_id key must exist and be empty string
+  profile="$(printf '%s\n' "$line" | jq -r '.profile_id')"
+  [ "$profile" = "" ]
+}

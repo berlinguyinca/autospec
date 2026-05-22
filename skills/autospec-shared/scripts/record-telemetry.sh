@@ -24,6 +24,7 @@ DISPATCH_ID=""
 ROLE=""
 ISSUE=""
 TOKENS_JSON=""
+PROFILE_ID=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -39,6 +40,9 @@ while [ $# -gt 0 ]; do
     --tokens-json)
       if [ $# -lt 2 ]; then printf 'record-telemetry.sh: --tokens-json requires an argument\n' >&2; exit 1; fi
       TOKENS_JSON="$2"; shift 2 ;;
+    --profile-id)
+      if [ $# -lt 2 ]; then printf 'record-telemetry.sh: --profile-id requires an argument\n' >&2; exit 1; fi
+      PROFILE_ID="$2"; shift 2 ;;
     -*)
       printf 'record-telemetry.sh: unknown option: %s\n' "$1" >&2; exit 1 ;;
     *)
@@ -47,7 +51,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$DISPATCH_ID" ] || [ -z "$ROLE" ] || [ -z "$ISSUE" ] || [ -z "$TOKENS_JSON" ]; then
-  printf 'Usage: record-telemetry.sh --dispatch-id <id> --role <role> --issue <n> --tokens-json <file>\n' >&2
+  printf 'Usage: record-telemetry.sh --dispatch-id <id> --role <role> --issue <n> --tokens-json <file> [--profile-id <id>]\n' >&2
   exit 1
 fi
 
@@ -76,5 +80,6 @@ jq -cn \
   --argjson cache_r     "$cache_read" \
   --argjson output      "$output_tokens" \
   --arg     dispatch_id "$DISPATCH_ID" \
-  '{ts:$ts,role:$role,issue:$issue,input_tokens:$input,cache_creation_input_tokens:$cache_c,cache_read_input_tokens:$cache_r,output_tokens:$output,dispatch_id:$dispatch_id}' \
+  --arg     profile_id  "${PROFILE_ID:-}" \
+  '{ts:$ts,role:$role,issue:$issue,input_tokens:$input,cache_creation_input_tokens:$cache_c,cache_read_input_tokens:$cache_r,output_tokens:$output,dispatch_id:$dispatch_id,profile_id:$profile_id}' \
   >> "$TELEMETRY_FILE"
