@@ -1,0 +1,67 @@
+[
+  {
+    "language": "rust",
+    "exports": [],
+    "entry_points": [
+      {
+        "kind": "cli_command",
+        "identifier": "main",
+        "line": 15
+      }
+    ],
+    "imports": [
+      {
+        "source": "clap::Parser",
+        "names": []
+      },
+      {
+        "source": "lib::greet",
+        "names": []
+      }
+    ],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/rust/src/main.rs"
+  },
+  {
+    "language": "rust",
+    "exports": [
+      {
+        "name": "start_server",
+        "kind": "function",
+        "signature": "pub async fn start_server(addr: &str) -> std::io::Result<()> {",
+        "line": 10
+      }
+    ],
+    "entry_points": [
+      {
+        "kind": "http_route",
+        "identifier": "/greet/{name}",
+        "line": 5
+      }
+    ],
+    "imports": [
+      {
+        "source": "actix_web::{get, web, App, HttpResponse, HttpServer, Responder}",
+        "names": []
+      },
+      {
+        "source": "crate::lib::greet",
+        "names": []
+      }
+    ],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/rust/src/server.rs"
+  },
+  {
+    "language": "rust",
+    "exports": [
+      {
+        "name": "greet",
+        "kind": "function",
+        "signature": "pub fn greet(name: &str) -> String {",
+        "line": 2
+      }
+    ],
+    "entry_points": [],
+    "imports": [],
+    "file_path": "/private/tmp/wt-373-phase10b/skills/autospec-shared/test-targets/lang-matrix/rust/src/lib.rs"
+  }
+]
