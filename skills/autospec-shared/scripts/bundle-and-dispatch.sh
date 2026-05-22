@@ -33,10 +33,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUNDLER="$SCRIPT_DIR/bundle-static-context.sh"
 
 HELP_TEXT='Usage:
-  bundle-and-dispatch.sh --role implementer|reviewer|decomposer|classifier
-                         --dynamic-suffix-file <path>
-                         [--issue-labels "label1,label2,..."]
-  bundle-and-dispatch.sh --help
+bundle-and-dispatch.sh --role implementer|reviewer|decomposer|classifier
+  --dynamic-suffix-file <path>
+  [--issue-labels "label1,label2,..."]
+bundle-and-dispatch.sh --help
 
 Assemble the two-part subagent prompt: static cached prefix (from bundle-static-context.sh)
 followed by the dynamic suffix from <path>. Emit combined output to stdout.'
