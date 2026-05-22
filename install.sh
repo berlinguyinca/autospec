@@ -323,8 +323,34 @@ pull_autospec() {
         || warn "pull_autospec: git pull failed (offline or no tracking branch); continuing"
 }
 
+copy_shared_scripts() {
+    # Copy skills/autospec-shared/scripts/** to $AUTOSPEC_SCRIPTS_DIR preserving +x bits.
+    # Runs on every install (not just --update) so new scripts are always present.
+    shared_scripts_src="$REPO_ROOT/skills/autospec-shared/scripts"
+    if [ ! -d "$shared_scripts_src" ]; then
+        warn "copy_shared_scripts: $shared_scripts_src not found; skipping"
+        return 0
+    fi
+
+    autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] copy_shared_scripts: would copy $shared_scripts_src/** to $autospec_scripts_dir/"
+        return 0
+    fi
+
+    mkdir -p "$autospec_scripts_dir"
+    # Use cp -R with a trailing /. to copy contents (not the directory itself).
+    # Then restore executable bits for all .sh and .mjs files.
+    cp -R "$shared_scripts_src/." "$autospec_scripts_dir/"
+    # Restore +x on shell scripts and mjs files (cp may strip bits on some platforms)
+    find "$autospec_scripts_dir" -maxdepth 2 \( -name '*.sh' -o -name '*.mjs' \) -exec chmod +x {} \;
+    info "copy_shared_scripts: copied shared scripts to $autospec_scripts_dir/"
+}
+
 # Integration bootstrap: pull autospec (if --update) + turbo, before per-skill installers run.
 pull_autospec
+copy_shared_scripts
 bootstrap_turbo
 check_codex
 merge_claude_md
