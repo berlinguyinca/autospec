@@ -460,7 +460,19 @@ issues unblock the queue before continuing with normal feature work.
 >   - `claimed`, `worktree_ready`, `tests_started`, `tests_passed`, `pr_created`, `smoke_retry`, `reviewed`, `merged`, `failed`
 > - Schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}"}`
 > - Delete this file on terminal SUCCESS/FAILURE in both clean and failure paths.
-> 
+>
+> ## Project rules you MUST honor
+>
+> <verbatim concatenation of relevant feedback_*.md bodies — injected by assemble-impl-prompt.sh before dispatch>
+>
+> ## RULE_IDs (from AGENTS.md ## Implementation-quality contract)
+>
+> <verbatim RULE_ID table from AGENTS.md — injected by assemble-impl-prompt.sh>
+>
+> ## Acceptance criteria as constraints
+>
+> <verbatim AC checkbox list from issue body — every checkbox must be green before push>
+>
 > 1. Worktree off origin/main:
 >    cd {repo_root} && git fetch origin
 >    git worktree add -b <BRANCH> /tmp/wt-<BRANCH> origin/main && cd /tmp/wt-<BRANCH>
