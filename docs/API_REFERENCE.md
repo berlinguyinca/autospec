@@ -179,7 +179,8 @@ Usage: bash scripts/validate.sh
 Exit: 0 = all checks pass, non-zero = first failure with diagnostic.
 
 **Checks include:**
-- Lockstep: SKILL.md body == opencode/agent.md body == codex/prompt.md
+- Lockstep (trio): SKILL.md body == opencode/agent.md body == codex/prompt.md
+- Lockstep (duo): SKILL.md body == codex/prompt.md when opencode/agent.md is absent (`check_lockstep_duo`)
 - Bash syntax: every install.sh / uninstall.sh
 - YAML frontmatter valid
 - Self-update section present in every skill trio
@@ -191,3 +192,12 @@ Exit: 0 = all checks pass, non-zero = first failure with diagnostic.
 - Phase 4 adaptive-retry loop
 - Docs presence: `docs/USER_MANUAL.md`, `llms.txt`, `docs/.llm-manifest.json`
 - autospec-test structural lint (per-skill validate.sh)
+
+**Bats unit tests:** `tests/validate.bats` exercises `check_lockstep()` and `check_lockstep_duo()` against
+fixture directories in `tests/fixtures/lockstep-{trio-pass,duo-pass,duo-divergence}/`.
+
+<!-- autospec-doc-scope:
+  src: ["tests/validate.bats", "tests/fixtures/lockstep-trio-pass/SKILL.md", "tests/fixtures/lockstep-trio-pass/codex/prompt.md", "tests/fixtures/lockstep-trio-pass/opencode/agent.md", "tests/fixtures/lockstep-duo-pass/SKILL.md", "tests/fixtures/lockstep-duo-pass/codex/prompt.md", "tests/fixtures/lockstep-duo-divergence/SKILL.md", "tests/fixtures/lockstep-duo-divergence/codex/prompt.md", "skills/autospec-test/codex/prompt.md"]
+  reason: "Bats unit tests and fixtures for validate.sh lockstep checks"
+  generated: false
+-->

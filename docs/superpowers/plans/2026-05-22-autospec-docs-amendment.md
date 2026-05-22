@@ -132,6 +132,12 @@ Note: `skills/autospec-shared/` is a new directory housing cross-skill tooling. 
 
 ### Tasks
 
+<!-- autospec-doc-scope:
+  src: ["skills/autospec-shared/scripts/scan-doc-scope.mjs", "skills/autospec-shared/scripts/check-doc-drift.sh"]
+  reason: "Phase 2 tasks cover scan-doc-scope.mjs and check-doc-drift.sh implementation"
+  generated: false
+-->
+
 - [ ] **2.1** Write `scan-doc-scope.mjs` exporting `parse(markdownPath): Array<{ heading_path: string, src_globs: string[], visual_glob?: string, generated?: boolean, reason?: string, byte_range: [start, end] }>`. Parses `<!-- autospec-doc-scope: ... -->` blocks. Uses YAML inside the comment for structured fields. The `byte_range` covers the section body (from after the comment to the next same-or-higher heading).
 
 - [ ] **2.2** Fixture markdown files covering: valid scope, multiple sections, malformed YAML inside scope (must error cleanly), section with `generated: true`, section with `visual:` glob, file with no scope at all (returns empty array).
@@ -513,6 +519,15 @@ Note: `skills/autospec-shared/` is a new directory housing cross-skill tooling. 
 - Modify: `validate.sh` (add lockstep checks for new structural sections)
 
 ### Tasks
+
+<!-- autospec-doc-scope:
+  src: ["scripts/validate.sh"]
+  reason: "Phase 10 tasks reference validate.sh lockstep checks"
+  generated: false
+-->
+
+_Phase 2 roadmap addition (2026-05-22): `check_lockstep_duo()` added to `validate.sh` to cover
+duo-harness skills (SKILL.md + codex/prompt.md, no opencode/agent.md). See PR #425._
 
 - [ ] **10.1** Build 5 synthetic targets per spec §9b:
   - `target-doc-drift-bait`: source change without doc update → check fails with specific reason

@@ -36,6 +36,17 @@ discover_skills() {
     done
 }
 
+# Discover duo-harness skills: directories under skills/ that contain SKILL.md
+# *and* codex/prompt.md but NOT opencode/agent.md.
+discover_duo_skills() {
+    for d in skills/*/; do
+        [ -d "$d" ] || continue
+        if [ -f "$d/SKILL.md" ] && [ -f "$d/codex/prompt.md" ] && [ ! -f "$d/opencode/agent.md" ]; then
+            printf '%s\n' "${d%/}"
+        fi
+    done
+}
+
 # Strip frontmatter and any HR --- separator lines per repo convention.
 strip_body() {
     awk '/^---$/{c++; next} c>=2' "$1"
@@ -52,6 +63,18 @@ check_lockstep() {
     if ! diff <(strip_body "$skill_dir/SKILL.md") <(strip_body "$skill_dir/opencode/agent.md") >/dev/null; then
         diff <(strip_body "$skill_dir/SKILL.md") <(strip_body "$skill_dir/opencode/agent.md") | head -40 >&2
         fail "$name: SKILL.md body diverges from opencode/agent.md"
+    fi
+}
+
+# Duo-mode lockstep: byte-diff SKILL.md body against codex/prompt.md when
+# opencode/agent.md is absent. Fails with a message naming both files.
+check_lockstep_duo() {
+    skill_dir="$1"
+    name="$(basename "$skill_dir")"
+    info "lock-step (duo): $name"
+    if ! diff <(strip_body "$skill_dir/SKILL.md") <(cat "$skill_dir/codex/prompt.md") >/dev/null; then
+        diff <(strip_body "$skill_dir/SKILL.md") <(cat "$skill_dir/codex/prompt.md") | head -40 >&2
+        fail "$name: $skill_dir/SKILL.md body diverges from $skill_dir/codex/prompt.md"
     fi
 }
 
@@ -601,6 +624,12 @@ main() {
         check_subagent_model_tier "$skill_dir"
         check_harness_detection_block "$skill_dir/SKILL.md"
         check_monitor_batch_exit "$skill_dir/SKILL.md"
+    done
+
+    info "scanning duo-harness skills under skills/ ..."
+    duo_skills="$(discover_duo_skills)"
+    for skill_dir in $duo_skills; do
+        check_lockstep_duo "$skill_dir"
     done
 
     check_startup_preflight

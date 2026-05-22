@@ -175,6 +175,103 @@ Loop state schema:
 
 The wizard does not run tests. It only produces config. Run `/autospec-test [PR#]` or let `/autospec-run` invoke the gate to exercise the configuration.
 
+## v2 — Stage 2.5 invariants
+
+Stage 2.5 is an optional extension to Stage 2 that catches a specific regression class: Playwright suites pass green but the user-visible product still breaks — missing edit affordances on visible items, frontend-display windows wider than backend query windows, broken or unaffordable interactive elements, and UI claims the API cannot back.
+
+Stage 2.5 runs four declarative gate metrics (F/G/H/I) after Stage 2 passes, only when `e2e.invariants_v2.enabled: true` in the target's `.autospec/test.yml`. If `enabled` is not `true`, the gate emits `{"skipped": true, "passed": true}` and exits 0 with zero overhead on v1-only targets.
+
+```
+Stage 2 (E2E)
+     │ passes
+     ▼
+Stage 2.5 (Invariants & contracts) — skipped if invariants_v2.enabled != true
+  Metric F — Structural invariants (edit affordances on all rows)
+  Metric G — Window-contract symmetry (UI window == API window)
+  Metric H — Extended crawler (all interactive elements affordable)
+  Metric I — Data-source contract symmetry (UI claims ↔ API responses)
+     │
+     ▼
+Auto-merge (all pass) or block (any fail)
+```
+
+**Stage 2.5 + docs drift-gate composition:** When the docs amendment is active (Phase 10c), the
+drift-gate (`check-doc-drift.sh`) runs immediately after Stage 2.5 and shares its exit-code
+routing. A `failing_doc_drift` result feeds the same self-heal loop as a Stage 2.5 metric
+failure — the loop classifier routes it to `failing_doc_drift` → doc-section edit, not a
+test rewrite. Both gates must pass before the fused guardian+LGTM step proceeds. If Stage 2.5
+is skipped (`invariants_v2.enabled` absent), the drift gate still runs independently.
+
+## Contract: invariants_v2
+
+Add the `e2e.invariants_v2` namespace to `.autospec/test.yml` to enable Stage 2.5:
+
+```yaml
+e2e:
+  clone_url_env: E2E_BASE_URL
+  forbidden_url_patterns:
+    - "^https?://app\\.example\\.com"
+
+  invariants_v2:
+    enabled: true
+    structural_invariants:
+      - name: dashboard-done-items-editable
+        selector: "[data-done-item]"
+        require_affordance: edit
+        routes:
+          - /dashboard
+    window_contracts:
+      - name: dashboard-streak-window
+        ui_attribute: data-window-days
+        api_param: from
+        tolerance_days: 1
+    contract_symmetry:
+      - name: streak-task-must-be-editable
+        ui_selector: "[data-task-id]"
+        api_endpoint: /api/timeline
+        require_field: editable
+    edge_case_seeds:
+      enforcement: refuse_to_run_if_missing
+      require_shapes:
+        - kind: done_item
+          count_at_least: 3
+        - kind: streak_gap
+          count_at_least: 1
+```
+
+## Built-in invariant kinds
+
+| Metric | Kind | What it checks | Block label |
+|--------|------|----------------|-------------|
+| F | `structural` | Every `selector` row has the required `affordance` button/link | `e2e:blocked-stage25` |
+| G | `window_contract` | UI window attribute matches API query window (±`tolerance_days`) | `e2e:window-mismatch` |
+| H | `crawler` | Every reachable interactive element is afforded (click → response within 5s) | `e2e:unaffordable-elements` |
+| I | `contract_symmetry` | UI claim fields present in API response and semantically consistent | `e2e:contract-mismatch` |
+
+## Edge-case seeds handshake
+
+`edge_case_seeds` in the contract creates a hard handshake with Skill C (autospec-e2e-clone). When declared, Stage 2.5 verifies that the clone contains at least `count_at_least` rows matching each declared shape before running any metric.
+
+- `enforcement: refuse_to_run_if_missing` (default) → gate exits 2 (`e2e:seed-missing`) if shapes absent; operator re-runs Skill C.
+- Loop cannot fix missing seeds — Skill A explicitly does not edit clone-provisioner concerns.
+
+## Helper library (@autospec/test)
+
+The `@autospec/test` npm package ships Playwright helpers for writing the same invariant patterns imperatively inside target-repo test suites:
+
+```typescript
+import { checkStructuralInvariant, verifyWindowContract } from '@autospec/test';
+
+test('dashboard done items are editable', async ({ page }) => {
+  await checkStructuralInvariant(page, {
+    selector: '[data-done-item]',
+    requireAffordance: 'edit',
+  });
+});
+```
+
+Install: `npm install --save-dev @autospec/test` (wizard handles this during `--init`).
+
 ## Required capabilities & harness adapter
 
 | Capability                  | Claude Code                             | OpenCode                              | Codex CLI                              | Fallback if missing                         |
