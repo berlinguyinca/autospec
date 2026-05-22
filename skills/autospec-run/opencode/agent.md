@@ -360,6 +360,18 @@ issues unblock the queue before continuing with normal feature work.
 >       fi
 >     fi
 >   fi
+>   # effective_batch_size probe — recomputed each outer-loop tick (not cached).
+>   # Force batch=1 when the next ready issue is reasoning:deep (high blast-radius).
+>   _next_reasoning=$(gh issue view "${ready[0]}" --json labels \
+>     --jq '[.labels[].name | select(startswith("reasoning:"))] | first // "reasoning:medium"' \
+>     2>/dev/null || echo "reasoning:medium")
+>   if [ "$_next_reasoning" = "reasoning:deep" ]; then
+>     effective_batch_size=1
+>   else
+>     effective_batch_size="${AUTOSPEC_BATCH_SIZE:-3}"
+>     [ "$effective_batch_size" -gt 0 ] 2>/dev/null || effective_batch_size=3
+>   fi
+>   echo "[monitor] effective_batch_size=$effective_batch_size (next issue reasoning: $_next_reasoning)"
 >   ISSUE = ready[0]
 >   # Claim check: verify the issue is still labeled auto-implement before processing.
 >   # Multiple monitors can query the same candidate list simultaneously;
@@ -409,11 +421,11 @@ issues unblock the queue before continuing with normal feature work.
 >   echo "[monitor] scope: ${ISSUE_SCOPE:-<not provided>}"
 >   process(ISSUE)   # foreground subagent — see template below
 >   batch_issue_count=$((batch_issue_count + 1))
->   if [ "$batch_issue_count" -ge "$BATCH_SIZE" ]; then
+>   if [ "$batch_issue_count" -ge "${effective_batch_size:-$BATCH_SIZE}" ]; then
 >     printf '{"batch":%s,"processed":%s,"repo":"%s","ts":%s,"status":"BATCH_COMPLETE"}\n' \
 >       "${batch_num:-1}" "$batch_issue_count" "{repo}" "$(date -u +%s)" \
 >       > "$HOME/.autospec/batch-done.json"
->     echo "[monitor] batch ${batch_num:-1}: processed $batch_issue_count/$BATCH_SIZE issues — writing batch-done.json and exiting for fresh context"
+>     echo "[monitor] batch ${batch_num:-1}: processed $batch_issue_count/${effective_batch_size:-$BATCH_SIZE} issues — writing batch-done.json and exiting for fresh context"
 >     exit 0
 >   fi
 >   # Immediate next-issue pickup: NO SLEEP after process(ISSUE). Re-enter the top

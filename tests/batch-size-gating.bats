@@ -60,3 +60,25 @@ setup() {
   grep -q "AUTOSPEC_BATCH_SIZE" "$agents_md"
   grep -q "reasoning:deep" "$agents_md"
 }
+
+@test "codex/prompt.md contains effective_batch_size probe (lockstep with SKILL.md)" {
+  codex_md="${BATS_TEST_DIRNAME}/../skills/autospec-run/codex/prompt.md"
+  [ -f "$codex_md" ]
+  grep -q "effective_batch_size" "$codex_md"
+}
+
+@test "codex/prompt.md uses effective_batch_size in batch comparison (lockstep)" {
+  codex_md="${BATS_TEST_DIRNAME}/../skills/autospec-run/codex/prompt.md"
+  grep -q 'effective_batch_size:-\$BATCH_SIZE' "$codex_md"
+}
+
+@test "opencode/agent.md contains effective_batch_size probe (lockstep with SKILL.md)" {
+  opencode_md="${BATS_TEST_DIRNAME}/../skills/autospec-run/opencode/agent.md"
+  [ -f "$opencode_md" ]
+  grep -q "effective_batch_size" "$opencode_md"
+}
+
+@test "opencode/agent.md uses effective_batch_size in batch comparison (lockstep)" {
+  opencode_md="${BATS_TEST_DIRNAME}/../skills/autospec-run/opencode/agent.md"
+  grep -q 'effective_batch_size:-\$BATCH_SIZE' "$opencode_md"
+}
