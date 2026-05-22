@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<!--
+  target-contract-symmetry-bait/src/index.html
+  Bait: UI renders 3 streak tasks (t-1, t-2, t-3) but the API only returns
+  events for t-1 and t-2. Task t-3 shows in the UI but has no backend data.
+  Metric I (data-source contract symmetry) should catch the violation.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Target: Contract Symmetry Bait</title>
+</head>
+<body>
+  <h1>Streak Dashboard</h1>
+
+  <!-- 3 streak task elements: all visible in UI, but t-3 has no API backing -->
+  <div
+    data-testid="streak-task-1"
+    data-task-id="t-1"
+    data-date="2026-05-14"
+  >Task 1 (completed 2026-05-14)</div>
+
+  <div
+    data-testid="streak-task-2"
+    data-task-id="t-2"
+    data-date="2026-05-14"
+  >Task 2 (completed 2026-05-14)</div>
+
+  <!-- BAIT: t-3 appears in UI but API returns empty events for it -->
+  <div
+    data-testid="streak-task-3"
+    data-task-id="t-3"
+    data-date="2026-05-14"
+  >Task 3 (completed 2026-05-14)</div>
+</body>
+</html>

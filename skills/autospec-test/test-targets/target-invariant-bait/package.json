@@ -1,0 +1,11 @@
+{
+  "name": "target-invariant-bait",
+  "version": "1.0.0",
+  "description": "Synthetic target: done-item row #4 renders as <span> (no edit button). Metric F catches it.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/invariant-bait.test.mjs",
+    "serve": "node server.mjs"
+  },
+  "devDependencies": {}
+}

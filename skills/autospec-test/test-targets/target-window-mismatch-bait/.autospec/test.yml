@@ -1,0 +1,29 @@
+mode: strict_isolation
+
+unit:
+  test_cmd: "node --test tests/window-mismatch.test.mjs"
+
+e2e:
+  forbidden_url_patterns:
+    - "^https?://prod\\.example\\.com"
+
+  invariants_v2:
+    enabled: true
+
+    window_contracts:
+      - id: dashboard-streak-window
+        ui_display:
+          route: /
+          widget: '[data-testid=streak-widget]'
+          window_days_attr: 'data-window-days'
+        api_query:
+          method: GET
+          path_pattern: '^/api/household/timeline$'
+          window_params:
+            from: { type: iso_date, must_be: 'today - $N days', tolerance_days: 1 }
+            to:   { type: iso_date, must_be: 'today', tolerance_days: 1 }
+          recorded_via: network_intercept
+        mismatch_action: hard_fail
+
+    thresholds:
+      window_contracts_required_pass_rate: 100

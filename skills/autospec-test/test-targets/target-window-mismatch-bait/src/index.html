@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<!--
+  target-window-mismatch-bait/src/index.html
+  Bait: widget claims 7-day window (data-window-days="7") but the JS fetches
+  only a 3-day window from the backend. Metric G should catch the mismatch.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Target: Window Mismatch Bait</title>
+</head>
+<body>
+  <h1>Dashboard</h1>
+
+  <!-- Streak widget: claims 7-day window in the DOM -->
+  <div
+    data-testid="streak-widget"
+    data-window-days="7"
+    data-loaded="false"
+  >
+    Loading streak data...
+  </div>
+
+  <script type="module">
+    // BAIT: fetch only 3 days, not the 7 days declared in data-window-days
+    const today = new Date().toISOString().slice(0, 10);
+    const threeDaysAgo = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+
+    // This is the mismatch: UI says 7d, but query uses 3d
+    const url = `/api/household/timeline?from=${threeDaysAgo}&to=${today}`;
+
+    fetch(url)
+      .then(r => r.json())
+      .then(data => {
+        const widget = document.querySelector('[data-testid="streak-widget"]');
+        widget.textContent = `Streak: ${data.streak_days ?? 0} days`;
+        widget.setAttribute('data-loaded', 'true');
+      })
+      .catch(() => {
+        const widget = document.querySelector('[data-testid="streak-widget"]');
+        widget.textContent = 'Streak data unavailable';
+        widget.setAttribute('data-loaded', 'true');
+      });
+  </script>
+</body>
+</html>

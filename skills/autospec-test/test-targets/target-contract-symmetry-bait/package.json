@@ -1,0 +1,11 @@
+{
+  "name": "target-contract-symmetry-bait",
+  "version": "1.0.0",
+  "description": "Synthetic target: UI shows 3 streak tasks but API only returns data for 2. Metric I catches it.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/symmetry-bait.test.mjs",
+    "serve": "node server.mjs"
+  },
+  "devDependencies": {}
+}

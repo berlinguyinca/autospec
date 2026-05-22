@@ -1,0 +1,26 @@
+{
+  "metric": "F",
+  "passed": false,
+  "target": "target-invariant-bait",
+  "invariants": [
+    {
+      "id": "done-items-editable",
+      "route": "/",
+      "passed": false,
+      "violations": [
+        {
+          "index": 4,
+          "selector": "[data-testid^=\"done-item-row-\"]",
+          "reason": "edit button not visible — row renders as span not button"
+        }
+      ],
+      "count_observed": 5
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "passed_count": 0,
+    "failed_count": 1,
+    "violation_count": 1
+  }
+}
