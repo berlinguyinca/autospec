@@ -304,3 +304,17 @@ on `git diff --cached` and blocks commits containing RULE_ID violations.
 `lint-implementation.sh` extended flags:
 - `--pre-commit` / `--staged` — read staged diff (`git diff --cached`) instead of a PR diff
 - `--directives` — reformat each finding as `Fix RULE_ID: <imperative action>` for use in implementer retry prompts
+
+## CI-wait sentinel
+
+Replaces synchronous `gh pr checks --watch` with a fire-and-forget background poller.
+
+| Script | Purpose | Flags |
+|---|---|---|
+| `scripts/ci-wait.sh` | Spawns background CI poller; returns immediately | `<PR>`, `--timeout SECONDS`, `--required-only` |
+| `scripts/ci-wait-poll.sh` | Reads sentinel; returns state as exit code | `<PR>` |
+| `scripts/ci-wait-cleanup.sh` | Kills poller; removes sentinel files | `<PR>` |
+
+Signal file: `~/.autospec/ci-state/<PR>.signal` — JSON `{pr, state, checks, settled_at}`.
+State values: `pending | pass | fail | stalled`.
+Exit codes from `ci-wait-poll.sh`: 0=pass, 1=fail/stalled, 2=pending, 3=no sentinel.

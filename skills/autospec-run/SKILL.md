@@ -524,7 +524,11 @@ issues unblock the queue before continuing with normal feature work.
 >
 >      If `LGTM` && det_exit == 0:
 >        gh pr comment <PR> --body "<!-- guardian-block --> Review: clean. <!-- /-->"
->        run **Operator/full verification**; sleep 30; `gh pr checks <PR>`; break SUCCESS if required checks pass.
+>        run **Operator/full verification**
+>        bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ci-wait.sh" <PR>  # fire-and-forget sentinel
+>        # monitor exits to parking state HERE — orchestrator relaunches when ~/.autospec/ci-state/<PR>.signal settles
+>        # On relaunch: run ci-wait-poll.sh <PR>; break SUCCESS if exit 0 (pass)
+>        break SUCCESS if required checks pass.
 >      If `LGTM` but det_exit != 0:
 >        Treat deterministic findings as blocking. Comment, fix, recommit, push. Continue inner loop.
 >      If findings list:
