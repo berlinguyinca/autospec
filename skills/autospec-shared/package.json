@@ -1,0 +1,27 @@
+{
+  "name": "@autospec/shared",
+  "version": "1.0.0",
+  "description": "Cross-skill shared tooling for autospec — tree-sitter walker, doc generators, and utilities.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/unit/"
+  },
+  "bin": {
+    "tree-sitter-walk": "./bin/tree-sitter-walk"
+  },
+  "dependencies": {
+    "web-tree-sitter": "^0.24.7",
+    "tree-sitter-typescript": "^0.23.2",
+    "tree-sitter-javascript": "^0.23.1",
+    "tree-sitter-python": "^0.23.6",
+    "tree-sitter-go": "^0.23.4",
+    "tree-sitter-rust": "^0.23.2",
+    "tree-sitter-java": "^0.23.5"
+  },
+  "devDependencies": {
+    "node": ">=20.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

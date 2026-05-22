@@ -1,0 +1,80 @@
+#!/usr/bin/env node
+// bin/tree-sitter-walk — CLI wrapper for the autospec-shared tree-sitter walker.
+//
+// Usage:
+//   tree-sitter-walk <file>               Walk a single file; emit JSON to stdout.
+//   tree-sitter-walk --root <dir>         Walk all supported files under <dir>; emit JSON array.
+//   tree-sitter-walk --help               Print usage.
+//
+// Exit codes:
+//   0 = success (JSON emitted)
+//   1 = error (message on stderr)
+
+import { walk } from '../scripts/tree-sitter-walk/walker.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const SUPPORTED_EXTS = new Set(['.ts', '.tsx', '.mts', '.js', '.mjs', '.cjs', '.jsx', '.py', '.go', '.rs', '.java']);
+
+function walkDirRecursive(dir) {
+    const results = [];
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+            // Skip common non-source directories
+            if (['.git', 'node_modules', 'vendor', '.turbo', 'dist', 'build', '__pycache__'].includes(entry.name)) continue;
+            results.push(...walkDirRecursive(fullPath));
+        } else if (entry.isFile() && SUPPORTED_EXTS.has(path.extname(entry.name).toLowerCase())) {
+            results.push(fullPath);
+        }
+    }
+    return results;
+}
+
+async function main() {
+    const args = process.argv.slice(2);
+
+    if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
+        process.stdout.write([
+            'Usage:',
+            '  tree-sitter-walk <file>         Walk a single file; emit JSON to stdout.',
+            '  tree-sitter-walk --root <dir>   Walk all supported files under <dir>.',
+            '  tree-sitter-walk --help         Print this help.',
+            '',
+            'Supported languages: TypeScript, JavaScript, Python, Go, Rust, Java',
+            '',
+        ].join('\n'));
+        process.exit(args.length === 0 ? 1 : 0);
+    }
+
+    try {
+        if (args[0] === '--root') {
+            const dir = args[1];
+            if (!dir) {
+                process.stderr.write('tree-sitter-walk: --root requires a directory argument\n');
+                process.exit(1);
+            }
+            if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+                process.stderr.write(`tree-sitter-walk: not a directory: ${dir}\n`);
+                process.exit(1);
+            }
+            const files = walkDirRecursive(dir);
+            const outputs = await Promise.all(files.map(f => walk(f)));
+            process.stdout.write(JSON.stringify(outputs, null, 2) + '\n');
+        } else {
+            const filePath = args[0];
+            if (!fs.existsSync(filePath)) {
+                process.stderr.write(`tree-sitter-walk: file not found: ${filePath}\n`);
+                process.exit(1);
+            }
+            const output = await walk(filePath);
+            process.stdout.write(JSON.stringify(output, null, 2) + '\n');
+        }
+    } catch (err) {
+        process.stderr.write(`tree-sitter-walk: error: ${err.message}\n`);
+        process.exit(1);
+    }
+}
+
+main();
