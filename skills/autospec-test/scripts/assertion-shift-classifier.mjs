@@ -25,6 +25,19 @@ const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const ADAPTERS_DIR = path.join(path.dirname(__filename), 'adapters');
 
+// v2 contract diff classifier — loaded lazily when .autospec/test.yml is in the diff
+let _v2BucketsModule = null;
+async function loadV2Buckets() {
+    if (_v2BucketsModule) return _v2BucketsModule;
+    try {
+        const v2Path = path.join(path.dirname(__filename), 'assertion-shift-v2-buckets.mjs');
+        _v2BucketsModule = await import(`file://${v2Path}`);
+    } catch {
+        _v2BucketsModule = null;
+    }
+    return _v2BucketsModule;
+}
+
 /**
  * @typedef {Object} Verdict
  * @property {string} file       - relative path to the test file
@@ -231,6 +244,72 @@ export async function classify(options) {
         // Run adapter
         const verdicts = adapter.bucket(fileDiff, testFile);
         allVerdicts.push(...verdicts);
+    }
+
+    // v2 second pass: if .autospec/test.yml appears in the diff, classify contract changes
+    const contractFile = '.autospec/test.yml';
+    const diffSource = diffText !== undefined ? diffText : null;
+    let contractDiffPresent = false;
+    if (diffSource !== null) {
+        contractDiffPresent = diffSource.includes(`a/${contractFile}`) || diffSource.includes(`b/${contractFile}`);
+    } else {
+        // Check git diff for contract file
+        try {
+            const { stdout: contractDiff } = await execFileAsync('git', [
+                '-C', repoRoot, 'diff', `${baseRef}..${headRef}`, '--', contractFile
+            ]);
+            if (contractDiff.trim().length > 0) {
+                contractDiffPresent = true;
+                // stash for v2 classifier
+                options._contractDiff = contractDiff;
+            }
+        } catch { /* ignore */ }
+    }
+
+    if (contractDiffPresent) {
+        const v2Module = await loadV2Buckets();
+        if (v2Module && typeof v2Module.classifyV2ContractDiff === 'function') {
+            try {
+                // Extract before/after YAML from the diff or git show
+                let beforeYaml = '';
+                let afterYaml = '';
+                if (diffSource !== null || options._contractDiff) {
+                    const rawDiff = diffSource !== null ? diffSource : options._contractDiff;
+                    // Extract lines from the contract file hunk
+                    const escaped = contractFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const fileStart = new RegExp(`^diff --git a/${escaped}`, 'm');
+                    const startIdx = rawDiff.search(fileStart);
+                    if (startIdx !== -1) {
+                        const nextDiff = rawDiff.indexOf('\ndiff --git', startIdx + 1);
+                        const section = nextDiff === -1 ? rawDiff.slice(startIdx) : rawDiff.slice(startIdx, nextDiff);
+                        const beforeLines = [];
+                        const afterLines = [];
+                        for (const line of section.split('\n')) {
+                            if (line.startsWith('-') && !line.startsWith('---')) beforeLines.push(line.slice(1));
+                            else if (line.startsWith('+') && !line.startsWith('+++')) afterLines.push(line.slice(1));
+                            else if (!line.startsWith('@@') && !line.startsWith('diff') && !line.startsWith('index')) {
+                                const ctx = line.startsWith(' ') ? line.slice(1) : line;
+                                beforeLines.push(ctx);
+                                afterLines.push(ctx);
+                            }
+                        }
+                        beforeYaml = beforeLines.join('\n');
+                        afterYaml = afterLines.join('\n');
+                    }
+                } else {
+                    try {
+                        const { stdout: bef } = await execFileAsync('git', ['-C', repoRoot, 'show', `${baseRef}:${contractFile}`]);
+                        beforeYaml = bef;
+                    } catch { /* file may be new */ }
+                    try {
+                        const { stdout: aft } = await execFileAsync('git', ['-C', repoRoot, 'show', `${headRef}:${contractFile}`]);
+                        afterYaml = aft;
+                    } catch { /* file may be deleted */ }
+                }
+                const v2Verdicts = await v2Module.classifyV2ContractDiff({ beforeYaml, afterYaml });
+                allVerdicts.push(...v2Verdicts);
+            } catch { /* v2 classifier error — degrade gracefully, do not block */ }
+        }
     }
 
     // Compute gate decision

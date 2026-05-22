@@ -116,38 +116,105 @@ function extractInvariantsV2Struct(yamlText) {
         apply_on_routes: {},
     };
 
-    // Extract invariant ids
-    const invBlock = yamlText.match(/invariants:\s*\n([\s\S]*?)(?=\n\s{0,6}\w+:|$)/);
+    // Extract a top-level section block from invariants_v2: by key name.
+    // Stops at the next sibling key at the same indent level (4 spaces under invariants_v2).
+    // This avoids the common regex pitfall of stopping at child keys.
+    function extractV2Section(key) {
+        // Find `    key:` (4 spaces = under invariants_v2 which is at 4 spaces in e2e block)
+        const pat = new RegExp(`^([ \\t]{0,12})${key}:\\s*\\n`, 'm');
+        const startMatch = pat.exec(yamlText);
+        if (!startMatch) return '';
+        const indent = startMatch[1];
+        const startIdx = startMatch.index + startMatch[0].length;
+        // Stop at next line with same or less indent + word char + colon (a sibling key)
+        const stopPat = new RegExp(`\\n${indent}\\w[\\w_-]*:`, 'g');
+        stopPat.lastIndex = startIdx;
+        const stopMatch = stopPat.exec(yamlText);
+        return stopMatch
+            ? yamlText.slice(startIdx, stopMatch.index)
+            : yamlText.slice(startIdx);
+    }
+
+    // Parse list entries from a block. Returns array of objects {name, body}
+    // where body is the text following the `- name:` line until the next `- name:`.
+    function parseListEntries(block) {
+        const entries = [];
+        // Split on `- name:` or `- id:` boundary lines
+        const entryPat = /^[ \t]*-[ \t]+(?:name|id):[ \t]*(\S+)/gm;
+        let match;
+        while ((match = entryPat.exec(block)) !== null) {
+            const name = match[1];
+            const bodyStart = match.index + match[0].length;
+            // Find next entry start
+            entryPat.lastIndex = bodyStart;
+            const nextMatch = entryPat.exec(block);
+            entryPat.lastIndex = nextMatch ? nextMatch.index : bodyStart;
+            const body = nextMatch
+                ? block.slice(bodyStart, nextMatch.index)
+                : block.slice(bodyStart);
+            entries.push({ name, body });
+            if (!nextMatch) break;
+            // Reset to continue from after the entry we just found
+            entryPat.lastIndex = nextMatch.index;
+        }
+        return entries;
+    }
+
+    // Extract structural_invariants / invariants entries (support both `name:` and `id:`)
+    // Also handles partial diffs where context starts at the list entries directly.
+    const invBlock = extractV2Section('structural_invariants') || extractV2Section('invariants')
+        || (/^\s*-\s+(?:name|id):/.test(yamlText) && !/structural_invariants:|window_contracts:|contract_symmetry:|affordance_patterns:/.test(yamlText) ? yamlText : '');
     if (invBlock) {
-        const idMatches = invBlock[1].matchAll(/- id:\s*(\S+)/g);
-        for (const m of idMatches) result.invariants.push(m[1]);
+        const entries = parseListEntries(invBlock);
+        for (const { name, body } of entries) {
+            result.invariants.push(name);
 
-        const countMatches = invBlock[1].matchAll(/id:\s*(\S+)[\s\S]*?require_count_at_least:\s*(\d+)/g);
-        for (const m of countMatches) result.require_count_at_least[m[1]] = parseInt(m[2], 10);
+            const countMatch = body.match(/require_count_at_least:\s*(\d+)/);
+            if (countMatch) result.require_count_at_least[name] = parseInt(countMatch[1], 10);
 
-        const actionMatches = invBlock[1].matchAll(/id:\s*(\S+)[\s\S]*?mismatch_action:\s*(\S+)/g);
-        for (const m of actionMatches) result.mismatch_actions[m[1]] = m[2];
+            const actionMatch = body.match(/mismatch_action:\s*(\S+)/);
+            if (actionMatch) result.mismatch_actions[name] = actionMatch[1];
 
-        const routeMatches = invBlock[1].matchAll(/id:\s*(\S+)[\s\S]*?apply_on_routes:\s*\[([^\]]+)\]/g);
-        for (const m of routeMatches) {
-            result.apply_on_routes[m[1]] = m[2].split(',').map(s => s.trim().replace(/['"]/g, ''));
+            // apply_on_routes: inline array or block sequence
+            const inlineRoutes = body.match(/apply_on_routes:\s*\[([^\]]+)\]/);
+            if (inlineRoutes) {
+                result.apply_on_routes[name] = inlineRoutes[1].split(',').map(s => s.trim().replace(/['"]/g, ''));
+            } else {
+                const routesBlock = body.match(/apply_on_routes:\s*\n([\s\S]*?)(?=\n[ \t]*\w[\w_-]*:|$)/);
+                if (routesBlock) {
+                    const items = [];
+                    for (const line of routesBlock[1].split('\n')) {
+                        const trimmed = line.replace(/^\s*-\s*/, '').trim();
+                        if (trimmed) items.push(trimmed);
+                    }
+                    if (items.length > 0) result.apply_on_routes[name] = items;
+                }
+            }
         }
     }
 
-    // Extract window_contract ids
-    const winBlock = yamlText.match(/window_contracts:\s*\n([\s\S]*?)(?=\n\s{0,6}\w+:|$)/);
+    // Extract window_contracts entries (support `name:` and `id:`)
+    const winBlock = extractV2Section('window_contracts');
     if (winBlock) {
-        const idMatches = winBlock[1].matchAll(/- id:\s*(\S+)/g);
-        for (const m of idMatches) result.window_contracts.push(m[1]);
-
-        const actionMatches = winBlock[1].matchAll(/id:\s*(\S+)[\s\S]*?mismatch_action:\s*(\S+)/g);
-        for (const m of actionMatches) result.mismatch_actions[m[1]] = m[2];
+        const entries = parseListEntries(winBlock);
+        for (const { name, body } of entries) {
+            result.window_contracts.push(name);
+            const actionMatch = body.match(/mismatch_action:\s*(\S+)/);
+            if (actionMatch) result.mismatch_actions[name] = actionMatch[1];
+        }
     }
 
-    // Extract affordance_patterns elements
-    const affBlock = yamlText.match(/affordance_patterns:\s*\n([\s\S]*?)(?=\n\s{0,6}\w+:|$)/);
+    // Extract affordance_patterns elements (support both `element:` key and bare list items)
+    const affBlock = extractV2Section('affordance_patterns');
     if (affBlock) {
-        const elemMatches = affBlock[1].matchAll(/- element:\s*['"]?([^'"]+)['"]?/g);
+        // Bare list items: `- button[data-action=edit]`
+        const bareMatches = affBlock.matchAll(/^\s*-\s+(?!element:)([^\n]+)/gm);
+        for (const m of bareMatches) {
+            const val = m[1].trim().replace(/^['"]|['"]$/g, '');
+            if (val) result.affordance_patterns.push(val);
+        }
+        // Keyed items: `- element: 'selector'`
+        const elemMatches = affBlock.matchAll(/- element:\s*['"]?([^'"]+)['"]?/g);
         for (const m of elemMatches) result.affordance_patterns.push(m[1].trim());
     }
 
@@ -155,11 +222,19 @@ function extractInvariantsV2Struct(yamlText) {
     const bfsMatch = yamlText.match(/bfs_max_routes:\s*(\d+)/);
     if (bfsMatch) result.bfs_max_routes = parseInt(bfsMatch[1], 10);
 
-    // Extract contract_symmetry ids
-    const symBlock = yamlText.match(/contract_symmetry:\s*\n([\s\S]*?)(?=\n\s{0,6}\w+:|$)/);
+    // Extract contract_symmetry entries (support `name:` and `id:`)
+    const symBlock = extractV2Section('contract_symmetry');
     if (symBlock) {
-        const idMatches = symBlock[1].matchAll(/- id:\s*(\S+)/g);
-        for (const m of idMatches) result.contract_symmetry.push(m[1]);
+        const entries = parseListEntries(symBlock);
+        for (const { name, body } of entries) {
+            result.contract_symmetry.push(name);
+            // Track api_endpoint / path_template per entry for SHIFTING detection
+            const epMatch = body.match(/(?:api_endpoint|path_template):\s*(\S+)/);
+            if (epMatch) {
+                if (!result.contract_symmetry_endpoints) result.contract_symmetry_endpoints = {};
+                result.contract_symmetry_endpoints[name] = epMatch[1];
+            }
+        }
     }
 
     return result;
@@ -345,14 +420,25 @@ export function classifyV2ContractDiff(options) {
 }
 
 /**
- * Extract the YAML block for a specific id: from a list.
+ * Extract the YAML block for a specific name/id entry from a list.
+ * Supports both `- name: <val>` and `- id: <val>` forms (per spec §5c).
  */
 function extractIdSection(yamlText, id) {
     if (!yamlText) return '';
     const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const pattern = new RegExp(`- id:\\s*${escapedId}[\\s\\S]*?(?=\\n\\s*- id:|$)`, 'm');
-    const match = yamlText.match(pattern);
-    return match ? match[0] : '';
+    // Find the start of the entry line
+    const startPat = new RegExp(`(^|\\n)([ \\t]*)- (?:name|id):\\s*${escapedId}(\\n|$)`);
+    const startMatch = startPat.exec(yamlText);
+    if (!startMatch) return '';
+    const startIdx = startMatch.index + (startMatch[1] === '\n' ? 1 : 0);
+    const entryIndent = startMatch[2];
+    // Find next sibling entry at same indent level
+    const siblingPat = new RegExp(`\\n${entryIndent}- (?:name|id):`, 'g');
+    siblingPat.lastIndex = startIdx + 1;
+    const siblingMatch = siblingPat.exec(yamlText);
+    return siblingMatch
+        ? yamlText.slice(startIdx, siblingMatch.index)
+        : yamlText.slice(startIdx);
 }
 
 /**

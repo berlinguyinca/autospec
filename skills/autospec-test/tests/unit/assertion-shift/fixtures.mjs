@@ -503,6 +503,281 @@ export const FIXTURES = [
 `,
         expected: { gate_passed: false, reason: 'assertion_loosening', any_bucket: 'LOOSENING' },
     },
+
+    // ── v2 contract diff fixtures (spec §5c) ──────────────────────────────────
+    // These exercise assertion-shift-v2-buckets.mjs via the second-pass handler
+    // in assertion-shift-classifier.mjs when .autospec/test.yml appears in diff.
+
+    {
+        id: 'v2-01',
+        description: 'v2: remove invariants[] entry → LOOSENING',
+        filePath: '.autospec/test.yml',
+        commitMessages: 'chore: remove invariant\n',
+        nonTestFilesChanged: [],
+        diff: `diff --git a/.autospec/test.yml b/.autospec/test.yml
+index abc..def 100644
+--- a/.autospec/test.yml
++++ b/.autospec/test.yml
+@@ -10,7 +10,3 @@ e2e:
+   invariants_v2:
+     enabled: true
+-    structural_invariants:
+-      - name: dashboard-done-items-editable
+-        selector: "[data-done-item]"
+-        require_affordance: edit
+`,
+        expected: { gate_passed: false, reason: 'assertion_loosening', any_bucket: 'LOOSENING' },
+    },
+
+    {
+        id: 'v2-02',
+        description: 'v2: narrow apply_on_routes → LOOSENING',
+        filePath: '.autospec/test.yml',
+        commitMessages: 'chore: narrow routes\n',
+        nonTestFilesChanged: [],
+        diff: `diff --git a/.autospec/test.yml b/.autospec/test.yml
+index abc..def 100644
+--- a/.autospec/test.yml
++++ b/.autospec/test.yml
+@@ -5,14 +5,12 @@ e2e:
+   invariants_v2:
+     enabled: true
+     structural_invariants:
+       - name: dashboard-done-items-editable
+         selector: "[data-done-item]"
+         require_affordance: edit
+-        apply_on_routes:
+-          - /dashboard
+-          - /archive
++        apply_on_routes:
++          - /dashboard
+`,
+        expected: { gate_passed: false, reason: 'assertion_loosening', any_bucket: 'LOOSENING' },
+    },
+
+    {
+        id: 'v2-03',
+        description: 'v2: lower require_count_at_least → LOOSENING',
+        filePath: '.autospec/test.yml',
+        commitMessages: 'chore: lower count\n',
+        nonTestFilesChanged: [],
+        diff: `diff --git a/.autospec/test.yml b/.autospec/test.yml
+index abc..def 100644
+--- a/.autospec/test.yml
++++ b/.autospec/test.yml
+@@ -5,8 +5,8 @@ e2e:
+   invariants_v2:
+     enabled: true
+     structural_invariants:
+       - name: dashboard-done-items-editable
+-        require_count_at_least: 5
++        require_count_at_least: 1
+`,
+        expected: { gate_passed: false, reason: 'assertion_loosening', any_bucket: 'LOOSENING' },
+    },
+
+    {
+        id: 'v2-04',
+        description: 'v2: mismatch_action hard_fail → warn_only → LOOSENING',
+        filePath: '.autospec/test.yml',
+        commitMessages: 'chore: soften mismatch action\n',
+        nonTestFilesChanged: [],
+        diff: `diff --git a/.autospec/test.yml b/.autospec/test.yml
+index abc..def 100644
+--- a/.autospec/test.yml
++++ b/.autospec/test.yml
+@@ -5,7 +5,7 @@ e2e:
+   invariants_v2:
+     enabled: true
+     window_contracts:
+       - name: streak-window
+-        mismatch_action: hard_fail
++        mismatch_action: warn_only
+`,
+        expected: { gate_passed: false, reason: 'assertion_loosening', any_bucket: 'LOOSENING' },
+    },
+
+    {
+        id: 'v2-05',
+        description: 'v2: lower bfs_max_routes → LOOSENING',
+        filePath: '.autospec/test.yml',
+        commitMessages: 'chore: reduce crawl depth\n',
+        nonTestFilesChanged: [],
+        diff: `diff --git a/.autospec/test.yml b/.autospec/test.yml
+index abc..def 100644
+--- a/.autospec/test.yml
++++ b/.autospec/test.yml
+@@ -14,3 +14,3 @@ e2e:
+   invariants_v2:
+-    bfs_max_routes: 20
++    bfs_max_routes: 5
+`,
+        expected: { gate_passed: false, reason: 'assertion_loosening', any_bucket: 'LOOSENING' },
+    },
+
+    {
+        id: 'v2-06',
+        description: 'v2: remove affordance_patterns[] entry → LOOSENING',
+        filePath: '.autospec/test.yml',
+        commitMessages: 'chore: remove affordance pattern\n',
+        nonTestFilesChanged: [],
+        diff: `diff --git a/.autospec/test.yml b/.autospec/test.yml
+index abc..def 100644
+--- a/.autospec/test.yml
++++ b/.autospec/test.yml
+@@ -14,5 +14,3 @@ e2e:
+   invariants_v2:
+     affordance_patterns:
+       - button[data-action=edit]
+-      - a[href*=/edit]
+`,
+        expected: { gate_passed: false, reason: 'assertion_loosening', any_bucket: 'LOOSENING' },
+    },
+
+    {
+        id: 'v2-07',
+        description: 'v2: add new invariants[] entry → STRENGTHENING (gate passes)',
+        filePath: '.autospec/test.yml',
+        commitMessages: 'feat: add new invariant\n',
+        nonTestFilesChanged: ['src/dashboard.ts'],
+        diff: `diff --git a/.autospec/test.yml b/.autospec/test.yml
+index abc..def 100644
+--- a/.autospec/test.yml
++++ b/.autospec/test.yml
+@@ -12,3 +12,7 @@ e2e:
+   invariants_v2:
+     enabled: true
++    structural_invariants:
++      - name: family-member-editable
++        selector: "[data-family-member]"
++        require_affordance: edit
+`,
+        expected: { gate_passed: true, any_bucket: 'STRENGTHENING' },
+    },
+
+    {
+        id: 'v2-08',
+        description: 'v2: add window_contracts[] entry → STRENGTHENING (gate passes)',
+        filePath: '.autospec/test.yml',
+        commitMessages: 'feat: add window contract\nJUSTIFICATION: new API endpoint\n',
+        nonTestFilesChanged: ['src/api.ts'],
+        diff: `diff --git a/.autospec/test.yml b/.autospec/test.yml
+index abc..def 100644
+--- a/.autospec/test.yml
++++ b/.autospec/test.yml
+@@ -12,3 +12,7 @@ e2e:
+   invariants_v2:
+     enabled: true
++    window_contracts:
++      - name: family-streak-window
++        ui_attribute: data-window-days
++        api_param: from
+`,
+        expected: { gate_passed: true, any_bucket: 'STRENGTHENING' },
+    },
+
+    {
+        id: 'v2-09',
+        description: 'v2: widen apply_on_routes → STRENGTHENING (gate passes)',
+        filePath: '.autospec/test.yml',
+        commitMessages: 'feat: widen route coverage\n',
+        nonTestFilesChanged: ['src/archive.ts'],
+        diff: `diff --git a/.autospec/test.yml b/.autospec/test.yml
+index abc..def 100644
+--- a/.autospec/test.yml
++++ b/.autospec/test.yml
+@@ -5,11 +5,12 @@ e2e:
+   invariants_v2:
+     enabled: true
+     structural_invariants:
+       - name: dashboard-done-items-editable
+         apply_on_routes:
+           - /dashboard
++          - /archive
+`,
+        expected: { gate_passed: true, any_bucket: 'STRENGTHENING' },
+    },
+
+    {
+        id: 'v2-10',
+        description: 'v2: raise require_count_at_least → STRENGTHENING (gate passes)',
+        filePath: '.autospec/test.yml',
+        commitMessages: 'feat: require more items\n',
+        nonTestFilesChanged: ['src/dashboard.ts'],
+        diff: `diff --git a/.autospec/test.yml b/.autospec/test.yml
+index abc..def 100644
+--- a/.autospec/test.yml
++++ b/.autospec/test.yml
+@@ -5,8 +5,8 @@ e2e:
+   invariants_v2:
+     enabled: true
+     structural_invariants:
+       - name: dashboard-done-items-editable
+-        require_count_at_least: 1
++        require_count_at_least: 5
+`,
+        expected: { gate_passed: true, any_bucket: 'STRENGTHENING' },
+    },
+
+    {
+        id: 'v2-11',
+        description: 'v2: raise bfs_max_routes → STRENGTHENING (gate passes)',
+        filePath: '.autospec/test.yml',
+        commitMessages: 'feat: increase crawl coverage\n',
+        nonTestFilesChanged: ['src/routes.ts'],
+        diff: `diff --git a/.autospec/test.yml b/.autospec/test.yml
+index abc..def 100644
+--- a/.autospec/test.yml
++++ b/.autospec/test.yml
+@@ -12,3 +12,3 @@ e2e:
+   invariants_v2:
+-    bfs_max_routes: 5
++    bfs_max_routes: 20
+`,
+        expected: { gate_passed: true, any_bucket: 'STRENGTHENING' },
+    },
+
+    {
+        id: 'v2-12',
+        description: 'v2: change invariant selector (new component) → SHIFTING (justified)',
+        filePath: '.autospec/test.yml',
+        commitMessages: 'refactor: rename component selector\nJUSTIFICATION: component renamed from task-row to item-row\n',
+        nonTestFilesChanged: ['src/components/ItemRow.tsx'],
+        diff: `diff --git a/.autospec/test.yml b/.autospec/test.yml
+index abc..def 100644
+--- a/.autospec/test.yml
++++ b/.autospec/test.yml
+@@ -5,8 +5,8 @@ e2e:
+   invariants_v2:
+     enabled: true
+     structural_invariants:
+       - name: dashboard-done-items-editable
+-        selector: "[data-task-row]"
++        selector: "[data-item-row]"
+`,
+        expected: { gate_passed: true, any_bucket: 'SHIFTING' },
+    },
+
+    {
+        id: 'v2-13',
+        description: 'v2: change path_template in contract_symmetry → SHIFTING (justified)',
+        filePath: '.autospec/test.yml',
+        commitMessages: 'refactor: update API path\nJUSTIFICATION: API endpoint renamed from /api/timeline to /api/events\n',
+        nonTestFilesChanged: ['src/api/events.ts'],
+        diff: `diff --git a/.autospec/test.yml b/.autospec/test.yml
+index abc..def 100644
+--- a/.autospec/test.yml
++++ b/.autospec/test.yml
+@@ -5,8 +5,8 @@ e2e:
+   invariants_v2:
+     enabled: true
+     contract_symmetry:
+       - name: streak-task-must-be-editable
+-        api_endpoint: /api/timeline
++        api_endpoint: /api/events
+`,
+        expected: { gate_passed: true, any_bucket: 'SHIFTING' },
+    },
 ];
 
 export default FIXTURES;
