@@ -80,7 +80,7 @@ if (d[0].mismatch_action !== 'hard_fail') { console.error('expected hard_fail, g
     # Set up a fake repo with a doc that has mismatch_action: warn scope
     mkdir -p "$WORK/repo/docs" "$WORK/repo/.git"
     git -C "$WORK/repo" init -q
-    git -C "$WORK/repo" commit --allow-empty -m "init"
+    git -C "$WORK/repo" -c user.email="test@test.com" -c user.name="Test" commit --allow-empty -m "init"
 
     cat > "$WORK/repo/docs/MANUAL.md" <<'MD'
 # Manual
@@ -129,7 +129,7 @@ if (d.passed !== true) {
 @test "check-doc-drift: drift in hard_fail scope → exit 1 + drift populated" {
     mkdir -p "$WORK/repo/docs" "$WORK/repo/.git"
     git -C "$WORK/repo" init -q
-    git -C "$WORK/repo" commit --allow-empty -m "init"
+    git -C "$WORK/repo" -c user.email="test@test.com" -c user.name="Test" commit --allow-empty -m "init"
 
     cat > "$WORK/repo/docs/MANUAL.md" <<'MD'
 # Manual
@@ -173,7 +173,7 @@ if (d.passed !== false) {
 @test "check-doc-drift: no drift → exit 0 + both drift arrays empty" {
     mkdir -p "$WORK/repo/docs" "$WORK/repo/.git"
     git -C "$WORK/repo" init -q
-    git -C "$WORK/repo" commit --allow-empty -m "init"
+    git -C "$WORK/repo" -c user.email="test@test.com" -c user.name="Test" commit --allow-empty -m "init"
 
     cat > "$WORK/repo/docs/MANUAL.md" <<'MD'
 # Manual
