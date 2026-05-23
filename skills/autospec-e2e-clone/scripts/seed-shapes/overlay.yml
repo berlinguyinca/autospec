@@ -1,0 +1,23 @@
+# seed-shapes/overlay.yml — Clone-specific shape overrides for autospec-e2e-clone.
+#
+# Merge order (shallow per shape key):
+#   1. autospec-test canonical catalog  ($AUTOSPEC_SCRIPTS_DIR/seed-shapes/catalog.yml)
+#   2. This overlay                     (skills/autospec-e2e-clone/scripts/seed-shapes/overlay.yml)
+#   Overlay entries win over catalog entries for the same shape key.
+#
+# To override a shape, add an entry here with the same key as in catalog.yml.
+# Supported fields per shape:
+#   description:     (string) human-readable override description
+#   predicate_sql:   (string) SQL WHERE fragment override
+#   predicate_jsonpath: (string) JSONPath filter override
+#   template:        (map) column -> value or "faker:<method>" expression
+#
+# Example — override task_done_today to use a non-default column name:
+#
+# task_done_today:
+#   predicate_sql: "completed_at >= date('now') AND completed_at < date('now', '+1 day')"
+#   template:
+#     completed_at: "faker:date.recent"
+#
+# This file is intentionally empty by default. Add entries when the clone's
+# snapshot schema differs from the canonical catalog assumptions.
