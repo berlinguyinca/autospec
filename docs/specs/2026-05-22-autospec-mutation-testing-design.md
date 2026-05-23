@@ -98,7 +98,7 @@ Operator-tunable via per-language `negative-path-patterns.yml` overlay in the ta
 2. **Phase M2** — `bash-mutate.mjs` + `mutation-adapters/bash-mutate.sh` (bash mutation is custom-built since no off-the-shelf tool exists; ship first to validate the architecture on autospec itself). ~1 PR.
 3. **Phase M3** — Per-language adapters for Stryker (Node), mutmut (Python), go-mutesting (Go). ~1 PR. Each adapter is a thin wrapper invoking the language-native tool with per-file scoping.
 4. **Phase M4** — `scripts/run-mutation-test.sh` orchestrator + `scripts/qa-phase4.sh` Phase 4 QA chain wiring + opt-in scoping + `tests/run-mutation-test.bats` (7 cases). ~1 PR.
-5. **Phase M5** — `check-negative-path-pairs.sh` + assertion-density floor + integration tests against 3 synthetic targets (bash, node, python). ~1 PR.
+5. **Phase M5** — `scripts/check-negative-path-pairs.sh` + `--assertion-density` flag in `scripts/lint-implementation.sh` + `negative-path-patterns.yml` overlay + integration tests (`tests/mutation-integration.bats`, 8 cases) against 3 synthetic targets (`tests/fixtures/mutation-integration/{bash,node,python}`). ~1 PR.
 
 All 5 phases carry `priority:high` so they ship before queued docs-amendment-style work.
 

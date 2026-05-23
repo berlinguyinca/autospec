@@ -1,0 +1,22 @@
+# negative-path-patterns.yml — overlay for check-negative-path-pairs.sh
+# Spec §6: per-language pattern overrides for negative-path pair heuristic.
+# Leave a key absent to use the built-in default.
+#
+# Default patterns (built into check-negative-path-pairs.sh):
+#   positive_pattern: (should|when).*(success|valid|pass|works|returns|succeed)
+#   negative_pattern: (should|when).*(fail|invalid|reject|throws|errors|error)
+
+# Global overrides (used when no per-language key matches):
+positive_pattern: (should|when).*\b(success|valid|pass|works|returns|succeed)\b
+negative_pattern: (should|when).*\b(fail|invalid|reject|throws|errors|error)\b
+
+# Per-language overrides (future extension point):
+# bash:
+#   positive_pattern: "..."
+#   negative_pattern: "..."
+# node:
+#   positive_pattern: "..."
+#   negative_pattern: "..."
+# python:
+#   positive_pattern: "..."
+#   negative_pattern: "..."
