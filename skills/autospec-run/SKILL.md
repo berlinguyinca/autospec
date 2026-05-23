@@ -451,7 +451,21 @@ issues unblock the queue before continuing with normal feature work.
 > `process(ISSUE)` dispatches a **foreground subagent** (wait for return) with this prompt:
 >
 > **Prompt construction (cache-prefix + dynamic suffix):**
-> Before dispatch, the orchestrator builds the subagent prompt using `bundle-and-dispatch.sh`:
+> Before dispatch, the orchestrator builds the subagent prompt. Two options:
+>
+> **Option A (recommended): `gen-implementer-prompt.sh`** — standalone assembler:
+>    ```bash
+>    _body_file=$(mktemp -t autospec-body-XXXXXX.md)
+>    trap 'rm -f "$_body_file"' EXIT
+>    gh issue view <ISSUE> --json body --jq '.body' > "$_body_file"
+>    combined_prompt=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/gen-implementer-prompt.sh" \
+>      --issue-body "$_body_file" \
+>      --branch "<BRANCH>" \
+>      --issue-labels "<ISSUE_LABELS>" \
+>      --repo "<REPO>")
+>    ```
+>
+> **Option B (legacy): `bundle-and-dispatch.sh`** — wraps bundle-static-context internally:
 >
 > 1. **Static cached prefix + dynamic suffix** — call `bundle-and-dispatch.sh` to assemble the combined prompt:
 >    ```bash
