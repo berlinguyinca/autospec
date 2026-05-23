@@ -1,0 +1,39 @@
+sources:
+  - kind: postgres
+    dsn_env: PROD_DB_URL
+    tables_full:
+      - users
+      - products
+    tables_sample:
+      events: 10000
+      logs: 5000
+  - kind: s3
+    bucket: prod-assets
+    sample_prefix_count: 100
+  - kind: filesystem
+    paths:
+      - /var/data/uploads
+    sample_files_per_dir: 50
+
+anonymize:
+  rules:
+    - table: users
+      columns:
+        email: hash_with_domain
+        ssn: redact
+        name: replace_with_faker
+
+scale_down:
+  default_sample: 10000
+  foreign_key_aware: true
+
+edge_case_seed:
+  consume_from: .autospec/test.yml
+  seed_shapes_catalog: seed-shapes/catalog.yml
+
+expose:
+  kind: docker_compose
+  compose_file: deploy/docker-compose.clone.yml
+  url_template: "http://localhost:8080"
+  health_endpoint: /health
+  ready_wait_secs: 60

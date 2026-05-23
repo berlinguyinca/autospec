@@ -27,3 +27,6 @@ build/
 # Allow .autospec/ inside synthetic test targets
 !skills/autospec-shared/test-targets/**/.autospec/
 !skills/autospec-shared/test-targets/**/.autospec/**
+# Allow .autospec/ inside autospec-e2e-clone contract-loader fixtures
+!skills/autospec-e2e-clone/tests/unit/fixtures/**/.autospec/
+!skills/autospec-e2e-clone/tests/unit/fixtures/**/.autospec/**

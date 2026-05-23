@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-clone-contract.schema.json",
+  "title": "autospec-e2e-clone contract",
+  "description": "Schema for .autospec/clone.yml — the autospec-e2e-clone skill contract file. Declares snapshot sources, anonymization rules, scale-down config, edge-case seeding, and expose adapter.",
+  "type": "object",
+  "required": ["sources", "expose"],
+  "additionalProperties": false,
+  "properties": {
+    "sources": {
+      "type": "array",
+      "description": "List of data sources to snapshot. At least one required.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["kind"],
+        "additionalProperties": true,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["postgres", "mysql", "sqlite", "s3", "filesystem", "custom_cmd"],
+            "description": "Source adapter kind."
+          },
+          "dsn_env": {
+            "type": "string",
+            "description": "Environment variable name containing the connection DSN (postgres/mysql/sqlite)."
+          },
+          "tables_full": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Tables to clone in full (no sampling)."
+          },
+          "tables_sample": {
+            "type": "object",
+            "additionalProperties": { "type": "integer", "minimum": 1 },
+            "description": "Tables to clone with row-count sampling. Keys are table names, values are row counts."
+          },
+          "bucket": {
+            "type": "string",
+            "description": "S3 bucket name (kind: s3)."
+          },
+          "sample_prefix_count": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum number of objects per S3 prefix to include (kind: s3)."
+          },
+          "paths": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Filesystem paths to snapshot (kind: filesystem)."
+          },
+          "sample_files_per_dir": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum files per directory to include (kind: filesystem)."
+          },
+          "snapshot_cmd": {
+            "type": "string",
+            "description": "Custom command to run for snapshot (kind: custom_cmd)."
+          }
+        }
+      }
+    },
+    "anonymize": {
+      "type": "object",
+      "description": "PII anonymization configuration.",
+      "additionalProperties": false,
+      "properties": {
+        "rules": {
+          "type": "array",
+          "description": "Per-table anonymization rules.",
+          "items": {
+            "type": "object",
+            "required": ["table", "columns"],
+            "additionalProperties": false,
+            "properties": {
+              "table": {
+                "type": "string",
+                "description": "Table name to apply rules to."
+              },
+              "columns": {
+                "type": "object",
+                "description": "Column → anonymization strategy mapping.",
+                "additionalProperties": {
+                  "type": "string",
+                  "enum": [
+                    "hash_with_domain",
+                    "redact",
+                    "scrub_to_country_code",
+                    "replace_with_faker",
+                    "scrub_to_subnet"
+                  ]
+                }
+              },
+              "pii_assertions": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "SQL assertions that must return 0 rows post-anonymization."
+              }
+            }
+          }
+        },
+        "reversible_map_path": {
+          "type": "string",
+          "description": "Path template for the reversible mapping file (supports <sha> placeholder)."
+        }
+      }
+    },
+    "scale_down": {
+      "type": "object",
+      "description": "Scale-down sampling configuration.",
+      "additionalProperties": false,
+      "properties": {
+        "default_sample": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Default row count for sampled tables not explicitly listed in tables_sample."
+        },
+        "foreign_key_aware": {
+          "type": "boolean",
+          "description": "When true, rows referenced by sampled rows are included (referential integrity)."
+        }
+      }
+    },
+    "edge_case_seed": {
+      "type": "object",
+      "description": "Edge-case seed configuration.",
+      "additionalProperties": false,
+      "properties": {
+        "consume_from": {
+          "type": "string",
+          "description": "Path to autospec-test contract file to read edge_case_seeds.require_shapes from."
+        },
+        "seed_shapes_catalog": {
+          "type": "string",
+          "description": "Path to seed-shapes catalog YAML (default: $AUTOSPEC_SCRIPTS_DIR/seed-shapes/catalog.yml)."
+        }
+      }
+    },
+    "expose": {
+      "type": "object",
+      "description": "URL exposure adapter configuration.",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["docker_compose", "k8s_ephemeral_namespace", "dedicated_staging_slot", "custom_cmd"],
+          "description": "Expose adapter kind."
+        },
+        "compose_file": {
+          "type": "string",
+          "description": "Path to docker-compose file (kind: docker_compose)."
+        },
+        "url_template": {
+          "type": "string",
+          "description": "URL template for the exposed clone (e.g. http://localhost:8080)."
+        },
+        "health_endpoint": {
+          "type": "string",
+          "description": "HTTP path for health check polling (e.g. /health)."
+        },
+        "ready_wait_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Seconds to wait for health endpoint to respond before failing."
+        },
+        "up_cmd": {
+          "type": "string",
+          "description": "Custom command to bring the clone up (kind: custom_cmd)."
+        },
+        "down_cmd": {
+          "type": "string",
+          "description": "Custom command to bring the clone down (kind: custom_cmd)."
+        },
+        "namespace": {
+          "type": "string",
+          "description": "Kubernetes namespace to create (kind: k8s_ephemeral_namespace)."
+        },
+        "manifests_dir": {
+          "type": "string",
+          "description": "Directory containing Kubernetes manifests (kind: k8s_ephemeral_namespace)."
+        },
+        "slot_name": {
+          "type": "string",
+          "description": "Staging slot name (kind: dedicated_staging_slot)."
+        }
+      }
+    }
+  }
+}
