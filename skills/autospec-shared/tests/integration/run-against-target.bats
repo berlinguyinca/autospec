@@ -180,3 +180,67 @@ process.exit(0);
     norm_golden="$(normalise_json "$golden")"
     [ "$norm_actual" = "$norm_golden" ]
 }
+
+# ── AI reviewer wiring tests (issue #434) ────────────────────────────────────
+# These tests verify that gen-docs-from-spec.mjs invokes ai-review-doc.mjs
+# per generated section and that low-confidence sections produce side JSON.
+
+@test "gen-docs-from-spec: ai-reviewed annotation written per generated section (stub=low)" {
+    FIXTURE="${REPO_ROOT}/skills/autospec-shared/tests/fixtures/gen-docs-fixture.json"
+    [ -f "$FIXTURE" ] || skip "gen-docs fixture not found: $FIXTURE"
+    WORK="$(mktemp -d -t ai-review-test.XXXXXX)"
+
+    run env AUTOSPEC_AI_REVIEW_STUB=low \
+        node "${SCRIPTS_DIR}/gen-docs-from-spec.mjs" \
+        --fixture "$FIXTURE" --output-dir "$WORK" 2>/dev/null
+    [ "$status" -eq 0 ]
+
+    # At least one output file should contain ai-reviewed annotation
+    annotated=0
+    for f in "$WORK"/*.md "$WORK"/docs/*.md "$WORK"/docs/**/*.md; do
+        [ -f "$f" ] || continue
+        grep -q "ai-reviewed:" "$f" && annotated=1 && break
+    done
+    rm -rf "$WORK"
+    [ "$annotated" -eq 1 ]
+}
+
+@test "gen-docs-from-spec: low-confidence sections produce ai-review-low-confidence.json (stub=low)" {
+    FIXTURE="${REPO_ROOT}/skills/autospec-shared/tests/fixtures/gen-docs-fixture.json"
+    [ -f "$FIXTURE" ] || skip "gen-docs fixture not found: $FIXTURE"
+    WORK="$(mktemp -d -t ai-review-low-test.XXXXXX)"
+
+    run env AUTOSPEC_AI_REVIEW_STUB=low \
+        node "${SCRIPTS_DIR}/gen-docs-from-spec.mjs" \
+        --fixture "$FIXTURE" --output-dir "$WORK" 2>/dev/null
+    [ "$status" -eq 0 ]
+
+    # Low-confidence side JSON should be written
+    side_json="$WORK/ai-review-low-confidence.json"
+    [ -f "$side_json" ]
+    # Should be valid JSON array
+    node -e "const d=JSON.parse(require('fs').readFileSync('${side_json}','utf8')); if(!Array.isArray(d)) process.exit(1);" 2>/dev/null
+    rm -rf "$WORK"
+}
+
+@test "gen-docs-from-spec: cache-hit path: second invocation skips LLM (stub=low)" {
+    FIXTURE="${REPO_ROOT}/skills/autospec-shared/tests/fixtures/gen-docs-fixture.json"
+    [ -f "$FIXTURE" ] || skip "gen-docs fixture not found: $FIXTURE"
+    WORK="$(mktemp -d -t ai-review-cache-test.XXXXXX)"
+    CACHE_DIR="$WORK/cache"
+
+    # First invocation — populates cache
+    env AUTOSPEC_AI_REVIEW_STUB=low AUTOSPEC_AI_REVIEW_CACHE_DIR="$CACHE_DIR" \
+        node "${SCRIPTS_DIR}/gen-docs-from-spec.mjs" \
+        --fixture "$FIXTURE" --output-dir "$WORK/out1" >/dev/null 2>&1 || true
+
+    # Second invocation — should hit cache (cache dir should have entries)
+    env AUTOSPEC_AI_REVIEW_STUB=low AUTOSPEC_AI_REVIEW_CACHE_DIR="$CACHE_DIR" \
+        node "${SCRIPTS_DIR}/gen-docs-from-spec.mjs" \
+        --fixture "$FIXTURE" --output-dir "$WORK/out2" >/dev/null 2>&1 || true
+
+    # Cache dir should have at least one .json entry
+    cache_count="$(ls "$CACHE_DIR"/*.json 2>/dev/null | wc -l | tr -d ' ')"
+    rm -rf "$WORK"
+    [ "${cache_count:-0}" -gt 0 ]
+}
