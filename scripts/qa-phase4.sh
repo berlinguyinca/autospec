@@ -30,27 +30,40 @@ BASE_REF="${AUTOSPEC_BASE_REF:-origin/main}"
 ISSUE_LABELS=""
 ISSUE_BODY_FILE=""
 DRY_RUN=0
+_THIS_SCRIPT="$0"
+
+_next_arg() { printf '%s' "${1:-}"; }
 
 while [ $# -gt 0 ]; do
-    _arg="$1"
-    _val="${2:-}"
-    case "$_arg" in
-        --pr)           PR="$_val";           shift 2 ;;
-        --issue)        ISSUE="$_val";        shift 2 ;;
-        --base)         BASE_REF="$_val";     shift 2 ;;
-        --issue-labels) ISSUE_LABELS="$_val"; shift 2 ;;
-        --issue-body)   ISSUE_BODY_FILE="$_val"; shift 2 ;;
-        --dry-run)      DRY_RUN=1;            shift   ;;
+    case "$1" in
+        --pr)
+            PR="$(_next_arg "${2:-}")"
+            shift 2 ;;
+        --issue)
+            ISSUE="$(_next_arg "${2:-}")"
+            shift 2 ;;
+        --base)
+            BASE_REF="$(_next_arg "${2:-}")"
+            shift 2 ;;
+        --issue-labels)
+            ISSUE_LABELS="$(_next_arg "${2:-}")"
+            shift 2 ;;
+        --issue-body)
+            ISSUE_BODY_FILE="$(_next_arg "${2:-}")"
+            shift 2 ;;
+        --dry-run)
+            DRY_RUN=1
+            shift ;;
         --help)
-            sed -n '2,/^set -eu/p' "$0" | grep '^#' | sed 's/^# \?//'
+            sed -n '2,/^set -eu/p' "$_THIS_SCRIPT" | grep '^#' | sed 's/^# \?//'
             exit 0 ;;
         *)
-            printf 'qa-phase4.sh: unknown argument: %s\n' "$_arg" >&2
+            printf 'qa-phase4.sh: unknown argument: %s\n' "$1" >&2
             exit 2 ;;
     esac
 done
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$_THIS_SCRIPT")" && pwd)"
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 # ── Step 1: lint-implementation.sh ───────────────────────────────────────────
@@ -66,8 +79,8 @@ else
             "$LINT_SCRIPT" "${PR:+ $PR}" "${ISSUE:+ --issue $ISSUE}"
     else
         LINT_ARGS=""
-        [ -n "$PR" ]    && LINT_ARGS="$LINT_ARGS $PR"
-        [ -n "$ISSUE" ] && LINT_ARGS="$LINT_ARGS --issue $ISSUE"
+        if [ -n "$PR" ];    then LINT_ARGS="$LINT_ARGS $PR";            fi
+        if [ -n "$ISSUE" ]; then LINT_ARGS="$LINT_ARGS --issue $ISSUE"; fi
         set +e
         # shellcheck disable=SC2086
         bash "$LINT_SCRIPT" $LINT_ARGS 2>&1
@@ -115,8 +128,8 @@ else
             "$MUTATION_SCRIPT" "$BASE_REF" "$ISSUE_LABELS"
     else
         MUTATION_ARGS="--base $BASE_REF"
-        [ -n "$ISSUE_LABELS" ]    && MUTATION_ARGS="$MUTATION_ARGS --issue-labels $ISSUE_LABELS"
-        [ -n "$ISSUE_BODY_FILE" ] && MUTATION_ARGS="$MUTATION_ARGS --issue-body $ISSUE_BODY_FILE"
+        if [ -n "$ISSUE_LABELS" ];    then MUTATION_ARGS="$MUTATION_ARGS --issue-labels $ISSUE_LABELS"; fi
+        if [ -n "$ISSUE_BODY_FILE" ]; then MUTATION_ARGS="$MUTATION_ARGS --issue-body $ISSUE_BODY_FILE"; fi
         MUTATION_ARGS="$MUTATION_ARGS --repo-root $REPO_ROOT"
 
         set +e
