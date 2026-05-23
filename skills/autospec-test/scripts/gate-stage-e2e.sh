@@ -136,6 +136,49 @@ if [ "$PATTERNS_LEN" -eq 0 ] && [ "$FORBIDDEN_ACK" != "true" ]; then
     exit 2
 fi
 
+# ── Mode II: clone gate hook ──────────────────────────────────────────────────
+# If e2e.clone_url_env is set in the contract AND .autospec/clone.yml exists
+# in the target repo, provision the clone and export the URL into the named
+# env var. Teardown runs automatically on EXIT via the accumulating trap.
+
+CLONE_URL_ENV=$(printf '%s' "$CONTRACT_JSON" | jq -r '.e2e.clone_url_env // empty')
+CLONE_YML="$TARGET_REPO/.autospec/clone.yml"
+CLONE_HOOK="$SCRIPT_DIR/clone-gate-hook.sh"
+
+if [ -n "$CLONE_URL_ENV" ] && [ -f "$CLONE_YML" ] && [ -f "$CLONE_HOOK" ]; then
+    printf 'gate-stage-e2e: Mode II clone gate: provisioning clone (URL → %s)\n' \
+        "$CLONE_URL_ENV" >&2
+
+    # Invoke the hook in a subshell to capture the exported var safely,
+    # then re-export in this shell so Playwright picks it up.
+    CLONE_URL_VALUE=$(bash "$CLONE_HOOK" "$TARGET_REPO" "$CLONE_URL_ENV" 2>&1) || {
+        clone_rc=$?
+        printf 'gate-stage-e2e: clone-gate-hook failed (exit %s) — refusing to run E2E against unknown URL\n' \
+            "$clone_rc" >&2
+        emit_result false "clone_provision_failed" \
+            '{"e2e":{"passed":false,"reason":"clone_provision_failed"}}' '{}'
+        exit 2
+    }
+
+    # Extract the URL from the hook's stdout (last non-empty line is the URL)
+    CLONE_URL=$(printf '%s' "$CLONE_URL_VALUE" | grep -v '^clone-gate-hook:' | tail -1 | tr -d '[:space:]')
+    if [ -n "$CLONE_URL" ]; then
+        export "${CLONE_URL_ENV}=${CLONE_URL}"
+        printf 'gate-stage-e2e: Mode II clone URL exported: %s=%s\n' \
+            "$CLONE_URL_ENV" "$CLONE_URL" >&2
+    fi
+
+    # Register teardown via accumulating trap (runs on EXIT of this gate script)
+    CLONE_SKILL_DIR="$(cd "$SCRIPT_DIR/../../autospec-e2e-clone/scripts" 2>/dev/null && pwd)" || true
+    if [ -n "$CLONE_SKILL_DIR" ] && [ -f "$CLONE_SKILL_DIR/teardown.sh" ]; then
+        add_exit_trap "bash '${CLONE_SKILL_DIR}/teardown.sh' '${TARGET_REPO}' 2>/dev/null || true"
+        printf 'gate-stage-e2e: teardown registered for %s on EXIT\n' "$TARGET_REPO" >&2
+    fi
+elif [ -n "$CLONE_URL_ENV" ] && [ ! -f "$CLONE_YML" ]; then
+    printf 'gate-stage-e2e: WARN: e2e.clone_url_env=%s set but .autospec/clone.yml not found — skipping clone provisioning\n' \
+        "$CLONE_URL_ENV" >&2
+fi
+
 # ── Resolve Playwright config ─────────────────────────────────────────────────
 
 PW_RESOLVER="$SCRIPT_DIR/playwright-config-resolver.mjs"
