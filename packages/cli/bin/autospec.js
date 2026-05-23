@@ -24,15 +24,21 @@ function usage() {
 Usage: autospec <subcommand> [options]
 
 Subcommands:
-  init       Bootstrap a target repo (.autospec/test.yml + initial scopes)
-  install    Install autospec skills and scripts into your harness
-  --version  Print version
-  --help     Show this help
+  init        Bootstrap a target repo (.autospec/test.yml + initial scopes)
+  install     Install autospec skills and scripts into your harness
+  status      List installed skills, versions, and cache-hit-rate
+  upgrade     Fetch latest autospec and reinstall skills
+  uninstall   Remove autospec skills from harness paths (preserves ~/.autospec/)
+  --version   Print version
+  --help      Show this help
 
 Examples:
   autospec init
   autospec install
   autospec install --dry-run
+  autospec status
+  autospec upgrade --dry-run
+  autospec uninstall --yes
 `);
 }
 
@@ -56,6 +62,15 @@ switch (cmd) {
     break;
   case 'install':
     runScript('install', rest);
+    break;
+  case 'status':
+    runScript('status', rest);
+    break;
+  case 'upgrade':
+    runScript('upgrade', rest);
+    break;
+  case 'uninstall':
+    runScript('uninstall', rest);
     break;
   case '--version':
   case '-v':
