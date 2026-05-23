@@ -1,0 +1,4 @@
+id,email,ssn,phone,name
+1,alice@example.com,123-45-6789,+49 123 456 789,Alice Smith
+2,bob@test.org,987-65-4321,+1 800 555 1234,Bob Jones
+3,carol@domain.net,111-22-3333,+44 20 7946 0123,Carol Brown
