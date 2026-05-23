@@ -796,73 +796,62 @@ EOF
 # Flags test blocks (bats @test / JS it() / Python def test_) that have zero
 # assert/expect/run/grep calls. Emits ASSERTION_DENSITY:<file>:<line>: <desc>
 
+# _density_flush RULE FILE LINE HAS_ASSERT IN_BLOCK_REF HAS_ASSERT_REF — emit if no assertion
+_density_flush() {
+    local diff_file="$1" block_start="$2" has_assert="$3"
+    if [ "$has_assert" -eq 0 ]; then
+        emit_capped "ASSERTION_DENSITY" "$diff_file" "$block_start" \
+            "test block has no assert/expect/run/grep call — add a real assertion"
+    fi
+}
+
+# _density_scan_file DIFF_FILE — scan added lines for zero-assertion test blocks
+_density_scan_file() {
+    local diff_file="$1"
+    local in_block=0 block_start=0 has_assert=0 block_lang="" lineno content raw
+    while IFS= read -r raw; do
+        lineno="$(printf '%s' "$raw" | cut -d: -f1)"
+        content="$(printf '%s' "$raw" | cut -d: -f2-)"
+        # bats @test block start
+        if printf '%s' "$content" | grep -qE '^[+]?[[:space:]]*@test[[:space:]]+"'; then
+            [ "$in_block" -eq 1 ] && _density_flush "$diff_file" "$block_start" "$has_assert"
+            in_block=1; block_start="$lineno"; has_assert=0; block_lang="bats"; continue
+        fi
+        # JS/TS it()/test() block start
+        if printf '%s' "$content" | grep -qE '^[+]?[[:space:]]*(it|test)[[:space:]]*\('; then
+            [ "$in_block" -eq 1 ] && _density_flush "$diff_file" "$block_start" "$has_assert"
+            in_block=1; block_start="$lineno"; has_assert=0; block_lang="js"; continue
+        fi
+        # Python def test_ block start
+        if printf '%s' "$content" | grep -qE '^[+]?[[:space:]]*def[[:space:]]+test_'; then
+            [ "$in_block" -eq 1 ] && _density_flush "$diff_file" "$block_start" "$has_assert"
+            in_block=1; block_start="$lineno"; has_assert=0; block_lang="python"; continue
+        fi
+        [ "$in_block" -eq 0 ] && continue
+        # Assertion presence check
+        if printf '%s' "$content" | grep -qE '\b(assert|expect|run|grep|check|verify|assertEqual|assertIn|assertTrue|assertFalse|assertRaises)\b'; then
+            has_assert=1
+        fi
+        # Bats block end on closing brace
+        if [ "$block_lang" = "bats" ] && printf '%s' "$content" | grep -qE '^[+]?[[:space:]]*\}[[:space:]]*$'; then
+            _density_flush "$diff_file" "$block_start" "$has_assert"
+            in_block=0; has_assert=0
+        fi
+    done <<EOF
+$(get_added_lines_with_lineno "$diff_file")
+EOF
+    # Flush last open block
+    [ "$in_block" -eq 1 ] && _density_flush "$diff_file" "$block_start" "$has_assert"
+}
+
 detect_assertion_density() {
     while IFS= read -r diff_file; do
         [ -z "$diff_file" ] && continue
-        # Only scan test files
         if ! is_test_file "$diff_file"; then continue; fi
         case "$diff_file" in
             *.md|*.txt|*.diff|*.json|*.yaml|*.yml) continue ;;
         esac
-
-        local in_block=0
-        local block_start=0
-        local has_assert=0
-        local block_lang=""
-
-        while IFS= read -r raw; do
-            lineno="$(printf '%s' "$raw" | cut -d: -f1)"
-            content="$(printf '%s' "$raw" | cut -d: -f2-)"
-
-            # Detect test block start — bats, JS/TS, Python
-            if printf '%s' "$content" | grep -qE '^[+]?[[:space:]]*@test[[:space:]]+"'; then
-                # Flush prior block
-                if [ "$in_block" -eq 1 ] && [ "$has_assert" -eq 0 ]; then
-                    emit_capped "ASSERTION_DENSITY" "$diff_file" "$block_start" \
-                        "test block has no assert/expect/run/grep call — add a real assertion"
-                fi
-                in_block=1; block_start="$lineno"; has_assert=0; block_lang="bats"
-                continue
-            fi
-            if printf '%s' "$content" | grep -qE '^[+]?[[:space:]]*(it|test)[[:space:]]*\('; then
-                if [ "$in_block" -eq 1 ] && [ "$has_assert" -eq 0 ]; then
-                    emit_capped "ASSERTION_DENSITY" "$diff_file" "$block_start" \
-                        "test block has no assert/expect/run/grep call — add a real assertion"
-                fi
-                in_block=1; block_start="$lineno"; has_assert=0; block_lang="js"
-                continue
-            fi
-            if printf '%s' "$content" | grep -qE '^[+]?[[:space:]]*def[[:space:]]+test_'; then
-                if [ "$in_block" -eq 1 ] && [ "$has_assert" -eq 0 ]; then
-                    emit_capped "ASSERTION_DENSITY" "$diff_file" "$block_start" \
-                        "test block has no assert/expect/run/grep call — add a real assertion"
-                fi
-                in_block=1; block_start="$lineno"; has_assert=0; block_lang="python"
-                continue
-            fi
-
-            [ "$in_block" -eq 0 ] && continue
-
-            # Detect assertion presence
-            if printf '%s' "$content" | grep -qE '\b(assert|expect|run|grep|check|verify|assertEqual|assertIn|assertTrue|assertFalse|assertRaises)\b'; then
-                has_assert=1
-            fi
-            # Bats block end
-            if [ "$block_lang" = "bats" ] && printf '%s' "$content" | grep -qE '^[+]?[[:space:]]*\}[[:space:]]*$'; then
-                if [ "$has_assert" -eq 0 ]; then
-                    emit_capped "ASSERTION_DENSITY" "$diff_file" "$block_start" \
-                        "test block has no assert/expect/run/grep call — add a real assertion"
-                fi
-                in_block=0; has_assert=0
-            fi
-        done <<EOF
-$(get_added_lines_with_lineno "$diff_file")
-EOF
-        # Flush last open block
-        if [ "$in_block" -eq 1 ] && [ "$has_assert" -eq 0 ]; then
-            emit_capped "ASSERTION_DENSITY" "$diff_file" "$block_start" \
-                "test block has no assert/expect/run/grep call — add a real assertion"
-        fi
+        _density_scan_file "$diff_file"
     done <<EOF
 $(get_diff_files)
 EOF

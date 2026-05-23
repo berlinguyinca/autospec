@@ -90,6 +90,52 @@ _extract_test_name() {
     fi
 }
 
+# Classify test names from a file into pos_tmp and neg_tmp temp files
+_classify_test_names() {
+    local file="$1" pos_tmp="$2" neg_tmp="$3"
+    local lineno=0 test_name
+    while IFS= read -r line; do
+        lineno=$((lineno + 1))
+        test_name="$(_extract_test_name "$line")"
+        [ -z "$test_name" ] && continue
+        if printf '%s' "$test_name" | grep -qiE "$POSITIVE_PATTERN"; then
+            printf '%d:%s\n' "$lineno" "$test_name" >> "$pos_tmp"
+        elif printf '%s' "$test_name" | grep -qiE "$NEGATIVE_PATTERN"; then
+            printf '%s\n' "$test_name" >> "$neg_tmp"
+        fi
+    done < "$file"
+}
+
+# Emit WARN for each positive test in pos_tmp that lacks a negative sibling in neg_tmp
+_emit_missing_pairs() {
+    local file="$1" pos_tmp="$2" neg_tmp="$3"
+    local entry pos_line pos_name subject pat first_word found
+    while IFS= read -r entry; do
+        [ -z "$entry" ] && continue
+        pos_line="$(printf '%s' "$entry" | cut -d: -f1)"
+        pos_name="$(printf '%s' "$entry" | cut -d: -f2-)"
+        [ -z "$pos_name" ] && continue
+        subject="$(printf '%s' "$pos_name" \
+            | sed -E "s/ (success|valid|pass|works|returns|succeed|should|when).*//i" \
+            | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')"
+        found=0
+        if [ -s "$neg_tmp" ]; then
+            if [ -n "$subject" ]; then
+                pat="$(printf '%s' "$subject" | sed 's/[[:space:]]\{1,\}/.*/g')"
+                grep -qiE "$pat" "$neg_tmp" 2>/dev/null && found=1
+            fi
+            if [ "$found" -eq 0 ]; then
+                first_word="$(printf '%s' "$subject" | cut -d' ' -f1)"
+                [ -n "$first_word" ] && grep -qiF "$first_word" "$neg_tmp" 2>/dev/null && found=1
+            fi
+        fi
+        if [ "$found" -eq 0 ]; then
+            printf 'WARN:MISSING_NEGATIVE_PATH:%s:%s: test [%s] has no negative-path sibling\n' \
+                "$file" "$pos_line" "$pos_name"
+        fi
+    done < "$pos_tmp"
+}
+
 # Analyze a single test file for missing negative-path pairs
 _check_file() {
     local file="$1"
@@ -97,63 +143,12 @@ _check_file() {
         printf 'check-negative-path-pairs.sh: file not found: %s\n' "$file" >&2
         return
     fi
-
     local pos_tmp neg_tmp
     pos_tmp="$(mktemp -t negpath-pos.XXXXXX)"
     neg_tmp="$(mktemp -t negpath-neg.XXXXXX)"
-    # No RETURN trap — inline cleanup to avoid bash RETURN trap leaks (feedback_bash_return_trap_leak.md)
-
-    local lineno=0
-    local test_name
-    while IFS= read -r line; do
-        lineno=$((lineno + 1))
-        test_name="$(_extract_test_name "$line")"
-        [ -z "$test_name" ] && continue
-
-        if printf '%s' "$test_name" | grep -qiE "$POSITIVE_PATTERN"; then
-            printf '%d:%s\n' "$lineno" "$test_name" >> "$pos_tmp"
-        elif printf '%s' "$test_name" | grep -qiE "$NEGATIVE_PATTERN"; then
-            printf '%s\n' "$test_name" >> "$neg_tmp"
-        fi
-    done < "$file"
-
-    # For each positive test, look for a negative sibling
-    local entry pos_line pos_name subject pat first_word found
-    while IFS= read -r entry; do
-        [ -z "$entry" ] && continue
-        pos_line="$(printf '%s' "$entry" | cut -d: -f1)"
-        pos_name="$(printf '%s' "$entry" | cut -d: -f2-)"
-        [ -z "$pos_name" ] && continue
-
-        # Extract subject: words before the positive keyword
-        subject="$(printf '%s' "$pos_name" \
-            | sed -E "s/ (success|valid|pass|works|returns|succeed|should|when).*//i" \
-            | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')"
-
-        found=0
-        if [ -s "$neg_tmp" ]; then
-            if [ -n "$subject" ]; then
-                pat="$(printf '%s' "$subject" | sed 's/[[:space:]]\{1,\}/.*/g')"
-                if grep -qiE "$pat" "$neg_tmp" 2>/dev/null; then
-                    found=1
-                fi
-            fi
-            # Lenient: first word of subject matches any negative test
-            if [ "$found" -eq 0 ]; then
-                first_word="$(printf '%s' "$subject" | cut -d' ' -f1)"
-                if [ -n "$first_word" ] && grep -qiF "$first_word" "$neg_tmp" 2>/dev/null; then
-                    found=1
-                fi
-            fi
-        fi
-
-        if [ "$found" -eq 0 ]; then
-            printf 'WARN:MISSING_NEGATIVE_PATH:%s:%s: test [%s] has no negative-path sibling\n' \
-                "$file" "$pos_line" "$pos_name"
-        fi
-    done < "$pos_tmp"
-
-    # Inline cleanup
+    # No RETURN trap — inline cleanup (feedback_bash_return_trap_leak.md)
+    _classify_test_names "$file" "$pos_tmp" "$neg_tmp"
+    _emit_missing_pairs "$file" "$pos_tmp" "$neg_tmp"
     rm -f "$pos_tmp" "$neg_tmp"
 }
 
