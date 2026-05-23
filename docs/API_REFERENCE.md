@@ -143,6 +143,26 @@ Exit: 0 = success, 1 = usage/file error, 2 = LLM escalation failed.
   generated: false
 -->
 
+### `gen-implementer-prompt.sh`
+
+Composes the Phase 4 implementer dispatch prompt via `bundle-static-context.sh --role implementer`
+(static cached prefix) plus a deterministic dynamic suffix from the issue body and branch name.
+Zero LLM calls. Standalone alternative to `bundle-and-dispatch.sh`.
+
+```
+Usage: bash scripts/gen-implementer-prompt.sh --issue-body <file> --branch <name>
+                                               [--issue-labels <csv>] [--repo <owner/repo>]
+```
+
+Exit: 0 = success, 1 = missing required arg or file not found.
+
+<!-- autospec-doc-scope:
+  src: ["tests/gen-implementer-prompt.bats", "tests/fixtures/gen-implementer-prompt/issue-438.md"]
+  reason: "Bats unit tests and fixtures for gen-implementer-prompt.sh"
+  mismatch_action: warn
+  generated: false
+-->
+
 ### `gen-pr-report.sh`
 
 100% template-driven PR comment renderer. Reads gate JSON (Stage 1 + Stage 2 + Stage 2.5 results),
