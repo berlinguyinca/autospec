@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "status": "pass",
+  "outcome": "PASS",
+  "metrics": [
+    {"label": "test suite", "passed": true, "failure_reason": ""},
+    {"label": "coverage", "passed": true, "failure_reason": ""}
+  ],
+  "coding_time_used": "12m",
+  "coding_time_budget": "30m",
+  "iter_count": 2,
+  "max_iters": 5
+}

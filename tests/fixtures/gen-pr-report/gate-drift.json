@@ -1,0 +1,13 @@
+{
+  "passed": false,
+  "status": "fail",
+  "outcome": "DRIFT_ONLY",
+  "metrics": [
+    {"label": "test suite", "passed": true, "failure_reason": ""},
+    {"label": "doc drift", "passed": false, "failure_reason": "docs/API_REFERENCE.md section stale"}
+  ],
+  "coding_time_used": "15m",
+  "coding_time_budget": "30m",
+  "iter_count": 3,
+  "max_iters": 5
+}

@@ -1,0 +1,13 @@
+{
+  "passed": false,
+  "status": "fail",
+  "outcome": "BEHIND_REBASED",
+  "metrics": [
+    {"label": "rebase check", "passed": false, "failure_reason": "branch is 3 commits behind main"},
+    {"label": "test suite", "passed": true, "failure_reason": ""}
+  ],
+  "coding_time_used": "8m",
+  "coding_time_budget": "30m",
+  "iter_count": 1,
+  "max_iters": 5
+}
