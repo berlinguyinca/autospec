@@ -1,0 +1,2 @@
+1. RULE_ID:DUPLICATE_CODE:scripts/example.sh:5: function duplicates logic in scripts/other.sh
+2. Missing test for edge case: empty input

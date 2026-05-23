@@ -1,0 +1,15 @@
+diff --git a/scripts/example.sh b/scripts/example.sh
+new file mode 100755
+index 0000000..1234567
+--- /dev/null
++++ b/scripts/example.sh
+@@ -0,0 +1,10 @@
++#!/usr/bin/env bash
++# scripts/example.sh — example script
++set -eu
++
++main() {
++  echo "hello from example"
++}
++
++main "$@"
