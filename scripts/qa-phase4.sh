@@ -32,18 +32,20 @@ ISSUE_BODY_FILE=""
 DRY_RUN=0
 
 while [ $# -gt 0 ]; do
-    case "$1" in
-        --pr)           PR="$2";             shift 2 ;;
-        --issue)        ISSUE="$2";         shift 2 ;;
-        --base)         BASE_REF="$2";       shift 2 ;;
-        --issue-labels) ISSUE_LABELS="$2";   shift 2 ;;
-        --issue-body)   ISSUE_BODY_FILE="$2"; shift 2 ;;
-        --dry-run)      DRY_RUN=1;           shift   ;;
+    _arg="$1"
+    _val="${2:-}"
+    case "$_arg" in
+        --pr)           PR="$_val";           shift 2 ;;
+        --issue)        ISSUE="$_val";        shift 2 ;;
+        --base)         BASE_REF="$_val";     shift 2 ;;
+        --issue-labels) ISSUE_LABELS="$_val"; shift 2 ;;
+        --issue-body)   ISSUE_BODY_FILE="$_val"; shift 2 ;;
+        --dry-run)      DRY_RUN=1;            shift   ;;
         --help)
             sed -n '2,/^set -eu/p' "$0" | grep '^#' | sed 's/^# \?//'
             exit 0 ;;
         *)
-            printf 'qa-phase4.sh: unknown argument: %s\n' "$1" >&2
+            printf 'qa-phase4.sh: unknown argument: %s\n' "$_arg" >&2
             exit 2 ;;
     esac
 done
