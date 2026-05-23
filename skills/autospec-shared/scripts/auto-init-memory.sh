@@ -60,8 +60,32 @@ Memory types (mempalace wings):
 - **procedural** — playbooks, runbooks, recipes (also see SKILL.md files)
 - **synthesis** — lessons learned (feedback patterns, anti-patterns, gotchas)
 
-Read memories relevant to your task at session start. Write new memories by adding/editing files in `docs/memory/` and updating the index. Mempalace MCP layer (`mempalace search`, `mempalace traverse`, `mempalace kg_query`) is available if your tool supports MCP.
+Read memories relevant to your task at session start. Write new memories by adding/editing files in `docs/memory/` and updating the index. Mempalace MCP layer (`mempalace search`, `mempalace traverse`, `mempalace kg_query`) is auto-installed on first run via pipx/uv/pip (opt out: `AUTOSPEC_SKIP_MEMPALACE_INSTALL=1`).
 AGENTS_BLOCK
+  return 0
+}
+
+_ensure_mempalace_installed() {
+  # Best-effort install of mempalace CLI on first migration. Idempotent — no-op
+  # if already on PATH. Opt out with AUTOSPEC_SKIP_MEMPALACE_INSTALL=1.
+  [ "${AUTOSPEC_SKIP_MEMPALACE_INSTALL:-0}" = "1" ] && return 0
+  command -v mempalace > /dev/null 2>&1 && return 0
+
+  # Prefer pipx (isolated venv per tool), then uv, then pip --user. All silent
+  # failures — mempalace is optional; absence only loses the KG/search overlay.
+  if command -v pipx > /dev/null 2>&1; then
+    pipx install mempalace > /dev/null 2>&1 && \
+      echo "auto-init-memory: installed mempalace via pipx" >&2
+  elif command -v uv > /dev/null 2>&1; then
+    uv tool install mempalace > /dev/null 2>&1 && \
+      echo "auto-init-memory: installed mempalace via uv" >&2
+  elif command -v pip3 > /dev/null 2>&1; then
+    pip3 install --user --quiet mempalace > /dev/null 2>&1 && \
+      echo "auto-init-memory: installed mempalace via pip3 --user" >&2
+  elif command -v pip > /dev/null 2>&1; then
+    pip install --user --quiet mempalace > /dev/null 2>&1 && \
+      echo "auto-init-memory: installed mempalace via pip --user" >&2
+  fi
   return 0
 }
 
@@ -120,6 +144,9 @@ if [ -d "$REPO_PATH" ]; then
 else
   REPO_HAS_DIR=0
 fi
+
+# ── Ensure mempalace CLI (best-effort, optional KG overlay) ──────────────────
+_ensure_mempalace_installed
 
 # ── State matrix ──────────────────────────────────────────────────────────────
 BACKUP_SUFFIX="pre-migration-$(date +%Y%m%d-%H%M%S)"

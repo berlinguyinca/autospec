@@ -32,6 +32,9 @@ setup() {
   # Disable mempalace-mine for all tests (no external dependency)
   export AUTOSPEC_SCRIPTS_DIR="$TMP_DIR/scripts"
   mkdir -p "$AUTOSPEC_SCRIPTS_DIR"
+
+  # Suppress mempalace auto-install in all tests (network + pipx/pip side effects)
+  export AUTOSPEC_SKIP_MEMPALACE_INSTALL=1
 }
 
 teardown() {
@@ -266,4 +269,36 @@ run_script() {
   [ ! -L "$CC_PATH" ]
   [ -d "$CC_PATH" ]
   [ -f "$CC_PATH/feedback_test.md" ]
+}
+
+# ── Mempalace auto-install opt-out ────────────────────────────────────────────
+
+@test "AUTOSPEC_SKIP_MEMPALACE_INSTALL=1 → no install attempted" {
+  # Run a fresh CC_HAS_FILES migration; helper must be a no-op under SKIP=1
+  mkdir -p "$CC_PATH"
+  echo "# m" > "$CC_PATH/feedback_t.md"
+
+  run_script
+  [ "$status" -eq 0 ]
+  # Stderr must NOT mention any installer (pipx/uv/pip)
+  [[ "$output" != *"installed mempalace via"* ]]
+}
+
+@test "mempalace already on PATH → helper is no-op (no install lines logged)" {
+  # Shim a fake mempalace into a tmp bindir at the front of PATH
+  local BIN="$TMP_DIR/bin"
+  mkdir -p "$BIN"
+  cat > "$BIN/mempalace" <<'SHIM'
+#!/usr/bin/env bash
+exit 0
+SHIM
+  chmod +x "$BIN/mempalace"
+
+  mkdir -p "$CC_PATH"
+  echo "# m" > "$CC_PATH/feedback_t.md"
+
+  # Re-run with SKIP unset but mempalace on PATH (helper short-circuits via command -v)
+  run bash -c "cd \"$FAKE_REPO_REAL\" && HOME=\"$HOME\" PATH=\"$BIN:$PATH\" AUTOSPEC_SCRIPTS_DIR=\"$AUTOSPEC_SCRIPTS_DIR\" AUTOSPEC_SKIP_MEMPALACE_INSTALL=0 bash \"$SCRIPT\""
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"installed mempalace via"* ]]
 }
