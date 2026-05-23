@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Autospec — spec → issue tree → autonomous PRs</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-inner">
+      <h1>autospec</h1>
+      <p class="tagline">Multi-harness AI workflow suite:<br>spec → issue tree → autonomous PRs</p>
+      <div class="cta-group">
+        <a class="btn btn-primary" href="https://github.com/berlinguyinca/autospec">GitHub</a>
+        <a class="btn btn-secondary" href="../QUICKSTART.html">Quickstart</a>
+      </div>
+    </div>
+  </header>
+
+  <section class="pitch">
+    <div class="container">
+      <h2>What is autospec?</h2>
+      <p>
+        Autospec turns a natural-language feature description into a fully implemented,
+        reviewed, and merged pull request — autonomously. It works with Claude Code,
+        Codex CLI, and OpenCode.
+      </p>
+      <ol class="steps">
+        <li><strong>Define</strong> — <code>autospec define "build me a TODO list CLI"</code></li>
+        <li><strong>Decompose</strong> — spec becomes a GitHub issue tree, auto-labelled</li>
+        <li><strong>Implement</strong> — each issue gets its own worktree, TDD loop, and self-review</li>
+        <li><strong>Merge</strong> — passing PRs land automatically; failures surface for human review</li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="quickstart-embed">
+    <div class="container">
+      <h2>5-minute Quickstart</h2>
+      <div class="cast-wrapper">
+        <script async id="asciicast-autospec-quickstart"
+          src="https://asciinema.org/a/autospec-quickstart.js"
+          data-src="../quickstart.cast"
+          data-autoplay="0"
+          data-loop="1"
+          data-theme="monokai">
+        </script>
+        <noscript>
+          <pre><code>$ npx autospec init
+✔ autospec initialized
+
+$ autospec define "build me a TODO list CLI"
+[autospec] spec written — 3 issues created
+
+$ autospec run
+[autospec] issue #1: PR #2 opened — LGTM — merging
+[autospec] queue drained</code></pre>
+        </noscript>
+      </div>
+      <p><a href="../QUICKSTART.md">Read the full quickstart →</a></p>
+    </div>
+  </section>
+
+  <section class="docs-links">
+    <div class="container">
+      <h2>Documentation</h2>
+      <ul>
+        <li><a href="../USER_MANUAL.md">User Manual</a></li>
+        <li><a href="../architecture.md">Architecture</a></li>
+        <li><a href="../API_REFERENCE.md">API Reference</a></li>
+        <li><a href="https://github.com/berlinguyinca/autospec/issues">Issues &amp; Roadmap</a></li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      <p>MIT License · <a href="https://github.com/berlinguyinca/autospec">berlinguyinca/autospec</a></p>
+    </div>
+  </footer>
+</body>
+</html>
