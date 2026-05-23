@@ -4,7 +4,6 @@
 // Keep under 120 lines; no framework dependencies.
 
 import { execFileSync } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFileSync } from 'node:fs';
