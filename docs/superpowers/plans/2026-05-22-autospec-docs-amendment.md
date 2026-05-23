@@ -133,11 +133,13 @@ Note: `skills/autospec-shared/` is a new directory housing cross-skill tooling. 
 ### Tasks
 
 <!-- autospec-doc-scope:
-  src: ["skills/autospec-shared/scripts/scan-doc-scope.mjs", "skills/autospec-shared/scripts/check-doc-drift.sh", "tests/unit/test_doc_drift_mismatch_action.bats", ".github/workflows/autospec-doc-drift.yml"]
+  src: ["skills/autospec-shared/scripts/scan-doc-scope.mjs", "skills/autospec-shared/scripts/check-doc-drift.sh", "tests/unit/test_doc_drift_mismatch_action.bats", ".github/workflows/autospec-doc-drift.yml", "tests/classify-model-fit.bats", "tests/fixtures/classify-model-fit/small.md", "tests/fixtures/classify-model-fit/medium.md", "tests/fixtures/classify-model-fit/large.md", "tests/fixtures/classify-model-fit/deep-reasoning.md", "tests/fixtures/classify-model-fit/low-confidence.md"]
   reason: "Phase 2 tasks cover scan-doc-scope.mjs and check-doc-drift.sh implementation"
   mismatch_action: warn
   generated: false
 -->
+
+_Note (2026-05-22): `classify-model-fit.sh` (tooling-opt T2, #460) ships bats coverage under `tests/classify-model-fit.bats` and fixtures under `tests/fixtures/classify-model-fit/`. These are in scope here because the Phase 2 drift checker validates all test coverage patterns. PR #478._
 
 - [ ] **2.1** Write `scan-doc-scope.mjs` exporting `parse(markdownPath): Array<{ heading_path: string, src_globs: string[], visual_glob?: string, generated?: boolean, reason?: string, mismatch_action: 'hard_fail'|'warn', byte_range: [start, end] }>`. Parses `<!-- autospec-doc-scope: ... -->` blocks. Uses YAML inside the comment for structured fields. The `byte_range` covers the section body (from after the comment to the next same-or-higher heading). The `mismatch_action` field defaults to `hard_fail` when absent.
 
