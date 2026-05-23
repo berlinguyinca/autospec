@@ -1,0 +1,3 @@
+sources:
+  - kind: postgres
+    dsn_env: PROD_DB_URL
