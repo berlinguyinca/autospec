@@ -33,6 +33,8 @@ Flags:
   --directives      Reformat each finding as an imperative directive line:
                     \"Fix <RULE_ID>: <imperative action>\"
                     Suitable for injecting into implementer retry prompts.
+  --vacuous-assertions  Run vacuous-assertion detector (bundled in --pre-commit).
+                    Detects 8 patterns where tests always pass regardless of behavior.
 
 RULE_IDs enforced (deterministic detectors):
 
@@ -45,6 +47,12 @@ RULE_IDs enforced (deterministic detectors):
   MOCK_DB           mock/stub near DB-symbol in test diff hunks.
   DOC_OUT_OF_SYNC   Public-surface change (CLI flag/env var/exported func/config key)
                     without a touched doc file (README*, AGENTS.md, docs/**, SKILL.md).
+  VACUOUS_GREP_INVERSE_OR_TRUE  grep -qv ... || true — always passes; assertion is a no-op.
+  VACUOUS_OR_TRUE               || true at end of any test assertion line — masks failures.
+  VACUOUS_TAUTOLOGY             expect(true).toBe(true), assert(1===1), assert True, xit(...).
+  VACUOUS_AC_STUB               @test ... { skip \"auto-stub\" } in tests/ac/ — auto-generated stub.
+  VACUOUS_EMPTY_TEST            Empty test body: it(\"...\", () => {}) or @test with only braces.
+  VACUOUS_NO_ASSERT             Loop or function test body with no assert/expect call (WARN).
 
 RULE_IDs checked by LLM guardian (not this script):
 
@@ -63,6 +71,7 @@ DIFF_FILE=""
 PRE_COMMIT=0
 STAGED=0
 DIRECTIVES=0
+VACUOUS_ASSERTIONS=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -89,6 +98,7 @@ while [ $# -gt 0 ]; do
         --pre-commit)
             PRE_COMMIT=1
             STAGED=1
+            VACUOUS_ASSERTIONS=1
             shift
             ;;
         --staged)
@@ -97,6 +107,10 @@ while [ $# -gt 0 ]; do
             ;;
         --directives)
             DIRECTIVES=1
+            shift
+            ;;
+        --vacuous-assertions)
+            VACUOUS_ASSERTIONS=1
             shift
             ;;
         -*)
@@ -651,6 +665,126 @@ $diff_files
 EOF
 }
 
+# ── §3.1 VACUOUS_* detectors ─────────────────────────────────────────────────
+# Detects 8 vacuous-test patterns where assertions always pass regardless of behavior.
+# Active when --vacuous-assertions or --pre-commit flag is set.
+
+# _vacuous_grep_or_true FILE LINENO CONTENT — check GREP_INVERSE and OR_TRUE patterns
+_vacuous_grep_or_true() {
+    local diff_file="$1" lineno="$2" content="$3"
+    if printf '%s' "$content" | grep -qE 'grep -qv .* \|\| true'; then
+        emit_capped "VACUOUS_GREP_INVERSE_OR_TRUE" "$diff_file" "$lineno" \
+            "\`grep -qv\` with \`|| true\` is a no-op assertion. Use \`! grep -q\` instead."
+        return
+    fi
+    # VACUOUS_OR_TRUE: || true at end of line — only flag in test files
+    if is_test_file "$diff_file"; then
+        if printf '%s' "$content" | grep -qE '\|\| true[[:space:]]*$'; then
+            emit_capped "VACUOUS_OR_TRUE" "$diff_file" "$lineno" \
+                "\`|| true\` at end of assertion masks failure — assertion always exits 0."
+        fi
+    fi
+}
+
+# _vacuous_tautology_and_stubs FILE LINENO CONTENT — check TAUTOLOGY, AC_STUB, EMPTY_TEST
+_vacuous_tautology_and_stubs() {
+    local diff_file="$1" lineno="$2" content="$3"
+    local taut_pat='expect\((true|1)\)\.(toBe|toEqual|toStrictEqual)\(\1\)|assert\(1\s*===?\s*1\)|assert True[[:space:]]*$|xit\(|assert\.ok\(true\)|t\.true\(true\)'
+    if printf '%s' "$content" | grep -qE "$taut_pat"; then
+        emit_capped "VACUOUS_TAUTOLOGY" "$diff_file" "$lineno" \
+            "Tautological assertion — always passes regardless of code under test."
+    fi
+    case "$diff_file" in
+        tests/ac/*)
+            if printf '%s' "$content" | grep -qE 'skip[[:space:]]+"?auto-stub"?'; then
+                emit_capped "VACUOUS_AC_STUB" "$diff_file" "$lineno" \
+                    "Auto-generated stub test with skip — replace with a real assertion."
+            fi ;;
+    esac
+    local empty_js='it\([[:space:]]*["'"'"'][^"'"'"']+["'"'"'][[:space:]]*,[[:space:]]*\(\)[[:space:]]*=>[[:space:]]*\{[[:space:]]*\}'
+    local empty_bats='^[[:space:]]*@test[[:space:]]+"[^"]+"[[:space:]]*\{[[:space:]]*\}[[:space:]]*$'
+    if printf '%s' "$content" | grep -qE "$empty_js"; then
+        emit_capped "VACUOUS_EMPTY_TEST" "$diff_file" "$lineno" \
+            "Empty test body — it() callback has no assertions."
+    fi
+    if printf '%s' "$content" | grep -qE "$empty_bats"; then
+        emit_capped "VACUOUS_EMPTY_TEST" "$diff_file" "$lineno" \
+            "Empty bats @test body — no assertions."
+    fi
+}
+
+# _vacuous_scan_file FILE — dispatch per-line vacuous pattern checks
+_vacuous_scan_file() {
+    local diff_file="$1"
+    while IFS=: read -r lineno content; do
+        _vacuous_grep_or_true "$diff_file" "$lineno" "$content"
+        _vacuous_tautology_and_stubs "$diff_file" "$lineno" "$content"
+    done <<EOF
+$(get_added_lines_with_lineno "$diff_file")
+EOF
+}
+
+# _vacuous_scan_no_assert FILE — warn when a test file has added test blocks with no assert/expect
+# _vacuous_emit_no_assert — emit VACUOUS_NO_ASSERT if test has no assertions
+_vacuous_emit_no_assert() {
+    local diff_file="$1" test_start="$2" test_name="$3" has_assert="$4"
+    if [ "$has_assert" -eq 0 ] && [ -n "$test_name" ]; then
+        emit_capped "VACUOUS_NO_ASSERT" "$diff_file" "$test_start" \
+            "Test '${test_name}' has no assert/run/grep assertion (WARN)."
+    fi
+}
+
+# _vacuous_scan_no_assert FILE — warn when added bats test blocks lack assertions
+_vacuous_scan_no_assert() {
+    local diff_file="$1"
+    local in_test=0 test_start=0 has_assert=0 test_name=""
+
+    while IFS=: read -r lineno content; do
+        # New @test block: flush previous if open
+        if printf '%s' "$content" | grep -qE '^[[:space:]]*@test[[:space:]]'; then
+            if [ "$in_test" -eq 1 ]; then
+                _vacuous_emit_no_assert "$diff_file" "$test_start" "$test_name" "$has_assert"
+            fi
+            in_test=1; has_assert=0; test_start="$lineno"
+            test_name="$(printf '%s' "$content" | grep -oE '"[^"]+"' | head -1 | tr -d '"')"
+            continue
+        fi
+        [ "$in_test" -eq 0 ] && continue
+        # Closing brace: flush and reset
+        if printf '%s' "$content" | grep -qE '^[[:space:]]*\}[[:space:]]*$'; then
+            _vacuous_emit_no_assert "$diff_file" "$test_start" "$test_name" "$has_assert"
+            in_test=0; has_assert=0; test_name=""; continue
+        fi
+        # Assert/expect/run/grep counts as assertion presence
+        if printf '%s' "$content" | grep -qE '\b(assert|expect|run|grep|check|verify)\b'; then
+            has_assert=1
+        fi
+    done <<EOF
+$(get_added_lines_with_lineno "$diff_file")
+EOF
+    # Flush last open test block
+    if [ "$in_test" -eq 1 ]; then
+        _vacuous_emit_no_assert "$diff_file" "$test_start" "$test_name" "$has_assert"
+    fi
+}
+
+detect_vacuous_assertions() {
+    while IFS= read -r diff_file; do
+        [ -z "$diff_file" ] && continue
+        # Only scan test files and source files (skip docs/fixtures)
+        case "$diff_file" in
+            *.md|*.txt|*.diff|*.json|*.yaml|*.yml) continue ;;
+        esac
+        _vacuous_scan_file "$diff_file"
+        # VACUOUS_NO_ASSERT only for test files
+        if is_test_file "$diff_file"; then
+            _vacuous_scan_no_assert "$diff_file"
+        fi
+    done <<EOF
+$(get_diff_files)
+EOF
+}
+
 # ── directives output mode ────────────────────────────────────────────────────
 # Maps each RULE_ID to a short imperative directive line.
 
@@ -667,6 +801,12 @@ rule_directive() {
         HALLUCINATED_API) printf 'Verify the flagged symbol exists in the repo or dependency manifests before using it.' ;;
         DUPLICATE_CODE)  printf 'Reuse the existing helper instead of re-implementing the same logic.' ;;
         INVENTED_CONFIG) printf 'Remove the invented flag/env/key, or amend the issue body to introduce it as in-scope.' ;;
+        VACUOUS_GREP_INVERSE_OR_TRUE) printf 'Replace `grep -qv "X" || true` with `! grep -q "X"` — the current form always exits 0.' ;;
+        VACUOUS_OR_TRUE) printf 'Remove `|| true` from the assertion line so failures propagate correctly.' ;;
+        VACUOUS_TAUTOLOGY) printf 'Replace the tautological assertion with one that checks real output from the code under test.' ;;
+        VACUOUS_AC_STUB) printf 'Replace the auto-stub skip with a real assertion that exercises the acceptance criterion.' ;;
+        VACUOUS_EMPTY_TEST) printf 'Add at least one assertion to the empty test body.' ;;
+        VACUOUS_NO_ASSERT) printf 'Add an assert/expect/run+grep call to the test so it can actually fail.' ;;
         *)               printf 'Fix the flagged %s violation before re-pushing.' "$rule_id" ;;
     esac
 }
@@ -687,6 +827,9 @@ if [ "$DIRECTIVES" -eq 1 ]; then
         detect_todo_left
         detect_mock_db
         detect_doc_out_of_sync
+        if [ "$VACUOUS_ASSERTIONS" -eq 1 ]; then
+            detect_vacuous_assertions
+        fi
     } > "$TMP_FINDINGS" 2>&1
 
     # Reformat each finding as a directive line
@@ -708,6 +851,9 @@ else
     detect_todo_left
     detect_mock_db
     detect_doc_out_of_sync
+    if [ "$VACUOUS_ASSERTIONS" -eq 1 ]; then
+        detect_vacuous_assertions
+    fi
 fi
 
 # Exit with min(FINDINGS_COUNT, FINDINGS_EXIT_CAP)

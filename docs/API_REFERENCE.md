@@ -62,16 +62,28 @@ Exit: 0 = pass, 1 = fail with diagnostics.
 
 ### `lint-implementation.sh`
 
-Scans implementation PRs for 10 rule violations (OUT_OF_SCOPE, MISSING_TEST, COMPLEXITY,
+Scans implementation PRs for rule violations (OUT_OF_SCOPE, MISSING_TEST, COMPLEXITY,
 SECURITY, TODO_LEFT, MOCK_DB, DOC_OUT_OF_SYNC, HALLUCINATED_API, DUPLICATE_CODE,
-INVENTED_CONFIG).
+INVENTED_CONFIG). Also supports `--vacuous-assertions` mode (bundled in `--pre-commit`)
+that detects 6 vacuous-test RULE_IDs: VACUOUS_GREP_INVERSE_OR_TRUE, VACUOUS_OR_TRUE,
+VACUOUS_TAUTOLOGY, VACUOUS_AC_STUB, VACUOUS_EMPTY_TEST, VACUOUS_NO_ASSERT.
 
 ```
 Usage: bash lint-implementation.sh <pr-number> [--repo <owner/repo>]
+       bash lint-implementation.sh --diff-file <path>
+       bash lint-implementation.sh --pre-commit --staged
+       bash lint-implementation.sh --vacuous-assertions --diff-file <path>
        bash lint-implementation.sh --help
 ```
 
 Exit: 0 = pass, non-zero = at least one rule triggered.
+
+<!-- autospec-doc-scope:
+  src: ["tests/unit/test_lint_implementation.bats"]
+  reason: "Bats unit tests for lint-implementation.sh rule detectors including vacuous-assertions"
+  mismatch_action: warn
+  generated: false
+-->
 
 ### `sizing-check.sh`
 
