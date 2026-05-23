@@ -1,0 +1,12 @@
+sources:
+  - kind: postgres
+    dsn_env: PROD_DB_URL
+    tables_full:
+      - products
+      - orders
+    tables_sample:
+      order_items: 2
+
+scale_down:
+  foreign_key_aware: true
+  max_depth: 8
