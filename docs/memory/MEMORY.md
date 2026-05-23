@@ -14,6 +14,7 @@
 - [ROI-check new components](feedback_roi_check_new_components.md) — every new skill/fork/schema needs a named consumer that benefits today; default to invoking upstream over forking
 - [Bash RETURN trap leaks](feedback_bash_return_trap_leak.md) — RETURN traps in bash functions leak into caller frames; never use for local cleanup under set -u. Use inline cleanup instead.
 - [Bash set -e short-circuit aborts](feedback_bash_set_e_short_circuit.md) — `[ test ] && action` aborts under set -e when test fails; use if/then/fi for one-sided conditionals in install.sh.
+- [Mempalace miner flat-form gap](feedback_mempalace_miner_flat_form.md) — M3 miner only matched spec-style nested `metadata.type:`; real CC files use flat `type:`. Always fixture both real-world variants
 - [Heartbeat cross-repo collision](feedback_heartbeat_cross_repo_collision.md) — ~/.autospec/process-heartbeats/ shared across repos; filter by .repo field (now path-scoped via #416 / PR #426)
 - [E2E coverage gate skill — autospec-test family](project_e2e_coverage_gate_design.md) — v1+v2+hardening+caching+docs-amendment ALL SHIPPED 2026-05-22; 47+ PRs across the session
 - [Autospec Phase 2 roadmap](project_autospec_phase2_roadmap.md) — 6 non-tracker fixes SHIPPED 2026-05-22 (#415-#419, #422); 4 tracker stubs queued (#420 mutation, #421 tooling, #423 Skill C, #424 distribution)

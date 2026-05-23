@@ -2,6 +2,8 @@
 name: Autospec design preferences
 description: User's recurring design choices when shaping autospec features — small-LLM target, correctness over speed, tight triggers, conservative guardrails
 type: feedback
+wing: synthesis
+drawer_class: lesson
 originSessionId: 7205d05b-f2fd-4cde-9ced-ecc266a9bc7b
 ---
 When the user runs `/autospec` (or any of the family) on the autospec repo itself, these design choices repeat across sessions and should be assumed unless they say otherwise:

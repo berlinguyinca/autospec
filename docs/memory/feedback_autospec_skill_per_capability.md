@@ -2,6 +2,8 @@
 name: Operator-facing capabilities should be top-level autospec-* skills, not sub-modes
 description: Every distinct operator-facing capability in the autospec family ships as a slash command (skill), with inline sub-modes only as in-flight convenience shortcuts to the same backend
 type: feedback
+wing: synthesis
+drawer_class: lesson
 originSessionId: ff14de95-2db2-420a-9835-0401379148a3
 ---
 When designing a new operator-facing capability in the autospec family

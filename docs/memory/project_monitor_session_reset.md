@@ -2,6 +2,8 @@
 name: autospec-run monitor session-reset feature — brainstorming in progress
 description: Feature to make the Phase 4 monitor self-terminate after a batch and relaunch with fresh context; brainstorm started 2026-05-07, waiting for user answer on trigger mechanism
 type: project
+wing: episodic
+drawer_class: session-log
 originSessionId: 82cb28f4-e9f3-4587-b81c-68d4714201c0
 ---
 User request: "ensure that when you use autospec-run that you clear the session from time to time and than resume. It should be stateless itself, since all it does is hand off issues to subtasks."

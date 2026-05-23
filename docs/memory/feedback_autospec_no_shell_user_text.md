@@ -2,6 +2,8 @@
 name: Autospec mode-dispatch must not shell out user text
 description: Self-update / Stop mode (and any future mode-dispatch) sections in autospec skills must be pure prose; never embed bash that consumes the user's free-form request, and never use {FEATURE_DESCRIPTION} as a heredoc body.
 type: feedback
+wing: synthesis
+drawer_class: lesson
 originSessionId: 1fa102a0-c695-404e-879a-47532b04d1ab
 ---
 Mode-dispatch sections (`## Self-update mode`, `## Stop mode`, etc.) in any

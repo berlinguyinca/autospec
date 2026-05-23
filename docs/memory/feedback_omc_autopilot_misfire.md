@@ -2,6 +2,8 @@
 name: OMC autopilot magic-keyword false-trigger from system reminders
 description: OMC's autopilot skill auto-activates when the literal word "AUTOPILOT" appears in a system-reminder hook payload — even though the user never invoked /autopilot. Recovery requires state_write(active=false) + state_clear(skill-active).
 type: feedback
+wing: synthesis
+drawer_class: lesson
 originSessionId: d5e49fd5-4555-4cec-a538-54e67df0904a
 ---
 The oh-my-claudecode plugin's `autopilot` skill has a magic-keyword

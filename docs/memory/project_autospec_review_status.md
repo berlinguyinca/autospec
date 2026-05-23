@@ -2,6 +2,8 @@
 name: autospec-review implementation status
 description: autospec-review SKILL.md fully implemented as of 2026-05-07; all T7-T24 issues merged via PRs #271-#289
 type: project
+wing: episodic
+drawer_class: session-log
 originSessionId: 5e769f84-c8f2-46ae-90c1-f0732ff229db
 ---
 `skills/autospec-review/SKILL.md` is **fully implemented** as of 2026-05-07. All 20 tasks (T7–T24, issues #247–#265) were merged via PRs #271–#289 in a single autospec-run session (~2 hours). The skill is live and invokable via `/autospec-review`.

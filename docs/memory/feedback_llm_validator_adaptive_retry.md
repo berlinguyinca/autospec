@@ -2,6 +2,8 @@
 name: LLM-generated artifact validators must pair with adaptive retry loops
 description: When designing a lint/check for LLM-generated content, design the validator and the retry-with-feedback loop together; one-shot gates leave quality unimproved
 type: feedback
+wing: synthesis
+drawer_class: lesson
 originSessionId: ff14de95-2db2-420a-9835-0401379148a3
 ---
 When designing any validator that gates LLM-generated content (issue

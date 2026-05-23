@@ -2,6 +2,8 @@
 name: validate.sh has named-content checks beyond lock-step
 description: validate.sh checks specific prose phrases in skill files (not just lock-step equality), so renaming or rewriting sections requires updating validate.sh too
 type: feedback
+wing: synthesis
+drawer_class: lesson
 originSessionId: 82cb28f4-e9f3-4587-b81c-68d4714201c0
 ---
 When editing prose inside SKILL.md files, validate.sh enforces named-content checks beyond just lock-step sync. Examples found in practice:

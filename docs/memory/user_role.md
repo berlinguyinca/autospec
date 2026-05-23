@@ -2,6 +2,8 @@
 name: User role - autospec author
 description: User is the author/maintainer of the autospec skill repo at github.com/berlinguyinca/autospec
 type: user
+wing: semantic
+drawer_class: reference
 originSessionId: 7205d05b-f2fd-4cde-9ced-ecc266a9bc7b
 ---
 User (berlinguyinca, berlinguyinca@gmail.com) is the **author and primary maintainer** of the `autospec` skill repository — a multi-harness (Claude Code / OpenCode / Codex CLI) skill family for autonomous end-to-end feature shipping (bootstrap repo → design → decompose into linked GitHub issues → autonomous implementation loop with auto-merge).

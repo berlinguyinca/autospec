@@ -1,26 +1,28 @@
 ---
 name: project-cross-tool-memory-brainstorm
-description: In-design 2026-05-23 — autospec extension for cross-tool persistent memory across CC + Codex + OpenCode trio
-metadata:
+description: SHIPPED 2026-05-23 — autospec cross-tool memory extension fully integrated; M1-M5 merged + migration applied to this repo
+metadata: 
+  node_type: memory
   type: project
   wing: episodic
   drawer_class: session-log
+  originSessionId: 2e9dc40b-7a14-4cff-8d65-1043d1718ed0
 ---
 
-User asked 2026-05-23: "currently codex/claude/etc have no persistent memory between sessions. What is the best approach to solve this and actaully remember the content of a repo. Provide me with different highly rated examples to provide decent cross system memory"
+**Status:** SHIPPED + INTEGRATED on autospec repo (2026-05-23).
 
-**Decision: B+C** — survey-informed autospec extension. Survey landscape covered the highly-rated examples (llmstxt.org, mempalace, MCP memory servers, AGENTS.md convention, Karpathy LLM wiki, Mem0, MemGPT/Letta, Cody, Continue.dev, etc.). Then narrowed to the autospec-extension design.
+**Merged PRs:** #496 (spec/d15cbd9), #503 (M1 auto-init), #504 (M2 AGENTS.md), #505 (M3 mempalace-mine), #506 (M4 SKILL trio wiring), #507 (M5 rollback + integration).
 
-**Locked design decisions:**
-- Q1 memory types: ALL FOUR (semantic + episodic + procedural + synthesis). User: "all of the above"
-- Q2 target tools: i + ii + iii = Claude Code + Codex CLI + OpenCode (the autospec trio; no IDE-level tools in scope)
-- Q3 storage location: A = in-repo, gitted (`docs/memory/`)
-- Q4 directory layout: B = flat dir + `MEMORY.md` index (mirrors existing CC auto-memory pattern; 28 existing files migrate)
-- Q5 per-tool read mechanism: A = per-tool config files point at shared dir (CC via symlink; Codex/OpenCode via AGENTS.md `## Memory inventory` section)
-- Q6 migration: A = symlink CC's auto-memory dir → in-repo dir (one-shot, reversible)
+**Live state on this repo:**
+- `~/.claude/projects/-Users-wohlgemuth-IdeaProjects-autospec/memory/` is symlink → `docs/memory/` (verified)
+- 30 memory files migrated, 29 mined with `wing` + `drawer_class` frontmatter
+- `AGENTS.md` has `## Memory inventory` block (commit da395cf, then auto-init re-appended)
+- mempalace CLI installed at `/Users/wohlgemuth/.local/bin/mempalace`
 
-**Section 1 of design presented:** architecture + integration. Awaiting user confirmation. Sections 2-5 still to present: memory schema/frontmatter, migration playbook, Codex/OpenCode wiring, decision-log appendix with survey embedded.
+**Post-merge bug found + fixed (2026-05-23):** `mempalace-mine.sh` grep pattern `^  type:` only matched the nested-frontmatter form from the spec; actual CC auto-memory files use flat `^type:`. Fix extends miner to try nested → flat → metadata-block → raw frontmatter insertion. Now mines all 4 forms idempotently. PR for the fix going up.
 
-**Why this matters:** the existing CC auto-memory pattern works well WITHIN Claude Code but Codex/OpenCode can't see the 28 saved feedback/project memories. This extension makes the cross-tool autospec workflow durable — saved lessons (no RETURN traps, lockstep duo gap, prompt caching, etc.) become visible to peer-review subagents and OpenCode workers.
+**Why this matters:** the cross-tool autospec workflow (CC↔Codex↔OpenCode) now has durable shared memory. Saved lessons (no RETURN traps, lockstep duo gap, prompt caching) are visible to peer-review subagents and OpenCode workers via the in-repo `docs/memory/` floor + mempalace MCP overlay.
 
-**How to apply when resuming:** confirm Section 1 → present Section 2 (memory schema) → Section 3 (migration playbook) → Section 4 (per-tool wiring) → Section 5 (decision-log + survey appendix) → write spec to `docs/specs/2026-05-23-autospec-cross-tool-memory-design.md` → user review → /writing-plans.
+**How to apply:** When invoking any /autospec-* skill in a new repo, the startup self-update block auto-fires `auto-init-memory.sh` which: (1) computes CC slug path, (2) migrates+symlinks on first run, (3) appends AGENTS.md inventory, (4) mines mempalace metadata. Idempotent <50ms fast-path on subsequent runs. Rollback via `auto-init-memory.sh --rollback`.
+
+Related: [[feedback-mempalace-miner-flat-form]] (new lesson from the post-merge bug).

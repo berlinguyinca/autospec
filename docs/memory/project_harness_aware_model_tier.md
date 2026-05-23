@@ -2,6 +2,8 @@
 name: Harness-aware model tier resolution — in progress
 description: Feature to make autospec auto-detect its harness and use only that harness's models; spec + 6 issues filed 2026-05-07, awaiting run/defer/refine decision
 type: project
+wing: episodic
+drawer_class: session-log
 originSessionId: 82cb28f4-e9f3-4587-b81c-68d4714201c0
 ---
 Spec landed as PR #290 (merged to main 2026-05-07):

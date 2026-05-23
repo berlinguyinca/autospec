@@ -322,3 +322,16 @@ Exit codes from `ci-wait-poll.sh`: 0=pass, 1=fail/stalled, 2=pending, 3=no senti
 ## Batch size policy
 
 Default `AUTOSPEC_BATCH_SIZE=3`; force batch=1 when the next ready issue is `reasoning:deep` (high blast-radius work runs one-at-a-time per monitor session).
+
+## Memory inventory
+
+Persistent cross-session memory lives at [`docs/memory/`](docs/memory/).
+Index: [`docs/memory/MEMORY.md`](docs/memory/MEMORY.md).
+
+Memory types (mempalace wings):
+- **semantic** — codebase facts, architecture, conventions
+- **episodic** — session diary (`docs/memory/diary/`), in-flight project status
+- **procedural** — playbooks, runbooks, recipes (also see SKILL.md files)
+- **synthesis** — lessons learned (feedback patterns, anti-patterns, gotchas)
+
+Read memories relevant to your task at session start. Write new memories by adding/editing files in `docs/memory/` and updating the index. Mempalace MCP layer (`mempalace search`, `mempalace traverse`, `mempalace kg_query`) is available if your tool supports MCP.

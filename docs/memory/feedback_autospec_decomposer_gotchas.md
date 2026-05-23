@@ -2,6 +2,8 @@
 name: Autospec decomposer + lockstep gotchas (new-skill creation)
 description: Non-obvious failure modes when filing autospec issues that create a brand-new multi-harness skill — decomposer must scope first issue to include structural sections, codex/prompt.md needs leading blank line for lockstep
 type: feedback
+wing: synthesis
+drawer_class: lesson
 originSessionId: 7205d05b-f2fd-4cde-9ced-ecc266a9bc7b
 ---
 When the autospec Phase 3 decomposer (or you, manually) splits a "new multi-harness skill" feature into child issues, two non-obvious traps consistently cause cascade failures. Both surfaced on 2026-05-01 during the autospec-listen rollout (issues #36, #42, #101).

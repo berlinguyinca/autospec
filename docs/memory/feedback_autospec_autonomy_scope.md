@@ -2,6 +2,8 @@
 name: /autospec autonomy scope — auto-merge spec PRs, don't ask
 description: User expects /autospec to admin-merge spec PRs and routine workflow plumbing without asking; major gates like run/defer/refine are still OK to surface
 type: feedback
+wing: synthesis
+drawer_class: lesson
 originSessionId: ff14de95-2db2-420a-9835-0401379148a3
 ---
 When running `/autospec`, the user's standing expectation is that the

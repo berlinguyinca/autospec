@@ -2,6 +2,8 @@
 name: Autospec monitor silent-exit recovery pattern
 description: Background autospec monitor agents can exit silently mid-loop without filing a PR, leaving an issue stuck with in-progress-by-bot label — recovery and prompt-hardening notes
 type: feedback
+wing: synthesis
+drawer_class: lesson
 originSessionId: 7205d05b-f2fd-4cde-9ced-ecc266a9bc7b
 ---
 When you launch the Phase 4 autospec monitor as a background subagent, expect that it CAN exit silently after partial progress — typically after 5–10 successful merges, returning a cryptic 1-line summary instead of the expected "issue X processed" report. The previous run aborted with literally `"Apply the gate edits to all 3."` after 9 successful merges; no exception, no failure comment on the stuck issue.
