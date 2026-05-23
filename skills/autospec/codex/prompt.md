@@ -734,14 +734,18 @@ Pass the following prompt verbatim to each background subagent:
 >
 >      **Model tier:** `TIER_B` for normal issues; `TIER_A` for `regression`/`priority:high` issues. Silently fall back to `TIER_A` if `TIER_B` unavailable.
 >
->      **Static cached prefix** — call `bundle-static-context.sh` to emit the reviewer blob:
+>      **Assemble reviewer prompt** — call `gen-reviewer-prompt.sh` to compose the combined prompt (static cached prefix + dynamic suffix):
 >      ```bash
->      reviewer_prefix=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/bundle-static-context.sh" \
->        --role reviewer \
->        --issue-labels "<ISSUE_LABELS>")
+>      _pr_diff_file=$(mktemp -t autospec-pr-diff-XXXXXX.diff)
+>      trap 'rm -f "$_pr_diff_file"' EXIT
+>      gh pr diff <PR> > "$_pr_diff_file"
+>      combined_reviewer_prompt=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/gen-reviewer-prompt.sh" \
+>        --pr-diff "$_pr_diff_file" \
+>        --prev-findings "/tmp/guardian-<PR>.md" \
+>        --issue-labels "<ISSUE_LABELS>" \
+>        --repo "<REPO>")
 >      ```
->      Pass this blob as the first content block of the reviewer subagent prompt with `cache_control: { type: "ephemeral" }`.
->      Append the dynamic suffix: deterministic lint findings from `/tmp/guardian-<PR>.md`, PR diff, issue body, previous-iteration findings (if iter > 1).
+>      Pass `combined_reviewer_prompt` as the reviewer subagent prompt. The static cached prefix is framed by `<!-- CACHE BOUNDARY -->` markers; pass it with `cache_control: { type: "ephemeral" }` so Anthropic's prompt cache can reuse it across inner-loop iterations.
 >
 >      Dispatch ONE **foreground subagent** with this brief:
 >        > You are the implementation reviewer for PR #<PR> on {repo}, closing issue #<ISSUE>.
