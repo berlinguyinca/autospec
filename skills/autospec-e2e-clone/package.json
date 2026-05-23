@@ -1,0 +1,12 @@
+{
+  "name": "autospec-e2e-clone",
+  "version": "0.1.0",
+  "description": "Autospec E2E clone provisioner scripts",
+  "type": "module",
+  "scripts": {
+    "test": "bats tests/unit/anonymize-rules.bats"
+  },
+  "dependencies": {
+    "@faker-js/faker": "^8.4.1"
+  }
+}

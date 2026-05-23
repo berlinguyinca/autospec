@@ -1,0 +1,28 @@
+sources:
+  - kind: postgres
+    dsn_env: PROD_DB_URL
+    tables_full:
+      - users
+      - events
+
+anonymize:
+  rules:
+    - table: users
+      columns:
+        email: hash_with_domain
+        ssn: redact
+        phone: scrub_to_country_code
+        name: replace_with_faker
+      pii_assertions:
+        - "SELECT COUNT(*) FROM users WHERE email NOT LIKE '%@%'"
+    - table: events
+      columns:
+        ip_address: scrub_to_subnet
+  reversible_map_path: .autospec/anonymize-map.<sha>.json
+
+expose:
+  kind: docker_compose
+  compose_file: deploy/docker-compose.clone.yml
+  url_template: "http://localhost:8080"
+  health_endpoint: /health
+  ready_wait_secs: 60
