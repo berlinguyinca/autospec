@@ -109,6 +109,40 @@ Polls GitHub Actions for a PR's CI status until pass/fail/timeout.
 Usage: bash ci-wait.sh <pr-number> [--repo <owner/repo>] [--timeout-secs N]
 ```
 
+### `gen-issue-skeleton.sh`
+
+Renders a structured YAML input into an 11-section issue body and validates it via `lint-issue.sh`.
+
+```
+Usage: bash scripts/gen-issue-skeleton.sh --input <file>
+       bash scripts/gen-issue-skeleton.sh < input.yaml
+```
+
+Exit: 0 = lint pass, 1 = MISSING_FIELD or render error, N = lint finding count.
+
+### `classify-model-fit.sh`
+
+Deterministic ctx/reasoning classifier for autospec issue bodies. Scores `ctx:32k/64k/120k`
+and `reasoning:shallow/medium/deep` from issue body signals (files-to-read count, anchor sizes,
+verb patterns). Escalates to LLM only when `confidence < LLM_ESCALATION_THRESHOLD` (default 0.3).
+Appends one JSON telemetry line per invocation to `.autospec/telemetry/classify-model-fit.jsonl`.
+
+```
+Usage: bash scripts/classify-model-fit.sh <body-file>
+       bash scripts/classify-model-fit.sh <body-file> --json
+Env:   LLM_ESCALATION_THRESHOLD   confidence below this triggers LLM (default: 0.3)
+       AUTOSPEC_FORCE_LLM         set to 1 to always use LLM path
+```
+
+Exit: 0 = success, 1 = usage/file error, 2 = LLM escalation failed.
+
+<!-- autospec-doc-scope:
+  src: ["tests/classify-model-fit.bats", "tests/fixtures/classify-model-fit/small.md", "tests/fixtures/classify-model-fit/medium.md", "tests/fixtures/classify-model-fit/large.md", "tests/fixtures/classify-model-fit/deep-reasoning.md", "tests/fixtures/classify-model-fit/low-confidence.md"]
+  reason: "Bats unit tests and fixtures for classify-model-fit.sh"
+  mismatch_action: warn
+  generated: false
+-->
+
 ## Doc-generation scripts (`$AUTOSPEC_SCRIPTS_DIR`)
 
 Installed by `skills/autospec-shared/install.sh`.
