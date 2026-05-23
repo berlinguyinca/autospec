@@ -8,7 +8,11 @@ __pycache__/
 venv/
 env/
 node_modules/
-dist/
+dist/*
+# Allow dist/homebrew/ for the Homebrew formula source (D3)
+!dist/homebrew
+dist/homebrew/*
+!dist/homebrew/autospec.rb
 build/
 *.log
 *.tmp
