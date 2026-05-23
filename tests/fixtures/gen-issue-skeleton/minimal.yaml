@@ -1,0 +1,26 @@
+issue_id: test-issue-001
+spec_path: docs/specs/2026-05-22-autospec-tooling-optimization-design.md
+spec_url: https://github.com/berlinguyinca/autospec/blob/main/docs/specs/2026-05-22-autospec-tooling-optimization-design.md
+goal_sentence: "Add scripts/gen-issue-skeleton.sh to render structured YAML input into an 11-section issue body."
+files_to_read:
+  - docs/specs/2026-05-22-autospec-tooling-optimization-design.md
+  - scripts/lint-issue.sh
+implementation_scope:
+  - "scripts/gen-issue-skeleton.sh with --input <file> and stdin fallback"
+out_of_scope:
+  - "Model-fit block (owned by T2)"
+implementation_outline_lines:
+  - "Add scripts/gen-issue-skeleton.sh with --input flag"
+  - "Parse required YAML keys from input"
+  - "Substitute into 11-section markdown template"
+  - "Pipe output through scripts/lint-issue.sh"
+tests_required:
+  - "bats tests/gen-issue-skeleton.bats with 3 fixtures"
+acceptance_criteria:
+  - "scripts/gen-issue-skeleton.sh --input minimal.yaml emits 11-section body"
+  - "Output passes scripts/lint-issue.sh with exit 0"
+  - "Missing required YAML field exits non-zero with MISSING_FIELD:<name> on stderr"
+verification:
+  primary_smoke: "bats tests/gen-issue-skeleton.bats"
+  operator_full: "bash scripts/gen-issue-skeleton.sh --input tests/fixtures/gen-issue-skeleton/minimal.yaml | scripts/lint-issue.sh /dev/stdin"
+branch_name: feat/tooling-opt-t1-gen-issue-skeleton
