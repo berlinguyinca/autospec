@@ -1,0 +1,4 @@
+[
+  { "childTable": "order_items", "childCol": "order_id",   "parentTable": "orders",   "parentCol": "id" },
+  { "childTable": "order_items", "childCol": "product_id", "parentTable": "products", "parentCol": "id" }
+]
