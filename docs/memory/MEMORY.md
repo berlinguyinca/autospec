@@ -1,0 +1,32 @@
+- [User role - autospec author](user_role.md) — berlinguyinca authors and maintains the multi-harness autospec skill family
+- [Sync repo before /autospec design phases](feedback_pre_pipeline_sync.md) — check git fetch/status before brainstorming; stale local edits often duplicate landed upstream work
+- [Autospec design preferences](feedback_autospec_design_prefs.md) — small-LLM target (60-120k ctx), correctness>>speed, tight imperative triggers, conservative guardrails, lock-step rule sacred
+- [Autospec monitor exit modes + recovery](feedback_monitor_silent_exit.md) — Phase 4 monitor exits via two known modes: silent-exit (stale worktree + stuck label) and "Prompt is too long" overflow at ~185 tool calls; relaunch is part of the workflow
+- [Autospec decomposer + lockstep gotchas](feedback_autospec_decomposer_gotchas.md) — first new-skill issue MUST include structural sections (Self-update + Model tier + adapter row) or auto-discovery breaks downstream; codex/prompt.md needs leading blank line for lockstep
+- [Admin-merge denial during autospec](feedback_admin_merge_denial.md) — `gh pr merge --admin` blocked by harness hook; AskUserQuestion approval doesn't count, needs settings.json permission rule for Phase 4 to flow
+- [/autospec autonomy scope](feedback_autospec_autonomy_scope.md) — auto-merge spec PRs, collapse low-stakes brainstorm to default-locks, surface only run/defer/refine + destructive-remote actions
+- [OMC autopilot magic-keyword misfire](feedback_omc_autopilot_misfire.md) — system reminders containing "AUTOPILOT" auto-activate OMC autopilot mid-session; recover via state_write(active=false) + state_clear(skill-active)
+- [LLM validator + adaptive retry](feedback_llm_validator_adaptive_retry.md) — pair every LLM-output validator with a 5-attempt retry loop that feeds findings back as directives; one-shot gates leave quality unimproved
+- [Skill per capability](feedback_autospec_skill_per_capability.md) — operator-facing autospec capabilities ship as top-level /autospec-<verb> skills; inline sub-modes are convenience-only shortcuts to the same helper
+- [Autospec mode-dispatch must not shell out user text](feedback_autospec_no_shell_user_text.md) — Self-update / Stop mode sections must be pure prose; no bash heredocs of `{FEATURE_DESCRIPTION}` (placeholder is never substituted) — caused `Shell command failed for pattern "!\` | "` parse errors
+- [validate.sh has named-content checks](feedback_validate_sh_lockstep_checks.md) — renaming SKILL.md prose sections requires updating validate.sh checks too
+- [validate.sh lockstep duo gap](feedback_validate_sh_lockstep_duo_gap.md) — check_lockstep() guards on all 3 trio files; SKILL.md+codex/prompt.md duos fall through silently (now fixed in #415 / PR #425)
+- [ROI-check new components](feedback_roi_check_new_components.md) — every new skill/fork/schema needs a named consumer that benefits today; default to invoking upstream over forking
+- [Bash RETURN trap leaks](feedback_bash_return_trap_leak.md) — RETURN traps in bash functions leak into caller frames; never use for local cleanup under set -u. Use inline cleanup instead.
+- [Bash set -e short-circuit aborts](feedback_bash_set_e_short_circuit.md) — `[ test ] && action` aborts under set -e when test fails; use if/then/fi for one-sided conditionals in install.sh.
+- [Heartbeat cross-repo collision](feedback_heartbeat_cross_repo_collision.md) — ~/.autospec/process-heartbeats/ shared across repos; filter by .repo field (now path-scoped via #416 / PR #426)
+- [E2E coverage gate skill — autospec-test family](project_e2e_coverage_gate_design.md) — v1+v2+hardening+caching+docs-amendment ALL SHIPPED 2026-05-22; 47+ PRs across the session
+- [Autospec Phase 2 roadmap](project_autospec_phase2_roadmap.md) — 6 non-tracker fixes SHIPPED 2026-05-22 (#415-#419, #422); 4 tracker stubs queued (#420 mutation, #421 tooling, #423 Skill C, #424 distribution)
+- [Autospec tooling optimization — queued](project_autospec_tooling_optimization.md) — convert LLM-driven steps to deterministic tools; tracker #421
+- [Autospec init skill — queued](project_autospec_init_skill.md) — was folded into docs amendment (drift gate + reverse-engineer); residual init UX work tracked under Phase 2 distribution (#424)
+- [Autospec mutation testing — queued](project_autospec_mutation_testing.md) — test-of-tests layer: mutation testing gate + assertion-density floor + negative-path-pair lint; tracker #420
+- [Cross-tool memory — SHIPPED](project_cross_tool_memory_brainstorm.md) — M1-M5 all merged PRs #503-#507; CC↔Codex↔OpenCode share docs/memory/ via symlink+AGENTS.md inventory; mempalace MCP indexes (2026-05-23)
+- [Session close 2026-05-22→23](project_2026_05_22_23_session_close.md) — ~105 PRs shipped across 11 feature families; queue drained; CI disabled; cross-tool memory live
+
+<!-- Archived entries (shipped work; kept in dir for git history but not indexed):
+- project_autospec_review_status.md (autospec-review shipped 2026-05-07)
+- project_harness_aware_model_tier.md (harness-aware tier shipped 2026-05-07)
+- project_monitor_session_reset.md (monitor session-reset + guardian fusion shipped)
+- project_turbo_integration_design.md (turbo/autospec integration shipped)
+- project_cross_session_ci_rot.md (cross-session CI rot shipped 2026-05-18)
+-->
