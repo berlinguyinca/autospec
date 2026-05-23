@@ -1,0 +1,25 @@
+sources:
+  - kind: sqlite
+    db_path_env: FIXTURE_SQLITE_PATH
+    tables_full:
+      - items
+      - tags
+
+anonymize:
+  rules:
+    - table: items
+      columns:
+        owner_email: hash_with_domain
+      pii_assertions:
+        - "SELECT COUNT(*) FROM items WHERE owner_email LIKE '%.com' AND owner_email NOT LIKE '%@example.com' = 0"
+
+scale_down:
+  default_sample: 500
+  foreign_key_aware: true
+
+expose:
+  kind: custom_cmd
+  cmd: "echo sqlite:///${FIXTURE_SQLITE_PATH}"
+  url_template: "sqlite:///{{FIXTURE_SQLITE_PATH}}"
+  health_endpoint: ""
+  ready_wait_secs: 5

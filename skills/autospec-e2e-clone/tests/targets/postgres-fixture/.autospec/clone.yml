@@ -1,0 +1,28 @@
+sources:
+  - kind: postgres
+    dsn_env: FIXTURE_POSTGRES_DSN
+    tables_full:
+      - users
+      - events
+
+anonymize:
+  rules:
+    - table: users
+      columns:
+        email: hash_with_domain
+        ssn: redact
+        phone: scrub_to_country_code
+        name: replace_with_faker
+      pii_assertions:
+        - "SELECT COUNT(*) FROM users WHERE ssn IS NOT NULL = 0"
+
+scale_down:
+  default_sample: 1000
+  foreign_key_aware: true
+
+expose:
+  kind: docker_compose
+  compose_file: tests/targets/postgres-fixture/docker-compose.yml
+  url_template: "postgresql://appuser:apppass@localhost:15432/appdb"
+  health_endpoint: ""
+  ready_wait_secs: 30

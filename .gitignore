@@ -30,3 +30,6 @@ build/
 # Allow .autospec/ inside autospec-e2e-clone contract-loader fixtures
 !skills/autospec-e2e-clone/tests/unit/fixtures/**/.autospec/
 !skills/autospec-e2e-clone/tests/unit/fixtures/**/.autospec/**
+# Allow .autospec/ inside autospec-e2e-clone synthetic integration targets (C10)
+!skills/autospec-e2e-clone/tests/targets/**/.autospec/
+!skills/autospec-e2e-clone/tests/targets/**/.autospec/**

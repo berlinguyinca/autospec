@@ -5,20 +5,25 @@ Provision an isolated, scaled-down, anonymized clone of a production environment
 
 ## Self-update mode
 
-Decide this purely from the request text the harness handed you. Do NOT shell out to test the user's free-form request. Read the request, normalize it in your reasoning (collapse whitespace, trim, lowercase), and if the result is exactly `update`, this skill enters self-update mode and does NOT run the normal pipeline.
-
-Placeholder for autospec-discovery registration. The live self-update bash block lands in C10 per lockstep convention. Required here so the decomposer scans a complete structural set during family registration.
+Decide this purely from the request text the harness handed you. Do NOT
+shell out (no `grep`, `sed`, `[[ =~ ]]`, command substitution, etc.) to
+test the user's free-form request — passing it through a shell is what
+historically tripped harness permission engines. Read the request, normalize
+it in your reasoning (collapse whitespace, trim, lowercase), and if the result is
+exactly `update`, this skill enters self-update mode and does NOT run the
+normal pipeline.
 
 1. Detect harness by checking which install path exists for this skill:
    - Claude Code: `~/.claude/skills/autospec-e2e-clone/SKILL.md`
    - OpenCode:    `~/.config/opencode/agent/autospec-e2e-clone.md`
    - Codex CLI:   `~/.codex/prompts/autospec-e2e-clone.md`
 2. Re-install from `main` by piping the canonical installer:
-   ```bash
+   ```
    bash <(curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec-e2e-clone/install.sh) --harness <detected> --update
    ```
+   If multiple harness paths exist, run the one-liner once per detected harness.
 3. Show the diff between the prior installed file(s) and the freshly fetched copy.
-4. Stop. Do not enter any pipeline phase.
+4. Stop. Do not enter any pipeline phase. Print the upgrade summary and return to the user.
 
 If no install path is detected, print `Self-update: no installed copy of autospec-e2e-clone found; run install.sh first.` and exit.
 
@@ -134,7 +139,7 @@ expose:
 | C7 | Expose adapter: docker_compose | Pending |
 | C8 | Expose adapters: k8s + staging_slot + custom_cmd | Pending |
 | C9 | Teardown + autospec-test contract integration | Pending |
-| C10 | Synthetic targets + integration tests + dogfood | Pending |
+| C10 | Synthetic targets + integration tests + dogfood | Done |
 
 ## Constraints
 
