@@ -9,10 +9,10 @@
 #   echo '<contract-json>' | dispatch.sh <action> [adapter-args...]
 #
 # Supported expose.kind values:
-#   docker_compose            → compose.sh  (C7, this PR)
-#   k8s_ephemeral_namespace   → k8s.sh      (C8, deferred)
-#   dedicated_staging_slot    → staging.sh  (C8, deferred)
-#   custom_cmd                → custom.sh   (C8, deferred)
+#   docker_compose            → compose.sh  (C7)
+#   k8s_ephemeral_namespace   → k8s.sh      (C8)
+#   dedicated_staging_slot    → staging.sh  (C8)
+#   custom_cmd                → custom.sh   (C8)
 #
 # Exit codes:
 #   0  success (delegated to adapter)
@@ -86,6 +86,27 @@ expose_health_endpoint=$(printf '%s' "$CONTRACT_JSON" | \
 expose_ready_wait=$(printf '%s' "$CONTRACT_JSON" | \
   python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('expose',{}).get('ready_wait_secs',60))" 2>/dev/null || echo "60")
 
+# k8s fields
+expose_k8s_manifests=$(printf '%s' "$CONTRACT_JSON" | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('expose',{}).get('manifests_dir',''))" 2>/dev/null || true)
+
+expose_k8s_namespace=$(printf '%s' "$CONTRACT_JSON" | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('expose',{}).get('namespace','autospec-clone'))" 2>/dev/null || echo "autospec-clone")
+
+# staging fields
+expose_staging_swap=$(printf '%s' "$CONTRACT_JSON" | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('expose',{}).get('staging',{}).get('swap_cmd',''))" 2>/dev/null || true)
+
+expose_staging_restore=$(printf '%s' "$CONTRACT_JSON" | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('expose',{}).get('staging',{}).get('restore_cmd',''))" 2>/dev/null || true)
+
+# custom_cmd fields
+expose_custom_up=$(printf '%s' "$CONTRACT_JSON" | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('expose',{}).get('custom',{}).get('up_cmd',''))" 2>/dev/null || true)
+
+expose_custom_down=$(printf '%s' "$CONTRACT_JSON" | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('expose',{}).get('custom',{}).get('down_cmd',''))" 2>/dev/null || true)
+
 # ---------------------------------------------------------------------------
 # Dispatch by expose.kind
 # ---------------------------------------------------------------------------
@@ -100,11 +121,53 @@ case "$expose_kind" in
       "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
     ;;
 
-  k8s_ephemeral_namespace|dedicated_staging_slot|custom_cmd)
-    refuse "expose.kind '${expose_kind}' is not yet implemented (deferred to C8)"
+  k8s_ephemeral_namespace)
+    if [ "$ACTION" = "down" ]; then
+      exec bash "$SCRIPT_DIR/k8s.sh" down "$expose_k8s_namespace" \
+        "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
+    else
+      [ -n "$expose_k8s_manifests" ] || die "expose.manifests_dir is required for k8s_ephemeral_namespace kind"
+      exec bash "$SCRIPT_DIR/k8s.sh" up "$expose_k8s_manifests" "$expose_k8s_namespace" \
+        --url "$expose_url_template" \
+        --health "$expose_health_endpoint" \
+        --wait "$expose_ready_wait" \
+        "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
+    fi
+    ;;
+
+  dedicated_staging_slot)
+    if [ "$ACTION" = "down" ]; then
+      exec bash "$SCRIPT_DIR/staging.sh" down \
+        --restore-cmd "$expose_staging_restore" \
+        "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
+    else
+      [ -n "$expose_staging_swap" ] || die "expose.staging.swap_cmd is required for dedicated_staging_slot kind"
+      exec bash "$SCRIPT_DIR/staging.sh" up \
+        --swap-cmd "$expose_staging_swap" \
+        --url "$expose_url_template" \
+        --health "$expose_health_endpoint" \
+        --wait "$expose_ready_wait" \
+        "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
+    fi
+    ;;
+
+  custom_cmd)
+    if [ "$ACTION" = "down" ]; then
+      exec bash "$SCRIPT_DIR/custom.sh" down \
+        --down-cmd "$expose_custom_down" \
+        "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
+    else
+      [ -n "$expose_custom_up" ] || die "expose.custom.up_cmd is required for custom_cmd kind"
+      exec bash "$SCRIPT_DIR/custom.sh" up \
+        --up-cmd "$expose_custom_up" \
+        --url "$expose_url_template" \
+        --health "$expose_health_endpoint" \
+        --wait "$expose_ready_wait" \
+        "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
+    fi
     ;;
 
   *)
-    refuse "unknown expose.kind '${expose_kind}'. Supported: docker_compose (k8s_ephemeral_namespace/dedicated_staging_slot/custom_cmd deferred to C8)"
+    refuse "unknown expose.kind '${expose_kind}'. Supported: docker_compose, k8s_ephemeral_namespace, dedicated_staging_slot, custom_cmd"
     ;;
 esac
