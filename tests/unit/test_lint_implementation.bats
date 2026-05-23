@@ -448,12 +448,9 @@ _vac_diff() {
 
     # Stage a test file with a vacuous grep pattern
     mkdir -p "$TMPDIR_REPO/tests/unit"
-    cat > "$TMPDIR_REPO/tests/unit/test_bad.bats" << 'BATS'
-#!/usr/bin/env bats
-@test "vacuous grep" {
-  grep -qv "foo" somefile || true
-}
-BATS
+    # Write via printf to avoid bats scanning heredoc @test lines
+    printf '#!/usr/bin/env bats\n@test "check vacuous grep pattern" {\n  grep -qv "foo" somefile || true\n}\n' \
+        > "$TMPDIR_REPO/tests/unit/test_bad.bats"
     git -C "$TMPDIR_REPO" add tests/unit/test_bad.bats
 
     run bash -c "cd '$TMPDIR_REPO' && bash '$LINT' --pre-commit --staged"
