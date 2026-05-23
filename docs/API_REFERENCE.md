@@ -143,6 +143,26 @@ Exit: 0 = success, 1 = usage/file error, 2 = LLM escalation failed.
   generated: false
 -->
 
+### `gen-pr-report.sh`
+
+100% template-driven PR comment renderer. Reads gate JSON (Stage 1 + Stage 2 + Stage 2.5 results),
+drift JSON, and loop iteration log; renders the `<!-- autospec-test-report-marker -->` PR comment
+with zero LLM calls. Only non-coreutils dependency is `jq`.
+
+```
+Usage: bash scripts/gen-pr-report.sh --gate <file> [--drift <file>] [--loop-log <file>] [--mode <mode>]
+       bash scripts/gen-pr-report.sh --help
+```
+
+Exit: 0 = success, 1 = missing required input or file not found.
+
+<!-- autospec-doc-scope:
+  src: ["tests/gen-pr-report.bats", "tests/fixtures/gen-pr-report/gate-green.json", "tests/fixtures/gen-pr-report/gate-behind.json", "tests/fixtures/gen-pr-report/gate-max-iters.json", "tests/fixtures/gen-pr-report/gate-drift.json", "tests/fixtures/gen-pr-report/drift-empty.json", "tests/fixtures/gen-pr-report/drift-findings.json", "tests/fixtures/gen-pr-report/loop.log", "tests/fixtures/gen-pr-report/expected-green.md", "tests/fixtures/gen-pr-report/expected-behind-rebased.md", "tests/fixtures/gen-pr-report/expected-max-iters.md", "tests/fixtures/gen-pr-report/expected-drift-only.md"]
+  reason: "Bats unit tests and fixtures for gen-pr-report.sh"
+  mismatch_action: warn
+  generated: false
+-->
+
 ## Doc-generation scripts (`$AUTOSPEC_SCRIPTS_DIR`)
 
 Installed by `skills/autospec-shared/install.sh`.
