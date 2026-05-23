@@ -1,0 +1,83 @@
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish-npm:
+    name: Publish @autospec/cli to npm
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pkg.outputs.version }}
+      tarball_url: ${{ steps.pkg.outputs.tarball_url }}
+      sha256: ${{ steps.sha.outputs.sha256 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Read package version
+        id: pkg
+        working-directory: packages/cli
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tarball_url=https://registry.npmjs.org/@autospec/cli/-/cli-${VERSION}.tgz" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to npm
+        working-directory: packages/cli
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Compute tarball sha256
+        id: sha
+        run: |
+          TARBALL_URL="https://registry.npmjs.org/@autospec/cli/-/cli-${{ steps.pkg.outputs.version }}.tgz"
+          SHA256="$(curl -fsSL "$TARBALL_URL" | sha256sum | awk '{print $1}')"
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+
+  update-tap:
+    name: Open PR on homebrew-autospec tap
+    needs: publish-npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: berlinguyinca/homebrew-autospec
+          token: ${{ secrets.TAP_REPO_TOKEN }}
+          path: tap
+
+      - name: Update formula url and sha256
+        run: |
+          VERSION="${{ needs.publish-npm.outputs.version }}"
+          SHA256="${{ needs.publish-npm.outputs.sha256 }}"
+          TARBALL_URL="${{ needs.publish-npm.outputs.tarball_url }}"
+          sed -i "s|url \".*\"|url \"${TARBALL_URL}\"|" tap/Formula/autospec.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" tap/Formula/autospec.rb
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.TAP_REPO_TOKEN }}
+          path: tap
+          commit-message: "autospec ${{ needs.publish-npm.outputs.version }}"
+          title: "autospec ${{ needs.publish-npm.outputs.version }}"
+          body: |
+            Automated formula bump for autospec ${{ needs.publish-npm.outputs.version }}.
+
+            - url: ${{ needs.publish-npm.outputs.tarball_url }}
+            - sha256: ${{ needs.publish-npm.outputs.sha256 }}
+          branch: "bump/autospec-${{ needs.publish-npm.outputs.version }}"
+          base: main
