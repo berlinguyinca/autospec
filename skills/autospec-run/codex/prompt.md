@@ -47,6 +47,8 @@ if [ "$RC" -ne 0 ]; then
     echo "WARN: self-update skipped (install rc=$RC); continuing on installed version" >&2; exit 0
 fi
 printf '%s\n' "$REMOTE" > "$INSTALLED.tmp" && mv "$INSTALLED.tmp" "$INSTALLED"
+# Auto-init cross-tool memory (idempotent, <50ms fast-path)
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/auto-init-memory.sh"
 echo "[autospec] updated ${LOCAL:-fresh} → $REMOTE"
 ```
 
