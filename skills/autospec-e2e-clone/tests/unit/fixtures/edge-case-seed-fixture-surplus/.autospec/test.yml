@@ -1,0 +1,6 @@
+edge_case_seeds:
+  enforcement: warn_if_missing
+  tasks:
+    require_shapes:
+      - name: task_done_today
+        count_min: 1
