@@ -20,6 +20,50 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const GEN_DOCS_DIR = path.join(__dirname, 'gen-docs');
 
+// ── AI reviewer import ────────────────────────────────────────────────────────
+// Loaded lazily so gen-docs works in envs without the LLM available.
+// Controlled via AUTOSPEC_AI_REVIEW_STUB env var for tests (values: high|medium|low).
+let _reviewFn = null;
+async function getReviewer() {
+  if (_reviewFn) return _reviewFn;
+  try {
+    const mod = await import('./ai-review-doc.mjs');
+    _reviewFn = mod.review;
+  } catch {
+    _reviewFn = null;
+  }
+  return _reviewFn;
+}
+
+/**
+ * Run AI review on a generated section body.
+ * Returns { confidence: 'high'|'medium'|'low', concerns: string[] } or null on error.
+ */
+async function reviewSection(heading, body) {
+  const reviewFn = await getReviewer();
+  if (!reviewFn) return null;
+  const stub = process.env.AUTOSPEC_AI_REVIEW_STUB || null;
+  const cacheDir = process.env.AUTOSPEC_AI_REVIEW_CACHE_DIR || undefined;
+  try {
+    const raw = await reviewFn(
+      { section_heading: heading, section_body: body, scope_globs: [], source_files_text: '' },
+      { stub: stub || undefined, cacheDir }
+    );
+    // review() returns a parsed object { confidence, concerns }
+    if (raw && typeof raw === 'object') return raw;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Append <!-- ai-reviewed: CONFIDENCE --> annotation to markdown content.
+ */
+function annotateContent(content, confidence) {
+  return content.trimEnd() + `\n\n<!-- ai-reviewed: ${confidence} -->\n`;
+}
+
 // ── Generator imports ─────────────────────────────────────────────────────────
 
 const { generate: generateUserManual }   = await import(path.join(GEN_DOCS_DIR, 'user-manual.mjs'));
@@ -158,6 +202,7 @@ function mergeWithExisting(newContent, existingContent) {
  */
 export async function generateDocs({ clusters, specs = [], existingDocs = {}, outputDir = null }) {
   const results = [];
+  const lowConfidenceEntries = [];
 
   for (const generator of GENERATORS) {
     const { path: relPath, content: newContent, section_anchors } = generator({
@@ -167,6 +212,27 @@ export async function generateDocs({ clusters, specs = [], existingDocs = {}, ou
     const existing = existingDocs[relPath] || existingDocs[path.basename(relPath)] || null;
     const { merged, preserved } = mergeWithExisting(newContent, existing);
 
+    // ── AI reviewer pass (spec §7, issue #434) ────────────────────────────────
+    // review() each generated section heading + body; annotate + collect low-confidence.
+    const heading = path.basename(relPath, '.md');
+    const reviewResult = await reviewSection(heading, merged);
+    let finalContent = merged;
+    let reviewConfidence = null;
+
+    if (reviewResult) {
+      reviewConfidence = reviewResult.confidence;
+      finalContent = annotateContent(merged, reviewConfidence);
+      if (reviewConfidence === 'low') {
+        lowConfidenceEntries.push({
+          file: relPath,
+          heading,
+          confidence: 'low',
+          concerns: reviewResult.concerns || [],
+        });
+      }
+    }
+    // ── end AI reviewer pass ──────────────────────────────────────────────────
+
     let written = false;
     if (outputDir) {
       const outPath = path.join(outputDir, relPath);
@@ -174,13 +240,26 @@ export async function generateDocs({ clusters, specs = [], existingDocs = {}, ou
       // Only write if content changed
       let currentContent = null;
       try { currentContent = fs.readFileSync(outPath, 'utf8'); } catch {}
-      if (currentContent !== merged) {
-        fs.writeFileSync(outPath, merged, 'utf8');
+      if (currentContent !== finalContent) {
+        fs.writeFileSync(outPath, finalContent, 'utf8');
         written = true;
       }
     }
 
-    results.push({ path: relPath, content: merged, written, preserved_sections: preserved, section_anchors });
+    results.push({
+      path: relPath,
+      content: finalContent,
+      written,
+      preserved_sections: preserved,
+      section_anchors,
+      ai_review: reviewResult || undefined,
+    });
+  }
+
+  // Write low-confidence side JSON if any found (spec §7b)
+  if (outputDir && lowConfidenceEntries.length > 0) {
+    const sideJsonPath = path.join(outputDir, 'ai-review-low-confidence.json');
+    fs.writeFileSync(sideJsonPath, JSON.stringify(lowConfidenceEntries, null, 2), 'utf8');
   }
 
   return { files: results };

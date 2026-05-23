@@ -1,0 +1,20 @@
+{
+  "significant": [
+    {
+      "slug": "auth-module",
+      "files": [],
+      "language": "python",
+      "exports": [
+        {
+          "name": "authenticate",
+          "kind": "function",
+          "signature": "def authenticate(username, password):",
+          "line": 5
+        }
+      ],
+      "entry_points": [],
+      "imports": []
+    }
+  ],
+  "trivial": []
+}
