@@ -1,0 +1,17 @@
+contract:
+  version: "1"
+  target: "http://localhost:28080"
+
+e2e:
+  clone_url_env: MODE_II_CLONE_URL
+
+edge_case_seeds:
+  require_shapes:
+    - name: task_done_today
+      table: tasks
+      predicate: "status = 'done'"
+      count_min: 1
+    - name: task_in_collapsed_foldout
+      table: tasks
+      predicate: "status = 'pending'"
+      count_min: 1
