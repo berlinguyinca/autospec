@@ -156,3 +156,24 @@ EOF
   [ "$type_line" -lt "$wing_line" ]
   [ "$wing_line" -lt "$drawer_line" ]
 }
+
+# ── Flat frontmatter form (real CC auto-memory style, no metadata: wrapper) ──
+
+@test "flat frontmatter: top-level type: gets flat wing: + drawer_class:" {
+  run bash "$SCRIPT" --root "$TMP_DIR" --quiet
+  [ "$status" -eq 0 ]
+
+  grep -q "^wing: synthesis" "$TMP_DIR/feedback_flat_example.md"
+  grep -q "^drawer_class: lesson" "$TMP_DIR/feedback_flat_example.md"
+}
+
+@test "flat frontmatter: idempotent on second run" {
+  run bash "$SCRIPT" --root "$TMP_DIR" --quiet
+  [ "$status" -eq 0 ]
+  run bash "$SCRIPT" --root "$TMP_DIR" --quiet
+  [ "$status" -eq 0 ]
+
+  local wing_count
+  wing_count=$(grep -c "^wing:" "$TMP_DIR/feedback_flat_example.md")
+  [ "$wing_count" -eq 1 ]
+}

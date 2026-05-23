@@ -85,31 +85,31 @@ _inject_frontmatter() {
   local file="$1"
   local wing="$2"
   local drawer="$3"
-  local has_type
-  has_type=$(grep -c "^  type:" "$file" 2>/dev/null || echo 0)
+  local has_nested_type has_flat_type has_metadata
+  has_nested_type=$(grep -c "^  type:" "$file" 2>/dev/null); has_nested_type=${has_nested_type:-0}
+  has_flat_type=$(grep -c "^type:" "$file" 2>/dev/null); has_flat_type=${has_flat_type:-0}
+  has_metadata=$(grep -c "^metadata:" "$file" 2>/dev/null); has_metadata=${has_metadata:-0}
   local tmp
   tmp=$(mktemp /tmp/mempalace-mine-XXXXXX.md)
 
-  if [ "$has_type" -gt 0 ]; then
-    # Insert after the type: line
+  if [ "$has_nested_type" -gt 0 ]; then
     awk -v wing="$wing" -v drawer="$drawer" '
-      /^  type:/ {
-        print
-        print "  wing: " wing
-        print "  drawer_class: " drawer
-        next
-      }
+      /^  type:/ && !done { print; print "  wing: " wing; print "  drawer_class: " drawer; done=1; next }
+      { print }
+    ' "$file" > "$tmp" && mv "$tmp" "$file" || rm -f "$tmp"
+  elif [ "$has_flat_type" -gt 0 ]; then
+    awk -v wing="$wing" -v drawer="$drawer" '
+      /^type:/ && !done { print; print "wing: " wing; print "drawer_class: " drawer; done=1; next }
+      { print }
+    ' "$file" > "$tmp" && mv "$tmp" "$file" || rm -f "$tmp"
+  elif [ "$has_metadata" -gt 0 ]; then
+    awk -v wing="$wing" -v drawer="$drawer" '
+      /^metadata:/ && !done { print; print "  wing: " wing; print "  drawer_class: " drawer; done=1; next }
       { print }
     ' "$file" > "$tmp" && mv "$tmp" "$file" || rm -f "$tmp"
   else
-    # No type: line — insert after metadata: line
     awk -v wing="$wing" -v drawer="$drawer" '
-      /^metadata:/ {
-        print
-        print "  wing: " wing
-        print "  drawer_class: " drawer
-        next
-      }
+      /^---[[:space:]]*$/ && !opened { print; print "wing: " wing; print "drawer_class: " drawer; opened=1; next }
       { print }
     ' "$file" > "$tmp" && mv "$tmp" "$file" || rm -f "$tmp"
   fi
@@ -127,15 +127,18 @@ for md_file in "$ROOT"/*.md; do
   basename_file=$(basename "$md_file")
   [ "$basename_file" = "MEMORY.md" ] && continue
 
-  # Idempotency guard: skip if already has wing: in frontmatter
-  if grep -q "^  wing:" "$md_file" 2>/dev/null; then
+  # Idempotency guard: skip if already has wing: in frontmatter (nested or flat)
+  if grep -qE "^(  )?wing:" "$md_file" 2>/dev/null; then
     [ "$QUIET" -eq 0 ] && echo "mempalace-mine: skip (already mined): $basename_file"
     skipped=$(( skipped + 1 ))
     continue
   fi
 
-  # Extract metadata.type value (look for "  type: <val>" in frontmatter)
+  # Extract type value — try nested "  type:" first, then flat "type:"
   type_val=$(grep "^  type:" "$md_file" 2>/dev/null | head -1 | sed 's/^  type:[[:space:]]*//' | tr -d '\r')
+  if [ -z "$type_val" ]; then
+    type_val=$(grep "^type:" "$md_file" 2>/dev/null | head -1 | sed 's/^type:[[:space:]]*//' | tr -d '\r')
+  fi
 
   # Infer wing + drawer_class
   read -r wing drawer <<< "$(_infer_wing_drawer "$type_val")"
