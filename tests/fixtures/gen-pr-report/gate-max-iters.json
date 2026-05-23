@@ -1,0 +1,13 @@
+{
+  "passed": false,
+  "status": "fail",
+  "outcome": "MAX_ITERS_HIT",
+  "metrics": [
+    {"label": "test suite", "passed": false, "failure_reason": "tests still failing after 5 iterations"},
+    {"label": "lint", "passed": false, "failure_reason": "lint errors remain"}
+  ],
+  "coding_time_used": "30m",
+  "coding_time_budget": "30m",
+  "iter_count": 5,
+  "max_iters": 5
+}
