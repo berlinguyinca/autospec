@@ -45,6 +45,48 @@ autospec install [--dry-run] [--skill <name>] [--harness <name>] [--update]
 
 Delegates to the canonical `install.sh` in the autospec repo root.
 
+### `autospec status`
+
+List installed autospec skills, their versions, and optional cache-hit-rate from telemetry.
+
+```bash
+autospec status [--help]
+```
+
+Reads skill directories from `~/.claude/skills/autospec-*` (or `$AUTOSPEC_SKILLS_DIR`). Extracts version from each skill's `SKILL.md` frontmatter. Appends last cache-hit-rate from `~/.autospec/telemetry.jsonl` if present.
+
+### `autospec upgrade`
+
+Fetch the latest autospec from upstream and reinstall skills.
+
+```bash
+autospec upgrade [--dry-run] [--help]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--dry-run` | Print what would be done without making changes |
+
+Runs `git pull --ff-only origin main` in the autospec repo (if it is a git repo), then delegates to `install.sh --update`.
+
+### `autospec uninstall`
+
+Remove autospec skills from your harness paths, preserving `~/.autospec/`.
+
+```bash
+autospec uninstall [--yes] [--help]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--yes` | Skip confirmation prompt |
+
+Removes `autospec-*` directories from `~/.claude/skills/`, `~/.config/opencode/skills/`, and `~/.codex/skills/`. Preserves `~/.autospec/` (config, telemetry, memory).
+
 ### `autospec --version` / `-v`
 
 Print the installed `@autospec/cli` version.
