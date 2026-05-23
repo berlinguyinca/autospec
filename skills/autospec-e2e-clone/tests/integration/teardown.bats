@@ -122,18 +122,30 @@ YAML
 
 # ── provision → teardown round-trip (with custom_cmd mock adapter) ────────────
 
-@test "provision.sh → teardown.sh: full round-trip with custom_cmd mock (netcat health)" {
-  # Skip if nc (netcat) is unavailable — needed to serve a health response
-  command -v nc >/dev/null 2>&1 || skip "nc not available — skipping round-trip test"
+@test "provision.sh → teardown.sh: full round-trip with custom_cmd mock (python3 http server)" {
+  # Skip if python3 is unavailable — needed to serve a health response
+  command -v python3 >/dev/null 2>&1 || skip "python3 not available — skipping round-trip test"
 
   local FAKE_UP_SCRIPT="$TEST_REPO/fake-up.sh"
   local URL_FILE="$TEST_REPO/.autospec/clone-url.txt"
+  local SERVER_PID_FILE="$TEST_REPO/server.pid"
 
-  # Serve a single HTTP 200 on port 19888, then exit — health check can poll it
+  # Serve HTTP 200 on port 19888 using python3's built-in HTTP server
   cat > "$FAKE_UP_SCRIPT" << 'SHELL'
 #!/usr/bin/env bash
 PORT=19888
-(while true; do printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok' | nc -l "$PORT" 2>/dev/null || true; done) &
+# Start a minimal HTTP server that returns 200 OK for every request
+python3 -c "
+import http.server, os, signal, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'ok')
+    def log_message(self, *a): pass
+httpd = http.server.HTTPServer(('127.0.0.1', $PORT), H)
+httpd.serve_forever()
+" &
 printf '%s\n' "$!"
 exit 0
 SHELL
@@ -164,8 +176,8 @@ YAML
   [ ! -f "$URL_FILE" ]
   [[ "$output" == *"teardown complete"* ]]
 
-  # cleanup background nc processes
-  pkill -f "nc -l 19888" 2>/dev/null || true
+  # cleanup background python3 HTTP server
+  pkill -f "http.server.HTTPServer.*19888" 2>/dev/null || true
 }
 
 @test "teardown.sh: removes clone-url.txt written manually (simulate post-provision state)" {
