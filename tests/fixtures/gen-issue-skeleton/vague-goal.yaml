@@ -1,0 +1,20 @@
+issue_id: test-issue-002
+spec_path: docs/specs/2026-05-22-autospec-tooling-optimization-design.md
+spec_url: https://github.com/berlinguyinca/autospec/blob/main/docs/specs/2026-05-22-autospec-tooling-optimization-design.md
+goal_sentence: "Improve the system."
+files_to_read:
+  - scripts/lint-issue.sh
+implementation_scope:
+  - "Improve everything"
+out_of_scope:
+  - "Nothing"
+implementation_outline_lines:
+  - "Improve the codebase"
+tests_required:
+  - "None"
+acceptance_criteria:
+  - "System looks better"
+verification:
+  primary_smoke: "bats tests/example.bats"
+  operator_full: "bash scripts/example.sh"
+branch_name: feat/vague-test
