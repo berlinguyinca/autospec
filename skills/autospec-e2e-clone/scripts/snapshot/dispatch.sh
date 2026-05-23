@@ -116,8 +116,54 @@ for i in $(seq 0 $((SOURCE_COUNT - 1))); do
             fi
             ;;
 
-        s3|filesystem|custom_cmd)
-            printf 'dispatch.sh: info: kind=%s not implemented in C2 (deferred to C3)\n' "$KIND" >&2
+        s3)
+            BUCKET_VAL=$(printf '%s' "$SOURCE" | \
+                python3 -c "import sys,json; print(json.load(sys.stdin).get('bucket',''))" 2>/dev/null || echo "")
+            SAMPLE_PREFIX_COUNT=$(printf '%s' "$SOURCE" | \
+                python3 -c "import sys,json; print(json.load(sys.stdin).get('sample_prefix_count',100))" 2>/dev/null || echo "100")
+
+            if [ -n "$BUCKET_VAL" ]; then
+                export BUCKET="$BUCKET_VAL"
+            fi
+
+            if ! bash "$SCRIPT_DIR/s3.sh" "$SAMPLE_PREFIX_COUNT" "$OUT_DIR"; then
+                printf 'dispatch.sh: error: s3 source[%d] snapshot failed\n' "$i" >&2
+                FAILURES=$((FAILURES + 1))
+            fi
+            ;;
+
+        filesystem)
+            PATHS_CSV=$(printf '%s' "$SOURCE" | \
+                python3 -c "import sys,json; d=json.load(sys.stdin); print(','.join(d.get('paths',[])))" 2>/dev/null || echo "")
+            SAMPLE_FILES_PER_DIR=$(printf '%s' "$SOURCE" | \
+                python3 -c "import sys,json; print(json.load(sys.stdin).get('sample_files_per_dir',50))" 2>/dev/null || echo "50")
+
+            if [ -z "$PATHS_CSV" ]; then
+                printf 'dispatch.sh: error: filesystem source[%d]: paths is empty\n' "$i" >&2
+                FAILURES=$((FAILURES + 1))
+                continue
+            fi
+
+            if ! bash "$SCRIPT_DIR/fs.sh" "$PATHS_CSV" "$SAMPLE_FILES_PER_DIR" "$OUT_DIR"; then
+                printf 'dispatch.sh: error: filesystem source[%d] snapshot failed\n' "$i" >&2
+                FAILURES=$((FAILURES + 1))
+            fi
+            ;;
+
+        custom_cmd)
+            SNAP_CMD=$(printf '%s' "$SOURCE" | \
+                python3 -c "import sys,json; print(json.load(sys.stdin).get('snapshot_cmd',''))" 2>/dev/null || echo "")
+
+            if [ -z "$SNAP_CMD" ]; then
+                printf 'dispatch.sh: error: custom_cmd source[%d]: snapshot_cmd is empty\n' "$i" >&2
+                FAILURES=$((FAILURES + 1))
+                continue
+            fi
+
+            if ! bash "$SCRIPT_DIR/custom.sh" "$SNAP_CMD" "$OUT_DIR"; then
+                printf 'dispatch.sh: error: custom_cmd source[%d] snapshot failed\n' "$i" >&2
+                FAILURES=$((FAILURES + 1))
+            fi
             ;;
 
         *)
