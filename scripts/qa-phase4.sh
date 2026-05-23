@@ -34,7 +34,7 @@ DRY_RUN=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --pr)           PR="$2";             shift 2 ;;
-        --issue)        ISSUE="$2";          shift 2 ;;
+        --issue)        ISSUE="$2";         shift 2 ;;
         --base)         BASE_REF="$2";       shift 2 ;;
         --issue-labels) ISSUE_LABELS="$2";   shift 2 ;;
         --issue-body)   ISSUE_BODY_FILE="$2"; shift 2 ;;
