@@ -1,7 +1,7 @@
 ---
 name: autospec-listen
 description: |
-  Use when the user expresses an imperative intent to file an issue, write a spec, design a feature, implement/build/ship something, review code, or run autospec mid-conversation. Trigger keywords are "file an issue", "new issue", "open an issue", "create a ticket", "write a spec", "design spec", "new spec", "start a spec", "design", "new feature", "implement", "build", "ship", "review", "autospec". On an "issue" trigger, drafts a body from the last ~10 conversation turns and asks the user to approve before running gh issue create. On a "spec" trigger, hands off to /autospec-define. On a build/change verb, gates intent via scripts/listener-match.sh --classify and auto-routes to the mapped autospec skill with a one-line opt-out. Lives at github.com/berlinguyinca/autospec/skills/autospec-listen.
+  Use when the user expresses an imperative intent to file an issue, write a spec, design a feature, implement/build/ship something, review code, or run autospec mid-conversation. Trigger keywords are "file an issue", "new issue", "open an issue", "create a ticket", "write a spec", "design spec", "new spec", "start a spec", "design", "new feature", "implement", "build", "ship", "review", "autospec". On an "issue" trigger, drafts a body from the last ~10 conversation turns and asks the user to approve before running gh issue create. On a "spec" trigger, hands off to /autospec-define. On a build/change verb, gates intent via the deterministic listener-match classifier and auto-routes to the mapped autospec skill with a one-line opt-out. Lives at github.com/berlinguyinca/autospec/skills/autospec-listen.
 ---
 
 # autospec-listen (harness-neutral)
@@ -97,7 +97,7 @@ Beyond the explicit issue/spec triggers, this listener routes common build/chang
 **Intent gate.** Do not classify by eye. Delegate to the deterministic classifier, passing the user's latest message verbatim:
 
 ```bash
-scripts/listener-match.sh --classify "<user message>"
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/listener-match.sh" --classify "<user message>"
 ```
 
 It emits `{"match":bool,"skill":...,"trigger":...,"intent":"imperative|incidental|none","confidence":0-1}`. The gate is biased to false-negatives: descriptive ("the design is nice"), past-tense ("I reviewed it"), negated ("don't implement yet"), and interrogative ("should we redesign?") uses return `match:false` and MUST NOT route. Prefer no route over a misfire.

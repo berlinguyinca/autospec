@@ -92,7 +92,7 @@ Beyond the explicit issue/spec triggers, this listener routes common build/chang
 **Intent gate.** Do not classify by eye. Delegate to the deterministic classifier, passing the user's latest message verbatim:
 
 ```bash
-scripts/listener-match.sh --classify "<user message>"
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/listener-match.sh" --classify "<user message>"
 ```
 
 It emits `{"match":bool,"skill":...,"trigger":...,"intent":"imperative|incidental|none","confidence":0-1}`. The gate is biased to false-negatives: descriptive ("the design is nice"), past-tense ("I reviewed it"), negated ("don't implement yet"), and interrogative ("should we redesign?") uses return `match:false` and MUST NOT route. Prefer no route over a misfire.
