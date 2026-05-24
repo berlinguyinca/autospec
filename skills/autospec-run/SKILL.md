@@ -329,6 +329,10 @@ issues unblock the queue before continuing with normal feature work.
 >     latest_close = most recent closedAt of any auto-implement issue
 >     open_count   = count of open auto-implement issues
 >     if open_count == 0 AND latest_close > 2h ago:
+>       bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/diary-write.sh" \
+>         --phase 4 --event monitor-exit \
+>         --body "Monitor ALL_DONE: batch=${batch_num:-1} processed=$batch_issue_count repo={repo}" \
+>         2>/dev/null || true
 >       printf '{"batch":%s,"processed":%s,"repo":"%s","ts":%s,"status":"ALL_DONE"}\n' \
 >         "${batch_num:-1}" "$batch_issue_count" "{repo}" "$(date -u +%s)" \
 >         > "$HOME/.autospec/batch-done.json"
@@ -344,6 +348,10 @@ issues unblock the queue before continuing with normal feature work.
 >     if [ "$AGE_SECS" -gt 86400 ]; then
 >       echo "WARN: stale stop.flag ($AGE_SECS s old); ignoring" >&2
 >     elif [ "$MODE" = "graceful" ] || [ "$MODE" = "immediate" ]; then
+>       bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/diary-write.sh" \
+>         --phase 4 --event monitor-exit \
+>         --body "Monitor stopped ($MODE): batch=${batch_num:-1} processed=$batch_issue_count repo={repo}" \
+>         2>/dev/null || true
 >       printf '{"batch":%s,"processed":%s,"repo":"%s","ts":%s,"status":"ALL_DONE"}\n' \
 >         "${batch_num:-1}" "$batch_issue_count" "{repo}" "$(date -u +%s)" \
 >         > "$HOME/.autospec/batch-done.json"
@@ -439,6 +447,10 @@ issues unblock the queue before continuing with normal feature work.
 >   process(ISSUE)   # foreground subagent — see template below
 >   batch_issue_count=$((batch_issue_count + 1))
 >   if [ "$batch_issue_count" -ge "${effective_batch_size:-$BATCH_SIZE}" ]; then
+>     bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/diary-write.sh" \
+>       --phase 4 --event monitor-exit \
+>       --body "Monitor BATCH_COMPLETE: batch=${batch_num:-1} processed=$batch_issue_count repo={repo}" \
+>       2>/dev/null || true
 >     printf '{"batch":%s,"processed":%s,"repo":"%s","ts":%s,"status":"BATCH_COMPLETE"}\n' \
 >       "${batch_num:-1}" "$batch_issue_count" "{repo}" "$(date -u +%s)" \
 >       > "$HOME/.autospec/batch-done.json"
