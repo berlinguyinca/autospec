@@ -35,7 +35,7 @@ bash install.sh --update
 ### `/autospec-define`
 
 <!-- autospec-doc-scope:
-  src: ["skills/autospec-define/SKILL.md", "skills/autospec-define/install.sh"]
+  src: ["skills/autospec-define/SKILL.md"]
   reason: "User-facing invocation docs for autospec-define"
   generated: true
 -->
@@ -52,7 +52,7 @@ Turns a feature description into a spec PR and a GitHub issue tree.
 ### `/autospec-run`
 
 <!-- autospec-doc-scope:
-  src: ["skills/autospec-run/SKILL.md", "skills/autospec-run/install.sh", "skills/autospec-run/codex/prompt.md", "skills/autospec-run/opencode/agent.md", "skills/autospec-run/scripts/heartbeat-write.sh", "skills/autospec-run/scripts/heartbeat-read.sh", "tests/heartbeat.bats"]
+  src: ["skills/autospec-run/SKILL.md", "skills/autospec-run/codex/prompt.md", "skills/autospec-run/opencode/agent.md", "skills/autospec-run/scripts/heartbeat-write.sh", "skills/autospec-run/scripts/heartbeat-read.sh", "tests/heartbeat.bats"]
   reason: "User-facing invocation docs for autospec-run"
   generated: true
 -->

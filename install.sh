@@ -343,14 +343,48 @@ copy_shared_scripts() {
     # Use cp -R with a trailing /. to copy contents (not the directory itself).
     # Then restore executable bits for all .sh and .mjs files.
     cp -R "$shared_scripts_src/." "$autospec_scripts_dir/"
-    # Restore +x on shell scripts and mjs files (cp may strip bits on some platforms)
-    find "$autospec_scripts_dir" -maxdepth 2 \( -name '*.sh' -o -name '*.mjs' \) -exec chmod +x {} \;
+    # Restore +x on shell scripts and mjs files (cp may strip bits on some platforms).
+    # -maxdepth 3 covers nested helper dirs (e.g. gen-docs/architecture.mjs) once they
+    # land under $autospec_scripts_dir/<subdir>/<file>.
+    find "$autospec_scripts_dir" -maxdepth 3 \( -name '*.sh' -o -name '*.mjs' \) -exec chmod +x {} \;
     info "copy_shared_scripts: copied shared scripts to $autospec_scripts_dir/"
+}
+
+copy_repo_scripts() {
+    # Copy repo-root scripts/*.{sh,mjs,ps1} to $AUTOSPEC_SCRIPTS_DIR preserving +x bits.
+    # Globs (does not enumerate) so new repo-root helper scripts ship automatically for
+    # every harness. Excludes scripts/lib/ (install-time-only helpers) and never reaches
+    # per-skill target-repo gate scripts (those live under skills/, not scripts/).
+    repo_scripts_src="$REPO_ROOT/scripts"
+    if [ ! -d "$repo_scripts_src" ]; then
+        warn "copy_repo_scripts: $repo_scripts_src not found; skipping"
+        return 0
+    fi
+
+    autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] copy_repo_scripts: would copy $repo_scripts_src/*.{sh,mjs,ps1} to $autospec_scripts_dir/"
+        return 0
+    fi
+
+    mkdir -p "$autospec_scripts_dir"
+    # Copy only top-level script files (no recursion into scripts/lib/).
+    for ext in sh mjs ps1; do
+        for f in "$repo_scripts_src"/*."$ext"; do
+            [ -e "$f" ] || continue
+            cp "$f" "$autospec_scripts_dir/"
+        done
+    done
+    # Restore +x on shell scripts and mjs files (cp may strip bits on some platforms).
+    find "$autospec_scripts_dir" -maxdepth 1 \( -name '*.sh' -o -name '*.mjs' \) -exec chmod +x {} \;
+    info "copy_repo_scripts: copied repo-root scripts to $autospec_scripts_dir/"
 }
 
 # Integration bootstrap: pull autospec (if --update) + turbo, before per-skill installers run.
 pull_autospec
 copy_shared_scripts
+copy_repo_scripts
 bootstrap_turbo
 check_codex
 merge_claude_md
