@@ -4,15 +4,23 @@
 > *Per-symbol reference for all public CLI surfaces and shared scripts.*
 
 <!-- autospec-doc-scope:
-  src: ["scripts/**/*.sh", "skills/autospec-shared/scripts/**/*.mjs", "skills/autospec-shared/scripts/**/*.sh"]
-  reason: "API reference for all autospec shared scripts and CLI surfaces"
+  src: ["scripts/**/*.sh", "scripts/**/*.mjs", "scripts/**/*.ps1", "skills/autospec-shared/scripts/**/*.mjs", "skills/autospec-shared/scripts/**/*.sh", "install.sh", "skills/*/install.sh", "tests/ship-completeness.bats"]
+  reason: "API reference for all autospec shared scripts, their shipping path, and the ship-completeness guard"
   mismatch_action: warn
   generated: true
 -->
 
 ## Shared scripts (`$AUTOSPEC_SCRIPTS_DIR`)
 
-Installed to `~/.autospec/scripts/` by every skill's `install.sh`.
+Installed to `~/.autospec/scripts/`. The top-level `install.sh` globs every repo-root
+`scripts/*.{sh,mjs,ps1}` (excluding the install-time-only `scripts/lib/`) plus the entire
+`skills/autospec-shared/scripts/` tree into `~/.autospec/scripts/` for all harnesses
+(`claude|codex|opencode|all`), so new repo-root helper scripts ship automatically without a
+hand-maintained list. The per-skill standalone installers (`skills/*/install.sh`) enumerate a
+`SHARED_SCRIPT_FILES` subset as a stopgap for curl-based installs that lack the repo checkout.
+The `tests/ship-completeness.bats` guard asserts every `${AUTOSPEC_SCRIPTS_DIR}`-referenced
+script is in the shippable set and that no bare repo-relative script invocation remains in any
+skill surface.
 
 ### `autospec-watchdog.sh`
 
