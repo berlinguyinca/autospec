@@ -192,6 +192,11 @@ esac
 # ── Ensure AGENTS.md inventory section ───────────────────────────────────────
 _ensure_agents_md_inventory_section "$REPO_ROOT/AGENTS.md"
 
+# ── Register repo in cross-repo memory index (best-effort, silent fail) ──────
+if [ -x "${AUTOSPEC_SCRIPTS_DIR}/cross-repo-index.sh" ]; then
+  bash "${AUTOSPEC_SCRIPTS_DIR}/cross-repo-index.sh" --repo-root "$REPO_ROOT" 2>/dev/null || true
+fi
+
 # ── Lazy AAAK compression gate ───────────────────────────────────────────────
 # Trigger once per N invocations (default: every 10) to keep memory LOC small.
 # Falls through silently if mempalace-compress.sh is absent or mempalace is not installed.
