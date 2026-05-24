@@ -320,6 +320,8 @@ Exit: 0 = all checks pass, non-zero = first failure with diagnostic.
 - Monitor batch-exit invariants
 - Stop mode section
 - Keyword auto-routing section present across the autospec-listen trio (`check_keyword_routing_section`)
+- Phase 5.5 end-of-run gap-remediation section present across the autospec-run trio (`check_gap_remediation_section`)
+- Remediation mode section present across the autospec-review trio (`check_review_remediation_section`)
 - Phase 4 guardian block lockstep
 - Phase 4 adaptive-retry loop
 - Docs presence: `docs/USER_MANUAL.md`, `llms.txt`, `docs/.llm-manifest.json`

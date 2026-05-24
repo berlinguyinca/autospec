@@ -146,6 +146,37 @@ check_keyword_routing_section() {
     done
 }
 
+# Gap-remediation invariants (issue #535, deps #533/#534): the autospec-run
+# trio must carry a `## Phase 5.5 — End-of-run gap remediation` heading in all
+# three trio files (SKILL.md, opencode/agent.md, codex/prompt.md) so the
+# end-of-run gap-remediation loop stays in lockstep. Parallels
+# check_stop_mode_section.
+check_gap_remediation_section() {
+    for s in autospec-run; do
+        skill_dir="skills/$s"
+        [ -d "$skill_dir" ] || continue
+        info "gap-remediation: $s"
+        for trio in SKILL.md opencode/agent.md codex/prompt.md; do
+            grep -q '^## Phase 5[.]5 — End-of-run gap remediation' "$skill_dir/$trio" \
+                || fail "$s: $trio missing '## Phase 5.5 — End-of-run gap remediation' section"
+        done
+    done
+}
+
+# Remediation-mode invariants (issue #535, dep #533): the autospec-review trio
+# must carry a `## Remediation mode` heading in all three trio files
+# (SKILL.md, opencode/agent.md, codex/prompt.md) so the broad-review/gap-emit
+# remediation mode stays in lockstep. Parallels check_stop_mode_section.
+check_review_remediation_section() {
+    skill_dir="skills/autospec-review"
+    [ -d "$skill_dir" ] || return 0
+    info "review-remediation: autospec-review"
+    for trio in SKILL.md opencode/agent.md codex/prompt.md; do
+        grep -q '^## Remediation mode' "$skill_dir/$trio" \
+            || fail "autospec-review: $trio missing '## Remediation mode' section"
+    done
+}
+
 # Self-update invariants (introduced by issue #10): every multi-harness skill
 # must document `## Self-update mode` in all three trio files, and its
 # install.sh must accept the `--update` flag.
@@ -649,6 +680,8 @@ main() {
     check_startup_preflight
     check_stop_mode_section
     check_keyword_routing_section
+    check_gap_remediation_section
+    check_review_remediation_section
     check_codex_skills_install
     check_shared_script_install
 
