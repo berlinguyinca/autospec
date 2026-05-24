@@ -390,8 +390,16 @@ Usage: bash gen-llms-txt.sh --repo-root <dir> [--cluster-json <file>]
 
 ### `check-doc-drift.sh`
 
+<!-- autospec-doc-scope:
+  src: ["skills/autospec-shared/tests/unit/check-doc-drift.bats"]
+  reason: "Bats unit tests for check-doc-drift.sh including the cross-doc source-attribution regression"
+  mismatch_action: warn
+-->
+
 Deterministic drift checker. Parses `autospec-doc-scope` blocks, computes changed source
 files from a PR diff, and flags sections whose scope matches but whose content wasn't updated.
+Per-section matching-source state is reset on every scope entry so a source matched for one
+doc cannot leak into another doc's section on a multi-file diff.
 
 ```
 Usage: bash check-doc-drift.sh <pr-or-diff> [--repo <owner/repo>]
