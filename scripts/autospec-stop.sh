@@ -36,7 +36,9 @@ Flags:
   --graceful   Write sentinel mode=graceful; monitor exits after current issue.
   --immediate  Write sentinel mode=immediate; process(ISSUE) commits+pushes+marks paused at next boundary.
   --status     Report current sentinel state + paused-by-user issue count.
-  --resume     Strip paused-by-user labels, restore auto-implement, delete flag.
+  --resume     Detect the monitor exit mode (silent-exit | prompt-overflow |
+               clean | unknown) and print the matching recovery guidance, then
+               strip paused-by-user labels, restore auto-implement, delete flag.
   --help       Show this help and exit.
 
 Default (no flag): --graceful
@@ -137,7 +139,51 @@ cmd_status() {
     printf 'paused-by-user: %s issues\n' "$paused"
 }
 
+# detect_monitor_exit_mode — classify a halted Phase-4 monitor.
+# Delegates to detect-monitor-exit-mode.sh (override via AUTOSPEC_DETECTOR for
+# tests). Prints one of: silent-exit | prompt-overflow | clean | unknown.
+# The exit-mode fingerprints are driven by the cross-tool memory entry
+# docs/memory/feedback_monitor_silent_exit.md (the two known Phase-4 exit modes).
+detect_monitor_exit_mode() {
+    local detector="${AUTOSPEC_DETECTOR:-${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/detect-monitor-exit-mode.sh}"
+    if [ -f "$detector" ]; then
+        bash "$detector" 2>/dev/null || echo unknown
+    else
+        echo clean
+    fi
+}
+
+# report_exit_mode_recovery MODE — print the standard recovery guidance for a
+# detected exit mode (verbatim from feedback_monitor_silent_exit.md).
+report_exit_mode_recovery() {
+    local mode="$1"
+    case "$mode" in
+        clean)
+            info "exit mode: clean — no halted monitor detected. Resume is a no-op."
+            ;;
+        silent-exit)
+            info "exit mode: silent-exit — stale worktree + stuck in-progress-by-bot label, no PR."
+            info "recovery: removing orphan worktree, restoring auto-implement; relaunch the monitor to pick it up fresh."
+            ;;
+        prompt-overflow)
+            info "exit mode: prompt-overflow — monitor exceeded its context window (~185 tool calls)."
+            info "recovery: restart with a fresh session/terser prompt; cap each monitor turn at fewer issues."
+            ;;
+        *)
+            info "exit mode: unknown — stuck issue present but matches neither known fingerprint."
+            info "falling back to plain label restore; inspect the issue manually before relaunching."
+            ;;
+    esac
+}
+
 cmd_resume() {
+    # Memory-aware resume: first classify the monitor exit mode (driven by
+    # docs/memory/feedback_monitor_silent_exit.md), print recovery guidance,
+    # then perform the standard label restore + flag delete.
+    local mode
+    mode="$(detect_monitor_exit_mode)"
+    report_exit_mode_recovery "$mode"
+
     # List paused issues; strip label + restore auto-implement; delete flag.
     local nums count=0
 
