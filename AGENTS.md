@@ -292,12 +292,16 @@ Scripts for managing project memory files under `AUTOSPEC_MEMORY_DIR`
 | `scripts/apply-memory-tags.sh` | Idempotent tagger: prepends `tags:` YAML frontmatter to each `feedback_*.md` | `--dry-run`, `--memory-dir DIR`, `--manifest FILE` |
 | `scripts/install-implementer-precommit.sh` | Installs blocking pre-commit lint hook into an implementer worktree | `<worktree-path>` positional arg |
 | `skills/autospec-shared/scripts/mempalace-compress.sh` | AAAK compression GC: wraps `mempalace compress`; no-op below LOC threshold | `--dir DIR`, `--threshold LOC`, `--dry-run`, `--quiet` |
+| `skills/autospec-shared/scripts/mine-pr-history.sh` | Extract lessons from merged PR descriptions into `docs/memory/lesson_*.md` | `--repo OWNER/REPO`, `--output-dir DIR`, `--quiet` |
 
 `AUTOSPEC_MEMORY_DIR` — override for the memory directory path (default: auto-detected
 from `$HOME/.claude/projects/`).
 
 `AUTOSPEC_COMPRESS_THRESHOLD` — LOC threshold for `mempalace-compress.sh` (default: `5000`).
 `AUTOSPEC_COMPRESS_EVERY` — invoke compress every N calls to `auto-init-memory.sh` (default: `10`).
+`AUTOSPEC_MINE_PR_HISTORY` — set to `1` to enable PR history mining in `auto-init-memory.sh` (off by default; bandwidth-heavy).
+`AUTOSPEC_MINE_MIN_BODY` — minimum PR body length for `mine-pr-history.sh` (default: `200`).
+`AUTOSPEC_MINE_LIMIT` — max PRs to scan per `mine-pr-history.sh` run (default: `200`).
 
 ## Pre-commit lint hook
 
