@@ -178,6 +178,45 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+# ── grep-fallback pattern sanitization (G1/G2) ───────────────────────────────
+# These force the grep branch by hiding `mempalace` from PATH, so the
+# pattern-building code path (not the mempalace branch) is exercised.
+
+@test "search (grep fallback): trailing-space query returns only genuine matches, not match-all" {
+    run bash "$INDEX_SCRIPT" --repo-root "$REPO_A"
+    [ "$status" -eq 0 ]
+    # Query for a term that does NOT appear in any indexed file, plus a trailing
+    # space. A buggy 'foo|' pattern matches every line on GNU grep (match-all).
+    run env PATH="/usr/bin:/bin" bash "$SEARCH_SCRIPT" "zzznotpresent " --index-dir "$HOME/.autospec/memory-index"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "search (grep fallback): internal double-space query does not match-all" {
+    run bash "$INDEX_SCRIPT" --repo-root "$REPO_A"
+    [ "$status" -eq 0 ]
+    # Internal duplicate space → naive tr gives 'zzznotpresent||' (empty alt → match-all).
+    run env PATH="/usr/bin:/bin" bash "$SEARCH_SCRIPT" "zzznotpresent  alsoabsent" --index-dir "$HOME/.autospec/memory-index"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "search (grep fallback): genuine match still found with trailing space" {
+    run bash "$INDEX_SCRIPT" --repo-root "$REPO_A"
+    [ "$status" -eq 0 ]
+    run env PATH="/usr/bin:/bin" bash "$SEARCH_SCRIPT" "RETURN trap " --index-dir "$HOME/.autospec/memory-index"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qi "RETURN"
+}
+
+@test "search (grep fallback): all-whitespace query returns empty, exit 0" {
+    run bash "$INDEX_SCRIPT" --repo-root "$REPO_A"
+    [ "$status" -eq 0 ]
+    run env PATH="/usr/bin:/bin" bash "$SEARCH_SCRIPT" "   " --index-dir "$HOME/.autospec/memory-index"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 # ── inject-relevant-memory --cross-repo ───────────────────────────────────────
 
 @test "inject-relevant-memory: --cross-repo flag accepted without error" {

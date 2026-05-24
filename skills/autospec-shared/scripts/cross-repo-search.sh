@@ -73,8 +73,17 @@ fi
 _found_any=0
 _result_count=0
 
-# Build grep pattern from query words
-_pattern=$(printf '%s' "$QUERY" | tr ' ' '|')
+# Build grep pattern from query words.
+# Mirror inject-relevant-memory.sh sanitization so trailing/internal/duplicate
+# spaces cannot produce a match-all pattern (e.g. 'foo|') that behaves
+# differently on GNU vs BSD grep: collapse duplicate pipes, strip leading and
+# trailing pipe.
+_pattern=$(printf '%s' "$QUERY" | tr ' ' '|' | sed 's/|\{2,\}/|/g; s/^|//; s/|$//')
+
+# Guard: all-whitespace / empty query → empty pattern ⇒ no results, exit 0.
+if [ -z "$_pattern" ]; then
+  exit 0
+fi
 
 # ── Search each indexed repo ──────────────────────────────────────────────────
 for _link in "$INDEX_DIR"/*; do
