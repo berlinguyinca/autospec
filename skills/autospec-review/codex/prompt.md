@@ -48,6 +48,19 @@ Detect your harness by checking available tools before any phase:
 
 Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B" reference below resolves to these harness-specific values.
 
+## Relevant memory injection (run-start, once)
+
+Before executing the main pipeline phases, call the injector to surface relevant saved lessons:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/inject-relevant-memory.sh" \
+  --context "<skill-relevant keywords from request/issue/spec>" \
+  --top-k 5
+```
+
+Prepend the output block (if non-empty) to your working context. This surfaces lessons like
+`feedback_bash_return_trap_leak.md` that prevent re-occurrence of known pitfalls.
+
 
 # autospec-review
 
