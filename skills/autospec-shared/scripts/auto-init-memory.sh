@@ -67,24 +67,15 @@ AGENTS_BLOCK
 
 _ensure_mempalace_installed() {
   # Best-effort install of mempalace CLI on first migration. Idempotent — no-op
-  # if already on PATH. Opt out with AUTOSPEC_SKIP_MEMPALACE_INSTALL=1.
+  # if already on PATH. Delegates to the shared ensure-tool.sh installer, which
+  # bakes the pipx → uv → pip --user fallback chain into its tool table.
+  #
+  # Opt-out: AUTOSPEC_SKIP_MEMPALACE_INSTALL=1 (legacy, honored here for
+  # back-compat). ensure-tool.sh additionally respects its own
+  # AUTOSPEC_SKIP_ENSURE_TOOL[_MEMPALACE] gates.
   [ "${AUTOSPEC_SKIP_MEMPALACE_INSTALL:-0}" = "1" ] && return 0
-  command -v mempalace > /dev/null 2>&1 && return 0
-
-  # Prefer pipx (isolated venv per tool), then uv, then pip --user. All silent
-  # failures — mempalace is optional; absence only loses the KG/search overlay.
-  if command -v pipx > /dev/null 2>&1; then
-    pipx install mempalace > /dev/null 2>&1 && \
-      echo "auto-init-memory: installed mempalace via pipx" >&2
-  elif command -v uv > /dev/null 2>&1; then
-    uv tool install mempalace > /dev/null 2>&1 && \
-      echo "auto-init-memory: installed mempalace via uv" >&2
-  elif command -v pip3 > /dev/null 2>&1; then
-    pip3 install --user --quiet mempalace > /dev/null 2>&1 && \
-      echo "auto-init-memory: installed mempalace via pip3 --user" >&2
-  elif command -v pip > /dev/null 2>&1; then
-    pip install --user --quiet mempalace > /dev/null 2>&1 && \
-      echo "auto-init-memory: installed mempalace via pip --user" >&2
+  if [ -f "${AUTOSPEC_SCRIPTS_DIR}/ensure-tool.sh" ]; then
+    bash "${AUTOSPEC_SCRIPTS_DIR}/ensure-tool.sh" mempalace
   fi
   return 0
 }
