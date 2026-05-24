@@ -121,6 +121,17 @@ EOF
     [[ "$output" == *'"round": 1'* ]] || [[ "$output" == *'"round":1'* ]]
 }
 
+@test "intra-run dedupe: two identical gaps in one JSON file only one survivor" {
+    cat > "$TEST_TMP/gaps.json" <<'EOF'
+[{"gap_id":"G1","dimension":"correctness","severity":"medium","file":"a.sh","line":7,"title":"trailing pipe bug","body":"fix it","dedupe_key":"cross-repo-search-trailing-pipe"},
+ {"gap_id":"G2","dimension":"correctness","severity":"medium","file":"a.sh","line":7,"title":"trailing pipe bug","body":"fix it again","dedupe_key":"cross-repo-search-trailing-pipe"}]
+EOF
+    run bash "$LOOP" --gaps "$TEST_TMP/gaps.json" --file
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"survivors=1"* ]]
+    [ "$(grep -c "issue create" "$GH_CREATE_LOG")" -eq 1 ]
+}
+
 @test "skip flag ~/.autospec/no-review.flag short-circuits to survivors=0" {
     touch "$TEST_TMP/no-review.flag"
     run bash "$LOOP" --gaps "$TEST_TMP/gaps.json" --file

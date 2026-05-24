@@ -42,6 +42,9 @@ DO_FILE=0
 
 # shellcheck source=gap-json-lib.sh
 . "$AUTOSPEC_SCRIPTS_DIR/gap-json-lib.sh"
+# gap-json-lib.sh runs `set +e` at file scope; re-assert our strict mode so the
+# documented `set -eu` contract holds for the rest of this driver.
+set -eu
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -160,6 +163,17 @@ _is_dup() {
 }
 
 # ── Walk gaps, dedupe, file survivors ─────────────────────────────────────────
+# _seen_keys accumulates dedupe_key + title of survivors already counted this run
+# so two identical gaps in the same JSON are not double-filed (the open-issue
+# snapshot is taken once and does not reflect mid-run filings).
+_seen_keys=""
+_seen_in_run() {
+  case "$_seen_keys" in
+    *"<<$1>>"*) return 0 ;;
+    *"<<$2>>"*) return 0 ;;
+  esac
+  return 1
+}
 _filed=0
 _survivors=0
 _i=0
@@ -181,9 +195,11 @@ while [ "$_i" -lt "$_gap_count" ]; do
   _dim="$(printf '%s' "$_gap" | jq -r '.dimension')"
   _sev="$(printf '%s' "$_gap" | jq -r '.severity')"
 
-  if _is_dup "$_dk" "$_title"; then
+  if _is_dup "$_dk" "$_title" || _seen_in_run "$_dk" "$_title"; then
     continue
   fi
+  # Record this survivor so a later identical gap in the same JSON is deduped.
+  _seen_keys="$_seen_keys<<$_dk>><<$_title>>"
   _survivors=$((_survivors + 1))
 
   [ "$DO_FILE" -eq 1 ] || continue
@@ -231,8 +247,12 @@ while [ "$_i" -lt "$_gap_count" ]; do
   fi
 done
 
-# ── Advance round state when we actually filed something ──────────────────────
-if [ "$DO_FILE" -eq 1 ] && [ "$_filed" -gt 0 ]; then
+# ── Advance round state once a remediation round was attempted ────────────────
+# Advance whenever filing was requested AND there were survivors to file —
+# regardless of gh success — so persistent `gh issue create` failures still
+# count down toward AUTOSPEC_GAP_MAX_ROUNDS and the loop is guaranteed to
+# terminate. (Convergence with 0 survivors does not consume a round.)
+if [ "$DO_FILE" -eq 1 ] && [ "$_survivors" -gt 0 ]; then
   mkdir -p "$STATE_DIR" 2>/dev/null || true
   _new_round=$((_current_round + 1))
   printf '{"round": %s, "max_rounds": %s, "last_filed": %s}\n' \
