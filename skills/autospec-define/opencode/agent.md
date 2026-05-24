@@ -495,6 +495,19 @@ defaults to `defer`).
 
 No daemon auto-detection — always ask explicitly.
 
+After the user answers `run` or `defer` (i.e. the design is locked and issues
+are filed), call `diary-write.sh` to record the brainstorm decision:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/diary-write.sh" \
+  --phase 1 \
+  --event brainstorm-locked \
+  --body "Spec locked: ${SPEC_PATH}. Gate answer: ${GATE_ANSWER}. Issues filed: ${ISSUE_COUNT}." \
+  2>/dev/null || true
+```
+
+(Best-effort — never blocks the gate flow.)
+
 ## Handoff
 
 If the gate answer was `run`, hand off to `/autospec-run --profile <name>`
