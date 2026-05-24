@@ -188,6 +188,10 @@ child issues, and Phase 4 verification:
   suction path continuity. No vacuum tubing, air port, dust passage, or hose
   connection may be narrowed or blocked by ribs, mounts, bosses, decorative
   geometry, or slicer support assumptions.
+- For functional openings such as dust hood mouths, plenum intakes, vacuum
+  channels, gasket windows, and hose throats, add deterministic projection or
+  section keepout checks. Prove that reinforcements, sockets, bosses, ribs, and
+  cutters do not intrude into the working opening from any operating angle.
 - For every generated STL, require visual QA from at least 16 angles: right,
   left, front, back, top, bottom, top-right 45, top-left 45, top-front 45,
   top-back 45, front-right 45, front-left 45, back-right 45, back-left 45,
