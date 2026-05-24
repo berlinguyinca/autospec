@@ -96,7 +96,7 @@ in the helper script.
 | `--graceful` (default) | Write sentinel mode=graceful; monitor exits after current issue finishes. |
 | `--immediate` | Write sentinel mode=immediate; process(ISSUE) commits+pushes+marks paused at next step boundary. |
 | `--status` | Report current sentinel state, paused-by-user issue count, last monitor progress line. |
-| `--resume` | Strip paused-by-user labels from all paused issues, restore auto-implement, delete stop.flag. |
+| `--resume` | Memory-aware: detect the monitor exit mode (silent-exit \| prompt-overflow \| clean \| unknown — driven by `docs/memory/feedback_monitor_silent_exit.md`), print the matching recovery guidance, then strip paused-by-user labels from all paused issues, restore auto-implement, delete stop.flag. |
 | `--help` | Print usage and exit. |
 
 ## Required capabilities & harness adapter

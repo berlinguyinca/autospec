@@ -117,6 +117,71 @@ teardown() {
     echo "$output" | grep -q -- '--resume'
 }
 
+# ── #516: memory-aware --resume for known monitor exit modes ──────────────────
+# Acceptance criteria from issue #516. The detector is stubbed via
+# AUTOSPEC_DETECTOR so resume's reaction can be tested without real worktrees.
+
+# Helper: install a detector stub that always reports the given mode.
+_stub_detector() {
+    local mode="$1"
+    DETECTOR_STUB="$(mktemp "$HOME/detector.XXXXXX.sh")"
+    printf '#!/usr/bin/env sh\necho %s\n' "$mode" > "$DETECTOR_STUB"
+    chmod +x "$DETECTOR_STUB"
+    export AUTOSPEC_DETECTOR="$DETECTOR_STUB"
+}
+
+# AC1: --resume on a clean state is a no-op (exit 0, message), flag removed.
+@test "--resume clean state is a no-op exit 0 with message" {
+    _stub_detector clean
+    bash "$SCRIPT" --graceful
+    run bash "$SCRIPT" --resume
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qi 'clean'
+    [ ! -f "$FLAG_FILE" ]
+}
+
+# AC2: simulated silent-exit -> resume reports cleanup + restart guidance.
+@test "--resume silent-exit reports recovery (clean worktree + restart)" {
+    _stub_detector silent-exit
+    bash "$SCRIPT" --graceful
+    run bash "$SCRIPT" --resume
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qi 'silent-exit'
+    echo "$output" | grep -qiE 'worktree|restart|relaunch|recover'
+    [ ! -f "$FLAG_FILE" ]
+}
+
+# AC3: simulated prompt-overflow -> resume reports fresh-session restart.
+@test "--resume prompt-overflow reports fresh-session restart" {
+    _stub_detector prompt-overflow
+    bash "$SCRIPT" --graceful
+    run bash "$SCRIPT" --resume
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qi 'prompt-overflow'
+    echo "$output" | grep -qiE 'fresh|restart|relaunch|session'
+    [ ! -f "$FLAG_FILE" ]
+}
+
+# unknown mode -> resume falls back to plain label restore + flag delete.
+@test "--resume unknown mode falls back to label restore" {
+    _stub_detector unknown
+    bash "$SCRIPT" --graceful
+    run bash "$SCRIPT" --resume
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qi 'unknown'
+    [ ! -f "$FLAG_FILE" ]
+}
+
+# Backward compat: --resume still strips paused-by-user labels (existing behaviour).
+@test "--resume still deletes the flag (backward compat)" {
+    _stub_detector clean
+    bash "$SCRIPT" --graceful
+    [ -f "$FLAG_FILE" ]
+    run bash "$SCRIPT" --resume
+    [ "$status" -eq 0 ]
+    [ ! -f "$FLAG_FILE" ]
+}
+
 # Additional: unknown flag exits non-zero
 @test "unknown flag exits non-zero" {
     run bash "$SCRIPT" --bogus-flag

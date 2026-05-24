@@ -38,6 +38,10 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
 SHARED_SCRIPT_FILES="autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh"
+# Scripts that live under skills/autospec-shared/scripts/ rather than the
+# repo-root scripts/ dir, but are still required at runtime by this skill.
+# detect-monitor-exit-mode.sh backs the memory-aware `/autospec-stop --resume`.
+SHARED_LIB_SCRIPT_FILES="detect-monitor-exit-mode.sh"
 
 # ---------- helpers --------------------------------------------------------
 
@@ -90,7 +94,28 @@ fetch_source_files() {
             exit 1
         fi
     done
+    mkdir -p "$TMP_FETCH_DIR/lib-scripts"
+    for rel in $SHARED_LIB_SCRIPT_FILES; do
+        if ! curl -fsSL "$RAW_REPO_BASE/skills/autospec-shared/scripts/$rel" \
+            -o "$TMP_FETCH_DIR/lib-scripts/$rel"; then
+            err "failed to download $RAW_REPO_BASE/skills/autospec-shared/scripts/$rel"
+            exit 1
+        fi
+    done
     SKILL_DIR="$TMP_FETCH_DIR"
+}
+
+# resolve_shared_lib_scripts_dir — locate skills/autospec-shared/scripts/ in a
+# full checkout, or the fetched lib-scripts/ dir when running from stdin.
+resolve_shared_lib_scripts_dir() {
+    checkout_root="$(cd "$SKILL_DIR/../.." 2>/dev/null && pwd || true)"
+    if [ -n "$checkout_root" ] && [ -d "$checkout_root/skills/autospec-shared/scripts" ]; then
+        printf '%s\n' "$checkout_root/skills/autospec-shared/scripts"
+    elif [ -d "$SKILL_DIR/lib-scripts" ]; then
+        printf '%s\n' "$SKILL_DIR/lib-scripts"
+    else
+        printf ''
+    fi
 }
 
 resolve_shared_scripts_dir() {
@@ -112,6 +137,19 @@ install_shared_scripts() {
     fi
     for rel in $SHARED_SCRIPT_FILES; do
         install_one "$src_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
+        case "$rel" in
+            *.sh) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;;
+        esac
+    done
+    # Install shared-lib scripts (skills/autospec-shared/scripts/) into the same
+    # runtime dir so commands like `/autospec-stop --resume` find their detector.
+    lib_dir="$(resolve_shared_lib_scripts_dir)"
+    if [ -z "$lib_dir" ]; then
+        err "missing shared-lib scripts directory; cannot install detector"
+        return 1
+    fi
+    for rel in $SHARED_LIB_SCRIPT_FILES; do
+        install_one "$lib_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
         case "$rel" in
             *.sh) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;;
         esac
