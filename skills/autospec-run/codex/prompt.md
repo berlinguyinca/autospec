@@ -833,26 +833,43 @@ Re-run with --profile <larger> to pick these up, or run /autospec-run on a host 
 
 If `deferred[]` is empty, omit the section.
 
-## Post-batch audit (autospec-review interlock)
+## Phase 5.5 — End-of-run gap remediation
 
-Runs after the last issue in this batch closes/merges, before printing
-the final report.
+Runs after the last issue in the batch closes/merges (queue drains, `ALL_DONE`), before the final report. Replaces the old report-only post-batch audit: it broad-reviews the shipped work, files surviving gaps as `auto-implement` issues, and re-runs the monitor to close them — bounded by a round cap.
 
-Skip when:
+**Skip the whole phase when:**
 
 - `~/.autospec/no-review.flag` exists, OR
 - `--no-postreview` was passed to autospec-run.
 
-Otherwise:
+Otherwise run the bounded loop:
 
 ```bash
-/autospec-review --since "${BATCH_START_DATE}"
+BATCH_START_DATE="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/run-batch-start.sh" --read)"
+RUN_ID="$(date -u +%Y%m%dT%H%MZ)-$(git rev-parse --short HEAD)"
+GAPS_FILE="$HOME/.autospec/gaps-${RUN_ID}.json"
+MAX="${AUTOSPEC_GAP_MAX_ROUNDS:-2}"
+rm -f "$HOME/.autospec/gap-round-state.json"   # fresh window per run
 ```
 
-On gaps found: post a comment to the autospec-run status thread
-summarising gap counts by spec. Do NOT block batch completion.
-Failures from `/autospec-review` log a warning but do not fail the
-overall run.
+Loop (`round = 1 … MAX`):
+
+1. **Broad review** (Tier A): run `/autospec-review --remediation --since "${BATCH_START_DATE}" --emit-gaps "${GAPS_FILE}"`. On review failure, log a warning, treat as 0 survivors, and fall back to the final report (never block run completion).
+2. **File survivors:**
+
+   ```bash
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/gap-remediation-loop.sh" \
+     --gaps "${GAPS_FILE}" --file
+   ```
+
+   The driver prints `gap-remediation: survivors=<N> filed=<N> round=<N>`. Capture `<N>` survivors.
+3. **Converge:** if `survivors == 0`, break — the run is clean.
+4. **Drain:** otherwise re-enter the Phase 4 background monitor (opus, `batch=1`) and run it until the freshly-filed `gap-remediation` issues drain (same monitor batch-exit discipline as the main run). `gap-remediation`-labelled issues are recognizable so a later round does not re-flag freshly-fixed work.
+5. Increment `round`. The driver also enforces `AUTOSPEC_GAP_MAX_ROUNDS` internally (it refuses to file once the round-state hits the cap), so the loop never spins.
+
+**Termination guarantees:** convergence (0 survivors) ends the loop immediately; the `dedupe_key` prevents re-filing the same gap across rounds; the hard cap `AUTOSPEC_GAP_MAX_ROUNDS` (default 2) stops the loop and surfaces any remainder to the operator.
+
+**Feed Phase 6:** report (a) gaps closed this phase, (b) findings the filter suppressed, and (c) gaps still open after the cap. Failures from `/autospec-review` or the driver log a warning but do NOT fail the overall run.
 
 ## Constraints (apply throughout)
 
