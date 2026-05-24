@@ -97,6 +97,21 @@ function headingLevel(line) {
     return m ? m[1].length : 0;
 }
 
+// ── Fenced-code-block helpers ───────────────────────────────────────────────────
+// A fence delimiter is a line whose first non-whitespace run is 3+ backticks or
+// 3+ tildes. Opening fences may carry an info string (e.g. ```bash); closing
+// fences match the same character, are at least as long, and carry no info string.
+
+/**
+ * Parse a fence delimiter from a line.
+ * @returns {{ char: string, len: number, info: string } | null}
+ */
+function fenceDelimiter(line) {
+    const m = line.match(/^\s*(`{3,}|~{3,})(.*)$/);
+    if (!m) return null;
+    return { char: m[1][0], len: m[1].length, info: m[2].trim() };
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 const SCOPE_OPEN_RE  = /<!--\s*autospec-doc-scope\s*:/;
@@ -127,10 +142,42 @@ export function parse(markdownPath) {
     // Track headings and sections
     let currentHeading = null;
     let currentHeadingLevel = 0;
+    // Track fenced-code-block state. `fence` holds the open delimiter
+    // ({ char, len }) while inside a fence, or null while outside.
+    let fence = null;
     let i = 0;
 
     while (i < lines.length) {
         const line = lines[i];
+
+        // Fenced-code-block tracking: while inside a fence, ignore everything
+        // (headings and scope declarations alike) until the fence closes, so
+        // illustrative scope tokens in examples are not parsed as live claims.
+        const delim = fenceDelimiter(line);
+        if (delim) {
+            if (fence === null) {
+                // Opening fence (info string allowed, e.g. ```bash).
+                fence = { char: delim.char, len: delim.len };
+                i++;
+                continue;
+            }
+            // Inside a fence: a matching closing delimiter must use the same
+            // character, be at least as long, and carry no info string.
+            if (delim.char === fence.char && delim.len >= fence.len && delim.info === '') {
+                fence = null;
+                i++;
+                continue;
+            }
+            // Non-matching fence-like line inside a fence: still code content.
+            i++;
+            continue;
+        }
+        if (fence !== null) {
+            // Any other line inside an open fence is code content — skip it.
+            i++;
+            continue;
+        }
+
         const lvl = headingLevel(line);
 
         if (lvl > 0) {

@@ -475,7 +475,17 @@ Generates mermaid module dependency graph embedded in `docs/ARCHITECTURE.md`.
 
 ### `scan-doc-scope.mjs`
 
+<!-- autospec-doc-scope:
+  src: ["skills/autospec-shared/tests/unit/scan-doc-scope.test.mjs", "skills/autospec-shared/tests/fixtures/doc-scope/fenced-scope.md"]
+  reason: "Node unit tests and fixtures for scan-doc-scope.mjs, including fenced-code-block awareness"
+  mismatch_action: warn
+  generated: false
+-->
+
 Parses `<!-- autospec-doc-scope: ... -->` blocks into `{ section_path → globs }` map.
+Declarations inside markdown fenced code blocks (``` or ~~~, with or without a
+language tag) are ignored so illustrative example tokens are not treated as live
+scope claims.
 
 ```js
 import { scanDocScope } from './scan-doc-scope.mjs';
