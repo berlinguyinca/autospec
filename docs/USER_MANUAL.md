@@ -141,7 +141,7 @@ Read-only synthesis: produces a cited Markdown report of implementation state, s
 ### `/autospec-listen`
 
 <!-- autospec-doc-scope:
-  src: ["skills/autospec-listen/SKILL.md"]
+  src: ["skills/autospec-listen/SKILL.md", "skills/autospec-listen/codex/prompt.md", "skills/autospec-listen/opencode/agent.md"]
   reason: "User-facing invocation docs for autospec-listen"
   generated: true
 -->
