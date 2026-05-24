@@ -209,4 +209,17 @@ if [ -x "${AUTOSPEC_SCRIPTS_DIR}/mempalace-compress.sh" ]; then
   fi
 fi
 
+# ── Opt-in PR history mining ──────────────────────────────────────────────────
+# Off by default (bandwidth-heavy). Enable with AUTOSPEC_MINE_PR_HISTORY=1.
+if [ "${AUTOSPEC_MINE_PR_HISTORY:-0}" = "1" ] && \
+   [ -x "${AUTOSPEC_SCRIPTS_DIR}/mine-pr-history.sh" ]; then
+  _mine_repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)
+  if [ -n "$_mine_repo" ]; then
+    bash "${AUTOSPEC_SCRIPTS_DIR}/mine-pr-history.sh" \
+      --repo "$_mine_repo" \
+      --output-dir "$REPO_PATH" \
+      --quiet
+  fi
+fi
+
 exit 0
