@@ -192,4 +192,21 @@ esac
 # ── Ensure AGENTS.md inventory section ───────────────────────────────────────
 _ensure_agents_md_inventory_section "$REPO_ROOT/AGENTS.md"
 
+# ── Lazy AAAK compression gate ───────────────────────────────────────────────
+# Trigger once per N invocations (default: every 10) to keep memory LOC small.
+# Falls through silently if mempalace-compress.sh is absent or mempalace is not installed.
+if [ -x "${AUTOSPEC_SCRIPTS_DIR}/mempalace-compress.sh" ]; then
+  _invoke_counter_file="$HOME/.autospec/auto-init-memory-count"
+  _invoke_count=$(cat "$_invoke_counter_file" 2>/dev/null || echo 0)
+  _invoke_count=$(( _invoke_count + 1 ))
+  printf '%s\n' "$_invoke_count" > "$_invoke_counter_file"
+  _compress_every="${AUTOSPEC_COMPRESS_EVERY:-10}"
+  if [ "$(( _invoke_count % _compress_every ))" -eq 0 ]; then
+    bash "${AUTOSPEC_SCRIPTS_DIR}/mempalace-compress.sh" \
+      --dir "$REPO_PATH" \
+      --threshold "${AUTOSPEC_COMPRESS_THRESHOLD:-5000}" \
+      --quiet
+  fi
+fi
+
 exit 0
