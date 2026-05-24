@@ -32,7 +32,7 @@ No new skill. All changes amend existing skills.
 **New shared tooling (lives at `$AUTOSPEC_SCRIPTS_DIR`, NOT vendored into target repos):**
 
 - `check-doc-drift.sh <PR_or_diff>` — deterministic drift checker
-- `scan-doc-scope.mjs` — parses `<!-- autospec-doc-scope: ... -->` blocks into `{ section_path → globs }`
+- `scan-doc-scope.mjs` — parses `autospec-doc-scope` comment blocks into `{ section_path → globs }`
 - `reverse-engineer.sh <repo_root>` — tree-sitter scan + backfill specs + initial docs
 - `tree-sitter-walk/<lang>.scm` — language-specific queries
 - `gen-docs-from-spec.mjs` — given a spec + target doc file, produces/updates the relevant section
@@ -69,7 +69,7 @@ Each section in a doc file declares its source scope:
 ## Installing autospec-test
 
 <!-- autospec-doc-scope:
-  src: ["install.sh", "skills/autospec-test/install.sh"]
+  src: ["path/to/install.sh", "path/to/skill/install.sh"]
   reason: "User-facing install instructions must reflect actual install.sh behavior"
 -->
 
@@ -337,7 +337,7 @@ Different consumers want different models + dimensions. Binary indexes bloat the
 ## Module graph
 
 <!-- autospec-doc-scope:
-  src: ["src/**/*.ts", "src/**/*.py", "src/**/*.go"]
+  src: ["path/to/src/**/*.ts", "path/to/src/**/*.py", "path/to/src/**/*.go"]
   generated: true
 -->
 

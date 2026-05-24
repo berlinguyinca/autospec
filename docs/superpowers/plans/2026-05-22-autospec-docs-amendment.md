@@ -525,7 +525,8 @@ _Note (2026-05-22): `classify-model-fit.sh` (tooling-opt T2, #460) ships bats co
 
 <!-- autospec-doc-scope:
   src: ["scripts/validate.sh"]
-  reason: "Phase 10 tasks reference validate.sh lockstep checks"
+  reason: "Phase 10 tasks reference validate.sh lockstep checks (historical plan record)"
+  mismatch_action: warn
   generated: false
 -->
 
