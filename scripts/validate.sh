@@ -132,6 +132,20 @@ check_stop_mode_section() {
     done
 }
 
+# Keyword auto-routing invariants (issue #538): the autospec-listen trio must
+# carry a `## Keyword auto-routing` heading in all three trio files
+# (SKILL.md, opencode/agent.md, codex/prompt.md) so the broadened verb->skill
+# routing behavior stays in lockstep. Parallels check_stop_mode_section.
+check_keyword_routing_section() {
+    skill_dir="skills/autospec-listen"
+    [ -d "$skill_dir" ] || return 0
+    info "keyword-routing: autospec-listen"
+    for trio in SKILL.md opencode/agent.md codex/prompt.md; do
+        grep -q '^## Keyword auto-routing' "$skill_dir/$trio" \
+            || fail "autospec-listen: $trio missing '## Keyword auto-routing' section"
+    done
+}
+
 # Self-update invariants (introduced by issue #10): every multi-harness skill
 # must document `## Self-update mode` in all three trio files, and its
 # install.sh must accept the `--update` flag.
@@ -634,6 +648,7 @@ main() {
 
     check_startup_preflight
     check_stop_mode_section
+    check_keyword_routing_section
     check_codex_skills_install
     check_shared_script_install
 

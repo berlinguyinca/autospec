@@ -319,6 +319,7 @@ Exit: 0 = all checks pass, non-zero = first failure with diagnostic.
 - Harness detection block
 - Monitor batch-exit invariants
 - Stop mode section
+- Keyword auto-routing section present across the autospec-listen trio (`check_keyword_routing_section`)
 - Phase 4 guardian block lockstep
 - Phase 4 adaptive-retry loop
 - Docs presence: `docs/USER_MANUAL.md`, `llms.txt`, `docs/.llm-manifest.json`
