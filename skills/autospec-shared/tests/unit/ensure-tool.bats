@@ -1,0 +1,210 @@
+#!/usr/bin/env bats
+# ensure-tool.bats — Unit tests for ensure-tool.sh.
+#
+# Run: bats skills/autospec-shared/tests/unit/ensure-tool.bats
+#
+# Strategy: each test builds an isolated fake PATH containing only the stub
+# binaries it wants the script to "see" (command -v resolves against PATH).
+# Installer stubs (brew/apt-get/pipx/uv/pip3/npm) log their invocation to a
+# file so we can assert which installer branch fired. No real installs happen.
+
+SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/ensure-tool.sh"
+
+setup() {
+  TMP_DIR="$(mktemp -d /tmp/autospec-ensuretool-XXXXXX)"
+  BIN="$TMP_DIR/bin"
+  mkdir -p "$BIN"
+  LOG="$TMP_DIR/installer.log"
+  export TMP_DIR BIN LOG
+  # Keep a minimal real PATH for coreutils the script itself needs.
+  REAL_PATH="$PATH"
+  export REAL_PATH
+
+  # Coreutils-only dir: symlink ONLY the basic commands ensure-tool.sh needs
+  # (bash/env/tr/printf/id) so the script runs, while the target tool and all
+  # installers stay genuinely absent unless we stub them into $BIN.
+  CORE="$TMP_DIR/core"
+  mkdir -p "$CORE"
+  local c
+  for c in bash env tr printf id cat dirname; do
+    local p
+    p="$(command -v "$c" 2>/dev/null)" && ln -sf "$p" "$CORE/$c"
+  done
+  export CORE
+}
+
+teardown() {
+  rm -rf "$TMP_DIR"
+}
+
+# Create a stub installer that records "<name> <args>" to $LOG and exits 0.
+mk_installer() {
+  local name="$1" rc="${2:-0}"
+  cat > "$BIN/$name" <<SHIM
+#!/usr/bin/env bash
+echo "$name \$*" >> "$LOG"
+exit $rc
+SHIM
+  chmod +x "$BIN/$name"
+}
+
+# Create a stub of the target tool so command -v finds it.
+mk_tool() {
+  local name="$1"
+  cat > "$BIN/$name" <<'SHIM'
+#!/usr/bin/env bash
+exit 0
+SHIM
+  chmod +x "$BIN/$name"
+}
+
+# Run ensure-tool.sh with PATH = our fake bin first, then the real PATH
+# (so bash/cat/etc. still resolve). The script's own command -v probes see
+# only what we put in $BIN ahead of everything.
+run_ensure() {
+  run env PATH="$BIN:$REAL_PATH" HOME="$TMP_DIR/home" bash "$SCRIPT" "$@"
+}
+
+# Run with the fake bin + a coreutils-only dir on PATH, so the target tool and
+# every installer are genuinely absent unless we stubbed them into $BIN.
+run_ensure_isolated() {
+  run env PATH="$BIN:$CORE" HOME="$TMP_DIR/home" bash "$SCRIPT" "$@"
+}
+
+# ── No-op when tool already present ──────────────────────────────────────────
+
+@test "bats present → no-op, no installer invoked" {
+  mk_tool bats
+  mk_installer brew
+  run_ensure bats
+  [ "$status" -eq 0 ]
+  [ ! -f "$LOG" ]
+}
+
+@test "jq present → no-op" {
+  mk_tool jq
+  mk_installer apt-get
+  run_ensure jq
+  [ "$status" -eq 0 ]
+  [ ! -f "$LOG" ]
+}
+
+@test "gh present → no-op" {
+  mk_tool gh
+  mk_installer brew
+  run_ensure gh
+  [ "$status" -eq 0 ]
+  [ ! -f "$LOG" ]
+}
+
+@test "mempalace present → no-op" {
+  mk_tool mempalace
+  mk_installer pipx
+  run_ensure mempalace
+  [ "$status" -eq 0 ]
+  [ ! -f "$LOG" ]
+}
+
+# ── Install branch fires when tool absent ────────────────────────────────────
+
+@test "bats absent + brew available → installs via brew" {
+  mk_installer brew
+  run_ensure_isolated bats
+  [ "$status" -eq 0 ]
+  grep -q "brew .*bats" "$LOG"
+}
+
+@test "jq absent + brew available → installs via brew" {
+  mk_installer brew
+  run_ensure_isolated jq
+  [ "$status" -eq 0 ]
+  grep -q "brew .*jq" "$LOG"
+}
+
+@test "gh absent + brew available → installs via brew" {
+  mk_installer brew
+  run_ensure_isolated gh
+  [ "$status" -eq 0 ]
+  grep -q "brew .*gh" "$LOG"
+}
+
+@test "mempalace absent + pipx available → installs via pipx" {
+  mk_installer pipx
+  run_ensure_isolated mempalace
+  [ "$status" -eq 0 ]
+  grep -q "pipx .*mempalace" "$LOG"
+}
+
+# ── Fallback chain (no brew, apt-get available) ──────────────────────────────
+
+@test "bats absent + no brew + apt-get available → installs via apt-get" {
+  mk_installer apt-get
+  run_ensure_isolated bats
+  [ "$status" -eq 0 ]
+  grep -q "apt-get .*bats" "$LOG"
+}
+
+# ── mempalace pip fallback chain ─────────────────────────────────────────────
+
+@test "mempalace absent + no pipx + uv available → installs via uv" {
+  mk_installer uv
+  run_ensure_isolated mempalace
+  [ "$status" -eq 0 ]
+  grep -q "uv .*mempalace" "$LOG"
+}
+
+@test "mempalace absent + only pip3 available → installs via pip3" {
+  mk_installer pip3
+  run_ensure_isolated mempalace
+  [ "$status" -eq 0 ]
+  grep -q "pip3 .*mempalace" "$LOG"
+}
+
+# ── Best-effort silent failure: installer fails, exit still 0 ────────────────
+
+@test "installer fails (rc=1) → ensure-tool still exits 0" {
+  mk_installer brew 1
+  run_ensure_isolated bats
+  [ "$status" -eq 0 ]
+}
+
+@test "no installer available at all → exit 0 silently" {
+  # $BIN has nothing; tool absent and no installer present
+  run_ensure_isolated bats
+  [ "$status" -eq 0 ]
+}
+
+# ── Opt-out env vars ──────────────────────────────────────────────────────────
+
+@test "AUTOSPEC_SKIP_ENSURE_TOOL=1 → no install attempted" {
+  mk_installer brew
+  run env PATH="$BIN:$CORE" HOME="$TMP_DIR/home" AUTOSPEC_SKIP_ENSURE_TOOL=1 bash "$SCRIPT" bats
+  [ "$status" -eq 0 ]
+  [ ! -f "$LOG" ]
+}
+
+@test "AUTOSPEC_SKIP_ENSURE_TOOL_BATS=1 → bats skipped, jq still installs" {
+  mk_installer brew
+  run env PATH="$BIN:$CORE" HOME="$TMP_DIR/home" AUTOSPEC_SKIP_ENSURE_TOOL_BATS=1 bash "$SCRIPT" bats
+  [ "$status" -eq 0 ]
+  [ ! -f "$LOG" ]
+
+  # Same per-tool opt-out must NOT block a different tool
+  run env PATH="$BIN:$CORE" HOME="$TMP_DIR/home" AUTOSPEC_SKIP_ENSURE_TOOL_BATS=1 bash "$SCRIPT" jq
+  [ "$status" -eq 0 ]
+  grep -q "brew .*jq" "$LOG"
+}
+
+# ── Unknown tool ──────────────────────────────────────────────────────────────
+
+@test "unknown tool → exit 0 silently (no table entry, best-effort)" {
+  run_ensure_isolated some-unknown-tool-xyz
+  [ "$status" -eq 0 ]
+}
+
+# ── Missing argument ──────────────────────────────────────────────────────────
+
+@test "no argument → exit 0 (no-op)" {
+  run_ensure_isolated
+  [ "$status" -eq 0 ]
+}
