@@ -67,6 +67,12 @@ admin-squash-merges the PR.
 
 **Heartbeat layout:** `~/.autospec/process-heartbeats/<repo-slug>/<issue>.json` (repo-scoped since phase2-p2).
 
+**Phase 5.5 — end-of-run gap remediation:** after the queue drains, the run scopes
+`/autospec-review --since <run-start>` (run-start captured via `run-batch-start.sh`) to work
+shipped during this run, emits surviving gaps as JSON (`emit-gaps.sh`), and files them as
+`auto-implement,gap-remediation,priority:high` issues (`gap-remediation-loop.sh`), capped at
+`AUTOSPEC_GAP_MAX_ROUNDS` rounds (default 2) to bound the feedback loop.
+
 ### `/autospec-test`
 
 <!-- autospec-doc-scope:
@@ -95,6 +101,12 @@ Inline Phase 4 gate (runs after build + lint, before auto-merge) plus standalone
 Audits design specs against open/closed issues; finds gaps, files regression issues.
 
 **Triggers:** `autospec-review`, `audit specs`, `find spec gaps`, `regression review`
+
+**Remediation mode (`--remediation` / `--emit-gaps`):** powers Phase 5.5. `--remediation` runs the
+audit through evaluate-findings (false-positive filtering) and files surviving gaps; `--emit-gaps
+<path>` writes the filtered gaps to a JSON file (the `{gap_id, dimension, severity, file, line,
+title, body, dedupe_key}` contract) instead of filing, for the gap-remediation loop to consume.
+Combine with `--since <date>` to scope the audit to a run window.
 
 ### `/autospec-classify`
 

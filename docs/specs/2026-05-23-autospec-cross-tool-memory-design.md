@@ -158,6 +158,24 @@ exit 0
 
 Auto-commit + push are best-effort; failures log to stderr but never block the skill invocation.
 
+### 4a-bis. New shared tooling (shipped)
+
+Beyond `auto-init-memory.sh` and `mempalace-mine.sh`, the memory floor shipped a set of
+best-effort helpers at `$AUTOSPEC_SCRIPTS_DIR` (full reference in `docs/API_REFERENCE.md`):
+
+| Script | Role |
+|---|---|
+| `mempalace-compress.sh` | AAAK compression when a memory dir exceeds a LOC threshold |
+| `mine-pr-history.sh` | Extract `body:lesson:` lessons from merged PRs into `docs/memory/lesson_*.md` |
+| `inject-relevant-memory.sh` | Keyword-match `docs/memory/*.md` → top-k context block for prompt injection |
+| `diary-write.sh` | Append an episodic entry to `docs/memory/diary/YYYY-MM-DD.md` |
+| `ensure-tool.sh` | Idempotent best-effort installer for optional CLI deps (bats / jq / gh / mempalace) |
+| `cross-repo-index.sh` | Register the repo into `~/.autospec/memory-index/<slug>`; GC stale entries |
+| `cross-repo-search.sh` | Search memory across all indexed repos (mempalace, falling back to grep) |
+| `detect-monitor-exit-mode.sh` | Classify a halted Phase-4 monitor (silent-exit / prompt-overflow / clean) |
+
+Every script is best-effort: missing optional deps (mempalace, gh) are a silent skip, never a failure.
+
 ### 4b. Wired into every SKILL.md
 
 Existing `autospec-startup-self-update` block at the top of each SKILL.md (and lockstep `codex/prompt.md` + `opencode/agent.md`) gains one line:
@@ -281,11 +299,14 @@ If two tools edit the same memory file in the same session, second write wins (s
 | `git` | required | install pre-flight |
 | `validate.sh check_lockstep` duo-mode | live (#415) | enforces SKILL trio identity |
 
+### Shipped after initial design
+
+- **Cross-repo memory traversal** — shipped (#514) via `cross-repo-index.sh` + `cross-repo-search.sh`: repos register into `~/.autospec/memory-index/<slug>` and memory is searchable across all indexed repos.
+- **Memory garbage collection** — shipped (#510): `cross-repo-index.sh` GCs stale index entries whose `docs/memory/` no longer exists, and `mempalace-compress.sh` triggers AAAK compression above a LOC threshold.
+
 ### Out of scope (deferred to follow-on specs)
 
-- Cross-repo memory traversal (lessons from repo A visible in repo B)
 - Web UI for mempalace
-- Memory garbage collection (timestamp + reference-count heuristic)
 - Cursor / Aider / Copilot / Continue.dev integration (same in-repo files; readers per-tool)
 
 ## 8. Appendix A — Landscape survey (highly-rated approaches)
@@ -330,7 +351,7 @@ If two tools edit the same memory file in the same session, second write wins (s
 
 ## 10. Open follow-ups (separate specs)
 
-1. **Cross-repo memory traversal** — when a lesson from repo A is relevant in repo B (e.g., personal feedback rules). Mempalace's `find_tunnels` could span repos if operator opts in.
+1. ~~**Cross-repo memory traversal**~~ — SHIPPED (#514): `cross-repo-index.sh` + `cross-repo-search.sh` index and search memory across all registered repos.
 2. **Web UI for mempalace** — currently CLI/MCP only; browser navigator helps for large memory sets.
-3. **Memory garbage collection** — surface stale memories (referenced project shipped, feedback no longer relevant). Manual today; could automate via timestamp + reference-count heuristic.
+3. ~~**Memory garbage collection**~~ — SHIPPED (#510): stale index entries are GC'd by `cross-repo-index.sh`; `mempalace-compress.sh` compresses oversized memory dirs.
 4. **Cursor / Aider / Copilot / Continue.dev** — add their native pointers to the same in-repo files. Same architecture, different reader configs.
