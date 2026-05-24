@@ -157,7 +157,7 @@ check_gap_remediation_section() {
         [ -d "$skill_dir" ] || continue
         info "gap-remediation: $s"
         for trio in SKILL.md opencode/agent.md codex/prompt.md; do
-            grep -q '^## Phase 5.5 — End-of-run gap remediation' "$skill_dir/$trio" \
+            grep -q '^## Phase 5[.]5 — End-of-run gap remediation' "$skill_dir/$trio" \
                 || fail "$s: $trio missing '## Phase 5.5 — End-of-run gap remediation' section"
         done
     done
