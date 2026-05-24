@@ -51,3 +51,25 @@ FIX="$REPO_ROOT/tests/fixtures/gen-implementer-prompt"
   run grep -E "\bclaude\b|\bcodex\b|\bgemini\b" "$BIN"
   [ "$status" -ne 0 ]
 }
+
+# Case 7: flat-install resolution — script finds bundle-static-context.sh as a
+# sibling in the same dir when AUTOSPEC_SCRIPTS_DIR is unset and no repo layout exists
+@test "flat-install: resolves sibling bundle-static-context.sh with no repo layout" {
+  flatdir="$(mktemp -d)"
+  cp "$BIN" "$flatdir/gen-implementer-prompt.sh"
+  # Sibling bundle stamps a sentinel so we can prove the sibling (not the repo
+  # copy) was the one that ran.
+  cat > "$flatdir/bundle-static-context.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'FLAT_SIBLING_BUNDLE_RAN\n'
+STUB
+  chmod +x "$flatdir/bundle-static-context.sh"
+  printf 'hello world body\n' > "$flatdir/issue.md"
+  # Run from / with AUTOSPEC_SCRIPTS_DIR unset and no repo layout above $flatdir.
+  run env -u AUTOSPEC_SCRIPTS_DIR bash "$flatdir/gen-implementer-prompt.sh" \
+    --issue-body "$flatdir/issue.md" --branch feat/flat
+  rm -rf "$flatdir"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "FLAT_SIBLING_BUNDLE_RAN"
+  echo "$output" | grep -qv "bundle-static-context.sh not found"
+}

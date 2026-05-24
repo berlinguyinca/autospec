@@ -72,3 +72,25 @@ for i in range(8100):
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "DUPLICATE_CODE"
 }
+
+# Case 9: flat-install resolution — script finds bundle-static-context.sh as a
+# sibling in the same dir when AUTOSPEC_SCRIPTS_DIR is unset and no repo layout exists
+@test "flat-install: resolves sibling bundle-static-context.sh with no repo layout" {
+  flatdir="$(mktemp -d)"
+  cp "$BIN" "$flatdir/gen-reviewer-prompt.sh"
+  # Sibling bundle stamps a sentinel so we can prove the sibling (not the repo
+  # copy) was the one that ran.
+  cat > "$flatdir/bundle-static-context.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'FLAT_SIBLING_BUNDLE_RAN\n'
+STUB
+  chmod +x "$flatdir/bundle-static-context.sh"
+  printf '+example diff line\n' > "$flatdir/pr.diff"
+  # Run from / with AUTOSPEC_SCRIPTS_DIR unset and no repo layout above $flatdir.
+  run env -u AUTOSPEC_SCRIPTS_DIR bash "$flatdir/gen-reviewer-prompt.sh" \
+    --pr-diff "$flatdir/pr.diff"
+  rm -rf "$flatdir"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "FLAT_SIBLING_BUNDLE_RAN"
+  echo "$output" | grep -qv "bundle-static-context.sh not found"
+}
