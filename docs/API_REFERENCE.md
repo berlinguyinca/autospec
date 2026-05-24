@@ -98,8 +98,29 @@ Usage: bash sizing-check.sh <issue-number> [--repo <owner/repo>]
 Pattern-matches a conversation snippet against autospec-listen trigger keywords.
 
 ```
-Usage: bash listener-match.sh [--text <text>]
+Usage: bash listener-match.sh "<phrase>"              # word mode (default)
+       bash listener-match.sh --classify "<phrase>"   # JSON classify mode
+       echo "<phrase>" | bash listener-match.sh [--classify]
 ```
+
+Word mode (default, back-compat) prints exactly one of `issue`, `spec`, `none`
+and always exits 0.
+
+Classify mode (`--classify`) emits a JSON object and always exits 0. It applies
+the keyword-routing verb->skill map and an imperative-intent gate:
+
+```
+{"match":bool,"skill":"autospec-define|autospec-run|autospec-review|autospec|null",
+ "trigger":"<verb>|null","intent":"imperative|incidental|none","confidence":0-1}
+```
+
+Verb->skill map: `design`/`new feature`/`spec` -> `autospec-define`;
+`implement`/`build`/`ship` -> `autospec-run`; `review` -> `autospec-review`;
+`autospec ...` -> `autospec`. The existing `file an issue` / `write a spec`
+back-compat phrases route to `autospec-define`. The intent gate is biased to
+false-negatives: past-tense, negated, interrogative, and descriptive uses are
+suppressed (`match:false` / `intent:incidental`) so incidental mentions never
+misfire a route.
 
 ### `ci-wait.sh`
 
