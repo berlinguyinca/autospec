@@ -278,8 +278,14 @@ const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
 process.stdout.write(d.src_globs.join('\n'));
 " 2>/dev/null)"
 
-            # Find matching changed source files
-            touch "$WORK_DIR/matching_sources_${idx}.txt"
+            # Find matching changed source files.
+            # Reset (truncate, not just touch) the per-entry matching-sources file:
+            # these temp files are keyed only by entry index within the shared
+            # work dir, so without clearing it here a source matched for an
+            # earlier doc's entry N would leak into this doc's entry N — including
+            # empty-glob sections that never enter the matching loop below —
+            # causing cross-doc mis-attribution on multi-file diffs.
+            : > "$WORK_DIR/matching_sources_${idx}.txt"
             if [ -s "$WORK_DIR/changed_source.txt" ] && [ -n "$src_globs_str" ]; then
                 while IFS= read -r sf; do
                     [ -z "$sf" ] && continue
