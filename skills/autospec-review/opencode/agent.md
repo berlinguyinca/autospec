@@ -89,6 +89,46 @@ CSV ledger, and route regressions back through `/autospec-split` with
 | `--no-autoreview` | Skip the §7a Tier-A reviewer pass |
 | `--since DATE` | Only audit specs whose date prefix ≥ DATE |
 | `--spec-glob PATTERN` | Override default spec discovery globs |
+| `--remediation` | Broad-dimension review (spec-coverage + correctness + test-quality + integration-wiring + docs) with false-positive filter, for the end-of-run gap-remediation loop |
+| `--emit-gaps PATH` | Write the machine-readable gap JSON to PATH (implies `--remediation`) |
+
+## Remediation mode (`--remediation` / `--emit-gaps`)
+
+When `--remediation` (or `--emit-gaps PATH`) is passed, run a **broad-dimension** review instead of the spec-coverage-only audit, and emit a machine-readable gap list for the `/autospec-run` end-of-run gap-remediation loop.
+
+**Model tier:** Tier A (spec work) — broad review is inline analysis and needs opus turn-stamina (per `feedback_monitor_silent_exit.md`).
+
+Dimensions reviewed (all five, not just spec-coverage):
+
+1. **spec-coverage** — acceptance criteria with no shipping issue/PR (the existing audit).
+2. **correctness** — logic bugs, cross-platform shell portability (e.g. GNU-vs-BSD `grep`/`sed`), off-by-one, error-path gaps.
+3. **test-quality** — assertions that never fail, missing negative-path coverage, untested branches.
+4. **integration-wiring** — emitted-but-unconsumed artifacts, dangling references, lock-step drift.
+5. **docs** — stale or contradictory documentation versus shipped behavior.
+
+Pipeline:
+
+1. Dispatch the broad review subagent(s) at Tier A. Collect candidate findings, each tagged with `dimension`, `severity`, `file`, `line`, `title`, `body`, and a stable `dedupe_key`.
+2. **False-positive filter (required before emit):** pipe candidate findings through an evaluate-findings/critic pass. Mark each finding `verdict: keep` or `verdict: false_positive`. When uncertain, drop it (`false_positive`) — never ship a false positive into the auto-implement queue.
+3. Write the surviving findings to a temp findings file, then shape them into the gap contract:
+
+   ```bash
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/emit-gaps.sh" \
+     --findings /tmp/autospec-review/remediation-findings.json \
+     --out "${EMIT_GAPS_PATH:-$HOME/.autospec/gaps-${RUN_ID}.json}"
+   ```
+
+   The emitted gap JSON is an array of objects matching the contract:
+
+   ```json
+   [{"gap_id":"G1","dimension":"correctness","severity":"medium",
+     "file":"skills/autospec-shared/scripts/cross-repo-search.sh","line":77,
+     "title":"trailing pipe matches every line on BSD grep",
+     "body":"<remediation issue body>",
+     "dedupe_key":"cross-repo-search-trailing-pipe"}]
+   ```
+
+4. When `--emit-gaps PATH` is given, write to PATH; otherwise default to `~/.autospec/gaps-<run_id>.json`. The driver (`gap-remediation-loop.sh`) reads this file. On review-subagent failure, write an empty array (`[]`) so the driver converges cleanly, and log a warning — never block run completion.
 
 ## Phase 0 — Preflight
 
