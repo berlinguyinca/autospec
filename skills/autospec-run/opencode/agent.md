@@ -209,6 +209,16 @@ bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/inject-relevant-memory.sh
 Prepend the output block (if non-empty) to your working context. This surfaces lessons like
 `feedback_bash_return_trap_leak.md` that prevent re-occurrence of known pitfalls.
 
+## Run-start batch timestamp (run-start, once)
+
+Capture the run-start instant so the end-of-run gap-remediation phase (Phase 5.5) can scope its review to work shipped during THIS run. Run exactly once, before the Phase 4 monitor launches:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/run-batch-start.sh" --write
+```
+
+This writes the UTC ISO 8601 timestamp to `~/.autospec/.run-batch-start` (idempotent within a run; pass `--force` only when intentionally starting a fresh batch window). Phase 5.5 reads it back via `run-batch-start.sh --read`, which yields `BATCH_START_DATE`.
+
 ## Phase 4 — Background autonomous monitor
 
 Record this durable preference in `AGENTS.md` (idempotent — skip if already present):
