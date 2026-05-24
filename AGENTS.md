@@ -293,6 +293,7 @@ Scripts for managing project memory files under `AUTOSPEC_MEMORY_DIR`
 | `scripts/install-implementer-precommit.sh` | Installs blocking pre-commit lint hook into an implementer worktree | `<worktree-path>` positional arg |
 | `skills/autospec-shared/scripts/mempalace-compress.sh` | AAAK compression GC: wraps `mempalace compress`; no-op below LOC threshold | `--dir DIR`, `--threshold LOC`, `--dry-run`, `--quiet` |
 | `skills/autospec-shared/scripts/mine-pr-history.sh` | Extract lessons from merged PR descriptions into `docs/memory/lesson_*.md` | `--repo OWNER/REPO`, `--output-dir DIR`, `--quiet` |
+| `skills/autospec-shared/scripts/inject-relevant-memory.sh` | Grep/search `docs/memory/*.md` for keyword matches; emit top-k context block for skill prompt injection | `--context KEYWORDS`, `--top-k N`, `--memory-dir DIR` |
 
 `AUTOSPEC_MEMORY_DIR` — override for the memory directory path (default: auto-detected
 from `$HOME/.claude/projects/`).
