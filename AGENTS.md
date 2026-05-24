@@ -291,9 +291,13 @@ Scripts for managing project memory files under `AUTOSPEC_MEMORY_DIR`
 | `scripts/memory-tags.yml` | Manifest mapping each `feedback_*.md` to 4–5 tags | — (data file) |
 | `scripts/apply-memory-tags.sh` | Idempotent tagger: prepends `tags:` YAML frontmatter to each `feedback_*.md` | `--dry-run`, `--memory-dir DIR`, `--manifest FILE` |
 | `scripts/install-implementer-precommit.sh` | Installs blocking pre-commit lint hook into an implementer worktree | `<worktree-path>` positional arg |
+| `skills/autospec-shared/scripts/mempalace-compress.sh` | AAAK compression GC: wraps `mempalace compress`; no-op below LOC threshold | `--dir DIR`, `--threshold LOC`, `--dry-run`, `--quiet` |
 
 `AUTOSPEC_MEMORY_DIR` — override for the memory directory path (default: auto-detected
 from `$HOME/.claude/projects/`).
+
+`AUTOSPEC_COMPRESS_THRESHOLD` — LOC threshold for `mempalace-compress.sh` (default: `5000`).
+`AUTOSPEC_COMPRESS_EVERY` — invoke compress every N calls to `auto-init-memory.sh` (default: `10`).
 
 ## Pre-commit lint hook
 
