@@ -84,15 +84,42 @@ run_diary() {
   grep -q "Second entry" "$f"
 }
 
-@test "diary-write same-day file has multiple entry separators" {
+@test "diary-write same-day file separates entries with a distinct marker" {
   run_diary --phase 1 --event brainstorm-locked --body "Entry A" --memory-dir "$MEMORY_DIR"
   run_diary --phase 4 --event monitor-exit --body "Entry B" --memory-dir "$MEMORY_DIR"
 
   local today
   today=$(date -u +%Y-%m-%d)
+  # One append => exactly one distinct inter-entry marker (not a bare '---').
   local sep_count
-  sep_count=$(grep -c "^---$" "$MEMORY_DIR/diary/$today.md" || true)
-  [ "$sep_count" -ge 2 ]
+  sep_count=$(grep -c "^<!-- diary-entry -->$" "$MEMORY_DIR/diary/$today.md" || true)
+  [ "$sep_count" -eq 1 ]
+}
+
+# ── Body containing a --- line (separator/fence collision) ────────────────────
+
+@test "diary-write entry separator is distinct from a --- body line" {
+  # A body that itself contains a bare '---' line (common in pasted markdown / PR text).
+  run_diary --phase 1 --event brainstorm-locked --body $'line1\n---\nline2' --memory-dir "$MEMORY_DIR"
+  [ "$status" -eq 0 ]
+  run_diary --phase 4 --event monitor-exit --body $'line3\n---\nline4' --memory-dir "$MEMORY_DIR"
+  [ "$status" -eq 0 ]
+
+  local today f
+  today=$(date -u +%Y-%m-%d)
+  f="$MEMORY_DIR/diary/$today.md"
+
+  # The inter-entry separator must be a distinct marker that cannot be confused
+  # with a bare '---' line (used by both YAML frontmatter fences and body text).
+  local sep_count
+  sep_count=$(grep -c '^<!-- diary-entry -->$' "$f" || true)
+  [ "$sep_count" -eq 1 ]
+
+  # Both bodies (each containing their own '---' line) must be preserved verbatim.
+  grep -q "^line1$" "$f"
+  grep -q "^line2$" "$f"
+  grep -q "^line3$" "$f"
+  grep -q "^line4$" "$f"
 }
 
 # ── Auto-create memory dir ────────────────────────────────────────────────────

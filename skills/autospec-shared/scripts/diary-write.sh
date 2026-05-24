@@ -25,7 +25,15 @@
 #   phase: <n>
 #   event: <slug>
 #
-# Append-safe: multiple events on the same day go into one file, separated by ---.
+# Append-safe: multiple events on the same day go into one file, separated by a
+# distinct HTML-comment marker `<!-- diary-entry -->`. This marker is deliberately
+# NOT a bare `---` line so it can never collide with a YAML frontmatter fence or a
+# `---` line inside a body (common in pasted markdown / PR text), keeping entry
+# boundaries unambiguous for diary readers.
+#
+# Compat note: prior versions separated entries with a bare `---` line. Existing
+# diary files written that way still parse (each entry begins with its own `---`
+# frontmatter fence); only the inter-entry separator marker changed.
 
 set +e
 
@@ -79,8 +87,9 @@ DIARY_FILE="$DIARY_DIR/$TODAY.md"
 # Append-safe: if the file already exists, add a separator first.
 
 if [ -f "$DIARY_FILE" ]; then
-  # Separator between entries
-  printf '\n---\n' >> "$DIARY_FILE"
+  # Distinct inter-entry separator — never a bare '---' line, so it cannot be
+  # confused with a YAML frontmatter fence or a '---' line within a body.
+  printf '\n<!-- diary-entry -->\n\n' >> "$DIARY_FILE"
 fi
 
 cat >> "$DIARY_FILE" <<ENTRY
