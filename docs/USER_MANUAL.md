@@ -141,12 +141,12 @@ Read-only synthesis: produces a cited Markdown report of implementation state, s
 ### `/autospec-listen`
 
 <!-- autospec-doc-scope:
-  src: ["skills/autospec-listen/SKILL.md"]
+  src: ["skills/autospec-listen/SKILL.md", "skills/autospec-listen/codex/prompt.md", "skills/autospec-listen/opencode/agent.md"]
   reason: "User-facing invocation docs for autospec-listen"
   generated: true
 -->
 
-Passive listener — fires mid-conversation when the user mentions filing an issue or starting a spec. It also auto-routes common build/change verbs (`design` / `new feature` / `spec` → `/autospec-define`; `implement` / `build` / `ship` → `/autospec-run`; `review` → `/autospec-review`; `autospec …` → `/autospec`) into the matching skill. Routing is gated by an imperative-intent check (`scripts/listener-match.sh --classify`) biased to false-negatives, and every route prints a one-line opt-out: `Routing to /<skill> — say "plain" to opt out.`
+Passive listener — fires mid-conversation when the user mentions filing an issue or starting a spec. It also auto-routes common build/change verbs (`design` / `new feature` / `spec` → `/autospec-define`; `implement` / `build` / `ship` → `/autospec-run`; `review` → `/autospec-review`; `autospec …` → `/autospec`) into the matching skill. Routing is gated by an imperative-intent check (the deterministic `listener-match.sh --classify` classifier, invoked via `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}`) biased to false-negatives, and every route prints a one-line opt-out: `Routing to /<skill> — say "plain" to opt out.`
 
 ## Configuration
 
