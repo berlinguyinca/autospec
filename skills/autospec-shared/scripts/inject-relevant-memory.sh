@@ -24,10 +24,13 @@
 set +e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AUTOSPEC_SCRIPTS_DIR="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR}"
 
 CONTEXT=""
 TOP_K=5
 MEMORY_DIR=""
+CROSS_REPO=0
+INDEX_DIR=""
 
 # ── Argument parse ────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
@@ -44,8 +47,16 @@ while [ $# -gt 0 ]; do
       MEMORY_DIR="$2"
       shift 2
       ;;
+    --cross-repo)
+      CROSS_REPO=1
+      shift
+      ;;
+    --index-dir)
+      INDEX_DIR="$2"
+      shift 2
+      ;;
     --help|-h)
-      printf 'Usage: inject-relevant-memory.sh --context <keywords> [--top-k N] [--memory-dir DIR]\n'
+      printf 'Usage: inject-relevant-memory.sh --context <keywords> [--top-k N] [--memory-dir DIR] [--cross-repo [--index-dir DIR]]\n'
       exit 0
       ;;
     *)
@@ -122,5 +133,13 @@ while IFS= read -r _file; do
 
   printf '### Memory: %s\n%s\n\n' "$_basename" "$_content"
 done <<< "$_matched_files"
+
+# ── Cross-repo search (optional) ─────────────────────────────────────────────
+if [ "$CROSS_REPO" = "1" ] && [ -x "${AUTOSPEC_SCRIPTS_DIR}/cross-repo-search.sh" ]; then
+  _cr_index_dir="${INDEX_DIR:-${HOME}/.autospec/memory-index}"
+  bash "${AUTOSPEC_SCRIPTS_DIR}/cross-repo-search.sh" "$CONTEXT" \
+    --index-dir "$_cr_index_dir" \
+    --top-k "$TOP_K"
+fi
 
 exit 0
