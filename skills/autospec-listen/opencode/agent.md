@@ -1,5 +1,5 @@
 ---
-description: Use when the user mentions filing an issue or writing a spec mid-conversation. Trigger keywords are "file an issue", "new issue", "open an issue", "create a ticket", "write a spec", "design spec", "new spec", "start a spec". On an "issue" trigger, drafts a body from the last ~10 conversation turns and asks the user to approve before running gh issue create. On a "spec" trigger, hands off to /autospec-define. Lives at github.com/berlinguyinca/autospec/skills/autospec-listen.
+description: Use when the user expresses an imperative intent to file an issue, write a spec, design a feature, implement/build/ship something, review code, or run autospec mid-conversation. Trigger keywords are "file an issue", "new issue", "open an issue", "create a ticket", "write a spec", "design spec", "new spec", "start a spec", "design", "new feature", "implement", "build", "ship", "review", "autospec". On an "issue" trigger, drafts a body from the last ~10 conversation turns and asks the user to approve before running gh issue create. On a "spec" trigger, hands off to /autospec-define. On a build/change verb, gates intent via scripts/listener-match.sh --classify and auto-routes to the mapped autospec skill with a one-line opt-out. Lives at github.com/berlinguyinca/autospec/skills/autospec-listen.
 mode: primary
 ---
 
@@ -88,6 +88,37 @@ This skill assumes four capabilities. Map each one to your harness's actual tool
 ## Trigger flow
 
 > **Model tier:** Tier B (implementation work) — this listener is a router; subagent dispatches inside its trigger flows (drafting issue bodies, summarizing recent conversation) use cheaper models per AGENTS.md. Spec-trigger handoff to `/autospec-define` lets the downstream skill apply its own tier policy.
+
+## Keyword auto-routing
+
+Beyond the explicit issue/spec triggers, this listener routes common build/change verbs into the matching autospec skill so the pipeline is the default path. Routing is gated by an imperative-intent check and always offers a one-line opt-out.
+
+**Intent gate.** Do not classify by eye. Delegate to the deterministic classifier, passing the user's latest message verbatim:
+
+```bash
+scripts/listener-match.sh --classify "<user message>"
+```
+
+It emits `{"match":bool,"skill":...,"trigger":...,"intent":"imperative|incidental|none","confidence":0-1}`. The gate is biased to false-negatives: descriptive ("the design is nice"), past-tense ("I reviewed it"), negated ("don't implement yet"), and interrogative ("should we redesign?") uses return `match:false` and MUST NOT route. Prefer no route over a misfire.
+
+**Verb → skill map (D3).**
+
+| Verb(s) in an imperative request | Routes to |
+|----------------------------------|-----------|
+| `design` / `new feature` / `spec` | `/autospec-define` |
+| `implement` / `build` / `ship` | `/autospec-run` (or `/autospec` end-to-end when no issues exist yet) |
+| `review` | `/autospec-review` |
+| `autospec …` | the umbrella `/autospec` |
+
+**Auto-route behavior.** When the classifier returns `match:true` with `intent:imperative`, print exactly one line then invoke the mapped skill via the harness skill-invocation primitive:
+
+```
+Routing to /<skill> — say "plain" to opt out.
+```
+
+On a non-match or `intent:incidental`/`none`, do nothing — the session proceeds normally in plain mode.
+
+**Escape (D5).** If the user's next turn is the stop word (`plain` or `no`), cancel routing and proceed in plain mode for that request. The existing `file an issue` / `write a spec` triggers continue to fire their own flows below and are unaffected.
 
 ## Issue trigger flow
 

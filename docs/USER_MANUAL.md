@@ -134,7 +134,7 @@ Read-only synthesis: produces a cited Markdown report of implementation state, s
   generated: true
 -->
 
-Passive listener — fires mid-conversation when the user mentions filing an issue or starting a spec.
+Passive listener — fires mid-conversation when the user mentions filing an issue or starting a spec. It also auto-routes common build/change verbs (`design` / `new feature` / `spec` → `/autospec-define`; `implement` / `build` / `ship` → `/autospec-run`; `review` → `/autospec-review`; `autospec …` → `/autospec`) into the matching skill. Routing is gated by an imperative-intent check (`scripts/listener-match.sh --classify`) biased to false-negatives, and every route prints a one-line opt-out: `Routing to /<skill> — say "plain" to opt out.`
 
 ## Configuration
 
