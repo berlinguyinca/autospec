@@ -184,6 +184,30 @@ Exit: 0 = success, 1 = missing required arg or file not found.
   generated: false
 -->
 
+### `gen-reviewer-prompt.sh`
+
+Composes the Phase 4 fused guardian+LGTM reviewer prompt via `bundle-static-context.sh --role reviewer`
+(static cached prefix) plus a deterministic dynamic suffix from the PR diff and previous-iteration findings.
+Diffs over 8000 lines are clipped with a `[diff clipped at 8000 lines]` marker. Zero LLM calls.
+
+Both this script and `gen-implementer-prompt.sh` resolve their sibling `bundle-static-context.sh` by
+preferring `$AUTOSPEC_SCRIPTS_DIR/bundle-static-context.sh`, then the flat-install sibling in the script's
+own directory, then the repo-layout `skills/autospec-shared/scripts/` copy.
+
+```
+Usage: bash scripts/gen-reviewer-prompt.sh --pr-diff <file> [--prev-findings <file>]
+                                           [--issue-labels <csv>] [--repo <owner/repo>]
+```
+
+Exit: 0 = success, 1 = missing required arg or file not found.
+
+<!-- autospec-doc-scope:
+  src: ["tests/gen-reviewer-prompt.bats", "tests/fixtures/gen-reviewer-prompt/pr-303.diff", "tests/fixtures/gen-reviewer-prompt/findings-empty.json", "tests/fixtures/gen-reviewer-prompt/findings-example.txt"]
+  reason: "Bats unit tests and fixtures for gen-reviewer-prompt.sh"
+  mismatch_action: warn
+  generated: false
+-->
+
 ### `gen-pr-report.sh`
 
 100% template-driven PR comment renderer. Reads gate JSON (Stage 1 + Stage 2 + Stage 2.5 results),

@@ -30,8 +30,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Locate bundle-static-context.sh
 BUNDLE_STATIC="${AUTOSPEC_SCRIPTS_DIR:-}"/bundle-static-context.sh
 if [ ! -f "$BUNDLE_STATIC" ] 2>/dev/null; then
-  # Fall back to shared scripts in the repo
-  BUNDLE_STATIC="$REPO_ROOT/skills/autospec-shared/scripts/bundle-static-context.sh"
+  # Flat install: bundle-static-context.sh ships as a sibling in the same dir.
+  if [ -f "$SCRIPT_DIR/bundle-static-context.sh" ]; then
+    BUNDLE_STATIC="$SCRIPT_DIR/bundle-static-context.sh"
+  else
+    # Fall back to shared scripts in the repo
+    BUNDLE_STATIC="$REPO_ROOT/skills/autospec-shared/scripts/bundle-static-context.sh"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
