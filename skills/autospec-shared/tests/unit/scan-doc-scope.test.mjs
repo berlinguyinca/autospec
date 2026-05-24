@@ -117,6 +117,55 @@ test('generated-section.md: parses generated:true entry', async () => {
     assert.ok(result[0].src_globs.some(g => g.includes('**')), 'should have glob pattern');
 });
 
+// ── Fenced code block awareness (#561) ─────────────────────────────────────────
+
+test('fenced-scope.md: only prose declarations are honored, in-fence tokens ignored', async () => {
+    const result = parse(fixture('fenced-scope.md'));
+    const globs = result.flatMap(e => e.src_globs);
+    // In-fence tokens must NOT appear
+    assert.ok(!globs.includes('scripts/example-in-fence.sh'), 'token inside ``` fence must be ignored');
+    assert.ok(!globs.includes('scripts/another-in-fence.sh'), 'token inside language-tagged fence must be ignored');
+    assert.ok(!globs.includes('scripts/tilde-in-fence.sh'), 'token inside ~~~ fence must be ignored');
+    // Prose declarations (before and after fences) must be honored
+    assert.ok(globs.includes('scripts/real.sh'), 'prose declaration before fence must be honored');
+    assert.ok(globs.includes('scripts/post-fence.sh'), 'prose declaration after closed fences must be honored');
+    assert.equal(result.length, 2, `expected exactly 2 honored entries, got ${result.length}`);
+});
+
+test('scope token inside a fenced block is ignored', async () => {
+    const tmp = path.join(os.tmpdir(), `autospec-test-scope-fence-${Date.now()}.md`);
+    fs.writeFileSync(tmp, `## Section\n\n\`\`\`\n<!-- autospec-doc-scope:\n  src: ["in-fence.sh"]\n-->\n\`\`\`\n\nBody.\n`);
+    try {
+        const result = parse(tmp);
+        assert.equal(result.length, 0, 'in-fence declaration must yield no entries');
+    } finally {
+        fs.unlinkSync(tmp);
+    }
+});
+
+test('scope token after a closed fence is honored', async () => {
+    const tmp = path.join(os.tmpdir(), `autospec-test-scope-postfence-${Date.now()}.md`);
+    fs.writeFileSync(tmp, `## Section\n\n\`\`\`bash\necho hi\n\`\`\`\n\n<!-- autospec-doc-scope:\n  src: ["after.sh"]\n-->\n\nBody.\n`);
+    try {
+        const result = parse(tmp);
+        assert.equal(result.length, 1);
+        assert.deepEqual(result[0].src_globs, ['after.sh']);
+    } finally {
+        fs.unlinkSync(tmp);
+    }
+});
+
+test('unclosed trailing fence swallows declarations inside it', async () => {
+    const tmp = path.join(os.tmpdir(), `autospec-test-scope-unclosed-${Date.now()}.md`);
+    fs.writeFileSync(tmp, `## Section\n\n\`\`\`\n<!-- autospec-doc-scope:\n  src: ["trailing.sh"]\n-->\n`);
+    try {
+        const result = parse(tmp);
+        assert.equal(result.length, 0, 'declaration inside an unclosed trailing fence must be ignored');
+    } finally {
+        fs.unlinkSync(tmp);
+    }
+});
+
 // ── Inline fixture via temp file ──────────────────────────────────────────────
 
 test('single-glob src in flow syntax', async () => {
