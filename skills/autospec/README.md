@@ -101,8 +101,8 @@ Reach for this skill when:
 |---|---|---|
 | **0** | Bootstrap repo (if missing) | Detect missing git/GitHub remote, ask name/visibility/owner once, scaffold `.gitignore` + `AGENTS.md` + `README.md`, push. |
 | **1** | Investigate (delegate) | Read-only research subagent maps relevant files, schema, services. Real queries against remote systems if the feature touches them. |
-| **2** | Brainstorm + design | Structured 5-section brainstorm (architecture / API / data / errors / testing) with explicit per-section approval, written to `docs/specs/YYYY-MM-DD-<topic>-design.md`. |
-| **3** | Decompose into linked GitHub issues (delegate) | Foreground subagent creates labels, an EPIC umbrella, and N self-contained mini-specs sized for 32B-class local LLMs: file pointers, section anchors, checkbox AC, primary smoke test. |
+| **2** | Brainstorm + design | Selects a `Team personality` plus independent `Review counter-team`, then runs the structured 5-section brainstorm (architecture / API / data / errors / testing) with explicit per-section approval, written to `docs/specs/YYYY-MM-DD-<topic>-design.md`. |
+| **3** | Decompose into linked GitHub issues (delegate) | Foreground subagent creates labels, an EPIC umbrella, and N self-contained mini-specs sized for 32B-class local LLMs: team lens, review counter-team, file pointers, section anchors, checkbox AC, primary smoke test. |
 | **3.5** | Review and label (delegate) | Foreground subagent applies the `ctx:*` / `reasoning:*` rubric to each child, writes a `## Model fit` block into the body (idempotent), runs sibling-normalization across split children, and validates dep edges (closed-dep / child-less-tracker warnings; circular sibling-dep hard fail). Optional board assignment via `~/.autospec/project-map.yml` (full reader lands in PR B3 / #16). |
 | **4** | Background autonomous monitor | Background subagent loops: pick next ready issue → worktree → TDD → push → PR → self-review → admin-squash-merge → repeat until drained. |
 | **5** | Periodic status updates | Self-paced ~25 min wakeups posting deltas (closed issues, merged PRs, failures, blockers); slows to ~50 min when quiet. |

@@ -73,7 +73,34 @@ for i in range(8100):
   echo "$output" | grep -q "DUPLICATE_CODE"
 }
 
-# Case 9: flat-install resolution — script finds bundle-static-context.sh as a
+# Case 9: issue body appears in output when provided so review lenses are available
+@test "dynamic-suffix: issue body with review counter-team appears in output" {
+  issue_body="$(mktemp)"
+  cat > "$issue_body" <<'BODY'
+## Team personality
+
+- Tooling maintainers: shell developer, test engineer
+
+## Review counter-team
+
+- Reliability review: release engineer, docs-drift reviewer
+
+## Implementation scope
+
+- `scripts/example.sh`
+BODY
+  run bash "$BIN" \
+    --pr-diff "$FIX/pr-303.diff" \
+    --prev-findings "$FIX/findings-empty.json" \
+    --issue-body "$issue_body"
+  rm -f "$issue_body"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "### Issue body"
+  echo "$output" | grep -q "## Review counter-team"
+  echo "$output" | grep -q "Reliability review"
+}
+
+# Case 10: flat-install resolution — script finds bundle-static-context.sh as a
 # sibling in the same dir when AUTOSPEC_SCRIPTS_DIR is unset and no repo layout exists
 @test "flat-install: resolves sibling bundle-static-context.sh with no repo layout" {
   flatdir="$(mktemp -d)"

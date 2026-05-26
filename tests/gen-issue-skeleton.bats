@@ -7,12 +7,13 @@ MINIMAL_YAML="$REPO_ROOT/tests/fixtures/gen-issue-skeleton/minimal.yaml"
 VAGUE_YAML="$REPO_ROOT/tests/fixtures/gen-issue-skeleton/vague-goal.yaml"
 LINT_BIN="$REPO_ROOT/scripts/lint-issue.sh"
 
-@test "minimal-valid: --input emits 11-section body that passes lint-issue.sh" {
+@test "minimal-valid: --input emits issue body with team lenses that passes lint-issue.sh" {
   run bash "$GEN_BIN" --input "$MINIMAL_YAML"
   [ "$status" -eq 0 ]
-  # Must contain all 11 required section headings
   echo "$output" | grep -q "^## Goal"
   echo "$output" | grep -q "^## Source spec"
+  echo "$output" | grep -q "^## Team personality"
+  echo "$output" | grep -q "^## Review counter-team"
   echo "$output" | grep -q "^## Files to read first"
   echo "$output" | grep -q "^## Local-LLM notes"
   echo "$output" | grep -q "^## Implementation scope"
@@ -37,6 +38,10 @@ LINT_BIN="$REPO_ROOT/scripts/lint-issue.sh"
 issue_id: missing-goal
 spec_path: docs/specs/foo.md
 spec_url: https://example.com
+team_personality:
+  - "Core product engineering: product manager, architect, backend developer, test engineer"
+review_counter_team:
+  - "Security and reliability review: security advisor, SRE, regression tester"
 files_to_read:
   - scripts/lint-issue.sh
 implementation_scope:
@@ -64,4 +69,9 @@ YAML
   run bash "$GEN_BIN" --input "$VAGUE_YAML"
   # Should fail because lint-issue.sh will reject the vague goal
   [ "$status" -ne 0 ]
+}
+
+@test "operator-full-pipe: generated body can be linted via /dev/stdin" {
+  run bash -c "bash '$GEN_BIN' --input '$MINIMAL_YAML' | bash '$LINT_BIN' /dev/stdin"
+  [ "$status" -eq 0 ]
 }

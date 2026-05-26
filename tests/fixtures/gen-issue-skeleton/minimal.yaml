@@ -1,7 +1,13 @@
 issue_id: test-issue-001
 spec_path: docs/specs/2026-05-22-autospec-tooling-optimization-design.md
 spec_url: https://github.com/berlinguyinca/autospec/blob/main/docs/specs/2026-05-22-autospec-tooling-optimization-design.md
-goal_sentence: "Add scripts/gen-issue-skeleton.sh to render structured YAML input into an 11-section issue body."
+goal_sentence: "Add scripts/gen-issue-skeleton.sh to render structured YAML input into a team-lensed issue body."
+team_personality:
+  - "Tooling maintainers: architect, shell developer, test engineer"
+  - "Emphasis: deterministic issue rendering and lock-step validation compatibility"
+review_counter_team:
+  - "Reliability review: release engineer, docs-drift reviewer, regression tester"
+  - "Challenge: generated issues must preserve all prompt-governance sections"
 files_to_read:
   - docs/specs/2026-05-22-autospec-tooling-optimization-design.md
   - scripts/lint-issue.sh
@@ -12,12 +18,12 @@ out_of_scope:
 implementation_outline_lines:
   - "Add scripts/gen-issue-skeleton.sh with --input flag"
   - "Parse required YAML keys from input"
-  - "Substitute into 11-section markdown template"
+  - "Substitute into team-lensed markdown template"
   - "Pipe output through scripts/lint-issue.sh"
 tests_required:
   - "bats tests/gen-issue-skeleton.bats with 3 fixtures"
 acceptance_criteria:
-  - "scripts/gen-issue-skeleton.sh --input minimal.yaml emits 11-section body"
+  - "scripts/gen-issue-skeleton.sh --input minimal.yaml emits a team-lensed issue body"
   - "Output passes scripts/lint-issue.sh with exit 0"
   - "Missing required YAML field exits non-zero with MISSING_FIELD:<name> on stderr"
 verification:

@@ -7,6 +7,7 @@
 #
 # Usage:
 #   scripts/gen-reviewer-prompt.sh --pr-diff <file> [--prev-findings <file>]
+#                                   [--issue-body <file>]
 #                                   [--issue-labels <csv>] [--repo <owner/repo>]
 #   scripts/gen-reviewer-prompt.sh --help
 #
@@ -46,6 +47,7 @@ fi
 # ---------------------------------------------------------------------------
 PR_DIFF_FILE=""
 PREV_FINDINGS_FILE=""
+ISSUE_BODY_FILE=""
 ISSUE_LABELS=""
 REPO="${AUTOSPEC_REPO:-}"
 
@@ -57,6 +59,7 @@ gen-reviewer-prompt.sh — compose Phase 4 fused guardian+LGTM reviewer prompt
 
 Usage:
   scripts/gen-reviewer-prompt.sh --pr-diff <file> [--prev-findings <file>]
+                                  [--issue-body <file>]
                                   [--issue-labels <csv>] [--repo <owner/repo>]
   scripts/gen-reviewer-prompt.sh --help
 
@@ -65,6 +68,7 @@ Required:
 
 Optional:
   --prev-findings <file>   Path to previous-iteration findings file (JSON or text)
+  --issue-body <file>      Path to issue body markdown, including team lenses
   --issue-labels <csv>     Comma-separated issue labels (for cache-prefix tagging)
   --repo <owner/repo>      Repository slug (default: from AUTOSPEC_REPO env)
 
@@ -83,6 +87,9 @@ while [ $# -gt 0 ]; do
     --prev-findings)
       [ -z "${2:-}" ] && { printf 'gen-reviewer-prompt.sh: --prev-findings requires a value\n' >&2; exit 1; }
       PREV_FINDINGS_FILE="$2"; shift 2 ;;
+    --issue-body)
+      [ -z "${2:-}" ] && { printf 'gen-reviewer-prompt.sh: --issue-body requires a value\n' >&2; exit 1; }
+      ISSUE_BODY_FILE="$2"; shift 2 ;;
     --issue-labels)
       [ -z "${2:-}" ] && { printf 'gen-reviewer-prompt.sh: --issue-labels requires a value\n' >&2; exit 1; }
       ISSUE_LABELS="$2"; shift 2 ;;
@@ -109,6 +116,11 @@ fi
 
 if [ -n "$PREV_FINDINGS_FILE" ] && [ ! -f "$PREV_FINDINGS_FILE" ]; then
   printf 'gen-reviewer-prompt.sh: prev-findings file not found: %s\n' "$PREV_FINDINGS_FILE" >&2
+  exit 1
+fi
+
+if [ -n "$ISSUE_BODY_FILE" ] && [ ! -f "$ISSUE_BODY_FILE" ]; then
+  printf 'gen-reviewer-prompt.sh: issue-body file not found: %s\n' "$ISSUE_BODY_FILE" >&2
   exit 1
 fi
 
@@ -148,6 +160,11 @@ if [ -n "$PREV_FINDINGS_FILE" ]; then
   PREV_FINDINGS=$(cat "$PREV_FINDINGS_FILE")
 fi
 
+ISSUE_BODY=""
+if [ -n "$ISSUE_BODY_FILE" ]; then
+  ISSUE_BODY=$(cat "$ISSUE_BODY_FILE")
+fi
+
 # ---------------------------------------------------------------------------
 # Emit dynamic suffix
 # ---------------------------------------------------------------------------
@@ -179,6 +196,10 @@ cat <<SUFFIX2
 \`\`\`
 ${PREV_FINDINGS}
 \`\`\`
+
+### Issue body
+
+${ISSUE_BODY:-"(Issue body not provided. Fetch it before applying issue-scope, Team personality, or Review counter-team checks.)"}
 
 ---
 

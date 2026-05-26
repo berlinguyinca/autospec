@@ -25,7 +25,7 @@ It gives you:
 - Model-fit metadata on each issue with `ctx:*` and `reasoning:*` labels.
 - Implementation queues that can be filtered by model profile.
 - Quality gates for issue shape and implementation scope.
-- Autonomous PR creation, self-review, CI checks, and admin squash-merge.
+- Autonomous PR creation, counter-team review, CI checks, and admin squash-merge.
 - Stop/resume controls for long-running monitors.
 - A read-only story mode that explains the current application state from local
   docs plus GitHub issues and PRs.

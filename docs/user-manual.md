@@ -15,7 +15,8 @@ implementation → passive listener.
 `/autospec` is the umbrella end-to-end skill: a single feature request
 goes in and a series of merged PRs (closing the auto-generated issues)
 comes out. Internally it runs Phase 0 (bootstrap repo if missing),
-Phase 1 (investigate), Phase 2 (brainstorm + design), Phase 3
+Phase 1 (investigate), Phase 2 (team personality + review counter-team +
+brainstorm + design), Phase 3
 (decompose into linked GitHub issues), Phase 3.5 (review-and-label
 with `ctx:*`/`reasoning:*`), the Phase 3 pre-impl gate (default
 `run`), then Phase 4–6 (background autonomous monitor + status
@@ -34,7 +35,7 @@ to author a spec by hand.
 /autospec "add OIDC support behind a feature flag"
 Phase 0: bootstrap — repo present, skipping
 Phase 1: investigate — staged 6 files, 2 spec sections
-Phase 2: brainstorm — 4 design questions answered
+Phase 2: team personality + review counter-team selected, 4 design questions answered
 Phase 3: decompose — 9 child issues filed (#102…#110)
 Phase 3.5: classify — labeled with ctx:* and reasoning:*
 Spec written, 9 issues filed. Start /autospec-run now, defer to your

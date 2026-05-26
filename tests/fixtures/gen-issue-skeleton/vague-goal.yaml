@@ -2,6 +2,10 @@ issue_id: test-issue-002
 spec_path: docs/specs/2026-05-22-autospec-tooling-optimization-design.md
 spec_url: https://github.com/berlinguyinca/autospec/blob/main/docs/specs/2026-05-22-autospec-tooling-optimization-design.md
 goal_sentence: "Improve the system."
+team_personality:
+  - "Tooling maintainers: architect, shell developer, test engineer"
+review_counter_team:
+  - "Reliability review: release engineer, docs-drift reviewer, regression tester"
 files_to_read:
   - scripts/lint-issue.sh
 implementation_scope:

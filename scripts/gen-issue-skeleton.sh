@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/gen-issue-skeleton.sh — render a structured YAML input into an 11-section issue body.
+# scripts/gen-issue-skeleton.sh — render a structured YAML input into a team-lensed issue body.
 #
 # Usage:
 #   scripts/gen-issue-skeleton.sh --input <file>   # read YAML from file
@@ -8,12 +8,13 @@
 #
 # Required YAML keys:
 #   issue_id, spec_path, spec_url, goal_sentence,
-#   files_to_read (list), implementation_scope (list), out_of_scope (list),
+#   team_personality (list), review_counter_team (list), files_to_read (list),
+#   implementation_scope (list), out_of_scope (list),
 #   implementation_outline_lines (list), tests_required (list),
 #   acceptance_criteria (list), verification.primary_smoke,
 #   verification.operator_full, branch_name
 #
-# Output: 11-section markdown body on stdout.
+# Output: structured markdown issue body on stdout.
 # The output is piped through scripts/lint-issue.sh; non-zero exits propagate.
 #
 # Exit codes:
@@ -28,7 +29,7 @@ LINT_BIN="$SCRIPT_DIR/lint-issue.sh"
 
 usage() {
   cat <<'EOF'
-gen-issue-skeleton.sh — render a structured YAML input into an 11-section issue body
+gen-issue-skeleton.sh — render a structured YAML input into a team-lensed issue body
 
 Usage:
   scripts/gen-issue-skeleton.sh --input <file>
@@ -37,6 +38,7 @@ Usage:
 
 Required YAML keys:
   issue_id, spec_path, spec_url, goal_sentence,
+  team_personality, review_counter_team,
   files_to_read, implementation_scope, out_of_scope,
   implementation_outline_lines, tests_required, acceptance_criteria,
   verification.primary_smoke, verification.operator_full, branch_name
@@ -162,12 +164,16 @@ OPERATOR_FULL="$(yaml_get_nested verification operator_full)"
 
 # Lists (rendered as bullet lists)
 FILES_TO_READ="$(yaml_get_list files_to_read)"
+TEAM_PERSONALITY="$(yaml_get_list team_personality)"
+REVIEW_COUNTER_TEAM="$(yaml_get_list review_counter_team)"
 IMPL_SCOPE="$(yaml_get_list implementation_scope)"
 OUT_OF_SCOPE="$(yaml_get_list out_of_scope)"
 IMPL_OUTLINE="$(yaml_get_list implementation_outline_lines)"
 TESTS_REQUIRED="$(yaml_get_list tests_required)"
 ACCEPTANCE_CRITERIA="$(yaml_get_list acceptance_criteria)"
 
+[ -n "$TEAM_PERSONALITY" ]   || missing_field "team_personality"
+[ -n "$REVIEW_COUNTER_TEAM" ] || missing_field "review_counter_team"
 [ -n "$FILES_TO_READ" ]       || missing_field "files_to_read"
 [ -n "$IMPL_SCOPE" ]          || missing_field "implementation_scope"
 [ -n "$IMPL_OUTLINE" ]        || missing_field "implementation_outline_lines"
@@ -196,7 +202,7 @@ format_checkboxes() {
   done
 }
 
-# ── Render 11-section template ────────────────────────────────────────────────
+# ── Render issue body template ────────────────────────────────────────────────
 RENDERED_BODY="$(cat <<MARKDOWN
 ## Goal
 
@@ -205,6 +211,14 @@ ${GOAL_SENTENCE}
 ## Source spec section anchor
 
 \`${SPEC_PATH}\` — ${SPEC_URL}
+
+## Team personality
+
+$(printf '%s\n' "$TEAM_PERSONALITY" | format_bullets)
+
+## Review counter-team
+
+$(printf '%s\n' "$REVIEW_COUNTER_TEAM" | format_bullets)
 
 ## Files to read first
 

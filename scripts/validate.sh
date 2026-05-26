@@ -528,6 +528,65 @@ check_phase4_adaptive_retry() {
     done
 }
 
+# Team-personality contract: autospec should infer the right solving team from
+# the request, repository evidence, memories, and prior specs. If confidence is
+# low, it must ask explicitly with five concrete starter combinations, carry
+# the choice into the design spec, include it in child issues, and teach Phase 4
+# implementers to honor it as the execution lens.
+check_team_personality_contract() {
+    info "team personality contract: autospec / autospec-define / autospec-run"
+    for f in "skills/autospec/SKILL.md" "skills/autospec-define/SKILL.md"; do
+        grep -q '## Team personality selection' "$f" \
+            || fail "$f missing Team personality selection section"
+        grep -q 'past specs' "$f" \
+            || fail "$f missing past-spec inference input"
+        grep -q 'confidence is low' "$f" \
+            || fail "$f missing low-confidence ask rule"
+        grep -q 'five starter combinations' "$f" \
+            || fail "$f missing five starter combinations rule"
+        grep -q 'Core product engineering' "$f" \
+            || fail "$f missing Core product engineering starter team"
+        grep -q 'Security-sensitive' "$f" \
+            || fail "$f missing Security-sensitive starter team"
+        grep -q 'Team personality' "$f" \
+            || fail "$f missing Team personality issue/spec section"
+        grep -q 'Review counter-team' "$f" \
+            || fail "$f missing Review counter-team issue/spec section"
+        grep -q 'challenge likely blind spots' "$f" \
+            || fail "$f missing counter-team blind-spot directive"
+    done
+    for f in "skills/autospec/SKILL.md" "skills/autospec-define/SKILL.md" "skills/autospec-split/SKILL.md"; do
+        grep -q -- '- \*\*Team personality\*\*' "$f" \
+            || fail "$f missing Team personality child issue section"
+        grep -q -- '- \*\*Review counter-team\*\*' "$f" \
+            || fail "$f missing Review counter-team child issue section"
+        grep -q 'body should already contain `## Files to read first`, `## Implementation scope`, `## Team personality`, and `## Review counter-team`' "$f" \
+            || fail "$f missing Phase 3.5 team-lens template gate"
+    done
+    for f in "skills/autospec/SKILL.md" "skills/autospec-run/SKILL.md"; do
+        grep -q '## Team personality as execution lens' "$f" \
+            || fail "$f missing Phase 4 team personality execution lens"
+        grep -q '## Review counter-team as review lens' "$f" \
+            || fail "$f missing Phase 4 review counter-team lens"
+    done
+    grep -q 'team_personality' scripts/gen-issue-skeleton.sh \
+        || fail "scripts/gen-issue-skeleton.sh missing team_personality input"
+    grep -q 'review_counter_team' scripts/gen-issue-skeleton.sh \
+        || fail "scripts/gen-issue-skeleton.sh missing review_counter_team input"
+    grep -q -- '--issue-body' scripts/gen-reviewer-prompt.sh \
+        || fail "scripts/gen-reviewer-prompt.sh missing --issue-body support"
+    grep -q -- '--issue-body "$_body_file"' skills/autospec-run/SKILL.md \
+        || fail "skills/autospec-run/SKILL.md reviewer prompt does not pass issue body"
+    grep -q 'team_personality' docs/API_REFERENCE.md \
+        || fail "docs/API_REFERENCE.md missing gen-issue-skeleton team_personality schema"
+    grep -q 'review_counter_team' docs/API_REFERENCE.md \
+        || fail "docs/API_REFERENCE.md missing gen-issue-skeleton review_counter_team schema"
+    grep -q 'Team personality' skills/autospec/README.md \
+        || fail "skills/autospec/README.md missing Team personality docs"
+    grep -q 'Review counter-team' skills/autospec-define/README.md \
+        || fail "skills/autospec-define/README.md missing Review counter-team docs"
+}
+
 # Governance copy: the listener lifecycle and anti-loop guardrails must be
 # documented in AGENTS.md, and the listener skill must appear in both the
 # top-level README.md and SKILLS.md skill index. Spec §6.1, §7.1.
@@ -696,6 +755,7 @@ main() {
     check_phase4_issue_start_summary
     check_phase4_immediate_next_issue_pickup
     check_phase4_adaptive_retry
+    check_team_personality_contract
     check_autospec_run_priority_sort_lockstep
     check_autospec_run_regression_review_lockstep
     check_autospec_review_skill_present

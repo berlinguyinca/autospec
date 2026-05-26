@@ -67,7 +67,13 @@ if [ -z "$BODY_FILE" ]; then
     exit 1
 fi
 
-if [ ! -f "$BODY_FILE" ]; then
+STDIN_TMP=""
+if [ "$BODY_FILE" = "-" ] || [ "$BODY_FILE" = "/dev/stdin" ]; then
+    STDIN_TMP="$(mktemp)"
+    cat > "$STDIN_TMP"
+    BODY_FILE="$STDIN_TMP"
+    trap 'rm -f "$STDIN_TMP"' EXIT
+elif [ ! -f "$BODY_FILE" ]; then
     printf 'lint-issue.sh: file not found: %s\n' "$BODY_FILE" >&2
     exit 1
 fi
