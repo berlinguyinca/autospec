@@ -201,7 +201,8 @@ Exit: 0 = success, 1 = missing required arg or file not found.
 ### `gen-reviewer-prompt.sh`
 
 Composes the Phase 4 fused guardian+LGTM reviewer prompt via `bundle-static-context.sh --role reviewer`
-(static cached prefix) plus a deterministic dynamic suffix from the PR diff and previous-iteration findings.
+(static cached prefix) plus a deterministic dynamic suffix from the PR diff, issue body, and
+previous-iteration findings.
 Diffs over 8000 lines are clipped with a `[diff clipped at 8000 lines]` marker. Zero LLM calls.
 
 Both this script and `gen-implementer-prompt.sh` resolve their sibling `bundle-static-context.sh` by
@@ -210,6 +211,7 @@ own directory, then the repo-layout `skills/autospec-shared/scripts/` copy.
 
 ```
 Usage: bash scripts/gen-reviewer-prompt.sh --pr-diff <file> [--prev-findings <file>]
+                                           [--issue-body <file>]
                                            [--issue-labels <csv>] [--repo <owner/repo>]
 ```
 
