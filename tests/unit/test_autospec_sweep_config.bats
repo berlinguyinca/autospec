@@ -52,6 +52,7 @@ teardown() {
 }
 
 @test "autospec config schema compiles and accepts generated defaults" {
+  command -v ajv >/dev/null 2>&1 || skip "ajv CLI not available (install ajv-cli to run this test)"
   mkdir -p "$TEST_TMPDIR/repo"
   bash "$WIZARD" init --repo-root "$TEST_TMPDIR/repo" --answers "$REPO_ROOT/tests/fixtures/autospec-sweep/minimal-answers.yml"
 
