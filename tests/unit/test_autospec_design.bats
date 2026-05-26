@@ -189,3 +189,28 @@ teardown() {
     run bash "$REPO_ROOT/scripts/validate.sh"
     [ "$status" -eq 0 ]
 }
+
+# ---- top-level install.sh wiring (issue #574) ----------------------------
+
+@test "top-level install.sh: ALL_SKILLS contains autospec-design" {
+    grep -E '^ALL_SKILLS=' "$REPO_ROOT/install.sh" | grep -q 'autospec-design'
+}
+
+@test "top-level install.sh: --skill validation case accepts autospec-design" {
+    # Find the validation case-statement and confirm autospec-design is listed.
+    block="$(awk '/^case "\$SKILL_ARG" in/{f=1} f{print; if (/^esac/) exit}' "$REPO_ROOT/install.sh")"
+    [ -n "$block" ]
+    printf '%s\n' "$block" | grep -q 'autospec-design'
+}
+
+@test "install.sh --skill autospec-design --harness all --dry-run exits 0" {
+    run env AUTOSPEC_NO_STAR_PROMPT=1 AUTOSPEC_NO_SELF_UPDATE=1 \
+        bash "$REPO_ROOT/install.sh" --skill autospec-design --harness all --dry-run
+    [ "$status" -eq 0 ]
+}
+
+@test "install.sh --skill bogus-skill --dry-run exits non-zero (regression guard)" {
+    run env AUTOSPEC_NO_STAR_PROMPT=1 AUTOSPEC_NO_SELF_UPDATE=1 \
+        bash "$REPO_ROOT/install.sh" --skill bogus-skill --dry-run
+    [ "$status" -ne 0 ]
+}
