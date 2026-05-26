@@ -26,5 +26,6 @@ setup() {
 
 @test "validate.sh enforces the Phase 1 bounded context contract" {
   grep -q '^check_phase1_bounded_context_contract()' "$REPO_ROOT/scripts/validate.sh"
-  grep -q 'check_phase1_bounded_context_contract' "$REPO_ROOT/scripts/validate.sh"
+  count="$(grep -c 'check_phase1_bounded_context_contract' "$REPO_ROOT/scripts/validate.sh")"
+  [ "$count" -ge 2 ]
 }
