@@ -224,6 +224,48 @@ For a freshly-bootstrapped empty repo, Phase 1 may be a no-op — proceed to Pha
 
 > **Spec quality is the bottleneck.** Phase 2's output drives every downstream cycle's cost; if you care about spec quality, invoke this skill with your top-tier model (Claude Code: `claude-code --model opus`; Codex: top GPT). Phase 2 itself runs in the orchestrator (no subagent dispatch) — your invocation model IS the spec model. Subagents in Phases 1, 3, 3.5 follow this lead by selecting Tier A; Phase 4 implementation work uses Tier B. See AGENTS.md.
 
+## Team personality selection
+
+Before the Architecture question, decide what kind of team should solve this
+request. Infer the team personality from the user's request, Phase 1 evidence,
+repository labels, relevant memory files, and past specs under `docs/specs/`.
+The goal is to shape the design as a fitting team would reason about it, not to
+treat every request as a generic "fix this bug" task.
+
+Write a **Team personality** section into the design spec with:
+- the selected team name,
+- 3-6 roles,
+- why this team fits the request,
+- the risks this team is expected to notice,
+- any team emphasis that should carry into child issues.
+
+Also write a **Review counter-team** subsection. It must be a different
+emphasis from the implementation team and should challenge likely blind spots,
+not duplicate the same perspective. Include:
+- the counter-team name,
+- 2-5 roles,
+- which assumptions or failure modes this team should challenge,
+- how review should stay inside the issue scope while applying that lens.
+
+If confidence is low, ask the user explicitly: `What kind of team should solve this problem?`
+Offer exactly these five starter combinations:
+1. **Core product engineering** — product manager, architect, backend developer, frontend developer, test engineer.
+2. **Reliability/backend** — backend developer, platform engineer, sysadmin/SRE, database engineer, security advisor.
+3. **Frontend/product** — frontend developer, UX designer, accessibility reviewer, API/backend developer, QA engineer.
+4. **Security-sensitive** — security advisor, architect, backend developer, platform engineer, test engineer.
+5. **Legacy/refactor** — architect, maintainer, backend/frontend developer as needed, test engineer, documentation owner.
+
+If one option is clearly best, proceed without asking and record the confidence
+and evidence in the spec. If two or more options are plausible and would change
+the architecture, tests, or decomposition, ask before continuing.
+
+Derive the Review counter-team after choosing the implementation team:
+- Frontend/product implementation teams should be reviewed by accessibility, API contract, and QA perspectives.
+- Reliability/backend implementation teams should be reviewed by security, operations, and data-integrity perspectives.
+- Security-sensitive implementation teams should be reviewed by product/UX, maintainer, and test perspectives.
+- Legacy/refactor implementation teams should be reviewed by maintainer, regression-test, and architecture perspectives.
+- Core product engineering implementation teams should be reviewed by security, operations, accessibility, and maintainability perspectives.
+
 Run a structured brainstorm — one question at a time, get explicit approval after each section:
 
 1. **Architecture** — where does new code live, what existing patterns does it follow.
@@ -275,6 +317,8 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 >
 > - **Goal** — 1 sentence outcome.
 > - **Source spec** — `<spec-path>` + `<spec-github-url>` of the design doc this issue derives from.
+> - **Team personality** — copy the spec's selected team name, roles, and issue-relevant emphasis. If the selected spec lacks this section, infer it from the request, past specs, repository labels, and memory; if confidence is low, stop and ask the operator to choose from the five starter combinations in Phase 2 before filing issues.
+> - **Review counter-team** — copy the spec's counter-team name, roles, and issue-relevant blind spots to challenge. If the selected spec lacks this section, derive a different review emphasis from the Team personality and issue risk before filing.
 > - **Files to read first** — 3–7 entries. Each entry is one of: a path with **section anchors** (do not say "read the whole spec"), the closest existing-file analogue to mirror, the test file or fixture pattern to follow, or a dependency issue with a one-line summary so the LLM doesn't fetch its body. Bias toward sectional anchors over full files.
 > - **Local-LLM execution notes** — one-line context-window recommendation (`32k routine`, `64k stretch`, or `split into N subagents along <criterion>` for issues exceeding ~30k tokens of staged context) and whether single-pass or subagent-split is recommended.
 > - **Implementation scope** and **Out of scope** as separate subsections (replaces the prior single "Scope" section).
@@ -337,8 +381,7 @@ labels and patches each body with a `## Model fit` block.
 > `type:tracker` label). For each:
 >
 > 1. **Stage context.** Read `gh issue view <N> --repo {repo} --json title,body,labels`. The
->    body should already contain `## Files to read first` and
->    `## Implementation scope`. If either is missing, add label
+>    body should already contain `## Files to read first`, `## Implementation scope`, `## Team personality`, and `## Review counter-team`. If any is missing, add label
 >    `needs-autospec-template` (idempotent `gh label create --force` once at run
 >    start) and skip — do not classify or patch.
 >

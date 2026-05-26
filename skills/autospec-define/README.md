@@ -41,10 +41,12 @@ cd skills/autospec-define
 - **Phase 0** — Bootstrap a fresh GitHub repo if the cwd has no git/remote (asks
   name / visibility / owner once).
 - **Phase 1** — Read-only research subagent maps the codebase.
-- **Phase 2** — Structured 5-section brainstorm (architecture / API / data / errors /
+- **Phase 2** — Selects a `Team personality` plus independent `Review counter-team`,
+  then runs the structured 5-section brainstorm (architecture / API / data / errors /
   testing), written to `docs/specs/YYYY-MM-DD-<topic>-design.md`.
 - **Phase 3** — Foreground subagent decomposes the spec into an EPIC umbrella plus
-  N self-contained children pre-staged for 32B-class local LLMs.
+  N self-contained children pre-staged for 32B-class local LLMs, carrying both
+  the implementation team lens and review counter-team lens.
 
 In existing spec mode, the skill verifies the selected spec is present on
 `origin/main`, skips Phases 1–2, then runs Phase 3 and Phase 3.5 against that

@@ -538,6 +538,17 @@ issues unblock the queue before continuing with normal feature work.
 > <BODY>
 > ===END===
 >
+> ## Team personality as execution lens
+>
+> Read the issue body's **Team personality** section before choosing an
+> approach. Let that team shape what you emphasize: a reliability/backend team
+> should scrutinize operational safety and data boundaries, a frontend/product
+> team should scrutinize user workflow and accessibility, a security-sensitive
+> team should scrutinize trust boundaries and abuse cases, and so on. Do not
+> invent extra scope; use the team personality to decide which risks deserve
+> extra attention while still satisfying the issue's concrete acceptance
+> criteria.
+>
 > Keep a progress heartbeat so the monitor can prove forward movement:
 > - Create/update `~/.autospec/process-heartbeats/<repo-slug>/<ISSUE>.json` at each major step:
 >   - `claimed`, `worktree_ready`, `tests_started`, `tests_passed`, `pr_created`, `smoke_retry`, `reviewed`, `merged`, `failed`
@@ -679,10 +690,13 @@ issues unblock the queue before continuing with normal feature work.
 >      **Assemble reviewer prompt** — call `gen-reviewer-prompt.sh` to compose the combined prompt (static cached prefix + dynamic suffix):
 >      ```bash
 >      _pr_diff_file=$(mktemp -t autospec-pr-diff-XXXXXX.diff)
->      trap 'rm -f "$_pr_diff_file"' EXIT
+>      _body_file=$(mktemp -t autospec-issue-body-XXXXXX.md)
+>      trap 'rm -f "$_pr_diff_file" "$_body_file"' EXIT
 >      gh pr diff <PR> > "$_pr_diff_file"
+>      gh issue view <ISSUE> --json body --jq '.body' > "$_body_file"
 >      combined_reviewer_prompt=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/gen-reviewer-prompt.sh" \
 >        --pr-diff "$_pr_diff_file" \
+>        --issue-body "$_body_file" \
 >        --prev-findings "/tmp/guardian-<PR>.md" \
 >        --issue-labels "<ISSUE_LABELS>" \
 >        --repo "<REPO>")
@@ -691,6 +705,14 @@ issues unblock the queue before continuing with normal feature work.
 >
 >      Dispatch ONE **foreground subagent** with this brief:
 >        > You are the implementation reviewer for PR #<PR> on {repo}, closing issue #<ISSUE>.
+>        >
+>        > ## Review counter-team as review lens
+>        >
+>        > Read the issue body's **Review counter-team** section before reviewing.
+>        > Review from that independent team's perspective and challenge likely blind spots
+>        > from the implementation team's **Team personality**. Stay inside the issue
+>        > scope: do not request unrelated rewrites, but do raise findings when the PR
+>        > misses risks the counter-team was selected to notice.
 >        >
 >        > **Part 1 — Guardian (contract compliance)** — skip if `AUTOSPEC_NO_GUARDIAN=1`:
 >        > 1. Read AGENTS.md `## Implementation-quality contract` for the RULE_ID table and directive map.

@@ -211,12 +211,22 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 >
 > Read the selected design spec at `<spec-path>` (`<spec-github-url>`) and split it into linked GitHub issues for {repo}.
 >
+> Before drafting issues, identify the implementation **Team personality** and independent **Review counter-team** from the selected spec. If the spec lacks those sections, infer them from the request, past specs under `docs/specs/`, repository labels, and relevant memory. If confidence is low, stop and ask the operator: `What kind of team should solve this problem?` Offer exactly these five starter combinations:
+> 1. **Core product engineering** — product manager, architect, backend developer, frontend developer, test engineer.
+> 2. **Reliability/backend** — backend developer, platform engineer, sysadmin/SRE, database engineer, security advisor.
+> 3. **Frontend/product** — frontend developer, UX designer, accessibility reviewer, API/backend developer, QA engineer.
+> 4. **Security-sensitive** — security advisor, architect, backend developer, platform engineer, test engineer.
+> 5. **Legacy/refactor** — architect, maintainer, backend/frontend developer as needed, test engineer, documentation owner.
+> Derive the Review counter-team with a different emphasis that will challenge likely blind spots while staying inside the issue scope.
+>
 > Create labels (idempotent with `--force`): `auto-implement` (#0e8a16), `epic` (#b60205), plus any domain labels the spec calls for. Then create exactly N issues — first an EPIC umbrella (no `auto-implement` label, just `epic` + domain), then N-1 children all carrying `auto-implement`. After creating children, edit the umbrella body with a checklist linking them. Return JSON: `{umbrella, children:[…], labels_created:[…]}`. Use `gh` CLI only. Do NOT modify code. Do NOT push branches. Do NOT create PRs.
 >
 > Each child body must be a **self-contained mini-spec** sized for execution by a 32B-class local LLM, with these sections in order:
 >
 > - **Goal** — 1 sentence outcome.
 > - **Source spec** — `<spec-path>` + `<spec-github-url>` of the design doc this issue derives from.
+> - **Team personality** — copy the selected team name, roles, and issue-relevant emphasis.
+> - **Review counter-team** — copy the counter-team name, roles, and issue-relevant blind spots to challenge.
 > - **Files to read first** — 3–7 entries. Each entry is one of: a path with **section anchors** (do not say "read the whole spec"), the closest existing-file analogue to mirror, the test file or fixture pattern to follow, or a dependency issue with a one-line summary so the LLM doesn't fetch its body. Bias toward sectional anchors over full files.
 > - **Local-LLM execution notes** — one-line context-window recommendation (`32k routine`, `64k stretch`, or `split into N subagents along <criterion>` for issues exceeding ~30k tokens of staged context) and whether single-pass or subagent-split is recommended.
 > - **Implementation scope** and **Out of scope** as separate subsections (replaces the prior single "Scope" section).
@@ -279,8 +289,7 @@ labels and patches each body with a `## Model fit` block.
 > `type:tracker` label). For each:
 >
 > 1. **Stage context.** Read `gh issue view <N> --repo {repo} --json title,body,labels`. The
->    body should already contain `## Files to read first` and
->    `## Implementation scope`. If either is missing, add label
+>    body should already contain `## Files to read first`, `## Implementation scope`, `## Team personality`, and `## Review counter-team`. If any is missing, add label
 >    `needs-autospec-template` (idempotent `gh label create --force` once at run
 >    start) and skip — do not classify or patch.
 >

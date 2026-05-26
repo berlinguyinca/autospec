@@ -45,7 +45,7 @@ Turns a feature description into a spec PR and a GitHub issue tree.
 **Triggers:** `autospec-define`, `write a spec`, `define feature`, `create spec`, `decompose feature`
 
 **Modes:**
-- Normal: brainstorm → draft spec → decompose into issues
+- Normal: choose implementation team + review counter-team → brainstorm → draft spec → decompose into issues
 - Existing spec: skip Phases 1-2, reuse tracked `docs/specs/*.md`
 - `--init`: reverse-engineer existing repo → bootstrap docs + specs
 

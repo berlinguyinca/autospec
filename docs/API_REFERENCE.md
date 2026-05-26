@@ -140,12 +140,18 @@ Usage: bash ci-wait.sh <pr-number> [--repo <owner/repo>] [--timeout-secs N]
 
 ### `gen-issue-skeleton.sh`
 
-Renders a structured YAML input into an 11-section issue body and validates it via `lint-issue.sh`.
+Renders a structured YAML input into a team-lensed issue body and validates it via `lint-issue.sh`.
 
 ```
 Usage: bash scripts/gen-issue-skeleton.sh --input <file>
        bash scripts/gen-issue-skeleton.sh < input.yaml
 ```
+
+Required YAML keys: `issue_id`, `spec_path`, `spec_url`, `goal_sentence`,
+`team_personality`, `review_counter_team`, `files_to_read`,
+`implementation_scope`, `out_of_scope`, `implementation_outline_lines`,
+`tests_required`, `acceptance_criteria`, `verification.primary_smoke`,
+`verification.operator_full`, and `branch_name`.
 
 Exit: 0 = lint pass, 1 = MISSING_FIELD or render error, N = lint finding count.
 
@@ -195,7 +201,8 @@ Exit: 0 = success, 1 = missing required arg or file not found.
 ### `gen-reviewer-prompt.sh`
 
 Composes the Phase 4 fused guardian+LGTM reviewer prompt via `bundle-static-context.sh --role reviewer`
-(static cached prefix) plus a deterministic dynamic suffix from the PR diff and previous-iteration findings.
+(static cached prefix) plus a deterministic dynamic suffix from the PR diff, issue body, and
+previous-iteration findings.
 Diffs over 8000 lines are clipped with a `[diff clipped at 8000 lines]` marker. Zero LLM calls.
 
 Both this script and `gen-implementer-prompt.sh` resolve their sibling `bundle-static-context.sh` by
@@ -204,6 +211,7 @@ own directory, then the repo-layout `skills/autospec-shared/scripts/` copy.
 
 ```
 Usage: bash scripts/gen-reviewer-prompt.sh --pr-diff <file> [--prev-findings <file>]
+                                           [--issue-body <file>]
                                            [--issue-labels <csv>] [--repo <owner/repo>]
 ```
 
