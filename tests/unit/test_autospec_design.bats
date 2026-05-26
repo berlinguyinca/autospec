@@ -291,3 +291,116 @@ setup_fetch() {
     [ "$status" -ne 0 ]
     echo "$output" | grep -qiE 'install|gh|curl'
 }
+
+# ---- score-suggestion: rubric scorer (issue #577) ------------------------
+# Tests build throwaway fixture repos under $BATS_TEST_TMPDIR and inject the
+# catalog vendor list via $AUTOSPEC_DESIGN_VENDORS so the scorer runs
+# hermetically without hitting the real catalog. The vendor list mirrors a
+# representative slice of berlinguyinca/awesome-design-md.
+
+SCORE_VENDORS="linear.app vercel stripe apple tesla notion figma cursor supabase nike"
+
+setup_score() {
+    SCORE="$SKILL_DIR/scripts/score-suggestion.sh"
+    NEXT_REPO="$BATS_TEST_TMPDIR/nextjs-app"
+    HTML_REPO="$BATS_TEST_TMPDIR/vanilla-html"
+
+    mkdir -p "$NEXT_REPO"
+    cat > "$NEXT_REPO/package.json" <<'EOF'
+{
+  "name": "linear-style-dashboard",
+  "description": "A developer-tool dashboard inspired by Linear's design language.",
+  "dependencies": { "next": "14.0.0", "react": "18.2.0" }
+}
+EOF
+    cat > "$NEXT_REPO/next.config.js" <<'EOF'
+module.exports = {};
+EOF
+    cat > "$NEXT_REPO/README.md" <<'EOF'
+# Linear-style developer dashboard
+
+A Next.js app for engineering teams, modeled after Linear.
+EOF
+
+    mkdir -p "$HTML_REPO"
+    cat > "$HTML_REPO/index.html" <<'EOF'
+<!doctype html>
+<html><head><title>Tesla showroom</title></head>
+<body><h1>Electric vehicles by Tesla</h1></body></html>
+EOF
+    cat > "$HTML_REPO/README.md" <<'EOF'
+# Tesla electric vehicle marketing site
+
+A static HTML brochure site for Tesla cars.
+EOF
+}
+
+@test "score-suggestion: script exists and is executable" {
+    setup_score
+    [ -f "$SCORE" ]
+    [ -x "$SCORE" ]
+}
+
+@test "score-suggestion: no repo arg exits non-zero with usage" {
+    setup_score
+    run bash "$SCORE"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -qi 'usage'
+}
+
+@test "score-suggestion: Next.js fixture scores linear at least 3" {
+    setup_score
+    run env AUTOSPEC_DESIGN_VENDORS="$SCORE_VENDORS" bash "$SCORE" "$NEXT_REPO"
+    [ "$status" -eq 0 ]
+    # Output lines look like: "<score>\t<vendor>\t<rationale>". Find linear's score.
+    linear_line="$(echo "$output" | grep -iE 'linear' | head -1)"
+    [ -n "$linear_line" ]
+    linear_score="$(echo "$linear_line" | grep -oE '^[0-9]+' | head -1)"
+    [ -n "$linear_score" ]
+    [ "$linear_score" -ge 3 ]
+}
+
+@test "score-suggestion: prints at most 3 vendors" {
+    setup_score
+    run env AUTOSPEC_DESIGN_VENDORS="$SCORE_VENDORS" bash "$SCORE" "$NEXT_REPO"
+    [ "$status" -eq 0 ]
+    # Count vendor result lines (those beginning with a score integer).
+    n="$(echo "$output" | grep -cE '^[0-9]+')"
+    [ "$n" -le 3 ]
+    [ "$n" -ge 1 ]
+}
+
+@test "score-suggestion: vanilla HTML top-1 differs from Next.js top-1" {
+    setup_score
+    run env AUTOSPEC_DESIGN_VENDORS="$SCORE_VENDORS" bash "$SCORE" "$NEXT_REPO"
+    [ "$status" -eq 0 ]
+    next_top="$(echo "$output" | grep -E '^[0-9]+' | head -1 | cut -f2)"
+
+    run env AUTOSPEC_DESIGN_VENDORS="$SCORE_VENDORS" bash "$SCORE" "$HTML_REPO"
+    [ "$status" -eq 0 ]
+    html_top="$(echo "$output" | grep -E '^[0-9]+' | head -1 | cut -f2)"
+
+    [ -n "$next_top" ]
+    [ -n "$html_top" ]
+    [ "$next_top" != "$html_top" ]
+}
+
+# ---- suggest-section trio prose + lockstep (issue #577) ------------------
+
+@test "suggest: SKILL.md has a '## Suggest' heading" {
+    run grep -c '^## Suggest' "$SKILL_DIR/SKILL.md"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 1 ]
+}
+
+@test "suggest: lockstep holds after prose addition (SKILL == codex)" {
+    skill_body="$(awk '/^---$/{c++; next} c>=2' "$SKILL_DIR/SKILL.md")"
+    codex_body="$(cat "$SKILL_DIR/codex/prompt.md")"
+    [ "$skill_body" = "$codex_body" ]
+}
+
+@test "suggest: lockstep holds after prose addition (SKILL == opencode)" {
+    skill_body="$(awk '/^---$/{c++; next} c>=2' "$SKILL_DIR/SKILL.md")"
+    opencode_body="$(awk '/^---$/{c++; next} c>=2' "$SKILL_DIR/opencode/agent.md")"
+    [ "$skill_body" = "$opencode_body" ]
+}

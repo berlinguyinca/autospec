@@ -148,16 +148,41 @@ AUTOSPEC_DESIGN_CATALOG_REF="${AUTOSPEC_DESIGN_CATALOG_REF:-main}"
 
 Per-vendor DESIGN.md is fetched via `gh api repos/${owner}/${repo}/contents/design-md/${vendor}/DESIGN.md?ref=${ref} --jq '.content' | base64 -d`, with a fallback to `curl -fsSL https://raw.githubusercontent.com/...`. Cache lands under `~/.autospec/design-cache/<vendor>/DESIGN.md` with a 24h freshness window. The catalog fetcher script lands in issue #576 (`fetch-design-md.sh`).
 
-## Subcommand: suggest (placeholder)
+## Suggest
 
-> **Model tier:** `TIER_B` (implementation work) — scoring is mechanical; rubric is a fixed table.
+> **Model tier:** `TIER_B` (implementation work) — scoring is mechanical; the
+> rubric is a fixed table and the helper is deterministic.
 
-Scaffold-only placeholder. Real prose lands in issue #577. Until then, the
-suggest subcommand prints:
+`suggest` scans the current repo, scores every catalog vendor against a fixed
+rubric, and presents the top 3 candidates with a one-line rationale each. It is
+**read-only** — it never modifies any file in the target repo.
 
+Run the deterministic scorer (it prints tab-separated `<score>\t<vendor>\t<rationale>`
+lines, highest score first):
+
+```bash
+bash skills/autospec-design/scripts/score-suggestion.sh <repo-root>
 ```
-/autospec-design suggest: full implementation lands in issue #577.
-```
+
+The scorer:
+
+1. Fetches the catalog vendor list once (via `gh api .../contents/design-md`,
+   `curl` fallback). When you have already fetched it, pass it in via
+   `AUTOSPEC_DESIGN_VENDORS` to avoid a second round-trip.
+2. Detects repo signals: framework (`package.json`, `next.config.*`,
+   `vite.config.*`, `angular.json`, `svelte.config.*`, Tailwind config), brand
+   keywords (README + `package.json` `name`/`description`), and product-domain
+   keywords (README).
+3. Scores each vendor on the rubric below (cap 6):
+   - **Framework match (+2)** — repo uses a web/JS UI framework AND the vendor
+     is a developer / SaaS / web-product brand (e.g. Linear, Vercel, Stripe).
+   - **Brand match (+1)** — the vendor's normalized name appears in the repo's
+     README or `package.json`.
+   - **Domain match (+1)** — a vendor-name token overlaps the repo README.
+
+Present the top 3 to the user with their rationales and let them pick. Then run
+`/autospec-design apply <vendor>` with the chosen vendor. Do **not** apply
+automatically — `suggest` only recommends.
 
 ## Subcommand: apply (placeholder)
 
