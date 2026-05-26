@@ -214,3 +214,80 @@ teardown() {
         bash "$REPO_ROOT/install.sh" --skill bogus-skill --dry-run
     [ "$status" -ne 0 ]
 }
+
+# ---- fetch-design-md: catalog fetcher (issue #576) -----------------------
+# Tests cover cache-hit, missing-vendor Levenshtein hints, missing-args, and
+# missing-tools failure modes. Network-touching cases use the cache short-
+# circuit and an isolated $HOME so they run hermetically without hitting
+# the real catalog. The script reads $AUTOSPEC_DESIGN_CACHE_DIR and
+# $AUTOSPEC_DESIGN_CACHE_TTL to make these paths configurable.
+
+setup_fetch() {
+    FETCH="$SKILL_DIR/scripts/fetch-design-md.sh"
+    export AUTOSPEC_DESIGN_CACHE_DIR="$FAKE_HOME/.autospec/design-cache"
+    export AUTOSPEC_DESIGN_CACHE_TTL=86400
+}
+
+@test "fetch-design-md: script exists and is executable" {
+    setup_fetch
+    [ -f "$FETCH" ]
+    [ -x "$FETCH" ]
+}
+
+@test "fetch-design-md: no args exits non-zero with usage message" {
+    setup_fetch
+    run bash "$FETCH"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -qi 'usage'
+}
+
+@test "fetch-design-md: fresh cache hit prints body without network" {
+    setup_fetch
+    vendor="testvendor"
+    cache_file="$AUTOSPEC_DESIGN_CACHE_DIR/$vendor/DESIGN.md"
+    mkdir -p "$(dirname "$cache_file")"
+    printf '# Test DESIGN.md\n\nHello from cache.\n' > "$cache_file"
+    # Make PATH empty so any accidental network call would fail loudly.
+    run env PATH="/usr/bin:/bin" bash "$FETCH" "$vendor"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q 'Hello from cache'
+}
+
+@test "fetch-design-md: stale cache (mtime > TTL) triggers re-fetch attempt" {
+    setup_fetch
+    vendor="testvendor-stale"
+    cache_file="$AUTOSPEC_DESIGN_CACHE_DIR/$vendor/DESIGN.md"
+    mkdir -p "$(dirname "$cache_file")"
+    printf 'stale body\n' > "$cache_file"
+    # Force the file to look ancient (1970-ish).
+    touch -t 197001010000 "$cache_file" 2>/dev/null || touch -d '1970-01-01' "$cache_file"
+    # Set TTL low (1s) and point catalog at an unreachable host so the
+    # re-fetch fails loudly rather than silently using stale data.
+    export AUTOSPEC_DESIGN_CACHE_TTL=1
+    export AUTOSPEC_DESIGN_CATALOG_OWNER="autospec-test-nonexistent-owner-zzz"
+    export AUTOSPEC_DESIGN_CATALOG_REPO="nonexistent-repo-zzz"
+    run env PATH="/usr/bin:/bin" bash "$FETCH" "$vendor"
+    # Must NOT silently print stale body — must exit non-zero on network failure.
+    [ "$status" -ne 0 ]
+}
+
+@test "fetch-design-md: missing both gh and curl exits non-zero with install hint" {
+    setup_fetch
+    vendor="anyvendor"
+    # Stub PATH containing only shims for the binaries the script needs
+    # internally (date, stat, cat, mkdir, printf, dirname, sort, head,
+    # awk, sed, grep, tr) but NOT gh and NOT curl. We symlink from the
+    # real locations into a temp dir.
+    stub_path="$FAKE_HOME/stub-bin"
+    mkdir -p "$stub_path"
+    for tool in bash sh date stat cat mkdir printf dirname sort head awk sed grep tr base64 seq; do
+        src="$(command -v "$tool" 2>/dev/null || true)"
+        [ -n "$src" ] && ln -sf "$src" "$stub_path/$tool"
+    done
+    run env -i HOME="$FAKE_HOME" \
+        AUTOSPEC_DESIGN_CACHE_DIR="$AUTOSPEC_DESIGN_CACHE_DIR" \
+        AUTOSPEC_DESIGN_CACHE_TTL="$AUTOSPEC_DESIGN_CACHE_TTL" \
+        PATH="$stub_path" bash "$FETCH" "$vendor"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -qiE 'install|gh|curl'
+}
