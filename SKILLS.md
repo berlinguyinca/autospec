@@ -57,6 +57,16 @@
 - Harnesses: Claude Code (`SKILL.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
 - Status: inline Phase 4 gate (runs after build + lint, before auto-merge) plus standalone `/autospec-test [PR#]` invocation. Two-stage: unit coverage → E2E coverage. Self-heal loop up to 5 iterations / 60 min coding time. Assertion-shift guardrail blocks LOOSENING rewrites. Mode II (scoped production) opt-in with mandatory backup/restore.
 
+## autospec-design
+
+- Path: [`skills/autospec-design`](skills/autospec-design)
+- Trigger: use when a user wants the repo's UI anchored to a vendor design language (Apple, Linear, Notion, Stripe, Tesla, etc.) from the `berlinguyinca/awesome-design-md` catalog — pick a vendor, write `DESIGN.md` at the project root on a feature branch, and optionally migrate existing UI to match via per-component `auto-implement` issues.
+- Activation keywords: `autospec-design`, `adopt design`, `design language`, `DESIGN.md`, `apply design`, `suggest design`, `migrate to design`, `vendor design system`
+- Subcommands: `suggest` (rank catalog vendors against repo signals), `apply <vendor>` (fetch + write `DESIGN.md` to project root on a feature branch), `migrate <vendor>` (decompose existing UI into per-component design-migration spec, hand off to `/autospec-define`).
+- Catalog source: [`berlinguyinca/awesome-design-md`](https://github.com/berlinguyinca/awesome-design-md) (fork of `voltagent/awesome-design-md`, MIT). Fetched at runtime via `gh api` with `curl` fallback, cached for 24h under `~/.autospec/design-cache/<vendor>/DESIGN.md`.
+- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
+- Status: vendor-design adoption skill. See [`docs/specs/2026-05-26-autospec-design-skill.md`](docs/specs/2026-05-26-autospec-design-skill.md) for the design spec and [`skills/autospec-design/README.md`](skills/autospec-design/README.md) for usage.
+
 ## Docs amendment (Phase 10c)
 
 The autospec docs amendment ships first-class documentation artifacts to every target repo.
