@@ -533,8 +533,7 @@ check_phase4_adaptive_retry() {
 # low, it must ask explicitly with five concrete starter combinations, carry
 # the choice into the design spec, include it in child issues, and teach Phase 4
 # implementers to honor it as the execution lens.
-check_team_personality_contract() {
-    info "team personality contract: autospec / autospec-define / autospec-run"
+check_team_personality_selection_contract() {
     for f in "skills/autospec/SKILL.md" "skills/autospec-define/SKILL.md"; do
         grep -q '## Team personality selection' "$f" \
             || fail "$f missing Team personality selection section"
@@ -555,6 +554,9 @@ check_team_personality_contract() {
         grep -q 'challenge likely blind spots' "$f" \
             || fail "$f missing counter-team blind-spot directive"
     done
+}
+
+check_team_personality_issue_template_contract() {
     for f in "skills/autospec/SKILL.md" "skills/autospec-define/SKILL.md" "skills/autospec-split/SKILL.md"; do
         grep -q -- '- \*\*Team personality\*\*' "$f" \
             || fail "$f missing Team personality child issue section"
@@ -563,6 +565,9 @@ check_team_personality_contract() {
         grep -q 'body should already contain `## Files to read first`, `## Implementation scope`, `## Team personality`, and `## Review counter-team`' "$f" \
             || fail "$f missing Phase 3.5 team-lens template gate"
     done
+}
+
+check_team_personality_phase4_and_docs_contract() {
     for f in "skills/autospec/SKILL.md" "skills/autospec-run/SKILL.md"; do
         grep -q '## Team personality as execution lens' "$f" \
             || fail "$f missing Phase 4 team personality execution lens"
@@ -585,6 +590,13 @@ check_team_personality_contract() {
         || fail "skills/autospec/README.md missing Team personality docs"
     grep -q 'Review counter-team' skills/autospec-define/README.md \
         || fail "skills/autospec-define/README.md missing Review counter-team docs"
+}
+
+check_team_personality_contract() {
+    info "team personality contract: autospec / autospec-define / autospec-run"
+    check_team_personality_selection_contract
+    check_team_personality_issue_template_contract
+    check_team_personality_phase4_and_docs_contract
 }
 
 # Governance copy: the listener lifecycle and anti-loop guardrails must be

@@ -7,8 +7,7 @@
 #
 # Usage:
 #   scripts/gen-reviewer-prompt.sh --pr-diff <file> [--prev-findings <file>]
-#                                   [--issue-body <file>]
-#                                   [--issue-labels <csv>] [--repo <owner/repo>]
+#     [--issue-body <file>] [--issue-labels <csv>] [--repo <owner/repo>]
 #   scripts/gen-reviewer-prompt.sh --help
 #
 # Output (stdout):
@@ -59,8 +58,7 @@ gen-reviewer-prompt.sh — compose Phase 4 fused guardian+LGTM reviewer prompt
 
 Usage:
   scripts/gen-reviewer-prompt.sh --pr-diff <file> [--prev-findings <file>]
-                                  [--issue-body <file>]
-                                  [--issue-labels <csv>] [--repo <owner/repo>]
+    [--issue-body <file>] [--issue-labels <csv>] [--repo <owner/repo>]
   scripts/gen-reviewer-prompt.sh --help
 
 Required:
