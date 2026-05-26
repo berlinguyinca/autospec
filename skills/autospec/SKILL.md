@@ -161,6 +161,52 @@ This workflow assumes five capabilities. Map each one to your harness's actual t
 
 **Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches use a **two-tier policy**: Tier A (top model + extended thinking) for spec work (research, decompose, review/label); Tier B (cheaper model + medium thinking) for implementation work (Phase 4 implementer + LGTM review). The orchestrator keeps the user's invoked model. Fall back UP the tier on quota/capacity or other unavailability by retrying the same subagent with the stronger tier while preserving parent context.
 
+## Physical STL / CAD design guardrails
+
+When the request involves STL, CAD, 3D-printable fixtures, workholding,
+vacuum, pneumatic, hydraulic, dust-collection, hose, fitting, gasket, or
+other physical models, carry these requirements into Phase 2 specs, Phase 3
+child issues, and Phase 4 verification:
+
+- Treat physical function as acceptance criteria, not visual intent. Verify
+  mountability, tool access, fitting clearance, gasket compression, storage fit,
+  printer build volume, and expected operating orientation.
+- Do not allow blocked ports, obstructed hoses/tubes, capped passages, hidden
+  dead-end channels, or geometry that interferes with the model's purpose.
+- Around every port, fitting, connector, tap bore, hose socket, screw head, and
+  service tool path, require at least 5 mm of free working clearance in every
+  direction unless the user explicitly specifies a tighter envelope.
+- Around every gasket path, require at least 5 mm of continuous plastic margin
+  outside the gasket. Gasket grooves must not expose an edge or be crossed by
+  mounts, screws, ribs, channels, holders, or workpiece contact geometry.
+- For NPT or other tapped ports, prove the tap and installed fitting can enter
+  straight or along the specified angled axis without collisions. Ports and
+  fitting bosses must be integrated into reinforced body geometry, not left as
+  fragile stand-alone protrusions.
+- For low-flow vacuum systems, do not add relief valves, vents, restriction
+  orifices, small balancing holes, or intentional leaks unless the user
+  explicitly asks for them and the spec records why the pump can tolerate them.
+- For sealed or flowing parts, require gas/fluid/vacuum/dust-flow simulation or
+  deterministic geometry checks that prove no leaks, no disconnected internal
+  circuits, no blocked passages, and adequate inlet-to-outlet connectivity.
+- For dust collection, preserve maximum practical duct cross-section and
+  suction path continuity. No vacuum tubing, air port, dust passage, or hose
+  connection may be narrowed or blocked by ribs, mounts, bosses, decorative
+  geometry, or slicer support assumptions.
+- For functional openings such as dust hood mouths, plenum intakes, vacuum
+  channels, gasket windows, and hose throats, add deterministic projection or
+  section keepout checks. Prove that reinforcements, sockets, bosses, ribs, and
+  cutters do not intrude into the working opening from any operating angle.
+- For every generated STL, require visual QA from at least 16 angles: right,
+  left, front, back, top, bottom, top-right 45, top-left 45, top-front 45,
+  top-back 45, front-right 45, front-left 45, back-right 45, back-left 45,
+  bottom-right 45, and bottom-left 45. Renders must be nonblank, well-framed,
+  and reviewed for obvious gaps, overlaps, obstructions, unsupported fragile
+  features, and unexpected protrusions.
+- Regenerate from a clean build directory before release, then verify the build
+  directory contains every expected STL plus any PDFs, sections, renders, and
+  acceptance artifacts named by the spec.
+
 ---
 
 ## Harness detection (run once at skill start, before Phase 0)

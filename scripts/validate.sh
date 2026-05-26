@@ -669,6 +669,30 @@ check_governance_headings() {
         || fail "SKILLS.md: missing 'autospec-story' reference"
 }
 
+check_autospec_stl_design_guardrails() {
+    info "autospec STL/CAD design guardrails"
+    for f in \
+        "skills/autospec/SKILL.md" \
+        "skills/autospec/opencode/agent.md" \
+        "skills/autospec/codex/prompt.md"
+    do
+        grep -q '^## Physical STL / CAD design guardrails' "$f" \
+            || fail "$f missing physical STL/CAD design guardrails section"
+        grep -q 'at least 5 mm of free working clearance' "$f" \
+            || fail "$f missing 5 mm fitting/tool clearance rule"
+        grep -q 'at least 5 mm of continuous plastic margin' "$f" \
+            || fail "$f missing 5 mm gasket plastic margin rule"
+        grep -q 'relief valves, vents, restriction' "$f" \
+            || fail "$f missing low-flow vacuum no-restrictor rule"
+        grep -q 'gas/fluid/vacuum/dust-flow simulation' "$f" \
+            || fail "$f missing sealed/flowing simulation rule"
+        grep -q 'visual QA from at least 16 angles' "$f" \
+            || fail "$f missing 16-angle visual QA rule"
+        grep -q 'Regenerate from a clean build directory' "$f" \
+            || fail "$f missing clean-build regeneration rule"
+    done
+}
+
 # Existing spec mode invariants: autospec, autospec-split, and autospec-define must expose the
 # shortcut that skips Phase 1/2 and reuses Phase 3 + Phase 3.5 for a tracked
 # docs/specs/*.md file. Enforce all trio files so harness variants cannot drift.
@@ -806,6 +830,7 @@ main() {
     check_autospec_listen_files
     check_examples_dir
     check_governance_headings
+    check_autospec_stl_design_guardrails
     check_existing_spec_mode
     check_lint_issue_helpers
     check_lint_implementation_helpers
