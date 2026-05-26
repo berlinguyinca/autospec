@@ -1,0 +1,4 @@
+profile: full
+safety: strict_isolation
+team: auto
+allow_competitor_research: false

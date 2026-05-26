@@ -9,6 +9,14 @@
 - Status: 7-phase workflow (bootstrap → investigate → design → decompose → background monitor → status updates → final report) with admin-squash-merge of `auto-implement`-labeled PRs.
 - Turbo integration (since 2026-05-17): `install.sh` bootstraps [tobihagemann/turbo](https://github.com/tobihagemann/turbo) as a peer skill family and `--update` keeps both stacks current. Issues filed by `/autospec-define` carry the `autospec:v2-flow` label, which routes the Phase 4 implementer to a prompt at `skills/autospec-run/prompts/phase4-implementer.md` that absorbs turbo's expand → implement → finalize → peer-review → evaluate-findings discipline inline. Peer-review uses Codex CLI; gracefully skips when absent. See [`docs/superpowers/specs/2026-05-17-turbo-autospec-integration-design.md`](docs/superpowers/specs/2026-05-17-turbo-autospec-integration-design.md).
 
+## autospec-sweep
+
+- Path: [`skills/autospec-sweep`](skills/autospec-sweep)
+- Trigger: use when a project needs first-run autospec configuration, recurring spec-vs-reality sweeps, or continuous improvement across docs, tests, and code health.
+- Activation keywords: `autospec-sweep`, `sweep`, `configure autospec`, `first-run config`, `continuous improvement`, `spec sync`, `docs tests code sweep`
+- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
+- Status: tracked config mode. Creates `.autospec/autospec.yml`, asks project-specific setup questions from repo findings, keeps specs synchronized with implementation reality, and routes improvement gaps through `autospec-review`, issues, and `/autospec-run`.
+
 ## autospec-listen
 
 - Path: [`skills/autospec-listen`](skills/autospec-listen)

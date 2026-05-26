@@ -55,6 +55,7 @@ selected model and harness to execute reliably.
 | Skill | Use it when | Result |
 | --- | --- | --- |
 | [`autospec`](skills/autospec/README.md) | You want the full path from feature request to merged PRs. | Bootstraps if needed, investigates, writes a spec, creates issues, classifies them, runs implementation, and reports completion. |
+| [`autospec-sweep`](skills/autospec-sweep/README.md) | You want first-run configuration or continuous improvement across specs, docs, tests, and code. | Creates `.autospec/autospec.yml`, runs a configured sweep, writes `.autospec/sweep/latest.json`, and routes recurring gaps back through specs, issues, and `/autospec-run`. |
 | [`autospec-define`](skills/autospec-define/README.md) | You want planning only before implementation starts. | Produces a design spec plus classified `auto-implement` issues, then hands off to `/autospec-run`. |
 | [`autospec-split`](skills/autospec-split/README.md) | You already have a tracked `docs/specs/*.md` design spec. | Turns the existing spec into an EPIC plus linked child issues, then stops after classification. |
 | [`autospec-run`](skills/autospec-run/README.md) | You already have an `auto-implement` queue. | Runs the implementation monitor, opens PRs, reviews, validates, and merges. |
@@ -167,6 +168,7 @@ Or invoke any installed skill with `update`:
 /autospec-listen update
 /autospec-story update
 /autospec-stop update
+/autospec-sweep update
 ```
 
 ## Model Fit and Profiles

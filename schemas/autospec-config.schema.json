@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autospec.local/schemas/autospec-config.schema.json",
+  "title": "Autospec project configuration",
+  "type": "object",
+  "required": ["version", "generated_by", "config_path", "git", "project", "steps", "sweep", "continuous_improvement", "execution", "safety"],
+  "additionalProperties": true,
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "generated_by": {
+      "type": "string"
+    },
+    "config_path": {
+      "const": ".autospec/autospec.yml"
+    },
+    "git": {
+      "type": "object",
+      "required": ["tracked", "commit_required"],
+      "properties": {
+        "tracked": { "const": true },
+        "commit_required": { "const": true }
+      }
+    },
+    "project": {
+      "type": "object",
+      "required": ["profile", "team_personality", "findings", "questions"],
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "team_personality": { "type": "string", "minLength": 1 },
+        "findings": {
+          "type": "object",
+          "required": ["stack", "commands"],
+          "properties": {
+            "stack": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "minItems": 1
+            },
+            "commands": {
+              "type": "object",
+              "required": ["test", "e2e", "deploy"],
+              "properties": {
+                "test": { "type": "string", "minLength": 1 },
+                "e2e": { "type": "string", "minLength": 1 },
+                "deploy": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        },
+        "questions": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "steps": {
+      "type": "object",
+      "required": ["define", "classify", "run", "review", "test", "clone", "sweep"],
+      "patternProperties": {
+        "^[a-z_]+$": {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "sweep": {
+      "type": "object",
+      "required": ["cadence", "spec_sync", "competitor_research", "improvement_budget"],
+      "properties": {
+        "cadence": { "type": "string", "minLength": 1 },
+        "spec_sync": {
+          "type": "object",
+          "required": ["enabled", "update_specs_before_code", "create_gap_issues"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "update_specs_before_code": { "type": "boolean" },
+            "create_gap_issues": { "type": "boolean" }
+          }
+        },
+        "competitor_research": {
+          "type": "object",
+          "required": ["enabled", "sources"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "sources": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "improvement_budget": {
+          "type": "object",
+          "required": ["max_issues_per_sweep", "prefer_small_reviewable_changes"],
+          "properties": {
+            "max_issues_per_sweep": { "type": "integer", "minimum": 1 },
+            "prefer_small_reviewable_changes": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "continuous_improvement": {
+      "type": "object",
+      "required": ["docs", "tests", "code", "loop"],
+      "properties": {
+        "docs": { "$ref": "#/$defs/improvement_area" },
+        "tests": { "$ref": "#/$defs/improvement_area" },
+        "code": { "$ref": "#/$defs/improvement_area" },
+        "loop": {
+          "type": "object",
+          "required": ["create_or_update_specs", "file_issues", "route_fixes_via_autospec_run"],
+          "properties": {
+            "create_or_update_specs": { "type": "boolean" },
+            "file_issues": { "type": "boolean" },
+            "route_fixes_via_autospec_run": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "required": ["tests", "deployment"],
+      "properties": {
+        "tests": {
+          "type": "object",
+          "required": ["run_all_every_sweep", "fail_sweep_on_test_failure"],
+          "properties": {
+            "run_all_every_sweep": { "const": true },
+            "fail_sweep_on_test_failure": { "const": true }
+          }
+        },
+        "deployment": {
+          "type": "object",
+          "required": ["deploy_if_tests_require", "required_for"],
+          "properties": {
+            "deploy_if_tests_require": { "const": true },
+            "required_for": {
+              "type": "array",
+              "contains": { "const": "e2e" },
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "safety": {
+      "type": "object",
+      "required": ["production_access", "secrets_policy", "never_clone_raw_secrets"],
+      "properties": {
+        "production_access": {
+          "enum": ["strict_isolation", "scoped_production"]
+        },
+        "secrets_policy": {
+          "const": "references_only"
+        },
+        "never_clone_raw_secrets": {
+          "const": true
+        }
+      }
+    }
+  },
+  "$defs": {
+    "improvement_area": {
+      "type": "object",
+      "required": ["enabled", "checks"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "checks": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        }
+      }
+    }
+  }
+}
