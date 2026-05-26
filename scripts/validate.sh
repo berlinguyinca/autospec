@@ -203,7 +203,7 @@ check_startup_preflight() {
     }
     canonical=$(extract_block skills/autospec/SKILL.md)
     [ -n "$canonical" ] || fail "autospec SKILL.md missing ## Startup self-update section"
-    for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop; do
+    for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep; do
         for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
             body=$(extract_block "$f")
             [ -n "$body" ] || fail "$f missing ## Startup self-update section"
@@ -220,7 +220,7 @@ check_startup_preflight() {
 # prompts/ path AND the new skills/ slash-command registry path.
 check_codex_skills_install() {
     info "codex skills-dir install: all skills"
-    for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop; do
+    for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep; do
         f="skills/$s/install.sh"
         grep -q 'skills/\$SKILL_NAME/SKILL\.md' "$f" \
             || fail "$f missing Codex skills-dir install (skills/\$SKILL_NAME/SKILL.md)"
@@ -235,7 +235,7 @@ check_codex_skills_install() {
 check_shared_script_install() {
     info "shared helper install: all skills"
     helpers="autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh"
-    for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop; do
+    for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep; do
         f="skills/$s/install.sh"
         grep -q 'install_shared_scripts' "$f" \
             || fail "$f missing install_shared_scripts function/call"
@@ -327,6 +327,29 @@ check_phase1_bounded_context_contract() {
             || fail "$f missing compact-overflow fallback directive"
         grep -q 'bounded local read-only `rg`/file-read investigation' "$f" \
             || fail "$f missing bounded local fallback directive"
+    done
+}
+
+check_autospec_sweep_config_contract() {
+    info "autospec-sweep config contract"
+    local skill_dir="skills/autospec-sweep"
+    [ -d "$skill_dir" ] || fail "$skill_dir: directory missing"
+    [ -f "$skill_dir/scripts/wizard.sh" ] || fail "$skill_dir/scripts/wizard.sh: required file missing"
+    [ -f "$skill_dir/scripts/run.sh" ] || fail "$skill_dir/scripts/run.sh: required file missing"
+    [ -f "$skill_dir/scripts/review.sh" ] || fail "$skill_dir/scripts/review.sh: required file missing"
+    [ -f "schemas/autospec-config.schema.json" ] || fail "schemas/autospec-config.schema.json: required file missing"
+    bash -n "$skill_dir/scripts/wizard.sh" || fail "$skill_dir/scripts/wizard.sh: bash syntax error"
+    bash -n "$skill_dir/scripts/run.sh" || fail "$skill_dir/scripts/run.sh: bash syntax error"
+    bash -n "$skill_dir/scripts/review.sh" || fail "$skill_dir/scripts/review.sh: bash syntax error"
+    grep -q '.autospec/autospec.yml' "$skill_dir/SKILL.md" \
+        || fail "$skill_dir/SKILL.md missing .autospec/autospec.yml contract"
+    grep -q 'continuous improvement' "$skill_dir/SKILL.md" \
+        || fail "$skill_dir/SKILL.md missing continuous improvement contract"
+    for f in skills/autospec/SKILL.md skills/autospec/codex/prompt.md skills/autospec/opencode/agent.md; do
+        grep -q '.autospec/autospec.yml' "$f" \
+            || fail "$f missing autospec.yml first-run preflight"
+        grep -q '/autospec-sweep init' "$f" \
+            || fail "$f missing /autospec-sweep init first-run route"
     done
 }
 
@@ -791,6 +814,7 @@ main() {
     check_phase4_issue_start_summary
     check_phase4_immediate_next_issue_pickup
     check_phase4_adaptive_retry
+    check_autospec_sweep_config_contract
     check_team_personality_contract
     check_autospec_run_priority_sort_lockstep
     check_autospec_run_regression_review_lockstep

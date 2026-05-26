@@ -73,6 +73,32 @@ shipped during this run, emits surviving gaps as JSON (`emit-gaps.sh`), and file
 `auto-implement,gap-remediation,priority:high` issues (`gap-remediation-loop.sh`), capped at
 `AUTOSPEC_GAP_MAX_ROUNDS` rounds (default 2) to bound the feedback loop.
 
+### `/autospec-sweep`
+
+<!-- autospec-doc-scope:
+  src: ["skills/autospec-sweep/SKILL.md", "skills/autospec-sweep/scripts/wizard.sh"]
+  reason: "User-facing invocation docs for autospec-sweep"
+  generated: true
+-->
+
+First-run and recurring configuration mode. It creates `.autospec/autospec.yml`
+as tracked project source, asks a small set of setup questions with project-specific
+follow-ups from repo findings, then runs `autospec-sweep-run.sh` plus the bundled
+`autospec-sweep-review.sh` to write `.autospec/sweep/latest.json` and feed docs,
+test, and code gaps back through specs, issues, and `/autospec-run`.
+
+Every `run` executes the configured full test command. If E2E or integration
+tests require a deployed or started app, autospec-sweep runs
+`project.findings.commands.deploy` first and fails the sweep on deploy or test
+failure.
+
+**Triggers:** `autospec-sweep`, `configure autospec`, `first-run config`, `continuous improvement`
+
+**Modes:**
+- `init`: create `.autospec/autospec.yml` with all autospec steps enabled by default.
+- `configure`: update only relevant config sections and matching specs when repo reality changes.
+- `run`: sweep spec sync, docs drift, test gaps, and code health, then file bounded fix issues.
+
 ### `/autospec-test`
 
 <!-- autospec-doc-scope:

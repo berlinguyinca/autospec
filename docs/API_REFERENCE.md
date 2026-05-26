@@ -543,6 +543,13 @@ Exit: 0 = all checks pass, non-zero = first failure with diagnostic.
 - Remediation mode section present across the autospec-review trio (`check_review_remediation_section`)
 - Phase 4 guardian block lockstep
 - Phase 4 adaptive-retry loop
+- autospec-sweep config contract and first-run `/autospec-sweep init` preflight
+- autospec-sweep executable runner: `autospec-sweep-run.sh`
+- autospec-sweep deterministic review wrapper: `autospec-sweep-review.sh`
+- autospec config schema: `schemas/autospec-config.schema.json`
+- autospec-sweep execution contract: every run executes configured tests, deploys
+  first when E2E/integration tests need a live app, and records test/deployment
+  status in `.autospec/sweep/latest.json`
 - Docs presence: `docs/USER_MANUAL.md`, `llms.txt`, `docs/.llm-manifest.json`
 - autospec-test structural lint (per-skill validate.sh)
 

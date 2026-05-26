@@ -14,7 +14,7 @@
 #   ./install.sh --help                          # show this help
 #
 # Flags:
-#   --skill   one of: autospec | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | all
+#   --skill   one of: autospec | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | autospec-sweep | all
 #             (default: all)
 #   --harness one of: claude | opencode | codex | all
 #             (default: all)
@@ -38,7 +38,7 @@ TURBO_REPO_DIR="${TURBO_REPO_DIR:-$HOME/.turbo/repo}"
 TURBO_REMOTE="https://github.com/tobihagemann/turbo.git"
 CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
 
-ALL_SKILLS="autospec autospec-split autospec-define autospec-run autospec-review autospec-classify autospec-listen autospec-story autospec-stop"
+ALL_SKILLS="autospec autospec-split autospec-define autospec-run autospec-review autospec-classify autospec-listen autospec-story autospec-stop autospec-sweep"
 ALL_HARNESSES="claude opencode codex"
 
 SKILL_ARG="all"
@@ -65,37 +65,40 @@ run_or_report() {
 }
 
 offer_gitignore() {
-    # Offer to add `.autospec/` to the current repo's .gitignore so the integration
-    # scratch directory does not pollute git status. No-op outside a git repo.
+    # Offer to ignore autospec runtime scratch files while keeping the tracked
+    # project config `.autospec/autospec.yml` visible to git.
     git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
     repo_root="$(git rev-parse --show-toplevel)"
     gitignore="$repo_root/.gitignore"
-    entry=".autospec/"
+    entry=".autospec/*"
+    config_exception="!.autospec/autospec.yml"
 
-    if [ -f "$gitignore" ] && grep -qxF "$entry" "$gitignore"; then
+    if [ -f "$gitignore" ] && grep -qxF "$entry" "$gitignore" && grep -qxF "$config_exception" "$gitignore"; then
         return 0
     fi
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] offer_gitignore: would add $entry to $gitignore"
+        info "[dry-run] offer_gitignore: would add $entry and $config_exception to $gitignore"
         return 0
     fi
 
     if [ "${AUTOSPEC_AUTO_YES:-0}" = "1" ]; then
         ensure_line_in_file "$gitignore" "$entry"
-        info "offer_gitignore: added $entry to $gitignore"
+        ensure_line_in_file "$gitignore" "$config_exception"
+        info "offer_gitignore: added $entry and $config_exception to $gitignore"
         return 0
     fi
 
     # Only prompt on real interactive TTYs; otherwise skip silently.
     [ -t 0 ] && [ -t 1 ] || return 0
 
-    printf "offer_gitignore: add '%s' to %s? [y/N] " "$entry" "$gitignore"
+    printf "offer_gitignore: ignore autospec runtime files but track .autospec/autospec.yml in %s? [y/N] " "$gitignore"
     read -r reply || return 0
     case "$reply" in
         y|Y|yes|YES|Yes)
             ensure_line_in_file "$gitignore" "$entry"
-            info "offer_gitignore: added $entry to $gitignore"
+            ensure_line_in_file "$gitignore" "$config_exception"
+            info "offer_gitignore: added $entry and $config_exception to $gitignore"
             ;;
         *)
             info "offer_gitignore: skipped"
@@ -267,10 +270,10 @@ done
 
 # Validate --skill
 case "$SKILL_ARG" in
-    all|autospec|autospec-split|autospec-define|autospec-run|autospec-review|autospec-classify|autospec-listen|autospec-story|autospec-stop) ;;
+    all|autospec|autospec-split|autospec-define|autospec-run|autospec-review|autospec-classify|autospec-listen|autospec-story|autospec-stop|autospec-sweep) ;;
     *)
         err "invalid --skill: $SKILL_ARG"
-        err "must be one of: autospec | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | all"
+        err "must be one of: autospec | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | autospec-sweep | all"
         exit 2
         ;;
 esac

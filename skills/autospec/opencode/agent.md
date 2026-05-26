@@ -181,6 +181,27 @@ Detect your harness by checking available tools before any phase:
 
 Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B" reference below resolves to these harness-specific values.
 
+## Project configuration preflight
+
+Before Phase 0, look for `.autospec/autospec.yml` at the repository root.
+
+If the file is missing and the current directory is already inside a git repo,
+run `/autospec-sweep init` behavior first:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-sweep-wizard.sh" init
+```
+
+Accept the wizard defaults unless repo findings require a project-specific
+answer. The generated `.autospec/autospec.yml` is tracked project source and
+must be committed with the next autospec spec/config change. After it exists,
+read it before deciding which autospec phases are enabled.
+
+If the file is missing because Phase 0 must bootstrap a brand-new repo, create
+it immediately after the initial repo scaffold and before Phase 1. Use all
+steps enabled by default, strict isolation, `team_personality: auto`, and
+continuous improvement enabled for docs, tests, and code.
+
 ## Phase 0 — Bootstrap repo (if missing)
 
 Verify `gh auth status` is authenticated. If not, ask the user to run `gh auth login` and stop until they confirm.

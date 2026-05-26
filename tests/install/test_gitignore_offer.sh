@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verifies offer_gitignore: dry-run announces, AUTOSPEC_AUTO_YES adds the entry,
+# Verifies offer_gitignore: dry-run announces, AUTOSPEC_AUTO_YES adds entries,
 # re-run is idempotent, no-op outside a git repo.
 set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -14,10 +14,10 @@ git -C "$tmp_repo" -c user.email=t@t -c user.name=t commit -q -m init
 
 output=$(cd "$tmp_repo" && bash "$SCRIPT_DIR/install.sh" --dry-run --skill autospec --harness claude 2>&1 || true)
 case "$output" in
-    *"offer_gitignore"*".autospec/"*) ;;
-    *) echo "FAIL: dry-run did not announce .autospec/ gitignore offer"; echo "$output"; exit 1 ;;
+    *"offer_gitignore"*".autospec/*"*"!.autospec/autospec.yml"*) ;;
+    *) echo "FAIL: dry-run did not announce autospec runtime gitignore offer"; echo "$output"; exit 1 ;;
 esac
-if grep -qxF ".autospec/" "$tmp_repo/.gitignore"; then
+if grep -qxF ".autospec/*" "$tmp_repo/.gitignore"; then
     echo "FAIL: dry-run modified .gitignore"
     exit 1
 fi
@@ -37,17 +37,26 @@ git -C "$fake_home/.turbo/repo" -c user.email=t@t -c user.name=t commit -q --all
 HOME="$fake_home" AUTOSPEC_AUTO_YES=1 AUTOSPEC_NO_STAR_PROMPT=1 \
     bash -c "cd '$tmp_repo' && bash '$SCRIPT_DIR/install.sh' --skill autospec --harness claude" >/dev/null 2>&1 || true
 
-if ! grep -qxF ".autospec/" "$tmp_repo/.gitignore"; then
-    echo "FAIL: AUTOSPEC_AUTO_YES run did not add .autospec/"
+if ! grep -qxF ".autospec/*" "$tmp_repo/.gitignore"; then
+    echo "FAIL: AUTOSPEC_AUTO_YES run did not add .autospec/*"
+    exit 1
+fi
+if ! grep -qxF "!.autospec/autospec.yml" "$tmp_repo/.gitignore"; then
+    echo "FAIL: AUTOSPEC_AUTO_YES run did not unignore .autospec/autospec.yml"
     exit 1
 fi
 
 # Idempotency
 HOME="$fake_home" AUTOSPEC_AUTO_YES=1 AUTOSPEC_NO_STAR_PROMPT=1 \
     bash -c "cd '$tmp_repo' && bash '$SCRIPT_DIR/install.sh' --skill autospec --harness claude" >/dev/null 2>&1 || true
-count=$(grep -cxF ".autospec/" "$tmp_repo/.gitignore")
+count=$(grep -cxF ".autospec/*" "$tmp_repo/.gitignore")
 if [ "$count" -ne 1 ]; then
-    echo "FAIL: .autospec/ duplicated (count=$count)"
+    echo "FAIL: .autospec/* duplicated (count=$count)"
+    exit 1
+fi
+exception_count=$(grep -cxF "!.autospec/autospec.yml" "$tmp_repo/.gitignore")
+if [ "$exception_count" -ne 1 ]; then
+    echo "FAIL: .autospec/autospec.yml exception duplicated (count=$exception_count)"
     exit 1
 fi
 
