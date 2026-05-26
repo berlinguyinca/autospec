@@ -214,6 +214,16 @@ Spawn a **read-only research subagent** to map relevant files, schema, services.
 
 > **Model tier:** `TIER_A` (spec work) — top model with extended thinking; resolved at startup.
 
+> **Phase 1 bounded-context rule.** Launch the research subagent with a fresh,
+> bounded handoff. Do NOT fork, inherit, or compact the full parent conversation into Phase 1. The handoff may contain only: the feature request,
+> repo slug/root, a short git status summary, relevant memory-injection output,
+> explicit user-mentioned paths/surfaces, and these Phase 1 instructions. For
+> Codex native subagents, set `fork_context=false`; for Claude/OpenCode, use the
+> equivalent fresh/no-history task mode when available. If the harness cannot
+> start a fresh subagent, or returns a context window or remote compact failure,
+> do not retry with inherited context. Fall back to bounded local read-only `rg`/file-read investigation, label the result as `Phase 1 fallback`, and
+> continue to Phase 2 with the best evidence gathered.
+
 If the feature touches a remote system (DB, server, S3), run a real query against the actual data to confirm the problem statement before designing. Surface the concrete numbers in the design.
 
 For a freshly-bootstrapped empty repo, Phase 1 may be a no-op — proceed to Phase 2.
