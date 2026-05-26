@@ -30,6 +30,13 @@ cd skills/autospec-design
 ./install.sh --harness all
 ```
 
+Or via the top-level orchestrator (`install.sh` at the repo root) which
+delegates to this per-skill installer:
+
+```bash
+./install.sh --skill autospec-design --harness all
+```
+
 ## Invocation
 
 ```
