@@ -71,7 +71,49 @@ details.
 
 ## Install
 
-Install the full suite into every supported harness:
+One-line install for the full suite into every supported harness:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash
+```
+
+The bootstrap clones (or fast-forwards) autospec into `~/.autospec/repo` and then runs `./install.sh --skill all --harness all`. Re-run any time to update.
+
+Forward flags to the underlying installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh \
+  | bash -s -- --skill autospec --harness claude
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh \
+  | bash -s -- --skill all --harness opencode
+```
+
+The bootstrap honors:
+
+| Variable | Purpose |
+| --- | --- |
+| `AUTOSPEC_HOME` | Base dir for the autospec checkout + state (default: `~/.autospec`). |
+| `AUTOSPEC_REF` | Git ref (branch, tag, or sha) to install (default: `main`). |
+| `AUTOSPEC_REPO_URL` | Override the remote URL — useful for forks or mirrors. |
+
+The installer also honors:
+
+| Variable | Purpose |
+| --- | --- |
+| `CLAUDE_CONFIG_DIR` | Override Claude Code install root. |
+| `OPENCODE_CONFIG_DIR` | Override OpenCode install root. |
+| `CODEX_HOME` | Override Codex install root. |
+| `AUTOSPEC_NO_STAR_PROMPT=1` | Skip the optional adoption star prompt. |
+
+After a successful interactive suite install, the top-level installer asks
+whether you want to star `berlinguyinca/autospec` to support adoption. It is
+skipped for non-interactive installs (including `curl | bash`), `--update`,
+CI, missing `gh`, or `AUTOSPEC_NO_STAR_PROMPT=1`.
+
+### Manual install (from a checkout)
+
+If you'd rather manage the checkout yourself — e.g. for development on
+autospec itself — clone and run the installer directly:
 
 ```bash
 git clone https://github.com/berlinguyinca/autospec.git
@@ -94,26 +136,20 @@ Uninstall symmetrically:
 ./uninstall.sh --skill all --harness all
 ```
 
-The installer honors:
+### Single-skill curl install (advanced)
 
-| Variable | Purpose |
-| --- | --- |
-| `CLAUDE_CONFIG_DIR` | Override Claude Code install root. |
-| `OPENCODE_CONFIG_DIR` | Override OpenCode install root. |
-| `CODEX_HOME` | Override Codex install root. |
-| `AUTOSPEC_NO_STAR_PROMPT=1` | Skip the optional adoption star prompt. |
-
-After a successful interactive suite install, the top-level installer asks
-whether you want to star `berlinguyinca/autospec` to support adoption. It is
-skipped for non-interactive installs, `--update`, CI, missing `gh`, or
-`AUTOSPEC_NO_STAR_PROMPT=1`.
-
-Each per-skill installer is also standalone-callable:
+Each per-skill installer is also callable standalone over curl:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec/install.sh \
   | sh -s -- --harness all
 ```
+
+This installs only that skill's files and the small shared-script set listed
+inside its installer. It does **not** fetch `skills/autospec-shared/scripts/**`,
+so skills that depend on shared helpers (gap remediation, doc-drift scanning,
+etc.) may fail at runtime. Prefer the one-line `bootstrap.sh` install above
+unless you specifically want a single-skill, no-checkout footprint.
 
 ### Target repo setup
 
@@ -149,7 +185,13 @@ Disable startup self-update:
 AUTOSPEC_NO_SELF_UPDATE=1
 ```
 
-Force an in-place suite update:
+Force an in-place suite update — for a bootstrap install, re-run the one-liner:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash -s -- --update
+```
+
+Or, from a manual checkout:
 
 ```bash
 ./install.sh --skill all --harness all --update
