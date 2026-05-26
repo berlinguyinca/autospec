@@ -119,6 +119,16 @@ Cache fetched DESIGN.md files under `~/.autospec/design-cache/<vendor>/DESIGN.md
 with a 24h freshness window. On cache miss + network failure, surface a clear
 error rather than silently using stale data.
 
+The helper implementation lives at `skills/autospec-design/scripts/fetch-design-md.sh`
+and accepts two additional environment overrides for testing and deployment:
+
+- `AUTOSPEC_DESIGN_CACHE_DIR` — cache root (default `$HOME/.autospec/design-cache`).
+- `AUTOSPEC_DESIGN_CACHE_TTL` — freshness window in seconds (default `86400`).
+
+On 404 / unknown vendor the helper lists the catalog directory and prints
+the 5 closest vendor names by Levenshtein distance. When neither `gh` nor
+`curl` is on `PATH` the helper exits non-zero with an install hint.
+
 ## API shape (3 subcommands)
 
 ### `/autospec-design suggest`
