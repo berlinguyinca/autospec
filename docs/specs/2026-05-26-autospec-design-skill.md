@@ -261,7 +261,9 @@ curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstr
 
 Once `autospec-design` is in `ALL_SKILLS`, it gets picked up automatically.
 The per-skill curl one-liner also works once `skills/autospec-design/install.sh`
-exists.
+exists. The top-level `install.sh --skill autospec-design` flag value is
+accepted by the `--skill` validation case (wired in issue #574) and delegates
+to the per-skill installer.
 
 ## Migration path (rollout)
 
