@@ -307,6 +307,29 @@ check_subagent_model_tier() {
     fi
 }
 
+check_phase1_bounded_context_contract() {
+    info "phase1 bounded-context contract: autospec + autospec-define"
+    for f in \
+        skills/autospec/SKILL.md \
+        skills/autospec/codex/prompt.md \
+        skills/autospec/opencode/agent.md \
+        skills/autospec-define/SKILL.md \
+        skills/autospec-define/codex/prompt.md \
+        skills/autospec-define/opencode/agent.md
+    do
+        grep -q 'Phase 1 bounded-context rule' "$f" \
+            || fail "$f missing Phase 1 bounded-context rule"
+        grep -q 'Do NOT fork, inherit, or compact the full parent conversation' "$f" \
+            || fail "$f allows inherited parent conversation in Phase 1"
+        grep -q 'fork_context=false' "$f" \
+            || fail "$f missing Codex fresh-context directive"
+        grep -q 'context window or remote compact failure' "$f" \
+            || fail "$f missing compact-overflow fallback directive"
+        grep -q 'bounded local read-only `rg`/file-read investigation' "$f" \
+            || fail "$f missing bounded local fallback directive"
+    done
+}
+
 # Harness detection block validation.
 # If a SKILL.md contains a "## Harness detection" heading, verify that the
 # section body includes TIER_A, TIER_B, and a "silently" fallback reference.
@@ -764,6 +787,7 @@ main() {
     check_lint_issue_helpers
     check_lint_implementation_helpers
     check_phase4_guardian_block_lockstep
+    check_phase1_bounded_context_contract
     check_phase4_issue_start_summary
     check_phase4_immediate_next_issue_pickup
     check_phase4_adaptive_retry
