@@ -65,6 +65,7 @@ selected model and harness to execute reliably.
 | [`autospec-stop`](skills/autospec-stop/README.md) | You need to halt or resume an active monitor. | Writes the shared stop sentinel, pauses issues safely, reports status, or resumes paused work. |
 | [`autospec-review`](skills/autospec-review/README.md) | You want to close the spec-vs-code feedback loop. | Audits specs against issues, finds gaps, files `[REGRESSION]` issues with `priority:high`. |
 | [`autospec-test`](skills/autospec-test/README.md) | You want every Phase 4 PR gated on unit + E2E coverage with auto-heal. | Runs a two-stage coverage gate, auto-heals gaps within a 60-min budget, and blocks assertion-loosening rewrites before auto-merge. |
+| [`autospec-design`](skills/autospec-design/README.md) | You want the repo's UI anchored to a known vendor design language (Apple, Linear, Stripe, etc.). | Fetches a `DESIGN.md` from the `berlinguyinca/awesome-design-md` catalog via `suggest`, `apply`, and `migrate` subcommands, writes `DESIGN.md` to the project root on a feature branch, and optionally hands off a per-component migration spec to `/autospec-define`. |
 
 See [`SKILLS.md`](SKILLS.md) for activation keywords and per-skill routing
 details.
