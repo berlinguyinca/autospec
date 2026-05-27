@@ -145,6 +145,20 @@ if [ -n "$PR_BODY" ]; then
     fi
 fi
 
+# ── no-scope-config short-circuit ────────────────────────────────────────────
+# If the repo has zero `<!-- autospec-doc-scope: ... -->` annotations anywhere
+# in DOCS_DIR, the gate is not opted-in: every changed non-docs/ file would
+# otherwise be reported as missing-scope (exit 2), false-blocking every PR that
+# touches source. Treat this like a repo-wide `docs: skip` until annotations
+# are added. The pattern mirrors SCOPE_OPEN_RE in scan-doc-scope.mjs.
+NO_SCOPE_REPO=false
+if [ -d "$DOCS_DIR" ]; then
+    if ! grep -rlE '<!--[[:space:]]*autospec-doc-scope[[:space:]]*:' "$DOCS_DIR" --include='*.md' >/dev/null 2>&1; then
+        NO_SCOPE_REPO=true
+        echo "check-doc-drift: no autospec-doc-scope annotations in ${DOCS_DIR}; gate not opted-in, skipping" >&2
+    fi
+fi
+
 # ── Extract changed files from diff ──────────────────────────────────────────
 
 # Changed source files (not docs/) — one per line in a temp file
@@ -433,12 +447,13 @@ vstale_arr="$(build_json_array "$WORK_DIR/visual_stale_entries.txt")"
 
 # ── Apply docs: skip ──────────────────────────────────────────────────────────
 
-if $DOCS_SKIP; then
+if $DOCS_SKIP || $NO_SCOPE_REPO; then
     passed=true
     exit_code=0
     skipped_val=true
     drift_arr="[]"
     drift_warn_arr="[]"
+    missing_arr="[]"
 else
     drift_count=0
     missing_count=0

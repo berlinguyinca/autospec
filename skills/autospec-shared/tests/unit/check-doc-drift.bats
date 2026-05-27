@@ -109,7 +109,34 @@ typeof d.skipped==='boolean' ? 'ok' : 'fail'
 
 # ── Missing scope detection ───────────────────────────────────────────────────
 
-@test "changed source with no doc scope → missing_scope + exit 2" {
+@test "scoped repo, changed source not covered by any scope → missing_scope + exit 2" {
+    # valid-scope.md opts the repo into doc-drift (it carries annotations), but
+    # the changed file below is outside every declared src glob, so it is a
+    # genuine missing-scope finding.
+    cp "$FIXTURES_DIR/valid-scope.md" "$TMP_DIR/docs/USER_MANUAL.md"
+
+    DFILE="$(mktemp /tmp/autospec-driftpatch-XXXXXX)"
+    cat > "$DFILE" <<'DIFF'
+diff --git a/src/uncovered.py b/src/uncovered.py
+index abc..def 100644
+--- a/src/uncovered.py
++++ b/src/uncovered.py
+@@ -1,2 +1,3 @@
+ import os
+ # module
++print("new line")
+DIFF
+
+    run bash -c "\"$CHECK_DRIFT\" --diff \"$DFILE\" 2>/dev/null"
+    rm -f "$DFILE"
+    [ "$status" -eq 2 ]
+    mc="$(json_field "$output" "d.missing_scope.length")"
+    [ "$mc" -gt 0 ]
+}
+
+@test "no autospec-doc-scope annotations anywhere → skipped + exit 0" {
+    # Repo has a docs dir but zero annotations: gate is not opted-in, so a
+    # source-only change must pass (skipped) rather than hard-fail exit 2.
     cp "$FIXTURES_DIR/no-scope.md" "$TMP_DIR/docs/USER_MANUAL.md"
 
     DFILE="$(mktemp /tmp/autospec-driftpatch-XXXXXX)"
@@ -126,9 +153,11 @@ DIFF
 
     run bash -c "\"$CHECK_DRIFT\" --diff \"$DFILE\" 2>/dev/null"
     rm -f "$DFILE"
-    [ "$status" -eq 2 ]
+    [ "$status" -eq 0 ]
+    sk="$(json_field "$output" "d.skipped")"
+    [ "$sk" = "true" ]
     mc="$(json_field "$output" "d.missing_scope.length")"
-    [ "$mc" -gt 0 ]
+    [ "$mc" -eq 0 ]
 }
 
 # ── Drift detection ───────────────────────────────────────────────────────────
