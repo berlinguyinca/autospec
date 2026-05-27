@@ -23,6 +23,8 @@
 #
 # Honors:
 #   AUTOSPEC_NO_STAR_PROMPT=1  skip the optional GitHub star prompt.
+#   AUTOSPEC_SKIP_SYSTEM_TOOLS=1  skip best-effort CLI dependency installs.
+#   AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1  skip peer ecosystem bootstrap.
 #
 # Exits non-zero on any sub-installer failure; reports per-pair status.
 
@@ -37,6 +39,15 @@ SKILLS_DIR="$REPO_ROOT/skills"
 TURBO_REPO_DIR="${TURBO_REPO_DIR:-$HOME/.turbo/repo}"
 TURBO_REMOTE="https://github.com/tobihagemann/turbo.git"
 CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
+SUPERPOWERS_REPO_DIR="${SUPERPOWERS_REPO_DIR:-$HOME/.codex/superpowers}"
+SUPERPOWERS_REMOTE="${SUPERPOWERS_REMOTE:-https://github.com/obra/superpowers.git}"
+SUPERPOWERS_CODEX_SKILLS_DIR="${SUPERPOWERS_CODEX_SKILLS_DIR:-$HOME/.agents/skills}"
+SUPERPOWERS_OPENCODE_PLUGIN="${SUPERPOWERS_OPENCODE_PLUGIN:-superpowers@git+https://github.com/obra/superpowers.git}"
+OPENCODE_CONFIG_ROOT="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
+AUTOSPEC_SYSTEM_TOOLS="${AUTOSPEC_SYSTEM_TOOLS:-git bash curl jq yq gh node npm bun bats codex claude opencode omx omc oh-my-opencode mempalace ajv}"
+OH_MY_CODEX_PACKAGE="${OH_MY_CODEX_PACKAGE:-oh-my-codex}"
+OH_MY_OPENCODE_PACKAGE="${OH_MY_OPENCODE_PACKAGE:-oh-my-opencode}"
+OH_MY_CLAUDE_PACKAGE="${OH_MY_CLAUDE_PACKAGE:-oh-my-claude-sisyphus}"
 
 ALL_SKILLS="autospec autospec-split autospec-define autospec-run autospec-review autospec-classify autospec-listen autospec-story autospec-stop autospec-sweep autospec-design"
 ALL_HARNESSES="claude opencode codex"
@@ -134,6 +145,195 @@ check_codex() {
     info "  Phase 4 peer-review will skip gracefully until codex is installed."
     info "  Install: see https://github.com/openai/codex (or your package manager)."
     return 0
+}
+
+ensure_system_tools() {
+    if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" = "1" ]; then
+        info "ensure_system_tools: skipped by AUTOSPEC_SKIP_SYSTEM_TOOLS=1"
+        return 0
+    fi
+    ensure_tool="$REPO_ROOT/skills/autospec-shared/scripts/ensure-tool.sh"
+    if [ ! -f "$ensure_tool" ]; then
+        warn "ensure_system_tools: $ensure_tool missing; skipping"
+        return 0
+    fi
+    for tool in $AUTOSPEC_SYSTEM_TOOLS; do
+        if [ "$DRY_RUN" -eq 1 ]; then
+            info "[dry-run] ensure_system_tools: would ensure $tool"
+        else
+            bash "$ensure_tool" "$tool" || true
+        fi
+    done
+}
+
+install_npm_ecosystem_package() {
+    label="$1"
+    package_name="$2"
+    command_name="$3"
+    skip_var="$4"
+
+    eval "skip_val=\${${skip_var}:-0}"
+    if [ "$skip_val" = "1" ]; then
+        info "$label: skipped by $skip_var=1"
+        return 0
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] $label: would npm install -g $package_name when $command_name is missing or --update is set"
+        return 0
+    fi
+
+    if command_present "$command_name" && [ "$UPDATE" -eq 0 ]; then
+        info "$label: $command_name present ($(command -v "$command_name"))"
+        return 0
+    fi
+
+    if ! command_present npm; then
+        warn "$label: npm not found; install Node.js/npm or rerun after ensure_system_tools succeeds"
+        return 0
+    fi
+
+    npm install -g "$package_name" >/dev/null 2>&1 \
+        && info "$label: installed/updated $package_name" \
+        || warn "$label: npm install -g $package_name failed; continuing"
+}
+
+bootstrap_superpowers_codex_link() {
+    src="$SUPERPOWERS_REPO_DIR/skills"
+    target="$SUPERPOWERS_CODEX_SKILLS_DIR/superpowers"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] bootstrap_superpowers: would expose $src at $target"
+        return 0
+    fi
+
+    [ -d "$src" ] || { warn "bootstrap_superpowers: $src missing; cannot expose Codex skills"; return 0; }
+    mkdir -p "$SUPERPOWERS_CODEX_SKILLS_DIR"
+
+    if [ -L "$target" ]; then
+        ln -sfn "$src" "$target" \
+            && info "bootstrap_superpowers: refreshed Codex skills symlink at $target" \
+            || warn "bootstrap_superpowers: could not refresh $target"
+    elif [ ! -e "$target" ]; then
+        ln -s "$src" "$target" 2>/dev/null \
+            && info "bootstrap_superpowers: linked Codex skills at $target" \
+            || { cp -R "$src" "$target" 2>/dev/null \
+                && info "bootstrap_superpowers: copied Codex skills to $target (symlink unavailable)" \
+                || warn "bootstrap_superpowers: could not link or copy Codex skills to $target"; }
+    else
+        info "bootstrap_superpowers: existing $target left untouched"
+    fi
+}
+
+bootstrap_superpowers_opencode_plugin() {
+    config_file="$OPENCODE_CONFIG_ROOT/opencode.json"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] bootstrap_superpowers: would ensure OpenCode plugin $SUPERPOWERS_OPENCODE_PLUGIN in $config_file"
+        return 0
+    fi
+
+    if ! command_present node; then
+        warn "bootstrap_superpowers: node not found; cannot update $config_file"
+        return 0
+    fi
+
+    mkdir -p "$OPENCODE_CONFIG_ROOT"
+    if node - "$config_file" "$SUPERPOWERS_OPENCODE_PLUGIN" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const file = process.argv[2];
+const plugin = process.argv[3];
+let config = {};
+if (fs.existsSync(file)) {
+  try {
+    config = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    console.error(`invalid JSON in ${file}: ${error.message}`);
+    process.exit(2);
+  }
+}
+const plugins = Array.isArray(config.plugin)
+  ? config.plugin
+  : (typeof config.plugin === 'string' ? [config.plugin] : []);
+if (!plugins.includes(plugin)) {
+  plugins.push(plugin);
+}
+config.plugin = plugins;
+fs.mkdirSync(path.dirname(file), { recursive: true });
+fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
+NODE
+    then
+        info "bootstrap_superpowers: ensured OpenCode plugin in $config_file"
+    else
+        warn "bootstrap_superpowers: could not update $config_file"
+    fi
+}
+
+bootstrap_superpowers() {
+    if [ "${AUTOSPEC_SKIP_SUPERPOWERS:-0}" = "1" ]; then
+        info "bootstrap_superpowers: skipped by AUTOSPEC_SKIP_SUPERPOWERS=1"
+        return 0
+    fi
+
+    if [ -d "$SUPERPOWERS_REPO_DIR/.git" ]; then
+        info "bootstrap_superpowers: pulling obra/superpowers at $SUPERPOWERS_REPO_DIR"
+        if [ "$DRY_RUN" -eq 0 ]; then
+            git -C "$SUPERPOWERS_REPO_DIR" pull --ff-only 2>/dev/null \
+                || warn "bootstrap_superpowers: pull failed (offline or local changes); using cached superpowers"
+        fi
+    else
+        info "bootstrap_superpowers: cloning obra/superpowers to $SUPERPOWERS_REPO_DIR"
+        if [ "$DRY_RUN" -eq 0 ]; then
+            git clone --depth 1 "$SUPERPOWERS_REMOTE" "$SUPERPOWERS_REPO_DIR" 2>/dev/null \
+                || { warn "bootstrap_superpowers: clone failed; superpowers will not be installed"; return 0; }
+        fi
+    fi
+
+    bootstrap_superpowers_codex_link
+    bootstrap_superpowers_opencode_plugin
+}
+
+run_peer_setup_commands() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] bootstrap_oh_my_codex: would run omx setup --scope user --skill-target codex-home"
+        info "[dry-run] bootstrap_oh_my_opencode: would initialize oh-my-opencode only when config is missing"
+        info "[dry-run] bootstrap_oh_my_claude: would run omc setup --quiet"
+        return 0
+    fi
+
+    if command_present omx; then
+        omx setup --scope user --skill-target codex-home >/dev/null 2>&1 \
+            && info "bootstrap_oh_my_codex: refreshed OMX setup" \
+            || warn "bootstrap_oh_my_codex: omx setup failed; continuing"
+    fi
+    if command_present oh-my-opencode; then
+        if [ -f "$OPENCODE_CONFIG_ROOT/oh-my-openagent.json" ]; then
+            info "bootstrap_oh_my_opencode: existing config left untouched"
+        else
+            oh-my-opencode install --no-tui --claude=no --openai=no --gemini=no --copilot=no --skip-auth >/dev/null 2>&1 \
+                && info "bootstrap_oh_my_opencode: initialized OpenCode setup" \
+                || warn "bootstrap_oh_my_opencode: non-interactive setup failed; package install still completed"
+        fi
+    fi
+    if command_present omc; then
+        omc setup --quiet >/dev/null 2>&1 \
+            && info "bootstrap_oh_my_claude: refreshed OMC setup" \
+            || warn "bootstrap_oh_my_claude: omc setup failed; continuing"
+    fi
+}
+
+bootstrap_peer_ecosystems() {
+    if [ "${AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP:-0}" = "1" ]; then
+        info "bootstrap_peer_ecosystems: skipped by AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1"
+        return 0
+    fi
+
+    bootstrap_superpowers
+    install_npm_ecosystem_package "bootstrap_oh_my_codex" "$OH_MY_CODEX_PACKAGE" "omx" "AUTOSPEC_SKIP_OH_MY_CODEX"
+    install_npm_ecosystem_package "bootstrap_oh_my_opencode" "$OH_MY_OPENCODE_PACKAGE" "oh-my-opencode" "AUTOSPEC_SKIP_OH_MY_OPENCODE"
+    install_npm_ecosystem_package "bootstrap_oh_my_claude" "$OH_MY_CLAUDE_PACKAGE" "omc" "AUTOSPEC_SKIP_OH_MY_CLAUDE"
+    run_peer_setup_commands
 }
 
 bootstrap_turbo() {
@@ -398,6 +598,8 @@ copy_repo_scripts() {
 pull_autospec
 copy_shared_scripts
 copy_repo_scripts
+ensure_system_tools
+bootstrap_peer_ecosystems
 bootstrap_turbo
 check_codex
 merge_claude_md

@@ -4,7 +4,7 @@
 > *Per-symbol reference for all public CLI surfaces and shared scripts.*
 
 <!-- autospec-doc-scope:
-  src: ["scripts/**/*.sh", "scripts/**/*.mjs", "scripts/**/*.ps1", "skills/autospec-shared/scripts/**/*.mjs", "skills/autospec-shared/scripts/**/*.sh", "install.sh", "skills/*/install.sh", "tests/ship-completeness.bats"]
+  src: ["bootstrap.ps1", "scripts/**/*.sh", "scripts/**/*.mjs", "scripts/**/*.ps1", "skills/autospec-shared/scripts/**/*.mjs", "skills/autospec-shared/scripts/**/*.sh", "install.sh", "skills/*/install.sh", "tests/ship-completeness.bats"]
   reason: "API reference for all autospec shared scripts, their shipping path, and the ship-completeness guard"
   mismatch_action: warn
   generated: true
@@ -357,8 +357,12 @@ Exit: always 0 (best-effort; never blocks the caller).
 
 ### `ensure-tool.sh`
 
-Best-effort idempotent installer for autospec's optional CLI deps via a platform fallback chain
-(brew / apt-get / npm / pipx / uv / pip). Baked-in tool table: `bats`, `jq`, `gh`, `mempalace`.
+Best-effort idempotent installer for autospec's required and recommended CLI
+deps via a platform fallback chain (brew / apt/dnf/yum/pacman/apk /
+winget/choco/scoop / npm / pipx / uv / pip). Baked-in tool table: `ajv`,
+`bash`, `bats`, `bun`, `claude`, `codex`, `curl`, `gh`, `git`, `jq`,
+`mempalace`, `node`, `npm`, `omc`, `omx`, `oh-my-opencode`, `opencode`,
+`pipx`, `python3`, `uv`, `yq`.
 
 ```
 Usage: bash ensure-tool.sh <tool>
@@ -367,6 +371,20 @@ Env:   AUTOSPEC_SKIP_ENSURE_TOOL=1          disable ALL auto-installs
 ```
 
 Exit: always 0 (best-effort by design; unknown tools are a silent no-op).
+
+### `bootstrap.ps1`
+
+Windows-friendly suite bootstrap. Ensures Git/Bash through `winget`, `choco`,
+or `scoop` when available, clones or updates autospec in
+`$HOME\.autospec\repo`, then invokes `install.sh` through Bash and forwards all
+arguments.
+
+```
+Usage: ./bootstrap.ps1 [install.sh args...]
+Env:   AUTOSPEC_HOME       override checkout/state directory
+       AUTOSPEC_REF        git ref to install (default: main)
+       AUTOSPEC_REPO_URL   override remote URL
+```
 
 ### `cross-repo-index.sh`
 
