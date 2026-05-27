@@ -204,6 +204,13 @@ json_value() {
     jq -r --arg key "$key" '.[$key] // empty' "$file" 2>/dev/null || true
 }
 
+iso_to_epoch() {
+    ts="$1"
+    date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null \
+        || date -u -d "$ts" +%s 2>/dev/null \
+        || echo 0
+}
+
 heartbeat_schema_valid() {
     file="$1"
     issue="$2"
@@ -331,6 +338,84 @@ for hb in "$WATCHDOG_DIR"/*.json; do
         skipped=$((skipped + 1))
     fi
 done
+
+run_state_body_for_issue() {
+    issue="$1"
+    # shellcheck disable=SC2086
+    gh issue view "$issue" $REPO_ARGS \
+        --json comments \
+        --jq '[.comments[]? | select((.body // "") | contains("<!-- autospec-run-state:begin -->") and contains("<!-- autospec-run-state:end -->")) | .body][0] // ""' \
+        2>/dev/null || true
+}
+
+extract_run_state_json() {
+    awk '
+      /^<!-- autospec-run-state:begin -->$/ { inside=1; next }
+      /^<!-- autospec-run-state:end -->$/ { inside=0; exit }
+      inside { print }
+    '
+}
+
+pr_is_open() {
+    pr="$1"
+    [ -n "$pr" ] || return 1
+    # shellcheck disable=SC2086
+    state="$(gh pr view "$pr" $REPO_ARGS --json state --jq .state 2>/dev/null || true)"
+    [ "$state" = "OPEN" ]
+}
+
+reconcile_run_state_comments() {
+    # shellcheck disable=SC2086
+    issue_numbers="$(gh issue list $REPO_ARGS \
+        --state open \
+        --label in-progress-by-bot \
+        --limit 200 \
+        --json number \
+        --jq '.[].number' 2>/dev/null || true)"
+    for issue in $issue_numbers; do
+        body="$(run_state_body_for_issue "$issue")"
+        [ -n "$body" ] || continue
+        run_state_json="$(printf '%s\n' "$body" | extract_run_state_json)"
+        if ! printf '%s\n' "$run_state_json" | jq -e --argjson issue "$issue" \
+            '.schema == 1 and .issue == $issue' >/dev/null 2>&1; then
+            invalid_schema=$((invalid_schema + 1))
+            continue
+        fi
+
+        step="$(printf '%s\n' "$run_state_json" | jq -r '.step // .state // empty')"
+        updated_at="$(printf '%s\n' "$run_state_json" | jq -r '.updated_at // empty')"
+        ttl="$(printf '%s\n' "$run_state_json" | jq -r '.ttl_seconds // empty')"
+        pr="$(printf '%s\n' "$run_state_json" | jq -r '.pr // empty')"
+        case "$ttl" in ''|*[!0-9]*) ttl="$WATCHDOG_RECLAIM_SECS" ;; esac
+        [ -n "$updated_at" ] || continue
+
+        updated_epoch="$(iso_to_epoch "$updated_at")"
+        [ "$updated_epoch" -gt 0 ] || continue
+        age=$((now_ts - updated_epoch))
+        [ "$age" -ge 0 ] || age=0
+
+        case "$step" in
+            pr_created|awaiting_ci)
+                if pr_is_open "$pr"; then
+                    continue
+                fi
+                ;;
+        esac
+
+        if [ "$step" = "claimed" ] && [ "$age" -ge "$WATCHDOG_CLAIMED_TIMEOUT_SECS" ]; then
+            reclaim_issue "$issue" "$age"
+            claimed_released=$((claimed_released + 1))
+            continue
+        fi
+
+        if [ "$age" -ge "$ttl" ]; then
+            reclaim_issue "$issue" "$age"
+            reclaimed=$((reclaimed + 1))
+        fi
+    done
+}
+
+reconcile_run_state_comments
 
 save_state
 printf 'service-watch: nudged=%s reclaimed=%s claimed_released=%s garbage_collected=%s invalid_schema=%s skipped=%s\n' \
