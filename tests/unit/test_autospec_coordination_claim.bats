@@ -1,0 +1,143 @@
+#!/usr/bin/env bats
+# tests/unit/test_autospec_coordination_claim.bats — claim/release helpers.
+
+setup() {
+    REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+    CLAIM="$REPO_ROOT/skills/autospec-run/scripts/claim-issue.sh"
+    RELEASE="$REPO_ROOT/skills/autospec-run/scripts/release-issue.sh"
+    TEST_TMP="$(mktemp -d)"
+    LABELS="$TEST_TMP/labels.txt"
+    COMMENTS="$TEST_TMP/comments.json"
+    CALLS="$TEST_TMP/calls.log"
+    printf 'auto-implement\nctx:32k\n' > "$LABELS"
+    printf '[]\n' > "$COMMENTS"
+
+    mkdir -p "$TEST_TMP/bin"
+    cat > "$TEST_TMP/bin/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+
+labels="${AUTOSPEC_TEST_LABELS:?}"
+comments="${AUTOSPEC_TEST_COMMENTS:?}"
+calls="${AUTOSPEC_TEST_CALLS:?}"
+printf '%s\n' "$*" >> "$calls"
+
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+  printf 'testorg/testrepo\n'
+  exit 0
+fi
+
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  if printf '%s\n' "$*" | grep -q -- '--json comments'; then
+    cat "$comments"
+  else
+    cat "$labels"
+  fi
+  exit 0
+fi
+
+if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
+  shift 2
+  add=""
+  remove=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --add-label) add="$2"; shift 2 ;;
+      --remove-label) remove="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [ -n "$remove" ]; then
+    tr ',' '\n' <<<"$remove" | while IFS= read -r label; do
+      [ -n "$label" ] || continue
+      grep -Fxv "$label" "$labels" > "$labels.tmp" && mv "$labels.tmp" "$labels"
+    done
+  fi
+  if [ -n "$add" ]; then
+    tr ',' '\n' <<<"$add" | while IFS= read -r label; do
+      [ -n "$label" ] || continue
+      grep -Fx "$label" "$labels" >/dev/null 2>&1 || printf '%s\n' "$label" >> "$labels"
+    done
+  fi
+  exit 0
+fi
+
+if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
+  body_file=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --body-file) body_file="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  jq --arg body "$(cat "$body_file")" '. + [{id: 1, body: $body}]' "$comments" > "$comments.tmp"
+  mv "$comments.tmp" "$comments"
+  exit 0
+fi
+
+if [ "$1" = "api" ]; then
+  method=""
+  body_file=""
+  url="$2"
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -X) method="$2"; shift 2 ;;
+      -F) case "$2" in body=@*) body_file="${2#body=@}" ;; esac; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  id="${url##*/}"
+  if [ "$method" = "PATCH" ]; then
+    jq --argjson id "$id" --arg body "$(cat "$body_file")" \
+      'map(if .id == $id then .body = $body else . end)' "$comments" > "$comments.tmp"
+    mv "$comments.tmp" "$comments"
+  fi
+  exit 0
+fi
+
+exit 1
+SH
+    chmod +x "$TEST_TMP/bin/gh"
+    export PATH="$TEST_TMP/bin:$PATH"
+    export AUTOSPEC_TEST_LABELS="$LABELS"
+    export AUTOSPEC_TEST_COMMENTS="$COMMENTS"
+    export AUTOSPEC_TEST_CALLS="$CALLS"
+}
+
+teardown() {
+    rm -rf "$TEST_TMP"
+}
+
+@test "only 1 of 2 workers claims issue 42" {
+    run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-a
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"claimed": true'* ]]
+
+    run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-b
+    [ "$status" -eq 2 ]
+    [[ "$output" == *'"claimed": false'* ]]
+
+    run bash -c "grep -c '^in-progress-by-bot$' '$LABELS'"
+    [ "$output" = "1" ]
+}
+
+@test "release restores auto-implement" {
+    bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-a >/dev/null
+
+    run bash "$RELEASE" --issue 42 --repo testorg/testrepo --worker-id worker-a
+
+    [ "$status" -eq 0 ]
+    grep -Fx auto-implement "$LABELS"
+    ! grep -Fx in-progress-by-bot "$LABELS"
+    run jq -r '.[0].body | contains("\"state\": \"released\"")' "$COMMENTS"
+    [ "$output" = "true" ]
+}
+
+@test "claim-issue.sh exits 0 for claimed and 2 for already claimed" {
+    run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-a
+    [ "$status" -eq 0 ]
+
+    run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-b
+    [ "$status" -eq 2 ]
+}
