@@ -176,9 +176,11 @@ Turbo bootstrap failures are non-fatal: offline or no-remote setups continue usi
 ## Update
 
 Each installed suite skill runs a startup self-update check at most once every
-24 hours. It reinstalls from `main` when a newer commit is available. The check
-is fail-open: network or install errors log a `WARN:` line and the installed
-skill continues to run.
+24 hours. It reinstalls from `main` when a newer commit is available by running
+the curl-safe bootstrap with `--skill all --harness all --update`, so newly added
+autospec skills are picked up during ordinary self-update. The check is
+fail-open: network or install errors log a `WARN:` line and the installed skill
+continues to run.
 
 Disable startup self-update:
 
@@ -313,6 +315,24 @@ Check or resume:
 
 Stop state is stored in `~/.autospec/stop.flag`. Immediate stops preserve resume
 context on the issue and mark it with `paused-by-user`.
+
+## Usage-Limit Recovery
+
+Autospec-run can hand off quota pauses to a shell supervisor before the harness
+runs out of usable LLM turns. Set `AUTOSPEC_RESUME_COMMAND` to the exact command
+that relaunches the same run, then arm the helper with the reset time or wait
+duration:
+
+```bash
+"${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-usage-limit.sh" \
+  arm --harness codex --repo-dir "$PWD" \
+  --command "$AUTOSPEC_RESUME_COMMAND" --wait-seconds 1800
+```
+
+The supervisor stores state in `~/.autospec/usage-limits/`, polls every five
+minutes, and relaunches after the reset time. `/autospec-run` uses the same
+helper when a harness exposes `AUTOSPEC_USAGE_LIMIT_RESUME_AT` or
+`AUTOSPEC_USAGE_LIMIT_WAIT_SECONDS`.
 
 ## Repo Story Mode
 

@@ -203,6 +203,14 @@ check_startup_preflight() {
     }
     canonical=$(extract_block skills/autospec/SKILL.md)
     [ -n "$canonical" ] || fail "autospec SKILL.md missing ## Startup self-update section"
+    printf '%s\n' "$canonical" | grep -F 'raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh' >/dev/null \
+        || fail "startup preflight must call the curl-safe suite bootstrap.sh"
+    printf '%s\n' "$canonical" | grep -F -- '--skill all --harness all --update' >/dev/null \
+        || fail "startup preflight must update all skills across all harnesses"
+    if printf '%s\n' "$canonical" | grep -F 'raw.githubusercontent.com/berlinguyinca/autospec/main/install.sh' >/dev/null \
+        || printf '%s\n' "$canonical" | grep -F 'raw.githubusercontent.com/berlinguyinca/autospec/main/skills/' >/dev/null; then
+        fail "startup preflight must not call a raw installer directly"
+    fi
     for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design; do
         for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
             body=$(extract_block "$f")
@@ -234,7 +242,7 @@ check_codex_skills_install() {
 # not contain this repo's scripts/ directory.
 check_shared_script_install() {
     info "shared helper install: all skills"
-    helpers="autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh"
+    helpers="autospec-stop.sh autospec-usage-limit.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh"
     for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design; do
         f="skills/$s/install.sh"
         grep -q 'install_shared_scripts' "$f" \
@@ -475,6 +483,20 @@ check_lint_implementation_helpers() {
         printf '%s\n' "$help_out" | grep -q "$rule_id" \
             || fail "scripts/lint-implementation.sh --help missing RULE_ID: $rule_id"
     done
+}
+
+# Usage-limit recovery helper invariants: autospec-run's quota recovery path
+# depends on this shell-only supervisor being installed and executable.
+check_usage_limit_helper() {
+    info "usage-limit helper: scripts/autospec-usage-limit.sh"
+    [ -f scripts/autospec-usage-limit.sh ] \
+        || fail "scripts/autospec-usage-limit.sh: file missing"
+    [ -x scripts/autospec-usage-limit.sh ] \
+        || fail "scripts/autospec-usage-limit.sh: file not executable"
+    bash -n scripts/autospec-usage-limit.sh \
+        || fail "scripts/autospec-usage-limit.sh: bash syntax error"
+    bash scripts/autospec-usage-limit.sh --help 2>/dev/null | grep -q '^Usage:' \
+        || fail "scripts/autospec-usage-limit.sh --help did not print a 'Usage:' line"
 }
 
 # Phase 4 guardian block lock-step invariants (introduced by issue #212): the
@@ -836,6 +858,7 @@ main() {
     check_existing_spec_mode
     check_lint_issue_helpers
     check_lint_implementation_helpers
+    check_usage_limit_helper
     check_phase4_guardian_block_lockstep
     check_phase1_bounded_context_contract
     check_phase4_issue_start_summary

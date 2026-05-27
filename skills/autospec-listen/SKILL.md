@@ -41,9 +41,9 @@ if [ -z "$REMOTE" ]; then
 fi
 LOCAL=$(cat "$INSTALLED" 2>/dev/null || true)
 if [ "$REMOTE" = "$LOCAL" ]; then exit 0; fi
-bash <(curl -fsSL --max-time 30 \
-    "https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/$SKILL_NAME/install.sh") \
-    --harness all --update >/dev/null 2>&1
+curl -fsSL --max-time 30 \
+    "https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh" \
+    | bash -s -- --skill all --harness all --update >/dev/null 2>&1
 RC=$?
 if [ "$RC" -ne 0 ]; then
     echo "WARN: self-update skipped (install rc=$RC); continuing on installed version" >&2; exit 0
@@ -62,11 +62,11 @@ If the feature-request argument matches the regex `^\s*update\s*$` (case-insensi
    - Claude Code: `~/.claude/skills/autospec-listen/SKILL.md`
    - OpenCode:    `~/.config/opencode/agent/autospec-listen.md`
    - Codex CLI:   `~/.codex/prompts/autospec-listen.md`
-2. **Re-install from `main`** by piping the canonical installer:
+2. **Re-install the full autospec suite from `main`** by piping the canonical installer:
    ```bash
-   bash <(curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec-listen/install.sh) --harness <detected> --update
+   curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash -s -- --skill all --harness all --update
    ```
-   If multiple harness paths exist, run the one-liner once per detected harness.
+   Run this one-liner once; it refreshes all autospec skills across all harnesses.
 3. **Show the diff** between the prior installed file(s) and the freshly fetched copy (e.g. `diff <(cat <prior>) <(curl -fsSL ...SKILL.md)` or the equivalent recorded by the installer).
 4. **Stop.** Do not enter any trigger flow. Print the upgrade summary and return to the user.
 

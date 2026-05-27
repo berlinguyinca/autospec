@@ -23,9 +23,9 @@ normal pipeline.
    - Codex CLI:   `~/.codex/prompts/autospec-e2e-clone.md`
 2. Re-install from `main` by piping the canonical installer:
    ```
-   bash <(curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec-e2e-clone/install.sh) --harness <detected> --update
+   curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash -s -- --skill all --harness all --update
    ```
-   If multiple harness paths exist, run the one-liner once per detected harness.
+   Run this one-liner once; it refreshes all autospec skills across all harnesses.
 3. Show the diff between the prior installed file(s) and the freshly fetched copy.
 4. Stop. Do not enter any pipeline phase. Print the upgrade summary and return to the user.
 
