@@ -21,14 +21,28 @@ requests with validation, review, and merge control.
 ## Installation
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/install.sh)
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.ps1 | iex
 ```
 
 To update an existing install:
 
 ```bash
-bash install.sh --update
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash -s -- --update
 ```
+
+The suite installer also bootstraps required and recommended local tools on a
+best-effort basis across macOS, Linux, and Windows: system CLIs (`git`, `bash`,
+`curl`, `jq`, `yq`, `gh`, `node`, `npm`, `bun`, `bats`), agent CLIs (`codex`,
+`claude`, `opencode`), and companion ecosystems (`superpowers`,
+`oh-my-codex`/OMX, `oh-my-opencode`, OMC/oh-my-claude, and turbo). Locked-down
+or offline hosts continue with warnings; use `AUTOSPEC_SKIP_SYSTEM_TOOLS=1` or
+`AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1` to opt out.
 
 ## Skills
 

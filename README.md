@@ -78,6 +78,13 @@ One-line install for the full suite into every supported harness:
 curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash
 ```
 
+Windows PowerShell can use the native bootstrap, which installs Git/Bash through
+`winget`, `choco`, or `scoop` when available:
+
+```powershell
+irm https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.ps1 | iex
+```
+
 The bootstrap clones (or fast-forwards) autospec into `~/.autospec/repo` and then runs `./install.sh --skill all --harness all`. Re-run any time to update.
 
 Forward flags to the underlying installer:
@@ -105,6 +112,12 @@ The installer also honors:
 | `OPENCODE_CONFIG_DIR` | Override OpenCode install root. |
 | `CODEX_HOME` | Override Codex install root. |
 | `AUTOSPEC_NO_STAR_PROMPT=1` | Skip the optional adoption star prompt. |
+| `AUTOSPEC_SKIP_SYSTEM_TOOLS=1` | Skip best-effort installation of required/recommended CLIs. |
+| `AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1` | Skip peer ecosystem bootstrap. |
+| `AUTOSPEC_SKIP_SUPERPOWERS=1` | Skip Superpowers clone/link/OpenCode plugin setup. |
+| `AUTOSPEC_SKIP_OH_MY_CODEX=1` | Skip `oh-my-codex` npm install/setup. |
+| `AUTOSPEC_SKIP_OH_MY_OPENCODE=1` | Skip `oh-my-opencode` npm install/setup. |
+| `AUTOSPEC_SKIP_OH_MY_CLAUDE=1` | Skip `oh-my-claude`/OMC npm install/setup. |
 
 After a successful interactive suite install, the top-level installer asks
 whether you want to star `berlinguyinca/autospec` to support adoption. It is
@@ -168,14 +181,19 @@ cross-session CI rot.
 
 ### Turbo integration
 
-`install.sh` also bootstraps [tobihagemann/turbo](https://github.com/tobihagemann/turbo) as a peer skill family:
+`install.sh` also bootstraps the recommended peer ecosystem on macOS, Linux, and
+Windows hosts:
 
+- Ensures common system tools best-effort: `git`, `bash`, `curl`, `jq`, `yq`, `gh`, `node`, `npm`, `bun`, `bats`, `codex`, `claude`, `opencode`, `omx`, `omc`, `oh-my-opencode`, `mempalace`, and `ajv`.
+- Uses platform package managers when present: Homebrew, apt/dnf/yum/pacman/apk, winget, Chocolatey, Scoop, npm, pipx, uv, and pip.
+- Installs/updates `oh-my-codex`, `oh-my-opencode`, and OMC (`oh-my-claude-sisyphus`) through npm, runs idempotent setup for OMX/OMC, and initializes `oh-my-opencode` only when its config is missing.
+- Clones (or fast-forward pulls) [obra/superpowers](https://github.com/obra/superpowers), exposes its Codex skills at `~/.agents/skills/superpowers`, and adds the OpenCode plugin entry `superpowers@git+https://github.com/obra/superpowers.git`.
 - Clones (or fast-forward pulls) `~/.turbo/repo` and symlinks turbo skills into `~/.claude/skills/`.
 - Checks for the [Codex CLI](https://github.com/openai/codex). When present, autospec's Phase 4 implementer (issues labelled `autospec:v2-flow`) runs an inline peer-review pass on each diff before opening a PR. When absent, peer-review skips gracefully and the implementer continues.
 - Idempotently merges an `<!-- autospec-block -->` section into `~/.claude/CLAUDE.md` documenting both stacks' entrypoints.
 - Inside a git repo, offers to add `.autospec/` to `.gitignore` (auto-accept via `AUTOSPEC_AUTO_YES=1`).
 
-Turbo bootstrap failures are non-fatal: offline or no-remote setups continue using the cached turbo checkout.
+Peer ecosystem bootstrap failures are non-fatal: offline or locked-down hosts continue with cached tools or the autospec install itself.
 
 ## Update
 
@@ -204,7 +222,7 @@ Or, from a manual checkout:
 ./install.sh --skill all --harness all --update
 ```
 
-`--update` also fast-forwards the autospec checkout itself and pulls `~/.turbo/repo`, so a single command keeps both autospec and turbo current.
+`--update` also fast-forwards the autospec checkout itself and refreshes the peer ecosystem (`superpowers`, `oh-my-*`, and `~/.turbo/repo`), so a single command keeps the whole autospec toolchain current.
 
 Or invoke any installed skill with `update`:
 

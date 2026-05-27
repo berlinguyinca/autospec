@@ -9,6 +9,10 @@ if ! command -v script >/dev/null 2>&1; then
     echo "SKIP: script(1) not found"
     exit 0
 fi
+if ! script -qfec true /dev/null >/dev/null 2>&1; then
+    echo "SKIP: script(1) does not support GNU -qfec pseudo-TTY mode"
+    exit 0
+fi
 
 tmp_root="$(mktemp -d)"
 trap 'rm -rf "$tmp_root"' EXIT

@@ -5,7 +5,7 @@
 #
 # Strategy: each test builds an isolated fake PATH containing only the stub
 # binaries it wants the script to "see" (command -v resolves against PATH).
-# Installer stubs (brew/apt-get/pipx/uv/pip3/npm) log their invocation to a
+# Installer stubs (brew/apt-get/winget/choco/scoop/pipx/uv/pip3/npm) log their invocation to a
 # file so we can assert which installer branch fired. No real installs happen.
 
 SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/ensure-tool.sh"
@@ -142,6 +142,62 @@ run_ensure_isolated() {
   run_ensure_isolated bats
   [ "$status" -eq 0 ]
   grep -q "apt-get .*bats" "$LOG"
+}
+
+@test "yq absent + brew available → installs via brew" {
+  mk_installer brew
+  run_ensure_isolated yq
+  [ "$status" -eq 0 ]
+  grep -q "brew .*yq" "$LOG"
+}
+
+@test "node absent + winget available → installs Node.js LTS via winget" {
+  mk_installer winget
+  run_ensure_isolated node
+  [ "$status" -eq 0 ]
+  grep -q "winget .*OpenJS.NodeJS.LTS" "$LOG"
+}
+
+@test "codex absent + npm available → installs OpenAI Codex CLI via npm" {
+  mk_installer npm
+  run_ensure_isolated codex
+  [ "$status" -eq 0 ]
+  grep -q "npm .*@openai/codex" "$LOG"
+}
+
+@test "claude absent + npm available → installs Claude Code via npm" {
+  mk_installer npm
+  run_ensure_isolated claude
+  [ "$status" -eq 0 ]
+  grep -q "npm .*@anthropic-ai/claude-code" "$LOG"
+}
+
+@test "opencode absent + npm available → installs OpenCode via npm" {
+  mk_installer npm
+  run_ensure_isolated opencode
+  [ "$status" -eq 0 ]
+  grep -q "npm .*opencode-ai" "$LOG"
+}
+
+@test "omx absent + npm available → installs oh-my-codex via npm" {
+  mk_installer npm
+  run_ensure_isolated omx
+  [ "$status" -eq 0 ]
+  grep -q "npm .*oh-my-codex" "$LOG"
+}
+
+@test "omc absent + npm available → installs oh-my-claude via npm" {
+  mk_installer npm
+  run_ensure_isolated omc
+  [ "$status" -eq 0 ]
+  grep -q "npm .*oh-my-claude-sisyphus" "$LOG"
+}
+
+@test "oh-my-opencode absent + npm available → installs oh-my-opencode via npm" {
+  mk_installer npm
+  run_ensure_isolated oh-my-opencode
+  [ "$status" -eq 0 ]
+  grep -q "npm .*oh-my-opencode" "$LOG"
 }
 
 # ── mempalace pip fallback chain ─────────────────────────────────────────────
