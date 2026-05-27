@@ -209,16 +209,26 @@ bootstrap_turbo() {
 }
 
 maybe_prompt_star() {
-    # Keep scripted installs quiet: no prompt during updates, CI, pipes, or when opted out.
+    # Keep scripted installs quiet: no prompt during updates, CI, or when opted out.
     [ "$UPDATE" -eq 0 ] || return 0
+    [ "$DRY_RUN" -eq 0 ] || return 0
     [ "${AUTOSPEC_NO_STAR_PROMPT:-0}" != "1" ] || return 0
     [ "${CI:-}" = "" ] || return 0
-    [ -t 0 ] && [ -t 1 ] || return 0
     command -v gh >/dev/null 2>&1 || return 0
 
-    info ""
-    printf 'Would you like to star https://github.com/berlinguyinca/autospec to support adoption? [y/N] '
-    read -r answer || return 0
+    answer=""
+    if exec 3<>/dev/tty 2>/dev/null; then
+        info ""
+        printf 'Would you like to star https://github.com/berlinguyinca/autospec to support adoption? [y/N] ' >&3
+        read -r answer <&3 || { exec 3>&-; return 0; }
+        exec 3>&-
+    else
+        [ -t 0 ] && [ -t 1 ] || return 0
+        info ""
+        printf 'Would you like to star https://github.com/berlinguyinca/autospec to support adoption? [y/N] '
+        read -r answer || return 0
+    fi
+
     case "$answer" in
         y|Y|yes|YES|Yes)
             if gh api -X PUT /user/starred/berlinguyinca/autospec >/dev/null 2>&1; then

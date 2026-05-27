@@ -816,6 +816,18 @@ check_autospec_test_skill_present() {
         || { bash "$validate_sh" >&2; fail "$validate_sh: structural lint failed"; }
 }
 
+check_install_tests() {
+    info "install tests: tests/install/*.sh"
+    if [ -d tests/install ]; then
+        for t in tests/install/*.sh; do
+            [ -f "$t" ] || continue
+            info "  running: $t"
+            bash "$t" >/tmp/validate-install.log 2>&1 \
+                || { cat /tmp/validate-install.log >&2; fail "$t: failed"; }
+        done
+    fi
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -872,6 +884,7 @@ main() {
     check_autospec_review_tier_a_directives
     check_autospec_test_skill_present
     check_docs_amendment_presence
+    check_install_tests
     check_phase4_tests
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
