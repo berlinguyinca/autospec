@@ -138,6 +138,9 @@ Uninstall symmetrically:
 ./uninstall.sh --skill all --harness all
 ```
 
+`uninstall.sh --skill all` removes every suite skill listed in the install
+matrix, including `autospec-design`.
+
 ### Single-skill curl install (advanced)
 
 Each per-skill installer is also callable standalone over curl:
