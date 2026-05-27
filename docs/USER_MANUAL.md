@@ -87,6 +87,13 @@ follow-ups from repo findings, then runs `autospec-sweep-run.sh` plus the bundle
 `autospec-sweep-review.sh` to write `.autospec/sweep/latest.json` and feed docs,
 test, and code gaps back through specs, issues, and `/autospec-run`.
 
+Its config also declares documentation audiences and documentation scopes. Each
+entry names the reader or surface, the Markdown file that should cover it, and
+the focus autospec should preserve. During `run`, missing target files and
+missing required `autospec-doc-scope` markers become bounded docs gaps, so the
+normal autospec loop can build user, developer, operator, security, runbook,
+API, and troubleshooting documentation as separate reviewable work.
+
 Every `run` executes the configured full test command. If E2E or integration
 tests require a deployed or started app, autospec-sweep runs
 `project.findings.commands.deploy` first and fails the sweep on deploy or test

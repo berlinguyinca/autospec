@@ -165,6 +165,11 @@ The default sweep is not a one-time bug hunt. It continuously improves:
 
 - Documentation: keep user docs, API docs, runbooks, and generated docs in sync
   with implemented behavior.
+- Documentation targets: treat `documentation.audiences[]` and
+  `documentation.scopes[]` in `.autospec/autospec.yml` as the source of truth
+  for deep docs. Emit separate gaps for missing target files or missing required
+  `autospec-doc-scope` markers so user, developer, operator, security, runbook,
+  API, and troubleshooting docs can be built as bounded reviewable work.
 - Tests: add missing regression, unit, integration, E2E, invariant, and negative
   path coverage where the sweep finds weak confidence.
 - Code: reduce duplication, dead code, complexity, brittle boundaries, and

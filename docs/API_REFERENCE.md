@@ -547,6 +547,9 @@ Exit: 0 = all checks pass, non-zero = first failure with diagnostic.
 - autospec-sweep executable runner: `autospec-sweep-run.sh`
 - autospec-sweep deterministic review wrapper: `autospec-sweep-review.sh`
 - autospec config schema: `schemas/autospec-config.schema.json`
+- autospec-sweep documentation matrix: `documentation.audiences[]` and
+  `documentation.scopes[]` targets with `id`, `label`, `path`, `focus`, and
+  optional `require_scope`
 - autospec-sweep execution contract: every run executes configured tests, deploys
   first when E2E/integration tests need a live app, and records test/deployment
   status in `.autospec/sweep/latest.json`

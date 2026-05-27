@@ -112,6 +112,29 @@ SH
   [[ "$output" == *"autospec-config-test-command"* ]]
 }
 
+@test "autospec-sweep run emits configured documentation audience and scope gaps" {
+  repo="$(make_configured_repo)"
+  mkdir -p "$repo/docs"
+  cat > "$repo/README.md" <<'MD'
+# Example
+MD
+  cat > "$repo/docs/USER_MANUAL.md" <<'MD'
+# User manual
+MD
+  yq -i '.project.findings.commands.test = "true"' "$repo/.autospec/autospec.yml"
+  yq -i '.project.findings.commands.e2e = "true"' "$repo/.autospec/autospec.yml"
+  yq -i '.project.findings.commands.deploy = "true"' "$repo/.autospec/autospec.yml"
+  yq -i '.documentation.audiences = [{"id":"operators","label":"Operators","path":"docs/runbooks/OPERATIONS.md","focus":"Deployment and recovery.","require_scope":true}]' "$repo/.autospec/autospec.yml"
+  yq -i '.documentation.scopes = [{"id":"user-workflows","label":"User workflows","path":"docs/USER_MANUAL.md","focus":"Daily workflows.","require_scope":true}]' "$repo/.autospec/autospec.yml"
+
+  run bash "$RUNNER" run --repo-root "$repo" --no-file
+
+  [ "$status" -eq 0 ]
+  run jq -r '.[].dedupe_key' "$repo/.autospec/sweep/gaps.json"
+  [[ "$output" == *"autospec-doc-audience-operators"* ]]
+  [[ "$output" == *"autospec-doc-scope-marker-scope-user-workflows"* ]]
+}
+
 @test "autospec-sweep run executes configured all-test command every time" {
   repo="$(make_configured_repo)"
   cat > "$repo/all-tests.sh" <<'SH'

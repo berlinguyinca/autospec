@@ -141,10 +141,10 @@ deploy_cmd="$(yq -r '.project.findings.commands.deploy // ""' "$CONFIG")"
 helper_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
 if [ -n "${AUTOSPEC_SWEEP_REVIEW_CMD:-}" ]; then
   review_cmd="$AUTOSPEC_SWEEP_REVIEW_CMD"
-elif [ -x "$helper_dir/autospec-sweep-review.sh" ]; then
-  review_cmd="$helper_dir/autospec-sweep-review.sh"
 elif [ -x "$SCRIPT_DIR/review.sh" ]; then
   review_cmd="$SCRIPT_DIR/review.sh"
+elif [ -x "$helper_dir/autospec-sweep-review.sh" ]; then
+  review_cmd="$helper_dir/autospec-sweep-review.sh"
 else
   review_cmd="autospec-review"
 fi

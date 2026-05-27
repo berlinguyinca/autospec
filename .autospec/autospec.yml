@@ -63,6 +63,55 @@ continuous_improvement:
     create_or_update_specs: true
     file_issues: true
     route_fixes_via_autospec_run: true
+documentation:
+  enabled: true
+  audiences:
+    - id: users
+      label: End users
+      path: docs/USER_MANUAL.md
+      focus: Installation, daily workflows, troubleshooting, and success criteria.
+      require_scope: true
+    - id: developers
+      label: Developers
+      path: docs/API_REFERENCE.md
+      focus: CLI, helper scripts, config schema, and extension points.
+      require_scope: true
+    - id: operators
+      label: Operators
+      path: docs/runbooks/OPERATIONS.md
+      focus: Deployment, monitoring, recovery, scheduling, and safe rollback.
+      require_scope: true
+    - id: security-reviewers
+      label: Security reviewers
+      path: docs/SECURITY.md
+      focus: Trust boundaries, secret handling, production access, and abuse cases.
+      require_scope: true
+  scopes:
+    - id: repository-overview
+      label: Repository overview
+      path: README.md
+      focus: What autospec does, which skill to use, and the supported workflow.
+      require_scope: false
+    - id: user-workflows
+      label: User workflows
+      path: docs/USER_MANUAL.md
+      focus: Invocation flows, setup, stop/resume, sweep, review, and run behavior.
+      require_scope: true
+    - id: api-reference
+      label: API and script reference
+      path: docs/API_REFERENCE.md
+      focus: Installed helper scripts, config fields, command flags, and exit codes.
+      require_scope: true
+    - id: operations-runbooks
+      label: Operations runbooks
+      path: docs/runbooks/OPERATIONS.md
+      focus: Daemon operation, concurrency, CI waiting, quota recovery, and incident response.
+      require_scope: true
+    - id: troubleshooting
+      label: Troubleshooting
+      path: docs/TROUBLESHOOTING.md
+      focus: Common failures, diagnostics, recovery commands, and escalation paths.
+      require_scope: true
 execution:
   tests:
     run_all_every_sweep: true

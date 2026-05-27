@@ -53,6 +53,47 @@ add_gap() {
   rm -f "$tmp_gap"
 }
 
+slugify() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/^-*//; s/-*$//; s/--*/-/g'
+}
+
+add_documentation_target_gap() {
+  kind="$1"
+  id="$2"
+  label="$3"
+  path="$4"
+  focus="$5"
+  require_scope="$6"
+
+  [ -n "$id" ] || id="$(slugify "$label")"
+  [ -n "$label" ] || label="$id"
+  [ -n "$path" ] || return 0
+  [ -n "$focus" ] || focus="Keep this documentation aligned with implemented behavior."
+
+  if [ ! -f "$REPO_ROOT/$path" ]; then
+    add_gap \
+      "docs" \
+      "medium" \
+      "$path" \
+      0 \
+      "Build ${kind} documentation for ${label}" \
+      "Create ${path} for ${label}. Focus: ${focus}" \
+      "autospec-doc-${kind}-$(slugify "$id")"
+    return 0
+  fi
+
+  if [ "$require_scope" = "true" ] && ! grep -q 'autospec-doc-scope' "$REPO_ROOT/$path"; then
+    add_gap \
+      "docs" \
+      "low" \
+      "$path" \
+      1 \
+      "Add doc-scope metadata for ${label}" \
+      "Add an autospec-doc-scope block to ${path} so sweep can track drift for ${label}. Focus: ${focus}" \
+      "autospec-doc-scope-marker-${kind}-$(slugify "$id")"
+  fi
+}
+
 REPO_ROOT="$PWD"
 OUT=""
 SINCE=""
@@ -100,6 +141,7 @@ e2e_cmd="$(yq -r '.project.findings.commands.e2e // ""' "$CONFIG")"
 deploy_cmd="$(yq -r '.project.findings.commands.deploy // ""' "$CONFIG")"
 spec_sync_enabled="$(yq -r '.sweep.spec_sync.enabled // true' "$CONFIG")"
 docs_enabled="$(yq -r '.continuous_improvement.docs.enabled // true' "$CONFIG")"
+documentation_enabled="$(yq -r '.documentation.enabled // true' "$CONFIG")"
 tests_enabled="$(yq -r '.continuous_improvement.tests.enabled // true' "$CONFIG")"
 code_enabled="$(yq -r '.continuous_improvement.code.enabled // true' "$CONFIG")"
 deploy_if_tests_require="$(yq -r '.execution.deployment.deploy_if_tests_require // true' "$CONFIG")"
@@ -172,6 +214,18 @@ if [ "$docs_enabled" = "true" ] && [ ! -f "$REPO_ROOT/README.md" ]; then
     "Add project README" \
     "Create README.md so autospec-sweep has a user-facing documentation surface to keep synchronized with implemented behavior." \
     "autospec-readme-missing"
+fi
+
+if [ "$docs_enabled" = "true" ] && [ "$documentation_enabled" = "true" ]; then
+  yq -r '.documentation.audiences[]? | [.id, .label, .path, .focus, (.require_scope // true)] | @tsv' "$CONFIG" |
+    while IFS="$(printf '\t')" read -r id label path focus require_scope; do
+      add_documentation_target_gap "audience" "$id" "$label" "$path" "$focus" "$require_scope"
+    done
+
+  yq -r '.documentation.scopes[]? | [.id, .label, .path, .focus, (.require_scope // true)] | @tsv' "$CONFIG" |
+    while IFS="$(printf '\t')" read -r id label path focus require_scope; do
+      add_documentation_target_gap "scope" "$id" "$label" "$path" "$focus" "$require_scope"
+    done
 fi
 
 if [ "$code_enabled" = "true" ] && command -v rg >/dev/null 2>&1; then

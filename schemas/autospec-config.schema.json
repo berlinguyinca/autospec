@@ -121,6 +121,23 @@
         }
       }
     },
+    "documentation": {
+      "type": "object",
+      "required": ["enabled", "audiences", "scopes"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "audiences": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/documentation_target" },
+          "minItems": 1
+        },
+        "scopes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/documentation_target" },
+          "minItems": 1
+        }
+      }
+    },
     "execution": {
       "type": "object",
       "required": ["tests", "deployment"],
@@ -174,6 +191,24 @@
           "items": { "type": "string", "minLength": 1 },
           "minItems": 1
         }
+      }
+    },
+    "documentation_target": {
+      "type": "object",
+      "required": ["id", "label", "path", "focus"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "label": { "type": "string", "minLength": 1 },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^/].*\\.md$"
+        },
+        "focus": { "type": "string", "minLength": 1 },
+        "require_scope": { "type": "boolean" }
       }
     }
   }
