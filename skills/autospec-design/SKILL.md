@@ -11,10 +11,9 @@ catalog, write `DESIGN.md` at the project root, and optionally hand off a
 migration spec into `/autospec-define`. The catalog lives at
 `berlinguyinca/awesome-design-md` and is fetched at runtime — never vendored.
 
-This file is the **scaffold trio body** (see issue #572). The three
-subcommands — `suggest`, `apply`, `migrate` — currently hold placeholder
-sections. Real prose lands in the follow-up issues (#577 suggest, #578 apply,
-#580 migrate).
+This file is the **autospec-design trio body**. The `suggest` and `apply`
+subcommands are implemented; `migrate` still holds a placeholder until issue
+#580 lands.
 
 Manage your own context — never exceed 60%. Delegate to subagents whenever your harness supports it.
 
@@ -184,16 +183,86 @@ Present the top 3 to the user with their rationales and let them pick. Then run
 `/autospec-design apply <vendor>` with the chosen vendor. Do **not** apply
 automatically — `suggest` only recommends.
 
-## Subcommand: apply (placeholder)
+## Apply
 
 > **Model tier:** `TIER_B` (implementation work) — write-out is a deterministic
 > branch-and-commit; no novel design.
 
-Scaffold-only placeholder. Real prose lands in issue #578. Until then, the
-apply subcommand prints:
+`apply <vendor> [--force] [--branch <name>]` fetches `<vendor>/DESIGN.md` from
+the catalog and writes it to `<repo-root>/DESIGN.md` on a fresh feature branch,
+commits, and pushes. It is **mechanical** — no subagent dispatch. The flow:
 
-```
-/autospec-design apply: full implementation lands in issue #578.
+1. Parse `<vendor>` plus optional `--force` and `--branch <name>`.
+2. Validate `<vendor>` exists in the catalog by delegating to
+   `fetch-design-md.sh` (its exit code is the validation — a missing vendor
+   exits non-zero and prints Levenshtein hints; do not duplicate that logic).
+3. If `DESIGN.md` already exists at the repo root and `--force` is absent:
+   refuse, print a `git diff` hint, and exit non-zero. Never silently
+   overwrite.
+4. Refuse to commit on `main` — when `--branch` is absent, auto-create
+   `feat/design-<vendor>`; otherwise use the supplied branch name.
+5. Fetch the DESIGN.md body (cache hit or network) via `fetch-design-md.sh`.
+6. Write the body to `<repo-root>/DESIGN.md`.
+7. `git add DESIGN.md`, commit with `feat(design): adopt <vendor> design
+   language`, and push the branch (`git push -u origin <branch>`).
+8. Print a status summary: branch name, DESIGN.md byte count, and the
+   next-step hint (`open a PR, or run /autospec-design migrate <vendor>`).
+
+`apply` never opens a PR — the operator does that, or `/autospec-design
+migrate` takes over. It is idempotent: a second run on the same branch with the
+same vendor rewrites identical bytes and exits without creating a duplicate
+commit.
+
+The deterministic flow below is the canonical script for the steps above. Run
+it verbatim (it reads `<vendor>` from the invocation; the `DESIGN_*` overrides
+exist only so the test harness can point it at a fixture repo and a seeded
+cache). It honors `--force`/`--branch` via the `DESIGN_FORCE`/`DESIGN_BRANCH`
+mappings the wrapper sets from the parsed flags.
+
+```bash
+# autospec-design-apply-flow
+set -u
+vendor="${DESIGN_VENDOR:?vendor required: /autospec-design apply <vendor>}"
+repo_root="${DESIGN_REPO_ROOT:-$(git rev-parse --show-toplevel)}"
+fetch="${DESIGN_FETCH:-skills/autospec-design/scripts/fetch-design-md.sh}"
+branch="${DESIGN_BRANCH:-feat/design-$vendor}"
+target="$repo_root/DESIGN.md"
+
+# Guard: refuse overwrite without --force.
+if [ -e "$target" ] && [ "${DESIGN_FORCE:-0}" != "1" ]; then
+    printf 'autospec-design apply: %s already exists. Re-run with --force to overwrite (inspect with: git -C %q diff -- DESIGN.md).\n' \
+        "$target" "$repo_root" >&2
+    exit 1
+fi
+
+# Validate vendor + fetch body (non-zero here = unknown vendor or network).
+body="$(bash "$fetch" "$vendor")" || exit $?
+
+# Never commit on main: create/switch to the feature branch.
+git -C "$repo_root" checkout -B "$branch" >/dev/null 2>&1 || {
+    printf 'autospec-design apply: could not create branch %s\n' "$branch" >&2
+    exit 1
+}
+
+# Write, stage, commit.
+printf '%s' "$body" > "$target"
+git -C "$repo_root" add DESIGN.md
+if git -C "$repo_root" diff --cached --quiet -- DESIGN.md; then
+    printf 'autospec-design apply: DESIGN.md already matches %s on branch %s.\n' \
+        "$vendor" "$branch"
+else
+    git -C "$repo_root" commit -q -m "feat(design): adopt $vendor design language"
+fi
+
+# Push unless the test harness suppresses it.
+if [ "${DESIGN_NO_PUSH:-0}" != "1" ]; then
+    git -C "$repo_root" push -u origin "$branch"
+fi
+
+bytes="$(wc -c < "$target" | tr -d ' ')"
+printf 'autospec-design apply: wrote %s (%s bytes) on branch %s.\n' \
+    "$target" "$bytes" "$branch"
+printf 'Next: open a PR, or run /autospec-design migrate %s.\n' "$vendor"
 ```
 
 ## Subcommand: migrate (placeholder)
