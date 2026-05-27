@@ -78,6 +78,24 @@ function Find-Bash {
     return $null
 }
 
+function Find-Git {
+    $cmd = Get-Command git -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    $candidates = @(
+        "$env:ProgramFiles\Git\cmd\git.exe",
+        "$env:ProgramFiles\Git\bin\git.exe",
+        "${env:ProgramFiles(x86)}\Git\cmd\git.exe",
+        "${env:ProgramFiles(x86)}\Git\bin\git.exe",
+        "$env:LOCALAPPDATA\Programs\Git\cmd\git.exe",
+        "$env:LOCALAPPDATA\Programs\Git\bin\git.exe"
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) { return $candidate }
+    }
+    return $null
+}
+
 $autospecHome = [Environment]::GetEnvironmentVariable("AUTOSPEC_HOME")
 if ([string]::IsNullOrWhiteSpace($autospecHome)) {
     $autospecHome = Join-Path $HOME ".autospec"
@@ -95,7 +113,8 @@ $repoDir = Join-Path $autospecHome "repo"
 Install-CommandBestEffort "git" "Git.Git" "git" "git"
 Install-CommandBestEffort "bash" "Git.Git" "git" "git"
 
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+$git = Find-Git
+if ([string]::IsNullOrWhiteSpace($git)) {
     throw "git is required but was not found after best-effort installation."
 }
 $bash = Find-Bash
@@ -107,11 +126,11 @@ New-Item -ItemType Directory -Force -Path $autospecHome | Out-Null
 
 if (Test-Path (Join-Path $repoDir ".git")) {
     Write-Info "updating existing checkout at $repoDir (ref: $autospecRef)"
-    Invoke-Checked -CommandName "git" -CommandArgs @("-C", $repoDir, "fetch", "--quiet", "origin", $autospecRef) -ErrorMessage "git fetch failed for $repoUrl ($autospecRef)"
-    Invoke-Checked -CommandName "git" -CommandArgs @("-C", $repoDir, "checkout", "--quiet", $autospecRef) -ErrorMessage "git checkout failed for $autospecRef"
-    & git -C $repoDir merge --ff-only --quiet "origin/$autospecRef"
+    Invoke-Checked -CommandName $git -CommandArgs @("-C", $repoDir, "fetch", "--quiet", "origin", $autospecRef) -ErrorMessage "git fetch failed for $repoUrl ($autospecRef)"
+    Invoke-Checked -CommandName $git -CommandArgs @("-C", $repoDir, "checkout", "--quiet", $autospecRef) -ErrorMessage "git checkout failed for $autospecRef"
+    & $git -C $repoDir merge --ff-only --quiet "origin/$autospecRef"
     if ($LASTEXITCODE -ne 0) {
-        & git -C $repoDir symbolic-ref --quiet HEAD | Out-Null
+        & $git -C $repoDir symbolic-ref --quiet HEAD | Out-Null
         if ($LASTEXITCODE -eq 0) {
             throw "could not fast-forward $repoDir to origin/$autospecRef. Resolve local changes and re-run."
         }
@@ -120,11 +139,11 @@ if (Test-Path (Join-Path $repoDir ".git")) {
     throw "$repoDir exists but is not a git checkout. Remove it or set AUTOSPEC_HOME and re-run."
 } else {
     Write-Info "cloning $repoUrl to $repoDir (ref: $autospecRef)"
-    & git clone --quiet --branch $autospecRef --depth 1 $repoUrl $repoDir
+    & $git clone --quiet --branch $autospecRef --depth 1 $repoUrl $repoDir
     if ($LASTEXITCODE -ne 0) {
         Write-Warn "shallow branch clone failed; retrying full clone"
-        Invoke-Checked -CommandName "git" -CommandArgs @("clone", "--quiet", $repoUrl, $repoDir) -ErrorMessage "git clone failed for $repoUrl"
-        Invoke-Checked -CommandName "git" -CommandArgs @("-C", $repoDir, "checkout", "--quiet", $autospecRef) -ErrorMessage "git checkout failed for $autospecRef"
+        Invoke-Checked -CommandName $git -CommandArgs @("clone", "--quiet", $repoUrl, $repoDir) -ErrorMessage "git clone failed for $repoUrl"
+        Invoke-Checked -CommandName $git -CommandArgs @("-C", $repoDir, "checkout", "--quiet", $autospecRef) -ErrorMessage "git checkout failed for $autospecRef"
     }
 }
 
