@@ -525,3 +525,95 @@ setup_apply() {
         <(awk '/^---$/{c++; next} c>=2' "$SKILL_DIR/opencode/agent.md")
     [ "$status" -eq 0 ]
 }
+
+# ---- migrate helpers: scan UI sources + generate migration spec (#579) -----
+
+setup_migrate_helpers() {
+    SCAN="$SKILL_DIR/scripts/scan-ui-sources.sh"
+    GEN_MIGRATION="$SKILL_DIR/scripts/gen-migration-spec.sh"
+    UI_REPO="$BATS_TEST_TMPDIR/ui-repo"
+    EMPTY_REPO="$BATS_TEST_TMPDIR/empty-repo"
+
+    mkdir -p "$UI_REPO/app" "$UI_REPO/components" "$UI_REPO/node_modules/ignored"
+    cat > "$UI_REPO/package.json" <<'EOF'
+{
+  "name": "ui-repo",
+  "dependencies": { "next": "14.0.0", "react": "18.2.0" }
+}
+EOF
+    cat > "$UI_REPO/next.config.js" <<'EOF'
+module.exports = {};
+EOF
+    cat > "$UI_REPO/app/page.tsx" <<'EOF'
+export default function Page() { return <main>Hello</main>; }
+EOF
+    cat > "$UI_REPO/components/Button.tsx" <<'EOF'
+export function Button() { return <button>Go</button>; }
+EOF
+    cat > "$UI_REPO/node_modules/ignored/Skip.tsx" <<'EOF'
+export const Skip = () => null;
+EOF
+
+    mkdir -p "$EMPTY_REPO"
+
+    export AUTOSPEC_DESIGN_CACHE_DIR="$FAKE_HOME/.autospec/design-cache"
+    export AUTOSPEC_DESIGN_CACHE_TTL=86400
+    mkdir -p "$AUTOSPEC_DESIGN_CACHE_DIR/linear"
+    printf '# Linear design language\n\nUse crisp product UI.\n' \
+        > "$AUTOSPEC_DESIGN_CACHE_DIR/linear/DESIGN.md"
+}
+
+@test "migrate helpers: scan-ui-sources.sh exists and is executable" {
+    setup_migrate_helpers
+    [ -x "$SCAN" ]
+}
+
+@test "migrate helpers: gen-migration-spec.sh exists and is executable" {
+    setup_migrate_helpers
+    [ -x "$GEN_MIGRATION" ]
+}
+
+@test "migrate helpers: scan detects Next.js and UI files" {
+    setup_migrate_helpers
+    run bash "$SCAN" "$UI_REPO"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q '"framework":"next"'
+    echo "$output" | grep -q '"app/page.tsx"'
+    echo "$output" | grep -q '"components/Button.tsx"'
+    ! echo "$output" | grep -q 'node_modules'
+}
+
+@test "migrate helpers: scan caps UI inventory at 50 files" {
+    setup_migrate_helpers
+    for i in $(seq 1 60); do
+        printf 'export const C%s = true;\n' "$i" > "$UI_REPO/components/C$i.tsx"
+    done
+    run bash "$SCAN" "$UI_REPO"
+    [ "$status" -eq 0 ]
+    file_count="$(printf '%s\n' "$output" | grep -oE '"[^"]+[.](tsx|jsx|ts|js|vue|svelte|html|css|scss)"' | wc -l | tr -d ' ')"
+    [ "$file_count" -eq 50 ]
+}
+
+@test "migrate helpers: gen-migration-spec writes mandatory sections" {
+    setup_migrate_helpers
+    run bash "$GEN_MIGRATION" linear "$UI_REPO"
+    [ "$status" -eq 0 ]
+    spec_path="$(printf '%s\n' "$output" | tail -1)"
+    [ -f "$spec_path" ]
+    case "$spec_path" in
+        "$UI_REPO"/docs/specs/*-design-migration-linear.md) ;;
+        *) echo "unexpected spec path: $spec_path"; false ;;
+    esac
+    grep -q '^## Source' "$spec_path"
+    grep -q '^## Target' "$spec_path"
+    grep -q '^## Team personality' "$spec_path"
+    grep -q '^## Counter-team' "$spec_path"
+    grep -q '^## Per-component outline' "$spec_path"
+}
+
+@test "migrate helpers: gen-migration-spec exits non-zero for repos with no UI files" {
+    setup_migrate_helpers
+    run bash "$GEN_MIGRATION" linear "$EMPTY_REPO"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -qi 'no UI files'
+}
