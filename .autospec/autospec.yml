@@ -9,13 +9,17 @@ project:
   team_personality: 'auto'
   findings:
     stack:
-      - 'unknown'
+      - 'bash'
+      - 'bats'
+      - 'node'
+      - 'github-cli'
+      - 'multi-harness-skill'
     commands:
-      test: 'TODO: set project test command'
-      e2e: 'TODO: set project E2E command'
-      deploy: 'TODO: set deploy/start command for E2E tests'
+      test: 'bash scripts/validate.sh && bats tests/unit tests/smoke'
+      e2e: 'GH_CONFIG_DIR="$(mktemp -d)" E2E=0 AUTOSPEC_RUN_LIVE_COORDINATION_E2E=0 bats tests/e2e'
+      deploy: 'true'
   questions:
-    - 'Which fast test command should autospec use for the inner-loop smoke test?'
+    - 'Should live GitHub E2E sweeps create throwaway repos during scheduled runs, or stay skipped under strict isolation?'
 steps:
   define:
     enabled: true

@@ -37,6 +37,18 @@ make_configured_repo() {
   [ "$status" -eq 0 ]
 }
 
+@test "autospec-sweep run validates config through ajv when repo schema is present" {
+  command -v ajv >/dev/null 2>&1 || skip "ajv CLI not available (install ajv-cli to run this test)"
+  repo="$(make_configured_repo)"
+  mkdir -p "$repo/schemas"
+  cp "$REPO_ROOT/schemas/autospec-config.schema.json" "$repo/schemas/autospec-config.schema.json"
+
+  run bash "$RUNNER" run --repo-root "$repo" --dry-run
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"mode\": \"dry-run\""* ]]
+}
+
 @test "autospec-sweep run writes state and copies provided gaps without filing in --no-file mode" {
   repo="$(make_configured_repo)"
   gaps="$TEST_TMPDIR/gaps.json"
