@@ -404,3 +404,124 @@ EOF
     opencode_body="$(awk '/^---$/{c++; next} c>=2' "$SKILL_DIR/opencode/agent.md")"
     [ "$skill_body" = "$opencode_body" ]
 }
+
+# ---- apply-section trio prose + lockstep + runnable flow (issue #578) -----
+# The apply subcommand is prose-driven (no standalone helper, per #578 scope):
+# the SKILL.md ## Apply section embeds a self-contained, copy-pasteable bash
+# flow inside a ```bash fenced block tagged with the marker comment
+# "# autospec-design-apply-flow". These tests extract that exact flow and run
+# it against a REAL git fixture repo (no mocks) to prove the documented
+# commands actually write DESIGN.md, create the feature branch, and produce
+# the spec'd commit message. The fetch step is satisfied via the cache short-
+# circuit (the same mechanism fetch-design-md.sh uses), so no network is hit.
+
+# Extract the fenced apply flow from SKILL.md into $1 (a file path).
+extract_apply_flow() {
+    awk '
+        /# autospec-design-apply-flow/ { capture=1 }
+        capture && /^```[[:space:]]*$/ { exit }
+        capture { print }
+    ' "$SKILL_DIR/SKILL.md" > "$1"
+}
+
+setup_apply() {
+    APPLY_REPO="$BATS_TEST_TMPDIR/apply-fixture"
+    mkdir -p "$APPLY_REPO"
+    git -C "$APPLY_REPO" init -q
+    git -C "$APPLY_REPO" config user.email "test@example.com"
+    git -C "$APPLY_REPO" config user.name "Test User"
+    git -C "$APPLY_REPO" commit -q --allow-empty -m "init"
+    # Seed the design cache so the flow's fetch is a hermetic cache hit.
+    export AUTOSPEC_DESIGN_CACHE_DIR="$FAKE_HOME/.autospec/design-cache"
+    export AUTOSPEC_DESIGN_CACHE_TTL=86400
+    mkdir -p "$AUTOSPEC_DESIGN_CACHE_DIR/linear.app"
+    printf '# Linear design language\n\nBody from cache.\n' \
+        > "$AUTOSPEC_DESIGN_CACHE_DIR/linear.app/DESIGN.md"
+    FETCH="$SKILL_DIR/scripts/fetch-design-md.sh"
+}
+
+@test "apply: SKILL.md has exactly one '## Apply' heading" {
+    run grep -c '^## Apply' "$SKILL_DIR/SKILL.md"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 1 ]
+}
+
+@test "apply: SKILL.md documents the spec'd commit message" {
+    grep -q 'feat(design): adopt .* design language' "$SKILL_DIR/SKILL.md"
+}
+
+@test "apply: SKILL.md documents the --force refuse-overwrite guard" {
+    grep -qi 'force' "$SKILL_DIR/SKILL.md"
+    grep -qi 'overwrite' "$SKILL_DIR/SKILL.md"
+}
+
+@test "apply: SKILL.md embeds a runnable apply flow block" {
+    flow="$BATS_TEST_TMPDIR/flow.sh"
+    extract_apply_flow "$flow"
+    [ -s "$flow" ]
+    run bash -n "$flow"
+    [ "$status" -eq 0 ]
+}
+
+@test "apply: runnable flow writes DESIGN.md to root in feat/design-<vendor>" {
+    setup_apply
+    flow="$BATS_TEST_TMPDIR/flow.sh"
+    extract_apply_flow "$flow"
+    run env DESIGN_VENDOR="linear.app" \
+        DESIGN_REPO_ROOT="$APPLY_REPO" \
+        DESIGN_FETCH="$FETCH" \
+        DESIGN_NO_PUSH=1 \
+        bash "$flow"
+    [ "$status" -eq 0 ]
+    [ -f "$APPLY_REPO/DESIGN.md" ]
+    grep -q 'Body from cache' "$APPLY_REPO/DESIGN.md"
+    # Branch feat/design-linear.app created and checked out.
+    branch="$(git -C "$APPLY_REPO" rev-parse --abbrev-ref HEAD)"
+    [ "$branch" = "feat/design-linear.app" ]
+    # Commit message matches the spec.
+    msg="$(git -C "$APPLY_REPO" log -1 --pretty=%s)"
+    [ "$msg" = "feat(design): adopt linear.app design language" ]
+}
+
+@test "apply: runnable flow refuses overwrite without --force, exits non-zero" {
+    setup_apply
+    printf 'PRE-EXISTING\n' > "$APPLY_REPO/DESIGN.md"
+    flow="$BATS_TEST_TMPDIR/flow.sh"
+    extract_apply_flow "$flow"
+    run env DESIGN_VENDOR="linear.app" \
+        DESIGN_REPO_ROOT="$APPLY_REPO" \
+        DESIGN_FETCH="$FETCH" \
+        DESIGN_NO_PUSH=1 \
+        bash "$flow"
+    [ "$status" -ne 0 ]
+    # File unchanged.
+    grep -q 'PRE-EXISTING' "$APPLY_REPO/DESIGN.md"
+}
+
+@test "apply: runnable flow overwrites with --force" {
+    setup_apply
+    printf 'PRE-EXISTING\n' > "$APPLY_REPO/DESIGN.md"
+    flow="$BATS_TEST_TMPDIR/flow.sh"
+    extract_apply_flow "$flow"
+    run env DESIGN_VENDOR="linear.app" \
+        DESIGN_REPO_ROOT="$APPLY_REPO" \
+        DESIGN_FETCH="$FETCH" \
+        DESIGN_FORCE=1 \
+        DESIGN_NO_PUSH=1 \
+        bash "$flow"
+    [ "$status" -eq 0 ]
+    grep -q 'Body from cache' "$APPLY_REPO/DESIGN.md"
+    ! grep -q 'PRE-EXISTING' "$APPLY_REPO/DESIGN.md"
+}
+
+@test "apply: lockstep holds after prose addition (SKILL == codex)" {
+    run diff <(awk '/^---$/{c++; next} c>=2' "$SKILL_DIR/SKILL.md") \
+        "$SKILL_DIR/codex/prompt.md"
+    [ "$status" -eq 0 ]
+}
+
+@test "apply: lockstep holds after prose addition (SKILL == opencode)" {
+    run diff <(awk '/^---$/{c++; next} c>=2' "$SKILL_DIR/SKILL.md") \
+        <(awk '/^---$/{c++; next} c>=2' "$SKILL_DIR/opencode/agent.md")
+    [ "$status" -eq 0 ]
+}
