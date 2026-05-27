@@ -1,0 +1,75 @@
+version: 1
+generated_by: autospec-sweep
+config_path: .autospec/autospec.yml
+git:
+  tracked: true
+  commit_required: true
+project:
+  profile: 'full'
+  team_personality: 'auto'
+  findings:
+    stack:
+      - 'unknown'
+    commands:
+      test: 'TODO: set project test command'
+      e2e: 'TODO: set project E2E command'
+      deploy: 'TODO: set deploy/start command for E2E tests'
+  questions:
+    - 'Which fast test command should autospec use for the inner-loop smoke test?'
+steps:
+  define:
+    enabled: true
+  classify:
+    enabled: true
+  run:
+    enabled: true
+  review:
+    enabled: true
+  test:
+    enabled: true
+  clone:
+    enabled: true
+  sweep:
+    enabled: true
+sweep:
+  cadence: end_of_run
+  profile: 'full'
+  spec_sync:
+    enabled: true
+    mode: reality_check
+    update_specs_before_code: true
+    create_gap_issues: true
+  competitor_research:
+    enabled: false
+    sources: []
+  improvement_budget:
+    max_issues_per_sweep: 5
+    prefer_small_reviewable_changes: true
+continuous_improvement:
+  docs:
+    enabled: true
+    checks: [doc_drift, user_manual, api_reference, runbooks]
+  tests:
+    enabled: true
+    checks: [coverage_gaps, e2e_surface_gaps, regression_gaps]
+  code:
+    enabled: true
+    checks: [complexity, duplication, dead_code, security_footguns]
+  loop:
+    create_or_update_specs: true
+    file_issues: true
+    route_fixes_via_autospec_run: true
+execution:
+  tests:
+    run_all_every_sweep: true
+    fail_sweep_on_test_failure: true
+  deployment:
+    deploy_if_tests_require: true
+    required_for: [e2e]
+safety:
+  production_access: 'strict_isolation'
+  secrets_policy: references_only
+  never_clone_raw_secrets: true
+compatibility:
+  legacy_skill_contracts: read_if_present
+  source_of_truth: .autospec/autospec.yml
