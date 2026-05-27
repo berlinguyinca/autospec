@@ -34,7 +34,7 @@ cd skills/autospec-run
 ## Invocation
 
 ```
-/autospec-run [--profile <name>]
+/autospec-run [--profile <name>] [--worker-id <id>] [--coordination-status] [--max-parallel-safe]
 ```
 
 - `--profile <name>` — filter the candidate queue against
@@ -44,10 +44,36 @@ cd skills/autospec-run
 - (no flag) — run with the file's `default:` profile if present; otherwise prints
   `Profile filter inactive — running all auto-implement issues.` and continues
   without filtering.
+- `--worker-id <id>` — override the distributed worker identity written to the
+  GitHub run-state comment for a claimed issue.
+- `--coordination-status` — print the distributed queue state, including ready,
+  blocked, claimed, conflicting, and next-batch issues, then exit without
+  claiming work.
+- `--max-parallel-safe` — print only the next conflict-free batch from the
+  distributed queue planner, then exit without claiming work.
+- `--claim <issue>` — attempt to claim one issue and exit with status `0` when
+  claimed or `2` when the issue is already claimed or not ready.
+- `--release <issue>` — release a claim during failure, stop, or manual recovery.
 
 The full filter logic, deferred-summary accumulation, and `model-profiles.yml`
 auto-init arrive in PR B2 (issue #15). This skill currently plumbs the flag with
 no filter behaviour yet — runs all auto-implement issues regardless of profile.
+
+## Distributed coordination
+
+Multiple workstations can run `autospec-run` against the same GitHub repository.
+The shared queue is GitHub Issues:
+
+- `auto-implement` is the ready queue.
+- `in-progress-by-bot` is the active claim label.
+- A single marked `autospec-run-state` issue comment records worker identity,
+  step, branch, PR, owned paths, and TTL.
+
+Before selecting work, the monitor uses `list-ready-issues.sh` to exclude issues
+with open dependencies or path conflicts. It then uses `claim-issue.sh` to swap
+labels, write run-state, and verify that the same worker still owns the state
+comment. Lost claims are treated as normal races, not failures. The watchdog
+reclaims stale GitHub run-state in addition to same-host heartbeat files.
 
 ## What it does
 

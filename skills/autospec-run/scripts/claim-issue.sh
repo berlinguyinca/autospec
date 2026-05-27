@@ -73,6 +73,20 @@ fi
     --step claimed \
     --branch "$branch" >/dev/null
 
+verified_state_json="$("$RUN_STATE" read --issue "$issue" --repo "$repo" 2>/dev/null || true)"
+verified_owner="$(printf '%s\n' "$verified_state_json" | jq -r '.worker_id // empty' 2>/dev/null || true)"
+verified_state="$(printf '%s\n' "$verified_state_json" | jq -r '.state // empty' 2>/dev/null || true)"
+if [ "$verified_owner" != "$worker_id" ] || [ "$verified_state" != "claimed" ]; then
+    jq -n \
+        --argjson issue "$issue" \
+        --arg repo "$repo" \
+        --arg worker_id "$worker_id" \
+        --arg owner "$verified_owner" \
+        --arg state "$verified_state" \
+        '{claimed:false, issue:$issue, repo:$repo, worker_id:$worker_id, reason:"claim_lost", observed_owner:$owner, observed_state:$state}'
+    exit 2
+fi
+
 jq -n \
     --argjson issue "$issue" \
     --arg repo "$repo" \

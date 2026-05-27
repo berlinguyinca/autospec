@@ -68,7 +68,7 @@ extract_paths() {
 }
 
 extract_deps() {
-    jq -r '.body // ""' | grep -Eo 'Depends on (#|issue )[0-9]+' | grep -Eo '[0-9]+' || true
+    jq -r '.body // ""' | grep -Eoi 'Depends on[[:space:]]+(issue[[:space:]]+)?#?[0-9]+' | grep -Eo '[0-9]+' || true
 }
 
 issue_state() {
@@ -85,6 +85,11 @@ json_append() {
 active_paths_for_issue() {
     active_issue="$1"
     jq -c --argjson issue "$active_issue" '.[] | select(.number == $issue)' "$ACTIVE_FILE" | extract_paths
+}
+
+ready_paths_for_issue() {
+    ready_issue="$1"
+    jq -r --argjson issue "$ready_issue" '.[] | select(.number == $issue) | (.paths // [])[]' "$READY_FILE"
 }
 
 candidate_numbers="$(jq -r 'sort_by(.number) | .[].number' "$AUTO_FILE")"
@@ -121,6 +126,24 @@ for number in $candidate_numbers; do
 
     if [ -n "$conflict_issue" ]; then
         object="$(printf '%s\n' "$issue_json" | jq --argjson conflicts_with "$conflict_issue" --arg path "$conflict_path" '. + {reason:"path_conflict", conflicts_with:$conflicts_with, path:$path}')"
+        json_append "$CONFLICTS_FILE" "$object"
+        continue
+    fi
+
+    ready_numbers="$(jq -r 'sort_by(.number) | .[].number' "$READY_FILE")"
+    for ready in $ready_numbers; do
+        ready_paths="$(ready_paths_for_issue "$ready" | sort -u)"
+        for path in $candidate_paths; do
+            if printf '%s\n' "$ready_paths" | grep -Fx "$path" >/dev/null 2>&1; then
+                conflict_issue="$ready"
+                conflict_path="$path"
+                break 2
+            fi
+        done
+    done
+
+    if [ -n "$conflict_issue" ]; then
+        object="$(printf '%s\n' "$issue_json" | jq --argjson conflicts_with "$conflict_issue" --arg path "$conflict_path" '. + {reason:"batch_path_conflict", conflicts_with:$conflicts_with, path:$path}')"
         json_append "$CONFLICTS_FILE" "$object"
         continue
     fi
