@@ -117,8 +117,9 @@ if ! yq '.' "$CONFIG" >/dev/null 2>&1; then
 fi
 
 if command -v ajv >/dev/null 2>&1 && [ -f "$REPO_ROOT/schemas/autospec-config.schema.json" ]; then
-  tmp_json="$(mktemp -t autospec-sweep-config.XXXXXX)"
-  trap 'rm -f "$tmp_json"' EXIT
+  tmp_base="$(mktemp -t autospec-sweep-config.XXXXXX)"
+  tmp_json="${tmp_base}.json"
+  trap 'rm -f "$tmp_base" "$tmp_json"' EXIT
   yq -o=json '.' "$CONFIG" > "$tmp_json"
   ajv validate -s "$REPO_ROOT/schemas/autospec-config.schema.json" --spec=draft2020 -d "$tmp_json" >/dev/null \
     || fail ".autospec/autospec.yml does not match schemas/autospec-config.schema.json"
@@ -140,10 +141,10 @@ deploy_cmd="$(yq -r '.project.findings.commands.deploy // ""' "$CONFIG")"
 helper_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
 if [ -n "${AUTOSPEC_SWEEP_REVIEW_CMD:-}" ]; then
   review_cmd="$AUTOSPEC_SWEEP_REVIEW_CMD"
-elif [ -x "$helper_dir/autospec-sweep-review.sh" ]; then
-  review_cmd="$helper_dir/autospec-sweep-review.sh"
 elif [ -x "$SCRIPT_DIR/review.sh" ]; then
   review_cmd="$SCRIPT_DIR/review.sh"
+elif [ -x "$helper_dir/autospec-sweep-review.sh" ]; then
+  review_cmd="$helper_dir/autospec-sweep-review.sh"
 else
   review_cmd="autospec-review"
 fi

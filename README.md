@@ -426,6 +426,14 @@ The reverse-engineer pipeline + doc generators are part of the autospec-shared t
 | `llms.txt` | Short curated index ≤200 lines (llmstxt.org convention) |
 | `llms-full.txt` | Full concatenated doc content for context-window ingestion |
 
+`/autospec-sweep` can also enforce a documentation matrix in
+`.autospec/autospec.yml`. `documentation.audiences[]` names reader groups such
+as users, developers, operators, and security reviewers; `documentation.scopes[]`
+names product or operational surfaces such as API reference, runbooks, and
+troubleshooting. Missing target files or required `autospec-doc-scope` markers
+are emitted as separate docs gaps so the normal autospec loop can build deep
+documentation per audience and scope.
+
 **Doc-drift gate:** every Phase 4 PR is checked by `check-doc-drift.sh`. Source changes that
 match a `<!-- autospec-doc-scope: ... -->` block must be accompanied by doc updates. Use
 `docs: skip` in the issue body to demote drift to warnings for a single PR.

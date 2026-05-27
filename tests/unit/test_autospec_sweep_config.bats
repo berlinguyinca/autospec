@@ -44,6 +44,19 @@ teardown() {
   run yq -r '.continuous_improvement.code.enabled' "$TEST_TMPDIR/repo/.autospec/autospec.yml"
   [ "$output" = "true" ]
 
+  run yq -r '.documentation.enabled' "$TEST_TMPDIR/repo/.autospec/autospec.yml"
+  [ "$output" = "true" ]
+
+  run yq -r '.documentation.audiences[].id' "$TEST_TMPDIR/repo/.autospec/autospec.yml"
+  [[ "$output" == *"users"* ]]
+  [[ "$output" == *"developers"* ]]
+  [[ "$output" == *"operators"* ]]
+  [[ "$output" == *"security-reviewers"* ]]
+
+  run yq -r '.documentation.scopes[].id' "$TEST_TMPDIR/repo/.autospec/autospec.yml"
+  [[ "$output" == *"repository-overview"* ]]
+  [[ "$output" == *"troubleshooting"* ]]
+
   run yq -r '.execution.tests.run_all_every_sweep' "$TEST_TMPDIR/repo/.autospec/autospec.yml"
   [ "$output" = "true" ]
 
