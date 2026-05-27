@@ -108,8 +108,9 @@ The installer also honors:
 
 After a successful interactive suite install, the top-level installer asks
 whether you want to star `berlinguyinca/autospec` to support adoption. It is
-skipped for non-interactive installs (including `curl | bash`), `--update`,
-CI, missing `gh`, or `AUTOSPEC_NO_STAR_PROMPT=1`.
+prompted through `/dev/tty`, so one-line `curl | bash` installs can still ask
+when a terminal is available. The prompt is skipped for headless installs,
+`--update`, CI, missing `gh`, or `AUTOSPEC_NO_STAR_PROMPT=1`.
 
 ### Manual install (from a checkout)
 
