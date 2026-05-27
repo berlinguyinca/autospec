@@ -24,7 +24,9 @@ build/
 .omx/
 .claude/scheduled_tasks.lock
 **/.omc/
-.autospec/
+.autospec/*
+!.autospec/
+!.autospec/autospec.yml
 # Allow .autospec/ inside test fixtures (needed for skip_dirs tests)
 !skills/autospec-shared/tests/fixtures/**/.autospec/
 !skills/autospec-shared/tests/fixtures/**/.autospec/**
