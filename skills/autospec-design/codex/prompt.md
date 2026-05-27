@@ -261,16 +261,76 @@ printf 'autospec-design apply: wrote %s (%s bytes) on branch %s.\n' \
 printf 'Next: open a PR, or run /autospec-design migrate %s.\n' "$vendor"
 ```
 
-## Subcommand: migrate (placeholder)
+## Migrate
 
 > **Model tier:** `TIER_B` (implementation work) — emits a structured spec and
 > hands off to `/autospec-define`.
 
-Scaffold-only placeholder. Real prose lands in issue #580. Until then, the
-migrate subcommand prints:
+`migrate <vendor> [--branch <name>]` turns an applied vendor `DESIGN.md` into a
+tracked migration spec and then hands that spec to `/autospec-define` for normal
+autospec issue decomposition. It assumes `/autospec-design apply <vendor>` has
+already written the repo-root `DESIGN.md`.
 
-```
-/autospec-design migrate: full implementation lands in issue #580.
+Preconditions and flow:
+
+1. Verify `<repo-root>/DESIGN.md` exists and its first heading or first 20 lines
+   mention `<vendor>` (case-insensitive, with suffixes like `.app` ignored).
+   Otherwise print `Run /autospec-design apply <vendor> first.` and exit
+   non-zero.
+2. Run `scan-ui-sources.sh <repo-root>`; if no UI files are found, surface the
+   helper's no-UI-files message and exit non-zero.
+3. Run `gen-migration-spec.sh <vendor> <repo-root>` to write
+   `docs/specs/<YYYY-MM-DD>-design-migration-<vendor>.md`.
+4. Commit the spec on the current feature branch (or create/switch to
+   `--branch <name>` first when provided).
+5. Hand off to `/autospec-define <spec-path>`. If that handoff fails, do not
+   swallow the error: leave the committed spec on disk and report the exact
+   command for manual recovery.
+
+The deterministic flow below is the canonical shell portion for steps 1-4. The
+actual harness handoff is the final printed `/autospec-define <spec-path>` line;
+invoke that skill through the harness after this script succeeds.
+
+```bash
+# autospec-design-migrate-flow
+set -u
+vendor="${DESIGN_VENDOR:?vendor required: /autospec-design migrate <vendor>}"
+repo_root="${DESIGN_REPO_ROOT:-$(git rev-parse --show-toplevel)}"
+branch="${DESIGN_BRANCH:-}"
+scan="${DESIGN_SCAN:-skills/autospec-design/scripts/scan-ui-sources.sh}"
+generate="${DESIGN_GENERATE:-skills/autospec-design/scripts/gen-migration-spec.sh}"
+target="$repo_root/DESIGN.md"
+vendor_key="$(printf '%s' "$vendor" | sed -E 's/[.](app|ai|com|io)$//' | tr '[:upper:]' '[:lower:]')"
+
+if [ ! -f "$target" ] || ! head -20 "$target" | tr '[:upper:]' '[:lower:]' | grep -qF "$vendor_key"; then
+    printf 'Run /autospec-design apply %s first.\n' "$vendor" >&2
+    exit 1
+fi
+
+if [ -n "$branch" ]; then
+    git -C "$repo_root" checkout -B "$branch" >/dev/null 2>&1 || {
+        printf 'autospec-design migrate: could not create branch %s\n' "$branch" >&2
+        exit 1
+    }
+fi
+
+# Prove the UI inventory is non-empty before generating the spec.
+inventory="$(bash "$scan" "$repo_root")" || exit $?
+if printf '%s' "$inventory" | grep -q '"files":\[\]'; then
+    printf 'gen-migration-spec: no UI files found in %s; nothing to migrate.\n' "$repo_root" >&2
+    exit 2
+fi
+
+spec_path="$(bash "$generate" "$vendor" "$repo_root")" || exit $?
+git -C "$repo_root" add "$spec_path"
+if git -C "$repo_root" diff --cached --quiet -- "$spec_path"; then
+    printf 'autospec-design migrate: migration spec already committed: %s\n' "$spec_path"
+else
+    git -C "$repo_root" commit -q -m "docs(design): add $vendor migration spec"
+fi
+
+printf 'autospec-design migrate: wrote %s.\n' "$spec_path"
+printf '/autospec-define %s\n' "$spec_path"
 ```
 
 ## Hard rules

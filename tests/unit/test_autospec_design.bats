@@ -617,3 +617,104 @@ EOF
     [ "$status" -ne 0 ]
     echo "$output" | grep -qi 'no UI files'
 }
+
+# ---- migrate-section trio prose + runnable flow (issue #580) --------------
+
+extract_migrate_flow() {
+    awk '
+        /# autospec-design-migrate-flow/ { capture=1 }
+        capture && /^```[[:space:]]*$/ { exit }
+        capture { print }
+    ' "$SKILL_DIR/SKILL.md" > "$1"
+}
+
+setup_migrate_flow() {
+    MIGRATE_REPO="$BATS_TEST_TMPDIR/migrate-flow-repo"
+    mkdir -p "$MIGRATE_REPO/app"
+    git -C "$MIGRATE_REPO" init -q
+    git -C "$MIGRATE_REPO" config user.email "test@example.com"
+    git -C "$MIGRATE_REPO" config user.name "Test User"
+    cat > "$MIGRATE_REPO/package.json" <<'EOF'
+{"dependencies":{"next":"14.0.0","react":"18.2.0"}}
+EOF
+    cat > "$MIGRATE_REPO/next.config.js" <<'EOF'
+module.exports = {};
+EOF
+    cat > "$MIGRATE_REPO/app/page.tsx" <<'EOF'
+export default function Page() { return <main>Hello</main>; }
+EOF
+    git -C "$MIGRATE_REPO" add .
+    git -C "$MIGRATE_REPO" commit -q -m "init"
+
+    export AUTOSPEC_DESIGN_CACHE_DIR="$FAKE_HOME/.autospec/design-cache"
+    export AUTOSPEC_DESIGN_CACHE_TTL=86400
+    mkdir -p "$AUTOSPEC_DESIGN_CACHE_DIR/linear"
+    printf '# Linear design language\n\nUse crisp product UI.\n' \
+        > "$AUTOSPEC_DESIGN_CACHE_DIR/linear/DESIGN.md"
+}
+
+@test "migrate: trio files each have exactly one '## Migrate' heading" {
+    run grep -c '^## Migrate' "$SKILL_DIR/SKILL.md"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 1 ]
+    run grep -c '^## Migrate' "$SKILL_DIR/opencode/agent.md"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 1 ]
+    run grep -c '^## Migrate' "$SKILL_DIR/codex/prompt.md"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 1 ]
+}
+
+@test "migrate: SKILL.md embeds a runnable migrate flow block" {
+    flow="$BATS_TEST_TMPDIR/migrate-flow.sh"
+    extract_migrate_flow "$flow"
+    [ -s "$flow" ]
+    run bash -n "$flow"
+    [ "$status" -eq 0 ]
+}
+
+@test "migrate: runnable flow requires DESIGN.md from apply first" {
+    setup_migrate_flow
+    flow="$BATS_TEST_TMPDIR/migrate-flow.sh"
+    extract_migrate_flow "$flow"
+    run env DESIGN_VENDOR="linear" \
+        DESIGN_REPO_ROOT="$MIGRATE_REPO" \
+        DESIGN_SCAN="$SKILL_DIR/scripts/scan-ui-sources.sh" \
+        DESIGN_GENERATE="$SKILL_DIR/scripts/gen-migration-spec.sh" \
+        bash "$flow"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q 'Run /autospec-design apply linear first'
+}
+
+@test "migrate: runnable flow writes and commits migration spec" {
+    setup_migrate_flow
+    printf '# Linear design language\n\nUse crisp product UI.\n' > "$MIGRATE_REPO/DESIGN.md"
+    git -C "$MIGRATE_REPO" add DESIGN.md
+    git -C "$MIGRATE_REPO" commit -q -m "feat(design): adopt linear design language"
+    flow="$BATS_TEST_TMPDIR/migrate-flow.sh"
+    extract_migrate_flow "$flow"
+    run env DESIGN_VENDOR="linear" \
+        DESIGN_REPO_ROOT="$MIGRATE_REPO" \
+        DESIGN_SCAN="$SKILL_DIR/scripts/scan-ui-sources.sh" \
+        DESIGN_GENERATE="$SKILL_DIR/scripts/gen-migration-spec.sh" \
+        bash "$flow"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q '/autospec-define '
+    spec_path="$(printf '%s\n' "$output" | sed -n 's#^autospec-design migrate: wrote \(.*\)\.$#\1#p')"
+    [ -f "$spec_path" ]
+    grep -q '^## Per-component outline' "$spec_path"
+    msg="$(git -C "$MIGRATE_REPO" log -1 --pretty=%s)"
+    [ "$msg" = "docs(design): add linear migration spec" ]
+}
+
+@test "migrate: lockstep holds after prose addition (SKILL == codex)" {
+    run diff <(awk '/^---$/{c++; next} c>=2' "$SKILL_DIR/SKILL.md") \
+        "$SKILL_DIR/codex/prompt.md"
+    [ "$status" -eq 0 ]
+}
+
+@test "migrate: lockstep holds after prose addition (SKILL == opencode)" {
+    run diff <(awk '/^---$/{c++; next} c>=2' "$SKILL_DIR/SKILL.md") \
+        <(awk '/^---$/{c++; next} c>=2' "$SKILL_DIR/opencode/agent.md")
+    [ "$status" -eq 0 ]
+}
