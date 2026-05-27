@@ -217,7 +217,7 @@ maybe_prompt_star() {
     command -v gh >/dev/null 2>&1 || return 0
 
     answer=""
-    if exec 3<>/dev/tty 2>/dev/null; then
+    if { exec 3<>/dev/tty; } 2>/dev/null; then
         info ""
         printf 'Would you like to star https://github.com/berlinguyinca/autospec to support adoption? [y/N] ' >&3
         read -r answer <&3 || { exec 3>&-; return 0; }
