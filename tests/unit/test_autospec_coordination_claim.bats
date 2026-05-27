@@ -70,7 +70,11 @@ if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
       *) shift ;;
     esac
   done
-  jq --arg body "$(cat "$body_file")" '. + [{id: 1, body: $body}]' "$comments" > "$comments.tmp"
+  body="$(cat "$body_file")"
+  if [ -n "${AUTOSPEC_TEST_FORCE_OWNER:-}" ]; then
+    body="$(printf '%s\n' "$body" | sed "s/\"worker_id\": \"[^\"]*\"/\"worker_id\": \"${AUTOSPEC_TEST_FORCE_OWNER}\"/")"
+  fi
+  jq --arg body "$body" '. + [{id: 1, body: $body}]' "$comments" > "$comments.tmp"
   mv "$comments.tmp" "$comments"
   exit 0
 fi
@@ -88,8 +92,16 @@ if [ "$1" = "api" ]; then
     esac
   done
   id="${url##*/}"
+  if [ "$url" = "repos/testorg/testrepo/issues/42/comments" ]; then
+    cat "$comments"
+    exit 0
+  fi
   if [ "$method" = "PATCH" ]; then
-    jq --argjson id "$id" --arg body "$(cat "$body_file")" \
+    body="$(cat "$body_file")"
+    if [ -n "${AUTOSPEC_TEST_FORCE_OWNER:-}" ]; then
+      body="$(printf '%s\n' "$body" | sed "s/\"worker_id\": \"[^\"]*\"/\"worker_id\": \"${AUTOSPEC_TEST_FORCE_OWNER}\"/")"
+    fi
+    jq --argjson id "$id" --arg body "$body" \
       'map(if .id == $id then .body = $body else . end)' "$comments" > "$comments.tmp"
     mv "$comments.tmp" "$comments"
   fi
@@ -103,6 +115,7 @@ SH
     export AUTOSPEC_TEST_LABELS="$LABELS"
     export AUTOSPEC_TEST_COMMENTS="$COMMENTS"
     export AUTOSPEC_TEST_CALLS="$CALLS"
+    export AUTOSPEC_TEST_FORCE_OWNER=""
 }
 
 teardown() {
@@ -140,4 +153,12 @@ teardown() {
 
     run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-b
     [ "$status" -eq 2 ]
+}
+
+@test "claim-issue.sh exits 2 when run-state ownership is lost" {
+    AUTOSPEC_TEST_FORCE_OWNER=worker-b run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-a
+
+    [ "$status" -eq 2 ]
+    [[ "$output" == *'"claimed": false'* ]]
+    [[ "$output" == *'"reason": "claim_lost"'* ]]
 }

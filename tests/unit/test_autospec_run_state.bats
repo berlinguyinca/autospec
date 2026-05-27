@@ -23,11 +23,6 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
   exit 0
 fi
 
-if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
-  cat "$comments"
-  exit 0
-fi
-
 if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
   body_file=""
   while [ "$#" -gt 0 ]; do
@@ -57,8 +52,16 @@ if [ "$1" = "api" ]; then
     esac
   done
   id="${url##*/}"
+  if [ "$url" = "repos/testorg/testrepo/issues/42/comments" ]; then
+    cat "$comments"
+    exit 0
+  fi
   case "$method" in
     PATCH)
+      if [ -n "${AUTOSPEC_TEST_FAIL_PATCH_ONCE:-}" ] && [ ! -f "${AUTOSPEC_TEST_PATCH_FAIL_MARKER:?}" ]; then
+        touch "$AUTOSPEC_TEST_PATCH_FAIL_MARKER"
+        exit 1
+      fi
       jq --argjson id "$id" --arg body "$(cat "$body_file")" \
         'map(if .id == $id then .body = $body else . end)' "$comments" > "$comments.tmp"
       mv "$comments.tmp" "$comments"
@@ -77,6 +80,9 @@ SH
     export PATH="$TEST_TMP/bin:$PATH"
     export AUTOSPEC_TEST_COMMENTS="$COMMENTS"
     export AUTOSPEC_TEST_CALLS="$CALLS"
+    export AUTOSPEC_TEST_FAIL_PATCH_ONCE=""
+    export AUTOSPEC_TEST_PATCH_FAIL_MARKER="$TEST_TMP/patch-failed-once"
+    export AUTOSPEC_GH_API_RETRY_SLEEP=0
 }
 
 teardown() {
@@ -129,4 +135,50 @@ JSON
     [ "$output" = "true" ]
     run jq '[.[].body | select(contains("autospec-run-state:begin"))] | length' "$COMMENTS"
     [ "$output" = "1" ]
+}
+
+@test "run-state.sh ignores state comments for another repo" {
+    bash "$SCRIPT" upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state claimed --step claimed >/dev/null
+
+    run bash "$SCRIPT" read --issue 42 --repo otherorg/otherrepo
+
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "upsert collapses duplicate marked state comments" {
+    cat > "$COMMENTS" <<'JSON'
+[
+  {
+    "id": 7,
+    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"old-a\",\"state\":\"claimed\",\"claimed_at\":\"2026-01-01T00:00:00Z\"}\n<!-- autospec-run-state:end -->"
+  },
+  {
+    "id": 8,
+    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"old-b\",\"state\":\"claimed\",\"claimed_at\":\"2026-01-01T00:00:00Z\"}\n<!-- autospec-run-state:end -->"
+  }
+]
+JSON
+
+    run bash "$SCRIPT" upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state worktree_ready
+
+    [ "$status" -eq 0 ]
+    run jq '[.[].body | select(contains("autospec-run-state:begin"))] | length' "$COMMENTS"
+    [ "$output" = "1" ]
+    run jq -r '.[0].id' "$COMMENTS"
+    [ "$output" = "7" ]
+    run bash "$SCRIPT" read --issue 42 --repo testorg/testrepo
+    [[ "$output" == *'"worker_id": "worker-a"'* ]]
+}
+
+@test "upsert retries transient REST patch failure" {
+    bash "$SCRIPT" upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state claimed >/dev/null
+    export AUTOSPEC_TEST_FAIL_PATCH_ONCE=1
+
+    run bash "$SCRIPT" upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state worktree_ready
+
+    [ "$status" -eq 0 ]
+    [ -f "$AUTOSPEC_TEST_PATCH_FAIL_MARKER" ]
+    run bash "$SCRIPT" read --issue 42 --repo testorg/testrepo
+    [[ "$output" == *'"state": "worktree_ready"'* ]]
 }

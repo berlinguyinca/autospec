@@ -95,6 +95,31 @@ EOF
     [ "$output" = "0" ]
 }
 
+@test "Depends on issue #1 blocks issue 2" {
+    body2="$(cat <<'EOF'
+## Goal
+Implement dependent fixture.
+
+## Implementation outline
+- `skills/bar.sh`: update fixture path.
+
+## Dependencies
+Depends on issue #1
+EOF
+)"
+    jq -n --arg body "$body2" '[{number:2,title:"dependent",body:$body,labels:[{name:"auto-implement"}]}]' > "$AUTO_JSON"
+    printf '{"1":"OPEN"}\n' > "$STATES_JSON"
+
+    run bash "$SCRIPT" --repo testorg/testrepo
+
+    [ "$status" -eq 0 ]
+    planner_output="$output"
+    run bash -c "printf '%s' '$planner_output' | jq -r '.blocked[0].number'"
+    [ "$output" = "2" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.ready | length'"
+    [ "$output" = "0" ]
+}
+
 @test "planner groups 4 independent issues in one batch" {
     jq -n \
       --arg b1 "$(body_with_path skills/a.sh)" \
@@ -129,4 +154,25 @@ EOF
     [ "$output" = "20" ]
     run bash -c "printf '%s' '$planner_output' | jq -r '.conflicts[0].conflicts_with'"
     [ "$output" = "19" ]
+}
+
+@test "planner batch excludes ready issues that overlap each other" {
+    jq -n \
+      --arg b1 "$(body_with_path skills/shared.sh)" \
+      --arg b2 "$(body_with_path skills/shared.sh)" \
+      --arg b3 "$(body_with_path docs/independent.md)" \
+      '[
+        {number:30,title:"shared-a",body:$b1,labels:[{name:"auto-implement"}]},
+        {number:31,title:"shared-b",body:$b2,labels:[{name:"auto-implement"}]},
+        {number:32,title:"independent",body:$b3,labels:[{name:"auto-implement"}]}
+      ]' > "$AUTO_JSON"
+
+    run bash "$SCRIPT" --repo testorg/testrepo --batch-size 3
+
+    [ "$status" -eq 0 ]
+    planner_output="$output"
+    run bash -c "printf '%s' '$planner_output' | jq -r '.batch | map(.number) | join(\",\")'"
+    [ "$output" = "30,32" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.conflicts[] | select(.number == 31).conflicts_with'"
+    [ "$output" = "30" ]
 }
