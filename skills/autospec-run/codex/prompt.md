@@ -100,6 +100,16 @@ mode and does NOT run the normal pipeline. When dispatching, pass any
 - `--profile <name>` — filter the candidate queue against `~/.autospec/model-profiles.yml` so only issues whose `ctx:*` and `reasoning:*` labels fit the named profile are picked up. Issues that exceed the profile on either axis are appended to a `deferred[]` list and printed in the run-end summary.
 - (no flag) — load `~/.autospec/model-profiles.yml`'s `default:` profile and run with it. If the file is missing, run auto-init (below) then exit so the user can review/edit before re-running.
 - `--profile <unknown>` — exit non-zero and print the list of available profile names from `~/.autospec/model-profiles.yml`.
+- `--worker-id <id>` — override the distributed worker identity written to
+  GitHub run-state comments. Otherwise derive it from host, user, harness, pid,
+  and start timestamp.
+- `--coordination-status` — print active workers, claimed issues, blockers,
+  stale claims, conflicts, and the next safe batch, then exit without claiming.
+- `--max-parallel-safe` — print the next safe parallel batch from
+  `list-ready-issues.sh` and exit without claiming.
+- `--claim <issue>` — attempt a deterministic claim via `claim-issue.sh` and
+  exit with that helper's status (`0` claimed, `2` already claimed/skipped).
+- `--release <issue>` — release a distributed claim via `release-issue.sh`.
 
 ### Auto-init `~/.autospec/model-profiles.yml`
 
@@ -309,6 +319,43 @@ When selecting the next `auto-implement` issue, sort:
 
 `priority:high` always wins over age. This guarantees regression
 issues unblock the queue before continuing with normal feature work.
+
+### Distributed coordinator selection
+
+Before choosing `ready[0]`, prefer the distributed coordinator helpers when they
+exist in `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}` or the checked-out
+repo:
+
+```bash
+COORD_LIST="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/list-ready-issues.sh"
+COORD_CLAIM="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-issue.sh"
+COORD_RELEASE="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/release-issue.sh"
+[ -x "$COORD_LIST" ] || COORD_LIST="skills/autospec-run/scripts/list-ready-issues.sh"
+[ -x "$COORD_CLAIM" ] || COORD_CLAIM="skills/autospec-run/scripts/claim-issue.sh"
+[ -x "$COORD_RELEASE" ] || COORD_RELEASE="skills/autospec-run/scripts/release-issue.sh"
+```
+
+If `--coordination-status` is active, run `list-ready-issues.sh --repo {repo}
+--batch-size "${AUTOSPEC_BATCH_SIZE:-3}"`, print the JSON, and exit. If
+`--max-parallel-safe` is active, print only the `.batch` array and exit.
+
+During the normal monitor loop:
+
+1. Run `list-ready-issues.sh --repo {repo} --batch-size "$effective_batch_size"`
+   after watchdog reconciliation and profile filtering.
+2. Use `.ready[0].number` as the next issue candidate.
+3. Claim it through `claim-issue.sh --issue "$ISSUE" --repo {repo}
+   --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" --branch "<BRANCH>"`.
+4. Treat claim exit `2` as a normal lost-race or conflict outcome: refresh the
+   queue and try another candidate without failing the batch.
+5. On failure, stop, or retry exhaustion, call `release-issue.sh` before
+   returning `auto-implement` to the queue.
+
+The GitHub `autospec-run-state` comment written by these helpers is the
+cross-workstation source of truth. Local process heartbeat files remain useful
+for same-host progress and compatibility, but they are not authoritative across
+machines. If any coordinator helper is unavailable, fall back to the existing
+inline label-swap path below.
 
 >   all_open = [open auto-implement issues, sorted ascending by issue number]
 >   candidates = [all_open issues whose Depends-on deps are all CLOSED, sorted ascending]
