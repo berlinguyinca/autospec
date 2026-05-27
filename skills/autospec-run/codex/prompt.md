@@ -39,9 +39,9 @@ if [ -z "$REMOTE" ]; then
 fi
 LOCAL=$(cat "$INSTALLED" 2>/dev/null || true)
 if [ "$REMOTE" = "$LOCAL" ]; then exit 0; fi
-bash <(curl -fsSL --max-time 30 \
-    "https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/$SKILL_NAME/install.sh") \
-    --harness all --update >/dev/null 2>&1
+curl -fsSL --max-time 30 \
+    "https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh" \
+    | bash -s -- --skill all --harness all --update >/dev/null 2>&1
 RC=$?
 if [ "$RC" -ne 0 ]; then
     echo "WARN: self-update skipped (install rc=$RC); continuing on installed version" >&2; exit 0
@@ -67,11 +67,11 @@ normal pipeline.
    - Claude Code: `~/.claude/skills/autospec-run/SKILL.md`
    - OpenCode:    `~/.config/opencode/agent/autospec-run.md`
    - Codex CLI:   `~/.codex/prompts/autospec-run.md`
-2. **Re-install from `main`** by piping the canonical installer:
+2. **Re-install the full autospec suite from `main`** by piping the canonical installer:
    ```bash
-   bash <(curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec-run/install.sh) --harness <detected> --update
+   curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash -s -- --skill all --harness all --update
    ```
-   If multiple harness paths exist, run the one-liner once per detected harness.
+   Run this one-liner once; it refreshes all autospec skills across all harnesses.
 3. **Show the diff** between the prior installed file(s) and the freshly fetched copy (e.g. `diff <(cat <prior>) <(curl -fsSL ...SKILL.md)` or the equivalent recorded by the installer).
 4. **Stop.** Do not enter Phase 0 / Phase 1 / any pipeline phase. Print the upgrade summary and return to the user.
 
@@ -232,6 +232,25 @@ Record this durable preference in `AGENTS.md` (idempotent — skip if already pr
 > **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (`gh pr merge <#> --admin --squash --delete-branch`) when (a) all required CI checks pass — slow optional checks like TeamCity may be pending and that's acceptable, (b) the self-review subagent returned `LGTM`, (c) PR closes an `auto-implement` issue from a `feat/*` branch.
 
 **Off-peak tip:** For queues of 10+ issues (8+ hour runs), consider launching at night or on weekends. Usage limits are shared across all sessions — running long batches off-peak preserves daytime tokens for interactive work.
+
+**Usage-limit recovery guard.** Before launching the monitor, determine the exact non-interactive command that can relaunch this same `/autospec-run` invocation in the current repo and store it in `AUTOSPEC_RESUME_COMMAND` if the harness has not already set one. This must be a real shell command, for example the same Claude Code, Codex CLI, OpenCode, tmux, or wrapper command the operator used to start the run with the same `--profile` and repo path. Do not ask the user for it during a running monitor.
+
+When a harness reports a deterministic usage-limit/quota/capacity pause with a known reset time or wait duration, do not spend tokens diagnosing the message. Immediately arm the shell supervisor and exit:
+
+```bash
+USAGE_LIMIT="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-usage-limit.sh"
+if [ -n "${AUTOSPEC_USAGE_LIMIT_RESUME_AT:-}" ]; then
+  bash "$USAGE_LIMIT" arm --harness "<claude|codex|opencode>" --repo-dir "$(pwd)" \
+    --command "$AUTOSPEC_RESUME_COMMAND" --resume-at "$AUTOSPEC_USAGE_LIMIT_RESUME_AT"
+  exit 0
+elif [ -n "${AUTOSPEC_USAGE_LIMIT_WAIT_SECONDS:-}" ]; then
+  bash "$USAGE_LIMIT" arm --harness "<claude|codex|opencode>" --repo-dir "$(pwd)" \
+    --command "$AUTOSPEC_RESUME_COMMAND" --wait-seconds "$AUTOSPEC_USAGE_LIMIT_WAIT_SECONDS"
+  exit 0
+fi
+```
+
+The helper writes `~/.autospec/usage-limits/<run-id>.json`, starts a background daemon, polls every 300 seconds by default, and relaunches the recorded command after the reset time. This is intentionally shell-only so recovery does not require an LLM turn after the usage limit has already been hit.
 
 Then launch a **background monitor loop** — the orchestrator relaunches the monitor with fresh context after each batch of `AUTOSPEC_BATCH_SIZE` issues (default: 3). The monitor is stateless: all persistent state lives in GitHub labels and heartbeat files, so relaunches are always safe.
 

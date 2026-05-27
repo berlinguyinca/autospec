@@ -36,9 +36,9 @@ if [ -z "$REMOTE" ]; then
 fi
 LOCAL=$(cat "$INSTALLED" 2>/dev/null || true)
 if [ "$REMOTE" = "$LOCAL" ]; then exit 0; fi
-bash <(curl -fsSL --max-time 30 \
-    "https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/$SKILL_NAME/install.sh") \
-    --harness all --update >/dev/null 2>&1
+curl -fsSL --max-time 30 \
+    "https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh" \
+    | bash -s -- --skill all --harness all --update >/dev/null 2>&1
 RC=$?
 if [ "$RC" -ne 0 ]; then
     echo "WARN: self-update skipped (install rc=$RC); continuing on installed version" >&2; exit 0
@@ -54,9 +54,9 @@ echo "[autospec] updated ${LOCAL:-fresh} → $REMOTE"
 If the feature-request argument is exactly `update` after trimming whitespace and
 lowercasing, enter self-update mode and do not run a sweep:
 
-1. Detect the installed harness path for `autospec-sweep`.
-2. Run the canonical installer with `--update` for each detected harness:
-   `bash <(curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/skills/autospec-sweep/install.sh) --harness <detected> --update`
+1. Detect whether `autospec-sweep` is installed in any harness.
+2. Run the canonical suite installer once with `--update`:
+   `curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash -s -- --skill all --harness all --update`
 3. Show a short before/after summary and stop.
 
 ## Invocation

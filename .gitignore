@@ -17,6 +17,9 @@ build/
 *.log
 *.tmp
 *.bak
+artifacts/
+batch-done.json
+batch-donel.json
 
 # Agent-state artifacts (codesight, omc, claude session state)
 .codesight/

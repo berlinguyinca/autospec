@@ -23,6 +23,7 @@
 - [Autospec mutation testing — queued](project_autospec_mutation_testing.md) — test-of-tests layer: mutation testing gate + assertion-density floor + negative-path-pair lint; tracker #420
 - [Cross-tool memory — SHIPPED](project_cross_tool_memory_brainstorm.md) — M1-M5 all merged PRs #503-#507; CC↔Codex↔OpenCode share docs/memory/ via symlink+AGENTS.md inventory; mempalace MCP indexes (2026-05-23)
 - [Session close 2026-05-22→23](project_2026_05_22_23_session_close.md) — ~105 PRs shipped across 11 feature families; queue drained; CI disabled; cross-tool memory live
+- [Gap-remediation + keyword-routing SHIPPED](project_gap_remediation_keyword_routing.md) — 2026-05-24: end-of-run gap-remediation loop (Phase 5.5) + autospec-listen keyword auto-routing; built via parallel-wave opus single-issue monitors on disjoint files (watchdog off, no shared batch-done)
 
 <!-- Archived entries (shipped work; kept in dir for git history but not indexed):
 - project_autospec_review_status.md (autospec-review shipped 2026-05-07)

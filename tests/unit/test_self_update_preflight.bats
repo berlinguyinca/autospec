@@ -160,6 +160,54 @@ CURLSHIM
 }
 
 # ---------------------------------------------------------------------------
+# Scenario 6b — Installer target: suite bootstrap refreshes every skill
+# ---------------------------------------------------------------------------
+
+@test "startup self-update invokes suite bootstrap for all skills and harnesses" {
+    mkdir -p "$HOME/.autospec"
+    date -u -v-25H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '25 hours ago' +'%Y-%m-%dT%H:%M:%SZ' \
+        > "$HOME/.autospec/last-update-check"
+    echo "oldsha1" > "$HOME/.autospec/installed-version"
+
+    cat > "$SHIMDIR/curl" << 'CURLSHIM'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    case "$arg" in
+        *commits/main*)
+            printf '{"sha":"newsha99"}\n'
+            exit 0
+            ;;
+        *raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh)
+            printf '%s\n' "$arg" > "$HOME/install-url"
+            printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" > "$HOME/install-args"\nexit 0\n'
+            exit 0
+            ;;
+        *raw.githubusercontent.com/berlinguyinca/autospec/main/install.sh)
+            printf '%s\n' "$arg" > "$HOME/unexpected-raw-installer"
+            printf '#!/usr/bin/env bash\nexit 98\n'
+            exit 0
+            ;;
+        *raw.githubusercontent.com/berlinguyinca/autospec/main/skills/*/install.sh)
+            printf '%s\n' "$arg" > "$HOME/unexpected-skill-installer"
+            printf '#!/usr/bin/env bash\nexit 99\n'
+            exit 0
+            ;;
+    esac
+done
+exit 1
+CURLSHIM
+    chmod +x "$SHIMDIR/curl"
+
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    [ "$(cat "$HOME/install-url")" = "https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh" ]
+    [ "$(cat "$HOME/install-args")" = "--skill all --harness all --update" ]
+    [ ! -f "$HOME/unexpected-raw-installer" ]
+    [ ! -f "$HOME/unexpected-skill-installer" ]
+}
+
+# ---------------------------------------------------------------------------
 # Scenario 7 — Lock contention: lock dir already held → WARN, exit 0
 # ---------------------------------------------------------------------------
 
