@@ -353,9 +353,9 @@ Run a structured brainstorm — one question at a time, get explicit approval af
 2. **Interactivity / API shape** — how does the user/caller drive it; commands, keys, endpoints, fields.
 3. **Data model** — types, columns, persistence boundary.
 4. **Error handling** — failure modes, recovery, user-visible signals.
-5. **Testing** — unit / integration / e2e split, real services vs anything else (rule per AGENTS.md: real services).
+5. **Testing** — unit / integration / e2e split, real services vs anything else (rule per AGENTS.md: real services). For app/UI work, include an `autospec-qa` revalidation plan that maps each spec requirement to running-app checks for text inputs, validation, selects/dropdowns, buttons, forms, API effects, accessibility, responsive behavior, negative paths, and regenerated automated tests.
 
-Write the agreed design to `docs/specs/YYYY-MM-DD-<topic>-design.md`. Self-review for placeholders, contradictions, ambiguity, scope. The spec must be implementable end-to-end by an agent reading only the spec.
+Write the agreed design to `docs/specs/YYYY-MM-DD-<topic>-design.md`. Self-review for placeholders, contradictions, ambiguity, and scope. Then run a critical improvement check: ask "What else could fail even if this spec and its obvious tests pass, and how could this be better?" Add the highest-risk answer to Testing, Acceptance Criteria, or Review counter-team. For app/UI work, explicitly consider mocked-vs-deployed behavior, backend fallbacks, user-visible outcomes, and no-mock smoke coverage. The spec must be implementable end-to-end by an agent reading only the spec.
 
 If this is a fresh repo, commit the spec to `main` directly (`git add docs/... && git commit -m "docs: <topic> design spec" && git push`) so subsequent issues can reference it as a tracked file.
 
@@ -904,6 +904,7 @@ Pass the following prompt verbatim to each background subagent:
 >        > **Part 2 — LGTM (correctness review):** Using the same diff and issue body already in context:
 >        > 6. Check correctness, edge cases, missing tests, AGENTS.md compliance (TDD, no mocks, conventional commits).
 >        > 7. Collect findings as a numbered list.
+>        > 8. Critical self-question before LGTM: "What else could still pass here while the real user workflow fails, and how could this be better?" Check especially mocked-vs-deployed behavior, external service assumptions, fallback paths, user-visible outcomes, and missing no-mock smoke coverage. If the answer is actionable inside the issue scope, emit it as a finding or required test.
 >        >
 >        > **Hard limit:** max **25 tool calls total** (Parts 1 + 2 combined). If budget exhausted, append `RULE_ID:OUT_OF_SCOPE: reviewer budget exhausted; PR needs human review` and proceed to verdict.
 >        >

@@ -69,6 +69,20 @@ teardown() {
     grep -q '^## Contract file' "$SKILL_MD"
 }
 
+@test "SKILL.md contains ## Spec-compliance QA prompt section" {
+    grep -q '^## Spec-compliance QA prompt' "$SKILL_MD"
+}
+
+@test "SKILL.md QA prompt covers spec traceability and UI controls" {
+    grep -q 'Spec traceability' "$SKILL_MD"
+    grep -q 'selects, dropdowns' "$SKILL_MD"
+}
+
+@test "SKILL.md QA prompt requires no-mock deployed smoke coverage" {
+    grep -q 'No-mock deployed smoke' "$SKILL_MD"
+    grep -q 'mocked endpoint success' "$SKILL_MD"
+}
+
 @test "SKILL.md contains ## Modes I and II section" {
     grep -q '^## Modes I and II' "$SKILL_MD"
 }

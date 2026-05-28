@@ -8,6 +8,7 @@
 #   4. codex/prompt.md starts with a leading blank line (byte-precise).
 #   5. SKILL.md contains a forbidden_url_patterns example block (adapter row).
 #   6. SKILL.md Model tier declares reasoning:standard and ctx:120k.
+#   7. SKILL.md contains the spec-compliance QA prompt anchors.
 #
 # Usage:
 #   bash skills/autospec-test/validate.sh [--skill-dir <path>]
@@ -133,5 +134,18 @@ grep -q 'edge_case_seeds:' "$SKILL_MD" \
 info "checking v2 adapter row in SKILL.md"
 grep -q 'Stage 2\.5' "$SKILL_MD" \
     || fail "SKILL.md missing Stage 2.5 adapter row (required v2 lockstep check)"
+
+# ── 11. SKILL.md: spec-compliance QA prompt anchors ─────────────────────────
+info "checking spec-compliance QA prompt anchors in SKILL.md"
+grep -q '^## Spec-compliance QA prompt' "$SKILL_MD" \
+    || fail "SKILL.md missing '## Spec-compliance QA prompt' section"
+grep -q 'Spec traceability' "$SKILL_MD" \
+    || fail "SKILL.md missing spec traceability QA prompt anchor"
+grep -q 'selects, dropdowns' "$SKILL_MD" \
+    || fail "SKILL.md missing UI control QA prompt anchor"
+grep -q 'No-mock deployed smoke' "$SKILL_MD" \
+    || fail "SKILL.md missing no-mock deployed smoke QA prompt anchor"
+grep -q 'mocked endpoint success' "$SKILL_MD" \
+    || fail "SKILL.md missing mocked endpoint success warning"
 
 info "OK — all autospec-test structural checks passed."
