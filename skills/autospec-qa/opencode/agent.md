@@ -757,6 +757,55 @@ Required outcome:
   owner, and follow-up issue; tests must still prove the new canonical path.
 ```
 
+## Brute-force string heuristics sweep
+
+Sweep already-merged code for the LLM-tier RULE_IDs `STRING_MATCH_DOMAIN_LOGIC`
+and `REPEATED_STRUCTURE_AS_CODE` (AGENTS.md `## Implementation-quality contract`).
+This catches rot that pre-dates the PR-time guardian — substring-on-name
+classifiers and ≥5-branch ladders that ship as a wall of `if`/`elif`/`switch`
+instead of a table + dispatcher.
+
+Supported languages: Python, JavaScript/TypeScript, Go, Java, Scala, Rust.
+
+```bash
+# Run from repo root. Emits findings into .autospec/qa-verdict.json under
+# the category `code_health:brute_force_string_heuristics` and files one
+# auto-implement issue per offender.
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/qa-brute-force-sweep.sh"
+```
+
+The sweep:
+
+1. Walks every `*.py`, `*.js`, `*.ts`, `*.jsx`, `*.tsx`, `*.go`, `*.java`,
+   `*.scala`, `*.rs` file outside `node_modules`, `.git`, and `dist`.
+2. For `STRING_MATCH_DOMAIN_LOGIC`: counts substring-style checks
+   (`.contains(...)`, `.includes(...)`, `in name`, `strings.Contains`,
+   etc.) and confirms the file imports a proper-representation library for
+   its language — Python `rdkit`/`ast`/`urllib.parse`/`datetime`/
+   `ipaddress`/`lxml`/`jsonschema`; JS/TS `URL`/`Date`/`@babel/parser`/
+   `acorn`/`ts-morph`/`zod`/`ajv`/`joi`; Go `net/url`/`time`/`go/ast`/
+   `net.ParseIP`/`encoding/json`; Java `java.net.URI`/`java.time`/
+   `JavaParser`/`com.github.javaparser`/`javax.validation`; Scala
+   `java.net.URI`/`java.time`/`scalameta`/refined/circe; Rust `url::Url`/
+   `chrono`/`time`/`syn`/`std::net::IpAddr`/`serde`.
+3. For `REPEATED_STRUCTURE_AS_CODE`: counts repeated branch-shaped lines
+   (`if`/`elif`/`case`/`match` arms) and flags any file with ≥5.
+4. Writes one finding line per offender to `.autospec/qa-verdict.json`
+   under category `code_health:brute_force_string_heuristics`, carrying
+   `rule_id`, `language`, `file`, `function`, `line`.
+5. Files one `auto-implement,autospec:v2-flow` GitHub issue per offender
+   via `gh issue create`. Issue body cites the file, function/method, line,
+   and the verbatim RULE_ID directive from AGENTS.md so the implementer
+   retry loop has the corrective instruction. Where the offending file has
+   no proper-representation library imported, the issue notes
+   "no proper-rep library imported — investigate first" so the implementer
+   does not blindly add a dependency.
+
+Errors in the sweep MUST NOT block the QA verdict; emit findings and
+continue. End-to-end regression: after the QA-filed rewrite issues run
+through `/autospec-run`, the offending files no longer trip either
+RULE_ID in the PR-time guardian.
+
 ## Critical self-questioning checkpoint
 
 Before finalizing the QA report or accepting regenerated tests, stop and answer
