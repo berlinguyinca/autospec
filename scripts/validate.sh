@@ -978,6 +978,32 @@ check_autospec_release_contract() {
         || fail "README.md: missing getting-started skill guide"
 }
 
+# Brute-force string-heuristics RULE_ID invariants (issue #637): both
+# STRING_MATCH_DOMAIN_LOGIC and REPEATED_STRUCTURE_AS_CODE must appear in
+# all 6 adapter files (autospec-run trio + autospec-qa trio) so the
+# PR-time guardian list and the QA sweep section stay in lockstep with
+# AGENTS.md.
+check_brute_force_rule_ids() {
+    info "brute-force RULE_IDs: autospec-run + autospec-qa trios"
+    for rid in STRING_MATCH_DOMAIN_LOGIC REPEATED_STRUCTURE_AS_CODE; do
+        grep -q "$rid" AGENTS.md \
+            || fail "AGENTS.md missing $rid in RULE_ID table"
+        for trio in skills/autospec-run/SKILL.md skills/autospec-run/codex/prompt.md skills/autospec-run/opencode/agent.md \
+                    skills/autospec-qa/SKILL.md skills/autospec-qa/codex/prompt.md skills/autospec-qa/opencode/agent.md; do
+            grep -q "$rid" "$trio" \
+                || fail "$trio missing $rid (issue #637 lockstep)"
+        done
+    done
+    # The QA sweep section must appear in all 3 autospec-qa adapter files.
+    for trio in skills/autospec-qa/SKILL.md skills/autospec-qa/codex/prompt.md skills/autospec-qa/opencode/agent.md; do
+        grep -q '^## Brute-force string heuristics sweep' "$trio" \
+            || fail "$trio missing '## Brute-force string heuristics sweep' section (issue #637)"
+    done
+    # The sweep script must exist and be executable.
+    [ -x scripts/qa-brute-force-sweep.sh ] \
+        || fail "scripts/qa-brute-force-sweep.sh missing or not executable (issue #637)"
+}
+
 check_install_tests() {
     info "install tests: tests/install/*.sh"
     if [ -d tests/install ]; then
@@ -1048,6 +1074,7 @@ main() {
     check_autospec_review_tier_a_directives
     check_autospec_test_skill_present
     check_autospec_qa_contract
+    check_brute_force_rule_ids
     check_autospec_release_contract
     check_docs_amendment_presence
     check_install_tests

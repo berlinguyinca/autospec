@@ -229,6 +229,8 @@ the LGTM reviewer is dispatched. The enforcer is `scripts/lint-implementation.sh
 | `MOCK_DB` | det | regex on test diff | `\b(mock\|stub)\b` near DB-symbol heuristics (`db\.`, `database`, `DataSource`, `pg`, `mysql`, `sqlite`) |
 | `HALLUCINATED_API` | LLM | semantic | symbol referenced in diff not defined in diff, not in pre-PR repo (verifiable via repo search), not in dependency manifests |
 | `DUPLICATE_CODE` | LLM | semantic | new code mirrors an existing helper (must cite `<path>:<line>`) |
+| `STRING_MATCH_DOMAIN_LOGIC` | LLM | semantic | code uses substring checks against free-form text to encode domain meaning, AND a proper-representation library is imported in the file. Recognized primitives — Python: `rdkit`/`ast`/`urllib.parse`/`datetime`/`ipaddress`/`lxml`/`jsonschema`; JS/TS: `URL`/`Date`/`@babel/parser`/`acorn`/`ts-morph`/`zod`/`ajv`/`joi`; Go: `net/url`/`time`/`go/ast`/`net.ParseIP`/`encoding/json` + struct tags; Java: `java.net.URI`/`java.time.*`/`JavaParser`/`com.github.javaparser`/`javax.validation`; Scala: `java.net.URI`/`java.time.*`/`scalameta`/refined types/circe schemas; Rust: `url::Url`/`chrono`/`time`/`syn`/`std::net::IpAddr`/`serde` with strong types |
+| `REPEATED_STRUCTURE_AS_CODE` | LLM | semantic | ≥5 branches in the same function/method sharing identical structural shape (same return-tuple/case-class/struct-literal shape, same predicate signature, same side-effect line). Language-agnostic — Python if/elif, Java/Scala switch/match, Rust match arms, Go switch cases, JS if/else |
 | `DOC_OUT_OF_SYNC` | hybrid | det+LLM | det: any change to public surface (CLI flag, env var, exported function, config key) WITHOUT a touched doc file (`README*`, `AGENTS.md`, `docs/**`, `SKILL.md`); LLM: judges semantic accuracy when a doc IS touched |
 | `INVENTED_CONFIG` | LLM | semantic | flag/env-var/config-key introduced in diff not present in issue body or referenced spec |
 
@@ -247,6 +249,8 @@ retry prompt as cumulative context.
 | `MOCK_DB` | "Remove DB mock/stub. Use the real DB per AGENTS.md ## Engineering standards." |
 | `HALLUCINATED_API` | "The flagged symbol does not exist. Verify identifier names against the pre-PR repo and dependency manifests." |
 | `DUPLICATE_CODE` | "Reuse the existing helper at <path>:<line> instead of re-implementing." |
+| `STRING_MATCH_DOMAIN_LOGIC` | "Replace substring checks with the proper domain primitive (SMARTS/AST/parsed URL/IP/date/schema). Substring-on-name is brittle to synonyms, locants, salt forms, escaping, and case." |
+| `REPEATED_STRUCTURE_AS_CODE` | "Extract the N branches into a table + single dispatcher loop. In Python use a list of tuples or dict; in Java/Scala use a `Map`/sealed-trait registry; in Rust use a `&[(predicate, value)]` slice; in Go use a `[]struct{...}` table. Each new entry should be one row, not a ~10-line block." |
 | `DOC_OUT_OF_SYNC` | "Update the doc file(s) covering the changed public surface in this same PR." |
 | `INVENTED_CONFIG` | "Remove the invented flag/env/key, or amend the issue body to introduce it as scope." |
 
