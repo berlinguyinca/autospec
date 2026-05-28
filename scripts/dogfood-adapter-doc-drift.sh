@@ -38,10 +38,26 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 GATE_JSON="$WORK_DIR/gate.json"
 
-if git -C "$REPO_DIR" rev-parse HEAD~1 >/dev/null 2>&1; then
-    git -C "$REPO_DIR" diff HEAD~1 HEAD > "$WORK_DIR/diff.txt" 2>/dev/null || true
+# Read baseline_sha from .autospec/dogfood.yml so the diff window is
+# pinned to an explicit commit instead of sliding with HEAD~1 (issue #651).
+BASELINE_SHA=""
+if [ -f "$REPO_DIR/.autospec/dogfood.yml" ]; then
+    BASELINE_SHA=$(awk '
+        /^[[:space:]]*adapter:[[:space:]]+scripts\/dogfood-adapter-doc-drift\.sh/ { in_block=1; next }
+        in_block && /^[[:space:]]*-[[:space:]]/ { in_block=0 }
+        in_block && /^[[:space:]]+baseline_sha:/ {
+            sub(/^[[:space:]]+baseline_sha:[[:space:]]*/,""); print; exit
+        }
+    ' "$REPO_DIR/.autospec/dogfood.yml")
+fi
+
+if [ -n "$BASELINE_SHA" ] && git -C "$REPO_DIR" rev-parse "$BASELINE_SHA" >/dev/null 2>&1; then
+    git -C "$REPO_DIR" diff "$BASELINE_SHA" HEAD > "$WORK_DIR/diff.txt" 2>/dev/null || true
     bash "$DETECTOR" --diff "$WORK_DIR/diff.txt" > "$GATE_JSON" 2>/dev/null || true
 else
+    # No baseline pinned, or baseline unreachable (e.g. shallow clone) —
+    # fall back to working-tree mode so the gate degrades cleanly instead
+    # of silently scanning a sliding window.
     bash "$DETECTOR" --working-tree > "$GATE_JSON" 2>/dev/null || true
 fi
 
