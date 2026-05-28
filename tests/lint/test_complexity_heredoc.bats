@@ -70,20 +70,22 @@ PAYLOAD
     [ "$(printf '%s\n' "$output" | grep -c '^COMPLEXITY:')" -eq 0 ]
 }
 
-@test "heredoc with tab-stripped form (<<-EOF) closes on indented marker" {
+@test "heredoc with tab-stripped form (<<-EOF) closes on tab-indented marker" {
     src="$TMPDIR_BATS/heredoc_dash.sh"
-    cat > "$src" <<'PAYLOAD'
-#!/usr/bin/env bash
-emit() {
-    if true; then
-        cat <<-EOF
-                            indented body line A
-                                    indented body line B
-                                            indented body line C
-        EOF
-    fi
-}
-PAYLOAD
+    # POSIX/bash strips ONLY leading tabs from <<- body/closer; build the
+    # fixture with real tab characters so the closer is valid bash.
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'emit() {'
+        printf '%s\n' '    if true; then'
+        printf '\t%s\n' 'cat <<-EOF'
+        printf '%s\n' '                            indented body line A'
+        printf '%s\n' '                                    indented body line B'
+        printf '%s\n' '                                            indented body line C'
+        printf '\t%s\n' 'EOF'
+        printf '%s\n' '    fi'
+        printf '%s\n' '}'
+    } > "$src"
     diff="$TMPDIR_BATS/d.diff"
     make_diff "scripts/heredoc_dash.sh" "$src" "$diff"
     run bash "$LINT" --diff-file "$diff"

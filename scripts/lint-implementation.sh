@@ -485,8 +485,10 @@ detect_complexity() {
             # matching closer; either way, skip code-structure measurement.
             if [ -n "$heredoc_marker" ]; then
                 if [ "$heredoc_dash" -eq 1 ]; then
-                    # <<- form: closer may be indented with tabs/spaces
-                    if printf '%s' "$content" | grep -qE "^[[:space:]]*${heredoc_marker}[[:space:]]*$"; then
+                    # <<- form: bash strips ONLY leading tabs from body and
+                    # closer (POSIX). Spaces before the marker do NOT close.
+                    # Match: zero or more tabs, then the bare marker.
+                    if printf '%s' "$content" | grep -qE "^	*${heredoc_marker}[[:space:]]*$"; then
                         heredoc_marker=""
                         heredoc_dash=0
                     fi
