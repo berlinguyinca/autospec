@@ -929,6 +929,11 @@ check_phase4_tests() {
                 || { cat /tmp/validate-docs.log >&2; fail "$t: failed"; }
         done
     fi
+    if [ -f tests/e2e/test_autospec_fleet_dry_run.bats ] && [ -d tests/fixtures/fleet ]; then
+        info "e2e tests: tests/e2e/test_autospec_fleet_dry_run.bats"
+        AUTOSPEC_FLEET_LIVE_E2E=0 bats tests/e2e/test_autospec_fleet_dry_run.bats >/tmp/validate-fleet-e2e.log 2>&1 \
+            || { cat /tmp/validate-fleet-e2e.log >&2; fail "tests/e2e/test_autospec_fleet_dry_run.bats: failed"; }
+    fi
 }
 
 main "$@"
