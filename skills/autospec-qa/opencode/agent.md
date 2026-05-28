@@ -569,6 +569,66 @@ Required outcome:
   above), and the required remediation.
 ```
 
+## Outsourced implementation gate
+
+When the spec uses an implementation verb (classify, resolve, score, parse,
+transform, extract, generate, rank, detect, segment, embed, …) and the diff
+or repo adds a runtime call to a third-party API/SDK that performs that same
+verb, the LLM has outsourced the product to an external service instead of
+implementing it. Audit every new or expanded external-service binding:
+
+```text
+For each new HTTP client, SDK call, or service binding introduced to satisfy
+a spec acceptance criterion:
+
+1. Verb alignment — does the spec's verb describe an action the product is
+   supposed to PERFORM (build, classify, resolve, score, parse, transform,
+   extract, generate, detect, segment, embed) or merely INTEGRATE WITH
+   (fetch from, sync, import, mirror, publish to)? Implementation verbs
+   satisfied by remote-call shortcuts are outsourced implementations.
+2. Benchmark / comparator collision — does the third-party service's name
+   appear elsewhere in `docs/specs/**`, README, or QA reports as a
+   "benchmark", "comparator", "ground truth", or "baseline"? Using the
+   benchmark at runtime contaminates evaluation and frequently violates
+   ToS.
+3. Missing local algorithm — does the spec or referenced paper describe an
+   algorithm (rules, features, model, scoring formula) that the repo does
+   NOT implement, while a remote call answers the same question?
+4. Cached external payloads — is there a `cache/`, `fixtures/`, or
+   `generated/` directory holding downloaded service responses that the
+   runtime depends on, with no in-repo computation able to reproduce them?
+   (Does NOT apply when the spec's verb is itself an integration verb
+   from signal 1's integration list — e.g., a project whose stated job is
+   to mirror/import/sync that external dataset.)
+5. License and provenance — is there a provenance record (URL, fetch
+   timestamp, ToS link, redistribution scope) for every cached external
+   payload? Missing provenance on cached third-party data is a release
+   blocker even when the runtime call is itself legitimate.
+6. Reimplementation directive — does the spec or product mission state
+   that the project is supposed to REPLACE or REIMPLEMENT the named
+   service? If yes, runtime use of that service is a definitional bug.
+
+Required outcome:
+- For each finding, name the spec acceptance criterion, the offending
+  client/URL/SDK call, and the signals (1-6) that matched.
+- Remediation: replace the remote call with an in-repo implementation that
+  matches the spec's described algorithm. The external service MUST be
+  either (a) removed entirely, or (b) gated behind an off-by-default
+  feature flag scoped to evaluation/benchmark comparison only, with cached
+  payloads carrying explicit redistribution permission. No other
+  configuration is acceptable for release PASS.
+- A finding matching signal 1 (implementation verb satisfied by remote
+  call), signal 2 (benchmark/comparator collision), or signal 6
+  (reimplementation directive) is FAIL — these are product-identity
+  violations and cannot be release-deferred.
+- Signals 3, 4, or 5 alone default to PARTIAL until the in-repo
+  implementation lands. Signal 3 paired with signal 1 escalates to FAIL.
+- Record each finding in the QA report under "Outsourced Implementation"
+  and in `.autospec/qa-verdict.json` with category
+  `outsourced_implementation`, the matched signal numbers in the summary,
+  and the remediation status.
+```
+
 ## Post-merge deployed canary prompt
 
 When a deployed/dev URL exists, define the post-merge canary before release:
@@ -952,6 +1012,12 @@ first-N slice, assert exact benchmark answer-key values, lack a randomized or
 property-based sibling, or reuse the same fixture as training/selection signal.
 For each: test path, leaked dataset, failure mode (1-6 from the gate), and
 required remediation.
+## Outsourced Implementation
+List third-party API/SDK calls or cached external payloads where the spec
+required the product to implement the action locally. For each: spec
+acceptance criterion, offending client/URL, matched signal(s) from the gate
+(1-6), and remediation (replace remote call with in-repo algorithm; keep
+external service only as optional comparator behind a flag).
 ## Post-Merge Deployed Canary
 List required canary workflows, representative input, deployed/dev URL, expected
 domain result, result, and regression issue/action for failures.
@@ -1030,7 +1096,7 @@ Schema:
   "artifacts": ["path/to/screenshot.png", "path/to/network-trace.har"],
   "findings": [
     {
-      "category": "benchmark_overfit|no_mock_smoke|live_backend_blocker|mutation_proof_missing|spec_contradiction|duplicate_code|presentational_misclassified|legacy_residue|new_code_intent|accessibility|cross_browser|automated_test_gap|other",
+      "category": "benchmark_overfit|outsourced_implementation|no_mock_smoke|live_backend_blocker|mutation_proof_missing|spec_contradiction|duplicate_code|presentational_misclassified|legacy_residue|new_code_intent|accessibility|cross_browser|automated_test_gap|other",
       "release_blocking": true,
       "status": "PASS|PARTIAL|FAIL|NOT_TESTED",
       "summary": "<one-line description>",
@@ -1047,6 +1113,9 @@ Rules:
   against a booted app whose commit matches `head_sha`. Otherwise `false`.
 - `release_blocking` defaults TRUE for:
   - `benchmark_overfit` with failure mode 6 (training-on-test leak),
+  - `outsourced_implementation` matching signal 1 (implementation verb
+    satisfied by remote call), signal 2 (benchmark/comparator collision),
+    or signal 6 (reimplementation directive),
   - `no_mock_smoke` on a required path with any non-PASS status,
   - `live_backend_blocker` unresolved,
   - `mutation_proof_missing` on a critical workflow,

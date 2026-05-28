@@ -217,6 +217,14 @@ the explicit skill invocation was unavailable.
        the live backend, then re-run Stage 7.
      - `spec_contradiction` / `legacy_residue` → fix docs/specs/code in one
        commit, then re-run Stages 3-4.
+     - `outsourced_implementation` → replace the third-party API/SDK call
+       with an in-repo implementation of the spec's described algorithm;
+       the external service MUST be either removed or gated behind an
+       off-by-default flag scoped to evaluation-only use, with cached
+       payloads carrying explicit redistribution permission. Then re-run
+       Stages 4-7. If the same offending client/URL recurs in the next
+       iteration's findings, escalate to human review rather than
+       re-iterating on the same remediation.
      - Untriaged `auto-implement` issue or queued blocker → run
        `/autospec-run` on it, then re-run Stages 4-7.
      - Any other `release_blocking` finding (e.g. `accessibility`,
