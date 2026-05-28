@@ -363,6 +363,15 @@ check_autospec_sweep_config_contract() {
     done
 }
 
+check_autospec_fleet_scripts() {
+    info "autospec-fleet scripts"
+    local skill_dir="skills/autospec-fleet"
+    for f in fleet-lib.sh fleet-init.sh fleet-config-lint.sh; do
+        [ -f "$skill_dir/scripts/$f" ] || fail "$skill_dir/scripts/$f: required file missing"
+        bash -n "$skill_dir/scripts/$f" || fail "$skill_dir/scripts/$f: bash syntax error"
+    done
+}
+
 # Harness detection block validation.
 # If a SKILL.md contains a "## Harness detection" heading, verify that the
 # section body includes TIER_A, TIER_B, and a "silently" fallback reference.
@@ -877,6 +886,7 @@ main() {
     check_phase4_immediate_next_issue_pickup
     check_phase4_adaptive_retry
     check_autospec_sweep_config_contract
+    check_autospec_fleet_scripts
     check_team_personality_contract
     check_autospec_run_priority_sort_lockstep
     check_autospec_run_regression_review_lockstep
