@@ -802,6 +802,10 @@ continue. End-to-end regression: after the QA-filed rewrite issues run
 through `/autospec-run`, the offending files no longer trip either
 RULE_ID in the PR-time guardian.
 
+## Dogfood detectors driver
+
+When QA runs against the autospec repo itself, use `scripts/dogfood-detectors.sh` as the authoritative aggregated sweep rather than invoking individual `scripts/qa-*-sweep.sh` directly. The driver enforces an allowlist of intentional findings and fails on regression.
+
 ## Critical self-questioning checkpoint
 
 Before finalizing the QA report or accepting regenerated tests, stop and answer
