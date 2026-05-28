@@ -87,6 +87,50 @@ shipped during this run, emits surviving gaps as JSON (`emit-gaps.sh`), and file
 `auto-implement,gap-remediation,priority:high` issues (`gap-remediation-loop.sh`), capped at
 `AUTOSPEC_GAP_MAX_ROUNDS` rounds (default 2) to bound the feedback loop.
 
+### `/autospec-fleet`
+
+<!-- autospec-doc-scope:
+  src: ["skills/autospec-fleet/SKILL.md", "skills/autospec-fleet/README.md", "skills/autospec-fleet/scripts/fleet-run.sh", "skills/autospec-fleet/scripts/fleet-status.sh", "skills/autospec-fleet/scripts/fleet-stop.sh"]
+  reason: "User-facing invocation docs for autospec-fleet"
+  generated: true
+-->
+
+Workspace supervisor for running autospec across multiple GitHub repositories.
+Fleet schedules repositories; `/autospec-run` still owns issue claims, PRs,
+review, CI, and merge behavior inside each checkout.
+
+**Triggers:** `autospec-fleet`, `fleet init`, `fleet run`, `fleet status`, `fleet stop`
+
+**Operator flow:**
+
+```text
+mkdir fleet-workspace
+cd fleet-workspace
+/autospec-fleet init https://github.com/org/repo-a https://github.com/org/repo-b
+/autospec-fleet run --profile claude-sonnet-cloud --dry-run
+/autospec-fleet status
+/autospec-fleet stop --graceful
+```
+
+**Configuration distribution:** shared desired state lives in a versioned
+`autospec-fleet.yml`, preferably in a small Git control repository reviewed by
+PR. Nodes fetch that repo with `sync` or before each scheduler tick, so Git
+provides audit history, rollback, and access control without a separate control
+plane.
+
+**Node-local capacity:** private machine settings live in
+`~/.autospec/fleet-node.yml` and are never committed. This file declares
+`node_id`, local workspace override, `max_parallel_repos`, and runnable model
+profiles. Fleet combines `autospec-fleet.yml` and `fleet-node.yml` with the
+lower parallel cap, then emits worker IDs such as
+`fleet:mac-mini-01:org__repo-a`.
+
+**Commands:**
+- `init <repo-url>...`: record target GitHub repositories and planned checkout paths.
+- `run --dry-run`: validate config, probe each repo queue, and print per-repo `/autospec-run --profile` commands.
+- `status --json`: return a `repos` array with ready, blocked, claimed, conflict, and batch counts.
+- `stop --graceful|--immediate`: forward the existing autospec stop helper to active managed checkouts.
+
 ### `/autospec-sweep`
 
 <!-- autospec-doc-scope:

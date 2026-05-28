@@ -59,6 +59,7 @@ selected model and harness to execute reliably.
 | [`autospec-define`](skills/autospec-define/README.md) | You want planning only before implementation starts. | Produces a design spec plus classified `auto-implement` issues, then hands off to `/autospec-run`. |
 | [`autospec-split`](skills/autospec-split/README.md) | You already have a tracked `docs/specs/*.md` design spec. | Turns the existing spec into an EPIC plus linked child issues, then stops after classification. |
 | [`autospec-run`](skills/autospec-run/README.md) | You already have an `auto-implement` queue. | Runs the implementation monitor, opens PRs, reviews, validates, and merges. |
+| [`autospec-fleet`](skills/autospec-fleet/README.md) | You want to run autospec across multiple GitHub repositories from one workspace. | `/autospec-fleet init` records repo URLs, fleet scripts validate config, and fleet run/status/stop coordinate per-repo `/autospec-run` workers. |
 | [`autospec-classify`](skills/autospec-classify/README.md) | Existing issues need model-fit labels. | Adds `ctx:*` and `reasoning:*` labels, inserts a `## Model fit` block, and promotes `needs-classify` issues. |
 | [`autospec-listen`](skills/autospec-listen/README.md) | You want chat phrases like "file an issue" to become tracked work. | Drafts issues for approval or routes spec requests into `/autospec-define`. |
 | [`autospec-story`](skills/autospec-story/README.md) | You need a repo-level product and implementation-state overview. | Produces a cited Markdown story from local specs, docs, issues, PRs, and git history. |
@@ -300,6 +301,16 @@ Full end-to-end workflow:
 
 ```text
 /autospec "add OIDC support behind a feature flag"
+```
+
+Fleet workflow:
+
+```text
+mkdir fleet-workspace
+cd fleet-workspace
+/autospec-fleet init https://github.com/org/repo-a https://github.com/org/repo-b
+/autospec-fleet run --profile claude-sonnet-cloud --dry-run
+/autospec-fleet status
 ```
 
 The monitor:
