@@ -508,6 +508,40 @@ check_usage_limit_helper() {
         || fail "scripts/autospec-usage-limit.sh --help did not print a 'Usage:' line"
 }
 
+# Spec supersession contract (issue #635): scripts/resolve-spec-supersession.sh
+# must exist, be executable, pass bash -n, and `--help` must print a `Usage:`
+# line. Each of autospec-define, autospec-qa, autospec-release must reference
+# the resolver in all three trio files (SKILL.md + codex/prompt.md +
+# opencode/agent.md) under a `## Spec supersession (recency)` heading so the
+# lockstep stays uniform across adapters.
+check_supersession_contract() {
+    info "spec-supersession helper: scripts/resolve-spec-supersession.sh"
+    [ -f scripts/resolve-spec-supersession.sh ] \
+        || fail "scripts/resolve-spec-supersession.sh: file missing"
+    [ -x scripts/resolve-spec-supersession.sh ] \
+        || fail "scripts/resolve-spec-supersession.sh: file not executable"
+    bash -n scripts/resolve-spec-supersession.sh \
+        || fail "scripts/resolve-spec-supersession.sh: bash syntax error"
+    bash scripts/resolve-spec-supersession.sh --help 2>/dev/null | grep -q '^Usage:' \
+        || fail "scripts/resolve-spec-supersession.sh --help did not print a 'Usage:' line"
+    for s in autospec-define autospec-qa autospec-release; do
+        info "spec-supersession lockstep: $s"
+        for trio in SKILL.md codex/prompt.md opencode/agent.md; do
+            grep -q '^## Spec supersession (recency)' "skills/$s/$trio" \
+                || fail "$s: $trio missing '## Spec supersession (recency)' section"
+            grep -q 'resolve-spec-supersession\.sh' "skills/$s/$trio" \
+                || fail "$s: $trio missing reference to scripts/resolve-spec-supersession.sh"
+        done
+    done
+    [ -f tests/resolve-spec-supersession.bats ] \
+        || fail "tests/resolve-spec-supersession.bats: bats coverage missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/resolve-spec-supersession.bats"
+        bats tests/resolve-spec-supersession.bats >/tmp/validate-supersession.log 2>&1 \
+            || { cat /tmp/validate-supersession.log >&2; fail "tests/resolve-spec-supersession.bats: failed"; }
+    fi
+}
+
 # Phase 4 guardian block lock-step invariants (introduced by issue #212): the
 # outer guardian dispatch block (between <!-- guardian-block:begin --> and
 # <!-- guardian-block:end --> markers) must be byte-identical across all 6
@@ -999,6 +1033,7 @@ main() {
     check_lint_issue_helpers
     check_lint_implementation_helpers
     check_usage_limit_helper
+    check_supersession_contract
     check_phase4_guardian_block_lockstep
     check_phase1_bounded_context_contract
     check_phase4_issue_start_summary
