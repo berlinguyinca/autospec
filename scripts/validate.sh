@@ -1220,6 +1220,31 @@ check_qa_incident_contract() {
     fi
 }
 
+check_qa_exhaustiveness_contract() {
+    info "qa exhaustiveness flags: script + adapter lockstep (issue #660)"
+    local script="scripts/qa-exhaustiveness-check.sh"
+    local bats="tests/qa/test_exhaustiveness.bats"
+    [ -f "$script" ] || fail "$script: file missing (issue #660)"
+    [ -x "$script" ] || fail "$script: file not executable (issue #660)"
+    bash -n "$script" || fail "$script: bash syntax error (issue #660)"
+    [ -f "$bats" ] || fail "$bats: bats coverage missing (issue #660)"
+    for trio in skills/autospec-qa/SKILL.md skills/autospec-qa/codex/prompt.md skills/autospec-qa/opencode/agent.md; do
+        grep -q '^## Exhaustiveness flags' "$trio" \
+            || fail "$trio missing '## Exhaustiveness flags' section (issue #660)"
+        grep -q 'qa-exhaustiveness-check\.sh' "$trio" \
+            || fail "$trio missing reference to qa-exhaustiveness-check.sh (issue #660)"
+        for flag in --every-spec-row --mutation-each --no-mock-each --exhaustive; do
+            grep -q -- "$flag" "$trio" \
+                || fail "$trio missing $flag documentation (issue #660)"
+        done
+    done
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats"
+        bats "$bats" >/tmp/validate-exhaustiveness.log 2>&1 \
+            || { cat /tmp/validate-exhaustiveness.log >&2; fail "$bats: failed"; }
+    fi
+}
+
 check_lint_heredoc_handling() {
     info "lint-implementation heredoc handling: tests/lint/test_complexity_heredoc.bats"
     [ -f tests/lint/test_complexity_heredoc.bats ] \
@@ -1349,6 +1374,7 @@ main() {
     check_dogfood_detectors
     check_qa_verify_first_discipline
     check_qa_incident_contract
+    check_qa_exhaustiveness_contract
     check_autospec_release_contract
     check_qa_verdict_contract
     check_release_verdict_script
