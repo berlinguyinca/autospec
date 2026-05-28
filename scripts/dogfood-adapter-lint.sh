@@ -32,11 +32,13 @@ WORK_DIR="$(mktemp -d -t dogfood-lint.XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 DIFF_FILE="$WORK_DIR/diff.txt"
-if git -C "$REPO_DIR" rev-parse HEAD~1 >/dev/null 2>&1; then
-    git -C "$REPO_DIR" diff HEAD~1 HEAD > "$DIFF_FILE" 2>/dev/null || true
-else
-    : > "$DIFF_FILE"
-fi
+# Use staged-diff semantics (clean-tree): the lint detector runs against
+# `git diff --cached` so that on a clean checkout there is nothing to scan.
+# PR-time lint enforcement still happens in the pre-commit hook and in the
+# fused guardian/LGTM reviewer; this adapter only catches in-progress staged
+# offenders during local dogfood runs. Earlier HEAD~1..HEAD semantics shifted
+# the diff window every merge and silently invalidated the allowlist.
+git -C "$REPO_DIR" diff --cached > "$DIFF_FILE" 2>/dev/null || true
 
 # Skip if there's no diff to analyse.
 [ -s "$DIFF_FILE" ] || exit 0
