@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-canary-results.schema.json",
+  "title": "autospec deployed canary results",
+  "description": "Post-merge or deployed/dev no-mock canary results for representative user workflows.",
+  "type": "object",
+  "required": ["schema_version", "freshness", "canaries"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "freshness": { "$ref": "#/$defs/freshness" },
+    "canaries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["workflow_id", "url", "representative_input", "expected_result", "result", "evidence"],
+        "additionalProperties": false,
+        "properties": {
+          "workflow_id": { "type": "string", "minLength": 1 },
+          "url": { "type": "string", "minLength": 1 },
+          "representative_input": { "type": "string", "minLength": 1 },
+          "expected_backend_path": { "type": "string" },
+          "expected_result": { "type": "string", "minLength": 1 },
+          "forbidden_banners_absent": { "type": "boolean" },
+          "result": { "type": "string", "enum": ["PASS", "FAIL", "PARTIAL", "NOT_RUN"] },
+          "route_classification": {
+            "type": "string",
+            "enum": ["app", "api", "queue", "bridge", "worker", "cache", "database", "external", "unknown"]
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/$defs/evidence" }
+          },
+          "regression_issue": { "type": "string" },
+          "next_action": { "type": "string" }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "result": { "enum": ["FAIL", "PARTIAL", "NOT_RUN"] } } },
+            "then": { "anyOf": [{ "required": ["regression_issue"] }, { "required": ["next_action"] }] }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "freshness": {
+      "type": "object",
+      "required": ["repo_commit_sha", "spec_file", "spec_hash", "environment", "generated_at"],
+      "additionalProperties": false,
+      "properties": {
+        "repo_commit_sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+        "spec_file": { "type": "string", "minLength": 1 },
+        "spec_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "app_url": { "type": "string", "minLength": 1 },
+        "environment": { "type": "string", "minLength": 1 },
+        "test_command_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "generated_at": { "type": "string", "minLength": 1 }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["kind", "summary"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "enum": ["command", "screenshot", "video", "network", "api", "backend_probe", "log", "trace", "manual"] },
+        "summary": { "type": "string", "minLength": 1 },
+        "path": { "type": "string" },
+        "url": { "type": "string" },
+        "status_code": { "type": "integer", "minimum": 100, "maximum": 599 }
+      }
+    }
+  }
+}

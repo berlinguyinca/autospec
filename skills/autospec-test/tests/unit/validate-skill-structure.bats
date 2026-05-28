@@ -83,6 +83,44 @@ teardown() {
     grep -q 'mocked endpoint success' "$SKILL_MD"
 }
 
+@test "SKILL.md QA prompt requires user input intent review" {
+    grep -q 'User input intent review' "$SKILL_MD"
+    grep -q 'why it exists' "$SKILL_MD"
+}
+
+@test "SKILL.md QA prompt requires live backend blocker triage" {
+    grep -q 'Live backend blocker triage' "$SKILL_MD"
+    grep -q 'route-specific worker/handler failure' "$SKILL_MD"
+}
+
+@test "SKILL.md QA prompt requires proof and reliability artifacts" {
+    grep -q 'Proof artifacts' "$SKILL_MD"
+    grep -q 'Reliability contract' "$SKILL_MD"
+    grep -q 'Control intent ledger' "$SKILL_MD"
+}
+
+@test "SKILL.md QA prompt requires generated-code reliability checks" {
+    grep -q 'Duplicate-code guardian' "$SKILL_MD"
+    grep -q 'Mutation/breakage proof' "$SKILL_MD"
+    grep -q 'Post-merge deployed canary' "$SKILL_MD"
+    grep -q 'New code intent gate' "$SKILL_MD"
+}
+
+@test "SKILL.md QA prompt requires freshness provenance and runtime gates" {
+    grep -q 'Artifact freshness' "$SKILL_MD"
+    grep -q 'Evidence provenance' "$SKILL_MD"
+    grep -q 'Console/network gate' "$SKILL_MD"
+    grep -q 'Flake quarantine' "$SKILL_MD"
+}
+
+@test "SKILL.md QA prompt requires spec data observability exhaustion checks" {
+    grep -q 'Spec contradiction detector' "$SKILL_MD"
+    grep -q 'Data lifecycle proof' "$SKILL_MD"
+    grep -q 'Observability contract' "$SKILL_MD"
+    grep -q 'Reliability exhaustion loop' "$SKILL_MD"
+    grep -q 'Legacy removal and spec cleanup' "$SKILL_MD"
+}
+
 @test "SKILL.md contains ## Modes I and II section" {
     grep -q '^## Modes I and II' "$SKILL_MD"
 }
@@ -343,6 +381,34 @@ Something.
 ## Contract file
 
 forbidden_url_patterns example block here.
+invariants_v2:
+edge_case_seeds:
+Stage 2.5
+
+## Spec-compliance QA prompt
+
+Spec traceability
+selects, dropdowns
+No-mock deployed smoke
+mocked endpoint success
+User input intent review asks why it exists.
+Live backend blocker triage classifies route-specific worker/handler failure.
+Proof artifacts
+Reliability contract
+Control intent ledger
+Duplicate-code guardian
+Mutation/breakage proof
+Post-merge deployed canary
+New code intent gate.
+Artifact freshness
+Evidence provenance
+Console/network gate
+Spec contradiction detector
+Data lifecycle proof
+Observability contract
+Flake quarantine
+Reliability exhaustion loop
+Legacy removal and spec cleanup
 
 ## Modes I and II
 

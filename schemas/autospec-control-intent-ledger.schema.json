@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-control-intent-ledger.schema.json",
+  "title": "autospec control intent ledger",
+  "description": "Ledger of reachable controls, their intended purpose, expected effects, tests, and evidence.",
+  "type": "object",
+  "required": ["schema_version", "freshness", "status", "controls"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "freshness": { "$ref": "#/$defs/freshness" },
+    "status": { "type": "string", "enum": ["PASS", "FAIL", "PARTIAL"] },
+    "controls": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "control_id",
+          "selector",
+          "label",
+          "control_type",
+          "classification",
+          "intent",
+          "spec_reference",
+          "expected_effect",
+          "evidence"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "control_id": { "type": "string", "minLength": 1 },
+          "selector": { "type": "string", "minLength": 1 },
+          "label": { "type": "string", "minLength": 1 },
+          "accessible_name": { "type": "string" },
+          "control_type": { "type": "string", "minLength": 1 },
+          "classification": { "type": "string", "enum": ["functional", "read_only", "decorative", "unclassified"] },
+          "intent": { "type": "string", "minLength": 1 },
+          "spec_reference": { "type": "string", "minLength": 1 },
+          "expected_effect": { "type": "string", "minLength": 1 },
+          "validation_behavior": { "type": "string" },
+          "error_behavior": { "type": "string" },
+          "tests": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/test_evidence" }
+          },
+          "evidence": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/evidence" }
+          },
+          "follow_up": { "type": "string" }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "classification": { "const": "functional" } } },
+            "then": {
+              "properties": {
+                "tests": { "minItems": 1 },
+                "evidence": { "minItems": 1 }
+              }
+            }
+          },
+          {
+            "if": { "properties": { "classification": { "const": "unclassified" } } },
+            "then": { "required": ["follow_up"] }
+          }
+        ]
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "PASS" } } },
+      "then": {
+        "not": {
+          "properties": {
+            "controls": {
+              "contains": {
+                "properties": {
+                  "classification": { "const": "unclassified" }
+                },
+                "required": ["classification"]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "freshness": {
+      "type": "object",
+      "required": ["repo_commit_sha", "spec_file", "spec_hash", "environment", "generated_at"],
+      "additionalProperties": false,
+      "properties": {
+        "repo_commit_sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+        "spec_file": { "type": "string", "minLength": 1 },
+        "spec_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "app_url": { "type": "string", "minLength": 1 },
+        "environment": { "type": "string", "minLength": 1 },
+        "test_command_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "generated_at": { "type": "string", "minLength": 1 }
+      }
+    },
+    "test_evidence": {
+      "type": "object",
+      "required": ["path", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "command": { "type": "string" },
+        "result": { "type": "string" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["kind", "summary"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "enum": ["command", "screenshot", "video", "network", "api", "backend_probe", "log", "trace", "manual"] },
+        "summary": { "type": "string", "minLength": 1 },
+        "path": { "type": "string" },
+        "url": { "type": "string" },
+        "status_code": { "type": "integer", "minimum": 100, "maximum": 599 }
+      }
+    }
+  }
+}

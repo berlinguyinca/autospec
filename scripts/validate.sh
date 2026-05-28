@@ -829,6 +829,91 @@ check_autospec_test_skill_present() {
         || { bash "$validate_sh" >&2; fail "$validate_sh: structural lint failed"; }
 }
 
+check_autospec_qa_contract() {
+    info "autospec-qa contract: no-mock smoke blocker handling"
+    local skill_file="skills/autospec-qa/SKILL.md"
+    [ -f "$skill_file" ] || fail "$skill_file: required file missing"
+
+    grep -q '^## No-mock deployed smoke blocker handling' "$skill_file" \
+        || fail "$skill_file: missing no-mock smoke blocker handling section"
+    grep -q 'must be `PARTIAL`' "$skill_file" \
+        || fail "$skill_file: missing PARTIAL verdict requirement for untested deployed smoke"
+    grep -q 'environment setup issue/task' "$skill_file" \
+        || fail "$skill_file: missing environment setup artifact requirement"
+    grep -q 'operator-blocker line with the exact missing configuration' "$skill_file" \
+        || fail "$skill_file: missing exact operator blocker requirement"
+    grep -q '^## Presentational control classification' "$skill_file" \
+        || fail "$skill_file: missing presentational control classification section"
+    grep -q '^## User input element intent prompt' "$skill_file" \
+        || fail "$skill_file: missing user input element intent prompt section"
+    grep -q '^## Live backend blocker triage prompt' "$skill_file" \
+        || fail "$skill_file: missing live backend blocker triage prompt section"
+    grep -q 'Never print secret values' "$skill_file" \
+        || fail "$skill_file: missing secret redaction requirement for live backend triage"
+    grep -q 'route-specific worker/handler failure' "$skill_file" \
+        || fail "$skill_file: missing route-specific worker failure classification"
+    grep -q '^## Proof artifact requirements' "$skill_file" \
+        || fail "$skill_file: missing proof artifact requirements section"
+    grep -q '^## Generated app reliability contract prompt' "$skill_file" \
+        || fail "$skill_file: missing generated app reliability contract prompt"
+    grep -q '^## Control intent ledger prompt' "$skill_file" \
+        || fail "$skill_file: missing control intent ledger prompt"
+    grep -q '^## Duplicate-code guardian prompt' "$skill_file" \
+        || fail "$skill_file: missing duplicate-code guardian prompt"
+    grep -q '^## Mutation and breakage proof prompt' "$skill_file" \
+        || fail "$skill_file: missing mutation and breakage proof prompt"
+    grep -q '^## Post-merge deployed canary prompt' "$skill_file" \
+        || fail "$skill_file: missing post-merge deployed canary prompt"
+    grep -q '^## No-mock minimum coverage prompt' "$skill_file" \
+        || fail "$skill_file: missing no-mock minimum coverage prompt"
+    grep -q '^## New code intent gate' "$skill_file" \
+        || fail "$skill_file: missing new code intent gate"
+    grep -q '.autospec/proof-matrix.json' "$skill_file" \
+        || fail "$skill_file: missing proof matrix artifact path"
+    grep -q '.autospec/reliability.yml' "$skill_file" \
+        || fail "$skill_file: missing reliability contract artifact path"
+    grep -q '.autospec/control-intent-ledger.json' "$skill_file" \
+        || fail "$skill_file: missing control intent ledger artifact path"
+    grep -q '.autospec/mutation-proof.json' "$skill_file" \
+        || fail "$skill_file: missing mutation proof artifact path"
+    grep -q '.autospec/canary-results.json' "$skill_file" \
+        || fail "$skill_file: missing canary results artifact path"
+    for schema in \
+        schemas/autospec-proof-matrix.schema.json \
+        schemas/autospec-reliability.schema.json \
+        schemas/autospec-control-intent-ledger.schema.json \
+        schemas/autospec-mutation-proof.schema.json \
+        schemas/autospec-canary-results.schema.json; do
+        [ -f "$schema" ] || fail "$schema: QA artifact schema missing"
+    done
+    [ -x "scripts/validate-qa-artifacts.sh" ] \
+        || fail "scripts/validate-qa-artifacts.sh: missing or not executable"
+    bash -n "scripts/validate-qa-artifacts.sh" \
+        || fail "scripts/validate-qa-artifacts.sh: bash syntax error"
+    grep -q '^## Artifact freshness gate' "$skill_file" \
+        || fail "$skill_file: missing artifact freshness gate"
+    grep -q '^## Evidence provenance gate' "$skill_file" \
+        || fail "$skill_file: missing evidence provenance gate"
+    grep -q '^## Console and network error gate' "$skill_file" \
+        || fail "$skill_file: missing console and network error gate"
+    grep -q '^## Spec contradiction detector' "$skill_file" \
+        || fail "$skill_file: missing spec contradiction detector"
+    grep -q '^## Data lifecycle proof' "$skill_file" \
+        || fail "$skill_file: missing data lifecycle proof"
+    grep -q '^## Observability contract' "$skill_file" \
+        || fail "$skill_file: missing observability contract"
+    grep -q '^## Flake quarantine rule' "$skill_file" \
+        || fail "$skill_file: missing flake quarantine rule"
+    grep -q '^## Reliability exhaustion loop' "$skill_file" \
+        || fail "$skill_file: missing reliability exhaustion loop"
+    grep -q '^## Legacy removal and spec cleanup gate' "$skill_file" \
+        || fail "$skill_file: missing legacy removal and spec cleanup gate"
+    grep -q 'Do not populate deprecated caches' "$skill_file" \
+        || fail "$skill_file: missing deprecated cache/bucket anti-revival rule"
+    grep -q 'deprecated_surfaces' "schemas/autospec-reliability.schema.json" \
+        || fail "schemas/autospec-reliability.schema.json: missing deprecated_surfaces contract"
+}
+
 check_install_tests() {
     info "install tests: tests/install/*.sh"
     if [ -d tests/install ]; then
@@ -897,6 +982,7 @@ main() {
     check_autospec_review_skill_present
     check_autospec_review_tier_a_directives
     check_autospec_test_skill_present
+    check_autospec_qa_contract
     check_docs_amendment_presence
     check_install_tests
     check_phase4_tests

@@ -786,10 +786,10 @@ inline label-swap path below.
 >        > 2. Read issue #<ISSUE> body — note `## Implementation scope`, `## Implementation outline`, `## Tests required`, and any `Guardian: skip-*` lines.
 >        > 3. Read deterministic findings in /tmp/guardian-<PR>.md (populated by lint-implementation.sh; may be empty if guardian disabled).
 >        > 4. Run `gh pr diff <PR>` and `gh pr view <PR> --json files,title,body`.
->        > 5. Apply LLM-tier RULE_IDs (HALLUCINATED_API, DUPLICATE_CODE, DOC_OUT_OF_SYNC semantic pass, INVENTED_CONFIG). Collect as `RULE_ID:<path>:<line>: <desc>`. Honor `Guardian: skip-*` with `INFO:` lines.
+>        > 5. Apply LLM-tier RULE_IDs (HALLUCINATED_API, DUPLICATE_CODE, DOC_OUT_OF_SYNC semantic pass, INVENTED_CONFIG). For DUPLICATE_CODE, explicitly search for existing components, helpers, validators, API clients, request wrappers, error banners, fixtures, and test utilities before accepting new generated code. For each new component, module, function, endpoint, worker, hook, or test helper, require a spec-linked reason, reuse check, public contract, proof test, and "what breaks if wrong" answer. Collect as `RULE_ID:<path>:<line>: <desc>`. Honor `Guardian: skip-*` with `INFO:` lines.
 >        >
 >        > **Part 2 — LGTM (correctness review):** Using the same diff and issue body already in context:
->        > 6. Check correctness, edge cases, missing tests, AGENTS.md compliance (TDD, no mocks, conventional commits).
+>        > 6. Check correctness, edge cases, missing tests, AGENTS.md compliance (TDD, no mocks, conventional commits), whether every new code unit exists for a concrete issue/spec requirement rather than convenience, and whether deprecated routes, caches, buckets, stores, workers, config keys, UI paths, docs, specs, tests, or fixtures were removed instead of revived to make tests pass.
 >        > 7. Collect findings as a numbered list.
 >        > 8. Critical self-question before LGTM: "What else could still pass here while the real user workflow fails, and how could this be better?" Check especially mocked-vs-deployed behavior, external service assumptions, fallback paths, user-visible outcomes, and missing no-mock smoke coverage. If the answer is actionable inside the issue scope, emit it as a finding or required test.
 >        >

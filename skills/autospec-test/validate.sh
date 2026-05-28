@@ -145,6 +145,42 @@ grep -q 'selects, dropdowns' "$SKILL_MD" \
     || fail "SKILL.md missing UI control QA prompt anchor"
 grep -q 'No-mock deployed smoke' "$SKILL_MD" \
     || fail "SKILL.md missing no-mock deployed smoke QA prompt anchor"
+grep -q 'User input intent review' "$SKILL_MD" \
+    || fail "SKILL.md missing user input intent review QA prompt anchor"
+grep -q 'Live backend blocker triage' "$SKILL_MD" \
+    || fail "SKILL.md missing live backend blocker triage QA prompt anchor"
+grep -q 'Proof artifacts' "$SKILL_MD" \
+    || fail "SKILL.md missing proof artifacts QA prompt anchor"
+grep -q 'Reliability contract' "$SKILL_MD" \
+    || fail "SKILL.md missing reliability contract QA prompt anchor"
+grep -q 'Control intent ledger' "$SKILL_MD" \
+    || fail "SKILL.md missing control intent ledger QA prompt anchor"
+grep -q 'Duplicate-code guardian' "$SKILL_MD" \
+    || fail "SKILL.md missing duplicate-code guardian QA prompt anchor"
+grep -q 'Mutation/breakage proof' "$SKILL_MD" \
+    || fail "SKILL.md missing mutation/breakage proof QA prompt anchor"
+grep -q 'Post-merge deployed canary' "$SKILL_MD" \
+    || fail "SKILL.md missing post-merge deployed canary QA prompt anchor"
+grep -q 'New code intent gate' "$SKILL_MD" \
+    || fail "SKILL.md missing new code intent gate QA prompt anchor"
+grep -q 'Artifact freshness' "$SKILL_MD" \
+    || fail "SKILL.md missing artifact freshness QA prompt anchor"
+grep -q 'Evidence provenance' "$SKILL_MD" \
+    || fail "SKILL.md missing evidence provenance QA prompt anchor"
+grep -q 'Console/network gate' "$SKILL_MD" \
+    || fail "SKILL.md missing console/network gate QA prompt anchor"
+grep -q 'Spec contradiction detector' "$SKILL_MD" \
+    || fail "SKILL.md missing spec contradiction detector QA prompt anchor"
+grep -q 'Data lifecycle proof' "$SKILL_MD" \
+    || fail "SKILL.md missing data lifecycle proof QA prompt anchor"
+grep -q 'Observability contract' "$SKILL_MD" \
+    || fail "SKILL.md missing observability contract QA prompt anchor"
+grep -q 'Flake quarantine' "$SKILL_MD" \
+    || fail "SKILL.md missing flake quarantine QA prompt anchor"
+grep -q 'Reliability exhaustion loop' "$SKILL_MD" \
+    || fail "SKILL.md missing reliability exhaustion loop QA prompt anchor"
+grep -q 'Legacy removal and spec cleanup' "$SKILL_MD" \
+    || fail "SKILL.md missing legacy removal QA prompt anchor"
 grep -q 'mocked endpoint success' "$SKILL_MD" \
     || fail "SKILL.md missing mocked endpoint success warning"
 
