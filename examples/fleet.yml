@@ -1,0 +1,14 @@
+version: 1
+workspace: .autospec-fleet/repos
+default_profile: qwen3-32b-laptop
+parallel_repos: 2
+sync:
+  config_repo: git@github.com:org/autospec-fleet-control.git
+  ref: main
+repos:
+  - url: https://github.com/org/repo-a.git
+    profile: qwen3-32b-laptop
+    enabled: true
+  - url: git@github.com:org/repo-b.git
+    profile: claude-sonnet-cloud
+    enabled: true

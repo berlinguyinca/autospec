@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-fleet-node.schema.json",
+  "title": "autospec-fleet node-local capacity",
+  "description": "Schema for ~/.autospec/fleet-node.yml, the private per-node capacity file. It declares node identity, local workspace placement, runnable profiles, and concurrency limits.",
+  "type": "object",
+  "required": ["node_id", "max_parallel_repos"],
+  "additionalProperties": false,
+  "properties": {
+    "node_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      "description": "Stable node identifier used in fleet worker IDs and status files."
+    },
+    "workspace": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Node-local checkout directory. Overrides the shared desired-state workspace on this node."
+    },
+    "max_parallel_repos": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Maximum number of repository workers this node may run concurrently."
+    },
+    "profiles": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "Model profiles this node is allowed to run.",
+      "items": {
+        "$ref": "#/$defs/profile_name"
+      }
+    }
+  },
+  "$defs": {
+    "profile_name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    }
+  }
+}
