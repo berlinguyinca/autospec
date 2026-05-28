@@ -177,6 +177,75 @@ EOF
     [ "$findings_count" -eq 0 ]
 }
 
+@test "inline mutation_proof with mismatched test path does NOT satisfy coverage" {
+    rt="tests/regression/inc-mismatch.test.ts"
+    mkdir -p "$TMPDIR_T/$(dirname "$rt")"
+    cat > "$TMPDIR_T/$rt" <<'EOF'
+test("real", () => { expect(charge()).toBe(false); });
+EOF
+    # Inline proof references a DIFFERENT test path → must not count.
+    write_registry "$(cat <<EOF
+[
+  {
+    "id": "INC-mismatch",
+    "occurred_at": "2026-05-28T00:00:00Z",
+    "failure_mode": "x",
+    "feature": "x",
+    "regression_test": "$rt",
+    "mutation": "x",
+    "status": "active",
+    "mutation_proof": {
+      "test": { "path": "tests/regression/OTHER.test.ts" },
+      "observed_result": "failed_as_expected"
+    }
+  }
+]
+EOF
+)"
+    run bash "$SCRIPT" --registry "$REGISTRY" --verdict "$VERDICT" \
+        --mutation-proof "$MUT" --repo-root "$TMPDIR_T"
+    [ "$status" -eq 1 ]
+    summary="$(jq -r '.findings[0].summary' "$VERDICT")"
+    [[ "$summary" == *"mutation proof missing"* ]]
+}
+
+@test "assert.strictEqual is recognized as a real assertion (not trivial)" {
+    rt="tests/regression/inc-strict.test.ts"
+    mkdir -p "$TMPDIR_T/$(dirname "$rt")"
+    cat > "$TMPDIR_T/$rt" <<'EOF'
+const assert = require("assert");
+test("strictEqual is real", () => {
+    assert.strictEqual(result.status, 200);
+});
+EOF
+    write_registry "$(active_entry "$rt")"
+    write_mutation_proof "$(mutation_proof_failed "$rt")"
+
+    run bash "$SCRIPT" --registry "$REGISTRY" --verdict "$VERDICT" \
+        --mutation-proof "$MUT" --repo-root "$TMPDIR_T"
+    [ "$status" -eq 0 ]
+    findings_count="$(jq '.findings | length' "$VERDICT")"
+    [ "$findings_count" -eq 0 ]
+}
+
+@test "expect(false).toBe(false) is detected as tautological" {
+    rt="tests/regression/inc-false.test.ts"
+    mkdir -p "$TMPDIR_T/$(dirname "$rt")"
+    cat > "$TMPDIR_T/$rt" <<'EOF'
+test("inverse tautology", () => {
+    expect(false).toBe(false);
+});
+EOF
+    write_registry "$(active_entry "$rt")"
+    write_mutation_proof "$(mutation_proof_failed "$rt")"
+
+    run bash "$SCRIPT" --registry "$REGISTRY" --verdict "$VERDICT" \
+        --mutation-proof "$MUT" --repo-root "$TMPDIR_T"
+    [ "$status" -eq 1 ]
+    summary="$(jq -r '.findings[0].summary' "$VERDICT")"
+    [[ "$summary" == *"not non-trivially assertive"* ]]
+}
+
 @test "empty registry produces no findings and exits 0" {
     write_registry "[]"
 

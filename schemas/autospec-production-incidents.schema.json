@@ -24,6 +24,7 @@
       },
       "occurred_at": {
         "type": "string",
+        "format": "date-time",
         "minLength": 1,
         "description": "ISO-8601 UTC timestamp of when the production incident was observed."
       },
@@ -62,10 +63,12 @@
       },
       "superseded_by": {
         "type": "string",
+        "minLength": 1,
         "description": "Replacement spec section or incident id when status is `superseded`."
       },
       "wont_test_reason": {
         "type": "string",
+        "minLength": 1,
         "description": "Justification when status is `wont_test`."
       }
     },

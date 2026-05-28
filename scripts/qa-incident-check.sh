@@ -96,14 +96,17 @@ if [ "$count" = "0" ]; then
     exit 0
 fi
 
-mkdir -p "$(dirname "$VERDICT")"
+VERDICT_DIR="$(dirname "$VERDICT")"
+mkdir -p "$VERDICT_DIR"
+# Atomic init: write tmp in same dir, then rename.
 if [ ! -f "$VERDICT" ]; then
-    printf '{"findings": []}\n' > "$VERDICT"
+    init_tmp="$(mktemp "$VERDICT_DIR/.qa-verdict.XXXXXX")"
+    printf '{"findings": []}\n' > "$init_tmp" && mv "$init_tmp" "$VERDICT"
 fi
 
-# Ensure findings array exists.
+# Ensure findings array exists (same-dir atomic).
 if ! jq -e '.findings | type == "array"' "$VERDICT" >/dev/null 2>&1; then
-    tmp="$(mktemp)"
+    tmp="$(mktemp "$VERDICT_DIR/.qa-verdict.XXXXXX")"
     jq '. + {findings: (.findings // [])}' "$VERDICT" > "$tmp" && mv "$tmp" "$VERDICT"
 fi
 
@@ -111,7 +114,7 @@ append_finding() {
     # $1 = release_blocking (true/false), $2 = summary, $3 = evidence, $4 = id
     local blocking="$1" summary="$2" evidence="$3" inc_id="$4"
     local tmp
-    tmp="$(mktemp)"
+    tmp="$(mktemp "$VERDICT_DIR/.qa-verdict.XXXXXX")"
     jq --argjson blocking "$blocking" \
        --arg summary "$summary" \
        --arg evidence "$evidence" \
@@ -145,9 +148,9 @@ is_trivial_test_body() {
         return 0
     fi
     # Tautological patterns. ERE: ( ) are groups, so we escape literal parens.
-    local taut='expect\(true\)\.toBe\(true\)|expect\(1\)\.toBe\(1\)|assert[[:space:]]+True|assert[[:space:]]*\([[:space:]]*true|assert[[:space:]]*\([[:space:]]*1|^[[:space:]]*pass[[:space:]]*$'
+    local taut='expect\(true\)\.toBe\(true\)|expect\(false\)\.toBe\(false\)|expect\(1\)\.toBe\(1\)|expect\(0\)\.toBe\(0\)|assert[[:space:]]+True|assert[[:space:]]+False|assert[[:space:]]*\([[:space:]]*true|assert[[:space:]]*\([[:space:]]*false|assert[[:space:]]*\([[:space:]]*1|^[[:space:]]*pass[[:space:]]*$'
     # Real assertion patterns we treat as non-trivial.
-    local real='expect\(|assert[[:space:]]|assert\(|assertEqual|assertTrue|assertFalse|assertRaises|assertThat|should\.|to\.equal|toEqual|toBe\(|toMatch|toThrow|toHaveBeen'
+    local real='expect\(|assert[[:space:]]|assert\(|assert\.|assertEqual|assertTrue|assertFalse|assertRaises|assertThat|should\.|to\.equal|toEqual|toBe\(|toMatch|toThrow|toHaveBeen'
     local real_count taut_count
     real_count="$(printf '%s\n' "$stripped" | grep -E "$real" | grep -v -E "$taut" | wc -l | tr -d ' ')"
     taut_count="$(printf '%s\n' "$stripped" | grep -E "$taut" | wc -l | tr -d ' ')"
@@ -183,11 +186,12 @@ mutation_proven() {
 }
 
 inline_mutation_proven() {
-    # $1 = registry incident index
-    local idx="$1"
-    local result
+    # $1 = registry incident index, $2 = regression_test path to match
+    local idx="$1" rt="$2"
+    local result path
     result="$(jq -r --argjson i "$idx" '.[$i].mutation_proof.observed_result // ""' "$REGISTRY" 2>/dev/null)"
-    [ "$result" = "failed_as_expected" ]
+    path="$(jq -r --argjson i "$idx" '.[$i].mutation_proof.test.path // ""' "$REGISTRY" 2>/dev/null)"
+    [ "$result" = "failed_as_expected" ] && [ "$path" = "$rt" ]
 }
 
 exit_code=0
@@ -250,7 +254,7 @@ while [ "$i" -lt "$count" ]; do
     fi
 
     # Check 4: mutation proof present.
-    if ! mutation_proven "$rt" && ! inline_mutation_proven "$i"; then
+    if ! mutation_proven "$rt" && ! inline_mutation_proven "$i" "$rt"; then
         append_finding "true" \
             "incident $inc_id: mutation proof missing for $rt" \
             "expected mutation entry with observed_result=failed_as_expected" \
