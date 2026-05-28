@@ -1231,6 +1231,48 @@ check_lint_heredoc_handling() {
     fi
 }
 
+# Autonomous-mode contract (issue #662): the autospec + autospec-listen +
+# autospec-define + autospec-run trios each carry an "## Autonomous mode"
+# section, the autonomy-gate script is installed, and the bats coverage exists.
+check_autospec_autonomous_contract() {
+    info "autonomous contract: autospec + autospec-listen + autospec-define + autospec-run"
+    for s in autospec autospec-listen autospec-define autospec-run; do
+        for trio in SKILL.md codex/prompt.md opencode/agent.md; do
+            f="skills/$s/$trio"
+            [ -f "$f" ] || fail "$s: $trio missing"
+            grep -q '^## Autonomous mode' "$f" \
+                || fail "$s: $trio missing '## Autonomous mode' section"
+        done
+    done
+    # autospec trio additionally carries explicit drafting + safety subsections.
+    for trio in SKILL.md codex/prompt.md opencode/agent.md; do
+        f="skills/autospec/$trio"
+        grep -q '^### Autonomous spec drafting' "$f" \
+            || fail "autospec: $trio missing '### Autonomous spec drafting' subsection"
+        grep -q '^### Safety guardrails (autonomous)' "$f" \
+            || fail "autospec: $trio missing '### Safety guardrails (autonomous)' subsection"
+        grep -q 'autospec-autonomy-gate.sh' "$f" \
+            || fail "autospec: $trio missing autospec-autonomy-gate.sh reference"
+    done
+    # autonomy-gate script invariants.
+    [ -f scripts/autospec-autonomy-gate.sh ] \
+        || fail "scripts/autospec-autonomy-gate.sh: file missing"
+    [ -x scripts/autospec-autonomy-gate.sh ] \
+        || fail "scripts/autospec-autonomy-gate.sh: not executable"
+    bash -n scripts/autospec-autonomy-gate.sh \
+        || fail "scripts/autospec-autonomy-gate.sh: bash syntax error"
+    bash scripts/autospec-autonomy-gate.sh --help 2>/dev/null | grep -q '^Usage:' \
+        || fail "scripts/autospec-autonomy-gate.sh --help did not print 'Usage:'"
+    # Bats coverage.
+    [ -f tests/autospec/test_autonomous.bats ] \
+        || fail "tests/autospec/test_autonomous.bats: missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/autospec/test_autonomous.bats"
+        bats tests/autospec/test_autonomous.bats >/tmp/validate-autonomous.log 2>&1 \
+            || { cat /tmp/validate-autonomous.log >&2; fail "tests/autospec/test_autonomous.bats: failed"; }
+    fi
+}
+
 check_install_tests() {
     info "install tests: tests/install/*.sh"
     if [ -d tests/install ]; then
@@ -1311,6 +1353,7 @@ main() {
     check_qa_verdict_contract
     check_release_verdict_script
     check_docs_amendment_presence
+    check_autospec_autonomous_contract
     check_install_tests
     check_phase4_tests
 

@@ -977,3 +977,25 @@ Loop (`round = 1 … MAX`):
 - **Failure isolation**: a failed issue restores its `auto-implement` label so the next monitor cycle picks it up; it does not block the cascade unless dependent issues are downstream.
 - **Fresh repo**: if Phase 0 created the repo, the very first commit is the scaffold (incl. `AGENTS.md`); the spec lands as the second commit; child branches branch off that `main`.
 - **Small-LLM target**: child issues are sized and pre-staged for 32B-class local LLMs (e.g. qwen3-32B / Qwen3-30B-A3B on Ollama, 48 GB-class Macs). Bias toward smaller issues, sectional spec anchors, pre-staged file pointers, checkbox AC, and one Primary smoke test.
+
+## Autonomous mode
+
+`/autospec-run` is already autonomous (no operator gates during normal
+operation). When invoked with `--autonomous`, or when
+`~/.autospec/autonomous.flag` exists, the monitor:
+
+- Tags run-state telemetry with `autonomous=true` so Phase 5.5 gap
+  remediation and Phase 6 final reports can distinguish autonomous runs
+  from interactive ones.
+- Honors the same safety guardrails as `/autospec` and `/autospec-define`:
+  destructive remote actions, out-of-scope file changes, and cost gate
+  (`AUTOSPEC_AUTONOMOUS_ISSUE_CAP`, `AUTOSPEC_AUTONOMOUS_TOKEN_CAP`) still
+  surface confirmations via `scripts/autospec-autonomy-gate.sh --check all`,
+  exit 1 = ask anyway.
+- Does NOT add any additional user-facing gates. The flag is informational
+  here — the run loop's existing "only ask on hard blocker" rule already
+  matches autonomous semantics.
+
+Pass `--autonomous` from `/autospec-define`'s handoff (or set it
+explicitly) to preserve cross-phase telemetry continuity. Existing
+`feedback_autospec_autonomy_scope.md` rules remain in force.
