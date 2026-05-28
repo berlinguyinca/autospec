@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-refinement.schema.json",
+  "title": "autospec-refine round-by-round refinement artifact",
+  "description": "JSON record produced by scripts/refine-prompt.sh capturing the original prompt, per-round lens application, final refined prompt, and run metadata. Consumed by scripts/refine-render-overview.sh to produce the dual markdown overview.",
+  "type": "object",
+  "required": ["original_prompt", "rounds", "final_prompt", "status", "metadata"],
+  "additionalProperties": false,
+  "properties": {
+    "original_prompt": { "type": "string", "minLength": 1 },
+    "rounds": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/round" }
+    },
+    "final_prompt": { "type": "string", "minLength": 1 },
+    "status": {
+      "type": "string",
+      "enum": ["approved", "completed", "converged", "degraded", "round_cap_reached", "aborted"]
+    },
+    "metadata": { "$ref": "#/$defs/metadata" }
+  },
+  "$defs": {
+    "round": {
+      "type": "object",
+      "required": [
+        "round_number",
+        "lens",
+        "sources_used",
+        "refined_prompt",
+        "diff_summary",
+        "word_count_delta",
+        "reasoning"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "round_number": { "type": "integer", "minimum": 1 },
+        "lens": {
+          "type": "string",
+          "enum": ["repo-grounding", "clarity-ac", "sizing", "adversarial"]
+        },
+        "sources_used": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "refined_prompt": { "type": "string", "minLength": 1 },
+        "diff_summary": { "type": "string" },
+        "word_count_delta": { "type": "integer" },
+        "reasoning": { "type": "string" }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "head_sha",
+        "timestamp",
+        "rounds_requested",
+        "rounds_executed",
+        "converged_early",
+        "degraded_rounds",
+        "handoff_target",
+        "handoff_executed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "head_sha": { "type": "string", "minLength": 1 },
+        "timestamp": { "type": "string", "minLength": 1 },
+        "rounds_requested": { "type": "integer", "minimum": 1 },
+        "rounds_executed": { "type": "integer", "minimum": 0 },
+        "converged_early": { "type": "boolean" },
+        "degraded_rounds": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "context_sparse": { "type": "boolean" },
+        "handoff_target": { "type": "string", "minLength": 1 },
+        "handoff_executed": { "type": "boolean" }
+      }
+    }
+  }
+}
