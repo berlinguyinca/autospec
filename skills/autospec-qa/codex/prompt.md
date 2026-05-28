@@ -593,6 +593,9 @@ a spec acceptance criterion:
 4. Cached external payloads — is there a `cache/`, `fixtures/`, or
    `generated/` directory holding downloaded service responses that the
    runtime depends on, with no in-repo computation able to reproduce them?
+   (Does NOT apply when the spec's verb is itself an integration verb
+   from signal 1's integration list — e.g., a project whose stated job is
+   to mirror/import/sync that external dataset.)
 5. License and provenance — is there a provenance record (URL, fetch
    timestamp, ToS link, redistribution scope) for every cached external
    payload? Missing provenance on cached third-party data is a release
@@ -605,13 +608,17 @@ Required outcome:
 - For each finding, name the spec acceptance criterion, the offending
   client/URL/SDK call, and the signals (1-6) that matched.
 - Remediation: replace the remote call with an in-repo implementation that
-  matches the spec's described algorithm. The external service may remain
-  ONLY as an optional evaluation comparator behind a flag (off by default),
-  with cached payloads gated by explicit redistribution permission.
-- A finding matching signal 2 (benchmark collision) or signal 6
-  (reimplementation directive) is FAIL — these are training-on-test or
-  product-identity violations and cannot be release-deferred.
-- Other signals default to PARTIAL until the in-repo implementation lands.
+  matches the spec's described algorithm. The external service MUST be
+  either (a) removed entirely, or (b) gated behind an off-by-default
+  feature flag scoped to evaluation/benchmark comparison only, with cached
+  payloads carrying explicit redistribution permission. No other
+  configuration is acceptable for release PASS.
+- A finding matching signal 1 (implementation verb satisfied by remote
+  call), signal 2 (benchmark/comparator collision), or signal 6
+  (reimplementation directive) is FAIL — these are product-identity
+  violations and cannot be release-deferred.
+- Signals 3, 4, or 5 alone default to PARTIAL until the in-repo
+  implementation lands. Signal 3 paired with signal 1 escalates to FAIL.
 - Record each finding in the QA report under "Outsourced Implementation"
   and in `.autospec/qa-verdict.json` with category
   `outsourced_implementation`, the matched signal numbers in the summary,
@@ -1102,8 +1109,9 @@ Rules:
   against a booted app whose commit matches `head_sha`. Otherwise `false`.
 - `release_blocking` defaults TRUE for:
   - `benchmark_overfit` with failure mode 6 (training-on-test leak),
-  - `outsourced_implementation` matching signal 2 (benchmark/comparator
-    collision) or signal 6 (reimplementation directive),
+  - `outsourced_implementation` matching signal 1 (implementation verb
+    satisfied by remote call), signal 2 (benchmark/comparator collision),
+    or signal 6 (reimplementation directive),
   - `no_mock_smoke` on a required path with any non-PASS status,
   - `live_backend_blocker` unresolved,
   - `mutation_proof_missing` on a critical workflow,
