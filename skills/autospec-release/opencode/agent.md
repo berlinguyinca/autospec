@@ -158,13 +158,26 @@ the explicit skill invocation was unavailable.
    - Failed tests are work, not report decoration: fix them or create a
      release-blocking issue with exact reproduction.
 
-7. QA proof
-   - Run `/autospec-qa` against the configured local or deployed app.
+7. QA proof (MANDATORY — required for PASS)
+   - Run `/autospec-qa` against a live booted app. Either:
+     (a) boot the app locally (dev or prod build) and exercise it, or
+     (b) point QA at an already-deployed environment whose commit SHA matches
+         HEAD (or is explicitly recorded as the SHA under test).
+   - Mocked unit/integration tests do NOT satisfy this gate. Stage 7 must
+     produce browser- or app-level interaction artifacts (screenshots, DOM
+     snapshots, network traces, or recorded sessions) covering the user-
+     facing surfaces in the release range.
    - Require control-level proof for text boxes, selects, dropdowns, buttons,
      validation, API effects, failure banners, fallback behavior, accessibility,
      and no-mock smoke paths where the repo contract requires them.
    - Validate QA artifacts with
      `skills/autospec-shared/scripts/validate-qa-artifacts.sh` when available.
+   - Do not skip silently. If the app cannot be booted or reached, record the
+     reason, mark Stage 7 as `NOT EXECUTED`, and apply the Stage 9 verdict cap.
+   - After `/autospec-qa` completes, confirm `.autospec/qa-verdict.json`
+     exists with `head_sha` matching current HEAD and `live_app_proof: true`.
+     If absent, stale, or `live_app_proof: false`, the QA gate has not been
+     satisfied for this commit — treat as `NOT EXECUTED` for Stage 9.
 
 8. Legacy cleanup gate
    - Search code, specs, docs, tests, fixtures, config, infra, and examples for
@@ -174,14 +187,64 @@ the explicit skill invocation was unavailable.
    - If a legacy path cannot be removed yet, create a deprecation issue that
      names the owner, replacement path, and removal trigger.
 
-9. Final release verdict
-   - `PASS`: all release gates pass, no release-blocking issues remain, no
-     untested required no-mock path remains, docs match behavior, and legacy
-     cleanup is either complete or explicitly tracked.
-   - `PARTIAL`: useful progress landed, but at least one required gate is not
-     tested or externally blocked.
-   - `FAIL`: a release-blocking test, QA path, review finding, docs mismatch,
-     or legacy conflict remains.
+9. Verdict computation and release iteration loop
+
+   Compute the verdict deterministically from `.autospec/qa-verdict.json`:
+
+   - If the file is missing → verdict is `FAIL` with a synthetic finding
+     "qa-verdict.json not produced by Stage 7".
+   - If `head_sha` does not match `git rev-parse HEAD` → cap at `PARTIAL`
+     ("QA verdict is stale relative to current commit"). Re-run Stage 7
+     before accepting any further progress.
+   - If `live_app_proof: false` → cap at `PARTIAL` regardless of findings.
+   - For each finding with `release_blocking: true`:
+     - `status: FAIL` → verdict is at least `FAIL` for that finding.
+     - `status: PARTIAL` or `NOT_TESTED` → cap at `PARTIAL`.
+   - Otherwise → verdict is `PASS`.
+
+   Hard caps that override the file contents:
+   - "No merged PR in this range requires it" is NOT a valid reason to skip
+     live-app QA or any release-blocking finding. This gate evaluates the
+     cumulative shippable state of the repo, not the diff of the most
+     recent PRs.
+
+   Iteration loop:
+   - If verdict is `PASS`, emit the release report and stop.
+   - Otherwise, do NOT emit a final report yet. Pick the smallest
+     remediation that converts the highest-priority `release_blocking`
+     finding into evidence:
+     - `benchmark_overfit` / `mutation_proof_missing` /
+       `automated_test_gap` → re-enter `/autospec-qa`'s regeneration loop
+       to rewrite the offending tests.
+     - `no_mock_smoke` / `live_backend_blocker` → boot the app or unblock
+       the live backend, then re-run Stage 7.
+     - `spec_contradiction` / `legacy_residue` → fix docs/specs/code in one
+       commit, then re-run Stages 3-4.
+     - Untriaged `auto-implement` issue or queued blocker → run
+       `/autospec-run` on it, then re-run Stages 4-7.
+     After the remediation lands and is committed, re-enter at Stage 2
+     (sweep) and recompute.
+
+   Termination conditions (any one ends the loop):
+   - Verdict reached `PASS`.
+   - Iteration cap hit. Default: 5 iterations. Override:
+     `AUTOSPEC_RELEASE_MAX_ITERATIONS=<n>`. On cap, emit `PARTIAL` with the
+     unresolved findings and the exact next remediation command.
+   - `~/.autospec/stop.flag` is present (operator halt). Emit `PARTIAL`
+     with the current state.
+   - No-progress detector: two consecutive iterations produced an identical
+     set of `release_blocking` findings (by category + summary). Emit
+     `FAIL` with the stuck findings and an escalation note.
+
+   Verdict values:
+   - `PASS`: all gates green; verdict file confirms live-app proof; no
+     blocking findings remain.
+   - `PARTIAL`: useful progress landed but the iteration cap or operator
+     halt ended the loop with at least one non-FAIL blocking finding
+     still open.
+   - `FAIL`: at least one `release_blocking` finding has `status: FAIL`
+     after the loop terminated, or the no-progress detector tripped, or
+     the loop aborted on infrastructure failure.
 
 ## Legacy cleanup prompt
 
