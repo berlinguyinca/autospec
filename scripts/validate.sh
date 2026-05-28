@@ -1193,6 +1193,17 @@ check_qa_verify_first_discipline() {
     fi
 }
 
+check_lint_heredoc_handling() {
+    info "lint-implementation heredoc handling: tests/lint/test_complexity_heredoc.bats"
+    [ -f tests/lint/test_complexity_heredoc.bats ] \
+        || fail "tests/lint/test_complexity_heredoc.bats: bats coverage missing (issue #656)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/lint/test_complexity_heredoc.bats"
+        bats tests/lint/test_complexity_heredoc.bats >/tmp/validate-lint-heredoc.log 2>&1 \
+            || { cat /tmp/validate-lint-heredoc.log >&2; fail "tests/lint/test_complexity_heredoc.bats: failed"; }
+    fi
+}
+
 check_install_tests() {
     info "install tests: tests/install/*.sh"
     if [ -d tests/install ]; then
@@ -1247,6 +1258,7 @@ main() {
     check_existing_spec_mode
     check_lint_issue_helpers
     check_lint_implementation_helpers
+    check_lint_heredoc_handling
     check_usage_limit_helper
     check_supersession_contract
     check_phase4_guardian_block_lockstep

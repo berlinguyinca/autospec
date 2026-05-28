@@ -469,8 +469,59 @@ detect_complexity() {
         local func_loc=0
         local line_no=0
 
+        # Heredoc tracking (issue #656): physical indentation inside heredoc
+        # bodies is string-literal content, not code nesting. We track the
+        # active heredoc marker line-by-line and skip the nesting-depth
+        # measurement until the matching closer is seen.
+        # heredoc_marker = active terminator string ("" when not inside one)
+        # heredoc_dash   = 1 if opener used `<<-MARKER` (closer may be indented)
+        local heredoc_marker=""
+        local heredoc_dash=0
+
         while IFS=: read -r lineno content; do
             line_no="$lineno"
+
+            # If currently inside a heredoc, check whether this line is the
+            # matching closer; either way, skip code-structure measurement.
+            if [ -n "$heredoc_marker" ]; then
+                if [ "$heredoc_dash" -eq 1 ]; then
+                    # <<- form: closer may be indented with tabs/spaces
+                    if printf '%s' "$content" | grep -qE "^[[:space:]]*${heredoc_marker}[[:space:]]*$"; then
+                        heredoc_marker=""
+                        heredoc_dash=0
+                    fi
+                else
+                    # Plain << form: closer must be at column 0
+                    if printf '%s' "$content" | grep -qE "^${heredoc_marker}[[:space:]]*$"; then
+                        heredoc_marker=""
+                        heredoc_dash=0
+                    fi
+                fi
+                # While inside heredoc body, body lines are string literals —
+                # don't measure nesting and don't try to detect function starts
+                # (heredoc text can contain `name() {` patterns).
+                if [ "$in_func" -eq 1 ]; then
+                    func_loc=$((func_loc + 1))
+                fi
+                continue
+            fi
+
+            # Detect a new heredoc opener on this line. We accept the common
+            # forms `<<MARKER`, `<<-MARKER`, `<<'MARKER'`, `<<"MARKER"`,
+            # `<<\MARKER`. Use a sed extractor that strips optional `-`,
+            # optional surrounding quote/backslash, and grabs the bare marker.
+            if printf '%s' "$content" | grep -qE '<<-?[[:space:]]*(\\|'\''|")?[A-Za-z_][A-Za-z0-9_]*'; then
+                # Extract dash flag and marker.
+                local _hd_raw
+                _hd_raw="$(printf '%s' "$content" | grep -oE '<<-?[[:space:]]*(\\|'\''|")?[A-Za-z_][A-Za-z0-9_]*' | head -1)"
+                case "$_hd_raw" in
+                    '<<-'*) heredoc_dash=1 ;;
+                    *)      heredoc_dash=0 ;;
+                esac
+                heredoc_marker="$(printf '%s' "$_hd_raw" | sed -E 's/^<<-?[[:space:]]*(\\|'\''|")?//')"
+                # Fall through: still let this line participate in function/
+                # nesting detection because the opener itself is real code.
+            fi
 
             # Detect function start (bash-style: name() { or function name {)
             if printf '%s' "$content" | grep -qE '^[[:space:]]*(function[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*\(\)[[:space:]]*\{?[[:space:]]*$'; then
