@@ -189,6 +189,15 @@ the explicit skill invocation was unavailable.
 
 9. Verdict computation and release iteration loop
 
+   The deterministic computation is implemented by
+   `scripts/compute-release-verdict.sh` and is the canonical source of truth.
+   Invoke it with the current verdict path; stdout is one of `PASS` /
+   `PARTIAL` / `FAIL` and the exit code mirrors that (0/1/2; 3 for
+   infrastructure errors). The prose rules below describe what that script
+   does — if they diverge from the script's actual behavior, fix the script
+   and the bats tests in `tests/compute-release-verdict.bats`, not the
+   prose. Never re-derive the verdict by hand when the script is available.
+
    Compute the verdict deterministically from `.autospec/qa-verdict.json`:
 
    - If the file is missing → verdict is `FAIL` with a synthetic finding

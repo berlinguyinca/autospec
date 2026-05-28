@@ -944,6 +944,53 @@ check_autospec_release_contract() {
         || fail "README.md: missing getting-started skill guide"
 }
 
+check_release_verdict_script() {
+    info "release verdict computation: scripts/compute-release-verdict.sh"
+    local script="scripts/compute-release-verdict.sh"
+    local bats="tests/compute-release-verdict.bats"
+    [ -f "$script" ] || fail "$script: required file missing"
+    [ -x "$script" ] || fail "$script: must be executable"
+    [ -f "$bats" ] || fail "$bats: required file missing"
+    bash -n "$script" || fail "$script: bash syntax error"
+    # Verify all three release adapters reference the script so the deterministic
+    # verdict is the canonical computation rather than re-derived prose.
+    for f in skills/autospec-release/SKILL.md \
+             skills/autospec-release/codex/prompt.md \
+             skills/autospec-release/opencode/agent.md; do
+        grep -q 'compute-release-verdict.sh' "$f" \
+            || fail "$f: missing reference to scripts/compute-release-verdict.sh"
+    done
+    info "  running: $bats"
+    bats "$bats" >/tmp/validate-verdict.log 2>&1 \
+        || { cat /tmp/validate-verdict.log >&2; fail "$bats: failed"; }
+}
+
+check_qa_verdict_contract() {
+    info "autospec-qa verdict artifact contract"
+    for f in skills/autospec-qa/SKILL.md \
+             skills/autospec-qa/codex/prompt.md \
+             skills/autospec-qa/opencode/agent.md; do
+        grep -q '.autospec/qa-verdict.json' "$f" \
+            || fail "$f: missing reference to .autospec/qa-verdict.json"
+        grep -q 'live_app_proof' "$f" \
+            || fail "$f: missing live_app_proof field in verdict schema"
+        # Category enum must include the high-priority release-blocking categories
+        # added in PRs #634 (outsourced) and earlier (benchmark overfit).
+        grep -q 'outsourced_implementation' "$f" \
+            || fail "$f: missing outsourced_implementation in category enum"
+        grep -q 'benchmark_overfit' "$f" \
+            || fail "$f: missing benchmark_overfit in category enum"
+    done
+    # Release iteration loop must have a remediation branch for every
+    # release_blocking category enumerated by QA.
+    for f in skills/autospec-release/SKILL.md \
+             skills/autospec-release/codex/prompt.md \
+             skills/autospec-release/opencode/agent.md; do
+        grep -q 'outsourced_implementation' "$f" \
+            || fail "$f: missing outsourced_implementation remediation branch"
+    done
+}
+
 check_install_tests() {
     info "install tests: tests/install/*.sh"
     if [ -d tests/install ]; then
@@ -1014,6 +1061,8 @@ main() {
     check_autospec_test_skill_present
     check_autospec_qa_contract
     check_autospec_release_contract
+    check_qa_verdict_contract
+    check_release_verdict_script
     check_docs_amendment_presence
     check_install_tests
     check_phase4_tests
