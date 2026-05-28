@@ -508,6 +508,40 @@ check_usage_limit_helper() {
         || fail "scripts/autospec-usage-limit.sh --help did not print a 'Usage:' line"
 }
 
+# Spec supersession contract (issue #635): scripts/resolve-spec-supersession.sh
+# must exist, be executable, pass bash -n, and `--help` must print a `Usage:`
+# line. Each of autospec-define, autospec-qa, autospec-release must reference
+# the resolver in all three trio files (SKILL.md + codex/prompt.md +
+# opencode/agent.md) under a `## Spec supersession (recency)` heading so the
+# lockstep stays uniform across adapters.
+check_supersession_contract() {
+    info "spec-supersession helper: scripts/resolve-spec-supersession.sh"
+    [ -f scripts/resolve-spec-supersession.sh ] \
+        || fail "scripts/resolve-spec-supersession.sh: file missing"
+    [ -x scripts/resolve-spec-supersession.sh ] \
+        || fail "scripts/resolve-spec-supersession.sh: file not executable"
+    bash -n scripts/resolve-spec-supersession.sh \
+        || fail "scripts/resolve-spec-supersession.sh: bash syntax error"
+    bash scripts/resolve-spec-supersession.sh --help 2>/dev/null | grep -q '^Usage:' \
+        || fail "scripts/resolve-spec-supersession.sh --help did not print a 'Usage:' line"
+    for s in autospec-define autospec-qa autospec-release; do
+        info "spec-supersession lockstep: $s"
+        for trio in SKILL.md codex/prompt.md opencode/agent.md; do
+            grep -q '^## Spec supersession (recency)' "skills/$s/$trio" \
+                || fail "$s: $trio missing '## Spec supersession (recency)' section"
+            grep -q 'resolve-spec-supersession\.sh' "skills/$s/$trio" \
+                || fail "$s: $trio missing reference to scripts/resolve-spec-supersession.sh"
+        done
+    done
+    [ -f tests/resolve-spec-supersession.bats ] \
+        || fail "tests/resolve-spec-supersession.bats: bats coverage missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/resolve-spec-supersession.bats"
+        bats tests/resolve-spec-supersession.bats >/tmp/validate-supersession.log 2>&1 \
+            || { cat /tmp/validate-supersession.log >&2; fail "tests/resolve-spec-supersession.bats: failed"; }
+    fi
+}
+
 # Phase 4 guardian block lock-step invariants (introduced by issue #212): the
 # outer guardian dispatch block (between <!-- guardian-block:begin --> and
 # <!-- guardian-block:end --> markers) must be byte-identical across all 6
@@ -991,6 +1025,92 @@ check_qa_verdict_contract() {
     done
 }
 
+# Brute-force string-heuristics RULE_ID invariants (issue #637): both
+# STRING_MATCH_DOMAIN_LOGIC and REPEATED_STRUCTURE_AS_CODE must appear in
+# all 6 adapter files (autospec-run trio + autospec-qa trio) so the
+# PR-time guardian list and the QA sweep section stay in lockstep with
+# AGENTS.md.
+check_brute_force_rule_ids() {
+    info "brute-force RULE_IDs: autospec-run + autospec-qa trios"
+    for rid in STRING_MATCH_DOMAIN_LOGIC REPEATED_STRUCTURE_AS_CODE; do
+        grep -q "$rid" AGENTS.md \
+            || fail "AGENTS.md missing $rid in RULE_ID table"
+        for trio in skills/autospec-run/SKILL.md skills/autospec-run/codex/prompt.md skills/autospec-run/opencode/agent.md \
+                    skills/autospec-qa/SKILL.md skills/autospec-qa/codex/prompt.md skills/autospec-qa/opencode/agent.md; do
+            grep -q "$rid" "$trio" \
+                || fail "$trio missing $rid (issue #637 lockstep)"
+        done
+    done
+    # The QA sweep section must appear in all 3 autospec-qa adapter files.
+    for trio in skills/autospec-qa/SKILL.md skills/autospec-qa/codex/prompt.md skills/autospec-qa/opencode/agent.md; do
+        grep -q '^## Brute-force string heuristics sweep' "$trio" \
+            || fail "$trio missing '## Brute-force string heuristics sweep' section (issue #637)"
+    done
+    # The sweep script must exist and be executable.
+    [ -x scripts/qa-brute-force-sweep.sh ] \
+        || fail "scripts/qa-brute-force-sweep.sh missing or not executable (issue #637)"
+}
+
+# Dogfood detectors gate (issue #641): run every heuristic detector that
+# autospec ships against this repo and assert findings match the per-detector
+# allowlist. Also enforces lockstep across the 3 autospec-qa adapter files —
+# the "## Dogfood detectors driver" section and the scripts/dogfood-detectors.sh
+# reference must appear in SKILL.md, codex/prompt.md, and opencode/agent.md.
+check_dogfood_detectors() {
+    info "dogfood detectors: scripts/dogfood-detectors.sh"
+    [ -f scripts/dogfood-detectors.sh ] \
+        || fail "scripts/dogfood-detectors.sh: file missing"
+    [ -x scripts/dogfood-detectors.sh ] \
+        || fail "scripts/dogfood-detectors.sh: file not executable"
+    bash -n scripts/dogfood-detectors.sh \
+        || fail "scripts/dogfood-detectors.sh: bash syntax error"
+
+    info "dogfood detectors: autospec-qa adapter lockstep"
+    for trio in skills/autospec-qa/SKILL.md skills/autospec-qa/codex/prompt.md skills/autospec-qa/opencode/agent.md; do
+        grep -q '^## Dogfood detectors driver' "$trio" \
+            || fail "$trio missing '## Dogfood detectors driver' section (issue #641)"
+        grep -q 'scripts/dogfood-detectors\.sh' "$trio" \
+            || fail "$trio missing reference to scripts/dogfood-detectors.sh (issue #641)"
+    done
+
+    info "dogfood detectors: running driver against this repo"
+    bash scripts/dogfood-detectors.sh >/tmp/validate-dogfood.log 2>&1 \
+        || { cat /tmp/validate-dogfood.log >&2; fail "scripts/dogfood-detectors.sh: regressions detected"; }
+    if command -v bats >/dev/null 2>&1 && [ -f tests/dogfood/test_driver.bats ]; then
+        info "  running: tests/dogfood/test_driver.bats"
+        bats tests/dogfood/test_driver.bats >/tmp/validate-dogfood-bats.log 2>&1 \
+            || { cat /tmp/validate-dogfood-bats.log >&2; fail "tests/dogfood/test_driver.bats: failed"; }
+    fi
+}
+
+# Verify-first discipline gate (issue #643): both helper scripts must exist,
+# be executable, pass bash -n, and all 3 autospec-qa adapter files must
+# reference the two new section headings + both script paths. The bats
+# fixture suite is run as part of the gate.
+check_qa_verify_first_discipline() {
+    info "qa verify-first discipline: scripts + adapter lockstep"
+    for s in scripts/qa-verify-finding.sh scripts/qa-cluster-coverage.sh; do
+        [ -f "$s" ] || fail "$s: file missing (issue #643)"
+        [ -x "$s" ] || fail "$s: file not executable (issue #643)"
+        bash -n "$s" || fail "$s: bash syntax error (issue #643)"
+    done
+    for trio in skills/autospec-qa/SKILL.md skills/autospec-qa/codex/prompt.md skills/autospec-qa/opencode/agent.md; do
+        grep -q '^## Verify-first discipline' "$trio" \
+            || fail "$trio missing '## Verify-first discipline' section (issue #643)"
+        grep -q '^## Cluster sizing' "$trio" \
+            || fail "$trio missing '## Cluster sizing' section (issue #643)"
+        grep -q 'qa-verify-finding\.sh' "$trio" \
+            || fail "$trio missing reference to qa-verify-finding.sh (issue #643)"
+        grep -q 'qa-cluster-coverage\.sh' "$trio" \
+            || fail "$trio missing reference to qa-cluster-coverage.sh (issue #643)"
+    done
+    if command -v bats >/dev/null 2>&1 && [ -f tests/qa/test_verify_first.bats ]; then
+        info "  running: tests/qa/test_verify_first.bats"
+        bats tests/qa/test_verify_first.bats >/tmp/validate-verify-first.log 2>&1 \
+            || { cat /tmp/validate-verify-first.log >&2; fail "tests/qa/test_verify_first.bats: failed"; }
+    fi
+}
+
 check_install_tests() {
     info "install tests: tests/install/*.sh"
     if [ -d tests/install ]; then
@@ -1046,6 +1166,7 @@ main() {
     check_lint_issue_helpers
     check_lint_implementation_helpers
     check_usage_limit_helper
+    check_supersession_contract
     check_phase4_guardian_block_lockstep
     check_phase1_bounded_context_contract
     check_phase4_issue_start_summary
@@ -1060,6 +1181,9 @@ main() {
     check_autospec_review_tier_a_directives
     check_autospec_test_skill_present
     check_autospec_qa_contract
+    check_brute_force_rule_ids
+    check_dogfood_detectors
+    check_qa_verify_first_discipline
     check_autospec_release_contract
     check_qa_verdict_contract
     check_release_verdict_script

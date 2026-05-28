@@ -267,6 +267,35 @@ the explicit skill invocation was unavailable.
      after the loop terminated, or the no-progress detector tripped, or
      the loop aborted on infrastructure failure.
 
+## Spec supersession (recency)
+
+When `docs/specs/` contains two specs that overlap on a behavior, the spec
+whose last-modifying commit on the current branch is most recent wins
+(issue #635: implicit-by-recency supersession; untracked specs fall back
+to filesystem mtime). Operators do NOT write `Supersedes:` frontmatter —
+recency alone decides.
+
+Release verdict computation MUST consult the resolver before treating any
+finding as `release_blocking`. A finding whose `source_spec` is older than
+another spec covering the same behavior is downgraded from
+`release_blocking` to `informational` — the newer spec has already replaced
+the requirement.
+
+Use the shared helper for every finding under review:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/resolve-spec-supersession.sh" "<behavior-key>"
+```
+
+If the resolver returns a spec path different from the finding's
+`source_spec`, the finding is referencing a superseded behavior. Downgrade
+the severity and annotate the finding with the winning spec path so the
+operator can confirm the supersession intent. Do NOT block the release on a
+superseded finding.
+
+This rule applies to release report rows, QA proof-matrix carryover, and
+legacy-cleanup blockers alike.
+
 ## Legacy cleanup prompt
 
 Use this prompt whenever code, config, docs, tests, specs, infra, or examples

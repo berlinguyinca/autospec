@@ -347,6 +347,39 @@ UI/API behavior for contradictions:
 Contradictions become `AMBIGUOUS` rows with a proposed resolution and a
 spec/config follow-up before implementation is called complete.
 
+## Spec supersession (recency)
+
+When two specs in `docs/specs/` overlap on a behavior, the spec whose
+last-modifying commit on the current branch is most recent wins (issue #635:
+implicit-by-recency supersession; untracked specs fall back to filesystem
+mtime). Operators do NOT write `Supersedes:` frontmatter — recency alone
+decides.
+
+QA validation MUST resolve each behavior to its authoritative spec before
+classifying a row as `FAIL`. Behavior present only in an older, superseded
+spec is not a QA failure — it has been replaced by the newer spec. Use the
+shared helper to look up the authoritative spec for each behavior key:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/resolve-spec-supersession.sh" "<behavior-key>"
+```
+
+For each proof-matrix row whose expected behavior overlaps multiple specs:
+
+1. Run the resolver against the behavior key (e.g. heading text or
+   acceptance-criterion fragment).
+2. If the resolver returns a spec path different from the row's
+   `spec_reference`, the row is being validated against a superseded
+   behavior. Re-derive the expected behavior from the resolver's winning
+   spec and update the row's `spec_reference` accordingly.
+3. If the row's expected behavior no longer appears in the winning spec,
+   mark the row `superseded` with a note pointing at the winning spec; do
+   NOT classify it `FAIL`.
+
+This rule applies symmetrically to control-intent ledger entries and
+live-evidence checks: a control whose intent is only described by a
+superseded spec is not a regression.
+
 ## Data lifecycle proof
 
 For CRUD, stateful, or workflow apps, prove the data lifecycle:
@@ -723,6 +756,105 @@ Required outcome:
 - If compatibility must remain temporarily, document the sunset condition,
   owner, and follow-up issue; tests must still prove the new canonical path.
 ```
+
+## Brute-force string heuristics sweep
+
+Sweep already-merged code for the LLM-tier RULE_IDs `STRING_MATCH_DOMAIN_LOGIC`
+and `REPEATED_STRUCTURE_AS_CODE` (AGENTS.md `## Implementation-quality contract`).
+This catches rot that pre-dates the PR-time guardian — substring-on-name
+classifiers and ≥5-branch ladders that ship as a wall of `if`/`elif`/`switch`
+instead of a table + dispatcher.
+
+Supported languages: Python, JavaScript/TypeScript, Go, Java, Scala, Rust.
+
+```bash
+# Run from repo root. Emits findings into .autospec/qa-verdict.json under
+# the category `code_health:brute_force_string_heuristics` and files one
+# auto-implement issue per offender.
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/qa-brute-force-sweep.sh"
+```
+
+The sweep:
+
+1. Walks every `*.py`, `*.js`, `*.ts`, `*.jsx`, `*.tsx`, `*.go`, `*.java`,
+   `*.scala`, `*.rs` file outside `node_modules`, `.git`, and `dist`.
+2. For `STRING_MATCH_DOMAIN_LOGIC`: counts substring-style checks
+   (`.contains(...)`, `.includes(...)`, `in name`, `strings.Contains`,
+   etc.) and confirms the file imports a proper-representation library for
+   its language — Python `rdkit`/`ast`/`urllib.parse`/`datetime`/
+   `ipaddress`/`lxml`/`jsonschema`; JS/TS `URL`/`Date`/`@babel/parser`/
+   `acorn`/`ts-morph`/`zod`/`ajv`/`joi`; Go `net/url`/`time`/`go/ast`/
+   `net.ParseIP`/`encoding/json`; Java `java.net.URI`/`java.time`/
+   `JavaParser`/`com.github.javaparser`/`javax.validation`; Scala
+   `java.net.URI`/`java.time`/`scalameta`/refined/circe; Rust `url::Url`/
+   `chrono`/`time`/`syn`/`std::net::IpAddr`/`serde`.
+3. For `REPEATED_STRUCTURE_AS_CODE`: counts repeated branch-shaped lines
+   (`if`/`elif`/`case`/`match` arms) and flags any file with ≥5.
+4. Writes one finding line per offender to `.autospec/qa-verdict.json`
+   under category `code_health:brute_force_string_heuristics`, carrying
+   `rule_id`, `language`, `file`, `function`, `line`.
+5. Files one `auto-implement,autospec:v2-flow` GitHub issue per offender
+   via `gh issue create`. Issue body cites the file, function/method, line,
+   and the verbatim RULE_ID directive from AGENTS.md so the implementer
+   retry loop has the corrective instruction. Where the offending file has
+   no proper-representation library imported, the issue notes
+   "no proper-rep library imported — investigate first" so the implementer
+   does not blindly add a dependency.
+
+Errors in the sweep MUST NOT block the QA verdict; emit findings and
+continue. End-to-end regression: after the QA-filed rewrite issues run
+through `/autospec-run`, the offending files no longer trip either
+RULE_ID in the PR-time guardian.
+
+## Verify-first discipline
+
+Before any cluster emits a finding to `.autospec/qa-verdict.json`, the cluster
+MUST verify that the symptom still reproduces at current HEAD. This eliminates
+the dominant false-positive class observed in production: clusters re-flagging
+gaps that landed in a recent PR. Run the shared probe per candidate finding:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/qa-verify-finding.sh" \
+    --category <missing_function|missing_import|failing_test|spec_mismatch|regression> \
+    [--symbol <name>] [--file <path>] [--test-cmd <cmd>] \
+    [--spec <path>] [--impl <path>] [--claim <text>] [--commit <sha>]
+```
+
+Exit 0 means the finding still reproduces (KEEP and emit). Exit 1 means the
+symptom no longer reproduces (DROP and append to `verified_dropped[]` in the
+QA report). When ingesting prior-cycle findings from a previous
+`.autospec/qa-verdict.json`, run the same probe; drops go into
+`stale_dropped[]` rather than `verified_dropped[]`.
+
+Cluster cross-talk dedup: the QA orchestrator maintains
+`.autospec/qa-cluster-coverage.json` via the shared coverage helper. Each
+cluster MUST attempt to claim the `(file, spec_section, rule_id)` tuple it is
+about to scan; a second cluster racing on the same tuple receives exit 1
+("already claimed") and logs the skip as `cluster_skip_dedup`:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/qa-cluster-coverage.sh" \
+    claim --cluster <id> --file <path> --section <section> --rule <rule_id>
+```
+
+The final QA report MUST surface four explicit count fields so the operator
+can see what the discipline filtered: `findings_emitted`, `verified_dropped`,
+`stale_dropped`, `cluster_skip_dedup`.
+
+## Cluster sizing
+
+The QA orchestrator's cluster fan-out is a knob, not a constant. When the
+prior QA run dropped ≥30% of candidate findings on verification, prefer **3
+verify-first clusters** over **7 blind clusters** for the next run. A drop
+rate >50% means clusters are re-litigating the same closed gaps rather than
+exploring new surface; shrink the fan-out and let each cluster do deeper
+verification work. This is prose guidance to the orchestrator — no enforcement
+script — but the rule is non-negotiable for runs whose prior-cycle drop rate
+exceeded the threshold.
+
+## Dogfood detectors driver
+
+When QA runs against the autospec repo itself, use `scripts/dogfood-detectors.sh` as the authoritative aggregated sweep rather than invoking individual `scripts/qa-*-sweep.sh` directly. The driver enforces an allowlist of intentional findings and fails on regression.
 
 ## Critical self-questioning checkpoint
 
