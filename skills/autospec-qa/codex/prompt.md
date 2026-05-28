@@ -705,6 +705,101 @@ Exit 0 means every requested gate passed. Exit 1 means at least one gate
 failed and the verdict + findings have been updated atomically. Backwards-
 compatible: invoking with no flag is a no-op.
 
+## Self-healing loop
+
+`/autospec-qa` is self-healing by default. After discovery, the orchestrator
+enters a discover → file → fix → re-QA loop and runs until convergence or a
+guardrail trips. The loop is driven by `scripts/qa-heal-loop.sh`, which calls
+`scripts/qa-finding-to-issue.sh` once per release-blocking finding to file an
+`auto-implement,autospec:v2-flow` GitHub issue, then dispatches `/autospec-run`
+to drain the queue before re-running QA.
+
+Builds on the verify-first filter (#647 / PR #650): the heal loop relies on
+the filter to reject unverified findings before they become issues, otherwise
+round 1 would file noise. Builds on the production-incident registry
+(#659 / PR #661): findings tagged
+`code_health:production_incident_regression_missing` follow the same heal
+path. Companion to autonomous mode (#662): when
+`~/.autospec/autonomous.flag` is set, heal mode is implicit.
+
+Loop semantics:
+
+1. Round N: run `/autospec-qa`, write `.autospec/qa-verdict.json` as today.
+2. For each finding with `release_blocking: true` and
+   `status ∈ {FAIL, PARTIAL, NOT_TESTED}`:
+   - Translate via `scripts/qa-finding-to-issue.sh` into a structured issue
+     body (category + summary + evidence + reproduction + remediation
+     directive verbatim from the relevant `code_health:*` directive map).
+   - File one `auto-implement,autospec:v2-flow` issue. Existing dedup:
+     skip if an open issue with the same `(category, file, summary_hash)`
+     already exists.
+3. Launch `/autospec-run` (single-agent Phase 4) to drain the new + existing
+   queue. One PR per issue per existing pipeline semantics.
+4. After the run drains (`batch-done.json: ALL_DONE`), re-enter step 1.
+
+Termination — loop exits when ANY of:
+
+- **Convergence** — round N produces zero findings with
+  `release_blocking: true`. (Non-blocking findings are filed once but do
+  NOT keep the loop alive.) This is the canonical success state.
+- **Oscillation detected** — round N+1's release-blocking finding set,
+  hashed by `(category, file, summary)`, equals round N's. The auto-fix
+  is going nowhere; the loop exits with `oscillation_detected` and
+  surfaces the persistent findings for operator review.
+- **Round cap** — `AUTOSPEC_HEAL_MAX_ROUNDS` reached (default 5).
+- **Budget cap** — tokens used > `AUTOSPEC_HEAL_TOKEN_CAP` (default
+  1.5M) or wall time > `AUTOSPEC_HEAL_TIME_CAP` (default 4h).
+- **Verify-first violation persists** — if the post-cluster verify-first
+  filter keeps dropping the same findings as `verified_dropped` round
+  after round, those findings are likely flaky probes; the loop exits
+  and asks the operator to triage.
+
+At loop end, the orchestrator prints a Markdown table to the operator and
+writes `.autospec/heal-summary.md` for the audit trail and for
+`/autospec-release` to consume as a release-readiness signal:
+
+```
+## /autospec-qa heal loop summary
+
+| Round | Findings | Issues filed | PRs merged | Time | Status                  |
+|-------|---------:|-------------:|-----------:|------|-------------------------|
+| 1     |        7 |            7 |          6 | 12m  | 1 finding persisted     |
+| 2     |        1 |            0 |          0 |  4m  | oscillation_detected    |
+
+Final verdict: PARTIAL (1 persistent finding)
+```
+
+Invocation:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/qa-heal-loop.sh" \
+    --verdict .autospec/qa-verdict.json \
+    --summary .autospec/heal-summary.md
+```
+
+Safety guardrails (NOT bypassed by heal mode) — inherit all existing
+autonomy/release guardrails:
+
+- Destructive remote actions surface for confirmation (handled by
+  `scripts/autospec-autonomy-gate.sh`).
+- Per-PR merge still goes through the rebase-and-retest gate.
+- `~/.autospec/no-heal.flag` exists → heal globally disabled (operator
+  escape hatch for runaway loops).
+- `~/.autospec/stop.flag` (graceful / immediate) terminates the loop at
+  the next round boundary.
+
+## --no-heal opt-out
+
+The heal loop runs by default. `--no-heal` reverts to discovery-only
+(today's behavior): `/autospec-qa` writes `.autospec/qa-verdict.json` and
+exits without filing issues or dispatching `/autospec-run`. Triggers are
+identical for both modes; only post-discovery behavior differs. Backwards
+compatibility: any caller that relied on `/autospec-qa` exiting after
+discovery must pass `--no-heal` (or set `~/.autospec/qa-no-heal.flag`).
+`.autospec/qa-verdict.json` schema is unchanged. Existing
+`/autospec-release` and `/autospec-sweep` integrations see the post-heal
+verdict, not the pre-heal one — this is the intended improvement.
+
 ## Production incident regression check
 
 When QA passes but production breaks, the same bug class tends to leak again the
