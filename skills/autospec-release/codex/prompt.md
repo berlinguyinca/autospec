@@ -189,9 +189,10 @@ the explicit skill invocation was unavailable.
 
    - If the file is missing → verdict is `FAIL` with a synthetic finding
      "qa-verdict.json not produced by Stage 7".
-   - If `head_sha` does not match `git rev-parse HEAD` → cap at `PARTIAL`
-     ("QA verdict is stale relative to current commit"). Re-run Stage 7
-     before accepting any further progress.
+   - If `head_sha` does not match `git rev-parse HEAD` → treat as missing.
+     Synthesize a FAIL finding "QA verdict stale relative to HEAD" and
+     require Stage 7 to re-run in the same iteration before recomputing
+     the verdict.
    - If `live_app_proof: false` → cap at `PARTIAL` regardless of findings.
    - For each finding with `release_blocking: true`:
      - `status: FAIL` → verdict is at least `FAIL` for that finding.
@@ -218,8 +219,15 @@ the explicit skill invocation was unavailable.
        commit, then re-run Stages 3-4.
      - Untriaged `auto-implement` issue or queued blocker → run
        `/autospec-run` on it, then re-run Stages 4-7.
+     - Any other `release_blocking` finding (e.g. `accessibility`,
+       `cross_browser`, `duplicate_code`, `new_code_intent`,
+       `presentational_misclassified`, `other`) → file a tracked GitHub
+       issue with reproduction steps, link it from the release report,
+       then re-run Stage 7.
      After the remediation lands and is committed, re-enter at Stage 2
-     (sweep) and recompute.
+     (sweep) and recompute. Each iteration MUST re-run Stage 7 before
+     recomputing the verdict — a verdict file whose `head_sha` does not
+     match the iteration's current HEAD is treated as missing.
 
    Termination conditions (any one ends the loop):
    - Verdict reached `PASS`.

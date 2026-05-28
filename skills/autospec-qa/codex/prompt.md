@@ -1043,12 +1043,14 @@ Rules:
   against a booted app whose commit matches `head_sha`. Otherwise `false`.
 - `release_blocking` defaults TRUE for:
   - `benchmark_overfit` with failure mode 6 (training-on-test leak),
-  - `no_mock_smoke` with `status: NOT_TESTED` on a required path,
+  - `no_mock_smoke` on a required path with any non-PASS status,
   - `live_backend_blocker` unresolved,
   - `mutation_proof_missing` on a critical workflow,
   - `spec_contradiction` unresolved,
   - `legacy_residue` referenced by current user-facing docs.
-  Other categories default FALSE and can be promoted by the QA author.
+  Other categories default FALSE; promote to TRUE only when the finding
+  documents a user-visible regression, data loss, security exposure, or
+  violated spec requirement.
 - Write atomically: `.autospec/qa-verdict.json.tmp` then `mv` to the final
   path. Chmod 644. Always overwrite — staleness is checked by `head_sha`,
   not mtime.
