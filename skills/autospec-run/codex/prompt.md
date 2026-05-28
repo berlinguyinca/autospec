@@ -227,6 +227,8 @@ This writes the UTC ISO 8601 timestamp to `~/.autospec/.run-batch-start` (idempo
 
 ## Phase 4 — Background autonomous monitor
 
+**Single-agent absorbed-discipline (canonical Phase 4 path).** The monitor agent IS the implementer for the issue it claims — expand → implement → finalize → peer-review → evaluate-findings → PR → merge — all in one agent's context. The main session orchestrator relaunches the monitor between issues so each one gets a fresh top-level `Agent` call with full tool access. **Constraint:** Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool, so a backgrounded monitor cannot dispatch its own inner implementer. Phase 4 implementers must be top-level agents launched directly by the main session orchestrator, not nested inside a monitor. The `process(ISSUE)` notation below is shorthand for "the monitor agent now does the implementation work itself in this same context", NOT a nested subagent dispatch. `AUTOSPEC_BATCH_SIZE` semantics are preserved: a single agent can still process up to N issues sequentially within its 40-tool-call budget, exiting with `BATCH_COMPLETE` when the budget is approaching or after N issues, whichever comes first.
+
 Record this durable preference in `AGENTS.md` (idempotent — skip if already present):
 
 > **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (`gh pr merge <#> --admin --squash --delete-branch`) when (a) all required CI checks pass — slow optional checks like TeamCity may be pending and that's acceptable, (b) the self-review subagent returned `LGTM`, (c) PR closes an `auto-implement` issue from a `feat/*` branch.
@@ -515,7 +517,7 @@ inline label-swap path below.
 >   echo "[monitor] goal: ${ISSUE_GOAL:-<not provided>}"
 >   echo "[monitor] smoke: ${ISSUE_SMOKE:-<not provided>}"
 >   echo "[monitor] scope: ${ISSUE_SCOPE:-<not provided>}"
->   process(ISSUE)   # foreground subagent — see template below
+>   process(ISSUE)   # single-agent absorbed-discipline — the monitor IS the implementer; see template below
 >   batch_issue_count=$((batch_issue_count + 1))
 >   if [ "$batch_issue_count" -ge "${effective_batch_size:-$BATCH_SIZE}" ]; then
 >     bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/diary-write.sh" \
@@ -546,7 +548,7 @@ inline label-swap path below.
 >
 > Both paths share the same outer monitor loop (queue scan, lock-step compliance, label-based locking, heartbeat updates, post-process pickup). The selection only changes the inner subagent prompt body.
 >
-> `process(ISSUE)` dispatches a **foreground subagent** (wait for return) with this prompt:
+> `process(ISSUE)` is single-agent absorbed-discipline: the monitor agent performs the implementation work itself, in-context, using the prompt below as its working brief. There is NO nested subagent dispatch here — subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool, so the monitor must own the work directly:
 >
 > **Prompt construction (cache-prefix + dynamic suffix):**
 > Before dispatch, the orchestrator builds the subagent prompt. Two options:

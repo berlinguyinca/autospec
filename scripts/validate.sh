@@ -619,6 +619,44 @@ check_phase4_immediate_next_issue_pickup() {
     done
 }
 
+# Phase 4 single-agent absorbed-discipline (issue #648): the autospec-run trio
+# must (1) carry the canonical constraint sentence stating that subagents spawned
+# by background `Agent` calls do NOT inherit the `Agent` tool, (2) reference the
+# single-agent absorbed-discipline rewrite, (3) document that Phase 4 implementers
+# must be top-level agents launched directly by the main session orchestrator,
+# and (4) NOT contain the legacy "process(ISSUE)   # foreground subagent" or
+# "dispatches a **foreground subagent**" patterns that previously misled
+# operators into nested-dispatch. The phase4-implementer.md prompt must also
+# state the single-agent assumption explicitly.
+check_phase4_single_agent_discipline() {
+    info "phase4 single-agent absorbed-discipline: autospec-run trio"
+    for f in \
+        skills/autospec-run/SKILL.md \
+        skills/autospec-run/codex/prompt.md \
+        skills/autospec-run/opencode/agent.md
+    do
+        [ -f "$f" ] || fail "$f: required file missing"
+        grep -F 'Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool' "$f" >/dev/null \
+            || fail "$f missing canonical subagent-Agent-inheritance constraint sentence"
+        grep -F 'single-agent absorbed-discipline' "$f" >/dev/null \
+            || fail "$f missing 'single-agent absorbed-discipline' reference"
+        grep -F 'top-level agents launched directly by the main session orchestrator' "$f" >/dev/null \
+            || fail "$f missing 'top-level agents launched directly by the main session orchestrator' sentence"
+        if grep -F 'process(ISSUE)   # foreground subagent' "$f" >/dev/null 2>&1; then
+            fail "$f still contains legacy 'process(ISSUE)   # foreground subagent' nested-dispatch pattern"
+        fi
+        if grep -F 'dispatches a **foreground subagent**' "$f" >/dev/null 2>&1; then
+            fail "$f still contains legacy 'dispatches a **foreground subagent**' nested-dispatch pattern"
+        fi
+    done
+    impl="skills/autospec-run/prompts/phase4-implementer.md"
+    [ -f "$impl" ] || fail "$impl: required file missing"
+    grep -F 'single-agent' "$impl" >/dev/null \
+        || fail "$impl missing 'single-agent' assumption in prompt body"
+    grep -F 'Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool' "$impl" >/dev/null \
+        || fail "$impl missing canonical subagent-Agent-inheritance constraint sentence"
+}
+
 # Phase 4 adaptive-retry loop: the implementer prompt block must contain the
 # MAX_IMPL_RETRIES while-loop with directive_context accumulation and an
 # exhaustion branch that posts a manual-intervention comment. All three trio
@@ -1202,6 +1240,7 @@ main() {
     check_phase1_bounded_context_contract
     check_phase4_issue_start_summary
     check_phase4_immediate_next_issue_pickup
+    check_phase4_single_agent_discipline
     check_phase4_adaptive_retry
     check_autospec_sweep_config_contract
     check_autospec_fleet_scripts
