@@ -343,6 +343,38 @@ UI/API behavior for contradictions:
 Contradictions become `AMBIGUOUS` rows with a proposed resolution and a
 spec/config follow-up before implementation is called complete.
 
+## Spec supersession (recency)
+
+When two specs in `docs/specs/` overlap on a behavior, the spec whose
+last-modifying commit on `main` is most recent wins (issue #635:
+implicit-by-recency supersession). Operators do NOT write `Supersedes:`
+frontmatter — recency alone decides.
+
+QA validation MUST resolve each behavior to its authoritative spec before
+classifying a row as `FAIL`. Behavior present only in an older, superseded
+spec is not a QA failure — it has been replaced by the newer spec. Use the
+shared helper to look up the authoritative spec for each behavior key:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/resolve-spec-supersession.sh" "<behavior-key>"
+```
+
+For each proof-matrix row whose expected behavior overlaps multiple specs:
+
+1. Run the resolver against the behavior key (e.g. heading text or
+   acceptance-criterion fragment).
+2. If the resolver returns a spec path different from the row's
+   `spec_reference`, the row is being validated against a superseded
+   behavior. Re-derive the expected behavior from the resolver's winning
+   spec and update the row's `spec_reference` accordingly.
+3. If the row's expected behavior no longer appears in the winning spec,
+   mark the row `superseded` with a note pointing at the winning spec; do
+   NOT classify it `FAIL`.
+
+This rule applies symmetrically to control-intent ledger entries and
+live-evidence checks: a control whose intent is only described by a
+superseded spec is not a regression.
+
 ## Data lifecycle proof
 
 For CRUD, stateful, or workflow apps, prove the data lifecycle:

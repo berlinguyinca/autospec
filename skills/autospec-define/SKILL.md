@@ -528,6 +528,33 @@ labels and patches each body with a `## Model fit` block.
 
 ---
 
+## Spec supersession (recency)
+
+Specs in `docs/specs/` accumulate over time. When a newer spec adds, modifies, or
+removes behavior that an earlier spec described, autospec applies
+**implicit-by-recency supersession** (issue #635): the spec whose
+last-modifying commit on `main` is most recent wins for any overlapping
+behavior. Operators do NOT write `Supersedes:` frontmatter — recency alone
+decides.
+
+During Phase 3 decomposition, before filing a candidate child issue, resolve
+the authoritative spec for each behavior the issue touches. Use the shared
+helper:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/resolve-spec-supersession.sh" "<behavior-key>"
+```
+
+If the resolver prints a spec path other than the one currently being
+decomposed, the candidate behavior has already been overridden by a newer
+spec — skip filing the issue (it would re-introduce removed behavior) and
+note the supersession in the decompose run log. If the resolver exits 1 (no
+overlap), proceed normally: the behavior is new to this spec.
+
+See `tests/resolve-spec-supersession.bats` for the resolver contract:
+no-overlap → exit 1, single overlap → that spec wins, two/three-way overlap
+→ most recent wins, deleted specs are excluded.
+
 ## Phase 3 pre-impl gate
 
 After Phase 3 decomposition completes (and Phase 3.5 review-and-label has
