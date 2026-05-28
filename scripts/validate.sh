@@ -1073,6 +1073,22 @@ check_dogfood_detectors() {
             || fail "$trio missing reference to scripts/dogfood-detectors.sh (issue #641)"
     done
 
+    info "dogfood detectors: adapter layer (issue #646)"
+    [ -f .autospec/dogfood.yml ] \
+        || fail ".autospec/dogfood.yml: missing (issue #646 adapter registry)"
+    grep -q '^adapters:' .autospec/dogfood.yml \
+        || fail ".autospec/dogfood.yml: missing 'adapters:' schema (issue #646)"
+    for adapter in scripts/dogfood-adapter-doc-drift.sh scripts/dogfood-adapter-lint.sh; do
+        [ -f "$adapter" ] \
+            || fail "$adapter: required adapter missing (issue #646)"
+        [ -x "$adapter" ] \
+            || fail "$adapter: adapter not executable (issue #646)"
+        bash -n "$adapter" \
+            || fail "$adapter: bash syntax error (issue #646)"
+        grep -q "$(basename "$adapter")" .autospec/dogfood.yml \
+            || fail ".autospec/dogfood.yml: missing registration for $(basename "$adapter")"
+    done
+
     info "dogfood detectors: running driver against this repo"
     bash scripts/dogfood-detectors.sh >/tmp/validate-dogfood.log 2>&1 \
         || { cat /tmp/validate-dogfood.log >&2; fail "scripts/dogfood-detectors.sh: regressions detected"; }
@@ -1080,6 +1096,11 @@ check_dogfood_detectors() {
         info "  running: tests/dogfood/test_driver.bats"
         bats tests/dogfood/test_driver.bats >/tmp/validate-dogfood-bats.log 2>&1 \
             || { cat /tmp/validate-dogfood-bats.log >&2; fail "tests/dogfood/test_driver.bats: failed"; }
+    fi
+    if command -v bats >/dev/null 2>&1 && [ -f tests/dogfood/test_adapter_layer.bats ]; then
+        info "  running: tests/dogfood/test_adapter_layer.bats"
+        bats tests/dogfood/test_adapter_layer.bats >/tmp/validate-dogfood-adapter.log 2>&1 \
+            || { cat /tmp/validate-dogfood-adapter.log >&2; fail "tests/dogfood/test_adapter_layer.bats: failed"; }
     fi
 }
 

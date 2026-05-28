@@ -35,6 +35,14 @@ ALLOWLIST_DIR="tests/dogfood/allowlist"
 CONFIG_FILE=".autospec/dogfood.yml"
 
 # Build the detector list: glob + optional extras from config.
+#
+# Three sources contribute:
+#   1. scripts/qa-*-sweep.sh — native VERDICT_FILE contract, auto-discovered.
+#   2. .autospec/dogfood.yml `detectors:` — extra native-contract scripts.
+#   3. .autospec/dogfood.yml `adapters:` — wrapper scripts that normalize
+#      non-native detectors (per-PR args, non-JSON output) into the
+#      VERDICT_FILE contract (issue #646). The `adapter:` path is what
+#      the driver invokes; the `detector:` field is informational only.
 discover_detectors() {
     # Sweep scripts always participate.
     for d in scripts/qa-*-sweep.sh; do
@@ -45,16 +53,29 @@ discover_detectors() {
     if [ -f "$CONFIG_FILE" ]; then
         if command -v yq >/dev/null 2>&1; then
             yq -r '.detectors[]?' "$CONFIG_FILE" 2>/dev/null || true
+            yq -r '.adapters[]?.adapter' "$CONFIG_FILE" 2>/dev/null || true
         else
             # Minimal awk fallback: collect lines under `detectors:` that
-            # start with `- ` and strip the bullet.
+            # start with `- ` and strip the bullet; for `adapters:` collect
+            # the `adapter: <path>` value from each list entry.
             awk '
-                /^detectors:/ { in_list=1; next }
-                in_list && /^[^[:space:]-]/ { in_list=0 }
-                in_list && /^[[:space:]]*-[[:space:]]+/ {
-                    sub(/^[[:space:]]*-[[:space:]]+/, "")
-                    sub(/[[:space:]]*#.*$/, "")
-                    print
+                /^detectors:/ { mode="det"; next }
+                /^adapters:/  { mode="adp"; next }
+                mode=="det" && /^[^[:space:]-]/ { mode="" }
+                mode=="adp" && /^[^[:space:]-]/ { mode="" }
+                mode=="det" && /^[[:space:]]*-[[:space:]]+/ {
+                    s=$0
+                    sub(/^[[:space:]]*-[[:space:]]+/, "", s)
+                    sub(/[[:space:]]*#.*$/, "", s)
+                    print s
+                    next
+                }
+                mode=="adp" && /^[[:space:]]*adapter:[[:space:]]+/ {
+                    s=$0
+                    sub(/^[[:space:]]*adapter:[[:space:]]+/, "", s)
+                    sub(/[[:space:]]*#.*$/, "", s)
+                    gsub(/[[:space:]]+$/, "", s)
+                    print s
                 }
             ' "$CONFIG_FILE"
         fi

@@ -1,0 +1,28 @@
+# .autospec/dogfood.yml — dogfood detector configuration (issue #646)
+#
+# Two schemas the dogfood driver understands:
+#
+#   detectors: (legacy, native VERDICT_FILE contract)
+#     - scripts/qa-foo-sweep.sh
+#
+#   adapters: (issue #646, normalizes non-native detectors)
+#     - detector: scripts/check-doc-drift.sh
+#       adapter:  scripts/dogfood-adapter-doc-drift.sh
+#
+# For each `adapters:` entry the driver invokes the adapter (NOT the
+# underlying detector directly). The adapter is responsible for running
+# the detector with whatever arguments / env it actually needs and for
+# translating output into one JSON-Lines finding per line on
+# $VERDICT_FILE matching {category, rule_id, language, file, function,
+# line}. Adapters always exit 0; the driver decides PASS/FAIL via
+# allowlist comparison.
+#
+# Allowlist filename follows the adapter basename:
+#   tests/dogfood/allowlist/dogfood-adapter-doc-drift.json
+#   tests/dogfood/allowlist/dogfood-adapter-lint.json
+
+adapters:
+  - detector: skills/autospec-shared/scripts/check-doc-drift.sh
+    adapter:  scripts/dogfood-adapter-doc-drift.sh
+  - detector: scripts/lint-implementation.sh
+    adapter:  scripts/dogfood-adapter-lint.sh
