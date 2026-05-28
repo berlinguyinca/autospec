@@ -211,7 +211,7 @@ check_startup_preflight() {
         || printf '%s\n' "$canonical" | grep -F 'raw.githubusercontent.com/berlinguyinca/autospec/main/skills/' >/dev/null; then
         fail "startup preflight must not call a raw installer directly"
     fi
-    for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design; do
+    for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet; do
         for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
             body=$(extract_block "$f")
             [ -n "$body" ] || fail "$f missing ## Startup self-update section"
@@ -228,7 +228,7 @@ check_startup_preflight() {
 # prompts/ path AND the new skills/ slash-command registry path.
 check_codex_skills_install() {
     info "codex skills-dir install: all skills"
-    for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design; do
+    for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet; do
         f="skills/$s/install.sh"
         grep -q 'skills/\$SKILL_NAME/SKILL\.md' "$f" \
             || fail "$f missing Codex skills-dir install (skills/\$SKILL_NAME/SKILL.md)"
@@ -243,7 +243,7 @@ check_codex_skills_install() {
 check_shared_script_install() {
     info "shared helper install: all skills"
     helpers="autospec-stop.sh autospec-usage-limit.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh"
-    for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design; do
+    for s in autospec autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet; do
         f="skills/$s/install.sh"
         grep -q 'install_shared_scripts' "$f" \
             || fail "$f missing install_shared_scripts function/call"
