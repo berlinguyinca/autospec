@@ -17,7 +17,7 @@ setup() {
     export OPENCODE_CONFIG_DIR="$FAKE_HOME/.config/opencode"
     export CODEX_HOME="$FAKE_HOME/.codex"
 
-    SKILLS="autospec autospec-split autospec-define autospec-run autospec-classify autospec-listen autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa"
+    SKILLS="autospec autospec-release autospec-split autospec-define autospec-run autospec-classify autospec-listen autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa"
     HELPERS="autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh autospec-sweep-wizard.sh autospec-sweep-run.sh autospec-sweep-review.sh run-state.sh list-ready-issues.sh claim-issue.sh release-issue.sh"
 }
 

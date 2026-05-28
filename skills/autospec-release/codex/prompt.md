@@ -1,0 +1,220 @@
+
+# autospec-release workflow
+
+Run the repo-level release readiness loop. This is the "I want to ship the
+current repo" wrapper over the existing autospec surfaces: sweep, review, run,
+test, QA, proof validation, documentation drift checks, and legacy-code cleanup.
+
+Use this when the operator wants one explicit release gate instead of invoking
+each lower-level skill by hand.
+
+## Startup self-update
+
+```bash
+#!/usr/bin/env bash
+# autospec-startup-self-update — see docs/specs/2026-05-01-autospec-startup-self-update-design.md
+set +e
+SKILL_NAME=autospec-release   # per-skill: autospec-define / autospec-run / autospec-listen / autospec-classify
+if [ "${AUTOSPEC_NO_SELF_UPDATE:-0}" = "1" ]; then exit 0; fi
+mkdir -p "$HOME/.autospec"
+LOCKDIR="$HOME/.autospec/.update.lock.d"
+LAST="$HOME/.autospec/last-update-check"
+INSTALLED="$HOME/.autospec/installed-version"
+NOW=$(date -u +%s)
+if [ -f "$LAST" ]; then
+    PREV=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$(cat "$LAST" 2>/dev/null)" +%s 2>/dev/null \
+        || date -u -d "$(cat "$LAST" 2>/dev/null)" +%s 2>/dev/null || echo 0)
+    if [ "$((NOW - PREV))" -lt 86400 ]; then exit 0; fi
+fi
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    echo "WARN: self-update skipped (concurrent update in progress)" >&2; exit 0
+fi
+trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT
+date -u +'%Y-%m-%dT%H:%M:%SZ' > "$LAST.tmp" && mv "$LAST.tmp" "$LAST"
+REMOTE=$(curl -fsSL --max-time 5 \
+    "https://api.github.com/repos/berlinguyinca/autospec/commits/main" \
+    2>/dev/null | jq -r '.sha // empty' 2>/dev/null | cut -c1-7)
+if [ -z "$REMOTE" ]; then
+    echo "WARN: self-update skipped (network); continuing on installed version" >&2; exit 0
+fi
+LOCAL=$(cat "$INSTALLED" 2>/dev/null || true)
+if [ "$REMOTE" = "$LOCAL" ]; then exit 0; fi
+curl -fsSL --max-time 30 \
+    "https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh" \
+    | bash -s -- --skill all --harness all --update >/dev/null 2>&1
+RC=$?
+if [ "$RC" -ne 0 ]; then
+    echo "WARN: self-update skipped (install rc=$RC); continuing on installed version" >&2; exit 0
+fi
+printf '%s\n' "$REMOTE" > "$INSTALLED.tmp" && mv "$INSTALLED.tmp" "$INSTALLED"
+# Auto-init cross-tool memory (idempotent, <50ms fast-path)
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/auto-init-memory.sh"
+echo "[autospec] updated ${LOCAL:-fresh} → $REMOTE"
+```
+
+## Self-update mode
+
+If the feature-request argument matches `update` after trimming and lowercasing,
+re-install the full autospec suite from `main`, show the before/after diff if the
+harness exposes it, then stop. Do not run the release gate.
+
+## Required capabilities & harness adapter
+
+| Capability | Claude Code | OpenCode | Codex CLI | Fallback if missing |
+| --- | --- | --- | --- | --- |
+| Subagent model tier | Tier A: `opus` + ultrathink | Tier A: top-tier `task` + max reasoning | Tier A: current top GPT + `reasoning_effort=high` | Run inline, but keep the same PASS/PARTIAL/FAIL contract |
+| Existing autospec skills | Slash skills | agent prompts | skills/prompts | Run the matching workflow instructions inline |
+| GitHub operations | `gh` through shell | shell | shell | Mark merge/issue steps BLOCKED with exact command |
+| Test and QA execution | Browser/E2E or shell | browser/task or shell | shell/browser when available | Mark app-only checks NOT TESTED with blocker |
+
+**Model tier:** TIER_A for release synthesis and final readiness verdicts
+because a false PASS can ship broken behavior.
+
+## Harness detection
+
+Detect the harness once at skill start:
+
+1. Claude Code: `Agent` with `subagent_type` is available.
+   - `TIER_A` = `opus` + ultrathink.
+   - `TIER_B` = `sonnet`.
+2. OpenCode: `task` tool is available.
+   - `TIER_A` = top-tier task model + high reasoning.
+   - `TIER_B` = smaller-tier task model + medium reasoning.
+3. Codex CLI: `apply_patch` is the primary edit tool.
+   - `TIER_A` = current top GPT + `reasoning_effort=high`.
+   - `TIER_B` = current cost-optimized Codex model + `reasoning_effort=medium`.
+
+Prefer a Tier A reviewer/verifier subagent for the final release verdict when
+the harness supports it. If `TIER_A` is unavailable, silently fall back to the
+next available top-tier model. If delegation is unavailable, run the verdict
+inline.
+
+## When to use
+
+- The repo has existing specs, issues, code, and docs, and the operator asks
+  "can we release this?"
+- A project needs QA, review, testing, documentation drift checks, and legacy
+  cleanup in one coordinated pass.
+- Lower-level autospec skills have been run piecemeal and the operator wants a
+  single release-readiness answer.
+- The team wants a repeatable gate before tagging, deployment, or handoff.
+
+## When not to use
+
+- Do not use this as the first step for a brand-new feature idea. Use
+  `/autospec` or `/autospec-define`.
+- Do not use it as a replacement for `/autospec-stop` while a monitor is active.
+- Do not mark release PASS with mocked tests only when a no-mock smoke path is
+  required by the repo contract.
+- Do not paper over legacy code by leaving stale spec/docs references behind.
+
+## Release pipeline
+
+Run these stages in order. If a lower-level skill is installed and invocable,
+call that skill. If not, follow its documented workflow inline and report that
+the explicit skill invocation was unavailable.
+
+1. Preflight
+   - Record branch, dirty files, remotes, GitHub repo, open PRs, open
+     `auto-implement` and `needs-classify` issues, and installed autospec skill
+     versions if visible.
+   - Do not revert user work. If dirty files exist, treat them as current repo
+     reality and avoid overwriting them.
+
+2. Sweep
+   - Run `/autospec-sweep` or the equivalent sweep workflow.
+   - Ensure `.autospec/autospec.yml` and the latest sweep report exist when the
+     repo is configured for sweeps.
+   - Turn recurring drift into concrete spec, issue, test, or docs work.
+
+3. Spec, docs, and story sync
+   - Compare `docs/specs/**`, README docs, user-facing docs, config docs, and
+     implementation reality.
+   - Remove stale claims for legacy code, legacy storage, deprecated APIs,
+     removed flags, dead routes, and old workflows.
+   - If behavior still exists only for compatibility, document that explicitly
+     as compatibility, not as the preferred path.
+
+4. Review
+   - Run `/autospec-review`.
+   - File or surface high-priority regression issues for spec-vs-code gaps.
+   - Do not proceed to PASS while untriaged release-blocking review findings
+     remain.
+
+5. Implementation queue
+   - Run `/autospec-classify` if `needs-classify` issues exist.
+   - Run `/autospec-run` until there are no ready release-blocking
+     `auto-implement` issues, or until a blocker is documented with the exact
+     issue number and command to resume.
+
+6. Test gate
+   - Run `/autospec-test` where available.
+   - Require lint, typecheck, unit, integration, smoke, E2E, and static checks
+     that the target repo defines as release gates.
+   - Failed tests are work, not report decoration: fix them or create a
+     release-blocking issue with exact reproduction.
+
+7. QA proof
+   - Run `/autospec-qa` against the configured local or deployed app.
+   - Require control-level proof for text boxes, selects, dropdowns, buttons,
+     validation, API effects, failure banners, fallback behavior, accessibility,
+     and no-mock smoke paths where the repo contract requires them.
+   - Validate QA artifacts with
+     `skills/autospec-shared/scripts/validate-qa-artifacts.sh` when available.
+
+8. Legacy cleanup gate
+   - Search code, specs, docs, tests, fixtures, config, infra, and examples for
+     removed or deprecated behavior.
+   - Delete dead code when tests prove it is unreachable.
+   - Remove stale spec/docs references in the same change that removes the code.
+   - If a legacy path cannot be removed yet, create a deprecation issue that
+     names the owner, replacement path, and removal trigger.
+
+9. Final release verdict
+   - `PASS`: all release gates pass, no release-blocking issues remain, no
+     untested required no-mock path remains, docs match behavior, and legacy
+     cleanup is either complete or explicitly tracked.
+   - `PARTIAL`: useful progress landed, but at least one required gate is not
+     tested or externally blocked.
+   - `FAIL`: a release-blocking test, QA path, review finding, docs mismatch,
+     or legacy conflict remains.
+
+## Legacy cleanup prompt
+
+Use this prompt whenever code, config, docs, tests, specs, infra, or examples
+mention a deprecated path:
+
+```text
+Before accepting this release:
+
+1. Is this path still reachable in the product, CLI, API, deployment, tests, or
+   docs?
+2. Is it the preferred path, a compatibility shim, or dead code?
+3. Does the spec still describe it as current behavior?
+4. Does any test fixture, README, runbook, env var, script, or infra module keep
+   it alive accidentally?
+5. What is the replacement path and where is that replacement proven?
+6. Can I delete it now? If not, what exact issue tracks removal and what event
+   will make removal safe?
+
+Required outcome:
+- Preferred path: keep it and prove it.
+- Compatibility path: label and document it as compatibility only.
+- Dead path: delete it and remove matching spec/docs/tests references.
+- Unknown path: mark release PARTIAL and create the smallest investigation or
+  cleanup issue needed to settle it.
+```
+
+## Release report contract
+
+Return a concise report with:
+
+- Verdict: `PASS`, `PARTIAL`, or `FAIL`.
+- Branch and commit range reviewed.
+- Skills/stages run, with command evidence.
+- Changed files and simplifications made, if edits were performed.
+- Test, QA, docs, review, and legacy-cleanup evidence.
+- Remaining blockers with exact issue numbers or next commands.
+- Known `NOT TESTED` areas, separated from tested evidence.
+
+Never say the repo is release-ready unless the evidence above is complete.
