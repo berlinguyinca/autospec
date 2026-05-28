@@ -17,6 +17,14 @@
 - Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
 - Status: tracked config mode. Creates `.autospec/autospec.yml`, asks project-specific setup questions from repo findings, keeps specs synchronized with implementation reality, and routes improvement gaps through `autospec-review`, issues, and `/autospec-run`.
 
+## autospec-fleet
+
+- Path: [`skills/autospec-fleet`](skills/autospec-fleet)
+- Trigger: use when an operator wants to supervise autospec-run across multiple GitHub repositories from an empty workspace.
+- Activation keywords: `autospec-fleet`, `fleet init`, `fleet run`, `fleet status`, `fleet stop`, `run autospec across repos`
+- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
+- Status: workspace-level fleet supervisor. `init` records GitHub repo URLs, config schemas validate `autospec-fleet.yml` and `~/.autospec/fleet-node.yml`, `run --dry-run` builds per-repo `/autospec-run --profile ... --worker-id fleet:<node>:<repo>` commands, `status --json` summarizes queues, and `stop --graceful|--immediate` forwards existing stop behavior to active managed checkouts.
+
 ## autospec-listen
 
 - Path: [`skills/autospec-listen`](skills/autospec-listen)
