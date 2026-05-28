@@ -655,6 +655,13 @@ check_phase4_single_agent_discipline() {
         || fail "$impl missing 'single-agent' assumption in prompt body"
     grep -F 'Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool' "$impl" >/dev/null \
         || fail "$impl missing canonical subagent-Agent-inheritance constraint sentence"
+    bats_file="tests/phase4/test_single_agent_discipline.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-single-agent-discipline.log 2>&1 \
+            || { cat /tmp/validate-single-agent-discipline.log >&2; fail "$bats_file: failed"; }
+    fi
 }
 
 # Phase 4 adaptive-retry loop: the implementer prompt block must contain the
