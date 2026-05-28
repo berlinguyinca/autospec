@@ -1,0 +1,11 @@
+{
+  "ready": [
+    { "number": 202, "title": "Repo B ready issue" }
+  ],
+  "blocked": [],
+  "claimed": [],
+  "conflicts": [],
+  "batch": [
+    { "number": 202, "title": "Repo B ready issue" }
+  ]
+}
