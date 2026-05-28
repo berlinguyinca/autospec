@@ -276,7 +276,7 @@ Run a structured brainstorm — one question at a time, get explicit approval af
 2. **Interactivity / API shape** — how does the user/caller drive it; commands, keys, endpoints, fields.
 3. **Data model** — types, columns, persistence boundary.
 4. **Error handling** — failure modes, recovery, user-visible signals.
-5. **Testing** — unit / integration / e2e split, real services vs anything else (rule per AGENTS.md: real services).
+5. **Testing** — unit / integration / e2e split, real services vs anything else (rule per AGENTS.md: real services). For app/UI work, include an `autospec-qa` revalidation plan that maps each spec requirement to running-app checks for text inputs, validation, selects/dropdowns, buttons, forms, API effects, accessibility, responsive behavior, negative paths, regenerated automated tests, proof artifacts, reliability contract, control intent ledger, no-mock minimum coverage, mutation/breakage proof, duplicate-code review, post-merge canary, new-code intent checks, artifact freshness, evidence provenance, console/network error gates, spec contradiction detection, data lifecycle proof, observability, flake quarantine, legacy removal/spec cleanup, and reliability exhaustion loop.
 
 Write the agreed design to `docs/specs/YYYY-MM-DD-<topic>-design.md`, then run a **fresh-eyes self-review** before any issue is filed:
 

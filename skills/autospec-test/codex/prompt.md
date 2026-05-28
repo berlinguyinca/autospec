@@ -106,6 +106,66 @@ UI/product E2E tests, import its intent and preserve these minimum anchors:
   deployed/dev smoke paths whenever the target contract permits it.
 - **Outcome assertions:** tests prove visible domain results and absence of
   live-failure banners, not just clickability or request dispatch.
+- **User input intent review:** for every input-like control, ask what it is
+  for, why it exists, how users should use it, what request/state/result it
+  affects, how invalid/rejected input behaves, and whether evidence from the
+  running app proves it was implemented and tested correctly.
+- **Live backend blocker triage:** before leaving no-mock smoke `NOT TESTED`,
+  search safe config surfaces, avoid printing secret values, clean temporary
+  credential material, probe health/status/fleet paths when available, and
+  classify the blocker as credentials, infrastructure health, route mental
+  model, or route-specific worker/handler failure.
+- **Proof artifacts:** emit or draft `.autospec/proof-matrix.json`,
+  `.autospec/reliability.yml`, `.autospec/control-intent-ledger.json`,
+  `.autospec/mutation-proof.json`, and `.autospec/canary-results.json` so spec
+  rows connect to implementation files, tests, live evidence, blockers, and
+  follow-ups.
+- **Reliability contract:** backend-backed features declare required live smoke
+  workflows, representative inputs, seed/live data, allowed mocks, required
+  no-mock paths, health probes, fallback behavior, forbidden URLs, and forbidden
+  false-green patterns.
+- **Control intent ledger:** every reachable control is classified as
+  functional, read_only, decorative, or unclassified; unclassified controls keep
+  the result PARTIAL or FAIL.
+- **Duplicate-code guardian:** generated components, helpers, validators, API
+  clients, request wrappers, error banners, fixtures, and test utilities are
+  checked against existing repo patterns before acceptance.
+- **Mutation/breakage proof:** at least one critical workflow per feature proves
+  the test fails when request propagation, result rendering, fallback behavior,
+  persistence, or backend responses are broken.
+- **Post-merge deployed canary:** when a deployed/dev URL exists, representative
+  no-mock workflows are defined for post-merge verification and failed canaries
+  create regression issues with route classification.
+- **New code intent gate:** every new component, module, function, endpoint,
+  worker, hook, or test helper has a spec-linked reason, reuse check, public
+  contract, proof test, and "what breaks if wrong" answer.
+- **Artifact freshness:** proof artifacts record commit SHA, spec hash,
+  environment/app URL, test command hash when practical, and generation time;
+  stale artifacts cannot support PASS.
+- **Evidence provenance:** every PASS cites inspectable evidence such as test
+  file/name, command output, screenshot/video/trace/log path, network summary,
+  deployed URL, representative input, or backend probe result.
+- **Console/network gate:** unexpected frontend exceptions, failed network calls,
+  runtime warnings, generic live-failure banners, swallowed errors, or timeouts
+  fail the workflow unless they are the explicit negative path under test.
+- **Spec contradiction detector:** conflicting, untestable, UI/API-mismatched,
+  or data-missing requirements become AMBIGUOUS/PARTIAL with follow-up.
+- **Data lifecycle proof:** stateful features prove create, refresh, edit,
+  delete, rollback, idempotency, navigation, and relevant concurrency behavior.
+- **Observability contract:** backend-backed workflows expose enough safe health,
+  timing, correlation, and user-safe error information to triage failed canaries
+  without leaking secrets or PII.
+- **Flake quarantine:** retries, sleeps, widened timeouts, and reruns are
+  classified as product race, selector fragility, backend instability,
+  environment issue, or test oracle weakness before acceptance.
+- **Reliability exhaustion loop:** repeatedly ask what else could make the app
+  unreliable, duplicated, or falsely green; every actionable answer becomes a
+  fix, stronger test, proof update, contract update, or follow-up issue.
+- **Legacy removal and spec cleanup:** when a spec or accepted architecture
+  deprecates a route, cache, bucket, storage backend, worker, feature flag,
+  config key, UI path, or data source, generated tests and fixes must prove the
+  replacement path and remove stale code/spec/docs references instead of
+  repopulating or relying on the deprecated surface.
 - **Backend fragility:** `502` bridge/proxy/cache failures require regression
   coverage plus either a documented fallback route or a clear actionable user
   state; mocked endpoint success is not proof of deployed workflow success.

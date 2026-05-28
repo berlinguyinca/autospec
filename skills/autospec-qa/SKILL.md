@@ -130,6 +130,498 @@ contract and the deployed user-visible result:
    tests must follow the user-visible workflow and document the stable backend
    contract they prove.
 
+## No-mock deployed smoke blocker handling
+
+If a required no-mock deployed/dev smoke path is `NOT TESTED`, the final verdict
+must be `PARTIAL` unless the target repo's explicit test contract says that
+workflow intentionally has no deployed smoke requirement.
+
+Do not leave a no-mock smoke gap as a prose-only "remaining risk." For every
+`NOT TESTED` no-mock smoke row, create or draft one of:
+
+1. An environment setup issue/task that names the missing dev URL or env var,
+   representative seed/live data, credential requirements, backup/restore
+   constraints, and exact smoke workflow command or Playwright scenario.
+2. A test contract update in `.autospec/test.yml`, `docs/**`, or the repo's
+   equivalent QA contract explaining why deployed smoke is intentionally
+   unavailable for that workflow.
+3. An operator-blocker line with the exact missing configuration and the next
+   command to rerun once it exists.
+
+If a dev URL and representative data are supplied, run the no-mock smoke test
+instead of drafting setup work. If credentials or data are missing, keep the
+traceability row `NOT TESTED`, keep the overall result `PARTIAL`, and make the
+setup artifact the required next action.
+
+## Presentational control classification
+
+Example chips, demo shortcuts, taxonomy tokens, conversion presets, and similar
+controls must be classified before the report is finalized:
+
+- `decorative/presentational`: assert that the element has no action contract,
+  no request side effect, and is either documented or clearly inert.
+- `workflow control`: verify request contract, mocked happy path, no-mock smoke
+  path, success-state result, failure-banner absence, and known-fragile-backend
+  fallback behavior.
+
+Do not report presentational chips as a vague risk. Either prove they are
+intentionally decorative or file/draft the issue that wires and tests them as
+real controls.
+
+## User input element intent prompt
+
+Use this prompt every time the app creates, changes, tests, or audits any
+user-input element, including text boxes, textareas, selects, dropdowns,
+comboboxes, checkboxes, radio buttons, switches, date/time inputs, file inputs,
+search boxes, filters, sliders, segmented controls, editable tables, chips, or
+other controls that accept or change user intent:
+
+```text
+For this user input element, answer before accepting the implementation or test:
+
+1. What is this control for?
+2. Which user goal or spec requirement does it serve?
+3. How should a real user discover and use it?
+4. What valid, invalid, empty, boundary, and recovery inputs must work?
+5. What request payload, query, route, command, state change, persistence effect,
+   or visible result should change when the user changes this input?
+6. What should happen when the backend rejects, times out, or partially accepts
+   this input?
+7. Is this control intentionally read-only, disabled, decorative, or
+   presentational? If yes, where is that contract documented?
+8. Did I implement and test this correctly, with evidence from the running app
+   rather than only DOM presence or mocked request dispatch?
+
+Required outcome:
+- If the control is functional, tests must cover discoverability, enabled/disabled
+  state, valid input, invalid input, boundary input, request/output effect,
+  success state, error state, and recovery.
+- If the control is decorative or read-only, the QA report must classify it that
+  way and cite the spec, UI copy, or test contract that makes this intentional.
+- If the answers are unclear, mark the traceability row AMBIGUOUS or PARTIAL and
+  draft the smallest spec/test/implementation follow-up needed to settle it.
+```
+
+## Live backend blocker triage prompt
+
+When a no-mock deployed/dev smoke path is blocked by missing config, unknown
+credentials, `502`, `504`, timeout, bridge, queue, worker, proxy, or backend
+health errors, do not stop at "credentials unavailable" or "live backend not
+tested" until you have made a bounded, non-secret-leaking config search.
+
+```text
+For this live backend blocker, answer before finalizing the QA report:
+
+1. Where does the app define its deployed/dev base URL, API endpoint, worker
+   endpoint, queue/bridge URL, and environment-specific service names?
+2. Are these values available through safe config surfaces such as Terraform
+   outputs, deployment manifests, CI variables, documented env vars, cloud
+   resource names, or local `.env.example` files?
+3. If credentials are required, which secret names or credential sources are
+   referenced, and can the smoke test use them without printing secret values?
+4. If temporary credential files or tokens are created for probing, were they
+   stored outside the repo, restricted, and removed after the probe?
+5. Is the failure caused by missing credentials, stopped infrastructure,
+   unhealthy bridge/proxy, missing worker, wrong route mental model, or a live
+   handler/index path that times out?
+6. Can a direct health/status/fleet/ping probe distinguish infrastructure
+   outage from a route-specific worker failure?
+7. Which no-mock smoke paths now pass with real domain data, and which exact
+   route/subject still fails?
+8. What operator action, infrastructure fix, worker fix, or fallback behavior is
+   required next?
+
+Required outcome:
+- Never print secret values in the QA report, logs, issue body, or test output.
+- If credentials/config are discoverable, run the no-mock smoke instead of
+  leaving it `NOT TESTED`.
+- If infrastructure was stopped or unhealthy and can be safely started by the
+  target repo's documented dev procedure, record the action and rerun the smoke.
+- If broad health probes pass but one route/subject times out, classify the
+  blocker as a route-specific live worker/handler failure, not missing
+  credentials.
+- Report passed live paths and the remaining failing path separately.
+```
+
+## Proof artifact requirements
+
+The QA pass should produce machine-readable proof artifacts whenever the target
+repo permits writing under `.autospec/`. If the repo is read-only, draft the
+artifact contents in the report.
+
+Required artifacts:
+
+- `.autospec/proof-matrix.json`: one row per spec requirement with fields for
+  `requirement_id`, `spec_reference`, `expected_behavior`,
+  `implementation_files`, `automated_tests`, `live_evidence`, `status`,
+  `blocker`, and `follow_up`.
+- `.autospec/reliability.yml`: the generated app reliability contract,
+  including required live smoke workflows, representative inputs, seed/live data
+  sources, allowed mocks, required no-mock paths, health probes, expected
+  fallback behavior, forbidden production URLs, and forbidden false-green
+  conditions such as "PASS from DOM presence only."
+- `.autospec/control-intent-ledger.json`: every discovered user input, button,
+  link, chip, dropdown, form, modal trigger, table action, and workflow control
+  classified as `functional`, `read_only`, `decorative`, or `unclassified`, with
+  intent, owning spec reference, selector/locator, expected effect, tests, and
+  evidence.
+- `.autospec/mutation-proof.json`: critical workflow assertions that were
+  intentionally broken or simulated and proved that the test suite fails when
+  the implementation regresses.
+- `.autospec/canary-results.json`: post-merge or deployed/dev no-mock canary
+  results for representative workflows when a deployed/dev environment exists.
+
+Validate written artifacts against the matching repository schemas when tooling
+is available:
+
+- `schemas/autospec-proof-matrix.schema.json`
+- `schemas/autospec-reliability.schema.json`
+- `schemas/autospec-control-intent-ledger.schema.json`
+- `schemas/autospec-mutation-proof.schema.json`
+- `schemas/autospec-canary-results.schema.json`
+
+Use `scripts/validate-qa-artifacts.sh --repo <target-repo>` when the autospec
+repository helper is available. It validates present `.autospec/*` proof files
+and fails malformed artifacts while warning about missing draft-only artifacts.
+
+Hard gate: a QA result cannot be `PASS` if `.autospec/proof-matrix.json` has a
+`FAIL`, `PARTIAL`, `NOT_TESTED`, `AMBIGUOUS`, or unblocked `unclassified` row.
+
+## Artifact freshness gate
+
+Every proof artifact must carry freshness metadata:
+
+- repository commit SHA,
+- spec file path,
+- spec hash,
+- app URL or environment,
+- test command hash when practical,
+- generation timestamp.
+
+Before accepting an artifact, compare its freshness metadata to the current
+checkout and tested environment. If the spec, implementation, app URL, or test
+command changed after the artifact was generated, mark the artifact stale and
+the affected rows `PARTIAL` until regenerated.
+
+## Evidence provenance gate
+
+Every `PASS` must cite provenance that another reviewer can inspect:
+
+- test file and test name,
+- command and result,
+- screenshot, video, trace, or log path when relevant,
+- network request/response summary,
+- deployed/dev URL and representative input for no-mock smoke,
+- backend health/probe result when backend behavior is claimed.
+
+No provenance means no `PASS`. Request dispatch alone, DOM presence alone, a
+generic result panel change, or a mocked-only response is not sufficient
+provenance for backend-backed behavior.
+
+## Console and network error gate
+
+For each browser or deployed/dev workflow, inspect console and network signals.
+The workflow fails unless the error is the explicit negative path under test:
+
+- uncaught frontend exceptions,
+- failed network calls,
+- hydration/runtime warnings that affect the route,
+- generic live-failure banners,
+- unexpected retries, timeouts, or aborted requests,
+- swallowed errors that leave stale UI.
+
+Record expected negative-path failures separately from unexpected errors.
+
+## Spec contradiction detector
+
+Before implementation, test generation, or final QA, scan the spec and current
+UI/API behavior for contradictions:
+
+- two requirements conflict,
+- an acceptance criterion is not testable,
+- UI copy implies behavior the spec does not mention,
+- backend/API contract contradicts product wording,
+- error/fallback behavior is unspecified for a required workflow,
+- required seed/live data is missing for a no-mock path.
+
+Contradictions become `AMBIGUOUS` rows with a proposed resolution and a
+spec/config follow-up before implementation is called complete.
+
+## Data lifecycle proof
+
+For CRUD, stateful, or workflow apps, prove the data lifecycle:
+
+- create persists after refresh,
+- edit propagates to list/detail/search/export views,
+- delete/remove is reflected everywhere without ghost UI state,
+- failed writes roll back optimistic UI,
+- retries are idempotent or visibly safe,
+- browser back/forward and deep links preserve expected state,
+- concurrent or rapid repeated actions do not corrupt state.
+
+If the app has persistence but lacks lifecycle evidence, keep the affected
+feature `PARTIAL`.
+
+## Observability contract
+
+Generated apps must expose enough safe diagnostics to debug failed QA and
+canaries:
+
+- request correlation IDs across frontend/backend where practical,
+- frontend error boundary logging,
+- backend route/worker timing,
+- health/status endpoints or probes,
+- user-safe actionable error messages,
+- logs that identify route/worker/cache/database class without exposing
+  secrets or PII.
+
+Missing observability does not automatically fail a pure UI feature, but it is a
+blocking gap for backend-backed workflows whose failures cannot otherwise be
+triaged.
+
+## Flake quarantine rule
+
+Do not accept "green after retry" as reliable without classification. If a test
+uses retries, sleeps, widened timeouts, or repeated reruns to pass, classify the
+flake as one of:
+
+- product race,
+- selector fragility,
+- backend instability,
+- environment issue,
+- test oracle weakness.
+
+Then either fix it, quarantine it with a follow-up issue and owner, or keep the
+affected proof row `PARTIAL`.
+
+## Additional reliability surfaces
+
+Keep looking for reliability gaps beyond the obvious UI happy path:
+
+- route/screen inventory: every spec screen and reachable route has coverage or
+  a documented exclusion,
+- API contract replay: frontend requests match OpenAPI/schema/server contracts
+  when available,
+- auth and permission matrix: each role can and cannot perform the expected
+  actions,
+- timezone, locale, browser, viewport, and device variance for date/format/UI
+  sensitive features,
+- performance budgets for primary workflows,
+- destructive action safety: confirmation, undo/restore, scoped production
+  protections, and backup/restore where relevant,
+- dead-code and generated-artifact cleanup after implementation,
+- dependency/security scan for newly added packages or SDK use,
+- migration/backward-compatibility proof for schema or persisted-data changes,
+- test oracle specificity: assertions name the domain result, not generic text
+  or "something changed."
+
+## Reliability exhaustion loop
+
+Before finalizing, ask: "What else could make this generated app unreliable,
+duplicated, or falsely green against the spec?"
+
+Repeat until the next answer is only:
+
+- already covered by a proof artifact, test, canary, or follow-up issue,
+- impossible to verify from available safe environments and recorded as an
+  operator blocker,
+- outside the accepted scope and filed as a separate spec issue,
+- lower value than the documented risk tolerance in `.autospec/reliability.yml`.
+
+Each actionable answer must become a strengthened test, implementation fix,
+proof-artifact update, reliability-contract update, or follow-up issue.
+
+## Generated app reliability contract prompt
+
+Before declaring a generated app reliable, create or validate
+`.autospec/reliability.yml`:
+
+```text
+For this app, define the reliability contract:
+
+1. Which user workflows are required live smokes?
+2. Which representative inputs and seed/live data prove each workflow?
+3. Which tests may mock APIs, and which workflows require no-mock deployed/dev
+   execution?
+4. Which health probes distinguish app, API, queue, bridge, worker, cache,
+   database, and external-service failures?
+5. Which backend failures require fallback behavior, and what visible state
+   proves the fallback worked?
+6. Which production or unsafe URLs are forbidden during tests?
+7. Which false-green patterns are forbidden, such as DOM-only PASS, request-only
+   PASS, mocked-only PASS, or screenshot-only PASS?
+
+Required outcome:
+- If the contract is missing, draft it.
+- If the contract conflicts with the spec, mark the affected rows PARTIAL and
+  file a spec/config follow-up.
+- If no deployed/dev environment exists, require an explicit contract entry
+  explaining the blocker and exact setup action.
+```
+
+## Control intent ledger prompt
+
+The UI audit must not rely on a vague list of "controls covered." Build a
+control intent ledger:
+
+```text
+For every reachable control, record:
+
+- selector or stable locator
+- visible label and accessible name
+- control type
+- classification: functional, read_only, decorative, or unclassified
+- spec requirement served
+- expected request/state/persistence/result effect
+- validation and error behavior
+- tests proving the effect
+- live no-mock evidence when required
+- follow-up issue or blocker if not fully proven
+
+Required outcome:
+- Functional controls need request/output/result/failure coverage.
+- Read-only and decorative controls need an explicit documented reason.
+- Any unclassified control makes the QA result PARTIAL or FAIL.
+```
+
+## Duplicate-code guardian prompt
+
+Before accepting generated code or regenerated tests, challenge duplication:
+
+```text
+For each new component, function, module, API client, validator, form helper,
+error handler, backend wrapper, fixture, or test utility:
+
+1. Search the repo for existing helpers or patterns that already solve this.
+2. If a duplicate exists, reuse it or explain why it is insufficient.
+3. If the new code remains, identify its owning spec requirement and public
+   contract.
+4. Block duplicate API clients, duplicate validators, duplicate form state
+   logic, duplicate error banners, duplicate request wrappers, and duplicated
+   test fixtures unless the issue/spec explicitly requires a fork.
+
+Required outcome:
+- Duplication findings become implementation fixes or `DUPLICATE_CODE`
+  follow-up issues with file references.
+```
+
+## Mutation and breakage proof prompt
+
+For every critical user workflow, prove that the test would fail if the product
+were broken:
+
+```text
+For this workflow test, simulate or reason through one minimal break:
+
+1. Break request payload/query propagation.
+2. Break the visible result rendering.
+3. Return a known backend failure such as `502`, `504`, timeout, empty data, or
+   validation rejection.
+4. Disable the fallback route or error banner.
+5. Remove persistence or state update.
+
+Required outcome:
+- At least one critical workflow per feature has mutation/breakage evidence.
+- If a test still passes after the behavior is broken, strengthen the assertion
+  before accepting the QA result.
+- Record the result in `.autospec/mutation-proof.json` or the QA report.
+```
+
+## Post-merge deployed canary prompt
+
+When a deployed/dev URL exists, define the post-merge canary before release:
+
+```text
+For this feature, list the smallest deployed/dev workflow set that must run
+after merge or deploy:
+
+- route or screen
+- representative input
+- expected live API/backend path
+- expected visible domain result
+- failure banners that must not appear
+- health probes to run if the canary fails
+- issue label or escalation path for a failed canary
+
+Required outcome:
+- A missing canary for a backend-backed feature is PARTIAL unless the reliability
+  contract explicitly exempts it.
+- A failed canary creates a regression issue with logs, route classification,
+  and live evidence.
+```
+
+## No-mock minimum coverage prompt
+
+Mocked tests are not enough for backend-backed features:
+
+```text
+For every spec feature that depends on backend behavior, identify the minimum
+no-mock path that proves real integration:
+
+- one representative happy path,
+- one known fragile backend path or fallback path,
+- one visible success result,
+- one absence-of-generic-failure assertion.
+
+Required outcome:
+- If no no-mock path exists, update `.autospec/reliability.yml` with the blocker
+  and setup action.
+- If the app has only mocked coverage, do not mark the backend-backed feature
+  PASS.
+```
+
+## New code intent gate
+
+Every new component, module, function, endpoint, worker, hook, or test helper
+must answer why it exists:
+
+```text
+For this new code unit:
+
+1. Which spec requirement or issue acceptance criterion owns it?
+2. Why is an existing helper, component, service, or test utility not enough?
+3. What is the smallest public contract this unit exposes?
+4. What automated test and, when applicable, live workflow proves it?
+5. What would break if this unit were wrong?
+
+Required outcome:
+- If there is no spec-linked reason, remove the code or file a scope/spec issue.
+- If there is an existing helper, prefer reuse over a new abstraction.
+```
+
+## Legacy removal and spec cleanup gate
+
+When the current spec, operator direction, or accepted architecture deprecates a
+route, cache, bucket, storage backend, worker, feature flag, config key, UI path,
+or data source, autospec must remove the legacy surface and its spec/docs
+references instead of making the deprecated path work again.
+
+```text
+For each legacy or deprecated surface:
+
+1. What replaced it, and where is that replacement specified?
+2. Which code paths, feature flags, env vars, infrastructure resources, docs,
+   tests, fixtures, runbooks, and specs still reference the legacy surface?
+3. Did any smoke/test/repair step try to make the app pass by repopulating,
+   restarting, or relying on the deprecated surface?
+4. What data migration, cleanup, or compatibility window is required before
+   removal?
+5. Which tests prove the replacement path works and the legacy path is no longer
+   used?
+6. Which specs or docs were updated to remove or mark the legacy behavior as
+   intentionally unsupported?
+
+Required outcome:
+- Do not populate deprecated caches, buckets, queues, indexes, or fallback stores
+  just to make a live smoke pass.
+- If a deployed environment still depends on a deprecated surface, mark the row
+  PARTIAL/FAIL and file an implementation/infrastructure cleanup issue.
+- Remove stale spec/docs references in the same change when implementation
+  removes legacy behavior.
+- If compatibility must remain temporarily, document the sunset condition,
+  owner, and follow-up issue; tests must still prove the new canonical path.
+```
+
 ## Critical self-questioning checkpoint
 
 Before finalizing the QA report or accepting regenerated tests, stop and answer
@@ -148,6 +640,30 @@ these questions in the working notes:
 6. Does the test prove the intended domain result, or only that a generic panel
    changed?
 7. What is the single highest-risk missing test I can add now?
+8. Did I search safe deployment/config surfaces deeply enough to distinguish
+   missing credentials from stopped infrastructure or a route-specific worker
+   failure?
+9. Did I emit proof artifacts that connect the spec, implementation, tests,
+   live evidence, and remaining blockers?
+10. Did I challenge duplicated code and require a spec-linked reason for every
+   new code unit?
+11. Did I prove at least one critical workflow test fails when the workflow is
+   intentionally broken?
+12. Are the proof artifacts fresh for the current commit, spec hash, app URL,
+   environment, and test command?
+13. Does every PASS have evidence provenance a reviewer can inspect?
+14. Did browser console and network inspection reveal any unexpected errors?
+15. Did I resolve or file spec contradictions before treating behavior as done?
+16. For stateful features, did I prove the data lifecycle across create, refresh,
+   edit, delete, rollback, and navigation?
+17. Is there enough observability to debug a failed canary without exposing
+   secrets or PII?
+18. Did I classify every retry, sleep, timeout increase, or flaky rerun instead
+   of accepting green-after-retry?
+19. What else could make this generated app unreliable, duplicated, or falsely
+   green against the spec?
+20. Did I remove deprecated code paths and stale spec/docs references instead of
+   reviving a legacy cache, bucket, route, worker, or fallback to make QA pass?
 
 If any answer identifies a material gap, add the narrowest test for it or file a
 follow-up issue with reproduction steps. Do not silently leave it as an
@@ -209,6 +725,34 @@ payload/query, run a mocked happy path, run a no-mock deployed/dev smoke path
 with representative input, assert no live-failure banner appears, and assert a
 real domain result is visible.
 
+For every user input element, run the User Input Intent Prompt: identify what
+the control is for, why it exists, how it should be used, what request/state/
+visible result it should affect, how invalid or rejected input behaves, whether
+it is intentionally decorative/read-only, and whether running-app evidence proves
+it was implemented and tested correctly.
+
+When live backend smoke is blocked by config, credentials, bridge/queue errors,
+timeouts, or stopped services, run the Live Backend Blocker Triage Prompt before
+declaring `NOT TESTED`. Search safe config surfaces, do not print secret values,
+clean up temporary credential material, separate passed live paths from failing
+routes, and classify whether the blocker is credentials, infrastructure health,
+route mental model, or a route-specific worker/handler failure.
+
+Create or draft the proof artifacts: `.autospec/proof-matrix.json`,
+`.autospec/reliability.yml`, `.autospec/control-intent-ledger.json`,
+`.autospec/mutation-proof.json`, and `.autospec/canary-results.json` when a
+deployed/dev canary exists. Use them to prevent false PASS results: unclassified
+controls, missing backend no-mock coverage, missing mutation proof, duplicated
+code, or missing code intent keep the result PARTIAL or FAIL until resolved.
+Validate artifacts against their schemas when possible, reject stale artifacts,
+require evidence provenance for every PASS, fail unexpected console/network
+errors, detect spec contradictions, prove data lifecycle for stateful features,
+require observability for backend-backed workflows, classify flakes, and run the
+Reliability Exhaustion Loop until all actionable reliability ideas are handled
+or explicitly filed. Run the Legacy Removal and Spec Cleanup Gate whenever a
+workflow touches a deprecated route, cache, bucket, storage backend, worker,
+feature flag, config key, UI path, or data source.
+
 3. Form and Validation Testing
 For every form/input test valid input, empty input, invalid input, boundary
 values, very long text, special characters, whitespace-only values, duplicates,
@@ -254,6 +798,30 @@ dependent screens, and complete full user journeys.
 Identify missing unit, integration, component, E2E, accessibility, and API
 contract tests. For each missing test, state exactly what it should assert.
 
+11. Reliability and Maintainability Proof
+Validate the reliability contract, proof matrix, control intent ledger,
+duplicate-code guardian findings, mutation/breakage proof, post-merge canary,
+no-mock minimum coverage, and new-code intent gate. Treat these as required
+spec-compliance evidence, not optional cleanup.
+
+12. Freshness, Provenance, and Runtime Error Testing
+Validate artifact freshness against the current commit/spec/environment, require
+reviewable evidence provenance for every PASS, fail unexpected console/network
+errors, classify retries/flakes, and record stale or unverifiable artifacts as
+PARTIAL.
+
+13. Spec, Data, Observability, and Exhaustion Testing
+Detect spec contradictions, prove create/edit/delete/refresh/rollback/navigation
+lifecycles for stateful features, verify observability for backend-backed
+workflows, and run the Reliability Exhaustion Loop until no new actionable
+quality ideas remain.
+
+14. Legacy Removal and Spec Cleanup
+Identify deprecated routes, caches, buckets, fallback stores, workers, config
+keys, UI paths, and data sources. Verify the canonical replacement works, the
+legacy path is not repopulated or relied on, stale specs/docs/tests are removed
+or marked unsupported, and any temporary compatibility has a sunset issue.
+
 Execution rules:
 - Do not assume a feature works because code appears to exist.
 - Do not mark PASS without concrete evidence.
@@ -274,6 +842,33 @@ Final report:
 ## Spec Traceability Matrix
 | Requirement | Expected Behavior | Test Performed | Result | Evidence | Notes |
 |---|---|---|---|---|---|
+## Proof Artifacts
+List `.autospec/proof-matrix.json`, `.autospec/reliability.yml`,
+`.autospec/control-intent-ledger.json`, `.autospec/mutation-proof.json`, and
+`.autospec/canary-results.json`, or state why each artifact was drafted inline
+instead of written.
+## Artifact Freshness and Evidence Provenance
+List commit/spec/environment/test-command freshness checks and the exact
+evidence cited for each PASS row.
+## Runtime Error and Flake Classification
+List console errors, network failures, runtime warnings, retries, sleeps,
+timeouts, flake classification, and fixes or quarantines.
+## Spec Contradictions
+List contradictory or untestable requirements, UI/API/spec mismatches, proposed
+resolution, and follow-up issue or spec edit.
+## Data Lifecycle Proof
+List create, refresh, edit, delete, rollback, idempotency, navigation, and
+concurrency evidence for stateful workflows.
+## Observability Contract
+List correlation IDs, health probes, error boundary behavior, backend timing,
+logs, user-safe messages, and any missing diagnostic hooks.
+## Reliability Exhaustion Loop
+List each "what else could make this unreliable, duplicated, or falsely green?"
+answer and how it was handled.
+## Legacy Removal and Spec Cleanup
+List deprecated surfaces found, replacement path, code/config/docs/spec/tests
+removed or updated, data cleanup or migration action, compatibility window if
+any, and evidence that QA did not revive the legacy path.
 ## Bugs and Gaps
 For each issue include severity, area, spec reference, steps to reproduce,
 expected, actual, evidence, and suggested fix.
@@ -283,6 +878,38 @@ modal, table/list, and other control.
 ## Validation Coverage
 List every validation rule tested, including valid, invalid, boundary, and
 recovery behavior.
+## User Input Intent Review
+List every input-like control and answer: what it is for, why it exists, how a
+user should use it, expected request/state/result effect, invalid/rejected-input
+behavior, decorative/read-only status if applicable, and evidence that it was
+implemented and tested correctly.
+## No-Mock Deployed Smoke Coverage
+List every deployed/dev smoke workflow, live URL/config used, representative
+input/data, result, and blocker. Any required `NOT TESTED` no-mock smoke row
+forces Overall result: PARTIAL unless the QA contract explicitly exempts it.
+## Live Backend Blocker Triage
+For each blocked live path, list safe config sources checked, secret names or
+credential sources referenced without values, temporary credential cleanup,
+health/status/fleet probes, passed real-data endpoints, remaining failing route
+or subject, root-cause classification, and next operator or implementation
+action.
+## Presentational Control Classification
+List each example chip, shortcut, preset, or token-like control as
+decorative/presentational or workflow control, with the evidence or follow-up
+issue/task.
+## Duplicate-Code Guardian
+List duplicated or near-duplicated components, helpers, validators, API clients,
+request wrappers, error banners, fixtures, and test utilities, with reused
+alternatives or follow-up fixes.
+## Mutation and Breakage Proof
+List critical workflow tests, the simulated break or mutation, expected failing
+assertion, observed result, and strengthening performed if the test stayed green.
+## Post-Merge Deployed Canary
+List required canary workflows, representative input, deployed/dev URL, expected
+domain result, result, and regression issue/action for failures.
+## New Code Intent Gate
+List new code units reviewed, owning spec/AC, reason existing helpers were not
+enough, public contract, proof test, and what would break if wrong.
 ## Accessibility Findings
 Include keyboard, focus, labels, contrast, ARIA, and screen-reader concerns.
 ## Cross-Browser / Responsive Findings
@@ -303,6 +930,28 @@ After the audit:
    - a product bug fix,
    - a regenerated/strengthened automated test,
    - a follow-up GitHub issue when implementation scope is too large.
+   A required no-mock deployed smoke row that remains `NOT TESTED` must produce
+   an environment setup issue/task, a QA contract update, or an operator-blocker
+   line with exact rerun instructions.
+   Any input-like control with an unanswered User Input Intent Prompt must
+   produce a strengthened test, implementation fix, spec clarification, or
+   follow-up issue.
+   A blocked live-backend row must run the Live Backend Blocker Triage Prompt
+   first and then produce either real no-mock smoke evidence or a classified
+   credentials/infrastructure/route/worker blocker.
+   Missing proof artifacts, unclassified controls, duplicated generated code,
+   missing mutation/breakage proof, missing canary, missing no-mock minimum
+   coverage, and unanswered new-code intent gates must each produce a
+   strengthened test, implementation fix, reliability contract update, or
+   follow-up issue.
+   Stale artifacts, missing evidence provenance, unexpected console/network
+   errors, unresolved spec contradictions, missing data lifecycle proof, missing
+   observability for backend-backed failures, unclassified flakes, and any
+   actionable Reliability Exhaustion Loop answer must also produce a fix,
+   stronger test, proof update, contract update, or follow-up issue.
+   Any deprecated surface still referenced by code, config, specs, docs, tests,
+   fixtures, infrastructure, or live-smoke repair steps must produce removal,
+   spec cleanup, migration work, or a sunset follow-up before PASS.
 2. Regenerate tests in the narrowest existing harness:
    - unit tests for pure functions and validation rules,
    - integration/API tests for server-side validation and persistence,
@@ -323,6 +972,9 @@ Return:
 - Tests added/changed.
 - Product bugs fixed, if any.
 - Follow-up issues filed or drafted.
+- Proof artifacts written or drafted.
+- Reliability contract, control ledger, mutation proof, canary, duplicate-code,
+  and new-code intent status.
 - Commands run and results.
 - Remaining risks.
 
