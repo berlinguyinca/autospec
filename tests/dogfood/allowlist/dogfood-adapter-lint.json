@@ -1,14 +1,1 @@
-[
-  {
-    "file": "scripts/qa-finding-filter.sh",
-    "function": "-",
-    "rule_id": "COMPLEXITY",
-    "justification": "Multi-bucket finding partition (verified/stale/unverified) — extract would add indirection without simplification (issue #651)"
-  },
-  {
-    "file": "scripts/qa-verify-finding.sh",
-    "function": "-",
-    "rule_id": "COMPLEXITY",
-    "justification": "Per-category probe dispatcher (missing_function/failing_test/spec_mismatch/regression) — each branch is a different external tool, not extractable into a table (issue #651)"
-  }
-]
+[]
