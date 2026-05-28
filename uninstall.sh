@@ -12,7 +12,7 @@
 #   ./uninstall.sh --help                          # show this help
 #
 # Flags:
-#   --skill   one of: autospec | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | autospec-sweep | autospec-design | autospec-fleet | all
+#   --skill   one of: autospec | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | autospec-sweep | autospec-design | autospec-fleet | autospec-qa | all
 #             (default: all)
 #   --harness one of: claude | opencode | codex | all
 #             (default: all)
@@ -24,7 +24,7 @@
 
 set -eu
 
-ALL_SKILLS="autospec autospec-split autospec-define autospec-run autospec-review autospec-classify autospec-listen autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet"
+ALL_SKILLS="autospec autospec-split autospec-define autospec-run autospec-review autospec-classify autospec-listen autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa"
 ALL_HARNESSES="claude opencode codex"
 
 SKILL_ARG="all"
@@ -67,7 +67,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "$SKILL_ARG" in
-    all|autospec|autospec-split|autospec-define|autospec-run|autospec-review|autospec-classify|autospec-listen|autospec-story|autospec-stop|autospec-sweep|autospec-design|autospec-fleet) ;;
+    all|autospec|autospec-split|autospec-define|autospec-run|autospec-review|autospec-classify|autospec-listen|autospec-story|autospec-stop|autospec-sweep|autospec-design|autospec-fleet|autospec-qa) ;;
     *)
         err "invalid --skill: $SKILL_ARG"
         exit 2

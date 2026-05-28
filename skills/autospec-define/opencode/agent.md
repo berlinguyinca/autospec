@@ -288,6 +288,7 @@ Write the agreed design to `docs/specs/YYYY-MM-DD-<topic>-design.md`, then run a
 2. **Internal consistency** — re-read each section in order. Do any two sections contradict each other? Does the architecture match the feature descriptions? Fix inline.
 3. **Ambiguity** — could any requirement be interpreted two different ways? Pick one and make it explicit in the spec text.
 4. **Scope** — is this focused enough for a single multi-issue pipeline, or does it span independent subsystems that each need their own `/autospec-define` run? If the latter, stop and ask the operator to decompose before proceeding.
+5. **Critical improvement** — ask: "What else could fail even if this spec and its obvious tests pass, and how could this be better?" Add the highest-risk answer to Testing, Acceptance Criteria, or Review counter-team. For app/UI work, explicitly consider mocked-vs-deployed behavior, backend fallbacks, user-visible outcomes, and no-mock smoke coverage.
 
 The spec must be implementable end-to-end by an agent reading only the spec.
 

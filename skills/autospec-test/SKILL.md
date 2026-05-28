@@ -74,9 +74,48 @@ Auto-merge or block
 
 **Stage 2 — E2E:** Three metrics: code coverage from E2E run (Metric A, thresholds 90/85/90), UI element coverage (Metric B — every reachable `button/a/input/select/textarea/[contenteditable]` touched by Playwright), and behavior taxonomy (Metric D — at least one passing test per declared category: sort, scroll, upload, download, filter, paginate, bulk_select, keyboard_nav, drag_drop).
 
+**Spec-compliance QA audit:** For UI/product features, Stage 2 must also use
+the `autospec-qa` prompt shape when generating or healing E2E coverage: extract
+the spec into a traceability matrix, interact with the running app like a user,
+cover text boxes, textareas, selects, dropdowns, checkboxes, radio buttons,
+buttons, links, forms, validation, state changes, API effects, accessibility,
+responsive layouts, negative paths, and cross-feature flows, then regenerate
+tests for every missing or weak behavior. Do not mark a spec requirement PASS
+from code inspection alone.
+
+**No-mock deployed smoke:** Mocked API tests are necessary but insufficient for
+workflow buttons and dropdowns. For each workflow action, Stage 2 should include
+a deterministic mocked happy path plus a no-mock smoke path against the
+configured deployed/dev URL when the target contract permits it. The smoke path
+must assert no live-failure banner, a visible domain result, request
+payload/query changes from selected values, and recovery or actionable UI for
+known backend failure signatures such as `502` bridge/proxy outages.
+
 **Self-heal loop:** Up to 5 iterations, 60 minutes of coding time (paused while tests run). Each iteration classifies failures (missing_unit_test, missing_test, failing_unit_test, failing_test, flaky_test, selector_brittle, product_bug) and picks the highest-priority cluster that fits remaining budget. Loop state persisted in `.autospec/test-loop-state.json` in the worktree so monitor relaunches resume rather than reset.
 
 **Assertion-shift guardrail:** AST + regex pass over all modified test files. LOOSENING changes block auto-merge (adds `needs-human-review` + `e2e:assertion-loosening`). SHIFTING is conditionally allowed if the same commit also modifies a non-test source file and includes `JUSTIFICATION:` in the commit message. STRENGTHENING always allowed.
+
+## Spec-compliance QA prompt
+
+`autospec-qa` is the canonical full prompt for spec-to-running-app QA. Do not
+duplicate that full prompt here. When Stage 2 or the self-heal loop generates
+UI/product E2E tests, import its intent and preserve these minimum anchors:
+
+- **Spec traceability:** every spec requirement maps to expected behavior,
+  evidence, and PASS/FAIL/PARTIAL/NOT TESTED status.
+- **UI controls:** text inputs, textareas, selects, dropdowns, checkboxes,
+  radio buttons, buttons, links, forms, validation, state changes, responsive
+  layouts, and accessibility are exercised as user-visible behavior.
+- **No-mock deployed smoke:** mocked happy paths are paired with no-mock
+  deployed/dev smoke paths whenever the target contract permits it.
+- **Outcome assertions:** tests prove visible domain results and absence of
+  live-failure banners, not just clickability or request dispatch.
+- **Backend fragility:** `502` bridge/proxy/cache failures require regression
+  coverage plus either a documented fallback route or a clear actionable user
+  state; mocked endpoint success is not proof of deployed workflow success.
+- **Critical self-question:** before accepting green tests, ask: "What could
+  still pass here while a real user workflow fails?" Add one test or issue for
+  the highest-risk answer.
 
 ## Contract file
 

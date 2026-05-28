@@ -59,13 +59,14 @@ selected model and harness to execute reliably.
 | [`autospec-define`](skills/autospec-define/README.md) | You want planning only before implementation starts. | Produces a design spec plus classified `auto-implement` issues, then hands off to `/autospec-run`. |
 | [`autospec-split`](skills/autospec-split/README.md) | You already have a tracked `docs/specs/*.md` design spec. | Turns the existing spec into an EPIC plus linked child issues, then stops after classification. |
 | [`autospec-run`](skills/autospec-run/README.md) | You already have an `auto-implement` queue. | Runs the implementation monitor, opens PRs, reviews, validates, and merges. |
-| [`autospec-fleet`](skills/autospec-fleet/README.md) | You want to run autospec across multiple GitHub repositories from one workspace. | `/autospec-fleet init` records repo URLs, fleet scripts validate config, and fleet run/status/stop coordinate per-repo `/autospec-run` workers. |
+| [`autospec-fleet`](skills/autospec-fleet/README.md) | You want to prepare multi-repo autospec supervision. | Provides config schemas/linting, URL path planning, dry-run `/autospec-run` command generation, JSON status, stop forwarding, and smoke tests. |
 | [`autospec-classify`](skills/autospec-classify/README.md) | Existing issues need model-fit labels. | Adds `ctx:*` and `reasoning:*` labels, inserts a `## Model fit` block, and promotes `needs-classify` issues. |
 | [`autospec-listen`](skills/autospec-listen/README.md) | You want chat phrases like "file an issue" to become tracked work. | Drafts issues for approval or routes spec requests into `/autospec-define`. |
 | [`autospec-story`](skills/autospec-story/README.md) | You need a repo-level product and implementation-state overview. | Produces a cited Markdown story from local specs, docs, issues, PRs, and git history. |
 | [`autospec-stop`](skills/autospec-stop/README.md) | You need to halt or resume an active monitor. | Writes the shared stop sentinel, pauses issues safely, reports status, or resumes paused work. |
 | [`autospec-review`](skills/autospec-review/README.md) | You want to close the spec-vs-code feedback loop. | Audits specs against issues, finds gaps, files `[REGRESSION]` issues with `priority:high`. |
 | [`autospec-test`](skills/autospec-test/README.md) | You want every Phase 4 PR gated on unit + E2E coverage with auto-heal. | Runs a two-stage coverage gate, auto-heals gaps within a 60-min budget, and blocks assertion-loosening rewrites before auto-merge. |
+| [`autospec-qa`](skills/autospec-qa/README.md) | You want to revalidate a running app against its spec and regenerate weak tests. | Builds a spec traceability matrix, exercises UI/API/accessibility/validation flows, and turns gaps into stronger tests or follow-up issues. |
 | [`autospec-design`](skills/autospec-design/README.md) | You want the repo's UI anchored to a known vendor design language (Apple, Linear, Stripe, etc.). | Fetches a `DESIGN.md` from the `berlinguyinca/awesome-design-md` catalog via `suggest`, `apply`, and `migrate` subcommands, writes `DESIGN.md` to the project root on a feature branch, and optionally hands off a per-component migration spec to `/autospec-define`. |
 
 See [`SKILLS.md`](SKILLS.md) for activation keywords and per-skill routing
@@ -303,15 +304,19 @@ Full end-to-end workflow:
 /autospec "add OIDC support behind a feature flag"
 ```
 
-Fleet workflow:
+Fleet helper workflow:
 
 ```text
-mkdir fleet-workspace
-cd fleet-workspace
-/autospec-fleet init https://github.com/org/repo-a https://github.com/org/repo-b
-/autospec-fleet run --profile claude-sonnet-cloud --dry-run
-/autospec-fleet status
+bash skills/autospec-fleet/scripts/fleet-init.sh --dry-run --workspace .autospec-fleet/repos \
+  https://github.com/org/repo-a https://github.com/org/repo-b
+bash skills/autospec-fleet/scripts/fleet-config-lint.sh --config path/to/autospec-fleet.yml
+bash skills/autospec-fleet/scripts/fleet-run.sh --config path/to/autospec-fleet.yml --dry-run --once
+bash skills/autospec-fleet/scripts/fleet-status.sh --config path/to/autospec-fleet.yml --json
 ```
+
+`autospec-fleet` currently exposes helper scripts for planning and dry-run
+coordination. Live repository clone/sync and worker launch are not implemented
+yet.
 
 The monitor:
 
