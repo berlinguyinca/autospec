@@ -140,12 +140,25 @@ EOF
 #
 # Emit the classifier JSON object. All fields always present.
 emit_classify_json() {
-    # $1=match(true|false) $2=skill $3=trigger $4=intent $5=confidence
-    match="$1"; skill="$2"; trigger="$3"; intent="$4"; conf="$5"
+    # $1=match(true|false) $2=skill $3=trigger $4=intent $5=confidence $6=autonomous(true|false, optional)
+    match="$1"; skill="$2"; trigger="$3"; intent="$4"; conf="$5"; autonomous="${6:-false}"
     skill_json="null"; [ -n "$skill" ] && skill_json="\"$skill\""
     trigger_json="null"; [ -n "$trigger" ] && trigger_json="\"$trigger\""
-    printf '{"match":%s,"skill":%s,"trigger":%s,"intent":"%s","confidence":%s}\n' \
-        "$match" "$skill_json" "$trigger_json" "$intent" "$conf"
+    printf '{"match":%s,"skill":%s,"trigger":%s,"intent":"%s","confidence":%s,"autonomous":%s}\n' \
+        "$match" "$skill_json" "$trigger_json" "$intent" "$conf" "$autonomous"
+}
+
+# Autonomous-phrase detection (issue #662): scan the lowercased text for
+# operator phrasing that maps to --autonomous routing. Returns 0 (autonomous)
+# or 1 (not autonomous).
+is_autonomous_phrase() {
+    needle="$1"
+    # Patterns: "fix X automatically", "just do it", "no confirmation",
+    # "non-interactive", "go autonomous", "autonomous mode", "run autonomously",
+    # "do it automatically", "without asking".
+    printf '%s' "$needle" | grep -qE 'automatically|just do it|no confirmation|non-interactive|non interactive|go autonomous|autonomous mode|run autonomously|without asking|without confirmation' \
+        && return 0
+    return 1
 }
 
 # Whole-word match of a single token in the (already lower-cased) needle.
@@ -227,6 +240,14 @@ is_imperative() {
 classify_phrase() {
     text_lc="$(to_lower "$1")"
 
+    # Autonomous-phrase detection (issue #662). If the text contains an
+    # autonomous-routing phrase, mark autonomous=true and proceed; if no verb
+    # matches downstream, default to /autospec autonomous-end-to-end.
+    is_auto="false"
+    if is_autonomous_phrase "$text_lc"; then
+        is_auto="true"
+    fi
+
     # Back-compat: explicit "file an issue" / "write a spec" phrases are
     # already imperative triggers and bypass the verb intent-gate (they route
     # to autospec-define, the listen skill's define handoff).
@@ -234,14 +255,14 @@ classify_phrase() {
 $(parse_trigger_md "Issue triggers")
 EOF
     then
-        emit_classify_json true autospec-define issue imperative 0.6
+        emit_classify_json true autospec-define issue imperative 0.6 "$is_auto"
         return 0
     fi
     if match_against_list "$text_lc" <<EOF
 $(parse_trigger_md "Spec triggers")
 EOF
     then
-        emit_classify_json true autospec-define spec imperative 0.6
+        emit_classify_json true autospec-define spec imperative 0.6 "$is_auto"
         return 0
     fi
 
@@ -267,17 +288,23 @@ EOF
         skill="autospec-review"; trigger="review"
     fi
 
-    # No verb matched (and no back-compat phrase above) — non-match.
+    # No verb matched — but if autonomous-phrasing is present AND the request
+    # is imperative, default-route to the /autospec umbrella with autonomous=true
+    # so the operator gets the end-to-end pipeline.
     if [ -z "$skill" ]; then
-        emit_classify_json false "" "" none 0
+        if [ "$is_auto" = "true" ] && is_imperative "$text_lc"; then
+            emit_classify_json true autospec autospec imperative 0.6 true
+        else
+            emit_classify_json false "" "" none 0 false
+        fi
         return 0
     fi
 
     # A verb matched — apply the intent gate.
     if is_imperative "$text_lc"; then
-        emit_classify_json true "$skill" "$trigger" imperative 0.8
+        emit_classify_json true "$skill" "$trigger" imperative 0.8 "$is_auto"
     else
-        emit_classify_json false "$skill" "$trigger" incidental 0.2
+        emit_classify_json false "$skill" "$trigger" incidental 0.2 false
     fi
 }
 
