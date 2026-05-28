@@ -1126,6 +1126,11 @@ check_dogfood_detectors() {
         || fail ".autospec/dogfood.yml: missing (issue #646 adapter registry)"
     grep -q '^adapters:' .autospec/dogfood.yml \
         || fail ".autospec/dogfood.yml: missing 'adapters:' schema (issue #646)"
+    # The adapter scripts remain available for ad-hoc local runs even when
+    # they are intentionally unregistered in dogfood.yml (PR-time tools
+    # without a diff context cannot anchor a CI gate — see dogfood.yml
+    # rationale comment). Presence + executability + syntax are still
+    # checked; registration is no longer required.
     for adapter in scripts/dogfood-adapter-doc-drift.sh scripts/dogfood-adapter-lint.sh; do
         [ -f "$adapter" ] \
             || fail "$adapter: required adapter missing (issue #646)"
@@ -1133,8 +1138,6 @@ check_dogfood_detectors() {
             || fail "$adapter: adapter not executable (issue #646)"
         bash -n "$adapter" \
             || fail "$adapter: bash syntax error (issue #646)"
-        grep -q "$(basename "$adapter")" .autospec/dogfood.yml \
-            || fail ".autospec/dogfood.yml: missing registration for $(basename "$adapter")"
     done
 
     info "dogfood detectors: running driver against this repo"

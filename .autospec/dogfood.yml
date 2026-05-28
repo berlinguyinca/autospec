@@ -21,17 +21,19 @@
 #   tests/dogfood/allowlist/dogfood-adapter-doc-drift.json
 #   tests/dogfood/allowlist/dogfood-adapter-lint.json
 
-# PR-time detectors (doc-drift, lint-implementation) need a diff to make
-# sense. The dogfood gate runs on `main` where there is no PR diff, so the
-# adapters use clean-tree semantics: doc-drift runs `--working-tree` and
-# lint runs against `git diff --cached`. On a clean checkout both return
-# zero findings. Earlier baseline-pin and HEAD~1..HEAD designs both
-# accumulated noise as `main` advanced (issues #651 + follow-up). The
-# real PR-time enforcement still happens in the pre-commit hook and in
-# the fused guardian/LGTM reviewer at PR time.
+# PR-time detectors (doc-drift, lint-implementation) are deliberately NOT
+# registered here. They need a diff context to operate, which the dogfood
+# gate (running on `main` against a clean tree) cannot provide. Earlier
+# attempts to wrap them as dogfood adapters all failed in shape — HEAD~1
+# slides every merge, pinned baselines accumulate findings, and clean-
+# tree mode catches nothing in CI. Real PR-time enforcement still happens
+# in the pre-commit hook and the fused guardian/LGTM reviewer at PR time.
+#
+# The adapter scripts at `scripts/dogfood-adapter-{doc-drift,lint}.sh`
+# remain available for ad-hoc local runs (e.g. an operator who wants to
+# scan their own staged tree). They are simply not in the CI gate.
+#
+# Future adapters should be whole-repo invariant scanners (like
+# qa-brute-force-sweep), not diff-based PR-time tools.
 
-adapters:
-  - detector: skills/autospec-shared/scripts/check-doc-drift.sh
-    adapter:  scripts/dogfood-adapter-doc-drift.sh
-  - detector: scripts/lint-implementation.sh
-    adapter:  scripts/dogfood-adapter-lint.sh
+adapters: []
