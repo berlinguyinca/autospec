@@ -69,3 +69,22 @@ repo_checkout_path() {
     slug="$(repo_slug "$normalized")" || return 2
     printf '%s/%s\n' "${workspace%/}" "$slug"
 }
+
+fleet_worker_id() {
+    local node_id="${1:-}"
+    local normalized="${2:-}"
+    local slug
+
+    [ -n "$node_id" ] || node_id="local"
+    slug="$(repo_slug "$normalized")" || return 2
+    printf 'fleet:%s:%s\n' "$node_id" "$slug"
+}
+
+autospec_run_command() {
+    local profile="${1:-}"
+    local worker_id="${2:-}"
+
+    [ -n "$profile" ] || { printf 'fleet: profile is required\n' >&2; return 2; }
+    [ -n "$worker_id" ] || { printf 'fleet: worker ID is required\n' >&2; return 2; }
+    printf '/autospec-run --profile %s --worker-id %s\n' "$profile" "$worker_id"
+}
