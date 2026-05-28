@@ -629,11 +629,14 @@ check_phase4_immediate_next_issue_pickup() {
 # operators into nested-dispatch. The phase4-implementer.md prompt must also
 # state the single-agent assumption explicitly.
 check_phase4_single_agent_discipline() {
-    info "phase4 single-agent absorbed-discipline: autospec-run trio"
+    info "phase4 single-agent absorbed-discipline: autospec-run + autospec trios"
     for f in \
         skills/autospec-run/SKILL.md \
         skills/autospec-run/codex/prompt.md \
-        skills/autospec-run/opencode/agent.md
+        skills/autospec-run/opencode/agent.md \
+        skills/autospec/SKILL.md \
+        skills/autospec/codex/prompt.md \
+        skills/autospec/opencode/agent.md
     do
         [ -f "$f" ] || fail "$f: required file missing"
         grep -F 'Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool' "$f" >/dev/null \

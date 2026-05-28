@@ -622,6 +622,8 @@ Record this durable preference in `AGENTS.md` (idempotent — skip if already pr
 
 **Off-peak tip:** For queues of 10+ issues (8+ hour runs), consider launching at night or on weekends. Usage limits are shared across all sessions — running long batches off-peak preserves daytime tokens for interactive work.
 
+**Single-agent absorbed-discipline (canonical Phase 4 path).** The monitor agent IS the implementer for the issue it claims — expand → implement → finalize → peer-review → evaluate-findings → PR → merge — all in one agent's context. The main session orchestrator relaunches the monitor between issues so each one gets a fresh top-level `Agent` call with full tool access. **Constraint:** Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool, so a backgrounded monitor cannot dispatch its own inner implementer. Phase 4 implementers must be top-level agents launched directly by the main session orchestrator, not nested inside a monitor. The `process(ISSUE)` notation below is shorthand for "the monitor agent now does the implementation work itself in this same context", NOT a nested subagent dispatch. `AUTOSPEC_BATCH_SIZE` semantics are preserved: a single agent can still process up to N issues sequentially within its 40-tool-call budget, exiting with `BATCH_COMPLETE` when the budget is approaching or after N issues, whichever comes first.
+
 Then launch a **background monitor loop** — the orchestrator relaunches the monitor with fresh context after each batch of `AUTOSPEC_BATCH_SIZE` issues (default: 3). The monitor is stateless: all persistent state lives in GitHub labels and heartbeat files, so relaunches are always safe.
 
 ```
@@ -794,7 +796,7 @@ Pass the following prompt verbatim to each background subagent:
 >   echo "[monitor] goal: ${ISSUE_GOAL:-<not provided>}"
 >   echo "[monitor] smoke: ${ISSUE_SMOKE:-<not provided>}"
 >   echo "[monitor] scope: ${ISSUE_SCOPE:-<not provided>}"
->   process(ISSUE)   # foreground subagent — see template below
+>   process(ISSUE)   # single-agent absorbed-discipline — the monitor IS the implementer; see template below
 >   batch_issue_count=$((batch_issue_count + 1))
 >   if [ "$batch_issue_count" -ge "$BATCH_SIZE" ]; then
 >     printf '{"batch":%s,"processed":%s,"repo":"%s","ts":%s,"status":"BATCH_COMPLETE"}\n' \
@@ -808,7 +810,7 @@ Pass the following prompt verbatim to each background subagent:
 >   # by the merge or failure cleanup that just completed.
 > ```
 >
-> `process(ISSUE)` dispatches a **foreground subagent** (wait for return) with this prompt:
+> `process(ISSUE)` is single-agent absorbed-discipline: the monitor agent performs the implementation work itself, in-context, using the prompt below as its working brief. There is NO nested subagent dispatch here — subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool, so the monitor must own the work directly:
 >
 > ```
 > **Model tier:** `TIER_B` (implementation work) — cheaper model with medium thinking; resolved at startup. Silently fall back to `TIER_A` if unavailable.
