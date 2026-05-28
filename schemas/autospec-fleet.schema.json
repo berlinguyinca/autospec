@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-fleet.schema.json",
+  "title": "autospec-fleet desired state",
+  "description": "Schema for autospec-fleet.yml, the shared fleet desired-state file. It declares managed repositories, workspace placement, profile defaults, and optional config-repo sync metadata.",
+  "type": "object",
+  "required": ["version", "workspace", "repos"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "Fleet config schema version."
+    },
+    "workspace": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Directory where autospec-fleet stores managed repository checkouts."
+    },
+    "default_profile": {
+      "$ref": "#/$defs/profile_name",
+      "description": "Profile used by repos that do not set an explicit profile."
+    },
+    "parallel_repos": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Maximum number of repositories this desired state permits a node to run concurrently."
+    },
+    "sync": {
+      "type": "object",
+      "description": "Optional Git-backed desired-state distribution settings.",
+      "additionalProperties": false,
+      "properties": {
+        "config_repo": {
+          "$ref": "#/$defs/repo_url",
+          "description": "Git repository URL containing the canonical fleet config."
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Branch, tag, or ref to fetch from the config repository."
+        }
+      }
+    },
+    "repos": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Target repositories managed by this fleet.",
+      "items": {
+        "type": "object",
+        "required": ["url"],
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "$ref": "#/$defs/repo_url",
+            "description": "HTTPS or SSH GitHub repository URL."
+          },
+          "profile": {
+            "$ref": "#/$defs/profile_name",
+            "description": "Model profile override for this repository."
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "When false, fleet status may report the repo but run scheduling skips it."
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "profile_name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "repo_url": {
+      "type": "string",
+      "minLength": 1,
+      "anyOf": [
+        {
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$"
+        },
+        {
+          "pattern": "^git@github\\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$"
+        }
+      ]
+    }
+  }
+}
