@@ -1036,6 +1036,34 @@ check_dogfood_detectors() {
     fi
 }
 
+# Verify-first discipline gate (issue #643): both helper scripts must exist,
+# be executable, pass bash -n, and all 3 autospec-qa adapter files must
+# reference the two new section headings + both script paths. The bats
+# fixture suite is run as part of the gate.
+check_qa_verify_first_discipline() {
+    info "qa verify-first discipline: scripts + adapter lockstep"
+    for s in scripts/qa-verify-finding.sh scripts/qa-cluster-coverage.sh; do
+        [ -f "$s" ] || fail "$s: file missing (issue #643)"
+        [ -x "$s" ] || fail "$s: file not executable (issue #643)"
+        bash -n "$s" || fail "$s: bash syntax error (issue #643)"
+    done
+    for trio in skills/autospec-qa/SKILL.md skills/autospec-qa/codex/prompt.md skills/autospec-qa/opencode/agent.md; do
+        grep -q '^## Verify-first discipline' "$trio" \
+            || fail "$trio missing '## Verify-first discipline' section (issue #643)"
+        grep -q '^## Cluster sizing' "$trio" \
+            || fail "$trio missing '## Cluster sizing' section (issue #643)"
+        grep -q 'qa-verify-finding\.sh' "$trio" \
+            || fail "$trio missing reference to qa-verify-finding.sh (issue #643)"
+        grep -q 'qa-cluster-coverage\.sh' "$trio" \
+            || fail "$trio missing reference to qa-cluster-coverage.sh (issue #643)"
+    done
+    if command -v bats >/dev/null 2>&1 && [ -f tests/qa/test_verify_first.bats ]; then
+        info "  running: tests/qa/test_verify_first.bats"
+        bats tests/qa/test_verify_first.bats >/tmp/validate-verify-first.log 2>&1 \
+            || { cat /tmp/validate-verify-first.log >&2; fail "tests/qa/test_verify_first.bats: failed"; }
+    fi
+}
+
 check_install_tests() {
     info "install tests: tests/install/*.sh"
     if [ -d tests/install ]; then
@@ -1108,6 +1136,7 @@ main() {
     check_autospec_qa_contract
     check_brute_force_rule_ids
     check_dogfood_detectors
+    check_qa_verify_first_discipline
     check_autospec_release_contract
     check_docs_amendment_presence
     check_install_tests

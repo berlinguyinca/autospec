@@ -806,6 +806,52 @@ continue. End-to-end regression: after the QA-filed rewrite issues run
 through `/autospec-run`, the offending files no longer trip either
 RULE_ID in the PR-time guardian.
 
+## Verify-first discipline
+
+Before any cluster emits a finding to `.autospec/qa-verdict.json`, the cluster
+MUST verify that the symptom still reproduces at current HEAD. This eliminates
+the dominant false-positive class observed in production: clusters re-flagging
+gaps that landed in a recent PR. Run the shared probe per candidate finding:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/qa-verify-finding.sh" \
+    --category <missing_function|missing_import|failing_test|spec_mismatch|regression> \
+    [--symbol <name>] [--file <path>] [--test-cmd <cmd>] \
+    [--spec <path>] [--impl <path>] [--claim <text>] [--commit <sha>]
+```
+
+Exit 0 means the finding still reproduces (KEEP and emit). Exit 1 means the
+symptom no longer reproduces (DROP and append to `verified_dropped[]` in the
+QA report). When ingesting prior-cycle findings from a previous
+`.autospec/qa-verdict.json`, run the same probe; drops go into
+`stale_dropped[]` rather than `verified_dropped[]`.
+
+Cluster cross-talk dedup: the QA orchestrator maintains
+`.autospec/qa-cluster-coverage.json` via the shared coverage helper. Each
+cluster MUST attempt to claim the `(file, spec_section, rule_id)` tuple it is
+about to scan; a second cluster racing on the same tuple receives exit 1
+("already claimed") and logs the skip as `cluster_skip_dedup`:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/qa-cluster-coverage.sh" \
+    claim --cluster <id> --file <path> --section <section> --rule <rule_id>
+```
+
+The final QA report MUST surface four explicit count fields so the operator
+can see what the discipline filtered: `findings_emitted`, `verified_dropped`,
+`stale_dropped`, `cluster_skip_dedup`.
+
+## Cluster sizing
+
+The QA orchestrator's cluster fan-out is a knob, not a constant. When the
+prior QA run dropped ≥30% of candidate findings on verification, prefer **3
+verify-first clusters** over **7 blind clusters** for the next run. A drop
+rate >50% means clusters are re-litigating the same closed gaps rather than
+exploring new surface; shrink the fan-out and let each cluster do deeper
+verification work. This is prose guidance to the orchestrator — no enforcement
+script — but the rule is non-negotiable for runs whose prior-cycle drop rate
+exceeded the threshold.
+
 ## Dogfood detectors driver
 
 When QA runs against the autospec repo itself, use `scripts/dogfood-detectors.sh` as the authoritative aggregated sweep rather than invoking individual `scripts/qa-*-sweep.sh` directly. The driver enforces an allowlist of intentional findings and fails on regression.
