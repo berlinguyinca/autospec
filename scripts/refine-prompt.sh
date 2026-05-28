@@ -1,0 +1,458 @@
+#!/usr/bin/env bash
+# scripts/refine-prompt.sh — autospec-refine orchestrator (issue #670).
+#
+# N-round prompt refinement with repo-grounded lenses. Each round applies one
+# named lens (deterministic text transformation in v1) and is recorded to a
+# JSON artifact at .autospec/refinements/<slug>-<ISO-timestamp>.json.
+#
+# Lenses (default order): repo-grounding → clarity-ac → sizing → adversarial.
+# If --rounds exceeds the lens list length, the adversarial lens repeats.
+#
+# Termination — round loop exits when ANY of:
+#   - converged          round N == round N-1 byte-identical
+#   - round_cap_reached  --rounds N capped at AUTOSPEC_REFINE_MAX_ROUNDS (10)
+#   - completed          all requested rounds executed cleanly
+#
+# Path allowlist — refuses paths matching .env, *credential*, *secret*, *.pem,
+# *.key, .git/, node_modules/. Violation surfaces as
+# `code_health:refine_path_violation` and exits 3.
+#
+# Exit codes:
+#   0  — happy path (completed | converged | round_cap_reached)
+#   2  — usage / bad args
+#   3  — code_health:refine_path_violation
+#   4  — empty prompt
+
+set -u
+
+usage() {
+    cat <<'EOF'
+Usage: refine-prompt.sh "<initial prompt>" [flags]
+       refine-prompt.sh --from-file <path>  [flags]
+
+Flags:
+  --rounds N             Number of refinement passes (default 3, cap 10).
+  --lenses <list>        Comma-separated lens order. Names:
+                         repo-grounding, clarity-ac, sizing, adversarial.
+  --from-file <path>     Read the initial prompt from a file.
+  --output <path>        Also write the final refined prompt to this file.
+  --dry-run              Skip handoff, write artifact only.
+  --artifact-dir DIR     Override .autospec/refinements (test hook).
+  --repo-root DIR        Override repo root (test hook).
+  --memory-root DIR      Override ~/.autospec/projects memory root (test hook).
+  --help                 Show this and exit.
+
+Environment:
+  AUTOSPEC_REFINE_MAX_ROUNDS    default 10
+EOF
+}
+
+# ── arg parsing ───────────────────────────────────────────────────
+PROMPT=""
+FROM_FILE=""
+ROUNDS=3
+LENSES_RAW=""
+OUTPUT=""
+DRY_RUN=0
+ARTIFACT_DIR=".autospec/refinements"
+REPO_ROOT="."
+MEMORY_ROOT="${HOME}/.autospec/projects"
+MAX_ROUNDS="${AUTOSPEC_REFINE_MAX_ROUNDS:-10}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rounds) ROUNDS="$2"; shift ;;
+        --lenses) LENSES_RAW="$2"; shift ;;
+        --from-file) FROM_FILE="$2"; shift ;;
+        --output) OUTPUT="$2"; shift ;;
+        --dry-run) DRY_RUN=1 ;;
+        --artifact-dir) ARTIFACT_DIR="$2"; shift ;;
+        --repo-root) REPO_ROOT="$2"; shift ;;
+        --memory-root) MEMORY_ROOT="$2"; shift ;;
+        --help|-h) usage; exit 0 ;;
+        --*) echo "refine-prompt: unknown flag: $1" >&2; usage >&2; exit 2 ;;
+        *)
+            if [ -z "$PROMPT" ]; then
+                PROMPT="$1"
+            else
+                echo "refine-prompt: extra positional arg: $1" >&2
+                exit 2
+            fi
+            ;;
+    esac
+    shift
+done
+
+if [ -n "$FROM_FILE" ] && [ -n "$PROMPT" ]; then
+    echo "refine-prompt: --from-file and positional prompt are mutually exclusive" >&2
+    exit 2
+fi
+
+if [ -n "$FROM_FILE" ]; then
+    if ! check_path_allowed "$FROM_FILE" 2>/dev/null; then : ; fi
+    # Path-allowlist check runs after function defs; defer to below.
+    FROM_FILE_RESOLVED="$FROM_FILE"
+fi
+
+# ── path allowlist ────────────────────────────────────────────────
+# Forbidden patterns: .env (exact basename or .env.*), *credential*, *secret*,
+# *.pem, *.key, .git/, node_modules/.
+check_path_allowed() {
+    local p="$1"
+    case "$p" in
+        *.env|*.env.*|*/.env|.env) return 1 ;;
+        *credential*|*Credential*|*CREDENTIAL*) return 1 ;;
+        *secret*|*Secret*|*SECRET*) return 1 ;;
+        *.pem|*.key) return 1 ;;
+        */.git/*|.git/*) return 1 ;;
+        */node_modules/*|node_modules/*) return 1 ;;
+    esac
+    return 0
+}
+
+safe_read() {
+    # Reads a file if allowed; otherwise emits the violation and exits 3.
+    local p="$1"
+    if ! check_path_allowed "$p"; then
+        echo "code_health:refine_path_violation path=$p" >&2
+        exit 3
+    fi
+    [ -f "$p" ] && cat "$p"
+}
+
+# Resolve from-file after function def.
+if [ -n "$FROM_FILE" ]; then
+    if ! check_path_allowed "$FROM_FILE"; then
+        echo "code_health:refine_path_violation path=$FROM_FILE" >&2
+        exit 3
+    fi
+    if [ ! -f "$FROM_FILE" ]; then
+        echo "refine-prompt: --from-file not found: $FROM_FILE" >&2
+        exit 2
+    fi
+    PROMPT="$(cat "$FROM_FILE")"
+fi
+
+if [ -z "$PROMPT" ]; then
+    echo "refine-prompt: empty prompt (provide a positional arg or --from-file)" >&2
+    exit 4
+fi
+
+# ── lens registry ─────────────────────────────────────────────────
+DEFAULT_LENSES="repo-grounding,clarity-ac,sizing,adversarial"
+if [ -z "$LENSES_RAW" ]; then
+    LENSES_RAW="$DEFAULT_LENSES"
+fi
+
+# Validate lens names.
+KNOWN_LENSES="repo-grounding clarity-ac sizing adversarial"
+IFS=',' read -r -a REQUESTED_LENSES <<< "$LENSES_RAW"
+for l in "${REQUESTED_LENSES[@]}"; do
+    case " $KNOWN_LENSES " in
+        *" $l "*) ;;
+        *) echo "refine-prompt: unknown lens: $l" >&2; exit 2 ;;
+    esac
+done
+
+# ── round-cap enforcement ─────────────────────────────────────────
+ROUNDS_REQUESTED="$ROUNDS"
+CAPPED=0
+if [ "$ROUNDS" -gt "$MAX_ROUNDS" ] 2>/dev/null; then
+    ROUNDS="$MAX_ROUNDS"
+    CAPPED=1
+fi
+if [ "$ROUNDS" -lt 1 ] 2>/dev/null; then
+    echo "refine-prompt: --rounds must be >= 1" >&2
+    exit 2
+fi
+
+# ── repo context loader (with allowlist) ──────────────────────────
+CONTEXT_SPARSE=true
+SOURCES_USED=()
+
+load_agents_md() {
+    local p="$REPO_ROOT/AGENTS.md"
+    if check_path_allowed "$p" && [ -f "$p" ]; then
+        SOURCES_USED+=("AGENTS.md")
+        CONTEXT_SPARSE=false
+        cat "$p"
+    fi
+}
+
+load_recent_specs() {
+    local dir="$REPO_ROOT/docs/specs"
+    [ -d "$dir" ] || return 0
+    local count=0
+    # Last 30 days, cap 5. Fall back to mtime-sorted listing.
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        check_path_allowed "$f" || continue
+        SOURCES_USED+=("$(basename "$f")")
+        CONTEXT_SPARSE=false
+        count=$((count + 1))
+        [ "$count" -ge 5 ] && break
+    done < <(find "$dir" -name '*.md' -type f -mtime -30 2>/dev/null | sort -r | head -n 5)
+}
+
+load_git_log() {
+    ( cd "$REPO_ROOT" && git log --since='7 days ago' --oneline 2>/dev/null | head -n 20 ) || true
+}
+
+load_memory_feedback() {
+    # ~/.autospec/projects/*/memory/feedback_*.md, keyword-match prompt tokens.
+    [ -d "$MEMORY_ROOT" ] || return 0
+    local count=0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        check_path_allowed "$f" || continue
+        # Keyword match: any whitespace token from prompt ≥4 chars present in file.
+        local matched=0
+        for tok in $PROMPT; do
+            [ "${#tok}" -ge 4 ] || continue
+            if grep -qi "$tok" "$f" 2>/dev/null; then
+                matched=1
+                break
+            fi
+        done
+        if [ "$matched" = 1 ]; then
+            SOURCES_USED+=("memory:$(basename "$f")")
+            CONTEXT_SPARSE=false
+            count=$((count + 1))
+            [ "$count" -ge 5 ] && break
+        fi
+    done < <(find "$MEMORY_ROOT" -name 'feedback_*.md' -type f 2>/dev/null)
+}
+
+AGENTS_CONTENT="$(load_agents_md)"
+load_recent_specs   # populates SOURCES_USED
+GIT_LOG_CONTENT="$(load_git_log)"
+load_memory_feedback
+
+# ── lens implementations (deterministic v1) ───────────────────────
+# Each lens takes the previous prompt on stdin and emits the refined prompt on
+# stdout. They MUST apply a named, measurable change so bats can assert.
+
+lens_repo_grounding() {
+    # Inject concrete file paths and conventions discovered in AGENTS.md / specs.
+    local prev
+    prev="$(cat)"
+    local appended=""
+    appended+=$'\n\n## Repo grounding (autospec-refine repo-grounding lens)\n'
+    if [ -n "$AGENTS_CONTENT" ]; then
+        appended+=$'- AGENTS.md present — follow lockstep, TDD, conventional commits, sizing caps.\n'
+        # Extract up to 5 file path-like tokens from AGENTS.md.
+        local paths
+        paths="$(printf '%s\n' "$AGENTS_CONTENT" | grep -oE '[a-zA-Z0-9_./-]+\.(sh|md|json|yml|yaml|py|js|ts)' | sort -u | head -n 5 || true)"
+        if [ -n "$paths" ]; then
+            appended+=$'- Project-specific paths to ground against:\n'
+            while IFS= read -r p; do
+                [ -n "$p" ] || continue
+                appended+="  - \`$p\`"$'\n'
+            done <<< "$paths"
+        fi
+    fi
+    if [ -n "$GIT_LOG_CONTENT" ]; then
+        appended+=$'- Recently-changed scope (last 7 days):\n'
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            appended+="  - $line"$'\n'
+        done <<< "$(printf '%s\n' "$GIT_LOG_CONTENT" | head -n 3)"
+    fi
+    if [ "${#SOURCES_USED[@]}" -gt 0 ]; then
+        appended+=$'- Sources consulted: '"${SOURCES_USED[*]}"$'\n'
+    fi
+    printf '%s%s' "$prev" "$appended"
+}
+
+lens_clarity_ac() {
+    # Disambiguate hedging language and emit explicit AC checkbox list.
+    local prev
+    prev="$(cat)"
+    # Disambiguate hedges in-place.
+    local body="$prev"
+    body="$(printf '%s' "$body" | sed -E 's/should probably/MUST/g; s/might/MUST/g; s/could try/MUST/g; s/maybe/MUST/g')"
+    body+=$'\n\n## Acceptance criteria (autospec-refine clarity-ac lens)\n'
+    body+=$'- [ ] Implementation matches the disambiguated prompt above.\n'
+    body+=$'- [ ] Tests cover happy path + at least one adversarial scenario.\n'
+    body+=$'- [ ] `bash scripts/validate.sh` passes locally.\n'
+    body+=$'- [ ] PR description names the test command operators should run.\n'
+    printf '%s' "$body"
+}
+
+lens_sizing() {
+    # Enforce small-LLM caps: warn if body > 400 words, suggest split.
+    local prev
+    prev="$(cat)"
+    local wc
+    wc=$(printf '%s' "$prev" | wc -w | tr -d ' ')
+    local appended=""
+    appended+=$'\n\n## Sizing (autospec-refine sizing lens)\n'
+    appended+="- Current word count: $wc"$'\n'
+    appended+=$'- Cap per child issue: 400 words / 3 files / 30 LOC outline.\n'
+    if [ "$wc" -gt 400 ]; then
+        appended+=$'- ACTION: split into parent + child sequence; this prompt exceeds the 400-word cap.\n'
+    else
+        appended+=$'- Within cap — no split required.\n'
+    fi
+    printf '%s%s' "$prev" "$appended"
+}
+
+lens_adversarial() {
+    # Critical-question pass; add risk-driven test requirements.
+    local prev
+    prev="$(cat)"
+    local appended=""
+    appended+=$'\n\n## Adversarial review (autospec-refine adversarial lens)\n'
+    appended+=$'- What happens on empty input? Add a test.\n'
+    appended+=$'- What happens on malformed input? Add a test.\n'
+    appended+=$'- What happens when the environment lacks the expected dependency? Fail loudly.\n'
+    appended+=$'- What happens on partial network failure? Retry once, then surface.\n'
+    appended+=$'- What forbidden paths could the change accidentally touch? Enforce allowlist.\n'
+    printf '%s%s' "$prev" "$appended"
+}
+
+apply_lens() {
+    local name="$1"
+    case "$name" in
+        repo-grounding)  lens_repo_grounding ;;
+        clarity-ac)      lens_clarity_ac ;;
+        sizing)          lens_sizing ;;
+        adversarial)     lens_adversarial ;;
+        *) echo "refine-prompt: unknown lens at apply: $name" >&2; exit 2 ;;
+    esac
+}
+
+# ── helpers ───────────────────────────────────────────────────────
+word_count() { printf '%s' "$1" | wc -w | tr -d ' '; }
+
+slug_from_prompt() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' \
+        | cut -c1-40
+}
+
+iso_ts() { date -u +'%Y-%m-%dT%H-%M-%SZ'; }
+
+json_escape() {
+    # Stream-safe JSON string escape for a bash string. Reads stdin.
+    python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))'
+}
+
+# ── main loop ─────────────────────────────────────────────────────
+SLUG="$(slug_from_prompt "$PROMPT")"
+[ -n "$SLUG" ] || SLUG="prompt"
+TS="$(iso_ts)"
+mkdir -p "$ARTIFACT_DIR"
+ARTIFACT="$ARTIFACT_DIR/${SLUG}-${TS}.json"
+
+PREV_PROMPT="$PROMPT"
+ROUNDS_JSON=""
+STATUS="completed"
+DEGRADED_ROUNDS=()
+ROUNDS_EXECUTED=0
+CONVERGED_EARLY=false
+
+# If round cap triggered, status is round_cap_reached but we still run the
+# capped number of rounds.
+if [ "$CAPPED" = 1 ]; then
+    STATUS="round_cap_reached"
+fi
+
+NUM_LENSES="${#REQUESTED_LENSES[@]}"
+
+for ((i=1; i<=ROUNDS; i++)); do
+    # Lens picker: if i <= NUM_LENSES, use REQUESTED_LENSES[i-1].
+    # Otherwise repeat 'adversarial'.
+    if [ "$i" -le "$NUM_LENSES" ]; then
+        LENS="${REQUESTED_LENSES[$((i-1))]}"
+    else
+        LENS="adversarial"
+    fi
+
+    REFINED="$(printf '%s' "$PREV_PROMPT" | apply_lens "$LENS")"
+
+    PREV_WC="$(word_count "$PREV_PROMPT")"
+    NEW_WC="$(word_count "$REFINED")"
+    DELTA=$((NEW_WC - PREV_WC))
+
+    # Degradation check (round N word count < 75% of round N-1).
+    if [ "$PREV_WC" -gt 0 ] && [ "$i" -gt 1 ]; then
+        # NEW_WC * 100 < 75 * PREV_WC  =>  NEW_WC * 4 < 3 * PREV_WC
+        if [ $((NEW_WC * 4)) -lt $((PREV_WC * 3)) ]; then
+            DEGRADED_ROUNDS+=("$i:$LENS")
+        fi
+    fi
+
+    # Build round JSON object.
+    REFINED_JSON="$(printf '%s' "$REFINED" | json_escape)"
+    SOURCES_JSON="$(printf '%s\n' "${SOURCES_USED[@]:-}" | python3 -c 'import json,sys; arr=[l for l in sys.stdin.read().splitlines() if l]; sys.stdout.write(json.dumps(arr))')"
+    ROUND_OBJ=$(cat <<EOF
+{"round_number":$i,"lens":"$LENS","sources_used":$SOURCES_JSON,"refined_prompt":$REFINED_JSON,"diff_summary":"lens=$LENS applied","word_count_delta":$DELTA,"reasoning":"deterministic lens v1"}
+EOF
+)
+    if [ -n "$ROUNDS_JSON" ]; then
+        ROUNDS_JSON="$ROUNDS_JSON,$ROUND_OBJ"
+    else
+        ROUNDS_JSON="$ROUND_OBJ"
+    fi
+
+    ROUNDS_EXECUTED="$i"
+
+    # Convergence check (round N byte-identical to round N-1).
+    if [ "$REFINED" = "$PREV_PROMPT" ]; then
+        STATUS="converged"
+        CONVERGED_EARLY=true
+        break
+    fi
+
+    PREV_PROMPT="$REFINED"
+done
+
+FINAL_PROMPT="$PREV_PROMPT"
+
+# ── write artifact ────────────────────────────────────────────────
+ORIG_JSON="$(printf '%s' "$PROMPT" | json_escape)"
+FINAL_JSON="$(printf '%s' "$FINAL_PROMPT" | json_escape)"
+HEAD_SHA="$( ( cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null ) || echo unknown )"
+
+# Degraded rounds array.
+DEGRADED_JSON="$(printf '%s\n' "${DEGRADED_ROUNDS[@]:-}" | python3 -c 'import json,sys; arr=[l for l in sys.stdin.read().splitlines() if l]; sys.stdout.write(json.dumps(arr))')"
+
+HANDOFF_TARGET="/autospec --autonomous"
+HANDOFF_EXECUTED=false
+if [ "$DRY_RUN" = 1 ]; then
+    HANDOFF_TARGET="dry-run"
+fi
+
+CONTEXT_SPARSE_JSON="$CONTEXT_SPARSE"
+
+cat > "$ARTIFACT" <<EOF
+{
+  "original_prompt": $ORIG_JSON,
+  "rounds": [$ROUNDS_JSON],
+  "final_prompt": $FINAL_JSON,
+  "status": "$STATUS",
+  "metadata": {
+    "head_sha": "$HEAD_SHA",
+    "timestamp": "$TS",
+    "rounds_requested": $ROUNDS_REQUESTED,
+    "rounds_executed": $ROUNDS_EXECUTED,
+    "converged_early": $CONVERGED_EARLY,
+    "degraded_rounds": $DEGRADED_JSON,
+    "context_sparse": $CONTEXT_SPARSE_JSON,
+    "handoff_target": "$HANDOFF_TARGET",
+    "handoff_executed": $HANDOFF_EXECUTED
+  }
+}
+EOF
+
+if [ -n "$OUTPUT" ]; then
+    if ! check_path_allowed "$OUTPUT"; then
+        echo "code_health:refine_path_violation path=$OUTPUT" >&2
+        exit 3
+    fi
+    printf '%s' "$FINAL_PROMPT" > "$OUTPUT"
+fi
+
+echo "refine-prompt: status=$STATUS rounds_executed=$ROUNDS_EXECUTED artifact=$ARTIFACT"
+exit 0
