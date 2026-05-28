@@ -73,6 +73,16 @@ run_script() {
     [[ "$output" == *"e2e:prod smoke missing"* ]]
 }
 
+@test "PARTIAL when one release_blocking finding has status PARTIAL" {
+    write_verdict "{\"head_sha\": \"${HEAD_SHA}\", \"live_app_proof\": true, \"findings\": [
+        {\"category\": \"mutation_proof_missing\", \"release_blocking\": true, \"status\": \"PARTIAL\", \"summary\": \"checkout flow has no mutation proof\"}
+    ]}"
+    run_script
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"PARTIAL"* ]]
+    [[ "$output" == *"checkout flow has no mutation proof"* ]]
+}
+
 @test "FAIL when one release_blocking finding has status FAIL" {
     write_verdict "{\"head_sha\": \"${HEAD_SHA}\", \"live_app_proof\": true, \"findings\": [
         {\"category\": \"outsourced_implementation\", \"release_blocking\": true, \"status\": \"FAIL\", \"summary\": \"classifier delegates to ClassyFire API\"}
