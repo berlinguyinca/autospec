@@ -21,8 +21,16 @@
 #   tests/dogfood/allowlist/dogfood-adapter-doc-drift.json
 #   tests/dogfood/allowlist/dogfood-adapter-lint.json
 
+# Doc-drift uses `baseline_sha` to pin the diff window against a stable
+# commit instead of HEAD~1 (whose contents shift after every merge,
+# silently invalidating the allowlist — issue #651). Bump the baseline
+# only via explicit PR; re-seed the doc-drift allowlist against the new
+# baseline at the same time.
+
 adapters:
   - detector: skills/autospec-shared/scripts/check-doc-drift.sh
     adapter:  scripts/dogfood-adapter-doc-drift.sh
+    args:
+      baseline_sha: 0e0cd124076af1875eb227e3a138efd12081ab3a
   - detector: scripts/lint-implementation.sh
     adapter:  scripts/dogfood-adapter-lint.sh

@@ -1,9 +1,1 @@
-[
-  {"file":"docs/API_REFERENCE.md","function":"# API Reference","rule_id":"DOC_DRIFT_WARN","justification":"pre-existing drift on main at adapter introduction (issue #646)"},
-  {"file":"docs/API_REFERENCE.md","function":"## Validation (`scripts/validate.sh`)","rule_id":"DOC_DRIFT_WARN","justification":"pre-existing drift on main at adapter introduction (issue #646)"},
-  {"file":"docs/superpowers/plans/2026-05-22-autospec-docs-amendment.md","function":"### Tasks","rule_id":"DOC_DRIFT_WARN","justification":"pre-existing drift on main at adapter introduction (issue #646)"},
-  {"file":"skills/autospec-release/SKILL.md","function":"-","rule_id":"DOC_DRIFT_MISSING_SCOPE","justification":"release skill prose not yet scoped in docs (issue #646)"},
-  {"file":"skills/autospec-release/codex/prompt.md","function":"-","rule_id":"DOC_DRIFT_MISSING_SCOPE","justification":"release skill prose not yet scoped in docs (issue #646)"},
-  {"file":"skills/autospec-release/opencode/agent.md","function":"-","rule_id":"DOC_DRIFT_MISSING_SCOPE","justification":"release skill prose not yet scoped in docs (issue #646)"},
-  {"file":"tests/compute-release-verdict.bats","function":"-","rule_id":"DOC_DRIFT_MISSING_SCOPE","justification":"bats fixture not in docs scope (issue #646)"}
-]
+[]
