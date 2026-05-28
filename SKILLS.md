@@ -17,6 +17,14 @@
 - Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
 - Status: tracked config mode. Creates `.autospec/autospec.yml`, asks project-specific setup questions from repo findings, keeps specs synchronized with implementation reality, and routes improvement gaps through `autospec-review`, issues, and `/autospec-run`.
 
+## autospec-release
+
+- Path: [`skills/autospec-release`](skills/autospec-release)
+- Trigger: use when an existing repo needs an end-to-end release readiness gate across specs, docs, implementation, tests, QA proof artifacts, legacy cleanup, and merge readiness.
+- Activation keywords: `autospec-release`, `release readiness`, `release sweep`, `make repo releasable`, `full repo QA`, `ship current repo`, `release gate`
+- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
+- Status: wrapper workflow over working autospec skills. Runs preflight, `/autospec-sweep`, docs/spec sync, `/autospec-review`, `/autospec-classify`, `/autospec-run`, `/autospec-test`, `/autospec-qa`, proof validation, and the legacy cleanup gate before returning `PASS`, `PARTIAL`, or `FAIL`.
+
 ## autospec-fleet
 
 - Path: [`skills/autospec-fleet`](skills/autospec-fleet)

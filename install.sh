@@ -14,7 +14,7 @@
 #   ./install.sh --help                          # show this help
 #
 # Flags:
-#   --skill   one of: autospec | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | autospec-sweep | autospec-design | autospec-fleet | autospec-qa | all
+#   --skill   one of: autospec | autospec-release | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | autospec-sweep | autospec-design | autospec-fleet | autospec-qa | all
 #             (default: all)
 #   --harness one of: claude | opencode | codex | all
 #             (default: all)
@@ -49,7 +49,7 @@ OH_MY_CODEX_PACKAGE="${OH_MY_CODEX_PACKAGE:-oh-my-codex}"
 OH_MY_OPENCODE_PACKAGE="${OH_MY_OPENCODE_PACKAGE:-oh-my-opencode}"
 OH_MY_CLAUDE_PACKAGE="${OH_MY_CLAUDE_PACKAGE:-oh-my-claude-sisyphus}"
 
-ALL_SKILLS="autospec autospec-split autospec-define autospec-run autospec-review autospec-classify autospec-listen autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa"
+ALL_SKILLS="autospec autospec-release autospec-split autospec-define autospec-run autospec-review autospec-classify autospec-listen autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa"
 ALL_HARNESSES="claude opencode codex"
 
 SKILL_ARG="all"
@@ -480,10 +480,10 @@ done
 
 # Validate --skill
 case "$SKILL_ARG" in
-    all|autospec|autospec-split|autospec-define|autospec-run|autospec-review|autospec-classify|autospec-listen|autospec-story|autospec-stop|autospec-sweep|autospec-design|autospec-fleet|autospec-qa) ;;
+    all|autospec|autospec-release|autospec-split|autospec-define|autospec-run|autospec-review|autospec-classify|autospec-listen|autospec-story|autospec-stop|autospec-sweep|autospec-design|autospec-fleet|autospec-qa) ;;
     *)
         err "invalid --skill: $SKILL_ARG"
-        err "must be one of: autospec | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | autospec-sweep | autospec-design | autospec-fleet | autospec-qa | all"
+        err "must be one of: autospec | autospec-release | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | autospec-sweep | autospec-design | autospec-fleet | autospec-qa | all"
         exit 2
         ;;
 esac

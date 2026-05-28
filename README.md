@@ -12,11 +12,30 @@ repo overview.
 
 Autospec works across **Claude Code**, **OpenCode**, and **Codex CLI**.
 
+## Getting Started
+
+Pick the skill that matches where you are:
+
+| I want to... | Use | What happens |
+| --- | --- | --- |
+| Turn a feature idea into shipped PRs | [`/autospec`](skills/autospec/README.md) | Write the spec, create issues, implement, review, test, and merge. |
+| Plan only, then stop | [`/autospec-define`](skills/autospec-define/README.md) | Create the spec and issue queue without running implementation. |
+| Split an existing spec into issues | [`/autospec-split`](skills/autospec-split/README.md) | Turn `docs/specs/*.md` into classified GitHub issues. |
+| Work through ready issues | [`/autospec-run`](skills/autospec-run/README.md) | Process the `auto-implement` queue and merge passing PRs. |
+| Check whether the repo is ready to ship | [`/autospec-release`](skills/autospec-release/README.md) | Run sweep, review, implementation, tests, QA proof, docs sync, and legacy cleanup gates. |
+| Keep specs, docs, tests, and code aligned over time | [`/autospec-sweep`](skills/autospec-sweep/README.md) | Configure and run recurring repo sweeps. |
+| Prove the running app actually matches the spec | [`/autospec-qa`](skills/autospec-qa/README.md) | Revalidate UI controls, validation, API behavior, accessibility, and no-mock smoke paths. |
+| Stop or resume a long-running monitor | [`/autospec-stop`](skills/autospec-stop/README.md) | Gracefully stop, immediately pause, check status, or resume. |
+| Understand what has been built | [`/autospec-story`](skills/autospec-story/README.md) | Produce a cited repo story from specs, issues, PRs, and docs. |
+
+If you are unsure, start with `/autospec-release` for an existing repo or
+`/autospec` for a new feature.
+
 ## What It Solves
 
-AI-generated code can grow quickly without a clear record of why it exists, what
-spec produced it, which model worked on it, and which parts are actually
-implemented. Autospec makes that process auditable.
+AI-generated code can move fast without leaving a good trail of why it exists,
+what spec produced it, which model worked on it, and which parts actually work.
+Autospec makes that process auditable.
 
 It gives you:
 
@@ -55,6 +74,7 @@ selected model and harness to execute reliably.
 | Skill | Use it when | Result |
 | --- | --- | --- |
 | [`autospec`](skills/autospec/README.md) | You want the full path from feature request to merged PRs. | Bootstraps if needed, investigates, writes a spec, creates issues, classifies them, runs implementation, and reports completion. |
+| [`autospec-release`](skills/autospec-release/README.md) | You want to know whether the current repo is ready to ship. | Runs the release-readiness loop across sweep, review, run, test, QA, docs sync, proof artifacts, and legacy cleanup. |
 | [`autospec-sweep`](skills/autospec-sweep/README.md) | You want first-run configuration or continuous improvement across specs, docs, tests, and code. | Creates `.autospec/autospec.yml`, runs a configured sweep, writes `.autospec/sweep/latest.json`, and routes recurring gaps back through specs, issues, and `/autospec-run`. |
 | [`autospec-define`](skills/autospec-define/README.md) | You want planning only before implementation starts. | Produces a design spec plus classified `auto-implement` issues, then hands off to `/autospec-run`. |
 | [`autospec-split`](skills/autospec-split/README.md) | You already have a tracked `docs/specs/*.md` design spec. | Turns the existing spec into an EPIC plus linked child issues, then stops after classification. |
