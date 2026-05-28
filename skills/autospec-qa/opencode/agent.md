@@ -527,6 +527,48 @@ Required outcome:
 - Record the result in `.autospec/mutation-proof.json` or the QA report.
 ```
 
+## Benchmark leak and overfit gate
+
+For every test that consumes a public dataset, benchmark, leaderboard, or
+externally-curated answer key (e.g., ClassyFire, ChEMBL, MassBank, MNIST,
+GLUE, SuperGLUE, ImageNet, BIG-bench, HELM, GSM8K, MMLU, fixtures derived
+from a named corpus), audit for benchmark leak and overfit-shaped assertions:
+
+```text
+For each test fixture and assertion derived from a public benchmark or
+externally-curated dataset:
+
+1. Identifier hard-coding — does the test pin specific benchmark IDs
+   (InChIKeys, accession numbers, row hashes, sample indices, image filenames,
+   prompt IDs) and assert exact downstream values?
+2. First-N slice — is the fixture the first N rows / top-N records / a fixed
+   prefix of a known benchmark, rather than a randomized or rotated sample?
+3. Answer-key shape — do the assertions match the benchmark's published
+   answer key (labels, class names, expected outputs) such that the system
+   under test could pass by memorizing those rows?
+4. Distributional sibling — is there a randomized or property-based test
+   covering the same code path on a fresh draw from the source distribution?
+5. Refresh path — can the fixture be regenerated on demand from the upstream
+   source (API, query, seeded sampler), or is it frozen indefinitely?
+6. Training-on-test — is the same fixture also used to train, tune, select,
+   or prompt-engineer the code under test? If yes, the fixture is leaked.
+
+Required outcome:
+- Replace fixed slices with a seeded random sample drawn from the upstream
+  source per run (or per release), and rotate the seed at a defined cadence.
+- Replace exact-value assertions on benchmark identifiers with property-based
+  or invariant assertions that hold for any valid draw from the distribution.
+- Keep at most one tiny "shape smoke" test with hard-coded IDs, clearly named
+  as a smoke test, never as the primary correctness signal.
+- A test that asserts exact benchmark answers without a randomized sibling is
+  a PARTIAL finding. If the same fixture is also used as the training or
+  selection signal for the code under test, it is FAIL (training-on-test
+  leak).
+- Record each finding in the QA report under "Benchmark Overfit and Test
+  Leak" with the test path, the leaked dataset, the failure mode (1-6
+  above), and the required remediation.
+```
+
 ## Post-merge deployed canary prompt
 
 When a deployed/dev URL exists, define the post-merge canary before release:
@@ -904,6 +946,12 @@ alternatives or follow-up fixes.
 ## Mutation and Breakage Proof
 List critical workflow tests, the simulated break or mutation, expected failing
 assertion, observed result, and strengthening performed if the test stayed green.
+## Benchmark Overfit and Test Leak
+List tests whose fixtures hard-code public benchmark identifiers, use a fixed
+first-N slice, assert exact benchmark answer-key values, lack a randomized or
+property-based sibling, or reuse the same fixture as training/selection signal.
+For each: test path, leaked dataset, failure mode (1-6 from the gate), and
+required remediation.
 ## Post-Merge Deployed Canary
 List required canary workflows, representative input, deployed/dev URL, expected
 domain result, result, and regression issue/action for failures.
@@ -963,6 +1011,56 @@ After the audit:
 4. Run the relevant test commands and the repo's validation command.
 5. Repeat until the traceability matrix has no unexplained gaps or the remaining
    gaps are filed as issues with reproduction steps and evidence.
+
+## QA verdict artifact
+
+At the end of every audit run (including aborted runs), write
+`.autospec/qa-verdict.json` as the machine-readable result. Downstream
+skills — notably `/autospec-release` — read this file as the authoritative
+gate signal instead of re-parsing the prose report.
+
+Schema:
+
+```json
+{
+  "verdict": "PASS|PARTIAL|FAIL",
+  "head_sha": "<git rev-parse HEAD at run start>",
+  "generated_at": "<ISO-8601 UTC>",
+  "live_app_proof": true,
+  "artifacts": ["path/to/screenshot.png", "path/to/network-trace.har"],
+  "findings": [
+    {
+      "category": "benchmark_overfit|no_mock_smoke|live_backend_blocker|mutation_proof_missing|spec_contradiction|duplicate_code|presentational_misclassified|legacy_residue|new_code_intent|accessibility|cross_browser|automated_test_gap|other",
+      "release_blocking": true,
+      "status": "PASS|PARTIAL|FAIL|NOT_TESTED",
+      "summary": "<one-line description>",
+      "evidence": "<path or pointer to artifact, report section, or issue>"
+    }
+  ]
+}
+```
+
+Rules:
+
+- `live_app_proof` is `true` ONLY if at least one interaction artifact
+  (screenshot, DOM snapshot, network trace, recorded session) was captured
+  against a booted app whose commit matches `head_sha`. Otherwise `false`.
+- `release_blocking` defaults TRUE for:
+  - `benchmark_overfit` with failure mode 6 (training-on-test leak),
+  - `no_mock_smoke` on a required path with any non-PASS status,
+  - `live_backend_blocker` unresolved,
+  - `mutation_proof_missing` on a critical workflow,
+  - `spec_contradiction` unresolved,
+  - `legacy_residue` referenced by current user-facing docs.
+  Other categories default FALSE; promote to TRUE only when the finding
+  documents a user-visible regression, data loss, security exposure, or
+  violated spec requirement.
+- Write atomically: `.autospec/qa-verdict.json.tmp` then `mv` to the final
+  path. Chmod 644. Always overwrite — staleness is checked by `head_sha`,
+  not mtime.
+- If the audit aborts before completion, still write the file with
+  `verdict: "FAIL"` and one finding describing the abort reason. Never
+  leave a stale prior verdict in place to be misread as the current run.
 
 ## Output contract
 
