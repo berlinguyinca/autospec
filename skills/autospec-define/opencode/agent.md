@@ -636,3 +636,44 @@ bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/gen-docs-from-spec.mjs" \
 ```
 
 Open a `docs/` update PR and admin-merge it before Phase 3 begins. Skip if the spec change touches only non-public implementation details (no change to public API surface, no new CLI flags, no new env vars).
+
+## Autonomous mode
+
+When `/autospec-define --autonomous "<request>"` runs, or when
+`~/.autospec/autonomous.flag` exists at run start, Phase 2 and the Phase 3
+pre-impl gate skip user-facing confirmations.
+
+Branches taken in autonomous mode:
+
+- **Phase 2 brainstorm** — do NOT ask the Architecture / Interactivity /
+  Data model / Error handling / Testing questions one at a time. Synthesize
+  the entire spec from (a) the user's request text, (b) the last ~10
+  conversation turns, (c) `git log --since="7 days ago"` recent commits,
+  and (d) similar prior work in `docs/specs/**`. For each unverifiable
+  inference, mark the line in the spec body with a
+  `> AUTONOMOUS ASSUMPTION:` blockquote.
+- **Phase 3 pre-impl gate** — default to `run`. Do NOT ask
+  `[run / defer / refine]`. Proceed to issue filing without confirmation.
+- **Issue body confirmation** — `gh issue create` runs without per-issue
+  approval. The existing lint loop, sizing caps, and Phase 3.5 model-fit
+  classification still apply unchanged.
+
+If the orchestrator cannot generate a coherent spec from available context
+(e.g. "make it better" with no surface evidence), autonomous mode FAILS
+LOUDLY with `code_health:autonomous_input_insufficient` and prints the
+specific missing fields plus a recommended interactive command to retry.
+Do not silently pick arbitrary defaults.
+
+Safety guardrails are NOT bypassed. Before each would-have-asked decision,
+the orchestrator invokes `scripts/autospec-autonomy-gate.sh` with
+`--check all`. Exit 1 surfaces the confirmation even in autonomous mode:
+
+- Destructive remote actions (force-push, repo archive/delete, mass label
+  changes, prod DB writes).
+- Out-of-scope planned files (extend beyond Goal + Implementation outline).
+- Cost gate (`AUTOSPEC_AUTONOMOUS_ISSUE_CAP`, default 10; or
+  `AUTOSPEC_AUTONOMOUS_TOKEN_CAP`, default 500k).
+- Existing `feedback_autospec_autonomy_scope.md` rules.
+
+The handoff to `/autospec-run` preserves the `--autonomous` flag so the
+implementation half honors the same telemetry tagging.

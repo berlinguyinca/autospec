@@ -159,3 +159,37 @@ When the user utters a phrase from the **Spec triggers** list (see `references/t
 1. **Confirm.** Ask exactly: `Start the autospec design Q&A on <inferred-topic>? [yes / cancel]`. Use `AskUserQuestion` on Claude Code, an inline prompt elsewhere; if no question primitive is available, ask in the response and wait for the next turn. The `<inferred-topic>` is a short noun phrase synthesized from the trigger phrase and the most recent user turn (≤10 words).
 2. **On `yes`**, hand off to `/autospec-define` via the harness's skill-invocation primitive (Claude Code: `Skill` tool; OpenCode: nested skill invocation; Codex CLI: emit the `/autospec-define` slash command). The downstream skill applies its own tier policy. Do NOT inline any Phase 2 questions here.
 3. **On `cancel`**, print `OK, cancelled.` and silently exit. No persistence, no learning, no suppression list.
+
+## Autonomous mode
+
+The deterministic listener-match classifier recognizes autonomous-intent
+phrasing and routes the request with `--autonomous` so downstream
+`/autospec`, `/autospec-define`, and `/autospec-run` skip user-facing
+confirmation gates.
+
+Trigger phrases (case-insensitive, classified imperative):
+
+- "fix X automatically"
+- "no confirmation"
+- "just do it"
+- "non-interactive"
+- "go autonomous"
+- "autonomous mode"
+- "run autonomously"
+
+On a `match:true` + `intent:imperative` classification where the message
+contains one of these phrases, the listener routes to the mapped autospec
+skill with `--autonomous` appended:
+
+```
+Routing to /autospec --autonomous — say "plain" to opt out.
+```
+
+If the classifier returns `intent:incidental` or `none`, do NOT route — the
+session continues in plain mode. The same biased-to-false-negative rule
+applies: descriptive, past-tense, negated, and interrogative uses MUST NOT
+route.
+
+The autonomous routing inherits the listener's existing `plain`/`no` escape:
+the user's next-turn stop word cancels routing and proceeds in plain mode
+for that request.

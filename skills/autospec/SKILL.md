@@ -1005,3 +1005,80 @@ When the monitor terminates, post a final summary to the user: every issue proce
 - **Failure isolation**: a failed issue restores its `auto-implement` label so the next monitor cycle picks it up; it does not block the cascade unless dependent issues are downstream.
 - **Fresh repo**: if Phase 0 created the repo, the very first commit is the scaffold (incl. `AGENTS.md`); the spec lands as the second commit; child branches branch off that `main`.
 - **Small-LLM target**: child issues are sized and pre-staged for 32B-class local LLMs (e.g. qwen3-32B / Qwen3-30B-A3B on Ollama, 48 GB-class Macs). Bias toward smaller issues, sectional spec anchors, pre-staged file pointers, checkbox AC, and one Primary smoke test.
+
+## Autonomous mode
+
+`/autospec --autonomous "<request>"` skips all user-facing confirmation gates
+in this end-to-end pipeline. Spec is generated directly from conversation
+context + repo evidence; pre-implementation gate defaults to `run`; issue
+creation runs without approval.
+
+Triggers (any one enables autonomous mode):
+
+1. **Explicit flag** — `/autospec --autonomous "<request>"`.
+2. **Operator preference** — `~/.autospec/autonomous.flag` exists; every
+   `/autospec` invocation defaults to autonomous.
+3. **autospec-listen phrase detection** — the deterministic listener-match
+   classifier recognizes "fix X automatically", "no confirmation",
+   "just do it", "non-interactive", "go autonomous" and routes with
+   `--autonomous`.
+
+Gates bypassed in autonomous mode:
+
+- **Phase 2 brainstorm** — clarifying questions skipped. Spec is drafted
+  inline from (a) the user's request text, (b) the last ~10 turns,
+  (c) `git log --since="7 days ago"` for recent change context, and
+  (d) `docs/specs/**` for similar prior work.
+- **Phase 3 pre-implementation gate** — defaults to `run`.
+- **Issue body confirmation** — `gh issue create` runs without approval.
+
+Autonomous mode honors `--autonomous` end-to-end so Phase 4–6 telemetry can
+distinguish autonomous runs from interactive ones.
+
+### Autonomous spec drafting
+
+When `--autonomous` is set, do NOT ask the user. Synthesize the spec from
+conversation + repo evidence. For each unverifiable inference, mark the line
+in the spec body with a `> AUTONOMOUS ASSUMPTION:` blockquote so the spec PR
+review can catch wrong inferences. If a critical field cannot be inferred,
+pick the conservative default and note it under an **Autonomous assumptions**
+section in the spec.
+
+If the orchestrator cannot generate a coherent spec from available context
+(e.g. the request is too vague — "make it better"), autonomous mode FAILS
+LOUDLY with `code_health:autonomous_input_insufficient` rather than silently
+picking arbitrary defaults. The operator gets the specific missing fields
+and a recommended interactive command to retry.
+
+### Safety guardrails (autonomous)
+
+`scripts/autospec-autonomy-gate.sh` is called before each "would-have-asked"
+decision point. The following are NEVER bypassed:
+
+1. **Destructive remote actions** — prod DB writes, force-push to protected
+   branches, mass label changes, repo deletion, `gh repo archive`,
+   `gh release delete`, `git push --force` always surface for confirmation.
+   Gate exit 1 = "ask anyway".
+2. **Out-of-scope file changes** — if Phase 4 implementer's planned file
+   list extends outside the auto-detected scope (Goal + Implementation
+   outline files), the gate surfaces a confirmation listing the unexpected
+   files.
+3. **Cost gate** — if the generated spec exceeds
+   `AUTOSPEC_AUTONOMOUS_ISSUE_CAP` (default 10) or estimated total tokens
+   exceeds `AUTOSPEC_AUTONOMOUS_TOKEN_CAP` (default 500k), surface a
+   one-time go/no-go even in autonomous mode.
+4. **Existing rules in `feedback_autospec_autonomy_scope.md` remain in
+   force.**
+
+Invoke the gate before each gate-trigger point:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomy-gate.sh" \
+  --check all \
+  --issues "$ISSUE_COUNT" --tokens "$TOKEN_ESTIMATE" \
+  --files "$PLANNED_FILES" --scope "$SCOPE_PREFIXES" \
+  --intent "$USER_REQUEST"
+```
+
+Exit 0 = autonomous OK, proceed. Exit 1 = surface confirmation. Exit 2 =
+invocation error.
