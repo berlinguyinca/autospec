@@ -1110,10 +1110,11 @@ check_dogfood_detectors() {
 # fixture suite is run as part of the gate.
 check_qa_verify_first_discipline() {
     info "qa verify-first discipline: scripts + adapter lockstep"
-    for s in scripts/qa-verify-finding.sh scripts/qa-cluster-coverage.sh; do
-        [ -f "$s" ] || fail "$s: file missing (issue #643)"
-        [ -x "$s" ] || fail "$s: file not executable (issue #643)"
-        bash -n "$s" || fail "$s: bash syntax error (issue #643)"
+    for s in scripts/qa-verify-finding.sh scripts/qa-cluster-coverage.sh \
+             scripts/qa-finding-filter.sh; do
+        [ -f "$s" ] || fail "$s: file missing (issue #643/#647)"
+        [ -x "$s" ] || fail "$s: file not executable (issue #643/#647)"
+        bash -n "$s" || fail "$s: bash syntax error (issue #643/#647)"
     done
     for trio in skills/autospec-qa/SKILL.md skills/autospec-qa/codex/prompt.md skills/autospec-qa/opencode/agent.md; do
         grep -q '^## Verify-first discipline' "$trio" \
@@ -1124,11 +1125,20 @@ check_qa_verify_first_discipline() {
             || fail "$trio missing reference to qa-verify-finding.sh (issue #643)"
         grep -q 'qa-cluster-coverage\.sh' "$trio" \
             || fail "$trio missing reference to qa-cluster-coverage.sh (issue #643)"
+        grep -q 'qa-finding-filter\.sh' "$trio" \
+            || fail "$trio missing reference to qa-finding-filter.sh (issue #647)"
+        grep -q 'AUTOSPEC_QA_STRICT=1' "$trio" \
+            || fail "$trio missing AUTOSPEC_QA_STRICT=1 rule (issue #647)"
     done
     if command -v bats >/dev/null 2>&1 && [ -f tests/qa/test_verify_first.bats ]; then
         info "  running: tests/qa/test_verify_first.bats"
         bats tests/qa/test_verify_first.bats >/tmp/validate-verify-first.log 2>&1 \
             || { cat /tmp/validate-verify-first.log >&2; fail "tests/qa/test_verify_first.bats: failed"; }
+    fi
+    if command -v bats >/dev/null 2>&1 && [ -f tests/qa/test_finding_filter.bats ]; then
+        info "  running: tests/qa/test_finding_filter.bats"
+        bats tests/qa/test_finding_filter.bats >/tmp/validate-finding-filter.log 2>&1 \
+            || { cat /tmp/validate-finding-filter.log >&2; fail "tests/qa/test_finding_filter.bats: failed"; }
     fi
 }
 

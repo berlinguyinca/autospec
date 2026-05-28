@@ -841,6 +841,20 @@ The final QA report MUST surface four explicit count fields so the operator
 can see what the discipline filtered: `findings_emitted`, `verified_dropped`,
 `stale_dropped`, `cluster_skip_dedup`.
 
+After cluster fan-out completes, the QA orchestrator MUST run
+`scripts/qa-finding-filter.sh` against the merged
+`.autospec/qa-verdict.json` before any release-skill (e.g.,
+`/autospec-release`) consumes it. The filter partitions findings into
+verified, stale (re-probed and either refreshed or dropped to
+`verified_dropped[]`), and unverified. Under `AUTOSPEC_QA_STRICT=1`
+(the CI default), any finding lacking `verified_at` causes the QA run
+to FAIL with status `code_health:verify_first_violation`; under
+`AUTOSPEC_QA_STRICT=0` unverified findings are routed to
+`unverified_warnings[]` for operator triage. Cluster agents MUST emit
+findings via `qa-verify-finding.sh --emit-record <path>` so the
+required `verified_at`, `verified_by`, and `verify_category` fields are
+populated by the probe rather than hand-constructed.
+
 ## Cluster sizing
 
 The QA orchestrator's cluster fan-out is a knob, not a constant. When the
