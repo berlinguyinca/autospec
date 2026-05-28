@@ -1245,6 +1245,39 @@ check_qa_exhaustiveness_contract() {
     fi
 }
 
+check_qa_heal_loop_contract() {
+    info "qa heal loop: scripts + adapter lockstep (issue #663)"
+    local heal="scripts/qa-heal-loop.sh"
+    local f2i="scripts/qa-finding-to-issue.sh"
+    local bats="tests/qa/test_heal_loop.bats"
+    [ -f "$heal" ] || fail "$heal: file missing (issue #663)"
+    [ -x "$heal" ] || fail "$heal: file not executable (issue #663)"
+    bash -n "$heal" || fail "$heal: bash syntax error (issue #663)"
+    [ -f "$f2i" ] || fail "$f2i: file missing (issue #663)"
+    [ -x "$f2i" ] || fail "$f2i: file not executable (issue #663)"
+    bash -n "$f2i" || fail "$f2i: bash syntax error (issue #663)"
+    [ -f "$bats" ] || fail "$bats: bats coverage missing (issue #663)"
+    for trio in skills/autospec-qa/SKILL.md skills/autospec-qa/codex/prompt.md skills/autospec-qa/opencode/agent.md; do
+        grep -q '^## Self-healing loop' "$trio" \
+            || fail "$trio missing '## Self-healing loop' section (issue #663)"
+        grep -q '^## --no-heal opt-out' "$trio" \
+            || fail "$trio missing '## --no-heal opt-out' section (issue #663)"
+        grep -q 'qa-heal-loop\.sh' "$trio" \
+            || fail "$trio missing reference to qa-heal-loop.sh (issue #663)"
+        grep -q 'qa-finding-to-issue\.sh' "$trio" \
+            || fail "$trio missing reference to qa-finding-to-issue.sh (issue #663)"
+        grep -q 'oscillation_detected' "$trio" \
+            || fail "$trio missing 'oscillation_detected' terminator doc (issue #663)"
+        grep -q 'AUTOSPEC_HEAL_MAX_ROUNDS' "$trio" \
+            || fail "$trio missing AUTOSPEC_HEAL_MAX_ROUNDS doc (issue #663)"
+    done
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats"
+        bats "$bats" >/tmp/validate-heal-loop.log 2>&1 \
+            || { cat /tmp/validate-heal-loop.log >&2; fail "$bats: failed"; }
+    fi
+}
+
 check_lint_heredoc_handling() {
     info "lint-implementation heredoc handling: tests/lint/test_complexity_heredoc.bats"
     [ -f tests/lint/test_complexity_heredoc.bats ] \
@@ -1375,6 +1408,7 @@ main() {
     check_qa_verify_first_discipline
     check_qa_incident_contract
     check_qa_exhaustiveness_contract
+    check_qa_heal_loop_contract
     check_autospec_release_contract
     check_qa_verdict_contract
     check_release_verdict_script
