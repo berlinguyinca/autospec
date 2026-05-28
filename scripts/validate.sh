@@ -1331,6 +1331,37 @@ check_autospec_autonomous_contract() {
     fi
 }
 
+check_autospec_refine_contract() {
+    info "autospec-refine contract: trio + scripts + schema + bats (issue #672)"
+    # Trio lockstep is enforced by the discover_skills loop in main(); here we
+    # only assert the per-feature files referenced by the contract exist and
+    # the bats coverage runs.
+    local prompt_sh="scripts/refine-prompt.sh"
+    local overview_sh="scripts/refine-render-overview.sh"
+    local schema="schemas/autospec-refinement.schema.json"
+    [ -f "$prompt_sh" ] || fail "$prompt_sh: file missing (issue #672)"
+    [ -x "$prompt_sh" ] || fail "$prompt_sh: not executable (issue #672)"
+    bash -n "$prompt_sh" || fail "$prompt_sh: bash syntax error (issue #672)"
+    [ -f "$overview_sh" ] || fail "$overview_sh: file missing (issue #672)"
+    [ -x "$overview_sh" ] || fail "$overview_sh: not executable (issue #672)"
+    bash -n "$overview_sh" || fail "$overview_sh: bash syntax error (issue #672)"
+    [ -f "$schema" ] || fail "$schema: file missing (issue #672)"
+    # autospec-refine trio existence (lockstep checked separately).
+    for trio in skills/autospec-refine/SKILL.md skills/autospec-refine/codex/prompt.md skills/autospec-refine/opencode/agent.md; do
+        [ -f "$trio" ] || fail "$trio: missing (issue #672)"
+    done
+    if command -v bats >/dev/null 2>&1; then
+        if [ -d tests/refine ]; then
+            for t in tests/refine/test_refine_*.bats; do
+                [ -f "$t" ] || continue
+                info "  running: $t"
+                bats "$t" >/tmp/validate-refine.log 2>&1 \
+                    || { cat /tmp/validate-refine.log >&2; fail "$t: failed"; }
+            done
+        fi
+    fi
+}
+
 check_install_tests() {
     info "install tests: tests/install/*.sh"
     if [ -d tests/install ]; then
@@ -1414,6 +1445,7 @@ main() {
     check_release_verdict_script
     check_docs_amendment_presence
     check_autospec_autonomous_contract
+    check_autospec_refine_contract
     check_install_tests
     check_phase4_tests
 

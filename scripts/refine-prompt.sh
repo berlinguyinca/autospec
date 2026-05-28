@@ -37,6 +37,8 @@ Flags:
   --from-file <path>     Read the initial prompt from a file.
   --output <path>        Also write the final refined prompt to this file.
   --dry-run              Skip handoff, write artifact only.
+  --interactive          After refinement, hand off to /autospec (interactive).
+  --autonomous           After refinement, hand off to /autospec --autonomous (default).
   --artifact-dir DIR     Override .autospec/refinements (test hook).
   --repo-root DIR        Override repo root (test hook).
   --memory-root DIR      Override ~/.autospec/projects memory root (test hook).
@@ -54,6 +56,7 @@ ROUNDS=3
 LENSES_RAW=""
 OUTPUT=""
 DRY_RUN=0
+HANDOFF_MODE="autonomous"
 ARTIFACT_DIR=".autospec/refinements"
 REPO_ROOT="."
 MEMORY_ROOT="${HOME}/.autospec/projects"
@@ -66,6 +69,8 @@ while [ $# -gt 0 ]; do
         --from-file) FROM_FILE="$2"; shift ;;
         --output) OUTPUT="$2"; shift ;;
         --dry-run) DRY_RUN=1 ;;
+        --interactive) HANDOFF_MODE="interactive" ;;
+        --autonomous) HANDOFF_MODE="autonomous" ;;
         --artifact-dir) ARTIFACT_DIR="$2"; shift ;;
         --repo-root) REPO_ROOT="$2"; shift ;;
         --memory-root) MEMORY_ROOT="$2"; shift ;;
@@ -418,10 +423,15 @@ HEAD_SHA="$( ( cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null ) || echo unkno
 # Degraded rounds array.
 DEGRADED_JSON="$(printf '%s\n' "${DEGRADED_ROUNDS[@]:-}" | python3 -c 'import json,sys; arr=[l for l in sys.stdin.read().splitlines() if l]; sys.stdout.write(json.dumps(arr))')"
 
-HANDOFF_TARGET="/autospec --autonomous"
 HANDOFF_EXECUTED=false
 if [ "$DRY_RUN" = 1 ]; then
     HANDOFF_TARGET="dry-run"
+elif [ "$HANDOFF_MODE" = "interactive" ]; then
+    HANDOFF_TARGET="/autospec"
+    HANDOFF_EXECUTED=true
+else
+    HANDOFF_TARGET="/autospec --autonomous"
+    HANDOFF_EXECUTED=true
 fi
 
 CONTEXT_SPARSE_JSON="$CONTEXT_SPARSE"
@@ -455,4 +465,27 @@ if [ -n "$OUTPUT" ]; then
 fi
 
 echo "refine-prompt: status=$STATUS rounds_executed=$ROUNDS_EXECUTED artifact=$ARTIFACT"
+
+# ── handoff dispatch ──────────────────────────────────────────────
+# --dry-run skips handoff. Otherwise invoke the autospec entry point via
+# `claude` (slash-command dispatcher) if available, falling back to the
+# `autospec` binary on PATH. Test harnesses stub both.
+if [ "$DRY_RUN" != 1 ]; then
+    if command -v claude >/dev/null 2>&1; then
+        if [ "$HANDOFF_MODE" = "interactive" ]; then
+            claude "/autospec" "$FINAL_PROMPT" || true
+        else
+            claude "/autospec" "--autonomous" "$FINAL_PROMPT" || true
+        fi
+    elif command -v autospec >/dev/null 2>&1; then
+        if [ "$HANDOFF_MODE" = "interactive" ]; then
+            autospec "$FINAL_PROMPT" || true
+        else
+            autospec --autonomous "$FINAL_PROMPT" || true
+        fi
+    else
+        echo "refine-prompt: WARN — no handoff dispatcher (claude/autospec) on PATH; artifact retained" >&2
+    fi
+fi
+
 exit 0
