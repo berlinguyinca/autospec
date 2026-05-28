@@ -662,6 +662,53 @@ Required outcome:
   and the remediation status.
 ```
 
+## Exhaustiveness flags
+
+The orchestrator soft-discipline sections above (the reliability exhaustion
+loop, the 20-question Critical self-questioning checkpoint, "no-mock minimum
+coverage", etc.) drive depth of coverage by prose. When clusters skip a step
+the report can still say PASS while a production bug ships. The operator MAY
+invoke `/autospec-qa` with one or more explicit machine-checkable flags that
+convert that prose into a hard gate. With no flag, behavior is unchanged.
+
+- `--every-spec-row` — fail the run with `code_health:incomplete_traceability`
+  if any spec acceptance criterion lacks a non-`NOT_TESTED` row in
+  `.autospec/proof-matrix.json`. Forces the orchestrator to extract every
+  AC, not just the ones it judged "important".
+- `--mutation-each` — require a mutation/breakage entry in
+  `.autospec/mutation-proof.json` for every workflow listed in the spec,
+  not just "critical" ones. Missing entries emit
+  `code_health:incomplete_mutation_proof`.
+- `--no-mock-each` — require a no-mock deployed/dev smoke path in
+  `.autospec/canary-results.json` for every backend-backed feature.
+  Exceptions must be declared explicitly under `no_mock_exempt` in
+  `.autospec/reliability.yml`. Missing entries emit
+  `code_health:incomplete_no_mock_coverage`.
+- `--exhaustive` — turns the three above on.
+
+Enforcement runs after the existing verdict computation but BEFORE writing
+`.autospec/qa-verdict.json` as final. The helper appends one
+`release_blocking: true` finding per gap and demotes the verdict from
+PASS to PARTIAL (FAIL is preserved). The list of flags actually requested
+is recorded under `requested_flags` on the verdict so downstream skills
+(notably `/autospec-release`) can see what was enforced. Both the
+orchestrator prompt and the regeneration loop call this helper:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/qa-exhaustiveness-check.sh" \
+    --exhaustive \
+    --verdict        .autospec/qa-verdict.json \
+    --proof-matrix   .autospec/proof-matrix.json \
+    --mutation-proof .autospec/mutation-proof.json \
+    --canary         .autospec/canary-results.json \
+    --reliability    .autospec/reliability.yml \
+    --spec docs/specs/<feature>.md
+```
+
+Exit 0 means every requested gate passed. Exit 1 means at least one gate
+failed and the verdict + findings have been updated atomically. Backwards-
+compatible: invoking with no flag is a no-op.
+
 ## Production incident regression check
 
 When QA passes but production breaks, the same bug class tends to leak again the
