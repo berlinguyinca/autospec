@@ -1004,6 +1004,38 @@ check_brute_force_rule_ids() {
         || fail "scripts/qa-brute-force-sweep.sh missing or not executable (issue #637)"
 }
 
+# Dogfood detectors gate (issue #641): run every heuristic detector that
+# autospec ships against this repo and assert findings match the per-detector
+# allowlist. Also enforces lockstep across the 3 autospec-qa adapter files —
+# the "## Dogfood detectors driver" section and the scripts/dogfood-detectors.sh
+# reference must appear in SKILL.md, codex/prompt.md, and opencode/agent.md.
+check_dogfood_detectors() {
+    info "dogfood detectors: scripts/dogfood-detectors.sh"
+    [ -f scripts/dogfood-detectors.sh ] \
+        || fail "scripts/dogfood-detectors.sh: file missing"
+    [ -x scripts/dogfood-detectors.sh ] \
+        || fail "scripts/dogfood-detectors.sh: file not executable"
+    bash -n scripts/dogfood-detectors.sh \
+        || fail "scripts/dogfood-detectors.sh: bash syntax error"
+
+    info "dogfood detectors: autospec-qa adapter lockstep"
+    for trio in skills/autospec-qa/SKILL.md skills/autospec-qa/codex/prompt.md skills/autospec-qa/opencode/agent.md; do
+        grep -q '^## Dogfood detectors driver' "$trio" \
+            || fail "$trio missing '## Dogfood detectors driver' section (issue #641)"
+        grep -q 'scripts/dogfood-detectors\.sh' "$trio" \
+            || fail "$trio missing reference to scripts/dogfood-detectors.sh (issue #641)"
+    done
+
+    info "dogfood detectors: running driver against this repo"
+    bash scripts/dogfood-detectors.sh >/tmp/validate-dogfood.log 2>&1 \
+        || { cat /tmp/validate-dogfood.log >&2; fail "scripts/dogfood-detectors.sh: regressions detected"; }
+    if command -v bats >/dev/null 2>&1 && [ -f tests/dogfood/test_driver.bats ]; then
+        info "  running: tests/dogfood/test_driver.bats"
+        bats tests/dogfood/test_driver.bats >/tmp/validate-dogfood-bats.log 2>&1 \
+            || { cat /tmp/validate-dogfood-bats.log >&2; fail "tests/dogfood/test_driver.bats: failed"; }
+    fi
+}
+
 check_install_tests() {
     info "install tests: tests/install/*.sh"
     if [ -d tests/install ]; then
@@ -1075,6 +1107,7 @@ main() {
     check_autospec_test_skill_present
     check_autospec_qa_contract
     check_brute_force_rule_ids
+    check_dogfood_detectors
     check_autospec_release_contract
     check_docs_amendment_presence
     check_install_tests
