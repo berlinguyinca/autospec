@@ -161,7 +161,19 @@ function_ranges_brace() {
     awk -v lang="$lang" '
         function is_sig(s,   r) {
             if (lang == "javascript") {
-                return (s ~ /(^|[^A-Za-z0-9_])function[[:space:]]+[A-Za-z_]/)
+                # Accept: classic `function name(`, arrow `const name = (...) =>`,
+                # class/object methods `name(...) {`, and `name: function(`.
+                # Method form requires `{` on the same line to avoid matching
+                # bare call sites; arrow form matches `=>` anywhere on the line.
+                # Exclude lines whose leading identifier is a JS control-flow
+                # keyword so `switch (x) {` / `for (...) {` etc. do not get
+                # mistaken for a method signature.
+                if (s ~ /^[[:space:]]*(if|else|for|while|do|switch|case|catch|try|return|throw|with|typeof|new|in|of|delete|void|yield|await|async)[[:space:]]*[\({]/) return 0
+                return (s ~ /(^|[^A-Za-z0-9_])function[[:space:]]+[A-Za-z_]/) \
+                    || (s ~ /(^|[^A-Za-z0-9_])(const|let|var)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*(\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=>/) \
+                    || (s ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\([^)]*\)[[:space:]]*\{/) \
+                    || (s ~ /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*function[[:space:]]*\(/) \
+                    || (s ~ /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*(\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=>/)
             } else if (lang == "go") {
                 return (s ~ /^func[[:space:]]/)
             } else if (lang == "java") {
@@ -176,16 +188,37 @@ function_ranges_brace() {
             return 0
         }
         function extract_name(s,   t, kw_re) {
-            if (lang == "javascript") kw_re = "function[[:space:]]+"
-            else if (lang == "go")     kw_re = "func[[:space:]]+"
-            else if (lang == "scala")  kw_re = "def[[:space:]]+"
-            else if (lang == "rust")   kw_re = "fn[[:space:]]+"
-            else                        kw_re = ""
+            if (lang == "javascript") {
+                # classic function
+                if (match(s, /function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                    t = substr(s, RSTART, RLENGTH)
+                    sub(/^function[[:space:]]+/, "", t)
+                    return t
+                }
+                # arrow: const|let|var NAME =
+                if (match(s, /(const|let|var)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/)) {
+                    t = substr(s, RSTART, RLENGTH)
+                    sub(/^(const|let|var)[[:space:]]+/, "", t)
+                    sub(/[[:space:]]*=.*/, "", t)
+                    return t
+                }
+                # object/class member: NAME:  or  NAME(
+                if (match(s, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*[(:]/)) {
+                    t = substr(s, RSTART, RLENGTH)
+                    sub(/^[[:space:]]*/, "", t)
+                    sub(/[[:space:]]*[(:].*/, "", t)
+                    return t
+                }
+                return "<unknown>"
+            }
+            if (lang == "go")         kw_re = "func[[:space:]]+"
+            else if (lang == "scala") kw_re = "def[[:space:]]+"
+            else if (lang == "rust")  kw_re = "fn[[:space:]]+"
+            else                       kw_re = ""
             if (kw_re != "") {
                 if (match(s, kw_re "[A-Za-z_][A-Za-z0-9_]*")) {
                     t = substr(s, RSTART, RLENGTH)
                     sub("^" kw_re, "", t)
-                    # for go, strip leading receiver group remnants — rare
                     return t
                 }
             } else {

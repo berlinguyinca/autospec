@@ -313,6 +313,48 @@ teardown() {
     fi
 }
 
+@test "per-function: detects 5+ same-shape branches inside a JS arrow function" {
+    mkdir -p "$TMPDIR_FIXT/arrow"
+    cat >"$TMPDIR_FIXT/arrow/route.ts" <<'TS'
+const route = (name: string) => {
+    if (name.includes("http")) return ["http", 1];
+    if (name.includes("ftp")) return ["ftp", 2];
+    if (name.includes("ssh")) return ["ssh", 3];
+    if (name.includes("git")) return ["git", 4];
+    if (name.includes("ws")) return ["ws", 5];
+    return ["unknown", 0];
+};
+TS
+    run env REPO_DIR="$TMPDIR_FIXT/arrow" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+        bash "$SWEEP"
+    [ "$status" -eq 0 ]
+    [ -f "$TMPDIR_FIXT/.autospec/qa-verdict.json" ]
+    run grep -E '"rule_id":"REPEATED_STRUCTURE_AS_CODE".*"file":"[^"]*route\.ts".*"function":"route"' "$TMPDIR_FIXT/.autospec/qa-verdict.json"
+    [ "$status" -eq 0 ]
+}
+
+@test "per-function: detects 5+ same-shape branches inside a JS class method" {
+    mkdir -p "$TMPDIR_FIXT/method"
+    cat >"$TMPDIR_FIXT/method/router.ts" <<'TS'
+class Router {
+    route(name: string) {
+        if (name.includes("http")) return ["http", 1];
+        if (name.includes("ftp")) return ["ftp", 2];
+        if (name.includes("ssh")) return ["ssh", 3];
+        if (name.includes("git")) return ["git", 4];
+        if (name.includes("ws")) return ["ws", 5];
+        return ["unknown", 0];
+    }
+}
+TS
+    run env REPO_DIR="$TMPDIR_FIXT/method" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+        bash "$SWEEP"
+    [ "$status" -eq 0 ]
+    [ -f "$TMPDIR_FIXT/.autospec/qa-verdict.json" ]
+    run grep -E '"rule_id":"REPEATED_STRUCTURE_AS_CODE".*"file":"[^"]*router\.ts".*"function":"route"' "$TMPDIR_FIXT/.autospec/qa-verdict.json"
+    [ "$status" -eq 0 ]
+}
+
 @test "per-function: scattered branches across 5 functions emit ZERO findings (rust)" {
     run env REPO_DIR="$TMPDIR_FIXT/neg" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
         bash "$SWEEP"
