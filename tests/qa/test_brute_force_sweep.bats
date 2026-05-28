@@ -2,18 +2,12 @@
 # tests/qa/test_brute_force_sweep.bats
 #
 # Fixture-driven test for the autospec-qa brute-force string-heuristics sweep
-# introduced in issue #637. We synthesize offender files in each of the six
-# supported languages (Python, JS/TS, Go, Java, Scala, Rust), mock `gh`, and
-# assert that the sweep:
-#   1. Emits a `code_health:brute_force_string_heuristics` finding per
-#      language into `.autospec/qa-verdict.json`.
-#   2. Files one `auto-implement,autospec:v2-flow` GitHub issue per offender
-#      via `gh issue create`, with the file/function/line and the verbatim
-#      RULE_ID directive in the body.
+# introduced in issue #637 and refined in issue #640 (per-function scope).
 #
-# Because the sweep itself is what's under test, mocking `gh` is the right
-# call (per the issue scope). All other fixtures are real source files on
-# disk that the sweep grep/heuristic pass will see.
+# The sweep now scopes REPEATED_STRUCTURE_AS_CODE branch-counting to
+# individual function bodies and emits findings only when 5+ same-shape
+# branches appear within ONE function. Scattering branches across multiple
+# functions must NOT emit a finding.
 
 REPO_ROOT="${BATS_TEST_DIRNAME}/../.."
 SWEEP="${REPO_ROOT}/scripts/qa-brute-force-sweep.sh"
@@ -22,6 +16,8 @@ setup() {
     TMPDIR_FIXT="$(mktemp -d)"
     export TMPDIR_FIXT
     mkdir -p "$TMPDIR_FIXT/.autospec"
+
+    # ----- positive offenders (5+ same-shape branches in ONE function) -----
 
     # synthetic offender — Python with rdkit imported + substring-on-name ladder
     mkdir -p "$TMPDIR_FIXT/src"
@@ -117,6 +113,75 @@ fn classify(name: &str) -> (&str, i32) {
 }
 RUST
 
+    # ----- negative cases (#640): branches scattered across functions -----
+    # 5 unrelated `if` lines across 5 different functions in each language —
+    # must produce ZERO findings for REPEATED_STRUCTURE_AS_CODE.
+
+    mkdir -p "$TMPDIR_FIXT/neg"
+
+    cat >"$TMPDIR_FIXT/neg/scattered.py" <<'PY'
+def a(x):
+    if x > 0:
+        return 1
+def b(x):
+    if x > 0:
+        return 2
+def c(x):
+    if x > 0:
+        return 3
+def d(x):
+    if x > 0:
+        return 4
+def e(x):
+    if x > 0:
+        return 5
+PY
+
+    cat >"$TMPDIR_FIXT/neg/scattered.ts" <<'TS'
+function a(x: number) { if (x > 0) return 1; }
+function b(x: number) { if (x > 0) return 2; }
+function c(x: number) { if (x > 0) return 3; }
+function d(x: number) { if (x > 0) return 4; }
+function e(x: number) { if (x > 0) return 5; }
+TS
+
+    cat >"$TMPDIR_FIXT/neg/scattered.go" <<'GO'
+package main
+func a(x int) int { if x > 0 { return 1 }; return 0 }
+func b(x int) int { if x > 0 { return 2 }; return 0 }
+func c(x int) int { if x > 0 { return 3 }; return 0 }
+func d(x int) int { if x > 0 { return 4 }; return 0 }
+func e(x int) int { if x > 0 { return 5 }; return 0 }
+GO
+
+    cat >"$TMPDIR_FIXT/neg/Scattered.java" <<'JAVA'
+public class Scattered {
+    public int a(int x) { if (x > 0) return 1; return 0; }
+    public int b(int x) { if (x > 0) return 2; return 0; }
+    public int c(int x) { if (x > 0) return 3; return 0; }
+    public int d(int x) { if (x > 0) return 4; return 0; }
+    public int e(int x) { if (x > 0) return 5; return 0; }
+}
+JAVA
+
+    cat >"$TMPDIR_FIXT/neg/Scattered.scala" <<'SCALA'
+object Scattered {
+  def a(x: Int): Int = { if (x > 0) return 1; 0 }
+  def b(x: Int): Int = { if (x > 0) return 2; 0 }
+  def c(x: Int): Int = { if (x > 0) return 3; 0 }
+  def d(x: Int): Int = { if (x > 0) return 4; 0 }
+  def e(x: Int): Int = { if (x > 0) return 5; 0 }
+}
+SCALA
+
+    cat >"$TMPDIR_FIXT/neg/scattered.rs" <<'RUST'
+fn a(x: i32) -> i32 { if x > 0 { return 1; } 0 }
+fn b(x: i32) -> i32 { if x > 0 { return 2; } 0 }
+fn c(x: i32) -> i32 { if x > 0 { return 3; } 0 }
+fn d(x: i32) -> i32 { if x > 0 { return 4; } 0 }
+fn e(x: i32) -> i32 { if x > 0 { return 5; } 0 }
+RUST
+
     # Mock gh — record invocations into a log file
     MOCK_BIN="$TMPDIR_FIXT/bin"
     mkdir -p "$MOCK_BIN"
@@ -142,12 +207,12 @@ teardown() {
 }
 
 @test "sweep emits per-language findings in qa-verdict.json" {
-    run env REPO_DIR="$TMPDIR_FIXT" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+    run env REPO_DIR="$TMPDIR_FIXT/src" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
         bash "$SWEEP"
     [ "$status" -eq 0 ]
     [ -f "$TMPDIR_FIXT/.autospec/qa-verdict.json" ]
     for lang in python javascript go java scala rust; do
-        run grep -F "$lang" "$TMPDIR_FIXT/.autospec/qa-verdict.json"
+        run grep -F "\"language\":\"$lang\"" "$TMPDIR_FIXT/.autospec/qa-verdict.json"
         [ "$status" -eq 0 ]
     done
     run grep -F 'code_health:brute_force_string_heuristics' "$TMPDIR_FIXT/.autospec/qa-verdict.json"
@@ -155,7 +220,7 @@ teardown() {
 }
 
 @test "sweep files an auto-implement issue per offender via gh" {
-    run env REPO_DIR="$TMPDIR_FIXT" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+    run env REPO_DIR="$TMPDIR_FIXT/src" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
         bash "$SWEEP"
     [ "$status" -eq 0 ]
     [ -f "$TMPDIR_FIXT/gh-calls.log" ]
@@ -168,10 +233,92 @@ teardown() {
 }
 
 @test "sweep issue bodies cite RULE_ID directive verbatim" {
-    run env REPO_DIR="$TMPDIR_FIXT" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+    run env REPO_DIR="$TMPDIR_FIXT/src" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
         bash "$SWEEP"
     [ "$status" -eq 0 ]
     # At least one of the two new RULE_IDs must appear in the gh calls.
     run grep -E 'STRING_MATCH_DOMAIN_LOGIC|REPEATED_STRUCTURE_AS_CODE' "$TMPDIR_FIXT/gh-calls.log"
     [ "$status" -eq 0 ]
+}
+
+# ---------- issue #640 per-function-scope regression tests ----------
+
+@test "per-function: positive offender cites the offending function name (python)" {
+    run env REPO_DIR="$TMPDIR_FIXT/src" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+        bash "$SWEEP"
+    [ "$status" -eq 0 ]
+    # Finding for classify.py must name the `classify` function, not "<unknown>"
+    # and not the file's first def (here there is only one, but the rule still
+    # applies).
+    run grep -E '"file":"[^"]*classify\.py".*"function":"classify"' "$TMPDIR_FIXT/.autospec/qa-verdict.json"
+    [ "$status" -eq 0 ]
+}
+
+@test "per-function: positive offender cites the first branch line inside the function (python)" {
+    run env REPO_DIR="$TMPDIR_FIXT/src" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+        bash "$SWEEP"
+    [ "$status" -eq 0 ]
+    # First `if "acid" in name:` is on line 4 of the fixture.
+    run grep -E '"rule_id":"REPEATED_STRUCTURE_AS_CODE".*"file":"[^"]*classify\.py".*"line":4' "$TMPDIR_FIXT/.autospec/qa-verdict.json"
+    [ "$status" -eq 0 ]
+}
+
+@test "per-function: scattered branches across 5 functions emit ZERO findings (python)" {
+    run env REPO_DIR="$TMPDIR_FIXT/neg" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+        bash "$SWEEP"
+    [ "$status" -eq 0 ]
+    if [ -f "$TMPDIR_FIXT/.autospec/qa-verdict.json" ]; then
+        run grep -F 'scattered.py' "$TMPDIR_FIXT/.autospec/qa-verdict.json"
+        [ "$status" -ne 0 ]
+    fi
+}
+
+@test "per-function: scattered branches across 5 functions emit ZERO findings (javascript)" {
+    run env REPO_DIR="$TMPDIR_FIXT/neg" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+        bash "$SWEEP"
+    [ "$status" -eq 0 ]
+    if [ -f "$TMPDIR_FIXT/.autospec/qa-verdict.json" ]; then
+        run grep -F 'scattered.ts' "$TMPDIR_FIXT/.autospec/qa-verdict.json"
+        [ "$status" -ne 0 ]
+    fi
+}
+
+@test "per-function: scattered branches across 5 functions emit ZERO findings (go)" {
+    run env REPO_DIR="$TMPDIR_FIXT/neg" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+        bash "$SWEEP"
+    [ "$status" -eq 0 ]
+    if [ -f "$TMPDIR_FIXT/.autospec/qa-verdict.json" ]; then
+        run grep -F 'scattered.go' "$TMPDIR_FIXT/.autospec/qa-verdict.json"
+        [ "$status" -ne 0 ]
+    fi
+}
+
+@test "per-function: scattered branches across 5 functions emit ZERO findings (java)" {
+    run env REPO_DIR="$TMPDIR_FIXT/neg" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+        bash "$SWEEP"
+    [ "$status" -eq 0 ]
+    if [ -f "$TMPDIR_FIXT/.autospec/qa-verdict.json" ]; then
+        run grep -F 'Scattered.java' "$TMPDIR_FIXT/.autospec/qa-verdict.json"
+        [ "$status" -ne 0 ]
+    fi
+}
+
+@test "per-function: scattered branches across 5 functions emit ZERO findings (scala)" {
+    run env REPO_DIR="$TMPDIR_FIXT/neg" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+        bash "$SWEEP"
+    [ "$status" -eq 0 ]
+    if [ -f "$TMPDIR_FIXT/.autospec/qa-verdict.json" ]; then
+        run grep -F 'Scattered.scala' "$TMPDIR_FIXT/.autospec/qa-verdict.json"
+        [ "$status" -ne 0 ]
+    fi
+}
+
+@test "per-function: scattered branches across 5 functions emit ZERO findings (rust)" {
+    run env REPO_DIR="$TMPDIR_FIXT/neg" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+        bash "$SWEEP"
+    [ "$status" -eq 0 ]
+    if [ -f "$TMPDIR_FIXT/.autospec/qa-verdict.json" ]; then
+        run grep -F 'scattered.rs' "$TMPDIR_FIXT/.autospec/qa-verdict.json"
+        [ "$status" -ne 0 ]
+    fi
 }
