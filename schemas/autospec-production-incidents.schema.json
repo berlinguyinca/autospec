@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-production-incidents.schema.json",
+  "title": "autospec production incidents registry",
+  "description": "Registry of production incidents and the regression tests that prove they cannot reoccur. Consumed by scripts/qa-incident-check.sh.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "id",
+      "occurred_at",
+      "failure_mode",
+      "feature",
+      "regression_test",
+      "mutation",
+      "status"
+    ],
+    "additionalProperties": true,
+    "properties": {
+      "id": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Stable incident identifier, conventionally INC-YYYY-MM-DD-slug."
+      },
+      "occurred_at": {
+        "type": "string",
+        "format": "date-time",
+        "minLength": 1,
+        "description": "ISO-8601 UTC timestamp of when the production incident was observed."
+      },
+      "failure_mode": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Short description of the user-visible failure mode."
+      },
+      "feature": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Feature or subsystem implicated by the incident."
+      },
+      "spec_anchor": {
+        "type": "string",
+        "description": "Optional spec anchor that owns the affected behavior."
+      },
+      "regression_test": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Path to the regression test that proves the incident cannot silently recur."
+      },
+      "mutation": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Implementation mutation that should cause the regression test to FAIL."
+      },
+      "added_by": {
+        "type": "string",
+        "description": "Operator handle that recorded the incident."
+      },
+      "status": {
+        "type": "string",
+        "enum": ["active", "superseded", "wont_test"],
+        "description": "Lifecycle status. Only `active` is enforced. `superseded` requires citing the replacement spec section. `wont_test` requires explicit justification."
+      },
+      "superseded_by": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Replacement spec section or incident id when status is `superseded`."
+      },
+      "wont_test_reason": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Justification when status is `wont_test`."
+      }
+    },
+    "allOf": [
+      {
+        "if": { "properties": { "status": { "const": "superseded" } }, "required": ["status"] },
+        "then": { "required": ["superseded_by"] }
+      },
+      {
+        "if": { "properties": { "status": { "const": "wont_test" } }, "required": ["status"] },
+        "then": { "required": ["wont_test_reason"] }
+      }
+    ]
+  }
+}
