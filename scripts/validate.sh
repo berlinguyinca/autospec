@@ -1193,6 +1193,33 @@ check_qa_verify_first_discipline() {
     fi
 }
 
+check_qa_incident_contract() {
+    info "qa incident-regression contract: scripts + schema + adapter lockstep"
+    local script="scripts/qa-incident-check.sh"
+    local schema="schemas/autospec-production-incidents.schema.json"
+    local bats="tests/qa/test_incident_check.bats"
+    [ -f "$script" ] || fail "$script: file missing (issue #659)"
+    [ -x "$script" ] || fail "$script: file not executable (issue #659)"
+    bash -n "$script" || fail "$script: bash syntax error (issue #659)"
+    [ -f "$schema" ] || fail "$schema: schema missing (issue #659)"
+    [ -f "$bats" ] || fail "$bats: bats coverage missing (issue #659)"
+    for trio in skills/autospec-qa/SKILL.md skills/autospec-qa/codex/prompt.md skills/autospec-qa/opencode/agent.md; do
+        grep -q '^## Production incident regression check' "$trio" \
+            || fail "$trio missing '## Production incident regression check' section (issue #659)"
+        grep -q 'qa-incident-check\.sh' "$trio" \
+            || fail "$trio missing reference to qa-incident-check.sh (issue #659)"
+        grep -q '\.autospec/production-incidents\.json' "$trio" \
+            || fail "$trio missing reference to .autospec/production-incidents.json (issue #659)"
+        grep -q 'never silently delete\|Never silently delete' "$trio" \
+            || fail "$trio missing never-silently-delete rule (issue #659)"
+    done
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats"
+        bats "$bats" >/tmp/validate-incident-check.log 2>&1 \
+            || { cat /tmp/validate-incident-check.log >&2; fail "$bats: failed"; }
+    fi
+}
+
 check_lint_heredoc_handling() {
     info "lint-implementation heredoc handling: tests/lint/test_complexity_heredoc.bats"
     [ -f tests/lint/test_complexity_heredoc.bats ] \
@@ -1279,6 +1306,7 @@ main() {
     check_brute_force_rule_ids
     check_dogfood_detectors
     check_qa_verify_first_discipline
+    check_qa_incident_contract
     check_autospec_release_contract
     check_qa_verdict_contract
     check_release_verdict_script

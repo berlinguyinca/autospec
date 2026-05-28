@@ -662,6 +662,68 @@ Required outcome:
   and the remediation status.
 ```
 
+## Production incident regression check
+
+When QA passes but production breaks, the same bug class tends to leak again the
+next cycle because nothing in the QA pipeline learns from the incident. The
+registry `.autospec/production-incidents.json` records every production incident
+and the regression test that proves it cannot reoccur silently. `/autospec-qa`
+reads this registry on every run and asserts, for each `active` incident:
+
+1. A named `regression_test` file exists.
+2. That test actually runs.
+3. The test is non-trivially assertive (no `expect(true).toBe(true)` or empty
+   stub).
+4. The test FAILS when the incident's recorded `mutation` is applied to the
+   implementation — proving the test would catch a regression rather than
+   passing for unrelated reasons.
+
+Missing any of these four checks emits a finding under category
+`code_health:production_incident_regression_missing` with
+`release_blocking: true` in `.autospec/qa-verdict.json`.
+
+Registry schema (one JSON array, one entry per incident):
+
+```json
+[
+  {
+    "id": "INC-2026-05-28-checkout-double-charge",
+    "occurred_at": "2026-05-28T03:14:00Z",
+    "failure_mode": "concurrent submit creates duplicate Stripe charge",
+    "feature": "checkout/payment",
+    "spec_anchor": "docs/specs/checkout.md#payment",
+    "regression_test": "tests/regression/incident-2026-05-28-double-charge.test.ts",
+    "mutation": "remove the `submitting` guard on the Pay button; test must FAIL",
+    "added_by": "<operator handle>",
+    "status": "active"
+  }
+]
+```
+
+`status` ∈ `active | superseded | wont_test`. Only `active` is enforced.
+`superseded` means the underlying behavior was redesigned out of existence and
+must cite the replacement spec section. `wont_test` requires explicit
+justification (e.g., "infra-level only, no test can reach it") and emits a
+warning, never a release blocker.
+
+Never silently delete an incident entry. Operators move incidents to
+`superseded` or `wont_test` with a citation/justification so the historical
+record of why a regression test was added stays auditable. The orchestrator
+runs the helper after the existing verdict computation, similar to other
+post-verdict gates:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/qa-incident-check.sh" \
+    --registry .autospec/production-incidents.json \
+    --verdict  .autospec/qa-verdict.json
+```
+
+Exit 0 means every `active` incident is covered. Exit 1 means at least one
+active incident is missing coverage and a release-blocking finding has been
+appended to the verdict. The helper validates the registry against
+`schemas/autospec-production-incidents.schema.json` and writes findings
+atomically.
+
 ## Post-merge deployed canary prompt
 
 When a deployed/dev URL exists, define the post-merge canary before release:
