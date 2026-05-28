@@ -533,9 +533,9 @@ labels and patches each body with a `## Model fit` block.
 Specs in `docs/specs/` accumulate over time. When a newer spec adds, modifies, or
 removes behavior that an earlier spec described, autospec applies
 **implicit-by-recency supersession** (issue #635): the spec whose
-last-modifying commit on `main` is most recent wins for any overlapping
-behavior. Operators do NOT write `Supersedes:` frontmatter — recency alone
-decides.
+last-modifying commit on the current branch is most recent wins for any
+overlapping behavior (untracked specs fall back to filesystem mtime).
+Operators do NOT write `Supersedes:` frontmatter — recency alone decides.
 
 During Phase 3 decomposition, before filing a candidate child issue, resolve
 the authoritative spec for each behavior the issue touches. Use the shared

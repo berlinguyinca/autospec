@@ -535,6 +535,11 @@ check_supersession_contract() {
     done
     [ -f tests/resolve-spec-supersession.bats ] \
         || fail "tests/resolve-spec-supersession.bats: bats coverage missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/resolve-spec-supersession.bats"
+        bats tests/resolve-spec-supersession.bats >/tmp/validate-supersession.log 2>&1 \
+            || { cat /tmp/validate-supersession.log >&2; fail "tests/resolve-spec-supersession.bats: failed"; }
+    fi
 }
 
 # Phase 4 guardian block lock-step invariants (introduced by issue #212): the

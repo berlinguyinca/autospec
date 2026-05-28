@@ -20,9 +20,10 @@
 #   Deleted specs (no longer present on disk) are excluded.
 #
 # Recency tie-break:
-#   Most recent `git log -1 --format=%ct -- <spec>` wins. If git is unavailable
-#   or two specs share a commit timestamp, falls back to mtime, then lexical
-#   sort (later path wins) for determinism.
+#   Most recent `git log -1 --format=%ct -- <spec>` on the current branch wins.
+#   If git is unavailable or the spec is untracked, falls back to filesystem
+#   mtime. When two candidates share the same final timestamp, lexical sort of
+#   the path (later path wins) breaks the tie deterministically.
 #
 # Exit codes:
 #   0  authoritative spec resolved (printed on stdout)

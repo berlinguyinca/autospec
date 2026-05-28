@@ -350,9 +350,10 @@ spec/config follow-up before implementation is called complete.
 ## Spec supersession (recency)
 
 When two specs in `docs/specs/` overlap on a behavior, the spec whose
-last-modifying commit on `main` is most recent wins (issue #635:
-implicit-by-recency supersession). Operators do NOT write `Supersedes:`
-frontmatter — recency alone decides.
+last-modifying commit on the current branch is most recent wins (issue #635:
+implicit-by-recency supersession; untracked specs fall back to filesystem
+mtime). Operators do NOT write `Supersedes:` frontmatter — recency alone
+decides.
 
 QA validation MUST resolve each behavior to its authoritative spec before
 classifying a row as `FAIL`. Behavior present only in an older, superseded

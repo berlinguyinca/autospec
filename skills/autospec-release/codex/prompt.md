@@ -261,9 +261,10 @@ the explicit skill invocation was unavailable.
 ## Spec supersession (recency)
 
 When `docs/specs/` contains two specs that overlap on a behavior, the spec
-whose last-modifying commit on `main` is most recent wins (issue #635:
-implicit-by-recency supersession). Operators do NOT write `Supersedes:`
-frontmatter — recency alone decides.
+whose last-modifying commit on the current branch is most recent wins
+(issue #635: implicit-by-recency supersession; untracked specs fall back
+to filesystem mtime). Operators do NOT write `Supersedes:` frontmatter —
+recency alone decides.
 
 Release verdict computation MUST consult the resolver before treating any
 finding as `release_blocking`. A finding whose `source_spec` is older than
