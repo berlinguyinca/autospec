@@ -112,15 +112,73 @@ fi
 # ── path allowlist ────────────────────────────────────────────────
 # Forbidden patterns: .env (exact basename or .env.*), *credential*, *secret*,
 # *.pem, *.key, .git/, node_modules/.
-check_path_allowed() {
+#
+# Path-security hardening (issue #680):
+#   1. Resolve via `realpath -m` (or `readlink -f` fallback) to follow
+#      symlinks and canonicalize `..` segments.
+#   2. Check BOTH the literal input and the resolved target against the
+#      forbidden patterns — a safe-looking symlink to .env must reject.
+#   3. Reject any post-canonicalization `..` segments (defense in depth).
+_match_forbidden() {
     local p="$1"
     case "$p" in
-        *.env|*.env.*|*/.env|.env) return 1 ;;
-        *credential*|*Credential*|*CREDENTIAL*) return 1 ;;
-        *secret*|*Secret*|*SECRET*) return 1 ;;
-        *.pem|*.key) return 1 ;;
-        */.git/*|.git/*) return 1 ;;
-        */node_modules/*|node_modules/*) return 1 ;;
+        *.env|*.env.*|*/.env|.env) return 0 ;;
+        *credential*|*Credential*|*CREDENTIAL*) return 0 ;;
+        *secret*|*Secret*|*SECRET*) return 0 ;;
+        *.pem|*.key) return 0 ;;
+        */.git/*|.git/*|*/.git|.git) return 0 ;;
+        */node_modules/*|node_modules/*|*/node_modules|node_modules) return 0 ;;
+    esac
+    return 1
+}
+
+_canonicalize() {
+    local p="$1"
+    local r=""
+    # Try GNU realpath -m (handles non-existent paths).
+    if command -v realpath >/dev/null 2>&1; then
+        r="$(realpath -m "$p" 2>/dev/null)" || r=""
+        if [ -n "$r" ]; then printf '%s' "$r"; return; fi
+        # BSD realpath (macOS) — only resolves existing paths.
+        r="$(realpath "$p" 2>/dev/null)" || r=""
+        if [ -n "$r" ]; then printf '%s' "$r"; return; fi
+    fi
+    if command -v readlink >/dev/null 2>&1; then
+        r="$(readlink -f "$p" 2>/dev/null)" || r=""
+        if [ -n "$r" ]; then printf '%s' "$r"; return; fi
+        # Single-level symlink fallback (BSD readlink).
+        if [ -L "$p" ]; then
+            local target
+            target="$(readlink "$p" 2>/dev/null)" || target=""
+            if [ -n "$target" ]; then
+                case "$target" in
+                    /*) printf '%s' "$target"; return ;;
+                    *)  printf '%s/%s' "$(dirname "$p")" "$target"; return ;;
+                esac
+            fi
+        fi
+    fi
+    # Python fallback.
+    if command -v python3 >/dev/null 2>&1; then
+        r="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null)" || r=""
+        if [ -n "$r" ]; then printf '%s' "$r"; return; fi
+    fi
+    printf '%s' "$p"
+}
+
+check_path_allowed() {
+    local p="$1"
+    # Literal pattern check first.
+    if _match_forbidden "$p"; then return 1; fi
+    # Resolve (follows symlinks, canonicalizes ..) and re-check.
+    local resolved
+    resolved="$(_canonicalize "$p")"
+    if [ -n "$resolved" ] && [ "$resolved" != "$p" ]; then
+        if _match_forbidden "$resolved"; then return 1; fi
+    fi
+    # Reject any residual .. segment.
+    case "$resolved" in
+        *..*) return 1 ;;
     esac
     return 0
 }
@@ -151,6 +209,19 @@ fi
 if [ -z "$PROMPT" ]; then
     echo "refine-prompt: empty prompt (provide a positional arg or --from-file)" >&2
     exit 4
+fi
+
+# Extended allowlist (issue #680): artifact-dir and simulate-iterations dir
+# must also pass the forbidden-path check.
+if ! check_path_allowed "$ARTIFACT_DIR"; then
+    echo "code_health:refine_path_violation path=$ARTIFACT_DIR" >&2
+    exit 3
+fi
+if [ -n "$SIM_ITER_DIR" ]; then
+    if ! check_path_allowed "$SIM_ITER_DIR"; then
+        echo "code_health:refine_path_violation path=$SIM_ITER_DIR" >&2
+        exit 3
+    fi
 fi
 
 # ── slug helper (early — needed by --continue) ────────────────────
