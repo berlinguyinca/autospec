@@ -1664,6 +1664,7 @@ main() {
     check_loop_handoff_harness_awareness
     check_autospec_explore_researchers_deterministic
     check_autospec_explore_researchers_llm
+    check_autospec_explore_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -1828,6 +1829,66 @@ check_autospec_explore_researchers_llm() {
                 || { cat /tmp/validate-explore-llm.log >&2; fail "$bats_file: failed"; }
         fi
     done
+}
+
+# autospec-explore orchestrator contract (issue #721): top-level
+# scripts/autospec-explore.sh exists, is executable, bash -n clean, sources
+# the shared loop driver, references all explore subcomponents, and the
+# e2e bats fixture passes when bats is available. Also enforces the
+# autospec-explore trio lockstep already covered by the multi-harness
+# scanner plus references to the shared loop driver in adapters.
+check_autospec_explore_contract() {
+    info "autospec-explore orchestrator + loop integration + e2e (issue #721)"
+    local orch="scripts/autospec-explore.sh"
+    [ -f "$orch" ] || fail "$orch: top-level orchestrator missing"
+    [ -x "$orch" ] || fail "$orch: file not executable"
+    bash -n "$orch" || fail "$orch: bash syntax error"
+    grep -q 'lib/autospec-loop\.sh' "$orch" \
+        || fail "$orch: must source scripts/lib/autospec-loop.sh"
+    grep -q 'lib/autospec-harness-detect\.sh' "$orch" \
+        || fail "$orch: must source scripts/lib/autospec-harness-detect.sh"
+    grep -q 'explore-sandbox\.sh' "$orch" \
+        || fail "$orch: must invoke scripts/explore-sandbox.sh"
+    grep -q 'explore-research-cycle\.sh' "$orch" \
+        || fail "$orch: must invoke scripts/explore-research-cycle.sh"
+    grep -q 'explore-stop\.flag' "$orch" \
+        || fail "$orch: must check ~/.autospec/explore-stop.flag operator escape"
+    grep -q 'explore-summary\.md' "$orch" \
+        || fail "$orch: must write .autospec/explore-summary.md"
+    grep -q 'explore-loop\.json' "$orch" \
+        || fail "$orch: must write .autospec/explore-loop.json"
+
+    # All 6 researchers + 3 explore scripts must exist + bash -n clean.
+    for r in spec-vs-code prior-reports codebase-signals open-issues source-analysis internet; do
+        local script="scripts/explore-research/$r.sh"
+        [ -f "$script" ] || fail "$script: required researcher missing"
+        [ -x "$script" ] || fail "$script: file not executable"
+        bash -n "$script" || fail "$script: bash syntax error"
+    done
+    for s in scripts/explore-sandbox.sh scripts/explore-research-cycle.sh scripts/autospec-explore.sh; do
+        [ -f "$s" ] || fail "$s: required script missing"
+        [ -x "$s" ] || fail "$s: file not executable"
+        bash -n "$s" || fail "$s: bash syntax error"
+    done
+
+    # Adapter trio must reference the shared driver.
+    for trio in \
+        skills/autospec-explore/SKILL.md \
+        skills/autospec-explore/codex/prompt.md \
+        skills/autospec-explore/opencode/agent.md
+    do
+        [ -f "$trio" ] || fail "$trio: required adapter file missing"
+        grep -q 'lib/autospec-loop\.sh' "$trio" \
+            || fail "$trio: adapter must reference scripts/lib/autospec-loop.sh"
+    done
+
+    local bats_file="tests/explore/test_explore_e2e.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: e2e bats coverage missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-explore-e2e.log 2>&1 \
+            || { cat /tmp/validate-explore-e2e.log >&2; fail "$bats_file: failed"; }
+    fi
 }
 
 main "$@"
