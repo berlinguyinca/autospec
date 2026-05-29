@@ -246,7 +246,19 @@ slug_from_prompt_early() {
 #
 # Termination:
 #   convergence_clean | oscillation_detected | round_cap_reached |
-#   evidence_based_stop | operator_stop | budget_cap_reached.
+#   evidence_based_stop | operator_stop | budget_cap_reached |
+#   iteration_error (real handoff returned non-zero — issue #681).
+#
+# Real-mode vs simulated test mode:
+#   --simulate-iterations DIR  — test-only path; per-iteration refine runs
+#                                with --dry-run and reports are read from
+#                                pre-staged DIR/iter-<N>-report.md fixtures.
+#                                No real /autospec dispatch happens.
+#   (default real mode)        — each iteration runs the FULL refine +
+#                                handoff path; the report is harvested from
+#                                $REPO_ROOT/.autospec/run-summary.md and
+#                                handoff failure stops the loop with
+#                                status=iteration_error.
 #
 # Per-iteration record + summary table per spec
 # (docs/specs/2026-05-28-autospec-refine-design.md §Continuous-iteration mode).
@@ -335,20 +347,47 @@ run_continue_loop() {
         fi
 
         # Run refine on current prompt — inline by re-invoking the same script
-        # WITHOUT --continue so the single-pass path executes.
+        # WITHOUT --continue so the single-pass path executes. In real
+        # operation we invoke the FULL handoff path (refine + dispatch to
+        # /autospec) and harvest the resulting .autospec/run-summary.md.
+        # The --simulate-iterations test hook short-circuits to --dry-run and
+        # reads pre-staged iter-<N>-report.md fixtures.
         local iter_artifact_subdir="$ARTIFACT_DIR/iter-${iter}"
         mkdir -p "$iter_artifact_subdir"
         local refine_log="$iter_artifact_subdir/refine.log"
         local refine_status=0
-        bash "$0" "$cur_prompt" --rounds "$ROUNDS" --dry-run \
-            --artifact-dir "$iter_artifact_subdir" \
-            --repo-root "$REPO_ROOT" \
-            --memory-root "$MEMORY_ROOT" \
-            > "$refine_log" 2>&1 || refine_status=$?
+        if [ -n "$SIM_ITER_DIR" ]; then
+            # Test-only path: dry-run, no real /autospec dispatch.
+            bash "$0" "$cur_prompt" --rounds "$ROUNDS" --dry-run \
+                --artifact-dir "$iter_artifact_subdir" \
+                --repo-root "$REPO_ROOT" \
+                --memory-root "$MEMORY_ROOT" \
+                > "$refine_log" 2>&1 || refine_status=$?
+        else
+            # Real path: refine + handoff. handoff_exit_code in the artifact
+            # reflects whether /autospec ran cleanly.
+            bash "$0" "$cur_prompt" --rounds "$ROUNDS" \
+                --artifact-dir "$iter_artifact_subdir" \
+                --repo-root "$REPO_ROOT" \
+                --memory-root "$MEMORY_ROOT" \
+                > "$refine_log" 2>&1 || refine_status=$?
+        fi
 
         local refinement_artifact
         refinement_artifact="$(ls "$iter_artifact_subdir"/*.json 2>/dev/null | head -1)"
         [ -n "$refinement_artifact" ] || refinement_artifact=""
+
+        # If real handoff failed, stop the loop with iteration_error.
+        if [ -z "$SIM_ITER_DIR" ] && [ "$refine_status" -ne 0 ]; then
+            status="iteration_error"
+            row_status="iteration_error"
+            local row
+            row="$(printf '| %4d | %-21s | %-60s | %10s | %4s | %-20s |' \
+                "$iter" "$(printf '%s' "$cur_source" | head -c 21)" \
+                "handoff failed rc=$refine_status" "0" "-" "iteration_error")"
+            if [ -z "$table_rows" ]; then table_rows="$row"; else table_rows="$table_rows"$'\n'"$row"; fi
+            break
+        fi
 
         # Determine where the iteration report lives.
         local report_path=""
@@ -781,19 +820,23 @@ HEAD_SHA="$( ( cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null ) || echo unkno
 DEGRADED_JSON="$(printf '%s\n' "${DEGRADED_ROUNDS[@]:-}" | python3 -c 'import json,sys; arr=[l for l in sys.stdin.read().splitlines() if l]; sys.stdout.write(json.dumps(arr))')"
 
 HANDOFF_EXECUTED=false
+HANDOFF_EXIT_CODE="null"
 if [ "$DRY_RUN" = 1 ]; then
     HANDOFF_TARGET="dry-run"
 elif [ "$HANDOFF_MODE" = "interactive" ]; then
     HANDOFF_TARGET="/autospec"
-    HANDOFF_EXECUTED=true
 else
     HANDOFF_TARGET="/autospec --autonomous"
-    HANDOFF_EXECUTED=true
 fi
+# handoff_executed flips to true ONLY after a real handoff returns 0 — see
+# the dispatch block below (issue #681 Finding 6). The artifact is written
+# once here with the pessimistic default, then rewritten post-dispatch if
+# the handoff succeeded.
 
 CONTEXT_SPARSE_JSON="$CONTEXT_SPARSE"
 
-cat > "$ARTIFACT" <<EOF
+write_artifact() {
+    cat > "$ARTIFACT" <<EOF
 {
   "original_prompt": $ORIG_JSON,
   "rounds": [$ROUNDS_JSON],
@@ -808,10 +851,13 @@ cat > "$ARTIFACT" <<EOF
     "degraded_rounds": $DEGRADED_JSON,
     "context_sparse": $CONTEXT_SPARSE_JSON,
     "handoff_target": "$HANDOFF_TARGET",
-    "handoff_executed": $HANDOFF_EXECUTED
+    "handoff_executed": $HANDOFF_EXECUTED,
+    "handoff_exit_code": $HANDOFF_EXIT_CODE
   }
 }
 EOF
+}
+write_artifact
 
 if [ -n "$OUTPUT" ]; then
     if ! check_path_allowed "$OUTPUT"; then
@@ -835,24 +881,92 @@ fi
 echo "refine-prompt: status=$STATUS rounds_executed=$ROUNDS_EXECUTED artifact=$ARTIFACT"
 
 # ── handoff dispatch ──────────────────────────────────────────────
-# --dry-run skips handoff. Otherwise invoke the autospec entry point via
+# --dry-run skips handoff. Otherwise resolve the autospec entry point via
 # `claude` (slash-command dispatcher) if available, falling back to the
 # `autospec` binary on PATH. Test harnesses stub both.
-if [ "$DRY_RUN" != 1 ]; then
+#
+# Path-safety (issue #681 Finding 6): reject any resolved dispatcher that
+# lives under /tmp/ or the operator's home tmpdir unless explicitly
+# overridden via AUTOSPEC_HANDOFF_DISPATCHER=1. This blocks the common
+# PATH-stub attack where a writable temp directory shadows a system binary.
+#
+# Bookkeeping (issue #681 Finding 6): handoff_executed=true ONLY after the
+# binary returns 0; capture exit code as metadata.handoff_exit_code; drop
+# `|| true` so failures propagate. Re-write the artifact at the end.
+
+_handoff_dispatcher_safe() {
+    local resolved="$1"
+    [ -n "$resolved" ] || return 1
+    if [ -n "${AUTOSPEC_HANDOFF_DISPATCHER:-}" ]; then
+        return 0
+    fi
+    case "$resolved" in
+        /tmp/*|/private/tmp/*|/var/tmp/*|/var/folders/*) return 1 ;;
+    esac
+    if [ -n "${TMPDIR:-}" ]; then
+        case "$resolved" in
+            "$TMPDIR"*|"${TMPDIR%/}"/*) return 1 ;;
+        esac
+    fi
+    return 0
+}
+
+run_handoff() {
+    local rc=0
+    local dispatcher=""
     if command -v claude >/dev/null 2>&1; then
+        dispatcher="$(command -v claude)"
+        if ! _handoff_dispatcher_safe "$dispatcher"; then
+            echo "refine-prompt: ERROR — refusing handoff: dispatcher in tmpdir: $dispatcher (set AUTOSPEC_HANDOFF_DISPATCHER=1 to override)" >&2
+            return 5
+        fi
+        echo "refine-prompt: handoff dispatcher=$dispatcher" >&2
         if [ "$HANDOFF_MODE" = "interactive" ]; then
-            claude "/autospec" "$FINAL_PROMPT" || true
+            "$dispatcher" "/autospec" "$FINAL_PROMPT"
+            rc=$?
         else
-            claude "/autospec" "--autonomous" "$FINAL_PROMPT" || true
+            "$dispatcher" "/autospec" "--autonomous" "$FINAL_PROMPT"
+            rc=$?
         fi
     elif command -v autospec >/dev/null 2>&1; then
+        dispatcher="$(command -v autospec)"
+        if ! _handoff_dispatcher_safe "$dispatcher"; then
+            echo "refine-prompt: ERROR — refusing handoff: dispatcher in tmpdir: $dispatcher (set AUTOSPEC_HANDOFF_DISPATCHER=1 to override)" >&2
+            return 5
+        fi
+        echo "refine-prompt: handoff dispatcher=$dispatcher" >&2
         if [ "$HANDOFF_MODE" = "interactive" ]; then
-            autospec "$FINAL_PROMPT" || true
+            "$dispatcher" "$FINAL_PROMPT"
+            rc=$?
         else
-            autospec --autonomous "$FINAL_PROMPT" || true
+            "$dispatcher" --autonomous "$FINAL_PROMPT"
+            rc=$?
         fi
     else
         echo "refine-prompt: WARN — no handoff dispatcher (claude/autospec) on PATH; artifact retained" >&2
+        return 127
+    fi
+    return $rc
+}
+
+if [ "$DRY_RUN" != 1 ]; then
+    set +e
+    run_handoff
+    HANDOFF_RC=$?
+    set -e
+    HANDOFF_EXIT_CODE="$HANDOFF_RC"
+    if [ "$HANDOFF_RC" = "0" ]; then
+        HANDOFF_EXECUTED=true
+    else
+        HANDOFF_EXECUTED=false
+        STATUS="handoff_failed"
+    fi
+    write_artifact
+    if [ "$HANDOFF_RC" != "0" ] && [ "$HANDOFF_RC" != "127" ]; then
+        # 127 = no dispatcher on PATH — preserve legacy behavior (warn,
+        # exit 0). Any other non-zero is a real failure and must propagate.
+        echo "refine-prompt: handoff failed rc=$HANDOFF_RC" >&2
+        exit "$HANDOFF_RC"
     fi
 fi
 
