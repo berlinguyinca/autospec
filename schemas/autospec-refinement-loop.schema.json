@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-refinement-loop.schema.json",
+  "title": "autospec-refine --continue loop artifact",
+  "description": "JSON record produced by scripts/refine-prompt.sh --continue capturing the per-iteration harvest/refine/handoff loop and the final termination status. Separate from the single-pass autospec-refinement.schema.json because the status enum is disjoint (loop termination conditions vs. single-pass round outcomes). See issue #682.",
+  "type": "object",
+  "required": ["slug", "status", "iterations_executed", "max_iterations", "tokens_used", "iterations"],
+  "additionalProperties": true,
+  "properties": {
+    "slug": { "type": "string", "minLength": 1 },
+    "status": {
+      "type": "string",
+      "enum": [
+        "convergence_clean",
+        "oscillation_detected",
+        "evidence_based_stop",
+        "budget_cap_reached",
+        "operator_stop",
+        "round_cap_reached",
+        "handoff_failed",
+        "iteration_error"
+      ]
+    },
+    "iterations_executed": { "type": "integer", "minimum": 0 },
+    "max_iterations": { "type": "integer", "minimum": 1 },
+    "tokens_used": { "type": "integer", "minimum": 0 },
+    "iterations": {
+      "type": "array",
+      "items": { "type": "object" }
+    }
+  }
+}

@@ -1339,6 +1339,7 @@ check_autospec_refine_contract() {
     local prompt_sh="scripts/refine-prompt.sh"
     local overview_sh="scripts/refine-render-overview.sh"
     local schema="schemas/autospec-refinement.schema.json"
+    local loop_schema="schemas/autospec-refinement-loop.schema.json"
     [ -f "$prompt_sh" ] || fail "$prompt_sh: file missing (issue #672)"
     [ -x "$prompt_sh" ] || fail "$prompt_sh: not executable (issue #672)"
     bash -n "$prompt_sh" || fail "$prompt_sh: bash syntax error (issue #672)"
@@ -1346,6 +1347,21 @@ check_autospec_refine_contract() {
     [ -x "$overview_sh" ] || fail "$overview_sh: not executable (issue #672)"
     bash -n "$overview_sh" || fail "$overview_sh: bash syntax error (issue #672)"
     [ -f "$schema" ] || fail "$schema: file missing (issue #672)"
+    [ -f "$loop_schema" ] || fail "$loop_schema: file missing (issue #682)"
+    # Both schemas must parse as valid JSON Schema (issue #682).
+    if command -v python3 >/dev/null 2>&1; then
+        for s in "$schema" "$loop_schema"; do
+            python3 - "$s" <<'PY' || fail "$s: schema parse/check_schema failed (issue #682)"
+import json, sys
+try:
+    import jsonschema
+except ImportError:
+    sys.exit(0)
+with open(sys.argv[1]) as f: sch = json.load(f)
+jsonschema.Draft202012Validator.check_schema(sch)
+PY
+        done
+    fi
     # autospec-refine trio existence (lockstep checked separately).
     for trio in skills/autospec-refine/SKILL.md skills/autospec-refine/codex/prompt.md skills/autospec-refine/opencode/agent.md; do
         [ -f "$trio" ] || fail "$trio: missing (issue #672)"
