@@ -1431,6 +1431,32 @@ check_install_tests() {
     fi
 }
 
+# Parallel implementer worktree isolation contract (issue #690):
+# every autospec-run trio file must carry a `### Parallel implementer worktree
+# isolation` subsection; scripts/dispatch-implementer.sh must be present,
+# executable, and bash -n clean; tests/autospec-run/test_parallel_dispatch.bats
+# must exist and (if bats is available) pass.
+check_autospec_parallel_dispatch_contract() {
+    info "autospec parallel dispatch contract"
+    for f in skills/autospec-run/SKILL.md skills/autospec-run/codex/prompt.md skills/autospec-run/opencode/agent.md; do
+        grep -q '### Parallel implementer worktree isolation' "$f" \
+            || fail "$f missing '### Parallel implementer worktree isolation' subsection"
+        grep -q 'dispatch-implementer.sh' "$f" \
+            || fail "$f missing reference to scripts/dispatch-implementer.sh"
+    done
+    helper="scripts/dispatch-implementer.sh"
+    [ -f "$helper" ] || fail "$helper: required file missing"
+    [ -x "$helper" ] || fail "$helper: file not executable"
+    bash -n "$helper" || fail "$helper: bash syntax error"
+    bats_file="tests/autospec-run/test_parallel_dispatch.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-parallel-dispatch.log 2>&1 \
+            || { cat /tmp/validate-parallel-dispatch.log >&2; fail "$bats_file: failed"; }
+    fi
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -1506,6 +1532,7 @@ main() {
     check_autospec_run_summary_contract
     check_install_tests
     check_phase4_tests
+    check_autospec_parallel_dispatch_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
