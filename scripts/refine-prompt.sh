@@ -61,6 +61,12 @@ ARTIFACT_DIR=".autospec/refinements"
 REPO_ROOT="."
 MEMORY_ROOT="${HOME}/.autospec/projects"
 MAX_ROUNDS="${AUTOSPEC_REFINE_MAX_ROUNDS:-10}"
+CONTINUE_MODE=0
+MAX_ITERATIONS="${AUTOSPEC_REFINE_LOOP_MAX_ITERATIONS:-5}"
+SIM_ITER_DIR=""
+SIM_TOKENS=""
+TOKEN_CAP="${AUTOSPEC_REFINE_LOOP_TOKEN_CAP:-2000000}"
+TIME_CAP="${AUTOSPEC_REFINE_LOOP_TIME_CAP:-21600}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -74,6 +80,10 @@ while [ $# -gt 0 ]; do
         --artifact-dir) ARTIFACT_DIR="$2"; shift ;;
         --repo-root) REPO_ROOT="$2"; shift ;;
         --memory-root) MEMORY_ROOT="$2"; shift ;;
+        --continue) CONTINUE_MODE=1 ;;
+        --max-iterations) MAX_ITERATIONS="$2"; shift ;;
+        --simulate-iterations) SIM_ITER_DIR="$2"; shift ;;
+        --simulate-tokens) SIM_TOKENS="$2"; shift ;;
         --help|-h) usage; exit 0 ;;
         --*) echo "refine-prompt: unknown flag: $1" >&2; usage >&2; exit 2 ;;
         *)
@@ -141,6 +151,282 @@ fi
 if [ -z "$PROMPT" ]; then
     echo "refine-prompt: empty prompt (provide a positional arg or --from-file)" >&2
     exit 4
+fi
+
+# ── slug helper (early — needed by --continue) ────────────────────
+slug_from_prompt_early() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' \
+        | cut -c1-40
+}
+
+# ── continuous-iteration mode (--continue, issue #673) ────────────
+#
+# Wraps the single-pass refine + handoff loop. After each iteration the
+# orchestrator reads the autospec run report (either DIR/iter-<N>-report.md
+# from --simulate-iterations test hook, or .autospec/run-summary.md in real
+# operation) and applies the harvest contract:
+#
+#   1. `## Next steps` / `## What to do next` / `## Remaining work` /
+#      `## Open blockers` section (case-insensitive).
+#   2. Fenced ```autospec-next or ```next-prompt blocks.
+#   3. `STOP: <reason>` markers — terminates with evidence_based_stop.
+#   4. Empty / "(none — converged)" / missing — convergence_clean.
+#
+# Termination:
+#   convergence_clean | oscillation_detected | round_cap_reached |
+#   evidence_based_stop | operator_stop | budget_cap_reached.
+#
+# Per-iteration record + summary table per spec
+# (docs/specs/2026-05-28-autospec-refine-design.md §Continuous-iteration mode).
+
+harvest_next_prompt() {
+    local report="$1"
+    [ -f "$report" ] || { printf ''; return 0; }
+    # 1. STOP marker takes precedence.
+    if grep -qE '^STOP:[[:space:]]' "$report"; then
+        local reason
+        reason="$(grep -E '^STOP:[[:space:]]' "$report" | head -1 | sed -E 's/^STOP:[[:space:]]*//')"
+        printf 'STOP::%s' "$reason"
+        return 0
+    fi
+    # 2. Header section harvest.
+    local section
+    section="$(awk '
+        BEGIN{IGNORECASE=1; inblock=0}
+        /^##[[:space:]]+(Next steps|What to do next|Remaining work|Open blockers)/ {inblock=1; next}
+        inblock && /^##[[:space:]]/ {inblock=0}
+        inblock {print}
+    ' "$report")"
+    if [ -n "$section" ]; then
+        # Detect explicit convergence phrases.
+        if printf '%s' "$section" | grep -qiE '^\s*-\s*\(?none\b|no further work|^\s*done\s*$|converged'; then
+            # Convergence sentinel: empty harvest.
+            printf ''
+            return 0
+        fi
+        # Take the first non-empty bullet line as the canonical prompt.
+        local first_bullet
+        first_bullet="$(printf '%s\n' "$section" | grep -E '^\s*[-*]\s+' | head -1 | sed -E 's/^\s*[-*]\s+//')"
+        if [ -n "$first_bullet" ]; then
+            printf '%s' "$first_bullet"
+            return 0
+        fi
+        # Fallback: first non-blank line of section.
+        local first_line
+        first_line="$(printf '%s\n' "$section" | grep -v '^\s*$' | head -1)"
+        printf '%s' "$first_line"
+        return 0
+    fi
+    # 3. Fenced autospec-next / next-prompt block.
+    local fenced
+    fenced="$(awk '
+        BEGIN{infence=0}
+        /^```(autospec-next|next-prompt)/ {infence=1; next}
+        infence && /^```/ {infence=0; exit}
+        infence {print}
+    ' "$report")"
+    if [ -n "$fenced" ]; then
+        printf '%s' "$fenced" | head -1
+        return 0
+    fi
+    # 4. Nothing found — convergence.
+    printf ''
+}
+
+run_continue_loop() {
+    local loop_slug
+    loop_slug="$(slug_from_prompt_early "$PROMPT")"
+    [ -n "$loop_slug" ] || loop_slug="prompt"
+    mkdir -p "$ARTIFACT_DIR"
+    local loop_json="$ARTIFACT_DIR/${loop_slug}-loop.json"
+    local loop_md="$ARTIFACT_DIR/${loop_slug}-loop-summary.md"
+    local start_ts
+    start_ts="$(date +%s)"
+    local cur_prompt="$PROMPT"
+    local cur_source="(operator input)"
+    local iter=0
+    local status=""
+    local prev_hash=""
+    local iter_records="["
+    local table_rows=""
+    local first=1
+    local tokens_used=0
+
+    while [ "$iter" -lt "$MAX_ITERATIONS" ]; do
+        iter=$((iter + 1))
+
+        # Operator escape — checked at iteration boundary.
+        if [ -f "${HOME}/.autospec/refine-loop-stop.flag" ] \
+            || [ -f "${HOME}/.autospec/stop.flag" ]; then
+            status="operator_stop"
+            break
+        fi
+
+        # Run refine on current prompt — inline by re-invoking the same script
+        # WITHOUT --continue so the single-pass path executes.
+        local iter_artifact_subdir="$ARTIFACT_DIR/iter-${iter}"
+        mkdir -p "$iter_artifact_subdir"
+        local refine_log="$iter_artifact_subdir/refine.log"
+        local refine_status=0
+        bash "$0" "$cur_prompt" --rounds "$ROUNDS" --dry-run \
+            --artifact-dir "$iter_artifact_subdir" \
+            --repo-root "$REPO_ROOT" \
+            --memory-root "$MEMORY_ROOT" \
+            > "$refine_log" 2>&1 || refine_status=$?
+
+        local refinement_artifact
+        refinement_artifact="$(ls "$iter_artifact_subdir"/*.json 2>/dev/null | head -1)"
+        [ -n "$refinement_artifact" ] || refinement_artifact=""
+
+        # Determine where the iteration report lives.
+        local report_path=""
+        if [ -n "$SIM_ITER_DIR" ]; then
+            report_path="$SIM_ITER_DIR/iter-${iter}-report.md"
+        else
+            report_path="$REPO_ROOT/.autospec/run-summary.md"
+        fi
+
+        # Harvest next prompt from the report.
+        local harvested
+        harvested="$(harvest_next_prompt "$report_path")"
+
+        # Token budget tracking (simulated for tests).
+        if [ -n "$SIM_TOKENS" ]; then
+            tokens_used=$((tokens_used + SIM_TOKENS))
+        fi
+
+        # Build per-iteration JSON record.
+        local stop_reason="null"
+        local row_status="next-steps found"
+        local row_harvested="${harvested:-(empty)}"
+        local row_harvested_short
+        row_harvested_short="$(printf '%s' "$row_harvested" | head -c 60)"
+
+        # Evidence-based stop check.
+        if [ -n "$harvested" ] && [ "${harvested#STOP::}" != "$harvested" ]; then
+            stop_reason="\"$(printf '%s' "${harvested#STOP::}" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read())[1:-1])')\""
+            row_status="evidence_based_stop"
+            row_harvested_short="STOP: ${harvested#STOP::}"
+        fi
+
+        # Convergence — empty harvested.
+        local converged=0
+        if [ -z "$harvested" ]; then
+            converged=1
+            row_status="convergence_clean"
+        fi
+
+        # Oscillation — hash matches previous iteration's harvested prompt.
+        local oscillation=0
+        local cur_hash=""
+        if [ -n "$harvested" ] && [ "${harvested#STOP::}" = "$harvested" ]; then
+            cur_hash="$(printf '%s' "$harvested" | shasum -a 256 | awk '{print $1}')"
+            if [ -n "$prev_hash" ] && [ "$cur_hash" = "$prev_hash" ]; then
+                oscillation=1
+                row_status="oscillation_detected"
+            fi
+        fi
+
+        # Append iteration record.
+        local harvested_json
+        harvested_json="$(printf '%s' "${harvested:-}" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))')"
+        local source_json
+        source_json="$(printf '%s' "$cur_source" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))')"
+        local refart_json
+        refart_json="$(printf '%s' "$refinement_artifact" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))')"
+        local report_json
+        report_json="$(printf '%s' "$report_path" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))')"
+        local record
+        record=$(cat <<EOF
+{"iteration":$iter,"harvested_from_report":$report_json,"source":$source_json,"harvested_prompt":$harvested_json,"refinement_artifact":$refart_json,"handoff_pr_count":0,"handoff_pr_numbers":[],"stop_reason":$stop_reason,"status":"$row_status"}
+EOF
+)
+        if [ "$first" = 1 ]; then
+            iter_records="$iter_records$record"
+            first=0
+        else
+            iter_records="$iter_records,$record"
+        fi
+
+        # Build table row.
+        local row
+        row="$(printf '| %4d | %-21s | %-60s | %10s | %4s | %-20s |' \
+            "$iter" "$(printf '%s' "$cur_source" | head -c 21)" \
+            "$row_harvested_short" "0" "-" "$row_status")"
+        if [ -z "$table_rows" ]; then
+            table_rows="$row"
+        else
+            table_rows="$table_rows"$'\n'"$row"
+        fi
+
+        # Termination decisions (in priority order).
+        if [ "$row_status" = "evidence_based_stop" ]; then
+            status="evidence_based_stop"
+            break
+        fi
+        if [ "$converged" = 1 ]; then
+            status="convergence_clean"
+            break
+        fi
+        if [ "$oscillation" = 1 ]; then
+            status="oscillation_detected"
+            break
+        fi
+
+        # Budget caps.
+        if [ "$tokens_used" -gt "$TOKEN_CAP" ] 2>/dev/null; then
+            status="budget_cap_reached"
+            break
+        fi
+        local now
+        now="$(date +%s)"
+        if [ $((now - start_ts)) -gt "$TIME_CAP" ]; then
+            status="budget_cap_reached"
+            break
+        fi
+
+        # Continue: harvested becomes next iteration's prompt.
+        prev_hash="$cur_hash"
+        cur_prompt="$harvested"
+        cur_source="$report_path"
+    done
+
+    iter_records="$iter_records]"
+
+    if [ -z "$status" ]; then
+        status="round_cap_reached"
+    fi
+
+    # Write JSON record.
+    cat > "$loop_json" <<EOF
+{
+  "slug": "$loop_slug",
+  "status": "$status",
+  "iterations_executed": $iter,
+  "max_iterations": $MAX_ITERATIONS,
+  "tokens_used": $tokens_used,
+  "iterations": $iter_records
+}
+EOF
+
+    # Write markdown summary.
+    {
+        printf '## /autospec-refine continuous loop summary\n\n'
+        printf '| Iter | Harvested from        | Refined prompt (first 60 chars)                              | PRs merged | Time | Status               |\n'
+        printf '|------|-----------------------|--------------------------------------------------------------|-----------:|------|----------------------|\n'
+        printf '%s\n' "$table_rows"
+        printf '\nFinal status: %s\n' "$status"
+        printf 'Iterations executed: %s / %s\n' "$iter" "$MAX_ITERATIONS"
+    } > "$loop_md"
+
+    printf '%s\n' "## /autospec-refine continuous loop summary"
+    printf '%s\n' "Final status: $status (iterations=$iter, artifact=$loop_json)"
+}
+
+if [ "$CONTINUE_MODE" = 1 ]; then
+    run_continue_loop
+    exit 0
 fi
 
 # ── lens registry ─────────────────────────────────────────────────

@@ -991,6 +991,8 @@ If your harness lacks self-paced wakeup: register a local `cron`/`launchd` job t
 
 When the monitor terminates, post a final summary to the user: every issue processed, every PR merged, total elapsed wall time, and any failures that need human attention.
 
+The final report MUST include a canonical `## Next steps` section so downstream tooling (`/autospec-refine --continue`) can deterministically harvest the next prompt. Structure the section as a markdown list of candidate next-prompt strings, each one a self-contained imperative phrasing of the remaining work, blocker, or follow-up. If there is no remaining work, write `- (none — converged)` so the harvester can detect convergence cleanly. If evidence indicates the loop should not continue (overfitting, out-of-sample plateau, operator policy), include a line starting with `STOP: <reason>` to trigger an evidence-based stop in the continuous-iteration loop. Accepted header variants the harvester recognises are `## Next steps`, `## What to do next`, `## Remaining work`, and `## Open blockers` (case-insensitive); prefer `## Next steps` as the canonical form. Alternatively, write the harvest-target content inside a fenced ```autospec-next or ```next-prompt block — these are read in fallback order by the harvester.
+
 
 ## Constraints (apply throughout)
 
