@@ -1493,6 +1493,46 @@ check_autospec_continue_contract() {
     fi
 }
 
+# autospec --loop continuous-iteration contract (issue #708): the shared
+# loop driver script must exist, be bash -n clean, and expose
+# autospec_loop_run; the autospec trio (SKILL.md + codex + opencode) must
+# carry a `## Continuous loop mode (--loop)` section in lockstep; the bats
+# coverage at tests/autospec/test_autospec_loop.bats must exist and (if
+# bats is available) pass.
+check_autospec_loop_contract() {
+    info "autospec --loop contract: shared driver + trio + bats (issue #708)"
+    local lib="scripts/lib/autospec-loop.sh"
+    [ -f "$lib" ] || fail "$lib: shared loop driver missing (issue #708)"
+    bash -n "$lib" || fail "$lib: bash syntax error (issue #708)"
+    grep -q '^autospec_loop_run()' "$lib" \
+        || fail "$lib: autospec_loop_run() entry point missing (issue #708)"
+    grep -q '^autospec_loop_harvest_next_prompt()' "$lib" \
+        || fail "$lib: autospec_loop_harvest_next_prompt() missing (issue #708)"
+    # refine-prompt.sh + autospec-continue.sh must source the shared lib so
+    # there is a single source of truth for the loop driver.
+    grep -q 'lib/autospec-loop\.sh' scripts/refine-prompt.sh \
+        || fail "scripts/refine-prompt.sh: missing source of shared loop lib (issue #708)"
+    grep -q 'lib/autospec-loop\.sh' scripts/autospec-continue.sh \
+        || fail "scripts/autospec-continue.sh: missing source of shared loop lib (issue #708)"
+    # Lockstep: each autospec trio file must carry the loop-mode section.
+    for trio in skills/autospec/SKILL.md skills/autospec/codex/prompt.md skills/autospec/opencode/agent.md; do
+        [ -f "$trio" ] || fail "$trio: missing (issue #708)"
+        grep -q '^## Continuous loop mode (--loop)' "$trio" \
+            || fail "$trio: missing '## Continuous loop mode (--loop)' section (issue #708)"
+        grep -q 'autospec_loop_run\|lib/autospec-loop\.sh' "$trio" \
+            || fail "$trio: loop section must reference the shared driver (issue #708)"
+        grep -q 'evidence_based_stop' "$trio" \
+            || fail "$trio: loop section must enumerate termination conditions (issue #708)"
+    done
+    local bats_file="tests/autospec/test_autospec_loop.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing (issue #708)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-autospec-loop.log 2>&1 \
+            || { cat /tmp/validate-autospec-loop.log >&2; fail "$bats_file: failed"; }
+    fi
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -1566,6 +1606,7 @@ main() {
     check_autospec_autonomous_contract
     check_autospec_refine_contract
     check_autospec_continue_contract
+    check_autospec_loop_contract
     check_autospec_run_summary_contract
     check_install_tests
     check_phase4_tests

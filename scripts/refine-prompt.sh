@@ -275,6 +275,16 @@ if [ -f "$_REFINE_MATCHER_LIB" ]; then
     . "$_REFINE_MATCHER_LIB"
 fi
 
+# Shared loop driver (issue #708). Single source of truth for the
+# continuous-iteration loop used by /autospec-refine --continue,
+# /autospec-continue, and /autospec --loop. When the lib is available,
+# run_continue_loop below delegates to autospec_loop_run.
+_AUTOSPEC_LOOP_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/autospec-loop.sh"
+if [ -f "$_AUTOSPEC_LOOP_LIB" ]; then
+    # shellcheck source=lib/autospec-loop.sh
+    . "$_AUTOSPEC_LOOP_LIB"
+fi
+
 harvest_next_prompt() {
     local report="$1"
     [ -f "$report" ] || { printf ''; return 0; }
@@ -353,6 +363,13 @@ harvest_next_prompt() {
 }
 
 run_continue_loop() {
+    # Delegate to the shared driver (issue #708) when available. The shared
+    # driver is identical to the original implementation below — kept inline
+    # only as a safety net if the lib failed to source.
+    if declare -F autospec_loop_run >/dev/null 2>&1; then
+        SCRIPT_PATH="$0" autospec_loop_run
+        return $?
+    fi
     local loop_slug
     loop_slug="$(slug_from_prompt_early "$PROMPT")"
     [ -n "$loop_slug" ] || loop_slug="prompt"

@@ -103,6 +103,61 @@ mode and does NOT run the normal pipeline. When dispatching, pass any
 {FEATURE_DESCRIPTION}
 
 
+
+## Continuous loop mode (--loop)
+
+When the operator invokes `/autospec --loop "<initial prompt>"` (alias
+`--continuous`), this skill runs the full pipeline (Phases 1-6) once, then
+harvests the Phase 6 final report (`.autospec/run-summary.md` written by
+`scripts/autospec-write-run-summary.sh`) and re-iterates until one of six
+termination conditions trips. The loop is driven by the shared library at
+`scripts/lib/autospec-loop.sh` — the single source of truth shared with
+`/autospec-refine --continue` and `/autospec-continue --loop`.
+
+Flags:
+- `--loop` (alias `--continuous`) — enable continuous-iteration mode.
+- `--max-iterations N` — cap the loop at N iterations (default 5, env
+  override `AUTOSPEC_LOOP_MAX_ITERATIONS`).
+- `--skip-refine` — pipe the harvested next-prompt straight into the next
+  /autospec invocation without first running `/autospec-refine` on it.
+
+Termination conditions (priority order):
+1. `evidence_based_stop` — the run-summary contains a `STOP: <reason>` marker.
+2. `convergence_clean` — harvest returns empty / `(none — converged)`.
+3. `oscillation_detected` — iteration N+1's harvested prompt hash equals
+   iteration N's (same work proposed twice in a row).
+4. `operator_stop` — `~/.autospec/stop.flag` or
+   `~/.autospec/refine-loop-stop.flag` present at iteration boundary.
+5. `budget_cap_reached` — `AUTOSPEC_LOOP_TOKEN_CAP` (default 2M tokens) or
+   `AUTOSPEC_LOOP_TIME_CAP` (default 6h / 21600s) exceeded.
+6. `round_cap_reached` — `--max-iterations` hit without any of the above.
+
+Per-iteration loop:
+1. Run the full /autospec pipeline (Phase 1-6) on the current prompt.
+2. Read `$REPO_ROOT/.autospec/run-summary.md` and pass it to
+   `autospec_loop_harvest_next_prompt` from the shared library.
+3. If harvest is empty → `convergence_clean`. If it returns
+   `STOP::<reason>` → `evidence_based_stop`. Otherwise the harvested text
+   becomes the next iteration's prompt.
+4. Unless `--skip-refine` is set, run the harvested prompt through
+   `/autospec-refine` (4 lenses) before the next /autospec invocation.
+5. Hash the harvested prompt; oscillation trips when the hash matches
+   the previous iteration's.
+
+Output artifacts:
+- `.autospec/loop-summary.md` — markdown table with one row per iteration
+  + final status + iterations executed.
+- `<artifact-dir>/<slug>-loop.json` — per-iteration JSON record validated
+  against `schemas/autospec-refinement-loop.schema.json`.
+
+Safety guardrails inherit from the existing autonomy gate
+(`scripts/autospec-autonomy-gate.sh`) — destructive remote actions still
+surface for confirmation per iteration. The rate limit + injection guard
+from `scripts/autospec-continue.sh` (PR #704) also apply.
+
+Default behavior (no `--loop`) is unchanged: a single end-to-end pipeline
+run with no harvest/re-iteration.
+
 ## Existing spec mode
 
 Use this mode when the request asks to split, materialize, roadmap, decompose,
