@@ -8,6 +8,10 @@
 #
 # Flags:
 #   --from-message <path>          Read the source assistant message from <path>.
+#   --no-loop, --once              Disable the default continuous loop and run
+#                                  exactly one extract→refine→handoff pass
+#                                  (legacy single-pass behavior). Also honored
+#                                  via ~/.autospec/continue-no-loop.flag.
 #   --skip-refine                  Bypass the refine step; hand off the
 #                                  extracted block directly to /autospec.
 #   --ask-confirm                  After (or instead of) refine, surface the
@@ -58,6 +62,10 @@ Required:
   --from-message <path>          Source assistant message file.
 
 Flags:
+  --no-loop, --once              Disable continuous loop; run a single
+                                 extract→refine→handoff pass (legacy
+                                 behavior). Also honored via
+                                 ~/.autospec/continue-no-loop.flag.
   --skip-refine                  Skip the refine step; hand off extracted
                                  block directly.
   --ask-confirm                  Gate on operator approval before handoff.
@@ -81,10 +89,12 @@ LENS_MODE=""
 HANDOFF_MODE="autonomous"
 ARTIFACT_DIR=""
 REPO_ROOT="."
+NO_LOOP=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --from-message)  FROM_MESSAGE="${2:-}"; shift 2 ;;
+        --no-loop|--once) NO_LOOP=1; shift ;;
         --skip-refine)   SKIP_REFINE=1; shift ;;
         --ask-confirm)   ASK_CONFIRM=1; shift ;;
         --lens-mode)     LENS_MODE="${2:-}"; shift 2 ;;
@@ -215,6 +225,33 @@ if command -v jq >/dev/null 2>&1; then
             "$NOW" "$SOURCE_HASH" "$EXTRACTED_HASH" > "$HISTORY_TMP"
     fi
     mv "$HISTORY_TMP" "$HISTORY_FILE"
+fi
+
+# ── Step 1.5: continuous loop mode (issue #710) ────────────────────
+# Default behavior: invoke the shared loop driver from
+# scripts/lib/autospec-loop.sh (#708) — extract → refine → handoff →
+# harvest → re-extract → loop until convergence/oscillation/stop/cap.
+# Opt-outs: --no-loop / --once flag, or ~/.autospec/continue-no-loop.flag.
+LOOP_FLAG_FILE="${HOME}/.autospec/continue-no-loop.flag"
+if [ -f "$LOOP_FLAG_FILE" ]; then
+    NO_LOOP=1
+fi
+
+if [ "$NO_LOOP" -eq 0 ] && declare -F autospec_loop_run >/dev/null 2>&1; then
+    # Resolve the refine-prompt.sh script path the shared driver dispatches
+    # each iteration to.
+    SCRIPT_PATH="$REFINE_SH"
+    PROMPT="$EXTRACTED"
+    ARTIFACT_DIR="${ARTIFACT_DIR:-.autospec/refinements}"
+    MEMORY_ROOT="${MEMORY_ROOT:-$REPO_ROOT/.autospec/memory}"
+    ROUNDS="${ROUNDS:-3}"
+    MAX_ITERATIONS="${AUTOSPEC_LOOP_MAX_ITERATIONS:-${MAX_ITERATIONS:-5}}"
+    TOKEN_CAP="${AUTOSPEC_LOOP_TOKEN_CAP:-2000000}"
+    TIME_CAP="${AUTOSPEC_LOOP_TIME_CAP:-21600}"
+    mkdir -p "$ARTIFACT_DIR" 2>/dev/null || true
+    echo "autospec-continue: entering continuous loop mode (--no-loop to opt out)" >&2
+    autospec_loop_run
+    exit $?
 fi
 
 # ── Step 2: refine (unless --skip-refine) ─────────────────────────

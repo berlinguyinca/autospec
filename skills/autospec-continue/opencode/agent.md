@@ -144,12 +144,22 @@ gate in `scripts/validate.sh`.
 ## Invocation
 
 ```
-/autospec-continue [--skip-refine] [--ask-confirm] [--lens-mode deterministic|llm]
-                   [--from-message <path>]
+/autospec-continue [--no-loop|--once] [--skip-refine] [--ask-confirm]
+                   [--lens-mode deterministic|llm] [--from-message <path>]
 ```
 
 > **Model tier:** `TIER_B` for the deterministic extraction step; the downstream `/autospec-refine` call inherits `TIER_A` per its own contract.
 
+- **Default behavior (issue #710):** `/autospec-continue` runs the shared
+  continuous loop driver from `scripts/lib/autospec-loop.sh` (#708) — it
+  keeps cycling extract → refine → handoff → harvest-next → re-extract
+  until one of the six termination conditions fires (see
+  "Continuous loop mode" below). Operators who want today's single-pass
+  behavior pass `--no-loop`.
+- `--no-loop` (alias `--once`) — disable the loop; run a single
+  extract → refine → handoff pass and exit. Also honored via the operator
+  preference file `~/.autospec/continue-no-loop.flag` (same effect, no
+  flag needed per invocation).
 - `--skip-refine` — bypass `/autospec-refine`; hand the extracted prompt
   directly to `/autospec --autonomous`.
 - `--ask-confirm` — after refine but before handoff, surface the refined
@@ -159,6 +169,31 @@ gate in `scripts/validate.sh`.
 - `--from-message <path>` — read the source message from a file instead of
   the harness's "last assistant turn". Test/integration path; not the
   primary use case.
+
+## Continuous loop mode
+
+When invoked without `--no-loop` (and without `~/.autospec/continue-no-loop.flag`
+present), `/autospec-continue` invokes `autospec_loop_run` from
+`scripts/lib/autospec-loop.sh` — the same shared loop driver used by
+`/autospec --loop` (#708) and `/autospec-refine --continue` (#678). Six
+termination conditions stop the loop:
+
+1. `evidence_based_stop` — iteration report contains `STOP: <reason>`.
+2. `convergence_clean` — harvest finds no next-step content (`(none — converged)`).
+3. `oscillation_detected` — same harvested prompt hash two iterations running.
+4. `operator_stop` — `~/.autospec/stop.flag` or `~/.autospec/refine-loop-stop.flag` present.
+5. `budget_cap_reached` — `AUTOSPEC_LOOP_TOKEN_CAP` (default 2,000,000) or
+   `AUTOSPEC_LOOP_TIME_CAP` (default 21,600s) exceeded.
+6. `round_cap_reached` — `AUTOSPEC_LOOP_MAX_ITERATIONS` (default 5).
+
+**Rate limit interaction (PR #704):** the 60-second duplicate / 60-minute
+oscillation rate limit applies at the OUTER invocation level — once per
+`/autospec-continue` call, not once per inner iteration. Inner iterations
+are bounded by the round cap above.
+
+**Opt-out files:** `~/.autospec/continue-no-loop.flag` flips the default
+to single-pass for every invocation under this `$HOME`. Delete the file
+to restore loop-by-default.
 
 ## Extraction contract
 
