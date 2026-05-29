@@ -1662,6 +1662,7 @@ main() {
     check_autospec_parallel_dispatch_contract
     check_autospec_explore_implementer_base
     check_loop_handoff_harness_awareness
+    check_autospec_explore_researchers_deterministic
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -1768,6 +1769,35 @@ check_autospec_explore_implementer_base() {
         bats "$bats_file" >/tmp/validate-explore-impl-base.log 2>&1 \
             || { cat /tmp/validate-explore-impl-base.log >&2; fail "$bats_file: failed"; }
     fi
+}
+
+# autospec-explore research cycle + 4 deterministic researchers (issue #719):
+# all 4 researcher scripts + the aggregator must exist, be executable, and
+# pass `bash -n`. Runs tests/explore/test_explore_researchers.bats and
+# tests/explore/test_explore_research_cycle.bats when bats is on PATH.
+check_autospec_explore_researchers_deterministic() {
+    info "autospec-explore deterministic researchers + cycle aggregator"
+    local aggregator="scripts/explore-research-cycle.sh"
+    [ -f "$aggregator" ] || fail "$aggregator: required file missing"
+    [ -x "$aggregator" ] || fail "$aggregator: file not executable"
+    bash -n "$aggregator" || fail "$aggregator: bash syntax error"
+    for r in spec-vs-code prior-reports codebase-signals open-issues; do
+        local script="scripts/explore-research/$r.sh"
+        [ -f "$script" ] || fail "$script: required file missing"
+        [ -x "$script" ] || fail "$script: file not executable"
+        bash -n "$script" || fail "$script: bash syntax error"
+    done
+    for bats_file in \
+        tests/explore/test_explore_researchers.bats \
+        tests/explore/test_explore_research_cycle.bats
+    do
+        [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
+        if command -v bats >/dev/null 2>&1; then
+            info "  running: $bats_file"
+            bats "$bats_file" >/tmp/validate-explore-researchers.log 2>&1 \
+                || { cat /tmp/validate-explore-researchers.log >&2; fail "$bats_file: failed"; }
+        fi
+    done
 }
 
 main "$@"
