@@ -53,6 +53,92 @@ if [ -z "$INPUT_JSON" ] || [ -z "$SLUG" ]; then
     exit 2
 fi
 
+# ── slug sanitization (issue #680) ────────────────────────────────
+# Reject /, .., whitespace, control chars, or any char outside [a-z0-9-]
+# after lowercasing. Matches the orchestrator's slug_from_prompt() shape.
+_slug_sanitize_check() {
+    local s="$1"
+    [ -n "$s" ] || { echo "refine-render-overview: --slug is empty" >&2; return 2; }
+    case "$s" in
+        */*) echo "refine-render-overview: --slug contains '/': $s" >&2; return 2 ;;
+        *..*) echo "refine-render-overview: --slug contains '..': $s" >&2; return 2 ;;
+    esac
+    # Lowercase + check character class.
+    local lower
+    lower="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+    if ! printf '%s' "$lower" | LC_ALL=C grep -qE '^[a-z0-9-]+$'; then
+        echo "refine-render-overview: --slug has invalid chars (allowed: [a-z0-9-]): $s" >&2
+        return 2
+    fi
+    return 0
+}
+if ! _slug_sanitize_check "$SLUG"; then
+    exit 2
+fi
+
+# ── path allowlist (issue #680) ───────────────────────────────────
+# Same forbidden patterns as refine-prompt.sh::check_path_allowed.
+_render_match_forbidden() {
+    local p="$1"
+    case "$p" in
+        *.env|*.env.*|*/.env|.env) return 0 ;;
+        *credential*|*Credential*|*CREDENTIAL*) return 0 ;;
+        *secret*|*Secret*|*SECRET*) return 0 ;;
+        *.pem|*.key) return 0 ;;
+        */.git/*|.git/*|*/.git|.git) return 0 ;;
+        */node_modules/*|node_modules/*|*/node_modules|node_modules) return 0 ;;
+    esac
+    return 1
+}
+_render_canonicalize() {
+    local p="$1"
+    local r=""
+    if command -v realpath >/dev/null 2>&1; then
+        r="$(realpath -m "$p" 2>/dev/null)" || r=""
+        if [ -n "$r" ]; then printf '%s' "$r"; return; fi
+        r="$(realpath "$p" 2>/dev/null)" || r=""
+        if [ -n "$r" ]; then printf '%s' "$r"; return; fi
+    fi
+    if command -v readlink >/dev/null 2>&1; then
+        r="$(readlink -f "$p" 2>/dev/null)" || r=""
+        if [ -n "$r" ]; then printf '%s' "$r"; return; fi
+        if [ -L "$p" ]; then
+            local target
+            target="$(readlink "$p" 2>/dev/null)" || target=""
+            if [ -n "$target" ]; then
+                case "$target" in
+                    /*) printf '%s' "$target"; return ;;
+                    *)  printf '%s/%s' "$(dirname "$p")" "$target"; return ;;
+                esac
+            fi
+        fi
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        r="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null)" || r=""
+        if [ -n "$r" ]; then printf '%s' "$r"; return; fi
+    fi
+    printf '%s' "$p"
+}
+_render_check_path_allowed() {
+    local p="$1"
+    _render_match_forbidden "$p" && return 1
+    local resolved
+    resolved="$(_render_canonicalize "$p")"
+    if [ -n "$resolved" ] && [ "$resolved" != "$p" ]; then
+        _render_match_forbidden "$resolved" && return 1
+    fi
+    case "$resolved" in
+        *..*) return 1 ;;
+    esac
+    return 0
+}
+for _p in "$INPUT_JSON" "$OUTPUT_DIR"; do
+    if ! _render_check_path_allowed "$_p"; then
+        echo "code_health:refine_path_violation path=$_p" >&2
+        exit 3
+    fi
+done
+
 if [ ! -f "$INPUT_JSON" ]; then
     echo "refine-render-overview: input not found: $INPUT_JSON" >&2
     exit 4
