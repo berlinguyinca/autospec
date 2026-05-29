@@ -52,23 +52,23 @@ teardown() {
 
 @test "duplicate source message within 60s exits 3 with continue_recent_duplicate" {
     export AUTOSPEC_CONTINUE_NOW=1000
-    run bash "$SCRIPT" --from-message "$MSG" --skip-refine
+    run bash "$SCRIPT" --from-message "$MSG" --no-loop --skip-refine
     [ "$status" -eq 0 ]
 
     # Second run at +10s (within 60s window) — must reject.
     export AUTOSPEC_CONTINUE_NOW=1010
-    run bash "$SCRIPT" --from-message "$MSG" --skip-refine
+    run bash "$SCRIPT" --from-message "$MSG" --no-loop --skip-refine
     [ "$status" -eq 3 ]
     [[ "$output" == *"code_health:continue_recent_duplicate"* ]]
 }
 
 @test "duplicate source message after 60s window is allowed" {
     export AUTOSPEC_CONTINUE_NOW=1000
-    run bash "$SCRIPT" --from-message "$MSG" --skip-refine
+    run bash "$SCRIPT" --from-message "$MSG" --no-loop --skip-refine
     [ "$status" -eq 0 ]
 
     export AUTOSPEC_CONTINUE_NOW=1100   # +100s, outside window
-    run bash "$SCRIPT" --from-message "$MSG" --skip-refine
+    run bash "$SCRIPT" --from-message "$MSG" --no-loop --skip-refine
     [ "$status" -eq 0 ]
 }
 
@@ -83,21 +83,21 @@ teardown() {
     printf 'preamble C\n\n%s' "$common" > "$M3"
 
     export AUTOSPEC_CONTINUE_NOW=1000
-    run bash "$SCRIPT" --from-message "$M1" --skip-refine
+    run bash "$SCRIPT" --from-message "$M1" --no-loop --skip-refine
     [ "$status" -eq 0 ]
     export AUTOSPEC_CONTINUE_NOW=2000
-    run bash "$SCRIPT" --from-message "$M2" --skip-refine
+    run bash "$SCRIPT" --from-message "$M2" --no-loop --skip-refine
     [ "$status" -eq 0 ]
     # Third occurrence within 60min window of first — must trip oscillation.
     export AUTOSPEC_CONTINUE_NOW=3000
-    run bash "$SCRIPT" --from-message "$M3" --skip-refine
+    run bash "$SCRIPT" --from-message "$M3" --no-loop --skip-refine
     [ "$status" -eq 3 ]
     [[ "$output" == *"code_health:continue_oscillation"* ]]
 }
 
 @test "state file is deletable to reset rate limits" {
     export AUTOSPEC_CONTINUE_NOW=1000
-    run bash "$SCRIPT" --from-message "$MSG" --skip-refine
+    run bash "$SCRIPT" --from-message "$MSG" --no-loop --skip-refine
     [ "$status" -eq 0 ]
     [ -f "$AUTOSPEC_CONTINUE_HISTORY" ]
 
@@ -105,7 +105,7 @@ teardown() {
     [ ! -f "$AUTOSPEC_CONTINUE_HISTORY" ]
 
     export AUTOSPEC_CONTINUE_NOW=1010  # Would have tripped duplicate, but state was reset.
-    run bash "$SCRIPT" --from-message "$MSG" --skip-refine
+    run bash "$SCRIPT" --from-message "$MSG" --no-loop --skip-refine
     [ "$status" -eq 0 ]
 }
 
@@ -118,7 +118,7 @@ some prose
 ## Next steps
 - $SECRET
 EOF
-    run bash "$SCRIPT" --from-message "$MSG" --skip-refine
+    run bash "$SCRIPT" --from-message "$MSG" --no-loop --skip-refine
     [ "$status" -eq 0 ]
     [ -f "$AUTOSPEC_CONTINUE_HISTORY" ]
 

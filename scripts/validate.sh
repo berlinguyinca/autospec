@@ -1512,6 +1512,24 @@ check_autospec_continue_contract() {
     matcher_lib="scripts/lib/extract-matchers.sh"
     [ -f "$matcher_lib" ] || fail "$matcher_lib: file missing (issue #707)"
     bash -n "$matcher_lib" || fail "$matcher_lib: bash syntax error (issue #707)"
+    # Default-on continuous loop (issue #710): trio docs default-loop, opt-outs
+    # via --no-loop and ~/.autospec/continue-no-loop.flag; orchestrator parses
+    # both --no-loop and --once.
+    for trio in skills/autospec-continue/SKILL.md skills/autospec-continue/codex/prompt.md skills/autospec-continue/opencode/agent.md; do
+        [ -f "$trio" ] || continue
+        grep -q '^## Continuous loop mode' "$trio" \
+            || fail "$trio: missing '## Continuous loop mode' section (issue #710)"
+        grep -q -- '--no-loop' "$trio" \
+            || fail "$trio: missing --no-loop opt-out documentation (issue #710)"
+        grep -q 'continue-no-loop\.flag' "$trio" \
+            || fail "$trio: missing continue-no-loop.flag preference file (issue #710)"
+    done
+    grep -q -- '--no-loop|--once' scripts/autospec-continue.sh \
+        || fail "scripts/autospec-continue.sh: --no-loop/--once flags missing (issue #710)"
+    grep -q 'continue-no-loop\.flag' scripts/autospec-continue.sh \
+        || fail "scripts/autospec-continue.sh: continue-no-loop.flag honor missing (issue #710)"
+    grep -q 'autospec_loop_run' scripts/autospec-continue.sh \
+        || fail "scripts/autospec-continue.sh: autospec_loop_run dispatch missing (issue #710)"
     if command -v bats >/dev/null 2>&1; then
         if [ -d tests/continue ]; then
             for t in tests/continue/test_continue_*.bats; do

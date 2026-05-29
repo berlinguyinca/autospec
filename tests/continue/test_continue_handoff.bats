@@ -64,8 +64,8 @@ teardown() {
     rm -rf "$WORK"
 }
 
-@test "--skip-refine routes directly to autospec without going through refine" {
-    run bash "$SCRIPT" --from-message "$MSG" --skip-refine
+@test "--no-loop --skip-refine routes directly to autospec without going through refine" {
+    run bash "$SCRIPT" --from-message "$MSG" --no-loop --skip-refine
     [ "$status" -eq 0 ]
     # Stub got invoked.
     [ -f "$STUB_LOG" ]
@@ -87,13 +87,13 @@ teardown() {
 }
 
 @test "--ask-confirm with operator 'proceed' completes handoff" {
-    run bash -c "printf 'proceed\n' | '$SCRIPT' --from-message '$MSG' --skip-refine --ask-confirm"
+    run bash -c "printf 'proceed\n' | '$SCRIPT' --from-message '$MSG' --no-loop --skip-refine --ask-confirm"
     [ "$status" -eq 0 ]
     grep -q '^STUB_CLAUDE\|^STUB_AUTOSPEC' "$STUB_LOG"
 }
 
 @test "--ask-confirm with operator 'cancel' aborts before handoff" {
-    run bash -c "printf 'cancel\n' | '$SCRIPT' --from-message '$MSG' --skip-refine --ask-confirm"
+    run bash -c "printf 'cancel\n' | '$SCRIPT' --from-message '$MSG' --no-loop --skip-refine --ask-confirm"
     # Cancel exits non-zero (3) and no stub call recorded.
     [ "$status" -eq 3 ]
     [ ! -s "$STUB_LOG" ] || ! grep -q '^STUB_' "$STUB_LOG"
@@ -101,7 +101,7 @@ teardown() {
 
 @test "--from-message reads from the file path end-to-end" {
     # Confirms the file-source path works without any extra plumbing.
-    run bash "$SCRIPT" --from-message "$MSG" --skip-refine
+    run bash "$SCRIPT" --from-message "$MSG" --no-loop --skip-refine
     [ "$status" -eq 0 ]
     # The extracted recommendation must have been forwarded to the dispatcher.
     # Stubs log the full argv joined by '|'; assert the keyword "orchestrator"
@@ -110,6 +110,6 @@ teardown() {
 }
 
 @test "--from-message rejects a missing file with exit 2" {
-    run bash "$SCRIPT" --from-message "$WORK/does-not-exist.md" --skip-refine
+    run bash "$SCRIPT" --from-message "$WORK/does-not-exist.md" --no-loop --skip-refine
     [ "$status" -eq 2 ]
 }
