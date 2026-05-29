@@ -1368,6 +1368,37 @@ check_autospec_refine_contract() {
     fi
 }
 
+# Phase 6 run-summary contract (issue #683): the autospec trio must instruct
+# Phase 6 to write `.autospec/run-summary.md` via the canonical helper, the
+# helper script must exist + be executable + pass `bash -n`, and the bats
+# coverage at tests/autospec/test_run_summary.bats must pass.
+check_autospec_run_summary_contract() {
+    info "autospec run-summary contract (Phase 6 → .autospec/run-summary.md)"
+    for trio in SKILL.md codex/prompt.md opencode/agent.md; do
+        f="skills/autospec/$trio"
+        [ -f "$f" ] || fail "$f: required file missing"
+        grep -q '\.autospec/run-summary\.md' "$f" \
+            || fail "$f: Phase 6 missing .autospec/run-summary.md write directive"
+        grep -q 'autospec-write-run-summary\.sh' "$f" \
+            || fail "$f: Phase 6 missing autospec-write-run-summary.sh invocation"
+        grep -q '(none — converged)' "$f" \
+            || fail "$f: Phase 6 missing canonical convergence sentinel"
+    done
+    helper="scripts/autospec-write-run-summary.sh"
+    [ -f "$helper" ] || fail "$helper: required helper missing"
+    [ -x "$helper" ] || fail "$helper: not executable"
+    bash -n "$helper" || fail "$helper: bash syntax error"
+    bash "$helper" --help 2>/dev/null | grep -q '^Usage:' \
+        || fail "$helper --help did not print a 'Usage:' line"
+    bats_file="tests/autospec/test_run_summary.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-run-summary.log 2>&1 \
+            || { cat /tmp/validate-run-summary.log >&2; fail "$bats_file: failed"; }
+    fi
+}
+
 check_install_tests() {
     info "install tests: tests/install/*.sh"
     if [ -d tests/install ]; then
@@ -1452,6 +1483,7 @@ main() {
     check_docs_amendment_presence
     check_autospec_autonomous_contract
     check_autospec_refine_contract
+    check_autospec_run_summary_contract
     check_install_tests
     check_phase4_tests
 
