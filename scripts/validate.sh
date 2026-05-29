@@ -1663,6 +1663,7 @@ main() {
     check_autospec_explore_implementer_base
     check_loop_handoff_harness_awareness
     check_autospec_explore_researchers_deterministic
+    check_autospec_explore_researchers_llm
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -1796,6 +1797,35 @@ check_autospec_explore_researchers_deterministic() {
             info "  running: $bats_file"
             bats "$bats_file" >/tmp/validate-explore-researchers.log 2>&1 \
                 || { cat /tmp/validate-explore-researchers.log >&2; fail "$bats_file: failed"; }
+        fi
+    done
+}
+
+# autospec-explore LLM-heavy researchers + internet safety (issue #720):
+# both LLM researcher scripts (source-analysis.sh, internet.sh) plus the
+# explore-internet-safety.sh helper must exist, be executable, and pass
+# `bash -n`. Runs tests/explore/test_explore_researchers_llm.bats and
+# tests/explore/test_explore_internet_safety.bats when bats is on PATH.
+check_autospec_explore_researchers_llm() {
+    info "autospec-explore LLM-heavy researchers + internet safety (issue #720)"
+    local safety_lib="scripts/lib/explore-internet-safety.sh"
+    [ -f "$safety_lib" ] || fail "$safety_lib: required helper missing"
+    bash -n "$safety_lib" || fail "$safety_lib: bash syntax error"
+    for r in source-analysis internet; do
+        local script="scripts/explore-research/$r.sh"
+        [ -f "$script" ] || fail "$script: required file missing"
+        [ -x "$script" ] || fail "$script: file not executable"
+        bash -n "$script" || fail "$script: bash syntax error"
+    done
+    for bats_file in \
+        tests/explore/test_explore_researchers_llm.bats \
+        tests/explore/test_explore_internet_safety.bats
+    do
+        [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
+        if command -v bats >/dev/null 2>&1; then
+            info "  running: $bats_file"
+            bats "$bats_file" >/tmp/validate-explore-llm.log 2>&1 \
+                || { cat /tmp/validate-explore-llm.log >&2; fail "$bats_file: failed"; }
         fi
     done
 }
