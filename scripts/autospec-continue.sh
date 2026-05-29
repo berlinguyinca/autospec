@@ -39,6 +39,17 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Source the shared loop driver (issue #708) so /autospec-continue and
+# /autospec-refine --continue + /autospec --loop share a single source of
+# truth for the continuous-iteration loop. The single-pass /autospec-continue
+# path is unchanged; the lib is sourced so the future --loop multi-iteration
+# caller can invoke autospec_loop_run without re-implementing termination
+# logic. See scripts/lib/autospec-loop.sh.
+if [ -f "$SCRIPT_DIR/lib/autospec-loop.sh" ]; then
+    # shellcheck source=lib/autospec-loop.sh
+    . "$SCRIPT_DIR/lib/autospec-loop.sh"
+fi
+
 usage() {
     cat <<'EOF'
 Usage: autospec-continue.sh --from-message <path> [flags]
