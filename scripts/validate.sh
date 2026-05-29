@@ -1270,7 +1270,38 @@ check_qa_heal_loop_contract() {
             || fail "$trio missing 'oscillation_detected' terminator doc (issue #663)"
         grep -q 'AUTOSPEC_HEAL_MAX_ROUNDS' "$trio" \
             || fail "$trio missing AUTOSPEC_HEAL_MAX_ROUNDS doc (issue #663)"
+        # Issue #711: lock in default-on + four opt-outs + shared driver.
+        grep -q 'default-on' "$trio" \
+            || fail "$trio missing 'default-on' lock-in (issue #711)"
+        grep -q -- '--single-pass' "$trio" \
+            || fail "$trio missing '--single-pass' opt-out alias (issue #711)"
+        grep -q 'qa-no-heal\.flag' "$trio" \
+            || fail "$trio missing 'qa-no-heal.flag' opt-out (issue #711)"
+        grep -q 'scripts/lib/autospec-loop\.sh' "$trio" \
+            || fail "$trio missing shared loop driver reference (issue #711)"
+        grep -q 'qa-heal-summary\.md' "$trio" \
+            || fail "$trio missing qa-heal-summary.md unified path (issue #711)"
+        grep -q 'evidence_based_stop' "$trio" \
+            || fail "$trio missing evidence_based_stop terminator (issue #711)"
     done
+    # Issue #711: qa-heal-loop.sh must reference the shared driver and
+    # support the new opt-out flag/path surface.
+    grep -q 'scripts/lib/autospec-loop\.sh\|lib/autospec-loop\.sh' "$heal" \
+        || fail "$heal missing reference to shared loop driver (issue #711)"
+    grep -q -- '--single-pass' "$heal" \
+        || fail "$heal missing --single-pass alias (issue #711)"
+    grep -q 'qa-no-heal\.flag' "$heal" \
+        || fail "$heal missing qa-no-heal.flag handling (issue #711)"
+    grep -q 'qa-heal-summary\.md' "$heal" \
+        || fail "$heal missing qa-heal-summary.md mirror (issue #711)"
+    # New default-on bats (issue #711) — required.
+    [ -f tests/qa/test_qa_heal_default.bats ] \
+        || fail "tests/qa/test_qa_heal_default.bats: bats coverage missing (issue #711)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/qa/test_qa_heal_default.bats"
+        bats tests/qa/test_qa_heal_default.bats >/tmp/validate-heal-default.log 2>&1 \
+            || { cat /tmp/validate-heal-default.log >&2; fail "tests/qa/test_qa_heal_default.bats: failed"; }
+    fi
     if command -v bats >/dev/null 2>&1; then
         info "  running: $bats"
         bats "$bats" >/tmp/validate-heal-loop.log 2>&1 \
