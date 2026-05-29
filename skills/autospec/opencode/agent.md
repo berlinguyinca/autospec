@@ -993,6 +993,49 @@ When the monitor terminates, post a final summary to the user: every issue proce
 
 The final report MUST include a canonical `## Next steps` section so downstream tooling (`/autospec-refine --continue`) can deterministically harvest the next prompt. Structure the section as a markdown list of candidate next-prompt strings, each one a self-contained imperative phrasing of the remaining work, blocker, or follow-up. If there is no remaining work, write `- (none — converged)` so the harvester can detect convergence cleanly. If evidence indicates the loop should not continue (overfitting, out-of-sample plateau, operator policy), include a line starting with `STOP: <reason>` to trigger an evidence-based stop in the continuous-iteration loop. Accepted header variants the harvester recognises are `## Next steps`, `## What to do next`, `## Remaining work`, and `## Open blockers` (case-insensitive); prefer `## Next steps` as the canonical form. Alternatively, write the harvest-target content inside a fenced ```autospec-next or ```next-prompt block — these are read in fallback order by the harvester.
 
+In addition to printing the final report to stdout, Phase 6 MUST write it to `.autospec/run-summary.md` at the repository root via the canonical helper so `/autospec-refine --continue` can harvest a real on-disk file rather than scrape transcripts. Invoke the helper with the run's tracking state and the `## Next steps` content; the helper assembles the canonical schema, performs an atomic `.tmp` + `mv` write, and exits 0 on success:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-write-run-summary.sh" \
+  --repo "{repo}" \
+  --prs "$MERGED_PRS" \
+  --issues "$CLOSED_ISSUES" \
+  --failures "$FAILURES" \
+  --elapsed "$ELAPSED" \
+  --next-steps-file "$NEXT_STEPS_FILE" \
+  --output ".autospec/run-summary.md"
+```
+
+Canonical schema (the helper enforces this; do not hand-roll an alternative):
+
+```markdown
+# autospec run summary — <timestamp>
+
+- HEAD SHA: <sha>
+- Branch: <branch>
+- Total PRs merged: N
+- Issues closed: M
+- Elapsed: HH:MM
+
+## PRs merged
+
+- #1234 fix: ...
+
+## Issues closed
+
+- #1230 ...
+
+## Failures
+
+(empty or list)
+
+## Next steps
+
+(harvest-target content — `- (none — converged)` when the run converged cleanly)
+```
+
+The `## Next steps` section is REQUIRED in every written run-summary; if the orchestrator has no next-steps content, pass `--next-steps-file` referencing a file containing the single line `- (none — converged)` so the harvest contract treats the file as `convergence_clean`. Do not skip writing the file even on failure runs — the harvester relies on its presence.
+
 
 ## Constraints (apply throughout)
 
