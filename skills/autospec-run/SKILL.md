@@ -565,6 +565,16 @@ inline label-swap path below.
 > parallel dispatch is the only safe parallelism. See `scripts/dispatch-implementer.sh`
 > and `tests/autospec-run/test_parallel_dispatch.bats` for the canonical contract.
 >
+> ### Sandbox branch contract (autospec-explore PR-base integration)
+>
+> When `.autospec/explore-mode.json` is present (written by
+> `scripts/explore-sandbox.sh`), the Phase 4 implementer MUST target the sandbox
+> branch from that file's `branch` field as PR base instead of `main`, and MUST
+> refuse `gh pr merge` against `main` while the file is present (refusal
+> identifier: `code_health:explore_main_merge_refused`). The full contract lives
+> in `skills/autospec-run/prompts/phase4-implementer.md` under "Sandbox branch
+> contract" and "No accidental main merges"; the trio enforces it via lockstep.
+>
 > ### Implementer prompt selection (turbo-integration routing)
 >
 > Before dispatching, read the issue's labels:
