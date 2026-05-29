@@ -540,6 +540,31 @@ inline label-swap path below.
 >   # by the merge or failure cleanup that just completed.
 > ```
 >
+> ### Parallel implementer worktree isolation
+>
+> Background `Agent` implementers in the same git workdir collide on `git checkout`
+> even when their file-level scopes are disjoint — first agent to call
+> `git checkout -b <BRANCH>` wins; the second lands on the wrong branch and must
+> recover via cherry-pick. File-level disjointness is necessary but NOT sufficient
+> for parallel safety; the collision is at the git-branch level.
+>
+> When dispatching multiple Phase 4 implementers in parallel, the orchestrator
+> MUST wrap each dispatch via `scripts/dispatch-implementer.sh` (or an inline
+> equivalent that produces the same contract):
+>
+> 1. Create a per-issue worktree at `/tmp/wt-<BRANCH>` off `origin/main` via
+>    `git worktree add -b <BRANCH> /tmp/wt-<BRANCH> origin/main`.
+> 2. Pre-pend the implementer prompt with an explicit workdir directive naming
+>    `/tmp/wt-<BRANCH>` and forbidding `cd`/`git checkout` into the main checkout
+>    or sibling branches.
+> 3. On agent completion, remove the worktree via
+>    `git worktree remove --force /tmp/wt-<BRANCH>` (defer cleanup until the PR
+>    has merged so the worktree stays available for retries).
+>
+> Sequential dispatch in the main checkout is the safe default; worktree-isolated
+> parallel dispatch is the only safe parallelism. See `scripts/dispatch-implementer.sh`
+> and `tests/autospec-run/test_parallel_dispatch.bats` for the canonical contract.
+>
 > ### Implementer prompt selection (turbo-integration routing)
 >
 > Before dispatching, read the issue's labels:
