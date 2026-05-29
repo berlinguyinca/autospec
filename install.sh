@@ -489,15 +489,24 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-# Validate --skill
-case "$SKILL_ARG" in
-    all|autospec|autospec-release|autospec-split|autospec-define|autospec-run|autospec-review|autospec-classify|autospec-listen|autospec-story|autospec-stop|autospec-sweep|autospec-design|autospec-fleet|autospec-qa) ;;
-    *)
-        err "invalid --skill: $SKILL_ARG"
-        err "must be one of: autospec | autospec-release | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | autospec-sweep | autospec-design | autospec-fleet | autospec-qa | all"
-        exit 2
-        ;;
-esac
+# Validate --skill against the auto-discovered ALL_SKILLS list (#705 follow-up).
+# Previously the validator carried its own hardcoded skill names; the
+# discovery from #705 fixed `ALL_SKILLS=` but the validator still rejected
+# autospec-refine / autospec-continue.
+_skill_valid=0
+if [ "$SKILL_ARG" = "all" ]; then
+    _skill_valid=1
+else
+    for _s in $ALL_SKILLS; do
+        if [ "$SKILL_ARG" = "$_s" ]; then _skill_valid=1; break; fi
+    done
+fi
+if [ "$_skill_valid" != "1" ]; then
+    err "invalid --skill: $SKILL_ARG"
+    err "must be one of: $(printf '%s' "$ALL_SKILLS" | tr ' ' '\n' | sed 's/^/  /'; printf '  all\n')"
+    exit 2
+fi
+unset _skill_valid _s
 
 # Validate --harness
 case "$HARNESS_ARG" in
