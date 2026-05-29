@@ -34,6 +34,9 @@ EOF
     chmod +x "$STUB_BIN/autospec"
 
     export PATH="$STUB_BIN:$PATH"
+    # Stubs live under macOS $TMPDIR; opt in to bypass the dispatcher
+    # path-safety check (issue #681 Finding 6).
+    export AUTOSPEC_HANDOFF_DISPATCHER=1
 }
 
 teardown() {

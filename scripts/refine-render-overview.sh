@@ -18,7 +18,7 @@
 #   3  on schema validation failure
 #   4  on missing input
 
-set -u
+set -euo pipefail
 
 usage() {
     cat <<'EOF'
@@ -261,8 +261,13 @@ fi
 BASE="$OUTPUT_DIR/${SLUG}-${TS}"
 MD_PATH="$BASE.md"
 JSON_PATH="$BASE.json"
-MD_TMP="$MD_PATH.tmp"
-JSON_TMP="$JSON_PATH.tmp"
+# Atomic write (issue #681 Finding 5): use mktemp in $OUTPUT_DIR so the temp
+# file shares a filesystem with the destination (atomic mv), and a trap so
+# any failure path cleans up partial state. Predictable .tmp names would
+# allow concurrent renders to clobber each other.
+MD_TMP="$(mktemp "$OUTPUT_DIR/refine-render.XXXXXX")"
+JSON_TMP="$(mktemp "$OUTPUT_DIR/refine-render.XXXXXX")"
+trap 'rm -f "$MD_TMP" "$JSON_TMP"' EXIT
 
 python3 - "$INPUT_JSON" "$MD_TMP" "$SLUG" <<'PY'
 import json, sys, difflib
@@ -359,8 +364,17 @@ PY
 # Copy the input JSON atomically as well.
 cp "$INPUT_JSON" "$JSON_TMP"
 
+# Both temps must exist and be non-empty before we promote them.
+if [ ! -s "$MD_TMP" ] || [ ! -s "$JSON_TMP" ]; then
+    echo "refine-render-overview: refusing to publish empty temp files" >&2
+    exit 3
+fi
+
 mv "$MD_TMP" "$MD_PATH"
 mv "$JSON_TMP" "$JSON_PATH"
+# Clear trap targets so the EXIT trap doesn't delete published files.
+MD_TMP=""
+JSON_TMP=""
 
 echo "refine-render-overview: wrote $MD_PATH and $JSON_PATH"
 exit 0
