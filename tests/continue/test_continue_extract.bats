@@ -119,6 +119,140 @@ EOF
     [[ "$output" == *"I recommend reviewing the diff"* ]]
 }
 
+@test "tier 3.5 Next best slice: prefix is extracted (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+Some prose before.
+
+Next best slice: the 2 remaining Aromatic anilides rows, but only with blockers for pyridinecarboxamide and oligopeptide rows; otherwise move to Organic acids and derivatives > Carboxylic acids and derivatives.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Aromatic anilides"* ]]
+    [[ "$output" == *"Organic acids"* ]]
+}
+
+@test "tier 3.5 Next step: prefix is extracted (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+Next step: rebuild the index and re-run the bench.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"rebuild the index"* ]]
+}
+
+@test "tier 3.5 Next: prefix is extracted (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+Next: extend the harvest matchers across both trios in lockstep.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"extend the harvest matchers"* ]]
+}
+
+@test "tier 3.5 Continue with: prefix is extracted (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+Continue with: porting the remaining adapter rows.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"porting the remaining"* ]]
+}
+
+@test "tier 3.5 Proceed with: prefix is extracted (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+Proceed with: shipping the gap-remediation patch.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gap-remediation"* ]]
+}
+
+@test "tier 3.5 Move on to: prefix is extracted (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+Move on to: the Organic acids subtree once anilides converge.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Organic acids subtree"* ]]
+}
+
+@test "tier 3.5 Move to: prefix is extracted (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+Move to: the next anilide cluster after this PR lands.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"anilide cluster"* ]]
+}
+
+@test "tier 3.5 Up next: prefix is extracted (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+Up next: regenerate the test fixtures.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"regenerate the test fixtures"* ]]
+}
+
+@test "tier 3.5 Up next is: prefix is extracted (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+Up next is: closing out the validate.sh hook on the new matcher lib.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"validate.sh hook"* ]]
+}
+
+@test "tier 3.5 Suggested next: prefix is extracted (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+Suggested next: extend bats coverage with adversarial fixtures.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"extend bats coverage"* ]]
+}
+
+@test "tier 3.5 Then: prefix is extracted (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+Then: review the diff and ship via admin-merge.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"review the diff"* ]]
+}
+
+@test "tier 3.5 Next slice: prefix is extracted (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+Next slice: tighten the validate.sh lockstep checks.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"tighten the validate.sh"* ]]
+}
+
+@test "tier 3.5 Next best step: prefix is extracted (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+Next best step: re-run the bats suite end-to-end.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"re-run the bats suite"* ]]
+}
+
+@test "tier 3.5 does NOT shadow section heading priority (issue #707)" {
+    cat >"$TMPDIR_T/msg" <<'EOF'
+## Next steps
+
+- fix the heading bug
+
+Next step: this should also appear but after the section.
+EOF
+    run bash "$SCRIPT" --message "$TMPDIR_T/msg"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"fix the heading bug"* ]]
+    [[ "$output" == *"this should also appear"* ]]
+}
+
 @test "empty message exits 3 with continue_no_recommendation" {
     : >"$TMPDIR_T/msg"
     run bash "$SCRIPT" --message "$TMPDIR_T/msg"

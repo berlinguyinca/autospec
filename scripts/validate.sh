@@ -1344,6 +1344,10 @@ check_autospec_refine_contract() {
     [ -f "$prompt_sh" ] || fail "$prompt_sh: file missing (issue #672)"
     [ -x "$prompt_sh" ] || fail "$prompt_sh: not executable (issue #672)"
     bash -n "$prompt_sh" || fail "$prompt_sh: bash syntax error (issue #672)"
+    # Shared matcher library (issue #707).
+    matcher_lib="scripts/lib/extract-matchers.sh"
+    [ -f "$matcher_lib" ] || fail "$matcher_lib: file missing (issue #707)"
+    bash -n "$matcher_lib" || fail "$matcher_lib: bash syntax error (issue #707)"
     [ -f "$lens_llm_sh" ] || fail "$lens_llm_sh: file missing (issue #684)"
     [ -x "$lens_llm_sh" ] || fail "$lens_llm_sh: not executable (issue #684)"
     bash -n "$lens_llm_sh" || fail "$lens_llm_sh: bash syntax error (issue #684)"
@@ -1471,6 +1475,12 @@ check_autospec_continue_contract() {
         [ -x "$helper" ] || fail "$helper: not executable (issue #700)"
         bash -n "$helper" || fail "$helper: bash syntax error (issue #700)"
     done
+    # Shared matcher library (issue #707): both extract-conversational-
+    # recommendation.sh and refine-prompt.sh::run_continue_loop() source this
+    # so future matcher additions land in one place.
+    matcher_lib="scripts/lib/extract-matchers.sh"
+    [ -f "$matcher_lib" ] || fail "$matcher_lib: file missing (issue #707)"
+    bash -n "$matcher_lib" || fail "$matcher_lib: bash syntax error (issue #707)"
     if command -v bats >/dev/null 2>&1; then
         if [ -d tests/continue ]; then
             for t in tests/continue/test_continue_*.bats; do

@@ -4,6 +4,8 @@
 #   1. section-heading matcher (## Next steps / What to do next / etc.)
 #   2. fenced-block matcher (```autospec-next / ```next-prompt)
 #   3. numbered-list-with-action-verbs matcher (>=50% imperative)
+#   3.5 Next-prefix / continuation prefixes (Next best slice:, Next step:,
+#       Continue with:, Proceed with:, Move on to:, etc. — issue #707)
 #   4. you-should / I-suggest / I-recommend / next-step-is sentence matcher
 # then concatenates all matches and runs a prompt-injection guard.
 #
@@ -61,128 +63,23 @@ fi
 
 MSG="$(cat "$MESSAGE_PATH")"
 
-# -----------------------------------------------------------------------------
-# Matcher 1: section headings (case-insensitive via tolower()).
-# Headings recognised:
-#   ## Next steps
-#   ## What to do next
-#   ## Remaining work
-#   ## Open blockers
-#   ## Suggestions
-#   ## Proposed follow-ups
-# Extract from the heading line through the next "## " heading or end.
-# -----------------------------------------------------------------------------
-extract_section_headings() {
-    awk '
-        BEGIN { in_section = 0 }
-        {
-            low = tolower($0)
-        }
-        low ~ /^##[[:space:]]+(next steps|what to do next|remaining work|open blockers|suggestions|proposed follow-ups)[[:space:]]*$/ {
-            in_section = 1
-            print
-            next
-        }
-        /^##[[:space:]]+/ {
-            if (in_section) { in_section = 0 }
-            next
-        }
-        {
-            if (in_section) print
-        }
-    ' <<<"$MSG"
-}
-
-# -----------------------------------------------------------------------------
-# Matcher 2: fenced blocks ```autospec-next / ```next-prompt
-# -----------------------------------------------------------------------------
-extract_fenced_blocks() {
-    awk '
-        BEGIN { in_block = 0 }
-        /^```(autospec-next|next-prompt)[[:space:]]*$/ {
-            in_block = 1
-            next
-        }
-        /^```[[:space:]]*$/ {
-            if (in_block) { in_block = 0; next }
-            next
-        }
-        {
-            if (in_block) print
-        }
-    ' <<<"$MSG"
-}
-
-# -----------------------------------------------------------------------------
-# Matcher 3: numbered lists where >=50% items start with imperative verbs.
-# -----------------------------------------------------------------------------
-extract_numbered_action_list() {
-    awk '
-        BEGIN {
-            verbs = "^(fix|add|implement|update|review|refactor|ship|merge|remove|delete|create|build|write|test|run|deploy|document|rename|move|split|extract)([[:space:]]|$)"
-            block_lines = ""
-            total = 0
-            imperative = 0
-        }
-        function flush() {
-            if (total > 0 && imperative * 2 >= total) {
-                printf "%s", block_lines
-            }
-            block_lines = ""
-            total = 0
-            imperative = 0
-        }
-        /^[[:space:]]*[0-9]+\.[[:space:]]+/ {
-            body = $0
-            sub(/^[[:space:]]*[0-9]+\.[[:space:]]+/, "", body)
-            low = tolower(body)
-            total++
-            if (match(low, verbs)) imperative++
-            block_lines = block_lines $0 "\n"
-            next
-        }
-        /^[[:space:]]*$/ {
-            flush()
-            next
-        }
-        {
-            flush()
-        }
-        END { flush() }
-    ' <<<"$MSG"
-}
-
-# -----------------------------------------------------------------------------
-# Matcher 4: "you should" / "I suggest" / "I recommend" / "next step is" /
-# "the next thing to do is" sentences plus the following paragraph.
-# -----------------------------------------------------------------------------
-extract_recommend_sentences() {
-    awk '
-        BEGIN {
-            pat = "(you should|i suggest|i recommend|next step is|the next thing to do is)"
-            in_para = 0
-        }
-        {
-            low = tolower($0)
-            if (match(low, pat)) {
-                in_para = 1
-                print
-                next
-            }
-            if (in_para) {
-                if ($0 ~ /^[[:space:]]*$/) {
-                    in_para = 0
-                } else {
-                    print
-                }
-            }
-        }
-    ' <<<"$MSG"
-}
+# Shared matcher library (issue #707) — sourced for both this script and
+# scripts/refine-prompt.sh::run_continue_loop(). Defines:
+#   extract_section_headings, extract_fenced_blocks,
+#   extract_numbered_action_list, extract_next_prefix_continuations,
+#   extract_recommend_sentences
+_MATCHER_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/extract-matchers.sh"
+if [ ! -f "$_MATCHER_LIB" ]; then
+    echo "extract-conversational-recommendation.sh: missing matcher library: $_MATCHER_LIB" >&2
+    exit 2
+fi
+# shellcheck source=lib/extract-matchers.sh
+. "$_MATCHER_LIB"
 
 S1="$(extract_section_headings)"
 S2="$(extract_fenced_blocks)"
 S3="$(extract_numbered_action_list)"
+S3_5="$(extract_next_prefix_continuations)"
 S4="$(extract_recommend_sentences)"
 
 COMBINED=""
@@ -201,6 +98,7 @@ append_if_nonempty() {
 append_if_nonempty "$S1"
 append_if_nonempty "$S2"
 append_if_nonempty "$S3"
+append_if_nonempty "$S3_5"
 append_if_nonempty "$S4"
 
 if [ -z "$COMBINED" ]; then

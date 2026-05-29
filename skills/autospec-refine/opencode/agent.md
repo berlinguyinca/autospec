@@ -323,10 +323,18 @@ The orchestrator reads the LAST autospec run's report and looks for, in order:
    `## Remaining work`, or `## Open blockers` (case-insensitive).
 2. If absent, fenced code blocks tagged with ` ```autospec-next` or
    ` ```next-prompt`.
-3. If absent, the report's `Out-of-sample`, `Stop condition`, or
+3. If absent, sentence-start continuation prefixes (tier 3.5, issue #707):
+   `Next best slice:`, `Next best step:`, `Next slice:`, `Next step:`,
+   `Next:`, `Continue with:`, `Proceed with:`, `Move on to:`, `Move to:`,
+   `Then:`, `Up next:`, `Up next is:`, `Suggested next:` (case-insensitive).
+   The matched line plus its following paragraph (up to next blank line or
+   `##` heading) becomes the harvested prompt. All matcher functions live
+   in the shared library `scripts/lib/extract-matchers.sh` so additions to
+   either harvest path land in one place.
+4. If absent, the report's `Out-of-sample`, `Stop condition`, or
    `Evidence-backed stop` sections are inspected. If they say "stop", the
    loop terminates with `evidence_based_stop`.
-4. If none of the above are present → convergence (loop exits cleanly).
+5. If none of the above are present → convergence (loop exits cleanly).
 
 ### Safety guardrails
 

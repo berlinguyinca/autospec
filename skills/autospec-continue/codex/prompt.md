@@ -179,9 +179,22 @@ The skill prose tells the LLM:
      items start with imperative verbs (`fix`, `add`, `implement`,
      `update`, `review`, `refactor`, `ship`, `merge`, etc.). Extract the
      whole list.
+   - **Next-prefix / continuation prefixes (tier 3.5, issue #707):**
+     sentence-start prefixes `Next best slice:`, `Next best step:`,
+     `Next slice:`, `Next step:`, `Next:`, `Continue with:`,
+     `Proceed with:`, `Move on to:`, `Move to:`, `Then:`, `Up next:`,
+     `Up next is:`, `Suggested next:` (case-insensitive). Extract the
+     matched line plus the following paragraph (up to next blank line or
+     `##` heading).
    - **"You should / I suggest" patterns:** sentences starting with
      `you should`, `I suggest`, `I recommend`, `next step is`, `the next
      thing to do is`. Extract that sentence plus the following paragraph.
+
+   All matcher functions live in the shared library
+   `scripts/lib/extract-matchers.sh` (issue #707) — sourced by both
+   `scripts/extract-conversational-recommendation.sh` and
+   `scripts/refine-prompt.sh::run_continue_loop()` so future additions land
+   in one place.
 3. **Combine matches** (operator confirmed default: pass everything as one
    prompt). Refine's sizing lens splits into multiple issues if needed.
 4. **Empty-recommendation case:** if NO matcher hits, exit with
