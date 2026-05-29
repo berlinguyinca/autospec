@@ -1660,6 +1660,7 @@ main() {
     check_install_tests
     check_phase4_tests
     check_autospec_parallel_dispatch_contract
+    check_autospec_explore_implementer_base
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -1697,6 +1698,45 @@ check_phase4_tests() {
         info "e2e tests: tests/e2e/test_autospec_fleet_dry_run.bats"
         AUTOSPEC_FLEET_LIVE_E2E=0 bats tests/e2e/test_autospec_fleet_dry_run.bats >/tmp/validate-fleet-e2e.log 2>&1 \
             || { cat /tmp/validate-fleet-e2e.log >&2; fail "tests/e2e/test_autospec_fleet_dry_run.bats: failed"; }
+    fi
+}
+
+# autospec-explore implementer PR-base integration (issue #718):
+# the Phase 4 implementer prompt must reference .autospec/explore-mode.json,
+# encode sandbox-base resolution, and a main-merge refusal exit identifier.
+# The autospec-run trio must reference both the explore-mode file and the
+# phase4-implementer.md prompt in lockstep. Runs tests/explore bats fixtures
+# when bats is on PATH.
+check_autospec_explore_implementer_base() {
+    info "autospec-explore implementer PR-base integration"
+    impl="skills/autospec-run/prompts/phase4-implementer.md"
+    [ -f "$impl" ] || fail "$impl: required file missing"
+    grep -F '.autospec/explore-mode.json' "$impl" >/dev/null \
+        || fail "$impl missing .autospec/explore-mode.json reference"
+    grep -F 'EXPLORE_BASE' "$impl" >/dev/null \
+        || fail "$impl missing EXPLORE_BASE sandbox-base resolution"
+    grep -F 'gh pr create --base "$EXPLORE_BASE"' "$impl" >/dev/null \
+        || fail "$impl missing 'gh pr create --base \"\$EXPLORE_BASE\"' snippet"
+    grep -F 'code_health:explore_main_merge_refused' "$impl" >/dev/null \
+        || fail "$impl missing code_health:explore_main_merge_refused refusal identifier"
+    for trio in \
+        skills/autospec-run/SKILL.md \
+        skills/autospec-run/codex/prompt.md \
+        skills/autospec-run/opencode/agent.md
+    do
+        grep -F '.autospec/explore-mode.json' "$trio" >/dev/null \
+            || fail "$trio missing .autospec/explore-mode.json reference (lockstep)"
+        grep -F 'phase4-implementer.md' "$trio" >/dev/null \
+            || fail "$trio missing reference to phase4-implementer.md (lockstep)"
+        grep -F 'code_health:explore_main_merge_refused' "$trio" >/dev/null \
+            || fail "$trio missing code_health:explore_main_merge_refused (lockstep)"
+    done
+    bats_file="tests/explore/test_explore_implementer_base.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-explore-impl-base.log 2>&1 \
+            || { cat /tmp/validate-explore-impl-base.log >&2; fail "$bats_file: failed"; }
     fi
 }
 
