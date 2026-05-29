@@ -99,12 +99,49 @@ EOF
 }
 
 # ── dispatcher path-safety ────────────────────────────────────────
+_canonicalize() {
+    local p="$1"
+    local r=""
+    if command -v realpath >/dev/null 2>&1; then
+        r="$(realpath -m "$p" 2>/dev/null)" || r=""
+        if [ -n "$r" ]; then printf '%s' "$r"; return; fi
+        r="$(realpath "$p" 2>/dev/null)" || r=""
+        if [ -n "$r" ]; then printf '%s' "$r"; return; fi
+    fi
+    if command -v readlink >/dev/null 2>&1; then
+        r="$(readlink -f "$p" 2>/dev/null)" || r=""
+        if [ -n "$r" ]; then printf '%s' "$r"; return; fi
+        if [ -L "$p" ]; then
+            local target
+            target="$(readlink "$p" 2>/dev/null)" || target=""
+            if [ -n "$target" ]; then
+                case "$target" in
+                    /*) printf '%s' "$target"; return ;;
+                    *)  printf '%s/%s' "$(dirname "$p")" "$target"; return ;;
+                esac
+            fi
+        fi
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        r="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null)" || r=""
+        if [ -n "$r" ]; then printf '%s' "$r"; return; fi
+    fi
+    printf '%s' "$p"
+}
+
 _dispatcher_safe() {
     local resolved="$1"
     [ -n "$resolved" ] || return 1
     if [ -n "${AUTOSPEC_LLM_DISPATCHER:-}" ]; then
-        return 0
+        # Even under override, reject relative paths (issue #692).
+        case "$resolved" in /*) return 0 ;; *) return 1 ;; esac
     fi
+    # Reject relative paths outright.
+    case "$resolved" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    # Raw path tmpdir check.
     case "$resolved" in
         /tmp/*|/private/tmp/*|/var/tmp/*|/var/folders/*) return 1 ;;
     esac
@@ -112,6 +149,19 @@ _dispatcher_safe() {
         case "$resolved" in
             "$TMPDIR"*|"${TMPDIR%/}"/*) return 1 ;;
         esac
+    fi
+    # Canonicalize and re-check — symlink-to-tmpdir attack defense (issue #692).
+    local canon
+    canon="$(_canonicalize "$resolved")"
+    if [ -n "$canon" ] && [ "$canon" != "$resolved" ]; then
+        case "$canon" in
+            /tmp/*|/private/tmp/*|/var/tmp/*|/var/folders/*) return 1 ;;
+        esac
+        if [ -n "${TMPDIR:-}" ]; then
+            case "$canon" in
+                "$TMPDIR"*|"${TMPDIR%/}"/*) return 1 ;;
+            esac
+        fi
     fi
     return 0
 }
