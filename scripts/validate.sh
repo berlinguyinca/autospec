@@ -1350,6 +1350,12 @@ check_autospec_refine_contract() {
     for trio in skills/autospec-refine/SKILL.md skills/autospec-refine/codex/prompt.md skills/autospec-refine/opencode/agent.md; do
         [ -f "$trio" ] || fail "$trio: missing (issue #672)"
     done
+    # Canonical ## Next steps section presence in autospec trio (issue #673).
+    # Required for /autospec-refine --continue harvest contract.
+    for trio in skills/autospec/SKILL.md skills/autospec/codex/prompt.md skills/autospec/opencode/agent.md; do
+        grep -qE 'canonical `## Next steps` section' "$trio" \
+            || fail "$trio: missing canonical '## Next steps' harvest-contract directive (issue #673)"
+    done
     if command -v bats >/dev/null 2>&1; then
         if [ -d tests/refine ]; then
             for t in tests/refine/test_refine_*.bats; do
