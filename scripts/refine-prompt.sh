@@ -750,6 +750,17 @@ if [ -n "$OUTPUT" ]; then
     printf '%s' "$FINAL_PROMPT" > "$OUTPUT"
 fi
 
+# Produce the human-readable markdown sibling next to the JSON. The
+# renderer reuses the JSON's timestamp so the .md and .json share a
+# base path; missing the .md (#671 shipped the renderer but didn't wire
+# it into the orchestrator's artifact step).
+RENDER_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/refine-render-overview.sh"
+if [ -x "$RENDER_SH" ]; then
+    "$RENDER_SH" --json "$ARTIFACT" --slug "$SLUG" \
+        --output-dir "$ARTIFACT_DIR" >/dev/null 2>&1 || \
+        echo "refine-prompt: WARN — overview render failed for $ARTIFACT" >&2
+fi
+
 echo "refine-prompt: status=$STATUS rounds_executed=$ROUNDS_EXECUTED artifact=$ARTIFACT"
 
 # ── handoff dispatch ──────────────────────────────────────────────

@@ -160,7 +160,18 @@ fi
 
 # ── render markdown ───────────────────────────────────────────────
 mkdir -p "$OUTPUT_DIR"
-TS="$(date -u +'%Y-%m-%dT%H-%M-%SZ')"
+# Derive the timestamp from the input filename when it matches the
+# orchestrator's naming convention (<slug>-<ISO-ts>.json), so the .md
+# sibling lands beside its source .json instead of forking a new
+# timestamp. Falls back to "now" only when the input is renamed/synthetic.
+INPUT_BASE="$(basename "$INPUT_JSON" .json)"
+INPUT_TS="${INPUT_BASE#${SLUG}-}"
+if [ "$INPUT_TS" != "$INPUT_BASE" ] && \
+   printf '%s' "$INPUT_TS" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z$'; then
+    TS="$INPUT_TS"
+else
+    TS="$(date -u +'%Y-%m-%dT%H-%M-%SZ')"
+fi
 BASE="$OUTPUT_DIR/${SLUG}-${TS}"
 MD_PATH="$BASE.md"
 JSON_PATH="$BASE.json"
