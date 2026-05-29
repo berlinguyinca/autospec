@@ -67,6 +67,8 @@ SIM_ITER_DIR=""
 SIM_TOKENS=""
 TOKEN_CAP="${AUTOSPEC_REFINE_LOOP_TOKEN_CAP:-2000000}"
 TIME_CAP="${AUTOSPEC_REFINE_LOOP_TIME_CAP:-21600}"
+LENS_MODE=""
+LLM_BINARY=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -84,6 +86,8 @@ while [ $# -gt 0 ]; do
         --max-iterations) MAX_ITERATIONS="$2"; shift ;;
         --simulate-iterations) SIM_ITER_DIR="$2"; shift ;;
         --simulate-tokens) SIM_TOKENS="$2"; shift ;;
+        --lens-mode) LENS_MODE="$2"; shift ;;
+        --llm-binary) LLM_BINARY="$2"; shift ;;
         --help|-h) usage; exit 0 ;;
         --*) echo "refine-prompt: unknown flag: $1" >&2; usage >&2; exit 2 ;;
         *)
@@ -745,6 +749,96 @@ apply_lens() {
     esac
 }
 
+# ── LLM-driven lens dispatch (issue #684) ─────────────────────────
+# Per-round lens routing flows through scripts/refine-prompt-lens-llm.sh when
+# --lens-mode llm is active (or auto-detected). On LLM failure for a lens,
+# falls back to the deterministic implementation for THAT lens and records
+# `lens_implementation=deterministic` with `degraded_fallback=true` so the
+# round JSON reflects the actual code path taken.
+LENS_LLM_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/refine-prompt-lens-llm.sh"
+
+_resolve_lens_mode() {
+    # Honor explicit operator choice; otherwise auto-detect.
+    if [ -n "$LENS_MODE" ]; then
+        case "$LENS_MODE" in
+            deterministic|llm) printf '%s' "$LENS_MODE"; return ;;
+            *) echo "refine-prompt: --lens-mode must be deterministic|llm" >&2; exit 2 ;;
+        esac
+    fi
+    # Env override (operator opt-in for default-llm).
+    if [ -n "${AUTOSPEC_REFINE_LENS_MODE:-}" ]; then
+        case "$AUTOSPEC_REFINE_LENS_MODE" in
+            deterministic|llm) printf '%s' "$AUTOSPEC_REFINE_LENS_MODE"; return ;;
+        esac
+    fi
+    # Auto-detect: LLM only when explicitly enabled via AUTOSPEC_LLM_DISPATCHER
+    # AND a dispatcher is available. Otherwise deterministic so existing
+    # workflows (and tests not in LLM mode) are not silently rerouted through
+    # a billable API.
+    local have_llm=0
+    if [ -n "$LLM_BINARY" ]; then have_llm=1; fi
+    if [ -n "${AUTOSPEC_LLM_DISPATCHER:-}" ]; then
+        if command -v claude >/dev/null 2>&1; then have_llm=1; fi
+        if command -v codex  >/dev/null 2>&1; then have_llm=1; fi
+    fi
+    if [ "$have_llm" = 1 ]; then printf '%s' "llm"; else printf '%s' "deterministic"; fi
+}
+
+LENS_MODE_RESOLVED="$(_resolve_lens_mode)"
+LAST_LENS_IMPL=""
+LAST_DEGRADED_FALLBACK="false"
+
+apply_lens_routed() {
+    # Routes through the LLM dispatcher when LENS_MODE_RESOLVED=llm; falls back
+    # to deterministic per-lens on dispatcher failure. Writes the impl marker
+    # ("llm" or "deterministic") and degraded flag ("true"/"false") to
+    # $LENS_IMPL_FILE so the (subshell-captured) caller can still read them
+    # — bash $() runs in a subshell, so plain variable side-effects would be
+    # lost otherwise.
+    local name="$1"
+    local input="$2"
+    local impl="deterministic"
+    local degraded="false"
+    local impl_file="${LENS_IMPL_FILE:-}"
+
+    if [ "$LENS_MODE_RESOLVED" = "llm" ] && [ -x "$LENS_LLM_SH" ]; then
+        # Build a tiny context file from already-loaded sources.
+        local ctx
+        ctx="$(mktemp -t refine-lens-ctx.XXXXXX)"
+        {
+            if [ -n "$AGENTS_CONTENT" ]; then
+                printf '%s\n' "## AGENTS.md"
+                printf '%s\n' "$AGENTS_CONTENT"
+            fi
+            if [ -n "$GIT_LOG_CONTENT" ]; then
+                printf '%s\n' "## Recent git log"
+                printf '%s\n' "$GIT_LOG_CONTENT"
+            fi
+        } > "$ctx" 2>/dev/null || true
+        local llm_args=( --lens "$name" --prompt "$input" --context-file "$ctx" )
+        if [ -n "$LLM_BINARY" ]; then
+            llm_args+=( --llm-binary "$LLM_BINARY" )
+        fi
+        local llm_out
+        local llm_rc=0
+        llm_out="$(bash "$LENS_LLM_SH" "${llm_args[@]}" 2>/dev/null)" || llm_rc=$?
+        rm -f "$ctx" 2>/dev/null || true
+        if [ "$llm_rc" = 0 ] && [ -n "$llm_out" ]; then
+            impl="llm"
+            [ -n "$impl_file" ] && printf '%s|%s' "$impl" "$degraded" > "$impl_file"
+            printf '%s' "$llm_out"
+            return 0
+        fi
+        # Fallback for THIS lens.
+        impl="deterministic"
+        degraded="true"
+        echo "refine-prompt: WARN — LLM lens '$name' failed; falling back to deterministic" >&2
+    fi
+
+    [ -n "$impl_file" ] && printf '%s|%s' "$impl" "$degraded" > "$impl_file"
+    printf '%s' "$input" | apply_lens "$name"
+}
+
 # ── helpers ───────────────────────────────────────────────────────
 word_count() { printf '%s' "$1" | wc -w | tr -d ' '; }
 
@@ -792,7 +886,17 @@ for ((i=1; i<=ROUNDS; i++)); do
         LENS="adversarial"
     fi
 
-    REFINED="$(printf '%s' "$PREV_PROMPT" | apply_lens "$LENS")"
+    LENS_IMPL_FILE="$(mktemp -t refine-lens-impl.XXXXXX)"
+    export LENS_IMPL_FILE
+    REFINED="$(apply_lens_routed "$LENS" "$PREV_PROMPT")"
+    ROUND_IMPL="deterministic"
+    ROUND_DEGRADED="false"
+    if [ -f "$LENS_IMPL_FILE" ]; then
+        IFS='|' read -r ROUND_IMPL ROUND_DEGRADED < "$LENS_IMPL_FILE"
+        rm -f "$LENS_IMPL_FILE"
+    fi
+    [ -n "$ROUND_IMPL" ] || ROUND_IMPL="deterministic"
+    [ -n "$ROUND_DEGRADED" ] || ROUND_DEGRADED="false"
 
     PREV_WC="$(word_count "$PREV_PROMPT")"
     NEW_WC="$(word_count "$REFINED")"
@@ -810,7 +914,7 @@ for ((i=1; i<=ROUNDS; i++)); do
     REFINED_JSON="$(printf '%s' "$REFINED" | json_escape)"
     SOURCES_JSON="$(printf '%s\n' "${SOURCES_USED[@]:-}" | python3 -c 'import json,sys; arr=[l for l in sys.stdin.read().splitlines() if l]; sys.stdout.write(json.dumps(arr))')"
     ROUND_OBJ=$(cat <<EOF
-{"round_number":$i,"lens":"$LENS","sources_used":$SOURCES_JSON,"refined_prompt":$REFINED_JSON,"diff_summary":"lens=$LENS applied","word_count_delta":$DELTA,"reasoning":"deterministic lens v1"}
+{"round_number":$i,"lens":"$LENS","sources_used":$SOURCES_JSON,"refined_prompt":$REFINED_JSON,"diff_summary":"lens=$LENS applied","word_count_delta":$DELTA,"reasoning":"lens_impl=$ROUND_IMPL","lens_implementation":"$ROUND_IMPL","degraded_fallback":$ROUND_DEGRADED}
 EOF
 )
     if [ -n "$ROUNDS_JSON" ]; then

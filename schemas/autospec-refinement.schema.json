@@ -45,7 +45,12 @@
         "refined_prompt": { "type": "string", "minLength": 1 },
         "diff_summary": { "type": "string" },
         "word_count_delta": { "type": "integer" },
-        "reasoning": { "type": "string" }
+        "reasoning": { "type": "string" },
+        "lens_implementation": {
+          "type": "string",
+          "enum": ["deterministic", "llm"]
+        },
+        "degraded_fallback": { "type": "boolean" }
       }
     },
     "metadata": {
