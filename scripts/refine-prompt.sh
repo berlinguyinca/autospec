@@ -360,6 +360,17 @@ run_continue_loop() {
         mkdir -p "$iter_artifact_subdir"
         local refine_log="$iter_artifact_subdir/refine.log"
         local refine_status=0
+
+        # Staleness guard (issue #692 fix 2): capture mtime of any pre-existing
+        # run-summary.md and move it aside so this iteration must produce a
+        # fresh, non-empty file with newer mtime. Real-mode only.
+        local run_summary="$REPO_ROOT/.autospec/run-summary.md"
+        local mtime_before=0
+        if [ -z "$SIM_ITER_DIR" ] && [ -f "$run_summary" ]; then
+            mtime_before="$(stat -c%Y "$run_summary" 2>/dev/null || stat -f%m "$run_summary" 2>/dev/null || echo 0)"
+            mv "$run_summary" "$run_summary.prev-iter${iter}" 2>/dev/null || true
+        fi
+
         if [ -n "$SIM_ITER_DIR" ]; then
             # Test-only path: dry-run, no real /autospec dispatch.
             bash "$0" "$cur_prompt" --rounds "$ROUNDS" --dry-run \
@@ -399,6 +410,34 @@ run_continue_loop() {
             report_path="$SIM_ITER_DIR/iter-${iter}-report.md"
         else
             report_path="$REPO_ROOT/.autospec/run-summary.md"
+        fi
+
+        # Staleness post-check (issue #692 fix 2): in real mode, the handoff
+        # must produce a fresh, non-empty run-summary.md with mtime > mtime_before.
+        # Missing / empty / stale → iteration_error.
+        if [ -z "$SIM_ITER_DIR" ]; then
+            local stale_reason=""
+            if [ ! -f "$report_path" ]; then
+                stale_reason="run_summary_missing_after_handoff"
+            elif [ ! -s "$report_path" ]; then
+                stale_reason="run_summary_empty_after_handoff"
+            else
+                local mtime_after
+                mtime_after="$(stat -c%Y "$report_path" 2>/dev/null || stat -f%m "$report_path" 2>/dev/null || echo 0)"
+                if [ "$mtime_after" -le "$mtime_before" ] 2>/dev/null; then
+                    stale_reason="run_summary_stale_after_handoff"
+                fi
+            fi
+            if [ -n "$stale_reason" ]; then
+                echo "code_health:$stale_reason path=$report_path" >&2
+                status="iteration_error"
+                local row
+                row="$(printf '| %4d | %-21s | %-60s | %10s | %4s | %-20s |' \
+                    "$iter" "$(printf '%s' "$cur_source" | head -c 21)" \
+                    "$stale_reason" "0" "-" "iteration_error")"
+                if [ -z "$table_rows" ]; then table_rows="$row"; else table_rows="$table_rows"$'\n'"$row"; fi
+                break
+            fi
         fi
 
         # Harvest next prompt from the report.
@@ -1031,8 +1070,16 @@ _handoff_dispatcher_safe() {
     local resolved="$1"
     [ -n "$resolved" ] || return 1
     if [ -n "${AUTOSPEC_HANDOFF_DISPATCHER:-}" ]; then
-        return 0
+        # Even under override, reject relative paths — they're ambiguous and
+        # can be hijacked by cwd shadowing.
+        case "$resolved" in /*) return 0 ;; *) return 1 ;; esac
     fi
+    # Reject relative paths outright (issue #692).
+    case "$resolved" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    # Check raw path against tmpdir denylist.
     case "$resolved" in
         /tmp/*|/private/tmp/*|/var/tmp/*|/var/folders/*) return 1 ;;
     esac
@@ -1040,6 +1087,20 @@ _handoff_dispatcher_safe() {
         case "$resolved" in
             "$TMPDIR"*|"${TMPDIR%/}"/*) return 1 ;;
         esac
+    fi
+    # Canonicalize (follows symlinks) and re-check — symlink at safe path
+    # pointing into tmpdir must be rejected (issue #692).
+    local canon
+    canon="$(_canonicalize "$resolved")"
+    if [ -n "$canon" ] && [ "$canon" != "$resolved" ]; then
+        case "$canon" in
+            /tmp/*|/private/tmp/*|/var/tmp/*|/var/folders/*) return 1 ;;
+        esac
+        if [ -n "${TMPDIR:-}" ]; then
+            case "$canon" in
+                "$TMPDIR"*|"${TMPDIR%/}"/*) return 1 ;;
+            esac
+        fi
     fi
     return 0
 }

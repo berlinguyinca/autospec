@@ -15,7 +15,7 @@
     "final_prompt": { "type": "string", "minLength": 1 },
     "status": {
       "type": "string",
-      "enum": ["approved", "completed", "converged", "degraded", "round_cap_reached", "aborted"]
+      "enum": ["approved", "completed", "converged", "degraded", "round_cap_reached", "aborted", "handoff_failed"]
     },
     "metadata": { "$ref": "#/$defs/metadata" }
   },
@@ -78,7 +78,8 @@
         },
         "context_sparse": { "type": "boolean" },
         "handoff_target": { "type": "string", "minLength": 1 },
-        "handoff_executed": { "type": "boolean" }
+        "handoff_executed": { "type": "boolean" },
+        "handoff_exit_code": { "type": ["integer", "null"] }
       }
     }
   }
