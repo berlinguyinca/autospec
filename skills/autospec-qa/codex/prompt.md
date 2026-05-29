@@ -1534,3 +1534,18 @@ bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" <args>
 ```
 
 Print the helper output and stop. Do not run the QA audit.
+
+## Harness-aware handoff
+
+Loop dispatch uses `scripts/lib/autospec-harness-detect.sh` (issue #723) to
+resolve the active AI harness and pick the canonical `/autospec --autonomous`
+invocation form:
+
+- Claude Code → `claude "/autospec" "--autonomous" "$PROMPT"`.
+- Codex CLI → `codex exec --skip-git-repo-check "/autospec --autonomous $PROMPT"`.
+- OpenCode → `opencode "/autospec" "--autonomous" "$PROMPT"` (best-effort).
+
+Detection order: `AUTOSPEC_HANDOFF_DISPATCHER_KIND` env override → skill-mount
+probe (`~/.claude/skills` / `~/.codex/prompts` / `~/.config/opencode/agent`) →
+PATH probe. Missing dispatcher exits 3 with
+`code_health:loop_handoff_no_dispatcher_for_harness`.

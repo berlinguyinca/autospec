@@ -1661,6 +1661,7 @@ main() {
     check_phase4_tests
     check_autospec_parallel_dispatch_contract
     check_autospec_explore_implementer_base
+    check_loop_handoff_harness_awareness
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -1668,6 +1669,35 @@ main() {
     check_bash_syntax "uninstall.sh"
 
     info "OK — all validation checks passed."
+}
+
+# Issue #723: harness-aware loop dispatcher contract. Every loop-using
+# script must source scripts/lib/autospec-harness-detect.sh so the
+# `/autospec --autonomous` handoff form matches the active AI harness
+# (Claude Code / Codex CLI / OpenCode).
+check_loop_handoff_harness_awareness() {
+    info "loop handoff harness-awareness (issue #723)"
+    local helper="scripts/lib/autospec-harness-detect.sh"
+    [ -f "$helper" ] || fail "$helper: missing — required for harness-aware loop handoff"
+    bash -n "$helper" || fail "$helper: bash syntax error"
+    # Each loop-using consumer must source the shared helper rather than
+    # carrying its own claude/autospec resolution.
+    local consumers=(
+        "scripts/refine-prompt.sh"
+        "scripts/autospec-continue.sh"
+        "scripts/qa-heal-loop.sh"
+        "scripts/refine-prompt-lens-llm.sh"
+    )
+    for c in "${consumers[@]}"; do
+        [ -f "$c" ] || fail "$c: missing"
+        grep -q "lib/autospec-harness-detect.sh" "$c" \
+            || fail "$c: must source scripts/lib/autospec-harness-detect.sh (issue #723)"
+    done
+    # Bats coverage must exist.
+    [ -f "tests/lib/test_autospec_harness_detect.bats" ] \
+        || fail "tests/lib/test_autospec_harness_detect.bats: missing (issue #723)"
+    [ -f "tests/refine/test_refine_loop_codex.bats" ] \
+        || fail "tests/refine/test_refine_loop_codex.bats: missing (issue #723)"
 }
 
 # tests/phase4/*.sh — exercise the v2-flow Phase 4 implementer prompt
