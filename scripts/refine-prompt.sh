@@ -267,6 +267,14 @@ slug_from_prompt_early() {
 # Per-iteration record + summary table per spec
 # (docs/specs/2026-05-28-autospec-refine-design.md §Continuous-iteration mode).
 
+# Shared matcher library (issue #707). Sourced once so harvest_next_prompt
+# can invoke the same matchers as scripts/extract-conversational-recommendation.sh.
+_REFINE_MATCHER_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/extract-matchers.sh"
+if [ -f "$_REFINE_MATCHER_LIB" ]; then
+    # shellcheck source=lib/extract-matchers.sh
+    . "$_REFINE_MATCHER_LIB"
+fi
+
 harvest_next_prompt() {
     local report="$1"
     [ -f "$report" ] || { printf ''; return 0; }
@@ -316,6 +324,29 @@ harvest_next_prompt() {
     if [ -n "$fenced" ]; then
         printf '%s' "$fenced" | head -1
         return 0
+    fi
+    # 3.5 Next-prefix / continuation prefixes (issue #707).
+    # Recognises "Next best slice:", "Next step:", "Continue with:",
+    # "Proceed with:", "Move on to:", "Then:", "Up next:", "Suggested next:",
+    # etc. Extracts the matched line + following paragraph, then strips the
+    # leading prefix so the harvested prompt is the actionable body.
+    if declare -F extract_next_prefix_continuations >/dev/null 2>&1; then
+        local next_pref
+        MSG="$(cat "$report")" next_pref="$(MSG="$(cat "$report")" extract_next_prefix_continuations)"
+        if [ -n "$next_pref" ]; then
+            # Use the first line; strip the leading "Next best slice:" / etc.
+            local first_line
+            first_line="$(printf '%s\n' "$next_pref" | head -1)"
+            # Case-insensitive strip of recognised prefixes.
+            local stripped
+            stripped="$(printf '%s' "$first_line" | sed -E 's/^[[:space:]]*([Nn]ext best slice|[Nn]ext best step|[Nn]ext slice|[Nn]ext step|[Cc]ontinue with|[Pp]roceed with|[Mm]ove on to|[Mm]ove to|[Uu]p next is|[Uu]p next|[Ss]uggested next|[Tt]hen|[Nn]ext):[[:space:]]*//')"
+            if [ -n "$stripped" ]; then
+                printf '%s' "$stripped"
+            else
+                printf '%s' "$first_line"
+            fi
+            return 0
+        fi
     fi
     # 4. Nothing found — convergence.
     printf ''

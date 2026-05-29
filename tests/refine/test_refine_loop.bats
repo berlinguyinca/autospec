@@ -197,6 +197,49 @@ EOF
     grep -q 'Final status:' "$LOOP_SUMMARY"
 }
 
+@test "tier 3.5 Next best slice: in report triggers continuation (issue #707)" {
+    cat > "$SIM_DIR/iter-1-report.md" <<'EOF'
+# autospec run summary
+
+Some prose.
+
+Next best slice: extend the harvest matchers across both trios.
+EOF
+    cat > "$SIM_DIR/iter-2-report.md" <<'EOF'
+## Next steps
+
+- (none — converged)
+EOF
+    run bash "$SCRIPT" "fix harvest" --continue --max-iterations 3 \
+        --artifact-dir "$ART_DIR" --repo-root "$REPO_ROOT" --memory-root "$MEMORY_ROOT" \
+        --simulate-iterations "$SIM_DIR"
+    [ "$status" -eq 0 ]
+    LOOP_JSON=$(ls "$ART_DIR"/*-loop.json | head -1)
+    # iter 1 should harvest non-empty (the next-best-slice prefix), iter 2 converges.
+    run jq -r '.iterations[0].harvested_prompt' "$LOOP_JSON"
+    [[ "$output" == *"extend the harvest matchers"* ]]
+    run jq -r '.status' "$LOOP_JSON"
+    [ "$output" = "convergence_clean" ]
+}
+
+@test "tier 3.5 chemontology fixture: Next best slice: extracts body (issue #707)" {
+    cat > "$SIM_DIR/iter-1-report.md" <<'EOF'
+Next best slice: the 2 remaining Aromatic anilides rows, but only with blockers for pyridinecarboxamide and oligopeptide rows; otherwise move to Organic acids and derivatives > Carboxylic acids and derivatives.
+EOF
+    cat > "$SIM_DIR/iter-2-report.md" <<'EOF'
+## Next steps
+
+- (none — converged)
+EOF
+    run bash "$SCRIPT" "chemont" --continue --max-iterations 3 \
+        --artifact-dir "$ART_DIR" --repo-root "$REPO_ROOT" --memory-root "$MEMORY_ROOT" \
+        --simulate-iterations "$SIM_DIR"
+    [ "$status" -eq 0 ]
+    LOOP_JSON=$(ls "$ART_DIR"/*-loop.json | head -1)
+    run jq -r '.iterations[0].harvested_prompt' "$LOOP_JSON"
+    [[ "$output" == *"Aromatic anilides"* ]]
+}
+
 @test "autospec trio carries canonical ## Next steps section" {
     # Lockstep guard: all three autospec trio files must document the section.
     REPO="${BATS_TEST_DIRNAME}/../.."
