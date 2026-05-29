@@ -116,6 +116,49 @@ if [ ! -x "$EXTRACT_SH" ]; then
     exit 2
 fi
 
+# ── Step 0: rate-limit bookkeeping (issue #700) ────────────────────
+# Persist hashes + timestamps only (never prompt content) to
+# ~/.autospec/continue-history.json. Operator may delete the file to reset.
+# Override path via AUTOSPEC_CONTINUE_HISTORY for tests.
+# Override clock via AUTOSPEC_CONTINUE_NOW (epoch seconds) for tests.
+_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    else
+        echo "autospec-continue: no sha256sum/shasum on PATH" >&2
+        return 1
+    fi
+}
+
+HISTORY_FILE="${AUTOSPEC_CONTINUE_HISTORY:-$HOME/.autospec/continue-history.json}"
+mkdir -p "$(dirname "$HISTORY_FILE")" 2>/dev/null || true
+
+NOW="${AUTOSPEC_CONTINUE_NOW:-$(date +%s)}"
+SOURCE_HASH="$(_sha256 < "$FROM_MESSAGE")"
+[ -n "$SOURCE_HASH" ] || { echo "autospec-continue: source hash failed" >&2; exit 2; }
+
+# Read existing entries (jq optional; fall back to grep parsing).
+DUPLICATE_WINDOW=60        # seconds
+OSCILLATION_WINDOW=3600    # 60 minutes
+OSCILLATION_THRESHOLD=3
+
+if [ -f "$HISTORY_FILE" ]; then
+    if command -v jq >/dev/null 2>&1; then
+        DUP_COUNT="$(jq --arg h "$SOURCE_HASH" --argjson now "$NOW" --argjson w "$DUPLICATE_WINDOW" \
+            '[.entries[]? | select(.source_message_hash == $h) | select(($now - .timestamp) < $w)] | length' \
+            "$HISTORY_FILE" 2>/dev/null || echo 0)"
+    else
+        DUP_COUNT=0
+    fi
+    if [ "${DUP_COUNT:-0}" -gt 0 ]; then
+        echo "code_health:continue_recent_duplicate" >&2
+        echo "autospec-continue: same source message seen within ${DUPLICATE_WINDOW}s; refusing to re-run" >&2
+        exit 3
+    fi
+fi
+
 # ── Step 1: extract conversational recommendation ─────────────────
 EXTRACTED=""
 EXTRACT_RC=0
@@ -128,6 +171,39 @@ fi
 if [ -z "$EXTRACTED" ]; then
     echo "autospec-continue: extractor returned empty output" >&2
     exit 3
+fi
+
+EXTRACTED_HASH="$(printf '%s' "$EXTRACTED" | _sha256)"
+[ -n "$EXTRACTED_HASH" ] || { echo "autospec-continue: extracted hash failed" >&2; exit 2; }
+
+# Oscillation check: same extracted prompt appearing ≥3x in last 60 min.
+if [ -f "$HISTORY_FILE" ] && command -v jq >/dev/null 2>&1; then
+    OSC_COUNT="$(jq --arg h "$EXTRACTED_HASH" --argjson now "$NOW" --argjson w "$OSCILLATION_WINDOW" \
+        '[.entries[]? | select(.extracted_prompt_hash == $h) | select(($now - .timestamp) < $w)] | length' \
+        "$HISTORY_FILE" 2>/dev/null || echo 0)"
+    # Count prior occurrences; current invocation makes it +1, so the
+    # threshold trips when prior count >= threshold-1.
+    if [ "${OSC_COUNT:-0}" -ge $((OSCILLATION_THRESHOLD - 1)) ]; then
+        echo "code_health:continue_oscillation" >&2
+        echo "autospec-continue: same extracted prompt seen ${OSC_COUNT}x in last ${OSCILLATION_WINDOW}s; refusing to oscillate" >&2
+        exit 3
+    fi
+fi
+
+# Atomic append of new entry. Schema: { "entries": [ {timestamp, source_message_hash, extracted_prompt_hash}, ... ] }
+HISTORY_TMP="${HISTORY_FILE}.tmp.$$"
+if command -v jq >/dev/null 2>&1; then
+    if [ -f "$HISTORY_FILE" ]; then
+        jq --argjson now "$NOW" --arg s "$SOURCE_HASH" --arg e "$EXTRACTED_HASH" \
+            '.entries = ((.entries // []) + [{timestamp: $now, source_message_hash: $s, extracted_prompt_hash: $e}])' \
+            "$HISTORY_FILE" > "$HISTORY_TMP" 2>/dev/null \
+            || printf '{"entries":[{"timestamp":%s,"source_message_hash":"%s","extracted_prompt_hash":"%s"}]}\n' \
+                "$NOW" "$SOURCE_HASH" "$EXTRACTED_HASH" > "$HISTORY_TMP"
+    else
+        printf '{"entries":[{"timestamp":%s,"source_message_hash":"%s","extracted_prompt_hash":"%s"}]}\n' \
+            "$NOW" "$SOURCE_HASH" "$EXTRACTED_HASH" > "$HISTORY_TMP"
+    fi
+    mv "$HISTORY_TMP" "$HISTORY_FILE"
 fi
 
 # ── Step 2: refine (unless --skip-refine) ─────────────────────────

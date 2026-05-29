@@ -39,6 +39,10 @@ exit 0
 EOF
     chmod +x "$STUB_BIN/claude"
 
+    # Isolate rate-limit state per test (issue #700).
+    export HOME="$WORK"
+    export AUTOSPEC_CONTINUE_HISTORY="$WORK/continue-history.json"
+
     # AUTOSPEC_HANDOFF_DISPATCHER=1 needed because stubs live in tmpdir.
     export AUTOSPEC_HANDOFF_DISPATCHER=1
     # Prepend stub dir so it wins over real binaries (if any) on PATH.
