@@ -794,15 +794,48 @@ autonomy/release guardrails:
 
 ## --no-heal opt-out
 
-The heal loop runs by default. `--no-heal` reverts to discovery-only
-(today's behavior): `/autospec-qa` writes `.autospec/qa-verdict.json` and
-exits without filing issues or dispatching `/autospec-run`. Triggers are
-identical for both modes; only post-discovery behavior differs. Backwards
-compatibility: any caller that relied on `/autospec-qa` exiting after
-discovery must pass `--no-heal` (or set `~/.autospec/qa-no-heal.flag`).
+The heal loop runs by default (issue #711 locks the default-on contract;
+issue #666 introduced it). Four opt-outs revert to discovery-only
+behavior; all four are equivalent and only post-discovery behavior
+differs:
+
+1. `--no-heal` flag.
+2. `--single-pass` flag (alias).
+3. `~/.autospec/qa-no-heal.flag` operator preference.
+4. `~/.autospec/no-heal.flag` legacy operator preference (still honored).
+
+When any of the four is present, `/autospec-qa` writes
+`.autospec/qa-verdict.json` and exits without filing issues or
+dispatching `/autospec-run`. Triggers are identical for both modes.
+Backwards compatibility: any caller that relied on `/autospec-qa`
+exiting after discovery must pass `--no-heal`. The
 `.autospec/qa-verdict.json` schema is unchanged. Existing
 `/autospec-release` and `/autospec-sweep` integrations see the post-heal
 verdict, not the pre-heal one — this is the intended improvement.
+
+## Shared loop driver (issue #711)
+
+`scripts/qa-heal-loop.sh` adopts the shared loop driver
+`scripts/lib/autospec-loop.sh` (issue #708 / PR #712) for unified
+termination naming. The four loop-enabled skills — `/autospec --loop`,
+`/autospec-refine --continue`, `/autospec-continue --loop`, and
+`/autospec-qa` (heal default-on) — share these termination conditions:
+
+- `convergence_clean` — zero release-blocking findings (heal alias:
+  `convergence`).
+- `oscillation_detected` — finding-set hash repeats round-over-round.
+- `round_cap_reached` — `AUTOSPEC_HEAL_MAX_ROUNDS` reached.
+- `evidence_based_stop` — `stop_marker` / `STOP:` field in the QA
+  verdict.
+- `operator_stop` — `~/.autospec/stop.flag` or
+  `~/.autospec/qa-heal-stop.flag` (heal alias: `stopped`).
+- `budget_cap_reached` — token or wall-time cap exceeded.
+
+Loop end produces `.autospec/qa-heal-summary.md` (mirrored from the
+legacy `.autospec/heal-summary.md` path) with the same Markdown table
+shape as `.autospec/loop-summary.md` (refine/continue/autospec --loop)
+so `/autospec-release` and downstream consumers see structurally
+identical summaries across all four loop-enabled skills.
 
 ## Production incident regression check
 

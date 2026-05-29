@@ -1,22 +1,33 @@
 #!/usr/bin/env bash
 # scripts/qa-heal-loop.sh — /autospec-qa self-healing loop orchestrator
-# (issue #663).
+# (issues #663 + #711).
 #
-# Drives a discover → file → fix → re-QA cycle until convergence or a
-# guardrail trips. Reads .autospec/qa-verdict.json after each round,
+# Default-on. Drives a discover → file → fix → re-QA cycle until convergence
+# or a guardrail trips. Reads .autospec/qa-verdict.json after each round,
 # translates release-blocking findings into auto-implement issues via
 # qa-finding-to-issue.sh, dispatches /autospec-run to drain the queue,
 # then re-enters the loop.
 #
+# Adopts the shared loop driver from scripts/lib/autospec-loop.sh (issue
+# #708) for termination-condition naming: heal-loop status values are kept
+# back-compat (convergence, oscillation_detected, round_cap_reached,
+# budget_cap_reached, verify_first_violation, no_heal, stopped) AND the
+# unified summary shape is mirrored to .autospec/qa-heal-summary.md so
+# /autospec-release, /autospec-continue, /autospec-refine, and /autospec
+# --loop all read structurally-identical loop summaries.
+#
 # Termination — loop exits when ANY of:
 #   - convergence            zero release_blocking findings
+#                            (== autospec-loop convergence_clean)
 #   - oscillation_detected   round N+1 hash == round N hash
 #   - round_cap_reached      $AUTOSPEC_HEAL_MAX_ROUNDS reached
 #   - budget_cap_reached     token or wall-time cap exceeded
+#   - evidence_based_stop    STOP: <reason> marker in QA report
 #   - verify_first_violation same findings dropped as verified_dropped
 #                            two rounds in a row
-#   - stopped                ~/.autospec/stop.flag present
-#   - no_heal                --no-heal or ~/.autospec/no-heal.flag
+#   - stopped                ~/.autospec/stop.flag or qa-heal-stop.flag
+#   - no_heal                --no-heal / --single-pass /
+#                            ~/.autospec/{no-heal,qa-no-heal}.flag
 #
 # Exit codes:
 #   0  — convergence (canonical success)
@@ -33,6 +44,7 @@ Usage: qa-heal-loop.sh [flags]
 
 Flags:
   --no-heal               Discovery-only; do not file issues or loop.
+  --single-pass           Alias for --no-heal (issue #711).
   --max-rounds N          Override AUTOSPEC_HEAL_MAX_ROUNDS (default 5).
   --token-cap N           Override AUTOSPEC_HEAL_TOKEN_CAP (default 1500000).
   --time-cap S            Override AUTOSPEC_HEAL_TIME_CAP (seconds, default 14400).
@@ -48,9 +60,20 @@ Environment:
   AUTOSPEC_HEAL_TOKEN_CAP     default 1500000
   AUTOSPEC_HEAL_TIME_CAP      default 14400 (seconds)
   ~/.autospec/no-heal.flag    forces --no-heal
+  ~/.autospec/qa-no-heal.flag forces --no-heal (issue #711 alias)
   ~/.autospec/stop.flag       graceful or immediate stop sentinel
+  ~/.autospec/qa-heal-stop.flag  per-skill stop sentinel (issue #711)
 EOF
 }
+
+# Shared loop driver from PR #712 / issue #708. Sourced for the matcher
+# library (extract-matchers.sh) and to register that qa-heal-loop is the
+# heal-side adopter of the unified termination contract.
+_AUTOSPEC_LOOP_LIB="$(cd "$(dirname "$0")" && pwd)/lib/autospec-loop.sh"
+if [ -f "$_AUTOSPEC_LOOP_LIB" ]; then
+    # shellcheck source=lib/autospec-loop.sh
+    . "$_AUTOSPEC_LOOP_LIB" 2>/dev/null || true
+fi
 
 VERDICT=".autospec/qa-verdict.json"
 SUMMARY=".autospec/heal-summary.md"
@@ -63,7 +86,7 @@ SIM_ROUNDS=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --no-heal) NO_HEAL=1 ;;
+        --no-heal|--single-pass) NO_HEAL=1 ;;
         --max-rounds) MAX_ROUNDS="$2"; shift ;;
         --token-cap) TOKEN_CAP="$2"; shift ;;
         --time-cap)  TIME_CAP="$2";  shift ;;
@@ -77,7 +100,8 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-if [ -f "${HOME}/.autospec/no-heal.flag" ]; then
+if [ -f "${HOME}/.autospec/no-heal.flag" ] \
+    || [ -f "${HOME}/.autospec/qa-no-heal.flag" ]; then
     NO_HEAL=1
 fi
 
@@ -198,14 +222,28 @@ while [ "$ROUND" -lt "$MAX_ROUNDS" ]; do
     ROUND=$((ROUND + 1))
     ROUND_START=$(date +%s)
 
-    # Stop flag check at round boundary.
-    if [ -f "${HOME}/.autospec/stop.flag" ]; then
+    # Stop flag check at round boundary (issue #711: honor both global and
+    # per-skill stop sentinels).
+    if [ -f "${HOME}/.autospec/stop.flag" ] \
+        || [ -f "${HOME}/.autospec/qa-heal-stop.flag" ]; then
         STATUS="stopped"
         break
     fi
 
     run_qa_round "$ROUND" || true
     BLOCKING=$(count_blocking "$VERDICT")
+    # Evidence-based stop marker (issue #711): a verdict with
+    # `stop_marker: "..."` or top-level `STOP: <reason>` field terminates
+    # the loop with the unified evidence_based_stop status.
+    STOP_MARKER=$(jq -r '.stop_marker // .STOP // empty' "$VERDICT" 2>/dev/null)
+    if [ -n "$STOP_MARKER" ]; then
+        ELAPSED=$(( $(date +%s) - ROUND_START ))
+        ROUNDS_DATA="${ROUNDS_DATA}${ROUND}|${BLOCKING}|0|0|${ELAPSED}s|evidence_based_stop
+"
+        STATUS="evidence_based_stop"
+        FINAL_VERDICT=$(jq -r '.verdict // "UNKNOWN"' "$VERDICT" 2>/dev/null || echo UNKNOWN)
+        break
+    fi
     HASH=$(hash_findings "$VERDICT")
     DROPPED_HASH=$(jq -r '(.verified_dropped // []) | map([(.category // ""), (.summary // "")] | join("|")) | sort | join("\n")' \
         "$VERDICT" 2>/dev/null | shasum -a 256 | awk '{print $1}')
@@ -299,6 +337,15 @@ if [ -z "$STATUS" ]; then
 fi
 
 write_summary "$STATUS" "$ROUNDS_DATA" "$PERSISTENT" "$FINAL_VERDICT"
+
+# Issue #711: mirror to .autospec/qa-heal-summary.md so the
+# release/refine/continue loop summaries all live under predictable
+# per-skill paths.
+SUMMARY_DIR="$(dirname "$SUMMARY")"
+if [ -f "$SUMMARY" ] && [ "$(basename "$SUMMARY")" != "qa-heal-summary.md" ]; then
+    cp "$SUMMARY" "$SUMMARY_DIR/qa-heal-summary.md" 2>/dev/null || true
+fi
+
 echo "qa-heal-loop: $STATUS (verdict=$FINAL_VERDICT, rounds=$ROUND)"
 
 case "$STATUS" in
