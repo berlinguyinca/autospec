@@ -49,7 +49,18 @@ OH_MY_CODEX_PACKAGE="${OH_MY_CODEX_PACKAGE:-oh-my-codex}"
 OH_MY_OPENCODE_PACKAGE="${OH_MY_OPENCODE_PACKAGE:-oh-my-opencode}"
 OH_MY_CLAUDE_PACKAGE="${OH_MY_CLAUDE_PACKAGE:-oh-my-claude-sisyphus}"
 
-ALL_SKILLS="autospec autospec-release autospec-split autospec-define autospec-run autospec-review autospec-classify autospec-listen autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa"
+# Auto-discover skills from the repo by walking skills/*/install.sh. Earlier
+# this was a hardcoded list, which silently dropped any new skill that didn't
+# remember to update install.sh (autospec-refine via #674 and
+# autospec-continue via #701 both shipped this way; operators never saw them).
+ALL_SKILLS="$(
+    for d in "$SKILLS_DIR"/*/; do
+        [ -f "$d/install.sh" ] || continue
+        basename "$d"
+    done | sort | tr '\n' ' '
+)"
+# Drop the trailing space from the join above.
+ALL_SKILLS="${ALL_SKILLS% }"
 ALL_HARNESSES="claude opencode codex"
 
 SKILL_ARG="all"
