@@ -167,6 +167,17 @@ _dispatcher_safe() {
 }
 
 # ── resolve dispatcher ────────────────────────────────────────────
+# Issue #723: align with the shared harness-aware loop dispatcher resolver
+# so detection order (env override → skill-mount probe → PATH probe) matches
+# scripts/lib/autospec-harness-detect.sh. The LLM-specific call form (`-p`
+# for claude, `exec --reasoning-effort` for codex) is kept here because it
+# differs from the `/autospec` loop handoff.
+_AUTOSPEC_HARNESS_DETECT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/autospec-harness-detect.sh"
+if [ -f "$_AUTOSPEC_HARNESS_DETECT_LIB" ]; then
+    # shellcheck source=lib/autospec-harness-detect.sh
+    . "$_AUTOSPEC_HARNESS_DETECT_LIB"
+fi
+
 DISPATCHER=""
 DISPATCHER_KIND=""
 if [ -n "$LLM_BINARY" ]; then
@@ -176,15 +187,36 @@ if [ -n "$LLM_BINARY" ]; then
         codex*)  DISPATCHER_KIND="codex" ;;
         *)       DISPATCHER_KIND="claude" ;;
     esac
-elif command -v claude >/dev/null 2>&1; then
-    DISPATCHER="$(command -v claude)"
-    DISPATCHER_KIND="claude"
-elif command -v codex >/dev/null 2>&1; then
-    DISPATCHER="$(command -v codex)"
-    DISPATCHER_KIND="codex"
-else
-    echo "refine-prompt-lens-llm: no claude/codex on PATH" >&2
-    exit 1
+elif declare -F autospec_harness_detect >/dev/null 2>&1; then
+    _harness_kind="$(autospec_harness_detect 2>/dev/null || echo claude)"
+    # OpenCode has no first-class LLM invocation form yet — fall through to
+    # claude/codex PATH probing in that case.
+    case "$_harness_kind" in
+        claude)
+            if command -v claude >/dev/null 2>&1; then
+                DISPATCHER="$(command -v claude)"
+                DISPATCHER_KIND="claude"
+            fi
+            ;;
+        codex)
+            if command -v codex >/dev/null 2>&1; then
+                DISPATCHER="$(command -v codex)"
+                DISPATCHER_KIND="codex"
+            fi
+            ;;
+    esac
+fi
+if [ -z "$DISPATCHER" ]; then
+    if command -v claude >/dev/null 2>&1; then
+        DISPATCHER="$(command -v claude)"
+        DISPATCHER_KIND="claude"
+    elif command -v codex >/dev/null 2>&1; then
+        DISPATCHER="$(command -v codex)"
+        DISPATCHER_KIND="codex"
+    else
+        echo "refine-prompt-lens-llm: no claude/codex on PATH" >&2
+        exit 1
+    fi
 fi
 
 if ! _dispatcher_safe "$DISPATCHER"; then

@@ -75,6 +75,15 @@ if [ -f "$_AUTOSPEC_LOOP_LIB" ]; then
     . "$_AUTOSPEC_LOOP_LIB" 2>/dev/null || true
 fi
 
+# Harness-aware loop dispatcher (issue #723). Used by run_autospec_drain
+# when no AUTOSPEC_RUN_CMD test hook is set, so heal-loop's queue-drain step
+# uses the correct per-harness `/autospec --autonomous` invocation form.
+_AUTOSPEC_HARNESS_DETECT_LIB="$(cd "$(dirname "$0")" && pwd)/lib/autospec-harness-detect.sh"
+if [ -f "$_AUTOSPEC_HARNESS_DETECT_LIB" ]; then
+    # shellcheck source=lib/autospec-harness-detect.sh
+    . "$_AUTOSPEC_HARNESS_DETECT_LIB" 2>/dev/null || true
+fi
+
 VERDICT=".autospec/qa-verdict.json"
 SUMMARY=".autospec/heal-summary.md"
 MAX_ROUNDS="${AUTOSPEC_HEAL_MAX_ROUNDS:-5}"
@@ -192,7 +201,20 @@ run_autospec_drain() {
         sh -c "$AUTOSPEC_RUN_CMD" 2>/dev/null
         return $?
     fi
-    # No drain command configured → treat as 0 PRs merged.
+    # Harness-aware dispatch (issue #723): when no AUTOSPEC_RUN_CMD test hook
+    # is set, dispatch /autospec --autonomous through the per-harness binary
+    # resolved by the shared detector.
+    if declare -F autospec_harness_resolve_dispatcher >/dev/null 2>&1; then
+        local _rc=0
+        ( autospec_harness_resolve_dispatcher ) >/dev/null 2>&1 || _rc=$?
+        if [ "$_rc" = 0 ]; then
+            autospec_harness_resolve_dispatcher
+            autospec_harness_invoke autonomous \
+                "drain queued auto-implement issues for heal round $round" >/dev/null 2>&1
+            return 0
+        fi
+    fi
+    # No drain command and no harness binary → treat as 0 PRs merged.
     return 0
 }
 

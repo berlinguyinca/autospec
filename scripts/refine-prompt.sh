@@ -1153,42 +1153,70 @@ _handoff_dispatcher_safe() {
     return 0
 }
 
+# Harness-aware loop dispatcher (issue #723). Source the shared helper so
+# Claude Code / Codex CLI / OpenCode each get their canonical invocation
+# form. Legacy `autospec` binary fallback is preserved when the helper can
+# detect neither the AI harness nor a per-harness binary on PATH.
+_AUTOSPEC_HARNESS_DETECT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/autospec-harness-detect.sh"
+if [ -f "$_AUTOSPEC_HARNESS_DETECT_LIB" ]; then
+    # shellcheck source=lib/autospec-harness-detect.sh
+    . "$_AUTOSPEC_HARNESS_DETECT_LIB"
+fi
+
 run_handoff() {
     local rc=0
-    local dispatcher=""
-    if command -v claude >/dev/null 2>&1; then
-        dispatcher="$(command -v claude)"
-        if ! _handoff_dispatcher_safe "$dispatcher"; then
-            echo "refine-prompt: ERROR — refusing handoff: dispatcher in tmpdir: $dispatcher (set AUTOSPEC_HANDOFF_DISPATCHER=1 to override)" >&2
+    if declare -F autospec_harness_resolve_dispatcher >/dev/null 2>&1; then
+        # Detect harness first; only fall back to legacy `autospec` binary if
+        # no harness is detected AND no harness binary is on PATH.
+        local kind=""
+        if declare -F autospec_harness_detect >/dev/null 2>&1; then
+            kind="$(autospec_harness_detect 2>/dev/null || true)"
+        fi
+        # Try harness-aware resolve; on exit 3 (no dispatcher), fall through
+        # to autospec legacy binary. On exit 5 (path-safety refused), surface
+        # the refusal directly so callers see the rc=5 contract (issue #692).
+        local resolve_rc=0
+        local resolve_err
+        resolve_err="$(mktemp -t refine-harness-resolve.XXXXXX)"
+        ( autospec_harness_resolve_dispatcher ) >/dev/null 2>"$resolve_err" || resolve_rc=$?
+        if [ "$resolve_rc" = 0 ]; then
+            autospec_harness_resolve_dispatcher
+            rm -f "$resolve_err"
+            echo "refine-prompt: handoff harness=$AUTOSPEC_HARNESS_KIND dispatcher=$AUTOSPEC_HARNESS_DISPATCHER" >&2
+            autospec_harness_invoke "$HANDOFF_MODE" "$FINAL_PROMPT"
+            return $?
+        fi
+        if [ "$resolve_rc" = 5 ]; then
+            cat "$resolve_err" >&2
+            rm -f "$resolve_err"
             return 5
         fi
-        echo "refine-prompt: handoff dispatcher=$dispatcher" >&2
-        if [ "$HANDOFF_MODE" = "interactive" ]; then
-            "$dispatcher" "/autospec" "$FINAL_PROMPT"
-            rc=$?
-        else
-            "$dispatcher" "/autospec" "--autonomous" "$FINAL_PROMPT"
-            rc=$?
+        rm -f "$resolve_err"
+        # Resolve failed with rc=3 (code_health:loop_handoff_no_dispatcher_for_harness).
+        # Try the legacy `autospec` binary fallback before surfacing the error.
+        if command -v autospec >/dev/null 2>&1; then
+            local dispatcher
+            dispatcher="$(command -v autospec)"
+            if ! _handoff_dispatcher_safe "$dispatcher"; then
+                echo "refine-prompt: ERROR — refusing handoff: dispatcher in tmpdir: $dispatcher (set AUTOSPEC_HANDOFF_DISPATCHER=1 to override)" >&2
+                return 5
+            fi
+            echo "refine-prompt: handoff dispatcher=$dispatcher (legacy autospec binary)" >&2
+            if [ "$HANDOFF_MODE" = "interactive" ]; then
+                "$dispatcher" "$FINAL_PROMPT"
+                rc=$?
+            else
+                "$dispatcher" --autonomous "$FINAL_PROMPT"
+                rc=$?
+            fi
+            return $rc
         fi
-    elif command -v autospec >/dev/null 2>&1; then
-        dispatcher="$(command -v autospec)"
-        if ! _handoff_dispatcher_safe "$dispatcher"; then
-            echo "refine-prompt: ERROR — refusing handoff: dispatcher in tmpdir: $dispatcher (set AUTOSPEC_HANDOFF_DISPATCHER=1 to override)" >&2
-            return 5
-        fi
-        echo "refine-prompt: handoff dispatcher=$dispatcher" >&2
-        if [ "$HANDOFF_MODE" = "interactive" ]; then
-            "$dispatcher" "$FINAL_PROMPT"
-            rc=$?
-        else
-            "$dispatcher" --autonomous "$FINAL_PROMPT"
-            rc=$?
-        fi
-    else
-        echo "refine-prompt: WARN — no handoff dispatcher (claude/autospec) on PATH; artifact retained" >&2
+        echo "refine-prompt: WARN — no handoff dispatcher for harness=$kind; artifact retained" >&2
         return 127
     fi
-    return $rc
+    # Helper missing — preserve original behavior.
+    echo "refine-prompt: WARN — no handoff dispatcher (claude/autospec) on PATH; artifact retained" >&2
+    return 127
 }
 
 if [ "$DRY_RUN" != 1 ]; then

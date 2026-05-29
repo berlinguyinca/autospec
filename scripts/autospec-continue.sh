@@ -379,44 +379,52 @@ _dispatcher_safe() {
     return 0
 }
 
-# ── Step 5: handoff ───────────────────────────────────────────────
-DISPATCHER=""
-DISPATCHER_KIND=""
-if command -v claude >/dev/null 2>&1; then
-    DISPATCHER="$(command -v claude)"
-    DISPATCHER_KIND="claude"
-elif command -v autospec >/dev/null 2>&1; then
+# ── Step 5: harness-aware handoff (issue #723) ────────────────────
+# Delegates to scripts/lib/autospec-harness-detect.sh so Codex CLI gets
+# `codex exec --skip-git-repo-check "/autospec --autonomous $PROMPT"` and
+# OpenCode gets `opencode "/autospec" "--autonomous" "$PROMPT"`.
+HARNESS_LIB="$SCRIPT_DIR/lib/autospec-harness-detect.sh"
+if [ -f "$HARNESS_LIB" ]; then
+    # shellcheck source=lib/autospec-harness-detect.sh
+    . "$HARNESS_LIB"
+fi
+
+if declare -F autospec_harness_resolve_dispatcher >/dev/null 2>&1; then
+    _resolve_rc=0
+    _resolve_err="$(mktemp -t autospec-continue-resolve.XXXXXX)"
+    ( autospec_harness_resolve_dispatcher ) >/dev/null 2>"$_resolve_err" || _resolve_rc=$?
+    if [ "$_resolve_rc" = 0 ]; then
+        autospec_harness_resolve_dispatcher
+        rm -f "$_resolve_err"
+        echo "autospec-continue: handoff harness=$AUTOSPEC_HARNESS_KIND dispatcher=$AUTOSPEC_HARNESS_DISPATCHER mode=$HANDOFF_MODE" >&2
+        autospec_harness_invoke "$HANDOFF_MODE" "$FINAL_PROMPT"
+        exit $?
+    fi
+    if [ "$_resolve_rc" = 5 ]; then
+        cat "$_resolve_err" >&2
+        rm -f "$_resolve_err"
+        exit 5
+    fi
+    rm -f "$_resolve_err"
+fi
+
+# Legacy `autospec` binary fallback (preserved per issue #723 backward-compat).
+if command -v autospec >/dev/null 2>&1; then
     DISPATCHER="$(command -v autospec)"
-    DISPATCHER_KIND="autospec"
-else
-    echo "autospec-continue: no claude/autospec on PATH; final prompt follows on stdout" >&2
-    printf '%s\n' "$FINAL_PROMPT"
-    exit 0
+    if ! _dispatcher_safe "$DISPATCHER"; then
+        echo "autospec-continue: ERROR — refusing handoff: dispatcher in tmpdir: $DISPATCHER (set AUTOSPEC_HANDOFF_DISPATCHER=1 to override)" >&2
+        exit 5
+    fi
+    echo "autospec-continue: handoff dispatcher=$DISPATCHER mode=$HANDOFF_MODE (legacy autospec binary)" >&2
+    RC=0
+    if [ "$HANDOFF_MODE" = "interactive" ]; then
+        "$DISPATCHER" "$FINAL_PROMPT" || RC=$?
+    else
+        "$DISPATCHER" --autonomous "$FINAL_PROMPT" || RC=$?
+    fi
+    exit "$RC"
 fi
 
-if ! _dispatcher_safe "$DISPATCHER"; then
-    echo "autospec-continue: ERROR — refusing handoff: dispatcher in tmpdir: $DISPATCHER (set AUTOSPEC_HANDOFF_DISPATCHER=1 to override)" >&2
-    exit 5
-fi
-
-echo "autospec-continue: handoff dispatcher=$DISPATCHER mode=$HANDOFF_MODE" >&2
-
-RC=0
-case "$DISPATCHER_KIND" in
-    claude)
-        if [ "$HANDOFF_MODE" = "interactive" ]; then
-            "$DISPATCHER" "/autospec" "$FINAL_PROMPT" || RC=$?
-        else
-            "$DISPATCHER" "/autospec" "--autonomous" "$FINAL_PROMPT" || RC=$?
-        fi
-        ;;
-    autospec)
-        if [ "$HANDOFF_MODE" = "interactive" ]; then
-            "$DISPATCHER" "$FINAL_PROMPT" || RC=$?
-        else
-            "$DISPATCHER" --autonomous "$FINAL_PROMPT" || RC=$?
-        fi
-        ;;
-esac
-
-exit "$RC"
+echo "autospec-continue: no harness dispatcher on PATH; final prompt follows on stdout" >&2
+printf '%s\n' "$FINAL_PROMPT"
+exit 0
