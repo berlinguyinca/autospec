@@ -520,6 +520,28 @@ EOF
 }
 EOF
 
+    # Validate loop JSON against loop schema (issue #682). Non-fatal warn
+    # if jsonschema is unavailable; fatal if validation actually fails.
+    _loop_schema="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/schemas/autospec-refinement-loop.schema.json"
+    if [ -f "$_loop_schema" ] && command -v python3 >/dev/null 2>&1; then
+        python3 - "$loop_json" "$_loop_schema" <<'PY' || {
+import json, sys
+try:
+    import jsonschema
+except ImportError:
+    sys.exit(0)
+with open(sys.argv[1]) as f: doc = json.load(f)
+with open(sys.argv[2]) as f: sch = json.load(f)
+try:
+    jsonschema.validate(doc, sch)
+except jsonschema.ValidationError as e:
+    sys.stderr.write(f"refine-prompt: loop schema validation failed: {e.message}\n")
+    sys.exit(1)
+PY
+            echo "refine-prompt: WARN — loop artifact failed schema validation: $loop_json" >&2
+        }
+    fi
+
     # Write markdown summary.
     {
         printf '## /autospec-refine continuous loop summary\n\n'
@@ -810,6 +832,13 @@ EOF
 done
 
 FINAL_PROMPT="$PREV_PROMPT"
+
+# Degraded status: when word-count-delta degradation was detected and no
+# other terminating condition (converged / round_cap_reached) already set
+# the status. Issue #682 — `degraded` was previously dead in the schema.
+if [ "$STATUS" = "completed" ] && [ "${#DEGRADED_ROUNDS[@]}" -gt 0 ]; then
+    STATUS="degraded"
+fi
 
 # ── write artifact ────────────────────────────────────────────────
 ORIG_JSON="$(printf '%s' "$PROMPT" | json_escape)"
