@@ -1457,6 +1457,32 @@ check_autospec_parallel_dispatch_contract() {
     fi
 }
 
+# autospec-continue contract (issue #700): rate-limit + e2e bats coverage,
+# skill trio presence, and helper script invariants. Lockstep is enforced by
+# the duo-skill loop in main(); here we assert the per-feature scripts exist
+# + are executable + bash -n clean, and run the new bats fixtures.
+check_autospec_continue_contract() {
+    info "autospec-continue contract: trio + scripts + bats (issue #700)"
+    for trio in skills/autospec-continue/SKILL.md skills/autospec-continue/codex/prompt.md; do
+        [ -f "$trio" ] || fail "$trio: missing (issue #700)"
+    done
+    for helper in scripts/autospec-continue.sh scripts/extract-conversational-recommendation.sh; do
+        [ -f "$helper" ] || fail "$helper: file missing (issue #700)"
+        [ -x "$helper" ] || fail "$helper: not executable (issue #700)"
+        bash -n "$helper" || fail "$helper: bash syntax error (issue #700)"
+    done
+    if command -v bats >/dev/null 2>&1; then
+        if [ -d tests/continue ]; then
+            for t in tests/continue/test_continue_*.bats; do
+                [ -f "$t" ] || continue
+                info "  running: $t"
+                bats "$t" >/tmp/validate-continue.log 2>&1 \
+                    || { cat /tmp/validate-continue.log >&2; fail "$t: failed"; }
+            done
+        fi
+    fi
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -1529,6 +1555,7 @@ main() {
     check_docs_amendment_presence
     check_autospec_autonomous_contract
     check_autospec_refine_contract
+    check_autospec_continue_contract
     check_autospec_run_summary_contract
     check_install_tests
     check_phase4_tests
