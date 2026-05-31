@@ -1705,6 +1705,7 @@ main() {
     check_autospec_explore_researchers_deterministic
     check_autospec_explore_researchers_llm
     check_autospec_explore_contract
+    check_autospec_release_area_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -1928,6 +1929,38 @@ check_autospec_explore_contract() {
         info "  running: $bats_file"
         bats "$bats_file" >/tmp/validate-explore-e2e.log 2>&1 \
             || { cat /tmp/validate-explore-e2e.log >&2; fail "$bats_file: failed"; }
+    fi
+}
+
+# Release area-dispatch contract (issue #731): 6 area files exist under
+# skills/autospec-release/areas/, scripts/release-area-dispatch.sh dispatches
+# them in parallel via the harness-aware dispatcher (PR #725), trio prose
+# references the new area directory, and the bats fixture asserts the
+# aggregated verdict shape that compute-release-verdict.sh (PR #636) consumes.
+check_autospec_release_area_contract() {
+    info "autospec-release area dispatch: 6 areas + dispatcher + trio lockstep"
+    local areas_dir="skills/autospec-release/areas"
+    [ -d "$areas_dir" ] || fail "$areas_dir: directory missing (issue #731)"
+    for area in spec-completeness docs-freshness implementation-completeness \
+                test-coverage qa-artifact-integrity legacy-cleanup; do
+        [ -f "$areas_dir/$area.md" ] \
+            || fail "$areas_dir/$area.md: required area file missing (issue #731)"
+    done
+    local script="scripts/release-area-dispatch.sh"
+    [ -f "$script" ] || fail "$script: required (issue #731)"
+    [ -x "$script" ] || fail "$script: must be executable (issue #731)"
+    bash -n "$script" || fail "$script: bash syntax error (issue #731)"
+    for trio in skills/autospec-release/SKILL.md \
+                skills/autospec-release/codex/prompt.md \
+                skills/autospec-release/opencode/agent.md; do
+        grep -q 'release-area-dispatch\.sh' "$trio" \
+            || fail "$trio missing reference to scripts/release-area-dispatch.sh (issue #731)"
+    done
+    if command -v bats >/dev/null 2>&1 && [ -f tests/release/test_release_area_dispatch.bats ]; then
+        info "  running: tests/release/test_release_area_dispatch.bats"
+        bats tests/release/test_release_area_dispatch.bats \
+            >/tmp/validate-release-area-dispatch.log 2>&1 \
+            || { cat /tmp/validate-release-area-dispatch.log >&2; fail "tests/release/test_release_area_dispatch.bats: failed"; }
     fi
 }
 
