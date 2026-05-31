@@ -95,6 +95,7 @@ If `TIER_B` is unavailable, silently retry the same delegated work with
 | Foreground delegation | `Agent` | `task` | native subagent/CLI | Do the synthesis in-thread |
 | Ask questions | `AskUserQuestion` | inline prompt | inline prompt | Ask one concise question |
 | Subagent model tier | Tier A/B per harness detection | Tier A/B per harness detection | Tier A/B per harness detection | Fall back UP, never down |
+| Subagent dispatch policy   | per AGENTS.md decision matrix        | per AGENTS.md decision matrix            | per AGENTS.md decision matrix            | inline with main-session token cost                |
 
 ## First-run config
 

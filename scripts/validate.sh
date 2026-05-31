@@ -426,6 +426,45 @@ check_agents_md_subagent_section() {
         || fail "AGENTS.md missing '### Tier B — Implementation work' subheading"
 }
 
+# Issue #729: AGENTS.md must declare the canonical Subagent-vs-inline decision
+# matrix (9 work-shape rows), and every skill trio's Required-capabilities table
+# must carry a `Subagent dispatch policy` row pointing back to it. This keeps
+# fan-out vs inline choices uniform across the autospec skill family.
+check_agents_md_subagent_matrix() {
+    info "AGENTS.md: Subagent vs inline decision matrix + per-skill trio reference"
+    [ -f AGENTS.md ] || fail "AGENTS.md missing at repo root"
+    grep -q '^## Subagent vs inline decision matrix$' AGENTS.md \
+        || fail "AGENTS.md missing '## Subagent vs inline decision matrix' section"
+    # The 9 work-shape rows from issue #729 — exact-text anchors so reorderings
+    # or rewordings trip the gate.
+    for anchor in \
+        'Read-only exploration across many files' \
+        '2+ independent tasks with disjoint scopes' \
+        'Single-purpose long-running work' \
+        'Risky / quarantine-worthy work' \
+        'Orchestration / decision-making' \
+        'One-shot tool calls' \
+        'Short edits (1-3 file modifications)' \
+        'Routing / control flow' \
+        'Multi-area fan-out'
+    do
+        grep -q "$anchor" AGENTS.md \
+            || fail "AGENTS.md decision matrix missing work-shape row: '$anchor'"
+    done
+    # Every autospec skill trio file must carry the new dispatch-policy row.
+    for d in skills/autospec*/; do
+        [ -d "$d" ] || continue
+        for f in "${d}SKILL.md" "${d}codex/prompt.md" "${d}opencode/agent.md"; do
+            [ -f "$f" ] || continue
+            grep -q '^## Required capabilities & harness adapter' "$f" || continue
+            grep -q '^| Subagent dispatch policy' "$f" \
+                || fail "$f: Required-capabilities table missing 'Subagent dispatch policy' row"
+            grep -q 'per AGENTS.md decision matrix' "$f" \
+                || fail "$f: dispatch-policy row missing 'per AGENTS.md decision matrix' reference"
+        done
+    done
+}
+
 # Listener skill must ship a complete trio plus references/trigger-keywords.md
 # and a README. Per spec §6.1, validate enforces presence of every required
 # file so the skill is never partially shipped.
@@ -1617,6 +1656,7 @@ main() {
     check_shared_script_install
 
     check_agents_md_subagent_section
+    check_agents_md_subagent_matrix
     check_autospec_listen_files
     check_examples_dir
     check_governance_headings

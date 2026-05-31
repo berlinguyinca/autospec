@@ -41,6 +41,7 @@ This workflow assumes five capabilities. Map each one to your harness's actual t
 | Foreground delegation       | `Agent` (subagent_type=general-purpose) | nested `task` agent                   | spawn nested CLI session              | Do the work in-thread                  |
 | Ask the user a question     | `AskUserQuestion`                       | inline prompt                         | inline prompt                         | Ask in response and wait               |
 | Subagent model tier         | **Model tier:** `TIER_B` for provisioning work; `TIER_A` for review | top task model + high reasoning | top GPT + reasoning_effort=high | Honor per-phase tier mapping |
+| Subagent dispatch policy   | per AGENTS.md decision matrix        | per AGENTS.md decision matrix            | per AGENTS.md decision matrix            | inline with main-session token cost                |
 
 ## Harness detection
 
