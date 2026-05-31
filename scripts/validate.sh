@@ -1035,6 +1035,40 @@ check_autospec_qa_contract() {
         || fail "schemas/autospec-reliability.schema.json: missing deprecated_surfaces contract"
 }
 
+check_autospec_sweep_area_contract() {
+    info "autospec-sweep area dispatch contract"
+    local areas_dir="skills/autospec-sweep/areas"
+    [ -d "$areas_dir" ] || fail "$areas_dir: required directory missing"
+    for a in spec-vs-code-drift docs-drift code-health dependency-health; do
+        [ -f "$areas_dir/$a.md" ] || fail "$areas_dir/$a.md: required area file missing"
+    done
+    local dispatcher="scripts/sweep-area-dispatch.sh"
+    [ -f "$dispatcher" ] || fail "$dispatcher: required dispatcher missing"
+    bash -n "$dispatcher" || fail "$dispatcher: bash syntax error"
+    local dep_researcher="scripts/explore-research/dependency-health.sh"
+    [ -f "$dep_researcher" ] || fail "$dep_researcher: required researcher missing"
+    bash -n "$dep_researcher" || fail "$dep_researcher: bash syntax error"
+    # Lockstep: the "## Parallel area dispatch" section must appear in all 3
+    # trio adapters with the same area list.
+    for f in skills/autospec-sweep/SKILL.md \
+             skills/autospec-sweep/codex/prompt.md \
+             skills/autospec-sweep/opencode/agent.md; do
+        grep -q '^## Parallel area dispatch' "$f" \
+            || fail "$f: missing '## Parallel area dispatch' section"
+        for a in spec-vs-code-drift docs-drift code-health dependency-health; do
+            grep -q "$a" "$f" \
+                || fail "$f: missing area reference '$a'"
+        done
+        grep -q 'sweep-area-dispatch.sh' "$f" \
+            || fail "$f: missing reference to scripts/sweep-area-dispatch.sh"
+    done
+    local bats_file="tests/sweep/test_sweep_area_dispatch.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: required bats file missing"
+    info "  running: $bats_file"
+    bats "$bats_file" >/tmp/validate-sweep-area.log 2>&1 \
+        || { cat /tmp/validate-sweep-area.log >&2; fail "$bats_file: failed"; }
+}
+
 check_autospec_release_contract() {
     info "autospec-release contract: release readiness wrapper"
     local skill_file="skills/autospec-release/SKILL.md"
@@ -1705,6 +1739,7 @@ main() {
     check_autospec_explore_researchers_deterministic
     check_autospec_explore_researchers_llm
     check_autospec_explore_contract
+    check_autospec_sweep_area_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
