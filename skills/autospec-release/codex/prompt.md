@@ -90,6 +90,57 @@ the harness supports it. If `TIER_A` is unavailable, silently fall back to the
 next available top-tier model. If delegation is unavailable, run the verdict
 inline.
 
+## Area dispatch (parallel subagents)
+
+`/autospec-release` parallelizes Stages 3-8 across 6 area subagents instead
+of walking them sequentially in the orchestrator (issue #731). The
+canonical orchestrator script is `scripts/release-area-dispatch.sh`, which:
+
+1. Reads area definitions from `skills/autospec-release/areas/<name>.md`.
+2. Dispatches all 6 area subagents in parallel via the harness-aware
+   dispatcher (`scripts/lib/autospec-harness-detect.sh`, PR #725).
+3. Aggregates per-area findings into `.autospec/release-verdict.json`
+   honoring the schema consumed by `scripts/compute-release-verdict.sh`
+   (PR #636).
+4. Optionally re-probes stale findings via the qa-finding-filter
+   (`scripts/qa-finding-filter.sh`, PR #650) when
+   `AUTOSPEC_RELEASE_VERIFY_FIRST=1`.
+
+The 6 areas:
+
+| Area | Stage | Description |
+| --- | --- | --- |
+| `spec-completeness` | 3 | Specs match live code; no stale/superseded blockers. |
+| `docs-freshness` | 3 | README/AGENTS/USER_MANUAL describe current behavior. |
+| `implementation-completeness` | 5 | Every acceptance criterion has live code. |
+| `test-coverage` | 6 | Release-gate suites green; mutation + density floors met. |
+| `qa-artifact-integrity` | 7 | proof-matrix + control-ledger + mutation-proof + canary-results fresh + schema-valid. |
+| `legacy-cleanup` | 8 | No dead routes/caches/configs masquerading as current. |
+
+Each area subagent receives a tight prompt bounded to 50-120k context and
+25 tool calls. Findings carry `verified_at: <head_sha>` since each
+subagent is its own verifier; the orchestrator merges them and surfaces
+`live_app_proof` from `qa-artifact-integrity` so
+`compute-release-verdict.sh` continues to consume the merged verdict
+unchanged.
+
+**Model tier:** Tier A (spec work) for `spec-completeness`,
+`implementation-completeness`, and `legacy-cleanup`; Tier B
+(implementation work) for `docs-freshness`, `test-coverage`, and
+`qa-artifact-integrity`.
+
+Invoke the orchestrator directly:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/release-area-dispatch.sh"
+```
+
+Or, when iterating on a single area:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/release-area-dispatch.sh" --area spec-completeness
+```
+
 ## When to use
 
 - The repo has existing specs, issues, code, and docs, and the operator asks
