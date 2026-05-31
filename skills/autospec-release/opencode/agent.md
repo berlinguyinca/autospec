@@ -67,6 +67,7 @@ harness exposes it, then stop. Do not run the release gate.
 | Capability | Claude Code | OpenCode | Codex CLI | Fallback if missing |
 | --- | --- | --- | --- | --- |
 | Subagent model tier | Tier A: `opus` + ultrathink | Tier A: top-tier `task` + max reasoning | Tier A: current top GPT + `reasoning_effort=high` | Run inline, but keep the same PASS/PARTIAL/FAIL contract |
+| Subagent dispatch policy   | per AGENTS.md decision matrix        | per AGENTS.md decision matrix            | per AGENTS.md decision matrix            | inline with main-session token cost                |
 | Existing autospec skills | Slash skills | agent prompts | skills/prompts | Run the matching workflow instructions inline |
 | GitHub operations | `gh` through shell | shell | shell | Mark merge/issue steps BLOCKED with exact command |
 | Test and QA execution | Browser/E2E or shell | browser/task or shell | shell/browser when available | Mark app-only checks NOT TESTED with blocker |

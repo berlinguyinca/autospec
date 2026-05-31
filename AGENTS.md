@@ -211,6 +211,31 @@ The first fenced code block under `### Primary smoke test (inner loop)` must con
 exactly one non-blank, non-comment line. It must NOT contain `...`, `<TODO>`, `TBD`,
 or `XXX`.
 
+## Subagent vs inline decision matrix
+
+Every autospec skill author MUST consult this matrix before choosing between a
+nested subagent dispatch and inline (main-session) execution. Skills that fan
+out work inline burn orchestrator context tokens; skills that over-dispatch pay
+subagent boilerplate cost on trivial work. The defaults below normalize that
+tradeoff across the skill family.
+
+| Work shape | Choose | Why |
+|---|---|---|
+| Read-only exploration across many files (grep, file enumeration, pattern survey) | **Subagent (Explore type)** | Bounded context, returns short summary, doesn't pollute orchestrator |
+| 2+ independent tasks with disjoint scopes | **Parallel subagents (foreground, worktree-isolated per PR #691)** | True parallelism; isolated branches prevent collision |
+| Single-purpose long-running work (Phase 4 implementer, peer-review) | **Subagent (general-purpose, single-agent absorbed discipline per PR #653)** | Quarantines context; orchestrator stays lean |
+| Risky / quarantine-worthy work (codex peer-review, security scans) | **Subagent (foreground)** | Failure doesn't poison orchestrator |
+| Orchestration / decision-making | **Inline (main session)** | State must persist across turns |
+| One-shot tool calls (single grep, single gh) | **Inline (Bash tool)** | Subagent overhead exceeds work |
+| Short edits (1-3 file modifications) | **Inline (Edit tool)** | Subagent boilerplate dominates cost |
+| Routing / control flow (stop, listen, classify-trigger) | **Inline** | Decision is the work |
+| Multi-area fan-out (specs / docs / tests / impl / QA) | **Parallel subagents, one per area** | Token cost per area is independent; main session aggregates findings |
+
+Each skill's `## Required capabilities & harness adapter` table carries a
+**Subagent dispatch policy** row pointing back to this matrix; the
+`scripts/validate.sh::check_agents_md_subagent_matrix` gate enforces lockstep
+across every adapter trio.
+
 ## Implementation-quality contract
 
 Every PR produced by an `auto-implement` agent must satisfy the rules below before

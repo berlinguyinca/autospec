@@ -24,6 +24,7 @@ normal pipeline.
 | Capability                  | Claude Code                          | OpenCode                                 | Codex CLI                                | Fallback if missing                                |
 |-----------------------------|--------------------------------------|------------------------------------------|------------------------------------------|----------------------------------------------------|
 | Subagent model tier          | Tier A: `opus` + ultrathink          | Tier A: top-tier `task` + max reasoning  | Tier A: `gpt-5.1-codex` + `reasoning_effort=high` | Fall back UP on unavailability |
+| Subagent dispatch policy   | per AGENTS.md decision matrix        | per AGENTS.md decision matrix            | per AGENTS.md decision matrix            | inline with main-session token cost                |
 
 **Model tier:** `TIER_B` (implementation work) — cheaper model with medium thinking; resolved at startup. Silently fall back to `TIER_A` if unavailable.
 

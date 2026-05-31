@@ -384,6 +384,7 @@ Install: `npm install --save-dev @autospec/test` (wizard handles this during `--
 | Read-only codebase research | `Agent` (subagent_type=Explore)         | `task` agent in read-only mode        | shell `grep` / `rg`                    | In-thread grep                              |
 | Ask the user a question     | `AskUserQuestion`                       | inline prompt                         | inline prompt                          | Ask in the response and wait               |
 | Subagent model tier         | TIER_B: `sonnet`; TIER_A: `opus` + ultrathink | TIER_B: smaller task model       | TIER_B: `gpt-5.1-codex-spark`          | Fall back UP to TIER_A on unavailability    |
+| Subagent dispatch policy   | per AGENTS.md decision matrix        | per AGENTS.md decision matrix            | per AGENTS.md decision matrix            | inline with main-session token cost                |
 
 ## Stop mode
 
