@@ -458,6 +458,12 @@ defaults to `defer`).
 
 No daemon auto-detection — always ask explicitly.
 
+After all decomposition issues are filed (and before asking the gate question),
+file one additional child issue titled
+`"Phase 5.5 audit + remediation — <feature-name>"` with labels
+`auto-implement,priority:high,audit`, then post a comment on the umbrella issue
+linking it: `"Phase 5.5 audit tracker: #<N>"`.
+
 ## Handoff
 
 If the gate answer was `run`, hand off to `/autospec-run --profile <name>`
