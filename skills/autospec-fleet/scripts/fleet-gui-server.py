@@ -38,9 +38,10 @@ last_activity = time.time()
 shutdown_event = threading.Event()
 
 
-def update_activity():
+def record_activity(ts=None):
+    """Record the current time as the last activity timestamp."""
     global last_activity
-    last_activity = time.time()
+    last_activity = ts if ts is not None else time.time()
 
 
 def _yaml_scalar(v):
@@ -133,7 +134,7 @@ class FleetHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        update_activity()
+        record_activity(ts=None)
         path = urlparse(self.path).path
         if path in ("/", ""):
             self._serve_html()
@@ -151,7 +152,7 @@ class FleetHandler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "not_found"})
 
     def do_POST(self):
-        update_activity()
+        record_activity(ts=None)
         path = urlparse(self.path).path
         if not auth_ok(self):
             self.send_json(401, {"error": "unauthorized"})
