@@ -30,8 +30,8 @@ import time
 from pathlib import Path
 
 from .adapters.base import TranscriptNotFoundError, Usage
-from .engine import Action, Engine
-from .injector import SessionGone, inject, session_exists
+from .engine import Action, Engine, State
+from .injector import SessionGone, inject, session_exists, wait_for_cancel
 
 _POLL_INTERVAL = 15  # seconds
 _KILL_SWITCH = Path.home() / ".autospec" / "no-auto-rollover.flag"
@@ -71,27 +71,36 @@ def _load_adapter(harness: str):
 # Action dispatcher
 # ---------------------------------------------------------------------------
 
-def _dispatch(action: Action, tmux_session: str, logf: Path) -> None:
-    """Execute *action* by injecting into the tmux session."""
+def _dispatch(action: Action, tmux_session: str, logf: Path) -> bool:
+    """Execute *action* by injecting into the tmux session.
+
+    Returns:
+        ``True`` if the action was canceled by the user (only possible for
+        ``"clear"`` actions where the cancel-window fires), ``False`` otherwise.
+    """
     if action.kind == "noop":
         _log(logf, {"event": "noop", "payload": action.payload})
-        return
+        return False
 
     if action.kind == "compact":
         _log(logf, {"event": "inject", "kind": "compact"})
         inject(tmux_session, "/compact")
-        return
+        return False
 
     if action.kind == "handoff":
         _log(logf, {"event": "inject", "kind": "handoff"})
         inject(tmux_session, "/create-handoff")
         # wait_for_handoff is handled inline during ROLLED transition in the loop
-        return
+        return False
 
     if action.kind == "clear":
+        _log(logf, {"event": "cancel_window_start", "kind": "clear"})
+        if wait_for_cancel(tmux_session):
+            _log(logf, {"event": "rollover canceled by user", "kind": "clear"})
+            return True
         _log(logf, {"event": "inject", "kind": "clear"})
         inject(tmux_session, "/clear")
-        return
+        return False
 
     if action.kind == "resume":
         # Find the latest handoff file and inject a resume prompt.
@@ -106,9 +115,10 @@ def _dispatch(action: Action, tmux_session: str, logf: Path) -> None:
             resume_text = "Continue from where the previous session left off."
         _log(logf, {"event": "inject", "kind": "resume", "file": str(files[-1]) if files else None})
         inject(tmux_session, resume_text)
-        return
+        return False
 
     _log(logf, {"event": "unknown_action", "kind": action.kind})
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +201,14 @@ def main(argv: list[str] | None = None) -> None:
                 })
                 actions = engine.classify(usage)
                 for action in actions:
-                    _dispatch(action, args.tmux_session, logf)
+                    canceled = _dispatch(action, args.tmux_session, logf)
+                    if canceled:
+                        # User pressed Esc during cancel window — revert state
+                        # so the engine re-fires the rollover on the next 80%
+                        # climb rather than waiting for a new transcript.
+                        engine._state = State.COMPACTED  # noqa: SLF001
+                        _log(logf, {"event": "state_reverted", "state": "COMPACTED"})
+                        break
             except TranscriptNotFoundError as exc:
                 _log(logf, {"event": "no_transcript", "err": str(exc)})
             except SessionGone:
