@@ -37,6 +37,15 @@ DEFAULT_SKELETON = {
 last_activity = time.time()
 shutdown_event = threading.Event()
 
+# In --once smoke mode the server must serve BOTH /api/repos and /api/config
+# before shutting down (the launcher self-issues one GET to each). Tracking which
+# endpoints have been served — and only shutting down once both are — keeps the
+# smoke run deterministic: a shutdown armed after the first hit could race the
+# second request and tear the server down before /api/config is served.
+ONCE_REQUIRED = {"/api/repos", "/api/config"}
+_once_lock = threading.Lock()
+_once_served = set()
+
 
 def record_activity(ts=None):
     """Record the current time as the last activity timestamp."""
@@ -203,6 +212,22 @@ def schedule_shutdown(post_save=False):
     threading.Timer(delay, shutdown_event.set).start()
 
 
+def once_served(path):
+    """Record that a --once smoke endpoint was served; shut down once both are.
+
+    The launcher hits /api/repos and /api/config exactly once each in --once
+    mode. Shutting down only after BOTH have been served (rather than after the
+    first) makes the smoke run deterministic — see ONCE_REQUIRED above.
+    """
+    if not ONCE:
+        return
+    with _once_lock:
+        _once_served.add(path)
+        complete = ONCE_REQUIRED.issubset(_once_served)
+    if complete:
+        schedule_shutdown(post_save=False)
+
+
 class FleetHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # suppress default access log
@@ -224,12 +249,10 @@ class FleetHandler(BaseHTTPRequestHandler):
             self.send_json(401, {"error": "unauthorized"})
         elif path == "/api/repos":
             self._handle_repos()
-            if ONCE:
-                schedule_shutdown(post_save=False)
+            once_served(path)
         elif path == "/api/config":
             self._handle_config_get()
-            if ONCE:
-                schedule_shutdown(post_save=False)
+            once_served(path)
         else:
             self.send_json(404, {"error": "not_found"})
 
@@ -259,8 +282,6 @@ class FleetHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         else:
             self.send_json(404, {"error": "gui_html_not_found", "path": GUI_HTML})
-        if ONCE:
-            schedule_shutdown(post_save=False)
 
     def _handle_repos(self):
         try:

@@ -661,3 +661,112 @@ EOF
     code="$(http_code_of "$resp")"
     [ "$code" = "200" ]
 }
+
+# ---------------------------------------------------------------------------
+# Test 8: --once smoke mode actually starts the server and hits both endpoints (#839)
+#
+# Per spec § Primary smoke test, `fleet-gui.sh --no-browser --print-url --once`
+# must "launch the server, hit /api/repos and /api/config once, exit 0" — an
+# end-to-end guarantee that the HTTP surface is alive. The shipped --once branch
+# previously only re-bound the port to confirm bindability and returned BEFORE
+# exec'ing the server, so the server never started, no request was issued, and
+# the server's own ONCE shutdown handling was unreachable dead code. The
+# documented smoke command proved nothing about the live HTTP surface.
+#
+# This test runs the real launcher in --once mode against a real (stubbed-gh)
+# server over real HTTP and asserts:
+#   - exit 0
+#   - the URL is printed (--print-url)
+#   - BOTH /api/repos and /api/config returned HTTP 200 (the launcher reports
+#     each endpoint's status; the test pins both to 200)
+#   - the gh stub was invoked, proving /api/repos genuinely reached the handler
+#     (which shells out to `gh repo list`) rather than being short-circuited.
+#
+# Mutation-verified: reverting --once to the old port-bindable-only branch (which
+# never starts the server) makes this test FAIL — no smoke line is emitted, the
+# gh stub is never called, and the endpoint statuses are absent. So the test
+# cannot pass unless --once truly boots the server and exercises both endpoints.
+# ---------------------------------------------------------------------------
+@test "--once smoke mode boots the server and hits /api/repos + /api/config (#839)" {
+    # Stub gh so /api/repos returns a real 200 (and so we can prove the route was
+    # actually reached: the handler shells out to `gh repo list`, and this stub
+    # records each invocation to a marker file).
+    local BIN="$TMP/bin"
+    mkdir -p "$BIN"
+    local gh_calls="$TMP/gh-calls.log"
+    cat > "$BIN/gh" <<EOF
+#!/usr/bin/env bash
+echo "called \$*" >> "$gh_calls"
+echo '[]'
+EOF
+    chmod +x "$BIN/gh"
+
+    # Run the launcher in --once smoke mode from within the workspace tmpdir, so
+    # /api/config reads $TMP/autospec-fleet.yml (absent → default skeleton, 200).
+    run bash -c "cd '$TMP' && PATH=\"$BIN:\$PATH\" AUTOSPEC_GUI_IDLE_SECS=30 bash '$GUI_SH' --no-browser --print-url --once 2>&1"
+
+    # Exit 0 — the documented smoke guarantee.
+    [ "$status" -eq 0 ]
+
+    # --print-url must have emitted the tokenized URL.
+    [[ "$output" == *"http://127.0.0.1:"*"/?t="* ]]
+
+    # Both endpoints must have been hit and returned 200. The launcher reports
+    # each endpoint's HTTP status in its smoke output.
+    [[ "$output" == *"/api/repos"*"200"* ]]
+    [[ "$output" == *"/api/config"*"200"* ]]
+
+    # The gh stub must have been invoked at least once, proving /api/repos
+    # genuinely reached the server handler (not short-circuited by a
+    # port-bindable-only branch that never starts the server).
+    [ -f "$gh_calls" ]
+    grep -q "repo list" "$gh_calls"
+}
+
+# ---------------------------------------------------------------------------
+# Test 9: --once must not open a real browser even without --no-browser (#839)
+#
+# In --once mode the server self-shuts-down once both /api/repos and /api/config
+# have been served. If a real browser were opened, its GUI JS would hit those two
+# endpoints first, satisfying the ONCE gate and tearing the server down before
+# the smoke client issues its own GETs — a flaky premature-shutdown race. So
+# --once must suppress browser opening regardless of --no-browser. This test runs
+# --once WITHOUT --no-browser, stubbing xdg-open/open to record any invocation,
+# and asserts the browser was never opened while the smoke still exits 0.
+#
+# Mutation-verified: gating browser-open on NO_BROWSER alone (dropping the ONCE
+# guard) makes the browser stub fire and this test FAIL.
+# ---------------------------------------------------------------------------
+@test "--once suppresses browser open even without --no-browser (#839)" {
+    local BIN="$TMP/bin"
+    mkdir -p "$BIN"
+    local browser_calls="$TMP/browser-calls.log"
+
+    cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[]'
+EOF
+    chmod +x "$BIN/gh"
+
+    # Stub BOTH browser openers to record any invocation. open_browser tries
+    # xdg-open first, then open; either firing means a real browser was launched.
+    for opener in xdg-open open; do
+        cat > "$BIN/$opener" <<EOF
+#!/usr/bin/env bash
+echo "opened \$*" >> "$browser_calls"
+EOF
+        chmod +x "$BIN/$opener"
+    done
+
+    # --once WITHOUT --no-browser. Put the stub BIN first on PATH so the stub
+    # openers win over any real ones.
+    run bash -c "cd '$TMP' && PATH=\"$BIN:\$PATH\" AUTOSPEC_GUI_IDLE_SECS=30 bash '$GUI_SH' --print-url --once 2>&1"
+
+    # Smoke still succeeds end-to-end.
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/api/repos"*"200"* ]]
+    [[ "$output" == *"/api/config"*"200"* ]]
+
+    # The browser must NOT have been opened in --once mode.
+    [ ! -f "$browser_calls" ]
+}
