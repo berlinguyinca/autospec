@@ -33,6 +33,7 @@ def _fake_adapter(kind: str) -> MagicMock:
 _PATCH_INJECT = "autospec_context_monitor.__main__.inject"
 _PATCH_WAIT_HANDOFF = "autospec_context_monitor.__main__.wait_for_handoff"
 _PATCH_WAIT_CANCEL = "autospec_context_monitor.__main__.wait_for_cancel"
+_PATCH_WAIT_FOR_PROMPT = "autospec_context_monitor.__main__.wait_for_prompt"
 _PATCH_SUBPROCESS = "autospec_context_monitor.__main__.subprocess"
 
 
@@ -66,15 +67,16 @@ def test_overlay_message_for_action(tmp_path, kind, expected_msg):
     with patch(_PATCH_INJECT):
         with patch(_PATCH_WAIT_HANDOFF, return_value=_FakeHandoffPath()):
             with patch(_PATCH_WAIT_CANCEL, return_value=False):
-                with patch(_PATCH_SUBPROCESS) as sp_mock:
-                    sp_mock.run = MagicMock(return_value=MagicMock(returncode=0))
-                    _dispatch(
-                        Action(kind),
-                        "test-session",
-                        logf,
-                        cwd=str(tmp_path),
-                        adapter=_fake_adapter(kind),
-                    )
+                with patch(_PATCH_WAIT_FOR_PROMPT, return_value=True):
+                    with patch(_PATCH_SUBPROCESS) as sp_mock:
+                        sp_mock.run = MagicMock(return_value=MagicMock(returncode=0))
+                        _dispatch(
+                            Action(kind),
+                            "test-session",
+                            logf,
+                            cwd=str(tmp_path),
+                            adapter=_fake_adapter(kind),
+                        )
 
     # Find the display-message call among all subprocess.run calls.
     display_calls = [
