@@ -279,6 +279,33 @@ retry prompt as cumulative context.
 | `DOC_OUT_OF_SYNC` | "Update the doc file(s) covering the changed public surface in this same PR." |
 | `INVENTED_CONFIG` | "Remove the invented flag/env/key, or amend the issue body to introduce it as scope." |
 
+### Enforcement
+
+The following rules are enforced deterministically by `scripts/lint-implementation.sh`.
+Each rule has an inline escape hatch for genuine exceptions.
+
+| Rule | Enforcing check | `linter:allow-` escape hatch |
+|---|---|---|
+| TDD non-negotiable (test must accompany every non-docs change) | `MISSING_TEST` detector | `# linter:allow-MISSING_TEST <reason>` on the issue body or in-file |
+| No DB mocks/stubs in tests | `MOCK_DB` detector | `# linter:allow-MOCK_DB <reason>` — allowed only for unit tests with no accessible DB |
+| No hardcoded secrets or unsafe git operations | `SECURITY` detector | `# linter:allow-SECURITY <reason>` — allowed only for test fixtures with non-secret values |
+
+**Inline escape hatch syntax** (in source code, not issue body):
+
+```
+# linter:allow-MOCK_DB integration test requires mock — no test DB available in CI
+# linter:allow-MISSING_TEST docs-only change, no behavior to test
+# linter:allow-SECURITY fixture value is not a real secret
+```
+
+The `linter:allow-` comment must appear on the same line as or the line immediately before
+the offending pattern. A bare `# linter:allow-X` without a reason is rejected and the
+rule remains active. Allowed escape hatches are emitted as `INFO:RULE_ID:...` (audit trail)
+but do NOT block the merge.
+
+The existing `Guardian: skip-RULE_ID` opt-out grammar in the issue body remains valid for
+per-PR-level skips. Inline `# linter:allow-*` is for line-level exceptions inside the code.
+
 ### Per-issue opt-out grammar
 
 The issue body MAY declare per-RULE_ID opt-outs with mandatory justification.
