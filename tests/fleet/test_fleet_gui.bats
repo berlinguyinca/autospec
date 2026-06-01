@@ -432,4 +432,25 @@ assert d.get('saved') == True, f'expected saved=true, got: {d}'
     # load would have dropped experimental_thing entirely.
     grep -Eq '^experimental_thing:[[:space:]]*42$' "$config_file"
     grep -Eq '^default_profile:[[:space:]]*changed-profile$' "$config_file"
+
+    # GET round-trip, still without PyYAML: the stdlib reader must return the
+    # unmanaged key AND parse the empty repos list as [] (not null), so the GUI
+    # renders a real list. Start a fresh server with yaml still shimmed out.
+    local port2
+    port2="$(pick_free_port)"
+    GUI_PID=""
+    PYTHONPATH="$YAMLSTUB" PATH="$BIN:$PATH" start_server "$port2"
+
+    local get_resp
+    get_resp="$(api_get "$port2" "/api/config")"
+
+    python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+assert d.get('exists') == True, f'expected exists=true, got: {d}'
+cfg = d.get('config', {})
+assert cfg.get('experimental_thing') == 42, f'unmanaged key lost on GET: {cfg}'
+assert cfg.get('default_profile') == 'changed-profile', f'managed update lost: {cfg}'
+assert cfg.get('repos') == [], f'empty repos should round-trip as [] not {cfg.get(\"repos\")!r}: {cfg}'
+" "$get_resp"
 }

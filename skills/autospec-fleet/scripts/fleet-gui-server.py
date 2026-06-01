@@ -74,8 +74,13 @@ def _basic_yaml_dump(data):
     lines = []
     for k, v in data.items():
         if isinstance(v, list):
-            lines.append(f"{k}:")
-            lines.extend(_yaml_list_items(v))
+            if not v:
+                # Emit an explicit empty-list flow form so the stdlib reader
+                # round-trips it as [] (a bare "k:" loads as None, like PyYAML).
+                lines.append(f"{k}: []")
+            else:
+                lines.append(f"{k}:")
+                lines.extend(_yaml_list_items(v))
         elif v is None:
             lines.append(f"{k}:")
         else:
@@ -94,6 +99,8 @@ def _yaml_load_scalar(text):
         return True
     if t in ("false", "False"):
         return False
+    if t == "[]":
+        return []
     if t in ("", "~", "null", "None"):
         return None
     if (len(t) >= 2) and ((t[0] == t[-1] == '"') or (t[0] == t[-1] == "'")):
