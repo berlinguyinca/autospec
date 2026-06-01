@@ -13,6 +13,11 @@ from typing import Literal
 
 from .base import HarnessAdapter, TranscriptNotFoundError, Usage
 
+# Transcript path (SQLite DB) checked by `doctor.py` for write-access.
+PATHS_TO_CHECK: list[Path] = [
+    Path.home() / ".local" / "share" / "opencode" / "opencode.db",
+]
+
 # Context-window sizes by model identifier.
 MODEL_MAX: dict[str, int] = {
     "claude-sonnet-4-5": 200_000,

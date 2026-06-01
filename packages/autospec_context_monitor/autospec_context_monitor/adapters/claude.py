@@ -11,6 +11,11 @@ from typing import Literal
 
 from .base import HarnessAdapter, TranscriptNotFoundError, Usage
 
+# Transcript directories checked by `doctor.py` for write-access.
+PATHS_TO_CHECK: list[Path] = [
+    Path.home() / ".claude" / "projects",
+]
+
 # Context-window sizes by model identifier.
 # Add new models here as Claude Code ships them.
 MODEL_MAX: dict[str, int] = {

@@ -14,6 +14,11 @@ from typing import Literal
 
 from .base import HarnessAdapter, TranscriptNotFoundError, Usage
 
+# Transcript directories checked by `doctor.py` for write-access.
+PATHS_TO_CHECK: list[Path] = [
+    Path.home() / ".codex" / "sessions",
+]
+
 # Context-window sizes by model identifier.
 MODEL_MAX: dict[str, int] = {
     "gpt-5": 200_000,
