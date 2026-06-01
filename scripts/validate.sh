@@ -372,6 +372,20 @@ check_autospec_fleet_scripts() {
     done
 }
 
+# Lockstep check: the literal line '/autospec-fleet gui' must appear in all
+# three adapter files for the fleet skill (SKILL.md, codex/prompt.md,
+# opencode/agent.md). Introduced by issue #829.
+check_fleet_gui_subcommand_lockstep() {
+    local needle='/autospec-fleet gui'
+    info "fleet-gui subcommand lockstep"
+    for f in skills/autospec-fleet/SKILL.md \
+              skills/autospec-fleet/codex/prompt.md \
+              skills/autospec-fleet/opencode/agent.md; do
+        grep -qF "$needle" "$f" \
+            || fail "fleet-gui lockstep: '$needle' missing in $f"
+    done
+}
+
 # Harness detection block validation.
 # If a SKILL.md contains a "## Harness detection" heading, verify that the
 # section body includes TIER_A, TIER_B, and a "silently" fallback reference.
@@ -1709,6 +1723,7 @@ main() {
     check_phase4_adaptive_retry
     check_autospec_sweep_config_contract
     check_autospec_fleet_scripts
+    check_fleet_gui_subcommand_lockstep
     check_team_personality_contract
     check_autospec_run_priority_sort_lockstep
     check_autospec_run_regression_review_lockstep

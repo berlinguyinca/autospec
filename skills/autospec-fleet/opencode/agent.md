@@ -102,6 +102,27 @@ and exit.
 - `status` summarizes queue state, active workers, open PRs, and recent
   failures across configured repositories.
 - `stop` forwards existing autospec stop semantics to active repo workers.
+- `gui` launches a local one-page browser GUI on `127.0.0.1` with a random
+  port and URL token; lets the operator toggle repos and edit top-level config.
+
+## GUI mode
+
+```text
+/autospec-fleet gui
+```
+
+Runs `skills/autospec-fleet/scripts/fleet-gui.sh`, which:
+
+1. Checks for `gh` on PATH (exits 1 with `code_health:fleet_gui_missing_gh`
+   if absent).
+2. Picks a random port (49152–65535) and 16-hex URL token.
+3. Starts a Python stdlib HTTP server bound to `127.0.0.1`.
+4. Opens the default browser at `http://127.0.0.1:<port>/?t=<token>`.
+5. Serves `GET /api/repos`, `GET /api/config`, and `POST /api/config`.
+6. Exits after save or after 15 min idle (`AUTOSPEC_GUI_IDLE_SECS` to
+   override).
+
+Flags: `--no-browser`, `--print-url`, `--once` (smoke-test mode).
 
 ## Required capabilities & harness adapter
 
