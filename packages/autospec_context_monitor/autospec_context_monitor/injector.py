@@ -87,6 +87,25 @@ def inject(session: str, text: str, *, submit: bool = True) -> None:
             )
 
 
+def wait_for_prompt(session: str, marker: str, attempts: int = 3, delay: float = 2.0) -> bool:
+    """Poll the pane output until *marker* appears; return ``False`` after exhausting attempts.
+
+    This is the public guard function used by ``_dispatch`` before each inject.
+    It delegates to :func:`prompt_ready` with the spec-aligned parameter names
+    (``attempts`` / ``delay`` instead of ``retries`` / ``wait``).
+
+    Args:
+        session:  Tmux session name.
+        marker:   String to look for in the captured pane output.
+        attempts: Maximum number of polling attempts (default 3).
+        delay:    Seconds to wait between attempts (default 2.0).
+
+    Returns:
+        ``True`` when the marker is seen; ``False`` after all attempts are exhausted.
+    """
+    return prompt_ready(session, marker, retries=attempts, wait=delay)
+
+
 def wait_for_cancel(tmux_session: str, timeout: int = 10) -> bool:
     """Show a countdown overlay and return ``True`` if the user pressed Esc.
 
