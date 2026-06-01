@@ -74,8 +74,13 @@ def _basic_yaml_dump(data):
     lines = []
     for k, v in data.items():
         if isinstance(v, list):
-            lines.append(f"{k}:")
-            lines.extend(_yaml_list_items(v))
+            if not v:
+                # Emit an explicit empty-list flow form so the stdlib reader
+                # round-trips it as [] (a bare "k:" loads as None, like PyYAML).
+                lines.append(f"{k}: []")
+            else:
+                lines.append(f"{k}:")
+                lines.extend(_yaml_list_items(v))
         elif v is None:
             lines.append(f"{k}:")
         else:
@@ -83,19 +88,96 @@ def _basic_yaml_dump(data):
     return "\n".join(lines) + "\n"
 
 
+def _yaml_load_scalar(text):
+    """Parse a scalar YAML token into bool / int / None / str.
+
+    Mirrors the value forms emitted by _yaml_scalar (true/false/ints) plus
+    bare strings; quotes are stripped so dumped-then-loaded values round-trip.
+    """
+    t = text.strip()
+    if t in ("true", "True"):
+        return True
+    if t in ("false", "False"):
+        return False
+    if t == "[]":
+        return []
+    if t in ("", "~", "null", "None"):
+        return None
+    if (len(t) >= 2) and ((t[0] == t[-1] == '"') or (t[0] == t[-1] == "'")):
+        return t[1:-1]
+    try:
+        return int(t)
+    except ValueError:
+        return t
+
+
+def _basic_yaml_load(text):
+    """Minimal stdlib YAML reader for the simple dict/list shapes this server
+    writes (top-level scalars and lists of flat dicts).
+
+    Stdlib has no YAML parser, so this is the round-trip counterpart to
+    _basic_yaml_dump. It preserves every top-level key — including unmanaged
+    ones — so a save cannot silently drop them when PyYAML is unavailable.
+    """
+    result = {}
+    cur_key = None  # key whose value is being filled by following list lines
+    cur_item = None  # dict item currently being built inside that list
+    empty_key = None  # top-level "key:" with no value yet seen → None unless a
+    #                   list item follows, in which case it becomes a list
+    for raw in text.splitlines():
+        line = raw.rstrip("\n")
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        if indent == 0 and not stripped.startswith("- "):
+            # top-level "key:" or "key: value"
+            cur_item = None
+            key, sep, val = stripped.partition(":")
+            key = key.strip()
+            if sep and val.strip() == "":
+                result[key] = None  # provisional: None unless list items follow
+                cur_key = key
+                empty_key = key
+            else:
+                result[key] = _yaml_load_scalar(val)
+                cur_key = None
+                empty_key = None
+        elif cur_key is not None and stripped.startswith("- "):
+            if empty_key == cur_key:
+                result[cur_key] = []  # promote None → list on first item
+                empty_key = None
+            rest = stripped[2:]
+            if ":" in rest:
+                cur_item = {}
+                k, _, v = rest.partition(":")
+                cur_item[k.strip()] = _yaml_load_scalar(v)
+                result[cur_key].append(cur_item)
+            else:
+                cur_item = None
+                result[cur_key].append(_yaml_load_scalar(rest))
+        elif cur_key is not None and cur_item is not None:
+            # continuation key of the current dict list-item
+            k, _, v = stripped.partition(":")
+            cur_item[k.strip()] = _yaml_load_scalar(v)
+    return result
+
+
 def load_yaml_config(path):
-    """Load YAML config. Uses PyYAML if available; falls back to JSON."""
+    """Load YAML config. Uses PyYAML if available; otherwise a stdlib reader.
+
+    The stdlib reader preserves all top-level keys so unmanaged config keys
+    survive a save round-trip even when PyYAML is not installed (the spec
+    assumes stdlib-only). It must NOT fall back to json.load on a YAML file —
+    that returns {} for any real YAML and silently destroys unmanaged keys.
+    """
     try:
         import yaml
-        with open(path) as f:
-            return yaml.safe_load(f) or {}
     except ImportError:
-        pass
-    try:
         with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return {}
+            return _basic_yaml_load(f.read())
+    with open(path) as f:
+        return yaml.safe_load(f) or {}
 
 
 def dump_yaml_config(data):
