@@ -35,7 +35,18 @@ bash skills/autospec-fleet/scripts/fleet-config-lint.sh --config path/to/autospe
 bash skills/autospec-fleet/scripts/fleet-run.sh --config path/to/autospec-fleet.yml --dry-run --once
 bash skills/autospec-fleet/scripts/fleet-status.sh --config path/to/autospec-fleet.yml --json
 bash skills/autospec-fleet/scripts/fleet-stop.sh --config path/to/autospec-fleet.yml --graceful
+bash skills/autospec-fleet/scripts/fleet-gui.sh [--no-browser] [--print-url] [--once]
 ```
+
+### fleet-gui.sh flags
+
+| Flag | Description |
+| --- | --- |
+| `--no-browser` | Start the server without opening the system browser. |
+| `--print-url` | Print the full URL (with token) to stdout before serving. |
+| `--once` | Smoke-test mode: verify setup (port bindable) and exit 0 immediately. |
+
+Environment: `AUTOSPEC_GUI_IDLE_SECS` — idle timeout in seconds (default 900 = 15 min).
 
 Implemented surface:
 

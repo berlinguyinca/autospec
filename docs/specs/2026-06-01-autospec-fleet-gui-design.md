@@ -245,6 +245,16 @@ bash skills/autospec-fleet/scripts/fleet-gui.sh --no-browser --print-url --once
 (In tests: launches the server, prints the URL, hits `/api/repos` and
 `/api/config` once, exits 0. The `--once` flag bypasses the 15-min loop.)
 
+### fleet-gui.sh CLI flags
+
+| Flag | Description |
+| --- | --- |
+| `--no-browser` | Start the server without opening the system browser. |
+| `--print-url` | Print the full URL (with token) to stdout before serving. |
+| `--once` | Smoke-test mode: verify setup (port bindable) and exit 0 immediately. |
+
+Environment variable: `AUTOSPEC_GUI_IDLE_SECS` — idle timeout in seconds (default 900 = 15 min).
+
 ## Operator / full verification
 
 ```bash
