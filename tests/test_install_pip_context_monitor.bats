@@ -36,3 +36,15 @@ INSTALL_SH="${BATS_TEST_DIRNAME}/../install.sh"
     echo "$block" | grep -qE 'pip[[:space:]]+install'
     echo "$block" | grep -qF 'autospec_context_monitor'
 }
+
+@test "g-021: pip install passes --break-system-packages for PEP 668 compatibility" {
+    block=$(awk '/^install_context_monitor_pkg\(\)/{flag=1} flag{print} /^}$/{if(flag){flag=0; exit}}' "$INSTALL_SH")
+    echo "$block" | grep -qF -- '--break-system-packages'
+}
+
+@test "g-021: install_context_monitor_pkg returns non-zero when pip install fails" {
+    # The function must propagate pip failures (no silent pass).
+    # Verify by checking that a failure path exists with 'return 1'.
+    block=$(awk '/^install_context_monitor_pkg\(\)/{flag=1} flag{print} /^}$/{if(flag){flag=0; exit}}' "$INSTALL_SH")
+    echo "$block" | grep -qF 'return 1'
+}
