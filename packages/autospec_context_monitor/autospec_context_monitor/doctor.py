@@ -1,0 +1,227 @@
+"""autospec_context_monitor.doctor — diagnostic command.
+
+Usage::
+
+    python -m autospec_context_monitor.doctor [--json] [--self-test]
+
+Exits 0 when all checks pass; non-zero when any check reports a problem.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Callable, List, Tuple
+
+_MONITORS_DIR = Path.home() / ".autospec" / "monitors"
+_TRANSCRIPTS_DIR = Path.home() / ".claude" / "projects"
+
+# ---------------------------------------------------------------------------
+# Check helpers
+# ---------------------------------------------------------------------------
+
+def _tmux_version() -> str:
+    result = subprocess.run(["tmux", "-V"], capture_output=True, text=True)
+    if result.returncode != 0:
+        return "MISSING"
+    return result.stdout.strip() or "MISSING"
+
+
+def _binary(name: str) -> str:
+    return shutil.which(name) or "MISSING"
+
+
+def _transcripts_writable() -> bool:
+    path = _TRANSCRIPTS_DIR
+    if path.exists():
+        return os.access(path, os.W_OK)
+    # parent must be writable so it can be created
+    return os.access(path.parent, os.W_OK)
+
+
+def _import_all_adapters() -> str:
+    """Try to import all known adapter modules; return 'ok' or error string."""
+    errors: list[str] = []
+    for mod in (
+        "autospec_context_monitor.adapters.base",
+        "autospec_context_monitor.adapters.claude",
+        "autospec_context_monitor.adapters.codex",
+        "autospec_context_monitor.adapters.opencode",
+    ):
+        try:
+            importlib.import_module(mod)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{mod}: {exc}")
+    return "ok" if not errors else "IMPORT_ERROR: " + "; ".join(errors)
+
+
+def _list_pids() -> list[str]:
+    """Return list of '<session>:<pid>' strings for running monitors."""
+    if not _MONITORS_DIR.exists():
+        return []
+    pids: list[str] = []
+    for pidf in _MONITORS_DIR.glob("*.pid"):
+        try:
+            pid = int(pidf.read_text().strip())
+        except (ValueError, OSError):
+            continue
+        # Check if the process is alive
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except OSError:
+            alive = False
+        session = pidf.stem
+        pids.append(f"{session}:{pid}({'alive' if alive else 'dead'})")
+    return pids
+
+
+def _recent_events(n: int = 5) -> list[str]:
+    """Return up to *n* recent log lines (newest-first) across all monitor logs."""
+    if not _MONITORS_DIR.exists():
+        return []
+    all_lines: list[tuple[float, str]] = []
+    for logf in _MONITORS_DIR.glob("*.log"):
+        try:
+            lines = logf.read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines[-50:]:  # read tail of each log
+            try:
+                rec = json.loads(line)
+                ts_str = rec.get("ts", "")
+                # convert ISO ts to float for sorting
+                try:
+                    ts = time.mktime(time.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ"))
+                except Exception:  # noqa: BLE001
+                    ts = 0.0
+                all_lines.append((ts, line))
+            except json.JSONDecodeError:
+                all_lines.append((0.0, line))
+    all_lines.sort(key=lambda x: x[0], reverse=True)
+    return [line for _, line in all_lines[:n]]
+
+
+# ---------------------------------------------------------------------------
+# Checks table
+# ---------------------------------------------------------------------------
+
+def _build_checks() -> List[Tuple[str, Callable[[], Any]]]:
+    return [
+        ("tmux", _tmux_version),
+        ("claude binary", lambda: _binary("claude")),
+        ("codex binary", lambda: _binary("codex")),
+        ("opencode binary", lambda: _binary("opencode")),
+        ("transcripts writable", _transcripts_writable),
+        ("adapters importable", _import_all_adapters),
+        ("monitor PIDs", _list_pids),
+        ("recent events", _recent_events),
+    ]
+
+
+def _safe_run(fn: Callable[[], Any]) -> Any:
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR: {exc}"
+
+
+def _is_failing(value: Any) -> bool:
+    if value is False:
+        return True
+    if isinstance(value, str) and value in ("MISSING", ""):
+        return True
+    if isinstance(value, str) and value.startswith("ERROR:"):
+        return True
+    if isinstance(value, str) and value.startswith("IMPORT_ERROR:"):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Output formatters
+# ---------------------------------------------------------------------------
+
+_GREEN = "\033[32m"
+_RED = "\033[31m"
+_RESET = "\033[0m"
+
+_NO_COLOR = not sys.stdout.isatty() or os.environ.get("NO_COLOR")
+
+
+def _color(text: str, code: str) -> str:
+    if _NO_COLOR:
+        return text
+    return f"{code}{text}{_RESET}"
+
+
+def _print_table(results: List[Tuple[str, Any]]) -> None:
+    width = max(len(name) for name, _ in results)
+    for name, value in results:
+        failing = _is_failing(value)
+        status = _color("FAIL", _RED) if failing else _color("OK  ", _GREEN)
+        if isinstance(value, list):
+            display = ", ".join(str(v) for v in value) if value else "(none)"
+        else:
+            display = str(value)
+        print(f"  [{status}] {name:<{width}}  {display}")
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the doctor checks and return an exit code."""
+    parser = argparse.ArgumentParser(
+        prog="python -m autospec_context_monitor.doctor",
+        description="Diagnostic tool for the autospec context-monitor.",
+    )
+    parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        default=False,
+        help="Emit results as a JSON array to stdout.",
+    )
+    parser.add_argument(
+        "--self-test",
+        dest="self_test",
+        action="store_true",
+        default=False,
+        help="After checks, run pytest over the adapter and engine test suites.",
+    )
+    args = parser.parse_args(argv)
+
+    checks = _build_checks()
+    results: List[Tuple[str, Any]] = [(name, _safe_run(fn)) for name, fn in checks]
+    fail = any(_is_failing(v) for _, v in results)
+
+    if args.json_output:
+        print(json.dumps([{"check": name, "result": value} for name, value in results], default=str))
+    else:
+        print("autospec-context-monitor doctor")
+        print("=" * 40)
+        _print_table(results)
+        if fail:
+            print("\nOne or more checks failed. Review above for details.")
+        else:
+            print("\nAll checks passed.")
+
+    if args.self_test:
+        import pytest  # type: ignore[import]
+        rc = pytest.main(["-q", "tests/adapters", "tests/engine"])
+        return int(rc) or (1 if fail else 0)
+
+    return 1 if fail else 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())
