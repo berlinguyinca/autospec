@@ -67,7 +67,11 @@ lowercasing, enter self-update mode and do not run a sweep:
 /autospec-sweep run
 ```
 
-- `init` creates `.autospec/autospec.yml` on first use.
+- `init` creates `.autospec/autospec.yml` on first use **and** verifies that
+  every supported harness (Claude Code, Codex CLI, OpenCode) is wired up
+  consistently — shared persistent memory at `docs/memory/`, a `Memory
+  inventory` section in `AGENTS.md`, a `CLAUDE.md` pointer if missing, and the
+  `~/.claude/projects/<slug>/memory` symlink resolving to `docs/memory/`.
 - `configure` reads current repo findings and edits the tracked config.
 - `run` executes the configured sweep and feeds resulting fixes back through
   `autospec-review`, specs, issues, and `autospec-run`.
@@ -113,6 +117,39 @@ If it is missing:
 If the config exists, read it first and treat it as the source of truth. Existing
 `.autospec/test.yml` or `.autospec/clone.yml` files are compatibility inputs only;
 do not make them the new source of truth.
+
+## Cross-harness setup verification (init mode)
+
+`init` always runs the harness-setup doctor after the wizard, regardless of
+whether `.autospec/autospec.yml` already existed. The doctor is idempotent —
+re-running it on a fully-configured repo is a fast no-op:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/verify-harness-setup.sh"
+```
+
+It ensures all three supported harnesses see the same project guidance and the
+same persistent memory:
+
+| Harness     | Entry file        | Memory source                                 |
+|-------------|-------------------|-----------------------------------------------|
+| Claude Code | `CLAUDE.md`       | `~/.claude/projects/<slug>/memory` → symlink → `docs/memory/` |
+| Codex CLI   | `AGENTS.md`       | `docs/memory/` (linked from AGENTS.md `## Memory inventory`) |
+| OpenCode    | `AGENTS.md`       | `docs/memory/` (linked from AGENTS.md `## Memory inventory`) |
+
+The doctor delegates the memory migration + AGENTS.md inventory block to
+`auto-init-memory.sh`, then verifies five invariants:
+
+1. `docs/memory/` exists and contains a `MEMORY.md` index.
+2. `~/.claude/projects/<slug>/memory` is a symlink resolving to `docs/memory/`.
+3. `AGENTS.md` exists at the repo root.
+4. `AGENTS.md` contains a `## Memory inventory` section.
+5. `CLAUDE.md` exists at the repo root — created as a one-line pointer to
+   `AGENTS.md` if missing, so Claude Code converges on the same source of truth.
+
+Run `verify-harness-setup.sh --check` (read-only) as a doctor at any time; run
+without flags to apply fixes. Exit code is non-zero only when an unfixable
+invariant fails.
 
 ## Configure mode
 
