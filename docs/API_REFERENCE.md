@@ -582,10 +582,3 @@ fixture directories in `tests/fixtures/lockstep-{trio-pass,duo-pass,duo-divergen
   reason: "Bats unit tests and fixtures for validate.sh lockstep checks"
   generated: false
 -->
-
-<!-- autospec-doc-scope:
-  src: ["tests/fleet/test_fleet_gui.bats"]
-  reason: "Bats backend tests for fleet-gui-server.py: sort order, config round-trip, missing-gh, default skeleton, flock serialization"
-  mismatch_action: warn
-  generated: false
--->
