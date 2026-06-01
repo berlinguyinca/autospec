@@ -910,6 +910,142 @@ $(get_diff_files)
 EOF
 }
 
+# ── §3.x Deterministic complexity gates ──────────────────────────────────────
+# Configurable via AUTOSPEC_MAX_FILE_LOC, AUTOSPEC_MAX_FUNC_LOC,
+# AUTOSPEC_MAX_CYCLOMATIC env vars.  Only changed files are examined.
+
+_COMPLEXITY_MAX_FILE_LOC="${AUTOSPEC_MAX_FILE_LOC:-400}"
+_COMPLEXITY_MAX_FUNC_LOC="${AUTOSPEC_MAX_FUNC_LOC:-50}"
+_COMPLEXITY_MAX_CYCLOMATIC="${AUTOSPEC_MAX_CYCLOMATIC:-10}"
+
+# check_file_loc — emit COMPLEXITY finding if a changed file exceeds max LOC.
+check_file_loc() {
+    while IFS= read -r diff_file; do
+        [ -z "$diff_file" ] && continue
+        [ -f "$diff_file" ] || continue
+        case "$diff_file" in
+            *.md|*.txt|*.json|*.yaml|*.yml|*.diff) continue ;;
+        esac
+        local loc
+        loc="$(wc -l < "$diff_file" | tr -d ' ')"
+        if [ "$loc" -gt "$_COMPLEXITY_MAX_FILE_LOC" ]; then
+            emit_capped "COMPLEXITY" "$diff_file" "-" \
+                "file is ${loc} LOC (AUTOSPEC_MAX_FILE_LOC=${_COMPLEXITY_MAX_FILE_LOC}); split into smaller modules"
+        fi
+    done <<EOF
+$(get_diff_files)
+EOF
+}
+
+# check_function_loc — emit COMPLEXITY finding for functions exceeding max LOC.
+check_function_loc() {
+    while IFS= read -r diff_file; do
+        [ -z "$diff_file" ] && continue
+        [ -f "$diff_file" ] || continue
+        case "$diff_file" in
+            *.py|*.ts|*.js|*.go|*.sh) ;;
+            *) continue ;;
+        esac
+        local func_name func_start func_loc
+        # Python: def <name>( — count lines until next def/class at same indent
+        if printf '%s' "$diff_file" | grep -qE '\.py$'; then
+            awk '
+                /^[[:space:]]*(def |class )[A-Za-z_]/ {
+                    if (func_name && NR - func_start > max_loc) {
+                        print func_name ":" func_start ":" (NR - func_start)
+                    }
+                    func_name=$2; func_start=NR
+                }
+                END {
+                    if (func_name && NR - func_start > max_loc) {
+                        print func_name ":" func_start ":" (NR - func_start)
+                    }
+                }
+            ' max_loc="$_COMPLEXITY_MAX_FUNC_LOC" "$diff_file" | while IFS=: read -r fname fstart floc; do
+                emit_capped "COMPLEXITY" "$diff_file" "$fstart" \
+                    "function '${fname}' is ${floc} LOC (AUTOSPEC_MAX_FUNC_LOC=${_COMPLEXITY_MAX_FUNC_LOC})"
+            done
+        fi
+        # Shell/bash: fname() { ... }
+        if printf '%s' "$diff_file" | grep -qE '\.(sh|bash)$'; then
+            awk '
+                /^[A-Za-z_][A-Za-z_0-9]*[[:space:]]*\(\)/ {
+                    if (func_name && NR - func_start > max_loc) {
+                        print func_name ":" func_start ":" (NR - func_start)
+                    }
+                    func_name=$1; func_start=NR
+                }
+                END {
+                    if (func_name && NR - func_start > max_loc) {
+                        print func_name ":" func_start ":" (NR - func_start)
+                    }
+                }
+            ' max_loc="$_COMPLEXITY_MAX_FUNC_LOC" "$diff_file" | while IFS=: read -r fname fstart floc; do
+                emit_capped "COMPLEXITY" "$diff_file" "$fstart" \
+                    "function '${fname}' is ${floc} LOC (AUTOSPEC_MAX_FUNC_LOC=${_COMPLEXITY_MAX_FUNC_LOC})"
+            done
+        fi
+    done <<EOF
+$(get_diff_files)
+EOF
+}
+
+# check_cyclomatic — emit COMPLEXITY finding for functions with high cyclomatic
+# complexity (keyword-count proxy: if/elif/else/for/while/case/catch/except).
+# Uses radon for Python if available; falls back to keyword count.
+check_cyclomatic() {
+    while IFS= read -r diff_file; do
+        [ -z "$diff_file" ] && continue
+        [ -f "$diff_file" ] || continue
+        case "$diff_file" in
+            *.py) ;;
+            *) continue ;;
+        esac
+        if command -v radon >/dev/null 2>&1; then
+            radon cc -s "$diff_file" 2>/dev/null | \
+            grep -E '[A-Z] ' | \
+            while read -r _ _ _ _ score rest; do
+                score_num="${score//[^0-9]/}"
+                [ -n "$score_num" ] && [ "$score_num" -gt "$_COMPLEXITY_MAX_CYCLOMATIC" ] 2>/dev/null && \
+                    emit_capped "COMPLEXITY" "$diff_file" "-" \
+                        "cyclomatic complexity ${score_num} (AUTOSPEC_MAX_CYCLOMATIC=${_COMPLEXITY_MAX_CYCLOMATIC}) — ${rest}"
+            done
+        else
+            # Keyword-count proxy: count decision points per function
+            local count
+            count="$(grep -cE '^\s+(if |elif |else:|for |while |case |except |catch )' "$diff_file" 2>/dev/null || true)"
+            if [ -n "$count" ] && [ "$count" -gt "$_COMPLEXITY_MAX_CYCLOMATIC" ] 2>/dev/null; then
+                emit_capped "COMPLEXITY" "$diff_file" "-" \
+                    "keyword-proxy cyclomatic ~${count} (AUTOSPEC_MAX_CYCLOMATIC=${_COMPLEXITY_MAX_CYCLOMATIC}); install radon for accurate analysis"
+            fi
+        fi
+    done <<EOF
+$(get_diff_files)
+EOF
+}
+
+# check_duplicate_names — emit COMPLEXITY finding for duplicate function/method
+# names across changed files (likely copy-paste duplication).
+check_duplicate_names() {
+    local changed_files
+    changed_files="$(get_diff_files | grep -E '\.(py|ts|js|go|sh)$' | tr '\n' ' ')"
+    [ -z "$changed_files" ] && return 0
+    # shellcheck disable=SC2086
+    local dupes
+    dupes="$(grep -hE '^[[:space:]]*(def |function |func )[A-Za-z_][A-Za-z_0-9]*' $changed_files 2>/dev/null \
+        | sed 's/^[[:space:]]*//' \
+        | grep -oE '(def |function |func )[A-Za-z_][A-Za-z_0-9]*' \
+        | awk '{print $2}' \
+        | sort | uniq -d)" || true
+    if [ -n "$dupes" ]; then
+        echo "$dupes" | while IFS= read -r dupe_name; do
+            [ -z "$dupe_name" ] && continue
+            emit_capped "COMPLEXITY" "-" "-" \
+                "duplicate function name '${dupe_name}' across changed files — reuse or rename to avoid confusion"
+        done
+    fi
+}
+
 # ── directives output mode ────────────────────────────────────────────────────
 # Maps each RULE_ID to a short imperative directive line.
 
@@ -949,6 +1085,10 @@ if [ "$DIRECTIVES" -eq 1 ]; then
         detect_out_of_scope
         detect_missing_test
         detect_complexity
+        check_file_loc
+        check_function_loc
+        check_cyclomatic
+        check_duplicate_names
         detect_security
         detect_todo_left
         detect_mock_db
@@ -976,6 +1116,10 @@ else
     detect_out_of_scope
     detect_missing_test
     detect_complexity
+    check_file_loc
+    check_function_loc
+    check_cyclomatic
+    check_duplicate_names
     detect_security
     detect_todo_left
     detect_mock_db
