@@ -86,6 +86,7 @@ Runs `bash skills/autospec-rollover-status/show.sh` and presents the output.
 |------------------------|-------------|-------------|-------------|----------------------------------|
 | Run shell command       | `Bash`      | `bash` tool | `shell`     | Ask user to run manually         |
 | Subagent model tier    | Tier A: `haiku` — read-only, no reasoning | Tier A: smallest tier | Tier A | inline |
+| Subagent dispatch policy | per AGENTS.md decision matrix        | per AGENTS.md decision matrix            | per AGENTS.md decision matrix            | inline with main-session token cost                |
 
 **Model tier:** Tier A (haiku) — pure log read, no judgment needed.
 
