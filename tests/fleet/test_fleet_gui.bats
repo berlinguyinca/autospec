@@ -221,8 +221,19 @@ assert cfg.get('version') == 1
 # Test 3: missing gh — exit 1 + code_health:fleet_gui_missing_gh on stderr
 # ---------------------------------------------------------------------------
 @test "missing gh emits code_health:fleet_gui_missing_gh on stderr and exits 1" {
-    # Strip all directories that might contain gh from PATH, then run fleet-gui.sh
-    run bash -c "PATH=/usr/bin:/bin bash '$GUI_SH' --no-browser --print-url --once 2>&1"
+    # Place a `gh` stub that is NOT executable (mode 000) so `command -v gh`
+    # finds the file but cannot execute it — but actually the simplest and most
+    # portable approach is a PATH that genuinely has no `gh` binary.
+    # We build a minimal PATH: a single temp dir with python3 + bash symlinked in
+    # but no gh, so `command -v gh` reliably fails on any system.
+    local bin_dir
+    bin_dir="$(mktemp -d -t no-gh-bin.XXXXXX)"
+    ln -s "$(command -v python3)" "$bin_dir/python3" 2>/dev/null || true
+    ln -s "$(command -v bash)"    "$bin_dir/bash"    2>/dev/null || true
+    # Deliberately do NOT place gh in bin_dir.
+
+    run bash -c "PATH='$bin_dir' bash '$GUI_SH' --no-browser --print-url --once 2>&1"
+    rm -rf "$bin_dir"
 
     # Must exit non-zero
     [ "$status" -ne 0 ]
@@ -291,14 +302,31 @@ EOF
     body_a='{"version":1,"workspace":".autospec-fleet/repos","default_profile":"profile-a","parallel_repos":1,"repos":[{"url":"https://github.com/org/repo-a","enabled":true}]}'
     body_b='{"version":1,"workspace":".autospec-fleet/repos","default_profile":"profile-b","parallel_repos":3,"repos":[{"url":"https://github.com/org/repo-b","enabled":true}]}'
 
-    # Fire both POSTs concurrently; capture both HTTP responses
-    local resp_a resp_b
-    resp_a="$(api_post "$port" "/api/config" "$body_a")" &
+    # Fire both POSTs concurrently; write responses to files (subshell output
+    # capture via variable assignment runs in a subshell and cannot propagate
+    # back to the parent shell, so we use temp files instead).
+    local resp_file_a resp_file_b
+    resp_file_a="$TMP/resp_a.json"
+    resp_file_b="$TMP/resp_b.json"
+    api_post "$port" "/api/config" "$body_a" > "$resp_file_a" &
     local pid_a=$!
-    resp_b="$(api_post "$port" "/api/config" "$body_b")" &
+    api_post "$port" "/api/config" "$body_b" > "$resp_file_b" &
     local pid_b=$!
     wait "$pid_a"
     wait "$pid_b"
+
+    # At least one POST must have returned saved:true
+    python3 -c "
+import json, os
+for f in ('$resp_file_a', '$resp_file_b'):
+    if os.path.exists(f) and os.path.getsize(f) > 0:
+        d = json.loads(open(f).read())
+        if d.get('saved'):
+            print('at least one POST succeeded:', f)
+            break
+else:
+    raise AssertionError('no POST returned saved:true')
+"
 
     # Server does a 1-second post-save shutdown; give it time to settle
     sleep 2
