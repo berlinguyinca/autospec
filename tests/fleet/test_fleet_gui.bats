@@ -76,6 +76,7 @@ teardown() {
 }
 
 # start_server <port>: start the fleet-gui-server in background, sets GUI_PID
+# Honors an exported PYTHONPATH (used by the no-PyYAML test to shim out yaml).
 start_server() {
     local port="$1"
     IDLE_SECS="${IDLE_SECS:-3600}"
@@ -354,4 +355,81 @@ for k in ('version', 'workspace', 'default_profile', 'parallel_repos', 'repos'):
 assert isinstance(cfg['repos'], list)
 print('OK — profile:', profile)
 " "$config_file"
+}
+
+# ---------------------------------------------------------------------------
+# Test 6: no-PyYAML fallback must NOT destroy unmanaged keys on save (#836)
+#
+# The spec's autonomous assumption is "Python 3 stdlib only — no pip packages",
+# so PyYAML may be absent at runtime. When it is, load_yaml_config must still
+# parse a real YAML file (not fall through to json.load and silently return {}),
+# otherwise _merge_config drops every unmanaged on-disk key during a save.
+#
+# This test forces `import yaml` to fail (a PYTHONPATH shim raising ImportError),
+# seeds a real YAML config carrying an unmanaged key, POSTs a managed-only
+# update, and asserts the unmanaged key survives the save round-trip. It FAILS
+# against the buggy json-fallback implementation and PASSES once load/dump are
+# stdlib-correct without PyYAML.
+# ---------------------------------------------------------------------------
+@test "no-PyYAML fallback preserves unmanaged keys on save (#836)" {
+    local port
+    port="$(pick_free_port)"
+
+    # Shim that makes `import yaml` raise ImportError inside the server process.
+    local YAMLSTUB="$TMP/yamlstub"
+    mkdir -p "$YAMLSTUB"
+    cat > "$YAMLSTUB/yaml.py" <<'EOF'
+raise ImportError("PyYAML forced unavailable for test")
+EOF
+
+    # Stub gh so the server starts cleanly.
+    local BIN="$TMP/bin"
+    mkdir -p "$BIN"
+    cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[]'
+EOF
+    chmod +x "$BIN/gh"
+
+    # Seed a REAL YAML config on disk with managed + unmanaged keys.
+    # experimental_thing is unmanaged and must survive the save.
+    local config_file="$TMP/autospec-fleet.yml"
+    cat > "$config_file" <<'EOF'
+version: 1
+workspace: .autospec-fleet/repos
+default_profile: qwen3-32b-laptop
+parallel_repos: 2
+repos:
+  - url: https://github.com/org/seeded-repo
+    enabled: true
+experimental_thing: 42
+EOF
+
+    # Start the server with yaml shimmed out — its `import yaml` must fail.
+    PYTHONPATH="$YAMLSTUB" PATH="$BIN:$PATH" start_server "$port"
+
+    # POST an update touching only managed keys (no experimental_thing).
+    local post_body
+    post_body='{"version":1,"workspace":".autospec-fleet/repos","default_profile":"changed-profile","parallel_repos":4,"repos":[]}'
+
+    local post_resp
+    post_resp="$(api_post "$port" "/api/config" "$post_body")"
+
+    python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+assert d.get('saved') == True, f'expected saved=true, got: {d}'
+" "$post_resp"
+
+    # Wait out the post-save shutdown timer.
+    sleep 1.5
+    GUI_PID=""
+
+    [ -f "$config_file" ]
+
+    # Verify WITHOUT PyYAML (raw text scan): the unmanaged key must still be on
+    # disk, and the managed update must have applied. A bug that returns {} on
+    # load would have dropped experimental_thing entirely.
+    grep -Eq '^experimental_thing:[[:space:]]*42$' "$config_file"
+    grep -Eq '^default_profile:[[:space:]]*changed-profile$' "$config_file"
 }
