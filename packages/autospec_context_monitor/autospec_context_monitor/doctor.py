@@ -41,12 +41,39 @@ def _binary(name: str) -> str:
     return shutil.which(name) or "MISSING"
 
 
-def _transcripts_writable() -> bool:
-    path = _TRANSCRIPTS_DIR
-    if path.exists():
-        return os.access(path, os.W_OK)
-    # parent must be writable so it can be created
-    return os.access(path.parent, os.W_OK)
+_ADAPTER_MODULES = [
+    "autospec_context_monitor.adapters.claude",
+    "autospec_context_monitor.adapters.codex",
+    "autospec_context_monitor.adapters.opencode",
+]
+
+
+def _transcripts_writable() -> list[str]:
+    """Return per-adapter transcript path write-access status.
+
+    Iterates each adapter's ``PATHS_TO_CHECK`` list and checks whether the
+    path (or its parent, when the path itself does not yet exist) is writable.
+    Each entry is labelled with the short adapter name so operators can
+    immediately identify which harness has a misconfigured transcript directory.
+
+    Adapters without a ``PATHS_TO_CHECK`` attribute are skipped gracefully.
+    """
+    results: list[str] = []
+    for mod_name in _ADAPTER_MODULES:
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception as exc:  # noqa: BLE001
+            results.append(f"{mod_name}: IMPORT_ERROR({exc})")
+            continue
+        paths: list[Path] = getattr(mod, "PATHS_TO_CHECK", [])
+        # Short adapter label, e.g. "claude", "codex", "opencode".
+        label = mod_name.split(".")[-1]
+        for path in paths:
+            check_target = path if path.exists() else path.parent
+            writable = os.access(check_target, os.W_OK)
+            status = "writable" if writable else "NOT_WRITABLE"
+            results.append(f"{label}:{path}:{status}")
+    return results
 
 
 def _import_all_adapters() -> str:
@@ -145,6 +172,11 @@ def _is_failing(value: Any) -> bool:
         return True
     if isinstance(value, str) and value.startswith("IMPORT_ERROR:"):
         return True
+    if isinstance(value, list):
+        return any(
+            isinstance(item, str) and ("NOT_WRITABLE" in item or "IMPORT_ERROR" in item)
+            for item in value
+        )
     return False
 
 
