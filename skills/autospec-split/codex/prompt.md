@@ -427,6 +427,43 @@ labels and patches each body with a `## Model fit` block.
 >    ```
 
 
+## Phase 3.75 — Architectural alignment (delegate)
+
+After Phase 3.5 has applied `ctx:*` / `reasoning:*` labels and before the
+pre-impl gate, run a Tier-A (opus) subagent that reads all child issue bodies
+plus the source spec and produces a `Shared contracts` summary. This prevents
+each child issue from inventing incompatible type signatures, file-layout
+conventions, and naming schemes — integration mismatches that are caught only
+in Phase 5.5.
+
+The subagent must:
+
+1. Read the source spec and all child issue bodies (skip the umbrella/tracker).
+2. Extract all public interfaces, function signatures, data types, file paths,
+   and naming conventions mentioned across the issues.
+3. Produce a `## Shared contracts` summary as a markdown block with:
+   - Type signatures / data structures used across ≥2 issues.
+   - File-layout constraints (which file owns what).
+   - Naming conventions (e.g. class names, env var prefixes).
+4. Patch each child issue body by appending:
+
+```
+<!-- autospec-shared-contracts:begin -->
+## Shared contracts
+
+<summary block from step 3>
+<!-- autospec-shared-contracts:end -->
+```
+
+   using `gh issue edit <N> --body "$(gh issue view <N> --json body -q .body)<newblock>"`.
+   The patch is idempotent — skip if `<!-- autospec-shared-contracts:begin -->` is already
+   present in the body.
+
+If there are fewer than 2 child issues, or all child issues are in the same
+file (no cross-issue interface), skip Phase 3.75 and log:
+`"Phase 3.75: skipped (single-file scope)"`
+
+
 ## Phase 3 pre-impl gate
 
 After Phase 3 decomposition completes (and Phase 3.5 review-and-label has
