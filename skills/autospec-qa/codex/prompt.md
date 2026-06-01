@@ -1071,6 +1071,53 @@ continue. End-to-end regression: after the QA-filed rewrite issues run
 through `/autospec-run`, the offending files no longer trip either
 RULE_ID in the PR-time guardian.
 
+## Bug-class sibling sweep (issue #737)
+
+When `.autospec/qa-verdict.json` carries a `release_blocking: true`
+finding whose `category` ends in `:bug` (or otherwise matches a
+fingerprintable shape), run `scripts/qa-bug-class-sweep.sh` to fan out
+across the repo for sibling instances of the same pattern class. Goal:
+consistency by construction — the implementer fixes every matching
+instance in **one PR**, not N PRs.
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/qa-bug-class-sweep.sh" \
+    --verdict .autospec/qa-verdict.json --repo-dir .
+```
+
+The sweep:
+
+1. Computes a deterministic **pattern fingerprint** over the offending
+   line + ±5 context lines (literal-stripped: strings → `""`, numbers →
+   `N`). The fingerprint and its sha256 (`pattern_fingerprint`,
+   `fingerprint_hash`) are stored on the PARENT finding **at
+   finding-time**, not recomputed — this gives pattern drift safety so
+   siblings remain resolvable even after the parent line is rewritten.
+2. Runs `git grep -nE <fingerprint>` over the repo, excluding
+   `node_modules/`, `.git/`, and `vendor/`, plus the parent's own
+   `file:line`.
+3. For each match, computes a **confidence** score
+   `(presence + density_bonus) * specificity` where specificity scales
+   with fingerprint length (longer anchors → higher confidence). Matches
+   with `confidence >= AUTOSPEC_QA_BUG_CLASS_MIN_CONFIDENCE` (default
+   `0.7`) are appended to `findings[]` with
+   `category: code_health:bug_class_sibling`, `parent_fingerprint`,
+   `confidence`, `file`, `line`. Below-threshold matches land in
+   `.autospec/qa-bug-class-flagged.json` (operator review surface, NOT
+   filed as issues).
+4. Applies the verify-first filter
+   (`scripts/qa-verify-finding.sh --category missing_function`) to every
+   candidate sibling. If the bug is already fixed at HEAD for an
+   instance, that sibling is dropped silently.
+5. All verdict mutations are atomic (`.tmp` + `mv`) so partial runs
+   cannot corrupt the verdict.
+
+Per-class issue filing: `scripts/qa-heal-loop.sh` groups findings by
+`parent_fingerprint` when present and files **one `auto-implement` issue
+per pattern class** carrying every instance's `file:line`. Findings
+without a fingerprint stay per-finding as before. This is the key
+contract that turns bug-class detection into a single coordinated fix.
+
 ## Verify-first discipline
 
 Before any cluster emits a finding to `.autospec/qa-verdict.json`, the cluster

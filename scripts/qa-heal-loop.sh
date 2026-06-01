@@ -308,14 +308,51 @@ while [ "$ROUND" -lt "$MAX_ROUNDS" ]; do
         fi
     fi
 
-    # File issues for each release_blocking finding.
+    # File issues for each release_blocking finding. Bug-class sibling
+    # sweep (issue #737): when findings carry a `parent_fingerprint`,
+    # group them so the heal loop files ONE auto-implement issue per
+    # pattern class — implementer fixes every matching instance in a
+    # single PR. Findings without parent_fingerprint stay per-finding.
     FILED=0
+    # Group 1: per-class (one issue per parent_fingerprint).
+    while IFS= read -r class_hash; do
+        [ -n "$class_hash" ] || continue
+        class_finding=$(jq -c --arg fp "$class_hash" '
+            (.findings // [])
+            | map(select(.release_blocking == true))
+            | map(select((.parent_fingerprint // "") == $fp
+                         or (.fingerprint_hash // "") == $fp))
+            | {
+                category: "code_health:bug_class_sibling",
+                release_blocking: true,
+                parent_fingerprint: $fp,
+                instances: map({file: .file, line: .line, confidence: (.confidence // 1.0)}),
+                summary: ("bug-class sibling sweep: " + (length | tostring) + " instances of pattern " + $fp[0:12])
+              }
+        ' "$VERDICT" 2>/dev/null)
+        [ -n "$class_finding" ] || continue
+        if bash "$(dirname "$0")/qa-finding-to-issue.sh" --finding "$class_finding" >/dev/null 2>&1; then
+            FILED=$((FILED + 1))
+        fi
+    done < <(jq -r '
+        (.findings // [])
+        | map(select(.release_blocking == true))
+        | map(.parent_fingerprint // .fingerprint_hash // empty)
+        | map(select(. != ""))
+        | unique
+        | .[]
+    ' "$VERDICT" 2>/dev/null)
+    # Group 2: ungrouped findings (no fingerprint) — per-finding as before.
     while IFS= read -r finding; do
         [ -n "$finding" ] || continue
         if bash "$(dirname "$0")/qa-finding-to-issue.sh" --finding "$finding" >/dev/null 2>&1; then
             FILED=$((FILED + 1))
         fi
-    done < <(jq -c '(.findings // [])[] | select(.release_blocking == true)' "$VERDICT" 2>/dev/null)
+    done < <(jq -c '
+        (.findings // [])[]
+        | select(.release_blocking == true)
+        | select((.parent_fingerprint // "") == "" and (.fingerprint_hash // "") == "")
+    ' "$VERDICT" 2>/dev/null)
 
     # Drain via /autospec-run.
     MERGED=$(run_autospec_drain "$ROUND")
