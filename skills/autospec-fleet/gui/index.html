@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>autospec-fleet</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #1a1a1a;
+      --surface: #242424;
+      --border: #3a3a3a;
+      --text: #e0e0e0;
+      --text-dim: #888;
+      --accent: #4a9eff;
+      --badge-public: #2ea043;
+      --badge-private: #6e40c9;
+      --badge-internal: #c28b00;
+      --focus-ring: 0 0 0 2px #4a9eff;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f6f8fa;
+        --surface: #ffffff;
+        --border: #d0d7de;
+        --text: #1f2328;
+        --text-dim: #57606a;
+        --accent: #0969da;
+        --badge-public: #1a7f37;
+        --badge-private: #6639ba;
+        --badge-internal: #9a6700;
+      }
+    }
+
+    body { font-family: system-ui, -apple-system, sans-serif; font-size: 14px;
+           background: var(--bg); color: var(--text); height: 100vh;
+           display: flex; flex-direction: column; }
+
+    header { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+             background: var(--surface); border-bottom: 1px solid var(--border);
+             flex-shrink: 0; }
+    header h1 { font-size: 16px; font-weight: 600; }
+    #workspace-path { font-size: 12px; color: var(--text-dim); flex: 1;
+                      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #save-btn { padding: 6px 14px; background: var(--accent); color: #fff;
+                border: none; border-radius: 6px; cursor: pointer;
+                font-size: 13px; font-weight: 500; flex-shrink: 0; }
+    #save-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+    #save-btn:hover { opacity: 0.85; }
+
+    .grid { display: grid; grid-template-columns: 35% 65%; flex: 1; overflow: hidden; }
+
+    section { padding: 16px; overflow-y: auto; }
+    section + section { border-left: 1px solid var(--border); }
+
+    h2 { font-size: 13px; font-weight: 600; margin-bottom: 12px;
+         text-transform: uppercase; letter-spacing: .5px; color: var(--text-dim); }
+
+    label.field-label { display: block; font-size: 12px; font-weight: 500;
+                        margin-bottom: 4px; color: var(--text-dim); }
+    input[type="text"], input[type="number"] {
+      width: 100%; padding: 6px 8px; background: var(--bg);
+      border: 1px solid var(--border); border-radius: 4px; color: var(--text);
+      font-size: 13px; }
+    input[type="text"]:focus, input[type="number"]:focus {
+      outline: none; box-shadow: var(--focus-ring); }
+    .field { margin-bottom: 14px; }
+
+    #filter-box { width: 100%; padding: 6px 8px; margin-bottom: 8px;
+                  background: var(--bg); border: 1px solid var(--border);
+                  border-radius: 4px; color: var(--text); font-size: 13px; }
+    #filter-box:focus { outline: none; box-shadow: var(--focus-ring); }
+
+    .repo-controls { display: flex; gap: 12px; margin-bottom: 8px; font-size: 12px; }
+    .repo-controls a { color: var(--accent); cursor: pointer; text-decoration: none; }
+    .repo-controls a:hover { text-decoration: underline; }
+    .repo-controls a:focus-visible { outline: none; box-shadow: var(--focus-ring);
+                                      border-radius: 2px; }
+
+    #repo-list { display: flex; flex-direction: column; gap: 2px; }
+
+    label.repo-row {
+      display: flex; align-items: flex-start; gap: 10px; padding: 6px 8px;
+      border-radius: 4px; cursor: pointer; }
+    label.repo-row:hover { background: var(--surface); }
+    label.repo-row:focus-within { outline: none; box-shadow: var(--focus-ring);
+                                   border-radius: 4px; }
+    label.repo-row input[type="checkbox"] { margin-top: 2px; flex-shrink: 0;
+                                             cursor: pointer; }
+    label.repo-row input[type="checkbox"]:focus-visible {
+      outline: none; box-shadow: var(--focus-ring); }
+
+    .repo-info { flex: 1; min-width: 0; }
+    .repo-name { font-weight: 500; white-space: nowrap; overflow: hidden;
+                 text-overflow: ellipsis; }
+    .repo-meta { display: flex; align-items: center; gap: 6px; margin-top: 2px;
+                 font-size: 11px; color: var(--text-dim); }
+    .badge { padding: 1px 5px; border-radius: 10px; font-size: 10px;
+             font-weight: 600; text-transform: uppercase; color: #fff; }
+    .badge-PUBLIC  { background: var(--badge-public); }
+    .badge-PRIVATE { background: var(--badge-private); }
+    .badge-INTERNAL { background: var(--badge-internal); }
+    .repo-desc { margin-top: 2px; font-size: 11px; color: var(--text-dim);
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    #banner { display: none; padding: 10px 16px; background: var(--badge-public);
+              color: #fff; font-weight: 500; text-align: center; }
+    #error-banner { display: none; padding: 10px 16px; background: #c02020;
+                    color: #fff; font-size: 13px; text-align: center; }
+  </style>
+</head>
+<body>
+
+<div id="error-banner"></div>
+<div id="banner">Saved — server stopped</div>
+
+<header>
+  <h1>autospec-fleet</h1>
+  <span id="workspace-path"></span>
+  <button id="save-btn" type="button">Save (Cmd+S)</button>
+</header>
+
+<div class="grid">
+  <section id="config-section" aria-label="Fleet configuration">
+    <h2>Configuration</h2>
+    <div class="field">
+      <label class="field-label" for="cfg-workspace">Workspace</label>
+      <input type="text" id="cfg-workspace" name="workspace">
+    </div>
+    <div class="field">
+      <label class="field-label" for="cfg-profile">Default profile</label>
+      <input type="text" id="cfg-profile" name="default_profile">
+    </div>
+    <div class="field">
+      <label class="field-label" for="cfg-parallel">Parallel repos</label>
+      <input type="number" id="cfg-parallel" name="parallel_repos" min="1" max="32">
+    </div>
+  </section>
+
+  <section id="repos-section" aria-label="Repository picker">
+    <h2>Repositories</h2>
+    <input type="search" id="filter-box" aria-label="Filter repos by name"
+           placeholder="Filter repos by name…" autocomplete="off">
+    <div class="repo-controls">
+      <a id="select-all" role="button" tabindex="0">Select all visible</a>
+      <a id="clear-all"  role="button" tabindex="0">Clear all</a>
+    </div>
+    <div id="repo-list" role="list"></div>
+  </section>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── Token ─────────────────────────────────────────────────────────────────
+  const qs = new URLSearchParams(location.search);
+  const token = qs.get('t') || localStorage.getItem('autospecGuiToken') || '';
+  if (token) localStorage.setItem('autospecGuiToken', token);
+
+  const headers = { 'X-Autospec-Token': token };
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  let allRepos = [];   // raw from /api/repos
+  let enabledUrls = new Set();   // currently checked repo URLs
+  let extraConfig = {};   // unmanaged keys to round-trip
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  function relativeTime(iso) {
+    if (!iso) return '';
+    const diff = Date.now() - new Date(iso).getTime();
+    const d = Math.floor(diff / 86400000);
+    if (d === 0) return 'today';
+    if (d === 1) return 'yesterday';
+    if (d < 30) return d + 'd ago';
+    const m = Math.floor(d / 30);
+    if (m < 12) return m + 'mo ago';
+    return Math.floor(m / 12) + 'yr ago';
+  }
+
+  function showError(msg) {
+    const b = document.getElementById('error-banner');
+    b.textContent = msg;
+    b.style.display = 'block';
+  }
+
+  // ── Render repos ──────────────────────────────────────────────────────────
+  function renderRepos(query) {
+    const list = document.getElementById('repo-list');
+    list.innerHTML = '';
+    const q = (query || '').toLowerCase();
+    const filtered = allRepos.filter(r =>
+      !q || r.nameWithOwner.toLowerCase().includes(q)
+    );
+    filtered.forEach((repo, i) => {
+      const id = 'repo-' + i;
+      const checked = enabledUrls.has(repo.url);
+
+      const label = document.createElement('label');
+      label.className = 'repo-row';
+      label.setAttribute('for', id);
+      label.setAttribute('role', 'listitem');
+
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.id = id;
+      cb.checked = checked;
+      cb.dataset.url = repo.url;
+      cb.addEventListener('change', () => {
+        if (cb.checked) enabledUrls.add(repo.url);
+        else enabledUrls.delete(repo.url);
+      });
+
+      const info = document.createElement('div');
+      info.className = 'repo-info';
+
+      const name = document.createElement('div');
+      name.className = 'repo-name';
+      name.textContent = repo.nameWithOwner;
+
+      const meta = document.createElement('div');
+      meta.className = 'repo-meta';
+
+      const badge = document.createElement('span');
+      badge.className = 'badge badge-' + (repo.visibility || 'PUBLIC');
+      badge.textContent = (repo.visibility || 'PUBLIC').toLowerCase();
+
+      const when = document.createElement('span');
+      when.textContent = relativeTime(repo.pushedAt);
+
+      meta.appendChild(badge);
+      meta.appendChild(when);
+
+      const desc = document.createElement('div');
+      desc.className = 'repo-desc';
+      desc.textContent = repo.description || '';
+
+      info.appendChild(name);
+      info.appendChild(meta);
+      if (repo.description) info.appendChild(desc);
+
+      label.appendChild(cb);
+      label.appendChild(info);
+      list.appendChild(label);
+    });
+    return filtered;
+  }
+
+  // ── Filter ─────────────────────────────────────────────────────────────────
+  let lastFiltered = [];
+  document.getElementById('filter-box').addEventListener('input', function () {
+    lastFiltered = renderRepos(this.value);
+  });
+
+  // ── Select all / clear all ─────────────────────────────────────────────────
+  function toggleVisible(checked) {
+    const boxes = document.querySelectorAll('#repo-list input[type="checkbox"]');
+    boxes.forEach(cb => {
+      cb.checked = checked;
+      if (checked) enabledUrls.add(cb.dataset.url);
+      else enabledUrls.delete(cb.dataset.url);
+    });
+  }
+
+  const selectAll = document.getElementById('select-all');
+  const clearAll  = document.getElementById('clear-all');
+
+  selectAll.addEventListener('click', () => toggleVisible(true));
+  clearAll.addEventListener('click',  () => toggleVisible(false));
+
+  function activateOnEnter(el, fn) {
+    el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } });
+  }
+  activateOnEnter(selectAll, () => toggleVisible(true));
+  activateOnEnter(clearAll,  () => toggleVisible(false));
+
+  // ── Save ───────────────────────────────────────────────────────────────────
+  async function save() {
+    const repos = allRepos
+      .filter(r => enabledUrls.has(r.url))
+      .map(r => ({ url: r.url, enabled: true }));
+
+    const payload = Object.assign({}, extraConfig, {
+      version:         1,
+      workspace:       document.getElementById('cfg-workspace').value,
+      default_profile: document.getElementById('cfg-profile').value,
+      parallel_repos:  parseInt(document.getElementById('cfg-parallel').value, 10) || 2,
+      repos:           repos,
+    });
+
+    try {
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, headers),
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'unknown' }));
+        showError('Save failed: ' + (err.error || res.status));
+        return;
+      }
+      try { window.close(); } catch (_) { /* best-effort */ }
+      document.getElementById('banner').style.display = 'block';
+    } catch (e) {
+      showError('Save failed: ' + e.message);
+    }
+  }
+
+  document.getElementById('save-btn').addEventListener('click', save);
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+      e.preventDefault();
+      save();
+    }
+  });
+
+  // ── Load ───────────────────────────────────────────────────────────────────
+  async function load() {
+    let repos = [];
+    let config = {};
+
+    try {
+      const [reposRes, configRes] = await Promise.all([
+        fetch('/api/repos', { headers }),
+        fetch('/api/config', { headers }),
+      ]);
+
+      if (reposRes.ok) {
+        const data = await reposRes.json();
+        if (Array.isArray(data)) {
+          repos = data;
+        } else if (data.error === 'gh_not_authenticated') {
+          showError('GitHub not authenticated — ' + (data.hint || 'run: gh auth login'));
+        }
+      }
+
+      if (configRes.ok) {
+        const body = await configRes.json();
+        config = body.config || {};
+        // Preserve any unmanaged keys for round-trip
+        const managed = new Set(['version','workspace','default_profile','parallel_repos','repos']);
+        extraConfig = {};
+        Object.keys(config).forEach(k => { if (!managed.has(k)) extraConfig[k] = config[k]; });
+      }
+    } catch (e) {
+      showError('Failed to load data: ' + e.message);
+    }
+
+    // Populate config form
+    document.getElementById('cfg-workspace').value  = config.workspace       || '.autospec-fleet/repos';
+    document.getElementById('cfg-profile').value    = config.default_profile || '';
+    document.getElementById('cfg-parallel').value   = config.parallel_repos  || 2;
+    document.getElementById('workspace-path').textContent = config.workspace || '.autospec-fleet/repos';
+
+    // Build enabled set from config
+    const cfgRepos = config.repos || [];
+    enabledUrls = new Set(
+      cfgRepos.filter(r => r.enabled !== false).map(r => r.url).filter(Boolean)
+    );
+
+    allRepos = repos;
+    lastFiltered = renderRepos('');
+  }
+
+  load();
+})();
+</script>
+</body>
+</html>
