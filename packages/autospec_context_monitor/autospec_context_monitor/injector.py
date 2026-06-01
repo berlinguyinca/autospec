@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 
 class SessionGone(RuntimeError):
@@ -84,6 +85,61 @@ def inject(session: str, text: str, *, submit: bool = True) -> None:
                 check=True,
                 timeout=5,
             )
+
+
+def wait_for_cancel(tmux_session: str, timeout: int = 10) -> bool:
+    """Show a countdown overlay and return ``True`` if the user pressed Esc.
+
+    Binds ``Escape`` in the tmux root key-table to ``touch``-create a sentinel
+    file at ``~/.autospec/monitors/<tmux_session>.cancel``.  Polls every second
+    for up to *timeout* seconds, refreshing a ``tmux display-message`` countdown
+    each tick.  Always unbinds the key and removes the sentinel in a ``finally``
+    block, regardless of how the function exits.
+
+    Args:
+        tmux_session: Name of the tmux session to target.
+        timeout:      Number of seconds to count down (default 10).
+
+    Returns:
+        ``True`` if the sentinel file was created (user pressed Esc),
+        ``False`` if the countdown expired without cancellation.
+    """
+    monitors_dir = Path.home() / ".autospec" / "monitors"
+    monitors_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = monitors_dir / f"{tmux_session}.cancel"
+    sentinel.unlink(missing_ok=True)
+
+    # Bind Escape to touch the sentinel file.
+    subprocess.run(
+        [
+            "tmux", "bind-key", "-T", "root", "Escape",
+            "run-shell", f"touch {sentinel}",
+        ],
+        check=False,
+    )
+
+    canceled = False
+    try:
+        for remaining in range(timeout, 0, -1):
+            subprocess.run(
+                [
+                    "tmux", "display-message", "-d", "1000",
+                    f"autospec: rolling in {remaining}s — Esc to cancel",
+                ],
+                check=False,
+            )
+            time.sleep(1)
+            if sentinel.exists():
+                canceled = True
+                break
+    finally:
+        subprocess.run(
+            ["tmux", "unbind-key", "-T", "root", "Escape"],
+            check=False,
+        )
+        sentinel.unlink(missing_ok=True)
+
+    return canceled
 
 
 def notify_failure(message: str) -> None:
