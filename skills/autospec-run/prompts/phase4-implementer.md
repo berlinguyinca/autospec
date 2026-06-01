@@ -221,6 +221,48 @@ if [ -f .autospec/explore-mode.json ] && [ "$PR_BASE" = "main" ]; then
 fi
 ```
 
+## Smoke test gate
+
+After all unit/integration tests pass and before opening the PR, run the
+**Primary smoke test** command from the issue body. This must be an executable
+shell command (single fenced block), not prose. If the issue body does not
+contain an executable smoke command (e.g. it is multi-line prose with no
+runnable command), treat it as a missing AC and comment on the issue:
+
+```bash
+gh issue comment <ISSUE> --body "Smoke test section is not executable — cannot merge without a runnable smoke command. Needs operator update."
+exit 1
+```
+
+Extract and run the smoke command:
+
+```bash
+# Extract the first shell command from the Primary smoke test section.
+smoke_cmd=$(gh issue view <ISSUE> --json body --jq '.body' \
+    | awk '/### Primary smoke test/{found=1} found && /^```/{if(++fence==1){next} if(fence==2){exit}} found && fence==1{print}' \
+    | head -5)
+
+if [ -z "$smoke_cmd" ]; then
+    gh issue comment <ISSUE> --body "No executable smoke command found in issue body — aborting merge."
+    exit 1
+fi
+
+# smoke_test_passes: run the smoke command in the worktree.
+if ! eval "$smoke_cmd"; then
+    gh issue comment <ISSUE> --body "Smoke test FAILED (command: \`$smoke_cmd\`). Not merging until smoke passes."
+    exit 1
+fi
+```
+
+If smoke passes, proceed. If smoke fails, do NOT open the PR — comment on the
+issue with the failure output and exit. Operators must fix the smoke command or
+the implementation before re-running.
+
+> **Decomposer constraint:** Issue bodies filed by `/autospec-split` or
+> `/autospec-define` must include a `### Primary smoke test (inner loop)`
+> section whose code fence contains a single runnable shell command. Multi-line
+> prose without a runnable command is rejected by this gate.
+
 ## Rebase-and-retest gate
 
 Immediately before `gh pr merge --admin --squash --delete-branch`, run the
