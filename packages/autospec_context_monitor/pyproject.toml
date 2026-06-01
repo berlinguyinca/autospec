@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autospec-context-monitor"
+version = "0.1.0"
+description = "Context-window monitor daemon for the autospec multi-harness workflow suite"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/berlinguyinca/autospec"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["autospec_context_monitor*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
