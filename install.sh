@@ -67,6 +67,7 @@ SKILL_ARG="all"
 HARNESS_ARG="all"
 UPDATE=0
 DRY_RUN=0
+DISABLE_AUTO_ROLLOVER=0
 
 err()  { printf 'error: %s\n' "$*" >&2; }
 warn() { printf 'warn:  %s\n' "$*" >&2; }
@@ -454,6 +455,121 @@ maybe_prompt_star() {
     esac
 }
 
+_ROLLOVER_MARKER_START="# >>> autospec auto-rollover >>>"
+_ROLLOVER_MARKER_END="# <<< autospec auto-rollover <<<"
+
+prompt_user_for_auto_rollover() {
+    # Skip prompt during updates, CI, dry-run, or explicit disable.
+    [ "$UPDATE" -eq 0 ] || return 0
+    [ "$DRY_RUN" -eq 0 ] || return 0
+    [ "$DISABLE_AUTO_ROLLOVER" -eq 0 ] || return 0
+    [ "${CI:-}" = "" ] || return 0
+
+    info ""
+    info "autospec auto-context-rollover"
+    info "  Wraps the claude/codex/opencode commands so that autospec-session"
+    info "  monitors context usage and compacts/hands-off automatically."
+    info "  A guard block is added to ~/.bashrc, ~/.zshrc, and fish config."
+    info "  You can remove it anytime with:  bash install.sh --disable-auto-rollover"
+    info ""
+
+    answer=""
+    if { exec 3<>/dev/tty; } 2>/dev/null; then
+        printf '  Enable auto-context-rollover? [y/N] ' >&3
+        read -r answer <&3 || { exec 3>&-; return 0; }
+        exec 3>&-
+    else
+        [ -t 0 ] && [ -t 1 ] || return 0
+        printf '  Enable auto-context-rollover? [y/N] '
+        read -r answer || return 0
+    fi
+
+    case "$answer" in
+        y|Y|yes|YES|Yes)
+            install_rollover_block
+            ;;
+        *)
+            info "  Skipping auto-rollover setup."
+            ;;
+    esac
+}
+
+install_rollover_block() {
+    local bash_block
+    bash_block="$_ROLLOVER_MARKER_START
+export AUTOSPEC_AUTO_ROLLOVER=1
+if [ \"\${AUTOSPEC_AUTO_ROLLOVER:-0}\" = \"1\" ] && command -v autospec-session >/dev/null 2>&1; then
+    claude()   { autospec-session claude \"\$@\"; }
+    codex()    { autospec-session codex \"\$@\"; }
+    opencode() { autospec-session opencode \"\$@\"; }
+fi
+$_ROLLOVER_MARKER_END"
+
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        [ -f "$rc" ] || continue
+        if grep -qF "$_ROLLOVER_MARKER_START" "$rc"; then
+            info "  auto-rollover block already present in $rc (skipping)"
+            continue
+        fi
+        printf '\n%s\n' "$bash_block" >> "$rc"
+        info "  auto-rollover block added to $rc"
+    done
+
+    # Fish uses function syntax instead of shell function declarations.
+    local fish_config="$HOME/.config/fish/config.fish"
+    if [ -f "$fish_config" ]; then
+        if grep -qF "$_ROLLOVER_MARKER_START" "$fish_config"; then
+            info "  auto-rollover block already present in $fish_config (skipping)"
+        else
+            printf '\n%s\n' "$_ROLLOVER_MARKER_START
+set -x AUTOSPEC_AUTO_ROLLOVER 1
+if test \"\$AUTOSPEC_AUTO_ROLLOVER\" = \"1\"; and command -v autospec-session >/dev/null 2>&1
+    function claude; autospec-session claude \$argv; end
+    function codex; autospec-session codex \$argv; end
+    function opencode; autospec-session opencode \$argv; end
+end
+$_ROLLOVER_MARKER_END" >> "$fish_config"
+            info "  auto-rollover block added to $fish_config"
+        fi
+    fi
+}
+
+remove_rollover_block() {
+    local removed=0
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        [ -f "$rc" ] || continue
+        if grep -qF "$_ROLLOVER_MARKER_START" "$rc"; then
+            # Use a temp file approach for portability (macOS sed -i differs from GNU).
+            local tmp
+            tmp=$(mktemp)
+            awk "
+                /$_ROLLOVER_MARKER_START/{skip=1}
+                !skip{print}
+                /$_ROLLOVER_MARKER_END/{skip=0}
+            " "$rc" > "$tmp" && mv "$tmp" "$rc"
+            info "  auto-rollover block removed from $rc"
+            removed=$((removed + 1))
+        fi
+    done
+
+    local fish_config="$HOME/.config/fish/config.fish"
+    if [ -f "$fish_config" ] && grep -qF "$_ROLLOVER_MARKER_START" "$fish_config"; then
+        local tmp
+        tmp=$(mktemp)
+        awk "
+            /$_ROLLOVER_MARKER_START/{skip=1}
+            !skip{print}
+            /$_ROLLOVER_MARKER_END/{skip=0}
+        " "$fish_config" > "$tmp" && mv "$tmp" "$fish_config"
+        info "  auto-rollover block removed from $fish_config"
+        removed=$((removed + 1))
+    fi
+
+    if [ "$removed" -eq 0 ]; then
+        info "  auto-rollover: no block found to remove (already clean)"
+    fi
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --skill)
@@ -475,6 +591,9 @@ while [ $# -gt 0 ]; do
             ;;
         --dry-run)
             DRY_RUN=1
+            ;;
+        --disable-auto-rollover)
+            DISABLE_AUTO_ROLLOVER=1
             ;;
         -h|--help)
             usage
@@ -659,5 +778,10 @@ info "Suite install summary: $succeeded/$total pairs OK ($failures failed)"
 if [ "$failures" -gt 0 ]; then
     exit 1
 fi
+if [ "$DISABLE_AUTO_ROLLOVER" -eq 1 ]; then
+    remove_rollover_block
+    exit 0
+fi
+prompt_user_for_auto_rollover
 maybe_prompt_star
 exit 0
