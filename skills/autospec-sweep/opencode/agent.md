@@ -131,6 +131,28 @@ changed enough that the config is stale.
 5. If a config change contradicts a tracked spec, update the spec in the same
    autospec design/spec PR before any implementation issue is filed.
 
+## Parallel area dispatch
+
+Sweep runs fan out into 4 parallel area subagents per the AGENTS.md subagent
+dispatch decision matrix. Areas are defined under
+`skills/autospec-sweep/areas/` and dispatched via
+`scripts/sweep-area-dispatch.sh`:
+
+1. `spec-vs-code-drift` — reuses `scripts/explore-research/spec-vs-code.sh`.
+2. `docs-drift` — reuses `scripts/dogfood-adapter-doc-drift.sh`.
+3. `code-health` — reuses `scripts/explore-research/codebase-signals.sh`.
+4. `dependency-health` — new `scripts/explore-research/dependency-health.sh`
+   researcher (also available to autospec-explore — extends the 6-researcher
+   set to 7).
+
+Each area subagent emits research-cycle JSON. The dispatcher aggregates into
+`.autospec/sweep/area-findings.json` (`schema: autospec-sweep.area-findings.v1`)
+which feeds the existing sweep report and `autospec-review`.
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/sweep-area-dispatch.sh"
+```
+
 ## Sweep execution
 
 > **Model tier:** TIER_A for sweep synthesis and gap classification. Any fix

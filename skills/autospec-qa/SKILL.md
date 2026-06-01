@@ -12,6 +12,37 @@ with deterministic coverage and E2E checks; `autospec-qa` performs a broad
 human-style audit from the spec and turns gaps into stronger tests or follow-up
 issues.
 
+## Cluster dispatch
+
+The per-area prose for this skill is also available as 8 cluster files under
+`skills/autospec-qa/clusters/<name>.md`, dispatched by
+`scripts/qa-cluster-dispatch.sh` (issue #730). The 8 canonical clusters are:
+
+1. `spec-traceability` — extract spec requirements + traceability matrix.
+2. `functional-coverage` — UI controls, forms, validation, dropdowns, buttons.
+3. `backend-integration` — API contracts + no-mock smoke + live backend triage.
+4. `reliability-contract` — proof matrix, control ledger, mutation, canary,
+   no-mock coverage, observability, data lifecycle.
+5. `legacy-and-cleanup` — legacy removal gate + spec/docs cleanup +
+   deprecated-surface scan.
+6. `benchmark-and-outsourcing` — benchmark-overfit gate + outsourced-
+   implementation gate.
+7. `accessibility-and-responsive` — a11y + viewport + browser variance.
+8. `production-incidents` — incident registry regression check (PR #661).
+
+Each cluster carries only its area's prose plus the spec under audit. The
+orchestrator (`scripts/qa-cluster-dispatch.sh`) is harness-aware (via
+`scripts/lib/autospec-harness-detect.sh`, PR #725), honors
+`scripts/qa-cluster-coverage.sh` for cross-cluster dedup, and honors
+`scripts/qa-verify-finding.sh` for verify-first filtering. Aggregated findings
+land in `.autospec/qa-verdict.json`, which the existing heal loop
+(PR #666/#713) consumes unchanged.
+
+The full per-area prose in the sections below remains canonical for now;
+cluster files reference it and will be backfilled as the dispatch model
+matures. Operators can opt out individual clusters via
+`scripts/qa-cluster-dispatch.sh --skip-cluster <name>`.
+
 ## Startup self-update
 
 ```bash

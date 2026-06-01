@@ -1035,6 +1035,40 @@ check_autospec_qa_contract() {
         || fail "schemas/autospec-reliability.schema.json: missing deprecated_surfaces contract"
 }
 
+check_autospec_sweep_area_contract() {
+    info "autospec-sweep area dispatch contract"
+    local areas_dir="skills/autospec-sweep/areas"
+    [ -d "$areas_dir" ] || fail "$areas_dir: required directory missing"
+    for a in spec-vs-code-drift docs-drift code-health dependency-health; do
+        [ -f "$areas_dir/$a.md" ] || fail "$areas_dir/$a.md: required area file missing"
+    done
+    local dispatcher="scripts/sweep-area-dispatch.sh"
+    [ -f "$dispatcher" ] || fail "$dispatcher: required dispatcher missing"
+    bash -n "$dispatcher" || fail "$dispatcher: bash syntax error"
+    local dep_researcher="scripts/explore-research/dependency-health.sh"
+    [ -f "$dep_researcher" ] || fail "$dep_researcher: required researcher missing"
+    bash -n "$dep_researcher" || fail "$dep_researcher: bash syntax error"
+    # Lockstep: the "## Parallel area dispatch" section must appear in all 3
+    # trio adapters with the same area list.
+    for f in skills/autospec-sweep/SKILL.md \
+             skills/autospec-sweep/codex/prompt.md \
+             skills/autospec-sweep/opencode/agent.md; do
+        grep -q '^## Parallel area dispatch' "$f" \
+            || fail "$f: missing '## Parallel area dispatch' section"
+        for a in spec-vs-code-drift docs-drift code-health dependency-health; do
+            grep -q "$a" "$f" \
+                || fail "$f: missing area reference '$a'"
+        done
+        grep -q 'sweep-area-dispatch.sh' "$f" \
+            || fail "$f: missing reference to scripts/sweep-area-dispatch.sh"
+    done
+    local bats_file="tests/sweep/test_sweep_area_dispatch.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: required bats file missing"
+    info "  running: $bats_file"
+    bats "$bats_file" >/tmp/validate-sweep-area.log 2>&1 \
+        || { cat /tmp/validate-sweep-area.log >&2; fail "$bats_file: failed"; }
+}
+
 check_autospec_release_contract() {
     info "autospec-release contract: release readiness wrapper"
     local skill_file="skills/autospec-release/SKILL.md"
@@ -1706,6 +1740,8 @@ main() {
     check_autospec_explore_researchers_llm
     check_autospec_explore_contract
     check_autospec_release_area_contract
+    check_autospec_sweep_area_contract
+    check_autospec_qa_cluster_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -1713,6 +1749,43 @@ main() {
     check_bash_syntax "uninstall.sh"
 
     info "OK — all validation checks passed."
+}
+
+# Issue #730: autospec-qa per-area cluster dispatch contract.
+# Enforces:
+#   - 8 canonical cluster files under skills/autospec-qa/clusters/.
+#   - scripts/qa-cluster-dispatch.sh exists, executable, bash -n clean.
+#   - all 3 autospec-qa adapter files reference the cluster dispatcher.
+#   - tests/qa/test_qa_cluster_dispatch.bats exists.
+check_autospec_qa_cluster_contract() {
+    info "autospec-qa per-area cluster dispatch contract (issue #730)"
+    local clusters_dir="skills/autospec-qa/clusters"
+    local dispatcher="scripts/qa-cluster-dispatch.sh"
+    local bats_file="tests/qa/test_qa_cluster_dispatch.bats"
+
+    [ -d "$clusters_dir" ] || fail "$clusters_dir: missing cluster directory (issue #730)"
+    for c in spec-traceability functional-coverage backend-integration \
+             reliability-contract legacy-and-cleanup \
+             benchmark-and-outsourcing accessibility-and-responsive \
+             production-incidents; do
+        [ -f "$clusters_dir/$c.md" ] \
+            || fail "$clusters_dir/$c.md: missing cluster file (issue #730)"
+    done
+
+    [ -f "$dispatcher" ] || fail "$dispatcher: missing (issue #730)"
+    [ -x "$dispatcher" ] || fail "$dispatcher: not executable (issue #730)"
+    bash -n "$dispatcher" || fail "$dispatcher: bash -n failed (issue #730)"
+
+    for trio in skills/autospec-qa/SKILL.md \
+                skills/autospec-qa/codex/prompt.md \
+                skills/autospec-qa/opencode/agent.md; do
+        grep -q 'qa-cluster-dispatch\.sh' "$trio" \
+            || fail "$trio: missing reference to qa-cluster-dispatch.sh (issue #730)"
+        grep -q 'skills/autospec-qa/clusters/' "$trio" \
+            || fail "$trio: missing reference to clusters/ directory (issue #730)"
+    done
+
+    [ -f "$bats_file" ] || fail "$bats_file: missing (issue #730)"
 }
 
 # Issue #723: harness-aware loop dispatcher contract. Every loop-using
