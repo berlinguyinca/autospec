@@ -493,6 +493,33 @@ prompt_user_for_auto_rollover() {
             info "  Skipping auto-rollover setup."
             ;;
     esac
+
+    info ""
+    info "autospec Claude hook mode"
+    info "  Instead of polling via tmux, hook mode fires on Claude's PreCompact event."
+    info "  Use this if you prefer native Claude Code integration over a background daemon."
+    info "  Equivalent to running:  bash install.sh --hook-mode claude"
+    info ""
+
+    hook_ans=""
+    if { exec 3<>/dev/tty; } 2>/dev/null; then
+        printf '  Enable Claude hook mode? (fires on PreCompact instead of polling) [y/N] ' >&3
+        read -r hook_ans <&3 || { exec 3>&-; return 0; }
+        exec 3>&-
+    else
+        [ -t 0 ] && [ -t 1 ] || return 0
+        printf '  Enable Claude hook mode? (fires on PreCompact instead of polling) [y/N] '
+        read -r hook_ans || return 0
+    fi
+
+    case "$hook_ans" in
+        y|Y|yes|YES|Yes)
+            install_hook_mode_claude
+            ;;
+        *)
+            info "  Skipping Claude hook mode setup."
+            ;;
+    esac
 }
 
 # Install the autospec_context_monitor Python package into user-site so the
