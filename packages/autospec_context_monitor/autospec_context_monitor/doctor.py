@@ -10,6 +10,8 @@ Exits 0 when all checks pass; non-zero when any check reports a problem.
 from __future__ import annotations
 
 import argparse
+import collections
+import datetime
 import importlib
 import json
 import os
@@ -22,6 +24,7 @@ from typing import Any, Callable, List, Tuple
 
 _MONITORS_DIR = Path.home() / ".autospec" / "monitors"
 _TRANSCRIPTS_DIR = Path.home() / ".claude" / "projects"
+_STATS_FILE = Path.home() / ".autospec" / "monitors" / "stats.jsonl"
 
 # ---------------------------------------------------------------------------
 # Check helpers
@@ -175,6 +178,81 @@ def _print_table(results: List[Tuple[str, Any]]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stats aggregation
+# ---------------------------------------------------------------------------
+
+def _print_stats(filter_cwd: str | None = None) -> None:
+    """Read stats.jsonl and print last-7-day counts per event type and harness."""
+    if not _STATS_FILE.exists():
+        print("No stats ledger found at", _STATS_FILE)
+        return
+
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+    by_event: collections.Counter[str] = collections.Counter()
+    by_harness: collections.Counter[str] = collections.Counter()
+    total = 0
+    skipped = 0
+
+    with _STATS_FILE.open() as fh:
+        for lineno, raw in enumerate(fh, 1):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                row = json.loads(raw)
+            except json.JSONDecodeError:
+                skipped += 1
+                continue
+
+            # Filter by cwd when requested
+            if filter_cwd is not None and row.get("cwd") != filter_cwd:
+                continue
+
+            # Filter by 7-day window
+            ts_str = row.get("ts", "")
+            try:
+                ts = datetime.datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=datetime.timezone.utc
+                )
+            except (ValueError, TypeError):
+                ts = datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+
+            if ts < cutoff:
+                continue
+
+            total += 1
+            event = row.get("event", "(unknown)")
+            harness = row.get("harness", "(unknown)")
+            by_event[event] += 1
+            by_harness[harness] += 1
+
+    print(f"autospec stats — last 7 days  (ledger: {_STATS_FILE})")
+    if filter_cwd:
+        print(f"  filtered to cwd: {filter_cwd}")
+    print(f"  total events : {total}")
+    if skipped:
+        print(f"  malformed lines skipped: {skipped}")
+    print()
+
+    print("By event type:")
+    if by_event:
+        width = max(len(k) for k in by_event)
+        for event, count in sorted(by_event.items(), key=lambda x: -x[1]):
+            print(f"  {event:<{width}}  {count}")
+    else:
+        print("  (none)")
+
+    print()
+    print("By harness:")
+    if by_harness:
+        width = max(len(k) for k in by_harness)
+        for harness, count in sorted(by_harness.items(), key=lambda x: -x[1]):
+            print(f"  {harness:<{width}}  {count}")
+    else:
+        print("  (none)")
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -198,7 +276,23 @@ def main(argv: list[str] | None = None) -> int:
         default=False,
         help="After checks, run pytest over the adapter and engine test suites.",
     )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        default=False,
+        help="Print last-7-day counts from the stats ledger (~/.autospec/monitors/stats.jsonl).",
+    )
+    parser.add_argument(
+        "--cwd",
+        default=None,
+        help="When used with --stats, filter events to this working directory.",
+    )
     args = parser.parse_args(argv)
+
+    # Short-circuit: if --stats is requested, print and exit.
+    if args.stats:
+        _print_stats(filter_cwd=args.cwd)
+        return 0
 
     checks = _build_checks()
     results: List[Tuple[str, Any]] = [(name, _safe_run(fn)) for name, fn in checks]

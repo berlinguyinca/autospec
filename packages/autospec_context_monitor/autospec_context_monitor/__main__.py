@@ -34,6 +34,7 @@ from .adapters.base import TranscriptNotFoundError, Usage
 from .engine import Action, Engine, State
 from .handoff import validate_handoff
 from .injector import SessionGone, inject, session_exists, wait_for_cancel
+from . import stats as _stats
 
 _POLL_INTERVAL = 15  # seconds
 _KILL_SWITCH = Path.home() / ".autospec" / "no-auto-rollover.flag"
@@ -73,7 +74,14 @@ def _load_adapter(harness: str):
 # Action dispatcher
 # ---------------------------------------------------------------------------
 
-def _dispatch(action: Action, tmux_session: str, logf: Path) -> bool:
+def _dispatch(
+    action: Action,
+    tmux_session: str,
+    logf: Path,
+    harness: str = "",
+    cwd: str = "",
+    pct: float = 0.0,
+) -> bool:
     """Execute *action* by injecting into the tmux session.
 
     Returns:
@@ -87,6 +95,13 @@ def _dispatch(action: Action, tmux_session: str, logf: Path) -> bool:
     if action.kind == "compact":
         _log(logf, {"event": "inject", "kind": "compact"})
         inject(tmux_session, "/compact")
+        _stats.record(
+            "compact_fired",
+            harness=harness,
+            tmux_session=tmux_session,
+            pct=round(pct, 4),
+            cwd=cwd,
+        )
         return False
 
     if action.kind == "handoff":
@@ -104,6 +119,13 @@ def _dispatch(action: Action, tmux_session: str, logf: Path) -> bool:
             if not ok:
                 msg = f"autospec: handoff invalid (missing: {', '.join(missing)}) — rollover aborted"
                 _log(logf, {"event": "handoff invalid: missing", "missing": missing, "kind": "clear"})
+                _stats.record(
+                    "handoff_invalid",
+                    harness=harness,
+                    tmux_session=tmux_session,
+                    pct=round(pct, 4),
+                    cwd=cwd,
+                )
                 subprocess.run(["tmux", "display-message", msg], check=False)
                 subprocess.run(
                     ["tmux", "send-keys", "-t", tmux_session, "-l", "\a"],
@@ -115,9 +137,23 @@ def _dispatch(action: Action, tmux_session: str, logf: Path) -> bool:
         _log(logf, {"event": "cancel_window_start", "kind": "clear"})
         if wait_for_cancel(tmux_session):
             _log(logf, {"event": "rollover canceled by user", "kind": "clear"})
+            _stats.record(
+                "rollover_aborted",
+                harness=harness,
+                tmux_session=tmux_session,
+                pct=round(pct, 4),
+                cwd=cwd,
+            )
             return True
         _log(logf, {"event": "inject", "kind": "clear"})
         inject(tmux_session, "/clear")
+        _stats.record(
+            "rollover_fired",
+            harness=harness,
+            tmux_session=tmux_session,
+            pct=round(pct, 4),
+            cwd=cwd,
+        )
         return False
 
     if action.kind == "resume":
@@ -219,7 +255,14 @@ def main(argv: list[str] | None = None) -> None:
                 })
                 actions = engine.classify(usage)
                 for action in actions:
-                    canceled = _dispatch(action, args.tmux_session, logf)
+                    canceled = _dispatch(
+                        action,
+                        args.tmux_session,
+                        logf,
+                        harness=args.harness,
+                        cwd=args.cwd,
+                        pct=round(usage.used_tokens / usage.max_tokens, 4),
+                    )
                     if canceled:
                         # User pressed Esc during cancel window — revert state
                         # so the engine re-fires the rollover on the next 80%
