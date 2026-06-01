@@ -13,6 +13,7 @@ within the same process.
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import threading
@@ -30,6 +31,40 @@ class SessionGone(RuntimeError):
 
 # Per-process lock: only one inject call runs at a time.
 _LOCK = threading.Lock()
+
+
+def _inject_with_retry(cmd: list[str], action_name: str) -> bool:
+    """Run *cmd* (a subprocess inject command), retrying once after 5 s on failure.
+
+    On first failure: sleeps 5 seconds and retries once.
+    On second failure: rings the terminal bell via ``tput bel``, then sends a
+    desktop notification via ``osascript`` (macOS) or ``notify-send`` (Linux).
+    Both notification calls are best-effort (``check=False``).
+
+    Args:
+        cmd:         The subprocess command list to execute.
+        action_name: Human-readable name of the action; used in the notification
+                     message so operators know what failed.
+
+    Returns:
+        ``True`` if the command succeeded on either attempt, ``False`` otherwise.
+    """
+    if subprocess.run(cmd, check=False).returncode == 0:
+        return True
+    time.sleep(5)
+    if subprocess.run(cmd, check=False).returncode == 0:
+        return True
+    # Both attempts failed — alert the operator.
+    subprocess.run(["tput", "bel"], check=False)
+    msg = f"[autospec] inject failed for {action_name}"
+    if shutil.which("osascript"):
+        subprocess.run(
+            ["osascript", "-e", f'display notification "{msg}"'],
+            check=False,
+        )
+    elif shutil.which("notify-send"):
+        subprocess.run(["notify-send", msg], check=False)
+    return False
 
 
 def session_exists(session: str) -> bool:
