@@ -1742,6 +1742,7 @@ main() {
     check_autospec_release_area_contract
     check_autospec_sweep_area_contract
     check_autospec_qa_cluster_contract
+    check_autospec_qa_bug_class_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -1786,6 +1787,40 @@ check_autospec_qa_cluster_contract() {
     done
 
     [ -f "$bats_file" ] || fail "$bats_file: missing (issue #730)"
+}
+
+# Issue #737: autospec-qa bug-class sibling sweep contract.
+# Enforces:
+#   - scripts/qa-bug-class-sweep.sh exists, executable, bash -n clean.
+#   - all 3 autospec-qa trio files reference qa-bug-class-sweep.sh and
+#     the per-class issue-filing semantics.
+#   - heal-loop references parent_fingerprint grouping.
+#   - tests/qa/test_qa_bug_class_sweep.bats exists.
+check_autospec_qa_bug_class_contract() {
+    info "autospec-qa bug-class sibling sweep contract (issue #737)"
+    local helper="scripts/qa-bug-class-sweep.sh"
+    local bats_file="tests/qa/test_qa_bug_class_sweep.bats"
+    local heal="scripts/qa-heal-loop.sh"
+
+    [ -f "$helper" ] || fail "$helper: missing (issue #737)"
+    [ -x "$helper" ] || fail "$helper: not executable (issue #737)"
+    bash -n "$helper" || fail "$helper: bash -n failed (issue #737)"
+
+    for trio in skills/autospec-qa/SKILL.md \
+                skills/autospec-qa/codex/prompt.md \
+                skills/autospec-qa/opencode/agent.md; do
+        grep -q 'qa-bug-class-sweep\.sh' "$trio" \
+            || fail "$trio: missing reference to qa-bug-class-sweep.sh (issue #737)"
+        grep -q 'parent_fingerprint' "$trio" \
+            || fail "$trio: missing parent_fingerprint contract (issue #737)"
+        grep -q 'AUTOSPEC_QA_BUG_CLASS_MIN_CONFIDENCE' "$trio" \
+            || fail "$trio: missing confidence-threshold env var (issue #737)"
+    done
+
+    grep -q 'parent_fingerprint' "$heal" \
+        || fail "$heal: must group by parent_fingerprint (issue #737)"
+
+    [ -f "$bats_file" ] || fail "$bats_file: missing (issue #737)"
 }
 
 # Issue #723: harness-aware loop dispatcher contract. Every loop-using
