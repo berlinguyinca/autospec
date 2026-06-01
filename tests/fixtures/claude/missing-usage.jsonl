@@ -1,0 +1,2 @@
+{"type":"system","message":{"role":"system","content":"System init"}}
+{"type":"message","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"No usage field here"}]}}
