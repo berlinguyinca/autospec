@@ -176,6 +176,12 @@ Uninstall symmetrically:
 `uninstall.sh --skill all` removes every suite skill listed in the install
 matrix, including `autospec-design`.
 
+To enable Claude hook mode (PreCompact trigger instead of tmux polling):
+
+```bash
+bash install.sh --hook-mode claude
+```
+
 ### Single-skill curl install (advanced)
 
 Each per-skill installer is also callable standalone over curl:
