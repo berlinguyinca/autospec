@@ -682,16 +682,25 @@ hooks = data.setdefault("hooks", {})
 
 monitor_cmd = "python3 -m autospec_context_monitor --hook-event"
 
-hooks.setdefault("PreCompact",    [])
-hooks.setdefault("SessionStart",  [])
+# Claude Code's hooks schema requires each array entry to be an object with a
+# `hooks` list of {type, command} steps -- not a bare command string. Earlier
+# installs appended bare strings, which `claude doctor` flags as invalid.
+def merge(event):
+    cmd = "%s %s" % (monitor_cmd, event)
+    entries = hooks.setdefault(event, [])
+    # Drop any legacy bare-string form left by earlier installs, so re-running
+    # the installer self-heals configs already in the wild.
+    entries[:] = [e for e in entries if e != cmd]
+    already = any(
+        isinstance(e, dict)
+        and any(h.get("command") == cmd for h in e.get("hooks", []))
+        for e in entries
+    )
+    if not already:
+        entries.append({"hooks": [{"type": "command", "command": cmd}]})
 
-_pre  = monitor_cmd + " PreCompact"
-_sess = monitor_cmd + " SessionStart"
-
-if _pre  not in hooks["PreCompact"]:
-    hooks["PreCompact"].append(_pre)
-if _sess not in hooks["SessionStart"]:
-    hooks["SessionStart"].append(_sess)
+merge("PreCompact")
+merge("SessionStart")
 
 tmp = settings_path.with_suffix(".json.tmp")
 tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
