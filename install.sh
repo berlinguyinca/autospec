@@ -495,7 +495,55 @@ prompt_user_for_auto_rollover() {
     esac
 }
 
+# Install the autospec_context_monitor Python package into user-site so the
+# tmux launcher (scripts/autospec-session) and the Claude PreCompact hook can
+# both `python3 -m autospec_context_monitor` without ModuleNotFoundError.
+# Gap g-002: prior installs accepted the rollover prompt but never installed
+# the package — the daemon failed on first launch with
+# `No module named autospec_context_monitor`.
+install_context_monitor_pkg() {
+    local pkg_dir
+    pkg_dir="$(dirname "$0")/packages/autospec_context_monitor"
+    if [ ! -d "$pkg_dir" ]; then
+        info "  autospec_context_monitor: package dir not found ($pkg_dir); skipping pip install"
+        return 0
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] would run: pip install --user -e $pkg_dir"
+        return 0
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        info "  autospec_context_monitor: python3 not on PATH; skipping pip install"
+        return 0
+    fi
+
+    # Skip when already importable (idempotent re-runs avoid pip churn).
+    if python3 -c "import autospec_context_monitor" 2>/dev/null; then
+        info "  autospec_context_monitor: already installed"
+        return 0
+    fi
+
+    info "  autospec_context_monitor: pip install --user -e $pkg_dir"
+    if python3 -m pip install --user --quiet -e "$pkg_dir" 2>&1 | grep -v -E '^(WARNING|$)' >&2; then
+        true  # pip succeeded; grep just filters its noisy WARNING lines
+    fi
+
+    if python3 -c "import autospec_context_monitor" 2>/dev/null; then
+        info "  autospec_context_monitor: import OK"
+    else
+        warn "  autospec_context_monitor: pip install completed but module not importable"
+        warn "  (rollover daemon will fail; check 'python3 -m pip --version' and user-site PATH)"
+    fi
+}
+
 install_rollover_block() {
+    # First, ensure the python package backing autospec-context-monitor is
+    # installed in user-site so both the tmux launcher and the Claude
+    # PreCompact hook can `python3 -m autospec_context_monitor`.
+    install_context_monitor_pkg
+
     local bash_block
     bash_block="$_ROLLOVER_MARKER_START
 export AUTOSPEC_AUTO_ROLLOVER=1

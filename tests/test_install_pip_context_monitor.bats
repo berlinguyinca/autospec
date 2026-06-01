@@ -8,25 +8,31 @@
 
 INSTALL_SH="${BATS_TEST_DIRNAME}/../install.sh"
 
-@test "g-002: install_rollover_block invokes pip install for autospec_context_monitor" {
-    # Static grep: the install_rollover_block helper (or a helper it calls)
-    # must contain a `pip install ... autospec_context_monitor` reference.
-    run grep -nE 'pip[[:space:]]+install.*autospec_context_monitor|packages/autospec_context_monitor' "$INSTALL_SH"
+@test "g-002: install.sh contains a pip install for the package directory" {
+    # The package is installed editable from its source dir, so the pip line
+    # references the package directory ($pkg_dir → packages/autospec_context_monitor).
+    run grep -E 'pip[[:space:]]+install[[:space:]].*\$pkg_dir' "$INSTALL_SH"
     [ "$status" -eq 0 ]
 
-    # And it must specifically be a pip install line (not just a comment / path mention)
-    run grep -cE 'pip[[:space:]]+install.+autospec_context_monitor' "$INSTALL_SH"
+    # And the package directory path must be referenced.
+    run grep -F 'packages/autospec_context_monitor' "$INSTALL_SH"
     [ "$status" -eq 0 ]
-    [ "$output" -ge 1 ]
 }
 
 @test "g-002: pip install uses --user (no sudo, no system-wide install)" {
-    run grep -E 'pip[[:space:]]+install[[:space:]]+--user.*autospec_context_monitor' "$INSTALL_SH"
+    run grep -E 'pip[[:space:]]+install[[:space:]].*--user' "$INSTALL_SH"
     [ "$status" -eq 0 ]
 }
 
-@test "g-002: pip install runs inside install_rollover_block (gated by user prompt)" {
-    # Extract the install_rollover_block function and assert it contains pip install.
+@test "g-002: install_rollover_block calls install_context_monitor_pkg" {
+    # The pip install is gated behind the rollover prompt via
+    # install_context_monitor_pkg, called from install_rollover_block.
     block=$(awk '/^install_rollover_block\(\)/{flag=1} flag{print} /^}$/{if(flag){flag=0; exit}}' "$INSTALL_SH")
-    echo "$block" | grep -qE 'pip[[:space:]]+install.+autospec_context_monitor'
+    echo "$block" | grep -q 'install_context_monitor_pkg'
+}
+
+@test "g-002: install_context_monitor_pkg helper exists and runs pip install" {
+    block=$(awk '/^install_context_monitor_pkg\(\)/{flag=1} flag{print} /^}$/{if(flag){flag=0; exit}}' "$INSTALL_SH")
+    echo "$block" | grep -qE 'pip[[:space:]]+install'
+    echo "$block" | grep -qF 'autospec_context_monitor'
 }
