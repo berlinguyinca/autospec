@@ -44,7 +44,7 @@ bash skills/autospec-fleet/scripts/fleet-gui.sh [--no-browser] [--print-url] [--
 | --- | --- |
 | `--no-browser` | Start the server without opening the system browser. |
 | `--print-url` | Print the full URL (with token) to stdout before serving. |
-| `--once` | Smoke-test mode: verify setup (port bindable) and exit 0 immediately. |
+| `--once` | Smoke-test mode: start the server, self-issue one GET to `/api/repos` and `/api/config`, assert both return 200, then exit 0. Bypasses the 15-min loop. |
 
 Environment: `AUTOSPEC_GUI_IDLE_SECS` — idle timeout in seconds (default 900 = 15 min).
 
