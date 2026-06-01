@@ -25,12 +25,14 @@ import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 from .adapters.base import TranscriptNotFoundError, Usage
 from .engine import Action, Engine, State
+from .handoff import validate_handoff
 from .injector import SessionGone, inject, session_exists, wait_for_cancel
 
 _POLL_INTERVAL = 15  # seconds
@@ -94,6 +96,22 @@ def _dispatch(action: Action, tmux_session: str, logf: Path) -> bool:
         return False
 
     if action.kind == "clear":
+        # --- Handoff validation gate ---
+        handoff_dir = Path.home() / ".turbo" / "handoff"
+        hfiles = sorted(handoff_dir.glob("*.md"), key=lambda p: p.stat().st_mtime) if handoff_dir.exists() else []
+        if hfiles:
+            ok, missing = validate_handoff(hfiles[-1])
+            if not ok:
+                msg = f"autospec: handoff invalid (missing: {', '.join(missing)}) — rollover aborted"
+                _log(logf, {"event": "handoff invalid: missing", "missing": missing, "kind": "clear"})
+                subprocess.run(["tmux", "display-message", msg], check=False)
+                subprocess.run(
+                    ["tmux", "send-keys", "-t", tmux_session, "-l", "\a"],
+                    check=False,
+                )
+                return True
+
+        # --- Cancel window ---
         _log(logf, {"event": "cancel_window_start", "kind": "clear"})
         if wait_for_cancel(tmux_session):
             _log(logf, {"event": "rollover canceled by user", "kind": "clear"})
