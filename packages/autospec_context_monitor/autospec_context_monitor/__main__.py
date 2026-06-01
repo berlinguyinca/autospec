@@ -140,6 +140,17 @@ def _dispatch(
         else Path.home() / ".turbo" / "handoff"
     )
 
+    # UX overlays: show a brief tmux message so the operator sees rollover is in progress.
+    _OVERLAY_MSG = {
+        "compact": "[autospec] compacting context…",
+        "handoff": "[autospec] writing handoff…",
+        "clear": "[autospec] clearing session…",
+        "resume": "[autospec] resuming…",
+    }
+    overlay_msg = _OVERLAY_MSG.get(action.kind)
+    if overlay_msg and tmux_session:
+        subprocess.run(["tmux", "display-message", "-d", "3000", overlay_msg], check=False)
+
     if action.kind == "compact":
         cmd = adapter.command("compact") if adapter is not None else "/compact"
         _log(logf, {"event": "inject", "kind": "compact", "cmd": cmd})
