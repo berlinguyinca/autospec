@@ -178,7 +178,12 @@ main() {
     url="http://127.0.0.1:${port}/?t=${token}"
 
     [[ "$PRINT_URL" -eq 1 ]] && printf '%s\n' "$url"
-    [[ "$NO_BROWSER" -eq 0 ]] && open_browser "$url"
+    # In --once smoke mode the server is torn down as soon as both endpoints have
+    # been served, so a real browser must NOT be opened: its GUI JS would hit
+    # /api/repos and /api/config first, satisfying the ONCE gate and shutting the
+    # server down before the smoke client issues its own GETs. Smoke mode is
+    # headless by definition.
+    [[ "$NO_BROWSER" -eq 0 && "$ONCE" -eq 0 ]] && open_browser "$url"
 
     # Smoke-test / --once mode: actually start the server, self-issue one GET to
     # /api/repos and /api/config, assert both return HTTP 200, then exit 0. This

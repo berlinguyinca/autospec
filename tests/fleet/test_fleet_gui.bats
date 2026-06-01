@@ -722,3 +722,51 @@ EOF
     [ -f "$gh_calls" ]
     grep -q "repo list" "$gh_calls"
 }
+
+# ---------------------------------------------------------------------------
+# Test 9: --once must not open a real browser even without --no-browser (#839)
+#
+# In --once mode the server self-shuts-down once both /api/repos and /api/config
+# have been served. If a real browser were opened, its GUI JS would hit those two
+# endpoints first, satisfying the ONCE gate and tearing the server down before
+# the smoke client issues its own GETs — a flaky premature-shutdown race. So
+# --once must suppress browser opening regardless of --no-browser. This test runs
+# --once WITHOUT --no-browser, stubbing xdg-open/open to record any invocation,
+# and asserts the browser was never opened while the smoke still exits 0.
+#
+# Mutation-verified: gating browser-open on NO_BROWSER alone (dropping the ONCE
+# guard) makes the browser stub fire and this test FAIL.
+# ---------------------------------------------------------------------------
+@test "--once suppresses browser open even without --no-browser (#839)" {
+    local BIN="$TMP/bin"
+    mkdir -p "$BIN"
+    local browser_calls="$TMP/browser-calls.log"
+
+    cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[]'
+EOF
+    chmod +x "$BIN/gh"
+
+    # Stub BOTH browser openers to record any invocation. open_browser tries
+    # xdg-open first, then open; either firing means a real browser was launched.
+    for opener in xdg-open open; do
+        cat > "$BIN/$opener" <<EOF
+#!/usr/bin/env bash
+echo "opened \$*" >> "$browser_calls"
+EOF
+        chmod +x "$BIN/$opener"
+    done
+
+    # --once WITHOUT --no-browser. Put the stub BIN first on PATH so the stub
+    # openers win over any real ones.
+    run bash -c "cd '$TMP' && PATH=\"$BIN:\$PATH\" AUTOSPEC_GUI_IDLE_SECS=30 bash '$GUI_SH' --print-url --once 2>&1"
+
+    # Smoke still succeeds end-to-end.
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/api/repos"*"200"* ]]
+    [[ "$output" == *"/api/config"*"200"* ]]
+
+    # The browser must NOT have been opened in --once mode.
+    [ ! -f "$browser_calls" ]
+}
