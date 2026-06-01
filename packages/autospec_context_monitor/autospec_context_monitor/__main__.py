@@ -209,42 +209,66 @@ def _dispatch(
         return False
 
     if action.kind == "clear":
-        # --- Handoff validation gate ---
+        # --- Handoff validation gate (must run BEFORE cancel window per spec) ---
         hfiles = (
             sorted(handoff_dir.glob("*.md"), key=lambda p: p.stat().st_mtime)
             if handoff_dir.exists()
             else []
         )
-        if hfiles:
-            ok, missing = validate_handoff(hfiles[-1])
-            if not ok:
-                msg = (
-                    f"autospec: handoff invalid (missing: {', '.join(missing)}) "
-                    "— rollover aborted"
-                )
-                _log(
-                    logf,
-                    {
-                        "event": "handoff invalid: missing",
-                        "missing": missing,
-                        "kind": "clear",
-                    },
-                )
-                _stats.record(
-                    "handoff_invalid",
-                    harness=harness,
-                    tmux_session=tmux_session,
-                    pct=round(pct, 4),
-                    cwd=cwd,
-                )
-                subprocess.run(["tmux", "display-message", msg], check=False)
-                subprocess.run(
-                    ["tmux", "send-keys", "-t", tmux_session, "-l", "\a"],
-                    check=False,
-                )
-                return True
+        if not hfiles:
+            # No handoff file found — abort rollover before showing cancel window.
+            msg = "autospec: no handoff file found — rollover aborted"
+            _log(
+                logf,
+                {
+                    "event": "no_handoff_file",
+                    "kind": "clear",
+                    "msg": msg,
+                },
+            )
+            _stats.record(
+                "handoff_invalid",
+                harness=harness,
+                tmux_session=tmux_session,
+                pct=round(pct, 4),
+                cwd=cwd,
+            )
+            subprocess.run(["tmux", "display-message", msg], check=False)
+            subprocess.run(
+                ["tmux", "send-keys", "-t", tmux_session, "-l", "\a"],
+                check=False,
+            )
+            return True
 
-        # --- Cancel window ---
+        ok, missing = validate_handoff(hfiles[-1])
+        if not ok:
+            msg = (
+                f"autospec: handoff invalid (missing: {', '.join(missing)}) "
+                "— rollover aborted"
+            )
+            _log(
+                logf,
+                {
+                    "event": "handoff invalid: missing",
+                    "missing": missing,
+                    "kind": "clear",
+                },
+            )
+            _stats.record(
+                "handoff_invalid",
+                harness=harness,
+                tmux_session=tmux_session,
+                pct=round(pct, 4),
+                cwd=cwd,
+            )
+            subprocess.run(["tmux", "display-message", msg], check=False)
+            subprocess.run(
+                ["tmux", "send-keys", "-t", tmux_session, "-l", "\a"],
+                check=False,
+            )
+            return True
+
+        # --- Cancel window (only reached when handoff validation passes) ---
         _log(logf, {"event": "cancel_window_start", "kind": "clear"})
         if wait_for_cancel(tmux_session):
             _log(logf, {"event": "rollover canceled by user", "kind": "clear"})
