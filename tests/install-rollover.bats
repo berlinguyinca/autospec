@@ -17,13 +17,28 @@ setup() {
     export AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1
 
     # Build a sourceable helpers file from install.sh's rollover block.
+    # We extract from `_ROLLOVER_MARKER_START=` (the first ROLLOVER var
+    # declaration) through the line that registers the hook-mode-claude
+    # function — this captures _ROLLOVER_MARKER_*, prompt_user_for_auto_rollover,
+    # install_context_monitor_pkg, install_rollover_block, and
+    # remove_rollover_block — regardless of where they sit in the file.
     {
         printf '#!/usr/bin/env bash\n'
         printf 'UPDATE=0\nDRY_RUN=0\nDISABLE_AUTO_ROLLOVER=0\n'
         printf 'info() { printf "%%s\\n" "$*"; }\n'
+        printf 'warn() { printf "warn: %%s\\n" "$*" >&2; }\n'
         printf 'err()  { printf "error: %%s\\n" "$*" >&2; }\n'
-        # Extract lines 458-571 from install.sh (rollover vars + functions)
-        sed -n '458,571p' "$INSTALL_SH"
+        # Stub install_context_monitor_pkg so tests don't shell out to pip.
+        # The real helper is exercised by tests/test_install_pip_context_monitor.bats.
+        printf 'install_context_monitor_pkg() { :; }\n'
+        # Extract from _ROLLOVER_MARKER_START variable declaration up to (and
+        # including) the closing brace of remove_rollover_block.
+        awk '
+            /^_ROLLOVER_MARKER_START=/ { capture = 1 }
+            capture { print }
+            /^remove_rollover_block\(\)/ { in_remove = 1 }
+            in_remove && /^\}$/ { exit }
+        ' "$INSTALL_SH"
     } > "$_ROLLOVER_HELPERS"
 }
 
