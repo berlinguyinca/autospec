@@ -329,6 +329,11 @@ from `$HOME/.claude/projects/`).
 
 ## Auto context rollover skills
 
+### autospec-session launcher (`scripts/autospec-session`)
+Starts the `autospec_context_monitor` daemon in the background for a given tmux session.
+The daemon monitors context percentage and fires compact/handoff/clear/resume actions automatically.
+Stop it with `kill $(cat ~/.autospec/context-monitor.pid)` or by ending the tmux session.
+
 - `/autospec-rollover-status` — reports current context % and last rollover event for the active session (see [`docs/specs/2026-05-31-auto-context-rollover-design.md`](docs/specs/2026-05-31-auto-context-rollover-design.md)).
 
 `AUTOSPEC_COMPRESS_THRESHOLD` — LOC threshold for `mempalace-compress.sh` (default: `5000`).
