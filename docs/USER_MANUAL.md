@@ -131,6 +131,12 @@ lower parallel cap, then emits worker IDs such as
 - `status --json`: return a `repos` array with ready, blocked, claimed, conflict, and batch counts.
 - `stop --graceful|--immediate`: forward the existing autospec stop helper to active managed checkouts.
 
+**Configuration GUI:** `bash skills/autospec-fleet/scripts/fleet-gui.sh` opens a
+one-page browser GUI for editing `autospec-fleet.yml`. Its `--once` flag is a
+smoke-test mode that starts the server, self-issues one GET to `/api/repos` and
+`/api/config`, asserts both return 200, then exits 0 — verifying the live HTTP
+surface (not merely that the port binds).
+
 ### `/autospec-sweep`
 
 <!-- autospec-doc-scope:
