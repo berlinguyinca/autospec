@@ -327,6 +327,10 @@ Scripts for managing project memory files under `AUTOSPEC_MEMORY_DIR`
 `AUTOSPEC_MEMORY_DIR` — override for the memory directory path (default: auto-detected
 from `$HOME/.claude/projects/`).
 
+## Auto context rollover skills
+
+- `/autospec-rollover-status` — reports current context % and last rollover event for the active session (see [`docs/specs/2026-05-31-auto-context-rollover-design.md`](docs/specs/2026-05-31-auto-context-rollover-design.md)).
+
 `AUTOSPEC_COMPRESS_THRESHOLD` — LOC threshold for `mempalace-compress.sh` (default: `5000`).
 `AUTOSPEC_COMPRESS_EVERY` — invoke compress every N calls to `auto-init-memory.sh` (default: `10`).
 `AUTOSPEC_MINE_PR_HISTORY` — set to `1` to enable PR history mining in `auto-init-memory.sh` (off by default; bandwidth-heavy).
