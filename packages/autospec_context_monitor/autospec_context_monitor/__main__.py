@@ -41,7 +41,7 @@ from pathlib import Path
 from .adapters.base import TranscriptNotFoundError, Usage
 from .engine import Action, Engine, State
 from .handoff import HandoffTimeoutError, validate_handoff, wait_for_handoff
-from .injector import SessionGone, inject, session_exists, wait_for_cancel
+from .injector import SessionGone, inject, session_exists, wait_for_cancel, wait_for_prompt
 from . import stats as _stats
 
 _POLL_INTERVAL = 15  # seconds
@@ -151,9 +151,23 @@ def _dispatch(
     if overlay_msg and tmux_session:
         subprocess.run(["tmux", "display-message", "-d", "3000", overlay_msg], check=False)
 
+    # Prompt-ready guard helper: returns the marker and whether the prompt is ready.
+    def _prompt_ok(kind: str) -> bool:
+        if not tmux_session or adapter is None:
+            return True  # no guard when tmux or adapter absent (e.g. hook mode / tests)
+        marker = adapter.prompt_marker()
+        if not marker:
+            return True
+        ready = wait_for_prompt(tmux_session, marker)
+        if not ready:
+            _log(logf, {"event": "prompt_not_ready", "kind": kind, "marker": marker})
+        return ready
+
     if action.kind == "compact":
         cmd = adapter.command("compact") if adapter is not None else "/compact"
         _log(logf, {"event": "inject", "kind": "compact", "cmd": cmd})
+        if not _prompt_ok("compact"):
+            return False
         inject(tmux_session, cmd)
         _stats.record(
             "compact_fired",
@@ -168,6 +182,8 @@ def _dispatch(
         cmd = adapter.command("handoff") if adapter is not None else "/create-handoff"
         since = time.time()
         _log(logf, {"event": "inject", "kind": "handoff", "cmd": cmd})
+        if not _prompt_ok("handoff"):
+            return False
         inject(tmux_session, cmd)
         # Block until the harness writes a fresh handoff file under
         # <cwd>/.turbo/handoff/.  Must complete before /clear (next action
@@ -243,6 +259,8 @@ def _dispatch(
 
         cmd = adapter.command("clear") if adapter is not None else "/clear"
         _log(logf, {"event": "inject", "kind": "clear", "cmd": cmd})
+        if not _prompt_ok("clear"):
+            return False
         inject(tmux_session, cmd)
         _stats.record(
             "rollover_fired",
@@ -277,6 +295,8 @@ def _dispatch(
                 "file": str(latest) if latest else None,
             },
         )
+        if not _prompt_ok("resume"):
+            return False
         inject(tmux_session, resume_text)
         return False
 

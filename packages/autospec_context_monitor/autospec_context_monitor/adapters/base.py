@@ -72,3 +72,14 @@ class HarnessAdapter(Protocol):
     def command(self, logical: Literal["clear", "compact", "handoff"]) -> str:
         """Map a logical command name to the harness-specific slash command."""
         ...
+
+    def prompt_marker(self) -> str:
+        """Return a string that identifies an idle shell prompt in the tmux pane.
+
+        ``_dispatch`` captures pane output and checks for this marker before
+        injecting a command.  Each adapter should return a marker that reliably
+        appears at the end of the prompt line when the harness is idle and ready
+        to accept input (e.g. ``"> "`` for Claude Code, ``"$ "`` for a bare
+        shell, ``"% "`` for zsh).
+        """
+        ...
