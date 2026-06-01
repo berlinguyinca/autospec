@@ -2,9 +2,7 @@
 """fleet-gui-server.py — embedded HTTP server for the autospec-fleet GUI.
 
 Called by fleet-gui.sh; not intended to be invoked directly.
-
-Usage: fleet-gui-server.py <port> <token> <workspace> <gui_html> <lock_file>
-                           <once> <idle_secs>
+Args: <port> <token> <workspace> <gui_html> <lock_file> <once> <idle_secs>
 """
 
 import sys
@@ -45,6 +43,45 @@ def update_activity():
     last_activity = time.time()
 
 
+def _yaml_scalar(v):
+    """Format a scalar value for basic YAML output."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
+
+
+def _yaml_dict_items(item):
+    """Yield YAML lines for a dict item in a list."""
+    first = True
+    for ik, iv in item.items():
+        prefix = "  - " if first else "    "
+        first = False
+        yield f"{prefix}{ik}: {_yaml_scalar(iv)}"
+
+
+def _yaml_list_items(lst):
+    """Yield YAML lines for a list value."""
+    for item in lst:
+        if isinstance(item, dict):
+            yield from _yaml_dict_items(item)
+        else:
+            yield f"  - {item}"
+
+
+def _basic_yaml_dump(data):
+    """Minimal YAML serializer for simple dict/list structures."""
+    lines = []
+    for k, v in data.items():
+        if isinstance(v, list):
+            lines.append(f"{k}:")
+            lines.extend(_yaml_list_items(v))
+        elif v is None:
+            lines.append(f"{k}:")
+        else:
+            lines.append(f"{k}: {_yaml_scalar(v)}")
+    return "\n".join(lines) + "\n"
+
+
 def load_yaml_config(path):
     """Load YAML config. Uses PyYAML if available; falls back to JSON."""
     try:
@@ -64,38 +101,9 @@ def dump_yaml_config(data):
     """Dump config dict as YAML. Uses PyYAML if available; falls back to basic."""
     try:
         import yaml
-        return yaml.dump(data, default_flow_style=False, allow_unicode=True,
-                         sort_keys=False)
+        return yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
     except ImportError:
         return _basic_yaml_dump(data)
-
-
-def _basic_yaml_dump(data):
-    """Minimal YAML serializer for simple dict/list structures."""
-    lines = []
-    for k, v in data.items():
-        if isinstance(v, list):
-            lines.append(f"{k}:")
-            for item in v:
-                if isinstance(item, dict):
-                    first = True
-                    for ik, iv in item.items():
-                        prefix = "  - " if first else "    "
-                        first = False
-                        lines.append(f"{prefix}{ik}: {_yaml_scalar(iv)}")
-                else:
-                    lines.append(f"  - {item}")
-        elif v is None:
-            lines.append(f"{k}:")
-        else:
-            lines.append(f"{k}: {_yaml_scalar(v)}")
-    return "\n".join(lines) + "\n"
-
-
-def _yaml_scalar(v):
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    return str(v)
 
 
 def auth_ok(handler):
@@ -104,6 +112,12 @@ def auth_ok(handler):
         return True
     qs = parse_qs(urlparse(handler.path).query)
     return qs.get("t", [""])[0] == TOKEN
+
+
+def _arm_shutdown():
+    """Trigger server shutdown after a short delay (once-mode or post-save)."""
+    delay = 0.1 if ONCE else 1.0
+    threading.Timer(delay, shutdown_event.set).start()
 
 
 class FleetHandler(BaseHTTPRequestHandler):
@@ -128,11 +142,11 @@ class FleetHandler(BaseHTTPRequestHandler):
         elif path == "/api/repos":
             self._handle_repos()
             if ONCE:
-                threading.Timer(0.1, shutdown_event.set).start()
+                _arm_shutdown()
         elif path == "/api/config":
             self._handle_config_get()
             if ONCE:
-                threading.Timer(0.1, shutdown_event.set).start()
+                _arm_shutdown()
         else:
             self.send_json(404, {"error": "not_found"})
 
@@ -143,14 +157,7 @@ class FleetHandler(BaseHTTPRequestHandler):
             self.send_json(401, {"error": "unauthorized"})
             return
         if path == "/api/config":
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length)
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError as e:
-                self.send_json(400, {"error": "invalid_json", "detail": str(e)})
-                return
-            self._handle_config_post(data)
+            self._read_and_handle_config_post()
         else:
             self.send_json(404, {"error": "not_found"})
 
@@ -170,7 +177,7 @@ class FleetHandler(BaseHTTPRequestHandler):
         else:
             self.send_json(404, {"error": "gui_html_not_found", "path": GUI_HTML})
         if ONCE:
-            threading.Timer(0.1, shutdown_event.set).start()
+            _arm_shutdown()
 
     def _handle_repos(self):
         try:
@@ -180,27 +187,26 @@ class FleetHandler(BaseHTTPRequestHandler):
                  "--limit", "200"],
                 capture_output=True, text=True, timeout=30,
             )
-            if result.returncode != 0:
-                err = result.stderr.strip()
-                hint_words = ("not logged", "authentication", "auth")
-                if any(w in err.lower() for w in hint_words):
-                    self.send_json(503, {
-                        "error": "gh_not_authenticated",
-                        "hint": "run: gh auth login",
-                    })
-                else:
-                    self.send_json(503, {"error": "gh_failed", "detail": err})
-                return
-            repos = json.loads(result.stdout or "[]")
-            repos.sort(key=lambda r: r.get("pushedAt", ""), reverse=True)
-            self.send_json(200, repos)
         except FileNotFoundError:
-            self.send_json(503, {
-                "error": "gh_not_found",
-                "hint": "Install gh CLI: https://cli.github.com",
-            })
+            self.send_json(503, {"error": "gh_not_found", "hint": "Install gh CLI: https://cli.github.com"})
+            return
         except subprocess.TimeoutExpired:
             self.send_json(503, {"error": "gh_timeout"})
+            return
+        if result.returncode != 0:
+            self._repos_error(result.stderr.strip())
+            return
+        repos = json.loads(result.stdout or "[]")
+        repos.sort(key=lambda r: r.get("pushedAt", ""), reverse=True)
+        self.send_json(200, repos)
+
+    def _repos_error(self, err):
+        """Send appropriate error JSON for a failed gh repo list call."""
+        hint_words = ("not logged", "authentication", "auth")
+        if any(w in err.lower() for w in hint_words):
+            self.send_json(503, {"error": "gh_not_authenticated", "hint": "run: gh auth login"})
+        else:
+            self.send_json(503, {"error": "gh_failed", "detail": err})
 
     def _handle_config_get(self):
         config_path = os.path.join(WORKSPACE, "autospec-fleet.yml")
@@ -209,21 +215,23 @@ class FleetHandler(BaseHTTPRequestHandler):
             return
         try:
             cfg = load_yaml_config(config_path)
-            if not cfg:
-                self.send_json(200, {
-                    "config": dict(DEFAULT_SKELETON),
-                    "exists": True,
-                    "warning": "yaml_partial",
-                })
-            else:
-                self.send_json(200, {"config": cfg, "exists": True})
         except Exception as e:
-            self.send_json(200, {
-                "config": dict(DEFAULT_SKELETON),
-                "exists": True,
-                "warning": "yaml_partial",
-                "detail": str(e),
-            })
+            self.send_json(200, {"config": dict(DEFAULT_SKELETON), "exists": True, "warning": "yaml_partial", "detail": str(e)})
+            return
+        if not cfg:
+            self.send_json(200, {"config": dict(DEFAULT_SKELETON), "exists": True, "warning": "yaml_partial"})
+        else:
+            self.send_json(200, {"config": cfg, "exists": True})
+
+    def _read_and_handle_config_post(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as e:
+            self.send_json(400, {"error": "invalid_json", "detail": str(e)})
+            return
+        self._handle_config_post(data)
 
     def _handle_config_post(self, new_data):
         config_path = os.path.join(WORKSPACE, "autospec-fleet.yml")
@@ -231,45 +239,53 @@ class FleetHandler(BaseHTTPRequestHandler):
         lock_fd = open(LOCK_FILE, "w")
         try:
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
-            existing = {}
-            if os.path.exists(config_path):
-                try:
-                    existing = load_yaml_config(config_path) or {}
-                except Exception:
-                    existing = {}
-            # Merge: existing → unmanaged keys from new_data → managed keys from new_data
-            merged = dict(existing)
-            for key, val in new_data.items():
-                if key not in MANAGED_KEYS:
-                    merged[key] = val
-            for key in MANAGED_KEYS:
-                if key in new_data:
-                    merged[key] = new_data[key]
-            # Atomic write
-            config_dir = os.path.dirname(os.path.abspath(config_path))
-            tmp_fd, tmp_path = tempfile.mkstemp(
-                dir=config_dir, prefix=".autospec-fleet-tmp-"
-            )
-            try:
-                with os.fdopen(tmp_fd, "w") as f:
-                    f.write(dump_yaml_config(merged))
-                os.replace(tmp_path, config_path)
-            except Exception:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
+            merged = _merge_config(config_path, new_data)
+            _atomic_write(config_path, dump_yaml_config(merged))
             repos_count = len(merged.get("repos", []))
             self.send_json(200, {"saved": True, "repos_count": repos_count})
         finally:
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
             lock_fd.close()
-        delay = 0.1 if ONCE else 1.0
-        threading.Timer(delay, shutdown_event.set).start()
+        _arm_shutdown()
+
+
+def _merge_config(config_path, new_data):
+    """Merge new_data over existing on-disk config, preserving unmanaged keys."""
+    existing = {}
+    if os.path.exists(config_path):
+        try:
+            existing = load_yaml_config(config_path) or {}
+        except Exception:
+            existing = {}
+    # Strategy: existing → unmanaged keys from new_data → managed keys from new_data
+    merged = dict(existing)
+    for key, val in new_data.items():
+        if key not in MANAGED_KEYS:
+            merged[key] = val
+    for key in MANAGED_KEYS:
+        if key in new_data:
+            merged[key] = new_data[key]
+    return merged
+
+
+def _atomic_write(target_path, content):
+    """Write content to target_path atomically via temp file + rename."""
+    config_dir = os.path.dirname(os.path.abspath(target_path))
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=config_dir, prefix=".autospec-fleet-tmp-")
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            f.write(content)
+        os.replace(tmp_path, target_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def idle_watcher():
+    """Shut down the server after IDLE_SECS of no requests."""
     while not shutdown_event.is_set():
         if time.time() - last_activity > IDLE_SECS:
             print("fleet-gui: idle_timeout — shutting down", flush=True)
