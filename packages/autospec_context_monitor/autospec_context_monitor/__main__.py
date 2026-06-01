@@ -491,7 +491,6 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     # ---- tmux-mode setup ----
-    adapter = _load_adapter(args.harness)
     engine = Engine()
     hint: dict = {
         "cwd": args.cwd,
@@ -527,6 +526,9 @@ def main(argv: list[str] | None = None) -> None:
     last_transcript: Path | None = None
 
     try:
+        # Load adapter inside the try block so PID cleanup runs even if
+        # _load_adapter raises ImportError or ValueError.
+        adapter = _load_adapter(args.harness)
         while True:
             if _KILL_SWITCH.exists():
                 _log(logf, {"event": "kill_switch", "reason": "no-auto-rollover.flag present"})
