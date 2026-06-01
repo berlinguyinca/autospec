@@ -37,15 +37,18 @@
            background: var(--bg); color: var(--text); height: 100vh;
            display: flex; flex-direction: column; }
 
-    header { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
-             background: var(--surface); border-bottom: 1px solid var(--border);
-             flex-shrink: 0; }
+    header {
+      display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      flex-shrink: 0; }
     header h1 { font-size: 16px; font-weight: 600; }
-    #workspace-path { font-size: 12px; color: var(--text-dim); flex: 1;
-                      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    #save-btn { padding: 6px 14px; background: var(--accent); color: #fff;
-                border: none; border-radius: 6px; cursor: pointer;
-                font-size: 13px; font-weight: 500; flex-shrink: 0; }
+    #workspace-path {
+      font-size: 12px; color: var(--text-dim); flex: 1;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #save-btn {
+      padding: 6px 14px; background: var(--accent); color: #fff;
+      border: none; border-radius: 6px; cursor: pointer;
+      font-size: 13px; font-weight: 500; flex-shrink: 0; }
     #save-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
     #save-btn:hover { opacity: 0.85; }
 
@@ -57,8 +60,9 @@
     h2 { font-size: 13px; font-weight: 600; margin-bottom: 12px;
          text-transform: uppercase; letter-spacing: .5px; color: var(--text-dim); }
 
-    label.field-label { display: block; font-size: 12px; font-weight: 500;
-                        margin-bottom: 4px; color: var(--text-dim); }
+    label.field-label {
+      display: block; font-size: 12px; font-weight: 500;
+      margin-bottom: 4px; color: var(--text-dim); }
     input[type="text"], input[type="number"] {
       width: 100%; padding: 6px 8px; background: var(--bg);
       border: 1px solid var(--border); border-radius: 4px; color: var(--text);
@@ -75,8 +79,8 @@
     .repo-controls { display: flex; gap: 12px; margin-bottom: 8px; font-size: 12px; }
     .repo-controls a { color: var(--accent); cursor: pointer; text-decoration: none; }
     .repo-controls a:hover { text-decoration: underline; }
-    .repo-controls a:focus-visible { outline: none; box-shadow: var(--focus-ring);
-                                      border-radius: 2px; }
+    .repo-controls a:focus-visible {
+      outline: none; box-shadow: var(--focus-ring); border-radius: 2px; }
 
     #repo-list { display: flex; flex-direction: column; gap: 2px; }
 
@@ -84,10 +88,10 @@
       display: flex; align-items: flex-start; gap: 10px; padding: 6px 8px;
       border-radius: 4px; cursor: pointer; }
     label.repo-row:hover { background: var(--surface); }
-    label.repo-row:focus-within { outline: none; box-shadow: var(--focus-ring);
-                                   border-radius: 4px; }
-    label.repo-row input[type="checkbox"] { margin-top: 2px; flex-shrink: 0;
-                                             cursor: pointer; }
+    label.repo-row:focus-within {
+      outline: none; box-shadow: var(--focus-ring); border-radius: 4px; }
+    label.repo-row input[type="checkbox"] {
+      margin-top: 2px; flex-shrink: 0; cursor: pointer; }
     label.repo-row input[type="checkbox"]:focus-visible {
       outline: none; box-shadow: var(--focus-ring); }
 
@@ -104,10 +108,12 @@
     .repo-desc { margin-top: 2px; font-size: 11px; color: var(--text-dim);
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-    #banner { display: none; padding: 10px 16px; background: var(--badge-public);
-              color: #fff; font-weight: 500; text-align: center; }
-    #error-banner { display: none; padding: 10px 16px; background: #c02020;
-                    color: #fff; font-size: 13px; text-align: center; }
+    #banner {
+      display: none; padding: 10px 16px; background: var(--badge-public);
+      color: #fff; font-weight: 500; text-align: center; }
+    #error-banner {
+      display: none; padding: 10px 16px; background: #c02020;
+      color: #fff; font-size: 13px; text-align: center; }
   </style>
 </head>
 <body>
