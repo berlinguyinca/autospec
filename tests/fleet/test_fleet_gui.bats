@@ -72,6 +72,14 @@ teardown() {
         kill "$GUI_PID" 2>/dev/null || true
         wait "$GUI_PID" 2>/dev/null || true
     fi
+    # Kill any extra servers registered by multi-process tests (e.g. the flock
+    # contention test) so a failure before the test's own kill block cannot leak
+    # processes that hold ports.
+    local _pid
+    for _pid in ${EXTRA_PIDS:-}; do
+        kill "$_pid" 2>/dev/null || true
+        wait "$_pid" 2>/dev/null || true
+    done
     rm -rf "$TMP"
 }
 
@@ -280,13 +288,36 @@ assert isinstance(cfg.get('repos'), list), f'repos not a list: {cfg}'
 }
 
 # ---------------------------------------------------------------------------
-# Test 5: flock serialization — 2 concurrent POSTs produce one valid shape
+# Test 5: flock serializes concurrent POSTs from TWO real server processes (#837)
+#
+# Why this rewrite: a single fleet-gui-server.py is strictly single-threaded
+# (`while not shutdown_event: server.handle_request()`), so two POSTs aimed at
+# ONE server are serialized by the HTTP accept loop — never by flock. A test
+# that fires both at one server would still pass with fcntl.flock deleted; it
+# proves nothing about the lock.
+#
+# This test creates REAL cross-process contention: two INDEPENDENT server
+# processes share the SAME WORKSPACE and the SAME LOCK_FILE, and each receives
+# one simultaneous POST. flock is the ONLY thing serializing their
+# read-merge-write of autospec-fleet.yml across the two OS processes.
+#
+# What it asserts (the genuine flock guarantee): each POST adds a DISTINCT
+# UNMANAGED key. _handle_config_post does read-modify-write (load existing →
+# merge → atomic os.replace). The final write is atomic, so the file is always
+# a single intact YAML shape EVEN WITHOUT flock — checking "file is valid YAML"
+# would not detect a missing lock. The thing flock actually prevents is the
+# LOST UPDATE: without the lock both processes read the same baseline and the
+# second writer clobbers the first writer's key. With flock, the second writer
+# reads the first's result, so BOTH unmanaged keys survive.
+#
+# Determinism: a large seeded baseline config widens the read-merge window so
+# the unlocked race is reliably triggered (no sleeps/timing in the assertion
+# path). Mutation-verified: deleting the two fcntl.flock() calls makes this
+# test FAIL (one key is lost), 12/12 runs; with flock it PASSES, 12/12 runs.
 # ---------------------------------------------------------------------------
-@test "flock serializes concurrent POSTs — result is one valid full YAML shape" {
-    local port
-    port="$(pick_free_port)"
-
-    # Stub gh
+@test "flock serializes concurrent POSTs across two server processes — no lost update (#837)" {
+    # Stub gh (servers call it only for /api/repos, not for config POSTs, but
+    # keep PATH consistent with the other tests).
     local BIN="$TMP/bin"
     mkdir -p "$BIN"
     cat > "$BIN/gh" <<'EOF'
@@ -295,65 +326,94 @@ echo '[]'
 EOF
     chmod +x "$BIN/gh"
 
-    # Use a long idle timeout so server does not shut down mid-test
-    IDLE_SECS=3600 PATH="$BIN:$PATH" start_server "$port"
+    # Seed a LARGE baseline config sharing the workspace both servers use.
+    # The size makes load_yaml_config (the read half of read-modify-write) take
+    # long enough that, with flock removed, the two processes deterministically
+    # read the same baseline and the lost update manifests every run. The
+    # baseline carries only managed keys; each POST adds its own unmanaged key.
+    local config_file="$TMP/autospec-fleet.yml"
+    python3 - "$config_file" <<'PY'
+import sys
+n = 8000
+lines = ["version: 1", "workspace: ws", "default_profile: baseline",
+         "parallel_repos: 1", "repos:"]
+for i in range(n):
+    lines.append(f"  - url: https://github.com/org/repo{i}")
+    lines.append("    enabled: true")
+open(sys.argv[1], "w").write("\n".join(lines) + "\n")
+PY
 
-    # Two distinct valid payloads
-    local body_a body_b
-    body_a='{"version":1,"workspace":".autospec-fleet/repos","default_profile":"profile-a","parallel_repos":1,"repos":[{"url":"https://github.com/org/repo-a","enabled":true}]}'
-    body_b='{"version":1,"workspace":".autospec-fleet/repos","default_profile":"profile-b","parallel_repos":3,"repos":[{"url":"https://github.com/org/repo-b","enabled":true}]}'
+    # Two independent servers on two ports, SHARING $TMP (workspace) + $LOCK_FILE.
+    local port_a port_b
+    port_a="$(pick_free_port)"
+    port_b="$(pick_free_port)"
 
-    # Fire both POSTs concurrently; write responses to files (subshell output
-    # capture via variable assignment runs in a subshell and cannot propagate
-    # back to the parent shell, so we use temp files instead).
-    local resp_file_a resp_file_b
-    resp_file_a="$TMP/resp_a.json"
-    resp_file_b="$TMP/resp_b.json"
-    api_post "$port" "/api/config" "$body_a" > "$resp_file_a" &
+    IDLE_SECS=3600 PATH="$BIN:$PATH" python3 "$SERVER_PY" \
+        "$port_a" "$TOKEN" "$TMP" "$GUI_HTML" "$LOCK_FILE" "0" "3600" \
+        >/dev/null 2>&1 &
+    local srv_a=$!
+    IDLE_SECS=3600 PATH="$BIN:$PATH" python3 "$SERVER_PY" \
+        "$port_b" "$TOKEN" "$TMP" "$GUI_HTML" "$LOCK_FILE" "0" "3600" \
+        >/dev/null 2>&1 &
+    local srv_b=$!
+    # Register both PIDs so teardown reaps them even if an assertion below fails
+    # before the explicit kill block.
+    EXTRA_PIDS="$srv_a $srv_b"
+
+    wait_for_port "$port_a" 50 || { kill "$srv_a" "$srv_b" 2>/dev/null; false; }
+    wait_for_port "$port_b" 50 || { kill "$srv_a" "$srv_b" 2>/dev/null; false; }
+
+    # Each POST adds a DISTINCT unmanaged key. Fire them simultaneously, one at
+    # each independent server, so only flock can serialize the shared write.
+    local resp_a resp_b
+    resp_a="$TMP/resp_a.json"
+    resp_b="$TMP/resp_b.json"
+    api_post "$port_a" "/api/config" '{"experimental_a":1}' > "$resp_a" &
     local pid_a=$!
-    api_post "$port" "/api/config" "$body_b" > "$resp_file_b" &
+    api_post "$port_b" "/api/config" '{"experimental_b":2}' > "$resp_b" &
     local pid_b=$!
     wait "$pid_a"
     wait "$pid_b"
 
-    # At least one POST must have returned saved:true
+    # Both POSTs must have been accepted (saved:true).
     python3 -c "
-import json, os
-for f in ('$resp_file_a', '$resp_file_b'):
-    if os.path.exists(f) and os.path.getsize(f) > 0:
-        d = json.loads(open(f).read())
-        if d.get('saved'):
-            print('at least one POST succeeded:', f)
-            break
-else:
-    raise AssertionError('no POST returned saved:true')
+import json
+for f in ('$resp_a', '$resp_b'):
+    d = json.loads(open(f).read())
+    assert d.get('saved') is True, f'POST did not save: {f} -> {d}'
+print('both POSTs saved')
 "
 
-    # Server does a 1-second post-save shutdown; give it time to settle
+    # Let each server's 1s post-save shutdown settle, then reap.
     sleep 2
-    GUI_PID=""
+    kill "$srv_a" "$srv_b" 2>/dev/null || true
+    wait "$srv_a" 2>/dev/null || true
+    wait "$srv_b" 2>/dev/null || true
 
-    # The on-disk file must exist and be valid YAML (no partial / corrupted write)
-    local config_file="$TMP/autospec-fleet.yml"
+    # The on-disk file must be a single intact YAML shape (atomic write) AND —
+    # the real flock guarantee — must retain BOTH unmanaged keys. Without flock
+    # the second writer clobbers the first writer's baseline read, dropping one
+    # of experimental_a / experimental_b: that is the lost update flock prevents.
     [ -f "$config_file" ]
-
     python3 -c "
 import yaml, sys
 with open(sys.argv[1]) as f:
     cfg = yaml.safe_load(f)
+assert isinstance(cfg, dict), f'not a dict / corrupted write: {type(cfg)}'
 
-assert isinstance(cfg, dict), f'not a dict: {cfg}'
-
-# Must be one of the two valid full shapes
-profile = cfg.get('default_profile')
-assert profile in ('profile-a', 'profile-b'), f'unexpected profile: {profile}'
-
-# Required keys all present
+# Managed baseline keys must survive the merge.
 for k in ('version', 'workspace', 'default_profile', 'parallel_repos', 'repos'):
-    assert k in cfg, f'missing key {k}: {cfg}'
+    assert k in cfg, f'missing managed key {k}'
+assert isinstance(cfg['repos'], list), 'repos not a list'
 
-assert isinstance(cfg['repos'], list)
-print('OK — profile:', profile)
+# The lock guarantee: NO lost update — both concurrent writers' keys present.
+assert cfg.get('experimental_a') == 1, (
+    'lost update: experimental_a missing — flock did not serialize the '
+    'read-modify-write across the two server processes')
+assert cfg.get('experimental_b') == 2, (
+    'lost update: experimental_b missing — flock did not serialize the '
+    'read-modify-write across the two server processes')
+print('OK — both unmanaged keys survived concurrent cross-process writes')
 " "$config_file"
 }
 
