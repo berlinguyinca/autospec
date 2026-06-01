@@ -72,6 +72,14 @@ teardown() {
         kill "$GUI_PID" 2>/dev/null || true
         wait "$GUI_PID" 2>/dev/null || true
     fi
+    # Kill any extra servers registered by multi-process tests (e.g. the flock
+    # contention test) so a failure before the test's own kill block cannot leak
+    # processes that hold ports.
+    local _pid
+    for _pid in ${EXTRA_PIDS:-}; do
+        kill "$_pid" 2>/dev/null || true
+        wait "$_pid" 2>/dev/null || true
+    done
     rm -rf "$TMP"
 }
 
@@ -348,6 +356,9 @@ PY
         "$port_b" "$TOKEN" "$TMP" "$GUI_HTML" "$LOCK_FILE" "0" "3600" \
         >/dev/null 2>&1 &
     local srv_b=$!
+    # Register both PIDs so teardown reaps them even if an assertion below fails
+    # before the explicit kill block.
+    EXTRA_PIDS="$srv_a $srv_b"
 
     wait_for_port "$port_a" 50 || { kill "$srv_a" "$srv_b" 2>/dev/null; false; }
     wait_for_port "$port_b" 50 || { kill "$srv_a" "$srv_b" 2>/dev/null; false; }
