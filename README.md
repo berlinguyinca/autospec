@@ -519,3 +519,22 @@ LGTM first-pass rate, and top-10 cost outliers by issue. To publish to GitHub Pa
   profiles and project board mapping.
 - [`AGENTS.md`](AGENTS.md) - repository operating contract and merge authority
   rules.
+
+## Auto context rollover (opt-in)
+
+Wraps `claude`, `codex`, and `opencode` in a tmux session monitored by
+`autospec-context-monitor`. At 50% context usage the monitor injects
+`/compact`; at 80% it triggers `/create-handoff` → `/clear` → resume — same
+terminal, same process, new conversation.
+
+**Enable:** run `bash install.sh` and answer `y` to the auto-rollover prompt.
+
+**Disable at any time:**
+- `bash install.sh --disable-auto-rollover` — removes the shim permanently.
+- `AUTOSPEC_AUTO_ROLLOVER=0 claude` — single-session bypass.
+- `command claude` — bypasses the shim entirely.
+- `touch ~/.autospec/no-auto-rollover.flag` — global kill-switch without reinstalling.
+
+Check current status with the `/autospec-rollover-status` skill. See the
+[design spec](docs/specs/2026-05-31-auto-context-rollover-design.md) for full
+architecture details.
