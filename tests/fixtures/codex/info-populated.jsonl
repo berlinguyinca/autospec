@@ -1,0 +1,2 @@
+{"type":"event","model":"gpt-5","event_msg":{"type":"response","payload":{"info":{"input_tokens":1200,"output_tokens":300},"content":"First response"}}}
+{"type":"event","model":"gpt-5","event_msg":{"type":"response","payload":{"info":{"input_tokens":800,"output_tokens":200},"content":"Second response"}}}

@@ -1,0 +1,2 @@
+{"type":"event","model":"gpt-5","event_msg":{"type":"response","payload":{"info":null,"content":"Response without explicit token counts"}}}
+{"type":"event","model":"gpt-5","event_msg":{"type":"response","payload":{"info":null,"content":"Another response without token counts, longer text here to have something to estimate"}}}
