@@ -1,11 +1,15 @@
 """State machine engine for context-window monitoring.
 
 Transitions:
-  NORMAL → COMPACTED  when pct >= 0.50
-  NORMAL → ROLLED     when pct >= 0.80  (direct climb skips COMPACTED)
+  NORMAL → COMPACTED  when pct >= 0.50  (also taken on direct climb to >=0.80;
+                                         compaction always runs first per spec)
   COMPACTED → ROLLED  when pct >= 0.80
   COMPACTED → NORMAL  when pct < 0.30   (compaction worked)
   ROLLED → NORMAL     when pct < 0.30   (new transcript detected after /clear)
+
+Spec §Threshold state machine requires NORMAL → COMPACTED → ROLLED as the only
+path: compaction must always be attempted before a rollover, since /compact
+alone often drops pct below the rollover threshold.
 
 Invariant: each transition fires at most once per state entry.
 Re-firing requires returning to the prior state first.
@@ -59,9 +63,13 @@ class Engine:
         pct = usage.used_tokens / usage.max_tokens
 
         if self._state is State.NORMAL:
-            if pct >= 0.80:
-                self._state = State.ROLLED
-                return [Action("handoff"), Action("clear"), Action("resume")]
+            # Spec §Threshold state machine: NORMAL never transitions
+            # directly to ROLLED. On a direct climb to >= 0.80 we still
+            # enter COMPACTED and emit [compact]; the next tick (still
+            # >= 0.80 because compaction hasn't taken effect yet) will
+            # transition COMPACTED -> ROLLED. This guarantees /compact is
+            # always attempted before a rollover, which often makes the
+            # rollover unnecessary.
             if pct >= 0.50:
                 self._state = State.COMPACTED
                 return [Action("compact")]

@@ -60,12 +60,28 @@ def test_g001_hook_event_argparse_rejects_unknown_event():
 
 
 def test_g001_tmux_session_still_required_without_hook_event():
-    """Without --hook-event, --tmux-session/--harness/--cwd are still required."""
-    from autospec_context_monitor.__main__ import _build_parser
+    """Without --hook-event, --tmux-session/--harness/--cwd are still required.
+
+    Validation happens after parsing (so hook-mode invocations can skip the
+    tmux args entirely); we exercise the full main() entry path which calls
+    both ``_build_parser`` and ``_validate_args``.
+    """
+    from autospec_context_monitor.__main__ import _build_parser, _validate_args
 
     parser = _build_parser()
+    args = parser.parse_args([])  # parse succeeds because all flags default to None
     with pytest.raises(SystemExit):
-        parser.parse_args([])  # nothing → fails
+        _validate_args(parser, args)
+
+
+def test_g001_hook_event_skips_tmux_requirement():
+    """`--hook-event PreCompact` alone passes _validate_args (tmux flags optional)."""
+    from autospec_context_monitor.__main__ import _build_parser, _validate_args
+
+    parser = _build_parser()
+    args = parser.parse_args(["--hook-event", "PreCompact"])
+    # Should NOT raise — hook mode makes tmux args optional.
+    _validate_args(parser, args)
 
 
 # ---------------------------------------------------------------------------
