@@ -553,9 +553,16 @@ install_context_monitor_pkg() {
     fi
 
     info "  autospec_context_monitor: pip install --user -e $pkg_dir"
-    if python3 -m pip install --user --quiet -e "$pkg_dir" 2>&1 | grep -v -E '^(WARNING|$)' >&2; then
-        true  # pip succeeded; grep just filters its noisy WARNING lines
-    fi
+    # --break-system-packages handles PEP 668 (externally-managed-environment) on
+    # Homebrew Python, Apt-managed Python 3.11+, etc.  It is a no-op on Python
+    # installations that do not enforce the marker file.
+    local pip_out
+    pip_out=$(python3 -m pip install --user --quiet --break-system-packages -e "$pkg_dir" 2>&1) || {
+        err "  autospec_context_monitor: pip install failed"
+        printf '%s\n' "$pip_out" | grep -v -E '^(WARNING|$)' >&2 || true
+        err "  Recovery: run 'python3 -m pip install --user --break-system-packages -e $pkg_dir'"
+        return 1
+    }
 
     if python3 -c "import autospec_context_monitor" 2>/dev/null; then
         info "  autospec_context_monitor: import OK"
