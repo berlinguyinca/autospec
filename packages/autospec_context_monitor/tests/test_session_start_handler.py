@@ -1,0 +1,88 @@
+"""Tests for g-011: SessionStart hook handler in _run_hook_mode.
+
+Verifies that:
+- _run_hook_mode with hook_event="SessionStart" returns without error (Option A: no-op).
+- install.sh --hook-mode claude registers SessionStart in settings.json.
+- The registration and handler are consistent (both present).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# Test 1: _run_hook_mode("SessionStart") returns without error
+# ---------------------------------------------------------------------------
+
+def test_run_hook_mode_session_start_noop(tmp_path):
+    """_run_hook_mode with SessionStart fires without raising; logs hook_noop event."""
+    from autospec_context_monitor.__main__ import _run_hook_mode
+
+    args = argparse.Namespace(
+        hook_event="SessionStart",
+        tmux_session=None,
+        harness=None,
+        cwd=None,
+        started_at=None,
+    )
+
+    # Redirect _MONITORS_DIR to tmp_path so logs don't pollute ~/.autospec/monitors.
+    import autospec_context_monitor.__main__ as _main
+    original_dir = _main._MONITORS_DIR
+    _main._MONITORS_DIR = tmp_path / "monitors"
+    try:
+        # Must return without raising.
+        _run_hook_mode(args)
+    finally:
+        _main._MONITORS_DIR = original_dir
+
+    # Log file must contain hook_noop event.
+    logf = tmp_path / "monitors" / "hook-SessionStart.log"
+    assert logf.exists(), "hook-SessionStart.log must be written"
+    events = [json.loads(l)["event"] for l in logf.read_text().splitlines() if l.strip()]
+    assert "hook_noop" in events, (
+        "SessionStart handler must log a hook_noop event; events: " + str(events)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 2: install.sh --hook-mode claude registers SessionStart
+# ---------------------------------------------------------------------------
+
+_INSTALL_SH = Path(__file__).resolve().parents[3] / "install.sh"
+
+
+@pytest.mark.skipif(not _INSTALL_SH.exists(), reason="install.sh not found")
+def test_install_sh_registers_session_start():
+    """install.sh --hook-mode claude must add hooks.SessionStart to settings.json."""
+    with tempfile.TemporaryDirectory() as tmp_home:
+        settings = Path(tmp_home) / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text("{}", encoding="utf-8")
+
+        env = {**os.environ, "HOME": tmp_home}
+        result = subprocess.run(
+            ["bash", str(_INSTALL_SH), "--hook-mode", "claude"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"install.sh failed:\n{result.stderr}"
+
+        data = json.loads(settings.read_text())
+        hooks = data.get("hooks", {})
+        assert "SessionStart" in hooks, (
+            "hooks.SessionStart must be registered by --hook-mode claude"
+        )
+        sess_cmds = hooks["SessionStart"]
+        assert any(
+            "autospec_context_monitor" in cmd and "SessionStart" in cmd
+            for cmd in sess_cmds
+        ), f"SessionStart hook must invoke autospec_context_monitor; got: {sess_cmds}"

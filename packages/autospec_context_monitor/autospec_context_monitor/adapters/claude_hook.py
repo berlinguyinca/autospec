@@ -20,6 +20,15 @@ Install integration:
     ``hooks.SessionStart`` to ``~/.claude/settings.json`` (merge, not
     overwrite) so Claude Code invokes ``python -m autospec_context_monitor
     --hook-event PreCompact`` on every compaction opportunity.
+
+SessionStart handling decision (g-011):
+    Option A was chosen: ``SessionStart`` **is** registered in ``install.sh``
+    and **is** handled in ``_run_hook_mode`` (as a documented no-op reserved
+    for future resume-hint functionality).  This keeps the registered hook and
+    its handler in sync so Claude Code's dispatcher does not encounter a
+    handler-less registration.  Do NOT remove the ``SessionStart`` entry from
+    ``install.sh`` without also adding handling for it in ``_run_hook_mode``,
+    and vice versa.
 """
 from __future__ import annotations
 
