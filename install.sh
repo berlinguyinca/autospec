@@ -68,6 +68,7 @@ HARNESS_ARG="all"
 UPDATE=0
 DRY_RUN=0
 DISABLE_AUTO_ROLLOVER=0
+HOOK_MODE_ARG=""
 
 err()  { printf 'error: %s\n' "$*" >&2; }
 warn() { printf 'warn:  %s\n' "$*" >&2; }
@@ -570,6 +571,48 @@ remove_rollover_block() {
     fi
 }
 
+# Install PreCompact + SessionStart hooks into ~/.claude/settings.json.
+# Uses python3 to read-modify-write the JSON atomically (tempfile + mv).
+# Idempotent: re-running writes the same values, leaving the file hash
+# unchanged when the entries are already present.
+install_hook_mode_claude() {
+    local settings="$HOME/.claude/settings.json"
+    mkdir -p "$(dirname "$settings")"
+    [ -f "$settings" ] || printf '{}' > "$settings"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] install_hook_mode_claude: would merge hooks.PreCompact + hooks.SessionStart into $settings"
+        return 0
+    fi
+
+    python3 - "$settings" <<'PYEOF'
+import json, sys, tempfile, os, pathlib
+
+settings_path = pathlib.Path(sys.argv[1])
+data = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
+
+hooks = data.setdefault("hooks", {})
+
+monitor_cmd = "python3 -m autospec_context_monitor --hook-event"
+
+hooks.setdefault("PreCompact",    [])
+hooks.setdefault("SessionStart",  [])
+
+_pre  = monitor_cmd + " PreCompact"
+_sess = monitor_cmd + " SessionStart"
+
+if _pre  not in hooks["PreCompact"]:
+    hooks["PreCompact"].append(_pre)
+if _sess not in hooks["SessionStart"]:
+    hooks["SessionStart"].append(_sess)
+
+tmp = settings_path.with_suffix(".json.tmp")
+tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+tmp.replace(settings_path)
+print(f"install_hook_mode_claude: merged PreCompact + SessionStart into {settings_path}")
+PYEOF
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --skill)
@@ -594,6 +637,13 @@ while [ $# -gt 0 ]; do
             ;;
         --disable-auto-rollover)
             DISABLE_AUTO_ROLLOVER=1
+            ;;
+        --hook-mode)
+            shift
+            HOOK_MODE_ARG="${1:-}"
+            ;;
+        --hook-mode=*)
+            HOOK_MODE_ARG="${1#--hook-mode=}"
             ;;
         -h|--help)
             usage
@@ -780,6 +830,10 @@ if [ "$failures" -gt 0 ]; then
 fi
 if [ "$DISABLE_AUTO_ROLLOVER" -eq 1 ]; then
     remove_rollover_block
+    exit 0
+fi
+if [ "$HOOK_MODE_ARG" = "claude" ]; then
+    install_hook_mode_claude
     exit 0
 fi
 prompt_user_for_auto_rollover
