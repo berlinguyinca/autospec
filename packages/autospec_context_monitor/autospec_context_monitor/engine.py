@@ -53,6 +53,10 @@ class Engine:
     def state(self) -> State:
         return self._state
 
+    def reset(self) -> None:
+        """Reset state to NORMAL (called when a new transcript is detected)."""
+        self._state = State.NORMAL
+
     def classify(self, usage: Usage) -> list[Action]:
         """Return Actions that should be executed for *usage*.
 

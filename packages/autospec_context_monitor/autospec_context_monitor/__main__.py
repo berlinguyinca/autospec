@@ -498,6 +498,10 @@ def main(argv: list[str] | None = None) -> None:
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
     # ---- poll loop ----
+    # Track the transcript path seen when ROLLED state was entered so that
+    # a new transcript (new path) triggers an immediate reset to NORMAL.
+    last_transcript: Path | None = None
+
     try:
         while True:
             if _KILL_SWITCH.exists():
@@ -510,6 +514,17 @@ def main(argv: list[str] | None = None) -> None:
 
             try:
                 transcript = adapter.find_transcript(hint)
+
+                # ROLLED → NORMAL on new transcript detection (g-016).
+                if engine.state is State.ROLLED and transcript and transcript != last_transcript:
+                    engine.reset()
+                    last_transcript = transcript
+                    import logging as _logging
+                    _logging.getLogger(__name__).info(
+                        "[autospec] new transcript detected, resetting to NORMAL"
+                    )
+                    _log(logf, {"event": "rolled_reset", "transcript": str(transcript)})
+
                 usage: Usage = adapter.read_usage(transcript)
                 _log(logf, {
                     "event": "usage",
@@ -538,6 +553,10 @@ def main(argv: list[str] | None = None) -> None:
                         engine._state = State.COMPACTED  # noqa: SLF001
                         _log(logf, {"event": "state_reverted", "state": "COMPACTED"})
                         break
+
+                # Update last_transcript after each successful tick so the
+                # ROLLED→NORMAL check compares against a stable baseline.
+                last_transcript = transcript
             except TranscriptNotFoundError as exc:
                 _log(logf, {"event": "no_transcript", "err": str(exc)})
             except SessionGone:
