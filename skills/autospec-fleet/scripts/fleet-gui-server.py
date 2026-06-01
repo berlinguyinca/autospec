@@ -114,9 +114,9 @@ def auth_ok(handler):
     return qs.get("t", [""])[0] == TOKEN
 
 
-def _arm_shutdown():
+def schedule_shutdown(post_save=False):
     """Trigger server shutdown after a short delay (once-mode or post-save)."""
-    delay = 0.1 if ONCE else 1.0
+    delay = 1.0 if post_save and not ONCE else 0.1
     threading.Timer(delay, shutdown_event.set).start()
 
 
@@ -142,11 +142,11 @@ class FleetHandler(BaseHTTPRequestHandler):
         elif path == "/api/repos":
             self._handle_repos()
             if ONCE:
-                _arm_shutdown()
+                schedule_shutdown(post_save=False)
         elif path == "/api/config":
             self._handle_config_get()
             if ONCE:
-                _arm_shutdown()
+                schedule_shutdown(post_save=False)
         else:
             self.send_json(404, {"error": "not_found"})
 
@@ -177,7 +177,7 @@ class FleetHandler(BaseHTTPRequestHandler):
         else:
             self.send_json(404, {"error": "gui_html_not_found", "path": GUI_HTML})
         if ONCE:
-            _arm_shutdown()
+            schedule_shutdown(post_save=False)
 
     def _handle_repos(self):
         try:
@@ -246,7 +246,7 @@ class FleetHandler(BaseHTTPRequestHandler):
         finally:
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
             lock_fd.close()
-        _arm_shutdown()
+        schedule_shutdown(post_save=True)
 
 
 def _merge_config(config_path, new_data):
