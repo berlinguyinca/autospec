@@ -114,6 +114,48 @@ api_post() {
         "http://127.0.0.1:${port}${path}"
 }
 
+# raw_get <port> <path> [token-header-value]
+# GET without the api_get convenience header. If a third arg is given it is sent
+# verbatim as the X-Autospec-Token header value (used to send a WRONG token); if
+# omitted, NO token header is sent at all. Prints "<body>\n<http_code>" so a test
+# can assert both the status line and the JSON body. Used by the auth (#838) tests
+# which must reach the server with bad/absent credentials — the api_* helpers
+# always attach the correct token and so cannot exercise auth_ok's reject path.
+raw_get() {
+    local port="$1" path="$2"
+    if [[ $# -ge 3 ]]; then
+        curl -s -w '\n%{http_code}' \
+            -H "X-Autospec-Token: $3" \
+            "http://127.0.0.1:${port}${path}"
+    else
+        curl -s -w '\n%{http_code}' \
+            "http://127.0.0.1:${port}${path}"
+    fi
+}
+
+# raw_post <port> <path> <json-body> [token-header-value]
+# POST counterpart to raw_get. Omit the token arg to send no token header; pass a
+# value to send a wrong token. Prints "<body>\n<http_code>".
+raw_post() {
+    local port="$1" path="$2" body="$3"
+    if [[ $# -ge 4 ]]; then
+        curl -s -w '\n%{http_code}' -X POST \
+            -H "X-Autospec-Token: $4" \
+            -H "Content-Type: application/json" \
+            -d "$body" \
+            "http://127.0.0.1:${port}${path}"
+    else
+        curl -s -w '\n%{http_code}' -X POST \
+            -H "Content-Type: application/json" \
+            -d "$body" \
+            "http://127.0.0.1:${port}${path}"
+    fi
+}
+
+# http_code_of / body_of: split the two-line raw_* output.
+http_code_of() { printf '%s\n' "$1" | tail -n1; }
+body_of()      { printf '%s\n' "$1" | sed '$d'; }
+
 # ---------------------------------------------------------------------------
 # Test 1: backend sort order — pushedAt desc
 # ---------------------------------------------------------------------------
@@ -513,4 +555,109 @@ assert cfg.get('experimental_thing') == 42, f'unmanaged key lost on GET: {cfg}'
 assert cfg.get('default_profile') == 'changed-profile', f'managed update lost: {cfg}'
 assert cfg.get('repos') == [], f'empty repos should round-trip as [] not {cfg.get(\"repos\")!r}: {cfg}'
 " "$get_resp"
+}
+
+# ---------------------------------------------------------------------------
+# Test 7: auth/token enforcement — 401 on missing/wrong token (#838)
+#
+# The AC "the HTTP server requires the URL token" is enforced solely by
+# auth_ok (fleet-gui-server.py): the JSON API routes return
+# 401 {"error":"unauthorized"} unless the request carries the correct token via
+# the X-Autospec-Token header OR the ?t= query param, and the HTML route
+# (_serve_html) re-checks auth_ok and returns a bare 401. Before this test every
+# existing test sent the correct token, so auth_ok could be inverted or deleted
+# and the suite would stay green.
+#
+# This test reaches GET /api/repos, GET /api/config, POST /api/config and GET /
+# with (a) NO token and (b) a WRONG token, asserting HTTP 401, the
+# {"error":"unauthorized"} body on the JSON routes, and — the destructive part —
+# that an unauthorized POST writes NO config file. As a positive control it also
+# confirms the ?t= query-param path authenticates a GET, so the assertions pin
+# auth_ok's real accept/reject contract rather than a blanket "everything 401s".
+#
+# Mutation-verified (see commit): with a copy of the server whose auth_ok is
+# forced to `return True`, every reject assertion here FAILS (routes answer 200
+# and the POST writes the file); against the real server they all PASS. So this
+# test genuinely fails when auth is broken — it cannot pass while real auth fails.
+# ---------------------------------------------------------------------------
+@test "auth enforcement — missing/wrong token yields 401 and no write (#838)" {
+    local port
+    port="$(pick_free_port)"
+
+    # Stub gh so the server starts (and so a 401 on /api/repos is provably the
+    # auth gate, not a missing-gh 503: with auth disabled this stub would let the
+    # route return 200, which is exactly what the mutation check relies on).
+    local BIN="$TMP/bin"
+    mkdir -p "$BIN"
+    cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[]'
+EOF
+    chmod +x "$BIN/gh"
+
+    # Ensure no config file exists going in, so a POST that is (wrongly) accepted
+    # would create one — the absence check below is then meaningful.
+    local config_file="$TMP/autospec-fleet.yml"
+    rm -f "$config_file"
+
+    PATH="$BIN:$PATH" start_server "$port"
+
+    local resp code body
+    local wrong="not-the-token"
+
+    # --- GET /api/repos: no token, then wrong token -> 401 unauthorized ----
+    resp="$(raw_get "$port" "/api/repos")"
+    code="$(http_code_of "$resp")"; body="$(body_of "$resp")"
+    [ "$code" = "401" ]
+    [[ "$body" == *'"error": "unauthorized"'* ]]
+
+    resp="$(raw_get "$port" "/api/repos" "$wrong")"
+    code="$(http_code_of "$resp")"; body="$(body_of "$resp")"
+    [ "$code" = "401" ]
+    [[ "$body" == *'"error": "unauthorized"'* ]]
+
+    # --- GET /api/config: no token, then wrong token -> 401 unauthorized ---
+    resp="$(raw_get "$port" "/api/config")"
+    code="$(http_code_of "$resp")"; body="$(body_of "$resp")"
+    [ "$code" = "401" ]
+    [[ "$body" == *'"error": "unauthorized"'* ]]
+
+    resp="$(raw_get "$port" "/api/config" "$wrong")"
+    code="$(http_code_of "$resp")"; body="$(body_of "$resp")"
+    [ "$code" = "401" ]
+    [[ "$body" == *'"error": "unauthorized"'* ]]
+
+    # --- POST /api/config: no token, then wrong token -> 401 AND no file ---
+    local post_body='{"version":1,"workspace":"x","default_profile":"p","parallel_repos":1,"repos":[]}'
+
+    resp="$(raw_post "$port" "/api/config" "$post_body")"
+    code="$(http_code_of "$resp")"; body="$(body_of "$resp")"
+    [ "$code" = "401" ]
+    [[ "$body" == *'"error": "unauthorized"'* ]]
+    # An unauthorized POST must NOT have written the config file.
+    [ ! -f "$config_file" ]
+
+    resp="$(raw_post "$port" "/api/config" "$post_body" "$wrong")"
+    code="$(http_code_of "$resp")"; body="$(body_of "$resp")"
+    [ "$code" = "401" ]
+    [[ "$body" == *'"error": "unauthorized"'* ]]
+    [ ! -f "$config_file" ]
+
+    # --- GET / (HTML route): no token, then wrong token -> bare 401 --------
+    # _serve_html re-checks auth_ok and replies 401 with no JSON body.
+    resp="$(raw_get "$port" "/")"
+    code="$(http_code_of "$resp")"
+    [ "$code" = "401" ]
+
+    resp="$(raw_get "$port" "/" "$wrong")"
+    code="$(http_code_of "$resp")"
+    [ "$code" = "401" ]
+
+    # --- Positive control: the ?t= query-param path DOES authenticate. -----
+    # This pins auth_ok's accept branch too, so the test asserts the real
+    # accept/reject contract rather than "every request 401s" (which would still
+    # pass if auth_ok were hard-wired to reject everything).
+    resp="$(raw_get "$port" "/api/config?t=$TOKEN")"
+    code="$(http_code_of "$resp")"
+    [ "$code" = "200" ]
 }
