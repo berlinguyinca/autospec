@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# scripts/autospec-session — create a tmux session, launch a harness, and
+# optionally spawn the context-window monitor daemon.
+#
+# Usage:
+#   autospec-session <harness> [harness-args...] [--no-monitor]
+#   autospec-session --doctor
+#
+# <harness>: claude | codex | opencode (or any executable)
+# --no-monitor: skip spawning the Python monitor daemon
+# --doctor:     check system health and exit
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+err()  { printf 'autospec-session: %s\n' "$*" >&2; }
+info() { printf 'autospec-session: %s\n' "$*"; }
+
+usage() {
+    cat <<EOF
+Usage: autospec-session <harness> [args...] [--no-monitor]
+       autospec-session --doctor
+
+Options:
+  --no-monitor   Start the tmux session without the context-monitor daemon.
+  --doctor       Run the context-monitor health check and exit.
+  -h, --help     Show this help message.
+
+Examples:
+  autospec-session claude
+  autospec-session codex --no-monitor
+  autospec-session opencode --some-flag
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+if [[ $# -eq 0 ]]; then
+    err "harness argument required."
+    usage >&2
+    exit 1
+fi
+
+case "${1:-}" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    --doctor)
+        exec python3 -m autospec_context_monitor.doctor "$@"
+        ;;
+esac
+
+harness="$1"; shift
+
+# Scan remaining args for --no-monitor (may appear anywhere after harness)
+no_monitor=0
+remaining_args=()
+for arg in "$@"; do
+    if [[ "$arg" == "--no-monitor" ]]; then
+        no_monitor=1
+    else
+        remaining_args+=("$arg")
+    fi
+done
+set -- "${remaining_args[@]+"${remaining_args[@]}"}"
+
+# ---------------------------------------------------------------------------
+# Pre-flight checks
+# ---------------------------------------------------------------------------
+
+if ! command -v tmux >/dev/null 2>&1; then
+    err "tmux not installed. Install tmux and retry."
+    exit 127
+fi
+
+# ---------------------------------------------------------------------------
+# Generate unique session name: as-<8 hex chars>
+# ---------------------------------------------------------------------------
+
+if command -v uuidgen >/dev/null 2>&1; then
+    session="as-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-' | cut -c1-8)"
+else
+    # Fallback: use /proc/sys/kernel/random/uuid or od
+    session="as-$(od -A n -t x1 -N 4 /dev/urandom | tr -d ' \n')"
+fi
+
+info "Creating tmux session '${session}' with harness '${harness}'."
+
+# ---------------------------------------------------------------------------
+# Create detached tmux session running the harness
+# ---------------------------------------------------------------------------
+
+started_at="$(date +%s)"
+
+if [[ $# -gt 0 ]]; then
+    tmux new-session -d -s "$session" "$harness" "$@"
+else
+    tmux new-session -d -s "$session" "$harness"
+fi
+
+# ---------------------------------------------------------------------------
+# Spawn monitor daemon (unless --no-monitor)
+# ---------------------------------------------------------------------------
+
+mon_pid=""
+
+if [[ "$no_monitor" -eq 0 ]]; then
+    monitor_log_dir="${HOME}/.autospec/monitors"
+    mkdir -p "$monitor_log_dir"
+    boot_log="${monitor_log_dir}/${session}.boot.log"
+
+    nohup python3 -m autospec_context_monitor \
+        --tmux-session "$session" \
+        --harness "$harness" \
+        --cwd "$PWD" \
+        --started-at "$started_at" \
+        >>"$boot_log" 2>&1 &
+    mon_pid=$!
+
+    info "Monitor daemon started (PID ${mon_pid}). Boot log: ${boot_log}"
+
+    # Register tmux hook to SIGTERM the monitor when the session closes.
+    # session-closed fires after the last window exits.
+    tmux set-hook -t "$session" session-closed \
+        "run-shell 'kill -TERM ${mon_pid} 2>/dev/null || true'"
+fi
+
+# ---------------------------------------------------------------------------
+# Attach to the session (replaces the current process)
+# ---------------------------------------------------------------------------
+
+exec tmux attach-session -t "$session"
