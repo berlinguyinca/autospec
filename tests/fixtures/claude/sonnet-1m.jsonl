@@ -1,0 +1,1 @@
+{"type":"message","message":{"role":"assistant","model":"claude-sonnet-4-5-1m","usage":{"input_tokens":5000,"output_tokens":1000},"content":[{"type":"text","text":"Long context response"}]}}
