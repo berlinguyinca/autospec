@@ -226,6 +226,8 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 >
 > Create labels (idempotent with `--force`): `auto-implement` (#0e8a16), `epic` (#b60205), plus any domain labels the spec calls for. Then create exactly N issues — first an EPIC umbrella (no `auto-implement` label, just `epic` + domain), then N-1 children all carrying `auto-implement`. After creating children, edit the umbrella body with a checklist linking them. Return JSON: `{umbrella, children:[…], labels_created:[…]}`. Use `gh` CLI only. Do NOT modify code. Do NOT push branches. Do NOT create PRs.
 >
+> **Label guard — Phase 3 ONLY:** Children receive `auto-implement` plus any domain labels. Do NOT apply `needs-autospec-template`, `ctx:*`, or `reasoning:*` at child-create time. Those labels are applied exclusively by Phase 3.5 after it evaluates the child body. Applying them in Phase 3 causes Phase 3.5 to skip those children entirely, defeating classification.
+>
 > Each child body must be a **self-contained mini-spec** sized for execution by a 32B-class local LLM, with these sections in order:
 >
 > - **Goal** — 1 sentence outcome.
