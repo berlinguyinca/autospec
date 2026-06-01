@@ -217,6 +217,36 @@ is_skipped() {
     esac
 }
 
+# ── inline escape-hatch (linter:allow-) ──────────────────────────────────────
+
+# is_line_allowed RULE_ID FILE LINENO
+# Returns 0 (allowed/suppressed) if the line at LINENO in FILE, or the
+# immediately preceding line, contains a valid inline escape hatch comment:
+#   # linter:allow-RULE_ID <reason>
+# A bare "# linter:allow-X" without a reason is NOT honored.
+is_line_allowed() {
+    local rule_id="$1"
+    local file="$2"
+    local lineno="$3"
+    [ -f "$file" ] || return 1
+    local pattern="linter:allow-${rule_id}[[:space:]]+[^[:space:]]"
+    # Check the line itself and the line immediately above
+    local check_line prev_line=""
+    check_line="$(sed -n "${lineno}p" "$file" 2>/dev/null || true)"
+    if [ "$lineno" -gt 1 ]; then
+        prev_line="$(sed -n "$((lineno - 1))p" "$file" 2>/dev/null || true)"
+    fi
+    if printf '%s' "$check_line" | grep -qE "$pattern"; then
+        emit_info "$rule_id" "$file" "$lineno" "suppressed by linter:allow-${rule_id}"
+        return 0
+    fi
+    if [ -n "$prev_line" ] && printf '%s' "$prev_line" | grep -qE "$pattern"; then
+        emit_info "$rule_id" "$file" "$lineno" "suppressed by linter:allow-${rule_id} on preceding line"
+        return 0
+    fi
+    return 1
+}
+
 # ── diff acquisition ──────────────────────────────────────────────────────────
 
 TMP_DIFF="$(mktemp -t lint-impl-diff.XXXXXX)"
