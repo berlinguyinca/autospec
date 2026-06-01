@@ -938,12 +938,14 @@ EOF
 }
 
 # check_function_loc — emit COMPLEXITY finding for functions exceeding max LOC.
+# Shell (.sh/.bash) functions are already checked by detect_complexity (diff-based);
+# this check covers Python, TypeScript, JavaScript, and Go using full-file analysis.
 check_function_loc() {
     while IFS= read -r diff_file; do
         [ -z "$diff_file" ] && continue
         [ -f "$diff_file" ] || continue
         case "$diff_file" in
-            *.py|*.ts|*.js|*.go|*.sh) ;;
+            *.py|*.ts|*.js|*.go) ;;
             *) continue ;;
         esac
         local func_name func_start func_loc
@@ -955,25 +957,6 @@ check_function_loc() {
                         print func_name ":" func_start ":" (NR - func_start)
                     }
                     func_name=$2; func_start=NR
-                }
-                END {
-                    if (func_name && NR - func_start > max_loc) {
-                        print func_name ":" func_start ":" (NR - func_start)
-                    }
-                }
-            ' max_loc="$_COMPLEXITY_MAX_FUNC_LOC" "$diff_file" | while IFS=: read -r fname fstart floc; do
-                emit_capped "COMPLEXITY" "$diff_file" "$fstart" \
-                    "function '${fname}' is ${floc} LOC (AUTOSPEC_MAX_FUNC_LOC=${_COMPLEXITY_MAX_FUNC_LOC})"
-            done
-        fi
-        # Shell/bash: fname() { ... }
-        if printf '%s' "$diff_file" | grep -qE '\.(sh|bash)$'; then
-            awk '
-                /^[A-Za-z_][A-Za-z_0-9]*[[:space:]]*\(\)/ {
-                    if (func_name && NR - func_start > max_loc) {
-                        print func_name ":" func_start ":" (NR - func_start)
-                    }
-                    func_name=$1; func_start=NR
                 }
                 END {
                     if (func_name && NR - func_start > max_loc) {
