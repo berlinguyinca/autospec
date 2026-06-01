@@ -605,6 +605,11 @@ remove_rollover_block() {
     if [ -f "$fish_config" ] && grep -qF "$_ROLLOVER_MARKER_START" "$fish_config"; then
         local tmp
         tmp=$(mktemp)
+        # WARNING: fish uninstall uses awk to remove lines between marker comments.
+        # If you have manually edited or removed the marker comments, this awk command
+        # will leave stale autospec lines in config.fish.
+        # Recovery: manually delete lines between '# >>> autospec auto-rollover >>>'
+        # and '# <<< autospec auto-rollover <<<' in ~/.config/fish/config.fish.
         awk "
             /$_ROLLOVER_MARKER_START/{skip=1}
             !skip{print}
