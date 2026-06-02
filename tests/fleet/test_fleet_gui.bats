@@ -1027,3 +1027,75 @@ d = json.load(sys.stdin)
 assert d['error'] == 'gh_bad_output', f'expected gh_bad_output, got: {d}'
 "
 }
+
+# ---------------------------------------------------------------------------
+# Test 16: idle-timeout AC — AUTOSPEC_GUI_IDLE_SECS controls self-exit (#845)
+#
+# The spec requires the server to exit after IDLE_SECS of no requests, printing
+# 'fleet-gui: idle_timeout — shutting down' on stdout. The env var
+# AUTOSPEC_GUI_IDLE_SECS tunes this. Previously no test exercised this path;
+# the test suite only set IDLE_SECS=3600 to PREVENT the timeout from firing.
+#
+# This test starts the server with IDLE_SECS=1 (via positional argv[7]), makes
+# NO requests, waits one full idle_watcher poll cycle (5 s) plus buffer, then
+# asserts:
+#   - The server process has exited (process is gone)
+#   - The captured stdout contains 'idle_timeout'
+#
+# Timing rationale: idle_watcher sleeps 5 s between checks. With IDLE_SECS=1
+# the condition triggers on the FIRST check (≥1 s after start). The poll loop
+# interval caps worst-case latency at ~5 s; we wait 8 s to be safe on slow CI.
+#
+# Mutation-verified: changing IDLE_SECS to 9999 prevents the watcher from
+# triggering and the "process exited" assertion fails; removing the idle_watcher
+# thread entirely also fails both assertions.
+# ---------------------------------------------------------------------------
+@test "idle-timeout: AUTOSPEC_GUI_IDLE_SECS=1 → server self-exits with idle_timeout log (#845)" {
+    local port
+    port="$(pick_free_port)"
+
+    local BIN="$TMP/bin"
+    mkdir -p "$BIN"
+    cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[]'
+EOF
+    chmod +x "$BIN/gh"
+
+    # Capture stdout so we can assert the idle_timeout log line.
+    local out_file="$TMP/server-stdout.log"
+
+    # Start with IDLE_SECS=1 (argv[7]) — the watcher will fire on its first
+    # 5-second sleep once 1s of inactivity has elapsed.
+    # GUI_PID is set so teardown will attempt kill, but we expect it to have
+    # already self-exited before the assertion runs.
+    PATH="$BIN:$PATH" python3 "$SERVER_PY" \
+        "$port" "$TOKEN" "$TMP" "$GUI_HTML" "$LOCK_FILE" "0" "1" \
+        >"$out_file" 2>&1 &
+    GUI_PID=$!
+
+    # Wait for the server to be ready before we start the idle clock.
+    wait_for_port "$port" 30 || {
+        echo "server did not start" >&2
+        return 1
+    }
+
+    # Make NO requests — just wait for the idle_watcher to fire.
+    # idle_watcher: sleep(5) then check time.time() - last_activity > IDLE_SECS=1
+    # So worst-case shutdown is ~5 s after last_activity (set at startup).
+    # We wait up to 12 s in 0.5 s steps to stay deterministic on slow CI.
+    local i
+    for (( i=0; i<24; i++ )); do
+        sleep 0.5
+        kill -0 "$GUI_PID" 2>/dev/null || break
+    done
+
+    # Assert: process must have exited on its own.
+    ! kill -0 "$GUI_PID" 2>/dev/null
+
+    # Clear GUI_PID — teardown kill is harmless but not needed.
+    GUI_PID=""
+
+    # Assert: stdout must contain the idle_timeout sentinel.
+    grep -q "idle_timeout" "$out_file"
+}
