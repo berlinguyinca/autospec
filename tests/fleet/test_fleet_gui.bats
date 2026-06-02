@@ -916,3 +916,66 @@ EOF
     [ "$http_code" = "200" ]
     echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('warning')=='yaml_partial', d"
 }
+
+# ---------------------------------------------------------------------------
+# Test 14: auth_ok uses hmac.compare_digest — constant-time token comparison (#843)
+#
+# Token comparison with == is theoretically timing-observable; hmac.compare_digest
+# provides a constant-time alternative. The fix: replace both == TOKEN comparisons
+# in auth_ok with hmac.compare_digest(candidate, TOKEN).
+#
+# This test has two parts:
+#   1. Static: auth_ok in fleet-gui-server.py must use hmac.compare_digest (grep).
+#      This FAILS on the unfixed server (where == TOKEN is used) and PASSES once
+#      the fix is applied — it is the primary "failing test first" gate.
+#   2. Functional: the server must still correctly accept the right token (200)
+#      and reject a wrong token (401), confirming the replacement did not break
+#      auth semantics.
+#
+# Mutation-verified: reverting hmac.compare_digest back to == TOKEN causes the
+# grep assertion to fail; changing hmac.compare_digest to always return True causes
+# the wrong-token 401 assertion to fail.
+# ---------------------------------------------------------------------------
+@test "auth_ok uses hmac.compare_digest for constant-time token comparison (#843)" {
+    # --- Part 1: static check — source must use hmac.compare_digest in auth_ok ---
+    # grep for hmac.compare_digest in the server source; fails on unfixed code.
+    grep -q "hmac.compare_digest" "$SERVER_PY"
+
+    # --- Part 2: functional — correct token allows, wrong token blocks ----------
+    local port
+    port="$(pick_free_port)"
+
+    local BIN="$TMP/bin"
+    mkdir -p "$BIN"
+    cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[]'
+EOF
+    chmod +x "$BIN/gh"
+
+    PATH="$BIN:$PATH" start_server "$port"
+
+    local resp code
+
+    # Correct token via header → 200
+    resp="$(curl -s -w '\n%{http_code}' \
+        -H "X-Autospec-Token: $TOKEN" \
+        "http://127.0.0.1:${port}/api/config")"
+    code="$(http_code_of "$resp")"
+    [ "$code" = "200" ]
+
+    # Correct token via ?t= query param → 200
+    resp="$(raw_get "$port" "/api/config?t=$TOKEN")"
+    code="$(http_code_of "$resp")"
+    [ "$code" = "200" ]
+
+    # Wrong token via header → 401
+    resp="$(raw_get "$port" "/api/config" "wrong-token")"
+    code="$(http_code_of "$resp")"
+    [ "$code" = "401" ]
+
+    # Wrong token via ?t= query param → 401
+    resp="$(raw_get "$port" "/api/config?t=wrong-token")"
+    code="$(http_code_of "$resp")"
+    [ "$code" = "401" ]
+}
