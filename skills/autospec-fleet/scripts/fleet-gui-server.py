@@ -304,7 +304,11 @@ class FleetHandler(BaseHTTPRequestHandler):
         if result.returncode != 0:
             self._repos_error(result.stderr.strip())
             return
-        repos = json.loads(result.stdout or "[]")
+        try:
+            repos = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError:
+            self.send_json(503, {"error": "gh_bad_output"})
+            return
         repos.sort(key=lambda r: r.get("pushedAt", ""), reverse=True)
         self.send_json(200, repos)
 
