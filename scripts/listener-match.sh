@@ -339,7 +339,16 @@ EOF
             esac
         done
 
-        if [ "$_is_gerund" -eq 0 ] && [ "$_is_suppressed" -eq 0 ]; then
+        # Suppressed "run the <non-autospec-object>" (e.g. "run the build",
+        # "run the tests"): the user means that object, not autospec. Emit a
+        # clean no-match and return so an embedded build/ship/implement word in
+        # the object cannot re-trigger autospec-run in the verb map below.
+        if [ "$_is_suppressed" -eq 1 ]; then
+            emit_classify_json false "" "" none 0 false "" ""
+            return 0
+        fi
+
+        if [ "$_is_gerund" -eq 0 ]; then
             if is_imperative "$text_lc"; then
                 emit_classify_json true autospec-run run imperative 0.7 "$is_auto" "" auto-implement-open
             else
@@ -347,7 +356,7 @@ EOF
             fi
             return 0
         fi
-        # Suppressed / gerund: fall through to remaining verbs.
+        # Gerund ("running"): fall through to remaining verbs.
     fi
 
     # Existing branches (preserved in order).

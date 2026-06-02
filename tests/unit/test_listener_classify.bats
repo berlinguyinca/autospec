@@ -105,25 +105,21 @@ setup() {
 
 # ── Suppressed run-objects: must NOT be autospec-run ─────────────────────────
 
-@test "classify: 'run the tests' → NOT autospec-run" {
+@test "classify: 'run the tests' → clean no-match (match:false, skill:null)" {
     run "$MATCH" --classify "run the tests"
     [ "$status" -eq 0 ]
-    skill="$(printf '%s' "$output" | jq -r .skill)"
-    [ "$skill" != "autospec-run" ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "null" ]
 }
 
-@test "classify: 'run the build' → not routed to autospec-run (match:false or skill differs)" {
+@test "classify: 'run the build' → clean no-match (embedded 'build' must not leak autospec-run)" {
     run "$MATCH" --classify "run the build"
     [ "$status" -eq 0 ]
-    # Either no match, or the skill is not autospec-run via run-branch routing.
-    match_val="$(printf '%s' "$output" | jq -r .match)"
-    skill="$(printf '%s' "$output" | jq -r .skill)"
-    # At least one of: match is false, or the skill is something other than
-    # autospec-run being routed by the run-scoped/bare branch.
-    # We verify the *build* route (not autospec-run via run-path) by checking
-    # the trigger is not "run".
-    trigger="$(printf '%s' "$output" | jq -r .trigger)"
-    [ "$match_val" = "false" ] || [ "$trigger" != "run" ]
+    # Regression: a suppressed "run the <object>" must be a clean no-match —
+    # the embedded 'build' verb must NOT re-trigger autospec-run as stale
+    # metadata. match:false AND skill:null.
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "null" ]
 }
 
 @test "classify: 'run lint' → NOT autospec-run" {
