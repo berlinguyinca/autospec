@@ -171,6 +171,11 @@ main() {
 
     local port token workspace gui_html lock_file url
     port="$(pick_port)"
+    if [[ -z "$port" ]]; then
+        printf 'fleet-gui: no free port found after 20 attempts\n' >&2
+        printf 'code_health:fleet_gui_no_free_port\n' >&2
+        exit 1
+    fi
     token="$(pick_token)"
     workspace="${PWD}"
     gui_html="${SKILL_DIR}/gui/index.html"

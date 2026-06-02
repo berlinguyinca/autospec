@@ -737,6 +737,54 @@ EOF
 # Mutation-verified: gating browser-open on NO_BROWSER alone (dropping the ONCE
 # guard) makes the browser stub fire and this test FAIL.
 # ---------------------------------------------------------------------------
+@test "pick_port exhaustion — exits 1 with clear message and code_health sentinel (#840)" {
+    local BIN="$TMP/bin"
+    mkdir -p "$BIN"
+    cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[]'
+EOF
+    chmod +x "$BIN/gh"
+
+    # Create a wrapper script that calls fleet-gui.sh but injects a pick_port
+    # override via a PICK_PORT env var. We patch fleet-gui.sh's pick_port by
+    # pre-binding all ports in the range — instead, the simplest approach is to
+    # create a fleet-gui-wrapper.sh that sources a temporary override.
+    #
+    # Since fleet-gui.sh calls main at bottom and is not sourceable, we create a
+    # tiny helper that invokes fleet-gui.sh via env trickery: override PICK_PORT_CMD
+    # to a script that prints nothing. But fleet-gui.sh calls python3 directly.
+    #
+    # Cleanest verified approach: write a python3 shim that prints nothing for
+    # the pick_port invocation and passes through all others. The pick_port call
+    # is uniquely identified by "-c" arg containing "socket" AND "random.randint".
+    cat > "$BIN/python3" <<'PYEOF'
+#!/usr/bin/env bash
+# Shim: intercept pick_port's specific -c invocation (socket + random.randint),
+# print nothing to simulate all 20 ports busy.  All other python3 calls (like
+# pick_token, fleet-gui-server.py etc.) are forwarded to the real interpreter.
+joined="${*}"
+if [[ "$joined" == *"random.randint"* && "$joined" == *"socket"* ]]; then
+    # Simulate exhaustion: print nothing and exit 0
+    exit 0
+fi
+exec /usr/bin/python3 "$@"
+PYEOF
+    chmod +x "$BIN/python3"
+
+    # fleet-gui.sh should detect the empty port, print the error, and exit 1.
+    # Use timeout to guard against any unexpected hang.
+    run bash -c "cd '$TMP' && PATH=\"$BIN:\$PATH\" timeout 10 bash '$GUI_SH' --no-browser 2>&1"
+
+    # Must exit non-zero (timeout=124 also acceptable but we expect 1)
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    # Must emit a human-readable message on stderr (captured via 2>&1)
+    [[ "$output" == *"no free port"* ]]
+    # Must emit the code_health sentinel (matches the missing-gh pattern)
+    [[ "$output" == *"code_health:fleet_gui_no_free_port"* ]]
+}
+
 @test "--once suppresses browser open even without --no-browser (#839)" {
     local BIN="$TMP/bin"
     mkdir -p "$BIN"
