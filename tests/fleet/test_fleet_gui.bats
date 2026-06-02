@@ -746,18 +746,9 @@ echo '[]'
 EOF
     chmod +x "$BIN/gh"
 
-    # Create a wrapper script that calls fleet-gui.sh but injects a pick_port
-    # override via a PICK_PORT env var. We patch fleet-gui.sh's pick_port by
-    # pre-binding all ports in the range — instead, the simplest approach is to
-    # create a fleet-gui-wrapper.sh that sources a temporary override.
-    #
-    # Since fleet-gui.sh calls main at bottom and is not sourceable, we create a
-    # tiny helper that invokes fleet-gui.sh via env trickery: override PICK_PORT_CMD
-    # to a script that prints nothing. But fleet-gui.sh calls python3 directly.
-    #
-    # Cleanest verified approach: write a python3 shim that prints nothing for
-    # the pick_port invocation and passes through all others. The pick_port call
-    # is uniquely identified by "-c" arg containing "socket" AND "random.randint".
+    # python3 shim: intercept pick_port's -c invocation (identified by "socket" AND
+    # "random.randint") and print nothing to simulate all 20 ports busy.
+    # All other python3 calls (pick_token, fleet-gui-server.py) pass through.
     cat > "$BIN/python3" <<'PYEOF'
 #!/usr/bin/env bash
 # Shim: intercept pick_port's specific -c invocation (socket + random.randint),
