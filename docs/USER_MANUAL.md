@@ -90,8 +90,8 @@ shipped during this run, emits surviving gaps as JSON (`emit-gaps.sh`), and file
 ### `/autospec-fleet`
 
 <!-- autospec-doc-scope:
-  src: ["skills/autospec-fleet/SKILL.md", "skills/autospec-fleet/README.md", "skills/autospec-fleet/scripts/fleet-run.sh", "skills/autospec-fleet/scripts/fleet-status.sh", "skills/autospec-fleet/scripts/fleet-stop.sh"]
-  reason: "User-facing invocation docs for autospec-fleet"
+  src: ["skills/autospec-fleet/SKILL.md", "skills/autospec-fleet/README.md", "skills/autospec-fleet/scripts/**", "skills/autospec-fleet/gui/**"]
+  reason: "User-facing invocation docs for autospec-fleet: CLI scripts, GUI server, and frontend"
   generated: true
 -->
 
