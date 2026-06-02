@@ -13,6 +13,7 @@ import threading
 import time
 import tempfile
 import fcntl
+import hmac
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -199,11 +200,14 @@ def dump_yaml_config(data):
 
 
 def auth_ok(handler):
-    """Return True if the request carries the correct URL token."""
-    if handler.headers.get("X-Autospec-Token", "") == TOKEN:
+    """Return True if the request carries the correct URL token.
+
+    Both comparisons use hmac.compare_digest to avoid timing side-channels.
+    """
+    if hmac.compare_digest(handler.headers.get("X-Autospec-Token", ""), TOKEN):
         return True
     qs = parse_qs(urlparse(handler.path).query)
-    return qs.get("t", [""])[0] == TOKEN
+    return hmac.compare_digest(qs.get("t", [""])[0], TOKEN)
 
 
 def schedule_shutdown(post_save=False):
