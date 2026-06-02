@@ -979,3 +979,51 @@ EOF
     code="$(http_code_of "$resp")"
     [ "$code" = "401" ]
 }
+
+# ---------------------------------------------------------------------------
+# Test 15: gh exits 0 with non-JSON stdout → 503 gh_bad_output (#844)
+#
+# _handle_repos calls json.loads(result.stdout) after checking returncode==0 only.
+# A gh that exits 0 with a non-JSON warning banner or unexpected output causes an
+# unhandled JSONDecodeError that surfaces as a 500 traceback. Fix: wrap json.loads
+# in try/except json.JSONDecodeError and return 503 {"error":"gh_bad_output"}.
+#
+# This test stubs gh to exit 0 with non-JSON stdout and asserts:
+#   - HTTP 503 (not 500)
+#   - body is {"error": "gh_bad_output"}
+#
+# Mutation-verified: removing the try/except and reverting to bare json.loads makes
+# the server return HTTP 500 (unhandled exception), causing the 503 assertion here
+# to fail.
+# ---------------------------------------------------------------------------
+@test "fail-mode: gh exits 0 with non-JSON stdout → 503 gh_bad_output (#844)" {
+    local port
+    port="$(pick_free_port)"
+    local BIN="$TMP/bin"
+    mkdir -p "$BIN"
+
+    # Stub gh: exits 0 but prints a non-JSON warning banner (simulates deprecation
+    # notice, auth banner, or format change that slips past returncode==0 check).
+    cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "Warning: this CLI version is deprecated. Please upgrade."
+exit 0
+EOF
+    chmod +x "$BIN/gh"
+
+    PATH="$BIN:$PATH" start_server "$port"
+
+    local resp http_code body
+    resp="$(curl -s -w '\n%{http_code}' \
+        -H "X-Autospec-Token: $TOKEN" \
+        "http://127.0.0.1:${port}/api/repos")"
+    http_code="$(http_code_of "$resp")"
+    body="$(body_of "$resp")"
+
+    [ "$http_code" = "503" ]
+    echo "$body" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['error'] == 'gh_bad_output', f'expected gh_bad_output, got: {d}'
+"
+}
