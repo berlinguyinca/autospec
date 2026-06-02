@@ -141,11 +141,15 @@ EOF
 # Emit the classifier JSON object. All fields always present.
 emit_classify_json() {
     # $1=match(true|false) $2=skill $3=trigger $4=intent $5=confidence $6=autonomous(true|false, optional)
+    # $7=chain(skill|empty) $8=gate(string|empty)
     match="$1"; skill="$2"; trigger="$3"; intent="$4"; conf="$5"; autonomous="${6:-false}"
+    chain="${7:-}"; gate="${8:-}"
     skill_json="null"; [ -n "$skill" ] && skill_json="\"$skill\""
     trigger_json="null"; [ -n "$trigger" ] && trigger_json="\"$trigger\""
-    printf '{"match":%s,"skill":%s,"trigger":%s,"intent":"%s","confidence":%s,"autonomous":%s}\n' \
-        "$match" "$skill_json" "$trigger_json" "$intent" "$conf" "$autonomous"
+    chain_json="null"; [ -n "$chain" ] && chain_json="\"$chain\""
+    gate_json="null"; [ -n "$gate" ] && gate_json="\"$gate\""
+    printf '{"match":%s,"skill":%s,"trigger":%s,"intent":"%s","confidence":%s,"autonomous":%s,"chain":%s,"gate":%s}\n' \
+        "$match" "$skill_json" "$trigger_json" "$intent" "$conf" "$autonomous" "$chain_json" "$gate_json"
 }
 
 # Autonomous-phrase detection (issue #662): scan the lowercased text for
@@ -267,7 +271,95 @@ EOF
     fi
 
     # Verb → skill map (D3). Order matters: most specific first.
-    skill=""; trigger=""
+    skill=""; trigger=""; chain=""; gate=""
+
+    # ── 1. Combined refine+run (most specific) ──────────────────────────────
+    # Phrases that mean "refine then also run the pipeline". Matched before
+    # bare refine/run so the combined semantics win.
+    _is_combined=0
+    for _combo in "refine and run" "refine then run" "refine & run" \
+                  "optimize and run" "optimize then run" "polish and run" \
+                  "tune up" "tune it up" "tune things up"; do
+        case "$text_lc" in
+            *"$_combo"*) _is_combined=1; break ;;
+        esac
+    done
+    if [ "$_is_combined" -eq 1 ]; then
+        if is_imperative "$text_lc"; then
+            emit_classify_json true autospec-refine refine-and-run imperative 0.8 "$is_auto" autospec-run ""
+        else
+            emit_classify_json false autospec-refine refine-and-run incidental 0.2 false "" ""
+        fi
+        return 0
+    fi
+
+    # ── 2. Run — scoped phrases (unconditional, no gate) ────────────────────
+    # Explicit "run <autospec-object>" phrases that unambiguously mean the
+    # autospec-run pipeline; no context gate required.
+    _is_run_scoped=0
+    for _scoped in "run autospec" "run the loop" "run the queue" "run the batch" \
+                   "run the pipeline" "run it" "run them" "drain the queue"; do
+        case "$text_lc" in
+            *"$_scoped"*) _is_run_scoped=1; break ;;
+        esac
+    done
+    if [ "$_is_run_scoped" -eq 1 ]; then
+        if is_imperative "$text_lc"; then
+            emit_classify_json true autospec-run run imperative 0.8 "$is_auto" "" ""
+        else
+            emit_classify_json false autospec-run run incidental 0.2 false "" ""
+        fi
+        return 0
+    fi
+
+    # ── 3. Run — bare (context-gated) ───────────────────────────────────────
+    # A bare "run" that is NOT followed by a non-autospec object. Requires the
+    # auto-implement-open gate: only route if open auto-implement issues exist.
+    # Gerund "running" and suppressed objects fall through.
+    if has_word "$text_lc" "run"; then
+        # Gerund suppressor: "running" as a word.
+        _is_gerund=0
+        case "$text_lc" in
+            *"running"*) _is_gerund=1 ;;
+        esac
+
+        # Suppressed objects: "run <non-autospec-thing>".
+        _is_suppressed=0
+        for _obj in "run the test" "run the tests" "run the suite" \
+                    "run the build" "run the builds" \
+                    "run the script" "run the scripts" \
+                    "run the server" "run the dev server" \
+                    "run the app" "run lint" "run the linter" \
+                    "run ci" "run the ci" \
+                    "run the benchmark" "run the benchmarks" \
+                    "run the migration" "run the migrations" \
+                    "run the demo" "run the command" "run the commands"; do
+            case "$text_lc" in
+                *"$_obj"*) _is_suppressed=1; break ;;
+            esac
+        done
+
+        # Suppressed "run the <non-autospec-object>" (e.g. "run the build",
+        # "run the tests"): the user means that object, not autospec. Emit a
+        # clean no-match and return so an embedded build/ship/implement word in
+        # the object cannot re-trigger autospec-run in the verb map below.
+        if [ "$_is_suppressed" -eq 1 ]; then
+            emit_classify_json false "" "" none 0 false "" ""
+            return 0
+        fi
+
+        if [ "$_is_gerund" -eq 0 ]; then
+            if is_imperative "$text_lc"; then
+                emit_classify_json true autospec-run run imperative 0.7 "$is_auto" "" auto-implement-open
+            else
+                emit_classify_json false autospec-run run incidental 0.2 false "" ""
+            fi
+            return 0
+        fi
+        # Gerund ("running"): fall through to remaining verbs.
+    fi
+
+    # Existing branches (preserved in order).
     if has_word "$text_lc" "autospec"; then
         skill="autospec"; trigger="autospec"
     elif has_word "$text_lc" "implement" || has_word "$text_lc" "build" \
@@ -276,6 +368,18 @@ EOF
         if has_word "$text_lc" "implement"; then trigger="implement"
         elif has_word "$text_lc" "build"; then trigger="build"
         else trigger="ship"; fi
+    # ── 4. Refine words ─────────────────────────────────────────────────────
+    # After implement/build/ship so those more-specific verbs take precedence;
+    # before design/spec so refine doesn't shadow them.
+    elif has_word "$text_lc" "refine" || has_word "$text_lc" "optimize" \
+        || has_word "$text_lc" "polish" || has_word "$text_lc" "improve" \
+        || has_word "$text_lc" "tune"; then
+        skill="autospec-refine"
+        if has_word "$text_lc" "refine"; then trigger="refine"
+        elif has_word "$text_lc" "optimize"; then trigger="optimize"
+        elif has_word "$text_lc" "polish"; then trigger="polish"
+        elif has_word "$text_lc" "improve"; then trigger="improve"
+        else trigger="tune"; fi
     elif has_word "$text_lc" "design" || has_word "$text_lc" "redesign" \
         || has_word "$text_lc" "new feature" \
         || (has_word "$text_lc" "spec" && ! has_word "$text_lc" "specification"); then
@@ -293,18 +397,18 @@ EOF
     # so the operator gets the end-to-end pipeline.
     if [ -z "$skill" ]; then
         if [ "$is_auto" = "true" ] && is_imperative "$text_lc"; then
-            emit_classify_json true autospec autospec imperative 0.6 true
+            emit_classify_json true autospec autospec imperative 0.6 true "" ""
         else
-            emit_classify_json false "" "" none 0 false
+            emit_classify_json false "" "" none 0 false "" ""
         fi
         return 0
     fi
 
     # A verb matched — apply the intent gate.
     if is_imperative "$text_lc"; then
-        emit_classify_json true "$skill" "$trigger" imperative 0.8 "$is_auto"
+        emit_classify_json true "$skill" "$trigger" imperative 0.8 "$is_auto" "$chain" "$gate"
     else
-        emit_classify_json false "$skill" "$trigger" incidental 0.2 false
+        emit_classify_json false "$skill" "$trigger" incidental 0.2 false "$chain" "$gate"
     fi
 }
 

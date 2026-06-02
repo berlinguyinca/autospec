@@ -101,7 +101,11 @@ Beyond the explicit issue/spec triggers, this listener routes common build/chang
 bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/listener-match.sh" --classify "<user message>"
 ```
 
-It emits `{"match":bool,"skill":...,"trigger":...,"intent":"imperative|incidental|none","confidence":0-1}`. The gate is biased to false-negatives: descriptive ("the design is nice"), past-tense ("I reviewed it"), negated ("don't implement yet"), and interrogative ("should we redesign?") uses return `match:false` and MUST NOT route. Prefer no route over a misfire.
+It emits `{"match":bool,"skill":...,"trigger":...,"intent":"imperative|incidental|none","confidence":0-1,"autonomous":bool,"chain":<skill|null>,"gate":<string|null>}`. The gate is biased to false-negatives: descriptive ("the design is nice"), past-tense ("I reviewed it"), negated ("don't implement yet"), and interrogative ("should we redesign?") uses return `match:false` and MUST NOT route. Prefer no route over a misfire.
+
+The two new trailing fields:
+- `chain` — after the primary skill completes, invoke the chained skill (e.g. `/autospec-run` after `/autospec-refine`). Null when no chain applies.
+- `gate` — before routing, the listener must satisfy the named context gate; `auto-implement-open` means run `gh issue list --repo <repo> --label auto-implement --state open --json number --jq 'length'` and route only if > 0, else stay in plain mode. Null means no gate.
 
 **Verb → skill map (D3).**
 
@@ -109,6 +113,9 @@ It emits `{"match":bool,"skill":...,"trigger":...,"intent":"imperative|incidenta
 |----------------------------------|-----------|
 | `design` / `new feature` / `spec` | `/autospec-define` |
 | `implement` / `build` / `ship` | `/autospec-run` (or `/autospec` end-to-end when no issues exist yet) |
+| `refine` / `optimize` / `polish` / `improve` / `tune` | `/autospec-refine` |
+| `run` (scoped: "run it", "run the loop", "run autospec"; bare "run" only when open `auto-implement` issues exist) | `/autospec-run` |
+| `refine and run` / `tune up` (combined) | `/autospec-refine` then `/autospec-run` |
 | `review` | `/autospec-review` |
 | `autospec …` | the umbrella `/autospec` |
 
@@ -117,6 +124,8 @@ It emits `{"match":bool,"skill":...,"trigger":...,"intent":"imperative|incidenta
 ```
 Routing to /<skill> — say "plain" to opt out.
 ```
+
+If `gate` is non-null, perform the gate check first and skip routing (plain mode) if unmet. If `chain` is non-null, after the mapped skill completes, invoke the chained skill (printing one opt-out line as usual).
 
 On a non-match or `intent:incidental`/`none`, do nothing — the session proceeds normally in plain mode.
 
