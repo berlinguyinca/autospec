@@ -1099,3 +1099,74 @@ EOF
     # Assert: stdout must contain the idle_timeout sentinel.
     grep -q "idle_timeout" "$out_file"
 }
+
+# ---------------------------------------------------------------------------
+# Test 17: GET / (_serve_html) — wiring from launcher token through server to
+# HTML file is tested end-to-end (#846)
+#
+# The _serve_html route was untested: every existing test only exercised /api/*
+# endpoints. The smoke bats grepped index.html on disk but never made an HTTP
+# GET / against a live server. This means:
+#   - A broken path in do_GET (e.g. wrong routing condition) would not be caught.
+#   - A missing or corrupt index.html would not be caught at server level.
+#   - The auth_ok re-check inside _serve_html had no positive (200) assertion.
+#
+# This test starts a real server, issues:
+#   1. GET / with a WRONG token → 401 (auth gate in _serve_html)
+#   2. GET / with NO token     → 401
+#   3. GET / with the CORRECT token → 200, Content-Type text/html,
+#      body contains '<title>autospec-fleet</title>' (known marker in index.html)
+#      and 'aria-label="Filter repos by name"' (from the search-box element)
+#
+# Mutation-verified: with _serve_html forced to return 404 unconditionally, the
+# 200 assertion fails; with auth_ok replaced by `return True`, the 401
+# assertions for missing/wrong token fail.
+# ---------------------------------------------------------------------------
+@test "GET / with valid token returns 200 text/html with known marker (#846)" {
+    local port
+    port="$(pick_free_port)"
+
+    # Stub gh (the server may call gh for /api/repos; stub it here for a clean
+    # environment even though this test only exercises GET /).
+    local BIN="$TMP/bin"
+    mkdir -p "$BIN"
+    cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[]'
+EOF
+    chmod +x "$BIN/gh"
+
+    PATH="$BIN:$PATH" start_server "$port"
+
+    # ── part 1: missing token → 401 ──────────────────────────────────────────
+    # raw_get with no third arg sends NO X-Autospec-Token header.
+    local resp code
+    resp="$(raw_get "$port" "/")"
+    code="$(http_code_of "$resp")"
+    [ "$code" = "401" ]
+
+    # ── part 2: wrong token → 401 ────────────────────────────────────────────
+    resp="$(raw_get "$port" "/" "definitely-wrong-token")"
+    code="$(http_code_of "$resp")"
+    [ "$code" = "401" ]
+
+    # ── part 3: correct token → 200 + text/html + known HTML markers ─────────
+    # Use curl -i to capture the response headers alongside the body so we can
+    # assert Content-Type without a separate HEAD request.
+    local full_resp
+    full_resp="$(curl -si -H "X-Autospec-Token: $TOKEN" "http://127.0.0.1:${port}/")"
+
+    # HTTP status must be 200.
+    echo "$full_resp" | grep -q "^HTTP/1\.[01] 200"
+
+    # Content-Type must be text/html (with optional charset suffix).
+    echo "$full_resp" | grep -qi "^Content-Type: text/html"
+
+    # Body must contain the <title> marker from index.html — a server that
+    # returns a stub or empty body would fail here.
+    echo "$full_resp" | grep -q '<title>autospec-fleet</title>'
+
+    # Body must also contain the search-box aria-label so we confirm actual
+    # index.html contents are served (not a minimal stub).
+    echo "$full_resp" | grep -q 'aria-label="Filter repos by name"'
+}
