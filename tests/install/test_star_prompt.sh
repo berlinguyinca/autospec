@@ -84,52 +84,32 @@ EOS
 }
 
 # run_install_with_star_reply <star_reply> <output_file> <log_file>
-#
-# Runs install.sh under script(1), feeding answers for each interactive prompt:
-#   [1] auto-rollover? → n (default; not under test)
-#   [2] Claude hook mode? → n (default; not under test)
-#   [3] star GitHub repo? → <star_reply>  ← the value under test
-#   [4+] extra blank lines as safety buffer for any future prompts
-#
-# This ordering matches the call order in install.sh:
-#   prompt_user_for_auto_rollover() → maybe_prompt_star()
-# offer_gitignore() is skipped because the repo's .gitignore already contains
-# the required entries, so it does not produce a prompt.
+# Answers: n (rollover), n (hook-mode), <star_reply> (star), + blank buffer.
+# Uses a temp file (not command substitution) so trailing newlines are preserved.
 run_install_with_star_reply() {
-    local star_reply="$1"
-    local output_file="$2"
-    local log_file="$3"
+    local star_reply="$1" output_file="$2" log_file="$3"
 
-    local fake_home
+    local fake_home fake_bin cmd ans_file rc
     fake_home="$(setup_fake_home)"
-    local fake_bin
     fake_bin="$(setup_fake_bin "$log_file")"
     : > "$log_file"
 
-    local cmd
     cmd="cd '$SCRIPT_DIR' && HOME='$fake_home' GH_LOG='$log_file' PATH='$fake_bin':\$PATH bash '$SCRIPT_DIR/install.sh' --skill autospec --harness claude"
 
-    # Write the answer sequence to a temp file to avoid command-substitution
-    # stripping of trailing newlines.  The answers are:
-    #   [1] n → auto-rollover prompt (prompt_user_for_auto_rollover)
-    #   [2] n → Claude hook-mode prompt (prompt_user_for_auto_rollover)
-    #   [3] <star_reply> → star prompt (maybe_prompt_star)  ← under test
-    #   [4-7] blank lines → safety buffer for any future prompts
-    # Using printf without command substitution ensures all trailing newlines
-    # are preserved; without them, the last read -r may not return.
-    local ans_file="$tmp_root/answers-$$.txt"
+    # Write answers to a file; printf inside $() would strip trailing newlines,
+    # leaving the last read -r in install.sh blocked on the pty (issue #854).
+    # Sequence: [1] n=rollover [2] n=hook-mode [3] <reply>=star [4+] buffer
+    ans_file="$tmp_root/answers-$$.txt"
     printf 'n\nn\n%s\n\n\n\n\n' "$star_reply" > "$ans_file"
 
-    # Pipe answers into script(1), bounded by INSTALL_TIMEOUT.
-    local rc=0
+    rc=0
     timeout "$INSTALL_TIMEOUT" script -qfec "$cmd" "$output_file" < "$ans_file" >/dev/null || rc=$?
     if [ "$rc" -ne 0 ]; then
         if [ "$rc" -eq 124 ]; then
-            echo "FAIL: install.sh run exceeded ${INSTALL_TIMEOUT}s timeout — a read -r blocked on the pty (issue #854)" >&2
-            echo "      This may mean new interactive prompts were added to install.sh; add corresponding" >&2
-            echo "      answers to the input sequence in run_install_with_star_reply." >&2
+            echo "FAIL: install.sh exceeded ${INSTALL_TIMEOUT}s timeout (read -r blocked on pty — issue #854)" >&2
+            echo "      Add more answers if new prompts were added to install.sh." >&2
         else
-            echo "FAIL: script(1) exited with rc=$rc for star_reply='$star_reply'" >&2
+            echo "FAIL: script(1) rc=$rc for star_reply='$star_reply'" >&2
         fi
         return 1
     fi
