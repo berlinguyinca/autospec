@@ -809,3 +809,110 @@ EOF
     # The browser must NOT have been opened in --once mode.
     [ ! -f "$browser_calls" ]
 }
+
+# ---------------------------------------------------------------------------
+# Tests 11-13: documented fail-mode paths (#842)
+#
+# Three spec'd failure modes in the Fail-modes table had zero test coverage:
+#   1. GET /api/repos → 503 {"error":"gh_not_authenticated"} when gh exits
+#      non-zero with an auth-flavored stderr (_repos_error path).
+#   2. POST /api/config with a non-JSON body → 400 {"error":"invalid_json"}
+#      (_read_and_handle_config_post path).
+#   3. Malformed on-disk YAML → 200 {"warning":"yaml_partial"} (_handle_config_get).
+#
+# Each test starts a real server, issues a real HTTP request, and asserts the
+# expected HTTP status + JSON body.  The gh stub is a PATH-shadowed executable.
+# ---------------------------------------------------------------------------
+
+@test "fail-mode: gh auth failure → GET /api/repos returns 503 gh_not_authenticated (#842)" {
+    local port
+    port="$(pick_free_port)"
+    local BIN="$TMP/bin"
+    mkdir -p "$BIN"
+
+    # Stub gh: exits 1 with an auth-flavored message on stderr
+    cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "error: not logged into any GitHub hosts" >&2
+exit 1
+EOF
+    chmod +x "$BIN/gh"
+
+    PATH="$BIN:$PATH" start_server "$port"
+
+    # Use curl with the correct token; raw_get omits the token (returns 401).
+    local resp body
+    resp="$(curl -s -w '\n%{http_code}' \
+        -H "X-Autospec-Token: $TOKEN" \
+        "http://127.0.0.1:${port}/api/repos")"
+    local http_code body
+    http_code="$(http_code_of "$resp")"
+    body="$(body_of "$resp")"
+
+    [ "$http_code" = "503" ]
+    echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['error']=='gh_not_authenticated', d"
+}
+
+@test "fail-mode: non-JSON POST body → 400 invalid_json (#842)" {
+    local port
+    port="$(pick_free_port)"
+    local BIN="$TMP/bin"
+    mkdir -p "$BIN"
+
+    # gh stub (not called for POST, but server starts it)
+    cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[]'
+EOF
+    chmod +x "$BIN/gh"
+
+    PATH="$BIN:$PATH" start_server "$port"
+
+    # POST a literal non-JSON body
+    local resp http_code body
+    resp="$(curl -s -w '\n%{http_code}' -X POST \
+        -H "X-Autospec-Token: $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d 'not valid json at all' \
+        "http://127.0.0.1:${port}/api/config")"
+    http_code="$(http_code_of "$resp")"
+    body="$(body_of "$resp")"
+
+    [ "$http_code" = "400" ]
+    echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['error']=='invalid_json', d"
+}
+
+@test "fail-mode: truncated/garbage YAML → GET /api/config returns 200 warning:yaml_partial (#842)" {
+    local port
+    port="$(pick_free_port)"
+    local BIN="$TMP/bin"
+    mkdir -p "$BIN"
+
+    # gh stub
+    cat > "$BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[]'
+EOF
+    chmod +x "$BIN/gh"
+
+    # Write a garbage YAML file that load_yaml_config raises on.
+    # The server catches the exception and returns warning:yaml_partial.
+    # We override the YAML path by pointing WORKSPACE at TMP.
+    # The server uses WORKSPACE/autospec-fleet.yml.
+    mkdir -p "$TMP"
+    # Write a file that yaml.safe_load would raise on (tabs in YAML are illegal)
+    # AND that _basic_yaml_load returns {} (empty → warning:yaml_partial fallback).
+    printf '\t{broken: yaml: content' > "$TMP/autospec-fleet.yml"
+
+    PATH="$BIN:$PATH" start_server "$port"
+
+    local resp body http_code
+    resp="$(curl -s -w '\n%{http_code}' \
+        -H "X-Autospec-Token: $TOKEN" \
+        "http://127.0.0.1:${port}/api/config")"
+    http_code="$(http_code_of "$resp")"
+    body="$(body_of "$resp")"
+
+    [ "$http_code" = "200" ]
+    echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('warning')=='yaml_partial', d"
+}
