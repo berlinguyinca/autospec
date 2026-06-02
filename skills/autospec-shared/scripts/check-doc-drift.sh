@@ -161,11 +161,17 @@ fi
 
 # ── Extract changed files from diff ──────────────────────────────────────────
 
-# Changed source files (not docs/) — one per line in a temp file
+# Changed source files (not docs/, not tests/) — one per line in a temp file.
+# tests/** is excluded: test files are internal QA artifacts and never require
+# a corresponding doc-scope annotation.  Including them causes exit 2
+# (missing-scope) on every test-only PR that touches a path not covered by any
+# declared scope — a false signal that degrades the gate without providing real
+# drift information (tests don't document user-facing surfaces).
 grep -E '^\+\+\+ ' "$WORK_DIR/diff.txt" 2>/dev/null \
     | sed 's|^+++ b/||; s|^+++ /dev/null||' \
     | grep -v '^$' \
     | grep -v '^docs/' \
+    | grep -v '^tests/' \
     | sort -u > "$WORK_DIR/changed_source.txt" || true
 
 # Changed doc files — one per line in a temp file
