@@ -21,7 +21,15 @@ EOF
 }
 
 repo="."
-schema_dir="$(cd "$(dirname "$0")/.." && pwd)/schemas"
+# Schema directory resolution (issue #856):
+#   1. AUTOSPEC_SCHEMAS_DIR env override (set by operators or tests).
+#   2. --schema-dir CLI flag (explicit override, takes precedence over env).
+#   3. Default: ~/.autospec/schemas/ (the installed location populated by install.sh).
+# When running from a repo checkout, scripts/validate-qa-artifacts.sh resolves
+# to repo/schemas/ via the relative "$(dirname $0)/.." path; from the installed
+# copy (~/.autospec/scripts/), the env/default resolves correctly without a
+# checkout alongside the scripts.
+schema_dir="${AUTOSPEC_SCHEMAS_DIR:-$HOME/.autospec/schemas}"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -44,6 +52,32 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+# Guard: verify the schema directory exists and contains the required schemas.
+# Print an actionable error and exit non-zero instead of silently skipping QA
+# validation, so operators know exactly how to recover (run install.sh --update).
+_required_schemas="
+autospec-proof-matrix.schema.json
+autospec-control-intent-ledger.schema.json
+autospec-mutation-proof.schema.json
+autospec-canary-results.schema.json
+autospec-reliability.schema.json
+"
+_missing_schemas=""
+for _schema in $_required_schemas; do
+    [ -z "$_schema" ] && continue
+    if [ ! -f "$schema_dir/$_schema" ]; then
+        _missing_schemas="$_missing_schemas $_schema"
+    fi
+done
+if [ -n "$_missing_schemas" ]; then
+    echo "validate-qa-artifacts: schemas directory is missing required files: $_missing_schemas" >&2
+    echo "  Looked in: $schema_dir" >&2
+    echo "  Recovery:  run 'bash install.sh --update' to install schemas to \$AUTOSPEC_SCHEMAS_DIR (default ~/.autospec/schemas/)" >&2
+    echo "  Override:  set AUTOSPEC_SCHEMAS_DIR or pass --schema-dir to point at the correct location" >&2
+    exit 3
+fi
+unset _required_schemas _missing_schemas _schema
 
 command -v ajv >/dev/null 2>&1 || {
     echo "validate-qa-artifacts: ajv is required" >&2
