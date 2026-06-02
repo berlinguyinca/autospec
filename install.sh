@@ -879,10 +879,39 @@ copy_repo_scripts() {
     info "copy_repo_scripts: copied repo-root scripts to $autospec_scripts_dir/"
 }
 
+copy_schemas() {
+    # Copy repo-root schemas/*.json into $AUTOSPEC_SCHEMAS_DIR (default ~/.autospec/schemas/).
+    # Mirrors copy_repo_scripts for the schemas/ directory. Runs on every install
+    # (fresh + --update) so validate-qa-artifacts.sh can resolve schemas from the
+    # installed location without requiring a repo checkout alongside the scripts.
+    # Issue #856: install.sh never shipped schemas/, causing the installed validator
+    # to fail with "missing ~/.autospec/schemas/*.json" for all non-checkout users.
+    schemas_src="$REPO_ROOT/schemas"
+    if [ ! -d "$schemas_src" ]; then
+        warn "copy_schemas: $schemas_src not found; skipping"
+        return 0
+    fi
+
+    autospec_schemas_dir="${AUTOSPEC_SCHEMAS_DIR:-$HOME/.autospec/schemas}"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] copy_schemas: would copy $schemas_src/*.json to $autospec_schemas_dir/"
+        return 0
+    fi
+
+    mkdir -p "$autospec_schemas_dir"
+    for f in "$schemas_src"/*.json; do
+        [ -e "$f" ] || continue
+        cp "$f" "$autospec_schemas_dir/"
+    done
+    info "copy_schemas: copied $(ls "$autospec_schemas_dir"/*.json 2>/dev/null | wc -l | tr -d ' ') schemas to $autospec_schemas_dir/"
+}
+
 # Integration bootstrap: pull autospec (if --update) + turbo, before per-skill installers run.
 pull_autospec
 copy_shared_scripts
 copy_repo_scripts
+copy_schemas
 ensure_system_tools
 bootstrap_peer_ecosystems
 bootstrap_turbo
