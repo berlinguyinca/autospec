@@ -115,6 +115,7 @@ fi
 # lock, or a lock we already own, also falls through (normal claim/refresh).
 reclaim_secs="${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}"
 case "$reclaim_secs" in *[!0-9]*|'') reclaim_secs=10800 ;; esac
+reclaiming=""
 lowest_owner="$(lowest_lock_field "$repo" "$issue" worker_id)"
 if [ -n "$lowest_owner" ] && [ "$lowest_owner" != "$worker_id" ]; then
     lowest_updated_at="$(lowest_lock_field "$repo" "$issue" updated_at)"
@@ -138,8 +139,10 @@ if [ -n "$lowest_owner" ] && [ "$lowest_owner" != "$worker_id" ]; then
             '{claimed:false, issue:$issue, repo:$repo, worker_id:$worker_id, reason:"claim_lost", observed_owner:$owner}'
         exit 2
     fi
-    printf 'claim-issue: stale lease reclaimed (issue %s, prior owner %s, age %ss > ttl %ss)\n' \
-        "$issue" "$lowest_owner" "$age" "$reclaim_secs" >&2
+    # Stale lower-id lock: fall through to the upsert/reclaim path. The actual
+    # "stale lease reclaimed" line is emitted only after the read-back confirms
+    # the win, so a reclaimer that loses a concurrent race logs only claim lost.
+    reclaiming="$lowest_owner"
 fi
 
 "$RUN_STATE" upsert \
@@ -170,6 +173,11 @@ if [ "$verified_owner" != "$worker_id" ] || [ "$verified_state" != "claimed" ]; 
         --arg state "$verified_state" \
         '{claimed:false, issue:$issue, repo:$repo, worker_id:$worker_id, reason:"claim_lost", observed_owner:$owner, observed_state:$state}'
     exit 2
+fi
+
+if [ -n "$reclaiming" ]; then
+    printf 'claim-issue: stale lease reclaimed (issue %s, prior owner %s, ttl %ss)\n' \
+        "$issue" "$reclaiming" "$reclaim_secs" >&2
 fi
 
 jq -n \
