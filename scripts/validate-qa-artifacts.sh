@@ -104,6 +104,16 @@ validate_json() {
     echo "OK: $artifact"
 }
 
+yaml_to_json() {
+    src="$1"
+    dest="$2"
+    if yq -o=json '.' "$src" > "$dest" 2>/dev/null; then
+        return 0
+    fi
+    # Python yq transcodes YAML to JSON by default and forwards -o to jq.
+    yq '.' "$src" > "$dest"
+}
+
 validate_json \
     "$autospec_dir/proof-matrix.json" \
     "$schema_dir/autospec-proof-matrix.schema.json"
@@ -126,7 +136,7 @@ elif [ -f "$autospec_dir/reliability.yml" ]; then
         echo "validate-qa-artifacts: yq is required for $autospec_dir/reliability.yml" >&2
         exit 2
     }
-    yq -o=json '.' "$autospec_dir/reliability.yml" > "$tmpdir/reliability.json"
+    yaml_to_json "$autospec_dir/reliability.yml" "$tmpdir/reliability.json"
     ajv validate \
         -s "$schema_dir/autospec-reliability.schema.json" \
         --spec=draft2020 \

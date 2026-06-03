@@ -265,7 +265,7 @@ same session id (a fresh session gets a new id), and `--force` overrides it.
 
 Record this durable preference in `AGENTS.md` (idempotent — skip if already present):
 
-> **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (`gh pr merge <#> --admin --squash --delete-branch`) when (a) all required CI checks pass — slow optional checks like TeamCity may be pending and that's acceptable, (b) the self-review subagent returned `LGTM`, (c) PR closes an `auto-implement` issue from a `feat/*` branch.
+> **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (`gh pr merge <#> --admin --squash --delete-branch`) when (a) the full target-repo validation/test suite has passed locally after the branch is current with `main`, (b) all required CI checks pass — slow optional checks like TeamCity may be pending only after the full local suite is green, (c) the self-review subagent returned `LGTM`, (d) PR closes an `auto-implement` issue from a `feat/*` branch.
 
 **Off-peak tip:** For queues of 10+ issues (8+ hour runs), consider launching at night or on weekends. Usage limits are shared across all sessions — running long batches off-peak preserves daytime tokens for interactive work.
 
@@ -724,7 +724,11 @@ inline label-swap path below.
 >    cd {repo_root} && git fetch origin
 >    git worktree add -b <BRANCH> /tmp/wt-<BRANCH> origin/main && cd /tmp/wt-<BRANCH>
 > 2. TDD per AGENTS.md: failing test first → implement → refactor → commit. NO DB/external mocks. Follow file paths and signatures from the issue body verbatim.
-> 3. Build + test green (use the project's test runner; for Go: `go build ./... && go test ./... -count=1`; for Node: `npm test`; for Python: `pytest`). 80%+ coverage on changed files.
+> 3. **Full test suite gate.** Run the target repo's full validation/test suite, not only the Primary smoke test. Command resolution order:
+>    1. If `AUTOSPEC_FULL_TEST_COMMAND` is set, run `bash -lc "$AUTOSPEC_FULL_TEST_COMMAND"`.
+>    2. Else run every command listed under the issue's **Operator/full verification** section.
+>    3. Else run the repo-standard full suite: `bash scripts/validate.sh` when present; otherwise use the ecosystem default (`npm test`, `pytest`, `go test ./...`, `cargo test`, `mvn test`, etc.).
+>    If the full suite fails, fix the failure, recommit, rerun the full suite, and repeat. Do NOT dispatch LGTM review while the full suite is failing. Do NOT run `gh pr merge` while the full suite is failing. Record the exact full-suite command and passing output summary in the PR comment or final report.
 > 3a. **autospec-test gate** (run when `skills/autospec-test/scripts/run-gate.sh` exists in the repo): invoke the gate against the PR's target repo root. Handle exit codes per spec §7a/§7b:
 >    ```bash
 >    GATE_SCRIPT="skills/autospec-test/scripts/run-gate.sh"
@@ -829,6 +833,7 @@ inline label-swap path below.
 >    fi
 >    ```
 >    - Run the **Primary smoke test** from the issue body. If it fails, fix and recommit before review.
+>    - Run the **Full test suite gate** before fused guardian + LGTM review. If it fails, fix and recommit, rerun the full suite, and do not dispatch review until the full suite passes.
 >    - **Fused guardian + LGTM review** (one subagent does both — saves one dispatch per inner-loop iteration):
 >      <!-- guardian-block:begin -->
 >      Run deterministic lint first (no subagent cost):
@@ -885,7 +890,7 @@ inline label-swap path below.
 >
 >      If `LGTM` && det_exit == 0:
 >        gh pr comment <PR> --body "<!-- guardian-block --> Review: clean. <!-- /-->"
->        run **Operator/full verification**
+>        run **Full test suite gate** and record the exact full-suite command and passing output summary
 >        bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ci-wait.sh" <PR>  # fire-and-forget sentinel
 >        if [ -f ".autospec/tokens-<ISSUE>-reviewer.json" ]; then
 >          bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/record-telemetry.sh" \
@@ -894,7 +899,7 @@ inline label-swap path below.
 >        fi
 >        # monitor exits to parking state HERE — orchestrator relaunches when ~/.autospec/ci-state/<PR>.signal settles
 >        # On relaunch: run ci-wait-poll.sh <PR>; break SUCCESS if exit 0 (pass)
->        break SUCCESS if required checks pass.
+>        break SUCCESS only if the full suite passed and required checks pass.
 >      If `LGTM` but det_exit != 0:
 >        Treat deterministic findings as blocking. Comment, fix, recommit, push. Continue inner loop.
 >      If findings list:
@@ -958,6 +963,10 @@ inline label-swap path below.
 >        gh issue comment <ISSUE> --body "PR #<PR>: rebase-and-retest stalled after $max_attempts attempts; main is moving faster than CI completes. Pausing for operator review."
 >        exit 1
 >    fi
+>    # Mandatory final local proof after the branch is current with main.
+>    # Run the **Full test suite gate** here using the same command resolution order
+>    # (`AUTOSPEC_FULL_TEST_COMMAND`, Operator/full verification, then `bash scripts/validate.sh` fallback).
+>    # If it fails, fix the failure, recommit, push, rerun the full suite and review, and do NOT run `gh pr merge`.
 >    gh pr merge <PR> --admin --squash --delete-branch
 >    ```
 >    The block ends with the admin-merge; merge auto-closes the issue.

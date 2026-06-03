@@ -754,6 +754,39 @@ check_phase4_adaptive_retry() {
     done
 }
 
+# Phase 4 full-suite verification: autospec must never merge a PR just because
+# review and required CI are green. Every Phase 4 adapter must require the
+# target repo's full local validation/test suite before LGTM review and again
+# after branch update/rebase immediately before admin-merge. Failures must
+# return to the fix/recommit/retry loop; no merge is allowed while the suite
+# fails.
+check_phase4_full_test_suite_gate() {
+    info "phase4 full test suite gate: autospec + autospec-run trio"
+    for f in \
+        skills/autospec/SKILL.md \
+        skills/autospec/codex/prompt.md \
+        skills/autospec/opencode/agent.md \
+        skills/autospec-run/SKILL.md \
+        skills/autospec-run/codex/prompt.md \
+        skills/autospec-run/opencode/agent.md
+    do
+        grep -q 'Full test suite gate' "$f" \
+            || fail "$f missing Full test suite gate section"
+        grep -q 'AUTOSPEC_FULL_TEST_COMMAND' "$f" \
+            || fail "$f missing AUTOSPEC_FULL_TEST_COMMAND override"
+        grep -q 'scripts/validate.sh' "$f" \
+            || fail "$f missing scripts/validate.sh fallback command"
+        grep -q 'If the full suite fails, fix the failure, recommit, rerun the full suite, and repeat' "$f" \
+            || fail "$f missing fix/recommit/rerun failure loop"
+        grep -q 'Do NOT dispatch LGTM review' "$f" \
+            || fail "$f missing pre-review block on failing full suite"
+        grep -q 'Do NOT run `gh pr merge`' "$f" \
+            || fail "$f missing pre-merge block on failing full suite"
+        grep -q 'Record the exact full-suite command and passing output summary' "$f" \
+            || fail "$f missing verification evidence requirement"
+    done
+}
+
 # Team-personality contract: autospec should infer the right solving team from
 # the request, repository evidence, memories, and prior specs. If confidence is
 # low, it must ask explicitly with five concrete starter combinations, carry
@@ -1819,6 +1852,7 @@ main() {
     check_phase4_immediate_next_issue_pickup
     check_phase4_single_agent_discipline
     check_phase4_adaptive_retry
+    check_phase4_full_test_suite_gate
     check_autospec_sweep_config_contract
     check_autospec_fleet_scripts
     check_fleet_gui_subcommand_lockstep
