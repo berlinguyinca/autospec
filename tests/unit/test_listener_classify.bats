@@ -226,3 +226,179 @@ setup() {
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq -r .chain)" = "null" ]
 }
+
+# ── Explore/discover intent → autospec-explore, gate=explore-confirm (#909) ──
+#
+# CLAIM table: explore/discover co-occurring with build/ship/feature intent
+# routes to autospec-explore carrying the explore-confirm gate. The gate value
+# is consumed byte-for-byte by the autospec-listen trio (#910), so trigger,
+# intent, and gate are all asserted.
+
+@test "classify: 'explore and ship new features' → autospec-explore, gate=explore-confirm" {
+    run "$MATCH" --classify "explore and ship new features"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-explore" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "explore" ]
+    [ "$(printf '%s' "$output" | jq -r .intent)" = "imperative" ]
+    [ "$(printf '%s' "$output" | jq -r .gate)" = "explore-confirm" ]
+}
+
+@test "classify: 'discover features to build' → autospec-explore, gate=explore-confirm" {
+    run "$MATCH" --classify "discover features to build"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-explore" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "explore" ]
+    [ "$(printf '%s' "$output" | jq -r .gate)" = "explore-confirm" ]
+}
+
+@test "classify: 'autonomously explore the repo for improvements' → autospec-explore, gate=explore-confirm" {
+    run "$MATCH" --classify "autonomously explore the repo for improvements"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-explore" ]
+    [ "$(printf '%s' "$output" | jq -r .gate)" = "explore-confirm" ]
+}
+
+@test "classify: 'go explore and build improvements' → autospec-explore, gate=explore-confirm" {
+    run "$MATCH" --classify "go explore and build improvements"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-explore" ]
+    [ "$(printf '%s' "$output" | jq -r .gate)" = "explore-confirm" ]
+}
+
+@test "classify: 'discover and implement enhancements' → autospec-explore, gate=explore-confirm" {
+    run "$MATCH" --classify "discover and implement enhancements"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-explore" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "explore" ]
+    [ "$(printf '%s' "$output" | jq -r .gate)" = "explore-confirm" ]
+}
+
+@test "classify: 'start exploring features to ship' → autospec-explore, gate=explore-confirm" {
+    run "$MATCH" --classify "start exploring features to ship"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-explore" ]
+    [ "$(printf '%s' "$output" | jq -r .gate)" = "explore-confirm" ]
+}
+
+# ── Explore/discover SUPPRESS table — THE CRITICAL SAFETY GUARD (#909) ───────
+#
+# Every read/understand/conversational/interrogative/negated/past-tense explore
+# phrasing MUST yield match:false (no route). A false positive here would
+# auto-launch a perpetual PR-shipping loop on an isolated sandbox branch. Do
+# NOT weaken these assertions.
+
+@test "classify: 'explore the codebase' → match:false (read intent, no route)" {
+    run "$MATCH" --classify "explore the codebase"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'explore this file' → match:false (read intent, no route)" {
+    run "$MATCH" --classify "explore this file"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'explore the data' → match:false (read intent, no route)" {
+    run "$MATCH" --classify "explore the data"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'explore options' → match:false (no build intent, no route)" {
+    run "$MATCH" --classify "explore options"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'let me explore' → match:false (no build intent, no route)" {
+    run "$MATCH" --classify "let me explore"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: \"I'll explore later\" → match:false (no build intent, no route)" {
+    run "$MATCH" --classify "I'll explore later"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'exploratory test' → match:false (not the explore verb, no route)" {
+    run "$MATCH" --classify "exploratory test"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: \"let's do exploratory testing\" → match:false (no route)" {
+    run "$MATCH" --classify "let's do exploratory testing"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'the exploration is done' → match:false (past/descriptive)" {
+    run "$MATCH" --classify "the exploration is done"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'should we explore?' → match:false (interrogative)" {
+    run "$MATCH" --classify "should we explore?"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: \"don't explore yet\" → match:false (negated)" {
+    run "$MATCH" --classify "don't explore yet"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'should we explore and ship?' → match:false (interrogative beats build intent)" {
+    run "$MATCH" --classify "should we explore and ship?"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: \"don't explore and build yet\" → match:false (negation beats build intent)" {
+    run "$MATCH" --classify "don't explore and build yet"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+# Incidental build/feature NOUN after explore (no coordinating action) must NOT
+# route — these slipped past a naive co-occurrence gate and are the real-world
+# misfire risk the connector requirement closes.
+
+@test "classify: 'explore the feature flags' → match:false (feature is an incidental noun)" {
+    run "$MATCH" --classify "explore the feature flags"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'explore the build directory' → match:false (build is an incidental noun)" {
+    run "$MATCH" --classify "explore the build directory"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+# "explore the test build output" contains the bare verb 'build', which the
+# PRE-EXISTING build→autospec-run branch claims (out of #909's scope). The
+# safety property #909 owns is narrower and absolute: it must NOT route to
+# autospec-explore (no perpetual ship-loop launch).
+@test "classify: 'explore the test build output' → NOT autospec-explore" {
+    run "$MATCH" --classify "explore the test build output"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" != "autospec-explore" ]
+}
+
+@test "classify: \"let's explore how the build works\" → match:false (read intent)" {
+    run "$MATCH" --classify "let's explore how the build works"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
