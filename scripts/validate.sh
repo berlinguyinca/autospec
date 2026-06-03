@@ -2149,8 +2149,8 @@ check_autospec_release_area_contract() {
 # backward-compatible `host` field; and /autospec-run wires the registry write
 # in lockstep across its trio. Runs the per-skill validate.sh and the
 # tests/resume bats fixtures when bats is on PATH.
-check_autospec_resume_contract() {
-    info "autospec-resume crash-resume skill + durable run registry (issue #881)"
+# Files + structural sections + script syntax for the autospec-resume skill.
+check_autospec_resume_structure() {
     local skill="skills/autospec-resume"
     [ -d "$skill" ] || fail "$skill: skill directory missing (issue #881)"
     for f in SKILL.md README.md install.sh uninstall.sh validate.sh \
@@ -2158,8 +2158,6 @@ check_autospec_resume_contract() {
              scripts/resume-scan.sh scripts/resume-attempts.sh; do
         [ -f "$skill/$f" ] || fail "$skill/$f: required file missing (issue #881)"
     done
-
-    # Standard new-skill structural sections in SKILL.md.
     grep -q '^## Startup self-update' "$skill/SKILL.md" \
         || fail "$skill/SKILL.md missing ## Startup self-update section"
     grep -q 'SKILL_NAME=autospec-resume' "$skill/SKILL.md" \
@@ -2170,8 +2168,6 @@ check_autospec_resume_contract() {
         || fail "$skill/SKILL.md missing ## Required capabilities & harness adapter row"
     grep -q 'Subagent model tier' "$skill/SKILL.md" \
         || fail "$skill/SKILL.md adapter table missing 'Subagent model tier' row"
-
-    # New scripts exist, executable, bash -n clean.
     for s in "$skill/scripts/resume-scan.sh" \
              "$skill/scripts/resume-attempts.sh" \
              "scripts/autospec-run-registry.sh"; do
@@ -2179,23 +2175,25 @@ check_autospec_resume_contract() {
         [ -x "$s" ] || fail "$s: file not executable (issue #881)"
         bash -n "$s" || fail "$s: bash syntax error (issue #881)"
     done
+}
 
-    # Idempotency / no-second-lock invariant: resume-scan reads run-state but
-    # never upserts/clears it and never writes a run-state comment.
+# Crash-resume invariants: no second lock, server updated_at, host field,
+# registry wiring, per-skill lint, and bats coverage.
+check_autospec_resume_contract() {
+    info "autospec-resume crash-resume skill + durable run registry (issue #881)"
+    local skill="skills/autospec-resume"
+    check_autospec_resume_structure
+
+    # Idempotency / no-second-lock: resume-scan reads run-state but never
+    # upserts/clears it and never writes a run-state comment.
     if grep -E 'run-state\.sh[^[:alnum:]]*upsert|run-state\.sh[^[:alnum:]]*clear|gh issue comment' \
             "$skill/scripts/resume-scan.sh" >/dev/null; then
         fail "$skill/scripts/resume-scan.sh must add no second lock (found a run-state mutation)"
     fi
-
-    # Crash-vs-live must key on server updated_at (mirrors watchdog windows).
     grep -q 'updated_at' "$skill/scripts/resume-scan.sh" \
         || fail "$skill/scripts/resume-scan.sh must use run-state server updated_at"
-
-    # Heartbeat schema gained a backward-compatible host field.
     grep -q '"host"' "skills/autospec-run/scripts/heartbeat-write.sh" \
         || fail "heartbeat-write.sh must write a backward-compatible host field (issue #881)"
-
-    # /autospec-run wires the registry write in lockstep across its trio.
     for trio in skills/autospec-run/SKILL.md \
                 skills/autospec-run/codex/prompt.md \
                 skills/autospec-run/opencode/agent.md; do
@@ -2203,16 +2201,13 @@ check_autospec_resume_contract() {
             || fail "$trio missing autospec-run-registry.sh registry-write wiring (issue #881)"
     done
 
-    # Per-skill structural lint.
     info "  running: $skill/validate.sh"
     bash "$skill/validate.sh" >/tmp/validate-resume-skill.log 2>&1 \
         || { cat /tmp/validate-resume-skill.log >&2; fail "$skill/validate.sh: failed"; }
 
-    # bats coverage.
-    local bats_dir="tests/resume"
-    [ -d "$bats_dir" ] || fail "$bats_dir: bats coverage directory missing (issue #881)"
+    [ -d tests/resume ] || fail "tests/resume: bats coverage directory missing (issue #881)"
     if command -v bats >/dev/null 2>&1; then
-        for bats_file in "$bats_dir"/*.bats; do
+        for bats_file in tests/resume/*.bats; do
             [ -f "$bats_file" ] || continue
             info "  running: $bats_file"
             bats "$bats_file" >/tmp/validate-resume-bats.log 2>&1 \
