@@ -260,11 +260,17 @@ through the scripts that ship with this skill — never hand-edit the JSON:
   `0` when satisfied, `not-met` and exits `1` otherwise (a missing, empty, or
   literal `null` command is always `not-met`).
 
-`progress[]` is an array, which `loop-state.sh update` cannot append to from the
-CLI; read the array, append the new summary with `jq`, and write the field back
-in one `update` call passing the re-serialized array — or persist the
-human-readable rolling state in `last_result` and keep `progress[]` for the exit
-report only. Resolve `<owner/name>` once at loop start (e.g.
+`progress[]` is an array. `loop-state.sh update --value` infers the JSON type
+from the value (`true`/`false` → boolean, all-digits → number, **everything else
+→ string**), so it cannot write a real array — passing a serialized array string
+would store `progress` as a quoted string and corrupt the schema. To append an
+iteration summary, read the state, append with `jq`, and write the **whole**
+state file atomically yourself (`jq '.progress += ["<summary>"]' "$(loop-state.sh
+path --repo <owner/name>)"` into a `mktemp` then `mv` over the path) — or, the
+simpler default, keep a human-readable rolling log in `last_result` (a plain
+string `update` handles correctly) and let Phase 1's `init` seed `progress` as
+the empty array, treating it as the exit-report accumulator you only append to
+via the `jq`+`mv` path. Resolve `<owner/name>` once at loop start (e.g.
 `gh repo view --json nameWithOwner --jq .nameWithOwner`) and reuse it for every
 script call so all reads and writes target the same state file.
 
@@ -290,8 +296,9 @@ enter the loop (the in-loop verifier judges each iteration).
    concretely what changed (files touched, commands run, observable deltas).
 3. **Persist** — capture the worker's outcome. Set `last_result` to its summary
    via `loop-state.sh update --key last_result --value "<summary>"`, and append a
-   one-line iteration summary to `progress[]` (read → `jq` append → write the
-   field). Never carry the raw worker transcript in your own context.
+   one-line iteration summary to `progress[]` via the `jq`+`mv` whole-file path
+   above (never via `update`, which would stringify the array). Never carry the
+   raw worker transcript in your own context.
 4. **Goal eval** — if `check` is non-null, run `loop-check.sh "$check"`: `met`
    (exit 0) means the goal holds, `not-met` (exit 1) means keep going. If `check`
    is `null`, dispatch a **separate verifier** subagent (Tier B; Tier A for
