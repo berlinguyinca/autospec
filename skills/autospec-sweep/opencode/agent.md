@@ -176,7 +176,9 @@ dispatch decision matrix. Areas are defined under
 `scripts/sweep-area-dispatch.sh`:
 
 1. `spec-vs-code-drift` — reuses `scripts/explore-research/spec-vs-code.sh`.
-2. `docs-drift` — reuses `scripts/dogfood-adapter-doc-drift.sh`.
+2. `docs-drift` — reuses `scripts/dogfood-adapter-doc-drift.sh`, which invokes
+   `/autospec-doc --full` (full regen + repo-wide completeness audit via
+   `scripts/doc-orchestrator.mjs`) and surfaces missing parts as findings.
 3. `code-health` — reuses `scripts/explore-research/codebase-signals.sh`.
 4. `dependency-health` — new `scripts/explore-research/dependency-health.sh`
    researcher (also available to autospec-explore — extends the 6-researcher

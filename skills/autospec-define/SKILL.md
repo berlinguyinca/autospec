@@ -676,14 +676,19 @@ If `.autospec/init-done.flag` exists, skip the prompt entirely.
 
 ### Auto-docs step (after spec PR merges)
 
-After any spec PR merges in normal `autospec-define` flow, invoke:
+After any spec PR merges in normal `autospec-define` flow, regenerate
+documentation through the single doc engine — invoke `/autospec-doc`
+(incremental, scoped to the docs the merged spec affects), routed via
+`scripts/doc-orchestrator.mjs`:
 
 ```bash
-bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/gen-docs-from-spec.mjs" \
-  --spec "<spec-path>" --out docs/
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/doc-orchestrator.mjs"
 ```
 
-Open a `docs/` update PR and admin-merge it before Phase 3 begins. Skip if the spec change touches only non-public implementation details (no change to public API surface, no new CLI flags, no new env vars).
+`/autospec-doc` is the only documentation-generation path; there is no
+parallel generator. Open a `docs/` update PR and admin-merge it before Phase 3
+begins. Skip if the spec change touches only non-public implementation details
+(no change to public API surface, no new CLI flags, no new env vars).
 
 ## Autonomous mode
 
