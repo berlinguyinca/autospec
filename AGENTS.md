@@ -90,7 +90,8 @@ top GPT" at call time so the skill survives model-family churn.
 ## Auto-merge authority for auto-implement PRs
 
 Admin-merge `auto-implement` PRs (`gh pr merge <#> --admin --squash --delete-branch`) when:
-- All required CI checks pass (slow optional checks pending is acceptable).
+- The full target-repo validation/test suite has passed locally after the branch is current with `main`.
+- All required CI checks pass (slow optional checks pending is acceptable only after the full local suite is green).
 - The self-review subagent returned `LGTM`.
 - PR closes an `auto-implement` issue from a `feat/*` branch.
 

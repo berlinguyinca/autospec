@@ -2,7 +2,7 @@
 
 Implementation half of the **autospec** suite. Picks up where `/autospec-define`
 stops: takes the populated `auto-implement` queue on the current GitHub repo and
-runs Phases 4–6 of autospec — autonomous monitor + admin-squash-merge of each PR
+runs Phases 4–6 of autospec — autonomous monitor + full-suite-gated admin-squash-merge of each PR
 + periodic status updates + final report.
 
 Works on **Claude Code**, **OpenCode**, and **Codex CLI**.

@@ -33,13 +33,23 @@ need_cmd() {
     command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
 }
 
+yaml_to_json() {
+    local src="$1"
+    local dest="$2"
+    if yq -o=json '.' "$src" > "$dest" 2>/dev/null; then
+        return 0
+    fi
+    # Python yq transcodes YAML to JSON by default and forwards -o to jq.
+    yq '.' "$src" > "$dest"
+}
+
 schema_validate() {
     local schema="$1"
     local src="$2"
     local json_file
     json_file="$(mktemp -t fleet-config.XXXXXX).json"
     tmp_files="$tmp_files $json_file"
-    yq -o=json '.' "$src" > "$json_file"
+    yaml_to_json "$src" "$json_file"
     ajv validate -s "$schema" --spec=draft2020 -d "$json_file" >/dev/null \
         || fail "$src failed schema validation"
 }

@@ -103,7 +103,8 @@ Phase 3 complete. Run /autospec-run --profile <name> to begin implementation.
 `/autospec-run` is the implementation half: it consumes any open
 `auto-implement` issues whose `Depends-on` graph is satisfied,
 processes them one at a time through a TDD inner loop, opens a PR per
-issue, self-reviews, and admin-merges on `LGTM`.
+issue, self-reviews, runs the full target-repo test suite, and admin-merges only
+after the suite and required checks pass.
 
 ### When to use it
 

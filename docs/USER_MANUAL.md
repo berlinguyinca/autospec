@@ -73,7 +73,7 @@ Turns a feature description into a spec PR and a GitHub issue tree.
 
 Background monitor that claims `auto-implement`-labelled issues one at a time, dispatches a
 TIER_B implementer subagent, runs the fused guardian+LGTM gate, rebase-and-retests, and
-admin-squash-merges the PR.
+admin-squash-merges the PR only after the full target-repo test suite passes.
 
 **Triggers:** `autospec-run`, `run the queue`, `implement issues`, `start the monitor`
 
