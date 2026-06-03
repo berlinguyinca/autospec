@@ -231,6 +231,35 @@ bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/run-batch-start.sh" --wri
 
 This writes the UTC ISO 8601 timestamp to `~/.autospec/.run-batch-start` (idempotent within a run; pass `--force` only when intentionally starting a fresh batch window). Phase 5.5 reads it back via `run-batch-start.sh --read`, which yields `BATCH_START_DATE`.
 
+## Single-instance session lock (run-start, once)
+
+Acquire a per-session lock BEFORE launching the Phase 4 monitor so a single
+harness session never runs two concurrent monitors (which collide on the queue
+and on git branches). The lock is keyed by the harness session id, so separate
+sessions still run independently by design.
+
+```bash
+LOCK="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-run-session-lock.sh"
+if ! bash "$LOCK" acquire --repo "{repo}"; then
+    # exit 3 = a monitor is already active in THIS session.
+    echo "autospec-run: refusing to start a second monitor in this session." >&2
+    bash "$LOCK" status
+    # STOP — do NOT launch Phase 4. Halt the active monitor with /autospec-stop,
+    # or re-run the lock helper with --force to override a stale lock.
+    exit 0
+fi
+```
+
+Release the lock on EVERY terminal exit of this run — the Phase 6 final report,
+the `ALL_DONE` shutdown, and stop mode:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-run-session-lock.sh" release
+```
+
+The lock is advisory and self-scoped: a crashed session's lock only blocks that
+same session id (a fresh session gets a new id), and `--force` overrides it.
+
 ## Phase 4 — Background autonomous monitor
 
 **Single-agent absorbed-discipline (canonical Phase 4 path).** The monitor agent IS the implementer for the issue it claims — expand → implement → finalize → peer-review → evaluate-findings → PR → merge — all in one agent's context. The main session orchestrator relaunches the monitor between issues so each one gets a fresh top-level `Agent` call with full tool access. **Constraint:** Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool, so a backgrounded monitor cannot dispatch its own inner implementer. Phase 4 implementers must be top-level agents launched directly by the main session orchestrator, not nested inside a monitor. The `process(ISSUE)` notation below is shorthand for "the monitor agent now does the implementation work itself in this same context", NOT a nested subagent dispatch. `AUTOSPEC_BATCH_SIZE` semantics are preserved: a single agent can still process up to N issues sequentially within its 40-tool-call budget, exiting with `BATCH_COMPLETE` when the budget is approaching or after N issues, whichever comes first.
