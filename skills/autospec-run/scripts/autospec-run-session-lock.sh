@@ -51,26 +51,30 @@ done
 case "$cmd" in
     acquire)
         mkdir -p "$LOCK_DIR"
-        [ "$FORCE" = "1" ] && rm -f "$LOCK_FILE"
-        # Atomic create: noclobber redirection fails if the file already exists.
-        if ( set -o noclobber; : > "$LOCK_FILE" ) 2>/dev/null; then
-            printf '{"session":"%s","pid":%s,"repo":"%s","host":"%s","started_at":"%s"}\n' \
-                "$TOKEN" "$$" "$REPO" "$(hostname 2>/dev/null || echo unknown)" \
-                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK_FILE"
-            printf 'autospec-run: session lock acquired (session=%s)\n' "$TOKEN"
-            exit 0
+        if [ "$FORCE" != "1" ]; then
+            # Atomic guard: noclobber redirection fails if the file already exists.
+            # (--force skips this entirely → deterministic last-writer-wins, no
+            #  rm+recreate window that a concurrent acquire could slip through.)
+            if ! ( set -o noclobber; : > "$LOCK_FILE" ) 2>/dev/null; then
+                # Held for THIS session already -> refuse + report (single instance).
+                existing="$(cat "$LOCK_FILE" 2>/dev/null || true)"
+                pid="$(printf '%s' "$existing" | sed -n 's/.*"pid":\([0-9]*\).*/\1/p')"
+                alive="dead"
+                { [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; } && alive="alive"
+                {
+                    printf 'autospec-run: a monitor is already active for this session (session=%s).\n' "$TOKEN"
+                    printf '  %s\n' "$existing"
+                    printf '  holder pid=%s (%s). Run /autospec-stop to halt it, or re-run with --force to override.\n' "${pid:-?}" "$alive"
+                } >&2
+                exit 3
+            fi
         fi
-        # Held for THIS session already -> refuse + report (per-session single instance).
-        existing="$(cat "$LOCK_FILE" 2>/dev/null || true)"
-        pid="$(printf '%s' "$existing" | sed -n 's/.*"pid":\([0-9]*\).*/\1/p')"
-        alive="dead"
-        { [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; } && alive="alive"
-        {
-            printf 'autospec-run: a monitor is already active for this session (session=%s).\n' "$TOKEN"
-            printf '  %s\n' "$existing"
-            printf '  holder pid=%s (%s). Run /autospec-stop to halt it, or re-run with --force to override.\n' "${pid:-?}" "$alive"
-        } >&2
-        exit 3
+        # Acquired a fresh noclobber sentinel, or --force override: write the body.
+        printf '{"session":"%s","pid":%s,"repo":"%s","host":"%s","started_at":"%s"}\n' \
+            "$TOKEN" "$$" "$REPO" "$(hostname 2>/dev/null || echo unknown)" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK_FILE"
+        printf 'autospec-run: session lock acquired (session=%s)\n' "$TOKEN"
+        exit 0
         ;;
     release)
         rm -f "$LOCK_FILE"

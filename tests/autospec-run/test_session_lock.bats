@@ -62,3 +62,17 @@ teardown() {
     CLAUDE_CODE_SESSION_ID=ccB run bash "$LOCK" acquire --repo o/r
     [ "$status" -eq 0 ]
 }
+
+@test "release is idempotent (releasing when no lock is held still exits 0)" {
+    AUTOSPEC_SESSION_ID=sessA run bash "$LOCK" release
+    [ "$status" -eq 0 ]
+}
+
+@test "--force is a clean override even when the file is mid-write empty" {
+    # Simulate a partially-written (empty) lock body; --force must still acquire
+    # deterministically (no rm+recreate race).
+    : > "$AUTOSPEC_LOCK_DIR/autospec-run-session-sessF.lock"
+    AUTOSPEC_SESSION_ID=sessF run bash "$LOCK" acquire --repo o/r --force
+    [ "$status" -eq 0 ]
+    [[ "$(cat "$AUTOSPEC_LOCK_DIR/autospec-run-session-sessF.lock")" == *"sessF"* ]]
+}
