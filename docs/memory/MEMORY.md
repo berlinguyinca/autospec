@@ -1,34 +1,79 @@
-- [User role - autospec author](user_role.md) — berlinguyinca authors and maintains the multi-harness autospec skill family
-- [Sync repo before /autospec design phases](feedback_pre_pipeline_sync.md) — check git fetch/status before brainstorming; stale local edits often duplicate landed upstream work
-- [Autospec design preferences](feedback_autospec_design_prefs.md) — small-LLM target (60-120k ctx), correctness>>speed, tight imperative triggers, conservative guardrails, lock-step rule sacred
-- [Autospec monitor exit modes + recovery](feedback_monitor_silent_exit.md) — Phase 4 monitor exits via two known modes: silent-exit (stale worktree + stuck label) and "Prompt is too long" overflow at ~185 tool calls; relaunch is part of the workflow
-- [Autospec decomposer + lockstep gotchas](feedback_autospec_decomposer_gotchas.md) — first new-skill issue MUST include structural sections (Self-update + Model tier + adapter row) or auto-discovery breaks downstream; codex/prompt.md needs leading blank line for lockstep
-- [Admin-merge denial during autospec](feedback_admin_merge_denial.md) — `gh pr merge --admin` blocked by harness hook; AskUserQuestion approval doesn't count, needs settings.json permission rule for Phase 4 to flow
-- [/autospec autonomy scope](feedback_autospec_autonomy_scope.md) — auto-merge spec PRs, collapse low-stakes brainstorm to default-locks, surface only run/defer/refine + destructive-remote actions
-- [OMC autopilot magic-keyword misfire](feedback_omc_autopilot_misfire.md) — system reminders containing "AUTOPILOT" auto-activate OMC autopilot mid-session; recover via state_write(active=false) + state_clear(skill-active)
-- [LLM validator + adaptive retry](feedback_llm_validator_adaptive_retry.md) — pair every LLM-output validator with a 5-attempt retry loop that feeds findings back as directives; one-shot gates leave quality unimproved
-- [Skill per capability](feedback_autospec_skill_per_capability.md) — operator-facing autospec capabilities ship as top-level /autospec-<verb> skills; inline sub-modes are convenience-only shortcuts to the same helper
-- [Autospec mode-dispatch must not shell out user text](feedback_autospec_no_shell_user_text.md) — Self-update / Stop mode sections must be pure prose; no bash heredocs of `{FEATURE_DESCRIPTION}` (placeholder is never substituted) — caused `Shell command failed for pattern "!\` | "` parse errors
-- [validate.sh has named-content checks](feedback_validate_sh_lockstep_checks.md) — renaming SKILL.md prose sections requires updating validate.sh checks too
-- [validate.sh lockstep duo gap](feedback_validate_sh_lockstep_duo_gap.md) — check_lockstep() guards on all 3 trio files; SKILL.md+codex/prompt.md duos fall through silently (now fixed in #415 / PR #425)
-- [ROI-check new components](feedback_roi_check_new_components.md) — every new skill/fork/schema needs a named consumer that benefits today; default to invoking upstream over forking
-- [Bash RETURN trap leaks](feedback_bash_return_trap_leak.md) — RETURN traps in bash functions leak into caller frames; never use for local cleanup under set -u. Use inline cleanup instead.
-- [Bash set -e short-circuit aborts](feedback_bash_set_e_short_circuit.md) — `[ test ] && action` aborts under set -e when test fails; use if/then/fi for one-sided conditionals in install.sh.
-- [Mempalace miner flat-form gap](feedback_mempalace_miner_flat_form.md) — M3 miner only matched spec-style nested `metadata.type:`; real CC files use flat `type:`. Always fixture both real-world variants
-- [Heartbeat cross-repo collision](feedback_heartbeat_cross_repo_collision.md) — ~/.autospec/process-heartbeats/ shared across repos; filter by .repo field (now path-scoped via #416 / PR #426)
-- [E2E coverage gate skill — autospec-test family](project_e2e_coverage_gate_design.md) — v1+v2+hardening+caching+docs-amendment ALL SHIPPED 2026-05-22; 47+ PRs across the session
-- [Autospec Phase 2 roadmap](project_autospec_phase2_roadmap.md) — 6 non-tracker fixes SHIPPED 2026-05-22 (#415-#419, #422); 4 tracker stubs queued (#420 mutation, #421 tooling, #423 Skill C, #424 distribution)
-- [Autospec tooling optimization — queued](project_autospec_tooling_optimization.md) — convert LLM-driven steps to deterministic tools; tracker #421
-- [Autospec init skill — queued](project_autospec_init_skill.md) — was folded into docs amendment (drift gate + reverse-engineer); residual init UX work tracked under Phase 2 distribution (#424)
-- [Autospec mutation testing — queued](project_autospec_mutation_testing.md) — test-of-tests layer: mutation testing gate + assertion-density floor + negative-path-pair lint; tracker #420
-- [Cross-tool memory — SHIPPED](project_cross_tool_memory_brainstorm.md) — M1-M5 all merged PRs #503-#507; CC↔Codex↔OpenCode share docs/memory/ via symlink+AGENTS.md inventory; mempalace MCP indexes (2026-05-23)
-- [Session close 2026-05-22→23](project_2026_05_22_23_session_close.md) — ~105 PRs shipped across 11 feature families; queue drained; CI disabled; cross-tool memory live
-- [Gap-remediation + keyword-routing SHIPPED](project_gap_remediation_keyword_routing.md) — 2026-05-24: end-of-run gap-remediation loop (Phase 5.5) + autospec-listen keyword auto-routing; built via parallel-wave opus single-issue monitors on disjoint files (watchdog off, no shared batch-done)
+<!--
+ACTIVE USE PROTOCOL (this file is auto-loaded every session — read this header)
 
-<!-- Archived entries (shipped work; kept in dir for git history but not indexed):
-- project_autospec_review_status.md (autospec-review shipped 2026-05-07)
-- project_harness_aware_model_tier.md (harness-aware tier shipped 2026-05-07)
-- project_monitor_session_reset.md (monitor session-reset + guardian fusion shipped)
-- project_turbo_integration_design.md (turbo/autospec integration shipped)
-- project_cross_session_ci_rot.md (cross-session CI rot shipped 2026-05-18)
+Before each significant decision, do a 5-second mental check:
+  "Is there a memory below that applies to what I'm about to do?"
+
+Major decision triggers (consult memory BEFORE):
+  - dispatching a subagent (esp. for autospec/long-running work)
+  - recovering from a failure (silent-exit, stalled batch, label conflict)
+  - filing new issues (sizing caps, lockstep, decomposer gotchas)
+  - design choices (skill-per-capability, ROI check, autonomy scope)
+  - bash / shell scripting (set -e, return traps, heredoc gotchas)
+  - validation / lockstep (validate.sh checks, trio/duo gaps)
+
+If a memory applies and you didn't reference it, that's a miss. Call it out
+to the user when you catch yourself. Memory works only if you actually use it.
+
+Adding new memories: when you'd otherwise re-learn the same lesson, save it.
+Removing old ones: when a memory cites a closed issue or "SHIPPED" status
+older than 7 days AND the lesson is no longer load-bearing, archive it.
+-->
+
+# Always-relevant
+
+- [User role - autospec author](user_role.md) — berlinguyinca authors and maintains the multi-harness autospec skill family
+- [Proactively query memory before major decisions](feedback_proactively_query_memory.md) — meta-rule: passive auto-load isn't enough; explicit "what memory applies here?" check before each dispatch/recovery/design choice
+
+# Autospec workflow
+
+- [Sync repo before /autospec design phases](feedback_pre_pipeline_sync.md) — check git fetch/status before brainstorming; stale local edits often duplicate landed upstream work
+- [autospec-split origin/main gate](feedback_autospec_split_origin_main_gate.md) — /autospec-split halts if spec not on origin/main; land spec first to avoid mid-pipeline PR detour
+- [Per-PR LGTM misses integration](feedback_per_pr_lgtm_misses_integration.md) — Phase 5.5 broad-audit caught 7 high-sev integration bugs that 19 per-PR LGTMs missed; never skip 5.5
+- [Autospec design preferences](feedback_autospec_design_prefs.md) — small-LLM target (60-120k ctx), correctness>>speed, tight imperative triggers, conservative guardrails, lock-step rule sacred
+- [Autospec monitor exit modes + recovery](feedback_monitor_silent_exit.md) — Phase 4 monitor silent-exits on complex integration work; relaunch is part of the workflow; subprocess mocks for tmux/osascript prevent test stalls
+- [Autospec decomposer + lockstep gotchas](feedback_autospec_decomposer_gotchas.md) — first new-skill issue MUST include structural sections (Self-update + Model tier + adapter row); codex/prompt.md needs leading blank line for lockstep; decomposer should NOT apply needs-autospec-template
+- [Admin-merge denial during autospec](feedback_admin_merge_denial.md) — `gh pr merge --admin` blocked by harness hook; needs settings.json permission rule for Phase 4 to flow
+- [/autospec autonomy scope](feedback_autospec_autonomy_scope.md) — auto-merge spec PRs, collapse low-stakes brainstorm to default-locks, surface only run/defer/refine + destructive-remote actions
+- [Skill per capability](feedback_autospec_skill_per_capability.md) — operator-facing capabilities ship as top-level /autospec-<verb> skills; inline sub-modes are convenience shortcuts only
+- [Autospec mode-dispatch must not shell out user text](feedback_autospec_no_shell_user_text.md) — Self-update/Stop mode sections must be pure prose; no bash heredocs of `{FEATURE_DESCRIPTION}`
+
+# Quality / framework discipline
+
+- [ROI-check new components](feedback_roi_check_new_components.md) — every new skill/fork/schema needs a named consumer that benefits today; default to invoking upstream over forking
+- [LLM validator + adaptive retry](feedback_llm_validator_adaptive_retry.md) — pair every LLM-output validator with a 5-attempt retry loop that feeds findings back as directives
+- [validate.sh has named-content checks](feedback_validate_sh_lockstep_checks.md) — renaming SKILL.md prose sections requires updating validate.sh checks too
+- [validate.sh lockstep duo gap](feedback_validate_sh_lockstep_duo_gap.md) — check_lockstep() must guard SKILL.md+codex/prompt.md duos, not just full trios
+- [jq test() regex metachar injection](feedback_jq_test_regex_metachar_injection.md) — interpolating host/user-derived values into jq test() is regex injection; dotted hostnames made claim self-clean delete the wrong worker's lock comment; use capture()+==
+- [Self-consistent test fixtures mask bugs](feedback_self_consistent_test_fixtures_mask_bugs.md) — tests that build fixtures with the SUT's own derivation expression can't catch a bug in it; the Claude transcript-slug `lstrip` bug shipped green for months. Pin against the real convention / live values; reproduce end-to-end
+
+# Infrastructure gotchas
+
+- [Heartbeat cross-repo collision](feedback_heartbeat_cross_repo_collision.md) — ~/.autospec/process-heartbeats/ is shared across repos; use path-scoped slug subdirs
+- [Bash RETURN trap leaks](feedback_bash_return_trap_leak.md) — RETURN traps leak into caller frames under set -u; use inline cleanup
+- [Bash set -e short-circuit aborts](feedback_bash_set_e_short_circuit.md) — `[ test ] && action` aborts under set -e when test fails; use if/then/fi for one-sided conditionals
+- [OMC autopilot magic-keyword misfire](feedback_omc_autopilot_misfire.md) — system reminders containing "AUTOPILOT" auto-activate OMC autopilot mid-session; recover via state_write(active=false) + state_clear(skill-active)
+- [Mempalace miner flat-form gap](feedback_mempalace_miner_flat_form.md) — M3 miner matches both `metadata.type:` (spec) and `type:` (real CC files); fixture both variants
+- [Harness session-id env vars](reference_harness_session_id_envs.md) — `CLAUDE_CODE_SESSION_ID` is the stable per-session id (ps -o sess=0, no tty under tool calls); fallback chain for harness-neutral per-session locks; PPID fallback is unreliable
+
+# Active project state (review weekly; archive when shipped)
+
+- [Autospec tooling optimization — tracker #421](project_autospec_tooling_optimization.md) — convert LLM-driven steps to deterministic tools
+- [Autospec mutation testing — tracker #420](project_autospec_mutation_testing.md) — test-of-tests layer: mutation gate + assertion-density floor + negative-path-pair lint
+
+<!-- Archived (shipped or session-historical; files kept on disk, removed from index):
+- project_2026_05_22_23_session_close.md — historical session close 2026-05-22→23
+- project_e2e_coverage_gate_design.md — autospec-test family SHIPPED 2026-05-22
+- project_autospec_phase2_roadmap.md — Phase 2 fixes shipped May 2026; trackers folded into items above
+- project_autospec_init_skill.md — folded into docs amendment; residual under #424
+- project_autospec_review_status.md — autospec-review shipped 2026-05-07
+- project_harness_aware_model_tier.md — harness-aware tier shipped 2026-05-07
+- project_monitor_session_reset.md — monitor session-reset + guardian fusion shipped
+- project_turbo_integration_design.md — turbo/autospec integration shipped
+- project_cross_session_ci_rot.md — cross-session CI rot shipped 2026-05-18
+- project_cross_tool_memory_brainstorm.md — cross-tool memory M1-M5 shipped 2026-05-23 (PRs #503-#507)
+- project_gap_remediation_keyword_routing.md — gap-remediation + keyword-routing shipped 2026-05-24
+- feedback_mempalace_integration_boundary.md — mempalace-specific, archived to keep index focused
+- project_memory_consumers_epic.md — superseded by current session's framework improvements (#820-#824)
+- Auto-context-rollover feature SHIPPED 2026-06-01 — see .turbo/handoff/2026-06-01-auto-context-rollover-shipped.md for the full PR list (43 PRs incl. framework #820-#824)
 -->
