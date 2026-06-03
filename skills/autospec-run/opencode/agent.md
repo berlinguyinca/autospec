@@ -475,21 +475,20 @@ inline label-swap path below.
 >   fi
 >   echo "[monitor] effective_batch_size=$effective_batch_size (next issue reasoning: $_next_reasoning)"
 >   ISSUE = ready[0]
->   # Claim check: verify the issue is still labeled auto-implement before processing.
->   # Multiple monitors can query the same candidate list simultaneously;
->   # the first to claim wins, others must skip to the next candidate.
->   CURRENT_LABELS=$(gh issue view ISSUE --json labels --jq -r '.labels[].name')
->   if ! echo "$CURRENT_LABELS" | grep -q "^auto-implement$"; then
->     echo "[monitor] ISSUE $ISSUE already claimed (no auto-implement label); skipping"
+>   # Atomic claim: claim-issue.sh is the SOLE claim path. It performs the
+>   # check-and-swap (auto-implement -> in-progress-by-bot) atomically with a
+>   # read-back verification, so the hot loop NEVER re-implements the inline
+>   # label swap. Multiple monitors can race the same candidate; exactly one
+>   # wins (exit 0), the rest lose (non-zero) and skip to the next candidate.
+>   claim_json="$("$COORD_CLAIM" --issue "$ISSUE" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-$(hostname):${USER:-unknown}:monitor:$$}" --branch "${BRANCH:-}")" && claim_rc=0 || claim_rc=$?
+>   if [ "$claim_rc" -ne 0 ]; then
+>     echo "[monitor] claim lost for #$ISSUE (rc=$claim_rc); refreshing queue"
 >     READY_REMOVE=$(printf "%s\n%s" "$READY_REMOVE" "$ISSUE" | grep -v "^${ISSUE}$" || true)
 >     ready=($READY_REMOVE)
 >     continue
 >   fi
->   gh label create in-progress-by-bot --color ededed --force
->   if ! gh issue edit ISSUE --remove-label auto-implement --add-label in-progress-by-bot; then
->     echo "[monitor] ISSUE $ISSUE claim failed (another monitor claimed it); skipping"
->     continue
->   fi
+>   # exit 0 only: this monitor now owns #$ISSUE (label already swapped to
+>   # in-progress-by-bot by claim-issue.sh) -> heartbeat write -> process(ISSUE).
 >   _hb_slug="$(printf '%s' "{repo}" | tr '/' '_')"
 >   mkdir -p "$HOME/.autospec/process-heartbeats/$_hb_slug"
 >   printf '{"issue":"%s","branch":"","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' "$ISSUE" "$(date -u +%s)" "{repo}" > "$HOME/.autospec/process-heartbeats/$_hb_slug/$ISSUE.json"
