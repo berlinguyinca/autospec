@@ -248,6 +248,7 @@ touch "$WORK_DIR/covered_sources.txt"
 touch "$WORK_DIR/drift_entries.txt"
 touch "$WORK_DIR/drift_warn_entries.txt"
 touch "$WORK_DIR/visual_stale_entries.txt"
+touch "$WORK_DIR/example_stale_entries.txt"
 
 if [ -d "$DOCS_DIR" ]; then
     # Find all .md files in docs dir
@@ -319,6 +320,56 @@ process.stdout.write(d.src_globs.join('\n'));
                     done <<< "$src_globs_str"
                 done < "$WORK_DIR/changed_source.txt"
                 sort -u "$WORK_DIR/matching_sources_${idx}.txt" -o "$WORK_DIR/matching_sources_${idx}.txt"
+            fi
+
+            # Example staleness check (issue #919, spec §D3 step 6).
+            # A verified example carries an `<!-- example-verified: <sha> <iso> -->`
+            # marker (stamped by verify-examples.mjs). The example is STALE when its
+            # marker SHA is older (a strict git ancestor) than the newest commit
+            # touching this scope's src_globs — the documented command may no longer
+            # reflect the code, so it must be re-verified. Unlike drift/visual_stale
+            # this is a marker-vs-history check, INDEPENDENT of the current diff, so
+            # it must run BEFORE the no-source-match skip below — every scope section
+            # carrying a marker is checked, not only sections whose sources changed
+            # in this diff. Same JSON shape family as visual_stale (an array of
+            # objects with doc_file/heading/source_changed[]).
+            if [ -f "$docfile" ] && [ -n "$src_globs_str" ]; then
+                sec_body="$(head -c "${byte_end:-0}" "$docfile" 2>/dev/null | tail -c "+$(( ${byte_start:-0} + 1 ))" 2>/dev/null)" || sec_body=""
+                marker_sha="$(printf '%s' "$sec_body" \
+                    | grep -oE '<!-- example-verified: [^ ]+ [^ ]+ -->' \
+                    | head -1 \
+                    | sed -E 's/<!-- example-verified: ([^ ]+) .*/\1/')" || marker_sha=""
+                if [ -n "$marker_sha" ]; then
+                    : > "$WORK_DIR/example_srcfiles_${idx}.txt"
+                    while IFS= read -r glob; do
+                        [ -z "$glob" ] && continue
+                        git -C "$AUTOSPEC_REPO_ROOT" ls-files -- "$glob" 2>/dev/null \
+                            >> "$WORK_DIR/example_srcfiles_${idx}.txt" || true
+                    done <<< "$src_globs_str"
+                    sort -u "$WORK_DIR/example_srcfiles_${idx}.txt" \
+                        -o "$WORK_DIR/example_srcfiles_${idx}.txt" 2>/dev/null || true
+                    newest_commit=""
+                    if [ -s "$WORK_DIR/example_srcfiles_${idx}.txt" ]; then
+                        # shellcheck disable=SC2046
+                        newest_commit="$(git -C "$AUTOSPEC_REPO_ROOT" log -1 --format='%H' -- \
+                            $(tr '\n' ' ' < "$WORK_DIR/example_srcfiles_${idx}.txt") 2>/dev/null)" || newest_commit=""
+                    fi
+                    if [ -n "$newest_commit" ] && [ "$newest_commit" != "$marker_sha" ]; then
+                        # Stale only when the marker is a strict ANCESTOR of the
+                        # newest src commit (marker predates the latest src change).
+                        if git -C "$AUTOSPEC_REPO_ROOT" merge-base --is-ancestor "$marker_sha" "$newest_commit" 2>/dev/null; then
+                            src_changed=""
+                            while IFS= read -r sf; do
+                                [ -z "$sf" ] && continue
+                                src_changed="${src_changed:+$src_changed,}\"$sf\""
+                            done < "$WORK_DIR/example_srcfiles_${idx}.txt"
+                            h_esc="$(echo "$heading" | sed 's/"/\\"/g')"
+                            printf '{"doc_file":"%s","heading":"%s","marker_sha":"%s","newest_src_commit":"%s","source_changed":[%s]}\n' \
+                                "$rel_docfile" "$h_esc" "$marker_sha" "$newest_commit" "$src_changed" \
+                                >> "$WORK_DIR/example_stale_entries.txt"
+                        fi
+                    fi
+                fi
             fi
 
             # Skip if no source matches
@@ -450,6 +501,7 @@ drift_arr="$(build_json_array "$WORK_DIR/drift_entries.txt")"
 drift_warn_arr="$(build_json_array "$WORK_DIR/drift_warn_entries.txt")"
 missing_arr="$(build_json_array "$WORK_DIR/missing_scope_entries.txt")"
 vstale_arr="$(build_json_array "$WORK_DIR/visual_stale_entries.txt")"
+example_stale_arr="$(build_json_array "$WORK_DIR/example_stale_entries.txt")"
 
 # ── Apply docs: skip ──────────────────────────────────────────────────────────
 
@@ -460,6 +512,8 @@ if $DOCS_SKIP || $NO_SCOPE_REPO; then
     drift_arr="[]"
     drift_warn_arr="[]"
     missing_arr="[]"
+    # example_stale (like visual_stale) is a non-blocking signal and is NOT
+    # zeroed under docs: skip / no-scope — it informs the regenerate self-heal.
 else
     drift_count=0
     missing_count=0
@@ -489,6 +543,7 @@ cat <<JSON
   "drift_warn": ${drift_warn_arr},
   "missing_scope": ${missing_arr},
   "visual_stale": ${vstale_arr},
+  "example_stale": ${example_stale_arr},
   "ai_review_stale": [],
   "skipped": ${skipped_val}
 }

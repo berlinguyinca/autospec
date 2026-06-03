@@ -189,7 +189,12 @@ Every fenced code example in generated docs is executed against the repo, so
 documentation cannot silently drift from working code. Verified examples carry a
 `<!-- example-verified: <head-sha> <ISO-date> -->` marker; a re-run on a newer
 HEAD that no longer matches re-verifies or flags the example as stale.
-*(verification engine filled in by #919; `example_stale` drift key added there.)*
+The verification engine is `scripts/verify-examples.mjs`: it executes every
+tagged example in a fresh worktree off origin/main (network-restricted, 60s
+per-example timeout), embeds captured output in an adjacent ` ```output ` block,
+and a failing example fails generation. `check-doc-drift.sh` reports an
+`example_stale` entry when a marker SHA predates the newest commit touching the
+scope's `src_globs` (same self-heal path as `visual_stale`).
 
 ## Style & palette
 
