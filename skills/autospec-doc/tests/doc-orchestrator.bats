@@ -113,3 +113,87 @@ EOF
   [ "$status" -eq 2 ]
   [[ "$output" == *"Usage:"* ]]
 }
+
+# ── init scaffolding (issue #917) ─────────────────────────────────────────────
+
+@test "init writes the documentation: block with style and examples keys" {
+  run node "$ORCH" init
+  [ "$status" -eq 0 ]
+  [ -f .autospec/autospec.yml ]
+  grep -q '^documentation:' .autospec/autospec.yml
+  grep -q 'palette: light-blue' .autospec/autospec.yml
+  grep -q 'verify: true' .autospec/autospec.yml
+  grep -q 'sandbox: worktree' .autospec/autospec.yml
+}
+
+@test "init seeds the four default audiences in the written block" {
+  run node "$ORCH" init
+  [ "$status" -eq 0 ]
+  grep -q 'name: user' .autospec/autospec.yml
+  grep -q 'name: developer' .autospec/autospec.yml
+  grep -q 'name: admin' .autospec/autospec.yml
+  grep -q 'name: general' .autospec/autospec.yml
+}
+
+@test "init creates per-audience starter scopes per the folder contract" {
+  run node "$ORCH" init
+  [ "$status" -eq 0 ]
+  [ -f docs/user/index.md ]
+  [ -f docs/user/getting-started.md ]
+  [ -f docs/developer/architecture/.gitkeep ]
+  [ -f docs/developer/api/.gitkeep ]
+  [ -f docs/admin/getting-started.md ]
+  [ -f docs/general/index.md ]
+  grep -q 'autospec-doc-scope: audience=user' docs/user/index.md
+}
+
+@test "init --dry-run writes nothing" {
+  run node "$ORCH" init --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no files written"* ]]
+  [ ! -f .autospec/autospec.yml ]
+  [ ! -d docs ]
+}
+
+@test "init is idempotent: existing documentation: block left untouched" {
+  seed_config
+  before="$(cat .autospec/autospec.yml)"
+  run node "$ORCH" init
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already present"* ]]
+  after="$(cat .autospec/autospec.yml)"
+  [ "$before" == "$after" ]
+}
+
+@test "init does not overwrite an existing human-owned doc file" {
+  mkdir -p docs/user
+  echo "HUMAN OWNED" > docs/user/index.md
+  run node "$ORCH" init
+  [ "$status" -eq 0 ]
+  grep -q 'HUMAN OWNED' docs/user/index.md
+}
+
+@test "after init, a non-init subcommand passes the config gate" {
+  node "$ORCH" init >/dev/null
+  run node "$ORCH" --full
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"full:"* ]]
+}
+
+@test "init output round-trips: loadConfig parses the written block to four defaults" {
+  node "$ORCH" init >/dev/null
+  export CFG="$PWD/.autospec/autospec.yml"
+  export CONFMOD="${BATS_TEST_DIRNAME}/../scripts/doc-config.mjs"
+  run node -e '
+    import(process.env.CONFMOD).then(m => {
+      const c = m.loadConfig(process.env.CFG);
+      const names = c.audiences.map(a => a.name).join(",");
+      if (names !== "user,developer,admin,general") { console.error("names=" + names); process.exit(1); }
+      if (c.style.palette !== "light-blue") process.exit(1);
+      if (c.examples.verify !== true || c.examples.sandbox !== "worktree") process.exit(1);
+      console.log("roundtrip-ok");
+    }).catch(e => { console.error(e); process.exit(1); });
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"roundtrip-ok"* ]]
+}
