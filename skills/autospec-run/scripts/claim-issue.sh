@@ -8,8 +8,19 @@ RUN_STATE="$SCRIPT_DIR/run-state.sh"
 
 # Lock-comment markers — must match run-state.sh so the loser self-clean can
 # locate this worker's own marked comment.
-BEGIN_MARKER="<!-- autospec-run-state:begin -->"
-END_MARKER="<!-- autospec-run-state:end -->"
+begin_marker="<!-- autospec-run-state:begin -->"
+end_marker="<!-- autospec-run-state:end -->"
+
+# own_marked_comment_id REPO ISSUE WORKER — print the highest id among marked
+# lock comments whose body carries this worker's worker_id (its own lock); empty
+# if none. Used on the lost-race path to self-delete only this worker's comment.
+own_marked_comment_id() {
+    gh api "repos/$1/issues/$2/comments" --jq '. // []' 2>/dev/null \
+        | jq -r --arg b "$begin_marker" --arg e "$end_marker" --arg wid "$3" \
+            'map(select((.body//"")|contains($b) and contains($e)))
+             | map(select((.body//"")|test("\"worker_id\"\\s*:\\s*\""+$wid+"\"")))
+             | sort_by(.id) | (.[-1].id // empty)' 2>/dev/null || true
+}
 
 usage() {
     cat <<'EOF'
@@ -83,18 +94,9 @@ verified_owner="$(printf '%s\n' "$verified_state_json" | jq -r '.worker_id // em
 verified_state="$(printf '%s\n' "$verified_state_json" | jq -r '.state // empty' 2>/dev/null || true)"
 if [ "$verified_owner" != "$worker_id" ] || [ "$verified_state" != "claimed" ]; then
     # Lost race: the lowest-id lock comment is owned by a different worker.
-    # Self-clean by deleting ONLY this worker's own marked lock comment (the
-    # higher id), never the winner's lower-id comment. Locate our own comment
-    # by matching worker_id inside the marked-comment body; fail-closed if it
-    # cannot be found or the delete fails.
-    own_comment_id="$(gh api "repos/$repo/issues/$issue/comments" --jq '. // []' 2>/dev/null \
-        | jq -r --arg begin "$BEGIN_MARKER" --arg end "$END_MARKER" --arg wid "$worker_id" '
-            map(select((.body // "") | contains($begin) and contains($end)))
-            | map(select((.body // "") | contains("\"worker_id\": \"" + $wid + "\"")
-                                       or contains("\"worker_id\":\"" + $wid + "\"")))
-            | sort_by(.id)
-            | (.[-1].id // empty)
-        ' 2>/dev/null || true)"
+    # Self-clean by deleting ONLY this worker's own marked lock comment, never
+    # the winner's lower-id comment. Fail-closed if it cannot be found.
+    own_comment_id="$(own_marked_comment_id "$repo" "$issue" "$worker_id")"
     if [ -n "$own_comment_id" ] && [ "$own_comment_id" != "null" ]; then
         gh api "repos/$repo/issues/comments/$own_comment_id" -X DELETE >/dev/null 2>&1 || true
     fi
