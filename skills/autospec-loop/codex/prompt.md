@@ -149,26 +149,94 @@ goal-vs-interval:
 
 ## Phase 1 — refine-until-go gate
 
-The interactive gate that freezes a contract before any loop iteration runs:
+The interactive gate that turns a raw operator request into a frozen,
+operator-approved contract before any loop iteration runs. It reuses
+`autospec-refine --interactive` for the refinement rounds (do **not** fork the
+lens logic — per the ROI-check rule, invoke upstream), extracts the
+GOAL / CHECK / MODE contract, shows-and-explains what was understood, and keeps
+iterating with the operator until they type the literal unlock token `go`.
 
-1. **Trigger disambiguation** (above). If interval intent → redirect to native
-   `/loop`, stop.
-2. **Refinement rounds** — invoke `autospec-refine --interactive` to run the
-   repo-grounded prompt-improvement rounds on the raw request (reuse upstream;
-   do not fork the lens logic).
-3. **Contract extraction** — extract GOAL (testable success criterion), CHECK
-   (a deterministic verifier command, or `null`), and MODE (`cumulative`
-   default vs `polling`).
-4. **Show & explain** — present the refined prompt verbatim, restate what was
-   understood (GOAL, CHECK or "an independent verifier will judge", MODE,
-   guardrails), and the per-iteration plan.
-5. **Clarify loop** — re-run steps 2–4 until the operator types the literal
-   unlock token **`go`** (case-insensitive; also accepts "go ahead"/"start").
-   `--yes` skips the gate (off by default).
-6. **Freeze** the contract into the loop-state file.
+The gate is the core requested behaviour, so it is **on by default**; only
+`--yes` skips it (autonomous mode).
 
-> Stub: the contract-extraction and show-and-explain logic is filled in by the
-> Phase 1 refine-until-go gate child issue.
+### 1. Trigger disambiguation handoff
+
+Apply the **Trigger disambiguation** section above. If the request is bare
+interval polling intent (*"loop every 5m"*, *"poll every N minutes"*), redirect
+to the native `/loop` and **stop** — do not enter this gate. If the request is
+ambiguous (*"do a loop"* with no interval and no goal), the gate's **first
+clarifying question** is goal-or-interval; on an interval answer, redirect to
+native `/loop` and stop. Otherwise (a goal/completion intent) continue.
+
+### 2. Refinement rounds (reuse autospec-refine)
+
+Run the repo-grounded prompt-improvement rounds by invoking
+**`autospec-refine --interactive`** on the raw request. This reuses the upstream
+lens pipeline (repo-grounding, clarity-ac, sizing, adversarial); do not
+reimplement or fork it. Take the refined prompt that `autospec-refine` produces
+as the input to contract extraction below.
+
+If the operator passed `--goal '<criterion>'`, treat that as the authoritative
+GOAL and skip GOAL inference; still run the refinement rounds to sharpen the
+per-iteration prompt unless `--yes` is also set.
+
+### 3. Contract extraction (GOAL / CHECK / MODE)
+
+From the refined prompt, extract three contract artifacts:
+
+- **GOAL** — an explicit, **testable** success criterion (one or more
+  sentences). It must be phrased so that "done" is unambiguous. When `--goal`
+  was supplied, use it verbatim.
+- **CHECK** — a **deterministic verifier**: a shell command plus its expected
+  exit status (e.g. a test command, a `grep`, or a `gh` query that exits `0`
+  exactly when the goal holds), **when one is derivable from the refined
+  prompt**. If no deterministic check can be derived, set CHECK to **`null`** —
+  the loop will then rely on a **separate** verifier subagent (never the worker)
+  to judge each iteration. If the operator passed `--check '<cmd>'`, use that
+  command verbatim and skip CHECK inference; an explicit `--check ''` (empty) or
+  the operator declining a check forces CHECK = `null`.
+- **MODE** — `cumulative` (carry `progress[]` state between iterations;
+  **default**) vs `polling` (stateless re-run of the same refined prompt each
+  iteration, judged on fresh repo state). Default to `cumulative` unless the
+  refined prompt clearly describes stateless polling.
+
+### 4. Show & explain
+
+Present to the operator, in plain language:
+
+- the **refined prompt verbatim** (exactly what each iteration's worker
+  receives);
+- **what was understood** — the restated GOAL; the CHECK that will gate
+  termination, shown as the literal command + expected exit (or, when CHECK is
+  `null`, the sentence *"no deterministic check — an independent verifier
+  subagent will judge each iteration against the GOAL"*); the MODE
+  (`cumulative` / `polling`) and why; and the active guardrails (`max_iters`,
+  `no_progress_K`, `stop.flag`, pre-loop short-circuit);
+- the **per-iteration plan** — what one iteration will do (dispatch worker →
+  persist outcome → evaluate goal → no-progress check → converge-or-continue).
+
+### 5. Clarify loop (unlock on `go`)
+
+Ask the operator to confirm or correct. If they correct or clarify anything,
+**re-run steps 2–4** with the new input and show the updated contract. Repeat
+until the operator types the literal unlock token **`go`** (case-insensitive;
+also accept `"go ahead"` and `"start"`). Any other response is treated as
+further clarification and re-enters the loop — never start the loop on an
+ambiguous or partial confirmation.
+
+`--yes` skips this entire gate (steps 4–5): the extracted contract is frozen
+immediately and the loop starts without operator confirmation. It is **off by
+default** because the gate is the core requested behaviour.
+
+### 6. Freeze the contract
+
+Initialize the loop-state file at
+`~/.autospec/loop/<repo-slug>/loop-state.json` via `loop-state.sh init`, writing
+the frozen `goal`, `check` (the command string or `null`), and `mode`, plus the
+guardrail defaults (`max_iters`, `no_progress_K` — overridable by `--max-iters`
+/ `--no-progress`) and the zeroed counters (`iter`, `no_progress_count`,
+`progress`, `last_result`, `done`, `exit_reason`). Once frozen, the contract is
+authoritative for the run; proceed to Phase 2.
 
 ## Phase 2 — goal-conditioned loop
 
