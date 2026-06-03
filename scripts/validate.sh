@@ -143,7 +143,19 @@ check_keyword_routing_section() {
     for trio in SKILL.md opencode/agent.md codex/prompt.md; do
         grep -q '^## Keyword auto-routing' "$skill_dir/$trio" \
             || fail "autospec-listen: $trio missing '## Keyword auto-routing' section"
+        # Issue #910: the explore/discover build-intent verb-map row must route
+        # to /autospec-explore, and the explore-confirm gate literal (emitted by
+        # the #909 classifier in scripts/listener-match.sh) must be honored in
+        # all three trio files. Keep these byte-identical to the classifier.
+        grep -q '/autospec-explore' "$skill_dir/$trio" \
+            || fail "autospec-listen: $trio missing explore -> /autospec-explore verb-map row"
+        grep -q 'explore-confirm' "$skill_dir/$trio" \
+            || fail "autospec-listen: $trio missing 'explore-confirm' gate literal"
     done
+    # The explore-confirm gate literal honored in the trio MUST exactly match the
+    # one emitted by the classifier (scripts/listener-match.sh, issue #909).
+    grep -q 'explore-confirm' scripts/listener-match.sh \
+        || fail "scripts/listener-match.sh missing 'explore-confirm' gate literal (classifier/trio drift)"
 }
 
 # Gap-remediation invariants (issue #535, deps #533/#534): the autospec-run

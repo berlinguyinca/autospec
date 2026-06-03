@@ -104,7 +104,7 @@ It emits `{"match":bool,"skill":...,"trigger":...,"intent":"imperative|incidenta
 
 The two new trailing fields:
 - `chain` — after the primary skill completes, invoke the chained skill (e.g. `/autospec-run` after `/autospec-refine`). Null when no chain applies.
-- `gate` — before routing, the listener must satisfy the named context gate; `auto-implement-open` means run `gh issue list --repo <repo> --label auto-implement --state open --json number --jq 'length'` and route only if > 0, else stay in plain mode. Null means no gate.
+- `gate` — before routing, the listener must satisfy the named context gate; `auto-implement-open` means run `gh issue list --repo <repo> --label auto-implement --state open --json number --jq 'length'` and route only if > 0, else stay in plain mode. `explore-confirm` means the route launches `/autospec-explore`, which starts a perpetual autonomous research + ship loop on an isolated sandbox branch whose PRs target the sandbox branch, never main; before invoking, print exactly that consequence and require ONE explicit confirmation, routing only on an affirmative reply. Null means no gate.
 
 **Verb → skill map (D3).**
 
@@ -116,6 +116,7 @@ The two new trailing fields:
 | `run` (scoped: "run it", "run the loop", "run autospec"; bare "run" only when open `auto-implement` issues exist) | `/autospec-run` |
 | `refine and run` / `tune up` (combined) | `/autospec-refine` then `/autospec-run` |
 | `review` | `/autospec-review` |
+| `explore` / `discover` (only with an explicit build/ship/improve action connector, e.g. "explore and ship", "discover features to build") | `/autospec-explore` (gate `explore-confirm`) |
 | `autospec …` | the umbrella `/autospec` |
 
 **Auto-route behavior.** When the classifier returns `match:true` with `intent:imperative`, print exactly one line then invoke the mapped skill via the harness skill-invocation primitive:
@@ -124,7 +125,7 @@ The two new trailing fields:
 Routing to /<skill> — say "plain" to opt out.
 ```
 
-If `gate` is non-null, perform the gate check first and skip routing (plain mode) if unmet. If `chain` is non-null, after the mapped skill completes, invoke the chained skill (printing one opt-out line as usual).
+If `gate` is non-null, perform the gate check first and skip routing (plain mode) if unmet. For `gate:explore-confirm` (skill `autospec-explore`), do NOT auto-route on the one-line opt-out alone: first print exactly that `/autospec-explore` starts a perpetual autonomous research + ship loop on an isolated sandbox branch whose PRs target the sandbox branch, never main, then require ONE explicit confirmation and invoke `/autospec-explore` only on an affirmative reply; the existing `plain`/`no` escape still cancels. If `chain` is non-null, after the mapped skill completes, invoke the chained skill (printing one opt-out line as usual).
 
 On a non-match or `intent:incidental`/`none`, do nothing — the session proceeds normally in plain mode.
 

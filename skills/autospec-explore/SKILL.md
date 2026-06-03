@@ -1,6 +1,6 @@
 ---
 name: autospec-explore
-description: Use when the user wants /autospec-explore to start a perpetual autonomous research + ship loop on an isolated sandbox branch — 6 researchers propose features from spec/code gaps, prior reports, codebase signals, open issues, repo source analysis, and competitor research, then drain via /autospec-run with PRs targeting the sandbox branch (never main).
+description: Use when the user wants /autospec-explore to start a perpetual autonomous research + ship loop on an isolated sandbox branch — 6 researchers propose features from spec/code gaps, prior reports, codebase signals, open issues, repo source analysis, and competitor research, then drain via /autospec-run with PRs targeting the sandbox branch (never main). Can also be reached via an explore/discover build-intent phrase through autospec-listen (which requires one explicit confirmation first), but is not a bare-keyword trigger on its own.
 ---
 
 # autospec-explore workflow (harness-neutral)
