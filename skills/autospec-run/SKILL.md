@@ -326,6 +326,8 @@ while true:
   # continue immediately, no sleep
 ```
 
+**Continuation contract:** BATCH_COMPLETE is a continuation signal, not a terminal state. reasoning:deep may reduce a single monitor batch to one issue, but the orchestrator MUST relaunch automatically until ALL_DONE. Never tell the operator to rerun `/autospec-run` after BATCH_COMPLETE; the current invocation owns the relaunch loop until the queue is empty or a hard blocker stops it.
+
 Pass the following prompt verbatim to each background subagent:
 
 > You are the auto-implement monitor for `{repo}`. Process `auto-implement` issues one at a time. Exit after processing `AUTOSPEC_BATCH_SIZE` issues (default: 3) by writing `~/.autospec/batch-done.json` — the orchestrator will relaunch you with fresh context.
@@ -340,7 +342,7 @@ Pass the following prompt verbatim to each background subagent:
 > 3. **tmux pane:** `tmux new-window 'bash << '''HEREDOC'''
 > while true; do ...; done
 > HEREDOC'`
-> **Session batching:** Exit after processing `AUTOSPEC_BATCH_SIZE` issues (default 3) by writing `~/.autospec/batch-done.json` with `status=BATCH_COMPLETE`. The orchestrator relaunches you with fresh context. When the queue is fully drained, write `status=ALL_DONE` instead. This keeps each monitor session short to prevent context overflow.
+> **Session batching:** Exit after processing `AUTOSPEC_BATCH_SIZE` issues (default 3) by writing `~/.autospec/batch-done.json` with `status=BATCH_COMPLETE`. BATCH_COMPLETE is a continuation signal, not a terminal state; the orchestrator relaunches you with fresh context. When the queue is fully drained, write `status=ALL_DONE` instead. This keeps each monitor session short to prevent context overflow.
 
 >
 > **Profile load (run-start, once).** If `--profile <name>` was passed, look it up in `~/.autospec/model-profiles.yml`; if `<name>` is not a key under `profiles:`, exit non-zero and print the available names. If no flag was passed, load the file's `default:` profile. If the file is missing, run auto-init and exit (per the Invocation section).
@@ -505,7 +507,8 @@ inline label-swap path below.
 >     fi
 >   fi
 >   # effective_batch_size probe — recomputed each outer-loop tick (not cached).
->   # Force batch=1 when the next ready issue is reasoning:deep (high blast-radius).
+>   # reasoning:deep may reduce a single monitor batch to one issue for fresh context.
+>   # This is not a run stop: the orchestrator MUST relaunch automatically until ALL_DONE.
 >   _next_reasoning=$(gh issue view "${ready[0]}" --json labels \
 >     --jq '[.labels[].name | select(startswith("reasoning:"))] | first // "reasoning:medium"' \
 >     2>/dev/null || echo "reasoning:medium")

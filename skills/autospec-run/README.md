@@ -82,6 +82,9 @@ reclaims stale GitHub run-state in addition to same-host heartbeat files.
   a foreground subagent to implement it (worktree → TDD → push → PR → self-review
   → admin-squash-merge), then loops without sleeping so a freshly-merged PR can
   unblock the next issue immediately.
+  `reasoning:deep` issues may reduce one monitor batch to a single issue for
+  fresh context, but `BATCH_COMPLETE` still auto-relaunches; only `ALL_DONE`
+  ends the `/autospec-run` invocation.
 - **Phase 5** — Periodic status updates posted to the user every ~25 min (slows
   to ~50 min when quiet).
 - **Phase 6** — Final report on monitor termination: every issue processed, every
