@@ -223,7 +223,7 @@ check_startup_preflight() {
         || printf '%s\n' "$canonical" | grep -F 'raw.githubusercontent.com/berlinguyinca/autospec/main/skills/' >/dev/null; then
         fail "startup preflight must not call a raw installer directly"
     fi
-    for s in autospec autospec-release autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa autospec-resume; do
+    for s in autospec autospec-release autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa autospec-resume autospec-doc; do
         for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
             body=$(extract_block "$f")
             [ -n "$body" ] || fail "$f missing ## Startup self-update section"
@@ -240,7 +240,7 @@ check_startup_preflight() {
 # prompts/ path AND the new skills/ slash-command registry path.
 check_codex_skills_install() {
     info "codex skills-dir install: all skills"
-    for s in autospec autospec-release autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa; do
+    for s in autospec autospec-release autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa autospec-doc; do
         f="skills/$s/install.sh"
         grep -q 'skills/\$SKILL_NAME/SKILL\.md' "$f" \
             || fail "$f missing Codex skills-dir install (skills/\$SKILL_NAME/SKILL.md)"
@@ -255,7 +255,7 @@ check_codex_skills_install() {
 check_shared_script_install() {
     info "shared helper install: all skills"
     helpers="autospec-stop.sh autospec-usage-limit.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh"
-    for s in autospec autospec-release autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa; do
+    for s in autospec autospec-release autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa autospec-doc; do
         f="skills/$s/install.sh"
         grep -q 'install_shared_scripts' "$f" \
             || fail "$f missing install_shared_scripts function/call"
@@ -1892,6 +1892,7 @@ main() {
     check_autospec_qa_cluster_contract
     check_autospec_qa_bug_class_contract
     check_autospec_resume_contract
+    check_autospec_doc_contract
     check_watchdog_worktree_gc
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
@@ -2326,6 +2327,54 @@ check_autospec_resume_contract() {
             bats "$bats_file" >/tmp/validate-resume-bats.log 2>&1 \
                 || { cat /tmp/validate-resume-bats.log >&2; fail "$bats_file: failed"; }
         done
+    fi
+}
+
+# autospec-doc scaffold contract (issue #916): the per-audience documentation
+# generator trio + subcommand router stub. Enforces:
+#   - all three trio files carry a `## Subcommand contract` section documenting
+#     the five §D1 forms (bare incremental, --full, --audit, --audience <name>,
+#     init), so the contract stays in lock-step across harnesses;
+#   - scripts/doc-orchestrator.mjs exists, node --check clean, and exits 2 on a
+#     non-init subcommand with no `documentation:` config;
+#   - the bats suite exists and passes.
+# Generic trio checks (lock-step, frontmatter, self-update, model-tier,
+# harness-detection, required-files) run via the discover_skills loop in main().
+check_autospec_doc_contract() {
+    info "autospec-doc scaffold contract (issue #916)"
+    local skill="skills/autospec-doc"
+    [ -d "$skill" ] || fail "$skill: directory missing"
+    for trio in SKILL.md codex/prompt.md opencode/agent.md; do
+        f="$skill/$trio"
+        [ -f "$f" ] || fail "$f: required file missing"
+        grep -q '^## Subcommand contract' "$f" \
+            || fail "$f missing '## Subcommand contract' section"
+        # The five §D1 subcommand forms must all be documented in every trio file.
+        grep -q -- '--full' "$f"     || fail "$f missing --full subcommand"
+        grep -q -- '--audit' "$f"    || fail "$f missing --audit subcommand"
+        grep -q -- '--audience' "$f" || fail "$f missing --audience subcommand"
+        grep -qE '/autospec-doc init|`init`' "$f" \
+            || fail "$f missing init subcommand"
+    done
+    orch="$skill/scripts/doc-orchestrator.mjs"
+    [ -f "$orch" ] || fail "$orch: orchestrator stub missing"
+    if command -v node >/dev/null 2>&1; then
+        node --check "$orch" || fail "$orch: node --check failed"
+        # Config gate: a non-init subcommand with no documentation config exits 2.
+        # Capture the exit without tripping `set -e` (the non-zero exit is expected).
+        gate_dir="$(mktemp -d)"
+        rc=0
+        ( cd "$gate_dir" && node "$REPO_ROOT/$orch" --full ) >/dev/null 2>&1 || rc=$?
+        rm -rf "$gate_dir"
+        [ "$rc" -eq 2 ] \
+            || fail "$orch: non-init subcommand with no documentation config must exit 2 (got $rc)"
+    fi
+    bats_file="$skill/tests/doc-orchestrator.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-autospec-doc-bats.log 2>&1 \
+            || { cat /tmp/validate-autospec-doc-bats.log >&2; fail "$bats_file: failed"; }
     fi
 }
 
