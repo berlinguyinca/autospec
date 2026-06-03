@@ -82,19 +82,25 @@ gh_api_retry() {
 }
 
 state_comment_ids() {
+    # Emit marked lock-comment ids sorted numeric-ascending. The lowest id is
+    # the CAS linearization point (the single deterministic owner); array/API
+    # order is not a contracted monotonic key, so selection never relies on it.
     comments_json | jq -r --arg begin "$BEGIN_MARKER" --arg end "$END_MARKER" '
       map(select((.body // "") | contains($begin) and contains($end))) |
+      sort_by(.id) |
       .[].id
     '
 }
 
 state_comment_id() {
+    # Lowest marked id (first of the ascending-sorted list).
     state_comment_ids | sed -n '1p'
 }
 
 state_comment_body() {
     comments_json | jq -r --arg begin "$BEGIN_MARKER" --arg end "$END_MARKER" '
       map(select((.body // "") | contains($begin) and contains($end))) |
+      sort_by(.id) |
       if length == 0 then "" else .[0].body end
     '
 }
