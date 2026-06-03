@@ -125,6 +125,7 @@ CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
 CLAUDE_DEST="$CLAUDE_DIR/skills/$SKILL_NAME/SKILL.md"
 OPENCODE_DEST="$OPENCODE_DIR/agent/$SKILL_NAME.md"
 CODEX_DEST="$CODEX_DIR/prompts/$SKILL_NAME.md"
+CODEX_SKILL_DEST="$CODEX_DIR/skills/$SKILL_NAME/SKILL.md"
 
 # ---------- remove ---------------------------------------------------------
 
@@ -144,6 +145,7 @@ if [ "$HARNESS" = "codex" ] || [ "$HARNESS" = "all" ]; then
     info ""
     info "Codex CLI:"
     remove_one "$CODEX_DEST"
+    remove_one "$CODEX_SKILL_DEST"
 fi
 
 info ""
