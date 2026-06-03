@@ -6,6 +6,11 @@ set -eu
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 RUN_STATE="$SCRIPT_DIR/run-state.sh"
 
+# Lock-comment markers — must match run-state.sh so the loser self-clean can
+# locate this worker's own marked comment.
+BEGIN_MARKER="<!-- autospec-run-state:begin -->"
+END_MARKER="<!-- autospec-run-state:end -->"
+
 usage() {
     cat <<'EOF'
 Usage: claim-issue.sh --issue <N> [--repo owner/repo] [--worker-id <id>] [--branch <branch>]
@@ -77,6 +82,23 @@ verified_state_json="$("$RUN_STATE" read --issue "$issue" --repo "$repo" 2>/dev/
 verified_owner="$(printf '%s\n' "$verified_state_json" | jq -r '.worker_id // empty' 2>/dev/null || true)"
 verified_state="$(printf '%s\n' "$verified_state_json" | jq -r '.state // empty' 2>/dev/null || true)"
 if [ "$verified_owner" != "$worker_id" ] || [ "$verified_state" != "claimed" ]; then
+    # Lost race: the lowest-id lock comment is owned by a different worker.
+    # Self-clean by deleting ONLY this worker's own marked lock comment (the
+    # higher id), never the winner's lower-id comment. Locate our own comment
+    # by matching worker_id inside the marked-comment body; fail-closed if it
+    # cannot be found or the delete fails.
+    own_comment_id="$(gh api "repos/$repo/issues/$issue/comments" --jq '. // []' 2>/dev/null \
+        | jq -r --arg begin "$BEGIN_MARKER" --arg end "$END_MARKER" --arg wid "$worker_id" '
+            map(select((.body // "") | contains($begin) and contains($end)))
+            | map(select((.body // "") | contains("\"worker_id\": \"" + $wid + "\"")
+                                       or contains("\"worker_id\":\"" + $wid + "\"")))
+            | sort_by(.id)
+            | (.[-1].id // empty)
+        ' 2>/dev/null || true)"
+    if [ -n "$own_comment_id" ] && [ "$own_comment_id" != "null" ]; then
+        gh api "repos/$repo/issues/comments/$own_comment_id" -X DELETE >/dev/null 2>&1 || true
+    fi
+    printf 'claim-issue: claim lost (issue %s owned by %s)\n' "$issue" "$verified_owner" >&2
     jq -n \
         --argjson issue "$issue" \
         --arg repo "$repo" \
