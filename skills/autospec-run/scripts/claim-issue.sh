@@ -12,13 +12,16 @@ begin_marker="<!-- autospec-run-state:begin -->"
 end_marker="<!-- autospec-run-state:end -->"
 
 # own_marked_comment_id REPO ISSUE WORKER — print the highest id among marked
-# lock comments whose body carries this worker's worker_id (its own lock); empty
-# if none. Used on the lost-race path to self-delete only this worker's comment.
+# lock comments whose embedded worker_id LITERALLY equals this worker's id (its
+# own lock); empty if none. The worker_id is extracted via capture() and compared
+# with == so a regex metacharacter in the id (e.g. a `.` from an FQDN/hostname)
+# can never false-match a different worker's comment. Used on the lost-race path
+# to self-delete only this worker's own comment.
 own_marked_comment_id() {
     gh api "repos/$1/issues/$2/comments" --jq '. // []' 2>/dev/null \
         | jq -r --arg b "$begin_marker" --arg e "$end_marker" --arg wid "$3" \
             'map(select((.body//"")|contains($b) and contains($e)))
-             | map(select((.body//"")|test("\"worker_id\"\\s*:\\s*\""+$wid+"\"")))
+             | map(select(((.body//"")|capture("\"worker_id\"\\s*:\\s*\"(?<w>[^\"]*)\"").w // "") == $wid))
              | sort_by(.id) | (.[-1].id // empty)' 2>/dev/null || true
 }
 
