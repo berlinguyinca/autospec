@@ -96,6 +96,44 @@ JSON
     ! grep -q 'api repos/testorg/testrepo/issues/comments/100 -X DELETE' "$CALLS"
 }
 
+@test "dotted worker_id self-cleans only its own comment, never a near-collision" {
+    # Cross-machine correctness: a worker_id with a regex metacharacter must
+    # match by LITERAL equality, not jq test(). winner-a holds the lowest-id
+    # lock (100) and wins via FORCE_OWNER. The loser's worker_id contains a dot
+    # (mac.lan:bob:monitor:1, its own comment is 101). A DIFFERENT worker owns a
+    # near-collision id (macXlan:bob:monitor:1, comment 102) where `.` would
+    # regex-match `X`. The loser must DELETE only its OWN comment (101) and never
+    # the near-collision's (102) nor the winner's (100).
+    cat > "$COMMENTS" <<'JSON'
+[
+  {
+    "id": 100,
+    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"winner-a\",\"state\":\"claimed\",\"claimed_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-01-01T00:00:00Z\"}\n<!-- autospec-run-state:end -->"
+  },
+  {
+    "id": 101,
+    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"mac.lan:bob:monitor:1\",\"state\":\"claimed\",\"claimed_at\":\"2026-01-01T00:00:01Z\",\"updated_at\":\"2026-01-01T00:00:01Z\"}\n<!-- autospec-run-state:end -->"
+  },
+  {
+    "id": 102,
+    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"macXlan:bob:monitor:1\",\"state\":\"claimed\",\"claimed_at\":\"2026-01-01T00:00:02Z\",\"updated_at\":\"2026-01-01T00:00:02Z\"}\n<!-- autospec-run-state:end -->"
+  }
+]
+JSON
+    printf 'auto-implement\nctx:32k\n' > "$LABELS"
+
+    AUTOSPEC_TEST_FORCE_OWNER=winner-a run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id 'mac.lan:bob:monitor:1'
+    [ "$status" -eq 2 ]
+    [[ "$output" == *'"claimed": false'* ]]
+    [[ "$output" == *'"reason": "claim_lost"'* ]]
+    # loser self-deletes its OWN comment (101) ...
+    grep -q 'api repos/testorg/testrepo/issues/comments/101 -X DELETE' "$CALLS"
+    # ... and NEVER the near-collision's (102), even though `.` regex-matches `X`
+    ! grep -q 'api repos/testorg/testrepo/issues/comments/102 -X DELETE' "$CALLS"
+    # ... and never the winner's lowest id (100)
+    ! grep -q 'api repos/testorg/testrepo/issues/comments/100 -X DELETE' "$CALLS"
+}
+
 @test "both-create race: two distinct marked comments, lower id wins the read" {
     # No pre-existing lock; both workers CREATE a fresh marked comment, ending
     # with two distinct marked comments (100 then 101). read returns the lower id.
