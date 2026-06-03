@@ -15,10 +15,11 @@ Works on **Claude Code**, **OpenCode**, and **Codex CLI**.
 
 > **Status:** scaffold (issue #916). This issue ships the lock-step trio with
 > the required structural sections, packaging, and the `doc-orchestrator.mjs`
-> router stub. The generators (`gen-audience-docs.mjs`, `verify-examples.mjs`,
-> `doc-style.mjs`, `gen-llms-full.mjs`), the config schema + folder contract,
-> and the Phase 4 / Phase 5.5 / sweep / define wiring land in follow-up child
-> issues #917-#924.
+> router stub. The config schema + folder contract (`scripts/doc-config.mjs`)
+> and the working `init` scaffolder landed in #917. The generators
+> (`gen-audience-docs.mjs`, `verify-examples.mjs`, `doc-style.mjs`,
+> `gen-llms-full.mjs`) and the Phase 4 / Phase 5.5 / sweep / define wiring land
+> in follow-up child issues #918-#924.
 
 ## Subcommands
 
@@ -73,10 +74,43 @@ a conformant autospec skill:
 
 ## Config
 
-`.autospec/autospec.yml` `documentation:` block. `init` seeds the four default
-audiences (user → `docs/user`, developer → `docs/developer`, admin →
-`docs/admin`, general → `docs/general`) only when `audiences:` is empty.
-*(Schema + folder-contract path constants land in #917.)*
+`.autospec/autospec.yml` `documentation:` block, parsed by
+`scripts/doc-config.mjs`. `init` seeds the four default audiences (user →
+`docs/user`, developer → `docs/developer`, admin → `docs/admin`, general →
+`docs/general`) only when `audiences:` is empty.
+
+```yaml
+documentation:
+  audiences:
+    - {name: user,      path: docs/user,      focus: "tasks, workflows, how to use features"}
+    - {name: developer, path: docs/developer, focus: "architecture, APIs, extending"}
+    - {name: admin,     path: docs/admin,     focus: "install, configure, operate, troubleshoot"}
+    - {name: general,   path: docs/general,   focus: "what it is, why it matters, plain language"}
+  style:
+    palette: light-blue        # named preset (default: light-blue)
+  examples:
+    verify: true               # docs-as-tests on/off (default: true)
+    sandbox: worktree          # example execution isolation (default: worktree)
+```
+
+**Folder contract** per audience: `index.md`, `getting-started.md`,
+`tutorials/<feature>.md`, `features/<feature>.md`; **developer** additionally
+gets `architecture/` + `api/`; **admin** links `docs/runbooks/`; shared assets
+live under `docs/assets/{screenshots,diagrams,transcripts}/`. The path constants
+are exported from `scripts/doc-config.mjs` as `FOLDER_CONTRACT`.
+
+### Migration note
+
+The `style` and `examples` keys are **new and optional** — existing
+`documentation:` configs keep working unchanged. If your repo already declares
+`audiences:` (including custom audiences such as `operators` or
+`security-reviewers`, or legacy entries keyed by `id`/`label`), those entries
+are preserved **verbatim**: the loader never rewrites their
+`name`/`path`/`focus`/`require_scope` fields and does **not** inject the four
+defaults when any audience is already declared. To adopt the new behavior, add a
+`style:` and/or `examples:` block; omit them to accept the defaults
+(`palette: light-blue`, `examples.verify: true`, `examples.sandbox: worktree`).
+No action is required to upgrade.
 
 ## Self-update
 
