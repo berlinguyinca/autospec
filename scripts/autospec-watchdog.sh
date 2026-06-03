@@ -24,6 +24,14 @@ WATCHDOG_CLAIMED_TIMEOUT_SECS="${AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS:-300}"
 WATCHDOG_NUDGE_COOLDOWN_SECS="${AUTOSPEC_WATCHDOG_NUDGE_COOLDOWN_SECS:-900}"
 STATE_FILE="${AUTOSPEC_WATCHDOG_STATE_FILE:-$HOME/.autospec/watchdog-state.tsv}"
 
+# Orphaned-worktree GC (crash-resume design, Child 3). The GC pass scans this
+# root for `wt-*` worktree directories and prunes only those that are provably
+# safe to remove (no un-pushed commits, issue closed/unlabeled, no live
+# heartbeat). Default root is /tmp where autospec runners create `/tmp/wt-*`.
+WATCHDOG_GC_DIR="${AUTOSPEC_WATCHDOG_GC_DIR:-/tmp}"
+# Heartbeat is considered "live" if its ts is within this many seconds of now.
+WATCHDOG_GC_HEARTBEAT_FRESH_SECS="${AUTOSPEC_WATCHDOG_GC_HEARTBEAT_FRESH_SECS:-${AUTOSPEC_WATCHDOG_STALE_SECS:-1800}}"
+
 WATCHDOG_LOG_PREFIX="[autospec-watchdog]"
 
 if ! command -v gh >/dev/null 2>&1; then
@@ -254,6 +262,98 @@ normalize_heartbeat() {
         && mv "$tmp" "$file"
 }
 
+# ── Orphaned-worktree GC (crash-resume design, Child 3) ───────────────────────
+#
+# Prune a `wt-*` worktree via `git worktree remove --force` ONLY when ALL three
+# data-integrity guards hold:
+#   (1) NO un-pushed commits   — `git -C <wt> log --not --remotes` is empty
+#   (2) issue closed/unlabeled — gh shows the issue not (OPEN AND still labeled
+#                                auto-implement/in-progress-by-bot)
+#   (3) NO live heartbeat      — no heartbeat for that issue has a fresh `ts`
+#                                (within WATCHDOG_GC_HEARTBEAT_FRESH_SECS)
+#
+# This is a destructive, data-integrity-load-bearing pass: it NEVER recursively
+# force-deletes a path and NEVER removes a worktree with un-pushed work or a
+# live heartbeat. It
+# only ever invokes `git worktree remove --force` after all three guards pass.
+# The pass is bounded (it only globs WATCHDOG_GC_DIR/wt-*) and must not block or
+# slow the reclaim loop; every guard short-circuits on the cheap local checks
+# (rev-parse, log) before the single per-candidate `gh` call.
+
+# True (0) if a heartbeat for $issue is live (fresh ts within the freshness
+# window). Conservative: any parse failure is treated as "not live" so it does
+# not by itself save a worktree — the un-pushed and issue-state guards remain.
+_gc_heartbeat_is_live() {
+    issue="$1"
+    hb="${WATCHDOG_DIR}/${issue}.json"
+    [ -f "$hb" ] || return 1
+    hb_ts="$(json_value ts "$hb")"
+    case "$hb_ts" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    hb_age=$(( now_ts - hb_ts ))
+    [ "$hb_age" -lt 0 ] && hb_age=0
+    [ "$hb_age" -lt "$WATCHDOG_GC_HEARTBEAT_FRESH_SECS" ]
+}
+
+gc_orphaned_worktrees() {
+    command -v git >/dev/null 2>&1 || return 0
+    for wt in "$WATCHDOG_GC_DIR"/wt-*; do
+        [ -d "$wt" ] || continue
+        # Must be a real git worktree before we touch it.
+        git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
+
+        branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+        case "$branch" in
+            ''|HEAD) continue ;;
+        esac
+
+        # Derive the issue number from the branch (e.g. feat/...-issue-700 or a
+        # trailing numeric segment). Skip if we cannot identify an issue.
+        issue="$(printf '%s' "$branch" | grep -oE '[0-9]+' | tail -1 || true)"
+        case "$issue" in
+            ''|*[!0-9]*) continue ;;
+        esac
+
+        # GUARD 1 — un-pushed commits. NEVER prune if any local commit is not on
+        # a remote. This is the load-bearing data-integrity check.
+        unpushed="$(git -C "$wt" log --not --remotes --oneline 2>/dev/null || echo "x")"
+        [ -z "$unpushed" ] || continue
+
+        # GUARD 3 — live heartbeat (cheap local file check; do it before gh).
+        if _gc_heartbeat_is_live "$issue"; then
+            continue
+        fi
+
+        # GUARD 2 — issue closed or unlabeled. Skip if the issue is still OPEN
+        # AND still carries an in-flight label. issue_meta is "STATE labels".
+        meta="$(issue_meta "$issue")"
+        gc_state="${meta%% *}"
+        gc_labels="${meta#* }"
+        [ "$gc_state" = "$meta" ] && gc_labels=""
+        if [ "$gc_state" = "OPEN" ]; then
+            if printf '%s' ",${gc_labels}," | grep -qE ',(auto-implement|in-progress-by-bot),'; then
+                continue
+            fi
+        fi
+
+        # All three guards passed → safe to prune via git's own worktree removal.
+        if git worktree remove --force "$wt" >/dev/null 2>&1; then
+            garbage_collected=$((garbage_collected + 1))
+            echo "$WATCHDOG_LOG_PREFIX gc: removed orphaned worktree $wt (issue #$issue, branch $branch)" >&2
+        fi
+    done
+}
+
+# GC-only mode: run just the orphaned-worktree GC pass and exit. Used by the
+# watchdog GC bats fixture to exercise the real pass in isolation.
+if [ "${AUTOSPEC_WATCHDOG_GC_ONLY:-}" = "1" ]; then
+    gc_orphaned_worktrees
+    printf 'service-watch: nudged=0 reclaimed=0 claimed_released=0 garbage_collected=%s invalid_schema=0 skipped=0\n' \
+        "$garbage_collected"
+    exit 0
+fi
+
 load_state
 
 for hb in "$WATCHDOG_DIR"/*.json; do
@@ -416,6 +516,9 @@ reconcile_run_state_comments() {
 }
 
 reconcile_run_state_comments
+
+# Orphaned-worktree GC: once per watchdog cycle, after reclaim, before summary.
+gc_orphaned_worktrees
 
 save_state
 printf 'service-watch: nudged=%s reclaimed=%s claimed_released=%s garbage_collected=%s invalid_schema=%s skipped=%s\n' \

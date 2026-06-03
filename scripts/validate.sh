@@ -1722,6 +1722,39 @@ check_claim_cas_guard() {
     done
 }
 
+# Watchdog orphaned-worktree GC (crash-resume design, Child 3 / issue #883).
+# Enforces the data-integrity contract structurally:
+#   - gc_orphaned_worktrees is defined and invoked once per cycle.
+#   - Pruning uses `git worktree remove --force`, never `rm -rf` of a worktree.
+#   - The script passes `bash -n`.
+#   - A bats fixture under tests/resume/ covers the three GC outcomes.
+check_watchdog_worktree_gc() {
+    info "watchdog orphaned-worktree GC (issue #883)"
+    local wd="scripts/autospec-watchdog.sh"
+    [ -f "$wd" ] || fail "$wd: missing"
+    bash -n "$wd" || fail "$wd: bash syntax error (issue #883)"
+    grep -q 'gc_orphaned_worktrees()' "$wd" \
+        || fail "$wd must define gc_orphaned_worktrees() (issue #883)"
+    grep -q '^gc_orphaned_worktrees$\|^    gc_orphaned_worktrees$' "$wd" \
+        || fail "$wd must invoke gc_orphaned_worktrees once per cycle (issue #883)"
+    grep -q 'git worktree remove --force' "$wd" \
+        || fail "$wd GC must prune via 'git worktree remove --force' (issue #883)"
+    # Data-integrity guard: the GC must never rm -rf a worktree path. Allow no
+    # `rm -rf` anywhere in the watchdog (it has never needed one).
+    if grep -vE '^[[:space:]]*#' "$wd" | grep -qE 'rm[[:space:]]+-rf'; then
+        fail "$wd must never 'rm -rf' a worktree path; use 'git worktree remove --force' (issue #883)"
+    fi
+    grep -q 'log --not --remotes' "$wd" \
+        || fail "$wd GC must gate on 'git -C <wt> log --not --remotes' for un-pushed commits (issue #883)"
+    [ -f tests/resume/test_watchdog_gc.bats ] \
+        || fail "tests/resume/test_watchdog_gc.bats: GC bats fixture missing (issue #883)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/resume/test_watchdog_gc.bats"
+        bats tests/resume/test_watchdog_gc.bats >/tmp/validate-watchdog-gc.log 2>&1 \
+            || { cat /tmp/validate-watchdog-gc.log >&2; fail "tests/resume/test_watchdog_gc.bats: failed (issue #883)"; }
+    fi
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -1813,6 +1846,7 @@ main() {
     check_autospec_qa_cluster_contract
     check_autospec_qa_bug_class_contract
     check_autospec_resume_contract
+    check_watchdog_worktree_gc
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
