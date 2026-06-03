@@ -148,8 +148,23 @@ goal-vs-interval:
   question** is goal-or-interval. If the operator wants interval polling, the
   skill **redirects to native `/loop`** and exits without starting its own loop.
 
-> Stub: the full trigger wording lives in the frontmatter `description` and is
-> finalized in the trigger-disambiguation child issue.
+Decision rule, applied to the raw request before anything else runs:
+
+1. **Explicit interval, no goal** — the request names a cadence (*"every 5m"*,
+   *"every N minutes"*, *"on an interval"*, or the literal `/loop <interval>`
+   form) and no completion criterion → **defer to native `/loop`**; do not
+   enter this skill's gate.
+2. **Explicit goal / completion** — the request names a stopping condition
+   (*"until …"*, *"until done"*, *"until it passes"*, *"keep doing X until Y"*)
+   → **autospec-loop claims it**; enter the Phase 1 gate.
+3. **Ambiguous** — a bare *"do a loop"* / *"execute a loop"* with neither an
+   interval nor a goal → autospec-loop claims it, and the gate's **first
+   clarifying question is goal-or-interval**: on a goal answer, continue the
+   gate; on an interval answer, **redirect to native `/loop`** and exit without
+   starting a loop here.
+
+The frontmatter `description` encodes this same split so auto-invocation routes
+goal-intent phrasings here and leaves bare interval phrasings to native `/loop`.
 
 ## Phase 1 — refine-until-go gate
 
