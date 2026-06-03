@@ -237,6 +237,20 @@ is_imperative() {
         esac
     done
 
+    # Suppressor 5: explore/discover read-and-understand idioms (D4, issue #909).
+    # Reinforces the question/negation/past groups for the explore verb. These
+    # are narrow read-intent phrasings — NOT a blanket "explore the" suppressor,
+    # which would wrongly kill "explore the repo for improvements" (a CLAIM
+    # phrase). The build/ship co-occurrence gate in classify_phrase() is the
+    # primary guard; this is belt-and-suspenders for descriptive explore use.
+    for rd in "explore the codebase" "explore this" "explore the data" \
+              "explore the file" "explore the files" "explore options" \
+              "let me explore" "exploratory" "the exploration"; do
+        case "$text" in
+            *"$rd"*) return 1 ;;
+        esac
+    done
+
     return 0
 }
 
@@ -357,6 +371,52 @@ EOF
             return 0
         fi
         # Gerund ("running"): fall through to remaining verbs.
+    fi
+
+    # ── Explore / discover — research-and-ship intent (D3, issue #909) ───────
+    # Route to /autospec-explore ONLY when an explore/discover verb co-occurs
+    # with a COORDINATED build/ship/feature action ("explore and ship",
+    # "discover features to build", "explore the repo for improvements"). A bare
+    # "explore <noun>" — including "explore the feature flags" / "explore the
+    # build dir", where the build/feature word is an incidental noun with no
+    # coordinating action connector — must NOT route. That is the critical
+    # safety property guarding against auto-launching a perpetual PR-shipping
+    # loop.
+    # Placed BEFORE implement/build/ship so the more-specific explore semantics
+    # win over the embedded build/ship/implement verb. Emitted explicitly (like
+    # the bare-run gate exemplar above) so it carries gate=explore-confirm,
+    # consumed byte-for-byte by the autospec-listen trio (issue #910).
+    # `discover` is an alias verb routing identically (same skill/trigger/gate).
+    _has_explore=0
+    if has_word "$text_lc" "explore" || has_word "$text_lc" "discover" \
+        || has_word "$text_lc" "exploring" || has_word "$text_lc" "discovering"; then
+        _has_explore=1
+    fi
+    # Build intent requires an explicit ACTION CONNECTOR ("and/to/for") joined
+    # to a build/ship/feature word — NOT mere co-occurrence. This is the safety
+    # discriminator: "explore the feature flags" / "explore the build dir" are
+    # read requests (a build/feature noun, no coordinating action) and must NOT
+    # route; "explore and ship", "discover features to build", "explore the repo
+    # for improvements" carry a coordinated build action and DO route.
+    _has_build_intent=0
+    if [ "$_has_explore" -eq 1 ]; then
+        for _bi in "and ship" "to ship" "for ship" \
+                   "and build" "to build" "for build" \
+                   "and implement" "to implement" "for implement" \
+                   "and improve" "to improve" "for improvement" "for improvements" \
+                   "and enhance" "to enhance" "for enhancement" "for enhancements"; do
+            case "$text_lc" in
+                *"$_bi"*) _has_build_intent=1; break ;;
+            esac
+        done
+    fi
+    if [ "$_has_explore" -eq 1 ] && [ "$_has_build_intent" -eq 1 ]; then
+        if is_imperative "$text_lc"; then
+            emit_classify_json true autospec-explore explore imperative 0.7 "$is_auto" "" explore-confirm
+        else
+            emit_classify_json false autospec-explore explore incidental 0.2 false "" ""
+        fi
+        return 0
     fi
 
     # Existing branches (preserved in order).
