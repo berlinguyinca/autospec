@@ -1000,6 +1000,16 @@ inline label-swap path below.
 >      exit 0
 >    fi
 >    ```
+>    <!-- token-report:begin -->
+>    Post the per-issue token report (best-effort; never fails the run):
+>    ```bash
+>    # Orchestrator writes .autospec/tokens-<ISSUE>.json from Agent-result usage
+>    # (harness-dependent, best-effort; absent fields → null, never blocking).
+>    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/post-token-report.sh" \
+>      --issue "<ISSUE>" --repo "<REPO>" \
+>      --tokens-json ".autospec/tokens-<ISSUE>.json" || true
+>    ```
+>    <!-- token-report:end -->
 > 9. FAILURE (loop exhausted): comment failure on issue, swap label `in-progress-by-bot` → `auto-implement`, `gh pr close <PR> --delete-branch`.
 > 10. Cleanup: cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force
 > 11. Report: PR number, outcome, one-paragraph summary.
