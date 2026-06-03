@@ -1071,6 +1071,20 @@ rm -f "$HOME/.autospec/gap-round-state.json"   # fresh window per run
 Loop (`round = 1 … MAX`):
 
 1. **Broad review** (Tier A): run `/autospec-review --remediation --since "${BATCH_START_DATE}" --emit-gaps "${GAPS_FILE}"`. On review failure, log a warning, treat as 0 survivors, and fall back to the final report (never block run completion).
+1b. **Docs-completeness dimension** (spec §D6 row 2 — runs only on round 1, after the broad review emits `${GAPS_FILE}`): the gap-remediation review also audits documentation completeness for the work shipped during this batch window. Every feature shipped in the window (scoped by `run-batch-start.sh --read`) must have a page for every configured audience (the `documentation.audiences` from #917's doc config), and there must be no outstanding `visual_stale` / `example_stale` drift signals (`check-doc-drift.sh`). Run the deterministic helper and **append** its gaps onto the existing `${GAPS_FILE}` so they file, dedupe, and converge through the SAME gap-remediation machinery used in step 2 (do NOT build a parallel loop):
+
+   ```bash
+   DOCS_GAPS="$(bash "skills/autospec-run/scripts/docs-completeness-gaps.sh" 2>/tmp/docs-completeness.err)" || DOCS_GAPS='[]'
+   # Merge the docs gaps into the broad-review gap array (re-numbered by the driver).
+   if [ -s "${GAPS_FILE}" ]; then
+     jq -s '.[0] + .[1]' "${GAPS_FILE}" <(printf '%s' "${DOCS_GAPS}") > "${GAPS_FILE}.merged" \
+       && mv "${GAPS_FILE}.merged" "${GAPS_FILE}"
+   else
+     printf '%s' "${DOCS_GAPS}" > "${GAPS_FILE}"
+   fi
+   ```
+
+   The emitted gaps carry `dimension: "docs-completeness"`; the gap-remediation loop labels them `gap-remediation` like every other survivor, so a later round does not re-flag freshly-fixed work. Failures of the docs check itself (missing config, drift-script error, missing `node`/`jq`) only log a WARN to `/tmp/docs-completeness.err` and emit an empty array — this dimension NEVER blocks run completion (same failure semantics as `/autospec-review` above).
 2. **File survivors:**
 
    ```bash
