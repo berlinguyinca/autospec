@@ -477,8 +477,17 @@ inline label-swap path below.
 >   # label swap. Multiple monitors can race the same candidate; exactly one
 >   # wins (exit 0), the rest lose (non-zero) and skip to the next candidate.
 >   claim_json="$("$COORD_CLAIM" --issue "$ISSUE" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-$(hostname):${USER:-unknown}:monitor:$$}" --branch "${BRANCH:-}")" && claim_rc=0 || claim_rc=$?
->   if [ "$claim_rc" -ne 0 ]; then
+>   # exit 1 = hard usage error (never a race signal); exit 2 = lost race.
+>   # Split them: a misconfigured claim (rc 1 or any other non-2 non-zero) must
+>   # surface an operator-visible WARN, not masquerade as a silently-dropped
+>   # lost race (rc 2). rc 0 falls through to ownership below.
+>   if [ "$claim_rc" -eq 2 ]; then
 >     echo "[monitor] claim lost for #$ISSUE (rc=$claim_rc); refreshing queue"
+>     READY_REMOVE=$(printf "%s\n%s" "$READY_REMOVE" "$ISSUE" | grep -v "^${ISSUE}$" || true)
+>     ready=($READY_REMOVE)
+>     continue
+>   elif [ "$claim_rc" -ne 0 ]; then
+>     echo "[monitor] WARN: claim hard error for #$ISSUE (rc=$claim_rc) — usage/config error, NOT a lost race; skipping. Check claim-issue.sh invocation." >&2
 >     READY_REMOVE=$(printf "%s\n%s" "$READY_REMOVE" "$ISSUE" | grep -v "^${ISSUE}$" || true)
 >     ready=($READY_REMOVE)
 >     continue
