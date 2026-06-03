@@ -21,6 +21,24 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 
+// ── Style / palette integration ───────────────────────────────────────────────
+// doc-style.mjs is the single source of the light-blue palette.
+// When --style is passed on the CLI, mermaidInit() is prepended to every
+// generated diagram so renderers apply the correct theme variables.
+let _mermaidInitFn = null;
+
+async function getMermaidInit() {
+  if (_mermaidInitFn) return _mermaidInitFn;
+  try {
+    const stylePath = path.resolve(path.dirname(__filename), '../../autospec-doc/scripts/doc-style.mjs');
+    const mod = await import(stylePath);
+    _mermaidInitFn = mod.mermaidInit;
+  } catch {
+    _mermaidInitFn = null;
+  }
+  return _mermaidInitFn;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
@@ -285,13 +303,16 @@ if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.rea
   let clusterFile = null;
   let archFile = null;
 
+  let useStyle = false;
+
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--cluster') clusterFile = args[i + 1];
     if (args[i] === '--arch')    archFile    = args[i + 1];
+    if (args[i] === '--style')   useStyle    = true;
   }
 
   if (!clusterFile) {
-    process.stderr.write('Usage: gen-arch-diagram.mjs --cluster <file> [--arch <architecture.md>]\n');
+    process.stderr.write('Usage: gen-arch-diagram.mjs --cluster <file> [--arch <architecture.md>] [--style]\n');
     process.exit(1);
   }
 
@@ -303,26 +324,55 @@ if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.rea
     process.exit(1);
   }
 
+  // Resolve the mermaid init block when --style is requested.
+  let initBlock = '';
+  if (useStyle) {
+    const initFn = await getMermaidInit();
+    if (initFn) {
+      initBlock = initFn() + '\n';
+    } else {
+      process.stderr.write('gen-arch-diagram: --style requested but doc-style.mjs could not be loaded; continuing without theme\n');
+    }
+  }
+
+  /**
+   * Wrap a mermaid string with the optional init block and fences.
+   * @param {string} content
+   * @returns {string}
+   */
+  function styledFence(content) {
+    return '```mermaid\n' + initBlock + content + '\n```';
+  }
+
   const diagrams = generateAllDiagrams(clusters);
 
   if (archFile) {
     let existing = '';
     if (fs.existsSync(archFile)) existing = fs.readFileSync(archFile, 'utf8');
-    const patched = patchArchitectureMd(existing, diagrams);
+    // When --style is active, patch diagrams to include the init block.
+    let patchedDiagrams = diagrams;
+    if (initBlock) {
+      patchedDiagrams = {
+        moduleGraph: initBlock.trimEnd() + '\n' + diagrams.moduleGraph,
+        cliTrees:  diagrams.cliTrees.map(t  => initBlock.trimEnd() + '\n' + t),
+        httpTrees: diagrams.httpTrees.map(t => initBlock.trimEnd() + '\n' + t),
+      };
+    }
+    const patched = patchArchitectureMd(existing, patchedDiagrams);
     fs.writeFileSync(archFile, patched, 'utf8');
     process.stdout.write(`gen-arch-diagram: patched ${archFile}\n`);
   } else {
     // Print all diagrams to stdout
     const { moduleGraph, cliTrees, httpTrees } = diagrams;
     process.stdout.write('## Module Graph\n\n');
-    process.stdout.write(mermaidFence(moduleGraph) + '\n');
+    process.stdout.write(styledFence(moduleGraph) + '\n');
     if (cliTrees.length > 0) {
       process.stdout.write('\n## CLI Entry-point Call Trees\n\n');
-      for (const t of cliTrees) process.stdout.write(mermaidFence(t) + '\n\n');
+      for (const t of cliTrees) process.stdout.write(styledFence(t) + '\n\n');
     }
     if (httpTrees.length > 0) {
       process.stdout.write('\n## HTTP Entry-point Call Trees\n\n');
-      for (const t of httpTrees) process.stdout.write(mermaidFence(t) + '\n\n');
+      for (const t of httpTrees) process.stdout.write(styledFence(t) + '\n\n');
     }
   }
 
