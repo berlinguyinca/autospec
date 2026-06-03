@@ -241,30 +241,88 @@ authoritative for the run; proceed to Phase 2.
 ## Phase 2 — goal-conditioned loop
 
 State lives at `~/.autospec/loop/<repo-slug>/loop-state.json` (path-scoped slug
-to avoid cross-repo collision; atomic `tmp`+`mv` writes via `loop-state.sh`).
+to avoid cross-repo collision; atomic `tmp`+`mv` writes). Drive it **only**
+through the scripts that ship with this skill — never hand-edit the JSON:
 
-**Pre-loop short-circuit:** if CHECK is non-null, run it once before iterating;
-if already satisfied → `exit_reason="already-satisfied"`, report, stop.
+- `loop-state.sh init --repo <owner/name> --goal <GOAL> --check <CMD|null>
+  [--mode cumulative|polling] [--max-iters N] [--no-progress-k N]` — already run
+  by Phase 1 step 6 to freeze the contract.
+- `loop-state.sh read --repo <owner/name>` — print the current JSON; parse the
+  fields you need with `jq`.
+- `loop-state.sh update --repo <owner/name> --key <field> --value <val>` —
+  atomic single-field write (the script picks the JSON type: `true`/`false` →
+  boolean, all-digits → number, else string).
+- `loop-check.sh '<CMD>'` — run the deterministic CHECK; prints `met` and exits
+  `0` when satisfied, `not-met` and exits `1` otherwise (a missing, empty, or
+  literal `null` command is always `not-met`).
+
+`progress[]` is an array. `loop-state.sh update --value` infers the JSON type
+from the value (`true`/`false` → boolean, all-digits → number, **everything else
+→ string**), so it cannot write a real array — passing a serialized array string
+would store `progress` as a quoted string and corrupt the schema. To append an
+iteration summary, read the state, append with `jq`, and write the **whole**
+state file atomically yourself (`jq '.progress += ["<summary>"]' "$(loop-state.sh
+path --repo <owner/name>)"` into a `mktemp` then `mv` over the path) — or, the
+simpler default, keep a human-readable rolling log in `last_result` (a plain
+string `update` handles correctly) and let Phase 1's `init` seed `progress` as
+the empty array, treating it as the exit-report accumulator you only append to
+via the `jq`+`mv` path. Resolve `<owner/name>` once at loop start (e.g.
+`gh repo view --json nameWithOwner --jq .nameWithOwner`) and reuse it for every
+script call so all reads and writes target the same state file.
+
+**Pre-loop short-circuit:** read `check` from state; if it is non-null, run
+`loop-check.sh "$check"` once **before** the first iteration. If it prints `met`
+(exit 0), the goal already holds: `loop-state.sh update --key done --value true`,
+`--key exit_reason --value already-satisfied`, emit the exit report, and stop —
+no worker is ever dispatched. If `check` is `null`, skip the short-circuit and
+enter the loop (the in-loop verifier judges each iteration).
 
 **Each iteration** (stop-gates evaluated *before* doing work):
 
-1. **Halt gate** — see Guardrails.
-2. **Work** — dispatch a worker subagent (Tier B; inline on Codex) with the
-   refined prompt + GOAL + carried `progress[]` (cumulative) or just the prompt
-   + `last_result` (polling). Instruct it to make forward progress and report.
-3. **Persist** — append the outcome to `progress[]`, set `last_result`, via
-   `loop-state.sh`.
-4. **Goal eval** — if CHECK non-null, run `loop-check.sh` (deterministic,
-   preferred). If CHECK is `null`, dispatch a **separate** verifier subagent —
-   **never the worker subagent** (no self-approval) — to judge against GOAL.
-5. **No-progress detection** — measurable change this iteration? No →
-   `no_progress_count++`; yes → reset to 0.
-6. **Converge** — goal met → `done=true`, `exit_reason="goal-met"`, break.
-   Else `iter++`, continue.
+1. **Halt gate** — before dispatching any worker, evaluate the guardrails (see
+   **Guardrails**) against current state. If `~/.autospec/stop.flag` exists, or
+   `iter >= max_iters`, or `no_progress_count >= no_progress_K`, write the
+   matching `exit_reason` (`stopped-by-flag` / `max-iters` / `no-progress`) and
+   `done=true` via `loop-state.sh update`, emit the exit report, and stop
+   **without** dispatching another worker.
+2. **Work** — dispatch a **worker** subagent (Tier B; **inline on Codex**, which
+   has no subagents) with input = the refined prompt + GOAL + the carried
+   `progress[]` (cumulative mode) or the refined prompt + `last_result` only
+   (polling mode). Instruct it to make forward progress toward GOAL and report
+   concretely what changed (files touched, commands run, observable deltas).
+3. **Persist** — capture the worker's outcome. Set `last_result` to its summary
+   via `loop-state.sh update --key last_result --value "<summary>"`, and append a
+   one-line iteration summary to `progress[]` via the `jq`+`mv` whole-file path
+   above (never via `update`, which would stringify the array). Never carry the
+   raw worker transcript in your own context.
+4. **Goal eval** — if `check` is non-null, run `loop-check.sh "$check"`: `met`
+   (exit 0) means the goal holds, `not-met` (exit 1) means keep going. If `check`
+   is `null`, dispatch a **separate verifier** subagent (Tier B; Tier A for
+   high-stakes goals) — **never the worker subagent that produced this result**,
+   to honour the no-self-approval rule — to judge `last_result` / current repo
+   state against GOAL and return met / not-met plus a one-line reason.
+5. **No-progress detection** — did this iteration produce a measurable change
+   toward the goal (CHECK output flipped or moved, files changed, a non-empty
+   `progress[]` delta)? **No** → `no_progress_count++` (read, increment, write).
+   **Yes** → reset `no_progress_count` to `0`.
+6. **Converge** — goal met (`loop-check.sh` printed `met`, or the verifier
+   returned met) → `loop-state.sh update --key done --value true`,
+   `--key exit_reason --value goal-met`, break. Otherwise increment `iter`
+   (`loop-state.sh update --key iter --value <iter+1>`) and continue to the next
+   iteration's halt gate.
 
-> Stub: the iteration body and exit report are filled in by the Phase 2
-> goal-conditioned loop child issue; `loop-state.sh` / `loop-check.sh` ship in
-> the scripts child issue.
+**Exit report.** On any loop exit, read the final state once
+(`loop-state.sh read`) and report to the operator, in plain language:
+
+- the **final status** drawn from `exit_reason` — one of `goal-met`,
+  `max-iters`, `no-progress`, `stopped-by-flag`, or `already-satisfied`;
+- the **iteration count** (`iter`) and, when relevant, the `no_progress_count`;
+- the **progress log** — the `progress[]` entries in order, so the operator can
+  see what each iteration accomplished and why the loop stopped.
+
+Make the status unambiguous: distinguish a true `goal-met` convergence from a
+guardrail halt (`max-iters` / `no-progress` / `stopped-by-flag`) so the operator
+knows whether to re-run, raise `--max-iters`, or intervene.
 
 ## Guardrails
 
