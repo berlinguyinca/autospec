@@ -22,6 +22,31 @@ own_marked_comment_id() {
              | sort_by(.id) | (.[-1].id // empty)' 2>/dev/null || true
 }
 
+# lowest_lock_field REPO ISSUE FIELD — print FIELD (.id, .updated_at, or the
+# embedded worker_id) of the LOWEST-numeric-id marked lock comment, i.e. the CAS
+# linearization point. updated_at is the SERVER timestamp from the GitHub API —
+# never a local clock. Empty if no marked lock exists.
+lowest_lock_field() {
+    gh api "repos/$1/issues/$2/comments" --jq '. // []' 2>/dev/null \
+        | jq -r --arg b "$begin_marker" --arg e "$end_marker" --arg f "$3" '
+            map(select((.body//"")|contains($b) and contains($e)))
+            | sort_by(.id) | .[0] as $c
+            | if $c == null then ""
+              elif $f == "worker_id" then
+                ($c.body | capture("\"worker_id\"\\s*:\\s*\"(?<w>[^\"]*)\"").w // "")
+              else ($c[$f] // "") end' 2>/dev/null || true
+}
+
+# iso_to_epoch ISO8601Z — parse a server UTC timestamp (YYYY-MM-DDThh:mm:ssZ) to
+# epoch seconds, portable across BSD (date -j) and GNU (date -d). Empty on parse
+# failure so callers can fail closed (treat as not-stale).
+iso_to_epoch() {
+    [ -n "$1" ] || return 0
+    date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null \
+        || date -u -d "$1" +%s 2>/dev/null \
+        || true
+}
+
 usage() {
     cat <<'EOF'
 Usage: claim-issue.sh --issue <N> [--repo owner/repo] [--worker-id <id>] [--branch <branch>]
@@ -79,6 +104,42 @@ if ! gh issue edit "$issue" --repo "$repo" --remove-label auto-implement --add-l
     jq -n --argjson issue "$issue" --arg repo "$repo" --arg reason "label_mutation_failed" \
         '{claimed:false, issue:$issue, repo:$repo, reason:$reason}'
     exit 2
+fi
+
+# Fixed evaluation order BEFORE the destructive upsert (spec §Critical-improvement
+# fold-in): (1) determine the lowest-id marked lock = current owner; (2) if a
+# DIFFERENT worker owns it and that lock is FRESH (server updated_at age <= ttl)
+# -> claim lost, self-clean, exit 2 — a live-but-slow owner is never reclaimed,
+# and the fresh winner's lock is never overwritten; (3) ONLY if the lowest-id
+# lock is STALE do we fall through to the upsert/reclaim path below. No existing
+# lock, or a lock we already own, also falls through (normal claim/refresh).
+reclaim_secs="${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}"
+case "$reclaim_secs" in *[!0-9]*|'') reclaim_secs=10800 ;; esac
+lowest_owner="$(lowest_lock_field "$repo" "$issue" worker_id)"
+if [ -n "$lowest_owner" ] && [ "$lowest_owner" != "$worker_id" ]; then
+    lowest_updated_at="$(lowest_lock_field "$repo" "$issue" updated_at)"
+    lock_epoch="$(iso_to_epoch "$lowest_updated_at")"
+    now_epoch="$(date -u +%s)"
+    # Fail closed: an unparseable server timestamp is treated as FRESH (age 0),
+    # never stale, so we never reclaim on ambiguity.
+    age=0
+    if [ -n "$lock_epoch" ]; then age=$(( now_epoch - lock_epoch )); fi
+    if [ "$age" -le "$reclaim_secs" ]; then
+        own_comment_id="$(own_marked_comment_id "$repo" "$issue" "$worker_id")"
+        if [ -n "$own_comment_id" ] && [ "$own_comment_id" != "null" ]; then
+            gh api "repos/$repo/issues/comments/$own_comment_id" -X DELETE >/dev/null 2>&1 || true
+        fi
+        printf 'claim-issue: claim lost (issue %s owned by %s, lock fresh)\n' "$issue" "$lowest_owner" >&2
+        jq -n \
+            --argjson issue "$issue" \
+            --arg repo "$repo" \
+            --arg worker_id "$worker_id" \
+            --arg owner "$lowest_owner" \
+            '{claimed:false, issue:$issue, repo:$repo, worker_id:$worker_id, reason:"claim_lost", observed_owner:$owner}'
+        exit 2
+    fi
+    printf 'claim-issue: stale lease reclaimed (issue %s, prior owner %s, age %ss > ttl %ss)\n' \
+        "$issue" "$lowest_owner" "$age" "$reclaim_secs" >&2
 fi
 
 "$RUN_STATE" upsert \
