@@ -25,6 +25,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { loadConfig, DEFAULT_AUDIENCES, FOLDER_CONTRACT } from './doc-config.mjs';
+import { writeLlmsFull, fillManifest } from './gen-llms-full.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -50,10 +51,72 @@ function hasDocumentationConfig(configPath) {
 // doc-config.mjs (#917) so the audience list it reports is the resolved one
 // (declared entries verbatim, or the four seeded defaults).
 
+function collectAudiencePages(cfg, repoRoot) {
+  // Discover all generated .md pages from configured audience paths.
+  // Returns Array<{ audience, feature, path, content }>.
+  const pages = [];
+  for (const aud of cfg.audiences) {
+    const audName = aud.name || aud.id || 'unknown';
+    const audPath = aud.path;
+    if (!audPath) continue;
+    const dir = path.resolve(repoRoot, audPath);
+    if (!fs.existsSync(dir)) continue;
+    const walk = (d) => {
+      let entries;
+      try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+      for (const ent of entries) {
+        const full = path.join(d, ent.name);
+        if (ent.isDirectory()) { walk(full); continue; }
+        if (!ent.name.endsWith('.md')) continue;
+        const relPath = path.relative(repoRoot, full).replace(/\\/g, '/');
+        let content;
+        try { content = fs.readFileSync(full, 'utf8'); } catch { continue; }
+        const featureMatch = relPath.match(/\/(?:tutorials|features)\/([^/]+)\.md$/);
+        const feature = featureMatch ? featureMatch[1] : null;
+        pages.push({ audience: audName, feature, path: relPath, content });
+      }
+    };
+    walk(dir);
+  }
+  return pages;
+}
+
+async function regenerateLlmsFull(cfg, repoRoot) {
+  const pages = collectAudiencePages(cfg, repoRoot);
+  const outputPath = path.join(repoRoot, 'llms-full.txt');
+  const result = await writeLlmsFull({ pages, outputPath });
+  process.stderr.write(`[autospec-doc] llms-full.txt ${result.written ? 'written' : 'unchanged'} (${pages.length} pages)\n`);
+
+  // Fill manifest if present.
+  const manifestPath = path.join(repoRoot, '.llm-manifest.json');
+  if (fs.existsSync(manifestPath)) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      if (manifest && typeof manifest === 'object') {
+        if (!Array.isArray(manifest.modules))          manifest.modules = [];
+        if (!Array.isArray(manifest.concepts))         manifest.concepts = [];
+        if (!Array.isArray(manifest.faq))              manifest.faq = [];
+        if (!Array.isArray(manifest.cli_entry_points)) manifest.cli_entry_points = [];
+        if (!Array.isArray(manifest.http_endpoints))   manifest.http_endpoints = [];
+        fillManifest(manifest, pages);
+        const newContent = JSON.stringify(manifest, null, 2) + '\n';
+        const oldContent = fs.readFileSync(manifestPath, 'utf8');
+        if (oldContent !== newContent) {
+          fs.writeFileSync(manifestPath, newContent, 'utf8');
+          process.stderr.write(`[autospec-doc] .llm-manifest.json updated\n`);
+        }
+      }
+    } catch { /* manifest read/parse failure is non-fatal */ }
+  }
+}
+
 function handleIncremental(_opts) {
   const cfg = loadConfig(CONFIG_PATH);
   const names = cfg.audiences.map(a => a.name || a.id).join(', ');
   console.log(`[autospec-doc] incremental: plan scopes affected since last generation for audiences [${names}] (generation stub — #918/#919).`);
+  // Regenerate llms-full.txt from any already-generated pages (cheap concat).
+  const repoRoot = path.resolve(__dirname, '../../..');
+  regenerateLlmsFull(cfg, repoRoot).catch(e => process.stderr.write(`[autospec-doc] llms-full regen error: ${e.message}\n`));
   return 0;
 }
 
@@ -61,6 +124,9 @@ function handleFull(_opts) {
   const cfg = loadConfig(CONFIG_PATH);
   const names = cfg.audiences.map(a => a.name || a.id).join(', ');
   console.log(`[autospec-doc] full: regenerate every audience [${names}] + run completeness audit (generation stub — #918/#923).`);
+  // Regenerate llms-full.txt from any already-generated pages (cheap concat).
+  const repoRoot = path.resolve(__dirname, '../../..');
+  regenerateLlmsFull(cfg, repoRoot).catch(e => process.stderr.write(`[autospec-doc] llms-full regen error: ${e.message}\n`));
   return 0;
 }
 
