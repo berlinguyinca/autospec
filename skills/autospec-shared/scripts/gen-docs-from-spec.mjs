@@ -85,7 +85,7 @@ const GENERATORS = [
  * @param {string} content
  * @returns {Array<{ heading: string, level: number, raw: string, generated: boolean }>}
  */
-function parseSections(content) {
+export function parseSections(content) {
   const lines = content.split('\n');
   const sections = [];
   let currentSection = null;
@@ -160,7 +160,7 @@ function parseSections(content) {
  * @param {string} existingContent
  * @returns {{ merged: string, preserved: number }}
  */
-function mergeWithExisting(newContent, existingContent) {
+export function mergeWithExisting(newContent, existingContent) {
   if (!existingContent) return { merged: newContent, preserved: 0 };
 
   const existingSections = parseSections(existingContent);
