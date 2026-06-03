@@ -91,6 +91,28 @@ function scopeBlock(srcGlobs, reason, extraLines = []) {
   ].filter(l => l !== '').join('\n');
 }
 
+// Reject path components that would escape the documentation tree. Audience
+// paths and feature slugs flow into on-disk write targets (path.join(outputDir,
+// page.path)); a value like `../outside` or an absolute path must never let a
+// page write outside outputDir. Allow forward-slash-separated relative segments
+// only — no `..`, no leading `/`, no NUL.
+function assertSafeRelative(value, label) {
+  if (typeof value !== 'string' || value === '') {
+    throw new Error(`gen-audience-docs: ${label} must be a non-empty string`);
+  }
+  if (value.includes('\0')) {
+    throw new Error(`gen-audience-docs: ${label} contains a NUL byte: ${value}`);
+  }
+  if (path.isAbsolute(value)) {
+    throw new Error(`gen-audience-docs: ${label} must be a relative path, got: ${value}`);
+  }
+  const segments = value.split(/[\\/]+/);
+  if (segments.some(s => s === '..')) {
+    throw new Error(`gen-audience-docs: ${label} must not traverse outside the docs tree: ${value}`);
+  }
+  return value;
+}
+
 function featureSrcGlobs(feature) {
   const eps = feature.code_entry_points || feature.entry_points || [];
   const globs = eps.map(e => (typeof e === 'string' ? e : (e.path || e.identifier))).filter(Boolean);
@@ -207,8 +229,11 @@ async function getScanner() {
 }
 
 function defaultValidator(content) {
-  // Cheap structural check that does not require touching the filesystem: a
-  // generated page must contain a scope comment with generated: true.
+  // Structural well-formedness check (no filesystem access): a generated page
+  // must contain a scope comment with generated: true. This is intentionally a
+  // cheap regex gate, not a full scan-doc-scope YAML parse — callers that need
+  // strict YAML validation can pass their own validator. (The scan-doc-scope
+  // parser is still exercised end-to-end in the test suite against real output.)
   const hasScope = /<!--\s*autospec-doc-scope\s*:/.test(content);
   const hasGenerated = /generated:\s*true/.test(content);
   if (hasScope && hasGenerated) return { ok: true, findings: [] };
@@ -242,8 +267,11 @@ async function buildPage({ relPath, render, validator, maxRetries, existingDocs,
     directive = `prior attempt(s) failed validation: ${directiveLog.join('; ')}`;
   }
 
-  // Preserve human-owned sections from any existing copy.
-  const existing = existingDocs[relPath] || existingDocs[path.basename(relPath)] || null;
+  // Preserve human-owned sections from any existing copy. Keyed by the EXACT
+  // relPath only — a basename fallback would collide across audiences (every
+  // audience has an index.md) and across tutorials/ vs features/ (same
+  // <feature>.md basename), risking preservation of the wrong human content.
+  const existing = existingDocs[relPath] || null;
   const { merged, preserved } = mergeWithExisting(content, existing);
 
   // AI-review confidence pass (annotation only; never blocks).
@@ -300,6 +328,7 @@ export async function generateAudienceDocs({
     if (!audience || !audience.path || !audience.name) {
       throw new Error('generateAudienceDocs: each audience needs { name, path }');
     }
+    assertSafeRelative(audience.path, `audience "${audience.name}" path`);
     const base = audience.path.replace(/\/+$/, '');
 
     // Folder-contract base files (always emitted, even with zero features).
@@ -309,6 +338,7 @@ export async function generateAudienceDocs({
     ];
     // Per-feature tutorial + feature pages.
     for (const feature of features) {
+      assertSafeRelative(feature.slug, `feature slug`);
       pageSpecs.push({
         relPath: `${base}/tutorials/${feature.slug}.md`,
         render: d => renderTutorial(audience, feature, d),

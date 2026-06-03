@@ -250,6 +250,62 @@ test('second write with identical content is idempotent (written=false)', async 
   }
 });
 
+// ── Test 9: path-traversal guard ──────────────────────────────────────────────
+
+test('rejects an audience path that escapes the docs tree', async () => {
+  await assert.rejects(
+    generateAudienceDocs({
+      features: [],
+      audiences: [{ name: 'evil', path: '../../etc', focus: 'x' }],
+    }),
+    /must not traverse|must be a relative/,
+  );
+});
+
+test('rejects an absolute audience path', async () => {
+  await assert.rejects(
+    generateAudienceDocs({
+      features: [],
+      audiences: [{ name: 'evil', path: '/etc', focus: 'x' }],
+    }),
+    /must be a relative path/,
+  );
+});
+
+test('rejects a feature slug that traverses out of the tree', async () => {
+  await assert.rejects(
+    generateAudienceDocs({
+      features: [{ slug: '../../escape' }],
+      audiences: [FOUR_AUDIENCES[0]],
+    }),
+    /must not traverse/,
+  );
+});
+
+// ── Test 10: basename fallback collision is NOT applied across audiences ───────
+
+test('existing content keyed by basename does NOT leak across audiences', async () => {
+  // A human-edited index.md for the user audience must not be preserved into
+  // the developer audience's index.md (which has the same basename).
+  const userIndex = (await generateAudienceDocs({
+    features: [],
+    audiences: [FOUR_AUDIENCES[0]],
+  })).files.find(f => f.path === 'docs/user/index.md');
+  const handEdited = userIndex.content
+    .replace('generated: true', 'generated: false')
+    .replace(/(<!-- autospec-doc-scope:[\s\S]*?-->\n)/, '$1\nLEAK MARKER user-only.\n');
+
+  const result = await generateAudienceDocs({
+    features: [],
+    audiences: [FOUR_AUDIENCES[1]], // developer
+    existingDocs: { 'docs/user/index.md': handEdited }, // wrong-audience key
+  });
+  const devIndex = result.files.find(f => f.path === 'docs/developer/index.md');
+  assert.ok(devIndex, 'developer index should be generated');
+  assert.ok(!devIndex.content.includes('LEAK MARKER user-only.'),
+    'user-audience content must not leak into developer index via basename fallback');
+});
+
 // ── Test 8: empty features still produce index + getting-started ──────────────
 
 test('audience with no features still gets index.md and getting-started.md', async () => {
