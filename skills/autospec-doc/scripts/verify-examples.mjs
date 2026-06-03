@@ -99,10 +99,16 @@ export function parseExamples(content) {
     while (k < lines.length && !fenceCloseRe.test(lines[k])) k++;
     if (k >= lines.length) continue; // unterminated fence — skip defensively
 
-    const command = lines.slice(j + 1, k).join('\n');
+    const raw = lines.slice(j + 1, k).join('\n');
+    const norm = lang === 'sh' || lang === 'shell' ? 'bash' : lang;
     examples.push({
-      lang: lang === 'sh' || lang === 'shell' ? 'bash' : lang,
-      command,
+      lang: norm,
+      raw,
+      // `command` is the executable text. For `console` blocks (the `$ ` prompt
+      // convention) only the prompted lines are commands — interleaved output
+      // lines are illustrative and must NOT be executed. For bash blocks the
+      // whole body is the command.
+      command: norm === 'console' ? extractConsoleCommands(raw) : raw,
       tagStart: lineOffsets[i],
       blockStart: lineOffsets[j],
       // char offset just past the closing-fence line (incl. its newline if any)
@@ -113,6 +119,35 @@ export function parseExamples(content) {
   return examples;
 }
 
+// Extract the executable command lines from a `console`-style block: lines that
+// begin with a `$ ` (or `# ` root) prompt, prompt stripped. Continuation lines
+// ending in `\` are joined. Non-prompt lines are treated as sample output and
+// dropped. If no prompts are present, fall back to running the whole block.
+function extractConsoleCommands(body) {
+  const lines = body.split('\n');
+  const cmds = [];
+  let collecting = false;
+  let buf = '';
+  for (const ln of lines) {
+    const m = /^\s*[$#]\s+(.*)$/.exec(ln);
+    if (m) {
+      if (collecting) cmds.push(buf);
+      buf = m[1];
+      collecting = true;
+      if (buf.endsWith('\\')) { buf = buf.slice(0, -1); }
+      else { cmds.push(buf); collecting = false; buf = ''; }
+    } else if (collecting) {
+      // continuation of a `\`-terminated prompted command
+      buf += ln.replace(/\\$/, '');
+      if (!ln.endsWith('\\')) { cmds.push(buf); collecting = false; buf = ''; }
+    }
+    // else: illustrative output line — ignored
+  }
+  if (collecting) cmds.push(buf);
+  if (cmds.length === 0) return body; // no prompts → run the block verbatim
+  return cmds.join('\n');
+}
+
 // ── Output / marker splicing ──────────────────────────────────────────────────
 
 // Build the replacement text that follows a verified example: a fresh marker and
@@ -120,7 +155,13 @@ export function parseExamples(content) {
 // replace (never duplicate) any prior marker/output.
 function renderVerifiedTail(sha, iso, output) {
   const body = output.replace(/\s+$/, ''); // trim trailing whitespace/newlines
-  return `\n${stampMarker(sha, iso)}\n\n\`\`\`${OUTPUT_LANG}\n${body}\n\`\`\`\n`;
+  // Choose a fence longer than the longest backtick run in the body so output
+  // containing ``` (e.g. nested code fences) cannot prematurely close the block
+  // and corrupt the surrounding Markdown.
+  let longest = 0;
+  for (const run of body.match(/`+/g) || []) longest = Math.max(longest, run.length);
+  const fence = '`'.repeat(Math.max(3, longest + 1));
+  return `\n${stampMarker(sha, iso)}\n\n${fence}${OUTPUT_LANG}\n${body}\n${fence}\n`;
 }
 
 // After an example's closing fence there may already be a verified marker and/or
@@ -139,8 +180,10 @@ function consumeExistingTail(content, fromOffset) {
     const blanks = /^(\s*)/.exec(rest);
     if (blanks) { consumed += blanks[1].length; rest = content.slice(fromOffset + consumed); }
   }
-  // Optional existing ```output block.
-  const ob = /^```output[ \t]*\n[\s\S]*?\n```[ \t]*\n?/.exec(rest);
+  // Optional existing output block — fence may be 3+ backticks (chosen
+  // dynamically when output itself contains backticks), so match the opening
+  // fence length and require the same length to close.
+  const ob = /^(`{3,})output[ \t]*\n[\s\S]*?\n\1[ \t]*\n?/.exec(rest);
   if (ob) consumed += ob[0].length;
   return consumed;
 }
@@ -185,6 +228,12 @@ export async function verifyExamples(opts) {
     }
   }
 
+  // The marker SHA must be the commit the examples actually ran against. When
+  // the caller passes an explicit headSha (e.g. unit tests with a fake exec),
+  // honor it; otherwise use the sandbox commit reported by the real executor.
+  const execSandboxSha = results.find((x) => x.r && x.r.sandboxSha)?.r.sandboxSha;
+  const markerSha = headSha || execSandboxSha || 'unknown';
+
   // Rewrite content: replace each example's trailing region with a fresh marker
   // + output block. Process in reverse document order to keep offsets valid.
   let out = content;
@@ -192,7 +241,7 @@ export async function verifyExamples(opts) {
     const { ex, r } = results[n];
     if (r.code !== 0) continue; // failing example: do not stamp (it blocks)
     const consumed = consumeExistingTail(out, ex.blockEnd);
-    const tail = renderVerifiedTail(headSha, isoDate, r.stdout || '');
+    const tail = renderVerifiedTail(markerSha, isoDate, r.stdout || '');
     out = out.slice(0, ex.blockEnd) + tail + out.slice(ex.blockEnd + consumed);
   }
 
@@ -209,10 +258,35 @@ export async function verifyExamples(opts) {
 //   'pass' → every example returns {stdout:'<command echoed>', code:0}
 //   'fail' → every example returns {code:1}
 // This lets the CLI test exercise the full file-rewrite path without a worktree.
+// Env vars scrubbed from the sandbox before executing docs-provided shell:
+// the examples come from documentation, so they must never see CI/cloud/VCS
+// credentials. Proxy vars are dropped to discourage outbound network use, and
+// any var whose name matches a secret-ish pattern is removed defensively.
+const SCRUB_EXACT = new Set([
+  'http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'all_proxy',
+  'GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_API_TOKEN',
+  'NPM_TOKEN', 'NODE_AUTH_TOKEN', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',
+]);
+const SCRUB_PATTERN = /(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|SESSION_TOKEN)/i;
+
+function scrubbedEnv() {
+  const out = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (SCRUB_EXACT.has(k)) continue;
+    if (SCRUB_PATTERN.test(k)) continue;
+    out[k] = v;
+  }
+  out.GIT_TERMINAL_PROMPT = '0';
+  out.no_proxy = '*';
+  out.NO_PROXY = '*';
+  return out;
+}
+
 export function makeWorktreeExecutor(execOpts = {}) {
   const fake = execOpts.fake ?? process.env.AUTOSPEC_EXAMPLE_FAKE ?? '';
   let worktreeDir = null;
   let worktreeRepoRoot = null;
+  let sandboxSha = null;
 
   async function ensureWorktree() {
     if (fake) return null;
@@ -228,6 +302,11 @@ export function makeWorktreeExecutor(execOpts = {}) {
     );
     worktreeDir = dir;
     worktreeRepoRoot = repoRoot;
+    // Record the exact commit the examples run against, so the verified marker
+    // is stamped with the SHA they were actually executed on (not the caller's
+    // unrelated HEAD). This is what check-doc-drift.sh compares against the
+    // newest src commit.
+    sandboxSha = execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim();
     return worktreeDir;
   }
 
@@ -237,13 +316,12 @@ export function makeWorktreeExecutor(execOpts = {}) {
     if (fake) return { stdout: '', stderr: `unknown fake mode: ${fake}`, code: 2 };
 
     const dir = await ensureWorktree();
-    // Network restriction: unset proxy/credential env where feasible. True
-    // network namespacing is platform-specific; we degrade gracefully to a
-    // scrubbed-env best effort (documented limitation).
-    const childEnv = { ...process.env };
-    delete childEnv.http_proxy; delete childEnv.https_proxy;
-    delete childEnv.HTTP_PROXY; delete childEnv.HTTPS_PROXY;
-    childEnv.GIT_TERMINAL_PROMPT = '0';
+    // Network restriction: docs-provided shell runs with a secret-scrubbed env
+    // and proxy vars cleared / no_proxy=* set. True kernel-level network
+    // namespacing is platform-specific and out of scope; this is the
+    // env-level restriction the spec calls for ("network-restricted where
+    // feasible").
+    const childEnv = scrubbedEnv();
 
     const res = spawnSync('bash', ['-eo', 'pipefail', '-c', command], {
       cwd: dir,
@@ -253,14 +331,21 @@ export function makeWorktreeExecutor(execOpts = {}) {
       maxBuffer: 8 * 1024 * 1024,
     });
     if (res.error && res.error.code === 'ETIMEDOUT') {
-      return { stdout: res.stdout || '', stderr: `timed out after ${timeoutMs}ms`, code: 124 };
+      return { stdout: res.stdout || '', stderr: `timed out after ${timeoutMs}ms`, code: 124, sandboxSha };
     }
     return {
       stdout: res.stdout || '',
       stderr: res.stderr || '',
       code: res.status == null ? 1 : res.status,
+      // The commit the examples actually executed against — verifyExamples
+      // stamps the marker with this when no explicit headSha is supplied.
+      sandboxSha,
     };
   };
+
+  // The commit the sandbox is running against (resolved on first use). Null
+  // until the worktree is created (or always null in fake mode).
+  exec.sandboxSha = () => sandboxSha;
 
   exec.dispose = () => {
     if (worktreeDir && worktreeRepoRoot) {
@@ -284,18 +369,16 @@ async function main(argv) {
     return 2;
   }
 
-  let headSha = 'unknown';
-  let isoDate = new Date().toISOString().slice(0, 10);
-  try {
-    headSha = execSync('git rev-parse HEAD', { encoding: 'utf8' }).trim();
-  } catch { /* not a git repo / detached — leave 'unknown' */ }
-
+  const isoDate = new Date().toISOString().slice(0, 10);
   const exec = makeWorktreeExecutor();
   let anyFailed = false;
   try {
     for (const file of files) {
       const content = fs.readFileSync(file, 'utf8');
-      const res = await verifyExamples({ content, headSha, isoDate, exec });
+      // headSha is left undefined so verifyExamples stamps the marker with the
+      // commit the sandbox actually ran the examples against (reported by the
+      // executor). For pages with zero examples nothing is stamped anyway.
+      const res = await verifyExamples({ content, isoDate, exec });
       if (res.failed.length > 0) {
         anyFailed = true;
         for (const f of res.failed) {

@@ -52,7 +52,10 @@ function makeExec(responder) {
   const exec = async (ctx) => {
     calls.push(ctx);
     const r = responder ? responder(ctx) : {};
-    return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.code ?? 0 };
+    return {
+      stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.code ?? 0,
+      ...(r.sandboxSha !== undefined ? { sandboxSha: r.sandboxSha } : {}),
+    };
   };
   exec.calls = calls;
   return exec;
@@ -211,6 +214,54 @@ test('tutorial step sequences are collected as examples', () => {
   const ex = parseExamples(page);
   assert.strictEqual(ex.length, 2);
   assert.deepEqual(ex.map(e => e.command.trim()), ['step-one', 'step-two']);
+});
+
+test('console block strips $ prompts and ignores illustrative output lines', () => {
+  const page = [
+    '<!-- example -->',
+    '```console',
+    '$ echo one',
+    'sample output that must NOT execute',
+    '$ echo two',
+    '```',
+    '',
+  ].join('\n');
+  const ex = parseExamples(page);
+  assert.strictEqual(ex.length, 1);
+  // Only the two prompted commands survive; the output line is dropped.
+  assert.strictEqual(ex[0].command, 'echo one\necho two');
+});
+
+test('console block with no prompts runs verbatim', () => {
+  const page = '<!-- example -->\n```console\nplain command\n```\n';
+  const ex = parseExamples(page);
+  assert.strictEqual(ex[0].command, 'plain command');
+});
+
+test('output containing triple backticks uses a longer fence (no markdown corruption)', async () => {
+  const exec = passingExec('here is ```code``` inside\n');
+  const res = await verifyExamples({
+    content: PASS_PAGE, headSha: 'x', isoDate: '2026-06-03', exec,
+  });
+  // A 3-backtick fence would be closed early by the embedded ```; engine must
+  // pick a 4+ backtick fence.
+  assert.match(res.content, /````output\n[\s\S]*```code```[\s\S]*\n````/);
+  // Re-running must still cleanly replace the long-fenced block (idempotent).
+  const exec2 = passingExec('plain\n');
+  const res2 = await verifyExamples({
+    content: res.content, headSha: 'y', isoDate: '2026-06-04', exec: exec2,
+  });
+  const outputBlocks = (res2.content.match(/`{3,}output/g) || []).length;
+  assert.strictEqual(outputBlocks, 1, 'one output block after re-run over a long fence');
+  assert.doesNotMatch(res2.content, /code/);
+});
+
+test('verifyExamples stamps the executor-reported sandbox sha when no headSha given', async () => {
+  const exec = makeExec(() => ({ stdout: 'ok\n', code: 0, sandboxSha: 'sandbox123' }));
+  const res = await verifyExamples({
+    content: PASS_PAGE, isoDate: '2026-06-03', exec,
+  });
+  assert.match(res.content, /<!-- example-verified: sandbox123 2026-06-03 -->/);
 });
 
 test('stampMarker produces the exact pinned marker format', () => {

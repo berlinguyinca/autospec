@@ -340,19 +340,25 @@ process.stdout.write(d.src_globs.join('\n'));
                     | head -1 \
                     | sed -E 's/<!-- example-verified: ([^ ]+) .*/\1/')" || marker_sha=""
                 if [ -n "$marker_sha" ]; then
+                    # NUL-delimited file feed so paths with spaces / glob / shell
+                    # metacharacters are passed argv-safe to git (never word-split
+                    # or re-globbed). example_srcfiles holds newline paths (for the
+                    # human-readable source_changed[] array); example_srcfiles_z
+                    # holds the matching NUL stream consumed by `git log`/xargs.
                     : > "$WORK_DIR/example_srcfiles_${idx}.txt"
+                    : > "$WORK_DIR/example_srcfiles_${idx}.z"
                     while IFS= read -r glob; do
                         [ -z "$glob" ] && continue
-                        git -C "$AUTOSPEC_REPO_ROOT" ls-files -- "$glob" 2>/dev/null \
-                            >> "$WORK_DIR/example_srcfiles_${idx}.txt" || true
+                        git -C "$AUTOSPEC_REPO_ROOT" ls-files -z -- "$glob" 2>/dev/null \
+                            >> "$WORK_DIR/example_srcfiles_${idx}.z" || true
                     done <<< "$src_globs_str"
-                    sort -u "$WORK_DIR/example_srcfiles_${idx}.txt" \
-                        -o "$WORK_DIR/example_srcfiles_${idx}.txt" 2>/dev/null || true
+                    # Derive the newline list (dedup) for JSON from the NUL stream.
+                    tr '\0' '\n' < "$WORK_DIR/example_srcfiles_${idx}.z" \
+                        | grep -v '^$' | sort -u > "$WORK_DIR/example_srcfiles_${idx}.txt" 2>/dev/null || true
                     newest_commit=""
-                    if [ -s "$WORK_DIR/example_srcfiles_${idx}.txt" ]; then
-                        # shellcheck disable=SC2046
-                        newest_commit="$(git -C "$AUTOSPEC_REPO_ROOT" log -1 --format='%H' -- \
-                            $(tr '\n' ' ' < "$WORK_DIR/example_srcfiles_${idx}.txt") 2>/dev/null)" || newest_commit=""
+                    if [ -s "$WORK_DIR/example_srcfiles_${idx}.z" ]; then
+                        newest_commit="$(xargs -0 git -C "$AUTOSPEC_REPO_ROOT" log -1 --format='%H' -- \
+                            < "$WORK_DIR/example_srcfiles_${idx}.z" 2>/dev/null)" || newest_commit=""
                     fi
                     if [ -n "$newest_commit" ] && [ "$newest_commit" != "$marker_sha" ]; then
                         # Stale only when the marker is a strict ANCESTOR of the
