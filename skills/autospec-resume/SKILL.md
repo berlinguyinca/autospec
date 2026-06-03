@@ -1,0 +1,151 @@
+---
+name: autospec-resume
+description: Use when a fresh process must detect an interrupted autospec run from durable run-state plus heartbeats and auto-continue it after a host, session, or terminal crash — without adding a second lock, without stealing a genuinely-live worker on another host, without deleting un-pushed work, and capped at AUTOSPEC_RESUME_MAX_ATTEMPTS (default 3) consecutive attempts. Supports --resume-partial, --repo <owner/name>, and --dry-run.
+---
+
+# autospec-resume (harness-neutral)
+
+Detect an interrupted autospec run from durable run-state + heartbeats on a
+*fresh* start and auto-continue it. All decision logic routes through
+`bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/resume-scan.sh" "$@"`.
+
+Manage your own context — never exceed 60%. Delegate to subagents whenever your harness supports it.
+
+## Startup self-update
+
+```bash
+#!/usr/bin/env bash
+# autospec-startup-self-update — see docs/specs/2026-05-01-autospec-startup-self-update-design.md
+set +e
+SKILL_NAME=autospec-resume   # per-skill: autospec-define / autospec-run / autospec-listen / autospec-classify / autospec-stop / autospec-resume
+if [ "${AUTOSPEC_NO_SELF_UPDATE:-0}" = "1" ]; then exit 0; fi
+mkdir -p "$HOME/.autospec"
+LOCKDIR="$HOME/.autospec/.update.lock.d"
+LAST="$HOME/.autospec/last-update-check"
+INSTALLED="$HOME/.autospec/installed-version"
+NOW=$(date -u +%s)
+if [ -f "$LAST" ]; then
+    PREV=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$(cat "$LAST" 2>/dev/null)" +%s 2>/dev/null \
+        || date -u -d "$(cat "$LAST" 2>/dev/null)" +%s 2>/dev/null || echo 0)
+    if [ "$((NOW - PREV))" -lt 86400 ]; then exit 0; fi
+fi
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    echo "WARN: self-update skipped (concurrent update in progress)" >&2; exit 0
+fi
+trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT
+date -u +'%Y-%m-%dT%H:%M:%SZ' > "$LAST.tmp" && mv "$LAST.tmp" "$LAST"
+REMOTE=$(curl -fsSL --max-time 5 \
+    "https://api.github.com/repos/berlinguyinca/autospec/commits/main" \
+    2>/dev/null | jq -r '.sha // empty' 2>/dev/null | cut -c1-7)
+if [ -z "$REMOTE" ]; then
+    echo "WARN: self-update skipped (network); continuing on installed version" >&2; exit 0
+fi
+LOCAL=$(cat "$INSTALLED" 2>/dev/null || true)
+if [ "$REMOTE" = "$LOCAL" ]; then exit 0; fi
+curl -fsSL --max-time 30 \
+    "https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh" \
+    | bash -s -- --skill all --harness all --update >/dev/null 2>&1
+RC=$?
+if [ "$RC" -ne 0 ]; then
+    echo "WARN: self-update skipped (install rc=$RC); continuing on installed version" >&2; exit 0
+fi
+printf '%s\n' "$REMOTE" > "$INSTALLED.tmp" && mv "$INSTALLED.tmp" "$INSTALLED"
+# Auto-init cross-tool memory (idempotent, <50ms fast-path)
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/auto-init-memory.sh"
+echo "[autospec] updated ${LOCAL:-fresh} → $REMOTE"
+```
+
+## Self-update mode
+
+If the feature-request argument matches the regex `^\s*update\s*$` (case-insensitive, whitespace-padded), this skill enters self-update mode and does not run the normal pipeline:
+
+1. **Detect harness** by checking which install path exists for this skill:
+   - Claude Code: `~/.claude/skills/autospec-resume/SKILL.md`
+   - OpenCode:    `~/.config/opencode/agent/autospec-resume.md`
+   - Codex CLI:   `~/.codex/prompts/autospec-resume.md`
+2. **Re-install the full autospec suite from `main`** by piping the canonical installer:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash -s -- --skill all --harness all --update
+   ```
+   Run this one-liner once; it refreshes all autospec skills across all harnesses.
+3. **Show the diff** between the prior installed file(s) and the freshly fetched copy.
+4. **Stop.** Do not enter any pipeline phase. Print the upgrade summary and return to the user.
+
+If no install path is detected, print `Self-update: no installed copy of autospec-resume found; run install.sh first.` and exit.
+
+## Harness detection
+
+This skill is a thin dispatch wrapper — the relaunch happens through the durably-captured command, so it runs at the implementation tier. Detect your harness and pick the matching subagent tier:
+
+- **TIER_A** (architecture / deep reasoning): not used here; this skill never plans.
+- **TIER_B** (implementation work): the default — run the scan helper, print its one-line decision.
+
+If your harness lacks a subagent primitive, run the helper inline and **silently** fall back to the in-context path rather than erroring. Never escalate a missing capability into a hard failure.
+
+## Stop mode
+
+If the feature-request argument matches the regex `^\s*stop(\s+--\w+)*\s*$`
+(case-insensitive), defer to `/autospec-stop`: dispatch to
+`bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" <args>`,
+print its stdout, and do not enter any resume pipeline. Resume never halts a
+running monitor — that is `/autospec-stop`'s job.
+
+## Invocation
+
+```
+/autospec-resume [--resume-partial] [--repo <owner/name>] [--dry-run]
+```
+
+Dispatches directly to `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/resume-scan.sh" "$@"`. All decision logic lives in the helper script.
+
+| Flag | Behaviour |
+|---|---|
+| (none) | Scan the current repo's durable run-state + heartbeats, apply the auto-resume pre-conditions, and if all pass relaunch via the durably-captured command (clean-restart off `origin/main`). |
+| `--resume-partial` | Additionally re-attach `/tmp/wt-<branch>` **only when** `heartbeat.host == $(hostname)`; cross-host or missing host silently clean-restarts off `origin/main`. |
+| `--repo <owner/name>` | Target a specific repo (used by the boot supervisor, which iterates the registry). |
+| `--dry-run` | Print the decision and the command that *would* run; change nothing; exit 0. |
+
+**Exit codes:** `0` = nothing to resume / `--dry-run` / resumed (one-line reason printed); `1` = hard error (bad args, no `gh`).
+
+## Auto-resume contract (enforced by the helper)
+
+- **No second lock / idempotency.** Resume relaunches the *run*; the relaunched monitor claims issues through the **existing** GitHub CAS lock-comment (`run-state.sh`, lowest-comment-id wins, loser self-cleans). Resume itself never writes a run-state comment and never adds any new lock. Two concurrent resumes (supervisor + human, or two hosts) converge to exactly one claim per issue at the existing CAS boundary.
+- **Pre-conditions (ALL required, else exit 0, no relaunch):** (a) ≥1 issue with run-state labeled `in-progress-by-bot` whose heartbeat step ∉ {`merged`,`failed`}; (b) no `~/.autospec/stop.flag`; (c) no issue labeled `paused-by-user`; (d) not all issues closed.
+- **Crash-vs-live.** Treat an issue as crashed (eligible) only when its age, computed from run-state **server** `updated_at` (never a local clock — mirrors `scripts/autospec-watchdog.sh:386-405`), satisfies `step=claimed && age>=300` OR `age>=10800`. Otherwise assume a live/slow worker elsewhere and do **not** steal.
+- **Cross-host.** `--resume-partial` re-attaches `/tmp/wt-<branch>` only when `heartbeat.host == $(hostname)`; cross-host or missing `host` MUST clean-restart off `origin/main` (the crashed worktree is on a dead machine's local `/tmp`).
+- **Durable relaunch command.** The command comes from the registry `~/.autospec/active-runs/<repo-slug>.json` written by `/autospec-run` at monitor launch — never an attacker-supplied path. After a reboot (env cleared) the registry alone yields a runnable command.
+- **Attempt cap.** Capped at `AUTOSPEC_RESUME_MAX_ATTEMPTS` (default 3) consecutive attempts without forward progress. At the cap, halt, print the cap-reached reason, and surface. The counter resets on forward progress (any issue `merged`).
+
+## Required capabilities & harness adapter
+
+This workflow assumes a small set of capabilities. Map each one to your harness's actual tool. If a capability is missing, use the listed fallback.
+
+| Capability                  | Claude Code                          | OpenCode                                 | Codex CLI                                | Fallback if missing                                |
+|-----------------------------|--------------------------------------|------------------------------------------|------------------------------------------|----------------------------------------------------|
+| Run shell command            | `Bash`                               | `bash` tool                              | `shell` / `apply_patch`                  | Ask user to run manually                           |
+| Ask the user a question      | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn     |
+| Subagent model tier          | Tier B: `sonnet` + medium thinking   | Tier B: smaller-tier `task` + medium reasoning | Tier B: `gpt-5.1-codex-spark` + `reasoning_effort=medium` | Fall back UP on unavailability |
+| Subagent dispatch policy   | per AGENTS.md decision matrix        | per AGENTS.md decision matrix            | per AGENTS.md decision matrix            | inline with main-session token cost                |
+
+**Model tier:** Tier B (implementation work) — this skill is a thin dispatch wrapper.
+
+## Procedure
+
+1. Run startup self-update block above.
+2. Parse the user's invocation arguments.
+3. Execute: `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/resume-scan.sh" "$@"`
+4. Print the helper's one-line decision to the user and exit.
+
+If `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/resume-scan.sh` is not found, print:
+```
+autospec-resume: helper not found at ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/resume-scan.sh.
+Reinstall autospec-resume from the autospec repo, then retry.
+```
+and exit non-zero.
+
+## Hard rules
+
+- Never write a run-state comment from this skill and never add a new lock. The relaunched monitor claims through the existing GitHub CAS lock only.
+- Never re-attach a cross-host or missing-host worktree under `--resume-partial`; clean-restart off `origin/main`.
+- Never exceed `AUTOSPEC_RESUME_MAX_ATTEMPTS` consecutive auto-resume attempts; halt and surface at the cap.
+- This skill is a thin wrapper. All behaviour is in the helper script.

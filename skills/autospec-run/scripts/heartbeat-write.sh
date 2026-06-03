@@ -77,11 +77,19 @@ mkdir -p "$TARGET_DIR"
 
 NOW_TS="$(date -u +%s)"
 
-printf '{"issue":"%s","branch":"%s","step":"%s","ts":%s,"pr":"%s","repo":"%s"}\n' \
+# host: the machine that owns this heartbeat. Added backward-compatibly for the
+# cross-host partial-resume gate (resume-scan.sh). Readers that predate this
+# field, or any heartbeat written before it existed, simply see a missing
+# "host" key and MUST treat it as an unknown host → never eligible for
+# --resume-partial (always clean-restart). Override via AUTOSPEC_HOST for tests.
+HOST_VAL="${AUTOSPEC_HOST:-$(hostname 2>/dev/null || echo "")}"
+
+printf '{"issue":"%s","branch":"%s","step":"%s","ts":%s,"pr":"%s","repo":"%s","host":"%s"}\n' \
     "$ISSUE" \
     "${BRANCH:-}" \
     "$STEP" \
     "$NOW_TS" \
     "${PR_VAL:-}" \
     "$REPO_FULL" \
+    "$HOST_VAL" \
     > "${TARGET_DIR}/${ISSUE}.json"

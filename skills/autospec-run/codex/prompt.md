@@ -238,6 +238,18 @@ Record this durable preference in `AGENTS.md` (idempotent — skip if already pr
 
 **Usage-limit recovery guard.** Before launching the monitor, determine the exact non-interactive command that can relaunch this same `/autospec-run` invocation in the current repo and store it in `AUTOSPEC_RESUME_COMMAND` if the harness has not already set one. This must be a real shell command, for example the same Claude Code, Codex CLI, OpenCode, tmux, or wrapper command the operator used to start the run with the same `--profile` and repo path. Do not ask the user for it during a running monitor.
 
+**Durable run registry (crash-resume).** At monitor launch, also persist that same relaunch command to the durable run registry so it survives a host/session crash and reboot — the session env var `AUTOSPEC_RESUME_COMMAND` does not. Write it once per launch with the identical command:
+
+```bash
+REGISTRY="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-run-registry.sh"
+if [ -f "$REGISTRY" ] && [ -n "${AUTOSPEC_RESUME_COMMAND:-}" ]; then
+  bash "$REGISTRY" write --repo "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" \
+    --repo-dir "$(pwd)" --harness "<claude|codex|opencode>" --command "$AUTOSPEC_RESUME_COMMAND"
+fi
+```
+
+`/autospec-resume` reads `~/.autospec/active-runs/<repo-slug>.json` on a fresh start to relaunch this run. The registry is the only durable carrier of the relaunch command across reboot.
+
 When a harness reports a deterministic usage-limit/quota/capacity pause with a known reset time or wait duration, do not spend tokens diagnosing the message. Immediately arm the shell supervisor and exit:
 
 ```bash

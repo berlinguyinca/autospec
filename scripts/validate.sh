@@ -211,7 +211,7 @@ check_startup_preflight() {
         || printf '%s\n' "$canonical" | grep -F 'raw.githubusercontent.com/berlinguyinca/autospec/main/skills/' >/dev/null; then
         fail "startup preflight must not call a raw installer directly"
     fi
-    for s in autospec autospec-release autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa; do
+    for s in autospec autospec-release autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa autospec-resume; do
         for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
             body=$(extract_block "$f")
             [ -n "$body" ] || fail "$f missing ## Startup self-update section"
@@ -1812,6 +1812,7 @@ main() {
     check_autospec_sweep_area_contract
     check_autospec_qa_cluster_contract
     check_autospec_qa_bug_class_contract
+    check_autospec_resume_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -2138,6 +2139,80 @@ check_autospec_release_area_contract() {
         bats tests/release/test_release_area_dispatch.bats \
             >/tmp/validate-release-area-dispatch.log 2>&1 \
             || { cat /tmp/validate-release-area-dispatch.log >&2; fail "tests/release/test_release_area_dispatch.bats: failed"; }
+    fi
+}
+
+# Crash-resume skill + durable run registry contract (issue #881):
+# the new autospec-resume skill ships the trio + scaffolding + per-skill
+# validate.sh; resume-scan.sh / resume-attempts.sh / autospec-run-registry.sh
+# exist, are executable, and bash -n clean; the heartbeat schema carries a
+# backward-compatible `host` field; and /autospec-run wires the registry write
+# in lockstep across its trio. Runs the per-skill validate.sh and the
+# tests/resume bats fixtures when bats is on PATH.
+# Files + structural sections + script syntax for the autospec-resume skill.
+check_autospec_resume_structure() {
+    local skill="skills/autospec-resume"
+    [ -d "$skill" ] || fail "$skill: skill directory missing (issue #881)"
+    for f in SKILL.md README.md install.sh uninstall.sh validate.sh \
+             opencode/agent.md codex/prompt.md \
+             scripts/resume-scan.sh scripts/resume-attempts.sh; do
+        [ -f "$skill/$f" ] || fail "$skill/$f: required file missing (issue #881)"
+    done
+    grep -q '^## Startup self-update' "$skill/SKILL.md" \
+        || fail "$skill/SKILL.md missing ## Startup self-update section"
+    grep -q 'SKILL_NAME=autospec-resume' "$skill/SKILL.md" \
+        || fail "$skill/SKILL.md Startup self-update missing SKILL_NAME=autospec-resume"
+    grep -q '^## Harness detection' "$skill/SKILL.md" \
+        || fail "$skill/SKILL.md missing harness-detection section"
+    grep -q '^## Required capabilities & harness adapter' "$skill/SKILL.md" \
+        || fail "$skill/SKILL.md missing ## Required capabilities & harness adapter row"
+    grep -q 'Subagent model tier' "$skill/SKILL.md" \
+        || fail "$skill/SKILL.md adapter table missing 'Subagent model tier' row"
+    for s in "$skill/scripts/resume-scan.sh" \
+             "$skill/scripts/resume-attempts.sh" \
+             "scripts/autospec-run-registry.sh"; do
+        [ -f "$s" ] || fail "$s: required script missing (issue #881)"
+        [ -x "$s" ] || fail "$s: file not executable (issue #881)"
+        bash -n "$s" || fail "$s: bash syntax error (issue #881)"
+    done
+}
+
+# Crash-resume invariants: no second lock, server updated_at, host field,
+# registry wiring, per-skill lint, and bats coverage.
+check_autospec_resume_contract() {
+    info "autospec-resume crash-resume skill + durable run registry (issue #881)"
+    local skill="skills/autospec-resume"
+    check_autospec_resume_structure
+
+    # Idempotency / no-second-lock: resume-scan reads run-state but never
+    # upserts/clears it and never writes a run-state comment.
+    if grep -E 'run-state\.sh[^[:alnum:]]*upsert|run-state\.sh[^[:alnum:]]*clear|gh issue comment' \
+            "$skill/scripts/resume-scan.sh" >/dev/null; then
+        fail "$skill/scripts/resume-scan.sh must add no second lock (found a run-state mutation)"
+    fi
+    grep -q 'updated_at' "$skill/scripts/resume-scan.sh" \
+        || fail "$skill/scripts/resume-scan.sh must use run-state server updated_at"
+    grep -q '"host"' "skills/autospec-run/scripts/heartbeat-write.sh" \
+        || fail "heartbeat-write.sh must write a backward-compatible host field (issue #881)"
+    for trio in skills/autospec-run/SKILL.md \
+                skills/autospec-run/codex/prompt.md \
+                skills/autospec-run/opencode/agent.md; do
+        grep -q 'autospec-run-registry.sh' "$trio" \
+            || fail "$trio missing autospec-run-registry.sh registry-write wiring (issue #881)"
+    done
+
+    info "  running: $skill/validate.sh"
+    bash "$skill/validate.sh" >/tmp/validate-resume-skill.log 2>&1 \
+        || { cat /tmp/validate-resume-skill.log >&2; fail "$skill/validate.sh: failed"; }
+
+    [ -d tests/resume ] || fail "tests/resume: bats coverage directory missing (issue #881)"
+    if command -v bats >/dev/null 2>&1; then
+        for bats_file in tests/resume/*.bats; do
+            [ -f "$bats_file" ] || continue
+            info "  running: $bats_file"
+            bats "$bats_file" >/tmp/validate-resume-bats.log 2>&1 \
+                || { cat /tmp/validate-resume-bats.log >&2; fail "$bats_file: failed"; }
+        done
     fi
 }
 
