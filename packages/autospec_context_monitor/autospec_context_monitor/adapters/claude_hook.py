@@ -93,8 +93,10 @@ class ClaudeHookAdapter:
         """Fire a desktop notification asking the user to run ``/clear``.
 
         On macOS uses ``osascript``; on Linux uses ``notify-send``.
-        Both calls are best-effort (``check=False``) so a missing notifier
-        never aborts the monitor loop.
+        Both calls are best-effort: ``check=False`` ignores a non-zero exit and
+        ``timeout=`` bounds wall-clock so a blocked notifier (no GUI session,
+        pending TCC prompt, wedged NotificationCenter) can never freeze the
+        synchronous PreCompact hook. Any subprocess error is swallowed.
 
         Args:
             handoff_path: Path to the handoff file that was written, included
@@ -104,17 +106,29 @@ class ClaudeHookAdapter:
         if handoff_path is not None:
             body = f"{body} Handoff: {handoff_path}"
 
-        if sys.platform == "darwin":
-            subprocess.run(
-                [
-                    "osascript",
-                    "-e",
-                    f'display notification "{body}" with title "autospec: rollover needed"',
-                ],
-                check=False,
-            )
-        else:
-            subprocess.run(
-                ["notify-send", "autospec: rollover needed", body],
-                check=False,
-            )
+        try:
+            if sys.platform == "darwin":
+                # body is embedded inside an AppleScript double-quoted string,
+                # so backslashes and double-quotes must be escaped or osascript
+                # errors out (or hangs) on a handoff path containing them.
+                escaped = body.replace("\\", "\\\\").replace('"', '\\"')
+                subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        f'display notification "{escaped}" with title "autospec: rollover needed"',
+                    ],
+                    check=False,
+                    timeout=5,
+                )
+            else:
+                # notify-send args are passed as separate argv, so no shell/
+                # AppleScript escaping is needed for the body here.
+                subprocess.run(
+                    ["notify-send", "autospec: rollover needed", body],
+                    check=False,
+                    timeout=5,
+                )
+        except (OSError, subprocess.SubprocessError):
+            # Missing or blocked notifier must never abort/stall the hook.
+            pass

@@ -6,6 +6,7 @@ under ``~/.claude/projects/<cwd-slug>/`` and summing token usage from JSONL.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -54,15 +55,20 @@ class ClaudeAdapter:
     def find_transcript(self, hint: dict) -> Path:
         """Locate the newest ``.jsonl`` transcript for this session.
 
-        Derives the project slug from ``hint["cwd"]`` (``/``→``-``, strip
-        leading ``-``), then returns the most-recently-modified ``.jsonl``
-        found at ``~/.claude/projects/<slug>/``.
+        Derives the project slug from ``hint["cwd"]`` the way Claude Code does:
+        every non-alphanumeric character (``/``, ``.``, ``_``, space, …) is
+        replaced with ``-``. The cwd is absolute, so it starts with ``/`` and
+        the slug keeps a leading ``-`` (e.g. ``/Users/x/my_repo`` →
+        ``-Users-x-my-repo``) — do NOT strip it, or the path will not match the
+        directory Claude Code actually creates. Verified against live
+        ``~/.claude/projects`` slugs, where underscores in the source path
+        (e.g. ``.../m_/...``) appear as ``-``.
 
         Raises :class:`~autospec_context_monitor.adapters.base.TranscriptNotFoundError`
         if no transcript exists.
         """
         cwd: str = hint.get("cwd", "")
-        slug = cwd.replace("/", "-").lstrip("-")
+        slug = re.sub(r"[^a-zA-Z0-9]", "-", cwd)
         root = Path.home() / ".claude" / "projects" / slug
         candidates = sorted(
             root.glob("*.jsonl"),

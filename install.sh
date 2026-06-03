@@ -685,21 +685,30 @@ monitor_cmd = "python3 -m autospec_context_monitor --hook-event"
 # Claude Code's hooks schema requires each array entry to be an object with a
 # `hooks` list of {type, command} steps -- not a bare command string. Earlier
 # installs appended bare strings, which `claude doctor` flags as invalid.
-def merge(event):
+def merge(event, step_extra=None):
     cmd = "%s %s" % (monitor_cmd, event)
     entries = hooks.setdefault(event, [])
-    # Drop any legacy bare-string form left by earlier installs, so re-running
-    # the installer self-heals configs already in the wild.
-    entries[:] = [e for e in entries if e != cmd]
-    already = any(
-        isinstance(e, dict)
-        and any(h.get("command") == cmd for h in e.get("hooks", []))
-        for e in entries
-    )
-    if not already:
-        entries.append({"hooks": [{"type": "command", "command": cmd}]})
+    # Drop any legacy bare-string form AND any prior monitor entry, so re-running
+    # the installer self-heals configs already in the wild (e.g. upgrading
+    # PreCompact to async + timeout). Re-runs stay idempotent: we always drop our
+    # own entry and re-append an identical one.
+    entries[:] = [
+        e for e in entries
+        if e != cmd
+        and not (
+            isinstance(e, dict)
+            and any(h.get("command") == cmd for h in e.get("hooks", []))
+        )
+    ]
+    step = {"type": "command", "command": cmd}
+    if step_extra:
+        step.update(step_extra)
+    entries.append({"hooks": [step]})
 
-merge("PreCompact")
+# PreCompact fires synchronously during compaction and Claude Code blocks on it;
+# make the monitor step non-blocking (async) and time-bounded so a slow or
+# blocked notifier can never freeze the harness.
+merge("PreCompact", {"async": True, "timeout": 10})
 merge("SessionStart")
 
 tmp = settings_path.with_suffix(".json.tmp")
