@@ -2177,12 +2177,45 @@ check_autospec_resume_structure() {
     done
 }
 
+# External boot supervisor (issue #882, child 2 of the crash-resume spec): the
+# boot entrypoint + cross-platform install surface must exist, be executable,
+# and pass `bash -n`. The supervisor must delegate relaunch to /autospec-resume
+# (resume-scan.sh) and never eval the registry's raw resume_command directly,
+# and the installer must select launchd / systemd / @reboot cron by platform.
+check_autospec_supervisor_structure() {
+    info "autospec-supervisor boot supervisor + install surface (issue #882)"
+    for s in scripts/autospec-supervisor.sh scripts/autospec-supervisor-install.sh; do
+        [ -f "$s" ] || fail "$s: required script missing (issue #882)"
+        [ -x "$s" ] || fail "$s: file not executable (issue #882)"
+        bash -n "$s" || fail "$s: bash syntax error (issue #882)"
+    done
+    # Security: the supervisor relaunches only via /autospec-resume (resume-scan),
+    # never by eval'ing the registry's raw resume_command.
+    grep -q 'resume-scan.sh' scripts/autospec-supervisor.sh \
+        || fail "scripts/autospec-supervisor.sh must delegate relaunch to resume-scan.sh (/autospec-resume)"
+    if grep -Eq 'eval[[:space:]]+"\$(resume_command|reg)' scripts/autospec-supervisor.sh; then
+        fail "scripts/autospec-supervisor.sh must NOT eval the registry's raw resume_command directly (supervisor safety)"
+    fi
+    grep -q 'confirm_open_run\|in-progress-by-bot' scripts/autospec-supervisor.sh \
+        || fail "scripts/autospec-supervisor.sh must independently confirm an open in-progress run via gh"
+    # Installer must cover all three platform surfaces.
+    for needle in launchd systemd '@reboot'; do
+        grep -q "$needle" scripts/autospec-supervisor-install.sh \
+            || fail "scripts/autospec-supervisor-install.sh missing $needle platform surface (issue #882)"
+    done
+    for action in install uninstall status; do
+        grep -q "^[[:space:]]*$action)" scripts/autospec-supervisor-install.sh \
+            || fail "scripts/autospec-supervisor-install.sh missing '$action' action (issue #882)"
+    done
+}
+
 # Crash-resume invariants: no second lock, server updated_at, host field,
 # registry wiring, per-skill lint, and bats coverage.
 check_autospec_resume_contract() {
     info "autospec-resume crash-resume skill + durable run registry (issue #881)"
     local skill="skills/autospec-resume"
     check_autospec_resume_structure
+    check_autospec_supervisor_structure
 
     # Idempotency / no-second-lock: resume-scan reads run-state but never
     # upserts/clears it and never writes a run-state comment.
