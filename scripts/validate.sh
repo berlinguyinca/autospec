@@ -1892,6 +1892,7 @@ main() {
     check_autospec_qa_cluster_contract
     check_autospec_qa_bug_class_contract
     check_autospec_resume_contract
+    check_palette_single_source
     check_autospec_doc_contract
     check_watchdog_worktree_gc
 
@@ -2326,6 +2327,44 @@ check_autospec_resume_contract() {
             info "  running: $bats_file"
             bats "$bats_file" >/tmp/validate-resume-bats.log 2>&1 \
                 || { cat /tmp/validate-resume-bats.log >&2; fail "$bats_file: failed"; }
+        done
+    fi
+}
+
+# Palette single-source check (issue #920): the 6 light-blue hex constants must
+# live ONLY in skills/autospec-doc/scripts/doc-style.mjs.  No other .mjs, .sh,
+# or .md file in the repo may hardcode any of those hex values.
+check_palette_single_source() {
+    info "palette single-source: 6 light-blue hexes must live only in doc-style.mjs (issue #920)"
+    local doc_style="skills/autospec-doc/scripts/doc-style.mjs"
+    local doc_style_test="skills/autospec-doc/tests/doc-style.test.mjs"
+    [ -f "$doc_style" ] || { fail "$doc_style: file missing"; return; }
+
+    # Read the 6 pinned hex values directly from the source of truth.
+    local hexes
+    hexes=$(grep -oE '#[0-9A-Fa-f]{6}' "$doc_style" | sort -u)
+    if [ -z "$hexes" ]; then
+        fail "$doc_style: no hex values found — palette single-source check cannot run"
+        return
+    fi
+
+    local violations=()
+    while IFS= read -r hex; do
+        # Search all .mjs and .sh files (NOT .md — specs and docs are allowed to
+        # document the hex values; only source code must not hardcode them).
+        # Exclude doc-style.mjs itself and its test file.
+        while IFS= read -r hit; do
+            # Normalize path (strip leading ./)
+            local norm_hit="${hit#./}"
+            [ "$norm_hit" = "$doc_style" ]      && continue
+            [ "$norm_hit" = "$doc_style_test" ] && continue
+            violations+=("$norm_hit contains palette hex $hex")
+        done < <(grep -rl "$hex" --include="*.mjs" --include="*.sh" . 2>/dev/null || true)
+    done <<< "$hexes"
+
+    if [ "${#violations[@]}" -gt 0 ]; then
+        for v in "${violations[@]}"; do
+            fail "palette single-source violation: $v"
         done
     fi
 }
