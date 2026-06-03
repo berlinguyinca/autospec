@@ -96,11 +96,20 @@ function parseArgs(argv) {
       case '--audit':
         opts.subcommand = 'audit';
         break;
-      case '--audience':
+      case '--audience': {
+        const next = argv[i + 1];
+        // The value must be a real name, not another flag or a missing arg.
+        // `--audience --full` or a trailing `--audience` is a usage error.
+        if (next === undefined || next.startsWith('-')) {
+          console.error('[autospec-doc] --audience requires a <name> argument.');
+          opts.subcommand = 'usage';
+          return opts;
+        }
         opts.subcommand = 'audience';
-        opts.audience = argv[i + 1] || null;
+        opts.audience = next;
         i++; // consume the value
         break;
+      }
       case '-h':
       case '--help':
         opts.subcommand = 'usage';

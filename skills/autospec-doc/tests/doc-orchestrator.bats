@@ -101,6 +101,12 @@ EOF
   [ "$status" -eq 2 ]
 }
 
+@test "--audience followed by a flag is a usage error, not an audience name" {
+  seed_config
+  run node "$ORCH" --audience --full
+  [ "$status" -eq 2 ]
+}
+
 @test "unknown argument prints usage and exits 2" {
   seed_config
   run node "$ORCH" --bogus
