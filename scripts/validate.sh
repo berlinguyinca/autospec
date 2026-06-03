@@ -1669,6 +1669,59 @@ check_autospec_loop_contract() {
     fi
 }
 
+# Atomic cross-machine issue claim CAS guard (issue #871, spec
+# docs/specs/2026-06-02-atomic-cross-machine-issue-claim-design.md §Testing).
+#
+# Prevents regression of the whole CAS-claim effort (#872/#873/#874): the hot
+# monitor loop must route every claim through claim-issue.sh, never through an
+# inline blind check-then-act label swap. This guard fails if any of the three
+# autospec-run harness trio files (SKILL.md, opencode/agent.md, codex/prompt.md)
+# still contains an unguarded `gh issue edit ... --add-label in-progress-by-bot`
+# in the hot loop — i.e. an add-label swap on a line that does NOT also route
+# through claim-issue.sh. It also asserts each trio file references
+# claim-issue.sh in its claim section so the documented CAS call site cannot be
+# silently dropped.
+#
+# Lockstep byte-identity of the rewritten claim prose is covered separately by
+# check_lockstep (run per-skill in main()). The two mocked-`gh` PATH-shadow
+# simulations from #873/#874 (contended-claim ids 100/101 + stale-lease reclaim)
+# are executed here when bats is available so the CAS correctness argument is
+# part of the validate flow, mirroring check_supersession_contract.
+check_claim_cas_guard() {
+    info "claim CAS guard: autospec-run trio (issue #871)"
+    for trio in SKILL.md opencode/agent.md codex/prompt.md; do
+        f="skills/autospec-run/$trio"
+        [ -f "$f" ] || fail "$f: required file missing"
+        # (1) The claim section must reference claim-issue.sh (the SOLE CAS path).
+        grep -q 'claim-issue\.sh' "$f" \
+            || fail "$f: claim section missing reference to claim-issue.sh (issue #871)"
+        # (2) No unguarded check-then-act swap: any line that performs
+        #     `gh issue edit ... --add-label in-progress-by-bot` must also route
+        #     through claim-issue.sh. A bare add-label swap is the regression.
+        unguarded="$(grep -nE 'gh issue edit .*--add-label in-progress-by-bot' "$f" \
+            | grep -v 'claim-issue\.sh' || true)"
+        if [ -n "$unguarded" ]; then
+            printf '%s\n' "$unguarded" >&2
+            fail "$f: unguarded check-then-act 'gh issue edit --add-label in-progress-by-bot' outside the claim-issue.sh CAS path (issue #871)"
+        fi
+    done
+    # (3) The two mocked-`gh` PATH-shadow simulations (contended-claim ids
+    #     100/101 + stale-lease reclaim) encode the CAS correctness argument.
+    [ -f tests/fixtures/gh-mock/gh ] \
+        || fail "tests/fixtures/gh-mock/gh: PATH-shadow mocked-gh fixture missing (issue #871)"
+    for bats_file in \
+        tests/unit/test_autospec_claim_id_tiebreak.bats \
+        tests/unit/test_autospec_stale_lease_reclaim.bats
+    do
+        [ -f "$bats_file" ] || fail "$bats_file: mocked-gh simulation missing (issue #871)"
+        if command -v bats >/dev/null 2>&1; then
+            info "  running: $bats_file"
+            bats "$bats_file" >/tmp/validate-claim-cas-guard.log 2>&1 \
+                || { cat /tmp/validate-claim-cas-guard.log >&2; fail "$bats_file: failed (issue #871)"; }
+        fi
+    done
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -1727,6 +1780,7 @@ main() {
     check_team_personality_contract
     check_autospec_run_priority_sort_lockstep
     check_autospec_run_regression_review_lockstep
+    check_claim_cas_guard
     check_autospec_review_skill_present
     check_autospec_review_tier_a_directives
     check_autospec_test_skill_present
