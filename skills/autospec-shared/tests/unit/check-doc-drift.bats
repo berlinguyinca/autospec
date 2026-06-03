@@ -101,10 +101,106 @@ typeof d.passed==='boolean' &&
 Array.isArray(d.drift) &&
 Array.isArray(d.missing_scope) &&
 Array.isArray(d.visual_stale) &&
+Array.isArray(d.example_stale) &&
 Array.isArray(d.ai_review_stale) &&
 typeof d.skipped==='boolean' ? 'ok' : 'fail'
 ")"
     [ "$result" = "ok" ]
+}
+
+# ── Example staleness (issue #919, §D3 step 6) ────────────────────────────────
+
+# A verified example marker whose SHA predates the newest commit touching the
+# scope's src_globs is reported in example_stale. We build a real git history:
+#   commit 1: src + a doc scope carrying an example-verified marker at commit 1.
+#   commit 2: changes the src file → newest src commit is now ahead of the marker.
+# example_stale must then contain the doc's section.
+@test "marker SHA older than newest src commit → example_stale reported" {
+    git -C "$TMP_DIR" init -q
+    git -C "$TMP_DIR" config user.email "test@test.com"
+    git -C "$TMP_DIR" config user.name "Test"
+
+    mkdir -p "$TMP_DIR/src"
+    printf 'echo v1\n' > "$TMP_DIR/src/tool.sh"
+    git -C "$TMP_DIR" add -A
+    git -C "$TMP_DIR" commit -q -m "c1: src + docs"
+    OLD_SHA="$(git -C "$TMP_DIR" rev-parse HEAD)"
+
+    # Doc scope tracking src/tool.sh, carrying a verified marker stamped at c1.
+    cat > "$TMP_DIR/docs/TUT.md" <<DOC
+# Tutorial
+
+## Run the tool
+
+<!-- autospec-doc-scope:
+  src: ["src/tool.sh"]
+  reason: "Tutorial documents tool.sh"
+-->
+
+<!-- example -->
+\`\`\`bash
+bash src/tool.sh
+\`\`\`
+
+<!-- example-verified: ${OLD_SHA} 2026-06-01 -->
+
+\`\`\`output
+v1
+\`\`\`
+DOC
+    git -C "$TMP_DIR" add -A
+    git -C "$TMP_DIR" commit -q -m "c1b: doc marker"
+
+    # Now change the source in a later commit → newest src commit > marker SHA.
+    printf 'echo v2\n' > "$TMP_DIR/src/tool.sh"
+    git -C "$TMP_DIR" add -A
+    git -C "$TMP_DIR" commit -q -m "c2: src changes, doc not re-verified"
+
+    run bash -c "\"$CHECK_DRIFT\" --working-tree 2>/dev/null"
+    es="$(json_field "$output" "d.example_stale.length")"
+    [ "$es" -ge 1 ]
+    sha_ok="$(json_field "$output" "d.example_stale[0].marker_sha === '${OLD_SHA}' ? 'ok' : 'fail'")"
+    [ "$sha_ok" = "ok" ]
+}
+
+@test "marker SHA == newest src commit → no example_stale" {
+    git -C "$TMP_DIR" init -q
+    git -C "$TMP_DIR" config user.email "test@test.com"
+    git -C "$TMP_DIR" config user.name "Test"
+
+    mkdir -p "$TMP_DIR/src"
+    printf 'echo v1\n' > "$TMP_DIR/src/tool.sh"
+    git -C "$TMP_DIR" add -A
+    git -C "$TMP_DIR" commit -q -m "c1"
+    CUR_SHA="$(git -C "$TMP_DIR" rev-parse HEAD)"
+
+    cat > "$TMP_DIR/docs/TUT.md" <<DOC
+# Tutorial
+
+## Run the tool
+
+<!-- autospec-doc-scope:
+  src: ["src/tool.sh"]
+  reason: "Tutorial documents tool.sh"
+-->
+
+<!-- example -->
+\`\`\`bash
+bash src/tool.sh
+\`\`\`
+
+<!-- example-verified: ${CUR_SHA} 2026-06-03 -->
+
+\`\`\`output
+v1
+\`\`\`
+DOC
+    git -C "$TMP_DIR" add -A
+    git -C "$TMP_DIR" commit -q -m "c1b: doc marker at HEAD"
+
+    run bash -c "\"$CHECK_DRIFT\" --working-tree 2>/dev/null"
+    es="$(json_field "$output" "d.example_stale.length")"
+    [ "$es" -eq 0 ]
 }
 
 # ── Missing scope detection ───────────────────────────────────────────────────
