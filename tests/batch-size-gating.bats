@@ -82,3 +82,25 @@ setup() {
   opencode_md="${BATS_TEST_DIRNAME}/../skills/autospec-run/opencode/agent.md"
   grep -q 'effective_batch_size:-\$BATCH_SIZE' "$opencode_md"
 }
+
+@test "autospec-run documents BATCH_COMPLETE as continuation rather than manual rerun" {
+  for f in \
+    "${BATS_TEST_DIRNAME}/../skills/autospec-run/SKILL.md" \
+    "${BATS_TEST_DIRNAME}/../skills/autospec-run/codex/prompt.md" \
+    "${BATS_TEST_DIRNAME}/../skills/autospec-run/opencode/agent.md"
+  do
+    grep -F 'BATCH_COMPLETE is a continuation signal, not a terminal state' "$f"
+    grep -F 'Never tell the operator to rerun `/autospec-run` after BATCH_COMPLETE' "$f"
+  done
+}
+
+@test "reasoning:deep gate is scoped to one monitor batch, not the full autospec-run invocation" {
+  for f in \
+    "${BATS_TEST_DIRNAME}/../skills/autospec-run/SKILL.md" \
+    "${BATS_TEST_DIRNAME}/../skills/autospec-run/codex/prompt.md" \
+    "${BATS_TEST_DIRNAME}/../skills/autospec-run/opencode/agent.md"
+  do
+    grep -F 'reasoning:deep may reduce a single monitor batch to one issue' "$f"
+    grep -F 'the orchestrator MUST relaunch automatically until ALL_DONE' "$f"
+  done
+}

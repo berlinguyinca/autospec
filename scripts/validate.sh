@@ -684,6 +684,27 @@ check_phase4_immediate_next_issue_pickup() {
     done
 }
 
+# autospec-run queue-drain contract: `reasoning:deep` may shorten one monitor
+# batch for fresh context, but it must not end the user-invoked run.
+check_autospec_run_continuation_contract() {
+    info "autospec-run continuation contract: BATCH_COMPLETE relaunches until ALL_DONE"
+    for f in \
+        skills/autospec-run/SKILL.md \
+        skills/autospec-run/codex/prompt.md \
+        skills/autospec-run/opencode/agent.md
+    do
+        [ -f "$f" ] || fail "$f: required file missing"
+        grep -F 'BATCH_COMPLETE is a continuation signal, not a terminal state' "$f" >/dev/null \
+            || fail "$f missing BATCH_COMPLETE continuation contract"
+        grep -F 'reasoning:deep may reduce a single monitor batch to one issue' "$f" >/dev/null \
+            || fail "$f missing reasoning:deep single-monitor-batch wording"
+        grep -F 'the orchestrator MUST relaunch automatically until ALL_DONE' "$f" >/dev/null \
+            || fail "$f missing automatic relaunch-until-ALL_DONE directive"
+        grep -F 'Never tell the operator to rerun `/autospec-run` after BATCH_COMPLETE' "$f" >/dev/null \
+            || fail "$f missing no-manual-rerun directive"
+    done
+}
+
 # Phase 4 single-agent absorbed-discipline (issue #648): the autospec-run trio
 # must (1) carry the canonical constraint sentence stating that subagents spawned
 # by background `Agent` calls do NOT inherit the `Agent` tool, (2) reference the
@@ -1850,6 +1871,7 @@ main() {
     check_phase1_bounded_context_contract
     check_phase4_issue_start_summary
     check_phase4_immediate_next_issue_pickup
+    check_autospec_run_continuation_contract
     check_phase4_single_agent_discipline
     check_phase4_adaptive_retry
     check_phase4_full_test_suite_gate
