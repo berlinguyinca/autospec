@@ -5,8 +5,9 @@
 #
 # Rationale (#556): repo-root scripts ship to ~/.autospec/scripts via install.sh's
 # copy_repo_scripts() glob + skills/autospec-shared/scripts via copy_shared_scripts().
-# A runtime reference to a script that the installers never copy would be missing in
-# a target repo. This guard catches such drift at test time.
+# Per-skill runtime helpers (skills/<skill>/scripts/) ship via copy_runtime_skill_scripts()'s
+# explicit src->dest manifest (#985). A runtime reference to a script that the installers
+# never copy would be missing in a target repo. This guard catches such drift at test time.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
@@ -37,6 +38,16 @@ shippable_paths() {
       ( cd "$REPO_ROOT/skills/autospec-shared/scripts" && \
         find . -type f \( -name '*.sh' -o -name '*.mjs' -o -name '*.ps1' \) \
           | sed 's#^\./##' )
+    fi
+    # Per-skill runtime helpers ship flat (basename) via copy_runtime_skill_scripts()'s
+    # explicit "<src>::<dest>" manifest in install.sh. Read the manifest's declared
+    # destinations so this guard tracks what the installer actually copies (#985). The
+    # references being checked come from skill surface files, not from install.sh, so
+    # this is not a self-consistent fixture.
+    if [ -f "$REPO_ROOT/install.sh" ]; then
+      grep -oE 'skills/[A-Za-z0-9_./-]+\.(sh|mjs|ps1)::[A-Za-z0-9_.-]+\.(sh|mjs|ps1)' \
+        "$REPO_ROOT/install.sh" \
+        | sed -E 's#^.*::##'
     fi
   } | sort -u
 }
