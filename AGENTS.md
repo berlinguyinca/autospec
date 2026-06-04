@@ -413,3 +413,57 @@ Memory types (mempalace wings):
 - **synthesis** — lessons learned (feedback patterns, anti-patterns, gotchas)
 
 Read memories relevant to your task at session start. Write new memories by adding/editing files in `docs/memory/` and updating the index. Mempalace MCP layer (`mempalace search`, `mempalace traverse`, `mempalace kg_query`) is available if your tool supports MCP.
+
+## Git hygiene (agents)
+
+These rules apply to every autospec skill that mutates the repository (run
+implementers, define spec-PRs, doc regenerate commits, explore sandbox,
+release). The enforcement tool is `scripts/worktree-guard.sh`.
+
+### Primary checkout is read-only for agents
+
+Agents MUST NOT `cd`, `git checkout`, or `git commit` in the primary checkout.
+Operator dirt in it is never touched and never matters. Every git-mutating step
+happens in a linked worktree, never in the primary checkout directory.
+
+### Fetch-before-branch
+
+Always run `git fetch origin` (with one automatic retry) before creating or
+adopting a branch. `worktree-guard.sh create` handles this automatically;
+callers that bypass `create` must fetch explicitly.
+
+### Fresh-or-verified-clean worktrees only
+
+Use `worktree-guard.sh create` to obtain a worktree. Before any edit or commit,
+call `worktree-guard.sh assert`; it MUST exit 0. A non-zero exit means the
+worktree is dirty, primary, or stale — stop work, comment on the issue, and
+restore `auto-implement`. Never force-reuse a dirty worktree.
+
+### PR-aware ladder (standard branch-exists behavior)
+
+Before creating a new worktree, call `worktree-guard.sh resolve-branch`:
+
+- `open-pr` — a PR already exists for this branch: validate + merge the
+  existing PR; skip re-implementation (#886 recovery).
+- `branch-only` — branch exists on origin but no open PR: adopt it in a fresh
+  worktree and continue (#917 recovery).
+- `fresh` — nothing exists: `worktree-guard.sh create` off `origin/main`.
+
+### Cleanup after merge + prune
+
+After a PR is confirmed merged, remove the worktree and prune the git metadata:
+
+```bash
+git worktree remove /tmp/wt-<branch> 2>/dev/null || true
+git worktree prune
+```
+
+Never leave stale worktrees; the watchdog GC (`scripts/autospec-watchdog.sh`)
+sweeps orphans as a safety net, but proactive cleanup is required.
+
+### Pointer to enforcement tool
+
+`scripts/worktree-guard.sh` (installed to `~/.autospec/scripts/worktree-guard.sh`)
+implements `assert`, `resolve-branch`, and `create`. See
+`docs/specs/2026-06-03-worktree-guard-design.md` §D1 for the full contract and
+pinned exit codes.

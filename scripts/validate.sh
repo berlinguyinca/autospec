@@ -2055,6 +2055,70 @@ check_watchdog_worktree_gc() {
     fi
 }
 
+# AGENTS.md git-hygiene section (issue #962, spec §D5): AGENTS.md must carry
+# the `## Git hygiene (agents)` section with the five sub-rules (fetch-before-
+# branch; primary checkout read-only; fresh-or-verified-clean worktrees;
+# cleanup after merge + prune; PR-aware ladder as standard behavior) and a
+# pointer to worktree-guard.sh.
+check_agents_md_git_hygiene() {
+    info "AGENTS.md git hygiene section (issue #962 §D5)"
+    [ -f AGENTS.md ] || fail "AGENTS.md missing at repo root"
+    grep -q '^## Git hygiene (agents)$' AGENTS.md \
+        || fail "AGENTS.md missing '## Git hygiene (agents)' section (issue #962 §D5)"
+    grep -q 'Fetch-before-branch\|fetch-before-branch' AGENTS.md \
+        || fail "AGENTS.md git hygiene section missing fetch-before-branch rule (§D5)"
+    grep -q 'primary checkout' AGENTS.md \
+        || fail "AGENTS.md git hygiene section missing primary-checkout read-only rule (§D5)"
+    grep -q 'fresh-or-verified-clean\|Fresh-or-verified-clean' AGENTS.md \
+        || fail "AGENTS.md git hygiene section missing fresh-or-verified-clean worktrees rule (§D5)"
+    grep -q 'git worktree remove' AGENTS.md \
+        || fail "AGENTS.md git hygiene section missing 'git worktree remove' cleanup rule (§D5)"
+    grep -q 'git worktree prune' AGENTS.md \
+        || fail "AGENTS.md git hygiene section missing 'git worktree prune' cleanup rule (§D5)"
+    grep -q 'open-pr\|branch-only\|fresh' AGENTS.md \
+        || fail "AGENTS.md git hygiene section missing PR-aware ladder states (§D5)"
+    grep -q 'worktree-guard\.sh' AGENTS.md \
+        || fail "AGENTS.md git hygiene section missing pointer to worktree-guard.sh (§D5)"
+}
+
+# Define spec-PR worktree routing (issue #962, spec §D4): the autospec-define
+# trio must route the spec-PR commit through worktree-guard.sh create to a temp
+# worktree (/tmp/wt-spec-<slug>), never the primary checkout. The define-spec-pr
+# sentinel block must be present in all three trio files in lockstep.
+check_define_spec_worktree_routing() {
+    info "define spec-PR worktree routing (issue #962 §D4)"
+    for trio in \
+        skills/autospec-define/SKILL.md \
+        skills/autospec-define/codex/prompt.md \
+        skills/autospec-define/opencode/agent.md
+    do
+        [ -f "$trio" ] || fail "$trio: required file missing (issue #962 §D4)"
+        grep -q 'worktree-guard.sh' "$trio" \
+            || fail "$trio: missing worktree-guard.sh reference (issue #962 §D4)"
+        grep -q '/tmp/wt-spec-' "$trio" \
+            || fail "$trio: missing /tmp/wt-spec-<slug> temp worktree path (issue #962 §D4)"
+        grep -q 'MUST exit 0 before any edit' "$trio" \
+            || fail "$trio: missing 'MUST exit 0 before any edit' assert directive (issue #962 §D4)"
+        grep -q 'resolve-branch' "$trio" \
+            || fail "$trio: missing resolve-branch call (issue #962 §D4)"
+        grep -q 'define-spec-pr:begin' "$trio" \
+            || fail "$trio: missing define-spec-pr:begin sentinel (issue #962 §D4)"
+        grep -q 'define-spec-pr:end' "$trio" \
+            || fail "$trio: missing define-spec-pr:end sentinel (issue #962 §D4)"
+        grep -q 'git worktree remove' "$trio" \
+            || fail "$trio: missing 'git worktree remove' cleanup rule (issue #962 §D4)"
+        grep -q 'git worktree prune' "$trio" \
+            || fail "$trio: missing 'git worktree prune' cleanup rule (issue #962 §D4)"
+    done
+    # bats coverage file must exist.
+    local bats_file="tests/phase4/test_define_spec_worktree.sh"
+    [ -f "$bats_file" ] \
+        || fail "$bats_file: bats coverage missing (issue #962 §D4)"
+    info "  running: $bats_file"
+    bash "$bats_file" >/tmp/validate-define-spec-worktree.log 2>&1 \
+        || { cat /tmp/validate-define-spec-worktree.log >&2; fail "$bats_file: failed (issue #962)"; }
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -2156,6 +2220,8 @@ main() {
     check_autospec_doc_contract
     check_watchdog_worktree_gc
     check_qa_documentation_gate
+    check_agents_md_git_hygiene
+    check_define_spec_worktree_routing
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
