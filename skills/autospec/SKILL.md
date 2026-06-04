@@ -969,18 +969,16 @@ Pass the following prompt verbatim to each background subagent:
 > 4. Conventional commits (feat:/fix:/test:/docs:/refactor:). NEVER bypass hooks. NEVER amend.
 > 5. Push: git push -u origin <BRANCH>
 >    ```bash
->    # autospec-stop sentinel check — inside process(ISSUE), after each major step
->    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
->      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>    # Stop-sentinel: abort if an immediate stop flag is present after this step.
+>    if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop-check.sh" "$ISSUE" "$BRANCH" "$LAST_STEP"; then
 >      exit 0
 >    fi
 >    ```
 > 6. PR: gh pr create --base main --head <BRANCH> --title "<TITLE>" --body "Closes #<ISSUE>\n\n<summary>". Capture PR.
 > 7. Inner loop (max 3 iterations):
 >    ```bash
->    # autospec-stop sentinel check — inside process(ISSUE), after each major step
->    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
->      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>    # Stop-sentinel: abort if an immediate stop flag is present after this step.
+>    if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop-check.sh" "$ISSUE" "$BRANCH" "$LAST_STEP"; then
 >      exit 0
 >    fi
 >    ```
@@ -1070,17 +1068,15 @@ Pass the following prompt verbatim to each background subagent:
 >    - **Regression coverage** for `regression`/`priority:high` issues is handled inside the single fused reviewer brief (Part 2 item 9 above): the reviewer self-asks "would the reviewer have caught the original gap?", writes any missing checks to `reports/autospec-review/reviewer-lessons.md`, and applies them before its verdict. No second Tier-A dispatch.
 >    - If LGTM: break SUCCESS.
 >    ```bash
->    # autospec-stop sentinel check — inside process(ISSUE), after each major step
->    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
->      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>    # Stop-sentinel: abort if an immediate stop flag is present after this step.
+>    if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop-check.sh" "$ISSUE" "$BRANCH" "$LAST_STEP"; then
 >      exit 0
 >    fi
 >    ```
 > 8. SUCCESS: Run the **Full test suite gate** one final time after the PR branch is current with `main`; if it fails, fix the failure, recommit, push, rerun the full suite and review, and do NOT run `gh pr merge`. Then run `gh pr merge <PR> --admin --squash --delete-branch`. Merge auto-closes the issue.
 >    ```bash
->    # autospec-stop sentinel check — inside process(ISSUE), after each major step
->    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
->      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>    # Stop-sentinel: abort if an immediate stop flag is present after this step.
+>    if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop-check.sh" "$ISSUE" "$BRANCH" "$LAST_STEP"; then
 >      exit 0
 >    fi
 >    ```
