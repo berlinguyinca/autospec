@@ -117,6 +117,7 @@ The two new trailing fields:
 | `refine and run` / `tune up` (combined) | `/autospec-refine` then `/autospec-run` |
 | `review` | `/autospec-review` |
 | `explore` / `discover` (only with an explicit build/ship/improve action connector, e.g. "explore and ship", "discover features to build") | `/autospec-explore` (gate `explore-confirm`) |
+| `fix` (imperative, e.g. "fix the login flow"; trivial-fix phrasings like "fix the typo", "quick fix", "fix the formatting" stay plain) | the umbrella `/autospec` (no gate) |
 | `autospec …` | the umbrella `/autospec` |
 
 **Auto-route behavior.** When the classifier returns `match:true` with `intent:imperative`, print exactly one line then invoke the mapped skill via the harness skill-invocation primitive:

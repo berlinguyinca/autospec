@@ -419,6 +419,63 @@ EOF
         return 0
     fi
 
+    # ── 'fix' — imperative bug-fix intent → /autospec end-to-end (D1, #954) ──────
+    # Whole-word imperative `fix` routes to the `/autospec` umbrella (spec →
+    # issues → run): a fix needs scoping before implementation, unlike the bare
+    # implement/build/ship verbs which route straight to autospec-run. NO gate,
+    # NO confirm (autospec is not a perpetual loop) — the standard one-line
+    # opt-out applies. Confidence 0.7.
+    #
+    # PLACEMENT: evaluated AFTER explore/refine/run (above) so "fix it by
+    # exploring..." and combined-refine phrasings keep their more-specific route,
+    # and BEFORE the implement/build/ship chain below so an incidental build/ship
+    # word in a fix request does not steal it. Mirrors the explore gate's
+    # explicit emit-and-return shape.
+    #
+    # Trivial-fix suppressors (the negative table — false-negative biased): tiny
+    # cosmetic fixes are too small to warrant the full pipeline and must stay
+    # plain. Implemented branch-local (mirroring the run-suppressed objects gate)
+    # so they short-circuit BEFORE the route emits. The inherited D4
+    # question/negation/past guards in is_imperative() cover "did you fix it?",
+    # "don't fix that yet", and "I fixed it" (past tense — 'fixed' is not the
+    # whole word 'fix').
+    if has_word "$text_lc" "fix"; then
+        _fix_suppressed=0
+        # Trivial-fix cosmetic table (spec §D1 pins the first seven; "fix the
+        # whitespace" added during #954 adversarial self-review as a cosmetic
+        # sibling of indentation/formatting). False-negative biased.
+        for _tf in "fix this typo" "fix the typo" "fix the comment" \
+                   "fix the indentation" "fix the formatting" "quick fix" \
+                   "fix the spelling" "fix the whitespace"; do
+            case "$text_lc" in
+                *"$_tf"*) _fix_suppressed=1; break ;;
+            esac
+        done
+        # Descriptive/deferred 'fix' phrasings surfaced by #954 self-review
+        # (the #909 noun-co-occurrence lesson): "a fix" is the NOUN, not the
+        # imperative verb ("this needs a fix", "ship a fix"); "i'll fix … later"
+        # / "fix … later" is a deferral, not a now-action. These are too weak an
+        # imperative to launch the full /autospec pipeline. Scoped branch-local
+        # so they only affect the fix route.
+        if [ "$_fix_suppressed" -eq 0 ]; then
+            for _fd in "a fix" "later"; do
+                case "$text_lc" in
+                    *"$_fd"*) _fix_suppressed=1; break ;;
+                esac
+            done
+        fi
+        if [ "$_fix_suppressed" -eq 1 ]; then
+            emit_classify_json false "" "" none 0 false "" ""
+            return 0
+        fi
+        if is_imperative "$text_lc"; then
+            emit_classify_json true autospec fix imperative 0.7 "$is_auto" "" ""
+        else
+            emit_classify_json false autospec fix incidental 0.2 false "" ""
+        fi
+        return 0
+    fi
+
     # Existing branches (preserved in order).
     if has_word "$text_lc" "autospec"; then
         skill="autospec"; trigger="autospec"
