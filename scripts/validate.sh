@@ -2134,6 +2134,42 @@ check_define_spec_worktree_routing() {
         || { cat /tmp/validate-define-spec-worktree.log >&2; fail "$bats_file: failed (issue #962)"; }
 }
 
+# D1 token-baseline staleness check (issue #1017).
+# Warn-only: never fails the validate run; a stale baseline just prints a
+# reminder to regenerate with `bash scripts/skill-token-report.sh`.
+check_token_baseline_fresh() {
+    info "token baseline staleness check (issue #1017, warn-only)"
+    local baseline="docs/reports/skill-token-baseline.md"
+    local script="scripts/skill-token-report.sh"
+
+    if [ ! -f "$baseline" ]; then
+        printf 'validate: WARN — %s not found; run: bash %s > %s\n' \
+            "$baseline" "$script" "$baseline" >&2
+        return 0
+    fi
+
+    if [ ! -f "$script" ]; then
+        printf 'validate: WARN — %s not found; cannot check baseline staleness\n' \
+            "$script" >&2
+        return 0
+    fi
+
+    local fresh
+    fresh="$(bash "$script" 2>/dev/null)" || {
+        printf 'validate: WARN — %s failed; skipping staleness check\n' "$script" >&2
+        return 0
+    }
+
+    # Extract only the table lines from the baseline (between baseline markers)
+    local committed
+    committed="$(awk '/<!-- baseline:begin -->/{f=1;next} /<!-- baseline:end -->/{f=0} f' "$baseline")"
+
+    if [ "$fresh" != "$committed" ]; then
+        printf 'validate: WARN — %s is stale; run: bash %s > %s\n' \
+            "$baseline" "$script" "$baseline" >&2
+    fi
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -2240,6 +2276,7 @@ main() {
     check_qa_documentation_gate
     check_agents_md_git_hygiene
     check_define_spec_worktree_routing
+    check_token_baseline_fresh
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
