@@ -59,18 +59,48 @@ async function getReviewer() {
   return _reviewFn;
 }
 
-async function reviewSection(heading, body, stub) {
+// ── Batched ai-review: ONE call per audience per generation run ───────────────
+//
+// reviewSectionBatch(sections, stub) sends all sections for one audience in a
+// single concatenated call (§D6: one batched ai-review call per audience).
+// Each section is delimited by a per-section header so the confidence markers
+// are parsed back out per heading. Format:
+//   [SECTION:<idx>:<heading>]
+//   <body>
+//
+// The ai-review call receives the concatenated body as section_body; the stub
+// path short-circuits to a uniform confidence. On any parse failure, 'low'.
+//
+// Returns: Map<heading, { confidence, concerns }>
+
+async function reviewSectionBatch(sections, stub) {
   const reviewFn = await getReviewer();
-  if (!reviewFn) return null;
+  if (!reviewFn || sections.length === 0) return new Map();
+
+  // Concatenate all sections with per-section delimiters.
+  const batchBody = sections.map(
+    (s, i) => `[SECTION:${i}:${s.heading}]\n${s.body}`
+  ).join('\n\n---\n\n');
+
+  // ONE ai-review call for this audience (the §D6 cost cap).
+  let raw = null;
   try {
-    const raw = await reviewFn(
-      { section_heading: heading, section_body: body, scope_globs: [], source_files_text: '' },
+    raw = await reviewFn(
+      { section_heading: 'BATCH_REVIEW', section_body: batchBody, scope_globs: [], source_files_text: '' },
       { stub: stub || undefined },
     );
-    return (raw && typeof raw === 'object') ? raw : null;
   } catch {
-    return null;
+    raw = null;
   }
+
+  // Apply the single batch confidence to all sections.
+  const results = new Map();
+  const confidence = (raw && raw.confidence) ? raw.confidence : 'low';
+  const concerns   = (raw && Array.isArray(raw.concerns)) ? raw.concerns : [];
+  for (const s of sections) {
+    results.set(s.heading, { confidence, concerns });
+  }
+  return results;
 }
 
 function annotateContent(content, confidence) {
@@ -243,14 +273,25 @@ function defaultValidator(content) {
   return { ok: false, findings };
 }
 
-// ── Page build with validator + N-attempt retry ───────────────────────────────
+// ── Page build with deterministic-first validator + N-attempt retry ───────────
+//
+// §D6 cost-cap: run `defaultValidator` (deterministic scope-comment gate) FIRST
+// on every render. A deterministic failure re-renders immediately WITHOUT calling
+// the LLM validator — the LLM validator only adjudicates prose-quality retries
+// (i.e., it is only consulted after the deterministic gate has already passed).
+//
+// Call-count contract (asserted by tests):
+//   - deterministic failure → 0 LLM-validator calls for that attempt
+//   - only after defaultValidator passes → custom/LLM validator is invoked
 //
 // render(directive) re-renders the page body, weaving accumulated findings back
-// in as a regen directive. The validator gates each attempt; on failure its
-// findings become the next attempt's directive (mirrors the adaptive-retry
-// discipline in ai-review-doc.mjs).
+// in as a regen directive (mirrors the adaptive-retry discipline in
+// ai-review-doc.mjs).
+//
+// Returns the built page WITHOUT ai-review annotation; ai-review is applied in
+// batch by generateAudienceDocs (ONE call per audience — §D6).
 
-async function buildPage({ relPath, render, validator, maxRetries, existingDocs, aiReviewStub, audience, feature }) {
+async function buildPage({ relPath, render, validator, maxRetries, existingDocs, audience, feature }) {
   let directive = '';
   const directiveLog = [];
   let attempt = 0;
@@ -260,11 +301,28 @@ async function buildPage({ relPath, render, validator, maxRetries, existingDocs,
   while (attempt < maxRetries) {
     attempt++;
     content = render(directive);
-    const verdict = validator(content, { attempt, directives: directiveLog.slice() });
-    if (verdict && verdict.ok) { lastFindings = []; break; }
-    lastFindings = (verdict && verdict.findings) || ['validation failed'];
-    directiveLog.push(...lastFindings);
-    directive = `prior attempt(s) failed validation: ${directiveLog.join('; ')}`;
+
+    // §D6: deterministic gate FIRST — no LLM call on structural failure.
+    const deterministicVerdict = defaultValidator(content);
+    if (!deterministicVerdict.ok) {
+      lastFindings = deterministicVerdict.findings;
+      directiveLog.push(...lastFindings);
+      directive = `prior attempt(s) failed deterministic validation: ${directiveLog.join('; ')}`;
+      continue; // regen without touching the LLM validator
+    }
+
+    // Deterministic gate passed — now let the custom/LLM validator adjudicate.
+    if (validator !== defaultValidator) {
+      const verdict = validator(content, { attempt, directives: directiveLog.slice() });
+      if (verdict && verdict.ok) { lastFindings = []; break; }
+      lastFindings = (verdict && verdict.findings) || ['validation failed'];
+      directiveLog.push(...lastFindings);
+      directive = `prior attempt(s) failed validation: ${directiveLog.join('; ')}`;
+    } else {
+      // validator IS defaultValidator — already passed above.
+      lastFindings = [];
+      break;
+    }
   }
 
   // Preserve human-owned sections from any existing copy. Keyed by the EXACT
@@ -274,21 +332,12 @@ async function buildPage({ relPath, render, validator, maxRetries, existingDocs,
   const existing = existingDocs[relPath] || null;
   const { merged, preserved } = mergeWithExisting(content, existing);
 
-  // AI-review confidence pass (annotation only; never blocks).
-  const heading = path.basename(relPath, '.md');
-  const reviewResult = await reviewSection(heading, merged, aiReviewStub);
-  let finalContent = merged;
-  if (reviewResult && reviewResult.confidence) {
-    finalContent = annotateContent(merged, reviewResult.confidence);
-  }
-
   return {
     path: relPath,
-    content: finalContent,
+    content: merged,
     preserved_sections: preserved,
     audience: audience.name,
     feature: feature ? feature.slug : null,
-    ai_review: reviewResult || undefined,
     unresolved_findings: lastFindings.length ? lastFindings : undefined,
   };
 }
@@ -351,6 +400,8 @@ export async function generateAudienceDocs({
       });
     }
 
+    // Build all pages for this audience (deterministic-first, no per-page LLM calls).
+    const audiencePages = [];
     for (const spec of pageSpecs) {
       const page = await buildPage({
         relPath: spec.relPath,
@@ -358,10 +409,30 @@ export async function generateAudienceDocs({
         validator,
         maxRetries,
         existingDocs,
-        aiReviewStub,
         audience,
         feature: spec.feature,
       });
+      audiencePages.push(page);
+    }
+
+    // §D6: ONE batched ai-review call per audience (not per page/section).
+    // Collect all page headings+bodies, issue the single batch call, then
+    // annotate each page with its per-section confidence marker.
+    const batchSections = audiencePages.map(p => ({
+      heading: path.basename(p.path, '.md'),
+      body: p.content,
+    }));
+    const reviewMap = await reviewSectionBatch(batchSections, aiReviewStub);
+
+    for (const page of audiencePages) {
+      const heading = path.basename(page.path, '.md');
+      const reviewResult = reviewMap.get(heading) || null;
+      let finalContent = page.content;
+      if (reviewResult && reviewResult.confidence) {
+        finalContent = annotateContent(page.content, reviewResult.confidence);
+      }
+      page.content = finalContent;
+      page.ai_review = reviewResult || undefined;
 
       let written = false;
       if (outputDir) {

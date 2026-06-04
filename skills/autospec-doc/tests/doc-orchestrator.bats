@@ -197,3 +197,60 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"roundtrip-ok"* ]]
 }
+
+# ── §D6 incremental orchestrator tests (issue #943) ───────────────────────────
+
+# §D6: bare invocation with zero changed scopes (AUTOSPEC_CHECK_DRIFT_SH stub
+# that exits 0 = clean) must be a fast no-op — log line only, no regeneration.
+@test "§D6: bare incremental with zero changed scopes is a fast no-op" {
+  seed_config
+  # Stub check-doc-drift.sh to exit 0 (clean — no drift).
+  STUB_DRIFT="$TESTDIR/stub-drift-clean.sh"
+  cat > "$STUB_DRIFT" <<'SH'
+#!/usr/bin/env bash
+echo '{"status":"clean","changed_scopes":[]}'
+exit 0
+SH
+  chmod +x "$STUB_DRIFT"
+  export AUTOSPEC_CHECK_DRIFT_SH="$STUB_DRIFT"
+  run node "$ORCH"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no changed scopes"* ]]
+}
+
+# §D6: bare invocation with one changed scope (AUTOSPEC_CHECK_DRIFT_SH exits 1
+# with a changed_scopes list) must log the scope and regenerate only that scope.
+@test "§D6: bare incremental with changed scopes logs and regenerates only those scopes" {
+  seed_config
+  STUB_DRIFT="$TESTDIR/stub-drift-changed.sh"
+  cat > "$STUB_DRIFT" <<'SH'
+#!/usr/bin/env bash
+echo '{"status":"drift","changed_scopes":["docs/user/features/export-pipeline.md"]}'
+exit 1
+SH
+  chmod +x "$STUB_DRIFT"
+  export AUTOSPEC_CHECK_DRIFT_SH="$STUB_DRIFT"
+  run node "$ORCH"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 changed scope"* ]]
+  [[ "$output" == *"export-pipeline"* ]]
+}
+
+# §D6: --full must NOT be affected by the incremental scope computation — it
+# always regenerates everything regardless of check-doc-drift output.
+@test "§D6: --full ignores changed-scope computation and does full fan-out" {
+  seed_config
+  STUB_DRIFT="$TESTDIR/stub-drift-clean.sh"
+  cat > "$STUB_DRIFT" <<'SH'
+#!/usr/bin/env bash
+echo '{"status":"clean","changed_scopes":[]}'
+exit 0
+SH
+  chmod +x "$STUB_DRIFT"
+  export AUTOSPEC_CHECK_DRIFT_SH="$STUB_DRIFT"
+  run node "$ORCH" --full
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"full:"* ]]
+  # full output must NOT contain "no changed scopes" (that's incremental-only messaging)
+  [[ "$output" != *"no changed scopes"* ]]
+}
