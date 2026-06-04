@@ -16,6 +16,9 @@
 SCRIPT="${BATS_TEST_DIRNAME}/../../scripts/refine-prompt.sh"
 
 setup() {
+    # Pin deterministic template lens — default is now auto/LLM-first (#1024),
+    # but the loop's convergence/oscillation invariants assert deterministic output.
+    export AUTOSPEC_REFINE_LENS_MODE=deterministic
     TEST_TMP="$(mktemp -d -t refine-loop.XXXXXX)"
     REPO_ROOT="$TEST_TMP/repo"
     mkdir -p "$REPO_ROOT/docs/specs"

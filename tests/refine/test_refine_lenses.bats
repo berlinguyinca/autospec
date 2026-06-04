@@ -5,6 +5,11 @@
 SCRIPT="${BATS_TEST_DIRNAME}/../../scripts/refine-prompt.sh"
 
 setup() {
+    # These tests assert the DETERMINISTIC template-lens output specifically.
+    # Since the default lens mode is now auto/LLM-first (issue #1024), pin the
+    # deterministic path so the template signatures are exercised regardless of
+    # whether a claude/codex dispatcher is present in the test environment.
+    export AUTOSPEC_REFINE_LENS_MODE=deterministic
     TEST_TMP="$(mktemp -d -t refine-lens.XXXXXX)"
     REPO_ROOT="$TEST_TMP/repo"
     mkdir -p "$REPO_ROOT/docs/specs"

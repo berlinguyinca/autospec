@@ -8,6 +8,9 @@ SCRIPT="${BATS_TEST_DIRNAME}/../../scripts/refine-render-overview.sh"
 SCHEMA="${BATS_TEST_DIRNAME}/../../schemas/autospec-refinement.schema.json"
 
 setup() {
+    # Pin deterministic template lens — default is now auto/LLM-first (#1024),
+    # but the overview render asserts deterministic-path artifact fields.
+    export AUTOSPEC_REFINE_LENS_MODE=deterministic
     TEST_TMP="$(mktemp -d -t refine-render.XXXXXX)"
     OUT_DIR="$TEST_TMP/out"
     INPUT="$TEST_TMP/input.json"

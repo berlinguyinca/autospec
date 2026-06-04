@@ -44,8 +44,21 @@ Flags:
   --memory-root DIR      Override ~/.autospec/projects memory root (test hook).
   --help                 Show this and exit.
 
+Lens dispatch:
+  --lens-mode MODE       deterministic | llm | auto (overrides the env hatch).
+  --llm-binary PATH      Explicit LLM dispatcher for the lens path (test hook).
+
 Environment:
   AUTOSPEC_REFINE_MAX_ROUNDS    default 10
+  AUTOSPEC_REFINE_LENS_MODE     deterministic | llm | auto (default auto).
+                                auto = LLM-first: each lens round dispatches the
+                                LLM path first; the deterministic template lens
+                                is the fallback ONLY when the LLM path is
+                                unavailable/fails (round tagged
+                                degraded_fallback=true). llm = LLM-only (fails
+                                loudly if no dispatcher). deterministic = legacy
+                                template lenses (offline/tests). The --lens-mode
+                                flag wins over this env var.
 EOF
 }
 
@@ -845,33 +858,83 @@ apply_lens() {
 LENS_LLM_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/refine-prompt-lens-llm.sh"
 
 _resolve_lens_mode() {
-    # Honor explicit operator choice; otherwise auto-detect.
+    # Resolve the lens dispatch mode to one of: deterministic | llm | auto.
+    #
+    # Precedence (issue #1024): the --lens-mode flag wins over the
+    # AUTOSPEC_REFINE_LENS_MODE env hatch, which wins over the default (auto).
+    # All three values are allow-listed; any out-of-list value is fatal so a
+    # typo never silently degrades to a different code path.
+    #
+    #   deterministic — legacy template lenses only; never dispatch the LLM
+    #                   (offline / test / billable-API-free path).
+    #   llm           — LLM-only; fail loudly if the dispatcher is unavailable.
+    #   auto (default)— LLM-first: dispatch the LLM path each round; the
+    #                   deterministic template lens is the fallback ONLY when
+    #                   the LLM path is unavailable/fails, tagging
+    #                   degraded_fallback=true on that round.
+    #
+    # Flag wins over env (flag-over-env). Flag is allow-listed.
     if [ -n "$LENS_MODE" ]; then
         case "$LENS_MODE" in
-            deterministic|llm) printf '%s' "$LENS_MODE"; return ;;
-            *) echo "refine-prompt: --lens-mode must be deterministic|llm" >&2; exit 2 ;;
+            deterministic|llm|auto) printf '%s' "$LENS_MODE"; return ;;
+            *) echo "refine-prompt: --lens-mode must be deterministic|llm|auto" >&2; exit 2 ;;
         esac
     fi
-    # Env override (operator opt-in for default-llm).
+    # Env hatch — allow-listed; an invalid value is fatal (allow-list).
     if [ -n "${AUTOSPEC_REFINE_LENS_MODE:-}" ]; then
         case "$AUTOSPEC_REFINE_LENS_MODE" in
-            deterministic|llm) printf '%s' "$AUTOSPEC_REFINE_LENS_MODE"; return ;;
+            deterministic|llm|auto) printf '%s' "$AUTOSPEC_REFINE_LENS_MODE"; return ;;
+            *) echo "refine-prompt: AUTOSPEC_REFINE_LENS_MODE must be deterministic|llm|auto (got: $AUTOSPEC_REFINE_LENS_MODE)" >&2; exit 2 ;;
         esac
     fi
-    # Auto-detect: LLM only when explicitly enabled via AUTOSPEC_LLM_DISPATCHER
-    # AND a dispatcher is available. Otherwise deterministic so existing
-    # workflows (and tests not in LLM mode) are not silently rerouted through
-    # a billable API.
-    local have_llm=0
-    if [ -n "$LLM_BINARY" ]; then have_llm=1; fi
-    if [ -n "${AUTOSPEC_LLM_DISPATCHER:-}" ]; then
-        if command -v claude >/dev/null 2>&1; then have_llm=1; fi
-        if command -v codex  >/dev/null 2>&1; then have_llm=1; fi
-    fi
-    if [ "$have_llm" = 1 ]; then printf '%s' "llm"; else printf '%s' "deterministic"; fi
+    # Default: LLM-first auto.
+    printf '%s' "auto"
 }
 
+# Availability probe — is an LLM dispatcher reachable for the lens path?
+# Mirrors refine-prompt-lens-llm.sh's own resolution: an explicit
+# --llm-binary, or a claude/codex on PATH. Used to decide llm-vs-fallback
+# without spending a real dispatch.
+_lens_llm_available() {
+    if [ -n "$LLM_BINARY" ]; then return 0; fi
+    if command -v claude >/dev/null 2>&1; then return 0; fi
+    if command -v codex  >/dev/null 2>&1; then return 0; fi
+    return 1
+}
+
+# Validate the allow-listed inputs in the MAIN shell (not the $() subshell
+# below, where an exit would only terminate the subshell and leak an empty
+# LENS_MODE_RESOLVED). Flag-over-env: the flag is validated first.
+if [ -n "$LENS_MODE" ]; then
+    case "$LENS_MODE" in
+        deterministic|llm|auto) ;;
+        *) echo "refine-prompt: --lens-mode must be deterministic|llm|auto" >&2; exit 2 ;;
+    esac
+elif [ -n "${AUTOSPEC_REFINE_LENS_MODE:-}" ]; then
+    case "$AUTOSPEC_REFINE_LENS_MODE" in
+        deterministic|llm|auto) ;;
+        *) echo "refine-prompt: AUTOSPEC_REFINE_LENS_MODE must be deterministic|llm|auto (got: $AUTOSPEC_REFINE_LENS_MODE)" >&2; exit 2 ;;
+    esac
+fi
+
 LENS_MODE_RESOLVED="$(_resolve_lens_mode)"
+
+# llm mode is LLM-only: if no dispatcher is reachable, fail loudly rather than
+# silently degrading to the deterministic template lens (issue #1024).
+if [ "$LENS_MODE_RESOLVED" = "llm" ] && ! _lens_llm_available; then
+    echo "refine-prompt: ERROR — lens-mode=llm requires an LLM dispatcher (claude/codex or --llm-binary); none available" >&2
+    exit 2
+fi
+
+# auto mode is LLM-first with a deterministic fallback. When no dispatcher is
+# reachable up front, collapse to the deterministic template lens but mark the
+# fallback so every round's artifact carries degraded_fallback=true. The flag
+# below is consulted by apply_lens_routed.
+AUTO_DEGRADED_FALLBACK=0
+if [ "$LENS_MODE_RESOLVED" = "auto" ] && ! _lens_llm_available; then
+    AUTO_DEGRADED_FALLBACK=1
+    echo "refine-prompt: WARN — lens-mode=auto: no LLM dispatcher available; using deterministic fallback (degraded_fallback=true)" >&2
+fi
 LAST_LENS_IMPL=""
 LAST_DEGRADED_FALLBACK="false"
 
@@ -888,7 +951,22 @@ apply_lens_routed() {
     local degraded="false"
     local impl_file="${LENS_IMPL_FILE:-}"
 
-    if [ "$LENS_MODE_RESOLVED" = "llm" ] && [ -x "$LENS_LLM_SH" ]; then
+    # auto mode with no dispatcher available up front: deterministic fallback,
+    # tagged degraded (issue #1024). No LLM dispatch is attempted.
+    if [ "$LENS_MODE_RESOLVED" = "auto" ] && [ "${AUTO_DEGRADED_FALLBACK:-0}" = 1 ]; then
+        impl="deterministic"
+        degraded="true"
+        if [ -n "$impl_file" ]; then printf '%s|%s' "$impl" "$degraded" > "$impl_file"; fi
+        printf '%s' "$input" | apply_lens "$name"
+        return 0
+    fi
+
+    # llm and auto both dispatch the LLM path first. In auto mode a per-lens
+    # dispatch failure degrades to the deterministic template lens for THAT
+    # lens (degraded_fallback=true). In llm mode the dispatcher is known
+    # reachable (checked up front); a per-lens failure still degrades that
+    # single lens rather than aborting the whole run.
+    if { [ "$LENS_MODE_RESOLVED" = "llm" ] || [ "$LENS_MODE_RESOLVED" = "auto" ]; } && [ -x "$LENS_LLM_SH" ]; then
         # Build a tiny context file from already-loaded sources.
         local ctx
         ctx="$(mktemp -t refine-lens-ctx.XXXXXX)"
