@@ -128,19 +128,11 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "workflow file exists at .github/workflows/autospec-self-enforce.yml" {
-  [ -f "${BATS_TEST_DIRNAME}/../.github/workflows/autospec-self-enforce.yml" ]
-}
-
-@test "workflow triggers on pull_request to main" {
-  workflow="${BATS_TEST_DIRNAME}/../.github/workflows/autospec-self-enforce.yml"
-  grep -q "pull_request" "$workflow"
-  grep -q "main" "$workflow"
-}
-
-@test "workflow has path filter for skills/** scripts/** docs/specs/**" {
-  workflow="${BATS_TEST_DIRNAME}/../.github/workflows/autospec-self-enforce.yml"
-  grep -q "skills/\*\*" "$workflow"
-  grep -q "scripts/\*\*" "$workflow"
-  grep -q "docs/specs/\*\*" "$workflow"
+# The autospec-self-enforce GitHub Actions workflow was deliberately removed
+# in #481 (commit 21d4f52, "chore: disable GitHub Actions / CI") when CI was
+# disabled repo-wide; local pre-commit hooks + on-demand scripts/validate.sh
+# now carry self-enforcement. This asserts the workflow stays absent so the
+# stale existence/trigger/path-filter assertions can never silently re-appear.
+@test "autospec-self-enforce workflow is intentionally absent (CI disabled in #481)" {
+  [ ! -f "${BATS_TEST_DIRNAME}/../.github/workflows/autospec-self-enforce.yml" ]
 }
