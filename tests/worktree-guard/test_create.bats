@@ -87,6 +87,40 @@ teardown() { rm -rf "$TEST_TMP"; }
     [ "$(git -C "$wt" log -1 --pretty=%s)" = "published work" ]
 }
 
+@test "create: refuses to reuse the primary checkout even when clean + same branch (exit 4)" {
+    # Adversarial (peer-review): `create --branch main --path <primary>` must NOT
+    # pass just because the primary is clean and on main — `assert` rejects that
+    # same dir with exit 3, so reuse here would bypass the guard's core property.
+    run bash -c "cd '$PRIMARY' && bash '$GUARD' create --branch main --path '$PRIMARY'"
+    [ "$status" -eq 4 ]
+    [[ "$output" == *worktree_dirty_reuse_refused* ]]
+}
+
+@test "create: adopt fails (non-zero) when the branch is already checked out elsewhere" {
+    # Adversarial (peer-review): adopt must not silently leave a detached HEAD.
+    # Publish a branch, adopt it into one worktree, then try to adopt the same
+    # branch into a second worktree — git refuses a second checkout of B, and
+    # the script must surface that rather than swallow it.
+    git -C "$PRIMARY" checkout -q -b feat/dup
+    echo work >> "$PRIMARY/seed.txt"
+    git -C "$PRIMARY" commit -q -am "dup work"
+    git -C "$PRIMARY" push -q -u origin feat/dup
+    git -C "$PRIMARY" checkout -q main
+
+    wt1="$TEST_TMP/wt-dup-1"
+    bash -c "cd '$PRIMARY' && bash '$GUARD' create --branch feat/dup --adopt --path '$wt1'"
+    [ "$(git -C "$wt1" rev-parse --abbrev-ref HEAD)" = "feat/dup" ]
+
+    wt2="$TEST_TMP/wt-dup-2"
+    run bash -c "cd '$PRIMARY' && bash '$GUARD' create --branch feat/dup --adopt --path '$wt2'"
+    [ "$status" -ne 0 ]
+    # If a worktree dir was left behind, it must not be a detached HEAD pretending success.
+    if [ -d "$wt2" ]; then
+        [ "$(git -C "$wt2" rev-parse --abbrev-ref HEAD 2>/dev/null)" != "HEAD" ] || \
+            [[ "$output" == *adopt_checkout_failed* ]]
+    fi
+}
+
 @test "create: missing --branch is a usage error (exit 2)" {
     run bash -c "cd '$PRIMARY' && bash '$GUARD' create --path '$TEST_TMP/wt-x'"
     [ "$status" -eq 2 ]

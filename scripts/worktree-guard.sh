@@ -205,17 +205,35 @@ cmd_create() {
         fi
     fi
 
-    # Existing path: reuse ONLY if clean AND on the same branch; else refuse.
+    # Existing path: reuse ONLY if clean AND on the same branch AND it is a
+    # linked worktree (NOT the primary checkout). Reusing the primary checkout
+    # would let `create --branch main --path <primary>` pass while `assert` (the
+    # very next preflight) rejects the same dir with exit 3 — the guard's core
+    # safety property bypassed. So refuse primary-checkout reuse too.
     if [ -e "$path" ]; then
-        local existing_branch existing_porcelain
+        local existing_branch existing_porcelain p_git_dir p_common_dir
         existing_branch="$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
         existing_porcelain="$(git -C "$path" status --porcelain 2>/dev/null || true)"
-        if [ "$existing_branch" = "$branch" ] && [ -z "$existing_porcelain" ]; then
-            # Clean, same branch -> idempotent reuse.
+        p_git_dir="$(git -C "$path" rev-parse --git-dir 2>/dev/null || true)"
+        p_common_dir="$(git -C "$path" rev-parse --git-common-dir 2>/dev/null || true)"
+        # Normalise to absolute paths (git may report them relative to $path).
+        if [ -n "$p_git_dir" ]; then
+            p_git_dir="$(cd "$path" && cd "$p_git_dir" 2>/dev/null && pwd -P)" || p_git_dir=""
+        fi
+        if [ -n "$p_common_dir" ]; then
+            p_common_dir="$(cd "$path" && cd "$p_common_dir" 2>/dev/null && pwd -P)" || p_common_dir=""
+        fi
+        local is_linked_worktree=0
+        if [ -n "$p_git_dir" ] && [ "$p_git_dir" != "$p_common_dir" ]; then
+            is_linked_worktree=1
+        fi
+        if [ "$existing_branch" = "$branch" ] && [ -z "$existing_porcelain" ] \
+                && [ "$is_linked_worktree" -eq 1 ]; then
+            # Clean, same branch, genuine linked worktree -> idempotent reuse.
             exit 0
         fi
-        emit "code_health:worktree_dirty_reuse_refused path=$path branch=$existing_branch want=$branch"
-        die 4 "create: refusing to reuse worktree at $path (dirty or wrong branch); never silent-reuse"
+        emit "code_health:worktree_dirty_reuse_refused path=$path branch=$existing_branch want=$branch linked=$is_linked_worktree"
+        die 4 "create: refusing to reuse path $path (dirty, wrong branch, or primary checkout); never silent-reuse"
     fi
 
     # Adopt an existing remote branch, or create a fresh branch off the base.
@@ -225,7 +243,13 @@ cmd_create() {
             die 2 "create: git worktree add (adopt) failed for origin/$branch at $path"
         fi
         # Land on a local tracking branch named B, not detached at origin/B.
-        git -C "$path" checkout -q -B "$branch" "origin/$branch" >/dev/null 2>&1 || true
+        # A failure here (e.g. B already checked out in another worktree) leaves
+        # a detached HEAD that violates the "local tracking branch named B"
+        # contract — surface it rather than swallowing.
+        if ! git -C "$path" checkout -q -B "$branch" "origin/$branch" >/dev/null 2>&1; then
+            emit "code_health:worktree_adopt_checkout_failed"
+            die 2 "create: could not check out branch $branch in adopted worktree $path (already checked out elsewhere?)"
+        fi
     else
         if ! git worktree add -b "$branch" "$path" "$base" >/dev/null 2>&1; then
             emit "code_health:worktree_create_failed"
