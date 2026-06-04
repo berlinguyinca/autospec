@@ -1014,13 +1014,27 @@ check_autospec_run_priority_sort_lockstep() {
         || fail "priority sort lockstep (codex)"
 }
 
+# Tier right-sizing (issue #941, spec §D4): the second Tier-A regression
+# meta-review dispatch is FOLDED into the single fused reviewer brief. The
+# run-trio variants must (a) NOT carry a second `TIER_A` meta-review dispatch,
+# (b) keep the regression gap-check + reviewer-lessons write-path inside the
+# single reviewer brief, and (c) document the `AUTOSPEC_REVIEWER_TIER` hatch.
 check_autospec_run_regression_review_lockstep() {
-    info "autospec-run regression review lockstep"
-    for variant in "skills/autospec-run/opencode/agent.md" "skills/autospec-run/codex/prompt.md"; do
-        grep -qE "Regression (review escalation|meta-review)" "$variant" \
-            || fail "regression review block missing in $variant"
-        grep -qE "Tier A \(spec work\)|TIER_A" "$variant" \
-            || fail "Tier A annotation missing in $variant"
+    info "autospec-run regression review folded (D4) lockstep"
+    for variant in \
+        "skills/autospec-run/SKILL.md" \
+        "skills/autospec-run/opencode/agent.md" \
+        "skills/autospec-run/codex/prompt.md"; do
+        ! grep -q 'dispatch a second `TIER_A` subagent' "$variant" \
+            || fail "second TIER_A regression meta-review dispatch still present in $variant (should be folded into reviewer brief)"
+        grep -q 'reviewer-lessons.md' "$variant" \
+            || fail "reviewer-lessons write-path missing in $variant"
+        grep -qi 'would the reviewer have caught the original gap' "$variant" \
+            || fail "folded regression gap-check missing in $variant"
+        grep -q 'AUTOSPEC_REVIEWER_TIER' "$variant" \
+            || fail "AUTOSPEC_REVIEWER_TIER env hatch missing in $variant"
+        grep -q '`TIER_B` for ALL issues' "$variant" \
+            || fail "reviewer Tier-B-for-all-issues directive missing in $variant"
     done
 }
 

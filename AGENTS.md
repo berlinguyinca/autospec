@@ -15,9 +15,11 @@ When the workflow dispatches a subagent, choose tier based on the **type of work
 
 ### Tier A — Specification work (top model + extended/maximum thinking)
 
-Used by: research subagents (Phase 1), decomposition subagents (Phase 3 — turning a spec into linked GitHub issues), Phase 3.5 review-and-label subagents (turning issue bodies into model-fit metadata that drives all downstream filtering).
+Used by: research subagents (Phase 1), decomposition subagents (Phase 3 — turning a spec into linked GitHub issues).
 
 Reasoning: spec/issue quality is the bottleneck. A cheap model here costs you N cheap-implementer cycles correcting it downstream. The orchestrator/user is also typically running on a top model in Phase 2 (design + spec writing); subagents in spec-adjacent phases match that quality.
+
+**Tier right-sizing for classification (Phase 3.5 review-and-label + `/autospec-classify`):** classification is now **deterministic-first**. The deterministic rubric (file counts under `## Files to read first`, verb keywords — see `scripts/classify-model-fit.sh`, tracker #421) runs FIRST and gates any LLM call. Only issues the rubric scores as ambiguous (confidence below `LLM_ESCALATION_THRESHOLD`) get an LLM call, and that call runs at **Tier B**, not Tier A. Sibling normalization stays deterministic. This keeps the common case zero-LLM-cost while preserving a cheap LLM tie-breaker for genuinely ambiguous issues.
 
 | Harness     | Preferred model | Thinking budget | Fallback (next-tier UP on unavailability) |
 |-------------|-----------------|-----------------|--------------------------------------------|
@@ -27,7 +29,7 @@ Reasoning: spec/issue quality is the bottleneck. A cheap model here costs you N 
 
 ### Tier B — Implementation work (cheaper model + medium thinking)
 
-Used by: implementer subagents inside Phase 4's `process(ISSUE)` (the one writing code on `feat/*` branches), LGTM-review subagents (the inner-loop self-review of a PR).
+Used by: implementer subagents inside Phase 4's `process(ISSUE)` (the one writing code on `feat/*` branches); the fused guardian + LGTM reviewer subagent (the inner-loop self-review of a PR — Tier B for ALL issues including `regression`/`priority:high`, see the env hatch below); and the Tier-B LLM tie-breaker for ambiguous classification (above).
 
 Reasoning: implementation follows a well-specified contract from Tier A. The work is mechanical relative to the spec. We run this loop many times per spec, so cheaper-tier amortizes well.
 
@@ -81,11 +83,12 @@ top GPT" at call time so the skill survives model-family churn.
 | 1 — Investigate (research) | autospec, autospec-define | A |
 | 2 — Brainstorm + design | autospec, autospec-define | (orchestrator only — no subagent dispatch; user invokes skill on top model) |
 | 3 — Decompose into issues | autospec, autospec-define | A |
-| 3.5 — Review and label | autospec, autospec-define | A |
-| classify (per-issue review) | autospec-classify | A |
+| 3.5 — Review and label | autospec, autospec-define | deterministic-first; **B** on ambiguity |
+| classify (per-issue review) | autospec-classify | deterministic-first; **B** on ambiguity |
 | 4 — Implementer (process(ISSUE) in worktree) | autospec, autospec-run | B |
-| 4 — LGTM self-review | autospec, autospec-run | B |
-| 4 — Implementation guardian | autospec, autospec-run | A |
+| 4 — Fused guardian + LGTM reviewer | autospec, autospec-run | **B** for ALL issues (incl. `regression`/`priority:high`); `AUTOSPEC_REVIEWER_TIER=opus` → A |
+
+**`AUTOSPEC_REVIEWER_TIER` (reviewer escape hatch):** the fused guardian + LGTM reviewer runs at **Tier B for every issue**, including `regression` and `priority:high`. The former second Tier-A regression meta-review pass is folded into the single reviewer brief (the reviewer self-asks "would the reviewer have caught the original gap?" and writes any missing checks to `reports/autospec-review/reviewer-lessons.md`). To restore Tier A for the reviewer, set `AUTOSPEC_REVIEWER_TIER=opus`; unset (or any other value) keeps Tier B (sonnet). This is the one-variable revert if a high-stakes run shows the cheaper reviewer missing real bugs.
 
 ## Auto-merge authority for auto-implement PRs
 
