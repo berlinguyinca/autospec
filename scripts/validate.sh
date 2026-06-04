@@ -934,7 +934,7 @@ check_team_personality_phase4_and_docs_contract() {
         || fail "scripts/gen-issue-skeleton.sh missing review_counter_team input"
     grep -q -- '--issue-body' scripts/gen-reviewer-prompt.sh \
         || fail "scripts/gen-reviewer-prompt.sh missing --issue-body support"
-    grep -q -- '--issue-body "$_body_file"' skills/autospec-run/SKILL.md \
+    grep -q -- '--issue-body "/tmp/issue-<ISSUE>-body.md"' skills/autospec-run/SKILL.md \
         || fail "skills/autospec-run/SKILL.md reviewer prompt does not pass issue body"
     grep -q 'team_personality' docs/API_REFERENCE.md \
         || fail "docs/API_REFERENCE.md missing gen-issue-skeleton team_personality schema"
