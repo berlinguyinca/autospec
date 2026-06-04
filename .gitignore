@@ -15,6 +15,8 @@ dist/homebrew/*
 !dist/homebrew/autospec.rb
 build/
 *.log
+# Allow committed *.log test fixtures (e.g. gen-pr-report loop-log golden input)
+!tests/fixtures/**/*.log
 *.tmp
 *.bak
 artifacts/
