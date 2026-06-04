@@ -943,6 +943,37 @@ check_phase4_cost_epic_parity_lockstep() {
     info "phase4 cost-epic parity: both trios carry batch=1 + fresh-subagent prose + pinned token-report"
 }
 
+# Docs-drift-gate regeneration conditional parity (issue #955): the D2b gate
+# conditional wrapping the regeneration path must be present in BOTH run trios
+# (autospec + autospec-run, 6 files total). Detection, labels, and the skip log
+# line must be present. Fails CI if either trio drifts back to unconditional regen.
+check_docs_drift_gate_regen_conditional_parity() {
+    info "docs-drift-gate regen conditional parity (D2b): autospec + autospec-run trios (6 files)"
+    for s in autospec autospec-run; do
+        for f in "skills/$s/SKILL.md" "skills/$s/codex/prompt.md" "skills/$s/opencode/agent.md"; do
+            [ -f "$f" ] || fail "$f: required file missing"
+            # Gate conditional: _REGEN resolver must be present.
+            grep -q '_REGEN' "$f" \
+                || fail "$f: missing _REGEN gate variable (D2b auto_regenerate conditional)"
+            # Resolver function must be referenced.
+            grep -q 'resolveAutoRegenerate' "$f" \
+                || fail "$f: missing resolveAutoRegenerate import in gate block (D2b)"
+            # OFF-path log line must be present.
+            grep -qF 'docs: regeneration skipped (auto_regenerate=false)' "$f" \
+                || fail "$f: missing OFF-path log 'docs: regeneration skipped (auto_regenerate=false)' (D2b)"
+            # docs-drift-gate markers must still bracket the section.
+            grep -qF '<!-- docs-drift-gate:begin -->' "$f" \
+                || fail "$f: missing docs-drift-gate:begin marker (D2b)"
+            grep -qF '<!-- docs-drift-gate:end -->' "$f" \
+                || fail "$f: missing docs-drift-gate:end marker (D2b)"
+            # Regeneration path (orchestrator) must still be present inside the gate.
+            grep -q 'doc-orchestrator.mjs' "$f" \
+                || fail "$f: missing doc-orchestrator.mjs inside gate (D2b regenerate path must be preserved)"
+        done
+    done
+    info "docs-drift-gate regen conditional parity: all 6 trio files carry D2b gate"
+}
+
 # Team-personality contract: autospec should infer the right solving team from
 # the request, repository evidence, memories, and prior specs. If confidence is
 # low, it must ask explicitly with five concrete starter combinations, carry
@@ -2026,6 +2057,7 @@ main() {
     check_phase4_adaptive_retry
     check_phase4_full_test_suite_gate
     check_phase4_cost_epic_parity_lockstep
+    check_docs_drift_gate_regen_conditional_parity
     check_autospec_sweep_config_contract
     check_autospec_fleet_scripts
     check_fleet_gui_subcommand_lockstep

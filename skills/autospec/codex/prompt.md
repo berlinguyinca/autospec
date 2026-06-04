@@ -901,6 +901,79 @@ Pass the following prompt verbatim to each background subagent:
 >    2. Else run every command listed under the issue's **Operator/full verification** section.
 >    3. Else run the repo-standard full suite: `bash scripts/validate.sh` when present; otherwise use the ecosystem default (`npm test`, `pytest`, `go test ./...`, `cargo test`, `mvn test`, etc.).
 >    If the full suite fails, fix the failure, recommit, rerun the full suite, and repeat. Do NOT dispatch LGTM review while the full suite is failing. Do NOT run `gh pr merge` while the full suite is failing. Record the exact full-suite command and passing output summary in the PR comment or final report.
+> 3b. <!-- docs-drift-gate:begin -->
+> ## Docs drift gate
+> Run after full test suite gate, before LGTM review. Skip if issue body contains a line matching `^docs:\s*skip\s*$` (case-insensitive). On `drift`/`missing_scope`/`example_stale` the classifier emits the pinned `regenerate` action carrying the affected scopes; the gate self-heals by invoking `/autospec-doc` (via `doc-orchestrator.mjs`) scoped to ONLY those scopes, re-verifying the regenerated pages with `verify-examples.mjs`, and committing `docs: regenerate <scopes>` onto the SAME PR branch. **Doc generation NEVER blocks the code PR** — generation/verification failure only warns, applies the `docs:failed` label, and comments; the code review loop continues. Only the regenerate commit's own example verification gates the regenerated docs (failing pages are NOT committed):
+>    ```bash
+>    if ! grep -qiE '^docs:[[:space:]]*skip[[:space:]]*$' "/tmp/issue-<ISSUE>-body.md" 2>/dev/null; then
+>      SCRIPTS_DIR="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+>      DOC_SCRIPTS_DIR="${AUTOSPEC_DOC_SCRIPTS_DIR:-$HOME/.autospec/skills/autospec-doc/scripts}"
+>      DRIFT_JSON="$(bash "$SCRIPTS_DIR/check-doc-drift.sh" --pr "<PR>" 2>/tmp/drift-<PR>.err)"; drift_exit=$?
+>      if [ "$drift_exit" = "0" ]; then
+>        : # no drift — continue to LGTM
+>      else
+>        # drift_exit 1 (drift/example_stale) or 2 (missing_scope): classify, then
+>        # self-heal in-PR when the classifier emits the `regenerate` action.
+>        VERDICT_JSON="$(printf '%s' "$DRIFT_JSON" | node "$SCRIPTS_DIR/loop-classifier-docs-extension.mjs" --drift-json - --issue "<ISSUE>" --pr "<PR>" 2>/dev/null || true)"
+>        ACTION="$(printf '%s' "$VERDICT_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write((JSON.parse(s).action)||"")}catch{}})' 2>/dev/null || true)"
+>        if [ "$ACTION" = "regenerate" ]; then
+>          # Scopes the classifier flagged — always extract for labelling/reporting.
+>          mapfile -t SCOPES < <(printf '%s' "$VERDICT_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{for(const x of (JSON.parse(s).scopes||[]))console.log(x)}catch{}})' 2>/dev/null || true)
+>          gh issue edit <ISSUE> --add-label "docs:drift" 2>/dev/null || true
+>          # Resolve the auto_regenerate switch (D2 gate conditional).
+>          # Reads config from .autospec/autospec.yml, issue body from single-fetch file, and
+>          # AUTOSPEC_WITH_DOCS env. Precedence: docs:skip (already handled above) >
+>          # docs:generate > config auto_regenerate=true > AUTOSPEC_WITH_DOCS=1 > default-off.
+>          _REGEN=$(node --input-type=module <<'__REGEN_EOF__' 2>/dev/null || echo "0"
+>          import { resolveAutoRegenerate, loadConfig } from '${AUTOSPEC_DOC_SCRIPTS_DIR:-$HOME/.autospec/skills/autospec-doc/scripts}/doc-config.mjs';
+>          import fs from 'node:fs';
+>          const cfg = (() => { try { return loadConfig('.autospec/autospec.yml'); } catch { return {}; } })();
+>          const body = (() => { try { return fs.readFileSync('/tmp/issue-<ISSUE>-body.md','utf8'); } catch { return ''; } })();
+>          const flag = process.env.AUTOSPEC_WITH_DOCS === '1';
+>          const { generate } = resolveAutoRegenerate({ config: cfg, issueBody: body, withDocsFlag: flag });
+>          process.stdout.write(generate ? '1' : '0');
+>          __REGEN_EOF__
+>          )
+>          if [ "${_REGEN:-0}" = "1" ]; then
+>            # auto_regenerate is ON — run the regenerate self-heal path.
+>            doc_ok=1
+>            if node "$DOC_SCRIPTS_DIR/doc-orchestrator.mjs" 2>/tmp/docgen-<PR>.err; then
+>              # Re-verify regenerated pages; only verified pages are committed.
+>              if [ "${#SCOPES[@]}" -gt 0 ] && node "$DOC_SCRIPTS_DIR/verify-examples.mjs" "${SCOPES[@]}" 2>/tmp/docverify-<PR>.err; then
+>                if ! git diff --quiet -- "${SCOPES[@]}" 2>/dev/null; then
+>                  git add -- "${SCOPES[@]}"
+>                  git commit -m "docs: regenerate ${SCOPES[*]}" || doc_ok=0
+>                  git push || doc_ok=0
+>                fi
+>              else
+>                doc_ok=0  # example verification failed — do NOT commit regenerated docs
+>              fi
+>            else
+>              doc_ok=0    # generation failed
+>            fi
+>            if [ "$doc_ok" = "0" ]; then
+>              gh issue edit <ISSUE> --add-label "docs:failed" 2>/dev/null || true
+>              gh pr comment <PR> --body "$(printf 'docs: regenerate self-heal failed (generation or example verification) — code PR NOT blocked. Scopes: %s' "${SCOPES[*]:-<none>}")" 2>/dev/null || true
+>            else
+>              gh pr comment <PR> --body "$(printf 'docs: regenerated %s in-PR (examples re-verified).' "${SCOPES[*]:-<none>}")" 2>/dev/null || true
+>            fi
+>          else
+>            # auto_regenerate is OFF — log and continue; detection/labels already applied.
+>            echo "docs: regeneration skipped (auto_regenerate=false)"
+>          fi
+>        else
+>          # No regenerate verdict — surface drift for operator review; do not block.
+>          gh pr comment <PR> --body "$(printf 'docs drift detected — no self-heal action emitted:\n\n```json\n%s\n```' "$DRIFT_JSON")" 2>/dev/null || true
+>          gh issue edit <ISSUE> --add-label "docs:drift" 2>/dev/null || true
+>          if [ "$drift_exit" = "2" ]; then gh issue edit <ISSUE> --add-label "docs:missing-scope" 2>/dev/null || true; fi
+>        fi
+>      fi
+>    else
+>      gh pr comment <PR> --body "docs: drift check skipped (docs:skip in issue body)" 2>/dev/null || true
+>      gh issue edit <ISSUE> --add-label "docs:skipped" 2>/dev/null || true
+>    fi
+>    ```
+>    <!-- docs-drift-gate:end -->
 > 4. Conventional commits (feat:/fix:/test:/docs:/refactor:). NEVER bypass hooks. NEVER amend.
 > 5. Push: git push -u origin <BRANCH>
 >    ```bash
