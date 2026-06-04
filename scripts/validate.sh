@@ -206,9 +206,14 @@ check_self_update() {
     skill_dir="$1"
     name="$(basename "$skill_dir")"
     info "self-update: $name"
+    # Transition-safe: accept EITHER the canonical '## Self-update mode' heading
+    # OR its <!-- autospec-block:startup-self-update --> marker (D3 sweep form).
+    # A file with NEITHER form fails the gate (fail closed).
     for trio in SKILL.md opencode/agent.md codex/prompt.md; do
-        grep -q '^## Self-update mode' "$skill_dir/$trio" \
-            || fail "$name: $trio missing '## Self-update mode' section"
+        if ! grep -q '^## Self-update mode' "$skill_dir/$trio" \
+            && ! grep -q 'autospec-block:startup-self-update' "$skill_dir/$trio"; then
+            fail "$name: $trio missing '## Self-update mode' section or autospec-block:startup-self-update marker"
+        fi
     done
     grep -q -- '--update' "$skill_dir/install.sh" \
         || fail "$name: install.sh missing --update flag handling"
@@ -218,6 +223,9 @@ check_self_update() {
 # multi-harness skill must carry a ## Startup self-update section whose bash
 # body is byte-identical to the canonical block in skills/autospec/SKILL.md
 # (modulo the SKILL_NAME= first line).
+# Transition-safe (D3): a file carrying <!-- autospec-block:startup-self-update -->
+# instead of the full section body is accepted as equivalent; files with NEITHER
+# form still fail (fail closed).
 check_startup_preflight() {
     extract_block() {
         awk '/^## Startup self-update/{f=1} f && /^```bash/{g=1; next} g && /^```/{g=0; f=0; next} g{print}' "$1" \
@@ -235,6 +243,11 @@ check_startup_preflight() {
     fi
     for s in autospec autospec-release autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa autospec-resume autospec-doc; do
         for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
+            # Transition-safe: if the file carries the marker, skip the byte-diff check
+            # (the D3 sweep will expand it; expanded bytes will match the golden).
+            if grep -q 'autospec-block:startup-self-update' "$f" 2>/dev/null; then
+                continue
+            fi
             body=$(extract_block "$f")
             [ -n "$body" ] || fail "$f missing ## Startup self-update section"
             if ! diff <(printf '%s\n' "$canonical") <(printf '%s\n' "$body") >/dev/null 2>&1; then
@@ -1722,6 +1735,29 @@ check_lint_heredoc_handling() {
     fi
 }
 
+# Quality-differential harness (issue #1023, spec §5 D4): the boilerplate guard
+# (scripts/quality-differential.sh) plus its synthetic self-test negative pair
+# and the >=3 refine-lens fixtures whose deterministic path is the documented
+# KEEP-LLM failure.
+check_quality_differential() {
+    info "quality-differential harness: scripts/quality-differential.sh + tests/quality-differential.bats"
+    [ -f scripts/quality-differential.sh ] \
+        || fail "scripts/quality-differential.sh: missing (issue #1023)"
+    [ -f tests/quality-differential.bats ] \
+        || fail "tests/quality-differential.bats: bats coverage missing (issue #1023)"
+    bash -n scripts/quality-differential.sh \
+        || fail "scripts/quality-differential.sh: bash -n failed"
+    local refine_count
+    refine_count="$(ls tests/fixtures/quality-diff/refine-lenses/*/assert.sh 2>/dev/null | wc -l | tr -d ' ')"
+    [ "${refine_count:-0}" -ge 3 ] \
+        || fail "tests/fixtures/quality-diff/refine-lenses: need >=3 fixtures with assert.sh (got ${refine_count:-0})"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/quality-differential.bats"
+        bats tests/quality-differential.bats >/tmp/validate-quality-diff.log 2>&1 \
+            || { cat /tmp/validate-quality-diff.log >&2; fail "tests/quality-differential.bats: failed"; }
+    fi
+}
+
 # Autonomous-mode contract (issue #662): the autospec + autospec-listen +
 # autospec-define + autospec-run trios each carry an "## Autonomous mode"
 # section, the autonomy-gate script is installed, and the bats coverage exists.
@@ -2170,6 +2206,49 @@ check_token_baseline_fresh() {
     fi
 }
 
+# Golden-snapshot gate (D2, issue #1019): for every skill with a stored golden
+# in tests/fixtures/skill-goldens/<skill>.SKILL.md.sha256, expand the current
+# SKILL.md through scripts/expand-skill-blocks.sh and compare sha256 to the
+# golden. A mismatch means the bytes changed without an approved golden update.
+# Missing golden for an existing SKILL.md -> FAIL (fail closed).
+# Missing expander script -> FAIL (fail closed).
+# No RETURN traps; if/then/fi for one-sided conditionals (repo bash rules).
+check_block_expansion() {
+    info "block-expansion golden gate: tests/fixtures/skill-goldens/"
+    local expander="$REPO_ROOT/scripts/expand-skill-blocks.sh"
+    if [ ! -f "$expander" ]; then
+        fail "check_block_expansion: scripts/expand-skill-blocks.sh missing (fail closed)"
+    fi
+    local golden_dir="$REPO_ROOT/tests/fixtures/skill-goldens"
+    local failed=""
+    for skill_dir in skills/*/; do
+        [ -d "$skill_dir" ] || continue
+        local skill
+        skill="$(basename "$skill_dir")"
+        local skill_file="$skill_dir/SKILL.md"
+        if [ ! -f "$skill_file" ]; then
+            continue
+        fi
+        local golden="$golden_dir/${skill}.SKILL.md.sha256"
+        if [ ! -f "$golden" ]; then
+            fail "check_block_expansion: no golden for $skill (tests/fixtures/skill-goldens/${skill}.SKILL.md.sha256 missing — fail closed)"
+        fi
+        local expected
+        expected="$(cat "$golden" | tr -d '[:space:]')"
+        local got
+        got="$(bash "$expander" "$skill_file" | shasum -a 256 | cut -d' ' -f1)"
+        if [ "$got" != "$expected" ]; then
+            printf 'validate: FAIL — check_block_expansion: %s expanded sha256 mismatch (got %s, want %s)\n' \
+                "$skill" "$got" "$expected" >&2
+            failed="${failed} $skill"
+        fi
+    done
+    if [ -n "$failed" ]; then
+        fail "check_block_expansion: sha256 mismatch for skills:$failed"
+    fi
+    info "block-expansion golden gate: all skills OK"
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -2215,6 +2294,7 @@ main() {
     check_lint_implementation_helpers
     check_implementer_contract
     check_lint_heredoc_handling
+    check_quality_differential
     check_usage_limit_helper
     check_supersession_contract
     check_phase4_guardian_block_lockstep
@@ -2277,6 +2357,7 @@ main() {
     check_agents_md_git_hygiene
     check_define_spec_worktree_routing
     check_token_baseline_fresh
+    check_block_expansion
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.

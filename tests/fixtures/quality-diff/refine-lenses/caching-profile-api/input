@@ -1,0 +1,1 @@
+Add a caching layer to the user profile API endpoint to reduce database load on repeated reads.

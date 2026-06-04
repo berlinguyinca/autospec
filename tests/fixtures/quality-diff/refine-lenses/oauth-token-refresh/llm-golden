@@ -1,0 +1,7 @@
+Add silent OAuth2 token refresh to the mobile authentication module so an
+expired access token is renewed from the refresh token without interrupting the
+user. Detect expiry from the token expiry claim, exchange the refresh token for
+a new access token, retry the original request once, and force re-authentication
+only when the refresh token itself is rejected. Acceptance: an expired session
+renews transparently; a revoked refresh token surfaces a re-login prompt; a
+single in-flight refresh is shared across concurrent requests.

@@ -1,0 +1,8 @@
+Add a streaming CSV export to the inventory dashboard that handles large
+datasets without exhausting memory. Page the inventory query and write rows to
+the response stream incrementally rather than buffering the full result set,
+emit a Content-Disposition attachment header, and flush periodically so the
+download starts promptly. Acceptance: exporting a multi-hundred-thousand-row
+inventory completes within a bounded memory envelope; the streamed file opens
+cleanly in a spreadsheet; a query error mid-stream is surfaced without producing
+a truncated file that looks complete.
