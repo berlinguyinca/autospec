@@ -287,3 +287,98 @@ EOF
 
     rm -rf "$dest_dir"
 }
+
+# ─── test 7: REAL trio install into temp HOME — zero markers in ALL THREE ─────
+# (TOKR1-002, issue #1035) Run the real install.sh against a real markered skill
+# for claude + codex + opencode, then prove every installed copy
+# (claude SKILL.md, codex skills/SKILL.md, codex prompts/<skill>.md, opencode
+# agent/<skill>.md) has zero autospec-block markers. This is the byte-provable
+# install gate; before the fix, codex prompts/ and opencode agent/ shipped the
+# literal marker unexpanded.
+
+@test "real install: trio install of a markered skill leaves zero markers in claude/codex/opencode copies" {
+    # Pick a real markered skill from the repo (startup-self-update marker).
+    local skill="autospec-classify"
+    [ -f "$REPO_ROOT/skills/$skill/SKILL.md" ] || skip "fixture skill missing"
+    grep -q '<!-- autospec-block:' "$REPO_ROOT/skills/$skill/codex/prompt.md" \
+        || skip "$skill codex/prompt.md is not markered"
+    grep -q '<!-- autospec-block:' "$REPO_ROOT/skills/$skill/opencode/agent.md" \
+        || skip "$skill opencode/agent.md is not markered"
+
+    local cdir="$HOME/.claude"
+    local xdir="$HOME/.codex"
+    local odir="$HOME/.config/opencode"
+
+    run env \
+        CLAUDE_CONFIG_DIR="$cdir" \
+        CODEX_HOME="$xdir" \
+        OPENCODE_CONFIG_DIR="$odir" \
+        AUTOSPEC_SCRIPTS_DIR="$HOME/.autospec/scripts" \
+        AUTOSPEC_SCHEMAS_DIR="$HOME/.autospec/schemas" \
+        bash "$INSTALL_SH" --skill "$skill" --harness all --update
+    [ "$status" -eq 0 ]
+
+    # All four installed copies must exist...
+    local claude_copy="$cdir/skills/$skill/SKILL.md"
+    local codex_skill_copy="$xdir/skills/$skill/SKILL.md"
+    local codex_prompt_copy="$xdir/prompts/$skill.md"
+    local opencode_copy="$odir/agent/$skill.md"
+    [ -f "$claude_copy" ]
+    [ -f "$codex_skill_copy" ]
+    [ -f "$codex_prompt_copy" ]
+    [ -f "$opencode_copy" ]
+
+    # ...and NONE may contain an unexpanded autospec-block marker.
+    local copy
+    for copy in "$claude_copy" "$codex_skill_copy" "$codex_prompt_copy" "$opencode_copy"; do
+        run grep -c '<!-- autospec-block:' "$copy"
+        # grep -c exits non-zero (1) when no match; output "0" when zero matches.
+        [ "$status" -ne 0 ] || [ "$output" = "0" ]
+    done
+
+    # The expanded copies must carry real template content (proves expansion,
+    # not just marker deletion): the startup block calls bootstrap.sh.
+    for copy in "$codex_prompt_copy" "$opencode_copy"; do
+        run grep -c 'bootstrap.sh' "$copy"
+        [ "$status" -eq 0 ]
+        [ "$output" -gt 0 ]
+    done
+}
+
+# ─── test 8: NEGATIVE — codex/opencode member expansion failure aborts loudly ─
+# (TOKR1-002 negative pair) If a markered codex/opencode member fails to expand,
+# expand_skill_file must fail closed: non-zero exit, error message, no dest file.
+
+@test "negative: codex member expansion failure fails closed (no dest, loud error)" {
+    local skill_dir="$FIXTURE_SKILL_DIR"
+    local dest_dir
+    dest_dir="$(mktemp -d)"
+
+    # A codex/prompt.md carrying an UNKNOWN block — expander exits non-zero.
+    cat > "$skill_dir/codex/prompt.md" <<'EOF'
+# Broken codex member
+
+<!-- autospec-block:no-such-codex-block-xyz -->
+EOF
+
+    local helper_script
+    helper_script="$(mktemp /tmp/expand_helper_codex.XXXXXX.sh)"
+    {
+        printf '#!/usr/bin/env bash\nset -eu\n'
+        printf 'REPO_ROOT="%s"\n' "$REPO_ROOT"
+        printf 'err()  { printf "error: %%s\\n" "$*" >&2; }\n'
+        printf 'info() { printf "%%s\\n" "$*"; }\n'
+        awk '/^expand_skill_file\(\)/{f=1} f{print} f && /^\}$/{exit}' "$INSTALL_SH"
+        printf '\nexpand_skill_file "%s/codex/prompt.md" "%s/prompt.md"\n' "$skill_dir" "$dest_dir"
+    } > "$helper_script"
+    chmod +x "$helper_script"
+
+    run bash "$helper_script"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "expander" ]] || [[ "$output" =~ "expand" ]] || [[ "$output" =~ "error" ]]
+    # Fail-closed: no dest file left behind.
+    [ ! -f "$dest_dir/prompt.md" ]
+
+    rm -f "$helper_script"
+    rm -rf "$dest_dir"
+}

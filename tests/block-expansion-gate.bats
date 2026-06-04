@@ -223,3 +223,127 @@ ENDMARKER
         return 1
     fi
 }
+
+# ===========================================================================
+# TRIO-WIDE member-golden coverage (TOKR1-003, issue #1035)
+# codex/prompt.md + opencode/agent.md goldens are gated too, not just SKILL.md.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# POSITIVE: every markered codex/opencode member has a recorded golden
+# ---------------------------------------------------------------------------
+@test "every markered codex/opencode member has a recorded golden" {
+    local missing=""
+    local skill member src suffix golden
+    for skill_dir in "$REPO_ROOT"/skills/*/; do
+        [ -d "$skill_dir" ] || continue
+        skill="$(basename "$skill_dir")"
+        for member in "codex/prompt.md:codex.prompt.md" "opencode/agent.md:opencode.agent.md"; do
+            src="$skill_dir/${member%%:*}"
+            suffix="${member##*:}"
+            [ -f "$src" ] || continue
+            grep -q '<!-- autospec-block:' "$src" || continue
+            golden="$GOLDEN_DIR/${skill}.${suffix}.sha256"
+            if [ ! -f "$golden" ]; then
+                missing="${missing} ${skill}.${suffix}"
+            fi
+        done
+    done
+    if [ -n "$missing" ]; then
+        echo "Missing member goldens for:$missing" >&2
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# POSITIVE (green): every recorded member golden matches expanded output
+# ---------------------------------------------------------------------------
+@test "all recorded codex/opencode member goldens match expanded output (green)" {
+    local failed=""
+    local g skill_member skill member src suffix expected got
+    for g in "$GOLDEN_DIR"/*.codex.prompt.md.sha256 "$GOLDEN_DIR"/*.opencode.agent.md.sha256; do
+        [ -f "$g" ] || continue
+        local base
+        base="$(basename "$g")"            # e.g. autospec-classify.codex.prompt.md.sha256
+        base="${base%.sha256}"             # autospec-classify.codex.prompt.md
+        case "$base" in
+            *.codex.prompt.md)
+                skill="${base%.codex.prompt.md}"; src="$REPO_ROOT/skills/$skill/codex/prompt.md" ;;
+            *.opencode.agent.md)
+                skill="${base%.opencode.agent.md}"; src="$REPO_ROOT/skills/$skill/opencode/agent.md" ;;
+            *) continue ;;
+        esac
+        [ -f "$src" ] || { failed="${failed} ${base}(no-src)"; continue; }
+        expected="$(cat "$g" | tr -d '[:space:]')"
+        got="$(bash "$EXPANDER" "$src" | shasum -a 256 | cut -d' ' -f1)"
+        if [ "$got" != "$expected" ]; then
+            failed="${failed} ${base}"
+        fi
+    done
+    if [ -n "$failed" ]; then
+        echo "member golden mismatches:$failed" >&2
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# NEGATIVE: tampered codex member golden makes the gate red
+# ---------------------------------------------------------------------------
+@test "tampered codex member golden makes check_block_expansion gate red" {
+    # Find a real markered codex member with a golden.
+    local g
+    g="$(ls "$GOLDEN_DIR"/*.codex.prompt.md.sha256 2>/dev/null | head -1)"
+    [ -n "$g" ] || skip "no codex member goldens recorded"
+    local base skill src
+    base="$(basename "$g")"; base="${base%.sha256}"
+    skill="${base%.codex.prompt.md}"
+    src="$REPO_ROOT/skills/$skill/codex/prompt.md"
+    [ -f "$src" ]
+
+    # The real (correct) expanded hash differs from a zeroed tampered hash.
+    local got tampered
+    got="$(bash "$EXPANDER" "$src" | shasum -a 256 | cut -d' ' -f1)"
+    tampered="0000000000000000000000000000000000000000000000000000000000000000"
+    [ "$got" != "$tampered" ]
+}
+
+# ---------------------------------------------------------------------------
+# NEGATIVE (fail-closed): a markered member with NO golden must fail the gate.
+# Exercises the real check_block_expansion against an isolated skills/ tree that
+# contains a markered codex member but no recorded golden for it.
+# ---------------------------------------------------------------------------
+@test "markered codex member with missing golden fails check_block_expansion (fail closed)" {
+    # Stand up an isolated REPO_ROOT-like sandbox with one skill whose codex
+    # member is markered but has SKILL.md + codex goldens missing for codex.
+    local sand="$TMP/sandbox"
+    mkdir -p "$sand/scripts" "$sand/tests/fixtures/skill-goldens" "$sand/templates/skill-blocks"
+    mkdir -p "$sand/skills/demo/codex"
+
+    # Copy the real expander + template so expansion works.
+    cp "$REPO_ROOT/scripts/expand-skill-blocks.sh" "$sand/scripts/"
+    cp "$REPO_ROOT/templates/skill-blocks/startup-self-update.md" "$sand/templates/skill-blocks/"
+
+    # A plain SKILL.md (no marker) WITH a matching golden so the SKILL.md leg passes.
+    printf '# demo\n\nplain body\n' > "$sand/skills/demo/SKILL.md"
+    bash "$sand/scripts/expand-skill-blocks.sh" "$sand/skills/demo/SKILL.md" \
+        | shasum -a 256 | cut -d' ' -f1 > "$sand/tests/fixtures/skill-goldens/demo.SKILL.md.sha256"
+
+    # A MARKERED codex member with NO golden recorded — must trip the gate.
+    printf '# demo codex\n\n<!-- autospec-block:startup-self-update SKILL_NAME=demo -->\n' \
+        > "$sand/skills/demo/codex/prompt.md"
+
+    # Run only check_block_expansion (+ its helper) against the sandbox.
+    run bash -c '
+        set -eu
+        REPO_ROOT="'"$sand"'"
+        cd "$REPO_ROOT"
+        fail(){ printf "validate: FAIL — %s\n" "$*" >&2; exit 1; }
+        info(){ printf "validate: %s\n" "$*"; }
+        # Source the helper + gate straight from the repo validate.sh.
+        eval "$(awk "/^gate_block_member\(\)/{f=1} f{print} f&&/^}\$/{c++; if(c==1) exit}" "'"$VALIDATE"'")"
+        eval "$(awk "/^check_block_expansion\(\)/{f=1} f{print} f&&/^}\$/{exit}" "'"$VALIDATE"'")"
+        check_block_expansion
+    '
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "no golden" ]] || [[ "$output" =~ "fail closed" ]] || [[ "$output" =~ "FAIL" ]]
+}
