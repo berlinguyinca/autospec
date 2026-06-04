@@ -819,27 +819,29 @@ Pass the following prompt verbatim to each background subagent:
 >   printf '{"issue":"%s","branch":"","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' "$ISSUE" "$(date -u +%s)" "{repo}" > "$HOME/.autospec/process-heartbeats/$ISSUE.json"
 >   # Issue start summary — print before dispatching process(ISSUE) so the operator
 >   # knows exactly what the monitor is about to work on.
+>   # Single body fetch — all later steps consume this file (D5: duplicate-read elimination).
+>   _issue_body_file="/tmp/issue-${ISSUE}-body.md"
+>   gh issue view ISSUE --json body --jq .body 2>/dev/null > "$_issue_body_file" || true
 >   ISSUE_TITLE=$(gh issue view ISSUE --json title --jq .title 2>/dev/null || echo "")
 >   ISSUE_URL=$(gh issue view ISSUE --json url --jq .url 2>/dev/null || echo "")
 >   ISSUE_LABELS=$(gh issue view ISSUE --json labels --jq -r '[.labels[].name] | join(", ")' 2>/dev/null || echo "")
->   ISSUE_BODY=$(gh issue view ISSUE --json body --jq .body 2>/dev/null || echo "")
->   ISSUE_GOAL=$(printf '%s\n' "$ISSUE_BODY" | awk '
+>   ISSUE_GOAL=$(awk '
 >     BEGIN{in_goal=0}
 >     /^## Goal[[:space:]]*$/ {in_goal=1; next}
 >     /^## / && in_goal {exit}
 >     in_goal && NF {print; exit}
->   ')
->   [ -n "$ISSUE_GOAL" ] || ISSUE_GOAL=$(printf '%s\n' "$ISSUE_BODY" | awk 'NF && $0 !~ /^#/ {print; exit}')
->   ISSUE_SMOKE=$(printf '%s\n' "$ISSUE_BODY" | awk '
+>   ' "$_issue_body_file")
+>   [ -n "$ISSUE_GOAL" ] || ISSUE_GOAL=$(awk 'NF && $0 !~ /^#/ {print; exit}' "$_issue_body_file")
+>   ISSUE_SMOKE=$(awk '
 >     /### Primary smoke test/ {seen=1; next}
 >     seen && /^```/ {fence++; next}
 >     seen && fence==1 && NF && $0 !~ /^[[:space:]]*#/ {print; exit}
->   ')
->   ISSUE_SCOPE=$(printf '%s\n' "$ISSUE_BODY" | awk '
+>   ' "$_issue_body_file")
+>   ISSUE_SCOPE=$(awk '
 >     /^## Implementation outline[[:space:]]*$/ {in_scope=1; next}
 >     /^## / && in_scope {exit}
 >     in_scope && /^- / {gsub(/^- /,""); print; count++; if (count>=3) exit}
->   ' | paste -sd '; ' -)
+>   ' "$_issue_body_file" | paste -sd '; ' -)
 >   echo "[monitor] starting #$ISSUE: ${ISSUE_TITLE:-<untitled>}"
 >   echo "[monitor] url: ${ISSUE_URL:-<unknown>}"
 >   echo "[monitor] labels: ${ISSUE_LABELS:-<none>}"
@@ -932,14 +934,17 @@ Pass the following prompt verbatim to each background subagent:
 >
 >      **Assemble reviewer prompt** — call `gen-reviewer-prompt.sh` to compose the combined prompt (static cached prefix + dynamic suffix):
 >      ```bash
->      _pr_diff_file=$(mktemp -t autospec-pr-diff-XXXXXX.diff)
->      _body_file=$(mktemp -t autospec-issue-body-XXXXXX.md)
->      trap 'rm -f "$_pr_diff_file" "$_body_file"' EXIT
->      gh pr diff <PR> > "$_pr_diff_file"
->      gh issue view <ISSUE> --json body --jq '.body' > "$_body_file"
+>      # Reuse the single body fetch from process(ISSUE) start (D5).
+>      # SHA-gated diff re-fetch: only re-fetch the PR diff when the branch head changed.
+>      _current_head=$(gh pr view <PR> --json headRefOid --jq .headRefOid 2>/dev/null || echo "")
+>      if [ -z "${_reviewer_pr_diff_file:-}" ] || [ "${_reviewer_last_head:-}" != "$_current_head" ]; then
+>        _reviewer_pr_diff_file=$(mktemp -t autospec-pr-diff-XXXXXX.diff)
+>        gh pr diff <PR> > "$_reviewer_pr_diff_file"
+>        _reviewer_last_head="$_current_head"
+>      fi
 >      combined_reviewer_prompt=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/gen-reviewer-prompt.sh" \
->        --pr-diff "$_pr_diff_file" \
->        --issue-body "$_body_file" \
+>        --pr-diff "$_reviewer_pr_diff_file" \
+>        --issue-body "/tmp/issue-<ISSUE>-body.md" \
 >        --prev-findings "/tmp/guardian-<PR>.md" \
 >        --issue-labels "<ISSUE_LABELS>" \
 >        --repo "<REPO>")
@@ -1014,7 +1019,10 @@ Pass the following prompt verbatim to each background subagent:
 >      exit 0
 >    fi
 >    ```
+>    # Cleanup single-fetch body temp file on terminal success (D5).
+>    rm -f "/tmp/issue-<ISSUE>-body.md" || true
 > 9. FAILURE (loop exhausted): comment failure on issue, swap label `in-progress-by-bot` → `auto-implement`, `gh pr close <PR> --delete-branch`.
+>    Cleanup single-fetch body temp file on terminal failure: `rm -f "/tmp/issue-<ISSUE>-body.md" || true`
 > 10. Cleanup: cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force
 > 11. Report: PR number, outcome, one-paragraph summary.
 >
