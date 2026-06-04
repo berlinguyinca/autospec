@@ -888,6 +888,51 @@ copy_repo_scripts() {
     info "copy_repo_scripts: copied repo-root scripts to $autospec_scripts_dir/"
 }
 
+copy_runtime_skill_scripts() {
+    # Ship the per-skill helper scripts that skill *surfaces* invoke at runtime via
+    # ${AUTOSPEC_SCRIPTS_DIR}/<name> but that copy_shared_scripts()/copy_repo_scripts()
+    # do not reach (they live under skills/<skill>/scripts/, not scripts/ or
+    # skills/autospec-shared/scripts/). The per-skill installers also ship these, but a
+    # top-level `install.sh` invocation must land every runtime reference on its own so a
+    # single install is complete (issue #985). Explicit src->dest manifest (not a glob):
+    # several skills reuse generic basenames (sweep run.sh/wizard.sh, autospec-test
+    # wizard.sh), so a flat copy would collide; the sweep scripts also ship under
+    # autospec-sweep-* renames. tests/ship-completeness.bats mirrors this manifest.
+    autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+
+    # Each entry is "<repo-relative source>::<dest basename under $AUTOSPEC_SCRIPTS_DIR>".
+    runtime_skill_scripts="\
+skills/autospec-run/scripts/autospec-run-session-lock.sh::autospec-run-session-lock.sh \
+skills/autospec-run/scripts/claim-issue.sh::claim-issue.sh \
+skills/autospec-run/scripts/list-ready-issues.sh::list-ready-issues.sh \
+skills/autospec-run/scripts/post-token-report.sh::post-token-report.sh \
+skills/autospec-run/scripts/release-issue.sh::release-issue.sh \
+skills/autospec-resume/scripts/resume-scan.sh::resume-scan.sh \
+skills/autospec-doc/scripts/doc-orchestrator.mjs::doc-orchestrator.mjs \
+skills/autospec-sweep/scripts/run.sh::autospec-sweep-run.sh \
+skills/autospec-sweep/scripts/wizard.sh::autospec-sweep-wizard.sh"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] copy_runtime_skill_scripts: would copy 9 per-skill runtime scripts to $autospec_scripts_dir/"
+        return 0
+    fi
+
+    mkdir -p "$autospec_scripts_dir"
+    for entry in $runtime_skill_scripts; do
+        src="$REPO_ROOT/${entry%%::*}"
+        dest="$autospec_scripts_dir/${entry##*::}"
+        if [ -f "$src" ]; then
+            cp "$src" "$dest"
+            case "$dest" in
+                *.sh|*.mjs) chmod +x "$dest" ;;
+            esac
+        else
+            warn "copy_runtime_skill_scripts: source not found: $src (skipping)"
+        fi
+    done
+    info "copy_runtime_skill_scripts: copied per-skill runtime scripts to $autospec_scripts_dir/"
+}
+
 copy_schemas() {
     # Copy repo-root schemas/*.json into $AUTOSPEC_SCHEMAS_DIR (default ~/.autospec/schemas/).
     # Mirrors copy_repo_scripts for the schemas/ directory. Runs on every install
@@ -920,6 +965,7 @@ copy_schemas() {
 pull_autospec
 copy_shared_scripts
 copy_repo_scripts
+copy_runtime_skill_scripts
 copy_schemas
 ensure_system_tools
 bootstrap_peer_ecosystems
