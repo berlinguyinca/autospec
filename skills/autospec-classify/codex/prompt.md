@@ -201,7 +201,7 @@ Default for issues that lack any of these signals: `ctx:64k`, `reasoning:medium`
 
 > **Model tier:** **deterministic-first; `TIER_B` on ambiguity (never `TIER_A`).**
 > Classification runs the deterministic
-> rubric (`scripts/classify-model-fit.sh` — file counts, verb keywords, per
+> rubric (`${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/classify-model-fit.sh` — file counts, verb keywords, per
 > tracker #421) FIRST, with **no LLM dispatch** for issues it can score
 > confidently. Only issues the rubric flags as ambiguous (confidence below
 > `LLM_ESCALATION_THRESHOLD`, default 0.3) escalate to a single `TIER_B` LLM
@@ -218,7 +218,7 @@ For each candidate issue:
    - Skip — do not modify body, do not assign a model-fit class.
 
 2. **Classify (deterministic-first).** Run the deterministic rubric first
-   (`scripts/classify-model-fit.sh <body-file>`): it assigns one `ctx:*` and one
+   (`${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/classify-model-fit.sh <body-file>`): it assigns one `ctx:*` and one
    `reasoning:*` label from file counts and verb keywords with **zero LLM cost**.
    Only when the rubric reports `deterministic:false` (confidence below
    `LLM_ESCALATION_THRESHOLD`) escalate that single ambiguous issue to one
