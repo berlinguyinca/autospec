@@ -48,10 +48,18 @@ done
 
 # ── 2. Standard new-skill structural sections ─────────────────────────────────
 info "checking standard structural sections in SKILL.md"
-grep -q '^## Startup self-update' "$SKILL_MD" \
-    || fail "SKILL.md missing '## Startup self-update' section"
-grep -q 'SKILL_NAME=autospec-resume' "$SKILL_MD" \
-    || fail "SKILL.md Startup self-update missing 'SKILL_NAME=autospec-resume'"
+# Transition-safe (D3a sweep, #1032/#1035): accept EITHER the canonical
+# '## Startup self-update' section OR its autospec-block marker form (which
+# carries SKILL_NAME=autospec-resume inline). Files with NEITHER fail closed.
+if grep -q '^## Startup self-update' "$SKILL_MD"; then
+    grep -q 'SKILL_NAME=autospec-resume' "$SKILL_MD" \
+        || fail "SKILL.md Startup self-update missing 'SKILL_NAME=autospec-resume'"
+elif grep -q 'autospec-block:startup-self-update' "$SKILL_MD"; then
+    grep -q 'autospec-block:startup-self-update SKILL_NAME=autospec-resume' "$SKILL_MD" \
+        || fail "SKILL.md startup-self-update marker missing 'SKILL_NAME=autospec-resume'"
+else
+    fail "SKILL.md missing '## Startup self-update' section or autospec-block:startup-self-update marker"
+fi
 grep -q '^## Harness detection' "$SKILL_MD" \
     || fail "SKILL.md missing harness-detection section"
 grep -q 'TIER_A' "$SKILL_MD" \

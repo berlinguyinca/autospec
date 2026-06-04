@@ -2839,10 +2839,20 @@ check_autospec_resume_structure() {
              scripts/resume-scan.sh scripts/resume-attempts.sh; do
         [ -f "$skill/$f" ] || fail "$skill/$f: required file missing (issue #881)"
     done
-    grep -q '^## Startup self-update' "$skill/SKILL.md" \
-        || fail "$skill/SKILL.md missing ## Startup self-update section"
-    grep -q 'SKILL_NAME=autospec-resume' "$skill/SKILL.md" \
-        || fail "$skill/SKILL.md Startup self-update missing SKILL_NAME=autospec-resume"
+    # Transition-safe (D3a sweep, #1032/#1035): the canonical '## Startup
+    # self-update' section was replaced by the
+    # <!-- autospec-block:startup-self-update SKILL_NAME=autospec-resume -->
+    # marker. Accept EITHER form; require SKILL_NAME=autospec-resume in whichever
+    # form is present (the marker carries it inline). Files with NEITHER fail.
+    if grep -q '^## Startup self-update' "$skill/SKILL.md"; then
+        grep -q 'SKILL_NAME=autospec-resume' "$skill/SKILL.md" \
+            || fail "$skill/SKILL.md Startup self-update missing SKILL_NAME=autospec-resume"
+    elif grep -q 'autospec-block:startup-self-update' "$skill/SKILL.md"; then
+        grep -q 'autospec-block:startup-self-update SKILL_NAME=autospec-resume' "$skill/SKILL.md" \
+            || fail "$skill/SKILL.md startup-self-update marker missing SKILL_NAME=autospec-resume"
+    else
+        fail "$skill/SKILL.md missing ## Startup self-update section or autospec-block:startup-self-update marker"
+    fi
     grep -q '^## Harness detection' "$skill/SKILL.md" \
         || fail "$skill/SKILL.md missing harness-detection section"
     grep -q '^## Required capabilities & harness adapter' "$skill/SKILL.md" \
