@@ -163,14 +163,14 @@ Skill family layout (mirrors existing autospec-refine / autospec-continue):
 - `skills/autospec-explore/codex/prompt.md` — Codex CLI mirror (lockstep).
 - `skills/autospec-explore/opencode/agent.md` — OpenCode mirror (lockstep).
 - `skills/autospec-explore/install.sh`, `uninstall.sh`, `README.md`.
-- `scripts/autospec-explore.sh` — orchestrator. **Stubbed by Issue E.**
-- `scripts/explore-sandbox.sh` — sandbox branch creation + `.autospec/explore-mode.json`.
-- `scripts/explore-research-cycle.sh` — runs all researchers, aggregates. **Stubbed by Issue C.**
+- `autospec-explore.sh` — orchestrator. **Stubbed by Issue E.**
+- `explore-sandbox.sh` — sandbox branch creation + `.autospec/explore-mode.json`.
+- `explore-research-cycle.sh` — runs all researchers, aggregates. **Stubbed by Issue C.**
 - `scripts/explore-research/` (subdir) — one researcher per source. **Stubbed by Issues C+D.**
 
 This SKILL.md is the scaffold contract. Subsequent child issues fill in the
 implementer PR-base integration (B), researchers (C+D), the orchestrator + loop
-integration (E), and the `check_autospec_explore_contract` gate in `scripts/validate.sh` (E).
+integration (E), and the `check_autospec_explore_contract` gate in `validate.sh` (E).
 
 ## Invocation
 
@@ -208,20 +208,20 @@ integration (E), and the `check_autospec_explore_contract` gate in `scripts/vali
 ## Sandbox branch contract
 
 1. **Worktree assert (MUST exit 0 before any sandbox commit/push)**: the
-   orchestrator MUST run `bash scripts/worktree-guard.sh assert` before invoking
+   orchestrator MUST run `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert` before invoking
    `explore-sandbox.sh` or performing any sandbox commit step. A non-zero exit
    (in_primary_checkout / dirty / stale_base) is NEVER worked around — emit
    the `code_health` identifier from the guard, and stop. The primary checkout
    is read-only for agents; all sandbox work happens in a linked worktree.
    ```bash
    # MANDATORY assert gate: MUST exit 0 before any sandbox commit/push.
-   if ! bash scripts/worktree-guard.sh assert; then
+   if ! bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert; then
      echo "worktree-guard assert failed (see code_health identifier above); aborting sandbox commit" >&2
      exit 1
    fi
    ```
 2. **Creation**: at run start, the orchestrator invokes
-   `scripts/explore-sandbox.sh --slug <slug> --base main` which creates
+   `explore-sandbox.sh --slug <slug> --base main` which creates
    `autospec/explore/<YYYY-MM-DD>-<slug>` off `origin/main` (or the supplied
    `--base`) if not already present, pushes the branch to `origin`, and writes
    `.autospec/explore-mode.json` with `{branch, slug, base, head_sha, created_at}`.
@@ -285,10 +285,10 @@ authoritative interface between researchers and the aggregator.**
 
 ## Loop driver integration
 
-The outer loop uses `scripts/lib/autospec-loop.sh` from PR #712 with
+The outer loop uses `lib/autospec-loop.sh` from PR #712 with
 explore-specific callbacks (wired in Issue E):
 
-- **per-iteration callback**: `scripts/explore-research-cycle.sh` (file
+- **per-iteration callback**: `explore-research-cycle.sh` (file
   issues for top N proposals).
 - **drain callback**: invoke `/autospec-run` (which honors sandbox base
   branch via the Issue B integration).
@@ -299,7 +299,7 @@ explore-specific callbacks (wired in Issue E):
 
 ## Usage-limit recovery
 
-Inherits `scripts/autospec-usage-limit.sh` (already wired for autospec-run
+Inherits `autospec-usage-limit.sh` (already wired for autospec-run
 per existing skill prose). When the harness reports a deterministic
 quota pause, the orchestrator arms the supervisor with the resume command
 (the same `/autospec-explore` invocation + the sandbox branch context recovered
@@ -373,5 +373,5 @@ To discard:
 
 ```
 bash scripts/validate.sh
-bash scripts/explore-sandbox.sh --slug smoke-test
+bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-sandbox.sh --slug smoke-test
 ```

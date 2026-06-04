@@ -599,7 +599,7 @@ inline label-swap path below.
 > for parallel safety; the collision is at the git-branch level.
 >
 > When dispatching multiple Phase 4 implementers in parallel, the orchestrator
-> MUST wrap each dispatch via `scripts/dispatch-implementer.sh` (or an inline
+> MUST wrap each dispatch via `dispatch-implementer.sh` (or an inline
 > equivalent that produces the same contract):
 >
 > 1. Create a per-issue worktree at `/tmp/wt-<BRANCH>` off `origin/main` via
@@ -612,13 +612,13 @@ inline label-swap path below.
 >    has merged so the worktree stays available for retries).
 >
 > Sequential dispatch in the main checkout is the safe default; worktree-isolated
-> parallel dispatch is the only safe parallelism. See `scripts/dispatch-implementer.sh`
+> parallel dispatch is the only safe parallelism. See `dispatch-implementer.sh`
 > and `tests/autospec-run/test_parallel_dispatch.bats` for the canonical contract.
 >
 > ### Sandbox branch contract (autospec-explore PR-base integration)
 >
 > When `.autospec/explore-mode.json` is present (written by
-> `scripts/explore-sandbox.sh`), the Phase 4 implementer MUST target the sandbox
+> `explore-sandbox.sh`), the Phase 4 implementer MUST target the sandbox
 > branch from that file's `branch` field as PR base instead of `main`, and MUST
 > refuse `gh pr merge` against `main` while the file is present (refusal
 > identifier: `code_health:explore_main_merge_refused`). The full contract lives
@@ -723,7 +723,7 @@ inline label-swap path below.
 >    <!-- worktree-ladder:begin -->
 >    ```bash
 >    cd {repo_root} && git fetch origin
->    LADDER=$(bash scripts/worktree-guard.sh resolve-branch --branch <BRANCH> --repo {repo})
+>    LADDER=$(bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh resolve-branch --branch <BRANCH> --repo {repo})
 >    STATE=$(printf '%s' "$LADDER" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
 >    PR=$(printf '%s' "$LADDER" | sed -n 's/.*"pr":\([0-9]*\).*/\1/p')
 >    case "$STATE" in
@@ -732,7 +732,7 @@ inline label-swap path below.
 >        # Check out the existing PR in a fresh worktree, run the issue's
 >        # verification (tests + validate.sh) and the standard review loop
 >        # against the EXISTING PR, then merge if green. Never re-implement.
->        bash scripts/worktree-guard.sh create --branch <BRANCH> --path /tmp/wt-<BRANCH> --adopt
+>        bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh create --branch <BRANCH> --path /tmp/wt-<BRANCH> --adopt
 >        cd /tmp/wt-<BRANCH>
 >        gh pr checkout "$PR"
 >        echo "[ladder] open-pr #$PR — skip implementation; verify + review + merge existing PR"
@@ -740,13 +740,13 @@ inline label-swap path below.
 >      branch-only)
 >        # #917 recovery: the branch exists with un-PR'd work. Adopt it in a
 >        # fresh worktree and CONTINUE the remaining work (do not start over).
->        bash scripts/worktree-guard.sh create --branch <BRANCH> --path /tmp/wt-<BRANCH> --adopt
+>        bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh create --branch <BRANCH> --path /tmp/wt-<BRANCH> --adopt
 >        cd /tmp/wt-<BRANCH>
 >        echo "[ladder] branch-only — adopted <BRANCH>; continue remaining work"
 >        ;;
 >      fresh|*)
 >        # No branch, no PR: create a new worktree off origin/main.
->        bash scripts/worktree-guard.sh create --branch <BRANCH> --path /tmp/wt-<BRANCH>
+>        bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh create --branch <BRANCH> --path /tmp/wt-<BRANCH>
 >        cd /tmp/wt-<BRANCH>
 >        echo "[ladder] fresh — created <BRANCH>"
 >        ;;
@@ -756,7 +756,7 @@ inline label-swap path below.
 >    # around — comment the emitted code_health identifier on the issue, restore
 >    # the `auto-implement` label (swap `in-progress-by-bot` → `auto-implement`),
 >    # remove the heartbeat, and stop this issue.
->    if ! bash scripts/worktree-guard.sh assert; then
+>    if ! bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert; then
 >      gh issue comment <ISSUE> --body "worktree-guard assert failed (see code_health identifier above); restoring auto-implement"
 >      gh issue edit <ISSUE> --remove-label in-progress-by-bot --add-label auto-implement
 >      exit 1
@@ -1199,7 +1199,7 @@ operation). When invoked with `--autonomous`, or when
 - Honors the same safety guardrails as `/autospec` and `/autospec-define`:
   destructive remote actions, out-of-scope file changes, and cost gate
   (`AUTOSPEC_AUTONOMOUS_ISSUE_CAP`, `AUTOSPEC_AUTONOMOUS_TOKEN_CAP`) still
-  surface confirmations via `scripts/autospec-autonomy-gate.sh --check all`,
+  surface confirmations via `autospec-autonomy-gate.sh --check all`,
   exit 1 = ask anyway.
 - Does NOT add any additional user-facing gates. The flag is informational
   here — the run loop's existing "only ask on hard blocker" rule already

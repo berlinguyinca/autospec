@@ -95,13 +95,23 @@ is_shipped() {
 }
 
 @test "no bare repo-relative shell/mjs script invocation in skill surfaces" {
-  # Allow-listed: the autospec-test target-repo gate is an intentional project opt-in
-  # that runs from the target repo checkout, not from ~/.autospec/scripts.
+  # Allow-listed, intentionally repo-relative invocations (NOT shipped to
+  # ~/.autospec/scripts; they run from a repo checkout, not the installed scripts dir):
+  #   - skills/autospec-test/scripts/run-gate.sh: the autospec-test target-repo gate, an
+  #     opt-in that runs from the target repo checkout.
+  #   - scripts/validate.sh: the lock-step / full-suite validator. In autospec-run /
+  #     autospec / autospec-sweep it is "the repo-standard full suite ... when present",
+  #     i.e. the TARGET repo's own validate.sh; in autospec-explore it is this repo's
+  #     own lock-step gate run from the autospec checkout. It is never copied to
+  #     ~/.autospec/scripts, so a ${AUTOSPEC_SCRIPTS_DIR} rewrite would be incorrect.
   offenders="$(
     surface_files | while read -r f; do
       grep -nE '(bash[[:space:]]+|\./|[^/A-Za-z._-])scripts/[A-Za-z0-9_./-]+\.(sh|mjs)' "$f" 2>/dev/null \
         | sed "s#^#${f}:#"
-    done | grep -v 'skills/autospec-test/scripts/run-gate.sh' || true
+    done \
+      | grep -v 'skills/autospec-test/scripts/run-gate.sh' \
+      | grep -vE '(bash[[:space:]]+|\./)scripts/validate\.sh' \
+      || true
   )"
   if [ -n "$offenders" ]; then
     echo "Bare repo-relative script invocations found (must use \${AUTOSPEC_SCRIPTS_DIR}):" >&2

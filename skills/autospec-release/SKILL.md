@@ -98,16 +98,16 @@ inline.
 
 `/autospec-release` parallelizes Stages 3-8 across 6 area subagents instead
 of walking them sequentially in the orchestrator (issue #731). The
-canonical orchestrator script is `scripts/release-area-dispatch.sh`, which:
+canonical orchestrator script is `release-area-dispatch.sh`, which:
 
 1. Reads area definitions from `skills/autospec-release/areas/<name>.md`.
 2. Dispatches all 6 area subagents in parallel via the harness-aware
-   dispatcher (`scripts/lib/autospec-harness-detect.sh`, PR #725).
+   dispatcher (`lib/autospec-harness-detect.sh`, PR #725).
 3. Aggregates per-area findings into `.autospec/release-verdict.json`
-   honoring the schema consumed by `scripts/compute-release-verdict.sh`
+   honoring the schema consumed by `compute-release-verdict.sh`
    (PR #636).
 4. Optionally re-probes stale findings via the qa-finding-filter
-   (`scripts/qa-finding-filter.sh`, PR #650) when
+   (`qa-finding-filter.sh`, PR #650) when
    `AUTOSPEC_RELEASE_VERIFY_FIRST=1`.
 
 The 6 areas:
@@ -242,7 +242,7 @@ the explicit skill invocation was unavailable.
 9. Verdict computation and release iteration loop
 
    The deterministic computation is implemented by
-   `scripts/compute-release-verdict.sh` and is the canonical source of truth.
+   `compute-release-verdict.sh` and is the canonical source of truth.
    Invoke it with the current verdict path; stdout is one of `PASS` /
    `PARTIAL` / `FAIL` and the exit code mirrors that (0/1/2; 3 for
    infrastructure errors). The prose rules below describe what that script

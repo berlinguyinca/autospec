@@ -1519,8 +1519,8 @@ check_dogfood_detectors() {
     for trio in skills/autospec-qa/SKILL.md skills/autospec-qa/codex/prompt.md skills/autospec-qa/opencode/agent.md; do
         grep -q '^## Dogfood detectors driver' "$trio" \
             || fail "$trio missing '## Dogfood detectors driver' section (issue #641)"
-        grep -q 'scripts/dogfood-detectors\.sh' "$trio" \
-            || fail "$trio missing reference to scripts/dogfood-detectors.sh (issue #641)"
+        grep -q 'dogfood-detectors\.sh' "$trio" \
+            || fail "$trio missing reference to dogfood-detectors.sh (issue #641)"
     done
 
     info "dogfood detectors: adapter layer (issue #646)"
@@ -1679,7 +1679,7 @@ check_qa_heal_loop_contract() {
             || fail "$trio missing '--single-pass' opt-out alias (issue #711)"
         grep -q 'qa-no-heal\.flag' "$trio" \
             || fail "$trio missing 'qa-no-heal.flag' opt-out (issue #711)"
-        grep -q 'scripts/lib/autospec-loop\.sh' "$trio" \
+        grep -q 'lib/autospec-loop\.sh' "$trio" \
             || fail "$trio missing shared loop driver reference (issue #711)"
         grep -q 'qa-heal-summary\.md' "$trio" \
             || fail "$trio missing qa-heal-summary.md unified path (issue #711)"

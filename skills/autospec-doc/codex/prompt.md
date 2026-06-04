@@ -10,7 +10,7 @@ corpus is concatenated into an `llms-full.txt` for downstream LLM consumption.
 Goal: documentation that a non-author can actually follow, that never silently
 drifts from the code, whose examples are proven to run, and whose token cost
 stays bounded through incremental regeneration. This skill is the operator
-entry point; the heavy lifting lives in `scripts/doc-orchestrator.mjs` and the
+entry point; the heavy lifting lives in `doc-orchestrator.mjs` and the
 per-capability generators it dispatches.
 
 This SKILL.md is the **scaffold contract** (issue #916). The subcommand router
@@ -134,7 +134,7 @@ Hold `TIER_A` and `TIER_B` for the entire skill run.
 
 ## Subcommand contract
 
-`/autospec-doc` routes every operation through `scripts/doc-orchestrator.mjs`.
+`/autospec-doc` routes every operation through `doc-orchestrator.mjs`.
 There are five forms; resolve the active repo's `<owner/name>` once and reuse it.
 
 ```
@@ -189,7 +189,7 @@ Every fenced code example in generated docs is executed against the repo, so
 documentation cannot silently drift from working code. Verified examples carry a
 `<!-- example-verified: <head-sha> <ISO-date> -->` marker; a re-run on a newer
 HEAD that no longer matches re-verifies or flags the example as stale.
-The verification engine is `scripts/verify-examples.mjs`: it executes every
+The verification engine is `verify-examples.mjs`: it executes every
 tagged example in a fresh worktree off origin/main (network-restricted, 60s
 per-example timeout), embeds captured output in an adjacent ` ```output ` block,
 and a failing example fails generation. `check-doc-drift.sh` reports an
@@ -198,8 +198,8 @@ scope's `src_globs` (same self-heal path as `visual_stale`).
 
 ## Style & palette
 
-The visual palette is **single-sourced** in `scripts/doc-style.mjs` — no other
-file may hardcode the palette hexes, and `scripts/validate.sh` enforces this.
+The visual palette is **single-sourced** in `doc-style.mjs` — no other
+file may hardcode the palette hexes, and `validate.sh` enforces this.
 The palette also themes generated mermaid diagrams. *(palette resolution +
 mermaid theming filled in by #920.)*
 
@@ -230,7 +230,7 @@ Before committing any regenerated content, the doc orchestrator MUST call
 # MANDATORY assert gate before the doc regenerate commit.
 # MUST exit 0 before any commit. A non-zero exit (in_primary_checkout / dirty /
 # stale_base) is NEVER worked around — stop and surface the code_health identifier.
-if ! bash scripts/worktree-guard.sh assert; then
+if ! bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert; then
   echo "worktree-guard assert failed before doc regenerate commit; aborting" >&2
   exit 1
 fi
@@ -246,6 +246,6 @@ fi
 > **Model tier:** TIER_A (spec work) for the audience-content authoring pass and the completeness audit; TIER_B (implementation work) for deterministic generation, example verification, and style — resolved at startup per the harness detection above.
 
 The skill resolves the harness and tiers, runs the startup self-update preflight,
-then dispatches the parsed subcommand to `scripts/doc-orchestrator.mjs`. On a
+then dispatches the parsed subcommand to `doc-orchestrator.mjs`. On a
 non-`init` subcommand with no `documentation:` config, it surfaces the orchestrator's
 exit-`2` message instructing the operator to run `/autospec-doc init` first.

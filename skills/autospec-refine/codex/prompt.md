@@ -136,14 +136,14 @@ Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B"
 - `skills/autospec-refine/install.sh` — installer; mirrors existing skills.
 - `skills/autospec-refine/uninstall.sh` — uninstaller; mirrors existing skills.
 - `skills/autospec-refine/README.md` — usage doc.
-- `scripts/refine-prompt.sh` — orchestrator: parses args, dispatches lenses,
+- `refine-prompt.sh` — orchestrator: parses args, dispatches lenses,
   writes artifacts, performs handoff. **Stubbed by this scaffold; implemented
   in the orchestrator child issue.**
-- `scripts/refine-render-overview.sh` — produces dual markdown + JSON artifact.
+- `refine-render-overview.sh` — produces dual markdown + JSON artifact.
   **Stubbed by this scaffold; implemented in the renderer child issue.**
 
 This SKILL.md is the scaffold contract. Subsequent child issues fill in
-`scripts/refine-prompt.sh`, the lens helpers, the renderer, the handoff
+`refine-prompt.sh`, the lens helpers, the renderer, the handoff
 plumbing, and the continuous-iteration loop.
 
 ## Invocation
@@ -258,7 +258,7 @@ allowlist is enforced in `refine-prompt.sh`.
 prompt → per-round headings with diff blocks → final prompt → handoff record.
 
 A JSON schema lives at `schemas/autospec-refinement.schema.json` and is
-validated by `scripts/validate.sh`.
+validated by `validate.sh`.
 
 ## Error handling
 
@@ -326,7 +326,7 @@ The orchestrator reads the LAST autospec run's report and looks for, in order:
    `Then:`, `Up next:`, `Up next is:`, `Suggested next:` (case-insensitive).
    The matched line plus its following paragraph (up to next blank line or
    `##` heading) becomes the harvested prompt. All matcher functions live
-   in the shared library `scripts/lib/extract-matchers.sh` so additions to
+   in the shared library `lib/extract-matchers.sh` so additions to
    either harvest path land in one place.
 4. If absent, the report's `Out-of-sample`, `Stop condition`, or
    `Evidence-backed stop` sections are inspected. If they say "stop", the
@@ -335,7 +335,7 @@ The orchestrator reads the LAST autospec run's report and looks for, in order:
 
 ### Safety guardrails
 
-- The `--autonomous` mode safety guardrails (`scripts/autospec-autonomy-gate.sh`)
+- The `--autonomous` mode safety guardrails (`autospec-autonomy-gate.sh`)
   still apply on every loop iteration.
 - The continuous loop inherits the autospec autonomy scope rules; it does
   NOT escalate privileges.
@@ -377,7 +377,7 @@ loop summary table is printed at loop end.
 
 ## Harness-aware handoff
 
-Loop dispatch uses `scripts/lib/autospec-harness-detect.sh` (issue #723) to
+Loop dispatch uses `lib/autospec-harness-detect.sh` (issue #723) to
 resolve the active AI harness and pick the canonical `/autospec --autonomous`
 invocation form:
 

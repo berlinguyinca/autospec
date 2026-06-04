@@ -169,14 +169,14 @@ changed enough that the config is stale.
 Sweep runs fan out into 4 parallel area subagents per the AGENTS.md subagent
 dispatch decision matrix. Areas are defined under
 `skills/autospec-sweep/areas/` and dispatched via
-`scripts/sweep-area-dispatch.sh`:
+`sweep-area-dispatch.sh`:
 
-1. `spec-vs-code-drift` — reuses `scripts/explore-research/spec-vs-code.sh`.
-2. `docs-drift` — reuses `scripts/dogfood-adapter-doc-drift.sh`, which invokes
+1. `spec-vs-code-drift` — reuses `explore-research/spec-vs-code.sh`.
+2. `docs-drift` — reuses `dogfood-adapter-doc-drift.sh`, which invokes
    `/autospec-doc --full` (full regen + repo-wide completeness audit via
-   `scripts/doc-orchestrator.mjs`) and surfaces missing parts as findings.
-3. `code-health` — reuses `scripts/explore-research/codebase-signals.sh`.
-4. `dependency-health` — new `scripts/explore-research/dependency-health.sh`
+   `doc-orchestrator.mjs`) and surfaces missing parts as findings.
+3. `code-health` — reuses `explore-research/codebase-signals.sh`.
+4. `dependency-health` — new `explore-research/dependency-health.sh`
    researcher (also available to autospec-explore — extends the 6-researcher
    set to 7).
 

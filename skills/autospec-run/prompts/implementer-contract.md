@@ -33,7 +33,7 @@ acting digest, not a replacement for the per-step prompt.
 
 Every PR produced by an `auto-implement` agent must satisfy the rules below
 before the LGTM reviewer is dispatched. The enforcer is
-`scripts/lint-implementation.sh` (exits 0 on pass, N on fail where N = number of
+`lint-implementation.sh` (exits 0 on pass, N on fail where N = number of
 blocking findings, capped at 200).
 
 ### RULE_ID table
@@ -76,7 +76,7 @@ implementer's retry prompt as cumulative context:
 ### Enforcement and opt-out
 
 - `TDD non-negotiable`, `No DB mocks/stubs`, and `No hardcoded secrets / unsafe
-  git ops` are enforced deterministically by `scripts/lint-implementation.sh`.
+  git ops` are enforced deterministically by `lint-implementation.sh`.
 - **Inline escape hatch:** `# linter:allow-RULE_ID <reason>` on the same line as,
   or the line immediately before, the offending pattern. A bare
   `# linter:allow-X` with no reason is rejected and the rule stays active.
@@ -100,8 +100,8 @@ byte-identical (after frontmatter is stripped per the repo convention
 - A SKILL.md + codex/prompt.md **duo** (no opencode/agent.md) must also stay
   byte-identical.
 - Renaming any prose section heading in a trio SKILL.md requires updating
-  `scripts/validate.sh` named-content checks in the same PR.
-- `scripts/validate.sh` is the authoritative lock-step gate. Run it before every
+  `validate.sh` named-content checks in the same PR.
+- `validate.sh` is the authoritative lock-step gate. Run it before every
   push; a non-zero exit means the trio (or a named-content check) diverged.
 
 ## Heartbeat schema
