@@ -1041,47 +1041,68 @@ for skill in $SKILLS_TO_RUN; do
             continue
         fi
 
-        # D2 block-expansion pass: after the per-skill installer copies files,
-        # expand any SKILL.md that contains autospec-block markers.  Zero
-        # behavior change for skills without markers (byte-identical copy path).
+        # D2 block-expansion pass (trio-wide, TOKR1-002, issue #1035): after the
+        # per-skill installer copies files, expand EVERY installed trio-member
+        # copy that originates from a marker-bearing source — not just SKILL.md.
+        # Each harness installs different members:
+        #   claude:   skills/<skill>/SKILL.md            (from SKILL.md)
+        #   codex:    skills/<skill>/SKILL.md            (from SKILL.md)
+        #             prompts/<skill>.md                 (from codex/prompt.md)
+        #   opencode: agent/<skill>.md                   (from opencode/agent.md)
+        # Without this, codex prompts/ and opencode agent/ copies shipped the
+        # literal <!-- autospec-block:startup-self-update --> marker unexpanded,
+        # silently dropping self-update on 2 of 3 harnesses.
+        # Each (src,dest) pair is expanded independently and guarded by the
+        # source carrying a marker; expand_skill_file fails closed (removes the
+        # dest + returns non-zero) if the expander errors or a marker survives.
         # Version-skew rule §6: always invoke $REPO_ROOT/scripts/expand-skill-blocks.sh.
+        # Bash 3.2-compatible: no associative arrays, if/then/fi under set -e.
         if [ "$DRY_RUN" -eq 0 ]; then
-            _src="$SKILLS_DIR/$skill/SKILL.md"
-            if [ -f "$_src" ] && grep -q '<!-- autospec-block:' "$_src" 2>/dev/null; then
-                # Determine installed SKILL.md paths for this harness.
-                _claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-                _codex_dir="${CODEX_HOME:-$HOME/.codex}"
+            _claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+            _codex_dir="${CODEX_HOME:-$HOME/.codex}"
+            _opencode_dir="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
+            _skill_src_dir="$SKILLS_DIR/$skill"
 
-                case "$harness" in
-                    claude)
-                        _dest="$_claude_dir/skills/$skill/SKILL.md"
-                        if [ -f "$_dest" ]; then
-                            if ! expand_skill_file "$_src" "$_dest"; then
-                                err "  expand: failed for $skill ($harness); marking pair failed"
-                                failures=$((failures + 1))
-                            else
-                                info "  expanded: $_dest"
-                            fi
+            # Build the per-harness list of "src|dest" member pairs as newline
+            # records (bash 3.2-safe; no arrays of arrays).
+            _pairs=""
+            case "$harness" in
+                claude)
+                    _pairs="$_skill_src_dir/SKILL.md|$_claude_dir/skills/$skill/SKILL.md"
+                    ;;
+                codex)
+                    _pairs="$_skill_src_dir/SKILL.md|$_codex_dir/skills/$skill/SKILL.md
+$_skill_src_dir/codex/prompt.md|$_codex_dir/prompts/$skill.md"
+                    ;;
+                opencode)
+                    _pairs="$_skill_src_dir/opencode/agent.md|$_opencode_dir/agent/$skill.md"
+                    ;;
+            esac
+
+            # Expand each member whose source carries a marker. Members without a
+            # marker were already byte-copied by the per-skill installer and are
+            # left untouched. The post-expand safety-grep inside expand_skill_file
+            # covers every installed copy here, not just SKILL.md.
+            _old_ifs="$IFS"
+            IFS='
+'
+            for _pair in $_pairs; do
+                [ -n "$_pair" ] || continue
+                _src="${_pair%%|*}"
+                _dest="${_pair#*|}"
+                if [ -f "$_src" ] && grep -q '<!-- autospec-block:' "$_src" 2>/dev/null; then
+                    if [ -f "$_dest" ]; then
+                        if ! expand_skill_file "$_src" "$_dest"; then
+                            err "  expand: failed for $skill ($harness) $_dest; marking pair failed"
+                            failures=$((failures + 1))
+                        else
+                            info "  expanded: $_dest"
                         fi
-                        ;;
-                    codex)
-                        _dest="$_codex_dir/skills/$skill/SKILL.md"
-                        if [ -f "$_dest" ]; then
-                            if ! expand_skill_file "$_src" "$_dest"; then
-                                err "  expand: failed for $skill ($harness); marking pair failed"
-                                failures=$((failures + 1))
-                            else
-                                info "  expanded: $_dest"
-                            fi
-                        fi
-                        ;;
-                    opencode)
-                        # OpenCode installs agent.md, not SKILL.md; no expansion needed here.
-                        ;;
-                esac
-                unset _dest _claude_dir _codex_dir
-            fi
-            unset _src
+                    fi
+                fi
+            done
+            IFS="$_old_ifs"
+            unset _pairs _pair _src _dest _claude_dir _codex_dir _opencode_dir _skill_src_dir _old_ifs
         fi
 
         info ""

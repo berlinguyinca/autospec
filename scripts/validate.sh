@@ -221,8 +221,12 @@ check_self_update() {
 
 # Startup preflight invariants (introduced by issues #115–#119): every
 # multi-harness skill must carry a ## Startup self-update section whose bash
-# body is byte-identical to the canonical block in skills/autospec/SKILL.md
-# (modulo the SKILL_NAME= first line).
+# body is byte-identical to the canonical block (modulo the SKILL_NAME= first
+# line).
+# Single-source-of-truth (TOKR1-001, issue #1035): the canonical block is read
+# from templates/skill-blocks/startup-self-update.md — the same template the
+# expander injects — instead of being extracted from skills/autospec/SKILL.md,
+# which now carries only the marker (so extraction returned empty -> exit 1).
 # Transition-safe (D3): a file carrying <!-- autospec-block:startup-self-update -->
 # instead of the full section body is accepted as equivalent; files with NEITHER
 # form still fail (fail closed).
@@ -231,8 +235,11 @@ check_startup_preflight() {
         awk '/^## Startup self-update/{f=1} f && /^```bash/{g=1; next} g && /^```/{g=0; f=0; next} g{print}' "$1" \
             | grep -v '^SKILL_NAME='
     }
-    canonical=$(extract_block skills/autospec/SKILL.md)
-    [ -n "$canonical" ] || fail "autospec SKILL.md missing ## Startup self-update section"
+    canonical_template="templates/skill-blocks/startup-self-update.md"
+    [ -f "$canonical_template" ] \
+        || fail "check_startup_preflight: $canonical_template missing (single source of truth)"
+    canonical=$(extract_block "$canonical_template")
+    [ -n "$canonical" ] || fail "$canonical_template missing ## Startup self-update bash block"
     printf '%s\n' "$canonical" | grep -F 'raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh' >/dev/null \
         || fail "startup preflight must call the curl-safe suite bootstrap.sh"
     printf '%s\n' "$canonical" | grep -F -- '--skill all --harness all --update' >/dev/null \
@@ -2215,6 +2222,42 @@ check_token_baseline_fresh() {
 # Missing golden for an existing SKILL.md -> FAIL (fail closed).
 # Missing expander script -> FAIL (fail closed).
 # No RETURN traps; if/then/fi for one-sided conditionals (repo bash rules).
+# Helper: gate one trio member (src file -> golden) through the expander.
+# Appends the member label to the caller's $failed accumulator (by echoing it).
+# Echoes nothing on success. On mismatch, prints a FAIL diagnostic to stderr and
+# echoes the failing label to stdout.
+# Args: <expander> <golden_dir> <skill> <src_file> <golden_suffix>
+# golden_suffix is one of: SKILL.md | codex.prompt.md | opencode.agent.md
+# SKILL.md goldens are required (fail closed). codex/opencode goldens are
+# required only when the member source carries a marker (TOKR1-003); a markered
+# member with no golden fails closed.
+gate_block_member() {
+    _gbm_expander="$1"
+    _gbm_golden_dir="$2"
+    _gbm_skill="$3"
+    _gbm_src="$4"
+    _gbm_suffix="$5"
+    [ -f "$_gbm_src" ] || return 0
+    _gbm_golden="$_gbm_golden_dir/${_gbm_skill}.${_gbm_suffix}.sha256"
+    if [ ! -f "$_gbm_golden" ]; then
+        if [ "$_gbm_suffix" = "SKILL.md" ]; then
+            fail "check_block_expansion: no golden for $_gbm_skill (tests/fixtures/skill-goldens/${_gbm_skill}.${_gbm_suffix}.sha256 missing — fail closed)"
+        fi
+        # codex/opencode member: a golden is required iff the source is markered.
+        if grep -q '<!-- autospec-block:' "$_gbm_src" 2>/dev/null; then
+            fail "check_block_expansion: markered member $_gbm_src has no golden (tests/fixtures/skill-goldens/${_gbm_skill}.${_gbm_suffix}.sha256 missing — fail closed)"
+        fi
+        return 0
+    fi
+    _gbm_expected="$(cat "$_gbm_golden" | tr -d '[:space:]')"
+    _gbm_got="$(bash "$_gbm_expander" "$_gbm_src" | shasum -a 256 | cut -d' ' -f1)"
+    if [ "$_gbm_got" != "$_gbm_expected" ]; then
+        printf 'validate: FAIL — check_block_expansion: %s %s expanded sha256 mismatch (got %s, want %s)\n' \
+            "$_gbm_skill" "$_gbm_suffix" "$_gbm_got" "$_gbm_expected" >&2
+        printf '%s.%s' "$_gbm_skill" "$_gbm_suffix"
+    fi
+}
+
 check_block_expansion() {
     info "block-expansion golden gate: tests/fixtures/skill-goldens/"
     local expander="$REPO_ROOT/scripts/expand-skill-blocks.sh"
@@ -2223,32 +2266,27 @@ check_block_expansion() {
     fi
     local golden_dir="$REPO_ROOT/tests/fixtures/skill-goldens"
     local failed=""
+    local m
     for skill_dir in skills/*/; do
         [ -d "$skill_dir" ] || continue
         local skill
         skill="$(basename "$skill_dir")"
-        local skill_file="$skill_dir/SKILL.md"
-        if [ ! -f "$skill_file" ]; then
-            continue
+        # SKILL.md is required for every skill (fail closed on missing golden).
+        if [ -f "$skill_dir/SKILL.md" ]; then
+            m="$(gate_block_member "$expander" "$golden_dir" "$skill" "$skill_dir/SKILL.md" "SKILL.md")"
+            failed="${failed}${m:+ $m}"
         fi
-        local golden="$golden_dir/${skill}.SKILL.md.sha256"
-        if [ ! -f "$golden" ]; then
-            fail "check_block_expansion: no golden for $skill (tests/fixtures/skill-goldens/${skill}.SKILL.md.sha256 missing — fail closed)"
-        fi
-        local expected
-        expected="$(cat "$golden" | tr -d '[:space:]')"
-        local got
-        got="$(bash "$expander" "$skill_file" | shasum -a 256 | cut -d' ' -f1)"
-        if [ "$got" != "$expected" ]; then
-            printf 'validate: FAIL — check_block_expansion: %s expanded sha256 mismatch (got %s, want %s)\n' \
-                "$skill" "$got" "$expected" >&2
-            failed="${failed} $skill"
-        fi
+        # codex/opencode trio members: gated whenever a golden exists, and
+        # required (fail closed) whenever the member source carries a marker.
+        m="$(gate_block_member "$expander" "$golden_dir" "$skill" "$skill_dir/codex/prompt.md" "codex.prompt.md")"
+        failed="${failed}${m:+ $m}"
+        m="$(gate_block_member "$expander" "$golden_dir" "$skill" "$skill_dir/opencode/agent.md" "opencode.agent.md")"
+        failed="${failed}${m:+ $m}"
     done
     if [ -n "$failed" ]; then
-        fail "check_block_expansion: sha256 mismatch for skills:$failed"
+        fail "check_block_expansion: sha256 mismatch for members:$failed"
     fi
-    info "block-expansion golden gate: all skills OK"
+    info "block-expansion golden gate: all skills + members OK"
 }
 
 main() {
