@@ -678,14 +678,14 @@ Record this durable preference in `AGENTS.md` (idempotent — skip if already pr
 
 **Off-peak tip:** For queues of 10+ issues (8+ hour runs), consider launching at night or on weekends. Usage limits are shared across all sessions — running long batches off-peak preserves daytime tokens for interactive work.
 
-**Single-agent absorbed-discipline (canonical Phase 4 path).** The monitor agent IS the implementer for the issue it claims — expand → implement → finalize → peer-review → evaluate-findings → PR → merge — all in one agent's context. The main session orchestrator relaunches the monitor between issues so each one gets a fresh top-level `Agent` call with full tool access. **Constraint:** Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool, so a backgrounded monitor cannot dispatch its own inner implementer. Phase 4 implementers must be top-level agents launched directly by the main session orchestrator, not nested inside a monitor. The `process(ISSUE)` notation below is shorthand for "the monitor agent now does the implementation work itself in this same context", NOT a nested subagent dispatch. `AUTOSPEC_BATCH_SIZE` semantics are preserved: a single agent can still process up to N issues sequentially within its 40-tool-call budget, exiting with `BATCH_COMPLETE` when the budget is approaching or after N issues, whichever comes first.
+**Fresh-subagent-per-issue (canonical Phase 4 path, formerly single-agent absorbed-discipline).** Each issue is processed by a FRESH top-level subagent dispatched by the orchestrator — expand → implement → finalize → peer-review → evaluate-findings → PR → merge — in that subagent's own context. The orchestrator NEVER implements in its own context; it only claims, dispatches, and waits. Each subagent receives full tool access because it is a top-level `Agent` call launched directly by the main session orchestrator. **Constraint:** Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool, so nested monitors cannot dispatch inner implementers. Phase 4 implementers must be top-level agents launched directly by the main session orchestrator, not nested inside a monitor. The `process(ISSUE)` notation below is shorthand for "dispatch a fresh top-level subagent to do this work", NOT in-context implementation by the orchestrator. Batch>1 is an explicit operator opt-in via `AUTOSPEC_BATCH_SIZE=N`; the default is 1 (one issue per subagent). The `reasoning:deep` force-to-1 rule is retained: deep issues stay batch=1 even under an operator `AUTOSPEC_BATCH_SIZE=N` override.
 
-Then launch a **background monitor loop** — the orchestrator relaunches the monitor with fresh context after each batch of `AUTOSPEC_BATCH_SIZE` issues (default: 3). The monitor is stateless: all persistent state lives in GitHub labels and heartbeat files, so relaunches are always safe.
+Then launch a **background monitor loop** — the orchestrator relaunches the monitor with fresh context after each batch of `AUTOSPEC_BATCH_SIZE` issues (default: 1). The monitor is stateless: all persistent state lives in GitHub labels and heartbeat files, so relaunches are always safe.
 
 ```
 batch_num=1
 while true:
-  launch background subagent (pass batch_num; AUTOSPEC_BATCH_SIZE=${AUTOSPEC_BATCH_SIZE:-3})
+  launch background subagent (pass batch_num; AUTOSPEC_BATCH_SIZE=${AUTOSPEC_BATCH_SIZE:-1})
   wait for task-notification (monitor agent completes)
 
   # Read and consume the batch-done signal.
@@ -707,7 +707,7 @@ while true:
 
 Pass the following prompt verbatim to each background subagent:
 
-> You are the auto-implement monitor for `{repo}`. Process `auto-implement` issues one at a time. Exit after processing `AUTOSPEC_BATCH_SIZE` issues (default: 3) by writing `~/.autospec/batch-done.json` — the orchestrator will relaunch you with fresh context.
+> You are the auto-implement monitor for `{repo}`. Process `auto-implement` issues one at a time. Exit after processing `AUTOSPEC_BATCH_SIZE` issues (default: 1) by writing `~/.autospec/batch-done.json` — the orchestrator will relaunch you with fresh context.
 
 > **Harness adaptation (loop persistence).** The `while true:` below is pseudocode. In Claude Code, use `/loop` or `ScheduleWakeup` to persist across turns. In Codex CLI and OpenCode, you lack a built-in loop primitive — implement persistence via one of these patterns:
 > 1. **Shell wrapper (preferred):** `exec bash << 'EOF'
@@ -719,7 +719,7 @@ Pass the following prompt verbatim to each background subagent:
 > 3. **tmux pane:** `tmux new-window 'bash << '''HEREDOC'''
 > while true; do ...; done
 > HEREDOC'`
-> **Session batching:** Exit after processing `AUTOSPEC_BATCH_SIZE` issues (default 3) by writing `~/.autospec/batch-done.json` with `status=BATCH_COMPLETE`. The orchestrator relaunches you with fresh context. When the queue is fully drained, write `status=ALL_DONE` instead. This keeps each monitor session short to prevent context overflow.
+> **Session batching:** Exit after processing `AUTOSPEC_BATCH_SIZE` issues (default 1) by writing `~/.autospec/batch-done.json` with `status=BATCH_COMPLETE`. The orchestrator relaunches you with fresh context. When the queue is fully drained, write `status=ALL_DONE` instead. This keeps each monitor session short to prevent context overflow.
 
 >
 > **Shared helper scripts.** Helper scripts live at `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}` after installation. Do not assume the target repository has an autospec `scripts/` directory.
@@ -728,7 +728,7 @@ Pass the following prompt verbatim to each background subagent:
 > ```
 > # Before the loop (run-once init):
 > #   batch_issue_count=0
-> #   BATCH_SIZE="${AUTOSPEC_BATCH_SIZE:-3}"
+> #   BATCH_SIZE="${AUTOSPEC_BATCH_SIZE:-1}"
 > #   [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null || BATCH_SIZE=3   # guard against 0 or negative
 > #   rm -f "$HOME/.autospec/batch-done.json"   # clear stale file from prior crash
 >
@@ -1025,6 +1025,16 @@ Pass the following prompt verbatim to each background subagent:
 >      exit 0
 >    fi
 >    ```
+>    <!-- token-report:begin -->
+>    Post the per-issue token report (best-effort; never fails the run):
+>    ```bash
+>    # Orchestrator writes .autospec/tokens-<ISSUE>.json from Agent-result usage
+>    # (harness-dependent, best-effort; absent fields → null, never blocking).
+>    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/post-token-report.sh" \
+>      --issue "<ISSUE>" --repo "<REPO>" \
+>      --tokens-json ".autospec/tokens-<ISSUE>.json" || true
+>    ```
+>    <!-- token-report:end -->
 >    # Cleanup single-fetch body temp file on terminal success (D5).
 >    rm -f "/tmp/issue-<ISSUE>-body.md" || true
 > 9. FAILURE (loop exhausted): comment failure on issue, swap label `in-progress-by-bot` → `auto-implement`, `gh pr close <PR> --delete-branch`.

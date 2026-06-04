@@ -878,6 +878,61 @@ check_phase4_full_test_suite_gate() {
     done
 }
 
+# Phase 4 cost-epic parity (issue #971): the cost-efficiency epic (#937) D1
+# (per-issue token reporting) and D2 (batch=1 / fresh-subagent-per-issue) were
+# applied to the autospec-run trio but silently missed the autospec trio's
+# embedded Phase 4 monitor loop, and the existing phase4 lock-step gates
+# (guardian / issue-start / next-pickup / test-suite) did NOT cover the
+# batch-default, token-report slot, or absorbed-discipline prose — so the
+# divergence passed CI. This gate ties those three surfaces between BOTH run
+# trios so the divergence CLASS fails CI going forward. Each assertion below
+# must PASS after parity and provably FAIL if either trio drifts back.
+check_phase4_cost_epic_parity_lockstep() {
+    info "phase4 cost-epic parity (D1 token-report + D2 batch=1): autospec + autospec-run trios"
+    for s in autospec autospec-run; do
+        for f in "skills/$s/SKILL.md" "skills/$s/codex/prompt.md" "skills/$s/opencode/agent.md"; do
+            [ -f "$f" ] || fail "$f: required file missing"
+            # D2: batch default must be 1, never the legacy 3, anywhere a
+            # batch-size default or prose is stated.
+            if grep -F 'AUTOSPEC_BATCH_SIZE:-3' "$f" >/dev/null 2>&1; then
+                fail "$f still defaults AUTOSPEC_BATCH_SIZE to 3 (D2 requires :-1)"
+            fi
+            if grep -Eq 'AUTOSPEC_BATCH_SIZE` issues \(default:? 3\)' "$f"; then
+                fail "$f still states batch 'default 3' prose (D2 requires 1)"
+            fi
+            grep -F 'AUTOSPEC_BATCH_SIZE:-1' "$f" >/dev/null \
+                || fail "$f missing AUTOSPEC_BATCH_SIZE:-1 default (D2 batch=1)"
+            # D2: fresh-subagent-per-issue prose (orchestrator never implements
+            # in its own context; default is 1; reasoning:deep force-to-1).
+            grep -F 'Fresh-subagent-per-issue (canonical Phase 4 path, formerly single-agent absorbed-discipline)' "$f" >/dev/null \
+                || fail "$f missing fresh-subagent-per-issue canonical prose (D2)"
+            grep -F 'The orchestrator NEVER implements in its own context' "$f" >/dev/null \
+                || fail "$f missing 'orchestrator NEVER implements in its own context' (D2)"
+            grep -F 'the default is 1 (one issue per subagent)' "$f" >/dev/null \
+                || fail "$f missing 'default is 1 (one issue per subagent)' (D2)"
+            grep -F 'reasoning:deep` force-to-1 rule is retained' "$f" >/dev/null \
+                || fail "$f missing reasoning:deep force-to-1 retention (D2)"
+            # D1: per-issue token-report step at the pinned slot — after the
+            # admin-merge SUCCESS step (8) and before the FAILURE step (9) /
+            # batch-done. Enforce both the markers and their pinned position.
+            grep -F '<!-- token-report:begin -->' "$f" >/dev/null \
+                || fail "$f missing token-report:begin marker (D1)"
+            grep -F '<!-- token-report:end -->' "$f" >/dev/null \
+                || fail "$f missing token-report:end marker (D1)"
+            grep -F 'post-token-report.sh' "$f" >/dev/null \
+                || fail "$f missing post-token-report.sh invocation (D1)"
+            slot="$(awk '
+                /(^|> )8\. SUCCESS/             { after_success=1 }
+                /(^|> )9\. FAILURE/             { after_success=0 }
+                after_success && /token-report:begin/ { print "FOUND" }
+            ' "$f")"
+            [ "$slot" = "FOUND" ] \
+                || fail "$f: token-report:begin not at pinned slot (must follow admin-merge SUCCESS step 8, precede FAILURE step 9 / batch-done) (D1)"
+        done
+    done
+    info "phase4 cost-epic parity: both trios carry batch=1 + fresh-subagent prose + pinned token-report"
+}
+
 # Team-personality contract: autospec should infer the right solving team from
 # the request, repository evidence, memories, and prior specs. If confidence is
 # low, it must ask explicitly with five concrete starter combinations, carry
@@ -1960,6 +2015,7 @@ main() {
     check_phase4_single_agent_discipline
     check_phase4_adaptive_retry
     check_phase4_full_test_suite_gate
+    check_phase4_cost_epic_parity_lockstep
     check_autospec_sweep_config_contract
     check_autospec_fleet_scripts
     check_fleet_gui_subcommand_lockstep
