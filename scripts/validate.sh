@@ -2211,6 +2211,7 @@ main() {
     check_autospec_explore_researchers_deterministic
     check_autospec_explore_researchers_llm
     check_autospec_explore_contract
+    check_explore_trio_worktree_assert
     check_autospec_release_area_contract
     check_release_trio_worktree_assert
     check_autospec_sweep_area_contract
@@ -2518,6 +2519,51 @@ check_autospec_explore_contract() {
         bats "$bats_file" >/tmp/validate-explore-e2e.log 2>&1 \
             || { cat /tmp/validate-explore-e2e.log >&2; fail "$bats_file: failed"; }
     fi
+}
+
+# Explore-trio worktree assert (issue #964, spec §D4): the autospec-explore
+# trio (SKILL.md + codex/prompt.md + opencode/agent.md) must each carry the
+# mandatory `worktree-guard.sh assert` call before any sandbox commit step,
+# the MUST-exit-0 gate wording, the primary-checkout hard rule, and the
+# Sandbox branch contract section must be byte-identical across all three
+# files (lock-step). Runs tests/explore/test_explore_worktree_assert.bats
+# when bats is on PATH.
+check_explore_trio_worktree_assert() {
+    info "explore-trio worktree assert (D4, issue #964)"
+    for trio in \
+        skills/autospec-explore/SKILL.md \
+        skills/autospec-explore/codex/prompt.md \
+        skills/autospec-explore/opencode/agent.md
+    do
+        [ -f "$trio" ] || fail "$trio: required adapter file missing"
+        grep -q 'worktree-guard.sh assert' "$trio" \
+            || fail "$trio: missing worktree-guard.sh assert before sandbox commit (D4)"
+        grep -q 'MUST exit 0' "$trio" \
+            || fail "$trio: assert gate must carry MUST-exit-0 wording (D4)"
+        grep -qi 'primary checkout' "$trio" \
+            || fail "$trio: missing primary-checkout hard rule (D4)"
+    done
+    # Lock-step: Sandbox branch contract section must be byte-identical.
+    local s1 s2 s3
+    s1="$(awk '/^## Sandbox branch contract/,/^## Research cycle contract/' \
+        skills/autospec-explore/SKILL.md)"
+    s2="$(awk '/^## Sandbox branch contract/,/^## Research cycle contract/' \
+        skills/autospec-explore/codex/prompt.md)"
+    s3="$(awk '/^## Sandbox branch contract/,/^## Research cycle contract/' \
+        skills/autospec-explore/opencode/agent.md)"
+    [ -n "$s1" ] || fail "SKILL.md: Sandbox branch contract section missing"
+    diff <(printf '%s\n' "$s1") <(printf '%s\n' "$s2") \
+        || fail "explore-trio: SKILL.md vs codex/prompt.md Sandbox branch contract differs (lock-step violation)"
+    diff <(printf '%s\n' "$s1") <(printf '%s\n' "$s3") \
+        || fail "explore-trio: SKILL.md vs opencode/agent.md Sandbox branch contract differs (lock-step violation)"
+    local bats_file="tests/explore/test_explore_worktree_assert.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing (issue #964)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-explore-worktree-assert.log 2>&1 \
+            || { cat /tmp/validate-explore-worktree-assert.log >&2; fail "$bats_file: failed"; }
+    fi
+    info "explore-trio worktree assert: all three adapter files carry D4 assert + lock-step verified"
 }
 
 # Release area-dispatch contract (issue #731): 6 area files exist under
