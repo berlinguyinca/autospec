@@ -29,6 +29,21 @@ For each candidate, note the file path and a one-line description of what it doe
 
 Skipping this step or leaving the reuse decision undocumented in the PR body is a policy violation.
 
+## Worktree + PR-aware recovery ladder
+
+**Before any code is written**, resolve the branch state and enter an isolated
+worktree. You NEVER `cd`/`git checkout`/`git commit` in the primary checkout —
+all work happens in a linked worktree off `origin/main`. This file is standalone
+(not lock-step with the run trios) but its rules MUST agree with the trio
+contract.
+
+1. **Ladder first.** `bash scripts/worktree-guard.sh resolve-branch --branch <BRANCH> --repo <REPO>` returns `{"state":"open-pr"|"branch-only"|"fresh","pr":N|null}`. Branch on `state`:
+   - **`open-pr`** (#886 recovery): a PR already exists — **skip implementation** entirely. Create an adopt-mode worktree, `gh pr checkout <PR>`, then run the issue's verification (tests + `validate.sh`) and the standard review loop against the EXISTING PR, and merge if green. Never re-implement.
+   - **`branch-only`** (#917 recovery): the branch exists with un-PR'd work — adopt it (`worktree-guard.sh create --adopt`) in a fresh worktree and **continue** the remaining work; do not start over.
+   - **`fresh`**: no branch, no PR — `worktree-guard.sh create --branch <BRANCH>`.
+2. **Assert before any edit.** `bash scripts/worktree-guard.sh assert` MUST exit 0 before the first file edit/commit. A non-zero exit (`in_primary_checkout` / `dirty` / `stale_base`) is NEVER worked around — comment the emitted `code_health:` identifier on the issue, restore the `auto-implement` label, and stop the issue.
+3. **Cleanup.** After the merge is confirmed (or on terminal failure), `git worktree remove` the linked worktree and `git worktree prune`. Never delete un-pushed work before merge.
+
 ## Expand
 
 Before changing any code:
