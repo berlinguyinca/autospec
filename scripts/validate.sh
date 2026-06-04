@@ -2655,6 +2655,15 @@ check_autospec_doc_contract() {
         grep -q -- '--audience' "$f" || fail "$f missing --audience subcommand"
         grep -qE '/autospec-doc init|`init`' "$f" \
             || fail "$f missing init subcommand"
+        # §D4 worktree assert: the regenerate commit step must be preceded by a
+        # worktree-guard.sh assert call. The sentinel block must be present and
+        # the assert MUST exit 0 rule must be stated in every trio file.
+        grep -q 'worktree-guard.sh assert' "$f" \
+            || fail "$f: missing worktree-guard.sh assert before doc regenerate commit (issue #963 §D4)"
+        grep -q 'MUST exit 0' "$f" \
+            || fail "$f: doc-regen assert gate must require exit 0 before commit (issue #963 §D4)"
+        grep -q 'doc-regen-assert:begin' "$f" \
+            || fail "$f: missing doc-regen-assert:begin sentinel (issue #963 §D4)"
     done
     orch="$skill/scripts/doc-orchestrator.mjs"
     [ -f "$orch" ] || fail "$orch: orchestrator stub missing"

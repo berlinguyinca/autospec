@@ -218,6 +218,25 @@ docs-completeness dimension; `/autospec-sweep --full` and `/autospec-define`'s
 auto-docs step redirect to `/autospec-doc`. *(wiring filled in by
 #922/#923/#924.)*
 
+## Worktree assert (regenerate commit)
+
+The regenerate commit step runs inside the implementer's PR-branch worktree
+(already a linked worktree off `origin/main`, never the primary checkout).
+Before committing any regenerated content, the doc orchestrator MUST call
+`worktree-guard.sh assert` and verify it exits 0.
+
+<!-- doc-regen-assert:begin -->
+```bash
+# MANDATORY assert gate before the doc regenerate commit.
+# MUST exit 0 before any commit. A non-zero exit (in_primary_checkout / dirty /
+# stale_base) is NEVER worked around — stop and surface the code_health identifier.
+if ! bash scripts/worktree-guard.sh assert; then
+  echo "worktree-guard assert failed before doc regenerate commit; aborting" >&2
+  exit 1
+fi
+```
+<!-- doc-regen-assert:end -->
+
 ## Invocation
 
 ```
