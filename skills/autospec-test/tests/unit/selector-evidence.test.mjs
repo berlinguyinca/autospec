@@ -13,7 +13,7 @@ import os from 'node:os';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPTS_DIR = path.resolve(__dirname, '../../scripts');
 
-const { extractSelectors, resolveSelector, buildEvidence, writeManifest } =
+const { extractSelectors, resolveSelector, buildEvidence, writeManifest, stripComments } =
     await import(`file://${SCRIPTS_DIR}/selector-evidence.mjs`);
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -179,6 +179,134 @@ test('resolveSelector: works with absolute file paths (no glob)', () => {
 `);
         const result = resolveSelector('form-submit', [srcFile], dir);
         assert.ok(result !== null, 'Should find form-submit with direct path');
+    } finally {
+        cleanup(dir);
+    }
+});
+
+// ── resolveSelector: comment-greenwash regression (Phase 5.5 audit #1001) ───────
+//
+// A spec author must NOT be able to greenwash PW_SELECTOR_UNVERIFIED by writing
+// the invented selector string inside an app-source comment. resolveSelector
+// strips comments before matching, so a selector that appears ONLY in a comment
+// must resolve to null (lint then hard-fails as intended).
+
+test('resolveSelector: selector that appears ONLY in a // line comment does NOT resolve', () => {
+    const dir = tmpDir();
+    try {
+        writeFile(dir, 'src/Button.tsx', `
+export function Button() {
+    // greenwash attempt: data-testid="ghost-btn" lives only in this comment
+    return <button data-testid="real-btn">Submit</button>;
+}
+`);
+        const result = resolveSelector('ghost-btn', [path.join(dir, 'src/**')], dir);
+        assert.equal(result, null, 'A selector only present in a line comment must NOT resolve');
+        // sanity: the genuinely-rendered selector still resolves
+        const real = resolveSelector('real-btn', [path.join(dir, 'src/**')], dir);
+        assert.ok(real !== null, 'real-btn (in real markup) must still resolve');
+    } finally {
+        cleanup(dir);
+    }
+});
+
+test('resolveSelector: selector that appears ONLY in a /* block comment */ does NOT resolve', () => {
+    const dir = tmpDir();
+    try {
+        writeFile(dir, 'src/Form.tsx', `
+export function Form() {
+    /* aria-label="Phantom field" is documented here but never rendered */
+    return <input aria-label="Real field" />;
+}
+`);
+        const result = resolveSelector('Phantom field', [path.join(dir, 'src/**')], dir);
+        assert.equal(result, null, 'A selector only present in a block comment must NOT resolve');
+    } finally {
+        cleanup(dir);
+    }
+});
+
+test('resolveSelector: selector inside a string literal containing // is still resolved', () => {
+    const dir = tmpDir();
+    try {
+        // The selector value itself contains "//" (e.g. a URL-ish label). The
+        // comment stripper is string-aware, so this real code must NOT be
+        // mistaken for a comment and must still resolve.
+        writeFile(dir, 'src/Link.tsx', `
+export function Link() {
+    return <a aria-label="Visit https://example.com">Go</a>;
+}
+`);
+        const result = resolveSelector('Visit https://example.com', [path.join(dir, 'src/**')], dir);
+        assert.ok(result !== null, 'Selector with // inside a string literal must still resolve');
+    } finally {
+        cleanup(dir);
+    }
+});
+
+test('resolveSelector: line number stays accurate after comment stripping', () => {
+    const dir = tmpDir();
+    try {
+        writeFile(dir, 'src/Multi.tsx', `// header comment
+export function Multi() {
+    return <button data-testid="line4-btn">X</button>;
+}
+`);
+        const result = resolveSelector('line4-btn', [path.join(dir, 'src/**')], dir);
+        assert.ok(result !== null, 'should resolve');
+        assert.ok(result.endsWith(':3'), `expected real source on line 3, got ${result}`);
+    } finally {
+        cleanup(dir);
+    }
+});
+
+test('stripComments: blanks comments, preserves line count and string literals', () => {
+    const src = `const a = 1; // trailing
+/* block
+   spanning */
+const url = "http://x"; // ok
+const tpl = \`a // not-comment\`;`;
+    const out = stripComments(src);
+    // same number of lines preserved
+    assert.equal(out.split('\n').length, src.split('\n').length);
+    // comment bodies gone
+    assert.ok(!out.includes('trailing'), 'line comment body removed');
+    assert.ok(!out.includes('spanning'), 'block comment body removed');
+    // string literal content preserved (including // inside strings)
+    assert.ok(out.includes('http://x'), 'string literal preserved');
+    assert.ok(out.includes('a // not-comment'), 'template-literal // preserved');
+});
+
+// ── resolveSelector: glob extension filter regression (Phase 5.5 audit #1001) ────
+//
+// A single-level `dir/*.tsx` glob must match ONLY .tsx files, not every file in
+// the directory. The old parseGlob dropped the extension filter for `*.tsx`,
+// over-matching .txt / .spec.ts / config files and letting a selector falsely
+// "resolve" against non-source files.
+
+test('resolveSelector: dir/*.tsx does NOT match files with other extensions', () => {
+    const dir = tmpDir();
+    try {
+        writeFile(dir, 'App.tsx', `<button data-testid="real-btn">Go</button>`);
+        // selector lives ONLY in a non-.tsx file — *.tsx must not see it
+        writeFile(dir, 'notes.txt', `data-testid="ghost-btn" mentioned in a .txt file`);
+        const ghost = resolveSelector('ghost-btn', [path.join(dir, '*.tsx')], dir);
+        assert.equal(ghost, null, '*.tsx must not match a .txt file');
+        const real = resolveSelector('real-btn', [path.join(dir, '*.tsx')], dir);
+        assert.ok(real !== null, 'real-btn in App.tsx must still resolve via *.tsx');
+    } finally {
+        cleanup(dir);
+    }
+});
+
+test('resolveSelector: dir/**/*.tsx (multi-level) still matches nested .tsx only', () => {
+    const dir = tmpDir();
+    try {
+        writeFile(dir, 'components/Deep.tsx', `<input aria-label="Deep field" />`);
+        writeFile(dir, 'components/Deep.css', `.x { content: "Deep field"; }`);
+        const result = resolveSelector('Deep field', [path.join(dir, '**/*.tsx')], dir);
+        assert.ok(result !== null && result.endsWith('.tsx:1'),
+            `expected nested .tsx match, got ${result}`);
     } finally {
         cleanup(dir);
     }

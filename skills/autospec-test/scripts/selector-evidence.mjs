@@ -120,7 +120,13 @@ export function resolveSelector(selector, srcGlobs, repoRoot) {
             continue;
         }
 
-        const lines = text.split('\n');
+        // Strip comments before matching so a spec author cannot greenwash
+        // PW_SELECTOR_UNVERIFIED by writing an invented selector string inside
+        // an app-source comment (e.g. `// data-testid="fake-btn"`). The selector
+        // must appear in real, comment-free source to count as verified.
+        // Line numbers are preserved (commented-out text becomes blanks, not
+        // deleted lines), so the reported file:line stays accurate.
+        const lines = stripComments(text).split('\n');
         for (let i = 0; i < lines.length; i++) {
             if (lines[i].includes(selector)) {
                 const relPath = path.relative(repoRoot, filePath);
@@ -130,6 +136,63 @@ export function resolveSelector(selector, srcGlobs, repoRoot) {
     }
 
     return null;
+}
+
+// ── stripComments ──────────────────────────────────────────────────────────────
+
+/**
+ * Remove JS/TS/JSX comments from source text while preserving line count and
+ * the byte-offset structure of remaining code (comment characters are replaced
+ * with spaces, newlines inside block comments are kept). This is a lightweight
+ * state-machine scanner — not a full parser — but it is string/template-literal
+ * aware so selector literals like "a // b" or "/* x" inside quotes are NOT
+ * mistaken for comments.
+ *
+ * Handles: // line comments, /* block comments *​/, and string/template literals
+ * (single, double, backtick) so comment markers inside strings are ignored.
+ *
+ * @param {string} text
+ * @returns {string} text with comment bodies blanked out, same line count
+ */
+export function stripComments(text) {
+    let out = '';
+    let i = 0;
+    const n = text.length;
+    // state: 'code' | 'line' | 'block' | 'sq' | 'dq' | 'tpl'
+    let state = 'code';
+
+    while (i < n) {
+        const c = text[i];
+        const next = i + 1 < n ? text[i + 1] : '';
+
+        if (state === 'code') {
+            if (c === '/' && next === '/') { state = 'line'; out += '  '; i += 2; continue; }
+            if (c === '/' && next === '*') { state = 'block'; out += '  '; i += 2; continue; }
+            if (c === "'") { state = 'sq'; out += c; i++; continue; }
+            if (c === '"') { state = 'dq'; out += c; i++; continue; }
+            if (c === '`') { state = 'tpl'; out += c; i++; continue; }
+            out += c; i++; continue;
+        }
+        if (state === 'line') {
+            // keep newlines, blank everything else
+            if (c === '\n') { state = 'code'; out += '\n'; i++; continue; }
+            out += ' '; i++; continue;
+        }
+        if (state === 'block') {
+            if (c === '*' && next === '/') { state = 'code'; out += '  '; i += 2; continue; }
+            out += (c === '\n') ? '\n' : ' '; i++; continue;
+        }
+        // inside a string/template literal: copy verbatim, honor escapes
+        if (state === 'sq' || state === 'dq' || state === 'tpl') {
+            if (c === '\\') { out += c + (next || ''); i += 2; continue; }
+            if (state === 'sq' && c === "'") { state = 'code'; }
+            else if (state === 'dq' && c === '"') { state = 'code'; }
+            else if (state === 'tpl' && c === '`') { state = 'code'; }
+            out += c; i++; continue;
+        }
+    }
+
+    return out;
 }
 
 // ── buildEvidence ──────────────────────────────────────────────────────────────
@@ -254,9 +317,17 @@ function parseGlob(pattern) {
         base = pattern;
     }
 
-    // Check for extension pattern like *.tsx or *.{ts,tsx}
+    // Check for a single-extension pattern like `*.tsx` -> ext ".tsx".
+    // (A brace pattern like `*.{ts,tsx}` intentionally leaves ext=null so all
+    // files are collected, since this lightweight expander does not parse braces.)
+    // NOTE: do NOT gate this on hasGlobChars of the stripped stem — `*.tsx`
+    // stripped of its extension is `*`, which IS a glob char, so the old guard
+    // wrongly skipped ext detection and made `dir/*.tsx` collect EVERY file
+    // (any extension) under dir. That over-match let a selector "resolve" against
+    // non-source files (e.g. the spec itself or .txt notes), silently weakening
+    // PW_SELECTOR_UNVERIFIED. (Phase 5.5 audit #1001.)
     const lastPart = parts[parts.length - 1];
-    if (lastPart && !hasGlobChars(lastPart.replace(/\.\w+$/, ''))) {
+    if (lastPart && !lastPart.includes('{')) {
         const extMatch = lastPart.match(/\*(\.\w+)$/);
         if (extMatch) ext = extMatch[1];
     }

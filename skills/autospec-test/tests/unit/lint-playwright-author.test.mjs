@@ -461,3 +461,65 @@ test('runWithRetry: default MAX is 5', async () => {
     await assert.rejects(async () => await runWithRetry(authorFn, '/tmp/fake.spec.ts'));
     assert.equal(callCount, 5);
 });
+
+// ── PW_SELECTOR_UNVERIFIED: comment-greenwash regression (Phase 5.5 audit #1001) ─
+//
+// End-to-end seam test: with resolveSelector:true the lint delegates to
+// selector-evidence.mjs's resolver. A selector that exists ONLY in an app-source
+// comment must NOT count as verified — the lint must hard-fail PW_SELECTOR_UNVERIFIED.
+
+test('lintSpec: selector present only in an app-source comment hard-fails PW_SELECTOR_UNVERIFIED', async () => {
+    const { dir, specPath } = tmpSpec(`
+import { test, expect } from '@playwright/test';
+test('ghost', async ({ page }) => {
+    await page.getByTestId('ghost-btn').click();
+    await expect(page.getByRole('status')).toContainText('ok');
+});
+`.trim());
+    try {
+        // App source mentions the selector ONLY inside a comment (greenwash attempt).
+        tmpSrc(dir, 'App.tsx', `
+export function App() {
+    // data-testid="ghost-btn" is described here but never rendered
+    return <button data-testid="real-btn">Go</button>;
+}
+`);
+        const result = await lintSpec(specPath, {
+            appSrcGlobs: [path.join(dir, '*.tsx')],
+            assignedFile: specPath,
+            resolveSelector: true,
+            repoRoot: dir,
+        });
+        assert.equal(result.ok, false, 'comment-only selector must NOT pass lint');
+        assert.ok(result.findings.some(f => f.rule === 'PW_SELECTOR_UNVERIFIED'),
+            `expected PW_SELECTOR_UNVERIFIED, got ${JSON.stringify(result.findings)}`);
+    } finally {
+        cleanup(dir);
+    }
+});
+
+test('lintSpec: selector in real (non-comment) markup passes PW_SELECTOR_UNVERIFIED', async () => {
+    const { dir, specPath } = tmpSpec(`
+import { test, expect } from '@playwright/test';
+test('real', async ({ page }) => {
+    await page.getByTestId('real-btn').click();
+});
+`.trim());
+    try {
+        tmpSrc(dir, 'App.tsx', `
+export function App() {
+    return <button data-testid="real-btn">Go</button>;
+}
+`);
+        const result = await lintSpec(specPath, {
+            appSrcGlobs: [path.join(dir, '*.tsx')],
+            assignedFile: specPath,
+            resolveSelector: true,
+            repoRoot: dir,
+        });
+        assert.ok(!result.findings.some(f => f.rule === 'PW_SELECTOR_UNVERIFIED'),
+            `real-btn should be verified, got ${JSON.stringify(result.findings)}`);
+    } finally {
+        cleanup(dir);
+    }
+});
