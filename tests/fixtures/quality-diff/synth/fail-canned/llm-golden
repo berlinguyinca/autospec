@@ -1,0 +1,1 @@
+Implement a read-through cache for the user profile API endpoint with a configurable TTL, write-through invalidation, and graceful database fallback when the cache backend is unreachable.

@@ -1,0 +1,6 @@
+Refine this prompt.
+
+## Adversarial review
+- What happens on empty input? Add a test.
+- What happens on malformed input? Add a test.
+- What forbidden paths could the change accidentally touch? Enforce allowlist.

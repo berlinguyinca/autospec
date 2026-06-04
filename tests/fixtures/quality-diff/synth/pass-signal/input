@@ -1,0 +1,1 @@
+Add a caching layer to the user profile API endpoint to reduce database load on repeated reads. The cache should honor a configurable TTL, invalidate on profile writes, and degrade gracefully to a direct database read when the cache backend is unreachable.
