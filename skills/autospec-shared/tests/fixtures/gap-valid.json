@@ -1,0 +1,1 @@
+[{"gap_id":"G1","dimension":"correctness","severity":"medium","file":"a.sh","line":7,"title":"trailing pipe bug","body":"The trailing pipe causes a subshell exit to be swallowed.","dedupe_key":"trailing-pipe-bug-a-sh-7"}]

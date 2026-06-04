@@ -1,0 +1,6 @@
+[
+  {"evidence":"token efficiency finding 1","remediation":"reduce context window","source_prs":["#101"],"dimension":"performance"},
+  {"evidence":"token efficiency finding 2","remediation":"cache repeated blocks","source_prs":["#102"]},
+  {"evidence":"token efficiency finding 3 — critical","remediation":"split large prompt","source_prs":["#103"],"dimension":"performance"},
+  {"evidence":"token efficiency finding 4 — critical","remediation":"prune dead tokens","source_prs":["#104"],"dimension":"performance"}
+]
