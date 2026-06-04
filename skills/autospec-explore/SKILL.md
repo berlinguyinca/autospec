@@ -211,27 +211,40 @@ integration (E), and the `check_autospec_explore_contract` gate in `scripts/vali
 
 ## Sandbox branch contract
 
-1. **Creation**: at run start, the orchestrator invokes
+1. **Worktree assert (MUST exit 0 before any sandbox commit/push)**: the
+   orchestrator MUST run `bash scripts/worktree-guard.sh assert` before invoking
+   `explore-sandbox.sh` or performing any sandbox commit step. A non-zero exit
+   (in_primary_checkout / dirty / stale_base) is NEVER worked around — emit
+   the `code_health` identifier from the guard, and stop. The primary checkout
+   is read-only for agents; all sandbox work happens in a linked worktree.
+   ```bash
+   # MANDATORY assert gate: MUST exit 0 before any sandbox commit/push.
+   if ! bash scripts/worktree-guard.sh assert; then
+     echo "worktree-guard assert failed (see code_health identifier above); aborting sandbox commit" >&2
+     exit 1
+   fi
+   ```
+2. **Creation**: at run start, the orchestrator invokes
    `scripts/explore-sandbox.sh --slug <slug> --base main` which creates
    `autospec/explore/<YYYY-MM-DD>-<slug>` off `origin/main` (or the supplied
    `--base`) if not already present, pushes the branch to `origin`, and writes
    `.autospec/explore-mode.json` with `{branch, slug, base, head_sha, created_at}`.
    The branch lives until the operator merges or deletes it.
-2. **Idempotency**: re-invocation with the same `--slug` reuses the existing
+3. **Idempotency**: re-invocation with the same `--slug` reuses the existing
    sandbox branch — no error, no duplicate, no force-push. The script verifies
    the existing branch tracks the expected base via `git merge-base` and
    refreshes `.autospec/explore-mode.json` with the current head SHA.
-3. **Implementer integration**: every child-issue implementer reads
+4. **Implementer integration**: every child-issue implementer reads
    `.autospec/explore-mode.json` (written by the sandbox script) to learn the
    sandbox branch name. PRs target `--base <sandbox-branch>` instead of
    `main`. This is enforced by extending the Phase 4 implementer prompt
    template (`skills/autospec-run/prompts/phase4-implementer.md`) in Issue B.
-4. **No accidental main merges**: orchestrator refuses to invoke
+5. **No accidental main merges**: orchestrator refuses to invoke
    `gh pr merge` against `main` while `.autospec/explore-mode.json` is
    present. The sandbox → main merge is a separate explicit operator
    action (`/autospec-explore-promote <sandbox-branch>` — out of scope
    for v1; documented as the manual path).
-5. **Sandbox refresh policy**: the sandbox branch is NOT auto-rebased onto
+6. **Sandbox refresh policy**: the sandbox branch is NOT auto-rebased onto
    main. Operator does that explicitly. This is intentional — rebasing
    under autonomous shipping is unsafe.
 
