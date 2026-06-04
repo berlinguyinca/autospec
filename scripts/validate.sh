@@ -151,11 +151,21 @@ check_keyword_routing_section() {
             || fail "autospec-listen: $trio missing explore -> /autospec-explore verb-map row"
         grep -q 'explore-confirm' "$skill_dir/$trio" \
             || fail "autospec-listen: $trio missing 'explore-confirm' gate literal"
+        # Issue #954: the imperative `fix` verb-map row must route to the
+        # `/autospec` umbrella with NO gate. The `fix` trigger literal is emitted
+        # by the #954 classifier branch in scripts/listener-match.sh; keep the
+        # trio row in lockstep with it.
+        grep -q '| `fix`' "$skill_dir/$trio" \
+            || fail "autospec-listen: $trio missing 'fix' -> /autospec verb-map row"
     done
     # The explore-confirm gate literal honored in the trio MUST exactly match the
     # one emitted by the classifier (scripts/listener-match.sh, issue #909).
     grep -q 'explore-confirm' scripts/listener-match.sh \
         || fail "scripts/listener-match.sh missing 'explore-confirm' gate literal (classifier/trio drift)"
+    # The `fix` trigger literal honored in the trio MUST exactly match the one
+    # emitted by the classifier (scripts/listener-match.sh, issue #954).
+    grep -q 'autospec fix imperative' scripts/listener-match.sh \
+        || fail "scripts/listener-match.sh missing 'fix' imperative route (classifier/trio drift)"
 }
 
 # Gap-remediation invariants (issue #535, deps #533/#534): the autospec-run

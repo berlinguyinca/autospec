@@ -402,3 +402,169 @@ setup() {
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
 }
+
+# ── 'fix' intent → /autospec end-to-end, NO gate (#954, spec §D1) ────────────
+#
+# CLAIM table: imperative whole-word `fix` routes to the `/autospec` umbrella
+# (spec → issues → run) — a fix needs scoping before implementation. The route
+# carries trigger=fix, intent=imperative, confidence=0.7, and NO gate / NO
+# confirm (autospec is not a perpetual loop). Evaluated AFTER explore/refine/run
+# so it never cannibalizes the more-specific branches.
+
+@test "classify: 'fix the login flow' → autospec, intent=imperative, gate=null" {
+    run "$MATCH" --classify "fix the login flow"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "fix" ]
+    [ "$(printf '%s' "$output" | jq -r .intent)" = "imperative" ]
+    [ "$(printf '%s' "$output" | jq -r .confidence)" = "0.7" ]
+    [ "$(printf '%s' "$output" | jq -r .gate)" = "null" ]
+}
+
+@test "classify: 'fix the race condition in the watchdog' → autospec, gate=null" {
+    run "$MATCH" --classify "fix the race condition in the watchdog"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "fix" ]
+    [ "$(printf '%s' "$output" | jq -r .intent)" = "imperative" ]
+    [ "$(printf '%s' "$output" | jq -r .gate)" = "null" ]
+}
+
+@test "classify: 'please fix the broken pagination' → autospec, gate=null" {
+    run "$MATCH" --classify "please fix the broken pagination"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "fix" ]
+    [ "$(printf '%s' "$output" | jq -r .intent)" = "imperative" ]
+    [ "$(printf '%s' "$output" | jq -r .gate)" = "null" ]
+}
+
+# ── 'fix' SUPPRESS table — THE PERMANENT SAFETY GUARD (#954, spec §D1) ────────
+#
+# Trivial-fix phrasings (typo/comment/indentation/formatting/spelling/quick fix)
+# are too small to warrant the /autospec spec→issues→run pipeline and MUST yield
+# match:false (stay plain). Plus the inherited D4 question/negation/past guards
+# ("did you fix it?", "don't fix that yet", "I fixed it"). Do NOT weaken these —
+# a false positive here launches a full end-to-end pipeline on chatter.
+
+@test "classify: 'fix this typo' → match:false (trivial-fix suppressor)" {
+    run "$MATCH" --classify "fix this typo"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'fix the typo' → match:false (trivial-fix suppressor)" {
+    run "$MATCH" --classify "fix the typo"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'fix the comment' → match:false (trivial-fix suppressor)" {
+    run "$MATCH" --classify "fix the comment"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'fix the indentation' → match:false (trivial-fix suppressor)" {
+    run "$MATCH" --classify "fix the indentation"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'fix the formatting' → match:false (trivial-fix suppressor)" {
+    run "$MATCH" --classify "fix the formatting"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'quick fix' → match:false (trivial-fix suppressor)" {
+    run "$MATCH" --classify "quick fix"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'fix the spelling' → match:false (trivial-fix suppressor)" {
+    run "$MATCH" --classify "fix the spelling"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+# Inherited D4 guards applied to 'fix'.
+
+@test "classify: 'did you fix it?' → match:false (interrogative)" {
+    run "$MATCH" --classify "did you fix it?"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+# No-punctuation interrogative regression (#954 peer-review): "did you fix it"
+# without a trailing '?' must still be caught by the interrogative lead-in.
+@test "classify: 'did you fix it' (no ?) → match:false (interrogative lead-in)" {
+    run "$MATCH" --classify "did you fix it"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: \"don't fix that yet\" → match:false (negated)" {
+    run "$MATCH" --classify "don't fix that yet"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'I fixed it' → match:false (past tense — not the fix verb)" {
+    run "$MATCH" --classify "I fixed it"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+# Additional suppressors surfaced by #954 adversarial self-review (the #909
+# noun-co-occurrence lesson). "fix the whitespace" is a cosmetic sibling of
+# indentation/formatting; "a fix" is the noun not the imperative verb;
+# "i'll fix … later" / "fix … later" is a deferral, not a now-action.
+
+@test "classify: 'fix the whitespace' → match:false (cosmetic suppressor)" {
+    run "$MATCH" --classify "fix the whitespace"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'this needs a fix' → match:false ('a fix' is a noun, not imperative)" {
+    run "$MATCH" --classify "this needs a fix"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: \"I'll fix it later\" → match:false (deferred, not a now-action)" {
+    run "$MATCH" --classify "I'll fix it later"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+@test "classify: 'can you fix the login bug' → match:false (interrogative)" {
+    run "$MATCH" --classify "can you fix the login bug"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
+# Positive guard: a genuine imperative fix with surrounding words still routes.
+@test "classify: \"let's fix the deploy pipeline\" → autospec (genuine imperative)" {
+    run "$MATCH" --classify "let's fix the deploy pipeline"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec" ]
+    [ "$(printf '%s' "$output" | jq -r .trigger)" = "fix" ]
+}
+
+# Regression guard (#954 peer-review): the descriptive "a fix" suppressor must
+# NOT swallow a co-occurring build/ship/implement verb. "ship a fix" keeps its
+# pre-existing ship → autospec-run route (the fix branch falls through, it does
+# not hard no-match).
+@test "classify: 'ship a fix' → autospec-run (ship route preserved, not swallowed)" {
+    run "$MATCH" --classify "ship a fix"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-run" ]
+}

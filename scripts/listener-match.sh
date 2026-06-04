@@ -198,6 +198,7 @@ is_imperative() {
     esac
     for q in should could would shall "do we" "do you" "can we" "can you" \
              "should we" "should i" "could we" "could you" "would you" \
+             "did you" "did we" "did i" "does it" "do they" "do i" \
              why what how when "are we" "is it" "are you"; do
         case "$text" in
             "$q "*|"$q") return 1 ;;
@@ -415,6 +416,68 @@ EOF
             emit_classify_json true autospec-explore explore imperative 0.7 "$is_auto" "" explore-confirm
         else
             emit_classify_json false autospec-explore explore incidental 0.2 false "" ""
+        fi
+        return 0
+    fi
+
+    # ── 'fix' — imperative bug-fix intent → /autospec end-to-end (D1, #954) ──────
+    # Whole-word imperative `fix` routes to the `/autospec` umbrella (spec →
+    # issues → run): a fix needs scoping before implementation, unlike the bare
+    # implement/build/ship verbs which route straight to autospec-run. NO gate,
+    # NO confirm (autospec is not a perpetual loop) — the standard one-line
+    # opt-out applies. Confidence 0.7.
+    #
+    # PLACEMENT: evaluated AFTER explore/refine/run (above) so "fix it by
+    # exploring..." and combined-refine phrasings keep their more-specific route,
+    # and BEFORE the implement/build/ship chain below so an incidental build/ship
+    # word in a fix request does not steal it. Mirrors the explore gate's
+    # explicit emit-and-return shape.
+    #
+    # Trivial-fix suppressors (the negative table — false-negative biased): tiny
+    # cosmetic fixes are too small to warrant the full pipeline and must stay
+    # plain. Implemented branch-local (mirroring the run-suppressed objects gate)
+    # so they short-circuit BEFORE the route emits. The inherited D4
+    # question/negation/past guards in is_imperative() cover "did you fix it?",
+    # "don't fix that yet", and "I fixed it" (past tense — 'fixed' is not the
+    # whole word 'fix').
+    # Two tiers of suppression — different exit semantics:
+    #
+    #   (a) Cosmetic table → HARD no-match (stay plain, per spec §D1). These are
+    #       complete trivial-fix requests; emit match:false and return.
+    #   (b) Descriptive/deferred ("a fix" the noun, "... later" the deferral) →
+    #       SKIP the fix route but FALL THROUGH to the downstream
+    #       implement/build/ship chain, so a co-occurring imperative verb still
+    #       routes ("ship a fix" must keep its ship → autospec-run route — #954
+    #       peer-review regression). A bare "this needs a fix" has no other verb
+    #       and falls through to the no-verb-matched no-match anyway.
+    _fix_skip=0
+    if has_word "$text_lc" "fix"; then
+        # (a) Trivial-fix cosmetic table (spec §D1 pins the first seven; "fix the
+        # whitespace" added during #954 adversarial self-review as a cosmetic
+        # sibling of indentation/formatting). False-negative biased; hard exit.
+        for _tf in "fix this typo" "fix the typo" "fix the comment" \
+                   "fix the indentation" "fix the formatting" "quick fix" \
+                   "fix the spelling" "fix the whitespace"; do
+            case "$text_lc" in
+                *"$_tf"*) emit_classify_json false "" "" none 0 false "" ""; return 0 ;;
+            esac
+        done
+        # (b) Descriptive/deferred 'fix' phrasings surfaced by #954 self-review
+        # (the #909 noun-co-occurrence lesson): "a fix" is the NOUN, not the
+        # imperative verb; "... later" is a deferral, not a now-action. Skip the
+        # fix route and let the downstream chain decide — do NOT hard-exit here,
+        # so "ship a fix" keeps its ship route.
+        for _fd in "a fix" "later"; do
+            case "$text_lc" in
+                *"$_fd"*) _fix_skip=1; break ;;
+            esac
+        done
+    fi
+    if has_word "$text_lc" "fix" && [ "$_fix_skip" -eq 0 ]; then
+        if is_imperative "$text_lc"; then
+            emit_classify_json true autospec fix imperative 0.7 "$is_auto" "" ""
+        else
+            emit_classify_json false autospec fix incidental 0.2 false "" ""
         fi
         return 0
     fi
