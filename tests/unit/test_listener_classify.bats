@@ -500,6 +500,14 @@ setup() {
     [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
 }
 
+# No-punctuation interrogative regression (#954 peer-review): "did you fix it"
+# without a trailing '?' must still be caught by the interrogative lead-in.
+@test "classify: 'did you fix it' (no ?) → match:false (interrogative lead-in)" {
+    run "$MATCH" --classify "did you fix it"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "false" ]
+}
+
 @test "classify: \"don't fix that yet\" → match:false (negated)" {
     run "$MATCH" --classify "don't fix that yet"
     [ "$status" -eq 0 ]
@@ -548,4 +556,15 @@ setup() {
     [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
     [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec" ]
     [ "$(printf '%s' "$output" | jq -r .trigger)" = "fix" ]
+}
+
+# Regression guard (#954 peer-review): the descriptive "a fix" suppressor must
+# NOT swallow a co-occurring build/ship/implement verb. "ship a fix" keeps its
+# pre-existing ship → autospec-run route (the fix branch falls through, it does
+# not hard no-match).
+@test "classify: 'ship a fix' → autospec-run (ship route preserved, not swallowed)" {
+    run "$MATCH" --classify "ship a fix"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r .match)" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r .skill)" = "autospec-run" ]
 }
