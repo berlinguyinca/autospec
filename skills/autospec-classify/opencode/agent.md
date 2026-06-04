@@ -109,7 +109,7 @@ This workflow assumes a small set of capabilities. Map each one to your harness'
 | Subagent model tier         | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: `gpt-5.1-codex-spark` + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; retry the same subagent UP on unavailability |
 | Subagent dispatch policy   | per AGENTS.md decision matrix        | per AGENTS.md decision matrix            | per AGENTS.md decision matrix            | inline with main-session token cost                |
 
-**Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches use a **two-tier policy**: Tier A (top model + extended thinking) for spec work — including this skill's per-issue review (review/label is spec-adjacent) — and Tier B (cheaper model + medium thinking) for implementation work (not used by this skill). The orchestrator keeps the user's invoked model. Fall back UP the tier on quota/capacity or other unavailability by retrying the same subagent with the stronger tier while preserving parent context.
+**Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches use a **two-tier policy**: Tier A (top model + extended thinking) for spec work and Tier B (cheaper model + medium thinking) for implementation work. This skill's per-issue classification is **deterministic-first**: the deterministic rubric runs with no LLM call, and only ambiguous issues escalate to a single Tier-B LLM tie-breaker — never Tier A. The orchestrator keeps the user's invoked model. Fall back UP the tier on quota/capacity or other unavailability by retrying the same subagent with the stronger tier while preserving parent context.
 
 
 ## Harness detection (run once at skill start, before Phase 0)
@@ -203,7 +203,15 @@ Default for issues that lack any of these signals: `ctx:64k`, `reasoning:medium`
 
 ## Per-issue procedure
 
-> **Model tier:** `TIER_A` (spec work) — top model with extended thinking; resolved at startup.
+> **Model tier:** **deterministic-first; `TIER_B` on ambiguity (never `TIER_A`).**
+> Classification runs the deterministic
+> rubric (`scripts/classify-model-fit.sh` — file counts, verb keywords, per
+> tracker #421) FIRST, with **no LLM dispatch** for issues it can score
+> confidently. Only issues the rubric flags as ambiguous (confidence below
+> `LLM_ESCALATION_THRESHOLD`, default 0.3) escalate to a single `TIER_B` LLM
+> tie-breaker — never `TIER_A`. Sibling normalization stays deterministic. Set
+> `AUTOSPEC_REVIEWER_TIER=opus` only governs the run-trio reviewer, not this
+> classifier; the classifier's LLM tie-breaker is always `TIER_B`.
 
 For each candidate issue:
 
@@ -213,8 +221,14 @@ For each candidate issue:
      once at the top of the run).
    - Skip — do not modify body, do not assign a model-fit class.
 
-2. **Classify.** Apply the rubric to assign one `ctx:*` and one `reasoning:*`
-   label. Print the rationale in the dry-run preview.
+2. **Classify (deterministic-first).** Run the deterministic rubric first
+   (`scripts/classify-model-fit.sh <body-file>`): it assigns one `ctx:*` and one
+   `reasoning:*` label from file counts and verb keywords with **zero LLM cost**.
+   Only when the rubric reports `deterministic:false` (confidence below
+   `LLM_ESCALATION_THRESHOLD`) escalate that single ambiguous issue to one
+   `TIER_B` LLM tie-breaker; otherwise take the deterministic result as final.
+   Print the rationale (and whether it was deterministic or escalated) in the
+   dry-run preview.
 
 3. **Apply labels.**
    - `gh label create ctx:32k --color c5def5 --force` (and ctx:64k, ctx:120k).

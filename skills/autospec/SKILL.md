@@ -934,7 +934,7 @@ Pass the following prompt verbatim to each background subagent:
 >        fi
 >        det_exit=$?
 >
->      **Model tier:** `TIER_B` for normal issues; `TIER_A` for `regression`/`priority:high` issues. Silently fall back to `TIER_A` if `TIER_B` unavailable.
+>      **Model tier:** `TIER_B` for ALL issues — including `regression` and `priority:high`. The single fused reviewer carries the regression gap-check (see brief below), so no second Tier-A pass is dispatched. **Escape hatch:** `AUTOSPEC_REVIEWER_TIER` overrides the reviewer tier — unset (or any value other than `opus`) → `TIER_B` (sonnet); set `AUTOSPEC_REVIEWER_TIER=opus` to restore `TIER_A` for the reviewer. Silently fall back to `TIER_A` if `TIER_B` is unavailable.
 >
 >      **Assemble reviewer prompt** — call `gen-reviewer-prompt.sh` to compose the combined prompt (static cached prefix + dynamic suffix):
 >      ```bash
@@ -974,6 +974,7 @@ Pass the following prompt verbatim to each background subagent:
 >        > 6. Check correctness, edge cases, missing tests, AGENTS.md compliance (TDD, no mocks, conventional commits), whether every new code unit exists for a concrete issue/spec requirement rather than convenience, and whether deprecated routes, caches, buckets, stores, workers, config keys, UI paths, docs, specs, tests, or fixtures were removed instead of revived to make tests pass.
 >        > 7. Collect findings as a numbered list.
 >        > 8. Critical self-question before LGTM: "What else could still pass here while the real user workflow fails, and how could this be better?" Check especially mocked-vs-deployed behavior, external service assumptions, fallback paths, user-visible outcomes, and missing no-mock smoke coverage. If the answer is actionable inside the issue scope, emit it as a finding or required test.
+>        > 9. **Regression gap-check (MANDATORY for `regression`/`priority:high` issues; skip otherwise):** ask "would the reviewer have caught the original gap?" If the fused review as written would NOT have caught the gap this regression closes, add the missing checklist item(s) to `reports/autospec-review/reviewer-lessons.md` (one entry per item, with parent `gap_id` and date) and apply those new checks to this diff before issuing the verdict. This folds the former second-pass regression meta-review into this single reviewer pass — the reviewer-lessons write-path is preserved here; there is no second Tier-A dispatch.
 >        >
 >        > **Hard limit:** max **25 tool calls total** (Parts 1 + 2 combined). If budget exhausted, append `RULE_ID:OUT_OF_SCOPE: reviewer budget exhausted; PR needs human review` and proceed to verdict.
 >        >
@@ -1002,8 +1003,8 @@ Pass the following prompt verbatim to each background subagent:
 >        Run failure cleanup (comment, swap label, close PR).
 >        rm -f /tmp/guardian-<PR>.md
 >      <!-- guardian-block:end -->
->    - **Regression meta-review** (only for `regression`/`priority:high` issues, after LGTM passes): dispatch a second `TIER_A` subagent: "Would the fused reviewer have caught the original gap? If yes, add missing checklist items to `reports/autospec-review/reviewer-lessons.md` (entry per item, parent gap_id, date) and re-review. Both passes must approve before merge."
->    - If LGTM (and meta-review passes if applicable): break SUCCESS.
+>    - **Regression coverage** for `regression`/`priority:high` issues is handled inside the single fused reviewer brief (Part 2 item 9 above): the reviewer self-asks "would the reviewer have caught the original gap?", writes any missing checks to `reports/autospec-review/reviewer-lessons.md`, and applies them before its verdict. No second Tier-A dispatch.
+>    - If LGTM: break SUCCESS.
 >    ```bash
 >    # autospec-stop sentinel check — inside process(ISSUE), after each major step
 >    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
