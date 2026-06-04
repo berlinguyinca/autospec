@@ -1,0 +1,5 @@
+[
+  {"gap_id":"G1","dimension":"correctness","severity":"high","file":"b.sh","line":12,"title":"missing null check","body":"Dereferencing without null guard.","dedupe_key":"missing-null-check-b-sh-12"},
+  {"evidence":"some text","remediation":"fix it","source_prs":["#42"],"dimension":"performance"},
+  {"gap_id":"G3","dimension":"security","severity":"critical","file":"c.sh","line":5,"title":"sql injection risk","body":"Unescaped user input in query.","dedupe_key":"sql-injection-c-sh-5"}
+]

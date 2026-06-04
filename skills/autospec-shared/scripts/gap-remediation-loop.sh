@@ -21,10 +21,12 @@
 #   AUTOSPEC_GAP_MAX_ROUNDS   — hard round cap (default: 2)
 #
 # Output (stdout, last line): "gap-remediation: survivors=<N> filed=<N> round=<N>"
+#   When gaps are dropped: "gap-remediation: survivors=<N> filed=<N> round=<N> dropped=<N>"
 #
 # Exit codes:
 #   0  always (best-effort; emits WARN on recoverable problems)
 #   2  gh CLI absent (hard fail — cannot file issues)
+#   3  input was non-empty but ALL gaps failed schema (nothing filed — fix the producer)
 #
 # Requires: bash 3.2+, gh, jq
 
@@ -58,7 +60,37 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-_report() { printf 'gap-remediation: survivors=%s filed=%s round=%s\n' "$1" "$2" "$3"; }
+_report() {
+  local _survivors="$1" _filed="$2" _round="$3" _dropped="${4:-0}"
+  if [ "$_dropped" -gt 0 ]; then
+    printf 'gap-remediation: survivors=%s filed=%s round=%s dropped=%s\n' \
+      "$_survivors" "$_filed" "$_round" "$_dropped"
+  else
+    printf 'gap-remediation: survivors=%s filed=%s round=%s\n' \
+      "$_survivors" "$_filed" "$_round"
+  fi
+}
+
+# _missing_fields <json-string> — print comma-separated list of missing/null required fields.
+_missing_fields() {
+  local obj="$1" key missing_list="" sep=""
+  for key in gap_id dimension severity file line title body dedupe_key; do
+    if ! printf '%s' "$obj" | jq -e --arg k "$key" 'has($k) and (.[$k] != null)' >/dev/null 2>&1; then
+      missing_list="${missing_list}${sep}${key}"
+      sep=","
+    fi
+  done
+  printf '%s' "$missing_list"
+}
+
+# _gap_id_label <json-string> — print "(gap_id=<val>)" if gap_id present, else "".
+_gap_id_label() {
+  local obj="$1" gid
+  gid="$(printf '%s' "$obj" | jq -r '.gap_id // empty' 2>/dev/null || true)"
+  if [ -n "$gid" ]; then
+    printf ' (gap_id=%s)' "$gid"
+  fi
+}
 
 # Hard requirement: gh must exist to file issues.
 if ! command -v gh >/dev/null 2>&1; then
@@ -176,14 +208,19 @@ _seen_in_run() {
 }
 _filed=0
 _survivors=0
+_dropped=0
 _i=0
 while [ "$_i" -lt "$_gap_count" ]; do
   _gap="$(jq -c ".[$_i]" "$GAPS_FILE")"
   _i=$((_i + 1))
 
-  # Schema gate — skip invalid objects with a warning.
+  # Schema gate — skip invalid objects with a detailed warning.
   if ! gap_validate_object "$_gap"; then
-    printf 'gap-remediation: WARN gap %s failed schema; skipping\n' "$_i" >&2
+    _dropped=$((_dropped + 1))
+    _mf="$(_missing_fields "$_gap")"
+    _gid_label="$(_gap_id_label "$_gap")"
+    printf 'gap-remediation: WARN gap %s%s failed schema; missing: %s\n' \
+      "$_i" "$_gid_label" "$_mf" >&2
     continue
   fi
 
@@ -247,6 +284,14 @@ while [ "$_i" -lt "$_gap_count" ]; do
   fi
 done
 
+# ── All-dropped exit-3: input non-empty but every gap failed schema ────────────
+if [ "$_gap_count" -gt 0 ] && [ "$_dropped" -eq "$_gap_count" ]; then
+  printf 'gap-remediation: ERROR all %s gaps failed schema; nothing filed — fix the producer (see emit-gaps.sh) and re-run\n' \
+    "$_gap_count" >&2
+  _report 0 0 "$_current_round" "$_dropped"
+  exit 3
+fi
+
 # ── Advance round state once a remediation round was attempted ────────────────
 # Advance whenever filing was requested AND there were survivors to file —
 # regardless of gh success — so persistent `gh issue create` failures still
@@ -260,5 +305,5 @@ if [ "$DO_FILE" -eq 1 ] && [ "$_survivors" -gt 0 ]; then
   _current_round="$_new_round"
 fi
 
-_report "$_survivors" "$_filed" "$_current_round"
+_report "$_survivors" "$_filed" "$_current_round" "$_dropped"
 exit 0
