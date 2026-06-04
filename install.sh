@@ -933,6 +933,47 @@ skills/autospec-sweep/scripts/wizard.sh::autospec-sweep-wizard.sh"
     info "copy_runtime_skill_scripts: copied per-skill runtime scripts to $autospec_scripts_dir/"
 }
 
+# expand_skill_file <src> <dest>
+#
+# D2 block-expansion step (§5 D2, §6 version-skew rule).
+# If <src> contains an autospec-block marker, pipe it through the REPO copy of
+# expand-skill-blocks.sh and write the result to <dest>.  Files without markers
+# copy byte-identically.  Fails closed: if the expander exits non-zero, emit a
+# clear message and return non-zero without writing <dest>.  After a successful
+# expansion the installed copy is re-checked for any residual marker; if found,
+# the dest is removed and the function returns non-zero.
+#
+# Version-skew rule: the expander is ALWAYS resolved relative to this script's
+# own REPO_ROOT — never from a previously-installed ~/.autospec/scripts copy.
+#
+# Bash 3.2-compatible: no associative arrays, no RETURN traps, if/then/fi for
+# one-sided conditionals under set -e.
+expand_skill_file() {
+    _esf_src="$1"
+    _esf_dest="$2"
+    _esf_expander="$REPO_ROOT/scripts/expand-skill-blocks.sh"
+
+    if grep -q '<!-- autospec-block:' "$_esf_src" 2>/dev/null; then
+        if [ ! -x "$_esf_expander" ]; then
+            err "expand_skill_file: expander not found or not executable: $_esf_expander"
+            return 1
+        fi
+        if ! "$_esf_expander" "$_esf_src" > "$_esf_dest"; then
+            err "expand_skill_file: expander failed for $_esf_src; aborting install of this file"
+            rm -f "$_esf_dest"
+            return 1
+        fi
+        # Post-install safety: ensure no unexpanded marker survived.
+        if grep -q '<!-- autospec-block:' "$_esf_dest" 2>/dev/null; then
+            err "expand_skill_file: installed copy still contains unexpanded marker: $_esf_dest"
+            rm -f "$_esf_dest"
+            return 1
+        fi
+    else
+        cp "$_esf_src" "$_esf_dest"
+    fi
+}
+
 copy_schemas() {
     # Copy repo-root schemas/*.json into $AUTOSPEC_SCHEMAS_DIR (default ~/.autospec/schemas/).
     # Mirrors copy_repo_scripts for the schemas/ directory. Runs on every install
@@ -996,7 +1037,53 @@ for skill in $SKILLS_TO_RUN; do
         else
             err  "    FAIL: $skill ($harness)"
             failures=$((failures + 1))
+            info ""
+            continue
         fi
+
+        # D2 block-expansion pass: after the per-skill installer copies files,
+        # expand any SKILL.md that contains autospec-block markers.  Zero
+        # behavior change for skills without markers (byte-identical copy path).
+        # Version-skew rule §6: always invoke $REPO_ROOT/scripts/expand-skill-blocks.sh.
+        if [ "$DRY_RUN" -eq 0 ]; then
+            _src="$SKILLS_DIR/$skill/SKILL.md"
+            if [ -f "$_src" ] && grep -q '<!-- autospec-block:' "$_src" 2>/dev/null; then
+                # Determine installed SKILL.md paths for this harness.
+                _claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+                _codex_dir="${CODEX_HOME:-$HOME/.codex}"
+
+                case "$harness" in
+                    claude)
+                        _dest="$_claude_dir/skills/$skill/SKILL.md"
+                        if [ -f "$_dest" ]; then
+                            if ! expand_skill_file "$_src" "$_dest"; then
+                                err "  expand: failed for $skill ($harness); marking pair failed"
+                                failures=$((failures + 1))
+                            else
+                                info "  expanded: $_dest"
+                            fi
+                        fi
+                        ;;
+                    codex)
+                        _dest="$_codex_dir/skills/$skill/SKILL.md"
+                        if [ -f "$_dest" ]; then
+                            if ! expand_skill_file "$_src" "$_dest"; then
+                                err "  expand: failed for $skill ($harness); marking pair failed"
+                                failures=$((failures + 1))
+                            else
+                                info "  expanded: $_dest"
+                            fi
+                        fi
+                        ;;
+                    opencode)
+                        # OpenCode installs agent.md, not SKILL.md; no expansion needed here.
+                        ;;
+                esac
+                unset _dest _claude_dir _codex_dir
+            fi
+            unset _src
+        fi
+
         info ""
     done
 done
