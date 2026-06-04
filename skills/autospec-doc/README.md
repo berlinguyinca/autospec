@@ -91,6 +91,13 @@ documentation:
   examples:
     verify: true               # docs-as-tests on/off (default: true)
     sandbox: worktree          # example execution isolation (default: worktree)
+  # documentation.auto_regenerate — opt-in to automatic doc regeneration in runs.
+  # Default: false. Three ways to enable for a given run (highest precedence first):
+  #   1. Add "docs: skip" to the issue body to suppress regardless of other settings.
+  #   2. Add "docs: generate" to the issue body to enable for that issue only.
+  #   3. Set auto_regenerate: true here, or pass --with-docs (AUTOSPEC_WITH_DOCS=1).
+  documentation:
+    auto_regenerate: false
 ```
 
 **Folder contract** per audience: `index.md`, `getting-started.md`,
@@ -101,16 +108,22 @@ are exported from `scripts/doc-config.mjs` as `FOLDER_CONTRACT`.
 
 ### Migration note
 
-The `style` and `examples` keys are **new and optional** — existing
-`documentation:` configs keep working unchanged. If your repo already declares
-`audiences:` (including custom audiences such as `operators` or
+The `style`, `examples`, and `documentation` keys are **new and optional** —
+existing `documentation:` configs keep working unchanged. If your repo already
+declares `audiences:` (including custom audiences such as `operators` or
 `security-reviewers`, or legacy entries keyed by `id`/`label`), those entries
 are preserved **verbatim**: the loader never rewrites their
 `name`/`path`/`focus`/`require_scope` fields and does **not** inject the four
 defaults when any audience is already declared. To adopt the new behavior, add a
 `style:` and/or `examples:` block; omit them to accept the defaults
 (`palette: light-blue`, `examples.verify: true`, `examples.sandbox: worktree`).
-No action is required to upgrade.
+
+The `documentation.auto_regenerate` key (added in #953) defaults to `false` —
+**doc regeneration is off by default**. To enable it globally set
+`documentation.auto_regenerate: true` in your config, or pass `--with-docs`
+(`AUTOSPEC_WITH_DOCS=1`) at run time. To enable it for a single issue only, add
+a `docs: generate` line to the issue body. To suppress it regardless of any
+setting, add `docs: skip` to the issue body. No action is required to upgrade.
 
 ## Self-update
 

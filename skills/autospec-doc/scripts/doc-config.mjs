@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// doc-config.mjs — config loader for /autospec-doc (issue #917)
+// doc-config.mjs — config loader for /autospec-doc (issue #917, #953)
 //
 // Parses the `documentation:` block from .autospec/autospec.yml, applies
-// defaults for the new optional `style` and `examples` keys, and seeds the
-// four default audiences (user/developer/admin/general) when `audiences:` is
-// absent or empty.
+// defaults for the new optional `style`, `examples`, and `auto_regenerate` keys,
+// and seeds the four default audiences (user/developer/admin/general) when
+// `audiences:` is absent or empty.
 //
 // Existing `audiences:` entries (with any key shape — name/id/label/path/focus/
 // require_scope) are preserved verbatim; this module never mutates or replaces
@@ -12,7 +12,8 @@
 // default audience strings; any change there must propagate here.
 //
 // Exports:
-//   loadConfig(configPath) → { audiences, style, examples }
+//   loadConfig(configPath) → { audiences, style, examples, documentation }
+//   resolveAutoRegenerate({ config, issueBody, withDocsFlag }) → { generate, reason }
 //   DEFAULT_AUDIENCES — the four canonical defaults (array, read-only)
 //   FOLDER_CONTRACT   — the approved folder-contract constants (object, read-only)
 
@@ -253,10 +254,60 @@ function extractDocumentationBlock(text) {
   return block;
 }
 
+// ── resolveAutoRegenerate ──────────────────────────────────────────────────────
+
+// Regex matchers for per-issue body lines (case-insensitive, anchored).
+const SKIP_RE     = /^docs:\s*skip\s*$/im;
+const GENERATE_RE = /^docs:\s*generate\s*$/im;
+
+/**
+ * resolveAutoRegenerate({ config, issueBody, withDocsFlag }) → { generate, reason }
+ *
+ * Determines whether documentation regeneration should run for a given issue,
+ * applying the 3-opt-in precedence defined in the shared-contracts block:
+ *
+ *   Precedence (highest first):
+ *     1. `docs: skip`     in issueBody   → generate=false, reason='skip-line'
+ *     2. `docs: generate` in issueBody   → generate=true,  reason='generate-line'
+ *     3. config.documentation.auto_regenerate === true
+ *        OR withDocsFlag === true         → generate=true,  reason='config' | 'flag'
+ *     4. default                          → generate=false, reason='default-off'
+ *
+ * @param {{ config: object, issueBody: string, withDocsFlag: boolean }} opts
+ * @returns {{ generate: boolean, reason: 'skip-line'|'generate-line'|'config'|'flag'|'default-off' }}
+ */
+export function resolveAutoRegenerate({ config = {}, issueBody = '', withDocsFlag = false } = {}) {
+  const body = typeof issueBody === 'string' ? issueBody : '';
+
+  // 1. `docs: skip` wins over everything.
+  if (SKIP_RE.test(body)) {
+    return { generate: false, reason: 'skip-line' };
+  }
+
+  // 2. `docs: generate` overrides config/flag.
+  if (GENERATE_RE.test(body)) {
+    return { generate: true, reason: 'generate-line' };
+  }
+
+  // 3a. Config opt-in.
+  const autoRegen = config && config.documentation && config.documentation.auto_regenerate;
+  if (autoRegen === true) {
+    return { generate: true, reason: 'config' };
+  }
+
+  // 3b. Per-run flag opt-in (AUTOSPEC_WITH_DOCS=1).
+  if (withDocsFlag === true) {
+    return { generate: true, reason: 'flag' };
+  }
+
+  // 4. Default off.
+  return { generate: false, reason: 'default-off' };
+}
+
 // ── loadConfig ─────────────────────────────────────────────────────────────────
 
 /**
- * loadConfig(configPath) → { audiences, style, examples }
+ * loadConfig(configPath) → { audiences, style, examples, documentation }
  *
  * Reads the `documentation:` block from .autospec/autospec.yml at `configPath`
  * and returns a normalised config object with defaults applied.
@@ -267,9 +318,10 @@ function extractDocumentationBlock(text) {
  *  - style.palette: defaults to 'light-blue'.
  *  - examples.verify: defaults to true.
  *  - examples.sandbox: defaults to 'worktree'.
+ *  - documentation.auto_regenerate: defaults to false (issue #953).
  *
  * @param {string} configPath  Absolute or CWD-relative path to autospec.yml.
- * @returns {{ audiences: object[], style: { palette: string }, examples: { verify: boolean, sandbox: string } }}
+ * @returns {{ audiences: object[], style: { palette: string }, examples: { verify: boolean, sandbox: string }, documentation: { auto_regenerate: boolean } }}
  */
 export function loadConfig(configPath) {
   let raw = '';
@@ -277,9 +329,10 @@ export function loadConfig(configPath) {
     raw = fs.readFileSync(configPath, 'utf8');
   } catch {
     return {
-      audiences: DEFAULT_AUDIENCES.map(a => ({ ...a })),
-      style:    { palette: 'light-blue' },
-      examples: { verify: true, sandbox: 'worktree' },
+      audiences:     DEFAULT_AUDIENCES.map(a => ({ ...a })),
+      style:         { palette: 'light-blue' },
+      examples:      { verify: true, sandbox: 'worktree' },
+      documentation: { auto_regenerate: false },
     };
   }
 
@@ -309,5 +362,14 @@ export function loadConfig(configPath) {
     sandbox: (exRaw.sandbox != null) ? String(exRaw.sandbox)  : 'worktree',
   };
 
-  return { audiences, style, examples };
+  // ── documentation ─────────────────────────────────────────────────────────
+  // The `documentation` sub-key carries run-time switches; `auto_regenerate`
+  // defaults to false (opt-in only).
+  const docRaw = (typeof doc.documentation === 'object' && doc.documentation !== null && !Array.isArray(doc.documentation))
+    ? doc.documentation : {};
+  const documentation = {
+    auto_regenerate: (docRaw.auto_regenerate != null) ? Boolean(docRaw.auto_regenerate) : false,
+  };
+
+  return { audiences, style, examples, documentation };
 }
