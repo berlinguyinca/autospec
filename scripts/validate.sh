@@ -2148,6 +2148,7 @@ main() {
     check_autospec_explore_researchers_llm
     check_autospec_explore_contract
     check_autospec_release_area_contract
+    check_release_trio_worktree_assert
     check_autospec_sweep_area_contract
     check_autospec_qa_cluster_contract
     check_autospec_qa_bug_class_contract
@@ -2483,6 +2484,57 @@ check_autospec_release_area_contract() {
             >/tmp/validate-release-area-dispatch.log 2>&1 \
             || { cat /tmp/validate-release-area-dispatch.log >&2; fail "tests/release/test_release_area_dispatch.bats: failed"; }
     fi
+}
+
+# Release-trio worktree assert gate (issue #965, spec §D4): every file in the
+# autospec-release trio must carry a `## Worktree guard (commit gate)` section
+# with `worktree-guard.sh assert` before any commit, the MANDATORY/MUST-exit-0
+# wording, a `worktree-assert:begin/end` sentinel block, and the primary-checkout
+# and cleanup rules. Lock-step: the section must be byte-identical across the
+# trio (SKILL.md == codex/prompt.md == opencode/agent.md prose block).
+check_release_trio_worktree_assert() {
+    info "release-trio worktree assert gate (D4, issue #965)"
+    local trio="skills/autospec-release/SKILL.md \
+                skills/autospec-release/codex/prompt.md \
+                skills/autospec-release/opencode/agent.md"
+    for f in $trio; do
+        [ -f "$f" ] || fail "$f: required file missing (issue #965)"
+        grep -q '## Worktree guard (commit gate)' "$f" \
+            || fail "$f: missing '## Worktree guard (commit gate)' section (issue #965)"
+        grep -q 'worktree-guard.sh assert' "$f" \
+            || fail "$f: missing worktree-guard.sh assert call (issue #965)"
+        grep -q 'MUST exit 0' "$f" \
+            || fail "$f: assert gate must state MUST exit 0 (issue #965)"
+        grep -q 'worktree-assert:begin' "$f" \
+            || fail "$f: missing worktree-assert:begin sentinel (issue #965)"
+        grep -q 'worktree-assert:end' "$f" \
+            || fail "$f: missing worktree-assert:end sentinel (issue #965)"
+        grep -qi 'primary checkout' "$f" \
+            || fail "$f: missing primary-checkout hard rule (issue #965)"
+        grep -q 'git worktree remove' "$f" \
+            || fail "$f: missing 'git worktree remove' cleanup rule (issue #965)"
+        grep -q 'git worktree prune' "$f" \
+            || fail "$f: missing 'git worktree prune' cleanup rule (issue #965)"
+    done
+    # Lock-step: the prose block between sentinels must be byte-identical across trio.
+    local skill_block codex_block opencode_block
+    skill_block="$(awk '/<!-- worktree-assert:begin -->/,/<!-- worktree-assert:end -->/' \
+        skills/autospec-release/SKILL.md)"
+    codex_block="$(awk '/<!-- worktree-assert:begin -->/,/<!-- worktree-assert:end -->/' \
+        skills/autospec-release/codex/prompt.md)"
+    opencode_block="$(awk '/<!-- worktree-assert:begin -->/,/<!-- worktree-assert:end -->/' \
+        skills/autospec-release/opencode/agent.md)"
+    [ "$skill_block" = "$codex_block" ] \
+        || fail "SKILL.md and codex/prompt.md worktree-assert blocks differ (lock-step violation, issue #965)"
+    [ "$skill_block" = "$opencode_block" ] \
+        || fail "SKILL.md and opencode/agent.md worktree-assert blocks differ (lock-step violation, issue #965)"
+    if command -v bats >/dev/null 2>&1 && [ -f tests/release/test_release_worktree_assert.bats ]; then
+        info "  running: tests/release/test_release_worktree_assert.bats"
+        bats tests/release/test_release_worktree_assert.bats \
+            >/tmp/validate-release-worktree-assert.log 2>&1 \
+            || { cat /tmp/validate-release-worktree-assert.log >&2; fail "tests/release/test_release_worktree_assert.bats: failed"; }
+    fi
+    info "release-trio worktree assert gate: all 3 trio files carry D4 assert"
 }
 
 # Crash-resume skill + durable run registry contract (issue #881):
