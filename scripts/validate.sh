@@ -974,6 +974,60 @@ check_docs_drift_gate_regen_conditional_parity() {
     info "docs-drift-gate regen conditional parity: all 6 trio files carry D2b gate"
 }
 
+# Worktree PR-aware ladder + assert-gate parity (issue #961, spec §D3): the
+# run-trio `process(ISSUE)` step 1 must carry the 3-state recovery ladder
+# (open-pr/branch-only/fresh) wired through `worktree-guard.sh resolve-branch`,
+# plus the mandatory `worktree-guard.sh assert` gate (MUST exit 0 before any
+# edit; non-zero → restore auto-implement + stop) and the prose hard rules
+# (no primary-checkout mutation; cleanup = `git worktree remove` + prune). Both
+# run trios (6 files) AND phase4-implementer.md must agree. Fails CI if either
+# trio drifts back to the unconditional `git worktree add` path.
+check_worktree_ladder_assert_parity() {
+    info "worktree ladder + assert parity (D3): autospec + autospec-run trios (6 files) + phase4-implementer.md"
+    local phase4="skills/autospec-run/prompts/phase4-implementer.md"
+    local targets=""
+    for s in autospec autospec-run; do
+        targets="$targets skills/$s/SKILL.md skills/$s/codex/prompt.md skills/$s/opencode/agent.md"
+    done
+    targets="$targets $phase4"
+    for f in $targets; do
+        [ -f "$f" ] || fail "$f: required file missing"
+        grep -q 'worktree-guard.sh resolve-branch' "$f" \
+            || fail "$f: missing worktree-guard.sh resolve-branch (D3 ladder step 1)"
+        grep -q 'open-pr' "$f"     || fail "$f: missing open-pr ladder state (D3)"
+        grep -q 'branch-only' "$f" || fail "$f: missing branch-only ladder state (D3)"
+        grep -q '\bfresh\b' "$f"   || fail "$f: missing fresh ladder state (D3)"
+        grep -qi 'skip implementation' "$f" \
+            || fail "$f: open-pr path must skip implementation (D3 #886 recovery)"
+        grep -q 'adopt' "$f" \
+            || fail "$f: branch-only path must adopt the branch (D3 #917 recovery)"
+        grep -q 'worktree-guard.sh assert' "$f" \
+            || fail "$f: missing worktree-guard.sh assert gate (D3 step 2)"
+        grep -q 'MUST exit 0' "$f" \
+            || fail "$f: assert gate must require exit 0 before any edit (D3)"
+        grep -qi 'primary checkout' "$f" \
+            || fail "$f: missing primary-checkout hard rule (D3)"
+        grep -q 'git worktree remove' "$f" \
+            || fail "$f: missing 'git worktree remove' cleanup rule (D3)"
+        grep -q 'git worktree prune' "$f" \
+            || fail "$f: missing 'git worktree prune' cleanup rule (D3)"
+    done
+    # Extracted ladder bash from each SKILL.md must be well-formed.
+    for f in skills/autospec/SKILL.md skills/autospec-run/SKILL.md; do
+        local block
+        block="$(awk '
+            /worktree-ladder:begin/{cap=1; next}
+            /worktree-ladder:end/{cap=0}
+            cap{ sub(/^> ?/, ""); print }
+        ' "$f")"
+        [ -n "$block" ] \
+            || fail "$f: missing worktree-ladder:begin/end sentinel block (D3)"
+        printf '%s\n' "$block" | bash -n - \
+            || fail "$f: extracted worktree-ladder block fails bash -n (D3)"
+    done
+    info "worktree ladder + assert parity: all 6 trio files + phase4-implementer.md carry D3 ladder/assert"
+}
+
 # Team-personality contract: autospec should infer the right solving team from
 # the request, repository evidence, memories, and prior specs. If confidence is
 # low, it must ask explicitly with five concrete starter combinations, carry
@@ -2058,6 +2112,7 @@ main() {
     check_phase4_full_test_suite_gate
     check_phase4_cost_epic_parity_lockstep
     check_docs_drift_gate_regen_conditional_parity
+    check_worktree_ladder_assert_parity
     check_autospec_sweep_config_contract
     check_autospec_fleet_scripts
     check_fleet_gui_subcommand_lockstep

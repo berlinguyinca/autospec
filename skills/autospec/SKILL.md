@@ -898,9 +898,51 @@ Pass the following prompt verbatim to each background subagent:
 > - Schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}"}`
 > - Delete this file on terminal SUCCESS/FAILURE in both clean and failure paths.
 > 
-> 1. Worktree off origin/main:
+> 1. **PR-aware recovery ladder, then worktree.** Resolve the branch state FIRST, then act on the verdict. NEVER `cd`/`git checkout`/`git commit` in the primary checkout — all work happens in a linked worktree off `origin/main`.
+>    <!-- worktree-ladder:begin -->
+>    ```bash
 >    cd {repo_root} && git fetch origin
->    git worktree add -b <BRANCH> /tmp/wt-<BRANCH> origin/main && cd /tmp/wt-<BRANCH>
+>    LADDER=$(bash scripts/worktree-guard.sh resolve-branch --branch <BRANCH> --repo {repo})
+>    STATE=$(printf '%s' "$LADDER" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+>    PR=$(printf '%s' "$LADDER" | sed -n 's/.*"pr":\([0-9]*\).*/\1/p')
+>    case "$STATE" in
+>      open-pr)
+>        # #886 recovery: a PR already exists. SKIP implementation entirely.
+>        # Check out the existing PR in a fresh worktree, run the issue's
+>        # verification (tests + validate.sh) and the standard review loop
+>        # against the EXISTING PR, then merge if green. Never re-implement.
+>        bash scripts/worktree-guard.sh create --branch <BRANCH> --path /tmp/wt-<BRANCH> --adopt
+>        cd /tmp/wt-<BRANCH>
+>        gh pr checkout "$PR"
+>        echo "[ladder] open-pr #$PR — skip implementation; verify + review + merge existing PR"
+>        ;;
+>      branch-only)
+>        # #917 recovery: the branch exists with un-PR'd work. Adopt it in a
+>        # fresh worktree and CONTINUE the remaining work (do not start over).
+>        bash scripts/worktree-guard.sh create --branch <BRANCH> --path /tmp/wt-<BRANCH> --adopt
+>        cd /tmp/wt-<BRANCH>
+>        echo "[ladder] branch-only — adopted <BRANCH>; continue remaining work"
+>        ;;
+>      fresh|*)
+>        # No branch, no PR: create a new worktree off origin/main.
+>        bash scripts/worktree-guard.sh create --branch <BRANCH> --path /tmp/wt-<BRANCH>
+>        cd /tmp/wt-<BRANCH>
+>        echo "[ladder] fresh — created <BRANCH>"
+>        ;;
+>    esac
+>    # MANDATORY assert gate: MUST exit 0 before the first file edit/commit. A
+>    # non-zero exit (in_primary_checkout / dirty / stale_base) is NEVER worked
+>    # around — comment the emitted code_health identifier on the issue, restore
+>    # the `auto-implement` label (swap `in-progress-by-bot` → `auto-implement`),
+>    # remove the heartbeat, and stop this issue.
+>    if ! bash scripts/worktree-guard.sh assert; then
+>      gh issue comment <ISSUE> --body "worktree-guard assert failed (see code_health identifier above); restoring auto-implement"
+>      gh issue edit <ISSUE> --remove-label in-progress-by-bot --add-label auto-implement
+>      exit 1
+>    fi
+>    ```
+>    <!-- worktree-ladder:end -->
+>    On the `open-pr` path the verification bar EQUALS fresh work — full tests + the standard review loop, never a blind merge. Cleanup is identical for every path: after the merge is confirmed (or on terminal failure), `git worktree remove` the linked worktree and `git worktree prune`; never delete un-pushed work before merge.
 > 2. TDD per AGENTS.md: failing test first → implement → refactor → commit. NO DB/external mocks. Follow file paths and signatures from the issue body verbatim.
 > 3. **Full test suite gate.** Run the target repo's full validation/test suite, not only the Primary smoke test. Command resolution order:
 >    1. If `AUTOSPEC_FULL_TEST_COMMAND` is set, run `bash -lc "$AUTOSPEC_FULL_TEST_COMMAND"`.
