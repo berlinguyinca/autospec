@@ -23,6 +23,11 @@
 #   2  usage error (missing/extra args, unreadable input)
 #   3  unknown block / missing template file (fail closed)
 set -u
+# Disable pathname expansion: the param-token loop iterates an unquoted variable
+# (`for tok in $params`) so word-splitting separates KEY=VALUE tokens. With
+# globbing on, a value such as *.md could expand against the cwd. noglob keeps
+# every value a literal regardless of where the expander is invoked.
+set -f
 
 PROG=$(basename "$0")
 # Resolve repo root from this script's location (scripts/ -> repo root).
