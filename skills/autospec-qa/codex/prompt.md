@@ -331,6 +331,38 @@ checkout and tested environment. If the spec, implementation, app URL, or test
 command changed after the artifact was generated, mark the artifact stale and
 the affected rows `PARTIAL` until regenerated.
 
+## Documentation gate
+
+Every QA run invokes `/autospec-doc --full` (via
+`skills/autospec-doc/scripts/doc-orchestrator.mjs --full`), then runs
+`verify-examples.mjs` across the regenerated pages, then runs
+`check-doc-drift.sh --working-tree` expecting a clean working tree.
+
+`documentation.auto_regenerate` is NOT consulted here. QA is the guaranteed
+sync point for documentation correctness, independent of the operator-controlled
+auto-regeneration switch.
+
+Each of the following failure classes is a **QA finding** in the standard QA
+report format, subject to the same severity discipline as the no-mock smoke rule
+(never silently skipped):
+
+- **Generation error** — `doc-orchestrator.mjs --full` exits non-zero or
+  produces no output pages.
+- **Failing example** — `verify-examples.mjs` reports one or more example
+  failures across the regenerated audience pages.
+- **Residual drift** — `check-doc-drift.sh --working-tree` exits non-zero,
+  indicating that generated pages differ from what is committed.
+- **Missing audience page** — a required audience page is absent from the
+  output after generation.
+
+Failures are reported as findings with `release_blocking: true` and `category:
+documentation_gate`, mirroring the no-mock smoke handling.
+
+**Graceful skip** (logged as INFO, not a finding): when the target repo has no
+`documentation:` config (orchestrator exits 2), the gate records an INFO log
+line — `docs: no documentation config found (exit 2), gate skipped` — and
+continues without emitting a finding. No other skip condition is permitted.
+
 ## Evidence provenance gate
 
 Every `PASS` must cite provenance that another reviewer can inspect:

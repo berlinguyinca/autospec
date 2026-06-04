@@ -2100,6 +2100,7 @@ main() {
     check_palette_single_source
     check_autospec_doc_contract
     check_watchdog_worktree_gc
+    check_qa_documentation_gate
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -2620,6 +2621,33 @@ check_autospec_doc_contract() {
         bats "$bats_file" >/tmp/validate-autospec-doc-bats.log 2>&1 \
             || { cat /tmp/validate-autospec-doc-bats.log >&2; fail "$bats_file: failed"; }
     fi
+}
+
+# Issue #956: QA documentation gate (D3).
+# Enforces that the '## Documentation gate' section is present byte-identically
+# across the autospec-qa trio (SKILL.md + codex/prompt.md + opencode/agent.md),
+# and that the bats coverage file exists.
+check_qa_documentation_gate() {
+    info "qa documentation gate lockstep: autospec-qa trio (issue #956)"
+    local skill="skills/autospec-qa"
+    for trio in SKILL.md codex/prompt.md opencode/agent.md; do
+        local f="$skill/$trio"
+        [ -f "$f" ] || fail "$f: required file missing"
+        grep -q '^## Documentation gate' "$f" \
+            || fail "$f: missing '## Documentation gate' section (issue #956)"
+        grep -q 'doc-orchestrator.mjs --full' "$f" \
+            || fail "$f: Documentation gate must reference doc-orchestrator.mjs --full"
+        grep -q 'verify-examples.mjs' "$f" \
+            || fail "$f: Documentation gate must reference verify-examples.mjs"
+        grep -q 'check-doc-drift.sh --working-tree' "$f" \
+            || fail "$f: Documentation gate must reference check-doc-drift.sh --working-tree"
+        grep -q 'auto_regenerate.*NOT consulted\|NOT consulted.*auto_regenerate\|auto_regenerate` is NOT consulted' "$f" \
+            || fail "$f: Documentation gate must explicitly state auto_regenerate is NOT consulted"
+        grep -q 'orchestrator exits 2\|exit 2\|exits 2' "$f" \
+            || fail "$f: Documentation gate must document graceful skip on orchestrator exit 2"
+    done
+    local bats_file="tests/qa/test_qa_documentation_gate.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing (issue #956)"
 }
 
 main "$@"
