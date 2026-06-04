@@ -17,7 +17,7 @@ die() {
 }
 
 repo=""
-batch_size=3
+batch_size=1
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -29,7 +29,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$batch_size" in *[!0-9]*|'') die "--batch-size must be an integer" ;; esac
-[ "$batch_size" -gt 0 ] || batch_size=3
+[ "$batch_size" -gt 0 ] || batch_size=1
 
 if [ -z "$repo" ]; then
     repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"

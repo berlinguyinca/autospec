@@ -396,7 +396,7 @@ Exit codes from `ci-wait-poll.sh`: 0=pass, 1=fail/stalled, 2=pending, 3=no senti
 
 ## Batch size policy
 
-Default `AUTOSPEC_BATCH_SIZE=3`; force batch=1 when the next ready issue is `reasoning:deep` (high blast-radius work runs one-at-a-time per monitor session). This only ends the current monitor batch: `autospec-run` must automatically relaunch fresh monitor batches until the queue is `ALL_DONE`.
+Default `AUTOSPEC_BATCH_SIZE=1`; force batch=1 when the next ready issue is `reasoning:deep` (high blast-radius work runs one-at-a-time per monitor session). This only ends the current monitor batch: `autospec-run` must automatically relaunch fresh monitor batches until the queue is `ALL_DONE`.
 
 ## Memory inventory
 
