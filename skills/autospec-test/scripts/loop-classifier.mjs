@@ -42,11 +42,29 @@ const PRIORITY_RANK = {
     missing_unit_test: 6,
     missing_test: 5,
     selector_brittle: 4,
+    env_blocker: 3,       // below product_bug; env failure must never beat a real bug signal
     failing_unit_test: 3,
     failing_test: 2,
     flaky_test: 1,
     empty_action: 0,
 };
+
+/**
+ * Signal patterns for environment-blocker failures (spec §§6,9 playwright-authoring design).
+ * A failure matching any of these routes to environment fixes — never to assertion loosening.
+ * Priority is below product_bug so a real assertion failure wins when both signals are present.
+ *
+ * Exported so sibling consumers (#996, #1000) can import the canonical list directly.
+ */
+export const ENV_BLOCKER_SIGNALS = [
+    /CORS/i,
+    /rate.?limit/i,
+    /auth.?bootstrap/i,
+    /no migration/i,
+    /reset endpoint missing/i,
+    /reset endpoint not registered/i,
+    /crawler.?unreachable/i,
+];
 
 /**
  * Classify failures from gate JSON and findings.
@@ -145,6 +163,25 @@ export function classify(options) {
             estimated_minutes: 10,
             priority: PRIORITY_RANK.selector_brittle,
         });
+    }
+
+    // ── env_blocker detection (spec §§6,9 playwright-authoring) ──────────────
+    // Auth-bootstrap, CORS, rate-limit, missing migration/reset, crawler-unreachable.
+    // Priority is intentionally below product_bug so a real assertion failure wins.
+    // Suggested files point to config/env/infra only — never to test directories.
+    // This path MUST NOT carry loosening_files or shifting_unjustified_files (those
+    // belong exclusively to assertion-shift-classifier.mjs's anti-loosen guard).
+    {
+        const envCombined = ((testSummary.stderr_tail || '') + (testSummary.stdout_tail || ''));
+        if (ENV_BLOCKER_SIGNALS.some(p => p.test(envCombined))) {
+            candidates.push({
+                classification: 'env_blocker',
+                target_failures: ['environment configuration failure'],
+                suggested_files: ['.env', 'config/', 'infra/', '.autospec/'],
+                estimated_minutes: 10,
+                priority: PRIORITY_RANK.env_blocker,
+            });
+        }
     }
 
     // ── failing_unit_test detection ───────────────────────────────────────────
