@@ -14,6 +14,9 @@ SCRIPT="${BATS_TEST_DIRNAME}/../../scripts/refine-prompt.sh"
 RENDER="${BATS_TEST_DIRNAME}/../../scripts/refine-render-overview.sh"
 
 setup() {
+    # Pin deterministic template lens — default is now auto/LLM-first (#1024),
+    # but these correctness invariants assert deterministic-path output.
+    export AUTOSPEC_REFINE_LENS_MODE=deterministic
     TEST_TMP="$(mktemp -d -t refine-correct.XXXXXX)"
     REPO_ROOT="$TEST_TMP/repo"
     mkdir -p "$REPO_ROOT/docs/specs" "$REPO_ROOT/.autospec"

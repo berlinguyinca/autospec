@@ -6,6 +6,11 @@
 SCRIPT="${BATS_TEST_DIRNAME}/../../scripts/refine-prompt.sh"
 
 setup() {
+    # These orchestrator invariants (convergence, word-count degradation, round
+    # cap, context-sparse) only hold for the DETERMINISTIC template lens. The
+    # default lens mode is now auto/LLM-first (issue #1024), whose output is
+    # non-deterministic, so pin the deterministic path here.
+    export AUTOSPEC_REFINE_LENS_MODE=deterministic
     TEST_TMP="$(mktemp -d -t refine-orch.XXXXXX)"
     REPO_ROOT="$TEST_TMP/repo"
     mkdir -p "$REPO_ROOT/docs/specs"
