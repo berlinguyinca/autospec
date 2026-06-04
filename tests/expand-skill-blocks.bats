@@ -49,18 +49,20 @@ teardown() {
 }
 
 # --- LOAD-BEARING: startup template reproduces the EXACT live block ---
-@test "startup-self-update expansion is byte-identical to autospec-define live block" {
-    # Extract the live canonical block (## Startup self-update .. closing fence)
-    local live="$TMP/live.md"
-    awk '/^## Startup self-update$/{p=1} p{print}
-         p&&/^```bash$/{seen=1; next}
-         p&&seen&&/^```$/{exit}' \
-        "$REPO_ROOT/skills/autospec-define/SKILL.md" > "$live"
+@test "startup-self-update expansion is byte-identical to the canonical template block" {
+    # Single source of truth (#1032/#1035): the canonical block lives in
+    # templates/skill-blocks/startup-self-update.md, NOT in any skill's live
+    # SKILL.md (which now carries only the marker). The marker expansion must be
+    # byte-identical to the template with {{SKILL_NAME}} substituted.
+    local template="$REPO_ROOT/templates/skill-blocks/startup-self-update.md"
+    [ -f "$template" ]
+    local expected="$TMP/expected.md"
+    sed 's/{{SKILL_NAME}}/autospec-define/g' "$template" > "$expected"
     # Synthetic file containing only the marker for autospec-define
     local synth="$TMP/synth.md"
     printf '<!-- autospec-block:startup-self-update SKILL_NAME=autospec-define -->\n' > "$synth"
     bash "$SCRIPT" "$synth" > "$TMP/expanded.md"
-    run diff "$live" "$TMP/expanded.md"
+    run diff "$expected" "$TMP/expanded.md"
     [ "$status" -eq 0 ]
 }
 
