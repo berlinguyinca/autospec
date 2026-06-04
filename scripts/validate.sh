@@ -303,7 +303,9 @@ check_subagent_model_tier() {
     info "subagent model tier: $name"
     grep -q -F '**Model tier:**' "$skill_dir/SKILL.md" \
         || fail "$name: SKILL.md missing '**Model tier:**' directive on at least one subagent dispatch"
+    # Accept EITHER the literal row OR the harness-adapter block marker (transition-safe: D3b).
     grep -q -E '^\| Subagent model tier ' "$skill_dir/SKILL.md" \
+        || grep -q -F '<!-- autospec-block:harness-adapter -->' "$skill_dir/SKILL.md" \
         || fail "$name: SKILL.md harness-adapter table missing 'Subagent model tier' row"
 
     # Every **Model tier:** line must label itself Tier A or Tier B.
