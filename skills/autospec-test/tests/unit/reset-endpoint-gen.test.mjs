@@ -292,6 +292,24 @@ test('generateResetRoute: nextjs — writes file with guard-env check', async ()
     }
 });
 
+test('generateResetRoute: nuxt — writes file with AUTOSPEC-GENERATED header', async () => {
+    const dir = tmpDir();
+    try {
+        writePkg(dir, { nuxt: '^3.0.0' });
+        const result = await generateResetRoute(dir, {
+            guardEnv: 'AUTOSPEC_TEST_STACK',
+            baseUrl: 'http://localhost:3000',
+        });
+        const content = fs.readFileSync(result.filePath, 'utf8');
+        assert.ok(content.includes('AUTOSPEC-GENERATED test-only'));
+        assert.ok(content.includes('AUTOSPEC_TEST_STACK'));
+        assert.equal(result.framework, 'nuxt');
+        assert.ok(result.warning && result.warning.length > 0, 'must emit nuxt adaptation warning');
+    } finally {
+        cleanup(dir);
+    }
+});
+
 test('generateResetRoute: unknown framework — writes generic handler with warning', async () => {
     const dir = tmpDir();
     try {
