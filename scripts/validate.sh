@@ -1264,6 +1264,21 @@ check_autospec_test_skill_present() {
         || { bash "$validate_sh" >&2; fail "$validate_sh: structural lint failed"; }
 }
 
+# autospec-playwright skill structural check (issue #999): run per-skill validate.sh
+# to verify trio lockstep, leading blank line in codex/prompt.md, and required sections.
+check_autospec_playwright_skill_present() {
+    info "autospec-playwright skill structural lint"
+    local skill_dir="skills/autospec-playwright"
+    local validate_sh="$skill_dir/validate.sh"
+    [ -d "$skill_dir" ] || fail "$skill_dir: directory missing"
+    [ -f "$skill_dir/SKILL.md" ] || fail "$skill_dir/SKILL.md: required file missing"
+    [ -f "$skill_dir/codex/prompt.md" ] || fail "$skill_dir/codex/prompt.md: required file missing"
+    [ -f "$validate_sh" ] || fail "$validate_sh: per-skill validate.sh missing"
+    bash -n "$validate_sh" || fail "$validate_sh: bash syntax error"
+    bash "$validate_sh" >/dev/null 2>&1 \
+        || { bash "$validate_sh" >&2; fail "$validate_sh: structural lint failed"; }
+}
+
 check_autospec_qa_contract() {
     info "autospec-qa contract: no-mock smoke blocker handling"
     local skill_file="skills/autospec-qa/SKILL.md"
@@ -2187,6 +2202,7 @@ main() {
     check_autospec_review_skill_present
     check_autospec_review_tier_a_directives
     check_autospec_test_skill_present
+    check_autospec_playwright_skill_present
     check_autospec_qa_contract
     check_brute_force_rule_ids
     check_dogfood_detectors
