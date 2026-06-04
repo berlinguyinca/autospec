@@ -734,7 +734,7 @@ If `.autospec/init-done.flag` exists, skip the prompt entirely.
 After any spec PR merges in normal `autospec-define` flow, regenerate
 documentation through the single doc engine — invoke `/autospec-doc`
 (incremental, scoped to the docs the merged spec affects), routed via
-`scripts/doc-orchestrator.mjs`:
+`doc-orchestrator.mjs`:
 
 ```bash
 bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/doc-orchestrator.mjs"
@@ -773,7 +773,7 @@ specific missing fields plus a recommended interactive command to retry.
 Do not silently pick arbitrary defaults.
 
 Safety guardrails are NOT bypassed. Before each would-have-asked decision,
-the orchestrator invokes `scripts/autospec-autonomy-gate.sh` with
+the orchestrator invokes `autospec-autonomy-gate.sh` with
 `--check all`. Exit 1 surfaces the confirmation even in autonomous mode:
 
 - Destructive remote actions (force-push, repo archive/delete, mass label

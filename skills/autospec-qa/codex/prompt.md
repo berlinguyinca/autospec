@@ -12,7 +12,7 @@ issues.
 
 The per-area prose for this skill is also available as 8 cluster files under
 `skills/autospec-qa/clusters/<name>.md`, dispatched by
-`scripts/qa-cluster-dispatch.sh` (issue #730). The 8 canonical clusters are:
+`qa-cluster-dispatch.sh` (issue #730). The 8 canonical clusters are:
 
 1. `spec-traceability` — extract spec requirements + traceability matrix.
 2. `functional-coverage` — UI controls, forms, validation, dropdowns, buttons.
@@ -27,17 +27,17 @@ The per-area prose for this skill is also available as 8 cluster files under
 8. `production-incidents` — incident registry regression check (PR #661).
 
 Each cluster carries only its area's prose plus the spec under audit. The
-orchestrator (`scripts/qa-cluster-dispatch.sh`) is harness-aware (via
-`scripts/lib/autospec-harness-detect.sh`, PR #725), honors
-`scripts/qa-cluster-coverage.sh` for cross-cluster dedup, and honors
-`scripts/qa-verify-finding.sh` for verify-first filtering. Aggregated findings
+orchestrator (`qa-cluster-dispatch.sh`) is harness-aware (via
+`lib/autospec-harness-detect.sh`, PR #725), honors
+`qa-cluster-coverage.sh` for cross-cluster dedup, and honors
+`qa-verify-finding.sh` for verify-first filtering. Aggregated findings
 land in `.autospec/qa-verdict.json`, which the existing heal loop
 (PR #666/#713) consumes unchanged.
 
 The full per-area prose in the sections below remains canonical for now;
 cluster files reference it and will be backfilled as the dispatch model
 matures. Operators can opt out individual clusters via
-`scripts/qa-cluster-dispatch.sh --skip-cluster <name>`.
+`qa-cluster-dispatch.sh --skip-cluster <name>`.
 
 ## Startup self-update
 
@@ -308,7 +308,7 @@ is available:
 - `schemas/autospec-mutation-proof.schema.json`
 - `schemas/autospec-canary-results.schema.json`
 
-Use `scripts/validate-qa-artifacts.sh --repo <target-repo>` when the autospec
+Use `validate-qa-artifacts.sh --repo <target-repo>` when the autospec
 repository helper is available. It validates present `.autospec/*` proof files
 and fails malformed artifacts while warning about missing draft-only artifacts.
 
@@ -773,8 +773,8 @@ compatible: invoking with no flag is a no-op.
 
 `/autospec-qa` is self-healing by default. After discovery, the orchestrator
 enters a discover → file → fix → re-QA loop and runs until convergence or a
-guardrail trips. The loop is driven by `scripts/qa-heal-loop.sh`, which calls
-`scripts/qa-finding-to-issue.sh` once per release-blocking finding to file an
+guardrail trips. The loop is driven by `qa-heal-loop.sh`, which calls
+`qa-finding-to-issue.sh` once per release-blocking finding to file an
 `auto-implement,autospec:v2-flow` GitHub issue, then dispatches `/autospec-run`
 to drain the queue before re-running QA.
 
@@ -791,7 +791,7 @@ Loop semantics:
 1. Round N: run `/autospec-qa`, write `.autospec/qa-verdict.json` as today.
 2. For each finding with `release_blocking: true` and
    `status ∈ {FAIL, PARTIAL, NOT_TESTED}`:
-   - Translate via `scripts/qa-finding-to-issue.sh` into a structured issue
+   - Translate via `qa-finding-to-issue.sh` into a structured issue
      body (category + summary + evidence + reproduction + remediation
      directive verbatim from the relevant `code_health:*` directive map).
    - File one `auto-implement,autospec:v2-flow` issue. Existing dedup:
@@ -845,7 +845,7 @@ Safety guardrails (NOT bypassed by heal mode) — inherit all existing
 autonomy/release guardrails:
 
 - Destructive remote actions surface for confirmation (handled by
-  `scripts/autospec-autonomy-gate.sh`).
+  `autospec-autonomy-gate.sh`).
 - Per-PR merge still goes through the rebase-and-retest gate.
 - `~/.autospec/no-heal.flag` exists → heal globally disabled (operator
   escape hatch for runaway loops).
@@ -875,8 +875,8 @@ verdict, not the pre-heal one — this is the intended improvement.
 
 ## Shared loop driver (issue #711)
 
-`scripts/qa-heal-loop.sh` adopts the shared loop driver
-`scripts/lib/autospec-loop.sh` (issue #708 / PR #712) for unified
+`qa-heal-loop.sh` adopts the shared loop driver
+`lib/autospec-loop.sh` (issue #708 / PR #712) for unified
 termination naming. The four loop-enabled skills — `/autospec --loop`,
 `/autospec-refine --continue`, `/autospec-continue --loop`, and
 `/autospec-qa` (heal default-on) — share these termination conditions:
@@ -1107,7 +1107,7 @@ RULE_ID in the PR-time guardian.
 
 When `.autospec/qa-verdict.json` carries a `release_blocking: true`
 finding whose `category` ends in `:bug` (or otherwise matches a
-fingerprintable shape), run `scripts/qa-bug-class-sweep.sh` to fan out
+fingerprintable shape), run `qa-bug-class-sweep.sh` to fan out
 across the repo for sibling instances of the same pattern class. Goal:
 consistency by construction — the implementer fixes every matching
 instance in **one PR**, not N PRs.
@@ -1138,13 +1138,13 @@ The sweep:
    `.autospec/qa-bug-class-flagged.json` (operator review surface, NOT
    filed as issues).
 4. Applies the verify-first filter
-   (`scripts/qa-verify-finding.sh --category missing_function`) to every
+   (`qa-verify-finding.sh --category missing_function`) to every
    candidate sibling. If the bug is already fixed at HEAD for an
    instance, that sibling is dropped silently.
 5. All verdict mutations are atomic (`.tmp` + `mv`) so partial runs
    cannot corrupt the verdict.
 
-Per-class issue filing: `scripts/qa-heal-loop.sh` groups findings by
+Per-class issue filing: `qa-heal-loop.sh` groups findings by
 `parent_fingerprint` when present and files **one `auto-implement` issue
 per pattern class** carrying every instance's `file:line`. Findings
 without a fingerprint stay per-finding as before. This is the key
@@ -1186,7 +1186,7 @@ can see what the discipline filtered: `findings_emitted`, `verified_dropped`,
 `stale_dropped`, `cluster_skip_dedup`.
 
 After cluster fan-out completes, the QA orchestrator MUST run
-`scripts/qa-finding-filter.sh` against the merged
+`qa-finding-filter.sh` against the merged
 `.autospec/qa-verdict.json` before any release-skill (e.g.,
 `/autospec-release`) consumes it. The filter partitions findings into
 verified, stale (re-probed and either refreshed or dropped to
@@ -1212,7 +1212,7 @@ exceeded the threshold.
 
 ## Dogfood detectors driver
 
-When QA runs against the autospec repo itself, use `scripts/dogfood-detectors.sh` as the authoritative aggregated sweep rather than invoking individual `scripts/qa-*-sweep.sh` directly. The driver enforces an allowlist of intentional findings and fails on regression.
+When QA runs against the autospec repo itself, use `dogfood-detectors.sh` as the authoritative aggregated sweep rather than invoking individual `scripts/qa-*-sweep.sh` directly. The driver enforces an allowlist of intentional findings and fails on regression.
 
 ## Critical self-questioning checkpoint
 
@@ -1648,7 +1648,7 @@ Print the helper output and stop. Do not run the QA audit.
 
 ## Harness-aware handoff
 
-Loop dispatch uses `scripts/lib/autospec-harness-detect.sh` (issue #723) to
+Loop dispatch uses `lib/autospec-harness-detect.sh` (issue #723) to
 resolve the active AI harness and pick the canonical `/autospec --autonomous`
 invocation form:
 
