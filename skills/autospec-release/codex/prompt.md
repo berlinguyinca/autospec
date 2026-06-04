@@ -374,6 +374,27 @@ Required outcome:
   cleanup issue needed to settle it.
 ```
 
+## Worktree guard (commit gate)
+
+<!-- worktree-assert:begin -->
+Before committing any remediation fix (stage 9 iteration) or any other
+change produced by this skill, run `worktree-guard.sh assert` and require
+exit 0. A non-zero exit (in_primary_checkout / dirty / stale_base) is NEVER
+worked around — stop the release flow and surface the emitted
+`code_health:*` identifier to the operator.
+
+```bash
+# MANDATORY assert gate: MUST exit 0 before any commit in the release flow.
+if ! bash "${AUTOSPEC_SCRIPTS_DIR:-scripts}/worktree-guard.sh" assert; then
+  echo "worktree-guard assert failed (see code_health identifier above); aborting release commit" >&2
+  exit 1
+fi
+```
+
+Cleanup after a release-flow commit lands: `git worktree remove` the linked
+worktree and `git worktree prune`. Never work in the primary checkout.
+<!-- worktree-assert:end -->
+
 ## Release report contract
 
 Return a concise report with:
