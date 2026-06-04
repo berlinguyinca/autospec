@@ -1722,6 +1722,29 @@ check_lint_heredoc_handling() {
     fi
 }
 
+# Quality-differential harness (issue #1023, spec §5 D4): the boilerplate guard
+# (scripts/quality-differential.sh) plus its synthetic self-test negative pair
+# and the >=3 refine-lens fixtures whose deterministic path is the documented
+# KEEP-LLM failure.
+check_quality_differential() {
+    info "quality-differential harness: scripts/quality-differential.sh + tests/quality-differential.bats"
+    [ -f scripts/quality-differential.sh ] \
+        || fail "scripts/quality-differential.sh: missing (issue #1023)"
+    [ -f tests/quality-differential.bats ] \
+        || fail "tests/quality-differential.bats: bats coverage missing (issue #1023)"
+    bash -n scripts/quality-differential.sh \
+        || fail "scripts/quality-differential.sh: bash -n failed"
+    local refine_count
+    refine_count="$(ls tests/fixtures/quality-diff/refine-lenses/*/assert.sh 2>/dev/null | wc -l | tr -d ' ')"
+    [ "${refine_count:-0}" -ge 3 ] \
+        || fail "tests/fixtures/quality-diff/refine-lenses: need >=3 fixtures with assert.sh (got ${refine_count:-0})"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/quality-differential.bats"
+        bats tests/quality-differential.bats >/tmp/validate-quality-diff.log 2>&1 \
+            || { cat /tmp/validate-quality-diff.log >&2; fail "tests/quality-differential.bats: failed"; }
+    fi
+}
+
 # Autonomous-mode contract (issue #662): the autospec + autospec-listen +
 # autospec-define + autospec-run trios each carry an "## Autonomous mode"
 # section, the autonomy-gate script is installed, and the bats coverage exists.
@@ -2179,6 +2202,7 @@ main() {
     check_lint_implementation_helpers
     check_implementer_contract
     check_lint_heredoc_handling
+    check_quality_differential
     check_usage_limit_helper
     check_supersession_contract
     check_phase4_guardian_block_lockstep

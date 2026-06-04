@@ -1,0 +1,1 @@
+Implement OAuth2 token refresh in the mobile authentication module so expired sessions renew silently.

@@ -1,0 +1,1 @@
+Implement a read-through cache for the user profile API endpoint. Use a configurable TTL, invalidate cache entries when a profile is written, and fall back to a direct database read if the cache backend is unreachable so reads never fail.

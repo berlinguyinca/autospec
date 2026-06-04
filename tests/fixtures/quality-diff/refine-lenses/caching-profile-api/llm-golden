@@ -1,0 +1,7 @@
+Implement a read-through cache in front of the user profile API endpoint to cut
+database load on repeated reads. Specify a configurable TTL, invalidate cached
+profiles on write, and fall back to a direct database read when the cache
+backend is unreachable. Acceptance: a cold read populates the cache; a warm read
+serves from cache without a database query; a profile write evicts the stale
+entry; cache-backend outage degrades to direct reads with no errors surfaced to
+callers.
