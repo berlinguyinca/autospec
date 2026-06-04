@@ -6,9 +6,9 @@ setup() {
   # We define the function inline here as it will appear in SKILL.md pseudocode.
   compute_effective_batch_size() {
     local reasoning_lbl="${1:-reasoning:medium}"
-    local batch_size="${AUTOSPEC_BATCH_SIZE:-3}"
+    local batch_size="${AUTOSPEC_BATCH_SIZE:-1}"
     # Guard against 0 or negative
-    [[ "$batch_size" -gt 0 ]] 2>/dev/null || batch_size=3
+    [[ "$batch_size" -gt 0 ]] 2>/dev/null || batch_size=1
     if [ "$reasoning_lbl" = "reasoning:deep" ]; then
       echo 1
     else
@@ -32,9 +32,9 @@ setup() {
   [ "$result" = "7" ]
 }
 
-@test "unlabeled issue defaults to reasoning:medium behavior (batch size 3)" {
-  AUTOSPEC_BATCH_SIZE=3 result=$(compute_effective_batch_size "reasoning:medium")
-  [ "$result" = "3" ]
+@test "unlabeled issue defaults to reasoning:medium behavior (batch size 1)" {
+  result=$(compute_effective_batch_size "reasoning:medium")
+  [ "$result" = "1" ]
 }
 
 @test "reasoning:deep overrides even large AUTOSPEC_BATCH_SIZE" {
@@ -48,10 +48,10 @@ setup() {
   grep -q "effective_batch_size" "$skill_md"
 }
 
-@test "SKILL.md default AUTOSPEC_BATCH_SIZE is 3" {
+@test "SKILL.md default AUTOSPEC_BATCH_SIZE is 1" {
   skill_md="${BATS_TEST_DIRNAME}/../skills/autospec-run/SKILL.md"
-  # Should contain AUTOSPEC_BATCH_SIZE:-3 (the default)
-  grep -q 'AUTOSPEC_BATCH_SIZE:-3' "$skill_md"
+  # Should contain AUTOSPEC_BATCH_SIZE:-1 (the default)
+  grep -q 'AUTOSPEC_BATCH_SIZE:-1' "$skill_md"
 }
 
 @test "AGENTS.md documents batch default and reasoning:deep gating" {

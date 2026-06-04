@@ -257,7 +257,7 @@ same session id (a fresh session gets a new id), and `--force` overrides it.
 
 ## Phase 4 — Background autonomous monitor
 
-**Single-agent absorbed-discipline (canonical Phase 4 path).** The monitor agent IS the implementer for the issue it claims — expand → implement → finalize → peer-review → evaluate-findings → PR → merge — all in one agent's context. The main session orchestrator relaunches the monitor between issues so each one gets a fresh top-level `Agent` call with full tool access. **Constraint:** Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool, so a backgrounded monitor cannot dispatch its own inner implementer. Phase 4 implementers must be top-level agents launched directly by the main session orchestrator, not nested inside a monitor. The `process(ISSUE)` notation below is shorthand for "the monitor agent now does the implementation work itself in this same context", NOT a nested subagent dispatch. `AUTOSPEC_BATCH_SIZE` semantics are preserved: a single agent can still process up to N issues sequentially within its 40-tool-call budget, exiting with `BATCH_COMPLETE` when the budget is approaching or after N issues, whichever comes first.
+**Fresh-subagent-per-issue (canonical Phase 4 path, formerly single-agent absorbed-discipline).** Each issue is processed by a FRESH top-level subagent dispatched by the orchestrator — expand → implement → finalize → peer-review → evaluate-findings → PR → merge — in that subagent's own context. The orchestrator NEVER implements in its own context; it only claims, dispatches, and waits. Each subagent receives full tool access because it is a top-level `Agent` call launched directly by the main session orchestrator. **Constraint:** Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool, so nested monitors cannot dispatch inner implementers. Phase 4 implementers must be top-level agents launched directly by the main session orchestrator, not nested inside a monitor. The `process(ISSUE)` notation below is shorthand for "dispatch a fresh top-level subagent to do this work", NOT in-context implementation by the orchestrator. Batch>1 is an explicit operator opt-in via `AUTOSPEC_BATCH_SIZE=N`; the default is 1 (one issue per subagent). The `reasoning:deep` force-to-1 rule is retained: deep issues stay batch=1 even under an operator `AUTOSPEC_BATCH_SIZE=N` override.
 
 Record this durable preference in `AGENTS.md` (idempotent — skip if already present):
 
@@ -296,12 +296,12 @@ fi
 
 The helper writes `~/.autospec/usage-limits/<run-id>.json`, starts a background daemon, polls every 300 seconds by default, and relaunches the recorded command after the reset time. This is intentionally shell-only so recovery does not require an LLM turn after the usage limit has already been hit.
 
-Then launch a **background monitor loop** — the orchestrator relaunches the monitor with fresh context after each batch of `AUTOSPEC_BATCH_SIZE` issues (default: 3). The monitor is stateless: all persistent state lives in GitHub labels and heartbeat files, so relaunches are always safe.
+Then launch a **background monitor loop** — the orchestrator relaunches the monitor with fresh context after each batch of `AUTOSPEC_BATCH_SIZE` issues (default: 1). The monitor is stateless: all persistent state lives in GitHub labels and heartbeat files, so relaunches are always safe.
 
 ```
 batch_num=1
 while true:
-  launch background subagent (pass batch_num; AUTOSPEC_BATCH_SIZE=${AUTOSPEC_BATCH_SIZE:-3})
+  launch background subagent (pass batch_num; AUTOSPEC_BATCH_SIZE=${AUTOSPEC_BATCH_SIZE:-1})
   wait for task-notification (monitor agent completes)
 
   # Read and consume the batch-done signal.
@@ -325,7 +325,7 @@ while true:
 
 Pass the following prompt verbatim to each background subagent:
 
-> You are the auto-implement monitor for `{repo}`. Process `auto-implement` issues one at a time. Exit after processing `AUTOSPEC_BATCH_SIZE` issues (default: 3) by writing `~/.autospec/batch-done.json` — the orchestrator will relaunch you with fresh context.
+> You are the auto-implement monitor for `{repo}`. Process `auto-implement` issues one at a time. Exit after processing `AUTOSPEC_BATCH_SIZE` issues (default: 1) by writing `~/.autospec/batch-done.json` — the orchestrator will relaunch you with fresh context.
 
 > **Harness adaptation (loop persistence).** The `while true:` below is pseudocode. In Claude Code, use `/loop` or `ScheduleWakeup` to persist across turns. In Codex CLI and OpenCode, you lack a built-in loop primitive — implement persistence via one of these patterns:
 > 1. **Shell wrapper (preferred):** `exec bash << 'EOF'
@@ -337,7 +337,7 @@ Pass the following prompt verbatim to each background subagent:
 > 3. **tmux pane:** `tmux new-window 'bash << '''HEREDOC'''
 > while true; do ...; done
 > HEREDOC'`
-> **Session batching:** Exit after processing `AUTOSPEC_BATCH_SIZE` issues (default 3) by writing `~/.autospec/batch-done.json` with `status=BATCH_COMPLETE`. BATCH_COMPLETE is a continuation signal, not a terminal state; the orchestrator relaunches you with fresh context. When the queue is fully drained, write `status=ALL_DONE` instead. This keeps each monitor session short to prevent context overflow.
+> **Session batching:** Exit after processing `AUTOSPEC_BATCH_SIZE` issues (default 1) by writing `~/.autospec/batch-done.json` with `status=BATCH_COMPLETE`. BATCH_COMPLETE is a continuation signal, not a terminal state; the orchestrator relaunches you with fresh context. When the queue is fully drained, write `status=ALL_DONE` instead. This keeps each monitor session short to prevent context overflow.
 
 >
 > **Profile load (run-start, once).** If `--profile <name>` was passed, look it up in `~/.autospec/model-profiles.yml`; if `<name>` is not a key under `profiles:`, exit non-zero and print the available names. If no flag was passed, load the file's `default:` profile. If the file is missing, run auto-init and exit (per the Invocation section).
@@ -350,8 +350,8 @@ Pass the following prompt verbatim to each background subagent:
 > ```
 > # Before the loop (run-once init):
 > #   batch_issue_count=0
-> #   BATCH_SIZE="${AUTOSPEC_BATCH_SIZE:-3}"
-> #   [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null || BATCH_SIZE=3   # guard against 0 or negative
+> #   BATCH_SIZE="${AUTOSPEC_BATCH_SIZE:-1}"
+> #   [ "$BATCH_SIZE" -gt 0 ] 2>/dev/null || BATCH_SIZE=1   # guard against 0 or negative
 > #   rm -f "$HOME/.autospec/batch-done.json"   # clear stale file from prior crash
 >
 > while true:
@@ -401,7 +401,7 @@ COORD_RELEASE="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/release-issue.sh
 ```
 
 If `--coordination-status` is active, run `list-ready-issues.sh --repo {repo}
---batch-size "${AUTOSPEC_BATCH_SIZE:-3}"`, print the JSON, and exit. If
+--batch-size "${AUTOSPEC_BATCH_SIZE:-1}"`, print the JSON, and exit. If
 `--max-parallel-safe` is active, print only the `.batch` array and exit.
 
 During the normal monitor loop:
@@ -510,8 +510,8 @@ inline label-swap path below.
 >   if [ "$_next_reasoning" = "reasoning:deep" ]; then
 >     effective_batch_size=1
 >   else
->     effective_batch_size="${AUTOSPEC_BATCH_SIZE:-3}"
->     [ "$effective_batch_size" -gt 0 ] 2>/dev/null || effective_batch_size=3
+>     effective_batch_size="${AUTOSPEC_BATCH_SIZE:-1}"
+>     [ "$effective_batch_size" -gt 0 ] 2>/dev/null || effective_batch_size=1
 >   fi
 >   echo "[monitor] effective_batch_size=$effective_batch_size (next issue reasoning: $_next_reasoning)"
 >   ISSUE = ready[0]
