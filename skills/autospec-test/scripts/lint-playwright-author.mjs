@@ -20,6 +20,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// #996/#1003 carry-over: wire selector-evidence.mjs's resolver into the lint
+// path so PW_SELECTOR_UNVERIFIED resolves selectors against real source
+// (file:line) instead of a naive whole-blob substring scan.
+import { extractSelectors, resolveSelector as resolveSelectorEvidence }
+    from './selector-evidence.mjs';
+
 const __filename = fileURLToPath(import.meta.url);
 
 // ── RULE_ID severity map ───────────────────────────────────────────────────────
@@ -171,10 +177,14 @@ const API_ASSERT_PATTERNS = [
  * @param {object} opts
  * @param {string[]} opts.appSrcGlobs - globs for app source files (for PW_SELECTOR_UNVERIFIED)
  * @param {string} opts.assignedFile - the author's assigned spec file path (for PW_SHARED_FILE_EDIT)
+ * @param {boolean} [opts.resolveSelector] - #1003 carry-over: when true, use
+ *   selector-evidence.mjs's resolver (file:line) instead of the naive substring
+ *   scan. Requires opts.repoRoot for relative-path computation.
+ * @param {string} [opts.repoRoot] - repo root for the evidence resolver.
  * @returns {Promise<{ok: boolean, findings: Array<{rule: string, msg: string, line: number}>}>}
  */
 export async function lintSpec(specPath, opts = {}) {
-    const { appSrcGlobs = [], assignedFile = null } = opts;
+    const { appSrcGlobs = [], assignedFile = null, resolveSelector = false, repoRoot = process.cwd() } = opts;
     const findings = [];
 
     function addFinding(rule, msg, line) {
@@ -291,10 +301,14 @@ export async function lintSpec(specPath, opts = {}) {
     }
 
     // ── PW_SELECTOR_UNVERIFIED ─────────────────────────────────────────────────
-    // Only run if appSrcGlobs is non-empty (requires app source access)
-    // When appSrcGlobs is empty, this check is skipped (deferred to selector-evidence.mjs)
+    // Only run if appSrcGlobs is non-empty (requires app source access).
+    // #1003 carry-over: when resolveSelector=true, delegate to selector-evidence.mjs's
+    // resolver (per-selector file:line resolution) so the check actually fires;
+    // otherwise fall back to the legacy substring scan.
     if (appSrcGlobs.length > 0) {
-        const selectorFindings = await checkSelectorsVerified(lines, appSrcGlobs);
+        const selectorFindings = resolveSelector
+            ? checkSelectorsViaEvidence(text, appSrcGlobs, repoRoot)
+            : await checkSelectorsVerified(lines, appSrcGlobs);
         findings.push(...selectorFindings);
     }
 
@@ -361,6 +375,34 @@ async function checkSelectorsVerified(lines, appSrcGlobs) {
         }
     }
 
+    return findings;
+}
+
+/**
+ * #1003 carry-over: verify selectors using selector-evidence.mjs's resolver.
+ * Each selector referenced in the spec is resolved against app source via
+ * resolveSelector(); an unresolved selector (no file:line) becomes a
+ * PW_SELECTOR_UNVERIFIED hard-fail finding.
+ *
+ * @param {string} specText - full spec text
+ * @param {string[]} appSrcGlobs - globs/paths for app source
+ * @param {string} repoRoot - repo root for relative path computation
+ * @returns {Array<{rule, msg, line}>}
+ */
+function checkSelectorsViaEvidence(specText, appSrcGlobs, repoRoot) {
+    const findings = [];
+    const selectors = extractSelectors(specText);
+    for (const { selector, type, line } of selectors) {
+        const evidence = resolveSelectorEvidence(selector, appSrcGlobs, repoRoot);
+        if (evidence === null) {
+            findings.push({
+                rule: 'PW_SELECTOR_UNVERIFIED',
+                msg: `${type} selector '${selector}' on line ${line} not found in app source. ` +
+                    'Verify the selector exists or add a // source: file:line comment.',
+                line,
+            });
+        }
+    }
     return findings;
 }
 
