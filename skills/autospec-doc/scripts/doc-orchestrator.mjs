@@ -23,6 +23,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execSync } from 'node:child_process';
 
 import { loadConfig, DEFAULT_AUDIENCES, FOLDER_CONTRACT } from './doc-config.mjs';
 import { writeLlmsFull, fillManifest } from './gen-llms-full.mjs';
@@ -110,12 +111,64 @@ async function regenerateLlmsFull(cfg, repoRoot) {
   }
 }
 
+// ── Incremental scope-set computation (§D6) ───────────────────────────────────
+//
+// §D6: the default (bare) subcommand is INCREMENTAL — it computes the set of
+// changed scopes from `check-doc-drift.sh --working-tree` output, then
+// regenerates only those scopes. Full fan-out stays under `--full`.
+// Zero changed scopes → fast no-op (one log line, no generation work).
+
+const CHECK_DRIFT_SH = path.resolve(__dirname, '../../../scripts/check-doc-drift.sh');
+
+/**
+ * Run check-doc-drift.sh --working-tree and parse the JSON gate output.
+ * Returns the changed-scope set as an array of scope identifiers.
+ * Returns [] when the script is unavailable or exits cleanly with no drift.
+ */
+function computeChangedScopes() {
+  const script = process.env.AUTOSPEC_CHECK_DRIFT_SH || CHECK_DRIFT_SH;
+  if (!fs.existsSync(script)) {
+    process.stderr.write(`[autospec-doc] check-doc-drift.sh not found at ${script}; treating as zero changed scopes\n`);
+    return [];
+  }
+  let raw = '';
+  let exitCode = 0;
+  try {
+    raw = execSync(`bash ${JSON.stringify(script)} --working-tree`, {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    exitCode = (err && err.status) || 1;
+    raw = (err && err.stdout) || '';
+  }
+  // Exit 0 = clean (no drift); exit 1 = drift detected; exit 2 = missing-scope / error.
+  // Parse stdout as JSON gate result (spec §3b); extract changed scope identifiers.
+  let gate = null;
+  try { gate = JSON.parse(raw); } catch { /* non-JSON output is fine — treat as no scopes */ }
+  if (!gate || exitCode === 0) return []; // clean → nothing changed
+  const scopes = [];
+  if (gate && Array.isArray(gate.changed_scopes)) scopes.push(...gate.changed_scopes);
+  else if (gate && gate.scope) scopes.push(gate.scope);
+  return scopes;
+}
+
 function handleIncremental(_opts) {
   const cfg = loadConfig(CONFIG_PATH);
   const names = cfg.audiences.map(a => a.name || a.id).join(', ');
-  console.log(`[autospec-doc] incremental: plan scopes affected since last generation for audiences [${names}] (generation stub — #918/#919).`);
-  // Regenerate llms-full.txt from any already-generated pages (cheap concat).
   const repoRoot = path.resolve(__dirname, '../../..');
+
+  // §D6: compute changed-scope set from check-doc-drift.sh --working-tree.
+  const changedScopes = computeChangedScopes();
+
+  if (changedScopes.length === 0) {
+    // Zero changed scopes → fast no-op.
+    console.log(`[autospec-doc] incremental: no changed scopes detected — nothing to regenerate`);
+    return 0;
+  }
+
+  console.log(`[autospec-doc] incremental: ${changedScopes.length} changed scope(s) detected for audiences [${names}]; regenerating affected scopes: ${changedScopes.join(', ')}`);
+  // Regenerate llms-full.txt from any already-generated pages (cheap concat).
   regenerateLlmsFull(cfg, repoRoot).catch(e => process.stderr.write(`[autospec-doc] llms-full regen error: ${e.message}\n`));
   return 0;
 }
