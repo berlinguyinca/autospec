@@ -6,7 +6,7 @@ FIXTURES_DIR="${BATS_TEST_DIRNAME}/fixtures/bundle-static-context"
 
 setup() {
   mkdir -p "$FIXTURES_DIR/memory"
-  mkdir -p "$FIXTURES_DIR/skills/autospec-run"
+  mkdir -p "$FIXTURES_DIR/skills/autospec-run/prompts"
   mkdir -p "$FIXTURES_DIR/skills/autospec-shared/scripts"
 
   # Fixture SKILL.md for implementer role
@@ -19,6 +19,19 @@ description: test fixture
 # autospec-run workflow
 
 This is the SKILL.md content for testing.
+EOF
+
+  # Fixture implementer-contract.md (D3: implementer role injects this, not SKILL.md)
+  cat > "$FIXTURES_DIR/skills/autospec-run/prompts/implementer-contract.md" <<'EOF'
+# Implementer contract (test fixture)
+
+## Implementation-quality contract
+
+### RULE_ID table
+
+| RULE_ID | Detector |
+|---|---|
+| `OUT_OF_SCOPE` | det |
 EOF
 
   # Fixture AGENTS.md with RULE_ID table
@@ -84,14 +97,71 @@ teardown() {
   printf '%s\n' "$output" | head -1 | grep -q "CACHE BOUNDARY"
 }
 
-@test "bundle-static-context.sh --role implementer emits closing CACHE BOUNDARY marker" {
+@test "bundle-static-context.sh --role implementer emits two CACHE BOUNDARY markers (prefix is framed; memory/scaffolding below the second)" {
   run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
     AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
     AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
     AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
     "$SCRIPT" --role implementer --issue-labels "skill:autospec-run"
   [ "$status" -eq 0 ]
-  printf '%s\n' "$output" | tail -1 | grep -q "CACHE BOUNDARY"
+  boundary_count=$(printf '%s\n' "$output" | grep -c "CACHE BOUNDARY")
+  [ "$boundary_count" -eq 2 ]
+}
+
+@test "bundle-static-context.sh --role implementer injects implementer-contract.md, NOT the SKILL.md" {
+  run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role implementer --issue-labels "skill:autospec-run"
+  [ "$status" -eq 0 ]
+  # The contract section header is injected for the implementer role...
+  printf '%s\n' "$output" | grep -q "Implementer contract"
+  # ...and the verbose SKILL.md prefix header is gone for the implementer role.
+  ! printf '%s\n' "$output" | grep -q "SKILL.md (implementer role)"
+}
+
+@test "bundle-static-context.sh --role implementer keeps memory BELOW the closing CACHE BOUNDARY (byte-stable prefix)" {
+  run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role implementer --issue-labels "skill:autospec-run"
+  [ "$status" -eq 0 ]
+  # Second (closing) CACHE BOUNDARY line number vs the matched memory content.
+  last_boundary=$(printf '%s\n' "$output" | grep -n "CACHE BOUNDARY" | tail -1 | cut -d: -f1)
+  mem_line=$(printf '%s\n' "$output" | grep -n "ascending issue order" | head -1 | cut -d: -f1)
+  [ -n "$last_boundary" ]
+  [ -n "$mem_line" ]
+  [ "$mem_line" -gt "$last_boundary" ]
+}
+
+@test "bundle-static-context.sh --role implementer prefix is byte-stable across two different issue-label inputs" {
+  pfx() {
+    env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+      AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+      AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+      AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+      "$SCRIPT" --role implementer --issue-labels "$1" \
+      | awk '/<!-- CACHE BOUNDARY -->/{c++} {print} c==2{exit}'
+  }
+  p1=$(pfx "skill:autospec-run")
+  p2=$(pfx "bash,scripting")
+  [ "$p1" = "$p2" ]
+}
+
+@test "implementer-contract.md exists and is at most 24576 bytes (size guard)" {
+  contract="${BATS_TEST_DIRNAME}/../skills/autospec-run/prompts/implementer-contract.md"
+  [ -f "$contract" ]
+  size=$(wc -c < "$contract" | tr -d ' ')
+  [ "$size" -le 24576 ]
+}
+
+@test "implementer-contract.md contains the single RULE_ID table header" {
+  contract="${BATS_TEST_DIRNAME}/../skills/autospec-run/prompts/implementer-contract.md"
+  [ -f "$contract" ]
+  count=$(grep -c '^### RULE_ID table' "$contract")
+  [ "$count" -eq 1 ]
 }
 
 @test "bundle-static-context.sh --role implementer output is idempotent" {

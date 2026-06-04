@@ -7,7 +7,7 @@ FIXTURES_DIR="${BATS_TEST_DIRNAME}/fixtures/bundle-and-dispatch"
 
 setup() {
   mkdir -p "$FIXTURES_DIR/memory"
-  mkdir -p "$FIXTURES_DIR/skills/autospec-run"
+  mkdir -p "$FIXTURES_DIR/skills/autospec-run/prompts"
   mkdir -p "$FIXTURES_DIR/skills/autospec-shared/scripts"
 
   # Fixture SKILL.md for implementer role
@@ -20,6 +20,19 @@ description: test fixture
 # autospec-run workflow
 
 This is the SKILL.md content for testing.
+EOF
+
+  # Fixture implementer-contract.md (D3: implementer role injects this, not SKILL.md)
+  cat > "$FIXTURES_DIR/skills/autospec-run/prompts/implementer-contract.md" <<'EOF'
+# Implementer contract (test fixture)
+
+## Implementation-quality contract
+
+### RULE_ID table
+
+| RULE_ID | Detector |
+|---|---|
+| `OUT_OF_SCOPE` | det |
 EOF
 
   # Fixture AGENTS.md with RULE_ID table
@@ -106,8 +119,9 @@ teardown() {
     "$SCRIPT" --role implementer --issue-labels "ctx:64k" \
     --dynamic-suffix-file "$FIXTURES_DIR/dynamic-suffix.txt"
   [ "$status" -eq 0 ]
-  # Spot-check: a distinctive line from the prefix appears in combined output
-  printf '%s\n' "$output" | grep -q "SKILL.md (implementer role)"
+  # Spot-check: a distinctive line from the implementer prefix (the injected
+  # contract section header) appears in the combined output.
+  printf '%s\n' "$output" | grep -q "Implementer contract"
 }
 
 @test "bundle-and-dispatch.sh output appends dynamic suffix after cache boundary" {
