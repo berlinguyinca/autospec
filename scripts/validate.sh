@@ -559,6 +559,76 @@ check_lint_implementation_helpers() {
     done
 }
 
+# Implementer-contract named-content invariants (issue #940, spec §D3): the
+# curated implementer-contract.md replaces the 70KB SKILL.md in the implementer
+# prefix. The contract MUST exist, stay <=24KB (size budget so the cached prefix
+# is small), carry exactly one RULE_ID table header (single copy, no dup), and
+# must not drift from AGENTS.md's canonical RULE_ID set. The bundler MUST NOT
+# inject the autospec-run SKILL.md into the implementer role any more.
+check_implementer_contract() {
+    info "implementer-contract: skills/autospec-run/prompts/implementer-contract.md"
+    local contract="skills/autospec-run/prompts/implementer-contract.md"
+    [ -f "$contract" ] \
+        || fail "$contract: file missing"
+
+    # Size guard: <=24576 bytes.
+    local size
+    size="$(wc -c < "$contract" | tr -d ' ')"
+    [ "$size" -le 24576 ] \
+        || fail "$contract: $size bytes exceeds 24576-byte (24KB) budget"
+
+    # Single RULE_ID table header (no duplicate re-extraction).
+    local header_count
+    header_count="$(grep -c '^### RULE_ID table' "$contract" || true)"
+    [ "$header_count" = "1" ] \
+        || fail "$contract: expected exactly 1 '### RULE_ID table' header, found $header_count"
+
+    # Drift gate: every RULE_ID named in AGENTS.md's canonical table must also be
+    # present in the contract (curated digest must not silently drop a rule).
+    [ -f AGENTS.md ] || fail "AGENTS.md missing at repo root"
+    # Extract only the FIRST-column backticked token from each table data row so
+    # backticked regex fragments in later columns (e.g. `URL`) are never mistaken
+    # for RULE_IDs.
+    local agents_rule_ids
+    agents_rule_ids="$(awk '
+        /^### RULE_ID table/ { in_table=1; next }
+        /^### / && in_table { exit }
+        /^## / && in_table { exit }
+        in_table && /^\| `[A-Z_]+`/ {
+            line=$0; sub(/^\| `/,"",line); sub(/`.*/,"",line); print line
+        }
+    ' AGENTS.md | sort -u)"
+    [ -n "$agents_rule_ids" ] || fail "AGENTS.md RULE_ID table yielded no RULE_IDs (parse drift)"
+    local rid
+    for rid in $agents_rule_ids; do
+        grep -q "$rid" "$contract" \
+            || fail "$contract: drift — AGENTS.md RULE_ID '$rid' missing from contract"
+    done
+
+    # The bundler must inject the contract for the implementer role and must NOT
+    # inject the autospec-run SKILL.md for that role any more.
+    local bundler="skills/autospec-shared/scripts/bundle-static-context.sh"
+    [ -f "$bundler" ] || fail "$bundler: file missing"
+    grep -q 'implementer-contract.md' "$bundler" \
+        || fail "$bundler: implementer role no longer references implementer-contract.md"
+    grep -q 'IMPLEMENTER_CONTRACT' "$bundler" \
+        || fail "$bundler: missing IMPLEMENTER_CONTRACT injection variable"
+
+    # Behavioral negative: actual implementer-role output must NOT carry the
+    # verbose 'SKILL.md (implementer role)' injection header. This catches a
+    # future regression where the bundler emits BOTH the contract and the 70KB
+    # SKILL.md (the named-content presence checks above would not).
+    local impl_out
+    impl_out="$(AUTOSPEC_REPO_ROOT="$REPO_ROOT" \
+        AUTOSPEC_MEMORY_DIR=/nonexistent-memory-dir \
+        AUTOSPEC_MANIFEST=/nonexistent-manifest.yml \
+        bash "$bundler" --role implementer --issue-labels 'ctx:120k' 2>/dev/null)" \
+        || fail "$bundler: --role implementer failed to run"
+    if printf '%s\n' "$impl_out" | grep -q 'SKILL.md (implementer role)'; then
+        fail "$bundler: implementer output still injects the SKILL.md (implementer role) prefix"
+    fi
+}
+
 # Usage-limit recovery helper invariants: autospec-run's quota recovery path
 # depends on this shell-only supervisor being installed and executable.
 check_usage_limit_helper() {
@@ -1864,6 +1934,7 @@ main() {
     check_existing_spec_mode
     check_lint_issue_helpers
     check_lint_implementation_helpers
+    check_implementer_contract
     check_lint_heredoc_handling
     check_usage_limit_helper
     check_supersession_contract
