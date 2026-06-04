@@ -54,6 +54,41 @@ setup() {
   grep -q 'AUTOSPEC_BATCH_SIZE:-1' "$skill_md"
 }
 
+@test "autospec trio default AUTOSPEC_BATCH_SIZE is 1 (parity with autospec-run, issue #971)" {
+  for f in SKILL.md codex/prompt.md opencode/agent.md; do
+    p="${BATS_TEST_DIRNAME}/../skills/autospec/$f"
+    [ -f "$p" ]
+    # D2: default must be 1, never the legacy 3.
+    grep -q 'AUTOSPEC_BATCH_SIZE:-1' "$p"
+    ! grep -qF 'AUTOSPEC_BATCH_SIZE:-3' "$p"
+    ! grep -qE 'AUTOSPEC_BATCH_SIZE` issues \(default:? 3\)' "$p"
+  done
+}
+
+@test "autospec trio carries fresh-subagent-per-issue prose (D2 parity, issue #971)" {
+  for f in SKILL.md codex/prompt.md opencode/agent.md; do
+    p="${BATS_TEST_DIRNAME}/../skills/autospec/$f"
+    grep -qF 'Fresh-subagent-per-issue (canonical Phase 4 path, formerly single-agent absorbed-discipline)' "$p"
+    grep -qF 'The orchestrator NEVER implements in its own context' "$p"
+    grep -qF 'the default is 1 (one issue per subagent)' "$p"
+  done
+}
+
+@test "autospec trio posts per-issue token report at pinned slot (D1 parity, issue #971)" {
+  for f in SKILL.md codex/prompt.md opencode/agent.md; do
+    p="${BATS_TEST_DIRNAME}/../skills/autospec/$f"
+    grep -qF '<!-- token-report:begin -->' "$p"
+    grep -qF 'post-token-report.sh' "$p"
+    # Pinned slot: token-report:begin must fall between SUCCESS step 8 and FAILURE step 9.
+    slot=$(awk '
+      /(^|> )8\. SUCCESS/ { after=1 }
+      /(^|> )9\. FAILURE/ { after=0 }
+      after && /token-report:begin/ { print "FOUND" }
+    ' "$p")
+    [ "$slot" = "FOUND" ]
+  done
+}
+
 @test "AGENTS.md documents batch default and reasoning:deep gating" {
   agents_md="${BATS_TEST_DIRNAME}/../AGENTS.md"
   [ -f "$agents_md" ]
