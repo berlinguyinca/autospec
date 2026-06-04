@@ -295,12 +295,75 @@ The spec must be implementable end-to-end by an agent reading only the spec.
 
 If this is a fresh repo, commit the spec to `main` directly (`git add docs/... && git commit -m "docs: <topic> design spec" && git push`) so subsequent issues can reference it as a tracked file.
 
-For an existing repo, land the spec via a short-lived PR so CI can validate it:
-1. Create branch `feat/spec-<topic>`, commit `docs/specs/...design.md`, push.
-2. `gh pr create --base main --head feat/spec-<topic> --title "docs: <topic> design spec" --body "Source spec: docs/specs/..."`
-3. Wait for required CI checks to pass (`gh pr checks <#> --repo {repo}`).
-4. Unless `AUTOSPEC_NO_AUTOMERGE_SPEC=1` is set, admin-merge: `gh pr merge <#> --admin --squash --delete-branch --repo {repo}`. If the env var is set, pause and ask the user to merge before continuing.
-5. Verify the spec is reachable at `https://github.com/{repo}/blob/main/docs/specs/...` before dispatching Phase 3.
+For an existing repo, land the spec via a short-lived PR so CI can validate it.
+The spec commit happens in a temp worktree (`/tmp/wt-spec-<slug>`), never in the
+primary checkout (see §D4 of `docs/specs/2026-06-03-worktree-guard-design.md` and
+`## Git hygiene (agents)` in `AGENTS.md`).
+
+<!-- define-spec-pr:begin -->
+```bash
+SLUG="<topic>"
+BRANCH="feat/spec-${SLUG}"
+WT="/tmp/wt-spec-${SLUG}"
+
+# resolve → create → assert (D4 pattern)
+VERDICT="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh" \
+    resolve-branch --branch "$BRANCH" --repo {repo})"
+STATE="$(printf '%s' "$VERDICT" | jq -r .state)"
+
+case "$STATE" in
+  open-pr)
+    PR_NUM="$(printf '%s' "$VERDICT" | jq -r .pr)"
+    # Spec PR already open — validate CI + merge; skip re-commit.
+    gh pr checks "$PR_NUM" --repo {repo} --watch
+    gh pr merge "$PR_NUM" --admin --squash --delete-branch --repo {repo}
+    ;;
+  branch-only)
+    # Branch exists but no PR — adopt in a fresh worktree and continue.
+    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh" \
+        create --branch "$BRANCH" --path "$WT" --adopt
+    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh" \
+        assert  # MUST exit 0 before any edit
+    # Push + open PR then fall through to the wait/merge step below.
+    git -C "$WT" push -u origin "$BRANCH"
+    gh pr create --base main --head "$BRANCH" --repo {repo} \
+        --title "docs: ${SLUG} design spec" \
+        --body "Source spec: docs/specs/${SLUG}-design.md"
+    gh pr checks --watch --repo {repo} "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
+    gh pr merge --admin --squash --delete-branch --repo {repo} \
+        "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
+    git worktree remove "$WT" 2>/dev/null || true
+    git worktree prune
+    ;;
+  fresh)
+    # Happy path: create a clean worktree, commit spec there, push, PR.
+    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh" \
+        create --branch "$BRANCH" --path "$WT"
+    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh" \
+        assert  # MUST exit 0 before any edit; non-zero → stop, restore auto-implement
+    cp "docs/specs/${SLUG}-design.md" "$WT/docs/specs/${SLUG}-design.md"
+    git -C "$WT" add "docs/specs/${SLUG}-design.md"
+    git -C "$WT" commit -m "docs: ${SLUG} design spec"
+    git -C "$WT" push -u origin "$BRANCH"
+    gh pr create --base main --head "$BRANCH" --repo {repo} \
+        --title "docs: ${SLUG} design spec" \
+        --body "Source spec: docs/specs/${SLUG}-design.md"
+    gh pr checks --watch --repo {repo} "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
+    if [ "${AUTOSPEC_NO_AUTOMERGE_SPEC:-0}" != "1" ]; then
+        gh pr merge --admin --squash --delete-branch --repo {repo} \
+            "$( gh pr list --head "$BRANCH" --repo {repo} --json number -q '.[0].number')"
+    else
+        # Env var set — pause and ask user to merge before continuing.
+        echo "AUTOSPEC_NO_AUTOMERGE_SPEC=1: merge the spec PR manually, then continue."
+    fi
+    git worktree remove "$WT" 2>/dev/null || true
+    git worktree prune
+    ;;
+esac
+```
+<!-- define-spec-pr:end -->
+
+6. Verify the spec is reachable at `https://github.com/{repo}/blob/main/docs/specs/...` before dispatching Phase 3.
 
 ## Phase 3 — Decompose into linked GitHub issues (delegate)
 
