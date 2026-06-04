@@ -856,9 +856,8 @@ inline label-swap path below.
 >    <!-- RETRY-LOOP:end -->
 > 5. Push: git push -u origin <BRANCH>
 >    ```bash
->    # autospec-stop sentinel check — inside process(ISSUE), after each major step
->    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
->      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>    # Stop-sentinel: abort if an immediate stop flag is present after this step.
+>    if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop-check.sh" "$ISSUE" "$BRANCH" "$LAST_STEP"; then
 >      exit 0
 >    fi
 >    ```
@@ -873,9 +872,8 @@ inline label-swap path below.
 >    ```
 > 7. Inner loop (max 3 iterations):
 >    ```bash
->    # autospec-stop sentinel check — inside process(ISSUE), after each major step
->    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
->      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>    # Stop-sentinel: abort if an immediate stop flag is present after this step.
+>    if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop-check.sh" "$ISSUE" "$BRANCH" "$LAST_STEP"; then
 >      exit 0
 >    fi
 >    ```
@@ -965,9 +963,8 @@ inline label-swap path below.
 >    - **Regression coverage** for `regression`/`priority:high` issues is handled inside the single fused reviewer brief (Part 2 item 9 above): the reviewer self-asks "would the reviewer have caught the original gap?", writes any missing checks to `reports/autospec-review/reviewer-lessons.md`, and applies them before its verdict. No second Tier-A dispatch.
 >    - If LGTM: break SUCCESS.
 >    ```bash
->    # autospec-stop sentinel check — inside process(ISSUE), after each major step
->    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
->      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>    # Stop-sentinel: abort if an immediate stop flag is present after this step.
+>    if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop-check.sh" "$ISSUE" "$BRANCH" "$LAST_STEP"; then
 >      exit 0
 >    fi
 >    ```
@@ -1022,9 +1019,8 @@ inline label-swap path below.
 >    ```
 >    The block ends with the admin-merge; merge auto-closes the issue.
 >    ```bash
->    # autospec-stop sentinel check — inside process(ISSUE), after each major step
->    if [ -f "$HOME/.autospec/stop.flag" ] && [ "$(head -1 $HOME/.autospec/stop.flag)" = "immediate" ]; then
->      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --abort-current-issue "$ISSUE" "$BRANCH" "$LAST_STEP"
+>    # Stop-sentinel: abort if an immediate stop flag is present after this step.
+>    if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop-check.sh" "$ISSUE" "$BRANCH" "$LAST_STEP"; then
 >      exit 0
 >    fi
 >    ```
