@@ -1,0 +1,8 @@
+{
+  "name": "authoring-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "server.mjs",
+  "description": "Synthetic 3-route web app with embedded Stage 2A traps (no reset endpoint)."
+}
