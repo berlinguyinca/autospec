@@ -66,7 +66,7 @@ This workflow assumes a small set of capabilities. Map each one to your harness'
 | Run shell command            | `Bash`                               | `bash` tool                              | `shell` / `apply_patch`                  | Ask user to run manually                           |
 | Ask the user a question      | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn     |
 | Subagent model tier          | Tier B: `sonnet` + medium thinking   | Tier B: smaller-tier `task` + medium reasoning | Tier B: `gpt-5.1-codex-spark` + `reasoning_effort=medium` | Fall back UP on unavailability |
-| Subagent dispatch policy   | per AGENTS.md decision matrix        | per AGENTS.md decision matrix            | per AGENTS.md decision matrix            | inline with main-session token cost                |
+<!-- autospec-block:harness-adapter-core -->
 
 **Model tier:** Tier B (implementation work) — this skill is a thin dispatch wrapper.
 

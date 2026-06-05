@@ -56,7 +56,7 @@ harness exposes it, then stop. Do not run the QA audit.
 | Capability | Claude Code | OpenCode | Codex CLI | Fallback if missing |
 | --- | --- | --- | --- | --- |
 | Subagent model tier | Tier A: `opus` + ultrathink | Tier A: top-tier `task` + max reasoning | Tier A: current top GPT + `reasoning_effort=high` | Run inline, but keep the same report contract |
-| Subagent dispatch policy   | per AGENTS.md decision matrix        | per AGENTS.md decision matrix            | per AGENTS.md decision matrix            | inline with main-session token cost                |
+<!-- autospec-block:harness-adapter-core -->
 | Browser/E2E execution | Playwright/browser tool or shell | Playwright/browser task | shell + browser when available | Mark UI-only checks NOT TESTED with blocker |
 | Shell execution | Bash tool | shell tool | shell/apply_patch | Required for regeneration |
 

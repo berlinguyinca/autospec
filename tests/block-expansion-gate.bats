@@ -347,3 +347,38 @@ ENDMARKER
     [ "$status" -ne 0 ]
     [[ "$output" =~ "no golden" ]] || [[ "$output" =~ "fail closed" ]] || [[ "$output" =~ "FAIL" ]]
 }
+
+# ---------------------------------------------------------------------------
+# POSITIVE (#1037): harness-adapter-core marker expands byte-faithfully to the
+# Subagent dispatch policy row — the only >=20-skill identical adapter span.
+# ---------------------------------------------------------------------------
+@test "harness-adapter-core marker expands to the canonical dispatch-policy row (byte-faithful)" {
+    local tmpl="$REPO_ROOT/templates/skill-blocks/harness-adapter-core.md"
+    [ -f "$tmpl" ]
+    local f="$TMP/core.md"
+    printf '%s\n' '<!-- autospec-block:harness-adapter-core -->' > "$f"
+    run bash "$EXPANDER" "$f"
+    [ "$status" -eq 0 ]
+    # Expansion equals the template body verbatim.
+    [ "$output" = "$(cat "$tmpl")" ]
+    # And that body IS the canonical dispatch-policy row.
+    [[ "$output" =~ "Subagent dispatch policy" ]]
+    [[ "$output" =~ "per AGENTS.md decision matrix" ]]
+}
+
+# ---------------------------------------------------------------------------
+# NEGATIVE (#1037): skills whose adapter row drifts from the core span stay
+# UNCONVERTED — they must NOT carry the harness-adapter-core marker, and their
+# SKILL.md must still hold an inline (literal) adapter row. Guards against a
+# split template silently swallowing a per-skill qualifier.
+# ---------------------------------------------------------------------------
+@test "drift-skipped skills keep an inline adapter section and no harness-adapter-core marker" {
+    for skill in autospec-doc autospec-loop autospec-playwright autospec-rollover-status; do
+        local sf="$REPO_ROOT/skills/$skill/SKILL.md"
+        [ -f "$sf" ] || continue
+        # Skipped skills must NOT have been markered with the core block.
+        ! grep -qF 'autospec-block:harness-adapter-core' "$sf"
+        # They still describe an adapter / dispatch capability inline.
+        grep -qE 'Required capabilities & harness adapter|Subagent (model tier|dispatch)' "$sf"
+    done
+}

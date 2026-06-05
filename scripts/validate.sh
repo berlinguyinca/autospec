@@ -515,6 +515,12 @@ check_agents_md_subagent_matrix() {
         for f in "${d}SKILL.md" "${d}codex/prompt.md" "${d}opencode/agent.md"; do
             [ -f "$f" ] || continue
             grep -q '^## Required capabilities & harness adapter' "$f" || continue
+            # Accept EITHER the literal dispatch row OR the harness-adapter-core
+            # block marker (transition-safe: D3 split, #1037 — the marker expands
+            # to that exact row). Mirrors the harness-adapter marker precedent.
+            if grep -q -F '<!-- autospec-block:harness-adapter-core -->' "$f"; then
+                continue
+            fi
             grep -q '^| Subagent dispatch policy' "$f" \
                 || fail "$f: Required-capabilities table missing 'Subagent dispatch policy' row"
             grep -q 'per AGENTS.md decision matrix' "$f" \
