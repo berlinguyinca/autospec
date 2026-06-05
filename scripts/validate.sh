@@ -2194,8 +2194,8 @@ check_token_baseline_fresh() {
     local script="scripts/skill-token-report.sh"
 
     if [ ! -f "$baseline" ]; then
-        printf 'validate: WARN — %s not found; run: bash %s > %s\n' \
-            "$baseline" "$script" "$baseline" >&2
+        printf 'validate: WARN — %s not found; run: bash %s --update-baseline\n' \
+            "$baseline" "$script" >&2
         return 0
     fi
 
@@ -2216,8 +2216,8 @@ check_token_baseline_fresh() {
     committed="$(awk '/<!-- baseline:begin -->/{f=1;next} /<!-- baseline:end -->/{f=0} f' "$baseline")"
 
     if [ "$fresh" != "$committed" ]; then
-        printf 'validate: WARN — %s is stale; run: bash %s > %s\n' \
-            "$baseline" "$script" "$baseline" >&2
+        printf 'validate: WARN — %s is stale; run: bash %s --update-baseline\n' \
+            "$baseline" "$script" >&2
     fi
 }
 

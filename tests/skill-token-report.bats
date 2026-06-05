@@ -139,3 +139,74 @@ BIN="$REPO_ROOT/scripts/skill-token-report.sh"
   run bash "$BIN" --help
   [ "$status" -eq 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# --update-baseline: splice mode (negative-path pairs)
+# ---------------------------------------------------------------------------
+
+_mk_baseline_workdir() {
+  # Temp cwd with a marker-wrapped baseline + one fixture skill.
+  WORK="$(mktemp -d)"
+  mkdir -p "$WORK/docs/reports" "$WORK/skills/demo-skill"
+  printf 'one two three four\n' > "$WORK/skills/demo-skill/SKILL.md"
+  cat > "$WORK/docs/reports/skill-token-baseline.md" << 'BASE'
+# Skill token baseline
+
+Header prose that must survive the splice.
+
+<!-- baseline:begin -->
+| Skill | Words | Tokens |
+|-------|------:|-------:|
+| stale-row | 999 | 999 |
+<!-- baseline:end -->
+
+Footer prose that must survive the splice.
+BASE
+}
+
+@test "--update-baseline splices fresh table, preserves header/footer/markers" {
+  _mk_baseline_workdir
+  cd "$WORK"
+  run bash "$BIN" --skills-dir "$WORK/skills"
+  table_first_data_row="$(echo "$output" | sed -n '3p')"
+  run bash -c "cd '$WORK' && bash '$BIN' --skills-dir '$WORK/skills' --update-baseline"
+  [ "$status" -eq 0 ]
+  b="$WORK/docs/reports/skill-token-baseline.md"
+  grep -q 'Header prose that must survive' "$b"
+  grep -q 'Footer prose that must survive' "$b"
+  [ "$(grep -c 'baseline:begin\|baseline:end' "$b")" -eq 2 ]
+  grep -q 'demo-skill' "$b"
+  if grep -q 'stale-row' "$b"; then false; fi
+}
+
+@test "--update-baseline is idempotent (second run leaves file byte-identical)" {
+  _mk_baseline_workdir
+  bash -c "cd '$WORK' && bash '$BIN' --skills-dir '$WORK/skills' --update-baseline" > /dev/null
+  h1="$(shasum -a 256 "$WORK/docs/reports/skill-token-baseline.md")"
+  bash -c "cd '$WORK' && bash '$BIN' --skills-dir '$WORK/skills' --update-baseline" > /dev/null
+  h2="$(shasum -a 256 "$WORK/docs/reports/skill-token-baseline.md")"
+  [ "$h1" = "$h2" ]
+}
+
+@test "--update-baseline fails loudly (exit 2) when markers are missing" {
+  _mk_baseline_workdir
+  printf '# No markers here\n' > "$WORK/docs/reports/skill-token-baseline.md"
+  run bash -c "cd '$WORK' && bash '$BIN' --skills-dir '$WORK/skills' --update-baseline"
+  [ "$status" -eq 2 ]
+  echo "$output" | grep -q 'refusing to splice'
+  grep -q 'No markers here' "$WORK/docs/reports/skill-token-baseline.md"
+}
+
+@test "--update-baseline fails loudly (exit 2) when baseline file is absent" {
+  _mk_baseline_workdir
+  rm "$WORK/docs/reports/skill-token-baseline.md"
+  run bash -c "cd '$WORK' && bash '$BIN' --skills-dir '$WORK/skills' --update-baseline"
+  [ "$status" -eq 2 ]
+  echo "$output" | grep -q 'cannot --update-baseline'
+}
+
+@test "--json and --update-baseline are mutually exclusive (exit 1)" {
+  run bash "$BIN" --json --update-baseline
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'mutually exclusive'
+}
