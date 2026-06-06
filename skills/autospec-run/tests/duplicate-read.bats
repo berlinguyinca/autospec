@@ -161,6 +161,19 @@ AUTOSPEC_TRIO=(
   done
 }
 
+# ── Phase 6 final self-challenge summary ─────────────────────────────────────
+
+@test "run trio: Phase 6 reports done challenge, archived summary, and next work" {
+  for f in "${RUN_TRIO[@]}"; do
+    grep -q 'Done challenge' "$f" \
+      || { echo "missing Done challenge contract in $f"; return 1; }
+    grep -q 'Archived summary' "$f" \
+      || { echo "missing Archived summary contract in $f"; return 1; }
+    grep -q 'what should be worked on next' "$f" \
+      || { echo "missing next-work wording in $f"; return 1; }
+  done
+}
+
 # ── bash -n syntax check on all modified SKILL.md files ──────────────────────
 
 @test "bash -n: autospec-run/SKILL.md has no syntax errors" {

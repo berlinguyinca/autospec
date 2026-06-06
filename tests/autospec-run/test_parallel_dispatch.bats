@@ -20,8 +20,9 @@ setup() {
     TMPDIR_BATS="$(mktemp -d)"
     PROMPT_FILE="$TMPDIR_BATS/prompt.md"
     printf 'IMPLEMENTER_PROMPT_BODY\n' > "$PROMPT_FILE"
-    BRANCH_A="test-690-fixture-a-$$"
-    BRANCH_B="test-690-fixture-b-$$"
+    UNIQUE_SUFFIX="$(basename "$TMPDIR_BATS" | tr -cd '[:alnum:]')"
+    BRANCH_A="test-690-fixture-a-$UNIQUE_SUFFIX"
+    BRANCH_B="test-690-fixture-b-$UNIQUE_SUFFIX"
     MOCK_BIN="$TMPDIR_BATS/bin"
     mkdir -p "$MOCK_BIN"
 }
@@ -29,6 +30,8 @@ setup() {
 teardown() {
     bash "$HELPER" --issue 690 --branch "$BRANCH_A" --cleanup 2>/dev/null || true
     bash "$HELPER" --issue 690 --branch "$BRANCH_B" --cleanup 2>/dev/null || true
+    git branch -D "$BRANCH_A" >/dev/null 2>&1 || true
+    git branch -D "$BRANCH_B" >/dev/null 2>&1 || true
     rm -rf "$TMPDIR_BATS"
 }
 
@@ -151,7 +154,7 @@ MOCKEOF
 }
 
 @test "fixture h (#960): dirty-reuse refusal propagates (exit 4 + code_health marker)" {
-    DIRTY_BRANCH="test-960-dirty-$$"
+    DIRTY_BRANCH="test-960-dirty-$UNIQUE_SUFFIX"
     DIRTY_PATH="/tmp/wt-$DIRTY_BRANCH"
 
     # Create a real worktree, then dirty it with an untracked file.
@@ -163,6 +166,7 @@ MOCKEOF
     # Cleanup regardless of test outcome.
     git worktree remove --force "$DIRTY_PATH" 2>/dev/null || rm -rf "$DIRTY_PATH"
     git worktree prune 2>/dev/null || true
+    git branch -D "$DIRTY_BRANCH" >/dev/null 2>&1 || true
 
     [ "$status" -eq 4 ]
     # The code_health marker must appear or the propagated error message.

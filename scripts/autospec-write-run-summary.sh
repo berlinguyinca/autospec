@@ -23,6 +23,12 @@
 #   ## Failures
 #   (empty or list)
 #
+#   ## Archived
+#   (empty or list)
+#
+#   ## Done challenge
+#   <content from --done-challenge-file, or conservative fallback>
+#
 #   ## Next steps
 #   <content from --next-steps-file, or "- (none — converged)" fallback>
 #
@@ -43,6 +49,9 @@ Options:
   --prs <file|csv>          file with one PR per line OR comma-separated list
   --issues <file|csv>       file with one issue per line OR comma-separated list
   --failures <file|csv>     file with failures OR comma-separated list
+  --archived <file|csv>     file with archived items OR comma-separated list
+  --done-challenge-file <file>
+                            file with markdown for the ## Done challenge section
   --elapsed <HH:MM>         elapsed wall-clock time (defaults: "")
   --next-steps-file <file>  file with markdown for the ## Next steps section
                             (defaults to "- (none — converged)" when empty/missing)
@@ -57,6 +66,8 @@ REPO=""
 PRS_INPUT=""
 ISSUES_INPUT=""
 FAILURES_INPUT=""
+ARCHIVED_INPUT=""
+DONE_CHALLENGE_FILE=""
 ELAPSED=""
 NEXT_STEPS_FILE=""
 OUTPUT=""
@@ -69,6 +80,8 @@ while [ $# -gt 0 ]; do
         --prs) PRS_INPUT="${2:-}"; shift 2 ;;
         --issues) ISSUES_INPUT="${2:-}"; shift 2 ;;
         --failures) FAILURES_INPUT="${2:-}"; shift 2 ;;
+        --archived) ARCHIVED_INPUT="${2:-}"; shift 2 ;;
+        --done-challenge-file) DONE_CHALLENGE_FILE="${2:-}"; shift 2 ;;
         --elapsed) ELAPSED="${2:-}"; shift 2 ;;
         --next-steps-file) NEXT_STEPS_FILE="${2:-}"; shift 2 ;;
         --output) OUTPUT="${2:-}"; shift 2 ;;
@@ -151,14 +164,30 @@ count_list() {
 PRS_RENDERED=$(render_list "$PRS_INPUT")
 ISSUES_RENDERED=$(render_list "$ISSUES_INPUT")
 FAILURES_RENDERED=$(render_list "$FAILURES_INPUT")
+ARCHIVED_RENDERED=$(render_list "$ARCHIVED_INPUT")
 PR_COUNT=$(count_list "$PRS_INPUT")
 ISSUE_COUNT=$(count_list "$ISSUES_INPUT")
+
+if [ -n "$DONE_CHALLENGE_FILE" ] && [ -f "$DONE_CHALLENGE_FILE" ] \
+    && grep -q '[^[:space:]]' "$DONE_CHALLENGE_FILE" 2>/dev/null; then
+    DONE_CHALLENGE_BODY=$(cat "$DONE_CHALLENGE_FILE")
+    HAS_DONE_CHALLENGE=1
+else
+    DONE_CHALLENGE_BODY="- Done challenge not recorded; verify queue, Phase 5.5, failures, and next steps before claiming convergence."
+    HAS_DONE_CHALLENGE=0
+fi
 
 # Resolve ## Next steps content. The section is REQUIRED — fall back to
 # `- (none — converged)` so the harvest contract sees convergence_clean.
 if [ -n "$NEXT_STEPS_FILE" ] && [ -f "$NEXT_STEPS_FILE" ] \
     && grep -q '[^[:space:]]' "$NEXT_STEPS_FILE" 2>/dev/null; then
     NEXT_STEPS_BODY=$(cat "$NEXT_STEPS_FILE")
+    if [ "$HAS_DONE_CHALLENGE" -eq 0 ] \
+        && [ "$(printf '%s\n' "$NEXT_STEPS_BODY" | sed '/^[[:space:]]*$/d')" = "- (none — converged)" ]; then
+        NEXT_STEPS_BODY="- Run and record the Done challenge before declaring convergence."
+    fi
+elif [ "$HAS_DONE_CHALLENGE" -eq 0 ]; then
+    NEXT_STEPS_BODY="- Run and record the Done challenge before declaring convergence."
 else
     NEXT_STEPS_BODY="- (none — converged)"
 fi
@@ -197,6 +226,14 @@ TMP="${OUTPUT}.tmp.$$"
     else
         printf '(none)\n'
     fi
+    printf '\n## Archived\n\n'
+    if [ -n "$ARCHIVED_RENDERED" ]; then
+        printf '%s\n' "$ARCHIVED_RENDERED"
+    else
+        printf '(none)\n'
+    fi
+    printf '\n## Done challenge\n\n'
+    printf '%s\n' "$DONE_CHALLENGE_BODY"
     printf '\n## Next steps\n\n'
     printf '%s\n' "$NEXT_STEPS_BODY"
 } > "$TMP" || { rm -f "$TMP"; echo "ERROR: write failed" >&2; exit 2; }

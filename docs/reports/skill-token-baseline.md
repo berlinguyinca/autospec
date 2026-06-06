@@ -26,7 +26,7 @@ To regenerate: `bash scripts/skill-token-report.sh --update-baseline` (splices b
 | autospec-resume |     1017 | 1352 |
 | autospec-review |     1712 | 2276 |
 | autospec-rollover-status |      393 | 522 |
-| autospec-run |    10342 | 13754 |
+| autospec-run |    10597 | 14094 |
 | autospec-split |     4820 | 6410 |
 | autospec-stop |      635 | 844 |
 | autospec-story |     1478 | 1965 |
