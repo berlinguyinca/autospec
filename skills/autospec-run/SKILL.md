@@ -1071,7 +1071,50 @@ If your harness lacks self-paced wakeup: register a local `cron`/`launchd` job t
 
 ## Phase 6 — Final report
 
-When the monitor terminates, post a final summary to the user: every issue processed, every PR merged, total elapsed wall time, and any failures that need human attention. Append the **Deferred summary** when `deferred[]` is non-empty:
+When the monitor terminates, challenge whether the run is really done before
+posting the final summary. The **Done challenge** must explicitly re-check:
+
+- Queue state: no ready `auto-implement`, `gap-remediation`, or
+  `needs-classify` issues remain under the active profile.
+- Phase 5.5 result: either 0 surviving gaps, or a named warning explaining why
+  post-review could not run and what risk remains.
+- Failures/deferred work: every failure is either fixed, restored to the queue,
+  or listed as next work; every deferred issue is listed in the Deferred summary.
+- Verification evidence: merged PRs passed the required local suite and required
+  CI checks before admin-merge.
+
+If the Done challenge finds unfinished work that can be handled safely, do not
+claim completion; relaunch Phase 4/Phase 5.5 or file the missing follow-up and
+drain it. Only emit the final report after the challenge says the run is really
+done or after the remaining work is explicitly captured as next work.
+
+Post a final summary to the user with:
+
+- Work done: every issue processed, every PR merged, total elapsed wall time,
+  and any failures that need human attention.
+- Archived summary: stale trackers, superseded specs, closed follow-ups, or
+  other archived items from this run; use `(none)` when nothing was archived.
+- Done challenge: the challenge bullets and final verdict.
+- Next work: what should be worked on next, or `- (none — converged)` when the
+  challenge and Phase 5.5 found no remaining work.
+
+Also write `.autospec/run-summary.md` via the canonical helper so downstream
+tools can harvest the same answer:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-write-run-summary.sh" \
+  --repo "{repo}" \
+  --prs "$PRS_MERGED_FILE_OR_CSV" \
+  --issues "$ISSUES_CLOSED_FILE_OR_CSV" \
+  --failures "$FAILURES_FILE_OR_CSV" \
+  --archived "$ARCHIVED_FILE_OR_CSV" \
+  --elapsed "$ELAPSED_HHMM" \
+  --done-challenge-file "$DONE_CHALLENGE_FILE" \
+  --next-steps-file "$NEXT_STEPS_FILE" \
+  --output ".autospec/run-summary.md"
+```
+
+Append the **Deferred summary** when `deferred[]` is non-empty:
 
 ```
 Deferred (off-profile under <profile_name>: ctx=<P.ctx>, reasoning=<P.reasoning>):
