@@ -199,6 +199,21 @@ check_review_remediation_section() {
     done
 }
 
+# Enforcement-defaults invariants (autospec-secaudit): the autospec-secaudit
+# trio must carry an `## Enforcement defaults` heading in all three trio files
+# (SKILL.md, opencode/agent.md, codex/prompt.md) so the concern->gate mapping
+# (which dimensions block vs. are advisory) stays in lockstep across harnesses.
+# Parallels check_review_remediation_section.
+check_enforcement_defaults_section() {
+    skill_dir="skills/autospec-secaudit"
+    [ -d "$skill_dir" ] || return 0
+    info "enforcement-defaults: autospec-secaudit"
+    for trio in SKILL.md opencode/agent.md codex/prompt.md; do
+        grep -q '^## Enforcement defaults' "$skill_dir/$trio" \
+            || fail "autospec-secaudit: $trio missing '## Enforcement defaults' section"
+    done
+}
+
 # Self-update invariants (introduced by issue #10): every multi-harness skill
 # must document `## Self-update mode` in all three trio files, and its
 # install.sh must accept the `--update` flag.
@@ -2326,6 +2341,7 @@ main() {
     check_keyword_routing_section
     check_gap_remediation_section
     check_review_remediation_section
+    check_enforcement_defaults_section
     check_codex_skills_install
     check_shared_script_install
 
