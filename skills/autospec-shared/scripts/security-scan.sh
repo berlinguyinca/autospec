@@ -184,9 +184,50 @@ scan_trivy() {
   done
 }
 
+# ── PII in logs/output: deterministic heuristic (LLM triage refines) ─────────
+# Flags personal data emitted through a log/print sink AS A VALUE (adjacent to
+# =/: or via .member / ["index"] access) — not bare English words. First pass;
+# the skill's LLM triage confirms and may add cases this misses.
+scan_pii() {
+  want pii || return 0
+  command -v grep >/dev/null 2>&1 || { warn_missing grep pii; return 0; }
+  local sinks='console\.(log|info|warn|error|debug)|System\.out|fmt\.Print|logger?\.|logging\.|printf|println|print\(|[[:space:]]echo[[:space:]]'
+  local pii='ssn|social.?security|credit.?card|card.?number|cardnumber|dob|date.?of.?birth|email|phone|passport|national.?id'
+  # PII must look like a value: name= / name: / .name / ["name"] / ['name']
+  local val="((${pii})[[:space:]]*[=:]|[.\\[][\"']?(${pii}))"
+  grep -rInEi "(${sinks}).*${val}" "$ROOT" 2>/dev/null | while IFS= read -r hit; do
+    local file line
+    file="$(printf '%s' "$hit" | cut -d: -f1)"; file="${file#$ROOT/}"
+    line="$(printf '%s' "$hit" | cut -d: -f2)"
+    emit_gap pii must-fix "$file" "$line" "Possible PII written to a log/output sink" \
+      "Personal data (SSN/email/phone/card/DOB) appears to be logged or printed. Redact or omit PII from logs; emit a stable non-identifying token instead."
+  done
+}
+
+# ── Prompt injection: untrusted input concatenated into an LLM/prompt sink ────
+# Advisory candidate (nice-to-have): a line referencing a prompt/LLM sink that
+# also performs raw string concatenation. Regex cannot prove taint flow, so the
+# skill's LLM triage upgrades confirmed cases to must-fix. Conservative to limit
+# false positives.
+scan_promptinj() {
+  want injection || return 0
+  command -v grep >/dev/null 2>&1 || { warn_missing grep injection; return 0; }
+  local sinks='prompt|messages|completion|chatcompletion|\.chat\.|\.complete|\.generate|openai|anthropic|claude|llm'
+  # raw concatenation: "literal" + var   OR   var + "literal"   OR f"...{x}..."
+  local concat='("[^"]*"[[:space:]]*\+|\+[[:space:]]*"[^"]*"|f"[^"]*\{)'
+  grep -rInEi "(${sinks})" "$ROOT" 2>/dev/null | grep -EI "${concat}" 2>/dev/null | while IFS= read -r hit; do
+    local file line
+    file="$(printf '%s' "$hit" | cut -d: -f1)"; file="${file#$ROOT/}"
+    line="$(printf '%s' "$hit" | cut -d: -f2)"
+    emit_gap injection nice-to-have "$file" "$line" "Possible prompt injection: input concatenated into an LLM/prompt" \
+      "Untrusted input appears to be concatenated into a prompt/LLM call. Separate instructions from data, validate/escape user input, and prefer structured message fields over string concatenation. (LLM triage confirms severity.)"
+  done
+}
+
 scan_secrets
 scan_semgrep
 scan_license
 scan_trivy
-# (pii covered by the LLM triage pass)
+scan_pii
+scan_promptinj
 exit 0

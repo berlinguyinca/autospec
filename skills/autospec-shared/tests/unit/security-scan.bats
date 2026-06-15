@@ -161,3 +161,35 @@ EOF
     # the eval finding (check_id ...eval-detected) is NOT injection, so under --only injection it is filtered out
     ! printf '%s' "$output" | grep -q 'eval-detected'
 }
+
+@test "scan_pii flags PII written to a log sink (must-fix)" {
+    run bash "$SCAN" --tree --root "$FIX" --only pii
+    [ "$status" -eq 0 ]
+    # pii-log.js logs ssn/email as values → must-fix pii gap
+    printf '%s' "$output" | grep -q '"dimension":"pii"'
+    printf '%s' "$output" | grep -q '"severity":"must-fix"'
+    printf '%s' "$output" | grep -q 'pii-log.js'
+}
+
+@test "scan_pii does not flag bare PII words or non-logged PII (low false positives)" {
+    run bash "$SCAN" --tree --root "$FIX" --only pii
+    [ "$status" -eq 0 ]
+    # pii-ui.js ("email address" prose) and pii-nosink.py (assignment, no sink) must NOT appear
+    ! printf '%s' "$output" | grep -q 'pii-ui.js'
+    ! printf '%s' "$output" | grep -q 'pii-nosink.py'
+}
+
+@test "scan_promptinj flags user input concatenated into an LLM prompt (advisory)" {
+    run bash "$SCAN" --tree --root "$FIX" --only injection
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | grep -q 'promptinj.py'
+    # advisory candidate: nice-to-have (LLM triage upgrades confirmed cases)
+    printf '%s' "$output" | grep -E 'promptinj.py' | grep -q '"dimension":"injection"'
+    printf '%s' "$output" | grep -E 'promptinj.py' | grep -q '"severity":"nice-to-have"'
+}
+
+@test "scan_promptinj does not flag benign string concatenation (no LLM sink)" {
+    run bash "$SCAN" --tree --root "$FIX" --only injection
+    [ "$status" -eq 0 ]
+    ! printf '%s' "$output" | grep -q 'concat-benign.py'
+}
