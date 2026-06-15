@@ -130,3 +130,37 @@ assert d['proposals_after_recent_filter'] == 1
 assert d['proposals'][0]['title'] == 'feat: beta'
 "
 }
+
+@test "constitution gate drops empty-evidence and below-floor-confidence proposals" {
+    make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[{"title":"feat: keep me","evidence":"real evidence","estimated_complexity":"small","confidence":0.9},{"title":"feat: no evidence","evidence":"","estimated_complexity":"small","confidence":0.9},{"title":"feat: low conf","evidence":"e","estimated_complexity":"small","confidence":0.1}]}'
+    make_fake_researcher prior-reports '{"source":"prior-reports","proposals":[]}'
+    make_fake_researcher codebase-signals '{"source":"codebase-signals","proposals":[]}'
+    make_fake_researcher open-issues '{"source":"open-issues","proposals":[]}'
+
+    run bash "$REPO_ROOT/scripts/explore-research-cycle.sh" --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+assert 'proposals_after_constitution' in d, 'missing proposals_after_constitution key'
+assert d['proposals_after_dedup'] == 3, d['proposals_after_dedup']
+assert d['proposals_after_constitution'] == 1, d['proposals_after_constitution']
+titles = [p['title'] for p in d['proposals']]
+assert titles == ['feat: keep me'], titles
+"
+}
+
+@test "constitution floor is overridable via AUTOSPEC_EXPLORE_MIN_CONFIDENCE" {
+    make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[{"title":"feat: low conf","evidence":"e","estimated_complexity":"small","confidence":0.1}]}'
+    make_fake_researcher prior-reports '{"source":"prior-reports","proposals":[]}'
+    make_fake_researcher codebase-signals '{"source":"codebase-signals","proposals":[]}'
+    make_fake_researcher open-issues '{"source":"open-issues","proposals":[]}'
+
+    run env AUTOSPEC_EXPLORE_MIN_CONFIDENCE=0.05 bash "$REPO_ROOT/scripts/explore-research-cycle.sh" --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+assert d['proposals_after_constitution'] == 1, d['proposals_after_constitution']
+"
+}

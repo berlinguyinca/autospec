@@ -240,6 +240,18 @@ for p in all_props:
         by_norm[n] = p
 deduped = list(by_norm.values())
 
+# Constitution gate (deterministic rules D1 evidence + D2 confidence floor).
+# Keep this byte-aligned with explore-constitution.sh --filter. Floor default 0.3
+# reproduces prior behavior for well-formed proposals (all carry evidence and
+# confidence >= 0.4); it drops empty-evidence and low-confidence noise.
+try:
+    _floor = float(os.environ.get("AUTOSPEC_EXPLORE_MIN_CONFIDENCE", "0.3") or "0.3")
+except Exception:
+    _floor = 0.3
+constitutional = [p for p in deduped
+                  if str(p.get("evidence", "")).strip() != ""
+                  and p.get("confidence", 0) >= _floor]
+
 # Filter against recent titles.
 recent_norms = set()
 try:
@@ -251,7 +263,7 @@ try:
 except FileNotFoundError:
     pass
 
-filtered = [p for p in deduped if normalize_title(p["title"]) not in recent_norms]
+filtered = [p for p in constitutional if normalize_title(p["title"]) not in recent_norms]
 
 # Rank descending by score; cap.
 filtered.sort(key=lambda p: p["score"], reverse=True)
@@ -261,6 +273,7 @@ out = {
     "round": datetime.date.today().isoformat(),
     "proposals_total": total,
     "proposals_after_dedup": len(deduped),
+    "proposals_after_constitution": len(constitutional),
     "proposals_after_recent_filter": len(filtered),
     "proposals": final,
 }
