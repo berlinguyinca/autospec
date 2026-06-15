@@ -298,10 +298,10 @@ case "$CMD" in
       norm="$(_normalize_title "$title")"
 
       # 2) Derive linked PR + per-issue timestamps.
-      pr_json="$(gh pr list $repo_args --state all --search "$num in:body" \
+      pr_json="$(gh pr list $repo_args --state all --search "#$num in:body" \
         --json number,state,mergedAt,baseRefName --limit 50 2>/dev/null)"
       [ -n "$pr_json" ] || pr_json="[]"
-      iv_json="$(gh issue view $num $repo_args --json number,state,closedAt,createdAt 2>/dev/null)"
+      iv_json="$(gh issue view $num $repo_args --json number,state,closedAt,createdAt,updatedAt 2>/dev/null)"
       [ -n "$iv_json" ] || iv_json="{}"
 
       # Merged PR (mergedAt non-null) takes precedence.
@@ -309,6 +309,7 @@ case "$CMD" in
       open_pr="$(printf '%s' "$pr_json" | jq -r '[.[] | select((.state|ascii_upcase)=="OPEN")] | (.[0].number // empty)')"
 
       created_at="$(printf '%s' "$iv_json" | jq -r '.createdAt // ""')"
+      updated_at="$(printf '%s' "$iv_json" | jq -r '.updatedAt // ""')"
       closed_at="$(printf '%s' "$iv_json" | jq -r '.closedAt // ""')"
       iv_state="$(printf '%s' "$iv_json" | jq -r '.state // ""')"
       [ -n "$iv_state" ] && istate="$iv_state"
@@ -321,8 +322,10 @@ case "$CMD" in
       elif [ "$istate_uc" = "OPEN" ] && [ -n "$open_pr" ]; then
         outcome="pending"; pr="$open_pr"
       elif [ "$istate_uc" = "OPEN" ] && [ -z "$open_pr" ]; then
-        # Stalled if age (from created/closed) exceeds threshold.
-        ref_ts="${created_at:-$closed_at}"
+        # Stalled only if the issue has gone quiet: time since last update
+        # (not creation) exceeds the threshold. An actively-draining issue
+        # filed long ago but recently touched is NOT stalled.
+        ref_ts="${updated_at:-$created_at}"
         age_days=0
         if [ -n "$ref_ts" ]; then
           ref_epoch="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$ref_ts" +%s 2>/dev/null || date -u -d "$ref_ts" +%s 2>/dev/null || echo "")"

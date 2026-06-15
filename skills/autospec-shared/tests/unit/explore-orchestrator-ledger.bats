@@ -57,8 +57,18 @@ case "$1 $2" in
         echo '{"state":"CLOSED","closedAt":"2026-06-15T00:00:00Z"}'
         ;;
     "pr list")
-        # A merged PR references the issue.
-        echo '[{"number":888,"state":"MERGED","mergedAt":"2026-06-15T00:00:00Z"}]'
+        # A merged PR references the issue — but ONLY when the caller asks for
+        # non-open PRs (--state all/merged/closed). gh defaults to --state open,
+        # which would EXCLUDE the already-merged PR; emulate that so a missing
+        # --state flag yields [] (regression guard for the orchestrator fix).
+        case "$*" in
+            *"--state all"*|*"--state merged"*|*"--state closed"*)
+                echo '[{"number":888,"state":"MERGED","mergedAt":"2026-06-15T00:00:00Z"}]'
+                ;;
+            *)
+                echo '[]'
+                ;;
+        esac
         ;;
     *) : ;;
 esac

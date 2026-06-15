@@ -207,10 +207,12 @@ fi
 if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
   # $3 is the issue number.
   case "$3" in
-    201) echo '{"number":201,"state":"CLOSED","closedAt":"2026-06-01T00:00:00Z","createdAt":"2026-05-01T00:00:00Z"}'; exit 0 ;;
-    202) echo '{"number":202,"state":"OPEN","closedAt":null,"createdAt":"2026-06-14T00:00:00Z"}'; exit 0 ;;
-    203) echo '{"number":203,"state":"OPEN","closedAt":null,"createdAt":"2020-01-01T00:00:00Z"}'; exit 0 ;;
-    204) echo '{"number":204,"state":"CLOSED","closedAt":"2026-06-01T00:00:00Z","createdAt":"2026-05-01T00:00:00Z"}'; exit 0 ;;
+    201) echo '{"number":201,"state":"CLOSED","closedAt":"2026-06-01T00:00:00Z","createdAt":"2026-05-01T00:00:00Z","updatedAt":"2026-06-01T00:00:00Z"}'; exit 0 ;;
+    202) echo '{"number":202,"state":"OPEN","closedAt":null,"createdAt":"2026-06-14T00:00:00Z","updatedAt":"2026-06-14T00:00:00Z"}'; exit 0 ;;
+    # 203: created recently but NOT updated in ages -> stalled by updatedAt
+    # (createdAt is recent to prove staleness is driven by updatedAt, not creation).
+    203) echo '{"number":203,"state":"OPEN","closedAt":null,"createdAt":"2026-06-14T00:00:00Z","updatedAt":"2020-01-01T00:00:00Z"}'; exit 0 ;;
+    204) echo '{"number":204,"state":"CLOSED","closedAt":"2026-06-01T00:00:00Z","createdAt":"2026-05-01T00:00:00Z","updatedAt":"2026-06-01T00:00:00Z"}'; exit 0 ;;
     *) echo '{}'; exit 0 ;;
   esac
 fi

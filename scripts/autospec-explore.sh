@@ -336,7 +336,8 @@ $marker"
             issue_url=""
             issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement 2>/dev/null)" || issue_url=""
             if [ -z "$issue_url" ]; then
-                # Retry without suppression so genuine failures surface in logs.
+                # Retry with stderr visible (gh diagnostics no longer suppressed);
+                # stdout (the issue URL) is still captured into issue_url.
                 issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement)" || issue_url=""
             fi
             [ -z "$issue_url" ] && continue
@@ -375,7 +376,7 @@ $marker"
         for fnum in $filed_issue_nums; do
             iv_json="$(gh issue view "$fnum" --json state,closedAt 2>/dev/null)" || iv_json=""
             [ -n "$iv_json" ] || iv_json="{}"
-            pr_json="$(gh pr list --search "$fnum in:body" --json number,state,mergedAt 2>/dev/null)" || pr_json=""
+            pr_json="$(gh pr list --state all --search "#$fnum in:body" --json number,state,mergedAt 2>/dev/null)" || pr_json=""
             [ -n "$pr_json" ] || pr_json="[]"
             istate="$(printf '%s' "$iv_json" | jq -r '.state // ""' 2>/dev/null)"
             istate_uc="$(printf '%s' "$istate" | tr '[:lower:]' '[:upper:]')"
