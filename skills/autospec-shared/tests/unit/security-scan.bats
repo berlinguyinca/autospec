@@ -147,7 +147,10 @@ EOF
     cp "$FIX/sqli.py" "$TMP/sqli.py"
     mkdir -p "$TMP/tmphome"
     before="$(find "$TMP/tmphome" -mindepth 1 -maxdepth 1 -type d | wc -l)"
-    run env TMPDIR="$TMP/tmphome" bash "$SCAN" --diff HEAD --root "$TMP" --only vuln
+    # FORCE_LLM=1 skips real scanners so this asserts security-scan.sh's OWN
+    # --diff temp tree (_scan_tmp) is cleaned, without counting temp dirs leaked
+    # by an installed scanner (e.g. semgrep's semgrep-mcp) into TMPDIR.
+    run env TMPDIR="$TMP/tmphome" AUTOSPEC_SECSCAN_FORCE_LLM=1 bash "$SCAN" --diff HEAD --root "$TMP" --only vuln
     [ "$status" -eq 0 ]
     after="$(find "$TMP/tmphome" -mindepth 1 -maxdepth 1 -type d | wc -l)"
     [ "$before" -eq "$after" ]
