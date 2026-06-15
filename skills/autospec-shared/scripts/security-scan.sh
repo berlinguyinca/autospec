@@ -86,6 +86,52 @@ scan_secrets() {
   rm -f "$report"
 }
 
+# ── vuln/injection: semgrep ──────────────────────────────────────────────────
+scan_semgrep() {
+  want vuln || want injection || return 0
+  if [ "${AUTOSPEC_SECSCAN_FORCE_LLM:-0}" = "1" ] || ! command -v semgrep >/dev/null 2>&1; then
+    warn_missing semgrep vuln; return 0
+  fi
+  local out; out="$(semgrep --config=auto --json --quiet "$ROOT" 2>/dev/null)"
+  [ -n "$out" ] || return 0
+  printf '%s' "$out" | jq -c '.results[]?' 2>/dev/null | while IFS= read -r r; do
+    local file line msg sev gsev cid
+    file="$(printf '%s' "$r" | jq -r '.path // ""')"
+    line="$(printf '%s' "$r" | jq -r '.start.line // 0')"
+    msg="$(printf '%s' "$r"  | jq -r '.extra.message // .check_id // "vulnerability"')"
+    sev="$(printf '%s' "$r"  | jq -r '.extra.severity // "WARNING"')"
+    cid="$(printf '%s' "$r"  | jq -r '.check_id // ""')"
+    [ "$sev" = "ERROR" ] && gsev="must-fix" || gsev="nice-to-have"
+    emit_gap vuln "$gsev" "$file" "$line" "$msg" \
+      "semgrep flagged a security pattern ($cid). Validate input at the boundary; never eval/exec untrusted data; parameterize SQL."
+  done
+}
+
+# ── license/IP: license-checker (deps) + copyleft header heuristic (source) ───
+scan_license() {
+  want license || return 0
+  # Copyleft header heuristic over source tree (advisory-fix, human confirms).
+  if command -v grep >/dev/null 2>&1; then
+    grep -rliE 'GNU (General|Lesser) Public License|GPL|AGPL' "$ROOT" 2>/dev/null \
+      | while IFS= read -r file; do
+        emit_gap license must-fix "$file" 0 "Possible copyleft (GPL/AGPL) license header" \
+          "Copyleft license text found. Confirm this code can ship under the project license — human review required before merge."
+      done
+  fi
+  command -v license-checker >/dev/null 2>&1 || { warn_missing license-checker license; return 0; }
+  # Dependency license scan runs only where a package.json exists.
+  [ -f "$ROOT/package.json" ] || return 0
+  ( cd "$ROOT" && license-checker --json --production 2>/dev/null ) \
+    | jq -rc 'to_entries[]? | select(.value.licenses | test("GPL|AGPL"; "i")) | {pkg:.key, lic:.value.licenses}' 2>/dev/null \
+    | while IFS= read -r e; do
+        emit_gap license must-fix "package.json" 0 \
+          "Copyleft dependency: $(printf '%s' "$e" | jq -r '.pkg')" \
+          "Dependency license $(printf '%s' "$e" | jq -r '.lic') may be incompatible with the project license."
+      done
+}
+
 scan_secrets
-# (vuln / injection / license / pii / cve added in later tasks)
+scan_semgrep
+scan_license
+# (pii / cve covered by the LLM triage pass + trivy in a follow-up)
 exit 0
