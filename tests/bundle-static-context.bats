@@ -230,3 +230,27 @@ teardown() {
   [ -f "$skill_md" ]
   grep -q "bundle-static-context.sh" "$skill_md"
 }
+
+@test "implementer bundle injects DESIGN.md when the repo has one" {
+  printf '# Design Language\nprimary: #112233\nspacing: 8px grid\n' > "$FIXTURES_DIR/DESIGN.md"
+  run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role implementer --issue-labels "skill:autospec-run"
+  rm -f "$FIXTURES_DIR/DESIGN.md"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q 'Design language (DESIGN.md'
+  printf '%s\n' "$output" | grep -q '8px grid'
+}
+
+@test "implementer bundle omits the design section when no DESIGN.md exists" {
+  rm -f "$FIXTURES_DIR/DESIGN.md"
+  run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role implementer --issue-labels "skill:autospec-run"
+  [ "$status" -eq 0 ]
+  ! printf '%s\n' "$output" | grep -q 'Design language (DESIGN.md'
+}

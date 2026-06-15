@@ -243,6 +243,17 @@ emit_scaffolding() {
   esac
 }
 
+# Emit the repo's adopted design language (DESIGN.md at repo root), if present, so
+# the implementer honors design tokens/constraints instead of hardcoding values.
+# Repo-wide and byte-stable across issues, so it lives inside the cache boundary.
+emit_design() {
+  design_md="$REPO_ROOT/DESIGN.md"
+  [ -f "$design_md" ] || return 0
+  printf '## Design language (DESIGN.md — honor these tokens; do not hardcode)\n\n'
+  cat "$design_md"
+  printf '\n'
+}
+
 # ── emit output ───────────────────────────────────────────────────────────────
 
 if [ "$ROLE" = "implementer" ]; then
@@ -266,6 +277,10 @@ if [ "$ROLE" = "implementer" ]; then
     in_sec { print }
   ' "$AGENTS_MD"
   printf '\n'
+
+  # 3. Adopted design language (DESIGN.md), if the repo has one — repo-wide and
+  #    byte-stable, so it stays inside the cache boundary.
+  emit_design
 
   printf '<!-- CACHE BOUNDARY -->\n'
 
