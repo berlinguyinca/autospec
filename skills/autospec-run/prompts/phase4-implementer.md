@@ -186,6 +186,42 @@ If Peer-review ran:
 
 If Peer-review skipped: skip this step.
 
+## Security gate (blocking — before PR)
+
+After applying peer-review must-fixes and before opening the PR, run the security
+gate on the branch diff. This catches secret leaks, vulnerabilities, SQL/command
+injection, prompt-injection sinks, PII leaks, copyleft/IP contamination, and
+backdoors. The gate shares its engine with `/autospec-secaudit`.
+
+```bash
+SECGATE="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/security-remediation-loop.sh"
+if [ -x "$SECGATE" ] || [ -f "$SECGATE" ]; then
+  sec_out="$(bash "$SECGATE" --decide --diff origin/main --root .)"; sec_exit=$?
+  echo "$sec_out"
+else
+  echo "[secgate] security-remediation-loop.sh not installed — skipping (run /autospec-secaudit update)"; sec_exit=0
+fi
+```
+
+Handle the result:
+
+- **`decision=pass` (exit 0)** → continue to Lock-step compliance.
+- **`decision=block` (exit 1)** → for each `must-fix` finding, remove the flagged
+  pattern (validate input at boundaries; parameterize SQL; never eval/exec
+  untrusted input; never let untrusted input reach an LLM/prompt sink). For any
+  `ROTATE: <file> — <title>` line printed, remove the secret from the code AND
+  add a `## Security: rotate these credentials` section to the PR body listing
+  them (a committed secret is compromised even after removal). Then re-run the
+  gate. Repeat up to `AUTOSPEC_SEC_MAX_ROUNDS` (default 3) rounds. If a
+  `must-fix` still survives after the cap → do NOT open the PR; comment the
+  findings on the issue and exit. The monitor will pick the issue up again.
+- **`decision=block reason=engine-failed-closed` (exit 2)** → the scanner engine
+  could not run (e.g. `jq` missing). Fail closed: do NOT open the PR. Comment on
+  the issue that the security engine could not run, and exit.
+
+Advisory findings (`nice-to-have`, e.g. non-critical dependency CVEs) never block
+the PR; they are reported but the gate still returns `decision=pass`.
+
 ## Lock-step compliance
 
 Immediately before `gh pr create`:

@@ -11,8 +11,8 @@
 #   ensure-tool.sh <tool>          # ensure <tool> is on PATH; install if absent
 #
 # Supported tools (baked-in table): ajv, bash, bats, bun, claude, codex, curl,
-# gh, git, jq, mempalace, node, npm, omc, omx, oh-my-opencode, opencode, pipx,
-# python3, uv, yq
+# gh, git, gitleaks, jq, license-checker, mempalace, node, npm, omc, omx,
+# oh-my-opencode, opencode, pipx, python3, semgrep, trivy, uv, yq
 # Unknown tools are a silent no-op (exit 0).
 #
 # Exit codes:
@@ -206,6 +206,12 @@ case "$TOOL" in
     _try_brew git || _try_apt git || _try_dnf git || _try_yum git || _try_pacman git || _try_apk git \
       || _try_winget Git.Git || _try_choco git || _try_scoop git || true
     ;;
+  gitleaks)
+    _try_brew gitleaks || _try_winget gitleaks.gitleaks || _try_choco gitleaks || _try_scoop gitleaks || true
+    ;;
+  license-checker)
+    _try_npm license-checker || true
+    ;;
   mempalace)
     # Python tool: pipx (isolated venv) → uv → pip --user. Mirrors PR #509.
     _try_pipx mempalace || _try_uv mempalace || _try_pip mempalace || true
@@ -234,6 +240,13 @@ case "$TOOL" in
     _try_brew python || _try_apt python3 python3-pip || _try_dnf python3 python3-pip || _try_yum python3 python3-pip \
       || _try_pacman python python-pip || _try_apk python3 py3-pip || _try_winget Python.Python.3.12 \
       || _try_choco python || _try_scoop python || true
+    ;;
+  semgrep)
+    # Python tool: pipx (isolated venv) → uv → pip --user → brew.
+    _try_pipx semgrep || _try_uv semgrep || _try_pip semgrep || _try_brew semgrep || true
+    ;;
+  trivy)
+    _try_brew trivy || _try_winget AquaSecurity.Trivy || _try_choco trivy || _try_scoop trivy || true
     ;;
   uv)
     _try_brew uv || _try_pipx uv || _try_pip uv || _try_choco uv || _try_scoop uv || true

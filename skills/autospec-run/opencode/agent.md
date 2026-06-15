@@ -1161,6 +1161,28 @@ Loop (`round = 1 … MAX`):
    ```
 
    The emitted gaps carry `dimension: "docs-completeness"`; the gap-remediation loop labels them `gap-remediation` like every other survivor, so a later round does not re-flag freshly-fixed work. Failures of the docs check itself (missing config, drift-script error, missing `node`/`jq`) only log a WARN to `/tmp/docs-completeness.err` and emit an empty array — this dimension NEVER blocks run completion (same failure semantics as `/autospec-review` above).
+1c. **Security dimension** (autospec-secaudit sweep — runs on round 1, after the docs dimension merges into `${GAPS_FILE}`): run a repo-wide security sweep (full-tree `--tree --root .`) for security, secret-leak, injection, and PII issues, and **append surviving must-fix findings** to the same `${GAPS_FILE}` so they file, dedupe, and converge through the SAME gap-remediation machinery used in step 2 (do NOT build a parallel loop). Skip the dimension when `~/.autospec/no-secaudit.flag` exists. This shares its engine with `/autospec-secaudit`.
+
+   ```bash
+   if [ ! -f "$HOME/.autospec/no-secaudit.flag" ]; then
+     SECSCAN="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/security-scan.sh"
+     if [ -f "$SECSCAN" ]; then
+       # Auto-file only must-fix findings, and exclude `license` (copyleft/IP
+       # needs human confirmation — surfaced via a manual /autospec-secaudit
+       # report, not auto-filed as an implementable issue).
+       SEC_GAPS="$(bash "$SECSCAN" --tree --root . 2>/tmp/secaudit-sweep.err \
+         | jq -sc '[ .[] | select(.severity=="must-fix" and .dimension != "license") ]' 2>/dev/null || printf '[]')"
+       if [ -s "${GAPS_FILE}" ]; then
+         jq -s '.[0] + .[1]' "${GAPS_FILE}" <(printf '%s' "${SEC_GAPS}") > "${GAPS_FILE}.secmerged" \
+           && mv "${GAPS_FILE}.secmerged" "${GAPS_FILE}"
+       else
+         printf '%s' "${SEC_GAPS}" > "${GAPS_FILE}"
+       fi
+     fi
+   fi
+   ```
+
+   The emitted gaps carry security dimensions (`secrets` / `vuln` / `injection` / `pii` / `cve`); the gap-remediation loop labels them `gap-remediation` like every other survivor, so a later round does not re-flag freshly-fixed work. A missing scan engine, missing scanners, or `jq` error only logs to `/tmp/secaudit-sweep.err` and emits nothing — this dimension NEVER blocks run completion (same failure semantics as the docs dimension above). For deeper coverage (LLM triage of PII / prompt-injection, plus copyleft/IP review and the `.autospec/secaudit.md` report), run `/autospec-secaudit` manually.
 2. **File survivors:**
 
    ```bash

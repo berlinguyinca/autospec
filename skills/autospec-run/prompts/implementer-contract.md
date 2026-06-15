@@ -63,7 +63,7 @@ implementer's retry prompt as cumulative context:
 | `OUT_OF_SCOPE` | "Restrict diff to files listed in issue's ## Implementation outline. Revert other changes or amend the issue body." |
 | `MISSING_TEST` | "Add a test under tests/<TIER>/ for the listed required test type before re-pushing." |
 | `COMPLEXITY` | "Split functions >50 LOC, files >500 LOC, nesting >4. No copy-paste branches." |
-| `SECURITY` | "Remove the flagged pattern. NEVER hardcode secrets, NEVER use --no-verify or git reset --hard, validate input at boundaries." |
+| `SECURITY` | "Remove the flagged pattern. NEVER hardcode secrets (remove AND rotate — a committed secret is compromised), NEVER use --no-verify or git reset --hard, validate input at boundaries, parameterize SQL, never eval/exec untrusted input, never let untrusted input reach an LLM/prompt sink. The Phase 4 security gate (security-remediation-loop.sh) must report decision=pass before merge." |
 | `TODO_LEFT` | "Remove TODO/XXX/FIXME from non-test code. File a follow-up issue if the work is genuinely deferred." |
 | `MOCK_DB` | "Remove DB mock/stub. Use the real DB per AGENTS.md ## Engineering standards." |
 | `HALLUCINATED_API` | "The flagged symbol does not exist. Verify identifier names against the pre-PR repo and dependency manifests." |
