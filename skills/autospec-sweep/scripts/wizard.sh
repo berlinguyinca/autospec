@@ -199,6 +199,17 @@ fi
 [ -n "$E2E_COMMAND" ] || E2E_COMMAND="TODO: set project E2E command"
 [ -n "$DEPLOY_COMMAND" ] || DEPLOY_COMMAND="TODO: set deploy/start command for E2E tests"
 
+# Loud warning: any TODO: stub means the sweep runs in DEGRADED mode (the
+# corresponding command is silently skipped by review.sh). Never let this pass
+# unnoticed — the operator must fill these in before autospec-sweep can act.
+_sweep_stub_warns=""
+case "$TEST_COMMAND"   in TODO:*) _sweep_stub_warns="${_sweep_stub_warns} test";;   esac
+case "$E2E_COMMAND"    in TODO:*) _sweep_stub_warns="${_sweep_stub_warns} e2e";;    esac
+case "$DEPLOY_COMMAND" in TODO:*) _sweep_stub_warns="${_sweep_stub_warns} deploy";; esac
+if [ -n "$_sweep_stub_warns" ]; then
+  printf 'autospec-sweep: WARN — could not auto-detect command(s):%s. Written as TODO: stubs in .autospec/autospec.yml and SKIPPED (degraded mode) until you set them.\n' "$_sweep_stub_warns" >&2
+fi
+
 TMP_CONFIG="$(mktemp -t autospec-sweep-config.XXXXXX)"
 trap 'rm -f "$TMP_CONFIG"' EXIT
 

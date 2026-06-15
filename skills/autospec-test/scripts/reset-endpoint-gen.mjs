@@ -202,7 +202,11 @@ export function preflightHostname(url) {
 
 // ── Reset route code generators ───────────────────────────────────────────────
 
-const AUTOSPEC_HEADER = '// AUTOSPEC-GENERATED test-only — do not edit manually; regenerate via autospec-playwright';
+const AUTOSPEC_HEADER = `// AUTOSPEC-GENERATED test-only — do not edit manually; regenerate via autospec-playwright
+// ⚠ STUB: the DB-reset body below is a scaffold. It returns ok WITHOUT resetting
+// anything until you replace the marked TODO with real reset logic (truncate +
+// migrate + seed). Until then this endpoint is a no-op that will mask test state
+// bleed. Fill it in before relying on it.`;
 
 /**
  * Generate Express reset route handler content.

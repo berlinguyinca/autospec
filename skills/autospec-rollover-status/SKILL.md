@@ -39,6 +39,26 @@ If no install path is detected, print `Self-update: no installed copy of autospe
 
 Runs `bash skills/autospec-rollover-status/show.sh` and presents the output.
 
+## Harness detection (run once at skill start)
+
+Detect your harness by checking available tools before dispatching work:
+
+1. **Claude Code** — the `Agent` tool with a `subagent_type` parameter is available.
+   - `TIER_A` = `opus` + `ultrathink`  (model ID: claude-opus-4-7)
+   - `TIER_B` = `sonnet`               (model ID: claude-sonnet-4-6)
+
+2. **OpenCode** — a `task` tool with model/tier configuration is available (no `subagent_type`).
+   - `TIER_A` = top-tier task model + high reasoning
+   - `TIER_B` = smaller-tier task model + medium reasoning
+
+3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available; `apply_patch` is the primary edit tool.
+   - `TIER_A` = current top GPT model + `reasoning_effort=high`
+   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+
+**Fallback rule:** If `TIER_B` is not available in your harness (model unknown, quota/capacity failure, authorization failure, or tool call returns an error for that model), silently retry the same dispatch with `TIER_A`. Preserve the parent context on retry; for Codex native subagents, fork/inherit the current conversation context and use the latest top GPT model instead of moving the work into the main session. Never ask the user.
+
+Hold `TIER_A` and `TIER_B` for the entire skill run.
+
 ## Required capabilities & harness adapter
 
 | Capability             | Claude Code | OpenCode    | Codex CLI   | Fallback if missing              |
