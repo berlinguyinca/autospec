@@ -34,12 +34,22 @@ Options:
   --research-sources LIST      Comma-separated subset of:
                                  spec-vs-code,prior-reports,codebase-signals,open-issues
                                Default: all 4.
+  --ledger PATH                Outcome ledger to derive dynamic source weights
+                               from (passed to explore-source-weights.sh). When
+                               omitted, $AUTOSPEC_EXPLORE_LEDGER is used, then the
+                               weights script's own default. With no ledger the
+                               canonical static priors are used (unchanged).
   --out PATH                   Write JSON to PATH (atomic) instead of stdout.
   -h, --help                   Print this help.
 
 Env:
   AUTOSPEC_REPO_ROOT             Repo root (default: git rev-parse).
   AUTOSPEC_RESEARCH_DIR          Researcher directory.
+  AUTOSPEC_EXPLORE_LEDGER        Default outcome ledger path (overridden by
+                                 --ledger).
+  AUTOSPEC_EXPLORE_WEIGHTS_BIN   Explicit path to explore-source-weights.sh
+                                 (overrides sibling/repo resolution; testing).
+  AUTOSPEC_SCRIPTS_DIR           Shared scripts dir searched for the weights bin.
   AUTOSPEC_TEST_ISSUES_JSON      Inject fake gh issue list (testing).
   AUTOSPEC_TEST_RECENT_TITLES    Newline-separated titles created in last 7d
                                  (testing — bypasses gh search).
@@ -49,16 +59,40 @@ EOF
 MAX_ISSUES=5
 SOURCES="spec-vs-code,prior-reports,codebase-signals,open-issues"
 OUT=""
+LEDGER="${AUTOSPEC_EXPLORE_LEDGER:-}"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --max-issues-per-round) MAX_ISSUES="$2"; shift 2 ;;
         --research-sources)     SOURCES="$2"; shift 2 ;;
+        --ledger)               LEDGER="$2"; shift 2 ;;
         --out)                  OUT="$2"; shift 2 ;;
         -h|--help)              usage; exit 0 ;;
         *) echo "explore-research-cycle: unknown arg: $1" >&2; usage; exit 2 ;;
     esac
 done
+
+# Resolve explore-source-weights.sh defensively. Order:
+#   1. $AUTOSPEC_EXPLORE_WEIGHTS_BIN (explicit override, e.g. tests)
+#   2. $AUTOSPEC_SCRIPTS_DIR/explore-source-weights.sh
+#   3. sibling of this script
+#   4. <repo>/skills/autospec-shared/scripts/explore-source-weights.sh
+# Prints the resolved path (may be empty / nonexistent — caller checks -x).
+_resolve_weights_bin() {
+    if [ -n "${AUTOSPEC_EXPLORE_WEIGHTS_BIN:-}" ]; then
+        printf '%s\n' "$AUTOSPEC_EXPLORE_WEIGHTS_BIN"; return 0
+    fi
+    if [ -n "${AUTOSPEC_SCRIPTS_DIR:-}" ] && [ -f "$AUTOSPEC_SCRIPTS_DIR/explore-source-weights.sh" ]; then
+        printf '%s\n' "$AUTOSPEC_SCRIPTS_DIR/explore-source-weights.sh"; return 0
+    fi
+    if [ -f "$SCRIPT_DIR/explore-source-weights.sh" ]; then
+        printf '%s\n' "$SCRIPT_DIR/explore-source-weights.sh"; return 0
+    fi
+    if [ -f "$REPO_ROOT/skills/autospec-shared/scripts/explore-source-weights.sh" ]; then
+        printf '%s\n' "$REPO_ROOT/skills/autospec-shared/scripts/explore-source-weights.sh"; return 0
+    fi
+    printf '\n'
+}
 
 cd "$REPO_ROOT" || { echo '{"proposals":[]}'; exit 0; }
 
@@ -111,6 +145,17 @@ else
     : > "$recent_titles_file"
 fi
 
+# Compute dynamic, ledger-derived source weights (best-effort). The weights
+# script emits {source: weight} JSON. With no/empty ledger it emits the
+# canonical priors that EXACTLY equal DEFAULT_SRC_WEIGHTS below, so behavior is
+# byte-identical when there is no learning yet. Any failure -> empty -> fallback.
+WEIGHTS_JSON=""
+weights_bin="$(_resolve_weights_bin)"
+if [ -n "$weights_bin" ] && [ -x "$weights_bin" ]; then
+    WEIGHTS_JSON="$("$weights_bin" --json ${LEDGER:+--ledger "$LEDGER"} 2>/dev/null || true)"
+fi
+export WEIGHTS_JSON
+
 # Aggregate, dedup, rank, filter, cap.
 WORK_DIR="$work_dir" \
 MAX_ISSUES="$MAX_ISSUES" \
@@ -122,8 +167,9 @@ work     = os.environ["WORK_DIR"]
 cap      = int(os.environ["MAX_ISSUES"])
 recent_f = os.environ["RECENT_FILE"]
 
-# Source weights per the spec.
-SRC_WEIGHTS = {
+# Static source priors per the spec — the defensive fallback used verbatim when
+# no dynamic weights are available (no ledger / weights script absent / broken).
+DEFAULT_SRC_WEIGHTS = {
     "spec-vs-code":     1.0,
     "prior-reports":    0.9,
     "codebase-signals": 0.7,
@@ -131,6 +177,17 @@ SRC_WEIGHTS = {
     "source-analysis":  0.5,
     "internet":         0.4,
 }
+# Overlay dynamic ledger-derived weights when present; otherwise fall back to
+# the static table. The overlay is a merge so unknown/missing sources retain
+# their static prior, guaranteeing parity when WEIGHTS_JSON mirrors the priors.
+_wj = os.environ.get("WEIGHTS_JSON", "").strip()
+if _wj:
+    try:
+        SRC_WEIGHTS = {**DEFAULT_SRC_WEIGHTS, **json.loads(_wj)}
+    except Exception:
+        SRC_WEIGHTS = DEFAULT_SRC_WEIGHTS
+else:
+    SRC_WEIGHTS = DEFAULT_SRC_WEIGHTS
 COMPLEXITY = {"small": 1.0, "medium": 2.0, "large": 4.0}
 
 def normalize_title(t):
