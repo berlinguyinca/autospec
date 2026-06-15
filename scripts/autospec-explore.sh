@@ -113,6 +113,59 @@ mkdir -p .autospec
 # shellcheck source=lib/autospec-harness-detect.sh
 . "$SCRIPT_DIR/lib/autospec-harness-detect.sh"
 
+# ── Ledger wiring (best-effort; never breaks the loop). ────────────────────────
+# Resolve explore-ledger.sh defensively. Order mirrors explore-research-cycle's
+# _resolve_weights_bin:
+#   1. $AUTOSPEC_EXPLORE_LEDGER_BIN (explicit override, e.g. tests)
+#   2. $AUTOSPEC_SCRIPTS_DIR/explore-ledger.sh
+#   3. sibling of this script
+#   4. <repo>/skills/autospec-shared/scripts/explore-ledger.sh
+# Prints the resolved path if it exists, else empty.
+_resolve_ledger_bin() {
+    if [ -n "${AUTOSPEC_EXPLORE_LEDGER_BIN:-}" ] && [ -f "${AUTOSPEC_EXPLORE_LEDGER_BIN}" ]; then
+        printf '%s\n' "$AUTOSPEC_EXPLORE_LEDGER_BIN"; return 0
+    fi
+    if [ -n "${AUTOSPEC_SCRIPTS_DIR:-}" ] && [ -f "$AUTOSPEC_SCRIPTS_DIR/explore-ledger.sh" ]; then
+        printf '%s\n' "$AUTOSPEC_SCRIPTS_DIR/explore-ledger.sh"; return 0
+    fi
+    if [ -f "$SCRIPT_DIR/explore-ledger.sh" ]; then
+        printf '%s\n' "$SCRIPT_DIR/explore-ledger.sh"; return 0
+    fi
+    if [ -f "$REPO_ROOT/skills/autospec-shared/scripts/explore-ledger.sh" ]; then
+        printf '%s\n' "$REPO_ROOT/skills/autospec-shared/scripts/explore-ledger.sh"; return 0
+    fi
+    printf '\n'
+}
+LEDGER_BIN="$(_resolve_ledger_bin)"
+
+# _ledger_normalize_title <title> — mirror explore-ledger.sh / research-cycle
+# normalize_title: lowercase, strip a leading conventional-commit prefix,
+# collapse non-alnum runs to single spaces, trim, cap at 120 chars.
+_ledger_normalize_title() {
+    printf '%s' "$1" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/^(feat|fix|chore|docs|test|refactor|perf|track|ci)(\([^)]*\))?!?: *//' \
+        | sed -E 's/[^a-z0-9]+/ /g' \
+        | sed -E 's/^ +//; s/ +$//' \
+        | cut -c1-120
+}
+
+# _ledger_append <json-record> — best-effort append; WARN + continue on failure.
+_ledger_append() {
+    [ -n "$LEDGER_BIN" ] || return 0
+    if ! bash "$LEDGER_BIN" --append "$1" >/dev/null 2>&1; then
+        echo "autospec-explore: WARN ledger append failed (continuing)" >&2
+    fi
+}
+
+# _ledger_update_outcome <issue> <outcome> [reason] — best-effort; WARN+continue.
+_ledger_update_outcome() {
+    [ -n "$LEDGER_BIN" ] || return 0
+    if ! bash "$LEDGER_BIN" --update-outcome "$1" "$2" "${3:-}" >/dev/null 2>&1; then
+        echo "autospec-explore: WARN ledger update-outcome failed for issue $1 (continuing)" >&2
+    fi
+}
+
 # ── Step 1: sandbox creation (idempotent). ─────────────────────────────────────
 sandbox_args=()
 if [ -n "$SANDBOX_SLUG" ]; then
@@ -242,32 +295,99 @@ while [ "$iter" -lt "$_max_iter" ]; do
 
     # ── File top-N proposals as auto-implement issues. ────────────────────────
     issues_filed=0
+    filed_issue_nums=""   # space-separated issue numbers filed THIS round (for ledger)
     if [ "$proposals_count" -gt 0 ] && command -v gh >/dev/null 2>&1; then
-        # Iterate proposal titles via python.
-        titles_file="$iter_dir/titles.txt"
+        # Iterate proposals via python, emitting TAB-separated
+        # title<TAB>source<TAB>complexity<TAB>confidence per proposal. We
+        # carry the full object so the issue body can embed the canonical
+        # explore-ledger marker and the ledger can record proposal metadata.
+        props_file="$iter_dir/proposals.tsv"
         python3 -c "
 import json
 d = json.load(open('$research_json'))
 for p in d.get('proposals', []):
-    print(p.get('title','').replace(chr(10),' '))
-" > "$titles_file" 2>/dev/null || : > "$titles_file"
+    title = (p.get('title','') or '').replace(chr(10),' ').replace(chr(9),' ')
+    src = (p.get('source','') or 'unknown').replace(chr(10),' ').replace(chr(9),' ')
+    comp = (p.get('estimated_complexity','') or 'medium').lower()
+    try:
+        conf = float(p.get('confidence', 0.5))
+    except Exception:
+        conf = 0.5
+    if comp not in ('small','medium','large'):
+        comp = 'medium'
+    if conf < 0: conf = 0.0
+    if conf > 1: conf = 1.0
+    print('%s\t%s\t%s\t%.2f' % (title, src, comp, conf))
+" > "$props_file" 2>/dev/null || : > "$props_file"
 
-        while IFS= read -r title; do
+        while IFS="$(printf '\t')" read -r title src complexity conf; do
             [ -z "$title" ] && continue
+            [ -n "$src" ] || src="unknown"
+            [ -n "$complexity" ] || complexity="medium"
+            [ -n "$conf" ] || conf="0.50"
+            # Canonical explore-ledger marker — MUST byte-match the rebuild
+            # parser grammar. Appended as the LAST line of the body.
+            marker="<!-- explore-ledger source=$src complexity=$complexity confidence=$conf round=$iter -->"
             body="Auto-filed by /autospec-explore round $iter (sandbox=$SANDBOX_BRANCH).
 
-Source: research cycle ($RESEARCH_SOURCES)."
-            if gh issue create --title "$title" --body "$body" --label auto-implement >/dev/null 2>&1; then
-                issues_filed=$((issues_filed + 1))
-            elif gh issue create --title "$title" --body "$body" --label auto-implement; then
-                issues_filed=$((issues_filed + 1))
+Source: research cycle ($RESEARCH_SOURCES).
+
+$marker"
+            issue_url=""
+            issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement 2>/dev/null)" || issue_url=""
+            if [ -z "$issue_url" ]; then
+                # Retry without suppression so genuine failures surface in logs.
+                issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement)" || issue_url=""
             fi
-        done < "$titles_file"
+            [ -z "$issue_url" ] && continue
+            issues_filed=$((issues_filed + 1))
+            # Extract trailing issue number from the returned URL.
+            issue_num="$(printf '%s' "$issue_url" | sed -E 's#.*/([0-9]+)[[:space:]]*$#\1#')"
+            case "$issue_num" in
+                ''|*[!0-9]*) issue_num=0 ;;
+            esac
+            # Record a pending ledger entry for the filed issue (best-effort).
+            if [ "$issue_num" -gt 0 ]; then
+                filed_issue_nums="$filed_issue_nums $issue_num"
+                norm_title="$(_ledger_normalize_title "$title")"
+                rec="$(jq -cn \
+                    --argjson round "$iter" \
+                    --arg source "$src" \
+                    --arg title "$title" \
+                    --arg norm "$norm_title" \
+                    --arg complexity "$complexity" \
+                    --argjson confidence "$conf" \
+                    --argjson issue "$issue_num" \
+                    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                    '{round:$round, source:$source, title:$title, norm_title:$norm, complexity:$complexity, confidence:$confidence, issue:$issue, pr:0, outcome:"pending", reason:"", ts:$ts}' \
+                    2>/dev/null)" || rec=""
+                [ -n "$rec" ] && _ledger_append "$rec"
+            fi
+        done < "$props_file"
     fi
 
     # ── Drain callback: invoke /autospec-run. ─────────────────────────────────
     drain_rc=0
     invoke_drain || drain_rc=$?
+
+    # ── Resolve outcomes for issues filed THIS round (best-effort). ───────────
+    if [ -n "$LEDGER_BIN" ] && [ -n "$filed_issue_nums" ] && command -v gh >/dev/null 2>&1; then
+        for fnum in $filed_issue_nums; do
+            iv_json="$(gh issue view "$fnum" --json state,closedAt 2>/dev/null)" || iv_json=""
+            [ -n "$iv_json" ] || iv_json="{}"
+            pr_json="$(gh pr list --search "$fnum in:body" --json number,state,mergedAt 2>/dev/null)" || pr_json=""
+            [ -n "$pr_json" ] || pr_json="[]"
+            istate="$(printf '%s' "$iv_json" | jq -r '.state // ""' 2>/dev/null)"
+            istate_uc="$(printf '%s' "$istate" | tr '[:lower:]' '[:upper:]')"
+            merged_pr="$(printf '%s' "$pr_json" | jq -r '[.[] | select(.mergedAt != null)] | (.[0].number // empty)' 2>/dev/null)"
+            if [ -n "$merged_pr" ]; then
+                _ledger_update_outcome "$fnum" "merged_clean" "merged via PR #$merged_pr"
+            elif [ "$istate_uc" = "CLOSED" ]; then
+                _ledger_update_outcome "$fnum" "abandoned" "issue closed without merged PR"
+            fi
+            # else: leave pending (no update).
+        done
+    fi
     if [ "$drain_rc" -ne 0 ]; then
         echo "autospec-explore: drain failed rc=$drain_rc (continuing with backoff)" >&2
         sleep 1
