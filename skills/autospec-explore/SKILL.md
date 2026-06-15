@@ -230,13 +230,20 @@ Aggregation:
 1. **Deduplication**: by normalized title (lowercased, action verb +
    subject), drop duplicates across researchers.
 2. **Ranking**: weighted score = `confidence × source_weight ×
-   1/estimated_complexity`. Default source weights:
+   1/estimated_complexity`. Source weights are **dynamic** — learned from the
+   outcome ledger (`explore-ledger.sh` → `explore-source-weights.sh`): each
+   weight is the Bayesian-smoothed clean-ship rate for that source in THIS repo
+   (`(merged_clean + α·prior) / (filed + α)`, α default 5), so a source whose
+   proposals keep merging clean gains weight and one whose proposals keep failing
+   loses it. With no ledger yet (round 1, or before `--rebuild`) every weight
+   equals its prior, so behavior matches the original static table. Priors:
    - `spec-vs-code` = 1.0 (highest — spec drift is concrete and grounded)
    - `prior-reports` = 0.9 (operator-derived priorities)
    - `codebase-signals` = 0.7
    - `open-issues` = 0.6
    - `source-analysis` = 0.5
    - `internet` = 0.4 (lowest — least grounded)
+   Inspect/rebuild the ledger and view current weights via `/autospec-explore-ledger`.
 3. **Filtering**: drop proposals that match recently-filed issue titles
    (last 7 days) to prevent oscillation.
 4. **Cap**: top `--max-issues-per-round` proposals become issues.
