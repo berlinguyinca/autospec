@@ -11,6 +11,14 @@
 # where RULE_ID is GOAL_VAGUE | GOAL_HEDGE | GOAL_NOT_ONE_SENTENCE
 #                | AC_PROSE | AC_SUBJECTIVE | AC_TOO_LONG | AC_EMPTY
 #                | SMOKE_MULTI_LINE | SMOKE_PLACEHOLDER | SMOKE_NOT_FENCED
+#                | MISSING_SECTION_FILES_TO_READ | MISSING_SECTION_IMPL_OUTLINE
+#                | MISSING_SECTION_TESTS | DEPS_MALFORMED
+#                | TOO_MANY_FILES | BODY_TOO_LONG | OUTLINE_TOO_LONG
+#
+# Implementer-load-bearing section + sizing rules (autospec trackers #420/#421):
+# the per-issue implementer reads "Files to read first", "Implementation outline",
+# and "Tests required"; the monitor parses "Dependencies"; scope comes from
+# "Files touched". These rules enforce the prose-only contract deterministically.
 #
 # Exit code = number of distinct findings (capped at 64); 0 means pass.
 
@@ -24,7 +32,7 @@ Rules enforced (§3 quality contract):
   GOAL_VAGUE            Bare vague verb (improve|enhance|optimize|polish|simplify|refactor|harden)
                         without a concrete object (path, backtick-quoted term, number, UPPER_SNAKE).
   GOAL_HEDGE            Hedging word (should|might|could try|try to) found in Goal section.
-  GOAL_NOT_ONE_SENTENCE Goal section must contain exactly one sentence (one terminal . ? or !).
+  GOAL_NOT_ONE_SENTENCE Goal section is empty/missing, has more than 2 sentences, or exceeds 30 words.
   AC_PROSE              AC line is not a checkbox (must start with '- [ ]').
   AC_SUBJECTIVE         AC item contains subjective adjective (looks|feels|seems|nice|clean|elegant|appropriate).
   AC_TOO_LONG           AC item exceeds 120 characters (excluding '- [ ] ' prefix).
@@ -32,6 +40,14 @@ Rules enforced (§3 quality contract):
   SMOKE_MULTI_LINE      Primary smoke test block has more than one non-blank/non-comment line.
   SMOKE_PLACEHOLDER     Primary smoke test block contains ... <TODO> TBD or XXX.
   SMOKE_NOT_FENCED      No fenced code block found under Primary smoke test heading.
+  MISSING_SECTION_FILES_TO_READ   Body has no '## Files to read first' heading.
+  MISSING_SECTION_IMPL_OUTLINE    Body has no '## Implementation outline' heading.
+  MISSING_SECTION_TESTS           Body has no '## Tests required' heading.
+  DEPS_MALFORMED        A '## Dependencies' section exists but a content line is neither
+                        'Depends on issue #N' nor exactly 'none'.
+  TOO_MANY_FILES        A '## Files touched' section lists more than 3 file paths.
+  BODY_TOO_LONG         Whole body exceeds 400 words.
+  OUTLINE_TOO_LONG      '## Implementation outline' section exceeds 30 non-blank lines.
 
 Exit code = number of findings (capped at 64). Exit 0 means all rules pass."
 
@@ -142,13 +158,17 @@ check_goal() {
     local full_text
     full_text="$(printf '%s' "$goal_content" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ //;s/ $//')"
 
-    # Count sentence-terminal characters: ? or ! anywhere, or . that is followed by
-    # whitespace/end-of-string (to skip dots inside .sh, .md, 3.1, etc.)
+    # Relaxed sizing rule (review W4): a Goal may be up to 2 sentences and up to
+    # 30 words. Count sentence-terminal characters: ? or ! anywhere, or . that is
+    # followed by whitespace/end-of-string (to skip dots inside .sh, .md, 3.1, etc.)
     local terminal_count
     terminal_count="$(printf '%s' "$full_text" | grep -oE '[?!]|\.[[:space:]]|\.$' | wc -l | tr -d ' ')"
 
-    if [ "$terminal_count" -ne 1 ]; then
-        add_finding "GOAL_NOT_ONE_SENTENCE" "Goal section must be exactly one sentence; found ${terminal_count} terminal punctuation mark(s)"
+    local word_count
+    word_count="$(printf '%s' "$full_text" | wc -w | tr -d ' ')"
+
+    if [ "$terminal_count" -gt 2 ] || [ "$word_count" -gt 30 ]; then
+        add_finding "GOAL_NOT_ONE_SENTENCE" "Goal must be at most 2 sentences and 30 words; found ${terminal_count} sentence(s) and ${word_count} word(s)"
     fi
 
     # Check for concrete object: path token, backtick-quoted span, number, UPPER_SNAKE label/env-var
@@ -309,11 +329,97 @@ EOF
     fi
 }
 
+# ── implementer-load-bearing section presence + dependency format ─────────────
+# (autospec trackers #420/#421 — the per-issue implementer reads these sections)
+
+check_sections() {
+    # Required headings the implementer loads. extract_section returns empty when
+    # the heading is absent; a present-but-empty section still satisfies presence
+    # (other rules cover emptiness), so test the heading line directly.
+    if ! grep -qE '^## Files to read first[[:space:]]*$' "$BODY_FILE"; then
+        add_finding "MISSING_SECTION_FILES_TO_READ" "Body has no '## Files to read first' heading (implementer reads it)"
+    fi
+    if ! grep -qE '^## Implementation outline[[:space:]]*$' "$BODY_FILE"; then
+        add_finding "MISSING_SECTION_IMPL_OUTLINE" "Body has no '## Implementation outline' heading (implementer reads it)"
+    fi
+    if ! grep -qE '^## Tests required[[:space:]]*$' "$BODY_FILE"; then
+        add_finding "MISSING_SECTION_TESTS" "Body has no '## Tests required' heading (implementer reads it)"
+    fi
+
+    # Dependencies format: only validated when the section exists. Every non-blank
+    # content line must be 'Depends on issue #N' or exactly 'none'.
+    if grep -qE '^## Dependencies[[:space:]]*$' "$BODY_FILE"; then
+        local deps_content
+        deps_content="$(extract_section '## Dependencies' "$BODY_FILE" | sed '/^[[:space:]]*$/d')"
+        local bad_dep=""
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            if ! printf '%s' "$line" | grep -qE '^Depends on issue #[0-9]+$' \
+                && [ "$line" != "none" ]; then
+                bad_dep="$line"
+                break
+            fi
+        done <<EOF
+$deps_content
+EOF
+        if [ -n "$bad_dep" ]; then
+            add_finding "DEPS_MALFORMED" "Dependencies line must be 'Depends on issue #N' or 'none': $(printf '%s' "$bad_dep" | cut -c1-60)"
+        fi
+    fi
+}
+
+# ── scope cap: ## Files touched must list at most 3 paths ──────────────────────
+
+check_files_touched() {
+    grep -qE '^## Files touched[[:space:]]*$' "$BODY_FILE" || return 0
+    local content
+    content="$(extract_section '## Files touched' "$BODY_FILE" | sed '/^[[:space:]]*$/d')"
+    # Count lines that look like a path: a '- ' bullet, or a bare path-ish token.
+    local path_count=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        if printf '%s' "$line" | grep -qE '^[[:space:]]*-[[:space:]]+\S' \
+            || printf '%s' "$line" | grep -qE '^[[:space:]]*[A-Za-z0-9_./\-]+'; then
+            path_count=$((path_count + 1))
+        fi
+    done <<EOF
+$content
+EOF
+    if [ "$path_count" -gt 3 ]; then
+        add_finding "TOO_MANY_FILES" "Files touched lists ${path_count} paths (max 3); split the issue to stay small-LLM-sized"
+    fi
+}
+
+# ── whole-body word budget ────────────────────────────────────────────────────
+
+check_body_size() {
+    local body_words
+    body_words="$(wc -w < "$BODY_FILE" | tr -d ' ')"
+    if [ "$body_words" -gt 400 ]; then
+        add_finding "BODY_TOO_LONG" "Body is ${body_words} words (max 400); a small-LLM implementer cannot hold an over-long issue"
+    fi
+}
+
+# ── implementation outline line budget ────────────────────────────────────────
+
+check_outline_size() {
+    grep -qE '^## Implementation outline[[:space:]]*$' "$BODY_FILE" || return 0
+    local outline_lines
+    outline_lines="$(extract_section '## Implementation outline' "$BODY_FILE" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+    if [ "$outline_lines" -gt 30 ]; then
+        add_finding "OUTLINE_TOO_LONG" "Implementation outline has ${outline_lines} non-blank lines (max 30); tighten or split"
+    fi
+}
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 check_goal
 check_ac
 check_smoke
+check_sections
+check_files_touched
+check_body_size
+check_outline_size
 
 finding_count="$(count_findings)"
 
