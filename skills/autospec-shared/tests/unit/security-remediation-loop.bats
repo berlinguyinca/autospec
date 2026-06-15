@@ -49,6 +49,12 @@ EOF
     printf '%s' "$output" | grep -q 'decision=pass'
 }
 
+@test "no --decide -> usage error exit 2" {
+    : > "$TMP/empty.txt"; mk_scan_stub "$TMP/empty.txt"
+    run bash "$LOOP"
+    [ "$status" -eq 2 ]
+}
+
 @test "engine fail-closed (scan exit 2) -> decision=block exit 2" {
     cat > "$TMP/scan2.sh" <<'EOF'
 #!/usr/bin/env bash

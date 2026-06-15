@@ -196,7 +196,7 @@ backdoors. The gate shares its engine with `/autospec-secaudit`.
 ```bash
 SECGATE="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/security-remediation-loop.sh"
 if [ -x "$SECGATE" ] || [ -f "$SECGATE" ]; then
-  sec_out="$(bash "$SECGATE" --decide --diff main --root .)"; sec_exit=$?
+  sec_out="$(bash "$SECGATE" --decide --diff origin/main --root .)"; sec_exit=$?
   echo "$sec_out"
 else
   echo "[secgate] security-remediation-loop.sh not installed — skipping (run /autospec-secaudit update)"; sec_exit=0

@@ -1157,7 +1157,7 @@ Loop (`round = 1 … MAX`):
    ```
 
    The emitted gaps carry `dimension: "docs-completeness"`; the gap-remediation loop labels them `gap-remediation` like every other survivor, so a later round does not re-flag freshly-fixed work. Failures of the docs check itself (missing config, drift-script error, missing `node`/`jq`) only log a WARN to `/tmp/docs-completeness.err` and emit an empty array — this dimension NEVER blocks run completion (same failure semantics as `/autospec-review` above).
-1c. **Security dimension** (autospec-secaudit sweep — runs on round 1, after the docs dimension merges into `${GAPS_FILE}`): scan the work shipped during this batch window for security, secret-leak, injection, and PII issues, and **append surviving must-fix findings** to the same `${GAPS_FILE}` so they file, dedupe, and converge through the SAME gap-remediation machinery used in step 2 (do NOT build a parallel loop). Skip the dimension when `~/.autospec/no-secaudit.flag` exists. This shares its engine with `/autospec-secaudit`.
+1c. **Security dimension** (autospec-secaudit sweep — runs on round 1, after the docs dimension merges into `${GAPS_FILE}`): run a repo-wide security sweep (full-tree `--tree --root .`) for security, secret-leak, injection, and PII issues, and **append surviving must-fix findings** to the same `${GAPS_FILE}` so they file, dedupe, and converge through the SAME gap-remediation machinery used in step 2 (do NOT build a parallel loop). Skip the dimension when `~/.autospec/no-secaudit.flag` exists. This shares its engine with `/autospec-secaudit`.
 
    ```bash
    if [ ! -f "$HOME/.autospec/no-secaudit.flag" ]; then

@@ -43,6 +43,11 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+if [ "$DECIDE" -ne 1 ]; then
+  echo "usage: security-remediation-loop.sh --decide [--diff <base>] [--root <dir>]" >&2
+  exit 2
+fi
+
 # Build scan args.
 set --
 if [ -n "$DIFF" ]; then set -- --diff "$DIFF"; else set -- --tree; fi

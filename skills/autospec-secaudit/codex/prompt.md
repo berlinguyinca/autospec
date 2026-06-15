@@ -89,9 +89,9 @@ Security triage runs on `TIER_A`. Hold `TIER_A` and `TIER_B` for the entire skil
 |---|---|---|---|
 | Secrets / credentials | secrets | block | redact + flag rotation |
 | Vulns / SQLi / cmd-injection / backdoors | vuln | block | yes, re-scan |
-| Prompt injection | injection | block | yes, re-scan |
-| PII / data leaks | pii | block | yes, re-scan |
-| IP / copyright / license | license | block | advisory fix (human confirms) |
+| Prompt injection | injection | advisory (deterministic; LLM triage blocks) | yes, re-scan |
+| PII / data leaks | pii | advisory (deterministic; LLM triage blocks) | yes, re-scan |
+| IP / copyright / license | license | advisory (deterministic; LLM triage blocks) | advisory fix (human confirms) |
 | Dependency CVEs | cve | advisory (block only critical+fixable) | bump if trivial |
 
 ## Finalization

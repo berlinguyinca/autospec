@@ -58,7 +58,8 @@ if [ "$MODE" = "diff" ]; then
     fi
     _scan_tmp="$(mktemp -d)"
     trap 'rm -rf "$_scan_tmp"' EXIT
-    { git -C "$ROOT" diff --name-only "$BASE" 2>/dev/null; \
+    { git -C "$ROOT" diff --name-only \
+        "$(git -C "$ROOT" merge-base "$BASE" HEAD 2>/dev/null || echo "$BASE")" 2>/dev/null; \
       git -C "$ROOT" ls-files --others --exclude-standard 2>/dev/null; } \
       | sort -u | while IFS= read -r rel; do
         [ -n "$rel" ] || continue
@@ -133,7 +134,7 @@ scan_semgrep() {
     cid="$(printf '%s' "$r"  | jq -r '.check_id // ""')"
     [ "$sev" = "ERROR" ] && gsev="must-fix" || gsev="nice-to-have"
     case "$cid" in
-      *sql*|*sqli*|*injection*|*xss*|*ssrf*|*command-injection*|*tainted*) dim=injection ;;
+      *sql*|*injection*|*xss*|*ssrf*|*tainted*) dim=injection ;;
       *) dim=vuln ;;
     esac
     # Respect --only after we know the real dimension.
@@ -148,9 +149,9 @@ scan_license() {
   want license || return 0
   # Copyleft header heuristic over source tree (advisory-fix, human confirms).
   if command -v grep >/dev/null 2>&1; then
-    grep -rliE 'GNU (General|Lesser) Public License|GPL|AGPL' "$ROOT" 2>/dev/null \
+    grep -rliE 'GNU (General|Lesser) Public License|SPDX-License-Identifier:[^\n]*(GPL|AGPL)' "$ROOT" 2>/dev/null \
       | while IFS= read -r file; do
-        emit_gap license must-fix "$file" 0 "Possible copyleft (GPL/AGPL) license header" \
+        emit_gap license nice-to-have "$file" 0 "Possible copyleft (GPL/AGPL) license header" \
           "Copyleft license text found. Confirm this code can ship under the project license — human review required before merge."
       done
   fi
@@ -160,7 +161,7 @@ scan_license() {
   ( cd "$ROOT" && license-checker --json --production 2>/dev/null ) \
     | jq -rc 'to_entries[]? | select(.value.licenses | test("GPL|AGPL"; "i")) | {pkg:.key, lic:.value.licenses}' 2>/dev/null \
     | while IFS= read -r e; do
-        emit_gap license must-fix "package.json" 0 \
+        emit_gap license nice-to-have "package.json" 0 \
           "Copyleft dependency: $(printf '%s' "$e" | jq -r '.pkg')" \
           "Dependency license $(printf '%s' "$e" | jq -r '.lic') may be incompatible with the project license."
       done
@@ -199,7 +200,7 @@ scan_pii() {
     local file line
     file="$(printf '%s' "$hit" | cut -d: -f1)"; file="${file#$ROOT/}"
     line="$(printf '%s' "$hit" | cut -d: -f2)"
-    emit_gap pii must-fix "$file" "$line" "Possible PII written to a log/output sink" \
+    emit_gap pii nice-to-have "$file" "$line" "Possible PII written to a log/output sink" \
       "Personal data (SSN/email/phone/card/DOB) appears to be logged or printed. Redact or omit PII from logs; emit a stable non-identifying token instead."
   done
 }
