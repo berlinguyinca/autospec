@@ -182,6 +182,28 @@ Immediately before `gh pr create`, then before `gh pr merge`:
    (`code_health:explore_main_merge_refused`).
 6. **Merge:** when the merge-state is `CLEAN`/`HAS_HOOKS`/`UNSTABLE` and all
    gates pass: `gh pr merge <PR> --admin --squash --delete-branch`.
+7. **Closeout evidence:** record the Closeout report (below) as merge evidence
+   alongside the passing full-suite summary. Do NOT merge on a closeout you did
+   not emit. Re-read the cited artifacts — treat the closeout as a claim, not
+   proof — and downgrade any `[verified]` runtime claim whose proof type is
+   `static`/build-only to `[assumed]`.
+
+## Closeout report
+
+End every issue by appending a **Closeout report** to the PR body and printing it
+to the monitor log. Terse and result-first. Canonical contract: AGENTS.md
+`## Closeout report contract`. Required fields:
+
+- **Result** — one line, outcome first (open with the result, not "I'll"/"Let me").
+- **Claims** — each load-bearing claim labeled `[verified]` (you checked it),
+  `[assumed]` (inferred / another agent's word), `[couldnt-verify]`, or
+  `[likely-wrong]`.
+- **Proof type** — per `[verified]` claim, `runtime` or `static`. Runtime claims
+  need runtime proof, not a build/read.
+- **Before/after** — the measurable delta, or `n/a — <reason>` (mandatory field).
+- **Artifacts** — exact paths + a re-runnable command.
+- **Scoped git status** — the files this issue touched.
+- **One likely hidden failure** — the most probable thing still wrong ("none" is a claim).
 
 ## Exit conditions
 
