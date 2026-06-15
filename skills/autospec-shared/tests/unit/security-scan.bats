@@ -77,3 +77,43 @@ EOF
     run env PATH="$TMP/empty" "$BASH_BIN" "$SCAN" --tree --root "$FIX"
     [ "$status" -eq 2 ]
 }
+
+@test "trivy CVE findings are advisory (nice-to-have), not blocking" {
+    mkdir -p "$TMP/bin"
+    cat > "$TMP/bin/trivy" <<'EOF'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"Results":[{"Target":"package-lock.json","Vulnerabilities":[{"VulnerabilityID":"CVE-2021-1234","PkgName":"lodash","Severity":"HIGH","Title":"proto pollution","FixedVersion":""}]}]}
+JSON
+exit 0
+EOF
+    chmod +x "$TMP/bin/trivy"
+    run env PATH="$TMP/bin:/usr/bin:/bin" bash "$SCAN" --tree --root "$FIX" --only cve
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | jq -e 'select(.dimension=="cve") | .severity == "nice-to-have"'
+}
+
+@test "--diff scopes findings to changed files only" {
+    git -C "$TMP" init -q
+    printf 'ok = 1\n' > "$TMP/clean.py"
+    git -C "$TMP" add clean.py
+    git -C "$TMP" -c user.email=t@t -c user.name=t commit -qm base
+    cp "$FIX/sqli.py" "$TMP/sqli.py"
+    mkdir -p "$TMP/bin"
+    cat > "$TMP/bin/semgrep" <<'EOF'
+#!/usr/bin/env bash
+root="${@: -1}"
+results=""
+for f in $(find "$root" -name '*.py' 2>/dev/null); do
+  rel="${f#$root/}"
+  results="$results{\"check_id\":\"x\",\"path\":\"$rel\",\"start\":{\"line\":1},\"extra\":{\"severity\":\"ERROR\",\"message\":\"m\"}},"
+done
+results="${results%,}"
+printf '{"results":[%s]}\n' "$results"
+EOF
+    chmod +x "$TMP/bin/semgrep"
+    export PATH="$TMP/bin:$PATH"
+    run bash "$SCAN" --diff HEAD --root "$TMP" --only vuln
+    [ "$status" -eq 0 ]
+    ! printf '%s' "$output" | grep -q 'clean.py'
+}

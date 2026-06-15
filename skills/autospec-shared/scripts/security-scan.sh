@@ -47,6 +47,25 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# In --diff mode, narrow ROOT to a temp tree of only the changed files so
+# tree-walking scanners (semgrep/license/trivy/gitleaks) see just the diff.
+if [ "$MODE" = "diff" ]; then
+  if ! command -v git >/dev/null 2>&1; then
+    echo "security-scan: WARN git missing — cannot scope --diff, scanning full tree" >&2
+  else
+    _scan_tmp="$(mktemp -d)"
+    { git -C "$ROOT" diff --name-only "$BASE" 2>/dev/null; \
+      git -C "$ROOT" ls-files --others --exclude-standard 2>/dev/null; } \
+      | sort -u | while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        [ -f "$ROOT/$rel" ] || continue
+        mkdir -p "$_scan_tmp/$(dirname "$rel")"
+        cp "$ROOT/$rel" "$_scan_tmp/$rel"
+      done
+    ROOT="$_scan_tmp"
+  fi
+fi
+
 # want <class> — is this dimension in scope? (empty --only = all)
 want() { [ -z "$ONLY" ] && return 0; case " $ONLY " in *" $1 "*) return 0;; esac; return 1; }
 
@@ -130,8 +149,27 @@ scan_license() {
       done
 }
 
+# ── CVE: trivy (advisory — only critical+fixable should ever block) ──────────
+scan_trivy() {
+  want cve || return 0
+  command -v trivy >/dev/null 2>&1 || { warn_missing trivy cve; return 0; }
+  local out; out="$(trivy fs --quiet --format json "$ROOT" 2>/dev/null)"
+  [ -n "$out" ] || return 0
+  printf '%s' "$out" | jq -c '.Results[]?.Vulnerabilities[]?' 2>/dev/null | while IFS= read -r v; do
+    local id pkg sev fixed gsev
+    id="$(printf '%s' "$v"    | jq -r '.VulnerabilityID')"
+    pkg="$(printf '%s' "$v"   | jq -r '.PkgName')"
+    sev="$(printf '%s' "$v"   | jq -r '.Severity')"
+    fixed="$(printf '%s' "$v" | jq -r '.FixedVersion // ""')"
+    if [ "$sev" = "CRITICAL" ] && [ -n "$fixed" ]; then gsev="must-fix"; else gsev="nice-to-have"; fi
+    emit_gap cve "$gsev" "package-lock.json" 0 "$id in $pkg ($sev)" \
+      "$(printf '%s' "$v" | jq -r '.Title // ""'). Fixed in: ${fixed:-none available}."
+  done
+}
+
 scan_secrets
 scan_semgrep
 scan_license
-# (pii / cve covered by the LLM triage pass + trivy in a follow-up)
+scan_trivy
+# (pii covered by the LLM triage pass)
 exit 0
