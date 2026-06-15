@@ -53,7 +53,11 @@ if [ "$MODE" = "diff" ]; then
   if ! command -v git >/dev/null 2>&1; then
     echo "security-scan: WARN git missing — cannot scope --diff, scanning full tree" >&2
   else
+    if [ -z "$BASE" ] || ! git -C "$ROOT" rev-parse --verify "$BASE" >/dev/null 2>&1; then
+      echo "security-scan: WARN --diff base '$BASE' is empty or not a valid ref; results may be incomplete" >&2
+    fi
     _scan_tmp="$(mktemp -d)"
+    trap 'rm -rf "$_scan_tmp"' EXIT
     { git -C "$ROOT" diff --name-only "$BASE" 2>/dev/null; \
       git -C "$ROOT" ls-files --others --exclude-standard 2>/dev/null; } \
       | sort -u | while IFS= read -r rel; do
@@ -92,11 +96,17 @@ scan_secrets() {
     warn_missing gitleaks secrets; return 0
   fi
   local report; report="$(mktemp)"
-  gitleaks detect --no-banner --source "$ROOT" --report-format json --report-path "$report" >/dev/null 2>&1
+  if gitleaks dir --help >/dev/null 2>&1; then
+    gitleaks dir --no-banner --report-format json --report-path "$report" "$ROOT" >/dev/null 2>&1
+  else
+    gitleaks detect --no-git --no-banner --source "$ROOT" \
+      --report-format json --report-path "$report" >/dev/null 2>&1
+  fi
   [ -s "$report" ] || { rm -f "$report"; return 0; }
   jq -c '.[]?' "$report" 2>/dev/null | while IFS= read -r f; do
     local file line title
     file="$(printf '%s' "$f" | jq -r '.File // ""')"
+    file="${file#$ROOT/}"
     line="$(printf '%s' "$f" | jq -r '.StartLine // 0')"
     title="$(printf '%s' "$f" | jq -r '.Description // .RuleID // "secret"')"
     emit_gap secrets must-fix "$file" "$line" "$title" \
@@ -114,14 +124,21 @@ scan_semgrep() {
   local out; out="$(semgrep --config=auto --json --quiet "$ROOT" 2>/dev/null)"
   [ -n "$out" ] || return 0
   printf '%s' "$out" | jq -c '.results[]?' 2>/dev/null | while IFS= read -r r; do
-    local file line msg sev gsev cid
+    local file line msg sev gsev cid dim
     file="$(printf '%s' "$r" | jq -r '.path // ""')"
+    file="${file#$ROOT/}"
     line="$(printf '%s' "$r" | jq -r '.start.line // 0')"
     msg="$(printf '%s' "$r"  | jq -r '.extra.message // .check_id // "vulnerability"')"
     sev="$(printf '%s' "$r"  | jq -r '.extra.severity // "WARNING"')"
     cid="$(printf '%s' "$r"  | jq -r '.check_id // ""')"
     [ "$sev" = "ERROR" ] && gsev="must-fix" || gsev="nice-to-have"
-    emit_gap vuln "$gsev" "$file" "$line" "$msg" \
+    case "$cid" in
+      *sql*|*sqli*|*injection*|*xss*|*ssrf*|*command-injection*|*tainted*) dim=injection ;;
+      *) dim=vuln ;;
+    esac
+    # Respect --only after we know the real dimension.
+    if [ -n "$ONLY" ]; then case " $ONLY " in *" $dim "*) : ;; *) continue ;; esac; fi
+    emit_gap "$dim" "$gsev" "$file" "$line" "$msg" \
       "semgrep flagged a security pattern ($cid). Validate input at the boundary; never eval/exec untrusted data; parameterize SQL."
   done
 }

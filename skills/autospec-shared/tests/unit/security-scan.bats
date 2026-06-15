@@ -63,7 +63,9 @@ EOF
     stub_semgrep
     run bash "$SCAN" --tree --root "$FIX" --only vuln
     [ "$status" -eq 0 ]
-    [ "$(printf '%s\n' "$output" | grep -c '"dimension":"vuln"')" -eq 2 ]
+    # Under --only vuln, only the eval-detected finding stays in the vuln
+    # dimension; the sqli finding is now classified as injection and filtered.
+    [ "$(printf '%s\n' "$output" | grep -c '"dimension":"vuln"')" -eq 1 ]
     printf '%s' "$output" | grep -q '"severity":"must-fix"'
 }
 
@@ -116,4 +118,46 @@ EOF
     run bash "$SCAN" --diff HEAD --root "$TMP" --only vuln
     [ "$status" -eq 0 ]
     ! printf '%s' "$output" | grep -q 'clean.py'
+}
+
+@test "gitleaks is invoked in directory mode (not git-history mode)" {
+    mkdir -p "$TMP/bin"
+    cat > "$TMP/bin/gitleaks" <<EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$TMP/gitleaks-argv.txt"
+# honor --help probe so the script picks 'dir' mode
+case "\$1" in dir) [ "\$2" = "--help" ] && exit 0 ;; esac
+# write an empty report to the --report-path
+prev=""; for a in "\$@"; do [ "\$prev" = "--report-path" ] && echo "[]" > "\$a"; prev="\$a"; done
+exit 0
+EOF
+    chmod +x "$TMP/bin/gitleaks"
+    export PATH="$TMP/bin:$PATH"
+    run bash "$SCAN" --tree --root "$FIX" --only secrets
+    [ "$status" -eq 0 ]
+    # The real (non --help) invocation must be directory mode.
+    grep -vE '^dir --help' "$TMP/gitleaks-argv.txt" | grep -qE '(^| )dir( |$)|--no-git'
+}
+
+@test "--diff cleans up its temp scan tree (no leak)" {
+    git -C "$TMP" init -q
+    printf 'ok=1\n' > "$TMP/a.py"
+    git -C "$TMP" add a.py
+    git -C "$TMP" -c user.email=t@t -c user.name=t commit -qm base
+    cp "$FIX/sqli.py" "$TMP/sqli.py"
+    mkdir -p "$TMP/tmphome"
+    before="$(find "$TMP/tmphome" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+    run env TMPDIR="$TMP/tmphome" bash "$SCAN" --diff HEAD --root "$TMP" --only vuln
+    [ "$status" -eq 0 ]
+    after="$(find "$TMP/tmphome" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+    [ "$before" -eq "$after" ]
+}
+
+@test "semgrep sqli check maps to injection dimension under --only injection" {
+    stub_semgrep   # existing helper: emits a check_id 'python.sqlalchemy.security.sqli' for sqli.py
+    run bash "$SCAN" --tree --root "$FIX" --only injection
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | grep -q '"dimension":"injection"'
+    # the eval finding (check_id ...eval-detected) is NOT injection, so under --only injection it is filtered out
+    ! printf '%s' "$output" | grep -q 'eval-detected'
 }
