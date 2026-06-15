@@ -248,6 +248,30 @@ Each researcher is a separate script and can be enabled/disabled via
 `--research-sources`. **Stubbed by Issue C; the JSON contract is the
 authoritative interface between researchers and the aggregator.**
 
+## Constitution gate (Constitutional AI)
+
+Before any proposal is filed, it is checked against a proposal **constitution**
+(`.autospec/explore-constitution.md`, seeded by `explore-constitution.sh --ensure`,
+operator-editable). The gate has two layers:
+
+1. **Deterministic (enforced automatically)** — the research cycle applies the
+   constitution's hard rules between dedup and ranking (mirrored by
+   `explore-constitution.sh --filter`):
+   - **D1 Evidence** — drop proposals with empty `evidence` (no concrete repo/spec citation).
+   - **D2 Confidence floor** — drop proposals below `AUTOSPEC_EXPLORE_MIN_CONFIDENCE` (default 0.3).
+   The cycle reports the survivor count as `proposals_after_constitution`.
+2. **Judgment (TIER_A critique-revise)** — for the ranked survivors, the
+   aggregator/ranker critiques each against the constitution's judgment rules
+   (J1 scope/≤medium, J2 testable, J3 non-duplication, J4 safety-flag, J5
+   alignment) and either revises the proposal or drops it before filing. This is
+   the critique→revise loop: generate → critique against the constitution →
+   revise/drop → file. Run `/autospec-explore-ledger`-style inspection or
+   `explore-constitution.sh --show` to view the active rules.
+
+The constitution makes proposal quality a gate, not an afterthought — cheap
+deterministic rules cull noise first; the TIER_A pass spends judgment only on
+survivors, before any implementer cycles are spent.
+
 ## Loop driver integration
 
 The outer loop uses `lib/autospec-loop.sh` from PR #712 with
