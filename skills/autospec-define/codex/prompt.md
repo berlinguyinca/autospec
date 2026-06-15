@@ -349,14 +349,13 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > - **Files to read first** — 3–7 entries. Each entry is one of: a path with **section anchors** (do not say "read the whole spec"), the closest existing-file analogue to mirror, the test file or fixture pattern to follow, or a dependency issue with a one-line summary so the LLM doesn't fetch its body. Bias toward sectional anchors over full files.
 > - **Local-LLM execution notes** — one-line context-window recommendation (`32k routine`, `64k stretch`, or `split into N subagents along <criterion>` for issues exceeding ~30k tokens of staged context) and whether single-pass or subagent-split is recommended.
 > - **Implementation scope** and **Out of scope** as separate subsections (replaces the prior single "Scope" section).
+> - **Files touched** — machine-parseable: one repo-relative path per line, ≤3. The authoritative scope source the linter (`TOO_MANY_FILES`) and reviewers check; keep it in sync with the outline.
 > - **Implementation outline** — file paths + function signatures + data flow.
 > - **Tests required** — TDD per AGENTS.md, real services, no DB mocks, 80%+ coverage.
 > - **Acceptance criteria** — checkbox list `[ ]` only, no prose. Each item machine-checkable.
 > - **Verification** — split into a **Primary smoke test (inner loop)** with exactly one fast command, and **Operator/full verification** listing the remaining commands.
 > - **Branch name** — `feat/<slug>`.
 > - **Dependencies** — `Depends on issue #N` lines (parsed by the monitor).
->
-> Sizing rule: aim for ≤ 4 KB body. Issues that span more than 4 canonical tables, more than 3 packages, or schema-wide changes must be split — better to emit two children with a `Depends on` edge than one oversized child a small LLM can't hold in working memory.
 >
 > **Sizing caps (hard, per spec §3.4):**
 >
@@ -382,6 +381,13 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > | `SMOKE_MULTI_LINE: N lines` | `COLLAPSE: Primary smoke test must be exactly one command line. Use \`&&\` to chain or move setup to Operator/full verification.` |
 > | `SMOKE_PLACEHOLDER: contains "<TODO>"` | `RESOLVE: Replace placeholders \`<TODO>/TBD/XXX/...\` with the actual command before filing.` |
 > | `SMOKE_NOT_FENCED` | `ADD: Primary smoke test section must contain exactly one fenced code block.` |
+> | `MISSING_SECTION_FILES_TO_READ` | `ADD: a \`## Files to read first\` section with 3-7 anchored entries (path#section or dep #N).` |
+> | `MISSING_SECTION_IMPL_OUTLINE` | `ADD: a \`## Implementation outline\` section (file paths + signatures + data flow).` |
+> | `MISSING_SECTION_TESTS` | `ADD: a \`## Tests required\` section (TDD per AGENTS.md, real services, no DB mocks).` |
+> | `DEPS_MALFORMED` | `FIX: each \`## Dependencies\` line must be \`Depends on issue #N\` or exactly \`none\`.` |
+> | `TOO_MANY_FILES` | `SPLIT: \`## Files touched\` exceeds 3 paths; split into a parent + child with a \`Depends on\` edge.` |
+> | `BODY_TOO_LONG` | `SHORTEN: body exceeds 400 words; cut prose or split the issue into a \`Depends on\` pair.` |
+> | `OUTLINE_TOO_LONG` | `SHORTEN: \`## Implementation outline\` exceeds 30 lines; compress signatures or split the issue.` |
 
 ### Small-LLM friendliness (applies to every child issue)
 
