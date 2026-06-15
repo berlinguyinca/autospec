@@ -176,3 +176,128 @@ valid_record() {
     [ "$status" -eq 0 ]
     [[ "$output" == *explore-ledger.sh* ]]
 }
+
+# ── --rebuild ─────────────────────────────────────────────────────────────────────
+#
+# Stub gh on PATH. The stub dispatches on the subcommand ("issue list",
+# "issue view", "pr list") and the presence of an issue number. Fixture:
+#   201 merged PR #301              -> merged_clean, pr 301
+#   202 OPEN, open PR #302          -> pending,      pr 302
+#   203 OPEN, no PR, old            -> stalled,      pr 0
+#   204 CLOSED, no merged PR        -> abandoned,    pr 0
+#   205 NO marker                   -> skipped (skipped_no_marker)
+
+setup_rebuild_gh_stub() {
+    mkdir -p "$TEST_TMP/bin"
+    cat > "$TEST_TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+# Dispatch on subcommand. $1=issue|pr, $2=list|view.
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+  cat <<'JSON'
+[
+  {"number":201,"title":"feat: Add retry to fetch","state":"CLOSED","closedAt":"2026-06-01T00:00:00Z","body":"Some body\n<!-- explore-ledger source=spec-vs-code complexity=small confidence=0.9 round=1 -->\nmore"},
+  {"number":202,"title":"Improve internet research","state":"OPEN","closedAt":null,"body":"<!-- explore-ledger source=internet complexity=large confidence=0.4 round=1 -->"},
+  {"number":203,"title":"Refactor codebase signals","state":"OPEN","closedAt":null,"createdAt":"2020-01-01T00:00:00Z","body":"<!-- explore-ledger source=codebase-signals complexity=medium confidence=0.6 round=2 -->"},
+  {"number":204,"title":"Close out open issues scan","state":"CLOSED","closedAt":"2026-06-01T00:00:00Z","body":"<!-- explore-ledger source=open-issues complexity=small confidence=0.5 round=2 -->"},
+  {"number":205,"title":"No marker here","state":"OPEN","closedAt":null,"body":"plain body, nothing structured"}
+]
+JSON
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  # $3 is the issue number.
+  case "$3" in
+    201) echo '{"number":201,"state":"CLOSED","closedAt":"2026-06-01T00:00:00Z","createdAt":"2026-05-01T00:00:00Z"}'; exit 0 ;;
+    202) echo '{"number":202,"state":"OPEN","closedAt":null,"createdAt":"2026-06-14T00:00:00Z"}'; exit 0 ;;
+    203) echo '{"number":203,"state":"OPEN","closedAt":null,"createdAt":"2020-01-01T00:00:00Z"}'; exit 0 ;;
+    204) echo '{"number":204,"state":"CLOSED","closedAt":"2026-06-01T00:00:00Z","createdAt":"2026-05-01T00:00:00Z"}'; exit 0 ;;
+    *) echo '{}'; exit 0 ;;
+  esac
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  # Find which issue number is in the args (after --search).
+  case "$*" in
+    *"201"*) echo '[{"number":301,"state":"MERGED","mergedAt":"2026-06-02T00:00:00Z","baseRefName":"explore-sandbox"}]'; exit 0 ;;
+    *"202"*) echo '[{"number":302,"state":"OPEN","mergedAt":null,"baseRefName":"explore-sandbox"}]'; exit 0 ;;
+    *) echo '[]'; exit 0 ;;
+  esac
+fi
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/gh"
+    export PATH="$TEST_TMP/bin:$PATH"
+}
+
+@test "rebuild: produces 4 valid records (205 skipped), all pass --validate" {
+    setup_rebuild_gh_stub
+    run bash "$LEDGER_SH" --rebuild
+    [ "$status" -eq 0 ]
+    [ -f "$AUTOSPEC_EXPLORE_LEDGER" ]
+    [ "$(wc -l < "$AUTOSPEC_EXPLORE_LEDGER")" -eq 4 ]
+    run bash "$LEDGER_SH" --validate
+    [ "$status" -eq 0 ]
+}
+
+@test "rebuild: derives outcomes from PR + issue state" {
+    setup_rebuild_gh_stub
+    run bash "$LEDGER_SH" --rebuild
+    [ "$status" -eq 0 ]
+    run jq -e 'select(.issue==201) | .outcome=="merged_clean" and .pr==301' "$AUTOSPEC_EXPLORE_LEDGER"
+    [ "$status" -eq 0 ]
+    run jq -e 'select(.issue==202) | .outcome=="pending" and .pr==302' "$AUTOSPEC_EXPLORE_LEDGER"
+    [ "$status" -eq 0 ]
+    run jq -e 'select(.issue==203) | .outcome=="stalled" and .pr==0' "$AUTOSPEC_EXPLORE_LEDGER"
+    [ "$status" -eq 0 ]
+    run jq -e 'select(.issue==204) | .outcome=="abandoned" and .pr==0' "$AUTOSPEC_EXPLORE_LEDGER"
+    [ "$status" -eq 0 ]
+}
+
+@test "rebuild: norm_title strips conventional prefix and normalizes" {
+    setup_rebuild_gh_stub
+    run bash "$LEDGER_SH" --rebuild
+    [ "$status" -eq 0 ]
+    run jq -r 'select(.issue==201) | .norm_title' "$AUTOSPEC_EXPLORE_LEDGER"
+    [ "$status" -eq 0 ]
+    [ "$output" = "add retry to fetch" ]
+}
+
+@test "rebuild: with a live ledger writes <ledger>.rebuilt and does NOT modify it" {
+    setup_rebuild_gh_stub
+    bash "$LEDGER_SH" --append "$(valid_record 1 spec-vs-code 'Existing' small 0.8 999 0 pending)"
+    before="$(cat "$AUTOSPEC_EXPLORE_LEDGER")"
+    run bash "$LEDGER_SH" --rebuild
+    [ "$status" -eq 0 ]
+    [ -f "$AUTOSPEC_EXPLORE_LEDGER.rebuilt" ]
+    [ "$(cat "$AUTOSPEC_EXPLORE_LEDGER")" = "$before" ]
+    [ "$(wc -l < "$AUTOSPEC_EXPLORE_LEDGER.rebuilt")" -eq 4 ]
+    [[ "$output" == *".rebuilt"* ]]
+}
+
+@test "rebuild: summary line counts are correct" {
+    setup_rebuild_gh_stub
+    run bash "$LEDGER_SH" --rebuild
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"issues=5"* ]]
+    [[ "$output" == *"parsed=4"* ]]
+    [[ "$output" == *"skipped_no_marker=1"* ]]
+    [[ "$output" == *"merged_clean=1"* ]]
+    [[ "$output" == *"pending=1"* ]]
+    [[ "$output" == *"stalled=1"* ]]
+    [[ "$output" == *"abandoned=1"* ]]
+}
+
+@test "rebuild: gh missing -> exit 2 (fail-closed)" {
+    EMPTY="$TEST_TMP/empty_path2"
+    mkdir -p "$EMPTY"
+    # jq present via a symlink, gh absent.
+    ln -s "$(command -v jq)" "$EMPTY/jq"
+    run env PATH="$EMPTY" "$BASH_BIN" "$LEDGER_SH" --rebuild
+    [ "$status" -eq 2 ]
+}
+
+@test "rebuild: jq missing -> exit 2 (fail-closed)" {
+    EMPTY="$TEST_TMP/empty_path3"
+    mkdir -p "$EMPTY"
+    run env PATH="$EMPTY" "$BASH_BIN" "$LEDGER_SH" --rebuild
+    [ "$status" -eq 2 ]
+}
