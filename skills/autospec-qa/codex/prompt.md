@@ -1544,7 +1544,7 @@ Schema:
   "artifacts": ["path/to/screenshot.png", "path/to/network-trace.har"],
   "findings": [
     {
-      "category": "benchmark_overfit|outsourced_implementation|no_mock_smoke|live_backend_blocker|mutation_proof_missing|spec_contradiction|duplicate_code|presentational_misclassified|legacy_residue|new_code_intent|accessibility|cross_browser|automated_test_gap|other",
+      "category": "benchmark_overfit|outsourced_implementation|no_mock_smoke|live_backend_blocker|mutation_proof_missing|spec_contradiction|duplicate_code|presentational_misclassified|legacy_residue|new_code_intent|accessibility|cross_browser|visual_fidelity|automated_test_gap|other",
       "release_blocking": true,
       "status": "PASS|PARTIAL|FAIL|NOT_TESTED",
       "summary": "<one-line description>",
