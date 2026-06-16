@@ -49,7 +49,7 @@ if [ -z "$repo" ] && command -v gh >/dev/null 2>&1; then
   repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
 fi
 slug="$(printf '%s' "$repo" | tr '/' '_')"
-HB_BASE="${AUTOSPEC_HEARTBEAT_DIR:-$HOME/.autospec/process-heartbeats}"
+HB_BASE="${AUTOSPEC_HEARTBEAT_DIR:-${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}}"
 hb_dir="$HB_BASE/$slug"
 
 # Build a JSON array of per-issue rows by reading the heartbeat files directly

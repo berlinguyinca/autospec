@@ -32,7 +32,7 @@
 set -eu
 
 REPO=""
-HB_BASE="${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}"
+HB_BASE="${AUTOSPEC_HEARTBEAT_DIR:-${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}}"
 WT_BASE="${AUTOSPEC_WORKTREE_BASE:-/tmp}"
 # ~185 tool calls is where the empirical "Prompt is too long" overflow hit
 # (see feedback_monitor_silent_exit.md, third confirmation). 180 leaves margin.

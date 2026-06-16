@@ -10,12 +10,13 @@
 # Reads from: ~/.autospec/process-heartbeats/<repo-slug>/
 #
 # Environment:
-#   AUTOSPEC_HEARTBEAT_DIR   base dir (default: ~/.autospec/process-heartbeats)
+#   AUTOSPEC_HEARTBEAT_DIR   base dir (default: ~/.autospec/process-heartbeats);
+#                            AUTOSPEC_WATCHDOG_DIR is honored as a back-compat alias
 #   AUTOSPEC_REPO            repo override (owner/repo format)
 
 set -eu
 
-HEARTBEAT_BASE="${AUTOSPEC_HEARTBEAT_DIR:-$HOME/.autospec/process-heartbeats}"
+HEARTBEAT_BASE="${AUTOSPEC_HEARTBEAT_DIR:-${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}}"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
