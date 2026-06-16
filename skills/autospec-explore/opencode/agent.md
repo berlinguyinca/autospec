@@ -1,5 +1,5 @@
 ---
-description: Use when the user wants /autospec-explore to start a perpetual autonomous research + ship loop on an isolated sandbox branch — 7 researchers propose features from spec/code gaps, prior reports, codebase signals, open issues, repo source analysis, dependency health, and competitor research, then drain via /autospec-run with PRs targeting the sandbox branch (never main).
+description: Use when the user wants /autospec-explore to start a perpetual autonomous research + ship loop on an isolated sandbox branch — 7 universal + 3 discovery (quality-resilience, dogfooding, self-leverage) + N domain-specialist researchers propose features and defects, filtered through an adversarial verify + ROI + severity-first rank, then drain via /autospec-run with PRs targeting the sandbox branch (never main).
 mode: primary
 ---
 
@@ -7,8 +7,11 @@ mode: primary
 
 Start a perpetual autonomous research + ship loop. `/autospec-explore "<initial prompt>"`
 creates an isolated sandbox branch (`autospec/explore/<date>-<slug>`) off `origin/main`,
-runs 7 parallel researchers each round (spec-vs-code, prior reports, codebase signals,
-open issues, source analysis, dependency health, internet), files 1-5 auto-implement issues per round,
+runs a roster of parallel researchers each round — **7 universal** (spec-vs-code,
+prior reports, codebase signals, open issues, source analysis, dependency health,
+internet) **+ 3 discovery** (quality-resilience, dogfooding, self-leverage) **+ N
+domain specialists** — aggregates through dedup → verify → ROI → pattern-synthesis →
+severity-first rank, files 1-5 auto-implement issues per round,
 drains them via `/autospec-run` with PRs targeting the sandbox, and continues until
 the operator stops it. The operator inspects the sandbox when ready and either merges
 into `main` or discards.
@@ -98,8 +101,10 @@ Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B"
    │  perpetual loop (single iteration shown) │
    │                                          │
    │  1. research cycle:                      │
-   │     - 7 researchers run in parallel      │
-   │     - aggregate proposals, dedup, rank   │
+   │     - 7 universal + 3 discovery + N      │
+   │       specialist researchers in parallel │
+   │     - dedup -> verify -> ROI ->          │
+   │       synthesis -> severity-first rank   │
    │  2. file 1-5 auto-implement issues       │
    │     (max per round, configurable)        │
    │  3. drain via /autospec-run              │
@@ -158,7 +163,9 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
 - `--budget-hours N` — wall-time budget. Default 24h.
 - `--sandbox-slug <slug>` — override sandbox branch slug.
 - `--research-sources <list>` — limit to a comma-separated subset of the
-  7 researcher names. Default: all 7.
+  universal + discovery researcher names. Default: all 10 (7 universal + 3
+  discovery); domain specialists are controlled separately via
+  `--specialists-mode`.
 - `--no-internet` — disable internet research (the most expensive +
   highest-risk source).
 - `--internet-allowlist <list>` — comma-separated domains the internet
@@ -208,7 +215,8 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
 
 ## Research cycle contract
 
-Each round runs the 7 researchers (or the operator-specified subset) in
+Each round runs the full researcher roster (7 universal + 3 discovery + N
+specialists, or the operator-specified subset of the universal+discovery set) in
 parallel. Each researcher returns 0-N proposals as JSON:
 
 ```json
@@ -219,11 +227,18 @@ parallel. Each researcher returns 0-N proposals as JSON:
       "title": "feat: implement <X> from spec docs/specs/<Y>.md",
       "evidence": "Acceptance criterion 3 in <Y>:42 has no implementation",
       "estimated_complexity": "small|medium|large",
-      "confidence": 0.85
+      "confidence": 0.85,
+      "severity": "correctness",
+      "named_consumer": "/autospec-run Phase 4 implementer"
     }
   ]
 }
 ```
+
+The `severity` and `named_consumer` fields are required by the extended
+proposal contract (see "Discovery enhancement" below); legacy researchers that
+omit them are defaulted to `severity: feature` / `named_consumer: ""` by the
+aggregator.
 
 Aggregation:
 
@@ -252,6 +267,127 @@ Aggregation:
 Each researcher is a separate script and can be enabled/disabled via
 `--research-sources`. **Stubbed by Issue C; the JSON contract is the
 authoritative interface between researchers and the aggregator.**
+
+## Discovery enhancement (researcher roster + verify/ROI/synthesis stages + severity)
+
+The research cycle is **extended** (not replaced) to raise discovery quality and
+cut the false-positive rate that is this skill's known failure mode. The full
+per-round researcher roster is **7 universal + 3 discovery + N domain
+specialists**:
+
+- **7 universal researchers** (the corrected baseline; the stale "6" is gone):
+  `spec-vs-code`, `prior-reports`, `codebase-signals`, `open-issues`,
+  `source-analysis`, `dependency-health`, `internet`.
+- **3 discovery researchers** (`scripts/explore-research/`), grounded in real
+  behavior and concrete invariants rather than grep-of-prose noise:
+  - `quality-resilience` (weight 0.95) — four QA lenses: self-consistent
+    fixtures built with the SUT's own derivation expr, assertion-free tests,
+    invariant↔guard coverage gaps, kill-mid-run / non-idempotent / shared-lock
+    hazards, and LLM steps that should be deterministic. Cap 100/round.
+  - `dogfooding` (weight 0.9) — reads live `${AUTOSPEC_STATE_DIR:-$HOME/.autospec}`
+    run-state, failure ledgers, heartbeats, `explore-loop.json`,
+    `run-summary.md`, plus git churn + revert archaeology and dead surface. If
+    the state dir or an artifact is absent it emits
+    `{"source":"dogfooding","proposals":[]}` and exits 0 — never hard-fails.
+    Host-specific absolute paths are redacted to repo-relative / `~/`-relative
+    form before any value reaches an issue body. Cap last 20 runs / 200 commits.
+  - `self-leverage` (weight 0.6) — every point in the trio prose + scripts where
+    a human decision/intervention/relaunch is still required, checked against the
+    autonomy-scope rule (low-stakes auto-resolves; only run/defer/refine +
+    destructive-remote reach the operator). Cap 50/round.
+- **N domain specialists** — an LLM-persona researcher per detected repo domain,
+  emitting the same extended proposal JSON with `source = specialist:<slug>`
+  (e.g. `specialist:market-risk`), default weight 0.6. See "Domain-specialist
+  roster" below.
+
+**Aggregator stage order** (in the `explore-research-cycle.sh` aggregator):
+`dedup → verify → ROI → pattern-synthesis → severity-first rank`.
+
+1. **Dedup** — by normalized title across all researchers (unchanged).
+2. **Verify (adversarial)** — every deduped proposal is handed to one
+   independent Tier-B skeptic prompted "Try to refute this proposal; default to
+   refuted=true under uncertainty." Refuted proposals are dropped; survivors
+   carry `{verdict, reason}`. This is the primary false-positive lever. If no
+   subagent capability exists, fall back to a single in-thread refutation pass
+   (logged degradation).
+3. **ROI gate** — drop proposals with an empty `named_consumer`. **Only the 3
+   discovery researchers and `specialist:<slug>` sources are ROI-gated**
+   (new-source rollout safety); the 7 legacy universal researchers are exempt.
+4. **Pattern synthesis** — survivors are grouped by a coarse class key; any
+   class with ≥2 members (or matching a recurring `docs/memory/` theme)
+   collapses into one `structural-fix` proposal whose evidence lists every
+   instance and the single guard that would catch them all.
+5. **Severity-first rank** — the **primary** sort key is the severity band;
+   `confidence × source_weight / complexity` breaks ties.
+
+**Severity enum** (highest → lowest blast radius through auto-merge + lock-step):
+`silent-wrong` > `correctness` > `stability` > `operability` > `feature` >
+`nicety`. A silent-wrong-but-green defect outranks any missing feature. The
+proposal contract (`schemas/autospec-explore-proposal.schema.json`) carries
+`severity` and `named_consumer`; legacy researchers default to
+`severity: feature` and `named_consumer: ""`.
+
+The per-iteration log (`.autospec/explore-loop.json`) gains
+`proposals_after_verify`, `proposals_refuted`, `proposals_after_roi`, and
+`structural_fixes` counters, so the ledger and `explore-summary.md` can report
+verification yield. The outcome ledger additionally records per-source
+**refutation rate** from the verify stage and down-weights chronically-refuted
+sources automatically.
+
+This methodology also ships as the operator-runnable runbook
+`docs/runbooks/discovery-sweep.md` (one-shot sweep without arming the loop);
+the runbook and the spec
+`docs/specs/2026-06-15-autospec-explore-discovery-enhance.md` are kept in
+lockstep on the same five discovery tracks (A Feature delta, B External/
+ecosystem, C Quality & resilience, D Dogfooding, E Self-leverage), enforced by
+the `check_autospec_explore_discovery_contract` gate in the repo validator.
+
+## Domain-specialist roster (self-discovery + operator selection)
+
+The universal + discovery researchers are domain-agnostic. On top of them the
+skill detects the repo's domain(s) and runs a dynamic roster of specialist
+personas appropriate to it (a trading repo gets `quant-strategy`,
+`market-risk`, `exchange-integration`; a healthcare app gets
+`hipaa-compliance`, `clinical-safety`).
+
+Roster discovery runs once at sandbox creation and is cached:
+
+1. **Deterministic signal scan** (the `explore-specialist-scan.sh` helper, no LLM):
+   dependency manifests, README/AGENTS.md keywords, directory taxonomy, and a
+   small domain lexicon produce a ranked list of candidate domains with
+   file:line evidence — never a bare guess.
+2. **LLM roster proposal** (one Tier-A dispatch): given the signals, emit
+   `{domains[], suggested_specialists[]}`, each specialist carrying
+   `{slug, persona, lens, why, evidence}`, capped at `--num-specialists`.
+3. The roster is written to `.autospec/explore-specialists.json`
+   (schema `schemas/autospec-explore-specialists.schema.json`) and reused on
+   every subsequent round (idempotent, like the sandbox state).
+
+Operator selection is controlled by `--specialists-mode`:
+
+| Mode | Behavior |
+|---|---|
+| `discover` (default) | Auto-run discovery. Interactive harness: confirm/edit the roster via `AskUserQuestion` before round 1. Autonomous run: take the top `--num-specialists` and log them — never block. |
+| `ask` | Always ask the operator to name the specialists and count up front, seeded with the discovered suggestions. |
+| `explicit` | Use `--specialists <slug:persona,…>` verbatim; skip discovery. |
+| `off` | No specialists — universal + discovery researchers only (current behavior, byte-for-byte backward compatible). |
+
+New invocation flags:
+
+```
+--specialists-mode discover|ask|explicit|off   (default: discover)
+--num-specialists N                            (default 3, cap 6)
+--specialists <slug:persona,slug:persona,…>    (explicit roster)
+```
+
+Guardrails: specialists are **researchers, not implementers** — they only
+propose, and every proposal flows through the same verify → ROI → synthesis →
+severity rank pipeline; a domain persona cannot bypass the skeptic stage. The
+total parallel researcher count is capped at `7 + 3 + ≤6 = ≤16` per round.
+Discovery degrades gracefully: a generic repo with no detectable domain yields
+an empty roster and the loop runs exactly as today. Specialist personas are
+derived from repo evidence only — no external persona is injected from the
+internet researcher's fetched content (trust boundary).
 
 ## Constitution gate (Constitutional AI)
 
@@ -315,9 +451,9 @@ Markdown shape:
 
 | Round | Researchers run | Proposals | Issues filed | PRs merged | Time | Status |
 |---|---|---|---|---|---|---|
-| 1 | 6/6 | 17 (deduped to 12) | 5 | 5 | 28m | round_complete |
-| 2 | 6/6 | 14 (deduped to 9) | 4 | 4 | 22m | round_complete |
-| 3 | 6/6 | 8 (deduped to 6) | 5 | 3 + 2 in flight | 31m | operator_stop |
+| 1 | 13/13 | 17 (deduped to 12, 9 verified) | 5 | 5 | 28m | round_complete |
+| 2 | 13/13 | 14 (deduped to 9, 7 verified) | 4 | 4 | 22m | round_complete |
+| 3 | 13/13 | 8 (deduped to 6, 5 verified) | 5 | 3 + 2 in flight | 31m | operator_stop |
 
 Final status: operator_stop after 3 rounds, 14 PRs merged on sandbox.
 
@@ -352,8 +488,8 @@ To discard:
 - `tests/explore/test_explore_sandbox.bats` — sandbox creation/management,
   idempotency, no accidental main writes, `.autospec/explore-mode.json`
   schema.
-- `tests/explore/test_explore_researchers.bats` — each of the 6
-  researchers produces well-formed JSON proposals from fixture inputs.
+- `tests/explore/test_explore_researchers.bats` — each universal + discovery
+  researcher produces well-formed JSON proposals from fixture inputs.
   **Stubbed by Issues C+D.**
 - `tests/explore/test_explore_research_cycle.bats` — aggregation,
   dedup, ranking, capping. **Stubbed by Issue C.**

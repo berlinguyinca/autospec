@@ -155,3 +155,57 @@ EOF
     [ "$status" -ne 0 ]
     echo "$output" | grep -q 'explore_sandbox_base_mismatch'
 }
+
+# --- Discovery enhancement contract (issues #1084/#1085) ---
+#
+# Build a sourceable copy of validate.sh with the trailing `main "$@"` removed
+# so the new contract function can be invoked in isolation against a mutated
+# repo copy. Asserts the gate PASSES on the real (lockstep-clean) trio and
+# FAILS on a seeded trio lockstep break.
+
+# Helper: a sourceable validate.sh (no auto-run). The function `cd`s itself via
+# the validate.sh header `cd "$REPO_ROOT"`, where REPO_ROOT derives from $0 of
+# the *sourcing* shell — so callers must cd to the target repo AFTER sourcing
+# and pass an absolute REPO_ROOT override.
+_sourceable_validate() {
+    local out="$1"
+    sed 's/^main "\$@"$/: # main suppressed for sourcing/' \
+        "$REPO_ROOT/scripts/validate.sh" > "$out"
+}
+
+@test "discovery contract: passes on the real lockstep-clean trio" {
+    local vsrc="$TMP/validate-src.sh"
+    _sourceable_validate "$vsrc"
+    run bash -c '
+        set -eu
+        source "'"$vsrc"'"
+        cd "'"$REPO_ROOT"'"
+        check_autospec_explore_discovery_contract
+    '
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    echo "$output" | grep -q 'discovery enhancement contract'
+}
+
+@test "discovery contract: fails on a seeded trio lockstep break" {
+    local repo="$TMP/mutrepo"
+    mkdir -p "$repo/skills/autospec-explore/codex"
+    cp "$REPO_ROOT/skills/autospec-explore/SKILL.md" "$repo/skills/autospec-explore/SKILL.md"
+    cp "$REPO_ROOT/skills/autospec-explore/codex/prompt.md" "$repo/skills/autospec-explore/codex/prompt.md"
+    mkdir -p "$repo/skills/autospec-explore/opencode"
+    cp "$REPO_ROOT/skills/autospec-explore/opencode/agent.md" "$repo/skills/autospec-explore/opencode/agent.md"
+    # Seed a lockstep break: append a divergent line to the codex body only.
+    printf '\nSEEDED LOCKSTEP DRIFT LINE (codex only)\n' \
+        >> "$repo/skills/autospec-explore/codex/prompt.md"
+    local vsrc="$TMP/validate-src2.sh"
+    _sourceable_validate "$vsrc"
+    run bash -c '
+        set -eu
+        source "'"$vsrc"'"
+        cd "'"$repo"'"
+        # The seeded break must be caught by the project lock-step check that the
+        # full validate run pairs with this gate.
+        check_lockstep skills/autospec-explore
+    '
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -qi 'diverges'
+}
