@@ -2461,6 +2461,7 @@ main() {
     check_define_spec_worktree_routing
     check_token_baseline_fresh
     check_block_expansion
+    check_claim_guard_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -3123,6 +3124,33 @@ check_qa_documentation_gate() {
     done
     local bats_file="tests/qa/test_qa_documentation_gate.bats"
     [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing (issue #956)"
+}
+
+# claim-guard contract (issue #1066): scripts/claim-guard.sh must be present
+# and executable, pass `bash -n` syntax check, and the overlap bats suite must
+# be green. Mirrors the pattern used by check_supersession_contract and
+# check_watchdog_worktree_gc.
+check_claim_guard_contract() {
+    info "claim-guard contract: scripts/claim-guard.sh + bats suite (issue #1066)"
+    local guard="scripts/claim-guard.sh"
+    [ -f "$guard" ] \
+        || fail "$guard: file missing (issue #1066)"
+    [ -x "$guard" ] \
+        || fail "$guard: file not executable (issue #1066)"
+    bash -n "$guard" \
+        || fail "$guard: bash syntax error (issue #1066)"
+    # scan subcommand must be wired up (the core contract of issue #1066).
+    grep -q '^        scan)' "$guard" \
+        || fail "$guard: 'scan' subcommand missing from dispatch (issue #1066)"
+    local bats_file="tests/test_claim_guard_overlap.bats"
+    [ -f "$bats_file" ] \
+        || fail "$bats_file: bats coverage missing (issue #1066)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-claim-guard-overlap.log 2>&1 \
+            || { cat /tmp/validate-claim-guard-overlap.log >&2; \
+                 fail "$bats_file: failed (issue #1066)"; }
+    fi
 }
 
 main "$@"
