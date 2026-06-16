@@ -211,6 +211,12 @@ emit_lockstep() {
 
 # Emit role-specific scaffolding (per-issue acting instructions).
 emit_scaffolding() {
+  # Output discipline (all roles): a subagent's final message flows back into the
+  # orchestrator's context, so verbose returns bloat context + burn tokens. Keep
+  # returns high-density.
+  printf '## Output discipline\n\n'
+  printf 'Your final message returns to the orchestrator — keep it high-density. Return only conclusions, file:line references, and uncertainty; no preamble, prompt restatement, or end-summary. Make minimal diffs — never rewrite a whole file for a small change. Use markdown only where it compresses (tables); otherwise terse prose.\n'
+  printf '\n'
   case "$ROLE" in
     implementer)
       printf '## Implementer scaffolding\n\n'

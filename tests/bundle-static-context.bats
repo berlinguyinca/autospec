@@ -254,3 +254,60 @@ teardown() {
   [ "$status" -eq 0 ]
   ! printf '%s\n' "$output" | grep -q 'Design language (DESIGN.md'
 }
+
+@test "every role's scaffolding carries the Output discipline directive" {
+  # Limited to roles whose SKILL the test fixture provides (autospec-run); the
+  # directive is role-agnostic (emitted before the per-role case), so this is
+  # representative.
+  for role in implementer reviewer; do
+    run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+      AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+      AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+      AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+      "$SCRIPT" --role "$role" --issue-labels "skill:autospec-run"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q '## Output discipline'
+    printf '%s\n' "$output" | grep -q 'minimal diffs'
+  done
+}
+
+@test "bundle-static-context.sh output is cwd-independent (cross-directory invocation)" {
+  # The script resolves all inputs from AUTOSPEC_REPO_ROOT, not $PWD. Run it once
+  # from the tests directory (near the script) and once from an unrelated temp
+  # working dir; output must be byte-identical and carry real content, proving the
+  # script never reads relative to the caller's working directory.
+  local workdir from_near from_elsewhere
+  workdir="$BATS_TEST_TMPDIR/elsewhere"
+  mkdir -p "$workdir"
+
+  from_near=$(cd "$BATS_TEST_DIRNAME" && env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role implementer --issue-labels "skill:autospec-run")
+
+  from_elsewhere=$(cd "$workdir" && env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role implementer --issue-labels "skill:autospec-run")
+
+  [ -n "$from_near" ]
+  [ "$from_near" = "$from_elsewhere" ]
+  # Not merely "it ran": the cross-directory output carries the real bundle.
+  printf '%s\n' "$from_elsewhere" | grep -q "CACHE BOUNDARY"
+  printf '%s\n' "$from_elsewhere" | grep -q "Implementer contract"
+}
+
+@test "Output discipline sits BELOW the implementer cache boundary (prefix stays byte-stable)" {
+  run env AUTOSPEC_REPO_ROOT="$FIXTURES_DIR" \
+    AUTOSPEC_MEMORY_DIR="$FIXTURES_DIR/memory" \
+    AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../scripts" \
+    AUTOSPEC_MANIFEST="$FIXTURES_DIR/memory-tags.yml" \
+    "$SCRIPT" --role implementer --issue-labels "skill:autospec-run"
+  [ "$status" -eq 0 ]
+  # The directive must appear AFTER the second (closing) CACHE BOUNDARY marker.
+  disc_line="$(printf '%s\n' "$output" | grep -n '## Output discipline' | head -1 | cut -d: -f1)"
+  last_boundary="$(printf '%s\n' "$output" | grep -n 'CACHE BOUNDARY' | tail -1 | cut -d: -f1)"
+  [ "$disc_line" -gt "$last_boundary" ]
+}
