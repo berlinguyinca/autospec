@@ -903,6 +903,7 @@ copy_runtime_skill_scripts() {
     # Each entry is "<repo-relative source>::<dest basename under $AUTOSPEC_SCRIPTS_DIR>".
     runtime_skill_scripts="\
 skills/autospec-run/scripts/autospec-run-session-lock.sh::autospec-run-session-lock.sh \
+skills/autospec-run/scripts/autospec-run-status.sh::autospec-run-status.sh \
 skills/autospec-run/scripts/claim-issue.sh::claim-issue.sh \
 skills/autospec-run/scripts/list-ready-issues.sh::list-ready-issues.sh \
 skills/autospec-run/scripts/post-token-report.sh::post-token-report.sh \
@@ -913,7 +914,7 @@ skills/autospec-sweep/scripts/run.sh::autospec-sweep-run.sh \
 skills/autospec-sweep/scripts/wizard.sh::autospec-sweep-wizard.sh"
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] copy_runtime_skill_scripts: would copy 9 per-skill runtime scripts to $autospec_scripts_dir/"
+        info "[dry-run] copy_runtime_skill_scripts: would copy 10 per-skill runtime scripts to $autospec_scripts_dir/"
         return 0
     fi
 
