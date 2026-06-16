@@ -56,6 +56,7 @@ Usage:
   claim-guard.sh refresh                     bump updated_at on my claims (heartbeat)
   claim-guard.sh release [<path|skill>...]   drop my claims (default: all mine in this repo)
   claim-guard.sh status                      list live claims for this repo
+  claim-guard.sh scan    <path|skill>...     advisory overlap pre-flight (always exit 0)
 
 Env:
   AUTOSPEC_CLAIM_GUARD   off|warn|strict (default warn). off / unwritable store => no-op.
@@ -509,6 +510,129 @@ cmd_status() {
 }
 
 # ---------------------------------------------------------------------------
+# scan — advisory pre-flight overlap detection. Always exits 0.
+#
+# Checks three sources for in-flight edits that overlap the given targets:
+#   1. Live claim JSON files in the store (same-filesystem sessions).
+#   2. git worktree list --porcelain (other branches on this machine).
+#   3. Open PRs via `gh pr list` (degrades gracefully if gh absent/offline).
+#
+# Emits `code_health:claim_overlap` advisory lines on stderr; never blocks.
+# ---------------------------------------------------------------------------
+cmd_scan() {
+    [ $# -ge 1 ] || die 2 "scan: at least one <path|skill> is required"
+
+    # Resolve target keys.
+    target_keys="$(for a in "$@"; do resolve_key "$a"; printf '\n'; done | sort -u)"
+
+    # ------------------------------------------------------------------ #
+    # 1. Live claim files: any claim whose lock_key matches a target key  #
+    #    and belongs to a different, non-stale session.                   #
+    # ------------------------------------------------------------------ #
+    ensure_store
+    me="$(session_id)"
+    if [ "$STORE_OK" -eq 1 ] && [ -d "$CLAIM_DIR" ]; then
+        for cf in "$CLAIM_DIR"/*.json; do
+            [ -e "$cf" ] || continue
+            claim_is_stale "$cf" && continue
+            owner="$(claim_owner "$cf")"
+            [ -n "$owner" ] || continue
+            [ "$owner" = "$me" ] && continue
+            held_key="$(jq -r '.lock_key // empty' "$cf" 2>/dev/null || true)"
+            [ -n "$held_key" ] || continue
+            for tk in $target_keys; do
+                if [ "$held_key" = "$tk" ]; then
+                    host="$(jq -r '.host // empty' "$cf" 2>/dev/null || true)"
+                    branch="$(jq -r '.branch // empty' "$cf" 2>/dev/null || true)"
+                    emit "code_health:claim_overlap source=live_claim key=$tk owner_session=$owner host=$host branch=$branch"
+                    break
+                fi
+            done
+        done
+    fi
+
+    # ------------------------------------------------------------------ #
+    # 2. git worktree list: other checked-out branches that are not the   #
+    #    current worktree (same-machine; advisory only).                  #
+    # ------------------------------------------------------------------ #
+    current_wt="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if command -v git >/dev/null 2>&1; then
+        wt_output="$(git worktree list --porcelain 2>/dev/null || true)"
+        wt_path=""
+        wt_branch=""
+        while IFS= read -r line; do
+            case "$line" in
+                worktree\ *)
+                    wt_path="${line#worktree }"
+                    wt_branch=""
+                    ;;
+                branch\ refs/heads/*)
+                    wt_branch="${line#branch refs/heads/}"
+                    ;;
+                "")
+                    # End of a worktree stanza — emit advisory if it is another
+                    # worktree on a different branch (it may be editing the same
+                    # skill; we cannot know without a claim file, so this is
+                    # purely informational when the target skill is contested).
+                    if [ -n "$wt_path" ] && [ -n "$wt_branch" ] \
+                            && [ "$wt_path" != "$current_wt" ] \
+                            && [ "$wt_branch" != "$current_branch" ]; then
+                        # Only emit if the worktree branch name contains a
+                        # fragment of any target key name (heuristic; not a
+                        # hard conflict check).
+                        for tk in $target_keys; do
+                            skill_name="${tk#skill:}"
+                            skill_name="${skill_name#path:}"
+                            if printf '%s' "$wt_branch" | grep -qF "$skill_name"; then
+                                emit "code_health:claim_overlap source=worktree key=$tk worktree=$wt_path branch=$wt_branch"
+                                break
+                            fi
+                        done
+                    fi
+                    wt_path=""
+                    wt_branch=""
+                    ;;
+            esac
+        done <<EOF_WL
+$wt_output
+EOF_WL
+    fi
+
+    # ------------------------------------------------------------------ #
+    # 3. Open PRs via gh pr list (degrade cleanly if gh absent/offline). #
+    # ------------------------------------------------------------------ #
+    if command -v gh >/dev/null 2>&1; then
+        pr_json="$(gh pr list --state open --json number,headRefName \
+            --limit 50 2>/dev/null || echo '[]')"
+        if [ -n "$pr_json" ] && [ "$pr_json" != '[]' ]; then
+            pr_count="$(printf '%s' "$pr_json" | jq 'length' 2>/dev/null || echo 0)"
+            i=0
+            while [ "$i" -lt "$pr_count" ]; do
+                pr_branch="$(printf '%s' "$pr_json" | \
+                    jq -r ".[$i].headRefName // empty" 2>/dev/null || true)"
+                pr_num="$(printf '%s' "$pr_json" | \
+                    jq -r ".[$i].number // empty" 2>/dev/null || true)"
+                if [ -n "$pr_branch" ]; then
+                    for tk in $target_keys; do
+                        skill_name="${tk#skill:}"
+                        skill_name="${skill_name#path:}"
+                        if printf '%s' "$pr_branch" | grep -qF "$skill_name"; then
+                            emit "code_health:claim_overlap source=open_pr key=$tk pr=#${pr_num} branch=$pr_branch"
+                            break
+                        fi
+                    done
+                fi
+                i=$(( i + 1 ))
+            done
+        fi
+    fi
+
+    # scan is always advisory — never block.
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
 # dispatch
 # ---------------------------------------------------------------------------
 main() {
@@ -520,6 +644,7 @@ main() {
         refresh)   cmd_refresh "$@" ;;
         release)   cmd_release "$@" ;;
         status)    cmd_status "$@" ;;
+        scan)      cmd_scan "$@" ;;
         -h|--help) usage; exit 0 ;;
         *)         echo "$PROG: unknown subcommand: $sub" >&2; usage >&2; exit 2 ;;
     esac
