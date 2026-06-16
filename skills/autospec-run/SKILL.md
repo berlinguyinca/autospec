@@ -740,6 +740,20 @@ inline label-swap path below.
 >    ```
 >    <!-- worktree-ladder:end -->
 >    On the `open-pr` path the verification bar EQUALS fresh work — full tests + the standard review loop, never a blind merge. Cleanup is identical for every path: after the merge is confirmed (or on terminal failure), `git worktree remove` the linked worktree and `git worktree prune`; never delete un-pushed work before merge.
+> 1a. **Claim the edit surface (claim-guard), nested inside the issue claim.** After the `worktree-guard.sh assert` gate passes and BEFORE the first file edit, take a fine-grained lease on the skill(s)/paths this issue will touch so a concurrent session in another worktree cannot stomp the same trio+golden surface. This is the inner layer of the three-layer caller pattern (worktree-guard → claim-guard scan → claim-guard acquire); it composes with — and sits inside — the issue-level lease you already hold. Set `TARGETS` to the space-separated skill names and/or repo-relative paths the issue's **Files touched** lists.
+>    <!-- claim-guard-acquire:begin -->
+>    ```bash
+>    TARGETS="<space-separated skills/paths from the issue's Files touched>"
+>    bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert || exit $?
+>    bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh scan $TARGETS || true
+>    if ! bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh acquire $TARGETS; then
+>      gh issue comment <ISSUE> --body "claim-guard acquire conflict (see code_health:claim_conflict identifier above); another live session owns this edit surface — restoring auto-implement"
+>      gh issue edit <ISSUE> --remove-label in-progress-by-bot --add-label auto-implement
+>      exit 6
+>    fi
+>    ```
+>    <!-- claim-guard-acquire:end -->
+>    `scan` is advisory (it warns on overlapping open PRs / worktrees / live claims but never blocks); `acquire` is all-or-nothing and exits `6` on `claim_conflict`. Hold this lease across the whole edit+test+PR step. **Refresh rides the existing heartbeat tick** — at each heartbeat write also run `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh refresh` (no new loop) so a slow-but-live editor is never reclaimed. **Release on PR open**: immediately after `gh pr create` succeeds, run `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh release $TARGETS` (the lease has served its purpose once the work is captured in a PR). `AUTOSPEC_CLAIM_GUARD=off` or an unwritable store degrades the whole block to a no-op and NEVER blocks the issue.
 > 2. TDD per AGENTS.md: failing test first → implement → refactor → commit. NO DB/external mocks. Follow file paths and signatures from the issue body verbatim.
 > 3. **Full test suite gate.** Run the target repo's full validation/test suite, not only the Primary smoke test. Command resolution order:
 >    1. If `AUTOSPEC_FULL_TEST_COMMAND` is set, run `bash -lc "$AUTOSPEC_FULL_TEST_COMMAND"`.
@@ -875,7 +889,7 @@ inline label-swap path below.
 >      exit 0
 >    fi
 >    ```
-> 6. PR: gh pr create --base main --head <BRANCH> --title "<TITLE>" --body "Closes #<ISSUE>\n\n<summary>". Capture PR.
+> 6. PR: gh pr create --base main --head <BRANCH> --title "<TITLE>" --body "Closes #<ISSUE>\n\n<summary>". Capture PR. Immediately after the PR opens, release the claim-guard lease taken in step 1a: `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh release $TARGETS`.
 >    After the LLM subagent returns, record telemetry (tokens JSON written by the harness to `.autospec/tokens-<ISSUE>.json` if present):
 >    ```bash
 >    if [ -f ".autospec/tokens-<ISSUE>.json" ]; then
