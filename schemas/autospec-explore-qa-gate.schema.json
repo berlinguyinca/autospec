@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-explore-qa-gate.schema.json",
+  "title": "autospec explore QA sandbox-promotion gate result",
+  "description": "Result of scripts/explore-qa-gate.sh: runs autospec-qa --no-heal against the explore sandbox HEAD in a fresh worktree and records the promotion-gate verdict. 'skipped' is fail-open (no QA config, not penalized); 'error' is fail-closed (an attempted gate crashed/errored, blocks).",
+  "type": "object",
+  "required": ["verdict", "sandbox_branch", "sandbox_head_sha", "qa_verdict_path", "blocking_findings", "ran_at"],
+  "additionalProperties": false,
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "PARTIAL", "FAIL", "skipped", "error"]
+    },
+    "sandbox_branch": { "type": "string", "minLength": 1 },
+    "sandbox_head_sha": { "type": "string" },
+    "qa_verdict_path": { "type": "string" },
+    "blocking_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "category": { "type": "string" },
+          "release_blocking": { "type": "boolean" },
+          "status": { "type": "string" },
+          "summary": { "type": "string" },
+          "evidence": { "type": "string" }
+        }
+      }
+    },
+    "ran_at": { "type": "string", "minLength": 1 },
+    "reason": { "type": "string" }
+  }
+}
