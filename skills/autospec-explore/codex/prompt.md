@@ -149,7 +149,9 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
     [--sandbox-slug <slug>] \
     [--research-sources <comma-list>] \
     [--no-internet] \
-    [--internet-allowlist <comma-list>]
+    [--internet-allowlist <comma-list>] \
+    [--qa-gate] \
+    [--qa-gate-pass-on-partial]
 ```
 
 > **Model tier:** `TIER_A` for the aggregator + proposal ranker; `TIER_B` for the
@@ -172,6 +174,13 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
   competitor-research-appropriate domains (GitHub, official product
   docs, HackerNews, etc.). Forbidden by default: paywalled content,
   social media, pastebin-class sites.
+- `--qa-gate` — **default OFF.** Run `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-qa-gate.sh` ONCE at loop
+  termination (operator_stop / cap), before the final summary's
+  promotion-readiness block, to gate the merge instructions on a sandbox-HEAD
+  QA verdict. See [QA promotion gate](#qa-promotion-gate---qa-gate) below.
+- `--qa-gate-pass-on-partial` — treat a `PARTIAL` gate verdict as PASS
+  (promote). Default is `PARTIAL → withhold`, matching QA's own "PARTIAL is not
+  PASS" discipline. Only meaningful with `--qa-gate`.
 
 ## Sandbox branch contract
 
@@ -514,6 +523,54 @@ To discard:
   git branch -D autospec/explore/2026-05-29-X && \
     git push origin --delete autospec/explore/2026-05-29-X
 ```
+
+## QA promotion gate (`--qa-gate`)
+
+By default the loop summary above prints the merge instructions ungated — the
+operator promotes the sandbox at their own discretion. `--qa-gate` (default OFF)
+makes promotion contingent on a sandbox-HEAD QA verdict.
+
+- **When it runs:** ONCE at loop termination (operator_stop / cap), before the
+  final summary's promotion-readiness block — NOT per round (bounds cost). The
+  orchestrator invokes `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-qa-gate.sh`, which spins a fresh
+  worktree on the sandbox branch at its recorded HEAD, runs
+  `autospec-qa --no-heal` (the gate proves; it never mutates the sandbox)
+  against that HEAD, and writes `.autospec/explore-qa-gate.json`
+  (schema `schemas/autospec-explore-qa-gate.schema.json`):
+  `{verdict, sandbox_branch, sandbox_head_sha, qa_verdict_path,
+  blocking_findings, ran_at}`.
+- **Default OFF is byte-unchanged.** Without `--qa-gate` the promotion block is
+  emitted verbatim — identical to the pre-gate manual path. The flag only adds
+  gating; it never changes the ungated output.
+
+**Promotion-readiness contract** (gates the summary's merge block by verdict):
+
+| Gate verdict | Promotion | Annotation | Notes |
+|---|---|---|---|
+| `PASS` | promote — print merge instructions | `sandbox QA: PASS` | |
+| `PARTIAL` + `--qa-gate-pass-on-partial` | promote | `sandbox QA: PASS` | opt-in |
+| `PARTIAL` (default) | **WITHHELD** | `sandbox QA: PARTIAL` | PARTIAL is not PASS |
+| `skipped` (no QA config) | promote — print merge instructions | `sandbox QA: skipped (no QA config)` | fail-open; promote at own risk |
+| `FAIL` | **WITHHELD** | `sandbox QA: FAIL` | |
+| `error` (QA crash / missing skill / jq error) | **WITHHELD** | `sandbox QA: error` | fail-closed |
+
+- **Fail-open SKIP vs fail-closed error.** A repo with no QA config the gate can
+  run against (no `.autospec/test.yml`, no autospec-qa config) is NOT penalized:
+  the runner emits `code_health:explore_qa_gate_skipped_no_config`, writes
+  `verdict:"skipped"`, exits 0, and the merge instructions are still printed
+  (annotated). An *attempted* gate that crashes, errors, or returns
+  FAIL/PARTIAL(default) WITHHOLDS the merge instructions and emits
+  `code_health:explore_qa_gate_failed`.
+- **Withheld output** prints the `sandbox QA: <verdict>` annotation, the
+  blocking findings, the `.autospec/qa-verdict.json` detail path, and the
+  discard instructions — never the merge instructions.
+- **Stale-verdict warning.** The gate records `sandbox_head_sha`. If the sandbox
+  branch has advanced past that SHA since the gate ran, the promotion output
+  prints `WARN: sandbox advanced past the QA gate sandbox_head_sha (…); verdict
+  may be stale.` — re-run the gate before promoting.
+- **Artifact + ledger.** The gate verdict row (`qa_gate`, `qa_gate_verdict`,
+  `qa_gate_promote`, `qa_gate_stale`) is recorded in `.autospec/explore-loop.json`
+  alongside `.autospec/explore-qa-gate.json`.
 
 ## Error handling
 
