@@ -286,6 +286,152 @@ invoke_drain() {
     return 0
 }
 
+# >>> explore-spec-first-filing >>>  (issue #1102 — extracted for bats coverage)
+# Raw per-round filing: turn the ranked proposals into bare auto-implement
+# issues via `gh issue create`. Used as the FALLBACK path only, when the
+# spec-first /autospec-define handoff is unavailable or fails. Reads the
+# loop-scoped vars (iter, research_json, iter_dir, SANDBOX_BRANCH,
+# RESEARCH_SOURCES) and updates issues_filed / filed_issue_nums in place.
+_explore_raw_file_round() {
+    [ "$proposals_count" -gt 0 ] || return 0
+    command -v gh >/dev/null 2>&1 || return 0
+    local props_file title src complexity conf marker body issue_url issue_num \
+        norm_title rec
+    props_file="$iter_dir/proposals.tsv"
+    python3 -c "
+import json
+d = json.load(open('$research_json'))
+for p in d.get('proposals', []):
+    title = (p.get('title','') or '').replace(chr(10),' ').replace(chr(9),' ')
+    src = (p.get('source','') or 'unknown').replace(chr(10),' ').replace(chr(9),' ')
+    comp = (p.get('estimated_complexity','') or 'medium').lower()
+    try:
+        conf = float(p.get('confidence', 0.5))
+    except Exception:
+        conf = 0.5
+    if comp not in ('small','medium','large'):
+        comp = 'medium'
+    if conf < 0: conf = 0.0
+    if conf > 1: conf = 1.0
+    print('%s\t%s\t%s\t%.2f' % (title, src, comp, conf))
+" > "$props_file" 2>/dev/null || : > "$props_file"
+
+    while IFS="$(printf '\t')" read -r title src complexity conf; do
+        [ -z "$title" ] && continue
+        [ -n "$src" ] || src="unknown"
+        [ -n "$complexity" ] || complexity="medium"
+        [ -n "$conf" ] || conf="0.50"
+        # Canonical explore-ledger marker — MUST byte-match the rebuild
+        # parser grammar. Appended as the LAST line of the body.
+        marker="<!-- explore-ledger source=$src complexity=$complexity confidence=$conf round=$iter -->"
+        body="Auto-filed by /autospec-explore round $iter (sandbox=$SANDBOX_BRANCH).
+
+Source: research cycle ($RESEARCH_SOURCES).
+
+$marker"
+        issue_url=""
+        issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement 2>/dev/null)" || issue_url=""
+        if [ -z "$issue_url" ]; then
+            # Retry with stderr visible (gh diagnostics no longer suppressed);
+            # stdout (the issue URL) is still captured into issue_url.
+            issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement)" || issue_url=""
+        fi
+        [ -z "$issue_url" ] && continue
+        issues_filed=$((issues_filed + 1))
+        # Extract trailing issue number from the returned URL.
+        issue_num="$(printf '%s' "$issue_url" | sed -E 's#.*/([0-9]+)[[:space:]]*$#\1#')"
+        case "$issue_num" in
+            ''|*[!0-9]*) issue_num=0 ;;
+        esac
+        # Record a pending ledger entry for the filed issue (best-effort).
+        if [ "$issue_num" -gt 0 ]; then
+            filed_issue_nums="$filed_issue_nums $issue_num"
+            norm_title="$(_ledger_normalize_title "$title")"
+            rec="$(jq -cn \
+                --argjson round "$iter" \
+                --arg source "$src" \
+                --arg title "$title" \
+                --arg norm "$norm_title" \
+                --arg complexity "$complexity" \
+                --argjson confidence "$conf" \
+                --argjson issue "$issue_num" \
+                --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                '{round:$round, source:$source, title:$title, norm_title:$norm, complexity:$complexity, confidence:$confidence, issue:$issue, pr:0, outcome:"pending", reason:"", ts:$ts}' \
+                2>/dev/null)" || rec=""
+            [ -n "$rec" ] && _ledger_append "$rec"
+        fi
+    done < "$props_file"
+}
+
+# Resolve + run the /autospec-define existing-spec decompose for the committed
+# round spec, ALWAYS passing --base <sandbox-branch> so the spec-tracking gate
+# and child-issue blob URLs resolve against the sandbox, never main. Returns
+# the dispatcher's exit code (non-zero — or 3 for a missing dispatcher — drives
+# the caller's fallback). AUTOSPEC_EXPLORE_ROUND_DEFINE_CMD overrides the
+# handoff for tests; it receives AUTOSPEC_DEFINE_ARGS in its environment.
+_explore_round_decompose() {
+    local spec_path="$1" args
+    args="--base $SANDBOX_BRANCH $spec_path"
+    if [ -n "${AUTOSPEC_EXPLORE_ROUND_DEFINE_CMD:-}" ]; then
+        AUTOSPEC_DEFINE_ARGS="$args" bash -c "$AUTOSPEC_EXPLORE_ROUND_DEFINE_CMD"
+        return $?
+    fi
+    autospec_harness_resolve_dispatcher 2>/dev/null || true
+    [ -n "${AUTOSPEC_HARNESS_DISPATCHER:-}" ] || return 3
+    case "$AUTOSPEC_HARNESS_KIND" in
+        claude|opencode)
+            "$AUTOSPEC_HARNESS_DISPATCHER" "/autospec-define" "$args" ;;
+        codex)
+            "$AUTOSPEC_HARNESS_DISPATCHER" exec --skip-git-repo-check "/autospec-define $args" ;;
+        *) return 3 ;;
+    esac
+}
+
+# Spec-first per-round filing (issue #1102): render the round spec, commit +
+# push it to the SANDBOX branch BEFORE decomposition, then decompose it into
+# linked auto-implement issues via /autospec-define --base <sandbox>. On a
+# missing or failing define handoff, log code_health:explore_define_unavailable,
+# keep the committed round spec, and fall back to raw `gh issue create` filing
+# for that round only — the loop never stalls.
+_explore_file_round() {
+    [ "$proposals_count" -gt 0 ] || return 0
+
+    local slug spec_path define_rc
+    slug="$(printf '%s' "$SANDBOX_BRANCH" | sed 's#.*/##')"
+    [ -n "$slug" ] || slug="explore"
+    spec_path="docs/specs/$(date +%Y-%m-%d)-explore-${slug}-round-${iter}-design.md"
+
+    # 1. Render the round spec from the ranked proposals (deterministic).
+    if ! bash "$SCRIPT_DIR/gen-explore-round-spec.sh" "$research_json" \
+        --round "$iter" --branch "$SANDBOX_BRANCH" --out "$spec_path" 2>/dev/null; then
+        echo "code_health:explore_round_spec_render_failed round=$iter" >&2
+        _explore_raw_file_round
+        return 0
+    fi
+
+    # 2. Commit + push the round spec to the SANDBOX branch BEFORE any issue
+    #    links it (no dangling blob URL). Stage the spec EXPLICITLY — never
+    #    `git add -A` inside the loop.
+    git add "$spec_path" 2>/dev/null || true
+    if ! git diff --cached --quiet -- "$spec_path" 2>/dev/null; then
+        git commit -q -m "docs(explore): round $iter design spec ($slug)" \
+            -- "$spec_path" 2>/dev/null || true
+        git push -q origin "HEAD:$SANDBOX_BRANCH" 2>/dev/null || true
+    fi
+
+    # 3. Decompose via /autospec-define --base <sandbox> (never targets main).
+    define_rc=0
+    _explore_round_decompose "$spec_path" || define_rc=$?
+
+    if [ "$define_rc" -ne 0 ]; then
+        # 4. Fallback — keep the committed spec, raw-file this round, continue.
+        echo "code_health:explore_define_unavailable round=$iter rc=$define_rc spec=$spec_path" >&2
+        _explore_raw_file_round
+    fi
+    return 0
+}
+# <<< explore-spec-first-filing <<<
+
 while [ "$iter" -lt "$_max_iter" ]; do
     iter=$((iter + 1))
 
@@ -476,79 +622,15 @@ PYR
         break
     fi
 
-    # ── File top-N proposals as auto-implement issues. ────────────────────────
+    # ── Spec-first round filing (issue #1102). ────────────────────────────────
+    # Render this round's ranked proposals into a round design spec, commit +
+    # push it to the SANDBOX branch BEFORE decomposition, then decompose via
+    # /autospec-define --base <sandbox>. On a missing/failing define handoff,
+    # log code_health:explore_define_unavailable, keep the committed spec, fall
+    # back to raw `gh issue create` for that round, and continue (never stall).
     issues_filed=0
     filed_issue_nums=""   # space-separated issue numbers filed THIS round (for ledger)
-    if [ "$proposals_count" -gt 0 ] && command -v gh >/dev/null 2>&1; then
-        # Iterate proposals via python, emitting TAB-separated
-        # title<TAB>source<TAB>complexity<TAB>confidence per proposal. We
-        # carry the full object so the issue body can embed the canonical
-        # explore-ledger marker and the ledger can record proposal metadata.
-        props_file="$iter_dir/proposals.tsv"
-        python3 -c "
-import json
-d = json.load(open('$research_json'))
-for p in d.get('proposals', []):
-    title = (p.get('title','') or '').replace(chr(10),' ').replace(chr(9),' ')
-    src = (p.get('source','') or 'unknown').replace(chr(10),' ').replace(chr(9),' ')
-    comp = (p.get('estimated_complexity','') or 'medium').lower()
-    try:
-        conf = float(p.get('confidence', 0.5))
-    except Exception:
-        conf = 0.5
-    if comp not in ('small','medium','large'):
-        comp = 'medium'
-    if conf < 0: conf = 0.0
-    if conf > 1: conf = 1.0
-    print('%s\t%s\t%s\t%.2f' % (title, src, comp, conf))
-" > "$props_file" 2>/dev/null || : > "$props_file"
-
-        while IFS="$(printf '\t')" read -r title src complexity conf; do
-            [ -z "$title" ] && continue
-            [ -n "$src" ] || src="unknown"
-            [ -n "$complexity" ] || complexity="medium"
-            [ -n "$conf" ] || conf="0.50"
-            # Canonical explore-ledger marker — MUST byte-match the rebuild
-            # parser grammar. Appended as the LAST line of the body.
-            marker="<!-- explore-ledger source=$src complexity=$complexity confidence=$conf round=$iter -->"
-            body="Auto-filed by /autospec-explore round $iter (sandbox=$SANDBOX_BRANCH).
-
-Source: research cycle ($RESEARCH_SOURCES).
-
-$marker"
-            issue_url=""
-            issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement 2>/dev/null)" || issue_url=""
-            if [ -z "$issue_url" ]; then
-                # Retry with stderr visible (gh diagnostics no longer suppressed);
-                # stdout (the issue URL) is still captured into issue_url.
-                issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement)" || issue_url=""
-            fi
-            [ -z "$issue_url" ] && continue
-            issues_filed=$((issues_filed + 1))
-            # Extract trailing issue number from the returned URL.
-            issue_num="$(printf '%s' "$issue_url" | sed -E 's#.*/([0-9]+)[[:space:]]*$#\1#')"
-            case "$issue_num" in
-                ''|*[!0-9]*) issue_num=0 ;;
-            esac
-            # Record a pending ledger entry for the filed issue (best-effort).
-            if [ "$issue_num" -gt 0 ]; then
-                filed_issue_nums="$filed_issue_nums $issue_num"
-                norm_title="$(_ledger_normalize_title "$title")"
-                rec="$(jq -cn \
-                    --argjson round "$iter" \
-                    --arg source "$src" \
-                    --arg title "$title" \
-                    --arg norm "$norm_title" \
-                    --arg complexity "$complexity" \
-                    --argjson confidence "$conf" \
-                    --argjson issue "$issue_num" \
-                    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                    '{round:$round, source:$source, title:$title, norm_title:$norm, complexity:$complexity, confidence:$confidence, issue:$issue, pr:0, outcome:"pending", reason:"", ts:$ts}' \
-                    2>/dev/null)" || rec=""
-                [ -n "$rec" ] && _ledger_append "$rec"
-            fi
-        done < "$props_file"
-    fi
+    _explore_file_round
 
     # ── Drain callback: invoke /autospec-run. ─────────────────────────────────
     drain_rc=0
