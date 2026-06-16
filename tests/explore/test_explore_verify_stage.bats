@@ -130,6 +130,42 @@ assert titles == ['feat: affirmed'], titles
 "
 }
 
+@test "verify_mode=no-op-unverified surfaces the inert-gate state (audit #1086 seam-1)" {
+    # Regression for the inert-dead-gate failure mode: with no orchestrator-
+    # supplied verdict map the verify stage no-ops, and that MUST be observable
+    # in the structured output so an operator (and the orchestrator's
+    # code_health warning) can tell "skeptic refuted nothing" from "skeptic
+    # never ran". stdout stays pure JSON — the human warning is the
+    # orchestrator's job off this field.
+    make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[{"title":"feat: alpha","evidence":"e1","estimated_complexity":"small","confidence":0.9}]}'
+    empties
+
+    run bash "$REPO_ROOT/scripts/explore-research-cycle.sh" --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+assert d['verify_mode'] == 'no-op-unverified', d
+"
+}
+
+@test "verify_mode=active when a verdict map is supplied (audit #1086 seam-1)" {
+    make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[{"title":"feat: real fix","evidence":"e1","estimated_complexity":"small","confidence":0.9}]}'
+    empties
+    cat > "$TMP/verdicts.json" <<'EOF'
+{ "real fix": {"verdict":"survived","reason":"verified"} }
+EOF
+    export AUTOSPEC_EXPLORE_VERIFY_VERDICTS="$TMP/verdicts.json"
+
+    run bash "$REPO_ROOT/scripts/explore-research-cycle.sh" --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+assert d['verify_mode'] == 'active', d
+"
+}
+
 @test "all four discovery-enhance counters are present in the iteration log" {
     make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[{"title":"feat: a","evidence":"e1","estimated_complexity":"small","confidence":0.9}]}'
     empties

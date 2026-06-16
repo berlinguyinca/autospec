@@ -320,8 +320,20 @@ while [ "$iter" -lt "$_max_iter" ]; do
         --out "$research_json" > "$iter_dir/research.log" 2>&1 || research_rc=$?
 
     proposals_count=0
+    verify_mode="unknown"
     if [ -f "$research_json" ]; then
         proposals_count="$(python3 -c "import json; print(len(json.load(open('$research_json')).get('proposals',[])))" 2>/dev/null || echo 0)"
+        verify_mode="$(python3 -c "import json; print(json.load(open('$research_json')).get('verify_mode','unknown'))" 2>/dev/null || echo unknown)"
+    fi
+
+    # Surface the inert-verify-gate state (audit #1086 seam-1): when no
+    # adversarial-skeptic verdict map drove the verify stage, the headline
+    # false-positive defense ran as a no-op and every deduped proposal survived
+    # unverified. Make that loud rather than silent so the operator (and any log
+    # scraper) sees the gate is inactive. Wiring a live skeptic dispatch that
+    # populates AUTOSPEC_EXPLORE_VERIFY_VERDICTS is tracked as a follow-up.
+    if [ "$verify_mode" = "no-op-unverified" ]; then
+        echo "code_health:explore_verify_noop iter=$iter (adversarial verify gate INACTIVE — no verdict map supplied; proposals survive unverified)" >&2
     fi
 
     if [ "$proposals_count" -eq 0 ] && [ "$research_rc" -ne 0 ]; then
