@@ -3,7 +3,7 @@
 #
 # Runs the enabled deterministic researchers in parallel, aggregates their
 # proposals, then threads them through the stage pipeline
-#   dedup -> verify -> ROI gate -> (pattern synthesis: Issue D) -> rank
+#   dedup -> verify -> ROI gate -> pattern synthesis (Issue D) -> rank
 # (constitution + recent-title filters apply before the severity-first rank),
 # and caps output at --max-issues-per-round.
 #
@@ -19,7 +19,7 @@
 #     "proposals_after_verify": N,        # survived the adversarial verify gate
 #     "proposals_refuted": N,             # dropped by the verify gate
 #     "proposals_after_roi": N,           # survived the named-consumer ROI gate
-#     "structural_fixes": N,              # pattern-synthesis output (Issue D; 0)
+#     "structural_fixes": N,              # pattern-synthesis collapses (Issue D)
 #     "proposals_after_recent_filter": N,
 #     "proposals": [ ...top --max-issues-per-round... ] }
 #
@@ -368,8 +368,8 @@ for p in deduped:
 # ---------------------------------------------------------------------------
 # ROI gate (Issue C) — drop NEW-source proposals with empty named_consumer.
 # Legacy universal sources are exempt (rollout safety). The pattern-synthesis
-# hook (Issue D #1081) slots in AFTER this gate and BEFORE ranking; it is not
-# implemented here — structural_fixes stays 0 as the clean seam.
+# stage (Issue D #1081) runs immediately AFTER this gate and BEFORE ranking,
+# collapsing recurring same-class survivors into structural-fix proposals.
 roi_kept = []
 for p in verified:
     src = p.get("source", "")
@@ -379,7 +379,130 @@ for p in verified:
         continue
     roi_kept.append(p)
 
-structural_fixes = 0  # Pattern synthesis is Issue D; seam left intentionally.
+# ---------------------------------------------------------------------------
+# PATTERN SYNTHESIS (Issue D #1081) — runs AFTER the ROI gate, BEFORE the
+# constitution/recent filters and the severity-first rank.
+#
+# Goal: when several survivors describe the SAME recurring defect class (e.g.
+# "missing error handling in <X>" across alpha/beta/gamma), collapse them into
+# ONE `structural-fix` proposal whose evidence lists every instance plus the
+# single guard that would catch them all — so the loop files one durable fix
+# instead of N point patches.
+#
+# Clustering is deterministic and COARSE-but-CONSERVATIVE to avoid the watched
+# risk (over-collapsing unrelated findings):
+#   - Two proposals may cluster ONLY within the SAME severity band (a
+#     silent-wrong defect never merges with a nicety).
+#   - Within a band, cluster by content-token overlap: greedy single-linkage
+#     where membership requires Jaccard(tokens) >= JACCARD_MIN against the
+#     cluster seed. Stopwords + the conventional-commit verb are stripped so
+#     the signal is the subject, not "fix:"/"add"/"the".
+#   - A cluster collapses iff it has >= 2 members, OR its shared-token theme
+#     matches a recurring docs/memory/ theme (memory-grounded structural class
+#     even at size 1). Singletons with no memory match pass through unchanged.
+#
+# Convergence/safety: pure function of the survivor set + a static memory-theme
+# list; no randomness, no global state — deterministic across runs.
+
+# Recurring docs/memory/ themes: coarse token signatures distilled from the
+# persistent feedback memos (bash portability, lockstep duos, regex injection,
+# self-consistent fixtures, installer omissions). A survivor whose shared theme
+# tokens intersect one of these is a known structural class. Kept intentionally
+# small + high-signal; extending it is a deliberate, reviewable act.
+MEMORY_THEMES = [
+    {"bash", "portability", "shell"},
+    {"lockstep", "trio", "duo"},
+    {"regex", "injection", "metachar"},
+    {"fixture", "self", "consistent", "mock"},
+    {"installer", "runtime", "lib", "ship"},
+    {"validator", "retry", "adaptive"},
+]
+
+_STOPWORDS = {
+    "the", "a", "an", "in", "on", "of", "to", "for", "and", "or", "with",
+    "is", "are", "be", "by", "at", "from", "into", "module", "modules",
+    "add", "fix", "feat", "support", "enable", "new",
+}
+
+def _content_tokens(p):
+    toks = normalize_title(p["title"]).split()
+    return {t for t in toks if t not in _STOPWORDS and len(t) > 2}
+
+def _jaccard(a, b):
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    return inter / union if union else 0.0
+
+# Conservative threshold: a true recurring class (e.g. "missing error handling
+# in alpha/beta/gamma") shares its whole subject vocabulary minus the leaf token
+# (Jaccard ~0.67-0.75), while two unrelated items that merely share a generic
+# word ("high/low score feature" -> 0.5) stay apart. 0.6 is the seam between.
+JACCARD_MIN = 0.6
+
+def _theme_match(shared):
+    for theme in MEMORY_THEMES:
+        if len(shared & theme) >= 2:
+            return theme
+    return None
+
+# Greedy single-linkage clustering within each severity band.
+structural_fixes = 0
+_synth_out = []
+_by_band = {}
+for _i, p in enumerate(roi_kept):
+    _by_band.setdefault(p.get("severity", "feature"), []).append(p)
+
+for _band, members in _by_band.items():
+    _toks = [_content_tokens(m) for m in members]
+    _used = [False] * len(members)
+    for i in range(len(members)):
+        if _used[i]:
+            continue
+        cluster_idx = [i]
+        _used[i] = True
+        for j in range(i + 1, len(members)):
+            if _used[j]:
+                continue
+            if _jaccard(_toks[i], _toks[j]) >= JACCARD_MIN:
+                cluster_idx.append(j)
+                _used[j] = True
+        cluster = [members[k] for k in cluster_idx]
+        # Shared tokens across the whole cluster (the common defect signature).
+        shared = set(_toks[cluster_idx[0]])
+        for k in cluster_idx[1:]:
+            shared &= _toks[k]
+        theme = _theme_match(_content_tokens(cluster[0]))
+        if len(cluster) >= 2 or (theme is not None):
+            # Collapse to one structural-fix. Highest-scoring member is the
+            # representative for score/consumer; evidence lists every instance.
+            rep = max(cluster, key=lambda q: q["score"])
+            instances = [c["title"] for c in cluster]
+            ev_lines = "; ".join(
+                "%s (%s)" % (c["title"], (c.get("evidence", "") or "").strip())
+                for c in cluster
+            )
+            guard_subject = " ".join(sorted(shared)) or "the shared pattern"
+            sfix = dict(rep)
+            sfix["proposal_kind"] = "structural-fix"
+            sfix["title"] = "fix(structural): one guard for %d instances of [%s]" % (
+                len(cluster), guard_subject,
+            )
+            sfix["evidence"] = (
+                "%d instances collapse to one structural fix — a single guard "
+                "for [%s] would catch them all. Instances: %s"
+                % (len(cluster), guard_subject, ev_lines)
+            )
+            sfix["instances"] = instances
+            if theme is not None:
+                sfix["memory_theme"] = sorted(theme)
+            _synth_out.append(sfix)
+            structural_fixes += 1
+        else:
+            _synth_out.append(cluster[0])
+
+roi_kept = _synth_out
 
 # Constitution gate (deterministic rules D1 evidence + D2 confidence floor).
 # Keep this byte-aligned with explore-constitution.sh --filter. Floor default 0.3

@@ -9,12 +9,30 @@
 #
 # Weighting formula (Bayesian-smoothed clean-ship rate):
 #
-#   weight = (merged_clean + alpha * prior) / (filed + alpha)
+#   base   = (merged_clean + alpha * prior) / (filed + alpha)
+#   weight = base * downweight
 #
 #   prior        = the source's canonical prior (or 0.5 for unknown sources)
 #   merged_clean = # proposals from this source that merged clean (--stats)
 #   filed        = # proposals from this source that were filed   (--stats)
+#   refuted      = # proposals from this source refuted by the verify stage
+#                  (--stats; never counted toward filed) — Issue D
 #   alpha        = smoothing pseudo-count (default 5)
+#
+# Refutation-rate down-weighting (Issue D): a source that the adversarial
+# verify stage keeps refuting is producing false positives, so it is
+# automatically pulled down WITHOUT hand-tuning:
+#
+#   r          = refuted / (refuted + filed)        (0 when never refuted)
+#   downweight = max(FLOOR, 1 - BETA * r)
+#
+#   BETA  = AUTOSPEC_EXPLORE_REFUTE_BETA  (default 0.5) — strength of the pull.
+#   FLOOR = AUTOSPEC_EXPLORE_REFUTE_FLOOR (default 0.25) — a consistently-
+#           refuted source is throttled, never starved to 0 (it can recover as
+#           clean ships accrue). The multiplier is bounded + monotone in r, so
+#           weights CONVERGE rather than oscillate.
+#   With no refutations (r=0) downweight==1.0 -> weights are byte-identical to
+#   the pre-Issue-D behavior (round-trip parity preserved).
 #
 # Properties:
 #   - No data (filed=0)  -> weight == prior exactly (round-1 parity with the old
@@ -69,6 +87,9 @@ LEDGER_SH="$SCRIPT_DIR/explore-ledger.sh"
 LEDGER=""
 ALPHA="5"
 EXPLAIN=0
+# Refutation-rate down-weight tuning (Issue D). Bounded, monotone -> converges.
+REFUTE_BETA="${AUTOSPEC_EXPLORE_REFUTE_BETA:-0.5}"
+REFUTE_FLOOR="${AUTOSPEC_EXPLORE_REFUTE_FLOOR:-0.25}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -126,14 +147,25 @@ for s in $ordered; do
   prior="$(_prior_for "$s")"
   filed="$(printf '%s' "$stats_json" | jq -r --arg s "$s" '.[$s].filed // 0')"
   clean="$(printf '%s' "$stats_json" | jq -r --arg s "$s" '.[$s].merged_clean // 0')"
+  refuted="$(printf '%s' "$stats_json" | jq -r --arg s "$s" '.[$s].refuted // 0')"
   [ -n "$filed" ] || filed=0
   [ -n "$clean" ] || clean=0
+  [ -n "$refuted" ] || refuted=0
 
-  # weight = (clean + alpha*prior) / (filed + alpha), rounded to 4 decimals.
+  # base   = (clean + alpha*prior) / (filed + alpha)
+  # r      = refuted / (refuted + filed)
+  # weight = base * max(floor, 1 - beta*r), rounded to 4 decimals.
   weight="$(python3 -c "
 import sys
 clean=float(sys.argv[1]); filed=float(sys.argv[2]); alpha=float(sys.argv[3]); prior=float(sys.argv[4])
-w=(clean + alpha*prior)/(filed + alpha)
+refuted=float(sys.argv[5]); beta=float(sys.argv[6]); floor=float(sys.argv[7])
+base=(clean + alpha*prior)/(filed + alpha)
+denom=refuted + filed
+r=(refuted/denom) if denom>0 else 0.0
+downweight=1.0 - beta*r
+if downweight<floor: downweight=floor
+if downweight>1.0: downweight=1.0
+w=base*downweight
 if w<0: w=0.0
 if w>1: w=1.0
 w=round(w,4)
@@ -141,15 +173,15 @@ w=round(w,4)
 # integral values as a single trailing .0 (1.0) so it stays a float literal.
 s=('%.4f' % w).rstrip('0').rstrip('.')
 print(s if '.' in s else s + '.0')
-" "$clean" "$filed" "$ALPHA" "$prior")"
+" "$clean" "$filed" "$ALPHA" "$prior" "$refuted" "$REFUTE_BETA" "$REFUTE_FLOOR")"
 
   jq_obj="$(printf '%s' "$jq_obj" | jq -c --arg s "$s" --argjson w "$weight" '.[$s] = $w')"
 
   if [ "$EXPLAIN" -eq 1 ]; then
     # Use jq's normalized number (e.g. 0.8000 -> 0.8) so explain matches JSON.
     weight_norm="$(printf '%s' "$jq_obj" | jq -r --arg s "$s" '.[$s]')"
-    printf '%s: filed=%s clean=%s prior=%s -> weight=%s\n' \
-      "$s" "$filed" "$clean" "$prior" "$weight_norm" >&2
+    printf '%s: filed=%s clean=%s prior=%s -> weight=%s (refuted=%s)\n' \
+      "$s" "$filed" "$clean" "$prior" "$weight_norm" "$refuted" >&2
   fi
 done
 
