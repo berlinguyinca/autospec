@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# scripts/explore-research/quality-resilience.sh — discovery researcher (quality-resilience).
+#
+# Four QA lenses:
+#   (a) test files vs their SUT — flags self-consistent fixtures built with the
+#       SUT's own derivation expression and assertion-free tests;
+#   (b) each claimed invariant in validate.sh/SKILL prose vs whether a test AND
+#       a guard exist;
+#   (c) kill-mid-run / non-idempotent / shared-lock / partial-state hazards;
+#   (d) LLM steps that should be deterministic + disproportionate-token phases.
+#
+# Cap: 100 candidates per round.
+# Default weight: 0.95.
+#
+# Output: JSON to stdout matching schemas/autospec-explore-proposal.schema.json
+# (extended contract with severity + named_consumer).
+
+set -u
+
+REPO_ROOT="${AUTOSPEC_REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+MAX_PROPOSALS=100
+
+cd "$REPO_ROOT" || { echo '{"source":"quality-resilience","proposals":[]}'; exit 0; }
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo '{"source":"quality-resilience","proposals":[]}'
+    exit 0
+fi
+
+# Collect test files (bats + shell test helpers).
+test_tmp="$(mktemp -t qr-tests.XXXXXX)"
+trap 'rm -f "$test_tmp"' EXIT
+
+if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git ls-files -- '*.bats' 'tests/*.sh' 'test/*.sh' 'spec/*.sh' 2>/dev/null \
+        | head -n 200 > "$test_tmp" || true
+fi
+
+# Collect validate.sh claim lines.
+validate_tmp="$(mktemp -t qr-validate.XXXXXX)"
+trap 'rm -f "$test_tmp" "$validate_tmp"' EXIT
+
+if [ -f "scripts/validate.sh" ]; then
+    grep -n 'check_\|assert\|must\|require\|ensure' scripts/validate.sh 2>/dev/null \
+        | head -n 100 > "$validate_tmp" || true
+fi
+
+# Collect lock / partial-state hazard signals.
+hazard_tmp="$(mktemp -t qr-hazard.XXXXXX)"
+trap 'rm -f "$test_tmp" "$validate_tmp" "$hazard_tmp"' EXIT
+
+if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git grep -n -I -E '(lock|\.lock|lockfile|partial|PARTIAL|pid|PID|trap.*EXIT|rm.*tmp)' \
+        -- 'scripts/*.sh' '*.sh' 2>/dev/null | head -n 200 > "$hazard_tmp" || true
+fi
+
+# Collect LLM-dispatch sites.
+llm_tmp="$(mktemp -t qr-llm.XXXXXX)"
+trap 'rm -f "$test_tmp" "$validate_tmp" "$hazard_tmp" "$llm_tmp"' EXIT
+
+if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git grep -n -I -E '(claude|llm_dispatch|AskUserQuestion|invoke.*model|--model)' \
+        -- 'scripts/*.sh' 'skills/**/*.md' 'skills/*.md' 2>/dev/null \
+        | head -n 100 > "$llm_tmp" || true
+fi
+
+python3 - "$test_tmp" "$validate_tmp" "$hazard_tmp" "$llm_tmp" "$MAX_PROPOSALS" <<'PY'
+import json, os, re, sys
+
+test_path     = sys.argv[1]
+validate_path = sys.argv[2]
+hazard_path   = sys.argv[3]
+llm_path      = sys.argv[4]
+cap           = int(sys.argv[5])
+
+proposals = []
+
+def add(title, evidence, complexity="small", confidence=0.75,
+        severity="correctness", named_consumer=""):
+    if len(proposals) >= cap:
+        return
+    proposals.append({
+        "title": title,
+        "evidence": evidence,
+        "estimated_complexity": complexity,
+        "confidence": confidence,
+        "severity": severity,
+        "named_consumer": named_consumer,
+    })
+
+# ── Lens (a): assertion-free test files ────────────────────────────────────
+try:
+    with open(test_path, "r", encoding="utf-8", errors="ignore") as fh:
+        test_files = [l.strip() for l in fh if l.strip()]
+except FileNotFoundError:
+    test_files = []
+
+for tf in test_files:
+    if not os.path.isfile(tf):
+        continue
+    try:
+        content = open(tf, "r", encoding="utf-8", errors="ignore").read()
+    except Exception:
+        continue
+
+    # Check for assertion-free bats files.
+    if tf.endswith(".bats"):
+        has_assert = bool(re.search(r'\bassert\b|run\s+.*\n.*assert|assert_output|assert_success|assert_failure', content))
+        if not has_assert:
+            add(
+                f"test: add assertions to {tf} (currently assertion-free)",
+                f"{tf} contains @test blocks but no assert_* calls — tests cannot falsify behaviour.",
+                complexity="small",
+                confidence=0.85,
+                severity="silent-wrong",
+                named_consumer="/autospec-run mutation gate; assertion-density floor",
+            )
+            continue
+
+    # Check for self-consistent fixture pattern: test imports / sources the SUT
+    # and builds expected output via the same function call being tested.
+    if re.search(r'source\s+\S+\s*\n.*expected.*=.*\$\(.*\)', content, re.DOTALL):
+        add(
+            f"test: replace self-consistent fixture in {tf} with pinned expected values",
+            f"{tf} appears to derive expected output by calling the SUT — bugs in the SUT make fixtures self-validating (cf. lstrip transcript-slug bug).",
+            complexity="small",
+            confidence=0.7,
+            severity="silent-wrong",
+            named_consumer="/autospec-run mutation gate",
+        )
+
+# ── Lens (b): validate.sh invariants without matching test ─────────────────
+try:
+    with open(validate_path, "r", encoding="utf-8", errors="ignore") as fh:
+        validate_lines = fh.readlines()
+except FileNotFoundError:
+    validate_lines = []
+
+check_fn_pat = re.compile(r'^\s*(check_\w+)\s*\(\s*\)')
+for i, line in enumerate(validate_lines, start=1):
+    m = check_fn_pat.match(line)
+    if not m:
+        continue
+    fn_name = m.group(1)
+    # Heuristic: look for a bats @test that references this function name.
+    found_test = False
+    for tf in test_files:
+        if not os.path.isfile(tf):
+            continue
+        try:
+            tcontent = open(tf, "r", encoding="utf-8", errors="ignore").read()
+            if fn_name in tcontent:
+                found_test = True
+                break
+        except Exception:
+            continue
+    if not found_test:
+        add(
+            f"test: add bats coverage for validate.sh:{fn_name}",
+            f"validate.sh defines {fn_name} (line {i}) but no bats test references it — the invariant is untested.",
+            complexity="small",
+            confidence=0.7,
+            severity="correctness",
+            named_consumer="/autospec-run validate gate; /autospec-sweep",
+        )
+
+# ── Lens (c): kill-mid-run / partial-state / shared-lock hazards ───────────
+try:
+    with open(hazard_path, "r", encoding="utf-8", errors="ignore") as fh:
+        hazard_lines = fh.readlines()
+except FileNotFoundError:
+    hazard_lines = []
+
+lock_files_seen = set()
+for line in hazard_lines:
+    line = line.strip()
+    if not line:
+        continue
+    m = re.match(r'^(.+?):(\d+):(.+)$', line)
+    if not m:
+        continue
+    fpath, lineno, content = m.group(1), m.group(2), m.group(3).strip()
+
+    # Flag lockfile writes without a matching trap/cleanup.
+    if re.search(r'\.lock\b', content) and fpath not in lock_files_seen:
+        lock_files_seen.add(fpath)
+        # Check if same file has a trap EXIT that removes the lock.
+        try:
+            full = open(fpath, "r", encoding="utf-8", errors="ignore").read()
+            has_trap = bool(re.search(r'trap\s+.*rm.*\.lock|trap\s+.*cleanup', full))
+        except Exception:
+            has_trap = False
+        if not has_trap:
+            add(
+                f"fix(resilience): ensure lockfile cleanup on exit in {fpath}",
+                f"{fpath}:{lineno} uses a lockfile but no trap-on-EXIT cleanup found — kill-mid-run leaves stale locks.",
+                complexity="small",
+                confidence=0.72,
+                severity="stability",
+                named_consumer="/autospec-run concurrent-round guard",
+            )
+
+# ── Lens (d): LLM steps that could be deterministic ───────────────────────
+try:
+    with open(llm_path, "r", encoding="utf-8", errors="ignore") as fh:
+        llm_lines = fh.readlines()
+except FileNotFoundError:
+    llm_lines = []
+
+deterministic_candidates = set()
+for line in llm_lines:
+    line = line.strip()
+    if not line:
+        continue
+    m = re.match(r'^(.+?):(\d+):(.+)$', line)
+    if not m:
+        continue
+    fpath, lineno, content = m.group(1), m.group(2), m.group(3).strip()
+    # If a script invokes claude but the surrounding content looks like a pure
+    # grep/count operation, flag it.
+    if re.search(r'(count|grep|find|ls|wc)\b', content) and re.search(r'claude|llm_dispatch', content):
+        key = fpath
+        if key not in deterministic_candidates:
+            deterministic_candidates.add(key)
+            add(
+                f"refactor: replace LLM call with deterministic tool in {fpath}:{lineno}",
+                f"{fpath}:{lineno} invokes an LLM for what appears to be a grep/count operation — convert to bash (cf. tooling-optimization tracker).",
+                complexity="medium",
+                confidence=0.6,
+                severity="operability",
+                named_consumer="autospec tooling-optimization tracker #421",
+            )
+
+print(json.dumps({"source": "quality-resilience", "proposals": proposals}))
+PY
