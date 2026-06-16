@@ -755,6 +755,21 @@ check_supersession_contract() {
     fi
 }
 
+# Ship-completeness gate (#556/#985): every script a skill surface invokes via
+# ${AUTOSPEC_SCRIPTS_DIR} must be shipped by the installers, every $SCRIPT_DIR/lib
+# source must ship via copy_runtime_subdirs, and no bare repo-relative invocation
+# may remain in a surface file. Run tests/ship-completeness.bats as part of the
+# lock-step gate so install-drift fails closed HERE, not silently in a target repo.
+check_ship_completeness() {
+    [ -f tests/ship-completeness.bats ] \
+        || fail "tests/ship-completeness.bats: missing (ship-completeness gate)"
+    if command -v bats >/dev/null 2>&1; then
+        info "ship-completeness gate: tests/ship-completeness.bats"
+        bats tests/ship-completeness.bats >/tmp/validate-ship-completeness.log 2>&1 \
+            || { cat /tmp/validate-ship-completeness.log >&2; fail "tests/ship-completeness.bats: failed"; }
+    fi
+}
+
 # Phase 4 guardian block lock-step invariants (introduced by issue #212): the
 # outer guardian dispatch block (between <!-- guardian-block:begin --> and
 # <!-- guardian-block:end --> markers) must be byte-identical across all 6
@@ -2384,6 +2399,7 @@ main() {
     check_quality_differential
     check_usage_limit_helper
     check_supersession_contract
+    check_ship_completeness
     check_phase4_guardian_block_lockstep
     check_phase1_bounded_context_contract
     check_phase4_issue_start_summary
