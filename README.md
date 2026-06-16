@@ -71,26 +71,63 @@ selected model and harness to execute reliably.
 
 ## Skills
 
+Every capability ships as a `/autospec-<verb>` skill. Run any of them inside
+Claude Code, OpenCode, or Codex CLI. Each links to its own README; see
+[`SKILLS.md`](SKILLS.md) for activation keywords and routing details.
+
+### Core pipeline — plan and ship
+
 | Skill | Use it when | Result |
 | --- | --- | --- |
 | [`autospec`](skills/autospec/README.md) | You want the full path from feature request to merged PRs. | Bootstraps if needed, investigates, writes a spec, creates issues, classifies them, runs implementation, and reports completion. |
-| [`autospec-release`](skills/autospec-release/README.md) | You want to know whether the current repo is ready to ship. | Runs the release-readiness loop across sweep, review, run, test, QA, docs sync, proof artifacts, and legacy cleanup. |
-| [`autospec-sweep`](skills/autospec-sweep/README.md) | You want first-run configuration or continuous improvement across specs, docs, tests, and code. | Creates `.autospec/autospec.yml`, runs a configured sweep, writes `.autospec/sweep/latest.json`, and routes recurring gaps back through specs, issues, and `/autospec-run`. |
 | [`autospec-define`](skills/autospec-define/README.md) | You want planning only before implementation starts. | Produces a design spec plus classified `auto-implement` issues, then hands off to `/autospec-run`. |
 | [`autospec-split`](skills/autospec-split/README.md) | You already have a tracked `docs/specs/*.md` design spec. | Turns the existing spec into an EPIC plus linked child issues, then stops after classification. |
 | [`autospec-run`](skills/autospec-run/README.md) | You already have an `auto-implement` queue. | Runs the implementation monitor, opens PRs, reviews, validates, and merges. |
-| [`autospec-fleet`](skills/autospec-fleet/README.md) | You want to prepare multi-repo autospec supervision. | Provides config schemas/linting, URL path planning, dry-run `/autospec-run` command generation, JSON status, stop forwarding, and smoke tests. |
 | [`autospec-classify`](skills/autospec-classify/README.md) | Existing issues need model-fit labels. | Adds `ctx:*` and `reasoning:*` labels, inserts a `## Model fit` block, and promotes `needs-classify` issues. |
-| [`autospec-listen`](skills/autospec-listen/README.md) | You want chat phrases like "file an issue" to become tracked work. | Drafts issues for approval or routes spec requests into `/autospec-define`. |
-| [`autospec-story`](skills/autospec-story/README.md) | You need a repo-level product and implementation-state overview. | Produces a cited Markdown story from local specs, docs, issues, PRs, and git history. |
-| [`autospec-stop`](skills/autospec-stop/README.md) | You need to halt or resume an active monitor. | Writes the shared stop sentinel, pauses issues safely, reports status, or resumes paused work. |
-| [`autospec-review`](skills/autospec-review/README.md) | You want to close the spec-vs-code feedback loop. | Audits specs against issues, finds gaps, files `[REGRESSION]` issues with `priority:high`. |
-| [`autospec-test`](skills/autospec-test/README.md) | You want every Phase 4 PR gated on unit + E2E coverage with auto-heal. | Runs a two-stage coverage gate, auto-heals gaps within a 60-min budget, and blocks assertion-loosening rewrites before auto-merge. |
-| [`autospec-qa`](skills/autospec-qa/README.md) | You want to revalidate a running app against its spec and regenerate weak tests. | Builds a spec traceability matrix, exercises UI/API/accessibility/validation flows, and turns gaps into stronger tests or follow-up issues. |
-| [`autospec-design`](skills/autospec-design/README.md) | You want the repo's UI anchored to a known vendor design language (Apple, Linear, Stripe, etc.). | Fetches a `DESIGN.md` from the `berlinguyinca/awesome-design-md` catalog via `suggest`, `apply`, and `migrate` subcommands, writes `DESIGN.md` to the project root on a feature branch, and optionally hands off a per-component migration spec to `/autospec-define`. |
 
-See [`SKILLS.md`](SKILLS.md) for activation keywords and per-skill routing
-details.
+### Capture and refine intent
+
+| Skill | Use it when | Result |
+| --- | --- | --- |
+| [`autospec-listen`](skills/autospec-listen/README.md) | A chat phrase like "file an issue", "write a spec", or "build X" should become tracked work. | Drafts an issue for approval, routes spec requests to `/autospec-define`, or gates build verbs to the mapped autospec skill. |
+| [`autospec-continue`](skills/autospec-continue/README.md) | You want `/continue` to act on the last assistant recommendation. | Extracts the recommendation, refines it, and hands off to `/autospec --autonomous`. |
+| [`autospec-refine`](skills/autospec-refine/README.md) | A feature request needs sharpening before implementation. | Iterates the prompt over N repo-grounded lenses, then hands off to `/autospec`. |
+
+### Test, review, and QA
+
+| Skill | Use it when | Result |
+| --- | --- | --- |
+| [`autospec-review`](skills/autospec-review/README.md) | You want to close the spec-vs-code feedback loop. | Audits specs against open/closed issues, finds gaps, files `[REGRESSION]` issues with `priority:high`. |
+| [`autospec-test`](skills/autospec-test/README.md) | You want every Phase 4 PR gated on unit + E2E coverage with auto-heal. | Runs a two-stage coverage gate, auto-heals gaps within a 60-min budget, and blocks assertion-loosening rewrites before merge. |
+| [`autospec-qa`](skills/autospec-qa/README.md) | You want to revalidate a running app against its spec and regenerate weak tests. | Builds a spec traceability matrix, exercises UI/API/accessibility/validation flows, and turns gaps into stronger tests or follow-up issues. |
+| [`autospec-playwright`](skills/autospec-playwright/README.md) | You want disciplined no-mock Playwright UI tests. | Runs autospec-test Stage 2A against `.autospec/test.yml` authoring blocks and prints the coverage report. |
+| [`autospec-e2e-clone`](skills/autospec-e2e-clone/README.md) | E2E tests need a safe stand-in for production. | Provisions an isolated, scaled-down, PII-anonymized clone of a production environment. |
+
+### Docs and design
+
+| Skill | Use it when | Result |
+| --- | --- | --- |
+| [`autospec-doc`](skills/autospec-doc/README.md) | You want per-audience documentation kept honest as docs-as-tests. | Generates or audits user/developer/admin/general docs with verified examples and `llms-full.txt` output. |
+| [`autospec-design`](skills/autospec-design/README.md) | You want the repo's UI anchored to a vendor design language (Apple, Linear, Stripe, etc.). | Fetches a `DESIGN.md` from the `berlinguyinca/awesome-design-md` catalog via `suggest`, `apply`, and `migrate`, then optionally hands off a migration spec. |
+
+### Lifecycle and reporting
+
+| Skill | Use it when | Result |
+| --- | --- | --- |
+| [`autospec-sweep`](skills/autospec-sweep/README.md) | You want first-run configuration or continuous spec-vs-reality improvement. | Creates `.autospec/autospec.yml`, runs a configured sweep, and routes recurring gaps back through specs, issues, and `/autospec-run`. |
+| [`autospec-release`](skills/autospec-release/README.md) | You want to know whether the current repo is ready to ship. | Runs the release-readiness loop across sweep, review, run, test, QA, docs sync, proof artifacts, and legacy cleanup. |
+| [`autospec-story`](skills/autospec-story/README.md) | You need a repo-level product and implementation-state overview. | Produces a cited Markdown story from local specs, docs, issues, PRs, and git history. |
+| [`autospec-fleet`](skills/autospec-fleet/README.md) | You want to supervise `autospec-run` across multiple repos. | Provides config schemas/linting, checkout planning, dry-run command generation, JSON status, and stop forwarding. |
+
+### Run control and recovery
+
+| Skill | Use it when | Result |
+| --- | --- | --- |
+| [`autospec-stop`](skills/autospec-stop/README.md) | You need to halt or resume an active monitor. | Writes the shared stop sentinel, pauses issues safely, reports status, or resumes paused work. |
+| [`autospec-resume`](skills/autospec-resume/README.md) | A run was interrupted by a host, session, or terminal crash. | Detects the interrupted run from durable state plus heartbeats and auto-continues it without stealing a live worker. |
+| [`autospec-rollover-status`](skills/autospec-rollover-status/SKILL.md) | You want to know how close a session is to context rollover. | Reports current context % and the last rollover event for the active monitor. |
+| [`autospec-loop`](skills/autospec-loop/README.md) | You want a task repeated until a goal is reached ("loop until the build passes"). | Freezes the request into a contract, then runs a goal-conditioned loop with conservative guardrails. |
+| [`autospec-explore`](skills/autospec-explore/README.md) | You want perpetual autonomous research + shipping on a sandbox branch. | Runs 7 researchers that propose features from spec/code gaps and other signals, then drains them via `/autospec-run` with PRs targeting the sandbox branch (never `main`). |
 
 ## Install
 
@@ -519,8 +556,7 @@ LGTM first-pass rate, and top-10 cost outliers by issue. To publish to GitHub Pa
   suite skills (generated).
 - [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) - per-symbol reference for all scripts (generated).
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) - concurrency model, lock-step rule, module graph (generated).
-- [`docs/user-manual.md`](docs/user-manual.md) - legacy narrative walkthrough.
-- [`docs/architecture.md`](docs/architecture.md) - legacy architecture notes.
+- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) - zero-to-PRs walkthrough.
 - [`examples/README.md`](examples/README.md) - config file schemas for model
   profiles and project board mapping.
 - [`AGENTS.md`](AGENTS.md) - repository operating contract and merge authority
