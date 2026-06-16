@@ -303,9 +303,32 @@ specialists**:
 2. **Verify (adversarial)** — every deduped proposal is handed to one
    independent Tier-B skeptic prompted "Try to refute this proposal; default to
    refuted=true under uncertainty." Refuted proposals are dropped; survivors
-   carry `{verdict, reason}`. This is the primary false-positive lever. If no
-   subagent capability exists, fall back to a single in-thread refutation pass
-   (logged degradation).
+   carry `{verdict, reason}`. This is the primary false-positive lever.
+
+   This stage runs as a **two-pass split** (the orchestrator cannot key the
+   verdict map until it knows the deduped titles, so verify cannot live inside a
+   single aggregator pass):
+   - **Pass 1** — `explore-research-cycle.sh --stage dedup` runs the researchers,
+     aggregates, dedups, and emits each deduped proposal stamped with its
+     `norm_title` key, then stops before verify.
+   - **Skeptic dispatch** — for each deduped proposal the orchestrator dispatches
+     one Tier-B skeptic (refute-by-default) and assembles a
+     `{norm_title → {verdict, reason}}` map. The seam is
+     `AUTOSPEC_EXPLORE_VERIFY_CMD` (it reads `AUTOSPEC_EXPLORE_DEDUPED_IN` and
+     writes `AUTOSPEC_EXPLORE_VERDICTS_OUT`); it may fan out one subagent per
+     proposal or run a single in-thread pass.
+   - **Pass 2** — `explore-research-cycle.sh --stage finalize --deduped-in <pass1>`
+     consumes the map via `AUTOSPEC_EXPLORE_VERIFY_VERDICTS`, drops refuted
+     proposals (proposal with no map entry is **refuted by default**), sets
+     `verify_mode=active`, and increments `proposals_refuted`. Each refuted
+     proposal is recorded to the outcome ledger as `outcome=refuted` (issue=0),
+     which feeds the per-source refutation-rate down-weighting.
+
+   Degradation ladder (never hard-fail): no `AUTOSPEC_EXPLORE_VERIFY_CMD` but a
+   harness dispatcher → a single in-thread refutation pass builds the map; on
+   total absence of skeptic capability → no map, pass 2 no-ops to the
+   **observable** `verify_mode=no-op-unverified` with a
+   `code_health:explore_verify_noop` warning (never a silent all-survive).
 3. **ROI gate** — drop proposals with an empty `named_consumer`. **Only the 3
    discovery researchers and `specialist:<slug>` sources are ROI-gated**
    (new-source rollout safety); the 7 legacy universal researchers are exempt.
