@@ -34,6 +34,17 @@ Behavioral + a11y checks confirm a screen functions; this loop confirms it
 matches the adopted design language. It runs only when the repo has a root
 `DESIGN.md` (otherwise skip — nothing to judge against).
 
+0. **Deterministic token-drift lint (cheap pre-pass)** — before spending a vision
+   call, run the objective design-token linter on the changed UI files; it catches
+   what regex can prove (raw hex outside the palette, off-grid spacing, ad-hoc
+   z-index, banned fonts) and emits `file:line` findings:
+   ```bash
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-ui.sh" $(git diff --name-only main...HEAD -- '*.css' '*.scss' '*.tsx' '*.jsx' '*.vue' '*.html')
+   ```
+   Map each finding to a `category:"visual_fidelity"` qa-verdict entry (these are
+   the deterministic half of the implementer's `DESIGN_DRIFT` directive). The
+   vision judge below then handles the *subjective* fidelity the linter can't.
+
 1. **Capture** — screenshot each spec route at the viewport matrix using the
    existing `gen-screenshots.mjs` (Mode-II forbidden-URL safety already built in):
    ```bash
