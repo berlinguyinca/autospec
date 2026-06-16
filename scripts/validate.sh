@@ -2450,6 +2450,7 @@ main() {
     check_explore_trio_worktree_assert
     check_autospec_explore_discovery_contract
     check_autospec_explore_spec_first_contract
+    check_autospec_explore_qa_gate_contract
     check_autospec_release_area_contract
     check_release_trio_worktree_assert
     check_autospec_sweep_area_contract
@@ -3026,6 +3027,69 @@ check_autospec_explore_spec_first_contract() {
     done
 
     info "autospec-explore spec-first filing: renderer + sandbox-commit-before-decompose + --base + fallback verified"
+}
+
+# autospec-explore QA promotion gate loop integration (issue #1114): the
+# orchestrator parses --qa-gate (default OFF) + --qa-gate-pass-on-partial, runs
+# scripts/explore-qa-gate.sh ONCE at loop termination before the promotion
+# block, branches the promotion-readiness output on the verdict, emits the two
+# code_health tokens, and preserves a byte-unchanged default-off promotion path.
+check_autospec_explore_qa_gate_contract() {
+    info "autospec-explore QA promotion gate contract (#1114)"
+    local orch="scripts/autospec-explore.sh"
+    [ -f "$orch" ] || fail "$orch: orchestrator missing"
+    bash -n "$orch" || fail "$orch: bash syntax error"
+
+    # 1. Both flags are parsed.
+    grep -q -- '--qa-gate)' "$orch" \
+        || fail "$orch: must parse --qa-gate (#1114)"
+    grep -q -- '--qa-gate-pass-on-partial)' "$orch" \
+        || fail "$orch: must parse --qa-gate-pass-on-partial (#1114)"
+
+    # 2. The runner from issue #1113 is invoked (guarded behind --qa-gate).
+    grep -q 'explore-qa-gate\.sh' "$orch" \
+        || fail "$orch: must invoke scripts/explore-qa-gate.sh (#1114)"
+
+    # 3. Promotion-gating branches: PASS/skipped print the merge block; the
+    #    fail-closed branch withholds it. Both promote+withhold paths must exist.
+    grep -q 'To merge sandbox into main' "$orch" \
+        || fail "$orch: must retain the merge-instructions promotion block (#1114)"
+    grep -q 'Promotion WITHHELD' "$orch" \
+        || fail "$orch: must withhold the merge block on a blocking verdict (#1114)"
+    grep -q 'sandbox QA:' "$orch" \
+        || fail "$orch: must annotate the promotion output with the sandbox QA verdict (#1114)"
+    grep -q 'no QA config' "$orch" \
+        || fail "$orch: skipped verdict must carry the no-config annotation (#1114)"
+
+    # 4. The two code_health tokens (gate ran inert/failed + the runner's skip).
+    grep -q 'code_health:explore_qa_gate_failed' "$orch" \
+        || fail "$orch: must emit code_health:explore_qa_gate_failed on a blocking verdict (#1114)"
+    grep -q 'code_health:explore_qa_gate_skipped_no_config' scripts/explore-qa-gate.sh \
+        || fail "scripts/explore-qa-gate.sh: must emit code_health:explore_qa_gate_skipped_no_config (#1113/#1114)"
+
+    # 5. Staleness warning: compares the current sandbox tip to the gate sha.
+    grep -q 'sandbox_head_sha' "$orch" \
+        || fail "$orch: must warn when the sandbox advances past the gate sandbox_head_sha (#1114)"
+
+    # 6. Default-off byte-unchanged path: the promotion block is guarded so the
+    #    ungated path emits the legacy output verbatim.
+    grep -q 'QA_GATE.*-eq 0' "$orch" \
+        || fail "$orch: must guard the default-off byte-unchanged promotion path (#1114)"
+
+    # 7. The gate verdict row is recorded in the loop json.
+    grep -q 'qa_gate_verdict' "$orch" \
+        || fail "$orch: must record the gate verdict in .autospec/explore-loop.json (#1114)"
+
+    # 8. bats coverage exists + passes.
+    local bats_file="tests/explore/test_explore_qa_gate_promotion.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: QA-gate promotion bats coverage missing (#1114)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-explore-qa-gate.log 2>&1 \
+            || { cat /tmp/validate-explore-qa-gate.log >&2; fail "$bats_file: failed"; }
+    fi
+
+    info "autospec-explore QA promotion gate: flags + single-run gate + verdict-gated promotion + code_health + default-off verified"
 }
 
 # Release area-dispatch contract (issue #731): 6 area files exist under
