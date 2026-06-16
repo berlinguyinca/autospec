@@ -125,9 +125,37 @@ Claude Code, OpenCode, or Codex CLI. Each links to its own README; see
 | --- | --- | --- |
 | [`autospec-stop`](skills/autospec-stop/README.md) | You need to halt or resume an active monitor. | Writes the shared stop sentinel, pauses issues safely, reports status, or resumes paused work. |
 | [`autospec-resume`](skills/autospec-resume/README.md) | A run was interrupted by a host, session, or terminal crash. | Detects the interrupted run from durable state plus heartbeats and auto-continues it without stealing a live worker. |
-| [`autospec-rollover-status`](skills/autospec-rollover-status/SKILL.md) | You want to know how close a session is to context rollover. | Reports current context % and the last rollover event for the active monitor. |
+| [`autospec-rollover-status`](skills/autospec-rollover-status/README.md) | You want to know how close a session is to context rollover. | Reports current context % and the last rollover event for the active monitor. |
 | [`autospec-loop`](skills/autospec-loop/README.md) | You want a task repeated until a goal is reached ("loop until the build passes"). | Freezes the request into a contract, then runs a goal-conditioned loop with conservative guardrails. |
 | [`autospec-explore`](skills/autospec-explore/README.md) | You want perpetual autonomous research + shipping on a sandbox branch. | Runs 7 researchers that propose features from spec/code gaps and other signals, then drains them via `/autospec-run` with PRs targeting the sandbox branch (never `main`). |
+
+### Estimated token cost per skill
+
+Each skill loads its instruction body into the model's context when invoked.
+The figures below estimate that **loaded-prompt** size (`floor(words × 1.33)`
+over the skill body) — the fixed overhead of running the skill, not the
+end-to-end cost of a run, which is dominated by the repo context, diffs, and
+review the skill drives.
+
+Sorted heaviest first. Regenerate with
+`bash scripts/skill-token-report.sh --update-baseline`; full table lives in
+[`docs/reports/skill-token-baseline.md`](docs/reports/skill-token-baseline.md).
+
+| Skill | ~Tokens | | Skill | ~Tokens |
+| --- | ---: | --- | --- | ---: |
+| `autospec` | 16.0k | | `autospec-listen` | 2.5k |
+| `autospec-run` | 14.1k | | `autospec-review` | 2.3k |
+| `autospec-qa` | 13.6k | | `autospec-doc` | 2.2k |
+| `autospec-define` | 9.2k | | `autospec-story` | 2.0k |
+| `autospec-split` | 6.4k | | `autospec-sweep` | 1.8k |
+| `autospec-test` | 4.2k | | `autospec-resume` | 1.4k |
+| `autospec-loop` | 3.6k | | `autospec-e2e-clone` | 1.2k |
+| `autospec-release` | 3.3k | | `autospec-fleet` | 1.1k |
+| `autospec-refine` | 3.1k | | `autospec-playwright` | 1.0k |
+| `autospec-classify` | 3.1k | | `autospec-stop` | 0.8k |
+| `autospec-explore` | 2.9k | | `autospec-rollover-status` | 0.5k |
+| `autospec-design` | 2.9k | | | |
+| `autospec-continue` | 2.7k | | | |
 
 ## Install
 
