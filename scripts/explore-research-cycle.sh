@@ -17,7 +17,17 @@
 #     "proposals": [ ...top --max-issues-per-round... ] }
 #
 # Each proposal carries: title, evidence, estimated_complexity, confidence,
-# source, score.
+# source, severity, named_consumer, score.
+#
+# Proposal contract (schemas/autospec-explore-proposal.schema.json):
+#   - severity        impact band, high->low: silent-wrong > correctness >
+#                     stability > operability > feature > nicety. Legacy
+#                     researchers that omit it are defaulted to "feature" here.
+#   - named_consumer  free text naming a skill/workflow/operator step that
+#                     benefits today. Missing -> defaulted to "" here. The
+#                     default-empty value does NOT auto-drop legacy proposals
+#                     (the ROI gate that drops empty-consumer proposals is
+#                     new-source-only; it lands in Issue C).
 
 set -u
 
@@ -223,12 +233,24 @@ for f in sorted(glob.glob(os.path.join(work, "*.json"))):
         weight = SRC_WEIGHTS.get(src, 0.5)
         cscale = COMPLEXITY.get(comp, 2.0)
         score = conf * weight / cscale
+        # Default the proposal-contract extension fields safely for legacy
+        # researchers that don't emit them (Issue A). Missing severity ->
+        # "feature"; missing named_consumer -> "". This is a pure default: it
+        # never drops a proposal, so the existing 7 researchers keep flowing.
+        severity = p.get("severity")
+        if not isinstance(severity, str) or not severity.strip():
+            severity = "feature"
+        named_consumer = p.get("named_consumer")
+        if not isinstance(named_consumer, str):
+            named_consumer = ""
         all_props.append({
             "title": title,
             "evidence": p.get("evidence",""),
             "estimated_complexity": comp,
             "confidence": conf,
             "source": src,
+            "severity": severity,
+            "named_consumer": named_consumer,
             "score": round(score, 4),
         })
         total += 1
