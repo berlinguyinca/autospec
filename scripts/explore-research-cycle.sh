@@ -50,6 +50,22 @@ Usage: explore-research-cycle.sh [options]
 
 Options:
   --max-issues-per-round N     Cap final proposals (default 5).
+  --stage STAGE                Two-pass split so the adversarial verify gate can
+                               actually run (issue #1095). One of:
+                                 full      (default) single-pass: run researchers,
+                                           aggregate, dedup, verify, ROI, synthesis,
+                                           rank, cap — backward-compatible behavior.
+                                 dedup     pass 1: run researchers, aggregate, dedup,
+                                           then STOP and emit the deduped proposals
+                                           (each carrying its normalized-title key)
+                                           for the orchestrator to verify. No verify/
+                                           ROI/synthesis/rank.
+                                 finalize  pass 2: skip researchers; read the pass-1
+                                           deduped artifact from --deduped-in and
+                                           resume verify -> ROI -> synthesis -> rank
+                                           -> cap, consuming the orchestrator-built
+                                           AUTOSPEC_EXPLORE_VERIFY_VERDICTS map.
+  --deduped-in PATH            (stage finalize) Path to the pass-1 deduped artifact.
   --research-sources LIST      Comma-separated subset of:
                                  spec-vs-code,prior-reports,codebase-signals,open-issues
                                Default: all 4.
@@ -96,10 +112,14 @@ LEDGER="${AUTOSPEC_EXPLORE_LEDGER:-}"
 SPECIALISTS_MODE="discover"
 NUM_SPECIALISTS=3
 SPECIALISTS_ARG=""
+STAGE="full"
+DEDUPED_IN=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --max-issues-per-round) MAX_ISSUES="$2"; shift 2 ;;
+        --stage)                STAGE="$2"; shift 2 ;;
+        --deduped-in)           DEDUPED_IN="$2"; shift 2 ;;
         --research-sources)     SOURCES="$2"; shift 2 ;;
         --ledger)               LEDGER="$2"; shift 2 ;;
         --out)                  OUT="$2"; shift 2 ;;
@@ -110,6 +130,16 @@ while [ "$#" -gt 0 ]; do
         *) echo "explore-research-cycle: unknown arg: $1" >&2; usage; exit 2 ;;
     esac
 done
+
+# Validate the two-pass stage (issue #1095).
+case "$STAGE" in
+    full|dedup|finalize) ;;
+    *) echo "explore-research-cycle: invalid --stage: $STAGE (use full|dedup|finalize)" >&2; exit 2 ;;
+esac
+if [ "$STAGE" = "finalize" ]; then
+    [ -n "$DEDUPED_IN" ] || { echo "explore-research-cycle: --stage finalize requires --deduped-in PATH" >&2; exit 2; }
+    [ -f "$DEDUPED_IN" ] || { echo "explore-research-cycle: --deduped-in not found: $DEDUPED_IN" >&2; exit 2; }
+fi
 
 # Validate / clamp specialist controls (deterministic; never abort the loop).
 case "$SPECIALISTS_MODE" in
@@ -160,6 +190,11 @@ fi
 work_dir="$(mktemp -d -t explore-cycle.XXXXXX)"
 trap 'rm -rf "$work_dir"' EXIT
 
+# In finalize (pass 2) the deduped proposals come from the pass-1 artifact, NOT
+# from re-running researchers (re-running would be non-deterministic for some
+# sources and would re-derive different deduped titles, breaking the verdict-map
+# keying). Skip the whole researcher + specialist dispatch block.
+if [ "$STAGE" != "finalize" ]; then
 pids=()
 IFS=','
 for src in $SOURCES; do
@@ -285,6 +320,7 @@ PY
         spec_n=$((spec_n + 1))
     done < "$specialists_file"
 fi
+fi  # end: STAGE != finalize (researcher + specialist dispatch)
 
 # Gather recent titles (last 7 days) to filter against. Allow injection.
 recent_titles_file="$work_dir/recent.txt"
@@ -330,12 +366,16 @@ export VERIFY_VERDICTS
 WORK_DIR="$work_dir" \
 MAX_ISSUES="$MAX_ISSUES" \
 RECENT_FILE="$recent_titles_file" \
+STAGE="$STAGE" \
+DEDUPED_IN="$DEDUPED_IN" \
 python3 - <<'PY' > "$work_dir/final.json"
 import json, os, re, glob, datetime
 
 work     = os.environ["WORK_DIR"]
 cap      = int(os.environ["MAX_ISSUES"])
 recent_f = os.environ["RECENT_FILE"]
+stage    = os.environ.get("STAGE", "full")
+deduped_in = os.environ.get("DEDUPED_IN", "").strip()
 
 # Static source priors per the spec — the defensive fallback used verbatim when
 # no dynamic weights are available (no ledger / weights script absent / broken).
@@ -394,7 +434,17 @@ def normalize_title(t):
 
 all_props = []
 total = 0
-for f in sorted(glob.glob(os.path.join(work, "*.json"))):
+if stage == "finalize":
+    # Pass 2: the deduped proposals (and the upstream counters) come from the
+    # pass-1 artifact, NOT from re-globbing researcher output. This is what makes
+    # the verdict map keyable — the orchestrator built it against THESE exact
+    # normalized titles between the two passes.
+    with open(deduped_in, "r", encoding="utf-8") as fh:
+        _p1 = json.load(fh)
+    total = int(_p1.get("proposals_total", 0))
+    deduped = [p for p in (_p1.get("deduped") or _p1.get("proposals") or []) if isinstance(p, dict)]
+else:
+  for f in sorted(glob.glob(os.path.join(work, "*.json"))):
     if os.path.basename(f) == "final.json":
         continue
     try:
@@ -444,13 +494,35 @@ for f in sorted(glob.glob(os.path.join(work, "*.json"))):
         })
         total += 1
 
-# Dedup by normalized title — keep highest score.
-by_norm = {}
-for p in all_props:
-    n = normalize_title(p["title"])
-    if n not in by_norm or p["score"] > by_norm[n]["score"]:
-        by_norm[n] = p
-deduped = list(by_norm.values())
+# Dedup by normalized title — keep highest score. (Skipped in finalize: the
+# deduped set was produced by pass 1 and loaded above.)
+if stage != "finalize":
+    by_norm = {}
+    for p in all_props:
+        n = normalize_title(p["title"])
+        if n not in by_norm or p["score"] > by_norm[n]["score"]:
+            by_norm[n] = p
+    deduped = list(by_norm.values())
+
+# ---------------------------------------------------------------------------
+# PASS 1 boundary (stage=dedup, issue #1095): emit the deduped proposals — each
+# stamped with its normalized-title key — and STOP before verify. The
+# orchestrator dispatches a Tier-B skeptic per deduped proposal, assembles the
+# {norm_title -> {verdict, reason}} map, and feeds it back into pass 2
+# (stage=finalize) via AUTOSPEC_EXPLORE_VERIFY_VERDICTS. No verify/ROI/synthesis/
+# rank happens here — those are pass-2's job once the verdicts exist.
+if stage == "dedup":
+    for p in deduped:
+        p["norm_title"] = normalize_title(p["title"])
+    out = {
+        "round": datetime.date.today().isoformat(),
+        "stage": "dedup",
+        "proposals_total": total,
+        "proposals_after_dedup": len(deduped),
+        "deduped": deduped,
+    }
+    print(json.dumps(out, indent=2))
+    raise SystemExit(0)
 
 # ---------------------------------------------------------------------------
 # VERIFY stage (Issue C) — adversarial-skeptic boundary, between dedup & rank.
