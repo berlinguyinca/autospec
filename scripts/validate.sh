@@ -1301,8 +1301,8 @@ check_existing_spec_mode() {
         for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
             grep -q '^## Existing spec mode' "$f" \
                 || fail "$f missing '## Existing spec mode' section"
-            grep -q 'git cat-file -e origin/main:<spec-path>' "$f" \
-                || fail "$f missing origin/main selected-spec verification"
+            grep -qE 'git cat-file -e (origin/main|<base>):<spec-path>' "$f" \
+                || fail "$f missing selected-spec verification (git cat-file -e <base>|origin/main:<spec-path>)"
             grep -q 'If Existing spec mode is active' "$f" \
                 || fail "$f missing Phase 3 selected-spec handoff"
         done
