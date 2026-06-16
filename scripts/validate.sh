@@ -29,15 +29,71 @@ bats() {
     { [ "$RUN_BATS" = 1 ] && [ "$_REAL_BATS" = 1 ]; } || return 0
     command bats "$@"
 }
+# ── Scoped mode (issue #1122) ────────────────────────────────────────────────
+# `--changed[=<base>]` (default base `origin/main`) and `--since <ref>` restrict
+# the run to checks whose declared input globs intersect the git diff, plus the
+# fail-safe ALWAYS-RUN set (any shared-input change degrades to ~full). Bare
+# invocation (no scoped flag) leaves SCOPED=0 and the full-serial path below
+# byte-for-byte unchanged — the merge gate. Mapping lives in
+# scripts/lib/validate-affected.sh.
+SCOPED=0
+CHANGED_BASE="origin/main"
+_expect_since=0
 for _arg in "$@"; do
     case "$_arg" in
         --no-bats|--fast) RUN_BATS=0 ;;
+        --changed) SCOPED=1 ;;
+        --changed=*) SCOPED=1; CHANGED_BASE="${_arg#--changed=}" ;;
+        --since) SCOPED=1; _expect_since=1 ;;
+        *)
+            if [ "$_expect_since" = 1 ]; then
+                CHANGED_BASE="$_arg"; _expect_since=0
+            fi
+            ;;
     esac
 done
 [ "$RUN_BATS" = 1 ] || printf 'validate: fast mode — skipping bats suites (structural checks only)\n' >&2
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# Scoped-mode setup: compute the changed-file list and source the affected-set
+# lib. AUTOSPEC_VALIDATE_CHANGED_OVERRIDE (a path to a pre-built changed-file
+# list, one path per line) lets tests seed a deterministic diff without touching
+# the working tree. Counters SCOPED_RAN / SCOPED_TOTAL feed the final
+# `scoped: ran N/TOTAL` line. Bare invocation skips all of this entirely.
+CHANGED_FILE_LIST=""
+CHANGED_FILES_DISPLAY=""
+SCOPED_RAN=0
+SCOPED_TOTAL=0
+if [ "$SCOPED" = 1 ]; then
+    # shellcheck disable=SC1091
+    . scripts/lib/validate-affected.sh
+    if [ -n "${AUTOSPEC_VALIDATE_CHANGED_OVERRIDE:-}" ]; then
+        CHANGED_FILE_LIST="$AUTOSPEC_VALIDATE_CHANGED_OVERRIDE"
+    else
+        CHANGED_FILE_LIST="$(mktemp)"
+        git diff --name-only "$CHANGED_BASE"...HEAD > "$CHANGED_FILE_LIST" 2>/dev/null \
+            || git diff --name-only "$CHANGED_BASE" > "$CHANGED_FILE_LIST" 2>/dev/null \
+            || : > "$CHANGED_FILE_LIST"
+    fi
+    CHANGED_FILES_DISPLAY="$(tr '\n' ' ' < "$CHANGED_FILE_LIST" | sed 's/ *$//')"
+    [ -n "$CHANGED_FILES_DISPLAY" ] || CHANGED_FILES_DISPLAY="(none)"
+fi
+
+# Scoped dispatch gate for per-skill checks. In bare mode SCOPED=0 → always run
+# (and never touch counters), keeping the default path byte-identical. In scoped
+# mode, increment SCOPED_TOTAL always and SCOPED_RAN only when the skill is in
+# the affected set. Returns 0 (run) / 1 (skip).
+scoped_skill_gate() {
+    [ "$SCOPED" = 1 ] || return 0
+    SCOPED_TOTAL=$((SCOPED_TOTAL + 1))
+    if validate_affected_skill_runs "$1" "$CHANGED_FILE_LIST"; then
+        SCOPED_RAN=$((SCOPED_RAN + 1))
+        return 0
+    fi
+    return 1
+}
 
 fail() {
     printf 'validate: FAIL — %s\n' "$*" >&2
@@ -2358,6 +2414,9 @@ main() {
     fi
 
     for skill_dir in $skills; do
+        if ! scoped_skill_gate "$(basename "$skill_dir")"; then
+            continue
+        fi
         check_required_files "$skill_dir"
         check_lockstep "$skill_dir"
         check_frontmatter "$skill_dir/SKILL.md"
@@ -2373,6 +2432,9 @@ main() {
     info "scanning duo-harness skills under skills/ ..."
     duo_skills="$(discover_duo_skills)"
     for skill_dir in $duo_skills; do
+        if ! scoped_skill_gate "$(basename "$skill_dir")"; then
+            continue
+        fi
         check_lockstep_duo "$skill_dir"
     done
 
@@ -2471,6 +2533,19 @@ main() {
     # if present; absence is OK before that PR lands.
     check_bash_syntax "install.sh"
     check_bash_syntax "uninstall.sh"
+
+    # Scoped accounting for the global (non-per-skill) check block above. Every
+    # global check is unmapped → fail-safe ALWAYS-RUN, so in scoped mode they all
+    # ran; count the block toward both RAN and TOTAL so the `scoped:` line is
+    # honest. Bare mode (SCOPED=0) skips this entirely. The count is derived from
+    # the source so it can't silently drift as checks are added/removed.
+    if [ "$SCOPED" = 1 ]; then
+        _global_check_count="$(awk '/^    # Top-level installer/{exit} f && /^    check_/{n++} /^    check_startup_preflight$/{f=1; n++} END{print n+0}' "$0")"
+        SCOPED_TOTAL=$((SCOPED_TOTAL + _global_check_count))
+        SCOPED_RAN=$((SCOPED_RAN + _global_check_count))
+        printf 'validate: scoped: ran %s/%s checks (changed: %s)\n' \
+            "$SCOPED_RAN" "$SCOPED_TOTAL" "$CHANGED_FILES_DISPLAY"
+    fi
 
     info "OK — all validation checks passed."
 }
