@@ -419,14 +419,45 @@ _explore_file_round() {
         git push -q origin "HEAD:$SANDBOX_BRANCH" 2>/dev/null || true
     fi
 
-    # 3. Decompose via /autospec-define --base <sandbox> (never targets main).
+    # 3. Snapshot open auto-implement issue numbers before decompose so we can
+    #    diff after to count what /autospec-define filed (best-effort; tolerates
+    #    gh absent or returning empty). Numbers are newline-separated integers.
+    local pre_nums post_nums new_num
+    pre_nums=""
+    if command -v gh >/dev/null 2>&1; then
+        pre_nums="$(gh issue list --label auto-implement --json number \
+            --jq '.[].number' 2>/dev/null)" || pre_nums=""
+    fi
+
+    # 4. Decompose via /autospec-define --base <sandbox> (never targets main).
     define_rc=0
     _explore_round_decompose "$spec_path" || define_rc=$?
 
     if [ "$define_rc" -ne 0 ]; then
-        # 4. Fallback — keep the committed spec, raw-file this round, continue.
+        # 5. Fallback — keep the committed spec, raw-file this round, continue.
         echo "code_health:explore_define_unavailable round=$iter rc=$define_rc spec=$spec_path" >&2
         _explore_raw_file_round
+        return 0
+    fi
+
+    # 6. On define success: diff the issue-number sets to count what was filed.
+    #    Guard: gh absent or snapshot empty → skip (issues_filed stays 0).
+    if command -v gh >/dev/null 2>&1; then
+        post_nums="$(gh issue list --label auto-implement --json number \
+            --jq '.[].number' 2>/dev/null)" || post_nums=""
+        if [ -n "$post_nums" ]; then
+            while IFS= read -r new_num; do
+                [ -z "$new_num" ] && continue
+                case "$new_num" in ''|*[!0-9]*) continue ;; esac
+                # Only count if absent from the pre-snapshot.
+                if ! printf '%s\n' "$pre_nums" | grep -qxF "$new_num" 2>/dev/null; then
+                    issues_filed=$((issues_filed + 1))
+                    filed_issue_nums="$filed_issue_nums $new_num"
+                fi
+            done <<EOF
+$post_nums
+EOF
+        fi
     fi
     return 0
 }

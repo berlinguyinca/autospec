@@ -112,3 +112,93 @@ DRIVER
     run cat "$TMP/define-args.txt"
     [[ "$output" != *"--base main"* ]]
 }
+
+# ── issues_filed / filed_issue_nums on the success path (#1109) ──────────────
+
+# _run_filing_with_counter: like _run_filing but prints issues_filed and
+# filed_issue_nums after the call so tests can assert them.
+_run_filing_with_counter() {
+    cat > "$TMP/driver_counter.sh" <<DRIVER
+set -u
+SCRIPT_DIR="$REPO_ROOT/scripts"
+SANDBOX_BRANCH="sandbox/explore-demo"
+RESEARCH_SOURCES="spec-vs-code"
+iter=1
+research_json="$TMP/.autospec/proposals.json"
+iter_dir="$TMP/.autospec"
+proposals_count=1
+issues_filed=0
+filed_issue_nums=""
+_ledger_append() { :; }
+_ledger_normalize_title() { printf '%s' "\$1"; }
+LEDGER_BIN=""
+$(awk '/^# >>> explore-spec-first-filing >>>/,/^# <<< explore-spec-first-filing <<</' "$ORCH")
+_explore_file_round
+printf 'issues_filed=%s\n' "\$issues_filed"
+printf 'filed_issue_nums=%s\n' "\$filed_issue_nums"
+DRIVER
+    AUTOSPEC_EXPLORE_ROUND_DEFINE_CMD="$DEFINE_CMD" bash "$TMP/driver_counter.sh"
+}
+
+@test "success path: issues_filed reflects issues created by define handoff" {
+    # gh stub: list returns 101 before, 101+102 after define runs
+    local call_count_file="$TMP/gh_calls"
+    printf '0' > "$call_count_file"
+    mkdir -p "$TMP/bin"
+    cat > "$TMP/bin/gh" <<GHSTUB
+#!/usr/bin/env bash
+if [ "\$1" = "issue" ] && [ "\$2" = "list" ]; then
+    n=\$(cat "$call_count_file" 2>/dev/null || echo 0)
+    n=\$((n + 1))
+    printf '%s' "\$n" > "$call_count_file"
+    if [ "\$n" -le 1 ]; then
+        # pre-snapshot: one existing issue
+        printf '101\n'
+    else
+        # post-snapshot: two issues — 102 is new
+        printf '101\n102\n'
+    fi
+    exit 0
+fi
+exit 0
+GHSTUB
+    chmod +x "$TMP/bin/gh"
+    export PATH="$TMP/bin:$PATH"
+
+    DEFINE_CMD='exit 0'
+    run _run_filing_with_counter
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [[ "$output" == *"issues_filed=1"* ]]
+    [[ "$output" == *"filed_issue_nums="*"102"* ]]
+}
+
+@test "success path: no double-count when define files zero new issues" {
+    mkdir -p "$TMP/bin"
+    cat > "$TMP/bin/gh" <<'GHSTUB'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+    # same set before and after — nothing new
+    printf '101\n'
+    exit 0
+fi
+exit 0
+GHSTUB
+    chmod +x "$TMP/bin/gh"
+    export PATH="$TMP/bin:$PATH"
+
+    DEFINE_CMD='exit 0'
+    run _run_filing_with_counter
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [[ "$output" == *"issues_filed=0"* ]]
+}
+
+@test "success path: gh absent — issues_filed stays 0 (no error)" {
+    # Remove gh from PATH entirely for this test.
+    local saved_path="$PATH"
+    export PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v "$TMP/bin" | paste -sd: -)"
+    DEFINE_CMD='exit 0'
+    run _run_filing_with_counter
+    export PATH="$saved_path"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [[ "$output" == *"issues_filed=0"* ]]
+}

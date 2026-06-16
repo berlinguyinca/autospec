@@ -112,3 +112,51 @@ DRIVER
     [ ! -f "$TMP/gh.log" ]
     ! grep -q 'code_health:explore_define_unavailable' "$TMP/err.log"
 }
+
+# ── issues_filed on fallback path: raw filing counter only (#1109) ───────────
+
+_run_filing_with_counter() {
+    cat > "$TMP/driver_counter.sh" <<DRIVER
+set -u
+SCRIPT_DIR="$REPO_ROOT/scripts"
+SANDBOX_BRANCH="sandbox/explore-demo"
+RESEARCH_SOURCES="codebase-signals"
+iter=1
+research_json="$TMP/.autospec/proposals.json"
+iter_dir="$TMP/.autospec"
+proposals_count=1
+issues_filed=0
+filed_issue_nums=""
+_ledger_append() { :; }
+_ledger_normalize_title() { printf '%s' "\$1"; }
+LEDGER_BIN=""
+$(awk '/^# >>> explore-spec-first-filing >>>/,/^# <<< explore-spec-first-filing <<</' "$ORCH")
+_explore_file_round
+printf 'issues_filed=%s\n' "\$issues_filed"
+DRIVER
+    AUTOSPEC_EXPLORE_ROUND_DEFINE_CMD="$DEFINE_CMD" bash "$TMP/driver_counter.sh" 2>"$TMP/err2.log"
+}
+
+@test "fallback path: issues_filed counts raw-filed issues, not snapshot diff" {
+    # gh stub: list returns nothing (so snapshot diff would give 0), but
+    # issue create returns a URL — raw filing should still count it.
+    cat > bin/gh <<'GHSTUB'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+    # empty — would make snapshot diff yield 0
+    exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+    echo "https://github.com/o/r/issues/9002"
+    exit 0
+fi
+exit 0
+GHSTUB
+    chmod +x bin/gh
+
+    DEFINE_CMD='exit 7'
+    run _run_filing_with_counter
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    # Raw filing incremented issues_filed for the one proposal.
+    [[ "$output" == *"issues_filed=1"* ]]
+}
