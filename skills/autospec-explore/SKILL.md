@@ -105,8 +105,11 @@ Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B"
    │       specialist researchers in parallel │
    │     - dedup -> verify -> ROI ->          │
    │       synthesis -> severity-first rank   │
-   │  2. file 1-5 auto-implement issues       │
-   │     (max per round, configurable)        │
+   │  2. spec-first filing (1-5 per round):   │
+   │     render round design spec ->          │
+   │     commit+push spec to SANDBOX ->       │
+   │     /autospec-define --base <sandbox>    │
+   │     (fallback: raw-file, never stall)    │
    │  3. drain via /autospec-run              │
    │     - implementer PRs target SANDBOX,    │
    │       not main                           │
@@ -267,6 +270,32 @@ Aggregation:
 Each researcher is a separate script and can be enabled/disabled via
 `--research-sources`. **Stubbed by Issue C; the JSON contract is the
 authoritative interface between researchers and the aggregator.**
+
+### Spec-first filing (per round)
+
+The capped proposals are NOT raw-filed as bare `gh issue create` tickets.
+Each round files **spec-first**: it batches that round's ranked proposals into
+one round design spec, commits the spec to the sandbox branch BEFORE any issue
+links it, then decomposes it into linked auto-implement issues. Per round:
+
+1. **Render the round spec** (deterministic, `gen-explore-round-spec.sh`) to
+   `docs/specs/<YYYY-MM-DD>-explore-<slug>-round-<N>-design.md`, where `<slug>`
+   is the sandbox-branch leaf and `<N>` is the round number. The spec's
+   acceptance criteria are `- [ ]` checkboxes so a later spec-vs-code
+   drift-check can parse explore's OWN output and catch unimplemented rounds.
+2. **Commit + push the spec to the SANDBOX branch FIRST** (`git add` the spec
+   path explicitly — never `git add -A` inside the loop — then `git commit` and
+   `git push origin HEAD:<sandbox-branch>`). This ordering guarantees no child
+   issue links a dangling `spec_url` blob; the spec blob resolves under the
+   sandbox base before any issue references it.
+3. **Decompose via `/autospec-define --base <sandbox-branch>`** (NOT raw
+   `gh issue create`). `--base` is always the sandbox branch, never `main`, so
+   the spec-tracking gate resolves the spec and child-issue `spec_url` links
+   against the sandbox and no PR or issue targets `main`.
+4. **Fallback — never stall**: if the `/autospec-define` handoff is unavailable
+   or exits non-zero, log `code_health:explore_define_unavailable`, KEEP the
+   already-committed round spec, and fall back to raw filing for that round
+   only. The loop continues; a round never blocks on define availability.
 
 ## Discovery enhancement (researcher roster + verify/ROI/synthesis stages + severity)
 
@@ -441,8 +470,10 @@ survivors, before any implementer cycles are spent.
 The outer loop uses `lib/autospec-loop.sh` from PR #712 with
 explore-specific callbacks (wired in Issue E):
 
-- **per-iteration callback**: `explore-research-cycle.sh` (file
-  issues for top N proposals).
+- **per-iteration callback**: `explore-research-cycle.sh` (spec-first filing
+  for top N proposals — render the round spec, commit+push it to the sandbox
+  branch, then `/autospec-define --base <sandbox>`; on define failure log
+  `code_health:explore_define_unavailable` and raw-file the round, never stall).
 - **drain callback**: invoke `/autospec-run` (which honors sandbox base
   branch via the Issue B integration).
 - **termination conditions**: inherited from #712 + new
