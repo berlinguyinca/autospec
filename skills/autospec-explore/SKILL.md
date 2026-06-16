@@ -1,14 +1,14 @@
 ---
 name: autospec-explore
-description: Use when the user wants /autospec-explore to start a perpetual autonomous research + ship loop on an isolated sandbox branch — 6 researchers propose features from spec/code gaps, prior reports, codebase signals, open issues, repo source analysis, and competitor research, then drain via /autospec-run with PRs targeting the sandbox branch (never main). Can also be reached via an explore/discover build-intent phrase through autospec-listen (which requires one explicit confirmation first), but is not a bare-keyword trigger on its own.
+description: Use when the user wants /autospec-explore to start a perpetual autonomous research + ship loop on an isolated sandbox branch — 7 researchers propose features from spec/code gaps, prior reports, codebase signals, open issues, repo source analysis, dependency health, and competitor research, then drain via /autospec-run with PRs targeting the sandbox branch (never main). Can also be reached via an explore/discover build-intent phrase through autospec-listen (which requires one explicit confirmation first), but is not a bare-keyword trigger on its own.
 ---
 
 # autospec-explore workflow (harness-neutral)
 
 Start a perpetual autonomous research + ship loop. `/autospec-explore "<initial prompt>"`
 creates an isolated sandbox branch (`autospec/explore/<date>-<slug>`) off `origin/main`,
-runs 6 parallel researchers each round (spec-vs-code, prior reports, codebase signals,
-open issues, source analysis, internet), files 1-5 auto-implement issues per round,
+runs 7 parallel researchers each round (spec-vs-code, prior reports, codebase signals,
+open issues, source analysis, dependency health, internet), files 1-5 auto-implement issues per round,
 drains them via `/autospec-run` with PRs targeting the sandbox, and continues until
 the operator stops it. The operator inspects the sandbox when ready and either merges
 into `main` or discards.
@@ -98,7 +98,7 @@ Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B"
    │  perpetual loop (single iteration shown) │
    │                                          │
    │  1. research cycle:                      │
-   │     - 6 researchers run in parallel      │
+   │     - 7 researchers run in parallel      │
    │     - aggregate proposals, dedup, rank   │
    │  2. file 1-5 auto-implement issues       │
    │     (max per round, configurable)        │
@@ -158,7 +158,7 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
 - `--budget-hours N` — wall-time budget. Default 24h.
 - `--sandbox-slug <slug>` — override sandbox branch slug.
 - `--research-sources <list>` — limit to a comma-separated subset of the
-  6 researcher names. Default: all 6.
+  7 researcher names. Default: all 7.
 - `--no-internet` — disable internet research (the most expensive +
   highest-risk source).
 - `--internet-allowlist <list>` — comma-separated domains the internet
@@ -208,7 +208,7 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
 
 ## Research cycle contract
 
-Each round runs the 6 researchers (or the operator-specified subset) in
+Each round runs the 7 researchers (or the operator-specified subset) in
 parallel. Each researcher returns 0-N proposals as JSON:
 
 ```json
@@ -240,6 +240,7 @@ Aggregation:
    - `spec-vs-code` = 1.0 (highest — spec drift is concrete and grounded)
    - `prior-reports` = 0.9 (operator-derived priorities)
    - `codebase-signals` = 0.7
+   - `dependency-health` = 0.65 (outdated/vulnerable deps; concrete + security-relevant)
    - `open-issues` = 0.6
    - `source-analysis` = 0.5
    - `internet` = 0.4 (lowest — least grounded)

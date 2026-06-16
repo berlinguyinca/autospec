@@ -173,6 +173,7 @@ DEFAULT_SRC_WEIGHTS = {
     "spec-vs-code":     1.0,
     "prior-reports":    0.9,
     "codebase-signals": 0.7,
+    "dependency-health": 0.65,
     "open-issues":      0.6,
     "source-analysis":  0.5,
     "internet":         0.4,
