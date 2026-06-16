@@ -2449,6 +2449,7 @@ main() {
     check_autospec_explore_contract
     check_explore_trio_worktree_assert
     check_autospec_explore_discovery_contract
+    check_autospec_explore_spec_first_contract
     check_autospec_release_area_contract
     check_release_trio_worktree_assert
     check_autospec_sweep_area_contract
@@ -2966,6 +2967,65 @@ check_autospec_explore_discovery_contract() {
     done
 
     info "autospec-explore discovery enhancement contract: researchers + stages + schemas + trio lock-step + runbook<->spec tracks verified"
+}
+
+# autospec-explore spec-first filing contract (issue #1102, spec
+# docs/specs/2026-06-16-autospec-explore-spec-first-filing-design.md §Integration
+# points + §Fallback): the perpetual loop must file each round's proposals
+# spec-first — render a round design spec via gen-explore-round-spec.sh, commit +
+# push it to the SANDBOX branch BEFORE decomposition, decompose via
+# /autospec-define --base <sandbox> (never targeting main), and on a
+# missing/failing define handoff log code_health:explore_define_unavailable,
+# keep the committed spec, and fall back to raw filing. This gate asserts those
+# wiring points are present in scripts/autospec-explore.sh and runs the two e2e
+# bats suites when bats is on PATH.
+check_autospec_explore_spec_first_contract() {
+    info "autospec-explore spec-first filing contract (#1102)"
+    local orch="scripts/autospec-explore.sh"
+    [ -f "$orch" ] || fail "$orch: orchestrator missing"
+    bash -n "$orch" || fail "$orch: bash syntax error"
+
+    # 1. The round-spec renderer is invoked from the loop.
+    grep -q 'gen-explore-round-spec\.sh' "$orch" \
+        || fail "$orch: must invoke scripts/gen-explore-round-spec.sh to render the round spec (#1102)"
+
+    # 2. The round-spec path convention is materialized under docs/specs/.
+    grep -q 'docs/specs/.*explore-.*round-' "$orch" \
+        || fail "$orch: must materialize docs/specs/<date>-explore-<slug>-round-<N>-design.md (#1102)"
+
+    # 3. Commit-before-decompose ordering: the spec is git add + commit + pushed
+    #    to the sandbox branch (HEAD:<sandbox>) before any decomposition.
+    grep -q 'git commit' "$orch" \
+        || fail "$orch: must commit the round spec before filing (#1102)"
+    grep -q 'git push .*origin .*HEAD:\$SANDBOX_BRANCH' "$orch" \
+        || fail "$orch: must push the round spec to the sandbox branch (HEAD:\$SANDBOX_BRANCH) before decompose (#1102)"
+
+    # 4. Decomposition runs /autospec-define with --base <sandbox>, never main.
+    grep -q '/autospec-define' "$orch" \
+        || fail "$orch: round filing must decompose via /autospec-define (#1102)"
+    grep -q -- '--base \$SANDBOX_BRANCH' "$orch" \
+        || fail "$orch: decompose must pass --base \$SANDBOX_BRANCH (never main) (#1102)"
+
+    # 5. Fallback identifier present + raw filing retained as the fallback path.
+    grep -q 'code_health:explore_define_unavailable' "$orch" \
+        || fail "$orch: missing fallback log token code_health:explore_define_unavailable (#1102)"
+    grep -q '_explore_raw_file_round' "$orch" \
+        || fail "$orch: must retain raw filing as the never-stall fallback (#1102)"
+
+    # 6. e2e bats coverage exists + passes.
+    for bats_file in \
+        tests/explore/test_explore_spec_first_filing.bats \
+        tests/explore/test_explore_define_fallback.bats
+    do
+        [ -f "$bats_file" ] || fail "$bats_file: spec-first bats coverage missing (#1102)"
+        if command -v bats >/dev/null 2>&1; then
+            info "  running: $bats_file"
+            bats "$bats_file" >/tmp/validate-explore-spec-first.log 2>&1 \
+                || { cat /tmp/validate-explore-spec-first.log >&2; fail "$bats_file: failed"; }
+        fi
+    done
+
+    info "autospec-explore spec-first filing: renderer + sandbox-commit-before-decompose + --base + fallback verified"
 }
 
 # Release area-dispatch contract (issue #731): 6 area files exist under
