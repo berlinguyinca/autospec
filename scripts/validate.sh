@@ -13,6 +13,29 @@
 
 set -eu
 
+# ── Fast mode ────────────────────────────────────────────────────────────────
+# `--no-bats` / `--fast` skips the bats SUITES (the slow part, ~minutes) while
+# still running every structural check (lock-step, goldens, frontmatter, named
+# content, file presence) for quick local feedback. CI/pre-merge runs the full
+# suite by default.
+#
+# Implemented by shadowing the `bats` command with a wrapper: every `bats ...`
+# call (guarded or not) routes through it. `_REAL_BATS` is detected BEFORE the
+# function is defined, so the wrapper preserves today's "skip when bats is not
+# installed" behavior even though `command -v bats` now resolves to the function.
+RUN_BATS=1
+_REAL_BATS=0; command -v bats >/dev/null 2>&1 && _REAL_BATS=1
+bats() {
+    { [ "$RUN_BATS" = 1 ] && [ "$_REAL_BATS" = 1 ]; } || return 0
+    command bats "$@"
+}
+for _arg in "$@"; do
+    case "$_arg" in
+        --no-bats|--fast) RUN_BATS=0 ;;
+    esac
+done
+[ "$RUN_BATS" = 1 ] || printf 'validate: fast mode — skipping bats suites (structural checks only)\n' >&2
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
