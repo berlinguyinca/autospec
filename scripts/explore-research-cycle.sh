@@ -51,6 +51,12 @@ Options:
   --research-sources LIST      Comma-separated subset of:
                                  spec-vs-code,prior-reports,codebase-signals,open-issues
                                Default: all 4.
+  --specialists-mode MODE      Domain-specialist roster mode (Issue E2):
+                                 discover (default) | ask | explicit | off.
+                                 off = zero specialists (current behavior).
+  --num-specialists N          Roster size for discover/ask (default 3, cap 6).
+  --specialists LIST           Explicit roster as slug:persona,slug:persona,...
+                               (used verbatim when --specialists-mode explicit).
   --ledger PATH                Outcome ledger to derive dynamic source weights
                                from (passed to explore-source-weights.sh). When
                                omitted, $AUTOSPEC_EXPLORE_LEDGER is used, then the
@@ -70,6 +76,14 @@ Env:
   AUTOSPEC_TEST_ISSUES_JSON      Inject fake gh issue list (testing).
   AUTOSPEC_TEST_RECENT_TITLES    Newline-separated titles created in last 7d
                                  (testing — bypasses gh search).
+  AUTOSPEC_EXPLORE_AUTONOMOUS     1 = autonomous/no-TTY run; discover mode then
+                                 auto-selects top-N (never blocks). Default: auto
+                                 (autonomous unless an interactive TTY is present).
+  AUTOSPEC_SPECIALIST_PROPOSALS_<SLUG>
+                                 Per-specialist proposal JSON (an array, or an
+                                 object with a "proposals" array). The seam the
+                                 orchestrator's LLM dispatch fills; absent → that
+                                 specialist contributes zero proposals (graceful).
 EOF
 }
 
@@ -77,6 +91,9 @@ MAX_ISSUES=5
 SOURCES="spec-vs-code,prior-reports,codebase-signals,open-issues"
 OUT=""
 LEDGER="${AUTOSPEC_EXPLORE_LEDGER:-}"
+SPECIALISTS_MODE="discover"
+NUM_SPECIALISTS=3
+SPECIALISTS_ARG=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -84,10 +101,29 @@ while [ "$#" -gt 0 ]; do
         --research-sources)     SOURCES="$2"; shift 2 ;;
         --ledger)               LEDGER="$2"; shift 2 ;;
         --out)                  OUT="$2"; shift 2 ;;
+        --specialists-mode)     SPECIALISTS_MODE="$2"; shift 2 ;;
+        --num-specialists)      NUM_SPECIALISTS="$2"; shift 2 ;;
+        --specialists)          SPECIALISTS_ARG="$2"; shift 2 ;;
         -h|--help)              usage; exit 0 ;;
         *) echo "explore-research-cycle: unknown arg: $1" >&2; usage; exit 2 ;;
     esac
 done
+
+# Validate / clamp specialist controls (deterministic; never abort the loop).
+case "$SPECIALISTS_MODE" in
+    discover|ask|explicit|off) ;;
+    *) echo "explore-research-cycle: invalid --specialists-mode: $SPECIALISTS_MODE (use discover|ask|explicit|off)" >&2; exit 2 ;;
+esac
+# --num-specialists: default 3, floor 0, cap 6.
+case "$NUM_SPECIALISTS" in
+    ''|*[!0-9]*) NUM_SPECIALISTS=3 ;;
+esac
+[ "$NUM_SPECIALISTS" -gt 6 ] && NUM_SPECIALISTS=6
+
+# Per-round researcher cap (spec §Guardrails): 7 universal + 3 discovery +
+# ≤6 specialists = ≤16. The universal+discovery set is the --research-sources
+# selection; specialists top it up to at most this many TOTAL researchers.
+RESEARCHER_CAP=16
 
 # Resolve explore-source-weights.sh defensively. Order:
 #   1. $AUTOSPEC_EXPLORE_WEIGHTS_BIN (explicit override, e.g. tests)
@@ -146,6 +182,107 @@ unset IFS
 for p in "${pids[@]:-}"; do
     [ -n "$p" ] && wait "$p" 2>/dev/null || true
 done
+
+# Count the universal+discovery researchers actually selected this round (the
+# non-empty, deduped --research-sources entries). Specialists may only top this
+# up to RESEARCHER_CAP total.
+universal_count=0
+IFS=','
+for src in $SOURCES; do
+    src="$(printf '%s' "$src" | tr -d ' ')"
+    [ -z "$src" ] && continue
+    universal_count=$((universal_count + 1))
+done
+unset IFS
+
+# ── Domain-specialist dispatch (Issue E2 #1083) ─────────────────────────────
+# Each resolved roster specialist runs as a researcher emitting proposals with
+# source=specialist:<slug> (default weight 0.6 in the aggregator). The roster is
+# resolved per --specialists-mode:
+#   off       no specialists — byte-for-byte the pre-E2 behavior.
+#   explicit  the verbatim --specialists slug:persona,... list.
+#   discover  auto-run discovery → the cached .autospec/explore-specialists.json
+#             roster; interactive harness confirms via AskUserQuestion (an
+#             orchestrator/SKILL-prose responsibility), autonomous/no-TTY takes
+#             the top --num-specialists and never blocks (handled here).
+#   ask       like discover but the operator names the roster (orchestrator
+#             prose); the deterministic floor here is the same cached top-N.
+# Proposals per specialist come from the LLM seam
+# AUTOSPEC_SPECIALIST_PROPOSALS_<SLUG>; absent → zero proposals (graceful, the
+# specialist still participates but contributes nothing — never hard-fails).
+# Trust boundary (spec §Guardrails): personas come from repo-evidence roster /
+# operator input only — never from the internet researcher's fetched content.
+if [ "$SPECIALISTS_MODE" != "off" ]; then
+    # Resolve the slug list (one per line) into $work_dir/specialists.txt.
+    specialists_file="$work_dir/specialists.txt"
+    : > "$specialists_file"
+    if [ "$SPECIALISTS_MODE" = "explicit" ]; then
+        # Verbatim roster: slug[:persona],slug[:persona],...  Take slug before ':'.
+        IFS=','
+        for entry in $SPECIALISTS_ARG; do
+            slug="${entry%%:*}"
+            slug="$(printf '%s' "$slug" | tr -d ' ' | tr '[:upper:]' '[:lower:]')"
+            [ -n "$slug" ] && printf '%s\n' "$slug" >> "$specialists_file"
+        done
+        unset IFS
+    else
+        # discover / ask: consume the cached roster (Issue E1). Slugs only.
+        roster_path="$REPO_ROOT/.autospec/explore-specialists.json"
+        if [ -f "$roster_path" ] && command -v python3 >/dev/null 2>&1; then
+            python3 - "$roster_path" >> "$specialists_file" 2>/dev/null <<'PY' || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    for s in d.get("suggested_specialists", []) or []:
+        slug = str((s or {}).get("slug", "")).strip().lower()
+        if slug:
+            print(slug)
+except Exception:
+    pass
+PY
+        fi
+    fi
+
+    # Top-N + cap. Take the first --num-specialists slugs, then clamp so the
+    # TOTAL researcher count (universal + specialists) never exceeds RESEARCHER_CAP.
+    room=$((RESEARCHER_CAP - universal_count))
+    [ "$room" -lt 0 ] && room=0
+    allow="$NUM_SPECIALISTS"
+    [ "$allow" -gt "$room" ] && allow="$room"
+
+    spec_n=0
+    while IFS= read -r slug; do
+        [ -z "$slug" ] && continue
+        [ "$spec_n" -ge "$allow" ] && break
+        # Per-specialist proposals via the LLM seam. Env var name is the slug
+        # upper-cased with non-alnum → underscore. Absent → empty proposals.
+        env_slug="$(printf '%s' "$slug" | tr '[:lower:]-' '[:upper:]_' | tr -c 'A-Z0-9_' '_')"
+        eval "payload=\"\${AUTOSPEC_SPECIALIST_PROPOSALS_${env_slug}:-}\""
+        SPEC_SLUG="$slug" SPEC_PAYLOAD="${payload:-}" python3 - > "$work_dir/specialist-$slug.json" <<'PY' || \
+            printf '{"source":"specialist:%s","proposals":[]}\n' "$slug" > "$work_dir/specialist-$slug.json"
+import json, os
+slug = os.environ["SPEC_SLUG"]
+src = "specialist:" + slug
+raw = os.environ.get("SPEC_PAYLOAD", "").strip()
+props = []
+if raw:
+    try:
+        d = json.loads(raw)
+        if isinstance(d, dict):
+            d = d.get("proposals", [])
+        if isinstance(d, list):
+            props = [p for p in d if isinstance(p, dict)]
+    except Exception:
+        props = []
+# Stamp the specialist source on every proposal (trust boundary: the slug, not
+# any source the payload may claim).
+for p in props:
+    p["source"] = src
+print(json.dumps({"source": src, "proposals": props}))
+PY
+        spec_n=$((spec_n + 1))
+    done < "$specialists_file"
+fi
 
 # Gather recent titles (last 7 days) to filter against. Allow injection.
 recent_titles_file="$work_dir/recent.txt"
@@ -273,7 +410,14 @@ for f in sorted(glob.glob(os.path.join(work, "*.json"))):
             conf = float(p.get("confidence", 0.5))
         except Exception:
             conf = 0.5
-        weight = SRC_WEIGHTS.get(src, 0.5)
+        # Domain-specialist sources (source=specialist:<slug>, Issue E2) default
+        # to weight 0.6 per the shared-contract; any other unknown source 0.5.
+        if src in SRC_WEIGHTS:
+            weight = SRC_WEIGHTS[src]
+        elif src.startswith("specialist:"):
+            weight = SRC_WEIGHTS.get(src, 0.6)
+        else:
+            weight = 0.5
         cscale = COMPLEXITY.get(comp, 2.0)
         score = conf * weight / cscale
         # Default the proposal-contract extension fields safely for legacy

@@ -45,6 +45,10 @@ SANDBOX_SLUG=""
 RESEARCH_SOURCES="spec-vs-code,prior-reports,codebase-signals,open-issues,source-analysis,internet"
 NO_INTERNET=0
 INTERNET_ALLOWLIST=""
+SPECIALISTS_MODE="discover"
+NUM_SPECIALISTS=3
+SPECIALISTS_ARG=""
+AUTONOMOUS=0
 PROMPT=""
 
 usage() {
@@ -60,6 +64,12 @@ Options:
   --research-sources LIST     Comma-separated researcher names.
   --no-internet               Disable the internet researcher.
   --internet-allowlist LIST   Pass-through to explore-research/internet.sh.
+  --specialists-mode MODE     Domain-specialist roster mode (Issue E2):
+                                discover (default) | ask | explicit | off.
+  --num-specialists N         Roster size for discover/ask (default 3, cap 6).
+  --specialists LIST          Explicit roster slug:persona,... (explicit mode).
+  --autonomous                Non-interactive run: discover mode auto-selects the
+                              top-N specialists and never blocks on confirmation.
 EOF
 }
 
@@ -74,6 +84,10 @@ while [ "$#" -gt 0 ]; do
         --research-sources)      shift; RESEARCH_SOURCES="$1" ;;
         --no-internet)           NO_INTERNET=1 ;;
         --internet-allowlist)    shift; INTERNET_ALLOWLIST="$1" ;;
+        --specialists-mode)      shift; SPECIALISTS_MODE="$1" ;;
+        --num-specialists)       shift; NUM_SPECIALISTS="$1" ;;
+        --specialists)           shift; SPECIALISTS_ARG="$1" ;;
+        --autonomous)            AUTONOMOUS=1 ;;
         -h|--help)               usage; exit 0 ;;
         --) shift; PROMPT="${PROMPT:-$*}"; break ;;
         -*) echo "autospec-explore: unknown flag: $1" >&2; usage; exit 2 ;;
@@ -106,6 +120,26 @@ fi
 
 cd "$REPO_ROOT" || { echo "autospec-explore: repo root unavailable: $REPO_ROOT" >&2; exit 2; }
 mkdir -p .autospec
+
+# ── Domain-specialist roster discovery + autonomy detection (Issue E2). ────────
+# Mark the run autonomous when --autonomous was passed OR no interactive TTY is
+# attached; the research cycle then auto-selects the top-N specialists in
+# `discover` mode rather than blocking on an AskUserQuestion confirm (which is an
+# interactive orchestrator/SKILL-prose responsibility, not a deterministic one).
+if [ "$AUTONOMOUS" -eq 1 ] || [ ! -t 0 ]; then
+    export AUTOSPEC_EXPLORE_AUTONOMOUS=1
+fi
+# For discover/ask, populate the cached roster up front (idempotent; generic
+# repos yield an empty roster and the loop runs exactly as today). off/explicit
+# need no scan.
+case "$SPECIALISTS_MODE" in
+    discover|ask)
+        if [ -x "$SCRIPT_DIR/explore-specialist-scan.sh" ]; then
+            AUTOSPEC_NUM_SPECIALISTS="$NUM_SPECIALISTS" \
+                bash "$SCRIPT_DIR/explore-specialist-scan.sh" >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
 
 # Source shared libs.
 # shellcheck source=lib/autospec-loop.sh
@@ -280,6 +314,9 @@ while [ "$iter" -lt "$_max_iter" ]; do
     bash "$SCRIPT_DIR/explore-research-cycle.sh" \
         --max-issues-per-round "$MAX_ISSUES_PER_ROUND" \
         --research-sources "$RESEARCH_SOURCES" \
+        --specialists-mode "$SPECIALISTS_MODE" \
+        --num-specialists "$NUM_SPECIALISTS" \
+        --specialists "$SPECIALISTS_ARG" \
         --out "$research_json" > "$iter_dir/research.log" 2>&1 || research_rc=$?
 
     proposals_count=0
