@@ -72,7 +72,7 @@ implementer's retry prompt as cumulative context:
 | `REPEATED_STRUCTURE_AS_CODE` | "Extract the N branches into a table + single dispatcher loop." |
 | `DOC_OUT_OF_SYNC` | "Update the doc file(s) covering the changed public surface in this same PR." |
 | `INVENTED_CONFIG` | "Remove the invented flag/env/key, or amend the issue body to introduce it as scope." |
-| `DESIGN_DRIFT` | "If the repo has a DESIGN.md, use its tokens (color/spacing/typography/component) instead of hardcoding values; match the adopted design language for any user-facing UI. Run scripts/lint-ui.sh on changed UI files — it deterministically flags raw hex, off-grid spacing, ad-hoc z-index, and banned fonts." |
+| `DESIGN_DRIFT` | "If the repo has a DESIGN.md, use its tokens (color/spacing/typography/component) instead of hardcoding values; match the adopted design language for any user-facing UI. Run `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-ui.sh` on changed UI files — it deterministically flags raw hex, off-grid spacing, ad-hoc z-index, and banned fonts." |
 
 ### Enforcement and opt-out
 
