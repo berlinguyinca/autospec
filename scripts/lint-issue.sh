@@ -48,6 +48,9 @@ Rules enforced (§3 quality contract):
   TOO_MANY_FILES        A '## Files touched' section lists more than 3 file paths.
   BODY_TOO_LONG         Whole body exceeds 400 words.
   OUTLINE_TOO_LONG      '## Implementation outline' section exceeds 30 non-blank lines.
+  UI_SECTIONS_INCOMPLETE A UI feature (a '<!-- ui-feature -->' marker or any one of
+                        '## Design reference' / '## Interaction states' / '## UX flows')
+                        is missing one or more of those three required UI sections.
 
 Exit code = number of findings (capped at 64). Exit 0 means all rules pass."
 
@@ -411,6 +414,29 @@ check_outline_size() {
     fi
 }
 
+# UI-feature decomposition: when an issue is a UI/frontend feature it must carry
+# the full set of UI sections so a small-LLM implementer (and the visual-fidelity
+# QA loop) have design + behavior to work against. Detection is opt-in: a
+# `<!-- ui-feature -->` marker OR the presence of any one UI section flags the
+# issue as UI; then ALL of Design reference + Interaction states + UX flows are
+# required (enforced as a coherent group — no false positives on non-UI issues).
+check_ui_sections() {
+    local has_marker=0 has_dr=0 has_is=0 has_ux=0
+    grep -qE '<!--[[:space:]]*ui-feature[[:space:]]*-->' "$BODY_FILE" && has_marker=1
+    grep -qE '^## Design reference[[:space:]]*$' "$BODY_FILE" && has_dr=1
+    grep -qE '^## Interaction states[[:space:]]*$' "$BODY_FILE" && has_is=1
+    grep -qE '^## UX flows[[:space:]]*$' "$BODY_FILE" && has_ux=1
+    if [ "$has_marker" = 1 ] || [ "$has_dr" = 1 ] || [ "$has_is" = 1 ] || [ "$has_ux" = 1 ]; then
+        local missing=""
+        [ "$has_dr" = 1 ] || missing="$missing '## Design reference'"
+        [ "$has_is" = 1 ] || missing="$missing '## Interaction states'"
+        [ "$has_ux" = 1 ] || missing="$missing '## UX flows'"
+        if [ -n "$missing" ]; then
+            add_finding "UI_SECTIONS_INCOMPLETE" "UI feature detected; missing required section(s):${missing} (UI issues need Design reference + Interaction states + UX flows)"
+        fi
+    fi
+}
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 check_goal
@@ -420,6 +446,7 @@ check_sections
 check_files_touched
 check_body_size
 check_outline_size
+check_ui_sections
 
 finding_count="$(count_findings)"
 
