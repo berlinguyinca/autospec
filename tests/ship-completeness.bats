@@ -119,3 +119,36 @@ is_shipped() {
     false
   fi
 }
+
+# Regression guard for the lib/explore-research ship gap: copy_repo_scripts() is
+# maxdepth-1, so NOTHING under scripts/lib/ or scripts/explore-research/ ships via the
+# glob. Runtime libs that installed repo-root scripts source via $SCRIPT_DIR/lib/<x>
+# (e.g. autospec-explore.sh: lib/autospec-loop.sh) must instead ship via the dedicated
+# copy_runtime_subdirs() step. The references are extracted from scripts/*.sh and the
+# shipment list from install.sh, so this is a true cross-check, not a self-consistent
+# fixture (cf. the green-suite-broken-install gap that let this bug ship).
+@test "runtime \$SCRIPT_DIR/lib sources are shipped by copy_runtime_subdirs" {
+  # Runtime libs that installed repo-root scripts source/exec via $SCRIPT_DIR/lib/<x>.sh.
+  referenced_libs="$(grep -rhoE '\$\{?SCRIPT_DIR\}?/lib/[A-Za-z0-9_.-]+\.sh' "$REPO_ROOT"/scripts/*.sh 2>/dev/null \
+    | sed -E 's#.*/lib/##' | sort -u)"
+
+  # What copy_runtime_subdirs() declares it ships (the runtime_libs list in install.sh).
+  shipped_libs="$(sed -n 's/^[[:space:]]*runtime_libs="\(.*\)"/\1/p' "$REPO_ROOT/install.sh" | tr ' ' '\n' | sort -u)"
+
+  missing=""
+  for lib in $referenced_libs; do
+    echo "$shipped_libs" | grep -qx "$lib" || missing="$missing $lib"
+  done
+  if [ -n "$missing" ]; then
+    echo "Runtime \$SCRIPT_DIR/lib sources not shipped by copy_runtime_subdirs():$missing" >&2
+    echo "Add each to the runtime_libs list in install.sh copy_runtime_subdirs()." >&2
+    false
+  fi
+
+  # scripts/explore-research/ (the researcher dir resolved at $SCRIPT_DIR/explore-research)
+  # must be shipped as a directory by the same step.
+  grep -q 'scripts/explore-research' "$REPO_ROOT/install.sh" || {
+    echo "install.sh copy_runtime_subdirs() does not ship scripts/explore-research/" >&2
+    false
+  }
+}
