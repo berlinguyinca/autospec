@@ -3142,14 +3142,23 @@ check_claim_guard_contract() {
     # scan subcommand must be wired up (the core contract of issue #1066).
     grep -q '^        scan)' "$guard" \
         || fail "$guard: 'scan' subcommand missing from dispatch (issue #1066)"
-    local bats_file="tests/test_claim_guard_overlap.bats"
-    [ -f "$bats_file" ] \
-        || fail "$bats_file: bats coverage missing (issue #1066)"
+    # Spec-named suites (docs/specs/2026-06-15-claim-guard-concurrent-edit-design.md
+    # §"Testing"): overlap, plus the stale-reclaim boundary and degrade-to-no-op
+    # suites the Phase 5.5 audit (issue #1069) made first-class so they cannot
+    # silently rot.
+    local bats_files="tests/test_claim_guard_overlap.bats tests/test_claim_guard_stale_reclaim.bats tests/test_claim_guard_degrade.bats"
+    local bf
+    for bf in $bats_files; do
+        [ -f "$bf" ] \
+            || fail "$bf: bats coverage missing (issue #1066/#1069)"
+    done
     if command -v bats >/dev/null 2>&1; then
-        info "  running: $bats_file"
-        bats "$bats_file" >/tmp/validate-claim-guard-overlap.log 2>&1 \
-            || { cat /tmp/validate-claim-guard-overlap.log >&2; \
-                 fail "$bats_file: failed (issue #1066)"; }
+        for bf in $bats_files; do
+            info "  running: $bf"
+            bats "$bf" >/tmp/validate-claim-guard.log 2>&1 \
+                || { cat /tmp/validate-claim-guard.log >&2; \
+                     fail "$bf: failed (issue #1066/#1069)"; }
+        done
     fi
 }
 
