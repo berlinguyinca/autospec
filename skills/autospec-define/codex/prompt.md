@@ -388,6 +388,27 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > | `TOO_MANY_FILES` | `SPLIT: \`## Files touched\` exceeds 3 paths; split into a parent + child with a \`Depends on\` edge.` |
 > | `BODY_TOO_LONG` | `SHORTEN: body exceeds 400 words; cut prose or split the issue into a \`Depends on\` pair.` |
 > | `OUTLINE_TOO_LONG` | `SHORTEN: \`## Implementation outline\` exceeds 30 lines; compress signatures or split the issue.` |
+> | `UI_SECTIONS_INCOMPLETE` | `ADD: this is a UI feature — include \`## Design reference\`, \`## Interaction states\`, and \`## UX flows\` (all three).` |
+
+### UI-feature decomposition (only for user-facing UI issues)
+
+When a child issue builds or changes user-facing UI, treat it as more than generic
+code: a small-LLM implementer needs the design and the behavior spelled out, and
+the visual-fidelity QA loop needs something to judge against. Mark such issues with
+a `<!-- ui-feature -->` comment and add these three sections (the linter's
+`UI_SECTIONS_INCOMPLETE` rule enforces them as a group once any one is present):
+
+- **Design reference** — the `DESIGN.md` section/tokens (or mockup link) the screen
+  must match. Pairs with the implementer's `DESIGN_DRIFT` directive and the QA
+  visual-fidelity judge.
+- **Interaction states** — the relevant subset of default / hover / focus / loading
+  / empty / error / disabled, plus responsive breakpoints if they change layout.
+- **UX flows** — the happy path, the failure scenarios, and the edge cases (one
+  line each; this is where most UI defects hide).
+
+Non-UI issues omit all three (the rule never fires without the marker or a section).
+Keep these within the same ≤400-word / ≤3-files caps — split a large screen into a
+parent + per-component children with `Depends on` edges rather than one giant issue.
 
 ### Small-LLM friendliness (applies to every child issue)
 

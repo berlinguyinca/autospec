@@ -335,3 +335,41 @@ MD
     [ "$status" -ge 1 ]
     echo "$output" | grep -q "GOAL_NOT_ONE_SENTENCE"
 }
+
+@test "UI_SECTIONS_INCOMPLETE: ui-feature marker without the UI sections is flagged" {
+    write_good_body "$TMP/b.md"
+    printf '\n<!-- ui-feature -->\n' >> "$TMP/b.md"
+    run bash "$LINT" "$TMP/b.md"
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q 'UI_SECTIONS_INCOMPLETE'
+    printf '%s\n' "$output" | grep -E 'UI_SECTIONS_INCOMPLETE' | grep -q 'Design reference'
+}
+
+@test "UI_SECTIONS_INCOMPLETE: one UI section present requires the other two" {
+    write_good_body "$TMP/b.md"
+    printf '\n## Interaction states\n\ndefault/hover/focus/loading/empty/error\n' >> "$TMP/b.md"
+    run bash "$LINT" "$TMP/b.md"
+    [ "$status" -ne 0 ]
+    out="$(printf '%s\n' "$output" | grep 'UI_SECTIONS_INCOMPLETE')"
+    # Inspect only the missing-list portion (before the explanatory parenthetical,
+    # which always names all three sections).
+    missing="$(printf '%s' "$out" | sed 's/ (UI issues.*//')"
+    printf '%s' "$missing" | grep -q 'Design reference'
+    printf '%s' "$missing" | grep -q 'UX flows'
+    ! printf '%s' "$missing" | grep -q 'Interaction states'
+}
+
+@test "UI_SECTIONS_INCOMPLETE: complete UI section set passes" {
+    write_good_body "$TMP/b.md"
+    printf '\n<!-- ui-feature -->\n\n## Design reference\n\nDESIGN.md#buttons\n\n## Interaction states\n\ndefault/hover/focus/loading/empty/error/disabled\n\n## UX flows\n\nhappy: click -> submit; failure: 500 -> toast; edge: empty list\n' >> "$TMP/b.md"
+    run bash "$LINT" "$TMP/b.md"
+    [ "$status" -eq 0 ]
+    ! printf '%s\n' "$output" | grep -q 'UI_SECTIONS_INCOMPLETE'
+}
+
+@test "UI_SECTIONS_INCOMPLETE: non-UI issue (no marker, no UI sections) is not flagged" {
+    write_good_body "$TMP/b.md"
+    run bash "$LINT" "$TMP/b.md"
+    [ "$status" -eq 0 ]
+    ! printf '%s\n' "$output" | grep -q 'UI_SECTIONS_INCOMPLETE'
+}
