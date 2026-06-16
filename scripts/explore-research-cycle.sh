@@ -16,6 +16,8 @@
 #   { "round": "<iso-date>",
 #     "proposals_total": N,
 #     "proposals_after_dedup": N,
+#     "verify_mode": "active"|"no-op-unverified",  # whether a verdict map drove
+#                                          # refutation, or the gate no-op'd
 #     "proposals_after_verify": N,        # survived the adversarial verify gate
 #     "proposals_refuted": N,             # dropped by the verify gate
 #     "proposals_after_roi": N,           # survived the named-consumer ROI gate
@@ -484,6 +486,15 @@ def _load_verdicts():
         return None
 
 _verdicts = _load_verdicts()
+# verify_mode makes the gate's effective state observable in explore-loop.json
+# (audit #1086 seam-1): "active" when an orchestrator-supplied verdict map drove
+# real refutations, "no-op-unverified" when no map was supplied and every
+# proposal survived carrying verdict=unverified. Without this an operator cannot
+# distinguish "skeptic refuted nothing" from "skeptic never ran" — the inert
+# dead-gate failure mode. The aggregator keeps stdout pure JSON (many consumers
+# parse it directly); the loud operator warning is emitted by the orchestrator
+# (autospec-explore.sh) off this field, not from here.
+verify_mode = "active" if _verdicts is not None else "no-op-unverified"
 verified = []
 refuted_count = 0
 for p in deduped:
@@ -688,6 +699,7 @@ out = {
     "round": datetime.date.today().isoformat(),
     "proposals_total": total,
     "proposals_after_dedup": len(deduped),
+    "verify_mode": verify_mode,
     "proposals_after_verify": len(verified),
     "proposals_refuted": refuted_count,
     "proposals_after_roi": len(roi_kept),
