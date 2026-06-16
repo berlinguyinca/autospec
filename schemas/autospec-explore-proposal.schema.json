@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autospec.local/schemas/autospec-explore-proposal.schema.json",
+  "title": "Autospec explore proposal",
+  "description": "A single feature proposal emitted by an autospec-explore researcher and carried through the research-cycle aggregator. Extends the base contract (title/evidence/estimated_complexity/confidence/source) with the severity band and named_consumer fields introduced by the discovery-enhance batch.",
+  "type": "object",
+  "required": ["title", "evidence", "estimated_complexity", "confidence"],
+  "additionalProperties": true,
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence": {
+      "type": "string"
+    },
+    "estimated_complexity": {
+      "type": "string",
+      "enum": ["small", "medium", "large"]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "source": {
+      "type": "string"
+    },
+    "severity": {
+      "type": "string",
+      "description": "Impact band, highest to lowest: silent-wrong > correctness > stability > operability > feature > nicety. The enum order is load-bearing — it is the primary ranking key. Legacy researchers that omit this field are defaulted to `feature` by the aggregator.",
+      "enum": [
+        "silent-wrong",
+        "correctness",
+        "stability",
+        "operability",
+        "feature",
+        "nicety"
+      ]
+    },
+    "named_consumer": {
+      "type": "string",
+      "description": "Free text naming a skill/workflow/operator step that benefits from this proposal today. Empty string means no named consumer; new-source proposals with an empty value are dropped by the ROI gate (Issue C). Legacy researchers that omit this field are defaulted to \"\" by the aggregator and are NOT auto-dropped."
+    },
+    "score": {
+      "type": "number",
+      "description": "Aggregator-computed ranking score (confidence * source_weight / complexity)."
+    }
+  }
+}
