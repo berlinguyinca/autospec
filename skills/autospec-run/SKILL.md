@@ -746,7 +746,7 @@ inline label-swap path below.
 >    TARGETS="<space-separated skills/paths from the issue's Files touched>"
 >    bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert || exit $?
 >    bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh scan $TARGETS || true
->    if ! bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh acquire $TARGETS; then
+>    if ! AUTOSPEC_CLAIM_GUARD=strict bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh acquire $TARGETS; then
 >      gh issue comment <ISSUE> --body "claim-guard acquire conflict (see code_health:claim_conflict identifier above); another live session owns this edit surface — restoring auto-implement"
 >      gh issue edit <ISSUE> --remove-label in-progress-by-bot --add-label auto-implement
 >      exit 6
