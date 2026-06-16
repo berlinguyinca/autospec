@@ -6,7 +6,8 @@
 # files and detect stalled workers.
 #
 # Environment overrides:
-#   AUTOSPEC_WATCHDOG_DIR              heartbeat directory (default: ~/.autospec/process-heartbeats)
+#   AUTOSPEC_WATCHDOG_DIR              heartbeat directory (default: ~/.autospec/process-heartbeats);
+#                                     AUTOSPEC_HEARTBEAT_DIR (writers' var) takes precedence so both agree
 #   AUTOSPEC_WATCHDOG_REPO              override repo for gh calls (default: gh repo context)
 #   AUTOSPEC_WATCHDOG_STALE_SECS         stale threshold (default: 1800)
 #   AUTOSPEC_WATCHDOG_RECLAIM_SECS       reclaim threshold (default: 10800)
@@ -16,7 +17,7 @@
 
 set -eu
 
-WATCHDOG_BASE="${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}"
+WATCHDOG_BASE="${AUTOSPEC_HEARTBEAT_DIR:-${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}}"
 WATCHDOG_REPO="${AUTOSPEC_WATCHDOG_REPO:-${AUTOSPEC_REPO:-}}"
 WATCHDOG_STALE_SECS="${AUTOSPEC_WATCHDOG_STALE_SECS:-1800}"
 WATCHDOG_RECLAIM_SECS="${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}"
