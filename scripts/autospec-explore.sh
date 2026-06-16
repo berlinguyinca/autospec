@@ -49,6 +49,8 @@ SPECIALISTS_MODE="discover"
 NUM_SPECIALISTS=3
 SPECIALISTS_ARG=""
 AUTONOMOUS=0
+QA_GATE=0
+QA_GATE_PASS_ON_PARTIAL=0
 PROMPT=""
 
 usage() {
@@ -70,6 +72,12 @@ Options:
   --specialists LIST          Explicit roster slug:persona,... (explicit mode).
   --autonomous                Non-interactive run: discover mode auto-selects the
                               top-N specialists and never blocks on confirmation.
+  --qa-gate                   Run scripts/explore-qa-gate.sh ONCE at loop
+                              termination and gate the promotion-readiness
+                              output by its verdict (default OFF — promotion
+                              output is byte-unchanged without this flag).
+  --qa-gate-pass-on-partial   Treat a PARTIAL gate verdict as PASS (default
+                              PARTIAL blocks, matching QA's PARTIAL!=PASS rule).
 EOF
 }
 
@@ -88,6 +96,8 @@ while [ "$#" -gt 0 ]; do
         --num-specialists)       shift; NUM_SPECIALISTS="$1" ;;
         --specialists)           shift; SPECIALISTS_ARG="$1" ;;
         --autonomous)            AUTONOMOUS=1 ;;
+        --qa-gate)               QA_GATE=1 ;;
+        --qa-gate-pass-on-partial) QA_GATE_PASS_ON_PARTIAL=1 ;;
         -h|--help)               usage; exit 0 ;;
         --) shift; PROMPT="${PROMPT:-$*}"; break ;;
         -*) echo "autospec-explore: unknown flag: $1" >&2; usage; exit 2 ;;
@@ -723,6 +733,74 @@ done
 iter_records="$iter_records]"
 [ -z "$status" ] && status="round_cap_reached"
 
+# ── Step 4.5: QA promotion gate (issue #1114, default OFF). ────────────────────
+# When --qa-gate is set, run scripts/explore-qa-gate.sh ONCE here at loop
+# termination (operator_stop / cap) — NOT per round (bounds cost) — before the
+# final-summary promotion block below. The gate runner (issue #1113) writes
+# .autospec/explore-qa-gate.json {verdict, sandbox_branch, sandbox_head_sha,
+# qa_verdict_path, blocking_findings, ran_at}; we read the verdict and let the
+# summary block gate the promotion-readiness output by it.
+#
+# When --qa-gate is NOT set, QA_VERDICT stays empty and the summary block below
+# reproduces the current promotion output byte-for-byte.
+QA_VERDICT=""
+QA_GATE_FILE=".autospec/explore-qa-gate.json"
+QA_GATE_HEAD_SHA=""
+QA_BLOCKING_FINDINGS=""
+QA_VERDICT_PATH=".autospec/qa-verdict.json"
+QA_STALE=0
+if [ "$QA_GATE" -eq 1 ]; then
+    qa_gate_rc=0
+    if [ -n "${AUTOSPEC_EXPLORE_QA_GATE_CMD:-}" ]; then
+        bash -c "$AUTOSPEC_EXPLORE_QA_GATE_CMD" || qa_gate_rc=$?
+    else
+        bash "$SCRIPT_DIR/explore-qa-gate.sh" || qa_gate_rc=$?
+    fi
+    if [ -f "$QA_GATE_FILE" ]; then
+        QA_VERDICT="$(jq -r '.verdict // empty' "$QA_GATE_FILE" 2>/dev/null || true)"
+        QA_GATE_HEAD_SHA="$(jq -r '.sandbox_head_sha // empty' "$QA_GATE_FILE" 2>/dev/null || true)"
+        QA_VERDICT_PATH="$(jq -r '.qa_verdict_path // ".autospec/qa-verdict.json"' "$QA_GATE_FILE" 2>/dev/null || echo ".autospec/qa-verdict.json")"
+        QA_BLOCKING_FINDINGS="$(jq -r '(.blocking_findings // [])[] | "  - " + (.|tostring)' "$QA_GATE_FILE" 2>/dev/null || true)"
+    fi
+    [ -n "$QA_VERDICT" ] || QA_VERDICT="error"
+
+    # Staleness: warn if the sandbox advanced past the gate's recorded HEAD sha.
+    if [ -n "$QA_GATE_HEAD_SHA" ]; then
+        cur_sandbox_sha="$(git rev-parse --verify --quiet "$SANDBOX_BRANCH" 2>/dev/null || true)"
+        if [ -n "$cur_sandbox_sha" ] && [ "$cur_sandbox_sha" != "$QA_GATE_HEAD_SHA" ]; then
+            QA_STALE=1
+            echo "autospec-explore: WARN sandbox advanced past gate sandbox_head_sha ($QA_GATE_HEAD_SHA -> $cur_sandbox_sha); QA verdict may be stale" >&2
+        fi
+    fi
+fi
+
+# Resolve the gate verdict to a promotion decision (used by the summary block).
+#   promote=1  → print the merge instructions (annotated)
+#   promote=0  → withhold the merge instructions, print discard + findings
+# QA_ANNOTATION is the `sandbox QA: …` line appended to the summary.
+QA_PROMOTE=1
+QA_ANNOTATION=""
+if [ "$QA_GATE" -eq 1 ]; then
+    case "$QA_VERDICT" in
+        PASS)
+            QA_PROMOTE=1; QA_ANNOTATION="sandbox QA: PASS" ;;
+        PARTIAL)
+            if [ "$QA_GATE_PASS_ON_PARTIAL" -eq 1 ]; then
+                QA_PROMOTE=1; QA_ANNOTATION="sandbox QA: PASS"
+            else
+                QA_PROMOTE=0; QA_ANNOTATION="sandbox QA: PARTIAL"
+            fi ;;
+        skipped)
+            QA_PROMOTE=1; QA_ANNOTATION="sandbox QA: skipped (no QA config)" ;;
+        *)
+            # FAIL, error, or any unrecognized verdict → withhold (fail-closed).
+            QA_PROMOTE=0; QA_ANNOTATION="sandbox QA: $QA_VERDICT" ;;
+    esac
+    if [ "$QA_PROMOTE" -eq 0 ]; then
+        echo "code_health:explore_qa_gate_failed verdict=$QA_VERDICT sandbox=$SANDBOX_BRANCH" >&2
+    fi
+fi
+
 # ── Step 5: write loop artifacts. ──────────────────────────────────────────────
 cat > "$LOOP_JSON" <<EOF
 {
@@ -732,6 +810,10 @@ cat > "$LOOP_JSON" <<EOF
   "iterations_executed": $iter,
   "max_iterations": $_max_iter,
   "tokens_used": $tokens_used,
+  "qa_gate": $QA_GATE,
+  "qa_gate_verdict": "$QA_VERDICT",
+  "qa_gate_promote": $QA_PROMOTE,
+  "qa_gate_stale": $QA_STALE,
   "iterations": $iter_records
 }
 EOF
@@ -742,10 +824,36 @@ EOF
     printf '|------:|-----------------|----------:|-------------:|----------------------|\n'
     printf '%s\n' "$table_rows"
     printf '\nFinal status: %s after %d rounds.\n\n' "$status" "$iter"
-    printf 'To merge sandbox into main:\n'
-    printf '  git checkout main && git merge %s\n\n' "$SANDBOX_BRANCH"
-    printf 'To discard:\n'
-    printf '  git branch -D %s && git push origin --delete %s\n' "$SANDBOX_BRANCH" "$SANDBOX_BRANCH"
+
+    if [ "$QA_GATE" -eq 0 ]; then
+        # DEFAULT OFF: byte-for-byte the pre-#1114 promotion block.
+        printf 'To merge sandbox into main:\n'
+        printf '  git checkout main && git merge %s\n\n' "$SANDBOX_BRANCH"
+        printf 'To discard:\n'
+        printf '  git branch -D %s && git push origin --delete %s\n' "$SANDBOX_BRANCH" "$SANDBOX_BRANCH"
+    else
+        # --qa-gate: gate the promotion-readiness output by the gate verdict.
+        printf '%s\n' "$QA_ANNOTATION"
+        if [ "$QA_STALE" -eq 1 ]; then
+            printf 'WARN: sandbox advanced past the QA gate sandbox_head_sha (%s); verdict may be stale.\n' "$QA_GATE_HEAD_SHA"
+        fi
+        printf '\n'
+        if [ "$QA_PROMOTE" -eq 1 ]; then
+            printf 'To merge sandbox into main:\n'
+            printf '  git checkout main && git merge %s\n\n' "$SANDBOX_BRANCH"
+            printf 'To discard:\n'
+            printf '  git branch -D %s && git push origin --delete %s\n' "$SANDBOX_BRANCH" "$SANDBOX_BRANCH"
+        else
+            printf 'Promotion WITHHELD — QA gate verdict: %s.\n\n' "$QA_VERDICT"
+            if [ -n "$QA_BLOCKING_FINDINGS" ]; then
+                printf 'Blocking findings:\n'
+                printf '%s\n\n' "$QA_BLOCKING_FINDINGS"
+            fi
+            printf 'QA verdict detail: %s\n\n' "$QA_VERDICT_PATH"
+            printf 'To discard:\n'
+            printf '  git branch -D %s && git push origin --delete %s\n' "$SANDBOX_BRANCH" "$SANDBOX_BRANCH"
+        fi
+    fi
 } > "$LOOP_MD"
 
 # ── Step 6: usage-limit supervisor arming (best-effort). ───────────────────────
