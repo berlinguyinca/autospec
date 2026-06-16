@@ -476,7 +476,9 @@ check_harness_detection_block() {
     file="$1"
     name="$(basename "$(dirname "$file")")"
     if ! grep -q '## Harness detection' "$file"; then
-        printf 'validate: WARN — %s: missing ## Harness detection section (incremental migration OK)\n' "$name" >&2
+        # Migration complete (all skills carry the section); a new skill omitting
+        # it is now a regression, not incremental migration — fail closed.
+        fail "$name: missing ## Harness detection section (required; defines TIER_A/TIER_B)"
         return 0
     fi
     info "harness detection block: $name"
