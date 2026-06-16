@@ -49,6 +49,19 @@ mode and does NOT run the normal pipeline. When dispatching, pass any
 2. Print the helper's stdout to the user.
 3. Stop. Do not enter Phase 0 or any pipeline phase.
 
+## Status mode
+
+Apply the same read-and-normalize approach. If the normalized request is exactly
+`status` (or `status` followed by `--<word>` flags such as `--json` / `--repo` /
+`--stale-secs`), this skill enters status mode and does NOT run the pipeline — it
+prints a one-glance operator view of the live run (in-flight issues with step +
+age + branch + PR + STALE detection, the queue counts, and the stop-flag state)
+instead of making the operator hand-parse heartbeat JSON.
+
+1. Dispatch to `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-run-status.sh" <args>`.
+2. Print the helper's stdout to the user.
+3. Stop. Do not enter Phase 0 or any pipeline phase.
+
 ## Invocation
 
 ```
