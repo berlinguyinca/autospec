@@ -89,3 +89,114 @@ assert p['severity'] == 'silent-wrong', p
 assert p['named_consumer'] == 'autospec-run Phase 4', p
 "
 }
+
+# --- Issue C: severity-first ranking -------------------------------------
+
+@test "ranking sorts by severity rank first, score second" {
+    # A high-severity, LOW-score proposal must out-rank a low-severity,
+    # HIGH-score one. Without severity-first the large-complexity silent-wrong
+    # item would sink below the small-complexity nicety item.
+    make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[
+      {"title":"feat: tiny polish","evidence":"e1","estimated_complexity":"small","confidence":0.99,"severity":"nicety","named_consumer":"x"},
+      {"title":"feat: data corruption guard","evidence":"e2","estimated_complexity":"large","confidence":0.5,"severity":"silent-wrong","named_consumer":"y"}
+    ]}'
+    make_fake_researcher prior-reports '{"source":"prior-reports","proposals":[]}'
+    make_fake_researcher codebase-signals '{"source":"codebase-signals","proposals":[]}'
+    make_fake_researcher open-issues '{"source":"open-issues","proposals":[]}'
+
+    run bash "$REPO_ROOT/scripts/explore-research-cycle.sh" --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+titles = [p['title'] for p in d['proposals']]
+assert titles[0] == 'feat: data corruption guard', titles
+assert titles[1] == 'feat: tiny polish', titles
+"
+}
+
+@test "within one severity band, score still breaks the tie" {
+    make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[
+      {"title":"feat: low score feature","evidence":"e1","estimated_complexity":"large","confidence":0.4,"severity":"feature","named_consumer":"x"},
+      {"title":"feat: high score feature","evidence":"e2","estimated_complexity":"small","confidence":0.95,"severity":"feature","named_consumer":"y"}
+    ]}'
+    make_fake_researcher prior-reports '{"source":"prior-reports","proposals":[]}'
+    make_fake_researcher codebase-signals '{"source":"codebase-signals","proposals":[]}'
+    make_fake_researcher open-issues '{"source":"open-issues","proposals":[]}'
+
+    run bash "$REPO_ROOT/scripts/explore-research-cycle.sh" --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+titles = [p['title'] for p in d['proposals']]
+assert titles[0] == 'feat: high score feature', titles
+"
+}
+
+# --- Issue C: ROI gate ---------------------------------------------------
+
+@test "ROI gate drops a new-source proposal with empty named_consumer; keeps a legacy one" {
+    # A NEW researcher (quality-resilience) with empty named_consumer is
+    # dropped by the ROI gate. A LEGACY researcher (spec-vs-code) with empty
+    # named_consumer is exempt and survives.
+    make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[{"title":"feat: legacy keeps","evidence":"e1","estimated_complexity":"small","confidence":0.9}]}'
+    make_fake_researcher quality-resilience '{"source":"quality-resilience","proposals":[
+      {"title":"feat: new no consumer","evidence":"e2","estimated_complexity":"small","confidence":0.9,"severity":"correctness"},
+      {"title":"feat: new with consumer","evidence":"e3","estimated_complexity":"small","confidence":0.9,"severity":"correctness","named_consumer":"validate.sh"}
+    ]}'
+    make_fake_researcher prior-reports '{"source":"prior-reports","proposals":[]}'
+    make_fake_researcher codebase-signals '{"source":"codebase-signals","proposals":[]}'
+    make_fake_researcher open-issues '{"source":"open-issues","proposals":[]}'
+
+    run bash "$REPO_ROOT/scripts/explore-research-cycle.sh" \
+        --research-sources spec-vs-code,prior-reports,codebase-signals,open-issues,quality-resilience \
+        --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+titles = sorted(p['title'] for p in d['proposals'])
+assert 'feat: legacy keeps' in titles, titles          # legacy empty-consumer kept
+assert 'feat: new with consumer' in titles, titles      # new + consumer kept
+assert 'feat: new no consumer' not in titles, titles     # new empty-consumer dropped
+assert d['proposals_after_roi'] == 2, d
+"
+}
+
+@test "ROI gate exempts ALL seven legacy universal sources" {
+    # Each legacy universal source emitting an empty-consumer proposal must
+    # survive the ROI gate. Guards against silently muting the existing 7.
+    for s in spec-vs-code prior-reports codebase-signals open-issues source-analysis dependency-health internet; do
+        make_fake_researcher "$s" "{\"source\":\"$s\",\"proposals\":[{\"title\":\"feat: $s item\",\"evidence\":\"e\",\"estimated_complexity\":\"small\",\"confidence\":0.9}]}"
+    done
+
+    run bash "$REPO_ROOT/scripts/explore-research-cycle.sh" \
+        --research-sources spec-vs-code,prior-reports,codebase-signals,open-issues,source-analysis,dependency-health,internet \
+        --max-issues-per-round 20
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+assert d['proposals_after_roi'] == 7, d
+"
+}
+
+@test "ROI gate drops empty-consumer specialist:<slug> proposals (new source)" {
+    make_fake_researcher 'specialist:market-risk' '{"source":"specialist:market-risk","proposals":[{"title":"feat: risk control gap","evidence":"e","estimated_complexity":"small","confidence":0.9,"severity":"correctness"}]}'
+    make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[]}'
+    make_fake_researcher prior-reports '{"source":"prior-reports","proposals":[]}'
+    make_fake_researcher codebase-signals '{"source":"codebase-signals","proposals":[]}'
+    make_fake_researcher open-issues '{"source":"open-issues","proposals":[]}'
+
+    run bash "$REPO_ROOT/scripts/explore-research-cycle.sh" \
+        --research-sources spec-vs-code,prior-reports,codebase-signals,open-issues,specialist:market-risk \
+        --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+assert d['proposals_after_roi'] == 0, d
+assert len(d['proposals']) == 0, d
+"
+}

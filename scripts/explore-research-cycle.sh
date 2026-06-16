@@ -2,17 +2,24 @@
 # scripts/explore-research-cycle.sh — autospec-explore research cycle aggregator.
 #
 # Runs the enabled deterministic researchers in parallel, aggregates their
-# proposals, deduplicates by normalized title, ranks by weighted score,
-# filters out proposals matching titles created in the last 7 days, and
-# caps output at --max-issues-per-round.
+# proposals, then threads them through the stage pipeline
+#   dedup -> verify -> ROI gate -> (pattern synthesis: Issue D) -> rank
+# (constitution + recent-title filters apply before the severity-first rank),
+# and caps output at --max-issues-per-round.
 #
 # Implements the "Research cycle contract" + "Per-researcher contracts"
-# rows 1-4 in docs/specs/2026-05-29-autospec-explore-design.md.
+# rows 1-4 in docs/specs/2026-05-29-autospec-explore-design.md and the
+# "Aggregator changes" (verify/ROI/severity-first-rank/counters) in
+# docs/specs/2026-06-15-autospec-explore-discovery-enhance.md.
 #
 # Output: JSON to stdout with shape:
 #   { "round": "<iso-date>",
 #     "proposals_total": N,
 #     "proposals_after_dedup": N,
+#     "proposals_after_verify": N,        # survived the adversarial verify gate
+#     "proposals_refuted": N,             # dropped by the verify gate
+#     "proposals_after_roi": N,           # survived the named-consumer ROI gate
+#     "structural_fixes": N,              # pattern-synthesis output (Issue D; 0)
 #     "proposals_after_recent_filter": N,
 #     "proposals": [ ...top --max-issues-per-round... ] }
 #
@@ -166,7 +173,21 @@ if [ -n "$weights_bin" ] && [ -x "$weights_bin" ]; then
 fi
 export WEIGHTS_JSON
 
-# Aggregate, dedup, rank, filter, cap.
+# Aggregate, dedup, VERIFY, ROI-gate, rank, filter, cap.
+#
+# Verify stage (Issue C): the adversarial LLM-skeptic refutation is an
+# explore-orchestrator (SKILL-prose) responsibility, NOT this deterministic
+# bash aggregator — no LLM is ever invoked from here. What the aggregator owns
+# is the verify *boundary*: every deduped proposal is threaded through a verify
+# gate that consumes an OPTIONAL verdict map supplied by the orchestrator via
+# AUTOSPEC_EXPLORE_VERIFY_VERDICTS (a path to, or inline, JSON mapping
+# normalized-title -> {verdict, reason}). Documented fallback: when no map is
+# supplied the gate no-ops to "all survive" (verdict=unverified). When a map IS
+# supplied, a proposal with no entry is refute-by-default (the skeptic could
+# not affirm it) per the spec.
+VERIFY_VERDICTS="${AUTOSPEC_EXPLORE_VERIFY_VERDICTS:-}"
+export VERIFY_VERDICTS
+
 WORK_DIR="$work_dir" \
 MAX_ISSUES="$MAX_ISSUES" \
 RECENT_FILE="$recent_titles_file" \
@@ -200,6 +221,28 @@ if _wj:
 else:
     SRC_WEIGHTS = DEFAULT_SRC_WEIGHTS
 COMPLEXITY = {"small": 1.0, "medium": 2.0, "large": 4.0}
+
+# Severity bands, highest impact -> lowest. Lower numeric value = higher
+# priority (primary sort key). Mirrors schemas/autospec-explore-proposal.schema
+# .json enum order, which is load-bearing.
+SEVERITY_ORDER = [
+    "silent-wrong", "correctness", "stability",
+    "operability", "feature", "nicety",
+]
+SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITY_ORDER)}
+# Default rank for an unknown severity = just below "feature" (treated as the
+# legacy default band so unknown values never out-rank a real correctness item).
+DEFAULT_SEVERITY_RANK = SEVERITY_RANK["feature"]
+
+# The 7 legacy universal researchers are EXEMPT from the ROI gate during
+# rollout (spec: "only the three new ones are ROI-gated, to avoid silently
+# muting the existing 7"). Any source NOT in this set — the three discovery
+# researchers (quality-resilience, dogfooding, self-leverage) and
+# specialist:<slug> sources — is a "new source" and IS ROI-gated.
+LEGACY_SOURCES = {
+    "spec-vs-code", "prior-reports", "codebase-signals", "open-issues",
+    "source-analysis", "dependency-health", "internet",
+}
 
 def normalize_title(t):
     s = t.lower()
@@ -263,6 +306,81 @@ for p in all_props:
         by_norm[n] = p
 deduped = list(by_norm.values())
 
+# ---------------------------------------------------------------------------
+# VERIFY stage (Issue C) — adversarial-skeptic boundary, between dedup & rank.
+#
+# The deterministic aggregator does NOT call an LLM. It consumes an optional
+# verdict map produced by the explore-orchestrator's per-proposal Tier-B
+# skeptic dispatch. Map shape: { "<normalized title>": {"verdict": "...",
+# "reason": "..."} }. verdict in {"survived","refuted"} (anything not
+# "survived" is treated as refuted). VERIFY_VERDICTS may be a path to a JSON
+# file or an inline JSON string.
+#
+# Fallback (documented degradation): no map supplied -> the gate no-ops, every
+# proposal survives carrying verdict="unverified". This is the safe default for
+# environments with no subagent capability (cf. the installer/runtime-libs and
+# bash-3.2 gotchas — never hard-fail).
+#
+# Refute-by-default: when a map IS supplied but a proposal has no entry, the
+# skeptic could not affirm it, so it is refuted and dropped (spec: "default to
+# refuted=true under uncertainty").
+def _load_verdicts():
+    raw = os.environ.get("VERIFY_VERDICTS", "").strip()
+    if not raw:
+        return None
+    # Prefer a file path; fall back to treating the value as inline JSON.
+    try:
+        if os.path.isfile(raw):
+            with open(raw, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        return json.loads(raw)
+    except Exception:
+        # Unparseable verdict source -> behave as if no map was supplied
+        # (no-op fallback) rather than refuting everything on a config error.
+        return None
+
+_verdicts = _load_verdicts()
+verified = []
+refuted_count = 0
+for p in deduped:
+    n = normalize_title(p["title"])
+    if _verdicts is None:
+        # No-op fallback: survive, unverified.
+        p["verdict"] = "unverified"
+        p["reason"] = "no verifier verdict supplied (verify stage no-op)"
+        verified.append(p)
+        continue
+    entry = _verdicts.get(n)
+    if not isinstance(entry, dict):
+        # Refute-by-default under uncertainty.
+        refuted_count += 1
+        continue
+    verdict = str(entry.get("verdict", "")).strip().lower()
+    reason = str(entry.get("reason", ""))
+    if verdict == "survived":
+        p["verdict"] = "survived"
+        p["reason"] = reason or "skeptic could not refute"
+        verified.append(p)
+    else:
+        # refuted (or any non-survived verdict) -> drop.
+        refuted_count += 1
+
+# ---------------------------------------------------------------------------
+# ROI gate (Issue C) — drop NEW-source proposals with empty named_consumer.
+# Legacy universal sources are exempt (rollout safety). The pattern-synthesis
+# hook (Issue D #1081) slots in AFTER this gate and BEFORE ranking; it is not
+# implemented here — structural_fixes stays 0 as the clean seam.
+roi_kept = []
+for p in verified:
+    src = p.get("source", "")
+    consumer = str(p.get("named_consumer", "")).strip()
+    if src not in LEGACY_SOURCES and consumer == "":
+        # New source, no named consumer -> dropped by the ROI gate.
+        continue
+    roi_kept.append(p)
+
+structural_fixes = 0  # Pattern synthesis is Issue D; seam left intentionally.
+
 # Constitution gate (deterministic rules D1 evidence + D2 confidence floor).
 # Keep this byte-aligned with explore-constitution.sh --filter. Floor default 0.3
 # reproduces prior behavior for well-formed proposals (all carry evidence and
@@ -271,7 +389,7 @@ try:
     _floor = float(os.environ.get("AUTOSPEC_EXPLORE_MIN_CONFIDENCE", "0.3") or "0.3")
 except Exception:
     _floor = 0.3
-constitutional = [p for p in deduped
+constitutional = [p for p in roi_kept
                   if str(p.get("evidence", "")).strip() != ""
                   and p.get("confidence", 0) >= _floor]
 
@@ -288,14 +406,25 @@ except FileNotFoundError:
 
 filtered = [p for p in constitutional if normalize_title(p["title"]) not in recent_norms]
 
-# Rank descending by score; cap.
-filtered.sort(key=lambda p: p["score"], reverse=True)
+# Severity-first ranking (Issue C): primary key = severity rank (lower rank =
+# higher impact = ranked first); secondary key = the existing weighted score
+# (confidence * source_weight / complexity), descending. A high-severity item
+# behind auto-merge thus out-ranks a low-severity high-score one, while score
+# still breaks ties within a band.
+def _rank_key(p):
+    sev_rank = SEVERITY_RANK.get(p.get("severity", "feature"), DEFAULT_SEVERITY_RANK)
+    return (sev_rank, -p["score"])
+filtered.sort(key=_rank_key)
 final = filtered[:cap]
 
 out = {
     "round": datetime.date.today().isoformat(),
     "proposals_total": total,
     "proposals_after_dedup": len(deduped),
+    "proposals_after_verify": len(verified),
+    "proposals_refuted": refuted_count,
+    "proposals_after_roi": len(roi_kept),
+    "structural_fixes": structural_fixes,
     "proposals_after_constitution": len(constitutional),
     "proposals_after_recent_filter": len(filtered),
     "proposals": final,
