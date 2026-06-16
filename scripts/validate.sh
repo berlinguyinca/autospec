@@ -2445,6 +2445,7 @@ main() {
     check_loop_handoff_harness_awareness
     check_autospec_explore_researchers_deterministic
     check_autospec_explore_researchers_llm
+    check_autospec_explore_specialists_discovery
     check_autospec_explore_contract
     check_explore_trio_worktree_assert
     check_autospec_release_area_contract
@@ -2697,6 +2698,35 @@ check_autospec_explore_researchers_llm() {
                 || { cat /tmp/validate-explore-llm.log >&2; fail "$bats_file: failed"; }
         fi
     done
+}
+
+# autospec-explore domain-specialist roster discovery (Issue E1 #1082):
+# the deterministic signal-scan script + the new specialists schema must
+# exist, be executable / well-formed, and the bats coverage must pass when
+# bats is on PATH. The schema must compile with ajv when available.
+check_autospec_explore_specialists_discovery() {
+    info "autospec-explore domain-specialist roster discovery (Issue E1)"
+    local scan="scripts/explore-specialist-scan.sh"
+    [ -f "$scan" ] || fail "$scan: required file missing"
+    [ -x "$scan" ] || fail "$scan: file not executable"
+    bash -n "$scan" || fail "$scan: bash syntax error"
+    local schema="schemas/autospec-explore-specialists.schema.json"
+    [ -f "$schema" ] || fail "$schema: specialists roster schema missing"
+    if command -v jq >/dev/null 2>&1; then
+        jq -e '.properties.domains and .properties.suggested_specialists' "$schema" >/dev/null \
+            || fail "$schema: missing domains/suggested_specialists contract"
+    fi
+    if command -v ajv >/dev/null 2>&1; then
+        ajv compile -s "$schema" --spec=draft2020 >/dev/null 2>&1 \
+            || fail "$schema: does not compile with ajv"
+    fi
+    local bats_file="tests/explore/test_explore_specialists.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-explore-specialists.log 2>&1 \
+            || { cat /tmp/validate-explore-specialists.log >&2; fail "$bats_file: failed"; }
+    fi
 }
 
 # autospec-explore orchestrator contract (issue #721): top-level
