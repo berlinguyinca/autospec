@@ -3083,13 +3083,21 @@ check_autospec_explore_qa_gate_contract() {
     # 8. bats coverage exists + passes.
     local bats_file="tests/explore/test_explore_qa_gate_promotion.bats"
     [ -f "$bats_file" ] || fail "$bats_file: QA-gate promotion bats coverage missing (#1114)"
+    # Cross-script composition guard (#1116): the real runner -> real loop path
+    # (no AUTOSPEC_EXPLORE_QA_GATE_CMD seam) — catches a runner/loop field or
+    # path rename that the two isolated suites would both miss.
+    local e2e_file="tests/explore/test_explore_qa_gate_e2e.bats"
+    [ -f "$e2e_file" ] || fail "$e2e_file: QA-gate cross-script e2e coverage missing (#1116)"
     if command -v bats >/dev/null 2>&1; then
         info "  running: $bats_file"
         bats "$bats_file" >/tmp/validate-explore-qa-gate.log 2>&1 \
             || { cat /tmp/validate-explore-qa-gate.log >&2; fail "$bats_file: failed"; }
+        info "  running: $e2e_file"
+        bats "$e2e_file" >/tmp/validate-explore-qa-gate-e2e.log 2>&1 \
+            || { cat /tmp/validate-explore-qa-gate-e2e.log >&2; fail "$e2e_file: failed"; }
     fi
 
-    info "autospec-explore QA promotion gate: flags + single-run gate + verdict-gated promotion + code_health + default-off verified"
+    info "autospec-explore QA promotion gate: flags + single-run gate + verdict-gated promotion + code_health + default-off + cross-script e2e verified"
 }
 
 # Release area-dispatch contract (issue #731): 6 area files exist under
