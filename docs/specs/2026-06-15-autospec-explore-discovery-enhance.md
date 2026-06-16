@@ -260,6 +260,25 @@ reference the three new researchers + verify stage are derived from. A
 `validate.sh` check asserts the runbook and this spec list the same five tracks
 (lockstep prose, like the existing area-dispatch lockstep checks).
 
+### The five discovery tracks (lockstep anchor)
+
+The runbook and this spec describe the **same five discovery tracks**; the
+`check_autospec_explore_discovery_contract` gate in `scripts/validate.sh`
+asserts both documents name all five (plus the verify stage and pattern
+synthesis):
+
+- **Track A — Feature delta** — promised/implied capabilities with no working
+  implementation (`spec-vs-code`, `source-analysis`).
+- **Track B — External/ecosystem** — comparable tools, papers, standards via
+  the `internet` researcher; cite source URLs.
+- **Track C — Quality & resilience** — the four QA lenses (test-of-tests,
+  invariant↔guard coverage, failure-injection, determinism & cost):
+  `quality-resilience`, `dependency-health`.
+- **Track D — Dogfooding** — live `~/.autospec` run-state, git churn + revert
+  archaeology, dead surface: `dogfooding`, `prior-reports`, `open-issues`.
+- **Track E — Self-leverage** — every remaining human-in-loop point checked
+  against the autonomy-scope rule: `self-leverage`.
+
 ## Testing
 
 - `tests/explore/test_explore_quality_resilience.bats` — the 4 lenses each

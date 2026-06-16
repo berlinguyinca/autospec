@@ -2448,6 +2448,7 @@ main() {
     check_autospec_explore_specialists_discovery
     check_autospec_explore_contract
     check_explore_trio_worktree_assert
+    check_autospec_explore_discovery_contract
     check_autospec_release_area_contract
     check_release_trio_worktree_assert
     check_autospec_sweep_area_contract
@@ -2832,6 +2833,139 @@ check_explore_trio_worktree_assert() {
             || { cat /tmp/validate-explore-worktree-assert.log >&2; fail "$bats_file: failed"; }
     fi
     info "explore-trio worktree assert: all three adapter files carry D4 assert + lock-step verified"
+}
+
+# autospec-explore discovery enhancement contract (issues #1084/#1085, spec
+# docs/specs/2026-06-15-autospec-explore-discovery-enhance.md §Acceptance):
+# the discovery-quality batch (#1077–#1083) shipped 3 new researchers, the
+# verify/ROI/synthesis/severity-first aggregator stages, the extended proposal
+# + specialist schemas, and the domain-specialist roster. This gate asserts
+# they are present + wired, the autospec-explore trio prose documents them in
+# lock-step, and the runbook docs/runbooks/discovery-sweep.md lists the same
+# five discovery tracks (A–E) as the spec. Runs the discovery bats suites when
+# bats is on PATH.
+check_autospec_explore_discovery_contract() {
+    info "autospec-explore discovery enhancement contract (#1084/#1085)"
+
+    # 1. The 3 discovery researchers exist, are executable, bash -n clean.
+    for r in quality-resilience dogfooding self-leverage; do
+        local script="scripts/explore-research/$r.sh"
+        [ -f "$script" ] || fail "$script: required discovery researcher missing"
+        [ -x "$script" ] || fail "$script: file not executable"
+        bash -n "$script" || fail "$script: bash syntax error"
+    done
+
+    # 2. dogfooding reads the overridable state dir (portability/graceful-empty).
+    grep -q 'AUTOSPEC_STATE_DIR' "scripts/explore-research/dogfooding.sh" \
+        || fail "scripts/explore-research/dogfooding.sh: must read \${AUTOSPEC_STATE_DIR:-\$HOME/.autospec}"
+
+    # 3. Aggregator stages: dedup -> verify -> ROI -> synthesis -> severity rank,
+    #    plus the four new per-iteration log counters.
+    local agg="scripts/explore-research-cycle.sh"
+    [ -f "$agg" ] || fail "$agg: required aggregator missing"
+    bash -n "$agg" || fail "$agg: bash syntax error"
+    grep -q 'proposals_after_verify' "$agg" \
+        || fail "$agg: missing verify-stage counter proposals_after_verify"
+    grep -q 'proposals_refuted' "$agg" \
+        || fail "$agg: missing proposals_refuted counter"
+    grep -q 'proposals_after_roi' "$agg" \
+        || fail "$agg: missing ROI-gate counter proposals_after_roi"
+    grep -q 'structural_fixes' "$agg" \
+        || fail "$agg: missing pattern-synthesis counter structural_fixes"
+    grep -qi 'severity' "$agg" \
+        || fail "$agg: missing severity-first ranking logic"
+
+    # 4. The proposal + specialist schemas ship with the new fields.
+    local pschema="schemas/autospec-explore-proposal.schema.json"
+    local sschema="schemas/autospec-explore-specialists.schema.json"
+    [ -f "$pschema" ] || fail "$pschema: required proposal schema missing"
+    grep -q 'silent-wrong' "$pschema" \
+        || fail "$pschema: severity enum must include silent-wrong (load-bearing rank head)"
+    grep -q 'named_consumer' "$pschema" \
+        || fail "$pschema: missing named_consumer ROI field"
+    [ -f "$sschema" ] || fail "$sschema: required specialist schema missing"
+    grep -q 'suggested_specialists' "$sschema" \
+        || fail "$sschema: missing suggested_specialists roster field"
+    [ -f "scripts/explore-specialist-scan.sh" ] \
+        || fail "scripts/explore-specialist-scan.sh: required signal-scan missing"
+    bash -n "scripts/explore-specialist-scan.sh" \
+        || fail "scripts/explore-specialist-scan.sh: bash syntax error"
+
+    # 5. Trio prose documents the enhancement in lock-step: the new sections,
+    #    the 3 discovery researchers, the stage order, the severity enum, and
+    #    the specialist flags must appear in all three adapter bodies. The
+    #    stale "6 researcher" count must be gone.
+    for trio in \
+        skills/autospec-explore/SKILL.md \
+        skills/autospec-explore/codex/prompt.md \
+        skills/autospec-explore/opencode/agent.md
+    do
+        [ -f "$trio" ] || fail "$trio: required adapter file missing"
+        grep -q '^## Discovery enhancement' "$trio" \
+            || fail "$trio: missing '## Discovery enhancement' section"
+        grep -q '^## Domain-specialist roster' "$trio" \
+            || fail "$trio: missing '## Domain-specialist roster' section"
+        for r in quality-resilience dogfooding self-leverage; do
+            grep -q "$r" "$trio" \
+                || fail "$trio: missing discovery researcher reference '$r'"
+        done
+        grep -q 'dedup . verify . ROI . pattern-synthesis . severity-first rank' "$trio" \
+            || grep -q 'dedup -> verify -> ROI -> pattern-synthesis -> severity-first rank' "$trio" \
+            || fail "$trio: missing aggregator stage order (dedup -> verify -> ROI -> pattern-synthesis -> severity-first rank)"
+        for sev in silent-wrong correctness stability operability feature nicety; do
+            grep -q "$sev" "$trio" \
+                || fail "$trio: missing severity band '$sev'"
+        done
+        for flag in --specialists-mode --num-specialists; do
+            grep -q -- "$flag" "$trio" \
+                || fail "$trio: missing specialist flag '$flag'"
+        done
+        grep -q '7 universal' "$trio" \
+            || fail "$trio: missing '7 universal' researcher accounting"
+        if grep -Eq '\b6 researchers\b|each of the 6' "$trio"; then
+            fail "$trio: stale '6 researchers' count still present (must be 7 universal)"
+        fi
+    done
+
+    # 6. Runbook <-> spec five-track lock-step: both docs/runbooks/discovery-sweep.md
+    #    and the spec must name the same five discovery tracks (A–E) plus the
+    #    verify + synthesis steps.
+    local runbook="docs/runbooks/discovery-sweep.md"
+    local spec="docs/specs/2026-06-15-autospec-explore-discovery-enhance.md"
+    [ -f "$runbook" ] || fail "$runbook: required runbook missing"
+    [ -f "$spec" ] || fail "$spec: required source spec missing"
+    for track in 'Feature delta' 'External' 'Quality & resilience' 'Dogfooding' 'Self-leverage'; do
+        grep -q "$track" "$runbook" \
+            || fail "$runbook: missing discovery track '$track' (runbook<->spec lock-step)"
+        grep -q "$track" "$spec" \
+            || fail "$spec: missing discovery track '$track' (runbook<->spec lock-step)"
+    done
+    grep -qi 'pattern synthesis' "$runbook" \
+        || fail "$runbook: missing pattern-synthesis stage"
+    grep -qi 'pattern synthesis' "$spec" \
+        || fail "$spec: missing pattern-synthesis stage"
+    # The runbook must cite this gate as the enforcing lock-step check.
+    grep -q 'check_autospec_explore_discovery_contract' "$runbook" \
+        || fail "$runbook: must cite check_autospec_explore_discovery_contract as the lock-step enforcer"
+
+    # 7. Discovery bats suites run green when bats is available.
+    for bats_file in \
+        tests/explore/test_explore_quality_resilience.bats \
+        tests/explore/test_explore_dogfooding.bats \
+        tests/explore/test_explore_self_leverage.bats \
+        tests/explore/test_explore_verify_stage.bats \
+        tests/explore/test_explore_severity_roi.bats \
+        tests/explore/test_explore_specialists.bats
+    do
+        [ -f "$bats_file" ] || fail "$bats_file: discovery bats coverage missing"
+        if command -v bats >/dev/null 2>&1; then
+            info "  running: $bats_file"
+            bats "$bats_file" >/tmp/validate-explore-discovery.log 2>&1 \
+                || { cat /tmp/validate-explore-discovery.log >&2; fail "$bats_file: failed"; }
+        fi
+    done
+
+    info "autospec-explore discovery enhancement contract: researchers + stages + schemas + trio lock-step + runbook<->spec tracks verified"
 }
 
 # Release area-dispatch contract (issue #731): 6 area files exist under
