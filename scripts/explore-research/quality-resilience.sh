@@ -136,7 +136,7 @@ try:
 except FileNotFoundError:
     validate_lines = []
 
-check_fn_pat = re.compile(r'^\s*(check_\w+)\s*\(\s*\)')
+check_fn_pat = re.compile(r'^(?:\d+:)?\s*(check_\w+)\s*\(\s*\)')
 for i, line in enumerate(validate_lines, start=1):
     m = check_fn_pat.match(line)
     if not m:
