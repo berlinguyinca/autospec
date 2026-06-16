@@ -240,17 +240,22 @@ for p in all_props:
         by_norm[n] = p
 deduped = list(by_norm.values())
 
-# Constitution gate (deterministic rules D1 evidence + D2 confidence floor).
-# Keep this byte-aligned with explore-constitution.sh --filter. Floor default 0.3
-# reproduces prior behavior for well-formed proposals (all carry evidence and
-# confidence >= 0.4); it drops empty-evidence and low-confidence noise.
+# Constitution gate (deterministic rules D1 evidence + D2 confidence floor +
+# D3 substance). Keep this byte-aligned with explore-constitution.sh --filter.
+# Floor default 0.3 reproduces prior behavior for well-formed proposals (all carry
+# evidence and confidence >= 0.4); it drops empty-evidence and low-confidence noise.
+# D3 drops bare "chore: address <marker>" proposals (raw TODO/FIXME/XXX/HACK churn):
+# these need human triage, not autonomous implementation, and otherwise crowd out
+# substantive spec-drift / prior-report / triaged-issue proposals.
 try:
     _floor = float(os.environ.get("AUTOSPEC_EXPLORE_MIN_CONFIDENCE", "0.3") or "0.3")
 except Exception:
     _floor = 0.3
+_chore_re = re.compile(r'^\s*chore:\s*address\s+(TODO|FIXME|XXX|HACK)\b', re.I)
 constitutional = [p for p in deduped
                   if str(p.get("evidence", "")).strip() != ""
-                  and p.get("confidence", 0) >= _floor]
+                  and p.get("confidence", 0) >= _floor
+                  and not _chore_re.match(str(p.get("title", "")))]
 
 # Filter against recent titles.
 recent_norms = set()

@@ -263,6 +263,7 @@ operator-editable). The gate has two layers:
    `explore-constitution.sh --filter`):
    - **D1 Evidence** — drop proposals with empty `evidence` (no concrete repo/spec citation).
    - **D2 Confidence floor** — drop proposals below `AUTOSPEC_EXPLORE_MIN_CONFIDENCE` (default 0.3).
+   - **D3 Substance** — drop bare `chore: address <marker>` proposals (raw TODO/FIXME/XXX/HACK churn); these need human triage, not autonomous implementation.
    The cycle reports the survivor count as `proposals_after_constitution`.
 2. **Judgment (TIER_A critique-revise)** — for the ranked survivors, the
    aggregator/ranker critiques each against the constitution's judgment rules
