@@ -66,9 +66,13 @@ Options:
                                            -> cap, consuming the orchestrator-built
                                            AUTOSPEC_EXPLORE_VERIFY_VERDICTS map.
   --deduped-in PATH            (stage finalize) Path to the pass-1 deduped artifact.
-  --research-sources LIST      Comma-separated subset of:
-                                 spec-vs-code,prior-reports,codebase-signals,open-issues
-                               Default: all 4.
+  --research-sources LIST      Comma-separated subset of the universal +
+                               discovery roster:
+                                 spec-vs-code,prior-reports,codebase-signals,
+                                 open-issues,source-analysis,dependency-health,
+                                 internet,quality-resilience,dogfooding,
+                                 self-leverage,style-normalization
+                               Default: all 11.
   --specialists-mode MODE      Domain-specialist roster mode (Issue E2):
                                  discover (default) | ask | explicit | off.
                                  off = zero specialists (current behavior).
@@ -106,7 +110,7 @@ EOF
 }
 
 MAX_ISSUES=5
-SOURCES="spec-vs-code,prior-reports,codebase-signals,open-issues"
+SOURCES="spec-vs-code,prior-reports,codebase-signals,open-issues,source-analysis,dependency-health,internet,quality-resilience,dogfooding,self-leverage,style-normalization"
 OUT=""
 LEDGER="${AUTOSPEC_EXPLORE_LEDGER:-}"
 SPECIALISTS_MODE="discover"
@@ -152,10 +156,10 @@ case "$NUM_SPECIALISTS" in
 esac
 [ "$NUM_SPECIALISTS" -gt 6 ] && NUM_SPECIALISTS=6
 
-# Per-round researcher cap (spec §Guardrails): 7 universal + 3 discovery +
-# ≤6 specialists = ≤16. The universal+discovery set is the --research-sources
+# Per-round researcher cap (spec §Guardrails): 7 universal + 4 discovery +
+# ≤6 specialists = ≤17. The universal+discovery set is the --research-sources
 # selection; specialists top it up to at most this many TOTAL researchers.
-RESEARCHER_CAP=16
+RESEARCHER_CAP=17
 
 # Resolve explore-source-weights.sh defensively. Order:
 #   1. $AUTOSPEC_EXPLORE_WEIGHTS_BIN (explicit override, e.g. tests)
@@ -385,6 +389,10 @@ DEFAULT_SRC_WEIGHTS = {
     "codebase-signals": 0.7,
     "dependency-health": 0.65,
     "open-issues":      0.6,
+    "style-normalization": 0.85,
+    "quality-resilience": 0.95,
+    "dogfooding":       0.9,
+    "self-leverage":    0.6,
     "source-analysis":  0.5,
     "internet":         0.4,
 }
@@ -414,9 +422,9 @@ SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITY_ORDER)}
 DEFAULT_SEVERITY_RANK = SEVERITY_RANK["feature"]
 
 # The 7 legacy universal researchers are EXEMPT from the ROI gate during
-# rollout (spec: "only the three new ones are ROI-gated, to avoid silently
-# muting the existing 7"). Any source NOT in this set — the three discovery
-# researchers (quality-resilience, dogfooding, self-leverage) and
+# rollout (spec: "only the discovery ones are ROI-gated, to avoid silently
+# muting the existing 7"). Any source NOT in this set — the discovery
+# researchers (quality-resilience, dogfooding, self-leverage, style-normalization) and
 # specialist:<slug> sources — is a "new source" and IS ROI-gated.
 LEGACY_SOURCES = {
     "spec-vs-code", "prior-reports", "codebase-signals", "open-issues",

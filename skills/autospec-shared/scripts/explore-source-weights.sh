@@ -43,7 +43,7 @@
 #   - Weight is always in [0,1] (merged_clean<=filed, prior in [0,1]); rounded
 #     to 4 decimals.
 #
-# Output sources = the 6 canonical sources UNION any source present in the
+# Output sources = the canonical universal + discovery sources UNION any source present in the
 # ledger stats. Unknown (non-canonical) sources use the default prior 0.5.
 #
 # Usage:
@@ -64,7 +64,7 @@
 set +e
 
 # Canonical prior table — the single source of truth.
-CANONICAL_SOURCES="spec-vs-code prior-reports codebase-signals open-issues source-analysis internet"
+CANONICAL_SOURCES="spec-vs-code prior-reports codebase-signals open-issues source-analysis dependency-health internet quality-resilience dogfooding self-leverage style-normalization"
 DEFAULT_PRIOR="0.5"
 
 _prior_for() {
@@ -72,9 +72,14 @@ _prior_for() {
     spec-vs-code)      echo "1.0" ;;
     prior-reports)     echo "0.9" ;;
     codebase-signals)  echo "0.7" ;;
+    dependency-health) echo "0.65" ;;
     open-issues)       echo "0.6" ;;
     source-analysis)   echo "0.5" ;;
     internet)          echo "0.4" ;;
+    quality-resilience) echo "0.95" ;;
+    dogfooding)        echo "0.9" ;;
+    self-leverage)     echo "0.6" ;;
+    style-normalization) echo "0.85" ;;
     *)                 echo "$DEFAULT_PRIOR" ;;
   esac
 }
