@@ -16,13 +16,28 @@
 #   4. Lockstep paragraph
 #   5. Role-specific implementer scaffolding
 #
-# Composition order (reviewer/decomposer/classifier roles — unchanged):
+# Composition order (reviewer role — prompt-cache reclaim Phase 1 prefix slim):
+#   --- inside the CACHE BOUNDARY (byte-stable prefix, safe to cache) ---
+#   1. reviewer-contract.md (curated guardian rubric + RULE_ID table — NOT the
+#      ~14KB autospec-run/SKILL.md monitor-loop machinery)
+#   2. AGENTS.md ## Implementation-quality contract section (canonical RULE_ID)
+#   --- below the closing CACHE BOUNDARY (per-issue, NOT cached) ---
+#   3. Tag-filtered saved-memory files
+#   4. Lockstep paragraph
+#   5. Reviewer scaffolding
+#
+# Composition order (decomposer/classifier roles):
+#   --- inside the CACHE BOUNDARY ---
 #   1. SKILL.md (role's skill, verbatim)
-#   2. AGENTS.md (verbatim)
-#   3. RULE_ID table (extracted from AGENTS.md)
-#   4. Tag-filtered saved-memory files
-#   5. Lockstep paragraph
-#   6. Role-specific scaffolding
+#   2. AGENTS.md (verbatim)   [NO separate RULE_ID re-extraction — it already
+#      rides inside AGENTS.md; the duplicate block was dropped in Phase 1]
+#   --- below the closing CACHE BOUNDARY (per-issue) ---
+#   3. Tag-filtered saved-memory files
+#   4. Lockstep paragraph
+#   5. Role-specific scaffolding
+#
+# Memory injection is capped at AUTOSPEC_MAX_MEMORY_FILES (default 6) — only the
+# top-K most-specific tag matches are injected, so memory never busts the budget.
 #
 # Implementer prefix caching: the launch path SHOULD pass everything ABOVE the
 # closing <!-- CACHE BOUNDARY --> with cache_control: {type: ephemeral} where the
@@ -110,13 +125,19 @@ MANIFEST="${AUTOSPEC_MANIFEST:-$SCRIPTS_DIR/memory-tags.yml}"
 AGENTS_MD="$REPO_ROOT/AGENTS.md"
 # D3: the implementer role injects this curated contract instead of the 70KB SKILL.md.
 IMPLEMENTER_CONTRACT="$REPO_ROOT/skills/autospec-run/prompts/implementer-contract.md"
+# Phase 1 (prompt-cache reclaim): the reviewer role injects this curated contract
+# instead of the ~14KB autospec-run/SKILL.md.
+REVIEWER_CONTRACT="$REPO_ROOT/skills/autospec-run/prompts/reviewer-contract.md"
 
-# Role-to-skill mapping. The implementer role no longer injects a SKILL.md
-# (D3 prefix slim) — it injects implementer-contract.md instead.
+# Cap on injected saved-memory files (top-K most-specific tag matches).
+AUTOSPEC_MAX_MEMORY_FILES="${AUTOSPEC_MAX_MEMORY_FILES:-6}"
+
+# Role-to-skill mapping. The implementer and reviewer roles no longer inject a
+# SKILL.md (prefix slim) — they inject their curated *-contract.md instead.
 SKILL_MD=""
 case "$ROLE" in
   implementer) SKILL_MD="" ;;
-  reviewer)    SKILL_MD="$REPO_ROOT/skills/autospec-run/SKILL.md" ;;
+  reviewer)    SKILL_MD="" ;;
   decomposer)  SKILL_MD="$REPO_ROOT/skills/autospec-define/SKILL.md" ;;
   classifier)  SKILL_MD="$REPO_ROOT/skills/autospec-classify/SKILL.md" ;;
 esac
@@ -129,6 +150,11 @@ fi
 if [ "$ROLE" = "implementer" ]; then
   if [ ! -f "$IMPLEMENTER_CONTRACT" ]; then
     printf 'bundle-static-context.sh: implementer-contract.md not found: %s\n' "$IMPLEMENTER_CONTRACT" >&2
+    exit 1
+  fi
+elif [ "$ROLE" = "reviewer" ]; then
+  if [ ! -f "$REVIEWER_CONTRACT" ]; then
+    printf 'bundle-static-context.sh: reviewer-contract.md not found: %s\n' "$REVIEWER_CONTRACT" >&2
     exit 1
   fi
 elif [ ! -f "$SKILL_MD" ]; then
@@ -145,8 +171,11 @@ _raw_tokens=$(printf '%s' "$ISSUE_LABELS" | tr ',' ' ' | tr '[:upper:]' '[:lower
 _colon_tokens=$(printf '%s' "$_raw_tokens" | tr ':' ' ')
 issue_tokens=" ${_raw_tokens} ${_colon_tokens} "
 
-# Build list of matched memory file paths from manifest
-matched_memory=""
+# Build list of matched memory file paths from manifest. Each match is scored by
+# how many of its tags hit the issue tokens (more matches = more specific), so we
+# can keep only the top-K most-specific files (AUTOSPEC_MAX_MEMORY_FILES).
+# Intermediate lines are "<score>\t<path>"; ranked + capped below.
+scored_memory=""
 if [ -f "$MANIFEST" ] && [ -d "$MEMORY_DIR" ]; then
   current_file=""
   while IFS= read -r line; do
@@ -159,20 +188,32 @@ if [ -f "$MANIFEST" ] && [ -d "$MEMORY_DIR" ]; then
     if printf '%s' "$line" | grep -qE '^[[:space:]]+tags:' && [ -n "$current_file" ]; then
       tags_raw=$(printf '%s' "$line" | sed 's/.*\[//; s/\].*//')
       current_path="$MEMORY_DIR/$current_file"
-      match=0
+      match_count=0
       for tag in $(printf '%s' "$tags_raw" | tr ',' '\n' | tr -d ' []"'"'" | tr '[:upper:]' '[:lower:]'); do
         if printf '%s' "$issue_tokens" | grep -qw "$tag"; then
-          match=1
-          break
+          match_count=$((match_count + 1))
         fi
       done
-      if [ "$match" -eq 1 ] && [ -f "$current_path" ]; then
-        matched_memory="${matched_memory}${current_path}
+      if [ "$match_count" -gt 0 ] && [ -f "$current_path" ]; then
+        scored_memory="${scored_memory}${match_count}	${current_path}
 "
       fi
       current_file=""
     fi
   done < "$MANIFEST"
+fi
+
+# Rank by specificity (descending match score), break ties by path for a stable
+# byte-identical ordering, then cap to the top-K. Keeps only the path column.
+matched_memory=""
+if [ -n "$scored_memory" ]; then
+  matched_memory=$(printf '%s' "$scored_memory" \
+    | grep -v '^$' \
+    | sort -t'	' -k1,1nr -k2,2 \
+    | head -n "$AUTOSPEC_MAX_MEMORY_FILES" \
+    | cut -f2-)
+  [ -n "$matched_memory" ] && matched_memory="${matched_memory}
+"
 fi
 
 # ── emit helpers ──────────────────────────────────────────────────────────────
@@ -294,9 +335,48 @@ if [ "$ROLE" = "implementer" ]; then
   emit_memory
   emit_lockstep
   emit_scaffolding
+elif [ "$ROLE" = "reviewer" ]; then
+  # Phase 1 (prompt-cache reclaim): the reviewer prefix is byte-stable across
+  # issues. Only the curated reviewer-contract + the AGENTS.md quality-contract
+  # section (the rules a reviewer actually enforces) live inside the cache
+  # boundary; per-issue memory + scaffolding (and the PR diff, appended by
+  # gen-reviewer-prompt.sh) go BELOW the closing marker.
+
+  printf '<!-- CACHE BOUNDARY -->\n'
+
+  # 1. Curated reviewer contract (NOT the ~14KB SKILL.md monitor-loop machinery).
+  printf '## Reviewer contract\n\n'
+  cat "$REVIEWER_CONTRACT"
+  printf '\n'
+
+  # 2. AGENTS.md ## Implementation-quality contract section — the enforcement
+  #    narrative a reviewer applies (Enforcement, opt-out grammar, env-var
+  #    contract). The RULE_ID table + Corrective directive map subsections are
+  #    OMITTED here because reviewer-contract.md above already carries them
+  #    verbatim: the table must appear EXACTLY once in the cached prefix (no
+  #    duplicate re-extraction). validate.sh flags contract↔AGENTS.md drift.
+  printf '## AGENTS.md — Implementation-quality contract (enforcement)\n\n'
+  awk '
+    /^## Implementation-quality contract/ { in_sec=1; print; next }
+    /^## / && in_sec { exit }
+    /^### RULE_ID table/ && in_sec { skip=1; next }
+    /^### Corrective directive map/ && in_sec { skip=1; next }
+    /^### / && skip { skip=0 }
+    in_sec && !skip { print }
+  ' "$AGENTS_MD"
+  printf '\n'
+
+  printf '<!-- CACHE BOUNDARY -->\n'
+
+  # Below the boundary: per-issue, NOT part of the cached prefix.
+  emit_memory
+  emit_lockstep
+  emit_scaffolding
 else
-  # reviewer / decomposer / classifier: unchanged composition (everything inside
-  # the boundary; these roles do not yet use the byte-stable-prefix split).
+  # decomposer / classifier: SKILL.md + AGENTS.md verbatim inside the boundary.
+  # The duplicate '## RULE_ID table' re-extraction was dropped in Phase 1 — the
+  # canonical table already rides inside AGENTS.md verbatim. Per-issue memory +
+  # scaffolding move BELOW the closing marker.
   printf '<!-- CACHE BOUNDARY -->\n'
 
   # 1. SKILL.md verbatim
@@ -304,29 +384,16 @@ else
   cat "$SKILL_MD"
   printf '\n'
 
-  # 2. AGENTS.md verbatim
+  # 2. AGENTS.md verbatim (carries the canonical RULE_ID table — no duplicate
+  #    re-extraction).
   printf '## AGENTS.md\n\n'
   cat "$AGENTS_MD"
   printf '\n'
 
-  # 3. RULE_ID table extracted from AGENTS.md
-  printf '## RULE_ID table\n\n'
-  awk '
-    /^### RULE_ID table/ { in_table=1; next }
-    /^### / && in_table { exit }
-    /^## / && in_table { exit }
-    in_table { print }
-  ' "$AGENTS_MD"
-  printf '\n'
-
-  # 4. Tag-filtered saved-memory files
-  emit_memory
-
-  # 5. Lockstep paragraph
-  emit_lockstep
-
-  # 6. Role-specific scaffolding
-  emit_scaffolding
-
   printf '<!-- CACHE BOUNDARY -->\n'
+
+  # Below the boundary: per-issue, NOT part of the cached prefix.
+  emit_memory
+  emit_lockstep
+  emit_scaffolding
 fi
