@@ -37,7 +37,9 @@ SKILLS_DIR="$REPO_ROOT/skills"
 . "$REPO_ROOT/scripts/lib/install-helpers.sh"
 
 TURBO_REPO_DIR="${TURBO_REPO_DIR:-$HOME/.turbo/repo}"
-TURBO_REMOTE="https://github.com/tobihagemann/turbo.git"
+# autospec installs and updates track the berlinguyinca/turbo fork (carries the
+# autospec-tuned skill set). Override with TURBO_REMOTE to point elsewhere.
+TURBO_REMOTE="${TURBO_REMOTE:-https://github.com/berlinguyinca/turbo.git}"
 CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
 SUPERPOWERS_REPO_DIR="${SUPERPOWERS_REPO_DIR:-$HOME/.codex/superpowers}"
 SUPERPOWERS_REMOTE="${SUPERPOWERS_REMOTE:-https://github.com/obra/superpowers.git}"
@@ -351,15 +353,19 @@ bootstrap_peer_ecosystems() {
 
 bootstrap_turbo() {
     if [ -d "$TURBO_REPO_DIR/.git" ]; then
-        info "bootstrap_turbo: pulling tobihagemann/turbo at $TURBO_REPO_DIR"
+        info "bootstrap_turbo: pulling berlinguyinca/turbo at $TURBO_REPO_DIR"
         if [ "$DRY_RUN" -eq 0 ]; then
+            # Converge an existing clone onto the autospec-managed remote so a repo
+            # originally cloned from upstream switches to the fork on the next update.
+            # (Idempotent; preserves any 'upstream' remote the user added for PRs.)
+            git -C "$TURBO_REPO_DIR" remote set-url origin "$TURBO_REMOTE" 2>/dev/null || true
             # Tolerate pull failures (no remote configured, offline, etc.) — turbo
             # is a nice-to-have peer skill family; absence shouldn't block install.
             git -C "$TURBO_REPO_DIR" pull --ff-only 2>/dev/null \
                 || warn "bootstrap_turbo: pull failed (no remote or offline); using cached turbo"
         fi
     else
-        info "bootstrap_turbo: cloning tobihagemann/turbo to $TURBO_REPO_DIR"
+        info "bootstrap_turbo: cloning berlinguyinca/turbo to $TURBO_REPO_DIR"
         if [ "$DRY_RUN" -eq 0 ]; then
             git clone --depth 1 "$TURBO_REMOTE" "$TURBO_REPO_DIR" 2>/dev/null \
                 || { warn "bootstrap_turbo: clone failed; turbo skills will not be installed"; return 0; }
@@ -900,7 +906,10 @@ copy_runtime_skill_scripts() {
     # autospec-sweep-* renames. tests/ship-completeness.bats mirrors this manifest.
     autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
 
-    # Each entry is "<repo-relative source>::<dest basename under $AUTOSPEC_SCRIPTS_DIR>".
+    # Each entry is "<repo-relative source>::<dest path relative to $AUTOSPEC_SCRIPTS_DIR parent>".
+    # Most entries install flat into $AUTOSPEC_SCRIPTS_DIR itself (dest has no slash prefix).
+    # autospec-doc entries install into the skills/ subtree so that the two-level relative
+    # import in gen-audience-docs.mjs resolves correctly (see comment below).
     runtime_skill_scripts="\
 skills/autospec-run/scripts/autospec-run-session-lock.sh::autospec-run-session-lock.sh \
 skills/autospec-run/scripts/autospec-run-status.sh::autospec-run-status.sh \
@@ -913,8 +922,30 @@ skills/autospec-doc/scripts/doc-orchestrator.mjs::doc-orchestrator.mjs \
 skills/autospec-sweep/scripts/run.sh::autospec-sweep-run.sh \
 skills/autospec-sweep/scripts/wizard.sh::autospec-sweep-wizard.sh"
 
+    # autospec-doc module closure: doc-orchestrator.mjs and its ES-module siblings
+    # must all reside in the same directory (relative static imports: ./doc-config.mjs,
+    # ./gen-llms-full.mjs, ./doc-style.mjs). Additionally, gen-audience-docs.mjs resolves
+    # shared deps via path.resolve(__dirname, '../../autospec-shared/scripts'). That
+    # two-level climb means the scripts must live at a path of the form:
+    #   <base>/autospec-doc/scripts/   (so ../../ reaches <base>/)
+    # with the shared scripts mirrored at <base>/autospec-shared/scripts/.
+    # We use $autospec_scripts_dir/../skills/ as <base>, giving:
+    #   ~/.autospec/skills/autospec-doc/scripts/       — the six module files
+    #   ~/.autospec/skills/autospec-shared/scripts/    — the shared deps mirror
+    # doc-orchestrator.mjs is ALSO copied to the flat $autospec_scripts_dir/ entry
+    # point (above) for backward-compatible invocations via ${AUTOSPEC_SCRIPTS_DIR}.
+    autospec_doc_scripts="\
+skills/autospec-doc/scripts/doc-orchestrator.mjs \
+skills/autospec-doc/scripts/doc-config.mjs \
+skills/autospec-doc/scripts/doc-style.mjs \
+skills/autospec-doc/scripts/gen-audience-docs.mjs \
+skills/autospec-doc/scripts/gen-llms-full.mjs \
+skills/autospec-doc/scripts/verify-examples.mjs"
+
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] copy_runtime_skill_scripts: would copy 10 per-skill runtime scripts to $autospec_scripts_dir/"
+        info "[dry-run] copy_runtime_skill_scripts: would copy autospec-doc module closure to $(dirname "$autospec_scripts_dir")/skills/autospec-doc/scripts/"
+        info "[dry-run] copy_runtime_skill_scripts: would mirror shared scripts to $(dirname "$autospec_scripts_dir")/skills/autospec-shared/scripts/"
         return 0
     fi
 
@@ -931,6 +962,34 @@ skills/autospec-sweep/scripts/wizard.sh::autospec-sweep-wizard.sh"
             warn "copy_runtime_skill_scripts: source not found: $src (skipping)"
         fi
     done
+
+    # Install the full autospec-doc module closure into the two-level subtree so
+    # gen-audience-docs.mjs's path.resolve(__dirname, '../../autospec-shared/scripts')
+    # resolves to ~/.autospec/skills/autospec-shared/scripts/ at runtime.
+    autospec_doc_dest="$(dirname "$autospec_scripts_dir")/skills/autospec-doc/scripts"
+    mkdir -p "$autospec_doc_dest"
+    for src_rel in $autospec_doc_scripts; do
+        src="$REPO_ROOT/$src_rel"
+        dest="$autospec_doc_dest/$(basename "$src_rel")"
+        if [ -f "$src" ]; then
+            cp "$src" "$dest"
+            chmod +x "$dest"
+        else
+            warn "copy_runtime_skill_scripts: source not found: $src (skipping)"
+        fi
+    done
+
+    # Mirror shared scripts alongside so the ../../autospec-shared/scripts import resolves.
+    shared_scripts_src="$REPO_ROOT/skills/autospec-shared/scripts"
+    shared_scripts_mirror="$(dirname "$autospec_scripts_dir")/skills/autospec-shared/scripts"
+    if [ -d "$shared_scripts_src" ]; then
+        mkdir -p "$shared_scripts_mirror"
+        cp -R "$shared_scripts_src/." "$shared_scripts_mirror/"
+        find "$shared_scripts_mirror" -maxdepth 3 \( -name '*.sh' -o -name '*.mjs' \) -exec chmod +x {} \;
+    else
+        warn "copy_runtime_skill_scripts: $shared_scripts_src not found; autospec-doc shared imports may fail"
+    fi
+
     info "copy_runtime_skill_scripts: copied per-skill runtime scripts to $autospec_scripts_dir/"
 }
 
@@ -1003,10 +1062,53 @@ copy_schemas() {
     info "copy_schemas: copied $(ls "$autospec_schemas_dir"/*.json 2>/dev/null | wc -l | tr -d ' ') schemas to $autospec_schemas_dir/"
 }
 
+copy_runtime_subdirs() {
+    # Ship the runtime SUBDIRECTORIES under scripts/ that installed surfaces source or
+    # exec at runtime via $SCRIPT_DIR/<subdir>. copy_repo_scripts() is maxdepth-1 and
+    # ships only top-level scripts/*.sh, so without this step a clean install leaves
+    # $AUTOSPEC_SCRIPTS_DIR/lib/ and .../explore-research/ empty — autospec-explore.sh
+    # then dies sourcing lib/autospec-loop.sh and every researcher fails to resolve at
+    # $SCRIPT_DIR/explore-research/. Same class of bug as copy_schemas (issue #856).
+    #
+    # scripts/lib/ is MIXED: install-time-only helpers (install-helpers.sh,
+    # claude-md-block.txt) stay OUT of the runtime tree; only the runtime libs sourced
+    # by installed scripts ship. scripts/explore-research/ is entirely runtime.
+    autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+
+    # Runtime libs sourced/exec'd by installed scripts at $SCRIPT_DIR/lib/<name>.
+    runtime_libs="autospec-loop.sh autospec-harness-detect.sh explore-internet-safety.sh extract-matchers.sh"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] copy_runtime_subdirs: would copy runtime libs + scripts/explore-research/ to $autospec_scripts_dir/"
+        return 0
+    fi
+
+    mkdir -p "$autospec_scripts_dir/lib"
+    for _lib in $runtime_libs; do
+        _src="$REPO_ROOT/scripts/lib/$_lib"
+        if [ -f "$_src" ]; then
+            cp "$_src" "$autospec_scripts_dir/lib/$_lib"
+            chmod +x "$autospec_scripts_dir/lib/$_lib"
+        else
+            warn "copy_runtime_subdirs: runtime lib not found: $_src (skipping)"
+        fi
+    done
+
+    if [ -d "$REPO_ROOT/scripts/explore-research" ]; then
+        mkdir -p "$autospec_scripts_dir/explore-research"
+        cp -R "$REPO_ROOT/scripts/explore-research/." "$autospec_scripts_dir/explore-research/"
+        find "$autospec_scripts_dir/explore-research" -maxdepth 1 -name '*.sh' -exec chmod +x {} \;
+    else
+        warn "copy_runtime_subdirs: $REPO_ROOT/scripts/explore-research not found; skipping"
+    fi
+    info "copy_runtime_subdirs: copied runtime libs + explore-research to $autospec_scripts_dir/"
+}
+
 # Integration bootstrap: pull autospec (if --update) + turbo, before per-skill installers run.
 pull_autospec
 copy_shared_scripts
 copy_repo_scripts
+copy_runtime_subdirs
 copy_runtime_skill_scripts
 copy_schemas
 ensure_system_tools

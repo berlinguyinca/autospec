@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_MOD = path.resolve(__dirname, '../scripts/doc-config.mjs');
 
-const { loadConfig, FOLDER_CONTRACT, DEFAULT_AUDIENCES } = await import(CONFIG_MOD);
+const { loadConfig, resolveFeatures, FOLDER_CONTRACT, DEFAULT_AUDIENCES } = await import(CONFIG_MOD);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -216,6 +216,100 @@ test('inline-mapping audience entries (init output form) parse to all four defau
   assert.strictEqual(cfg.style.palette, 'light-blue');
   assert.strictEqual(cfg.examples.verify, true);
   assert.strictEqual(cfg.examples.sandbox, 'worktree');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ── resolveFeatures ─────────────────────────────────────────────────────────────
+
+test('resolveFeatures: inline documentation.features wins (mapped through normalizeFeature)', () => {
+  const dir = makeTmpDir();
+  // Also drop a default doc-features.json that must be IGNORED in favour of inline.
+  fs.mkdirSync(path.join(dir, '.autospec'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.autospec', 'doc-features.json'),
+    JSON.stringify({ features: [{ slug: 'from-file' }] }), 'utf8');
+  writeYml(dir, [
+    'documentation:',
+    '  features:',
+    '    - slug: inline-one',
+    '      title: Inline One',
+    '    - slug: inline-two',
+    '',
+  ].join('\n'));
+  const cfg = loadConfig(configPath(dir));
+  const feats = resolveFeatures(cfg, dir);
+  assert.deepEqual(feats.map(f => f.slug), ['inline-one', 'inline-two']);
+  // normalizeFeature applied → six LLM fields defaulted.
+  assert.strictEqual(feats[0].rationale, '');
+  assert.deepEqual(feats[0].depends_on, []);
+  assert.deepEqual(feats[0].examples, []);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('resolveFeatures: features_file (relative to projRoot) used when no inline array', () => {
+  const dir = makeTmpDir();
+  fs.mkdirSync(path.join(dir, 'meta'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'meta', 'feats.json'),
+    JSON.stringify([{ slug: 'ff-one' }, { slug: 'ff-two' }]), 'utf8');
+  writeYml(dir, 'documentation:\n  features_file: meta/feats.json\n');
+  const cfg = loadConfig(configPath(dir));
+  const feats = resolveFeatures(cfg, dir);
+  assert.deepEqual(feats.map(f => f.slug), ['ff-one', 'ff-two']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('resolveFeatures: default .autospec/doc-features.json used when nothing else set', () => {
+  const dir = makeTmpDir();
+  fs.mkdirSync(path.join(dir, '.autospec'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.autospec', 'doc-features.json'),
+    JSON.stringify({ features: [{ slug: 'default-json' }] }), 'utf8');
+  writeYml(dir, 'documentation:\n  audiences: []\n');
+  const cfg = loadConfig(configPath(dir));
+  const feats = resolveFeatures(cfg, dir);
+  assert.deepEqual(feats.map(f => f.slug), ['default-json']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('resolveFeatures: default json may be a bare top-level array', () => {
+  const dir = makeTmpDir();
+  fs.mkdirSync(path.join(dir, '.autospec'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.autospec', 'doc-features.json'),
+    JSON.stringify([{ slug: 'bare-array' }]), 'utf8');
+  writeYml(dir, 'documentation:\n  audiences: []\n');
+  const cfg = loadConfig(configPath(dir));
+  const feats = resolveFeatures(cfg, dir);
+  assert.deepEqual(feats.map(f => f.slug), ['bare-array']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('resolveFeatures: returns [] when no source is present', () => {
+  const dir = makeTmpDir();
+  writeYml(dir, 'documentation:\n  audiences: []\n');
+  const cfg = loadConfig(configPath(dir));
+  const feats = resolveFeatures(cfg, dir);
+  assert.deepEqual(feats, []);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('resolveFeatures: rich fixture fields and per-audience maps are preserved', () => {
+  const dir = makeTmpDir();
+  fs.mkdirSync(path.join(dir, '.autospec'), { recursive: true });
+  const rich = {
+    slug: 'rich',
+    title: 'Rich Feature',
+    summary: { user: 'U', developer: 'D', default: 'X' },
+    spec_sections: ['a', 'b'],
+    code_entry_points: [{ path: 'src/x.js' }],
+    data_model: 'a table',
+  };
+  fs.writeFileSync(path.join(dir, '.autospec', 'doc-features.json'),
+    JSON.stringify({ features: [rich] }), 'utf8');
+  writeYml(dir, 'documentation:\n  audiences: []\n');
+  const cfg = loadConfig(configPath(dir));
+  const [f] = resolveFeatures(cfg, dir);
+  assert.deepEqual(f.summary, { user: 'U', developer: 'D', default: 'X' });
+  assert.deepEqual(f.spec_sections, ['a', 'b']);
+  assert.deepEqual(f.code_entry_points, [{ path: 'src/x.js' }]);
+  assert.strictEqual(f.data_model, 'a table');
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

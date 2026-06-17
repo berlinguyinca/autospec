@@ -73,3 +73,30 @@ STUB
   echo "$output" | grep -q "FLAT_SIBLING_BUNDLE_RAN"
   echo "$output" | grep -qv "bundle-static-context.sh not found"
 }
+
+# Case 8 (Phase 2 child C): --body-file rides BELOW the cached prefix, ahead of
+# the issue assignment, so the v2-flow path realizes the D3 cached prefix.
+@test "body-file: content emitted between cached prefix and issue assignment" {
+  bodyf="$(mktemp)"
+  printf 'PHASE4_BODY_SENTINEL line\n' > "$bodyf"
+  run bash "$BIN" \
+    --issue-body "$FIX/issue-438.md" \
+    --branch feat/example-hello \
+    --body-file "$bodyf"
+  rm -f "$bodyf"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "PHASE4_BODY_SENTINEL line"
+  # body sentinel must precede the issue-assignment header
+  body_ln=$(echo "$output" | grep -n "PHASE4_BODY_SENTINEL line" | head -1 | cut -d: -f1)
+  asg_ln=$(echo "$output" | grep -n "Your implementation assignment" | head -1 | cut -d: -f1)
+  [ "$body_ln" -lt "$asg_ln" ]
+}
+
+# Case 9: --body-file with a missing path exits non-zero
+@test "body-file: missing path exits non-zero" {
+  run bash "$BIN" \
+    --issue-body "$FIX/issue-438.md" \
+    --branch feat/example-hello \
+    --body-file "/nonexistent/phase4-body.md"
+  [ "$status" -ne 0 ]
+}

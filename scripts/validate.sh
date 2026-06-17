@@ -29,15 +29,97 @@ bats() {
     { [ "$RUN_BATS" = 1 ] && [ "$_REAL_BATS" = 1 ]; } || return 0
     command bats "$@"
 }
+# ── Scoped mode (issue #1122) ────────────────────────────────────────────────
+# `--changed[=<base>]` (default base `origin/main`) and `--since <ref>` restrict
+# the run to checks whose declared input globs intersect the git diff, plus the
+# fail-safe ALWAYS-RUN set (any shared-input change degrades to ~full). Bare
+# invocation (no scoped flag) leaves SCOPED=0 and the full-serial path below
+# byte-for-byte unchanged — the merge gate. Mapping lives in
+# scripts/lib/validate-affected.sh.
+SCOPED=0
+CHANGED_BASE="origin/main"
+_expect_since=0
+# ── Parallel mode (issue #1123) ──────────────────────────────────────────────
+# `--jobs N` runs the INDEPENDENT per-skill checks in a bounded background-worker
+# pool (concurrency cap N), each worker writing to its OWN temp file; the driver
+# collects and prints worker output DETERMINISTICALLY (sorted by skill name) so
+# the verdict and the failure stream are identical regardless of completion
+# order. `--jobs auto` / bare `--jobs` ⇒ CPU-2 (floor 1). Absent (or `--jobs 1`)
+# ⇒ JOBS=1 ⇒ the existing fully-serial per-skill loop runs UNCHANGED, keeping
+# bare `validate.sh` byte-for-byte identical (the merge gate). Composes with
+# `--changed`: only the selected (affected) skills enter the pool.
+JOBS=1
+_expect_jobs=0
 for _arg in "$@"; do
     case "$_arg" in
         --no-bats|--fast) RUN_BATS=0 ;;
+        --changed) SCOPED=1 ;;
+        --changed=*) SCOPED=1; CHANGED_BASE="${_arg#--changed=}" ;;
+        --since) SCOPED=1; _expect_since=1 ;;
+        --jobs) _expect_jobs=1 ;;
+        --jobs=*) JOBS="${_arg#--jobs=}" ;;
+        *)
+            if [ "$_expect_since" = 1 ]; then
+                CHANGED_BASE="$_arg"; _expect_since=0
+            elif [ "$_expect_jobs" = 1 ]; then
+                JOBS="$_arg"; _expect_jobs=0
+            fi
+            ;;
     esac
 done
+# Bare `--jobs` with no following value ⇒ auto.
+if [ "$_expect_jobs" = 1 ]; then JOBS="auto"; fi
+# Resolve `auto` ⇒ CPU-2 (floor 1); validate N is a positive integer else floor 1.
+if [ "$JOBS" = "auto" ]; then
+    _cpu="$( (getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 2) )"
+    case "$_cpu" in ''|*[!0-9]*) _cpu=2 ;; esac
+    JOBS=$((_cpu - 2))
+    [ "$JOBS" -ge 1 ] || JOBS=1
+fi
+case "$JOBS" in ''|*[!0-9]*) JOBS=1 ;; esac
+[ "$JOBS" -ge 1 ] || JOBS=1
 [ "$RUN_BATS" = 1 ] || printf 'validate: fast mode — skipping bats suites (structural checks only)\n' >&2
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# Scoped-mode setup: compute the changed-file list and source the affected-set
+# lib. AUTOSPEC_VALIDATE_CHANGED_OVERRIDE (a path to a pre-built changed-file
+# list, one path per line) lets tests seed a deterministic diff without touching
+# the working tree. Counters SCOPED_RAN / SCOPED_TOTAL feed the final
+# `scoped: ran N/TOTAL` line. Bare invocation skips all of this entirely.
+CHANGED_FILE_LIST=""
+CHANGED_FILES_DISPLAY=""
+SCOPED_RAN=0
+SCOPED_TOTAL=0
+if [ "$SCOPED" = 1 ]; then
+    # shellcheck disable=SC1091
+    . scripts/lib/validate-affected.sh
+    if [ -n "${AUTOSPEC_VALIDATE_CHANGED_OVERRIDE:-}" ]; then
+        CHANGED_FILE_LIST="$AUTOSPEC_VALIDATE_CHANGED_OVERRIDE"
+    else
+        CHANGED_FILE_LIST="$(mktemp)"
+        git diff --name-only "$CHANGED_BASE"...HEAD > "$CHANGED_FILE_LIST" 2>/dev/null \
+            || git diff --name-only "$CHANGED_BASE" > "$CHANGED_FILE_LIST" 2>/dev/null \
+            || : > "$CHANGED_FILE_LIST"
+    fi
+    CHANGED_FILES_DISPLAY="$(tr '\n' ' ' < "$CHANGED_FILE_LIST" | sed 's/ *$//')"
+    [ -n "$CHANGED_FILES_DISPLAY" ] || CHANGED_FILES_DISPLAY="(none)"
+fi
+
+# Scoped dispatch gate for per-skill checks. In bare mode SCOPED=0 → always run
+# (and never touch counters), keeping the default path byte-identical. In scoped
+# mode, increment SCOPED_TOTAL always and SCOPED_RAN only when the skill is in
+# the affected set. Returns 0 (run) / 1 (skip).
+scoped_skill_gate() {
+    [ "$SCOPED" = 1 ] || return 0
+    SCOPED_TOTAL=$((SCOPED_TOTAL + 1))
+    if validate_affected_skill_runs "$1" "$CHANGED_FILE_LIST"; then
+        SCOPED_RAN=$((SCOPED_RAN + 1))
+        return 0
+    fi
+    return 1
+}
 
 fail() {
     printf 'validate: FAIL — %s\n' "$*" >&2
@@ -135,6 +217,32 @@ check_required_files() {
     name="$(basename "$skill_dir")"
     for f in SKILL.md README.md install.sh uninstall.sh opencode/agent.md codex/prompt.md; do
         [ -f "$skill_dir/$f" ] || fail "$name: missing required file $f"
+    done
+}
+
+# Derive-trio drift gate (trio-derivation Phase 2, decomposition children C+E).
+# This ADOPTS scripts/derive-trio.sh --check as the canonical trio-drift
+# mechanism: for every multi-harness skill under skills/, the committed
+# codex/prompt.md and opencode/agent.md mirrors must be byte-identical to what
+# derive-trio regenerates from SKILL.md. check_lockstep (the byte-diff above)
+# stays as the low-level invariant; this is its derive-aware companion that, on
+# drift, emits the actionable single-command fix:
+#   run: scripts/derive-trio.sh --in-place skills/<name> && scripts/gen-skill-goldens.sh <name>
+# (re-derive the mirrors, then regenerate the skill-golden sha256s).
+#
+# Since --check already passes universally today, this gate is a no-op on a
+# clean tree; it makes derive-trio canonical going forward (no trio FILE changes
+# are part of this adoption). Uses the trio-discovery convention (SKILL.md +
+# opencode/agent.md + codex/prompt.md), matching discover_skills.
+check_derive_trio_consistency() {
+    info "derive-trio --check (canonical trio-drift gate)"
+    derive="scripts/derive-trio.sh"
+    [ -f "$derive" ] || fail "$derive: missing (trio-derivation Phase 1 must be merged first)"
+    for skill_dir in $(discover_skills); do
+        name="$(basename "$skill_dir")"
+        if ! bash "$derive" "$skill_dir" --check; then
+            fail "$name: trio mirrors drift from SKILL.md — run: $derive --in-place $skill_dir && scripts/gen-skill-goldens.sh $name"
+        fi
     done
 }
 
@@ -705,6 +813,123 @@ check_implementer_contract() {
     if printf '%s\n' "$impl_out" | grep -q 'SKILL.md (implementer role)'; then
         fail "$bundler: implementer output still injects the SKILL.md (implementer role) prefix"
     fi
+}
+
+# Reviewer-contract named-content invariants (prompt-cache reclaim Phase 1): the
+# curated reviewer-contract.md replaces the ~14KB autospec-run/SKILL.md in the
+# reviewer prefix. The contract MUST exist, stay <=24KB, carry exactly one
+# RULE_ID table header, and must not drift from AGENTS.md's canonical RULE_ID
+# set. The bundler MUST inject the contract for the reviewer role and MUST NOT
+# inject the autospec-run SKILL.md into that role any more.
+check_reviewer_contract() {
+    info "reviewer-contract: skills/autospec-run/prompts/reviewer-contract.md"
+    local contract="skills/autospec-run/prompts/reviewer-contract.md"
+    [ -f "$contract" ] \
+        || fail "$contract: file missing"
+
+    # Size guard: <=24576 bytes.
+    local size
+    size="$(wc -c < "$contract" | tr -d ' ')"
+    [ "$size" -le 24576 ] \
+        || fail "$contract: $size bytes exceeds 24576-byte (24KB) budget"
+
+    # Single RULE_ID table header (no duplicate re-extraction).
+    local header_count
+    header_count="$(grep -c '^### RULE_ID table' "$contract" || true)"
+    [ "$header_count" = "1" ] \
+        || fail "$contract: expected exactly 1 '### RULE_ID table' header, found $header_count"
+
+    # Drift gate: every RULE_ID named in AGENTS.md's canonical table must also be
+    # present in the contract (the reviewer must still enforce the full set).
+    [ -f AGENTS.md ] || fail "AGENTS.md missing at repo root"
+    local agents_rule_ids
+    agents_rule_ids="$(awk '
+        /^### RULE_ID table/ { in_table=1; next }
+        /^### / && in_table { exit }
+        /^## / && in_table { exit }
+        in_table && /^\| `[A-Z_]+`/ {
+            line=$0; sub(/^\| `/,"",line); sub(/`.*/,"",line); print line
+        }
+    ' AGENTS.md | sort -u)"
+    [ -n "$agents_rule_ids" ] || fail "AGENTS.md RULE_ID table yielded no RULE_IDs (parse drift)"
+    local rid
+    for rid in $agents_rule_ids; do
+        grep -q "$rid" "$contract" \
+            || fail "$contract: drift — AGENTS.md RULE_ID '$rid' missing from contract"
+    done
+
+    # The bundler must inject the contract for the reviewer role.
+    local bundler="skills/autospec-shared/scripts/bundle-static-context.sh"
+    [ -f "$bundler" ] || fail "$bundler: file missing"
+    grep -q 'REVIEWER_CONTRACT' "$bundler" \
+        || fail "$bundler: missing REVIEWER_CONTRACT injection variable"
+
+    # Behavioral negative: the reviewer-role output must NOT carry the verbose
+    # 'SKILL.md (reviewer role)' injection header (no full ~14KB SKILL.md), the
+    # RULE_ID table must appear EXACTLY once in the prefix, and the full LLM-tier
+    # RULE_ID set the fused reviewer applies must still be present.
+    local rev_out
+    rev_out="$(AUTOSPEC_REPO_ROOT="$REPO_ROOT" \
+        AUTOSPEC_MEMORY_DIR=/nonexistent-memory-dir \
+        AUTOSPEC_MANIFEST=/nonexistent-manifest.yml \
+        bash "$bundler" --role reviewer --issue-labels 'ctx:120k' 2>/dev/null)" \
+        || fail "$bundler: --role reviewer failed to run"
+    if printf '%s\n' "$rev_out" | grep -q 'SKILL.md (reviewer role)'; then
+        fail "$bundler: reviewer output still injects the SKILL.md (reviewer role) prefix"
+    fi
+    local rev_table_count
+    rev_table_count="$(printf '%s\n' "$rev_out" | grep -c '^### RULE_ID table' || true)"
+    [ "$rev_table_count" = "1" ] \
+        || fail "$bundler: reviewer prefix must carry the RULE_ID table exactly once (found $rev_table_count)"
+    local llm_rid
+    for llm_rid in HALLUCINATED_API DUPLICATE_CODE STRING_MATCH_DOMAIN_LOGIC \
+                   REPEATED_STRUCTURE_AS_CODE DOC_OUT_OF_SYNC INVENTED_CONFIG; do
+        printf '%s\n' "$rev_out" | grep -q "$llm_rid" \
+            || fail "$bundler: reviewer prefix dropped LLM-tier RULE_ID: $llm_rid"
+    done
+}
+
+# Closeout report contract (Fable-distillation work): every auto-implement agent
+# must emit a structured, result-first Closeout report consumed by the merge-gate
+# and done-challenge as evidence. The canonical contract lives in AGENTS.md; the
+# implementer-contract.md carries the acting digest + merge-gate wiring. This gate
+# asserts both files declare the section, all required field anchors, the
+# runtime-proof rule, and the one machine-checkable critic predicate
+# (static/build-only downgrade) so the two surfaces never drift apart.
+check_closeout_contract() {
+    info "closeout contract: AGENTS.md + implementer-contract.md"
+    local agents="AGENTS.md"
+    local contract="skills/autospec-run/prompts/implementer-contract.md"
+    [ -f "$agents" ] || fail "$agents missing at repo root"
+    [ -f "$contract" ] || fail "$contract: file missing"
+
+    # Section headers.
+    grep -qF '## Closeout report contract' "$agents" \
+        || fail "$agents missing '## Closeout report contract' section"
+    grep -qF '### Consumer contract' "$agents" \
+        || fail "$agents missing '### Consumer contract' (critic/merge-gate) subsection"
+    grep -qF '## Closeout report' "$contract" \
+        || fail "$contract missing '## Closeout report' section"
+    grep -qF 'Closeout evidence:' "$contract" \
+        || fail "$contract merge-gate missing 'Closeout evidence:' step"
+
+    # Required field anchors + the runtime-proof rule + critic predicate, in BOTH
+    # surfaces (drift gate).
+    local anchor f
+    for f in "$agents" "$contract"; do
+        for anchor in \
+            '[verified]' \
+            '[assumed]' \
+            '[couldnt-verify]' \
+            '[likely-wrong]' \
+            'Before/after' \
+            'One likely hidden failure' \
+            'runtime proof, not' \
+            'static`/build-only'; do
+            grep -qF "$anchor" "$f" \
+                || fail "$f: closeout contract missing required anchor: $anchor"
+        done
+    done
 }
 
 # Usage-limit recovery helper invariants: autospec-run's quota recovery path
@@ -2350,6 +2575,92 @@ check_block_expansion() {
     info "block-expansion golden gate: all skills + members OK"
 }
 
+# ── Per-skill check units (issue #1123) ──────────────────────────────────────
+# The full check sequence for one multi-harness / duo skill, factored into a
+# function so it can run either inline (serial path, byte-unchanged) or as a
+# bounded background worker (parallel path). The body is IDENTICAL to the
+# original inline loop body — do not reorder; per-skill output must match serial.
+run_one_skill_checks() {
+    skill_dir="$1"
+    check_required_files "$skill_dir"
+    check_lockstep "$skill_dir"
+    check_frontmatter "$skill_dir/SKILL.md"
+    check_frontmatter "$skill_dir/opencode/agent.md"
+    check_bash_syntax "$skill_dir/install.sh"
+    check_bash_syntax "$skill_dir/uninstall.sh"
+    check_self_update "$skill_dir"
+    check_subagent_model_tier "$skill_dir"
+    check_harness_detection_block "$skill_dir/SKILL.md"
+    check_monitor_batch_exit "$skill_dir/SKILL.md"
+}
+
+run_one_duo_checks() {
+    check_lockstep_duo "$1"
+}
+
+# Bounded parallel dispatch over a newline-free, space-separated list of
+# already-gated skill dirs. Each worker runs `$2 <skill_dir>` in a subshell,
+# redirecting all output to its OWN temp file keyed by skill name (no shared
+# path → no collision). Concurrency is capped at $JOBS by waiting on the oldest
+# launched PID once the pool is full (macOS bash 3.2 safe: no `wait -n`). After
+# all workers finish, output files are replayed in SORTED skill-name order, so
+# the printed stream is deterministic regardless of completion order. Returns
+# non-zero iff ANY worker exited non-zero (same verdict as serial). The serial
+# path NEVER calls this — bare `validate.sh` stays byte-identical.
+parallel_skill_dispatch() {
+    _worker_fn="$1"; shift
+    _pool_dir="$(mktemp -d)"
+    _pids=""
+    _names=""
+    _running=0
+    for _sd in "$@"; do
+        _name="$(basename "$_sd")"
+        _names="$_names $_name"
+        # Worker: run the check unit; its exit status is captured by `wait`.
+        ( "$_worker_fn" "$_sd" ) > "$_pool_dir/$_name.out" 2>&1 &
+        _pids="$_pids $!:$_name"
+        _running=$((_running + 1))
+        if [ "$_running" -ge "$JOBS" ]; then
+            # Pool full: drain the OLDEST launched PID before launching more.
+            set -- $_pids
+            _oldest="${1%%:*}"
+            wait "$_oldest" || printf '%s\n' "$_oldest" >> "$_pool_dir/.failed"
+            shift
+            _pids=" $*"
+            _running=$((_running - 1))
+        fi
+    done
+    # Drain any still-running workers.
+    for _entry in $_pids; do
+        _pid="${_entry%%:*}"
+        wait "$_pid" || printf '%s\n' "$_pid" >> "$_pool_dir/.failed"
+    done
+    # Replay output deterministically, sorted by skill name.
+    _rc=0
+    for _name in $(printf '%s\n' $_names | LC_ALL=C sort); do
+        if [ -f "$_pool_dir/$_name.out" ]; then
+            cat "$_pool_dir/$_name.out"
+        fi
+    done
+    if [ -s "$_pool_dir/.failed" ]; then
+        _rc=1
+    fi
+    rm -rf "$_pool_dir"
+    return "$_rc"
+}
+
+# Run the gated per-skill set: serial (byte-unchanged) when JOBS<=1, else pooled.
+run_skill_set() {
+    _worker_fn="$1"; shift
+    if [ "$JOBS" -le 1 ]; then
+        for _sd in "$@"; do
+            "$_worker_fn" "$_sd"
+        done
+    else
+        parallel_skill_dispatch "$_worker_fn" "$@" || fail "one or more parallel skill-check workers failed"
+    fi
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -2357,24 +2668,30 @@ main() {
         fail "no multi-harness skills found under skills/"
     fi
 
+    # Apply the scoped gate FIRST (in deterministic discovery order, so the
+    # `scoped:` counters are identical to serial), then run the surviving set —
+    # serially (byte-unchanged) when JOBS<=1, else via the bounded worker pool.
+    _gated_skills=""
     for skill_dir in $skills; do
-        check_required_files "$skill_dir"
-        check_lockstep "$skill_dir"
-        check_frontmatter "$skill_dir/SKILL.md"
-        check_frontmatter "$skill_dir/opencode/agent.md"
-        check_bash_syntax "$skill_dir/install.sh"
-        check_bash_syntax "$skill_dir/uninstall.sh"
-        check_self_update "$skill_dir"
-        check_subagent_model_tier "$skill_dir"
-        check_harness_detection_block "$skill_dir/SKILL.md"
-        check_monitor_batch_exit "$skill_dir/SKILL.md"
+        if ! scoped_skill_gate "$(basename "$skill_dir")"; then
+            continue
+        fi
+        _gated_skills="$_gated_skills $skill_dir"
     done
+    # shellcheck disable=SC2086
+    run_skill_set run_one_skill_checks $_gated_skills
 
     info "scanning duo-harness skills under skills/ ..."
     duo_skills="$(discover_duo_skills)"
+    _gated_duo=""
     for skill_dir in $duo_skills; do
-        check_lockstep_duo "$skill_dir"
+        if ! scoped_skill_gate "$(basename "$skill_dir")"; then
+            continue
+        fi
+        _gated_duo="$_gated_duo $skill_dir"
     done
+    # shellcheck disable=SC2086
+    run_skill_set run_one_duo_checks $_gated_duo
 
     check_startup_preflight
     check_stop_mode_section
@@ -2395,6 +2712,8 @@ main() {
     check_lint_issue_helpers
     check_lint_implementation_helpers
     check_implementer_contract
+    check_reviewer_contract
+    check_closeout_contract
     check_lint_heredoc_handling
     check_quality_differential
     check_usage_limit_helper
@@ -2449,6 +2768,7 @@ main() {
     check_autospec_explore_contract
     check_explore_trio_worktree_assert
     check_autospec_explore_discovery_contract
+    check_autospec_explore_style_normalization_contract
     check_autospec_explore_spec_first_contract
     check_autospec_explore_qa_gate_contract
     check_autospec_release_area_contract
@@ -2465,12 +2785,30 @@ main() {
     check_define_spec_worktree_routing
     check_token_baseline_fresh
     check_block_expansion
+    check_derive_trio_consistency
     check_claim_guard_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
     check_bash_syntax "install.sh"
     check_bash_syntax "uninstall.sh"
+
+    # Scoped accounting for the global (non-per-skill) check block above. Every
+    # global check is unmapped → fail-safe ALWAYS-RUN, so in scoped mode they all
+    # ran; count the block toward both RAN and TOTAL so the `scoped:` line is
+    # honest. Bare mode (SCOPED=0) skips this entirely. The count is derived from
+    # the source so it can't silently drift as checks are added/removed. The
+    # range spans every global `check_*` CALL from check_startup_preflight through
+    # the trailing check_bash_syntax install/uninstall calls (also always-run), so
+    # TOTAL is not understated by those two — it terminates at this accounting
+    # block, not before the installer checks.
+    if [ "$SCOPED" = 1 ]; then
+        _global_check_count="$(awk '/^    # Scoped accounting/{exit} f && /^    check_/{n++} /^    check_startup_preflight$/{f=1; n++} END{print n+0}' "$0")"
+        SCOPED_TOTAL=$((SCOPED_TOTAL + _global_check_count))
+        SCOPED_RAN=$((SCOPED_RAN + _global_check_count))
+        printf 'validate: scoped: ran %s/%s checks (changed: %s)\n' \
+            "$SCOPED_RAN" "$SCOPED_TOTAL" "$CHANGED_FILES_DISPLAY"
+    fi
 
     info "OK — all validation checks passed."
 }
@@ -2837,6 +3175,54 @@ check_explore_trio_worktree_assert() {
     info "explore-trio worktree assert: all three adapter files carry D4 assert + lock-step verified"
 }
 
+# autospec-explore style-normalization discovery contract: SPA/webapp visual
+# consistency work must run through a named discovery researcher and must
+# auto-generate missing Playwright coverage plus screenshots before filing
+# style-unification proposals.
+check_autospec_explore_style_normalization_contract() {
+    info "autospec-explore style-normalization contract"
+    local researcher="scripts/explore-research/style-normalization.sh"
+    [ -f "$researcher" ] || fail "$researcher: required style-normalization researcher missing"
+    [ -x "$researcher" ] || fail "$researcher: file not executable"
+    bash -n "$researcher" || fail "$researcher: bash syntax error"
+    grep -q 'AUTOSPEC_EXPLORE_STYLE_PROOF_CMD' "$researcher" \
+        || fail "$researcher: missing AUTOSPEC_EXPLORE_STYLE_PROOF_CMD invocation seam"
+    grep -q 'AUTOSPEC_STYLE_PROOF_DIR' "$researcher" \
+        || fail "$researcher: missing AUTOSPEC_STYLE_PROOF_DIR artifact directory contract"
+    grep -q 'best-effort' "$researcher" \
+        || fail "$researcher: generic dispatcher fallback must be documented as best-effort"
+    grep -q 'style-normalization' scripts/autospec-explore.sh \
+        || fail "scripts/autospec-explore.sh: default RESEARCH_SOURCES missing style-normalization"
+    grep -q 'style-normalization' scripts/explore-research-cycle.sh \
+        || fail "scripts/explore-research-cycle.sh: default source roster/weights missing style-normalization"
+    grep -q 'style-normalization' skills/autospec-shared/scripts/explore-source-weights.sh \
+        || fail "explore-source-weights.sh: canonical priors missing style-normalization"
+    for trio in \
+        skills/autospec-explore/SKILL.md \
+        skills/autospec-explore/codex/prompt.md \
+        skills/autospec-explore/opencode/agent.md
+    do
+        [ -f "$trio" ] || fail "$trio: required adapter file missing"
+        grep -q 'style-normalization' "$trio" \
+            || fail "$trio: missing style-normalization discovery researcher"
+        grep -q 'Playwright' "$trio" \
+            || fail "$trio: missing Playwright auto-generation requirement"
+        grep -q 'screenshot' "$trio" \
+            || fail "$trio: missing screenshot evidence requirement"
+        grep -q 'AUTOSPEC_EXPLORE_STYLE_PROOF_CMD' "$trio" \
+            || fail "$trio: missing AUTOSPEC_EXPLORE_STYLE_PROOF_CMD proof seam"
+        grep -q 'best-effort fallback' "$trio" \
+            || fail "$trio: missing best-effort fallback boundary"
+    done
+    local bats_file="tests/explore/test_explore_style_normalization.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing for style-normalization proof contract"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-explore-style-normalization.log 2>&1 \
+            || { cat /tmp/validate-explore-style-normalization.log >&2; fail "$bats_file: failed"; }
+    fi
+}
+
 # autospec-explore discovery enhancement contract (issues #1084/#1085, spec
 # docs/specs/2026-06-15-autospec-explore-discovery-enhance.md §Acceptance):
 # the discovery-quality batch (#1077–#1083) shipped 3 new researchers, the
@@ -2849,7 +3235,7 @@ check_explore_trio_worktree_assert() {
 check_autospec_explore_discovery_contract() {
     info "autospec-explore discovery enhancement contract (#1084/#1085)"
 
-    # 1. The 3 discovery researchers exist, are executable, bash -n clean.
+    # 1. The baseline discovery researchers exist, are executable, bash -n clean.
     for r in quality-resilience dogfooding self-leverage; do
         local script="scripts/explore-research/$r.sh"
         [ -f "$script" ] || fail "$script: required discovery researcher missing"
@@ -2894,7 +3280,7 @@ check_autospec_explore_discovery_contract() {
         || fail "scripts/explore-specialist-scan.sh: bash syntax error"
 
     # 5. Trio prose documents the enhancement in lock-step: the new sections,
-    #    the 3 discovery researchers, the stage order, the severity enum, and
+    #    the discovery researchers, the stage order, the severity enum, and
     #    the specialist flags must appear in all three adapter bodies. The
     #    stale "6 researcher" count must be gone.
     for trio in \

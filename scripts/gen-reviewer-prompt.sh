@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # scripts/gen-reviewer-prompt.sh — compose Phase 4 fused guardian+LGTM reviewer prompt.
 #
-# Wraps bundle-static-context.sh --role reviewer (static cached prefix) with a
-# deterministic dynamic suffix derived from the PR diff and previous-iteration findings.
-# Zero LLM calls.
+# Wraps bundle-static-context.sh --role reviewer (the slim, byte-stable cached
+# prefix: reviewer-contract.md guardian rubric + RULE_ID table + the AGENTS.md
+# enforcement narrative) with a deterministic dynamic suffix derived from the PR
+# diff and previous-iteration findings. The suffix references the cached prefix
+# rubric rather than re-embedding the RULE_ID table. Zero LLM calls.
 #
 # Usage:
 #   scripts/gen-reviewer-prompt.sh --pr-diff <file> [--prev-findings <file>]
@@ -204,7 +206,7 @@ ${ISSUE_BODY:-"(Issue body not provided. Fetch it before applying issue-scope, T
 ## Fused guardian+LGTM review rubric
 
 **Part 1 — Guardian (contract compliance)** — skip if \`AUTOSPEC_NO_GUARDIAN=1\`:
-1. Read AGENTS.md \`## Implementation-quality contract\` for the RULE_ID table and directive map.
+1. Apply the RULE_ID table and corrective-directive map from the cached \`## Reviewer contract\` prefix above (no need to re-read AGENTS.md — the prefix already carries them).
 2. Read the issue body — note \`## Implementation scope\`, \`## Implementation outline\`, \`## Tests required\`, and any \`Guardian: skip-*\` lines.
 3. Read deterministic findings from lint-implementation.sh output (included above if present).
 4. Apply LLM-tier RULE_IDs (HALLUCINATED_API, DUPLICATE_CODE, DOC_OUT_OF_SYNC semantic pass, INVENTED_CONFIG). Collect as \`RULE_ID:<path>:<line>: <desc>\`. Honor \`Guardian: skip-*\` with \`INFO:\` lines.

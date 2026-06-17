@@ -36,6 +36,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isLogicFlowSection, generateExplainerDiagram } from './doc-style.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SHARED_SCRIPTS = path.resolve(__dirname, '../../autospec-shared/scripts');
@@ -107,6 +108,35 @@ function annotateContent(content, confidence) {
   return content.trimEnd() + `\n\n<!-- ai-reviewed: ${confidence} -->\n`;
 }
 
+// ── Per-audience prose resolver ───────────────────────────────────────────────
+//
+// A feature prose field may be EITHER a shared value (scalar/array — same prose
+// for all audiences) OR a per-audience MAP: { user, developer, admin, general,
+// default }. pickForAudience resolves the latter to the right variant.
+//
+// Detection rule: treat `value` as a per-audience map only when it is a plain
+// object (not an array) carrying at least one known audience key OR a `default`
+// key. A normal data object (e.g. `{ id, payload, ts }`) has none of those keys
+// and is returned unchanged as a shared value.
+//
+// Resolution: value[audienceName] ?? value.default ?? null.
+
+const KNOWN_AUDIENCES = new Set(['user', 'developer', 'admin', 'general']);
+
+function isAudienceMap(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (Object.prototype.hasOwnProperty.call(value, 'default')) return true;
+  return Object.keys(value).some(k => KNOWN_AUDIENCES.has(k));
+}
+
+export function pickForAudience(value, audienceName) {
+  if (!isAudienceMap(value)) return value;
+  const picked = value[audienceName];
+  if (picked !== undefined) return picked;
+  if (value.default !== undefined) return value.default;
+  return null;
+}
+
 // ── Scope-comment emitter (existing format from gen-docs/*.mjs) ────────────────
 
 function scopeBlock(srcGlobs, reason, extraLines = []) {
@@ -170,7 +200,8 @@ function renderIndex(audience, features, directive) {
   if (features.length) {
     lines.push('Features documented for this audience:', '');
     for (const f of features) {
-      lines.push(`- [${f.title || f.slug}](features/${f.slug}.md) — ${f.summary || f.slug}`);
+      const summary = pickForAudience(f.summary, audience.name);
+      lines.push(`- [${f.title || f.slug}](features/${f.slug}.md) — ${summary || f.slug}`);
     }
   } else {
     lines.push('> _No features configured yet. Run `/autospec-doc` after defining features._');
@@ -207,6 +238,8 @@ function renderGettingStarted(audience, features, directive) {
 
 function renderTutorial(audience, feature, directive) {
   const globs = featureSrcGlobs(feature);
+  const summary = pickForAudience(feature.summary, audience.name);
+  const specSections = pickForAudience(feature.spec_sections, audience.name);
   const lines = [
     `# Tutorial: ${feature.title || feature.slug} (${audience.name})`,
     '',
@@ -216,16 +249,111 @@ function renderTutorial(audience, feature, directive) {
     '',
     `_Step-by-step for the **${audience.name}** audience (${audience.focus})._`,
     '',
-    feature.summary ? `${feature.summary}` : `Walkthrough of ${feature.slug}.`,
+    summary ? `${summary}` : `Walkthrough of ${feature.slug}.`,
     '',
   ];
-  for (const s of (feature.spec_sections || [])) lines.push(`> ${s}`, '');
+  for (const s of (specSections || [])) lines.push(`> ${s}`, '');
   if (directive) lines.push(`<!-- regen-directive: ${directive} -->`, '');
   return lines.join('\n');
 }
 
+// ── renderFeatureSections — six LLM-targeted H2 blocks (issue #1129) ──────────
+//
+// Audience gating (pinned in shared-contracts):
+//   config_reference → [admin, developer]
+//   rationale        → [developer]
+//   all others       → all audiences
+//
+// Empty fields ('' / []) are silently omitted — no blank H2 is emitted.
+//
+// Section order is fixed: Data model → Invariants → Errors → Configuration →
+// Why → Related features.
+
+const SECTION_AUDIENCE_GATE = {
+  config_reference: ['admin', 'developer'],
+  rationale:        ['developer'],
+};
+
+function renderFeatureSections(audience, feature) {
+  const lines = [];
+
+  function maybeSection(heading, fieldValue) {
+    if (!fieldValue || (typeof fieldValue === 'string' && fieldValue.trim() === '')) return;
+    if (Array.isArray(fieldValue) && fieldValue.length === 0) return;
+    lines.push(`## ${heading}`, '');
+    if (Array.isArray(fieldValue)) {
+      for (const item of fieldValue) lines.push(`- ${item}`);
+      lines.push('');
+    } else {
+      lines.push(String(fieldValue), '');
+    }
+  }
+
+  const pick = (field) => pickForAudience(feature[field], audience.name);
+
+  // data_model — all audiences
+  maybeSection('Data model', pick('data_model') || '');
+
+  // invariants — all audiences
+  maybeSection('Invariants & constraints', pick('invariants') || '');
+
+  // errors — all audiences
+  maybeSection('Errors & failure modes', pick('errors') || '');
+
+  // config_reference — admin + developer only
+  if (SECTION_AUDIENCE_GATE.config_reference.includes(audience.name)) {
+    maybeSection('Configuration', pick('config_reference') || '');
+  }
+
+  // rationale — developer only
+  if (SECTION_AUDIENCE_GATE.rationale.includes(audience.name)) {
+    maybeSection('Why', pick('rationale') || '');
+  }
+
+  // depends_on — shared (feature ids, not prose).
+  maybeSection('Related features', feature.depends_on || []);
+
+  return lines;
+}
+
+// ── renderExamples — emit <!-- example --> fenced blocks (issue #1133) ──────────
+//
+// Emits one `<!-- example -->` + fenced code block per entry in
+// feature.examples[].  Empty / absent arrays emit nothing.
+//
+// Entry shape: { lang?: string, command: string }
+//   lang     defaults to 'bash' when absent or empty.
+//   command  the executable text placed verbatim inside the fence.
+//
+// Marker format is pinned verbatim by the #1133 shared contract:
+//   <!-- example -->
+//   ```<lang>
+//   <command>
+//   ```
+//
+// verifyExamples (verify-examples.mjs) recognises exactly this tag+fence
+// sequence and stamps an adjacent output block + <!-- example-verified: -->
+// marker after a successful run.
+
+function renderExamples(feature, audienceName) {
+  const examples = pickForAudience(feature.examples, audienceName);
+  if (!examples || examples.length === 0) return [];
+  const lines = [];
+  for (const entry of examples) {
+    const lang = (entry.lang && entry.lang.trim()) ? entry.lang.trim() : 'bash';
+    lines.push('<!-- example -->');
+    lines.push(`\`\`\`${lang}`);
+    lines.push(entry.command);
+    lines.push('```');
+    lines.push('');
+  }
+  return lines;
+}
+
 function renderFeature(audience, feature, directive) {
   const globs = featureSrcGlobs(feature);
+  const summary = pickForAudience(feature.summary, audience.name);
+  const specSections = pickForAudience(feature.spec_sections, audience.name);
   const lines = [
     `# ${feature.title || feature.slug} (${audience.name})`,
     '',
@@ -235,10 +363,27 @@ function renderFeature(audience, feature, directive) {
     '',
     `_Reference for the **${audience.name}** audience (${audience.focus})._`,
     '',
-    feature.summary ? `${feature.summary}` : `Reference documentation for ${feature.slug}.`,
+    summary ? `${summary}` : `Reference documentation for ${feature.slug}.`,
     '',
   ];
-  for (const s of (feature.spec_sections || [])) lines.push(s, '');
+  for (const s of (specSections || [])) {
+    lines.push(s, '');
+    // Track D (issue #1131): emit a palette-themed mermaid diagram for logic-flow sections.
+    const section = { heading: feature.title || feature.slug, body: s };
+    if (isLogicFlowSection(section)) {
+      const diagram = generateExplainerDiagram(section);
+      if (diagram) {
+        lines.push('```mermaid');
+        lines.push(diagram);
+        lines.push('```');
+        lines.push('');
+      }
+    }
+  }
+  // Append the six LLM-targeted sections (issue #1129); empty fields are omitted.
+  lines.push(...renderFeatureSections(audience, feature));
+  // Append verified runnable examples (issue #1133); empty examples[] emits nothing.
+  lines.push(...renderExamples(feature, audience.name));
   if (directive) lines.push(`<!-- regen-directive: ${directive} -->`, '');
   return lines.join('\n');
 }
@@ -342,6 +487,77 @@ async function buildPage({ relPath, render, validator, maxRetries, existingDocs,
   };
 }
 
+// ── Sameness guard ────────────────────────────────────────────────────────────
+//
+// The audience split is only real if `features/<slug>.md` carries DIFFERENT prose
+// per audience. To detect a fake split we normalize away the parts that vary for
+// trivial reasons — the audience tagline, the tutorial tagline, the mermaid theme
+// `%%{init}%%` line, and the gated `## Configuration` / `## Why` sections (which
+// differ only because of gating, not authored prose) — and compare what remains.
+// If the normalized body is byte-identical across every audience, the feature has
+// no real per-audience tailoring.
+
+function normalizeForSameness(content) {
+  const out = [];
+  const lines = content.split('\n');
+  let skippingGated = false;
+  let inScopeBlock = false;
+  for (const line of lines) {
+    // Drop the entire autospec-doc-scope block: its `reason` carries the audience
+    // name + focus (auto-derived, not authored prose), so it always differs.
+    if (/<!--\s*autospec-doc-scope\s*:/.test(line)) { inScopeBlock = true; continue; }
+    if (inScopeBlock) {
+      if (line.includes('-->')) inScopeBlock = false;
+      continue;
+    }
+    // Enter/exit gated-section skip: `## Configuration` and `## Why` are gated by
+    // audience, so drop them (and their bodies, up to the next H2) before compare.
+    if (/^##\s+(Configuration|Why)\s*$/.test(line)) { skippingGated = true; continue; }
+    if (skippingGated) {
+      if (/^##\s+/.test(line)) skippingGated = false; // next H2 ends the gated block
+      else continue;
+    }
+    // Drop audience-tagline / tutorial-tagline lines.
+    if (/^_Reference for the \*\*.+?\*\* audience/.test(line)) continue;
+    if (/^_Step-by-step for the \*\*.+?\*\* audience/.test(line)) continue;
+    if (/^_Documentation for the \*\*.+?\*\* audience/.test(line)) continue;
+    // Drop the mermaid theme line and the audience name in headings/scope.
+    if (/%%\{init:/.test(line)) continue;
+    out.push(line);
+  }
+  // Neutralize the audience name wherever it is interpolated (H1 "(user)", scope
+  // "reason", the ai-reviewed marker, focus strings) so only authored prose drives
+  // the comparison.
+  return out.join('\n')
+    .replace(/\((user|developer|admin|general)\)/g, '(AUD)')
+    .replace(/\b(user|developer|admin|general)\b/g, 'AUD');
+}
+
+function computeSamenessWarnings(files) {
+  const warnings = [];
+  const identicalFeatures = new Set();
+  // Group feature pages by slug.
+  const bySlug = new Map();
+  for (const f of files) {
+    if (!f.feature) continue;
+    if (!f.path.includes('/features/')) continue;
+    if (!bySlug.has(f.feature)) bySlug.set(f.feature, []);
+    bySlug.get(f.feature).push(f);
+  }
+  for (const [slug, pages] of bySlug) {
+    if (pages.length < 2) continue; // single audience — nothing to compare
+    const normalized = pages.map(p => normalizeForSameness(p.content));
+    const allSame = normalized.every(n => n === normalized[0]);
+    if (allSame) {
+      identicalFeatures.add(slug);
+      warnings.push(
+        `feature '${slug}': identical prose across all audiences — no per-audience tailoring`,
+      );
+    }
+  }
+  return { warnings, identicalFeatures };
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
@@ -355,8 +571,9 @@ async function buildPage({ relPath, render, validator, maxRetries, existingDocs,
  *   validator?: (content: string, ctx: object) => { ok: boolean, findings: string[] },
  *   maxRetries?: number,
  *   aiReviewStub?: string,
+ *   failOnIdenticalAudiences?: boolean,
  * }} opts
- * @returns {Promise<{ files: Array<object> }>}
+ * @returns {Promise<{ files: Array<object>, warnings: string[] }>}
  */
 export async function generateAudienceDocs({
   features = [],
@@ -366,11 +583,15 @@ export async function generateAudienceDocs({
   validator = defaultValidator,
   maxRetries = 5,
   aiReviewStub = process.env.AUTOSPEC_AI_REVIEW_STUB || undefined,
+  failOnIdenticalAudiences = false,
 } = {}) {
   if (!Array.isArray(audiences) || audiences.length === 0) {
     throw new Error('generateAudienceDocs: at least one audience is required');
   }
 
+  // Build + annotate every page across every audience IN MEMORY first; defer all
+  // disk writes until after the sameness guard so failOnIdenticalAudiences can
+  // abort before writing anything new.
   const files = [];
 
   for (const audience of audiences) {
@@ -433,24 +654,39 @@ export async function generateAudienceDocs({
       }
       page.content = finalContent;
       page.ai_review = reviewResult || undefined;
-
-      let written = false;
-      if (outputDir) {
-        const outPath = path.join(outputDir, page.path);
-        fs.mkdirSync(path.dirname(outPath), { recursive: true });
-        let current = null;
-        try { current = fs.readFileSync(outPath, 'utf8'); } catch {}
-        if (current !== page.content) {
-          fs.writeFileSync(outPath, page.content, 'utf8');
-          written = true;
-        }
-      }
-      page.written = written;
+      page.written = false;
       files.push(page);
     }
   }
 
-  return { files };
+  // Sameness guard: detect features whose feature page is byte-identical across
+  // all audiences (modulo audience-varying lines). Surface a warning per feature;
+  // optionally abort BEFORE writing anything.
+  const { warnings, identicalFeatures } = computeSamenessWarnings(files);
+  if (failOnIdenticalAudiences && identicalFeatures.size > 0) {
+    const slugs = [...identicalFeatures].join(', ');
+    throw new Error(
+      `generateAudienceDocs: identical prose across all audiences for feature(s): ${slugs}. ` +
+      `Author per-audience prose (see SKILL.md) or pass failOnIdenticalAudiences: false. ` +
+      `Nothing was written.`,
+    );
+  }
+
+  // Guard passed (or not enforced) — now write to disk.
+  if (outputDir) {
+    for (const page of files) {
+      const outPath = path.join(outputDir, page.path);
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      let current = null;
+      try { current = fs.readFileSync(outPath, 'utf8'); } catch {}
+      if (current !== page.content) {
+        fs.writeFileSync(outPath, page.content, 'utf8');
+        page.written = true;
+      }
+    }
+  }
+
+  return { files, warnings };
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
@@ -479,5 +715,8 @@ if (isMain) {
     existingDocs: input.existingDocs || {},
     outputDir,
   });
-  console.log(JSON.stringify({ files: result.files.map(f => ({ path: f.path, written: f.written, preserved_sections: f.preserved_sections })) }, null, 2));
+  for (const w of (result.warnings || [])) {
+    process.stderr.write(`warning: ${w}\n`);
+  }
+  console.log(JSON.stringify({ files: result.files.map(f => ({ path: f.path, written: f.written, preserved_sections: f.preserved_sections })), warnings: result.warnings || [] }, null, 2));
 }

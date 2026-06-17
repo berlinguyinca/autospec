@@ -25,7 +25,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPTS_DIR = path.resolve(__dirname, '../scripts');
 const SHARED_SCRIPTS_DIR = path.resolve(__dirname, '../../autospec-shared/scripts');
 
-const { generateAudienceDocs } = await import(path.join(SCRIPTS_DIR, 'gen-audience-docs.mjs'));
+const { generateAudienceDocs, pickForAudience } = await import(path.join(SCRIPTS_DIR, 'gen-audience-docs.mjs'));
 const { parse: parseScopeBlocks } = await import(path.join(SHARED_SCRIPTS_DIR, 'scan-doc-scope.mjs'));
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -450,7 +450,257 @@ test('§D6: exactly ONE batched ai-review call per audience (not per section)', 
   assert.equal(confidences[0], 'high', 'stub=high should annotate all pages as high');
 });
 
-// Test D6-4: batched ai-review parse round-trip
+// ── Tests for six new LLM-targeted H2 sections (issue #1129) ─────────────────
+
+// Feature fixture with all six new fields populated.
+const ENRICHED_FEATURE = {
+  slug: 'pipeline',
+  title: 'Pipeline',
+  summary: 'Moves data through stages.',
+  spec_sections: ['Overview of pipeline stages.'],
+  data_model: '`Record { id, payload, ts }` — the unit of work.',
+  invariants: 'Records are immutable once enqueued.',
+  errors: '`QUEUE_FULL` — backpressure exceeded; `INVALID_RECORD` — schema mismatch.',
+  config_reference: '`pipeline.maxQueue` (default 1000) — maximum in-flight records.',
+  rationale: 'The pipeline decouples producers from consumers to allow backpressure.',
+  depends_on: ['auth', 'export-pipeline'],
+};
+
+// Legacy feature — only has summary + spec_sections (no new fields).
+const LEGACY_FEATURE = {
+  slug: 'export-pipeline',
+  title: 'Export Pipeline',
+  summary: 'Streams records out to downstream sinks.',
+  spec_sections: ['The export pipeline batches records and flushes to sinks.'],
+  code_entry_points: ['src/export/pipeline.mjs', 'src/export/sink.mjs'],
+};
+
+test('enriched feature: feature page contains all six H2 sections for all-audience fields', async () => {
+  const result = await generateAudienceDocs({
+    features: [ENRICHED_FEATURE],
+    audiences: FOUR_AUDIENCES,
+  });
+  for (const aud of FOUR_AUDIENCES) {
+    const page = result.files.find(f => f.path === `${aud.path}/features/pipeline.md`);
+    assert.ok(page, `${aud.name}: features/pipeline.md should exist`);
+    assert.ok(page.content.includes('## Data model'),
+      `${aud.name}: feature page should have ## Data model`);
+    assert.ok(page.content.includes('## Invariants & constraints'),
+      `${aud.name}: feature page should have ## Invariants & constraints`);
+    assert.ok(page.content.includes('## Errors & failure modes'),
+      `${aud.name}: feature page should have ## Errors & failure modes`);
+    assert.ok(page.content.includes('## Related features'),
+      `${aud.name}: feature page should have ## Related features`);
+  }
+});
+
+test('enriched feature: config_reference appears only for admin and developer audiences', async () => {
+  const result = await generateAudienceDocs({
+    features: [ENRICHED_FEATURE],
+    audiences: FOUR_AUDIENCES,
+  });
+  for (const aud of FOUR_AUDIENCES) {
+    const page = result.files.find(f => f.path === `${aud.path}/features/pipeline.md`);
+    assert.ok(page, `${aud.name}: features/pipeline.md should exist`);
+    if (aud.name === 'admin' || aud.name === 'developer') {
+      assert.ok(page.content.includes('## Configuration'),
+        `${aud.name}: feature page should have ## Configuration`);
+    } else {
+      assert.ok(!page.content.includes('## Configuration'),
+        `${aud.name}: feature page must NOT have ## Configuration (not gated for ${aud.name})`);
+    }
+  }
+});
+
+test('enriched feature: rationale appears only for developer audience', async () => {
+  const result = await generateAudienceDocs({
+    features: [ENRICHED_FEATURE],
+    audiences: FOUR_AUDIENCES,
+  });
+  for (const aud of FOUR_AUDIENCES) {
+    const page = result.files.find(f => f.path === `${aud.path}/features/pipeline.md`);
+    assert.ok(page, `${aud.name}: features/pipeline.md should exist`);
+    if (aud.name === 'developer') {
+      assert.ok(page.content.includes('## Why'),
+        `${aud.name}: feature page should have ## Why`);
+    } else {
+      assert.ok(!page.content.includes('## Why'),
+        `${aud.name}: feature page must NOT have ## Why`);
+    }
+  }
+});
+
+test('enriched feature: section content is rendered into the page body', async () => {
+  const result = await generateAudienceDocs({
+    features: [ENRICHED_FEATURE],
+    audiences: [FOUR_AUDIENCES[1]], // developer — sees all sections
+  });
+  const page = result.files.find(f => f.path === 'docs/developer/features/pipeline.md');
+  assert.ok(page, 'developer feature page should exist');
+  assert.ok(page.content.includes(ENRICHED_FEATURE.data_model),
+    'data_model content should appear in page');
+  assert.ok(page.content.includes(ENRICHED_FEATURE.invariants),
+    'invariants content should appear in page');
+  assert.ok(page.content.includes(ENRICHED_FEATURE.errors),
+    'errors content should appear in page');
+  assert.ok(page.content.includes(ENRICHED_FEATURE.config_reference),
+    'config_reference content should appear in page');
+  assert.ok(page.content.includes(ENRICHED_FEATURE.rationale),
+    'rationale content should appear in page');
+  // depends_on renders feature ids
+  for (const dep of ENRICHED_FEATURE.depends_on) {
+    assert.ok(page.content.includes(dep),
+      `depends_on entry '${dep}' should appear in page`);
+  }
+});
+
+test('empty new fields are omitted — no blank H2 headings emitted', async () => {
+  const partialFeature = {
+    slug: 'partial',
+    title: 'Partial',
+    summary: 'Has only some new fields.',
+    data_model: 'A partial data model.',
+    // invariants, errors, config_reference, rationale, depends_on all absent
+  };
+  const result = await generateAudienceDocs({
+    features: [partialFeature],
+    audiences: FOUR_AUDIENCES,
+  });
+  for (const aud of FOUR_AUDIENCES) {
+    const page = result.files.find(f => f.path === `${aud.path}/features/partial.md`);
+    assert.ok(page, `${aud.name}: features/partial.md should exist`);
+    // data_model is present → should render
+    assert.ok(page.content.includes('## Data model'),
+      `${aud.name}: ## Data model should appear for partial feature`);
+    // absent fields → no heading
+    assert.ok(!page.content.includes('## Invariants & constraints'),
+      `${aud.name}: ## Invariants & constraints must not appear when field absent`);
+    assert.ok(!page.content.includes('## Errors & failure modes'),
+      `${aud.name}: ## Errors & failure modes must not appear when field absent`);
+    assert.ok(!page.content.includes('## Related features'),
+      `${aud.name}: ## Related features must not appear when field absent`);
+    assert.ok(!page.content.includes('## Configuration'),
+      `${aud.name}: ## Configuration must not appear when field absent`);
+    assert.ok(!page.content.includes('## Why'),
+      `${aud.name}: ## Why must not appear when field absent`);
+  }
+});
+
+test('backward compat: legacy feature (summary+spec_sections only) produces byte-identical output', async () => {
+  // Generate without new fields — establish baseline.
+  const baseline = await generateAudienceDocs({
+    features: [LEGACY_FEATURE],
+    audiences: FOUR_AUDIENCES,
+    aiReviewStub: 'high',
+  });
+  // Generate again — should be identical (idempotent + no new sections).
+  const second = await generateAudienceDocs({
+    features: [LEGACY_FEATURE],
+    audiences: FOUR_AUDIENCES,
+    aiReviewStub: 'high',
+  });
+  for (const file of baseline.files) {
+    const match = second.files.find(f => f.path === file.path);
+    assert.ok(match, `${file.path}: should appear in second run`);
+    assert.equal(match.content, file.content,
+      `${file.path}: legacy feature must produce byte-identical output on re-run`);
+  }
+  // Confirm no new section headings leaked into legacy output.
+  for (const file of second.files) {
+    assert.ok(!file.content.includes('## Data model'),
+      `${file.path}: legacy feature must not emit ## Data model`);
+    assert.ok(!file.content.includes('## Invariants & constraints'),
+      `${file.path}: legacy feature must not emit ## Invariants & constraints`);
+    assert.ok(!file.content.includes('## Errors & failure modes'),
+      `${file.path}: legacy feature must not emit ## Errors & failure modes`);
+    assert.ok(!file.content.includes('## Configuration'),
+      `${file.path}: legacy feature must not emit ## Configuration`);
+    assert.ok(!file.content.includes('## Why'),
+      `${file.path}: legacy feature must not emit ## Why`);
+    assert.ok(!file.content.includes('## Related features'),
+      `${file.path}: legacy feature must not emit ## Related features`);
+  }
+});
+
+// ── Track D: logic-flow diagram tests (issue #1131) ──────────────────────────
+
+// A feature whose spec_sections describe logic/flow (ordered steps + decision
+// language). The feature page must contain a mermaid fenced block with the
+// palette %%{init}%% header from doc-style.mjs.
+const FLOW_FEATURE = {
+  slug: 'flow-feature',
+  title: 'Flow Feature',
+  summary: 'Demonstrates logic-flow diagram emission.',
+  spec_sections: [
+    // This section satisfies isLogicFlowSection: ordered steps + decision
+    '1. Validate input record against schema.\n2. If valid, enqueue record for processing.\n3. Otherwise, emit INVALID_RECORD error and reject.',
+  ],
+};
+
+// A feature with a plain prose section — no ordered steps, no flow language.
+const NON_FLOW_FEATURE = {
+  slug: 'non-flow-feature',
+  title: 'Non Flow Feature',
+  summary: 'Has a plain prose section — no logic flow.',
+  spec_sections: [
+    'This feature stores configuration settings for the application.',
+  ],
+};
+
+test('Track D: logic-flow spec section yields a themed mermaid block in the feature page', async () => {
+  const result = await generateAudienceDocs({
+    features: [FLOW_FEATURE],
+    audiences: [FOUR_AUDIENCES[0]], // user audience
+  });
+  const page = result.files.find(f => f.path === 'docs/user/features/flow-feature.md');
+  assert.ok(page, 'feature page should exist');
+  // The mermaid block must contain the %%{init}%% header from mermaidInit()
+  assert.ok(
+    page.content.includes('%%{init:'),
+    'logic-flow section must yield a themed mermaid %%{init}%% block',
+  );
+  // Must be wrapped in a mermaid fenced code block
+  assert.ok(
+    page.content.includes('```mermaid'),
+    'logic-flow section must yield a ```mermaid fenced block',
+  );
+});
+
+test('Track D: non-flow spec section yields no mermaid block in the feature page', async () => {
+  const result = await generateAudienceDocs({
+    features: [NON_FLOW_FEATURE],
+    audiences: [FOUR_AUDIENCES[0]],
+  });
+  const page = result.files.find(f => f.path === 'docs/user/features/non-flow-feature.md');
+  assert.ok(page, 'non-flow feature page should exist');
+  assert.ok(
+    !page.content.includes('```mermaid'),
+    'non-flow section must NOT yield a mermaid block',
+  );
+});
+
+test('Track D: gen-audience-docs.mjs imports doc-style.mjs (no second palette source)', async () => {
+  const src = fs.readFileSync(path.join(SCRIPTS_DIR, 'gen-audience-docs.mjs'), 'utf8');
+  assert.ok(
+    /doc-style\.mjs/.test(src) && /\bimport\b/.test(src),
+    'gen-audience-docs.mjs must import from doc-style.mjs',
+  );
+  // Must call the two exported functions
+  assert.ok(/isLogicFlowSection/.test(src), 'must reference isLogicFlowSection');
+  assert.ok(/generateExplainerDiagram/.test(src), 'must reference generateExplainerDiagram');
+  // Must NOT hardcode palette hex values (single-source guard). Derive the hex
+  // list from PALETTE at runtime so this test file introduces no second source.
+  const { PALETTE } = await import(path.join(SCRIPTS_DIR, 'doc-style.mjs'));
+  const paletteHexes = Object.values(PALETTE).filter((v) => /^#[0-9a-fA-F]{3,8}$/.test(v));
+  const hardcoded = paletteHexes.filter((hex) => src.includes(hex));
+  assert.deepStrictEqual(
+    hardcoded,
+    [],
+    'gen-audience-docs.mjs must not hardcode palette hex values (single-source guard)',
+  );
+});
+
+// ── Test D6-4: batched ai-review parse round-trip
 //
 // Confirm that per-section confidence markers in the ai_review field are correctly
 // set on each page, and that the annotation contract (<!-- ai-reviewed: ... -->)
@@ -479,4 +729,135 @@ test('§D6: batched ai-review annotations parse correctly (round-trip)', async (
   } finally {
     fs.rmSync(cacheDir, { recursive: true, force: true });
   }
+});
+
+// ── Per-audience prose resolver + sameness guard (the "fake audience" fix) ─────
+
+test('pickForAudience: returns the audience-specific value from a per-audience map', () => {
+  const map = { user: 'U', developer: 'D', admin: 'A', general: 'G' };
+  assert.equal(pickForAudience(map, 'user'), 'U');
+  assert.equal(pickForAudience(map, 'developer'), 'D');
+  assert.equal(pickForAudience(map, 'admin'), 'A');
+  assert.equal(pickForAudience(map, 'general'), 'G');
+});
+
+test('pickForAudience: falls back to default when the audience key is absent', () => {
+  const map = { user: 'U', default: 'FALLBACK' };
+  assert.equal(pickForAudience(map, 'user'), 'U');
+  assert.equal(pickForAudience(map, 'developer'), 'FALLBACK');
+  assert.equal(pickForAudience(map, 'admin'), 'FALLBACK');
+});
+
+test('pickForAudience: returns null when neither the audience key nor default exists', () => {
+  const map = { user: 'U' };
+  assert.equal(pickForAudience(map, 'developer'), null);
+});
+
+test('pickForAudience: returns shared scalar/array/undefined values unchanged', () => {
+  assert.equal(pickForAudience('shared string', 'user'), 'shared string');
+  const arr = ['a', 'b'];
+  assert.equal(pickForAudience(arr, 'developer'), arr); // same reference
+  assert.equal(pickForAudience(undefined, 'user'), undefined);
+  assert.equal(pickForAudience(null, 'user'), null);
+});
+
+test('pickForAudience: a normal data object (no audience keys, no default) is treated as shared', () => {
+  const obj = { id: 1, payload: 'x', ts: 'now' };
+  assert.equal(pickForAudience(obj, 'user'), obj); // same reference — not an audience map
+});
+
+test('pickForAudience: handles per-audience array form for spec_sections', () => {
+  const map = { user: ['user section'], developer: ['dev section'], default: ['shared'] };
+  assert.deepEqual(pickForAudience(map, 'user'), ['user section']);
+  assert.deepEqual(pickForAudience(map, 'developer'), ['dev section']);
+  assert.deepEqual(pickForAudience(map, 'admin'), ['shared']);
+});
+
+const PER_AUDIENCE_FEATURE = {
+  slug: 'aggregator',
+  title: 'Aggregator',
+  summary: {
+    user: 'Run the aggregator to combine your records.',
+    developer: 'The aggregator fans in streams via a merge tree.',
+    default: 'Combines records.',
+  },
+  spec_sections: {
+    user: ['USER_PROSE: click Run to aggregate your data.'],
+    developer: ['DEV_PROSE: the merge tree uses a k-way heap internally.'],
+    default: ['SHARED_PROSE: aggregation overview.'],
+  },
+};
+
+test('per-audience spec_sections render DIFFERENT body prose across audiences', async () => {
+  const result = await generateAudienceDocs({
+    features: [PER_AUDIENCE_FEATURE],
+    audiences: FOUR_AUDIENCES,
+  });
+  const userPage = result.files.find(f => f.path === 'docs/user/features/aggregator.md');
+  const devPage = result.files.find(f => f.path === 'docs/developer/features/aggregator.md');
+  assert.ok(userPage && devPage, 'both feature pages should exist');
+
+  assert.ok(userPage.content.includes('USER_PROSE: click Run to aggregate your data.'),
+    'user page should contain user-specific prose');
+  assert.ok(!userPage.content.includes('DEV_PROSE'),
+    'user page must NOT contain developer prose');
+
+  assert.ok(devPage.content.includes('DEV_PROSE: the merge tree uses a k-way heap internally.'),
+    'developer page should contain developer-specific prose');
+  assert.ok(!devPage.content.includes('USER_PROSE'),
+    'developer page must NOT contain user prose');
+
+  // admin/general fall back to default.
+  const adminPage = result.files.find(f => f.path === 'docs/admin/features/aggregator.md');
+  assert.ok(adminPage.content.includes('SHARED_PROSE: aggregation overview.'),
+    'admin page should fall back to default prose');
+
+  // Per-audience summary should reach the index list too.
+  const userIndex = result.files.find(f => f.path === 'docs/user/index.md');
+  assert.ok(userIndex.content.includes('Run the aggregator to combine your records.'),
+    'user index should carry the user-specific summary');
+});
+
+test('shared (array) spec_sections render identically across audiences AND trigger a sameness warning', async () => {
+  const result = await generateAudienceDocs({
+    features: [LEGACY_FEATURE],
+    audiences: FOUR_AUDIENCES,
+  });
+  assert.ok(Array.isArray(result.warnings), 'result should expose a warnings array');
+  assert.ok(
+    result.warnings.some(w => w.includes(LEGACY_FEATURE.slug) && /identical/.test(w)),
+    `expected a sameness warning for '${LEGACY_FEATURE.slug}', got: ${JSON.stringify(result.warnings)}`,
+  );
+});
+
+test('per-audience prose does NOT trigger a sameness warning', async () => {
+  const result = await generateAudienceDocs({
+    features: [PER_AUDIENCE_FEATURE],
+    audiences: FOUR_AUDIENCES,
+  });
+  assert.ok(Array.isArray(result.warnings), 'result should expose a warnings array');
+  assert.ok(
+    !result.warnings.some(w => w.includes('aggregator')),
+    `per-audience feature should not warn; got: ${JSON.stringify(result.warnings)}`,
+  );
+});
+
+test('failOnIdenticalAudiences: true throws when a feature is identical across audiences', async () => {
+  await assert.rejects(
+    generateAudienceDocs({
+      features: [LEGACY_FEATURE],
+      audiences: FOUR_AUDIENCES,
+      failOnIdenticalAudiences: true,
+    }),
+    /identical/i,
+  );
+});
+
+test('failOnIdenticalAudiences: true does NOT throw when per-audience prose differs', async () => {
+  const result = await generateAudienceDocs({
+    features: [PER_AUDIENCE_FEATURE],
+    audiences: FOUR_AUDIENCES,
+    failOnIdenticalAudiences: true,
+  });
+  assert.ok(result.files.length > 0, 'should produce files when prose differs per audience');
 });

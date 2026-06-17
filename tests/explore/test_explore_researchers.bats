@@ -84,6 +84,25 @@ EOF
     [[ "$output" == *"TODO"* ]]
 }
 
+@test "codebase-signals ignores prose markers + doc assets, keeps real annotations" {
+    mkdir -p src docs/site
+    # Real annotation (MARKER: shape) in a source file -> SHOULD be proposed.
+    printf 'def f():\n    # TODO: implement the parser\n    return 1\n' > src/real.py
+    # Prose that merely contains the word TODO (no annotation shape) -> must NOT match.
+    printf 'def g():\n    # build me a TODO list helper later\n    return 2\n' > src/prose.py
+    # Marketing copy in a non-.md doc asset -> excluded by path.
+    printf '<li>autospec define "build me a TODO list CLI"</li>\n' > docs/site/index.html
+    git add -A && git commit -q -m init
+    run bash "$REPO_ROOT/scripts/explore-research/codebase-signals.sh"
+    [ "$status" -eq 0 ]
+    assert_well_formed "$output"
+    # Real annotation surfaces.
+    [[ "$output" == *"src/real.py"* ]]
+    # Prose + doc-asset false positives are filtered out.
+    [[ "$output" != *"src/prose.py"* ]]
+    [[ "$output" != *"index.html"* ]]
+}
+
 @test "open-issues emits well-formed JSON from injected fake gh output" {
     cat > issues.json <<'EOF'
 [
