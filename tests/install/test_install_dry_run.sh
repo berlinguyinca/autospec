@@ -11,7 +11,7 @@ case "$output" in
 esac
 
 case "$output" in
-    *tobihagemann/turbo*) ;;
+    *berlinguyinca/turbo*) ;;
     *) echo "FAIL: turbo repo not mentioned in dry-run output"; exit 1 ;;
 esac
 

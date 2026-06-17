@@ -534,3 +534,79 @@ test('generateLlmsFull (Track E): re-run with same inputs produces identical out
   const run2 = generateLlmsFull(opts);
   assert.strictEqual(run1, run2, 'two runs with identical inputs must produce byte-identical output');
 });
+
+// ── Round 2 (content fidelity): real summaries, source→doc routing, real public_api ──
+
+// A page shaped like real generator output: H1, H2, a MULTI-LINE autospec-doc-scope
+// comment whose interior `src:` line previously leaked in as the "summary", an italic
+// audience-boilerplate line, then the real feature summary prose.
+const SCOPED_PAGE = {
+  audience: 'developer',
+  feature: 'export-pipeline',
+  path: 'docs/developer/features/export-pipeline.md',
+  content: [
+    '# Export Pipeline (developer)',
+    '',
+    '## Export Pipeline',
+    '',
+    '<!-- autospec-doc-scope:',
+    '  src: ["src/export/pipeline.mjs"]',
+    '  reason: "export-pipeline reference for developer"',
+    '  generated: true',
+    '-->',
+    '',
+    '_Reference for the **developer** audience (architecture, APIs, extending)._',
+    '',
+    'Streams records out to downstream sinks with bounded back-pressure.',
+    '',
+  ].join('\n'),
+};
+
+test('R2: llms.txt link description is the real feature summary, not the src glob', () => {
+  const idx = generateLlmsIndex({ pages: [SCOPED_PAGE] });
+  assert.ok(idx.includes('Streams records out to downstream sinks with bounded back-pressure.'),
+    'description must be the real prose summary');
+  assert.ok(!/src:\s*\[/.test(idx), 'description must NOT be the src: [...] glob');
+});
+
+test('R2: manifest module summary is the real prose, not the src glob', () => {
+  const manifest = { schema_version: '1.0', modules: [], cli_entry_points: [], concepts: [], faq: [] };
+  fillManifest(manifest, [SCOPED_PAGE]);
+  const mod = manifest.modules.find(m => m.path === SCOPED_PAGE.path);
+  assert.ok(mod, 'module entry exists');
+  assert.strictEqual(mod.summary, 'Streams records out to downstream sinks with bounded back-pressure.');
+  assert.ok(!mod.summary.includes('src:'), 'summary must not contain the src glob');
+});
+
+test('R2: reverse-routing maps source files to docs, not doc-to-itself identity', () => {
+  const out = generateLlmsFull({ pages: [SCOPED_PAGE] });
+  assert.ok(out.includes('src/export/pipeline.mjs -> docs/developer/features/export-pipeline.md'),
+    'reverse-routing must map the source file to the doc that references it');
+  assert.ok(!/docs\/developer\/features\/export-pipeline\.md#L1 -> /.test(out),
+    'reverse-routing must NOT emit the identity doc#L1 -> doc form');
+});
+
+test('R2: manifest public_api is extracted from the real code_entry_points source', () => {
+  const repoRoot = makeTmpDir();
+  fs.mkdirSync(path.join(repoRoot, 'src', 'export'), { recursive: true });
+  fs.writeFileSync(path.join(repoRoot, 'src', 'export', 'pipeline.mjs'), [
+    'export function flushBatch() {}',
+    'export const MAX_RETRIES = 5;',
+    'export class Sink {}',
+    'function privateHelper() {}',
+  ].join('\n'));
+  const manifest = { schema_version: '1.0', modules: [], cli_entry_points: [], concepts: [], faq: [] };
+  fillManifest(manifest, [SCOPED_PAGE], { repoRoot });
+  const mod = manifest.modules.find(m => m.path === SCOPED_PAGE.path);
+  assert.ok(mod, 'module entry exists');
+  for (const sym of ['flushBatch', 'MAX_RETRIES', 'Sink']) {
+    assert.ok(mod.public_api.includes(sym), `public_api must include exported ${sym}`);
+  }
+  assert.ok(!mod.public_api.includes('privateHelper'), 'non-exported symbols must be excluded');
+});
+
+test('R2: generateLlmsFull stays deterministic with scoped pages', () => {
+  const a = generateLlmsFull({ pages: [SCOPED_PAGE] });
+  const b = generateLlmsFull({ pages: [SCOPED_PAGE] });
+  assert.strictEqual(a, b, 'scoped-page output must be byte-identical across runs');
+});

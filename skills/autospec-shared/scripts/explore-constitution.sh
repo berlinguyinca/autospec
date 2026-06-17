@@ -18,6 +18,7 @@
 # Deterministic rules enforced by --filter:
 #   D1 Evidence  — proposal.evidence must be non-empty.
 #   D2 Confidence— proposal.confidence must be >= the floor.
+#   D3 Substance — drop bare "chore: address <marker>" (TODO/FIXME/XXX/HACK) churn.
 # (Keep these byte-aligned with the cycle's inline check in explore-research-cycle.sh.)
 #
 # Environment:
@@ -61,6 +62,7 @@ by the TIER_A ranker during the critique-revise step.
 ## Deterministic (enforced automatically)
 - **D1 Evidence** — every proposal MUST cite concrete repo/spec evidence (non-empty `evidence`).
 - **D2 Confidence floor** — drop proposals with confidence below `AUTOSPEC_EXPLORE_MIN_CONFIDENCE` (default 0.3).
+- **D3 Substance** — drop bare `chore: address <marker>` proposals (raw TODO/FIXME/XXX/HACK churn). These need human triage, not autonomous implementation, and otherwise crowd out substantive spec-drift / prior-report / triaged-issue work.
 
 ## Judgment (TIER_A critique-revise before filing)
 - **J1 Scope** — prefer ≤ medium complexity; a `large` proposal must be split into a parent + child (`Depends on`) before filing.
@@ -94,7 +96,7 @@ case "$MODE" in
     input="$(cat)"
     [ -n "$input" ] || { printf '[]'; exit 0; }
     kept="$(printf '%s' "$input" | jq -c --argjson floor "$FLOOR" \
-      '[ .[] | select(((.evidence // "") | tostring | gsub("^\\s+|\\s+$";"")) != "") | select((.confidence // 0) >= $floor) ]' 2>/dev/null)"
+      '[ .[] | select(((.evidence // "") | tostring | gsub("^\\s+|\\s+$";"")) != "") | select((.confidence // 0) >= $floor) | select(((.title // "") | tostring | test("^\\s*chore:\\s*address\\s+(TODO|FIXME|XXX|HACK)\\b"; "i")) | not) ]' 2>/dev/null)"
     if [ -z "$kept" ]; then
       echo "explore-constitution: WARN filter produced no output (malformed input?)" >&2
       printf '[]'; exit 0

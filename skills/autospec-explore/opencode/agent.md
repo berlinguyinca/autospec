@@ -1,5 +1,5 @@
 ---
-description: Use when the user wants /autospec-explore to start a perpetual autonomous research + ship loop on an isolated sandbox branch — 7 universal + 3 discovery (quality-resilience, dogfooding, self-leverage) + N domain-specialist researchers propose features and defects, filtered through an adversarial verify + ROI + severity-first rank, then drain via /autospec-run with PRs targeting the sandbox branch (never main).
+description: Use when the user wants /autospec-explore to start a perpetual autonomous research + ship loop on an isolated sandbox branch — 7 universal + 4 discovery (quality-resilience, dogfooding, self-leverage, style-normalization) + N domain-specialist researchers propose features and defects, filtered through an adversarial verify + ROI + severity-first rank, then drain via /autospec-run with PRs targeting the sandbox branch (never main).
 mode: primary
 ---
 
@@ -9,12 +9,12 @@ Start a perpetual autonomous research + ship loop. `/autospec-explore "<initial 
 creates an isolated sandbox branch (`autospec/explore/<date>-<slug>`) off `origin/main`,
 runs a roster of parallel researchers each round — **7 universal** (spec-vs-code,
 prior reports, codebase signals, open issues, source analysis, dependency health,
-internet) **+ 3 discovery** (quality-resilience, dogfooding, self-leverage) **+ N
-domain specialists** — aggregates through dedup → verify → ROI → pattern-synthesis →
-severity-first rank, files 1-5 auto-implement issues per round,
-drains them via `/autospec-run` with PRs targeting the sandbox, and continues until
-the operator stops it. The operator inspects the sandbox when ready and either merges
-into `main` or discards.
+internet) **+ 4 discovery** (quality-resilience, dogfooding, self-leverage,
+style-normalization) **+ N domain specialists** — aggregates through dedup → verify
+→ ROI → pattern-synthesis → severity-first rank, files 1-5 auto-implement issues per
+round, drains them via `/autospec-run` with PRs targeting the sandbox, and continues
+until the operator stops it. The operator inspects the sandbox when ready and either
+merges into `main` or discards.
 
 Manage your own context — never exceed 60%. Delegate to subagents whenever your
 harness supports it; do not run researchers or aggregate proposals directly in the
@@ -101,7 +101,7 @@ Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B"
    │  perpetual loop (single iteration shown) │
    │                                          │
    │  1. research cycle:                      │
-   │     - 7 universal + 3 discovery + N      │
+   │     - 7 universal + 4 discovery + N      │
    │       specialist researchers in parallel │
    │     - dedup -> verify -> ROI ->          │
    │       synthesis -> severity-first rank   │
@@ -168,7 +168,7 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
 - `--budget-hours N` — wall-time budget. Default 24h.
 - `--sandbox-slug <slug>` — override sandbox branch slug.
 - `--research-sources <list>` — limit to a comma-separated subset of the
-  universal + discovery researcher names. Default: all 10 (7 universal + 3
+  universal + discovery researcher names. Default: all 11 (7 universal + 4
   discovery); domain specialists are controlled separately via
   `--specialists-mode`.
 - `--no-internet` — disable internet research (the most expensive +
@@ -227,7 +227,7 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
 
 ## Research cycle contract
 
-Each round runs the full researcher roster (7 universal + 3 discovery + N
+Each round runs the full researcher roster (7 universal + 4 discovery + N
 specialists, or the operator-specified subset of the universal+discovery set) in
 parallel. Each researcher returns 0-N proposals as JSON:
 
@@ -310,13 +310,13 @@ links it, then decomposes it into linked auto-implement issues. Per round:
 
 The research cycle is **extended** (not replaced) to raise discovery quality and
 cut the false-positive rate that is this skill's known failure mode. The full
-per-round researcher roster is **7 universal + 3 discovery + N domain
+per-round researcher roster is **7 universal + 4 discovery + N domain
 specialists**:
 
 - **7 universal researchers** (the corrected baseline; the stale "6" is gone):
   `spec-vs-code`, `prior-reports`, `codebase-signals`, `open-issues`,
   `source-analysis`, `dependency-health`, `internet`.
-- **3 discovery researchers** (`scripts/explore-research/`), grounded in real
+- **4 discovery researchers** (`scripts/explore-research/`), grounded in real
   behavior and concrete invariants rather than grep-of-prose noise:
   - `quality-resilience` (weight 0.95) — four QA lenses: self-consistent
     fixtures built with the SUT's own derivation expr, assertion-free tests,
@@ -333,6 +333,23 @@ specialists**:
     a human decision/intervention/relaunch is still required, checked against the
     autonomy-scope rule (low-stakes auto-resolves; only run/defer/refine +
     destructive-remote reach the operator). Cap 50/round.
+  - `style-normalization` (weight 0.85) — runs only when frontend signals are
+    present (for example `package.json` frontend deps, `src/**` routes/components,
+    CSS modules, Tailwind config, design-token files, Storybook, or Playwright
+    config). It inventories visual primitives across SPA/webapp pages: duplicated
+    colors, spacing, typography, elevation, radii, ad hoc inline styles, mixed
+    component-library usage, and one-off button/input/card/modal/table patterns.
+    Proposals MUST name the normalization target (token, theme layer, shared
+    component, or stylesheet boundary), cite concrete file/page evidence, and
+    avoid subjective "make it nicer" wording. If no Playwright coverage or
+    screenshots exist for the affected UI surface, the researcher MUST
+    automatically generate them before filing by invoking
+    `AUTOSPEC_EXPLORE_STYLE_PROOF_CMD` when set. Routing through
+    `/autospec-playwright` or `/autospec-test` Stage 2A is a best-effort fallback,
+    not sufficient by itself. Generated proof artifacts must include at least one
+    route-level Playwright test plus before/after-ready screenshots under a deterministic path such as
+    `.autospec/style-normalization/<round>/`. Proposals without Playwright or
+    screenshot evidence are refuted by default in the verify stage. Cap 40/round.
 - **N domain specialists** — an LLM-persona researcher per detected repo domain,
   emitting the same extended proposal JSON with `source = specialist:<slug>`
   (e.g. `specialist:market-risk`), default weight 0.6. See "Domain-specialist
@@ -371,7 +388,7 @@ specialists**:
    total absence of skeptic capability → no map, pass 2 no-ops to the
    **observable** `verify_mode=no-op-unverified` with a
    `code_health:explore_verify_noop` warning (never a silent all-survive).
-3. **ROI gate** — drop proposals with an empty `named_consumer`. **Only the 3
+3. **ROI gate** — drop proposals with an empty `named_consumer`. **Only the 4
    discovery researchers and `specialist:<slug>` sources are ROI-gated**
    (new-source rollout safety); the 7 legacy universal researchers are exempt.
 4. **Pattern synthesis** — survivors are grouped by a coarse class key; any
@@ -394,6 +411,13 @@ The per-iteration log (`.autospec/explore-loop.json`) gains
 verification yield. The outcome ledger additionally records per-source
 **refutation rate** from the verify stage and down-weights chronically-refuted
 sources automatically.
+
+The `style-normalization` researcher is opt-in by `--research-sources
+style-normalization` and auto-enabled by prompts that ask to normalize styling,
+unify the look and feel, harmonize UI, or clean up SPA/webapp visual drift. In
+autonomous runs with frontend signals and no explicit `--research-sources`, it
+joins the default discovery roster; in non-frontend repos it emits
+`{"source":"style-normalization","proposals":[]}` and exits 0.
 
 This methodology also ships as the operator-runnable runbook
 `docs/runbooks/discovery-sweep.md` (one-shot sweep without arming the loop);
@@ -444,7 +468,7 @@ New invocation flags:
 Guardrails: specialists are **researchers, not implementers** — they only
 propose, and every proposal flows through the same verify → ROI → synthesis →
 severity rank pipeline; a domain persona cannot bypass the skeptic stage. The
-total parallel researcher count is capped at `7 + 3 + ≤6 = ≤16` per round.
+total parallel researcher count is capped at `7 + 4 + ≤6 = ≤17` per round.
 Discovery degrades gracefully: a generic repo with no detectable domain yields
 an empty roster and the loop runs exactly as today. Specialist personas are
 derived from repo evidence only — no external persona is injected from the
@@ -461,6 +485,7 @@ operator-editable). The gate has two layers:
    `explore-constitution.sh --filter`):
    - **D1 Evidence** — drop proposals with empty `evidence` (no concrete repo/spec citation).
    - **D2 Confidence floor** — drop proposals below `AUTOSPEC_EXPLORE_MIN_CONFIDENCE` (default 0.3).
+   - **D3 Substance** — drop bare `chore: address <marker>` proposals (raw TODO/FIXME/XXX/HACK churn); these need human triage, not autonomous implementation.
    The cycle reports the survivor count as `proposals_after_constitution`.
 2. **Judgment (TIER_A critique-revise)** — for the ranked survivors, the
    aggregator/ranker critiques each against the constitution's judgment rules
@@ -514,9 +539,9 @@ Markdown shape:
 
 | Round | Researchers run | Proposals | Issues filed | PRs merged | Time | Status |
 |---|---|---|---|---|---|---|
-| 1 | 13/13 | 17 (deduped to 12, 9 verified) | 5 | 5 | 28m | round_complete |
-| 2 | 13/13 | 14 (deduped to 9, 7 verified) | 4 | 4 | 22m | round_complete |
-| 3 | 13/13 | 8 (deduped to 6, 5 verified) | 5 | 3 + 2 in flight | 31m | operator_stop |
+| 1 | 14/14 | 17 (deduped to 12, 9 verified) | 5 | 5 | 28m | round_complete |
+| 2 | 14/14 | 14 (deduped to 9, 7 verified) | 4 | 4 | 22m | round_complete |
+| 3 | 14/14 | 8 (deduped to 6, 5 verified) | 5 | 3 + 2 in flight | 31m | operator_stop |
 
 Final status: operator_stop after 3 rounds, 14 PRs merged on sandbox.
 
