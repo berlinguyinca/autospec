@@ -450,6 +450,178 @@ test('§D6: exactly ONE batched ai-review call per audience (not per section)', 
   assert.equal(confidences[0], 'high', 'stub=high should annotate all pages as high');
 });
 
+// ── Tests for six new LLM-targeted H2 sections (issue #1129) ─────────────────
+
+// Feature fixture with all six new fields populated.
+const ENRICHED_FEATURE = {
+  slug: 'pipeline',
+  title: 'Pipeline',
+  summary: 'Moves data through stages.',
+  spec_sections: ['Overview of pipeline stages.'],
+  data_model: '`Record { id, payload, ts }` — the unit of work.',
+  invariants: 'Records are immutable once enqueued.',
+  errors: '`QUEUE_FULL` — backpressure exceeded; `INVALID_RECORD` — schema mismatch.',
+  config_reference: '`pipeline.maxQueue` (default 1000) — maximum in-flight records.',
+  rationale: 'The pipeline decouples producers from consumers to allow backpressure.',
+  depends_on: ['auth', 'export-pipeline'],
+};
+
+// Legacy feature — only has summary + spec_sections (no new fields).
+const LEGACY_FEATURE = {
+  slug: 'export-pipeline',
+  title: 'Export Pipeline',
+  summary: 'Streams records out to downstream sinks.',
+  spec_sections: ['The export pipeline batches records and flushes to sinks.'],
+  code_entry_points: ['src/export/pipeline.mjs', 'src/export/sink.mjs'],
+};
+
+test('enriched feature: feature page contains all six H2 sections for all-audience fields', async () => {
+  const result = await generateAudienceDocs({
+    features: [ENRICHED_FEATURE],
+    audiences: FOUR_AUDIENCES,
+  });
+  for (const aud of FOUR_AUDIENCES) {
+    const page = result.files.find(f => f.path === `${aud.path}/features/pipeline.md`);
+    assert.ok(page, `${aud.name}: features/pipeline.md should exist`);
+    assert.ok(page.content.includes('## Data model'),
+      `${aud.name}: feature page should have ## Data model`);
+    assert.ok(page.content.includes('## Invariants & constraints'),
+      `${aud.name}: feature page should have ## Invariants & constraints`);
+    assert.ok(page.content.includes('## Errors & failure modes'),
+      `${aud.name}: feature page should have ## Errors & failure modes`);
+    assert.ok(page.content.includes('## Related features'),
+      `${aud.name}: feature page should have ## Related features`);
+  }
+});
+
+test('enriched feature: config_reference appears only for admin and developer audiences', async () => {
+  const result = await generateAudienceDocs({
+    features: [ENRICHED_FEATURE],
+    audiences: FOUR_AUDIENCES,
+  });
+  for (const aud of FOUR_AUDIENCES) {
+    const page = result.files.find(f => f.path === `${aud.path}/features/pipeline.md`);
+    assert.ok(page, `${aud.name}: features/pipeline.md should exist`);
+    if (aud.name === 'admin' || aud.name === 'developer') {
+      assert.ok(page.content.includes('## Configuration'),
+        `${aud.name}: feature page should have ## Configuration`);
+    } else {
+      assert.ok(!page.content.includes('## Configuration'),
+        `${aud.name}: feature page must NOT have ## Configuration (not gated for ${aud.name})`);
+    }
+  }
+});
+
+test('enriched feature: rationale appears only for developer audience', async () => {
+  const result = await generateAudienceDocs({
+    features: [ENRICHED_FEATURE],
+    audiences: FOUR_AUDIENCES,
+  });
+  for (const aud of FOUR_AUDIENCES) {
+    const page = result.files.find(f => f.path === `${aud.path}/features/pipeline.md`);
+    assert.ok(page, `${aud.name}: features/pipeline.md should exist`);
+    if (aud.name === 'developer') {
+      assert.ok(page.content.includes('## Why'),
+        `${aud.name}: feature page should have ## Why`);
+    } else {
+      assert.ok(!page.content.includes('## Why'),
+        `${aud.name}: feature page must NOT have ## Why`);
+    }
+  }
+});
+
+test('enriched feature: section content is rendered into the page body', async () => {
+  const result = await generateAudienceDocs({
+    features: [ENRICHED_FEATURE],
+    audiences: [FOUR_AUDIENCES[1]], // developer — sees all sections
+  });
+  const page = result.files.find(f => f.path === 'docs/developer/features/pipeline.md');
+  assert.ok(page, 'developer feature page should exist');
+  assert.ok(page.content.includes(ENRICHED_FEATURE.data_model),
+    'data_model content should appear in page');
+  assert.ok(page.content.includes(ENRICHED_FEATURE.invariants),
+    'invariants content should appear in page');
+  assert.ok(page.content.includes(ENRICHED_FEATURE.errors),
+    'errors content should appear in page');
+  assert.ok(page.content.includes(ENRICHED_FEATURE.config_reference),
+    'config_reference content should appear in page');
+  assert.ok(page.content.includes(ENRICHED_FEATURE.rationale),
+    'rationale content should appear in page');
+  // depends_on renders feature ids
+  for (const dep of ENRICHED_FEATURE.depends_on) {
+    assert.ok(page.content.includes(dep),
+      `depends_on entry '${dep}' should appear in page`);
+  }
+});
+
+test('empty new fields are omitted — no blank H2 headings emitted', async () => {
+  const partialFeature = {
+    slug: 'partial',
+    title: 'Partial',
+    summary: 'Has only some new fields.',
+    data_model: 'A partial data model.',
+    // invariants, errors, config_reference, rationale, depends_on all absent
+  };
+  const result = await generateAudienceDocs({
+    features: [partialFeature],
+    audiences: FOUR_AUDIENCES,
+  });
+  for (const aud of FOUR_AUDIENCES) {
+    const page = result.files.find(f => f.path === `${aud.path}/features/partial.md`);
+    assert.ok(page, `${aud.name}: features/partial.md should exist`);
+    // data_model is present → should render
+    assert.ok(page.content.includes('## Data model'),
+      `${aud.name}: ## Data model should appear for partial feature`);
+    // absent fields → no heading
+    assert.ok(!page.content.includes('## Invariants & constraints'),
+      `${aud.name}: ## Invariants & constraints must not appear when field absent`);
+    assert.ok(!page.content.includes('## Errors & failure modes'),
+      `${aud.name}: ## Errors & failure modes must not appear when field absent`);
+    assert.ok(!page.content.includes('## Related features'),
+      `${aud.name}: ## Related features must not appear when field absent`);
+    assert.ok(!page.content.includes('## Configuration'),
+      `${aud.name}: ## Configuration must not appear when field absent`);
+    assert.ok(!page.content.includes('## Why'),
+      `${aud.name}: ## Why must not appear when field absent`);
+  }
+});
+
+test('backward compat: legacy feature (summary+spec_sections only) produces byte-identical output', async () => {
+  // Generate without new fields — establish baseline.
+  const baseline = await generateAudienceDocs({
+    features: [LEGACY_FEATURE],
+    audiences: FOUR_AUDIENCES,
+    aiReviewStub: 'high',
+  });
+  // Generate again — should be identical (idempotent + no new sections).
+  const second = await generateAudienceDocs({
+    features: [LEGACY_FEATURE],
+    audiences: FOUR_AUDIENCES,
+    aiReviewStub: 'high',
+  });
+  for (const file of baseline.files) {
+    const match = second.files.find(f => f.path === file.path);
+    assert.ok(match, `${file.path}: should appear in second run`);
+    assert.equal(match.content, file.content,
+      `${file.path}: legacy feature must produce byte-identical output on re-run`);
+  }
+  // Confirm no new section headings leaked into legacy output.
+  for (const file of second.files) {
+    assert.ok(!file.content.includes('## Data model'),
+      `${file.path}: legacy feature must not emit ## Data model`);
+    assert.ok(!file.content.includes('## Invariants & constraints'),
+      `${file.path}: legacy feature must not emit ## Invariants & constraints`);
+    assert.ok(!file.content.includes('## Errors & failure modes'),
+      `${file.path}: legacy feature must not emit ## Errors & failure modes`);
+    assert.ok(!file.content.includes('## Configuration'),
+      `${file.path}: legacy feature must not emit ## Configuration`);
+    assert.ok(!file.content.includes('## Why'),
+      `${file.path}: legacy feature must not emit ## Why`);
+    assert.ok(!file.content.includes('## Related features'),
+      `${file.path}: legacy feature must not emit ## Related features`);
+  }
+});
+
 // Test D6-4: batched ai-review parse round-trip
 //
 // Confirm that per-section confidence markers in the ai_review field are correctly

@@ -224,6 +224,63 @@ function renderTutorial(audience, feature, directive) {
   return lines.join('\n');
 }
 
+// ── renderFeatureSections — six LLM-targeted H2 blocks (issue #1129) ──────────
+//
+// Audience gating (pinned in shared-contracts):
+//   config_reference → [admin, developer]
+//   rationale        → [developer]
+//   all others       → all audiences
+//
+// Empty fields ('' / []) are silently omitted — no blank H2 is emitted.
+//
+// Section order is fixed: Data model → Invariants → Errors → Configuration →
+// Why → Related features.
+
+const SECTION_AUDIENCE_GATE = {
+  config_reference: ['admin', 'developer'],
+  rationale:        ['developer'],
+};
+
+function renderFeatureSections(audience, feature) {
+  const lines = [];
+
+  function maybeSection(heading, fieldValue) {
+    if (!fieldValue || (typeof fieldValue === 'string' && fieldValue.trim() === '')) return;
+    if (Array.isArray(fieldValue) && fieldValue.length === 0) return;
+    lines.push(`## ${heading}`, '');
+    if (Array.isArray(fieldValue)) {
+      for (const item of fieldValue) lines.push(`- ${item}`);
+      lines.push('');
+    } else {
+      lines.push(String(fieldValue), '');
+    }
+  }
+
+  // data_model — all audiences
+  maybeSection('Data model', feature.data_model || '');
+
+  // invariants — all audiences
+  maybeSection('Invariants & constraints', feature.invariants || '');
+
+  // errors — all audiences
+  maybeSection('Errors & failure modes', feature.errors || '');
+
+  // config_reference — admin + developer only
+  if (SECTION_AUDIENCE_GATE.config_reference.includes(audience.name)) {
+    maybeSection('Configuration', feature.config_reference || '');
+  }
+
+  // rationale — developer only
+  if (SECTION_AUDIENCE_GATE.rationale.includes(audience.name)) {
+    maybeSection('Why', feature.rationale || '');
+  }
+
+  // depends_on — all audiences
+  maybeSection('Related features', feature.depends_on || []);
+
+  return lines;
+}
+
 function renderFeature(audience, feature, directive) {
   const globs = featureSrcGlobs(feature);
   const lines = [
@@ -239,6 +296,8 @@ function renderFeature(audience, feature, directive) {
     '',
   ];
   for (const s of (feature.spec_sections || [])) lines.push(s, '');
+  // Append the six LLM-targeted sections (issue #1129); empty fields are omitted.
+  lines.push(...renderFeatureSections(audience, feature));
   if (directive) lines.push(`<!-- regen-directive: ${directive} -->`, '');
   return lines.join('\n');
 }
