@@ -25,7 +25,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPTS_DIR = path.resolve(__dirname, '../scripts');
 const SHARED_SCRIPTS_DIR = path.resolve(__dirname, '../../autospec-shared/scripts');
 
-const { generateAudienceDocs } = await import(path.join(SCRIPTS_DIR, 'gen-audience-docs.mjs'));
+const { generateAudienceDocs, pickForAudience } = await import(path.join(SCRIPTS_DIR, 'gen-audience-docs.mjs'));
 const { parse: parseScopeBlocks } = await import(path.join(SHARED_SCRIPTS_DIR, 'scan-doc-scope.mjs'));
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -729,4 +729,135 @@ test('§D6: batched ai-review annotations parse correctly (round-trip)', async (
   } finally {
     fs.rmSync(cacheDir, { recursive: true, force: true });
   }
+});
+
+// ── Per-audience prose resolver + sameness guard (the "fake audience" fix) ─────
+
+test('pickForAudience: returns the audience-specific value from a per-audience map', () => {
+  const map = { user: 'U', developer: 'D', admin: 'A', general: 'G' };
+  assert.equal(pickForAudience(map, 'user'), 'U');
+  assert.equal(pickForAudience(map, 'developer'), 'D');
+  assert.equal(pickForAudience(map, 'admin'), 'A');
+  assert.equal(pickForAudience(map, 'general'), 'G');
+});
+
+test('pickForAudience: falls back to default when the audience key is absent', () => {
+  const map = { user: 'U', default: 'FALLBACK' };
+  assert.equal(pickForAudience(map, 'user'), 'U');
+  assert.equal(pickForAudience(map, 'developer'), 'FALLBACK');
+  assert.equal(pickForAudience(map, 'admin'), 'FALLBACK');
+});
+
+test('pickForAudience: returns null when neither the audience key nor default exists', () => {
+  const map = { user: 'U' };
+  assert.equal(pickForAudience(map, 'developer'), null);
+});
+
+test('pickForAudience: returns shared scalar/array/undefined values unchanged', () => {
+  assert.equal(pickForAudience('shared string', 'user'), 'shared string');
+  const arr = ['a', 'b'];
+  assert.equal(pickForAudience(arr, 'developer'), arr); // same reference
+  assert.equal(pickForAudience(undefined, 'user'), undefined);
+  assert.equal(pickForAudience(null, 'user'), null);
+});
+
+test('pickForAudience: a normal data object (no audience keys, no default) is treated as shared', () => {
+  const obj = { id: 1, payload: 'x', ts: 'now' };
+  assert.equal(pickForAudience(obj, 'user'), obj); // same reference — not an audience map
+});
+
+test('pickForAudience: handles per-audience array form for spec_sections', () => {
+  const map = { user: ['user section'], developer: ['dev section'], default: ['shared'] };
+  assert.deepEqual(pickForAudience(map, 'user'), ['user section']);
+  assert.deepEqual(pickForAudience(map, 'developer'), ['dev section']);
+  assert.deepEqual(pickForAudience(map, 'admin'), ['shared']);
+});
+
+const PER_AUDIENCE_FEATURE = {
+  slug: 'aggregator',
+  title: 'Aggregator',
+  summary: {
+    user: 'Run the aggregator to combine your records.',
+    developer: 'The aggregator fans in streams via a merge tree.',
+    default: 'Combines records.',
+  },
+  spec_sections: {
+    user: ['USER_PROSE: click Run to aggregate your data.'],
+    developer: ['DEV_PROSE: the merge tree uses a k-way heap internally.'],
+    default: ['SHARED_PROSE: aggregation overview.'],
+  },
+};
+
+test('per-audience spec_sections render DIFFERENT body prose across audiences', async () => {
+  const result = await generateAudienceDocs({
+    features: [PER_AUDIENCE_FEATURE],
+    audiences: FOUR_AUDIENCES,
+  });
+  const userPage = result.files.find(f => f.path === 'docs/user/features/aggregator.md');
+  const devPage = result.files.find(f => f.path === 'docs/developer/features/aggregator.md');
+  assert.ok(userPage && devPage, 'both feature pages should exist');
+
+  assert.ok(userPage.content.includes('USER_PROSE: click Run to aggregate your data.'),
+    'user page should contain user-specific prose');
+  assert.ok(!userPage.content.includes('DEV_PROSE'),
+    'user page must NOT contain developer prose');
+
+  assert.ok(devPage.content.includes('DEV_PROSE: the merge tree uses a k-way heap internally.'),
+    'developer page should contain developer-specific prose');
+  assert.ok(!devPage.content.includes('USER_PROSE'),
+    'developer page must NOT contain user prose');
+
+  // admin/general fall back to default.
+  const adminPage = result.files.find(f => f.path === 'docs/admin/features/aggregator.md');
+  assert.ok(adminPage.content.includes('SHARED_PROSE: aggregation overview.'),
+    'admin page should fall back to default prose');
+
+  // Per-audience summary should reach the index list too.
+  const userIndex = result.files.find(f => f.path === 'docs/user/index.md');
+  assert.ok(userIndex.content.includes('Run the aggregator to combine your records.'),
+    'user index should carry the user-specific summary');
+});
+
+test('shared (array) spec_sections render identically across audiences AND trigger a sameness warning', async () => {
+  const result = await generateAudienceDocs({
+    features: [LEGACY_FEATURE],
+    audiences: FOUR_AUDIENCES,
+  });
+  assert.ok(Array.isArray(result.warnings), 'result should expose a warnings array');
+  assert.ok(
+    result.warnings.some(w => w.includes(LEGACY_FEATURE.slug) && /identical/.test(w)),
+    `expected a sameness warning for '${LEGACY_FEATURE.slug}', got: ${JSON.stringify(result.warnings)}`,
+  );
+});
+
+test('per-audience prose does NOT trigger a sameness warning', async () => {
+  const result = await generateAudienceDocs({
+    features: [PER_AUDIENCE_FEATURE],
+    audiences: FOUR_AUDIENCES,
+  });
+  assert.ok(Array.isArray(result.warnings), 'result should expose a warnings array');
+  assert.ok(
+    !result.warnings.some(w => w.includes('aggregator')),
+    `per-audience feature should not warn; got: ${JSON.stringify(result.warnings)}`,
+  );
+});
+
+test('failOnIdenticalAudiences: true throws when a feature is identical across audiences', async () => {
+  await assert.rejects(
+    generateAudienceDocs({
+      features: [LEGACY_FEATURE],
+      audiences: FOUR_AUDIENCES,
+      failOnIdenticalAudiences: true,
+    }),
+    /identical/i,
+  );
+});
+
+test('failOnIdenticalAudiences: true does NOT throw when per-audience prose differs', async () => {
+  const result = await generateAudienceDocs({
+    features: [PER_AUDIENCE_FEATURE],
+    audiences: FOUR_AUDIENCES,
+    failOnIdenticalAudiences: true,
+  });
+  assert.ok(result.files.length > 0, 'should produce files when prose differs per audience');
 });

@@ -30,7 +30,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPTS_DIR = path.resolve(__dirname, '../scripts');
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 
-const { PALETTE, mermaidInit, resolvePalette, mermaidInitForPreset, isLogicFlowSection, generateExplainerDiagram } =
+const { PALETTE, mermaidInit, resolvePalette, mermaidInitForPreset, isLogicFlowSection, generateExplainerDiagram, truncateLabel } =
   await import(path.join(SCRIPTS_DIR, 'doc-style.mjs'));
 
 // ── Spec §D4 pinned values ────────────────────────────────────────────────────
@@ -236,4 +236,118 @@ test('single-source guard: no hex from PALETTE appears in any file outside doc-s
   }
 
   assert.deepEqual(violations, [], `Single-source violation: palette hexes found outside doc-style.mjs:\n${violations.join('\n')}`);
+});
+
+// ── Tests 18+: diagram-generation bug fixes ──────────────────────────────────
+
+test('truncateLabel: short string is returned unchanged (no ellipsis)', () => {
+  const s = 'discovering the runner';
+  assert.strictEqual(truncateLabel(s, 80), s);
+  assert.ok(!truncateLabel(s, 80).includes('…'));
+});
+
+test('truncateLabel: never produces a mid-word cut and appends … only when truncated', () => {
+  const s = 'discovering the runner with the appropriate configuration';
+  const out = truncateLabel(s, 20);
+  assert.ok(out.length <= s.length);
+  assert.ok(out.endsWith('…'), `expected ellipsis, got: ${out}`);
+  // The portion before the ellipsis must be a prefix of whole words from the input.
+  const kept = out.slice(0, -1);
+  assert.ok(s.startsWith(kept), `kept portion must be a prefix of the input, got: ${kept}`);
+  // No partial word: the char in the source immediately after `kept` is whitespace
+  // (i.e. we cut on a word boundary), unless we kept the whole string.
+  if (kept.length < s.length) {
+    assert.match(s[kept.length], /\s/, `cut must land on a word boundary, got next char: '${s[kept.length]}'`);
+  }
+});
+
+test('truncateLabel: hard-cuts a first word that alone exceeds max', () => {
+  const s = 'antidisestablishmentarianism';
+  const out = truncateLabel(s, 10);
+  assert.ok(out.endsWith('…'));
+  assert.strictEqual(out, s.slice(0, 10) + '…');
+});
+
+test('flowchart step label longer than max is truncated at a word boundary', () => {
+  const longStep = 'Validate the incoming request payload against the published schema and reject anything malformed immediately';
+  const section = {
+    heading: 'Processing Steps',
+    body: `1. ${longStep}\n2. Transform data\n3. Write output`,
+  };
+  const diagram = generateExplainerDiagram(section);
+  assert.ok(diagram.includes('flowchart'));
+  // The truncated label must appear with an ellipsis and not contain the final partial token.
+  const m = diagram.match(/S1\["([^"]*)"\]/);
+  assert.ok(m, `expected S1 node label, got: ${diagram}`);
+  const label = m[1];
+  assert.ok(label.endsWith('…'), `label must end with ellipsis, got: ${label}`);
+  // The input's final word "immediately" must not be partially present.
+  assert.ok(!/immediatel\b/.test(label), `label must not contain a mid-word cut, got: ${label}`);
+  assert.ok(longStep.startsWith(label.slice(0, -1)), 'kept portion must be a word-prefix of the step');
+});
+
+test('generateExplainerDiagram: returns null for logic-ish prose with no steps, arrows, or if/otherwise pair', () => {
+  const section = {
+    heading: 'Pipeline Overview',
+    body: 'The pipeline processes records through a series of rules and routes them according to the configured workflow. This describes the general flow at a high level.',
+  };
+  const diagram = generateExplainerDiagram(section);
+  assert.strictEqual(diagram, null, `expected null, got: ${diagram}`);
+});
+
+test('generateExplainerDiagram: does NOT emit the old fabricated decision placeholder', () => {
+  const section = {
+    heading: 'Routing Process',
+    body: 'When a request arrives the process applies a rule to decide the route through the pipeline. The branch is chosen by the guard.',
+  };
+  const diagram = generateExplainerDiagram(section);
+  // Must not produce the old placeholder fabricated-decision output.
+  if (diagram !== null) {
+    assert.ok(!diagram.includes('Condition?'), `must not emit Condition? placeholder, got: ${diagram}`);
+    assert.ok(!diagram.includes('True branch'), `must not emit True branch placeholder, got: ${diagram}`);
+    assert.ok(!diagram.includes('False branch'), `must not emit False branch placeholder, got: ${diagram}`);
+  } else {
+    assert.strictEqual(diagram, null);
+  }
+});
+
+test('generateExplainerDiagram: real if/otherwise section emits decision flowchart with real branch labels', () => {
+  const section = {
+    heading: 'Routing Logic',
+    body: 'If the request is authenticated route to dashboard, otherwise redirect to login.',
+  };
+  const diagram = generateExplainerDiagram(section);
+  assert.ok(typeof diagram === 'string', `expected a diagram, got: ${diagram}`);
+  assert.ok(diagram.includes('flowchart'));
+  // Branch labels must contain the real extracted text, not the placeholders.
+  assert.ok(diagram.includes('the request is authenticated route to dashboard') ||
+            diagram.includes('the request is authenticated'),
+    `Yes branch must contain real text, got: ${diagram}`);
+  assert.ok(diagram.includes('redirect to login'), `No branch must contain real text, got: ${diagram}`);
+  assert.ok(!diagram.includes('True branch'), `must not contain True branch, got: ${diagram}`);
+  assert.ok(!diagram.includes('False branch'), `must not contain False branch, got: ${diagram}`);
+});
+
+test('buildStateDiagram path: clean A -> B -> C section yields a full state diagram with [*] start/end', () => {
+  const section = {
+    heading: 'Issue States',
+    body: 'States: open -> in-progress -> review -> closed. Transitions are guarded by labels.',
+  };
+  const diagram = generateExplainerDiagram(section);
+  assert.ok(typeof diagram === 'string', `expected a diagram, got: ${diagram}`);
+  assert.ok(diagram.includes('stateDiagram-v2'));
+  for (const state of ['open', 'in_progress', 'review', 'closed']) {
+    assert.ok(diagram.includes(state), `diagram must include state ${state}, got: ${diagram}`);
+  }
+  assert.ok(diagram.includes('[*] -->'), 'must include a start transition');
+  assert.ok(diagram.includes('--> [*]'), 'must include an end transition');
+});
+
+test('buildStateDiagram path: stray -> inside prose with long tokens returns null', () => {
+  const section = {
+    heading: 'Background',
+    body: 'The system takes the raw measurement data and transforms it -> producing a cleaned-up normalized result that downstream consumers can rely on for analysis.',
+  };
+  const diagram = generateExplainerDiagram(section);
+  assert.strictEqual(diagram, null, `expected null for stray-arrow prose, got: ${diagram}`);
 });

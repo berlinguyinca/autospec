@@ -130,6 +130,30 @@ export function isLogicFlowSection(section) {
 // ── Diagram generation helpers ────────────────────────────────────────────────
 
 /**
+ * Truncate a label at a word boundary, appending a single ellipsis char when cut.
+ *
+ * When `text.length <= max` the text is returned unchanged. Otherwise the text is
+ * cut at the last word boundary at or before `max` and `…` is appended. Never cuts
+ * mid-word — but if the very first word alone exceeds `max`, it is hard-cut.
+ *
+ * @param {string} text
+ * @param {number} max
+ * @returns {string}
+ */
+export function truncateLabel(text, max) {
+  const s = String(text);
+  if (s.length <= max) return s;
+  // Find the last whitespace at or before `max`.
+  const slice = s.slice(0, max);
+  const lastSpace = slice.search(/\s\S*$/); // index of the last whitespace run start
+  if (lastSpace > 0) {
+    return s.slice(0, lastSpace).replace(/\s+$/, '') + '…';
+  }
+  // First word alone exceeds max → hard-cut.
+  return slice + '…';
+}
+
+/**
  * Sanitize a label for use as a mermaid node ID.
  * @param {string} label
  * @returns {string}
@@ -163,7 +187,7 @@ function buildFlowchart(steps) {
   const lines = ['flowchart TD'];
   for (let i = 0; i < steps.length; i++) {
     const nodeId = `S${i + 1}`;
-    const label = steps[i].replace(/"/g, "'").slice(0, 80);
+    const label = truncateLabel(steps[i].replace(/"/g, "'"), 80);
     lines.push(`    ${nodeId}["${label}"]`);
     if (i > 0) {
       lines.push(`    S${i} --> ${nodeId}`);
@@ -173,65 +197,123 @@ function buildFlowchart(steps) {
 }
 
 /**
- * Build a themed mermaid flowchart from decision-rule language in the body.
- * Falls back to a simple two-branch decision node.
+ * Extract a real if/otherwise branch pair from prose, or null when both branches
+ * are not present. A decision diagram is only meaningful when BOTH the "if" clause
+ * and an "otherwise/else/when not" clause yield non-empty text.
+ *
  * @param {string} body
+ * @returns {{ yes: string, no: string } | null}
+ */
+function extractDecisionBranches(body) {
+  // "if <clause>," up to the first comma or period (the condition/true action).
+  const ifMatch = body.match(/\bif\b\s+([^,.;]+)/i);
+  // "otherwise/else/when not <clause>" up to the first comma or period.
+  const elseMatch = body.match(/\b(?:otherwise|else|when not)\b\s+([^,.;]+)/i);
+  if (!ifMatch || !elseMatch) return null;
+  const yes = ifMatch[1].trim();
+  const no = elseMatch[1].trim();
+  if (!yes || !no) return null;
+  return { yes, no };
+}
+
+/**
+ * Build a themed mermaid decision flowchart from an extracted branch pair.
+ * Only call this when extractDecisionBranches() returned a non-null pair.
+ *
+ * @param {{ yes: string, no: string }} branches
  * @param {string} heading
  * @returns {string}
  */
-function buildDecisionFlowchart(body, heading) {
+function buildDecisionFlowchart(branches, heading) {
   const init = mermaidInit();
-  const title = heading.replace(/"/g, "'").slice(0, 60);
-  // Extract a simple if/otherwise pair if present.
-  const ifMatch = body.match(/\bif\b[^,.]*?[,.]?([^.]*)/i);
-  const otherwiseMatch = body.match(/\b(otherwise|else|when not)\b[^,.]*/i);
+  const title = truncateLabel(heading.replace(/"/g, "'"), 60);
+  const yes = truncateLabel(branches.yes.replace(/"/g, "'"), 60);
+  const no = truncateLabel(branches.no.replace(/"/g, "'"), 60);
   const lines = ['flowchart TD'];
   lines.push(`    Start["${title}"]`);
   lines.push(`    Cond{Condition?}`);
   lines.push(`    Start --> Cond`);
-  if (ifMatch) {
-    const yes = ifMatch[0].replace(/^if\s*/i, '').replace(/"/g, "'").slice(0, 60);
-    lines.push(`    Cond -->|Yes| Yes["${yes}"]`);
-  } else {
-    lines.push(`    Cond -->|Yes| Yes["True branch"]`);
-  }
-  if (otherwiseMatch) {
-    const no = otherwiseMatch[0].replace(/^(otherwise|else|when not)\s*/i, '').replace(/"/g, "'").slice(0, 60);
-    lines.push(`    Cond -->|No| No["${no}"]`);
-  } else {
-    lines.push(`    Cond -->|No| No["False branch"]`);
-  }
+  lines.push(`    Cond -->|Yes| Yes["${yes}"]`);
+  lines.push(`    Cond -->|No| No["${no}"]`);
   return `${init}\n${lines.join('\n')}`;
 }
 
+// A "state" token must be short: ≤ 24 chars and no more than 3 space-separated
+// words — anything longer is prose, not a state name.
+const MAX_STATE_LEN = 24;
+
 /**
- * Build a themed mermaid state diagram from state-machine language in the body.
+ * Returns true when `token` looks like a clean state name (short, not a sentence
+ * fragment) rather than free prose.
+ * @param {string} token
+ * @returns {boolean}
+ */
+function isCleanStateToken(token) {
+  const t = token.trim();
+  if (!t || t.length > MAX_STATE_LEN) return false;
+  const words = t.split(/\s+/);
+  if (words.length > 3) return false;
+  return true;
+}
+
+/**
+ * Extract a clean ordered state chain from a body containing `A → B → C` style
+ * transitions. Returns an array of consecutive {from,to} pairs, deduplicated, or
+ * null when the chain is ambiguous/partial (fewer than 2 clean transitions, or
+ * any token looks like prose).
+ *
  * @param {string} body
- * @param {string} heading
+ * @returns {{ from: string, to: string }[] | null}
+ */
+function extractStateChain(body) {
+  // Find the longest contiguous run of `token (→|->) token (→|->) …`.
+  const chainRe = /([\w][\w-]*(?:\s+[\w][\w-]*){0,2})(?:\s*(?:→|->)\s*([\w][\w-]*(?:\s+[\w][\w-]*){0,2}))+/g;
+  let best = null;
+  let cm;
+  while ((cm = chainRe.exec(body)) !== null) {
+    const segment = cm[0];
+    // Split the matched segment on arrows into individual state tokens.
+    const tokens = segment.split(/\s*(?:→|->)\s*/).map(s => s.trim());
+    if (!best || tokens.length > best.length) best = tokens;
+  }
+  if (!best || best.length < 3) {
+    // Need ≥ 3 tokens → ≥ 2 transitions.
+    return null;
+  }
+  // Every token must be a clean state name.
+  if (!best.every(isCleanStateToken)) return null;
+  // Build consecutive pairs and deduplicate.
+  const seen = new Set();
+  const pairs = [];
+  for (let i = 0; i < best.length - 1; i++) {
+    const from = best[i];
+    const to = best[i + 1];
+    const key = `${from} ${to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pairs.push({ from, to });
+  }
+  if (pairs.length < 2) return null;
+  return pairs;
+}
+
+/**
+ * Build a themed mermaid state diagram from an extracted transition chain.
+ * Only call this when extractStateChain() returned a non-null array.
+ *
+ * @param {{ from: string, to: string }[]} pairs
  * @returns {string}
  */
-function buildStateDiagram(body, heading) {
+function buildStateDiagram(pairs) {
   const init = mermaidInit();
-  // Try to extract "A → B" or "A -> B" transitions.
-  const transPattern = /(\w[\w\s-]*)[\s]*(?:→|->)[\s]*([\w][\w\s-]*)/g;
-  const transitions = [];
-  let m;
-  while ((m = transPattern.exec(body)) !== null) {
-    transitions.push({ from: m[1].trim(), to: m[2].trim() });
-  }
-  if (transitions.length === 0) {
-    // Fallback: generic two-state diagram
-    const title = heading.replace(/"/g, "'").slice(0, 40);
-    return `${init}\nstateDiagram-v2\n    [*] --> Active\n    Active --> Done\n    Done --> [*]`;
-  }
   const lines = ['stateDiagram-v2'];
-  // First transition from gets [*] start
-  lines.push(`    [*] --> ${mermaidId(transitions[0].from)}`);
-  for (const t of transitions) {
+  // First transition from gets [*] start.
+  lines.push(`    [*] --> ${mermaidId(pairs[0].from)}`);
+  for (const t of pairs) {
     lines.push(`    ${mermaidId(t.from)} --> ${mermaidId(t.to)}`);
   }
-  // Last to gets [*] end
-  lines.push(`    ${mermaidId(transitions[transitions.length - 1].to)} --> [*]`);
+  // Last to gets [*] end.
+  lines.push(`    ${mermaidId(pairs[pairs.length - 1].to)} --> [*]`);
   return `${init}\n${lines.join('\n')}`;
 }
 
@@ -259,11 +341,22 @@ export function generateExplainerDiagram(section) {
     return buildFlowchart(steps);
   }
 
-  // 2. State-machine transitions.
+  // 2. State-machine transitions — only when a clean ≥2-transition chain exists.
   if (/(?:→|->)/.test(body)) {
-    return buildStateDiagram(body, heading);
+    const pairs = extractStateChain(body);
+    if (pairs) {
+      return buildStateDiagram(pairs);
+    }
+    // Stray arrow inside prose → no diagram.
+    return null;
   }
 
-  // 3. Decision / rule language.
-  return buildDecisionFlowchart(body, heading);
+  // 3. Decision / rule language — only when BOTH branches are extractable.
+  const branches = extractDecisionBranches(body);
+  if (branches) {
+    return buildDecisionFlowchart(branches, heading);
+  }
+
+  // No real structure extractable → emit no diagram (avoid fabricated noise).
+  return null;
 }

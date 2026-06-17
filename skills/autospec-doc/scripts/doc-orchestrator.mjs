@@ -25,10 +25,22 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
 
-import { loadConfig, DEFAULT_AUDIENCES, FOLDER_CONTRACT } from './doc-config.mjs';
+import { loadConfig, resolveFeatures, DEFAULT_AUDIENCES, FOLDER_CONTRACT } from './doc-config.mjs';
 import { writeLlmsFull, fillManifest } from './gen-llms-full.mjs';
+import { generateAudienceDocs } from './gen-audience-docs.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// ── Project root (generation output target) ───────────────────────────────────
+// `__dirname` is inside the AUTOSPEC INSTALL repo — wrong for generation output.
+// Generation must be rooted at the PROJECT root: the directory that CONTAINS the
+// resolved CONFIG_PATH's `.autospec/` dir. For `<proj>/.autospec/autospec.yml`
+// that is `<proj>` = dirname(dirname(resolve(CONFIG_PATH))). Defaults to cwd.
+function projectRoot() {
+  const resolved = path.resolve(CONFIG_PATH);
+  const root = path.dirname(path.dirname(resolved));
+  return root || process.cwd();
+}
 
 // ── Config detection ──────────────────────────────────────────────────────────
 // The config loader (doc-config.mjs, #917) parses the `documentation:` block.
@@ -153,10 +165,10 @@ function computeChangedScopes() {
   return scopes;
 }
 
-function handleIncremental(_opts) {
+async function handleIncremental(_opts) {
   const cfg = loadConfig(CONFIG_PATH);
   const names = cfg.audiences.map(a => a.name || a.id).join(', ');
-  const repoRoot = path.resolve(__dirname, '../../..');
+  const projRoot = projectRoot();
 
   // §D6: compute changed-scope set from check-doc-drift.sh --working-tree.
   const changedScopes = computeChangedScopes();
@@ -169,38 +181,168 @@ function handleIncremental(_opts) {
 
   console.log(`[autospec-doc] incremental: ${changedScopes.length} changed scope(s) detected for audiences [${names}]; regenerating affected scopes: ${changedScopes.join(', ')}`);
   // Regenerate llms-full.txt from any already-generated pages (cheap concat).
-  regenerateLlmsFull(cfg, repoRoot).catch(e => process.stderr.write(`[autospec-doc] llms-full regen error: ${e.message}\n`));
+  await regenerateLlmsFull(cfg, projRoot).catch(e => process.stderr.write(`[autospec-doc] llms-full regen error: ${e.message}\n`));
   return 0;
 }
 
-function handleFull(_opts) {
+// ── Deterministic completeness audit (read-only) ──────────────────────────────
+//
+// Computes, from an in-memory generation pass + the on-disk page tree:
+//   - features that have no feature page for one or more audiences (missing)
+//   - generated pages that are empty / near-empty on disk
+//   - audiences with zero generated pages on disk
+//   - "identical prose across all audiences" warnings (from the generator)
+// Returns a structured report object; never writes.
+async function runAudit(cfg, projRoot, features) {
+  const audiences = cfg.audiences;
+  let warnings = [];
+  try {
+    const result = await generateAudienceDocs({
+      features,
+      audiences,
+      outputDir: null,
+      failOnIdenticalAudiences: false,
+    });
+    warnings = result.warnings || [];
+  } catch (e) {
+    warnings = [`generation error during audit: ${e.message}`];
+  }
+
+  const pages = collectAudiencePages(cfg, projRoot);
+  const audienceNames = audiences.map(a => a.name || a.id);
+
+  // Audiences with zero pages on disk.
+  const pagesByAudience = new Map();
+  for (const p of pages) {
+    if (!pagesByAudience.has(p.audience)) pagesByAudience.set(p.audience, []);
+    pagesByAudience.get(p.audience).push(p);
+  }
+  const emptyAudiences = audienceNames.filter(n => !(pagesByAudience.get(n) || []).length);
+
+  // Missing feature pages: each feature should have docs/<aud>/features/<slug>.md.
+  const missing = [];
+  for (const aud of audiences) {
+    const audName = aud.name || aud.id;
+    if (!aud.path) continue;
+    for (const f of features) {
+      if (!f || !f.slug) continue;
+      const rel = `${aud.path.replace(/\/+$/, '')}/features/${f.slug}.md`;
+      const onDisk = path.resolve(projRoot, rel);
+      if (!fs.existsSync(onDisk)) missing.push(`${audName}: ${rel}`);
+    }
+  }
+
+  // Empty / near-empty generated pages on disk (< 40 non-whitespace chars).
+  const nearEmpty = [];
+  for (const p of pages) {
+    const stripped = (p.content || '').replace(/\s+/g, '');
+    if (stripped.length < 40) nearEmpty.push(p.path);
+  }
+
+  return {
+    audiences: audienceNames,
+    features: features.length,
+    pagesOnDisk: pages.length,
+    emptyAudiences,
+    missing,
+    nearEmpty,
+    sameness: warnings,
+  };
+}
+
+function printAuditReport(report) {
+  console.log(
+    `[autospec-doc] audit: ${report.audiences.length} audience(s), ${report.features} feature(s), `
+    + `${report.pagesOnDisk} page(s) on disk — `
+    + `${report.missing.length} missing page(s), ${report.nearEmpty.length} near-empty, `
+    + `${report.emptyAudiences.length} audience(s) with zero pages, ${report.sameness.length} sameness warning(s)`,
+  );
+  for (const m of report.missing)        console.log(`  missing: ${m}`);
+  for (const n of report.nearEmpty)      console.log(`  near-empty: ${n}`);
+  for (const a of report.emptyAudiences) console.log(`  zero-pages: ${a}`);
+  for (const w of report.sameness)       console.log(`  sameness: ${w}`);
+}
+
+async function handleFull(_opts) {
   const cfg = loadConfig(CONFIG_PATH);
+  const projRoot = projectRoot();
+  const features = resolveFeatures(cfg, projRoot);
   const names = cfg.audiences.map(a => a.name || a.id).join(', ');
-  console.log(`[autospec-doc] full: regenerate every audience [${names}] + run completeness audit (generation stub — #918/#923).`);
-  // Regenerate llms-full.txt from any already-generated pages (cheap concat).
-  const repoRoot = path.resolve(__dirname, '../../..');
-  regenerateLlmsFull(cfg, repoRoot).catch(e => process.stderr.write(`[autospec-doc] llms-full regen error: ${e.message}\n`));
+
+  const { files, warnings } = await generateAudienceDocs({
+    features,
+    audiences: cfg.audiences,
+    outputDir: projRoot,
+    failOnIdenticalAudiences: false,
+  });
+  const written = files.filter(f => f.written).length;
+
+  console.log(
+    `[autospec-doc] full: regenerated every audience [${names}] — `
+    + `${written} page(s) written, ${features.length} feature(s), ${cfg.audiences.length} audience(s).`,
+  );
+  for (const w of warnings) process.stderr.write(`[autospec-doc] warning: ${w}\n`);
+
+  // Regenerate llms-full.txt from the freshly written pages.
+  await regenerateLlmsFull(cfg, projRoot).catch(e => process.stderr.write(`[autospec-doc] llms-full regen error: ${e.message}\n`));
+
+  // Run the deterministic completeness audit and print its summary.
+  const report = await runAudit(cfg, projRoot, features);
+  printAuditReport(report);
   return 0;
 }
 
-function handleAudit(_opts) {
+async function handleAudit(_opts) {
+  // READ-ONLY: writes nothing.
   const cfg = loadConfig(CONFIG_PATH);
-  console.log(`[autospec-doc] audit: read-only completeness/drift report across ${cfg.audiences.length} audiences (generation stub — #919/#923).`);
+  const projRoot = projectRoot();
+  const features = resolveFeatures(cfg, projRoot);
+  const report = await runAudit(cfg, projRoot, features);
+  printAuditReport(report);
   return 0;
 }
 
-function handleAudience(opts) {
+async function handleAudience(opts) {
   if (!opts.audience) {
     console.error('[autospec-doc] --audience requires a <name> argument.');
     return 2;
   }
-  // The router dispatches by form; audience-membership resolution (and the
-  // unknown-audience error) is the generator's concern (#918). Here we load the
-  // config only to surface whether the requested name is already configured.
   const cfg = loadConfig(CONFIG_PATH);
-  const known = cfg.audiences.some(a => (a.name || a.id) === opts.audience);
-  const note = known ? '' : ' [not in current config — generator will resolve]';
-  console.log(`[autospec-doc] audience: regenerate "${opts.audience}" only${note} (generation stub — #918).`);
+  // Resolve against the configured audiences first, then fall back to the four
+  // canonical defaults (user/developer/admin/general are always valid targets
+  // even when the config declares a narrower explicit list).
+  let match = cfg.audiences.find(a => (a.name || a.id) === opts.audience);
+  if (!match) match = DEFAULT_AUDIENCES.find(a => a.name === opts.audience);
+  if (!match) {
+    const known = [...new Set([
+      ...cfg.audiences.map(a => a.name || a.id),
+      ...DEFAULT_AUDIENCES.map(a => a.name),
+    ])].join(', ');
+    console.error(
+      `[autospec-doc] audience: "${opts.audience}" is not a known audience `
+      + `(known: ${known || 'none'}).`,
+    );
+    return 1;
+  }
+
+  const projRoot = projectRoot();
+  const features = resolveFeatures(cfg, projRoot);
+
+  const { files, warnings } = await generateAudienceDocs({
+    features,
+    audiences: [match],
+    outputDir: projRoot,
+    failOnIdenticalAudiences: false,
+  });
+  const written = files.filter(f => f.written).length;
+
+  console.log(
+    `[autospec-doc] audience: regenerated "${opts.audience}" only — `
+    + `${written} page(s) written, ${features.length} feature(s).`,
+  );
+  for (const w of warnings) process.stderr.write(`[autospec-doc] warning: ${w}\n`);
+
+  await regenerateLlmsFull(cfg, projRoot).catch(e => process.stderr.write(`[autospec-doc] llms-full regen error: ${e.message}\n`));
   return 0;
 }
 
@@ -369,7 +511,7 @@ function usage() {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-function main() {
+async function main() {
   const opts = parseArgs(process.argv.slice(2));
 
   if (opts.subcommand === 'usage') {
@@ -389,14 +531,17 @@ function main() {
 
   switch (opts.subcommand) {
     case 'init':        return handleInit(opts);
-    case 'full':        return handleFull(opts);
-    case 'audit':       return handleAudit(opts);
-    case 'audience':    return handleAudience(opts);
-    case 'incremental': return handleIncremental(opts);
+    case 'full':        return await handleFull(opts);
+    case 'audit':       return await handleAudit(opts);
+    case 'audience':    return await handleAudience(opts);
+    case 'incremental': return await handleIncremental(opts);
     default:
       usage();
       return 2;
   }
 }
 
-process.exit(main());
+main().then(code => process.exit(code)).catch(err => {
+  process.stderr.write(`[autospec-doc] fatal: ${err && err.stack ? err.stack : err}\n`);
+  process.exit(1);
+});
