@@ -242,3 +242,123 @@ test('chunk markers include a boundary token count annotation', () => {
   const chunkNum = parseInt(markerMatch[1], 10);
   assert.ok(chunkNum >= 1, 'chunk number must be >= 1');
 });
+
+// ── Track B new tests (issue #1130) ───────────────────────────────────────────
+
+// Fixture corpus for Track B: contains an H1, a cli marker, and a concept marker
+const TRACK_B_PAGES = [
+  {
+    audience: 'developer',
+    feature: 'autospec-run',
+    path: 'docs/developer/features/autospec-run.md',
+    content: [
+      '# autospec-run',
+      '',
+      'The main entry point for running the autospec pipeline.',
+      '',
+      '<!-- autospec-concept: lock-step rule -->',
+      'Every phase-1 change locks all related trios simultaneously.',
+      '',
+      '<!-- autospec-concept: worktree isolation -->',
+      'Each implementation runs in an isolated git worktree.',
+      '',
+      '## CLI',
+      '`/autospec-run` — run the implementation loop',
+    ].join('\n'),
+  },
+  {
+    audience: 'developer',
+    feature: 'autospec-define',
+    path: 'docs/developer/features/autospec-define.md',
+    content: [
+      '# autospec-define',
+      '',
+      'Plan a feature and decompose into GitHub issues.',
+    ].join('\n'),
+  },
+];
+
+// ── Test 13: modules[] carry name, summary, source_anchor, approx_tokens ──────
+
+test('fillManifest: modules carry name, source_anchor, and approx_tokens', () => {
+  const manifest = { modules: [], cli_entry_points: [], http_endpoints: [], concepts: [], faq: [] };
+  fillManifest(manifest, TRACK_B_PAGES);
+  assert.ok(manifest.modules.length > 0, 'modules must be non-empty');
+  for (const mod of manifest.modules) {
+    assert.ok(typeof mod.name === 'string' && mod.name.length > 0,
+      `module must have name field; got ${JSON.stringify(mod)}`);
+    assert.ok(typeof mod.summary === 'string' && mod.summary.length > 0,
+      `module must have summary; got ${JSON.stringify(mod)}`);
+    assert.ok(typeof mod.source_anchor === 'string' && mod.source_anchor.includes('#L'),
+      `module must have source_anchor with #L; got ${JSON.stringify(mod)}`);
+    assert.ok(typeof mod.approx_tokens === 'number' && mod.approx_tokens > 0,
+      `module must have approx_tokens > 0; got ${JSON.stringify(mod)}`);
+    assert.ok(Array.isArray(mod.public_api),
+      `module must have public_api array; got ${JSON.stringify(mod)}`);
+    assert.ok(typeof mod.doc === 'string',
+      `module must have doc field; got ${JSON.stringify(mod)}`);
+  }
+});
+
+// ── Test 14: concepts[] carry source_anchor and approx_tokens ─────────────────
+
+test('fillManifest: concepts carry source_anchor and approx_tokens', () => {
+  const manifest = { modules: [], cli_entry_points: [], http_endpoints: [], concepts: [], faq: [] };
+  fillManifest(manifest, TRACK_B_PAGES);
+  assert.ok(manifest.concepts.length >= 2, 'expected at least 2 concepts from fixture');
+  for (const concept of manifest.concepts) {
+    assert.ok(typeof concept.source_anchor === 'string' && concept.source_anchor.includes('#L'),
+      `concept must have source_anchor with #L; got ${JSON.stringify(concept)}`);
+    assert.ok(typeof concept.approx_tokens === 'number' && concept.approx_tokens > 0,
+      `concept must have approx_tokens > 0; got ${JSON.stringify(concept)}`);
+  }
+});
+
+// ── Test 15: no literal <name> placeholder in manifest output ──────────────────
+
+test('fillManifest: no literal <name> placeholder survives in any field', () => {
+  // Inject a page that contains the literal placeholder string in a concept marker
+  const pagesWithPlaceholder = [
+    ...TRACK_B_PAGES,
+    {
+      audience: 'developer',
+      feature: 'bad',
+      path: 'docs/developer/features/bad.md',
+      content: '# Bad page\n\n<!-- autospec-concept: <name> -->\nShould be skipped.\n',
+    },
+  ];
+  const manifest = { modules: [], cli_entry_points: [], http_endpoints: [], concepts: [], faq: [] };
+  fillManifest(manifest, pagesWithPlaceholder);
+  const conceptNames = manifest.concepts.map(c => c.name);
+  assert.ok(!conceptNames.includes('<name>'),
+    `literal <name> placeholder must not appear in concepts; got ${JSON.stringify(conceptNames)}`);
+  // Also check no field in manifest JSON contains literal <name>
+  const json = JSON.stringify(manifest);
+  assert.ok(!json.includes('"<name>"'),
+    `literal "<name>" must not appear in manifest JSON; found: ${json.slice(0, 200)}`);
+});
+
+// ── Test 16: cli_entry_points[] non-empty when pages have CLI sections ─────────
+
+test('fillManifest: cli_entry_points extracted from pages', () => {
+  const manifest = { modules: [], cli_entry_points: [], http_endpoints: [], concepts: [], faq: [] };
+  fillManifest(manifest, TRACK_B_PAGES);
+  // TRACK_B_PAGES has a CLI section with `/autospec-run`; cli_entry_points should be populated
+  assert.ok(Array.isArray(manifest.cli_entry_points),
+    'cli_entry_points must be an array');
+  // The fixture has CLI content — at least one entry is expected
+  assert.ok(manifest.cli_entry_points.length > 0,
+    `cli_entry_points must be non-empty for pages with CLI sections; got ${JSON.stringify(manifest.cli_entry_points)}`);
+});
+
+// ── Test 17: fixture corpus produces zero placeholder strings ─────────────────
+
+test('fillManifest: fixture corpus produces non-empty modules and concepts, zero placeholders', () => {
+  const manifest = { modules: [], cli_entry_points: [], http_endpoints: [], concepts: [], faq: [] };
+  fillManifest(manifest, TRACK_B_PAGES);
+  assert.ok(manifest.modules.length > 0, 'modules must be non-empty');
+  assert.ok(manifest.concepts.length > 0, 'concepts must be non-empty');
+  const json = JSON.stringify(manifest);
+  assert.ok(!json.includes('<name>'),
+    `no <name> placeholder must survive; manifest JSON: ${json.slice(0, 300)}`);
+});
