@@ -2768,6 +2768,7 @@ main() {
     check_autospec_explore_contract
     check_explore_trio_worktree_assert
     check_autospec_explore_discovery_contract
+    check_autospec_explore_style_normalization_contract
     check_autospec_explore_spec_first_contract
     check_autospec_explore_qa_gate_contract
     check_autospec_release_area_contract
@@ -3172,6 +3173,29 @@ check_explore_trio_worktree_assert() {
             || { cat /tmp/validate-explore-worktree-assert.log >&2; fail "$bats_file: failed"; }
     fi
     info "explore-trio worktree assert: all three adapter files carry D4 assert + lock-step verified"
+}
+
+# autospec-explore style-normalization discovery contract: SPA/webapp visual
+# consistency work must run through a named discovery researcher and must
+# auto-generate missing Playwright coverage plus screenshots before filing
+# style-unification proposals.
+check_autospec_explore_style_normalization_contract() {
+    info "autospec-explore style-normalization contract"
+    for trio in \
+        skills/autospec-explore/SKILL.md \
+        skills/autospec-explore/codex/prompt.md \
+        skills/autospec-explore/opencode/agent.md
+    do
+        [ -f "$trio" ] || fail "$trio: required adapter file missing"
+        grep -q 'style-normalization' "$trio" \
+            || fail "$trio: missing style-normalization discovery researcher"
+        grep -q 'Playwright' "$trio" \
+            || fail "$trio: missing Playwright auto-generation requirement"
+        grep -q 'screenshot' "$trio" \
+            || fail "$trio: missing screenshot evidence requirement"
+        grep -q 'AUTOSPEC_EXPLORE_STYLE_PROOF_CMD' "$trio" \
+            || fail "$trio: missing AUTOSPEC_EXPLORE_STYLE_PROOF_CMD proof seam"
+    done
 }
 
 # autospec-explore discovery enhancement contract (issues #1084/#1085, spec
