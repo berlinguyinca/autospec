@@ -155,7 +155,9 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
     [--no-internet] \
     [--internet-allowlist <comma-list>] \
     [--qa-gate] \
-    [--qa-gate-pass-on-partial]
+    [--qa-gate-pass-on-partial] \
+    [--no-initial-handoff] \
+    [--handoff-timeout-sec N]
 ```
 
 > **Model tier:** `TIER_A` for the aggregator + proposal ranker; `TIER_B` for the
@@ -185,6 +187,13 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
 - `--qa-gate-pass-on-partial` — treat a `PARTIAL` gate verdict as PASS
   (promote). Default is `PARTIAL → withhold`, matching QA's own "PARTIAL is not
   PASS" discipline. Only meaningful with `--qa-gate`.
+- `--no-initial-handoff` — skip startup `/autospec-refine` and
+  `/autospec-define` handoffs and run only the explore research loop. Use this
+  when the operator already has a scoped prompt or wants to avoid hidden nested
+  harness work. Equivalent env: `AUTOSPEC_EXPLORE_SKIP_INITIAL_HANDOFF=1`.
+- `--handoff-timeout-sec N` — maximum seconds for each startup handoff before it
+  is terminated and logged as `code_health:explore_handoff_timeout`. Default:
+  `900`. Equivalent env: `AUTOSPEC_EXPLORE_HANDOFF_TIMEOUT_SEC`.
 
 ## Sandbox branch contract
 

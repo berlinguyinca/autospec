@@ -51,7 +51,10 @@ SPECIALISTS_ARG=""
 AUTONOMOUS=0
 QA_GATE=0
 QA_GATE_PASS_ON_PARTIAL=0
+SKIP_INITIAL_HANDOFF="${AUTOSPEC_EXPLORE_SKIP_INITIAL_HANDOFF:-0}"
+HANDOFF_TIMEOUT_SEC="${AUTOSPEC_EXPLORE_HANDOFF_TIMEOUT_SEC:-900}"
 PROMPT=""
+EXPLORE_CHILD_PIDS=""
 
 usage() {
     cat <<'EOF'
@@ -78,6 +81,10 @@ Options:
                               output is byte-unchanged without this flag).
   --qa-gate-pass-on-partial   Treat a PARTIAL gate verdict as PASS (default
                               PARTIAL blocks, matching QA's PARTIAL!=PASS rule).
+  --no-initial-handoff        Skip startup /autospec-refine and /autospec-define
+                              handoffs; run only the explore research loop.
+  --handoff-timeout-sec N     Timeout for startup handoffs (default 900; env:
+                              AUTOSPEC_EXPLORE_HANDOFF_TIMEOUT_SEC).
 EOF
 }
 
@@ -98,6 +105,8 @@ while [ "$#" -gt 0 ]; do
         --autonomous)            AUTONOMOUS=1 ;;
         --qa-gate)               QA_GATE=1 ;;
         --qa-gate-pass-on-partial) QA_GATE_PASS_ON_PARTIAL=1 ;;
+        --no-initial-handoff)    SKIP_INITIAL_HANDOFF=1 ;;
+        --handoff-timeout-sec)   shift; HANDOFF_TIMEOUT_SEC="$1" ;;
         -h|--help)               usage; exit 0 ;;
         --) shift; PROMPT="${PROMPT:-$*}"; break ;;
         -*) echo "autospec-explore: unknown flag: $1" >&2; usage; exit 2 ;;
@@ -130,6 +139,110 @@ fi
 
 cd "$REPO_ROOT" || { echo "autospec-explore: repo root unavailable: $REPO_ROOT" >&2; exit 2; }
 mkdir -p .autospec
+
+case "$SKIP_INITIAL_HANDOFF" in
+    1|true|TRUE|yes|YES) SKIP_INITIAL_HANDOFF=1 ;;
+    *) SKIP_INITIAL_HANDOFF=0 ;;
+esac
+
+case "$HANDOFF_TIMEOUT_SEC" in
+    ''|*[!0-9]*) HANDOFF_TIMEOUT_SEC=900 ;;
+esac
+
+_explore_remove_child_pid() {
+    local target="$1" out="" p
+    for p in $EXPLORE_CHILD_PIDS; do
+        [ "$p" = "$target" ] && continue
+        out="${out:+$out }$p"
+    done
+    EXPLORE_CHILD_PIDS="$out"
+}
+
+_explore_kill_tree() {
+    local pid="$1" child
+    local pgid
+    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    if [ -n "$pgid" ] && [ "$pgid" != "$$" ]; then
+        kill -TERM "-$pgid" 2>/dev/null || true
+    fi
+    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+        _explore_kill_tree "$child"
+    done
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 1
+    if [ -n "$pgid" ] && [ "$pgid" != "$$" ]; then
+        kill -KILL "-$pgid" 2>/dev/null || true
+    fi
+    kill -KILL "$pid" 2>/dev/null || true
+}
+
+_explore_cleanup_children() {
+    local pid
+    for pid in $EXPLORE_CHILD_PIDS; do
+        if kill -0 "$pid" 2>/dev/null; then
+            _explore_kill_tree "$pid"
+        fi
+    done
+}
+
+trap _explore_cleanup_children INT TERM EXIT
+
+_explore_run_handoff() {
+    local step="$1"; shift
+    local log_dir=".autospec/explore-handoff"
+    local log_file="$log_dir/$step.log"
+    local timeout_file="$log_dir/$step.timeout"
+    local pid watchdog rc
+
+    mkdir -p "$log_dir"
+    : > "$log_file"
+    rm -f "$timeout_file"
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout -k 2s "${HANDOFF_TIMEOUT_SEC}s" "$@" > "$log_file" 2>&1
+        rc=$?
+        if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            echo "code_health:explore_handoff_timeout step=$step timeout_sec=$HANDOFF_TIMEOUT_SEC log=$log_file" >&2
+            return 124
+        fi
+        if [ "$rc" -ne 0 ]; then
+            echo "autospec-explore: WARN initial handoff step=$step failed rc=$rc log=$log_file (continuing)" >&2
+        fi
+        return "$rc"
+    fi
+
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$@" > "$log_file" 2>&1 &
+    else
+        "$@" > "$log_file" 2>&1 &
+    fi
+    pid=$!
+    EXPLORE_CHILD_PIDS="${EXPLORE_CHILD_PIDS:+$EXPLORE_CHILD_PIDS }$pid"
+
+    (
+        sleep "$HANDOFF_TIMEOUT_SEC"
+        if kill -0 "$pid" 2>/dev/null; then
+            printf 'timeout after %ss\n' "$HANDOFF_TIMEOUT_SEC" > "$timeout_file"
+            _explore_kill_tree "$pid"
+        fi
+    ) &
+    watchdog=$!
+
+    wait "$pid"
+    rc=$?
+    kill "$watchdog" 2>/dev/null || true
+    wait "$watchdog" 2>/dev/null || true
+    _explore_remove_child_pid "$pid"
+
+    if [ -f "$timeout_file" ]; then
+        echo "code_health:explore_handoff_timeout step=$step timeout_sec=$HANDOFF_TIMEOUT_SEC log=$log_file" >&2
+        return 124
+    fi
+    if [ "$rc" -ne 0 ]; then
+        echo "autospec-explore: WARN initial handoff step=$step failed rc=$rc log=$log_file (continuing)" >&2
+    fi
+    return "$rc"
+}
 
 # ── Domain-specialist roster discovery + autonomy detection (Issue E2). ────────
 # Mark the run autonomous when --autonomous was passed OR no interactive TTY is
@@ -233,30 +346,34 @@ if [ -z "$SANDBOX_BRANCH" ]; then
 fi
 
 # ── Step 2: refine initial prompt (harness-aware). ─────────────────────────────
-if [ -n "${AUTOSPEC_EXPLORE_REFINE_CMD:-}" ]; then
-    bash -c "$AUTOSPEC_EXPLORE_REFINE_CMD" || true
+if [ "$SKIP_INITIAL_HANDOFF" -eq 1 ]; then
+    echo "autospec-explore: initial handoff skipped (--no-initial-handoff)" >&2
+elif [ -n "${AUTOSPEC_EXPLORE_REFINE_CMD:-}" ]; then
+    _explore_run_handoff refine bash -c "$AUTOSPEC_EXPLORE_REFINE_CMD" || true
 else
     autospec_harness_resolve_dispatcher 2>/dev/null || true
     if [ -n "${AUTOSPEC_HARNESS_DISPATCHER:-}" ]; then
         case "$AUTOSPEC_HARNESS_KIND" in
             claude|opencode)
-                "$AUTOSPEC_HARNESS_DISPATCHER" "/autospec-refine" "$PROMPT" >/dev/null 2>&1 || true ;;
+                _explore_run_handoff refine "$AUTOSPEC_HARNESS_DISPATCHER" "/autospec-refine" "$PROMPT" || true ;;
             codex)
-                "$AUTOSPEC_HARNESS_DISPATCHER" exec --skip-git-repo-check "/autospec-refine $PROMPT" >/dev/null 2>&1 || true ;;
+                _explore_run_handoff refine "$AUTOSPEC_HARNESS_DISPATCHER" exec --skip-git-repo-check "/autospec-refine $PROMPT" || true ;;
         esac
     fi
 fi
 
 # ── Step 3: file initial issues via decompose (harness-aware). ─────────────────
-if [ -n "${AUTOSPEC_EXPLORE_DEFINE_CMD:-}" ]; then
-    bash -c "$AUTOSPEC_EXPLORE_DEFINE_CMD" || true
+if [ "$SKIP_INITIAL_HANDOFF" -eq 1 ]; then
+    :
+elif [ -n "${AUTOSPEC_EXPLORE_DEFINE_CMD:-}" ]; then
+    _explore_run_handoff define bash -c "$AUTOSPEC_EXPLORE_DEFINE_CMD" || true
 else
     if [ -n "${AUTOSPEC_HARNESS_DISPATCHER:-}" ]; then
         case "$AUTOSPEC_HARNESS_KIND" in
             claude|opencode)
-                "$AUTOSPEC_HARNESS_DISPATCHER" "/autospec-define" "$PROMPT" >/dev/null 2>&1 || true ;;
+                _explore_run_handoff define "$AUTOSPEC_HARNESS_DISPATCHER" "/autospec-define" "$PROMPT" || true ;;
             codex)
-                "$AUTOSPEC_HARNESS_DISPATCHER" exec --skip-git-repo-check "/autospec-define $PROMPT" >/dev/null 2>&1 || true ;;
+                _explore_run_handoff define "$AUTOSPEC_HARNESS_DISPATCHER" exec --skip-git-repo-check "/autospec-define $PROMPT" || true ;;
         esac
     fi
 fi
@@ -661,6 +778,9 @@ PYR
         echo "code_health:explore_all_researchers_failed iter=$iter" >&2
         status="explore_all_researchers_failed"
         break
+    fi
+    if [ "$proposals_count" -eq 0 ] && [ "$research_rc" -eq 0 ]; then
+        echo "code_health:explore_no_proposals iter=$iter research_rc=0" >&2
     fi
 
     # ── Spec-first round filing (issue #1102). ────────────────────────────────

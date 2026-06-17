@@ -108,6 +108,65 @@ teardown() {
     grep -q 'issue create' "$TMP/.gh-calls.log"
 }
 
+@test "orchestrator: --no-initial-handoff skips startup refine and define dispatch" {
+    run bash "$REPO_ROOT/scripts/autospec-explore.sh" \
+        "ship cool feature" \
+        --no-initial-handoff \
+        --max-iterations 1 \
+        --sandbox-slug no-handoff-test \
+        --research-sources spec-vs-code
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+    [ ! -f "$TMP/.refine-calls.log" ]
+    [ ! -f "$TMP/.define-calls.log" ]
+}
+
+@test "orchestrator: initial handoff timeout logs diagnostics and continues" {
+    unset AUTOSPEC_EXPLORE_REFINE_CMD
+    unset AUTOSPEC_EXPLORE_DEFINE_CMD
+    export AUTOSPEC_HANDOFF_DISPATCHER=1
+    export AUTOSPEC_EXPLORE_HANDOFF_TIMEOUT_SEC=1
+    cat > "$TMP/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+echo "claude-start $*" >> "$AUTOSPEC_REPO_ROOT/.claude-calls.log"
+echo "claude-start $*"
+sleep 30 >/dev/null 2>&1
+EOF
+    chmod +x "$TMP/bin/claude"
+
+    run bash "$REPO_ROOT/scripts/autospec-explore.sh" \
+        "ship cool feature" \
+        --max-iterations 1 \
+        --sandbox-slug handoff-timeout-test \
+        --research-sources spec-vs-code
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+    echo "$output" | grep -q 'code_health:explore_handoff_timeout step=refine'
+    echo "$output" | grep -q 'code_health:explore_handoff_timeout step=define'
+    [ -s "$TMP/.autospec/explore-handoff/refine.log" ]
+    [ -s "$TMP/.autospec/explore-handoff/define.log" ]
+    grep -q 'claude-start' "$TMP/.autospec/explore-handoff/refine.log"
+    grep -q 'claude-start' "$TMP/.autospec/explore-handoff/define.log"
+}
+
+@test "orchestrator: zero-proposal successful research round is surfaced loudly" {
+    cat > "$AUTOSPEC_RESEARCH_DIR/spec-vs-code.sh" <<'EOF'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"source":"spec-vs-code","proposals":[]}
+JSON
+EOF
+    chmod +x "$AUTOSPEC_RESEARCH_DIR/spec-vs-code.sh"
+
+    run bash "$REPO_ROOT/scripts/autospec-explore.sh" \
+        "ship cool feature" \
+        --max-iterations 1 \
+        --sandbox-slug no-proposals-test \
+        --research-sources spec-vs-code
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    echo "$output" | grep -q 'code_health:explore_no_proposals iter=1'
+}
+
 @test "orchestrator: termination — operator stop via explore-stop.flag" {
     touch "$HOME/.autospec/explore-stop.flag"
     run bash "$REPO_ROOT/scripts/autospec-explore.sh" \
