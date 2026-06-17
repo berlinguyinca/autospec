@@ -183,6 +183,27 @@ and a failing example fails generation. `check-doc-drift.sh` reports an
 `example_stale` entry when a marker SHA predates the newest commit touching the
 scope's `src_globs` (same self-heal path as `visual_stale`).
 
+## Answerability / domain-term coverage
+
+`--audit` and `--full` run a deterministic, **project-transparent** answerability
+audit (`doc-coverage.mjs`): it mines the project's OWN vocabulary and checks
+whether the generated docs cover it — no project-specific config required. Two
+term kinds are mined directly from the repo: **enum** constants
+(`SCREAMING_SNAKE_CASE` identifiers with ≥2 segments — enum values, case objects,
+state names users ask about, e.g. `INVALID_TARGET`) from source files, and
+**config** keys (dotted lowercase paths of depth ≥2, e.g.
+`wcmc.workflow.targets.invalidate.name`) from `application*.yml`, `.properties`,
+and `.conf` files. Build/vendor dirs and the generated `docs/<audience>/` trees
+are excluded so the docs are never mined as their own source, and a built-in
+stoplist drops generic ALLCAPS noise (API, HTTP, JSON, …). A term is *covered*
+when any generated page mentions it (case-insensitive whole-token; config keys
+also match on their last ≥2 segments). `--audit` prints
+`domain coverage: <covered>/<total> terms (<pct>%)` and lists the highest-signal
+missing terms; `--full` prints a one-line summary. The audit is advisory (never
+throws, never writes). Knobs live under `documentation.coverage`:
+`enabled` (default true — set `false` to skip), `min_freq`, `min_files`,
+`source_globs`, `config_globs`, `stoplist`, and `max_report` (default 15).
+
 ## Style & palette
 
 The visual palette is **single-sourced** in `doc-style.mjs` — no other

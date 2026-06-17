@@ -25,9 +25,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
 
-import { loadConfig, resolveFeatures, DEFAULT_AUDIENCES, FOLDER_CONTRACT } from './doc-config.mjs';
+import { loadConfig, resolveFeatures, resolveCoverageOptions, DEFAULT_AUDIENCES, FOLDER_CONTRACT } from './doc-config.mjs';
 import { writeLlmsFull, fillManifest } from './gen-llms-full.mjs';
 import { generateAudienceDocs } from './gen-audience-docs.mjs';
+import { auditCoverage } from './doc-coverage.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -263,6 +264,51 @@ function printAuditReport(report) {
   for (const w of report.sameness)       console.log(`  sameness: ${w}`);
 }
 
+// ── Answerability / domain-term coverage (doc-coverage.mjs) ────────────────────
+//
+// Mines the project's OWN vocabulary (SCREAMING_SNAKE enum constants + dotted
+// config keys) and checks whether the generated audience docs cover it. Advisory
+// only — never throws, never writes. Returns the coverage result (or null when
+// disabled / on error).
+function runCoverage(cfg, projRoot) {
+  const opts = resolveCoverageOptions(cfg);
+  if (!opts.enabled) return null;
+  try {
+    const pages = collectAudiencePages(cfg, projRoot);
+    const res = auditCoverage({
+      repoRoot: projRoot,
+      pages,
+      options: {
+        minFreq:     opts.minFreq,
+        minFiles:    opts.minFiles,
+        sourceGlobs: opts.sourceGlobs || undefined,
+        configGlobs: opts.configGlobs || undefined,
+        stoplist:    opts.stoplist || [],
+        excludeDirs: opts.excludeDirs || [],
+        excludeGlobs: opts.excludeGlobs || [],
+        excludeFiles: opts.excludeFiles || [],
+        configPrefixStoplist: opts.configPrefixStoplist || [],
+        useDefaultConfigPrefixStoplist: opts.useDefaultConfigPrefixStoplist,
+      },
+    });
+    return { ...res, maxReport: opts.maxReport };
+  } catch (e) {
+    process.stderr.write(`[autospec-doc] coverage audit error: ${e.message}\n`);
+    return null;
+  }
+}
+
+// Full multi-line coverage section for --audit (and --full's audit pass).
+function printCoverageReport(res) {
+  if (!res) return;
+  console.log(`  domain coverage: ${res.covered}/${res.total} terms (${res.coveragePct}%)`);
+  const limit = res.maxReport != null ? res.maxReport : 15;
+  for (const t of res.missing.slice(0, limit)) {
+    const sample = (t.sampleFiles && t.sampleFiles[0]) ? ` e.g. ${t.sampleFiles[0]}` : '';
+    console.log(`  missing ${t.kind}: ${t.term} (freq ${t.freq}, ${t.files} files)${sample}`);
+  }
+}
+
 async function handleFull(_opts) {
   const cfg = loadConfig(CONFIG_PATH);
   const projRoot = projectRoot();
@@ -289,6 +335,15 @@ async function handleFull(_opts) {
   // Run the deterministic completeness audit and print its summary.
   const report = await runAudit(cfg, projRoot, features);
   printAuditReport(report);
+
+  // Advisory answerability/domain-term coverage summary (one line; never throws).
+  const cov = runCoverage(cfg, projRoot);
+  if (cov) {
+    console.log(
+      `[autospec-doc] domain coverage: ${cov.coveragePct}% (${cov.covered}/${cov.total}); `
+      + `${cov.missing.length} high-signal terms missing`,
+    );
+  }
   return 0;
 }
 
@@ -299,6 +354,10 @@ async function handleAudit(_opts) {
   const features = resolveFeatures(cfg, projRoot);
   const report = await runAudit(cfg, projRoot, features);
   printAuditReport(report);
+
+  // Advisory answerability/domain-term coverage section (read-only; never writes).
+  const cov = runCoverage(cfg, projRoot);
+  printCoverageReport(cov);
   return 0;
 }
 

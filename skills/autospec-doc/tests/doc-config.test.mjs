@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_MOD = path.resolve(__dirname, '../scripts/doc-config.mjs');
 
-const { loadConfig, resolveFeatures, FOLDER_CONTRACT, DEFAULT_AUDIENCES } = await import(CONFIG_MOD);
+const { loadConfig, resolveFeatures, resolveCoverageOptions, COVERAGE_DEFAULTS, FOLDER_CONTRACT, DEFAULT_AUDIENCES } = await import(CONFIG_MOD);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -311,6 +311,144 @@ test('resolveFeatures: rich fixture fields and per-audience maps are preserved',
   assert.deepEqual(f.code_entry_points, [{ path: 'src/x.js' }]);
   assert.strictEqual(f.data_model, 'a table');
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ── resolveCoverageOptions ──────────────────────────────────────────────────────
+
+test('resolveCoverageOptions: defaults when no coverage block present', () => {
+  const dir = makeTmpDir();
+  writeYml(dir, 'documentation:\n  audiences: []\n');
+  const cfg = loadConfig(configPath(dir));
+  const opts = resolveCoverageOptions(cfg);
+  assert.strictEqual(opts.enabled, true);
+  assert.strictEqual(opts.minFreq, COVERAGE_DEFAULTS.minFreq);
+  assert.strictEqual(opts.minFiles, COVERAGE_DEFAULTS.minFiles);
+  assert.strictEqual(opts.maxReport, 15);
+  assert.deepEqual(opts.stoplist, []);
+  assert.strictEqual(opts.sourceGlobs, null);
+  assert.strictEqual(opts.configGlobs, null);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('resolveCoverageOptions: snake_case overrides are honoured', () => {
+  const dir = makeTmpDir();
+  writeYml(dir, [
+    'documentation:',
+    '  audiences: []',
+    '  coverage:',
+    '    enabled: false',
+    '    min_freq: 5',
+    '    min_files: 4',
+    '    max_report: 3',
+    '    stoplist:',
+    '      - FOO_BAR',
+    '      - BAZ_QUX',
+    '',
+  ].join('\n'));
+  const cfg = loadConfig(configPath(dir));
+  const opts = resolveCoverageOptions(cfg);
+  assert.strictEqual(opts.enabled, false);
+  assert.strictEqual(opts.minFreq, 5);
+  assert.strictEqual(opts.minFiles, 4);
+  assert.strictEqual(opts.maxReport, 3);
+  assert.deepEqual(opts.stoplist, ['FOO_BAR', 'BAZ_QUX']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('resolveCoverageOptions: source_globs / config_globs pass through as arrays', () => {
+  const dir = makeTmpDir();
+  writeYml(dir, [
+    'documentation:',
+    '  audiences: []',
+    '  coverage:',
+    '    source_globs:',
+    '      - "**/*.scala"',
+    '    config_globs:',
+    '      - "**/*.conf"',
+    '',
+  ].join('\n'));
+  const cfg = loadConfig(configPath(dir));
+  const opts = resolveCoverageOptions(cfg);
+  assert.deepEqual(opts.sourceGlobs, ['**/*.scala']);
+  assert.deepEqual(opts.configGlobs, ['**/*.conf']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('resolveCoverageOptions: excludeDirs / excludeGlobs default to []', () => {
+  const dir = makeTmpDir();
+  writeYml(dir, 'documentation:\n  audiences: []\n');
+  const cfg = loadConfig(configPath(dir));
+  const opts = resolveCoverageOptions(cfg);
+  assert.deepEqual(opts.excludeDirs, []);
+  assert.deepEqual(opts.excludeGlobs, []);
+  assert.deepEqual(COVERAGE_DEFAULTS.excludeDirs, []);
+  assert.deepEqual(COVERAGE_DEFAULTS.excludeGlobs, []);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('resolveCoverageOptions: exclude_dirs / exclude_globs overrides honoured', () => {
+  const dir = makeTmpDir();
+  writeYml(dir, [
+    'documentation:',
+    '  audiences: []',
+    '  coverage:',
+    '    exclude_dirs:',
+    '      - thirdparty',
+    '      - generated',
+    '    exclude_globs:',
+    '      - "fixtures/**"',
+    '      - "**/*.gen.scala"',
+    '',
+  ].join('\n'));
+  const cfg = loadConfig(configPath(dir));
+  const opts = resolveCoverageOptions(cfg);
+  assert.deepEqual(opts.excludeDirs, ['thirdparty', 'generated']);
+  assert.deepEqual(opts.excludeGlobs, ['fixtures/**', '**/*.gen.scala']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('resolveCoverageOptions: new knobs default to [] / [] / true', () => {
+  const dir = makeTmpDir();
+  writeYml(dir, 'documentation:\n  audiences: []\n');
+  const cfg = loadConfig(configPath(dir));
+  const opts = resolveCoverageOptions(cfg);
+  assert.deepEqual(opts.excludeFiles, []);
+  assert.deepEqual(opts.configPrefixStoplist, []);
+  assert.strictEqual(opts.useDefaultConfigPrefixStoplist, true);
+  assert.deepEqual(COVERAGE_DEFAULTS.excludeFiles, []);
+  assert.deepEqual(COVERAGE_DEFAULTS.configPrefixStoplist, []);
+  assert.strictEqual(COVERAGE_DEFAULTS.useDefaultConfigPrefixStoplist, true);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('resolveCoverageOptions: exclude_files / config_prefix_stoplist / use_default_config_prefix_stoplist overrides honoured', () => {
+  const dir = makeTmpDir();
+  writeYml(dir, [
+    'documentation:',
+    '  audiences: []',
+    '  coverage:',
+    '    exclude_files:',
+    '      - custom.properties',
+    '    config_prefix_stoplist:',
+    '      - acme',
+    '      - internal',
+    '    use_default_config_prefix_stoplist: false',
+    '',
+  ].join('\n'));
+  const cfg = loadConfig(configPath(dir));
+  const opts = resolveCoverageOptions(cfg);
+  assert.deepEqual(opts.excludeFiles, ['custom.properties']);
+  assert.deepEqual(opts.configPrefixStoplist, ['acme', 'internal']);
+  assert.strictEqual(opts.useDefaultConfigPrefixStoplist, false);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('resolveCoverageOptions: tolerant of an empty/undefined config object', () => {
+  const opts = resolveCoverageOptions({});
+  assert.strictEqual(opts.enabled, true);
+  assert.strictEqual(opts.minFreq, 3);
+  const opts2 = resolveCoverageOptions();
+  assert.strictEqual(opts2.enabled, true);
 });
 
 test('explicit style.palette and examples values are honoured over defaults', () => {
