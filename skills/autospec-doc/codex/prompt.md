@@ -141,6 +141,31 @@ Folder contract: `docs/<audience>/{index.md,getting-started.md,tutorials/<featur
 developer adds `architecture/` + `api/`; admin links `docs/runbooks/`; shared
 assets live under `docs/assets/{screenshots,diagrams,transcripts}/`.
 
+### Per-audience prose (authoring contract)
+
+Every feature prose field (`summary`, `spec_sections`, `data_model`,
+`invariants`, `errors`, `config_reference`, `rationale`, `examples`) may be
+EITHER a shared scalar/array (same text for all audiences) OR a per-audience map
+`{ user, developer, admin, general, default }`. `pickForAudience` resolves the
+map to `value[audience] ?? value.default ?? null`; shared values pass through
+unchanged. `title`, `slug`, `code_entry_points`, and `depends_on` stay shared.
+
+The TIER_A authoring pass SHOULD produce genuinely per-audience prose, not the
+same text four times:
+
+- **user** — task/workflow framing: how to run it, what to click, expected results.
+- **developer** — architecture and internals: data structures, APIs, extension points.
+- **admin** — install/operate/configure: setup, tuning knobs, troubleshooting.
+- **general** — plain-language "what & why": the problem it solves, in one breath.
+
+The generator runs a **sameness guard**: if a feature's `features/<slug>.md`
+body is byte-identical across all audiences (after stripping the audience
+tagline, mermaid theme line, scope block, and gated `## Configuration` / `## Why`
+sections), it adds a `feature '<slug>': identical prose…` entry to the returned
+`warnings[]` (printed to stderr by the CLI). Pass
+`failOnIdenticalAudiences: true` to turn that warning into a hard failure
+(nothing is written) so a fake audience split cannot silently ship.
+
 ## Docs-as-tests
 
 Every fenced code example in generated docs is executed against the repo, so
