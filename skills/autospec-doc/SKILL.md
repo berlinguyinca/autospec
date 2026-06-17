@@ -121,10 +121,12 @@ There are five forms; resolve the active repo's `<owner/name>` once and reuse it
   config; `<name>` must resolve to a configured (or default) audience.
   *(filled in by #918.)*
 - **`init`** — the bootstrap. Scans the repo (features, entry points, existing
-  `docs/`) and scaffolds a `documentation:` block in `.autospec/autospec.yml`
-  plus starter doc scopes under `docs/<audience>/` per the folder contract. This
-  is the ONLY subcommand that runs WITHOUT an existing `documentation:` config —
-  it is what creates that config. *(scaffolding logic filled in by #917.)*
+  `docs/`) and scaffolds a `documentation:` block in `.autospec/autospec.yml`,
+  starter doc scopes under `docs/<audience>/` per the folder contract, AND a
+  project-grounded feature skeleton at `.autospec/doc-features.json` (see
+  *Authoring & coverage-driven enrichment workflow*). This is the ONLY subcommand
+  that runs WITHOUT an existing `documentation:` config — it is what creates that
+  config. Idempotent: an existing fixture is never overwritten.
 
 **Config gate.** Every non-`init` subcommand exits `2` when no `documentation:`
 config is present in `.autospec/autospec.yml`: there is nothing to generate
@@ -182,6 +184,60 @@ per-example timeout), embeds captured output in an adjacent ` ```output ` block,
 and a failing example fails generation. `check-doc-drift.sh` reports an
 `example_stale` entry when a marker SHA predates the newest commit touching the
 scope's `src_globs` (same self-heal path as `visual_stale`).
+
+## Answerability / domain-term coverage
+
+`--audit` and `--full` run a deterministic, **project-transparent** answerability
+audit (`doc-coverage.mjs`): it mines the project's OWN vocabulary and checks
+whether the generated docs cover it — no project-specific config required. Two
+term kinds are mined directly from the repo: **enum** constants
+(`SCREAMING_SNAKE_CASE` identifiers with ≥2 segments — enum values, case objects,
+state names users ask about, e.g. `INVALID_TARGET`) from source files, and
+**config** keys (dotted lowercase paths of depth ≥2, e.g.
+`wcmc.workflow.targets.invalidate.name`) from `application*.yml`, `.properties`,
+and `.conf` files. Build/vendor dirs and the generated `docs/<audience>/` trees
+are excluded so the docs are never mined as their own source, and a built-in
+stoplist drops generic ALLCAPS noise (API, HTTP, JSON, …). A term is *covered*
+when any generated page mentions it (case-insensitive whole-token; config keys
+also match on their last ≥2 segments). `--audit` prints
+`domain coverage: <covered>/<total> terms (<pct>%)` and lists the highest-signal
+missing terms; `--full` prints a one-line summary. The audit is advisory (never
+throws, never writes). Knobs live under `documentation.coverage`:
+`enabled` (default true — set `false` to skip), `min_freq`, `min_files`,
+`source_globs`, `config_globs`, `stoplist`, and `max_report` (default 15).
+
+## Authoring & coverage-driven enrichment workflow
+
+The repeatable loop for ANY project — no project-specific hardcoding anywhere:
+
+1. **`init`** — scaffolds the `documentation:` config, the starter doc scopes,
+   AND a project-grounded feature SKELETON at `.autospec/doc-features.json`
+   (`doc-scaffold.mjs`). Candidates are derived deterministically, in priority
+   order: existing topic docs (non-index `*.md` under `docs/<topic>/` dirs that
+   are NOT the generated `user|developer|admin|general` trees), else immediate
+   children of source roots (`apps/`, `packages/`, `services/`, `cmd/`,
+   `modules/`, `crates/`, else first-level `src/` dirs), else a single `overview`
+   feature. Slugs are kebab-cased and filesystem-safe; prose fields are left
+   EMPTY for you to author. The scaffolder NEVER overwrites an existing fixture.
+2. **Author each feature's per-audience prose**, grounded in the project's code
+   and existing docs. Each prose field accepts a per-audience map
+   `{user, developer, admin, general, default}` (or a shared scalar): **user** =
+   task / how-to-run, **developer** = internals / APIs, **admin** =
+   install / operate / config, **general** = plain-language "what & why". Put
+   LITERAL config keys and enum / constant names into the prose (not paraphrases)
+   so the docs are greppable and the coverage audit can detect them.
+3. **`--full`** — generate every audience's pages from the inventory.
+4. **`--audit`** — read the `domain coverage` worklist. Treat the high-frequency
+   missing `enum` / `config` terms as the gap list; ignore genuine framework /
+   test-fixture noise (override via `coverage.stoplist` /
+   `coverage.config_prefix_stoplist` when the built-in stoplists miss something).
+5. **Enrich** the relevant features' `config_reference` / `data_model` /
+   `invariants` with those literal terms, regenerate, and repeat until coverage
+   plateaus or the remaining terms are framework / fixture noise.
+
+Notes: the scaffolder never clobbers an authored fixture (re-running `init` is
+idempotent); per-audience typed fields may be maps or shared scalars; and
+underscore-prefixed or otherwise unknown keys are ignored by the generator.
 
 ## Style & palette
 

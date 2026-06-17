@@ -25,9 +25,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
 
-import { loadConfig, resolveFeatures, DEFAULT_AUDIENCES, FOLDER_CONTRACT } from './doc-config.mjs';
+import { loadConfig, resolveFeatures, resolveCoverageOptions, DEFAULT_AUDIENCES, FOLDER_CONTRACT } from './doc-config.mjs';
+import { scaffoldFeatures, writeScaffold } from './doc-scaffold.mjs';
 import { writeLlmsFull, fillManifest } from './gen-llms-full.mjs';
 import { generateAudienceDocs } from './gen-audience-docs.mjs';
+import { auditCoverage } from './doc-coverage.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -263,6 +265,51 @@ function printAuditReport(report) {
   for (const w of report.sameness)       console.log(`  sameness: ${w}`);
 }
 
+// ── Answerability / domain-term coverage (doc-coverage.mjs) ────────────────────
+//
+// Mines the project's OWN vocabulary (SCREAMING_SNAKE enum constants + dotted
+// config keys) and checks whether the generated audience docs cover it. Advisory
+// only — never throws, never writes. Returns the coverage result (or null when
+// disabled / on error).
+function runCoverage(cfg, projRoot) {
+  const opts = resolveCoverageOptions(cfg);
+  if (!opts.enabled) return null;
+  try {
+    const pages = collectAudiencePages(cfg, projRoot);
+    const res = auditCoverage({
+      repoRoot: projRoot,
+      pages,
+      options: {
+        minFreq:     opts.minFreq,
+        minFiles:    opts.minFiles,
+        sourceGlobs: opts.sourceGlobs || undefined,
+        configGlobs: opts.configGlobs || undefined,
+        stoplist:    opts.stoplist || [],
+        excludeDirs: opts.excludeDirs || [],
+        excludeGlobs: opts.excludeGlobs || [],
+        excludeFiles: opts.excludeFiles || [],
+        configPrefixStoplist: opts.configPrefixStoplist || [],
+        useDefaultConfigPrefixStoplist: opts.useDefaultConfigPrefixStoplist,
+      },
+    });
+    return { ...res, maxReport: opts.maxReport };
+  } catch (e) {
+    process.stderr.write(`[autospec-doc] coverage audit error: ${e.message}\n`);
+    return null;
+  }
+}
+
+// Full multi-line coverage section for --audit (and --full's audit pass).
+function printCoverageReport(res) {
+  if (!res) return;
+  console.log(`  domain coverage: ${res.covered}/${res.total} terms (${res.coveragePct}%)`);
+  const limit = res.maxReport != null ? res.maxReport : 15;
+  for (const t of res.missing.slice(0, limit)) {
+    const sample = (t.sampleFiles && t.sampleFiles[0]) ? ` e.g. ${t.sampleFiles[0]}` : '';
+    console.log(`  missing ${t.kind}: ${t.term} (freq ${t.freq}, ${t.files} files)${sample}`);
+  }
+}
+
 async function handleFull(_opts) {
   const cfg = loadConfig(CONFIG_PATH);
   const projRoot = projectRoot();
@@ -289,6 +336,15 @@ async function handleFull(_opts) {
   // Run the deterministic completeness audit and print its summary.
   const report = await runAudit(cfg, projRoot, features);
   printAuditReport(report);
+
+  // Advisory answerability/domain-term coverage summary (one line; never throws).
+  const cov = runCoverage(cfg, projRoot);
+  if (cov) {
+    console.log(
+      `[autospec-doc] domain coverage: ${cov.coveragePct}% (${cov.covered}/${cov.total}); `
+      + `${cov.missing.length} high-signal terms missing`,
+    );
+  }
   return 0;
 }
 
@@ -299,6 +355,10 @@ async function handleAudit(_opts) {
   const features = resolveFeatures(cfg, projRoot);
   const report = await runAudit(cfg, projRoot, features);
   printAuditReport(report);
+
+  // Advisory answerability/domain-term coverage section (read-only; never writes).
+  const cov = runCoverage(cfg, projRoot);
+  printCoverageReport(cov);
   return 0;
 }
 
@@ -413,7 +473,19 @@ function handleInit(opts) {
   console.log('  - create starter doc scopes under docs/<audience>/ per the folder contract:');
   for (const f of scopeFiles) console.log(`      ${f}`);
 
+  // The feature inventory itself is hand-authored today; init seeds a project-
+  // grounded SKELETON so the authoring pass starts from a real feature list.
+  const repoRoot = path.dirname(path.dirname(path.resolve(CONFIG_PATH)));
+  const featuresPath = path.join(repoRoot, '.autospec', 'doc-features.json');
+  const featuresExist = fs.existsSync(featuresPath);
+
   if (opts.dryRun) {
+    if (featuresExist) {
+      console.log('  - .autospec/doc-features.json already present (left untouched)');
+    } else {
+      const { features, source } = scaffoldFeatures({ repoRoot });
+      console.log(`  - scaffold ${features.length} feature skeleton(s) into .autospec/doc-features.json (from ${source})`);
+    }
     console.log('  (--dry-run: no files written)');
     return 0;
   }
@@ -448,6 +520,20 @@ function handleInit(opts) {
     created++;
   }
   console.log(`  ✓ created ${created} starter doc file(s)`);
+
+  // 3. Seed a project-grounded skeleton feature inventory (never clobber an
+  //    existing/authored fixture).
+  if (featuresExist) {
+    console.log('  - .autospec/doc-features.json already present (left untouched)');
+  } else {
+    const audiences = DEFAULT_AUDIENCES.map(a => ({ name: a.name, path: a.path, focus: a.focus }));
+    const res = writeScaffold({ repoRoot, audiences });
+    if (res.written) {
+      console.log(`  ✓ scaffolded ${res.features.length} feature(s) into .autospec/doc-features.json (from ${res.source})`);
+      console.log('  Next: author per-audience prose for each feature in .autospec/doc-features.json,');
+      console.log('        then run `/autospec-doc --full` and `/autospec-doc --audit` to find coverage gaps.');
+    }
+  }
   return 0;
 }
 

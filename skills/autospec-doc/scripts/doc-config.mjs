@@ -329,10 +329,16 @@ export function resolveAutoRegenerate({ config = {}, issueBody = '', withDocsFla
  */
 export function normalizeFeature(feature) {
   if (!feature || typeof feature !== 'object') return feature;
-  // String fields: coerce present non-string values; keep '' for absent.
+  // String fields: keep '' for absent, preserve per-audience maps / arrays
+  // verbatim (the renderer resolves those via pickForAudience), and coerce only
+  // scalar non-string values. Stringifying an object here would turn a
+  // per-audience map { admin, developer, … } into the literal "[object Object]".
   const STR_FIELDS = ['data_model', 'invariants', 'errors', 'config_reference', 'rationale'];
   for (const field of STR_FIELDS) {
-    feature[field] = (feature[field] != null) ? String(feature[field]) : '';
+    const v = feature[field];
+    if (v == null) feature[field] = '';
+    else if (typeof v === 'object') feature[field] = v; // per-audience map or array — preserve
+    else feature[field] = String(v);
   }
   // Array fields: coerce present non-array values; keep [] for absent.
   if (!Array.isArray(feature.depends_on)) {
@@ -481,5 +487,82 @@ export function loadConfig(configPath) {
   if (Array.isArray(doc.features)) documentation.features = doc.features;
   if (doc.features_file != null) documentation.features_file = doc.features_file;
 
+  // Pass through the `documentation.coverage` block verbatim (when present) so
+  // the orchestrator can read answerability-audit knobs via resolveCoverageOptions.
+  const docDocRaw = (typeof doc.documentation === 'object' && doc.documentation !== null && !Array.isArray(doc.documentation))
+    ? doc.documentation : {};
+  const covRaw = (typeof docDocRaw.coverage === 'object' && docDocRaw.coverage !== null && !Array.isArray(docDocRaw.coverage))
+    ? docDocRaw.coverage
+    : ((typeof doc.coverage === 'object' && doc.coverage !== null && !Array.isArray(doc.coverage)) ? doc.coverage : null);
+  if (covRaw) documentation.coverage = covRaw;
+
   return { audiences, style, examples, documentation };
+}
+
+// ── resolveCoverageOptions ──────────────────────────────────────────────────────
+//
+// Normalise the `documentation.coverage` block (answerability / domain-term
+// coverage audit, doc-coverage.mjs) into a defaulted options object the
+// orchestrator passes to auditCoverage. The audit is advisory and ON by default;
+// `enabled: false` turns it off. All knobs are project-agnostic.
+
+export const COVERAGE_DEFAULTS = Object.freeze({
+  enabled:     true,
+  minFreq:     3,
+  minFiles:    2,
+  sourceGlobs: null,   // null → doc-coverage.mjs built-in code-extension default
+  configGlobs: null,   // null → doc-coverage.mjs built-in config-file default
+  stoplist:    [],
+  maxReport:   15,
+  excludeDirs:  [],    // extra dir names merged with doc-coverage built-in exclusions
+  excludeGlobs: [],    // extra POSIX relative-path globs pruned per-file
+  excludeFiles: [],    // extra basenames merged with build-generated-info defaults
+  configPrefixStoplist: [],            // extra config first-segment prefixes (MERGED with defaults)
+  useDefaultConfigPrefixStoplist: true, // opt out of the default framework prefix stoplist
+});
+
+/**
+ * resolveCoverageOptions(config) → normalized coverage options.
+ *
+ * Reads config.documentation.coverage (snake_case keys from YAML) and returns a
+ * camelCase options object with defaults applied. Unknown/absent keys fall back
+ * to COVERAGE_DEFAULTS. Always returns a fresh object.
+ *
+ * @param {object} config  Object returned by loadConfig (carries .documentation).
+ * @returns {{ enabled:boolean, minFreq:number, minFiles:number, sourceGlobs:?string[], configGlobs:?string[], stoplist:string[], maxReport:number, excludeDirs:string[], excludeGlobs:string[], excludeFiles:string[], configPrefixStoplist:string[], useDefaultConfigPrefixStoplist:boolean }}
+ */
+export function resolveCoverageOptions(config = {}) {
+  const doc = (config && typeof config.documentation === 'object' && config.documentation !== null)
+    ? config.documentation : {};
+  const cov = (typeof doc.coverage === 'object' && doc.coverage !== null && !Array.isArray(doc.coverage))
+    ? doc.coverage : {};
+
+  const num = (v, d) => {
+    const n = Number(v);
+    return (v != null && Number.isFinite(n)) ? n : d;
+  };
+  const arr = (v) => {
+    if (Array.isArray(v)) return v.map(String);
+    if (v != null && String(v).trim() !== '') return [String(v)];
+    return null;
+  };
+
+  return {
+    enabled:     (cov.enabled != null) ? Boolean(cov.enabled) : COVERAGE_DEFAULTS.enabled,
+    minFreq:     num(cov.min_freq  != null ? cov.min_freq  : cov.minFreq,  COVERAGE_DEFAULTS.minFreq),
+    minFiles:    num(cov.min_files != null ? cov.min_files : cov.minFiles, COVERAGE_DEFAULTS.minFiles),
+    sourceGlobs: arr(cov.source_globs != null ? cov.source_globs : cov.sourceGlobs),
+    configGlobs: arr(cov.config_globs != null ? cov.config_globs : cov.configGlobs),
+    stoplist:    arr(cov.stoplist) || [],
+    maxReport:   num(cov.max_report != null ? cov.max_report : cov.maxReport, COVERAGE_DEFAULTS.maxReport),
+    excludeDirs:  arr(cov.exclude_dirs  != null ? cov.exclude_dirs  : cov.excludeDirs)  || [],
+    excludeGlobs: arr(cov.exclude_globs != null ? cov.exclude_globs : cov.excludeGlobs) || [],
+    excludeFiles: arr(cov.exclude_files != null ? cov.exclude_files : cov.excludeFiles) || [],
+    configPrefixStoplist:
+      arr(cov.config_prefix_stoplist != null ? cov.config_prefix_stoplist : cov.configPrefixStoplist) || [],
+    useDefaultConfigPrefixStoplist:
+      (cov.use_default_config_prefix_stoplist != null) ? Boolean(cov.use_default_config_prefix_stoplist)
+      : (cov.useDefaultConfigPrefixStoplist != null) ? Boolean(cov.useDefaultConfigPrefixStoplist)
+      : COVERAGE_DEFAULTS.useDefaultConfigPrefixStoplist,
+  };
 }

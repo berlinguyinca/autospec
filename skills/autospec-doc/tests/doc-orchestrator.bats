@@ -198,6 +198,44 @@ EOF
   [[ "$output" == *"roundtrip-ok"* ]]
 }
 
+# ── init feature-inventory scaffolding (doc-scaffold.mjs) ──────────────────────
+
+@test "init seeds .autospec/doc-features.json with feature slugs from topic docs" {
+  mkdir -p docs/apps docs/algorithms
+  echo '# Export' > docs/apps/export-pipeline.md
+  echo '# Ingest' > docs/apps/ingest.md
+  echo '# Peaks' > docs/algorithms/peak-detection.md
+  echo '# index' > docs/apps/index.md
+  run node "$ORCH" init
+  [ "$status" -eq 0 ]
+  [ -f .autospec/doc-features.json ]
+  [[ "$output" == *"scaffolded"* ]]
+  grep -q '"slug": "export-pipeline"' .autospec/doc-features.json
+  grep -q '"slug": "ingest"' .autospec/doc-features.json
+  grep -q '"slug": "peak-detection"' .autospec/doc-features.json
+  # index.md must NOT become a feature.
+  ! grep -q '"slug": "index"' .autospec/doc-features.json
+}
+
+@test "init does NOT overwrite an edited doc-features.json on re-run" {
+  mkdir -p .autospec docs/apps
+  echo '# Export' > docs/apps/export.md
+  echo '{"features":[{"slug":"hand-authored"}]}' > .autospec/doc-features.json
+  run node "$ORCH" init
+  [ "$status" -eq 0 ]
+  grep -q 'hand-authored' .autospec/doc-features.json
+  ! grep -q 'export' .autospec/doc-features.json
+}
+
+@test "init --dry-run writes no feature inventory" {
+  mkdir -p docs/apps
+  echo '# Export' > docs/apps/export.md
+  run node "$ORCH" init --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"scaffold"* ]]
+  [ ! -f .autospec/doc-features.json ]
+}
+
 # ── §D6 incremental orchestrator tests (issue #943) ───────────────────────────
 
 # §D6: bare invocation with zero changed scopes (AUTOSPEC_CHECK_DRIFT_SH stub
@@ -333,4 +371,77 @@ EOF
   run node "$ORCH" --audience nonsense
   [ "$status" -ne 0 ]
   [[ "$output" == *"not a known audience"* ]]
+}
+
+# ── Answerability / domain-term coverage audit (doc-coverage.mjs) ───────────────
+
+# Seed a config + a source file containing a SCREAMING_SNAKE enum constant that
+# NO generated doc mentions. The audit must mine it and report it missing.
+seed_coverage_config() {
+  mkdir -p .autospec
+  cat > .autospec/autospec.yml <<EOF
+documentation:
+  audiences:
+    - {name: user, path: docs/user, focus: "tasks"}
+$1
+EOF
+  # A source file with a high-signal enum across two files so it passes
+  # min_freq>=3 / min_files>=2 thresholds.
+  mkdir -p src
+  cat > src/Annotation.scala <<'EOF'
+object Annotation {
+  val a = AnnotationTargetType.INVALID_TARGET
+  val b = INVALID_TARGET
+}
+EOF
+  cat > src/Target.scala <<'EOF'
+object Target {
+  val x = INVALID_TARGET
+}
+EOF
+  # A generated user doc that does NOT mention INVALID_TARGET.
+  mkdir -p docs/user/features
+  cat > docs/user/features/export-pipeline.md <<'EOF'
+<!-- autospec-doc-scope: audience=user -->
+# Export Pipeline
+Export your data to CSV.
+EOF
+}
+
+@test "--audit reports a domain coverage section and lists the missing enum" {
+  seed_coverage_config ""
+  run node "$ORCH" --audit
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"domain coverage:"* ]]
+  [[ "$output" == *"INVALID_TARGET"* ]]
+  [[ "$output" == *"missing enum:"* ]]
+}
+
+@test "--full prints a one-line domain coverage summary" {
+  seed_coverage_config ""
+  run node "$ORCH" --full
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"full:"* ]]
+  [[ "$output" == *"domain coverage:"* ]]
+  [[ "$output" == *"high-signal terms missing"* ]]
+}
+
+@test "coverage enabled:false suppresses the domain coverage output" {
+  seed_coverage_config "  coverage:
+    enabled: false"
+  run node "$ORCH" --audit
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"audit:"* ]]
+  [[ "$output" != *"domain coverage:"* ]]
+}
+
+@test "coverage exclude_globs from config flows through to the extractor" {
+  # Proves the orchestrator forwards the newer override knobs (not just
+  # min_freq/stoplist): excluding src/** must drop the INVALID_TARGET enum.
+  seed_coverage_config "  coverage:
+    exclude_globs: [\"src/**\"]"
+  run node "$ORCH" --audit
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"domain coverage:"* ]]
+  [[ "$output" != *"INVALID_TARGET"* ]]
 }
