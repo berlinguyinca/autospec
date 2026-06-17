@@ -281,6 +281,40 @@ function renderFeatureSections(audience, feature) {
   return lines;
 }
 
+// ── renderExamples — emit <!-- example --> fenced blocks (issue #1133) ──────────
+//
+// Emits one `<!-- example -->` + fenced code block per entry in
+// feature.examples[].  Empty / absent arrays emit nothing.
+//
+// Entry shape: { lang?: string, command: string }
+//   lang     defaults to 'bash' when absent or empty.
+//   command  the executable text placed verbatim inside the fence.
+//
+// Marker format is pinned verbatim by the #1133 shared contract:
+//   <!-- example -->
+//   ```<lang>
+//   <command>
+//   ```
+//
+// verifyExamples (verify-examples.mjs) recognises exactly this tag+fence
+// sequence and stamps an adjacent output block + <!-- example-verified: -->
+// marker after a successful run.
+
+function renderExamples(feature) {
+  const examples = feature.examples;
+  if (!examples || examples.length === 0) return [];
+  const lines = [];
+  for (const entry of examples) {
+    const lang = (entry.lang && entry.lang.trim()) ? entry.lang.trim() : 'bash';
+    lines.push('<!-- example -->');
+    lines.push(`\`\`\`${lang}`);
+    lines.push(entry.command);
+    lines.push('```');
+    lines.push('');
+  }
+  return lines;
+}
+
 function renderFeature(audience, feature, directive) {
   const globs = featureSrcGlobs(feature);
   const lines = [
@@ -298,6 +332,8 @@ function renderFeature(audience, feature, directive) {
   for (const s of (feature.spec_sections || [])) lines.push(s, '');
   // Append the six LLM-targeted sections (issue #1129); empty fields are omitted.
   lines.push(...renderFeatureSections(audience, feature));
+  // Append verified runnable examples (issue #1133); empty examples[] emits nothing.
+  lines.push(...renderExamples(feature));
   if (directive) lines.push(`<!-- regen-directive: ${directive} -->`, '');
   return lines.join('\n');
 }
