@@ -9,6 +9,37 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Added
 
+#### Auto context rollover — perpetual-session monitor (2026-05-31 → 2026-06-01)
+- New `autospec-session` launcher wraps `claude` / `codex` / `opencode` in a tmux daemon that injects `/compact` at 50% context and `/create-handoff` → `/clear` → resume at 80%, same terminal and process.
+- NORMAL/COMPACTED/ROLLED state-machine engine, per-harness transcript adapters (Claude transcript, Codex `info:null` fallback, OpenCode SQLite), Claude PreCompact hook mode (no tmux), opt-in `install.sh` prompt, cancel-window overlay, handoff validation gate, and a cost/value telemetry ledger. (#743–#776, #777, #783, #801–#819, #897)
+- New `autospec-rollover-status` skill reports live context % and the last rollover event. (#770, #784)
+
+#### autospec-e2e-clone — production-clone provisioner (tracker #423)
+- New skill: an isolated, scaled-down, PII-anonymized clone of a production environment for autospec-test Mode II — snapshot capture, edge-case seeding, adapters for docker-compose / k8s / staging-slot / custom-cmd, and teardown + autospec-test integration. (#473, #474, #493)
+
+#### autospec-doc — multi-audience documentation engine (2026-06-03)
+- New docs-as-tests engine: a `documentation:` config + folder contract, per-audience generators (user / developer / admin / general), `verify-examples.mjs` (doc examples run as tests), `doc-style.mjs` palette + mermaid theming, `gen-llms-full.mjs` + manifest fill, and an incremental-by-default orchestrator with deterministic-first cost caps. Wired into `/autospec-sweep --full` and `/autospec-define` auto-docs. (#914, #921, #927–#946, #970)
+
+#### autospec-explore — autonomous research + ship loop (2026-06-03)
+- New skill: 7 researchers propose features on an isolated sandbox branch, filtered through adversarial verify + ROI + severity rank, then drained via `/autospec-run` with PRs that never target `main`; `autospec-listen` routes explore/discover intent behind a confirmation gate. (#907, #912, #913, #964, #983)
+
+#### autospec-loop — goal-conditioned loop skill (2026-06-02)
+- New skill: freeze a request into a contract, then loop until the goal is met (refine-until-go gate, goal-conditioned loop, trigger disambiguation vs native `/loop`). (#890–#905)
+
+#### autospec-playwright — no-mock UI test authoring, Stage 2A (2026-06-04)
+- New thin dispatcher skill plus autospec-test Stage 2A: control inventory + effect-assertion taxonomy, `selector-evidence.mjs` source-grep resolver, `lint-playwright-author.mjs` (AST mock-ban + adaptive retry), and reset-endpoint generation with guard-env rails. (#990–#1010)
+
+#### autospec-fleet GUI (2026-06-01 → 2026-06-02)
+- Backend launcher `fleet-gui.sh` (HTTP server, atomic config writes, constant-time auth) plus an accessible vanilla-JS repo-picker page, `--once` smoke mode, and flock-guarded concurrent config writes. (#826, #832–#865)
+
+#### Cost & token efficiency (2026-06-03 → 2026-06-04)
+- Fresh-subagent-per-issue with batch default 1, slim implementer prefix + cache-boundary fix, per-issue body fetched once with SHA-gated reviewer re-fetch, deterministic-first classify + tiered reviewer (`AUTOSPEC_REVIEWER_TIER`), `post-token-report.sh` + committed baseline, and skill-block templates with install-time expansion + version-skew guard. (#938–#950, #967, #969, #1015–#1040)
+
+#### Git hygiene, guardrails & correctness (2026-06-01 → 2026-06-14)
+- `worktree-guard.sh` (assert / resolve-branch / create) with a PR-aware worktree ladder asserted before every commit step across the run / define / doc / release / explore trios. (#959–#983)
+- AGENTS.md converted to a deterministic-lint-enforced contract with `linter:allow-` escape hatches (#824); deterministic complexity gates — file/function LOC, cyclomatic, duplicate names (#822); Phase 3.75 architectural alignment between decomposition and implementation (#823); mandatory Pattern-survey before Phase 4 (#820).
+- Full-suite proof required before merge (#926), autospec-run done-challenge before convergence, and a structured result-first Closeout report contract + gate (2026-06-14).
+
 #### Phase 2 roadmap — operational hardening (2026-05-22)
 - `feat(model-tier): Haiku trial profile + select-model-profile routing` (#417 / #428)
   Routes `reasoning:shallow` / `reasoning:medium` issues to Claude Haiku; `reasoning:deep` stays on Sonnet. Per-profile telemetry tracks quality.
@@ -90,8 +121,9 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 - `#420` Mutation testing (test-of-tests, vacuous-assertion detector, mutmut/Stryker gate)
 - `#421` Tooling optimization (deterministic templates, batched classifier, gen-pr-report)
-- `#423` Skill C — clone provisioner (autospec-e2e-clone, Mode II infrastructure)
 - `#424` Distribution / install UX (npm package, npx, marketplace listings)
+
+(`#423` clone provisioner shipped as `autospec-e2e-clone` — see Added above.)
 
 ---
 

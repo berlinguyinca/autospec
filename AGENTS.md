@@ -341,6 +341,52 @@ Rules:
   Mirrors `AUTOSPEC_NO_AUTOMERGE_SPEC=1` and `AUTOSPEC_NO_SELF_UPDATE=1`. Logged
   as `WARN: guardian disabled by AUTOSPEC_NO_GUARDIAN` on every Phase 4 dispatch.
 
+## Closeout report contract
+
+Every `auto-implement` agent ends an issue by emitting a **Closeout report** —
+appended to the PR body and printed to the monitor log. It is the structured,
+result-first summary the merge-gate and the done-challenge consume as *evidence*.
+Keep it terse: a tight body, long only where a claim genuinely needs it.
+
+Required fields (exact field names are gated by `scripts/validate.sh`):
+
+- **Result** — one line, outcome first (what shipped), not a narration of the
+  agent's own process. Open with the result, not "I'll" / "Let me".
+- **Claims** — each load-bearing claim carries one label: `[verified]` (the agent
+  checked it itself), `[assumed]` (inferred or taken from another agent's report),
+  `[couldnt-verify]`, or `[likely-wrong]`. Unlabeled load-bearing claims are a
+  defect.
+- **Proof type** — for each `[verified]` claim, `runtime` or `static`. **Runtime
+  claims need runtime proof, not just a build/read.** A `[verified]` runtime claim
+  backed only by static/build evidence is downgraded to `[assumed]` by the
+  consumer (see below).
+- **Before/after** — the measurable delta this change produced (test count, perf
+  number, error rate, …) or an explicit `n/a — <reason>`. A before/after is the
+  marker of real work; the field is mandatory (the reason may be `n/a`).
+- **Artifacts** — exact file paths and a re-runnable command a reviewer can
+  execute to reproduce the proof.
+- **Scoped git status** — the files this issue touched (scoped, not a raw global
+  status dump).
+- **One likely hidden failure** — the single most probable thing still wrong. Not
+  optional; "none" is itself a claim to be challenged.
+
+### Consumer contract (critic / merge-gate)
+
+The merge-gate and the autospec-run done-challenge treat the Closeout report as a
+**claim, not proof**:
+
+- Record the Closeout report as merge evidence (alongside the full-suite passing
+  summary) — never merge on a closeout the agent did not actually emit.
+- Re-read the cited artifacts; do not accept a closeout's word for them.
+- **Reject (or downgrade to `[assumed]`) any `[verified]` runtime claim whose
+  proof type is `static`/build-only.** This is the one machine-checkable critic
+  predicate.
+
+The judgment-bound discipline that cannot be gated, applied throughout an issue:
+state the blast radius before any global/destructive action; stay in the issue's
+scope and park unrelated findings as follow-up issues rather than expanding the
+diff.
+
 ## Memory management scripts
 
 Scripts for managing project memory files under `AUTOSPEC_MEMORY_DIR`

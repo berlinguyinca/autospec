@@ -1,89 +1,95 @@
 # Autospec Quickstart
 
-Get from zero to autonomous PRs in under 5 minutes.
+Get from zero to autonomous PRs in a few minutes.
 
-[![asciicast](https://asciinema.org/a/autospec-quickstart.svg)](docs/quickstart.cast)
+Autospec is a suite of agent **skills**, not a standalone binary. You install it
+once into your agent harness (Claude Code, OpenCode, or Codex CLI) and then drive
+it with `/autospec-*` slash commands inside that harness.
 
 ---
 
 ## Step 1 — Install
 
-**Homebrew (macOS / Linux):**
+One line installs the full suite into every supported harness:
 
 ```bash
-brew install berlinguyinca/autospec/autospec
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash
 ```
 
-**npm / npx (any platform):**
+Windows PowerShell:
 
-```bash
-npx autospec init
+```powershell
+irm https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.ps1 | iex
 ```
 
-Both paths install the `autospec` CLI and run the interactive setup wizard,
-which writes `~/.autospec/model-profiles.yml` with sensible defaults.
+This clones autospec into `~/.autospec/repo` and installs the skills. Re-run any
+time to update. See [`README.md`](../README.md#install) for flags, environment
+variables, and single-harness installs.
 
 ---
 
-## Step 2 — Configure (optional)
+## Step 2 — Configure model profiles (optional)
 
-If you want to customise model tiers, edit the profile file:
+`/autospec-run --profile <name>` filters the issue queue against
+`~/.autospec/model-profiles.yml`, so a smaller local model takes only the issues
+that fit its limits. Seed the defaults:
 
 ```bash
-$EDITOR ~/.autospec/model-profiles.yml
+mkdir -p ~/.autospec
+cp examples/model-profiles.yml ~/.autospec/model-profiles.yml
 ```
 
-The defaults use `claude-sonnet` for implementation and `claude-opus` for review.
 No changes are required to continue.
 
 ---
 
 ## Step 3 — Define a feature
 
-Point autospec at an empty repo and describe what you want:
+Inside your harness, point autospec at a repo and describe what you want:
 
-```bash
-cd /path/to/your-repo
-autospec define "build me a TODO list CLI in Node"
+```text
+/autospec-define "build a TODO list CLI in Node"
 ```
 
-Autospec calls the LLM to produce a spec, decomposes it into GitHub issues,
-and labels them `auto-implement`. You can review and edit the issues before
-the next step.
+Autospec investigates the repo, writes a design spec under `docs/specs/`,
+decomposes it into linked GitHub issues, and classifies each with `ctx:*` /
+`reasoning:*` model-fit labels. Review and edit the issues before the next step.
 
 ---
 
-## Step 4 — Run the implementation pipeline
+## Step 4 — Run the implementation loop
 
-```bash
-autospec run
+```text
+/autospec-run
 ```
 
-Autospec picks up the `auto-implement` queue, implements each issue in an
-isolated git worktree, self-reviews, and opens a PR. Watch the output:
-
-```
-[autospec] issue #1: feat(cli): add create command — implementing...
-[autospec] issue #1: PR #2 opened — awaiting review gate
-[autospec] issue #1: LGTM — merging
-[autospec] queue drained — 1 issue processed
-```
+Autospec claims one `auto-implement` issue at a time, opens a branch and PR,
+runs self-review plus the test and lint gates, and admin squash-merges each PR
+once the suite and required checks pass.
 
 ---
 
-## Step 5 — Done
+## Step 5 — Inspect what shipped
 
-Open your repo on GitHub. The PR is landed. Admire the result.
+```text
+/autospec-story
+```
 
-```bash
-autospec status   # shows cache-hit rate, issues processed, tokens spent
+This produces a cited Markdown report of what the repo is, what has been built,
+and what remains — reconciling local specs, issues, PRs, and git history.
+
+To do everything in one shot instead of step by step:
+
+```text
+/autospec "build a TODO list CLI in Node"
 ```
 
 ---
 
 ## Next steps
 
+- Skill catalog: [`README.md`](../README.md#skills) and [`SKILLS.md`](../SKILLS.md)
 - Full command reference: [`docs/USER_MANUAL.md`](USER_MANUAL.md)
-- Architecture deep-dive: [`docs/architecture.md`](architecture.md)
+- Architecture deep-dive: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)
 - Troubleshooting & runbooks: [`docs/runbooks/`](runbooks/)
 - GitHub: <https://github.com/berlinguyinca/autospec>

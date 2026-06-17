@@ -889,6 +889,49 @@ check_reviewer_contract() {
     done
 }
 
+# Closeout report contract (Fable-distillation work): every auto-implement agent
+# must emit a structured, result-first Closeout report consumed by the merge-gate
+# and done-challenge as evidence. The canonical contract lives in AGENTS.md; the
+# implementer-contract.md carries the acting digest + merge-gate wiring. This gate
+# asserts both files declare the section, all required field anchors, the
+# runtime-proof rule, and the one machine-checkable critic predicate
+# (static/build-only downgrade) so the two surfaces never drift apart.
+check_closeout_contract() {
+    info "closeout contract: AGENTS.md + implementer-contract.md"
+    local agents="AGENTS.md"
+    local contract="skills/autospec-run/prompts/implementer-contract.md"
+    [ -f "$agents" ] || fail "$agents missing at repo root"
+    [ -f "$contract" ] || fail "$contract: file missing"
+
+    # Section headers.
+    grep -qF '## Closeout report contract' "$agents" \
+        || fail "$agents missing '## Closeout report contract' section"
+    grep -qF '### Consumer contract' "$agents" \
+        || fail "$agents missing '### Consumer contract' (critic/merge-gate) subsection"
+    grep -qF '## Closeout report' "$contract" \
+        || fail "$contract missing '## Closeout report' section"
+    grep -qF 'Closeout evidence:' "$contract" \
+        || fail "$contract merge-gate missing 'Closeout evidence:' step"
+
+    # Required field anchors + the runtime-proof rule + critic predicate, in BOTH
+    # surfaces (drift gate).
+    local anchor f
+    for f in "$agents" "$contract"; do
+        for anchor in \
+            '[verified]' \
+            '[assumed]' \
+            '[couldnt-verify]' \
+            '[likely-wrong]' \
+            'Before/after' \
+            'One likely hidden failure' \
+            'runtime proof, not' \
+            'static`/build-only'; do
+            grep -qF "$anchor" "$f" \
+                || fail "$f: closeout contract missing required anchor: $anchor"
+        done
+    done
+}
+
 # Usage-limit recovery helper invariants: autospec-run's quota recovery path
 # depends on this shell-only supervisor being installed and executable.
 check_usage_limit_helper() {
@@ -2670,6 +2713,7 @@ main() {
     check_lint_implementation_helpers
     check_implementer_contract
     check_reviewer_contract
+    check_closeout_contract
     check_lint_heredoc_handling
     check_quality_differential
     check_usage_limit_helper
