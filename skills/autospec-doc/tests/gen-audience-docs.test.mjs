@@ -622,7 +622,85 @@ test('backward compat: legacy feature (summary+spec_sections only) produces byte
   }
 });
 
-// Test D6-4: batched ai-review parse round-trip
+// ── Track D: logic-flow diagram tests (issue #1131) ──────────────────────────
+
+// A feature whose spec_sections describe logic/flow (ordered steps + decision
+// language). The feature page must contain a mermaid fenced block with the
+// palette %%{init}%% header from doc-style.mjs.
+const FLOW_FEATURE = {
+  slug: 'flow-feature',
+  title: 'Flow Feature',
+  summary: 'Demonstrates logic-flow diagram emission.',
+  spec_sections: [
+    // This section satisfies isLogicFlowSection: ordered steps + decision
+    '1. Validate input record against schema.\n2. If valid, enqueue record for processing.\n3. Otherwise, emit INVALID_RECORD error and reject.',
+  ],
+};
+
+// A feature with a plain prose section — no ordered steps, no flow language.
+const NON_FLOW_FEATURE = {
+  slug: 'non-flow-feature',
+  title: 'Non Flow Feature',
+  summary: 'Has a plain prose section — no logic flow.',
+  spec_sections: [
+    'This feature stores configuration settings for the application.',
+  ],
+};
+
+test('Track D: logic-flow spec section yields a themed mermaid block in the feature page', async () => {
+  const result = await generateAudienceDocs({
+    features: [FLOW_FEATURE],
+    audiences: [FOUR_AUDIENCES[0]], // user audience
+  });
+  const page = result.files.find(f => f.path === 'docs/user/features/flow-feature.md');
+  assert.ok(page, 'feature page should exist');
+  // The mermaid block must contain the %%{init}%% header from mermaidInit()
+  assert.ok(
+    page.content.includes('%%{init:'),
+    'logic-flow section must yield a themed mermaid %%{init}%% block',
+  );
+  // Must be wrapped in a mermaid fenced code block
+  assert.ok(
+    page.content.includes('```mermaid'),
+    'logic-flow section must yield a ```mermaid fenced block',
+  );
+});
+
+test('Track D: non-flow spec section yields no mermaid block in the feature page', async () => {
+  const result = await generateAudienceDocs({
+    features: [NON_FLOW_FEATURE],
+    audiences: [FOUR_AUDIENCES[0]],
+  });
+  const page = result.files.find(f => f.path === 'docs/user/features/non-flow-feature.md');
+  assert.ok(page, 'non-flow feature page should exist');
+  assert.ok(
+    !page.content.includes('```mermaid'),
+    'non-flow section must NOT yield a mermaid block',
+  );
+});
+
+test('Track D: gen-audience-docs.mjs imports doc-style.mjs (no second palette source)', async () => {
+  const src = fs.readFileSync(path.join(SCRIPTS_DIR, 'gen-audience-docs.mjs'), 'utf8');
+  assert.ok(
+    /doc-style\.mjs/.test(src) && /\bimport\b/.test(src),
+    'gen-audience-docs.mjs must import from doc-style.mjs',
+  );
+  // Must call the two exported functions
+  assert.ok(/isLogicFlowSection/.test(src), 'must reference isLogicFlowSection');
+  assert.ok(/generateExplainerDiagram/.test(src), 'must reference generateExplainerDiagram');
+  // Must NOT hardcode palette hex values (single-source guard). Derive the hex
+  // list from PALETTE at runtime so this test file introduces no second source.
+  const { PALETTE } = await import(path.join(SCRIPTS_DIR, 'doc-style.mjs'));
+  const paletteHexes = Object.values(PALETTE).filter((v) => /^#[0-9a-fA-F]{3,8}$/.test(v));
+  const hardcoded = paletteHexes.filter((hex) => src.includes(hex));
+  assert.deepStrictEqual(
+    hardcoded,
+    [],
+    'gen-audience-docs.mjs must not hardcode palette hex values (single-source guard)',
+  );
+});
+
+// ── Test D6-4: batched ai-review parse round-trip
 //
 // Confirm that per-section confidence markers in the ai_review field are correctly
 // set on each page, and that the annotation contract (<!-- ai-reviewed: ... -->)

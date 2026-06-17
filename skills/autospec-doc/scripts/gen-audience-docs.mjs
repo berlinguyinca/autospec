@@ -36,6 +36,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isLogicFlowSection, generateExplainerDiagram } from './doc-style.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SHARED_SCRIPTS = path.resolve(__dirname, '../../autospec-shared/scripts');
@@ -329,7 +330,20 @@ function renderFeature(audience, feature, directive) {
     feature.summary ? `${feature.summary}` : `Reference documentation for ${feature.slug}.`,
     '',
   ];
-  for (const s of (feature.spec_sections || [])) lines.push(s, '');
+  for (const s of (feature.spec_sections || [])) {
+    lines.push(s, '');
+    // Track D (issue #1131): emit a palette-themed mermaid diagram for logic-flow sections.
+    const section = { heading: feature.title || feature.slug, body: s };
+    if (isLogicFlowSection(section)) {
+      const diagram = generateExplainerDiagram(section);
+      if (diagram) {
+        lines.push('```mermaid');
+        lines.push(diagram);
+        lines.push('```');
+        lines.push('');
+      }
+    }
+  }
   // Append the six LLM-targeted sections (issue #1129); empty fields are omitted.
   lines.push(...renderFeatureSections(audience, feature));
   // Append verified runnable examples (issue #1133); empty examples[] emits nothing.
