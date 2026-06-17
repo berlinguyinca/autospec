@@ -3189,6 +3189,8 @@ check_autospec_explore_style_normalization_contract() {
         || fail "$researcher: missing AUTOSPEC_EXPLORE_STYLE_PROOF_CMD invocation seam"
     grep -q 'AUTOSPEC_STYLE_PROOF_DIR' "$researcher" \
         || fail "$researcher: missing AUTOSPEC_STYLE_PROOF_DIR artifact directory contract"
+    grep -q 'best-effort' "$researcher" \
+        || fail "$researcher: generic dispatcher fallback must be documented as best-effort"
     grep -q 'style-normalization' scripts/autospec-explore.sh \
         || fail "scripts/autospec-explore.sh: default RESEARCH_SOURCES missing style-normalization"
     grep -q 'style-normalization' scripts/explore-research-cycle.sh \
@@ -3209,6 +3211,8 @@ check_autospec_explore_style_normalization_contract() {
             || fail "$trio: missing screenshot evidence requirement"
         grep -q 'AUTOSPEC_EXPLORE_STYLE_PROOF_CMD' "$trio" \
             || fail "$trio: missing AUTOSPEC_EXPLORE_STYLE_PROOF_CMD proof seam"
+        grep -q 'best-effort fallback' "$trio" \
+            || fail "$trio: missing best-effort fallback boundary"
     done
     local bats_file="tests/explore/test_explore_style_normalization.bats"
     [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing for style-normalization proof contract"

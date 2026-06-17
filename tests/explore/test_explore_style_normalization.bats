@@ -76,6 +76,28 @@ assert d["proposals"] == [], d
 '
 }
 
+@test "style-normalization treats autospec-playwright fallback as best-effort until proof appears" {
+    seed_frontend_style_drift
+    unset AUTOSPEC_EXPLORE_STYLE_PROOF_CMD
+    export PATH="$TMP/bin:$PATH"
+    mkdir -p "$TMP/bin"
+    cat > "$TMP/bin/autospec-playwright" <<'EOF'
+#!/usr/bin/env bash
+printf 'fallback-ran' > "$AUTOSPEC_STYLE_PROOF_DIR/fallback.txt"
+EOF
+    chmod +x "$TMP/bin/autospec-playwright"
+
+    run bash "$REPO_ROOT/scripts/explore-research/style-normalization.sh"
+    [ "$status" -eq 0 ]
+    [ -f "$TMP/.autospec/style-normalization/round/fallback.txt" ]
+    assert_well_formed "$output"
+    printf '%s' "$output" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["proposals"] == [], d
+'
+}
+
 @test "style-normalization emits empty proposals for non-frontend repos" {
     mkdir -p scripts
     echo 'echo hello' > scripts/tool.sh

@@ -344,10 +344,10 @@ specialists**:
     avoid subjective "make it nicer" wording. If no Playwright coverage or
     screenshots exist for the affected UI surface, the researcher MUST
     automatically generate them before filing by invoking
-    `AUTOSPEC_EXPLORE_STYLE_PROOF_CMD` when set, otherwise by routing through
-    `/autospec-playwright` or `/autospec-test` Stage 2A. Generated proof artifacts
-    must include at least one route-level Playwright test plus before/after-ready
-    screenshots under a deterministic path such as
+    `AUTOSPEC_EXPLORE_STYLE_PROOF_CMD` when set. Routing through
+    `/autospec-playwright` or `/autospec-test` Stage 2A is a best-effort fallback,
+    not sufficient by itself. Generated proof artifacts must include at least one
+    route-level Playwright test plus before/after-ready screenshots under a deterministic path such as
     `.autospec/style-normalization/<round>/`. Proposals without Playwright or
     screenshot evidence are refuted by default in the verify stage. Cap 40/round.
 - **N domain specialists** — an LLM-persona researcher per detected repo domain,
