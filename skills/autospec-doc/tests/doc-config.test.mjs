@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_MOD = path.resolve(__dirname, '../scripts/doc-config.mjs');
 
-const { loadConfig, resolveFeatures, resolveCoverageOptions, COVERAGE_DEFAULTS, FOLDER_CONTRACT, DEFAULT_AUDIENCES } = await import(CONFIG_MOD);
+const { loadConfig, resolveFeatures, resolveCoverageOptions, COVERAGE_DEFAULTS, FOLDER_CONTRACT, DEFAULT_AUDIENCES, normalizeFeature } = await import(CONFIG_MOD);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -243,6 +243,24 @@ test('resolveFeatures: inline documentation.features wins (mapped through normal
   assert.deepEqual(feats[0].depends_on, []);
   assert.deepEqual(feats[0].examples, []);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('normalizeFeature: preserves per-audience maps for typed fields (no [object Object])', () => {
+  const f = normalizeFeature({
+    slug: 's',
+    config_reference: { admin: 'ADMIN_CFG', developer: 'DEV_CFG' },
+    data_model: { user: 'UM', default: 'DM' },
+    errors: 'plain string',
+    rationale: 7,        // scalar → coerced
+    invariants: null,    // absent → ''
+  });
+  // Per-audience maps preserved verbatim so pickForAudience can resolve them.
+  assert.deepEqual(f.config_reference, { admin: 'ADMIN_CFG', developer: 'DEV_CFG' });
+  assert.deepEqual(f.data_model, { user: 'UM', default: 'DM' });
+  // Plain string preserved; scalar coerced; absent defaulted to ''.
+  assert.strictEqual(f.errors, 'plain string');
+  assert.strictEqual(f.rationale, '7');
+  assert.strictEqual(f.invariants, '');
 });
 
 test('resolveFeatures: features_file (relative to projRoot) used when no inline array', () => {

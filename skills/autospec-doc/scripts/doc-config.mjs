@@ -329,10 +329,16 @@ export function resolveAutoRegenerate({ config = {}, issueBody = '', withDocsFla
  */
 export function normalizeFeature(feature) {
   if (!feature || typeof feature !== 'object') return feature;
-  // String fields: coerce present non-string values; keep '' for absent.
+  // String fields: keep '' for absent, preserve per-audience maps / arrays
+  // verbatim (the renderer resolves those via pickForAudience), and coerce only
+  // scalar non-string values. Stringifying an object here would turn a
+  // per-audience map { admin, developer, … } into the literal "[object Object]".
   const STR_FIELDS = ['data_model', 'invariants', 'errors', 'config_reference', 'rationale'];
   for (const field of STR_FIELDS) {
-    feature[field] = (feature[field] != null) ? String(feature[field]) : '';
+    const v = feature[field];
+    if (v == null) feature[field] = '';
+    else if (typeof v === 'object') feature[field] = v; // per-audience map or array — preserve
+    else feature[field] = String(v);
   }
   // Array fields: coerce present non-array values; keep [] for absent.
   if (!Array.isArray(feature.depends_on)) {
