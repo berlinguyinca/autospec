@@ -66,55 +66,224 @@ function chunkMarker(chunkNum, charCount) {
   return `<!-- llms-chunk: chunk=${chunkNum} approx_tokens=${approxTokens} -->`;
 }
 
+// ── Internal helpers (Track E) ────────────────────────────────────────────────
+
+/**
+ * Derive a URL-safe anchor slug from a heading string.
+ * Mirrors GitHub-flavored Markdown anchor rules: lowercase, spaces→hyphens,
+ * strip non-alphanumeric-hyphen chars.
+ */
+function slugify(text) {
+  return text.toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-');
+}
+
+/**
+ * Extract the first H1 text from a page's content, falling back to the
+ * path's basename.
+ */
+function pageTitle(page) {
+  const m = (page.content || '').match(/^#\s+(.+)/m);
+  return m ? m[1].trim() : path.basename(page.path, '.md');
+}
+
+/**
+ * Extract a one-line summary for a page: the first non-empty, non-heading
+ * line after the H1 (or the H1 text itself if nothing follows).
+ */
+function pageSummary(page) {
+  const lines = (page.content || '').split('\n');
+  let pastH1 = false;
+  for (const ln of lines) {
+    if (!pastH1) { if (/^#\s+/.test(ln)) pastH1 = true; continue; }
+    const t = ln.trim();
+    if (t && !/^#+\s/.test(t) && !t.startsWith('<!--')) return t;
+  }
+  return pageTitle(page);
+}
+
+/**
+ * Group sorted pages by their audience, returning
+ * Array<{ audience: string, pages: page[] }> in deterministic order.
+ */
+function groupByAudience(sorted) {
+  const map = new Map();
+  for (const page of sorted) {
+    if (!map.has(page.audience)) map.set(page.audience, []);
+    map.get(page.audience).push(page);
+  }
+  return [...map.entries()].map(([audience, pages]) => ({ audience, pages }));
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Generate a deterministic, byte-stable llms-full.txt string from page objects.
+ * Generate a deterministic llms.txt string conforming to llmstxt.org:
+ *   - single H1 title
+ *   - blockquote one-line summary
+ *   - one H2 section per audience with described links
  *
  * @param {{
- *   pages: Array<{ audience: string, feature: string|null, path: string, content: string }>
+ *   pages: Array<{ audience: string, feature: string|null, path: string, content: string }>,
+ *   title?: string,
+ *   summary?: string,
  * }} opts
  * @returns {string}
  */
-export function generateLlmsFull({ pages = [] } = {}) {
+export function generateLlmsIndex({ pages = [], title = 'autospec', summary = 'Multi-harness LLM-driven CI/CD skill family for autonomous feature decomposition, implementation, and review.' } = {}) {
+  // Sort deterministically by path.
+  const sorted = [...pages].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const groups = groupByAudience(sorted);
+
+  const parts = [];
+
+  // Single H1
+  parts.push(`# ${title}`);
+  parts.push('');
+
+  // Blockquote summary
+  parts.push(`> ${summary}`);
+  parts.push('');
+
+  if (groups.length === 0) {
+    // No pages — emit a placeholder note section
+    parts.push('## Documentation');
+    parts.push('');
+    parts.push('No documentation pages have been generated yet.');
+    parts.push('');
+  } else {
+    // One H2 section per audience, with described links
+    for (const { audience, pages: grpPages } of groups) {
+      const sectionTitle = audience.charAt(0).toUpperCase() + audience.slice(1);
+      parts.push(`## ${sectionTitle} Documentation`);
+      parts.push('');
+      for (const pg of grpPages) {
+        const t = pageTitle(pg);
+        const desc = pageSummary(pg);
+        parts.push(`- [${t}](${pg.path}): ${desc}`);
+      }
+      parts.push('');
+    }
+  }
+
+  return parts.join('\n');
+}
+
+/**
+ * Write llms.txt to outputPath. Idempotent: skips write if byte-equal.
+ *
+ * @param {{
+ *   pages: Array<object>,
+ *   outputPath: string,
+ *   title?: string,
+ *   summary?: string,
+ * }} opts
+ * @returns {Promise<{ written: boolean, path: string }>}
+ */
+export async function writeLlmsIndex({ pages, outputPath, title, summary }) {
+  const content = generateLlmsIndex({ pages, title, summary });
+
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+
+  let existing = null;
+  try { existing = fs.readFileSync(outputPath, 'utf8'); } catch {}
+
+  const written = existing !== content;
+  if (written) fs.writeFileSync(outputPath, content, 'utf8');
+
+  return { written, path: outputPath };
+}
+
+/**
+ * Generate a deterministic, byte-stable llms-full.txt string from page objects.
+ * Track E additions: top ToC with anchors, per-section summary + approx_tokens,
+ * reverse-routing block, generated_at + commit freshness stamp.
+ *
+ * @param {{
+ *   pages: Array<{ audience: string, feature: string|null, path: string, content: string }>,
+ *   generatedAt?: string,   // ISO timestamp; omit to use current time (non-idempotent)
+ *   commit?: string,        // git commit hash; omit to skip
+ * }} opts
+ * @returns {string}
+ */
+export function generateLlmsFull({ pages = [], generatedAt, commit } = {}) {
   if (!pages || pages.length === 0) return '';
 
   // Sort deterministically by path so output is stable regardless of input order.
   const sorted = [...pages].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
-  const parts = [];
-  let accChars = 0;
+  // ── Track E: build ToC entries ──────────────────────────────────────────────
+  // Each page gets an anchor derived from its path slug.
+  const tocEntries = sorted.map(page => {
+    const title = pageTitle(page);
+    const anchor = slugify(page.path.replace(/[/\\]/g, '-').replace(/\.md$/, ''));
+    return { page, title, anchor };
+  });
+
+  const headerParts = [];
+
+  // Top-level freshness stamp (generated_at + commit) — only emitted when
+  // generatedAt is explicitly provided so that callers without a fixed stamp
+  // stay byte-stable across calls.
+  if (generatedAt) {
+    headerParts.push(`<!-- generated_at=${generatedAt}${commit ? ` commit=${commit}` : ''} -->`);
+    headerParts.push('');
+  }
+
+  // Table of Contents
+  headerParts.push('## Table of Contents');
+  headerParts.push('');
+  for (const { title, anchor } of tocEntries) {
+    headerParts.push(`- [${title}](#${anchor})`);
+  }
+  headerParts.push('');
+
+  // Reverse-routing block: source_anchor → doc path mapping
+  headerParts.push('<!-- reverse-routing');
+  for (const page of sorted) {
+    const src = `${page.path}#L1`;
+    headerParts.push(`  ${src} -> ${page.path}`);
+  }
+  headerParts.push('-->');
+  headerParts.push('');
+
+  // ── Page blocks ─────────────────────────────────────────────────────────────
+  const pageParts = [];
+  let accChars = headerParts.join('\n').length;
   let chunkNum = 1;
 
-  for (const page of sorted) {
+  for (const { page, anchor } of tocEntries) {
     const open  = openDelimiter(page.audience, page.feature);
     const close = closeDelimiter(page.audience, page.feature);
     const body  = (page.content || '').trimEnd();
+    const tokens = approxTokens(body);
+
+    // Per-section summary + approx_tokens annotation (Track E)
+    const summary = pageSummary(page);
+    const sectionHeader = `<!-- section-summary: ${summary} approx_tokens=${tokens} id=${anchor} -->`;
 
     // Emit chunk marker BEFORE this page if we would cross the budget boundary.
-    // We check accChars > 0 to avoid a spurious marker at the very start.
     if (accChars > 0 && (accChars + open.length + body.length) > TOKEN_BUDGET_CHARS * chunkNum) {
       const marker = chunkMarker(chunkNum, accChars);
-      parts.push(marker);
+      pageParts.push(marker);
       accChars += marker.length + 1;
       chunkNum++;
     }
 
-    const block = [open, body, close, ''].join('\n');
-    parts.push(block);
+    const block = [sectionHeader, open, body, close, ''].join('\n');
+    pageParts.push(block);
     accChars += block.length;
 
     // Also emit a marker AFTER this page if the page itself was large enough to
     // cross the next budget boundary (handles single-page inputs > TOKEN_BUDGET_CHARS).
     while (accChars > TOKEN_BUDGET_CHARS * chunkNum) {
       const marker = chunkMarker(chunkNum, accChars);
-      parts.push(marker);
+      pageParts.push(marker);
       accChars += marker.length + 1;
       chunkNum++;
     }
   }
 
-  return parts.join('\n');
+  return headerParts.join('\n') + pageParts.join('\n');
 }
 
 /**

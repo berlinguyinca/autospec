@@ -14,6 +14,18 @@
 //  10. generateLlmsFull: deterministic sort — changing page order does not change output
 //  11. writeLlmsFull: writes file to disk; second identical run reports written=false
 //  12. chunk markers contain the correct token-budget boundary annotation
+//  Track E (issue #1132):
+//  18. generateLlmsIndex: single H1 in output
+//  19. generateLlmsIndex: blockquote summary present
+//  20. generateLlmsIndex: described link sections (each link has a description)
+//  21. generateLlmsIndex: no duplicate headings
+//  22. generateLlmsIndex: empty pages → well-formed minimal output
+//  23. generateLlmsFull: top ToC with anchors present
+//  24. generateLlmsFull: per-section summary before each section
+//  25. generateLlmsFull: per-section approx_tokens annotation
+//  26. generateLlmsFull: reverse-routing block present
+//  27. generateLlmsFull: generated_at + commit stamp present
+//  28. generateLlmsFull: re-run idempotency (no-op diff with fixed stamp)
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,7 +37,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPTS_DIR = path.resolve(__dirname, '../scripts');
 
-const { generateLlmsFull, writeLlmsFull, fillManifest } =
+const { generateLlmsFull, writeLlmsFull, fillManifest, generateLlmsIndex, writeLlmsIndex } =
   await import(path.join(SCRIPTS_DIR, 'gen-llms-full.mjs'));
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -361,4 +373,164 @@ test('fillManifest: fixture corpus produces non-empty modules and concepts, zero
   const json = JSON.stringify(manifest);
   assert.ok(!json.includes('<name>'),
     `no <name> placeholder must survive; manifest JSON: ${json.slice(0, 300)}`);
+});
+
+// ── Track E tests (issue #1132) ───────────────────────────────────────────────
+
+// Fixture for Track E: pages with varied features + sections
+const TRACK_E_PAGES = [
+  {
+    audience: 'user',
+    feature: 'export-pipeline',
+    path: 'docs/user/features/export-pipeline.md',
+    content: [
+      '# Export Pipeline',
+      '',
+      'Streams records out to downstream sinks.',
+      '',
+      '## Overview',
+      '',
+      'The export pipeline processes batches of records.',
+    ].join('\n'),
+  },
+  {
+    audience: 'developer',
+    feature: 'auth',
+    path: 'docs/developer/features/auth.md',
+    content: [
+      '# Authentication',
+      '',
+      'Token-based login architecture.',
+      '',
+      '## Overview',
+      '',
+      'Supports OAuth2 and API keys.',
+    ].join('\n'),
+  },
+  {
+    audience: 'user',
+    feature: null,
+    path: 'docs/user/index.md',
+    content: [
+      '# User Guide',
+      '',
+      'Entry point for user-facing documentation.',
+    ].join('\n'),
+  },
+];
+
+// ── Test 18: generateLlmsIndex — single H1 in output ──────────────────────────
+
+test('generateLlmsIndex: output contains exactly one H1 heading', () => {
+  const output = generateLlmsIndex({ pages: TRACK_E_PAGES });
+  assert.ok(typeof output === 'string', 'should return a string');
+  const h1Matches = output.match(/^# .+/gm);
+  assert.ok(h1Matches !== null, 'output must contain at least one H1');
+  assert.strictEqual(h1Matches.length, 1, `output must have exactly one H1; got ${h1Matches.length}: ${JSON.stringify(h1Matches)}`);
+});
+
+// ── Test 19: generateLlmsIndex — blockquote summary present ───────────────────
+
+test('generateLlmsIndex: output contains a blockquote summary line', () => {
+  const output = generateLlmsIndex({ pages: TRACK_E_PAGES });
+  assert.ok(output.includes('\n> '), 'output must contain a blockquote line (> ...)');
+});
+
+// ── Test 20: generateLlmsIndex — described links (each link has a description) ─
+
+test('generateLlmsIndex: each link entry has a one-line description', () => {
+  const output = generateLlmsIndex({ pages: TRACK_E_PAGES });
+  // llmstxt.org: links in sections look like:  - [Title](url): Description
+  const linkLines = output.split('\n').filter(l => /^- \[.+\]\(.+\):/.test(l));
+  assert.ok(linkLines.length > 0, `output must contain at least one described link; output:\n${output}`);
+  for (const line of linkLines) {
+    // After the colon there must be non-empty description text
+    const descPart = line.replace(/^- \[.+\]\(.+\):\s*/, '').trim();
+    assert.ok(descPart.length > 0, `link line must have a non-empty description: "${line}"`);
+  }
+});
+
+// ── Test 21: generateLlmsIndex — no duplicate headings ────────────────────────
+
+test('generateLlmsIndex: no duplicate headings in output', () => {
+  const output = generateLlmsIndex({ pages: TRACK_E_PAGES });
+  const headings = output.split('\n').filter(l => /^#{1,6} /.test(l));
+  const seen = new Set();
+  for (const h of headings) {
+    assert.ok(!seen.has(h), `duplicate heading found: "${h}"`);
+    seen.add(h);
+  }
+});
+
+// ── Test 22: generateLlmsIndex — empty pages → well-formed minimal output ──────
+
+test('generateLlmsIndex: empty pages array returns a well-formed string', () => {
+  let result;
+  assert.doesNotThrow(() => { result = generateLlmsIndex({ pages: [] }); });
+  assert.ok(typeof result === 'string', 'should return a string');
+  // Must still have a single H1
+  const h1Matches = result.match(/^# .+/gm);
+  assert.ok(h1Matches !== null && h1Matches.length === 1, 'empty-pages output must still have exactly one H1');
+});
+
+// ── Test 23: generateLlmsFull — top ToC with anchors present ──────────────────
+
+test('generateLlmsFull (Track E): top ToC with anchors present', () => {
+  const output = generateLlmsFull({ pages: TRACK_E_PAGES });
+  // ToC section: ## Table of Contents or similar, with anchor links [text](#anchor)
+  assert.ok(output.includes('Table of Contents') || output.includes('## Contents'),
+    'output must contain a table of contents section');
+  // Anchors look like (#something)
+  assert.ok(/\(#[a-z0-9-]+\)/.test(output),
+    'ToC must contain at least one anchor link like (#section-name)');
+});
+
+// ── Test 24: generateLlmsFull — per-section summary before each section ────────
+
+test('generateLlmsFull (Track E): per-section summary (1-2 lines) before each section', () => {
+  const output = generateLlmsFull({ pages: TRACK_E_PAGES });
+  // A summary comment block looks like: <!-- summary: ... --> or plain text before the delimiter
+  // We check that summary annotations appear somewhere in the output
+  assert.ok(
+    output.includes('<!-- section-summary:') || output.includes('<!-- summary:'),
+    'output must contain per-section summary annotations'
+  );
+});
+
+// ── Test 25: generateLlmsFull — per-section approx_tokens annotation ──────────
+
+test('generateLlmsFull (Track E): per-section approx_tokens annotation present', () => {
+  const output = generateLlmsFull({ pages: TRACK_E_PAGES });
+  assert.ok(
+    /approx_tokens=\d+/.test(output),
+    'output must contain per-section approx_tokens=N annotations'
+  );
+});
+
+// ── Test 26: generateLlmsFull — reverse-routing block present ─────────────────
+
+test('generateLlmsFull (Track E): reverse-routing block (source→doc mapping) present', () => {
+  const output = generateLlmsFull({ pages: TRACK_E_PAGES });
+  assert.ok(
+    output.includes('<!-- reverse-routing') || output.includes('## Source Routing') || output.includes('source-routing'),
+    'output must contain a reverse-routing block mapping source files to docs'
+  );
+});
+
+// ── Test 27: generateLlmsFull — generated_at + commit stamp present ───────────
+
+test('generateLlmsFull (Track E): generated_at and commit stamp present', () => {
+  const output = generateLlmsFull({ pages: TRACK_E_PAGES, generatedAt: '2026-06-16T00:00:00Z', commit: 'abc1234' });
+  assert.ok(output.includes('generated_at'), 'output must contain generated_at stamp');
+  assert.ok(output.includes('2026-06-16T00:00:00Z'), 'output must contain the provided generated_at value');
+  assert.ok(output.includes('abc1234'), 'output must contain the commit hash');
+});
+
+// ── Test 28: generateLlmsFull — re-run idempotency with fixed stamp ───────────
+
+test('generateLlmsFull (Track E): re-run with same inputs produces identical output (idempotent)', () => {
+  const opts = { pages: TRACK_E_PAGES, generatedAt: '2026-06-16T00:00:00Z', commit: 'abc1234' };
+  const run1 = generateLlmsFull(opts);
+  const run2 = generateLlmsFull(opts);
+  assert.strictEqual(run1, run2, 'two runs with identical inputs must produce byte-identical output');
 });
