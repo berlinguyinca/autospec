@@ -2650,9 +2650,13 @@ main() {
     # global check is unmapped → fail-safe ALWAYS-RUN, so in scoped mode they all
     # ran; count the block toward both RAN and TOTAL so the `scoped:` line is
     # honest. Bare mode (SCOPED=0) skips this entirely. The count is derived from
-    # the source so it can't silently drift as checks are added/removed.
+    # the source so it can't silently drift as checks are added/removed. The
+    # range spans every global `check_*` CALL from check_startup_preflight through
+    # the trailing check_bash_syntax install/uninstall calls (also always-run), so
+    # TOTAL is not understated by those two — it terminates at this accounting
+    # block, not before the installer checks.
     if [ "$SCOPED" = 1 ]; then
-        _global_check_count="$(awk '/^    # Top-level installer/{exit} f && /^    check_/{n++} /^    check_startup_preflight$/{f=1; n++} END{print n+0}' "$0")"
+        _global_check_count="$(awk '/^    # Scoped accounting/{exit} f && /^    check_/{n++} /^    check_startup_preflight$/{f=1; n++} END{print n+0}' "$0")"
         SCOPED_TOTAL=$((SCOPED_TOTAL + _global_check_count))
         SCOPED_RAN=$((SCOPED_RAN + _global_check_count))
         printf 'validate: scoped: ran %s/%s checks (changed: %s)\n' \
