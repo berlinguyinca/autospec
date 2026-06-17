@@ -377,19 +377,46 @@ check_files_touched() {
     grep -qE '^## Files touched[[:space:]]*$' "$BODY_FILE" || return 0
     local content
     content="$(extract_section '## Files touched' "$BODY_FILE" | sed '/^[[:space:]]*$/d')"
-    # Count lines that look like a path: a '- ' bullet, or a bare path-ish token.
-    local path_count=0
+    # Count DISTINCT logical file units, applying the trio atomic-unit
+    # exemption (trio-derivation Phase 2 child D). With derive-trio.sh shipped,
+    # a trio edit is one logical change — "edit SKILL.md → derive-trio
+    # --in-place → gen-skill-goldens" in one commit — so:
+    #   - A skill trio's three members
+    #     skills/<x>/{SKILL.md,codex/prompt.md,opencode/agent.md} collapse to a
+    #     single `skills/<x>/<trio>` unit.
+    #   - Derived tests/fixtures/skill-goldens/*.sha256 files are mechanically
+    #     regenerated, so they are excluded from the count entirely.
+    # Mirrors scripts/sizing-check.sh's outline-files exemption.
+    local units=""
+    local raw
     while IFS= read -r line; do
         [ -z "$line" ] && continue
-        if printf '%s' "$line" | grep -qE '^[[:space:]]*-[[:space:]]+\S' \
-            || printf '%s' "$line" | grep -qE '^[[:space:]]*[A-Za-z0-9_./\-]+'; then
-            path_count=$((path_count + 1))
-        fi
+        # Strip a leading bullet marker and surrounding backticks/whitespace.
+        raw="$(printf '%s' "$line" \
+            | sed -E 's/^[[:space:]]*-[[:space:]]+//; s/^[[:space:]]+//; s/[[:space:]]+$//; s/`//g')"
+        # Only consider lines that still look like a path/token.
+        printf '%s' "$raw" | grep -qE '^[A-Za-z0-9_./-]+$' || continue
+        # Exclusion: derived skill-golden hashes never count.
+        case "$raw" in
+            tests/fixtures/skill-goldens/*.sha256) continue ;;
+        esac
+        # Collapse trio members to a single per-skill logical unit.
+        case "$raw" in
+            skills/*/SKILL.md|skills/*/codex/prompt.md|skills/*/opencode/agent.md)
+                local skill_name
+                skill_name="$(printf '%s' "$raw" | awk -F/ '{print $2}')"
+                raw="skills/${skill_name}/<trio>"
+                ;;
+        esac
+        units="${units}${raw}
+"
     done <<EOF
 $content
 EOF
+    local path_count
+    path_count="$(printf '%s' "$units" | sed '/^[[:space:]]*$/d' | sort -u | grep -c '.')"
     if [ "$path_count" -gt 3 ]; then
-        add_finding "TOO_MANY_FILES" "Files touched lists ${path_count} paths (max 3); split the issue to stay small-LLM-sized"
+        add_finding "TOO_MANY_FILES" "Files touched lists ${path_count} logical units (max 3; trio members + derived goldens count as one); split the issue to stay small-LLM-sized"
     fi
 }
 

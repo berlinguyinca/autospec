@@ -361,7 +361,7 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > - **Files to read first** — 3–7 entries. Each entry is one of: a path with **section anchors** (do not say "read the whole spec"), the closest existing-file analogue to mirror, the test file or fixture pattern to follow, or a dependency issue with a one-line summary so the LLM doesn't fetch its body. Bias toward sectional anchors over full files.
 > - **Local-LLM execution notes** — one-line context-window recommendation (`32k routine`, `64k stretch`, or `split into N subagents along <criterion>` for issues exceeding ~30k tokens of staged context) and whether single-pass or subagent-split is recommended.
 > - **Implementation scope** and **Out of scope** as separate subsections (replaces the prior single "Scope" section).
-> - **Files touched** — machine-parseable: one repo-relative path per line, ≤3. The authoritative scope source the linter (`TOO_MANY_FILES`) and reviewers check; keep it in sync with the outline.
+> - **Files touched** — machine-parseable: one repo-relative path per line, ≤3 logical units. The authoritative scope source the linter (`TOO_MANY_FILES`) and reviewers check; keep it in sync with the outline. A skill trio (`SKILL.md` + `codex/prompt.md` + `opencode/agent.md`) plus its derived `tests/fixtures/skill-goldens/*.sha256` counts as ONE unit, so a single-trio edit may list all six paths and still be in-cap.
 > - **Implementation outline** — file paths + function signatures + data flow.
 > - **Tests required** — TDD per AGENTS.md, real services, no DB mocks, 80%+ coverage.
 > - **Acceptance criteria** — checkbox list `[ ]` only, no prose. Each item machine-checkable.
@@ -373,7 +373,7 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 >
 > - **Body ≤400 words** including all sections.
 > - **Implementation outline ≤30 lines** (file paths + function signatures).
-> - **Files touched ≤3** per child issue.
+> - **Files touched ≤3** per child issue, counted as distinct **logical units** — not raw paths. A multi-harness skill **trio** (`skills/<x>/SKILL.md` + `codex/prompt.md` + `opencode/agent.md`) plus its derived `tests/fixtures/skill-goldens/<x>.*.sha256` is **ONE** logical unit: with `derive-trio.sh` shipped, the edit is "edit `SKILL.md` → derive the mirrors with `derive-trio.sh --in-place skills/<x>` → regenerate goldens with `gen-skill-goldens.sh <x>`" in a **single commit**, so the cap must not split a trio's prose from its golden regen into separate issues. `lint-issue.sh` and `sizing-check.sh` collapse trio members to one unit and exclude the derived goldens — keep a trio edit (and its goldens) inside one child.
 > - If a candidate child would exceed any cap, split into a parent + child pair with a `Depends on` edge.
 > - The whole spec + a single child issue body must fit comfortably in a 60–120k context window.
 >
@@ -397,7 +397,7 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > | `MISSING_SECTION_IMPL_OUTLINE` | `ADD: a \`## Implementation outline\` section (file paths + signatures + data flow).` |
 > | `MISSING_SECTION_TESTS` | `ADD: a \`## Tests required\` section (TDD per AGENTS.md, real services, no DB mocks).` |
 > | `DEPS_MALFORMED` | `FIX: each \`## Dependencies\` line must be \`Depends on issue #N\` or exactly \`none\`.` |
-> | `TOO_MANY_FILES` | `SPLIT: \`## Files touched\` exceeds 3 paths; split into a parent + child with a \`Depends on\` edge.` |
+> | `TOO_MANY_FILES` | `SPLIT: \`## Files touched\` exceeds 3 logical units; split into a parent + child with a \`Depends on\` edge. NOTE: a skill trio (SKILL.md + codex/prompt.md + opencode/agent.md) plus its derived skill-goldens is ONE unit — keep them together, do not split a trio from its golden regen.` |
 > | `BODY_TOO_LONG` | `SHORTEN: body exceeds 400 words; cut prose or split the issue into a \`Depends on\` pair.` |
 > | `OUTLINE_TOO_LONG` | `SHORTEN: \`## Implementation outline\` exceeds 30 lines; compress signatures or split the issue.` |
 > | `UI_SECTIONS_INCOMPLETE` | `ADD: this is a UI feature — include \`## Design reference\`, \`## Interaction states\`, and \`## UX flows\` (all three).` |
@@ -582,31 +582,49 @@ labels and patches each body with a `## Model fit` block.
 >    ```
 
 
-## Phase 3.75 — Architectural alignment (delegate)
+## Phase 3.75 — Architectural alignment (deterministic scan + reconcile)
 
 After Phase 3.5 has applied `ctx:*` / `reasoning:*` labels and before the
-pre-impl gate, run a Tier-A (opus) subagent that reads all child issue bodies
-plus the source spec and produces a `Shared contracts` summary. This prevents
-each child issue from inventing incompatible type signatures, file-layout
-conventions, and naming schemes — integration mismatches that are caught only
-in Phase 5.5.
+pre-impl gate, build a `Shared contracts` summary so child issues don't invent
+incompatible type signatures, file-layout conventions, and naming schemes —
+integration mismatches that are otherwise caught only in Phase 5.5.
 
-The subagent must:
+The former standalone Tier-A (opus) pass is **replaced** by a deterministic
+scan plus an optional small Tier-B reconcile. Mechanically extracting
+signatures / file paths / naming tokens is not reasoning work — a grep does it
+exactly and for free.
 
-1. Read the source spec and all child issue bodies (skip the umbrella/tracker).
-2. Extract all public interfaces, function signatures, data types, file paths,
-   and naming conventions mentioned across the issues.
-3. Produce a `## Shared contracts` summary as a markdown block with:
-   - Type signatures / data structures used across ≥2 issues.
-   - File-layout constraints (which file owns what).
-   - Naming conventions (e.g. class names, env var prefixes).
-4. Patch each child issue body by appending:
+1. **Deterministic extract (no LLM).** Dump each child issue body
+   (skip the umbrella/tracker) to a temp dir, then run the shared scanner:
+
+   ```bash
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/extract-shared-contracts.sh" --dir "$bodies_dir" > /tmp/shared-contracts.md
+   ```
+
+   It greps every file path, `name(...)` signature, and ALL-CAPS naming/env-var
+   token that appears in **≥2 distinct** issues and emits a `## Shared
+   contracts` block (file paths, signatures, names). Identical inputs produce
+   byte-identical output. If it reports
+   `_No cross-issue contracts detected_`, there is no cross-issue interface —
+   skip the rest of Phase 3.75 and log
+   `"Phase 3.75: skipped (no cross-issue contracts)"`.
+
+2. **Tier-B reconcile (small, only for genuine conflicts).** Skip unless the
+   scan surfaced an actual contradiction — the same path/name used with
+   **incompatible** shapes across issues (e.g. one issue declares
+   `bundle_static_context(role)` and another `bundle_static_context(role, dir)`).
+   When that happens, dispatch a small Tier-B subagent with ONLY the scanner
+   output plus the conflicting bodies and ask it to pick the authoritative
+   shape and note it in the block. Do **not** re-read every body or re-derive
+   the whole summary — the deterministic scan already did steps 1-2.
+
+3. **Patch each child issue body** by appending the (possibly reconciled) block:
 
 ```
 <!-- autospec-shared-contracts:begin -->
 ## Shared contracts
 
-<summary block from step 3>
+<the extract-shared-contracts.sh block, plus any Tier-B reconcile notes>
 <!-- autospec-shared-contracts:end -->
 ```
 

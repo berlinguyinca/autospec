@@ -218,6 +218,96 @@ MD
     ! echo "$output" | grep -q "TOO_MANY_FILES"
 }
 
+# ── TOO_MANY_FILES: trio atomic-unit exemption (trio-derivation Phase 2 D) ─────
+
+@test "files-touched: a trio's 3 members + derived goldens are ONE unit (no TOO_MANY_FILES)" {
+    cat > "$TMP/b.md" <<'MD'
+## Goal
+
+Edit one skill trio and regenerate its goldens in one commit.
+
+## Files to read first
+
+- skills/autospec-define/SKILL.md
+
+## Implementation outline
+
+1. Edit SKILL.md, run derive-trio --in-place, regen goldens.
+
+## Tests required
+
+- bats tests/x.bats
+
+## Files touched
+
+- skills/autospec-define/SKILL.md
+- skills/autospec-define/codex/prompt.md
+- skills/autospec-define/opencode/agent.md
+- tests/fixtures/skill-goldens/autospec-define.SKILL.md.sha256
+- tests/fixtures/skill-goldens/autospec-define.codex.prompt.md.sha256
+- tests/fixtures/skill-goldens/autospec-define.opencode.agent.md.sha256
+
+## Acceptance criteria
+
+- [ ] `bash scripts/validate.sh` exits 0.
+
+## Verification
+
+### Primary smoke test (inner loop)
+
+```bash
+bash scripts/derive-trio.sh --check skills/autospec-define && echo OK
+```
+MD
+    run bash -c "bash '$LINT' '$TMP/b.md' 2>&1"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "TOO_MANY_FILES"
+}
+
+@test "files-touched: a trio unit + 3 unrelated files still trips TOO_MANY_FILES" {
+    cat > "$TMP/b.md" <<'MD'
+## Goal
+
+Edit a trio plus three unrelated scripts.
+
+## Files to read first
+
+- skills/autospec-run/SKILL.md
+
+## Implementation outline
+
+1. Edit too much.
+
+## Tests required
+
+- bats tests/x.bats
+
+## Files touched
+
+- skills/autospec-run/SKILL.md
+- skills/autospec-run/codex/prompt.md
+- skills/autospec-run/opencode/agent.md
+- scripts/a.sh
+- scripts/b.sh
+- scripts/c.sh
+
+## Acceptance criteria
+
+- [ ] `bash scripts/a.sh` exits 0.
+
+## Verification
+
+### Primary smoke test (inner loop)
+
+```bash
+bash scripts/a.sh && echo OK
+```
+MD
+    run bash -c "bash '$LINT' '$TMP/b.md' 2>&1"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "TOO_MANY_FILES"
+}
+
 # ── BODY_TOO_LONG ─────────────────────────────────────────────────────────────
 
 @test "body-size: >400 words triggers BODY_TOO_LONG" {
