@@ -150,6 +150,24 @@ assert titles == ['feat: keep me'], titles
 "
 }
 
+@test "constitution D3 drops bare chore:address marker proposals" {
+    make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[{"title":"feat: real work","evidence":"spec gap","estimated_complexity":"medium","confidence":0.8}]}'
+    make_fake_researcher prior-reports '{"source":"prior-reports","proposals":[]}'
+    make_fake_researcher codebase-signals '{"source":"codebase-signals","proposals":[{"title":"chore: address TODO in src/x.py:10","evidence":"TODO at src/x.py:10: TODO: fix it","estimated_complexity":"small","confidence":0.55}]}'
+    make_fake_researcher open-issues '{"source":"open-issues","proposals":[]}'
+
+    run bash "$REPO_ROOT/scripts/explore-research-cycle.sh" --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+titles = [p['title'] for p in d['proposals']]
+assert d['proposals_after_dedup'] == 2, d['proposals_after_dedup']
+assert d['proposals_after_constitution'] == 1, d['proposals_after_constitution']
+assert titles == ['feat: real work'], titles
+"
+}
+
 @test "constitution floor is overridable via AUTOSPEC_EXPLORE_MIN_CONFIDENCE" {
     make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[{"title":"feat: low conf","evidence":"e","estimated_complexity":"small","confidence":0.1}]}'
     make_fake_researcher prior-reports '{"source":"prior-reports","proposals":[]}'
