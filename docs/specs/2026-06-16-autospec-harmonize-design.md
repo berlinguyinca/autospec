@@ -44,6 +44,33 @@ a single auto-applied verdict.
 - v1 does not invent novel design languages — variants are bounded transforms of
   the discovered tokens or blends toward the existing vendor catalog.
 
+## Team personality
+
+**Frontend/product team** — frontend developer, UX designer, accessibility
+reviewer, API/backend developer, QA engineer.
+
+This is user-facing UI work whose payoff is visual consistency, a clear
+preview-and-pick UX, and trustworthy generated tests — exactly a frontend/product
+team's wheelhouse. Risks this team is expected to notice: visual regressions
+across pages after harmonizing, WCAG contrast failures in generated variants,
+brittle selectors in the generated Playwright tests, a confusing preview-pick
+flow, and divergence between the runtime and source extractors producing
+different token profiles for the same app. Emphasis carried into child issues:
+every UI-touching child carries Design reference / Interaction states / UX flows.
+
+## Review counter-team
+
+**Accessibility & contract review** — accessibility auditor, API-contract
+reviewer, QA/regression engineer.
+
+This counter-team challenges the implementation team's likely blind spots: that
+the discovered tokens are accurate, that each variant preserves accessibility
+(AA contrast, focus states), that the migration spec actually covers every page
+(not just the representative sample), and that the generated Playwright tests
+assert real effects rather than merely that a page renders. Review stays inside
+each issue's scope by judging it against its own acceptance criteria through the
+a11y / contract / regression lens.
+
 ## Invocation
 
 ```
