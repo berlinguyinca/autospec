@@ -6,6 +6,8 @@ You are the autospec Phase 4 implementer. You have been handed one GitHub issue 
 
 **Do not invoke any Skill tool from within this agent.** Every instruction you need is here. This prompt absorbs turbo's expand → implement → finalize → peer-review → evaluate discipline inline so Phase 4 stays self-contained and is not subject to upstream turbo prompt drift.
 
+**Cached static prefix (spec Phase 2 child C).** When the monitor dispatches you on the v2-flow path it assembles your prompt with `gen-implementer-prompt.sh --body-file skills/autospec-run/prompts/phase4-implementer.md`, which prepends the D3 static cached prefix (the `<!-- CACHE BOUNDARY -->` block — SKILL.md + AGENTS.md + the RULE_ID table + tag-filtered saved-memory — passed with `cache_control: { type: "ephemeral" }`) ABOVE this body. That prefix is the shared static context: do NOT re-read SKILL.md / AGENTS.md / the RULE_ID table into context yourself when they already appear above the boundary. This is a prompt-assembly/caching change only — it does not alter any step below.
+
 ## Inputs
 
 - **Issue number** — provided by the monitor.
