@@ -87,18 +87,68 @@ function pageTitle(page) {
 }
 
 /**
- * Extract a one-line summary for a page: the first non-empty, non-heading
- * line after the H1 (or the H1 text itself if nothing follows).
+ * Extract the first real prose line of a page: skip the H1, any multi-line HTML
+ * comment block (e.g. the autospec-doc-scope comment whose interior `src:` line
+ * must NOT be mistaken for prose), other headings, and the italic audience
+ * boilerplate line (`_Reference for the … audience._`). Returns null if none.
+ */
+function firstProseLine(content) {
+  const lines = (content || '').split('\n');
+  let pastH1 = false;
+  let inComment = false;
+  for (const ln of lines) {
+    const t = ln.trim();
+    if (inComment) { if (t.includes('-->')) inComment = false; continue; }
+    if (t.startsWith('<!--')) { if (!t.includes('-->')) inComment = true; continue; }
+    if (!pastH1) { if (/^#\s+/.test(t)) pastH1 = true; continue; }
+    if (!t) continue;
+    if (/^#+\s/.test(t)) continue;          // headings
+    if (/^_.*_$/.test(t)) continue;         // italic audience boilerplate
+    return t;
+  }
+  return null;
+}
+
+/**
+ * Extract a one-line summary for a page: the first real prose line (see
+ * firstProseLine), falling back to the H1 title.
  */
 function pageSummary(page) {
-  const lines = (page.content || '').split('\n');
-  let pastH1 = false;
-  for (const ln of lines) {
-    if (!pastH1) { if (/^#\s+/.test(ln)) pastH1 = true; continue; }
-    const t = ln.trim();
-    if (t && !/^#+\s/.test(t) && !t.startsWith('<!--')) return t;
+  return firstProseLine(page.content) || pageTitle(page);
+}
+
+/**
+ * Parse the `src: [...]` list out of a page's first autospec-doc-scope comment.
+ * These are the feature's code_entry_points — used for source→doc reverse
+ * routing and real public_api extraction. Returns [] when no scope/src present.
+ */
+function parseScopeSrc(content) {
+  const block = (content || '').match(/<!--\s*autospec-doc-scope:[\s\S]*?-->/);
+  if (!block) return [];
+  const srcM = block[0].match(/src:\s*\[([^\]]*)\]/);
+  if (!srcM) return [];
+  return [...srcM[1].matchAll(/"([^"]+)"|'([^']+)'/g)].map(m => m[1] || m[2]);
+}
+
+/**
+ * Best-effort extraction of the public symbol surface of a source file: ESM
+ * exports (function/const/let/var/class + `export { … }`) and module-level
+ * Python def/class. Returns [] when the file is absent, a glob, or unreadable.
+ */
+function extractExports(absPath) {
+  let src;
+  try { src = fs.readFileSync(absPath, 'utf8'); } catch { return []; }
+  const out = [];
+  // Accept only valid identifiers — guards against matching `export { … }` that
+  // appears inside this file's own JSDoc/comments or string literals.
+  const push = (n) => { const s = (n || '').trim(); if (/^[A-Za-z_$][\w$]*$/.test(s) && !out.includes(s)) out.push(s); };
+  for (const m of src.matchAll(/export\s+(?:async\s+)?function\s+([A-Za-z0-9_$]+)/g)) push(m[1]);
+  for (const m of src.matchAll(/export\s+(?:const|let|var|class)\s+([A-Za-z0-9_$]+)/g)) push(m[1]);
+  for (const m of src.matchAll(/export\s*\{([^}]+)\}/g)) {
+    for (const part of m[1].split(',')) push(part.split(/\s+as\s+/)[0]);
   }
-  return pageTitle(page);
+  for (const m of src.matchAll(/^(?:def|class)\s+([A-Za-z0-9_]+)/gm)) push(m[1]);
+  return out;
 }
 
 /**
@@ -237,11 +287,20 @@ export function generateLlmsFull({ pages = [], generatedAt, commit } = {}) {
   }
   headerParts.push('');
 
-  // Reverse-routing block: source_anchor → doc path mapping
-  headerParts.push('<!-- reverse-routing');
+  // Reverse-routing block: source_file → doc paths. Built from each page's
+  // autospec-doc-scope `src:` list so an LLM can answer "where are the docs for
+  // src/foo.mjs?". Pages without a scope contribute nothing (no identity noise).
+  const routeMap = new Map();
   for (const page of sorted) {
-    const src = `${page.path}#L1`;
-    headerParts.push(`  ${src} -> ${page.path}`);
+    for (const src of parseScopeSrc(page.content)) {
+      if (!routeMap.has(src)) routeMap.set(src, new Set());
+      routeMap.get(src).add(page.path);
+    }
+  }
+  headerParts.push('<!-- reverse-routing');
+  for (const src of [...routeMap.keys()].sort()) {
+    const docs = [...routeMap.get(src)].sort().join(', ');
+    headerParts.push(`  ${src} -> ${docs}`);
   }
   headerParts.push('-->');
   headerParts.push('');
@@ -300,9 +359,11 @@ function approxTokens(text) {
  * page content.  Non-destructive: existing entries are kept; duplicates skipped.
  *
  * Extraction rules:
- *   modules          — one entry per page; name = H1 text; summary = first
- *                      non-heading paragraph line; public_api = backtick
- *                      command/function tokens on lines inside ## CLI / ## API
+ *   modules          — one entry per page; name = H1 text; summary = first real
+ *                      prose line (the scope comment + audience boilerplate are
+ *                      skipped); public_api = real exported symbols read from the
+ *                      page's code_entry_points (scope `src:`) under repoRoot,
+ *                      supplemented by backtick tokens inside ## CLI / ## API
  *                      sections; doc = page.path; source_anchor = "<path>#L1";
  *                      approx_tokens = chars/4 heuristic on full page content.
  *   cli_entry_points — slash-command tokens (`/word-word`) found anywhere in
@@ -318,7 +379,7 @@ function approxTokens(text) {
  * @param {Array<{ path: string, content: string }>} pages
  * @returns {void}
  */
-export function fillManifest(manifest, pages = []) {
+export function fillManifest(manifest, pages = [], { repoRoot = process.cwd() } = {}) {
   if (!Array.isArray(manifest.modules))         manifest.modules = [];
   if (!Array.isArray(manifest.cli_entry_points)) manifest.cli_entry_points = [];
   if (!Array.isArray(manifest.concepts))         manifest.concepts = [];
@@ -341,33 +402,23 @@ export function fillManifest(manifest, pages = []) {
       const name    = h1Line ? h1Line.replace(/^#+\s+/, '').trim()
                              : path.basename(page.path, '.md');
 
-      // summary = first non-empty, non-heading line after the H1
-      let summary = name;
-      let pastH1 = !h1Line; // if no H1, start scanning from line 0
-      for (const ln of lines) {
-        if (!pastH1) { if (/^#\s+/.test(ln)) { pastH1 = true; } continue; }
-        const t = ln.trim();
-        if (t && !/^#+\s/.test(t) && !t.startsWith('<!--')) {
-          summary = t;
-          break;
-        }
-      }
+      // summary = first real prose line (skips the scope comment + boilerplate)
+      const summary = firstProseLine(content) || name;
 
-      // public_api = backtick tokens from ## CLI / ## API sub-sections
+      // public_api = real exported symbols from the page's code_entry_points,
+      // supplemented by backtick tokens in any ## CLI / ## API sub-section.
       const public_api = [];
+      const addApi = (n) => { const s = (n || '').trim(); if (s && !public_api.includes(s)) public_api.push(s); };
+      for (const src of parseScopeSrc(content)) {
+        if (/[*?[\]]/.test(src)) continue;   // skip globs — only read literal paths
+        for (const sym of extractExports(path.resolve(repoRoot, src))) addApi(sym);
+      }
       let inApiSection = false;
       for (const ln of lines) {
-        if (/^##\s+(CLI|API|Public API|Commands)/i.test(ln)) {
-          inApiSection = true;
-          continue;
-        }
+        if (/^##\s+(CLI|API|Public API|Commands)/i.test(ln)) { inApiSection = true; continue; }
         if (/^##\s+/.test(ln)) { inApiSection = false; continue; }
         if (!inApiSection) continue;
-        // extract all `token` spans
-        const ticks = [...ln.matchAll(/`([^`]+)`/g)].map(m2 => m2[1]);
-        for (const tok of ticks) {
-          if (!public_api.includes(tok)) public_api.push(tok);
-        }
+        for (const m2 of ln.matchAll(/`([^`]+)`/g)) addApi(m2[1]);
       }
 
       manifest.modules.push({
