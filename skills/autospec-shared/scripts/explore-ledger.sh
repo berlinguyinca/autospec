@@ -15,7 +15,11 @@
 #     confidence  number  0..1
 #     issue       integer GitHub issue number, or 0 if not filed
 #     pr          integer PR number, or 0/null if none
-#     outcome     string  pending | merged_clean | qa_failed | reverted | stalled | abandoned
+#     outcome     string  pending | merged_clean | qa_failed | reverted | stalled | abandoned | refuted
+#                 `refuted` records a verify-stage refutation (Issue D): the
+#                 proposal was dropped before becoming an issue, so it carries
+#                 issue=0 and feeds the per-source refutation rate (down-weight)
+#                 WITHOUT counting toward `filed`.
 #     reason      string  (may be empty)
 #     ts          ISO-8601 UTC string (caller-supplied for --append)
 #
@@ -56,7 +60,7 @@
 
 set +e
 
-ALLOWED_OUTCOMES="pending merged_clean qa_failed reverted stalled abandoned"
+ALLOWED_OUTCOMES="pending merged_clean qa_failed reverted stalled abandoned refuted"
 ALLOWED_COMPLEXITY="small medium large"
 
 _usage() {
@@ -235,20 +239,22 @@ case "$CMD" in
     stats_json="$(printf '%s' "$arr" | jq '
       reduce .[] as $r ({};
         ($r.source) as $s
-        | .[$s] //= {filed:0, merged_clean:0, failed:0, pending:0}
-        | .[$s].filed += 1
-        | if   $r.outcome == "merged_clean" then .[$s].merged_clean += 1
-          elif ($r.outcome == "qa_failed" or $r.outcome == "reverted" or $r.outcome == "abandoned") then .[$s].failed += 1
-          elif $r.outcome == "pending" then .[$s].pending += 1
-          else . end)
+        | .[$s] //= {filed:0, merged_clean:0, failed:0, pending:0, refuted:0}
+        | if   $r.outcome == "refuted" then .[$s].refuted += 1
+          else .[$s].filed += 1
+               | if   $r.outcome == "merged_clean" then .[$s].merged_clean += 1
+                 elif ($r.outcome == "qa_failed" or $r.outcome == "reverted" or $r.outcome == "abandoned") then .[$s].failed += 1
+                 elif $r.outcome == "pending" then .[$s].pending += 1
+                 else . end
+          end)
     ')"
     if [ "$JSON" -eq 1 ]; then
       printf '%s\n' "$stats_json"
     else
-      printf '%-22s %6s %12s %6s %7s\n' "source" "filed" "merged_clean" "failed" "pending"
-      printf '%s' "$stats_json" | jq -r 'to_entries[] | [.key, (.value.filed|tostring), (.value.merged_clean|tostring), (.value.failed|tostring), (.value.pending|tostring)] | @tsv' \
-        | while IFS=$'\t' read -r s f m fa p; do
-            printf '%-22s %6s %12s %6s %7s\n' "$s" "$f" "$m" "$fa" "$p"
+      printf '%-22s %6s %12s %6s %7s %7s\n' "source" "filed" "merged_clean" "failed" "pending" "refuted"
+      printf '%s' "$stats_json" | jq -r 'to_entries[] | [.key, (.value.filed|tostring), (.value.merged_clean|tostring), (.value.failed|tostring), (.value.pending|tostring), ((.value.refuted // 0)|tostring)] | @tsv' \
+        | while IFS=$'\t' read -r s f m fa p rf; do
+            printf '%-22s %6s %12s %6s %7s %7s\n' "$s" "$f" "$m" "$fa" "$p" "$rf"
           done
     fi
     exit 0

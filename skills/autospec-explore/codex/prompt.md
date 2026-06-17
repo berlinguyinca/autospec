@@ -3,11 +3,14 @@
 
 Start a perpetual autonomous research + ship loop. `/autospec-explore "<initial prompt>"`
 creates an isolated sandbox branch (`autospec/explore/<date>-<slug>`) off `origin/main`,
-runs 6 parallel researchers each round (spec-vs-code, prior reports, codebase signals,
-open issues, source analysis, internet), files 1-5 auto-implement issues per round,
-drains them via `/autospec-run` with PRs targeting the sandbox, and continues until
-the operator stops it. The operator inspects the sandbox when ready and either merges
-into `main` or discards.
+runs a roster of parallel researchers each round — **7 universal** (spec-vs-code,
+prior reports, codebase signals, open issues, source analysis, dependency health,
+internet) **+ 4 discovery** (quality-resilience, dogfooding, self-leverage,
+style-normalization) **+ N domain specialists** — aggregates through dedup → verify
+→ ROI → pattern-synthesis → severity-first rank, files 1-5 auto-implement issues per
+round, drains them via `/autospec-run` with PRs targeting the sandbox, and continues
+until the operator stops it. The operator inspects the sandbox when ready and either
+merges into `main` or discards.
 
 Manage your own context — never exceed 60%. Delegate to subagents whenever your
 harness supports it; do not run researchers or aggregate proposals directly in the
@@ -94,10 +97,15 @@ Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B"
    │  perpetual loop (single iteration shown) │
    │                                          │
    │  1. research cycle:                      │
-   │     - 6 researchers run in parallel      │
-   │     - aggregate proposals, dedup, rank   │
-   │  2. file 1-5 auto-implement issues       │
-   │     (max per round, configurable)        │
+   │     - 7 universal + 4 discovery + N      │
+   │       specialist researchers in parallel │
+   │     - dedup -> verify -> ROI ->          │
+   │       synthesis -> severity-first rank   │
+   │  2. spec-first filing (1-5 per round):   │
+   │     render round design spec ->          │
+   │     commit+push spec to SANDBOX ->       │
+   │     /autospec-define --base <sandbox>    │
+   │     (fallback: raw-file, never stall)    │
    │  3. drain via /autospec-run              │
    │     - implementer PRs target SANDBOX,    │
    │       not main                           │
@@ -141,7 +149,9 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
     [--sandbox-slug <slug>] \
     [--research-sources <comma-list>] \
     [--no-internet] \
-    [--internet-allowlist <comma-list>]
+    [--internet-allowlist <comma-list>] \
+    [--qa-gate] \
+    [--qa-gate-pass-on-partial]
 ```
 
 > **Model tier:** `TIER_A` for the aggregator + proposal ranker; `TIER_B` for the
@@ -154,7 +164,9 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
 - `--budget-hours N` — wall-time budget. Default 24h.
 - `--sandbox-slug <slug>` — override sandbox branch slug.
 - `--research-sources <list>` — limit to a comma-separated subset of the
-  6 researcher names. Default: all 6.
+  universal + discovery researcher names. Default: all 11 (7 universal + 4
+  discovery); domain specialists are controlled separately via
+  `--specialists-mode`.
 - `--no-internet` — disable internet research (the most expensive +
   highest-risk source).
 - `--internet-allowlist <list>` — comma-separated domains the internet
@@ -162,6 +174,13 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
   competitor-research-appropriate domains (GitHub, official product
   docs, HackerNews, etc.). Forbidden by default: paywalled content,
   social media, pastebin-class sites.
+- `--qa-gate` — **default OFF.** Run `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-qa-gate.sh` ONCE at loop
+  termination (operator_stop / cap), before the final summary's
+  promotion-readiness block, to gate the merge instructions on a sandbox-HEAD
+  QA verdict. See [QA promotion gate](#qa-promotion-gate---qa-gate) below.
+- `--qa-gate-pass-on-partial` — treat a `PARTIAL` gate verdict as PASS
+  (promote). Default is `PARTIAL → withhold`, matching QA's own "PARTIAL is not
+  PASS" discipline. Only meaningful with `--qa-gate`.
 
 ## Sandbox branch contract
 
@@ -204,7 +223,8 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
 
 ## Research cycle contract
 
-Each round runs the 6 researchers (or the operator-specified subset) in
+Each round runs the full researcher roster (7 universal + 4 discovery + N
+specialists, or the operator-specified subset of the universal+discovery set) in
 parallel. Each researcher returns 0-N proposals as JSON:
 
 ```json
@@ -215,11 +235,18 @@ parallel. Each researcher returns 0-N proposals as JSON:
       "title": "feat: implement <X> from spec docs/specs/<Y>.md",
       "evidence": "Acceptance criterion 3 in <Y>:42 has no implementation",
       "estimated_complexity": "small|medium|large",
-      "confidence": 0.85
+      "confidence": 0.85,
+      "severity": "correctness",
+      "named_consumer": "/autospec-run Phase 4 implementer"
     }
   ]
 }
 ```
+
+The `severity` and `named_consumer` fields are required by the extended
+proposal contract (see "Discovery enhancement" below); legacy researchers that
+omit them are defaulted to `severity: feature` / `named_consumer: ""` by the
+aggregator.
 
 Aggregation:
 
@@ -236,6 +263,7 @@ Aggregation:
    - `spec-vs-code` = 1.0 (highest — spec drift is concrete and grounded)
    - `prior-reports` = 0.9 (operator-derived priorities)
    - `codebase-signals` = 0.7
+   - `dependency-health` = 0.65 (outdated/vulnerable deps; concrete + security-relevant)
    - `open-issues` = 0.6
    - `source-analysis` = 0.5
    - `internet` = 0.4 (lowest — least grounded)
@@ -247,6 +275,200 @@ Aggregation:
 Each researcher is a separate script and can be enabled/disabled via
 `--research-sources`. **Stubbed by Issue C; the JSON contract is the
 authoritative interface between researchers and the aggregator.**
+
+### Spec-first filing (per round)
+
+The capped proposals are NOT raw-filed as bare `gh issue create` tickets.
+Each round files **spec-first**: it batches that round's ranked proposals into
+one round design spec, commits the spec to the sandbox branch BEFORE any issue
+links it, then decomposes it into linked auto-implement issues. Per round:
+
+1. **Render the round spec** (deterministic, `gen-explore-round-spec.sh`) to
+   `docs/specs/<YYYY-MM-DD>-explore-<slug>-round-<N>-design.md`, where `<slug>`
+   is the sandbox-branch leaf and `<N>` is the round number. The spec's
+   acceptance criteria are `- [ ]` checkboxes so a later spec-vs-code
+   drift-check can parse explore's OWN output and catch unimplemented rounds.
+2. **Commit + push the spec to the SANDBOX branch FIRST** (`git add` the spec
+   path explicitly — never `git add -A` inside the loop — then `git commit` and
+   `git push origin HEAD:<sandbox-branch>`). This ordering guarantees no child
+   issue links a dangling `spec_url` blob; the spec blob resolves under the
+   sandbox base before any issue references it.
+3. **Decompose via `/autospec-define --base <sandbox-branch>`** (NOT raw
+   `gh issue create`). `--base` is always the sandbox branch, never `main`, so
+   the spec-tracking gate resolves the spec and child-issue `spec_url` links
+   against the sandbox and no PR or issue targets `main`.
+4. **Fallback — never stall**: if the `/autospec-define` handoff is unavailable
+   or exits non-zero, log `code_health:explore_define_unavailable`, KEEP the
+   already-committed round spec, and fall back to raw filing for that round
+   only. The loop continues; a round never blocks on define availability.
+
+## Discovery enhancement (researcher roster + verify/ROI/synthesis stages + severity)
+
+The research cycle is **extended** (not replaced) to raise discovery quality and
+cut the false-positive rate that is this skill's known failure mode. The full
+per-round researcher roster is **7 universal + 4 discovery + N domain
+specialists**:
+
+- **7 universal researchers** (the corrected baseline; the stale "6" is gone):
+  `spec-vs-code`, `prior-reports`, `codebase-signals`, `open-issues`,
+  `source-analysis`, `dependency-health`, `internet`.
+- **4 discovery researchers** (`scripts/explore-research/`), grounded in real
+  behavior and concrete invariants rather than grep-of-prose noise:
+  - `quality-resilience` (weight 0.95) — four QA lenses: self-consistent
+    fixtures built with the SUT's own derivation expr, assertion-free tests,
+    invariant↔guard coverage gaps, kill-mid-run / non-idempotent / shared-lock
+    hazards, and LLM steps that should be deterministic. Cap 100/round.
+  - `dogfooding` (weight 0.9) — reads live `${AUTOSPEC_STATE_DIR:-$HOME/.autospec}`
+    run-state, failure ledgers, heartbeats, `explore-loop.json`,
+    `run-summary.md`, plus git churn + revert archaeology and dead surface. If
+    the state dir or an artifact is absent it emits
+    `{"source":"dogfooding","proposals":[]}` and exits 0 — never hard-fails.
+    Host-specific absolute paths are redacted to repo-relative / `~/`-relative
+    form before any value reaches an issue body. Cap last 20 runs / 200 commits.
+  - `self-leverage` (weight 0.6) — every point in the trio prose + scripts where
+    a human decision/intervention/relaunch is still required, checked against the
+    autonomy-scope rule (low-stakes auto-resolves; only run/defer/refine +
+    destructive-remote reach the operator). Cap 50/round.
+  - `style-normalization` (weight 0.85) — runs only when frontend signals are
+    present (for example `package.json` frontend deps, `src/**` routes/components,
+    CSS modules, Tailwind config, design-token files, Storybook, or Playwright
+    config). It inventories visual primitives across SPA/webapp pages: duplicated
+    colors, spacing, typography, elevation, radii, ad hoc inline styles, mixed
+    component-library usage, and one-off button/input/card/modal/table patterns.
+    Proposals MUST name the normalization target (token, theme layer, shared
+    component, or stylesheet boundary), cite concrete file/page evidence, and
+    avoid subjective "make it nicer" wording. If no Playwright coverage or
+    screenshots exist for the affected UI surface, the researcher MUST
+    automatically generate them before filing by invoking
+    `AUTOSPEC_EXPLORE_STYLE_PROOF_CMD` when set. Routing through
+    `/autospec-playwright` or `/autospec-test` Stage 2A is a best-effort fallback,
+    not sufficient by itself. Generated proof artifacts must include at least one
+    route-level Playwright test plus before/after-ready screenshots under a deterministic path such as
+    `.autospec/style-normalization/<round>/`. Proposals without Playwright or
+    screenshot evidence are refuted by default in the verify stage. Cap 40/round.
+- **N domain specialists** — an LLM-persona researcher per detected repo domain,
+  emitting the same extended proposal JSON with `source = specialist:<slug>`
+  (e.g. `specialist:market-risk`), default weight 0.6. See "Domain-specialist
+  roster" below.
+
+**Aggregator stage order** (in the `explore-research-cycle.sh` aggregator):
+`dedup → verify → ROI → pattern-synthesis → severity-first rank`.
+
+1. **Dedup** — by normalized title across all researchers (unchanged).
+2. **Verify (adversarial)** — every deduped proposal is handed to one
+   independent Tier-B skeptic prompted "Try to refute this proposal; default to
+   refuted=true under uncertainty." Refuted proposals are dropped; survivors
+   carry `{verdict, reason}`. This is the primary false-positive lever.
+
+   This stage runs as a **two-pass split** (the orchestrator cannot key the
+   verdict map until it knows the deduped titles, so verify cannot live inside a
+   single aggregator pass):
+   - **Pass 1** — `explore-research-cycle.sh --stage dedup` runs the researchers,
+     aggregates, dedups, and emits each deduped proposal stamped with its
+     `norm_title` key, then stops before verify.
+   - **Skeptic dispatch** — for each deduped proposal the orchestrator dispatches
+     one Tier-B skeptic (refute-by-default) and assembles a
+     `{norm_title → {verdict, reason}}` map. The seam is
+     `AUTOSPEC_EXPLORE_VERIFY_CMD` (it reads `AUTOSPEC_EXPLORE_DEDUPED_IN` and
+     writes `AUTOSPEC_EXPLORE_VERDICTS_OUT`); it may fan out one subagent per
+     proposal or run a single in-thread pass.
+   - **Pass 2** — `explore-research-cycle.sh --stage finalize --deduped-in <pass1>`
+     consumes the map via `AUTOSPEC_EXPLORE_VERIFY_VERDICTS`, drops refuted
+     proposals (proposal with no map entry is **refuted by default**), sets
+     `verify_mode=active`, and increments `proposals_refuted`. Each refuted
+     proposal is recorded to the outcome ledger as `outcome=refuted` (issue=0),
+     which feeds the per-source refutation-rate down-weighting.
+
+   Degradation ladder (never hard-fail): no `AUTOSPEC_EXPLORE_VERIFY_CMD` but a
+   harness dispatcher → a single in-thread refutation pass builds the map; on
+   total absence of skeptic capability → no map, pass 2 no-ops to the
+   **observable** `verify_mode=no-op-unverified` with a
+   `code_health:explore_verify_noop` warning (never a silent all-survive).
+3. **ROI gate** — drop proposals with an empty `named_consumer`. **Only the 4
+   discovery researchers and `specialist:<slug>` sources are ROI-gated**
+   (new-source rollout safety); the 7 legacy universal researchers are exempt.
+4. **Pattern synthesis** — survivors are grouped by a coarse class key; any
+   class with ≥2 members (or matching a recurring `docs/memory/` theme)
+   collapses into one `structural-fix` proposal whose evidence lists every
+   instance and the single guard that would catch them all.
+5. **Severity-first rank** — the **primary** sort key is the severity band;
+   `confidence × source_weight / complexity` breaks ties.
+
+**Severity enum** (highest → lowest blast radius through auto-merge + lock-step):
+`silent-wrong` > `correctness` > `stability` > `operability` > `feature` >
+`nicety`. A silent-wrong-but-green defect outranks any missing feature. The
+proposal contract (`schemas/autospec-explore-proposal.schema.json`) carries
+`severity` and `named_consumer`; legacy researchers default to
+`severity: feature` and `named_consumer: ""`.
+
+The per-iteration log (`.autospec/explore-loop.json`) gains
+`proposals_after_verify`, `proposals_refuted`, `proposals_after_roi`, and
+`structural_fixes` counters, so the ledger and `explore-summary.md` can report
+verification yield. The outcome ledger additionally records per-source
+**refutation rate** from the verify stage and down-weights chronically-refuted
+sources automatically.
+
+The `style-normalization` researcher is opt-in by `--research-sources
+style-normalization` and auto-enabled by prompts that ask to normalize styling,
+unify the look and feel, harmonize UI, or clean up SPA/webapp visual drift. In
+autonomous runs with frontend signals and no explicit `--research-sources`, it
+joins the default discovery roster; in non-frontend repos it emits
+`{"source":"style-normalization","proposals":[]}` and exits 0.
+
+This methodology also ships as the operator-runnable runbook
+`docs/runbooks/discovery-sweep.md` (one-shot sweep without arming the loop);
+the runbook and the spec
+`docs/specs/2026-06-15-autospec-explore-discovery-enhance.md` are kept in
+lockstep on the same five discovery tracks (A Feature delta, B External/
+ecosystem, C Quality & resilience, D Dogfooding, E Self-leverage), enforced by
+the `check_autospec_explore_discovery_contract` gate in the repo validator.
+
+## Domain-specialist roster (self-discovery + operator selection)
+
+The universal + discovery researchers are domain-agnostic. On top of them the
+skill detects the repo's domain(s) and runs a dynamic roster of specialist
+personas appropriate to it (a trading repo gets `quant-strategy`,
+`market-risk`, `exchange-integration`; a healthcare app gets
+`hipaa-compliance`, `clinical-safety`).
+
+Roster discovery runs once at sandbox creation and is cached:
+
+1. **Deterministic signal scan** (the `explore-specialist-scan.sh` helper, no LLM):
+   dependency manifests, README/AGENTS.md keywords, directory taxonomy, and a
+   small domain lexicon produce a ranked list of candidate domains with
+   file:line evidence — never a bare guess.
+2. **LLM roster proposal** (one Tier-A dispatch): given the signals, emit
+   `{domains[], suggested_specialists[]}`, each specialist carrying
+   `{slug, persona, lens, why, evidence}`, capped at `--num-specialists`.
+3. The roster is written to `.autospec/explore-specialists.json`
+   (schema `schemas/autospec-explore-specialists.schema.json`) and reused on
+   every subsequent round (idempotent, like the sandbox state).
+
+Operator selection is controlled by `--specialists-mode`:
+
+| Mode | Behavior |
+|---|---|
+| `discover` (default) | Auto-run discovery. Interactive harness: confirm/edit the roster via `AskUserQuestion` before round 1. Autonomous run: take the top `--num-specialists` and log them — never block. |
+| `ask` | Always ask the operator to name the specialists and count up front, seeded with the discovered suggestions. |
+| `explicit` | Use `--specialists <slug:persona,…>` verbatim; skip discovery. |
+| `off` | No specialists — universal + discovery researchers only (current behavior, byte-for-byte backward compatible). |
+
+New invocation flags:
+
+```
+--specialists-mode discover|ask|explicit|off   (default: discover)
+--num-specialists N                            (default 3, cap 6)
+--specialists <slug:persona,slug:persona,…>    (explicit roster)
+```
+
+Guardrails: specialists are **researchers, not implementers** — they only
+propose, and every proposal flows through the same verify → ROI → synthesis →
+severity rank pipeline; a domain persona cannot bypass the skeptic stage. The
+total parallel researcher count is capped at `7 + 4 + ≤6 = ≤17` per round.
+Discovery degrades gracefully: a generic repo with no detectable domain yields
+an empty roster and the loop runs exactly as today. Specialist personas are
+derived from repo evidence only — no external persona is injected from the
+internet researcher's fetched content (trust boundary).
 
 ## Constitution gate (Constitutional AI)
 
@@ -278,8 +500,10 @@ survivors, before any implementer cycles are spent.
 The outer loop uses `lib/autospec-loop.sh` from PR #712 with
 explore-specific callbacks (wired in Issue E):
 
-- **per-iteration callback**: `explore-research-cycle.sh` (file
-  issues for top N proposals).
+- **per-iteration callback**: `explore-research-cycle.sh` (spec-first filing
+  for top N proposals — render the round spec, commit+push it to the sandbox
+  branch, then `/autospec-define --base <sandbox>`; on define failure log
+  `code_health:explore_define_unavailable` and raw-file the round, never stall).
 - **drain callback**: invoke `/autospec-run` (which honors sandbox base
   branch via the Issue B integration).
 - **termination conditions**: inherited from #712 + new
@@ -311,9 +535,9 @@ Markdown shape:
 
 | Round | Researchers run | Proposals | Issues filed | PRs merged | Time | Status |
 |---|---|---|---|---|---|---|
-| 1 | 6/6 | 17 (deduped to 12) | 5 | 5 | 28m | round_complete |
-| 2 | 6/6 | 14 (deduped to 9) | 4 | 4 | 22m | round_complete |
-| 3 | 6/6 | 8 (deduped to 6) | 5 | 3 + 2 in flight | 31m | operator_stop |
+| 1 | 14/14 | 17 (deduped to 12, 9 verified) | 5 | 5 | 28m | round_complete |
+| 2 | 14/14 | 14 (deduped to 9, 7 verified) | 4 | 4 | 22m | round_complete |
+| 3 | 14/14 | 8 (deduped to 6, 5 verified) | 5 | 3 + 2 in flight | 31m | operator_stop |
 
 Final status: operator_stop after 3 rounds, 14 PRs merged on sandbox.
 
@@ -324,6 +548,54 @@ To discard:
   git branch -D autospec/explore/2026-05-29-X && \
     git push origin --delete autospec/explore/2026-05-29-X
 ```
+
+## QA promotion gate (`--qa-gate`)
+
+By default the loop summary above prints the merge instructions ungated — the
+operator promotes the sandbox at their own discretion. `--qa-gate` (default OFF)
+makes promotion contingent on a sandbox-HEAD QA verdict.
+
+- **When it runs:** ONCE at loop termination (operator_stop / cap), before the
+  final summary's promotion-readiness block — NOT per round (bounds cost). The
+  orchestrator invokes `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-qa-gate.sh`, which spins a fresh
+  worktree on the sandbox branch at its recorded HEAD, runs
+  `autospec-qa --no-heal` (the gate proves; it never mutates the sandbox)
+  against that HEAD, and writes `.autospec/explore-qa-gate.json`
+  (schema `schemas/autospec-explore-qa-gate.schema.json`):
+  `{verdict, sandbox_branch, sandbox_head_sha, qa_verdict_path,
+  blocking_findings, ran_at}`.
+- **Default OFF is byte-unchanged.** Without `--qa-gate` the promotion block is
+  emitted verbatim — identical to the pre-gate manual path. The flag only adds
+  gating; it never changes the ungated output.
+
+**Promotion-readiness contract** (gates the summary's merge block by verdict):
+
+| Gate verdict | Promotion | Annotation | Notes |
+|---|---|---|---|
+| `PASS` | promote — print merge instructions | `sandbox QA: PASS` | |
+| `PARTIAL` + `--qa-gate-pass-on-partial` | promote | `sandbox QA: PASS` | opt-in |
+| `PARTIAL` (default) | **WITHHELD** | `sandbox QA: PARTIAL` | PARTIAL is not PASS |
+| `skipped` (no QA config) | promote — print merge instructions | `sandbox QA: skipped (no QA config)` | fail-open; promote at own risk |
+| `FAIL` | **WITHHELD** | `sandbox QA: FAIL` | |
+| `error` (QA crash / missing skill / jq error) | **WITHHELD** | `sandbox QA: error` | fail-closed |
+
+- **Fail-open SKIP vs fail-closed error.** A repo with no QA config the gate can
+  run against (no `.autospec/test.yml`, no autospec-qa config) is NOT penalized:
+  the runner emits `code_health:explore_qa_gate_skipped_no_config`, writes
+  `verdict:"skipped"`, exits 0, and the merge instructions are still printed
+  (annotated). An *attempted* gate that crashes, errors, or returns
+  FAIL/PARTIAL(default) WITHHOLDS the merge instructions and emits
+  `code_health:explore_qa_gate_failed`.
+- **Withheld output** prints the `sandbox QA: <verdict>` annotation, the
+  blocking findings, the `.autospec/qa-verdict.json` detail path, and the
+  discard instructions — never the merge instructions.
+- **Stale-verdict warning.** The gate records `sandbox_head_sha`. If the sandbox
+  branch has advanced past that SHA since the gate ran, the promotion output
+  prints `WARN: sandbox advanced past the QA gate sandbox_head_sha (…); verdict
+  may be stale.` — re-run the gate before promoting.
+- **Artifact + ledger.** The gate verdict row (`qa_gate`, `qa_gate_verdict`,
+  `qa_gate_promote`, `qa_gate_stale`) is recorded in `.autospec/explore-loop.json`
+  alongside `.autospec/explore-qa-gate.json`.
 
 ## Error handling
 
@@ -348,8 +620,8 @@ To discard:
 - `tests/explore/test_explore_sandbox.bats` — sandbox creation/management,
   idempotency, no accidental main writes, `.autospec/explore-mode.json`
   schema.
-- `tests/explore/test_explore_researchers.bats` — each of the 6
-  researchers produces well-formed JSON proposals from fixture inputs.
+- `tests/explore/test_explore_researchers.bats` — each universal + discovery
+  researcher produces well-formed JSON proposals from fixture inputs.
   **Stubbed by Issues C+D.**
 - `tests/explore/test_explore_research_cycle.bats` — aggregation,
   dedup, ranking, capping. **Stubbed by Issue C.**

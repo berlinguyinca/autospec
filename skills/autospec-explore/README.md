@@ -2,7 +2,7 @@
 
 Perpetual autonomous research + ship loop on an isolated sandbox branch.
 `/autospec-explore "<initial prompt>"` creates `autospec/explore/<date>-<slug>` off
-`origin/main`, runs 6 parallel researchers each round (spec-vs-code, prior reports,
+`origin/main`, runs 7 parallel researchers each round (spec-vs-code, prior reports,
 codebase signals, open issues, source analysis, internet), files 1-5 auto-implement
 issues per round, drains them via `/autospec-run` with PRs targeting the sandbox,
 and continues until the operator stops it.

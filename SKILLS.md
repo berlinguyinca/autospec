@@ -1,122 +1,151 @@
 # Skill Index
 
-## autospec
+Every autospec capability is a skill under [`skills/`](skills). Each ships three
+harness variants kept byte-identical by the lock-step rule — Claude Code
+(`SKILL.md`), OpenCode (`opencode/agent.md`), and Codex CLI (`codex/prompt.md`) —
+plus a per-skill `install.sh` / `uninstall.sh`. Only frontmatter differs between
+harnesses; [`scripts/validate.sh`](scripts/validate.sh) enforces this.
 
+This file lists every skill with its trigger and activation keywords. For
+task-oriented "I want to…" guidance, see [`README.md`](README.md).
+
+## Core pipeline — plan and ship
+
+### `autospec`
 - Path: [`skills/autospec`](skills/autospec)
-- Trigger: use when a user asks the agent to ship a feature end-to-end — bootstrap a missing GitHub repo, brainstorm/design, decompose into linked GitHub issues with dependency metadata, split an existing `docs/specs/*.md` into issues, and run an autonomous implementation loop with admin auto-merge until done.
-- Activation keywords: `autospec`, `ship this feature`, `autonomous feature shipping`, `bootstrap repo and ship`, `decompose and auto-implement`, `run the autonomous loop`, `create issues and auto-merge`, `auto-implement this feature`, `ship end-to-end`, `turn this spec into GitHub issues`, `roadmap this spec`, `materialize this spec`, `split existing spec`, `split latest spec`
-- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
-- Status: 7-phase workflow (bootstrap → investigate → design → decompose → background monitor → status updates → final report) with admin-squash-merge of `auto-implement`-labeled PRs.
-- Turbo integration (since 2026-05-17): `install.sh` bootstraps [tobihagemann/turbo](https://github.com/tobihagemann/turbo) as a peer skill family and `--update` keeps both stacks current. Issues filed by `/autospec-define` carry the `autospec:v2-flow` label, which routes the Phase 4 implementer to a prompt at `skills/autospec-run/prompts/phase4-implementer.md` that absorbs turbo's expand → implement → finalize → peer-review → evaluate-findings discipline inline. Peer-review uses Codex CLI; gracefully skips when absent. See [`docs/superpowers/specs/2026-05-17-turbo-autospec-integration-design.md`](docs/superpowers/specs/2026-05-17-turbo-autospec-integration-design.md).
+- Trigger: ship a feature end-to-end — bootstrap a missing repo, design, decompose into linked issues (or split an existing spec), and run the autonomous implementation loop with admin auto-merge.
+- Keywords: `autospec`, `ship this feature`, `auto-implement this feature`, `ship end-to-end`, `decompose and auto-implement`, `run the autonomous loop`
 
-## autospec-sweep
+### `autospec-define`
+- Path: [`skills/autospec-define`](skills/autospec-define)
+- Trigger: planning only — bootstrap, brainstorm a spec, and decompose into classified issues; stop after Phase 3 and hand off to `/autospec-run`.
+- Keywords: `autospec-define`, `plan a feature`, `design a spec`, `decompose into issues`
 
-- Path: [`skills/autospec-sweep`](skills/autospec-sweep)
-- Trigger: use when a project needs first-run autospec configuration, recurring spec-vs-reality sweeps, or continuous improvement across docs, tests, and code health.
-- Activation keywords: `autospec-sweep`, `sweep`, `configure autospec`, `first-run config`, `continuous improvement`, `spec sync`, `docs tests code sweep`
-- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
-- Status: tracked config mode. Creates `.autospec/autospec.yml`, asks project-specific setup questions from repo findings, keeps specs synchronized with implementation reality, and routes improvement gaps through `autospec-review`, issues, and `/autospec-run`.
-
-## autospec-release
-
-- Path: [`skills/autospec-release`](skills/autospec-release)
-- Trigger: use when an existing repo needs an end-to-end release readiness gate across specs, docs, implementation, tests, QA proof artifacts, legacy cleanup, and merge readiness.
-- Activation keywords: `autospec-release`, `release readiness`, `release sweep`, `make repo releasable`, `full repo QA`, `ship current repo`, `release gate`
-- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
-- Status: wrapper workflow over working autospec skills. Runs preflight, `/autospec-sweep`, docs/spec sync, `/autospec-review`, `/autospec-classify`, `/autospec-run`, `/autospec-test`, `/autospec-qa`, proof validation, and the legacy cleanup gate before returning `PASS`, `PARTIAL`, or `FAIL`.
-
-## autospec-fleet
-
-- Path: [`skills/autospec-fleet`](skills/autospec-fleet)
-- Trigger: use when an operator wants to supervise autospec-run across multiple GitHub repositories from an empty workspace.
-- Activation keywords: `autospec-fleet`, `fleet init`, `fleet run`, `fleet status`, `fleet stop`, `run autospec across repos`
-- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
-- Status: helper-script surface for preparing multi-repo supervision. Config schemas validate `autospec-fleet.yml` and `~/.autospec/fleet-node.yml`; `fleet-init.sh --dry-run` plans checkout paths; `fleet-run.sh --dry-run` builds per-repo `/autospec-run` commands; `fleet-status.sh --json` summarizes queues; and `fleet-stop.sh` forwards stop behavior to configured local checkouts. Live clone/sync and worker launch are still planned.
-
-## autospec-listen
-
-- Path: [`skills/autospec-listen`](skills/autospec-listen)
-- Trigger: passive listener that fires mid-conversation when the user mentions filing an issue or starting a spec — drafts a GitHub issue body for confirmation (issue trigger) or routes to `/autospec-define` (spec trigger). Bare nouns ("issue", "spec", "ticket") are NOT triggers.
-- Activation keywords: `file an issue`, `file this as an issue`, `new issue`, `open an issue`, `create a ticket`, `make an issue`, `write a spec`, `design spec`, `new spec`, `start a spec`, `write a design spec`
-- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
-- Status: trigger-listener for chat-driven issue / spec creation. Files issues with `needs-classify` label so `/autospec-classify` can transition them onto the `auto-implement` queue. See [`skills/autospec-listen/README.md`](skills/autospec-listen/README.md).
-
-## autospec-story
-
-- Path: [`skills/autospec-story`](skills/autospec-story)
-- Trigger: use when a user asks for a complete repo story, implementation overview, product history, or state report from local specs plus GitHub issues and PRs.
-- Activation keywords: `autospec-story`, `repo story`, `application story`, `implementation state`, `what has been built`, `complete overview`, `state of the application`
-- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
-- Status: read-only synthesis mode. Produces a cited Markdown report that separates evidence, inference, open work, completed work, and unknowns. See [`skills/autospec-story/README.md`](skills/autospec-story/README.md).
-
-## autospec-review
-
-- Path: [`skills/autospec-review`](skills/autospec-review)
-- Trigger: use when a user wants to audit design specs against open and closed issues to find gaps, file high-priority regression issues, and feed them back through autospec. Auto-fires after each autospec-run batch unless `~/.autospec/no-review.flag` exists.
-- Activation keywords: `autospec-review`, `audit specs`, `find spec gaps`, `regression review`, `spec vs issues`, `find missing coverage`
-- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
-- Status: closes the spec-vs-code feedback loop; renders regression specs, dispatches Tier A reviewer subagent, and hands off to `/autospec-split` to file `[REGRESSION]` issues with `priority:high`.
-
-## autospec-split
-
+### `autospec-split`
 - Path: [`skills/autospec-split`](skills/autospec-split)
-- Trigger: use when a user asks to split, materialize, roadmap, decompose, or turn an existing tracked `docs/specs/*.md` design spec into GitHub issues.
-- Activation keywords: `autospec-split`, `split existing spec`, `split latest spec`, `turn this spec into GitHub issues`, `roadmap this spec`, `materialize this spec`
-- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
-- Status: existing-spec shortcut for Phase 3 plus Phase 3.5 with startup self-update before normal execution.
+- Trigger: turn an existing tracked `docs/specs/*.md` spec into GitHub issues, then stop after Phase 3.5.
+- Keywords: `autospec-split`, `split existing spec`, `split latest spec`, `turn this spec into GitHub issues`, `roadmap this spec`, `materialize this spec`
 
-## autospec-test
+### `autospec-run`
+- Path: [`skills/autospec-run`](skills/autospec-run)
+- Trigger: run the implementation half (Phases 4–6) over a populated `auto-implement` queue with admin auto-merge. `--profile <name>` filters by model profile.
+- Keywords: `autospec-run`, `run the queue`, `implement the issues`, `process auto-implement`
 
+### `autospec-classify`
+- Path: [`skills/autospec-classify`](skills/autospec-classify)
+- Trigger: retro-apply the Phase 3.5 model-fit rubric to existing issues — add `ctx:*` / `reasoning:*` labels and a `## Model fit` block.
+- Keywords: `autospec-classify`, `classify issues`, `model-fit labels`, `add ctx labels`
+
+## Capture and refine intent
+
+### `autospec-listen`
+- Path: [`skills/autospec-listen`](skills/autospec-listen)
+- Trigger: a mid-conversation imperative to file an issue, write a spec, or build/ship something. Drafts an issue for approval, routes spec requests to `/autospec-define`, or gates build verbs to the mapped skill. Bare nouns are not triggers.
+- Keywords: `file an issue`, `new issue`, `open an issue`, `create a ticket`, `write a spec`, `design spec`, `new spec`, `implement`, `build`, `ship`, `review`
+
+### `autospec-continue`
+- Path: [`skills/autospec-continue`](skills/autospec-continue)
+- Trigger: `/continue` — extract the last assistant recommendation, refine it, and hand off to `/autospec --autonomous`. Supports `--skip-refine`, `--ask-confirm`, `--lens-mode`, `--from-message`.
+- Keywords: `continue`, `act on that recommendation`, `do the suggested next step`
+
+### `autospec-refine`
+- Path: [`skills/autospec-refine`](skills/autospec-refine)
+- Trigger: sharpen a prompt or feature request over N repo-grounded lenses before handing off to `/autospec`. Supports `--rounds`, `--lenses`, `--autonomous`, `--interactive`, `--dry-run`, `--continue`.
+- Keywords: `autospec-refine`, `refine this request`, `tighten the prompt`
+
+## Test, review, and QA
+
+### `autospec-review`
+- Path: [`skills/autospec-review`](skills/autospec-review)
+- Trigger: audit design specs against open and closed issues to find gaps and file `[REGRESSION]` issues. Auto-fires after each `autospec-run` batch unless `~/.autospec/no-review.flag` exists.
+- Keywords: `autospec-review`, `audit specs`, `find spec gaps`, `regression review`, `spec vs issues`
+
+### `autospec-test`
 - Path: [`skills/autospec-test`](skills/autospec-test)
-- Trigger: use when you want every Phase 4 PR gated on unit + E2E test coverage with an auto-heal loop, or to run ad-hoc coverage validation against any branch.
-- Activation keywords: `autospec-test`, `coverage gate`, `e2e gate`, `unit coverage`, `test gate`, `auto-heal tests`, `enforce test coverage`, `coverage enforcement`
-- Harnesses: Claude Code (`SKILL.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
-- Status: inline Phase 4 gate (runs after build + lint, before auto-merge) plus standalone `/autospec-test [PR#]` invocation. Two-stage: unit coverage → E2E coverage. Self-heal loop up to 5 iterations / 60 min coding time. Assertion-shift guardrail blocks LOOSENING rewrites. Mode II (scoped production) opt-in with mandatory backup/restore.
+- Trigger: gate every Phase 4 PR on unit + E2E coverage with a self-heal loop (≤5 iterations / 60 min), blocking assertion-loosening rewrites; also runs standalone against a branch.
+- Keywords: `autospec-test`, `coverage gate`, `e2e gate`, `enforce test coverage`, `auto-heal tests`
 
-## autospec-qa
-
+### `autospec-qa`
 - Path: [`skills/autospec-qa`](skills/autospec-qa)
-- Trigger: use when a running app must be revalidated against a spec, UI controls and validation must be audited, or weak/missing tests should be regenerated from spec behavior.
-- Activation keywords: `autospec-qa`, `qa revalidate`, `revalidate app`, `spec compliance audit`, `regenerate tests`, `test every control`, `validate dropdowns`, `validation audit`
-- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
-- Status: explicit spec-to-running-app QA workflow. Produces a traceability matrix, exercises UI/API/accessibility/validation/negative paths, and turns gaps into stronger automated tests or follow-up issues.
+- Trigger: revalidate a running app against its spec — audit UI controls, forms, validation, dropdowns, API behavior, and accessibility, and regenerate weak or missing tests.
+- Keywords: `autospec-qa`, `qa revalidate`, `spec compliance audit`, `regenerate tests`, `validate dropdowns`, `validation audit`
 
-## autospec-design
+### `autospec-playwright`
+- Path: [`skills/autospec-playwright`](skills/autospec-playwright)
+- Trigger: run disciplined no-mock Playwright UI-test authoring (autospec-test Stage 2A) against `.autospec/test.yml` authoring blocks and print the coverage report.
+- Keywords: `autospec-playwright`, `playwright tests`, `ui test authoring`, `no-mock e2e`
 
+### `autospec-e2e-clone`
+- Path: [`skills/autospec-e2e-clone`](skills/autospec-e2e-clone)
+- Trigger: provision an isolated, scaled-down, PII-anonymized clone of a production environment for E2E testing (autospec-test Mode II).
+- Keywords: `autospec-e2e-clone`, `clone production`, `anonymized environment`, `e2e clone`
+
+## Docs and design
+
+### `autospec-doc`
+- Path: [`skills/autospec-doc`](skills/autospec-doc)
+- Trigger: generate, regenerate, or audit per-audience documentation (user, developer, admin, general) as docs-as-tests. Supports `--full`, `--audit`, `--audience <name>`, and `init`.
+- Keywords: `autospec-doc`, `generate docs`, `audit docs`, `per-audience documentation`, `docs as tests`
+
+### `autospec-design`
 - Path: [`skills/autospec-design`](skills/autospec-design)
-- Trigger: use when a user wants the repo's UI anchored to a vendor design language (Apple, Linear, Notion, Stripe, Tesla, etc.) from the `berlinguyinca/awesome-design-md` catalog — pick a vendor, write `DESIGN.md` at the project root on a feature branch, and optionally migrate existing UI to match via per-component `auto-implement` issues.
-- Activation keywords: `autospec-design`, `adopt design`, `design language`, `DESIGN.md`, `apply design`, `suggest design`, `migrate to design`, `vendor design system`
-- Subcommands: `suggest` (rank catalog vendors against repo signals), `apply <vendor>` (fetch + write `DESIGN.md` to project root on a feature branch), `migrate <vendor>` (decompose existing UI into per-component design-migration spec, hand off to `/autospec-define`).
-- Catalog source: [`berlinguyinca/awesome-design-md`](https://github.com/berlinguyinca/awesome-design-md) (fork of `voltagent/awesome-design-md`, MIT). Fetched at runtime via `gh api` with `curl` fallback, cached for 24h under `~/.autospec/design-cache/<vendor>/DESIGN.md`.
-- Harnesses: Claude Code (`SKILL.md`), OpenCode (`opencode/agent.md`), Codex CLI (`codex/prompt.md`). Bundled `install.sh` / `uninstall.sh` handle per-harness placement.
-- Status: vendor-design adoption skill. See [`docs/specs/2026-05-26-autospec-design-skill.md`](docs/specs/2026-05-26-autospec-design-skill.md) for the design spec and [`skills/autospec-design/README.md`](skills/autospec-design/README.md) for usage.
+- Trigger: adopt a vendor design language — score the repo against catalog vendors, write `DESIGN.md`, and optionally migrate existing UI. Subcommands `suggest`, `apply <vendor>`, `migrate <vendor>`.
+- Keywords: `autospec-design`, `adopt design`, `design language`, `DESIGN.md`, `vendor design system`
+- Catalog: [`berlinguyinca/awesome-design-md`](https://github.com/berlinguyinca/awesome-design-md) (MIT), cached 24h under `~/.autospec/design-cache/`.
 
-## Docs amendment (Phase 10c)
+## Lifecycle and reporting
 
-The autospec docs amendment ships first-class documentation artifacts to every target repo.
-Run `bash skills/autospec-shared/scripts/reverse-engineer.sh --repo-root .` to regenerate.
+### `autospec-sweep`
+- Path: [`skills/autospec-sweep`](skills/autospec-sweep)
+- Trigger: first-run autospec configuration, recurring spec-vs-reality sweeps, or continuous improvement across docs, tests, and code health.
+- Keywords: `autospec-sweep`, `sweep`, `configure autospec`, `first-run config`, `continuous improvement`, `spec sync`
 
-Generated artifacts committed to this repo (autospec dogfooding its own pipeline):
+### `autospec-release`
+- Path: [`skills/autospec-release`](skills/autospec-release)
+- Trigger: end-to-end release-readiness sweep across specs, docs, implementation, tests, QA proof, legacy cleanup, and merge readiness; returns `PASS`, `PARTIAL`, or `FAIL`.
+- Keywords: `autospec-release`, `release readiness`, `release sweep`, `release gate`, `ship current repo`
 
-| File | Generator |
-|---|---|
-| [`docs/USER_MANUAL.md`](docs/USER_MANUAL.md) | `gen-docs-from-spec.mjs` |
-| [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | `gen-docs-from-spec.mjs` |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | `gen-docs-from-spec.mjs` + `gen-arch-diagram.mjs` |
-| [`docs/ASSISTANT_PROMPT.md`](docs/ASSISTANT_PROMPT.md) | `gen-assistant-prompt.mjs` |
-| [`docs/.llm-manifest.json`](docs/.llm-manifest.json) | `gen-llm-manifest.mjs` |
-| [`llms.txt`](llms.txt) | `gen-llms-txt.sh` |
-| [`llms-full.txt`](llms-full.txt) | `gen-llms-txt.sh` |
+### `autospec-story`
+- Path: [`skills/autospec-story`](skills/autospec-story)
+- Trigger: synthesize a cited repo-level product story and implementation-state report from local specs plus GitHub issues and PRs.
+- Keywords: `autospec-story`, `repo story`, `implementation state`, `what has been built`, `state of the application`
 
-`scripts/validate.sh` enforces presence of `docs/USER_MANUAL.md`, `llms.txt`, and
-`docs/.llm-manifest.json` on every CI run. Deleting any of these artifacts causes
-`validate.sh` to exit non-zero.
+### `autospec-fleet`
+- Path: [`skills/autospec-fleet`](skills/autospec-fleet)
+- Trigger: supervise `autospec-run` across multiple GitHub repos from an empty workspace — config schemas, checkout planning, dry-run command generation, JSON status, stop forwarding.
+- Keywords: `autospec-fleet`, `fleet init`, `fleet run`, `fleet status`, `run autospec across repos`
 
-## Future Skill Checklist
+## Run control and recovery
 
-1. Create `skills/<skill-name>/SKILL.md`.
-2. Keep the skill body concise and move large details into `references/`.
-3. Add deterministic helper code under `scripts/` when repeated shell/API work is error-prone.
-4. Add UI metadata under `agents/openai.yaml` when useful.
-5. Validate the skill before publishing.
-6. Add a row to the README skill table and this index.
+### `autospec-stop`
+- Path: [`skills/autospec-stop`](skills/autospec-stop)
+- Trigger: halt a running monitor — `--graceful` (after the current issue), `--immediate` (next step boundary), `--status`, `--resume`. Writes `~/.autospec/stop.flag`.
+- Keywords: `autospec-stop`, `stop`, `halt the monitor`, `pause autospec`, `resume autospec`
+
+### `autospec-resume`
+- Path: [`skills/autospec-resume`](skills/autospec-resume)
+- Trigger: a fresh process detects an interrupted run from durable state plus heartbeats and auto-continues it after a crash — without stealing a live worker or deleting un-pushed work. Capped at `AUTOSPEC_RESUME_MAX_ATTEMPTS` (default 3).
+- Keywords: `autospec-resume`, `resume interrupted run`, `recover crashed run`, `continue after crash`
+
+### `autospec-rollover-status`
+- Path: [`skills/autospec-rollover-status`](skills/autospec-rollover-status)
+- Trigger: report current context % and the last rollover event for the active session monitor.
+- Keywords: `rollover status`, `context status`, `how close to rollover`, `is compaction imminent`
+
+### `autospec-loop`
+- Path: [`skills/autospec-loop`](skills/autospec-loop)
+- Trigger: run a single task repeatedly until a goal is reached. Freezes the request into a contract, then runs a goal-conditioned loop. Defers bare interval polling to native `/loop`.
+- Keywords: `autospec-loop`, `loop until the build passes`, `keep going until done`, `run X in a loop until Y`
+
+### `autospec-explore`
+- Path: [`skills/autospec-explore`](skills/autospec-explore)
+- Trigger: start a perpetual autonomous research + ship loop on an isolated sandbox branch — 7 researchers propose features from spec/code gaps, prior reports, codebase signals, open issues, source analysis, dependency health, and competitor research, then drain via `/autospec-run` with PRs targeting the sandbox branch (never `main`).
+- Keywords: `autospec-explore`, `explore and ship`, `autonomous research loop`, `discovery loop`
+
+## Adding a skill
+
+1. Create `skills/<skill-name>/SKILL.md`; keep the body concise and move large detail into `references/`.
+2. Add deterministic helpers under `scripts/` when repeated shell/API work is error-prone.
+3. Derive the `opencode/agent.md` and `codex/prompt.md` variants (lock-step) and regenerate goldens.
+4. Validate with `bash scripts/validate.sh`.
+5. Add the skill to the [`README.md`](README.md) catalog and to this index.

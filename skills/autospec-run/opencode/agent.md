@@ -608,7 +608,17 @@ inline label-swap path below.
 > labels=$(gh issue view <ISSUE> --json labels --jq '[.labels[].name] | join(",")')
 > ```
 >
-> - **If `labels` contains `autospec:v2-flow`** — load the prompt template from `skills/autospec-run/prompts/phase4-implementer.md` (relative to this skill's install location, or via `AUTOSPEC_SKILLS_DIR`/the harness's skill mount). That prompt embeds the absorbed-discipline path: expand → implement → finalize → peer-review (via `codex exec`) → evaluate-findings. Use it verbatim as the subagent prompt body.
+> - **If `labels` contains `autospec:v2-flow`** — load the prompt template from `skills/autospec-run/prompts/phase4-implementer.md` (relative to this skill's install location, or via `AUTOSPEC_SKILLS_DIR`/the harness's skill mount). That prompt embeds the absorbed-discipline path: expand → implement → finalize → peer-review (via `codex exec`) → evaluate-findings. **Wire the D3 cached prefix (spec Phase 2 child C):** do NOT send the `phase4-implementer.md` body alone — prepend the `gen-implementer-prompt.sh` static cached prefix so the default v2 path stops re-reading SKILL.md + AGENTS.md + the RULE_ID table uncached. Assemble the combined v2 prompt by passing the `phase4-implementer.md` body as the dynamic body that rides BELOW the cached prefix:
+>   ```bash
+>   # Reuse the single body fetch written at process(ISSUE) start (D5).
+>   v2_combined_prompt=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/gen-implementer-prompt.sh" \
+>     --issue-body "/tmp/issue-<ISSUE>-body.md" \
+>     --branch "<BRANCH>" \
+>     --issue-labels "<ISSUE_LABELS>" \
+>     --repo "<REPO>" \
+>     --body-file "skills/autospec-run/prompts/phase4-implementer.md")
+>   ```
+>   `gen-implementer-prompt.sh` emits the static cached prefix (framed by `<!-- CACHE BOUNDARY -->` markers, containing SKILL.md + AGENTS.md + RULE_ID table + tag-filtered saved-memory) first; the `phase4-implementer.md` body and the issue assignment ride below it as the dynamic suffix. Pass the prefix block (up to and including the closing `<!-- CACHE BOUNDARY -->`) with `cache_control: { type: "ephemeral" }` so Anthropic's prompt cache reuses it across dispatches in the same monitor session. This only changes prompt **assembly/caching** — the implementer's absorbed-discipline BEHAVIOR (every step in `phase4-implementer.md`) is unchanged.
 > - **Otherwise** — use the legacy inline prompt below (current behavior). Legacy path is retained until every pre-v2 issue has drained.
 >
 > Both paths share the same outer monitor loop (queue scan, lock-step compliance, label-based locking, heartbeat updates, post-process pickup). The selection only changes the inner subagent prompt body.
@@ -739,6 +749,20 @@ inline label-swap path below.
 >    ```
 >    <!-- worktree-ladder:end -->
 >    On the `open-pr` path the verification bar EQUALS fresh work — full tests + the standard review loop, never a blind merge. Cleanup is identical for every path: after the merge is confirmed (or on terminal failure), `git worktree remove` the linked worktree and `git worktree prune`; never delete un-pushed work before merge.
+> 1a. **Claim the edit surface (claim-guard), nested inside the issue claim.** After the `worktree-guard.sh assert` gate passes and BEFORE the first file edit, take a fine-grained lease on the skill(s)/paths this issue will touch so a concurrent session in another worktree cannot stomp the same trio+golden surface. This is the inner layer of the three-layer caller pattern (worktree-guard → claim-guard scan → claim-guard acquire); it composes with — and sits inside — the issue-level lease you already hold. Set `TARGETS` to the space-separated skill names and/or repo-relative paths the issue's **Files touched** lists.
+>    <!-- claim-guard-acquire:begin -->
+>    ```bash
+>    TARGETS="<space-separated skills/paths from the issue's Files touched>"
+>    bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert || exit $?
+>    bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh scan $TARGETS || true
+>    if ! AUTOSPEC_CLAIM_GUARD=strict bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh acquire $TARGETS; then
+>      gh issue comment <ISSUE> --body "claim-guard acquire conflict (see code_health:claim_conflict identifier above); another live session owns this edit surface — restoring auto-implement"
+>      gh issue edit <ISSUE> --remove-label in-progress-by-bot --add-label auto-implement
+>      exit 6
+>    fi
+>    ```
+>    <!-- claim-guard-acquire:end -->
+>    `scan` is advisory (it warns on overlapping open PRs / worktrees / live claims but never blocks); `acquire` is all-or-nothing and exits `6` on `claim_conflict`. Hold this lease across the whole edit+test+PR step. **Refresh rides the existing heartbeat tick** — at each heartbeat write also run `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh refresh` (no new loop) so a slow-but-live editor is never reclaimed. **Release on PR open**: immediately after `gh pr create` succeeds, run `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh release $TARGETS` (the lease has served its purpose once the work is captured in a PR). `AUTOSPEC_CLAIM_GUARD=off` or an unwritable store degrades the whole block to a no-op and NEVER blocks the issue.
 > 2. TDD per AGENTS.md: failing test first → implement → refactor → commit. NO DB/external mocks. Follow file paths and signatures from the issue body verbatim.
 > 3. **Full test suite gate.** Run the target repo's full validation/test suite, not only the Primary smoke test. Command resolution order:
 >    1. If `AUTOSPEC_FULL_TEST_COMMAND` is set, run `bash -lc "$AUTOSPEC_FULL_TEST_COMMAND"`.
@@ -874,7 +898,7 @@ inline label-swap path below.
 >      exit 0
 >    fi
 >    ```
-> 6. PR: gh pr create --base main --head <BRANCH> --title "<TITLE>" --body "Closes #<ISSUE>\n\n<summary>". Capture PR.
+> 6. PR: gh pr create --base main --head <BRANCH> --title "<TITLE>" --body "Closes #<ISSUE>\n\n<summary>". Capture PR. Immediately after the PR opens, release the claim-guard lease taken in step 1a: `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh release $TARGETS`.
 >    After the LLM subagent returns, record telemetry (tokens JSON written by the harness to `.autospec/tokens-<ISSUE>.json` if present):
 >    ```bash
 >    if [ -f ".autospec/tokens-<ISSUE>.json" ]; then
@@ -1159,7 +1183,18 @@ rm -f "$HOME/.autospec/gap-round-state.json"   # fresh window per run
 
 Loop (`round = 1 … MAX`):
 
-1. **Broad review** (Tier A): run `/autospec-review --remediation --since "${BATCH_START_DATE}" --emit-gaps "${GAPS_FILE}"`. On review failure, log a warning, treat as 0 survivors, and fall back to the final report (never block run completion).
+1. **Broad review** (Tier A): run the broad-review pass with a round-scoped `--since` window (spec Phase 2 child E):
+
+   ```bash
+   if [ "${round}" -ge 2 ] && [ -n "${GAP_ROUND_SINCE:-}" ]; then
+     REVIEW_SINCE="${GAP_ROUND_SINCE}"   # round ≥2: only the gap PRs filed by the prior round
+   else
+     REVIEW_SINCE="${BATCH_START_DATE}"  # round 1: full batch window
+   fi
+   /autospec-review --remediation --since "${REVIEW_SINCE}" --emit-gaps "${GAPS_FILE}"
+   ```
+
+   **Round 1** keeps the full `BATCH_START_DATE` batch window — this preserves the per-PR-LGTM-misses-integration value (the broad pass catches cross-PR integration gaps the per-PR LGTMs missed). **Round ≥2** scopes `--since` to ONLY the newly-filed gap PRs from the prior round (`GAP_ROUND_SINCE`, the timestamp captured just before the prior round's gap PRs began merging — see step 4), so the re-review doesn't re-scan the entire already-reviewed batch, only the freshly-shipped gap remediations. On review failure, log a warning, treat as 0 survivors, and fall back to the final report (never block run completion).
 1b. **Docs-completeness dimension** (spec §D6 row 2 — runs only on round 1, after the broad review emits `${GAPS_FILE}`): the gap-remediation review also audits documentation completeness for the work shipped during this batch window. Every feature shipped in the window (scoped by `run-batch-start.sh --read`) must have a page for every configured audience (the `documentation.audiences` from #917's doc config), and there must be no outstanding `visual_stale` / `example_stale` drift signals (`check-doc-drift.sh`). Run the deterministic helper and **append** its gaps onto the existing `${GAPS_FILE}` so they file, dedupe, and converge through the SAME gap-remediation machinery used in step 2 (do NOT build a parallel loop):
 
    ```bash
@@ -1205,7 +1240,11 @@ Loop (`round = 1 … MAX`):
 
    The driver prints `gap-remediation: survivors=<N> filed=<N> round=<N>`. Capture `<N>` survivors.
 3. **Converge:** if `survivors == 0`, break — the run is clean.
-4. **Drain:** otherwise re-enter the Phase 4 background monitor (opus, `batch=1`) and run it until the freshly-filed `gap-remediation` issues drain (same monitor batch-exit discipline as the main run). `gap-remediation`-labelled issues are recognizable so a later round does not re-flag freshly-fixed work.
+4. **Drain:** otherwise capture the gap-window watermark, then re-enter the Phase 4 background monitor (opus, `batch=1`) and run it until the freshly-filed `gap-remediation` issues drain (same monitor batch-exit discipline as the main run). `gap-remediation`-labelled issues are recognizable so a later round does not re-flag freshly-fixed work. Capture the watermark BEFORE the gap PRs merge so the next round's broad review (step 1) scopes `--since` to only these gap PRs (spec Phase 2 child E):
+
+   ```bash
+   GAP_ROUND_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # next round scopes --since to gap PRs filed here onward
+   ```
 5. Increment `round`. The driver also enforces `AUTOSPEC_GAP_MAX_ROUNDS` internally (it refuses to file once the round-state hits the cap), so the loop never spins.
 
 **Termination guarantees:** convergence (0 survivors) ends the loop immediately; the `dedupe_key` prevents re-filing the same gap across rounds; the hard cap `AUTOSPEC_GAP_MAX_ROUNDS` (default 2) stops the loop and surfaces any remainder to the operator.

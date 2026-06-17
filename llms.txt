@@ -1,4 +1,4 @@
-# wt-feat-autospec-docs-phase10c
+# autospec
 
 ## Summary
 
@@ -9,6 +9,8 @@ tracked, reviewable, and explainable software changes.
 
 ## Key Documentation
 
+- docs/USER_MANUAL.md
+- docs/API_REFERENCE.md
 - docs/ARCHITECTURE.md
 
 ## Design Specifications

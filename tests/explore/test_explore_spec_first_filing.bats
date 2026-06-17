@@ -1,0 +1,204 @@
+#!/usr/bin/env bats
+# tests/explore/test_explore_spec_first_filing.bats
+#
+# Issue #1102 — spec-first filing loop in scripts/autospec-explore.sh.
+# Asserts the per-round filing path: render round spec → commit + push to the
+# sandbox branch BEFORE decomposition → decompose via /autospec-define
+# --base <sandbox>. No mocks of git; we exercise the real filing function in
+# isolation against a throwaway git repo with a stubbed define handoff.
+
+setup() {
+    REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+    ORCH="$REPO_ROOT/scripts/autospec-explore.sh"
+    TMP="$(mktemp -d -t spec-first.XXXXXX)"
+
+    # A throwaway git repo standing in for the sandbox working tree.
+    cd "$TMP"
+    git init -q
+    git config user.email t@t.t
+    git config user.name t
+    git checkout -q -b sandbox/explore-demo
+    mkdir -p docs/specs .autospec
+    echo "seed" > seed.txt
+    git add seed.txt
+    git commit -qm seed
+    # A bare "remote" so push has somewhere to go.
+    git init -q --bare "$TMP/remote.git"
+    git remote add origin "$TMP/remote.git"
+    git push -q origin sandbox/explore-demo
+
+    # Ranked-proposals fixture for the renderer.
+    cat > .autospec/proposals.json <<'EOF'
+{
+  "proposals": [
+    {
+      "title": "feat: add retry to loop",
+      "evidence": "scripts/autospec-explore.sh:42",
+      "estimated_complexity": "small",
+      "confidence": 0.9,
+      "source": "spec-vs-code",
+      "severity": "correctness",
+      "named_consumer": "autospec-run"
+    }
+  ]
+}
+EOF
+}
+
+teardown() {
+    cd /
+    rm -rf "$TMP"
+}
+
+# Extract the spec-first filing function from the orchestrator and run it in a
+# minimal harness with the surrounding loop variables faked.
+_run_filing() {
+    # shellcheck disable=SC1090
+    cat > "$TMP/driver.sh" <<DRIVER
+set -u
+SCRIPT_DIR="$REPO_ROOT/scripts"
+SANDBOX_BRANCH="sandbox/explore-demo"
+RESEARCH_SOURCES="spec-vs-code"
+iter=1
+research_json="$TMP/.autospec/proposals.json"
+iter_dir="$TMP/.autospec"
+proposals_count=1
+issues_filed=0
+filed_issue_nums=""
+_ledger_append() { :; }
+_ledger_normalize_title() { printf '%s' "\$1"; }
+LEDGER_BIN=""
+# Source ONLY the spec-first filing function out of the orchestrator.
+$(awk '/^# >>> explore-spec-first-filing >>>/,/^# <<< explore-spec-first-filing <<</' "$ORCH")
+_explore_file_round
+DRIVER
+    AUTOSPEC_EXPLORE_ROUND_DEFINE_CMD="$DEFINE_CMD" bash "$TMP/driver.sh"
+}
+
+@test "renders + commits the round spec to the sandbox BEFORE decomposing" {
+    # Define handoff that asserts the spec is already committed when it runs.
+    DEFINE_CMD='git -C '"$TMP"' cat-file -e sandbox/explore-demo:docs/specs/$(ls '"$TMP"'/docs/specs | head -1) >/dev/null 2>&1 || git rev-parse HEAD >/dev/null; exit 0'
+    run _run_filing
+    [ "$status" -eq 0 ]
+    # A round spec was written under docs/specs.
+    ls "$TMP"/docs/specs/*-round-1-design.md >/dev/null 2>&1
+    # And committed to the sandbox branch (exists in the tree at HEAD).
+    run git -C "$TMP" log --oneline -1 --name-only
+    [[ "$output" == *"docs/specs/"*"-round-1-design.md"* ]]
+}
+
+@test "pushes the round spec commit to origin/sandbox before filing" {
+    DEFINE_CMD='exit 0'
+    run _run_filing
+    [ "$status" -eq 0 ]
+    # origin sandbox branch now contains the round spec.
+    run git -C "$TMP" ls-tree -r --name-only origin/sandbox/explore-demo
+    [[ "$output" == *"docs/specs/"*"-round-1-design.md"* ]]
+}
+
+@test "decompose handoff is invoked with --base <sandbox>" {
+    DEFINE_CMD='echo "$AUTOSPEC_DEFINE_ARGS" > '"$TMP"'/define-args.txt; exit 0'
+    run _run_filing
+    [ "$status" -eq 0 ]
+    run cat "$TMP/define-args.txt"
+    [[ "$output" == *"--base sandbox/explore-demo"* ]]
+    [[ "$output" == *"-round-1-design.md"* ]]
+}
+
+@test "never targets main: the define args carry the sandbox base, not main" {
+    DEFINE_CMD='echo "$AUTOSPEC_DEFINE_ARGS" > '"$TMP"'/define-args.txt; exit 0'
+    run _run_filing
+    [ "$status" -eq 0 ]
+    run cat "$TMP/define-args.txt"
+    [[ "$output" != *"--base main"* ]]
+}
+
+# ── issues_filed / filed_issue_nums on the success path (#1109) ──────────────
+
+# _run_filing_with_counter: like _run_filing but prints issues_filed and
+# filed_issue_nums after the call so tests can assert them.
+_run_filing_with_counter() {
+    cat > "$TMP/driver_counter.sh" <<DRIVER
+set -u
+SCRIPT_DIR="$REPO_ROOT/scripts"
+SANDBOX_BRANCH="sandbox/explore-demo"
+RESEARCH_SOURCES="spec-vs-code"
+iter=1
+research_json="$TMP/.autospec/proposals.json"
+iter_dir="$TMP/.autospec"
+proposals_count=1
+issues_filed=0
+filed_issue_nums=""
+_ledger_append() { :; }
+_ledger_normalize_title() { printf '%s' "\$1"; }
+LEDGER_BIN=""
+$(awk '/^# >>> explore-spec-first-filing >>>/,/^# <<< explore-spec-first-filing <<</' "$ORCH")
+_explore_file_round
+printf 'issues_filed=%s\n' "\$issues_filed"
+printf 'filed_issue_nums=%s\n' "\$filed_issue_nums"
+DRIVER
+    AUTOSPEC_EXPLORE_ROUND_DEFINE_CMD="$DEFINE_CMD" bash "$TMP/driver_counter.sh"
+}
+
+@test "success path: issues_filed reflects issues created by define handoff" {
+    # gh stub: list returns 101 before, 101+102 after define runs
+    local call_count_file="$TMP/gh_calls"
+    printf '0' > "$call_count_file"
+    mkdir -p "$TMP/bin"
+    cat > "$TMP/bin/gh" <<GHSTUB
+#!/usr/bin/env bash
+if [ "\$1" = "issue" ] && [ "\$2" = "list" ]; then
+    n=\$(cat "$call_count_file" 2>/dev/null || echo 0)
+    n=\$((n + 1))
+    printf '%s' "\$n" > "$call_count_file"
+    if [ "\$n" -le 1 ]; then
+        # pre-snapshot: one existing issue
+        printf '101\n'
+    else
+        # post-snapshot: two issues — 102 is new
+        printf '101\n102\n'
+    fi
+    exit 0
+fi
+exit 0
+GHSTUB
+    chmod +x "$TMP/bin/gh"
+    export PATH="$TMP/bin:$PATH"
+
+    DEFINE_CMD='exit 0'
+    run _run_filing_with_counter
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [[ "$output" == *"issues_filed=1"* ]]
+    [[ "$output" == *"filed_issue_nums="*"102"* ]]
+}
+
+@test "success path: no double-count when define files zero new issues" {
+    mkdir -p "$TMP/bin"
+    cat > "$TMP/bin/gh" <<'GHSTUB'
+#!/usr/bin/env bash
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+    # same set before and after — nothing new
+    printf '101\n'
+    exit 0
+fi
+exit 0
+GHSTUB
+    chmod +x "$TMP/bin/gh"
+    export PATH="$TMP/bin:$PATH"
+
+    DEFINE_CMD='exit 0'
+    run _run_filing_with_counter
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [[ "$output" == *"issues_filed=0"* ]]
+}
+
+@test "success path: gh absent — issues_filed stays 0 (no error)" {
+    # Remove gh from PATH entirely for this test.
+    local saved_path="$PATH"
+    export PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v "$TMP/bin" | paste -sd: -)"
+    DEFINE_CMD='exit 0'
+    run _run_filing_with_counter
+    export PATH="$saved_path"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [[ "$output" == *"issues_filed=0"* ]]
+}
