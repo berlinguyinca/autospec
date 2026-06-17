@@ -18,6 +18,7 @@
 //   FOLDER_CONTRACT   — the approved folder-contract constants (object, read-only)
 
 import fs from 'node:fs';
+import path from 'node:path';
 
 // ── Default audiences (spec §D2; shared-contracts block pinned 2026-06-03) ────
 
@@ -343,6 +344,73 @@ export function normalizeFeature(feature) {
   return feature;
 }
 
+// ── resolveFeatures ─────────────────────────────────────────────────────────────
+//
+// Resolve the feature inventory the audience-doc generator needs, deterministically,
+// in priority order:
+//   1. config.documentation.features  — inline array in autospec.yml.
+//   2. config.documentation.features_file — JSON file relative to projRoot (if set).
+//   3. default <projRoot>/.autospec/doc-features.json — if it exists.
+//   4. else []  — no features (only base index/getting-started pages render).
+//
+// JSON files may be either `{ "features": [...] }` or a bare top-level array.
+// Every resolved feature is passed through normalizeFeature so the six LLM fields
+// are empty-safe; unknown rich fields (summary/spec_sections/data_model/per-audience
+// maps/…) are preserved verbatim.
+
+function readFeaturesJson(file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === 'object' && Array.isArray(parsed.features)) return parsed.features;
+  return [];
+}
+
+/**
+ * resolveFeatures(config, projRoot) → Array<object>
+ *
+ * @param {object} config   The object returned by loadConfig (carries .documentation).
+ * @param {string} projRoot Project root used to resolve features_file / default JSON.
+ * @returns {object[]}      Normalised feature objects (possibly empty).
+ */
+export function resolveFeatures(config = {}, projRoot = process.cwd()) {
+  const doc = (config && typeof config.documentation === 'object' && config.documentation !== null)
+    ? config.documentation : {};
+
+  // 1. Inline array.
+  if (Array.isArray(doc.features)) {
+    return doc.features.map(normalizeFeature);
+  }
+
+  // 2. Explicit features_file (relative to projRoot).
+  if (doc.features_file != null && String(doc.features_file).trim() !== '') {
+    const file = path.resolve(projRoot, String(doc.features_file));
+    const feats = readFeaturesJson(file);
+    if (feats !== null) return feats.map(normalizeFeature);
+    return [];
+  }
+
+  // 3. Default <projRoot>/.autospec/doc-features.json.
+  const defaultFile = path.join(projRoot, '.autospec', 'doc-features.json');
+  if (fs.existsSync(defaultFile)) {
+    const feats = readFeaturesJson(defaultFile);
+    if (feats !== null) return feats.map(normalizeFeature);
+  }
+
+  // 4. No features.
+  return [];
+}
+
 // ── loadConfig ─────────────────────────────────────────────────────────────────
 
 /**
@@ -409,6 +477,9 @@ export function loadConfig(configPath) {
   const documentation = {
     auto_regenerate: (docRaw.auto_regenerate != null) ? Boolean(docRaw.auto_regenerate) : false,
   };
+  // Feature-inventory inputs for resolveFeatures (preserved verbatim when present).
+  if (Array.isArray(doc.features)) documentation.features = doc.features;
+  if (doc.features_file != null) documentation.features_file = doc.features_file;
 
   return { audiences, style, examples, documentation };
 }

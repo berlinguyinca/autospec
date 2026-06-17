@@ -254,3 +254,83 @@ SH
   # full output must NOT contain "no changed scopes" (that's incremental-only messaging)
   [[ "$output" != *"no changed scopes"* ]]
 }
+
+# ── Generation wiring (issue #918/#923) ────────────────────────────────────────
+
+# Seed a documentation config with the four default audiences plus a 1-feature
+# inventory file. Generation must write into the TEMP project, never the repo.
+seed_gen_config() {
+  mkdir -p .autospec
+  cat > .autospec/autospec.yml <<'EOF'
+documentation:
+  audiences:
+    - {name: user, path: docs/user, focus: "tasks"}
+    - {name: developer, path: docs/developer, focus: "architecture"}
+EOF
+  cat > .autospec/doc-features.json <<'EOF'
+{
+  "features": [
+    {
+      "slug": "export-pipeline",
+      "title": "Export Pipeline",
+      "summary": {
+        "user": "Export your data to CSV.",
+        "developer": "Streaming export pipeline with backpressure."
+      },
+      "spec_sections": ["Configure the destination.", "Trigger the export."]
+    }
+  ]
+}
+EOF
+}
+
+@test "--full writes audience feature pages into the project (not the repo)" {
+  # Record the autospec repo state so we can prove no pollution.
+  REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
+  before_repo="$(cd "$REPO_ROOT" && git status --porcelain)"
+
+  seed_gen_config
+  run node "$ORCH" --full
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"full:"* ]]
+
+  # Pages were written into the TEMP project under docs/<audience>/features/.
+  [ -f docs/user/features/export-pipeline.md ]
+  [ -f docs/developer/features/export-pipeline.md ]
+  [ -s docs/user/features/export-pipeline.md ]
+  [ -s docs/developer/features/export-pipeline.md ]
+  grep -q 'autospec-doc-scope' docs/user/features/export-pipeline.md
+
+  # The autospec repo must be byte-for-byte unchanged (projectRoot() guard).
+  after_repo="$(cd "$REPO_ROOT" && git status --porcelain)"
+  [ "$before_repo" == "$after_repo" ]
+}
+
+@test "--audit writes nothing and reports audit:" {
+  seed_gen_config
+  # Snapshot the temp tree.
+  snapshot_before="$(find . -type f | sort; find . -type f -exec shasum {} \; | sort)"
+  run node "$ORCH" --audit
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"audit:"* ]]
+  snapshot_after="$(find . -type f | sort; find . -type f -exec shasum {} \; | sort)"
+  [ "$snapshot_before" == "$snapshot_after" ]
+}
+
+@test "--audience developer generates only developer pages" {
+  seed_gen_config
+  run node "$ORCH" --audience developer
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"audience:"* ]]
+  [ -d docs/developer ]
+  [ -f docs/developer/features/export-pipeline.md ]
+  # The user audience must NOT have been generated.
+  [ ! -d docs/user ]
+}
+
+@test "--audience with an unknown name exits nonzero" {
+  seed_gen_config
+  run node "$ORCH" --audience nonsense
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a known audience"* ]]
+}
