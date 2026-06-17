@@ -220,6 +220,32 @@ check_required_files() {
     done
 }
 
+# Derive-trio drift gate (trio-derivation Phase 2, decomposition children C+E).
+# This ADOPTS scripts/derive-trio.sh --check as the canonical trio-drift
+# mechanism: for every multi-harness skill under skills/, the committed
+# codex/prompt.md and opencode/agent.md mirrors must be byte-identical to what
+# derive-trio regenerates from SKILL.md. check_lockstep (the byte-diff above)
+# stays as the low-level invariant; this is its derive-aware companion that, on
+# drift, emits the actionable single-command fix:
+#   run: scripts/derive-trio.sh --in-place skills/<name> && scripts/gen-skill-goldens.sh <name>
+# (re-derive the mirrors, then regenerate the skill-golden sha256s).
+#
+# Since --check already passes universally today, this gate is a no-op on a
+# clean tree; it makes derive-trio canonical going forward (no trio FILE changes
+# are part of this adoption). Uses the trio-discovery convention (SKILL.md +
+# opencode/agent.md + codex/prompt.md), matching discover_skills.
+check_derive_trio_consistency() {
+    info "derive-trio --check (canonical trio-drift gate)"
+    derive="scripts/derive-trio.sh"
+    [ -f "$derive" ] || fail "$derive: missing (trio-derivation Phase 1 must be merged first)"
+    for skill_dir in $(discover_skills); do
+        name="$(basename "$skill_dir")"
+        if ! bash "$derive" "$skill_dir" --check; then
+            fail "$name: trio mirrors drift from SKILL.md — run: $derive --in-place $skill_dir && scripts/gen-skill-goldens.sh $name"
+        fi
+    done
+}
+
 # Stop mode invariants (introduced by the autospec-stop mechanism): every
 # multi-harness skill trio must carry a `## Stop mode` heading in all three
 # trio files (SKILL.md, opencode/agent.md, codex/prompt.md). Parallels
@@ -2714,6 +2740,7 @@ main() {
     check_define_spec_worktree_routing
     check_token_baseline_fresh
     check_block_expansion
+    check_derive_trio_consistency
     check_claim_guard_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
