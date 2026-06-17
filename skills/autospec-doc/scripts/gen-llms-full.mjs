@@ -118,22 +118,48 @@ export function generateLlmsFull({ pages = [] } = {}) {
 }
 
 /**
- * Fill modules, concepts, and faq in a manifest object from page content.
- * Non-destructive: existing entries are kept; duplicates skipped.
+ * Approximate token count for a string using the 4-chars/token heuristic.
+ * @param {string} text
+ * @returns {number}
+ */
+function approxTokens(text) {
+  return Math.max(1, Math.round((text || '').length / 4));
+}
+
+/**
+ * Fill modules, concepts, cli_entry_points, and faq in a manifest object from
+ * page content.  Non-destructive: existing entries are kept; duplicates skipped.
  *
  * Extraction rules:
- *   modules  — one entry per page, path = page.path, summary = first H1 heading
- *   concepts — <!-- autospec-concept: <name> --> markers; next non-empty line = definition
- *   faq      — ### Q: <question> / next non-empty line = answer
+ *   modules          — one entry per page; name = H1 text; summary = first
+ *                      non-heading paragraph line; public_api = backtick
+ *                      command/function tokens on lines inside ## CLI / ## API
+ *                      sections; doc = page.path; source_anchor = "<path>#L1";
+ *                      approx_tokens = chars/4 heuristic on full page content.
+ *   cli_entry_points — slash-command tokens (`/word-word`) found anywhere in
+ *                      the page, deduplicated.
+ *   concepts         — <!-- autospec-concept: <name> --> markers; next
+ *                      non-empty line = definition; source_anchor = line ref;
+ *                      approx_tokens = definition char/4; literal "<name>"
+ *                      placeholder is ALWAYS skipped.
+ *   faq              — ### Q: <question> / next non-empty line = answer.
  *
- * @param {object} manifest - object with modules, concepts, faq arrays (mutated in place)
+ * @param {object} manifest - object with modules, cli_entry_points, concepts,
+ *                            faq arrays (mutated in place)
  * @param {Array<{ path: string, content: string }>} pages
  * @returns {void}
  */
 export function fillManifest(manifest, pages = []) {
-  const existingModPaths   = new Set((manifest.modules  || []).map(m => m.path));
-  const existingConceptNames = new Set((manifest.concepts || []).map(c => c.name));
-  const existingFaqQs      = new Set((manifest.faq      || []).map(f => f.question));
+  if (!Array.isArray(manifest.modules))         manifest.modules = [];
+  if (!Array.isArray(manifest.cli_entry_points)) manifest.cli_entry_points = [];
+  if (!Array.isArray(manifest.concepts))         manifest.concepts = [];
+  if (!Array.isArray(manifest.faq))              manifest.faq = [];
+
+  const existingModPaths     = new Set(manifest.modules.map(m => m.path || m.doc));
+  const existingConceptNames = new Set(manifest.concepts.map(c => c.name));
+  const existingFaqQs        = new Set(manifest.faq.map(f => f.question));
+  const existingCliCmds      = new Set(manifest.cli_entry_points.map(e =>
+    typeof e === 'string' ? e : e.command));
 
   for (const page of pages) {
     const content = page.content || '';
@@ -141,10 +167,60 @@ export function fillManifest(manifest, pages = []) {
 
     // ── modules: one entry per page keyed by path ────────────────────────────
     if (!existingModPaths.has(page.path)) {
-      const h1 = lines.find(l => /^#\s+/.test(l));
-      const summary = h1 ? h1.replace(/^#+\s+/, '').trim() : path.basename(page.path, '.md');
-      manifest.modules.push({ path: page.path, summary, public_api: [], depends_on: [] });
+      // name = first H1 text (strip leading #s)
+      const h1Line  = lines.find(l => /^#\s+/.test(l));
+      const name    = h1Line ? h1Line.replace(/^#+\s+/, '').trim()
+                             : path.basename(page.path, '.md');
+
+      // summary = first non-empty, non-heading line after the H1
+      let summary = name;
+      let pastH1 = !h1Line; // if no H1, start scanning from line 0
+      for (const ln of lines) {
+        if (!pastH1) { if (/^#\s+/.test(ln)) { pastH1 = true; } continue; }
+        const t = ln.trim();
+        if (t && !/^#+\s/.test(t) && !t.startsWith('<!--')) {
+          summary = t;
+          break;
+        }
+      }
+
+      // public_api = backtick tokens from ## CLI / ## API sub-sections
+      const public_api = [];
+      let inApiSection = false;
+      for (const ln of lines) {
+        if (/^##\s+(CLI|API|Public API|Commands)/i.test(ln)) {
+          inApiSection = true;
+          continue;
+        }
+        if (/^##\s+/.test(ln)) { inApiSection = false; continue; }
+        if (!inApiSection) continue;
+        // extract all `token` spans
+        const ticks = [...ln.matchAll(/`([^`]+)`/g)].map(m2 => m2[1]);
+        for (const tok of ticks) {
+          if (!public_api.includes(tok)) public_api.push(tok);
+        }
+      }
+
+      manifest.modules.push({
+        name,
+        summary,
+        public_api,
+        doc:           page.path,
+        path:          page.path,
+        source_anchor: `${page.path}#L1`,
+        approx_tokens: approxTokens(content),
+      });
       existingModPaths.add(page.path);
+    }
+
+    // ── cli_entry_points: /slash-command tokens anywhere in page ─────────────
+    const slashCmds = [...content.matchAll(/`(\/[\w-]+(?:\s+[\w-]+)?)`/g)]
+      .map(m2 => m2[1]);
+    for (const cmd of slashCmds) {
+      if (!existingCliCmds.has(cmd)) {
+        manifest.cli_entry_points.push(cmd);
+        existingCliCmds.add(cmd);
+      }
     }
 
     // ── concepts: <!-- autospec-concept: <name> --> ──────────────────────────
@@ -152,6 +228,8 @@ export function fillManifest(manifest, pages = []) {
       const m = lines[i].match(/<!--\s*autospec-concept:\s*(.+?)\s*-->/);
       if (!m) continue;
       const name = m[1].trim();
+      // Skip the literal template placeholder "<name>"
+      if (name === '<name>') continue;
       if (existingConceptNames.has(name)) continue;
       // Definition is the next non-empty line after the marker.
       let definition = '';
@@ -159,7 +237,12 @@ export function fillManifest(manifest, pages = []) {
         const def = lines[j].trim();
         if (def) { definition = def; break; }
       }
-      manifest.concepts.push({ name, definition, source_anchor: `${page.path}#L${i + 1}` });
+      manifest.concepts.push({
+        name,
+        definition,
+        source_anchor: `${page.path}#L${i + 1}`,
+        approx_tokens: approxTokens(definition),
+      });
       existingConceptNames.add(name);
     }
 
