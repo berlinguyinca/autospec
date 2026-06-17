@@ -312,3 +312,139 @@ test('CLI exits 0 and rewrites the file on a passing-example fixture (fake-pass)
   assert.match(out, /```output/);
   assert.match(out, /example-verified:/);
 });
+
+// ── Track C: gen-audience-docs examples[] emission + llms-full.txt survival ───
+// Issue #1133: gen-audience-docs.mjs must emit <!-- example --> fenced blocks
+// from feature.examples[]; the output block and verified marker must survive
+// generateLlmsFull concatenation unaltered.
+
+import { generateLlmsFull } from '../scripts/gen-llms-full.mjs';
+// generateAudienceDocs is the entry point for Track A+C together
+const { generateAudienceDocs } = await import(
+  path.resolve(__dirname, '../scripts/gen-audience-docs.mjs')
+);
+// EXAMPLE_TAG is already destructured from MOD above; no re-import needed.
+
+// Minimal audience fixture for Track C tests
+const TRACK_C_AUDIENCE = [
+  { name: 'developer', path: 'docs/developer', focus: 'APIs, architecture, extending' },
+];
+
+// Feature with an examples[] array — the new Track C field
+const FEATURE_WITH_EXAMPLES = {
+  slug: 'greet',
+  title: 'Greeter',
+  summary: 'Emits a greeting.',
+  spec_sections: [],
+  code_entry_points: [],
+  examples: [
+    { lang: 'bash', command: 'echo hello-world' },
+    { lang: 'bash', command: 'echo second-example' },
+  ],
+};
+
+// Feature with no examples[] — backward compat must be unaffected
+const FEATURE_NO_EXAMPLES = {
+  slug: 'plain',
+  title: 'Plain feature',
+  summary: 'No examples.',
+  spec_sections: [],
+  code_entry_points: [],
+};
+
+test('Track C: gen-audience-docs emits <!-- example --> blocks for each feature.examples[] entry', async () => {
+  const result = await generateAudienceDocs({
+    features: [FEATURE_WITH_EXAMPLES],
+    audiences: TRACK_C_AUDIENCE,
+  });
+  // The feature page should contain EXAMPLE_TAG for each entry
+  const featurePage = result.files.find(f => f.path.includes('features/greet.md'));
+  assert.ok(featurePage, 'feature page greet.md must be generated');
+  const tagCount = (featurePage.content.match(/<!-- example -->/g) || []).length;
+  assert.strictEqual(tagCount, 2, 'one <!-- example --> tag per examples[] entry');
+  // Each command should appear in a fenced block after the tag
+  assert.match(featurePage.content, /<!-- example -->\n```bash\necho hello-world\n```/);
+  assert.match(featurePage.content, /<!-- example -->\n```bash\necho second-example\n```/);
+});
+
+test('Track C: feature with no examples[] emits no <!-- example --> blocks (backward compat)', async () => {
+  const result = await generateAudienceDocs({
+    features: [FEATURE_NO_EXAMPLES],
+    audiences: TRACK_C_AUDIENCE,
+  });
+  const featurePage = result.files.find(f => f.path.includes('features/plain.md'));
+  assert.ok(featurePage, 'feature page plain.md must be generated');
+  assert.doesNotMatch(featurePage.content, /<!-- example -->/,
+    'no example tag when examples[] is absent');
+});
+
+test('Track C: output block and example-verified marker survive generateLlmsFull concatenation', () => {
+  // Build a page that already has a verified example (simulate post-verify-examples state)
+  const verifiedPage = [
+    '# Greeter (developer)',
+    '',
+    '<!-- example -->',
+    '```bash',
+    'echo hello-world',
+    '```',
+    '<!-- example-verified: deadbeef 2026-06-16 -->',
+    '',
+    '```output',
+    'hello-world',
+    '```',
+    '',
+  ].join('\n');
+
+  const llmsFull = generateLlmsFull({
+    pages: [{ audience: 'developer', feature: 'greet', path: 'docs/developer/features/greet.md', content: verifiedPage }],
+  });
+
+  // The marker must survive intact
+  assert.match(llmsFull, /<!-- example-verified: deadbeef 2026-06-16 -->/,
+    'example-verified marker must survive llms-full concat');
+  // The output block must survive intact
+  assert.match(llmsFull, /```output\nhello-world\n```/,
+    'output fence block must survive llms-full concat');
+  // The example tag must survive intact
+  assert.match(llmsFull, /<!-- example -->/,
+    '<!-- example --> tag must survive llms-full concat');
+});
+
+test('Track C: end-to-end — example in gen-audience-docs page + verify + llms-full survival', async () => {
+  // 1. Generate the docs page with examples
+  const result = await generateAudienceDocs({
+    features: [FEATURE_WITH_EXAMPLES],
+    audiences: TRACK_C_AUDIENCE,
+  });
+  const featurePage = result.files.find(f => f.path.includes('features/greet.md'));
+  assert.ok(featurePage, 'feature page must exist');
+
+  // 2. Run verifyExamples with a fake executor (no real sandbox needed)
+  const fakeExec = async ({ command }) => ({
+    stdout: `${command}-output\n`,
+    stderr: '',
+    code: 0,
+  });
+  const verified = await verifyExamples({
+    content: featurePage.content,
+    headSha: 'cafe1234',
+    isoDate: '2026-06-16',
+    exec: fakeExec,
+  });
+  assert.strictEqual(verified.failed.length, 0, 'no failures from fake executor');
+  assert.ok(verified.verified >= 1, 'at least one example verified');
+  // Marker must be in the stamped page
+  assert.match(verified.content, /<!-- example-verified: cafe1234 2026-06-16 -->/,
+    'marker must appear in verified page content');
+  // Output block must be in the stamped page
+  assert.match(verified.content, /```output/, 'output block must appear in verified page');
+
+  // 3. Concatenate via generateLlmsFull and confirm marker/output survive
+  const llmsFull = generateLlmsFull({
+    pages: [{ audience: 'developer', feature: 'greet', path: featurePage.path, content: verified.content }],
+  });
+  assert.match(llmsFull, /<!-- example-verified: cafe1234 2026-06-16 -->/,
+    'marker must survive into llms-full.txt');
+  assert.match(llmsFull, /```output/,
+    'output block must survive into llms-full.txt');
+});
