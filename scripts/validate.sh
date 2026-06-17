@@ -39,19 +39,45 @@ bats() {
 SCOPED=0
 CHANGED_BASE="origin/main"
 _expect_since=0
+# ── Parallel mode (issue #1123) ──────────────────────────────────────────────
+# `--jobs N` runs the INDEPENDENT per-skill checks in a bounded background-worker
+# pool (concurrency cap N), each worker writing to its OWN temp file; the driver
+# collects and prints worker output DETERMINISTICALLY (sorted by skill name) so
+# the verdict and the failure stream are identical regardless of completion
+# order. `--jobs auto` / bare `--jobs` ⇒ CPU-2 (floor 1). Absent (or `--jobs 1`)
+# ⇒ JOBS=1 ⇒ the existing fully-serial per-skill loop runs UNCHANGED, keeping
+# bare `validate.sh` byte-for-byte identical (the merge gate). Composes with
+# `--changed`: only the selected (affected) skills enter the pool.
+JOBS=1
+_expect_jobs=0
 for _arg in "$@"; do
     case "$_arg" in
         --no-bats|--fast) RUN_BATS=0 ;;
         --changed) SCOPED=1 ;;
         --changed=*) SCOPED=1; CHANGED_BASE="${_arg#--changed=}" ;;
         --since) SCOPED=1; _expect_since=1 ;;
+        --jobs) _expect_jobs=1 ;;
+        --jobs=*) JOBS="${_arg#--jobs=}" ;;
         *)
             if [ "$_expect_since" = 1 ]; then
                 CHANGED_BASE="$_arg"; _expect_since=0
+            elif [ "$_expect_jobs" = 1 ]; then
+                JOBS="$_arg"; _expect_jobs=0
             fi
             ;;
     esac
 done
+# Bare `--jobs` with no following value ⇒ auto.
+if [ "$_expect_jobs" = 1 ]; then JOBS="auto"; fi
+# Resolve `auto` ⇒ CPU-2 (floor 1); validate N is a positive integer else floor 1.
+if [ "$JOBS" = "auto" ]; then
+    _cpu="$( (getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 2) )"
+    case "$_cpu" in ''|*[!0-9]*) _cpu=2 ;; esac
+    JOBS=$((_cpu - 2))
+    [ "$JOBS" -ge 1 ] || JOBS=1
+fi
+case "$JOBS" in ''|*[!0-9]*) JOBS=1 ;; esac
+[ "$JOBS" -ge 1 ] || JOBS=1
 [ "$RUN_BATS" = 1 ] || printf 'validate: fast mode — skipping bats suites (structural checks only)\n' >&2
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -2406,6 +2432,92 @@ check_block_expansion() {
     info "block-expansion golden gate: all skills + members OK"
 }
 
+# ── Per-skill check units (issue #1123) ──────────────────────────────────────
+# The full check sequence for one multi-harness / duo skill, factored into a
+# function so it can run either inline (serial path, byte-unchanged) or as a
+# bounded background worker (parallel path). The body is IDENTICAL to the
+# original inline loop body — do not reorder; per-skill output must match serial.
+run_one_skill_checks() {
+    skill_dir="$1"
+    check_required_files "$skill_dir"
+    check_lockstep "$skill_dir"
+    check_frontmatter "$skill_dir/SKILL.md"
+    check_frontmatter "$skill_dir/opencode/agent.md"
+    check_bash_syntax "$skill_dir/install.sh"
+    check_bash_syntax "$skill_dir/uninstall.sh"
+    check_self_update "$skill_dir"
+    check_subagent_model_tier "$skill_dir"
+    check_harness_detection_block "$skill_dir/SKILL.md"
+    check_monitor_batch_exit "$skill_dir/SKILL.md"
+}
+
+run_one_duo_checks() {
+    check_lockstep_duo "$1"
+}
+
+# Bounded parallel dispatch over a newline-free, space-separated list of
+# already-gated skill dirs. Each worker runs `$2 <skill_dir>` in a subshell,
+# redirecting all output to its OWN temp file keyed by skill name (no shared
+# path → no collision). Concurrency is capped at $JOBS by waiting on the oldest
+# launched PID once the pool is full (macOS bash 3.2 safe: no `wait -n`). After
+# all workers finish, output files are replayed in SORTED skill-name order, so
+# the printed stream is deterministic regardless of completion order. Returns
+# non-zero iff ANY worker exited non-zero (same verdict as serial). The serial
+# path NEVER calls this — bare `validate.sh` stays byte-identical.
+parallel_skill_dispatch() {
+    _worker_fn="$1"; shift
+    _pool_dir="$(mktemp -d)"
+    _pids=""
+    _names=""
+    _running=0
+    for _sd in "$@"; do
+        _name="$(basename "$_sd")"
+        _names="$_names $_name"
+        # Worker: run the check unit; its exit status is captured by `wait`.
+        ( "$_worker_fn" "$_sd" ) > "$_pool_dir/$_name.out" 2>&1 &
+        _pids="$_pids $!:$_name"
+        _running=$((_running + 1))
+        if [ "$_running" -ge "$JOBS" ]; then
+            # Pool full: drain the OLDEST launched PID before launching more.
+            set -- $_pids
+            _oldest="${1%%:*}"
+            wait "$_oldest" || printf '%s\n' "$_oldest" >> "$_pool_dir/.failed"
+            shift
+            _pids=" $*"
+            _running=$((_running - 1))
+        fi
+    done
+    # Drain any still-running workers.
+    for _entry in $_pids; do
+        _pid="${_entry%%:*}"
+        wait "$_pid" || printf '%s\n' "$_pid" >> "$_pool_dir/.failed"
+    done
+    # Replay output deterministically, sorted by skill name.
+    _rc=0
+    for _name in $(printf '%s\n' $_names | LC_ALL=C sort); do
+        if [ -f "$_pool_dir/$_name.out" ]; then
+            cat "$_pool_dir/$_name.out"
+        fi
+    done
+    if [ -s "$_pool_dir/.failed" ]; then
+        _rc=1
+    fi
+    rm -rf "$_pool_dir"
+    return "$_rc"
+}
+
+# Run the gated per-skill set: serial (byte-unchanged) when JOBS<=1, else pooled.
+run_skill_set() {
+    _worker_fn="$1"; shift
+    if [ "$JOBS" -le 1 ]; then
+        for _sd in "$@"; do
+            "$_worker_fn" "$_sd"
+        done
+    else
+        parallel_skill_dispatch "$_worker_fn" "$@" || fail "one or more parallel skill-check workers failed"
+    fi
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -2413,30 +2525,30 @@ main() {
         fail "no multi-harness skills found under skills/"
     fi
 
+    # Apply the scoped gate FIRST (in deterministic discovery order, so the
+    # `scoped:` counters are identical to serial), then run the surviving set —
+    # serially (byte-unchanged) when JOBS<=1, else via the bounded worker pool.
+    _gated_skills=""
     for skill_dir in $skills; do
         if ! scoped_skill_gate "$(basename "$skill_dir")"; then
             continue
         fi
-        check_required_files "$skill_dir"
-        check_lockstep "$skill_dir"
-        check_frontmatter "$skill_dir/SKILL.md"
-        check_frontmatter "$skill_dir/opencode/agent.md"
-        check_bash_syntax "$skill_dir/install.sh"
-        check_bash_syntax "$skill_dir/uninstall.sh"
-        check_self_update "$skill_dir"
-        check_subagent_model_tier "$skill_dir"
-        check_harness_detection_block "$skill_dir/SKILL.md"
-        check_monitor_batch_exit "$skill_dir/SKILL.md"
+        _gated_skills="$_gated_skills $skill_dir"
     done
+    # shellcheck disable=SC2086
+    run_skill_set run_one_skill_checks $_gated_skills
 
     info "scanning duo-harness skills under skills/ ..."
     duo_skills="$(discover_duo_skills)"
+    _gated_duo=""
     for skill_dir in $duo_skills; do
         if ! scoped_skill_gate "$(basename "$skill_dir")"; then
             continue
         fi
-        check_lockstep_duo "$skill_dir"
+        _gated_duo="$_gated_duo $skill_dir"
     done
+    # shellcheck disable=SC2086
+    run_skill_set run_one_duo_checks $_gated_duo
 
     check_startup_preflight
     check_stop_mode_section
