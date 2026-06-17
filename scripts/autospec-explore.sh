@@ -151,7 +151,16 @@ case "$SPECIALISTS_MODE" in
         ;;
 esac
 
-# Source shared libs.
+# Source shared libs. These are REQUIRED — without them the loop driver and
+# harness detection are unavailable. If the installer failed to ship lib/ (see
+# install.sh copy_runtime_subdirs), emit an actionable code_health diagnostic
+# instead of a cryptic "No such file or directory" from the shell.
+for _req_lib in autospec-loop.sh autospec-harness-detect.sh; do
+    if [ ! -f "$SCRIPT_DIR/lib/$_req_lib" ]; then
+        echo "code_health:explore_missing_runtime_lib lib=$_req_lib dir=$SCRIPT_DIR/lib — reinstall: curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash -s -- --skill all --harness all --update" >&2
+        exit 2
+    fi
+done
 # shellcheck source=lib/autospec-loop.sh
 . "$SCRIPT_DIR/lib/autospec-loop.sh"
 # shellcheck source=lib/autospec-harness-detect.sh

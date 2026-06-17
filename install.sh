@@ -1009,10 +1009,53 @@ copy_schemas() {
     info "copy_schemas: copied $(ls "$autospec_schemas_dir"/*.json 2>/dev/null | wc -l | tr -d ' ') schemas to $autospec_schemas_dir/"
 }
 
+copy_runtime_subdirs() {
+    # Ship the runtime SUBDIRECTORIES under scripts/ that installed surfaces source or
+    # exec at runtime via $SCRIPT_DIR/<subdir>. copy_repo_scripts() is maxdepth-1 and
+    # ships only top-level scripts/*.sh, so without this step a clean install leaves
+    # $AUTOSPEC_SCRIPTS_DIR/lib/ and .../explore-research/ empty — autospec-explore.sh
+    # then dies sourcing lib/autospec-loop.sh and every researcher fails to resolve at
+    # $SCRIPT_DIR/explore-research/. Same class of bug as copy_schemas (issue #856).
+    #
+    # scripts/lib/ is MIXED: install-time-only helpers (install-helpers.sh,
+    # claude-md-block.txt) stay OUT of the runtime tree; only the runtime libs sourced
+    # by installed scripts ship. scripts/explore-research/ is entirely runtime.
+    autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+
+    # Runtime libs sourced/exec'd by installed scripts at $SCRIPT_DIR/lib/<name>.
+    runtime_libs="autospec-loop.sh autospec-harness-detect.sh explore-internet-safety.sh extract-matchers.sh"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] copy_runtime_subdirs: would copy runtime libs + scripts/explore-research/ to $autospec_scripts_dir/"
+        return 0
+    fi
+
+    mkdir -p "$autospec_scripts_dir/lib"
+    for _lib in $runtime_libs; do
+        _src="$REPO_ROOT/scripts/lib/$_lib"
+        if [ -f "$_src" ]; then
+            cp "$_src" "$autospec_scripts_dir/lib/$_lib"
+            chmod +x "$autospec_scripts_dir/lib/$_lib"
+        else
+            warn "copy_runtime_subdirs: runtime lib not found: $_src (skipping)"
+        fi
+    done
+
+    if [ -d "$REPO_ROOT/scripts/explore-research" ]; then
+        mkdir -p "$autospec_scripts_dir/explore-research"
+        cp -R "$REPO_ROOT/scripts/explore-research/." "$autospec_scripts_dir/explore-research/"
+        find "$autospec_scripts_dir/explore-research" -maxdepth 1 -name '*.sh' -exec chmod +x {} \;
+    else
+        warn "copy_runtime_subdirs: $REPO_ROOT/scripts/explore-research not found; skipping"
+    fi
+    info "copy_runtime_subdirs: copied runtime libs + explore-research to $autospec_scripts_dir/"
+}
+
 # Integration bootstrap: pull autospec (if --update) + turbo, before per-skill installers run.
 pull_autospec
 copy_shared_scripts
 copy_repo_scripts
+copy_runtime_subdirs
 copy_runtime_skill_scripts
 copy_schemas
 ensure_system_tools
