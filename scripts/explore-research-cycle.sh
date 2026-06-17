@@ -2,22 +2,41 @@
 # scripts/explore-research-cycle.sh — autospec-explore research cycle aggregator.
 #
 # Runs the enabled deterministic researchers in parallel, aggregates their
-# proposals, deduplicates by normalized title, ranks by weighted score,
-# filters out proposals matching titles created in the last 7 days, and
-# caps output at --max-issues-per-round.
+# proposals, then threads them through the stage pipeline
+#   dedup -> verify -> ROI gate -> pattern synthesis (Issue D) -> rank
+# (constitution + recent-title filters apply before the severity-first rank),
+# and caps output at --max-issues-per-round.
 #
 # Implements the "Research cycle contract" + "Per-researcher contracts"
-# rows 1-4 in docs/specs/2026-05-29-autospec-explore-design.md.
+# rows 1-4 in docs/specs/2026-05-29-autospec-explore-design.md and the
+# "Aggregator changes" (verify/ROI/severity-first-rank/counters) in
+# docs/specs/2026-06-15-autospec-explore-discovery-enhance.md.
 #
 # Output: JSON to stdout with shape:
 #   { "round": "<iso-date>",
 #     "proposals_total": N,
 #     "proposals_after_dedup": N,
+#     "verify_mode": "active"|"no-op-unverified",  # whether a verdict map drove
+#                                          # refutation, or the gate no-op'd
+#     "proposals_after_verify": N,        # survived the adversarial verify gate
+#     "proposals_refuted": N,             # dropped by the verify gate
+#     "proposals_after_roi": N,           # survived the named-consumer ROI gate
+#     "structural_fixes": N,              # pattern-synthesis collapses (Issue D)
 #     "proposals_after_recent_filter": N,
 #     "proposals": [ ...top --max-issues-per-round... ] }
 #
 # Each proposal carries: title, evidence, estimated_complexity, confidence,
-# source, score.
+# source, severity, named_consumer, score.
+#
+# Proposal contract (schemas/autospec-explore-proposal.schema.json):
+#   - severity        impact band, high->low: silent-wrong > correctness >
+#                     stability > operability > feature > nicety. Legacy
+#                     researchers that omit it are defaulted to "feature" here.
+#   - named_consumer  free text naming a skill/workflow/operator step that
+#                     benefits today. Missing -> defaulted to "" here. The
+#                     default-empty value does NOT auto-drop legacy proposals
+#                     (the ROI gate that drops empty-consumer proposals is
+#                     new-source-only; it lands in Issue C).
 
 set -u
 
@@ -31,9 +50,35 @@ Usage: explore-research-cycle.sh [options]
 
 Options:
   --max-issues-per-round N     Cap final proposals (default 5).
-  --research-sources LIST      Comma-separated subset of:
-                                 spec-vs-code,prior-reports,codebase-signals,open-issues
-                               Default: all 4.
+  --stage STAGE                Two-pass split so the adversarial verify gate can
+                               actually run (issue #1095). One of:
+                                 full      (default) single-pass: run researchers,
+                                           aggregate, dedup, verify, ROI, synthesis,
+                                           rank, cap — backward-compatible behavior.
+                                 dedup     pass 1: run researchers, aggregate, dedup,
+                                           then STOP and emit the deduped proposals
+                                           (each carrying its normalized-title key)
+                                           for the orchestrator to verify. No verify/
+                                           ROI/synthesis/rank.
+                                 finalize  pass 2: skip researchers; read the pass-1
+                                           deduped artifact from --deduped-in and
+                                           resume verify -> ROI -> synthesis -> rank
+                                           -> cap, consuming the orchestrator-built
+                                           AUTOSPEC_EXPLORE_VERIFY_VERDICTS map.
+  --deduped-in PATH            (stage finalize) Path to the pass-1 deduped artifact.
+  --research-sources LIST      Comma-separated subset of the universal +
+                               discovery roster:
+                                 spec-vs-code,prior-reports,codebase-signals,
+                                 open-issues,source-analysis,dependency-health,
+                                 internet,quality-resilience,dogfooding,
+                                 self-leverage,style-normalization
+                               Default: all 11.
+  --specialists-mode MODE      Domain-specialist roster mode (Issue E2):
+                                 discover (default) | ask | explicit | off.
+                                 off = zero specialists (current behavior).
+  --num-specialists N          Roster size for discover/ask (default 3, cap 6).
+  --specialists LIST           Explicit roster as slug:persona,slug:persona,...
+                               (used verbatim when --specialists-mode explicit).
   --ledger PATH                Outcome ledger to derive dynamic source weights
                                from (passed to explore-source-weights.sh). When
                                omitted, $AUTOSPEC_EXPLORE_LEDGER is used, then the
@@ -53,24 +98,68 @@ Env:
   AUTOSPEC_TEST_ISSUES_JSON      Inject fake gh issue list (testing).
   AUTOSPEC_TEST_RECENT_TITLES    Newline-separated titles created in last 7d
                                  (testing — bypasses gh search).
+  AUTOSPEC_EXPLORE_AUTONOMOUS     1 = autonomous/no-TTY run; discover mode then
+                                 auto-selects top-N (never blocks). Default: auto
+                                 (autonomous unless an interactive TTY is present).
+  AUTOSPEC_SPECIALIST_PROPOSALS_<SLUG>
+                                 Per-specialist proposal JSON (an array, or an
+                                 object with a "proposals" array). The seam the
+                                 orchestrator's LLM dispatch fills; absent → that
+                                 specialist contributes zero proposals (graceful).
 EOF
 }
 
 MAX_ISSUES=5
-SOURCES="spec-vs-code,prior-reports,codebase-signals,open-issues"
+SOURCES="spec-vs-code,prior-reports,codebase-signals,open-issues,source-analysis,dependency-health,internet,quality-resilience,dogfooding,self-leverage,style-normalization"
 OUT=""
 LEDGER="${AUTOSPEC_EXPLORE_LEDGER:-}"
+SPECIALISTS_MODE="discover"
+NUM_SPECIALISTS=3
+SPECIALISTS_ARG=""
+STAGE="full"
+DEDUPED_IN=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --max-issues-per-round) MAX_ISSUES="$2"; shift 2 ;;
+        --stage)                STAGE="$2"; shift 2 ;;
+        --deduped-in)           DEDUPED_IN="$2"; shift 2 ;;
         --research-sources)     SOURCES="$2"; shift 2 ;;
         --ledger)               LEDGER="$2"; shift 2 ;;
         --out)                  OUT="$2"; shift 2 ;;
+        --specialists-mode)     SPECIALISTS_MODE="$2"; shift 2 ;;
+        --num-specialists)      NUM_SPECIALISTS="$2"; shift 2 ;;
+        --specialists)          SPECIALISTS_ARG="$2"; shift 2 ;;
         -h|--help)              usage; exit 0 ;;
         *) echo "explore-research-cycle: unknown arg: $1" >&2; usage; exit 2 ;;
     esac
 done
+
+# Validate the two-pass stage (issue #1095).
+case "$STAGE" in
+    full|dedup|finalize) ;;
+    *) echo "explore-research-cycle: invalid --stage: $STAGE (use full|dedup|finalize)" >&2; exit 2 ;;
+esac
+if [ "$STAGE" = "finalize" ]; then
+    [ -n "$DEDUPED_IN" ] || { echo "explore-research-cycle: --stage finalize requires --deduped-in PATH" >&2; exit 2; }
+    [ -f "$DEDUPED_IN" ] || { echo "explore-research-cycle: --deduped-in not found: $DEDUPED_IN" >&2; exit 2; }
+fi
+
+# Validate / clamp specialist controls (deterministic; never abort the loop).
+case "$SPECIALISTS_MODE" in
+    discover|ask|explicit|off) ;;
+    *) echo "explore-research-cycle: invalid --specialists-mode: $SPECIALISTS_MODE (use discover|ask|explicit|off)" >&2; exit 2 ;;
+esac
+# --num-specialists: default 3, floor 0, cap 6.
+case "$NUM_SPECIALISTS" in
+    ''|*[!0-9]*) NUM_SPECIALISTS=3 ;;
+esac
+[ "$NUM_SPECIALISTS" -gt 6 ] && NUM_SPECIALISTS=6
+
+# Per-round researcher cap (spec §Guardrails): 7 universal + 4 discovery +
+# ≤6 specialists = ≤17. The universal+discovery set is the --research-sources
+# selection; specialists top it up to at most this many TOTAL researchers.
+RESEARCHER_CAP=17
 
 # Resolve explore-source-weights.sh defensively. Order:
 #   1. $AUTOSPEC_EXPLORE_WEIGHTS_BIN (explicit override, e.g. tests)
@@ -105,6 +194,11 @@ fi
 work_dir="$(mktemp -d -t explore-cycle.XXXXXX)"
 trap 'rm -rf "$work_dir"' EXIT
 
+# In finalize (pass 2) the deduped proposals come from the pass-1 artifact, NOT
+# from re-running researchers (re-running would be non-deterministic for some
+# sources and would re-derive different deduped titles, breaking the verdict-map
+# keying). Skip the whole researcher + specialist dispatch block.
+if [ "$STAGE" != "finalize" ]; then
 pids=()
 IFS=','
 for src in $SOURCES; do
@@ -129,6 +223,108 @@ unset IFS
 for p in "${pids[@]:-}"; do
     [ -n "$p" ] && wait "$p" 2>/dev/null || true
 done
+
+# Count the universal+discovery researchers actually selected this round (the
+# non-empty, deduped --research-sources entries). Specialists may only top this
+# up to RESEARCHER_CAP total.
+universal_count=0
+IFS=','
+for src in $SOURCES; do
+    src="$(printf '%s' "$src" | tr -d ' ')"
+    [ -z "$src" ] && continue
+    universal_count=$((universal_count + 1))
+done
+unset IFS
+
+# ── Domain-specialist dispatch (Issue E2 #1083) ─────────────────────────────
+# Each resolved roster specialist runs as a researcher emitting proposals with
+# source=specialist:<slug> (default weight 0.6 in the aggregator). The roster is
+# resolved per --specialists-mode:
+#   off       no specialists — byte-for-byte the pre-E2 behavior.
+#   explicit  the verbatim --specialists slug:persona,... list.
+#   discover  auto-run discovery → the cached .autospec/explore-specialists.json
+#             roster; interactive harness confirms via AskUserQuestion (an
+#             orchestrator/SKILL-prose responsibility), autonomous/no-TTY takes
+#             the top --num-specialists and never blocks (handled here).
+#   ask       like discover but the operator names the roster (orchestrator
+#             prose); the deterministic floor here is the same cached top-N.
+# Proposals per specialist come from the LLM seam
+# AUTOSPEC_SPECIALIST_PROPOSALS_<SLUG>; absent → zero proposals (graceful, the
+# specialist still participates but contributes nothing — never hard-fails).
+# Trust boundary (spec §Guardrails): personas come from repo-evidence roster /
+# operator input only — never from the internet researcher's fetched content.
+if [ "$SPECIALISTS_MODE" != "off" ]; then
+    # Resolve the slug list (one per line) into $work_dir/specialists.txt.
+    specialists_file="$work_dir/specialists.txt"
+    : > "$specialists_file"
+    if [ "$SPECIALISTS_MODE" = "explicit" ]; then
+        # Verbatim roster: slug[:persona],slug[:persona],...  Take slug before ':'.
+        IFS=','
+        for entry in $SPECIALISTS_ARG; do
+            slug="${entry%%:*}"
+            slug="$(printf '%s' "$slug" | tr -d ' ' | tr '[:upper:]' '[:lower:]')"
+            [ -n "$slug" ] && printf '%s\n' "$slug" >> "$specialists_file"
+        done
+        unset IFS
+    else
+        # discover / ask: consume the cached roster (Issue E1). Slugs only.
+        roster_path="$REPO_ROOT/.autospec/explore-specialists.json"
+        if [ -f "$roster_path" ] && command -v python3 >/dev/null 2>&1; then
+            python3 - "$roster_path" >> "$specialists_file" 2>/dev/null <<'PY' || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    for s in d.get("suggested_specialists", []) or []:
+        slug = str((s or {}).get("slug", "")).strip().lower()
+        if slug:
+            print(slug)
+except Exception:
+    pass
+PY
+        fi
+    fi
+
+    # Top-N + cap. Take the first --num-specialists slugs, then clamp so the
+    # TOTAL researcher count (universal + specialists) never exceeds RESEARCHER_CAP.
+    room=$((RESEARCHER_CAP - universal_count))
+    [ "$room" -lt 0 ] && room=0
+    allow="$NUM_SPECIALISTS"
+    [ "$allow" -gt "$room" ] && allow="$room"
+
+    spec_n=0
+    while IFS= read -r slug; do
+        [ -z "$slug" ] && continue
+        [ "$spec_n" -ge "$allow" ] && break
+        # Per-specialist proposals via the LLM seam. Env var name is the slug
+        # upper-cased with non-alnum → underscore. Absent → empty proposals.
+        env_slug="$(printf '%s' "$slug" | tr '[:lower:]-' '[:upper:]_' | tr -c 'A-Z0-9_' '_')"
+        eval "payload=\"\${AUTOSPEC_SPECIALIST_PROPOSALS_${env_slug}:-}\""
+        SPEC_SLUG="$slug" SPEC_PAYLOAD="${payload:-}" python3 - > "$work_dir/specialist-$slug.json" <<'PY' || \
+            printf '{"source":"specialist:%s","proposals":[]}\n' "$slug" > "$work_dir/specialist-$slug.json"
+import json, os
+slug = os.environ["SPEC_SLUG"]
+src = "specialist:" + slug
+raw = os.environ.get("SPEC_PAYLOAD", "").strip()
+props = []
+if raw:
+    try:
+        d = json.loads(raw)
+        if isinstance(d, dict):
+            d = d.get("proposals", [])
+        if isinstance(d, list):
+            props = [p for p in d if isinstance(p, dict)]
+    except Exception:
+        props = []
+# Stamp the specialist source on every proposal (trust boundary: the slug, not
+# any source the payload may claim).
+for p in props:
+    p["source"] = src
+print(json.dumps({"source": src, "proposals": props}))
+PY
+        spec_n=$((spec_n + 1))
+    done < "$specialists_file"
+fi
+fi  # end: STAGE != finalize (researcher + specialist dispatch)
 
 # Gather recent titles (last 7 days) to filter against. Allow injection.
 recent_titles_file="$work_dir/recent.txt"
@@ -156,16 +352,34 @@ if [ -n "$weights_bin" ] && [ -x "$weights_bin" ]; then
 fi
 export WEIGHTS_JSON
 
-# Aggregate, dedup, rank, filter, cap.
+# Aggregate, dedup, VERIFY, ROI-gate, rank, filter, cap.
+#
+# Verify stage (Issue C): the adversarial LLM-skeptic refutation is an
+# explore-orchestrator (SKILL-prose) responsibility, NOT this deterministic
+# bash aggregator — no LLM is ever invoked from here. What the aggregator owns
+# is the verify *boundary*: every deduped proposal is threaded through a verify
+# gate that consumes an OPTIONAL verdict map supplied by the orchestrator via
+# AUTOSPEC_EXPLORE_VERIFY_VERDICTS (a path to, or inline, JSON mapping
+# normalized-title -> {verdict, reason}). Documented fallback: when no map is
+# supplied the gate no-ops to "all survive" (verdict=unverified). When a map IS
+# supplied, a proposal with no entry is refute-by-default (the skeptic could
+# not affirm it) per the spec.
+VERIFY_VERDICTS="${AUTOSPEC_EXPLORE_VERIFY_VERDICTS:-}"
+export VERIFY_VERDICTS
+
 WORK_DIR="$work_dir" \
 MAX_ISSUES="$MAX_ISSUES" \
 RECENT_FILE="$recent_titles_file" \
+STAGE="$STAGE" \
+DEDUPED_IN="$DEDUPED_IN" \
 python3 - <<'PY' > "$work_dir/final.json"
 import json, os, re, glob, datetime
 
 work     = os.environ["WORK_DIR"]
 cap      = int(os.environ["MAX_ISSUES"])
 recent_f = os.environ["RECENT_FILE"]
+stage    = os.environ.get("STAGE", "full")
+deduped_in = os.environ.get("DEDUPED_IN", "").strip()
 
 # Static source priors per the spec — the defensive fallback used verbatim when
 # no dynamic weights are available (no ledger / weights script absent / broken).
@@ -173,7 +387,12 @@ DEFAULT_SRC_WEIGHTS = {
     "spec-vs-code":     1.0,
     "prior-reports":    0.9,
     "codebase-signals": 0.7,
+    "dependency-health": 0.65,
     "open-issues":      0.6,
+    "style-normalization": 0.85,
+    "quality-resilience": 0.95,
+    "dogfooding":       0.9,
+    "self-leverage":    0.6,
     "source-analysis":  0.5,
     "internet":         0.4,
 }
@@ -190,6 +409,28 @@ else:
     SRC_WEIGHTS = DEFAULT_SRC_WEIGHTS
 COMPLEXITY = {"small": 1.0, "medium": 2.0, "large": 4.0}
 
+# Severity bands, highest impact -> lowest. Lower numeric value = higher
+# priority (primary sort key). Mirrors schemas/autospec-explore-proposal.schema
+# .json enum order, which is load-bearing.
+SEVERITY_ORDER = [
+    "silent-wrong", "correctness", "stability",
+    "operability", "feature", "nicety",
+]
+SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITY_ORDER)}
+# Default rank for an unknown severity = just below "feature" (treated as the
+# legacy default band so unknown values never out-rank a real correctness item).
+DEFAULT_SEVERITY_RANK = SEVERITY_RANK["feature"]
+
+# The 7 legacy universal researchers are EXEMPT from the ROI gate during
+# rollout (spec: "only the discovery ones are ROI-gated, to avoid silently
+# muting the existing 7"). Any source NOT in this set — the discovery
+# researchers (quality-resilience, dogfooding, self-leverage, style-normalization) and
+# specialist:<slug> sources — is a "new source" and IS ROI-gated.
+LEGACY_SOURCES = {
+    "spec-vs-code", "prior-reports", "codebase-signals", "open-issues",
+    "source-analysis", "dependency-health", "internet",
+}
+
 def normalize_title(t):
     s = t.lower()
     # Strip leading conventional-commit prefix.
@@ -201,7 +442,17 @@ def normalize_title(t):
 
 all_props = []
 total = 0
-for f in sorted(glob.glob(os.path.join(work, "*.json"))):
+if stage == "finalize":
+    # Pass 2: the deduped proposals (and the upstream counters) come from the
+    # pass-1 artifact, NOT from re-globbing researcher output. This is what makes
+    # the verdict map keyable — the orchestrator built it against THESE exact
+    # normalized titles between the two passes.
+    with open(deduped_in, "r", encoding="utf-8") as fh:
+        _p1 = json.load(fh)
+    total = int(_p1.get("proposals_total", 0))
+    deduped = [p for p in (_p1.get("deduped") or _p1.get("proposals") or []) if isinstance(p, dict)]
+else:
+  for f in sorted(glob.glob(os.path.join(work, "*.json"))):
     if os.path.basename(f) == "final.json":
         continue
     try:
@@ -219,26 +470,274 @@ for f in sorted(glob.glob(os.path.join(work, "*.json"))):
             conf = float(p.get("confidence", 0.5))
         except Exception:
             conf = 0.5
-        weight = SRC_WEIGHTS.get(src, 0.5)
+        # Domain-specialist sources (source=specialist:<slug>, Issue E2) default
+        # to weight 0.6 per the shared-contract; any other unknown source 0.5.
+        if src in SRC_WEIGHTS:
+            weight = SRC_WEIGHTS[src]
+        elif src.startswith("specialist:"):
+            weight = SRC_WEIGHTS.get(src, 0.6)
+        else:
+            weight = 0.5
         cscale = COMPLEXITY.get(comp, 2.0)
         score = conf * weight / cscale
+        # Default the proposal-contract extension fields safely for legacy
+        # researchers that don't emit them (Issue A). Missing severity ->
+        # "feature"; missing named_consumer -> "". This is a pure default: it
+        # never drops a proposal, so the existing 7 researchers keep flowing.
+        severity = p.get("severity")
+        if not isinstance(severity, str) or not severity.strip():
+            severity = "feature"
+        named_consumer = p.get("named_consumer")
+        if not isinstance(named_consumer, str):
+            named_consumer = ""
         all_props.append({
             "title": title,
             "evidence": p.get("evidence",""),
             "estimated_complexity": comp,
             "confidence": conf,
             "source": src,
+            "severity": severity,
+            "named_consumer": named_consumer,
             "score": round(score, 4),
         })
         total += 1
 
-# Dedup by normalized title — keep highest score.
-by_norm = {}
-for p in all_props:
+# Dedup by normalized title — keep highest score. (Skipped in finalize: the
+# deduped set was produced by pass 1 and loaded above.)
+if stage != "finalize":
+    by_norm = {}
+    for p in all_props:
+        n = normalize_title(p["title"])
+        if n not in by_norm or p["score"] > by_norm[n]["score"]:
+            by_norm[n] = p
+    deduped = list(by_norm.values())
+
+# ---------------------------------------------------------------------------
+# PASS 1 boundary (stage=dedup, issue #1095): emit the deduped proposals — each
+# stamped with its normalized-title key — and STOP before verify. The
+# orchestrator dispatches a Tier-B skeptic per deduped proposal, assembles the
+# {norm_title -> {verdict, reason}} map, and feeds it back into pass 2
+# (stage=finalize) via AUTOSPEC_EXPLORE_VERIFY_VERDICTS. No verify/ROI/synthesis/
+# rank happens here — those are pass-2's job once the verdicts exist.
+if stage == "dedup":
+    for p in deduped:
+        p["norm_title"] = normalize_title(p["title"])
+    out = {
+        "round": datetime.date.today().isoformat(),
+        "stage": "dedup",
+        "proposals_total": total,
+        "proposals_after_dedup": len(deduped),
+        "deduped": deduped,
+    }
+    print(json.dumps(out, indent=2))
+    raise SystemExit(0)
+
+# ---------------------------------------------------------------------------
+# VERIFY stage (Issue C) — adversarial-skeptic boundary, between dedup & rank.
+#
+# The deterministic aggregator does NOT call an LLM. It consumes an optional
+# verdict map produced by the explore-orchestrator's per-proposal Tier-B
+# skeptic dispatch. Map shape: { "<normalized title>": {"verdict": "...",
+# "reason": "..."} }. verdict in {"survived","refuted"} (anything not
+# "survived" is treated as refuted). VERIFY_VERDICTS may be a path to a JSON
+# file or an inline JSON string.
+#
+# Fallback (documented degradation): no map supplied -> the gate no-ops, every
+# proposal survives carrying verdict="unverified". This is the safe default for
+# environments with no subagent capability (cf. the installer/runtime-libs and
+# bash-3.2 gotchas — never hard-fail).
+#
+# Refute-by-default: when a map IS supplied but a proposal has no entry, the
+# skeptic could not affirm it, so it is refuted and dropped (spec: "default to
+# refuted=true under uncertainty").
+def _load_verdicts():
+    raw = os.environ.get("VERIFY_VERDICTS", "").strip()
+    if not raw:
+        return None
+    # Prefer a file path; fall back to treating the value as inline JSON.
+    try:
+        if os.path.isfile(raw):
+            with open(raw, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        return json.loads(raw)
+    except Exception:
+        # Unparseable verdict source -> behave as if no map was supplied
+        # (no-op fallback) rather than refuting everything on a config error.
+        return None
+
+_verdicts = _load_verdicts()
+# verify_mode makes the gate's effective state observable in explore-loop.json
+# (audit #1086 seam-1): "active" when an orchestrator-supplied verdict map drove
+# real refutations, "no-op-unverified" when no map was supplied and every
+# proposal survived carrying verdict=unverified. Without this an operator cannot
+# distinguish "skeptic refuted nothing" from "skeptic never ran" — the inert
+# dead-gate failure mode. The aggregator keeps stdout pure JSON (many consumers
+# parse it directly); the loud operator warning is emitted by the orchestrator
+# (autospec-explore.sh) off this field, not from here.
+verify_mode = "active" if _verdicts is not None else "no-op-unverified"
+verified = []
+refuted_count = 0
+for p in deduped:
     n = normalize_title(p["title"])
-    if n not in by_norm or p["score"] > by_norm[n]["score"]:
-        by_norm[n] = p
-deduped = list(by_norm.values())
+    if _verdicts is None:
+        # No-op fallback: survive, unverified.
+        p["verdict"] = "unverified"
+        p["reason"] = "no verifier verdict supplied (verify stage no-op)"
+        verified.append(p)
+        continue
+    entry = _verdicts.get(n)
+    if not isinstance(entry, dict):
+        # Refute-by-default under uncertainty.
+        refuted_count += 1
+        continue
+    verdict = str(entry.get("verdict", "")).strip().lower()
+    reason = str(entry.get("reason", ""))
+    if verdict == "survived":
+        p["verdict"] = "survived"
+        p["reason"] = reason or "skeptic could not refute"
+        verified.append(p)
+    else:
+        # refuted (or any non-survived verdict) -> drop.
+        refuted_count += 1
+
+# ---------------------------------------------------------------------------
+# ROI gate (Issue C) — drop NEW-source proposals with empty named_consumer.
+# Legacy universal sources are exempt (rollout safety). The pattern-synthesis
+# stage (Issue D #1081) runs immediately AFTER this gate and BEFORE ranking,
+# collapsing recurring same-class survivors into structural-fix proposals.
+roi_kept = []
+for p in verified:
+    src = p.get("source", "")
+    consumer = str(p.get("named_consumer", "")).strip()
+    if src not in LEGACY_SOURCES and consumer == "":
+        # New source, no named consumer -> dropped by the ROI gate.
+        continue
+    roi_kept.append(p)
+
+# ---------------------------------------------------------------------------
+# PATTERN SYNTHESIS (Issue D #1081) — runs AFTER the ROI gate, BEFORE the
+# constitution/recent filters and the severity-first rank.
+#
+# Goal: when several survivors describe the SAME recurring defect class (e.g.
+# "missing error handling in <X>" across alpha/beta/gamma), collapse them into
+# ONE `structural-fix` proposal whose evidence lists every instance plus the
+# single guard that would catch them all — so the loop files one durable fix
+# instead of N point patches.
+#
+# Clustering is deterministic and COARSE-but-CONSERVATIVE to avoid the watched
+# risk (over-collapsing unrelated findings):
+#   - Two proposals may cluster ONLY within the SAME severity band (a
+#     silent-wrong defect never merges with a nicety).
+#   - Within a band, cluster by content-token overlap: greedy single-linkage
+#     where membership requires Jaccard(tokens) >= JACCARD_MIN against the
+#     cluster seed. Stopwords + the conventional-commit verb are stripped so
+#     the signal is the subject, not "fix:"/"add"/"the".
+#   - A cluster collapses iff it has >= 2 members, OR its shared-token theme
+#     matches a recurring docs/memory/ theme (memory-grounded structural class
+#     even at size 1). Singletons with no memory match pass through unchanged.
+#
+# Convergence/safety: pure function of the survivor set + a static memory-theme
+# list; no randomness, no global state — deterministic across runs.
+
+# Recurring docs/memory/ themes: coarse token signatures distilled from the
+# persistent feedback memos (bash portability, lockstep duos, regex injection,
+# self-consistent fixtures, installer omissions). A survivor whose shared theme
+# tokens intersect one of these is a known structural class. Kept intentionally
+# small + high-signal; extending it is a deliberate, reviewable act.
+MEMORY_THEMES = [
+    {"bash", "portability", "shell"},
+    {"lockstep", "trio", "duo"},
+    {"regex", "injection", "metachar"},
+    {"fixture", "self", "consistent", "mock"},
+    {"installer", "runtime", "lib", "ship"},
+    {"validator", "retry", "adaptive"},
+]
+
+_STOPWORDS = {
+    "the", "a", "an", "in", "on", "of", "to", "for", "and", "or", "with",
+    "is", "are", "be", "by", "at", "from", "into", "module", "modules",
+    "add", "fix", "feat", "support", "enable", "new",
+}
+
+def _content_tokens(p):
+    toks = normalize_title(p["title"]).split()
+    return {t for t in toks if t not in _STOPWORDS and len(t) > 2}
+
+def _jaccard(a, b):
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    return inter / union if union else 0.0
+
+# Conservative threshold: a true recurring class (e.g. "missing error handling
+# in alpha/beta/gamma") shares its whole subject vocabulary minus the leaf token
+# (Jaccard ~0.67-0.75), while two unrelated items that merely share a generic
+# word ("high/low score feature" -> 0.5) stay apart. 0.6 is the seam between.
+JACCARD_MIN = 0.6
+
+def _theme_match(shared):
+    for theme in MEMORY_THEMES:
+        if len(shared & theme) >= 2:
+            return theme
+    return None
+
+# Greedy single-linkage clustering within each severity band.
+structural_fixes = 0
+_synth_out = []
+_by_band = {}
+for _i, p in enumerate(roi_kept):
+    _by_band.setdefault(p.get("severity", "feature"), []).append(p)
+
+for _band, members in _by_band.items():
+    _toks = [_content_tokens(m) for m in members]
+    _used = [False] * len(members)
+    for i in range(len(members)):
+        if _used[i]:
+            continue
+        cluster_idx = [i]
+        _used[i] = True
+        for j in range(i + 1, len(members)):
+            if _used[j]:
+                continue
+            if _jaccard(_toks[i], _toks[j]) >= JACCARD_MIN:
+                cluster_idx.append(j)
+                _used[j] = True
+        cluster = [members[k] for k in cluster_idx]
+        # Shared tokens across the whole cluster (the common defect signature).
+        shared = set(_toks[cluster_idx[0]])
+        for k in cluster_idx[1:]:
+            shared &= _toks[k]
+        theme = _theme_match(_content_tokens(cluster[0]))
+        if len(cluster) >= 2 or (theme is not None):
+            # Collapse to one structural-fix. Highest-scoring member is the
+            # representative for score/consumer; evidence lists every instance.
+            rep = max(cluster, key=lambda q: q["score"])
+            instances = [c["title"] for c in cluster]
+            ev_lines = "; ".join(
+                "%s (%s)" % (c["title"], (c.get("evidence", "") or "").strip())
+                for c in cluster
+            )
+            guard_subject = " ".join(sorted(shared)) or "the shared pattern"
+            sfix = dict(rep)
+            sfix["proposal_kind"] = "structural-fix"
+            sfix["title"] = "fix(structural): one guard for %d instances of [%s]" % (
+                len(cluster), guard_subject,
+            )
+            sfix["evidence"] = (
+                "%d instances collapse to one structural fix — a single guard "
+                "for [%s] would catch them all. Instances: %s"
+                % (len(cluster), guard_subject, ev_lines)
+            )
+            sfix["instances"] = instances
+            if theme is not None:
+                sfix["memory_theme"] = sorted(theme)
+            _synth_out.append(sfix)
+            structural_fixes += 1
+        else:
+            _synth_out.append(cluster[0])
+
+roi_kept = _synth_out
 
 # Constitution gate (deterministic rules D1 evidence + D2 confidence floor).
 # Keep this byte-aligned with explore-constitution.sh --filter. Floor default 0.3
@@ -248,7 +747,7 @@ try:
     _floor = float(os.environ.get("AUTOSPEC_EXPLORE_MIN_CONFIDENCE", "0.3") or "0.3")
 except Exception:
     _floor = 0.3
-constitutional = [p for p in deduped
+constitutional = [p for p in roi_kept
                   if str(p.get("evidence", "")).strip() != ""
                   and p.get("confidence", 0) >= _floor]
 
@@ -265,14 +764,26 @@ except FileNotFoundError:
 
 filtered = [p for p in constitutional if normalize_title(p["title"]) not in recent_norms]
 
-# Rank descending by score; cap.
-filtered.sort(key=lambda p: p["score"], reverse=True)
+# Severity-first ranking (Issue C): primary key = severity rank (lower rank =
+# higher impact = ranked first); secondary key = the existing weighted score
+# (confidence * source_weight / complexity), descending. A high-severity item
+# behind auto-merge thus out-ranks a low-severity high-score one, while score
+# still breaks ties within a band.
+def _rank_key(p):
+    sev_rank = SEVERITY_RANK.get(p.get("severity", "feature"), DEFAULT_SEVERITY_RANK)
+    return (sev_rank, -p["score"])
+filtered.sort(key=_rank_key)
 final = filtered[:cap]
 
 out = {
     "round": datetime.date.today().isoformat(),
     "proposals_total": total,
     "proposals_after_dedup": len(deduped),
+    "verify_mode": verify_mode,
+    "proposals_after_verify": len(verified),
+    "proposals_refuted": refuted_count,
+    "proposals_after_roi": len(roi_kept),
+    "structural_fixes": structural_fixes,
     "proposals_after_constitution": len(constitutional),
     "proposals_after_recent_filter": len(filtered),
     "proposals": final,

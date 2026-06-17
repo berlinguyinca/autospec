@@ -8,12 +8,19 @@
 # Usage:
 #   scripts/gen-implementer-prompt.sh --issue-body <file> --branch <name>
 #                                      [--issue-labels <csv>] [--repo <owner/repo>]
+#                                      [--body-file <file>]
 #   scripts/gen-implementer-prompt.sh --help
 #
 # Output (stdout):
 #   <static cached prefix from bundle-static-context.sh>
 #
 #   <dynamic suffix: issue body sections + branch/worktree commands + "begin coding now">
+#
+# --body-file (autospec:v2-flow cache wiring, spec Phase 2 child C): when given,
+# the file's content (e.g. skills/autospec-run/prompts/phase4-implementer.md) is
+# emitted as the dynamic body that rides BELOW the cached prefix, ahead of the
+# issue assignment block. This lets the v2-flow path realize the D3 cached prefix
+# without re-reading the static context uncached inside the implementer prompt.
 #
 # Dependencies:
 #   skills/autospec-shared/scripts/bundle-static-context.sh (or $AUTOSPEC_SCRIPTS_DIR)
@@ -46,6 +53,7 @@ ISSUE_BODY_FILE=""
 BRANCH=""
 ISSUE_LABELS=""
 REPO="${AUTOSPEC_REPO:-}"
+BODY_FILE=""
 
 usage() {
   cat <<'EOF'
@@ -63,6 +71,8 @@ Required:
 Optional:
   --issue-labels <csv>  Comma-separated issue labels (for cache-prefix tagging)
   --repo <owner/repo>   Repository slug (default: from AUTOSPEC_REPO env)
+  --body-file <file>    Prompt body emitted below the cached prefix, ahead of the
+                        issue assignment (e.g. the v2-flow phase4-implementer.md).
 
 Exit: 0=success 1=error
 EOF
@@ -83,6 +93,9 @@ while [ $# -gt 0 ]; do
     --repo)
       [ -z "${2:-}" ] && { printf 'gen-implementer-prompt.sh: --repo requires a value\n' >&2; exit 1; }
       REPO="$2"; shift 2 ;;
+    --body-file)
+      [ -z "${2:-}" ] && { printf 'gen-implementer-prompt.sh: --body-file requires a value\n' >&2; exit 1; }
+      BODY_FILE="$2"; shift 2 ;;
     *)
       printf 'gen-implementer-prompt.sh: unknown option: %s\n' "$1" >&2; exit 1 ;;
   esac
@@ -103,6 +116,11 @@ fi
 
 if [ ! -f "$ISSUE_BODY_FILE" ]; then
   printf 'gen-implementer-prompt.sh: issue body file not found: %s\n' "$ISSUE_BODY_FILE" >&2
+  exit 1
+fi
+
+if [ -n "$BODY_FILE" ] && [ ! -f "$BODY_FILE" ]; then
+  printf 'gen-implementer-prompt.sh: body file not found: %s\n' "$BODY_FILE" >&2
   exit 1
 fi
 
@@ -130,6 +148,15 @@ REPO_SLUG="${REPO:-berlinguyinca/autospec}"
 WT_PATH="/private/tmp/wt-$(echo "$BRANCH" | tr '/' '-' | tr '_' '-')"
 
 printf '\n\n'
+
+# v2-flow cache wiring (spec Phase 2 child C): the prompt body (e.g.
+# phase4-implementer.md) rides below the cached prefix, ahead of the issue
+# assignment, so the v2 path realizes the D3 cached prefix.
+if [ -n "$BODY_FILE" ]; then
+  cat "$BODY_FILE"
+  printf '\n\n'
+fi
+
 cat <<SUFFIX
 ---
 

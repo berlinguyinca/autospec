@@ -36,6 +36,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isLogicFlowSection, generateExplainerDiagram } from './doc-style.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SHARED_SCRIPTS = path.resolve(__dirname, '../../autospec-shared/scripts');
@@ -224,6 +225,97 @@ function renderTutorial(audience, feature, directive) {
   return lines.join('\n');
 }
 
+// ── renderFeatureSections — six LLM-targeted H2 blocks (issue #1129) ──────────
+//
+// Audience gating (pinned in shared-contracts):
+//   config_reference → [admin, developer]
+//   rationale        → [developer]
+//   all others       → all audiences
+//
+// Empty fields ('' / []) are silently omitted — no blank H2 is emitted.
+//
+// Section order is fixed: Data model → Invariants → Errors → Configuration →
+// Why → Related features.
+
+const SECTION_AUDIENCE_GATE = {
+  config_reference: ['admin', 'developer'],
+  rationale:        ['developer'],
+};
+
+function renderFeatureSections(audience, feature) {
+  const lines = [];
+
+  function maybeSection(heading, fieldValue) {
+    if (!fieldValue || (typeof fieldValue === 'string' && fieldValue.trim() === '')) return;
+    if (Array.isArray(fieldValue) && fieldValue.length === 0) return;
+    lines.push(`## ${heading}`, '');
+    if (Array.isArray(fieldValue)) {
+      for (const item of fieldValue) lines.push(`- ${item}`);
+      lines.push('');
+    } else {
+      lines.push(String(fieldValue), '');
+    }
+  }
+
+  // data_model — all audiences
+  maybeSection('Data model', feature.data_model || '');
+
+  // invariants — all audiences
+  maybeSection('Invariants & constraints', feature.invariants || '');
+
+  // errors — all audiences
+  maybeSection('Errors & failure modes', feature.errors || '');
+
+  // config_reference — admin + developer only
+  if (SECTION_AUDIENCE_GATE.config_reference.includes(audience.name)) {
+    maybeSection('Configuration', feature.config_reference || '');
+  }
+
+  // rationale — developer only
+  if (SECTION_AUDIENCE_GATE.rationale.includes(audience.name)) {
+    maybeSection('Why', feature.rationale || '');
+  }
+
+  // depends_on — all audiences
+  maybeSection('Related features', feature.depends_on || []);
+
+  return lines;
+}
+
+// ── renderExamples — emit <!-- example --> fenced blocks (issue #1133) ──────────
+//
+// Emits one `<!-- example -->` + fenced code block per entry in
+// feature.examples[].  Empty / absent arrays emit nothing.
+//
+// Entry shape: { lang?: string, command: string }
+//   lang     defaults to 'bash' when absent or empty.
+//   command  the executable text placed verbatim inside the fence.
+//
+// Marker format is pinned verbatim by the #1133 shared contract:
+//   <!-- example -->
+//   ```<lang>
+//   <command>
+//   ```
+//
+// verifyExamples (verify-examples.mjs) recognises exactly this tag+fence
+// sequence and stamps an adjacent output block + <!-- example-verified: -->
+// marker after a successful run.
+
+function renderExamples(feature) {
+  const examples = feature.examples;
+  if (!examples || examples.length === 0) return [];
+  const lines = [];
+  for (const entry of examples) {
+    const lang = (entry.lang && entry.lang.trim()) ? entry.lang.trim() : 'bash';
+    lines.push('<!-- example -->');
+    lines.push(`\`\`\`${lang}`);
+    lines.push(entry.command);
+    lines.push('```');
+    lines.push('');
+  }
+  return lines;
+}
+
 function renderFeature(audience, feature, directive) {
   const globs = featureSrcGlobs(feature);
   const lines = [
@@ -238,7 +330,24 @@ function renderFeature(audience, feature, directive) {
     feature.summary ? `${feature.summary}` : `Reference documentation for ${feature.slug}.`,
     '',
   ];
-  for (const s of (feature.spec_sections || [])) lines.push(s, '');
+  for (const s of (feature.spec_sections || [])) {
+    lines.push(s, '');
+    // Track D (issue #1131): emit a palette-themed mermaid diagram for logic-flow sections.
+    const section = { heading: feature.title || feature.slug, body: s };
+    if (isLogicFlowSection(section)) {
+      const diagram = generateExplainerDiagram(section);
+      if (diagram) {
+        lines.push('```mermaid');
+        lines.push(diagram);
+        lines.push('```');
+        lines.push('');
+      }
+    }
+  }
+  // Append the six LLM-targeted sections (issue #1129); empty fields are omitted.
+  lines.push(...renderFeatureSections(audience, feature));
+  // Append verified runnable examples (issue #1133); empty examples[] emits nothing.
+  lines.push(...renderExamples(feature));
   if (directive) lines.push(`<!-- regen-directive: ${directive} -->`, '');
   return lines.join('\n');
 }

@@ -37,7 +37,9 @@ SKILLS_DIR="$REPO_ROOT/skills"
 . "$REPO_ROOT/scripts/lib/install-helpers.sh"
 
 TURBO_REPO_DIR="${TURBO_REPO_DIR:-$HOME/.turbo/repo}"
-TURBO_REMOTE="https://github.com/tobihagemann/turbo.git"
+# autospec installs and updates track the berlinguyinca/turbo fork (carries the
+# autospec-tuned skill set). Override with TURBO_REMOTE to point elsewhere.
+TURBO_REMOTE="${TURBO_REMOTE:-https://github.com/berlinguyinca/turbo.git}"
 CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
 SUPERPOWERS_REPO_DIR="${SUPERPOWERS_REPO_DIR:-$HOME/.codex/superpowers}"
 SUPERPOWERS_REMOTE="${SUPERPOWERS_REMOTE:-https://github.com/obra/superpowers.git}"
@@ -351,15 +353,19 @@ bootstrap_peer_ecosystems() {
 
 bootstrap_turbo() {
     if [ -d "$TURBO_REPO_DIR/.git" ]; then
-        info "bootstrap_turbo: pulling tobihagemann/turbo at $TURBO_REPO_DIR"
+        info "bootstrap_turbo: pulling berlinguyinca/turbo at $TURBO_REPO_DIR"
         if [ "$DRY_RUN" -eq 0 ]; then
+            # Converge an existing clone onto the autospec-managed remote so a repo
+            # originally cloned from upstream switches to the fork on the next update.
+            # (Idempotent; preserves any 'upstream' remote the user added for PRs.)
+            git -C "$TURBO_REPO_DIR" remote set-url origin "$TURBO_REMOTE" 2>/dev/null || true
             # Tolerate pull failures (no remote configured, offline, etc.) — turbo
             # is a nice-to-have peer skill family; absence shouldn't block install.
             git -C "$TURBO_REPO_DIR" pull --ff-only 2>/dev/null \
                 || warn "bootstrap_turbo: pull failed (no remote or offline); using cached turbo"
         fi
     else
-        info "bootstrap_turbo: cloning tobihagemann/turbo to $TURBO_REPO_DIR"
+        info "bootstrap_turbo: cloning berlinguyinca/turbo to $TURBO_REPO_DIR"
         if [ "$DRY_RUN" -eq 0 ]; then
             git clone --depth 1 "$TURBO_REMOTE" "$TURBO_REPO_DIR" 2>/dev/null \
                 || { warn "bootstrap_turbo: clone failed; turbo skills will not be installed"; return 0; }

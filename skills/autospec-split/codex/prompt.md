@@ -63,14 +63,22 @@ classification path as the normal pipeline.
      user answers.
 4. **Verify selected spec is filed.**
    - The selected path must be under `docs/specs/` and end in `.md`.
-   - The selected file must be tracked on `origin/main` before Phase 3, so child
-     issues can cite a stable GitHub URL. Verify with:
-     `git fetch origin` and `git cat-file -e origin/main:<spec-path>`.
-   - If the selected file is missing from `origin/main`, stop and tell the user:
-     `Selected spec is not on origin/main yet: <spec-path>. Land the spec first,
+   - This mode accepts an optional `--base <branch>` flag (default `main`). The
+     base names the branch the spec must already be tracked on before Phase 3,
+     so child issues can cite a stable GitHub URL. With no flag the base is
+     `main` and every check below is byte-identical to the current behavior;
+     explore passes a sandbox branch as `--base <sandbox-branch>`.
+   - The selected file must be tracked on `<base>` before Phase 3. Verify with:
+     `git fetch origin` and `git cat-file -e <base>:<spec-path>`.
+   - If the selected file is missing from `<base>`, stop and tell the user:
+     `Selected spec is not on <base> yet: <spec-path>. Land the spec first,
      or run /autospec-define so Phase 2 can create and merge the spec PR.`
+   - Guardrail: under a non-main `--base <branch>`, no PR or issue targets
+     `main` — child issues link the `<base>` blob and the decomposer files
+     against `<base>` only.
 5. **Continue at Phase 3.** Capture `{selected_spec_path}` and its GitHub URL as
-   `https://github.com/{repo}/blob/main/{selected_spec_path}`. Run Phase 3 and
+   `https://github.com/{repo}/blob/<base>/{selected_spec_path}` (with the default
+   base this is `.../blob/main/...`, byte-unchanged). Run Phase 3 and
    Phase 3.5 using that selected spec. Then proceed to the existing Phase 3
    pre-impl gate.
 

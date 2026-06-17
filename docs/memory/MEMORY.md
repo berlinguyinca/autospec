@@ -33,6 +33,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [Autospec design preferences](feedback_autospec_design_prefs.md) — small-LLM target (60-120k ctx), correctness>>speed, tight imperative triggers, conservative guardrails, lock-step rule sacred
 - [Autospec monitor exit modes + recovery](feedback_monitor_silent_exit.md) — Phase 4 monitor silent-exits on complex integration work; relaunch is part of the workflow; subprocess mocks for tmux/osascript prevent test stalls
 - [Autospec decomposer + lockstep gotchas](feedback_autospec_decomposer_gotchas.md) — first new-skill issue MUST include structural sections (Self-update + Model tier + adapter row); codex/prompt.md needs leading blank line for lockstep; decomposer should NOT apply needs-autospec-template
+- [lint BODY_TOO_LONG counts injected metadata](feedback_lint_body_too_long_counts_injected_metadata.md) — Phase 3.5/3.75 append Model-fit + Shared-contracts blocks after the ≤400-word trim, so every classified child trips needs-quality-bar; blanket BODY_TOO_LONG-only flags are benign
 - [Admin-merge denial during autospec](feedback_admin_merge_denial.md) — `gh pr merge --admin` blocked by harness hook; needs settings.json permission rule for Phase 4 to flow
 - [/autospec autonomy scope](feedback_autospec_autonomy_scope.md) — auto-merge spec PRs, collapse low-stakes brainstorm to default-locks, surface only run/defer/refine + destructive-remote actions
 - [Skill per capability](feedback_autospec_skill_per_capability.md) — operator-facing capabilities ship as top-level /autospec-<verb> skills; inline sub-modes are convenience shortcuts only
@@ -44,14 +45,22 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [LLM validator + adaptive retry](feedback_llm_validator_adaptive_retry.md) — pair every LLM-output validator with a 5-attempt retry loop that feeds findings back as directives
 - [validate.sh has named-content checks](feedback_validate_sh_lockstep_checks.md) — renaming SKILL.md prose sections requires updating validate.sh checks too
 - [validate.sh lockstep duo gap](feedback_validate_sh_lockstep_duo_gap.md) — check_lockstep() must guard SKILL.md+codex/prompt.md duos, not just full trios
+- [Skill golden + derivation workflow](feedback_skill_golden_derivation_workflow.md) — editing any trio skill (esp. with autospec-block markers) needs re-derive codex/opencode AND regenerate tests/fixtures/skill-goldens sha256, or validate.sh fails closed
+- [Decompose: trio prose + goldens must be one issue](feedback_decompose_trio_prose_goldens_atomic.md) — never split "edit trio prose" and "regen goldens" into separate auto-implement issues; the prose-only intermediate fails validate closed (bit 3x in one run); combine into one implementer that Closes both
 - [jq test() regex metachar injection](feedback_jq_test_regex_metachar_injection.md) — interpolating host/user-derived values into jq test() is regex injection; dotted hostnames made claim self-clean delete the wrong worker's lock comment; use capture()+==
 - [Self-consistent test fixtures mask bugs](feedback_self_consistent_test_fixtures_mask_bugs.md) — tests that build fixtures with the SUT's own derivation expression can't catch a bug in it; the Claude transcript-slug `lstrip` bug shipped green for months. Pin against the real convention / live values; reproduce end-to-end
 
 # Infrastructure gotchas
 
+- [Installer excludes runtime libs](feedback_installer_excludes_runtime_libs.md) — install.sh drops scripts/lib/ runtime libs; autospec-explore hard-crashes on a clean install; ship-completeness doesn't catch it
+- [Explore codebase-signals false positives](feedback_explore_codebase_signals_false_positives.md) — TODO/FIXME grep matches prose, assets, and its own source; noise dominates ranking; constitution gate drops 0/45
+
 - [Heartbeat cross-repo collision](feedback_heartbeat_cross_repo_collision.md) — ~/.autospec/process-heartbeats/ is shared across repos; use path-scoped slug subdirs
 - [Bash RETURN trap leaks](feedback_bash_return_trap_leak.md) — RETURN traps leak into caller frames under set -u; use inline cleanup
 - [Bash set -e short-circuit aborts](feedback_bash_set_e_short_circuit.md) — `[ test ] && action` aborts under set -e when test fails; use if/then/fi for one-sided conditionals
+- [bash 3.2 process-sub + [ -f ] in tests](feedback_bash32_process_sub_test_file.md) — macOS bash 3.2 `[ -f <(...) ]` is false; bats tests must write to a real temp file before a --validate-file/[ -f ] helper
+- [Subagent cwd pinned to main checkout](feedback_subagent_cwd_pinned_to_main_checkout.md) — Agent subagents commit to the main checkout's branch, NOT the EnterWorktree worktree; do writes directly as the main agent, reserve subagents for read-only, or they contaminate parallel branches
+- [Per-session worktree isolation](feedback_per_session_worktree_isolation.md) — concurrent autospec/claude sessions stomp each other; start every edit in a fresh worktree off origin/main + pre-flight overlap scan + file/skill claim, never edit on a shared/in-flight branch
 - [OMC autopilot magic-keyword misfire](feedback_omc_autopilot_misfire.md) — system reminders containing "AUTOPILOT" auto-activate OMC autopilot mid-session; recover via state_write(active=false) + state_clear(skill-active)
 - [Mempalace miner flat-form gap](feedback_mempalace_miner_flat_form.md) — M3 miner matches both `metadata.type:` (spec) and `type:` (real CC files); fixture both variants
 - [Harness session-id env vars](reference_harness_session_id_envs.md) — `CLAUDE_CODE_SESSION_ID` is the stable per-session id (ps -o sess=0, no tty under tool calls); fallback chain for harness-neutral per-session locks; PPID fallback is unreliable

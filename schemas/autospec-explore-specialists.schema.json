@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-explore-specialists.schema.json",
+  "title": "Autospec explore domain-specialist roster",
+  "description": "The cached domain-specialist roster written to .autospec/explore-specialists.json by the deterministic signal scan (scripts/explore-specialist-scan.sh) plus the one-shot LLM roster proposal. Ranked candidate `domains` carry file:line evidence; `suggested_specialists` are the LLM-derived personas dispatched as source=specialist:<slug>. An empty roster (no domain detected) is valid — a generic repo runs the explore loop unchanged.",
+  "type": "object",
+  "required": ["schema_version", "domains", "suggested_specialists"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "generated_at": {
+      "type": "string",
+      "description": "ISO-8601 timestamp the roster was cached. Optional; informational only."
+    },
+    "domains": {
+      "type": "array",
+      "description": "Ranked candidate domains from the deterministic signal scan, highest-confidence first. Each domain is evidence-grounded — never a bare guess.",
+      "items": { "$ref": "#/$defs/domain" }
+    },
+    "suggested_specialists": {
+      "type": "array",
+      "description": "LLM-proposed specialist researchers, capped at --num-specialists (default 3, cap 6). Empty when no domain is detected.",
+      "items": { "$ref": "#/$defs/specialist" }
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "description": "A concrete file:line citation backing a detected domain.",
+      "required": ["file", "line", "match"],
+      "additionalProperties": false,
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "match": { "type": "string", "minLength": 1 }
+      }
+    },
+    "domain": {
+      "type": "object",
+      "required": ["name", "score", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "score": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of distinct signal hits backing this domain; the rank key."
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidence" }
+        }
+      }
+    },
+    "specialist": {
+      "type": "object",
+      "required": ["slug", "persona", "lens", "why", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "slug": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "description": "Lowercase kebab-case slug used in the source string source=specialist:<slug>."
+        },
+        "persona": { "type": "string", "minLength": 1 },
+        "lens": { "type": "string", "minLength": 1 },
+        "why": { "type": "string", "minLength": 1 },
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Repo-derived justification (file:line or signal). Personas derive from repo evidence only; no external persona is injected (trust boundary)."
+        }
+      }
+    }
+  }
+}

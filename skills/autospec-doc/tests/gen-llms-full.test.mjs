@@ -14,6 +14,18 @@
 //  10. generateLlmsFull: deterministic sort — changing page order does not change output
 //  11. writeLlmsFull: writes file to disk; second identical run reports written=false
 //  12. chunk markers contain the correct token-budget boundary annotation
+//  Track E (issue #1132):
+//  18. generateLlmsIndex: single H1 in output
+//  19. generateLlmsIndex: blockquote summary present
+//  20. generateLlmsIndex: described link sections (each link has a description)
+//  21. generateLlmsIndex: no duplicate headings
+//  22. generateLlmsIndex: empty pages → well-formed minimal output
+//  23. generateLlmsFull: top ToC with anchors present
+//  24. generateLlmsFull: per-section summary before each section
+//  25. generateLlmsFull: per-section approx_tokens annotation
+//  26. generateLlmsFull: reverse-routing block present
+//  27. generateLlmsFull: generated_at + commit stamp present
+//  28. generateLlmsFull: re-run idempotency (no-op diff with fixed stamp)
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,7 +37,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPTS_DIR = path.resolve(__dirname, '../scripts');
 
-const { generateLlmsFull, writeLlmsFull, fillManifest } =
+const { generateLlmsFull, writeLlmsFull, fillManifest, generateLlmsIndex, writeLlmsIndex } =
   await import(path.join(SCRIPTS_DIR, 'gen-llms-full.mjs'));
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -241,4 +253,360 @@ test('chunk markers include a boundary token count annotation', () => {
   assert.ok(markerMatch, 'chunk marker must match pattern <!-- llms-chunk: chunk=N approx_tokens=N -->');
   const chunkNum = parseInt(markerMatch[1], 10);
   assert.ok(chunkNum >= 1, 'chunk number must be >= 1');
+});
+
+// ── Track B new tests (issue #1130) ───────────────────────────────────────────
+
+// Fixture corpus for Track B: contains an H1, a cli marker, and a concept marker
+const TRACK_B_PAGES = [
+  {
+    audience: 'developer',
+    feature: 'autospec-run',
+    path: 'docs/developer/features/autospec-run.md',
+    content: [
+      '# autospec-run',
+      '',
+      'The main entry point for running the autospec pipeline.',
+      '',
+      '<!-- autospec-concept: lock-step rule -->',
+      'Every phase-1 change locks all related trios simultaneously.',
+      '',
+      '<!-- autospec-concept: worktree isolation -->',
+      'Each implementation runs in an isolated git worktree.',
+      '',
+      '## CLI',
+      '`/autospec-run` — run the implementation loop',
+    ].join('\n'),
+  },
+  {
+    audience: 'developer',
+    feature: 'autospec-define',
+    path: 'docs/developer/features/autospec-define.md',
+    content: [
+      '# autospec-define',
+      '',
+      'Plan a feature and decompose into GitHub issues.',
+    ].join('\n'),
+  },
+];
+
+// ── Test 13: modules[] carry name, summary, source_anchor, approx_tokens ──────
+
+test('fillManifest: modules carry name, source_anchor, and approx_tokens', () => {
+  const manifest = { modules: [], cli_entry_points: [], http_endpoints: [], concepts: [], faq: [] };
+  fillManifest(manifest, TRACK_B_PAGES);
+  assert.ok(manifest.modules.length > 0, 'modules must be non-empty');
+  for (const mod of manifest.modules) {
+    assert.ok(typeof mod.name === 'string' && mod.name.length > 0,
+      `module must have name field; got ${JSON.stringify(mod)}`);
+    assert.ok(typeof mod.summary === 'string' && mod.summary.length > 0,
+      `module must have summary; got ${JSON.stringify(mod)}`);
+    assert.ok(typeof mod.source_anchor === 'string' && mod.source_anchor.includes('#L'),
+      `module must have source_anchor with #L; got ${JSON.stringify(mod)}`);
+    assert.ok(typeof mod.approx_tokens === 'number' && mod.approx_tokens > 0,
+      `module must have approx_tokens > 0; got ${JSON.stringify(mod)}`);
+    assert.ok(Array.isArray(mod.public_api),
+      `module must have public_api array; got ${JSON.stringify(mod)}`);
+    assert.ok(typeof mod.doc === 'string',
+      `module must have doc field; got ${JSON.stringify(mod)}`);
+  }
+});
+
+// ── Test 14: concepts[] carry source_anchor and approx_tokens ─────────────────
+
+test('fillManifest: concepts carry source_anchor and approx_tokens', () => {
+  const manifest = { modules: [], cli_entry_points: [], http_endpoints: [], concepts: [], faq: [] };
+  fillManifest(manifest, TRACK_B_PAGES);
+  assert.ok(manifest.concepts.length >= 2, 'expected at least 2 concepts from fixture');
+  for (const concept of manifest.concepts) {
+    assert.ok(typeof concept.source_anchor === 'string' && concept.source_anchor.includes('#L'),
+      `concept must have source_anchor with #L; got ${JSON.stringify(concept)}`);
+    assert.ok(typeof concept.approx_tokens === 'number' && concept.approx_tokens > 0,
+      `concept must have approx_tokens > 0; got ${JSON.stringify(concept)}`);
+  }
+});
+
+// ── Test 15: no literal <name> placeholder in manifest output ──────────────────
+
+test('fillManifest: no literal <name> placeholder survives in any field', () => {
+  // Inject a page that contains the literal placeholder string in a concept marker
+  const pagesWithPlaceholder = [
+    ...TRACK_B_PAGES,
+    {
+      audience: 'developer',
+      feature: 'bad',
+      path: 'docs/developer/features/bad.md',
+      content: '# Bad page\n\n<!-- autospec-concept: <name> -->\nShould be skipped.\n',
+    },
+  ];
+  const manifest = { modules: [], cli_entry_points: [], http_endpoints: [], concepts: [], faq: [] };
+  fillManifest(manifest, pagesWithPlaceholder);
+  const conceptNames = manifest.concepts.map(c => c.name);
+  assert.ok(!conceptNames.includes('<name>'),
+    `literal <name> placeholder must not appear in concepts; got ${JSON.stringify(conceptNames)}`);
+  // Also check no field in manifest JSON contains literal <name>
+  const json = JSON.stringify(manifest);
+  assert.ok(!json.includes('"<name>"'),
+    `literal "<name>" must not appear in manifest JSON; found: ${json.slice(0, 200)}`);
+});
+
+// ── Test 16: cli_entry_points[] non-empty when pages have CLI sections ─────────
+
+test('fillManifest: cli_entry_points extracted from pages', () => {
+  const manifest = { modules: [], cli_entry_points: [], http_endpoints: [], concepts: [], faq: [] };
+  fillManifest(manifest, TRACK_B_PAGES);
+  // TRACK_B_PAGES has a CLI section with `/autospec-run`; cli_entry_points should be populated
+  assert.ok(Array.isArray(manifest.cli_entry_points),
+    'cli_entry_points must be an array');
+  // The fixture has CLI content — at least one entry is expected
+  assert.ok(manifest.cli_entry_points.length > 0,
+    `cli_entry_points must be non-empty for pages with CLI sections; got ${JSON.stringify(manifest.cli_entry_points)}`);
+});
+
+// ── Test 17: fixture corpus produces zero placeholder strings ─────────────────
+
+test('fillManifest: fixture corpus produces non-empty modules and concepts, zero placeholders', () => {
+  const manifest = { modules: [], cli_entry_points: [], http_endpoints: [], concepts: [], faq: [] };
+  fillManifest(manifest, TRACK_B_PAGES);
+  assert.ok(manifest.modules.length > 0, 'modules must be non-empty');
+  assert.ok(manifest.concepts.length > 0, 'concepts must be non-empty');
+  const json = JSON.stringify(manifest);
+  assert.ok(!json.includes('<name>'),
+    `no <name> placeholder must survive; manifest JSON: ${json.slice(0, 300)}`);
+});
+
+// ── Track E tests (issue #1132) ───────────────────────────────────────────────
+
+// Fixture for Track E: pages with varied features + sections
+const TRACK_E_PAGES = [
+  {
+    audience: 'user',
+    feature: 'export-pipeline',
+    path: 'docs/user/features/export-pipeline.md',
+    content: [
+      '# Export Pipeline',
+      '',
+      'Streams records out to downstream sinks.',
+      '',
+      '## Overview',
+      '',
+      'The export pipeline processes batches of records.',
+    ].join('\n'),
+  },
+  {
+    audience: 'developer',
+    feature: 'auth',
+    path: 'docs/developer/features/auth.md',
+    content: [
+      '# Authentication',
+      '',
+      'Token-based login architecture.',
+      '',
+      '## Overview',
+      '',
+      'Supports OAuth2 and API keys.',
+    ].join('\n'),
+  },
+  {
+    audience: 'user',
+    feature: null,
+    path: 'docs/user/index.md',
+    content: [
+      '# User Guide',
+      '',
+      'Entry point for user-facing documentation.',
+    ].join('\n'),
+  },
+];
+
+// ── Test 18: generateLlmsIndex — single H1 in output ──────────────────────────
+
+test('generateLlmsIndex: output contains exactly one H1 heading', () => {
+  const output = generateLlmsIndex({ pages: TRACK_E_PAGES });
+  assert.ok(typeof output === 'string', 'should return a string');
+  const h1Matches = output.match(/^# .+/gm);
+  assert.ok(h1Matches !== null, 'output must contain at least one H1');
+  assert.strictEqual(h1Matches.length, 1, `output must have exactly one H1; got ${h1Matches.length}: ${JSON.stringify(h1Matches)}`);
+});
+
+// ── Test 19: generateLlmsIndex — blockquote summary present ───────────────────
+
+test('generateLlmsIndex: output contains a blockquote summary line', () => {
+  const output = generateLlmsIndex({ pages: TRACK_E_PAGES });
+  assert.ok(output.includes('\n> '), 'output must contain a blockquote line (> ...)');
+});
+
+// ── Test 20: generateLlmsIndex — described links (each link has a description) ─
+
+test('generateLlmsIndex: each link entry has a one-line description', () => {
+  const output = generateLlmsIndex({ pages: TRACK_E_PAGES });
+  // llmstxt.org: links in sections look like:  - [Title](url): Description
+  const linkLines = output.split('\n').filter(l => /^- \[.+\]\(.+\):/.test(l));
+  assert.ok(linkLines.length > 0, `output must contain at least one described link; output:\n${output}`);
+  for (const line of linkLines) {
+    // After the colon there must be non-empty description text
+    const descPart = line.replace(/^- \[.+\]\(.+\):\s*/, '').trim();
+    assert.ok(descPart.length > 0, `link line must have a non-empty description: "${line}"`);
+  }
+});
+
+// ── Test 21: generateLlmsIndex — no duplicate headings ────────────────────────
+
+test('generateLlmsIndex: no duplicate headings in output', () => {
+  const output = generateLlmsIndex({ pages: TRACK_E_PAGES });
+  const headings = output.split('\n').filter(l => /^#{1,6} /.test(l));
+  const seen = new Set();
+  for (const h of headings) {
+    assert.ok(!seen.has(h), `duplicate heading found: "${h}"`);
+    seen.add(h);
+  }
+});
+
+// ── Test 22: generateLlmsIndex — empty pages → well-formed minimal output ──────
+
+test('generateLlmsIndex: empty pages array returns a well-formed string', () => {
+  let result;
+  assert.doesNotThrow(() => { result = generateLlmsIndex({ pages: [] }); });
+  assert.ok(typeof result === 'string', 'should return a string');
+  // Must still have a single H1
+  const h1Matches = result.match(/^# .+/gm);
+  assert.ok(h1Matches !== null && h1Matches.length === 1, 'empty-pages output must still have exactly one H1');
+});
+
+// ── Test 23: generateLlmsFull — top ToC with anchors present ──────────────────
+
+test('generateLlmsFull (Track E): top ToC with anchors present', () => {
+  const output = generateLlmsFull({ pages: TRACK_E_PAGES });
+  // ToC section: ## Table of Contents or similar, with anchor links [text](#anchor)
+  assert.ok(output.includes('Table of Contents') || output.includes('## Contents'),
+    'output must contain a table of contents section');
+  // Anchors look like (#something)
+  assert.ok(/\(#[a-z0-9-]+\)/.test(output),
+    'ToC must contain at least one anchor link like (#section-name)');
+});
+
+// ── Test 24: generateLlmsFull — per-section summary before each section ────────
+
+test('generateLlmsFull (Track E): per-section summary (1-2 lines) before each section', () => {
+  const output = generateLlmsFull({ pages: TRACK_E_PAGES });
+  // A summary comment block looks like: <!-- summary: ... --> or plain text before the delimiter
+  // We check that summary annotations appear somewhere in the output
+  assert.ok(
+    output.includes('<!-- section-summary:') || output.includes('<!-- summary:'),
+    'output must contain per-section summary annotations'
+  );
+});
+
+// ── Test 25: generateLlmsFull — per-section approx_tokens annotation ──────────
+
+test('generateLlmsFull (Track E): per-section approx_tokens annotation present', () => {
+  const output = generateLlmsFull({ pages: TRACK_E_PAGES });
+  assert.ok(
+    /approx_tokens=\d+/.test(output),
+    'output must contain per-section approx_tokens=N annotations'
+  );
+});
+
+// ── Test 26: generateLlmsFull — reverse-routing block present ─────────────────
+
+test('generateLlmsFull (Track E): reverse-routing block (source→doc mapping) present', () => {
+  const output = generateLlmsFull({ pages: TRACK_E_PAGES });
+  assert.ok(
+    output.includes('<!-- reverse-routing') || output.includes('## Source Routing') || output.includes('source-routing'),
+    'output must contain a reverse-routing block mapping source files to docs'
+  );
+});
+
+// ── Test 27: generateLlmsFull — generated_at + commit stamp present ───────────
+
+test('generateLlmsFull (Track E): generated_at and commit stamp present', () => {
+  const output = generateLlmsFull({ pages: TRACK_E_PAGES, generatedAt: '2026-06-16T00:00:00Z', commit: 'abc1234' });
+  assert.ok(output.includes('generated_at'), 'output must contain generated_at stamp');
+  assert.ok(output.includes('2026-06-16T00:00:00Z'), 'output must contain the provided generated_at value');
+  assert.ok(output.includes('abc1234'), 'output must contain the commit hash');
+});
+
+// ── Test 28: generateLlmsFull — re-run idempotency with fixed stamp ───────────
+
+test('generateLlmsFull (Track E): re-run with same inputs produces identical output (idempotent)', () => {
+  const opts = { pages: TRACK_E_PAGES, generatedAt: '2026-06-16T00:00:00Z', commit: 'abc1234' };
+  const run1 = generateLlmsFull(opts);
+  const run2 = generateLlmsFull(opts);
+  assert.strictEqual(run1, run2, 'two runs with identical inputs must produce byte-identical output');
+});
+
+// ── Round 2 (content fidelity): real summaries, source→doc routing, real public_api ──
+
+// A page shaped like real generator output: H1, H2, a MULTI-LINE autospec-doc-scope
+// comment whose interior `src:` line previously leaked in as the "summary", an italic
+// audience-boilerplate line, then the real feature summary prose.
+const SCOPED_PAGE = {
+  audience: 'developer',
+  feature: 'export-pipeline',
+  path: 'docs/developer/features/export-pipeline.md',
+  content: [
+    '# Export Pipeline (developer)',
+    '',
+    '## Export Pipeline',
+    '',
+    '<!-- autospec-doc-scope:',
+    '  src: ["src/export/pipeline.mjs"]',
+    '  reason: "export-pipeline reference for developer"',
+    '  generated: true',
+    '-->',
+    '',
+    '_Reference for the **developer** audience (architecture, APIs, extending)._',
+    '',
+    'Streams records out to downstream sinks with bounded back-pressure.',
+    '',
+  ].join('\n'),
+};
+
+test('R2: llms.txt link description is the real feature summary, not the src glob', () => {
+  const idx = generateLlmsIndex({ pages: [SCOPED_PAGE] });
+  assert.ok(idx.includes('Streams records out to downstream sinks with bounded back-pressure.'),
+    'description must be the real prose summary');
+  assert.ok(!/src:\s*\[/.test(idx), 'description must NOT be the src: [...] glob');
+});
+
+test('R2: manifest module summary is the real prose, not the src glob', () => {
+  const manifest = { schema_version: '1.0', modules: [], cli_entry_points: [], concepts: [], faq: [] };
+  fillManifest(manifest, [SCOPED_PAGE]);
+  const mod = manifest.modules.find(m => m.path === SCOPED_PAGE.path);
+  assert.ok(mod, 'module entry exists');
+  assert.strictEqual(mod.summary, 'Streams records out to downstream sinks with bounded back-pressure.');
+  assert.ok(!mod.summary.includes('src:'), 'summary must not contain the src glob');
+});
+
+test('R2: reverse-routing maps source files to docs, not doc-to-itself identity', () => {
+  const out = generateLlmsFull({ pages: [SCOPED_PAGE] });
+  assert.ok(out.includes('src/export/pipeline.mjs -> docs/developer/features/export-pipeline.md'),
+    'reverse-routing must map the source file to the doc that references it');
+  assert.ok(!/docs\/developer\/features\/export-pipeline\.md#L1 -> /.test(out),
+    'reverse-routing must NOT emit the identity doc#L1 -> doc form');
+});
+
+test('R2: manifest public_api is extracted from the real code_entry_points source', () => {
+  const repoRoot = makeTmpDir();
+  fs.mkdirSync(path.join(repoRoot, 'src', 'export'), { recursive: true });
+  fs.writeFileSync(path.join(repoRoot, 'src', 'export', 'pipeline.mjs'), [
+    'export function flushBatch() {}',
+    'export const MAX_RETRIES = 5;',
+    'export class Sink {}',
+    'function privateHelper() {}',
+  ].join('\n'));
+  const manifest = { schema_version: '1.0', modules: [], cli_entry_points: [], concepts: [], faq: [] };
+  fillManifest(manifest, [SCOPED_PAGE], { repoRoot });
+  const mod = manifest.modules.find(m => m.path === SCOPED_PAGE.path);
+  assert.ok(mod, 'module entry exists');
+  for (const sym of ['flushBatch', 'MAX_RETRIES', 'Sink']) {
+    assert.ok(mod.public_api.includes(sym), `public_api must include exported ${sym}`);
+  }
+  assert.ok(!mod.public_api.includes('privateHelper'), 'non-exported symbols must be excluded');
+});
+
+test('R2: generateLlmsFull stays deterministic with scoped pages', () => {
+  const a = generateLlmsFull({ pages: [SCOPED_PAGE] });
+  const b = generateLlmsFull({ pages: [SCOPED_PAGE] });
+  assert.strictEqual(a, b, 'scoped-page output must be byte-identical across runs');
 });

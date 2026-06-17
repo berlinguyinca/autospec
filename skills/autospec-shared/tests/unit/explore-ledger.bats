@@ -118,6 +118,75 @@ valid_record() {
     echo "$output" | jq -e '.["internet"].failed == 3'
 }
 
+# ── refutation-rate (Issue D) ────────────────────────────────────────────────
+
+@test "append accepts the refuted outcome (verify-stage refutation record)" {
+    rec="$(valid_record 1 internet 'bogus claim' small 0.8 0 0 refuted)"
+    run bash "$LEDGER_SH" --append "$rec"
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$AUTOSPEC_EXPLORE_LEDGER")" -eq 1 ]
+}
+
+@test "stats --json records per-source refuted count separate from filed" {
+    # Two filed (issue!=0) + three refuted (issue=0) for internet.
+    bash "$LEDGER_SH" --append "$(valid_record 1 internet 'A' small 0.8 301 0 merged_clean)"
+    bash "$LEDGER_SH" --append "$(valid_record 1 internet 'B' small 0.8 302 0 qa_failed)"
+    bash "$LEDGER_SH" --append "$(valid_record 1 internet 'R1' small 0.8 0 0 refuted)"
+    bash "$LEDGER_SH" --append "$(valid_record 1 internet 'R2' small 0.8 0 0 refuted)"
+    bash "$LEDGER_SH" --append "$(valid_record 1 internet 'R3' small 0.8 0 0 refuted)"
+    run bash "$LEDGER_SH" --stats --json
+    [ "$status" -eq 0 ]
+    # Refuted records (issue=0) do NOT inflate filed.
+    echo "$output" | jq -e '.["internet"].filed == 2'
+    echo "$output" | jq -e '.["internet"].refuted == 3'
+}
+
+@test "source-weights down-weights a high-refutation source; converges (no oscillation)" {
+    WEIGHTS_SH="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/explore-source-weights.sh"
+    # spec-vs-code: 4 clean, 0 refuted -> no down-weight.
+    for i in 1 2 3 4; do
+        bash "$LEDGER_SH" --append "$(valid_record 1 spec-vs-code "C$i" small 0.8 $((400+i)) 0 merged_clean)"
+    done
+    # internet: 4 clean, 6 refuted -> heavy down-weight.
+    for i in 1 2 3 4; do
+        bash "$LEDGER_SH" --append "$(valid_record 1 internet "C$i" small 0.8 $((500+i)) 0 merged_clean)"
+    done
+    for i in 1 2 3 4 5 6; do
+        bash "$LEDGER_SH" --append "$(valid_record 1 internet "R$i" small 0.8 0 0 refuted)"
+    done
+    run bash "$WEIGHTS_SH" --ledger "$AUTOSPEC_EXPLORE_LEDGER" --alpha 5
+    [ "$status" -eq 0 ]
+    # spec-vs-code has zero refutations -> base weight unchanged.
+    sc="$(echo "$output" | jq -r '.["spec-vs-code"]')"
+    [ "$sc" = "1.0" ] || [ "$sc" = "1" ]
+    # internet base = (4 + 5*0.4)/(4+5) = 0.6667; refutation rate 6/10 down-weights it.
+    iw="$(echo "$output" | jq -r '.["internet"]')"
+    below="$(python3 -c "print(float('$iw') < 0.6667)")"
+    [ "$below" = "True" ]
+    # Stays in [0,1] and does NOT go negative/oscillate (bounded multiplier).
+    inrange="$(python3 -c "w=float('$iw'); print(0.0 <= w <= 1.0)")"
+    [ "$inrange" = "True" ]
+    # Determinism: a second run yields the identical weight (converges, no flip).
+    run bash "$WEIGHTS_SH" --ledger "$AUTOSPEC_EXPLORE_LEDGER" --alpha 5
+    iw2="$(echo "$output" | jq -r '.["internet"]')"
+    [ "$iw" = "$iw2" ]
+}
+
+@test "source-weights does NOT starve a useful but occasionally-refuted source" {
+    WEIGHTS_SH="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/explore-source-weights.sh"
+    # spec-vs-code: 10 clean, 1 refuted -> low refutation rate, weight stays high.
+    for i in $(seq 1 10); do
+        bash "$LEDGER_SH" --append "$(valid_record 1 spec-vs-code "C$i" small 0.8 $((600+i)) 0 merged_clean)"
+    done
+    bash "$LEDGER_SH" --append "$(valid_record 1 spec-vs-code 'R1' small 0.8 0 0 refuted)"
+    run bash "$WEIGHTS_SH" --ledger "$AUTOSPEC_EXPLORE_LEDGER" --alpha 5
+    [ "$status" -eq 0 ]
+    iw="$(echo "$output" | jq -r '.["spec-vs-code"]')"
+    # Base = (10+5*1.0)/15 = 1.0; 1/11 refutation rate barely dents it (>0.9).
+    high="$(python3 -c "print(float('$iw') > 0.9)")"
+    [ "$high" = "True" ]
+}
+
 @test "stats default (human table) exits 0 and mentions source" {
     bash "$LEDGER_SH" --append "$(valid_record 1 spec-vs-code 'A' small 0.8 101 0 merged_clean)"
     run bash "$LEDGER_SH" --stats

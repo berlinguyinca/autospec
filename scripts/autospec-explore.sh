@@ -42,9 +42,15 @@ MAX_ISSUES_PER_ROUND=5
 BUDGET_TOKENS=""
 BUDGET_HOURS=""
 SANDBOX_SLUG=""
-RESEARCH_SOURCES="spec-vs-code,prior-reports,codebase-signals,open-issues,source-analysis,internet"
+RESEARCH_SOURCES="spec-vs-code,prior-reports,codebase-signals,open-issues,source-analysis,dependency-health,internet,quality-resilience,dogfooding,self-leverage,style-normalization"
 NO_INTERNET=0
 INTERNET_ALLOWLIST=""
+SPECIALISTS_MODE="discover"
+NUM_SPECIALISTS=3
+SPECIALISTS_ARG=""
+AUTONOMOUS=0
+QA_GATE=0
+QA_GATE_PASS_ON_PARTIAL=0
 PROMPT=""
 
 usage() {
@@ -60,6 +66,18 @@ Options:
   --research-sources LIST     Comma-separated researcher names.
   --no-internet               Disable the internet researcher.
   --internet-allowlist LIST   Pass-through to explore-research/internet.sh.
+  --specialists-mode MODE     Domain-specialist roster mode (Issue E2):
+                                discover (default) | ask | explicit | off.
+  --num-specialists N         Roster size for discover/ask (default 3, cap 6).
+  --specialists LIST          Explicit roster slug:persona,... (explicit mode).
+  --autonomous                Non-interactive run: discover mode auto-selects the
+                              top-N specialists and never blocks on confirmation.
+  --qa-gate                   Run scripts/explore-qa-gate.sh ONCE at loop
+                              termination and gate the promotion-readiness
+                              output by its verdict (default OFF — promotion
+                              output is byte-unchanged without this flag).
+  --qa-gate-pass-on-partial   Treat a PARTIAL gate verdict as PASS (default
+                              PARTIAL blocks, matching QA's PARTIAL!=PASS rule).
 EOF
 }
 
@@ -74,6 +92,12 @@ while [ "$#" -gt 0 ]; do
         --research-sources)      shift; RESEARCH_SOURCES="$1" ;;
         --no-internet)           NO_INTERNET=1 ;;
         --internet-allowlist)    shift; INTERNET_ALLOWLIST="$1" ;;
+        --specialists-mode)      shift; SPECIALISTS_MODE="$1" ;;
+        --num-specialists)       shift; NUM_SPECIALISTS="$1" ;;
+        --specialists)           shift; SPECIALISTS_ARG="$1" ;;
+        --autonomous)            AUTONOMOUS=1 ;;
+        --qa-gate)               QA_GATE=1 ;;
+        --qa-gate-pass-on-partial) QA_GATE_PASS_ON_PARTIAL=1 ;;
         -h|--help)               usage; exit 0 ;;
         --) shift; PROMPT="${PROMPT:-$*}"; break ;;
         -*) echo "autospec-explore: unknown flag: $1" >&2; usage; exit 2 ;;
@@ -106,6 +130,26 @@ fi
 
 cd "$REPO_ROOT" || { echo "autospec-explore: repo root unavailable: $REPO_ROOT" >&2; exit 2; }
 mkdir -p .autospec
+
+# ── Domain-specialist roster discovery + autonomy detection (Issue E2). ────────
+# Mark the run autonomous when --autonomous was passed OR no interactive TTY is
+# attached; the research cycle then auto-selects the top-N specialists in
+# `discover` mode rather than blocking on an AskUserQuestion confirm (which is an
+# interactive orchestrator/SKILL-prose responsibility, not a deterministic one).
+if [ "$AUTONOMOUS" -eq 1 ] || [ ! -t 0 ]; then
+    export AUTOSPEC_EXPLORE_AUTONOMOUS=1
+fi
+# For discover/ask, populate the cached roster up front (idempotent; generic
+# repos yield an empty roster and the loop runs exactly as today). off/explicit
+# need no scan.
+case "$SPECIALISTS_MODE" in
+    discover|ask)
+        if [ -x "$SCRIPT_DIR/explore-specialist-scan.sh" ]; then
+            AUTOSPEC_NUM_SPECIALISTS="$NUM_SPECIALISTS" \
+                bash "$SCRIPT_DIR/explore-specialist-scan.sh" >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
 
 # Source shared libs. These are REQUIRED — without them the loop driver and
 # harness detection are unavailable. If the installer failed to ship lib/ (see
@@ -261,6 +305,183 @@ invoke_drain() {
     return 0
 }
 
+# >>> explore-spec-first-filing >>>  (issue #1102 — extracted for bats coverage)
+# Raw per-round filing: turn the ranked proposals into bare auto-implement
+# issues via `gh issue create`. Used as the FALLBACK path only, when the
+# spec-first /autospec-define handoff is unavailable or fails. Reads the
+# loop-scoped vars (iter, research_json, iter_dir, SANDBOX_BRANCH,
+# RESEARCH_SOURCES) and updates issues_filed / filed_issue_nums in place.
+_explore_raw_file_round() {
+    [ "$proposals_count" -gt 0 ] || return 0
+    command -v gh >/dev/null 2>&1 || return 0
+    local props_file title src complexity conf marker body issue_url issue_num \
+        norm_title rec
+    props_file="$iter_dir/proposals.tsv"
+    python3 -c "
+import json
+d = json.load(open('$research_json'))
+for p in d.get('proposals', []):
+    title = (p.get('title','') or '').replace(chr(10),' ').replace(chr(9),' ')
+    src = (p.get('source','') or 'unknown').replace(chr(10),' ').replace(chr(9),' ')
+    comp = (p.get('estimated_complexity','') or 'medium').lower()
+    try:
+        conf = float(p.get('confidence', 0.5))
+    except Exception:
+        conf = 0.5
+    if comp not in ('small','medium','large'):
+        comp = 'medium'
+    if conf < 0: conf = 0.0
+    if conf > 1: conf = 1.0
+    print('%s\t%s\t%s\t%.2f' % (title, src, comp, conf))
+" > "$props_file" 2>/dev/null || : > "$props_file"
+
+    while IFS="$(printf '\t')" read -r title src complexity conf; do
+        [ -z "$title" ] && continue
+        [ -n "$src" ] || src="unknown"
+        [ -n "$complexity" ] || complexity="medium"
+        [ -n "$conf" ] || conf="0.50"
+        # Canonical explore-ledger marker — MUST byte-match the rebuild
+        # parser grammar. Appended as the LAST line of the body.
+        marker="<!-- explore-ledger source=$src complexity=$complexity confidence=$conf round=$iter -->"
+        body="Auto-filed by /autospec-explore round $iter (sandbox=$SANDBOX_BRANCH).
+
+Source: research cycle ($RESEARCH_SOURCES).
+
+$marker"
+        issue_url=""
+        issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement 2>/dev/null)" || issue_url=""
+        if [ -z "$issue_url" ]; then
+            # Retry with stderr visible (gh diagnostics no longer suppressed);
+            # stdout (the issue URL) is still captured into issue_url.
+            issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement)" || issue_url=""
+        fi
+        [ -z "$issue_url" ] && continue
+        issues_filed=$((issues_filed + 1))
+        # Extract trailing issue number from the returned URL.
+        issue_num="$(printf '%s' "$issue_url" | sed -E 's#.*/([0-9]+)[[:space:]]*$#\1#')"
+        case "$issue_num" in
+            ''|*[!0-9]*) issue_num=0 ;;
+        esac
+        # Record a pending ledger entry for the filed issue (best-effort).
+        if [ "$issue_num" -gt 0 ]; then
+            filed_issue_nums="$filed_issue_nums $issue_num"
+            norm_title="$(_ledger_normalize_title "$title")"
+            rec="$(jq -cn \
+                --argjson round "$iter" \
+                --arg source "$src" \
+                --arg title "$title" \
+                --arg norm "$norm_title" \
+                --arg complexity "$complexity" \
+                --argjson confidence "$conf" \
+                --argjson issue "$issue_num" \
+                --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                '{round:$round, source:$source, title:$title, norm_title:$norm, complexity:$complexity, confidence:$confidence, issue:$issue, pr:0, outcome:"pending", reason:"", ts:$ts}' \
+                2>/dev/null)" || rec=""
+            [ -n "$rec" ] && _ledger_append "$rec"
+        fi
+    done < "$props_file"
+}
+
+# Resolve + run the /autospec-define existing-spec decompose for the committed
+# round spec, ALWAYS passing --base <sandbox-branch> so the spec-tracking gate
+# and child-issue blob URLs resolve against the sandbox, never main. Returns
+# the dispatcher's exit code (non-zero — or 3 for a missing dispatcher — drives
+# the caller's fallback). AUTOSPEC_EXPLORE_ROUND_DEFINE_CMD overrides the
+# handoff for tests; it receives AUTOSPEC_DEFINE_ARGS in its environment.
+_explore_round_decompose() {
+    local spec_path="$1" args
+    args="--base $SANDBOX_BRANCH $spec_path"
+    if [ -n "${AUTOSPEC_EXPLORE_ROUND_DEFINE_CMD:-}" ]; then
+        AUTOSPEC_DEFINE_ARGS="$args" bash -c "$AUTOSPEC_EXPLORE_ROUND_DEFINE_CMD"
+        return $?
+    fi
+    autospec_harness_resolve_dispatcher 2>/dev/null || true
+    [ -n "${AUTOSPEC_HARNESS_DISPATCHER:-}" ] || return 3
+    case "$AUTOSPEC_HARNESS_KIND" in
+        claude|opencode)
+            "$AUTOSPEC_HARNESS_DISPATCHER" "/autospec-define" "$args" ;;
+        codex)
+            "$AUTOSPEC_HARNESS_DISPATCHER" exec --skip-git-repo-check "/autospec-define $args" ;;
+        *) return 3 ;;
+    esac
+}
+
+# Spec-first per-round filing (issue #1102): render the round spec, commit +
+# push it to the SANDBOX branch BEFORE decomposition, then decompose it into
+# linked auto-implement issues via /autospec-define --base <sandbox>. On a
+# missing or failing define handoff, log code_health:explore_define_unavailable,
+# keep the committed round spec, and fall back to raw `gh issue create` filing
+# for that round only — the loop never stalls.
+_explore_file_round() {
+    [ "$proposals_count" -gt 0 ] || return 0
+
+    local slug spec_path define_rc
+    slug="$(printf '%s' "$SANDBOX_BRANCH" | sed 's#.*/##')"
+    [ -n "$slug" ] || slug="explore"
+    spec_path="docs/specs/$(date +%Y-%m-%d)-explore-${slug}-round-${iter}-design.md"
+
+    # 1. Render the round spec from the ranked proposals (deterministic).
+    if ! bash "$SCRIPT_DIR/gen-explore-round-spec.sh" "$research_json" \
+        --round "$iter" --branch "$SANDBOX_BRANCH" --out "$spec_path" 2>/dev/null; then
+        echo "code_health:explore_round_spec_render_failed round=$iter" >&2
+        _explore_raw_file_round
+        return 0
+    fi
+
+    # 2. Commit + push the round spec to the SANDBOX branch BEFORE any issue
+    #    links it (no dangling blob URL). Stage the spec EXPLICITLY — never
+    #    `git add -A` inside the loop.
+    git add "$spec_path" 2>/dev/null || true
+    if ! git diff --cached --quiet -- "$spec_path" 2>/dev/null; then
+        git commit -q -m "docs(explore): round $iter design spec ($slug)" \
+            -- "$spec_path" 2>/dev/null || true
+        git push -q origin "HEAD:$SANDBOX_BRANCH" 2>/dev/null || true
+    fi
+
+    # 3. Snapshot open auto-implement issue numbers before decompose so we can
+    #    diff after to count what /autospec-define filed (best-effort; tolerates
+    #    gh absent or returning empty). Numbers are newline-separated integers.
+    local pre_nums post_nums new_num
+    pre_nums=""
+    if command -v gh >/dev/null 2>&1; then
+        pre_nums="$(gh issue list --label auto-implement --json number \
+            --jq '.[].number' 2>/dev/null)" || pre_nums=""
+    fi
+
+    # 4. Decompose via /autospec-define --base <sandbox> (never targets main).
+    define_rc=0
+    _explore_round_decompose "$spec_path" || define_rc=$?
+
+    if [ "$define_rc" -ne 0 ]; then
+        # 5. Fallback — keep the committed spec, raw-file this round, continue.
+        echo "code_health:explore_define_unavailable round=$iter rc=$define_rc spec=$spec_path" >&2
+        _explore_raw_file_round
+        return 0
+    fi
+
+    # 6. On define success: diff the issue-number sets to count what was filed.
+    #    Guard: gh absent or snapshot empty → skip (issues_filed stays 0).
+    if command -v gh >/dev/null 2>&1; then
+        post_nums="$(gh issue list --label auto-implement --json number \
+            --jq '.[].number' 2>/dev/null)" || post_nums=""
+        if [ -n "$post_nums" ]; then
+            while IFS= read -r new_num; do
+                [ -z "$new_num" ] && continue
+                case "$new_num" in ''|*[!0-9]*) continue ;; esac
+                # Only count if absent from the pre-snapshot.
+                if ! printf '%s\n' "$pre_nums" | grep -qxF "$new_num" 2>/dev/null; then
+                    issues_filed=$((issues_filed + 1))
+                    filed_issue_nums="$filed_issue_nums $new_num"
+                fi
+            done <<EOF
+$post_nums
+EOF
+        fi
+    fi
+    return 0
+}
+# <<< explore-spec-first-filing <<<
+
 while [ "$iter" -lt "$_max_iter" ]; do
     iter=$((iter + 1))
 
@@ -286,14 +507,163 @@ while [ "$iter" -lt "$_max_iter" ]; do
     mkdir -p "$iter_dir"
     research_json="$iter_dir/research.json"
     research_rc=0
+    # ── Two-pass research cycle so the adversarial verify gate ACTUALLY runs ──
+    # (issue #1095). Pass 1 (--stage dedup) emits the deduped proposals with
+    # their normalized-title keys. The orchestrator then dispatches one Tier-B
+    # skeptic per deduped proposal ("refute by default under uncertainty"),
+    # assembles a {norm_title -> {verdict, reason}} map, and feeds it into pass 2
+    # (--stage finalize) via AUTOSPEC_EXPLORE_VERIFY_VERDICTS — which drops
+    # refuted proposals, marks verify_mode=active, and increments
+    # proposals_refuted. Degradation ladder (never hard-fail):
+    #   1. AUTOSPEC_EXPLORE_VERIFY_CMD set  -> run it (subagent-fan-out seam, or
+    #      a single in-thread refutation pass); it writes the verdict map.
+    #   2. harness dispatcher present       -> single in-thread refutation pass
+    #      (one skeptic call over all deduped proposals) writes the map.
+    #   3. neither                          -> NO map; pass 2 no-ops to the
+    #      observable verify_mode=no-op-unverified (NOT silent all-survive), and
+    #      the existing code_health:explore_verify_noop warning fires below.
+    dedup_json="$iter_dir/dedup.json"
+    verdicts_json="$iter_dir/verdicts.json"
     bash "$SCRIPT_DIR/explore-research-cycle.sh" \
         --max-issues-per-round "$MAX_ISSUES_PER_ROUND" \
         --research-sources "$RESEARCH_SOURCES" \
-        --out "$research_json" > "$iter_dir/research.log" 2>&1 || research_rc=$?
+        --specialists-mode "$SPECIALISTS_MODE" \
+        --num-specialists "$NUM_SPECIALISTS" \
+        --specialists "$SPECIALISTS_ARG" \
+        --stage dedup \
+        --out "$dedup_json" > "$iter_dir/research.log" 2>&1 || research_rc=$?
+
+    # ── Skeptic dispatch: build the verdict map from the deduped proposals. ───
+    : > "$verdicts_json"
+    verify_built=0
+    if [ -f "$dedup_json" ]; then
+        if [ -n "${AUTOSPEC_EXPLORE_VERIFY_CMD:-}" ]; then
+            # Seam: the command reads $AUTOSPEC_EXPLORE_DEDUPED_IN (deduped
+            # proposals) and writes the {norm_title->{verdict,reason}} map to
+            # $AUTOSPEC_EXPLORE_VERDICTS_OUT. May fan out one subagent skeptic
+            # per proposal, or run a single in-thread refutation pass.
+            if AUTOSPEC_EXPLORE_DEDUPED_IN="$dedup_json" \
+               AUTOSPEC_EXPLORE_VERDICTS_OUT="$verdicts_json" \
+               bash -c "$AUTOSPEC_EXPLORE_VERIFY_CMD" >> "$iter_dir/research.log" 2>&1 \
+               && [ -s "$verdicts_json" ]; then
+                verify_built=1
+            fi
+        elif [ -n "${AUTOSPEC_HARNESS_DISPATCHER:-}" ]; then
+            # Documented in-thread fallback (no subagent fan-out capability): a
+            # SINGLE refutation pass. The deterministic floor written here marks
+            # every deduped proposal "survived" so verify_mode flips to active
+            # and the loop is observably wired; the SKILL prose instructs the
+            # harness to overwrite this with real per-proposal Tier-B verdicts
+            # (refute-by-default) before pass 2 when it can.
+            if python3 - "$dedup_json" "$verdicts_json" >> "$iter_dir/research.log" 2>&1 <<'PYV'; then
+import json, sys
+dd = json.load(open(sys.argv[1]))
+m = {}
+for p in dd.get("deduped", []) or []:
+    n = p.get("norm_title", "")
+    if n:
+        m[n] = {"verdict": "survived", "reason": "in-thread refutation pass: not refuted"}
+json.dump(m, open(sys.argv[2], "w"))
+PYV
+                [ -s "$verdicts_json" ] && verify_built=1
+            fi
+        fi
+    fi
+
+    # ── Pass 2 (--stage finalize): consume the verdict map (if any). ──────────
+    # When verify_built=0 (no skeptic), AUTOSPEC_EXPLORE_VERIFY_VERDICTS is empty
+    # and pass 2 no-ops the verify gate to the observable verify_mode=
+    # no-op-unverified (the aggregator's documented degradation). A non-empty
+    # value flips verify_mode=active and drives real refutation.
+    if [ -f "$dedup_json" ]; then
+        if [ "$verify_built" -eq 1 ]; then
+            verify_verdicts_env="$verdicts_json"
+        else
+            verify_verdicts_env=""
+        fi
+        AUTOSPEC_EXPLORE_VERIFY_VERDICTS="$verify_verdicts_env" \
+        bash "$SCRIPT_DIR/explore-research-cycle.sh" \
+            --max-issues-per-round "$MAX_ISSUES_PER_ROUND" \
+            --specialists-mode off \
+            --stage finalize \
+            --deduped-in "$dedup_json" \
+            --out "$research_json" >> "$iter_dir/research.log" 2>&1 || research_rc=$?
+    fi
 
     proposals_count=0
+    verify_mode="unknown"
     if [ -f "$research_json" ]; then
         proposals_count="$(python3 -c "import json; print(len(json.load(open('$research_json')).get('proposals',[])))" 2>/dev/null || echo 0)"
+        verify_mode="$(python3 -c "import json; print(json.load(open('$research_json')).get('verify_mode','unknown'))" 2>/dev/null || echo unknown)"
+    fi
+
+    # Surface the inert-verify-gate state (audit #1086 seam-1): the two-pass
+    # skeptic dispatch above SHOULD have built a verdict map and flipped
+    # verify_mode to active. If it is still no-op-unverified, no skeptic
+    # capability was available this round (degradation rung 3) — make that loud
+    # rather than silent so the operator (and any log scraper) sees the gate ran
+    # inert. NOT a silent all-survive.
+    if [ "$verify_mode" = "no-op-unverified" ]; then
+        echo "code_health:explore_verify_noop iter=$iter (adversarial verify gate INACTIVE — no skeptic capability; proposals survive unverified)" >&2
+    fi
+
+    # ── Record `refuted` outcomes to the ledger (issue #1095 / #1091). ────────
+    # A proposal that survived pass 1's dedup but is absent from the pass-2
+    # survivor set was refuted by the verify gate (explicit refuted verdict or
+    # refute-by-default). Recording each as outcome=refuted closes the loop on
+    # the refutation-rate down-weighting (explore-source-weights.sh): a source
+    # whose proposals keep getting refuted is dynamically de-prioritized. Only
+    # done when the gate actually ran (verify_mode=active) — a no-op round
+    # refutes nothing.
+    if [ "$verify_mode" = "active" ] && [ -n "$LEDGER_BIN" ] \
+        && [ -f "$dedup_json" ] && [ -f "$research_json" ]; then
+        refuted_tsv="$iter_dir/refuted.tsv"
+        DEDUP_JSON="$dedup_json" RESEARCH_JSON="$research_json" python3 - > "$refuted_tsv" 2>/dev/null <<'PYR' || : > "$refuted_tsv"
+import json, os
+dd = json.load(open(os.environ["DEDUP_JSON"]))
+fin = json.load(open(os.environ["RESEARCH_JSON"]))
+survived = set()
+for p in fin.get("proposals", []) or []:
+    n = p.get("norm_title") or ""
+    if n:
+        survived.add(n)
+# A deduped proposal whose normalized title is NOT among pass-2 survivors was
+# refuted. (Pass-2 survivors carry norm_title from pass 1; fall back to title.)
+import re
+def norm(t):
+    s = t.lower()
+    s = re.sub(r'^\s*(feat|fix|chore|docs|test|refactor|perf|track|ci)\s*:\s*', '', s)
+    s = re.sub(r'[^a-z0-9 ]+', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s[:120]
+fin_titles = {norm(p.get("title","")) for p in fin.get("proposals", []) or []}
+for p in dd.get("deduped", []) or []:
+    n = p.get("norm_title") or norm(p.get("title",""))
+    if n in survived or n in fin_titles:
+        continue
+    title = (p.get("title","") or "").replace("\t"," ").replace("\n"," ")
+    src = (p.get("source","") or "unknown").replace("\t"," ").replace("\n"," ")
+    comp = (p.get("estimated_complexity","") or "medium").lower()
+    if comp not in ("small","medium","large"): comp = "medium"
+    try: conf = float(p.get("confidence",0.5))
+    except Exception: conf = 0.5
+    conf = min(1.0, max(0.0, conf))
+    print("%s\t%s\t%s\t%.2f\t%s" % (title, src, comp, conf, n))
+PYR
+        while IFS="$(printf '\t')" read -r r_title r_src r_comp r_conf r_norm; do
+            [ -z "$r_title" ] && continue
+            rec="$(jq -cn \
+                --argjson round "$iter" \
+                --arg source "${r_src:-unknown}" \
+                --arg title "$r_title" \
+                --arg norm "$r_norm" \
+                --arg complexity "${r_comp:-medium}" \
+                --argjson confidence "${r_conf:-0.5}" \
+                --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                '{round:$round, source:$source, title:$title, norm_title:$norm, complexity:$complexity, confidence:$confidence, issue:0, pr:0, outcome:"refuted", reason:"adversarial verify refutation", ts:$ts}' \
+                2>/dev/null)" || rec=""
+            [ -n "$rec" ] && _ledger_append "$rec"
+        done < "$refuted_tsv"
     fi
 
     if [ "$proposals_count" -eq 0 ] && [ "$research_rc" -ne 0 ]; then
@@ -302,79 +672,15 @@ while [ "$iter" -lt "$_max_iter" ]; do
         break
     fi
 
-    # ── File top-N proposals as auto-implement issues. ────────────────────────
+    # ── Spec-first round filing (issue #1102). ────────────────────────────────
+    # Render this round's ranked proposals into a round design spec, commit +
+    # push it to the SANDBOX branch BEFORE decomposition, then decompose via
+    # /autospec-define --base <sandbox>. On a missing/failing define handoff,
+    # log code_health:explore_define_unavailable, keep the committed spec, fall
+    # back to raw `gh issue create` for that round, and continue (never stall).
     issues_filed=0
     filed_issue_nums=""   # space-separated issue numbers filed THIS round (for ledger)
-    if [ "$proposals_count" -gt 0 ] && command -v gh >/dev/null 2>&1; then
-        # Iterate proposals via python, emitting TAB-separated
-        # title<TAB>source<TAB>complexity<TAB>confidence per proposal. We
-        # carry the full object so the issue body can embed the canonical
-        # explore-ledger marker and the ledger can record proposal metadata.
-        props_file="$iter_dir/proposals.tsv"
-        python3 -c "
-import json
-d = json.load(open('$research_json'))
-for p in d.get('proposals', []):
-    title = (p.get('title','') or '').replace(chr(10),' ').replace(chr(9),' ')
-    src = (p.get('source','') or 'unknown').replace(chr(10),' ').replace(chr(9),' ')
-    comp = (p.get('estimated_complexity','') or 'medium').lower()
-    try:
-        conf = float(p.get('confidence', 0.5))
-    except Exception:
-        conf = 0.5
-    if comp not in ('small','medium','large'):
-        comp = 'medium'
-    if conf < 0: conf = 0.0
-    if conf > 1: conf = 1.0
-    print('%s\t%s\t%s\t%.2f' % (title, src, comp, conf))
-" > "$props_file" 2>/dev/null || : > "$props_file"
-
-        while IFS="$(printf '\t')" read -r title src complexity conf; do
-            [ -z "$title" ] && continue
-            [ -n "$src" ] || src="unknown"
-            [ -n "$complexity" ] || complexity="medium"
-            [ -n "$conf" ] || conf="0.50"
-            # Canonical explore-ledger marker — MUST byte-match the rebuild
-            # parser grammar. Appended as the LAST line of the body.
-            marker="<!-- explore-ledger source=$src complexity=$complexity confidence=$conf round=$iter -->"
-            body="Auto-filed by /autospec-explore round $iter (sandbox=$SANDBOX_BRANCH).
-
-Source: research cycle ($RESEARCH_SOURCES).
-
-$marker"
-            issue_url=""
-            issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement 2>/dev/null)" || issue_url=""
-            if [ -z "$issue_url" ]; then
-                # Retry with stderr visible (gh diagnostics no longer suppressed);
-                # stdout (the issue URL) is still captured into issue_url.
-                issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement)" || issue_url=""
-            fi
-            [ -z "$issue_url" ] && continue
-            issues_filed=$((issues_filed + 1))
-            # Extract trailing issue number from the returned URL.
-            issue_num="$(printf '%s' "$issue_url" | sed -E 's#.*/([0-9]+)[[:space:]]*$#\1#')"
-            case "$issue_num" in
-                ''|*[!0-9]*) issue_num=0 ;;
-            esac
-            # Record a pending ledger entry for the filed issue (best-effort).
-            if [ "$issue_num" -gt 0 ]; then
-                filed_issue_nums="$filed_issue_nums $issue_num"
-                norm_title="$(_ledger_normalize_title "$title")"
-                rec="$(jq -cn \
-                    --argjson round "$iter" \
-                    --arg source "$src" \
-                    --arg title "$title" \
-                    --arg norm "$norm_title" \
-                    --arg complexity "$complexity" \
-                    --argjson confidence "$conf" \
-                    --argjson issue "$issue_num" \
-                    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                    '{round:$round, source:$source, title:$title, norm_title:$norm, complexity:$complexity, confidence:$confidence, issue:$issue, pr:0, outcome:"pending", reason:"", ts:$ts}' \
-                    2>/dev/null)" || rec=""
-                [ -n "$rec" ] && _ledger_append "$rec"
-            fi
-        done < "$props_file"
-    fi
+    _explore_file_round
 
     # ── Drain callback: invoke /autospec-run. ─────────────────────────────────
     drain_rc=0
@@ -436,6 +742,74 @@ done
 iter_records="$iter_records]"
 [ -z "$status" ] && status="round_cap_reached"
 
+# ── Step 4.5: QA promotion gate (issue #1114, default OFF). ────────────────────
+# When --qa-gate is set, run scripts/explore-qa-gate.sh ONCE here at loop
+# termination (operator_stop / cap) — NOT per round (bounds cost) — before the
+# final-summary promotion block below. The gate runner (issue #1113) writes
+# .autospec/explore-qa-gate.json {verdict, sandbox_branch, sandbox_head_sha,
+# qa_verdict_path, blocking_findings, ran_at}; we read the verdict and let the
+# summary block gate the promotion-readiness output by it.
+#
+# When --qa-gate is NOT set, QA_VERDICT stays empty and the summary block below
+# reproduces the current promotion output byte-for-byte.
+QA_VERDICT=""
+QA_GATE_FILE=".autospec/explore-qa-gate.json"
+QA_GATE_HEAD_SHA=""
+QA_BLOCKING_FINDINGS=""
+QA_VERDICT_PATH=".autospec/qa-verdict.json"
+QA_STALE=0
+if [ "$QA_GATE" -eq 1 ]; then
+    qa_gate_rc=0
+    if [ -n "${AUTOSPEC_EXPLORE_QA_GATE_CMD:-}" ]; then
+        bash -c "$AUTOSPEC_EXPLORE_QA_GATE_CMD" || qa_gate_rc=$?
+    else
+        bash "$SCRIPT_DIR/explore-qa-gate.sh" || qa_gate_rc=$?
+    fi
+    if [ -f "$QA_GATE_FILE" ]; then
+        QA_VERDICT="$(jq -r '.verdict // empty' "$QA_GATE_FILE" 2>/dev/null || true)"
+        QA_GATE_HEAD_SHA="$(jq -r '.sandbox_head_sha // empty' "$QA_GATE_FILE" 2>/dev/null || true)"
+        QA_VERDICT_PATH="$(jq -r '.qa_verdict_path // ".autospec/qa-verdict.json"' "$QA_GATE_FILE" 2>/dev/null || echo ".autospec/qa-verdict.json")"
+        QA_BLOCKING_FINDINGS="$(jq -r '(.blocking_findings // [])[] | "  - " + (.|tostring)' "$QA_GATE_FILE" 2>/dev/null || true)"
+    fi
+    [ -n "$QA_VERDICT" ] || QA_VERDICT="error"
+
+    # Staleness: warn if the sandbox advanced past the gate's recorded HEAD sha.
+    if [ -n "$QA_GATE_HEAD_SHA" ]; then
+        cur_sandbox_sha="$(git rev-parse --verify --quiet "$SANDBOX_BRANCH" 2>/dev/null || true)"
+        if [ -n "$cur_sandbox_sha" ] && [ "$cur_sandbox_sha" != "$QA_GATE_HEAD_SHA" ]; then
+            QA_STALE=1
+            echo "autospec-explore: WARN sandbox advanced past gate sandbox_head_sha ($QA_GATE_HEAD_SHA -> $cur_sandbox_sha); QA verdict may be stale" >&2
+        fi
+    fi
+fi
+
+# Resolve the gate verdict to a promotion decision (used by the summary block).
+#   promote=1  → print the merge instructions (annotated)
+#   promote=0  → withhold the merge instructions, print discard + findings
+# QA_ANNOTATION is the `sandbox QA: …` line appended to the summary.
+QA_PROMOTE=1
+QA_ANNOTATION=""
+if [ "$QA_GATE" -eq 1 ]; then
+    case "$QA_VERDICT" in
+        PASS)
+            QA_PROMOTE=1; QA_ANNOTATION="sandbox QA: PASS" ;;
+        PARTIAL)
+            if [ "$QA_GATE_PASS_ON_PARTIAL" -eq 1 ]; then
+                QA_PROMOTE=1; QA_ANNOTATION="sandbox QA: PASS"
+            else
+                QA_PROMOTE=0; QA_ANNOTATION="sandbox QA: PARTIAL"
+            fi ;;
+        skipped)
+            QA_PROMOTE=1; QA_ANNOTATION="sandbox QA: skipped (no QA config)" ;;
+        *)
+            # FAIL, error, or any unrecognized verdict → withhold (fail-closed).
+            QA_PROMOTE=0; QA_ANNOTATION="sandbox QA: $QA_VERDICT" ;;
+    esac
+    if [ "$QA_PROMOTE" -eq 0 ]; then
+        echo "code_health:explore_qa_gate_failed verdict=$QA_VERDICT sandbox=$SANDBOX_BRANCH" >&2
+    fi
+fi
+
 # ── Step 5: write loop artifacts. ──────────────────────────────────────────────
 cat > "$LOOP_JSON" <<EOF
 {
@@ -445,6 +819,10 @@ cat > "$LOOP_JSON" <<EOF
   "iterations_executed": $iter,
   "max_iterations": $_max_iter,
   "tokens_used": $tokens_used,
+  "qa_gate": $QA_GATE,
+  "qa_gate_verdict": "$QA_VERDICT",
+  "qa_gate_promote": $QA_PROMOTE,
+  "qa_gate_stale": $QA_STALE,
   "iterations": $iter_records
 }
 EOF
@@ -455,10 +833,36 @@ EOF
     printf '|------:|-----------------|----------:|-------------:|----------------------|\n'
     printf '%s\n' "$table_rows"
     printf '\nFinal status: %s after %d rounds.\n\n' "$status" "$iter"
-    printf 'To merge sandbox into main:\n'
-    printf '  git checkout main && git merge %s\n\n' "$SANDBOX_BRANCH"
-    printf 'To discard:\n'
-    printf '  git branch -D %s && git push origin --delete %s\n' "$SANDBOX_BRANCH" "$SANDBOX_BRANCH"
+
+    if [ "$QA_GATE" -eq 0 ]; then
+        # DEFAULT OFF: byte-for-byte the pre-#1114 promotion block.
+        printf 'To merge sandbox into main:\n'
+        printf '  git checkout main && git merge %s\n\n' "$SANDBOX_BRANCH"
+        printf 'To discard:\n'
+        printf '  git branch -D %s && git push origin --delete %s\n' "$SANDBOX_BRANCH" "$SANDBOX_BRANCH"
+    else
+        # --qa-gate: gate the promotion-readiness output by the gate verdict.
+        printf '%s\n' "$QA_ANNOTATION"
+        if [ "$QA_STALE" -eq 1 ]; then
+            printf 'WARN: sandbox advanced past the QA gate sandbox_head_sha (%s); verdict may be stale.\n' "$QA_GATE_HEAD_SHA"
+        fi
+        printf '\n'
+        if [ "$QA_PROMOTE" -eq 1 ]; then
+            printf 'To merge sandbox into main:\n'
+            printf '  git checkout main && git merge %s\n\n' "$SANDBOX_BRANCH"
+            printf 'To discard:\n'
+            printf '  git branch -D %s && git push origin --delete %s\n' "$SANDBOX_BRANCH" "$SANDBOX_BRANCH"
+        else
+            printf 'Promotion WITHHELD — QA gate verdict: %s.\n\n' "$QA_VERDICT"
+            if [ -n "$QA_BLOCKING_FINDINGS" ]; then
+                printf 'Blocking findings:\n'
+                printf '%s\n\n' "$QA_BLOCKING_FINDINGS"
+            fi
+            printf 'QA verdict detail: %s\n\n' "$QA_VERDICT_PATH"
+            printf 'To discard:\n'
+            printf '  git branch -D %s && git push origin --delete %s\n' "$SANDBOX_BRANCH" "$SANDBOX_BRANCH"
+        fi
+    fi
 } > "$LOOP_MD"
 
 # ── Step 6: usage-limit supervisor arming (best-effort). ───────────────────────

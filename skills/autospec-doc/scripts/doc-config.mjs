@@ -304,6 +304,45 @@ export function resolveAutoRegenerate({ config = {}, issueBody = '', withDocsFla
   return { generate: false, reason: 'default-off' };
 }
 
+// ── normalizeFeature ──────────────────────────────────────────────────────────
+//
+// Coerces the six new LLM-targeted fields (issue #1129) to empty-safe defaults
+// so downstream renderers never encounter undefined. Absent fields stay '' / [].
+// Existing fields (slug, title, summary, spec_sections, code_entry_points, …)
+// are preserved verbatim — this function only adds the new keys when missing.
+//
+// Shared-contracts field names (pinned; consumers MUST use these verbatim):
+//   data_model      string (markdown) | default ''
+//   invariants      string (markdown) | default ''
+//   errors          string (markdown) | default ''
+//   config_reference string (markdown) | default ''
+//   rationale       string (markdown) | default ''
+//   depends_on      array of feature-id strings | default []
+//   examples        array of example entries     | default []
+
+/**
+ * normalizeFeature(feature) → feature with six new LLM fields defaulted.
+ *
+ * @param {object} feature  Raw feature object from config / test fixtures.
+ * @returns {object}  Same object reference enriched with empty-safe defaults.
+ */
+export function normalizeFeature(feature) {
+  if (!feature || typeof feature !== 'object') return feature;
+  // String fields: coerce present non-string values; keep '' for absent.
+  const STR_FIELDS = ['data_model', 'invariants', 'errors', 'config_reference', 'rationale'];
+  for (const field of STR_FIELDS) {
+    feature[field] = (feature[field] != null) ? String(feature[field]) : '';
+  }
+  // Array fields: coerce present non-array values; keep [] for absent.
+  if (!Array.isArray(feature.depends_on)) {
+    feature.depends_on = (feature.depends_on != null) ? [feature.depends_on] : [];
+  }
+  if (!Array.isArray(feature.examples)) {
+    feature.examples = (feature.examples != null) ? [feature.examples] : [];
+  }
+  return feature;
+}
+
 // ── loadConfig ─────────────────────────────────────────────────────────────────
 
 /**
