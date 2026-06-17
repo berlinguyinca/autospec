@@ -198,6 +198,44 @@ EOF
   [[ "$output" == *"roundtrip-ok"* ]]
 }
 
+# ── init feature-inventory scaffolding (doc-scaffold.mjs) ──────────────────────
+
+@test "init seeds .autospec/doc-features.json with feature slugs from topic docs" {
+  mkdir -p docs/apps docs/algorithms
+  echo '# Export' > docs/apps/export-pipeline.md
+  echo '# Ingest' > docs/apps/ingest.md
+  echo '# Peaks' > docs/algorithms/peak-detection.md
+  echo '# index' > docs/apps/index.md
+  run node "$ORCH" init
+  [ "$status" -eq 0 ]
+  [ -f .autospec/doc-features.json ]
+  [[ "$output" == *"scaffolded"* ]]
+  grep -q '"slug": "export-pipeline"' .autospec/doc-features.json
+  grep -q '"slug": "ingest"' .autospec/doc-features.json
+  grep -q '"slug": "peak-detection"' .autospec/doc-features.json
+  # index.md must NOT become a feature.
+  ! grep -q '"slug": "index"' .autospec/doc-features.json
+}
+
+@test "init does NOT overwrite an edited doc-features.json on re-run" {
+  mkdir -p .autospec docs/apps
+  echo '# Export' > docs/apps/export.md
+  echo '{"features":[{"slug":"hand-authored"}]}' > .autospec/doc-features.json
+  run node "$ORCH" init
+  [ "$status" -eq 0 ]
+  grep -q 'hand-authored' .autospec/doc-features.json
+  ! grep -q 'export' .autospec/doc-features.json
+}
+
+@test "init --dry-run writes no feature inventory" {
+  mkdir -p docs/apps
+  echo '# Export' > docs/apps/export.md
+  run node "$ORCH" init --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"scaffold"* ]]
+  [ ! -f .autospec/doc-features.json ]
+}
+
 # ── §D6 incremental orchestrator tests (issue #943) ───────────────────────────
 
 # §D6: bare invocation with zero changed scopes (AUTOSPEC_CHECK_DRIFT_SH stub
