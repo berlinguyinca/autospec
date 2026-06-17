@@ -2768,6 +2768,7 @@ main() {
     check_autospec_explore_contract
     check_explore_trio_worktree_assert
     check_autospec_explore_discovery_contract
+    check_autospec_explore_style_normalization_contract
     check_autospec_explore_spec_first_contract
     check_autospec_explore_qa_gate_contract
     check_autospec_release_area_contract
@@ -3174,6 +3175,54 @@ check_explore_trio_worktree_assert() {
     info "explore-trio worktree assert: all three adapter files carry D4 assert + lock-step verified"
 }
 
+# autospec-explore style-normalization discovery contract: SPA/webapp visual
+# consistency work must run through a named discovery researcher and must
+# auto-generate missing Playwright coverage plus screenshots before filing
+# style-unification proposals.
+check_autospec_explore_style_normalization_contract() {
+    info "autospec-explore style-normalization contract"
+    local researcher="scripts/explore-research/style-normalization.sh"
+    [ -f "$researcher" ] || fail "$researcher: required style-normalization researcher missing"
+    [ -x "$researcher" ] || fail "$researcher: file not executable"
+    bash -n "$researcher" || fail "$researcher: bash syntax error"
+    grep -q 'AUTOSPEC_EXPLORE_STYLE_PROOF_CMD' "$researcher" \
+        || fail "$researcher: missing AUTOSPEC_EXPLORE_STYLE_PROOF_CMD invocation seam"
+    grep -q 'AUTOSPEC_STYLE_PROOF_DIR' "$researcher" \
+        || fail "$researcher: missing AUTOSPEC_STYLE_PROOF_DIR artifact directory contract"
+    grep -q 'best-effort' "$researcher" \
+        || fail "$researcher: generic dispatcher fallback must be documented as best-effort"
+    grep -q 'style-normalization' scripts/autospec-explore.sh \
+        || fail "scripts/autospec-explore.sh: default RESEARCH_SOURCES missing style-normalization"
+    grep -q 'style-normalization' scripts/explore-research-cycle.sh \
+        || fail "scripts/explore-research-cycle.sh: default source roster/weights missing style-normalization"
+    grep -q 'style-normalization' skills/autospec-shared/scripts/explore-source-weights.sh \
+        || fail "explore-source-weights.sh: canonical priors missing style-normalization"
+    for trio in \
+        skills/autospec-explore/SKILL.md \
+        skills/autospec-explore/codex/prompt.md \
+        skills/autospec-explore/opencode/agent.md
+    do
+        [ -f "$trio" ] || fail "$trio: required adapter file missing"
+        grep -q 'style-normalization' "$trio" \
+            || fail "$trio: missing style-normalization discovery researcher"
+        grep -q 'Playwright' "$trio" \
+            || fail "$trio: missing Playwright auto-generation requirement"
+        grep -q 'screenshot' "$trio" \
+            || fail "$trio: missing screenshot evidence requirement"
+        grep -q 'AUTOSPEC_EXPLORE_STYLE_PROOF_CMD' "$trio" \
+            || fail "$trio: missing AUTOSPEC_EXPLORE_STYLE_PROOF_CMD proof seam"
+        grep -q 'best-effort fallback' "$trio" \
+            || fail "$trio: missing best-effort fallback boundary"
+    done
+    local bats_file="tests/explore/test_explore_style_normalization.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing for style-normalization proof contract"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-explore-style-normalization.log 2>&1 \
+            || { cat /tmp/validate-explore-style-normalization.log >&2; fail "$bats_file: failed"; }
+    fi
+}
+
 # autospec-explore discovery enhancement contract (issues #1084/#1085, spec
 # docs/specs/2026-06-15-autospec-explore-discovery-enhance.md §Acceptance):
 # the discovery-quality batch (#1077–#1083) shipped 3 new researchers, the
@@ -3186,7 +3235,7 @@ check_explore_trio_worktree_assert() {
 check_autospec_explore_discovery_contract() {
     info "autospec-explore discovery enhancement contract (#1084/#1085)"
 
-    # 1. The 3 discovery researchers exist, are executable, bash -n clean.
+    # 1. The baseline discovery researchers exist, are executable, bash -n clean.
     for r in quality-resilience dogfooding self-leverage; do
         local script="scripts/explore-research/$r.sh"
         [ -f "$script" ] || fail "$script: required discovery researcher missing"
@@ -3231,7 +3280,7 @@ check_autospec_explore_discovery_contract() {
         || fail "scripts/explore-specialist-scan.sh: bash syntax error"
 
     # 5. Trio prose documents the enhancement in lock-step: the new sections,
-    #    the 3 discovery researchers, the stage order, the severity enum, and
+    #    the discovery researchers, the stage order, the severity enum, and
     #    the specialist flags must appear in all three adapter bodies. The
     #    stale "6 researcher" count must be gone.
     for trio in \

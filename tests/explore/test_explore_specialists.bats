@@ -163,7 +163,7 @@ assert 'market-risk' in slugs, slugs
 # cycle.sh. The aggregator parses --specialists-mode/--num-specialists/
 # --specialists, resolves the roster, and dispatches each as a
 # source=specialist:<slug> researcher (default weight 0.6) through the same
-# dedup → verify → ROI → synthesis → rank pipeline, under the ≤16 per-round cap.
+# dedup → verify → ROI → synthesis → rank pipeline, under the ≤17 per-round cap.
 # ───────────────────────────────────────────────────────────────────────────
 
 CYCLE="scripts/explore-research-cycle.sh"
@@ -300,7 +300,7 @@ assert sp == ['specialist:sp-a','specialist:sp-b'], sp
 "
 }
 
-@test "E2 the per-round researcher count is clamped to 16" {
+@test "E2 the per-round researcher count is clamped to 17" {
     _e2_setup_cycle
     # 14 universal researchers selected.
     local us=""
@@ -309,7 +309,7 @@ assert sp == ['specialist:sp-a','specialist:sp-b'], sp
         us="$us,u$i"
     done
     us="${us#,}"
-    # Roster of 6; ask for 6, but only 16-14=2 slots remain.
+    # Roster of 6; ask for 6, but only 17-14=3 slots remain.
     {
         printf '{"schema_version":1,"domains":[],"suggested_specialists":['
         printf '{"slug":"sp-a","persona":"P","lens":"L","why":"W","evidence":"E"},'
@@ -334,7 +334,7 @@ assert sp == ['specialist:sp-a','specialist:sp-b'], sp
 import sys, json
 d = json.loads(sys.stdin.read())
 sp = sorted(p['source'] for p in d['proposals'] if p['source'].startswith('specialist:'))
-assert len(sp) == 2, sp  # 14 universal + 2 specialists = 16 cap
+assert len(sp) == 3, sp  # 14 universal + 3 specialists = 17 cap
 "
 }
 
