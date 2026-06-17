@@ -34,6 +34,24 @@ EOF
 | `OUT_OF_SCOPE` | det |
 EOF
 
+  # Fixture reviewer-contract.md (Phase 1: reviewer role injects this, not SKILL.md)
+  cat > "$FIXTURES_DIR/skills/autospec-run/prompts/reviewer-contract.md" <<'EOF'
+# Reviewer contract (test fixture)
+
+## Guardian rubric
+
+### RULE_ID table
+
+| RULE_ID | Detector |
+|---|---|
+| `OUT_OF_SCOPE` | det |
+| `MISSING_TEST` | det |
+
+## Verdict
+
+Return LGTM if clean.
+EOF
+
   # Fixture AGENTS.md with RULE_ID table
   cat > "$FIXTURES_DIR/AGENTS.md" <<'EOF'
 # AGENTS.md

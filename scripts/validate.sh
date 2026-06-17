@@ -789,6 +789,80 @@ check_implementer_contract() {
     fi
 }
 
+# Reviewer-contract named-content invariants (prompt-cache reclaim Phase 1): the
+# curated reviewer-contract.md replaces the ~14KB autospec-run/SKILL.md in the
+# reviewer prefix. The contract MUST exist, stay <=24KB, carry exactly one
+# RULE_ID table header, and must not drift from AGENTS.md's canonical RULE_ID
+# set. The bundler MUST inject the contract for the reviewer role and MUST NOT
+# inject the autospec-run SKILL.md into that role any more.
+check_reviewer_contract() {
+    info "reviewer-contract: skills/autospec-run/prompts/reviewer-contract.md"
+    local contract="skills/autospec-run/prompts/reviewer-contract.md"
+    [ -f "$contract" ] \
+        || fail "$contract: file missing"
+
+    # Size guard: <=24576 bytes.
+    local size
+    size="$(wc -c < "$contract" | tr -d ' ')"
+    [ "$size" -le 24576 ] \
+        || fail "$contract: $size bytes exceeds 24576-byte (24KB) budget"
+
+    # Single RULE_ID table header (no duplicate re-extraction).
+    local header_count
+    header_count="$(grep -c '^### RULE_ID table' "$contract" || true)"
+    [ "$header_count" = "1" ] \
+        || fail "$contract: expected exactly 1 '### RULE_ID table' header, found $header_count"
+
+    # Drift gate: every RULE_ID named in AGENTS.md's canonical table must also be
+    # present in the contract (the reviewer must still enforce the full set).
+    [ -f AGENTS.md ] || fail "AGENTS.md missing at repo root"
+    local agents_rule_ids
+    agents_rule_ids="$(awk '
+        /^### RULE_ID table/ { in_table=1; next }
+        /^### / && in_table { exit }
+        /^## / && in_table { exit }
+        in_table && /^\| `[A-Z_]+`/ {
+            line=$0; sub(/^\| `/,"",line); sub(/`.*/,"",line); print line
+        }
+    ' AGENTS.md | sort -u)"
+    [ -n "$agents_rule_ids" ] || fail "AGENTS.md RULE_ID table yielded no RULE_IDs (parse drift)"
+    local rid
+    for rid in $agents_rule_ids; do
+        grep -q "$rid" "$contract" \
+            || fail "$contract: drift — AGENTS.md RULE_ID '$rid' missing from contract"
+    done
+
+    # The bundler must inject the contract for the reviewer role.
+    local bundler="skills/autospec-shared/scripts/bundle-static-context.sh"
+    [ -f "$bundler" ] || fail "$bundler: file missing"
+    grep -q 'REVIEWER_CONTRACT' "$bundler" \
+        || fail "$bundler: missing REVIEWER_CONTRACT injection variable"
+
+    # Behavioral negative: the reviewer-role output must NOT carry the verbose
+    # 'SKILL.md (reviewer role)' injection header (no full ~14KB SKILL.md), the
+    # RULE_ID table must appear EXACTLY once in the prefix, and the full LLM-tier
+    # RULE_ID set the fused reviewer applies must still be present.
+    local rev_out
+    rev_out="$(AUTOSPEC_REPO_ROOT="$REPO_ROOT" \
+        AUTOSPEC_MEMORY_DIR=/nonexistent-memory-dir \
+        AUTOSPEC_MANIFEST=/nonexistent-manifest.yml \
+        bash "$bundler" --role reviewer --issue-labels 'ctx:120k' 2>/dev/null)" \
+        || fail "$bundler: --role reviewer failed to run"
+    if printf '%s\n' "$rev_out" | grep -q 'SKILL.md (reviewer role)'; then
+        fail "$bundler: reviewer output still injects the SKILL.md (reviewer role) prefix"
+    fi
+    local rev_table_count
+    rev_table_count="$(printf '%s\n' "$rev_out" | grep -c '^### RULE_ID table' || true)"
+    [ "$rev_table_count" = "1" ] \
+        || fail "$bundler: reviewer prefix must carry the RULE_ID table exactly once (found $rev_table_count)"
+    local llm_rid
+    for llm_rid in HALLUCINATED_API DUPLICATE_CODE STRING_MATCH_DOMAIN_LOGIC \
+                   REPEATED_STRUCTURE_AS_CODE DOC_OUT_OF_SYNC INVENTED_CONFIG; do
+        printf '%s\n' "$rev_out" | grep -q "$llm_rid" \
+            || fail "$bundler: reviewer prefix dropped LLM-tier RULE_ID: $llm_rid"
+    done
+}
+
 # Usage-limit recovery helper invariants: autospec-run's quota recovery path
 # depends on this shell-only supervisor being installed and executable.
 check_usage_limit_helper() {
@@ -2569,6 +2643,7 @@ main() {
     check_lint_issue_helpers
     check_lint_implementation_helpers
     check_implementer_contract
+    check_reviewer_contract
     check_lint_heredoc_handling
     check_quality_differential
     check_usage_limit_helper
