@@ -1,0 +1,8 @@
+{
+  "frameworks": ["react"],
+  "versions": {"react": "19.0.0"},
+  "package_manager": "npm",
+  "runners": ["jest"],
+  "monorepo": false,
+  "has_tests": true
+}

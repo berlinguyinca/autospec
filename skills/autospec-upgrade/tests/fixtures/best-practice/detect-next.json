@@ -1,0 +1,8 @@
+{
+  "frameworks": ["next"],
+  "versions": {"next": "14.0.0"},
+  "package_manager": "npm",
+  "runners": ["jest"],
+  "monorepo": false,
+  "has_tests": true
+}
