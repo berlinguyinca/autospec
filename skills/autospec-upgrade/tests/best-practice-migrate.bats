@@ -231,6 +231,10 @@ BLEOF
   EXISTING_TAGS="post-upgrade-angular-17" run env PATH="$MOCK_BIN:$PATH" \
     "$SCRIPT" --detect "$FX/detect-angular.json" --root "$TEST_ROOT"
   printf '%s\n' "$output" | grep -qi 'follow-up'
+  # "not attempted": exactly the ONE official schematic ran; the manual signals/
+  # inject() migrations were surfaced as follow-ups, NOT routed through codemod.
+  [ "$(grep -c . "$CODEMOD_LOG")" -eq 1 ]
+  ! grep -qiE 'signals|inject' "$CODEMOD_LOG"
 }
 
 @test "manual-migration: follow-up line surfaced for next pages-to-app-router" {
@@ -241,6 +245,10 @@ BLEOF
   EXISTING_TAGS="post-upgrade-next-14" run env PATH="$MOCK_BIN:$PATH" \
     "$SCRIPT" --detect "$FX/detect-next.json" --root "$TEST_ROOT"
   printf '%s\n' "$output" | grep -qi 'follow-up'
+  # "not attempted": only the official async-request-api schematic ran; the
+  # Pages->App Router restructure was surfaced as a follow-up, NOT codemoded.
+  [ "$(grep -c . "$CODEMOD_LOG")" -eq 1 ]
+  ! grep -qiE 'app-router|pages' "$CODEMOD_LOG"
 }
 
 @test "manual-migration: follow-up line surfaced for react 19 manual patterns" {
@@ -251,6 +259,10 @@ BLEOF
   EXISTING_TAGS="post-upgrade-react-19" run env PATH="$MOCK_BIN:$PATH" \
     "$SCRIPT" --detect "$FX/detect-react.json" --root "$TEST_ROOT"
   printf '%s\n' "$output" | grep -qi 'follow-up'
+  # "not attempted": only the official types schematic ran; the React 19
+  # forwardRef/use() manual patterns were surfaced as follow-ups, NOT codemoded.
+  [ "$(grep -c . "$CODEMOD_LOG")" -eq 1 ]
+  ! grep -qiE 'forwardRef|use-hook' "$CODEMOD_LOG"
 }
 
 # ── Argument validation ───────────────────────────────────────────────────────
