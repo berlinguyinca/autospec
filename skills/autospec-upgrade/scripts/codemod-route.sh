@@ -44,6 +44,30 @@ route_angular_codemod() {
   fi
 }
 
+# ── Next.js codemod (issue #1178) ────────────────────────────────────────────
+#
+# Shells the OFFICIAL Next.js codemod tooling only — never hand-rolls migrations.
+#   npx @next/codemod upgrade                  (standard version hop)
+#   npx @next/codemod next-async-request-api   (async request API migration)
+
+route_next_codemod() {
+  local target_major="$1"
+  local async_request_api="${2:-}"
+
+  if [ -z "$target_major" ]; then
+    printf 'codemod-route: route_next_codemod requires <target_major>\n' >&2
+    return 2
+  fi
+
+  if [ "$async_request_api" = "--async-request-api" ]; then
+    # Official Next.js async request API migration codemod — never hand-roll this
+    npx @next/codemod next-async-request-api
+  else
+    # Official Next.js upgrade codemod — never hand-roll this
+    npx @next/codemod upgrade
+  fi
+}
+
 # ── Shared dispatcher ─────────────────────────────────────────────────────────
 #
 # route_codemod <framework> <target_major> [--standalone]
@@ -71,7 +95,10 @@ route_codemod() {
     angular)
       route_angular_codemod "$target_major" "$standalone"
       ;;
-    # additional framework arms added by #1178 (next) / #1179 (react)
+    next)
+      route_next_codemod "$target_major" "$standalone"
+      ;;
+    # additional framework arms added by #1179 (react)
     *)
       printf 'codemod-route: unknown framework "%s" — code_health:upgrade_unknown_framework\n' \
         "$framework" >&2
