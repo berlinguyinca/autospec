@@ -1,0 +1,363 @@
+#!/usr/bin/env node
+// skills/autospec-harmonize/scripts/design-variants.mjs
+//
+// Stage 3 — Variants: given a baseline variant, emit an array of design
+// variants for requested axes. Baseline is always index 0.
+//
+// CLI: node design-variants.mjs --baseline <file>
+//        --axes minimal,high-contrast,dense,bold[,vendor-blend]
+//        [--vendor-file <f>]   (bypasses fetch-vendor.sh in tests)
+// Stdout: JSON array of variants conforming to
+//         schemas/autospec-harmonize-variant.schema.json
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { execSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+import { hexToRgb, rgbToHsl, hexToHsl, isChromatic } from './lib/color.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// ---------------------------------------------------------------------------
+// WCAG relative luminance (linearized sRGB) — NOT HSL-L
+// ---------------------------------------------------------------------------
+
+/** sRGB channel [0,255] → linear light value. */
+function linearize(c) {
+  const s = c / 255;
+  return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+}
+
+/** WCAG relative luminance of a "#rrggbb" hex. */
+function wcagLuminance(hex) {
+  const [r, g, b] = hexToRgb(hex);
+  return 0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b);
+}
+
+/** WCAG contrast ratio between two hex colors. */
+function contrastRatio(hexA, hexB) {
+  const L1 = wcagLuminance(hexA);
+  const L2 = wcagLuminance(hexB);
+  const lighter = Math.max(L1, L2);
+  const darker  = Math.min(L1, L2);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+/** Pick the background entry: the one tagged role:"bg", else the lightest hex. */
+function pickBackground(palette) {
+  if (!palette.length) return null;
+  const tagged = palette.find(e => e.role === 'bg');
+  if (tagged) return tagged;
+  return palette.reduce((a, b) => (wcagLuminance(b.hex) > wcagLuminance(a.hex) ? b : a));
+}
+
+/**
+ * Readability metric: the minimum WCAG contrast of each foreground color
+ * against the background. Contrast is inherently foreground-vs-background, so
+ * this — not min-pairwise-across-all-colors — is what "high contrast" must
+ * improve. The high-contrast transform pushes foregrounds away from the bg
+ * luminance, which monotonically raises this value (no fudge floor needed).
+ */
+function minForegroundContrast(palette) {
+  const bg = pickBackground(palette);
+  if (!bg) return 1;
+  const fg = palette.filter(e => e !== bg);
+  if (!fg.length) return 1;
+  let min = Infinity;
+  for (const e of fg) {
+    const r = contrastRatio(e.hex, bg.hex);
+    if (r < min) min = r;
+  }
+  return min === Infinity ? 1 : min;
+}
+
+// ---------------------------------------------------------------------------
+// Hex utilities
+// ---------------------------------------------------------------------------
+
+/** [r,g,b] in [0,255] → "#rrggbb" */
+function rgbToHex(r, g, b) {
+  return '#' + [r, g, b].map(v => Math.round(Math.max(0, Math.min(255, v)))
+    .toString(16).padStart(2, '0')).join('');
+}
+
+/** HSL [h∈[0,360), s∈[0,1], l∈[0,1]] → "#rrggbb" */
+function hslToHex(h, s, l) {
+  // Standard HSL→RGB conversion
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = l - c / 2;
+  let r = 0, g = 0, b = 0;
+  if (h < 60)       { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else              { r = c; g = 0; b = x; }
+  return rgbToHex((r + m) * 255, (g + m) * 255, (b + m) * 255);
+}
+
+/** Deep-clone a JSON-serializable object. */
+function clone(obj) {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+// ---------------------------------------------------------------------------
+// CLI argument parsing
+// ---------------------------------------------------------------------------
+
+function parseArgs(argv) {
+  const args = argv.slice(2);
+  const result = { baseline: null, axes: [], vendorFile: null };
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--baseline' && args[i + 1]) {
+      result.baseline = args[++i];
+    } else if (args[i] === '--axes' && args[i + 1] !== undefined) {
+      const raw = args[++i].trim();
+      result.axes = raw ? raw.split(',').map(a => a.trim()).filter(Boolean) : [];
+    } else if (args[i] === '--vendor-file' && args[i + 1]) {
+      result.vendorFile = args[++i];
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Axis transforms
+// ---------------------------------------------------------------------------
+
+/** minimal: drop shadows, desaturate accent role. */
+function makeMinimal(baseline) {
+  const v = clone(baseline);
+  v.id    = 'minimal';
+  v.label = 'Minimal — reduced decoration';
+  v.axis  = 'minimal';
+
+  // Drop shadows
+  v.tokens.shadows = [];
+
+  // Desaturate accent palette entry
+  v.tokens.palette = v.tokens.palette.map(entry => {
+    if (entry.role !== 'accent') return entry;
+    const [h, , l] = hexToHsl(entry.hex);
+    // Fully desaturate (s→0), keep lightness
+    return { ...entry, hex: hslToHex(h, 0, l) };
+  });
+
+  v.design_md = '# Minimal Variant\n\nShadows removed; accent desaturated for a clean, decoration-free aesthetic.';
+  return v;
+}
+
+/** high-contrast: push dark colors darker, light colors lighter; recompute wcag_min_ratio. */
+function makeHighContrast(baseline) {
+  const v = clone(baseline);
+  v.id    = 'high-contrast';
+  v.label = 'High-Contrast — WCAG-AA+ accessibility';
+  v.axis  = 'high-contrast';
+
+  // Contrast is foreground-vs-background. Push the background further toward
+  // its own extreme, and push every foreground color AWAY from the background
+  // luminance (light bg → darken foregrounds; dark bg → lighten them). This
+  // raises each foreground-vs-bg contrast monotonically.
+  const bg = pickBackground(v.tokens.palette);
+  const bgLight = bg ? wcagLuminance(bg.hex) >= 0.5 : true;
+  v.tokens.palette = v.tokens.palette.map(entry => {
+    const [h, s, l] = hexToHsl(entry.hex);
+    let newL;
+    if (entry === bg) {
+      newL = bgLight ? Math.min(1, l + 0.15) : Math.max(0, l - 0.15);
+    } else {
+      newL = bgLight ? Math.max(0, l - 0.20) : Math.min(1, l + 0.20);
+    }
+    return { ...entry, hex: hslToHex(h, s, newL) };
+  });
+
+  v.wcag_min_ratio = minForegroundContrast(v.tokens.palette);
+  v.design_md = '# High-Contrast Variant\n\nPalette colors pushed apart for WCAG-AA+ contrast.';
+  return v;
+}
+
+/** dense: multiply spacing & radii px by 0.75. */
+function makeDense(baseline) {
+  const v = clone(baseline);
+  v.id    = 'dense';
+  v.label = 'Dense — compact spacing';
+  v.axis  = 'dense';
+
+  v.tokens.spacing = v.tokens.spacing.map(s => ({ ...s, px: s.px * 0.75 }));
+  v.tokens.radii   = v.tokens.radii.map(r => ({ ...r, px: r.px * 0.75 }));
+
+  v.design_md = '# Dense Variant\n\nSpacing and radii reduced to 75% for compact layouts.';
+  return v;
+}
+
+/** bold: heavier font weights + bump type_scale by ~2px. */
+function makeBold(baseline) {
+  const v = clone(baseline);
+  v.id    = 'bold';
+  v.label = 'Bold — strong typographic presence';
+  v.axis  = 'bold';
+
+  v.tokens.type_scale = v.tokens.type_scale.map(t => {
+    const bumped = { ...t };
+    if (typeof bumped.px === 'number') bumped.px = bumped.px + 2;
+    // Add/increase font weight
+    bumped.weight = typeof bumped.weight === 'number'
+      ? Math.min(900, bumped.weight + 100)
+      : 700;
+    return bumped;
+  });
+
+  v.design_md = '# Bold Variant\n\nType scale bumped up 2px per step; weights increased for strong typographic presence.';
+  return v;
+}
+
+/** vendor-blend: channel-wise 50% lerp between baseline hex and vendor hex. */
+function blendHex(baseHex, vendorHex) {
+  const [br, bg, bb] = hexToRgb(baseHex);
+  const [vr, vg, vb] = hexToRgb(vendorHex);
+  // Midpoint — strictly between when channels differ
+  const r = Math.round((br + vr) / 2);
+  const g = Math.round((bg + vg) / 2);
+  const b = Math.round((bb + vb) / 2);
+  return rgbToHex(r, g, b);
+}
+
+function makeVendorBlend(baseline, vendorPalette) {
+  const v = clone(baseline);
+  v.id     = 'vendor-blend';
+  v.label  = 'Vendor-Blend — 50% palette merge with vendor brand';
+  v.axis   = 'vendor-blend';
+  v.vendor = 'vendor';
+
+  // Build a map from role → vendor hex (prefer role match, else index match)
+  const vendorByRole = {};
+  for (const entry of vendorPalette) {
+    if (entry.role) vendorByRole[entry.role] = entry.hex;
+  }
+
+  v.tokens.palette = v.tokens.palette.map((entry, idx) => {
+    // Find vendor counterpart: by role first, then by index
+    const vendorHex = entry.role && vendorByRole[entry.role]
+      ? vendorByRole[entry.role]
+      : vendorPalette[idx]?.hex ?? null;
+
+    if (!vendorHex) return entry;
+    return { ...entry, hex: blendHex(entry.hex, vendorHex) };
+  });
+
+  v.design_md = '# Vendor-Blend Variant\n\nPalette is a 50% channel-wise blend between the baseline and vendor brand colors.';
+  return v;
+}
+
+// ---------------------------------------------------------------------------
+// Vendor fetch
+// ---------------------------------------------------------------------------
+
+function fetchVendor(vendorFile, scriptDir) {
+  // Test mode: vendor file provided directly
+  if (vendorFile) {
+    if (!fs.existsSync(vendorFile)) return null;
+    try {
+      const data = JSON.parse(fs.readFileSync(vendorFile, 'utf8'));
+      return data.palette ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Normal mode: call fetch-vendor.sh
+  const fetchScript = path.join(scriptDir, 'fetch-vendor.sh');
+  if (!fs.existsSync(fetchScript)) return null;
+
+  const tmpOut = `/tmp/autospec-vendor-${Date.now()}.json`;
+  try {
+    const result = spawnSync(
+      'bash',
+      [fetchScript, '--vendor', 'default', '--out', tmpOut],
+      { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }
+    );
+    if (result.status !== 0) return null;
+    if (!fs.existsSync(tmpOut)) return null;
+    const data = JSON.parse(fs.readFileSync(tmpOut, 'utf8'));
+    fs.unlinkSync(tmpOut);
+    return data.palette ?? null;
+  } catch {
+    if (fs.existsSync(tmpOut)) {
+      try { fs.unlinkSync(tmpOut); } catch { /* ignore */ }
+    }
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+function main() {
+  const args = parseArgs(process.argv);
+
+  if (!args.baseline) {
+    process.stderr.write('Usage: node design-variants.mjs --baseline <file> --axes <axes> [--vendor-file <f>]\n');
+    process.exit(1);
+  }
+
+  if (!fs.existsSync(args.baseline)) {
+    process.stderr.write(`Error: baseline file not found: ${args.baseline}\n`);
+    process.exit(1);
+  }
+
+  let baseline;
+  try {
+    baseline = JSON.parse(fs.readFileSync(args.baseline, 'utf8'));
+  } catch (e) {
+    process.stderr.write(`Error: could not parse baseline JSON: ${e.message}\n`);
+    process.exit(1);
+  }
+
+  // Recompute baseline wcag_min_ratio with the same foreground-vs-bg metric the
+  // variants use, so comparisons are apples-to-apples regardless of what value
+  // the upstream baseline carried.
+  baseline.wcag_min_ratio = minForegroundContrast(baseline.tokens.palette);
+
+  const variants = [baseline];
+
+  for (const axis of args.axes) {
+    switch (axis) {
+      case 'minimal':
+        variants.push(makeMinimal(baseline));
+        break;
+
+      case 'high-contrast':
+        variants.push(makeHighContrast(baseline));
+        break;
+
+      case 'dense':
+        variants.push(makeDense(baseline));
+        break;
+
+      case 'bold':
+        variants.push(makeBold(baseline));
+        break;
+
+      case 'vendor-blend': {
+        const vendorPalette = fetchVendor(args.vendorFile, __dirname);
+        if (!vendorPalette) {
+          process.stderr.write('code_health:harmonize_vendor_fetch_failed\n');
+          // Drop only vendor-blend; continue with other axes
+          continue;
+        }
+        variants.push(makeVendorBlend(baseline, vendorPalette));
+        break;
+      }
+
+      default:
+        process.stderr.write(`Warning: unknown axis "${axis}" — skipped\n`);
+    }
+  }
+
+  process.stdout.write(JSON.stringify(variants, null, 2) + '\n');
+}
+
+main();
