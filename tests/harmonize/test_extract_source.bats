@@ -88,3 +88,17 @@ teardown() {
   [ "$status" -eq 0 ]
   [ "$output" = "true" ]
 }
+
+@test "extract-source captures all corners of a border-radius shorthand (audit #1147 F4)" {
+  command -v node >/dev/null 2>&1 || skip "node not available"
+  command -v jq   >/dev/null 2>&1 || skip "jq not available"
+
+  RADIUS_DIR="$(mktemp -d /tmp/autospec-radii-XXXXXX)"
+  printf '.card { border-radius: 4px 8px 12px 16px; }\n' > "$RADIUS_DIR/s.css"
+  node "$EXTRACTOR" --root "$RADIUS_DIR" > "$RADIUS_DIR/profile.json"
+  # All four distinct corner values must be captured (was: only the first).
+  run jq -e '[.radii[].px] == [4,8,12,16]' "$RADIUS_DIR/profile.json"
+  rm -rf "$RADIUS_DIR"
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+}

@@ -120,9 +120,16 @@ function extractSpacing(css) {
 /** Extract border-radius px values → sorted unique {px} objects. */
 function extractRadii(css) {
   const vals = new Set();
-  const re = /border-radius\s*:\s*(\d+(?:\.\d+)?)px/gi;
+  // border-radius may be a multi-value shorthand (e.g. "4px 8px 12px 16px");
+  // capture every px corner value, matching the runtime extractor's per-corner
+  // read (Phase 5.5 audit #1147 finding F4).
+  const re = /border-radius\s*:\s*([^;}{]+)/gi;
   let m;
-  while ((m = re.exec(css)) !== null) vals.add(Number(m[1]));
+  while ((m = re.exec(css)) !== null) {
+    const pxRe = /(\d+(?:\.\d+)?)px/g;
+    let p;
+    while ((p = pxRe.exec(m[1])) !== null) vals.add(Number(p[1]));
+  }
   return Array.from(vals).sort((a, b) => a - b).map(px => ({ px }));
 }
 

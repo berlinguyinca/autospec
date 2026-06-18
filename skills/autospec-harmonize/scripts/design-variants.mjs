@@ -145,6 +145,10 @@ function makeMinimal(baseline) {
     return { ...entry, hex: hslToHex(h, 0, l) };
   });
 
+  // Desaturating the accent changes its luminance, so recompute the contrast
+  // annotation from THIS variant's palette — never inherit the baseline's stale
+  // wcag_min_ratio (Phase 5.5 audit #1147 finding F1).
+  v.wcag_min_ratio = minForegroundContrast(v.tokens.palette);
   v.design_md = '# Minimal Variant\n\nShadows removed; accent desaturated for a clean, decoration-free aesthetic.';
   return v;
 }
