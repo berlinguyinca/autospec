@@ -118,6 +118,7 @@ Claude Code, OpenCode, or Codex CLI. Each links to its own README; see
 | [`autospec-release`](skills/autospec-release/README.md) | You want to know whether the current repo is ready to ship. | Runs the release-readiness loop across sweep, review, run, test, QA, docs sync, proof artifacts, and legacy cleanup. |
 | [`autospec-story`](skills/autospec-story/README.md) | You need a repo-level product and implementation-state overview. | Produces a cited Markdown story from local specs, docs, issues, PRs, and git history. |
 | [`autospec-fleet`](skills/autospec-fleet/README.md) | You want to supervise `autospec-run` across multiple repos. | Provides config schemas/linting, checkout planning, dry-run command generation, JSON status, and stop forwarding. |
+| [`autospec-harmonize`](skills/autospec-harmonize/README.md) | You want to discover design-token drift and produce a harmonized migration spec. | Runs a 6-stage pipeline (discover → generalize → variants → preview → pick → gen-migration-spec) and emits a dated spec ready for `/autospec-define`. |
 
 ### Run control and recovery
 
@@ -154,7 +155,7 @@ Sorted heaviest first. Regenerate with
 | `autospec-refine` | 3.1k | | `autospec-playwright` | 1.0k |
 | `autospec-classify` | 3.1k | | `autospec-stop` | 0.8k |
 | `autospec-explore` | 2.9k | | `autospec-rollover-status` | 0.5k |
-| `autospec-design` | 2.9k | | | |
+| `autospec-design` | 2.9k | | `autospec-harmonize` | 2.0k |
 | `autospec-continue` | 2.7k | | | |
 
 ## Install

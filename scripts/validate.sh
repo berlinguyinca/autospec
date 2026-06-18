@@ -2787,6 +2787,8 @@ main() {
     check_block_expansion
     check_derive_trio_consistency
     check_claim_guard_contract
+    check_autospec_harmonize_contract
+    check_autospec_upgrade_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -3842,6 +3844,55 @@ check_claim_guard_contract() {
                      fail "$bf: failed (issue #1066/#1069)"; }
         done
     fi
+}
+
+# autospec-harmonize trio contract (issue #1146):
+# All three adapter files (SKILL.md, codex/prompt.md, opencode/agent.md) must
+# contain the 6 stage labels, --no-live-preview, the AskUserQuestion pick gate,
+# and the /autospec-define handoff.
+check_autospec_harmonize_contract() {
+    info "autospec-harmonize contract: trio stage labels + pick gate + handoff (issue #1146)"
+    local skill_dir="skills/autospec-harmonize"
+    for f in "$skill_dir/SKILL.md" \
+              "$skill_dir/codex/prompt.md" \
+              "$skill_dir/opencode/agent.md"; do
+        [ -f "$f" ] || fail "$f: required trio file missing (issue #1146)"
+        for token in discover generalize variants preview pick gen-migration-spec; do
+            grep -q "$token" "$f" \
+                || fail "$f: missing stage label '$token' (issue #1146)"
+        done
+        grep -q -- '--no-live-preview' "$f" \
+            || fail "$f: missing '--no-live-preview' (issue #1146)"
+        grep -q 'AskUserQuestion' "$f" \
+            || fail "$f: missing 'AskUserQuestion' pick gate reference (issue #1146)"
+        grep -q '/autospec-define' "$f" \
+            || fail "$f: missing '/autospec-define' handoff (issue #1146)"
+    done
+}
+
+check_autospec_upgrade_contract() {
+    info "autospec-upgrade contract: trio phase tokens + full bats suite (issue #1211/#1185)"
+    local skill_dir="skills/autospec-upgrade"
+    for f in "$skill_dir/SKILL.md" \
+              "$skill_dir/codex/prompt.md" \
+              "$skill_dir/opencode/agent.md"; do
+        [ -f "$f" ] || fail "$f: required trio file missing (issue #1211)"
+        for token in detect behavior-lock mutation codemod orchestrat; do
+            grep -qi "$token" "$f" \
+                || fail "$f: missing pipeline token '$token' (issue #1211)"
+        done
+    done
+    # Run the autospec-upgrade bats suite. Previously NO validate gate ran these
+    # tests, which is exactly why the #1185 behavior-lock landed-order regression
+    # (green in isolation, red once mutation-gate.sh landed) went undetected.
+    local t name
+    for t in "$skill_dir"/tests/*.bats; do
+        [ -f "$t" ] || continue
+        name="$(basename "$t")"
+        info "  running: $t"
+        bats "$t" >"/tmp/validate-upgrade-$name.log" 2>&1 \
+            || { cat "/tmp/validate-upgrade-$name.log" >&2; fail "$t: failed"; }
+    done
 }
 
 main "$@"
