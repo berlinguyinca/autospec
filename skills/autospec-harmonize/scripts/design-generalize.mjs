@@ -28,7 +28,7 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { hexToHsl, luminance, isChromatic, hueDist } from './lib/color.mjs';
+import { hexToHsl, luminance, isChromatic, hueDist, minForegroundContrast } from './lib/color.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -255,6 +255,7 @@ function deterministicCollapse(profile) {
     id: 'baseline',
     label: 'Baseline — faithful consolidation',
     axis: 'baseline',
+    wcag_min_ratio: minForegroundContrast(palette),
     tokens: { palette, type_scale, spacing, radii, shadows },
     design_md,
   };

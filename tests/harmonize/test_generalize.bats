@@ -94,6 +94,22 @@ _build_profile() {
   [ "$output" = "true" ]
 }
 
+@test "design-generalize baseline variant has numeric wcag_min_ratio > 0" {
+  command -v node >/dev/null 2>&1 || skip "node not available"
+  command -v jq   >/dev/null 2>&1 || skip "jq not available"
+  _build_profile
+  env AUTOSPEC_HARMONIZE_LLM_STUB=1 node "$GENERALIZER" --tokens "$TEST_TMPDIR/profile.json" \
+    > "$TEST_TMPDIR/variant.json"
+  # wcag_min_ratio must be a number
+  run jq -e '.wcag_min_ratio | type == "number"' "$TEST_TMPDIR/variant.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+  # wcag_min_ratio must be > 0 (contrast ratio is always >= 1 for any two colors)
+  run jq -e '.wcag_min_ratio > 0' "$TEST_TMPDIR/variant.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+}
+
 @test "design-generalize inline fixture profile also produces exactly 1 primary" {
   command -v node >/dev/null 2>&1 || skip "node not available"
   command -v jq   >/dev/null 2>&1 || skip "jq not available"
