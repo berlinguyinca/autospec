@@ -52,3 +52,56 @@ export function hueDist(a, b) {
   const d = Math.abs(a - b) % 360;
   return d > 180 ? 360 - d : d;
 }
+
+// ---------------------------------------------------------------------------
+// WCAG contrast helpers (shared by design-variants and design-generalize)
+// ---------------------------------------------------------------------------
+
+/** sRGB channel [0,255] → linear light value. */
+export function linearize(c) {
+  const s = c / 255;
+  return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+}
+
+/** WCAG relative luminance of a "#rrggbb" hex. */
+export function wcagLuminance(hex) {
+  const [r, g, b] = hexToRgb(hex);
+  return 0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b);
+}
+
+/** WCAG contrast ratio between two hex colors. */
+export function contrastRatio(hexA, hexB) {
+  const L1 = wcagLuminance(hexA);
+  const L2 = wcagLuminance(hexB);
+  const lighter = Math.max(L1, L2);
+  const darker  = Math.min(L1, L2);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+/** Pick the background entry: the one tagged role:"bg", else the lightest hex. */
+export function pickBackground(palette) {
+  if (!palette.length) return null;
+  const tagged = palette.find(e => e.role === 'bg');
+  if (tagged) return tagged;
+  return palette.reduce((a, b) => (wcagLuminance(b.hex) > wcagLuminance(a.hex) ? b : a));
+}
+
+/**
+ * Readability metric: the minimum WCAG contrast of each foreground color
+ * against the background. Contrast is inherently foreground-vs-background, so
+ * this — not min-pairwise-across-all-colors — is what "high contrast" must
+ * improve. The high-contrast transform pushes foregrounds away from the bg
+ * luminance, which monotonically raises this value (no fudge floor needed).
+ */
+export function minForegroundContrast(palette) {
+  const bg = pickBackground(palette);
+  if (!bg) return 1;
+  const fg = palette.filter(e => e !== bg);
+  if (!fg.length) return 1;
+  let min = Infinity;
+  for (const e of fg) {
+    const r = contrastRatio(e.hex, bg.hex);
+    if (r < min) min = r;
+  }
+  return min === Infinity ? 1 : min;
+}

@@ -15,62 +15,9 @@ import path from 'node:path';
 import { execSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { hexToRgb, rgbToHsl, hexToHsl, isChromatic } from './lib/color.mjs';
+import { hexToRgb, rgbToHsl, hexToHsl, isChromatic, wcagLuminance, contrastRatio, pickBackground, minForegroundContrast } from './lib/color.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-// ---------------------------------------------------------------------------
-// WCAG relative luminance (linearized sRGB) — NOT HSL-L
-// ---------------------------------------------------------------------------
-
-/** sRGB channel [0,255] → linear light value. */
-function linearize(c) {
-  const s = c / 255;
-  return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
-}
-
-/** WCAG relative luminance of a "#rrggbb" hex. */
-function wcagLuminance(hex) {
-  const [r, g, b] = hexToRgb(hex);
-  return 0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b);
-}
-
-/** WCAG contrast ratio between two hex colors. */
-function contrastRatio(hexA, hexB) {
-  const L1 = wcagLuminance(hexA);
-  const L2 = wcagLuminance(hexB);
-  const lighter = Math.max(L1, L2);
-  const darker  = Math.min(L1, L2);
-  return (lighter + 0.05) / (darker + 0.05);
-}
-
-/** Pick the background entry: the one tagged role:"bg", else the lightest hex. */
-function pickBackground(palette) {
-  if (!palette.length) return null;
-  const tagged = palette.find(e => e.role === 'bg');
-  if (tagged) return tagged;
-  return palette.reduce((a, b) => (wcagLuminance(b.hex) > wcagLuminance(a.hex) ? b : a));
-}
-
-/**
- * Readability metric: the minimum WCAG contrast of each foreground color
- * against the background. Contrast is inherently foreground-vs-background, so
- * this — not min-pairwise-across-all-colors — is what "high contrast" must
- * improve. The high-contrast transform pushes foregrounds away from the bg
- * luminance, which monotonically raises this value (no fudge floor needed).
- */
-function minForegroundContrast(palette) {
-  const bg = pickBackground(palette);
-  if (!bg) return 1;
-  const fg = palette.filter(e => e !== bg);
-  if (!fg.length) return 1;
-  let min = Infinity;
-  for (const e of fg) {
-    const r = contrastRatio(e.hex, bg.hex);
-    if (r < min) min = r;
-  }
-  return min === Infinity ? 1 : min;
-}
 
 // ---------------------------------------------------------------------------
 // Hex utilities
@@ -342,6 +289,38 @@ function buildVariants(baseline, axes, vendorFile) {
   return variants;
 }
 
+/** Self-validate variants against the schema using ajv CLI if available.
+ *  Exits 1 with an error to stderr if any variant is invalid.
+ *  Skips silently when ajv is not on PATH (no hard dependency).
+ */
+function selfValidateVariants(variants, schemaPath) {
+  // Check if ajv is available — skip silently if not
+  const ajvCheck = spawnSync('ajv', ['--version'], { stdio: 'pipe' });
+  if (ajvCheck.status !== 0 || ajvCheck.error) return; // ajv not available — skip
+
+  for (let i = 0; i < variants.length; i++) {
+    const tmpFile = `/tmp/autospec-variants-validate-${Date.now()}-${i}.json`;
+    try {
+      fs.writeFileSync(tmpFile, JSON.stringify(variants[i]));
+      const result = spawnSync(
+        'ajv',
+        ['validate', '-s', schemaPath, '--spec=draft2020', '-d', tmpFile],
+        { stdio: 'pipe' }
+      );
+      try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+      if (result.status !== 0) {
+        const stderr = result.stderr ? result.stderr.toString() : '';
+        process.stderr.write(`Error: variant[${i}] (id="${variants[i].id}") failed schema validation:\n${stderr}\n`);
+        process.exit(1);
+      }
+    } catch (e) {
+      try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+      process.stderr.write(`Error: schema validation error for variant[${i}]: ${e.message}\n`);
+      process.exit(1);
+    }
+  }
+}
+
 function main() {
   const args = parseArgs(process.argv);
   if (!args.baseline) {
@@ -353,7 +332,13 @@ function main() {
   // variants use, so comparisons are apples-to-apples regardless of what value
   // the upstream baseline carried.
   baseline.wcag_min_ratio = minForegroundContrast(baseline.tokens.palette);
-  process.stdout.write(JSON.stringify(buildVariants(baseline, args.axes, args.vendorFile), null, 2) + '\n');
+  const variants = buildVariants(baseline, args.axes, args.vendorFile);
+
+  // F5: self-validate each variant against the schema (skips when ajv absent)
+  const schemaPath = path.resolve(__dirname, '../../../schemas/autospec-harmonize-variant.schema.json');
+  selfValidateVariants(variants, schemaPath);
+
+  process.stdout.write(JSON.stringify(variants, null, 2) + '\n');
 }
 
 main();
