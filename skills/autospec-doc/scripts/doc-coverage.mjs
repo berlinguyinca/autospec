@@ -75,6 +75,29 @@ const DEFAULT_STOPLIST = [
   // matched, so real domain enums like INVALID_TARGET are unaffected.
   'MAX_VALUE', 'MIN_VALUE', 'POSITIVE_INFINITY', 'NEGATIVE_INFINITY',
   'MAX_SAFE_INTEGER', 'MIN_SAFE_INTEGER', 'NOT_FOUND', 'NO_ERROR',
+  // Framework / stdlib enum CONSTANTS (multi-segment, so they pass the enum
+  // regex, but they are library vocabulary — not the project's domain). These
+  // recur in any JVM/Spring/Jackson codebase. Whole-term matched, so real
+  // domain enums are unaffected; projects can extend via `coverage.stoplist`.
+  // java.math.RoundingMode
+  'HALF_EVEN', 'HALF_UP', 'HALF_DOWN', 'ROUNDING_MODE', 'UNNECESSARY',
+  // java.nio.charset.StandardCharsets
+  'UTF_8', 'UTF_16', 'UTF_16BE', 'UTF_16LE', 'US_ASCII', 'ISO_8859_1',
+  // Spring bean scopes / tx propagation / ordering
+  'SCOPE_PROTOTYPE', 'SCOPE_SINGLETON', 'REQUIRES_NEW', 'PROPAGATION_REQUIRES_NEW',
+  'PROPAGATION_REQUIRED', 'LOWEST_PRECEDENCE', 'HIGHEST_PRECEDENCE', 'ASSIGNABLE_TYPE',
+  // Jackson (de)serialization features
+  'FAIL_ON_UNKNOWN_PROPERTIES', 'FAIL_ON_EMPTY_BEANS', 'WRITE_DATES_AS_TIMESTAMPS',
+  // Spring/HTTP media types
+  'APPLICATION_JSON', 'APPLICATION_XML', 'TEXT_PLAIN', 'MULTIPART_FORM_DATA',
+  // java.time formatters / SQL / NIO options
+  'ISO_ZONED_DATE_TIME', 'ISO_LOCAL_DATE_TIME', 'ISO_INSTANT', 'ISO_DATE_TIME',
+  'ISO_LOCAL_DATE', 'CURRENT_TIMESTAMP', 'CURRENT_DATE', 'REPLACE_EXISTING', 'COPY_ATTRIBUTES',
+  // HTTP statuses / AWS regions / misc stdlib + library constants.
+  'BAD_GATEWAY', 'BAD_REQUEST', 'BUFFER_SIZE', 'CASE_INSENSITIVE',
+  'NO_COMPRESSION', 'OBJECT_MAPPER',
+  // javax.xml.stream.XMLStreamConstants
+  'START_ELEMENT', 'END_ELEMENT', 'START_DOCUMENT', 'END_DOCUMENT', 'CHARACTERS',
 ];
 
 // Build-generated info files replicated per module: pure noise (git.properties is
@@ -98,6 +121,8 @@ const CONFIG_PREFIX_STOPLIST = [
   'camel', 'aws', 'azure', 'gcp', 'java', 'sun', 'user', 'os', 'line', 'file',
   'path', 'maven', 'gradle', 'log4j', 'logback', 'slf4j', 'tomcat', 'jetty',
   'netty', 'grpc', 'otel', 'opentelemetry', 'sentry', 'datadog',
+  // datasource proxy / SQL logging decorators (datasource-proxy, p6spy).
+  'decorator', 'p6spy',
 ];
 
 // Regex: SCREAMING_SNAKE_CASE with at least two segments.
@@ -393,15 +418,22 @@ function escapeRe(s) {
 }
 
 // A term is covered if it appears in any page content via a whole-token,
-// case-insensitive match. For config keys, the full dotted key OR its last ≥2
-// segments suffice.
+// case-insensitive match. For config keys, the full dotted key, a key sharing
+// the same trailing path (last 3 segments — covers prefix-aliased duplicates
+// like `…lcms.X` vs `…algorithm.X`), or the standalone last-2-segment leaf all
+// suffice.
 function termCovered(term, haystack) {
   if (term.kind === 'config') {
     const segs = String(term.term).split('.').filter(Boolean);
-    const candidates = [term.term];
-    if (segs.length >= 2) candidates.push(segs.slice(-2).join('.'));
-    return candidates.some(c => {
-      const re = new RegExp('(?<![\\w.])' + escapeRe(c) + '(?![\\w.])', 'i');
+    // candidate := { text, suffix }. suffix=true relaxes the leading lookbehind
+    // to allow a preceding dot, so a documented key with a different ROOT prefix
+    // but the same trailing segments still counts as covering this term.
+    const candidates = [{ text: term.term, suffix: false }];
+    if (segs.length >= 3) candidates.push({ text: segs.slice(-3).join('.'), suffix: true });
+    if (segs.length >= 2) candidates.push({ text: segs.slice(-2).join('.'), suffix: false });
+    return candidates.some(({ text, suffix }) => {
+      const behind = suffix ? '(?<!\\w)' : '(?<![\\w.])';
+      const re = new RegExp(behind + escapeRe(text) + '(?![\\w.])', 'i');
       return re.test(haystack);
     });
   }
