@@ -46,8 +46,12 @@ teardown() {
   run bash "$DISCOVER" --root "$FIXTURE_DIR" --url "http://127.0.0.1:1" --out "$TEST_TMPDIR" 2>&1
   [ "$status" -eq 0 ]
 
-  # Output must mention the unavailability signal
-  echo "$output" | grep -q "harmonize_runtime_unavailable"
+  # Output must mention the unavailability signal (assert deterministically:
+  # a mid-body pipeline is not a reliable bats failure point on its own).
+  if ! echo "$output" | grep -q "harmonize_runtime_unavailable"; then
+    echo "FAIL: expected harmonize_runtime_unavailable in output: $output" >&2
+    return 1
+  fi
 
   # Fallback must produce source-extracted profile
   [ -f "$TEST_TMPDIR/discovered-tokens.json" ]
