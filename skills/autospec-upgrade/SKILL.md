@@ -107,29 +107,152 @@ Scripts live under `skills/autospec-upgrade/scripts/` and install into
    `.autospec/upgrade-state.json`; resume from the last completed checkpoint
    after a mid-hop crash; never re-run a completed hop.
 
-## Phase contract stub
+## Phase contract
 
-> **Note:** Full phase prose lands in issue #1184
-> (`upgrade-orchestrator.sh` resumable state machine). This stub documents the
-> phase names and invariants so downstream issues can reference them correctly.
+The orchestrator (`upgrade-orchestrator.sh`) sequences every phase over a
+single resumable state file: `.autospec/upgrade-state.json`. Each phase writes
+its checkpoint before the next phase starts. On restart the orchestrator reads
+the state file and skips every already-completed phase. A fully-completed run
+is a no-op on re-invocation (idempotent). Every phase failure that cannot be
+recovered within its bounded fix-loop stops the pipeline immediately, persists
+state, and exits non-zero so the operator can inspect and retry.
 
-- **Phase 0 — Detect.** Run `upgrade-detect.sh`. Emit detection JSON. Surface
-  unknown stacks or auth-required registries; never block on them.
-- **Phase 1 — Behavior-lock.** Generate characterization tests (E2E/Playwright
-  golden-master + unit/integration 80% floor); record Stryker mutation baseline.
-  Tag `pre-upgrade-<fw>-<ver>`. Hard rule: no upgrade step runs until behavior
-  is locked and the mutation baseline is recorded.
-- **Phase 2 — Incremental upgrade loop.** For each major hop: run
-  `codemod-route.sh` → build + type-check → run tests → re-verify golden-master
-  → bounded fix-loop → `tag-upgrade.sh` + commit.
-- **Phase 3 — Best-practice migration.** Standalone/signals, App Router/async
-  request APIs, React 19 patterns — only after versions green; each behind
-  behavior-lock + new tests.
-- **Phase 4 — Verify.** `autospec-qa --no-heal` + mutation score ≥ baseline
-  (hard gate). Coverage floor checked but never sufficient alone.
-- **Phase 5 — Document.** `autospec-doc --full` migration log.
-- **Phase 6 — Tag + report.** Push `post-upgrade-<fw>-<ver>` tags; emit
-  `.autospec/upgrade-report.json`.
+State file schema (`.autospec/upgrade-state.json`):
+
+```json
+{
+  "current_phase": "phase2_complete",
+  "last_completed_hop": "angular-21",
+  "last_green_tag": "post-upgrade-angular-21"
+}
+```
+
+`current_phase` values in order: `phase0_complete`, `phase1_complete`,
+`phase2_complete`, `phase3_complete`, `phase4_complete`, `phase5_complete`,
+`phase6_complete`. An absent or unrecognised value means "start from Phase 0".
+
+### Phase 0 — Detect
+
+Run `upgrade-detect.sh --root <root> --out <autospec-dir>`. Emit detection
+JSON to `<autospec-dir>/detect.json`. Detection JSON schema:
+`{frameworks[], versions, package_manager, runners[], monorepo, has_tests}`.
+
+Explicit handling required:
+
+- **Zero tests present** — emit `has_tests: false`; Phase 1 will surface this
+  as `code_health:upgrade_behavior_lock_unreachable`.
+- **Non-npm package manager** — emit `package_manager` correctly; codemods
+  adapt per manager.
+- **Monorepo with multiple apps** — operate per-project; `monorepo: true`.
+- **Private registry** — do not block on auth; surface registry info in
+  detection JSON and continue.
+- **Unknown framework** — emit `frameworks: []`; orchestrator exits with
+  `code_health:upgrade_unknown_stack`. Never guess.
+
+On success write checkpoint `phase0_complete` to state file.
+
+### Phase 1 — Behavior-lock (gate before any upgrade)
+
+Run `behavior-lock.sh --detect <detect.json> --root <root> --out
+<autospec-dir>`. This phase:
+
+1. Generates characterization tests biased to E2E/Playwright golden-master
+   (refactor-robust) plus unit/integration to the 80 % **floor**.
+2. Records the Stryker mutation **baseline** to
+   `.autospec/mutation-proof.json`.
+3. Tags `pre-upgrade-<fw>-<ver>` via `tag-upgrade.sh pre`.
+
+**Hard rule:** no upgrade step in Phase 2 may run until this phase exits 0
+and the mutation baseline is recorded. If `behavior-lock.sh` exits non-zero
+the orchestrator stops with `code_health:upgrade_behavior_lock_unreachable`
+and preserves state so the operator can fix the test surface and resume.
+
+On success write checkpoint `phase1_complete` to state file.
+
+### Phase 2 — Incremental upgrade loop
+
+Run `upgrade-engine.sh --hops <hops.json> --root <root>`. The hops file is
+produced by `compute-upgrade-steps.sh`. For each major hop the engine:
+
+1. Checks idempotency: if `post-upgrade-<fw>-<to>` tag already exists, skip.
+2. Sets `pre-upgrade-<fw>-<to>` tag (checkpoint before the hop).
+3. Runs `codemod-route.sh <fw> <to>` (official tooling only — never
+   hand-rolls a migration that an official codemod performs).
+4. Runs: build → type-check → tests → `behavior-lock.sh` re-verify.
+5. **Bounded fix-loop** (default 5 iterations): on failure, re-run the
+   pipeline; if the bound is exceeded, stop at that hop, leave the last green
+   tag intact, and exit non-zero so the operator can inspect the failing diff.
+6. On success: sets `post-upgrade-<fw>-<to>` tag + commits.
+
+Angular must never skip a major (20→21→22, never 20→22). Next.js and React
+apply the same one-major-at-a-time invariant.
+
+"Latest" is resolved per framework, hop by hop, from the computed steps.
+
+If `upgrade-engine.sh` exits non-zero the orchestrator stops, persists the
+current state (phase and last green tag), and surfaces the failure to the
+operator (exit non-zero). Do not silently continue to Phase 3.
+
+On success write checkpoint `phase2_complete` (with `last_completed_hop` and
+`last_green_tag`) to state file.
+
+### Phase 3 — Best-practice migration
+
+Run `best-practice-migrate.sh --detect <detect.json> --root <root> --out
+<autospec-dir> --versions-green`. This phase applies framework-idiomatic
+modernisation **only after all version hops are green**:
+
+- Angular: standalone component migration (`ng generate @angular/core:standalone`),
+  surface Signals adoption and `inject()` migration as operator follow-ups.
+- Next.js: async request API migration (`next-async-request-api` codemod),
+  surface Pages→App Router restructure as an operator follow-up.
+- React: React 19 types codemod (`types-react-codemod preset-19`), surface
+  `forwardRef` → ref-as-prop and `use()` hook as operator follow-ups.
+
+Each schematic step is gated: `behavior-lock.sh` re-verify must pass after
+each schematic. Manual structural migrations that no official schematic
+performs are **surfaced as operator follow-ups, never attempted silently**.
+
+If `best-practice-migrate.sh` exits non-zero the orchestrator stops and
+persists state. On success write checkpoint `phase3_complete` to state file.
+
+### Phase 4 — Verify
+
+Run `mutation-gate.sh --gate --out <autospec-dir>` then
+`autospec-qa --no-heal --root <root>`. Both must pass:
+
+- **Mutation score ≥ pre-upgrade baseline** (hard gate from
+  `.autospec/mutation-proof.json`). If the score regressed, the orchestrator
+  stops with state persisted and reports surviving mutants to the operator.
+  The `post-upgrade` tag is **withheld** until this gate passes.
+- **`autospec-qa --no-heal`**: no-mock smoke + console/network gate + proof
+  artifacts. Coverage floor is checked but is never sufficient alone.
+
+If either check exits non-zero the orchestrator stops and persists state
+(exit non-zero). On success write checkpoint `phase4_complete` to state file.
+
+### Phase 5 — Document
+
+Run `migration-doc.sh --root <root> --out <root>`. Renders the human
+migration log from `.autospec/upgrade-report.json`:
+
+- Per-hop sections: framework, before/after version, codemods applied,
+  manual fixes, residual risk.
+- Written to `docs/migrations/<date>-upgrade.md`.
+- Composes `autospec-doc --full` to finalise the log.
+
+On success write checkpoint `phase5_complete` to state file.
+
+### Phase 6 — Tag + report
+
+Run `tag-upgrade.sh post` for each framework/version to push
+`post-upgrade-<fw>-<ver>` tags (withheld until mutation gate passed in
+Phase 4). Run `tag-upgrade.sh report` to emit/append to
+`.autospec/upgrade-report.json`.
+
+On success write checkpoint `phase6_complete` to state file. A subsequent
+re-invocation of the orchestrator reads `phase6_complete` and exits 0
+immediately (idempotent no-op).
 
 ## Error handling
 
