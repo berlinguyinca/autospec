@@ -1,0 +1,1 @@
+{"frameworks":["next","react"],"versions":{"next":"13.4.0","react":"18.2.0"},"package_manager":"pnpm","runners":["jest"],"monorepo":false,"has_tests":true}
