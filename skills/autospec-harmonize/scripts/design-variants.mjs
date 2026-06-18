@@ -295,69 +295,61 @@ function fetchVendor(vendorFile, scriptDir) {
 // Main
 // ---------------------------------------------------------------------------
 
-function main() {
-  const args = parseArgs(process.argv);
+/** Directional axes that are a pure function of the baseline (no I/O). */
+const SIMPLE_AXES = {
+  minimal: makeMinimal,
+  'high-contrast': makeHighContrast,
+  dense: makeDense,
+  bold: makeBold,
+};
 
-  if (!args.baseline) {
-    process.stderr.write('Usage: node design-variants.mjs --baseline <file> --axes <axes> [--vendor-file <f>]\n');
+/** Read + parse the baseline variant file; exit 1 on missing/invalid input. */
+function loadBaseline(file) {
+  if (!fs.existsSync(file)) {
+    process.stderr.write(`Error: baseline file not found: ${file}\n`);
     process.exit(1);
   }
-
-  if (!fs.existsSync(args.baseline)) {
-    process.stderr.write(`Error: baseline file not found: ${args.baseline}\n`);
-    process.exit(1);
-  }
-
-  let baseline;
   try {
-    baseline = JSON.parse(fs.readFileSync(args.baseline, 'utf8'));
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (e) {
     process.stderr.write(`Error: could not parse baseline JSON: ${e.message}\n`);
     process.exit(1);
   }
+}
 
+/** Build the variant array (baseline at index 0) for the requested axes. */
+function buildVariants(baseline, axes, vendorFile) {
+  const variants = [baseline];
+  for (const axis of axes) {
+    if (SIMPLE_AXES[axis]) {
+      variants.push(SIMPLE_AXES[axis](baseline));
+    } else if (axis === 'vendor-blend') {
+      const vendorPalette = fetchVendor(vendorFile, __dirname);
+      if (!vendorPalette) {
+        // Drop only vendor-blend; other axes survive.
+        process.stderr.write('code_health:harmonize_vendor_fetch_failed\n');
+        continue;
+      }
+      variants.push(makeVendorBlend(baseline, vendorPalette));
+    } else {
+      process.stderr.write(`Warning: unknown axis "${axis}" — skipped\n`);
+    }
+  }
+  return variants;
+}
+
+function main() {
+  const args = parseArgs(process.argv);
+  if (!args.baseline) {
+    process.stderr.write('Usage: node design-variants.mjs --baseline <file> --axes <axes> [--vendor-file <f>]\n');
+    process.exit(1);
+  }
+  const baseline = loadBaseline(args.baseline);
   // Recompute baseline wcag_min_ratio with the same foreground-vs-bg metric the
   // variants use, so comparisons are apples-to-apples regardless of what value
   // the upstream baseline carried.
   baseline.wcag_min_ratio = minForegroundContrast(baseline.tokens.palette);
-
-  const variants = [baseline];
-
-  for (const axis of args.axes) {
-    switch (axis) {
-      case 'minimal':
-        variants.push(makeMinimal(baseline));
-        break;
-
-      case 'high-contrast':
-        variants.push(makeHighContrast(baseline));
-        break;
-
-      case 'dense':
-        variants.push(makeDense(baseline));
-        break;
-
-      case 'bold':
-        variants.push(makeBold(baseline));
-        break;
-
-      case 'vendor-blend': {
-        const vendorPalette = fetchVendor(args.vendorFile, __dirname);
-        if (!vendorPalette) {
-          process.stderr.write('code_health:harmonize_vendor_fetch_failed\n');
-          // Drop only vendor-blend; continue with other axes
-          continue;
-        }
-        variants.push(makeVendorBlend(baseline, vendorPalette));
-        break;
-      }
-
-      default:
-        process.stderr.write(`Warning: unknown axis "${axis}" — skipped\n`);
-    }
-  }
-
-  process.stdout.write(JSON.stringify(variants, null, 2) + '\n');
+  process.stdout.write(JSON.stringify(buildVariants(baseline, args.axes, args.vendorFile), null, 2) + '\n');
 }
 
 main();
