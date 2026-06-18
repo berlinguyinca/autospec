@@ -141,6 +141,22 @@ test('extractDomainTerms drops stoplisted noise and sub-threshold terms', () => 
   cleanup(root);
 });
 
+test('extractDomainTerms drops framework/stdlib enum constants by default', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-coverage-fw-'));
+  const w = (rel, c) => { const f = path.join(root, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, c, 'utf8'); };
+  // Two files each so they pass minFiles=2; mix framework noise with a domain enum.
+  const noise = 'HALF_EVEN SCOPE_PROTOTYPE REQUIRES_NEW UTF_8 APPLICATION_JSON ROUNDING_MODE ISO_ZONED_DATE_TIME';
+  w('a/A.scala', `object A { val n = "${noise}"; val d = INVALID_TARGET }`);
+  w('b/B.scala', `object B { val n = "${noise}"; val d = INVALID_TARGET }`);
+  const { terms } = extractDomainTerms({ repoRoot: root, minFreq: 2, minFiles: 2 });
+  const names = new Set(terms.map(t => t.term));
+  for (const fw of ['HALF_EVEN', 'SCOPE_PROTOTYPE', 'REQUIRES_NEW', 'UTF_8', 'APPLICATION_JSON', 'ROUNDING_MODE', 'ISO_ZONED_DATE_TIME']) {
+    assert.ok(!names.has(fw), `${fw} (framework/stdlib) must be stoplisted`);
+  }
+  assert.ok(names.has('INVALID_TARGET'), 'real domain enum must survive');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test('extractDomainTerms with minFiles=1 still drops freq-1 terms', () => {
   const root = makeFixture();
   const { terms } = extractDomainTerms({ repoRoot: root, minFreq: 3, minFiles: 1 });
@@ -431,6 +447,22 @@ test('scoreCoverage config-key partial match (last 2 segments) counts as covered
   const res = scoreCoverage({ terms, pages });
   assert.strictEqual(res.covered, 1, 'last-2-segment match should count');
   assert.strictEqual(res.missing.length, 0);
+});
+
+test('scoreCoverage config prefix-alias match: same trailing path, different root prefix', () => {
+  // A key documented under one root prefix covers the prefix-aliased duplicate
+  // (last-3 segments shared), even though the suffix is preceded by a dot in the
+  // doc. A key with a DIFFERENT trailing path is NOT covered.
+  const terms = [
+    { term: 'wcmc.workflow.algorithm.preprocessing.deconvolution.msdial4.massSliceWidth', kind: 'config', freq: 5, files: 5, sampleFiles: ['a.yml'] },
+    { term: 'wcmc.workflow.algorithm.preprocessing.deconvolution.msdial.massSliceWidth', kind: 'config', freq: 5, files: 5, sampleFiles: ['b.yml'] },
+  ];
+  // Doc documents only the `lcms` root prefix, msdial4 variant.
+  const pages = [{ path: 'docs/admin/peak.md', content: 'Tune `wcmc.workflow.lcms.preprocessing.deconvolution.msdial4.massSliceWidth` (default 0.1).' }];
+  const res = scoreCoverage({ terms, pages });
+  const missing = new Set(res.missing.map(m => m.term));
+  assert.ok(!missing.has('wcmc.workflow.algorithm.preprocessing.deconvolution.msdial4.massSliceWidth'), 'algorithm-prefix alias (same last-3) must be covered');
+  assert.ok(missing.has('wcmc.workflow.algorithm.preprocessing.deconvolution.msdial.massSliceWidth'), 'msdial v3 (different last-3) must NOT be covered by the msdial4 key');
 });
 
 test('scoreCoverage enum match is whole-token (does not match substring of a longer word)', () => {
