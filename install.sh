@@ -918,7 +918,7 @@ skills/autospec-run/scripts/list-ready-issues.sh::list-ready-issues.sh \
 skills/autospec-run/scripts/post-token-report.sh::post-token-report.sh \
 skills/autospec-run/scripts/release-issue.sh::release-issue.sh \
 skills/autospec-resume/scripts/resume-scan.sh::resume-scan.sh \
-skills/autospec-doc/scripts/doc-orchestrator.mjs::doc-orchestrator.mjs \
+skills/autospec-doc/scripts/doc-orchestrator-entry.mjs::doc-orchestrator.mjs \
 skills/autospec-sweep/scripts/run.sh::autospec-sweep-run.sh \
 skills/autospec-sweep/scripts/wizard.sh::autospec-sweep-wizard.sh"
 
@@ -930,13 +930,24 @@ skills/autospec-sweep/scripts/wizard.sh::autospec-sweep-wizard.sh"
     #   <base>/autospec-doc/scripts/   (so ../../ reaches <base>/)
     # with the shared scripts mirrored at <base>/autospec-shared/scripts/.
     # We use $autospec_scripts_dir/../skills/ as <base>, giving:
-    #   ~/.autospec/skills/autospec-doc/scripts/       — the six module files
+    #   ~/.autospec/skills/autospec-doc/scripts/       — the module closure
     #   ~/.autospec/skills/autospec-shared/scripts/    — the shared deps mirror
-    # doc-orchestrator.mjs is ALSO copied to the flat $autospec_scripts_dir/ entry
-    # point (above) for backward-compatible invocations via ${AUTOSPEC_SCRIPTS_DIR}.
+    # A delegating shim (doc-orchestrator-entry.mjs) is installed flat at
+    # $autospec_scripts_dir/doc-orchestrator.mjs (above) for backward-compatible
+    # ${AUTOSPEC_SCRIPTS_DIR} invocations; it re-execs the subtree orchestrator. A
+    # flat copy of the real orchestrator can never resolve its two-level shared import.
+    #
+    # This list MUST contain doc-orchestrator.mjs's full transitive ./ import closure:
+    #   doc-orchestrator -> doc-config, doc-scaffold, gen-llms-full, gen-audience-docs, doc-coverage
+    #   doc-scaffold     -> doc-config
+    #   gen-audience-docs -> doc-style (+ ../../autospec-shared/scripts)
+    # Omitting any of these crashes the orchestrator at module-load (ERR_MODULE_NOT_FOUND).
+    # tests/ship-completeness.bats enforces this against the static import graph.
     autospec_doc_scripts="\
 skills/autospec-doc/scripts/doc-orchestrator.mjs \
 skills/autospec-doc/scripts/doc-config.mjs \
+skills/autospec-doc/scripts/doc-scaffold.mjs \
+skills/autospec-doc/scripts/doc-coverage.mjs \
 skills/autospec-doc/scripts/doc-style.mjs \
 skills/autospec-doc/scripts/gen-audience-docs.mjs \
 skills/autospec-doc/scripts/gen-llms-full.mjs \

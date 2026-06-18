@@ -152,3 +152,48 @@ is_shipped() {
     false
   }
 }
+
+# --- autospec-doc ES-module closure (the doc-orchestrator regression) ----------
+# The orchestrator's relative `./*.mjs` imports must ALL be shipped into the
+# subtree, else it crashes at module-load (ERR_MODULE_NOT_FOUND). The generic
+# ${AUTOSPEC_SCRIPTS_DIR} guard above can't see static ES imports, so check the
+# import graph directly. This is the bug where doc-scaffold.mjs + doc-coverage.mjs
+# were omitted from install.sh's autospec_doc_scripts closure list.
+
+@test "autospec-doc orchestrator import closure is fully shipped by install.sh" {
+  scripts_dir="$REPO_ROOT/skills/autospec-doc/scripts"
+  seen=" "
+  queue="doc-orchestrator.mjs"
+  closure=""
+  while [ -n "$queue" ]; do
+    next=""
+    for m in $queue; do
+      case "$seen" in *" $m "*) continue ;; esac
+      seen="$seen$m "
+      closure="$closure $m"
+      imports="$(grep -hoE "from '\./[a-z-]+\.mjs'" "$scripts_dir/$m" 2>/dev/null | sed "s#from '\./##;s#'##")"
+      next="$next $imports"
+    done
+    queue="$next"
+  done
+  shipped="$(grep -oE 'skills/autospec-doc/scripts/[a-z-]+\.mjs' "$REPO_ROOT/install.sh" | sed 's#.*/##' | sort -u)"
+  missing=""
+  for m in $closure; do
+    printf '%s\n' "$shipped" | grep -qx "$m" || missing="$missing $m"
+  done
+  [ -z "$missing" ] || { echo "Unshipped doc-orchestrator closure modules:$missing" >&2; false; }
+}
+
+@test "autospec-doc flat entry is the delegating shim (not the real orchestrator)" {
+  # The flat ${AUTOSPEC_SCRIPTS_DIR}/doc-orchestrator.mjs must be the shim, since a
+  # flat copy of the real orchestrator can't resolve gen-audience-docs' two-level
+  # ../../autospec-shared/scripts import.
+  run grep -qE 'skills/autospec-doc/scripts/doc-orchestrator-entry\.mjs::doc-orchestrator\.mjs' "$REPO_ROOT/install.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$REPO_ROOT/skills/autospec-doc/scripts/doc-orchestrator-entry.mjs" ]
+  # The shim builds the subtree path from segments and re-execs it.
+  run grep -qE "spawnSync" "$REPO_ROOT/skills/autospec-doc/scripts/doc-orchestrator-entry.mjs"
+  [ "$status" -eq 0 ]
+  run grep -qE "autospec-doc" "$REPO_ROOT/skills/autospec-doc/scripts/doc-orchestrator-entry.mjs"
+  [ "$status" -eq 0 ]
+}
