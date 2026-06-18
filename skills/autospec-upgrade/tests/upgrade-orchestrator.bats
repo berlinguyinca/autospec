@@ -83,7 +83,7 @@ teardown() {
     BEST_PRACTICE_LOG="$BEST_PRACTICE_LOG" QA_LOG="$QA_LOG" \
     bash "$ORCHESTRATOR" --root "$TEST_ROOT" --out "$AUTOSPEC_DIR"
   [ "$status" -eq 0 ]
-  [ -s "$DETECT_LOG" ] || [ -f "$STATE_FILE" ]
+  [ -s "$DETECT_LOG" ]
   [ -s "$ENGINE_LOG" ]
   [ -s "$TAG_LOG" ]
   [ -s "$MIGRATION_DOC_LOG" ]

@@ -8,6 +8,9 @@ install_detect_mock() {
   cat > "$MOCK_BIN/upgrade-detect.sh" <<'EOF'
 #!/usr/bin/env bash
 DETECT_LOG="${DETECT_LOG:-/dev/null}"
+# Record invocation BEFORE consuming args, so the recorder reliably proves the
+# mock ran (a post-parse "$*" is empty -> a blank line, an ambiguous signal).
+printf 'invoked %s\n' "$*" >> "$DETECT_LOG"
 OUT_DIR="${1:-}"
 ROOT_ARG=""
 OUT_ARG=""
@@ -18,7 +21,6 @@ while [ $# -gt 0 ]; do
     *)      shift ;;
   esac
 done
-printf '%s\n' "$*" >> "$DETECT_LOG"
 if [ -n "$OUT_ARG" ]; then
   mkdir -p "$OUT_ARG"
   printf '{"frameworks":["angular"],"versions":{"angular":"21"},"package_manager":"npm","runners":["jest"],"monorepo":false,"has_tests":true}\n' \
