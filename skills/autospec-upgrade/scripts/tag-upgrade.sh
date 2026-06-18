@@ -111,62 +111,45 @@ do_pre() {
 
 # ── Mode: post ────────────────────────────────────────────────────────────────
 
-do_post() {
-  if [ -z "$FRAMEWORK" ]; then
-    printf 'tag-upgrade: --framework is required\n' >&2
-    exit 3
+# Evaluate the mutation-proof gate at $1. Return 0 if the post tag may be
+# created, 1 if it must be withheld (prints reason), 2 if the proof is
+# missing/malformed. Uses if/then/else to distinguish JSON false from a missing
+# "passed" key (jq `false // x` would wrongly treat false as absent).
+gate_evaluate() {
+  local proof="$1"
+  if [ ! -f "$proof" ]; then
+    printf 'tag-upgrade: proof file not found: %s\n' "$proof" >&2
+    return 2
   fi
-  if [ -z "$VERSION" ]; then
-    printf 'tag-upgrade: --version is required\n' >&2
-    exit 3
-  fi
-
-  # Resolve proof file: default to .autospec/mutation-proof.json
-  if [ -z "$PROOF_FILE" ]; then
-    PROOF_FILE="$AUTOSPEC_DIR/mutation-proof.json"
-  fi
-
-  if [ ! -f "$PROOF_FILE" ]; then
-    printf 'tag-upgrade: proof file not found: %s\n' "$PROOF_FILE" >&2
-    exit 2
-  fi
-
-  # Read passed flag from proof
-  # Use if/then/else to distinguish JSON false from missing key
   local passed
-  passed="$(jq -r 'if has("passed") then (if .passed then "true" else "false" end) else "null" end' "$PROOF_FILE" 2>/dev/null)"
+  passed="$(jq -r 'if has("passed") then (if .passed then "true" else "false" end) else "null" end' "$proof" 2>/dev/null)"
   if [ "$passed" = "null" ] || [ -z "$passed" ]; then
-    printf 'tag-upgrade: proof file missing "passed" field: %s\n' "$PROOF_FILE" >&2
-    exit 2
+    printf 'tag-upgrade: proof file missing "passed" field: %s\n' "$proof" >&2
+    return 2
   fi
-
-  # Read scores for regression check
-  local baseline_score post_score
-  baseline_score="$(jq -r '.baseline.score // "null"' "$PROOF_FILE" 2>/dev/null)"
-  post_score="$(jq -r '.post_upgrade.score // "null"' "$PROOF_FILE" 2>/dev/null)"
-
-  # Gate check 1: passed must be true
   if [ "$passed" != "true" ]; then
-    printf 'tag-upgrade: WITHHELD post tag — mutation gate not passed (passed=%s)\n' \
-      "$passed" >&2
-    exit 1
+    printf 'tag-upgrade: WITHHELD post tag — mutation gate not passed (passed=%s)\n' "$passed" >&2
+    return 1
   fi
-
-  # Gate check 2: post_upgrade.score must be >= baseline.score (if both present)
+  local baseline_score post_score bs_int ps_int
+  baseline_score="$(jq -r '.baseline.score // "null"' "$proof" 2>/dev/null)"
+  post_score="$(jq -r '.post_upgrade.score // "null"' "$proof" 2>/dev/null)"
   if [ "$baseline_score" != "null" ] && [ "$post_score" != "null" ]; then
-    # Strip any decimal for integer comparison
-    local bs_int ps_int
     bs_int="$(printf '%s' "$baseline_score" | grep -o '^[0-9]*')"
     ps_int="$(printf '%s' "$post_score" | grep -o '^[0-9]*')"
-    if [ -n "$bs_int" ] && [ -n "$ps_int" ]; then
-      if [ "$ps_int" -lt "$bs_int" ]; then
-        printf 'tag-upgrade: WITHHELD post tag — post_upgrade score %s is below baseline %s\n' \
-          "$ps_int" "$bs_int" >&2
-        exit 1
-      fi
+    if [ -n "$bs_int" ] && [ -n "$ps_int" ] && [ "$ps_int" -lt "$bs_int" ]; then
+      printf 'tag-upgrade: WITHHELD post tag — post_upgrade score %s is below baseline %s\n' "$ps_int" "$bs_int" >&2
+      return 1
     fi
   fi
+  return 0
+}
 
+do_post() {
+  if [ -z "$FRAMEWORK" ]; then printf 'tag-upgrade: --framework is required\n' >&2; exit 3; fi
+  if [ -z "$VERSION" ];   then printf 'tag-upgrade: --version is required\n'   >&2; exit 3; fi
+  if [ -z "$PROOF_FILE" ]; then PROOF_FILE="$AUTOSPEC_DIR/mutation-proof.json"; fi
+  gate_evaluate "$PROOF_FILE" || exit $?
   local tag_name="post-upgrade-${FRAMEWORK}-${VERSION}"
   git tag "$tag_name"
   printf 'tag-upgrade: created tag %s\n' "$tag_name"
@@ -174,6 +157,21 @@ do_post() {
 }
 
 # ── Mode: report ──────────────────────────────────────────────────────────────
+
+# Build one per-hop report entry JSON from the CLI-provided fields.
+build_hop_entry() {
+  local codemods_json="[]" manual_fixes_json="[]"
+  if [ -n "$CODEMODS" ];     then codemods_json="$(jq -n --arg c "$CODEMODS" '[$c]')"; fi
+  if [ -n "$MANUAL_FIXES" ]; then manual_fixes_json="$(jq -n --arg m "$MANUAL_FIXES" '[$m]')"; fi
+  jq -n \
+    --arg framework "$FRAMEWORK" \
+    --arg from "$FROM_VER" \
+    --arg to "$TO_VER" \
+    --argjson codemods "$codemods_json" \
+    --argjson manual_fixes "$manual_fixes_json" \
+    --arg residual_risk "${RESIDUAL_RISK:-}" \
+    '{framework:$framework, from:$from, to:$to, codemods:$codemods, manual_fixes:$manual_fixes, residual_risk:$residual_risk}'
+}
 
 do_report() {
   if [ -z "$FRAMEWORK" ]; then
@@ -191,31 +189,8 @@ do_report() {
 
   local report_file="$AUTOSPEC_DIR/$REPORT_FILENAME"
 
-  # Build codemods array
-  local codemods_json="[]"
-  if [ -n "$CODEMODS" ]; then
-    codemods_json="$(jq -n --arg c "$CODEMODS" '[$c]')"
-  fi
-
-  # Build manual_fixes array
-  local manual_fixes_json="[]"
-  if [ -n "$MANUAL_FIXES" ]; then
-    manual_fixes_json="$(jq -n --arg m "$MANUAL_FIXES" '[$m]')"
-  fi
-
-  # Build residual_risk string
-  local residual_risk_val="${RESIDUAL_RISK:-}"
-
-  # Build the new hop entry
   local new_entry
-  new_entry="$(jq -n \
-    --arg framework "$FRAMEWORK" \
-    --arg from "$FROM_VER" \
-    --arg to "$TO_VER" \
-    --argjson codemods "$codemods_json" \
-    --argjson manual_fixes "$manual_fixes_json" \
-    --arg residual_risk "$residual_risk_val" \
-    '{framework:$framework, from:$from, to:$to, codemods:$codemods, manual_fixes:$manual_fixes, residual_risk:$residual_risk}')"
+  new_entry="$(build_hop_entry)"
 
   # Read existing report or start fresh array
   local existing="[]"
