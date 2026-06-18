@@ -45,17 +45,38 @@ function walkSync(dir) {
       if (!SKIP_DIRS.has(entry.name)) {
         files.push(...walkSync(path.join(dir, entry.name)));
       }
-    } else if (/\.(css|scss)$/.test(entry.name)) {
+    } else if (/\.(css|scss|html|htm)$/.test(entry.name)) {
       files.push(path.join(dir, entry.name));
     }
   }
   return files;
 }
 
+/**
+ * Given the text of an HTML file, extract the contents of all
+ * <style>...</style> blocks and concatenate them.
+ */
+function extractStyleBlocks(html) {
+  const blocks = [];
+  const re = /<style[^>]*>([\s\S]*?)<\/style>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    blocks.push(m[1]);
+  }
+  return blocks.join('\n');
+}
+
 function readAllCSS(root) {
   const files = walkSync(root);
   return files.map(f => {
-    try { return fs.readFileSync(f, 'utf8'); } catch { return ''; }
+    let text;
+    try { text = fs.readFileSync(f, 'utf8'); } catch { return ''; }
+    // For HTML/HTM files, extract only the <style> block contents so that
+    // the CSS token regexes don't match stray hex-like strings in markup.
+    if (/\.html?$/.test(f)) {
+      return extractStyleBlocks(text);
+    }
+    return text;
   }).join('\n');
 }
 
