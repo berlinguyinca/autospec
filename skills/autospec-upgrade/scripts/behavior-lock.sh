@@ -104,12 +104,18 @@ fi
 
 # ── Resolve helper paths ──────────────────────────────────────────────────────
 
-# mutation-gate.sh: look in same scripts/ dir first, then PATH
+# mutation-gate.sh resolution: prefer an explicit AUTOSPEC_SCRIPTS_DIR (set by the
+# orchestrator / installed location), then PATH, then the co-located source sibling.
+# AUTOSPEC_SCRIPTS_DIR/PATH must win over the source sibling so the orchestrator's
+# configured gate — and a test's $TMP/bin mock — are honored rather than silently
+# bypassed by the in-tree sibling (Phase 5.5 audit #1185).
 MUTATION_GATE=""
-if [ -x "$SCRIPT_DIR/mutation-gate.sh" ]; then
-  MUTATION_GATE="$SCRIPT_DIR/mutation-gate.sh"
+if [ -n "${AUTOSPEC_SCRIPTS_DIR:-}" ] && [ -x "${AUTOSPEC_SCRIPTS_DIR}/mutation-gate.sh" ]; then
+  MUTATION_GATE="${AUTOSPEC_SCRIPTS_DIR}/mutation-gate.sh"
 elif command -v mutation-gate.sh >/dev/null 2>&1; then
   MUTATION_GATE="mutation-gate.sh"
+elif [ -x "$SCRIPT_DIR/mutation-gate.sh" ]; then
+  MUTATION_GATE="$SCRIPT_DIR/mutation-gate.sh"
 fi
 
 # ── Step 1: characterize — run autospec-test + autospec-playwright ────────────
