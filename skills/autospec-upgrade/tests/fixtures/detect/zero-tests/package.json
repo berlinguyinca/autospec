@@ -1,0 +1,8 @@
+{
+  "name": "zero-tests-app",
+  "version": "1.0.0",
+  "dependencies": {
+    "@angular/core": "^16.2.12"
+  },
+  "devDependencies": {}
+}
