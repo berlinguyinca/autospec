@@ -223,52 +223,59 @@ do_baseline() {
 
 # ── --gate mode ────────────────────────────────────────────────────────────────
 
-do_gate() {
-  # Validate threshold is numeric
+# Validate --gate inputs and echo the recorded baseline score on stdout.
+# Returns 3 on any error (NEVER `exit` here — this runs in a command
+# substitution, so exit would only kill the subshell and be swallowed).
+read_gate_baseline() {
   case "$THRESHOLD" in
     ''|*[!0-9]*)
       printf 'mutation-gate: threshold must be a non-negative integer, got: %s\n' "$THRESHOLD" >&2
-      exit 3
-      ;;
+      return 3 ;;
   esac
-
-  # Require existing proof file with a baseline score
   if [ ! -f "$PROOF_FILE" ]; then
     printf 'mutation-gate: mutation-proof.json not found at %s; run --baseline first\n' "$PROOF_FILE" >&2
-    exit 3
+    return 3
   fi
-
-  local baseline_score
-  baseline_score="$(jq -r '.baseline.score // empty' "$PROOF_FILE" 2>/dev/null)"
-  if [ -z "$baseline_score" ] || [ "$baseline_score" = "null" ]; then
+  local bs
+  bs="$(jq -r '.baseline.score // empty' "$PROOF_FILE" 2>/dev/null)"
+  if [ -z "$bs" ] || [ "$bs" = "null" ]; then
     printf 'mutation-gate: mutation-proof.json has no baseline.score; run --baseline first\n' >&2
-    exit 3
+    return 3
   fi
+  printf '%s' "$bs"
+}
 
-  local runner
-  runner="$(detect_runner)"
-  local stryker_runner
-  stryker_runner="$(map_stryker_runner "$runner")"
+# Merge the post-upgrade verdict into the proof, preserving the baseline.
+# Args: post_score threshold passed(true|false) gated_at
+write_gate_proof() {
+  local merged
+  merged="$(jq -n \
+    --argjson existing "$(cat "$PROOF_FILE")" \
+    --argjson post_score "$1" \
+    --argjson threshold "$2" \
+    --argjson passed "$3" \
+    --arg gated_at "$4" \
+    '$existing + {post_upgrade:{score:$post_score},threshold:$threshold,passed:$passed,gated_at:$gated_at}')"
+  printf '%s\n' "$merged" > "$PROOF_FILE"
+}
+
+do_gate() {
+  local baseline_score
+  baseline_score="$(read_gate_baseline)" || exit $?
+
   local cfg_file
-  cfg_file="$(write_stryker_config "$stryker_runner")"
+  cfg_file="$(write_stryker_config "$(map_stryker_runner "$(detect_runner)")")"
 
   MUTATION_SCORE=""
   SURVIVING_MUTANTS=""
   run_stryker_and_parse "$cfg_file" || exit $?
-
   local post_score="$MUTATION_SCORE"
-  local gated_at
-  gated_at="$(iso_now)"
 
-  # Determine pass/fail
-  local passed=true
-  local fail_reason=""
-
+  local passed=true fail_reason=""
   if [ "$post_score" -lt "$baseline_score" ]; then
     passed=false
     fail_reason="post-upgrade score ${post_score}% is below baseline ${baseline_score}%"
   fi
-
   if [ "$post_score" -lt "$THRESHOLD" ]; then
     passed=false
     if [ -n "$fail_reason" ]; then
@@ -278,31 +285,13 @@ do_gate() {
     fi
   fi
 
-  # Write updated proof (preserve baseline, add post_upgrade fields)
-  local passed_json
-  if [ "$passed" = "true" ]; then
-    passed_json="true"
-  else
-    passed_json="false"
-  fi
-
-  # Read existing proof and merge — use jq to combine fields
-  local merged
-  merged="$(jq -n \
-    --argjson existing "$(cat "$PROOF_FILE")" \
-    --argjson post_score "$post_score" \
-    --argjson threshold "$THRESHOLD" \
-    --argjson passed "$passed_json" \
-    --arg gated_at "$gated_at" \
-    '$existing + {post_upgrade:{score:$post_score},threshold:$threshold,passed:$passed,gated_at:$gated_at}')"
-  printf '%s\n' "$merged" > "$PROOF_FILE"
+  write_gate_proof "$post_score" "$THRESHOLD" "$passed" "$(iso_now)"
 
   if [ "$passed" = "false" ]; then
     printf 'mutation-gate: GATE FAILED — %s (surviving mutants: %s)\n' \
       "$fail_reason" "$SURVIVING_MUTANTS" >&2
     exit 1
   fi
-
   printf 'mutation-gate: gate passed — post-upgrade score=%s%% baseline=%s%% threshold=%s%%\n' \
     "$post_score" "$baseline_score" "$THRESHOLD"
   exit 0
