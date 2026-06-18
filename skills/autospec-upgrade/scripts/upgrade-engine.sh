@@ -114,6 +114,15 @@ set_tag() {
 # ── Helper: run the per-hop pipeline (codemod + build + test + behavior-lock) ─
 # Returns 0 on success, non-zero on any failure.
 
+# Run one labeled step; on non-zero exit, print a failure line and return 1.
+run_step() {
+  local label="$1"; shift
+  if ! "$@" 2>&1; then
+    printf 'upgrade-engine: %s failed\n' "$label" >&2
+    return 1
+  fi
+}
+
 run_hop_pipeline() {
   local fw="$1"
   local to="$2"
@@ -134,25 +143,12 @@ run_hop_pipeline() {
     return 1
   fi
 
-  # Step 2: build
-  if ! npm run build 2>&1; then
-    printf 'upgrade-engine: build failed for %s -> %s\n' "$fw" "$to" >&2
-    return 1
-  fi
-
-  # Step 3: type-check (tsc -- optional, skip if not found)
+  # Steps 2-4: build, optional type-check, tests
+  run_step "build for $fw -> $to" npm run build || return 1
   if command -v tsc >/dev/null 2>&1; then
-    if ! tsc 2>&1; then
-      printf 'upgrade-engine: type-check failed for %s -> %s\n' "$fw" "$to" >&2
-      return 1
-    fi
+    run_step "type-check for $fw -> $to" tsc || return 1
   fi
-
-  # Step 4: tests
-  if ! npm test 2>&1; then
-    printf 'upgrade-engine: tests failed for %s -> %s\n' "$fw" "$to" >&2
-    return 1
-  fi
+  run_step "tests for $fw -> $to" npm test || return 1
 
   # Step 5: behavior-lock re-verify
   if [ -x "$BEHAVIOR_LOCK" ]; then
