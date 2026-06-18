@@ -1,0 +1,40 @@
+[
+  {
+    "id": "baseline",
+    "label": "Baseline — faithful consolidation",
+    "axis": "baseline",
+    "wcag_min_ratio": 5.21,
+    "tokens": {
+      "palette": [
+        {"hex": "#ffffff", "role": "bg"},
+        {"hex": "#111111", "role": "text"},
+        {"hex": "#1a73e8", "role": "primary"},
+        {"hex": "#e53935", "role": "accent"}
+      ],
+      "type_scale": [{"px": 14}, {"px": 16}, {"px": 24}],
+      "spacing": [{"px": 8}, {"px": 16}, {"px": 32}],
+      "radii": [{"px": 4}, {"px": 8}],
+      "shadows": [{"value": "0 1px 3px rgba(0,0,0,0.2)"}]
+    },
+    "design_md": "# Baseline\n\nBase design system tokens."
+  },
+  {
+    "id": "minimal",
+    "label": "Minimal — reduced decoration",
+    "axis": "minimal",
+    "wcag_min_ratio": 4.80,
+    "tokens": {
+      "palette": [
+        {"hex": "#ffffff", "role": "bg"},
+        {"hex": "#333333", "role": "text"},
+        {"hex": "#888888", "role": "primary"},
+        {"hex": "#888888", "role": "accent"}
+      ],
+      "type_scale": [{"px": 14}, {"px": 16}, {"px": 24}],
+      "spacing": [{"px": 8}, {"px": 16}, {"px": 32}],
+      "radii": [{"px": 4}, {"px": 8}],
+      "shadows": []
+    },
+    "design_md": "# Minimal\n\nShadows removed; accent desaturated."
+  }
+]
