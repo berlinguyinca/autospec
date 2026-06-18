@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-harmonize-token-profile.schema.json",
+  "title": "autospec-harmonize token profile",
+  "description": "Design tokens discovered from a repo (runtime computed-CSS or static source) by the autospec-harmonize discover stage.",
+  "type": "object",
+  "required": ["source", "palette", "type_scale", "spacing", "radii", "shadows", "components"],
+  "additionalProperties": false,
+  "properties": {
+    "source": {
+      "type": "string",
+      "enum": ["runtime", "source"],
+      "description": "How the tokens were extracted: runtime computed CSS via Playwright, or static source parsing."
+    },
+    "palette": {
+      "type": "array",
+      "description": "Discovered color tokens.",
+      "items": {
+        "type": "object",
+        "required": ["hex"],
+        "additionalProperties": false,
+        "properties": {
+          "hex": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$"
+          },
+          "role": { "type": "string" },
+          "count": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "type_scale": { "type": "array", "items": { "type": "object" } },
+    "spacing": { "type": "array", "items": { "type": "object" } },
+    "radii": { "type": "array", "items": { "type": "object" } },
+    "shadows": { "type": "array", "items": { "type": "object" } },
+    "components": {
+      "type": "object",
+      "description": "Per-component computed style summaries keyed by component name."
+    },
+    "inconsistencies": {
+      "type": "array",
+      "description": "Detected cross-page or cross-component token inconsistencies.",
+      "items": { "type": "object" }
+    }
+  }
+}

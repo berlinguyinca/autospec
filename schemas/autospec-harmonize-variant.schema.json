@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-harmonize-variant.schema.json",
+  "title": "autospec-harmonize design variant",
+  "description": "A single generated design-language variant produced by the autospec-harmonize variants stage. The baseline variant is index 0.",
+  "type": "object",
+  "required": ["id", "label", "axis", "tokens", "design_md"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "label": { "type": "string", "minLength": 1 },
+    "axis": {
+      "type": "string",
+      "enum": ["baseline", "minimal", "high-contrast", "dense", "bold", "vendor-blend"]
+    },
+    "vendor": { "type": "string" },
+    "wcag_min_ratio": { "type": "number", "minimum": 0 },
+    "tokens": {
+      "type": "object",
+      "required": ["palette", "type_scale", "spacing", "radii", "shadows"],
+      "additionalProperties": false,
+      "properties": {
+        "palette": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["hex"],
+            "additionalProperties": false,
+            "properties": {
+              "hex": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+              "role": { "type": "string" },
+              "count": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "type_scale": { "type": "array", "items": { "type": "object" } },
+        "spacing": { "type": "array", "items": { "type": "object" } },
+        "radii": { "type": "array", "items": { "type": "object" } },
+        "shadows": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "design_md": { "type": "string", "minLength": 1 }
+  }
+}
