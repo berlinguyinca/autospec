@@ -162,7 +162,13 @@ _explore_kill_tree() {
     local pid="$1" child
     local pgid
     pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
-    if [ -n "$pgid" ] && [ "$pgid" != "$$" ]; then
+    # Group-kill ONLY when this pid is its own process-group leader (pgid == pid),
+    # i.e. setsid gave the handoff a dedicated group we own. When setsid is absent
+    # (e.g. macOS) the handoff shares the CALLER's group; a `kill -TERM -$pgid`
+    # there would take down autospec-explore itself, the test runner, or the
+    # operator's shell. In that case fall back to killing the pid + its
+    # descendants individually (pgrep -P recursion below).
+    if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
         kill -TERM "-$pgid" 2>/dev/null || true
     fi
     for child in $(pgrep -P "$pid" 2>/dev/null || true); do
@@ -170,7 +176,7 @@ _explore_kill_tree() {
     done
     kill -TERM "$pid" 2>/dev/null || true
     sleep 1
-    if [ -n "$pgid" ] && [ "$pgid" != "$$" ]; then
+    if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
         kill -KILL "-$pgid" 2>/dev/null || true
     fi
     kill -KILL "$pid" 2>/dev/null || true
@@ -219,17 +225,25 @@ _explore_run_handoff() {
     pid=$!
     EXPLORE_CHILD_PIDS="${EXPLORE_CHILD_PIDS:+$EXPLORE_CHILD_PIDS }$pid"
 
+    # Redirect the watchdog's own descriptors away from the caller's stdout/stderr:
+    # otherwise its `sleep $HANDOFF_TIMEOUT_SEC` inherits and holds them open, and a
+    # caller that reads our output to EOF (e.g. bats `run`) blocks until the sleep
+    # finally exits — up to the full timeout.
     (
         sleep "$HANDOFF_TIMEOUT_SEC"
         if kill -0 "$pid" 2>/dev/null; then
             printf 'timeout after %ss\n' "$HANDOFF_TIMEOUT_SEC" > "$timeout_file"
             _explore_kill_tree "$pid"
         fi
-    ) &
+    ) >/dev/null 2>&1 &
     watchdog=$!
 
     wait "$pid"
     rc=$?
+    # Tear down the watchdog AND its sleep child. Killing only the subshell
+    # ($watchdog) orphans the `sleep $HANDOFF_TIMEOUT_SEC`, which then lingers for
+    # the full timeout instead of being reaped promptly.
+    pkill -P "$watchdog" 2>/dev/null || true
     kill "$watchdog" 2>/dev/null || true
     wait "$watchdog" 2>/dev/null || true
     _explore_remove_child_pid "$pid"
