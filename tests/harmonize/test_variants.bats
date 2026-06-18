@@ -180,3 +180,38 @@ teardown() {
     [ "$status" -eq 0 ]
   done
 }
+
+@test "minimal variant recomputes wcag_min_ratio from its own palette (audit #1147 F1)" {
+  command -v node >/dev/null 2>&1 || skip "node not available"
+  command -v jq   >/dev/null 2>&1 || skip "jq not available"
+
+  # A baseline whose chromatic accent is the binding (minimum-contrast) foreground.
+  # 'minimal' fully desaturates the accent, which changes its luminance and thus
+  # the minimum foreground-vs-bg contrast — so the variant's wcag_min_ratio MUST
+  # differ from the baseline's. Before the fix, minimal inherited the baseline's
+  # stale value (clone), so this asserted inequality fails.
+  cat > "$TEST_TMPDIR/binding.json" <<'EOF'
+{
+  "id": "baseline", "label": "B", "axis": "baseline",
+  "tokens": {
+    "palette": [
+      {"hex": "#ffffff", "role": "bg"},
+      {"hex": "#595959", "role": "text"},
+      {"hex": "#1aa3a3", "role": "accent"},
+      {"hex": "#0044cc", "role": "primary"}
+    ],
+    "type_scale": [{"px": 16}], "spacing": [{"px": 8}], "radii": [{"px": 4}],
+    "shadows": [{"value": "x"}]
+  },
+  "design_md": "# B"
+}
+EOF
+  node "$VARIANTS" --baseline "$TEST_TMPDIR/binding.json" --axes minimal > "$TEST_TMPDIR/out.json"
+  BASE=$(jq -r '.[] | select(.axis=="baseline") | .wcag_min_ratio' "$TEST_TMPDIR/out.json")
+  MIN=$(jq -r  '.[] | select(.axis=="minimal")  | .wcag_min_ratio' "$TEST_TMPDIR/out.json")
+  # Both present and numeric
+  [ -n "$BASE" ] && [ "$BASE" != "null" ]
+  [ -n "$MIN" ]  && [ "$MIN"  != "null" ]
+  # Recomputed, not inherited: the minimal palette's contrast differs from baseline's.
+  [ "$(node -e "process.stdout.write(String($MIN !== $BASE))")" = "true" ]
+}
