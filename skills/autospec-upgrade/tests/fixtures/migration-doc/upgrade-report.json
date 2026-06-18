@@ -1,0 +1,27 @@
+[
+  {
+    "framework": "angular",
+    "from": "20",
+    "to": "21",
+    "codemods": [
+      "ng update @angular/core@21 @angular/cli@21",
+      "ng generate @angular/core:standalone"
+    ],
+    "manual_fixes": [
+      "Migrate deprecated NgModule imports to standalone imports in app.module.ts"
+    ],
+    "residual_risk": "Lazy-loaded modules with custom injectors require manual review"
+  },
+  {
+    "framework": "angular",
+    "from": "21",
+    "to": "22",
+    "codemods": [
+      "ng update @angular/core@22 @angular/cli@22"
+    ],
+    "manual_fixes": [
+      "Update signal-based component lifecycle hooks in shared/header.component.ts"
+    ],
+    "residual_risk": "Signal-based reactivity patterns may behave differently in edge cases"
+  }
+]
