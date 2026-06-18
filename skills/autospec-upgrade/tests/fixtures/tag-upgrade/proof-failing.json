@@ -1,0 +1,7 @@
+{
+  "baseline": {"score": 80},
+  "post_upgrade": {"score": 70},
+  "threshold": 70,
+  "passed": false,
+  "gated_at": "2026-06-18T00:00:00Z"
+}
