@@ -1,0 +1,1 @@
+{"frameworks":["angular","react"],"versions":{"angular":"21.0.0","react":"18.0.0"},"package_manager":"npm","runners":["jest"],"monorepo":true,"has_tests":true}
