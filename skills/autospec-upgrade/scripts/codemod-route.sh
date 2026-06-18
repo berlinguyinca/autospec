@@ -68,6 +68,30 @@ route_next_codemod() {
   fi
 }
 
+# ── React codemod (issue #1179) ──────────────────────────────────────────────
+#
+# Shells the OFFICIAL React codemod tooling only — never hand-rolls migrations.
+#   npx codemod react/19/migration-recipe   (standard React 19 hop)
+#   npx types-react-codemod preset-19       (types mode, optional)
+
+route_react_codemod() {
+  local target_major="$1"
+  local types="${2:-}"
+
+  if [ -z "$target_major" ]; then
+    printf 'codemod-route: route_react_codemod requires <target_major>\n' >&2
+    return 2
+  fi
+
+  if [ "$types" = "--types" ]; then
+    # Official types-react-codemod preset — never hand-roll this
+    npx types-react-codemod preset-19
+  else
+    # Official React migration recipe codemod — never hand-roll this
+    npx codemod react/19/migration-recipe
+  fi
+}
+
 # ── Shared dispatcher ─────────────────────────────────────────────────────────
 #
 # route_codemod <framework> <target_major> [--standalone]
@@ -98,7 +122,9 @@ route_codemod() {
     next)
       route_next_codemod "$target_major" "$standalone"
       ;;
-    # additional framework arms added by #1179 (react)
+    react)
+      route_react_codemod "$target_major" "$standalone"
+      ;;
     *)
       printf 'codemod-route: unknown framework "%s" — code_health:upgrade_unknown_framework\n' \
         "$framework" >&2
