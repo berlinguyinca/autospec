@@ -142,6 +142,11 @@ task-oriented "I want to…" guidance, see [`README.md`](README.md).
 - Trigger: start a perpetual autonomous research + ship loop on an isolated sandbox branch — 7 researchers propose features from spec/code gaps, prior reports, codebase signals, open issues, source analysis, dependency health, and competitor research, then drain via `/autospec-run` with PRs targeting the sandbox branch (never `main`).
 - Keywords: `autospec-explore`, `explore and ship`, `autonomous research loop`, `discovery loop`
 
+### `autospec-harmonize`
+- Path: [`skills/autospec-harmonize`](skills/autospec-harmonize)
+- Trigger: discover design-token drift in a codebase, generalize a baseline, generate variants, preview them, pick one, and emit a dated migration spec ready for `/autospec-define`.
+- Keywords: `autospec-harmonize`, `harmonize design`, `design tokens`, `style drift`, `palette inconsistency`, `design migration spec`
+
 ## Adding a skill
 
 1. Create `skills/<skill-name>/SKILL.md`; keep the body concise and move large detail into `references/`.
