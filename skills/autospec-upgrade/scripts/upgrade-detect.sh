@@ -97,63 +97,28 @@ resolve_version() {
 # ── Detect test runners ───────────────────────────────────────────────────────
 
 detect_runners() {
-  local runners=""
-
-  # jest: config file OR dep
-  local has_jest_dep
-  has_jest_dep="$(jq -r '
-    ((.dependencies // {}) + (.devDependencies // {})) |
-    if has("jest") then "yes" else "no" end
-  ' "$PKG")"
-  if [ "$has_jest_dep" = "yes" ] || \
-     ls "$ROOT"/jest.config.* 2>/dev/null | grep -q .; then
-    runners="${runners} jest"
-  fi
-
-  # vitest: config file OR dep
-  local has_vitest_dep
-  has_vitest_dep="$(jq -r '
-    ((.dependencies // {}) + (.devDependencies // {})) |
-    if has("vitest") then "yes" else "no" end
-  ' "$PKG")"
-  if [ "$has_vitest_dep" = "yes" ] || \
-     ls "$ROOT"/vitest.config.* 2>/dev/null | grep -q .; then
-    runners="${runners} vitest"
-  fi
-
-  # karma: config file OR dep
-  local has_karma_dep
-  has_karma_dep="$(jq -r '
-    ((.dependencies // {}) + (.devDependencies // {})) |
-    if has("karma") then "yes" else "no" end
-  ' "$PKG")"
-  if [ "$has_karma_dep" = "yes" ] || \
-     ls "$ROOT"/karma.conf.* 2>/dev/null | grep -q .; then
-    runners="${runners} karma"
-  fi
-
-  # playwright: config file OR dep
-  local has_pw_dep
-  has_pw_dep="$(jq -r '
-    ((.dependencies // {}) + (.devDependencies // {})) |
-    if has("@playwright/test") then "yes" else "no" end
-  ' "$PKG")"
-  if [ "$has_pw_dep" = "yes" ] || \
-     ls "$ROOT"/playwright.config.* 2>/dev/null | grep -q .; then
-    runners="${runners} playwright"
-  fi
-
-  # cypress: config file OR dep
-  local has_cy_dep
-  has_cy_dep="$(jq -r '
-    ((.dependencies // {}) + (.devDependencies // {})) |
-    if has("cypress") then "yes" else "no" end
-  ' "$PKG")"
-  if [ "$has_cy_dep" = "yes" ] || \
-     ls "$ROOT"/cypress.config.* "$ROOT"/cypress.json 2>/dev/null | grep -q .; then
-    runners="${runners} cypress"
-  fi
-
+  local runners="" name dep globs g found deps
+  # All declared dep/devDep names, one per line, for a fixed-string match.
+  deps="$(jq -r '((.dependencies // {}) + (.devDependencies // {})) | keys[]' "$PKG" 2>/dev/null)"
+  # Table: runner-name | dependency key | config globs (space-separated, under $ROOT).
+  while IFS='|' read -r name dep globs; do
+    [ -n "$name" ] || continue
+    found=no
+    if printf '%s\n' "$deps" | grep -Fqx "$dep"; then
+      found=yes
+    else
+      for g in $globs; do
+        if ls "$ROOT"/$g 2>/dev/null | grep -q .; then found=yes; break; fi
+      done
+    fi
+    if [ "$found" = "yes" ]; then runners="${runners} ${name}"; fi
+  done <<'EOF'
+jest|jest|jest.config.*
+vitest|vitest|vitest.config.*
+karma|karma|karma.conf.*
+playwright|@playwright/test|playwright.config.*
+cypress|cypress|cypress.config.* cypress.json
+EOF
   printf '%s' "$runners"
 }
 
