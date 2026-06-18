@@ -1,0 +1,5 @@
+lockfileVersion: '6.0'
+dependencies:
+  '@angular/core':
+    specifier: ^16.2.12
+    version: 16.2.12
