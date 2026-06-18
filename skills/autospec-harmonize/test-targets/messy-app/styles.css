@@ -1,0 +1,72 @@
+/* messy-app/styles.css — fixture with intentional style drift */
+
+/* Near-duplicate blues (3 entries → palette inconsistency) */
+.hero {
+  background-color: #1a73e8;
+  font-size: 32px;
+  padding: 24px;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+.nav-link {
+  color: #1b74e9;
+  font-size: 16px;
+  padding: 8px;
+}
+
+.icon-badge {
+  background: #1a72e7;
+  font-size: 12px;
+  border-radius: 4px;
+  margin: 4px;
+}
+
+/* Three distinct button treatments */
+.btn-primary {
+  background-color: #1a73e8;
+  color: #ffffff;
+  padding: 12px;
+  border-radius: 6px;
+  font-size: 16px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.btn-secondary {
+  background-color: #f5f5f5;
+  color: #1b74e9;
+  padding: 10px;
+  border-radius: 4px;
+  font-size: 14px;
+  border: 1px solid #1b74e9;
+}
+
+.cta-button {
+  background: #1a72e7;
+  color: #ffffff;
+  padding: 16px;
+  border-radius: 24px;
+  font-size: 18px;
+  box-shadow: 0 4px 12px rgba(26,114,231,0.4);
+}
+
+/* Additional colors */
+.error {
+  color: #d93025;
+  font-size: 14px;
+  border-radius: 2px;
+  gap: 8px;
+}
+
+.success {
+  color: #1e8e3e;
+  font-size: 14px;
+}
+
+/* Card with spacing + shadow */
+.card {
+  padding: 24px;
+  border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+  gap: 16px;
+}
