@@ -1,0 +1,16 @@
+{
+  "material": "PETG",
+  "print_orientation": "flat",
+  "load_critical": false,
+  "flow_critical": true,
+  "dims": { "x_mm": 40, "y_mm": 40, "z_mm": 20 },
+  "gaskets": [
+    {
+      "id": "g1",
+      "groove": "o-ring",
+      "surrounding_wall_mm": 8.0,
+      "seal_face_continuous": true,
+      "exposed_side": false
+    }
+  ]
+}
