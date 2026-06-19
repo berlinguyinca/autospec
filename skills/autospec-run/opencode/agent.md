@@ -1254,6 +1254,30 @@ Loop (`round = 1 … MAX`):
    ```
 
    The emitted gaps carry security dimensions (`secrets` / `vuln` / `injection` / `pii` / `cve`); the gap-remediation loop labels them `gap-remediation` like every other survivor, so a later round does not re-flag freshly-fixed work. A missing scan engine, missing scanners, or `jq` error only logs to `/tmp/secaudit-sweep.err` and emits nothing — this dimension NEVER blocks run completion (same failure semantics as the docs dimension above). For deeper coverage (LLM triage of PII / prompt-injection, plus copyleft/IP review and the `.autospec/secaudit.md` report), run `/autospec-secaudit` manually.
+1d. **Fab-completeness dimension** (spec §Phase 5.5 — runs only on round 1, after the security dimension merges into `${GAPS_FILE}`; runs only for a fab run, i.e. when `.autospec/fab.yml` exists): assert every printable model shipped its proof artifacts. For each printable model, `fab-completeness.sh` asserts (a) its 16-view contact sheet exists (`.autospec/fab/renders/<model>/contact-sheet.html`), (b) its `release-gate.json` exists (`.autospec/fab/gates/<model>/release-gate.json`), is GREEN (no stage `status=fail`), and is FRESH (its `geometry_hash` equals the model's current STL sha256 — never re-run stages to learn status). Each failed assertion prints one `GAP <model>: <reason>` line. Convert surviving GAP lines into gap objects carrying `dimension: "fab-completeness"` and **append** them onto `${GAPS_FILE}` so they file, dedupe, and converge through the SAME gap-remediation machinery used in step 2 (do NOT build a parallel loop):
+
+   ```bash
+   if [ -f ".autospec/fab.yml" ]; then
+     FAB_GAPS="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/fab-completeness.sh" \
+       --fab-dir .autospec/fab --stl-dir build/stls 2>/tmp/fab-completeness.err \
+       | jq -Rsc 'split("\n") | map(select(length>0)) | to_entries | map({
+           gap_id: ("F" + ((.key + 1) | tostring)),
+           dimension: "fab-completeness", severity: "high",
+           file: ".autospec/fab/release-gate.json", line: 1,
+           title: ("fab-completeness: " + .value),
+           body: ("Phase 5.5 fab-completeness found: " + .value + ". Every printable model must ship a 16-view contact sheet and a green + fresh release-gate.json. Re-run the fab gate (stl-release-gate.py) and regenerate the missing artifact."),
+           dedupe_key: ("fab-completeness-" + (.value | gsub("[^a-zA-Z0-9]+"; "-")))
+         })' 2>/dev/null || printf '[]')"
+     if [ -s "${GAPS_FILE}" ]; then
+       jq -s '.[0] + .[1]' "${GAPS_FILE}" <(printf '%s' "${FAB_GAPS}") > "${GAPS_FILE}.fabmerged" \
+         && mv "${GAPS_FILE}.fabmerged" "${GAPS_FILE}"
+     else
+       printf '%s' "${FAB_GAPS}" > "${GAPS_FILE}"
+     fi
+   fi
+   ```
+
+   The emitted gaps carry `dimension: "fab-completeness"`; the gap-remediation loop labels them `gap-remediation` like every other survivor, so a later round does not re-flag freshly-fixed work. A non-fab run (no `.autospec/fab.yml`), a missing helper, or a `jq` error only logs to `/tmp/fab-completeness.err` and emits nothing — this dimension NEVER blocks run completion (same failure semantics as the docs dimension above).
 2. **File survivors:**
 
    ```bash
