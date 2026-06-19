@@ -1,0 +1,14 @@
+{
+  "nodes": ["inlet_a", "junction_1", "gasket_x", "relief_valve_1"],
+  "edges": [
+    ["inlet_a", "junction_1"],
+    ["junction_1", "gasket_x"],
+    ["junction_1", "relief_valve_1"]
+  ],
+  "inlets": ["inlet_a"],
+  "targets": ["gasket_x"],
+  "isolated_groups": [],
+  "self_clamping": false,
+  "pump_type": "low_flow",
+  "relief_nodes": ["relief_valve_1"]
+}

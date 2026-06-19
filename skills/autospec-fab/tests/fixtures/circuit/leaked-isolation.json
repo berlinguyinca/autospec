@@ -1,0 +1,15 @@
+{
+  "nodes": ["inlet_a", "circuit_a_node", "bridge_node", "inlet_b", "circuit_b_node"],
+  "edges": [
+    ["inlet_a", "circuit_a_node"],
+    ["circuit_a_node", "bridge_node"],
+    ["bridge_node", "circuit_b_node"],
+    ["inlet_b", "circuit_b_node"]
+  ],
+  "inlets": ["inlet_a", "inlet_b"],
+  "targets": ["circuit_a_node", "circuit_b_node"],
+  "isolated_groups": [["inlet_a", "circuit_a_node"], ["inlet_b", "circuit_b_node"]],
+  "self_clamping": false,
+  "pump_type": "standard",
+  "relief_nodes": []
+}
