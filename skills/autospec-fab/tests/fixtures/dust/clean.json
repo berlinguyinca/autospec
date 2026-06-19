@@ -1,0 +1,23 @@
+{
+  "ducts": [
+    {
+      "id": "main_duct",
+      "opening_mm": 100.0,
+      "min_opening_mm": 96.0,
+      "cross_section_mm2": [7854.0, 7800.0, 7850.0, 7900.0],
+      "connected": true,
+      "printed_gate_slot": false,
+      "pvc_as_duct": false
+    },
+    {
+      "id": "branch_duct",
+      "opening_mm": 63.5,
+      "min_opening_mm": 60.0,
+      "cross_section_mm2": [3167.0, 3150.0, 3160.0, 3170.0],
+      "connected": true,
+      "printed_gate_slot": false,
+      "pvc_as_duct": false
+    }
+  ],
+  "nominal_full_size_mm2": 7854.0
+}
