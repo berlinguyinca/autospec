@@ -1,0 +1,7 @@
+{
+  "material": "PLA",
+  "print_orientation": "flat",
+  "load_critical": false,
+  "flow_critical": false,
+  "dims": { "x_mm": 40, "y_mm": 30, "z_mm": 20 }
+}

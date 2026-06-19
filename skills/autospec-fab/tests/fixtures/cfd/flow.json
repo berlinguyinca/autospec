@@ -1,0 +1,6 @@
+{
+  "inlet_velocity_m_s": 5.0,
+  "max_pressure_drop_pa": 500.0,
+  "min_velocity_m_s": 1.0,
+  "no_stagnation": true
+}

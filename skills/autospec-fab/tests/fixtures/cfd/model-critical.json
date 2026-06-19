@@ -1,0 +1,7 @@
+{
+  "material": "PETG",
+  "print_orientation": "upright",
+  "load_critical": false,
+  "flow_critical": true,
+  "dims": { "x_mm": 60, "y_mm": 40, "z_mm": 30 }
+}
