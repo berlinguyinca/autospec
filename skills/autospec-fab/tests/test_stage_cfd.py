@@ -240,6 +240,17 @@ class TestPassingPart(_WithSolverShim):
         count = _read_count(self.count_file)
         self.assertGreater(count, 0, "Expected solver shim to be invoked at least once")
 
+    def test_cfd_results_carries_metrics(self):
+        results = self.fragment.get("cfd_results")
+        self.assertIsInstance(
+            results, dict,
+            f"Expected structured cfd_results dict; fragment={self.fragment}",
+        )
+        self.assertAlmostEqual(results["pressure_drop_pa"], float(_PASSING_PRESSURE))
+        self.assertAlmostEqual(results["min_velocity_m_s"], float(_PASSING_VELOCITY))
+        self.assertFalse(results["stagnation"])
+        self.assertEqual(results["status"], "pass")
+
 
 class TestTargetMiss(_WithSolverShim):
     """A flow-critical part exceeding pressure-drop target must fail + emit cfd_target_miss."""
@@ -263,6 +274,13 @@ class TestTargetMiss(_WithSolverShim):
             "cfd_target_miss", codes,
             f"Expected cfd_target_miss finding; findings={self.fragment['findings']}",
         )
+
+    def test_cfd_results_carries_fail_status(self):
+        results = self.fragment.get("cfd_results")
+        self.assertIsInstance(results, dict,
+                              f"Expected cfd_results dict; fragment={self.fragment}")
+        self.assertAlmostEqual(results["pressure_drop_pa"], float(_FAILING_PRESSURE))
+        self.assertEqual(results["status"], "fail")
 
 
 class TestVelocityMiss(_WithSolverShim):
@@ -322,6 +340,12 @@ class TestNonCriticalPart(_WithSolverShim):
         count = _read_count(self.count_file)
         self.assertEqual(count, 0, "Solver must not run for non-flow-critical parts")
 
+    def test_no_fabricated_cfd_results_on_skip(self):
+        self.assertNotIn(
+            "cfd_results", self.fragment,
+            "skip path must not fabricate cfd_results numbers",
+        )
+
 
 class TestSolverAbsent(unittest.TestCase):
     """When simpleFoam is not on PATH, stage must skip (solver deferred to container)."""
@@ -353,6 +377,10 @@ class TestSolverAbsent(unittest.TestCase):
         )
         self.assertEqual(fragment["findings"], [],
                          "No findings when solver absent (deferred to container)")
+        self.assertNotIn(
+            "cfd_results", fragment,
+            "solver-absent skip must not fabricate cfd_results",
+        )
 
 
 if __name__ == "__main__":

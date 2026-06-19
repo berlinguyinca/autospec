@@ -7,21 +7,14 @@ Uniform stage CLI:
                  [--load <load.json>]
 
 Behaviour:
-  - load_critical: false  → status skip, detail "not load-critical".
-  - ccx absent from PATH  → status skip, detail "ccx not found …".
-  - Geometry-hash cache   → hit returns cached fragment without re-running ccx.
-  - Cache miss            → build anisotropic ccx deck, run ccx, parse result,
-                            compare safety factor to minimum, write cache entry.
-  - Safety factor < min   → status fail + finding fea_below_safety.
-  - Safety factor ≥ min   → status pass.
+  - load_critical: false / ccx absent → status skip (no fea_results).
+  - Geometry-hash cache hit → cached fragment (no re-run).
+  - Cache miss → build anisotropic ccx deck, run ccx, parse safety factor,
+    compare to minimum, write cache entry. Pass/fail fragments carry a
+    structured fea_results {safety_factor, required_min, status}.
 
-Cache location:
-  ${AUTOSPEC_FAB_CACHE_DIR}/<hash>.json
-  (default: .autospec/fab/fea-cache/ relative to cwd)
-
-Exit codes:
-  0 — harness success (verdict lives in fragment "status", not exit code).
-  1 — harness/usage error (bad args, missing --out, etc.).
+Cache: ${AUTOSPEC_FAB_CACHE_DIR}/<hash>.json (default .autospec/fab/fea-cache/).
+Exit 0 on harness success (verdict lives in fragment "status"); 1 on usage error.
 """
 
 from __future__ import annotations
@@ -41,11 +34,9 @@ from typing import Any
 # Material anisotropy tables
 # ---------------------------------------------------------------------------
 
-# Per-axis Young's modulus scale factors relative to the isotropic base value.
-# FDM extrusion is strongest along the X/Y print plane (along-layer) and
-# weakest in Z (between-layer bonding).  These ratios are representative of
-# typical FDM PETG/PLA/ABS; the exact numbers are less important than encoding
-# the orientation dependency.
+# Per-axis Young's modulus scale factors vs the isotropic base value. FDM is
+# strongest in the X/Y print plane and weakest in Z (between-layer bonding);
+# the ratios encode that orientation dependency for typical FDM PETG/PLA/ABS.
 _ORIENTATION_SCALE: dict[str, dict[str, float]] = {
     # orientation → {E_x, E_y, E_z} scale factors
     "flat":    {"E_x": 1.00, "E_y": 1.00, "E_z": 0.55},
@@ -89,12 +80,7 @@ def _load_json(path: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _geometry_hash(stl_path: str, model: dict, load: dict | None) -> str:
-    """
-    Hash the STL content plus material, print_orientation, and load spec.
-
-    The hash is used as the cache key.  Any change to the geometry, material,
-    orientation, or load invalidates the cache entry.
-    """
+    """Hash STL content + material + print_orientation + load spec (cache key)."""
     h = hashlib.sha256()
     with open(stl_path, "rb") as fh:
         for chunk in iter(lambda: fh.read(65536), b""):
@@ -152,99 +138,69 @@ def _build_ccx_deck(
     work_dir: str,
     job_name: str = "fea_job",
 ) -> str:
-    """
-    Write a minimal CalculiX input deck (.inp) and return the job base path.
+    """Write a minimal CalculiX input deck (.inp); return the job base path.
 
     The deck encodes per-axis anisotropic elastic constants derived from the
-    material + print_orientation.  A simple nodal model is used (single
-    8-node brick element) since the goal is to exercise the solver integration
-    and orientation encoding, not to produce production-accurate FEA results.
-    The real solver workflow uses a properly meshed geometry.
-
-    Deck sections:
-      *MATERIAL — orthotropic constants (per-axis E, nu)
-      *ELASTIC, TYPE=ENGINEERING CONSTANTS
-      *BOUNDARY — fixed base nodes
-      *CLOAD — applied force on top nodes
-      *STEP/*STATIC/*EL PRINT/*NODE PRINT/*END STEP
+    material + print_orientation on a single 8-node brick element (the goal is
+    to exercise solver integration + orientation encoding, not production FEA).
     """
     mat_name = model.get("material", "GENERIC")
     orientation = model.get("print_orientation", "flat")
     base = _MATERIAL_BASE.get(mat_name, _DEFAULT_MATERIAL_BASE)
     scale = _ORIENTATION_SCALE.get(orientation, _DEFAULT_ORIENTATION_SCALE)
 
-    E_x = base["E_mpa"] * scale["E_x"]
-    E_y = base["E_mpa"] * scale["E_y"]
-    E_z = base["E_mpa"] * scale["E_z"]
+    E = (base["E_mpa"] * scale["E_x"],
+         base["E_mpa"] * scale["E_y"],
+         base["E_mpa"] * scale["E_z"])
     nu = base["nu"]
-    G = base["E_mpa"] / (2.0 * (1.0 + nu))  # shear modulus (isotropic approximation)
+    G = base["E_mpa"] / (2.0 * (1.0 + nu))  # shear modulus (isotropic approx)
 
     force_n = load.get("force_n", 10.0)
     direction = load.get("direction", [0, 0, -1])
 
     inp_path = os.path.join(work_dir, f"{job_name}.inp")
     with open(inp_path, "w") as fh:
-        fh.write("** autospec-fab FEA deck\n")
-        fh.write(f"** Material: {mat_name}  Orientation: {orientation}\n")
-        fh.write(f"** E_x={E_x:.1f} E_y={E_y:.1f} E_z={E_z:.1f} MPa\n")
-        fh.write("**\n")
-
-        # Minimal 8-node hexahedral element (C3D8) — unit cube
-        fh.write("*NODE\n")
-        nodes = [
-            (1, 0.0, 0.0, 0.0),
-            (2, 1.0, 0.0, 0.0),
-            (3, 1.0, 1.0, 0.0),
-            (4, 0.0, 1.0, 0.0),
-            (5, 0.0, 0.0, 1.0),
-            (6, 1.0, 0.0, 1.0),
-            (7, 1.0, 1.0, 1.0),
-            (8, 0.0, 1.0, 1.0),
-        ]
-        for n, x, y, z in nodes:
-            fh.write(f"{n}, {x}, {y}, {z}\n")
-
-        fh.write("*ELEMENT, TYPE=C3D8, ELSET=EALL\n")
-        fh.write("1, 1, 2, 3, 4, 5, 6, 7, 8\n")
-
-        # Orthotropic material encoding orientation via per-axis E values
-        fh.write(f"*MATERIAL, NAME={mat_name}\n")
-        fh.write("*ELASTIC, TYPE=ENGINEERING CONSTANTS\n")
-        # E1, E2, E3, nu12, nu13, nu23, G12, G13
-        fh.write(f"{E_x:.2f}, {E_y:.2f}, {E_z:.2f}, "
-                 f"{nu:.4f}, {nu:.4f}, {nu:.4f}, {G:.2f}, {G:.2f}\n")
-        # G23 on continuation line
-        fh.write(f"{G:.2f}\n")
-
-        fh.write("*SOLID SECTION, ELSET=EALL, MATERIAL={}\n".format(mat_name))
-
-        # Boundary: fix bottom face (nodes 1-4) in all DOF
-        fh.write("*BOUNDARY\n")
-        for nid in range(1, 5):
-            fh.write(f"{nid}, 1, 3, 0.0\n")
-
-        # Load: apply force distributed over top face (nodes 5-8)
-        fx = force_n * direction[0] / 4.0
-        fy = force_n * direction[1] / 4.0
-        fz = force_n * direction[2] / 4.0
-        fh.write("*CLOAD\n")
-        for nid in range(5, 9):
-            if fx != 0.0:
-                fh.write(f"{nid}, 1, {fx:.4f}\n")
-            if fy != 0.0:
-                fh.write(f"{nid}, 2, {fy:.4f}\n")
-            if fz != 0.0:
-                fh.write(f"{nid}, 3, {fz:.4f}\n")
-
-        fh.write("*STEP\n")
-        fh.write("*STATIC\n")
-        fh.write("*EL PRINT, ELSET=EALL\n")
-        fh.write("S\n")
-        fh.write("*NODE PRINT, NSET=NALL\n")
-        fh.write("U\n")
-        fh.write("*END STEP\n")
-
+        _write_ccx_inp(fh, mat_name, orientation, E, nu, G, force_n, direction)
     return os.path.join(work_dir, job_name)
+
+
+# Unit-cube C3D8 nodes: (id, x, y, z). Bottom face 1-4 fixed; load on top 5-8.
+_CUBE_NODES = (
+    (1, 0.0, 0.0, 0.0), (2, 1.0, 0.0, 0.0), (3, 1.0, 1.0, 0.0),
+    (4, 0.0, 1.0, 0.0), (5, 0.0, 0.0, 1.0), (6, 1.0, 0.0, 1.0),
+    (7, 1.0, 1.0, 1.0), (8, 0.0, 1.0, 1.0),
+)
+
+
+def _write_ccx_inp(fh, mat_name, orientation, E, nu, G, force_n, direction):
+    """Write the .inp deck body (one 8-node brick, orthotropic material)."""
+    E_x, E_y, E_z = E
+    fh.write("** autospec-fab FEA deck\n")
+    fh.write(f"** Material: {mat_name}  Orientation: {orientation}\n")
+    fh.write(f"** E_x={E_x:.1f} E_y={E_y:.1f} E_z={E_z:.1f} MPa\n**\n")
+    fh.write("*NODE\n")
+    for n, x, y, z in _CUBE_NODES:
+        fh.write(f"{n}, {x}, {y}, {z}\n")
+    fh.write("*ELEMENT, TYPE=C3D8, ELSET=EALL\n1, 1, 2, 3, 4, 5, 6, 7, 8\n")
+    # Orthotropic: E1,E2,E3, nu12,nu13,nu23, G12,G13 then G23 on next line.
+    fh.write(f"*MATERIAL, NAME={mat_name}\n")
+    fh.write("*ELASTIC, TYPE=ENGINEERING CONSTANTS\n")
+    fh.write(f"{E_x:.2f}, {E_y:.2f}, {E_z:.2f}, "
+             f"{nu:.4f}, {nu:.4f}, {nu:.4f}, {G:.2f}, {G:.2f}\n")
+    fh.write(f"{G:.2f}\n")
+    fh.write(f"*SOLID SECTION, ELSET=EALL, MATERIAL={mat_name}\n")
+    fh.write("*BOUNDARY\n")
+    for nid in range(1, 5):
+        fh.write(f"{nid}, 1, 3, 0.0\n")
+    comps = (force_n * direction[0] / 4.0, force_n * direction[1] / 4.0,
+             force_n * direction[2] / 4.0)
+    fh.write("*CLOAD\n")
+    for nid in range(5, 9):
+        for axis, val in enumerate(comps, start=1):
+            if val != 0.0:
+                fh.write(f"{nid}, {axis}, {val:.4f}\n")
+    fh.write("*STEP\n*STATIC\n*EL PRINT, ELSET=EALL\nS\n")
+    fh.write("*NODE PRINT, NSET=NALL\nU\n*END STEP\n")
 
 
 # ---------------------------------------------------------------------------
@@ -252,10 +208,9 @@ def _build_ccx_deck(
 # ---------------------------------------------------------------------------
 
 def _run_ccx(job_base: str) -> tuple[bool, str]:
-    """
-    Run ccx on job_base.inp.  Returns (success, stderr_text).
+    """Run ccx on job_base.inp; return (success, stderr_text).
 
-    ccx is invoked as: ccx <job_base>   (no extension — ccx appends .inp/.dat).
+    Invoked as: ccx <job_base> (no extension — ccx appends .inp/.dat).
     """
     ccx_bin = shutil.which("ccx")
     if ccx_bin is None:
@@ -277,12 +232,9 @@ def _run_ccx(job_base: str) -> tuple[bool, str]:
 
 
 def _parse_safety_factor(job_base: str) -> float | None:
-    """
-    Parse the safety factor from the ccx .dat output file.
+    """Parse the safety factor from the ccx .dat output file.
 
-    The shim (and a real ccx wrapper) is expected to write:
-        SAFETY_FACTOR <value>
-    in the .dat file.  If that line is absent, return None (parse failure).
+    The shim/real wrapper writes `SAFETY_FACTOR <value>`; absent → None.
     """
     dat_path = job_base + ".dat"
     if not os.path.exists(dat_path):
@@ -325,8 +277,7 @@ def run_fea_stage(
         load = _load_json(load_path)
     safety_min = float(load.get("safety_factor_min", _DEFAULT_SAFETY_MIN))
 
-    # --- Check ccx availability BEFORE cache lookup ---
-    # If ccx is absent we skip (real solver deferred); cache is irrelevant.
+    # ccx absent -> skip (real solver deferred); cache is irrelevant.
     ccx_bin = shutil.which("ccx")
     if ccx_bin is None:
         return _make_fragment("fea", "skip", "ccx not found on PATH; real solver deferred to container", [])
@@ -339,48 +290,61 @@ def run_fea_stage(
         return cached
 
     # --- Cache miss: build deck, run ccx, parse result ---
+    success, err_msg, safety_factor = _run_and_parse(stl_path, model, load)
+    if not success:
+        fragment = _make_fragment(
+            "fea", "fail",
+            f"ccx execution failed: {err_msg[:200]}",
+            [_make_finding("fea_below_safety", f"ccx failed: {err_msg[:200]}")],
+        )
+    else:
+        fragment = _safety_fragment(safety_factor, safety_min, model)
+    _cache_write(cache_root, digest, fragment)
+    return fragment
+
+
+def _run_and_parse(stl_path, model, load):
+    """Build the ccx deck, run ccx, parse the safety factor.
+
+    Returns (success, err_msg, safety_factor). safety_factor is None on a parse
+    failure (success stays True so the caller emits the parse-failure verdict).
+    """
     with tempfile.TemporaryDirectory(prefix="fea_run_") as work_dir:
         job_base = _build_ccx_deck(stl_path, model, load, work_dir)
         success, err_msg = _run_ccx(job_base)
-
         if not success:
-            fragment = _make_fragment(
-                "fea", "fail",
-                f"ccx execution failed: {err_msg[:200]}",
-                [_make_finding("fea_below_safety", f"ccx failed: {err_msg[:200]}")],
-            )
-            _cache_write(cache_root, digest, fragment)
-            return fragment
+            return False, err_msg, None
+        return True, "", _parse_safety_factor(job_base)
 
-        safety_factor = _parse_safety_factor(job_base)
 
-    # --- Evaluate safety factor ---
+def _safety_fragment(safety_factor, safety_min, model):
+    """Map a parsed safety factor to a pass/fail fragment + fea_results.
+
+    safety_factor is None -> parse-failure fail (no fea_results numbers).
+    """
     if safety_factor is None:
-        fragment = _make_fragment(
+        return _make_fragment(
             "fea", "fail",
             "ccx ran but safety factor could not be parsed from .dat output",
             [_make_finding("fea_below_safety", "Safety factor parse failure")],
         )
-        _cache_write(cache_root, digest, fragment)
-        return fragment
-
+    cmp = "<" if safety_factor < safety_min else "≥"
+    detail = (
+        f"Safety factor {safety_factor:.3f} {cmp} required {safety_min:.1f} "
+        f"(material={model.get('material')}, "
+        f"orientation={model.get('print_orientation')})"
+    )
     if safety_factor < safety_min:
-        detail = (
-            f"Safety factor {safety_factor:.3f} < required {safety_min:.1f} "
-            f"(material={model.get('material')}, orientation={model.get('print_orientation')})"
-        )
         fragment = _make_fragment(
             "fea", "fail", detail,
-            [_make_finding("fea_below_safety", detail)],
-        )
+            [_make_finding("fea_below_safety", detail)])
     else:
-        detail = (
-            f"Safety factor {safety_factor:.3f} ≥ required {safety_min:.1f} "
-            f"(material={model.get('material')}, orientation={model.get('print_orientation')})"
-        )
         fragment = _make_fragment("fea", "pass", detail, [])
-
-    _cache_write(cache_root, digest, fragment)
+    fragment["fea_results"] = {
+        "safety_factor": safety_factor,
+        "required_min": safety_min,
+        "status": fragment["status"],
+    }
     return fragment
 
 

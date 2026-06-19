@@ -175,6 +175,7 @@ def run_gate(stl_path, model_path, stages_dir, out_path):
     """
     stages = []
     vision_findings = []
+    extras = {}  # top-level structured results keyed by gate field name
     blocking_failed = False
     render_dir = render_dir_for(out_path)
     ctx = {"render_dir": render_dir, "in_override": {}}
@@ -187,11 +188,7 @@ def run_gate(stl_path, model_path, stages_dir, out_path):
             stage, stl_path, model_path, stages_dir, ctx)
         record = _clean_stage_record(fragment, stage["name"])
         stages.append(record)
-
-        if stage["name"] == "vision":
-            vf = fragment.get("vision_findings")
-            if isinstance(vf, list):
-                vision_findings.extend(vf)
+        _collect_stage_extras(stage["name"], fragment, vision_findings, extras)
 
         if stage["blocking"]:
             if record["status"] == "fail" or not harness_ok:
@@ -204,7 +201,32 @@ def run_gate(stl_path, model_path, stages_dir, out_path):
         "stages": stages,
         "vision_findings": vision_findings,
     }
+    gate.update(extras)
     return gate, blocking_failed
+
+
+# Stage name -> the top-level gate field its structured results object feeds.
+_STRUCTURED_RESULT_FIELDS = {"fea": "fea_results", "cfd": "cfd_results"}
+
+
+def _collect_stage_extras(name, fragment, vision_findings, extras):
+    """Mirror per-stage extras into the gate top level.
+
+    vision -> advisory vision_findings (appended); fea/cfd -> structured
+    fea_results/cfd_results dicts (placed at gate top-level, parallel to
+    vision_findings). Absent/ill-typed extras are skipped (no fabrication).
+    """
+    if name == "vision":
+        vf = fragment.get("vision_findings")
+        if isinstance(vf, list):
+            vision_findings.extend(vf)
+        return
+    field = _STRUCTURED_RESULT_FIELDS.get(name)
+    if field is None:
+        return
+    value = fragment.get(field)
+    if isinstance(value, dict):
+        extras[field] = value
 
 
 def _ajv_validate(schema_path, out_path):
