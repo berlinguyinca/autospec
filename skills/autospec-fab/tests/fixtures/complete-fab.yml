@@ -1,0 +1,27 @@
+generator: "rm -rf build && .venv/bin/python src/generate.py"
+
+stl_roots:
+  - "build/stls/manifolds/"
+  - "catalog/manifolds/"
+
+printer:
+  nozzle_width: 0.6
+  layer_height: 0.3
+  min_perimeters: 4
+  max_overhang_deg: 40
+
+metadata_sidecar: "manifolds/{name}/metadata.json"
+
+models:
+  - name: "inlet_manifold"
+    stl: "build/stls/manifolds/inlet_manifold.stl"
+    metadata: "manifolds/inlet_manifold/metadata.json"
+    printable: true
+    load_critical: true
+    flow_critical: false
+  - name: "outlet_cap"
+    stl: "build/stls/manifolds/outlet_cap.stl"
+    metadata: "manifolds/outlet_cap/metadata.json"
+    printable: true
+    load_critical: false
+    flow_critical: true

@@ -1,0 +1,12 @@
+generator: "rm -rf build && .venv/bin/python src/generate.py"
+
+stl_roots:
+  - "build/stls/manifolds/"
+
+models:
+  - name: "test_part"
+    stl: "build/stls/manifolds/test_part.stl"
+    metadata: "manifolds/test_part/metadata.json"
+    printable: true
+    load_critical: false
+    flow_critical: false

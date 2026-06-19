@@ -1,0 +1,16 @@
+stl_roots:
+  - "build/stls/manifolds/"
+
+printer:
+  nozzle_width: 0.4
+  layer_height: 0.2
+  min_perimeters: 3
+  max_overhang_deg: 45
+
+models:
+  - name: "test_part"
+    stl: "build/stls/manifolds/test_part.stl"
+    metadata: "manifolds/test_part/metadata.json"
+    printable: true
+    load_critical: false
+    flow_critical: false
