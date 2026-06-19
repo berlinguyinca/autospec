@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-fab-model.schema.json",
+  "title": "autospec-fab model sidecar",
+  "description": "Per-model metadata sidecar describing geometry, material, ports, gaskets, and gate flags for the autospec-fab pipeline.",
+  "type": "object",
+  "required": ["material", "print_orientation", "load_critical", "flow_critical"],
+  "additionalProperties": false,
+  "properties": {
+    "material": {
+      "type": "string",
+      "description": "Filament or resin material designation (e.g. PETG, ABS, ASA)."
+    },
+    "print_orientation": {
+      "type": "string",
+      "description": "Recommended print orientation (e.g. flat, upright, side)."
+    },
+    "load_critical": {
+      "type": "boolean",
+      "description": "True when the part bears structural load and must pass FEA stage."
+    },
+    "flow_critical": {
+      "type": "boolean",
+      "description": "True when the part is in the vacuum/air-flow circuit and must pass CFD stage."
+    },
+    "dims": {
+      "type": "object",
+      "description": "Bounding-box dimensions in millimetres.",
+      "additionalProperties": false,
+      "properties": {
+        "x_mm": { "type": "number" },
+        "y_mm": { "type": "number" },
+        "z_mm": { "type": "number" }
+      }
+    },
+    "ports": {
+      "type": "array",
+      "description": "Fluid/vacuum port definitions (NPT, hose, socket).",
+      "items": {
+        "type": "object",
+        "required": ["id", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "description": "Unique port identifier within this model." },
+          "type": {
+            "type": "string",
+            "enum": ["npt", "hose", "socket"],
+            "description": "Port connection type."
+          },
+          "size": { "type": "string", "description": "Thread or diameter designation (e.g. 1/4, 25mm)." },
+          "clearance_mm": { "type": "number", "description": "Minimum tool-access clearance in mm." }
+        }
+      }
+    },
+    "gaskets": {
+      "type": "array",
+      "description": "Gasket / O-ring groove definitions.",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "description": "Unique gasket identifier within this model." },
+          "groove": { "type": "string", "description": "Groove profile type (e.g. o-ring, flat, dovetail)." },
+          "surrounding_wall_mm": {
+            "type": "number",
+            "description": "Minimum plastic wall surrounding the gasket groove in mm (gate requires ≥5 mm)."
+          }
+        }
+      }
+    }
+  }
+}
