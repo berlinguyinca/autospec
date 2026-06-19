@@ -241,15 +241,24 @@ class ReleaseGateEngineTest(unittest.TestCase):
 
     # ---- render -> vision handoff: vision gets the contact sheet ---------
     def _install_render_vision_handoff_stubs(self):
-        """Replace the render+vision stubs with handoff-aware probes.
-
-        render: records the --render-dir it received and emits a real
-        contact-sheet.html under <render-dir>/<slug>/. vision: records the
-        --in it received (so the test can assert it is the contact sheet,
-        NOT the STL) and emits a vision_findings observation.
-        """
+        """Replace render+vision stubs with handoff-aware probes (see sub-helpers)."""
         self.render_dir_probe = os.path.join(self.tmp, "render-dir.txt")
         self.vision_in_probe = os.path.join(self.tmp, "vision-in.txt")
+        self._install_render_stub()
+        self._install_vision_stub()
+
+    def _write_stage_stub(self, stage_name, src):
+        for st in STAGE_ORDER:
+            if st["name"] != stage_name:
+                continue
+            for fname in self._filenames_for(st["script"]):
+                path = os.path.join(self.stages_dir, fname)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(src)
+                os.chmod(path, 0o755)
+
+    def _install_render_stub(self):
+        """render: record the --render-dir + emit a real contact-sheet.html."""
         render_src = (
             "#!/usr/bin/env python3\n"
             "import argparse, json, os, sys\n"
@@ -268,6 +277,10 @@ class ReleaseGateEngineTest(unittest.TestCase):
             "'detail':'stub','findings':[]}, open(a.out,'w'))\n"
             "sys.exit(0)\n"
         ) % self.render_dir_probe
+        self._write_stage_stub("render", render_src)
+
+    def _install_vision_stub(self):
+        """vision: record --in (assert sheet, not STL) + emit an observation."""
         vision_src = (
             "#!/usr/bin/env python3\n"
             "import argparse, json, os, sys\n"
@@ -283,18 +296,7 @@ class ReleaseGateEngineTest(unittest.TestCase):
             "'findings':[],'vision_findings':vf}, open(a.out,'w'))\n"
             "sys.exit(0)\n"
         ) % self.vision_in_probe
-        for st in STAGE_ORDER:
-            if st["name"] == "render":
-                src = render_src
-            elif st["name"] == "vision":
-                src = vision_src
-            else:
-                continue
-            for fname in self._filenames_for(st["script"]):
-                path = os.path.join(self.stages_dir, fname)
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(src)
-                os.chmod(path, 0o755)
+        self._write_stage_stub("vision", vision_src)
 
     @staticmethod
     def _read(path):
