@@ -47,21 +47,9 @@ _FAILING_VELOCITY = "0.5"     # < 1.0 m/s → target miss
 
 
 def _make_solver_shim(bin_dir: str, count_file: str) -> str:
-    """
-    Write a simpleFoam shim to bin_dir/simpleFoam.
-
-    The shim:
-      - Increments the integer in count_file by 1 (creates it at 0 first).
-      - Writes a ``cfd_results`` file in the current directory (the case dir)
-        with metric values taken from env vars at invocation time.
-      - Exits 0.
-
-    Env vars (read at shim-invocation time):
-      SHIM_PRESSURE_DROP  — float pressure_drop_pa (default 200.0)
-      SHIM_MIN_VELOCITY   — float min_velocity_m_s (default 3.0)
-      SHIM_STAGNATION     — int 0|1               (default 0)
-      SHIM_COUNT_FILE     — path to counter file
-    """
+    """Write a simpleFoam shim to bin_dir/simpleFoam: increments the counter in
+    count_file, emits a cfd_results file with env-driven metrics (SHIM_PRESSURE_DROP
+    / SHIM_MIN_VELOCITY / SHIM_STAGNATION, read at invocation time), exits 0."""
     shim_path = os.path.join(bin_dir, "simpleFoam")
     shim_content = f"""\
 #!/bin/sh
