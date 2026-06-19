@@ -48,7 +48,10 @@
             "description": "Port connection type."
           },
           "size": { "type": "string", "description": "Thread or diameter designation (e.g. 1/4, 25mm)." },
-          "clearance_mm": { "type": "number", "description": "Minimum tool-access clearance in mm." }
+          "clearance_mm": { "type": "number", "description": "Minimum tool-access clearance in mm." },
+          "tap_access": { "type": "boolean", "description": "NPT port: tap/wrench access is preserved (vacuum-fitting QA, #1224)." },
+          "thread_depth_mm": { "type": "number", "description": "NPT port: usable thread depth in mm (vacuum-fitting QA)." },
+          "standalone_tower": { "type": "boolean", "description": "Port is a narrow standalone tower/ear/boss rather than integrated into the body (vacuum-fitting QA rejects true)." }
         }
       }
     },
@@ -65,7 +68,9 @@
           "surrounding_wall_mm": {
             "type": "number",
             "description": "Minimum plastic wall surrounding the gasket groove in mm (gate requires ≥5 mm)."
-          }
+          },
+          "seal_face_continuous": { "type": "boolean", "description": "Groove seal face is continuous/closed (gasket-leak QA rejects a broken seal face)." },
+          "exposed_side": { "type": "boolean", "description": "Groove side is open to the exterior (gasket-leak QA rejects true — exposed gasket side)." }
         }
       }
     }
