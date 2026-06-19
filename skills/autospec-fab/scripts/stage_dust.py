@@ -49,7 +49,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -176,36 +176,66 @@ def _check_duct(duct: Dict) -> List[Finding]:
 # Stage entry point
 # ---------------------------------------------------------------------------
 
-def run(duct_path: Optional[str]) -> Fragment:
+def _load_descriptor(duct_path: Optional[str]) -> Tuple[Optional[Dict], Optional[Fragment]]:
     """
-    Execute all dust/airflow checks and return the stage fragment dict.
-
-    This is the public API; main() wraps it for CLI use.
+    Resolve the duct input. Returns (descriptor, early_fragment).
 
     When no duct descriptor is supplied (the engine sequences stages with only
     --in/--model/--out and this model has no dust-collection ducts), the stage
     DEGRADES to a non-blocking skip rather than hard-failing — a missing
-    optional extra input is not a gate failure.
+    optional extra input is not a gate failure. On a load error the early
+    fragment is a fail; otherwise early_fragment is None and descriptor is set.
     """
     if not duct_path:
-        return {
+        return None, {
             "stage": STAGE_NAME,
             "status": "skip",
             "detail": ("no duct descriptor supplied (--duct absent); "
                        "dust-airflow QA skipped"),
             "findings": [],
         }
-
     try:
         with open(duct_path) as fh:
-            descriptor = json.load(fh)
+            return json.load(fh), None
     except Exception as exc:
-        return {
+        return None, {
             "stage": STAGE_NAME,
             "status": "fail",
             "detail": f"failed to load duct JSON: {exc}",
             "findings": [{"code": "disconnected_flow", "detail": str(exc)}],
         }
+
+
+def _assemble_fragment(findings: List[Finding], duct_count: int) -> Fragment:
+    """Build the pass/fail fragment from accumulated findings."""
+    if findings:
+        detail = "; ".join(f["detail"] for f in findings)
+        status = "fail"
+    else:
+        detail = (
+            f"all {duct_count} duct(s) pass: full-size openings verified, "
+            "cross-sections clear of pinches, all ducts connected, "
+            "no printed gate slots, no PVC-as-duct"
+        )
+        status = "pass"
+    return {
+        "stage": STAGE_NAME,
+        "status": status,
+        "detail": detail,
+        "findings": findings,
+    }
+
+
+def run(duct_path: Optional[str]) -> Fragment:
+    """
+    Execute all dust/airflow checks and return the stage fragment dict.
+
+    This is the public API; main() wraps it for CLI use.
+    """
+    descriptor, early = _load_descriptor(duct_path)
+    if early is not None:
+        return early
+    assert descriptor is not None
 
     ducts: List[Dict] = descriptor.get("ducts", [])
 
@@ -213,24 +243,7 @@ def run(duct_path: Optional[str]) -> Fragment:
     for duct in ducts:
         all_findings.extend(_check_duct(duct))
 
-    if all_findings:
-        detail = "; ".join(f["detail"] for f in all_findings)
-        status = "fail"
-    else:
-        duct_count = len(ducts)
-        detail = (
-            f"all {duct_count} duct(s) pass: full-size openings verified, "
-            "cross-sections clear of pinches, all ducts connected, "
-            "no printed gate slots, no PVC-as-duct"
-        )
-        status = "pass"
-
-    return {
-        "stage": STAGE_NAME,
-        "status": status,
-        "detail": detail,
-        "findings": all_findings,
-    }
+    return _assemble_fragment(all_findings, len(ducts))
 
 
 def main(argv: Optional[List[str]] = None) -> int:

@@ -201,37 +201,69 @@ def _check_relief(pump_type: str, relief_nodes: List[str]) -> List[Finding]:
 # Stage entry point
 # ---------------------------------------------------------------------------
 
-def run(circuit_path: Optional[str]) -> Fragment:
+def _load_circuit(circuit_path: Optional[str]) -> Tuple[Optional[Dict], Optional[Fragment]]:
     """
-    Execute all circuit checks and return the stage fragment dict.
-
-    This is the public API; main() wraps it for CLI use.
+    Resolve the circuit input. Returns (circuit, early_fragment).
 
     When no circuit graph is supplied (the engine sequences stages with only
     --in/--model/--out and this model declares no vacuum circuit), the stage
     DEGRADES to a non-blocking skip rather than hard-failing — a missing
-    optional extra input is not a gate failure.
+    optional extra input is not a gate failure. On a load error the early
+    fragment is a fail; otherwise early_fragment is None and circuit is set.
     """
     if not circuit_path:
-        return {
+        return None, {
             "stage": STAGE_NAME,
             "status": "skip",
             "detail": ("no circuit graph supplied (--circuit absent); "
                        "vacuum-circuit QA skipped"),
             "findings": [],
         }
-
-    # Load circuit graph
     try:
         with open(circuit_path) as fh:
-            circuit = json.load(fh)
+            return json.load(fh), None
     except Exception as exc:
-        return {
+        return None, {
             "stage": STAGE_NAME,
             "status": "fail",
             "detail": f"failed to load circuit JSON: {exc}",
             "findings": [{"code": "disconnected_flow", "detail": str(exc)}],
         }
+
+
+def _assemble_fragment(
+    findings: List[Finding],
+    inlet_count: int,
+    target_count: int,
+) -> Fragment:
+    """Build the pass/fail fragment from accumulated findings."""
+    if findings:
+        detail = "; ".join(f["detail"] for f in findings)
+        status = "fail"
+    else:
+        detail = (
+            f"all {inlet_count} inlet(s) reach all {target_count} target(s); "
+            "isolation intact; pump configuration valid"
+        )
+        status = "pass"
+    return {
+        "stage": STAGE_NAME,
+        "status": status,
+        "detail": detail,
+        "findings": findings,
+    }
+
+
+def run(circuit_path: Optional[str]) -> Fragment:
+    """
+    Execute all circuit checks and return the stage fragment dict.
+
+    This is the public API; main() wraps it for CLI use.
+    """
+    circuit, early = _load_circuit(circuit_path)
+    if early is not None:
+        return early
+    assert circuit is not None
 
     nodes: List[str] = circuit.get("nodes", [])
     edges: List[List[str]] = circuit.get("edges", [])
@@ -245,35 +277,11 @@ def run(circuit_path: Optional[str]) -> Fragment:
     adj = _build_adjacency(nodes, edges)
 
     all_findings: List[Finding] = []
-
-    # Check 1: reachability
     all_findings.extend(_check_reachability(adj, inlets, targets))
-
-    # Check 2: isolation
     all_findings.extend(_check_isolation(adj, isolated_groups, self_clamping))
-
-    # Check 3: no relief on low-flow pumps
     all_findings.extend(_check_relief(pump_type, relief_nodes))
 
-    if all_findings:
-        codes = sorted({f["code"] for f in all_findings})
-        detail = "; ".join(f["detail"] for f in all_findings)
-        status = "fail"
-    else:
-        inlet_count = len(inlets)
-        target_count = len(targets)
-        detail = (
-            f"all {inlet_count} inlet(s) reach all {target_count} target(s); "
-            "isolation intact; pump configuration valid"
-        )
-        status = "pass"
-
-    return {
-        "stage": STAGE_NAME,
-        "status": status,
-        "detail": detail,
-        "findings": all_findings,
-    }
+    return _assemble_fragment(all_findings, len(inlets), len(targets))
 
 
 def main(argv: Optional[List[str]] = None) -> int:
