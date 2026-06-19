@@ -239,6 +239,145 @@ class ReleaseGateEngineTest(unittest.TestCase):
         gate = self._read_gate()
         self.assertEqual([s["stage"] for s in gate["stages"]], STAGE_NAMES)
 
+    # ---- render -> vision handoff: vision gets the contact sheet ---------
+    def _install_render_vision_handoff_stubs(self):
+        """Replace render+vision stubs with handoff-aware probes (see sub-helpers)."""
+        self.render_dir_probe = os.path.join(self.tmp, "render-dir.txt")
+        self.vision_in_probe = os.path.join(self.tmp, "vision-in.txt")
+        self._install_render_stub()
+        self._install_vision_stub()
+
+    def _write_stage_stub(self, stage_name, src):
+        for st in STAGE_ORDER:
+            if st["name"] != stage_name:
+                continue
+            for fname in self._filenames_for(st["script"]):
+                path = os.path.join(self.stages_dir, fname)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(src)
+                os.chmod(path, 0o755)
+
+    def _install_render_stub(self):
+        """render: record the --render-dir + emit a real contact-sheet.html."""
+        render_src = (
+            "#!/usr/bin/env python3\n"
+            "import argparse, json, os, sys\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--in', dest='in_path', required=True)\n"
+            "p.add_argument('--model', dest='model_path', default=None)\n"
+            "p.add_argument('--out', required=True)\n"
+            "p.add_argument('--render-dir', dest='render_dir', default=None)\n"
+            "a, _ = p.parse_known_args()\n"
+            "open(%r, 'w').write(a.render_dir or '<none>')\n"
+            "slug = os.path.splitext(os.path.basename(a.in_path))[0] or 'model'\n"
+            "sheet_dir = os.path.join(a.render_dir, slug)\n"
+            "os.makedirs(sheet_dir, exist_ok=True)\n"
+            "open(os.path.join(sheet_dir, 'contact-sheet.html'), 'w').write('<html>')\n"
+            "json.dump({'stage':'render','status':'pass',"
+            "'detail':'stub','findings':[]}, open(a.out,'w'))\n"
+            "sys.exit(0)\n"
+        ) % self.render_dir_probe
+        self._write_stage_stub("render", render_src)
+
+    def _install_vision_stub(self):
+        """vision: record --in (assert sheet, not STL) + emit an observation."""
+        vision_src = (
+            "#!/usr/bin/env python3\n"
+            "import argparse, json, os, sys\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--in', dest='in_path', required=True)\n"
+            "p.add_argument('--model', dest='model_path', default=None)\n"
+            "p.add_argument('--out', required=True)\n"
+            "a, _ = p.parse_known_args()\n"
+            "open(%r, 'w').write(a.in_path)\n"
+            "ok = os.path.isfile(a.in_path) and a.in_path.endswith('contact-sheet.html')\n"
+            "vf = [{'observation':'looks ok','severity':'info'}] if ok else []\n"
+            "json.dump({'stage':'vision','status':'pass','detail':'stub',"
+            "'findings':[],'vision_findings':vf}, open(a.out,'w'))\n"
+            "sys.exit(0)\n"
+        ) % self.vision_in_probe
+        self._write_stage_stub("vision", vision_src)
+
+    @staticmethod
+    def _read(path):
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    @staticmethod
+    def _filenames_for(script):
+        if script.startswith("stage-"):
+            alt = "stage_" + script[len("stage-"):].replace("-", "_")
+        else:
+            alt = "stage-" + script[len("stage_"):].replace("_", "-")
+        return [script, alt]
+
+    def test_render_vision_handoff_sheet_not_stl(self):
+        self._install_render_vision_handoff_stubs()
+        proc = self._run(_env_for())
+        self.assertEqual(proc.returncode, 0,
+                         "handoff gate must be green; stderr=%s" % proc.stderr)
+        render_dir = self._read(self.render_dir_probe)
+        self.assertNotEqual(render_dir, "<none>",
+                            "engine must thread --render-dir to the render stage")
+        vision_in = self._read(self.vision_in_probe)
+        self.assertTrue(vision_in.endswith("contact-sheet.html"),
+                        "vision --in must be the contact sheet, got %r" % vision_in)
+        self.assertNotEqual(vision_in, self.stl,
+                            "vision --in must NOT be the STL")
+        # the produced sheet lives under the render-dir the engine handed render
+        slug = os.path.splitext(os.path.basename(self.stl))[0]
+        self.assertEqual(
+            vision_in, os.path.join(render_dir, slug, "contact-sheet.html"))
+        gate = self._read_gate()
+        self.assertEqual(
+            gate["vision_findings"],
+            [{"observation": "looks ok", "severity": "info"}])
+
+    def test_render_absent_vision_skips_green(self):
+        """render produces no sheet (skip) -> vision skips, gate still green."""
+        self.vision_in_probe = os.path.join(self.tmp, "vision-in.txt")
+        # render stub that emits NO contact sheet (renderer-absent path)
+        render_src = (
+            "#!/usr/bin/env python3\n"
+            "import argparse, json, sys\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--in', dest='in_path', required=True)\n"
+            "p.add_argument('--out', required=True)\n"
+            "a, _ = p.parse_known_args()\n"
+            "json.dump({'stage':'render','status':'skip','detail':'no renderer',"
+            "'findings':[]}, open(a.out,'w'))\n"
+            "sys.exit(0)\n"
+        )
+        vision_src = (
+            "#!/usr/bin/env python3\n"
+            "import argparse, json, os, sys\n"
+            "p = argparse.ArgumentParser()\n"
+            "p.add_argument('--in', dest='in_path', required=True)\n"
+            "p.add_argument('--out', required=True)\n"
+            "a, _ = p.parse_known_args()\n"
+            "open(%r, 'w').write(a.in_path)\n"
+            "status = 'skip' if not os.path.isfile(a.in_path) else 'pass'\n"
+            "json.dump({'stage':'vision','status':status,'detail':'stub',"
+            "'findings':[],'vision_findings':[]}, open(a.out,'w'))\n"
+            "sys.exit(0)\n"
+        ) % self.vision_in_probe
+        for st in STAGE_ORDER:
+            src = (render_src if st["name"] == "render"
+                   else vision_src if st["name"] == "vision" else None)
+            if src is None:
+                continue
+            for fname in self._filenames_for(st["script"]):
+                path = os.path.join(self.stages_dir, fname)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(src)
+                os.chmod(path, 0o755)
+        proc = self._run(_env_for())
+        self.assertEqual(proc.returncode, 0,
+                         "render-absent must stay green; stderr=%s" % proc.stderr)
+        gate = self._read_gate()
+        vis = next(s for s in gate["stages"] if s["stage"] == "vision")
+        self.assertEqual(vis["status"], "skip")
+
 
 if __name__ == "__main__":
     unittest.main()
