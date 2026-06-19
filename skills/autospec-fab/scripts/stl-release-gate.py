@@ -40,7 +40,8 @@ import subprocess
 import sys
 import tempfile
 
-from release_gate_stages import STAGE_ORDER, resolve_stage_script
+from release_gate_stages import (
+    STAGE_ORDER, extra_args_for, resolve_stage_script)
 
 # Keys the schema permits on a stage record; the engine strips everything else
 # off each fragment before aggregating (fragments may carry extras like
@@ -71,6 +72,22 @@ def _model_name(model_path):
         return ""
 
 
+def _stage_argv(script, stage_name, stl_path, model_path, out_path):
+    """Build the per-stage argv, threading sibling-file stage inputs.
+
+    Every stage gets `--model` + `--out`. The default input is `--in <stl>`,
+    UNLESS the per-stage resolver already supplies its own `--in` (docs takes
+    the model DIR). Stage-specific flags (--circuit/--duct/--load/--flow,
+    --baseline) come from extra_args_for and are appended only when the sibling
+    descriptor exists.
+    """
+    extra = extra_args_for(stage_name, stl_path, model_path)
+    argv = [sys.executable, script, "--model", model_path, "--out", out_path]
+    if "--in" not in extra:
+        argv += ["--in", stl_path]
+    return argv + extra
+
+
 def _run_stage(stage, stl_path, model_path, stages_dir):
     """Run one stage; return (fragment_dict, harness_ok).
 
@@ -88,8 +105,8 @@ def _run_stage(stage, stl_path, model_path, stages_dir):
         prefix="fab-frag-", suffix=".json", delete=False)
     tmp_out.close()
     try:
-        argv = [sys.executable, script,
-                "--in", stl_path, "--model", model_path, "--out", tmp_out.name]
+        argv = _stage_argv(
+            script, stage["name"], stl_path, model_path, tmp_out.name)
         proc = subprocess.run(argv, capture_output=True, text=True)
         fragment = _load_fragment(tmp_out.name, stage["name"])
         harness_ok = proc.returncode == 0 and fragment is not None

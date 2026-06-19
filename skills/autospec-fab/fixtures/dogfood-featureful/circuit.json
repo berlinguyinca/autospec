@@ -1,0 +1,17 @@
+{
+  "nodes": ["inlet_a", "inlet_b", "junction_1", "junction_2", "gasket_x", "cavity_y", "port_z"],
+  "edges": [
+    ["inlet_a", "junction_1"],
+    ["inlet_b", "junction_1"],
+    ["junction_1", "junction_2"],
+    ["junction_2", "gasket_x"],
+    ["junction_2", "cavity_y"],
+    ["junction_2", "port_z"]
+  ],
+  "inlets": ["inlet_a", "inlet_b"],
+  "targets": ["gasket_x", "cavity_y", "port_z"],
+  "isolated_groups": [],
+  "self_clamping": false,
+  "pump_type": "standard",
+  "relief_nodes": []
+}

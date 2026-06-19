@@ -7,6 +7,15 @@
   "required": ["material", "print_orientation", "load_critical", "flow_critical"],
   "additionalProperties": false,
   "properties": {
+    "name": {
+      "type": "string",
+      "description": "Optional human-readable model name; surfaced by the release-gate engine (stl-release-gate.py _model_name) into release-gate.json[\"name\"]."
+    },
+    "body_count": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional expected number of connected solid bodies; read by stage-geometry.py to set expect-bodies."
+    },
     "material": {
       "type": "string",
       "description": "Filament or resin material designation (e.g. PETG, ABS, ASA)."
