@@ -201,12 +201,26 @@ def _check_relief(pump_type: str, relief_nodes: List[str]) -> List[Finding]:
 # Stage entry point
 # ---------------------------------------------------------------------------
 
-def run(circuit_path: str) -> Fragment:
+def run(circuit_path: Optional[str]) -> Fragment:
     """
     Execute all circuit checks and return the stage fragment dict.
 
     This is the public API; main() wraps it for CLI use.
+
+    When no circuit graph is supplied (the engine sequences stages with only
+    --in/--model/--out and this model declares no vacuum circuit), the stage
+    DEGRADES to a non-blocking skip rather than hard-failing — a missing
+    optional extra input is not a gate failure.
     """
+    if not circuit_path:
+        return {
+            "stage": STAGE_NAME,
+            "status": "skip",
+            "detail": ("no circuit graph supplied (--circuit absent); "
+                       "vacuum-circuit QA skipped"),
+            "findings": [],
+        }
+
     # Load circuit graph
     try:
         with open(circuit_path) as fh:
@@ -272,12 +286,18 @@ def main(argv: Optional[List[str]] = None) -> int:
              "circuit verdict is driven by --circuit graph, not geometry)",
     )
     parser.add_argument(
-        "--circuit", required=True,
-        help="path to circuit graph JSON",
+        "--circuit", required=False, default=None,
+        help="path to circuit graph JSON (optional; absent → stage skips, "
+             "for models with no vacuum circuit)",
     )
     parser.add_argument(
         "--out", required=True,
         help="output path for stage fragment JSON",
+    )
+    parser.add_argument(
+        "--model", required=False, default=None,
+        help="per-model metadata sidecar (accepted for uniform stage CLI "
+             "symmetry; circuit verdict is driven by --circuit, not metadata)",
     )
     args = parser.parse_args(argv)
 

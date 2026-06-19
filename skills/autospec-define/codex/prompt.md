@@ -418,6 +418,33 @@ Non-UI issues omit all three (the rule never fires without the marker or a secti
 Keep these within the same ≤400-word / ≤3-files caps — split a large screen into a
 parent + per-component children with `Depends on` edges rather than one giant issue.
 
+### Fab-feature decomposition (only for 3D-printable / fab projects)
+
+When the feature is a 3D-printable / fab project — `.autospec/fab.yml` is present, or
+the request is about STL geometry, printing, vacuum/dust/gasket parts — apply the fab
+lens. CAD changes are high-risk and only verifiable through the autospec-fab
+release-gate, so decompose them small and gate every change:
+
+- **Regression-test-first.** Every CAD child issue starts with a focused regression
+  test (a release-gate run, or a single stage's check) that pins the geometry/metadata
+  invariant being changed, written and failing before the model edit. No geometry change
+  ships without a test that would have caught its regression.
+- **STL Modeling Rules are HARD constraints, not advice.** State them in the issue body
+  so the implementer treats them as acceptance gates: ≥5 mm gasket surrounding wall;
+  NPT tap access + ≥5 mm fitting clearance preserved (no standalone towers); intended
+  vacuum-path / inlet→gasket connectivity reachable; no relief/bleed on low-flow pumps;
+  full-size dust openings; the body stays watertight and single-body; never hand-edit
+  anything under `build/` (generated artifacts are regenerated, not patched).
+- **Pre-stage per-model metadata + sidecars.** Each model child issue pre-stages its
+  metadata sidecar (`material`, `print_orientation`, `load_critical`, `flow_critical`,
+  `dims`) and any ports/gaskets sidecar entries the gate needs, so the metadata /
+  vacuum-fitting / gasket stages have inputs to validate. A part with no vacuum circuit
+  or dust duct simply omits those sidecars — the corresponding stages skip, they do not
+  fail.
+
+Keep fab children within the same ≤400-word / ≤3-files caps; split a multi-feature model
+into per-feature children chained by `Depends on`, each with its own regression test.
+
 ### Small-LLM friendliness (applies to every child issue)
 
 Children are written assuming the implementer is a 32B-class local model with **pre-staged context**, not a search-driven cloud agent:

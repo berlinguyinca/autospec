@@ -176,12 +176,26 @@ def _check_duct(duct: Dict) -> List[Finding]:
 # Stage entry point
 # ---------------------------------------------------------------------------
 
-def run(duct_path: str) -> Fragment:
+def run(duct_path: Optional[str]) -> Fragment:
     """
     Execute all dust/airflow checks and return the stage fragment dict.
 
     This is the public API; main() wraps it for CLI use.
+
+    When no duct descriptor is supplied (the engine sequences stages with only
+    --in/--model/--out and this model has no dust-collection ducts), the stage
+    DEGRADES to a non-blocking skip rather than hard-failing — a missing
+    optional extra input is not a gate failure.
     """
+    if not duct_path:
+        return {
+            "stage": STAGE_NAME,
+            "status": "skip",
+            "detail": ("no duct descriptor supplied (--duct absent); "
+                       "dust-airflow QA skipped"),
+            "findings": [],
+        }
+
     try:
         with open(duct_path) as fh:
             descriptor = json.load(fh)
@@ -229,12 +243,18 @@ def main(argv: Optional[List[str]] = None) -> int:
              "dust verdict is driven by --duct descriptor, not raw geometry)",
     )
     parser.add_argument(
-        "--duct", required=True,
-        help="path to duct descriptor JSON",
+        "--duct", required=False, default=None,
+        help="path to duct descriptor JSON (optional; absent → stage skips, "
+             "for models with no dust-collection ducts)",
     )
     parser.add_argument(
         "--out", required=True,
         help="output path for stage fragment JSON",
+    )
+    parser.add_argument(
+        "--model", required=False, default=None,
+        help="per-model metadata sidecar (accepted for uniform stage CLI "
+             "symmetry; dust verdict is driven by --duct, not metadata)",
     )
     args = parser.parse_args(argv)
 
