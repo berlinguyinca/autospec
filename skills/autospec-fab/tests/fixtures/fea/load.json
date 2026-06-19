@@ -1,0 +1,5 @@
+{
+  "force_n": 50.0,
+  "direction": [0, 0, -1],
+  "safety_factor_min": 2.0
+}
