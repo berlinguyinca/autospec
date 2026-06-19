@@ -45,6 +45,7 @@ STAGE_ORDER = [
 _SIBLING_INPUTS = {
     "vacuum-circuit": ("--circuit", "circuit.json"),
     "dust-airflow": ("--duct", "duct.json"),
+    "slicer": ("--printer", "printer.json"),
     "fea": ("--load", "load.json"),
     "cfd": ("--flow", "flow.json"),
 }
