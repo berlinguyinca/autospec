@@ -11,7 +11,7 @@ SCRIPTS_DIR="$REPO_ROOT/skills/autospec-fab/scripts"
     run env PYTHONPATH="$SCRIPTS_DIR" \
         python3 -m unittest discover \
             -s "$REPO_ROOT/skills/autospec-fab/tests" \
-            -p "test_stage_cfd.py" \
+            -p "test_stage_cfd*.py" \
             -v
     [ "$status" -eq 0 ]
 }

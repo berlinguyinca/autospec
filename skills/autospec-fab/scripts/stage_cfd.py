@@ -35,6 +35,10 @@ import subprocess
 import sys
 import tempfile
 
+# Make sibling stage modules importable when run as a standalone script.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from openfoam_case import build_openfoam_case  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -114,93 +118,6 @@ def _cache_write(cache_root: str, digest: str, fragment: dict) -> None:
     with open(path, "w") as fh:
         json.dump(fragment, fh, indent=2)
         fh.write("\n")
-
-
-# ---------------------------------------------------------------------------
-# OpenFOAM case builder
-# ---------------------------------------------------------------------------
-
-def _build_openfoam_case(
-    stl_path: str,
-    model: dict,
-    flow: dict,
-    work_dir: str,
-) -> str:
-    """
-    Write a minimal OpenFOAM case directory and return its path.
-
-    The case directory contains the standard OpenFOAM layout:
-      constant/  — geometry + transport properties
-      system/    — blockMeshDict, controlDict, fvSchemes, fvSolution
-      0/         — initial/boundary conditions
-
-    This is a simplified single-pass case for the solver integration;
-    real production cases would use snappyHexMesh on the actual STL.
-    """
-    case_dir = os.path.join(work_dir, "cfd_case")
-    os.makedirs(os.path.join(case_dir, "constant", "triSurface"), exist_ok=True)
-    os.makedirs(os.path.join(case_dir, "system"), exist_ok=True)
-    os.makedirs(os.path.join(case_dir, "0"), exist_ok=True)
-
-    # Copy STL into triSurface
-    shutil.copy(stl_path, os.path.join(case_dir, "constant", "triSurface", "geometry.stl"))
-
-    inlet_velocity = flow.get("inlet_velocity_m_s", 5.0)
-
-    # controlDict
-    with open(os.path.join(case_dir, "system", "controlDict"), "w") as fh:
-        fh.write("FoamFile { version 2.0; format ascii; class dictionary; location \"system\"; object controlDict; }\n")
-        fh.write("application     simpleFoam;\n")
-        fh.write("startFrom       startTime;\n")
-        fh.write("startTime       0;\n")
-        fh.write("stopAt          endTime;\n")
-        fh.write("endTime         100;\n")
-        fh.write("deltaT          1;\n")
-        fh.write("writeControl    timeStep;\n")
-        fh.write("writeInterval   100;\n")
-
-    # blockMeshDict — simple unit cube mesh
-    with open(os.path.join(case_dir, "system", "blockMeshDict"), "w") as fh:
-        fh.write("FoamFile { version 2.0; format ascii; class dictionary; location \"system\"; object blockMeshDict; }\n")
-        fh.write("scale   1;\n")
-        fh.write("vertices ( (0 0 0) (1 0 0) (1 1 0) (0 1 0) (0 0 1) (1 0 1) (1 1 1) (0 1 1) );\n")
-        fh.write("blocks ( hex (0 1 2 3 4 5 6 7) (10 10 10) simpleGrading (1 1 1) );\n")
-        fh.write("edges ();\nboundary ();\nmergePatchPairs ();\n")
-
-    # fvSchemes
-    with open(os.path.join(case_dir, "system", "fvSchemes"), "w") as fh:
-        fh.write("FoamFile { version 2.0; format ascii; class dictionary; location \"system\"; object fvSchemes; }\n")
-        fh.write("ddtSchemes { default steadyState; }\n")
-        fh.write("divSchemes { default none; div(phi,U) bounded Gauss linearUpwind grad(U); }\n")
-        fh.write("gradSchemes { default Gauss linear; }\n")
-        fh.write("laplacianSchemes { default Gauss linear corrected; }\n")
-
-    # fvSolution
-    with open(os.path.join(case_dir, "system", "fvSolution"), "w") as fh:
-        fh.write("FoamFile { version 2.0; format ascii; class dictionary; location \"system\"; object fvSolution; }\n")
-        fh.write("solvers { p { solver GAMG; tolerance 1e-6; relTol 0.1; } }\n")
-        fh.write("SIMPLE { nNonOrthogonalCorrectors 0; }\n")
-
-    # transportProperties
-    with open(os.path.join(case_dir, "constant", "transportProperties"), "w") as fh:
-        fh.write("FoamFile { version 2.0; format ascii; class dictionary; location \"constant\"; object transportProperties; }\n")
-        fh.write("nu              [ 0 2 -1 0 0 0 0 ] 1.5e-05;\n")
-
-    # Initial U field
-    with open(os.path.join(case_dir, "0", "U"), "w") as fh:
-        fh.write("FoamFile { version 2.0; format ascii; class volVectorField; location \"0\"; object U; }\n")
-        fh.write("dimensions [0 1 -1 0 0 0 0];\n")
-        fh.write(f"internalField   uniform ({inlet_velocity} 0 0);\n")
-        fh.write("boundaryField { inlet { type fixedValue; value uniform (" + f"{inlet_velocity} 0 0); }}" + "\n")
-
-    # Initial p field
-    with open(os.path.join(case_dir, "0", "p"), "w") as fh:
-        fh.write("FoamFile { version 2.0; format ascii; class volScalarField; location \"0\"; object p; }\n")
-        fh.write("dimensions [0 2 -2 0 0 0 0];\n")
-        fh.write("internalField   uniform 0;\n")
-        fh.write("boundaryField { outlet { type zeroGradient; } }\n")
-
-    return case_dir
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +225,52 @@ def _evaluate_targets(results: dict, flow: dict) -> list[str]:
 # Stage runner
 # ---------------------------------------------------------------------------
 
+def _load_flow_spec(flow_path: str | None) -> dict:
+    """Load the flow spec JSON if present, else return an empty dict."""
+    if flow_path and os.path.exists(flow_path):
+        return _load_json(flow_path)
+    return {}
+
+
+def _solve_case(stl_path: str, model: dict, flow: dict) -> tuple[bool, str, dict | None]:
+    """
+    Build the OpenFOAM case in a temp dir, run the solver, and parse results.
+    Returns (success, err_msg, results). results is None on parse failure.
+    """
+    with tempfile.TemporaryDirectory(prefix="cfd_run_") as work_dir:
+        case_dir = build_openfoam_case(stl_path, model, flow, work_dir)
+        success, err_msg = _run_solver(case_dir)
+        if not success:
+            return False, err_msg, None
+        return True, "", _parse_cfd_results(case_dir)
+
+
+def _result_fragment(results: dict | None, flow: dict) -> dict:
+    """Map parsed CFD results + flow targets to a stage fragment."""
+    if results is None:
+        return _make_fragment(
+            "cfd", "fail",
+            "solver ran but CFD results could not be parsed from output",
+            [_make_finding("cfd_target_miss", "CFD result parse failure")],
+        )
+
+    misses = _evaluate_targets(results, flow)
+    if misses:
+        detail = "CFD target miss: " + "; ".join(misses)
+        return _make_fragment(
+            "cfd", "fail", detail,
+            [_make_finding("cfd_target_miss", detail)],
+        )
+
+    dp = results.get("pressure_drop_pa", 0.0)
+    vel = results.get("min_velocity_m_s", 0.0)
+    detail = (
+        f"CFD targets met: pressure_drop={dp:.1f} Pa, "
+        f"min_velocity={vel:.2f} m/s"
+    )
+    return _make_fragment("cfd", "pass", detail, [])
+
+
 def run_cfd_stage(
     stl_path: str,
     model_path: str,
@@ -319,18 +282,13 @@ def run_cfd_stage(
     """
     model = _load_json(model_path)
 
-    # --- Non-flow-critical: skip immediately ---
     if not model.get("flow_critical", False):
         return _make_fragment("cfd", "skip", "not flow-critical", [])
 
-    # --- Flow spec ---
-    flow: dict = {}
-    if flow_path and os.path.exists(flow_path):
-        flow = _load_json(flow_path)
+    flow = _load_flow_spec(flow_path)
 
     # --- Check solver availability BEFORE cache lookup ---
-    solver_bin = shutil.which(_SOLVER_NAME)
-    if solver_bin is None:
+    if shutil.which(_SOLVER_NAME) is None:
         return _make_fragment(
             "cfd", "skip",
             f"{_SOLVER_NAME} not found on PATH; real solver deferred to container",
@@ -344,47 +302,16 @@ def run_cfd_stage(
     if cached is not None:
         return cached
 
-    # --- Cache miss: build case, run solver, parse result ---
-    with tempfile.TemporaryDirectory(prefix="cfd_run_") as work_dir:
-        case_dir = _build_openfoam_case(stl_path, model, flow, work_dir)
-        success, err_msg = _run_solver(case_dir)
-
-        if not success:
-            fragment = _make_fragment(
-                "cfd", "fail",
-                f"solver execution failed: {err_msg[:200]}",
-                [_make_finding("cfd_target_miss", f"solver failed: {err_msg[:200]}")],
-            )
-            _cache_write(cache_root, digest, fragment)
-            return fragment
-
-        results = _parse_cfd_results(case_dir)
-
-    # --- Evaluate targets ---
-    if results is None:
+    # --- Cache miss: build case, run solver, evaluate targets ---
+    success, err_msg, results = _solve_case(stl_path, model, flow)
+    if not success:
         fragment = _make_fragment(
             "cfd", "fail",
-            "solver ran but CFD results could not be parsed from output",
-            [_make_finding("cfd_target_miss", "CFD result parse failure")],
-        )
-        _cache_write(cache_root, digest, fragment)
-        return fragment
-
-    misses = _evaluate_targets(results, flow)
-    if misses:
-        detail = "CFD target miss: " + "; ".join(misses)
-        fragment = _make_fragment(
-            "cfd", "fail", detail,
-            [_make_finding("cfd_target_miss", detail)],
+            f"solver execution failed: {err_msg[:200]}",
+            [_make_finding("cfd_target_miss", f"solver failed: {err_msg[:200]}")],
         )
     else:
-        dp = results.get("pressure_drop_pa", 0.0)
-        vel = results.get("min_velocity_m_s", 0.0)
-        detail = (
-            f"CFD targets met: pressure_drop={dp:.1f} Pa, "
-            f"min_velocity={vel:.2f} m/s"
-        )
-        fragment = _make_fragment("cfd", "pass", detail, [])
+        fragment = _result_fragment(results, flow)
 
     _cache_write(cache_root, digest, fragment)
     return fragment
