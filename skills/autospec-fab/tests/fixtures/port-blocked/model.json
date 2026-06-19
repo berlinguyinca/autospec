@@ -1,0 +1,17 @@
+{
+  "material": "PETG",
+  "print_orientation": "flat",
+  "load_critical": false,
+  "flow_critical": true,
+  "dims": { "x_mm": 20, "y_mm": 20, "z_mm": 20 },
+  "ports": [
+    {
+      "id": "p1",
+      "type": "npt",
+      "size": "1/4",
+      "clearance_mm": 3.0,
+      "tap_access": false,
+      "thread_depth_mm": 4.0
+    }
+  ]
+}
