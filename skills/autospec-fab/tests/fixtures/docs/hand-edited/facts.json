@@ -1,7 +1,0 @@
-{
-  "models": ["cyclone_inlet", "dust_deputy"],
-  "fitting_counts": {
-    "npt": 3,
-    "hose": 2
-  }
-}
