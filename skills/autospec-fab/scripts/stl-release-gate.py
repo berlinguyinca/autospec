@@ -41,7 +41,8 @@ import sys
 import tempfile
 
 from release_gate_stages import (
-    STAGE_ORDER, extra_args_for, resolve_stage_script)
+    STAGE_ORDER, contact_sheet_for, extra_args_for, render_dir_for,
+    resolve_stage_script)
 
 # Keys the schema permits on a stage record; the engine strips everything else
 # off each fragment before aggregating (fragments may carry extras like
@@ -72,28 +73,33 @@ def _model_name(model_path):
         return ""
 
 
-def _stage_argv(script, stage_name, stl_path, model_path, out_path):
-    """Build the per-stage argv, threading sibling-file stage inputs.
+def _stage_argv(script, stage, stl_path, model_path, out_path, ctx):
+    """Build the per-stage argv, threading sibling-file + handoff inputs.
 
     Every stage gets `--model` + `--out`. The default input is `--in <stl>`,
-    UNLESS the per-stage resolver already supplies its own `--in` (docs takes
-    the model DIR). Stage-specific flags (--circuit/--duct/--load/--flow,
-    --baseline) come from extra_args_for and are appended only when the sibling
-    descriptor exists.
+    UNLESS the resolver/handoff already supplies its own `--in` (docs takes the
+    model DIR; vision takes the render's contact sheet). render gets a
+    deterministic `--render-dir` (ctx["render_dir"]). `ctx["in_override"]` maps
+    a stage name -> an `--in` value (used to hand vision the render sheet).
     """
-    extra = extra_args_for(stage_name, stl_path, model_path)
+    name = stage["name"]
+    extra = extra_args_for(name, stl_path, model_path, ctx.get("render_dir"))
     argv = [sys.executable, script, "--model", model_path, "--out", out_path]
-    if "--in" not in extra:
+    override = ctx.get("in_override", {}).get(name)
+    if override is not None:
+        argv += ["--in", override]
+    elif "--in" not in extra:
         argv += ["--in", stl_path]
     return argv + extra
 
 
-def _run_stage(stage, stl_path, model_path, stages_dir):
+def _run_stage(stage, stl_path, model_path, stages_dir, ctx):
     """Run one stage; return (fragment_dict, harness_ok).
 
     fragment_dict is the raw JSON the stage wrote (or a synthetic error
     fragment if the stage produced none). harness_ok is False when the stage
-    crashed or emitted no usable fragment.
+    crashed or emitted no usable fragment. `ctx` carries the per-run handoff
+    state (render dir + per-stage --in overrides).
     """
     script = resolve_stage_script(stage["script"], stages_dir)
     if script is None:
@@ -106,7 +112,7 @@ def _run_stage(stage, stl_path, model_path, stages_dir):
     tmp_out.close()
     try:
         argv = _stage_argv(
-            script, stage["name"], stl_path, model_path, tmp_out.name)
+            script, stage, stl_path, model_path, tmp_out.name, ctx)
         proc = subprocess.run(argv, capture_output=True, text=True)
         fragment = _load_fragment(tmp_out.name, stage["name"])
         harness_ok = proc.returncode == 0 and fragment is not None
@@ -150,14 +156,35 @@ def _clean_stage_record(fragment, stage_name):
     return record
 
 
-def run_gate(stl_path, model_path, stages_dir):
-    """Run every stage in order; return (gate_dict, blocking_failed: bool)."""
+def _vision_in_override(render_dir, stl_path):
+    """The vision stage's --in: the render's produced contact sheet.
+
+    Always the deterministic sheet path under the render dir (NOT the STL). If
+    render emitted no sheet (renderer absent → skip), this path won't exist and
+    vision's resolve_contact_sheet returns None → vision skips gracefully.
+    """
+    return contact_sheet_for(render_dir, stl_path)
+
+
+def run_gate(stl_path, model_path, stages_dir, out_path):
+    """Run every stage in order; return (gate_dict, blocking_failed: bool).
+
+    Threads the render→vision handoff: render gets a deterministic
+    --render-dir; vision's --in is pointed at the contact sheet render writes
+    there (resolved AFTER render ran, so an absent sheet makes vision skip).
+    """
     stages = []
     vision_findings = []
     blocking_failed = False
+    render_dir = render_dir_for(out_path)
+    ctx = {"render_dir": render_dir, "in_override": {}}
 
     for stage in STAGE_ORDER:
-        fragment, harness_ok = _run_stage(stage, stl_path, model_path, stages_dir)
+        if stage["name"] == "vision":
+            ctx["in_override"]["vision"] = _vision_in_override(
+                render_dir, stl_path)
+        fragment, harness_ok = _run_stage(
+            stage, stl_path, model_path, stages_dir, ctx)
         record = _clean_stage_record(fragment, stage["name"])
         stages.append(record)
 
@@ -235,7 +262,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     gate, blocking_failed = run_gate(
-        args.in_path, args.model_path, args.stages_dir)
+        args.in_path, args.model_path, args.stages_dir, args.out)
 
     out_dir = os.path.dirname(os.path.abspath(args.out))
     if out_dir:

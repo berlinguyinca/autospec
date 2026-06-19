@@ -50,13 +50,41 @@ _SIBLING_INPUTS = {
 }
 
 
-def extra_args_for(stage_name, stl_path, model_path):
+def render_dir_for(out_path):
+    """Deterministic per-run render dir: <out-dir>/renders/.
+
+    Keyed to the gate `--out` directory so a run's renders land in a stable,
+    predictable location the engine can hand to render (via --render-dir) and
+    then read back for the vision handoff. The render stage writes its
+    contact sheet under <render-dir>/<slug>/contact-sheet.html.
+    """
+    out_dir = os.path.dirname(os.path.abspath(out_path))
+    return os.path.join(out_dir, "renders")
+
+
+def contact_sheet_for(render_dir, stl_path):
+    """Path the render stage writes its sheet to: <render-dir>/<slug>/...html.
+
+    `slug` is the STL stem (matches stage_render._model_slug). The engine
+    threads this path as the vision stage's --in so vision inspects the real
+    renders instead of the STL.
+    """
+    base = os.path.basename(stl_path)
+    slug = os.path.splitext(base)[0] or "model"
+    return os.path.join(render_dir, slug, "contact-sheet.html")
+
+
+def extra_args_for(stage_name, stl_path, model_path, render_dir=None):
     """Return the extra CLI args to thread into <stage_name>, or [].
 
     `docs` is the ONE stage that takes the model DIRECTORY (not the stl) as
-    `--in`, plus an optional `--baseline MODELDIR/baseline.json`. Every other
-    stage keeps `--in <stl>`; this resolver only adds stage-specific flags when
-    the sibling descriptor exists under MODELDIR (= dirname of the sidecar).
+    `--in`, plus an optional `--baseline MODELDIR/baseline.json`. `render`
+    gets `--render-dir <render_dir>` (the deterministic per-run renders dir)
+    when one is supplied, so its contact sheet lands at a known path. `vision`
+    takes that produced contact sheet as its `--in` (NOT the stl) when render
+    actually emitted one — handled by the engine via override, see run_gate.
+    Every other stage keeps `--in <stl>`; this resolver only adds
+    stage-specific flags when the sibling descriptor exists under MODELDIR.
     """
     model_dir = os.path.dirname(os.path.abspath(model_path))
     if stage_name == "docs":
@@ -65,6 +93,8 @@ def extra_args_for(stage_name, stl_path, model_path):
         if os.path.isfile(baseline):
             args += ["--baseline", baseline]
         return args
+    if stage_name == "render" and render_dir:
+        return ["--render-dir", render_dir]
     spec = _SIBLING_INPUTS.get(stage_name)
     if spec is None:
         return []
