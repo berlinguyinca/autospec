@@ -1,0 +1,6 @@
+{
+  "print_orientation": "flat",
+  "load_critical": false,
+  "flow_critical": true,
+  "dims": { "x_mm": 80, "y_mm": 60, "z_mm": 40 }
+}
