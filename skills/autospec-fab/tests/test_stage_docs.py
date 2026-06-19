@@ -17,6 +17,7 @@ committed fixtures under fixtures/docs/:
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -186,6 +187,34 @@ class TestMissingInArg(unittest.TestCase):
         finally:
             if os.path.exists(out_path):
                 os.unlink(out_path)
+
+
+class TestMissingGeneratedArtifact(unittest.TestCase):
+    """A baseline-listed generated artifact that is ABSENT on disk (e.g. a
+    deleted/never-regenerated file) must trip hand_edited_generated — proving
+    the guard fails closed on a missing file, not only on a content mismatch."""
+
+    def test_deleted_generated_artifact_fails(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            model_dir = os.path.join(tmp, "model")
+            shutil.copytree(_IN_SYNC, model_dir)
+            baseline_path = os.path.join(model_dir, "baseline.json")
+            with open(baseline_path) as f:
+                baseline = json.load(f)
+            # Pick a generated artifact the baseline tracks and delete it.
+            tracked = sorted(baseline.keys() if isinstance(baseline, dict)
+                             else [e["path"] for e in baseline])
+            victim = tracked[0]
+            os.unlink(os.path.join(model_dir, victim))
+
+            rc, fragment, _ = _run_stage(model_dir, baseline=baseline_path)
+            self.assertEqual(rc, 0, "verdict lives in status, not exit code")
+            self.assertEqual(fragment["status"], "fail")
+            self.assertIn("hand_edited_generated", _finding_codes(fragment),
+                          "a deleted baseline-tracked artifact must fail closed")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
