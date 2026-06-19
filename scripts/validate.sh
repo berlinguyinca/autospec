@@ -2789,6 +2789,7 @@ main() {
     check_claim_guard_contract
     check_autospec_harmonize_contract
     check_autospec_upgrade_contract
+    check_autospec_fab_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -3892,6 +3893,30 @@ check_autospec_upgrade_contract() {
         info "  running: $t"
         bats "$t" >"/tmp/validate-upgrade-$name.log" 2>&1 \
             || { cat "/tmp/validate-upgrade-$name.log" >&2; fail "$t: failed"; }
+    done
+}
+
+check_autospec_fab_contract() {
+    info "autospec-fab contract: trio fab tokens + full bats suite (issue #1218)"
+    local skill_dir="skills/autospec-fab"
+    for f in "$skill_dir/SKILL.md" \
+              "$skill_dir/codex/prompt.md" \
+              "$skill_dir/opencode/agent.md"; do
+        [ -f "$f" ] || fail "$f: required trio file missing (issue #1218)"
+        for token in release-gate watertight gasket vacuum FreeCAD STL; do
+            grep -q "$token" "$f" \
+                || fail "$f: missing fab token '$token' (issue #1218)"
+        done
+    done
+    # Run the autospec-fab bats suite so the fab test suite is gated from day one
+    # (lesson from #1211: no validate gate ran upgrade tests; regression went undetected).
+    local t name
+    for t in "$skill_dir"/tests/*.bats; do
+        [ -f "$t" ] || continue
+        name="$(basename "$t")"
+        info "  running: $t"
+        bats "$t" >"/tmp/validate-fab-$name.log" 2>&1 \
+            || { cat "/tmp/validate-fab-$name.log" >&2; fail "$t: failed"; }
     done
 }
 
