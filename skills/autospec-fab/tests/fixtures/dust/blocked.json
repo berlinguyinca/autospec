@@ -1,0 +1,14 @@
+{
+  "ducts": [
+    {
+      "id": "blocked_duct",
+      "opening_mm": 50.0,
+      "min_opening_mm": 96.0,
+      "cross_section_mm2": [1963.0, 1950.0, 1960.0],
+      "connected": false,
+      "printed_gate_slot": false,
+      "pvc_as_duct": false
+    }
+  ],
+  "nominal_full_size_mm2": 7854.0
+}

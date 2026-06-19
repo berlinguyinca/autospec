@@ -1,0 +1,14 @@
+{
+  "ducts": [
+    {
+      "id": "pinched_duct",
+      "opening_mm": 100.0,
+      "min_opening_mm": 96.0,
+      "cross_section_mm2": [7854.0, 7800.0, 3000.0, 7850.0],
+      "connected": true,
+      "printed_gate_slot": false,
+      "pvc_as_duct": false
+    }
+  ],
+  "nominal_full_size_mm2": 7854.0
+}
