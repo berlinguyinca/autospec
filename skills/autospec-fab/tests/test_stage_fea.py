@@ -332,36 +332,39 @@ class TestCacheHit(_WithCcxShim):
             f"ccx must NOT be invoked on cache hit (count={count_after_second})",
         )
 
-    def test_changed_model_busts_cache(self):
-        """Different model hash → fresh ccx run (cache miss)."""
+    def test_changed_orientation_busts_cache(self):
+        """A changed print_orientation must MISS the cache against the SAME cache
+        dir — proving the geometry-hash key includes print_orientation. (A prior
+        version of this test used a fresh cache dir, which only proved cold-cache
+        behaviour and would NOT catch a regression that dropped orientation from
+        the hash.)"""
         self._install_shim(_HIGH_SAFETY)
 
-        # First run with critical model
-        rc1, frag1, _ = self._run(_HIGH_SAFETY, model=_CRITICAL_MODEL)
+        # Prime the cache with the upright critical model.
+        rc1, _, _ = self._run(_HIGH_SAFETY, model=_CRITICAL_MODEL)
         self.assertEqual(rc1, 0)
-        count_after_first = _read_count(self.count_file)
-        self.assertGreater(count_after_first, 0)
+        self.assertGreater(_read_count(self.count_file), 0)
 
-        # Reset counter
+        # Reset the invocation counter so the second run's count is unambiguous.
         with open(self.count_file, "w") as f:
             f.write("0")
 
-        # Second run with noncritical model → different hash → but that skips entirely
-        # Instead, test with different load values by using a different cache dir
-        different_cache = os.path.join(self.tmp, "other-cache")
-        os.makedirs(different_cache)
-        env = dict(self.env_base)
-        env["CCX_SHIM_SAFETY"] = _HIGH_SAFETY
-        rc2, frag2, _ = _run_stage(
-            _BODY_STL, _CRITICAL_MODEL,
-            extra_env=env,
-            cache_dir=different_cache,
-        )
+        # Build a variant that differs ONLY in print_orientation.
+        with open(_CRITICAL_MODEL) as f:
+            variant = json.load(f)
+        self.assertEqual(variant["print_orientation"], "upright")
+        variant["print_orientation"] = "flat"
+        variant_path = os.path.join(self.tmp, "model-critical-flat.json")
+        with open(variant_path, "w") as f:
+            json.dump(variant, f)
+
+        # Re-run against the SAME cache dir → different hash → cache MISS → ccx runs.
+        rc2, _, _ = self._run(_HIGH_SAFETY, model=variant_path)
         self.assertEqual(rc2, 0)
-        count_after_second = _read_count(self.count_file)
         self.assertGreater(
-            count_after_second, 0,
-            "ccx must be invoked when using a fresh (empty) cache dir",
+            _read_count(self.count_file), 0,
+            "ccx MUST be re-invoked when print_orientation changes against the "
+            "same cache dir (hash key must include print_orientation)",
         )
 
 
