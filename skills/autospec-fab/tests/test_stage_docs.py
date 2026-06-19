@@ -1,20 +1,31 @@
 """
 test_stage_docs.py — unittest for stage_docs.py.
 
-Real file diffs, no mocks. Drives the stage via its uniform CLI against three
-committed fixtures under fixtures/docs/:
+Real file diffs, no mocks. Drives the stage via its uniform CLI against model
+dirs that each test MATERIALIZES AT RUNTIME under a tempfile.mkdtemp(). Nothing
+here reads any committed fixture or any committed build/ artifact, so the suite
+passes on a clean checkout (where build/ is gitignored and absent).
 
-  1. in-sync/        → status pass  (all generated artifacts match baseline.json;
-                       all hand docs reference every current fact).
-  2. stale-manifest/ → status fail + finding docs_stale
-                       (MANIFEST.md omits the current model 'dust_deputy';
-                        generated artifacts still match baseline).
-  3. hand-edited/    → status fail + finding hand_edited_generated
-                       (a build/ STL was hand-edited so its sha256 no longer
-                        matches baseline.json; hand docs are still in sync).
-  4. fragment shape  → required stage-record keys + valid status enum.
+Each scenario builds a fresh model dir containing:
+  - hand docs MANIFEST.md / README.md / FITTINGS_AND_SCREWS.md (inline content)
+  - facts.json with two models (cyclone_inlet, dust_deputy)
+  - build/ artifacts with deterministic bytes
+  - baseline.json = {relpath: sha256(materialized file)} computed in-code, so
+    the regen baseline is correct by construction.
+
+Scenarios:
+  1. in-sync        → status pass  (artifacts match baseline; docs reference both models).
+  2. stale-manifest → status fail + docs_stale (MANIFEST omits dust_deputy);
+                      NO hand_edited_generated (artifacts still match baseline).
+  3. hand-edited    → status fail + hand_edited_generated (one build artifact
+                      mutated after baseline so its sha256 no longer matches).
+  4. missing artifact → status fail + hand_edited_generated (a baseline-tracked
+                      build artifact deleted → guard fails closed on absence).
+  5. fragment shape → required stage-record keys + valid status enum.
+  6. exit codes     → verdict in status (exit 0); missing --in is usage error.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -25,17 +36,78 @@ import unittest
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS_DIR = os.path.normpath(os.path.join(_THIS_DIR, "..", "scripts"))
-_FIXTURES_DIR = os.path.normpath(os.path.join(_THIS_DIR, "fixtures", "docs"))
-
 _STAGE_SCRIPT = os.path.join(_SCRIPTS_DIR, "stage_docs.py")
 
-_IN_SYNC = os.path.join(_FIXTURES_DIR, "in-sync")
-_STALE = os.path.join(_FIXTURES_DIR, "stale-manifest")
-_HAND_EDITED = os.path.join(_FIXTURES_DIR, "hand-edited")
+_MODELS = ("cyclone_inlet", "dust_deputy")
+
+# Deterministic build/ artifacts (relpath -> bytes). Parent dirs created on write.
+_BUILD_ARTIFACTS = {
+    "build/BOM.md": b"# Bill of Materials\ncyclone_inlet x1\ndust_deputy x1\n",
+    "build/datasheet.pdf": b"%PDF-1.4\n%fake-deterministic-pdf-bytes\n%%EOF\n",
+    "build/renders/contact_sheet.txt": b"contact sheet: cyclone_inlet, dust_deputy\n",
+    "build/stls/manifolds/cyclone_inlet.stl": b"solid cyclone_inlet\nendsolid\n",
+    "build/stls/manifolds/dust_deputy.stl": b"solid dust_deputy\nendsolid\n",
+}
+
+
+def _sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _write_file(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+
+def _hand_docs(include_models):
+    """Return {filename: text} for the three hand docs.
+
+    Each doc references every model name in `include_models`. Omitting a model
+    from MANIFEST (via a smaller include list) makes that doc stale.
+    """
+    refs = ", ".join(include_models)
+    all_refs = ", ".join(_MODELS)
+    return {
+        "MANIFEST.md": f"# Manifest\nModels: {refs}\n",
+        "README.md": f"# Cyclone Kit\nIncludes models: {all_refs}\n",
+        "FITTINGS_AND_SCREWS.md": f"# Fittings\nFor models: {all_refs}\n",
+    }
+
+
+def _materialize_model_dir(manifest_models=_MODELS):
+    """Build a fresh tmp model dir with hand docs, facts.json, build/ artifacts,
+    and a baseline.json correct by construction. Returns the model dir path.
+
+    Caller is responsible for cleanup (shutil.rmtree of the parent tmp).
+    """
+    model_dir = tempfile.mkdtemp(prefix="stage_docs_")
+
+    # Hand docs (MANIFEST may omit models when manifest_models is shorter).
+    docs = _hand_docs(manifest_models)
+    for name, text in docs.items():
+        _write_file(os.path.join(model_dir, name), text.encode("utf-8"))
+
+    # facts.json — current model list.
+    _write_file(
+        os.path.join(model_dir, "facts.json"),
+        json.dumps({"models": list(_MODELS)}).encode("utf-8"),
+    )
+
+    # build/ artifacts + baseline (sha256 by construction).
+    baseline = {}
+    for rel, data in _BUILD_ARTIFACTS.items():
+        _write_file(os.path.join(model_dir, rel), data)
+        baseline[rel] = _sha256_bytes(data)
+    _write_file(
+        os.path.join(model_dir, "baseline.json"),
+        json.dumps(baseline).encode("utf-8"),
+    )
+    return model_dir
 
 
 def _run_stage(model_dir, baseline=None):
-    """Run stage_docs.py --in <dir> --out <tmp> [--baseline <dir>].
+    """Run stage_docs.py --in <dir> --out <tmp> --baseline <baseline>.
 
     Returns (returncode, fragment_dict_or_None, stderr).
     """
@@ -65,7 +137,17 @@ def _finding_codes(fragment):
     return {f.get("code") for f in fragment.get("findings", [])}
 
 
-class TestFragmentShape(unittest.TestCase):
+class _MaterializedModelMixin:
+    """Provides a self.model_dir materialized in setUp and cleaned up after."""
+
+    manifest_models = _MODELS
+
+    def setUp(self):
+        self.model_dir = _materialize_model_dir(self.manifest_models)
+        self.addCleanup(shutil.rmtree, self.model_dir, ignore_errors=True)
+
+
+class TestFragmentShape(_MaterializedModelMixin, unittest.TestCase):
     _VALID_STATUSES = {"pass", "fail", "warn", "skip"}
 
     def _assert_valid_fragment(self, fragment, expected_stage="docs"):
@@ -80,30 +162,44 @@ class TestFragmentShape(unittest.TestCase):
         self.assertIsInstance(fragment["findings"], list)
 
     def test_in_sync_fragment_shape(self):
-        _, fragment, _ = _run_stage(_IN_SYNC)
+        _, fragment, _ = _run_stage(self.model_dir)
         self.assertIsNotNone(fragment)
         self._assert_valid_fragment(fragment)
 
     def test_stale_fragment_shape(self):
-        _, fragment, _ = _run_stage(_STALE)
+        # Mutate MANIFEST to omit a model, then run.
+        _write_file(
+            os.path.join(self.model_dir, "MANIFEST.md"),
+            b"# Manifest\nModels: cyclone_inlet\n",
+        )
+        _, fragment, _ = _run_stage(self.model_dir)
         self.assertIsNotNone(fragment)
         self._assert_valid_fragment(fragment)
 
     def test_hand_edited_fragment_shape(self):
-        _, fragment, _ = _run_stage(_HAND_EDITED)
+        # Mutate a build artifact so it diverges from baseline, then run.
+        victim = os.path.join(self.model_dir,
+                              "build/stls/manifolds/cyclone_inlet.stl")
+        with open(victim, "ab") as fh:
+            fh.write(b"hand edit\n")
+        _, fragment, _ = _run_stage(self.model_dir)
         self.assertIsNotNone(fragment)
         self._assert_valid_fragment(fragment)
 
 
-class TestInSync(unittest.TestCase):
+class TestInSync(_MaterializedModelMixin, unittest.TestCase):
     """All artifacts match baseline + all docs fresh → pass."""
 
     def setUp(self):
-        self.rc, self.fragment, self.stderr = _run_stage(_IN_SYNC)
+        super().setUp()
+        self.rc, self.fragment, self.stderr = _run_stage(self.model_dir)
 
-    def test_fixture_exists(self):
-        self.assertTrue(os.path.isdir(_IN_SYNC))
-        self.assertTrue(os.path.exists(os.path.join(_IN_SYNC, "baseline.json")))
+    def test_baseline_materialized(self):
+        self.assertTrue(os.path.exists(
+            os.path.join(self.model_dir, "baseline.json")))
+        # build/ artifacts exist on disk (materialized, not committed).
+        for rel in _BUILD_ARTIFACTS:
+            self.assertTrue(os.path.exists(os.path.join(self.model_dir, rel)))
 
     def test_exit_code_zero(self):
         self.assertEqual(self.rc, 0, f"Expected exit 0; stderr={self.stderr}")
@@ -117,11 +213,15 @@ class TestInSync(unittest.TestCase):
                          f"Expected no findings; fragment={self.fragment}")
 
 
-class TestStaleManifest(unittest.TestCase):
-    """MANIFEST omits a current model → fail + docs_stale."""
+class TestStaleManifest(_MaterializedModelMixin, unittest.TestCase):
+    """MANIFEST omits a current model → fail + docs_stale (artifacts still match)."""
+
+    # MANIFEST references only cyclone_inlet → omits dust_deputy.
+    manifest_models = ("cyclone_inlet",)
 
     def setUp(self):
-        self.rc, self.fragment, self.stderr = _run_stage(_STALE)
+        super().setUp()
+        self.rc, self.fragment, self.stderr = _run_stage(self.model_dir)
 
     def test_exit_code_zero(self):
         self.assertEqual(self.rc, 0, f"Expected exit 0; stderr={self.stderr}")
@@ -136,22 +236,28 @@ class TestStaleManifest(unittest.TestCase):
                       f"Expected docs_stale; findings={self.fragment['findings']}")
 
     def test_not_hand_edited(self):
-        # Generated artifacts in this fixture still match baseline.
+        # Generated artifacts match the runtime baseline by construction.
         codes = _finding_codes(self.fragment)
         self.assertNotIn("hand_edited_generated", codes)
 
     def test_names_stale_doc_and_fact(self):
-        # The finding should name the stale doc + missing fact (MANIFEST/dust_deputy).
+        # The finding should name the stale doc + missing fact.
         blob = json.dumps(self.fragment)
         self.assertIn("MANIFEST", blob)
         self.assertIn("dust_deputy", blob)
 
 
-class TestHandEdited(unittest.TestCase):
+class TestHandEdited(_MaterializedModelMixin, unittest.TestCase):
     """A build/ artifact's bytes differ from baseline → fail + hand_edited_generated."""
 
     def setUp(self):
-        self.rc, self.fragment, self.stderr = _run_stage(_HAND_EDITED)
+        super().setUp()
+        # After baseline is written, mutate one build artifact's bytes.
+        victim = os.path.join(self.model_dir,
+                              "build/stls/manifolds/cyclone_inlet.stl")
+        with open(victim, "ab") as fh:
+            fh.write(b"hand edit\n")
+        self.rc, self.fragment, self.stderr = _run_stage(self.model_dir)
 
     def test_exit_code_zero(self):
         self.assertEqual(self.rc, 0, f"Expected exit 0; stderr={self.stderr}")
@@ -171,6 +277,25 @@ class TestHandEdited(unittest.TestCase):
         self.assertIn("cyclone_inlet.stl", blob)
 
 
+class TestMissingGeneratedArtifact(_MaterializedModelMixin, unittest.TestCase):
+    """A baseline-listed generated artifact that is ABSENT on disk must trip
+    hand_edited_generated — proving the guard fails closed on a missing file,
+    not only on a content mismatch."""
+
+    def test_deleted_generated_artifact_fails(self):
+        baseline_path = os.path.join(self.model_dir, "baseline.json")
+        with open(baseline_path) as f:
+            baseline = json.load(f)
+        victim = sorted(baseline.keys())[0]
+        os.unlink(os.path.join(self.model_dir, victim))
+
+        rc, fragment, _ = _run_stage(self.model_dir, baseline=baseline_path)
+        self.assertEqual(rc, 0, "verdict lives in status, not exit code")
+        self.assertEqual(fragment["status"], "fail")
+        self.assertIn("hand_edited_generated", _finding_codes(fragment),
+                      "a deleted baseline-tracked artifact must fail closed")
+
+
 class TestMissingInArg(unittest.TestCase):
     """Omitting --in should exit non-zero (usage error)."""
 
@@ -187,34 +312,6 @@ class TestMissingInArg(unittest.TestCase):
         finally:
             if os.path.exists(out_path):
                 os.unlink(out_path)
-
-
-class TestMissingGeneratedArtifact(unittest.TestCase):
-    """A baseline-listed generated artifact that is ABSENT on disk (e.g. a
-    deleted/never-regenerated file) must trip hand_edited_generated — proving
-    the guard fails closed on a missing file, not only on a content mismatch."""
-
-    def test_deleted_generated_artifact_fails(self):
-        tmp = tempfile.mkdtemp()
-        try:
-            model_dir = os.path.join(tmp, "model")
-            shutil.copytree(_IN_SYNC, model_dir)
-            baseline_path = os.path.join(model_dir, "baseline.json")
-            with open(baseline_path) as f:
-                baseline = json.load(f)
-            # Pick a generated artifact the baseline tracks and delete it.
-            tracked = sorted(baseline.keys() if isinstance(baseline, dict)
-                             else [e["path"] for e in baseline])
-            victim = tracked[0]
-            os.unlink(os.path.join(model_dir, victim))
-
-            rc, fragment, _ = _run_stage(model_dir, baseline=baseline_path)
-            self.assertEqual(rc, 0, "verdict lives in status, not exit code")
-            self.assertEqual(fragment["status"], "fail")
-            self.assertIn("hand_edited_generated", _finding_codes(fragment),
-                          "a deleted baseline-tracked artifact must fail closed")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
