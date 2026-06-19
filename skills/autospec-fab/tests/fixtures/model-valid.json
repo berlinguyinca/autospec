@@ -1,0 +1,14 @@
+{
+  "material": "PETG",
+  "print_orientation": "flat",
+  "load_critical": false,
+  "flow_critical": true,
+  "dims": { "x_mm": 80, "y_mm": 60, "z_mm": 40 },
+  "ports": [
+    { "id": "inlet", "type": "npt", "size": "1/4", "clearance_mm": 6.0 },
+    { "id": "outlet", "type": "hose", "size": "25mm", "clearance_mm": 8.0 }
+  ],
+  "gaskets": [
+    { "id": "main_seal", "groove": "o-ring", "surrounding_wall_mm": 5.5 }
+  ]
+}
