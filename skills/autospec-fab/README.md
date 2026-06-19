@@ -104,6 +104,65 @@ skills/autospec-fab/scripts/load-fab-config.sh .autospec/fab.yml
 skills/autospec-fab/scripts/load-fab-config.sh --validate .autospec/fab.yml
 ```
 
+## Fab model directory & output layout
+
+Two conventions keep the producers (the release-gate engine + its stages) and
+the consumer (the Phase 5.5 `fab-completeness.sh` audit) aligned. They live in
+`scripts/release_gate_stages.py` (`_SIBLING_INPUTS`, `extra_args_for`) and
+`skills/autospec-run/scripts/fab-completeness.sh`.
+
+### Per-model input layout
+
+`MODELDIR` is the directory holding a model's `--model` metadata file. It always
+contains `metadata.json` (validated against `autospec-fab-model.schema.json` by
+the `metadata` stage). Alongside it the engine looks for OPTIONAL stage sidecars
+and threads each one into its stage automatically **only when the file exists**.
+An absent sidecar means the engine adds no extra flag, so that stage skips
+cleanly — correct for a model that lacks the feature.
+
+| Sidecar (`MODELDIR/…`) | Stage | Engine flag |
+| --- | --- | --- |
+| `metadata.json` | `metadata` | `--model` (required) |
+| `circuit.json` | `vacuum-circuit` | `--circuit` |
+| `duct.json` | `dust-airflow` | `--duct` |
+| `printer.json` | `slicer` | `--printer` |
+| `load.json` | `fea` | `--load` |
+| `flow.json` | `cfd` | `--flow` |
+| `baseline.json` | `docs` | `--baseline` (the `docs` stage gets the model DIR as `--in`) |
+
+```text
+manifolds/inlet_manifold/
+├── metadata.json     # required; validated vs the model schema
+├── circuit.json      # optional → runs vacuum-circuit
+├── duct.json         # optional → runs dust-airflow
+├── printer.json      # optional → per-model slicer override
+├── load.json         # optional → runs FEA
+├── flow.json         # optional → runs CFD
+└── baseline.json     # optional → docs NO_HANDEDIT baseline
+```
+
+### Output layout
+
+The engine writes the aggregated `release-gate.json` to its `--out` path. It also
+threads a deterministic render dir (`<out-dir>/renders/`) into the `render` stage
+via `--render-dir`; render writes its contact sheet to
+`<render-dir>/<slug>/contact-sheet.html` (`slug` = STL stem), which the engine
+then hands to the `vision` stage as its `--in` (the render→vision handoff).
+
+The Phase 5.5 `fab-completeness.sh` audit consumes one canonical per-model
+layout under the fab dir (`.autospec/fab`). Keep the STL stem equal to the model
+name so the `<model>` segments stay aligned:
+
+```text
+.autospec/fab/
+├── gates/
+│   └── <model>/
+│       └── release-gate.json     # green + geometry_hash matches current STL
+└── renders/
+    └── <model>/
+        └── contact-sheet.html    # produced by render, read by vision
+```
+
 ## License
 
 MIT - see the repository [LICENSE](../../LICENSE) file.
