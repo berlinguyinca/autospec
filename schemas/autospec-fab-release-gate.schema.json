@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-fab-release-gate.schema.json",
+  "title": "autospec-fab release-gate",
+  "description": "Aggregated release-gate report for the autospec-fab pipeline (.autospec/fab/release-gate.json). Stages are written by individual stage scripts and aggregated by the engine.",
+  "type": "object",
+  "required": ["schema_version", "stages"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Schema version; always 1 for this revision."
+    },
+    "name": {
+      "type": "string",
+      "description": "Optional model name this gate report is for (set by the engine, #1234)."
+    },
+    "geometry_hash": {
+      "type": "string",
+      "description": "Optional geometry hash of the model (engine #1234) feeding the FEA/CFD freshness cache."
+    },
+    "stages": {
+      "type": "array",
+      "description": "Ordered list of stage records, one per fab pipeline stage.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["stage", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "stage": {
+            "type": "string",
+            "description": "Stage name (e.g. geometry, metadata, vacuum-fitting)."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pass", "fail", "warn", "skip"],
+            "description": "Outcome of the stage run."
+          },
+          "detail": {
+            "type": "string",
+            "description": "Human-readable summary of the stage outcome."
+          },
+          "findings": {
+            "type": "array",
+            "description": "Structured findings emitted by the stage (code_health ids etc.).",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "freshness": {
+      "type": "object",
+      "description": "Geometry-hash cache state used to decide whether FEA/CFD results are still fresh.",
+      "additionalProperties": true
+    },
+    "fea_results": {
+      "type": "object",
+      "description": "CalculiX FEA results summary for load-critical parts.",
+      "additionalProperties": true
+    },
+    "cfd_results": {
+      "type": "object",
+      "description": "OpenFOAM CFD results summary for flow-critical parts.",
+      "additionalProperties": true
+    },
+    "vision_findings": {
+      "type": "array",
+      "description": "Advisory observations from the vision stage (never blocking).",
+      "items": {
+        "type": "object"
+      }
+    }
+  }
+}
