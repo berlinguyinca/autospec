@@ -139,6 +139,33 @@ a broken migration replay.
 3. Verify the diff matches the issue's scope. If you ended up touching more than the issue called for, either split the extra work into a separate issue or revert it from this branch.
 4. Commit message follows the repo's existing style (see recent `git log --oneline`).
 
+### Fab full-suite gate (only for `area:fab` / `autospec:fab-flow` issues)
+
+If this issue carries `area:fab` or `autospec:fab-flow` (the monitor routes it
+here via `fab-route.sh`; confirm from the issue's own labels), the standard
+"run the project's test command" above is REPLACED by the fab full-suite gate.
+All other issues skip this section and keep the default gate.
+
+The fab gate runs in this exact order; any blocking failure aborts before
+`gh pr create` (comment the failure on the issue and exit):
+
+1. **Clean regen** — never trust a stale `build/`. Run
+   `rm -rf build && .venv/bin/python src/generate.py` (or the `generator`
+   entrypoint from `.autospec/fab.yml` if it overrides the default) so every
+   affected STL is rebuilt from source geometry.
+2. **Release gate** — run `stl-release-gate.py` (resolved via
+   `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/../autospec-fab/scripts/stl-release-gate.py`
+   or the installed path) on the affected models. **Blocking** geometry stages
+   (watertight, single-body, NPT access, gasket walls, flow circuit, FEA safety,
+   CFD target) must report `pass`; the **vision** stage is advisory and never
+   blocks. Read the aggregated `.autospec/fab/release-gate.json` for stage status
+   — do not re-run individual stages to learn their result.
+3. **Unittest** — run the repo's unittest suite. All tests must pass.
+
+The **Primary smoke test** for a fab issue is the model's **focused regression
+test** (the issue body's smoke command targets that one model's regression),
+not the full release gate — keep the smoke fast and model-scoped.
+
 ### Docs drift gate
 
 After tests pass and before creating the PR, run `check-doc-drift.sh --pr` on the branch diff to detect documentation drift. Skip if the issue body contains a line matching `^docs:\s*skip` (case-insensitive).

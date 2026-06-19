@@ -914,6 +914,7 @@ copy_runtime_skill_scripts() {
 skills/autospec-run/scripts/autospec-run-session-lock.sh::autospec-run-session-lock.sh \
 skills/autospec-run/scripts/autospec-run-status.sh::autospec-run-status.sh \
 skills/autospec-run/scripts/claim-issue.sh::claim-issue.sh \
+skills/autospec-run/scripts/fab-route.sh::fab-route.sh \
 skills/autospec-run/scripts/list-ready-issues.sh::list-ready-issues.sh \
 skills/autospec-run/scripts/post-token-report.sh::post-token-report.sh \
 skills/autospec-run/scripts/release-issue.sh::release-issue.sh \

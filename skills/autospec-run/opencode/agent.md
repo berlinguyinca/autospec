@@ -360,6 +360,29 @@ When selecting the next `auto-implement` issue, sort:
 `priority:high` always wins over age. This guarantees regression
 issues unblock the queue before continuing with normal feature work.
 
+### Fab implementer routing (label → gate)
+
+Decide each claimed issue's implementer gate from its labels with the
+`fab-route.sh` helper (resolved like the other coordinator scripts):
+
+```bash
+FAB_ROUTE="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/fab-route.sh"
+[ -x "$FAB_ROUTE" ] || FAB_ROUTE="skills/autospec-run/scripts/fab-route.sh"
+GATE=$(gh issue view "$ISSUE" --json labels --jq '[.labels[].name] | join(",")' \
+  | bash "$FAB_ROUTE" --stdin)
+```
+
+- `GATE=fab` — the issue carries `area:fab` or `autospec:fab-flow`. Dispatch the
+  **fab implementer**: its full-suite gate is clean regen
+  (`rm -rf build && .venv/bin/python src/generate.py`) → `stl-release-gate.py`
+  on affected models (blocking geometry stages must pass; vision is advisory) →
+  unittest, and the Primary smoke is the model's focused regression test.
+- `GATE=default` — every other issue keeps the standard implementer + gate.
+
+The branch is the only difference; the fab branch's gate prose lives in
+`prompts/phase4-implementer.md`. Routing is a pure label decision (no substring
+match: `area:fabric` stays `default`), so it is deterministic and testable.
+
 ### Distributed coordinator selection
 
 Before choosing `ready[0]`, prefer the distributed coordinator helpers when they
