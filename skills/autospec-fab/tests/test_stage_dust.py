@@ -203,5 +203,46 @@ class TestPvcDuct(unittest.TestCase):
         )
 
 
+class TestAbsentDuctSkips(unittest.TestCase):
+    """Engine sequences stages with only --in/--model/--out (no --duct).
+
+    A model with no dust-collection ducts must DEGRADE the stage to a
+    non-blocking skip, not hard-fail — otherwise the release-gate engine can
+    never reach a green gate for a duct-less model.
+    """
+
+    def _run_uniform(self, with_model=True):
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            out_path = tf.name
+        try:
+            cmd = [sys.executable, _STAGE_SCRIPT, "--in", _SHARED_STL,
+                   "--out", out_path]
+            if with_model:
+                cmd.extend(["--model", _SHARED_STL])  # any path; unused
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            frag = None
+            if os.path.exists(out_path):
+                with open(out_path) as fh:
+                    frag = json.load(fh)
+            return result.returncode, frag, result.stderr
+        finally:
+            if os.path.exists(out_path):
+                os.unlink(out_path)
+
+    def test_no_duct_skips(self):
+        rc, frag, stderr = self._run_uniform(with_model=False)
+        self.assertEqual(rc, 0, f"harness error without --duct: {stderr}")
+        self.assertIsNotNone(frag)
+        self.assertEqual(frag.get("status"), "skip")
+        self.assertEqual(frag.get("stage"), "dust-airflow")
+
+    def test_uniform_cli_with_model_skips(self):
+        # Mirrors the engine's exact call: --in --model --out, no --duct.
+        rc, frag, stderr = self._run_uniform(with_model=True)
+        self.assertEqual(rc, 0, f"harness error on uniform CLI: {stderr}")
+        self.assertIsNotNone(frag)
+        self.assertEqual(frag.get("status"), "skip")
+
+
 if __name__ == "__main__":
     unittest.main()

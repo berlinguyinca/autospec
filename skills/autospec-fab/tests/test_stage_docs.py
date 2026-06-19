@@ -314,5 +314,36 @@ class TestMissingInArg(unittest.TestCase):
                 os.unlink(out_path)
 
 
+class TestNoDocsContextSkips(unittest.TestCase):
+    """The release-gate engine sequences stages with --in <STL file> (not a
+    model directory) and no docs context. The docs stage must DEGRADE to a
+    non-blocking skip — there is nothing to drift against — rather than
+    hard-fail, or a circuit/duct-less model could never reach a green gate.
+    """
+
+    def test_in_is_a_file_skips(self):
+        # --in points at a regular file, not a model dir (engine's STL path).
+        with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as tf:
+            tf.write(b"solid x\nendsolid x\n")
+            stl_path = tf.name
+        try:
+            rc, fragment, stderr = _run_stage(stl_path)
+            self.assertEqual(rc, 0, f"verdict in status, not exit code: {stderr}")
+            self.assertIsNotNone(fragment)
+            self.assertEqual(fragment["status"], "skip")
+            self.assertEqual(fragment["findings"], [])
+        finally:
+            os.unlink(stl_path)
+
+    def test_dir_without_facts_skips(self):
+        # A model dir with no facts.json: no docs context to verify → skip.
+        model_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, model_dir, ignore_errors=True)
+        rc, fragment, stderr = _run_stage(model_dir)
+        self.assertEqual(rc, 0, f"verdict in status, not exit code: {stderr}")
+        self.assertIsNotNone(fragment)
+        self.assertEqual(fragment["status"], "skip")
+
+
 if __name__ == "__main__":
     unittest.main()

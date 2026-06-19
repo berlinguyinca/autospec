@@ -154,18 +154,25 @@ def _load_facts(model_dir: str) -> Optional[dict]:
 
 
 def run_docs_stage(model_dir: str, baseline_path: str) -> dict:
-    """Run both checks and return a stage-record fragment."""
+    """Run both checks and return a stage-record fragment.
+
+    When there is no docs context to verify — `--in` is not a model directory
+    (e.g. the engine passes a single STL file), or the directory carries no
+    `facts.json` — the stage DEGRADES to a non-blocking skip rather than
+    hard-failing. There is nothing to drift against, so a missing docs context
+    is not a gate failure. (A directory that DOES carry a facts.json is still
+    verified, and a hand-edited generated artifact still fails.)
+    """
     if not os.path.isdir(model_dir):
         return _make_fragment(
-            "fail", f"Input dir not found: {model_dir}",
-            [_make_finding("docs_stale", f"Input dir not found: {model_dir}")])
+            "skip", f"no docs context: --in is not a model directory "
+            f"({model_dir}); docs freshness check skipped", [])
 
     facts = _load_facts(model_dir)
     if facts is None:
         return _make_fragment(
-            "fail", f"facts.json not found under {model_dir}",
-            [_make_finding("docs_stale", "facts.json missing; cannot verify "
-                           "hand-doc freshness")])
+            "skip", f"no docs context: facts.json not found under {model_dir}; "
+            "docs freshness check skipped", [])
 
     findings = check_no_handedit(model_dir, baseline_path)
     findings += check_docs_fresh(model_dir, facts)
