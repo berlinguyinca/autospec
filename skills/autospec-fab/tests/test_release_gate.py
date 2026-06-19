@@ -76,6 +76,12 @@ def main():
     vision = os.environ.get("AUTOSPEC_STUB_VISION_" + key)
     if vision is not None:
         fragment["vision_findings"] = json.loads(vision)
+    fea = os.environ.get("AUTOSPEC_STUB_FEA_RESULTS_" + key)
+    if fea is not None:
+        fragment["fea_results"] = json.loads(fea)
+    cfd = os.environ.get("AUTOSPEC_STUB_CFD_RESULTS_" + key)
+    if cfd is not None:
+        fragment["cfd_results"] = json.loads(cfd)
     # exercise the "engine strips non-schema keys" path
     fragment["_stub_extra"] = "should-be-dropped-by-engine"
     with open(args.out, "w", encoding="utf-8") as f:

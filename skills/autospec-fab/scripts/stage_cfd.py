@@ -257,18 +257,32 @@ def _result_fragment(results: dict | None, flow: dict) -> dict:
     misses = _evaluate_targets(results, flow)
     if misses:
         detail = "CFD target miss: " + "; ".join(misses)
-        return _make_fragment(
+        fragment = _make_fragment(
             "cfd", "fail", detail,
             [_make_finding("cfd_target_miss", detail)],
         )
+    else:
+        dp = results.get("pressure_drop_pa", 0.0)
+        vel = results.get("min_velocity_m_s", 0.0)
+        detail = (
+            f"CFD targets met: pressure_drop={dp:.1f} Pa, "
+            f"min_velocity={vel:.2f} m/s"
+        )
+        fragment = _make_fragment("cfd", "pass", detail, [])
 
-    dp = results.get("pressure_drop_pa", 0.0)
-    vel = results.get("min_velocity_m_s", 0.0)
-    detail = (
-        f"CFD targets met: pressure_drop={dp:.1f} Pa, "
-        f"min_velocity={vel:.2f} m/s"
-    )
-    return _make_fragment("cfd", "pass", detail, [])
+    fragment["cfd_results"] = _cfd_results_object(results, fragment["status"])
+    return fragment
+
+
+def _cfd_results_object(results: dict, status: str) -> dict:
+    """Structured CFD metrics for the fragment + top-level gate aggregation."""
+    obj = {
+        "pressure_drop_pa": results.get("pressure_drop_pa"),
+        "min_velocity_m_s": results.get("min_velocity_m_s"),
+        "stagnation": results.get("stagnation", False),
+        "status": status,
+    }
+    return obj
 
 
 def run_cfd_stage(

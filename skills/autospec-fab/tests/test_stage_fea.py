@@ -1,16 +1,9 @@
-"""
-test_stage_fea.py — unittest for stage_fea.py (CalculiX FEA stage).
+"""test_stage_fea.py — unittest for stage_fea.py (CalculiX FEA stage).
 
-Tests:
-  1. strong_part: shim emits high safety factor  → status pass.
-  2. weak_part:   shim emits low safety factor   → status fail + fea_below_safety.
-  3. non_critical model (load_critical: false)   → status skip.
-  4. cache hit: re-run same inputs               → ccx invoked 0 times on second run.
-  5. ccx absent from PATH                        → status skip (solver deferred).
-  6. fragment validates release-gate stage-record shape.
-
-The ccx shim writes an invocation counter to $CCX_SHIM_COUNT_FILE and emits
-a synthetic .dat file whose safety factor is controlled by $CCX_SHIM_SAFETY.
+Covers pass/fail/skip verdicts, the geometry-hash cache, ccx-absent skip, the
+stage-record fragment shape, and the structured fea_results object (emitted on
+pass/fail; absent on skip). The ccx shim writes an invocation counter to
+$CCX_SHIM_COUNT_FILE and a synthetic .dat whose safety factor is $CCX_SHIM_SAFETY.
 """
 
 import json
@@ -39,28 +32,16 @@ _LOW_SAFETY = "0.8"
 
 
 def _make_ccx_shim(bin_dir: str, safety_factor: str, count_file: str) -> str:
-    """
-    Write a ccx shim to bin_dir/ccx.
+    """Write a ccx shim to bin_dir/ccx.
 
-    The shim:
-      - Increments the integer in count_file by 1 (creates it at 0 first).
-      - Writes a minimal .dat file that stage_fea.py can parse for the safety factor.
-        The stage looks for a line:  MAX_MISES <value>
-        and a line:                  SAFETY_FACTOR <value>
-        in the <job>.dat output (we write it alongside the input deck).
-      - Exits 0.
-
-    Parameters controlling output are taken from env vars at shim-invocation time
-    so the fixture can set them once before running the stage:
-      CCX_SHIM_SAFETY       — float safety factor to emit  (default 3.5)
-      CCX_SHIM_COUNT_FILE   — path to the counter file
+    The shim increments the counter in count_file, writes a <job>.dat with a
+    SAFETY_FACTOR line, and exits 0. Env-driven: CCX_SHIM_SAFETY (default 3.5),
+    CCX_SHIM_COUNT_FILE (counter path).
     """
     shim_path = os.path.join(bin_dir, "ccx")
     shim_content = f"""\
 #!/bin/sh
 # ccx shim for autospec-fab FEA tests
-
-# --- increment invocation counter ---
 count_file="${{CCX_SHIM_COUNT_FILE:-{count_file}}}"
 if [ -f "$count_file" ]; then
     count=$(cat "$count_file")
@@ -69,9 +50,7 @@ else
 fi
 echo $((count + 1)) > "$count_file"
 
-# --- emit synthetic .dat with safety factor ---
 safety="${{CCX_SHIM_SAFETY:-{safety_factor}}}"
-
 # The last positional arg to ccx is the job name (no extension).
 job_name="${{@: -1}}"
 dat_file="${{job_name}}.dat"
@@ -96,12 +75,9 @@ def _run_stage(
     extra_env: dict | None = None,
     cache_dir: str | None = None,
 ) -> tuple[int, dict | None, str]:
-    """
-    Run stage_fea.py, return (returncode, fragment_dict, stderr).
+    """Run stage_fea.py; return (returncode, fragment_dict, stderr).
 
-    extra_env — env vars merged on top of the current environment.
-    cache_dir — if given, set AUTOSPEC_FAB_CACHE_DIR so the stage uses an
-                isolated cache per test.
+    extra_env merges over os.environ; cache_dir sets AUTOSPEC_FAB_CACHE_DIR.
     """
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
         out_path = tf.name
@@ -174,8 +150,6 @@ class _WithCcxShim(unittest.TestCase):
 
 
 class TestFragmentShape(_WithCcxShim):
-    """Every fragment must match release-gate stage-record shape."""
-
     def _assert_valid_fragment(self, fragment, label):
         self.assertIsInstance(fragment, dict, f"{label}: fragment must be a dict")
         for key in ("stage", "status", "detail", "findings"):
@@ -215,8 +189,6 @@ class TestFragmentShape(_WithCcxShim):
 
 
 class TestStrongPart(_WithCcxShim):
-    """A load-critical part with high safety factor must pass."""
-
     def setUp(self):
         super().setUp()
         self._install_shim(_HIGH_SAFETY)
@@ -241,6 +213,16 @@ class TestStrongPart(_WithCcxShim):
         count = _read_count(self.count_file)
         self.assertGreater(count, 0, "Expected ccx shim to be invoked at least once")
 
+    def test_fea_results_carries_safety_factor(self):
+        results = self.fragment.get("fea_results")
+        self.assertIsInstance(
+            results, dict,
+            f"Expected structured fea_results dict; fragment={self.fragment}",
+        )
+        self.assertAlmostEqual(results["safety_factor"], float(_HIGH_SAFETY))
+        self.assertEqual(results["required_min"], 2.0)
+        self.assertEqual(results["status"], "pass")
+
 
 class TestWeakPart(_WithCcxShim):
     """A load-critical part with low safety factor must fail + emit fea_below_safety."""
@@ -264,6 +246,14 @@ class TestWeakPart(_WithCcxShim):
         codes = _finding_codes(self.fragment)
         self.assertIn("fea_below_safety", codes,
                       f"Expected fea_below_safety finding; findings={self.fragment['findings']}")
+
+    def test_fea_results_carries_fail_status(self):
+        results = self.fragment.get("fea_results")
+        self.assertIsInstance(results, dict,
+                              f"Expected fea_results dict; fragment={self.fragment}")
+        self.assertAlmostEqual(results["safety_factor"], float(_LOW_SAFETY))
+        self.assertEqual(results["required_min"], 2.0)
+        self.assertEqual(results["status"], "fail")
 
 
 class TestNonCriticalPart(_WithCcxShim):
@@ -300,6 +290,12 @@ class TestNonCriticalPart(_WithCcxShim):
         count = _read_count(self.count_file)
         self.assertEqual(count, 0, "ccx must not run for non-load-critical parts")
 
+    def test_no_fabricated_fea_results_on_skip(self):
+        self.assertNotIn(
+            "fea_results", self.fragment,
+            "skip path must not fabricate fea_results numbers",
+        )
+
 
 class TestCacheHit(_WithCcxShim):
     """Re-running the same inputs must hit the cache; ccx must not be re-invoked."""
@@ -314,9 +310,7 @@ class TestCacheHit(_WithCcxShim):
         count_after_first = _read_count(self.count_file)
         self.assertGreater(count_after_first, 0, "ccx must be called on first run")
 
-        # Reset counter (shim will create the file fresh from 0 + 1)
-        # Actually we set the count file content to 0 manually so we can
-        # detect exactly what happens on the second call.
+        # Reset counter so the second call's count is unambiguous.
         with open(self.count_file, "w") as f:
             f.write("0")
 
@@ -334,18 +328,13 @@ class TestCacheHit(_WithCcxShim):
 
     def test_changed_orientation_busts_cache(self):
         """A changed print_orientation must MISS the cache against the SAME cache
-        dir — proving the geometry-hash key includes print_orientation. (A prior
-        version of this test used a fresh cache dir, which only proved cold-cache
-        behaviour and would NOT catch a regression that dropped orientation from
-        the hash.)"""
+        dir — proving the geometry-hash key includes print_orientation."""
         self._install_shim(_HIGH_SAFETY)
 
         # Prime the cache with the upright critical model.
         rc1, _, _ = self._run(_HIGH_SAFETY, model=_CRITICAL_MODEL)
         self.assertEqual(rc1, 0)
         self.assertGreater(_read_count(self.count_file), 0)
-
-        # Reset the invocation counter so the second run's count is unambiguous.
         with open(self.count_file, "w") as f:
             f.write("0")
 
@@ -358,13 +347,13 @@ class TestCacheHit(_WithCcxShim):
         with open(variant_path, "w") as f:
             json.dump(variant, f)
 
-        # Re-run against the SAME cache dir → different hash → cache MISS → ccx runs.
+        # Same cache dir → different hash → cache MISS → ccx re-runs.
         rc2, _, _ = self._run(_HIGH_SAFETY, model=variant_path)
         self.assertEqual(rc2, 0)
         self.assertGreater(
             _read_count(self.count_file), 0,
-            "ccx MUST be re-invoked when print_orientation changes against the "
-            "same cache dir (hash key must include print_orientation)",
+            "ccx MUST re-run when print_orientation changes (hash key must "
+            "include print_orientation)",
         )
 
 
@@ -399,6 +388,10 @@ class TestCcxAbsent(unittest.TestCase):
         )
         self.assertEqual(fragment["findings"], [],
                          "No findings when ccx absent (solver deferred)")
+        self.assertNotIn(
+            "fea_results", fragment,
+            "ccx-absent skip must not fabricate fea_results",
+        )
 
 
 if __name__ == "__main__":
