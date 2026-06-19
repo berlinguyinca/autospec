@@ -34,6 +34,27 @@ JSON
   [ "$status" -eq 0 ]
 }
 
+@test "fab-model schema accepts a sidecar carrying engine-read name + body_count" {
+  command -v ajv >/dev/null 2>&1 || skip "ajv CLI not available (install ajv-cli to run this test)"
+
+  # The engine (stl-release-gate.py _model_name) reads "name" and
+  # stage-geometry.py reads "body_count" off the model sidecar. A real sidecar
+  # carrying either must NOT be rejected by the additionalProperties:false root.
+  cat > "$TEST_TMPDIR/model-named.json" <<'JSON'
+{
+  "name": "DogfoodFeaturefulManifold",
+  "body_count": 1,
+  "material": "PETG",
+  "print_orientation": "flat",
+  "load_critical": false,
+  "flow_critical": true
+}
+JSON
+
+  run ajv validate -s "$MODEL_SCHEMA" --spec=draft2020 -d "$TEST_TMPDIR/model-named.json"
+  [ "$status" -eq 0 ]
+}
+
 @test "fab-model schema rejects a sidecar missing required field material" {
   command -v ajv >/dev/null 2>&1 || skip "ajv CLI not available (install ajv-cli to run this test)"
 

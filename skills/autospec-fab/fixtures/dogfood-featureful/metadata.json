@@ -1,0 +1,11 @@
+{
+  "name": "DogfoodFeaturefulManifold",
+  "body_count": 1,
+  "material": "PETG",
+  "print_orientation": "flat",
+  "load_critical": false,
+  "flow_critical": true,
+  "dims": { "x_mm": 20, "y_mm": 20, "z_mm": 20 },
+  "ports": [],
+  "gaskets": []
+}

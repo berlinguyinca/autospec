@@ -35,6 +35,46 @@ STAGE_ORDER = [
 ]
 
 
+# Per-stage SIBLING-FILE input convention. The engine resolves each stage's
+# stage-specific input relative to MODELDIR (the directory holding the --model
+# sidecar) and threads it ONLY when the file exists. A featureless model (no
+# sibling file) gets no extra flag, so the stage correctly skips. This is what
+# makes a FEATUREFUL model actually RUN vacuum-circuit / dust-airflow / fea /
+# cfd instead of always skipping (Phase 5.5 audit D2).
+#   stage name -> (flag, sibling filename relative to MODELDIR)
+_SIBLING_INPUTS = {
+    "vacuum-circuit": ("--circuit", "circuit.json"),
+    "dust-airflow": ("--duct", "duct.json"),
+    "fea": ("--load", "load.json"),
+    "cfd": ("--flow", "flow.json"),
+}
+
+
+def extra_args_for(stage_name, stl_path, model_path):
+    """Return the extra CLI args to thread into <stage_name>, or [].
+
+    `docs` is the ONE stage that takes the model DIRECTORY (not the stl) as
+    `--in`, plus an optional `--baseline MODELDIR/baseline.json`. Every other
+    stage keeps `--in <stl>`; this resolver only adds stage-specific flags when
+    the sibling descriptor exists under MODELDIR (= dirname of the sidecar).
+    """
+    model_dir = os.path.dirname(os.path.abspath(model_path))
+    if stage_name == "docs":
+        args = ["--in", model_dir]
+        baseline = os.path.join(model_dir, "baseline.json")
+        if os.path.isfile(baseline):
+            args += ["--baseline", baseline]
+        return args
+    spec = _SIBLING_INPUTS.get(stage_name)
+    if spec is None:
+        return []
+    flag, filename = spec
+    sibling = os.path.join(model_dir, filename)
+    if os.path.isfile(sibling):
+        return [flag, sibling]
+    return []
+
+
 def _candidate_dirs(stages_dir):
     """Resolution order: --stages-dir, $AUTOSPEC_FAB_STAGES_DIR, engine dir."""
     dirs = []
