@@ -26,6 +26,9 @@ MODEL_MAX: dict[str, int] = {
     "claude-sonnet-4-7": 200_000,
     "claude-opus-4-7": 200_000,
     "claude-opus-4-5": 200_000,
+    "claude-opus-4-8": 200_000,
+    "claude-opus-4-8-1m": 1_000_000,
+    "claude-opus-4-8[1m]": 1_000_000,
     "claude-haiku-4-5": 200_000,
     # Legacy identifiers
     "claude-3-5-sonnet-20241022": 200_000,
@@ -34,6 +37,24 @@ MODEL_MAX: dict[str, int] = {
 }
 
 _DEFAULT_MAX = 200_000
+
+
+def _resolve_max(model: str | None) -> int:
+    """Context-window size for a model id.
+
+    Exact ``MODEL_MAX`` entries win; otherwise any id carrying the 1M-context
+    marker (a ``-1m`` suffix or a ``[1m]`` tag, the convention Claude Code uses
+    for million-token sessions) resolves to 1_000_000 so a newly-shipped 1M
+    model is not silently capped at the 200k default (issue #898). Everything
+    else falls back to ``_DEFAULT_MAX``.
+    """
+    if not model:
+        return _DEFAULT_MAX
+    if model in MODEL_MAX:
+        return MODEL_MAX[model]
+    if model.endswith("-1m") or "[1m]" in model:
+        return 1_000_000
+    return _DEFAULT_MAX
 
 _HANDOFF_PROMPT = (
     "Please run /create-handoff and wait for the file to be written "
@@ -103,7 +124,7 @@ class ClaudeAdapter:
             m = msg.get("model")
             if m:
                 model = m
-        max_tokens = MODEL_MAX.get(model, _DEFAULT_MAX)
+        max_tokens = _resolve_max(model)
         return Usage(
             used_tokens=used,
             max_tokens=max_tokens,
