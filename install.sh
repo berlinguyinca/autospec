@@ -882,8 +882,12 @@ copy_repo_scripts() {
     fi
 
     mkdir -p "$autospec_scripts_dir"
-    # Copy only top-level script files (no recursion into scripts/lib/).
-    for ext in sh mjs ps1; do
+    # Copy only top-level script files (no recursion into scripts/lib/). The yml
+    # extension ships runtime data assets that installed scripts hard-require at
+    # ${AUTOSPEC_SCRIPTS_DIR}/<name>.yml (e.g. assemble-impl-prompt.sh -> memory-tags.yml,
+    # which exit 1's if absent — a clean-install crash). Only memory-tags.yml lives at
+    # scripts/ top level today; the glob stays extension-scoped so it never sweeps subdirs.
+    for ext in sh mjs ps1 yml; do
         for f in "$repo_scripts_src"/*."$ext"; do
             [ -e "$f" ] || continue
             cp "$f" "$autospec_scripts_dir/"
@@ -921,6 +925,17 @@ skills/autospec-run/scripts/post-token-report.sh::post-token-report.sh \
 skills/autospec-run/scripts/release-issue.sh::release-issue.sh \
 skills/autospec-resume/scripts/resume-scan.sh::resume-scan.sh \
 skills/autospec-doc/scripts/doc-orchestrator-entry.mjs::doc-orchestrator.mjs \
+skills/autospec-harmonize/scripts/harmonize.sh::harmonize.sh \
+skills/autospec-harmonize/scripts/design-discover.sh::design-discover.sh \
+skills/autospec-harmonize/scripts/design-generalize.mjs::design-generalize.mjs \
+skills/autospec-harmonize/scripts/design-variants.mjs::design-variants.mjs \
+skills/autospec-harmonize/scripts/design-preview.mjs::design-preview.mjs \
+skills/autospec-harmonize/scripts/gen-migration-spec.mjs::gen-migration-spec.mjs \
+skills/autospec-harmonize/scripts/extract-source.mjs::extract-source.mjs \
+skills/autospec-harmonize/scripts/extract-runtime.mjs::extract-runtime.mjs \
+skills/autospec-harmonize/scripts/fetch-vendor.sh::fetch-vendor.sh \
+skills/autospec-harmonize/scripts/lib/color.mjs::lib/color.mjs \
+skills/autospec-qa/scripts/qa-visual-findings.sh::qa-visual-findings.sh \
 skills/autospec-sweep/scripts/run.sh::autospec-sweep-run.sh \
 skills/autospec-sweep/scripts/wizard.sh::autospec-sweep-wizard.sh"
 
@@ -967,6 +982,9 @@ skills/autospec-doc/scripts/verify-examples.mjs"
         src="$REPO_ROOT/${entry%%::*}"
         dest="$autospec_scripts_dir/${entry##*::}"
         if [ -f "$src" ]; then
+            # Create the dest's parent so subdir destinations (e.g. lib/color.mjs, the
+            # harmonize ./lib import) land correctly regardless of prior steps.
+            mkdir -p "$(dirname "$dest")"
             cp "$src" "$dest"
             case "$dest" in
                 *.sh|*.mjs) chmod +x "$dest" ;;
