@@ -483,22 +483,61 @@ check_codex_skills_install() {
     done
 }
 
-# Every per-skill installer must install shared helper scripts into
-# ~/.autospec/scripts so runtime commands work in target repositories that do
-# not contain this repo's scripts/ directory.
+# Every per-skill installer that REFERENCES a shared runtime helper must install
+# the shared-helper runtime dir (~/.autospec/scripts) so those commands work in
+# target repositories that do not contain this repo's scripts/ directory.
+#
+# Dynamic + conditional (was a hardcoded ~14-skill list against a fixed 8-helper
+# set — the hardcoded-subset class: new per-skill installers silently escaped the
+# assertion, and the 5 unlisted install.sh skills could not be blindly required
+# because some legitimately ship no shared helpers). Now:
+#   1. iterate every per-skill install.sh present under skills/*/;
+#   2. for each, determine whether the skill NEEDS shared helpers — TRUE iff any
+#      of its trio/cluster/script files reference a `${AUTOSPEC_SCRIPTS_DIR...}/<h>`
+#      runtime helper whose <h> is SHARED: it lives in repo-root scripts/ OR in
+#      skills/autospec-shared/scripts/ (the shared-lib dir) and is NOT one of the
+#      skill's OWN scripts/<h>;
+#   3. needs-shared  -> assert the install.sh installs into ~/.autospec/scripts
+#      (the runtime-dir mechanism that ships the shared helpers; this is
+#      name-agnostic so it tolerates the install_shared_scripts /
+#      install_runtime_scripts naming variance across siblings);
+#   4. otherwise     -> exempt (e2e-clone / playwright / secaudit and any other
+#      skill that references no shared runtime helper).
+#
+# referenced_shared_helpers SKILL_DIR -> prints the (sorted, unique) basenames of
+# the SHARED runtime helpers a skill references.
+referenced_shared_helpers() {
+    rsh_skill_dir="$1"
+    rsh_name="$(basename "$rsh_skill_dir")"
+    grep -rhoE '\$\{AUTOSPEC_SCRIPTS_DIR[^}]*\}/[A-Za-z0-9._-]+' "$rsh_skill_dir" 2>/dev/null \
+        | sed -E 's#^.*\}/##' | sort -u | while IFS= read -r rsh_h; do
+        [ -n "$rsh_h" ] || continue
+        # Skip the skill's own scripts/<helper>.
+        [ -f "$rsh_skill_dir/scripts/$rsh_h" ] && continue
+        # SHARED iff present in repo-root scripts/ or skills/autospec-shared/scripts/.
+        if [ -f "scripts/$rsh_h" ] || [ -f "skills/autospec-shared/scripts/$rsh_h" ]; then
+            printf '%s\n' "$rsh_h"
+        fi
+    done
+}
+
 check_shared_script_install() {
-    info "shared helper install: all skills"
-    helpers="autospec-stop.sh autospec-usage-limit.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh"
-    for s in autospec autospec-release autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa autospec-doc; do
-        f="skills/$s/install.sh"
-        grep -q 'install_shared_scripts' "$f" \
-            || fail "$f missing install_shared_scripts function/call"
-        grep -q '\.autospec/scripts' "$f" \
-            || fail "$f missing ~/.autospec/scripts install target"
-        for helper in $helpers; do
-            grep -q "$helper" "$f" \
-                || fail "$f missing shared helper install entry: $helper"
-        done
+    info "shared helper install: all skills (dynamic + conditional)"
+    for f in skills/*/install.sh; do
+        [ -f "$f" ] || continue
+        skill_dir="$(dirname "$f")"
+        name="$(basename "$skill_dir")"
+        shared="$(referenced_shared_helpers "$skill_dir")"
+        if [ -z "$shared" ]; then
+            info "  exempt (no shared runtime helper referenced): $name"
+            continue
+        fi
+        # needs-shared: must ship the shared-helper runtime dir.
+        if ! grep -q '\.autospec/scripts' "$f"; then
+            printf 'validate: %s references shared runtime helper(s):\n' "$name" >&2
+            printf '%s\n' "$shared" | sed 's/^/    /' >&2
+            fail "$f references shared runtime helper(s) but does not install into ~/.autospec/scripts"
+        fi
     done
 }
 
