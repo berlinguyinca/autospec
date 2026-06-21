@@ -365,6 +365,40 @@ check_self_update() {
         || fail "$name: install.sh missing --update flag handling"
 }
 
+# Duo-mode self-update gate: same invariants as check_self_update but for a
+# two-member duo (SKILL.md + codex/prompt.md, NO opencode/agent.md). The trio
+# variant loops a fixed 3-file list including opencode/agent.md, which a duo
+# lacks — so it cannot be reused as-is. A real top-level duo skill (e.g.
+# autospec-test, which has a `## Self-update mode` section + a `/autospec-test`
+# entrypoint) must have its self-update section gated across BOTH duo members,
+# just like the trio lane gates all three. Transition-safe in the same way:
+# accept either the canonical heading or the startup-self-update marker.
+check_self_update_duo() {
+    skill_dir="$1"
+    name="$(basename "$skill_dir")"
+    info "self-update (duo): $name"
+    # Accept the trio's '## Self-update mode' heading, the duo's '## Self-update'
+    # heading (autospec-test uses the shorter form), or the startup-self-update
+    # marker. Gate the section across BOTH duo members so SKILL.md and
+    # codex/prompt.md cannot drift one self-update section away from the other.
+    for member in SKILL.md codex/prompt.md; do
+        if ! grep -q '^## Self-update' "$skill_dir/$member" \
+            && ! grep -q 'autospec-block:startup-self-update' "$skill_dir/$member"; then
+            fail "$name: $member missing '## Self-update' section or autospec-block:startup-self-update marker"
+        fi
+    done
+    # The trio gate also asserts install.sh handles --update. A duo skill may ship
+    # without a per-skill install.sh (autospec-test installs via its own scripts/),
+    # so only enforce the flag when install.sh is present.
+    if [ -f "$skill_dir/install.sh" ]; then
+        grep -q -- '--update' "$skill_dir/install.sh" \
+            || fail "$name: install.sh missing --update flag handling"
+    fi
+    # Explicit success: a false trailing `if` test (no install.sh) must not make
+    # this function return non-zero and trip set -e in the serial run lane.
+    return 0
+}
+
 # Startup preflight invariants (introduced by issues #115–#119): every
 # multi-harness skill must carry a ## Startup self-update section whose bash
 # body is byte-identical to the canonical block (modulo the SKILL_NAME= first
@@ -394,15 +428,35 @@ check_startup_preflight() {
         || printf '%s\n' "$canonical" | grep -F 'raw.githubusercontent.com/berlinguyinca/autospec/main/skills/' >/dev/null; then
         fail "startup preflight must not call a raw installer directly"
     fi
-    for s in autospec autospec-release autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa autospec-resume autospec-doc; do
-        for f in "skills/$s/SKILL.md" "skills/$s/opencode/agent.md" "skills/$s/codex/prompt.md"; do
-            # Transition-safe: if the file carries the marker, skip the byte-diff check
-            # (the D3 sweep will expand it; expanded bytes will match the golden).
+    # Dynamic discovery (replaces the former hardcoded ~15-skill list, which
+    # silently omitted ~12 trios — including 5 unmarkered ones — from any
+    # preflight byte-equivalence check). Iterate EVERY multi-harness trio under
+    # skills/ via discover_skills, mirroring check_block_expansion /
+    # check_derive_trio_consistency. Per trio FILE there are three cases:
+    #   1. markered  → skip the byte-diff; the golden-expansion path
+    #      (check_block_expansion) verifies the expanded bytes. Failing here
+    #      would be a false positive.
+    #   2. full block present → byte-diff against the canonical template.
+    #   3. NEITHER marker NOR block → the skill legitimately carries no startup
+    #      preflight section; skip (do NOT fail closed — startup preflight is not
+    #      required of every skill). Matches check_self_update's transition-safe
+    #      "accept either form" handling rather than forcing a missing-section
+    #      failure on skills that never had the block.
+    for skill_dir in $(discover_skills); do
+        for f in "$skill_dir/SKILL.md" "$skill_dir/opencode/agent.md" "$skill_dir/codex/prompt.md"; do
+            # Case 1: markered — covered by the golden-expansion path.
             if grep -q 'autospec-block:startup-self-update' "$f" 2>/dev/null; then
                 continue
             fi
-            body=$(extract_block "$f")
-            [ -n "$body" ] || fail "$f missing ## Startup self-update section"
+            # `|| true`: extract_block ends in `grep -v`, which returns non-zero
+            # when the file has no Startup self-update block (empty input). Under
+            # set -e that would abort the run; the former hardcoded list never hit
+            # this because every listed skill carried the block. Guard it so the
+            # empty-body case falls through to the legitimate-absence skip below.
+            body=$(extract_block "$f") || true
+            # Case 3: no marker and no block — legitimately absent; skip.
+            [ -n "$body" ] || continue
+            # Case 2: full block present — must match the canonical template.
             if ! diff <(printf '%s\n' "$canonical") <(printf '%s\n' "$body") >/dev/null 2>&1; then
                 diff <(printf '%s\n' "$canonical") <(printf '%s\n' "$body") | head -20 >&2
                 fail "$f preflight body diverges from canonical"
@@ -416,8 +470,12 @@ check_startup_preflight() {
 # prompts/ path AND the new skills/ slash-command registry path.
 check_codex_skills_install() {
     info "codex skills-dir install: all skills"
-    for s in autospec autospec-release autospec-split autospec-define autospec-run autospec-listen autospec-classify autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa autospec-doc; do
-        f="skills/$s/install.sh"
+    # Dynamic over every per-skill install.sh (was a hardcoded ~14-skill list that
+    # silently exempted newer skills like fab/harmonize/upgrade from the Codex
+    # install invariants — the hardcoded-subset class). Every install.sh present
+    # must carry both the skills/ registry path and the legacy prompts-file path.
+    for f in skills/*/install.sh; do
+        [ -f "$f" ] || continue
         grep -q 'skills/\$SKILL_NAME/SKILL\.md' "$f" \
             || fail "$f missing Codex skills-dir install (skills/\$SKILL_NAME/SKILL.md)"
         grep -q 'prompts/\$SKILL_NAME\.md\|CODEX_DEST' "$f" \
@@ -2596,6 +2654,7 @@ run_one_skill_checks() {
 
 run_one_duo_checks() {
     check_lockstep_duo "$1"
+    check_self_update_duo "$1"
 }
 
 # Bounded parallel dispatch over a newline-free, space-separated list of
