@@ -30,10 +30,7 @@ setup() {
     echo "$output" | grep -q "GOAL_HEDGE"
 }
 
-@test "lint-issue: bad-goal-multi-sentence triggers GOAL_NOT_ONE_SENTENCE (skip if no fixture)" {
-    if [ ! -f "$FIX/bad-goal-multi-sentence.md" ]; then
-        skip "fixture bad-goal-multi-sentence.md not yet landed"
-    fi
+@test "lint-issue: bad-goal-multi-sentence triggers GOAL_NOT_ONE_SENTENCE" {
     run bash -c "bash '$LINT' '$FIX/bad-goal-multi-sentence.md' 2>&1"
     [ "$status" -ge 1 ]
     echo "$output" | grep -q "GOAL_NOT_ONE_SENTENCE"
@@ -41,19 +38,13 @@ setup() {
 
 # ── AC rule cases ─────────────────────────────────────────────────────────────
 
-@test "lint-issue: bad-ac-prose triggers AC_PROSE (skip if no fixture)" {
-    if [ ! -f "$FIX/bad-ac-prose.md" ]; then
-        skip "fixture bad-ac-prose.md not yet landed"
-    fi
+@test "lint-issue: bad-ac-prose triggers AC_PROSE" {
     run bash -c "bash '$LINT' '$FIX/bad-ac-prose.md' 2>&1"
     [ "$status" -ge 1 ]
     echo "$output" | grep -q "AC_PROSE"
 }
 
-@test "lint-issue: bad-ac-subjective triggers AC_SUBJECTIVE (skip if no fixture)" {
-    if [ ! -f "$FIX/bad-ac-subjective.md" ]; then
-        skip "fixture bad-ac-subjective.md not yet landed"
-    fi
+@test "lint-issue: bad-ac-subjective triggers AC_SUBJECTIVE" {
     run bash -c "bash '$LINT' '$FIX/bad-ac-subjective.md' 2>&1"
     [ "$status" -ge 1 ]
     echo "$output" | grep -q "AC_SUBJECTIVE"
@@ -65,10 +56,7 @@ setup() {
     echo "$output" | grep -q "AC_TOO_LONG"
 }
 
-@test "lint-issue: bad-ac-empty triggers AC_EMPTY (skip if no fixture)" {
-    if [ ! -f "$FIX/bad-ac-empty.md" ]; then
-        skip "fixture bad-ac-empty.md not yet landed"
-    fi
+@test "lint-issue: bad-ac-empty triggers AC_EMPTY" {
     run bash -c "bash '$LINT' '$FIX/bad-ac-empty.md' 2>&1"
     [ "$status" -ge 1 ]
     echo "$output" | grep -q "AC_EMPTY"
@@ -82,19 +70,13 @@ setup() {
     echo "$output" | grep -q "SMOKE_MULTI_LINE"
 }
 
-@test "lint-issue: bad-smoke-placeholder triggers SMOKE_PLACEHOLDER (skip if no fixture)" {
-    if [ ! -f "$FIX/bad-smoke-placeholder.md" ]; then
-        skip "fixture bad-smoke-placeholder.md not yet landed"
-    fi
+@test "lint-issue: bad-smoke-placeholder triggers SMOKE_PLACEHOLDER" {
     run bash -c "bash '$LINT' '$FIX/bad-smoke-placeholder.md' 2>&1"
     [ "$status" -ge 1 ]
     echo "$output" | grep -q "SMOKE_PLACEHOLDER"
 }
 
-@test "lint-issue: bad-smoke-no-fence triggers SMOKE_NOT_FENCED (skip if no fixture)" {
-    if [ ! -f "$FIX/bad-smoke-no-fence.md" ]; then
-        skip "fixture bad-smoke-no-fence.md not yet landed"
-    fi
+@test "lint-issue: bad-smoke-no-fence triggers SMOKE_NOT_FENCED" {
     run bash -c "bash '$LINT' '$FIX/bad-smoke-no-fence.md' 2>&1"
     [ "$status" -ge 1 ]
     echo "$output" | grep -q "SMOKE_NOT_FENCED"
