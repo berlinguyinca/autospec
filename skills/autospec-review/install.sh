@@ -37,6 +37,11 @@ USE_SYMLINK=0
 DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
+# Shared runtime helpers this skill calls via ${AUTOSPEC_SCRIPTS_DIR}/<name> and
+# that live under skills/autospec-shared/scripts/ (not repo-root scripts/). They
+# MUST ship into ~/.autospec/scripts so a standalone install of autospec-review
+# can run /autospec-review in a target repo without this checkout present.
+SHARED_LIB_SCRIPT_FILES="emit-gaps.sh inject-relevant-memory.sh"
 
 # ---------- helpers --------------------------------------------------------
 
@@ -75,6 +80,7 @@ fetch_source_files() {
     fi
     TMP_FETCH_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t autospec)"
     info "Fetching ${SKILL_NAME} source files from ${SKILL_RAW_BASE} ..."
+    RAW_REPO_BASE="${SKILL_RAW_BASE%/skills/$SKILL_NAME}"
     mkdir -p "$TMP_FETCH_DIR/opencode" "$TMP_FETCH_DIR/codex"
     for rel in SKILL.md opencode/agent.md codex/prompt.md; do
         if ! curl -fsSL "$SKILL_RAW_BASE/$rel" -o "$TMP_FETCH_DIR/$rel"; then
@@ -82,7 +88,44 @@ fetch_source_files() {
             exit 1
         fi
     done
+    mkdir -p "$TMP_FETCH_DIR/lib-scripts"
+    for rel in $SHARED_LIB_SCRIPT_FILES; do
+        if ! curl -fsSL "$RAW_REPO_BASE/skills/autospec-shared/scripts/$rel" \
+            -o "$TMP_FETCH_DIR/lib-scripts/$rel"; then
+            err "failed to download $RAW_REPO_BASE/skills/autospec-shared/scripts/$rel"
+            exit 1
+        fi
+    done
     SKILL_DIR="$TMP_FETCH_DIR"
+}
+
+# resolve_shared_lib_scripts_dir — locate skills/autospec-shared/scripts/ in a
+# full checkout, or the fetched lib-scripts/ dir when running from stdin.
+resolve_shared_lib_scripts_dir() {
+    checkout_root="$(cd "$SKILL_DIR/../.." 2>/dev/null && pwd || true)"
+    if [ -n "$checkout_root" ] && [ -d "$checkout_root/skills/autospec-shared/scripts" ]; then
+        printf '%s\n' "$checkout_root/skills/autospec-shared/scripts"
+    elif [ -d "$SKILL_DIR/lib-scripts" ]; then
+        printf '%s\n' "$SKILL_DIR/lib-scripts"
+    else
+        printf ''
+    fi
+}
+
+# install_shared_scripts — ship the shared-lib runtime helpers this skill calls
+# at runtime into ~/.autospec/scripts so /autospec-review works standalone.
+install_shared_scripts() {
+    lib_dir="$(resolve_shared_lib_scripts_dir)"
+    if [ -z "$lib_dir" ]; then
+        err "missing shared-lib scripts directory; cannot install autospec-review helpers"
+        return 1
+    fi
+    for rel in $SHARED_LIB_SCRIPT_FILES; do
+        install_one "$lib_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
+        case "$rel" in
+            *.sh) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;;
+        esac
+    done
 }
 
 install_one() {
@@ -226,6 +269,12 @@ if [ "$HARNESS" = "codex" ] || [ "$HARNESS" = "all" ]; then
     installed_paths="${installed_paths}  Codex CLI:   ${CODEX_DEST}\n"
     installed_paths="${installed_paths}  Codex skill: ${CODEX_DIR}/skills/${SKILL_NAME}/SKILL.md\n"
 fi
+
+# ---------- install shared helper scripts ---------------------------------
+
+info ""
+info "Shared autospec helper scripts:"
+install_shared_scripts
 
 # ---------- final summary --------------------------------------------------
 
