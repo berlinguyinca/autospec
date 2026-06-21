@@ -18,6 +18,10 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
 SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
+# Per-skill runtime helper that the QA clusters shell out to via
+# ${AUTOSPEC_SCRIPTS_DIR}/qa-visual-findings.sh. Must ship to ~/.autospec/scripts/ or the
+# accessibility-and-responsive cluster crashes on a clean install.
+SKILL_SCRIPT_FILES="qa-visual-findings.sh"
 
 err()  { printf 'error: %s\n' "$*" >&2; }
 warn() { printf 'warn: %s\n' "$*" >&2; }
@@ -95,6 +99,26 @@ install_shared_scripts() {
     done
 }
 
+resolve_skill_scripts_dir() {
+    if [ -d "$SKILL_DIR/scripts" ]; then
+        printf '%s\n' "$SKILL_DIR/scripts"
+    else
+        printf ''
+    fi
+}
+
+install_skill_scripts() {
+    src_dir="$(resolve_skill_scripts_dir)"
+    [ -n "$src_dir" ] || return 0
+    for rel in $SKILL_SCRIPT_FILES; do
+        src="$src_dir/$rel"
+        if [ -f "$src" ]; then
+            install_one "$src" "$HOME/.autospec/scripts/$rel" || return 1
+            case "$rel" in *.sh|*.mjs) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;; esac
+        fi
+    done
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --harness) shift; HARNESS="${1:-}" ;;
@@ -129,6 +153,10 @@ done
 info ""
 info "Shared autospec helper scripts:"
 install_shared_scripts
+
+info ""
+info "autospec-qa skill scripts:"
+install_skill_scripts
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 OPENCODE_DIR="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"

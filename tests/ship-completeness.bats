@@ -13,6 +13,10 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
 # Skill surface files that may reference helper scripts at runtime: per-skill trios,
 # the autospec orchestrator surface, and any prompt files dispatched to subagents.
+# This set drives the bare-repo-relative-invocation guard (test 2), which must stay
+# scoped to authored skill prose — not script bodies (whose comments legitimately
+# mention scripts/<x>.sh in prose) — so it is deliberately narrower than the
+# runtime-reference scan below.
 surface_files() {
   {
     ls "$REPO_ROOT"/skills/*/SKILL.md 2>/dev/null
@@ -23,6 +27,23 @@ surface_files() {
   } | sort -u
 }
 
+# Files scanned for ${AUTOSPEC_SCRIPTS_DIR}-resolved runtime-asset references (test 1):
+# every surface file PLUS the per-skill cluster docs (skills/*/clusters/*.md, which pipe
+# through helper scripts), the per-skill runtime scripts themselves (skills/*/scripts/*
+# that shell out to siblings via a resolved scripts dir, e.g. harmonize.sh ->
+# $STAGE_DIR/design-discover.sh), and the repo-root scripts/*.sh that hard-require runtime
+# assets at install-resolved paths (e.g. assemble-impl-prompt.sh -> memory-tags.yml). A
+# reference to an unshipped asset from ANY of these crashes a clean install.
+reference_scan_files() {
+  {
+    surface_files
+    ls "$REPO_ROOT"/skills/*/clusters/*.md 2>/dev/null
+    find "$REPO_ROOT"/skills/*/scripts -maxdepth 1 -type f \
+      \( -name '*.sh' -o -name '*.mjs' \) 2>/dev/null
+    ls "$REPO_ROOT"/scripts/*.sh 2>/dev/null
+  } | sort -u
+}
+
 # The set of relative paths (under ~/.autospec/scripts) the installers ship: repo-root
 # scripts/ globs (.sh/.mjs/.ps1, excluding install-time-only scripts/lib/) land at the
 # top level, while the entire skills/autospec-shared/scripts/ tree is copied preserving
@@ -30,8 +51,11 @@ surface_files() {
 # reference can be matched whether or not it carries a subdirectory prefix.
 shippable_paths() {
   {
-    # Repo-root scripts/*.{sh,mjs,ps1} ship flat (basename only); exclude scripts/lib/.
-    ls "$REPO_ROOT"/scripts/*.sh "$REPO_ROOT"/scripts/*.mjs "$REPO_ROOT"/scripts/*.ps1 2>/dev/null \
+    # Repo-root scripts/*.{sh,mjs,ps1,yml} ship flat (basename only); exclude scripts/lib/.
+    # .yml is included because copy_repo_scripts() now also globs runtime data assets
+    # (e.g. memory-tags.yml) that installed scripts require at ${AUTOSPEC_SCRIPTS_DIR}/<x>.yml.
+    ls "$REPO_ROOT"/scripts/*.sh "$REPO_ROOT"/scripts/*.mjs "$REPO_ROOT"/scripts/*.ps1 \
+       "$REPO_ROOT"/scripts/*.yml 2>/dev/null \
       | while read -r f; do basename "$f"; done
     # Shared scripts ship preserving their tree under ~/.autospec/scripts/.
     if [ -d "$REPO_ROOT/skills/autospec-shared/scripts" ]; then
@@ -49,15 +73,42 @@ shippable_paths() {
         "$REPO_ROOT/install.sh" \
         | sed -E 's#^.*::##'
     fi
+    # Per-skill installers ship additional helpers into ~/.autospec/scripts/<basename>
+    # via their SHARED_SCRIPT_FILES / SKILL_SCRIPT_FILES / SHARED_LIB_SCRIPT_FILES lists
+    # (install_shared_scripts / install_skill_scripts copy src -> $HOME/.autospec/scripts/$rel).
+    # Harvest every basename declared in those lists so the guard tracks this shipping
+    # mechanism too. The references being checked come from skill surfaces / script bodies,
+    # not from these installers, so this remains a true cross-check.
+    for inst in "$REPO_ROOT"/skills/*/install.sh; do
+      [ -f "$inst" ] || continue
+      sed -nE 's/^[A-Z_]*SCRIPT_FILES="([^"]*)".*/\1/p' "$inst" | tr ' ' '\n'
+    done
   } | sort -u
 }
 
-# Every ${AUTOSPEC_SCRIPTS_DIR...}/<path> reference, reduced to the path after the var.
+# Every runtime-asset reference resolved against the installed scripts dir, reduced to
+# the path after the resolver. Two reference forms are matched:
+#   1. ${AUTOSPEC_SCRIPTS_DIR[...]}/<name>  — the canonical surface form (SKILL.md,
+#      clusters, prompts, repo-root scripts). Now also matches .yml / .json runtime
+#      assets (e.g. memory-tags.yml), not just .sh/.mjs/.ps1.
+#   2. $STAGE_DIR/<name> and ${SCRIPT_DIR}/<name>  — the sibling-resolver form used
+#      inside per-skill runtime scripts (e.g. harmonize.sh resolves STAGE_DIR to
+#      AUTOSPEC_SCRIPTS_DIR then shells out to "$STAGE_DIR/design-discover.sh"). These
+#      siblings must ALSO be shipped flat into the installed scripts dir, so they belong
+#      in the same shipped-vs-referenced cross-check.
+# lib/ sub-imports (./lib/<x>.mjs) are covered by the doc-orchestrator-style closure
+# guards / copy steps and are not extracted here.
 referenced_paths() {
-  surface_files | while read -r f; do
-    grep -hoE '\$\{AUTOSPEC_SCRIPTS_DIR[^}]*\}/[A-Za-z0-9_./-]+\.(sh|mjs|ps1)' "$f" 2>/dev/null
+  # Match only a single basename after the resolver (no embedded '/'), so relative
+  # ES-module imports (./lib/x.mjs, ../../autospec-shared/scripts/y.mjs) and other
+  # checkout-relative paths are not mistaken for installed-scripts-dir siblings — those
+  # have their own dedicated closure/subdir guards.
+  reference_scan_files | while read -r f; do
+    grep -hoE '\$\{AUTOSPEC_SCRIPTS_DIR[^}]*\}/[A-Za-z0-9_.-]+\.(sh|mjs|ps1|yml|json)' "$f" 2>/dev/null
+    grep -hoE '\$\{?STAGE_DIR\}?/[A-Za-z0-9_.-]+\.(sh|mjs|ps1|yml|json)' "$f" 2>/dev/null
   done \
     | sed -E 's#\$\{AUTOSPEC_SCRIPTS_DIR[^}]*\}/##' \
+    | sed -E 's#\$\{?STAGE_DIR\}?/##' \
     | sort -u
 }
 

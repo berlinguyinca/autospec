@@ -44,6 +44,12 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
 SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
+# Per-skill runtime stage scripts that harmonize.sh shells out to via
+# ${AUTOSPEC_SCRIPTS_DIR}/<name> (resolved as STAGE_DIR). They MUST ship to
+# ~/.autospec/scripts/ or /autospec-harmonize crashes on a clean install. lib/color.mjs
+# is the relative ./lib/color.mjs import shared by design-generalize/design-variants and
+# ships preserving its lib/ subdir so the import resolves alongside the .mjs files.
+SKILL_SCRIPT_FILES="harmonize.sh design-discover.sh design-generalize.mjs design-variants.mjs design-preview.mjs gen-migration-spec.mjs extract-source.mjs extract-runtime.mjs fetch-vendor.sh lib/color.mjs"
 
 # ---------- helpers --------------------------------------------------------
 
@@ -131,6 +137,28 @@ install_shared_scripts() {
         case "$rel" in
             *.sh) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;;
         esac
+    done
+}
+
+resolve_skill_scripts_dir() {
+    if [ -d "$SKILL_DIR/scripts" ]; then
+        printf '%s\n' "$SKILL_DIR/scripts"
+    else
+        printf ''
+    fi
+}
+
+install_skill_scripts() {
+    src_dir="$(resolve_skill_scripts_dir)"
+    [ -n "$src_dir" ] || return 0
+    for rel in $SKILL_SCRIPT_FILES; do
+        src="$src_dir/$rel"
+        if [ -f "$src" ]; then
+            install_one "$src" "$HOME/.autospec/scripts/$rel" || return 1
+            case "$rel" in
+                *.sh|*.mjs) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;;
+            esac
+        fi
     done
 }
 
@@ -259,6 +287,10 @@ fi
 info ""
 info "Shared autospec helper scripts:"
 install_shared_scripts
+
+info ""
+info "autospec-harmonize stage scripts:"
+install_skill_scripts
 
 # ---------- per-harness paths ---------------------------------------------
 
