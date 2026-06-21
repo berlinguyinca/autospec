@@ -56,7 +56,8 @@ PYEOF
   elif command -v yamllint >/dev/null 2>&1; then
     yamllint "$REPO_ROOT/$WORKFLOW"
   else
-    skip "no yaml validator available (python3+yaml or yamllint)"
+    echo "no YAML validator (install python3-yaml or yamllint) — cannot validate workflow YAML" >&2
+    return 1
   fi
 }
 
