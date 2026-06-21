@@ -96,8 +96,15 @@ def test_install_hook_mode_claude_merges_keys(tmp_path, monkeypatch):
     assert data.get("existingKey") == "preserved", "existing keys must not be clobbered"
     assert "PreCompact" in data.get("hooks", {}), "hooks.PreCompact must be added"
     assert "SessionStart" in data.get("hooks", {}), "hooks.SessionStart must be added"
-    # Verify the monitor command is present in the hook lists
-    pre_cmds = data["hooks"]["PreCompact"]
+    # Verify the monitor command is present in the hook lists. Claude Code's
+    # canonical schema nests each entry as
+    # {"hooks": [{"type": "command", "command": "..."}]}; descend into the
+    # nested step commands rather than substring-matching a flat string.
+    pre_cmds = [
+        step.get("command", "")
+        for entry in data["hooks"]["PreCompact"]
+        for step in entry.get("hooks", [])
+    ]
     assert any("autospec_context_monitor" in cmd and "PreCompact" in cmd for cmd in pre_cmds)
 
 
@@ -111,7 +118,18 @@ def test_install_hook_mode_claude_idempotent(tmp_path):
     settings.parent.mkdir(parents=True)
     settings.write_text("{}", encoding="utf-8")
 
-    env = {**os.environ, "HOME": str(tmp_path)}
+    # Isolate the subprocess so the surrounding harness's own hooks can't mutate
+    # the test's tmp HOME/.claude/settings.json *between* the two install runs
+    # (install.sh's writes are themselves idempotent — the flakiness is purely
+    # external mutation). Point Claude Code's config dir away from tmp HOME and
+    # disable harness hooks inside the subprocess.
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path),
+        "CLAUDE_CONFIG_DIR": str(tmp_path / "claude-config-isolated"),
+        "OMC_SKIP_HOOKS": "1",
+        "DISABLE_OMC": "1",
+    }
     cmd = ["bash", str(_INSTALL_SH), "--hook-mode", "claude"]
 
     r1 = subprocess.run(cmd, env=env, capture_output=True, text=True)

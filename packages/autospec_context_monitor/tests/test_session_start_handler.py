@@ -81,8 +81,16 @@ def test_install_sh_registers_session_start():
         assert "SessionStart" in hooks, (
             "hooks.SessionStart must be registered by --hook-mode claude"
         )
-        sess_cmds = hooks["SessionStart"]
+        # Claude Code's canonical schema nests each entry as
+        # {"hooks": [{"type": "command", "command": "..."}]}; descend into the
+        # nested step commands rather than substring-matching a flat string.
+        sess_entries = hooks["SessionStart"]
+        sess_cmds = [
+            step.get("command", "")
+            for entry in sess_entries
+            for step in entry.get("hooks", [])
+        ]
         assert any(
             "autospec_context_monitor" in cmd and "SessionStart" in cmd
             for cmd in sess_cmds
-        ), f"SessionStart hook must invoke autospec_context_monitor; got: {sess_cmds}"
+        ), f"SessionStart hook must invoke autospec_context_monitor; got: {sess_entries}"

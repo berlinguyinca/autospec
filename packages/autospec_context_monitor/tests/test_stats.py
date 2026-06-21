@@ -114,7 +114,29 @@ def test_integration_compact_and_rollover(tmp_stats, tmp_path, monkeypatch):
     engine = Engine()
     harness = "claude"
     tmux_session = "integ-test"
-    cwd = "/integ/project"
+    # Use a real tmp cwd so the rollover's handoff-discovery/validation gate
+    # (clear action reads <cwd>/.turbo/handoff) can find a valid file.
+    cwd = str(tmp_path / "integ-project")
+
+    # The 'handoff' action (added in g-004) blocks on wait_for_handoff for up
+    # to 180s; mock it to return a structurally-valid handoff path immediately
+    # so the rollover path (handoff → clear → resume) completes and records
+    # rollover_fired. Without this mock the wait times out and the clear gate
+    # never fires.
+    handoff_dir = Path(cwd) / ".turbo" / "handoff"
+    handoff_dir.mkdir(parents=True, exist_ok=True)
+    handoff_file = handoff_dir / "2026-06-20-integ.md"
+    handoff_file.write_text(
+        "# Handoff\n\n"
+        "## Status\nIn progress.\n\n"
+        "## Next step\nKeep going.\n\n"
+        + ("x" * 300)
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        main_mod, "wait_for_handoff", lambda *a, **k: handoff_file
+    )
 
     # Tick 1: 52% → compact_fired
     usage1 = Usage(used_tokens=52, max_tokens=100, model="test", estimated=False)
