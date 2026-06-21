@@ -473,6 +473,88 @@ detect_missing_test() {
 # ── §3.1 COMPLEXITY detector ──────────────────────────────────────────────────
 # Function >50 LOC, file >500 LOC, nesting >4.
 
+# py_ast_nesting_findings DIFF_FILE
+# Issue #1245: For Python files, the leading-spaces/4 indentation proxy badly
+# over-counts nesting — module docstrings, multi-line call-argument
+# continuations (e.g. argparse.add_argument), and dict/list literals all look
+# like deep code nesting but carry no control-flow depth. We instead reconstruct
+# the file's added source and walk it with python3's `ast` module, measuring the
+# real maximum nesting of control-flow / scope nodes (If/For/While/With/Try/
+# FunctionDef and their async variants). Per offending function (real depth >4)
+# we emit COMPLEXITY at the function's def line with the true depth.
+#
+# Mirrors check_cyclomatic's optional-python3 pattern: this is only attempted
+# when `python3` is available AND the source parses. On either failure the
+# caller falls back to the indentation proxy (see detect_complexity).
+#
+# Returns 0 if the AST analysis ran (findings emitted as a side effect),
+# non-zero if python3 is unavailable or the source failed to parse — signalling
+# the caller to fall back to the indentation proxy.
+py_ast_nesting_findings() {
+    local diff_file="$1"
+    command -v python3 >/dev/null 2>&1 || return 1
+
+    local src
+    src="$(get_added_lines_for_file "$diff_file")"
+    [ -n "$src" ] || return 1
+
+    # Feed source on stdin; emit "LINENO\tDEPTH" lines for functions whose real
+    # control-flow nesting depth exceeds the threshold (4). Exit non-zero on a
+    # SyntaxError so the caller falls back to the proxy.
+    local out
+    out="$(printf '%s\n' "$src" | python3 -c '
+import ast, sys
+
+THRESHOLD = 4
+NEST = (ast.If, ast.For, ast.While, ast.With, ast.Try,
+        ast.FunctionDef, ast.AsyncFunctionDef)
+# AsyncFor / AsyncWith exist on all supported python3 versions.
+NEST = NEST + (ast.AsyncFor, ast.AsyncWith)
+
+try:
+    tree = ast.parse(sys.stdin.read())
+except SyntaxError:
+    sys.exit(3)
+
+# Record, per enclosing function def, the maximum nesting depth reached within
+# it. Depth counts the control-flow / scope nodes on the path (docstrings,
+# string/dict/list literals and call continuations are NOT ast control nodes,
+# so they never contribute). The function def itself counts as depth 1.
+findings = {}
+
+def walk(node, depth, func_lineno):
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, NEST):
+            d = depth + 1
+            fl = func_lineno
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                fl = child.lineno
+            if fl is not None and d > THRESHOLD:
+                prev = findings.get(fl, 0)
+                if d > prev:
+                    findings[fl] = d
+            walk(child, d, fl)
+        else:
+            walk(child, depth, func_lineno)
+
+walk(tree, 0, None)
+for lineno in sorted(findings):
+    sys.stdout.write("%d\t%d\n" % (lineno, findings[lineno]))
+' 2>/dev/null)"
+    local rc=$?
+    [ "$rc" -eq 0 ] || return 1
+
+    # Emit one finding per offending function.
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out" | while IFS="$(printf '\t')" read -r fline fdepth; do
+            [ -z "$fline" ] && continue
+            emit_capped "COMPLEXITY" "$diff_file" "$fline" \
+                "nesting depth ${fdepth} (threshold: 4) at line ${fline}"
+        done
+    fi
+    return 0
+}
+
 detect_complexity() {
     while IFS= read -r diff_file; do
         [ -z "$diff_file" ] && continue
@@ -490,6 +572,19 @@ detect_complexity() {
         if [ "$added_count" -gt 500 ]; then
             emit_capped "COMPLEXITY" "$diff_file" "-" "file adds ${added_count} lines (threshold: 500)"
         fi
+
+        # Nesting depth: for Python (#1245), prefer a real AST control-flow
+        # depth over the leading-spaces/4 proxy. If python3 is unavailable or
+        # the source fails to parse, py_ast_nesting_findings returns non-zero
+        # and we leave _nesting_proxy=1 so the indentation proxy still runs.
+        local _nesting_proxy=1
+        case "$diff_file" in
+            *.py)
+                if py_ast_nesting_findings "$diff_file"; then
+                    _nesting_proxy=0
+                fi
+                ;;
+        esac
 
         # Function LOC check: scan for function definitions, count body lines
         # Strategy: track function start/end in added lines
@@ -581,14 +676,19 @@ detect_complexity() {
                 fi
             fi
 
-            # Nesting depth check: count leading spaces / 4 as proxy for depth
-            local leading_spaces
-            leading_spaces="$(printf '%s' "$content" | sed 's/[^ ].*//' | wc -c | tr -d ' ')"
-            # leading_spaces includes the newline from wc -c, adjust
-            leading_spaces=$((leading_spaces - 1))
-            local depth=$((leading_spaces / 4))
-            if [ "$depth" -gt 4 ]; then
-                emit_capped "COMPLEXITY" "$diff_file" "$lineno" "nesting depth ~${depth} (threshold: 4) at line ${lineno}"
+            # Nesting depth check: count leading spaces / 4 as proxy for depth.
+            # Skipped for Python files already handled by the AST analysis
+            # above (_nesting_proxy=0); still used for .sh/.mjs and as the
+            # python3-absent / parse-failure fallback.
+            if [ "$_nesting_proxy" -eq 1 ]; then
+                local leading_spaces
+                leading_spaces="$(printf '%s' "$content" | sed 's/[^ ].*//' | wc -c | tr -d ' ')"
+                # leading_spaces includes the newline from wc -c, adjust
+                leading_spaces=$((leading_spaces - 1))
+                local depth=$((leading_spaces / 4))
+                if [ "$depth" -gt 4 ]; then
+                    emit_capped "COMPLEXITY" "$diff_file" "$lineno" "nesting depth ~${depth} (threshold: 4) at line ${lineno}"
+                fi
             fi
         done <<EOF
 $(get_added_lines_with_lineno "$diff_file")
@@ -1050,9 +1150,17 @@ check_duplicate_names() {
         | grep -oE '(def |function |func )[A-Za-z_][A-Za-z_0-9]*' \
         | awk '{print $2}' \
         | sort | uniq -d)" || true
+    # Issue #1245: exempt conventional method names that legitimately recur
+    # across distinct classes/files (e.g. every unittest.TestCase defines its
+    # own setUp/tearDown). Flagging these is a false positive; a real accidental
+    # dup of a domain function name still flags.
+    local _DUP_NAME_EXEMPT=" setUp tearDown setUpClass tearDownClass asyncSetUp asyncTearDown __init__ __enter__ __exit__ main "
     if [ -n "$dupes" ]; then
         echo "$dupes" | while IFS= read -r dupe_name; do
             [ -z "$dupe_name" ] && continue
+            case "$_DUP_NAME_EXEMPT" in
+                *" $dupe_name "*) continue ;;
+            esac
             emit_capped "COMPLEXITY" "-" "-" \
                 "duplicate function name '${dupe_name}' across changed files — reuse or rename to avoid confusion"
         done
