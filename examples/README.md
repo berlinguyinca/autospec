@@ -11,6 +11,7 @@ seed `~/.autospec/` for new users on first run.
 |---------------------|-----------------------------------------------------------------|--------------------------------------------------------------------------|
 | `model-profiles.yml`| [`skills/autospec-run/SKILL.md`](../skills/autospec-run/SKILL.md)        | Maps named model profiles to ctx/reasoning budgets used by Phase 4.       |
 | `project-map.yml`   | [`skills/autospec-classify/SKILL.md`](../skills/autospec-classify/SKILL.md) | Maps `ctx:*` / `reasoning:*` labels to GitHub Projects boards / swimlanes. |
+| `fab.yml`           | [`skills/autospec-fab/SKILL.md`](../skills/autospec-fab/SKILL.md)        | Starter `.autospec/fab.yml` — generator, STL roots, printer profile, and the per-model gate list. |
 
 ## model-profiles.yml
 
@@ -66,6 +67,41 @@ Known label keys (per spec §4.3):
 
 `/autospec-classify` looks up each classified issue's labels in this map and
 moves the row onto the matching board after Phase 3.5 labeling completes.
+
+## fab.yml
+
+Starter `.autospec/fab.yml` for a CAD-as-code repo opting in to `/autospec-fab`.
+It carries the `generator` regen command, `stl_roots`, the FDM `printer` profile,
+an optional `metadata_sidecar` template, and the `models[]` gate list
+(`name` / `stl` / `metadata` / `printable` / `load_critical` / `flow_critical`).
+
+```yaml
+generator: "rm -rf build && .venv/bin/python src/generate.py"
+stl_roots:
+  - "build/stls/manifolds/"
+printer:
+  nozzle_width: 0.4
+  layer_height: 0.2
+  min_perimeters: 3
+  max_overhang_deg: 45
+metadata_sidecar: "manifolds/{name}/metadata.json"
+models:
+  - name: "inlet_manifold"
+    stl: "build/stls/manifolds/inlet_manifold.stl"
+    metadata: "manifolds/inlet_manifold/metadata.json"
+    printable: true
+    load_critical: true
+    flow_critical: false
+```
+
+Required keys in `--validate` mode: `generator` (non-empty) and `models`
+(non-empty list). All other keys default at load time. Each model's `MODELDIR`
+may also hold optional stage sidecars (`circuit.json`, `duct.json`,
+`printer.json`, `load.json`, `flow.json`, `baseline.json`) that the release-gate
+engine threads into the matching stage only when the file exists. See
+[`skills/autospec-fab/README.md`](../skills/autospec-fab/README.md) for the full
+contract and the loader CLI
+([`load-fab-config.sh`](../skills/autospec-fab/scripts/load-fab-config.sh)).
 
 ## How skills consume these
 

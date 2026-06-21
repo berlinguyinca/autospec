@@ -102,6 +102,7 @@ Claude Code, OpenCode, or Codex CLI. Each links to its own README; see
 | [`autospec-qa`](skills/autospec-qa/README.md) | You want to revalidate a running app against its spec and regenerate weak tests. | Builds a spec traceability matrix, exercises UI/API/accessibility/validation flows, and turns gaps into stronger tests or follow-up issues. |
 | [`autospec-playwright`](skills/autospec-playwright/README.md) | You want disciplined no-mock Playwright UI tests. | Runs autospec-test Stage 2A against `.autospec/test.yml` authoring blocks and prints the coverage report. |
 | [`autospec-e2e-clone`](skills/autospec-e2e-clone/README.md) | E2E tests need a safe stand-in for production. | Provisions an isolated, scaled-down, PII-anonymized clone of a production environment. |
+| [`autospec-fab`](skills/autospec-fab/README.md) | A CAD-as-code repo produces printable STL and needs a fabrication release gate. | Regenerates artifacts, then gates every model through geometry, vacuum/pressure, gasket, airflow, slicer, FEA, CFD, render, and vision-advisory stages; opts in via `.autospec/fab.yml`. |
 
 ### Docs and design
 

@@ -1,0 +1,51 @@
+# autospec-fab starter config — copy to .autospec/fab.yml in your CAD-as-code repo.
+#
+# A target repo opts in to /autospec-fab by placing this file at its root in
+# .autospec/fab.yml. The loader skills/autospec-fab/scripts/load-fab-config.sh
+# parses it and emits normalized JSON with the defaults shown below applied.
+#
+#   load-fab-config.sh .autospec/fab.yml             # normalized JSON (defaults applied)
+#   load-fab-config.sh --validate .autospec/fab.yml  # strict: generator + models[] required
+
+# Command that regenerates every STL artifact from source.
+# REQUIRED in --validate mode. Default shown is the value used when omitted.
+generator: "rm -rf build && .venv/bin/python src/generate.py"
+
+# Directories scanned for output STL files.
+# Default: ["build/stls/manifolds/"]
+stl_roots:
+  - "build/stls/manifolds/"
+
+# FDM printer profile used by the slicer stage.
+# Every field defaults if the printer key (or an individual field) is absent.
+printer:
+  nozzle_width: 0.4      # default: 0.4 (mm)
+  layer_height: 0.2      # default: 0.2 (mm)
+  min_perimeters: 3      # default: 3   (min wall = min_perimeters x nozzle_width)
+  max_overhang_deg: 45   # default: 45  (degrees)
+
+# Path template to per-model metadata sidecar JSON files.
+# Optional; null when absent.
+metadata_sidecar: "manifolds/{name}/metadata.json"
+
+# Models to gate. REQUIRED (non-empty) in --validate mode.
+models:
+  - name: "inlet_manifold"
+    stl: "build/stls/manifolds/inlet_manifold.stl"
+    metadata: "manifolds/inlet_manifold/metadata.json"
+    printable: true
+    load_critical: true    # true -> the FEA stage gates this model
+    flow_critical: false   # true -> the CFD stage gates this model
+    #
+    # MODELDIR (the directory holding `metadata` above) may also carry OPTIONAL
+    # per-model stage sidecars. The release-gate engine threads each one into its
+    # stage automatically, but only when the file exists — an absent sidecar means
+    # that stage skips cleanly (correct for a model that lacks the feature):
+    #
+    #   metadata.json   metadata        --model    (required; validated vs schema)
+    #   circuit.json    vacuum-circuit  --circuit
+    #   duct.json       dust-airflow    --duct
+    #   printer.json    slicer          --printer  (per-model slicer override)
+    #   load.json       fea             --load
+    #   flow.json       cfd             --flow
+    #   baseline.json   docs            --baseline (NO_HANDEDIT baseline)

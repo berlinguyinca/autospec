@@ -38,8 +38,15 @@ LLMS_TXT="$REPO_ROOT/llms.txt"
 LLMS_FULL_TXT="$REPO_ROOT/llms-full.txt"
 
 # ── Detect repo slug ──────────────────────────────────────────────────────────
-REPO_SLUG="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null \
-  | sed -E 's|.*[:/]([^/]+/[^/]+?)(.git)?$|\1|' || basename "$REPO_ROOT")"
+# Portable (BSD + GNU): strip a trailing .git and take the repo basename via
+# shell parameter expansion. The old `sed -E` used a lazy `+?` quantifier, which
+# is a PCRE feature BSD sed (macOS) rejects ("RE error") — it then fell through to
+# basename of the worktree dir, corrupting the slug (e.g. a git-worktree run
+# produced "# wt-…" instead of "# autospec").
+REPO_SLUG="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null)"
+REPO_SLUG="${REPO_SLUG%.git}"     # drop trailing .git if present
+REPO_SLUG="${REPO_SLUG##*/}"      # repo basename (handles https and scp-style URLs)
+[ -n "$REPO_SLUG" ] || REPO_SLUG="$(basename "$REPO_ROOT")"
 
 # ── Read README for summary ───────────────────────────────────────────────────
 README_SUMMARY=""

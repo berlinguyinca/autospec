@@ -1029,315 +1029,263 @@ drift.
 
 ---
 
-## Spec: docs/specs/2026-06-15-autospec-explore-discovery-enhance.md
+## Spec: docs/specs/2026-06-18-autospec-upgrade-design.md
 
-# autospec-explore — discovery-quality enhancement (verification, dogfooding, self-leverage)
+# Design spec — `/autospec-upgrade`: behavior-locked, project-independent framework upgrades
 
-## Summary
+- **Date:** 2026-06-18
+- **Status:** design (decompose into auto-implement issues)
+- **Origin:** refined via `/autospec-refine` from "automate the framework-upgrade
+  workflow a departing engineer did manually (Angular/Next/React)."
 
-`/autospec-explore` already runs a perpetual research → ship loop from 7
-deterministic/LLM researchers, aggregates by `confidence × source_weight /
-complexity`, caps top-N, and drains via `/autospec-run` onto a sandbox branch.
-This spec **extends** that pipeline — it does not replace it — to raise the
-quality and breadth of what the loop discovers and to cut the false-positive
-rate that is the skill's known failure mode (the constitution gate has dropped
-0/45 on a flood of low-signal `codebase-signals` hits).
+## Result first
 
-Four additive enhancements:
+Build a new reusable autospec skill, **`/autospec-upgrade`**, that upgrades an
+arbitrary Angular / Next.js / React repo to the latest official versions
+**safely and project-independently** — by locking observable behavior *before*
+touching versions, upgrading **one major at a time** with official codemods,
+and gating completion on **mutation score**, not coverage theater.
 
-1. **Three new research sources** — `quality-resilience`, `dogfooding`,
-   `self-leverage` — that surface QA/stability/operability gaps the current 7
-   sources are blind to (tests that can't fail, kill-mid-run corruption,
-   points where the operator is still a manual bottleneck).
-2. **An adversarial verification stage** in the aggregator: every surviving
-   proposal is handed to an independent skeptic prompted to *refute* it; only
-   survivors are ranked. This is the primary false-positive lever — today
-   ranking has no refutation step at all.
-3. **Severity + ROI in the proposal contract** — severity is weighted by
-   blast radius through auto-merge + lock-step (a silent-wrong-but-green defect
-   outranks any missing feature), and every proposal must name a consumer who
-   benefits today (ROI gate) or it is dropped.
-4. **Pattern synthesis** — before filing, recurring findings (≥2 instances of
-   one class, including recurring `docs/memory/` themes) are clustered into a
-   single *structural-fix* proposal rather than N point patches.
-5. **Domain-specialist researchers (self-discovery + operator selection)** —
-   the researcher roster is no longer a fixed list. On top of the universal
-   base set, the skill detects the repo's domain(s) and runs a dynamic roster
-   of specialist personas appropriate to it (e.g. a quantitative-trading repo
-   gets a `quant-strategy`, `market-risk`, and `exchange-integration`
-   specialist; a healthcare app gets `hipaa-compliance` and `clinical-safety`).
-   The operator can let the skill auto-discover the roster, be asked to confirm
-   or name it, or specify it explicitly — and choose how many specialists run.
+It **composes** existing autospec machinery and builds new code only for the
+genuine gaps. The non-negotiable principle: the engineer this replaces had
+"coverage" and still shipped broken software, so **line coverage is a floor,
+never the gate** — the gate is *behavior-lock + mutation score ≥ pre-upgrade
+baseline*.
 
-> **Researcher accounting.** The baseline is **7 universal researchers**
-> (`spec-vs-code`, `prior-reports`, `codebase-signals`, `open-issues`,
-> `source-analysis`, `dependency-health`, `internet` — corrected from the stale
-> "6" the trio prose carried before this spec) **+ 3 discovery researchers**
-> (enhancement 1) **+ N domain specialists** (enhancement 5). The aggregator
-> already tolerates arbitrary `source` names via `SRC_WEIGHTS.get(src, 0.5)`,
-> so specialists slot in without changing the dedup/verify/rank machinery.
-
-The reusable operator-facing form of this same methodology ships as a runbook
-at `docs/runbooks/discovery-sweep.md`; this spec and that runbook are kept in
-sync (both describe the same five tracks + verify + synthesis).
+### Locked decisions (constraints, not open questions)
+1. Deliverable is the reusable `/autospec-upgrade` skill, not a one-off migration.
+2. Quality gate = E2E/Playwright golden-master behavior-lock **+** Stryker
+   mutation score ≥ pre-upgrade baseline. 80% line/branch coverage across
+   unit/integration/e2e/Playwright is a **floor**, never sufficient alone.
+3. Upgrade strategy = incremental, one major version at a time (mandatory for
+   Angular; applied to Next/React too), each hop delegating to **official
+   tooling**, each hop a revertable checkpoint (tag + commit).
 
 ## Team personality
 
-- **Selected team:** Core product + reliability engineering — product manager,
-  reliability/test engineer, backend developer, security advisor, technical
-  writer.
-- **Why this team fits:** the enhancement is mostly about *quality of
-  discovery* — separating real defects from plausible noise, and weighting
-  blast radius under autonomous auto-merge. Reliability and test judgment
-  dominate; the security advisor owns the live-state and dogfooding read paths.
-- **Risks this team will notice:** the verification stage becoming a rubber
-  stamp; severity inflation; dogfooding reading machine-specific state that
-  breaks portability; new researchers re-flooding the queue with the same
-  low-signal noise the codebase-signals source already produces.
-- **Carry into child issues:** verification defaults to *refuted* under
-  uncertainty; every proposal needs a named consumer; the new researchers
-  obey the same JSON contract and per-round caps as the existing 7; live-state
-  reads degrade gracefully to empty when the paths are absent.
+**Team: Migration & Test-Safety Engineering.** Roles: (1) Build/tooling
+engineer (detection, package-manager/runner adapters), (2) Test-safety engineer
+(characterization tests, golden-master, mutation gate), (3) Framework migration
+specialist (Angular/Next/React official codemods + best-practice schematics),
+(4) Release/SRE (tagging, checkpoints, resumability), (5) Docs engineer
+(migration log). Fits because the work is *risk-managed change to code we
+didn't write and don't fully trust* — the team's instinct is "prove it still
+works before and after, and make every step revertable." Risks this team
+notices: silent behavior drift, assertion-free tests inflating coverage,
+skipped majors, hand-rolled migrations diverging from official codemods,
+non-resumable big-bang upgrades, monorepo/workspace blind spots.
 
-## Review counter-team
-
-- **Selected counter-team:** Reliability + portability + false-positive audit.
-- **What this team should challenge:** does the skeptic pass actually kill
-  bad proposals, or does it pass everything? Does severity weighting ever let
-  a real auto-merge-blast-radius defect get out-ranked by a shiny feature?
-  Does `dogfooding` hard-depend on `~/.autospec/` existing, and does it leak
-  host-specific paths into issue bodies? Do the three new researchers add
-  signal, or just more volume to dedup?
+### Review counter-team
+**Team: Adversarial Reliability & Portability.** Roles: (1) Chaos/edge reviewer,
+(2) Cross-stack portability reviewer (pnpm/yarn/bun, Nx/Turborepo, Karma/Vitest),
+(3) Determinism reviewer. Challenges: "Does the behavior-lock actually catch a
+regression, or just pass vacuously?", "What happens on a repo with **zero**
+tests, a private registry, or a non-npm lockfile?", "Is every phase truly
+resumable and idempotent, or does a mid-hop crash brick the repo?", "Does the
+mutation gate run on a realistic mutant set, or a trivial one?" Stays in scope
+by attacking the skill's own contracts (detection JSON, gate thresholds,
+checkpoint tags), not by expanding feature scope.
 
 ## Architecture
 
-```
-research cycle (each round)
-        │
-   ┌────┴───────────────────────────────────────────────┐
-   │  10 researchers in parallel (7 existing + 3 new)    │
-   │    existing: spec-vs-code, prior-reports,           │
-   │      codebase-signals, open-issues, source-analysis,│
-   │      dependency-health, internet                    │
-   │    NEW:                                              │
-   │      quality-resilience  (4 QA lenses)              │
-   │      dogfooding          (live ~/.autospec state +  │
-   │                           git churn/revert)         │
-   │      self-leverage       (human-in-loop points)     │
-   └────┬───────────────────────────────────────────────┘
-        ▼
-   aggregate + dedup            (unchanged)
-        ▼
-   ADVERSARIAL VERIFY  ← NEW    one skeptic per proposal, refute-by-default;
-        │                       drop refuted; attach verdict + reason
-        ▼
+A new top-level skill mirroring the autospec-* family shape. Trio lockstep
+(`SKILL.md` authoritative; `codex/prompt.md` + `opencode/agent.md` derived via
+`derive-trio.sh --in-place`; goldens via `gen-skill-goldens.sh`), plus
+`install.sh` / `uninstall.sh` / `README.md`, and `autospec-block` markers for
+the shared startup-self-update + harness-adapter sections. The orchestrator and
+helpers live under `skills/autospec-upgrade/scripts/` and install into
+`~/.autospec/scripts/`.
+
+### Composition map (reuse — do NOT reinvent)
+| Capability | Reused skill / interface |
+|---|---|
+| Test authoring + coverage + self-heal | `autospec-test` (Stage 2A, `.autospec/test.yml`, `run-gate.sh`) |
+| Playwright run + coverage report | `autospec-playwright` |
+| No-mock smoke, console/network gate, proof artifacts | `autospec-qa --no-heal` |
+| Migration documentation (docs-as-tests) | `autospec-doc --full` |
+| Worktree / PR-aware ladder / CI-wait | `autospec-run` |
+
+### New components (the genuine gaps)
+1. **Detection** (`upgrade-detect.sh`) → JSON `{frameworks[], versions, package_manager, runners[], monorepo, has_tests}`.
+2. **Behavior-lock orchestration** (`behavior-lock.sh`) — drive `autospec-test`/`autospec-playwright`, capture golden-master snapshots, record the Stryker baseline; refuse to proceed until locked.
+3. **Mutation gate** (`mutation-gate.sh`) — Stryker adapter across jest/vitest/karma; `--baseline` and `--gate <threshold>` modes; writes `.autospec/mutation-proof.json`. The concrete consumer for tracker #420.
+4. **Upgrade engine** (`upgrade-engine.sh` + `compute-upgrade-steps.sh`) — per-major hop loop: official codemod → build/type-check → tests → behavior-lock re-verify → bounded fix-loop → tag+commit.
+5. **Codemod routing** (`codemod-route.sh`) — per framework: Angular `ng update` + `ng generate @angular/core:standalone` modes; Next `npx @next/codemod upgrade` + `next-async-request-api`; React `npx codemod react/19/migration-recipe` + `types-react-codemod preset-19`.
+6. **Best-practice migration phase** — applied only after versions green, each behind behavior-lock + new tests.
+7. **Tagging + report** (`tag-upgrade.sh`) — `pre-upgrade-<fw>-<ver>` / `post-upgrade-<fw>-<ver>`, structured `.autospec/upgrade-report.json`.
+8. **Orchestrator** (`upgrade-orchestrator.sh`) — resumable state machine over `.autospec/upgrade-state.json`.
+
+## Phase contract (each phase a checkpoint; resumable; bounded fix-loops; fail-to-operator on unbounded breakage)
+
+- **Phase 0 — Detect.** Emit detection JSON. Next implies React. Explicitly
+  handle: zero tests present, non-npm package manager, monorepo with multiple
+  apps (operate per-project), private registry (do not block on auth — surface).
+- **Phase 1 — Behavior-lock (gate before any upgrade).** Generate
+  characterization tests biased to E2E/Playwright golden-master (refactor-robust)
+  + unit/integration to the 80% **floor**; record Stryker mutation **baseline**.
+  Tag `pre-upgrade-<fw>-<ver>`. Hard rule: no upgrade step runs until behavior
+  is locked and the mutation baseline is recorded.
+- **Phase 2 — Incremental upgrade loop.** For each major hop (Angular strictly
+  one-at-a-time): official codemod/update → build + type-check → run tests →
+  re-verify golden-master → bounded fix-loop → tag + commit. "Latest" resolved
+  per framework, hop by hop.
+- **Phase 3 — Best-practice migration.** Standalone/signals, App Router / async
+  request APIs, React 19 patterns — only after versions are green; each behind
 
 ---
 
-## Spec: docs/specs/2026-06-04-skill-token-efficiency-design.md
+## Spec: docs/specs/2026-06-18-autospec-fab-design.md
 
-# Skill-base token efficiency + determinization boundary
+# autospec-fab — generative 3D-model fabrication QA skill (design)
 
-- **Date:** 2026-06-04
-- **Mode:** autonomous (`/autospec --autonomous` via `/autospec-refine`; refinement
-  artifact `.autospec/refinements/review-the-whole-autospec-skill-base-dis-2026-06-04T20-12-10Z.json`)
-- **Prior art (CLOSED — do not re-litigate):** tracker #421 tooling-optimization
-  (deterministic-first classify, lint-issue, lint-implementation), tracker #420
-  mutation testing, prompt-caching layer (`bundle-static-context.sh`, CACHE
-  BOUNDARY markers, `gen-implementer-prompt.sh`/`gen-reviewer-prompt.sh`),
-  ship-completeness guard + `${AUTOSPEC_SCRIPTS_DIR}` sweep (#1012/#1014).
+Status: proposed
+Owner: berlinguyinca
+Slug: autospec-fab
 
-## 1. Goal
+## Goal
 
-Reduce the per-invocation and on-disk token footprint of the 24-skill autospec
-family without changing any loaded skill behavior, and pin the
-deterministic-vs-LLM boundary for every pipeline touchpoint with
-fixture-proven evidence instead of intuition.
+Add a generic `autospec-fab` skill to the autospec family that lets the autospec
+pipeline (define → run → review → Phase 5.5) autonomously implement **parametric
+3D / CAD-as-code** features whose output is **3D-printable STL** that is proven
+watertight, structurally sound under its intended loads, fluid/airflow-correct,
+and **automatically visually inspected** before release. The skill is repo-generic:
+it drives any CAD-as-code project through a `.autospec/fab.yml` contract.
 
-## 2. Team personality
+## Locked decisions
 
-- **Team:** Legacy/refactor — architect, maintainer, test engineer,
-  documentation owner.
-- **Why:** the work is single-sourcing duplicated prose, extracting inline
-  bash, and adding regression-proof harnesses over an existing, shipping
-  system; no new product surface.
-- **Risks this team must notice:** byte-drift between repo source and
-  installed artifacts; validate.sh gates silently weakened during conversion;
-  a "dedup" that changes loaded context; mechanical sweeps damaging prose.
-- **Emphasis for children:** every change is provable by diffing expanded
-  output against golden snapshots recorded BEFORE conversion.
+1. **Scope:** generic `autospec-fab` skill in the autospec family (not a one-repo
+   fork). Target repos opt in via `.autospec/fab.yml`.
+2. **CAD backend:** **FreeCAD** scripting (headless `freecadcmd`/`FreeCAD` Python
+   API) for geometry ops, sections, and renders. STL is exported from FreeCAD and
+   mesh-level checks use `trimesh`.
+3. **Physical-test fidelity:** **full FEA + CFD from the start** — CalculiX (`ccx`)
+   for structural/load FEA and OpenFOAM for fluid/airflow CFD, on every part the
+   contract flags load- or flow-critical. Results are cached by geometry hash so
+   unchanged parts skip re-analysis (gate-runtime control).
+4. **Visual-inspection authority:** deterministic geometry checks are the
+   **blocking** gate; the LLM-vision pass over the 16-view contact sheet runs and
+   surfaces findings as **non-blocking** warnings/follow-ups ("geometry gates,
+   vision advises").
 
-### Review counter-team
+## Architecture (mirrors autospec-harmonize / autospec-upgrade)
 
-- **Counter-team:** Operations & regression review — SRE/release engineer,
-  regression-test engineer, security advisor.
-- **Challenge:** does self-update still work end-to-end after install-time
-  expansion (bootstrap → install.sh → expanded skills)? Can a stale installed
-  expander mismatch new templates (version skew)? Do the new validate.sh
-  gates fail CLOSED on a missing template? Could marker expansion ever execute
-  content (injection via template params)?
-- **Scope discipline:** findings stay inside each child's stated scope.
+### Lock-step trio skill `skills/autospec-fab/`
+`SKILL.md` (authoritative) + byte-identical `codex/prompt.md` + `opencode/agent.md`
+(via `derive-trio.sh --in-place`) + regenerated skill goldens; ships
+`install.sh`/`uninstall.sh`/`README.md`; `autospec-block` startup-self-update +
+harness-adapter. Encodes the STL Modeling Rules (below), the change workflow, and
+the release-gate contract. Validated by `check_autospec_fab_contract` in
+`scripts/validate.sh`, which also runs the fab bats/test suite + a dogfood model.
 
-## 3. Baseline (measured 2026-06-04, by the refinement lens run)
+### `.autospec/fab.yml` contract (per target repo)
+Declares: generator entrypoint (default `rm -rf build && .venv/bin/python
+src/generate.py`), STL output roots (`build/stls/manifolds/`, catalog
+`manifolds/...`), per-model **metadata sidecars** (dims, material + print
+orientation, ports, gaskets, load/flow-critical flags), printer profile (nozzle,
+layer height, min perimeters, max overhang), and which models are printable.
 
-- 24 multi-harness skills; **81,825 words** across `skills/*/SKILL.md`
-  (~109k tokens if all loaded; one loads per invocation). Largest:
-  `autospec` 12,666w/1324L; `autospec-run` 10,638w; `autospec-qa`
-  10,515w/1666L; `autospec-define` 7,168w; `autospec-split` 5,072w.
-- **Verbatim duplication (on disk):** `## Startup self-update` block —
-  45 lines/~233 words × 20 skills (~4,660 words; ×3 lockstep copies ≈ 14k
-  words on disk). `## Required capabilities & harness adapter` table (17L) +
-  `Subagent dispatch policy` row × 24 skills (×3 lockstep).
-- **No shared-include mechanism exists**; `scripts/validate.sh` (~40 gates)
-  ENFORCES the duplication byte-identically (`check_self_update`,
-  `check_startup_preflight`, `check_lockstep`,
-  `check_agents_md_subagent_matrix`).
-- Tier tables are correctly referenced from AGENTS.md (not duplicated).
-- `scripts/refine-prompt.sh` lens functions are template-append boilerplate
-  (canned strings not derived from the prompt) with an LLM escalation hatch
-  (`refine-prompt-lens-llm.sh`, `degraded_fallback=true`) — the canonical
-  failed-determinization precedent.
+### Release-gate engine `stl-release-gate.py`
+Sequences ordered, individually-tested stages; emits a schema-validated
+`.autospec/fab/release-gate.json` (single source of truth). Stages, in order:
 
-## 4. Deterministic-vs-LLM decision table (D6 commits this as a living doc)
+1. **geometry reload** — re-open every STL; parse OK.
+2. **watertight** — `trimesh.is_watertight` per body.
+3. **single-body connectivity** — `mesh.split()` yields the expected body count
+   (default 1); reject disconnected bodies.
+4. **metadata** — sidecar validates against `autospec-fab-model.schema.json`.
+5. **vacuum fitting QA** — every NPT pilot preserves tap access, fitting-body
+   clearance, entry relief, usable thread depth; every fitting/hose/socket/port has
+   ≥5 mm radial free clearance unless a larger connector envelope is documented;
+   NPT ports integrated into the body/reinforced block (reject narrow towers/ears/
+   bosses).
+6. **vacuum circuit QA** — graph reachability proves every intended inlet connects
+   to each intended gasket/cavity/port; isolated circuits stay isolated unless
+   declared shared-input self-clamping (full-size internal branches); reject relief
+   valves / bleed ports / intentional leaks / restrictors on low-flow pump models.
+7. **gasket leak sim** — every exposed gasket groove has ≥5 mm surrounding plastic
+   outside the groove; seal-face continuity / pressure-boundary check; reject
+   exposed gasket sides.
+8. **dust leak/airflow QA** — full-size unobstructed hose/duct/socket openings;
+   monotonic cross-section; reject blocked ports, disconnected ducts, printed gate
+   slots, or PVC used as the printed airflow duct.
+9. **slicer wall checks** — min wall = printer min-perimeters × nozzle width;
+   overhang-angle limit; section QA at key planes.
+10. **structural FEA** (CalculiX) — every load-critical part holds its intended
+    load with the configured safety factor, using material + **print-orientation
+    anisotropy** from the metadata. Cached by geometry hash.
+11. **fluid/airflow CFD** (OpenFOAM) — every flow-critical part meets pressure-drop
+    / velocity / no-stagnation targets; dust-hood outlet transitions analyzed.
+    Cached by geometry hash.
+12. **render QA + 16-view contact sheet** — headless FreeCAD render of the 16+
+    required angles (right/left/front/back/top/bottom, the eight 45° diagonals, plus
+    extra diagonals to expose ports/sockets/gaskets/lugs/overhangs/transitions) and
+    slicer-like rotated/top-side views; assemble a contact sheet.
+13. **visual inspection (vision-advises)** — LLM-vision pass judges the contact
+    sheet against the modeling rules (exposed gasket sides, blocked NPT,
+    disconnected bodies, overhangs); adversarially verified; emits **non-blocking**
+    findings.
+14. **docs + PDFs** — MANIFEST.md / README.md / FITTINGS_AND_SCREWS.md sync;
+    BOM/PDF/render regen consistent; `NO_HANDEDIT_GENERATED` guard forbids hand
+    edits to `build/`, `BOM.md`, PDFs, renders, section images, contact sheets.
 
-| Touchpoint | Current | Verdict | Rationale |
-|---|---|---|---|
-| Phase 1 research | LLM (Tier A, 25-call cap) | KEEP-LLM | open-ended exploration |
-| Phase 2 brainstorm/design | LLM (orchestrator) | KEEP-LLM | creative spec synthesis |
-| Phase 3 decompose | LLM (Tier A) + lint-issue.sh | KEEP-LLM (det lint retained) | semantic spec→issue mapping |
-| Phase 3.5 classify | deterministic-first (classify-model-fit.sh) | DONE (#421) | LLM only on ambiguity |
-| Phase 4 implementer | LLM (Tier B) + lint-implementation.sh | KEEP-LLM (det lint retained) | code authoring |
-| Phase 4 guardian+LGTM | hybrid (det RULE_IDs + LLM semantic) | KEEP-HYBRID | working as designed |
-| Phase 5.5 gap audit | LLM (Tier A) | KEEP-LLM | cross-issue integration reasoning |
-| refine lenses | deterministic boilerplate + LLM hatch | **INVERT: LLM-first / det-assist** | fixture-proven below quality bar (§7) |
+Hard reject (gate fail) on: blocked NPT access, exposed gasket sides, disconnected
+flow, non-watertight mesh, disconnected bodies, known leakage, FEA below safety
+factor, or CFD target miss.
 
-Default for any future conversion: **KEEP-LLM-WITH-ESCALATION unless a
-quality-differential fixture proves deterministic ≥ LLM** (§7).
+## STL Modeling Rules — split
 
-## 5. Architecture
-
-### D1 — Token baseline tooling (deterministic)
-`scripts/skill-token-report.sh`: per skill → SKILL.md words → est. tokens
-(words×1.33, integer) → duplicated-block share (% of words inside canonical
-blocks). Emits a markdown table; `--json` emits machine-readable rows.
-Committed report: `docs/reports/skill-token-baseline.md` (regenerated by the
-script; staleness checked by comparing regenerated output in validate.sh —
-warn-only).
-
-### D2 — Canonical block templates + expander (single-source mechanism)
-- `templates/skill-blocks/startup-self-update.md` (one `{{SKILL_NAME}}`
-  parameter), `templates/skill-blocks/harness-adapter.md`,
-  `templates/skill-blocks/dispatch-policy-row.md` — bodies copied verbatim
-  from today's canonical text.
-- `scripts/expand-skill-blocks.sh <file>`: replaces
-  `<!-- autospec-block:<name> param=value -->` markers with the template body
-  (param substitution is literal string replace of `{{KEY}}`; NO eval, NO
-  shell expansion — counter-team injection guard). Idempotent on files
-  without markers. Fails non-zero on unknown block name or missing template
-  (fail closed).
-- **Golden snapshots recorded BEFORE any conversion:**
+- **Gateable (deterministic, stages 1-12 above + FEA/CFD):** all clearance,
+  watertightness, connectivity, NPT-access, full-size-duct, gasket-wall, isolation,
 
 ---
 
-## Spec: docs/specs/2026-06-04-autospec-playwright-authoring-design.md
+## Spec: docs/specs/2026-06-17-autodoc-content-fidelity-design.md
 
-# autospec-playwright — disciplined no-mock Playwright UI-test authoring
+# Design spec — round 2: raise `/autospec-doc` LLM-artifact content fidelity
 
-- **Date:** 2026-06-04
-- **Status:** approved for decomposition
-- **Relation to prior specs:** folds in and supersedes-by-recency the unimplemented
-  `docs/specs/2026-05-27-playwright-control-effect-coverage-design.md` (landed as docs
-  via PR #611, never decomposed). Extends `docs/specs/2026-05-21-autospec-test-design.md`
-  (v1) and `2026-05-21-autospec-test-invariants-design.md` (v2). Consumes the
-  environment contract of `2026-05-22-autospec-e2e-clone-design.md`.
+- **Branch:** `feat/autodoc-fidelity`
+- **Follows:** round 1 (`docs/specs/2026-06-16-explore-autodoc-improve-round-1-design.md`)
+- **Trigger:** the round-1 preview shipped complete *structure* but placeholder-grade
+  *content* in the LLM artifacts. This round closes that gap.
 
-## 1. Goal
+## Result first
 
-Add a capability that **generates** Playwright UI tests which drive the actual
-application in a real browser against a real backend, asserting on rendered DOM
-and persisted state — under a deterministic, lint-enforced discipline: no
-mocking ever, selector-source verification, strict-mode locators, broad
-surface coverage with an explicit coverage percentage, and a
-test-bug-vs-app-bug triage rule that never weakens assertions.
+Three content-fidelity defects in `skills/autospec-doc/scripts/gen-llms-full.mjs`,
+all fixed scripts+tests only (no SKILL.md/trio change):
 
-This is the **authoring** counterpart to autospec-test's existing **gating**
-machinery. The gate answers "is coverage sufficient?"; this stage answers
-"write the disciplined tests that make it sufficient."
+1. **Descriptions were the `src:` glob, not prose.** `pageSummary` and
+   `fillManifest`'s summary loop skipped only lines that *individually* start with
+   `<!--`, so the multi-line `autospec-doc-scope` comment's interior `src: [...]`
+   line was returned as the "summary." Fixed: a shared `firstProseLine()` that
+   skips whole comment blocks and the italic audience-boilerplate line, reaching
+   the real feature summary. This corrects `llms.txt` link descriptions, manifest
+   `summary`, and `llms-full.txt` per-section summaries at once.
 
-## 2. Team personality
+2. **`reverse-routing` was doc→itself identity** (`docs/x.md#L1 -> docs/x.md`).
+   Fixed: `parseScopeSrc()` reads each page's scope `src:` list and the block now
+   emits the intended **source_file → docs** map (`src/foo.mjs -> docs/.../foo.md`),
+   sorted and deterministic.
 
-- **Team:** Frontend/product — frontend developer, UX designer, accessibility
-  reviewer, API/backend developer, QA engineer.
-- **Why:** the generated artifact is UI tests; the dominant risks are
-  UI-shaped — hallucinated selectors, strict-mode collisions, route coverage
-  blind spots, auth bootstrap, a11y-role locator correctness.
-- **Risks this team is expected to notice:** invented `data-testid`s, locators
-  that pass in isolation but collide under strict mode, empty-state vs
-  populated-state confusion, races before refetch, native HTML5 validation
-  pre-empting JS handlers.
-- **Emphasis carried into child issues:** every selector must be traceable to
-  component source; every write asserted both in DOM and via the real API.
+3. **Manifest `public_api` was empty** on audience pages (only `## CLI/API`
+   backticks were scanned). Fixed: `extractExports()` reads each page's real
+   `code_entry_points` under a `repoRoot` and records ESM exports
+   (`function/const/let/var/class` + `export { … }`) and module-level Python
+   `def/class`; backtick tokens remain a supplement. `fillManifest` gains an
+   optional `{ repoRoot = process.cwd() }`.
 
-### Review counter-team
+## Out of scope
+- Reshaping `modules[]` away from one-entry-per-page (kept for backward
+  compatibility; `public_api` now carries the real code surface instead).
+- Glossary auto-extraction beyond existing `<!-- autospec-concept: -->` markers.
+- Mermaid node-label polish (Track D heuristic).
 
-- **Counter-team:** Contract & operations review — API-contract reviewer,
-  security/ops advisor, maintainer.
-- **Blind spots to challenge:** (i) the generated reset endpoint must be
-  unreachable in production-like deployments (env-gate + forbidden-URL rails);
-  (ii) lint regexes must not be greenwashable (string-concat evasion of the
-  mock-import ban); (iii) shared-helper centralization must not become a
-  single mutable file every fan-out author edits; (iv) coverage-% arithmetic
-  must come from the crawler manifest, not the author's self-report.
-- **Scope discipline:** review stays inside each issue's stated scope while
-  applying that lens.
+## Acceptance criteria
+- [ ] `llms.txt` link descriptions and manifest `summary` are the feature prose, never `src: [`.
+- [ ] `reverse-routing` maps source files to docs; no `#L1 -> ` identity lines.
+- [ ] `fillManifest(manifest, pages, { repoRoot })` populates `public_api` from real exports; non-exported symbols excluded.
+- [ ] `generateLlmsFull` stays byte-identical across runs on the same input.
+- [ ] `node --test skills/autospec-doc/tests/gen-llms-full.test.mjs` passes; `bash scripts/validate.sh` exits 0.
 
-## 3. Architecture (locked: thin skill + autospec-test stage)
-
-Two deliverables, zero duplicated machinery:
-
-1. **`skills/autospec-playwright/`** — a **thin operator-facing dispatcher**
-   (full lockstep trio: `SKILL.md` + `codex/prompt.md` + `opencode/agent.md`,
-   plus `install.sh`/`uninstall.sh`/`validate.sh`/`README.md`). It contains
-   NO authoring machinery. It: detects/initializes `.autospec/test.yml`
-   (`e2e.authoring` + `e2e.reset` blocks), then invokes the autospec-test
-   authoring stage below, then prints the coverage report. Registered in the
-   root `scripts/validate.sh` skill arrays and `install.sh` usage strings.
-2. **autospec-test "Stage 2A — disciplined authoring"** — a new stage between
-   Stage 1 (unit gate) and Stage 2 (E2E gate) in
-   `skills/autospec-test/SKILL.md`, gated on `e2e.authoring.enabled`. All new
-   scripts live under `skills/autospec-test/scripts/`. It reuses, unchanged:
-   `ui-crawler.mjs` + `crawler-v2/` (surface enumeration),
-   `playwright-config-resolver.mjs` (URL contract),
-   `adapters/playwright.mjs`, the self-heal loop + `loop-classifier.mjs`
-   (triage), `assertion-shift-classifier.mjs` (anti-greenwash), Mode I/II
-   safety layers and `forbidden-url-check.mjs`, and the `@autospec/test`
-   helper library (shared harness base). The 2026-05-27 `e2e.control_effects`
-   schema and effect-assertion taxonomy are implemented as part of this stage
-   (control inventory feeds the authoring prompt; effect assertions are the
-   required assertion vocabulary).
-
-## 4. Contract extensions (`.autospec/test.yml`)
-
-```yaml
-e2e:
-  authoring:
-    enabled: true
-    spec_dir: e2e/specs            # one file per route-cluster
-    helpers_dir: e2e/helpers       # shared harness; authors read-only
-    route_clusters: auto           # auto (crawler-derived) | explicit list
-    coverage_target_pct: 80        # % of crawler-enumerated surfaces with
-                                   # render+empty-state+primary-action tests
-    fanout_max: 4                  # max concurrent author subagents
-  reset:
-    endpoint: /api/test/reset      # OR cmd: "make db-reset"
-    generate_if_missing: true      # locked: fix the environment
-    guard_env: AUTOSPEC_TEST_STACK # endpoint 404s unless this env var is set
-  control_effects:                 # from 2026-05-27 spec, implemented here
-    enabled: true
-```
-
-Defaults are conservative: `authoring.enabled` defaults to `false`;
-`generate_if_missing` requires Mode I (strict isolation) or an acked Mode II
-backup driver before touching app code. `forbidden_url_patterns` remains
-mandatory and fail-closed (v1 §safety), and the pre-flight production-hostname
-check runs before any authoring or reset-generation step.
+## Verification
+- Primary: `node --test skills/autospec-doc/tests/gen-llms-full.test.mjs`
+- Full: `bash scripts/validate.sh` + a regenerated preview showing prose descriptions, source→doc routing, and populated `public_api`.

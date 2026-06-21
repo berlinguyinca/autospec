@@ -80,6 +80,11 @@ task-oriented "I want to…" guidance, see [`README.md`](README.md).
 - Trigger: provision an isolated, scaled-down, PII-anonymized clone of a production environment for E2E testing (autospec-test Mode II).
 - Keywords: `autospec-e2e-clone`, `clone production`, `anonymized environment`, `e2e clone`
 
+### `autospec-fab`
+- Path: [`skills/autospec-fab`](skills/autospec-fab)
+- Trigger: autonomous fabrication QA gate for parametric 3D / CAD-as-code repos that produce printable STL — regenerate artifacts, then gate every model through geometry, vacuum/pressure, gasket, airflow, slicer, FEA, CFD, render, and vision-advisory stages before release. Opts in via `.autospec/fab.yml`.
+- Keywords: `autospec-fab`, `STL`, `3D print`, `FreeCAD`, `CAD-as-code`, `fabrication QA`, `release gate`, `watertight`, `FEA`, `CFD`
+
 ## Docs and design
 
 ### `autospec-doc`
