@@ -502,6 +502,28 @@ check_shared_script_install() {
     done
 }
 
+# Mutation + negative-path lint (tracker #420 deliverables) — these existed but
+# were never wired into the gate, so the assertion-density / negative-path-pair
+# floor only ran if a human invoked them. Wire the cheap lint + the mutation-
+# tooling bats here. (The full mutation RUN — run-mutation-test.sh against the
+# whole suite — is intentionally NOT run per-validate; it's too expensive and is
+# meant for CI / on-demand. Here we gate the negative-path-pair lint and the
+# mutation tooling's own tests.)
+check_mutation_and_negative_path() {
+    info "mutation + negative-path lint (#420)"
+    if [ -f scripts/check-negative-path-pairs.sh ]; then
+        bash scripts/check-negative-path-pairs.sh >/tmp/validate-negpath.log 2>&1 \
+            || { cat /tmp/validate-negpath.log >&2; fail "check-negative-path-pairs.sh: failed"; }
+    fi
+    if command -v bats >/dev/null 2>&1; then
+        for t in tests/run-mutation-test.bats tests/mutation-adapters.bats tests/bash-mutate.bats; do
+            [ -f "$t" ] || continue
+            bats "$t" >/tmp/validate-mut.log 2>&1 \
+                || { cat /tmp/validate-mut.log >&2; fail "$t: failed"; }
+        done
+    fi
+}
+
 # Two-tier subagent model selection invariants: every dispatching SKILL.md
 # must include the literal "**Model tier:**" directive at least once, every
 # such directive must specify either "Tier A (spec work)" or
@@ -2760,6 +2782,7 @@ main() {
     check_enforcement_defaults_section
     check_codex_skills_install
     check_shared_script_install
+    check_mutation_and_negative_path
 
     check_agents_md_subagent_section
     check_agents_md_subagent_matrix
