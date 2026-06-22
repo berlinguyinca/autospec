@@ -285,22 +285,29 @@ def test_g003_resume_reads_cwd_handoff(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# g-004 — wait_for_handoff is called between handoff and clear
+# g-004 — handoff wait is non-blocking (issue #898 Part 2, FIX B)
+#
+# The handoff wait NO LONGER blocks inside _dispatch (that froze the whole poll
+# loop for up to 180s). _dispatch('handoff') now only injects /create-handoff
+# and returns immediately; the wait is owned by the poll loop via
+# _PendingHandoff / _advance_pending_handoff, which polls non-blockingly and
+# dispatches the deferred clear+resume once the file appears (or reverts to
+# COMPACTED on deadline). These tests lock in that contract.
 # ---------------------------------------------------------------------------
 
 
-def test_g004_dispatch_handoff_calls_wait_for_handoff(tmp_path):
-    """Action('handoff') must call wait_for_handoff after injecting the prompt."""
+def test_g004_dispatch_handoff_injects_without_blocking(tmp_path):
+    """Action('handoff') injects /create-handoff and returns WITHOUT calling
+    wait_for_handoff (no 180s block inside _dispatch)."""
     from autospec_context_monitor.__main__ import _dispatch
 
     adapter = _FakeAdapter()
-    fake_path = _make_valid_handoff(tmp_path / ".turbo" / "handoff")
 
     wait_calls: list = []
 
-    def _fake_wait(repo_root, since, timeout=180.0, **_kw):
-        wait_calls.append((repo_root, since, timeout))
-        return fake_path
+    def _fake_wait(*a, **_kw):
+        wait_calls.append(a)
+        raise AssertionError("wait_for_handoff must NOT be called from _dispatch")
 
     injects: list[str] = []
 
@@ -309,35 +316,6 @@ def test_g004_dispatch_handoff_calls_wait_for_handoff(tmp_path):
 
     with patch("autospec_context_monitor.__main__.inject", _fake_inject):
         with patch("autospec_context_monitor.__main__.wait_for_handoff", _fake_wait):
-            _dispatch(
-                Action("handoff"),
-                "test-sess",
-                tmp_path / "log",
-                harness="fake",
-                cwd=str(tmp_path),
-                pct=0.85,
-                adapter=adapter,
-            )
-
-    assert wait_calls, "wait_for_handoff must be called during 'handoff' dispatch"
-    repo_root, since, timeout = wait_calls[0]
-    assert Path(repo_root) == tmp_path
-    assert timeout == 180.0
-    assert since <= time.time()
-
-
-def test_g004_dispatch_handoff_aborts_on_timeout(tmp_path):
-    """When wait_for_handoff raises HandoffTimeoutError, _dispatch returns True (canceled)."""
-    from autospec_context_monitor.__main__ import _dispatch
-    from autospec_context_monitor.handoff import HandoffTimeoutError
-
-    adapter = _FakeAdapter()
-
-    def _raise(*_a, **_kw):
-        raise HandoffTimeoutError("no file appeared")
-
-    with patch("autospec_context_monitor.__main__.inject", lambda *_a, **_kw: None):
-        with patch("autospec_context_monitor.__main__.wait_for_handoff", _raise):
             result = _dispatch(
                 Action("handoff"),
                 "test-sess",
@@ -348,9 +326,65 @@ def test_g004_dispatch_handoff_aborts_on_timeout(tmp_path):
                 adapter=adapter,
             )
 
-    assert result is True, (
-        "HandoffTimeoutError must cause _dispatch to return True (canceled) "
-        "so the main loop reverts state to COMPACTED instead of firing /clear."
+    assert "handoff" in adapter.requested
+    assert injects == ["/FAKE_HANDOFF"]
+    assert result is False, "_dispatch('handoff') must not signal cancel by itself"
+    assert not wait_calls, "the 180s blocking wait must not run inside _dispatch"
+
+
+def test_g004_advance_pending_handoff_completes_on_file(tmp_path):
+    """Once the handoff file appears, _advance_pending_handoff dispatches the
+    deferred clear+resume and reports ('done', not-canceled)."""
+    from autospec_context_monitor.__main__ import _advance_pending_handoff, _PendingHandoff
+
+    adapter = _FakeAdapter()
+    _make_valid_handoff(tmp_path / ".turbo" / "handoff")
+
+    injects: list[str] = []
+
+    pending = _PendingHandoff(
+        since=time.time() - 5,  # handoff written after this
+        deadline=time.monotonic() + 180.0,
+        rest=[Action("clear"), Action("resume")],
+    )
+
+    with patch("autospec_context_monitor.__main__.inject", lambda _s, t, **_k: injects.append(t)):
+        with patch("autospec_context_monitor.__main__.wait_for_cancel", return_value=False):
+            status, canceled = _advance_pending_handoff(
+                pending, tmp_path, tmp_path / "log",
+                harness="fake", tmux_session="test-sess", cwd=str(tmp_path),
+                pct=0.85, adapter=adapter,
+            )
+
+    assert status == "done"
+    assert canceled is False
+    assert "/FAKE_CLEAR" in injects  # deferred clear ran
+    assert any("continue from where" in t.lower() for t in injects)  # resume ran
+
+
+def test_g004_advance_pending_handoff_aborts_on_deadline(tmp_path):
+    """Past the deadline with no handoff file, _advance_pending_handoff reports
+    ('timeout', canceled=True) so the loop reverts state to COMPACTED."""
+    from autospec_context_monitor.__main__ import _advance_pending_handoff, _PendingHandoff
+
+    adapter = _FakeAdapter()  # no handoff file written
+
+    pending = _PendingHandoff(
+        since=time.time(),
+        deadline=100.0,
+        rest=[Action("clear"), Action("resume")],
+    )
+
+    status, canceled = _advance_pending_handoff(
+        pending, tmp_path, tmp_path / "log",
+        harness="fake", tmux_session="test-sess", cwd=str(tmp_path),
+        pct=0.85, adapter=adapter, now=101.0,  # past deadline
+    )
+
+    assert status == "timeout"
+    assert canceled is True, (
+        "deadline-exceeded handoff must signal cancel so the main loop reverts "
+        "state to COMPACTED instead of firing /clear."
     )
 
 

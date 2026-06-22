@@ -23,7 +23,9 @@ The daemon (tmux mode):
    - Checks ``~/.autospec/no-auto-rollover.flag`` (kill-switch).
    - Checks the tmux session is still alive.
    - Reads Usage via the selected adapter; runs Engine.classify(); dispatches
-     Actions via inject/wait_for_handoff.
+     Actions via inject. A pending ``/create-handoff`` is awaited
+     non-blockingly across ticks (see ``_PendingHandoff``) so the poll cadence
+     is never frozen.
 4. Removes the PID file on normal exit or SIGTERM.
 """
 
@@ -40,16 +42,37 @@ from pathlib import Path
 
 from .adapters.base import TranscriptNotFoundError, Usage
 from .engine import Action, Engine, State
-from .handoff import HandoffTimeoutError, validate_handoff, wait_for_handoff
+from .handoff import (
+    HandoffTimeoutError,
+    check_handoff,
+    validate_handoff,
+    wait_for_handoff,
+)
+
+# ``wait_for_handoff`` / ``HandoffTimeoutError`` are no longer called from the
+# dispatch path (the handoff wait is now non-blocking, owned by the poll loop
+# via ``_PendingHandoff`` / ``_advance_pending_handoff``). They remain imported
+# as part of this module's public surface: external callers and existing tests
+# reference ``autospec_context_monitor.__main__.wait_for_handoff``.
+_ = (HandoffTimeoutError, wait_for_handoff)
 from .injector import SessionGone, inject, session_exists, wait_for_cancel, wait_for_prompt
 from . import stats as _stats
 
 _POLL_INTERVAL = 15  # seconds
+# Wall-clock budget for the harness to write a handoff file after /create-handoff
+# is injected. Previously consumed by a single 180s blocking wait_for_handoff;
+# now spread across poll ticks so the loop stays responsive (kill-switch /
+# session-alive / usage keep being checked while the handoff is pending).
+_HANDOFF_DEADLINE = 180.0  # seconds
 _KILL_SWITCH = Path.home() / ".autospec" / "no-auto-rollover.flag"
 _MONITORS_DIR = Path.home() / ".autospec" / "monitors"
 
 # Hook-mode constants
 _HOOK_EVENTS = ("PreCompact", "SessionStart")
+# Window (seconds) used to judge a handoff "fresh" when no explicit session
+# start timestamp is available — a handoff written within this many seconds of
+# the transcript's last activity is treated as belonging to the current session.
+_FRESH_WINDOW = 6 * 60 * 60  # 6 hours
 
 
 # ---------------------------------------------------------------------------
@@ -104,10 +127,12 @@ def _dispatch(
     ``"clear"`` → ``/new``, OpenCode maps ``"handoff"`` to a prose prompt).
 
     Handoff handling:
-    - ``Action('handoff')`` injects ``adapter.command('handoff')`` then blocks
-      on :func:`wait_for_handoff` for up to 180s. On
-      :class:`HandoffTimeoutError`, the rollover is aborted (returns True so
-      the main loop reverts engine state to COMPACTED).
+    - ``Action('handoff')`` injects ``adapter.command('handoff')`` and returns
+      immediately. It does NOT block waiting for the handoff file — that wait
+      is owned by the main poll loop via :class:`_PendingHandoff` /
+      :func:`_advance_pending_handoff`, which polls non-blockingly each tick so
+      the loop stays responsive. The deferred ``clear`` + ``resume`` actions
+      are dispatched once the handoff file is observed.
     - ``Action('clear')`` validates the most recent handoff file under
       ``<cwd>/.turbo/handoff`` (per spec) before injecting.
 
@@ -125,8 +150,9 @@ def _dispatch(
 
     Returns:
         ``True`` if the action was canceled (user pressed Esc during the
-        clear cancel window, handoff failed validation, or
-        wait_for_handoff timed out); ``False`` otherwise.
+        clear cancel window, or the handoff failed validation); ``False``
+        otherwise. The handoff *timeout* path no longer flows through here —
+        it is handled by :func:`_advance_pending_handoff`.
     """
     if action.kind == "noop":
         _log(logf, {"event": "noop", "payload": action.payload})
@@ -179,33 +205,17 @@ def _dispatch(
         return False
 
     if action.kind == "handoff":
+        # Inject /create-handoff and return immediately. The blocking wait for
+        # the handoff file to appear is NOT done here — it would freeze the
+        # entire poll loop for up to 180s. Instead the main loop carries a
+        # deadline-based "pending handoff" state and polls non-blockingly each
+        # tick (see _check_pending_handoff and the loop). Injection of the
+        # subsequent /clear + resume is deferred until the file is observed.
         cmd = adapter.command("handoff") if adapter is not None else "/create-handoff"
-        since = time.time()
         _log(logf, {"event": "inject", "kind": "handoff", "cmd": cmd})
         if not _prompt_ok("handoff"):
             return False
         inject(tmux_session, cmd)
-        # Block until the harness writes a fresh handoff file under
-        # <cwd>/.turbo/handoff/.  Must complete before /clear (next action
-        # in [handoff, clear, resume]) is injected, otherwise the handoff
-        # payload is lost.
-        try:
-            path = wait_for_handoff(
-                Path(cwd) if cwd else Path.cwd(),
-                since=since,
-                timeout=180.0,
-            )
-            _log(logf, {"event": "handoff_written", "path": str(path)})
-        except HandoffTimeoutError as exc:
-            _log(logf, {"event": "handoff_timeout", "err": str(exc)})
-            _stats.record(
-                "handoff_timeout",
-                harness=harness,
-                tmux_session=tmux_session,
-                pct=round(pct, 4),
-                cwd=cwd,
-            )
-            return True
         return False
 
     if action.kind == "clear":
@@ -404,18 +414,186 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             )
 
 
+class _PendingHandoff:
+    """Deadline-based carrier for an in-flight ``/create-handoff`` wait.
+
+    Created when the daemon injects ``/create-handoff`` (the ``handoff``
+    action) and consulted on every subsequent poll tick. It replaces the old
+    single 180s blocking :func:`wait_for_handoff` call so the poll loop keeps
+    checking the kill-switch / session-alive / usage while the handoff is
+    pending.
+
+    Attributes:
+        since:    Timestamp captured just before ``/create-handoff`` was
+                  injected; only handoff files newer than this count.
+        deadline: ``time.monotonic()`` value past which the wait is abandoned.
+        rest:     The remaining actions to run once the handoff appears
+                  (typically ``[clear, resume]``).
+    """
+
+    __slots__ = ("since", "deadline", "rest")
+
+    def __init__(self, since: float, deadline: float, rest: list[Action]) -> None:
+        self.since = since
+        self.deadline = deadline
+        self.rest = rest
+
+
+def _advance_pending_handoff(
+    pending: _PendingHandoff,
+    repo_root: Path,
+    logf: Path,
+    *,
+    harness: str,
+    tmux_session: str,
+    cwd: str,
+    pct: float,
+    adapter,
+    now: float | None = None,
+) -> tuple[str, bool]:
+    """Advance an in-flight handoff wait by exactly one non-blocking poll.
+
+    Performs a single :func:`check_handoff` scan (never blocks). When the
+    handoff file has appeared, dispatches the deferred actions (``clear`` then
+    ``resume``); when the deadline has passed without a file, reports a timeout.
+
+    Args:
+        pending: The :class:`_PendingHandoff` carrier to advance.
+        repo_root: Repo root containing ``.turbo/handoff``.
+        logf: Daemon log path.
+        now: Injectable ``time.monotonic()`` value (for fast, deterministic
+             tests). Defaults to the real clock.
+
+    Returns:
+        A ``(status, canceled)`` tuple. ``status`` is one of:
+        - ``"pending"`` — no file yet and deadline not reached; keep waiting.
+        - ``"done"``    — handoff observed; deferred actions dispatched.
+        - ``"timeout"`` — deadline exceeded with no handoff; rollover aborted.
+        ``canceled`` is ``True`` when the loop should revert engine state to
+        COMPACTED (on timeout, or if a deferred action canceled).
+    """
+    path = check_handoff(repo_root, pending.since)
+    if path is not None:
+        _log(logf, {"event": "handoff_written", "path": str(path)})
+        canceled = False
+        for action in pending.rest:
+            if _dispatch(
+                action,
+                tmux_session,
+                logf,
+                harness=harness,
+                cwd=cwd,
+                pct=pct,
+                adapter=adapter,
+            ):
+                canceled = True
+                break
+        return "done", canceled
+
+    clock = time.monotonic() if now is None else now
+    if clock >= pending.deadline:
+        _log(
+            logf,
+            {
+                "event": "handoff_timeout",
+                "err": (
+                    f"no handoff under {repo_root / '.turbo' / 'handoff'} "
+                    f"with mtime > {pending.since:.3f} before deadline"
+                ),
+            },
+        )
+        _stats.record(
+            "handoff_timeout",
+            harness=harness,
+            tmux_session=tmux_session,
+            pct=round(pct, 4),
+            cwd=cwd,
+        )
+        return "timeout", True
+
+    return "pending", False
+
+
 # ---------------------------------------------------------------------------
 # Hook-mode entry point
 # ---------------------------------------------------------------------------
 
+def _resolve_session_start(args: argparse.Namespace, transcript: "Path | None") -> float:
+    """Resolve a best-effort "session start" cutoff for fresh-handoff checks.
+
+    Preference order:
+    1. ``args.started_at`` (the harness-supplied session start timestamp).
+    2. The transcript's last-modified time minus a recent window
+       (``_FRESH_WINDOW``) — the transcript is rewritten throughout the
+       session, so its mtime tracks recent activity; subtracting a window
+       lets us treat a handoff written shortly before this PreCompact as
+       "fresh" without admitting one from a prior, long-idle session.
+    3. ``time.time() - _FRESH_WINDOW`` when neither is available.
+
+    A handoff is considered *fresh* iff its mtime is strictly greater than the
+    returned cutoff.
+    """
+    if args.started_at is not None:
+        try:
+            return float(args.started_at)
+        except (TypeError, ValueError):
+            pass
+    if transcript is not None:
+        try:
+            return transcript.stat().st_mtime - _FRESH_WINDOW
+        except OSError:
+            pass
+    return time.time() - _FRESH_WINDOW
+
+
+def _hook_daemon_running(args: argparse.Namespace) -> bool:
+    """Best-effort check for a live tmux-daemon monitor for this session.
+
+    True auto-rollover (handoff -> clear -> resume) is performed *only* by the
+    tmux-daemon path, which writes a ``<session>.pid`` file under
+    :data:`_MONITORS_DIR`. Hook mode is notification-only, so we look for any
+    live (PID still running) monitor pidfile and, when none is found, warn that
+    the hook cannot actually roll over on its own.
+    """
+    if not _MONITORS_DIR.exists():
+        return False
+    for pidf in _MONITORS_DIR.glob("*.pid"):
+        try:
+            pid = int(pidf.read_text().strip())
+        except (OSError, ValueError):
+            continue
+        try:
+            os.kill(pid, 0)  # signal 0: existence check, no signal delivered
+        except OSError:
+            continue
+        return True
+    return False
+
+
 def _run_hook_mode(args: argparse.Namespace) -> None:
     """Handle Claude Code PreCompact / SessionStart hook invocations.
 
-    The hook fires synchronously inside Claude Code with no tmux pane to
-    inject into.  At ``PreCompact``, we read the current transcript, classify
-    usage, and surface a desktop notification (via the ``claude_hook``
-    adapter) so the user knows the handoff file is ready.  ``SessionStart``
-    is currently a no-op (reserved for resume hints in a future revision).
+    **Notification-only by design.** A PreCompact hook runs as a short-lived
+    Python subprocess *inside* Claude Code with no tmux pane to drive and no
+    way to summarize the conversation — it cannot run ``/create-handoff``,
+    cannot ``/clear``, and cannot ``/resume``. It can only *observe* usage and
+    surface a desktop notification. Real handoff->clear->resume orchestration
+    requires the tmux-daemon mode (the ``_dispatch`` path), which injects slash
+    commands into a live pane.
+
+    So at ``PreCompact`` this function:
+    - Reads usage from the transcript (logged for diagnostics).
+    - Surfaces a desktop notification that points at a *fresh* handoff (one
+      written after this session started) when one exists, or honestly says
+      "no fresh handoff — run /create-handoff before compaction" when the only
+      handoff on disk predates the session (a stale handoff must never be
+      presented as if it captured the current work).
+    - Warns (log + notification note) when hook mode is the *only* thing wired
+      (no live tmux daemon for this machine): auto-rollover will not happen and
+      the user must create the handoff manually.
+
+    ``SessionStart`` is currently a no-op (reserved for resume hints in a
+    future revision).
 
     All output goes to ``~/.autospec/monitors/hook-<event>.log`` so the daemon
     never pollutes the Claude Code transcript.  Failures are logged and
@@ -431,7 +609,7 @@ def _run_hook_mode(args: argparse.Namespace) -> None:
         _log(logf, {"event": "hook_noop", "hook_event": "SessionStart"})
         return
 
-    # PreCompact: best-effort notification path.
+    # PreCompact: best-effort, notification-only path.
     try:
         from .adapters.claude_hook import ClaudeHookAdapter
 
@@ -454,20 +632,61 @@ def _run_hook_mode(args: argparse.Namespace) -> None:
                 "model": usage.model,
             },
         )
-        # Resolve the latest handoff under <cwd>/.turbo/handoff and surface
-        # it via the desktop notification.
+
+        # Resolve the *fresh* handoff under <cwd>/.turbo/handoff: only a file
+        # newer than the session-start cutoff may be surfaced. Pointing at a
+        # stale handoff from a prior session would mislead the user into
+        # compacting on top of obsolete context.
+        cutoff = _resolve_session_start(args, transcript)
         handoff_dir = Path(cwd) / ".turbo" / "handoff"
         files = (
             sorted(handoff_dir.glob("*.md"), key=lambda p: p.stat().st_mtime)
             if handoff_dir.exists()
             else []
         )
-        latest = files[-1] if files else None
-        ClaudeHookAdapter.notify_clear_needed(handoff_path=latest)
-        _log(
-            logf,
-            {"event": "hook_notify", "handoff": str(latest) if latest else None},
-        )
+        fresh = [p for p in files if p.stat().st_mtime > cutoff]
+        latest_fresh = fresh[-1] if fresh else None
+
+        # Warn when nothing can actually perform the rollover (no live daemon).
+        daemon_running = _hook_daemon_running(args)
+        if not daemon_running:
+            _log(
+                logf,
+                {
+                    "event": "hook_only_no_daemon",
+                    "note": (
+                        "hook mode is notification-only; true auto-rollover "
+                        "(handoff->clear->resume) requires the tmux/daemon mode"
+                    ),
+                },
+            )
+
+        if latest_fresh is not None:
+            ClaudeHookAdapter.notify_clear_needed(handoff_path=latest_fresh)
+            _log(
+                logf,
+                {
+                    "event": "hook_notify",
+                    "handoff": str(latest_fresh),
+                    "fresh": True,
+                    "daemon_running": daemon_running,
+                },
+            )
+        else:
+            # No fresh handoff — be honest rather than pointing at a stale file.
+            note = "No fresh handoff — run /create-handoff before compaction."
+            if not daemon_running:
+                note += " (hook mode is notification-only; no daemon to roll over)"
+            ClaudeHookAdapter.notify_no_fresh_handoff(note)
+            _log(
+                logf,
+                {
+                    "event": "hook_notify_no_fresh",
+                    "stale_present": bool(files),
+                    "stale_latest": str(files[-1]) if files else None,
+                    "daemon_running": daemon_running,
+                },
+            )
     except Exception as exc:  # noqa: BLE001
         _log(
             logf,
@@ -524,6 +743,14 @@ def main(argv: list[str] | None = None) -> None:
     # Track the transcript path seen when ROLLED state was entered so that
     # a new transcript (new path) triggers an immediate reset to NORMAL.
     last_transcript: Path | None = None
+    # In-flight handoff wait, advanced one non-blocking tick at a time so the
+    # poll cadence (kill-switch / session-alive / usage) is never frozen.
+    pending_handoff: _PendingHandoff | None = None
+    repo_root = Path(args.cwd) if args.cwd else Path.cwd()
+
+    def _revert_to_compacted() -> None:
+        engine._state = State.COMPACTED  # noqa: SLF001
+        _log(logf, {"event": "state_reverted", "state": "COMPACTED"})
 
     try:
         # Load adapter inside the try block so PID cleanup runs even if
@@ -537,6 +764,35 @@ def main(argv: list[str] | None = None) -> None:
             if not session_exists(args.tmux_session):
                 _log(logf, {"event": "session_gone", "tmux_session": args.tmux_session})
                 break
+
+            # Advance any in-flight handoff wait FIRST (non-blocking). This is
+            # what keeps the loop responsive: instead of one 180s blocking
+            # wait_for_handoff inside _dispatch, we poll once per tick and fall
+            # through to sleep — so the kill-switch / session checks above keep
+            # running while the handoff is pending.
+            if pending_handoff is not None:
+                status, canceled = _advance_pending_handoff(
+                    pending_handoff,
+                    repo_root,
+                    logf,
+                    harness=args.harness,
+                    tmux_session=args.tmux_session,
+                    cwd=args.cwd,
+                    pct=0.0,
+                    adapter=adapter,
+                )
+                if status != "pending":
+                    pending_handoff = None
+                    if canceled:
+                        # Handoff timed out (or a deferred clear/resume was
+                        # canceled) — revert so the engine re-fires on the next
+                        # 80% climb rather than waiting for a new transcript.
+                        _revert_to_compacted()
+                # While a handoff is pending we skip classify/dispatch for this
+                # tick (the rollover sequence is mid-flight); just sleep and
+                # re-check liveness next tick.
+                time.sleep(_POLL_INTERVAL)
+                continue
 
             try:
                 transcript = adapter.find_transcript(hint)
@@ -559,25 +815,58 @@ def main(argv: list[str] | None = None) -> None:
                     "pct": round(usage.used_tokens / usage.max_tokens, 4),
                     "model": usage.model,
                 })
+                pct = round(usage.used_tokens / usage.max_tokens, 4)
                 actions = engine.classify(usage)
-                for action in actions:
+                for idx, action in enumerate(actions):
+                    if action.kind == "handoff":
+                        # Inject /create-handoff, then DON'T block: hand the
+                        # remaining actions ([clear, resume]) to a deadline-based
+                        # pending state the loop advances on later ticks.
+                        since = time.time()
+                        canceled = _dispatch(
+                            action,
+                            args.tmux_session,
+                            logf,
+                            harness=args.harness,
+                            cwd=args.cwd,
+                            pct=pct,
+                            adapter=adapter,
+                        )
+                        if canceled:
+                            _revert_to_compacted()
+                            break
+                        pending_handoff = _PendingHandoff(
+                            since=since,
+                            deadline=time.monotonic() + _HANDOFF_DEADLINE,
+                            rest=list(actions[idx + 1:]),
+                        )
+                        _log(
+                            logf,
+                            {
+                                "event": "handoff_pending",
+                                "deadline_s": _HANDOFF_DEADLINE,
+                                "rest": [a.kind for a in pending_handoff.rest],
+                            },
+                        )
+                        # Stop dispatching remaining actions now; they run once
+                        # the handoff file is observed.
+                        break
+
                     canceled = _dispatch(
                         action,
                         args.tmux_session,
                         logf,
                         harness=args.harness,
                         cwd=args.cwd,
-                        pct=round(usage.used_tokens / usage.max_tokens, 4),
+                        pct=pct,
                         adapter=adapter,
                     )
                     if canceled:
-                        # User pressed Esc during cancel window, handoff
-                        # validation failed, or wait_for_handoff timed out —
-                        # revert state so the engine re-fires the rollover on
-                        # the next 80% climb rather than waiting for a new
-                        # transcript.
-                        engine._state = State.COMPACTED  # noqa: SLF001
-                        _log(logf, {"event": "state_reverted", "state": "COMPACTED"})
+                        # User pressed Esc during cancel window or handoff
+                        # validation failed — revert state so the engine
+                        # re-fires the rollover on the next 80% climb rather
+                        # than waiting for a new transcript.
+                        _revert_to_compacted()
                         break
 
                 # Update last_transcript after each successful tick so the

@@ -106,26 +106,54 @@ class ClaudeHookAdapter:
         if handoff_path is not None:
             body = f"{body} Handoff: {handoff_path}"
 
+        ClaudeHookAdapter._notify("autospec: rollover needed", body)
+
+    @staticmethod
+    def notify_no_fresh_handoff(
+        message: str = "No fresh handoff — run /create-handoff before compaction.",
+    ) -> None:
+        """Fire an honest notification when no *fresh* handoff exists.
+
+        Hook mode cannot summarize the session, so when the only handoff on
+        disk predates this session (or there is none), it must say so plainly
+        instead of pointing the user at a stale file. Best-effort and bounded
+        like :meth:`notify_clear_needed`.
+
+        Args:
+            message: The notification body to display.
+        """
+        ClaudeHookAdapter._notify("autospec: handoff needed", message)
+
+    @staticmethod
+    def _notify(title: str, body: str) -> None:
+        """Fire a best-effort, timeout-bounded desktop notification.
+
+        On macOS uses ``osascript``; on Linux uses ``notify-send``. Any
+        subprocess error or a missing/blocked notifier is swallowed so the
+        synchronous PreCompact hook can never be aborted or stalled.
+        """
         try:
             if sys.platform == "darwin":
-                # body is embedded inside an AppleScript double-quoted string,
-                # so backslashes and double-quotes must be escaped or osascript
-                # errors out (or hangs) on a handoff path containing them.
-                escaped = body.replace("\\", "\\\\").replace('"', '\\"')
+                # body/title are embedded inside an AppleScript double-quoted
+                # string, so backslashes and double-quotes must be escaped or
+                # osascript errors out (or hangs) on content containing them.
+                def _esc(s: str) -> str:
+                    return s.replace("\\", "\\\\").replace('"', '\\"')
+
                 subprocess.run(
                     [
                         "osascript",
                         "-e",
-                        f'display notification "{escaped}" with title "autospec: rollover needed"',
+                        f'display notification "{_esc(body)}" with title "{_esc(title)}"',
                     ],
                     check=False,
                     timeout=5,
                 )
             else:
                 # notify-send args are passed as separate argv, so no shell/
-                # AppleScript escaping is needed for the body here.
+                # AppleScript escaping is needed here.
                 subprocess.run(
-                    ["notify-send", "autospec: rollover needed", body],
+                    ["notify-send", title, body],
                     check=False,
                     timeout=5,
                 )
