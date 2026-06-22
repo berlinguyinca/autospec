@@ -1,0 +1,8 @@
+# Invalid: target_envs.forbidden is required (>=1 entry) but absent.
+required: true
+stages:
+  - name: deploy-to-test-family
+    command: bash scripts/deploy-tidyboard-test.sh
+    timeout: 600
+target_envs:
+  allowed: [test.tidyboard.org, staging.tidyboard.org]

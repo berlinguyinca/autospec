@@ -1,0 +1,8 @@
+# Invalid: target_envs.forbidden present but empty (minItems: 1 -> >=1 required).
+required: true
+stages:
+  - name: deploy-to-test-family
+    command: bash scripts/deploy-tidyboard-test.sh
+target_envs:
+  allowed: [test.tidyboard.org]
+  forbidden: []
