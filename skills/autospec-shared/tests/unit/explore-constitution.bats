@@ -1,6 +1,12 @@
 #!/usr/bin/env bats
 # explore-constitution.bats — explore-constitution.sh seed + deterministic filter.
 
+# `run --separate-stderr` (used by the --filter JSON tests, so the stdout JSON
+# isn't polluted by the script's stderr accounting line) is a bats >=1.5.0
+# feature; declaring the minimum silences the BW02 warning. The repo ships
+# bats-core 1.13.0, so this is satisfied.
+bats_require_minimum_version 1.5.0
+
 setup() {
     SCRIPT_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
     C="${SCRIPT_DIR}/scripts/explore-constitution.sh"
@@ -30,8 +36,14 @@ teardown() { rm -rf "$TMP"; }
     printf '%s' "$output" | grep -q 'J4 Safety'
 }
 
+# NOTE: --filter writes its human-readable accounting line ("kept=N dropped=M
+# ...") to STDERR and the filtered JSON array to STDOUT (explore-constitution.sh
+# lines 106-107). bats `run` merges stderr into $output by default, which
+# corrupts the JSON these tests pipe to jq. Use `--separate-stderr` so $output
+# is the pure stdout JSON ($stderr holds the accounting line). The empty-input
+# test below stays on the merged form because that path emits no stderr line.
 @test "--filter drops empty-evidence (D1) and below-floor confidence (D2)" {
-    run bash -c "printf '%s' '[{\"title\":\"a\",\"evidence\":\"real\",\"confidence\":0.8},{\"title\":\"b\",\"evidence\":\"\",\"confidence\":0.9},{\"title\":\"c\",\"evidence\":\"x\",\"confidence\":0.1}]' | bash \"$C\" --filter"
+    run --separate-stderr bash -c "printf '%s' '[{\"title\":\"a\",\"evidence\":\"real\",\"confidence\":0.8},{\"title\":\"b\",\"evidence\":\"\",\"confidence\":0.9},{\"title\":\"c\",\"evidence\":\"x\",\"confidence\":0.1}]' | bash \"$C\" --filter"
     [ "$status" -eq 0 ]
     # only 'a' survives
     echo "$output" | jq -e '. == ["a"] or ([.[].title] == ["a"])' >/dev/null || \
@@ -39,13 +51,13 @@ teardown() { rm -rf "$TMP"; }
 }
 
 @test "--filter respects --min-confidence override" {
-    run bash -c "printf '%s' '[{\"title\":\"c\",\"evidence\":\"x\",\"confidence\":0.1}]' | bash \"$C\" --filter --min-confidence 0.05"
+    run --separate-stderr bash -c "printf '%s' '[{\"title\":\"c\",\"evidence\":\"x\",\"confidence\":0.1}]' | bash \"$C\" --filter --min-confidence 0.05"
     [ "$status" -eq 0 ]
     [ "$(echo "$output" | jq -c '[.[].title]')" = '["c"]' ]
 }
 
 @test "--filter on whitespace-only evidence is treated as empty (dropped)" {
-    run bash -c "printf '%s' '[{\"title\":\"w\",\"evidence\":\"   \",\"confidence\":0.9}]' | bash \"$C\" --filter"
+    run --separate-stderr bash -c "printf '%s' '[{\"title\":\"w\",\"evidence\":\"   \",\"confidence\":0.9}]' | bash \"$C\" --filter"
     [ "$status" -eq 0 ]
     [ "$(echo "$output" | jq -c 'length')" = "0" ]
 }

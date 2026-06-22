@@ -94,18 +94,21 @@ weight_of() { jq -r --arg s "$2" '.[$s]' <<<"$1"; }
     [ "$closer" = "True" ]
 }
 
-# ── 6. unknown source uses default prior 0.5 ─────────────────────────────────
-@test "dependency-health (not canonical) uses default prior 0.5" {
-    # absent ledger: dependency-health is not emitted (only canonical sources).
+# ── 6. dependency-health is a canonical discovery source (prior 0.65) ─────────
+@test "dependency-health (canonical) uses prior 0.65" {
+    # dependency-health is in CANONICAL_SOURCES (explore-source-weights.sh), so
+    # an absent ledger emits it at its canonical prior 0.65 (was previously a
+    # non-canonical source defaulting to 0.5 / null; promoted in fix(explore)).
     run bash "$WEIGHTS_SH" --ledger "$TEST_TMP/missing.jsonl"
     [ "$status" -eq 0 ]
-    [ "$(weight_of "$output" dependency-health)" = "null" ]
+    [ "$(weight_of "$output" dependency-health)" = "0.65" ]
 
-    # with ledger data: 3 filed, 0 clean, alpha=5 -> (0 + 5*0.5)/(3+5) = 0.3125
+    # with ledger data: 3 filed, 0 clean (all qa_failed), alpha=5, prior 0.65,
+    # plus the refute pull -> 0.4062 (script-rounded, pinned to live output).
     append_n dependency-health 3 qa_failed 500
     run bash "$WEIGHTS_SH" --ledger "$LEDGER" --alpha 5
     [ "$status" -eq 0 ]
-    [ "$(weight_of "$output" dependency-health)" = "0.3125" ]
+    [ "$(weight_of "$output" dependency-health)" = "0.4062" ]
 }
 
 # ── 7. jq missing -> exit 2 ──────────────────────────────────────────────────

@@ -45,20 +45,24 @@ PAGES_WORKFLOW="$REPO_ROOT/.github/workflows/pages.yml"
   [ "$count" -eq 5 ]
 }
 
-@test "QUICKSTART.md Step 1 references npx autospec init" {
-  grep -q 'npx autospec init' "$QUICKSTART"
+@test "QUICKSTART.md Step 1 references the bootstrap install command" {
+  # Autospec is a skill suite, not a standalone binary — install is the
+  # curl|bash bootstrap (Step 1), not `npx autospec init`.
+  grep -q 'bootstrap.sh' "$QUICKSTART"
 }
 
-@test "QUICKSTART.md Step 3 references autospec define" {
-  grep -q 'autospec define' "$QUICKSTART"
+@test "QUICKSTART.md Step 3 references the /autospec-define skill" {
+  # Driven via /autospec-* slash commands inside the harness (hyphenated).
+  grep -q '/autospec-define' "$QUICKSTART"
 }
 
-@test "QUICKSTART.md Step 4 references autospec run" {
-  grep -q 'autospec run' "$QUICKSTART"
+@test "QUICKSTART.md Step 4 references the /autospec-run skill" {
+  grep -q '/autospec-run' "$QUICKSTART"
 }
 
-@test "QUICKSTART.md references brew install" {
-  grep -q 'brew install' "$QUICKSTART"
+@test "QUICKSTART.md install uses the curl bootstrap (not a package manager)" {
+  # Install is the one-line curl|bash bootstrap; there is no brew/npm package.
+  grep -q 'curl -fsSL' "$QUICKSTART"
 }
 
 # ── QUICKSTART bash blocks parse cleanly ───────────────────────────────────
