@@ -43,13 +43,36 @@ import stage_render  # noqa: E402
 _CLI = os.path.join(_SCRIPTS_DIR, "fab-vision-cli.py")
 
 
-def _run_cli(args, stdin_text=None):
-    """Invoke fab-vision-cli.py as a subprocess; return (rc, parsed_stdout)."""
+# Env keys that influence backend resolution. Tests scrub these from the child
+# process so a developer's real ANTHROPIC_API_KEY (or an inherited backend/stub)
+# can't leak into the degradation assertions, then set exactly what each case
+# needs via `env_extra`.
+_BACKEND_ENV_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "AUTOSPEC_FAB_VISION_BACKEND",
+    "AUTOSPEC_FAB_VISION_STUB",
+    "AUTOSPEC_FAB_VISION_MODEL",
+)
+
+
+def _run_cli(args, stdin_text=None, env_extra=None):
+    """Invoke fab-vision-cli.py as a subprocess; return (rc, parsed_stdout).
+
+    The child env starts from the parent with all backend-influencing keys
+    scrubbed, then `env_extra` is layered on. This keeps the default cases on
+    the honest-degradation ("none") path regardless of the developer's
+    environment, while letting backend cases opt a stub/backend in explicitly.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in _BACKEND_ENV_KEYS}
+    if env_extra:
+        env.update(env_extra)
     proc = subprocess.run(
         [sys.executable, _CLI] + list(args),
         input=stdin_text,
         capture_output=True,
         text=True,
+        env=env,
     )
     parsed = None
     out = (proc.stdout or "").strip()
@@ -220,6 +243,220 @@ class TestResolver(unittest.TestCase):
             sheet, expected = _build_real_sheet(tmp, present_view_names=all_names)
             got = [os.path.basename(p) for p in self.mod.resolve_images(sheet)]
             self.assertEqual(got, expected[:3])
+
+
+# A stub backend executable. It stands in for the real Anthropic call: it reads
+# the image-manifest JSON the CLI passes on stdin (so we can assert images/rules
+# passed through), records that manifest to a side file, and emits the canned
+# judge/verify contract JSON. No real API call.
+_STUB = r'''#!/usr/bin/env python3
+import json, os, sys
+
+mode = sys.argv[1]
+payload = json.loads(sys.stdin.read() or "{}")
+
+# Record what the CLI handed us, so the test can assert image/rules passthrough.
+record = os.environ.get("STUB_RECORD")
+if record:
+    with open(record, "w") as f:
+        json.dump(payload, f)
+
+if mode == "judge":
+    print(json.dumps({"observations": [
+        {"observation": "stub-confirmed exposed gasket groove",
+         "severity": "warn", "view": "left", "rule": "exposed_gasket"},
+    ]}))
+elif mode == "verify":
+    print(json.dumps({"confirmed": True}))
+else:
+    sys.exit(2)
+'''
+
+# A stub that always fails (non-zero exit), to prove the CLI degrades on a
+# stub/backend error rather than crashing.
+_STUB_ERR = '''#!/usr/bin/env python3
+import sys
+sys.stderr.write("boom\\n")
+sys.exit(1)
+'''
+
+
+def _install_stub(tmp_dir, body, name="vision-stub.py"):
+    """Write an executable stub backend and return its path."""
+    path = os.path.join(tmp_dir, name)
+    with open(path, "w") as f:
+        f.write(body)
+    os.chmod(path, 0o755)
+    return path
+
+
+class TestBackendResolution(unittest.TestCase):
+    """resolve_backend honors the override and auto-detect falls back to none."""
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("fab_vision_cli", _CLI)
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+        self._saved = {k: os.environ.get(k) for k in _BACKEND_ENV_KEYS}
+        for k in _BACKEND_ENV_KEYS:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_override_none_is_none(self):
+        os.environ["AUTOSPEC_FAB_VISION_BACKEND"] = "none"
+        self.assertEqual(self.mod.resolve_backend(), "none")
+
+    def test_autodetect_no_key_no_stub_is_none(self):
+        # No stub, no key -> nothing usable -> honest degradation.
+        self.assertEqual(self.mod.resolve_backend(), "none")
+
+    def test_override_api_without_usable_backend_is_none(self):
+        # An override can't conjure a backend that isn't usable.
+        os.environ["AUTOSPEC_FAB_VISION_BACKEND"] = "api"
+        self.assertEqual(self.mod.resolve_backend(), "none")
+
+    def test_stub_makes_api_usable(self):
+        os.environ["AUTOSPEC_FAB_VISION_STUB"] = "/path/to/stub"
+        self.assertEqual(self.mod.resolve_backend(), "api")
+
+    def test_claude_cli_override_degrades(self):
+        os.environ["AUTOSPEC_FAB_VISION_BACKEND"] = "claude-cli"
+        self.assertEqual(self.mod.resolve_backend(), "none")
+
+
+class TestStubBackendIntegration(unittest.TestCase):
+    """Full path via the stub seam: images/rules pass through, contract JSON."""
+
+    def test_judge_via_stub_emits_canned_observations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sheet, _ = _build_real_sheet(tmp, present_view_names={"front",
+                                                                  "left"})
+            rules = os.path.join(tmp, "rules.md")
+            with open(rules, "w") as f:
+                f.write("# STL Modeling Rules\nNo exposed gaskets.\n")
+            stub = _install_stub(tmp, _STUB)
+            record = os.path.join(tmp, "record.json")
+            rc, out = _run_cli(
+                [sheet, rules],
+                env_extra={"AUTOSPEC_FAB_VISION_STUB": stub,
+                           "STUB_RECORD": record},
+            )
+            self.assertEqual(rc, 0)
+            # Contract JSON emitted unchanged from the stub.
+            self.assertEqual(out, {"observations": [
+                {"observation": "stub-confirmed exposed gasket groove",
+                 "severity": "warn", "view": "left", "rule": "exposed_gasket"},
+            ]})
+            # Images + rules passed through to the backend.
+            with open(record) as f:
+                manifest = json.load(f)
+            self.assertEqual(manifest["mode"], "judge")
+            self.assertEqual(manifest["rules"], rules)
+            self.assertEqual(
+                [os.path.basename(p) for p in manifest["images"]],
+                ["front.png", "left.png"])
+
+    def test_verify_via_stub_confirms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sheet, _ = _build_real_sheet(tmp, present_view_names={"front"})
+            stub = _install_stub(tmp, _STUB)
+            record = os.path.join(tmp, "record.json")
+            candidate = json.dumps({
+                "observation": "exposed gasket groove",
+                "severity": "warn", "view": "left", "rule": "exposed_gasket",
+            })
+            rc, out = _run_cli(
+                ["--verify", sheet],
+                stdin_text=candidate,
+                env_extra={"AUTOSPEC_FAB_VISION_STUB": stub,
+                           "STUB_RECORD": record},
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(out, {"confirmed": True})
+            # The candidate observation reached the backend on stdin.
+            with open(record) as f:
+                manifest = json.load(f)
+            self.assertEqual(manifest["mode"], "verify")
+            self.assertEqual(manifest["observation"]["rule"], "exposed_gasket")
+            self.assertTrue(manifest["images"])
+
+    def test_stub_with_zero_pngs_degrades_to_empty(self):
+        # Stub is "usable" but there are no images to inspect -> empty judge,
+        # and the stub is never invoked (no fabricated finding).
+        with tempfile.TemporaryDirectory() as tmp:
+            sheet, _ = _build_real_sheet(tmp, present_view_names=set())
+            stub = _install_stub(tmp, _STUB)
+            record = os.path.join(tmp, "record.json")
+            rc, out = _run_cli(
+                [sheet],
+                env_extra={"AUTOSPEC_FAB_VISION_STUB": stub,
+                           "STUB_RECORD": record},
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(out, {"observations": []})
+            self.assertFalse(os.path.exists(record))
+
+
+class TestApiBackendUnavailableDegrades(unittest.TestCase):
+    """No usable api backend -> empty judge / negative verify, exit 0."""
+
+    def test_judge_unavailable_empty_exit0(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sheet, _ = _build_real_sheet(tmp, present_view_names={"front"})
+            # AUTOSPEC_FAB_VISION_BACKEND=api but no stub and no key -> none.
+            rc, out = _run_cli(
+                [sheet],
+                env_extra={"AUTOSPEC_FAB_VISION_BACKEND": "api"},
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(out, {"observations": []})
+
+    def test_verify_unavailable_confirmed_false_exit0(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sheet, _ = _build_real_sheet(tmp, present_view_names={"front"})
+            candidate = json.dumps({"observation": "x", "severity": "warn"})
+            rc, out = _run_cli(
+                ["--verify", sheet],
+                stdin_text=candidate,
+                env_extra={"AUTOSPEC_FAB_VISION_BACKEND": "api"},
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(out, {"confirmed": False})
+
+
+class TestStubErrorDegrades(unittest.TestCase):
+    """A failing stub backend degrades to empty/negative, exit 0 (never crash)."""
+
+    def test_judge_stub_error_empty_exit0(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sheet, _ = _build_real_sheet(tmp, present_view_names={"front"})
+            stub = _install_stub(tmp, _STUB_ERR)
+            rc, out = _run_cli(
+                [sheet],
+                env_extra={"AUTOSPEC_FAB_VISION_STUB": stub},
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(out, {"observations": []})
+
+    def test_verify_stub_error_confirmed_false_exit0(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sheet, _ = _build_real_sheet(tmp, present_view_names={"front"})
+            stub = _install_stub(tmp, _STUB_ERR)
+            candidate = json.dumps({"observation": "x", "severity": "warn"})
+            rc, out = _run_cli(
+                ["--verify", sheet],
+                stdin_text=candidate,
+                env_extra={"AUTOSPEC_FAB_VISION_STUB": stub},
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(out, {"confirmed": False})
 
 
 if __name__ == "__main__":
