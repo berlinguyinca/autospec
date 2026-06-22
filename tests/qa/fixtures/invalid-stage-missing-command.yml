@@ -1,0 +1,7 @@
+# Invalid: a stage is missing the required `command` field.
+required: true
+stages:
+  - name: deploy-to-test-family
+    timeout: 600
+target_envs:
+  forbidden: [tidyboard.org]

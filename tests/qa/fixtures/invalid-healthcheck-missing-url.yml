@@ -1,0 +1,10 @@
+# Invalid: a health_check block is present but missing the required `url`.
+required: true
+stages:
+  - name: deploy-to-test-family
+    command: bash scripts/deploy-tidyboard-test.sh
+    health_check:
+      expect_status: 200
+      retry: 30
+target_envs:
+  forbidden: [tidyboard.org]

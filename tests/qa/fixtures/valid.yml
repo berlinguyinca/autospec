@@ -1,0 +1,30 @@
+required: true
+stages:
+  - name: deploy-to-test-family
+    command: bash scripts/deploy-tidyboard-test.sh
+    timeout: 600
+    env:
+      DEPLOY_TARGET: test-family
+    health_check:
+      url: https://test.tidyboard.org/health
+      expect_status: 200
+      retry: 30
+      retry_interval: 10
+  - name: clone-production-data
+    command: bash scripts/clone-prod-data-to-test.sh --target test-family
+    timeout: 1800
+    safety:
+      forbid_production_writes: true
+      max_records: 10000          # required: stage name contains "clone"
+teardown:
+  - name: snapshot-test-state
+    command: bash scripts/snapshot-test-state.sh
+    on_failure: warn
+  - name: cleanup
+    command: bash scripts/cleanup-test-family.sh
+    on_failure: warn
+target_envs:
+  allowed: [test.tidyboard.org, staging.tidyboard.org]
+  forbidden: [tidyboard.org, www.tidyboard.org]
+safety:
+  notes: "clone script anonymizes PII in step 2; test family is read-isolated from prod."

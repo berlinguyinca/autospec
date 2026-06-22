@@ -1,0 +1,16 @@
+# Data-clone stage (name contains "clone") without safety.max_records.
+# NOTE: this is structurally SCHEMA-VALID — the "max_records required for
+# data-clone stages" rule is a runner safety-floor check (regex on
+# name/command -> exit 3), not expressible in pure JSON Schema. The runner
+# bats in #1293 asserts the exit-3 rejection; this fixture seeds that case.
+required: true
+stages:
+  - name: clone-production-data
+    command: bash scripts/clone-prod-data-to-test.sh --target test-family
+    timeout: 1800
+    safety:
+      forbid_production_writes: true
+      # max_records intentionally omitted -> runner must reject with exit 3
+target_envs:
+  allowed: [test.tidyboard.org]
+  forbidden: [tidyboard.org, www.tidyboard.org]

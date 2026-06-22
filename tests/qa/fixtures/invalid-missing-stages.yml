@@ -1,0 +1,7 @@
+# Invalid: top-level `stages` is required but absent.
+required: true
+target_envs:
+  allowed: [test.tidyboard.org]
+  forbidden: [tidyboard.org]
+safety:
+  notes: "no stages declared"

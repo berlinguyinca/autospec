@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-qa-deploy.schema.json",
+  "title": "autospec qa-deploy contract",
+  "description": "Schema for .autospec/qa-deploy.yml — the declarative deploy contract consumed by scripts/qa-deploy-runner.sh. Mirrors the style of .autospec/test.yml. Parsed with `yq -o=json` and validated with ajv (same toolchain as skills/autospec-test/scripts/load-contract.sh). The file's PRESENCE makes deploy mandatory; `required` only governs whether absence could be an error (it never is). The safety floor (forbidden-target match, production-pattern rejection, max_records for data-clone stages) is enforced by the runner, not by this schema.",
+  "type": "object",
+  "required": ["stages", "target_envs"],
+  "additionalProperties": false,
+  "properties": {
+    "required": {
+      "type": "boolean",
+      "default": false,
+      "description": "Governs only whether the file being absent could be an error (it never is). The file's presence makes deploy mandatory."
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered deploy stages, sequential; first failure aborts the rest.",
+      "items": { "$ref": "#/$defs/stage" }
+    },
+    "teardown": {
+      "type": "array",
+      "description": "Post-verdict teardown steps.",
+      "items": { "$ref": "#/$defs/teardown_step" }
+    },
+    "target_envs": {
+      "type": "object",
+      "required": ["forbidden"],
+      "additionalProperties": false,
+      "description": "Allowed/forbidden target environments. `forbidden` is the absolute safety floor.",
+      "properties": {
+        "allowed": {
+          "type": "array",
+          "default": [],
+          "description": "Advisory; recorded.",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "forbidden": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Absolute safety floor — any forbidden token in a stage command, a health_check.url, or stage stdout aborts with exit 3. At least one entry required.",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Top-level safety metadata.",
+      "properties": {
+        "notes": {
+          "type": "string",
+          "description": "Free text."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "stage": {
+      "type": "object",
+      "required": ["name", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable id; appears in deploy.stages_run."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Shell command via bash -c. Subject to the safety floor."
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 300,
+          "description": "Hard wall-clock cap in seconds; exceeding it = stage failed."
+        },
+        "env": {
+          "type": "object",
+          "default": {},
+          "description": "Extra env; values passed verbatim, secret values never logged/recorded (only key names).",
+          "additionalProperties": { "type": ["string", "number", "boolean"] }
+        },
+        "health_check": { "$ref": "#/$defs/health_check" },
+        "safety": { "$ref": "#/$defs/stage_safety" }
+      }
+    },
+    "health_check": {
+      "type": "object",
+      "required": ["url"],
+      "additionalProperties": false,
+      "description": "Polled after the command. URL subject to target_envs.forbidden.",
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "description": "URL polled after the command."
+        },
+        "expect_status": {
+          "type": "integer",
+          "default": 200,
+          "description": "Ready status."
+        },
+        "retry": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 30,
+          "description": "Max poll attempts."
+        },
+        "retry_interval": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10,
+          "description": "Delay between attempts in seconds."
+        }
+      }
+    },
+    "stage_safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-stage safety. max_records is required by the runner for any data-clone stage (name/command matches clone|copy|replicate|sync).",
+      "properties": {
+        "max_records": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Cap on records copied. Required for any data-clone stage (enforced by the runner)."
+        },
+        "forbid_production_writes": {
+          "type": "boolean",
+          "default": false,
+          "description": "Operator intent flag; recorded, advisory."
+        }
+      }
+    },
+    "teardown_step": {
+      "type": "object",
+      "required": ["name", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Identifier."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Shell command; same safety floor."
+        },
+        "on_failure": {
+          "type": "string",
+          "enum": ["warn", "fail"],
+          "default": "warn",
+          "description": "warn -> logs only; fail -> downgrades a PASS verdict to PARTIAL."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+# Invalid: malformed YAML — unclosed flow sequence + bad indentation.
+# yq -o=json must fail to parse this before any schema validation runs.
+required: true
+stages:
+  - name: deploy-to-test-family
+    command: bash scripts/deploy-tidyboard-test.sh
+   timeout: 600
+target_envs:
+  forbidden: [tidyboard.org, www.tidyboard.org
