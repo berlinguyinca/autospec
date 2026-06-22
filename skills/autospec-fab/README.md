@@ -163,6 +163,123 @@ name so the `<model>` segments stay aligned:
         └── contact-sheet.html    # produced by render, read by vision
 ```
 
+## Required system packages
+
+The four solver stages resolve their binaries off `PATH` via `shutil.which`.
+The default and every-PR path uses `$TMP/bin` shims — real solvers are **not**
+required for unit tests or the mocked validation path. Real solvers are only
+needed when running against an actual physical model.
+
+| Stage | Script | PATH binary | APT package | Notes |
+| --- | --- | --- | --- | --- |
+| `fea` | `stage_fea.py` | `ccx` | `calculix-ccx` | CalculiX FEA solver |
+| `cfd` | `stage_cfd.py` | `simpleFoam` | `openfoam2406` | OpenFOAM ESI edition; full solver set includes `simpleFoam` |
+| `render` / geometry / section | `freecad_harness.py` | `freecadcmd` | `freecad-python3` | FreeCAD headless; requires mesa + xvfb for offscreen render |
+| `render` (headless display) | `freecad_harness.py` | `Xvfb` | `xvfb` + `libgl1-mesa-dri` | Virtual framebuffer for FreeCAD GUI render path |
+| `vision` (advisory) | `stage_vision.py` | `fab-vision` | — (see below) | Resolved via `$AUTOSPEC_FAB_VISION_CMD` or `PATH`; absent → stage skips cleanly |
+
+**Bare-metal install hint (Ubuntu 24.04 / Debian):**
+
+```bash
+# CalculiX
+sudo apt-get install -y calculix-ccx
+
+# FreeCAD headless + offscreen render dependencies
+sudo apt-get install -y freecad-python3 xvfb libgl1-mesa-dri
+
+# OpenFOAM ESI edition (adds the apt repo first)
+curl -s https://dl.openfoam.com/add-apt-repo.sh | sudo bash
+sudo apt-get install -y openfoam2406-default
+
+# fab-vision consumer CLI (from #1289)
+pip install scripts/fab-vision-cli.py   # or point $AUTOSPEC_FAB_VISION_CMD
+```
+
+> **Note:** These packages are deferred / optional. The `$TMP/bin`-shim test
+> path is the default; every unit suite and `validate.sh` run stays fully
+> mocked. Install real solvers only when you want to run live physical
+> simulations. The pinned container (forthcoming via #1300) ships all four
+> binaries on `PATH` without any manual install.
+
+## Container usage
+
+> **Status:** The container image (`skills/autospec-fab/docker/Dockerfile`) is
+> **forthcoming** — tracked in **#1300** (cost-gated, requires operator sign-off
+> per §4 of the design spec). This section documents the intended workflow so
+> operators can prepare; the bare-metal path described above works today.
+
+Once #1300 ships the `Dockerfile`, the build + run workflow will be:
+
+```bash
+# Build (one-time; ~10–20 min on cold cache — OpenFOAM dominates)
+docker build -f skills/autospec-fab/docker/Dockerfile -t autospec-fab .
+```
+
+```bash
+# Run the release gate on a model directory
+docker run --rm \
+  -v "$PWD/model:/work/model" \
+  -v "$PWD/stls:/work/stls" \
+  autospec-fab \
+  python3 /opt/autospec-fab/scripts/release_gate_stages.py \
+    --in    /work/stls/part.stl \
+    --model /work/model/metadata.json \
+    --out   /work/release-gate.json
+```
+
+### Sibling-file convention inside the container
+
+The container honors the same `MODELDIR` sibling-file convention as the bare-
+metal path (see [Per-model input layout](#per-model-input-layout) above).
+Map your model directory to `/work/model` and place the optional sidecar files
+alongside `metadata.json`:
+
+```text
+$PWD/model/          ← mounted as /work/model inside the container
+├── metadata.json    # required
+├── circuit.json     # optional → runs vacuum-circuit
+├── duct.json        # optional → runs dust-airflow
+├── printer.json     # optional → per-model slicer override
+├── load.json        # optional → runs FEA (ccx)
+└── flow.json        # optional → runs CFD (simpleFoam)
+```
+
+**Present sidecar → real solver runs; absent sidecar → stage skips cleanly.**
+No configuration change is needed — the engine's `extra_args_for` logic handles
+the presence / absence of each file automatically.
+
+### Vision stage environment variables
+
+The vision stage (`stage_vision.py`) is advisory and never blocks a release.
+It resolves its command through the following chain:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `AUTOSPEC_FAB_VISION_CMD` | Path or name of the vision CLI executable | `fab-vision` (PATH lookup) |
+| `AUTOSPEC_FAB_VISION_BACKEND` | Force backend: `api`, `claude-cli`, or `none` | auto-detect |
+| `AUTOSPEC_FAB_VISION_MAX_IMAGES` | Cap on PNG image blocks sent per judge call | CLI default |
+
+**`$AUTOSPEC_FAB_VISION_CMD` — the primary hook:**
+
+```bash
+# Use the bundled fab-vision-cli.py from #1289 as the vision consumer
+export AUTOSPEC_FAB_VISION_CMD=/path/to/scripts/fab-vision-cli.py
+
+# Or point to any conformant CLI (must implement the judge + --verify contract):
+#   Judge:  fab-vision <contact-sheet.html> <rules-file>
+#           → stdout: {"observations": [...]}
+#   Verify: echo '<observation-json>' | fab-vision --verify
+#           → stdout: {"confirmed": true|false}
+```
+
+When `$AUTOSPEC_FAB_VISION_CMD` is unset and `fab-vision` is not on `PATH`,
+the vision stage emits `status: skip` with empty `vision_findings` — this is
+the default on a bare host and is intentional. Vision findings are **advisory**
+only (`warn`-severity at most); the stage never emits `fail`.
+
+Inside the container (#1300), `fab-vision` will be present on `PATH` so vision
+runs automatically without setting any env var.
+
 ## License
 
 MIT - see the repository [LICENSE](../../LICENSE) file.
