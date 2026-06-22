@@ -3,6 +3,26 @@
 
 SCRIPT="${BATS_TEST_DIRNAME}/../scripts/self-enforce-qa.sh"
 FIXTURES_DIR="${BATS_TEST_DIRNAME}/fixtures/self-enforce"
+REAL_REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
+
+# self-enforce-qa.sh's QA chain runs the REAL ~13-minute `scripts/validate.sh`
+# as step 2 (self-enforce-qa.sh:131). Every test that invokes the chain against
+# a diff therefore took ~13min EACH — running unbounded under a directory sweep
+# (`bats -r`, CI) it looks like a hang and freezes the runner (epic #1280 bats
+# hang sweep). This helper builds a fast stub REPO_ROOT that keeps the REAL
+# lint-implementation.sh (so the deterministic SECURITY/lint detection these
+# tests assert is still genuinely exercised) but swaps validate.sh for a trivial
+# exit-0 stub. The lint step is what actually decides the bad/good verdict here;
+# validate.sh on a synthetic diff only added latency, not signal.
+_fast_repo_root() {
+  local d
+  d="$(mktemp -d -t self-enforce-root-XXXXXX)"
+  mkdir -p "$d/scripts"
+  cp "$REAL_REPO_ROOT/scripts/lint-implementation.sh" "$d/scripts/lint-implementation.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/scripts/validate.sh"
+  chmod +x "$d/scripts/validate.sh"
+  printf '%s' "$d"
+}
 
 setup() {
   mkdir -p "$FIXTURES_DIR/bad"
@@ -65,8 +85,9 @@ index 0000000..abc1234
 +git commit --no-verify -m "bypass hooks"
 +echo "done"
 EOF
+  export REPO_ROOT="$(_fast_repo_root)"
   run "$SCRIPT" --diff-file "$diff_file"
-  rm -f "$diff_file"
+  rm -rf "$REPO_ROOT"; rm -f "$diff_file"
   [ "$status" -ne 0 ]
 }
 
@@ -84,8 +105,9 @@ index 0000000..abc1234
 +git commit --no-verify -m "bypass hooks"
 +echo "done"
 EOF
+  export REPO_ROOT="$(_fast_repo_root)"
   run "$SCRIPT" --diff-file "$diff_file"
-  rm -f "$diff_file"
+  rm -rf "$REPO_ROOT"; rm -f "$diff_file"
   [ "$status" -ne 0 ]
   printf '%s\n' "$output" | grep -qiE "SECURITY|no-verify|finding|violation|blocked"
 }
@@ -104,8 +126,9 @@ index 0000000..def5678
 +set -eu
 +echo "hello world"
 EOF
+  export REPO_ROOT="$(_fast_repo_root)"
   run "$SCRIPT" --diff-file "$diff_file"
-  rm -f "$diff_file"
+  rm -rf "$REPO_ROOT"; rm -f "$diff_file"
   [ "$status" -eq 0 ]
 }
 

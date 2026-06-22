@@ -9,6 +9,20 @@ setup() {
     MEMORY_DIR="$TEST_TMP/docs/memory"
     mkdir -p "$MEMORY_DIR"
 
+    # Hermetic: inject-relevant-memory.sh prefers `mempalace search` over its
+    # grep fallback whenever a `mempalace` CLI is on PATH (script lines 91-97).
+    # On a dev box that HAS mempalace installed, that path searches the real
+    # mempalace store and ignores this test's synthetic --memory-dir fixtures,
+    # so the keyword-match assertions below fail through no fault of the SUT.
+    # Shadow mempalace with a no-op stub that returns nothing, forcing the
+    # deterministic grep fallback these tests are written to exercise.
+    STUB_BIN="$TEST_TMP/stub-bin"
+    mkdir -p "$STUB_BIN"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_BIN/mempalace"
+    chmod +x "$STUB_BIN/mempalace"
+    PATH="$STUB_BIN:$PATH"
+    export PATH
+
     # Create test memory files
     cat > "$MEMORY_DIR/feedback_bash_return_trap_leak.md" <<'EOF'
 ---

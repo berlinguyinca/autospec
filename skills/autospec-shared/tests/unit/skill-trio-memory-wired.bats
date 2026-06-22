@@ -81,8 +81,22 @@ WIRED_SKILLS=(
 }
 
 # ── validate.sh passes ───────────────────────────────────────────────────────
-
+#
+# QUARANTINE (epic #1280 bats hang sweep): this test shells out to the FULL
+# `bash scripts/validate.sh`, which runs the entire ~13-minute gate (including
+# the context-monitor python suites). When this unit file is picked up by a
+# directory-sweeping runner (`bats -r`, CI "run all bats", or this repo's own
+# bats sweep), that 13-minute call looks like a hang and freezes the runner —
+# exactly the "a test holds the pipe and freezes CI" failure mode this sweep
+# is chartered to eliminate. The check is also redundant: validate.sh already
+# has its own dedicated bats coverage and is invoked directly by CI, so re-
+# running it from inside an unrelated "memory-wired" unit suite buys nothing.
+#
+# Gated behind AUTOSPEC_RUN_SLOW_VALIDATE_IN_BATS=1 so it can still be invoked
+# deliberately, but never freezes an unattended sweep. Skipped by default.
 @test "bash scripts/validate.sh exits 0" {
+  [ "${AUTOSPEC_RUN_SLOW_VALIDATE_IN_BATS:-0}" = "1" ] \
+    || skip "quarantined: runs full ~13min validate.sh (set AUTOSPEC_RUN_SLOW_VALIDATE_IN_BATS=1 to enable); validate.sh is gated directly by CI"
   run bash "$REPO_ROOT/scripts/validate.sh"
   if [ "$status" -ne 0 ]; then
     echo "validate.sh output:" >&2
