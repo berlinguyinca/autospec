@@ -95,35 +95,26 @@ teardown() {
 
 # ── integration: validate.sh --changed ───────────────────────────────────────
 
-@test "bare validate.sh on clean tree is byte-identical to pre-change snapshot" {
-  # Guard: default (no-flag) behavior must be byte-for-byte unchanged. We
-  # actually materialize the pre-feature script (the parent of the first commit
-  # that touched scripts/lib/validate-affected.sh — i.e. before --changed/--jobs
-  # landed) and diff its bare --fast output against the current script's. Any
-  # byte difference in the structural-check stream (stdout or stderr) fails. We
-  # use --fast to avoid bats recursion and keep the comparison deterministic.
+@test "bare validate.sh (default mode) never emits the scoped: line" {
+  # Merge-gate invariant: the scoped `scoped: ran N/TOTAL` accounting line is a
+  # --changed-only feature. Bare/default invocation must run the FULL check set
+  # and must NOT emit the scoped line — otherwise the gate could silently skip
+  # checks on a clean tree.
+  #
+  # REDESIGN NOTE (was: "byte-identical to pre-change snapshot"): the original
+  # test diffed current `--fast` output against the validate.sh from the parent
+  # of the first commit that touched validate-affected.sh. Every legitimate
+  # check added since `--changed`/`--jobs` landed (dozens) changed that output,
+  # so the byte-for-byte assertion has been red on origin/main for a long time
+  # by construction — it asserted "validate.sh has not changed since <ancient
+  # commit>", which is the opposite of what we want. The durable intent worth
+  # guarding is the scoped-line invariant below; the per-mode scoping behavior
+  # (which checks run) is already covered by tests 12-15. --fast avoids bats
+  # recursion and keeps the run fast/deterministic.
   cd "${BATS_TEST_DIRNAME}/.."
-  # First commit that introduced the affected-set lib; its parent is the
-  # pre-feature snapshot. If history is unavailable (shallow clone), skip.
-  feat_commit="$(git log --reverse --format=%H -- scripts/lib/validate-affected.sh 2>/dev/null | head -1)"
-  [ -n "$feat_commit" ] || skip "validate-affected.sh history unavailable"
-  pre_ref="${feat_commit}~1"
-  pre_script="$TMP/validate-pre.sh"
-  git show "${pre_ref}:scripts/validate.sh" > "$pre_script" 2>/dev/null \
-    || skip "pre-feature validate.sh unavailable at ${pre_ref}"
-  # Run the pre-feature script from the scripts/ dir context (it resolves
-  # REPO_ROOT via dirname "$0"/..), then the current one, and diff both streams.
-  cp "$pre_script" scripts/.validate-pre-snapshot.sh
-  pre_out="$(bash scripts/.validate-pre-snapshot.sh --fast 2>"$TMP/pre.err")"; pre_rc=$?
-  pre_err="$(cat "$TMP/pre.err")"
-  rm -f scripts/.validate-pre-snapshot.sh
-  cur_out="$(bash scripts/validate.sh --fast 2>"$TMP/cur.err")"; cur_rc=$?
-  cur_err="$(cat "$TMP/cur.err")"
-  [ "$pre_rc" -eq "$cur_rc" ]
-  [ "$pre_out" = "$cur_out" ]
-  [ "$pre_err" = "$cur_err" ]
-  # The scoped line must NEVER appear in bare/default mode.
-  ! printf '%s\n' "$cur_out" | grep -q 'scoped: ran'
+  run bash scripts/validate.sh --fast
+  [ "$status" -eq 0 ]
+  ! printf '%s\n' "$output" | grep -q 'scoped: ran'
 }
 
 @test "validate.sh --changed emits the scoped N/TOTAL line" {
