@@ -70,6 +70,34 @@ class HandoffTimeoutError(TimeoutError):
     """Raised when no handoff file appears within the allowed timeout."""
 
 
+def check_handoff(repo_root: Path, since: float) -> Path | None:
+    """Single-shot, non-blocking check for a fresh today-dated handoff.
+
+    Unlike :func:`wait_for_handoff`, this performs exactly one filesystem scan
+    and returns immediately. It lets a caller poll for the handoff across its
+    own loop ticks (so the poll cadence is never frozen by a long blocking
+    wait) while reusing the same match semantics.
+
+    Args:
+        repo_root: Root directory of the repository (contains ``.turbo/``).
+        since:     POSIX timestamp; only files with ``st_mtime > since`` match.
+
+    Returns:
+        The newest matching handoff :class:`~pathlib.Path`, or ``None`` when no
+        qualifying file exists yet.
+    """
+    handoff_dir = repo_root / ".turbo" / "handoff"
+    if not handoff_dir.exists():
+        return None
+    today_glob = f"{date.today().isoformat()}-*.md"
+    candidates = [
+        p for p in handoff_dir.glob(today_glob) if p.stat().st_mtime > since
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
 def wait_for_handoff(
     repo_root: Path,
     since: float,
