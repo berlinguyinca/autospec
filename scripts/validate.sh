@@ -563,6 +563,32 @@ check_mutation_and_negative_path() {
     fi
 }
 
+# Context-monitor python suites (epic #1280) — these were green on main but never
+# wired into the gate, so they could silently re-rot. Run the full pytest suite
+# over `packages tests` with PYTHONPATH pointed at the context-monitor package
+# (matching how the suite is run today). This is an ~80s run, so it belongs in
+# full mode only and is SKIPPED under --fast (RUN_BATS=0), consistent with how the
+# slow bats suites gate on RUN_BATS. Fail-closed if the runner is unavailable:
+# we'd rather fail the gate than silently skip the suites.
+check_python_suites() {
+    info "python suites: context-monitor pytest (packages tests) (#1280)"
+    if [ "$RUN_BATS" != 1 ]; then
+        info "python suites: skipped in --fast"
+        return 0
+    fi
+    # Fail-closed: python3 / pytest must be available, else the gate is toothless.
+    if ! command -v python3 >/dev/null 2>&1; then
+        fail "python suites: pytest unavailable (pip install pytest) — cannot gate the context-monitor suites"
+    fi
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        fail "python suites: pytest unavailable (pip install pytest) — cannot gate the context-monitor suites"
+    fi
+    PYTHONPATH="packages/autospec_context_monitor${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -m pytest packages tests -q -p no:cacheprovider >/tmp/validate-pytest.log 2>&1 \
+        || { tail -40 /tmp/validate-pytest.log >&2; fail "python suites: pytest failed"; }
+    tail -1 /tmp/validate-pytest.log
+}
+
 # Two-tier subagent model selection invariants: every dispatching SKILL.md
 # must include the literal "**Model tier:**" directive at least once, every
 # such directive must specify either "Tier A (spec work)" or
@@ -2822,6 +2848,7 @@ main() {
     check_codex_skills_install
     check_shared_script_install
     check_mutation_and_negative_path
+    check_python_suites
 
     check_agents_md_subagent_section
     check_agents_md_subagent_matrix
