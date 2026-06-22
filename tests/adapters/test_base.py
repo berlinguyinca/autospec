@@ -49,6 +49,9 @@ def test_protocol_runtime_checkable():
         def command(self, logical: Literal["clear", "compact", "handoff"]) -> str:
             return f"/{logical}"
 
+        def prompt_marker(self) -> str:
+            return "> "
+
     adapter = ConcreteAdapter()
     assert isinstance(adapter, HarnessAdapter)
 

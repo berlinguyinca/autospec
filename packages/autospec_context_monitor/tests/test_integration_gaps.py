@@ -105,6 +105,13 @@ class _FakeAdapter:
             "handoff": "/FAKE_HANDOFF",
         }[logical]
 
+    def prompt_marker(self) -> str:
+        # Empty marker → _dispatch's _prompt_ok guard short-circuits to True
+        # without shelling out to tmux (these unit tests run without a tmux
+        # server). Matches the Protocol signature; a real adapter returns a
+        # non-empty prompt marker.
+        return ""
+
 
 def _make_valid_handoff(handoff_dir: Path) -> Path:
     """Write a structurally-valid handoff file under *handoff_dir*."""

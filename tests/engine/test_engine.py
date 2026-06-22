@@ -45,8 +45,15 @@ def test_compacted_to_rolled_at_eighty():
 
 
 def test_normal_direct_to_rolled_at_eighty():
-    """Spec: NORMAL → ROLLED direct climb (skips COMPACTED)."""
+    """Spec (compact-first): a direct climb to >=0.80 from NORMAL still
+    enters COMPACTED and emits [compact] first; compaction must always be
+    attempted before a rollover. ROLLED requires a second >=0.80 tick from
+    COMPACTED (see engine.py docstring + transitions)."""
     e = Engine()
+    actions = e.classify(u(0.80))
+    assert [a.kind for a in actions] == ["compact"]
+    assert e.state is State.COMPACTED
+    # Second >=0.80 tick (compaction hasn't dropped pct yet) → ROLLED.
     actions = e.classify(u(0.80))
     assert [a.kind for a in actions] == ["handoff", "clear", "resume"]
     assert e.state is State.ROLLED
@@ -119,7 +126,8 @@ def test_full_scripted_sequence_10_30_51_25_49_52_75_81():
 
 def test_rolled_to_normal_when_below_thirty():
     e = Engine()
-    e.classify(u(0.80))  # NORMAL → ROLLED
+    e.classify(u(0.80))  # NORMAL → COMPACTED (compact-first)
+    e.classify(u(0.80))  # COMPACTED → ROLLED
     actions = e.classify(u(0.20))  # ROLLED → NORMAL
     assert [a.kind for a in actions] == ["noop"]
     assert actions[0].payload == "reset:rolled->normal"
@@ -129,7 +137,8 @@ def test_rolled_to_normal_when_below_thirty():
 def test_rolled_noop_above_thirty():
     """ROLLED stays ROLLED if pct is still >= 30%."""
     e = Engine()
-    e.classify(u(0.80))  # → ROLLED
+    e.classify(u(0.80))  # NORMAL → COMPACTED (compact-first)
+    e.classify(u(0.80))  # COMPACTED → ROLLED
     actions = e.classify(u(0.50))
     assert actions == []
     assert e.state is State.ROLLED
@@ -138,9 +147,11 @@ def test_rolled_noop_above_thirty():
 def test_second_rollover_after_reset():
     """After ROLLED→NORMAL reset, the engine can roll again."""
     e = Engine()
-    e.classify(u(0.80))  # → ROLLED
-    e.classify(u(0.20))  # → NORMAL
-    actions = e.classify(u(0.90))  # → ROLLED again
+    e.classify(u(0.80))  # NORMAL → COMPACTED (compact-first)
+    e.classify(u(0.80))  # COMPACTED → ROLLED
+    e.classify(u(0.20))  # ROLLED → NORMAL
+    e.classify(u(0.90))  # NORMAL → COMPACTED (compact-first)
+    actions = e.classify(u(0.90))  # COMPACTED → ROLLED again
     assert [a.kind for a in actions] == ["handoff", "clear", "resume"]
     assert e.state is State.ROLLED
 
