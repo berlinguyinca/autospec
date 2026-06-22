@@ -25,6 +25,10 @@ teardown:
     on_failure: warn
 target_envs:
   allowed: [test.tidyboard.org, staging.tidyboard.org]
-  forbidden: [tidyboard.org, www.tidyboard.org]
+  # Forbidden tokens are matched as literal, case-insensitive SUBSTRINGS by the
+  # runner safety floor (rule 1), so they must not be substrings of an allowed
+  # host. The bare apex "tidyboard.org" would substring-match the allowed
+  # "test.tidyboard.org"; list specific prod hostnames instead.
+  forbidden: [www.tidyboard.org, app.tidyboard.org]
 safety:
   notes: "clone script anonymizes PII in step 2; test family is read-isolated from prod."
