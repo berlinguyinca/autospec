@@ -1,0 +1,41 @@
+name: python-suites
+
+# Runs the context-monitor python test suites on every PR and push to main.
+# Part of epic #1280: these suites (the whole autospec_context_monitor engine +
+# adapters) were un-gated and had rotted to 16 failures (greened in #1282, wired
+# into validate.sh in #1283). This CI job is the cross-checkout enforcement —
+# pure-python and ubuntu-portable, so it runs green on a GitHub runner without
+# the full validate.sh ubuntu-clean work (tracked separately in #1280).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: python-suites-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test deps
+        run: |
+          set -euxo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pytest pyyaml
+
+      - name: Run context-monitor python suites
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="packages/autospec_context_monitor${PYTHONPATH:+:$PYTHONPATH}"
+          python3 -m pytest packages tests -q -p no:cacheprovider
