@@ -14,8 +14,30 @@ FIX_BASE="$SKILL_DIR/tests/unit/fixtures/anonymize-fixture"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
+# Ensure @faker-js/faker is available for anonymize.mjs.
+# On a clean checkout node_modules is absent; install it now.
+# Skip (not fail) when npm is unavailable or network is unreachable.
+_ensure_node_modules() {
+  if [ -d "$SKILL_DIR/node_modules/@faker-js" ]; then
+    return 0
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    skip "npm not found — skipping faker-dependent tests"
+  fi
+  # Try npm ci first (uses lock file, reproducible); fall back to npm install.
+  if [ -f "$SKILL_DIR/package-lock.json" ]; then
+    npm ci --prefix "$SKILL_DIR" --silent 2>/dev/null \
+      || npm install --prefix "$SKILL_DIR" --silent 2>/dev/null \
+      || skip "@faker-js/faker could not be installed (offline?) — skipping faker-dependent tests"
+  else
+    npm install --prefix "$SKILL_DIR" --silent 2>/dev/null \
+      || skip "@faker-js/faker could not be installed (offline?) — skipping faker-dependent tests"
+  fi
+}
+
 # Create a fresh snapshot copy for each test (so we don't mutate shared fixtures)
 setup() {
+  _ensure_node_modules
   TEST_SNAPSHOT="$(mktemp -d -t anonymize-test-XXXXXX)"
   TEST_REPO="$(mktemp -d -t anonymize-repo-XXXXXX)"
   mkdir -p "$TEST_REPO/.autospec"
