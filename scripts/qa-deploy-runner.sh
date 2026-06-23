@@ -242,7 +242,330 @@ while [ "$i" -lt "$STAGE_COUNT" ]; do
 done
 
 # ── Parse + safety floor passed ──────────────────────────────────────────────
-# Stage execution, health probes, and verdict-write are deferred to #1294/#1295.
-# A valid, safe contract that this core cannot yet execute exits 0 (no-op for
-# the execution half) so the gate does not block on the unimplemented portion.
+# #1294: execute stages in order, run health probes, apply the run-time
+# stdout forbidden-target check, and write the deploy: block atomically.
+# (Teardown — #1295 — is intentionally NOT implemented here.)
+
+# Resolve the verdict path (default: <repo-dir>/.autospec/qa-verdict.json).
+if [ -z "$VERDICT_PATH" ]; then
+    VERDICT_PATH="$REPO_DIR/.autospec/qa-verdict.json"
+fi
+
+# ── Portable hard wall-clock timeout ─────────────────────────────────────────
+# macOS bash 3.2 has no `timeout`/`gtimeout` binary, so we run the command in
+# the background and a sibling watchdog that kills it after N seconds. We
+# group-kill ONLY when the child is its own process-group leader (pgid==pid) so
+# we never nuke the caller's process group (per the explore-handoff kill-tree
+# memory); otherwise we kill the single pid. The watchdog's own output is
+# redirected and it is reaped, so no stray `sleep` orphans hold a pipe open.
+#
+# run_stage_with_timeout <timeout_secs> <command_string> <stdout_file>
+# Returns: 0 ok, 124 timed out, other = command's own non-zero exit.
+run_stage_with_timeout() {
+    local _timeout="$1" _cmd="$2" _outfile="$3"
+    local _cpid _wpid _rc
+
+    # Launch the command in its own session if setsid is available so the
+    # watchdog can group-kill safely; fall back to a plain background job.
+    if command -v setsid >/dev/null 2>&1; then
+        setsid bash -c "$_cmd" >"$_outfile" 2>&1 &
+    else
+        bash -c "$_cmd" >"$_outfile" 2>&1 &
+    fi
+    _cpid=$!
+
+    # Watchdog: sleep then signal the child. Its stdout/stderr are discarded.
+    (
+        sleep "$_timeout"
+        # Try a group kill only when the child leads its own group.
+        _pgid="$(ps -o pgid= -p "$_cpid" 2>/dev/null | tr -d ' ')"
+        if [ -n "$_pgid" ] && [ "$_pgid" = "$_cpid" ]; then
+            kill -TERM "-$_pgid" 2>/dev/null
+            sleep 1
+            kill -KILL "-$_pgid" 2>/dev/null
+        else
+            kill -TERM "$_cpid" 2>/dev/null
+            sleep 1
+            kill -KILL "$_cpid" 2>/dev/null
+        fi
+    ) >/dev/null 2>&1 &
+    _wpid=$!
+
+    # Wait for the command; capture its exit status.
+    if wait "$_cpid" 2>/dev/null; then
+        _rc=0
+    else
+        _rc=$?
+    fi
+
+    # Reap the watchdog: if the command finished first, kill the watchdog (and
+    # its sleep) so nothing lingers. pkill -P reaps the watchdog's sleep child.
+    if kill -0 "$_wpid" 2>/dev/null; then
+        pkill -P "$_wpid" 2>/dev/null
+        kill -TERM "$_wpid" 2>/dev/null
+    fi
+    wait "$_wpid" 2>/dev/null || true
+
+    # A command killed by SIGTERM/SIGKILL reports 143/137 (or 124 from us). If
+    # the watchdog is what killed it (it is no longer alive AND rc indicates a
+    # signal), normalize to 124 (timed out). We detect "timed out" by checking
+    # whether the elapsed wall-clock exceeded the cap; simpler: a signal exit
+    # (>128) after the watchdog fired is treated as a timeout.
+    if [ "$_rc" -gt 128 ]; then
+        return 124
+    fi
+    return "$_rc"
+}
+
+# ── Monotonic-ish millisecond clock ──────────────────────────────────────────
+# Tests assert KEY presence + integer type, not exact ms. We use the wall clock
+# (date) since a true monotonic source is not portable across bash 3.2/macOS;
+# durations are advisory.
+now_ms() {
+    # date +%s%N is GNU-only; macOS date lacks %N. Use python3 (always present
+    # for the verdict write) for a portable millisecond timestamp.
+    python3 -c 'import time; print(int(time.time()*1000))'
+}
+
+# ── Write a qa_deploy_failed verdict + finding, then exit 1 ───────────────────
+# write_failure_and_exit <stage_name> <stdout_tail>
+write_failure_and_exit() {
+    local _stage="$1" _tail="$2"
+    # stages_run so far is in $STAGES_RUN_JSON / durations in $DURATIONS_JSON.
+    # NOTE: do NOT use ${VAR:-{}} brace defaults here — bash parses `:-{}}` as
+    # default `{` plus a literal trailing `}`, corrupting valid JSON. These
+    # accumulators are always initialized before any stage runs, so a plain
+    # expansion is correct.
+    VERDICT_PATH="$VERDICT_PATH" \
+    DEPLOY_STAGE="$_stage" \
+    DEPLOY_TAIL="$_tail" \
+    STAGES_RUN_JSON="$STAGES_RUN_JSON" \
+    DURATIONS_JSON="$DURATIONS_JSON" \
+    TARGET_ENV="$TARGET_ENV" \
+    HEAD_SHA="$HEAD_SHA_DEPLOYED" \
+    python3 - <<'PY'
+import json, os, sys
+
+path   = os.environ["VERDICT_PATH"]
+stage  = os.environ["DEPLOY_STAGE"]
+tail   = os.environ["DEPLOY_TAIL"]
+target = os.environ.get("TARGET_ENV", "")
+head   = os.environ.get("HEAD_SHA", "")
+
+verdict = {}
+if os.path.isfile(path):
+    try:
+        with open(path) as f:
+            verdict = json.load(f) or {}
+    except Exception:
+        verdict = {}
+
+deploy = dict(verdict.get("deploy", {}) or {})
+deploy["stages_run"]        = json.loads(os.environ.get("STAGES_RUN_JSON", "[]"))
+deploy["stage_durations_ms"] = json.loads(os.environ.get("DURATIONS_JSON", "{}"))
+if target:
+    deploy["target_env"] = target
+if head:
+    deploy["head_sha_deployed"] = head
+deploy["failed_stage"] = stage
+verdict["deploy"] = deploy
+
+findings = list(verdict.get("findings", []) or [])
+findings.append({
+    "category": "code_health:qa_deploy_failed",
+    "summary":  "deploy stage '%s' failed; stdout tail: %s" % (stage, tail),
+})
+verdict["findings"] = findings
+
+os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+tmp = path + ".tmp"
+with open(tmp, "w") as out:
+    json.dump(verdict, out, indent=2)
+    out.write("\n")
+os.replace(tmp, path)
+PY
+    emit_and_exit 1 "code_health:qa_deploy_failed" \
+        "deploy stage '$_stage' failed"
+}
+
+# ── Derive target_env: scheme+host of the first stage's health_check.url, ─────
+# else the first target_envs.allowed entry, else "".
+TARGET_ENV="$(printf '%s' "$CONTRACT_JSON" | jq -r '
+    ([.stages[]?.health_check?.url // empty] | .[0] // "") as $u
+    | if $u != "" then ($u | capture("^(?<o>[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+)").o // $u)
+      else (.target_envs.allowed[0]? // "") end
+' 2>/dev/null)"
+if [ -z "$TARGET_ENV" ] || [ "$TARGET_ENV" = "null" ]; then
+    TARGET_ENV=""
+fi
+
+# ── head_sha_deployed: short HEAD of the TARGET repo dir (guard non-git) ──────
+HEAD_SHA_DEPLOYED="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo "")"
+if [ -z "$HEAD_SHA_DEPLOYED" ]; then
+    HEAD_SHA_DEPLOYED="unknown-not-a-git-repo"
+fi
+
+# ── Accumulators for the deploy: block (built as JSON via jq) ─────────────────
+STAGES_RUN_JSON="[]"
+DURATIONS_JSON="{}"
+DATA_CLONE_JSON=""   # set if any stage emits records_copied=<int>
+
+STAGE_OUT="$(mktemp -t qa-deploy-stage-out.XXXXXX)"
+cleanup_stage() { rm -f "$STAGE_OUT"; }
+# Extend the existing EXIT trap behavior (cleanup() removes YQ_ERR + contract).
+trap 'cleanup; cleanup_stage' EXIT
+
+# ── Execute each stage in order ───────────────────────────────────────────────
+i=0
+while [ "$i" -lt "$STAGE_COUNT" ]; do
+    s_name="$(printf '%s' "$CONTRACT_JSON" | jq -r ".stages[$i].name // \"\"")"
+    s_cmd="$(printf '%s' "$CONTRACT_JSON" | jq -r ".stages[$i].command // \"\"")"
+    s_timeout="$(printf '%s' "$CONTRACT_JSON" | jq -r ".stages[$i].timeout // 300")"
+    s_max="$(printf '%s' "$CONTRACT_JSON" | jq -r ".stages[$i].safety.max_records // \"\"")"
+
+    # Build the env-prefix for the command. Pass env values VERBATIM but never
+    # log/record VALUES — only key names are ever printed. We export each pair
+    # into the bash -c subshell via a leading assignment string built with jq
+    # (so values with spaces survive). Key NAMES only go to stderr.
+    ENV_ASSIGNS="$(printf '%s' "$CONTRACT_JSON" | jq -r "
+        (.stages[$i].env // {}) | to_entries
+        | map(\"export \" + .key + \"=\" + (.value|tostring|@sh) + \"; \")
+        | join(\"\")
+    ")"
+    ENV_KEYS="$(printf '%s' "$CONTRACT_JSON" | jq -r "(.stages[$i].env // {}) | keys | join(\",\")")"
+    if [ -n "$ENV_KEYS" ]; then
+        printf 'qa-deploy-runner: stage %s env keys: %s\n' "$s_name" "$ENV_KEYS" >&2
+    fi
+
+    printf 'qa-deploy-runner: running stage %s\n' "$s_name" >&2
+
+    _start_ms="$(now_ms)"
+    run_stage_with_timeout "$s_timeout" "$ENV_ASSIGNS$s_cmd" "$STAGE_OUT"
+    _stage_rc=$?
+    _end_ms="$(now_ms)"
+    _dur_ms=$((_end_ms - _start_ms))
+    if [ "$_dur_ms" -lt 0 ]; then _dur_ms=0; fi
+
+    # Record this stage as run + its duration (regardless of pass/fail so the
+    # failure verdict reflects what was attempted).
+    STAGES_RUN_JSON="$(printf '%s' "$STAGES_RUN_JSON" | jq -c --arg n "$s_name" '. + [$n]')"
+    DURATIONS_JSON="$(printf '%s' "$DURATIONS_JSON" | jq -c --arg n "$s_name" --argjson d "$_dur_ms" '. + {($n): $d}')"
+
+    # stdout tail (last 20 lines) for diagnostics — never includes env values
+    # (we never echoed them; the command's own output is captured).
+    _tail="$(tail -n 20 "$STAGE_OUT" 2>/dev/null | tr '\n' ' ' | cut -c1-500)"
+
+    # ── Run-time forbidden-target check against captured STDOUT (rule 1 ext) ──
+    # Same literal, case-insensitive grep -iF matching as the static floor;
+    # contract tokens are never interpolated into a regex.
+    if [ -n "$FORBIDDEN_LIST" ]; then
+        while IFS= read -r token; do
+            if [ -z "$token" ]; then
+                continue
+            fi
+            if grep -iF -e "$token" "$STAGE_OUT" >/dev/null 2>&1; then
+                emit_and_exit 3 "qa_deploy_forbidden_target" \
+                    "forbidden target token '$token' appeared in stdout of stage '$s_name'"
+            fi
+        done <<EOF
+$FORBIDDEN_LIST
+EOF
+    fi
+
+    # ── Stage command failure / timeout -> exit 1 ────────────────────────────
+    if [ "$_stage_rc" -eq 124 ]; then
+        write_failure_and_exit "$s_name" "stage timed out after ${s_timeout}s; $_tail"
+    fi
+    if [ "$_stage_rc" -ne 0 ]; then
+        write_failure_and_exit "$s_name" "$_tail"
+    fi
+
+    # ── Parse data_clone (records_copied=<int>) from this stage's stdout ──────
+    # FIXED regex; the stdout is the searched input. Take the last match.
+    _rec="$(grep -E '^records_copied=[0-9]+$' "$STAGE_OUT" 2>/dev/null \
+        | tail -n 1 | sed -E 's/^records_copied=([0-9]+)$/\1/')"
+    if [ -n "$_rec" ]; then
+        if [ -n "$s_max" ]; then
+            DATA_CLONE_JSON="$(jq -nc --argjson r "$_rec" --argjson m "$s_max" \
+                '{records_copied: $r, max_records: $m}')"
+        else
+            DATA_CLONE_JSON="$(jq -nc --argjson r "$_rec" '{records_copied: $r}')"
+        fi
+    fi
+
+    # ── health_check (if present): poll url up to retry x retry_interval ──────
+    HC_URL="$(printf '%s' "$CONTRACT_JSON" | jq -r ".stages[$i].health_check?.url // \"\"")"
+    if [ -n "$HC_URL" ]; then
+        HC_STATUS="$(printf '%s' "$CONTRACT_JSON" | jq -r ".stages[$i].health_check?.expect_status // 200")"
+        HC_RETRY="$(printf '%s' "$CONTRACT_JSON" | jq -r ".stages[$i].health_check?.retry // 30")"
+        HC_INTERVAL="$(printf '%s' "$CONTRACT_JSON" | jq -r ".stages[$i].health_check?.retry_interval // 10")"
+
+        printf 'qa-deploy-runner: probing health for stage %s (%s attempts)\n' \
+            "$s_name" "$HC_RETRY" >&2
+        _attempt=0
+        _ready=0
+        while [ "$_attempt" -lt "$HC_RETRY" ]; do
+            _code="$(curl -s -o /dev/null -w '%{http_code}' "$HC_URL" 2>/dev/null || echo "000")"
+            if [ "$_code" = "$HC_STATUS" ]; then
+                _ready=1
+                break
+            fi
+            _attempt=$((_attempt + 1))
+            if [ "$_attempt" -lt "$HC_RETRY" ]; then
+                sleep "$HC_INTERVAL"
+            fi
+        done
+        if [ "$_ready" -ne 1 ]; then
+            write_failure_and_exit "$s_name" \
+                "health_check exhausted ${HC_RETRY} retries against ${HC_URL} (expected ${HC_STATUS}); $_tail"
+        fi
+    fi
+
+    i=$((i + 1))
+done
+
+# ── Success: write the deploy: block atomically (.tmp + mv) ───────────────────
+# Additive — merge into any existing verdict; create minimal {"deploy":{...}}
+# if none exists yet (deploy may run before the audit).
+VERDICT_PATH="$VERDICT_PATH" \
+STAGES_RUN_JSON="$STAGES_RUN_JSON" \
+DURATIONS_JSON="$DURATIONS_JSON" \
+TARGET_ENV="$TARGET_ENV" \
+HEAD_SHA_DEPLOYED="$HEAD_SHA_DEPLOYED" \
+DATA_CLONE_JSON="$DATA_CLONE_JSON" \
+python3 - <<'PY'
+import json, os
+
+path = os.environ["VERDICT_PATH"]
+
+verdict = {}
+if os.path.isfile(path):
+    try:
+        with open(path) as f:
+            verdict = json.load(f) or {}
+    except Exception:
+        verdict = {}
+
+deploy = {}
+deploy["stages_run"]         = json.loads(os.environ.get("STAGES_RUN_JSON", "[]"))
+deploy["stage_durations_ms"] = json.loads(os.environ.get("DURATIONS_JSON", "{}"))
+target = os.environ.get("TARGET_ENV", "")
+if target:
+    deploy["target_env"] = target
+deploy["head_sha_deployed"]  = os.environ.get("HEAD_SHA_DEPLOYED", "")
+dc = os.environ.get("DATA_CLONE_JSON", "")
+if dc:
+    deploy["data_clone"] = json.loads(dc)
+
+# Additive: replace ONLY the deploy block, leave every other verdict key intact.
+verdict["deploy"] = deploy
+
+os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+tmp = path + ".tmp"
+with open(tmp, "w") as out:
+    json.dump(verdict, out, indent=2)
+    out.write("\n")
+os.replace(tmp, path)
+PY
+
 exit 0

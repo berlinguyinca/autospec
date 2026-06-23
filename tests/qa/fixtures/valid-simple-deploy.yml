@@ -1,0 +1,21 @@
+# Schema-VALID, clears the safety floor, and is meant to RUN (#1294):
+# a single deploy stage whose command is a PATH-stubbed shim (deploy-stub)
+# that writes a real local readiness marker. The health_check polls a file://
+# URL served by the curl shim. Exercises ordered stages_run, stage_durations_ms
+# key presence, and target_env derivation.
+required: true
+stages:
+  - name: deploy-to-test-family
+    command: deploy-stub
+    timeout: 30
+    env:
+      DEPLOY_TARGET: test-family
+      DEPLOY_SECRET_TOKEN: super-secret-value
+    health_check:
+      url: http://stub.test/health
+      expect_status: 200
+      retry: 3
+      retry_interval: 1
+target_envs:
+  allowed: [test.tidyboard.org]
+  forbidden: [www.tidyboard.org, app.tidyboard.org]

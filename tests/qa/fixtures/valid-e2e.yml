@@ -1,0 +1,23 @@
+# Schema-VALID, clears the safety floor, synthetic end-to-end (#1294 fixture
+# 10): a deploy stage (with health_check) followed by a data-clone stage whose
+# stubbed command (clone-stub) prints a `records_copied=<int>` line. Exercises
+# the full deploy: block — ordered stages_run, stage_durations_ms keys,
+# target_env, head_sha_deployed, and data_clone {records_copied, max_records}.
+required: true
+stages:
+  - name: deploy-to-test-family
+    command: deploy-stub
+    timeout: 30
+    health_check:
+      url: http://stub.test/health
+      expect_status: 200
+      retry: 3
+      retry_interval: 1
+  - name: clone-production-data
+    command: clone-stub
+    timeout: 30
+    safety:
+      max_records: 10000
+target_envs:
+  allowed: [test.tidyboard.org]
+  forbidden: [www.tidyboard.org, app.tidyboard.org]

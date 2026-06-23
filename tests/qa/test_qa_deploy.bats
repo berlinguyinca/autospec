@@ -61,22 +61,26 @@ _install_contract() {
 # ── valid cross-directory: --repo-dir outside the checkout passes safety floor ─
 # Proves the runner reads its contract from --repo-dir (a mktemp dir under /tmp,
 # a different directory tree from $REPO_ROOT) rather than SCRIPT_DIR/.., and
-# that a valid contract clears the safety floor. Scope is parse + safety-floor +
-# no-op only: no stage execution, health probes, or verdict-write is asserted.
-@test "valid contract via --repo-dir outside checkout -> passes safety floor, writes nothing" {
+# that a valid contract clears the safety floor. With #1294 the runner now also
+# executes the (stubbed) stages and writes the deploy: block, so we assert it
+# runs end-to-end without tripping any safety category.
+@test "valid contract via --repo-dir outside checkout -> passes safety floor, runs + writes deploy block" {
   _require_tools
-  _install_contract "valid.yml"
+  _install_contract "valid-simple-deploy.yml"
+  _install_stub_bin
+  VERDICT="$TMP_REPO/.autospec/qa-verdict.json"
   # $TMP_REPO is a mktemp -d /tmp/... dir (see setup), outside $REPO_ROOT.
-  run bash "$RUNNER" --repo-dir "$TMP_REPO"
+  _run_with_stubs
   [ "$status" -eq 0 ]
   # Safety floor passed: none of the violation categories appear.
   [[ "$output" != *"qa_deploy_forbidden_target"* ]]
   [[ "$output" != *"qa_deploy_prod_pattern"* ]]
   [[ "$output" != *"qa_deploy_missing_records_cap"* ]]
   [[ "$output" != *"qa_deploy_invalid_contract"* ]]
-  # No artifact written into .autospec beyond the installed contract.
-  run ls -A "$TMP_REPO/.autospec"
-  [ "$output" = "qa-deploy.yml" ]
+  # deploy: block written into the verdict at --repo-dir.
+  [ -f "$VERDICT" ]
+  run jq -r '.deploy | has("stages_run")' "$VERDICT"
+  [ "$output" = "true" ]
 }
 
 # ── fixture 3: forbidden token in command/url -> exit 3 forbidden_target ──────
@@ -148,4 +152,191 @@ _install_contract() {
   [[ "$output" == *"qa_deploy_invalid_contract"* ]]
   [[ "$output" == *"install"* ]]
   [[ "$output" == *"yq"* ]]
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #1294 — stage execution + health probe + atomic deploy: block write.
+#
+# Real-services rule: the runner is NOT mocked. Deploy/clone/curl are
+# PATH-stubbed via a per-test fixture bin/ whose shims write/serve REAL local
+# files. No network. The runner runs end-to-end; only the leaf programs are
+# substituted (exactly the spec's "fixture bin/" approach).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Build a fixture bin/ on $TMP_REPO/bin with deploy-stub, clone-stub, and a curl
+# shim, then prepend it to PATH for the runner. The curl shim returns 200 for
+# any URL except one containing "never-ready" (returns 503) so health-success
+# and health-exhaustion are both exercised deterministically.
+_install_stub_bin() {
+  STUB_BIN="$TMP_REPO/bin"
+  mkdir -p "$STUB_BIN"
+
+  cat > "$STUB_BIN/deploy-stub" <<EOF
+#!/usr/bin/env bash
+# Writes a real local readiness marker so the "deploy" is observable on disk.
+echo "deploy ok" > "$TMP_REPO/.autospec/deployed.marker"
+echo "deploy-stub: target up"
+exit 0
+EOF
+  chmod +x "$STUB_BIN/deploy-stub"
+
+  cat > "$STUB_BIN/clone-stub" <<'EOF'
+#!/usr/bin/env bash
+# Emits the records_copied=<int> stdout line the runner parses for data_clone.
+echo "cloning prod-readonly into test family"
+echo "records_copied=8500"
+exit 0
+EOF
+  chmod +x "$STUB_BIN/clone-stub"
+
+  # curl shim: mimics `curl -s -o /dev/null -w '%{http_code}' <url>` by printing
+  # an HTTP status code to stdout. 503 for the never-ready URL, 200 otherwise.
+  cat > "$STUB_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+url=""
+for a in "$@"; do url="$a"; done
+case "$url" in
+  *never-ready*) printf '503' ;;
+  *)             printf '200' ;;
+esac
+exit 0
+EOF
+  chmod +x "$STUB_BIN/curl"
+}
+
+_run_with_stubs() {
+  # Run the runner with the stub bin prepended to PATH and a verdict path.
+  run env PATH="$STUB_BIN:$PATH" bash "$RUNNER" \
+    --repo-dir "$TMP_REPO" --verdict "$VERDICT"
+}
+
+# ── fixture 2: simple deploy -> ordered stages_run + durations + target_env ───
+@test "fixture 2: simple deploy -> exit 0, ordered stages_run + stage_durations_ms keys + target_env" {
+  _require_tools
+  _install_contract "valid-simple-deploy.yml"
+  _install_stub_bin
+  VERDICT="$TMP_REPO/.autospec/qa-verdict.json"
+  _run_with_stubs
+  [ "$status" -eq 0 ]
+  # Verdict file written (bats 3.2-safe: real file on disk before any [ -f ]).
+  [ -f "$VERDICT" ]
+
+  # stages_run is the single stage, in order.
+  run jq -c '.deploy.stages_run' "$VERDICT"
+  [ "$output" = '["deploy-to-test-family"]' ]
+
+  # stage_durations_ms has a key per stage and the value is an integer (we do
+  # NOT assert exact ms — durations are wall-clock and non-deterministic).
+  run jq -r '.deploy.stage_durations_ms | has("deploy-to-test-family")' "$VERDICT"
+  [ "$output" = "true" ]
+  run jq -r '.deploy.stage_durations_ms["deploy-to-test-family"] | type' "$VERDICT"
+  [ "$output" = "number" ]
+
+  # target_env recorded.
+  run jq -r '.deploy.target_env' "$VERDICT"
+  [ -n "$output" ]
+  [ "$output" != "null" ]
+
+  # Secret env VALUE never recorded anywhere in the verdict.
+  run grep -F "super-secret-value" "$VERDICT"
+  [ "$status" -ne 0 ]
+}
+
+# ── fixture 6: health check fails after retry -> exit 1 qa_deploy_failed ──────
+@test "fixture 6: health check exhausts retries -> exit 1 qa_deploy_failed naming stage" {
+  _require_tools
+  _install_contract "health-fail.yml"
+  _install_stub_bin
+  VERDICT="$TMP_REPO/.autospec/qa-verdict.json"
+  _run_with_stubs
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"qa_deploy_failed"* ]]
+  # Verdict written with the failed stage named in a finding.
+  [ -f "$VERDICT" ]
+  run jq -r '.findings[]? | select(.category|test("qa_deploy_failed")) | .summary' "$VERDICT"
+  [[ "$output" == *"deploy-to-test-family"* ]]
+}
+
+# ── fixture 10: synthetic end-to-end -> deploy: block matches expected ───────
+@test "fixture 10: synthetic end-to-end -> deploy: block structure + deterministic values" {
+  _require_tools
+  _install_contract "valid-e2e.yml"
+  _install_stub_bin
+  VERDICT="$TMP_REPO/.autospec/qa-verdict.json"
+  _run_with_stubs
+  [ "$status" -eq 0 ]
+  [ -f "$VERDICT" ]
+
+  # Ordered stages_run across both stages.
+  run jq -c '.deploy.stages_run' "$VERDICT"
+  [ "$output" = '["deploy-to-test-family","clone-production-data"]' ]
+
+  # Durations: a key per stage, integer-typed (not exact ms).
+  run jq -r '.deploy.stage_durations_ms | keys_unsorted | sort | join(",")' "$VERDICT"
+  [ "$output" = "clone-production-data,deploy-to-test-family" ]
+  run jq -r '[.deploy.stage_durations_ms[] | type] | unique | join(",")' "$VERDICT"
+  [ "$output" = "number" ]
+
+  # data_clone parsed from the records_copied=<int> stdout line + max_records.
+  run jq -r '.deploy.data_clone.records_copied' "$VERDICT"
+  [ "$output" = "8500" ]
+  run jq -r '.deploy.data_clone.max_records' "$VERDICT"
+  [ "$output" = "10000" ]
+
+  # head_sha_deployed: present (short sha) — guarded if not a git repo, but
+  # $TMP_REPO is not a git repo so it must be the explicit non-git sentinel.
+  run jq -r '.deploy | has("head_sha_deployed")' "$VERDICT"
+  [ "$output" = "true" ]
+
+  # target_env recorded.
+  run jq -r '.deploy.target_env' "$VERDICT"
+  [ -n "$output" ]
+  [ "$output" != "null" ]
+}
+
+# ── additive write: existing verdict keys preserved, deploy: merged in ───────
+@test "deploy: block is additive -> pre-existing verdict keys preserved" {
+  _require_tools
+  _install_contract "valid-simple-deploy.yml"
+  _install_stub_bin
+  VERDICT="$TMP_REPO/.autospec/qa-verdict.json"
+  # Seed a pre-existing verdict the audit would later own.
+  printf '{"verdict":"PASS","findings":[{"category":"x","summary":"keep me"}]}\n' > "$VERDICT"
+  [ -f "$VERDICT" ]
+  _run_with_stubs
+  [ "$status" -eq 0 ]
+  run jq -r '.verdict' "$VERDICT"
+  [ "$output" = "PASS" ]
+  run jq -r '.findings[0].summary' "$VERDICT"
+  [ "$output" = "keep me" ]
+  run jq -r '.deploy | has("stages_run")' "$VERDICT"
+  [ "$output" = "true" ]
+}
+
+# ── forbidden token in stage STDOUT at run time -> exit 3 mid-run ─────────────
+@test "forbidden token appearing in stage stdout at run time -> exit 3 qa_deploy_forbidden_target" {
+  _require_tools
+  _install_stub_bin
+  # A stage whose stub prints a forbidden token to stdout (clears the static
+  # command/url floor, trips the run-time stdout check).
+  cat > "$STUB_BIN/leak-stub" <<'EOF'
+#!/usr/bin/env bash
+echo "connecting to www.tidyboard.org now"
+exit 0
+EOF
+  chmod +x "$STUB_BIN/leak-stub"
+  cat > "$TMP_REPO/.autospec/qa-deploy.yml" <<'EOF'
+required: true
+stages:
+  - name: deploy-to-test-family
+    command: leak-stub
+    timeout: 30
+target_envs:
+  allowed: [test.tidyboard.org]
+  forbidden: [www.tidyboard.org, app.tidyboard.org]
+EOF
+  VERDICT="$TMP_REPO/.autospec/qa-verdict.json"
+  _run_with_stubs
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"qa_deploy_forbidden_target"* ]]
 }
