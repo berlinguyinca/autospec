@@ -4134,6 +4134,31 @@ check_autospec_fab_contract() {
         bats "$t" >"/tmp/validate-fab-$name.log" 2>&1 \
             || { cat "/tmp/validate-fab-$name.log" >&2; fail "$t: failed"; }
     done
+    check_fab_container_dockerfile
+}
+
+# Host-portable pin lint for the autospec-fab container Dockerfile (issue #1300,
+# folded from the deferred nightly CI #1301). Asserts the Dockerfile + the
+# result-contract wrappers are present and that the Dockerfile pins every version
+# (digest base, =version apt, hashed pip, no :latest). Runs WITHOUT building the
+# multi-GB image — the build itself runs only in the deferred fab-container.yml.
+check_fab_container_dockerfile() {
+    info "autospec-fab container: Dockerfile pin lint + wrapper presence (issue #1300)"
+    local docker_dir="skills/autospec-fab/docker"
+    local lint="scripts/lint-fab-dockerfile.sh"
+    # Skip cleanly only before child C lands the docker/ tree; once present, gate hard.
+    [ -f "$docker_dir/Dockerfile" ] || { info "  fab Dockerfile absent — pin lint skipped (pre-#1300)"; return 0; }
+    [ -f "$lint" ] || fail "$lint: pin-lint script missing (issue #1300)"
+    bash -n "$lint" || fail "$lint: bash -n failed"
+    for req in "$docker_dir/Dockerfile" \
+               "$docker_dir/requirements.txt" \
+               "$docker_dir/wrappers/ccx_safety_wrapper.py" \
+               "$docker_dir/wrappers/foam_cfd_reduce.py"; do
+        [ -f "$req" ] || fail "$req: required container file missing (issue #1300)"
+    done
+    bash "$lint" "$docker_dir/Dockerfile" >/tmp/validate-fab-pinlint.log 2>&1 \
+        || { cat /tmp/validate-fab-pinlint.log >&2; fail "fab Dockerfile pin lint failed (issue #1300)"; }
+    tail -1 /tmp/validate-fab-pinlint.log
 }
 
 main "$@"

@@ -1,0 +1,21 @@
+# autospec-fab container pip requirements (issue #1300, part of #1270)
+#
+# Installed with: python3 -m pip install --no-cache-dir --require-hashes -r requirements.txt
+#
+# Deliberately EMPTY of third-party packages:
+#   - The result-contract wrappers (docker/wrappers/ccx_safety_wrapper.py,
+#     foam_cfd_reduce.py) are pure Python stdlib (math, re, os, subprocess).
+#   - The shipped fab-vision CLI (scripts/fab-vision-cli.py) imports `anthropic`
+#     LAZILY and GUARDED — absent it degrades gracefully, which is exactly what
+#     the non-skip integration smoke needs. The real model is issue #1271's scope.
+#
+# Pinning policy (spec §5.3): any package added here MUST carry == version pins
+# and --hash sha256 entries so `--require-hashes` stays enforceable and the build
+# is reproducible. Example for a future real-vision dependency:
+#
+#   anthropic==0.39.0 \
+#       --hash=sha256:<wheel-sha256> \
+#       --hash=sha256:<sdist-sha256>
+#
+# An empty hashed requirements file is a no-op install and keeps the Dockerfile's
+# --require-hashes invocation valid and deterministic.
