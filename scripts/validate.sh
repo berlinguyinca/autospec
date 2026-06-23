@@ -1817,6 +1817,73 @@ check_autospec_qa_contract() {
         || fail "schemas/autospec-reliability.schema.json: missing deprecated_surfaces contract"
 }
 
+# autospec-qa deploy contract (#694, child #1296). Asserts the
+# `## Deployment contract` trio prose is lock-step across all three trio files
+# (the section is part of the SKILL.md body, so check_lockstep already enforces
+# byte-identity — here we assert the section + its load-bearing anchors are
+# present in every member), the qa-deploy-runner ships + is executable +
+# bash -n clean, the JSON-Schema is valid JSON (and ajv-compiles when available),
+# and the bats coverage passes when bats is on PATH. Mirrors
+# check_closeout_contract.
+check_qa_deploy_contract() {
+    info "autospec-qa deploy contract: ## Deployment contract trio + runner + schema"
+    # Trio lock-step: the section lives in the SKILL.md body, so it is mirrored
+    # into codex/prompt.md + opencode/agent.md by derive-trio. Assert the section
+    # header + its load-bearing anchors exist in ALL THREE members (drift gate).
+    local anchor trio_file
+    for trio_file in \
+        skills/autospec-qa/SKILL.md \
+        skills/autospec-qa/codex/prompt.md \
+        skills/autospec-qa/opencode/agent.md; do
+        [ -f "$trio_file" ] || fail "$trio_file: required trio file missing"
+        grep -q '^## Deployment contract' "$trio_file" \
+            || fail "$trio_file: missing '## Deployment contract' section"
+        for anchor in \
+            '.autospec/qa-deploy.yml' \
+            'qa-deploy-runner.sh' \
+            'before any cluster' \
+            'qa_deploy_forbidden_target' \
+            'qa_deploy_prod_pattern' \
+            'qa_deploy_missing_records_cap' \
+            'code_health:qa_deploy_failed' \
+            'code_health:qa_deploy_invalid_contract' \
+            'deploy:' \
+            'head_sha_deployed' \
+            '--skip-teardown' \
+            'byte-for-byte today'; do
+            grep -qF -- "$anchor" "$trio_file" \
+                || fail "$trio_file: deployment contract missing required anchor: $anchor"
+        done
+    done
+
+    # Runner ships, is executable, and is bash -n clean.
+    local runner="scripts/qa-deploy-runner.sh"
+    [ -f "$runner" ] || fail "$runner: file missing"
+    [ -x "$runner" ] || fail "$runner: file not executable"
+    bash -n "$runner" || fail "$runner: bash syntax error"
+
+    # JSON-Schema for the contract: valid JSON, and compiles with ajv when avail.
+    local schema="schemas/autospec-qa-deploy.schema.json"
+    [ -f "$schema" ] || fail "$schema: qa-deploy contract schema missing"
+    if command -v jq >/dev/null 2>&1; then
+        jq empty "$schema" >/dev/null 2>&1 \
+            || fail "$schema: not valid JSON"
+    fi
+    if command -v ajv >/dev/null 2>&1; then
+        ajv compile -s "$schema" --spec=draft2020 >/dev/null 2>&1 \
+            || fail "$schema: does not compile with ajv"
+    fi
+
+    # bats coverage for the runner.
+    local bats_file="tests/qa/test_qa_deploy.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-qa-deploy.log 2>&1 \
+            || { cat /tmp/validate-qa-deploy.log >&2; fail "$bats_file: failed"; }
+    fi
+}
+
 check_autospec_sweep_area_contract() {
     info "autospec-sweep area dispatch contract"
     local areas_dir="skills/autospec-sweep/areas"
@@ -2890,6 +2957,7 @@ main() {
     check_autospec_test_skill_present
     check_autospec_playwright_skill_present
     check_autospec_qa_contract
+    check_qa_deploy_contract
     check_brute_force_rule_ids
     check_dogfood_detectors
     check_qa_verify_first_discipline

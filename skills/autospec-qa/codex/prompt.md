@@ -39,6 +39,106 @@ cluster files reference it and will be backfilled as the dispatch model
 matures. Operators can opt out individual clusters via
 `qa-cluster-dispatch.sh --skip-cluster <name>`.
 
+## Deployment contract
+
+`/autospec-qa` assumes the app under audit is already running at the URL the
+operator supplies. For repos that need a fresh deploy plus a scoped test-data
+clone before each QA cycle, the optional declarative contract
+`.autospec/qa-deploy.yml` stands the app up **first** and records what/when/where
+into the verdict — so a failed deploy surfaces as a single
+`code_health:qa_deploy_*` finding instead of a downstream `502` triage trail.
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/qa-deploy-runner.sh" \
+    --repo-dir . --verdict .autospec/qa-verdict.json
+```
+
+is invoked at the **very start** of the orchestration — **before any cluster
+fan-out** — and its exit code gates the audit. The Live backend blocker triage
+prompt above stays as-is: it covers the deploy-succeeds-but-app-unhealthy-mid-
+audit case; the deploy runner covers the never-deployed case.
+
+**Contract file `.autospec/qa-deploy.yml`** mirrors the declarative style of
+`.autospec/test.yml`, parsed with `yq -o=json` and validated against
+`schemas/autospec-qa-deploy.schema.json` with `ajv` (the same yq → jq → ajv
+toolchain `skills/autospec-test/scripts/load-contract.sh` uses). Its presence
+makes deploy mandatory. Key fields:
+
+- `stages[]` (required) — ordered deploy stages run sequentially under each
+  stage's `timeout` (default 300s); first failure aborts the rest. Each stage
+  has a `name`, a `command` run via `bash -c`, optional `env`, and an optional
+  `health_check` (`url`, `expect_status` default 200, `retry` default 30,
+  `retry_interval` default 10s) polled after the command.
+- `stages[].safety.max_records` — **required** for any data-clone stage (name or
+  command matching `clone|copy|replicate|sync`).
+- `teardown[]` — post-verdict cleanup entries (`name`, `command`, `on_failure`
+  `warn`|`fail`).
+- `target_envs.forbidden` (required, ≥1) — the absolute safety floor.
+- `target_envs.allowed` / `safety.notes` — advisory, recorded.
+
+**Safety floor (non-negotiable, enforced regardless of operator config),** each
+violation aborts immediately, runs no further stages, and exits **3**:
+
+1. **Forbidden-target match** — each `target_envs.forbidden` token (literal,
+   case-insensitive substring) matched against each stage `command`,
+   `health_check.url`, and captured stdout → `qa_deploy_forbidden_target`.
+2. **Production-pattern rejection** — each deploy/teardown `command` matched
+   word-boundary case-insensitively against `--prod`, `--production`, ` prod `,
+   ` production `, `production-only`, `live-prod` → `qa_deploy_prod_pattern`.
+3. **`max_records` required for data-clone stages** — a `clone|copy|replicate|
+   sync` stage without `safety.max_records` → `qa_deploy_missing_records_cap`.
+
+**Exit-code gating:**
+
+| Exit | Meaning | Verdict category |
+| --- | --- | --- |
+| 0 | No `.autospec/qa-deploy.yml` (no-op), or all stages + probes succeeded | — / `deploy` block |
+| 1 | A stage failed/timed out, or a `health_check` exhausted retries | `code_health:qa_deploy_failed` |
+| 2 | Usage / contract invalid (ajv fail, malformed YAML, missing required) | `code_health:qa_deploy_invalid_contract` |
+| 3 | Safety-floor violation | `qa_deploy_forbidden_target` \| `qa_deploy_prod_pattern` \| `qa_deploy_missing_records_cap` |
+
+A failed deploy (exit 1/2/3) never reaches the cluster fan-out: the operator
+sees a single `code_health:qa_deploy_*` finding naming the failing stage and a
+stdout tail, not a `502`.
+
+**`deploy:` verdict block.** On success the runner writes a `deploy:` block into
+`.autospec/qa-verdict.json` (atomically via the sibling `.tmp` + `mv` pattern
+from `qa-finding-filter.sh`; a minimal `{"deploy": {...}}` is created
+when no verdict exists yet, which the later audit merges into):
+
+```json
+{
+  "deploy": {
+    "stages_run": ["deploy-to-test-family", "clone-production-data"],
+    "stage_durations_ms": {"deploy-to-test-family": 145000},
+    "target_env": "https://test.tidyboard.org",
+    "head_sha_deployed": "abc1234",
+    "data_clone": {"source": "prod-readonly", "records_copied": 8500, "max_records": 10000},
+    "teardown_run": true,
+    "teardown_failures": []
+  }
+}
+```
+
+`head_sha_deployed` = `git rev-parse --short HEAD` at deploy time.
+`data_clone.records_copied` is parsed from a `records_copied=<int>` stdout line
+when present, else omitted. The block is **additive** — every existing verdict
+consumer (heal loop, `/autospec-release`, `/autospec-sweep`) is unaffected.
+
+**Teardown.** `teardown[]` entries run after the verdict is final, unless
+`--skip-teardown` is passed (which sets `deploy.teardown_run: false` and leaves
+the env intact for repeated manual re-QA). `on_failure: warn` logs only;
+`on_failure: fail` downgrades a `PASS` verdict to `PARTIAL` (never touches
+`FAIL`) and appends the entry to `deploy.teardown_failures`.
+
+**Graceful absent-file behavior.** When `.autospec/qa-deploy.yml` is absent the
+runner exits `0` immediately, writes nothing, and QA proceeds exactly as today —
+the verdict is byte-identical with no `deploy:` key. This compatibility contract
+is the most important one: behavior is byte-for-byte today's behavior when the
+file is not present. Secret env **values** are never logged or recorded (only
+key names). The runner uses `set -u` (not `set -e`) around stage execution so
+failures are caught explicitly and recorded in the verdict.
+
 <!-- autospec-block:startup-self-update SKILL_NAME=autospec-qa -->
 
 ## Self-update mode
