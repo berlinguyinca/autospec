@@ -1,0 +1,12 @@
+# Schema-VALID, but trips the runner safety floor (#1293 rule 2):
+# a stage command contains a production pattern (word-boundary,
+# case-insensitive: --prod here) -> runner must abort exit 3
+# qa_deploy_prod_pattern BEFORE running any stage.
+required: true
+stages:
+  - name: deploy-to-test-family
+    command: bash scripts/deploy.sh --target test-family --prod
+    timeout: 600
+target_envs:
+  allowed: [test.tidyboard.org]
+  forbidden: [example.invalid]

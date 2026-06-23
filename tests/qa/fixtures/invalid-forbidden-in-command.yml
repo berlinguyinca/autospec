@@ -1,0 +1,12 @@
+# Schema-VALID, but trips the runner safety floor (#1293 rule 1):
+# a stage command embeds a forbidden target token (literal, case-insensitive
+# substring of a target_envs.forbidden entry) -> runner must abort exit 3
+# qa_deploy_forbidden_target BEFORE running any stage.
+required: true
+stages:
+  - name: deploy-to-test-family
+    command: bash scripts/deploy.sh --url https://Tidyboard.org/release
+    timeout: 600
+target_envs:
+  allowed: [test.tidyboard.org]
+  forbidden: [tidyboard.org, www.tidyboard.org]
