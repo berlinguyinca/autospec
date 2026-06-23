@@ -192,15 +192,28 @@ teardown() {
 
 # ---- top-level install.sh wiring (issue #574) ----------------------------
 
-@test "top-level install.sh: ALL_SKILLS contains autospec-design" {
-    grep -E '^ALL_SKILLS=' "$REPO_ROOT/install.sh" | grep -q 'autospec-design'
+@test "top-level install.sh: auto-discovery includes autospec-design" {
+    # install.sh builds ALL_SKILLS dynamically from skills/*/ that ship an
+    # install.sh (#705 replaced the old static list + case statement so newly
+    # added skills are never silently missed). The discovery condition for
+    # autospec-design is therefore that it ships an install.sh.
+    [ -f "$REPO_ROOT/skills/autospec-design/install.sh" ]
+    # And it must actually land in the runtime-discovered ALL_SKILLS.
+    discovered="$(for d in "$REPO_ROOT"/skills/*/; do \
+        [ -f "$d/install.sh" ] && basename "$d"; done)"
+    printf '%s\n' "$discovered" | grep -qx 'autospec-design'
 }
 
-@test "top-level install.sh: --skill validation case accepts autospec-design" {
-    # Find the validation case-statement and confirm autospec-design is listed.
-    block="$(awk '/^case "\$SKILL_ARG" in/{f=1} f{print; if (/^esac/) exit}' "$REPO_ROOT/install.sh")"
-    [ -n "$block" ]
-    printf '%s\n' "$block" | grep -q 'autospec-design'
+@test "top-level install.sh: --skill validation accepts autospec-design (rejects bogus)" {
+    # The validator loops the dynamically-discovered ALL_SKILLS (no hardcoded
+    # case), so it accepts autospec-design and rejects an unknown skill.
+    run env AUTOSPEC_NO_STAR_PROMPT=1 AUTOSPEC_NO_SELF_UPDATE=1 \
+        bash "$REPO_ROOT/install.sh" --skill autospec-design --harness all --dry-run
+    [ "$status" -eq 0 ]
+    run env AUTOSPEC_NO_STAR_PROMPT=1 AUTOSPEC_NO_SELF_UPDATE=1 \
+        bash "$REPO_ROOT/install.sh" --skill autospec-bogus-xyz --harness all --dry-run
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q 'invalid --skill'
 }
 
 @test "install.sh --skill autospec-design --harness all --dry-run exits 0" {

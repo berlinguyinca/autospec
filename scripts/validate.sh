@@ -442,6 +442,12 @@ check_startup_preflight() {
     #      required of every skill). Matches check_self_update's transition-safe
     #      "accept either form" handling rather than forcing a missing-section
     #      failure on skills that never had the block.
+    # Named-skill regression anchor (issue #1313): the dynamic discovery above
+    # must actually reach autospec-design — assert it is among discover_skills'
+    # output so a future change that drops it from discovery (e.g. a missing trio
+    # file) fails loudly here instead of silently exempting it.
+    discover_skills | grep -qx 'skills/autospec-design' \
+        || fail "check_startup_preflight: autospec-design not discovered (expected a complete multi-harness trio)"
     for skill_dir in $(discover_skills); do
         for f in "$skill_dir/SKILL.md" "$skill_dir/opencode/agent.md" "$skill_dir/codex/prompt.md"; do
             # Case 1: markered — covered by the golden-expansion path.
@@ -474,6 +480,11 @@ check_codex_skills_install() {
     # silently exempted newer skills like fab/harmonize/upgrade from the Codex
     # install invariants — the hardcoded-subset class). Every install.sh present
     # must carry both the skills/ registry path and the legacy prompts-file path.
+    # Named-skill regression anchor (issue #1313): autospec-design must be among
+    # the per-skill install.sh files the loop iterates, so it is held to the same
+    # Codex install invariants as its siblings (not silently exempted).
+    [ -f skills/autospec-design/install.sh ] \
+        || fail "check_codex_skills_install: skills/autospec-design/install.sh missing"
     for f in skills/*/install.sh; do
         [ -f "$f" ] || continue
         grep -q 'skills/\$SKILL_NAME/SKILL\.md' "$f" \
@@ -523,6 +534,15 @@ referenced_shared_helpers() {
 
 check_shared_script_install() {
     info "shared helper install: all skills (dynamic + conditional)"
+    # Named-skill regression anchor (issue #1313): autospec-design references no
+    # shared runtime helper today, so it legitimately takes the exempt branch
+    # below. Assert it stays exempt (no ${AUTOSPEC_SCRIPTS_DIR}/<helper> reference
+    # resolving to a shared helper); if it ever grows one, this loop will hold it
+    # to the needs-shared install requirement like every other skill.
+    if [ -n "$(referenced_shared_helpers skills/autospec-design)" ]; then
+        grep -q '\.autospec/scripts' skills/autospec-design/install.sh \
+            || fail "check_shared_script_install: autospec-design references a shared helper but does not install into ~/.autospec/scripts"
+    fi
     for f in skills/*/install.sh; do
         [ -f "$f" ] || continue
         skill_dir="$(dirname "$f")"
