@@ -1,0 +1,21 @@
+# #1295 fixture (7): a deploy that PASSES, then a teardown step whose command
+# FAILS with the default on_failure: warn. The failure must be LOGGED ONLY —
+# the verdict is left unchanged — and the teardown name appended to
+# deploy.teardown_failures. Commands are PATH-stubbed shims (no network).
+required: true
+stages:
+  - name: deploy-to-test-family
+    command: deploy-stub
+    timeout: 30
+    health_check:
+      url: http://stub.test/health
+      expect_status: 200
+      retry: 3
+      retry_interval: 1
+teardown:
+  - name: snapshot-test-state
+    command: teardown-fail-stub
+    on_failure: warn
+target_envs:
+  allowed: [test.tidyboard.org]
+  forbidden: [www.tidyboard.org, app.tidyboard.org]
