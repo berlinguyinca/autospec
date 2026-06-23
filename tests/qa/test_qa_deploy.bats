@@ -202,6 +202,24 @@ esac
 exit 0
 EOF
   chmod +x "$STUB_BIN/curl"
+
+  # #1295 teardown shims. teardown-fail-stub exits non-zero (a failing teardown
+  # command); teardown-ok-stub exits 0 and drops a real marker so a test can
+  # prove it ran (or, under --skip-teardown, that it did NOT).
+  cat > "$STUB_BIN/teardown-fail-stub" <<'EOF'
+#!/usr/bin/env bash
+echo "teardown-fail-stub: cleanup failed"
+exit 1
+EOF
+  chmod +x "$STUB_BIN/teardown-fail-stub"
+
+  cat > "$STUB_BIN/teardown-ok-stub" <<EOF
+#!/usr/bin/env bash
+echo "teardown ran" > "$TMP_REPO/.autospec/teardown.marker"
+echo "teardown-ok-stub: cleaned up"
+exit 0
+EOF
+  chmod +x "$STUB_BIN/teardown-ok-stub"
 }
 
 _run_with_stubs() {
@@ -339,4 +357,98 @@ EOF
   _run_with_stubs
   [ "$status" -eq 3 ]
   [[ "$output" == *"qa_deploy_forbidden_target"* ]]
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #1295 — post-verdict teardown + --skip-teardown + PASS->PARTIAL downgrade.
+#
+# Teardown runs AFTER the deploy: block is written (verdict final). Each
+# teardown command is subject to the same safety floor as deploy stages and is
+# PATH-stubbed (no network). on_failure: warn logs only; on_failure: fail
+# downgrades a PASS verdict to PARTIAL (never a FAIL / already-PARTIAL verdict).
+# All verdict updates are atomic (.tmp+os.replace) and additive.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── fixture 7: teardown warn-failure -> verdict UNCHANGED, name recorded ──────
+@test "fixture 7: teardown on_failure:warn failure -> verdict unchanged, name in teardown_failures" {
+  _require_tools
+  _install_contract "teardown-warn-fail.yml"
+  _install_stub_bin
+  VERDICT="$TMP_REPO/.autospec/qa-verdict.json"
+  # Seed a PASS verdict the audit would own; a warn teardown must NOT touch it.
+  printf '{"verdict":"PASS","findings":[]}\n' > "$VERDICT"
+  [ -f "$VERDICT" ]
+  _run_with_stubs
+  # A warn-only teardown failure does not change the runner's success exit.
+  [ "$status" -eq 0 ]
+  # Verdict left unchanged (still PASS).
+  run jq -r '.verdict' "$VERDICT"
+  [ "$output" = "PASS" ]
+  # Teardown ran.
+  run jq -r '.deploy.teardown_run' "$VERDICT"
+  [ "$output" = "true" ]
+  # The failing teardown name is recorded.
+  run jq -c '.deploy.teardown_failures' "$VERDICT"
+  [ "$output" = '["snapshot-test-state"]' ]
+}
+
+# ── fixture 8: teardown fail-failure on a PASS -> PASS becomes PARTIAL ────────
+@test "fixture 8: teardown on_failure:fail failure -> PASS downgraded to PARTIAL, name recorded" {
+  _require_tools
+  _install_contract "teardown-fail-downgrade.yml"
+  _install_stub_bin
+  VERDICT="$TMP_REPO/.autospec/qa-verdict.json"
+  printf '{"verdict":"PASS","findings":[{"category":"x","summary":"keep me"}]}\n' > "$VERDICT"
+  [ -f "$VERDICT" ]
+  _run_with_stubs
+  [ "$status" -eq 0 ]
+  # PASS -> PARTIAL downgrade.
+  run jq -r '.verdict' "$VERDICT"
+  [ "$output" = "PARTIAL" ]
+  # Additive: pre-existing findings preserved.
+  run jq -r '.findings[0].summary' "$VERDICT"
+  [ "$output" = "keep me" ]
+  run jq -c '.deploy.teardown_failures' "$VERDICT"
+  [ "$output" = '["cleanup-test-family"]' ]
+  run jq -r '.deploy.teardown_run' "$VERDICT"
+  [ "$output" = "true" ]
+}
+
+# ── teardown fail-failure must NOT alter a FAIL verdict (only PASS->PARTIAL) ──
+@test "teardown on_failure:fail failure does NOT alter a FAIL verdict" {
+  _require_tools
+  _install_contract "teardown-fail-downgrade.yml"
+  _install_stub_bin
+  VERDICT="$TMP_REPO/.autospec/qa-verdict.json"
+  # Seed a FAIL verdict; a fail teardown must leave it FAIL (never -> PARTIAL).
+  printf '{"verdict":"FAIL","findings":[]}\n' > "$VERDICT"
+  [ -f "$VERDICT" ]
+  _run_with_stubs
+  [ "$status" -eq 0 ]
+  run jq -r '.verdict' "$VERDICT"
+  [ "$output" = "FAIL" ]
+  # The failure is still recorded.
+  run jq -c '.deploy.teardown_failures' "$VERDICT"
+  [ "$output" = '["cleanup-test-family"]' ]
+}
+
+# ── fixture 9: --skip-teardown -> teardown skipped, teardown_run:false ────────
+@test "fixture 9: --skip-teardown -> teardown skipped entirely, deploy.teardown_run:false" {
+  _require_tools
+  _install_contract "teardown-ok.yml"
+  _install_stub_bin
+  VERDICT="$TMP_REPO/.autospec/qa-verdict.json"
+  printf '{"verdict":"PASS","findings":[]}\n' > "$VERDICT"
+  [ -f "$VERDICT" ]
+  run env PATH="$STUB_BIN:$PATH" bash "$RUNNER" \
+    --repo-dir "$TMP_REPO" --verdict "$VERDICT" --skip-teardown
+  [ "$status" -eq 0 ]
+  # Verdict unchanged.
+  run jq -r '.verdict' "$VERDICT"
+  [ "$output" = "PASS" ]
+  # teardown_run recorded as false.
+  run jq -r '.deploy.teardown_run' "$VERDICT"
+  [ "$output" = "false" ]
+  # The teardown command never ran (no marker written by teardown-ok-stub).
+  [ ! -f "$TMP_REPO/.autospec/teardown.marker" ]
 }

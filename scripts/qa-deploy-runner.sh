@@ -8,7 +8,7 @@
 # those land in #1294/#1295.
 #
 # Usage:
-#   qa-deploy-runner.sh --repo-dir <dir> [--verdict <path>]
+#   qa-deploy-runner.sh --repo-dir <dir> [--verdict <path>] [--skip-teardown]
 #
 # Reads <repo-dir>/.autospec/qa-deploy.yml. The file's PRESENCE makes deploy
 # mandatory; its ABSENCE is a no-op (today's behavior, byte-for-byte).
@@ -40,6 +40,7 @@ SCHEMA_FILE="$REPO_ROOT/schemas/autospec-qa-deploy.schema.json"
 
 REPO_DIR=""
 VERDICT_PATH=""
+SKIP_TEARDOWN=0
 
 # ── Emit a category + message, return the matching exit code ──────────────────
 # emit_and_exit <exit_code> <category> <message>
@@ -62,6 +63,10 @@ while [ $# -gt 0 ]; do
         --verdict)
             VERDICT_PATH="${2:-}"
             shift 2
+            ;;
+        --skip-teardown)
+            SKIP_TEARDOWN=1
+            shift
             ;;
         -h|--help)
             sed -n '2,30p' "$0"
@@ -567,5 +572,161 @@ with open(tmp, "w") as out:
     out.write("\n")
 os.replace(tmp, path)
 PY
+
+# ── Teardown phase (#1295) ────────────────────────────────────────────────────
+# Runs AFTER the deploy: block (the verdict is final). Each teardown command is
+# subject to the SAME safety floor as deploy stages — the static prod-pattern
+# rule already covered teardown commands above; here we add the run-time
+# forbidden-target check (literal, case-insensitive grep -iF — no regex
+# interpolation, per the jq/regex-injection memory) against each teardown
+# command before running it. Failures of an `on_failure: warn` step log only;
+# an `on_failure: fail` step downgrades a PASS verdict to PARTIAL (NEVER a FAIL
+# or already-PARTIAL verdict). All verdict updates are atomic (.tmp+os.replace)
+# and additive (only deploy.teardown_run / deploy.teardown_failures and the
+# verdict downgrade are touched).
+
+# Record teardown_run up front (false when skipped, true otherwise). This is an
+# atomic, additive update — it preserves every other verdict + deploy key.
+write_teardown_run() {
+    local _run="$1"   # "true" or "false"
+    VERDICT_PATH="$VERDICT_PATH" TEARDOWN_RUN="$_run" python3 - <<'PY'
+import json, os
+path = os.environ["VERDICT_PATH"]
+run  = os.environ["TEARDOWN_RUN"] == "true"
+verdict = {}
+if os.path.isfile(path):
+    try:
+        with open(path) as f:
+            verdict = json.load(f) or {}
+    except Exception:
+        verdict = {}
+deploy = dict(verdict.get("deploy", {}) or {})
+deploy["teardown_run"] = run
+verdict["deploy"] = deploy
+os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+tmp = path + ".tmp"
+with open(tmp, "w") as out:
+    json.dump(verdict, out, indent=2)
+    out.write("\n")
+os.replace(tmp, path)
+PY
+}
+
+# Append one failing teardown name and (if downgrade=1) rewrite PASS->PARTIAL.
+# Atomic + additive: only deploy.teardown_failures and (conditionally) the
+# top-level verdict are changed; a FAIL / already-PARTIAL verdict is untouched.
+record_teardown_failure() {
+    local _name="$1" _downgrade="$2"   # _downgrade: "1" to attempt PASS->PARTIAL
+    VERDICT_PATH="$VERDICT_PATH" TEARDOWN_NAME="$_name" TEARDOWN_DOWNGRADE="$_downgrade" \
+    python3 - <<'PY'
+import json, os
+path      = os.environ["VERDICT_PATH"]
+name      = os.environ["TEARDOWN_NAME"]
+downgrade = os.environ["TEARDOWN_DOWNGRADE"] == "1"
+verdict = {}
+if os.path.isfile(path):
+    try:
+        with open(path) as f:
+            verdict = json.load(f) or {}
+    except Exception:
+        verdict = {}
+deploy = dict(verdict.get("deploy", {}) or {})
+failures = list(deploy.get("teardown_failures", []) or [])
+failures.append(name)
+deploy["teardown_failures"] = failures
+verdict["deploy"] = deploy
+# Downgrade ONLY a PASS verdict to PARTIAL. Never touch FAIL or PARTIAL.
+if downgrade and verdict.get("verdict") == "PASS":
+    verdict["verdict"] = "PARTIAL"
+os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+tmp = path + ".tmp"
+with open(tmp, "w") as out:
+    json.dump(verdict, out, indent=2)
+    out.write("\n")
+os.replace(tmp, path)
+PY
+}
+
+# Seed an empty teardown_failures list so the key is always present when
+# teardown runs. Atomic + additive (touches only deploy.teardown_failures).
+seed_teardown_failures() {
+    VERDICT_PATH="$VERDICT_PATH" python3 - <<'PY'
+import json, os
+path = os.environ["VERDICT_PATH"]
+verdict = {}
+if os.path.isfile(path):
+    try:
+        with open(path) as f:
+            verdict = json.load(f) or {}
+    except Exception:
+        verdict = {}
+deploy = dict(verdict.get("deploy", {}) or {})
+if "teardown_failures" not in deploy:
+    deploy["teardown_failures"] = []
+verdict["deploy"] = deploy
+os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+tmp = path + ".tmp"
+with open(tmp, "w") as out:
+    json.dump(verdict, out, indent=2)
+    out.write("\n")
+os.replace(tmp, path)
+PY
+}
+
+TEARDOWN_COUNT="$(printf '%s' "$CONTRACT_JSON" | jq -r '.teardown | length // 0')"
+
+if [ "$SKIP_TEARDOWN" -eq 1 ]; then
+    printf 'qa-deploy-runner: --skip-teardown set; skipping all teardown\n' >&2
+    write_teardown_run "false"
+else
+    write_teardown_run "true"
+    seed_teardown_failures
+
+    t=0
+    while [ "$t" -lt "$TEARDOWN_COUNT" ]; do
+        td_name="$(printf '%s' "$CONTRACT_JSON" | jq -r ".teardown[$t].name // \"\"")"
+        td_cmd="$(printf '%s' "$CONTRACT_JSON" | jq -r ".teardown[$t].command // \"\"")"
+        td_on_failure="$(printf '%s' "$CONTRACT_JSON" | jq -r ".teardown[$t].on_failure // \"warn\"")"
+
+        # ── Run-time forbidden-target check on the teardown COMMAND (rule 1) ──
+        # Literal, case-insensitive; the command text is the searched input — no
+        # contract value is interpolated into a regex.
+        if [ -n "$FORBIDDEN_LIST" ]; then
+            while IFS= read -r token; do
+                if [ -z "$token" ]; then
+                    continue
+                fi
+                if printf '%s' "$td_cmd" | grep -iF -e "$token" >/dev/null 2>&1; then
+                    emit_and_exit 3 "qa_deploy_forbidden_target" \
+                        "forbidden target token '$token' appears in teardown command '$td_name'"
+                fi
+            done <<EOF
+$FORBIDDEN_LIST
+EOF
+        fi
+
+        printf 'qa-deploy-runner: running teardown %s (on_failure=%s)\n' \
+            "$td_name" "$td_on_failure" >&2
+
+        # Run the teardown command with the same portable timeout wrapper as
+        # deploy stages (default 300s — teardown has no per-step timeout field).
+        run_stage_with_timeout 300 "$td_cmd" "$STAGE_OUT"
+        td_rc=$?
+
+        if [ "$td_rc" -ne 0 ]; then
+            if [ "$td_on_failure" = "fail" ]; then
+                printf 'qa-deploy-runner: teardown %s failed (on_failure=fail); downgrading PASS->PARTIAL\n' \
+                    "$td_name" >&2
+                record_teardown_failure "$td_name" "1"
+            else
+                printf 'qa-deploy-runner: teardown %s failed (on_failure=warn); logging only\n' \
+                    "$td_name" >&2
+                record_teardown_failure "$td_name" "0"
+            fi
+        fi
+
+        t=$((t + 1))
+    done
+fi
 
 exit 0

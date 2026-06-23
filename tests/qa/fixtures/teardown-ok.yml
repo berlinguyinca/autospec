@@ -1,0 +1,21 @@
+# #1295 fixture (9): a deploy that PASSES with a teardown step that would
+# SUCCEED — used with --skip-teardown to prove teardown is skipped entirely
+# (deploy.teardown_run: false, teardown command never invoked). Commands are
+# PATH-stubbed shims (no network).
+required: true
+stages:
+  - name: deploy-to-test-family
+    command: deploy-stub
+    timeout: 30
+    health_check:
+      url: http://stub.test/health
+      expect_status: 200
+      retry: 3
+      retry_interval: 1
+teardown:
+  - name: snapshot-test-state
+    command: teardown-ok-stub
+    on_failure: warn
+target_envs:
+  allowed: [test.tidyboard.org]
+  forbidden: [www.tidyboard.org, app.tidyboard.org]
