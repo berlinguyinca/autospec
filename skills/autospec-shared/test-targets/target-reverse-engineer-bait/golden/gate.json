@@ -1,6 +1,7 @@
 {
   "passed": false,
   "drift": [],
+  "drift_warn": [],
   "missing_scope": [
     {
       "source_file": "src/router.js",
@@ -8,6 +9,7 @@
     }
   ],
   "visual_stale": [],
+  "example_stale": [],
   "ai_review_stale": [],
   "skipped": false
 }

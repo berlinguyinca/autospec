@@ -4,12 +4,16 @@
     {
       "doc_file": "docs/MANIFEST.md",
       "heading": "## Module Manifest",
-      "matching_source_files": ["src/lib.js"],
+      "matching_source_files": [
+        "src/lib.js"
+      ],
       "reason": "Module manifest must reflect exported functions in src/lib.js"
     }
   ],
+  "drift_warn": [],
   "missing_scope": [],
   "visual_stale": [],
+  "example_stale": [],
   "ai_review_stale": [],
   "skipped": false
 }
