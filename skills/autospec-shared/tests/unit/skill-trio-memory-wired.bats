@@ -30,7 +30,7 @@ WIRED_SKILLS=(
     local f="$REPO_ROOT/skills/$skill/SKILL.md"
     [ -f "$f" ] || { echo "MISSING: $f" >&2; return 1; }
     local count
-    count=$(grep -cF 'auto-init-memory.sh' "$f" || true)
+    count=$(bash "$REPO_ROOT/scripts/expand-skill-blocks.sh" "$f" 2>/dev/null | grep -cF 'auto-init-memory.sh' || true)
     [ "$count" -eq 1 ] || { echo "$skill/SKILL.md: expected 1 occurrence, got $count" >&2; return 1; }
   done
 }
@@ -42,7 +42,7 @@ WIRED_SKILLS=(
     local f="$REPO_ROOT/skills/$skill/codex/prompt.md"
     [ -f "$f" ] || { echo "MISSING: $f" >&2; return 1; }
     local count
-    count=$(grep -cF 'auto-init-memory.sh' "$f" || true)
+    count=$(bash "$REPO_ROOT/scripts/expand-skill-blocks.sh" "$f" 2>/dev/null | grep -cF 'auto-init-memory.sh' || true)
     [ "$count" -eq 1 ] || { echo "$skill/codex/prompt.md: expected 1 occurrence, got $count" >&2; return 1; }
   done
 }
@@ -54,7 +54,7 @@ WIRED_SKILLS=(
     local f="$REPO_ROOT/skills/$skill/opencode/agent.md"
     [ -f "$f" ] || { echo "MISSING (expected trio): $f" >&2; return 1; }
     local count
-    count=$(grep -cF 'auto-init-memory.sh' "$f" || true)
+    count=$(bash "$REPO_ROOT/scripts/expand-skill-blocks.sh" "$f" 2>/dev/null | grep -cF 'auto-init-memory.sh' || true)
     [ "$count" -eq 1 ] || { echo "$skill/opencode/agent.md: expected 1 occurrence, got $count" >&2; return 1; }
   done
 }
@@ -68,9 +68,10 @@ WIRED_SKILLS=(
     local opencode_md="$REPO_ROOT/skills/$skill/opencode/agent.md"
 
     local block_skill block_codex block_opencode
-    block_skill=$(grep -A1 '# Auto-init cross-tool memory' "$skill_md" 2>/dev/null || true)
-    block_codex=$(grep -A1 '# Auto-init cross-tool memory' "$codex_md" 2>/dev/null || true)
-    block_opencode=$(grep -A1 '# Auto-init cross-tool memory' "$opencode_md" 2>/dev/null || true)
+    local exp="$REPO_ROOT/scripts/expand-skill-blocks.sh"
+    block_skill=$(bash "$exp" "$skill_md" 2>/dev/null | grep -A1 '# Auto-init cross-tool memory' || true)
+    block_codex=$(bash "$exp" "$codex_md" 2>/dev/null | grep -A1 '# Auto-init cross-tool memory' || true)
+    block_opencode=$(bash "$exp" "$opencode_md" 2>/dev/null | grep -A1 '# Auto-init cross-tool memory' || true)
 
     [ -n "$block_skill" ] || { echo "$skill/SKILL.md: auto-init comment block not found" >&2; return 1; }
     [ "$block_skill" = "$block_codex" ] \
