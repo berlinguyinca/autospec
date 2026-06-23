@@ -55,6 +55,13 @@ setup() {
     for f in "${d}SKILL.md" "${d}codex/prompt.md" "${d}opencode/agent.md"; do
       [ -f "$f" ] || continue
       grep -q '^## Required capabilities & harness adapter' "$f" || continue
+      # Accept EITHER the literal dispatch row OR the harness-adapter-core block
+      # marker (the marker is single-sourced and expands to that exact row at
+      # install time). Mirrors scripts/validate.sh check_agents_md_subagent_matrix
+      # so the raw-grep test and the validator agree on what satisfies the gate.
+      if grep -q -F '<!-- autospec-block:harness-adapter-core -->' "$f"; then
+        continue
+      fi
       if ! grep -q '^| Subagent dispatch policy' "$f"; then
         echo "missing dispatch-policy row: $f"
         fail_count=$((fail_count + 1))
