@@ -88,7 +88,21 @@ docker compose version >/dev/null 2>&1 || die "docker compose plugin not found. 
 # Resolve compose file
 # ---------------------------------------------------------------------------
 
-COMPOSE_FILE="$(cd "$(dirname "$COMPOSE_FILE")" && pwd)/$(basename "$COMPOSE_FILE")"
+# Resolve a relative compose-file path. Contracts reference the file by a path
+# relative to the skill directory (the checkout that contains this adapter), not
+# the caller's CWD — provisioning may run from an arbitrary working directory.
+if [ "${COMPOSE_FILE#/}" = "$COMPOSE_FILE" ]; then
+  # Not absolute. Try CWD first (back-compat), then the skill directory.
+  ADAPTER_DIR="$(cd "$(dirname "$0")" && pwd)"
+  SKILL_DIR_GUESS="$(cd "$ADAPTER_DIR/../.." && pwd)"
+  if [ -f "$COMPOSE_FILE" ]; then
+    COMPOSE_FILE="$(cd "$(dirname "$COMPOSE_FILE")" && pwd)/$(basename "$COMPOSE_FILE")"
+  elif [ -f "$SKILL_DIR_GUESS/$COMPOSE_FILE" ]; then
+    COMPOSE_FILE="$SKILL_DIR_GUESS/$COMPOSE_FILE"
+  fi
+else
+  COMPOSE_FILE="$(cd "$(dirname "$COMPOSE_FILE")" && pwd)/$(basename "$COMPOSE_FILE")"
+fi
 [ -f "$COMPOSE_FILE" ] || die "compose file not found: $COMPOSE_FILE"
 
 COMPOSE_DIR="$(dirname "$COMPOSE_FILE")"
