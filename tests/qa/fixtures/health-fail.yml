@@ -1,0 +1,18 @@
+# Schema-VALID, clears the safety floor, but the health_check NEVER reaches
+# expect_status (the curl shim always returns a non-ready status for this URL),
+# so the probe exhausts its retries (#1294): runner must exit 1 with a
+# qa_deploy_failed finding naming the stage. retry/retry_interval kept tiny so
+# the test is fast.
+required: true
+stages:
+  - name: deploy-to-test-family
+    command: deploy-stub
+    timeout: 30
+    health_check:
+      url: http://stub.test/never-ready
+      expect_status: 200
+      retry: 2
+      retry_interval: 1
+target_envs:
+  allowed: [test.tidyboard.org]
+  forbidden: [www.tidyboard.org, app.tidyboard.org]
