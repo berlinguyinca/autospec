@@ -4,12 +4,16 @@
     {
       "doc_file": "docs/USER_MANUAL.md",
       "heading": "## API Reference",
-      "matching_source_files": ["src/api.sh"],
+      "matching_source_files": [
+        "src/api.sh"
+      ],
       "reason": "API flags must be kept in sync with src/api.sh options"
     }
   ],
+  "drift_warn": [],
   "missing_scope": [],
   "visual_stale": [],
+  "example_stale": [],
   "ai_review_stale": [],
   "skipped": false
 }

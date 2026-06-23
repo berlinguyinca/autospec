@@ -118,6 +118,32 @@ const SCOPE_OPEN_RE  = /<!--\s*autospec-doc-scope\s*:/;
 const SCOPE_CLOSE_RE = /-->/;
 
 /**
+ * Is the scope-comment opener on this line enclosed in an inline code span?
+ *
+ * A live autospec-doc-scope block is a raw HTML comment standing on its own; it
+ * is never wrapped in backticks. Illustrative syntax in prose, however, is often
+ * shown inline as `<!-- autospec-doc-scope: ... -->` (e.g. inside a markdown
+ * table cell documenting the format). The fenced-code-block tracking below skips
+ * multi-line ``` fences but NOT single-line inline code spans, so such an example
+ * would otherwise be parsed as a live (and frequently malformed) annotation and
+ * throw. We detect the opener offset and check whether an odd number of unescaped
+ * backticks precede it on the same line — i.e. it sits inside an open inline span.
+ *
+ * @param {string} line
+ * @returns {boolean}
+ */
+function scopeOpenerInInlineCode(line) {
+    const m = SCOPE_OPEN_RE.exec(line);
+    if (!m) return false;
+    const before = line.slice(0, m.index);
+    let ticks = 0;
+    for (let k = 0; k < before.length; k++) {
+        if (before[k] === '`' && before[k - 1] !== '\\') ticks++;
+    }
+    return ticks % 2 === 1;
+}
+
+/**
  * Parse all autospec-doc-scope blocks from a markdown file.
  *
  * @param {string} markdownPath - path to the markdown file
@@ -187,8 +213,10 @@ export function parse(markdownPath) {
             continue;
         }
 
-        // Detect scope comment start
-        if (SCOPE_OPEN_RE.test(line)) {
+        // Detect scope comment start. Skip openers that sit inside an inline
+        // code span (`...`) — those are illustrative syntax in prose, not live
+        // annotations (mirrors the fenced-code-block skip above for inline code).
+        if (SCOPE_OPEN_RE.test(line) && !scopeOpenerInInlineCode(line)) {
             // Collect the YAML content between the comment markers
             const commentLines = [];
             // The opening line may have content after the "autospec-doc-scope:"

@@ -4,12 +4,16 @@
     {
       "doc_file": "docs/AUTH.md",
       "heading": "## Authentication API",
-      "matching_source_files": ["src/auth.py"],
+      "matching_source_files": [
+        "src/auth.py"
+      ],
       "reason": "Auth API docs must match the methods and parameters in src/auth.py"
     }
   ],
+  "drift_warn": [],
   "missing_scope": [],
   "visual_stale": [],
+  "example_stale": [],
   "ai_review_stale": [],
   "skipped": false
 }

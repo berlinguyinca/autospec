@@ -132,6 +132,20 @@ test('fenced-scope.md: only prose declarations are honored, in-fence tokens igno
     assert.equal(result.length, 2, `expected exactly 2 honored entries, got ${result.length}`);
 });
 
+test('inline-code-scope.md: in-backtick tokens ignored, prose declarations honored', async () => {
+    // Must not throw even though the table cell contains a malformed inline
+    // example (regression: spec docs that document the scope syntax inline).
+    const result = parse(fixture('inline-code-scope.md'));
+    const globs = result.flatMap(e => e.src_globs);
+    // Inline-code (backtick-wrapped) examples must NOT appear, even well-formed.
+    assert.ok(!globs.includes('scripts/inline-well-formed.sh'), 'well-formed token inside `...` inline span must be ignored');
+    assert.ok(!globs.includes('glob'), 'malformed token inside `...` inline span must be ignored (and must not throw)');
+    // Standalone prose declarations (before and after) must still be honored.
+    assert.ok(globs.includes('scripts/real.sh'), 'prose declaration before inline examples must be honored');
+    assert.ok(globs.includes('scripts/post-inline.sh'), 'prose declaration after inline examples must be honored');
+    assert.equal(result.length, 2, `expected exactly 2 honored entries, got ${result.length}`);
+});
+
 test('scope token inside a fenced block is ignored', async () => {
     const tmp = path.join(os.tmpdir(), `autospec-test-scope-fence-${Date.now()}.md`);
     fs.writeFileSync(tmp, `## Section\n\n\`\`\`\n<!-- autospec-doc-scope:\n  src: ["in-fence.sh"]\n-->\n\`\`\`\n\nBody.\n`);
