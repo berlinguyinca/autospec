@@ -13,8 +13,12 @@ setup() {
     HOME="$(mktemp -d)"
 
     # Extract the startup self-update bash block from the canonical source.
+    # SKILL.md carries only the single-source block marker
+    # (<!-- autospec-block:startup-self-update ... -->); awk over the raw
+    # marker-only file would yield an empty block, so expand the markers first.
     SKILL="$REPO_ROOT/skills/autospec/SKILL.md"
-    BLOCK="$(awk '/^## Startup self-update/{f=1} f && /^```bash/{g=1; next} g && /^```/{g=0; f=0; next} g{print}' "$SKILL")"
+    BLOCK="$(bash "$REPO_ROOT/scripts/expand-skill-blocks.sh" "$SKILL" \
+        | awk '/^## Startup self-update/{f=1} f && /^```bash/{g=1; next} g && /^```/{g=0; f=0; next} g{print}')"
 
     # Shim directory — prepended to PATH inside each test that needs it.
     SHIMDIR="$(mktemp -d)"
