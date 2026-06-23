@@ -1,0 +1,11 @@
+{
+  "name": "SmokePart10mm",
+  "body_count": 1,
+  "material": "PETG",
+  "print_orientation": "flat",
+  "load_critical": true,
+  "flow_critical": true,
+  "dims": { "x_mm": 10, "y_mm": 10, "z_mm": 10 },
+  "ports": [],
+  "gaskets": []
+}
