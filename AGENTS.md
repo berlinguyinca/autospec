@@ -87,6 +87,7 @@ top GPT" at call time so the skill survives model-family churn.
 | classify (per-issue review) | autospec-classify | deterministic-first; **B** on ambiguity |
 | 4 — Implementer (process(ISSUE) in worktree) | autospec, autospec-run | B |
 | 4 — Fused guardian + LGTM reviewer | autospec, autospec-run | **B** for ALL issues (incl. `regression`/`priority:high`); `AUTOSPEC_REVIEWER_TIER=opus` → A |
+| 4 — Implementation guardian (Tier-A escape hatch) | autospec, autospec-run | **A** when `AUTOSPEC_REVIEWER_TIER=opus` (otherwise folded into the Tier-B fused reviewer row above) |
 
 **`AUTOSPEC_REVIEWER_TIER` (reviewer escape hatch):** the fused guardian + LGTM reviewer runs at **Tier B for every issue**, including `regression` and `priority:high`. The former second Tier-A regression meta-review pass is folded into the single reviewer brief (the reviewer self-asks "would the reviewer have caught the original gap?" and writes any missing checks to `reports/autospec-review/reviewer-lessons.md`). To restore Tier A for the reviewer, set `AUTOSPEC_REVIEWER_TIER=opus`; unset (or any other value) keeps Tier B (sonnet). This is the one-variable revert if a high-stakes run shows the cheaper reviewer missing real bugs.
 
