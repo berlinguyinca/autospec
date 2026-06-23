@@ -250,35 +250,100 @@ the presence / absence of each file automatically.
 
 ### Vision stage environment variables
 
-The vision stage (`stage_vision.py`) is advisory and never blocks a release.
-It resolves its command through the following chain:
+The vision stage (`stage_vision.py`) is **advisory and never blocks a release**.
+It invokes an external CLI (`$AUTOSPEC_FAB_VISION_CMD` or `fab-vision` on PATH)
+for a JUDGE pass followed by an adversarial `--verify` pass. The bundled
+consumer is `scripts/fab-vision-cli.py`.
+
+All five env vars are read by `fab-vision-cli.py` itself (not by the stage):
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `AUTOSPEC_FAB_VISION_CMD` | Path or name of the vision CLI executable | `fab-vision` (PATH lookup) |
-| `AUTOSPEC_FAB_VISION_BACKEND` | Force backend: `api`, `claude-cli`, or `none` | auto-detect |
-| `AUTOSPEC_FAB_VISION_MAX_IMAGES` | Cap on PNG image blocks sent per judge call | CLI default |
+| `AUTOSPEC_FAB_VISION_CMD` | Path or name of the vision CLI (consumed by the **stage**) | `fab-vision` (PATH lookup); unset → stage skips |
+| `AUTOSPEC_FAB_VISION_BACKEND` | Force backend: `api`, `claude-cli`, or `none` | auto-detect (first usable wins) |
+| `ANTHROPIC_API_KEY` | Credential for the `api` backend (Anthropic Claude vision) | unset → `api` backend unavailable |
+| `AUTOSPEC_FAB_VISION_MODEL` | Model id for the `api` backend | `claude-opus-4-8` |
+| `AUTOSPEC_FAB_VISION_MAX_IMAGES` | Cap on PNG image blocks sent per judge call | `16` |
 
-**`$AUTOSPEC_FAB_VISION_CMD` — the primary hook:**
+#### Concrete runnable example
+
+Point `$AUTOSPEC_FAB_VISION_CMD` at the bundled CLI, export your API key, then
+run any fab gate command:
 
 ```bash
-# Use the bundled fab-vision-cli.py from #1289 as the vision consumer
-export AUTOSPEC_FAB_VISION_CMD=/path/to/scripts/fab-vision-cli.py
+export AUTOSPEC_FAB_VISION_CMD=skills/autospec-fab/scripts/fab-vision-cli.py
+export ANTHROPIC_API_KEY=sk-ant-...
 
-# Or point to any conformant CLI (must implement the judge + --verify contract):
-#   Judge:  fab-vision <contact-sheet.html> <rules-file>
-#           → stdout: {"observations": [...]}
-#   Verify: echo '<observation-json>' | fab-vision --verify
-#           → stdout: {"confirmed": true|false}
+# Run the full release gate (vision stage fires automatically)
+python3 skills/autospec-fab/scripts/stl-release-gate.py \
+  --in  build/stls/manifolds/inlet_manifold.stl \
+  --model manifolds/inlet_manifold/metadata.json \
+  --out  .autospec/fab/gates/inlet_manifold/release-gate.json
 ```
 
-When `$AUTOSPEC_FAB_VISION_CMD` is unset and `fab-vision` is not on `PATH`,
-the vision stage emits `status: skip` with empty `vision_findings` — this is
-the default on a bare host and is intentional. Vision findings are **advisory**
-only (`warn`-severity at most); the stage never emits `fail`.
+Vision results appear in the `vision_findings` key of the output JSON.
+Findings are advisory (`warn`-severity at most); they never cause a hard reject.
+
+#### One-off manual invocation
+
+Run `fab-vision-cli.py` directly against any contact sheet (e.g. to inspect a
+single render without running the full gate):
+
+```bash
+# Judge pass — returns {"observations": [...]}
+python3 skills/autospec-fab/scripts/fab-vision-cli.py \
+  .autospec/fab/renders/inlet_manifold/contact-sheet.html \
+  [path/to/stl-modeling-rules.txt]   # optional rules file
+
+# Verify pass — pipe one observation JSON on stdin
+echo '{"observation": "...", "severity": "warn"}' | \
+  python3 skills/autospec-fab/scripts/fab-vision-cli.py --verify \
+    .autospec/fab/renders/inlet_manifold/contact-sheet.html
+```
+
+Both passes always exit 0. The verdict lives in the JSON output, never in the
+exit code. Exit 2 is reserved for usage errors (bad flags / missing `<sheet>`).
+
+#### Graceful-skip behavior
+
+`fab-vision-cli.py` **never crashes and never fabricates a finding**. Every
+failure mode degrades to an honest empty result:
+
+| Condition | Stage outcome | CLI output |
+| --- | --- | --- |
+| `$AUTOSPEC_FAB_VISION_CMD` unset, `fab-vision` not on PATH | `status: skip`, empty `vision_findings` | *(CLI not invoked)* |
+| CLI present, `ANTHROPIC_API_KEY` unset, no SDK | `status: pass`, empty `vision_findings` | `{"observations": []}` / `{"confirmed": false}` |
+| `AUTOSPEC_FAB_VISION_BACKEND=none` (explicit opt-out) | `status: pass`, empty `vision_findings` | `{"observations": []}` / `{"confirmed": false}` |
+| Sheet present but zero resolved PNGs on disk | `status: pass`, empty `vision_findings` | `{"observations": []}` |
+| API call fails / timeout / malformed response | `status: pass`, empty `vision_findings` | `{"observations": []}` |
+| Confirmed `warn` finding present | `status: warn` advisory (non-blocking) | `{"observations": [{...}]}` |
+
+Vision never emits `status: fail`. Operators can inspect `vision_findings` in
+the release-gate JSON and decide whether to act on advisory warnings.
 
 Inside the container (#1300), `fab-vision` will be present on `PATH` so vision
-runs automatically without setting any env var.
+runs automatically without setting `$AUTOSPEC_FAB_VISION_CMD`.
+
+#### Opt-in real-API smoke (manual only — never runs in CI)
+
+To verify the full Anthropic vision path end-to-end on a real contact sheet:
+
+```bash
+# Prerequisites: ANTHROPIC_API_KEY set, anthropic SDK installed, a real sheet
+pip install anthropic
+
+export ANTHROPIC_API_KEY=sk-ant-...
+export AUTOSPEC_FAB_VISION_CMD=skills/autospec-fab/scripts/fab-vision-cli.py
+# Optional: override model (default claude-opus-4-8)
+# export AUTOSPEC_FAB_VISION_MODEL=claude-opus-4-8
+
+python3 skills/autospec-fab/scripts/fab-vision-cli.py \
+  .autospec/fab/renders/inlet_manifold/contact-sheet.html
+```
+
+This makes a real Anthropic API call and incurs token cost. It is **not run by
+`validate.sh`** or any automated test. All automated paths use the
+`$AUTOSPEC_FAB_VISION_STUB` test seam so no network call is required.
 
 ## License
 
