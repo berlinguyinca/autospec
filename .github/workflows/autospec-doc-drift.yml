@@ -1,0 +1,46 @@
+name: autospec-doc-drift
+
+# Deterministic doc-drift gate for pull requests.
+#
+# Installed into consumer repos by
+# skills/autospec-shared/scripts/install-doc-drift-workflow.sh, which rewrites
+# the AUTOSPEC_SCRIPTS_PATH line below to point at the consumer's installed
+# autospec scripts dir ($AUTOSPEC_SCRIPTS_DIR, default ~/.autospec/scripts).
+#
+# Runs check-doc-drift.sh --pr <N> against the PR diff. The gate exits non-zero
+# when source changes are not covered by a doc scope (drift), failing the job.
+#
+# Part of epic #1280 / #1287.
+
+on:
+  pull_request:
+
+concurrency:
+  group: autospec-doc-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  doc-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run doc-drift gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          AUTOSPEC_SCRIPTS_PATH="${HOME}/.autospec/scripts"
+          bash "${AUTOSPEC_SCRIPTS_PATH}/check-doc-drift.sh" --pr "${{ github.event.pull_request.number }}"
