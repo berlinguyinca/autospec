@@ -764,8 +764,20 @@ PYEOF
     chmod +x "$BIN/python3"
 
     # fleet-gui.sh should detect the empty port, print the error, and exit 1.
-    # Use timeout to guard against any unexpected hang.
-    run bash -c "cd '$TMP' && PATH=\"$BIN:\$PATH\" timeout 10 bash '$GUI_SH' --no-browser 2>&1"
+    # Guard against any unexpected hang with a timeout binary when one exists.
+    # `timeout` is GNU coreutils and is NOT present on a stock macOS host (where
+    # it ships, if at all, as `gtimeout`). Hard-coding `timeout` made this test
+    # fail with exit 127 ("command not found") before fleet-gui.sh ever ran, so
+    # the sentinel never printed. Resolve a timeout wrapper portably; if none is
+    # available, run the script directly (the exhaustion path is bounded and does
+    # not hang).
+    local TIMEOUT=""
+    if command -v timeout >/dev/null 2>&1; then
+        TIMEOUT="timeout 10"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        TIMEOUT="gtimeout 10"
+    fi
+    run bash -c "cd '$TMP' && PATH=\"$BIN:\$PATH\" $TIMEOUT bash '$GUI_SH' --no-browser 2>&1"
 
     # Must exit non-zero (timeout=124 also acceptable but we expect 1)
     [ "$status" -ne 0 ]
