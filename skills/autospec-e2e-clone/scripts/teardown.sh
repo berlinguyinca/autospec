@@ -3,7 +3,12 @@
 # autospec-e2e-clone provisioned environment.
 #
 # Usage:
-#   teardown.sh [<repo_root>] [--keep-snapshots | --purge-snapshots]
+#   teardown.sh [<repo_root>] [--repo <dir>] [--compose-file <path>]
+#               [--keep-snapshots | --purge-snapshots]
+#
+#   The positional <repo_root> and the --repo flag are interchangeable; --repo
+#   takes precedence if both are given. --compose-file, when set and docker is
+#   available, brings the named compose stack down (-v) as part of teardown.
 #
 # Reads the resolved contract from .autospec/clone.yml (via load-contract.sh),
 # routes the "down" action to the correct expose adapter via dispatch.sh, and
@@ -38,13 +43,16 @@ info()   { printf 'teardown.sh: %s\n' "$*"; }
 
 REPO_ROOT="."
 PURGE_SNAPSHOTS=false
+COMPOSE_FILE_ARG=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --repo)             REPO_ROOT="$2";         shift 2 ;;
+    --compose-file)     COMPOSE_FILE_ARG="$2";  shift 2 ;;
     --keep-snapshots)   PURGE_SNAPSHOTS=false; shift ;;
     --purge-snapshots)  PURGE_SNAPSHOTS=true;  shift ;;
     -h|--help)
-      printf 'Usage: teardown.sh [<repo_root>] [--keep-snapshots|--purge-snapshots]\n'
+      printf 'Usage: teardown.sh [<repo_root>] [--repo <dir>] [--compose-file <path>] [--keep-snapshots|--purge-snapshots]\n'
       exit 0
       ;;
     -*)
@@ -124,6 +132,24 @@ if [ "$PURGE_SNAPSHOTS" = "true" ]; then
 else
   if [ -d "$SNAPSHOTS_DIR" ]; then
     info "retaining $SNAPSHOTS_DIR (use --purge-snapshots to remove)"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Optionally bring down a docker compose stack
+# ---------------------------------------------------------------------------
+
+if [ -n "$COMPOSE_FILE_ARG" ]; then
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    if [ -f "$COMPOSE_FILE_ARG" ]; then
+      info "bringing down compose stack: $COMPOSE_FILE_ARG"
+      docker compose -f "$COMPOSE_FILE_ARG" down -v >/dev/null 2>&1 || \
+        info "WARN: 'docker compose down' returned non-zero — continuing"
+    else
+      info "compose file not found: $COMPOSE_FILE_ARG (skipping compose down)"
+    fi
+  else
+    info "docker compose unavailable — skipping compose down for $COMPOSE_FILE_ARG"
   fi
 fi
 
