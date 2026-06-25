@@ -152,6 +152,47 @@ A pure decision helper `scripts/autonomous-usage-governor.sh` returns
 `continue` | `park <resume-epoch>` from (observed % or token tally) — no side
 effects beyond its tally file, so it is unit-testable.
 
+## Pre-merge quality & security gate (mandatory, every tier)
+
+**No PR merges — to `main` OR to the sandbox — until it passes both
+`/autospec-qa` and `/autospec-secaudit`.** This gate is non-optional and applies
+uniformly across all four tiers; it cannot be skipped by any flag, autonomy
+setting, or governor state. It runs *after* the existing per-PR LGTM + Phase 4
+secaudit gate, as a second, blocking conductor-level barrier before merge.
+
+Per merge candidate:
+
+1. **`/autospec-qa`** — revalidate the running app against its spec, regenerate
+   missing/weak tests, and audit UI controls/forms/validation/API behavior/
+   accessibility, to prove the change works and **does not regress** existing
+   behavior.
+2. **`/autospec-secaudit`** — scan the changed code for vulnerabilities, secret/
+   credential leaks, injection (SQL/prompt), PII/data leaks, IP/license
+   violations, and backdoors.
+
+**Finding disposition (severity-gated):**
+
+- **high / severe / critical / medium** findings from either skill are
+  **blockers**. The conductor dispatches a Tier-B implementer to **fix them in
+  place on the same PR branch**, then re-runs *both* skills on the updated branch.
+  Loop until the branch is clean of high/severe/medium findings (bounded by an
+  LLM-validator adaptive-retry loop, max 5 attempts —
+  `feedback_llm_validator_adaptive_retry`).
+- **low / info** findings do not block; they are recorded in the daily digest
+  and, if actionable, filed as fresh Tier-4 issues for a later cycle.
+- **Retries exhausted still dirty** → do **not** merge. Label the PR
+  `autospec:needs-human`, leave it open, emit a `notify.sh` transition, record
+  it in the digest, and move to the next work item. A genuinely unfixable
+  security finding is exactly the Charter's "surface to operator" case — never
+  merged around.
+
+Because both skills already auto-fire post-batch (`autospec-review` /
+`autospec-secaudit` per existing prose), the conductor's contribution is making
+them a **blocking pre-merge barrier with a fix-and-recheck loop**, not just a
+post-hoc report. The fix-then-recheck (not fix-then-trust) discipline mirrors
+`feedback_self_consistent_test_fixtures_mask_bugs`: re-run the validators against
+the *patched* branch, never assume the fix is clean.
+
 ## Safety & autonomy-gate integration
 
 Every would-have-asked decision still routes through
@@ -203,10 +244,15 @@ checks write a real temp file first (`feedback_bash32_process_sub_test_file`).
   resume epoch computed.
 - `tests/autonomous/test_digest.bats` — one digest per UTC day; idempotent
   within a day; pinned issue created once then edited.
+- `tests/autonomous/test_premerge_gate.bats` — clean qa+secaudit → merge allowed;
+  high/severe/medium finding → blocked + fix dispatched + both skills re-run on the
+  patched branch; recheck-clean → merge; retries exhausted → `autospec:needs-human`,
+  no merge; low/info → non-blocking, recorded. qa/secaudit invoked as mocked
+  subprocesses (external boundary).
 - `scripts/validate.sh` — trio goldens regenerated;
   `check_autospec_autonomous_contract` gate added.
 
-## Decomposition preview (≈7 children + 1 epic + Phase 5.5 audit)
+## Decomposition preview (≈8 children + 1 epic + Phase 5.5 audit)
 
 1. **EPIC** — /autospec-autonomous perpetual conductor.
 2. **Usage-governor investigation spike** (Tier A) — what each harness exposes;
@@ -217,10 +263,14 @@ checks write a real temp file first (`feedback_bash32_process_sub_test_file`).
 5. `autonomous-control-channel.sh` + reserved-label semantics + bats.
 6. `autonomous-usage-governor.sh` (per spike outcome) + bats.
 7. Tier-4 polish lenses + daily-digest renderer + pinned-issue wiring + bats.
-8. Conductor orchestrator: wire waterfall + control + governor + digest into the
-   `lib/autospec-loop.sh` driver; ScheduleWakeup/cron resume; install scripts.
-9. Phase 5.5 broad integration audit + remediation
-   (`feedback_per_pr_lgtm_misses_integration` — never skip 5.5).
+8. **Pre-merge gate**: blocking `/autospec-qa` + `/autospec-secaudit` barrier
+   with severity-gated fix-and-recheck loop (`scripts/autonomous-premerge-gate.sh`
+   decision helper + bats; high/severe/medium → fix-in-place + re-run, max 5).
+9. Conductor orchestrator: wire waterfall + control + governor + digest + the
+   pre-merge gate into the `lib/autospec-loop.sh` driver; ScheduleWakeup/cron
+   resume; install scripts.
+10. Phase 5.5 broad integration audit + remediation
+    (`feedback_per_pr_lgtm_misses_integration` — never skip 5.5).
 
 Each child ≤400 words, ≤3 logical units; trio-prose + goldens kept atomic in one
 issue (`feedback_decompose_trio_prose_goldens_atomic`).
@@ -230,12 +280,17 @@ issue (`feedback_decompose_trio_prose_goldens_atomic`).
 - **Placeholders:** none.
 - **Consistency:** backlog→main / self-generated→sandbox is uniform across tiers
   2–4 and the digest commit; control labels and governor are both default-off,
-  reversible, gate-respecting.
+  reversible, gate-respecting. The pre-merge qa+secaudit gate is the one
+  mandatory, non-skippable barrier and applies to every tier and both merge
+  targets.
 - **Scope:** one coherent multi-issue pipeline; the investigation spike de-risks
   the only genuine unknown (live-usage observability) before the governor is built.
 - **Critical risks & mitigations:** (a) runaway tier escalation → dry-cycle
   threshold + autonomy gate; (b) unreviewed code on main → structurally avoided
   by sandboxing self-generated work; (c) governor mis-estimate → hard-quota
-  backstop; (d) trio/goldens drift → derivation tooling + validate gate.
+  backstop; (d) trio/goldens drift → derivation tooling + validate gate;
+  (e) regression / security defect reaching any branch → mandatory blocking
+  `/autospec-qa` + `/autospec-secaudit` pre-merge gate with severity-gated
+  fix-and-recheck.
 - **On merge:** add `/autospec-autonomous` to the skill catalog, llms.txt, the
   per-skill token-cost table, and cross-link `docs/AUTONOMY-CHARTER.md` §5.
