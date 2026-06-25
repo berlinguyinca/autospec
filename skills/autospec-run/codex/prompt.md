@@ -544,6 +544,7 @@ inline label-swap path below.
 >   _hb_slug="$(printf '%s' "{repo}" | tr '/' '_')"
 >   mkdir -p "$HOME/.autospec/process-heartbeats/$_hb_slug"
 >   printf '{"issue":"%s","branch":"","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' "$ISSUE" "$(date -u +%s)" "{repo}" > "$HOME/.autospec/process-heartbeats/$_hb_slug/$ISSUE.json"
+>   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #$ISSUE: claimed" "Starting implementation on {repo}" || true
 >   # Issue start summary — print before dispatching process(ISSUE) so the operator
 >   # knows exactly what the monitor is about to work on.
 >   # Single body fetch — all later steps consume this file (D5: duplicate-read elimination).
@@ -719,6 +720,10 @@ inline label-swap path below.
 >   - `claimed`, `worktree_ready`, `tests_started`, `tests_passed`, `pr_created`, `smoke_retry`, `reviewed`, `merged`, `failed`
 > - Schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}"}`
 > - Delete this file on terminal SUCCESS/FAILURE in both clean and failure paths.
+> - Transition notifications: on `tests_passed`, `pr_created`, `merged`, and `failed` call
+>   `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "<title>" "<body>" || true`
+>   once per transition. Dedup with `_notify_fired=""` (reset per issue) and the pattern
+>   `case "$_notify_fired" in *:<STEP>:*) ;; *) _notify_fired="${_notify_fired}:<STEP>:"; bash ... || true ;; esac`.
 >
 > ## Project rules you MUST honor
 >
@@ -797,6 +802,7 @@ inline label-swap path below.
 >    2. Else run every command listed under the issue's **Operator/full verification** section.
 >    3. Else run the repo-standard full suite: `bash scripts/validate.sh` when present; otherwise use the ecosystem default (`npm test`, `pytest`, `go test ./...`, `cargo test`, `mvn test`, etc.).
 >    If the full suite fails, fix the failure, recommit, rerun the full suite, and repeat. Do NOT dispatch LGTM review while the full suite is failing. Do NOT run `gh pr merge` while the full suite is failing. Record the exact full-suite command and passing output summary in the PR comment or final report.
+>    Once the suite first passes, fire the transition notification: `case "$_notify_fired" in *:tests_passed:*) ;; *) _notify_fired="${_notify_fired}:tests_passed:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: tests_passed" "Full suite green on {repo}" || true ;; esac`
 > 3a. **autospec-test gate** (run when `skills/autospec-test/scripts/run-gate.sh` exists in the repo): invoke the gate against the PR's target repo root. Handle exit codes per spec §7a/§7b:
 >    ```bash
 >    GATE_SCRIPT="skills/autospec-test/scripts/run-gate.sh"
@@ -927,6 +933,7 @@ inline label-swap path below.
 >    fi
 >    ```
 > 6. PR: gh pr create --base main --head <BRANCH> --title "<TITLE>" --body "Closes #<ISSUE>\n\n<summary>". Capture PR. Immediately after the PR opens, release the claim-guard lease taken in step 1a: `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh release $TARGETS`.
+>    Fire the transition notification: `case "$_notify_fired" in *:pr_created:*) ;; *) _notify_fired="${_notify_fired}:pr_created:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: pr_created" "PR #<PR> opened on {repo}" || true ;; esac`
 >    After the LLM subagent returns, record telemetry (tokens JSON written by the harness to `.autospec/tokens-<ISSUE>.json` if present):
 >    ```bash
 >    if [ -f ".autospec/tokens-<ISSUE>.json" ]; then
@@ -1081,6 +1088,7 @@ inline label-swap path below.
 >    # (`AUTOSPEC_FULL_TEST_COMMAND`, Operator/full verification, then `bash scripts/validate.sh` fallback).
 >    # If it fails, fix the failure, recommit, push, rerun the full suite and review, and do NOT run `gh pr merge`.
 >    gh pr merge <PR> --admin --squash --delete-branch
+>    case "$_notify_fired" in *:merged:*) ;; *) _notify_fired="${_notify_fired}:merged:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: merged" "PR #<PR> merged on {repo}" || true ;; esac
 >    ```
 >    The block ends with the admin-merge; merge auto-closes the issue.
 >    ```bash
@@ -1102,6 +1110,7 @@ inline label-swap path below.
 >    # Cleanup single-fetch body temp file on terminal success (D5).
 >    rm -f "/tmp/issue-<ISSUE>-body.md" || true
 > 9. FAILURE (loop exhausted): comment failure on issue, swap label `in-progress-by-bot` → `auto-implement`, `gh pr close <PR> --delete-branch`.
+>    Fire the terminal failure notification: `case "$_notify_fired" in *:failed:*) ;; *) _notify_fired="${_notify_fired}:failed:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: failed" "Implementation failed on {repo}" || true ;; esac`
 >    Cleanup single-fetch body temp file on terminal failure: `rm -f "/tmp/issue-<ISSUE>-body.md" || true`
 > 10. Cleanup: cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force
 > 11. Report: PR number, outcome, one-paragraph summary.
