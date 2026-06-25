@@ -126,8 +126,10 @@ the conductor renders a digest with a Tier-C model and:
    committed page).
 
 Digest contents: cycles run, tier breakdown, issues filed, PRs merged to main vs
-sandbox, competitor features mined, usage spent / governor parks, and any
-`autospec:steer` directives honored. The date is derived from the sandbox script
+sandbox, competitor features mined, usage spent / governor parks, any
+`autospec:steer` directives honored, **sandbox→main drift** (commits/files behind
++ conflict-risk estimate), quarantined `autospec:needs-human` items, and any
+main-health halts. The date is derived from the sandbox script
 convention, not local `date` ad-hoc (`feedback_explore_sandbox_utc_date_branch`).
 
 ## Usage governor (90% pre-emptive park)
@@ -193,6 +195,63 @@ post-hoc report. The fix-then-recheck (not fix-then-trust) discipline mirrors
 `feedback_self_consistent_test_fixtures_mask_bugs`: re-run the validators against
 the *patched* branch, never assume the fix is clean.
 
+## Resilience & long-run operation
+
+The conductor is expected to run for **weeks**, so it is designed to survive
+crashes, never double-run, never spin on broken state, and report its own drift.
+
+**Crash recovery & resume.** The conductor writes durable run-state
+(`~/.autospec/autonomous-state.json`: active tier, cycle count, sandbox branch,
+last digest date, in-flight issue) plus a periodic heartbeat. A fresh process
+detects an interrupted run and resumes at the last waterfall position by reusing
+`/autospec-resume` (host/session/terminal-crash recovery, capped retries) rather
+than starting over. Run-state lives under the path-scoped slug subdir, not a flat
+shared dir (`feedback_heartbeat_cross_repo_collision`).
+
+**Single-instance lock.** One conductor per repo. A path-scoped lock
+(harness-neutral per-session id chain, `reference_harness_session_id_envs`)
+prevents a second accidental `/autospec-autonomous` from stomping the first; a
+second launch attaches as a status viewer or exits, never co-drives. Lock
+ownership is reclaimable only when the holder's heartbeat is stale (so a genuine
+live worker on another host is never stolen — mirrors `autospec-resume`).
+
+**Stuck-work quarantine.** A per-issue failure cap
+(`AUTOSPEC_ISSUE_FAILURE_CAP`, default 3): if `/autospec-run` fails the same
+issue that many times, label it `autospec:needs-human`, notify, and move on —
+the loop never spins forever on an unbuildable issue
+(`feedback_monitor_silent_exit`, `feedback_implementer_subagent_ends_mid_ceremony`).
+Implementer "ended mid-ceremony but work is correct" is verified via gh/git
+before counting a failure.
+
+**Outcome-ledger integration.** The conductor consults and feeds
+`autospec-explore-ledger` — the recursive-self-improvement memory that records
+which research sources actually ship clean PRs and derives dynamic source
+weights. This stops the loop re-proposing already-rejected features every week
+and biases discovery toward sources that historically merge clean.
+
+**Main-health gate.** Because Tier-1 work auto-merges to `main` unattended, a bad
+PR slipping the gates would poison every later cycle. After each main merge the
+conductor confirms `main` CI is green (via the existing `ci-wait.sh`); if `main`
+goes red, it **halts further Tier-1 merges**, files an `autospec:needs-human`
+fix issue, notifies, and continues only sandbox tiers until `main` is green again.
+
+**Lifetime.** No cumulative cost or time kill-switch (operator decision
+2026-06-25): the loop runs forever, parking only on the 90% usage governor and
+resuming on reset; it ends only on `autospec:stop` or an unrecoverable crash.
+The per-cycle autonomy-gate cost caps still apply per cycle.
+
+**Sandbox drift reporting.** A single long-lived sandbox (operator decision). The
+daily digest reports merge-base distance to `main` (commits/files behind) and a
+conflict-risk estimate, so the operator knows when to review/promote. No
+auto-rebase (unsafe under autonomous shipping — explore sandbox contract).
+
+**Clean-room competitor RE (Tier 3).** The internet researcher reverse-engineers
+competitors at the **behavior level only — describe what a feature does, never
+copy competitor source**. `/autospec-secaudit`'s IP/license/copyright check is
+the backstop in the pre-merge gate. Competitor targets come from
+`.autospec/competitors.yml` (or are derived from the README/spec "purpose"
+statement when absent), constrained by the existing internet allowlist.
+
 ## Safety & autonomy-gate integration
 
 Every would-have-asked decision still routes through
@@ -249,10 +308,14 @@ checks write a real temp file first (`feedback_bash32_process_sub_test_file`).
   patched branch; recheck-clean → merge; retries exhausted → `autospec:needs-human`,
   no merge; low/info → non-blocking, recorded. qa/secaudit invoked as mocked
   subprocesses (external boundary).
+- `tests/autonomous/test_resilience.bats` — single-instance lock blocks a second
+  conductor; stale-heartbeat lock is reclaimable but a live one is not; resume
+  restores waterfall position; per-issue failure cap → `autospec:needs-human`;
+  main red → Tier-1 merges halt, sandbox tiers continue; ledger consulted/fed.
 - `scripts/validate.sh` — trio goldens regenerated;
   `check_autospec_autonomous_contract` gate added.
 
-## Decomposition preview (≈8 children + 1 epic + Phase 5.5 audit)
+## Decomposition preview (≈9 children + 1 epic + Phase 5.5 audit)
 
 1. **EPIC** — /autospec-autonomous perpetual conductor.
 2. **Usage-governor investigation spike** (Tier A) — what each harness exposes;
@@ -266,10 +329,14 @@ checks write a real temp file first (`feedback_bash32_process_sub_test_file`).
 8. **Pre-merge gate**: blocking `/autospec-qa` + `/autospec-secaudit` barrier
    with severity-gated fix-and-recheck loop (`scripts/autonomous-premerge-gate.sh`
    decision helper + bats; high/severe/medium → fix-in-place + re-run, max 5).
-9. Conductor orchestrator: wire waterfall + control + governor + digest + the
-   pre-merge gate into the `lib/autospec-loop.sh` driver; ScheduleWakeup/cron
-   resume; install scripts.
-10. Phase 5.5 broad integration audit + remediation
+9. **Resilience unit**: durable run-state + heartbeat + single-instance lock +
+   `/autospec-resume` integration + stuck-work quarantine + main-health gate +
+   outcome-ledger wiring (`scripts/autonomous-resilience.sh` decision helpers +
+   bats). Clean-room competitor config (`.autospec/competitors.yml`).
+10. Conductor orchestrator: wire waterfall + control + governor + digest +
+    pre-merge gate + resilience into the `lib/autospec-loop.sh` driver;
+    ScheduleWakeup/cron resume; sandbox drift reporting; install scripts.
+11. Phase 5.5 broad integration audit + remediation
     (`feedback_per_pr_lgtm_misses_integration` — never skip 5.5).
 
 Each child ≤400 words, ≤3 logical units; trio-prose + goldens kept atomic in one
@@ -291,6 +358,10 @@ issue (`feedback_decompose_trio_prose_goldens_atomic`).
   backstop; (d) trio/goldens drift → derivation tooling + validate gate;
   (e) regression / security defect reaching any branch → mandatory blocking
   `/autospec-qa` + `/autospec-secaudit` pre-merge gate with severity-gated
-  fix-and-recheck.
+  fix-and-recheck; (f) crash over weeks → durable run-state + `/autospec-resume`;
+  (g) double-run → single-instance lock; (h) spinning on broken work → per-issue
+  failure cap → quarantine; (i) bad PR poisoning `main` → main-health gate halts
+  Tier-1 merges on red; (j) re-proposing rejected work → outcome-ledger; (k) IP
+  risk in competitor RE → clean-room behavior-only + secaudit IP check.
 - **On merge:** add `/autospec-autonomous` to the skill catalog, llms.txt, the
   per-skill token-cost table, and cross-link `docs/AUTONOMY-CHARTER.md` §5.
