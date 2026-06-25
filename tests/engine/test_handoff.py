@@ -20,8 +20,31 @@ def _write_md(directory: Path, name: str, content: str = "# handoff\n") -> Path:
 # Helpers
 # ---------------------------------------------------------------------------
 
-TODAY = date.today().isoformat()
-YESTERDAY = (date.today() - timedelta(days=1)).isoformat()
+# Freeze "today" so the date used to NAME the fixture files (below) is the same
+# instant the production glob reads via date.today(). Without this, a test that
+# imports just before midnight and scans just after would build the filename
+# under one date and the glob under the next — a real across-midnight flake
+# (issue #1333). The frozen date keeps the today-only contract intact (the glob
+# still excludes the frozen-yesterday prefix, per test_returns_only_today_dated_files).
+_FROZEN_TODAY = date(2026, 6, 15)
+
+
+class _FrozenDate(date):
+    @classmethod
+    def today(cls) -> date:
+        return _FROZEN_TODAY
+
+
+@pytest.fixture(autouse=True)
+def _freeze_handoff_date(monkeypatch):
+    """Pin handoff.date.today() to _FROZEN_TODAY for every test in this module."""
+    from autospec_context_monitor import handoff
+
+    monkeypatch.setattr(handoff, "date", _FrozenDate)
+
+
+TODAY = _FROZEN_TODAY.isoformat()
+YESTERDAY = (_FROZEN_TODAY - timedelta(days=1)).isoformat()
 
 
 # ---------------------------------------------------------------------------
