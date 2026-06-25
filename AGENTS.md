@@ -121,6 +121,20 @@ Operators can halt a running autospec monitor in two ways, both leaving clean st
 
 **Inline sub-modes**: both `/autospec` and `/autospec-run` accept `stop [--flag]` as a feature-request argument (regex `^\s*stop(\s+--\w+)*\s*$`, case-insensitive), routing through the same `scripts/autospec-stop.sh`.
 
+## Autonomy charter (default-on)
+
+The operator's standing preference is **autonomous by default**: when
+`~/.autospec/autonomous.flag` is present, `/autospec-define` and `/autospec-run`
+skip design-ratification, spec→plan→run handoff gates, and per-issue
+confirmations. The governing rule is **recommendation = action** — if the agent
+is confident enough to recommend a next step, it takes it and reports rather than
+asking permission. Safety is unchanged: `scripts/autospec-autonomy-gate.sh
+--check all` still surfaces a confirmation for destructive remote actions,
+force-push to a protected branch, out-of-scope files, cost over the aggressive
+caps (`AUTOSPEC_AUTONOMOUS_ISSUE_CAP`, `AUTOSPEC_AUTONOMOUS_TOKEN_CAP`), and
+genuine no-clear-winner forks. Full policy and rationale (mined from session
+transcripts): [`docs/AUTONOMY-CHARTER.md`](docs/AUTONOMY-CHARTER.md).
+
 ## Startup self-update
 
 Every multi-harness skill runs a preflight at startup that updates the installed copy
