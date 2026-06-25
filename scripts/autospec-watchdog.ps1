@@ -107,7 +107,7 @@ function Test-HeartbeatSchema {
     $issueValue = Get-HeartbeatValue $Heartbeat "issue"
     $tsRaw = Get-HeartbeatValue $Heartbeat "ts"
     $tsValue = 0L
-    $validSteps = @("claimed", "worktree_ready", "tests_started", "tests_passed", "pr_created", "smoke_retry", "reviewed", "merged", "failed")
+    $validSteps = @("claimed", "expand_start", "worktree_ready", "tests_started", "tests_passed", "pr_created", "smoke_retry", "reviewed", "merged", "failed")
 
     if ($issueValue -ne $IssueNumber) { return $false }
     if (-not [int64]::TryParse($tsRaw, [ref]$tsValue)) { return $false }
