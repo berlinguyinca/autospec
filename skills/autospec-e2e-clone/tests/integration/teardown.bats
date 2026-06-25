@@ -123,8 +123,11 @@ YAML
 # ── provision → teardown round-trip (with custom_cmd mock adapter) ────────────
 
 @test "provision.sh → teardown.sh: full round-trip with custom_cmd mock (python3 http server)" {
-  # Skip if python3 is unavailable — needed to serve a health response
+  # Skip if python3 (serves the health response) or curl (the adapter polls the
+  # health endpoint with it) is unavailable — without either the round-trip
+  # cannot run deterministically.
   command -v python3 >/dev/null 2>&1 || skip "python3 not available — skipping round-trip test"
+  command -v curl    >/dev/null 2>&1 || skip "curl not available — skipping round-trip test"
 
   local FAKE_UP_SCRIPT="$TEST_REPO/fake-up.sh"
   local URL_FILE="$TEST_REPO/.autospec/clone-url.txt"
@@ -145,7 +148,7 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 httpd = http.server.HTTPServer(('127.0.0.1', $PORT), H)
 httpd.serve_forever()
-" &
+" >/dev/null 2>&1 &
 printf '%s\n' "$!"
 exit 0
 SHELL
@@ -211,15 +214,33 @@ YAML
 
 @test "clone-gate-hook.sh: provisions clone and exports URL env var" {
   [ -f "$CLONE_HOOK_SH" ] || skip "clone-gate-hook.sh not found at $CLONE_HOOK_SH"
+  # The expose adapter polls the health endpoint with curl and we serve it with
+  # a python3 HTTP server — both are required for this round-trip to be
+  # deterministic. Skip cleanly rather than depend on whatever happens to be
+  # listening on the host's default port.
+  command -v python3 >/dev/null 2>&1 || skip "python3 not available — skipping clone-gate round-trip"
+  command -v curl    >/dev/null 2>&1 || skip "curl not available — skipping clone-gate round-trip"
 
   local FAKE_UP_SCRIPT="$TEST_REPO/fake-up2.sh"
   local URL_FILE="$TEST_REPO/.autospec/clone-url.txt"
 
-  cat > "$FAKE_UP_SCRIPT" << SHELL
+  # Serve HTTP 200 on port 19890 so the adapter's health poll succeeds. The
+  # adapter (via the provision url-file fix) writes clone-url.txt at the
+  # repo-absolute path on its own.
+  cat > "$FAKE_UP_SCRIPT" << 'SHELL'
 #!/usr/bin/env bash
-mkdir -p "$(dirname "$URL_FILE")"
-printf 'http://localhost:19889\n' > "$URL_FILE"
-printf 'http://localhost:19889\n'
+PORT=19890
+python3 -c "
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'ok')
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', $PORT), H).serve_forever()
+" >/dev/null 2>&1 &
+printf '%s\n' "$!"
 exit 0
 SHELL
   chmod +x "$FAKE_UP_SCRIPT"
@@ -233,13 +254,23 @@ expose:
   custom:
     up_cmd: "bash $FAKE_UP_SCRIPT"
     down_cmd: "echo fake-down-ok"
+  url_template: "http://localhost:19890"
+  health_endpoint: "/"
+  ready_wait_secs: 10
 YAML
 
-  run bash "$CLONE_HOOK_SH" "$TEST_REPO" "E2E_BASE_URL"
+  # Pass --add-exit-trap-cmd so the hook hands its teardown to our (no-op)
+  # accumulator instead of self-registering an EXIT trap. In standalone mode
+  # the hook otherwise tears the clone down the instant its own process exits,
+  # which would delete clone-url.txt before we can assert it was written.
+  run bash "$CLONE_HOOK_SH" "$TEST_REPO" "E2E_BASE_URL" --add-exit-trap-cmd true
   # Hook should succeed
   [ "$status" -eq 0 ]
   [ -f "$URL_FILE" ]
   [[ "$output" == *"clone gate hook complete"* ]]
+
+  # cleanup background python3 HTTP server
+  pkill -f "http.server.HTTPServer.*19890" 2>/dev/null || true
 }
 
 @test "clone-gate-hook.sh: exits 1 when no target_repo argument" {

@@ -131,15 +131,18 @@ trap 'rm -f "$CONTRACT_TMPFILE"' EXIT
 printf '%s\n' "$CONTRACT_JSON" > "$CONTRACT_TMPFILE"
 
 CLONE_URL_FILE="$REPO_ROOT/.autospec/clone-url.txt"
-URL_ARG=""
 if [ -n "$URL_FILE_ARG" ]; then
-  URL_ARG="--url-file $URL_FILE_ARG"
   CLONE_URL_FILE="$URL_FILE_ARG"
 fi
+# Always hand the adapter the resolved (absolute) clone-url.txt path. Adapters
+# default to a CWD-relative ".autospec/clone-url.txt" when no --url-file is
+# passed, which lands the file in the caller's working directory rather than
+# under $REPO_ROOT — so provision below would never find it. Passing the
+# absolute path keeps the adapter's write and provision's read in agreement.
+URL_ARGS=(--url-file "$CLONE_URL_FILE")
 
 info "dispatching 'up' action to expose adapter"
-# shellcheck disable=SC2086
-bash "$DISPATCH_SH" up --contract "$CONTRACT_TMPFILE" $URL_ARG || {
+bash "$DISPATCH_SH" up --contract "$CONTRACT_TMPFILE" "${URL_ARGS[@]}" || {
   rc=$?
   die "expose adapter 'up' failed (exit $rc)"
 }
