@@ -289,6 +289,15 @@ while true:
   fi
 
   if [ "$status" = "ALL_DONE" ]; then
+    # Queue drained — consult explore-on-drain.sh to decide whether to
+    # auto-chain into /autospec-explore or exit normally to Phase 6.
+    # The helper encapsulates: flag check → autonomy gate → cycle-cap.
+    # It emits "chain" or "stop" on stdout; default (flag absent) is "stop".
+    _drain_decision=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-on-drain.sh")
+    if [ "$_drain_decision" = "chain" ]; then
+      echo "[orchestrator] explore-on-drain: chaining into /autospec-explore on sandbox branch"
+      /autospec-explore   # runs on its own sandbox branch, NEVER main
+    fi
     break   # proceed to Phase 6 final report
   fi
 
