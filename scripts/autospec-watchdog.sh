@@ -35,6 +35,12 @@ WATCHDOG_GC_HEARTBEAT_FRESH_SECS="${AUTOSPEC_WATCHDOG_GC_HEARTBEAT_FRESH_SECS:-$
 
 WATCHDOG_LOG_PREFIX="[autospec-watchdog]"
 
+# Sibling helpers (F2 liveness + F4 canonical slug). Resolved relative to this
+# script so a checkout/worktree picks up its own copies; overridable for tests.
+WATCHDOG_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKER_LIVENESS_SH="${AUTOSPEC_WORKER_LIVENESS_SH:-$WATCHDOG_SCRIPT_DIR/worker-liveness.sh}"
+REPO_SLUG_SH="${AUTOSPEC_REPO_SLUG_SH:-$WATCHDOG_SCRIPT_DIR/repo-slug.sh}"
+
 if ! command -v gh >/dev/null 2>&1; then
     echo "$WATCHDOG_LOG_PREFIX ERROR: gh CLI not found" >&2
     exit 1
@@ -42,21 +48,26 @@ fi
 
 # ── Derive repo slug and scoped heartbeat dir ─────────────────────────────────
 
-_resolve_repo_slug() {
+_resolve_repo_full() {
     local repo="${WATCHDOG_REPO:-}"
     if [ -z "$repo" ]; then
         repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
     fi
-    if [ -z "$repo" ]; then
-        printf '' # fallback: empty slug → use base dir directly
-        return
-    fi
-    printf '%s' "$repo" | tr '/' '_'
+    printf '%s' "$repo"
 }
 
-REPO_SLUG="$(_resolve_repo_slug)"
-if [ -n "$REPO_SLUG" ]; then
-    WATCHDOG_DIR="${WATCHDOG_BASE}/${REPO_SLUG}"
+REPO_FULL="$(_resolve_repo_full)"
+if [ -n "$REPO_FULL" ]; then
+    # Reuse repo-slug.sh canonical-slug resolver (F4): prefers the canonical
+    # owner__name dir but transparently falls back to legacy owner_name /
+    # owner-name dirs so in-flight heartbeats written by the legacy `tr '/' '_'`
+    # form are still found.
+    if [ -x "$REPO_SLUG_SH" ]; then
+        WATCHDOG_DIR="$(bash "$REPO_SLUG_SH" --resolve-dir "$WATCHDOG_BASE" "$REPO_FULL" 2>/dev/null || true)"
+    fi
+    if [ -z "${WATCHDOG_DIR:-}" ]; then
+        WATCHDOG_DIR="${WATCHDOG_BASE}/$(printf '%s' "$REPO_FULL" | tr '/' '_')"
+    fi
 else
     WATCHDOG_DIR="$WATCHDOG_BASE"
 fi
@@ -121,8 +132,11 @@ now_ts="$(date -u +%s)"
 
 _migrate_flat_heartbeats "$WATCHDOG_BASE" "$now_ts"
 
-# Create scoped dir if needed
-mkdir -p "$WATCHDOG_DIR"
+# NOTE: do NOT create WATCHDOG_DIR here. The read loop and GC tolerate a missing
+# dir (every access is `[ -f ]`-guarded). repo-slug.sh --resolve-dir only returns
+# the canonical owner__name path when no dir exists yet; eagerly creating it
+# would shadow the legacy owner_name dir that heartbeat-write.sh creates later,
+# orphaning real heartbeats. The dir is created by the writer, not the watchdog.
 
 nudged=0
 reclaimed=0
@@ -184,7 +198,7 @@ reclaim_issue() {
         --add-label auto-implement >/dev/null 2>&1 || true
     # shellcheck disable=SC2086
     gh issue comment "$issue" $REPO_ARGS \
-        --body "autospec watchdog reclaimed this issue after ${age}s of no check-in." >/dev/null 2>&1 || true
+        --body "autospec watchdog released and reclaimed this issue after ${age}s with no live owner." >/dev/null 2>&1 || true
 }
 
 nudge_issue() {
@@ -355,6 +369,110 @@ if [ "${AUTOSPEC_WATCHDOG_GC_ONLY:-}" = "1" ]; then
     exit 0
 fi
 
+# ── GitHub-authority + liveness reclaim gate (F1+F2+F3) ───────────────────────
+#
+# The local heartbeat age is only a *trigger to check* — never the decision.
+# Once a `claimed` heartbeat is older than the claimed-timeout, the GitHub
+# `autospec-run-state` comment plus same-host PID-liveness are authoritative.
+
+# Fetch the run-state comment body for an issue (the marked comment written by
+# claim-issue.sh / release-issue.sh). Defined before the main loop so the
+# heartbeat path can consult it. Empty when absent.
+run_state_body_for_issue() {
+    issue="$1"
+    # Pick the CAS-authoritative marked comment: run-state.sh keeps the
+    # lowest-id (oldest) comment as the single owner and deletes losers, so in a
+    # transient duplicate window we mirror that by sorting marked comments oldest
+    # -first (createdAt, then id) and taking the first — never an arbitrary
+    # array-order comment that could carry a loser's worker_id.
+    # shellcheck disable=SC2086
+    gh issue view "$issue" $REPO_ARGS \
+        --json comments \
+        --jq '[.comments[]? | select((.body // "") | contains("<!-- autospec-run-state:begin -->") and contains("<!-- autospec-run-state:end -->"))] | sort_by(.createdAt, .id) | (.[0].body // "")' \
+        2>/dev/null || true
+}
+
+# Strip the run-state JSON out of a marked comment body.
+extract_run_state_json() {
+    awk '
+      /^<!-- autospec-run-state:begin -->$/ { inside=1; next }
+      /^<!-- autospec-run-state:end -->$/ { inside=0; exit }
+      inside { print }
+    '
+}
+
+# worker_liveness <worker_id> → alive|dead|unknown (delegates to the F2 helper).
+# Cross-host, malformed, or missing ids resolve to `unknown` so the caller falls
+# back to GitHub-timestamp freshness.
+worker_liveness() {
+    wid="${1:-}"
+    [ -n "$wid" ] || { printf 'unknown'; return 0; }
+    if [ -x "$WORKER_LIVENESS_SH" ]; then
+        bash "$WORKER_LIVENESS_SH" "$wid" 2>/dev/null || printf 'unknown'
+    else
+        printf 'unknown'
+    fi
+}
+
+# reclaim_decision <issue> <window_secs> → "reclaim" | "hold"
+#
+# Decision table for a `claimed` heartbeat already past the claimed-timeout:
+#   run-state absent / released / failed        → reclaim   (no live owner)
+#   same-host worker, kill -0 alive             → hold      (#1055 regression)
+#   same-host worker, kill -0 dead              → reclaim   (provably dead)
+#   cross-host/unknown, GitHub ts fresh (<win)  → hold      (live sibling)
+#   cross-host/unknown, GitHub ts stale (>=win) → reclaim
+reclaim_decision() {
+    rd_issue="$1"
+    rd_window="$2"
+
+    rd_body="$(run_state_body_for_issue "$rd_issue")"
+    if [ -z "$rd_body" ]; then
+        printf 'reclaim'   # run-state absent → no authoritative owner
+        return 0
+    fi
+
+    rd_json="$(printf '%s\n' "$rd_body" | extract_run_state_json)"
+    rd_state="$(printf '%s\n' "$rd_json" | jq -r '.state // .step // empty' 2>/dev/null || true)"
+    rd_worker="$(printf '%s\n' "$rd_json" | jq -r '.worker_id // empty' 2>/dev/null || true)"
+    rd_updated="$(printf '%s\n' "$rd_json" | jq -r '.updated_at // empty' 2>/dev/null || true)"
+
+    case "$rd_state" in
+        ''|released|failed)
+            printf 'reclaim'   # absent/parse-fail or explicitly relinquished
+            return 0
+            ;;
+    esac
+
+    # F2 — same-host PID-liveness short-circuit.
+    case "$(worker_liveness "$rd_worker")" in
+        alive)
+            printf 'hold'      # provably-live same-host owner — never reclaim
+            return 0
+            ;;
+        dead)
+            printf 'reclaim'   # provably-dead same-host owner — safe to reclaim
+            return 0
+            ;;
+    esac
+
+    # F1 — cross-host / unknown: fall back to GitHub `updated_at` freshness.
+    rd_epoch="$(iso_to_epoch "$rd_updated")"
+    case "$rd_epoch" in *[!0-9]*|'') rd_epoch=0 ;; esac
+    if [ "$rd_epoch" -le 0 ]; then
+        printf 'reclaim'       # unparseable GitHub ts → treat as stale
+        return 0
+    fi
+    rd_age=$(( now_ts - rd_epoch ))
+    [ "$rd_age" -ge 0 ] || rd_age=0
+    if [ "$rd_age" -ge "$rd_window" ]; then
+        printf 'reclaim'       # GitHub claim is stale past the window
+    else
+        printf 'hold'          # GitHub claim is fresh — live sibling
+    fi
+    return 0
+}
+
 load_state
 
 for hb in "$WATCHDOG_DIR"/*.json; do
@@ -406,10 +524,15 @@ for hb in "$WATCHDOG_DIR"/*.json; do
     fi
 
     if [ "$step" = "claimed" ] && [ "$age" -ge "$WATCHDOG_CLAIMED_TIMEOUT_SECS" ]; then
-        reclaim_issue "$issue" "$age"
-        claimed_released=$((claimed_released + 1))
-        state_unset "$issue"
-        rm -f "$hb"
+        # The stale heartbeat is only the trigger. GitHub authority + same-host
+        # PID-liveness decide whether to actually reclaim (F1+F2+F3). A live
+        # owner is never reclaimed — this closes the go-modules #1055 regression.
+        if [ "$(reclaim_decision "$issue" "$WATCHDOG_CLAIMED_TIMEOUT_SECS")" = "reclaim" ]; then
+            reclaim_issue "$issue" "$age"
+            claimed_released=$((claimed_released + 1))
+            state_unset "$issue"
+            rm -f "$hb"
+        fi
         continue
     fi
 
@@ -439,23 +562,6 @@ for hb in "$WATCHDOG_DIR"/*.json; do
         skipped=$((skipped + 1))
     fi
 done
-
-run_state_body_for_issue() {
-    issue="$1"
-    # shellcheck disable=SC2086
-    gh issue view "$issue" $REPO_ARGS \
-        --json comments \
-        --jq '[.comments[]? | select((.body // "") | contains("<!-- autospec-run-state:begin -->") and contains("<!-- autospec-run-state:end -->")) | .body][0] // ""' \
-        2>/dev/null || true
-}
-
-extract_run_state_json() {
-    awk '
-      /^<!-- autospec-run-state:begin -->$/ { inside=1; next }
-      /^<!-- autospec-run-state:end -->$/ { inside=0; exit }
-      inside { print }
-    '
-}
 
 pr_is_open() {
     pr="$1"
@@ -504,6 +610,13 @@ reconcile_run_state_comments() {
         esac
 
         if [ "$step" = "claimed" ] && [ "$age" -ge "$WATCHDOG_CLAIMED_TIMEOUT_SECS" ]; then
+            # F2 — never reclaim a provably-live same-host owner (#1055). A dead
+            # same-host pid is reclaimed; cross-host falls through to the stale
+            # GitHub `ts` already proven by `age >= claimed-timeout`.
+            worker_id="$(printf '%s\n' "$run_state_json" | jq -r '.worker_id // empty' 2>/dev/null || true)"
+            if [ "$(worker_liveness "$worker_id")" = "alive" ]; then
+                continue
+            fi
             reclaim_issue "$issue" "$age"
             claimed_released=$((claimed_released + 1))
             continue
