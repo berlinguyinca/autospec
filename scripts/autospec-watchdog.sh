@@ -132,8 +132,11 @@ now_ts="$(date -u +%s)"
 
 _migrate_flat_heartbeats "$WATCHDOG_BASE" "$now_ts"
 
-# Create scoped dir if needed
-mkdir -p "$WATCHDOG_DIR"
+# NOTE: do NOT create WATCHDOG_DIR here. The read loop and GC tolerate a missing
+# dir (every access is `[ -f ]`-guarded). repo-slug.sh --resolve-dir only returns
+# the canonical owner__name path when no dir exists yet; eagerly creating it
+# would shadow the legacy owner_name dir that heartbeat-write.sh creates later,
+# orphaning real heartbeats. The dir is created by the writer, not the watchdog.
 
 nudged=0
 reclaimed=0
@@ -377,10 +380,15 @@ fi
 # heartbeat path can consult it. Empty when absent.
 run_state_body_for_issue() {
     issue="$1"
+    # Pick the CAS-authoritative marked comment: run-state.sh keeps the
+    # lowest-id (oldest) comment as the single owner and deletes losers, so in a
+    # transient duplicate window we mirror that by sorting marked comments oldest
+    # -first (createdAt, then id) and taking the first — never an arbitrary
+    # array-order comment that could carry a loser's worker_id.
     # shellcheck disable=SC2086
     gh issue view "$issue" $REPO_ARGS \
         --json comments \
-        --jq '[.comments[]? | select((.body // "") | contains("<!-- autospec-run-state:begin -->") and contains("<!-- autospec-run-state:end -->")) | .body][0] // ""' \
+        --jq '[.comments[]? | select((.body // "") | contains("<!-- autospec-run-state:begin -->") and contains("<!-- autospec-run-state:end -->"))] | sort_by(.createdAt, .id) | (.[0].body // "")' \
         2>/dev/null || true
 }
 

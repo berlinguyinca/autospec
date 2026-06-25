@@ -44,8 +44,19 @@ fi
 if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
   if printf '%s\n' "$*" | grep -q -- '--json comments'; then
     issue="$3"
-    jq --argjson issue "$issue" \
-      -r '[.[] | select(.number == $issue) | .body][0] // ""' "${COMMENTS:?}"
+    # Run the REAL --jq filter the production code passes (gh applies --jq
+    # client-side after fetching --json comments). We reconstruct the
+    # {comments:[...]} shape gh would return for this issue and pipe it through
+    # the production filter verbatim, so the SUT's own selection logic — not a
+    # re-implementation in this mock — is what the test exercises.
+    filter=""; prev=""
+    for a in "$@"; do
+      [ "$prev" = "--jq" ] && filter="$a"
+      prev="$a"
+    done
+    comments_for_issue="$(jq --argjson issue "$issue" \
+      '[.[] | select(.number == $issue)]' "${COMMENTS:?}")"
+    printf '{"comments":%s}\n' "$comments_for_issue" | jq -r "${filter:-.}"
   else
     cat "${LABELS:?}"
   fi
@@ -239,5 +250,38 @@ isolate_heartbeat_pass() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"claimed_released=1"* ]]
     [ ! -f "$(HB_DIR_FOR)/42.json" ]
+    grep -q -- '--add-label auto-implement' "$CALLS"
+}
+
+# A marked run-state comment with a marker body, parametrized worker_id/ts/order.
+state_comment_obj() {
+    local issue="$1" state="$2" updated_at="$3" worker_id="$4" created_at="$5" id="$6"
+    jq -n \
+      --argjson issue "$issue" --arg state "$state" --arg updated_at "$updated_at" \
+      --arg worker_id "$worker_id" --arg created_at "$created_at" --argjson id "$id" \
+      '{
+        number: $issue, createdAt: $created_at, id: $id,
+        body: ("<!-- autospec-run-state:begin -->\n" +
+          ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:$worker_id,state:$state,branch:"feat/x",pr:"",step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
+          "\n<!-- autospec-run-state:end -->")
+      }'
+}
+
+@test "duplicate run-state comments: oldest (CAS-authoritative) owner decides, not array order" {
+    isolate_heartbeat_pass
+    fresh="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    write_hb 42 claimed 360
+    # Array order puts the LOSER first (a live pid → would hold under naive [0]).
+    # The CAS winner is the OLDEST/lowest-id comment, whose pid is dead → reclaim.
+    # Reclaim proves the watchdog honored CAS order, not array order.
+    jq -n \
+      --argjson loser "$(state_comment_obj 42 claimed "$fresh" "thishost:me:shell:$$" "2024-06-01T00:00:00Z" 200)" \
+      --argjson winner "$(state_comment_obj 42 claimed "$fresh" "thishost:me:shell:999999" "2020-01-01T00:00:00Z" 100)" \
+      '[$loser, $winner]' > "$COMMENTS"
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"claimed_released=1"* ]]
     grep -q -- '--add-label auto-implement' "$CALLS"
 }
