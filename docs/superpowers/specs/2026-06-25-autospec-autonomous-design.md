@@ -9,8 +9,8 @@ running for weeks." Builds on `docs/AUTONOMY-CHARTER.md`,
 
 ## Goal
 
-Ship a single top-level skill `/autospec-autonomous` that runs the autospec
-machinery **unattended for weeks**. Each cycle it walks a fixed **priority
+Ship a top-level skill `/autospec-autonomous` (plus its calibration companion
+`/autospec-persona`) that runs the autospec machinery **unattended for weeks**. Each cycle it walks a fixed **priority
 waterfall**, picks the highest-priority available work, ships it, writes a daily
 digest, obeys a GitHub control channel for live steering, routes work to the
 cheapest capable model tier, and **parks itself before exhausting usage quota**,
@@ -96,6 +96,107 @@ All four are **reversible, in-scope, local-or-already-authorized** actions, so
 per the Autonomy Charter they execute without an extra confirmation turn. Label
 parsing uses `capture()`/`==`, never interpolated `test()` regex
 (`feedback_jq_test_regex_metachar_injection`).
+
+## Operator-priority intake & self-brainstorm (operator simulation)
+
+The conductor must decide *what to build next* the way the operator would. Two
+mechanisms: a startup priority intake, and an internal multi-agent brainstorm
+grounded in a model of the operator's past behavior.
+
+### Startup priority intake
+
+At skill start the conductor accepts free-text priorities:
+`/autospec-autonomous --priorities "refine UX; add multi-user accounts; polish dashboards"`
+(or, first run with none supplied, it asks once via `AskUserQuestion` — the only
+startup gate — then proceeds). Priorities persist to
+`~/.autospec/autonomous-priorities.md` (operator-editable mid-run; also
+appendable via an `autospec:steer` issue). They are **high-weight directives**
+that bias discovery and ranking across every tier — a discovery proposal aligned
+with a stated priority gets a ranking multiplier; the polish tier draws its
+lenses from them (e.g. "refine UX" → UX-polish lens fires earlier). Priorities
+never bypass the safety gate or the waterfall ordering; they reweight, not
+override.
+
+### Operator persona model
+
+A derived profile of the operator's judgment — *how they decide, prioritize, and
+reject* — built by a Tier-A agent from, in precedence order:
+
+0. **Explicit calibration interview** (`/autospec-persona`, below) — direct
+   operator answers to ≤50 repo-grounded questions. This is the *supervised*
+   signal and outranks everything inferred; a direct answer beats a mined
+   pattern.
+1. `docs/memory/` (esp. `feedback_*` and `project_*`) and `AGENTS.md` — the
+   operator's explicit, durable preferences (correctness ≫ speed, small-LLM
+   target, conservative guardrails, ROI-check new components, skill-per-capability,
+   lock-step sacred, etc.).
+2. `docs/AUTONOMY-CHARTER.md` — the recommendation=action boundary.
+3. **Mined past sessions** — the same transcript corpus that produced the charter
+   (`project_babysit_tax_autonomy_charter`). When transcripts are present, mine
+   them for recurring decision patterns ("review the whole project for gaps",
+   what the operator greenlights vs. rejects, where they push back). When absent
+   (clean/headless/CI environment), fall back to sources 1–2 only — never block.
+
+Cached to `~/.autospec/operator-persona.md` and refreshed on a cadence
+(`AUTOSPEC_PERSONA_REFRESH_DAYS`, default 7). This is "simulate what I would do"
+made concrete and inspectable — the operator can read and hand-edit the persona.
+
+### Self-brainstorm panel
+
+At each **planning boundary** (entering a discovery tier, priorities/steer
+changed, or a fresh sandbox cycle — NOT every drain, to bound cost) the conductor
+runs an internal brainstorm that simulates the operator deliberating, in place of
+the human ratification the Autonomy Charter collapses:
+
+1. **Candidates** — researchers + active priorities produce candidate directions.
+2. **Operator-proxy panel** — N Tier-A agents (default 3, scales with budget),
+   each adopting `operator-persona.md` plus a distinct lens that mirrors the
+   operator's own review counter-teams (UX, architecture/ROI, risk/safety). Each
+   argues, as the operator would, which directions to pursue, defer, or reject —
+   with rationale citing the persona/memory.
+3. **Synthesis** — a Tier-A synthesizer reconciles the panel into a ranked way
+   forward and a one-paragraph `> AUTONOMOUS RATIONALE:` recorded with the filed
+   issues and surfaced in the daily digest, so the operator can audit "why did it
+   choose this?".
+
+This reuses the `superpowers:brainstorming` + judge-panel patterns, run
+autonomously with the operator *simulated* as the human in the loop. Panel
+disagreement that produces a genuine no-clear-winner fork escalates to the
+operator via the control channel (Charter boundary), instead of guessing.
+
+> AUTONOMOUS ASSUMPTION: panel runs at planning boundaries, not every cycle, and
+> default size 3. Flag if you want it every cycle (higher fidelity, higher cost)
+> or a different lens set.
+
+### `/autospec-persona` — calibration interview (separate companion skill)
+
+A standalone skill that **trains the persona on the operator directly** by asking
+repo-grounded questions, so the digital twin reflects how *this* operator decides
+— not a generic persona. Run once to bootstrap, re-run to recalibrate.
+
+- **Bounded:** asks **≤50 questions total** (hard cap), in themed batches via
+  `AskUserQuestion` (multiple-choice preferred, free-text where needed), so it is
+  finishable in one sitting and resumable if interrupted (progress persisted).
+- **Repo-grounded, not generic:** a Tier-A agent first reads the repo — `docs/specs/`,
+  `docs/memory/`, `AGENTS.md`, the charter, recent commits, open issues, code
+  areas — and *generates* the questions from real tensions it finds, e.g.:
+  *"Issue #X traded test-coverage for speed — would you have done that?"*,
+  *"Two specs disagree on Y; which wins?"*, *"Rank these five candidate features
+  for this repo."*, *"When is a new skill worth forking vs. invoking upstream?"*.
+  Questions span: priority ordering, quality/risk tolerance, UX-vs-backend
+  weighting, when to defer/reject, model-cost tradeoffs, review rigor, and
+  destructive-action comfort.
+- **Calibration, not just collection:** interleaves a few questions whose
+  "answer" is already inferable from memory/charter, to *measure agreement* and
+  flag where the inferred persona was wrong — correcting the model, not just
+  appending to it.
+- **Output:** writes/updates `~/.autospec/operator-persona.md` (the source-0
+  input above) with answers, derived decision rules, and a confidence note per
+  dimension. Human-readable and hand-editable.
+- **Lifecycle:** `/autospec-autonomous` checks for the persona on startup; if
+  absent, it offers to run `/autospec-persona` first (the operator may skip — the
+  conductor then falls back to inferred sources 1–3). It is its own top-level
+  skill (`feedback_autospec_skill_per_capability`), trio-derived like the others.
 
 ## Model-tier routing
 
@@ -272,7 +373,12 @@ commit, per the explore sandbox contract and
 - `skills/autospec-autonomous/codex/prompt.md` — Codex mirror (lockstep).
 - `skills/autospec-autonomous/opencode/agent.md` — OpenCode mirror (lockstep).
 - `skills/autospec-autonomous/{install.sh,uninstall.sh,README.md}`.
-- `tests/fixtures/skill-goldens/autospec-autonomous.*.sha256` (derived).
+- `skills/autospec-persona/{SKILL.md,codex/prompt.md,opencode/agent.md,install.sh,uninstall.sh,README.md}`
+  — the calibration-interview companion skill (its own trio).
+- `scripts/autonomous-persona.sh` — persona build/merge from interview + inferred
+  sources; pure transform over input files, unit-testable.
+- `tests/fixtures/skill-goldens/autospec-autonomous.*.sha256` +
+  `autospec-persona.*.sha256` (derived).
 - `scripts/autonomous-waterfall.sh` — pure tier-selection decision logic.
 - `scripts/autonomous-usage-governor.sh` — pure usage decision logic.
 - `scripts/autonomous-control-channel.sh` — label query → command decision.
@@ -308,6 +414,12 @@ checks write a real temp file first (`feedback_bash32_process_sub_test_file`).
   patched branch; recheck-clean → merge; retries exhausted → `autospec:needs-human`,
   no merge; low/info → non-blocking, recorded. qa/secaudit invoked as mocked
   subprocesses (external boundary).
+- `tests/autonomous/test_persona.bats` — interview caps at 50 questions;
+  progress persists/resumes; agreement-calibration flags an inferred-vs-stated
+  mismatch; `operator-persona.md` written/merged with interview as source-0.
+- `tests/autonomous/test_self_brainstorm.bats` — priorities reweight ranking;
+  panel runs at planning boundaries only (not every drain); no-clear-winner
+  panel split escalates to control channel; `AUTONOMOUS RATIONALE` captured.
 - `tests/autonomous/test_resilience.bats` — single-instance lock blocks a second
   conductor; stale-heartbeat lock is reclaimable but a live one is not; resume
   restores waterfall position; per-issue failure cap → `autospec:needs-human`;
@@ -315,7 +427,7 @@ checks write a real temp file first (`feedback_bash32_process_sub_test_file`).
 - `scripts/validate.sh` — trio goldens regenerated;
   `check_autospec_autonomous_contract` gate added.
 
-## Decomposition preview (≈9 children + 1 epic + Phase 5.5 audit)
+## Decomposition preview (≈11 children + 1 epic + Phase 5.5 audit)
 
 1. **EPIC** — /autospec-autonomous perpetual conductor.
 2. **Usage-governor investigation spike** (Tier A) — what each harness exposes;
@@ -329,6 +441,14 @@ checks write a real temp file first (`feedback_bash32_process_sub_test_file`).
 8. **Pre-merge gate**: blocking `/autospec-qa` + `/autospec-secaudit` barrier
    with severity-gated fix-and-recheck loop (`scripts/autonomous-premerge-gate.sh`
    decision helper + bats; high/severe/medium → fix-in-place + re-run, max 5).
+8b. **`/autospec-persona` calibration-interview skill** (own trio + goldens):
+    repo-grounded ≤50-question interview, agreement-calibration, writes
+    `operator-persona.md`. **Blocks the operator-simulation unit's source-0.**
+8c. **Operator-simulation unit**: startup `--priorities` intake +
+    `~/.autospec/autonomous-priorities.md` + persona builder
+    (`scripts/autonomous-persona.sh`, interview + memory/AGENTS/charter + optional
+    transcript mining w/ graceful fallback) + self-brainstorm panel wiring +
+    ranking reweight + `AUTONOMOUS RATIONALE` capture + bats.
 9. **Resilience unit**: durable run-state + heartbeat + single-instance lock +
    `/autospec-resume` integration + stuck-work quarantine + main-health gate +
    outcome-ledger wiring (`scripts/autonomous-resilience.sh` decision helpers +
@@ -363,5 +483,10 @@ issue (`feedback_decompose_trio_prose_goldens_atomic`).
   failure cap → quarantine; (i) bad PR poisoning `main` → main-health gate halts
   Tier-1 merges on red; (j) re-proposing rejected work → outcome-ledger; (k) IP
   risk in competitor RE → clean-room behavior-only + secaudit IP check.
-- **On merge:** add `/autospec-autonomous` to the skill catalog, llms.txt, the
-  per-skill token-cost table, and cross-link `docs/AUTONOMY-CHARTER.md` §5.
+- **On merge:** add `/autospec-autonomous` and `/autospec-persona` to the skill
+  catalog, llms.txt, the per-skill token-cost table, and cross-link
+  `docs/AUTONOMY-CHARTER.md` §5.
+- **Operator simulation:** the self-brainstorm is the autonomous replacement for
+  the brainstorming-ratification gate the Charter collapses — persona-grounded
+  (interview source-0 + inferred sources 1–3), auditable via `AUTONOMOUS
+  RATIONALE`, and escalates genuine forks rather than guessing.
