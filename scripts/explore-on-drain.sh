@@ -51,9 +51,15 @@ if ! autospec-autonomy-gate.sh --check all >/dev/null 2>&1; then
 fi
 
 # 3. Cycle cap check — read current counter (default 0).
+# Sanitize to numeric: treat missing or non-numeric content as 0 so a
+# corrupted counter file does not abort the script under set -eu.
 cycles=0
 if [ -f "$CYCLES_FILE" ]; then
-    cycles="$(cat "$CYCLES_FILE")"
+    raw="$(cat "$CYCLES_FILE")"
+    case "$raw" in
+        ''|*[!0-9]*) cycles=0 ;;   # empty or non-numeric → reset to 0
+        *)            cycles="$raw" ;;
+    esac
 fi
 
 if [ "$cycles" -ge "$MAX_CYCLES" ]; then
