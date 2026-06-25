@@ -345,7 +345,7 @@ Pass the following prompt verbatim to each background subagent:
 >   # Startup/per-scan heartbeat reconciliation — run before candidate selection.
 >   # This deletes closed/merged/orphaned heartbeats, rejects old schemas like
 >   # {"issue":407,"status":"in_progress"}, normalizes current schemas, and
->   # releases any `claimed` heartbeat older than AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS (default: 300).
+>   # releases any `claimed` heartbeat older than AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS (default: 1800).
 >   if [ -d "$HOME/.autospec/process-heartbeats" ]; then
 >     if command -v bash >/dev/null 2>&1; then
 >       bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-watchdog.sh"
@@ -722,7 +722,7 @@ inline label-swap path below.
 >
 > Keep a progress heartbeat so the monitor can prove forward movement:
 > - Create/update `~/.autospec/process-heartbeats/<repo-slug>/<ISSUE>.json` at each major step:
->   - `claimed`, `worktree_ready`, `tests_started`, `tests_passed`, `pr_created`, `smoke_retry`, `reviewed`, `merged`, `failed`
+>   - `claimed`, `expand_start`, `worktree_ready`, `tests_started`, `tests_passed`, `pr_created`, `smoke_retry`, `reviewed`, `merged`, `failed`
 > - Schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}"}`
 > - Delete this file on terminal SUCCESS/FAILURE in both clean and failure paths.
 > - Transition notifications: on `tests_passed`, `pr_created`, `merged`, and `failed` call
@@ -742,6 +742,14 @@ inline label-swap path below.
 >
 > <verbatim AC checkbox list from issue body — every checkbox must be green before push>
 >
+> 0. **Heartbeat refresh at expand start.** The very first action before any expand work (reading files, pattern survey, verifying paths) is to refresh the heartbeat to `expand_start`. This covers the claim→worktree_ready window: the monitor wrote `claimed` when it dispatched you; without this refresh the watchdog may falsely reclaim the issue during a long expand phase.
+>    ```bash
+>    _hb_slug="$(printf '%s' "{repo}" | tr '/' '_')"
+>    mkdir -p "$HOME/.autospec/process-heartbeats/$_hb_slug"
+>    printf '{"issue":"%s","branch":"","step":"expand_start","ts":%s,"pr":"","repo":"%s"}\n' \
+>      "<ISSUE>" "$(date -u +%s)" "{repo}" \
+>      > "$HOME/.autospec/process-heartbeats/$_hb_slug/<ISSUE>.json"
+>    ```
 > 1. **PR-aware recovery ladder, then worktree.** Resolve the branch state FIRST, then act on the verdict. NEVER `cd`/`git checkout`/`git commit` in the primary checkout — all work happens in a linked worktree off `origin/main`.
 >    <!-- worktree-ladder:begin -->
 >    ```bash

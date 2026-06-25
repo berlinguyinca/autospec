@@ -124,3 +124,18 @@ EOF
     [ -f "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG/410.json" ]
     echo "$output" | grep -q 'invalid_schema=0'
 }
+
+@test "expand_start is a recognized step and survives reconciliation (F3 refresh)" {
+    # The implementer writes an `expand_start` heartbeat to cover the
+    # claim->worktree_ready window. The watchdog must treat it as a valid
+    # step, not garbage-collect it as an unknown schema.
+    cat > "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG/410.json" <<EOF
+{"issue":410,"branch":"feat/410","step":"expand_start","ts":$((NOW - 10))}
+EOF
+
+    run bash "$SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [ -f "$AUTOSPEC_WATCHDOG_DIR/$REPO_SLUG/410.json" ]   # not GC'd as invalid schema
+    echo "$output" | grep -q 'invalid_schema=0'
+}
