@@ -57,6 +57,12 @@ SIGNAL_FILE="${CI_STATE_DIR}/${PR}.signal"
 PID_FILE="${CI_STATE_DIR}/${PR}.pid"
 LOG_FILE="${CI_STATE_DIR}/${PR}.log"
 
+# Resolve shared notify helper relative to this script's repo root.
+# skills/autospec-shared/scripts/notify.sh is the canonical entry point
+# (mirrors the osascript/notify-send pattern from the context-monitor adapter).
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NOTIFY_SH="${_SCRIPT_DIR}/../skills/autospec-shared/scripts/notify.sh"
+
 # Remove stale signal/PID from a previous run
 rm -f "$SIGNAL_FILE" "$PID_FILE"
 
@@ -69,6 +75,7 @@ PR="'"$PR"'"
 TIMEOUT='"$TIMEOUT"'
 REQUIRED_ONLY='"$REQUIRED_ONLY"'
 SIGNAL_FILE="'"$SIGNAL_FILE"'"
+NOTIFY_SH="'"$NOTIFY_SH"'"
 
 write_signal() {
     local state="$1"
@@ -92,16 +99,20 @@ while true; do
 
     if [ "$bad" -gt 0 ]; then
         write_signal "fail" "$rollup"
+        # Notify once on terminal verdict — failure must never block the merge path.
+        bash "$NOTIFY_SH" "autospec: CI failed" "PR #${PR} — one or more checks failed" || true
         exit 0
     fi
 
     if [ "$pending" -eq 0 ] && [ "$total" -gt 0 ]; then
         write_signal "pass" "$rollup"
+        bash "$NOTIFY_SH" "autospec: CI passed" "PR #${PR} — all checks green" || true
         exit 0
     fi
 
     if [ "$(elapsed)" -gt "$TIMEOUT" ]; then
         write_signal "stalled" "$rollup"
+        bash "$NOTIFY_SH" "autospec: CI stalled" "PR #${PR} — timed out after ${TIMEOUT}s" || true
         exit 0
     fi
 
