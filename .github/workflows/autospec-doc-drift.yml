@@ -43,4 +43,14 @@ jobs:
         run: |
           set -euo pipefail
           AUTOSPEC_SCRIPTS_PATH="${HOME}/.autospec/scripts"
-          bash "${AUTOSPEC_SCRIPTS_PATH}/check-doc-drift.sh" --pr "${{ github.event.pull_request.number }}"
+          # Resolve check-doc-drift.sh. In a CONSUMER repo the installer
+          # sed-substitutes AUTOSPEC_SCRIPTS_PATH above to the installed scripts
+          # dir, where the script exists. In autospec's OWN repo CI the scripts
+          # are not installed at ~/.autospec/scripts, so fall back to the repo's
+          # checked-out copy. The fallback path does not exist in a consumer repo
+          # (no autospec skills/ tree), so it is only ever taken here.
+          DRIFT_SCRIPT="${AUTOSPEC_SCRIPTS_PATH}/check-doc-drift.sh"
+          if [ ! -f "$DRIFT_SCRIPT" ]; then
+            DRIFT_SCRIPT="skills/autospec-shared/scripts/check-doc-drift.sh"
+          fi
+          bash "$DRIFT_SCRIPT" --pr "${{ github.event.pull_request.number }}"
