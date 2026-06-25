@@ -134,6 +134,26 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+# ── Slug validation (injection guard) ────────────────────────────────────────
+
+@test "enabled: acquire rejects slug containing a slash" {
+    export AUTOSPEC_REPO_LOCK=1
+    run bash "$LOCK_SCRIPT" acquire "owner/repo"
+    [ "$status" -ne 0 ]
+}
+
+@test "enabled: acquire rejects slug containing path traversal" {
+    export AUTOSPEC_REPO_LOCK=1
+    run bash "$LOCK_SCRIPT" acquire "../etc__passwd"
+    [ "$status" -ne 0 ]
+}
+
+@test "enabled: acquire rejects slug without canonical double-underscore" {
+    export AUTOSPEC_REPO_LOCK=1
+    run bash "$LOCK_SCRIPT" acquire "ownerrepo"
+    [ "$status" -ne 0 ]
+}
+
 # ── Canonical-slug integration (source repo-slug.sh) ─────────────────────────
 
 @test "enabled: acquire works when slug is derived via repo-slug.sh canonical_slug" {
