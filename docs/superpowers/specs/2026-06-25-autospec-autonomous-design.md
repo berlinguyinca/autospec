@@ -17,11 +17,14 @@ cheapest capable model tier, and **parks itself before exhausting usage quota**,
 resuming automatically when quota resets.
 
 This skill is a **conductor**, not a new engine. It reuses, without
-reimplementing: the `autospec-explore` research+ship loop, the `autospec-run`
-autonomous merge pipeline, the Autonomy Charter gate
-(`autospec-autonomy-gate.sh`), hard-quota recovery (`autospec-usage-limit.sh`),
-worktree isolation (`worktree-guard.sh`), the shared notifier
-(`autospec-shared/scripts/notify.sh`), and the loop driver (`lib/autospec-loop.sh`).
+reimplementing, components that **exist in repo source today**: the `autospec-run`
+autonomous merge pipeline, the Autonomy Charter gate (`autospec-autonomy-gate.sh`),
+hard-quota recovery (`autospec-usage-limit.sh`), worktree isolation
+(`worktree-guard.sh`), the loop driver (`scripts/lib/autospec-loop.sh`), and
+`/autospec-resume`. Components it depends on that are **not yet built**
+(`notify.sh`, `autospec-secaudit`, `autospec-explore-ledger`) and the
+`autospec-explore` single-cycle interface are sequenced as prerequisites in the
+"Phasing & post-review corrections" section — they are NOT assumed to exist.
 
 ## Non-goals
 
@@ -46,6 +49,92 @@ worktree isolation (`worktree-guard.sh`), the shared notifier
 4. **Control channel** — reserved GitHub labels, read at each **cycle boundary**
    (never mid-issue): `autospec:priority`, `autospec:steer`, `autospec:pause`,
    `autospec:stop`.
+
+## Phasing & post-review corrections (AUTHORITATIVE — added 2026-06-25 after peer review)
+
+Two independent reviews (Opus critic + Codex peer) converged on the same
+blockers. **This section governs; where the descriptive body below disagrees, this
+section wins.** The full vision (Tiers 2–4, persona, self-brainstorm, live-usage
+governor) is **retained but re-phased** — nothing is deleted, only sequenced.
+
+### Phase boundaries
+
+- **Phase 1 (the only thing this spec's plan builds now): boring-safe core.**
+  Tier 0 control channel + Tier 1 (backlog → `main`) + resilience + an
+  `autospec-qa`-only pre-merge gate + a **cumulative cost kill-switch**. Goal:
+  prove the loop ships the real backlog to `main` safely, forever, unattended.
+- **Phase 2: explore-backed discovery.** Tiers 2–3 (local discovery + competitor
+  RE) + the secaudit half of the gate + the live-usage governor. **Blocked on**
+  an `autospec-explore` single-cycle interface (below) and on `autospec-secaudit`
+  being built.
+- **Phase 3: operator intelligence.** Tier 4 polish lenses, the operator persona
+  model, the self-brainstorm panel, and the `/autospec-persona` interview skill.
+
+### Dependency reality (verified against repo source, not assumed)
+
+These are **design-only / unbuilt** in repo source and MUST NOT be cited as
+"reused" until built; depending on them as-is makes the gate fail closed or
+no-op on clean installs (`feedback_installer_excludes_runtime_libs`):
+
+- `autospec-secaudit` — spec only → **Phase-2 prerequisite**. Phase-1 gate is
+  `autospec-qa` only. Any gate that calls a scan skill MUST check presence and
+  **halt with a `code_health` identifier if missing — never silently skip**
+  (current `autospec-run` logs-and-continues; the conductor must fail closed).
+- `notify.sh` — spec only → **Phase-1 prerequisite** (it is the operator's only
+  window during unattended runs). Build it first (the Autonomy-Charter
+  automations spec already designs it), or wire the `osascript`/`notify-send`
+  path the explore/run skills already use; do not reference a nonexistent script.
+- `autospec-explore-ledger` — no repo footprint → **Phase-2** (only consumed once
+  discovery tiers exist).
+- Path fixes: `scripts/lib/autospec-loop.sh` (not `lib/...`); Tier-2/3 invoke
+  `/autospec-explore --research-sources internet` (there is no `--internet` flag;
+  internet is on by default and gated by `--no-internet` / `--internet-allowlist`).
+
+### Phase-1 contract corrections
+
+- **Cumulative cost kill-switch (NEW, Phase 1, hard requirement).** The autonomy
+  gate only checks per-invocation estimates — no running total. Add a persistent
+  spend ledger (`~/.autospec/autonomous-spend.json`, path-scoped) that tallies
+  tokens/issues across the whole run; at `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS`
+  (or issue count) the loop **parks and notifies** (not just per-cycle caps).
+  This replaces the earlier "no cumulative cost cap" decision, which the reviews
+  flagged as unsafe for a forever loop. The live-usage % governor remains Phase 2.
+- **Main-health primitive.** Use `gh api repos/{owner}/{repo}/commits/main/status`
+  (or `/check-runs` for the post-merge workflow), NOT `ci-wait.sh` (which polls a
+  single PR). Decision thresholds: green → continue; pending → wait one poll;
+  red → halt Tier-1 merges, file `autospec:needs-human`, notify.
+- **Single-instance lock — reconcile with resume, don't contradict it.**
+  `autospec-resume` deliberately adds **no second lock** (GitHub CAS comments +
+  `updated_at` age thresholds 300s/10800s). The conductor lock MUST reuse those
+  same age thresholds and define explicit handoff: on resume, the fresh process
+  inherits/clears the conductor lock using resume's staleness logic, so there is
+  never double-run or a stale lock that blocks recovery. Drop "mirrors resume."
+
+### Phase-2 contract corrections (specify before building Phase 2)
+
+- **`autospec-explore` single-cycle contract.** Explore is itself a perpetual
+  loop; the conductor must NOT nest two forever-loops. Add an explore `--once`
+  mode (or call `explore-research-cycle.sh` directly) that runs exactly one
+  research pass and returns `{tier, proposals_seen, new_candidates, filed,
+  dry, reason}` so the conductor can measure dryness at its own cycle boundary.
+  The "dry tier" + `AUTOSPEC_AUTO_DRY_CYCLES` escalation depends entirely on this.
+- **Priority reweight formula.** Make the multiplier explicit, e.g. a
+  priority-matched proposal's score = `base × AUTOSPEC_PRIORITY_BOOST`
+  (default 1.5), bounded so it reorders without swamping `confidence ×
+  source_weight × 1/complexity`.
+
+### Phase-3 contract corrections (specify before building Phase 3)
+
+- **Panel → filed issues** must be a defined step: who converts synthesis output
+  to `gh` issues, with what title/body/labels, deduped against open issues, on
+  which base. Currently unspecified.
+- **Persona merge is NOT a pure shell transform.** Split it: a deterministic
+  shell helper for source-gathering + precedence ordering (unit-testable), and an
+  explicit Tier-A LLM synthesis step (evaluated, not unit-asserted) — do not
+  claim determinism for an LLM judgment (`feedback_self_consistent_test_fixtures_mask_bugs`).
+- **ROI gate on the persona layer.** Before building Phase 3, justify it against
+  `--priorities` + `autospec:steer` (which already deliver steering today). If the
+  delta is only "rank slightly differently," cut it (`feedback_roi_check_new_components`).
 
 ## The priority waterfall
 
@@ -427,37 +516,54 @@ checks write a real temp file first (`feedback_bash32_process_sub_test_file`).
 - `scripts/validate.sh` — trio goldens regenerated;
   `check_autospec_autonomous_contract` gate added.
 
-## Decomposition preview (≈11 children + 1 epic + Phase 5.5 audit)
+## Decomposition — phase-structured (post-review)
 
-1. **EPIC** — /autospec-autonomous perpetual conductor.
-2. **Usage-governor investigation spike** (Tier A) — what each harness exposes;
-   writes findings + the chosen mechanism into the spec/README. **Blocks #6.**
-3. SKILL.md scaffold trio (Self-update + Stop + Model-tier + harness-adapter +
-   waterfall contract) + goldens + `check_autospec_autonomous_contract`.
-4. `autonomous-waterfall.sh` decision helper + bats.
-5. `autonomous-control-channel.sh` + reserved-label semantics + bats.
-6. `autonomous-usage-governor.sh` (per spike outcome) + bats.
-7. Tier-4 polish lenses + daily-digest renderer + pinned-issue wiring + bats.
-8. **Pre-merge gate**: blocking `/autospec-qa` + `/autospec-secaudit` barrier
-   with severity-gated fix-and-recheck loop (`scripts/autonomous-premerge-gate.sh`
-   decision helper + bats; high/severe/medium → fix-in-place + re-run, max 5).
-8b. **`/autospec-persona` calibration-interview skill** (own trio + goldens):
-    repo-grounded ≤50-question interview, agreement-calibration, writes
-    `operator-persona.md`. **Blocks the operator-simulation unit's source-0.**
-8c. **Operator-simulation unit**: startup `--priorities` intake +
-    `~/.autospec/autonomous-priorities.md` + persona builder
-    (`scripts/autonomous-persona.sh`, interview + memory/AGENTS/charter + optional
-    transcript mining w/ graceful fallback) + self-brainstorm panel wiring +
-    ranking reweight + `AUTONOMOUS RATIONALE` capture + bats.
-9. **Resilience unit**: durable run-state + heartbeat + single-instance lock +
-   `/autospec-resume` integration + stuck-work quarantine + main-health gate +
-   outcome-ledger wiring (`scripts/autonomous-resilience.sh` decision helpers +
-   bats). Clean-room competitor config (`.autospec/competitors.yml`).
-10. Conductor orchestrator: wire waterfall + control + governor + digest +
-    pre-merge gate + resilience into the `lib/autospec-loop.sh` driver;
-    ScheduleWakeup/cron resume; sandbox drift reporting; install scripts.
-11. Phase 5.5 broad integration audit + remediation
+Only **Phase 1** is decomposed and planned now. Phases 2–3 are roadmap entries to
+revisit once Phase 1 is proven; they carry the contract corrections above and are
+re-decomposed when reached.
+
+### Phase 1 — boring-safe core (planned now: ≈8 children + 1 epic + Phase 5.5 audit)
+
+1. **EPIC** — /autospec-autonomous perpetual conductor (Phase 1).
+2. **`notify.sh` shared notifier** (prerequisite) — `osascript`/`notify-send`
+   with graceful stdout fallback + bats. (Or land the Autonomy-Charter automations
+   notifier first and depend on it.)
+3. **SKILL.md scaffold trio** (Self-update + Stop + Model-tier + harness-adapter +
+   Phase-1 waterfall contract) + goldens + `check_autospec_autonomous_contract`.
+4. **`autonomous-control-channel.sh`** — reserved-label query → command decision
+   (`priority`/`steer`/`pause`/`stop`), metachar-safe parsing + bats.
+5. **`autonomous-waterfall.sh`** — Phase-1 tier selection (Tier 0 preempt → Tier 1
+   backlog; tiers 2–4 stubbed as "not-yet-enabled") + bats.
+6. **`autonomous-spend-ledger.sh`** — cumulative token/issue tally + hard
+   kill-switch (park + notify at lifetime cap) + bats. **(NEW per review.)**
+7. **Pre-merge gate (`autospec-qa` only in Phase 1)** —
+   `scripts/autonomous-premerge-gate.sh`: blocking qa barrier with severity-gated
+   fix-and-recheck (high/severe/medium → fix-in-place + re-run, max 5); **presence
+   check that halts if a configured scan skill is missing** (no silent skip) + bats.
+8. **Resilience unit** — durable run-state + heartbeat; single-instance lock
+   reconciled with `autospec-resume`'s 300s/10800s age model + explicit handoff;
+   stuck-work quarantine (per-issue failure cap → `autospec:needs-human`);
+   **main-health gate via `gh api .../commits/main/status`** (not ci-wait.sh) +
+   bats.
+9. **Conductor orchestrator** — wire control + waterfall + spend-ledger + gate +
+   resilience + daily digest into `scripts/lib/autospec-loop.sh`;
+   ScheduleWakeup/cron resume; install scripts.
+10. **Phase 5.5 broad integration audit + remediation**
     (`feedback_per_pr_lgtm_misses_integration` — never skip 5.5).
+
+### Phase 2 — explore-backed discovery (roadmap)
+
+Prereqs: `autospec-secaudit` built; `autospec-explore` `--once`/yield contract.
+Then: Tiers 2–3 (+ `--research-sources internet`), secaudit added to the gate,
+`autospec-explore-ledger` wiring, the live-usage % governor + its investigation
+spike, sandbox drift reporting, clean-room `.autospec/competitors.yml`.
+
+### Phase 3 — operator intelligence (roadmap)
+
+Tier-4 polish lenses; `--priorities` intake + persona model
+(`autonomous-persona.sh` split into shell gather + Tier-A synthesis); self-
+brainstorm panel + `AUTONOMOUS RATIONALE`; `/autospec-persona` interview skill —
+**only after the Phase-3 ROI gate** justifies it over `--priorities` alone.
 
 Each child ≤400 words, ≤3 logical units; trio-prose + goldens kept atomic in one
 issue (`feedback_decompose_trio_prose_goldens_atomic`).
@@ -465,13 +571,18 @@ issue (`feedback_decompose_trio_prose_goldens_atomic`).
 ## Self-review
 
 - **Placeholders:** none.
-- **Consistency:** backlog→main / self-generated→sandbox is uniform across tiers
-  2–4 and the digest commit; control labels and governor are both default-off,
-  reversible, gate-respecting. The pre-merge qa+secaudit gate is the one
-  mandatory, non-skippable barrier and applies to every tier and both merge
-  targets.
-- **Scope:** one coherent multi-issue pipeline; the investigation spike de-risks
-  the only genuine unknown (live-usage observability) before the governor is built.
+- **Consistency:** backlog→main / self-generated→sandbox is uniform; control
+  labels are reversible + gate-respecting. The pre-merge gate is the one
+  mandatory, non-skippable barrier (Phase 1: `autospec-qa`; secaudit added in
+  Phase 2 when built) and fails **closed** if a configured scan skill is absent.
+- **Scope:** phased (see "Phasing & post-review corrections"). Phase 1 = boring-
+  safe backlog→main loop with a cumulative cost kill-switch; discovery tiers and
+  the persona/intelligence layer are deferred to Phases 2–3 with their contract
+  corrections recorded. Only Phase 1 is planned now.
+- **Peer-review resolution (2026-06-25):** two independent reviews converged on —
+  unbuilt deps (secaudit/notify/ledger), no cumulative cost cap, nested
+  perpetual loops, lock-vs-resume contradiction, wrong main-health primitive, and
+  persona over-build. All are resolved or sequenced in the Phasing section above.
 - **Critical risks & mitigations:** (a) runaway tier escalation → dry-cycle
   threshold + autonomy gate; (b) unreviewed code on main → structurally avoided
   by sandboxing self-generated work; (c) governor mis-estimate → hard-quota
