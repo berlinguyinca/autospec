@@ -147,6 +147,11 @@ task-oriented "I want to…" guidance, see [`README.md`](README.md).
 - Trigger: start a perpetual autonomous research + ship loop on an isolated sandbox branch — 7 researchers propose features from spec/code gaps, prior reports, codebase signals, open issues, source analysis, dependency health, and competitor research, then drain via `/autospec-run` with PRs targeting the sandbox branch (never `main`).
 - Keywords: `autospec-explore`, `explore and ship`, `autonomous research loop`, `discovery loop`
 
+### `autospec-autonomous`
+- Path: [`skills/autospec-autonomous`](skills/autospec-autonomous)
+- Trigger: run the autospec machinery unattended for weeks — a perpetual conductor that walks a priority waterfall (Phase 1: Tier 0 control channel + Tier 1 backlog→`main`), gates merges on `autospec-qa` + main-health, parks before quota exhaustion via a cumulative spend ledger, obeys a GitHub control channel, and resumes after crashes. Tiers 2–4 are Phase 2/3 roadmap.
+- Keywords: `autospec-autonomous`, `run unattended`, `self-driving conductor`, `autonomous for weeks`, `perpetual autospec loop`
+
 ### `autospec-harmonize`
 - Path: [`skills/autospec-harmonize`](skills/autospec-harmonize)
 - Trigger: discover design-token drift in a codebase, generalize a baseline, generate variants, preview them, pick one, and emit a dated migration spec ready for `/autospec-define`.

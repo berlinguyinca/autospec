@@ -399,6 +399,8 @@ PY
 #   3. Waterfall tier selection (autonomous-waterfall.sh)
 #   4. Tier-1 drain: check premerge gate (autonomous-premerge-gate.sh)
 #      MUST emit merge-ok before any autospec-run invocation
+#   4b. Main-health gate (autonomous-resilience.sh main-health): red main →
+#      halt Tier-1 merges; pending → skip drain this cycle (never drain onto red)
 #   5. Drain via AUTOSPEC_RUN_CMD (inherits autospec-run path)
 #   6. Spend-ledger tally (autonomous-spend-ledger.sh); park on cap
 #   7. Once-per-UTC-day digest to .autospec/autonomous-digest.md + pinned issue
@@ -564,19 +566,57 @@ autospec_conductor_run() {
 
             case "$_gate_verdict" in
                 merge-ok)
-                    # Gate passes — invoke drain.
-                    if [ "$_dry" = "1" ]; then
-                        printf '[conductor] [dry-run] would invoke autospec-run for Tier-1 drain\n' >&2
-                    else
-                        local _run_cmd="${AUTOSPEC_RUN_CMD:-}"
-                        if [ -n "$_run_cmd" ]; then
-                            bash -c "$_run_cmd" 2>&1 || true
-                        else
-                            printf '[conductor] WARN: AUTOSPEC_RUN_CMD not set; skipping drain\n' >&2
+                    # ── Main-health gate (spec Phase-1 invariant: red main → halt
+                    # Tier-1 merges).  Never drain onto a red main.  Poll
+                    # autonomous-resilience.sh main-health and honor its DECISION:
+                    #   continue  → proceed with drain
+                    #   wait      → skip drain this cycle (re-poll next cycle)
+                    #   halt      → stop Tier-1 merges, notify, exit loop
+                    # Indeterminate/absent (no resilience or no repo) → proceed:
+                    # the deterministic conservatism (pending on gh failure) lives
+                    # in autonomous-resilience.sh main-health itself.
+                    local _main_health="continue"
+                    if [ -f "$_resilience" ] && [ -n "$_repo" ]; then
+                        local _mh_out
+                        _mh_out="$(bash "$_resilience" main-health \
+                            --repo "$_repo" 2>/dev/null || true)"
+                        local _mh_decision
+                        _mh_decision="$(printf '%s' "$_mh_out" \
+                            | grep '^DECISION:' | head -1 \
+                            | sed 's/^DECISION://' || true)"
+                        if [ -n "$_mh_decision" ]; then
+                            _main_health="$_mh_decision"
                         fi
                     fi
-                    _work_done=1
-                    _dry_cycles=0
+
+                    if [ "$_main_health" = "halt" ]; then
+                        printf '[conductor] HALT: main-health red — halting Tier-1 merges\n' >&2
+                        if [ -n "$_notify_sh" ]; then
+                            bash "$_notify_sh" "autospec-autonomous" \
+                                "conductor halted: main branch CI red — Tier-1 merges stopped" || true
+                        fi
+                        _stop_reason="main-health:red"
+                        break
+                    fi
+
+                    if [ "$_main_health" = "wait" ]; then
+                        printf '[conductor] main-health pending — skipping drain this cycle\n' >&2
+                        _dry_cycles=$((_dry_cycles + 1))
+                    else
+                        # Gate + main-health green — invoke drain.
+                        if [ "$_dry" = "1" ]; then
+                            printf '[conductor] [dry-run] would invoke autospec-run for Tier-1 drain\n' >&2
+                        else
+                            local _run_cmd="${AUTOSPEC_RUN_CMD:-}"
+                            if [ -n "$_run_cmd" ]; then
+                                bash -c "$_run_cmd" 2>&1 || true
+                            else
+                                printf '[conductor] WARN: AUTOSPEC_RUN_CMD not set; skipping drain\n' >&2
+                            fi
+                        fi
+                        _work_done=1
+                        _dry_cycles=0
+                    fi
                     ;;
                 block*)
                     printf '[conductor] premerge-gate blocked: %s — skipping drain this cycle\n' \

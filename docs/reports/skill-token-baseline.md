@@ -9,28 +9,34 @@ To regenerate: `bash scripts/skill-token-report.sh --update-baseline` (splices b
 <!-- baseline:begin -->
 | Skill | Words | Tokens |
 |-------|------:|-------:|
+| autospec-autonomous |     1864 | 2479 |
 | autospec-classify |     2299 | 3057 |
 | autospec-continue |     2054 | 2731 |
-| autospec-define |     6916 | 9198 |
+| autospec-define |     7889 | 10492 |
 | autospec-design |     2165 | 2879 |
-| autospec-doc |     1630 | 2167 |
+| autospec-doc |     2308 | 3069 |
 | autospec-e2e-clone |      902 | 1199 |
-| autospec-explore |     2217 | 2948 |
+| autospec-explore-ledger |     1278 | 1699 |
+| autospec-explore |     4751 | 6318 |
+| autospec-fab |     1492 | 1984 |
 | autospec-fleet |      856 | 1138 |
-| autospec-listen |     1887 | 2509 |
+| autospec-harmonize |     1503 | 1998 |
+| autospec-listen |     2075 | 2759 |
 | autospec-loop |     2703 | 3594 |
 | autospec-playwright |      749 | 996 |
-| autospec-qa |    10263 | 13649 |
+| autospec-qa |    10925 | 14530 |
 | autospec-refine |     2333 | 3102 |
 | autospec-release |     2468 | 3282 |
 | autospec-resume |     1017 | 1352 |
 | autospec-review |     1712 | 2276 |
-| autospec-rollover-status |      393 | 522 |
-| autospec-run |    10597 | 14094 |
-| autospec-split |     4820 | 6410 |
-| autospec-stop |      635 | 844 |
-| autospec-story |     1478 | 1965 |
+| autospec-rollover-status |      581 | 772 |
+| autospec-run |    12366 | 16446 |
+| autospec-secaudit |      842 | 1119 |
+| autospec-split |     5094 | 6775 |
+| autospec-stop |      823 | 1094 |
+| autospec-story |     1666 | 2215 |
 | autospec-sweep |     1361 | 1810 |
-| autospec-test |     3121 | 4150 |
+| autospec-test |     3309 | 4400 |
+| autospec-upgrade |     1812 | 2409 |
 | autospec |    12014 | 15978 |
 <!-- baseline:end -->

@@ -1029,263 +1029,315 @@ drift.
 
 ---
 
-## Spec: docs/specs/2026-06-18-autospec-upgrade-design.md
+## Spec: docs/specs/2026-06-25-concurrent-monitor-safety-design.md
 
-# Design spec — `/autospec-upgrade`: behavior-locked, project-independent framework upgrades
+# Concurrent autospec monitor safety — design spec
 
-- **Date:** 2026-06-18
-- **Status:** design (decompose into auto-implement issues)
-- **Origin:** refined via `/autospec-refine` from "automate the framework-upgrade
-  workflow a departing engineer did manually (Angular/Next/React)."
-
-## Result first
-
-Build a new reusable autospec skill, **`/autospec-upgrade`**, that upgrades an
-arbitrary Angular / Next.js / React repo to the latest official versions
-**safely and project-independently** — by locking observable behavior *before*
-touching versions, upgrading **one major at a time** with official codemods,
-and gating completion on **mutation score**, not coverage theater.
-
-It **composes** existing autospec machinery and builds new code only for the
-genuine gaps. The non-negotiable principle: the engineer this replaces had
-"coverage" and still shipped broken software, so **line coverage is a floor,
-never the gate** — the gate is *behavior-lock + mutation score ≥ pre-upgrade
-baseline*.
-
-### Locked decisions (constraints, not open questions)
-1. Deliverable is the reusable `/autospec-upgrade` skill, not a one-off migration.
-2. Quality gate = E2E/Playwright golden-master behavior-lock **+** Stryker
-   mutation score ≥ pre-upgrade baseline. 80% line/branch coverage across
-   unit/integration/e2e/Playwright is a **floor**, never sufficient alone.
-3. Upgrade strategy = incremental, one major version at a time (mandatory for
-   Angular; applied to Next/React too), each hop delegating to **official
-   tooling**, each hop a revertable checkpoint (tag + commit).
-
-## Team personality
-
-**Team: Migration & Test-Safety Engineering.** Roles: (1) Build/tooling
-engineer (detection, package-manager/runner adapters), (2) Test-safety engineer
-(characterization tests, golden-master, mutation gate), (3) Framework migration
-specialist (Angular/Next/React official codemods + best-practice schematics),
-(4) Release/SRE (tagging, checkpoints, resumability), (5) Docs engineer
-(migration log). Fits because the work is *risk-managed change to code we
-didn't write and don't fully trust* — the team's instinct is "prove it still
-works before and after, and make every step revertable." Risks this team
-notices: silent behavior drift, assertion-free tests inflating coverage,
-skipped majors, hand-rolled migrations diverging from official codemods,
-non-resumable big-bang upgrades, monorepo/workspace blind spots.
-
-### Review counter-team
-**Team: Adversarial Reliability & Portability.** Roles: (1) Chaos/edge reviewer,
-(2) Cross-stack portability reviewer (pnpm/yarn/bun, Nx/Turborepo, Karma/Vitest),
-(3) Determinism reviewer. Challenges: "Does the behavior-lock actually catch a
-regression, or just pass vacuously?", "What happens on a repo with **zero**
-tests, a private registry, or a non-npm lockfile?", "Is every phase truly
-resumable and idempotent, or does a mid-hop crash brick the repo?", "Does the
-mutation gate run on a realistic mutant set, or a trivial one?" Stays in scope
-by attacking the skill's own contracts (detection JSON, gate thresholds,
-checkpoint tags), not by expanding feature scope.
-
-## Architecture
-
-A new top-level skill mirroring the autospec-* family shape. Trio lockstep
-(`SKILL.md` authoritative; `codex/prompt.md` + `opencode/agent.md` derived via
-`derive-trio.sh --in-place`; goldens via `gen-skill-goldens.sh`), plus
-`install.sh` / `uninstall.sh` / `README.md`, and `autospec-block` markers for
-the shared startup-self-update + harness-adapter sections. The orchestrator and
-helpers live under `skills/autospec-upgrade/scripts/` and install into
-`~/.autospec/scripts/`.
-
-### Composition map (reuse — do NOT reinvent)
-| Capability | Reused skill / interface |
-|---|---|
-| Test authoring + coverage + self-heal | `autospec-test` (Stage 2A, `.autospec/test.yml`, `run-gate.sh`) |
-| Playwright run + coverage report | `autospec-playwright` |
-| No-mock smoke, console/network gate, proof artifacts | `autospec-qa --no-heal` |
-| Migration documentation (docs-as-tests) | `autospec-doc --full` |
-| Worktree / PR-aware ladder / CI-wait | `autospec-run` |
-
-### New components (the genuine gaps)
-1. **Detection** (`upgrade-detect.sh`) → JSON `{frameworks[], versions, package_manager, runners[], monorepo, has_tests}`.
-2. **Behavior-lock orchestration** (`behavior-lock.sh`) — drive `autospec-test`/`autospec-playwright`, capture golden-master snapshots, record the Stryker baseline; refuse to proceed until locked.
-3. **Mutation gate** (`mutation-gate.sh`) — Stryker adapter across jest/vitest/karma; `--baseline` and `--gate <threshold>` modes; writes `.autospec/mutation-proof.json`. The concrete consumer for tracker #420.
-4. **Upgrade engine** (`upgrade-engine.sh` + `compute-upgrade-steps.sh`) — per-major hop loop: official codemod → build/type-check → tests → behavior-lock re-verify → bounded fix-loop → tag+commit.
-5. **Codemod routing** (`codemod-route.sh`) — per framework: Angular `ng update` + `ng generate @angular/core:standalone` modes; Next `npx @next/codemod upgrade` + `next-async-request-api`; React `npx codemod react/19/migration-recipe` + `types-react-codemod preset-19`.
-6. **Best-practice migration phase** — applied only after versions green, each behind behavior-lock + new tests.
-7. **Tagging + report** (`tag-upgrade.sh`) — `pre-upgrade-<fw>-<ver>` / `post-upgrade-<fw>-<ver>`, structured `.autospec/upgrade-report.json`.
-8. **Orchestrator** (`upgrade-orchestrator.sh`) — resumable state machine over `.autospec/upgrade-state.json`.
-
-## Phase contract (each phase a checkpoint; resumable; bounded fix-loops; fail-to-operator on unbounded breakage)
-
-- **Phase 0 — Detect.** Emit detection JSON. Next implies React. Explicitly
-  handle: zero tests present, non-npm package manager, monorepo with multiple
-  apps (operate per-project), private registry (do not block on auth — surface).
-- **Phase 1 — Behavior-lock (gate before any upgrade).** Generate
-  characterization tests biased to E2E/Playwright golden-master (refactor-robust)
-  + unit/integration to the 80% **floor**; record Stryker mutation **baseline**.
-  Tag `pre-upgrade-<fw>-<ver>`. Hard rule: no upgrade step runs until behavior
-  is locked and the mutation baseline is recorded.
-- **Phase 2 — Incremental upgrade loop.** For each major hop (Angular strictly
-  one-at-a-time): official codemod/update → build + type-check → run tests →
-  re-verify golden-master → bounded fix-loop → tag + commit. "Latest" resolved
-  per framework, hop by hop.
-- **Phase 3 — Best-practice migration.** Standalone/signals, App Router / async
-  request APIs, React 19 patterns — only after versions are green; each behind
-
----
-
-## Spec: docs/specs/2026-06-18-autospec-fab-design.md
-
-# autospec-fab — generative 3D-model fabrication QA skill (design)
-
-Status: proposed
-Owner: berlinguyinca
-Slug: autospec-fab
+**Date:** 2026-06-25
+**Origin:** live incident — two autospec monitor sessions sharing the same repo
+checkout + `~/.autospec` store on `metabolomics-us/go-modules` double-processed
+issue #1055. A sibling session's watchdog reset #1055 from `in-progress-by-bot`
+→ `auto-implement` while the owning worker was still live (heads-down in expand,
+heartbeat step still `claimed`, age 332s > the 300s timeout).
 
 ## Goal
 
-Add a generic `autospec-fab` skill to the autospec family that lets the autospec
-pipeline (define → run → review → Phase 5.5) autonomously implement **parametric
-3D / CAD-as-code** features whose output is **3D-printable STL** that is proven
-watertight, structurally sound under its intended loads, fluid/airflow-correct,
-and **automatically visually inspected** before release. The skill is repo-generic:
-it drives any CAD-as-code project through a `.autospec/fab.yml` contract.
+Make several autospec monitor processes drain the same repo (same machine,
+shared `~/.autospec` store, or across machines) without colliding or
+double-processing — by making the GitHub claim the sole cross-session authority,
+never reclaiming a provably-live worker, and keying all shared state by one
+canonical slug.
 
-## Locked decisions
+## Team personality
 
-1. **Scope:** generic `autospec-fab` skill in the autospec family (not a one-repo
-   fork). Target repos opt in via `.autospec/fab.yml`.
-2. **CAD backend:** **FreeCAD** scripting (headless `freecadcmd`/`FreeCAD` Python
-   API) for geometry ops, sections, and renders. STL is exported from FreeCAD and
-   mesh-level checks use `trimesh`.
-3. **Physical-test fidelity:** **full FEA + CFD from the start** — CalculiX (`ccx`)
-   for structural/load FEA and OpenFOAM for fluid/airflow CFD, on every part the
-   contract flags load- or flow-critical. Results are cached by geometry hash so
-   unchanged parts skip re-analysis (gate-runtime control).
-4. **Visual-inspection authority:** deterministic geometry checks are the
-   **blocking** gate; the LLM-vision pass over the 16-view contact sheet runs and
-   surfaces findings as **non-blocking** warnings/follow-ups ("geometry gates,
-   vision advises").
+**Reliability/distributed-systems team** — orchestration engineer (watchdog +
+claim CAS), platform/shell engineer (heartbeat store, slug keying, locks), test
+engineer (bats with mocked `gh` + PID boundaries). Fits because the bug is a
+distributed-claim liveness/authority problem, where the failure modes are
+reclaiming a live owner and split-brain state.
 
-## Architecture (mirrors autospec-harmonize / autospec-upgrade)
+**Review counter-team** — safety/operations lens: challenge "can two workers
+still both believe they own an issue?", "can a genuinely-dead worker's claim
+wedge the queue forever?", "does any reclaim path act on local state without
+the GitHub authority?".
 
-### Lock-step trio skill `skills/autospec-fab/`
-`SKILL.md` (authoritative) + byte-identical `codex/prompt.md` + `opencode/agent.md`
-(via `derive-trio.sh --in-place`) + regenerated skill goldens; ships
-`install.sh`/`uninstall.sh`/`README.md`; `autospec-block` startup-self-update +
-harness-adapter. Encodes the STL Modeling Rules (below), the change workflow, and
-the release-gate contract. Validated by `check_autospec_fab_contract` in
-`scripts/validate.sh`, which also runs the fab bats/test suite + a dogfood model.
+## Root cause (confirmed in code)
 
-### `.autospec/fab.yml` contract (per target repo)
-Declares: generator entrypoint (default `rm -rf build && .venv/bin/python
-src/generate.py`), STL output roots (`build/stls/manifolds/`, catalog
-`manifolds/...`), per-model **metadata sidecars** (dims, material + print
-orientation, ports, gaskets, load/flow-critical flags), printer profile (nozzle,
-layer height, min perimeters, max overhang), and which models are printable.
+1. **Watchdog reclaims on local heartbeat age alone.**
+   `scripts/autospec-watchdog.sh:408` — `if [ "$step" = "claimed" ] && [ "$age"
+   -ge "$WATCHDOG_CLAIMED_TIMEOUT_SECS" ]; then reclaim_issue ...` — decides
+   purely from the local heartbeat timestamp. It never reads the GitHub
+   `autospec-run-state` comment, which the skill itself declares the
+   cross-session source of truth.
+2. **No process-liveness check.** The watchdog never checks whether the claiming
+   worker's process is actually alive before reclaiming.
+3. **`claimed`-timeout (300s) is shorter than the claim→worktree_ready gap.**
+   Expand + pattern survey routinely exceed 5 min, so a live worker still at
+   step `claimed` is flagged dead.
+4. **Slug-normalization split.** The heartbeat store contains both
+   `berlinguyinca_autospec` and `berlinguyinca-autospec` (and the tidyboard
+   equivalent) — `/` is normalized inconsistently (`_` vs `-`), so heartbeats and
+   run-state for one repo fragment across directories. Echoes
+   `feedback_heartbeat_cross_repo_collision`.
+5. **Per-session lock can't see siblings.** `autospec-run-session-lock.sh` is
+   keyed by harness session id (intentionally — separate sessions run
+   independently). It does not protect two sibling sessions sharing one repo
+   checkout + store.
 
-### Release-gate engine `stl-release-gate.py`
-Sequences ordered, individually-tested stages; emits a schema-validated
-`.autospec/fab/release-gate.json` (single source of truth). Stages, in order:
+## Design
 
-1. **geometry reload** — re-open every STL; parse OK.
-2. **watertight** — `trimesh.is_watertight` per body.
-3. **single-body connectivity** — `mesh.split()` yields the expected body count
-   (default 1); reject disconnected bodies.
-4. **metadata** — sidecar validates against `autospec-fab-model.schema.json`.
-5. **vacuum fitting QA** — every NPT pilot preserves tap access, fitting-body
-   clearance, entry relief, usable thread depth; every fitting/hose/socket/port has
-   ≥5 mm radial free clearance unless a larger connector envelope is documented;
-   NPT ports integrated into the body/reinforced block (reject narrow towers/ears/
-   bosses).
-6. **vacuum circuit QA** — graph reachability proves every intended inlet connects
-   to each intended gasket/cavity/port; isolated circuits stay isolated unless
-   declared shared-input self-clamping (full-size internal branches); reject relief
-   valves / bleed ports / intentional leaks / restrictors on low-flow pump models.
-7. **gasket leak sim** — every exposed gasket groove has ≥5 mm surrounding plastic
-   outside the groove; seal-face continuity / pressure-boundary check; reject
-   exposed gasket sides.
-8. **dust leak/airflow QA** — full-size unobstructed hose/duct/socket openings;
-   monotonic cross-section; reject blocked ports, disconnected ducts, printed gate
-   slots, or PVC used as the printed airflow duct.
-9. **slicer wall checks** — min wall = printer min-perimeters × nozzle width;
-   overhang-angle limit; section QA at key planes.
-10. **structural FEA** (CalculiX) — every load-critical part holds its intended
-    load with the configured safety factor, using material + **print-orientation
-    anisotropy** from the metadata. Cached by geometry hash.
-11. **fluid/airflow CFD** (OpenFOAM) — every flow-critical part meets pressure-drop
-    / velocity / no-stagnation targets; dust-hood outlet transitions analyzed.
-    Cached by geometry hash.
-12. **render QA + 16-view contact sheet** — headless FreeCAD render of the 16+
-    required angles (right/left/front/back/top/bottom, the eight 45° diagonals, plus
-    extra diagonals to expose ports/sockets/gaskets/lugs/overhangs/transitions) and
-    slicer-like rotated/top-side views; assemble a contact sheet.
-13. **visual inspection (vision-advises)** — LLM-vision pass judges the contact
-    sheet against the modeling rules (exposed gasket sides, blocked NPT,
-    disconnected bodies, overhangs); adversarially verified; emits **non-blocking**
-    findings.
-14. **docs + PDFs** — MANIFEST.md / README.md / FITTINGS_AND_SCREWS.md sync;
-    BOM/PDF/render regen consistent; `NO_HANDEDIT_GENERATED` guard forbids hand
-    edits to `build/`, `BOM.md`, PDFs, renders, section images, contact sheets.
+### F1 — Watchdog honors the GitHub claim authority (core fix)
+Before reclaiming ANY `claimed`/in-flight heartbeat, the watchdog must read the
+issue's `autospec-run-state` comment (`claim-issue.sh`/`release-issue.sh` already
+write it). Decision table for a heartbeat older than the timeout:
 
-Hard reject (gate fail) on: blocked NPT access, exposed gasket sides, disconnected
-flow, non-watertight mesh, disconnected bodies, known leakage, FEA below safety
-factor, or CFD target miss.
+| GitHub run-state | Action |
+|---|---|
+| absent / `released` / `failed` | reclaim (no live owner) |
+| `claimed`/in-flight, **different** worker, GitHub `ts` fresh (< RECLAIM window) | **DO NOT reclaim** — live sibling |
+| `claimed`/in-flight, GitHub `ts` stale (≥ RECLAIM window) | reclaim + comment |
+| owned by **this** worker | refresh, never reclaim |
 
-## STL Modeling Rules — split
+The local heartbeat age becomes a *trigger to check*, not the decision. The
+GitHub `ts` + `worker_id` are authoritative.
 
-- **Gateable (deterministic, stages 1-12 above + FEA/CFD):** all clearance,
-  watertightness, connectivity, NPT-access, full-size-duct, gasket-wall, isolation,
+### F2 — Process-liveness short-circuit (same host)
+The heartbeat + run-state already carry `worker_id` (`host:user:harness:pid`).
+When the heartbeat's host == this host, check `kill -0 <pid>` (or equivalent): if
+the worker process is alive, never reclaim regardless of age. Cross-host falls
+back to the F1 GitHub-freshness rule. A new `worker-liveness.sh` helper
+encapsulates the host-match + PID-liveness check (pure, testable).
+
+### F3 — Liveness window, not step-timeout
+Replace the bare 300s `claimed`-step timeout with a freshness window keyed off
+the **last heartbeat/run-state refresh**, and have the implementer refresh its
+heartbeat at the start of the expand phase (the current claim→worktree_ready gap
+is the unguarded window). Default `AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS` raised
+to a safe value (e.g. 1800) and only acted on after the F1/F2 authority+liveness
+checks clear.
+
+### F4 — Canonical slug helper
+One `repo-slug.sh` helper that maps `owner/name` → a single canonical form
+(pick one: `owner__name` or `owner-name`) used EVERYWHERE shared state is keyed:
+heartbeat dirs, run-state lookups, lock files, cycle counters. Migrate existing
+readers/writers to it; on read, also accept the legacy alternate form for one
+release so in-flight heartbeats aren't orphaned.
+
+### F5 — Repo-scoped advisory lock (shared-checkout guard)
+Add an OPTIONAL repo-scoped advisory lock (keyed by canonical slug, not session
+id) for the same-machine shared-checkout+store case, acquired around the
+claim+worktree-create critical section. Off by default (the GitHub claim CAS +
+worktree isolation already prevent most collisions); opt-in via
+`AUTOSPEC_REPO_LOCK=1` for operators running multiple monitors against one
+checkout. Never blocks cross-host workers (they don't share the lock dir).
+
 
 ---
 
-## Spec: docs/specs/2026-06-17-autodoc-content-fidelity-design.md
+## Spec: docs/specs/2026-06-25-autospec-autonomous-design.md
 
-# Design spec — round 2: raise `/autospec-doc` LLM-artifact content fidelity
+# /autospec-autonomous — perpetual self-driving conductor (design spec)
 
-- **Branch:** `feat/autodoc-fidelity`
-- **Follows:** round 1 (`docs/specs/2026-06-16-explore-autodoc-improve-round-1-design.md`)
-- **Trigger:** the round-1 preview shipped complete *structure* but placeholder-grade
-  *content* in the LLM artifacts. This round closes that gap.
+**Date:** 2026-06-25
+**Branch:** `feat/autonomous-perpetual-loop`
+**Origin:** operator request — "a 100% autonomous autospec process that keeps
+running for weeks." Builds on `docs/AUTONOMY-CHARTER.md`,
+`docs/memory/project_babysit_tax_autonomy_charter.md`, and the existing
+`autospec-explore` / `autospec-run` engines.
 
-## Result first
+## Goal
 
-Three content-fidelity defects in `skills/autospec-doc/scripts/gen-llms-full.mjs`,
-all fixed scripts+tests only (no SKILL.md/trio change):
+Ship a top-level skill `/autospec-autonomous` (plus its calibration companion
+`/autospec-persona`) that runs the autospec machinery **unattended for weeks**. Each cycle it walks a fixed **priority
+waterfall**, picks the highest-priority available work, ships it, writes a daily
+digest, obeys a GitHub control channel for live steering, routes work to the
+cheapest capable model tier, and **parks itself before exhausting usage quota**,
+resuming automatically when quota resets.
 
-1. **Descriptions were the `src:` glob, not prose.** `pageSummary` and
-   `fillManifest`'s summary loop skipped only lines that *individually* start with
-   `<!--`, so the multi-line `autospec-doc-scope` comment's interior `src: [...]`
-   line was returned as the "summary." Fixed: a shared `firstProseLine()` that
-   skips whole comment blocks and the italic audience-boilerplate line, reaching
-   the real feature summary. This corrects `llms.txt` link descriptions, manifest
-   `summary`, and `llms-full.txt` per-section summaries at once.
+This skill is a **conductor**, not a new engine. It reuses, without
+reimplementing, components that **exist in repo source today**: the `autospec-run`
+autonomous merge pipeline, the Autonomy Charter gate (`autospec-autonomy-gate.sh`),
+hard-quota recovery (`autospec-usage-limit.sh`), worktree isolation
+(`worktree-guard.sh`), the loop driver (`scripts/lib/autospec-loop.sh`), and
+`/autospec-resume`. Components it depends on that are **not yet built**
+(`notify.sh`, `autospec-secaudit`, `autospec-explore-ledger`) and the
+`autospec-explore` single-cycle interface are sequenced as prerequisites in the
+"Phasing & post-review corrections" section — they are NOT assumed to exist.
 
-2. **`reverse-routing` was doc→itself identity** (`docs/x.md#L1 -> docs/x.md`).
-   Fixed: `parseScopeSrc()` reads each page's scope `src:` list and the block now
-   emits the intended **source_file → docs** map (`src/foo.mjs -> docs/.../foo.md`),
-   sorted and deterministic.
+## Non-goals
 
-3. **Manifest `public_api` was empty** on audience pages (only `## CLI/API`
-   backticks were scanned). Fixed: `extractExports()` reads each page's real
-   `code_entry_points` under a `repoRoot` and records ESM exports
-   (`function/const/let/var/class` + `export { … }`) and module-level Python
-   `def/class`; backtick tokens remain a supplement. `fillManifest` gains an
-   optional `{ repoRoot = process.cwd() }`.
+- Not rebuilding researchers, the merge pipeline, or sandbox management.
+- Not a new planning UI — planning stays with `autospec-define`/`-refine`.
+- Not promoting the sandbox to `main` — that stays an explicit operator action.
+- No convergence-stop: the loop is meant to keep finding work indefinitely.
 
-## Out of scope
-- Reshaping `modules[]` away from one-entry-per-page (kept for backward
-  compatibility; `public_api` now carries the real code surface instead).
-- Glossary auto-extraction beyond existing `<!-- autospec-concept: -->` markers.
-- Mermaid node-label polish (Track D heuristic).
+## Design decisions (locked with operator 2026-06-25)
 
-## Acceptance criteria
-- [ ] `llms.txt` link descriptions and manifest `summary` are the feature prose, never `src: [`.
-- [ ] `reverse-routing` maps source files to docs; no `#L1 -> ` identity lines.
-- [ ] `fillManifest(manifest, pages, { repoRoot })` populates `public_api` from real exports; non-exported symbols excluded.
-- [ ] `generateLlmsFull` stays byte-identical across runs on the same input.
-- [ ] `node --test skills/autospec-doc/tests/gen-llms-full.test.mjs` passes; `bash scripts/validate.sh` exits 0.
+1. **Packaging** — new top-level skill `/autospec-autonomous` (per the
+   skill-per-capability rule). It calls `/autospec-run` and `/autospec-explore`
+   as sub-engines; it does not fork their internals.
+2. **Merge target by provenance** — issues that exist in the backlog (operator-
+   or human-authored, OR previously promoted) merge to **main** via the normal
+   `autospec-run` admin auto-merge. Work the loop **generates itself** (tiers 2–4
+   below) lands on the **explore sandbox branch** for batched operator review.
+3. **Usage governor** — investigate what each harness actually exposes for live
+   usage; use it when present, else fall back to a self-accounted token-budget
+   ceiling; always keep `autospec-usage-limit.sh` hard-quota recovery as a
+   backstop. (Investigation spike is the first child issue — see Decomposition.)
+4. **Control channel** — reserved GitHub labels, read at each **cycle boundary**
+   (never mid-issue): `autospec:priority`, `autospec:steer`, `autospec:pause`,
+   `autospec:stop`.
 
-## Verification
-- Primary: `node --test skills/autospec-doc/tests/gen-llms-full.test.mjs`
-- Full: `bash scripts/validate.sh` + a regenerated preview showing prose descriptions, source→doc routing, and populated `public_api`.
+## Phasing & post-review corrections (AUTHORITATIVE — added 2026-06-25 after peer review)
+
+Two independent reviews (Opus critic + Codex peer) converged on the same
+blockers. **This section governs; where the descriptive body below disagrees, this
+section wins.** The full vision (Tiers 2–4, persona, self-brainstorm, live-usage
+governor) is **retained but re-phased** — nothing is deleted, only sequenced.
+
+### Phase boundaries
+
+- **Phase 1 (the only thing this spec's plan builds now): boring-safe core.**
+  Tier 0 control channel + Tier 1 (backlog → `main`) + resilience + an
+  `autospec-qa`-only pre-merge gate + a **cumulative cost kill-switch**. Goal:
+  prove the loop ships the real backlog to `main` safely, forever, unattended.
+- **Phase 2: explore-backed discovery.** Tiers 2–3 (local discovery + competitor
+  RE) + the secaudit half of the gate + the live-usage governor. **Blocked on**
+  an `autospec-explore` single-cycle interface (below) and on `autospec-secaudit`
+  being built.
+- **Phase 3: operator intelligence.** Tier 4 polish lenses, the operator persona
+  model, the self-brainstorm panel, and the `/autospec-persona` interview skill.
+
+### Dependency reality (verified against repo source, not assumed)
+
+These are **design-only / unbuilt** in repo source and MUST NOT be cited as
+"reused" until built; depending on them as-is makes the gate fail closed or
+no-op on clean installs (`feedback_installer_excludes_runtime_libs`):
+
+- `autospec-secaudit` — spec only → **Phase-2 prerequisite**. Phase-1 gate is
+  `autospec-qa` only. Any gate that calls a scan skill MUST check presence and
+  **halt with a `code_health` identifier if missing — never silently skip**
+  (current `autospec-run` logs-and-continues; the conductor must fail closed).
+- `notify.sh` — spec only → **Phase-1 prerequisite** (it is the operator's only
+  window during unattended runs). Build it first (the Autonomy-Charter
+  automations spec already designs it), or wire the `osascript`/`notify-send`
+  path the explore/run skills already use; do not reference a nonexistent script.
+- `autospec-explore-ledger` — no repo footprint → **Phase-2** (only consumed once
+  discovery tiers exist).
+- Path fixes: `scripts/lib/autospec-loop.sh` (not `lib/...`); Tier-2/3 invoke
+  `/autospec-explore --research-sources internet` (there is no `--internet` flag;
+  internet is on by default and gated by `--no-internet` / `--internet-allowlist`).
+
+### Phase-1 contract corrections
+
+- **Cumulative cost kill-switch (NEW, Phase 1, hard requirement).** The autonomy
+  gate only checks per-invocation estimates — no running total. Add a persistent
+  spend ledger (`~/.autospec/autonomous-spend.json`, path-scoped) that tallies
+  tokens/issues across the whole run; at `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS`
+  (or issue count) the loop **parks and notifies** (not just per-cycle caps).
+  This replaces the earlier "no cumulative cost cap" decision, which the reviews
+
+---
+
+## Spec: docs/specs/2026-06-25-autonomy-charter-automations-design.md
+
+# Autonomy Charter automations — design spec
+
+**Date:** 2026-06-25
+**Source charter:** `docs/AUTONOMY-CHARTER.md` §5 ("Still to build")
+**Origin:** session-transcript mining (see `docs/memory/project_babysit_tax_autonomy_charter.md`).
+
+## Goal
+
+Eliminate the two operator-babysitting patterns that the Autonomy Charter named
+but did not yet automate: (1) the queue-drain stall ("standing by") and (2)
+async-wait silence ("how do they look?"). Both are `autospec-run` /
+`autospec-shared` changes.
+
+## Team personality
+
+**Reliability/backend automation team** — orchestration engineer (monitor loop),
+platform/shell engineer (sentinels, notifiers), test engineer (bats with mocked
+external boundaries). Fits because both features are control-flow + side-effect
+plumbing in the autonomous monitor, where the risks are runaway loops and
+cross-platform notifier portability.
+
+**Review counter-team** — operations + safety lens: challenge "does the
+drain→explore chain ever loop unbounded?", "does a notifier failure ever block
+the merge path?", "does this fire during CI/headless runs where notifications
+are noise?".
+
+---
+
+## Feature 1 — Queue-drain → autospec-explore auto-chain
+
+### Problem
+When the Phase 4 monitor drains the queue it writes `status=ALL_DONE` to
+`~/.autospec/batch-done.json` and the orchestrator exits with a "standing by"
+report. The operator's reflexive next instruction is always "review the whole
+project for gaps" — which is exactly what `/autospec-explore` does.
+
+### Design
+Hook the existing `ALL_DONE` branch in `skills/autospec-run/SKILL.md` (the
+orchestrator relaunch loop, ~the `if [ "$status" = "ALL_DONE" ]` block). Add an
+**opt-in** sentinel so default behavior is byte-unchanged:
+
+- `~/.autospec/explore-on-drain.flag` **absent** → current behavior (write final
+  report, exit). This is the default; no regression.
+- **present** → instead of exiting, auto-chain into `/autospec-explore` on the
+  sandbox branch (never `main`, per the existing explore sandbox contract).
+
+Guardrails (all must hold to chain; otherwise fall back to normal exit + log):
+- **Autonomy gate** — call `autospec-autonomy-gate.sh --check all` before
+  chaining; exit 1 → do not chain, surface instead.
+- **Max-cycle cap** — `AUTOSPEC_EXPLORE_ON_DRAIN_MAX_CYCLES` (default 3). A
+  per-repo counter at `~/.autospec/explore-on-drain.cycles` increments each
+  chain; at the cap, stop and log `explore-on-drain: max cycles reached`.
+  Counter resets when the operator clears it or starts a fresh `/autospec-run`.
+- **Idle/empty guard** — if `/autospec-explore` itself produces zero shippable
+  PRs for a full cycle, stop chaining (no point looping on a dry well).
+
+A small helper `scripts/explore-on-drain.sh` encapsulates: flag check →
+gate call → cycle-cap check/increment → emit the decision (`chain` | `stop`)
+as stdout for the orchestrator to act on. Pure decision logic, no side effects
+beyond the counter file, so it is unit-testable.
+
+### Files touched (1 logical unit + 1 trio unit)
+- `scripts/explore-on-drain.sh` (new) + `tests/explore-on-drain.bats` (new)
+- `skills/autospec-run/{SKILL.md,codex/prompt.md,opencode/agent.md}` + derived
+  `tests/fixtures/skill-goldens/autospec-run.*.sha256` (one trio unit — edit
+  SKILL.md, `derive-trio.sh --in-place`, `gen-skill-goldens.sh`)
+
+### Tests required
+- flag absent → decision `stop` (default unchanged).
+- flag present, gate OK, under cap → decision `chain`, counter incremented.
+- at `AUTOSPEC_EXPLORE_ON_DRAIN_MAX_CYCLES` → decision `stop`.
+- gate exit 1 → decision `stop` even with flag present.
+
+### Acceptance criteria
+- [ ] `bash scripts/explore-on-drain.sh` with no flag prints `stop` and exits 0.
+- [ ] With `~/.autospec/explore-on-drain.flag` present and cycles < cap, prints `chain`.
+- [ ] At cap, prints `stop` and does not increment past cap.
+- [ ] `tests/explore-on-drain.bats` passes.
+- [ ] `scripts/validate.sh` passes (trio goldens regenerated).
+
+---
+
+## Feature 2 — Async-transition push notifications
+
+### Problem
+During CI/monitor waits the agent goes silent; the operator pings "how do they
+look?". Transcript mining found that exact phrase repeated within a single run.
+
+### Design
+**Reuse the existing notifier**, do not build a new one. `packages/
+autospec_context_monitor/autospec_context_monitor/adapters/claude_hook.py` and
+`injector.py` already route to `osascript` (macOS) / `notify-send` (Linux) with
+proper escaping. Extract that into a single shared shell entry point
+`skills/autospec-shared/scripts/notify.sh "<title>" "<body>"` that:
+- emits a desktop notification via `osascript`/`notify-send` when available;
+- **degrades gracefully** to a stdout log line `notify: <title> — <body>` when
+  no notifier exists (headless/CI);
+- is a no-op when `AUTOSPEC_NOTIFY=0` (default on; set 0 to silence).
+
+Wire `notify.sh` at the run-state transition points:
