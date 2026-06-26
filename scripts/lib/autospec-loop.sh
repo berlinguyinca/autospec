@@ -389,3 +389,359 @@ PY
     printf '%s\n' "## /autospec continuous loop summary"
     printf '%s\n' "Final status: $status (iterations=$iter, artifact=$loop_json)"
 }
+
+# ── Conductor orchestrator (issue #1378) ─────────────────────────────────────
+#
+# autospec_conductor_run: Phase-1 perpetual conductor loop entry point for
+# /autospec-autonomous.  Each cycle walks:
+#   1. Resilience heartbeat / lock (autonomous-resilience.sh)
+#   2. Tier-0 control-channel poll (autonomous-control-channel.sh) → preempt
+#   3. Waterfall tier selection (autonomous-waterfall.sh)
+#   4. Tier-1 drain: check premerge gate (autonomous-premerge-gate.sh)
+#      MUST emit merge-ok before any autospec-run invocation
+#   5. Drain via AUTOSPEC_RUN_CMD (inherits autospec-run path)
+#   6. Spend-ledger tally (autonomous-spend-ledger.sh); park on cap
+#   7. Once-per-UTC-day digest to .autospec/autonomous-digest.md + pinned issue
+#   8. On park (spend/usage): arm ScheduleWakeup/cron via autospec-usage-limit.sh
+#
+# Tiers 2-4 are not enabled in Phase 1; a dry Tier-1 parks and notifies.
+#
+# Globals (caller sets before invoking):
+#   CONDUCTOR_SCRIPTS_DIR   path to scripts/ dir containing helper scripts
+#   CONDUCTOR_REPO          owner/repo slug (optional; auto-detected)
+#   CONDUCTOR_MAX_CYCLES    cycle cap; 0 = unlimited (default 0)
+#   CONDUCTOR_POLL_INTERVAL seconds to sleep between cycles (default 60)
+#   CONDUCTOR_DRY_RUN       1 = log only; no autospec-run invocations
+#   CONDUCTOR_NO_DIGEST     1 = skip daily digest writes
+#   AUTOSPEC_RUN_CMD        override autospec-run invocation (for tests/dry-run)
+#   AUTOSPEC_SCRIPTS_DIR    installed scripts path (fallback for helpers)
+#   AUTOSPEC_SESSION_ID     stable session identifier (default: conductor-$$)
+#
+# Safety rules (AGENTS.md):
+#   set -eu; if/then/fi for one-sided conditionals; no RETURN traps;
+#   jq: use capture()/== never interpolated test() for dynamic values.
+autospec_conductor_run() {
+    # Resolve scripts directory: explicit override > AUTOSPEC_SCRIPTS_DIR > sibling of lib/.
+    local _sdir
+    _sdir="${CONDUCTOR_SCRIPTS_DIR:-${AUTOSPEC_SCRIPTS_DIR:-$(cd "$_AUTOSPEC_LOOP_LIB_DIR/.." && pwd)}}"
+
+    local _repo="${CONDUCTOR_REPO:-${AUTOSPEC_REPO:-}}"
+    local _max="${CONDUCTOR_MAX_CYCLES:-0}"
+    local _poll="${CONDUCTOR_POLL_INTERVAL:-60}"
+    local _dry="${CONDUCTOR_DRY_RUN:-0}"
+    local _no_digest="${CONDUCTOR_NO_DIGEST:-0}"
+
+    # Resolve helper script paths.
+    local _control_ch="${_sdir}/autonomous-control-channel.sh"
+    local _waterfall="${_sdir}/autonomous-waterfall.sh"
+    local _spend="${_sdir}/autonomous-spend-ledger.sh"
+    local _gate="${_sdir}/autonomous-premerge-gate.sh"
+    local _resilience="${_sdir}/autonomous-resilience.sh"
+    local _usage_limit="${_sdir}/autospec-usage-limit.sh"
+
+    # Locate notify.sh: script-relative, then PATH.
+    local _notify_sh=""
+    if [ -f "${_sdir}/../skills/autospec-shared/scripts/notify.sh" ]; then
+        _notify_sh="${_sdir}/../skills/autospec-shared/scripts/notify.sh"
+    elif command -v notify.sh >/dev/null 2>&1; then
+        _notify_sh="notify.sh"
+    fi
+
+    local _cycle=0
+    local _dry_cycles=0
+    local _last_digest_day=""
+    local _stop_reason=""
+    local _conductor_session="${AUTOSPEC_SESSION_ID:-conductor-$$}"
+
+    # Acquire single-instance conductor lock (fail-open: errors never block).
+    # Reuses resume's 300s/10800s staleness thresholds — never contradicts resume.
+    if [ -f "$_resilience" ] && [ -n "$_repo" ]; then
+        local _lock_out
+        _lock_out="$(bash "$_resilience" lock acquire \
+            --repo "$_repo" \
+            --session "$_conductor_session" \
+            2>/dev/null || true)"
+        if printf '%s' "$_lock_out" | grep -q 'DECISION:lock-held'; then
+            printf '[conductor] WARN: another conductor holds the lock — exiting\n' >&2
+            return 1
+        fi
+    fi
+
+    # ── Main cycle loop ───────────────────────────────────────────────────────
+    while true; do
+        _cycle=$((_cycle + 1))
+        printf '[conductor] cycle %s starting\n' "$_cycle" >&2
+
+        # ── Step 1: Resilience heartbeat ──────────────────────────────────────
+        if [ -f "$_resilience" ] && [ -n "$_repo" ]; then
+            bash "$_resilience" state write \
+                --repo "$_repo" \
+                --status "running:cycle-${_cycle}" \
+                --session "$_conductor_session" \
+                2>/dev/null || true
+        fi
+
+        # ── Step 2: Tier-0 control-channel poll (preempts everything) ─────────
+        local _ctrl_decision=""
+        if [ -f "$_control_ch" ]; then
+            local _ctrl_repo_flag=""
+            if [ -n "$_repo" ]; then
+                _ctrl_repo_flag="--repo ${_repo}"
+            fi
+            local _ctrl_out
+            # shellcheck disable=SC2086
+            _ctrl_out="$(bash "$_control_ch" ${_ctrl_repo_flag} 2>/dev/null || true)"
+            _ctrl_decision="$(printf '%s' "$_ctrl_out" \
+                | grep '^DECISION:' | head -1 \
+                | sed 's/^DECISION://' || true)"
+        fi
+
+        if [ -n "$_ctrl_decision" ]; then
+            case "$_ctrl_decision" in
+                graceful-stop)
+                    printf '[conductor] DECISION:graceful-stop received — finishing cycle %s then exiting\n' \
+                        "$_cycle" >&2
+                    _stop_reason="control:graceful-stop"
+                    break
+                    ;;
+                pause)
+                    printf '[conductor] DECISION:pause received — parking loop\n' >&2
+                    _conductor_maybe_write_digest \
+                        "$_no_digest" "$_last_digest_day" "$_sdir" "$_repo" "$_dry" \
+                        >/dev/null 2>&1 || true
+                    _stop_reason="control:pause"
+                    break
+                    ;;
+                steer|priority)
+                    # Handled by control-channel.sh side-effects; conductor continues.
+                    printf '[conductor] DECISION:%s handled by control-channel\n' \
+                        "$_ctrl_decision" >&2
+                    ;;
+            esac
+        fi
+
+        # ── Step 3: Waterfall tier selection ──────────────────────────────────
+        local _tier_json
+        _tier_json="$(bash "$_waterfall" \
+            --dry-cycles "$_dry_cycles" \
+            ${_repo:+--repo "$_repo"} \
+            2>/dev/null \
+            || printf '{"tier":1,"action":"run-backlog","reason":"waterfall-unavailable"}')"
+        local _tier
+        _tier="$(printf '%s' "$_tier_json" \
+            | jq -r '.tier // 1' 2>/dev/null || echo 1)"
+        local _action
+        _action="$(printf '%s' "$_tier_json" \
+            | jq -r '.action // "run-backlog"' 2>/dev/null || echo "run-backlog")"
+
+        printf '[conductor] tier=%s action=%s\n' "$_tier" "$_action" >&2
+
+        # ── Step 4 + 5: Tier-1 drain gated on premerge check ─────────────────
+        local _work_done=0
+        if [ "$_tier" = "1" ] && [ "$_action" = "run-backlog" ]; then
+
+            # Pre-merge gate MUST be present and emit merge-ok (fail-closed).
+            if [ ! -f "$_gate" ]; then
+                printf '[conductor] HALT: autonomous-premerge-gate.sh missing at %s\n' \
+                    "$_gate" >&2
+                printf 'code_health:autonomous_gate_missing\n' >&2
+                if [ -n "$_notify_sh" ]; then
+                    bash "$_notify_sh" "autospec-autonomous" \
+                        "conductor halted: premerge gate script missing" || true
+                fi
+                _stop_reason="code_health:autonomous_gate_missing"
+                break
+            fi
+
+            # Run gate; capture last line as verdict.
+            local _gate_output
+            _gate_output="$(bash "$_gate" \
+                ${_repo:+--repo "$_repo"} \
+                ${_dry:+--dry-run} \
+                2>/dev/null || true)"
+            local _gate_verdict
+            _gate_verdict="$(printf '%s' "$_gate_output" | tail -1 || true)"
+
+            case "$_gate_verdict" in
+                merge-ok)
+                    # Gate passes — invoke drain.
+                    if [ "$_dry" = "1" ]; then
+                        printf '[conductor] [dry-run] would invoke autospec-run for Tier-1 drain\n' >&2
+                    else
+                        local _run_cmd="${AUTOSPEC_RUN_CMD:-}"
+                        if [ -n "$_run_cmd" ]; then
+                            bash -c "$_run_cmd" 2>&1 || true
+                        else
+                            printf '[conductor] WARN: AUTOSPEC_RUN_CMD not set; skipping drain\n' >&2
+                        fi
+                    fi
+                    _work_done=1
+                    _dry_cycles=0
+                    ;;
+                block*)
+                    printf '[conductor] premerge-gate blocked: %s — skipping drain this cycle\n' \
+                        "$_gate_verdict" >&2
+                    _dry_cycles=$((_dry_cycles + 1))
+                    ;;
+                halt*)
+                    printf '[conductor] HALT: premerge-gate returned: %s\n' "$_gate_verdict" >&2
+                    _stop_reason="premerge-gate:${_gate_verdict}"
+                    break
+                    ;;
+                *)
+                    # Unknown or empty verdict — treat as dry cycle.
+                    _dry_cycles=$((_dry_cycles + 1))
+                    ;;
+            esac
+
+        else
+            # Tier 2+ are not enabled in Phase 1 — park and notify.
+            printf '[conductor] Tier %s not enabled in Phase 1; dry-cycles=%s — parking\n' \
+                "$_tier" "$_dry_cycles" >&2
+            if [ -n "$_notify_sh" ]; then
+                bash "$_notify_sh" "autospec-autonomous" \
+                    "conductor parked: backlog dry (tier $((${_tier} - 1)) exhausted); Tier 2+ not enabled" \
+                    || true
+            fi
+            _stop_reason="phase1:tier${_tier}-not-enabled"
+            break
+        fi
+
+        # ── Step 6: Spend-ledger tally (autonomous-spend-ledger.sh) ──────────
+        if [ -f "$_spend" ]; then
+            bash "$_spend" add \
+                --tokens 0 \
+                --issues "$_work_done" \
+                2>/dev/null || true
+            local _spend_check
+            _spend_check="$(bash "$_spend" check 2>/dev/null || echo "continue")"
+            case "$_spend_check" in
+                park*)
+                    printf '[conductor] spend-ledger: %s — arming resume and exiting\n' \
+                        "$_spend_check" >&2
+                    _conductor_arm_resume \
+                        "$_sdir" "$_repo" "$_conductor_session" \
+                        "$_notify_sh" "$_spend_check"
+                    _stop_reason="spend-ledger:park"
+                    break
+                    ;;
+            esac
+        fi
+
+        # ── Step 7: Once-per-UTC-day digest ───────────────────────────────────
+        local _new_day
+        _new_day="$(_conductor_maybe_write_digest \
+            "$_no_digest" "$_last_digest_day" "$_sdir" "$_repo" "$_dry" 2>&1 \
+            | tail -1 || printf '%s' "$_last_digest_day")"
+        # _new_day stdout is the updated day; progress log went to stderr.
+        # Re-capture cleanly by calling the helper with stderr suppressed.
+        _last_digest_day="$(_conductor_maybe_write_digest \
+            "$_no_digest" "$_last_digest_day" "$_sdir" "$_repo" "$_dry" \
+            2>/dev/null || printf '%s' "$_last_digest_day")"
+
+        # ── Cycle cap ─────────────────────────────────────────────────────────
+        if [ "$_max" -gt 0 ] 2>/dev/null; then
+            if [ "$_cycle" -ge "$_max" ]; then
+                _stop_reason="max-cycles-reached"
+                break
+            fi
+        fi
+
+        # ── Poll interval ─────────────────────────────────────────────────────
+        if [ "$_dry" != "1" ] && [ "$_poll" -gt 0 ] 2>/dev/null; then
+            sleep "$_poll" || true
+        fi
+    done
+
+    # Release conductor lock on exit.
+    if [ -f "$_resilience" ] && [ -n "$_repo" ]; then
+        bash "$_resilience" lock release \
+            --repo "$_repo" \
+            --session "$_conductor_session" \
+            2>/dev/null || true
+    fi
+
+    printf '[conductor] stopped: %s (cycles=%s)\n' \
+        "${_stop_reason:-unknown}" "$_cycle" >&2
+}
+
+# _conductor_maybe_write_digest: write the daily digest when the UTC day changes.
+# Prints the current UTC day on stdout (new or unchanged) so the caller can
+# track the last-written day.  Log lines go to stderr.
+_conductor_maybe_write_digest() {
+    local no_digest="$1"
+    local last_day="$2"
+    local sdir="$3"
+    local repo="$4"
+    local dry="$5"
+
+    if [ "$no_digest" = "1" ]; then
+        printf '%s' "$last_day"
+        return 0
+    fi
+
+    local today
+    today="$(date -u +'%Y-%m-%d' 2>/dev/null || echo "unknown")"
+
+    if [ "$today" = "$last_day" ]; then
+        # Same UTC day — no-op.
+        printf '%s' "$last_day"
+        return 0
+    fi
+
+    if [ "$dry" = "1" ]; then
+        printf '[conductor] [dry-run] would write digest for UTC day %s\n' "$today" >&2
+        printf '%s' "$today"
+        return 0
+    fi
+
+    # Resolve repo root as the parent of sdir (scripts/).
+    local repo_root
+    repo_root="$(cd "${sdir}/.." 2>/dev/null && pwd || printf '.')"
+    local digest_file="${repo_root}/.autospec/autonomous-digest.md"
+    mkdir -p "$(dirname "$digest_file")" 2>/dev/null || true
+    {
+        printf '## autospec-autonomous daily digest — %s\n\n' "$today"
+        printf 'Conductor: `autospec_conductor_run` (scripts/lib/autospec-loop.sh)\n\n'
+        if [ -n "$repo" ]; then
+            printf 'Repo: %s\n' "$repo"
+        fi
+        printf '\n_Generated by autospec-autonomous Phase-1 conductor._\n'
+    } > "$digest_file" || true
+    printf '[conductor] daily digest written to %s\n' "$digest_file" >&2
+    printf '%s' "$today"
+}
+
+# _conductor_arm_resume: write resume context and arm ScheduleWakeup/cron via
+# autospec-usage-limit.sh.  Fail-open: errors must never block the exit path.
+_conductor_arm_resume() {
+    local sdir="$1"
+    local repo="$2"
+    local session="$3"
+    local notify_sh="$4"
+    local reason="$5"
+
+    printf '[conductor] arming resume context for: %s\n' "$reason" >&2
+
+    local usage_limit="${sdir}/autospec-usage-limit.sh"
+    if [ -f "$usage_limit" ]; then
+        local run_id="conductor-${session}"
+        local repo_root
+        repo_root="$(cd "${sdir}/.." 2>/dev/null && pwd || printf '.')"
+        local resume_cmd="bash ${sdir}/autospec-autonomous.sh --resume --run-id ${run_id}"
+        local wait_secs="${AUTOSPEC_RESUME_WAIT_SECS:-3600}"
+        bash "$usage_limit" arm \
+            --harness "autonomous" \
+            --repo-dir "$repo_root" \
+            --command "$resume_cmd" \
+            --wait-seconds "$wait_secs" \
+            --run-id "$run_id" \
+            --no-daemon \
+            2>/dev/null || true
+    fi
+
+    if [ -n "$notify_sh" ]; then
+        bash "$notify_sh" "autospec-autonomous" \
+            "conductor parked: ${reason} — resume armed" || true
+    fi
+}

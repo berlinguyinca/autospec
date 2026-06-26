@@ -2989,6 +2989,7 @@ main() {
     check_release_verdict_script
     check_docs_amendment_presence
     check_autospec_autonomous_contract
+    check_conductor_wiring_contract
     check_autospec_refine_contract
     check_autospec_continue_contract
     check_autospec_loop_contract
@@ -3027,6 +3028,7 @@ main() {
     check_autospec_upgrade_contract
     check_autospec_fab_contract
     check_autospec_autonomous_contract
+    check_conductor_wiring_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -4206,6 +4208,47 @@ check_autospec_autonomous_contract() {
         grep -q 'not yet enabled' "$f" \
             || fail "$f: tiers 2-4 must be marked 'not yet enabled' (issue #1372)"
     done
+}
+
+# Conductor wiring contract (issue #1378): scripts/lib/autospec-loop.sh must
+# define autospec_conductor_run(); the autonomous SKILL.md must reference it;
+# the premerge-gate, spend-ledger, resilience, and digest must be wired;
+# and bats coverage must exist and pass.
+check_conductor_wiring_contract() {
+    info "conductor wiring: autospec-loop.sh conductor entry point + SKILL.md + bats (issue #1378)"
+    local lib="scripts/lib/autospec-loop.sh"
+    [ -f "$lib" ] \
+        || fail "$lib: shared loop driver missing (issue #1378)"
+    bash -n "$lib" \
+        || fail "$lib: bash syntax error (issue #1378)"
+    grep -q '^autospec_conductor_run()' "$lib" \
+        || fail "$lib: autospec_conductor_run() entry point missing (issue #1378)"
+    grep -q 'autonomous-premerge-gate\|premerge.gate\|premerge_gate' "$lib" \
+        || fail "$lib: premerge gate wiring missing from conductor loop (issue #1378)"
+    grep -q 'autonomous-spend-ledger\|spend.ledger\|spend_ledger' "$lib" \
+        || fail "$lib: spend-ledger wiring missing from conductor loop (issue #1378)"
+    grep -q 'autonomous-resilience\|resilience' "$lib" \
+        || fail "$lib: resilience wiring missing from conductor loop (issue #1378)"
+    grep -q 'digest\|autonomous-digest' "$lib" \
+        || fail "$lib: daily digest missing from conductor loop (issue #1378)"
+    grep -q 'autonomous-control-channel\|control.channel\|control_ch' "$lib" \
+        || fail "$lib: control-channel wiring missing from conductor loop (issue #1378)"
+    grep -q 'autonomous-waterfall\|waterfall' "$lib" \
+        || fail "$lib: waterfall wiring missing from conductor loop (issue #1378)"
+    local skill="skills/autospec-autonomous/SKILL.md"
+    [ -f "$skill" ] \
+        || fail "$skill: SKILL.md missing (issue #1378)"
+    grep -q 'autospec_conductor_run\|autospec-loop\.sh' "$skill" \
+        || fail "$skill: missing reference to autospec_conductor_run / autospec-loop.sh (issue #1378)"
+    local bats_file="tests/autospec/test_conductor_wiring.bats"
+    [ -f "$bats_file" ] \
+        || fail "$bats_file: bats coverage missing (issue #1378)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-conductor-wiring.log 2>&1 \
+            || { cat /tmp/validate-conductor-wiring.log >&2; \
+                 fail "$bats_file: failed (issue #1378)"; }
+    fi
 }
 
 main "$@"
