@@ -399,3 +399,72 @@ STUB
     [ "$status" -eq 0 ]
     [[ "$output" != *"truncat"* ]]
 }
+
+# ── cadence self-gate (F3 wiring: NOT every cycle) ─────────────────────────
+
+@test "cadence: fresh digest → no-op (digest not rewritten)" {
+    write_fixture_md "$REPO_CORPUS/feedback_a.md"
+
+    # First run produces the digest.
+    run bash "$MINE" --repo-root "$FAKE_REPO" --autospec-home "$FAKE_AUTOSPEC"
+    [ "$status" -eq 0 ]
+    [ -f "$DIGEST" ]
+
+    # Record mtime, wait, run again — fresh digest must short-circuit.
+    if stat -f %m "$DIGEST" >/dev/null 2>&1; then
+        _before="$(stat -f %m "$DIGEST")"
+    else
+        _before="$(stat -c %Y "$DIGEST")"
+    fi
+    sleep 1
+    run bash "$MINE" --repo-root "$FAKE_REPO" --autospec-home "$FAKE_AUTOSPEC"
+    [ "$status" -eq 0 ]
+    if stat -f %m "$DIGEST" >/dev/null 2>&1; then
+        _after="$(stat -f %m "$DIGEST")"
+    else
+        _after="$(stat -c %Y "$DIGEST")"
+    fi
+    [ "$_before" = "$_after" ]
+}
+
+@test "cadence: --force re-mines even when digest is fresh" {
+    write_fixture_md "$REPO_CORPUS/feedback_a.md"
+    run bash "$MINE" --repo-root "$FAKE_REPO" --autospec-home "$FAKE_AUTOSPEC"
+    [ "$status" -eq 0 ]
+    [ -f "$DIGEST" ]
+
+    # Touch the digest into the future so a non-forced run would no-op, then
+    # confirm --force rewrites it (mtime moves back to ~now).
+    sleep 1
+    run bash "$MINE" --repo-root "$FAKE_REPO" --autospec-home "$FAKE_AUTOSPEC" --force
+    [ "$status" -eq 0 ]
+    [ -f "$DIGEST" ]
+    # Schema still valid after a forced re-mine.
+    run jq -r '.schema' "$DIGEST"
+    [ "$output" = "persona-mined-digest/v1" ]
+}
+
+@test "cadence: stale digest (older than REFRESH_DAYS) → re-mines" {
+    write_fixture_md "$REPO_CORPUS/feedback_a.md"
+    run bash "$MINE" --repo-root "$FAKE_REPO" --autospec-home "$FAKE_AUTOSPEC"
+    [ "$status" -eq 0 ]
+    [ -f "$DIGEST" ]
+
+    # Backdate the digest well past a 0-day window; with REFRESH_DAYS=0 any
+    # existing digest is considered stale and must be rewritten.
+    if stat -f %m "$DIGEST" >/dev/null 2>&1; then
+        _before="$(stat -f %m "$DIGEST")"
+    else
+        _before="$(stat -c %Y "$DIGEST")"
+    fi
+    sleep 1
+    AUTOSPEC_PERSONA_REFRESH_DAYS=0 \
+    run bash "$MINE" --repo-root "$FAKE_REPO" --autospec-home "$FAKE_AUTOSPEC"
+    [ "$status" -eq 0 ]
+    if stat -f %m "$DIGEST" >/dev/null 2>&1; then
+        _after="$(stat -f %m "$DIGEST")"
+    else
+        _after="$(stat -c %Y "$DIGEST")"
+    fi
+    [ "$_before" != "$_after" ]
+}

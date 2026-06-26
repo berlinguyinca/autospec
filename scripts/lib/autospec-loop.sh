@@ -518,6 +518,26 @@ autospec_conductor_run() {
         _persona_synth_sh="${_sdir}/autonomous-persona-synth.sh"
     fi
 
+    # ── Persona mining wiring (F3) ─────────────────────────────────────────────
+    # Resolve autonomous-persona-mine.sh: env override > sibling of scripts/.
+    # The script self-gates on AUTOSPEC_PERSONA_REFRESH_DAYS staleness of its
+    # mined digest, so the per-cycle invocation is a fast no-op while fresh. It
+    # MUST run before persona synthesis below: the mined-decision digest is the
+    # F1 precedence-3 source the synthesizer reads. Without this wiring F3 ships
+    # but never runs and precedence-3 is permanently empty.
+    local _persona_mine_sh=""
+    if [ -n "${AUTOSPEC_PERSONA_MINE_BIN:-}" ] && [ -x "$AUTOSPEC_PERSONA_MINE_BIN" ]; then
+        _persona_mine_sh="$AUTOSPEC_PERSONA_MINE_BIN"
+    elif [ -f "${_sdir}/autonomous-persona-mine.sh" ]; then
+        _persona_mine_sh="${_sdir}/autonomous-persona-mine.sh"
+    fi
+
+    # ── Persona recalibrate flag (F6 control channel → conductor) ──────────────
+    # autospec:recalibrate-persona drops this flag via autonomous-control-channel.sh;
+    # the conductor consumes it in step 1b to force a persona/mine refresh on the
+    # next cycle, then clears it. Path mirrors the control channel's FLAG_DIR.
+    local _persona_recal_flag="${AUTOSPEC_CONTROL_STATE_DIR:-${HOME}/.autospec}/persona-recalibrate.flag"
+
     # ── F4: Priority match script resolution ───────────────────────────────────
     # Resolve autonomous-priority-match.sh: env override > sibling of scripts/.
     local _priority_match_sh=""
@@ -667,15 +687,32 @@ fi'
                 2>/dev/null || true
         fi
 
-        # ── Step 1b: Persona synthesis on cadence (F2) ────────────────────────
-        # Fail-open: persona-synth errors (incl. lock-held, exit 2) never block
-        # the loop. Self-gates on staleness so this is a fast no-op when fresh.
+        # ── Step 1b: Persona mining + synthesis on cadence (F2/F3) ────────────
+        # Fail-open: errors (incl. synth lock-held exit 2) never block the loop.
+        # Both helpers self-gate on staleness so this is a fast no-op when fresh.
+        # An autospec:recalibrate-persona control signal (F6) drops a flag that
+        # forces a refresh; consume + clear it here so the refresh happens once.
+        local _persona_force=""
+        if [ "$_dry" != "1" ] && [ -f "$_persona_recal_flag" ]; then
+            printf '[conductor] F6: persona-recalibrate flag found — forcing persona refresh\n' >&2
+            _persona_force="--force"
+            rm -f "$_persona_recal_flag" 2>/dev/null || true
+        fi
+        # F3: refresh the mined-decision digest (F1 precedence-3 input) BEFORE
+        # synthesis so the fresh digest feeds the source bundle.
+        if [ -f "$_persona_mine_sh" ] && [ -n "$_repo_root" ] && [ "$_dry" != "1" ]; then
+            # shellcheck disable=SC2086
+            bash "$_persona_mine_sh" --repo-root "$_repo_root" $_persona_force \
+                >/dev/null 2>&1 || true
+        fi
+        # F2: synthesize the persona (self-gates on staleness; forced on recal).
         if [ -f "$_persona_synth_sh" ] && [ -n "$_repo_root" ]; then
             if [ "$_dry" = "1" ]; then
                 bash "$_persona_synth_sh" --repo-root "$_repo_root" --dry-run \
                     >/dev/null 2>&1 || true
             else
-                bash "$_persona_synth_sh" --repo-root "$_repo_root" \
+                # shellcheck disable=SC2086
+                bash "$_persona_synth_sh" --repo-root "$_repo_root" $_persona_force \
                     >/dev/null 2>&1 || true
             fi
         fi
@@ -733,6 +770,11 @@ fi'
                     # Handled by control-channel.sh side-effects; conductor continues.
                     printf '[conductor] DECISION:%s handled by control-channel\n' \
                         "$_ctrl_decision" >&2
+                    ;;
+                persona-recalibrate)
+                    # control-channel.sh wrote persona-recalibrate.flag; step 1b of
+                    # the next cycle consumes it and forces a persona refresh.
+                    printf '[conductor] DECISION:persona-recalibrate — refresh forced next cycle\n' >&2
                     ;;
             esac
         fi

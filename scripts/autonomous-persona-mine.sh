@@ -38,6 +38,8 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 AUTOSPEC_HOME="${AUTOSPEC_HOME:-$HOME/.autospec}"
 CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 TOP_N="${AUTOSPEC_PERSONA_MINE_TOP_N:-20}"
+REFRESH_DAYS="${AUTOSPEC_PERSONA_REFRESH_DAYS:-7}"
+FORCE=0
 
 # ── opt-out ────────────────────────────────────────────────────────────────
 if [ "${AUTOSPEC_PERSONA_MINE:-1}" = "0" ]; then
@@ -63,6 +65,10 @@ while [ $# -gt 0 ]; do
       AUTOSPEC_HOME="$2"
       shift 2
       ;;
+    --force)
+      FORCE=1
+      shift
+      ;;
     -h|--help)
       grep '^#' "$0" | sed 's/^# \?//'
       exit 0
@@ -78,6 +84,25 @@ done
 if ! command -v jq >/dev/null 2>&1; then
   printf 'autonomous-persona-mine: jq not found — required for JSON output\n' >&2
   exit 1
+fi
+
+# ── cadence self-gate ──────────────────────────────────────────────────────
+# Mining runs on the persona-refresh cadence, NOT every cycle. The conductor
+# invokes this helper once per cycle; it fast-exits while the existing digest is
+# younger than AUTOSPEC_PERSONA_REFRESH_DAYS, unless --force is given (used by an
+# autospec:recalibrate-persona control signal). Mirrors persona-synth's gate.
+_digest="$AUTOSPEC_HOME/persona-mined-digest.json"
+if [ "$FORCE" -ne 1 ] && [ -f "$_digest" ]; then
+  _now="$(date +%s)"
+  if stat -f %m "$_digest" >/dev/null 2>&1; then
+    _dmtime="$(stat -f %m "$_digest")"
+  else
+    _dmtime="$(stat -c %Y "$_digest" 2>/dev/null || echo 0)"
+  fi
+  _window_sec=$(( REFRESH_DAYS * 24 * 60 * 60 ))
+  if [ $(( _now - _dmtime )) -lt "$_window_sec" ]; then
+    exit 0
+  fi
 fi
 
 # ── resolve repo-slug corpus path ─────────────────────────────────────────
@@ -209,7 +234,6 @@ fi
 _mined_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')"
 
 mkdir -p "$AUTOSPEC_HOME"
-_digest="$AUTOSPEC_HOME/persona-mined-digest.json"
 
 jq -n \
   --arg   schema     "persona-mined-digest/v1" \
