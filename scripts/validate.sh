@@ -3032,6 +3032,7 @@ main() {
     check_autospec_autonomous_skill_contract
     check_conductor_wiring_contract
     check_autonomous_phase2_suite
+    check_persona_suite
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -4283,6 +4284,32 @@ check_autonomous_phase2_suite() {
     done
     if [ "$_any" -eq 0 ]; then
         fail "tests/autonomous/*.bats: no autonomous integration tests found (issue #1402)"
+    fi
+}
+
+# tests/persona/*.bats — the /autospec-persona calibration-interview contract
+# suite (issue #1418, feature F5). tests/persona/ is a NET-NEW top-level test
+# dir with no existing glob (tests/autonomous/* is auto-globbed by
+# check_autonomous_phase2_suite; tests/persona/* is NOT), so it would rot
+# ungated without this gate. Mirror the autonomous suite's per-file run.
+check_persona_suite() {
+    info "persona calibration suite: tests/persona/*.bats (issue #1418)"
+    if ! command -v bats >/dev/null 2>&1; then
+        info "  bats not available — skipping persona suite"
+        return 0
+    fi
+    local _any=0
+    local t
+    for t in tests/persona/*.bats; do
+        [ -f "$t" ] || continue
+        _any=1
+        info "  running: $t"
+        bats "$t" >/tmp/validate-persona-suite.log 2>&1 \
+            || { cat /tmp/validate-persona-suite.log >&2; \
+                 fail "$t: failed (issue #1418)"; }
+    done
+    if [ "$_any" -eq 0 ]; then
+        fail "tests/persona/*.bats: no persona contract tests found (issue #1418)"
     fi
 }
 
