@@ -130,6 +130,7 @@ Claude Code, OpenCode, or Codex CLI. Each links to its own README; see
 | [`autospec-rollover-status`](skills/autospec-rollover-status/README.md) | You want to know how close a session is to context rollover. | Reports current context % and the last rollover event for the active monitor. |
 | [`autospec-loop`](skills/autospec-loop/README.md) | You want a task repeated until a goal is reached ("loop until the build passes"). | Freezes the request into a contract, then runs a goal-conditioned loop with conservative guardrails. |
 | [`autospec-explore`](skills/autospec-explore/README.md) | You want perpetual autonomous research + shipping on a sandbox branch. | Runs 7 researchers that propose features from spec/code gaps and other signals, then drains them via `/autospec-run` with PRs targeting the sandbox branch (never `main`). |
+| [`autospec-autonomous`](skills/autospec-autonomous/README.md) | You want the machinery to run unattended for weeks. | A perpetual conductor that walks a priority waterfall (Phase 1: control channel + backlog→`main`), gates merges on `autospec-qa` and main-health, parks before quota exhaustion, and resumes after crashes. |
 
 ### Estimated token cost per skill
 
@@ -157,7 +158,7 @@ Sorted heaviest first. Regenerate with
 | `autospec-classify` | 3.1k | | `autospec-stop` | 0.8k |
 | `autospec-explore` | 2.9k | | `autospec-rollover-status` | 0.5k |
 | `autospec-design` | 2.9k | | `autospec-harmonize` | 2.0k |
-| `autospec-continue` | 2.7k | | | |
+| `autospec-continue` | 2.7k | | `autospec-autonomous` | 2.5k |
 
 ## Install
 

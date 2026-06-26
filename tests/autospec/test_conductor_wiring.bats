@@ -325,3 +325,84 @@ _install_stub() {
   run bash -n "$LOOP_LIB"
   [ "$status" -eq 0 ]
 }
+
+# ── 11. Main-health red → drain skipped, Tier-1 merges halt ──────────────────
+# Phase 5.5 integration fix (#1380): the conductor MUST poll main-health and
+# never drain onto a red main.  Prior to the fix, autospec_conductor_run() never
+# invoked autonomous-resilience.sh main-health, so a red main did not halt
+# Tier-1 merges (spec Phase-1 safety invariant).
+@test "conductor: main-health red halts Tier-1 drain" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '"'"'{"tier":1,"action":"run-backlog","reason":"test"}\n'"'"''
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  # Resilience stub: main-health returns DECISION:halt (red main).
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in
+       state) printf "DECISION:state-written\n" ;;
+       lock)  printf "DECISION:lock-acquired\nLOCK_SESSION:test\n" ;;
+       main-health) printf "DECISION:halt\nCI_STATE:failure\n"; exit 1 ;;
+       *) exit 0 ;;
+     esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  local run_log="$TEST_TMP/run.log"
+  export AUTOSPEC_RUN_CMD="printf 'should-not-run\n' >> '$run_log'"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=2 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  # Drain must NOT have run (no merging onto a red main).
+  if [ -f "$run_log" ]; then
+    ! grep -q 'should-not-run' "$run_log"
+  fi
+  # Loop must report the main-health halt stop reason.
+  [[ "$output" == *"main-health"* ]]
+}
+
+# ── 12. Main-health pending → drain skipped this cycle (no halt) ─────────────
+@test "conductor: main-health pending skips drain without halting" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '"'"'{"tier":1,"action":"run-backlog","reason":"test"}\n'"'"''
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in
+       state) printf "DECISION:state-written\n" ;;
+       lock)  printf "DECISION:lock-acquired\nLOCK_SESSION:test\n" ;;
+       main-health) printf "DECISION:wait\nCI_STATE:pending\n" ;;
+       *) exit 0 ;;
+     esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  local run_log="$TEST_TMP/run.log"
+  export AUTOSPEC_RUN_CMD="printf 'should-not-run\n' >> '$run_log'"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  # Drain skipped while main is pending.
+  if [ -f "$run_log" ]; then
+    ! grep -q 'should-not-run' "$run_log"
+  fi
+}

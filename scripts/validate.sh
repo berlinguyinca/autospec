@@ -2989,6 +2989,7 @@ main() {
     check_release_verdict_script
     check_docs_amendment_presence
     check_autospec_autonomous_contract
+    check_autospec_autonomous_skill_contract
     check_conductor_wiring_contract
     check_autospec_refine_contract
     check_autospec_continue_contract
@@ -3028,6 +3029,7 @@ main() {
     check_autospec_upgrade_contract
     check_autospec_fab_contract
     check_autospec_autonomous_contract
+    check_autospec_autonomous_skill_contract
     check_conductor_wiring_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
@@ -4184,8 +4186,13 @@ check_fab_container_dockerfile() {
     tail -1 /tmp/validate-fab-pinlint.log
 }
 
-check_autospec_autonomous_contract() {
-    info "autospec-autonomous contract: Self-update + Stop + harness-adapter + Phase-1 waterfall (issue #1372)"
+# NOTE: distinct name from check_autospec_autonomous_contract (the issue #662
+# `/autospec --autonomous` flag contract above).  A prior collision — both
+# functions were named check_autospec_autonomous_contract — meant this skill
+# contract silently SHADOWED and disabled the #662 flag contract (bash uses the
+# last definition).  Keep these names distinct (Phase 5.5 integration fix, #1380).
+check_autospec_autonomous_skill_contract() {
+    info "autospec-autonomous skill contract: Self-update + Stop + harness-adapter + Phase-1 waterfall (issue #1372)"
     local skill_dir="skills/autospec-autonomous"
     for f in "$skill_dir/SKILL.md" \
               "$skill_dir/codex/prompt.md" \
