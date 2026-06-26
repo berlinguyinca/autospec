@@ -122,7 +122,7 @@ _run_conductor_1() {
     # Override waterfall stub to return Tier 2 (not-enabled → weights consult + park).
     cat > "$TMP/bin/autonomous-waterfall.sh" <<'SH'
 #!/usr/bin/env bash
-printf '{"tier":2,"action":"run-discovery","reason":"stub"}\n'
+printf '{"tier":2,"action":"run-explore-once","reason":"stub"}\n'
 exit 0
 SH
 
@@ -137,7 +137,7 @@ SH
 @test "conductor passes ledger path to explore-source-weights.sh" {
     cat > "$TMP/bin/autonomous-waterfall.sh" <<'SH'
 #!/usr/bin/env bash
-printf '{"tier":2,"action":"run-discovery","reason":"stub"}\n'
+printf '{"tier":2,"action":"run-explore-once","reason":"stub"}\n'
 exit 0
 SH
 
@@ -226,7 +226,7 @@ SH
 @test "failing explore-source-weights.sh does not abort the conductor cycle" {
     cat > "$TMP/bin/autonomous-waterfall.sh" <<'SH'
 #!/usr/bin/env bash
-printf '{"tier":2,"action":"run-discovery","reason":"stub"}\n'
+printf '{"tier":2,"action":"run-explore-once","reason":"stub"}\n'
 exit 0
 SH
     # Override weights stub to return non-zero.

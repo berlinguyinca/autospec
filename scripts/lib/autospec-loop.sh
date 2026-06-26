@@ -405,6 +405,9 @@ PY
 #   5b. Outcome-ledger wiring (F5): after drain, record per-source ship/fail
 #       outcome for explore-filed issues (is_discovery=true in last-outcome.json).
 #       Tier-1 backlog issues do not write the file; recording is silently skipped.
+#   6a. Usage-governor soft-park (F6): autonomous-usage-governor.sh parks at
+#       AUTOSPEC_USAGE_SOFT_PCT (default 90%) BEFORE the Step-6 hard cap; layers
+#       on top of the spend-ledger backstop (fail-open continue on any error).
 #   6. Spend-ledger tally (autonomous-spend-ledger.sh); park on cap
 #   7. Once-per-UTC-day digest to .autospec/autonomous-digest.md + pinned issue
 #   8. On park (spend/usage): arm ScheduleWakeup/cron via autospec-usage-limit.sh
@@ -450,6 +453,7 @@ autospec_conductor_run() {
     local _gate="${_sdir}/autonomous-premerge-gate.sh"
     local _resilience="${_sdir}/autonomous-resilience.sh"
     local _usage_limit="${_sdir}/autospec-usage-limit.sh"
+    local _governor="${_sdir}/autonomous-usage-governor.sh"
 
     # ── Ledger wiring (F5) ─────────────────────────────────────────────────────
     # Resolve repo root (parent of scripts/ dir) for ledger data file path.
@@ -660,13 +664,24 @@ autospec_conductor_run() {
                     if [ "$_main_health" = "wait" ]; then
                         printf '[conductor] main-health pending — skipping drain this cycle\n' >&2
                         _dry_cycles=$((_dry_cycles + 1))
-                    elif [ "$_inflight_discovery" -gt 0 ]; then
-                        # F3: discovery issues in-flight → refuse main merge until consumed.
-                        printf 'code_health:autonomous_main_merge_refused\n' >&2
-                        printf '[conductor] F3: refusing Tier-1 drain — %s discovery issue(s) in-flight\n' \
-                            "$_inflight_discovery" >&2
-                        _dry_cycles=$((_dry_cycles + 1))
                     else
+                        # F3: while discovery issues are in flight, main merges are
+                        # refused — but that refusal is enforced PER-PR by the phase4
+                        # implementer via .autospec/explore-mode.json (PRs target the
+                        # sandbox base; gh pr merge against main is refused). The
+                        # conductor MUST still run the drain so discovery issues are
+                        # implemented onto the sandbox and the in-flight counter clears
+                        # as their outcomes are consumed below. Skipping the drain here
+                        # deadlocks: the decrement lives in this same branch, so a
+                        # skipped drain could never lower the counter — once raised,
+                        # the counter would block every future drain forever and the
+                        # discovery tier (the whole point of Phase 2) would never make
+                        # progress (Phase 5.5 integration finding).
+                        if [ "$_inflight_discovery" -gt 0 ]; then
+                            printf 'code_health:autonomous_main_merge_refused\n' >&2
+                            printf '[conductor] F3: %s discovery issue(s) in-flight — main merges refused (phase4 sandbox routing); draining onto sandbox\n' \
+                                "$_inflight_discovery" >&2
+                        fi
                         # Gate + main-health green — invoke drain.
                         if [ "$_dry" = "1" ]; then
                             printf '[conductor] [dry-run] would invoke autospec-run for Tier-1 drain\n' >&2
@@ -848,6 +863,34 @@ autospec_conductor_run() {
             printf '[conductor] unknown waterfall action=%s for tier=%s — skipping\n' \
                 "$_action" "$_tier" >&2
             _dry_cycles=$((_dry_cycles + 1))
+        fi
+
+        # ── Step 6a: Usage governor soft-park (F6) ───────────────────────────
+        # Soft-park at AUTOSPEC_USAGE_SOFT_PCT (default 90%) BEFORE the Phase-1
+        # hard-quota backstop (Step 6) fires. The governor prefers a live usage
+        # fraction (usage-observe.sh) and falls back to the spend-ledger token
+        # tally. It is fail-open ("continue" on any error), so a missing/older
+        # install never blocks the loop; it only ever ADDS an earlier park.
+        if [ -f "$_governor" ]; then
+            local _gov_harness="${AUTOSPEC_GOVERNOR_HARNESS:-${AUTOSPEC_HARNESS:-claude}}"
+            case "$_gov_harness" in
+                claude|codex|opencode) ;;
+                *) _gov_harness="claude" ;;
+            esac
+            local _gov_out
+            _gov_out="$(bash "$_governor" "$_gov_harness" \
+                --repo-dir "$_repo_root" 2>/dev/null || printf 'continue')"
+            case "$_gov_out" in
+                park*)
+                    printf '[conductor] usage-governor: %s — arming resume and exiting\n' \
+                        "$_gov_out" >&2
+                    _conductor_arm_resume \
+                        "$_sdir" "$_repo" "$_conductor_session" \
+                        "$_notify_sh" "usage-governor:${_gov_out}"
+                    _stop_reason="usage-governor:park"
+                    break
+                    ;;
+            esac
         fi
 
         # ── Step 6: Spend-ledger tally (autonomous-spend-ledger.sh) ──────────
