@@ -3,7 +3,9 @@
 #
 # Tier 0: control label always preempts.
 # Tier 1: backlog present → run-backlog; empty + dry-cycles < threshold → stay Tier 1.
-# Tiers 2-4: not-yet-enabled.
+# Tier 2: Tier 1 dry >= threshold → run-explore-once (local sources).
+# Tier 3: Tier 2 dry >= threshold → run-explore-once-internet.
+# Refill: non-empty backlog always floats back to Tier 1 regardless of dry-cycles.
 # gh is stubbed via PATH injection; no real network calls.
 
 setup() {
@@ -94,28 +96,38 @@ teardown() {
     [[ "$output" == *'"tier":1'* ]]
 }
 
-# ─── Tiers 2-4 not-yet-enabled ─────────────────────────────────────────────────
+# ─── Tier 2 escalation ─────────────────────────────────────────────────────────
 
-@test "Tiers 2-4: backlog empty + dry-cycles >= threshold emits not-yet-enabled" {
+@test "Tier 2: Tier-1 dry x2 (default threshold) selects run-explore-once" {
     run bash "$SCRIPT" \
         --backlog-count 0 \
         --dry-cycles 2
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":2'* ]]
-    [[ "$output" == *'"action":"not-yet-enabled"'* ]]
+    [[ "$output" == *'"action":"run-explore-once"'* ]]
 }
 
-@test "Tiers 2-4: not-yet-enabled with higher dry-cycles above threshold" {
+@test "Tier 2: Tier-1 dry above threshold also selects Tier 2 when Tier-2 counter is 0" {
     run bash "$SCRIPT" \
         --backlog-count 0 \
-        --dry-cycles 5
+        --dry-cycles 5 \
+        --tier2-dry-cycles 0
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":2'* ]]
-    [[ "$output" == *'not-yet-enabled'* ]]
+    [[ "$output" == *'"action":"run-explore-once"'* ]]
 }
 
-@test "Tiers 2-4: custom threshold via AUTOSPEC_AUTO_DRY_CYCLES env" {
-    # With threshold=3, dry-cycles=2 should still stay Tier 1.
+@test "Tier 2: Tier-1 dry >= threshold, Tier-2 dry < threshold stays at Tier 2" {
+    run bash "$SCRIPT" \
+        --backlog-count 0 \
+        --dry-cycles 2 \
+        --tier2-dry-cycles 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"tier":2'* ]]
+    [[ "$output" == *'"action":"run-explore-once"'* ]]
+}
+
+@test "Tier 2: custom threshold via AUTOSPEC_AUTO_DRY_CYCLES, dry-cycles below stays Tier 1" {
     AUTOSPEC_AUTO_DRY_CYCLES=3 run bash "$SCRIPT" \
         --backlog-count 0 \
         --dry-cycles 2
@@ -123,13 +135,69 @@ teardown() {
     [[ "$output" == *'"tier":1'* ]]
 }
 
-@test "Tiers 2-4: custom threshold=3 triggers not-yet-enabled at dry-cycles=3" {
+@test "Tier 2: custom threshold=3 escalates at dry-cycles=3" {
     AUTOSPEC_AUTO_DRY_CYCLES=3 run bash "$SCRIPT" \
         --backlog-count 0 \
-        --dry-cycles 3
+        --dry-cycles 3 \
+        --tier2-dry-cycles 0
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":2'* ]]
-    [[ "$output" == *'not-yet-enabled'* ]]
+    [[ "$output" == *'"action":"run-explore-once"'* ]]
+}
+
+# ─── Tier 3 escalation ─────────────────────────────────────────────────────────
+
+@test "Tier 3: Tier-2 dry x2 selects run-explore-once-internet" {
+    run bash "$SCRIPT" \
+        --backlog-count 0 \
+        --dry-cycles 2 \
+        --tier2-dry-cycles 2
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"tier":3'* ]]
+    [[ "$output" == *'"action":"run-explore-once-internet"'* ]]
+}
+
+@test "Tier 3: Tier-2 dry above threshold also selects Tier 3" {
+    run bash "$SCRIPT" \
+        --backlog-count 0 \
+        --dry-cycles 10 \
+        --tier2-dry-cycles 5
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"tier":3'* ]]
+    [[ "$output" == *'"action":"run-explore-once-internet"'* ]]
+}
+
+@test "Tier 3: custom threshold=3 escalates at tier2-dry-cycles=3" {
+    AUTOSPEC_AUTO_DRY_CYCLES=3 run bash "$SCRIPT" \
+        --backlog-count 0 \
+        --dry-cycles 3 \
+        --tier2-dry-cycles 3
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"tier":3'* ]]
+    [[ "$output" == *'"action":"run-explore-once-internet"'* ]]
+}
+
+# ─── Refill floats back to Tier 1 ─────────────────────────────────────────────
+# When a higher tier files candidates they become backlog; next cycle the
+# waterfall sees backlog_count > 0 and selects Tier 1 regardless of dry-cycles.
+
+@test "Refill: non-empty backlog overrides high dry-cycles and tier2-dry-cycles" {
+    run bash "$SCRIPT" \
+        --backlog-count 1 \
+        --dry-cycles 99 \
+        --tier2-dry-cycles 99
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"tier":1'* ]]
+    [[ "$output" == *'"action":"run-backlog"'* ]]
+}
+
+@test "Refill: backlog-count 3 after Tier 3 escalation returns to Tier 1" {
+    run bash "$SCRIPT" \
+        --backlog-count 3 \
+        --dry-cycles 5 \
+        --tier2-dry-cycles 5
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"tier":1'* ]]
 }
 
 # ─── Output format ─────────────────────────────────────────────────────────────
@@ -138,6 +206,22 @@ teardown() {
     run bash "$SCRIPT" --backlog-count 1
     [ "$status" -eq 0 ]
     # All three keys must be present.
+    [[ "$output" == *'"tier":'* ]]
+    [[ "$output" == *'"action":'* ]]
+    [[ "$output" == *'"reason":'* ]]
+}
+
+@test "Tier 2 output contains tier, action, reason keys" {
+    run bash "$SCRIPT" --backlog-count 0 --dry-cycles 2 --tier2-dry-cycles 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"tier":'* ]]
+    [[ "$output" == *'"action":'* ]]
+    [[ "$output" == *'"reason":'* ]]
+}
+
+@test "Tier 3 output contains tier, action, reason keys" {
+    run bash "$SCRIPT" --backlog-count 0 --dry-cycles 2 --tier2-dry-cycles 2
+    [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":'* ]]
     [[ "$output" == *'"action":'* ]]
     [[ "$output" == *'"reason":'* ]]
