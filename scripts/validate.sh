@@ -3026,6 +3026,7 @@ main() {
     check_autospec_harmonize_contract
     check_autospec_upgrade_contract
     check_autospec_fab_contract
+    check_autospec_autonomous_contract
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -4179,6 +4180,32 @@ check_fab_container_dockerfile() {
     bash "$lint" "$docker_dir/Dockerfile" >/tmp/validate-fab-pinlint.log 2>&1 \
         || { cat /tmp/validate-fab-pinlint.log >&2; fail "fab Dockerfile pin lint failed (issue #1300)"; }
     tail -1 /tmp/validate-fab-pinlint.log
+}
+
+check_autospec_autonomous_contract() {
+    info "autospec-autonomous contract: Self-update + Stop + harness-adapter + Phase-1 waterfall (issue #1372)"
+    local skill_dir="skills/autospec-autonomous"
+    for f in "$skill_dir/SKILL.md" \
+              "$skill_dir/codex/prompt.md" \
+              "$skill_dir/opencode/agent.md"; do
+        [ -f "$f" ] || fail "$f: required trio file missing (issue #1372)"
+        grep -q 'Self-update mode' "$f" \
+            || fail "$f: missing '## Self-update mode' section (issue #1372)"
+        grep -q 'Stop mode' "$f" \
+            || fail "$f: missing '## Stop mode' section (issue #1372)"
+        grep -q 'Required capabilities' "$f" \
+            || fail "$f: missing '## Required capabilities & harness adapter' section (issue #1372)"
+        grep -q 'Harness detection' "$f" \
+            || fail "$f: missing '## Harness detection' section (issue #1372)"
+        grep -q 'Phase-1 waterfall contract' "$f" \
+            || fail "$f: missing '## Phase-1 waterfall contract' section (issue #1372)"
+        grep -q 'Tier 0' "$f" \
+            || fail "$f: missing Tier 0 (control channel) in Phase-1 waterfall (issue #1372)"
+        grep -q 'Tier 1' "$f" \
+            || fail "$f: missing Tier 1 (backlog→main) in Phase-1 waterfall (issue #1372)"
+        grep -q 'not yet enabled' "$f" \
+            || fail "$f: tiers 2-4 must be marked 'not yet enabled' (issue #1372)"
+    done
 }
 
 main "$@"
