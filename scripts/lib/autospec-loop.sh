@@ -506,6 +506,18 @@ autospec_conductor_run() {
         _sandbox_sh="${_sdir}/explore-sandbox.sh"
     fi
 
+    # ── Persona synthesis wiring (F2) ──────────────────────────────────────────
+    # Resolve autonomous-persona-synth.sh: env override > sibling of scripts/.
+    # The script self-gates on AUTOSPEC_PERSONA_REFRESH_DAYS staleness, so the
+    # actual Tier-A synthesis only runs when the global persona is stale — the
+    # per-cycle invocation is a no-op (fast exit 0) while the persona is fresh.
+    local _persona_synth_sh=""
+    if [ -n "${AUTOSPEC_PERSONA_SYNTH_BIN:-}" ] && [ -x "$AUTOSPEC_PERSONA_SYNTH_BIN" ]; then
+        _persona_synth_sh="$AUTOSPEC_PERSONA_SYNTH_BIN"
+    elif [ -f "${_sdir}/autonomous-persona-synth.sh" ]; then
+        _persona_synth_sh="${_sdir}/autonomous-persona-synth.sh"
+    fi
+
     local _cycle=0
     local _dry_cycles=0
     local _tier2_dry_cycles=0
@@ -542,6 +554,19 @@ autospec_conductor_run() {
                 --status "running:cycle-${_cycle}" \
                 --session "$_conductor_session" \
                 2>/dev/null || true
+        fi
+
+        # ── Step 1b: Persona synthesis on cadence (F2) ────────────────────────
+        # Fail-open: persona-synth errors (incl. lock-held, exit 2) never block
+        # the loop. Self-gates on staleness so this is a fast no-op when fresh.
+        if [ -f "$_persona_synth_sh" ] && [ -n "$_repo_root" ]; then
+            if [ "$_dry" = "1" ]; then
+                bash "$_persona_synth_sh" --repo-root "$_repo_root" --dry-run \
+                    >/dev/null 2>&1 || true
+            else
+                bash "$_persona_synth_sh" --repo-root "$_repo_root" \
+                    >/dev/null 2>&1 || true
+            fi
         fi
 
         # ── Step 2: Tier-0 control-channel poll (preempts everything) ─────────
