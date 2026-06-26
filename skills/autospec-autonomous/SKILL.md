@@ -145,6 +145,35 @@ This is the primary Phase-1 loop body.
 
 The conductor detects a dry cycle count (`dry_cycle >= 2`) but does NOT activate Tier 2 or above in Phase 1. It parks and notifies the operator instead. This is a deliberate safety gate: prove the backlog loop ships to `main` safely before enabling autonomous discovery.
 
+## Usage observability (F6a spike finding)
+
+The Phase-2 usage governor (F6b) parks the loop before quota exhaustion. It needs
+to know whether a **live usage fraction** (percent of quota consumed this session)
+is observable per harness. The F6a spike probed all three harnesses and the
+finding is encoded in `usage-observe.sh <harness>` (`${AUTOSPEC_SCRIPTS_DIR}/usage-observe.sh`), which emits
+`{harness, observable, percent, source}` (`percent` is `null` and
+`observable` is `false` when no live fraction exists; an unknown harness exits
+non-zero).
+
+**Finding: no supported harness exposes a deterministic live usage fraction today.**
+Every harness reports `observable:false`, so the governor MUST fall back to the
+existing spend-ledger token tally (`autonomous-spend-ledger.sh`) and park at 90%
+of `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS`.
+
+| Harness     | Live % observable? | Why / fallback                                                                                                          |
+|-------------|--------------------|-----------------------------------------------------------------------------------------------------------------------|
+| Claude Code | No                 | No env var or session signal carries a quota %. Per-message token counts in `~/.claude/projects/.../*.jsonl` are a cumulative tally (the spend-ledger fallback), not a live fraction. |
+| Codex CLI   | No                 | No session-level quota fraction. Rate-limit headers are per-request/reset-based, not a cumulative session %.            |
+| OpenCode    | No                 | Provider-dependent; no unified usage signal. Whatever the provider returns is per-request, not a normalized session %.  |
+
+**Forward-compatible probe seam.** If a harness later ships a live fraction, wire
+it without editing the script by setting the per-harness env var
+`AUTOSPEC_USAGE_PROBE_CLAUDE` / `_CODEX` / `_OPENCODE` to an executable that prints
+a single number `0-100` and exits `0`. When set and valid, `usage-observe.sh`
+reports `observable:true` with that percent; otherwise it reports the honest
+`observable:false` default above. This seam is what F6b consults and what the
+bats suite mocks as a subprocess.
+
 ## Invocation
 
 > **Model tier:** `TIER_A` for waterfall-level decisions and ranking; `TIER_B` for
@@ -179,6 +208,7 @@ The conductor detects a dry cycle count (`dry_cycle >= 2`) but does NOT activate
 - `autonomous-spend-ledger.sh` — cumulative token/issue tally + kill-switch (Phase 1, Issue #1375).
 - `autonomous-premerge-gate.sh` — blocking autospec-qa pre-merge barrier (Phase 1, Issue #1376).
 - `autonomous-resilience.sh` — run-state, lock, quarantine, main-health (Phase 1, Issue #1377).
+- `usage-observe.sh` — per-harness live-usage observability probe; emits `{harness,observable,percent,source}` to gate the F6b governor's mechanism (F6a spike).
 - `notify.sh` (autospec-shared) — shared desktop notifier (operator window during unattended runs).
 - `tests/autospec/test_conductor_wiring.bats` — bats coverage for conductor wiring (issue #1378).
 - `tests/fixtures/skill-goldens/autospec-autonomous.*.sha256` — derived goldens.

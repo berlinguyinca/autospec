@@ -86,6 +86,27 @@ Each cycle executes in order:
 **Phase 1 scope:** Tier 0 + Tier 1 only. Tiers 2–4 (explore-backed discovery, persona,
 self-brainstorm) are Phase 2/3 roadmap entries and are **not yet enabled**.
 
+## Usage observability (F6a spike finding)
+
+The Phase-2 usage governor parks the loop before quota exhaustion. The F6a spike
+probed each harness for a **live usage fraction** (percent of quota consumed this
+session). `scripts/usage-observe.sh <harness>` encodes the finding, emitting
+`{harness, observable, percent, source}`.
+
+**Finding: no supported harness exposes a deterministic live usage fraction today.**
+All three report `observable:false`, so the governor falls back to the spend-ledger
+token tally and parks at 90% of `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS`.
+
+| Harness     | Live % observable? | Why                                                                                       |
+|-------------|--------------------|-------------------------------------------------------------------------------------------|
+| Claude Code | No                 | No env/session signal carries a quota %; transcript token counts are a cumulative tally.   |
+| Codex CLI   | No                 | No session-level quota %; rate-limit headers are per-request/reset-based.                  |
+| OpenCode    | No                 | Provider-dependent; no unified session usage signal.                                       |
+
+If a harness later ships a live fraction, set `AUTOSPEC_USAGE_PROBE_CLAUDE` /
+`_CODEX` / `_OPENCODE` to an executable that prints a number `0-100`; the probe
+then reports `observable:true` with that percent.
+
 ## Environment variables
 
 | Variable                              | Default               | Description                                                |
