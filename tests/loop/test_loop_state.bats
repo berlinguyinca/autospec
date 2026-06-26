@@ -6,7 +6,7 @@
 #   - read returns the current state JSON
 #   - update <key> <val> round-trips string and numeric values
 #   - atomic write: tmp+mv (file appears atomically, no partial writes)
-#   - path is scoped by repo-slug (owner/name -> owner_name)
+#   - path is scoped by repo-slug (owner/name -> owner__name)
 #   - slug isolation: two repos do not share state
 
 ROOT="${BATS_TEST_DIRNAME}/../.."
@@ -142,7 +142,7 @@ teardown() { rm -rf "$TEST_TMP"; }
 @test "path command returns slug-scoped path" {
     run bash "$LOOP_STATE" path --repo owner/name
     [ "$status" -eq 0 ]
-    [[ "$output" == *"/owner_name/"* ]]
+    [[ "$output" == *"/owner__name/"* ]]
     [[ "$output" == *"loop-state.json" ]]
 }
 

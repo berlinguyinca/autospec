@@ -23,7 +23,7 @@ setup() {
     export AUTOSPEC_REPO="berlinguyinca/autospec"
     export AUTOSPEC_CLAIM_GUARD="strict"
     export AUTOSPEC_HOST="testhost"
-    CLAIM_ROOT="${STATE_DIR}/edit-claims/berlinguyinca_autospec"
+    CLAIM_ROOT="${STATE_DIR}/edit-claims/berlinguyinca__autospec"
 }
 
 teardown() {

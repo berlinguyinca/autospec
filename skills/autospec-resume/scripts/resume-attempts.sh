@@ -47,10 +47,34 @@ Usage:
 EOF
 }
 
+# Source the canonical repo-slug helper (F4). Reader and writer share this one
+# repo_slug(), so routing it through canonical_slug migrates both atomically.
+_RA_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+for _rs_cand in \
+    "${AUTOSPEC_REPO_SLUG_SH:-}" \
+    "${_RA_SELF_DIR}/repo-slug.sh" \
+    "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" \
+    "${_RA_SELF_DIR}/../../../scripts/repo-slug.sh"; do
+    if [ -n "$_rs_cand" ] && [ -f "$_rs_cand" ]; then
+        # shellcheck source=/dev/null
+        . "$_rs_cand"
+        break
+    fi
+done
+
 repo_slug() {
     repo="${1:-}"
     [ -n "$repo" ] || die "repo is required"
-    printf '%s' "$repo" | tr '/' '_'
+    case "$repo" in
+        */*)
+            if command -v canonical_slug >/dev/null 2>&1; then
+                canonical_slug "$repo"
+            else
+                printf '%s' "$repo" | sed 's#/#__#'
+            fi
+            ;;
+        *) printf '%s' "$repo" ;;   # slashless input has no canonical form
+    esac
 }
 
 attempts_path() {

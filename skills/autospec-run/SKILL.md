@@ -546,7 +546,7 @@ inline label-swap path below.
 >   fi
 >   # exit 0 only: this monitor now owns #$ISSUE (label already swapped to
 >   # in-progress-by-bot by claim-issue.sh) -> heartbeat write -> process(ISSUE).
->   _hb_slug="$(printf '%s' "{repo}" | tr '/' '_')"
+>   _hb_slug="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")"
 >   mkdir -p "$HOME/.autospec/process-heartbeats/$_hb_slug"
 >   printf '{"issue":"%s","branch":"","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' "$ISSUE" "$(date -u +%s)" "{repo}" > "$HOME/.autospec/process-heartbeats/$_hb_slug/$ISSUE.json"
 >   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #$ISSUE: claimed" "Starting implementation on {repo}" || true
@@ -744,7 +744,7 @@ inline label-swap path below.
 >
 > 0. **Heartbeat refresh at expand start.** The very first action before any expand work (reading files, pattern survey, verifying paths) is to refresh the heartbeat to `expand_start`. This covers the claim→worktree_ready window: the monitor wrote `claimed` when it dispatched you; without this refresh the watchdog may falsely reclaim the issue during a long expand phase.
 >    ```bash
->    _hb_slug="$(printf '%s' "{repo}" | tr '/' '_')"
+>    _hb_slug="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")"
 >    mkdir -p "$HOME/.autospec/process-heartbeats/$_hb_slug"
 >    printf '{"issue":"%s","branch":"","step":"expand_start","ts":%s,"pr":"","repo":"%s"}\n' \
 >      "<ISSUE>" "$(date -u +%s)" "{repo}" \

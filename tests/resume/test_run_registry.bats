@@ -34,7 +34,7 @@ teardown() { rm -rf "$TEST_TMP"; }
 @test "registry path is scoped by repo-slug" {
     run bash "$REGISTRY" path --repo owner/name
     [ "$status" -eq 0 ]
-    [[ "$output" == *"/owner_name.json" ]]
+    [[ "$output" == *"/owner__name.json" ]]
 }
 
 @test "registry-durable: reboot (env cleared) still yields a runnable command" {
@@ -57,8 +57,8 @@ teardown() { rm -rf "$TEST_TMP"; }
     bash "$REGISTRY" write --repo b/two --repo-dir /y --harness claude --command "c2" --host h
     run bash "$REGISTRY" list
     [ "$status" -eq 0 ]
-    [[ "$output" == *"a_one.json"* ]]
-    [[ "$output" == *"b_two.json"* ]]
+    [[ "$output" == *"a__one.json"* ]]
+    [[ "$output" == *"b__two.json"* ]]
 }
 
 @test "registry stale (>24h) entry is not surfaced by read" {
