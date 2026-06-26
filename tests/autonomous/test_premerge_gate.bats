@@ -1,13 +1,20 @@
 #!/usr/bin/env bats
 # tests/autonomous/test_premerge_gate.bats — unit tests for
-# scripts/autonomous-premerge-gate.sh (issue #1376).
+# scripts/autonomous-premerge-gate.sh (issue #1376 + F4 secaudit #1396).
 #
 # Scenarios:
-#   1. Clean qa (0 findings) → merge-ok, exit 0.
-#   2. High finding fixed within 5 → merge-ok.
-#   3. Still-dirty after 5 → blocked + label + notify called.
-#   4. Missing configured scan skill → halt code_health, exit 2.
-#   5. Low/info finding only → non-blocking, merge-ok.
+#   1. Clean qa + clean secaudit → merge-ok, exit 0.
+#   2. High qa finding fixed within 5 → merge-ok.
+#   3. Still-dirty after 5 qa attempts → blocked + label + notify called.
+#   4. Missing autospec-qa skill → halt code_health:qa_skill_missing, exit 2.
+#   5. QA low/info finding only → non-blocking, merge-ok.
+#   6. --help exits 0.
+#   7. Retry loop bounded: max-attempts 3 → exactly 3 qa runs before blocking.
+#   8. Secaudit high finding blocks merge, exit 1.
+#   9. Secaudit medium finding blocks merge, exit 1.
+#  10. Missing autospec-secaudit skill → halt code_health:secaudit_skill_missing, exit 2.
+#  11. Secaudit low/info findings only → non-blocking, merge-ok.
+#  12. Secaudit high finding fixed on second attempt → merge-ok.
 
 REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 SCRIPT="$REPO_ROOT/scripts/autonomous-premerge-gate.sh"
@@ -26,6 +33,15 @@ printf 'autospec-qa: all checks passed\n'
 exit 0
 EOF
     chmod +x "$TMP/bin/autospec-qa"
+
+    # Default stubs: autospec-secaudit skill present (returns 0 findings).
+    cat > "$TMP/bin/autospec-secaudit" <<'EOF'
+#!/usr/bin/env bash
+# Default stub: no findings.
+printf 'autospec-secaudit: all checks passed\n'
+exit 0
+EOF
+    chmod +x "$TMP/bin/autospec-secaudit"
 
     # gh stub: accept any args, succeed silently.
     cat > "$TMP/bin/gh" <<'EOF'
@@ -61,11 +77,12 @@ teardown() {
     [ -n "${TMP:-}" ] && rm -rf "$TMP"
 }
 
-# ─── 1. Clean qa → merge-ok ───────────────────────────────────────────────────
+# ─── 1. Clean qa + clean secaudit → merge-ok ─────────────────────────────────
 
-@test "clean qa (0 findings) prints merge-ok and exits 0" {
-    # Default stub already returns 0 findings.
+@test "clean qa + clean secaudit prints merge-ok and exits 0" {
+    # Default stubs already return 0 findings for both qa and secaudit.
     export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
 
     run bash "$SCRIPT" \
         --pr-branch "feat/test-branch" \
@@ -75,9 +92,9 @@ teardown() {
     printf '%s\n' "$output" | grep -q "^merge-ok$"
 }
 
-# ─── 2. High finding fixed within 5 → merge-ok ───────────────────────────────
+# ─── 2. High qa finding fixed within 5 → merge-ok ────────────────────────────
 
-@test "high finding on attempt 1; fixed on attempt 2 → merge-ok" {
+@test "high qa finding on attempt 1; fixed on attempt 2 → merge-ok" {
     # Write a qa stub that emits a high finding on first call, clean on second.
     local call_file
     call_file="$(mktemp -t qa_calls.XXXXXX)"
@@ -100,6 +117,7 @@ EOF
     chmod +x "$TMP/bin/autospec-qa"
 
     export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
 
     run bash "$SCRIPT" \
         --pr-branch "feat/test-branch" \
@@ -114,7 +132,7 @@ EOF
 
 # ─── 3. Still-dirty after 5 → blocked + label + notify ───────────────────────
 
-@test "still-dirty after max attempts → block + label applied + notify called" {
+@test "still-dirty after max qa attempts → block + label applied + notify called" {
     # qa stub: always emits a high finding.
     cat > "$TMP/bin/autospec-qa" <<'EOF'
 #!/usr/bin/env bash
@@ -148,6 +166,7 @@ EOF
     chmod +x "$TMP/bin/notify.sh"
 
     export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
 
     run bash "$SCRIPT" \
         --pr-branch "feat/test-branch" \
@@ -170,7 +189,7 @@ EOF
     printf '%s\n' "$notify_log" | grep -q "notify-called"
 }
 
-# ─── 4. Missing configured scan skill → halt code_health, exit 2 ─────────────
+# ─── 4. Missing autospec-qa skill → halt code_health:qa_skill_missing, exit 2 ─
 
 @test "missing autospec-qa skill → halt with code_health identifier, exit 2" {
     # Remove the qa stub from PATH so it's genuinely missing.
@@ -183,12 +202,12 @@ EOF
         --notify-sh "$TMP/bin/notify.sh"
 
     [ "$status" -eq 2 ]
-    printf '%s\n' "$output" | grep -q "^halt code_health:"
+    printf '%s\n' "$output" | grep -q "^halt code_health:qa_skill_missing$"
 }
 
-# ─── 5. Low/info finding only → non-blocking, merge-ok ───────────────────────
+# ─── 5. QA low/info finding only → non-blocking, merge-ok ────────────────────
 
-@test "low/info findings only → non-blocking, merge-ok" {
+@test "qa low/info findings only → non-blocking, merge-ok" {
     cat > "$TMP/bin/autospec-qa" <<'EOF'
 #!/usr/bin/env bash
 printf 'severity: low — minor style inconsistency in README\n'
@@ -198,6 +217,7 @@ EOF
     chmod +x "$TMP/bin/autospec-qa"
 
     export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
 
     run bash "$SCRIPT" \
         --pr-branch "feat/test-branch" \
@@ -216,7 +236,7 @@ EOF
 
 # ─── 7. Retries are bounded: attempt counter matches max-attempts ─────────────
 
-@test "retry loop bounded: max-attempts 3 → exactly 3 qa runs before blocking" {
+@test "qa retry loop bounded: max-attempts 3 → exactly 3 qa runs before blocking" {
     local count_file
     count_file="$(mktemp -t qa_count.XXXXXX)"
     printf '0\n' > "$count_file"
@@ -233,6 +253,7 @@ EOF
     chmod +x "$TMP/bin/autospec-qa"
 
     export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
 
     run bash "$SCRIPT" \
         --pr-branch "feat/test-branch" \
@@ -246,4 +267,126 @@ EOF
     [ "$status" -eq 1 ]
     # 3 qa runs made (one per attempt up to max)
     [ "$final_count" -eq 3 ]
+}
+
+# ─── 8. Secaudit high finding blocks merge ────────────────────────────────────
+
+@test "secaudit high finding blocks merge, exit 1" {
+    # qa is clean; secaudit always emits a high finding.
+    cat > "$TMP/bin/autospec-secaudit" <<'EOF'
+#!/usr/bin/env bash
+printf 'severity: high — hardcoded AWS secret in config.py\n'
+exit 1
+EOF
+    chmod +x "$TMP/bin/autospec-secaudit"
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --max-attempts 3 \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "^block"
+}
+
+# ─── 9. Secaudit medium finding blocks merge ──────────────────────────────────
+
+@test "secaudit medium finding blocks merge, exit 1" {
+    # qa is clean; secaudit always emits a medium finding.
+    cat > "$TMP/bin/autospec-secaudit" <<'EOF'
+#!/usr/bin/env bash
+printf 'severity: medium — SQL injection risk in search handler\n'
+exit 1
+EOF
+    chmod +x "$TMP/bin/autospec-secaudit"
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --max-attempts 3 \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "^block"
+}
+
+# ─── 10. Missing autospec-secaudit skill → halt fail-closed, exit 2 ──────────
+
+@test "missing autospec-secaudit skill → halt code_health:secaudit_skill_missing, exit 2" {
+    # qa present; secaudit absent.
+    rm -f "$TMP/bin/autospec-secaudit"
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=false
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 2 ]
+    printf '%s\n' "$output" | grep -q "^halt code_health:secaudit_skill_missing$"
+}
+
+# ─── 11. Secaudit low/info findings only → non-blocking, merge-ok ────────────
+
+@test "secaudit low/info findings only → non-blocking, merge-ok" {
+    cat > "$TMP/bin/autospec-secaudit" <<'EOF'
+#!/usr/bin/env bash
+printf 'severity: low — outdated dependency with no known exploit\n'
+printf 'severity: info — license header missing on 2 files\n'
+exit 0
+EOF
+    chmod +x "$TMP/bin/autospec-secaudit"
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^merge-ok$"
+}
+
+# ─── 12. Secaudit high finding fixed on second attempt → merge-ok ────────────
+
+@test "secaudit high finding fixed on attempt 2 → merge-ok" {
+    # qa is clean; secaudit emits high on first call, clean on second.
+    local secaudit_call_file
+    secaudit_call_file="$(mktemp -t secaudit_calls.XXXXXX)"
+    printf '0\n' > "$secaudit_call_file"
+
+    cat > "$TMP/bin/autospec-secaudit" <<EOF
+#!/usr/bin/env bash
+CALL_FILE="${secaudit_call_file}"
+count=\$(cat "\$CALL_FILE" 2>/dev/null || printf '0')
+count=\$((count + 1))
+printf '%s\n' "\$count" > "\$CALL_FILE"
+if [ "\$count" -le 1 ]; then
+    printf 'severity: high — prompt injection in template renderer\n'
+    exit 1
+fi
+printf 'autospec-secaudit: all checks passed\n'
+exit 0
+EOF
+    chmod +x "$TMP/bin/autospec-secaudit"
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --max-attempts 5 \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    rm -f "$secaudit_call_file"
+
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^merge-ok$"
 }
