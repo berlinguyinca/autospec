@@ -33,6 +33,7 @@ batch-donel.json
 !.autospec/
 !.autospec/autospec.yml
 !.autospec/dogfood.yml
+!.autospec/competitors.yml
 # Allow .autospec/ inside test fixtures (needed for skip_dirs tests)
 !skills/autospec-shared/tests/fixtures/**/.autospec/
 !skills/autospec-shared/tests/fixtures/**/.autospec/**

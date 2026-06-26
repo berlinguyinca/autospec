@@ -62,23 +62,33 @@ _parse_competitors_yml() {
     python3 - "$yml" <<'PY'
 import sys, re
 path = sys.argv[1]
+
+def line_scan():
+    # Fallback: extract url: lines without a PyYAML dependency.
+    with open(path) as fh:
+        for line in fh:
+            m = re.match(r'\s+url:\s*["\']?(https?://[^\s"\'#]+)', line)
+            if m:
+                print(m.group(1))
+
 try:
     import yaml  # PyYAML
+except ImportError:
+    line_scan()
+    sys.exit(0)
+
+try:
     with open(path) as fh:
         d = yaml.safe_load(fh)
     for entry in (d or {}).get("competitors", []):
         u = str(entry.get("url", "")).strip()
         if u.startswith("http"):
             print(u)
-except ImportError:
-    # Fallback: extract url: lines without PyYAML dependency.
-    with open(path) as fh:
-        for line in fh:
-            m = re.match(r'\s+url:\s*["\']?(https?://[^\s"\'#]+)', line)
-            if m:
-                print(m.group(1))
 except Exception as exc:
-    sys.stderr.write(f"competitors.yml parse error: {exc}\n")
+    # Malformed YAML (or unexpected shape): degrade to the line-scan so a
+    # well-formed `url:` line is still honored instead of silently dropped.
+    sys.stderr.write(f"competitors.yml parse error: {exc}; line-scan fallback\n")
+    line_scan()
 PY
 }
 

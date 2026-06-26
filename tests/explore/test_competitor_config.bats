@@ -152,3 +152,24 @@ EOF
     COUNT="$(printf '%s' "$output" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["proposals"]))')"
     [ "$COUNT" -eq 0 ]
 }
+
+# ── Test 6: malformed YAML degrades to the url: line-scan fallback ───────────
+@test "competitors.yml: malformed YAML degrades to url: line-scan" {
+    # Indentation chaos that breaks yaml.safe_load, but a clean `url:` line
+    # the regex fallback can still recover and honor.
+    COMP_YML="$(mktemp -t competitors.XXXXXX.yml)"
+    printf 'competitors:\n  - name: "x"\n   url: "https://github.com/scan/recovered"\n\tbad: : :\n' > "$COMP_YML"
+    export AUTOSPEC_COMPETITORS_YML="$COMP_YML"
+    export AUTOSPEC_FETCH_STUB_github_com='Recovered tool feature description.'
+    export AUTOSPEC_LLM_STUB_OUTPUT='[{"title":"feat: recovered","evidence":"seen at https://github.com/scan/recovered","estimated_complexity":"small","confidence":0.5}]'
+
+    run bash "$REPO_ROOT/scripts/explore-research/internet.sh"
+    rm -f "$COMP_YML"
+
+    [ "$status" -eq 0 ]
+    # The malformed-YAML path emits a stderr diagnostic that bats merges into
+    # $output; isolate the JSON result line before parsing.
+    JSON_LINE="$(printf '%s\n' "$output" | grep '^{' | tail -n 1)"
+    COUNT="$(printf '%s' "$JSON_LINE" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["proposals"]))')"
+    [ "$COUNT" -ge 1 ]
+}
