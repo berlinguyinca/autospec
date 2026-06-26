@@ -101,6 +101,11 @@ Env:
   AUTOSPEC_EXPLORE_AUTONOMOUS     1 = autonomous/no-TTY run; discover mode then
                                  auto-selects top-N (never blocks). Default: auto
                                  (autonomous unless an interactive TTY is present).
+  AUTOSPEC_PRIORITY_BOOST        Score multiplier for priority/steer-aligned
+                                 proposals (those with priority:true or
+                                 source=="steer"). Default: 1.5. The boost
+                                 reorders without swamping: the boosted score is
+                                 capped at max_non_boosted_score * multiplier.
   AUTOSPEC_SPECIALIST_PROPOSALS_<SLUG>
                                  Per-specialist proposal JSON (an array, or an
                                  object with a "proposals" array). The seam the
@@ -490,6 +495,8 @@ else:
         named_consumer = p.get("named_consumer")
         if not isinstance(named_consumer, str):
             named_consumer = ""
+        # priority (F8): carry through for priority-boost gate.
+        priority = bool(p.get("priority"))
         all_props.append({
             "title": title,
             "evidence": p.get("evidence",""),
@@ -499,6 +506,7 @@ else:
             "severity": severity,
             "named_consumer": named_consumer,
             "score": round(score, 4),
+            "priority": priority,
         })
         total += 1
 
@@ -768,6 +776,22 @@ except FileNotFoundError:
     pass
 
 filtered = [p for p in constitutional if normalize_title(p["title"]) not in recent_norms]
+
+# Priority boost (F8): proposals with priority:true or source=="steer" get a
+# score multiplier so operator steers float to the top without swamping strong
+# organic proposals. AUTOSPEC_PRIORITY_BOOST defaults to 1.5.
+try:
+    _pboost = float(os.environ.get("AUTOSPEC_PRIORITY_BOOST", "1.5") or "1.5")
+except Exception:
+    _pboost = 1.5
+if _pboost != 1.0 and filtered:
+    _is_priority = lambda p: bool(p.get("priority")) or p.get("source") == "steer"
+    _non_boosted = [p["score"] for p in filtered if not _is_priority(p)]
+    _cap = (max(_non_boosted) * _pboost) if _non_boosted else None
+    for p in filtered:
+        if _is_priority(p):
+            _boosted = round(p["score"] * _pboost, 4)
+            p["score"] = round(min(_boosted, _cap), 4) if _cap is not None else _boosted
 
 # Severity-first ranking (Issue C): primary key = severity rank (lower rank =
 # higher impact = ranked first); secondary key = the existing weighted score
