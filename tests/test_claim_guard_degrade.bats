@@ -21,7 +21,7 @@ setup() {
     export AUTOSPEC_REPO="berlinguyinca/autospec"
     export AUTOSPEC_HOST="testhost"
     export CLAUDE_CODE_SESSION_ID="sess-degrade-aaaa"
-    CLAIM_ROOT="${STATE_DIR}/edit-claims/berlinguyinca_autospec"
+    CLAIM_ROOT="${STATE_DIR}/edit-claims/berlinguyinca__autospec"
 }
 
 teardown() {
@@ -72,7 +72,7 @@ teardown() {
         bash "$GUARD" acquire skills/autospec-run
     [ "$status" -eq 0 ]
     # Nothing was (could be) written under the read-only root.
-    [ ! -d "${ro_root}/edit-claims/berlinguyinca_autospec" ]
+    [ ! -d "${ro_root}/edit-claims/berlinguyinca__autospec" ]
     chmod 0700 "$ro_root"; rm -rf "$ro_root"
 }
 

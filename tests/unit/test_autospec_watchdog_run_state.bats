@@ -147,8 +147,16 @@ write_state_comment() {
 # ISSUE_LIST is forced empty so only the heartbeat pass runs (isolating it from
 # the reconcile pass, which would otherwise double-process the same issue).
 
-# Heartbeat dir matches the canonical slug repo-slug.sh resolves for testorg/testrepo.
+# Heartbeat dir matches the CANONICAL owner__name slug that production writers
+# (heartbeat-write.sh, SKILL.md, the watchdog flat-migration dest) now emit via
+# repo-slug.sh — and that the watchdog reader resolves canonical-first. Before
+# the F4 writer migration, production wrote the legacy single-underscore form
+# while this fixture keyed canonical (a self-consistent-fixture gap); the
+# `real heartbeat-write.sh` test below closes it end-to-end.
 HB_DIR_FOR() { printf '%s/testorg__testrepo' "$AUTOSPEC_WATCHDOG_DIR"; }
+
+REPO_SLUG_SH_PATH="${BATS_TEST_DIRNAME}/../../scripts/repo-slug.sh"
+HEARTBEAT_WRITE_SH="${BATS_TEST_DIRNAME}/../../skills/autospec-run/scripts/heartbeat-write.sh"
 
 write_hb() {
     local issue="$1" step="$2" age="$3"
@@ -265,6 +273,54 @@ state_comment_obj() {
           ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:$worker_id,state:$state,branch:"feat/x",pr:"",step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
           "\n<!-- autospec-run-state:end -->")
       }'
+}
+
+# ── F4: canonical-writer ↔ canonical/legacy-reader contract (no split-brain) ──
+
+@test "F4: real heartbeat-write.sh writes the canonical owner__name dir and the watchdog reads/reclaims it" {
+    isolate_heartbeat_pass
+    export AUTOSPEC_REPO_SLUG_SH="$REPO_SLUG_SH_PATH"
+    # Age the trigger to 0 so a just-written heartbeat fires the reclaim path.
+    export AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS=0
+
+    # Use the REAL production writer — not a hand-built fixture — so the test
+    # exercises the actual writer→reader keying contract end-to-end.
+    bash "$HEARTBEAT_WRITE_SH" --issue 77 --step claimed --repo testorg/testrepo
+
+    # The writer MUST land in the canonical owner__name dir, not legacy.
+    [ -f "$(HB_DIR_FOR)/77.json" ]
+    [ ! -d "$AUTOSPEC_WATCHDOG_DIR/testorg_testrepo" ]
+
+    printf '[]\n' > "$COMMENTS"          # absent run-state → reclaim
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"claimed_released=1"* ]]
+    [ ! -f "$(HB_DIR_FOR)/77.json" ]      # watchdog read the canonical dir + reclaimed
+    grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$CALLS"
+}
+
+@test "F4: a legacy owner_name heartbeat (in-flight pre-migration) is STILL read and reclaimed via resolve_slug_dir" {
+    isolate_heartbeat_pass
+    # Only the legacy single-underscore dir exists (written by a pre-migration
+    # worker). The canonical dir is absent, so resolve_slug_dir must fall back to
+    # the legacy dir for one release instead of orphaning the live heartbeat.
+    legacy_dir="$AUTOSPEC_WATCHDOG_DIR/testorg_testrepo"
+    mkdir -p "$legacy_dir"
+    now="$(date -u +%s)"; ts=$((now - 360))
+    printf '{"issue":"%s","branch":"feat/x","step":"claimed","ts":%s,"pr":"","repo":"testorg/testrepo"}\n' \
+        88 "$ts" > "$legacy_dir/88.json"
+    [ ! -d "$(HB_DIR_FOR)" ]              # canonical dir does NOT exist
+
+    printf '[]\n' > "$COMMENTS"          # absent run-state → reclaim
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"claimed_released=1"* ]]
+    [ ! -f "$legacy_dir/88.json" ]        # legacy heartbeat was found + reclaimed
+    grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$CALLS"
 }
 
 @test "duplicate run-state comments: oldest (CAS-authoritative) owner decides, not array order" {

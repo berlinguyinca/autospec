@@ -60,13 +60,16 @@ REPO_FULL="$(_resolve_repo_full)"
 if [ -n "$REPO_FULL" ]; then
     # Reuse repo-slug.sh canonical-slug resolver (F4): prefers the canonical
     # owner__name dir but transparently falls back to legacy owner_name /
-    # owner-name dirs so in-flight heartbeats written by the legacy `tr '/' '_'`
-    # form are still found.
+    # owner-name dirs (the legacy single-underscore form) so in-flight
+    # heartbeats from pre-migration writers are still found. The documented
+    # one-release legacy read-fallback lives inside resolve_slug_dir.
     if [ -x "$REPO_SLUG_SH" ]; then
         WATCHDOG_DIR="$(bash "$REPO_SLUG_SH" --resolve-dir "$WATCHDOG_BASE" "$REPO_FULL" 2>/dev/null || true)"
     fi
     if [ -z "${WATCHDOG_DIR:-}" ]; then
-        WATCHDOG_DIR="${WATCHDOG_BASE}/$(printf '%s' "$REPO_FULL" | tr '/' '_')"
+        # Degraded path (helper missing/non-exec): stay canonical so this reader
+        # never keys legacy against the canonical writers' degraded fallback.
+        WATCHDOG_DIR="${WATCHDOG_BASE}/$(printf '%s' "$REPO_FULL" | sed 's#/#__#')"
     fi
 else
     WATCHDOG_DIR="$WATCHDOG_BASE"
@@ -103,13 +106,22 @@ _migrate_flat_heartbeats() {
         local flat_repo
         flat_repo="$(jq -r '.repo // empty' "$flat_hb" 2>/dev/null || true)"
         if [ -n "$flat_repo" ]; then
-            # Move to correct subdir
-            local dest_slug
-            dest_slug="$(printf '%s' "$flat_repo" | tr '/' '_')"
-            local dest_dir="${base}/${dest_slug}"
+            # Move to correct subdir. This CREATES/writes a slug dir, so it is a
+            # WRITER and MUST emit the canonical owner__name form (F4) — same as
+            # heartbeat-write.sh — so the resolve_slug_dir read path converges on
+            # one canonical dir instead of splitting flat-migrated heartbeats
+            # into a legacy dir.
+            local dest_dir
+            if [ -x "$REPO_SLUG_SH" ]; then
+                dest_dir="${base}/$(bash "$REPO_SLUG_SH" --canonical "$flat_repo" 2>/dev/null || true)"
+            fi
+            if [ -z "${dest_dir:-}" ] || [ "$dest_dir" = "${base}/" ]; then
+                # Degraded fallback stays canonical (owner__name), never legacy.
+                dest_dir="${base}/$(printf '%s' "$flat_repo" | sed 's#/#__#')"
+            fi
             mkdir -p "$dest_dir"
             mv "$flat_hb" "${dest_dir}/${flat_issue}.json"
-            echo "$WATCHDOG_LOG_PREFIX migrated flat heartbeat #${flat_issue} → ${dest_slug}/" >&2
+            echo "$WATCHDOG_LOG_PREFIX migrated flat heartbeat #${flat_issue} → $(basename "$dest_dir")/" >&2
         else
             # No repo field: delete if older than 1 hour
             local flat_ts

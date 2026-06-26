@@ -57,9 +57,33 @@ Environment:
 EOF
 }
 
-# repo_slug OWNER/NAME -> OWNER_NAME (matches watchdog heartbeat subdir scheme).
-repo_slug() {
-    printf '%s\n' "$1" | tr '/' '_'
+# resolve_hb_dir BASE OWNER/NAME -> heartbeat subdir for this repo (F4).
+# Canonical-first (owner__name) with legacy (owner_name / owner-name) fallback,
+# matching the watchdog/heartbeat-read resolvers so this READER finds the same
+# dir the canonical writers create. EXEC repo-slug.sh standalone (don't source —
+# it would flip on `set -o pipefail`). A slashless sentinel (e.g.
+# "unknown_unknown") has no canonical form, so fall back to a plain base subdir.
+resolve_hb_dir() {
+    local base="$1" repo="$2"
+    case "$repo" in
+        */*) : ;;
+        *) printf '%s/%s' "$base" "$repo"; return 0 ;;
+    esac
+    local self_dir rs_sh="" out
+    self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    for c in \
+        "${AUTOSPEC_REPO_SLUG_SH:-}" \
+        "${self_dir}/repo-slug.sh" \
+        "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" \
+        "${self_dir}/../../../scripts/repo-slug.sh"; do
+        if [ -n "$c" ] && [ -f "$c" ]; then rs_sh="$c"; break; fi
+    done
+    if [ -n "$rs_sh" ]; then
+        out="$(bash "$rs_sh" --resolve-dir "$base" "$repo" 2>/dev/null || true)"
+        if [ -n "$out" ]; then printf '%s' "$out"; return 0; fi
+    fi
+    # Degraded fallback stays canonical so a reader never keys legacy.
+    printf '%s/%s' "$base" "$(printf '%s' "$repo" | sed 's#/#__#')"
 }
 
 # latest_heartbeat DIR — print path of newest *.json heartbeat, or empty.
@@ -159,8 +183,7 @@ if [ -z "$REPO" ] && command -v gh >/dev/null 2>&1; then
     REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || echo "")"
 fi
 
-slug="$(repo_slug "${REPO:-unknown_unknown}")"
-HB_DIR="$HB_BASE/$slug"
+HB_DIR="$(resolve_hb_dir "$HB_BASE" "${REPO:-unknown_unknown}")"
 
 stuck_count="$(count_stuck_issues)"
 hb="$(latest_heartbeat "$HB_DIR")"

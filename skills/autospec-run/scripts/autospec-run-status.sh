@@ -48,14 +48,35 @@ repo="$REPO_ARG"
 if [ -z "$repo" ] && command -v gh >/dev/null 2>&1; then
   repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
 fi
-slug="$(printf '%s' "$repo" | tr '/' '_')"
 HB_BASE="${AUTOSPEC_HEARTBEAT_DIR:-${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}}"
-hb_dir="$HB_BASE/$slug"
+
+# Resolve the heartbeat dir canonical-first with legacy fallback (F4). This
+# script runs under `set +e`, so we EXEC repo-slug.sh standalone rather than
+# source it (sourcing would flip on `set -euo pipefail`). Resolution order:
+# override → sibling (installed flat layout) → AUTOSPEC_SCRIPTS_DIR →
+# repo-relative (dev/test checkout). Degraded fallback stays canonical
+# (owner__name) so a reader never keys legacy against a canonical writer.
+_rs_sh=""
+for _c in \
+  "${AUTOSPEC_REPO_SLUG_SH:-}" \
+  "$SCRIPT_DIR/repo-slug.sh" \
+  "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" \
+  "$SCRIPT_DIR/../../../scripts/repo-slug.sh"; do
+  if [ -n "$_c" ] && [ -f "$_c" ]; then _rs_sh="$_c"; break; fi
+done
+if [ -n "$repo" ]; then
+  if [ -n "$_rs_sh" ]; then
+    hb_dir="$(bash "$_rs_sh" --resolve-dir "$HB_BASE" "$repo" 2>/dev/null)"
+  fi
+  [ -n "${hb_dir:-}" ] || hb_dir="$HB_BASE/$(printf '%s' "$repo" | sed 's#/#__#')"
+else
+  hb_dir=""
+fi
 
 # Build a JSON array of per-issue rows by reading the heartbeat files directly
 # (no dependency on heartbeat-read.sh being co-installed).
 rows="[]"
-if [ -n "$slug" ] && [ -d "$hb_dir" ] && ls "$hb_dir"/*.json >/dev/null 2>&1; then
+if [ -n "$repo" ] && [ -d "$hb_dir" ] && ls "$hb_dir"/*.json >/dev/null 2>&1; then
   rows="$(cat "$hb_dir"/*.json 2>/dev/null | jq -s --argjson now "$now" --argjson stale "$STALE_SECS" '
     [ .[] | {issue, step, branch, pr, host, ts,
              age: ($now - (.ts // $now)),

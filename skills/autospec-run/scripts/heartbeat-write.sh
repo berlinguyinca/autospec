@@ -5,7 +5,9 @@
 #   heartbeat-write.sh --issue <N> --step <step> [--branch <b>] [--pr <p>] [--repo <owner/repo>]
 #
 # Writes to: ~/.autospec/process-heartbeats/<repo-slug>/<issue>.json
-# where <repo-slug> is derived from <owner/repo> with '/' replaced by '_'.
+# where <repo-slug> is the canonical owner__name form produced by
+# scripts/repo-slug.sh (F4). Readers resolve canonical-first with a legacy
+# (owner_name) fallback for one release so in-flight heartbeats aren't orphaned.
 #
 # Environment:
 #   AUTOSPEC_HEARTBEAT_DIR   base dir (default: ~/.autospec/process-heartbeats);
@@ -53,9 +55,38 @@ if [ -z "$STEP" ]; then
     exit 1
 fi
 
+# ── Canonical repo-slug helper (F4) ───────────────────────────────────────────
+# Source repo-slug.sh so this WRITER emits the canonical owner__name slug
+# (matching the watchdog/heartbeat-read resolvers). Resolution order: explicit
+# override → sibling (installed flat layout) → AUTOSPEC_SCRIPTS_DIR →
+# repo-relative (dev/test checkout).
+_hb_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+for _rs_cand in \
+    "${AUTOSPEC_REPO_SLUG_SH:-}" \
+    "${_hb_self_dir}/repo-slug.sh" \
+    "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" \
+    "${_hb_self_dir}/../../../scripts/repo-slug.sh"; do
+    if [ -n "$_rs_cand" ] && [ -f "$_rs_cand" ]; then
+        # shellcheck source=/dev/null
+        . "$_rs_cand"
+        break
+    fi
+done
+
+# canonical slug for a writer; degraded inline fallback stays canonical
+# (owner__name) so we never silently regress to the legacy single-underscore
+# form if repo-slug.sh is somehow absent.
+_canonical_slug() {
+    if command -v canonical_slug >/dev/null 2>&1; then
+        canonical_slug "$1"
+    else
+        printf '%s' "$1" | sed 's#/#__#'
+    fi
+}
+
 # ── Resolve repo slug ─────────────────────────────────────────────────────────
 
-repo_slug() {
+resolve_repo() {
     local repo="${1:-}"
     if [ -z "$repo" ] && [ -n "${AUTOSPEC_REPO:-}" ]; then
         repo="$AUTOSPEC_REPO"
@@ -67,11 +98,11 @@ repo_slug() {
         printf 'heartbeat-write: cannot determine repo; set AUTOSPEC_REPO or pass --repo\n' >&2
         exit 1
     fi
-    printf '%s' "$repo" | tr '/' '_'
+    printf '%s' "$repo"
 }
 
-SLUG="$(repo_slug "${REPO_VAL:-}")"
-REPO_FULL="${REPO_VAL:-${AUTOSPEC_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || echo "")}}"
+REPO_FULL="$(resolve_repo "${REPO_VAL:-}")"
+SLUG="$(_canonical_slug "$REPO_FULL")"
 
 # ── Write heartbeat ───────────────────────────────────────────────────────────
 

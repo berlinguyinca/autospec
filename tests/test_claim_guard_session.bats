@@ -31,7 +31,7 @@ setup() {
     # Hold the claim comfortably within TTL for the whole test so no stale
     # reclaim can fire and mask a session-identity decision.
     export AUTOSPEC_CLAIM_TTL_SECONDS=1800
-    CLAIM_ROOT="${STATE_DIR}/edit-claims/berlinguyinca_autospec"
+    CLAIM_ROOT="${STATE_DIR}/edit-claims/berlinguyinca__autospec"
 }
 
 teardown() {

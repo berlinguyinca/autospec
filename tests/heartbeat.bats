@@ -49,13 +49,13 @@ teardown() {
 @test "heartbeat-write.sh creates file under repo-slug subdir" {
     run bash "$HB_WRITE" --issue 42 --step claimed --repo "testorg/testrepo"
     [ "$status" -eq 0 ]
-    [ -f "$TEST_TMP/testorg_testrepo/42.json" ]
+    [ -f "$TEST_TMP/testorg__testrepo/42.json" ]
 }
 
 @test "heartbeat-write.sh file contains correct JSON fields" {
     bash "$HB_WRITE" --issue 99 --step pr_created --branch feat/test --pr 123 --repo "myorg/myrepo"
     local content
-    content="$(cat "$TEST_TMP/myorg_myrepo/99.json")"
+    content="$(cat "$TEST_TMP/myorg__myrepo/99.json")"
     echo "$content" | grep -q '"issue":"99"'
     echo "$content" | grep -q '"step":"pr_created"'
     echo "$content" | grep -q '"branch":"feat/test"'
@@ -66,7 +66,7 @@ teardown() {
 @test "heartbeat-write.sh uses AUTOSPEC_REPO when --repo not given" {
     export AUTOSPEC_REPO="envorg/envrepo"
     bash "$HB_WRITE" --issue 77 --step claimed
-    [ -f "$TEST_TMP/envorg_envrepo/77.json" ]
+    [ -f "$TEST_TMP/envorg__envrepo/77.json" ]
 }
 
 # ── heartbeat-read.sh ─────────────────────────────────────────────────────────
@@ -101,9 +101,9 @@ teardown() {
     # repoA reader should only see repoA's heartbeat
     run bash "$HB_READ" --repo "repoA/proj"
     [ "$status" -eq 0 ]
-    echo "$output" | grep -q "repoA_proj"
+    echo "$output" | grep -q "repoA__proj"
     # Should NOT see repoB's path
-    ! echo "$output" | grep -q "repoB_proj"
+    ! echo "$output" | grep -q "repoB__proj"
 }
 
 @test "heartbeat-read.sh: zero cross-repo bleed for same issue number" {
@@ -137,7 +137,7 @@ teardown() {
 
     # The flat file should be gone and replaced in subdir
     [ ! -f "$TEST_TMP/200.json" ]
-    [ -f "$TEST_TMP/migorg_migrepo/200.json" ]
+    [ -f "$TEST_TMP/migorg__migrepo/200.json" ]
 }
 
 @test "watchdog deletes stale flat-format heartbeat without repo field" {

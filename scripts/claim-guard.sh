@@ -103,6 +103,21 @@ session_id() {
     printf 'ppid-%s' "${PPID:-unknown}"
 }
 
+# Source the canonical repo-slug helper (F4): override → sibling (installed
+# flat layout) → AUTOSPEC_SCRIPTS_DIR → repo-relative.
+_CG_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+for _rs_cand in \
+    "${AUTOSPEC_REPO_SLUG_SH:-}" \
+    "${_CG_SELF_DIR}/repo-slug.sh" \
+    "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" \
+    "${_CG_SELF_DIR}/../scripts/repo-slug.sh"; do
+    if [ -n "$_rs_cand" ] && [ -f "$_rs_cand" ]; then
+        # shellcheck source=/dev/null
+        . "$_rs_cand"
+        break
+    fi
+done
+
 repo_slug() {
     repo="${AUTOSPEC_REPO:-}"
     if [ -z "$repo" ] && command -v gh >/dev/null 2>&1; then
@@ -117,7 +132,19 @@ repo_slug() {
         fi
     fi
     [ -n "$repo" ] || repo="unknown_repo"
-    printf '%s' "$repo" | tr '/' '_'
+    # Canonical owner__name slug (F4). Reader and writer share this one
+    # function, so both migrate together. The slashless "unknown_repo" sentinel
+    # has no canonical form and passes through unchanged.
+    case "$repo" in
+        */*)
+            if command -v canonical_slug >/dev/null 2>&1; then
+                canonical_slug "$repo"
+            else
+                printf '%s' "$repo" | sed 's#/#__#'
+            fi
+            ;;
+        *) printf '%s' "$repo" ;;
+    esac
 }
 
 # Slugify a lock key into a safe file-name stem (':' and '/' -> '-').
