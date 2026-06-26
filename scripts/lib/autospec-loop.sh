@@ -493,6 +493,7 @@ autospec_conductor_run() {
 
     local _cycle=0
     local _dry_cycles=0
+    local _tier2_dry_cycles=0
     local _last_digest_day=""
     local _stop_reason=""
     local _conductor_session="${AUTOSPEC_SESSION_ID:-conductor-$$}"
@@ -568,6 +569,7 @@ autospec_conductor_run() {
         local _tier_json
         _tier_json="$(bash "$_waterfall" \
             --dry-cycles "$_dry_cycles" \
+            --tier2-dry-cycles "$_tier2_dry_cycles" \
             ${_repo:+--repo "$_repo"} \
             2>/dev/null \
             || printf '{"tier":1,"action":"run-backlog","reason":"waterfall-unavailable"}')"
@@ -707,12 +709,11 @@ autospec_conductor_run() {
                     ;;
             esac
 
-        else
-            # Tier 2+ are not enabled in Phase 1.
-            # Consult source weights before discovery ranking (best-effort).
-            # The ranking already reads them via explore-research-cycle.sh;
-            # the conductor passes AUTOSPEC_EXPLORE_LEDGER so the cycle picks
-            # up the right ledger when F2 enables Tier 2.
+        elif [ "$_action" = "run-explore-once" ] || [ "$_action" = "run-explore-once-internet" ]; then
+            # ── Tier 2/3: discovery via autospec-explore --once ───────────────
+            # Consult source weights before discovery ranking (best-effort, F5).
+            # The ranking reads them via explore-research-cycle.sh; the conductor
+            # passes AUTOSPEC_EXPLORE_LEDGER so the cycle picks up the right ledger.
             if [ -n "$_weights_bin" ] && [ -x "$_weights_bin" ]; then
                 printf '[conductor] consulting source weights for discovery cycle (Tier %s)\n' \
                     "$_tier" >&2
@@ -720,16 +721,87 @@ autospec_conductor_run() {
                     >/dev/null 2>&1 || true
             fi
             export AUTOSPEC_EXPLORE_LEDGER="$_ledger_path"
-            # Park and notify.
-            printf '[conductor] Tier %s not enabled in Phase 1; dry-cycles=%s — parking\n' \
-                "$_tier" "$_dry_cycles" >&2
-            if [ -n "$_notify_sh" ]; then
-                bash "$_notify_sh" "autospec-autonomous" \
-                    "conductor parked: backlog dry (tier $((${_tier} - 1)) exhausted); Tier 2+ not enabled" \
-                    || true
+
+            # Resolve the explore command: AUTOSPEC_EXPLORE_CMD override for
+            # tests, else the explore script sibling of this scripts/ dir.
+            local _explore_cmd="${AUTOSPEC_EXPLORE_CMD:-}"
+            if [ -z "$_explore_cmd" ]; then
+                local _explore_script="${_sdir}/autospec-explore.sh"
+                if [ -f "$_explore_script" ]; then
+                    _explore_cmd="bash $_explore_script"
+                elif command -v autospec-explore >/dev/null 2>&1; then
+                    _explore_cmd="autospec-explore"
+                fi
             fi
-            _stop_reason="phase1:tier${_tier}-not-enabled"
-            break
+
+            if [ -z "$_explore_cmd" ]; then
+                printf '[conductor] WARN: no explore command available for Tier %s — skipping\n' \
+                    "$_tier" >&2
+                if [ "$_tier" = "2" ]; then
+                    _tier2_dry_cycles=$((_tier2_dry_cycles + 1))
+                fi
+            else
+                # Build the --once invocation for the selected tier.
+                local _explore_out
+                if [ "$_dry" = "1" ]; then
+                    printf '[conductor] [dry-run] would invoke explore --once for Tier %s\n' \
+                        "$_tier" >&2
+                    # Simulate a dry yield in dry-run mode.
+                    _explore_out='{"tier":"local","proposals_seen":0,"new_candidates":0,"filed":0,"dry":true,"reason":"dry-run"}'
+                elif [ "$_action" = "run-explore-once-internet" ]; then
+                    printf '[conductor] Tier 3: invoking explore --once --research-sources internet\n' >&2
+                    _explore_out="$(bash -c "$_explore_cmd --once --research-sources internet" \
+                        2>/dev/null || printf '{"dry":true,"reason":"explore-error"}')"
+                else
+                    printf '[conductor] Tier 2: invoking explore --once (local sources)\n' >&2
+                    _explore_out="$(bash -c "$_explore_cmd --once" \
+                        2>/dev/null || printf '{"dry":true,"reason":"explore-error"}')"
+                fi
+
+                # Parse yield JSON for dryness.
+                local _explore_dry
+                _explore_dry="$(printf '%s' "$_explore_out" \
+                    | jq -r '.dry // true' 2>/dev/null || echo 'true')"
+                local _explore_filed
+                _explore_filed="$(printf '%s' "$_explore_out" \
+                    | jq -r '.filed // 0' 2>/dev/null || echo 0)"
+
+                printf '[conductor] Tier %s explore result: dry=%s filed=%s\n' \
+                    "$_tier" "$_explore_dry" "$_explore_filed" >&2
+
+                if [ "$_explore_dry" = "false" ]; then
+                    # New candidates were filed — they become Tier-1 backlog.
+                    # Float selection back up: reset both dry counters so the
+                    # waterfall selects Tier 1 next cycle.
+                    printf '[conductor] Tier %s filed %s candidate(s) — floating back to Tier 1\n' \
+                        "$_tier" "$_explore_filed" >&2
+                    _dry_cycles=0
+                    _tier2_dry_cycles=0
+                    _work_done=1
+                else
+                    # Explore was dry for this tier.
+                    if [ "$_tier" = "2" ]; then
+                        _tier2_dry_cycles=$((_tier2_dry_cycles + 1))
+                        printf '[conductor] Tier 2 dry (tier2-dry-cycles=%s)\n' \
+                            "$_tier2_dry_cycles" >&2
+                    else
+                        # Tier 3 dry — all discovery tiers exhausted; park and notify.
+                        printf '[conductor] Tier 3 dry — all discovery tiers exhausted; parking\n' >&2
+                        if [ -n "$_notify_sh" ]; then
+                            bash "$_notify_sh" "autospec-autonomous" \
+                                "conductor parked: Tier 3 (internet) discovery also dry; all tiers exhausted" \
+                                || true
+                        fi
+                        _stop_reason="discovery:all-tiers-dry"
+                        break
+                    fi
+                fi
+            fi
+        else
+            # Unknown action — log and treat as dry cycle.
+            printf '[conductor] unknown waterfall action=%s for tier=%s — skipping\n' \
+                "$_action" "$_tier" >&2
+            _dry_cycles=$((_dry_cycles + 1))
         fi
 
         # ── Step 6: Spend-ledger tally (autonomous-spend-ledger.sh) ──────────
