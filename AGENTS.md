@@ -522,6 +522,12 @@ git worktree prune
 Never leave stale worktrees; the watchdog GC (`scripts/autospec-watchdog.sh`)
 sweeps orphans as a safety net, but proactive cleanup is required.
 
+The watchdog cross-checks the GitHub `autospec-run-state` comment before releasing
+any `claimed` heartbeat — a live sibling's claim is never reclaimed on local age
+alone. The default `claimed` threshold is **1800s**; override with
+`AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS`. See SKILL.md §"Running concurrent workers"
+for the full concurrency model and tuning table.
+
 ### Pointer to enforcement tool
 
 `scripts/worktree-guard.sh` (installed to `~/.autospec/scripts/worktree-guard.sh`)

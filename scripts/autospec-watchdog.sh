@@ -389,7 +389,8 @@ fi
 
 # Fetch the run-state comment body for an issue (the marked comment written by
 # claim-issue.sh / release-issue.sh). Defined before the main loop so the
-# heartbeat path can consult it. Empty when absent.
+# heartbeat path can consult it. Empty when absent (no marked comment).
+# Exits non-zero on gh API failure so the caller can treat that as fail-safe.
 run_state_body_for_issue() {
     issue="$1"
     # Pick the CAS-authoritative marked comment: run-state.sh keeps the
@@ -397,11 +398,15 @@ run_state_body_for_issue() {
     # transient duplicate window we mirror that by sorting marked comments oldest
     # -first (createdAt, then id) and taking the first — never an arbitrary
     # array-order comment that could carry a loser's worker_id.
+    # NOTE: do NOT suppress gh exit code with "|| true" here — the caller
+    # (reclaim_decision) uses a non-zero exit as the fail-safe signal that
+    # GitHub is unreachable; suppressing it would make a transient outage
+    # indistinguishable from "no comment" and trigger a spurious reclaim.
     # shellcheck disable=SC2086
     gh issue view "$issue" $REPO_ARGS \
         --json comments \
         --jq '[.comments[]? | select((.body // "") | contains("<!-- autospec-run-state:begin -->") and contains("<!-- autospec-run-state:end -->"))] | sort_by(.createdAt, .id) | (.[0].body // "")' \
-        2>/dev/null || true
+        2>/dev/null
 }
 
 # Strip the run-state JSON out of a marked comment body.
@@ -438,7 +443,15 @@ reclaim_decision() {
     rd_issue="$1"
     rd_window="$2"
 
-    rd_body="$(run_state_body_for_issue "$rd_issue")"
+    # Fail-safe: if gh returns a non-zero exit (offline / rate-limited / auth
+    # failure), we cannot prove the claim is stale → hold to never reclaim a
+    # live claim we can't corroborate.  A truly absent run-state comment
+    # produces exit 0 with an empty body (the --jq filter returns ""), which
+    # is the only case we treat as "no authoritative owner → reclaim".
+    if ! rd_body="$(run_state_body_for_issue "$rd_issue")"; then
+        printf 'hold'      # gh API unreachable — fail-safe: do not reclaim
+        return 0
+    fi
     if [ -z "$rd_body" ]; then
         printf 'reclaim'   # run-state absent → no authoritative owner
         return 0
