@@ -212,25 +212,35 @@ do_soft_park() {
     fi
 
     # Arm autospec-usage-limit.sh if a resume command was supplied.
+    #
+    # The park verdict is the safety-critical output: at/over the soft threshold
+    # we MUST stop spending, so a failed arm never suppresses the park (failing
+    # closed here would mean "keep spending", the unsafe direction). But a silent
+    # arm failure leaves the operator parked with no durable auto-resume, so the
+    # failure is surfaced loudly on stderr rather than swallowed by `|| true`.
     if [ -n "$RESUME_COMMAND" ]; then
         limit_sh="$(find_script "autospec-usage-limit.sh")"
         if [ -n "$limit_sh" ]; then
+            arm_rc=0
             if [ -n "$RUN_ID" ]; then
                 bash "$limit_sh" arm \
                     --harness "$HARNESS" \
                     --repo-dir "$REPO_DIR" \
                     --command "$RESUME_COMMAND" \
                     --resume-at "$RESUME_AT" \
-                    --run-id "$RUN_ID" || true
+                    --run-id "$RUN_ID" || arm_rc=$?
             else
                 bash "$limit_sh" arm \
                     --harness "$HARNESS" \
                     --repo-dir "$REPO_DIR" \
                     --command "$RESUME_COMMAND" \
-                    --resume-at "$RESUME_AT" || true
+                    --resume-at "$RESUME_AT" || arm_rc=$?
+            fi
+            if [ "$arm_rc" -ne 0 ]; then
+                info "WARNING: autospec-usage-limit.sh arm failed (rc=${arm_rc}); parked WITHOUT durable auto-resume — operator must resume manually"
             fi
         else
-            info "autospec-usage-limit.sh not found; skipping arm"
+            info "autospec-usage-limit.sh not found; skipping arm (no durable auto-resume)"
         fi
     fi
 
@@ -248,9 +258,12 @@ if [ -n "$observe_sh" ]; then
     observe_json="$(bash "$observe_sh" "$HARNESS" 2>/dev/null)" || observe_rc=$?
 
     if [ "$observe_rc" -eq 0 ] && [ -n "$observe_json" ]; then
-        observable="$(printf '%s' "$observe_json" | jq -r '.observable // "false"')"
+        # Guard jq against malformed observe JSON (2>/dev/null || echo fallback):
+        # under set -e an unguarded jq failure in this command substitution would
+        # abort the script, breaking the fail-open continue|park contract.
+        observable="$(printf '%s' "$observe_json" | jq -r '.observable // "false"' 2>/dev/null || echo false)"
         if [ "$observable" = "true" ]; then
-            live_pct="$(printf '%s' "$observe_json" | jq -r '.percent // "null"')"
+            live_pct="$(printf '%s' "$observe_json" | jq -r '.percent // "null"' 2>/dev/null || echo null)"
             if is_valid_percent "$live_pct"; then
                 # Compare live_pct to SOFT_PCT using awk (handles decimals; avoids
                 # shell integer overflow; exit 0 = at/above threshold).
@@ -276,7 +289,11 @@ if [ -n "$ledger_sh" ]; then
     ledger_json="$(bash "$ledger_sh" status --repo-dir "$REPO_DIR" 2>/dev/null)" || ledger_rc=$?
 
     if [ "$ledger_rc" -eq 0 ] && [ -n "$ledger_json" ]; then
-        current_tokens="$(printf '%s' "$ledger_json" | jq -r '.tokens // 0')"
+        # Guard jq against malformed ledger JSON: under set -e an unguarded jq
+        # failure in this main-body command substitution aborted the script with
+        # a non-zero exit and NO verdict (reproducible rc 5), violating the
+        # fail-open continue|park contract. 2>/dev/null || echo 0 keeps it open.
+        current_tokens="$(printf '%s' "$ledger_json" | jq -r '.tokens // 0' 2>/dev/null || echo 0)"
         if ! is_valid_integer "$current_tokens"; then
             current_tokens=0
         fi

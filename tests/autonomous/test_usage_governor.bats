@@ -393,3 +393,55 @@ SH
     [ "$status" -eq 0 ]
     [ "$output" = "continue" ]
 }
+
+# ── Regression: malformed-JSON fail-open (#1409 hardening) ────────────────────
+# A safety governor must never abort with no verdict. Before the jq guards, a
+# malformed ledger/observe payload under set -e aborted the script (rc 5) with
+# empty stdout, breaking the advertised continue|park contract.
+
+@test "malformed observe JSON falls through to ledger tally (fail-open, rc 0)" {
+    cat > "$TEST_DIR/usage-observe.sh" <<'SH'
+#!/usr/bin/env bash
+echo "this is not json {{{"
+SH
+    chmod +x "$TEST_DIR/usage-observe.sh"
+
+    _write_ledger_mock 9000000
+    AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS=10000000 run_governor claude
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q '^park '
+}
+
+@test "malformed ledger JSON emits continue, never aborts (fail-open, rc 0)" {
+    # observe is unobservable so we reach the ledger path.
+    _write_observe_mock_unobservable
+    cat > "$TEST_DIR/autonomous-spend-ledger.sh" <<'SH'
+#!/usr/bin/env bash
+echo "not json at all {{{"
+SH
+    chmod +x "$TEST_DIR/autonomous-spend-ledger.sh"
+
+    AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS=10000000 run_governor claude
+    [ "$status" -eq 0 ]
+    [ "$output" = "continue" ]
+}
+
+# ── Regression: failed arm still parks and warns (safety-first) ───────────────
+
+@test "arm failure still parks and warns on stderr" {
+    _write_observe_mock_observable 90
+    # usage-limit mock that fails.
+    cat > "$TEST_DIR/autospec-usage-limit.sh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    chmod +x "$TEST_DIR/autospec-usage-limit.sh"
+
+    run bash "$SCRIPT" claude \
+        --repo-dir "$REPO_DIR" \
+        --resume-command "autospec-autonomous resume" \
+        --wait-seconds 3600
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q '^park '
+    printf '%s\n' "$output" | grep -q 'WARNING: autospec-usage-limit.sh arm failed'
+}
