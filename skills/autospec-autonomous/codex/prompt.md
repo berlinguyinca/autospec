@@ -10,7 +10,7 @@ when quota resets.
 
 This skill is a **conductor**, not a new engine. It reuses without reimplementing:
 `autospec-run` (the merge pipeline), `autospec-autonomy-gate.sh`, `autospec-usage-limit.sh`,
-`worktree-guard.sh`, `scripts/lib/autospec-loop.sh`, and `/autospec-resume`.
+`worktree-guard.sh`, `autospec-loop.sh` (the shared loop driver), and `/autospec-resume`.
 
 **Phase 1 scope:** Tier 0 (control channel) + Tier 1 (backlog → `main`). Tiers 2–4 are
 documented below but **not yet enabled — Phase 2/3** (see Phase-1 waterfall contract).
@@ -88,12 +88,22 @@ Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B"
 
 ## Phase-1 waterfall contract
 
+**Implementation:** the Phase-1 loop body is `autospec_conductor_run()` defined in
+the shared loop driver (`${AUTOSPEC_SCRIPTS_DIR}/lib/autospec-loop.sh`, issue #1378).
+Each cycle the function calls `autonomous-control-channel.sh` (Tier-0 preempt),
+then `autonomous-waterfall.sh` (tier selection), then `autonomous-premerge-gate.sh`
+(must emit `merge-ok` before any drain), then the `autospec-run` drain, then
+`autonomous-spend-ledger.sh` (park on cap), then `autonomous-resilience.sh`
+(state/heartbeat/lock/main-health), and finally the once-per-UTC-day digest stub.
+On park, `_conductor_arm_resume()` writes resume context and arms a
+ScheduleWakeup/cron wake via `autospec-usage-limit.sh`.
+
 Phase 1 is the **only phase built now**. The conductor walks tiers in priority order each cycle:
 
 ### Tier 0 — control channel (always preempts)
 
 At every **cycle boundary** (never mid-issue), read reserved GitHub labels via
-`scripts/autonomous-control-channel.sh`:
+`autonomous-control-channel.sh` (`${AUTOSPEC_SCRIPTS_DIR}/autonomous-control-channel.sh`):
 
 | Label                  | Command                                                              |
 |------------------------|----------------------------------------------------------------------|
@@ -159,9 +169,14 @@ The conductor detects a dry cycle count (`dry_cycle >= 2`) but does NOT activate
 - `skills/autospec-autonomous/SKILL.md` — Claude Code adapter (authoritative).
 - `skills/autospec-autonomous/codex/prompt.md` — Codex CLI mirror (lockstep).
 - `skills/autospec-autonomous/opencode/agent.md` — OpenCode mirror (lockstep).
-- `scripts/autonomous-control-channel.sh` — label query → command decision (Phase 1, Issue #4).
-- `scripts/autonomous-waterfall.sh` — tier selection logic (Phase 1, Issue #5).
-- `scripts/autonomous-spend-ledger.sh` — cumulative token/issue tally + kill-switch (Phase 1, Issue #6).
+- `autospec-loop.sh` (shared loop driver, `${AUTOSPEC_SCRIPTS_DIR}/lib/`) — extended with `autospec_conductor_run()`, the Phase-1 conductor entry point wiring control-channel → waterfall → premerge-gate → drain → spend-ledger → resilience → digest (issue #1378).
+- `autonomous-control-channel.sh` — label query → command decision (Phase 1, Issue #1373).
+- `autonomous-waterfall.sh` — tier selection logic (Phase 1, Issue #1374).
+- `autonomous-spend-ledger.sh` — cumulative token/issue tally + kill-switch (Phase 1, Issue #1375).
+- `autonomous-premerge-gate.sh` — blocking autospec-qa pre-merge barrier (Phase 1, Issue #1376).
+- `autonomous-resilience.sh` — run-state, lock, quarantine, main-health (Phase 1, Issue #1377).
+- `notify.sh` (autospec-shared) — shared desktop notifier (operator window during unattended runs).
+- `tests/autospec/test_conductor_wiring.bats` — bats coverage for conductor wiring (issue #1378).
 - `tests/fixtures/skill-goldens/autospec-autonomous.*.sha256` — derived goldens.
 
 Trio edits use `derive-trio.sh --in-place` + `gen-skill-goldens.sh`; never hand-maintain the codex/opencode mirrors or goldens.
