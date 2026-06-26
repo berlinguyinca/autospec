@@ -157,7 +157,8 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
     [--qa-gate] \
     [--qa-gate-pass-on-partial] \
     [--no-initial-handoff] \
-    [--handoff-timeout-sec N]
+    [--handoff-timeout-sec N] \
+    [--once]
 ```
 
 > **Model tier:** `TIER_A` for the aggregator + proposal ranker; `TIER_B` for the
@@ -194,6 +195,39 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
 - `--handoff-timeout-sec N` — maximum seconds for each startup handoff before it
   is terminated and logged as `code_health:explore_handoff_timeout`. Default:
   `900`. Equivalent env: `AUTOSPEC_EXPLORE_HANDOFF_TIMEOUT_SEC`.
+- `--once` — **single-cycle mode.** Run exactly ONE research pass over the
+  resolved `--research-sources`, emit a 6-key yield JSON to stdout, then return.
+  Never creates a sandbox branch; never enters the perpetual loop; never calls
+  the drain command. The conductor calls `--once` per cycle and counts
+  consecutive `dry=true` results for tier escalation. Output JSON shape:
+  ```json
+  {"tier":"local|competitor","proposals_seen":N,"new_candidates":N,
+   "filed":N,"dry":true|false,"reason":"..."}
+  ```
+  `tier="competitor"` when `--research-sources` includes `internet`, else
+  `tier="local"`. `dry=true` when `new_candidates==0` after dedup.
+  Test hook: `AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD` overrides the
+  `explore-research-cycle.sh` subprocess call; the mock receives
+  `AUTOSPEC_EXPLORE_ONCE_OUT` (path to write JSON) and
+  `AUTOSPEC_EXPLORE_ONCE_SOURCES` as env vars.
+
+## Single-cycle mode (`--once`)
+
+`--once` is the seam that prevents the two-perpetual-loops hazard when the
+autonomous conductor wraps `autospec-explore`: the conductor runs its own loop;
+`autospec-explore --once` is a single atomic unit inside that loop. Without
+`--once`, nesting would create two perpetual loops.
+
+Behavioural contract:
+1. Resolves `tier` from the source set (`internet` present → `"competitor"`;
+   otherwise `"local"`).
+2. Runs `explore-research-cycle.sh --stage full` exactly once with the resolved
+   `--research-sources` and `--max-issues-per-round`.
+3. Reads `proposals_total` → `proposals_seen`; `len(proposals)` → `new_candidates`.
+4. Files each surviving proposal via `gh issue create --label auto-implement`
+   (best-effort; never aborts on `gh` failure); counts successes as `filed`.
+5. Sets `dry=true` when `new_candidates==0`; sets `reason` accordingly.
+6. Prints the 6-key JSON to stdout and exits 0.
 
 ## Sandbox branch contract
 
