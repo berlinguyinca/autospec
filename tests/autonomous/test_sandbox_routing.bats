@@ -223,7 +223,12 @@ EOF
     [[ "$output" == *"code_health:autonomous_main_merge_refused"* ]]
 }
 
-@test "AUTOSPEC_RUN_CMD not invoked when discovery in-flight" {
+@test "drain still runs onto sandbox while discovery in-flight (phase4 refuses main merges)" {
+    # Regression for the Phase 5.5 deadlock finding: the conductor must NOT skip
+    # the Tier-1 drain while discovery is in-flight. The phase4 implementer
+    # enforces the main-merge refusal per-PR via explore-mode.json (PRs target
+    # the sandbox). Skipping the drain here would deadlock, because the only path
+    # that decrements the in-flight counter lives inside the drain branch.
     CYCLE_COUNT_FILE="$TMP/cycle-count.txt"
     printf '0\n' > "$CYCLE_COUNT_FILE"
 
@@ -250,10 +255,49 @@ EOF
 
     export CONDUCTOR_MAX_CYCLES=2
     _run_conductor
-    # run-cmd must NOT have been invoked (refused by F3 gate).
-    if [ -s "$RUN_CMD_LOG" ]; then
-        false  # fail: run-cmd should have been blocked
-    fi
+    # The drain MUST run on cycle 2 even though discovery is in-flight.
+    [ -s "$RUN_CMD_LOG" ]
+    grep -q "run-cmd-invoked" "$RUN_CMD_LOG"
+}
+
+@test "in-flight counter clears once a discovery outcome is consumed (no permanent deadlock)" {
+    # Three cycles: cycle 1 files a discovery issue (in-flight=1); cycles 2-3 are
+    # Tier-1 drains. The drain mock writes a discovery outcome file, which the
+    # conductor consumes to decrement the counter. By the time the counter hits 0
+    # the main-merge refusal must stop firing — proving the counter can clear.
+    CYCLE_COUNT_FILE="$TMP/cycle-count.txt"
+    printf '0\n' > "$CYCLE_COUNT_FILE"
+
+    OUTCOME_FILE="$TMP/.autospec/last-outcome.json"
+    export AUTOSPEC_LAST_OUTCOME_FILE="$OUTCOME_FILE"
+
+    cat > "$SCRIPTS_DIR/autonomous-waterfall.sh" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$CYCLE_COUNT_FILE" 2>/dev/null || printf '0')
+n=\$((n + 1))
+printf '%s\n' "\$n" > "$CYCLE_COUNT_FILE"
+if [ "\$n" -le 1 ]; then
+    printf '{"tier":2,"action":"run-explore-once","reason":"cycle1-discovery"}\n'
+else
+    printf '{"tier":1,"action":"run-backlog","reason":"tier1-drain"}\n'
+fi
+exit 0
+EOF
+    chmod +x "$SCRIPTS_DIR/autonomous-waterfall.sh"
+
+    cat > "$EXPLORE_SCRIPT" <<'EOF'
+#!/usr/bin/env bash
+printf '{"tier":"local","proposals_seen":1,"new_candidates":1,"filed":1,"dry":"false"}\n'
+exit 0
+EOF
+
+    # Drain mock writes a discovery outcome file so the conductor decrements.
+    export AUTOSPEC_RUN_CMD="printf 'run-cmd-invoked\n' >> $RUN_CMD_LOG; mkdir -p '$TMP/.autospec'; printf '{\"is_discovery\":true,\"issue\":4242,\"source\":\"spec-vs-code\",\"outcome\":\"shipped\"}\n' > '$OUTCOME_FILE'"
+
+    export CONDUCTOR_MAX_CYCLES=3
+    run _run_conductor
+    # The decrement path must be reachable: counter returns to 0.
+    [[ "$output" == *"in-flight=0"* ]]
 }
 
 # ── 4. Tier-1 backlog drain unaffected when no discovery in-flight ───────────

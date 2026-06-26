@@ -784,6 +784,13 @@ try:
     _pboost = float(os.environ.get("AUTOSPEC_PRIORITY_BOOST", "1.5") or "1.5")
 except Exception:
     _pboost = 1.5
+# Lower-bound the multiplier at 1.0: a "boost" must never DE-rank a priority/
+# steer proposal below organic ones (a misconfigured <1.0 value would invert the
+# intent). The upper bound is already enforced below via _cap (a boosted score is
+# capped at max(non-boosted) * _pboost, so it reorders without swamping the
+# confidence * source_weight * 1/complexity ranking).
+if _pboost < 1.0:
+    _pboost = 1.0
 if _pboost != 1.0 and filtered:
     _is_priority = lambda p: bool(p.get("priority")) or p.get("source") == "steer"
     _non_boosted = [p["score"] for p in filtered if not _is_priority(p)]

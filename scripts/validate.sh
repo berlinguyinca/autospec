@@ -3031,6 +3031,7 @@ main() {
     check_autospec_autonomous_contract
     check_autospec_autonomous_skill_contract
     check_conductor_wiring_contract
+    check_autonomous_phase2_suite
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -4255,6 +4256,33 @@ check_conductor_wiring_contract() {
         bats "$bats_file" >/tmp/validate-conductor-wiring.log 2>&1 \
             || { cat /tmp/validate-conductor-wiring.log >&2; \
                  fail "$bats_file: failed (issue #1378)"; }
+    fi
+}
+
+# Autonomous Phase-2 integration suite (issue #1402, Phase 5.5 audit): the
+# tests/autonomous/*.bats integration tests (waterfall escalation, sandbox
+# routing, premerge gate, outcome ledger, usage governor + conductor wiring)
+# were previously ungated by validate.sh, which let a stale-action test rot and
+# the governor-never-wired defect slip past. Gate the whole suite here so these
+# cross-issue integration seams stay green.
+check_autonomous_phase2_suite() {
+    info "autonomous Phase-2 integration suite: tests/autonomous/*.bats (issue #1402)"
+    if ! command -v bats >/dev/null 2>&1; then
+        info "  bats not available — skipping autonomous integration suite"
+        return 0
+    fi
+    local _any=0
+    local t
+    for t in tests/autonomous/*.bats; do
+        [ -f "$t" ] || continue
+        _any=1
+        info "  running: $t"
+        bats "$t" >/tmp/validate-autonomous-suite.log 2>&1 \
+            || { cat /tmp/validate-autonomous-suite.log >&2; \
+                 fail "$t: failed (issue #1402)"; }
+    done
+    if [ "$_any" -eq 0 ]; then
+        fail "tests/autonomous/*.bats: no autonomous integration tests found (issue #1402)"
     fi
 }
 
