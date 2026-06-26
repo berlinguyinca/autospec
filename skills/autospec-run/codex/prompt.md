@@ -1134,6 +1134,36 @@ Capture the agent ID / log path for monitoring.
 
 If your harness lacks background delegation: open a separate terminal/tmux pane, run the monitor prompt in a fresh session there, and have it write progress to a logfile that Phase 5 can tail.
 
+### Running concurrent workers
+
+autospec-run is designed for concurrent operation across separate harness sessions (e.g., two Claude Code sessions in different terminals, or two Codex CLI processes). Each session runs an independent monitor. Three layers enforce safety:
+
+1. **Atomic claim** — `claim-issue.sh` check-and-swaps `auto-implement → in-progress-by-bot` plus writes an `autospec-run-state` GitHub comment. The **GitHub comment is the cross-machine source of truth**, not the local heartbeat.
+2. **Worktree isolation** — each issue gets its own `/tmp/wt-<branch>` so two workers never share a worktree.
+3. **Per-session lock** — the session-lock (see above) ensures a single harness session never runs two concurrent monitors; separate sessions run independently by design.
+
+To launch a second concurrent worker:
+
+```bash
+# Terminal 1 — first worker (already running)
+AUTOSPEC_WORKER_ID="$(hostname):user:shell:$$" /autospec-run
+
+# Terminal 2 — second worker (fresh session, distinct worker id)
+AUTOSPEC_WORKER_ID="$(hostname):user:shell:$$" /autospec-run
+```
+
+Each session derives its own `AUTOSPEC_WORKER_ID` if not overridden; the default form is `host:user:harness:pid`. Set it explicitly when two sessions run on the same host to guarantee uniqueness.
+
+**Watchdog tuning for long concurrent runs.** The watchdog cross-checks the GitHub run-state comment before releasing any `claimed` heartbeat, so a live sibling's claim is never reclaimed. The tunable env vars (set in every concurrent terminal):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS` | `1800` | Minimum age before a `claimed` heartbeat triggers the GitHub cross-check. Set higher (e.g., `3600`) for hosts with slow worktree setup. |
+| `AUTOSPEC_WATCHDOG_RECLAIM_SECS` | `10800` | Age after which any non-`claimed` stale heartbeat is reclaimed. |
+| `AUTOSPEC_WATCHDOG_STALE_SECS` | `1800` | Age at which a heartbeat is considered stale for nudging. |
+
+If a cross-check GitHub API call fails (offline / rate-limited), the watchdog treats the claim as live and skips the reclaim — fail-safe by design.
+
 ## Phase 5 — Periodic status updates
 
 Set up a recurring check (every ~25 min) using your harness's self-paced wakeup capability. Each tick:
