@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# scripts/autonomous-premerge-gate.sh — blocking autospec-qa pre-merge barrier.
+# scripts/autonomous-premerge-gate.sh — blocking autospec-qa + autospec-secaudit
+#                                        pre-merge barrier.
 #
-# Runs /autospec-qa on a PR branch and gates the merge on finding severity.
-# Phase 1 only: autospec-qa. secaudit is Phase 2 (excluded here).
+# Phase 1: autospec-qa. Phase 2 (F4): autospec-secaudit added after qa.
+# Both skills run in sequence; either can block the merge on high/severe/
+# critical/medium findings. Missing either skill HALTS fail-closed.
 #
 # Usage:
 #   autonomous-premerge-gate.sh [--pr-branch <branch>] [--repo <owner/repo>]
@@ -53,13 +55,14 @@ Options:
   --pr-branch <branch>    Branch to validate (default: current branch).
   --repo <owner/repo>     GitHub repo slug for labelling (default: detected).
   --pr <number>           PR number for labelling (optional).
-  --max-attempts <N>      Max fix-and-recheck cycles (default: 5).
+  --max-attempts <N>      Max fix-and-recheck cycles per stage (default: 5).
   --notify-sh <path>      Path to notify.sh (default: auto-detected).
   --dry-run               Print what would run without executing.
 
 Environment:
   AUTOSPEC_PREMERGE_MAX_ATTEMPTS  Override max attempts (default 5).
   AUTOSPEC_QA_CMD                 Override the qa command (default: autospec-qa).
+  AUTOSPEC_SECAUDIT_CMD           Override the secaudit command (default: autospec-secaudit).
   AUTOSPEC_NOTIFY                 Set to 0 to suppress notifications.
 
 Exit 0 = merge-ok; 1 = block; 2 = halt (code_health); 3 = invocation error.
@@ -118,10 +121,11 @@ fi
 info "Validating branch: $PR_BRANCH"
 info "Max fix-and-recheck attempts: $MAX_ATTEMPTS"
 
-# ── Resolve QA command ────────────────────────────────────────────────────────
+# ── Resolve scan commands ─────────────────────────────────────────────────────
 QA_CMD="${AUTOSPEC_QA_CMD:-autospec-qa}"
+SECAUDIT_CMD="${AUTOSPEC_SECAUDIT_CMD:-autospec-secaudit}"
 
-# ── Phase 1: presence check for configured scan skill ────────────────────────
+# ── Presence checks for configured scan skills ────────────────────────────────
 # A missing scan skill HALTS (fail closed). Never silently skip.
 _qa_skill_present() {
     if [ -n "${AUTOSPEC_QA_PRESENT_OVERRIDE:-}" ]; then
@@ -136,6 +140,19 @@ _qa_skill_present() {
     command -v "$QA_CMD" >/dev/null 2>&1
 }
 
+_secaudit_skill_present() {
+    if [ -n "${AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE:-}" ]; then
+        # Test seam: override for unit tests.
+        if [ "$AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE" = "true" ]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    # Real check: secaudit command reachable in PATH or as an installed script.
+    command -v "$SECAUDIT_CMD" >/dev/null 2>&1
+}
+
 if ! _qa_skill_present; then
     # Emit machine-readable halt with code_health identifier.
     printf 'halt code_health:qa_skill_missing\n'
@@ -146,12 +163,52 @@ fi
 
 info "Scan skill '$QA_CMD' is present."
 
-# ── Run qa on branch; return blocking-finding count ──────────────────────────
-# Output contract: the qa command writes severity-tagged findings.
+if ! _secaudit_skill_present; then
+    # Emit machine-readable halt with code_health identifier.
+    printf 'halt code_health:secaudit_skill_missing\n'
+    info "HALT: configured scan skill '$SECAUDIT_CMD' is not installed or not in PATH."
+    info "Install autospec-secaudit before re-running the pre-merge gate."
+    exit 2
+fi
+
+info "Scan skill '$SECAUDIT_CMD' is present."
+
+# ── Shared severity classifier ────────────────────────────────────────────────
+# Output contract: scan commands write severity-tagged findings.
 # We look for lines matching high/severe/medium/critical as blocking.
-# For testability, QA output is captured and parsed.
+
+_count_blocking_findings() {
+    # Reads scan output from stdin; counts high/severe/medium/critical findings.
+    # Patterns: "severity: high", "SEVERITY: MEDIUM", "[HIGH]", etc.
+    grep -ciE \
+        '(severity[[:space:]]*:[[:space:]]*(high|severe|critical|medium)|\[(high|severe|critical|medium)\]|^(high|severe|critical|medium)[[:space:]])' \
+        || true
+}
+
+_has_blocking_findings() {
+    local scan_output="$1"
+    local count
+    count=$(printf '%s' "$scan_output" | _count_blocking_findings)
+    if [ "${count:-0}" -gt 0 ]; then
+        return 0  # has blocking findings
+    else
+        return 1  # no blocking findings
+    fi
+}
+
+_log_low_findings() {
+    local scan_output="$1" label="$2"
+    local low_findings
+    low_findings=$(printf '%s' "$scan_output" | \
+        grep -iE '(severity[[:space:]]*:[[:space:]]*(low|info)|\[(low|info)\]|^(low|info)[[:space:]])' || true)
+    if [ -n "$low_findings" ]; then
+        info "$label low/info findings (non-blocking, recorded):"
+        printf '%s\n' "$low_findings" >&2
+    fi
+}
+
+# ── Run qa on branch ──────────────────────────────────────────────────────────
 _run_qa() {
-    # Returns 0 and prints findings to stdout.
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] would run: $QA_CMD --branch $PR_BRANCH"
         printf ''
@@ -162,23 +219,15 @@ _run_qa() {
     "$QA_CMD" --branch "$PR_BRANCH" 2>&1 || true
 }
 
-_count_blocking_findings() {
-    # Reads qa output from stdin; counts high/severe/medium/critical findings.
-    # Patterns: "severity: high", "SEVERITY: MEDIUM", "[HIGH]", etc.
-    grep -ciE \
-        '(severity[[:space:]]*:[[:space:]]*(high|severe|critical|medium)|\[(high|severe|critical|medium)\]|^(high|severe|critical|medium)[[:space:]])' \
-        || true
-}
-
-_has_blocking_findings() {
-    local qa_output="$1"
-    local count
-    count=$(printf '%s' "$qa_output" | _count_blocking_findings)
-    if [ "${count:-0}" -gt 0 ]; then
-        return 0  # has blocking findings
-    else
-        return 1  # no blocking findings
+# ── Run secaudit on branch ────────────────────────────────────────────────────
+_run_secaudit() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] would run: $SECAUDIT_CMD --branch $PR_BRANCH"
+        printf ''
+        return 0
     fi
+    # Run secaudit; capture combined output. Exit code is informational only.
+    "$SECAUDIT_CMD" --branch "$PR_BRANCH" 2>&1 || true
 }
 
 # ── Fix dispatch ──────────────────────────────────────────────────────────────
@@ -186,15 +235,15 @@ _has_blocking_findings() {
 # In the real conductor this calls a Tier-B implementer; here we call
 # a FIX_CMD that callers can stub (AUTOSPEC_FIX_CMD env or default gh comment).
 _dispatch_fix() {
-    local attempt="$1" qa_output="$2"
+    local attempt="$1" scan_output="$2" stage="$3"
     local fix_cmd="${AUTOSPEC_FIX_CMD:-}"
-    info "Dispatching fix for blocking findings (attempt $attempt/$MAX_ATTEMPTS) ..."
+    info "Dispatching fix for $stage blocking findings (attempt $attempt/$MAX_ATTEMPTS) ..."
     if [ -n "$fix_cmd" ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
             info "[dry-run] would run: $fix_cmd --branch $PR_BRANCH"
         else
             # Pass findings summary to the fix command via stdin.
-            printf '%s' "$qa_output" | "$fix_cmd" --branch "$PR_BRANCH" || true
+            printf '%s' "$scan_output" | "$fix_cmd" --branch "$PR_BRANCH" || true
         fi
     else
         info "No AUTOSPEC_FIX_CMD set; recording findings for operator review."
@@ -225,7 +274,7 @@ _apply_needs_human_label() {
     fi
 }
 
-# ── Main fix-and-recheck loop ─────────────────────────────────────────────────
+# ── Stage 1: QA fix-and-recheck loop ─────────────────────────────────────────
 attempt=1
 while true; do
     info "=== QA run (attempt $attempt/$MAX_ATTEMPTS) ==="
@@ -233,35 +282,61 @@ while true; do
     qa_output=""
     qa_output="$(_run_qa)"
 
-    # Capture low/info findings for the digest (non-blocking, always recorded).
-    low_findings=""
-    low_findings=$(printf '%s' "$qa_output" | \
-        grep -iE '(severity[[:space:]]*:[[:space:]]*(low|info)|\[(low|info)\]|^(low|info)[[:space:]])' || true)
-    if [ -n "$low_findings" ]; then
-        info "Low/info findings (non-blocking, recorded):"
-        printf '%s\n' "$low_findings" >&2
-    fi
+    _log_low_findings "$qa_output" "QA"
 
     if _has_blocking_findings "$qa_output"; then
         if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
             # Retries exhausted and branch is still dirty — do NOT merge.
-            info "Max attempts ($MAX_ATTEMPTS) reached with blocking findings still present."
+            info "Max attempts ($MAX_ATTEMPTS) reached with QA blocking findings still present."
             _apply_needs_human_label
             _notify "autospec: needs-human" \
-                "Pre-merge gate exhausted $MAX_ATTEMPTS attempts on $PR_BRANCH; blocking findings remain."
+                "Pre-merge gate exhausted $MAX_ATTEMPTS QA attempts on $PR_BRANCH; blocking findings remain."
             printf 'block retries_exhausted\n'
             exit 1
         fi
 
-        info "Blocking findings detected; dispatching fix (attempt $attempt/$MAX_ATTEMPTS)."
-        _dispatch_fix "$attempt" "$qa_output"
+        info "Blocking QA findings detected; dispatching fix (attempt $attempt/$MAX_ATTEMPTS)."
+        _dispatch_fix "$attempt" "$qa_output" "qa"
         attempt=$((attempt + 1))
         # Loop: re-run qa on the (now-patched) branch.
         continue
     fi
 
-    # No blocking findings — gate passes.
-    info "No blocking findings on attempt $attempt. Gate passes."
+    # QA stage clear — proceed to secaudit stage.
+    info "QA stage clear on attempt $attempt."
+    break
+done
+
+# ── Stage 2: secaudit fix-and-recheck loop ────────────────────────────────────
+secaudit_attempt=1
+while true; do
+    info "=== secaudit run (attempt $secaudit_attempt/$MAX_ATTEMPTS) ==="
+
+    secaudit_output=""
+    secaudit_output="$(_run_secaudit)"
+
+    _log_low_findings "$secaudit_output" "secaudit"
+
+    if _has_blocking_findings "$secaudit_output"; then
+        if [ "$secaudit_attempt" -ge "$MAX_ATTEMPTS" ]; then
+            # Retries exhausted and branch is still dirty — do NOT merge.
+            info "Max attempts ($MAX_ATTEMPTS) reached with secaudit blocking findings still present."
+            _apply_needs_human_label
+            _notify "autospec: needs-human" \
+                "Pre-merge gate exhausted $MAX_ATTEMPTS secaudit attempts on $PR_BRANCH; blocking findings remain."
+            printf 'block retries_exhausted\n'
+            exit 1
+        fi
+
+        info "Blocking secaudit findings detected; dispatching fix (attempt $secaudit_attempt/$MAX_ATTEMPTS)."
+        _dispatch_fix "$secaudit_attempt" "$secaudit_output" "secaudit"
+        secaudit_attempt=$((secaudit_attempt + 1))
+        # Loop: re-run secaudit on the (now-patched) branch.
+        continue
+    fi
+
+    # Both stages clear — gate passes.
+    info "No blocking findings on QA+secaudit. Gate passes."
     printf 'merge-ok\n'
     exit 0
 done
