@@ -275,6 +275,101 @@ state_comment_obj() {
       }'
 }
 
+# ── F5: WATCHDOG_RECLAIM_SECS (3h) path — GitHub-authority gate (#1367) ─────────
+#
+# The bare 3h reclaim must also consult reclaim_decision so a live worker on a
+# non-`claimed` step is never reclaimed without GitHub corroboration.
+# Tests mirror the F1+F2+F3 pattern: heartbeat step="implementing", threshold
+# overridden small, and STALE_SECS set below RECLAIM_SECS so the age=360 hb
+# reaches the reclaim branch (not the "too fresh" early-continue).
+
+@test "F5: live same-host pid on non-claimed step past 3h is NOT reclaimed" {
+    isolate_heartbeat_pass
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=300
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    fresh="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    # expand_start is a valid schema step (non-claimed) a worker may be on >3h.
+    write_hb 42 expand_start 360
+    write_state_worker 42 expand_start "$fresh" "thishost:me:shell:$$" > "$COMMENTS"
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=0"* ]]
+    [ -f "$(HB_DIR_FOR)/42.json" ]
+    grep -q 'in-progress-by-bot' "$LABELS"
+    ! grep -q -- '--add-label auto-implement' "$CALLS"
+}
+
+@test "F5: gh failure on non-claimed step past 3h fail-safes to hold" {
+    isolate_heartbeat_pass
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=300
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    write_hb 42 expand_start 360
+    # Replace the gh stub so the run-state fetch returns non-zero (API down).
+    cat > "$TEST_TMP/bin/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "${CALLS:?}"
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then printf 'testorg/testrepo\n'; exit 0; fi
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+  if [ -n "${ISSUE_LIST:-}" ] && [ -f "${ISSUE_LIST}" ]; then cat "${ISSUE_LIST}"; else jq -r '.[].number' "${COMMENTS:?}"; fi
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  if printf '%s\n' "$*" | grep -q -- '--json comments'; then
+    exit 1   # simulate GitHub API failure → fail-safe to hold
+  fi
+  cat "${LABELS:?}"
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then exit 0; fi
+if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then cat "${PR_STATE:?}"; exit 0; fi
+exit 0
+SH
+    chmod +x "$TEST_TMP/bin/gh"
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=0"* ]]
+    [ -f "$(HB_DIR_FOR)/42.json" ]
+    grep -q 'in-progress-by-bot' "$LABELS"
+}
+
+@test "F5: absent run-state on non-claimed step past 3h is reclaimed" {
+    isolate_heartbeat_pass
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=300
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    write_hb 42 expand_start 360
+    printf '[]\n' > "$COMMENTS"   # no run-state comment → no authoritative owner
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=1"* ]]
+    [ ! -f "$(HB_DIR_FOR)/42.json" ]
+    grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$CALLS"
+}
+
+@test "F5: dead same-host pid on non-claimed step past 3h is reclaimed" {
+    isolate_heartbeat_pass
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=300
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    fresh="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    write_hb 42 expand_start 360
+    # PID 999999 is not alive on this host → worker_liveness = dead → reclaim.
+    write_state_worker 42 expand_start "$fresh" "thishost:me:shell:999999" > "$COMMENTS"
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=1"* ]]
+    [ ! -f "$(HB_DIR_FOR)/42.json" ]
+    grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$CALLS"
+}
+
 # ── F4: canonical-writer ↔ canonical/legacy-reader contract (no split-brain) ──
 
 @test "F4: real heartbeat-write.sh writes the canonical owner__name dir and the watchdog reads/reclaims it" {
