@@ -51,10 +51,11 @@ set -eu
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-RESERVED_LABELS="autospec:stop autospec:pause autospec:steer autospec:priority"
+RESERVED_LABELS="autospec:stop autospec:pause autospec:steer autospec:priority autospec:recalibrate-persona"
 
 FLAG_DIR="${AUTOSPEC_CONTROL_STATE_DIR:-${HOME}/.autospec}"
 PAUSE_FLAG="${FLAG_DIR}/autonomous-pause.flag"
+RECALIBRATE_FLAG="${FLAG_DIR}/persona-recalibrate.flag"
 
 GH="${AUTOSPEC_GH_CMD:-gh}"
 
@@ -92,7 +93,7 @@ EOF
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --repo)       REPO="$2"; shift 2 ;;
-        --state-dir)  FLAG_DIR="$2"; PAUSE_FLAG="${FLAG_DIR}/autonomous-pause.flag"; shift 2 ;;
+        --state-dir)  FLAG_DIR="$2"; PAUSE_FLAG="${FLAG_DIR}/autonomous-pause.flag"; RECALIBRATE_FLAG="${FLAG_DIR}/persona-recalibrate.flag"; shift 2 ;;
         --help|-h)    usage; exit 0 ;;
         *)            printf 'autonomous-control-channel: unknown argument: %s\n' "$1" >&2; usage; exit 2 ;;
     esac
@@ -193,13 +194,26 @@ emit_decision() {
                 printf 'PRIORITY_ISSUE:%s\n' "$issue_number"
             fi
             ;;
+
+        "autospec:recalibrate-persona")
+            # Write a flag file so the next conductor cycle triggers a persona
+            # refresh / interview re-run.  Atomic via temp+mv; idempotent.
+            local stamp
+            stamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo 'unknown')"
+            mkdir -p "$FLAG_DIR"
+            local _rtmp
+            _rtmp="$(mktemp "${FLAG_DIR}/.persona-recalibrate.XXXXXX")"
+            printf 'recalibrate\n%s\n' "$stamp" > "$_rtmp"
+            mv "$_rtmp" "$RECALIBRATE_FLAG"
+            printf 'DECISION:persona-recalibrate\n'
+            ;;
     esac
 }
 
 # ---------------------------------------------------------------------------
 # Main: query each reserved label in severity order, emit decisions.
 # ---------------------------------------------------------------------------
-# Severity order: stop (highest) > pause > steer > priority (lowest).
+# Severity order: stop (highest) > pause > steer > priority > recalibrate-persona (lowest).
 for label in $RESERVED_LABELS; do
     issues_json="$(query_label "$label")"
     emit_decision "$label" "$issues_json"
