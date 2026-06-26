@@ -566,10 +566,15 @@ for hb in "$WATCHDOG_DIR"/*.json; do
     fi
 
     if [ "$age" -ge "$WATCHDOG_RECLAIM_SECS" ]; then
-        reclaim_issue "$issue" "$age"
-        reclaimed=$((reclaimed + 1))
-        state_unset "$issue"
-        rm -f "$hb"
+        # Gate the 3h TTL reclaim on the same GitHub-authority cross-check used
+        # by the claimed-timeout path (F1+F2+F3 invariant, closes #1367).
+        # A live worker is never reclaimed; gh API failure fail-safes to hold.
+        if [ "$(reclaim_decision "$issue" "$WATCHDOG_RECLAIM_SECS")" = "reclaim" ]; then
+            reclaim_issue "$issue" "$age"
+            reclaimed=$((reclaimed + 1))
+            state_unset "$issue"
+            rm -f "$hb"
+        fi
         continue
     fi
 
