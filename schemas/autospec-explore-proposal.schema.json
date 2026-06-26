@@ -45,6 +45,10 @@
     "score": {
       "type": "number",
       "description": "Aggregator-computed ranking score (confidence * source_weight / complexity)."
+    },
+    "priority": {
+      "type": "boolean",
+      "description": "When true, the aggregator applies AUTOSPEC_PRIORITY_BOOST (default 1.5) to this proposal's score before ranking, bounded so it cannot exceed max_non_boosted_score * multiplier. Proposals with source==\"steer\" are also treated as priority-aligned."
     }
   }
 }
