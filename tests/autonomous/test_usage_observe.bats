@@ -131,6 +131,30 @@ make_probe() {
     [ "$(printf '%s' "$output" | jq -r '.percent')" = "null" ]
 }
 
+# Probe that prints a valid-looking percent but exits non-zero must NOT be
+# trusted (regression: pipeline-masked exit status).
+@test "probe printing a number but exiting non-zero falls back to false" {
+    probe="$TEST_DIR/probe.sh"
+    printf '#!/usr/bin/env bash\necho 73\nexit 1\n' > "$probe"
+    [ -f "$probe" ]
+    chmod +x "$probe"
+    export AUTOSPEC_USAGE_PROBE_CLAUDE="$probe"
+    run bash "$SCRIPT" claude
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '.observable')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.percent')" = "null" ]
+}
+
+# A bare "." would coerce to 0 in awk and break jq --argjson; it must be
+# rejected as non-numeric (regression: is_valid_percent dot handling).
+@test "probe emitting a bare dot falls back to false (valid JSON)" {
+    probe="$(make_probe .)"
+    export AUTOSPEC_USAGE_PROBE_CODEX="$probe"
+    run bash "$SCRIPT" codex
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | jq -e '.observable == false and .percent == null'
+}
+
 @test "a probe override on one harness does not affect another" {
     probe="$(make_probe 50)"
     export AUTOSPEC_USAGE_PROBE_CLAUDE="$probe"

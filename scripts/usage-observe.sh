@@ -82,16 +82,12 @@ default_source_for() {
 }
 
 # True (exit 0) when val is a number in [0,100]. Accepts integers and decimals.
+# Requires at least one leading digit so bare/partial dots ("." / "1." / ".5" /
+# "1.2.3") are rejected before the numeric range check (a bare "." would coerce
+# to 0 in awk and then break `jq --argjson`).
 is_valid_percent() {
     val="$1"
-    case "$val" in
-        ''|*[!0-9.]*) return 1 ;;
-    esac
-    # Reject strings with more than one dot (e.g. "1.2.3").
-    dots="$(printf '%s' "$val" | tr -cd '.' | wc -c | tr -d ' ')"
-    if [ "$dots" -gt 1 ]; then
-        return 1
-    fi
+    printf '%s' "$val" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || return 1
     awk -v v="$val" 'BEGIN { exit !(v >= 0 && v <= 100) }'
 }
 
@@ -121,9 +117,16 @@ probe_harness() {
     cmd="${!var:-}"
 
     if [ -n "$cmd" ]; then
-        probe_out=""
+        probe_raw=""
         probe_rc=0
-        probe_out="$($cmd 2>/dev/null | head -1 | tr -d '[:space:]')" || probe_rc=$?
+        # Capture the probe command's OWN exit status (no pipeline in the
+        # command substitution, so a probe that prints then exits non-zero is
+        # correctly rejected rather than masked by head/tr's exit status).
+        probe_raw="$($cmd 2>/dev/null)" || probe_rc=$?
+        # First line, trimming leading/trailing whitespace only (internal
+        # whitespace stays so "1 2" is rejected by is_valid_percent).
+        probe_out="$(printf '%s\n' "$probe_raw" | head -1 \
+            | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
         if [ "$probe_rc" = "0" ] && is_valid_percent "$probe_out"; then
             emit_json "$harness" true "$probe_out" "probe:${var}"
             return 0
