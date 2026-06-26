@@ -2,14 +2,15 @@
 # scripts/explore-research/internet.sh — LLM-heavy researcher #6 of 6.
 #
 # Multi-stage pipeline:
-#   1. Scan README for competitor / alternatives URLs.
+#   1. Collect candidate URLs: .autospec/competitors.yml (Tier-3) when present;
+#      fall back to README/"purpose"-derived URLs when absent.
 #   2. For each candidate URL: enforce domain allowlist (PR #685 pattern via
 #      scripts/lib/explore-internet-safety.sh::explore_internet_domain_allowed).
 #   3. Rate-limit check (5/round, 30/session).
 #   4. Fetch (via curl or AUTOSPEC_FETCH_STUB).
 #   5. Prompt-injection guard on fetched content.
-#   6. LLM extracts feature proposals; each proposal includes the citation URL
-#      in its evidence string.
+#   6. LLM extracts feature proposals (behavior-level clean-room directive);
+#      each proposal includes the citation URL in its evidence string.
 #
 # Output: JSON {"source":"internet","proposals":[…]} on stdout.
 #
@@ -23,6 +24,7 @@
 #   AUTOSPEC_FETCH_STUB_<host>   — content returned for fetch of <host>.
 #   AUTOSPEC_FETCH_URLS_OVERRIDE — newline-separated URLs (skips README scan).
 #   AUTOSPEC_EXPLORE_INTERNET_ALLOWLIST — CSV overriding the default allowlist.
+#   AUTOSPEC_COMPETITORS_YML     — override path for competitors.yml (tests).
 
 set -u
 
@@ -46,12 +48,55 @@ _emit_empty() {
     exit 0
 }
 
+# ── competitors.yml parser (F7, issue #1399) ───────────────────────
+# Reads URL entries from .autospec/competitors.yml.
+# Schema:
+#   version: 1
+#   competitors:
+#     - name: "tool-a"
+#       url: "https://github.com/tool-a/tool-a"
+# Falls back to a simple line-scan when PyYAML is unavailable.
+_parse_competitors_yml() {
+    local yml="$1"
+    [ -f "$yml" ] || return 0
+    python3 - "$yml" <<'PY'
+import sys, re
+path = sys.argv[1]
+try:
+    import yaml  # PyYAML
+    with open(path) as fh:
+        d = yaml.safe_load(fh)
+    for entry in (d or {}).get("competitors", []):
+        u = str(entry.get("url", "")).strip()
+        if u.startswith("http"):
+            print(u)
+except ImportError:
+    # Fallback: extract url: lines without PyYAML dependency.
+    with open(path) as fh:
+        for line in fh:
+            m = re.match(r'\s+url:\s*["\']?(https?://[^\s"\'#]+)', line)
+            if m:
+                print(m.group(1))
+except Exception as exc:
+    sys.stderr.write(f"competitors.yml parse error: {exc}\n")
+PY
+}
+
 # ── Stage 1: collect candidate URLs ───────────────────────────────
 collect_urls() {
     if [ -n "${AUTOSPEC_FETCH_URLS_OVERRIDE:-}" ]; then
         printf '%s\n' "$AUTOSPEC_FETCH_URLS_OVERRIDE"
         return
     fi
+
+    # F7: prefer .autospec/competitors.yml (Tier-3 targets) when present.
+    _COMPETITORS_YML="${AUTOSPEC_COMPETITORS_YML:-$REPO_ROOT/.autospec/competitors.yml}"
+    if [ -f "$_COMPETITORS_YML" ]; then
+        _parse_competitors_yml "$_COMPETITORS_YML" | head -n 20
+        return
+    fi
+
+    # Fallback: README-derived URLs from Alternatives/Competitors sections.
     [ -f README.md ] || return 0
     # Pull URLs from "Alternatives" / "Prior art" / "Competitors" sections.
     awk '
@@ -153,7 +198,14 @@ fetched competitor pages below (delimited by ---END-URL--- and ---END-CONTENT---
 propose 1-5 feature ideas inspired by what those competitors do that this
 repo does NOT. For each proposal include the source URL in the "evidence"
 field (REQUIRED). Output ONLY a JSON array of {title, evidence,
-estimated_complexity ∈ small|medium|large, confidence ∈ 0.0-1.0}.'
+estimated_complexity ∈ small|medium|large, confidence ∈ 0.0-1.0}.
+
+CLEAN-ROOM DIRECTIVE (MANDATORY): Describe only what each competitor feature
+DOES at the behavioral/UX level — what a user can observe or trigger. Never
+reproduce competitor source code, copy algorithm implementations, or include
+proprietary implementation details. Your output must be behavior-level
+observations only. The autospec-secaudit IP/license check is the backstop;
+your role is behavioral observation, not reverse-engineering.'
     CORPUS="$(cat "$FETCHED_DIR/corpus.txt")"
     INPUT="$INSTRUCTION"$'\n\n## Corpus\n'"$CORPUS"
     RC=0
