@@ -518,6 +518,117 @@ autospec_conductor_run() {
         _persona_synth_sh="${_sdir}/autonomous-persona-synth.sh"
     fi
 
+    # ── F4: Priority match script resolution ───────────────────────────────────
+    # Resolve autonomous-priority-match.sh: env override > sibling of scripts/.
+    local _priority_match_sh=""
+    if [ -n "${AUTOSPEC_PRIORITY_MATCH_BIN:-}" ] && [ -x "$AUTOSPEC_PRIORITY_MATCH_BIN" ]; then
+        _priority_match_sh="$AUTOSPEC_PRIORITY_MATCH_BIN"
+    elif [ -f "${_sdir}/autonomous-priority-match.sh" ]; then
+        _priority_match_sh="${_sdir}/autonomous-priority-match.sh"
+    fi
+
+    # ── F4: Priority intake ────────────────────────────────────────────────────
+    # Persist priorities to ~/.autospec/autonomous-priorities.md.
+    # Sources (in priority order):
+    #   1. CONDUCTOR_PRIORITIES env (--priorities "a; b; c" style, ";" delimited)
+    #   2. Existing priorities file (subsequent runs — no re-ask)
+    #   3. First run with neither: ONE AskUserQuestion startup gate via
+    #      AUTOSPEC_ASK_PRIORITIES_CMD seam, then proceed.
+    # fail-open: all errors produce a warning but never abort the conductor.
+    local _priorities_file="${AUTOSPEC_PRIORITIES_FILE:-${HOME}/.autospec/autonomous-priorities.md}"
+    local _priorities_dir
+    _priorities_dir="$(dirname "$_priorities_file")"
+
+    if [ -n "${CONDUCTOR_PRIORITIES:-}" ]; then
+        # --priorities supplied: parse semicolon-delimited items and append.
+        mkdir -p "$_priorities_dir" 2>/dev/null || true
+        printf '%s\n' "$CONDUCTOR_PRIORITIES" | tr ';' '\n' | while IFS= read -r _pri; do
+            _pri="$(printf '%s' "$_pri" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+            if [ -n "$_pri" ]; then
+                printf -- '- %s\n' "$_pri"
+            fi
+        done >> "$_priorities_file" 2>/dev/null || true
+        printf '[conductor] F4: persisted priorities from CONDUCTOR_PRIORITIES to %s\n' \
+            "$_priorities_file" >&2
+    elif [ ! -f "$_priorities_file" ]; then
+        # First run with no priorities file: one AskUserQuestion startup gate.
+        local _ask_priorities_cmd="${AUTOSPEC_ASK_PRIORITIES_CMD:-}"
+        if [ -n "$_ask_priorities_cmd" ]; then
+            printf '[conductor] F4: no priorities file — invoking startup gate\n' >&2
+            local _asked_priorities
+            _asked_priorities="$(bash -c "$_ask_priorities_cmd" 2>/dev/null || true)"
+            mkdir -p "$_priorities_dir" 2>/dev/null || true
+            if [ -n "$_asked_priorities" ]; then
+                printf '%s\n' "$_asked_priorities" | tr ';' '\n' | while IFS= read -r _pri; do
+                    _pri="$(printf '%s' "$_pri" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+                    if [ -n "$_pri" ]; then
+                        printf -- '- %s\n' "$_pri"
+                    fi
+                done >> "$_priorities_file" 2>/dev/null || true
+            else
+                # User declined — create the file to suppress future asks.
+                : > "$_priorities_file"
+            fi
+        else
+            # No ask seam available: proceed without priorities (fail-open).
+            printf '[conductor] F4: no priorities and no AUTOSPEC_ASK_PRIORITIES_CMD seam; proceeding without priorities\n' >&2
+        fi
+    fi
+
+    # Pre-compute the explore cycle wrapper for Tier 2/3 priority marking.
+    # When _priority_match_sh and _priorities_file both exist, the conductor
+    # wraps the explore-research-cycle.sh call with a two-stage approach:
+    #   1. --stage dedup (get raw deduped proposals)
+    #   2. autonomous-priority-match.sh on each proposal (sets priority:true)
+    #   3. --stage finalize (rank with the clamped boost consuming the flag)
+    # The wrapper is set as AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD inline on the bash -c
+    # invocation so it never leaks into Tier-1 drain calls.
+    # Fail-open: if cycle script or match script is absent, fall back to the
+    # original non-wrapped explore call.
+    local _priority_cycle_cmd=""
+    local _cycle_sh="${_sdir}/explore-research-cycle.sh"
+    local _eff_persona="${HOME}/.autospec/operator-persona.md"
+    if [ -f "${_repo_root}/.autospec/operator-persona.effective.md" ]; then
+        _eff_persona="${_repo_root}/.autospec/operator-persona.effective.md"
+    fi
+    if [ -f "$_priority_match_sh" ] && [ -f "$_priorities_file" ] \
+        && [ -s "$_priorities_file" ] && [ -f "$_cycle_sh" ]; then
+        # Single-quoted so variables expand when bash -c runs the string.
+        # Inner python3 -c uses env vars (PRIORITY_DEDUP/MATCH/MARKED) to avoid
+        # quoting conflicts between the outer bash string and python string literals.
+        _priority_cycle_cmd='set -eu
+_csh="${AUTOSPEC_CYCLE_SH}"
+_match="${AUTOSPEC_PRIORITY_MATCH_BIN}"
+_out="${AUTOSPEC_EXPLORE_ONCE_OUT}"
+_src="${AUTOSPEC_EXPLORE_ONCE_SOURCES:-spec-vs-code,prior-reports,codebase-signals,open-issues,source-analysis,dependency-health}"
+_dedup="${_out}.dedup.$$"
+bash "$_csh" --stage dedup --out "$_dedup" --research-sources "$_src" 2>/dev/null || true
+_marked="${_dedup}.marked"
+if [ -f "$_dedup" ] && [ -f "$_match" ]; then
+    PRIORITY_DEDUP="$_dedup" PRIORITY_MATCH="$_match" PRIORITY_MARKED="$_marked" \
+    python3 -c "
+import json,subprocess,os
+d=json.load(open(os.environ[\"PRIORITY_DEDUP\"]))
+match=os.environ[\"PRIORITY_MATCH\"]
+props=d.get(\"deduped\") or d.get(\"proposals\") or []
+out=[]
+for p in props:
+    try:
+        r=subprocess.run([\"bash\",match],input=json.dumps(p),capture_output=True,text=True,timeout=30)
+        out.append(json.loads(r.stdout) if r.returncode==0 and r.stdout.strip().startswith(\"{\") else p)
+    except Exception:
+        out.append(p)
+d[\"deduped\"]=out
+json.dump(d,open(os.environ[\"PRIORITY_MARKED\"],\"w\"))
+" 2>/dev/null || cp "$_dedup" "$_marked"
+    bash "$_csh" --stage finalize --deduped-in "$_marked" --out "$_out" --research-sources "$_src" 2>/dev/null || true
+    rm -f "$_dedup" "$_marked" 2>/dev/null || true
+else
+    bash "$_csh" --out "$_out" --research-sources "$_src" 2>/dev/null || true
+    rm -f "$_dedup" 2>/dev/null || true
+fi'
+    fi
+
     local _cycle=0
     local _dry_cycles=0
     local _tier2_dry_cycles=0
@@ -582,6 +693,24 @@ autospec_conductor_run() {
             _ctrl_decision="$(printf '%s' "$_ctrl_out" \
                 | grep '^DECISION:' | head -1 \
                 | sed 's/^DECISION://' || true)"
+
+            # ── F4: control-payload capture ────────────────────────────────────
+            # The conductor currently discards DIRECTIVE:/PRIORITY_ISSUE: lines
+            # after printf.  F4 persists them into the priorities file so steer
+            # directives survive across cycles.  Fail-open: errors never abort.
+            local _ctrl_payload
+            _ctrl_payload="$(printf '%s' "$_ctrl_out" \
+                | grep -E '^(DIRECTIVE:|PRIORITY_ISSUE:)' || true)"
+            if [ -n "$_ctrl_payload" ]; then
+                mkdir -p "$_priorities_dir" 2>/dev/null || true
+                {
+                    printf '\n## Steer directive captured %s\n' \
+                        "$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo 'unknown')"
+                    printf '%s\n' "$_ctrl_payload"
+                } >> "$_priorities_file" 2>/dev/null || true
+                printf '[conductor] F4: control-payload captured into %s\n' \
+                    "$_priorities_file" >&2
+            fi
         fi
 
         if [ -n "$_ctrl_decision" ]; then
@@ -829,12 +958,34 @@ autospec_conductor_run() {
                     _explore_out='{"tier":"local","proposals_seen":0,"new_candidates":0,"filed":0,"dry":true,"reason":"dry-run"}'
                 elif [ "$_action" = "run-explore-once-internet" ]; then
                     printf '[conductor] Tier 3: invoking explore --once --research-sources internet\n' >&2
-                    _explore_out="$(bash -c "$_explore_cmd --once --research-sources internet" \
-                        2>/dev/null || printf '{"dry":true,"reason":"explore-error"}')"
+                    # F4: wrap with priority-aware cycle when priorities are available.
+                    if [ -n "$_priority_cycle_cmd" ]; then
+                        _explore_out="$(AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$_priority_cycle_cmd" \
+                            AUTOSPEC_CYCLE_SH="$_cycle_sh" \
+                            AUTOSPEC_PRIORITY_MATCH_BIN="$_priority_match_sh" \
+                            AUTOSPEC_PRIORITIES_FILE="$_priorities_file" \
+                            AUTOSPEC_PERSONA_FILE="$_eff_persona" \
+                            bash -c "$_explore_cmd --once --research-sources internet" \
+                            2>/dev/null || printf '{"dry":true,"reason":"explore-error"}')"
+                    else
+                        _explore_out="$(bash -c "$_explore_cmd --once --research-sources internet" \
+                            2>/dev/null || printf '{"dry":true,"reason":"explore-error"}')"
+                    fi
                 else
                     printf '[conductor] Tier 2: invoking explore --once (local sources)\n' >&2
-                    _explore_out="$(bash -c "$_explore_cmd --once" \
-                        2>/dev/null || printf '{"dry":true,"reason":"explore-error"}')"
+                    # F4: wrap with priority-aware cycle when priorities are available.
+                    if [ -n "$_priority_cycle_cmd" ]; then
+                        _explore_out="$(AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$_priority_cycle_cmd" \
+                            AUTOSPEC_CYCLE_SH="$_cycle_sh" \
+                            AUTOSPEC_PRIORITY_MATCH_BIN="$_priority_match_sh" \
+                            AUTOSPEC_PRIORITIES_FILE="$_priorities_file" \
+                            AUTOSPEC_PERSONA_FILE="$_eff_persona" \
+                            bash -c "$_explore_cmd --once" \
+                            2>/dev/null || printf '{"dry":true,"reason":"explore-error"}')"
+                    else
+                        _explore_out="$(bash -c "$_explore_cmd --once" \
+                            2>/dev/null || printf '{"dry":true,"reason":"explore-error"}')"
+                    fi
                 fi
 
                 # Parse yield JSON for dryness.
