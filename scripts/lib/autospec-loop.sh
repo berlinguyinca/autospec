@@ -784,7 +784,7 @@ _conductor_sandbox_drift_section() {
     fi
 
     # Run git commands from the repo root.
-    local merge_base commits_behind sandbox_files base_files conflict_risk
+    local merge_base commits_behind sandbox_files conflict_risk
 
     merge_base="$(git -C "$repo_root" merge-base \
         "origin/${base_branch}" "$sandbox_branch" 2>/dev/null || true)"
