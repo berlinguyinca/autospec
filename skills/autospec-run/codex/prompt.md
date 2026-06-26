@@ -197,6 +197,21 @@ bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/run-batch-start.sh" --wri
 
 This writes the UTC ISO 8601 timestamp to `~/.autospec/.run-batch-start` (idempotent within a run; pass `--force` only when intentionally starting a fresh batch window). Phase 5.5 reads it back via `run-batch-start.sh --read`, which yields `BATCH_START_DATE`.
 
+## Explore-on-drain counter reset (run-start, once)
+
+Reset the per-repo explore-on-drain cycle counter so a fresh `/autospec-run` always starts with a clean slate (spec: "counter resets when the operator clears it or starts a fresh `/autospec-run`"). Run once, immediately after the batch-start timestamp above:
+
+```bash
+# Derive the canonical per-repo slug (owner__name) for state scoping.
+_eod_slug="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null \
+    | sed 's#/#__#' \
+    || printf '%s' "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" \
+         | tr '/' '_' | sed 's/^_//')"
+rm -f "$HOME/.autospec/explore-on-drain/${_eod_slug}/cycles"
+```
+
+This ensures the cycle cap (`AUTOSPEC_EXPLORE_ON_DRAIN_MAX_CYCLES`, default 3) counts only chains within the current run, not across multiple historical runs. The `_eod_slug` variable is reused in the ALL_DONE block below.
+
 ## Single-instance session lock (run-start, once)
 
 Acquire a per-session lock BEFORE launching the Phase 4 monitor so a single
@@ -286,12 +301,28 @@ while true:
   if [ "$status" = "ALL_DONE" ]; then
     # Queue drained — consult explore-on-drain.sh to decide whether to
     # auto-chain into /autospec-explore or exit normally to Phase 6.
-    # The helper encapsulates: flag check → autonomy gate → cycle-cap.
-    # It emits "chain" or "stop" on stdout; default (flag absent) is "stop".
-    _drain_decision=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-on-drain.sh")
+    # The helper encapsulates: flag check → autonomy gate → dry-well guard
+    # → per-repo cycle-cap.  It emits "chain" or "stop"; default is "stop".
+    # Pass AUTOSPEC_REPO so the helper scopes state to this repo without
+    # calling gh a second time (uses the same slug as the run-start reset).
+    _drain_decision=$(AUTOSPEC_REPO="${AUTOSPEC_REPO:-{repo}}" \
+        bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-on-drain.sh")
     if [ "$_drain_decision" = "chain" ]; then
       echo "[orchestrator] explore-on-drain: chaining into /autospec-explore on sandbox branch"
+      # Record the PR merge watermark before explore starts so we can count
+      # only the PRs it ships (used by the dry-well sentinel below).
+      _eod_before="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       /autospec-explore   # runs on its own sandbox branch, NEVER main
+      # Count PRs merged by this explore cycle and write the dry-well sentinel.
+      # explore-on-drain.sh reads this before the NEXT chain decision:
+      # if the count is 0 it emits "stop" (dry-well guard).
+      _eod_shipped="$(gh pr list --state merged \
+          --json mergedAt,labels \
+          --jq "[.[] | select(.mergedAt >= \"${_eod_before}\" and any(.labels[]; .name == \"autospec-explore\"))] | length" \
+          2>/dev/null || echo 1)"
+      mkdir -p "$HOME/.autospec/explore-on-drain/${_eod_slug}"
+      printf '%s\n' "${_eod_shipped}" \
+          > "$HOME/.autospec/explore-on-drain/${_eod_slug}/last-shipped"
     fi
     break   # proceed to Phase 6 final report
   fi
