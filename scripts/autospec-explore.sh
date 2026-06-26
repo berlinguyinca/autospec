@@ -51,6 +51,7 @@ SPECIALISTS_ARG=""
 AUTONOMOUS=0
 QA_GATE=0
 QA_GATE_PASS_ON_PARTIAL=0
+ONCE=0
 SKIP_INITIAL_HANDOFF="${AUTOSPEC_EXPLORE_SKIP_INITIAL_HANDOFF:-0}"
 HANDOFF_TIMEOUT_SEC="${AUTOSPEC_EXPLORE_HANDOFF_TIMEOUT_SEC:-900}"
 PROMPT=""
@@ -81,6 +82,15 @@ Options:
                               output is byte-unchanged without this flag).
   --qa-gate-pass-on-partial   Treat a PARTIAL gate verdict as PASS (default
                               PARTIAL blocks, matching QA's PARTIAL!=PASS rule).
+  --once                      Run exactly ONE research pass over the resolved
+                              --research-sources, emit a 6-key yield JSON
+                              {tier,proposals_seen,new_candidates,filed,dry,reason}
+                              to stdout, then return. Never enters the perpetual
+                              loop; never calls the drain command. dry=true when
+                              new_candidates==0 after dedup. Test hook:
+                              AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD (overrides the
+                              explore-research-cycle.sh call; must write JSON
+                              to \$AUTOSPEC_EXPLORE_ONCE_OUT).
   --no-initial-handoff        Skip startup /autospec-refine and /autospec-define
                               handoffs; run only the explore research loop.
   --handoff-timeout-sec N     Timeout for startup handoffs (default 900; env:
@@ -105,6 +115,7 @@ while [ "$#" -gt 0 ]; do
         --autonomous)            AUTONOMOUS=1 ;;
         --qa-gate)               QA_GATE=1 ;;
         --qa-gate-pass-on-partial) QA_GATE_PASS_ON_PARTIAL=1 ;;
+        --once)                  ONCE=1 ;;
         --no-initial-handoff)    SKIP_INITIAL_HANDOFF=1 ;;
         --handoff-timeout-sec)   shift; HANDOFF_TIMEOUT_SEC="$1" ;;
         -h|--help)               usage; exit 0 ;;
@@ -257,6 +268,132 @@ _explore_run_handoff() {
     fi
     return "$rc"
 }
+
+# ── --once: single-cycle no-loop mode (F1). ────────────────────────────────────
+# Runs exactly ONE research pass, emits a 6-key yield JSON, and returns.
+# Never enters the perpetual loop; never calls invoke_drain; never creates a
+# sandbox branch. The conductor calls this per cycle and counts consecutive
+# dry=true results for tier escalation (F2).
+#
+# Output JSON keys:
+#   tier            "competitor" when sources include "internet", else "local"
+#   proposals_seen  proposals_total from the research cycle (pre-dedup)
+#   new_candidates  proposals surviving dedup + recent-title filter (post-dedup)
+#   filed           issues actually created via gh issue create
+#   dry             true when new_candidates==0 after dedup
+#   reason          human-readable summary string
+#
+# Test hook: AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD — when set, runs instead of the
+# real explore-research-cycle.sh call. The mock receives AUTOSPEC_EXPLORE_ONCE_OUT
+# (the output JSON path) and AUTOSPEC_EXPLORE_ONCE_SOURCES (the resolved sources)
+# as env vars and must write valid research-cycle JSON to that path.
+if [ "$ONCE" -eq 1 ]; then
+    # Determine tier from the resolved source set.
+    _once_tier="local"
+    if printf '%s\n' "$RESEARCH_SOURCES" | tr ',' '\n' | grep -qx 'internet'; then
+        _once_tier="competitor"
+    fi
+
+    _once_dir=".autospec/explore-once-$$"
+    mkdir -p "$_once_dir"
+    _once_out="$_once_dir/research.json"
+
+    # Run the single research cycle pass (full stage: dedup + verify + rank).
+    if [ -n "${AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD:-}" ]; then
+        AUTOSPEC_EXPLORE_ONCE_OUT="$_once_out" \
+        AUTOSPEC_EXPLORE_ONCE_SOURCES="$RESEARCH_SOURCES" \
+            bash -c "$AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD" \
+            > "$_once_dir/research.log" 2>&1 || true
+    else
+        bash "$SCRIPT_DIR/explore-research-cycle.sh" \
+            --max-issues-per-round "$MAX_ISSUES_PER_ROUND" \
+            --research-sources "$RESEARCH_SOURCES" \
+            --out "$_once_out" \
+            > "$_once_dir/research.log" 2>&1 || true
+    fi
+
+    # Extract counts from the cycle output.
+    _once_seen=0
+    _once_new=0
+    if [ -f "$_once_out" ]; then
+        _once_seen="$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get('proposals_total', 0))
+except Exception:
+    print(0)
+" "$_once_out" 2>/dev/null)" || _once_seen=0
+        _once_new="$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(len(d.get('proposals', [])))
+except Exception:
+    print(0)
+" "$_once_out" 2>/dev/null)" || _once_new=0
+    fi
+    # Ensure numeric defaults
+    case "$_once_seen" in ''|*[!0-9]*) _once_seen=0 ;; esac
+    case "$_once_new"  in ''|*[!0-9]*) _once_new=0  ;; esac
+
+    # dry=true when no new candidates survive dedup.
+    _once_dry="false"
+    if [ "$_once_new" -eq 0 ]; then
+        _once_dry="true"
+    fi
+
+    # File surviving proposals as issues (best-effort; never blocks the mode).
+    _once_filed=0
+    if [ "$_once_new" -gt 0 ] && [ -f "$_once_out" ] && command -v gh >/dev/null 2>&1; then
+        _once_tsv="$_once_dir/proposals.tsv"
+        python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    for p in d.get('proposals', []):
+        title = (p.get('title', '') or '').replace('\n', ' ').replace('\t', ' ')
+        src = (p.get('source', '') or 'unknown').replace('\n', ' ').replace('\t', ' ')
+        comp = (p.get('estimated_complexity', '') or 'medium').lower()
+        try:
+            conf = float(p.get('confidence', 0.5))
+        except Exception:
+            conf = 0.5
+        if comp not in ('small', 'medium', 'large'):
+            comp = 'medium'
+        conf = max(0.0, min(1.0, conf))
+        print('%s\t%s\t%s\t%.2f' % (title, src, comp, conf))
+except Exception:
+    pass
+" "$_once_out" > "$_once_tsv" 2>/dev/null || : > "$_once_tsv"
+
+        while IFS="$(printf '\t')" read -r _t_title _t_src _t_comp _t_conf; do
+            [ -z "$_t_title" ] && continue
+            _t_body="Auto-filed by /autospec-explore --once (tier=$_once_tier).
+
+Source: $_t_src ($RESEARCH_SOURCES)."
+            if gh issue create \
+                --title "$_t_title" \
+                --body "$_t_body" \
+                --label auto-implement \
+                >/dev/null 2>&1; then
+                _once_filed=$((_once_filed + 1))
+            fi
+        done < "$_once_tsv"
+    fi
+
+    # Compose the reason string.
+    if [ "$_once_dry" = "true" ]; then
+        _once_reason="no new candidates after dedup"
+    else
+        _once_reason="filed $_once_filed of $_once_new candidates from $_once_tier research pass"
+    fi
+
+    # Emit the 6-key yield JSON.
+    printf '{"tier":"%s","proposals_seen":%d,"new_candidates":%d,"filed":%d,"dry":%s,"reason":"%s"}\n' \
+        "$_once_tier" "$_once_seen" "$_once_new" "$_once_filed" "$_once_dry" "$_once_reason"
+    exit 0
+fi
 
 # ── Domain-specialist roster discovery + autonomy detection (Issue E2). ────────
 # Mark the run autonomous when --autonomous was passed OR no interactive TTY is
