@@ -402,9 +402,15 @@ PY
 #   4b. Main-health gate (autonomous-resilience.sh main-health): red main →
 #      halt Tier-1 merges; pending → skip drain this cycle (never drain onto red)
 #   5. Drain via AUTOSPEC_RUN_CMD (inherits autospec-run path)
+#   5b. Outcome-ledger wiring (F5): after drain, record per-source ship/fail
+#       outcome for explore-filed issues (is_discovery=true in last-outcome.json).
+#       Tier-1 backlog issues do not write the file; recording is silently skipped.
 #   6. Spend-ledger tally (autonomous-spend-ledger.sh); park on cap
 #   7. Once-per-UTC-day digest to .autospec/autonomous-digest.md + pinned issue
 #   8. On park (spend/usage): arm ScheduleWakeup/cron via autospec-usage-limit.sh
+#   9. Tier 2+ discovery (not yet enabled in Phase 1): consult explore-source-
+#      weights.sh before the discovery cycle ranks proposals, then park.
+#      When F2 enables Tier 2, the cycle runs here with AUTOSPEC_EXPLORE_LEDGER set.
 #
 # Tiers 2-4 are not enabled in Phase 1; a dry Tier-1 parks and notifies.
 #
@@ -415,9 +421,13 @@ PY
 #   CONDUCTOR_POLL_INTERVAL seconds to sleep between cycles (default 60)
 #   CONDUCTOR_DRY_RUN       1 = log only; no autospec-run invocations
 #   CONDUCTOR_NO_DIGEST     1 = skip daily digest writes
-#   AUTOSPEC_RUN_CMD        override autospec-run invocation (for tests/dry-run)
-#   AUTOSPEC_SCRIPTS_DIR    installed scripts path (fallback for helpers)
-#   AUTOSPEC_SESSION_ID     stable session identifier (default: conductor-$$)
+#   AUTOSPEC_RUN_CMD              override autospec-run invocation (for tests/dry-run)
+#   AUTOSPEC_SCRIPTS_DIR          installed scripts path (fallback for helpers)
+#   AUTOSPEC_SESSION_ID           stable session identifier (default: conductor-$$)
+#   AUTOSPEC_EXPLORE_LEDGER       outcome ledger path (default: .autospec/explore-ledger.jsonl)
+#   AUTOSPEC_EXPLORE_LEDGER_BIN   explicit path to explore-ledger.sh (for tests)
+#   AUTOSPEC_EXPLORE_WEIGHTS_BIN  explicit path to explore-source-weights.sh (for tests)
+#   AUTOSPEC_LAST_OUTCOME_FILE    path the run command writes discovery outcomes to
 #
 # Safety rules (AGENTS.md):
 #   set -eu; if/then/fi for one-sided conditionals; no RETURN traps;
@@ -440,6 +450,38 @@ autospec_conductor_run() {
     local _gate="${_sdir}/autonomous-premerge-gate.sh"
     local _resilience="${_sdir}/autonomous-resilience.sh"
     local _usage_limit="${_sdir}/autospec-usage-limit.sh"
+
+    # ── Ledger wiring (F5) ─────────────────────────────────────────────────────
+    # Resolve repo root (parent of scripts/ dir) for ledger data file path.
+    local _repo_root
+    _repo_root="$(cd "${_sdir}/.." 2>/dev/null && pwd || printf '.')"
+
+    # Resolve outcome ledger data path (env override > default under repo root).
+    local _ledger_path="${AUTOSPEC_EXPLORE_LEDGER:-${_repo_root}/.autospec/explore-ledger.jsonl}"
+
+    # Resolve explore-ledger.sh (fail-open: missing script is benign).
+    local _ledger_sh=""
+    if [ -n "${AUTOSPEC_EXPLORE_LEDGER_BIN:-}" ] && [ -x "$AUTOSPEC_EXPLORE_LEDGER_BIN" ]; then
+        _ledger_sh="$AUTOSPEC_EXPLORE_LEDGER_BIN"
+    elif [ -n "${AUTOSPEC_SCRIPTS_DIR:-}" ] && [ -f "${AUTOSPEC_SCRIPTS_DIR}/explore-ledger.sh" ]; then
+        _ledger_sh="${AUTOSPEC_SCRIPTS_DIR}/explore-ledger.sh"
+    elif [ -f "${_sdir}/explore-ledger.sh" ]; then
+        _ledger_sh="${_sdir}/explore-ledger.sh"
+    elif [ -f "${_sdir}/../skills/autospec-shared/scripts/explore-ledger.sh" ]; then
+        _ledger_sh="${_sdir}/../skills/autospec-shared/scripts/explore-ledger.sh"
+    fi
+
+    # Resolve explore-source-weights.sh (same resolution order as explore-research-cycle.sh).
+    local _weights_bin=""
+    if [ -n "${AUTOSPEC_EXPLORE_WEIGHTS_BIN:-}" ] && [ -x "$AUTOSPEC_EXPLORE_WEIGHTS_BIN" ]; then
+        _weights_bin="$AUTOSPEC_EXPLORE_WEIGHTS_BIN"
+    elif [ -n "${AUTOSPEC_SCRIPTS_DIR:-}" ] && [ -f "${AUTOSPEC_SCRIPTS_DIR}/explore-source-weights.sh" ]; then
+        _weights_bin="${AUTOSPEC_SCRIPTS_DIR}/explore-source-weights.sh"
+    elif [ -f "${_sdir}/explore-source-weights.sh" ]; then
+        _weights_bin="${_sdir}/explore-source-weights.sh"
+    elif [ -f "${_sdir}/../skills/autospec-shared/scripts/explore-source-weights.sh" ]; then
+        _weights_bin="${_sdir}/../skills/autospec-shared/scripts/explore-source-weights.sh"
+    fi
 
     # Locate notify.sh: script-relative, then PATH.
     local _notify_sh=""
@@ -613,6 +655,37 @@ autospec_conductor_run() {
                             else
                                 printf '[conductor] WARN: AUTOSPEC_RUN_CMD not set; skipping drain\n' >&2
                             fi
+                            # ── Step 5b: Record per-source outcome for discovery issues ──
+                            # Tier-1 backlog issues do not write this file; recording is
+                            # silently skipped when absent.  All ledger calls are best-effort
+                            # and never abort the cycle.
+                            local _outcome_file
+                            _outcome_file="${AUTOSPEC_LAST_OUTCOME_FILE:-${_repo_root}/.autospec/last-outcome.json}"
+                            if [ -f "$_outcome_file" ]; then
+                                if [ -n "$_ledger_sh" ]; then
+                                    local _is_disc _issue_num _source_val _outcome_val
+                                    _is_disc="$(jq -r '.is_discovery // false' "$_outcome_file" 2>/dev/null || true)"
+                                    if [ "$_is_disc" = "true" ]; then
+                                        _issue_num="$(jq -r '.issue // 0' "$_outcome_file" 2>/dev/null || true)"
+                                        _source_val="$(jq -r '.source // ""' "$_outcome_file" 2>/dev/null || true)"
+                                        _outcome_val="$(jq -r '.outcome // "stalled"' "$_outcome_file" 2>/dev/null || true)"
+                                        if [ -n "$_issue_num" ] && [ "$_issue_num" != "0" ] \
+                                            && [ -n "$_source_val" ]; then
+                                            printf '[conductor] recording discovery outcome: issue=%s source=%s outcome=%s\n' \
+                                                "$_issue_num" "$_source_val" "$_outcome_val" >&2
+                                            bash "$_ledger_sh" \
+                                                --ledger "$_ledger_path" \
+                                                --update-outcome "$_issue_num" "$_outcome_val" \
+                                                2>/dev/null || true
+                                        fi
+                                    fi
+                                else
+                                    printf '[conductor] WARN: explore-ledger.sh unresolved; discarding outcome file\n' >&2
+                                fi
+                                # Always consume the outcome file so a later cycle never
+                                # re-processes a stale outcome (LOW review fix).
+                                rm -f "$_outcome_file" 2>/dev/null || true
+                            fi
                         fi
                         _work_done=1
                         _dry_cycles=0
@@ -635,7 +708,19 @@ autospec_conductor_run() {
             esac
 
         else
-            # Tier 2+ are not enabled in Phase 1 — park and notify.
+            # Tier 2+ are not enabled in Phase 1.
+            # Consult source weights before discovery ranking (best-effort).
+            # The ranking already reads them via explore-research-cycle.sh;
+            # the conductor passes AUTOSPEC_EXPLORE_LEDGER so the cycle picks
+            # up the right ledger when F2 enables Tier 2.
+            if [ -n "$_weights_bin" ] && [ -x "$_weights_bin" ]; then
+                printf '[conductor] consulting source weights for discovery cycle (Tier %s)\n' \
+                    "$_tier" >&2
+                "$_weights_bin" --json --ledger "$_ledger_path" \
+                    >/dev/null 2>&1 || true
+            fi
+            export AUTOSPEC_EXPLORE_LEDGER="$_ledger_path"
+            # Park and notify.
             printf '[conductor] Tier %s not enabled in Phase 1; dry-cycles=%s — parking\n' \
                 "$_tier" "$_dry_cycles" >&2
             if [ -n "$_notify_sh" ]; then
