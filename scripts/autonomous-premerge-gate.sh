@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+# scripts/autonomous-premerge-gate.sh — blocking autospec-qa pre-merge barrier.
+#
+# Runs /autospec-qa on a PR branch and gates the merge on finding severity.
+# Phase 1 only: autospec-qa. secaudit is Phase 2 (excluded here).
+#
+# Usage:
+#   autonomous-premerge-gate.sh [--pr-branch <branch>] [--repo <owner/repo>]
+#                                [--pr <number>] [--max-attempts <N>]
+#                                [--notify-sh <path>] [--dry-run]
+#
+# Verdict output (stdout, last line):
+#   merge-ok                  — no blocking findings; safe to merge
+#   block <reason>            — retries exhausted or fix rejected; human needed
+#   halt <code_health:id>     — configured scan skill missing; STOP immediately
+#
+# Exit codes:
+#   0 — merge-ok
+#   1 — block (needs human)
+#   2 — halt (code_health; configured skill missing)
+#   3 — invocation error
+
+set -eu
+
+SCRIPT_NAME="autonomous-premerge-gate"
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+PR_BRANCH=""
+REPO=""
+PR_NUMBER=""
+MAX_ATTEMPTS="${AUTOSPEC_PREMERGE_MAX_ATTEMPTS:-5}"
+NOTIFY_SH=""
+DRY_RUN=0
+
+# Resolve notify.sh path: env override → relative to this script → PATH lookup
+_default_notify_sh() {
+    local dir
+    dir="$(cd "$(dirname "$0")" && pwd)"
+    if [ -x "$dir/../skills/autospec-shared/scripts/notify.sh" ]; then
+        printf '%s' "$dir/../skills/autospec-shared/scripts/notify.sh"
+    elif command -v notify.sh >/dev/null 2>&1; then
+        printf 'notify.sh'
+    else
+        printf ''
+    fi
+}
+
+usage() {
+    cat <<'EOF'
+Usage: autonomous-premerge-gate.sh [OPTIONS]
+
+Options:
+  --pr-branch <branch>    Branch to validate (default: current branch).
+  --repo <owner/repo>     GitHub repo slug for labelling (default: detected).
+  --pr <number>           PR number for labelling (optional).
+  --max-attempts <N>      Max fix-and-recheck cycles (default: 5).
+  --notify-sh <path>      Path to notify.sh (default: auto-detected).
+  --dry-run               Print what would run without executing.
+
+Environment:
+  AUTOSPEC_PREMERGE_MAX_ATTEMPTS  Override max attempts (default 5).
+  AUTOSPEC_QA_CMD                 Override the qa command (default: autospec-qa).
+  AUTOSPEC_NOTIFY                 Set to 0 to suppress notifications.
+
+Exit 0 = merge-ok; 1 = block; 2 = halt (code_health); 3 = invocation error.
+EOF
+}
+
+die() {
+    printf '%s: ERROR: %s\n' "$SCRIPT_NAME" "$1" >&2
+    exit 3
+}
+
+info() {
+    printf '[%s] %s\n' "$SCRIPT_NAME" "$*" >&2
+}
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --pr-branch)   PR_BRANCH="${2:-}"; shift 2 ;;
+        --repo)        REPO="${2:-}"; shift 2 ;;
+        --pr)          PR_NUMBER="${2:-}"; shift 2 ;;
+        --max-attempts) MAX_ATTEMPTS="${2:-5}"; shift 2 ;;
+        --notify-sh)   NOTIFY_SH="${2:-}"; shift 2 ;;
+        --dry-run)     DRY_RUN=1; shift ;;
+        --help|-h)     usage; exit 0 ;;
+        *) printf '%s: unknown argument: %s\n' "$SCRIPT_NAME" "$1" >&2
+           usage >&2
+           exit 3 ;;
+    esac
+done
+
+# ── Resolve notify.sh ─────────────────────────────────────────────────────────
+if [ -z "$NOTIFY_SH" ]; then
+    NOTIFY_SH="$(_default_notify_sh)"
+fi
+
+_notify() {
+    local title="$1" body="$2"
+    if [ -n "$NOTIFY_SH" ] && [ -x "$NOTIFY_SH" ]; then
+        "$NOTIFY_SH" "$title" "$body" || true
+    elif [ -n "$NOTIFY_SH" ] && command -v "$NOTIFY_SH" >/dev/null 2>&1; then
+        "$NOTIFY_SH" "$title" "$body" || true
+    else
+        info "notify: $title — $body"
+    fi
+}
+
+# ── Resolve current branch if not supplied ────────────────────────────────────
+if [ -z "$PR_BRANCH" ]; then
+    PR_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+fi
+if [ -z "$PR_BRANCH" ] || [ "$PR_BRANCH" = "HEAD" ]; then
+    die "could not determine PR branch; pass --pr-branch"
+fi
+
+info "Validating branch: $PR_BRANCH"
+info "Max fix-and-recheck attempts: $MAX_ATTEMPTS"
+
+# ── Resolve QA command ────────────────────────────────────────────────────────
+QA_CMD="${AUTOSPEC_QA_CMD:-autospec-qa}"
+
+# ── Phase 1: presence check for configured scan skill ────────────────────────
+# A missing scan skill HALTS (fail closed). Never silently skip.
+_qa_skill_present() {
+    if [ -n "${AUTOSPEC_QA_PRESENT_OVERRIDE:-}" ]; then
+        # Test seam: override for unit tests.
+        if [ "$AUTOSPEC_QA_PRESENT_OVERRIDE" = "true" ]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    # Real check: qa command reachable in PATH or as an installed script.
+    command -v "$QA_CMD" >/dev/null 2>&1
+}
+
+if ! _qa_skill_present; then
+    # Emit machine-readable halt with code_health identifier.
+    printf 'halt code_health:qa_skill_missing\n'
+    info "HALT: configured scan skill '$QA_CMD' is not installed or not in PATH."
+    info "Install autospec-qa before re-running the pre-merge gate."
+    exit 2
+fi
+
+info "Scan skill '$QA_CMD' is present."
+
+# ── Run qa on branch; return blocking-finding count ──────────────────────────
+# Output contract: the qa command writes severity-tagged findings.
+# We look for lines matching high/severe/medium/critical as blocking.
+# For testability, QA output is captured and parsed.
+_run_qa() {
+    # Returns 0 and prints findings to stdout.
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] would run: $QA_CMD --branch $PR_BRANCH"
+        printf ''
+        return 0
+    fi
+    # Run qa; capture combined output. qa exit code is informational only —
+    # we parse the output for blocking severities ourselves.
+    "$QA_CMD" --branch "$PR_BRANCH" 2>&1 || true
+}
+
+_count_blocking_findings() {
+    # Reads qa output from stdin; counts high/severe/medium/critical findings.
+    # Patterns: "severity: high", "SEVERITY: MEDIUM", "[HIGH]", etc.
+    grep -ciE \
+        '(severity[[:space:]]*:[[:space:]]*(high|severe|critical|medium)|\[(high|severe|critical|medium)\]|^(high|severe|critical|medium)[[:space:]])' \
+        || true
+}
+
+_has_blocking_findings() {
+    local qa_output="$1"
+    local count
+    count=$(printf '%s' "$qa_output" | _count_blocking_findings)
+    if [ "${count:-0}" -gt 0 ]; then
+        return 0  # has blocking findings
+    else
+        return 1  # no blocking findings
+    fi
+}
+
+# ── Fix dispatch ──────────────────────────────────────────────────────────────
+# Dispatch a fix request for blocking findings on the PR branch.
+# In the real conductor this calls a Tier-B implementer; here we call
+# a FIX_CMD that callers can stub (AUTOSPEC_FIX_CMD env or default gh comment).
+_dispatch_fix() {
+    local attempt="$1" qa_output="$2"
+    local fix_cmd="${AUTOSPEC_FIX_CMD:-}"
+    info "Dispatching fix for blocking findings (attempt $attempt/$MAX_ATTEMPTS) ..."
+    if [ -n "$fix_cmd" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            info "[dry-run] would run: $fix_cmd --branch $PR_BRANCH"
+        else
+            # Pass findings summary to the fix command via stdin.
+            printf '%s' "$qa_output" | "$fix_cmd" --branch "$PR_BRANCH" || true
+        fi
+    else
+        info "No AUTOSPEC_FIX_CMD set; recording findings for operator review."
+    fi
+}
+
+# ── Needs-human labelling ─────────────────────────────────────────────────────
+_apply_needs_human_label() {
+    if [ -z "$REPO" ] && [ -z "$PR_NUMBER" ]; then
+        info "No --repo/--pr supplied; skipping label application."
+        return
+    fi
+    local label="autospec:needs-human"
+    if [ -n "$REPO" ] && [ -n "$PR_NUMBER" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            info "[dry-run] would apply label '$label' to PR #$PR_NUMBER in $REPO"
+        else
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "$label" 2>&1 || \
+                info "WARN: could not apply label '$label' (continuing)"
+        fi
+    elif [ -n "$PR_NUMBER" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            info "[dry-run] would apply label '$label' to PR #$PR_NUMBER"
+        else
+            gh pr edit "$PR_NUMBER" --add-label "$label" 2>&1 || \
+                info "WARN: could not apply label '$label' (continuing)"
+        fi
+    fi
+}
+
+# ── Main fix-and-recheck loop ─────────────────────────────────────────────────
+attempt=1
+while true; do
+    info "=== QA run (attempt $attempt/$MAX_ATTEMPTS) ==="
+
+    qa_output=""
+    qa_output="$(_run_qa)"
+
+    # Capture low/info findings for the digest (non-blocking, always recorded).
+    low_findings=""
+    low_findings=$(printf '%s' "$qa_output" | \
+        grep -iE '(severity[[:space:]]*:[[:space:]]*(low|info)|\[(low|info)\]|^(low|info)[[:space:]])' || true)
+    if [ -n "$low_findings" ]; then
+        info "Low/info findings (non-blocking, recorded):"
+        printf '%s\n' "$low_findings" >&2
+    fi
+
+    if _has_blocking_findings "$qa_output"; then
+        if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+            # Retries exhausted and branch is still dirty — do NOT merge.
+            info "Max attempts ($MAX_ATTEMPTS) reached with blocking findings still present."
+            _apply_needs_human_label
+            _notify "autospec: needs-human" \
+                "Pre-merge gate exhausted $MAX_ATTEMPTS attempts on $PR_BRANCH; blocking findings remain."
+            printf 'block retries_exhausted\n'
+            exit 1
+        fi
+
+        info "Blocking findings detected; dispatching fix (attempt $attempt/$MAX_ATTEMPTS)."
+        _dispatch_fix "$attempt" "$qa_output"
+        attempt=$((attempt + 1))
+        # Loop: re-run qa on the (now-patched) branch.
+        continue
+    fi
+
+    # No blocking findings — gate passes.
+    info "No blocking findings on attempt $attempt. Gate passes."
+    printf 'merge-ok\n'
+    exit 0
+done
