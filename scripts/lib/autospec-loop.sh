@@ -491,9 +491,23 @@ autospec_conductor_run() {
         _notify_sh="notify.sh"
     fi
 
+    # ── Sandbox wiring (F3) ────────────────────────────────────────────────────
+    # Resolve explore-sandbox.sh: env override > sibling of scripts/.
+    # Called idempotently at Tier 2/3 entry to ensure .autospec/explore-mode.json
+    # exists so implementer PRs target the sandbox base.
+    local _sandbox_sh=""
+    if [ -n "${AUTOSPEC_SANDBOX_BIN:-}" ] && [ -x "$AUTOSPEC_SANDBOX_BIN" ]; then
+        _sandbox_sh="$AUTOSPEC_SANDBOX_BIN"
+    elif [ -f "${_sdir}/explore-sandbox.sh" ]; then
+        _sandbox_sh="${_sdir}/explore-sandbox.sh"
+    fi
+
     local _cycle=0
     local _dry_cycles=0
     local _tier2_dry_cycles=0
+    # F3: count of discovery issues filed by Tier 2/3 cycles that have not yet
+    # been consumed by F5 outcome processing.  Non-zero → refuse Tier-1 main merge.
+    local _inflight_discovery=0
     local _last_digest_day=""
     local _stop_reason=""
     local _conductor_session="${AUTOSPEC_SESSION_ID:-conductor-$$}"
@@ -646,6 +660,12 @@ autospec_conductor_run() {
                     if [ "$_main_health" = "wait" ]; then
                         printf '[conductor] main-health pending — skipping drain this cycle\n' >&2
                         _dry_cycles=$((_dry_cycles + 1))
+                    elif [ "$_inflight_discovery" -gt 0 ]; then
+                        # F3: discovery issues in-flight → refuse main merge until consumed.
+                        printf 'code_health:autonomous_main_merge_refused\n' >&2
+                        printf '[conductor] F3: refusing Tier-1 drain — %s discovery issue(s) in-flight\n' \
+                            "$_inflight_discovery" >&2
+                        _dry_cycles=$((_dry_cycles + 1))
                     else
                         # Gate + main-health green — invoke drain.
                         if [ "$_dry" = "1" ]; then
@@ -684,6 +704,17 @@ autospec_conductor_run() {
                                 else
                                     printf '[conductor] WARN: explore-ledger.sh unresolved; discarding outcome file\n' >&2
                                 fi
+                                # F3: decrement in-flight discovery counter when a
+                                # discovery outcome is consumed, so the main-merge
+                                # refusal gate clears once all filed issues are resolved.
+                                local _f3_is_disc
+                                _f3_is_disc="$(jq -r '.is_discovery // false' \
+                                    "$_outcome_file" 2>/dev/null || echo 'false')"
+                                if [ "$_f3_is_disc" = "true" ] && [ "$_inflight_discovery" -gt 0 ]; then
+                                    _inflight_discovery=$((_inflight_discovery - 1))
+                                    printf '[conductor] F3: discovery outcome consumed; in-flight=%s\n' \
+                                        "$_inflight_discovery" >&2
+                                fi
                                 # Always consume the outcome file so a later cycle never
                                 # re-processes a stale outcome (LOW review fix).
                                 rm -f "$_outcome_file" 2>/dev/null || true
@@ -711,6 +742,14 @@ autospec_conductor_run() {
 
         elif [ "$_action" = "run-explore-once" ] || [ "$_action" = "run-explore-once-internet" ]; then
             # ── Tier 2/3: discovery via autospec-explore --once ───────────────
+            # F3: ensure explore sandbox exists before filing discovery issues.
+            # Idempotent — explore-sandbox.sh is a no-op when the branch already
+            # exists.  The implementer's phase4 contract reads explore-mode.json
+            # and targets the sandbox base; conductor does not duplicate that logic.
+            if [ -n "$_sandbox_sh" ]; then
+                printf '[conductor] Tier %s: ensuring explore sandbox (F3)\n' "$_tier" >&2
+                bash "$_sandbox_sh" --base main 2>/dev/null || true
+            fi
             # Consult source weights before discovery ranking (best-effort, F5).
             # The ranking reads them via explore-research-cycle.sh; the conductor
             # passes AUTOSPEC_EXPLORE_LEDGER so the cycle picks up the right ledger.
@@ -778,6 +817,13 @@ autospec_conductor_run() {
                     _dry_cycles=0
                     _tier2_dry_cycles=0
                     _work_done=1
+                    # F3: track in-flight discovery issues so the main-merge
+                    # refusal gate blocks Tier-1 drain until they are consumed.
+                    if [ "$_explore_filed" -gt 0 ] 2>/dev/null; then
+                        _inflight_discovery=$((_inflight_discovery + _explore_filed))
+                        printf '[conductor] F3: %s discovery issue(s) now in-flight (total=%s)\n' \
+                            "$_explore_filed" "$_inflight_discovery" >&2
+                    fi
                 else
                     # Explore was dry for this tier.
                     if [ "$_tier" = "2" ]; then
