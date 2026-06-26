@@ -17,6 +17,8 @@
 set -eu
 
 SKILL_NAME="autospec-autonomous"
+AUTONOMOUS_SCRIPT_FILES="autonomous-control-channel.sh autonomous-premerge-gate.sh autonomous-resilience.sh autonomous-spend-ledger.sh autonomous-waterfall.sh autospec-autonomy-gate.sh"
+LIB_FILES="autospec-loop.sh autospec-harness-detect.sh"
 
 HARNESS=""
 DRY_RUN=0
@@ -137,6 +139,18 @@ if [ "$HARNESS" = "codex" ] || [ "$HARNESS" = "all" ]; then
     info "Codex CLI:"
     remove_one "$CODEX_DEST"
 fi
+
+info ""
+info "Autonomous helper scripts:"
+for rel in $AUTONOMOUS_SCRIPT_FILES; do
+    remove_one "$HOME/.autospec/scripts/$rel"
+done
+
+info ""
+info "Runtime lib files (scripts/lib/):"
+for rel in $LIB_FILES; do
+    remove_one "$HOME/.autospec/scripts/lib/$rel"
+done
 
 info ""
 if [ "$DRY_RUN" -eq 1 ]; then

@@ -58,6 +58,46 @@ cd skills/autospec-autonomous
 ./uninstall.sh --harness all
 ```
 
+## Control labels (GitHub)
+
+Apply these labels to any open issue to send a Tier-0 control-channel signal:
+
+| Label                  | Effect                                                                     |
+|------------------------|----------------------------------------------------------------------------|
+| `autospec:stop`        | Write `~/.autospec/stop.flag`; finish the current issue; exit cleanly.    |
+| `autospec:pause`       | Park the loop; notify operator; wait for resume or `autospec:stop`.       |
+| `autospec:priority`    | Re-sort the Tier-1 backlog by the label body before the next drain.       |
+| `autospec:steer`       | Parse the label body as a directive; update the active waterfall intent; remove the label. |
+
+Tier 0 always preempts Tier 1. A `stop` or `pause` signal is honored at the next
+cycle boundary — never mid-issue.
+
+## Phase-1 waterfall
+
+Each cycle executes in order:
+
+1. **Tier-0 poll** — read GitHub control channel (`autonomous-control-channel.sh`).
+2. **Tier selection** — `autonomous-waterfall.sh` picks Tier 0 or Tier 1.
+3. **Tier-1 drain** — pick the highest-priority `auto-implement` issue and invoke `/autospec-run`.
+4. **Pre-merge gate** — `autonomous-premerge-gate.sh` + `autospec-autonomy-gate.sh` validate before merge.
+5. **Spend ledger** — `autonomous-spend-ledger.sh` tallies tokens/issues; parks when `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS` or the issue ceiling is reached.
+6. **Resilience** — `autonomous-resilience.sh` handles failures; notifies operator on persistent errors.
+
+**Phase 1 scope:** Tier 0 + Tier 1 only. Tiers 2–4 (explore-backed discovery, persona,
+self-brainstorm) are Phase 2/3 roadmap entries and are **not yet enabled**.
+
+## Environment variables
+
+| Variable                              | Default               | Description                                                |
+|---------------------------------------|-----------------------|------------------------------------------------------------|
+| `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS` | `50000000`            | Cumulative token ceiling; triggers park-and-notify.        |
+| `AUTOSPEC_SCRIPTS_DIR`                | `~/.autospec/scripts` | Runtime scripts directory.                                 |
+| `CLAUDE_CONFIG_DIR`                   | `~/.claude`           | Claude Code config directory.                              |
+| `OPENCODE_CONFIG_DIR`                 | `~/.config/opencode`  | OpenCode config directory.                                 |
+| `CODEX_HOME`                          | `~/.codex`            | Codex CLI home directory.                                  |
+| `AUTOSPEC_AUTONOMOUS_REF`             | `main`                | Git ref to fetch from when piped via curl.                 |
+| `AUTOSPEC_AUTONOMOUS_RAW_BASE`        | —                     | Override the raw GitHub URL base entirely.                 |
+
 ## Design spec
 
 `docs/specs/2026-06-25-autospec-autonomous-design.md`

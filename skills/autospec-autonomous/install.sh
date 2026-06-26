@@ -41,6 +41,8 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
 SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
+AUTONOMOUS_SCRIPT_FILES="autonomous-control-channel.sh autonomous-premerge-gate.sh autonomous-resilience.sh autonomous-spend-ledger.sh autonomous-waterfall.sh autospec-autonomy-gate.sh"
+LIB_FILES="autospec-loop.sh autospec-harness-detect.sh"
 
 err()  { printf 'error: %s\n' "$*" >&2; }
 warn() { printf 'warn:  %s\n' "$*" >&2; }
@@ -88,7 +90,7 @@ fetch_source_files() {
     TMP_FETCH_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t autospec)"
     info "Fetching ${SKILL_NAME} source files from ${SKILL_RAW_BASE} ..."
     RAW_REPO_BASE="${SKILL_RAW_BASE%/skills/$SKILL_NAME}"
-    mkdir -p "$TMP_FETCH_DIR/opencode" "$TMP_FETCH_DIR/codex" "$TMP_FETCH_DIR/scripts"
+    mkdir -p "$TMP_FETCH_DIR/opencode" "$TMP_FETCH_DIR/codex" "$TMP_FETCH_DIR/scripts" "$TMP_FETCH_DIR/scripts/lib"
     for rel in SKILL.md opencode/agent.md codex/prompt.md; do
         if ! curl -fsSL "$SKILL_RAW_BASE/$rel" -o "$TMP_FETCH_DIR/$rel"; then
             err "failed to download $SKILL_RAW_BASE/$rel"
@@ -98,6 +100,18 @@ fetch_source_files() {
     for rel in $SHARED_SCRIPT_FILES; do
         if ! curl -fsSL "$RAW_REPO_BASE/scripts/$rel" -o "$TMP_FETCH_DIR/scripts/$rel"; then
             err "failed to download $RAW_REPO_BASE/scripts/$rel"
+            exit 1
+        fi
+    done
+    for rel in $AUTONOMOUS_SCRIPT_FILES; do
+        if ! curl -fsSL "$RAW_REPO_BASE/scripts/$rel" -o "$TMP_FETCH_DIR/scripts/$rel"; then
+            err "failed to download $RAW_REPO_BASE/scripts/$rel"
+            exit 1
+        fi
+    done
+    for rel in $LIB_FILES; do
+        if ! curl -fsSL "$RAW_REPO_BASE/scripts/lib/$rel" -o "$TMP_FETCH_DIR/scripts/lib/$rel"; then
+            err "failed to download $RAW_REPO_BASE/scripts/lib/$rel"
             exit 1
         fi
     done
@@ -125,6 +139,32 @@ install_shared_scripts() {
         install_one "$src_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
         case "$rel" in
             *.sh) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;;
+        esac
+    done
+}
+
+install_autonomous_scripts() {
+    src_dir="$(resolve_shared_scripts_dir)"
+    if [ -z "$src_dir" ]; then
+        err "missing shared scripts directory; cannot install autonomous helper scripts"
+        return 1
+    fi
+    for rel in $AUTONOMOUS_SCRIPT_FILES; do
+        install_one "$src_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
+        run "chmod +x \"$HOME/.autospec/scripts/$rel\""
+    done
+}
+
+install_lib_files() {
+    src_dir="$(resolve_shared_scripts_dir)"
+    if [ -z "$src_dir" ]; then
+        err "missing shared scripts directory; cannot install runtime lib files"
+        return 1
+    fi
+    for rel in $LIB_FILES; do
+        install_one "$src_dir/lib/$rel" "$HOME/.autospec/scripts/lib/$rel" || return 1
+        case "$rel" in
+            *.sh) run "chmod +x \"$HOME/.autospec/scripts/lib/$rel\"" ;;
         esac
     done
 }
@@ -252,6 +292,14 @@ fi
 info ""
 info "Shared autospec helper scripts:"
 install_shared_scripts
+
+info ""
+info "Autonomous helper scripts:"
+install_autonomous_scripts
+
+info ""
+info "Runtime lib files (scripts/lib/):"
+install_lib_files
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 OPENCODE_DIR="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
