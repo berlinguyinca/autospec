@@ -47,6 +47,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [validate.sh lockstep duo gap](feedback_validate_sh_lockstep_duo_gap.md) — check_lockstep() must guard SKILL.md+codex/prompt.md duos, not just full trios
 - [Skill golden + derivation workflow](feedback_skill_golden_derivation_workflow.md) — editing any trio skill (esp. with autospec-block markers) needs re-derive codex/opencode AND regenerate tests/fixtures/skill-goldens sha256, or validate.sh fails closed
 - [Decompose: trio prose + goldens must be one issue](feedback_decompose_trio_prose_goldens_atomic.md) — never split "edit trio prose" and "regen goldens" into separate auto-implement issues; the prose-only intermediate fails validate closed (bit 3x in one run); combine into one implementer that Closes both
+- [Trio derivation tooling (use it)](reference_trio_derivation_tooling.md) — edit SKILL.md then `derive-trio.sh --in-place` + `gen-skill-goldens.sh`; stop hand-maintaining codex/opencode + goldens; validate's check_derive_trio_consistency enforces it; decomposer now treats trio+goldens as one unit
 - [jq test() regex metachar injection](feedback_jq_test_regex_metachar_injection.md) — interpolating host/user-derived values into jq test() is regex injection; dotted hostnames made claim self-clean delete the wrong worker's lock comment; use capture()+==
 - [Self-consistent test fixtures mask bugs](feedback_self_consistent_test_fixtures_mask_bugs.md) — tests that build fixtures with the SUT's own derivation expression can't catch a bug in it; the Claude transcript-slug `lstrip` bug shipped green for months. Pin against the real convention / live values; reproduce end-to-end
 
@@ -69,6 +70,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 
 - [Autospec tooling optimization — tracker #421](project_autospec_tooling_optimization.md) — convert LLM-driven steps to deterministic tools
 - [Autospec mutation testing — tracker #420](project_autospec_mutation_testing.md) — test-of-tests layer: mutation gate + assertion-density floor + negative-path-pair lint
+- [Babysit-tax → Autonomy Charter](project_babysit_tax_autonomy_charter.md) — session mining: operator confirmations are ~always rubber-stamps of the agent's own recommendation; build a standing recommendation=action charter, auto-chain define→run→explore, push notifications on async waits
 
 <!-- Archived (shipped or session-historical; files kept on disk, removed from index):
 - project_2026_05_22_23_session_close.md — historical session close 2026-05-22→23
