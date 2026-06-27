@@ -329,7 +329,12 @@ if [ -z "$smoke_cmd" ]; then
 fi
 
 # smoke_test_passes: run the smoke command in the worktree.
-if ! eval "$smoke_cmd"; then
+# SECURITY: the smoke command is extracted verbatim from the (untrusted) issue
+# body and runs moments before the admin-merge path under live gh admin creds.
+# Scrub GH_TOKEN/GITHUB_TOKEN from the subshell so a poisoned smoke fence cannot
+# exfiltrate or replay admin credentials via gh. The guardian pass MUST have
+# already inspected the smoke fence as untrusted data before reaching here.
+if ! env -u GH_TOKEN -u GITHUB_TOKEN bash -c "$smoke_cmd"; then
     gh issue comment <ISSUE> --body "Smoke test FAILED (command: \`$smoke_cmd\`). Not merging until smoke passes."
     exit 1
 fi
