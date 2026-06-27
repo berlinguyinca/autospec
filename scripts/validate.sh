@@ -288,6 +288,10 @@ check_keyword_routing_section() {
         # trio row in lockstep with it.
         grep -q '| `fix`' "$skill_dir/$trio" \
             || fail "autospec-listen: $trio missing 'fix' -> /autospec verb-map row"
+        grep -q 'post_approval_execution_ready' "$skill_dir/$trio" \
+            || fail "autospec-listen: $trio missing post-approval execution-ready routing contract"
+        grep -q 'AUTOSPEC_LISTENER_AUTO_IMPLEMENT_OPEN' "$skill_dir/$trio" \
+            || fail "autospec-listen: $trio missing auto-implement open-count routing hint"
     done
     # The explore-confirm gate literal honored in the trio MUST exactly match the
     # one emitted by the classifier (scripts/listener-match.sh, issue #909).
@@ -297,6 +301,10 @@ check_keyword_routing_section() {
     # emitted by the classifier (scripts/listener-match.sh, issue #954).
     grep -q 'autospec fix imperative' scripts/listener-match.sh \
         || fail "scripts/listener-match.sh missing 'fix' imperative route (classifier/trio drift)"
+    grep -q 'post_approval_execution_ready' scripts/listener-match.sh \
+        || fail "scripts/listener-match.sh missing post-approval execution-ready route (issue #1461)"
+    grep -q 'post-approval: open auto-implement issues route to autospec-run' skills/autospec-shared/tests/unit/listener-match.bats \
+        || fail "listener-match.bats missing post-approval open auto-implement route coverage (issue #1461)"
 }
 
 # Gap-remediation invariants (issue #535, deps #533/#534): the autospec-run

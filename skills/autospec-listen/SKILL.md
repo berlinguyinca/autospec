@@ -109,6 +109,37 @@ If `gate` is non-null, perform the gate check first and skip routing (plain mode
 
 On a non-match or `intent:incidental`/`none`, do nothing — the session proceeds normally in plain mode.
 
+**Post-approval execution-ready routing.** After an autospec/spec/refine flow writes
+an approved spec or implementation plan, do not ask the user to choose between
+subagent-driven and inline execution. Record the recent workflow state for the
+classifier using the narrow env hints below, then pass the user's approval turn
+verbatim:
+
+- `AUTOSPEC_LISTENER_APPROVED_SPEC_PATH` — path to the approved spec/design.
+- `AUTOSPEC_LISTENER_PLAN_PATH` — path to the written implementation plan.
+- `AUTOSPEC_LISTENER_AUTOSPEC_REQUESTED=1` — the thread previously requested autospec routing.
+- `AUTOSPEC_LISTENER_AUTONOMOUS_REQUESTED=1` — the thread previously requested autonomous routing.
+- `AUTOSPEC_LISTENER_AUTO_IMPLEMENT_OPEN=<count>` — open `auto-implement` issue count, from `gh issue list --repo <repo> --label auto-implement --state open --json number --jq 'length'`.
+
+For approval phrases such as `looks good` or `approved`, the classifier emits
+`trigger:"post_approval_execution_ready"`. If
+`AUTOSPEC_LISTENER_AUTO_IMPLEMENT_OPEN` is greater than zero, route to
+`/autospec-run`; otherwise route to `/autospec --autonomous`. Print exactly:
+
+```
+Routing to /autospec --autonomous — say "plain" to opt out.
+```
+
+or, when open `auto-implement` issues exist:
+
+```
+Routing to /autospec-run — say "plain" to opt out.
+```
+
+Explicit opt-outs (`plain`, `no`, `no workflow`, `just chat`, `do not implement`),
+conceptual questions, destructive/production requests, and descriptive mentions
+of autospec remain plain mode.
+
 **Escape (D5).** If the user's next turn is the stop word (`plain` or `no`), cancel routing and proceed in plain mode for that request. The existing `file an issue` / `write a spec` triggers continue to fire their own flows below and are unaffected.
 
 ## Issue trigger flow
