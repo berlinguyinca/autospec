@@ -116,6 +116,9 @@ verbatim:
 
 - `AUTOSPEC_LISTENER_APPROVED_SPEC_PATH` — path to the approved spec/design.
 - `AUTOSPEC_LISTENER_PLAN_PATH` — path to the written implementation plan.
+- `AUTOSPEC_LISTENER_SOURCE_SPEC_PATH` — source spec path, if the plan was derived from one.
+- `AUTOSPEC_LISTENER_REPO` / `AUTOSPEC_LISTENER_BRANCH` / `AUTOSPEC_LISTENER_BASE` — minimal repo routing metadata.
+- `AUTOSPEC_LISTENER_PLAN_TS` — timestamp for the saved plan or handoff artifact.
 - `AUTOSPEC_LISTENER_AUTOSPEC_REQUESTED=1` — the thread previously requested autospec routing.
 - `AUTOSPEC_LISTENER_AUTONOMOUS_REQUESTED=1` — the thread previously requested autonomous routing.
 - `AUTOSPEC_LISTENER_AUTO_IMPLEMENT_OPEN=<count>` — open `auto-implement` issue count, from `gh issue list --repo <repo> --label auto-implement --state open --json number --jq 'length'`.
@@ -138,6 +141,41 @@ Routing to /autospec-run — say "plain" to opt out.
 Explicit opt-outs (`plain`, `no`, `no workflow`, `just chat`, `do not implement`),
 conceptual questions, destructive/production requests, and descriptive mentions
 of autospec remain plain mode.
+
+**Completed Plan-mode handoff routing.** When any harness exits Plan mode after
+writing a concrete implementation plan, autospec is the default next step. Set
+`AUTOSPEC_LISTENER_PLAN_EXIT_READY=1` plus
+`AUTOSPEC_LISTENER_PLAN_PATH=<path>` (or
+`AUTOSPEC_LISTENER_PLAN_ARTIFACT=<summary>` when no path exists) and pass the
+latest Plan-mode exit text or the user's approval turn through the classifier.
+The classifier emits `trigger:"plan_exit_ready"` for the direct Plan-exit
+handoff and `trigger:"plan_approved_ready"` for approval phrases such as
+`continue`, `proceed`, `go`, or `ship it` after a completed plan.
+
+When `AUTOSPEC_LISTENER_AUTO_IMPLEMENT_OPEN` is greater than zero, route to
+`/autospec-run`; otherwise route to `/autospec --autonomous`. The JSON output
+also carries `plan_path`, `source_spec_path`, `repo`, `branch`, `base`, and
+`plan_ts` fields so the handoff can pass or summarize the saved plan instead of
+restarting discovery from scratch. Suppress generic execution-choice prompts
+such as "Subagent-Driven or Inline Execution?" when this routing state is
+present; print only the one-line autospec opt-out:
+
+```
+Routing to /autospec --autonomous — say "plain" to opt out.
+```
+
+or:
+
+```
+Routing to /autospec-run — say "plain" to opt out.
+```
+
+Do not route when `AUTOSPEC_LISTENER_PLAN_EXIT_BLOCKED=1`,
+`AUTOSPEC_LISTENER_PLAN_DESTRUCTIVE=1`, the plan text says it is blocked,
+ambiguous, destructive, production/credential-gated, or still requires explicit
+approval, or the user asks a conceptual question about the plan. The one-turn
+escape includes `plain`, `no`, `no workflow`, `just chat`, `do not implement`,
+`stop`, and `cancel`.
 
 **Escape (D5).** If the user's next turn is the stop word (`plain` or `no`), cancel routing and proceed in plain mode for that request. The existing `file an issue` / `write a spec` triggers continue to fire their own flows below and are unaffected.
 
