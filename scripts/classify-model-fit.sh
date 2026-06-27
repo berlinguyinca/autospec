@@ -337,7 +337,7 @@ fi
 # ---------------------------------------------------------------------------
 # Telemetry append
 # ---------------------------------------------------------------------------
-TELEMETRY_DIR="$REPO_ROOT/.autospec/telemetry"
+TELEMETRY_DIR="${AUTOSPEC_TELEMETRY_DIR:-$REPO_ROOT/.autospec/telemetry}"
 mkdir -p "$TELEMETRY_DIR"
 TELEMETRY_FILE="$TELEMETRY_DIR/classify-model-fit.jsonl"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)"

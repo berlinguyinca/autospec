@@ -90,6 +90,10 @@ STUB
   body_ln=$(echo "$output" | grep -n "PHASE4_BODY_SENTINEL line" | head -1 | cut -d: -f1)
   asg_ln=$(echo "$output" | grep -n "Your implementation assignment" | head -1 | cut -d: -f1)
   [ "$body_ln" -lt "$asg_ln" ]
+  # body sentinel must ride BELOW the last CACHE BOUNDARY (D3 cache-wiring guard)
+  cache_ln=$(echo "$output" | grep -n 'CACHE BOUNDARY' | tail -1 | cut -d: -f1)
+  [ -n "$cache_ln" ]
+  [ "$body_ln" -gt "$cache_ln" ]
 }
 
 # Case 9: --body-file with a missing path exits non-zero
