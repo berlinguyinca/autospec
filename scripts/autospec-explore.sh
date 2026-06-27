@@ -288,6 +288,12 @@ _explore_run_handoff() {
 # (the output JSON path) and AUTOSPEC_EXPLORE_ONCE_SOURCES (the resolved sources)
 # as env vars and must write valid research-cycle JSON to that path.
 if [ "$ONCE" -eq 1 ]; then
+    # --once is a non-interactive autonomous atomic (the conductor's per-cycle
+    # discovery unit). Force the autonomous flag so the cycle's fail-closed verify
+    # reliably applies here — a --once pass that cannot verify must file ZERO
+    # rather than auto-ship unverified proposals, regardless of inherited env.
+    export AUTOSPEC_EXPLORE_AUTONOMOUS=1
+
     # Determine tier from the resolved source set.
     _once_tier="local"
     if printf '%s\n' "$RESEARCH_SOURCES" | tr ',' '\n' | grep -qx 'internet'; then
@@ -333,6 +339,21 @@ except Exception:
     print(0)
 " "$_once_out" 2>/dev/null)" || _once_new=0
     fi
+    # Did the cycle fail closed (autonomous + no skeptic verdicts)? This is
+    # distinct from a genuine dry well — surfacing it stops the conductor from
+    # misreading "verify unavailable" as "repo exhausted".
+    _once_failclosed=false
+    if [ -f "$_once_out" ]; then
+        _once_failclosed="$(python3 -c "
+import json, sys
+try:
+    print('true' if json.load(open(sys.argv[1])).get('failclosed') else 'false')
+except Exception:
+    print('false')
+" "$_once_out" 2>/dev/null)" || _once_failclosed=false
+    fi
+    case "$_once_failclosed" in true|false) ;; *) _once_failclosed=false ;; esac
+
     # Ensure numeric defaults
     case "$_once_seen" in ''|*[!0-9]*) _once_seen=0 ;; esac
     case "$_once_new"  in ''|*[!0-9]*) _once_new=0  ;; esac
@@ -382,8 +403,13 @@ Source: $_t_src ($RESEARCH_SOURCES)."
         done < "$_once_tsv"
     fi
 
-    # Compose the reason string.
-    if [ "$_once_dry" = "true" ]; then
+    # Compose the reason string. A fail-closed pass is NOT a dry well — report it
+    # distinctly and emit the observable code_health signal so the inert-gate
+    # state is never silent.
+    if [ "$_once_failclosed" = "true" ]; then
+        _once_reason="verify-unavailable-failclosed"
+        echo "code_health:explore_verify_unavailable_failclosed (--once filed 0: autonomous run with no skeptic verdicts; wire AUTOSPEC_EXPLORE_VERIFY_CMD to verify + file)" >&2
+    elif [ "$_once_dry" = "true" ]; then
         _once_reason="no new candidates after dedup"
     else
         _once_reason="filed $_once_filed of $_once_new candidates from $_once_tier research pass"

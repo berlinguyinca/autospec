@@ -28,8 +28,12 @@ AGENTS_TXT=""
 TREE_TXT=""
 COMMITS_TXT=""
 
-[ -f README.md ] && README_TXT="$(head -c 8000 README.md 2>/dev/null || true)"
-[ -f AGENTS.md ] && AGENTS_TXT="$(head -c 8000 AGENTS.md 2>/dev/null || true)"
+# Read the FULL README/AGENTS (cap 64KB, a generous ceiling). The prior 8KB
+# truncation made the LLM declare things "missing" that simply sat below the cut
+# — every such claim was a false positive. Full context + the gap_check contract
+# below (re-verified by the aggregator) is the fix.
+[ -f README.md ] && README_TXT="$(head -c 65536 README.md 2>/dev/null || true)"
+[ -f AGENTS.md ] && AGENTS_TXT="$(head -c 65536 AGENTS.md 2>/dev/null || true)"
 
 if command -v tree >/dev/null 2>&1; then
     TREE_TXT="$(tree -L 3 2>/dev/null | head -c 4000 || true)"
@@ -46,7 +50,21 @@ repository README, AGENTS.md, top-level structure, and recent commits, and
 propose 1-5 concrete next features or improvements grounded in what you see.
 For each, emit a JSON object with fields: title (string, conventional-commit
 form), evidence (short string referencing a real file/area), estimated_complexity
-(one of "small","medium","large"), confidence (float 0.0-1.0, default 0.5).
+(one of "small","medium","large"), confidence (float 0.0-1.0, default 0.5), and a
+REQUIRED gap_check object proving the gap is real. gap_check has:
+  kind     "absent" when you claim something is MISSING, "present" when you claim
+           a specific pattern/string already EXISTS and should change;
+  needle   the exact fixed string (NOT a regex) to search for — for kind=absent
+           it is the thing you claim is missing (e.g. a doc heading, a function
+           name, a flag); for kind=present the existing token you are acting on;
+  haystack a repo-relative file or glob to search (e.g. "README.md",
+           "scripts/*.sh"), or the literal "<repo>" for a repo-wide search.
+The aggregator re-runs this search against the CURRENT files and DROPS your
+proposal if the claim is false (needle found for kind=absent, or not found for
+kind=present). Do NOT propose anything you cannot back with a gap_check — a
+proposal without a valid gap_check is discarded. This exists because truncated
+context previously caused false "X is missing" claims for things that already
+existed; make every claim verifiable.
 Return ONLY a JSON array of these objects — no prose, no markdown fences.'
 
 FULL_INPUT="$INSTRUCTION"$'\n\n## README\n'"$README_TXT"$'\n\n## AGENTS\n'"$AGENTS_TXT"$'\n\n## Tree\n'"$TREE_TXT"$'\n\n## Recent commits\n'"$COMMITS_TXT"
@@ -124,11 +142,25 @@ if isinstance(arr, list):
         conf = max(0.0, min(1.0, conf))
         if not title or not evidence:
             continue
-        out["proposals"].append({
+        prop = {
             "title": title,
             "evidence": evidence,
             "estimated_complexity": complexity,
             "confidence": conf,
-        })
+        }
+        # Carry a well-formed gap_check through so the aggregator can re-verify
+        # it. Proposals without one are refuted by default downstream (this is a
+        # gap-claiming source), so a model that ignores the contract self-mutes.
+        gc = item.get("gap_check")
+        if (isinstance(gc, dict)
+                and gc.get("kind") in ("absent", "present")
+                and isinstance(gc.get("needle"), str) and gc.get("needle")
+                and isinstance(gc.get("haystack"), str) and gc.get("haystack")):
+            prop["gap_check"] = {
+                "kind": gc["kind"],
+                "needle": gc["needle"],
+                "haystack": gc["haystack"],
+            }
+        out["proposals"].append(prop)
 print(json.dumps(out))
 PY

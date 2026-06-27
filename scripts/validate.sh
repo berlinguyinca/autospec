@@ -3572,9 +3572,10 @@ check_autospec_explore_discovery_contract() {
             grep -q "$r" "$trio" \
                 || fail "$trio: missing discovery researcher reference '$r'"
         done
-        grep -q 'dedup . verify . ROI . pattern-synthesis . severity-first rank' "$trio" \
-            || grep -q 'dedup -> verify -> ROI -> pattern-synthesis -> severity-first rank' "$trio" \
-            || fail "$trio: missing aggregator stage order (dedup -> verify -> ROI -> pattern-synthesis -> severity-first rank)"
+        # Locale-robust: `.{1,3}` spans either the 3-byte UTF-8 arrow (→, which a
+        # single BRE `.` cannot match under a C locale) or the 2-byte ASCII `->`.
+        grep -qE 'dedup .{1,3} gap-confirm .{1,3} verify .{1,3} ROI .{1,3} pattern-synthesis .{1,3} severity-first rank' "$trio" \
+            || fail "$trio: missing aggregator stage order (dedup -> gap-confirm -> verify -> ROI -> pattern-synthesis -> severity-first rank)"
         for sev in silent-wrong correctness stability operability feature nicety; do
             grep -q "$sev" "$trio" \
                 || fail "$trio: missing severity band '$sev'"
