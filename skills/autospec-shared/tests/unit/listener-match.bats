@@ -105,6 +105,32 @@ typeof d.match==='boolean' &&
     [ "$(json_field "$output" "d.skill")" = "autospec" ]
 }
 
+@test "post-approval: approved autospec spec routes to autospec autonomous" {
+    AUTOSPEC_LISTENER_APPROVED_SPEC_PATH="docs/specs/billing.md" \
+        run "$MATCH" --classify "looks good"
+    [ "$(json_field "$output" "d.match")" = "true" ]
+    [ "$(json_field "$output" "d.skill")" = "autospec" ]
+    [ "$(json_field "$output" "d.trigger")" = "post_approval_execution_ready" ]
+    [ "$(json_field "$output" "d.autonomous")" = "true" ]
+}
+
+@test "post-approval: approved plan routes to autospec autonomous" {
+    AUTOSPEC_LISTENER_PLAN_PATH="docs/plans/billing.md" \
+        run "$MATCH" --classify "approved"
+    [ "$(json_field "$output" "d.match")" = "true" ]
+    [ "$(json_field "$output" "d.skill")" = "autospec" ]
+    [ "$(json_field "$output" "d.autonomous")" = "true" ]
+}
+
+@test "post-approval: open auto-implement issues route to autospec-run" {
+    AUTOSPEC_LISTENER_PLAN_PATH="docs/plans/billing.md" \
+    AUTOSPEC_LISTENER_AUTO_IMPLEMENT_OPEN=2 \
+        run "$MATCH" --classify "looks good"
+    [ "$(json_field "$output" "d.match")" = "true" ]
+    [ "$(json_field "$output" "d.skill")" = "autospec-run" ]
+    [ "$(json_field "$output" "d.trigger")" = "post_approval_execution_ready" ]
+}
+
 # ── negatives (must NOT route) ──────────────────────────────────────────────────
 
 @test "negative: 'I already reviewed it' → no route" {
@@ -161,6 +187,24 @@ typeof d.match==='boolean' &&
     m="$(json_field "$output" "d.match")"
     intent="$(json_field "$output" "d.intent")"
     [ "$m" = "false" ] || [ "$intent" = "incidental" ]
+}
+
+@test "negative: post-approval plain opt-out → no route" {
+    AUTOSPEC_LISTENER_PLAN_PATH="docs/plans/billing.md" \
+        run "$MATCH" --classify "plain"
+    [ "$(json_field "$output" "d.match")" = "false" ]
+}
+
+@test "negative: descriptive autospec mention does not post-approval route" {
+    AUTOSPEC_LISTENER_PLAN_PATH="docs/plans/billing.md" \
+        run "$MATCH" --classify "the autospec plan looks detailed"
+    [ "$(json_field "$output" "d.match")" = "false" ]
+}
+
+@test "negative: do not implement suppresses post-approval route" {
+    AUTOSPEC_LISTENER_PLAN_PATH="docs/plans/billing.md" \
+        run "$MATCH" --classify "do not implement"
+    [ "$(json_field "$output" "d.match")" = "false" ]
 }
 
 # ── back-compat: classify mode still surfaces file-an-issue / write-a-spec ──────

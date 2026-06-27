@@ -165,6 +165,43 @@ is_autonomous_phrase() {
     return 1
 }
 
+# One-turn listener escape for routes that were offered with
+# "say plain to opt out".
+is_listener_escape() {
+    text="$1"
+    case "$text" in
+        plain|no|"no workflow"|"just chat"|"do not implement") return 0 ;;
+    esac
+    return 1
+}
+
+# Post-approval autospec handoff state is supplied by the listener/wrapper from
+# recent conversation memory. The classifier stays deterministic and stateless;
+# these env vars make the handoff decision testable without a live harness.
+has_post_approval_state() {
+    [ -n "${AUTOSPEC_LISTENER_APPROVED_SPEC_PATH:-}" ] \
+        || [ -n "${AUTOSPEC_LISTENER_PLAN_PATH:-}" ] \
+        || [ "${AUTOSPEC_LISTENER_AUTOSPEC_REQUESTED:-0}" = "1" ] \
+        || [ "${AUTOSPEC_LISTENER_AUTONOMOUS_REQUESTED:-0}" = "1" ]
+}
+
+is_approval_phrase() {
+    text="$1"
+    case "$text" in
+        "looks good"|"looks good to me"|approved|approve|yes|yep|ok|okay|"go ahead"|"do it"|"ship it")
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+has_open_auto_implement_hint() {
+    case "${AUTOSPEC_LISTENER_AUTO_IMPLEMENT_OPEN:-0}" in
+        ''|0|false|False|FALSE) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 # Whole-word match of a single token in the (already lower-cased) needle.
 # Word boundaries are non-[a-z0-9_-] characters or string ends.
 has_word() {
@@ -237,6 +274,14 @@ is_imperative() {
             *"$art"*) return 1 ;;
         esac
     done
+    # Descriptive references to the system should not route merely because the
+    # word "autospec" appears.
+    for autospec_desc in "the autospec" "this autospec" "that autospec" \
+                         "an autospec" "autospec plan" "autospec spec"; do
+        case "$text" in
+            *"$autospec_desc"*) return 1 ;;
+        esac
+    done
 
     # Suppressor 5: explore/discover read-and-understand idioms (D4, issue #909).
     # Reinforces the question/negation/past groups for the explore verb. These
@@ -265,6 +310,28 @@ classify_phrase() {
     is_auto="false"
     if is_autonomous_phrase "$text_lc"; then
         is_auto="true"
+    fi
+
+    # Post-approval execution-ready handoff (issue #1461). When a wrapper has
+    # recorded an approved spec/plan or prior autospec/autonomous request in the
+    # thread, plain approval should route directly into autospec execution
+    # instead of asking the user to choose an execution mode.
+    if has_post_approval_state && is_approval_phrase "$text_lc"; then
+        if is_listener_escape "$text_lc" || ! is_imperative "$text_lc"; then
+            emit_classify_json false "" "" none 0 false "" ""
+            return 0
+        fi
+        if has_open_auto_implement_hint; then
+            emit_classify_json true autospec-run post_approval_execution_ready imperative 0.85 false "" ""
+        else
+            emit_classify_json true autospec post_approval_execution_ready imperative 0.85 true "" ""
+        fi
+        return 0
+    fi
+
+    if is_listener_escape "$text_lc"; then
+        emit_classify_json false "" "" none 0 false "" ""
+        return 0
     fi
 
     # Back-compat: explicit "file an issue" / "write a spec" phrases are
