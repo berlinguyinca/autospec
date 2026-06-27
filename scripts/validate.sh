@@ -3045,6 +3045,7 @@ main() {
     check_conductor_wiring_contract
     check_autonomous_phase2_suite
     check_persona_suite
+    check_reuse_lens_suite
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -4322,6 +4323,33 @@ check_persona_suite() {
     done
     if [ "$_any" -eq 0 ]; then
         fail "tests/persona/*.bats: no persona contract tests found (issue #1418)"
+    fi
+}
+
+# tests/reuse-lens/*.bats — the interrogation ledger + precision proof + AUTOSPEC_REUSE_LENS
+# flag suite (issue #1442). tests/reuse-lens/ is a NET-NEW top-level test dir with no
+# existing glob, so it would rot ungated without this gate. Mirror the persona suite's
+# per-file run. The gate is also required by the gate-atomicity rule
+# (feedback_validate_must_gate_every_test_dir): every new tests/<dir>/ MUST be
+# enumerated in validate.sh in the same commit that creates it.
+check_reuse_lens_suite() {
+    info "reuse-lens suite: tests/reuse-lens/*.bats (issue #1442)"
+    if ! command -v bats >/dev/null 2>&1; then
+        info "  bats not available — skipping reuse-lens suite"
+        return 0
+    fi
+    local _any=0
+    local t
+    for t in tests/reuse-lens/*.bats; do
+        [ -f "$t" ] || continue
+        _any=1
+        info "  running: $t"
+        bats "$t" >/tmp/validate-reuse-lens-suite.log 2>&1 \
+            || { cat /tmp/validate-reuse-lens-suite.log >&2; \
+                 fail "$t: failed (issue #1442)"; }
+    done
+    if [ "$_any" -eq 0 ]; then
+        fail "tests/reuse-lens/*.bats: no reuse-lens tests found (issue #1442)"
     fi
 }
 
