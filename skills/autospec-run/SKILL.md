@@ -1004,6 +1004,21 @@ inline label-swap path below.
 >        fi
 >        det_exit=$?
 >
+>      Reuse lens (issues #1439/#1440/#1442): when armed, extract the reuse-triage
+>      RULE_IDs from the deterministic findings so the reviewer prompt receives the
+>      build-vs-buy block. Flag-OFF or no reuse hits → `_reuse_flags_file` stays empty
+>      → the reviewer prompt is byte-identical to today (the `${_reuse_flags_file:+…}`
+>      expansion below adds nothing):
+>        ```bash
+>        _reuse_flags_file=""
+>        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ] && [ -f /tmp/guardian-<PR>.md ]; then
+>          _reuse_candidate=$(mktemp -t autospec-reuse-flags-XXXXXX)
+>          grep -E '^(REINVENT_REPO_UTIL|NEW_DEP_UNJUSTIFIED|NEW_ABSTRACTION_SINGLE_CALLER):' \
+>            /tmp/guardian-<PR>.md > "$_reuse_candidate" 2>/dev/null || true
+>          if [ -s "$_reuse_candidate" ]; then _reuse_flags_file="$_reuse_candidate"; fi
+>        fi
+>        ```
+>
 >      **Model tier:** `TIER_B` for ALL issues — including `regression` and `priority:high`. The single fused reviewer carries the regression gap-check (see brief below), so no second Tier-A pass is dispatched. **Escape hatch:** `AUTOSPEC_REVIEWER_TIER` overrides the reviewer tier — unset (or any value other than `opus`) → `TIER_B` (sonnet); set `AUTOSPEC_REVIEWER_TIER=opus` to restore `TIER_A` for the reviewer. Silently fall back to `TIER_A` if `TIER_B` is unavailable.
 >
 >      **Assemble reviewer prompt** — call `gen-reviewer-prompt.sh` to compose the combined prompt (static cached prefix + dynamic suffix):
@@ -1056,7 +1071,15 @@ inline label-swap path below.
 >        >
 >        > **Verdict:** If Part 1 has ZERO blocking findings (INFO lines OK) AND Part 2 has no findings: return ONLY the token: `LGTM`. Otherwise return a numbered findings list — RULE_ID findings first, then LGTM findings. A reuse `BLOCK` is provisional until it survives the refute pass below.
 >
->      **Reuse-BLOCK refute pass (before consuming the verdict):** If the findings list contains a build-vs-buy / reuse `BLOCK`, do NOT halt on it yet. Dispatch a **cheap refute pass** — one short `TIER_B` second voter (≤5 tool calls) whose only job is to *kill* the BLOCK: `rg`-search the repo for the named util/library and confirm the claimed reuse target actually exists, is reachable, and fits this call site. **Majority rules:** keep the BLOCK only if the refuter also upholds it; if the refuter refutes it (the named target is absent, unreachable, or ill-fitting), demote that BLOCK to `ADVISE`, drop it from the blocking findings, and continue. If demotion leaves no remaining blocking findings, treat the verdict as `LGTM`. This keeps a hallucinated "library exists" from stalling the merge (`feedback_llm_validator_adaptive_retry`). Carry the upheld/refuted result into the reuse-lens ledger recorded below (`--upheld true` if upheld, `--upheld false` if refuted).
+>      **Reuse-BLOCK refute pass (before consuming the verdict):** If the findings list contains a build-vs-buy / reuse `BLOCK`, do NOT halt on it yet. Dispatch a **cheap refute pass** — one short `TIER_B` second voter (≤5 tool calls) whose only job is to *kill* the BLOCK: `rg`-search the repo for the named util/library and confirm the claimed reuse target actually exists, is reachable, and fits this call site. **Majority rules:** keep the BLOCK only if the refuter also upholds it; if the refuter refutes it (the named target is absent, unreachable, or ill-fitting), demote that BLOCK to `ADVISE`, drop it from the blocking findings, and continue. If demotion leaves no remaining blocking findings, treat the verdict as `LGTM`. This keeps a hallucinated "library exists" from stalling the merge (`feedback_llm_validator_adaptive_retry`). **Record the outcome of this reuse `BLOCK` decision to the reuse-lens ledger HERE** (issue #1442) — at the decision point, so precision = upheld ÷ total is computed only over real reuse BLOCKs and never from phantom rows on clean passes. Set `_reuse_block_raised=1`, `_reuse_trigger` to the flagged RULE_ID, and `_reuse_upheld=true` when the refuter upheld the BLOCK or `_reuse_upheld=false` when it was refuted/demoted-to-ADVISE, then:
+>        ```bash
+>        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ] && [ "${_reuse_block_raised:-0}" = "1" ]; then
+>          bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/interrogation-ledger.sh" record \
+>            --issue "<ISSUE>" --pr "<PR>" --trigger "${_reuse_trigger:-REINVENT_REPO_UTIL}" \
+>            --verdict BLOCK --upheld "${_reuse_upheld:-true}" \
+>          || true  # write failure is best-effort; never blocks the PR
+>        fi
+>        ```
 >
 >      If `LGTM` && det_exit == 0:
 >        gh pr comment <PR> --body "<!-- guardian-block --> Review: clean. <!-- /-->"
@@ -1067,15 +1090,9 @@ inline label-swap path below.
 >            --dispatch-id "<DISPATCH_ID>-reviewer" --role reviewer --issue "<ISSUE>" \
 >            --tokens-json ".autospec/tokens-<ISSUE>-reviewer.json"
 >        fi
->        # Reuse-lens decision ledger (issue #1442): when AUTOSPEC_REUSE_LENS=1,
->        # record the fused-review verdict so precision/demotion can be computed.
->        # `_reuse_upheld` is set by the refute pass above (true=upheld, false=refuted/
->        # demoted-to-ADVISE); default true when no reuse BLOCK was raised this iteration.
->        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ]; then
->          bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/interrogation-ledger.sh" record \
->            --issue "<ISSUE>" --pr "<PR>" --trigger "<TRIGGER>" --verdict BLOCK --upheld "${_reuse_upheld:-true}" \
->          || true  # write failure is best-effort; never blocks the PR
->        fi
+>        # Reuse-lens verdict is recorded at the refute-pass decision point above
+>        # (issue #1442), not here — recording in this LGTM-only branch produced
+>        # phantom BLOCK rows on clean passes and never recorded upheld BLOCKs.
 >        # monitor exits to parking state HERE — orchestrator relaunches when ~/.autospec/ci-state/<PR>.signal settles
 >        # On relaunch: run ci-wait-poll.sh <PR>; break SUCCESS if exit 0 (pass)
 >        break SUCCESS only if the full suite passed and required checks pass.

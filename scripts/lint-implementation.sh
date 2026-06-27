@@ -1428,9 +1428,14 @@ if [ "$DIRECTIVES" -eq 1 ]; then
         if [ "$ASSERTION_DENSITY" -eq 1 ]; then
             detect_assertion_density
         fi
-        detect_reinvent_repo_util
-        detect_new_dep_unjustified
-        detect_new_abstraction_single_caller
+        # Reuse-interrogation triage (issue #1439) is part of the reuse lens and
+        # must be inert unless AUTOSPEC_REUSE_LENS=1 — otherwise the lens fires
+        # while disarmed (flag-OFF byte-identical AC; spec Error handling §).
+        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ]; then
+            detect_reinvent_repo_util
+            detect_new_dep_unjustified
+            detect_new_abstraction_single_caller
+        fi
     } > "$TMP_FINDINGS" 2>&1
 
     # Reformat each finding as a directive line
@@ -1462,9 +1467,12 @@ else
     if [ "$ASSERTION_DENSITY" -eq 1 ]; then
         detect_assertion_density
     fi
-    detect_reinvent_repo_util
-    detect_new_dep_unjustified
-    detect_new_abstraction_single_caller
+    # Reuse-interrogation triage (issue #1439): inert unless the lens is armed.
+    if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ]; then
+        detect_reinvent_repo_util
+        detect_new_dep_unjustified
+        detect_new_abstraction_single_caller
+    fi
 fi
 
 # Exit with min(FINDINGS_COUNT, FINDINGS_EXIT_CAP)

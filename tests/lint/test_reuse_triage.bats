@@ -8,6 +8,12 @@ setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
     LINT="${REPO_ROOT}/scripts/lint-implementation.sh"
 
+    # The reuse-triage detectors are part of the reuse lens and only run when
+    # the lens is armed (issue #1439; spec flag-OFF inertness AC). Arm it for the
+    # positive/negative detector fixtures; the dedicated inertness test below
+    # unsets it explicitly.
+    export AUTOSPEC_REUSE_LENS=1
+
     # Create an isolated temp git repo for each test
     FAKE_REPO="$(mktemp -d -t reuse-triage-test.XXXXXX)"
     cd "$FAKE_REPO"
@@ -187,6 +193,32 @@ generate_report_output_v2() { echo "report"; }
 SH
     git add scripts/reporter.sh
 
+    run bash "$LINT" --pre-commit --staged
+    local reuse_findings
+    reuse_findings="$(printf '%s\n' "$output" \
+        | grep -E '^(REINVENT_REPO_UTIL|NEW_DEP_UNJUSTIFIED|NEW_ABSTRACTION_SINGLE_CALLER):' \
+        || true)"
+    [ -z "$reuse_findings" ]
+}
+
+# ─── Flag-OFF inertness (spec: lens inert unless AUTOSPEC_REUSE_LENS=1) ───────
+
+@test "flag OFF: AUTOSPEC_REUSE_LENS unset → reuse detectors emit nothing" {
+    # Same positive fixture as REINVENT_REPO_UTIL above — would fire when armed.
+    cat > scripts/lib/config-utils.sh <<'SH'
+#!/usr/bin/env bash
+parse_config() { grep -E '^[A-Z_]+='; }
+SH
+    git add scripts/lib/config-utils.sh
+    git commit -q -m "add config-utils"
+
+    cat > scripts/new-loader.sh <<'SH'
+#!/usr/bin/env bash
+parse_config() { echo "reinvented version"; }
+SH
+    git add scripts/new-loader.sh
+
+    unset AUTOSPEC_REUSE_LENS
     run bash "$LINT" --pre-commit --staged
     local reuse_findings
     reuse_findings="$(printf '%s\n' "$output" \
