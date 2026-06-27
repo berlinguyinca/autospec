@@ -27,6 +27,19 @@ DEFINE_PROMPT="${BATS_TEST_DIRNAME}/../skills/autospec-define/codex/prompt.md"
     [ "$output" -ge 1 ]
 }
 
+@test "phase4-implementer.md smoke gate scrubs gh admin creds from the subshell" {
+    # The smoke command is extracted verbatim from the untrusted issue body and
+    # runs moments before admin-merge under live gh creds (#W2). It must run in a
+    # credential-scrubbed subshell so a poisoned smoke fence cannot reach
+    # GH_TOKEN/GITHUB_TOKEN. Guard against a regression back to bare `eval`.
+    run grep -c 'env -u GH_TOKEN -u GITHUB_TOKEN bash -c "\$smoke_cmd"' "$PHASE4_PROMPT"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 1 ]
+    # The unscrubbed `eval "$smoke_cmd"` form must no longer be present.
+    run grep -c 'eval "\$smoke_cmd"' "$PHASE4_PROMPT"
+    [ "$output" -eq 0 ]
+}
+
 @test "autospec-split decomposer enforces SMOKE_NOT_FENCED and SMOKE_MULTI_LINE" {
     run grep -c "SMOKE_NOT_FENCED\|SMOKE_MULTI_LINE" "$SPLIT_PROMPT"
     [ "$status" -eq 0 ]
