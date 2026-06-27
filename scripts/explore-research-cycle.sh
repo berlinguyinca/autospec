@@ -377,6 +377,8 @@ MAX_ISSUES="$MAX_ISSUES" \
 RECENT_FILE="$recent_titles_file" \
 STAGE="$STAGE" \
 DEDUPED_IN="$DEDUPED_IN" \
+GAP_REPO_ROOT="$REPO_ROOT" \
+GAP_CLAIMING_SOURCES="${AUTOSPEC_EXPLORE_GAP_CLAIMING_SOURCES:-}" \
 python3 - <<'PY' > "$work_dir/final.json"
 import json, os, re, glob, datetime
 
@@ -385,6 +387,8 @@ cap      = int(os.environ["MAX_ISSUES"])
 recent_f = os.environ["RECENT_FILE"]
 stage    = os.environ.get("STAGE", "full")
 deduped_in = os.environ.get("DEDUPED_IN", "").strip()
+# Repo root for gap-confirmation file resolution — explicit, never cwd-dependent.
+gap_repo_root = os.environ.get("GAP_REPO_ROOT", "") or os.getcwd()
 
 # Static source priors per the spec — the defensive fallback used verbatim when
 # no dynamic weights are available (no ledger / weights script absent / broken).
@@ -445,6 +449,81 @@ def normalize_title(t):
     # Drop stopwords for normalization (keep verb + subject signal).
     return s[:120]
 
+# ---------------------------------------------------------------------------
+# GAP-CONFIRMATION config + helpers (stage: dedup -> gap-confirm -> verify).
+# A researcher may attach a machine-checkable `gap_check` claim; the aggregator
+# re-verifies it against the CURRENT files before ranking. This is the primary
+# precision lever: it kills "X is missing" proposals whose X already exists
+# (the empirical failure mode — source-analysis was 4/4 false on direct check).
+import subprocess
+
+# Sources that MUST make a falsifiable gap claim: a proposal from one of these
+# with no valid gap_check is refuted by default (it asserts a gap but offers
+# nothing to confirm). Scoped to the researchers converted to emit gap_check
+# in this pass — `source-analysis` and `self-leverage`, the two whose evidence
+# was empirically false/prose-only. Other sources (spec-vs-code, codebase-signals,
+# quality-resilience, …) are NOT refuted for omitting gap_check — they keep their
+# existing behavior; if they DO attach a gap_check it is still verified below.
+# Converting more sources is a deliberate edit to this set (or the env override).
+# Override via AUTOSPEC_EXPLORE_GAP_CLAIMING_SOURCES (CSV).
+_gcs_env = os.environ.get("GAP_CLAIMING_SOURCES", "").strip()
+GAP_CLAIMING_SOURCES = (
+    set(s.strip() for s in _gcs_env.split(",") if s.strip())
+    if _gcs_env else
+    {"source-analysis", "self-leverage"}
+)
+
+def _safe_haystack(h):
+    """Resolve a gap_check haystack to a repo-relative target, or None if it
+    escapes the repo (absolute path / `..` traversal) — never search outside."""
+    if not isinstance(h, str) or not h:
+        return None
+    if h == "<repo>":
+        return "<repo>"
+    if os.path.isabs(h):
+        return None
+    norm = os.path.normpath(h)
+    if norm == ".." or norm.startswith("../") or "/../" in norm:
+        return None
+    return norm
+
+def _gap_search(needle, haystack):
+    """Tri-state fixed-string search rooted at gap_repo_root (never cwd).
+    True=found, False=definitively absent (targets existed but lacked needle),
+    None=unconfirmable (no target / error). None always fails closed."""
+    if haystack == "<repo>":
+        try:
+            r = subprocess.run(["git", "grep", "-F", "-q", "--", needle],
+                               cwd=gap_repo_root,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if r.returncode == 0:
+                return True
+            if r.returncode == 1:
+                return False
+            return None
+        except Exception:
+            return None
+    pat = os.path.join(gap_repo_root, haystack)
+    paths = (glob.glob(pat, recursive=True)
+             if any(c in haystack for c in "*?[") else [pat])
+    existing = [p for p in paths if os.path.isfile(p)]
+    if not existing:
+        return None
+    for pth in existing:
+        try:
+            with open(pth, "r", encoding="utf-8", errors="ignore") as fh:
+                if needle in fh.read():
+                    return True
+        except Exception:
+            return None
+    return False
+
+# Counters surfaced in the cycle JSON (observable precision yield).
+gap_dropped = 0
+gap_malformed = 0
+gap_confirmed_count = None
+saturated_sources = []
+
 all_props = []
 total = 0
 if stage == "finalize":
@@ -497,7 +576,11 @@ else:
             named_consumer = ""
         # priority (F8): carry through for priority-boost gate.
         priority = bool(p.get("priority"))
-        all_props.append({
+        # Carry the optional gap_check through verbatim so the gap-confirmation
+        # stage can re-verify it; only a dict is propagated (anything else is
+        # ignored and treated as "no gap_check").
+        gap_check = p.get("gap_check")
+        _entry = {
             "title": title,
             "evidence": p.get("evidence",""),
             "estimated_complexity": comp,
@@ -507,7 +590,10 @@ else:
             "named_consumer": named_consumer,
             "score": round(score, 4),
             "priority": priority,
-        })
+        }
+        if isinstance(gap_check, dict):
+            _entry["gap_check"] = gap_check
+        all_props.append(_entry)
         total += 1
 
 # Dedup by normalized title — keep highest score. (Skipped in finalize: the
@@ -519,6 +605,85 @@ if stage != "finalize":
         if n not in by_norm or p["score"] > by_norm[n]["score"]:
             by_norm[n] = p
     deduped = list(by_norm.values())
+
+# Count after dedup but BEFORE gap-confirm/saturation mutate `deduped`, so the
+# reported proposals_after_dedup reflects dedup only (stable, test-compatible).
+dedup_count = len(deduped)
+
+# ---------------------------------------------------------------------------
+# GAP-CONFIRMATION stage — runs after dedup, before the pass-1 emit / verify.
+# Skipped in finalize: its input was already gap-confirmed in pass 1. Every
+# proposal carrying a gap_check is re-verified against current files; a
+# gap-claiming source with no (valid) gap_check is refuted by default.
+if stage != "finalize":
+    _confirmed = []
+    for p in deduped:
+        gc = p.get("gap_check")
+        src = p.get("source", "")
+        if not isinstance(gc, dict):
+            if src in GAP_CLAIMING_SOURCES:
+                gap_dropped += 1          # asserts a gap, offers nothing to check
+                continue
+            _confirmed.append(p)          # non-gap-claiming source: pass through
+            continue
+        kind = gc.get("kind")
+        needle = gc.get("needle")
+        hay = _safe_haystack(gc.get("haystack"))
+        if (kind not in ("absent", "present")
+                or not isinstance(needle, str) or not needle
+                or hay is None):
+            gap_malformed += 1
+            gap_dropped += 1              # malformed gap_check -> fail closed
+            continue
+        res = _gap_search(needle, hay)
+        if kind == "absent":
+            # Claim: needle is MISSING. Keep only if definitively absent.
+            if res is False:
+                _confirmed.append(p)
+            else:
+                gap_dropped += 1          # found (no real gap) or unconfirmable
+        else:  # present
+            # Claim: needle EXISTS (real call-site/pattern). Keep only if found.
+            if res is True:
+                _confirmed.append(p)
+            else:
+                gap_dropped += 1
+    deduped = _confirmed
+    gap_confirmed_count = len(deduped)
+
+    # ANTI-SATURATION — bound any single source to SATURATION_FRACTION of the
+    # post-gap-confirm pool, penalizing its surviving scores. Stops one
+    # researcher (e.g. a cap-saturated discovery source) from flooding the rank.
+    # Gated to LARGE, MULTI-SOURCE pools only: on a small or single-source pool
+    # the final top-N cap already bounds output, and capping there would just
+    # delete a legitimately dominant lone source. Each source keeps >= 3.
+    try:
+        _sat_frac = float(os.environ.get("AUTOSPEC_EXPLORE_SATURATION_FRACTION", "0.40") or "0.40")
+    except Exception:
+        _sat_frac = 0.40
+    try:
+        _sat_min_pool = int(os.environ.get("AUTOSPEC_EXPLORE_SATURATION_MIN_POOL", "12") or "12")
+    except Exception:
+        _sat_min_pool = 12
+    _SAT_PENALTY = 0.5
+    from collections import Counter, defaultdict
+    _cnt = Counter(p.get("source", "?") for p in deduped)
+    if len(deduped) >= _sat_min_pool and len(_cnt) >= 2:
+        _cap_n = max(3, int(_sat_frac * len(deduped)))
+        saturated_sources = sorted(s for s, c in _cnt.items() if c > _cap_n)
+        if saturated_sources:
+            _sat_set = set(saturated_sources)
+            _by_src = defaultdict(list)
+            for p in deduped:
+                _by_src[p.get("source", "?")].append(p)
+            _new = []
+            for s, members in _by_src.items():
+                if s in _sat_set:
+                    members = sorted(members, key=lambda q: -q.get("score", 0))[:_cap_n]
+                    for m in members:
+                        m["score"] = round(m.get("score", 0) * _SAT_PENALTY, 4)
+                _new.extend(members)
+            deduped = _new
 
 # ---------------------------------------------------------------------------
 # PASS 1 boundary (stage=dedup, issue #1095): emit the deduped proposals — each
@@ -534,7 +699,11 @@ if stage == "dedup":
         "round": datetime.date.today().isoformat(),
         "stage": "dedup",
         "proposals_total": total,
-        "proposals_after_dedup": len(deduped),
+        "proposals_after_dedup": dedup_count,
+        "proposals_after_gap_confirm": gap_confirmed_count if gap_confirmed_count is not None else len(deduped),
+        "gap_unconfirmed_dropped": gap_dropped,
+        "gap_check_malformed": gap_malformed,
+        "saturated_sources": saturated_sources,
         "deduped": deduped,
     }
     print(json.dumps(out, indent=2))
@@ -583,6 +752,13 @@ _verdicts = _load_verdicts()
 # parse it directly); the loud operator warning is emitted by the orchestrator
 # (autospec-explore.sh) off this field, not from here.
 verify_mode = "active" if _verdicts is not None else "no-op-unverified"
+# Fail-CLOSED in the autonomous path: an autonomous run that reaches the verify
+# gate with NO skeptic verdict map must NOT auto-file unverified proposals
+# (that is how 183 false positives would have shipped). Interactive runs keep
+# the historical no-op "all survive" behavior — there the operator IS the
+# skeptic. Gated on AUTOSPEC_EXPLORE_AUTONOMOUS=1 (set by --once / the conductor).
+autonomous = os.environ.get("AUTOSPEC_EXPLORE_AUTONOMOUS", "") == "1"
+failclosed = autonomous and verify_mode == "no-op-unverified"
 verified = []
 refuted_count = 0
 for p in deduped:
@@ -809,13 +985,19 @@ def _rank_key(p):
     sev_rank = SEVERITY_RANK.get(p.get("severity", "feature"), DEFAULT_SEVERITY_RANK)
     return (sev_rank, -p["score"])
 filtered.sort(key=_rank_key)
-final = filtered[:cap]
+# Fail-closed: an autonomous run with no skeptic verdicts files nothing.
+final = [] if failclosed else filtered[:cap]
 
 out = {
     "round": datetime.date.today().isoformat(),
     "proposals_total": total,
-    "proposals_after_dedup": len(deduped),
+    "proposals_after_dedup": dedup_count,
+    "proposals_after_gap_confirm": gap_confirmed_count if gap_confirmed_count is not None else len(deduped),
+    "gap_unconfirmed_dropped": gap_dropped,
+    "gap_check_malformed": gap_malformed,
+    "saturated_sources": saturated_sources,
     "verify_mode": verify_mode,
+    "failclosed": failclosed,
     "proposals_after_verify": len(verified),
     "proposals_refuted": refuted_count,
     "proposals_after_roi": len(roi_kept),

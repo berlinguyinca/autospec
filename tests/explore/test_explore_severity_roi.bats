@@ -167,9 +167,16 @@ assert d['proposals_after_roi'] == 2, d
 @test "ROI gate exempts ALL seven legacy universal sources" {
     # Each legacy universal source emitting an empty-consumer proposal must
     # survive the ROI gate. Guards against silently muting the existing 7.
-    for s in spec-vs-code prior-reports codebase-signals open-issues source-analysis dependency-health internet; do
+    # source-analysis is also a gap-claiming source, so its proposal carries a
+    # confirmable gap_check (a present-claim against a real repo file) to pass
+    # the gap-confirmation stage that runs before ROI; the other six are not
+    # gap-claiming and pass through unchanged.
+    echo "roi-probe-marker" > roi_probe.txt
+    git add roi_probe.txt && git commit -q -m "roi probe"
+    for s in spec-vs-code prior-reports codebase-signals open-issues dependency-health internet; do
         make_fake_researcher "$s" "{\"source\":\"$s\",\"proposals\":[{\"title\":\"feat: $s item\",\"evidence\":\"e\",\"estimated_complexity\":\"small\",\"confidence\":0.9}]}"
     done
+    make_fake_researcher source-analysis '{"source":"source-analysis","proposals":[{"title":"feat: source-analysis item","evidence":"e","estimated_complexity":"small","confidence":0.9,"gap_check":{"kind":"present","needle":"roi-probe-marker","haystack":"roi_probe.txt"}}]}'
 
     run bash "$REPO_ROOT/scripts/explore-research-cycle.sh" \
         --research-sources spec-vs-code,prior-reports,codebase-signals,open-issues,source-analysis,dependency-health,internet \

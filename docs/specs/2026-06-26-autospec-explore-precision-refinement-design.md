@@ -49,11 +49,17 @@ Confirmation rules (all deterministic, repo-relative, no LLM):
   repo-wide `git grep -F`.
 - `kind: "present"` — the proposal claims a real call-site/pattern **exists** at
   `needle` in `haystack`. Confirm it is actually there; **if absent → drop**.
-- **Refute-by-default for gap-claiming sources.** Sources in
-  `GAP_CLAIMING_SOURCES` (`source-analysis`, `self-leverage`, `codebase-signals`,
-  `spec-vs-code`) whose proposal carries **no** `gap_check` are dropped — they
-  must make a falsifiable, machine-checkable claim. Sources not in that set
-  (e.g. `dogfooding`, `dependency-health`) are unaffected (pass through).
+- **Refute-by-default for gap-claiming sources.** Any proposal carrying a
+  `gap_check` is verified regardless of source. Additionally, sources in
+  `GAP_CLAIMING_SOURCES` — **default `source-analysis`, `self-leverage`** (the two
+  researchers converted to emit `gap_check` this pass; configurable via
+  `AUTOSPEC_EXPLORE_GAP_CLAIMING_SOURCES`) — whose proposal carries **no**
+  `gap_check` are dropped, forcing a falsifiable claim. Sources NOT in the set
+  (`spec-vs-code`, `codebase-signals`, `quality-resilience`, `dogfooding`,
+  `dependency-health`, …) keep their existing behavior — they are not killed for
+  omitting `gap_check`. Converting more sources is a deliberate later edit; this
+  keeps the valuable `spec-vs-code` source alive and is backward compatible with
+  existing aggregator tests.
 - `needle`/`haystack` are validated: `haystack` must resolve inside the repo
   (no absolute paths, no `..` escape); a malformed/zero-match-impossible
   `gap_check` drops the proposal (fail-closed) and is counted.

@@ -18,7 +18,10 @@
 set -u
 
 REPO_ROOT="${AUTOSPEC_REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-MAX_PROPOSALS=100
+# Cap lowered 100 -> 25: at 100 this researcher saturated its own cap every round
+# (one self-declared silent-wrong flood swamping the severity-first rank). The
+# assertion-density lens now also COLLAPSES en masse (see lens (a)).
+MAX_PROPOSALS=25
 
 cd "$REPO_ROOT" || { echo '{"source":"quality-resilience","proposals":[]}'; exit 0; }
 
@@ -76,17 +79,36 @@ cap           = int(sys.argv[5])
 proposals = []
 
 def add(title, evidence, complexity="small", confidence=0.75,
-        severity="correctness", named_consumer=""):
+        severity="correctness", named_consumer="", gap_check=None):
     if len(proposals) >= cap:
         return
-    proposals.append({
+    prop = {
         "title": title,
         "evidence": evidence,
         "estimated_complexity": complexity,
         "confidence": confidence,
         "severity": severity,
         "named_consumer": named_consumer,
-    })
+    }
+    if isinstance(gap_check, dict):
+        prop["gap_check"] = gap_check
+    proposals.append(prop)
+
+# When more than this many test files trip the same lens, collapse to ONE
+# structural proposal instead of one issue per file (anti-flood).
+COLLAPSE_THRESHOLD = 8
+
+def _bats_has_assertion(content):
+    """True if a bats file contains ANY recognizable assertion — including
+    NATIVE bats forms, not just the bats-assert `assert_*` helpers. The old
+    `\\bassert\\b`-only check false-flagged every file that asserts with
+    `[ ... ]` / `[[ ... ]]` / run-result vars, which is most of them."""
+    return bool(re.search(
+        r'\bassert\w*\b'                       # assert / assert_output / assert_success
+        r'|\[\[?\s'                            # [ … ]  or  [[ … ]] test commands
+        r'|\$status\b|\$output\b|\$\{?lines\b'  # bats `run` result vars
+        r'|\brefute\w*\b',                     # bats-assert refute_*
+        content))
 
 # ── Lens (a): assertion-free test files ────────────────────────────────────
 try:
@@ -95,6 +117,7 @@ try:
 except FileNotFoundError:
     test_files = []
 
+_assertion_free = []   # collect first, then collapse-or-emit below
 for tf in test_files:
     if not os.path.isfile(tf):
         continue
@@ -103,18 +126,15 @@ for tf in test_files:
     except Exception:
         continue
 
-    # Check for assertion-free bats files.
+    # Flag bats files that have test blocks but NO recognizable assertion of
+    # any kind (native or bats-assert). Files asserting via `[ … ]`/`$status`
+    # are no longer false-flagged. The test-block marker is `@test` in source
+    # files, or `bats_test_function` after bats' own preprocessing (the form a
+    # fixture takes when created inside a bats heredoc).
     if tf.endswith(".bats"):
-        has_assert = bool(re.search(r'\bassert\b|run\s+.*\n.*assert|assert_output|assert_success|assert_failure', content))
-        if not has_assert:
-            add(
-                f"test: add assertions to {tf} (currently assertion-free)",
-                f"{tf} contains @test blocks but no assert_* calls — tests cannot falsify behaviour.",
-                complexity="small",
-                confidence=0.85,
-                severity="silent-wrong",
-                named_consumer="/autospec-run mutation gate; assertion-density floor",
-            )
+        has_test_block = ("@test" in content) or ("bats_test_function" in content)
+        if has_test_block and not _bats_has_assertion(content):
+            _assertion_free.append(tf)
             continue
 
     # Check for self-consistent fixture pattern: test imports / sources the SUT
@@ -127,6 +147,36 @@ for tf in test_files:
             confidence=0.7,
             severity="silent-wrong",
             named_consumer="/autospec-run mutation gate",
+        )
+
+# Collapse-or-emit the assertion-free bats files. Above COLLAPSE_THRESHOLD this
+# is a systemic gap (one assertion-density-floor lint), not N separate issues —
+# the prior per-file flood is exactly what saturated the cap. Each emitted
+# proposal carries a gap_check confirming the file still has @test blocks.
+if len(_assertion_free) > COLLAPSE_THRESHOLD:
+    sample = ", ".join(_assertion_free[:5])
+    add(
+        f"test(structural): add an assertion-density floor lint ({len(_assertion_free)} assertion-free bats files)",
+        f"{len(_assertion_free)} bats files have @test blocks but no recognizable "
+        f"assertion (native `[ … ]`/`$status` or bats-assert). One lint that fails "
+        f"CI on an assertion-free @test catches them all. Examples: {sample}.",
+        complexity="medium",
+        confidence=0.8,
+        severity="silent-wrong",
+        named_consumer="/autospec-run mutation gate; assertion-density floor",
+        gap_check={"kind": "present", "needle": "@test", "haystack": _assertion_free[0]},
+    )
+else:
+    for tf in _assertion_free:
+        add(
+            f"test: add assertions to {tf} (currently assertion-free)",
+            f"{tf} contains @test blocks but no recognizable assertion (native "
+            f"`[ … ]`/`$status` or bats-assert) — the test cannot falsify behaviour.",
+            complexity="small",
+            confidence=0.85,
+            severity="silent-wrong",
+            named_consumer="/autospec-run mutation gate; assertion-density floor",
+            gap_check={"kind": "present", "needle": "@test", "haystack": tf},
         )
 
 # ── Lens (b): validate.sh invariants without matching test ─────────────────

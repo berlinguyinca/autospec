@@ -53,6 +53,24 @@ EOF
     chmod +x "$TMP/bin/claude"
     export PATH="$TMP/bin:$PATH"
 
+    # Stub adversarial-verify skeptic. Under the precision-refinement contract an
+    # autonomous run with NO skeptic fails closed (files nothing); this stub
+    # affirms every deduped proposal so verify_mode=active and the happy-path
+    # filing/drain plumbing is exercised. A real harness supplies real per-
+    # proposal refute-by-default verdicts here.
+    cat > "$TMP/bin/stub-verify.sh" <<'EOF'
+#!/usr/bin/env bash
+python3 -c "
+import json, os
+d = json.load(open(os.environ['AUTOSPEC_EXPLORE_DEDUPED_IN']))
+m = {p['norm_title']: {'verdict': 'survived', 'reason': 'stub skeptic'}
+     for p in d.get('deduped', []) if p.get('norm_title')}
+json.dump(m, open(os.environ['AUTOSPEC_EXPLORE_VERDICTS_OUT'], 'w'))
+"
+EOF
+    chmod +x "$TMP/bin/stub-verify.sh"
+    export AUTOSPEC_EXPLORE_VERIFY_CMD="bash $TMP/bin/stub-verify.sh"
+
     # Override research dir with a single fast deterministic researcher.
     export AUTOSPEC_RESEARCH_DIR="$TMP/fake-research"
     mkdir -p "$AUTOSPEC_RESEARCH_DIR"
