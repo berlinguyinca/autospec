@@ -1016,7 +1016,8 @@ inline label-swap path below.
 >        --issue-body "/tmp/issue-<ISSUE>-body.md" \
 >        --prev-findings "/tmp/guardian-<PR>.md" \
 >        --issue-labels "<ISSUE_LABELS>" \
->        --repo "<REPO>")
+>        --repo "<REPO>" \
+>        ${_reuse_flags_file:+--reuse-flags "$_reuse_flags_file"})
 >      ```
 >      Pass `combined_reviewer_prompt` as the reviewer subagent prompt. The static cached prefix is framed by `<!-- CACHE BOUNDARY -->` markers; pass it with `cache_control: { type: "ephemeral" }` so Anthropic's prompt cache can reuse it across inner-loop iterations.
 >
