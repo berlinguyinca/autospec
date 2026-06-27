@@ -292,6 +292,10 @@ check_keyword_routing_section() {
             || fail "autospec-listen: $trio missing post-approval execution-ready routing contract"
         grep -q 'AUTOSPEC_LISTENER_AUTO_IMPLEMENT_OPEN' "$skill_dir/$trio" \
             || fail "autospec-listen: $trio missing auto-implement open-count routing hint"
+        grep -q 'plan_exit_ready' "$skill_dir/$trio" \
+            || fail "autospec-listen: $trio missing completed Plan-mode handoff route (issue #1462)"
+        grep -q 'AUTOSPEC_LISTENER_PLAN_EXIT_READY' "$skill_dir/$trio" \
+            || fail "autospec-listen: $trio missing Plan-exit-ready state hint (issue #1462)"
     done
     # The explore-confirm gate literal honored in the trio MUST exactly match the
     # one emitted by the classifier (scripts/listener-match.sh, issue #909).
@@ -305,6 +309,12 @@ check_keyword_routing_section() {
         || fail "scripts/listener-match.sh missing post-approval execution-ready route (issue #1461)"
     grep -q 'post-approval: open auto-implement issues route to autospec-run' skills/autospec-shared/tests/unit/listener-match.bats \
         || fail "listener-match.bats missing post-approval open auto-implement route coverage (issue #1461)"
+    grep -q 'plan_exit_ready' scripts/listener-match.sh \
+        || fail "scripts/listener-match.sh missing completed Plan-mode handoff route (issue #1462)"
+    grep -q 'plan-exit: completed saved implementation plan routes to autospec autonomous' skills/autospec-shared/tests/unit/listener-match.bats \
+        || fail "listener-match.bats missing completed Plan-mode handoff coverage (issue #1462)"
+    grep -q 'plan-exit: destructive action gate does not route' skills/autospec-shared/tests/unit/listener-match.bats \
+        || fail "listener-match.bats missing Plan-exit destructive-action gate coverage (issue #1462)"
 }
 
 # Gap-remediation invariants (issue #535, deps #533/#534): the autospec-run
