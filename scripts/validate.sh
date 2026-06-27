@@ -2262,6 +2262,17 @@ check_lint_heredoc_handling() {
     fi
 }
 
+check_lint_reuse_triage() {
+    info "lint reuse-triage RULE_IDs: tests/lint/test_reuse_triage.bats"
+    [ -f tests/lint/test_reuse_triage.bats ] \
+        || fail "tests/lint/test_reuse_triage.bats: bats coverage missing (issue #1439)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/lint/test_reuse_triage.bats"
+        bats tests/lint/test_reuse_triage.bats >/tmp/validate-lint-reuse-triage.log 2>&1 \
+            || { cat /tmp/validate-lint-reuse-triage.log >&2; fail "tests/lint/test_reuse_triage.bats: failed"; }
+    fi
+}
+
 # Quality-differential harness (issue #1023, spec §5 D4): the boilerplate guard
 # (scripts/quality-differential.sh) plus its synthetic self-test negative pair
 # and the >=3 refine-lens fixtures whose deterministic path is the documented
@@ -2950,6 +2961,7 @@ main() {
     check_reviewer_contract
     check_closeout_contract
     check_lint_heredoc_handling
+    check_lint_reuse_triage
     check_quality_differential
     check_usage_limit_helper
     check_supersession_contract
