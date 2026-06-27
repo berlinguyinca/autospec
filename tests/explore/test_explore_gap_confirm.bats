@@ -104,6 +104,25 @@ count_key() { printf '%s' "$1" | python3 -c "import json,sys;print(json.load(sys
     [ "$(count_key "$output" gap_check_malformed)" -ge 1 ]
 }
 
+@test "gap-confirm: newline in the needle is rejected as malformed" {
+    # A multi-line needle would be OR-split by git grep (any-line match) and
+    # disagree with the file branch's substring semantics — reject it.
+    mk source-analysis '{"source":"source-analysis","proposals":[{"title":"feat: multiline","evidence":"e","estimated_complexity":"small","confidence":0.9,"gap_check":{"kind":"present","needle":"line one\nline two","haystack":"probe.txt"}}]}'
+    run_cycle --research-sources source-analysis --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    [ -z "$(titles "$output")" ]
+    [ "$(count_key "$output" gap_check_malformed)" -ge 1 ]
+}
+
+@test "gap-confirm: a symlink pointing outside the repo is not followed (dropped)" {
+    ln -s /etc/hosts escape_link
+    mk self-leverage '{"source":"self-leverage","proposals":[{"title":"feat: via symlink","evidence":"e","estimated_complexity":"small","confidence":0.9,"named_consumer":"x","gap_check":{"kind":"present","needle":"localhost","haystack":"escape_link"}}]}'
+    run_cycle --research-sources self-leverage --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    # present-claim against an out-of-repo symlink target is unconfirmable -> dropped
+    [ -z "$(titles "$output")" ]
+}
+
 @test "fail-closed: autonomous run with no verdict map files ZERO" {
     mk spec-vs-code '{"source":"spec-vs-code","proposals":[{"title":"feat: would-ship","evidence":"e","estimated_complexity":"small","confidence":0.9}]}'
     AUTOSPEC_EXPLORE_AUTONOMOUS=1 run_cycle --research-sources spec-vs-code --max-issues-per-round 5

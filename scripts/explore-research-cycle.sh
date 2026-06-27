@@ -506,17 +506,28 @@ def _gap_search(needle, haystack):
     pat = os.path.join(gap_repo_root, haystack)
     paths = (glob.glob(pat, recursive=True)
              if any(c in haystack for c in "*?[") else [pat])
-    existing = [p for p in paths if os.path.isfile(p)]
+    # Hard containment: resolve symlinks and keep only files that really live
+    # inside the repo root (lexical `..`/abs is already rejected upstream, but
+    # an in-repo symlink could still point outside).
+    root_real = os.path.realpath(gap_repo_root) + os.sep
+    existing = [p for p in paths
+                if os.path.isfile(p)
+                and os.path.realpath(p).startswith(root_real)]
     if not existing:
         return None
+    any_readable = False
     for pth in existing:
         try:
             with open(pth, "r", encoding="utf-8", errors="ignore") as fh:
-                if needle in fh.read():
-                    return True
+                content = fh.read()
         except Exception:
-            return None
-    return False
+            continue          # skip an unreadable file, don't abort the whole check
+        any_readable = True
+        if needle in content:
+            return True
+    # All matched files existed but none contained the needle -> definitively
+    # absent (False); if NONE were readable we cannot confirm -> None (fail closed).
+    return False if any_readable else None
 
 # Counters surfaced in the cycle JSON (observable precision yield).
 gap_dropped = 0
@@ -535,6 +546,13 @@ if stage == "finalize":
         _p1 = json.load(fh)
     total = int(_p1.get("proposals_total", 0))
     deduped = [p for p in (_p1.get("deduped") or _p1.get("proposals") or []) if isinstance(p, dict)]
+    # Gap-confirm/saturation ran in pass 1 (stage=dedup) and is skipped here, so
+    # carry pass-1's precision-yield counters through this consumed artifact
+    # rather than reporting zeros for the work pass 1 already did.
+    gap_confirmed_count = _p1.get("proposals_after_gap_confirm", len(deduped))
+    gap_dropped = int(_p1.get("gap_unconfirmed_dropped", 0) or 0)
+    gap_malformed = int(_p1.get("gap_check_malformed", 0) or 0)
+    saturated_sources = _p1.get("saturated_sources", []) or []
 else:
   for f in sorted(glob.glob(os.path.join(work, "*.json"))):
     if os.path.basename(f) == "final.json":
@@ -629,8 +647,12 @@ if stage != "finalize":
         kind = gc.get("kind")
         needle = gc.get("needle")
         hay = _safe_haystack(gc.get("haystack"))
+        # A newline in the needle is rejected: `git grep -F` splits a
+        # newline-bearing fixed pattern into OR'd line patterns (any-line match),
+        # which disagrees with the file branch's true substring semantics. Force
+        # single-line needles so both branches mean the same thing.
         if (kind not in ("absent", "present")
-                or not isinstance(needle, str) or not needle
+                or not isinstance(needle, str) or not needle or "\n" in needle
                 or hay is None):
             gap_malformed += 1
             gap_dropped += 1              # malformed gap_check -> fail closed

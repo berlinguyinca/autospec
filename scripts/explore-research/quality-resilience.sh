@@ -106,6 +106,7 @@ def _bats_has_assertion(content):
     return bool(re.search(
         r'\bassert\w*\b'                       # assert / assert_output / assert_success
         r'|\[\[?\s'                            # [ … ]  or  [[ … ]] test commands
+        r'|\(\('                               # (( … )) arithmetic test
         r'|\$status\b|\$output\b|\$\{?lines\b'  # bats `run` result vars
         r'|\brefute\w*\b',                     # bats-assert refute_*
         content))

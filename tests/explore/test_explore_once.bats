@@ -285,3 +285,33 @@ assert d['filed'] == 2, f'expected filed=2, got: {d}'
 assert d['dry'] is False, f'expected dry=false, got: {d}'
 "
 }
+
+@test "--once fails closed (autonomous, no skeptic): files 0 and reports verify-unavailable-failclosed" {
+    # Run the REAL cycle (no AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD mock) with a fixture
+    # researcher. --once forces autonomous; with no verdict map the cycle fails
+    # closed -> 0 filed, and --once must surface it distinctly from a dry well.
+    export AUTOSPEC_RESEARCH_DIR="$TMP/fake-research"
+    mkdir -p "$AUTOSPEC_RESEARCH_DIR"
+    cat > "$AUTOSPEC_RESEARCH_DIR/spec-vs-code.sh" <<'EOF'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"source":"spec-vs-code","proposals":[{"title":"feat: would ship if verified","evidence":"ev","estimated_complexity":"small","confidence":0.9}]}
+JSON
+EOF
+    chmod +x "$AUTOSPEC_RESEARCH_DIR/spec-vs-code.sh"
+
+    run bash "$REPO_ROOT/scripts/autospec-explore.sh" "test prompt" \
+        --once --research-sources spec-vs-code
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | python3 -c "
+import sys, json
+lines = [l for l in sys.stdin.read().splitlines() if l.strip().startswith('{')]
+assert lines, 'no JSON line'
+d = json.loads(lines[-1])
+assert d['filed'] == 0, d
+assert d['dry'] is True, d
+assert d['reason'] == 'verify-unavailable-failclosed', d
+"
+    # No issue was created (fail-closed filed nothing).
+    ! grep -q 'issue create' "$TMP/.autospec/gh-calls.log" 2>/dev/null
+}
