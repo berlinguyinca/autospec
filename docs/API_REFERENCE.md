@@ -4,7 +4,7 @@
 > *Per-symbol reference for all public CLI surfaces and shared scripts.*
 
 <!-- autospec-doc-scope:
-  src: ["bootstrap.ps1", "scripts/**/*.sh", "scripts/**/*.mjs", "scripts/**/*.ps1", "skills/autospec-shared/scripts/**/*.mjs", "skills/autospec-shared/scripts/**/*.sh", "install.sh", "skills/*/install.sh", "tests/ship-completeness.bats"]
+  src: ["bootstrap.ps1", "scripts/**/*.sh", "scripts/**/*.mjs", "scripts/**/*.ps1", "skills/autospec-shared/scripts/**/*.mjs", "skills/autospec-shared/scripts/**/*.sh", "skills/autospec-doc/scripts/*.mjs", "install.sh", "skills/*/install.sh", "tests/ship-completeness.bats"]
   reason: "API reference for all autospec shared scripts, their shipping path, and the ship-completeness guard"
   mismatch_action: warn
   generated: true
@@ -445,6 +445,22 @@ Generates `llms.txt` (≤200 lines index) and `llms-full.txt` (full concatenated
 ```
 Usage: bash gen-llms-txt.sh --repo-root <dir> [--cluster-json <file>]
 ```
+
+
+### `autospec-doc` internals
+
+<!-- autospec-doc-scope:
+  src: ["skills/autospec-doc/*.md", "skills/autospec-doc/codex/prompt.md", "skills/autospec-doc/opencode/agent.md", "skills/autospec-doc/scripts/*.mjs", "skills/autospec-doc/tests/*.test.mjs", "tests/fixtures/skill-goldens/autospec-doc.*.sha256"]
+  reason: "autospec-doc skill authoring contract, per-audience generator internals, grounding tests, and lock-step goldens"
+  mismatch_action: warn
+  generated: false
+-->
+
+`autospec-doc` owns the per-audience feature inventory model and renderer. Its
+feature skeleton includes algorithm, config profile, settings, and grounded
+implementation-snippet fields; generated developer docs render real source-line
+fragments and the docs-as-tests verifier rejects snippets that diverge from the
+recorded `source_path:start-end` range.
 
 ### `check-doc-drift.sh`
 

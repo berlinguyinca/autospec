@@ -242,6 +242,10 @@ test('resolveFeatures: inline documentation.features wins (mapped through normal
   assert.strictEqual(feats[0].rationale, '');
   assert.deepEqual(feats[0].depends_on, []);
   assert.deepEqual(feats[0].examples, []);
+  assert.deepEqual(feats[0].algorithm, { developer: '', general: '' });
+  assert.deepEqual(feats[0].config_profiles, { admin: [], developer: [] });
+  assert.deepEqual(feats[0].settings, []);
+  assert.deepEqual(feats[0].implementation_snippets, []);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -261,6 +265,27 @@ test('normalizeFeature: preserves per-audience maps for typed fields (no [object
   assert.strictEqual(f.errors, 'plain string');
   assert.strictEqual(f.rationale, '7');
   assert.strictEqual(f.invariants, '');
+});
+
+
+test('normalizeFeature: defaults and preserves internals fields', () => {
+  const f = normalizeFeature({
+    slug: 'algo',
+    algorithm: { developer: 'DEV_ALGO', general: 'GEN_ALGO' },
+    config_profiles: [{ name: 'fast', description: 'Lower precision threshold.' }],
+    settings: { name: 'threshold', type: 'number', default: 0.8, description: 'Peak cutoff.' },
+    implementation_snippets: { source_path: 'src/algo.js', start_line: 1, end_line: 2 },
+  });
+  assert.deepEqual(f.algorithm, { developer: 'DEV_ALGO', general: 'GEN_ALGO' });
+  assert.deepEqual(f.config_profiles, [{ name: 'fast', description: 'Lower precision threshold.' }]);
+  assert.deepEqual(f.settings, [{ name: 'threshold', type: 'number', default: 0.8, description: 'Peak cutoff.' }]);
+  assert.deepEqual(f.implementation_snippets, [{ source_path: 'src/algo.js', start_line: 1, end_line: 2 }]);
+
+  const empty = normalizeFeature({ slug: 'empty' });
+  assert.deepEqual(empty.algorithm, { developer: '', general: '' });
+  assert.deepEqual(empty.config_profiles, { admin: [], developer: [] });
+  assert.deepEqual(empty.settings, []);
+  assert.deepEqual(empty.implementation_snippets, []);
 });
 
 test('resolveFeatures: features_file (relative to projRoot) used when no inline array', () => {

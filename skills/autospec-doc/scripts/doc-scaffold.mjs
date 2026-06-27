@@ -161,6 +161,10 @@ function skeletonFeature({ slug, title, glob }) {
     invariants: '',
     errors: '',
     config_reference: { admin: '', developer: '' },
+    algorithm: { developer: '', general: '' },
+    config_profiles: { admin: [], developer: [] },
+    settings: [],
+    implementation_snippets: [],
     rationale: '',
     depends_on: [],
   };

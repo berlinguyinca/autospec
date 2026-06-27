@@ -188,6 +188,93 @@ function consumeExistingTail(content, fromOffset) {
   return consumed;
 }
 
+
+// ── Implementation snippets (source-grounded code fragments) ────────────────
+
+// Snippet marker format:
+//   <!-- implementation-snippet: path/to/source.js:12-20 -->
+//   ```js
+//   <exact source lines 12..20>
+//   ```
+// These are not executed like examples; they are verified against real source
+// lines so docs cannot carry invented or stale implementation fragments.
+export function parseImplementationSnippets(content) {
+  const snippets = [];
+  const lines = content.split('\n');
+  const lineOffsets = [];
+  let off = 0;
+  for (const ln of lines) {
+    lineOffsets.push(off);
+    off += ln.length + 1;
+  }
+
+  const markerRe = /^\s*<!--\s*implementation-snippet:\s*(.+):(\d+)-(\d+)\s*-->\s*$/;
+  const fenceOpenRe = /^\s*```([A-Za-z0-9_-]*)\s*$/;
+  const fenceCloseRe = /^\s*```\s*$/;
+
+  for (let i = 0; i < lines.length; i++) {
+    const m = markerRe.exec(lines[i]);
+    if (!m) continue;
+    let j = i + 1;
+    while (j < lines.length && lines[j].trim() === '') j++;
+    if (j >= lines.length) continue;
+    const openM = fenceOpenRe.exec(lines[j]);
+    if (!openM) continue;
+    let k = j + 1;
+    while (k < lines.length && !fenceCloseRe.test(lines[k])) k++;
+    if (k >= lines.length) continue;
+    snippets.push({
+      sourcePath: m[1].trim(),
+      startLine: Number(m[2]),
+      endLine: Number(m[3]),
+      lang: (openM[1] || '').toLowerCase(),
+      code: lines.slice(j + 1, k).join('\n'),
+      tagStart: lineOffsets[i],
+      blockStart: lineOffsets[j],
+      blockEnd: k + 1 < lines.length ? lineOffsets[k + 1] : content.length,
+    });
+    i = k;
+  }
+  return snippets;
+}
+
+function isSafeSnippetPath(sourcePath) {
+  if (!sourcePath || sourcePath.includes('\0') || path.isAbsolute(sourcePath)) return false;
+  return !sourcePath.split(/[\\/]+/).some(seg => seg === '..');
+}
+
+export function verifyImplementationSnippets({ content, repoRoot = process.cwd() } = {}) {
+  const snippets = parseImplementationSnippets(content || '');
+  const failed = [];
+  let verified = 0;
+  for (const snippet of snippets) {
+    if (!isSafeSnippetPath(snippet.sourcePath)) {
+      failed.push({ ...snippet, reason: 'unsafe source_path' });
+      continue;
+    }
+    const abs = path.join(repoRoot, snippet.sourcePath);
+    let raw;
+    try { raw = fs.readFileSync(abs, 'utf8'); }
+    catch {
+      failed.push({ ...snippet, reason: 'source file not found' });
+      continue;
+    }
+    const sourceLines = raw.split('\n');
+    if (snippet.startLine < 1 || snippet.endLine < snippet.startLine || snippet.endLine > sourceLines.length) {
+      failed.push({ ...snippet, reason: 'line range outside source file' });
+      continue;
+    }
+    const expected = sourceLines.slice(snippet.startLine - 1, snippet.endLine).join('\n').replace(/\n+$/, '');
+    const actual = snippet.code.replace(/\n+$/, '');
+    if (actual !== expected) {
+      failed.push({ ...snippet, reason: 'snippet does not match source line range' });
+      continue;
+    }
+    verified++;
+  }
+  return { failed, verified, snippets };
+}
+
 // ── Verify ────────────────────────────────────────────────────────────────────
 
 // opts:
@@ -209,10 +296,17 @@ export async function verifyExamples(opts) {
     exec = makeWorktreeExecutor(),
     timeoutMs = DEFAULT_TIMEOUT_MS,
     sandbox = 'worktree',
+    repoRoot = process.cwd(),
   } = opts;
 
   const examples = parseExamples(content);
-  const failed = [];
+  const snippetVerification = verifyImplementationSnippets({ content, repoRoot });
+  const failed = snippetVerification.failed.map(f => ({
+    command: `implementation-snippet ${f.sourcePath}:${f.startLine}-${f.endLine}`,
+    lang: 'implementation-snippet',
+    code: 1,
+    stderr: f.reason,
+  }));
   let verified = 0;
 
   // Run examples sequentially in a single shared sandbox (each in a clean
@@ -245,7 +339,7 @@ export async function verifyExamples(opts) {
     out = out.slice(0, ex.blockEnd) + tail + out.slice(ex.blockEnd + consumed);
   }
 
-  return { content: out, failed, verified };
+  return { content: out, failed, verified, implementation_snippets: snippetVerification };
 }
 
 // ── Real executor (fresh worktree off origin/main) ────────────────────────────

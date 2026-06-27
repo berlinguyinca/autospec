@@ -318,6 +318,10 @@ export function resolveAutoRegenerate({ config = {}, issueBody = '', withDocsFla
 //   errors          string (markdown) | default ''
 //   config_reference string (markdown) | default ''
 //   rationale       string (markdown) | default ''
+//   algorithm       string/map (markdown) | default {developer:'', general:''}
+//   config_profiles array/map of profile entries | default {admin:[], developer:[]}
+//   settings        array of setting entries      | default []
+//   implementation_snippets array of source line refs | default []
 //   depends_on      array of feature-id strings | default []
 //   examples        array of example entries     | default []
 
@@ -340,7 +344,20 @@ export function normalizeFeature(feature) {
     else if (typeof v === 'object') feature[field] = v; // per-audience map or array — preserve
     else feature[field] = String(v);
   }
+  if (feature.algorithm == null) feature.algorithm = { developer: '', general: '' };
+  else if (typeof feature.algorithm === 'object') feature.algorithm = feature.algorithm;
+  else feature.algorithm = String(feature.algorithm);
+
+  // Profile maps may be audience-keyed; default to admin/developer arrays.
+  if (feature.config_profiles == null) feature.config_profiles = { admin: [], developer: [] };
+
   // Array fields: coerce present non-array values; keep [] for absent.
+  if (!Array.isArray(feature.settings)) {
+    feature.settings = (feature.settings != null) ? [feature.settings] : [];
+  }
+  if (!Array.isArray(feature.implementation_snippets)) {
+    feature.implementation_snippets = (feature.implementation_snippets != null) ? [feature.implementation_snippets] : [];
+  }
   if (!Array.isArray(feature.depends_on)) {
     feature.depends_on = (feature.depends_on != null) ? [feature.depends_on] : [];
   }

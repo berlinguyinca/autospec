@@ -622,6 +622,83 @@ test('backward compat: legacy feature (summary+spec_sections only) produces byte
   }
 });
 
+
+// ── Issue #1458: algorithm internals, profiles, settings, grounded snippets ───
+
+test('internals feature: renders algorithm, profiles, settings, and implementation with audience gates', async () => {
+  const root = makeTmpDir();
+  try {
+    fs.mkdirSync(path.join(root, 'src/processing'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src/processing/peaks.mjs'), [
+      'export function pickPeaks(signal, threshold = 0.8) {',
+      '  return signal.filter((point) => point.height >= threshold);',
+      '}',
+      '',
+    ].join('\n'), 'utf8');
+    const feature = {
+      slug: 'peak-picking',
+      title: 'Peak Picking',
+      summary: 'Finds chromatogram peaks.',
+      code_entry_points: ['src/processing/peaks.mjs'],
+      algorithm: {
+        developer: 'Uses thresholded local maxima after baseline correction.',
+        general: 'Finds signal peaks by comparing point heights against a cutoff.',
+      },
+      config_profiles: [
+        { name: 'fast', description: 'Uses a higher threshold for quicker scans.', audiences: ['admin', 'developer'] },
+      ],
+      settings: [
+        { name: 'threshold', type: 'number', default: 0.8, description: 'Minimum normalized peak height.', audiences: ['admin', 'developer'] },
+      ],
+      implementation_snippets: [
+        { title: 'Peak threshold filter', source_path: 'src/processing/peaks.mjs', start_line: 1, end_line: 3, language: 'js' },
+      ],
+    };
+    const result = await generateAudienceDocs({
+      features: [feature],
+      audiences: FOUR_AUDIENCES,
+      sourceRoot: root,
+    });
+    const byAud = Object.fromEntries(FOUR_AUDIENCES.map(a => [a.name, result.files.find(f => f.path === `${a.path}/features/peak-picking.md`)]));
+
+    assert.match(byAud.developer.content, /## How it works \(algorithm\)/);
+    assert.match(byAud.general.content, /## How it works \(algorithm\)/);
+    assert.doesNotMatch(byAud.user.content, /## How it works \(algorithm\)/);
+    assert.doesNotMatch(byAud.admin.content, /## How it works \(algorithm\)/);
+
+    assert.match(byAud.developer.content, /## Configuration profiles/);
+    assert.match(byAud.admin.content, /## Configuration profiles/);
+    assert.doesNotMatch(byAud.user.content, /## Configuration profiles/);
+
+    assert.match(byAud.developer.content, /## Settings/);
+    assert.match(byAud.admin.content, /## Settings/);
+    assert.match(byAud.developer.content, /\| `threshold` \| `number` \| `0.8` \| Minimum normalized peak height\. \|/);
+
+    assert.match(byAud.developer.content, /## Implementation/);
+    assert.match(byAud.developer.content, /<!-- implementation-snippet: src\/processing\/peaks\.mjs:1-3 -->/);
+    assert.ok(byAud.developer.content.includes(['```js', 'export function pickPeaks(signal, threshold = 0.8) {', '  return signal.filter'].join('\n')), 'developer page should include the source-backed code fragment');
+    assert.doesNotMatch(byAud.admin.content, /## Implementation/);
+    assert.doesNotMatch(byAud.general.content, /## Implementation/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('internals feature: missing implementation snippet source fails instead of inventing code', async () => {
+  await assert.rejects(
+    generateAudienceDocs({
+      features: [{
+        slug: 'missing-snippet',
+        summary: 'Snippet source is absent.',
+        implementation_snippets: [{ source_path: 'src/nope.js', start_line: 1, end_line: 2 }],
+      }],
+      audiences: [FOUR_AUDIENCES[1]],
+      sourceRoot: makeTmpDir(),
+    }),
+    /implementation snippet source not found/,
+  );
+});
+
 // ── Track D: logic-flow diagram tests (issue #1131) ──────────────────────────
 
 // A feature whose spec_sections describe logic/flow (ordered steps + decision

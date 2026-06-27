@@ -146,7 +146,8 @@ assets live under `docs/assets/{screenshots,diagrams,transcripts}/`.
 ### Per-audience prose (authoring contract)
 
 Every feature prose field (`summary`, `spec_sections`, `data_model`,
-`invariants`, `errors`, `config_reference`, `rationale`, `examples`) may be
+`invariants`, `errors`, `config_reference`, `rationale`, `algorithm`,
+`config_profiles`, `settings`, `implementation_snippets`, and `examples`) may be
 EITHER a shared scalar/array (same text for all audiences) OR a per-audience map
 `{ user, developer, admin, general, default }`. `pickForAudience` resolves the
 map to `value[audience] ?? value.default ?? null`; shared values pass through
@@ -156,9 +157,29 @@ The TIER_A authoring pass SHOULD produce genuinely per-audience prose, not the
 same text four times:
 
 - **user** — task/workflow framing: how to run it, what to click, expected results.
-- **developer** — architecture and internals: data structures, APIs, extension points.
-- **admin** — install/operate/configure: setup, tuning knobs, troubleshooting.
-- **general** — plain-language "what & why": the problem it solves, in one breath.
+- **developer** — architecture and internals: data structures, APIs, extension points, algorithms, and grounded implementation snippets.
+- **admin** — install/operate/configure: setup, tuning knobs, config profiles, troubleshooting.
+- **general** — plain-language "what & why": the problem it solves and how the core approach works in one breath.
+
+
+For any feature that wraps or implements processing, computation, algorithms,
+scientific/math logic, queue processing, parsing, ranking, regression,
+classification, transformation, or other non-trivial decision rules, the
+feature inventory MUST include:
+
+- `algorithm` for the developer and/or general audiences, describing the actual
+  approach, key thresholds, regressions/math, peak-picking/integration rules, or
+  decision strategy. Do not invent prose: ground it in `code_entry_points` and
+  the implementing source.
+- At least one `implementation_snippets[]` entry for the developer audience,
+  with `source_path`, `start_line`, and `end_line` pointing at real source. The
+  generator renders the code by reading those source lines; `verify-examples.mjs`
+  verifies rendered `<!-- implementation-snippet: path:start-end -->` blocks
+  against the same source line range so stale or invented fragments fail.
+- `settings[]` entries for user-visible/admin/developer knobs with `name`,
+  `type`, `default`, `description`, and optional `audiences`.
+- `config_profiles[]` entries for named profiles/presets and what each changes,
+  with optional `audiences`.
 
 The generator runs a **sameness guard**: if a feature's `features/<slug>.md`
 body is byte-identical across all audiences (after stripping the audience
@@ -228,8 +249,10 @@ The repeatable loop for ANY project — no project-specific hardcoding anywhere:
    test-fixture noise (override via `coverage.stoplist` /
    `coverage.config_prefix_stoplist` when the built-in stoplists miss something).
 5. **Enrich** the relevant features' `config_reference` / `data_model` /
-   `invariants` with those literal terms, regenerate, and repeat until coverage
-   plateaus or the remaining terms are framework / fixture noise.
+   `invariants` / `algorithm` / `settings` / `config_profiles` /
+   `implementation_snippets` with those literal terms and grounded source line
+   ranges, regenerate, and repeat until coverage plateaus or the remaining terms
+   are framework / fixture noise.
 
 Notes: the scaffolder never clobbers an authored fixture (re-running `init` is
 idempotent); per-audience typed fields may be maps or shared scalars; and
