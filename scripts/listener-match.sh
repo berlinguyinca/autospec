@@ -276,12 +276,11 @@ is_imperative() {
     done
     # Descriptive references to the system should not route merely because the
     # word "autospec" appears.
-    for autospec_desc in "the autospec" "this autospec" "that autospec" \
-                         "an autospec" "autospec plan" "autospec spec"; do
-        case "$text" in
-            *"$autospec_desc"*) return 1 ;;
-        esac
-    done
+    case "$text" in
+        *"the autospec"*|*"this autospec"*|*"that autospec"*|*"an autospec"*|*"autospec plan"*|*"autospec spec"*)
+            return 1
+            ;;
+    esac
 
     # Suppressor 5: explore/discover read-and-understand idioms (D4, issue #909).
     # Reinforces the question/negation/past groups for the explore verb. These
