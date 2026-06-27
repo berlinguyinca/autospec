@@ -175,6 +175,49 @@ _baseline_output() {
   done
 }
 
+# Phase 5.5 audit (issue #1443): the per-PR wire-in greps below only proved the
+# `--reuse-flags` STRING is present; they did not prove `_reuse_flags_file` is ever
+# ASSIGNED. It was not — the reviewer reuse block was integration-dead even with the
+# flag armed. These cases close that gap (feedback_feature_wired_to_script_but_never_invoked).
+
+# Case 12b: _reuse_flags_file is actually assigned (not just consumed) in the trio
+@test "wire-in: _reuse_flags_file is assigned from reuse-triage findings in all 6 trio files" {
+  for f in \
+    "$REPO_ROOT/skills/autospec-run/SKILL.md" \
+    "$REPO_ROOT/skills/autospec-run/codex/prompt.md" \
+    "$REPO_ROOT/skills/autospec-run/opencode/agent.md" \
+    "$REPO_ROOT/skills/autospec/SKILL.md" \
+    "$REPO_ROOT/skills/autospec/codex/prompt.md" \
+    "$REPO_ROOT/skills/autospec/opencode/agent.md"; do
+    grep -qF '_reuse_flags_file="$_reuse_candidate"' "$f" \
+      || { echo "FAIL: _reuse_flags_file never assigned in $f (dead reviewer lens)"; return 1; }
+    grep -qF 'REINVENT_REPO_UTIL|NEW_DEP_UNJUSTIFIED|NEW_ABSTRACTION_SINGLE_CALLER' "$f" \
+      || { echo "FAIL: reuse-triage RULE_IDs not extracted into reuse-flags file in $f"; return 1; }
+  done
+}
+
+# Case 12c: assignment is flag-gated (inert when AUTOSPEC_REUSE_LENS != 1)
+@test "wire-in: _reuse_flags_file extraction is gated by AUTOSPEC_REUSE_LENS" {
+  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md"; do
+    grep -qF 'AUTOSPEC_REUSE_LENS:-}" = "1" ] && [ -f /tmp/guardian-<PR>.md ]' "$f" \
+      || { echo "FAIL: reuse-flags extraction not flag-gated in $f"; return 1; }
+  done
+}
+
+# Case 12d: ledger record fires at the refute-pass decision point, not the LGTM-only
+# branch (which produced phantom BLOCK rows and never recorded upheld BLOCKs).
+@test "ledger: record is gated by _reuse_block_raised and carries _reuse_upheld" {
+  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md"; do
+    grep -qF '"${_reuse_block_raised:-0}" = "1"' "$f" \
+      || { echo "FAIL: ledger record not gated by _reuse_block_raised in $f"; return 1; }
+    grep -qF -- '--upheld "${_reuse_upheld:-true}"' "$f" \
+      || { echo "FAIL: ledger record does not carry refute outcome in $f"; return 1; }
+    grep -qF '<TRIGGER>' "$f" \
+      && { echo "FAIL: hardcoded <TRIGGER> placeholder still present in $f"; return 1; }
+  done
+  return 0
+}
+
 # Case 13: simplicity axis is documented as ADVISE-only (anti-gold-plating)
 @test "anti-gold-plating: simplicity axis is ADVISE-only in SKILL.md" {
   for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md"; do
