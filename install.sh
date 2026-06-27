@@ -884,7 +884,7 @@ copy_repo_scripts() {
     mkdir -p "$autospec_scripts_dir"
     # Copy only top-level script files (no recursion into scripts/lib/). The yml
     # extension ships runtime data assets that installed scripts hard-require at
-    # ${AUTOSPEC_SCRIPTS_DIR}/<name>.yml (e.g. assemble-impl-prompt.sh -> memory-tags.yml,
+    # ${AUTOSPEC_SCRIPTS_DIR}/<name>.yml (e.g. apply-memory-tags.sh -> memory-tags.yml,
     # which exit 1's if absent — a clean-install crash). Only memory-tags.yml lives at
     # scripts/ top level today; the glob stays extension-scoped so it never sweeps subdirs.
     for ext in sh mjs ps1 yml; do

@@ -32,7 +32,7 @@ surface_files() {
 # through helper scripts), the per-skill runtime scripts themselves (skills/*/scripts/*
 # that shell out to siblings via a resolved scripts dir, e.g. harmonize.sh ->
 # $STAGE_DIR/design-discover.sh), and the repo-root scripts/*.sh that hard-require runtime
-# assets at install-resolved paths (e.g. assemble-impl-prompt.sh -> memory-tags.yml). A
+# assets at install-resolved paths (e.g. apply-memory-tags.sh -> memory-tags.yml). A
 # reference to an unshipped asset from ANY of these crashes a clean install.
 reference_scan_files() {
   {
