@@ -40,9 +40,15 @@ const {
   DEFAULT_TIMEOUT_MS,
   EXAMPLE_TAG,
   stampMarker,
+  parseImplementationSnippets,
+  verifyImplementationSnippets,
 } = await import(MOD);
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+function makeTmpDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'verify-examples-test-'));
+}
 
 // A fake executor: records every call, returns canned results keyed by command.
 // Shape mirrors the real executor contract:
@@ -311,6 +317,73 @@ test('CLI exits 0 and rewrites the file on a passing-example fixture (fake-pass)
   assert.strictEqual(exitCode, 0, 'passing example must succeed');
   assert.match(out, /```output/);
   assert.match(out, /example-verified:/);
+});
+
+
+test('parseImplementationSnippets finds source-grounded fenced code fragments', () => {
+  const page = [
+    '# Implementation',
+    '<!-- implementation-snippet: src/algo.js:2-3 -->',
+    '```js',
+    'const threshold = 0.8;',
+    'return threshold;',
+    '```',
+    '',
+  ].join('\n');
+  const snippets = parseImplementationSnippets(page);
+  assert.strictEqual(snippets.length, 1);
+  assert.strictEqual(snippets[0].sourcePath, 'src/algo.js');
+  assert.strictEqual(snippets[0].startLine, 2);
+  assert.strictEqual(snippets[0].endLine, 3);
+  assert.strictEqual(snippets[0].code, 'const threshold = 0.8;\nreturn threshold;');
+});
+
+test('verifyImplementationSnippets verifies rendered fragments against real source lines', () => {
+  const root = makeTmpDir();
+  try {
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src/algo.js'), [
+      'function pick() {',
+      '  const threshold = 0.8;',
+      '  return threshold;',
+      '}',
+      '',
+    ].join('\n'), 'utf8');
+    const page = [
+      '<!-- implementation-snippet: src/algo.js:2-3 -->',
+      '```js',
+      '  const threshold = 0.8;',
+      '  return threshold;',
+      '```',
+      '',
+    ].join('\n');
+    const result = verifyImplementationSnippets({ content: page, repoRoot: root });
+    assert.strictEqual(result.failed.length, 0);
+    assert.strictEqual(result.verified, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('verifyImplementationSnippets rejects invented or stale code fragments', () => {
+  const root = makeTmpDir();
+  try {
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src/algo.js'), 'const real = 1;\n', 'utf8');
+    const page = [
+      '<!-- implementation-snippet: src/algo.js:1-1 -->',
+      '```js',
+      'const invented = 2;',
+      '```',
+      '',
+    ].join('\n');
+    const result = verifyImplementationSnippets({ content: page, repoRoot: root });
+    assert.strictEqual(result.verified, 0);
+    assert.strictEqual(result.failed.length, 1);
+    assert.match(result.failed[0].reason, /does not match source/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ── Track C: gen-audience-docs examples[] emission + llms-full.txt survival ───
