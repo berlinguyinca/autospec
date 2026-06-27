@@ -6,31 +6,39 @@ BIN="$REPO_ROOT/scripts/classify-model-fit.sh"
 FIXTURES="$REPO_ROOT/tests/fixtures/classify-model-fit"
 
 setup() {
-  # Use a temp telemetry dir so tests don't pollute the real one
-  export TELEMETRY_TEST_DIR="$(mktemp -d)"
-  # Point the script to a temp repo root by overriding via env trick:
-  # The script uses REPO_ROOT derived from SCRIPT_DIR; we cannot override it
-  # directly, but we can at least ensure .autospec/telemetry/ is created
-  # under the worktree (which is fine for CI).
-  :
+  # Route telemetry to a per-test temp dir so tests never write the real working-tree jsonl.
+  export AUTOSPEC_TELEMETRY_DIR="$(mktemp -d)"
 }
 
 teardown() {
-  rm -rf "${TELEMETRY_TEST_DIR:-}"
+  rm -rf "${AUTOSPEC_TELEMETRY_DIR:-}"
 }
 
-# Case 1: small fixture → ctx:32k
+# Case 1: small fixture → ctx:32k, reasoning:medium
 @test "small.md: ctx:32k output in Model fit block" {
   run bash "$BIN" "$FIXTURES/small.md"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "ctx:32k"
+  run bash "$BIN" "$FIXTURES/small.md" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"reasoning":"medium"'
 }
 
-# Case 2: medium fixture → ctx:64k
+# Case 2: medium fixture → ctx:64k, reasoning:medium
 @test "medium.md: ctx:64k output in Model fit block" {
   run bash "$BIN" "$FIXTURES/medium.md"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "ctx:64k"
+  run bash "$BIN" "$FIXTURES/medium.md" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"reasoning":"medium"'
+}
+
+# Case 2b: shallow fixture → ctx:32k, reasoning:shallow
+@test "shallow.md: ctx:32k and reasoning:shallow in JSON output" {
+  run bash "$BIN" "$FIXTURES/shallow.md" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"reasoning":"shallow"'
 }
 
 # Case 3: large fixture (8+ files, cross-skill) → ctx:120k
@@ -60,7 +68,7 @@ teardown() {
 
 # Case 6: telemetry-append — one JSON line appended per invocation
 @test "telemetry: .autospec/telemetry/classify-model-fit.jsonl gains one line per invocation" {
-  local telemetry_file="$REPO_ROOT/.autospec/telemetry/classify-model-fit.jsonl"
+  local telemetry_file="$AUTOSPEC_TELEMETRY_DIR/classify-model-fit.jsonl"
   local before=0
   if [ -f "$telemetry_file" ]; then
     before="$(wc -l < "$telemetry_file")"
