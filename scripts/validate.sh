@@ -2273,6 +2273,21 @@ check_lint_reuse_triage() {
     fi
 }
 
+check_reviewer_reuse_lens() {
+    info "reviewer reuse lens: tests/reviewer/test_reuse_lens.bats (issue #1440)"
+    [ -f tests/reviewer/test_reuse_lens.bats ] \
+        || fail "tests/reviewer/test_reuse_lens.bats: bats coverage missing (issue #1440)"
+    grep -q -- '--reuse-flags' scripts/gen-reviewer-prompt.sh \
+        || fail "scripts/gen-reviewer-prompt.sh missing --reuse-flags support (issue #1440)"
+    grep -q -- '--reuse-flags' skills/autospec-run/SKILL.md \
+        || fail "skills/autospec-run/SKILL.md does not pass --reuse-flags to gen-reviewer-prompt.sh (issue #1440)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/reviewer/test_reuse_lens.bats"
+        bats tests/reviewer/test_reuse_lens.bats >/tmp/validate-reviewer-reuse-lens.log 2>&1 \
+            || { cat /tmp/validate-reviewer-reuse-lens.log >&2; fail "tests/reviewer/test_reuse_lens.bats: failed"; }
+    fi
+}
+
 # Quality-differential harness (issue #1023, spec §5 D4): the boilerplate guard
 # (scripts/quality-differential.sh) plus its synthetic self-test negative pair
 # and the >=3 refine-lens fixtures whose deterministic path is the documented
@@ -2962,6 +2977,7 @@ main() {
     check_closeout_contract
     check_lint_heredoc_handling
     check_lint_reuse_triage
+    check_reviewer_reuse_lens
     check_quality_differential
     check_usage_limit_helper
     check_supersession_contract
