@@ -1167,6 +1167,161 @@ check_duplicate_names() {
     fi
 }
 
+# ── §3.2 REINVENT_REPO_UTIL detector ─────────────────────────────────────────
+# Net-new function whose name already exists elsewhere via rg.
+# LINT_SEARCH_ROOT env var overrides the search root (default: .).
+# Fail-open: rg error → no finding, exit 0.
+
+detect_reinvent_repo_util() {
+    command -v rg >/dev/null 2>&1 || return 0
+    local _root="${LINT_SEARCH_ROOT:-.}"
+
+    while IFS= read -r diff_file; do
+        [ -z "$diff_file" ] && continue
+        case "$diff_file" in
+            *.sh|*.bash|*.py|*.js|*.ts|*.go) ;;
+            *) continue ;;
+        esac
+
+        # File-level allow check
+        local _allow_pat="linter:allow-REINVENT_REPO_UTIL[[:space:]]+[^[:space:]]"
+        local _file_allowed=0
+        if get_added_lines_for_file "$diff_file" | grep -qE "$_allow_pat"; then
+            _file_allowed=1
+        fi
+
+        while IFS=: read -r lineno content; do
+            # Match bash/shell function definitions: name() or function name()
+            local fname=""
+            if printf '%s' "$content" | grep -qE '^[[:space:]]*(function[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*\(\)'; then
+                fname="$(printf '%s' "$content" | grep -oE '[A-Za-z_][A-Za-z0-9_]*\(\)' | head -1 | sed 's/()//')"
+            fi
+            [ -z "$fname" ] && continue
+
+            if [ "$_file_allowed" -eq 1 ]; then
+                emit_info "REINVENT_REPO_UTIL" "$diff_file" "$lineno" "suppressed by linter:allow-REINVENT_REPO_UTIL"
+                continue
+            fi
+
+            # rg -wl: list files with a function-definition match; fail-open via pipe.
+            # Exclude test files to avoid false positives from fixture heredocs.
+            local _cnt=0
+            _cnt="$(rg -l "^[[:space:]]*(function[[:space:]]+)?${fname}\(\)" \
+                "$_root" --glob '!*.bats' --glob '!tests/**' \
+                2>/dev/null | wc -l | tr -d ' ')" || _cnt=0
+            if [ "${_cnt:-0}" -gt 0 ]; then
+                emit_capped "REINVENT_REPO_UTIL" "$diff_file" "$lineno" \
+                    "function '${fname}' already defined elsewhere (${_cnt} file(s)) — reuse instead of reinventing"
+            fi
+        done <<EOF
+$(get_added_lines_with_lineno "$diff_file")
+EOF
+    done <<EOF
+$(get_diff_files)
+EOF
+}
+
+# ── §3.2 NEW_DEP_UNJUSTIFIED detector ────────────────────────────────────────
+# Manifest dep-add hunk without a 'why:' justification marker in the same section.
+
+detect_new_dep_unjustified() {
+    local _manifest_pat='(package\.json|requirements[^/]*\.txt|go\.mod|Cargo\.toml|pyproject\.toml|Gemfile)$'
+
+    while IFS= read -r diff_file; do
+        [ -z "$diff_file" ] && continue
+        printf '%s' "$diff_file" | grep -qE "$_manifest_pat" || continue
+
+        local _added
+        _added="$(get_added_lines_for_file "$diff_file")"
+        [ -z "$_added" ] && continue
+
+        # Detect dep-add line based on manifest type
+        local _has_dep=0 _dep_line="-"
+        while IFS=: read -r lineno content; do
+            local _is_dep=0
+            case "$diff_file" in
+                *package.json)
+                    printf '%s' "$content" | grep -qE '"[@A-Za-z][^"]*"[[:space:]]*:[[:space:]]*"[0-9^~>=*]' && _is_dep=1 ;;
+                *requirements*.txt)
+                    printf '%s' "$content" | grep -qE '^[A-Za-z][A-Za-z0-9._-]*[>=<!~^]' && _is_dep=1 ;;
+                *go.mod)
+                    printf '%s' "$content" | grep -qE '^[[:space:]]*[a-zA-Z].*v[0-9]+\.[0-9]' && _is_dep=1 ;;
+                *Cargo.toml)
+                    printf '%s' "$content" | grep -qE '^[a-z][a-z0-9_-]*[[:space:]]*=[[:space:]]*"[0-9^~>=]' && _is_dep=1 ;;
+                *Gemfile)
+                    printf '%s' "$content" | grep -qE "^[[:space:]]*gem[[:space:]]+['\"]" && _is_dep=1 ;;
+                *pyproject.toml)
+                    printf '%s' "$content" | grep -qE '^[A-Za-z][A-Za-z0-9._-]*[>=<!~^]' && _is_dep=1 ;;
+            esac
+            if [ "$_is_dep" -eq 1 ]; then
+                _has_dep=1; _dep_line="$lineno"
+            fi
+        done <<EOF
+$(get_added_lines_with_lineno "$diff_file")
+EOF
+        [ "$_has_dep" -eq 0 ] && continue
+
+        # Check for why: marker anywhere in the added lines for this file
+        if printf '%s\n' "$_added" | grep -qiE '(^|[[:space:]])why:[[:space:]]'; then
+            continue
+        fi
+        emit_capped "NEW_DEP_UNJUSTIFIED" "$diff_file" "$_dep_line" \
+            "dependency added without 'why:' justification marker in the same hunk"
+    done <<EOF
+$(get_diff_files)
+EOF
+}
+
+# ── §3.2 NEW_ABSTRACTION_SINGLE_CALLER detector ───────────────────────────────
+# New file matching *manager*|*factory*|*adapter*|*wrapper*|*base*|*abstract*
+# with <=1 call sites across the diff.
+
+detect_new_abstraction_single_caller() {
+    local _abs_pat='(manager|factory|adapter|wrapper|base|abstract)'
+
+    while IFS= read -r diff_file; do
+        [ -z "$diff_file" ] && continue
+        # Must match abstraction pattern (case-insensitive on basename)
+        printf '%s' "$(basename "$diff_file")" | grep -qiE "$_abs_pat" || continue
+        # Must be a new file in the diff
+        grep -A4 "^diff --git.*b/${diff_file}$" "$TMP_DIFF" 2>/dev/null | grep -q "^new file mode" || continue
+
+        # File-level allow check
+        if get_added_lines_for_file "$diff_file" | \
+            grep -qE "linter:allow-NEW_ABSTRACTION_SINGLE_CALLER[[:space:]]+[^[:space:]]"; then
+            emit_info "NEW_ABSTRACTION_SINGLE_CALLER" "$diff_file" "-" \
+                "suppressed by linter:allow-NEW_ABSTRACTION_SINGLE_CALLER"
+            continue
+        fi
+
+        # Collect function names defined in the new abstraction file
+        local _funcs
+        _funcs="$(get_added_lines_for_file "$diff_file" | \
+            grep -oE '[A-Za-z_][A-Za-z0-9_]*\(\)' | sed 's/()//' | sort -u)"
+
+        # Count call sites of those functions in other diff files
+        local _calls=0
+        while IFS= read -r other; do
+            [ -z "$other" ] && continue
+            [ "$other" = "$diff_file" ] && continue
+            for _fn in $_funcs; do
+                local _n=0
+                _n="$(get_added_lines_for_file "$other" | grep -cE "\b${_fn}\b" 2>/dev/null || true)"
+                _calls=$((_calls + _n))
+            done
+        done <<EOF
+$(get_diff_files)
+EOF
+
+        if [ "$_calls" -le 1 ]; then
+            emit_capped "NEW_ABSTRACTION_SINGLE_CALLER" "$diff_file" "-" \
+                "new abstraction '$(basename "$diff_file")' has only ${_calls} call site(s) in diff — verify a second caller exists or inline this logic"
+        fi
+    done <<EOF
+$(get_diff_files)
+EOF
+}
+
 # ── directives output mode ────────────────────────────────────────────────────
 # Maps each RULE_ID to a short imperative directive line.
 
@@ -1190,6 +1345,9 @@ rule_directive() {
         VACUOUS_EMPTY_TEST) printf 'Add at least one assertion to the empty test body.' ;;
         VACUOUS_NO_ASSERT) printf 'Add an assert/expect/run+grep call to the test so it can actually fail.' ;;
         ASSERTION_DENSITY) printf 'Add at least one assert/expect/run/grep call to each test block — zero-assertion tests cannot catch regressions.' ;;
+        REINVENT_REPO_UTIL) printf 'Reuse the existing helper found by rg instead of reimplementing — or add a linter:allow-REINVENT_REPO_UTIL <reason> comment.' ;;
+        NEW_DEP_UNJUSTIFIED) printf 'Add a "# why: <reason>" comment in the same hunk as the dependency addition.' ;;
+        NEW_ABSTRACTION_SINGLE_CALLER) printf 'Either wire a second call site now, inline the logic into its sole caller, or add linter:allow-NEW_ABSTRACTION_SINGLE_CALLER <reason>.' ;;
         *)               printf 'Fix the flagged %s violation before re-pushing.' "$rule_id" ;;
     esac
 }
@@ -1220,6 +1378,9 @@ if [ "$DIRECTIVES" -eq 1 ]; then
         if [ "$ASSERTION_DENSITY" -eq 1 ]; then
             detect_assertion_density
         fi
+        detect_reinvent_repo_util
+        detect_new_dep_unjustified
+        detect_new_abstraction_single_caller
     } > "$TMP_FINDINGS" 2>&1
 
     # Reformat each finding as a directive line
@@ -1251,6 +1412,9 @@ else
     if [ "$ASSERTION_DENSITY" -eq 1 ]; then
         detect_assertion_density
     fi
+    detect_reinvent_repo_util
+    detect_new_dep_unjustified
+    detect_new_abstraction_single_caller
 fi
 
 # Exit with min(FINDINGS_COUNT, FINDINGS_EXIT_CAP)
