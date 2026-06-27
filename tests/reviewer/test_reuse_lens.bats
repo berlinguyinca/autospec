@@ -160,3 +160,43 @@ _baseline_output() {
   run grep -q -- '--reuse-flags' "$BIN"
   [ "$status" -eq 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# Issue #1441: consequence + refute pass + anti-gold-plating in SKILL.md trio
+# ---------------------------------------------------------------------------
+
+# Case 12: refute pass prose is present in both SKILL.md guardian blocks
+@test "refute-pass: SKILL.md describes the reuse-BLOCK refute pass" {
+  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md"; do
+    grep -qF 'Reuse-BLOCK refute pass' "$f" \
+      || { echo "FAIL: refute pass prose missing in $f"; return 1; }
+    grep -qF 'Majority rules' "$f" \
+      || { echo "FAIL: majority-rules prose missing in $f"; return 1; }
+  done
+}
+
+# Case 13: simplicity axis is documented as ADVISE-only (anti-gold-plating)
+@test "anti-gold-plating: simplicity axis is ADVISE-only in SKILL.md" {
+  for f in "$REPO_ROOT/skills/autospec-run/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md"; do
+    grep -qF 'Simplicity axis is ADVISE-only' "$f" \
+      || { echo "FAIL: ADVISE-only simplicity prose missing in $f"; return 1; }
+    grep -qF 'never halt the commit' "$f" \
+      || { echo "FAIL: never-block-toward-more-code prose missing in $f"; return 1; }
+  done
+}
+
+# Case 14: refute pass + ADVISE-only prose propagated to all 6 trio mirrors
+@test "trio: refute-pass + ADVISE-only prose present in all 6 trio files" {
+  for f in \
+    "$REPO_ROOT/skills/autospec-run/SKILL.md" \
+    "$REPO_ROOT/skills/autospec-run/codex/prompt.md" \
+    "$REPO_ROOT/skills/autospec-run/opencode/agent.md" \
+    "$REPO_ROOT/skills/autospec/SKILL.md" \
+    "$REPO_ROOT/skills/autospec/codex/prompt.md" \
+    "$REPO_ROOT/skills/autospec/opencode/agent.md"; do
+    grep -qF 'Reuse-BLOCK refute pass' "$f" \
+      || { echo "FAIL: refute pass prose missing in mirror $f"; return 1; }
+    grep -qF 'Simplicity axis is ADVISE-only' "$f" \
+      || { echo "FAIL: ADVISE-only prose missing in mirror $f"; return 1; }
+  done
+}

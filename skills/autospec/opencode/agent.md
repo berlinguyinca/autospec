@@ -1039,7 +1039,11 @@ Pass the following prompt verbatim to each background subagent:
 >        >
 >        > **Hard limit:** max **25 tool calls total** (Parts 1 + 2 combined). If budget exhausted, append `RULE_ID:OUT_OF_SCOPE: reviewer budget exhausted; PR needs human review` and proceed to verdict.
 >        >
->        > **Verdict:** If Part 1 has ZERO blocking findings (INFO lines OK) AND Part 2 has no findings: return ONLY the token: `LGTM`. Otherwise return a numbered findings list — RULE_ID findings first, then LGTM findings.
+>        > **Simplicity axis is ADVISE-only (anti-gold-plating):** the reuse / build-vs-buy / "how could this be better?" axis may argue only toward *less* code — reuse a named existing util (`scripts/lib/`, repo source), adopt a named library, or delete an unneeded abstraction — and only when tied to a named acceptance criterion. It may NEVER emit a `BLOCK` that demands *more* code, a new abstraction, or speculative generality; such suggestions are at most `ADVISE` and never halt the commit. Every reuse verdict must name the matched util or library (evidence-bound), never assert a match from belief.
+>        >
+>        > **Verdict:** If Part 1 has ZERO blocking findings (INFO lines OK) AND Part 2 has no findings: return ONLY the token: `LGTM`. Otherwise return a numbered findings list — RULE_ID findings first, then LGTM findings. A reuse `BLOCK` is provisional until it survives the refute pass below.
+>
+>      **Reuse-BLOCK refute pass (before consuming the verdict):** If the findings list contains a build-vs-buy / reuse `BLOCK`, do NOT halt on it yet. Dispatch a **cheap refute pass** — one short `TIER_B` second voter (≤5 tool calls) whose only job is to *kill* the BLOCK: `rg`-search the repo for the named util/library and confirm the claimed reuse target actually exists, is reachable, and fits this call site. **Majority rules:** keep the BLOCK only if the refuter also upholds it; if the refuter refutes it (the named target is absent, unreachable, or ill-fitting), demote that BLOCK to `ADVISE`, drop it from the blocking findings, and continue. If demotion leaves no remaining blocking findings, treat the verdict as `LGTM`. This keeps a hallucinated "library exists" from stalling the merge (`feedback_llm_validator_adaptive_retry`). Carry the upheld/refuted result into the reuse-lens ledger recorded below (`--upheld true` if upheld, `--upheld false` if refuted).
 >
 >      If `LGTM` && det_exit == 0:
 >        gh pr comment <PR> --body "<!-- guardian-block --> Review: clean. <!-- /-->"
@@ -1052,9 +1056,11 @@ Pass the following prompt verbatim to each background subagent:
 >        fi
 >        # Reuse-lens decision ledger (issue #1442): when AUTOSPEC_REUSE_LENS=1,
 >        # record the fused-review verdict so precision/demotion can be computed.
+>        # `_reuse_upheld` is set by the refute pass above (true=upheld, false=refuted/
+>        # demoted-to-ADVISE); default true when no reuse BLOCK was raised this iteration.
 >        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ]; then
 >          bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/interrogation-ledger.sh" record \
->            --issue "<ISSUE>" --pr "<PR>" --trigger "<TRIGGER>" --verdict BLOCK --upheld true \
+>            --issue "<ISSUE>" --pr "<PR>" --trigger "<TRIGGER>" --verdict BLOCK --upheld "${_reuse_upheld:-true}" \
 >          || true  # write failure is best-effort; never blocks the PR
 >        fi
 >        # monitor exits to parking state HERE — orchestrator relaunches when ~/.autospec/ci-state/<PR>.signal settles
