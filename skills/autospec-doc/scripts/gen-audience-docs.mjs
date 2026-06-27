@@ -292,6 +292,13 @@ function audienceAllows(entry, audienceName) {
   return entry.audiences.includes(audienceName);
 }
 
+
+function listForAudience(value, audienceName) {
+  const picked = pickForAudience(value, audienceName);
+  if (picked == null) return [];
+  return Array.isArray(picked) ? picked : [picked];
+}
+
 function renderProfileItem(item) {
   if (typeof item === 'string') return item;
   if (!item || typeof item !== 'object') return String(item);
@@ -392,15 +399,15 @@ function renderFeatureSections(audience, feature, sourceRoot) {
     appendMarkdownSection(lines, 'How it works (algorithm)', pick('algorithm') || '');
   }
   if (SECTION_AUDIENCE_GATE.config_profiles.includes(audience.name)) {
-    const profiles = pick('config_profiles') || [];
-    const visibleProfiles = Array.isArray(profiles) ? profiles.filter(item => audienceAllows(item, audience.name)) : profiles;
-    appendMarkdownSection(lines, 'Configuration profiles', Array.isArray(visibleProfiles) ? visibleProfiles.map(renderProfileItem) : visibleProfiles);
+    const profiles = listForAudience(feature.config_profiles, audience.name);
+    const visibleProfiles = profiles.filter(item => audienceAllows(item, audience.name));
+    appendMarkdownSection(lines, 'Configuration profiles', visibleProfiles.map(renderProfileItem));
   }
   if (SECTION_AUDIENCE_GATE.settings.includes(audience.name)) {
-    lines.push(...renderSettingsTable(pick('settings') || [], audience.name));
+    lines.push(...renderSettingsTable(listForAudience(feature.settings, audience.name), audience.name));
   }
   if (SECTION_AUDIENCE_GATE.implementation_snippets.includes(audience.name)) {
-    lines.push(...renderImplementationSnippets(pick('implementation_snippets') || [], audience.name, sourceRoot));
+    lines.push(...renderImplementationSnippets(listForAudience(feature.implementation_snippets, audience.name), audience.name, sourceRoot));
   }
 
   appendCoreFeatureSections(lines, audience, feature, pick);

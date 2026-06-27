@@ -320,8 +320,8 @@ export function resolveAutoRegenerate({ config = {}, issueBody = '', withDocsFla
 //   rationale       string (markdown) | default ''
 //   algorithm       string/map (markdown) | default {developer:'', general:''}
 //   config_profiles array/map of profile entries | default {admin:[], developer:[]}
-//   settings        array of setting entries      | default []
-//   implementation_snippets array of source line refs | default []
+//   settings        array/map of setting entries | default []
+//   implementation_snippets array/map of source line refs | default []
 //   depends_on      array of feature-id strings | default []
 //   examples        array of example entries     | default []
 
@@ -331,6 +331,23 @@ export function resolveAutoRegenerate({ config = {}, issueBody = '', withDocsFla
  * @param {object} feature  Raw feature object from config / test fixtures.
  * @returns {object}  Same object reference enriched with empty-safe defaults.
  */
+function isAudienceMap(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (Object.prototype.hasOwnProperty.call(value, 'default')) return true;
+  return ['user', 'developer', 'admin', 'general'].some(k => Object.prototype.hasOwnProperty.call(value, k));
+}
+
+function isAudienceCollectionMap(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (['user', 'developer', 'admin', 'general'].some(k => Object.prototype.hasOwnProperty.call(value, k))) return true;
+  // `default` is also a valid audience fallback, but setting entries themselves
+  // have a `default` value. Treat `default` as audience-map syntax only when the
+  // object does not look like a single setting/snippet entry.
+  if (!Object.prototype.hasOwnProperty.call(value, 'default')) return false;
+  return !['name', 'type', 'description', 'source_path', 'sourcePath', 'path', 'start_line', 'startLine', 'end_line', 'endLine']
+    .some(k => Object.prototype.hasOwnProperty.call(value, k));
+}
+
 export function normalizeFeature(feature) {
   if (!feature || typeof feature !== 'object') return feature;
   // String fields: keep '' for absent, preserve per-audience maps / arrays
@@ -351,13 +368,13 @@ export function normalizeFeature(feature) {
   // Profile maps may be audience-keyed; default to admin/developer arrays.
   if (feature.config_profiles == null) feature.config_profiles = { admin: [], developer: [] };
 
-  // Array fields: coerce present non-array values; keep [] for absent.
-  if (!Array.isArray(feature.settings)) {
-    feature.settings = (feature.settings != null) ? [feature.settings] : [];
-  }
-  if (!Array.isArray(feature.implementation_snippets)) {
-    feature.implementation_snippets = (feature.implementation_snippets != null) ? [feature.implementation_snippets] : [];
-  }
+  // Array-or-audience-map fields: preserve per-audience maps so the renderer can
+  // pick the audience first, then coerce that selected value to an array. Plain
+  // object entries (e.g. one setting object) remain shared by wrapping in [].
+  if (feature.settings == null) feature.settings = [];
+  else if (!Array.isArray(feature.settings) && !isAudienceCollectionMap(feature.settings)) feature.settings = [feature.settings];
+  if (feature.implementation_snippets == null) feature.implementation_snippets = [];
+  else if (!Array.isArray(feature.implementation_snippets) && !isAudienceCollectionMap(feature.implementation_snippets)) feature.implementation_snippets = [feature.implementation_snippets];
   if (!Array.isArray(feature.depends_on)) {
     feature.depends_on = (feature.depends_on != null) ? [feature.depends_on] : [];
   }

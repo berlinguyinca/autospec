@@ -281,6 +281,14 @@ test('normalizeFeature: defaults and preserves internals fields', () => {
   assert.deepEqual(f.settings, [{ name: 'threshold', type: 'number', default: 0.8, description: 'Peak cutoff.' }]);
   assert.deepEqual(f.implementation_snippets, [{ source_path: 'src/algo.js', start_line: 1, end_line: 2 }]);
 
+  const perAudience = normalizeFeature({
+    slug: 'audience-internals',
+    settings: { developer: [{ name: 'dev_knob' }], admin: [{ name: 'admin_knob' }] },
+    implementation_snippets: { developer: [{ source_path: 'src/algo.js', start_line: 1, end_line: 2 }] },
+  });
+  assert.deepEqual(perAudience.settings, { developer: [{ name: 'dev_knob' }], admin: [{ name: 'admin_knob' }] });
+  assert.deepEqual(perAudience.implementation_snippets, { developer: [{ source_path: 'src/algo.js', start_line: 1, end_line: 2 }] });
+
   const empty = normalizeFeature({ slug: 'empty' });
   assert.deepEqual(empty.algorithm, { developer: '', general: '' });
   assert.deepEqual(empty.config_profiles, { admin: [], developer: [] });

@@ -26,6 +26,7 @@ const SCRIPTS_DIR = path.resolve(__dirname, '../scripts');
 const SHARED_SCRIPTS_DIR = path.resolve(__dirname, '../../autospec-shared/scripts');
 
 const { generateAudienceDocs, pickForAudience } = await import(path.join(SCRIPTS_DIR, 'gen-audience-docs.mjs'));
+const { normalizeFeature } = await import(path.join(SCRIPTS_DIR, 'doc-config.mjs'));
 const { parse: parseScopeBlocks } = await import(path.join(SHARED_SCRIPTS_DIR, 'scan-doc-scope.mjs'));
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -697,6 +698,42 @@ test('internals feature: missing implementation snippet source fails instead of 
     }),
     /implementation snippet source not found/,
   );
+});
+
+
+test('internals feature: config-loaded per-audience settings and snippets survive normalization', async () => {
+  const root = makeTmpDir();
+  try {
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src/algo.js'), [
+      'export const threshold = 0.8;',
+      'export function explain() { return threshold; }',
+      '',
+    ].join('\n'), 'utf8');
+    const feature = normalizeFeature({
+      slug: 'per-audience-internals',
+      summary: 'Uses audience-specific internals.',
+      settings: {
+        admin: [{ name: 'threshold', type: 'number', default: 0.8, description: 'Admin tuning knob.' }],
+        developer: [{ name: 'threshold', type: 'number', default: 0.8, description: 'Developer tuning knob.' }],
+      },
+      implementation_snippets: {
+        developer: [{ source_path: 'src/algo.js', start_line: 1, end_line: 2, language: 'js' }],
+      },
+    });
+    const result = await generateAudienceDocs({ features: [feature], audiences: FOUR_AUDIENCES, sourceRoot: root });
+    const developer = result.files.find(f => f.path === 'docs/developer/features/per-audience-internals.md').content;
+    const admin = result.files.find(f => f.path === 'docs/admin/features/per-audience-internals.md').content;
+    const general = result.files.find(f => f.path === 'docs/general/features/per-audience-internals.md').content;
+
+    assert.match(developer, /Developer tuning knob/);
+    assert.match(developer, /<!-- implementation-snippet: src\/algo\.js:1-2 -->/);
+    assert.match(admin, /Admin tuning knob/);
+    assert.doesNotMatch(admin, /implementation-snippet/);
+    assert.doesNotMatch(general, /## Settings/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ── Track D: logic-flow diagram tests (issue #1131) ──────────────────────────
