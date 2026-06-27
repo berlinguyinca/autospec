@@ -1062,6 +1062,13 @@ inline label-swap path below.
 >            --dispatch-id "<DISPATCH_ID>-reviewer" --role reviewer --issue "<ISSUE>" \
 >            --tokens-json ".autospec/tokens-<ISSUE>-reviewer.json"
 >        fi
+>        # Reuse-lens decision ledger (issue #1442): when AUTOSPEC_REUSE_LENS=1,
+>        # record the fused-review verdict so precision/demotion can be computed.
+>        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ]; then
+>          bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/interrogation-ledger.sh" record \
+>            --issue "<ISSUE>" --pr "<PR>" --trigger "<TRIGGER>" --verdict BLOCK --upheld true \
+>          || true  # write failure is best-effort; never blocks the PR
+>        fi
 >        # monitor exits to parking state HERE — orchestrator relaunches when ~/.autospec/ci-state/<PR>.signal settles
 >        # On relaunch: run ci-wait-poll.sh <PR>; break SUCCESS if exit 0 (pass)
 >        break SUCCESS only if the full suite passed and required checks pass.
