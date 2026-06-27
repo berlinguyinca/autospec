@@ -55,6 +55,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 
 - [Installer excludes runtime libs](feedback_installer_excludes_runtime_libs.md) — install.sh drops scripts/lib/ runtime libs; autospec-explore hard-crashes on a clean install; ship-completeness doesn't catch it
 - [Explore codebase-signals false positives](feedback_explore_codebase_signals_false_positives.md) — TODO/FIXME grep matches prose, assets, and its own source; noise dominates ranking; constitution gate drops 0/45
+- [Explore --once unverified output has no filing signal](feedback_explore_once_unverified_near_zero_precision.md) — local discovery on autospec repo: 183 raw → 0 verified; even the best source was false on direct checks; never auto-file --once bare-subprocess output before file-level verification
 
 - [Heartbeat cross-repo collision](feedback_heartbeat_cross_repo_collision.md) — ~/.autospec/process-heartbeats/ is shared across repos; use path-scoped slug subdirs
 - [Bash RETURN trap leaks](feedback_bash_return_trap_leak.md) — RETURN traps leak into caller frames under set -u; use inline cleanup
@@ -65,6 +66,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [OMC autopilot magic-keyword misfire](feedback_omc_autopilot_misfire.md) — system reminders containing "AUTOPILOT" auto-activate OMC autopilot mid-session; recover via state_write(active=false) + state_clear(skill-active)
 - [Mempalace miner flat-form gap](feedback_mempalace_miner_flat_form.md) — M3 miner matches both `metadata.type:` (spec) and `type:` (real CC files); fixture both variants
 - [Harness session-id env vars](reference_harness_session_id_envs.md) — `CLAUDE_CODE_SESSION_ID` is the stable per-session id (ps -o sess=0, no tty under tool calls); fallback chain for harness-neutral per-session locks; PPID fallback is unreliable
+- [Worktree/main topology](reference_worktree_main_topology.md) — autospec runs ~9 parallel worktrees; sibling autospec-autonomous holds `main`, so the primary checkout cannot sit on main; reconcile stale N-ahead branches by branching fresh off origin/main, never merge the stale commits
 
 # Active project state (review weekly; archive when shipped)
 

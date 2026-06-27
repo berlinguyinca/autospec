@@ -36,5 +36,22 @@ path-scoped heartbeats; atomic cross-machine issue-claim).
 4. Keep my work in its own branch/PR; stage only my files; leave others'
    uncommitted changes untouched.
 
+**Refinement (2026-06-26, /autospec-autonomous run):** `claim-issue.sh`'s atomic
+label swap does NOT protect you against a **claim-blind** parallel run. A separate
+flow (distinctive `wt-rl-*` worktrees / `feat/reuse-*` branches, merging via admin,
+not using the claim/heartbeat/registry system) merged the identical work for #1439
+(PR #1446) while I held `in-progress-by-bot` — wasting a full ~110k-token implementer
+dispatch on a duplicate conflicting PR (#1447, closed as superseded). Lessons:
+(a) AFTER claiming an issue and BEFORE dispatching the expensive implementer, run a
+**topic-keyed overlap scan** — search local `git worktree list`, `git ls-remote
+--heads origin`, and open PRs for branches/worktrees matching the issue's SUBJECT
+(not just its number); a rival's local un-pushed worktree (e.g. `/private/tmp/wt-rl-*`)
+is the early-warning sign. (b) One collision = pre-existing work, recover and continue;
+seeing rival worktrees pre-staged for DOWNSTREAM issues (#1440/#1442 here) is
+predictive — stop and surface to the operator rather than racing. (c) When the operator
+confirms "park & monitor," hold the session lock, persist a watermark
+(`~/.autospec/autonomous-park-watermark.json`), and re-engage only on stall.
+
 Related: [[feedback_subagent_cwd_pinned_to_main_checkout]],
-[[feedback_heartbeat_cross_repo_collision]], [[reference_harness_session_id_envs]].
+[[feedback_heartbeat_cross_repo_collision]], [[reference_harness_session_id_envs]],
+[[reference_worktree_main_topology]].
