@@ -1,7 +1,7 @@
 ---
 name: feedback_explore_once_unverified_near_zero_precision
 description: autospec-explore local discovery on the autospec repo is ~2% raw / ~0% post-verify precision; never auto-file --once output unverified
-metadata: 
+metadata:
   node_type: memory
   type: feedback
   originSessionId: 37d298e0-f75e-4f7a-8457-db86f85c4404

@@ -66,7 +66,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [OMC autopilot magic-keyword misfire](feedback_omc_autopilot_misfire.md) — system reminders containing "AUTOPILOT" auto-activate OMC autopilot mid-session; recover via state_write(active=false) + state_clear(skill-active)
 - [Mempalace miner flat-form gap](feedback_mempalace_miner_flat_form.md) — M3 miner matches both `metadata.type:` (spec) and `type:` (real CC files); fixture both variants
 - [Harness session-id env vars](reference_harness_session_id_envs.md) — `CLAUDE_CODE_SESSION_ID` is the stable per-session id (ps -o sess=0, no tty under tool calls); fallback chain for harness-neutral per-session locks; PPID fallback is unreliable
-- [Worktree/main topology](reference_worktree_main_topology.md) — autospec runs ~9 parallel worktrees; sibling autospec-autonomous holds `main`, so the primary checkout can't checkout main (rests detached/feature); reconcile stale N-ahead branches by branching fresh off origin/main, never merge the stale commits
+- [Worktree/main topology](reference_worktree_main_topology.md) — check `git worktree list` before assuming primary can hold `main`; sibling worktrees may own it, and stale N-ahead branches usually need fresh origin/main branches
 
 # Active project state (review weekly; archive when shipped)
 
