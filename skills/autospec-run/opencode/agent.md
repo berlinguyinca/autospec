@@ -584,10 +584,16 @@ inline label-swap path below.
 >   # knows exactly what the monitor is about to work on.
 >   # Single body fetch — all later steps consume this file (D5: duplicate-read elimination).
 >   _issue_body_file="/tmp/issue-${ISSUE}-body.md"
->   gh issue view ISSUE --json body --jq .body 2>/dev/null > "$_issue_body_file" || true
->   ISSUE_TITLE=$(gh issue view ISSUE --json title --jq .title 2>/dev/null || echo "")
->   ISSUE_URL=$(gh issue view ISSUE --json url --jq .url 2>/dev/null || echo "")
->   ISSUE_LABELS=$(gh issue view ISSUE --json labels --jq -r '[.labels[].name] | join(", ")' 2>/dev/null || echo "")
+>   _iv=$(gh issue view "$ISSUE" --json body,title,url,labels 2>/dev/null || echo "")
+>   printf '%s' "$_iv" | jq -r '.body // ""' > "$_issue_body_file"
+>   ISSUE_TITLE=$(printf '%s' "$_iv" | jq -r '.title // ""')
+>   ISSUE_URL=$(printf '%s' "$_iv" | jq -r '.url // ""')
+>   ISSUE_LABELS=$(printf '%s' "$_iv" | jq -r '[.labels[].name] | join(", ")')
+>   # Empty body == nothing to brief the implementer with; skip rather than dispatch a blank.
+>   if [ ! -s "$_issue_body_file" ]; then
+>     echo "ERROR: issue #$ISSUE has an empty body; skipping dispatch" >&2
+>     continue
+>   fi
 >   ISSUE_GOAL=$(awk '
 >     BEGIN{in_goal=0}
 >     /^## Goal[[:space:]]*$/ {in_goal=1; next}
