@@ -749,21 +749,23 @@ check_constitution_validation_contract() {
     local ensure_labels_script="scripts/autospec-ensure-labels.sh"
     local publish_issues_script="scripts/autospec-publish-issues.sh"
     local sync_issues_script="scripts/autospec-sync-published-issues.sh"
+    local worker_v1_script="scripts/autospec-worker-v1.sh"
     local validation_bats="tests/unit/test_constitution_validation.bats"
     local composition_bats="tests/unit/test_baseline_composition.bats"
     local intelligence_bats="tests/unit/test_repository_intelligence.bats"
     local issue_plan_bats="tests/unit/test_issue_planning.bats"
     local publishing_bats="tests/unit/test_github_publishing.bats"
-    for script in "$validation_script" "$composition_script" "$metadata_script" "$baseline_gap_script" "$constitutional_gap_script" "$issue_plan_script" "$bot_state_script" "$dry_run_script" "$ensure_labels_script" "$publish_issues_script" "$sync_issues_script"; do
+    local worker_v1_bats="tests/unit/test_worker_v1.bats"
+    for script in "$validation_script" "$composition_script" "$metadata_script" "$baseline_gap_script" "$constitutional_gap_script" "$issue_plan_script" "$bot_state_script" "$dry_run_script" "$ensure_labels_script" "$publish_issues_script" "$sync_issues_script" "$worker_v1_script"; do
         [ -f "$script" ] || fail "$script: required file missing"
         [ -x "$script" ] || fail "$script: not executable"
         bash -n "$script" || fail "$script: bash syntax error"
     done
-    for bats_file in "$validation_bats" "$composition_bats" "$intelligence_bats" "$issue_plan_bats" "$publishing_bats"; do
+    for bats_file in "$validation_bats" "$composition_bats" "$intelligence_bats" "$issue_plan_bats" "$publishing_bats" "$worker_v1_bats"; do
         [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
     done
     if command -v bats >/dev/null 2>&1; then
-        for bats_file in "$validation_bats" "$composition_bats" "$intelligence_bats" "$issue_plan_bats" "$publishing_bats"; do
+        for bats_file in "$validation_bats" "$composition_bats" "$intelligence_bats" "$issue_plan_bats" "$publishing_bats" "$worker_v1_bats"; do
             info "  running: $bats_file"
             bats "$bats_file" >/tmp/validate-constitution-validation.log 2>&1 \
                 || { cat /tmp/validate-constitution-validation.log >&2; fail "$bats_file: failed"; }
