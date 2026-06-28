@@ -239,6 +239,10 @@ validation = load_json(os.path.join(reports_dir, "worker-validation.json"), {})
 diff_review = load_json(os.path.join(reports_dir, "worker-diff-review.json"), {})
 worker_result = load_json(os.path.join(reports_dir, "worker-result.json"), {})
 worker_recipe_execution = load_json(os.path.join(reports_dir, "worker-recipe-execution.json"), {})
+runtime_generation = load_json(os.path.join(reports_dir, "runtime-generation-result.json"), {})
+runtime_verification = load_json(os.path.join(reports_dir, "runtime-feature-verification.json"), {})
+runtime_metadata_sync = load_json(os.path.join(reports_dir, "runtime-metadata-sync.json"), {})
+playwright_generation = load_json(os.path.join(reports_dir, "playwright-generation-result.json"), {})
 patch_plan_data = load_json(os.path.join(reports_dir, "patch-plan.json"), {})
 stack_profile = load_json(os.path.join(state_dir, "stack-profile.json"), load_json(os.path.join(reports_dir, "stack-profile.json"), {}))
 rule_recheck = load_json(os.path.join(reports_dir, "rule-recheck.json"), {})
@@ -473,6 +477,13 @@ template_application_review = {"status": "not_required", "summary": "No template
 stack_profile_review = {"status": "not_required", "summary": "No stack-specific recipe execution was provided.", "evidence": []}
 rule_recheck_review = {"status": "not_required", "summary": "No rule recheck artifact was provided.", "evidence": []}
 scaffold_honesty = {"status": "pass", "summary": "No scaffolded work is being claimed as complete runtime implementation.", "evidence": []}
+runtime_feature_review = {"status": "not_required", "summary": "No runtime feature generation artifact was provided.", "evidence": []}
+adapter_compliance = {"status": "not_required", "summary": "No runtime adapter was used.", "evidence": []}
+generated_files_review = {"status": "not_required", "summary": "No runtime files were generated.", "evidence": []}
+runtime_claim_honesty = {"status": "not_required", "summary": "No runtime claim was made.", "evidence": []}
+ui_ux_evidence = {"status": "not_required", "summary": "No UI runtime shell was generated.", "evidence": []}
+playwright_evidence_review = {"status": "not_required", "summary": "No Playwright runtime evidence was provided.", "evidence": []}
+metadata_synchronization = {"status": "not_required", "summary": "No runtime metadata sync artifact was provided.", "evidence": []}
 
 if worker_recipe_execution:
     recipe_id = worker_recipe_execution.get("recipe_id") or worker_recipe_execution.get("recipe", {}).get("id", "")
@@ -532,6 +543,60 @@ if worker_recipe_execution:
     }
     dimensions.append(dimension("scaffold_honesty", scaffold_honesty["status"], scaffold_honesty["summary"], scaffold_honesty["evidence"], "Describe scaffolded output as scaffolded, not complete runtime behavior." if false_runtime_claim else ""))
 
+if runtime_generation:
+    feature_id = runtime_generation.get("feature_id", "unknown")
+    runtime_status = runtime_generation.get("status", "unknown")
+    runtime_feature_review = {
+        "status": "pass" if runtime_status in {"planned", "generated"} else "warn",
+        "summary": f"Runtime generation artifact reviewed for `{feature_id}`.",
+        "evidence": [f"status={runtime_status}", f"claim={runtime_generation.get('runtime_claim_level', 'unknown')}"],
+    }
+    dimensions.append(dimension("runtime_feature_review", runtime_feature_review["status"], runtime_feature_review["summary"], runtime_feature_review["evidence"]))
+
+    adapter_compliance = {
+        "status": "pass" if runtime_generation.get("adapter") else "warn",
+        "summary": "Runtime generation references an adapter." if runtime_generation.get("adapter") else "Runtime generation does not reference an adapter.",
+        "evidence": [f"adapter={runtime_generation.get('adapter', 'none')}"],
+    }
+    dimensions.append(dimension("adapter_compliance", adapter_compliance["status"], adapter_compliance["summary"], adapter_compliance["evidence"]))
+
+    generated_files = runtime_generation.get("generated_files", [])
+    generated_files_review = {
+        "status": "pass" if generated_files or runtime_status == "planned" else "warn",
+        "summary": "Generated files are listed or this is a dry-run plan.",
+        "evidence": generated_files,
+    }
+    dimensions.append(dimension("generated_files_review", generated_files_review["status"], generated_files_review["summary"], generated_files_review["evidence"]))
+
+    overstated = re.search(r"\b(fully implemented|real model calls|db persistence|complete runtime)\b", pr_body, re.I) and runtime_generation.get("runtime_claim_level") in {"shell", "partial"}
+    runtime_claim_honesty = {
+        "status": "fail" if overstated else "pass",
+        "summary": "Runtime claim is represented honestly." if not overstated else "Runtime claim is overstated.",
+        "evidence": [f"claim={runtime_generation.get('runtime_claim_level', 'unknown')}"],
+    }
+    dimensions.append(dimension("runtime_claim_honesty", runtime_claim_honesty["status"], runtime_claim_honesty["summary"], runtime_claim_honesty["evidence"], "Describe shell/partial runtime slices honestly." if overstated else ""))
+
+    ui_ux_evidence = {
+        "status": "pass" if runtime_generation.get("runtime_claim_level") in {"shell", "partial"} else "warn",
+        "summary": "UI shell includes runtime claim-level evidence.",
+        "evidence": runtime_generation.get("generated_files", []),
+    }
+    dimensions.append(dimension("ui_ux_evidence", ui_ux_evidence["status"], ui_ux_evidence["summary"], ui_ux_evidence["evidence"]))
+
+    playwright_evidence_review = {
+        "status": "pass" if playwright_generation else "warn",
+        "summary": "Playwright evidence generation report is present." if playwright_generation else "Playwright evidence generation report is missing.",
+        "evidence": [json.dumps(playwright_generation, sort_keys=True)] if playwright_generation else [],
+    }
+    dimensions.append(dimension("playwright_evidence", playwright_evidence_review["status"], playwright_evidence_review["summary"], playwright_evidence_review["evidence"], "Generate Playwright evidence or document why unavailable." if not playwright_generation else ""))
+
+    metadata_synchronization = {
+        "status": "pass" if runtime_metadata_sync else "warn",
+        "summary": "Runtime metadata sync report is present." if runtime_metadata_sync else "Runtime metadata sync report is missing.",
+        "evidence": [json.dumps(runtime_metadata_sync, sort_keys=True)] if runtime_metadata_sync else [],
+    }
+    dimensions.append(dimension("runtime_metadata_sync", metadata_synchronization["status"], metadata_synchronization["summary"], metadata_synchronization["evidence"], "Run autospec-sync-runtime-metadata or document skip rationale." if not runtime_metadata_sync else ""))
+
 statuses = {item["dimension"]: item["status"] for item in dimensions}
 if statuses.get("forbidden_paths") == "fail" or statuses.get("risk_classification") == "fail":
     verdict = "blocked"
@@ -571,6 +636,13 @@ report = {
     "stack_profile_review": stack_profile_review,
     "rule_recheck_review": rule_recheck_review,
     "scaffold_honesty": scaffold_honesty,
+    "runtime_feature_review": runtime_feature_review,
+    "adapter_compliance": adapter_compliance,
+    "generated_files_review": generated_files_review,
+    "runtime_claim_honesty": runtime_claim_honesty,
+    "ui_ux_evidence": ui_ux_evidence,
+    "playwright_evidence": playwright_evidence_review,
+    "metadata_synchronization": metadata_synchronization,
     "acceptance_criteria": criterion_rows,
     "required_actions": required_actions,
     "side_effects": {"github_comment": bool(confirm and pr_arg), "approved": False, "merged": False, "pushed": False},
@@ -676,6 +748,51 @@ md = "\n".join([
     "",
     f"- Status: `{scaffold_honesty['status']}`",
     f"- Summary: {scaffold_honesty['summary']}",
+    "",
+    "## Runtime Feature Review",
+    "",
+    f"- Status: `{runtime_feature_review['status']}`",
+    f"- Summary: {runtime_feature_review['summary']}",
+    "",
+    "## Adapter Compliance",
+    "",
+    f"- Status: `{adapter_compliance['status']}`",
+    f"- Summary: {adapter_compliance['summary']}",
+    "",
+    "## Stack Confidence",
+    "",
+    f"- Status: `{stack_profile_review['status']}`",
+    f"- Summary: {stack_profile_review['summary']}",
+    "",
+    "## Generated Files",
+    "",
+    f"- Status: `{generated_files_review['status']}`",
+    f"- Summary: {generated_files_review['summary']}",
+    "",
+    "## Runtime Claim Honesty",
+    "",
+    f"- Status: `{runtime_claim_honesty['status']}`",
+    f"- Summary: {runtime_claim_honesty['summary']}",
+    "",
+    "## UI/UX Evidence",
+    "",
+    f"- Status: `{ui_ux_evidence['status']}`",
+    f"- Summary: {ui_ux_evidence['summary']}",
+    "",
+    "## Playwright Evidence",
+    "",
+    f"- Status: `{playwright_evidence_review['status']}`",
+    f"- Summary: {playwright_evidence_review['summary']}",
+    "",
+    "## Metadata Synchronization",
+    "",
+    f"- Status: `{metadata_synchronization['status']}`",
+    f"- Summary: {metadata_synchronization['summary']}",
+    "",
+    "## Rule Recheck",
+    "",
+    f"- Status: `{rule_recheck_review['status']}`",
+    f"- Summary: {rule_recheck_review['summary']}",
     "",
     "## Remaining Constitutional Gaps",
     "",

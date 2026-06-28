@@ -50,15 +50,15 @@ New repositories get metadata-first bootstrap: Autospec config, product purpose,
 
 ## Product baseline features
 
-Target repositories should eventually include in-app documentation, settings, onboarding/tutorials, reporting, analytics, feedback/support, diagnostics/status, search/help, and admin/operations areas where appropriate. Autospec MVP scaffolds these as specs and issue drafts.
+Target repositories should eventually include in-app documentation, settings, onboarding/tutorials, reporting, analytics, feedback/support, diagnostics/status, search/help, and admin/operations areas where appropriate. Autospec scaffolds these as specs and issue drafts, and Target-App Runtime Implementers v1 can generate bounded shell/partial runtime slices for recognized React/Vite and Next.js stacks.
 
 ## AI platform
 
-AI platform expectations include provider abstraction, OpenAI-compatible APIs, Ollama/local support, model selection, AI settings/admin pages, RAG, embeddings, agent/tool registries, memory, MCP registry, token/cost tracking, usage dashboards, quotas/budgets, and audit logging. Autospec MVP scaffolds these for target repositories and validates them through rules.
+AI platform expectations include provider abstraction, OpenAI-compatible APIs, Ollama/local support, model selection, AI settings/admin pages, RAG, embeddings, agent/tool registries, memory, MCP registry, token/cost tracking, usage dashboards, quotas/budgets, and audit logging. Autospec scaffolds these for target repositories, validates them through rules, and can generate safe AI settings/RAG/token-dashboard/MCP shell slices without provider calls, secret persistence, or migrations.
 
 ## NLAI
 
-Natural-language application interfaces expose core app capabilities through safe tools, support data querying, SQL generation/explanation/visualization, file discovery/preview/operations, workflow execution, report generation, pretty rendering, citations, evidence, and raw JSON avoidance. Autospec MVP scaffolds and validates these expectations.
+Natural-language application interfaces expose core app capabilities through safe tools, support data querying, SQL generation/explanation/visualization, file discovery/preview/operations, workflow execution, report generation, pretty rendering, citations, evidence, and raw JSON avoidance. Autospec scaffolds and validates these expectations, and can generate NLAI shell/viewer slices without executing SQL or destructive file operations.
 
 ## Diagnostics
 
@@ -84,7 +84,7 @@ Spec coverage implementation sweeps read the master requirements inventory and c
 
 ## Implemented MVP scope
 
-The MVP implements structured policy loading/checking, Digital Twin v1, issue-plan-v3, issue publishing/sync, worker/verifier/supervisor, onboarding, bootstrap, scaffolds, doctrine audits, local control, status, smoke, recovery, sensitive-output audit, and spec coverage closure.
+The MVP implements structured policy loading/checking, Digital Twin v1, issue-plan-v3, issue publishing/sync, worker/verifier/supervisor, onboarding, bootstrap, scaffolds, doctrine audits, local control, status, smoke, recovery, sensitive-output audit, spec coverage closure, Autonomy v2 recipes, and bounded target-app runtime shell generation for recognized stacks.
 
 ## Beyond-MVP scope
 

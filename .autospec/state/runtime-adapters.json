@@ -1,0 +1,525 @@
+{
+  "adapters": [
+    {
+      "allowed_paths": [
+        "src/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "component_patterns": [
+        "src/pages/{pascal}.tsx",
+        "src/components/autospec/{component}.tsx"
+      ],
+      "confidence_required": 0.8,
+      "config_patterns": [
+        "package.json"
+      ],
+      "detection": {
+        "confidence_rules": [
+          "react-vite-typescript"
+        ],
+        "evidence_files": [
+          "package.json"
+        ],
+        "required_files": []
+      },
+      "file_generation": {
+        "component": {
+          "patterns": [
+            "src/pages/{pascal}.tsx",
+            "src/components/autospec/{component}.tsx"
+          ]
+        },
+        "docs": {
+          "patterns": [
+            "docs/specs/{feature}.md"
+          ]
+        },
+        "route": {
+          "patterns": [
+            "src/pages/{pascal}.tsx",
+            "src/components/autospec/{component}.tsx"
+          ]
+        },
+        "test": {
+          "patterns": [
+            "tests/e2e/autospec-{feature}.spec.ts"
+          ]
+        }
+      },
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "id": "react-vite",
+      "match_reason": "stack profile, confidence, or route convention did not match",
+      "match_status": "unsupported",
+      "risk": {
+        "default_level": "low",
+        "requires_human_guidance": false
+      },
+      "route_patterns": [
+        "src/pages/{pascal}.tsx",
+        "src/components/autospec/{component}.tsx"
+      ],
+      "source_roots": [
+        "src",
+        "app",
+        "pages"
+      ],
+      "stack_profiles": [
+        "react-vite-typescript"
+      ],
+      "status": "enabled",
+      "style_patterns": [],
+      "supported_feature_slices": [
+        "in-app-docs-center",
+        "settings-area",
+        "status-page",
+        "feedback-support-flow",
+        "onboarding-shell",
+        "ai-provider-settings",
+        "ai-usage-token-dashboard",
+        "rag-assistant-shell",
+        "mcp-diagnostics-shell",
+        "capability-interface-shell",
+        "pretty-rendering-viewers",
+        "data-query-shell",
+        "file-operations-shell",
+        "analytics-dashboard-shell",
+        "report-export-shell",
+        "visualization-standard-shell",
+        "playwright-viewport-tests",
+        "playwright-accessibility-tests",
+        "playwright-white-screen-tests"
+      ],
+      "test_patterns": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "React/Vite",
+      "validation": {
+        "focused_commands": [
+          "bash scripts/autospec-verify-runtime-feature.sh --dry-run"
+        ],
+        "full_commands": []
+      }
+    },
+    {
+      "allowed_paths": [
+        "app/**",
+        "src/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "component_patterns": [
+        "app/{route}/page.tsx",
+        "src/components/autospec/{component}.tsx"
+      ],
+      "confidence_required": 0.8,
+      "config_patterns": [
+        "package.json"
+      ],
+      "detection": {
+        "confidence_rules": [
+          "nextjs-web-app"
+        ],
+        "evidence_files": [
+          "package.json"
+        ],
+        "required_files": [
+          "app/page.tsx"
+        ]
+      },
+      "file_generation": {
+        "component": {
+          "patterns": [
+            "app/{route}/page.tsx",
+            "src/components/autospec/{component}.tsx"
+          ]
+        },
+        "docs": {
+          "patterns": [
+            "docs/specs/{feature}.md"
+          ]
+        },
+        "route": {
+          "patterns": [
+            "app/{route}/page.tsx",
+            "src/components/autospec/{component}.tsx"
+          ]
+        },
+        "test": {
+          "patterns": [
+            "tests/e2e/autospec-{feature}.spec.ts"
+          ]
+        }
+      },
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "id": "nextjs-app-router",
+      "match_reason": "stack profile, confidence, or route convention did not match",
+      "match_status": "unsupported",
+      "risk": {
+        "default_level": "low",
+        "requires_human_guidance": false
+      },
+      "route_patterns": [
+        "app/{route}/page.tsx",
+        "src/components/autospec/{component}.tsx"
+      ],
+      "source_roots": [
+        "src",
+        "app",
+        "pages"
+      ],
+      "stack_profiles": [
+        "nextjs-web-app"
+      ],
+      "status": "enabled",
+      "style_patterns": [],
+      "supported_feature_slices": [
+        "in-app-docs-center",
+        "settings-area",
+        "status-page",
+        "feedback-support-flow",
+        "onboarding-shell",
+        "ai-provider-settings",
+        "ai-usage-token-dashboard",
+        "rag-assistant-shell",
+        "mcp-diagnostics-shell",
+        "capability-interface-shell",
+        "pretty-rendering-viewers",
+        "data-query-shell",
+        "file-operations-shell",
+        "analytics-dashboard-shell",
+        "report-export-shell",
+        "visualization-standard-shell",
+        "playwright-viewport-tests",
+        "playwright-accessibility-tests",
+        "playwright-white-screen-tests"
+      ],
+      "test_patterns": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Next.js App Router",
+      "validation": {
+        "focused_commands": [
+          "bash scripts/autospec-verify-runtime-feature.sh --dry-run"
+        ],
+        "full_commands": []
+      }
+    },
+    {
+      "allowed_paths": [
+        "pages/**",
+        "src/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "component_patterns": [
+        "pages/{route}.tsx",
+        "src/components/autospec/{component}.tsx"
+      ],
+      "confidence_required": 0.8,
+      "config_patterns": [
+        "package.json"
+      ],
+      "detection": {
+        "confidence_rules": [
+          "nextjs-web-app"
+        ],
+        "evidence_files": [
+          "package.json"
+        ],
+        "required_files": [
+          "pages/index.tsx"
+        ]
+      },
+      "file_generation": {
+        "component": {
+          "patterns": [
+            "pages/{route}.tsx",
+            "src/components/autospec/{component}.tsx"
+          ]
+        },
+        "docs": {
+          "patterns": [
+            "docs/specs/{feature}.md"
+          ]
+        },
+        "route": {
+          "patterns": [
+            "pages/{route}.tsx",
+            "src/components/autospec/{component}.tsx"
+          ]
+        },
+        "test": {
+          "patterns": [
+            "tests/e2e/autospec-{feature}.spec.ts"
+          ]
+        }
+      },
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "id": "nextjs-pages-router",
+      "match_reason": "stack profile, confidence, or route convention did not match",
+      "match_status": "unsupported",
+      "risk": {
+        "default_level": "low",
+        "requires_human_guidance": false
+      },
+      "route_patterns": [
+        "pages/{route}.tsx",
+        "src/components/autospec/{component}.tsx"
+      ],
+      "source_roots": [
+        "src",
+        "app",
+        "pages"
+      ],
+      "stack_profiles": [
+        "nextjs-web-app"
+      ],
+      "status": "enabled",
+      "style_patterns": [],
+      "supported_feature_slices": [
+        "in-app-docs-center",
+        "settings-area",
+        "status-page",
+        "feedback-support-flow",
+        "onboarding-shell",
+        "ai-provider-settings",
+        "ai-usage-token-dashboard",
+        "rag-assistant-shell",
+        "mcp-diagnostics-shell",
+        "capability-interface-shell",
+        "pretty-rendering-viewers",
+        "data-query-shell",
+        "file-operations-shell",
+        "analytics-dashboard-shell",
+        "report-export-shell",
+        "visualization-standard-shell",
+        "playwright-viewport-tests",
+        "playwright-accessibility-tests",
+        "playwright-white-screen-tests"
+      ],
+      "test_patterns": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Next.js Pages Router",
+      "validation": {
+        "focused_commands": [
+          "bash scripts/autospec-verify-runtime-feature.sh --dry-run"
+        ],
+        "full_commands": []
+      }
+    },
+    {
+      "allowed_paths": [
+        "bin/**",
+        "docs/**",
+        ".autospec/**",
+        "tests/**"
+      ],
+      "component_patterns": [
+        "bin/autospec-status.js"
+      ],
+      "confidence_required": 0.8,
+      "config_patterns": [
+        "package.json"
+      ],
+      "detection": {
+        "confidence_rules": [
+          "node-cli-tool"
+        ],
+        "evidence_files": [
+          "package.json"
+        ],
+        "required_files": []
+      },
+      "file_generation": {
+        "component": {
+          "patterns": [
+            "bin/autospec-status.js"
+          ]
+        },
+        "docs": {
+          "patterns": [
+            "docs/specs/{feature}.md"
+          ]
+        },
+        "route": {
+          "patterns": [
+            "bin/autospec-status.js"
+          ]
+        },
+        "test": {
+          "patterns": [
+            "tests/e2e/autospec-{feature}.spec.ts"
+          ]
+        }
+      },
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "id": "node-cli",
+      "match_reason": "stack profile, confidence, or route convention did not match",
+      "match_status": "unsupported",
+      "risk": {
+        "default_level": "low",
+        "requires_human_guidance": false
+      },
+      "route_patterns": [
+        "bin/autospec-status.js"
+      ],
+      "source_roots": [
+        "src",
+        "app",
+        "pages"
+      ],
+      "stack_profiles": [
+        "node-cli-tool"
+      ],
+      "status": "enabled",
+      "style_patterns": [],
+      "supported_feature_slices": [
+        "playwright-viewport-tests",
+        "report-export-shell"
+      ],
+      "test_patterns": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Node CLI",
+      "validation": {
+        "focused_commands": [
+          "bash scripts/autospec-verify-runtime-feature.sh --dry-run"
+        ],
+        "full_commands": []
+      }
+    },
+    {
+      "allowed_paths": [
+        "src/**",
+        "docs/**",
+        ".autospec/**",
+        "tests/**"
+      ],
+      "component_patterns": [
+        "src/autospec_status.py"
+      ],
+      "confidence_required": 0.8,
+      "config_patterns": [
+        "package.json"
+      ],
+      "detection": {
+        "confidence_rules": [
+          "python-cli-tool"
+        ],
+        "evidence_files": [
+          "package.json"
+        ],
+        "required_files": []
+      },
+      "file_generation": {
+        "component": {
+          "patterns": [
+            "src/autospec_status.py"
+          ]
+        },
+        "docs": {
+          "patterns": [
+            "docs/specs/{feature}.md"
+          ]
+        },
+        "route": {
+          "patterns": [
+            "src/autospec_status.py"
+          ]
+        },
+        "test": {
+          "patterns": [
+            "tests/e2e/autospec-{feature}.spec.ts"
+          ]
+        }
+      },
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "id": "python-cli",
+      "match_reason": "stack profile, confidence, or route convention did not match",
+      "match_status": "unsupported",
+      "risk": {
+        "default_level": "low",
+        "requires_human_guidance": false
+      },
+      "route_patterns": [
+        "src/autospec_status.py"
+      ],
+      "source_roots": [
+        "src",
+        "app",
+        "pages"
+      ],
+      "stack_profiles": [
+        "python-cli-tool"
+      ],
+      "status": "enabled",
+      "style_patterns": [],
+      "supported_feature_slices": [
+        "report-export-shell"
+      ],
+      "test_patterns": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Python CLI",
+      "validation": {
+        "focused_commands": [
+          "bash scripts/autospec-verify-runtime-feature.sh --dry-run"
+        ],
+        "full_commands": []
+      }
+    }
+  ],
+  "detected_stack": {
+    "confidence": 0.65,
+    "evidence": [
+      "python files or pyproject"
+    ],
+    "id": "python-cli-tool",
+    "notes": [],
+    "supported_recipes": [
+      "metadata-drift-test"
+    ],
+    "unsupported_recipes": []
+  },
+  "schema": 1
+}

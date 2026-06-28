@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Autospec Runtime Adapter",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "stack_profiles",
+    "status",
+    "confidence_required",
+    "supported_feature_slices",
+    "allowed_paths",
+    "forbidden_paths",
+    "file_generation",
+    "validation",
+    "detection",
+    "risk"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "title": { "type": "string" },
+    "stack_profiles": { "type": "array", "items": { "type": "string" } },
+    "status": { "enum": ["enabled", "experimental", "disabled"] },
+    "confidence_required": { "type": "number", "minimum": 0, "maximum": 1 },
+    "supported_feature_slices": { "type": "array", "items": { "type": "string" } },
+    "source_roots": { "type": "array", "items": { "type": "string" } },
+    "route_patterns": { "type": "array", "items": { "type": "string" } },
+    "component_patterns": { "type": "array", "items": { "type": "string" } },
+    "test_patterns": { "type": "array", "items": { "type": "string" } },
+    "style_patterns": { "type": "array", "items": { "type": "string" } },
+    "config_patterns": { "type": "array", "items": { "type": "string" } },
+    "allowed_paths": { "type": "array", "items": { "type": "string" } },
+    "forbidden_paths": { "type": "array", "items": { "type": "string" } },
+    "file_generation": { "type": "object" },
+    "validation": { "type": "object" },
+    "detection": { "type": "object" },
+    "risk": { "type": "object" }
+  }
+}

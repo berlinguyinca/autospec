@@ -1,0 +1,1341 @@
+{
+  "feature_slices": [
+    {
+      "acceptance_criteria": [
+        "In-app documentation center shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "product",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "DocsCenter",
+        "Docs"
+      ],
+      "id": "in-app-docs-center",
+      "implementation_kind": "route",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "docs",
+        "product"
+      ],
+      "source_rules": [
+        "required_in_app_documentation"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "In-app documentation center",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "In-app documentation center",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "Settings area shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "product",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "SettingsShell",
+        "Settings"
+      ],
+      "id": "settings-area",
+      "implementation_kind": "route",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "settings"
+      ],
+      "source_rules": [
+        "required_settings_area"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "Settings area shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Settings area shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "Status diagnostics page shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "product",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "StatusShell",
+        "Status"
+      ],
+      "id": "status-page",
+      "implementation_kind": "route",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "diagnostics"
+      ],
+      "source_rules": [
+        "required_status_page"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "Status diagnostics page shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Status diagnostics page shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "Feedback support flow shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "product",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "FeedbackSupport",
+        "Feedback"
+      ],
+      "id": "feedback-support-flow",
+      "implementation_kind": "route",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "product"
+      ],
+      "source_rules": [
+        "required_feedback_flow"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "Feedback support flow shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Feedback support flow shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "Onboarding shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "product",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "OnboardingShell",
+        "Onboarding"
+      ],
+      "id": "onboarding-shell",
+      "implementation_kind": "route",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "product"
+      ],
+      "source_rules": [
+        "required_onboarding"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "Onboarding shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Onboarding shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "AI provider settings shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "ai",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "AiProviderSettings",
+        "AiSettings"
+      ],
+      "id": "ai-provider-settings",
+      "implementation_kind": "mixed",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "ai"
+      ],
+      "source_rules": [
+        "required_ai_provider_abstraction",
+        "required_ai_settings_page"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "AI provider settings shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "AI provider settings shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "AI usage token dashboard shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "ai",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "AiUsageTokenDashboard",
+        "AiUsage"
+      ],
+      "id": "ai-usage-token-dashboard",
+      "implementation_kind": "mixed",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "ai"
+      ],
+      "source_rules": [
+        "required_token_usage_tracking"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "AI usage token dashboard shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "AI usage token dashboard shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "RAG assistant shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "ai",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "RagAssistantShell",
+        "RagAssistant"
+      ],
+      "id": "rag-assistant-shell",
+      "implementation_kind": "route",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "ai"
+      ],
+      "source_rules": [
+        "required_rag_indexing"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "RAG assistant shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "RAG assistant shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "MCP diagnostics shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "ai",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "McpDiagnosticsShell",
+        "McpDiagnostics"
+      ],
+      "id": "mcp-diagnostics-shell",
+      "implementation_kind": "route",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "ai",
+        "diagnostics"
+      ],
+      "source_rules": [
+        "required_mcp_registry"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "MCP diagnostics shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "MCP diagnostics shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "NLAI capability interface shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "nlai",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "CapabilityInterfaceShell",
+        "Capabilities"
+      ],
+      "id": "capability-interface-shell",
+      "implementation_kind": "route",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "nlai"
+      ],
+      "source_rules": [
+        "required_nlai_capability_registry"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "NLAI capability interface shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "NLAI capability interface shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "Pretty rendering viewers shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "nlai",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "PrettyRenderingViewers",
+        "PrettyRendering"
+      ],
+      "id": "pretty-rendering-viewers",
+      "implementation_kind": "component",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "nlai"
+      ],
+      "source_rules": [
+        "required_pretty_human_output"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "Pretty rendering viewers shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Pretty rendering viewers shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "Data query shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "nlai",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "DataQueryShell",
+        "DataQuery"
+      ],
+      "id": "data-query-shell",
+      "implementation_kind": "route",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "nlai"
+      ],
+      "source_rules": [
+        "required_nlai_data_querying_for_data_apps"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "Data query shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Data query shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "File operations shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "nlai",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "FileOperationsShell",
+        "FileOperations"
+      ],
+      "id": "file-operations-shell",
+      "implementation_kind": "route",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "nlai"
+      ],
+      "source_rules": [
+        "required_nlai_file_operations_for_file_apps"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "File operations shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "File operations shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "Analytics dashboard shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "reporting",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "AnalyticsDashboardShell",
+        "Analytics"
+      ],
+      "id": "analytics-dashboard-shell",
+      "implementation_kind": "route",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "reporting"
+      ],
+      "source_rules": [
+        "required_metrics_definitions"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "Analytics dashboard shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Analytics dashboard shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "Report export shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "reporting",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "ReportExportShell",
+        "Reports"
+      ],
+      "id": "report-export-shell",
+      "implementation_kind": "route",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "reporting"
+      ],
+      "source_rules": [
+        "required_csv_pdf_exports"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "Report export shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Report export shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "Visualization standard shell shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "reporting",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "VisualizationStandardShell",
+        "Visualization"
+      ],
+      "id": "visualization-standard-shell",
+      "implementation_kind": "docs",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "shell",
+      "source_baselines": [
+        "reporting"
+      ],
+      "source_rules": [
+        "required_visualization_library_standard"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "Visualization standard shell",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Visualization standard shell",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "Playwright viewport tests shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "testing",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "ViewportEvidence",
+        "Viewport"
+      ],
+      "id": "playwright-viewport-tests",
+      "implementation_kind": "test",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "partial",
+      "source_baselines": [
+        "testing"
+      ],
+      "source_rules": [
+        "required_playwright_viewport_matrix"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "Playwright viewport tests",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Playwright viewport tests",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "Playwright accessibility tests shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "testing",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "AccessibilityEvidence",
+        "Accessibility"
+      ],
+      "id": "playwright-accessibility-tests",
+      "implementation_kind": "test",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "partial",
+      "source_baselines": [
+        "testing"
+      ],
+      "source_rules": [
+        "required_playwright_accessibility_flow"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "Playwright accessibility tests",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Playwright accessibility tests",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    },
+    {
+      "acceptance_criteria": [
+        "Playwright white-screen tests shell is generated.",
+        "Runtime claim level is honest."
+      ],
+      "allowed_paths": [
+        "src/**",
+        "app/**",
+        "pages/**",
+        "docs/**",
+        "tests/**",
+        ".autospec/**"
+      ],
+      "category": "testing",
+      "forbidden_paths": [
+        ".github/workflows/**",
+        ".env",
+        ".env.*",
+        "**/migrations/**",
+        "package.json",
+        "pyproject.toml"
+      ],
+      "generated_artifacts": [
+        "WhiteScreenEvidence",
+        "WhiteScreen"
+      ],
+      "id": "playwright-white-screen-tests",
+      "implementation_kind": "test",
+      "metadata_updates": [
+        ".autospec/state/ui-surface.json",
+        ".autospec/state/capability-registry.json"
+      ],
+      "not_in_scope": [
+        "database migrations",
+        "auth/security behavior changes",
+        "dependency installation",
+        "provider calls"
+      ],
+      "required_inputs": [
+        "detected stack profile",
+        "runtime adapter"
+      ],
+      "requires_adapter": true,
+      "risk_level": "low",
+      "runtime_claim_level": "partial",
+      "source_baselines": [
+        "testing"
+      ],
+      "source_rules": [
+        "required_playwright_white_screen_repro"
+      ],
+      "stuck_if": [
+        "stack confidence is low",
+        "adapter is missing",
+        "route would overwrite user file"
+      ],
+      "summary": "Playwright white-screen tests",
+      "supported_adapters": [
+        "react-vite",
+        "nextjs-app-router",
+        "nextjs-pages-router"
+      ],
+      "tests_generated": [
+        "tests/e2e/autospec-{feature}.spec.ts"
+      ],
+      "title": "Playwright white-screen tests",
+      "validation_expectations": [
+        "runtime feature verification"
+      ]
+    }
+  ],
+  "schema": 1,
+  "summary": {
+    "total": 19
+  }
+}

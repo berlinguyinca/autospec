@@ -6,13 +6,22 @@ Usage:
   autospec-worker-one.sh [--repo-root DIR] [--dry-run|--confirm] --remediate --pr N [--branch NAME]
   autospec-worker-one.sh [--repo-root DIR] [--dry-run|--confirm] --issue N --recipe RECIPE_ID
   autospec-worker-one.sh [--repo-root DIR] [--dry-run|--confirm] --issue N --auto-recipe
+  autospec-worker-one.sh [--repo-root DIR] [--dry-run|--confirm] --issue N --feature FEATURE_ID
+  autospec-worker-one.sh [--repo-root DIR] [--dry-run|--confirm] --issue N --runtime-feature
 EOF
 }
 die(){ printf 'autospec-worker-one: %s\n' "$*" >&2; exit 2; }
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
-REPO_ROOT="$(pwd)"; CONFIRM=0; REMEDIATE=0; PR=""; BRANCH=""; ISSUE="1"; RECIPE=""; AUTO_RECIPE=0
-while [ "$#" -gt 0 ]; do case "$1" in --repo-root) REPO_ROOT="$2"; shift 2;; --dry-run) CONFIRM=0; shift;; --confirm) CONFIRM=1; shift;; --remediate) REMEDIATE=1; shift;; --pr) PR="$2"; shift 2;; --branch) BRANCH="$2"; shift 2;; --issue) ISSUE="$2"; shift 2;; --recipe) RECIPE="$2"; shift 2;; --auto-recipe) AUTO_RECIPE=1; shift;; -h|--help) usage; exit 0;; *) die "unknown arg: $1";; esac; done
+REPO_ROOT="$(pwd)"; CONFIRM=0; REMEDIATE=0; PR=""; BRANCH=""; ISSUE="1"; RECIPE=""; AUTO_RECIPE=0; FEATURE=""; RUNTIME_FEATURE=0
+while [ "$#" -gt 0 ]; do case "$1" in --repo-root) REPO_ROOT="$2"; shift 2;; --dry-run) CONFIRM=0; shift;; --confirm) CONFIRM=1; shift;; --remediate) REMEDIATE=1; shift;; --pr) PR="$2"; shift 2;; --branch) BRANCH="$2"; shift 2;; --issue) ISSUE="$2"; shift 2;; --recipe) RECIPE="$2"; shift 2;; --auto-recipe) AUTO_RECIPE=1; shift;; --feature) FEATURE="$2"; shift 2;; --runtime-feature) RUNTIME_FEATURE=1; shift;; -h|--help) usage; exit 0;; *) die "unknown arg: $1";; esac; done
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
+
+if [ -n "$FEATURE" ] || [ "$RUNTIME_FEATURE" -eq 1 ]; then
+    mode_flag="--dry-run"
+    [ "$CONFIRM" -eq 1 ] && mode_flag="--confirm"
+    [ -z "$FEATURE" ] && FEATURE="in-app-docs-center"
+    exec python3 "$SCRIPT_DIR/autospec-runtime-v1-lib.py" --command worker-runtime --repo-root "$REPO_ROOT" "$mode_flag" --issue "$ISSUE" --feature "$FEATURE"
+fi
 
 if [ -n "$RECIPE" ] || [ "$AUTO_RECIPE" -eq 1 ]; then
     mode_flag="--dry-run"

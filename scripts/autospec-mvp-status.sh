@@ -80,6 +80,7 @@ check_type_coverage = load(os.path.join(reports, "check-type-coverage.json"), {}
 template_coverage = load(os.path.join(reports, "template-coverage.json"), {})
 release_candidate_gate = load(os.path.join(reports, "release-candidate-gate.json"), {})
 autonomy_v2_status = load(os.path.join(reports, "autonomy-v2-status.json"), {})
+runtime_feature_status = load(os.path.join(reports, "runtime-feature-status.json"), {})
 spec_coverage = load(os.path.join(reports, "spec-coverage.json"), {})
 coverage_requirements = spec_coverage.get("requirements", []) if isinstance(spec_coverage.get("requirements"), list) else []
 critical_missing = [r for r in coverage_requirements if r.get("priority") == "critical" and r.get("status") == "missing" and r.get("requirement_type") != "target_app_scaffold"]
@@ -100,6 +101,7 @@ signals = {
     "template_coverage": "pass" if template_coverage.get("categories") else "unknown",
     "release_candidate_gate": release_candidate_gate.get("verdict", "unknown"),
     "autonomy_v2": "pass" if autonomy_v2_status.get("summary") or autonomy_v2_status.get("worker_capabilities") else "unknown",
+    "runtime_features": "pass" if runtime_feature_status.get("supported_adapters") or runtime_feature_status.get("generated_runtime_features") else "unknown",
     "spec_coverage": "fail" if critical_missing else "warn" if high_partial or documented_only else "pass" if coverage_requirements else "unknown",
 }
 blocking_values = {"blocked", "fail", "RC_BLOCKED", "RC_NOT_READY"}
@@ -136,6 +138,7 @@ status = {
         "bootstrap": exists("scripts/autospec-bootstrap-new-project.sh"),
         "ai_nlai_scaffolds": exists("scripts/autospec-generate-ai-nlai-scaffold.sh"),
         "autonomy_v2_recipes": exists("scripts/autospec-recipe-index.sh") and exists("scripts/autospec-rule-to-recipe-plan.sh") and exists("scripts/autospec-worker-one.sh"),
+        "runtime_feature_generation": exists("scripts/autospec-runtime-adapter-index.sh") and exists("scripts/autospec-generate-runtime-feature.sh") and exists("scripts/autospec-verify-runtime-feature.sh"),
     },
     "policy_source_status": "present" if exists(".autospec/state/policy-sources.json") else "unknown",
     "baseline_source_status": "present" if exists(".autospec/reports/baseline-composition.json") else "unknown",
@@ -197,6 +200,11 @@ md = "\n".join([
     "",
     "- Worker capabilities, implementation recipes, rule-to-recipe planning, patch plans, stack profiles, rule rechecks, and recipe-aware verifier review are available.",
     "",
+    "## Runtime feature status",
+    "",
+    f"- Signal: `{signals.get('runtime_features', 'unknown')}`",
+    "- Recognized-stack runtime shells are bounded, reviewable, and disabled for supervisor execution by default.",
+    "",
     "## Safety guarantees",
     "",
     "- No GitHub Actions or schedulers.",
@@ -229,6 +237,7 @@ md = "\n".join([
     "## Autonomy v2 status",
     "",
     f"- Signal: `{signals.get('autonomy_v2', 'unknown')}`",
+    f"- Runtime feature signal: `{signals.get('runtime_features', 'unknown')}`",
     f"- MVP readiness impact: `{status['spec_coverage']['mvp_readiness_impact']}`",
 ])
 write_text(os.path.join(reports, "mvp-status.md"), md)

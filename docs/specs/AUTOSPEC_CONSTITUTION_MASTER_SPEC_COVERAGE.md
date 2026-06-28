@@ -2,25 +2,26 @@
 
 ## Summary
 
-- Total requirements: 83
-- Status counts: {"deferred": 3, "documented_only": 1, "implemented": 45, "missing": 2, "partial": 1, "scaffolded": 24, "validated": 7}
+- Total requirements: 92
+- Status counts: {"deferred": 3, "documented_only": 1, "implemented": 54, "missing": 2, "partial": 1, "scaffolded": 24, "validated": 7}
+- runtime feature evidence is tracked through runtime adapters, feature slices, generation records, metadata sync, verification, worker v4, and runtime status reports.
 
 ## Coverage Matrix
 
 | Category | Total | Statuses |
 | --- | ---: | --- |
 | `ai_platform` | 9 | deferred: 1, implemented: 1, scaffolded: 7 |
-| `autonomous_development` | 21 | deferred: 1, documented_only: 1, implemented: 18, scaffolded: 1 |
+| `autonomous_development` | 22 | deferred: 1, documented_only: 1, implemented: 19, scaffolded: 1 |
 | `diagnostics` | 4 | implemented: 1, scaffolded: 3 |
-| `digital_twin` | 6 | implemented: 4, missing: 2 |
+| `digital_twin` | 7 | implemented: 5, missing: 2 |
 | `docs_tutorial_pdf` | 5 | implemented: 1, partial: 1, scaffolded: 3 |
 | `engineering` | 8 | deferred: 1, implemented: 4, validated: 3 |
 | `nlai` | 4 | implemented: 1, scaffolded: 3 |
 | `policy` | 9 | implemented: 9 |
-| `product_baseline` | 4 | implemented: 1, scaffolded: 3 |
+| `product_baseline` | 10 | implemented: 7, scaffolded: 3 |
 | `reporting_analytics_visualization` | 4 | implemented: 1, scaffolded: 2, validated: 1 |
 | `security` | 1 | implemented: 1 |
-| `testing` | 5 | implemented: 2, validated: 3 |
+| `testing` | 6 | implemented: 3, validated: 3 |
 | `ui_ux` | 3 | implemented: 1, scaffolded: 2 |
 
 ## Requirements
@@ -99,6 +100,15 @@
 | `reporting.exports` | reporting_analytics_visualization | scaffolded | high | .autospec/templates/product-baseline/reporting-dashboard-spec.md |
 | `reporting.metrics` | reporting_analytics_visualization | scaffolded | high | .autospec/templates/product-baseline/analytics-metrics-spec.md |
 | `reporting.visualization_standard` | reporting_analytics_visualization | validated | high | none |
+| `runtime.adapters` | product_baseline | implemented | critical | scripts/autospec-runtime-adapter-index.sh, .autospec/state/runtime-adapters.json |
+| `runtime.feature_slices` | product_baseline | implemented | critical | scripts/autospec-feature-slice-index.sh, .autospec/state/feature-slices.json |
+| `runtime.generator` | product_baseline | implemented | critical | scripts/autospec-generate-runtime-feature.sh |
+| `runtime.implementation_plan` | product_baseline | implemented | critical | scripts/autospec-runtime-implementation-plan.sh |
+| `runtime.metadata_sync` | digital_twin | implemented | high | scripts/autospec-sync-runtime-metadata.sh |
+| `runtime.playwright_evidence_generation` | testing | implemented | high | scripts/autospec-generate-playwright-evidence.sh |
+| `runtime.status` | product_baseline | implemented | high | scripts/autospec-runtime-feature-status.sh |
+| `runtime.verification` | product_baseline | implemented | critical | scripts/autospec-verify-runtime-feature.sh |
+| `runtime.worker_v4` | autonomous_development | implemented | critical | scripts/autospec-worker-one.sh |
 | `security.no_auto_auth_migrations` | engineering | deferred | critical | docs/KNOWN_LIMITATIONS.md |
 | `security.privacy_audit` | security | implemented | high | scripts/autospec-security-privacy-audit.sh, .autospec/reports/security-privacy-audit.json |
 | `target_app.full_ai_runtime` | ai_platform | deferred | high | docs/KNOWN_LIMITATIONS.md |

@@ -1,0 +1,39 @@
+{
+  "blocked_runtime_features": [
+    "in-app-docs-center",
+    "settings-area",
+    "status-page",
+    "feedback-support-flow",
+    "onboarding-shell",
+    "ai-provider-settings",
+    "ai-usage-token-dashboard",
+    "rag-assistant-shell",
+    "mcp-diagnostics-shell",
+    "capability-interface-shell",
+    "pretty-rendering-viewers",
+    "data-query-shell",
+    "file-operations-shell",
+    "analytics-dashboard-shell",
+    "report-export-shell",
+    "visualization-standard-shell",
+    "playwright-viewport-tests",
+    "playwright-accessibility-tests",
+    "playwright-white-screen-tests"
+  ],
+  "detected_stack": {
+    "confidence": 0.65,
+    "evidence": [
+      "python files or pyproject"
+    ],
+    "id": "python-cli-tool",
+    "notes": [],
+    "supported_recipes": [
+      "metadata-drift-test"
+    ],
+    "unsupported_recipes": []
+  },
+  "generated_runtime_features": [],
+  "safe_feature_slices": [],
+  "schema": 1,
+  "supported_adapters": []
+}

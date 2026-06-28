@@ -14,7 +14,7 @@ Expand beyond Autonomy v2 recipes only after verifier evidence is strong. Curren
 
 ## Phase 4 — Target-app AI/NLAI runtime generators
 
-Generate target-repo runtime code only after explicit design and human approval.
+Target-App Runtime Implementers v1 now supports recognized-stack shell/partial slices. Future work should deepen real provider/data integrations only after explicit design, tests, and human approval.
 
 ## Phase 5 — UI visual generation and review
 

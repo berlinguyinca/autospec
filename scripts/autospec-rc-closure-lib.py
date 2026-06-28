@@ -482,6 +482,7 @@ def release_candidate_gate(root: Path, script_root: Path) -> int:
     sensitive = load_json(reports(root) / "sensitive-output-audit.json", {})
     report_quality_data = load_json(reports(root) / "report-quality.json", {})
     autonomy_v2 = load_json(reports(root) / "autonomy-v2-status.json", {})
+    runtime_features = load_json(reports(root) / "runtime-feature-status.json", {})
     blockers = []
     warnings = []
     for req in spec.get("requirements", []):
@@ -495,6 +496,8 @@ def release_candidate_gate(root: Path, script_root: Path) -> int:
         blockers.append("report quality failure")
     if not autonomy_v2:
         warnings.append("Autonomy v2 status report has not been generated")
+    if not runtime_features:
+        warnings.append("Runtime feature status report has not been generated")
     try:
         cp = subprocess.run(["git", "status", "--porcelain", "--", ".github/workflows"], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         workflow_status = cp.stdout.splitlines() if cp.returncode == 0 else []
@@ -522,7 +525,7 @@ def release_candidate_gate(root: Path, script_root: Path) -> int:
         "",
         "## Capability summary",
         "",
-        "- Structured policy, Digital Twin, audits, backlog, Autonomy v2 recipes, and autonomy commands are checked through local reports.",
+        "- Structured policy, Digital Twin, audits, backlog, Autonomy v2 recipes, runtime feature shells, and autonomy commands are checked through local reports.",
         "",
         "## Implemented engine capabilities",
         "",

@@ -1,0 +1,45 @@
+id: nextjs-app-router
+title: Next.js App Router
+stack_profiles:
+  - nextjs-web-app
+status: enabled
+confidence_required: 0.8
+supported_feature_slices:
+  - in-app-docs-center
+  - settings-area
+  - status-page
+  - feedback-support-flow
+  - onboarding-shell
+  - ai-provider-settings
+  - ai-usage-token-dashboard
+  - rag-assistant-shell
+  - mcp-diagnostics-shell
+  - capability-interface-shell
+  - pretty-rendering-viewers
+  - data-query-shell
+  - file-operations-shell
+  - analytics-dashboard-shell
+  - report-export-shell
+  - visualization-standard-shell
+  - playwright-viewport-tests
+  - playwright-accessibility-tests
+  - playwright-white-screen-tests
+allowed_paths:
+  - app/**
+  - src/**
+  - docs/**
+  - tests/**
+  - .autospec/**
+forbidden_paths:
+  - .github/workflows/**
+  - .env
+  - .env.*
+  - **/migrations/**
+  - package.json
+  - pyproject.toml
+validation:
+  focused_commands:
+    - bash scripts/autospec-verify-runtime-feature.sh --dry-run
+risk:
+  default_level: low
+  requires_human_guidance: false

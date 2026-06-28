@@ -94,6 +94,10 @@ recipe_plan = load(os.path.join(reports, "rule-to-recipe-plan.json"), load(os.pa
 recipe_candidates = recipe_plan.get("items", []) if isinstance(recipe_plan, dict) else []
 safe_recipe_candidates = [item for item in recipe_candidates if item.get("status") == "recipe_available"]
 selected_recipe_context = safe_recipe_candidates[0] if safe_recipe_candidates else (recipe_candidates[0] if recipe_candidates else {})
+runtime_plan = load(os.path.join(reports, "runtime-implementation-plan.json"), load(os.path.join(state, "runtime-implementation-plan.json"), {}))
+runtime_candidates = runtime_plan.get("plans", []) if isinstance(runtime_plan, dict) else []
+safe_runtime_candidates = [item for item in runtime_candidates if item.get("status") in {"safe_to_generate", "safe_shell_only"}]
+selected_runtime_context = safe_runtime_candidates[0] if safe_runtime_candidates else (runtime_candidates[0] if runtime_candidates else {})
 rule_ids = selected_context.get("rule_ids") or selected_context.get("source_rule_ids") or []
 quality_gate_ids = selected_context.get("quality_gate_ids") or selected_context.get("quality_gates") or []
 risk = selected_context.get("risk", {}) if isinstance(selected_context.get("risk", {}), dict) else {}
@@ -141,6 +145,19 @@ plan = {
             "recipe_id": selected_recipe_context.get("recipe_id", ""),
             "capability": selected_recipe_context.get("capability", ""),
             "safe_candidate_count": len(safe_recipe_candidates),
+        },
+        "runtime_feature": {
+            "status": selected_runtime_context.get("status", "not_available"),
+            "feature_slice_id": selected_runtime_context.get("feature_slice_id", ""),
+            "adapter": selected_runtime_context.get("adapter", ""),
+            "stack_confidence": selected_runtime_context.get("stack_confidence", ""),
+            "runtime_claim_level": selected_runtime_context.get("runtime_claim_level", ""),
+            "generated_files_expected": selected_runtime_context.get("files_to_create", []),
+            "safe_candidate_count": len(safe_runtime_candidates),
+            "allow_runtime_features": False,
+            "runtime_feature_mode": "shell_only",
+            "allow_partial_runtime": True,
+            "allow_complete_runtime": False,
         },
     },
     "steps": steps,
@@ -205,6 +222,37 @@ plan_md.extend([
     "## Why This Is Safe",
     "",
     "Supervisor dry-run only plans one issue, performs no GitHub writes, and prefers recipe-backed bounded work.",
+    "",
+    "## Runtime Feature Candidate",
+    "",
+    f"- Status: `{plan['selected_issue_context']['runtime_feature']['status']}`",
+    f"- Feature: `{plan['selected_issue_context']['runtime_feature']['feature_slice_id'] or 'none'}`",
+    "",
+    "## Adapter",
+    "",
+    f"`{plan['selected_issue_context']['runtime_feature']['adapter'] or 'none'}`",
+    "",
+    "## Runtime Claim Level",
+    "",
+    f"`{plan['selected_issue_context']['runtime_feature']['runtime_claim_level'] or 'none'}`",
+    "",
+    "## Generated Files Expected",
+    "",
+    "\n".join(f"- `{p}`" for p in plan['selected_issue_context']['runtime_feature']['generated_files_expected']) or "- None.",
+    "",
+    "## Why Safe / Why Refused",
+    "",
+    "Runtime generation is disabled by default. Safe candidates are visible for operator review only.",
+    "",
+    "```yaml",
+    "autonomy:",
+    "  worker:",
+    "    allow_runtime_features: false",
+    "    runtime_feature_mode: shell_only",
+    "    require_stack_confidence: 0.8",
+    "    allow_partial_runtime: true",
+    "    allow_complete_runtime: false",
+    "```",
     "",
     "## Expected Validation",
     "",

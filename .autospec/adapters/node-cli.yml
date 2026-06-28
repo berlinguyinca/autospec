@@ -1,0 +1,27 @@
+id: node-cli
+title: Node CLI
+stack_profiles:
+  - node-cli-tool
+status: enabled
+confidence_required: 0.8
+supported_feature_slices:
+  - playwright-viewport-tests
+  - report-export-shell
+allowed_paths:
+  - bin/**
+  - docs/**
+  - .autospec/**
+  - tests/**
+forbidden_paths:
+  - .github/workflows/**
+  - .env
+  - .env.*
+  - **/migrations/**
+  - package.json
+  - pyproject.toml
+validation:
+  focused_commands:
+    - bash scripts/autospec-verify-runtime-feature.sh --dry-run
+risk:
+  default_level: low
+  requires_human_guidance: false
