@@ -736,6 +736,29 @@ check_autospec_sweep_config_contract() {
     done
 }
 
+check_constitution_validation_contract() {
+    info "constitution/baseline local validation contract"
+    local validation_script="scripts/autospec-constitution-validate.sh"
+    local composition_script="scripts/autospec-baseline-compose.sh"
+    local validation_bats="tests/unit/test_constitution_validation.bats"
+    local composition_bats="tests/unit/test_baseline_composition.bats"
+    for script in "$validation_script" "$composition_script"; do
+        [ -f "$script" ] || fail "$script: required file missing"
+        [ -x "$script" ] || fail "$script: not executable"
+        bash -n "$script" || fail "$script: bash syntax error"
+    done
+    for bats_file in "$validation_bats" "$composition_bats"; do
+        [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
+    done
+    if command -v bats >/dev/null 2>&1; then
+        for bats_file in "$validation_bats" "$composition_bats"; do
+            info "  running: $bats_file"
+            bats "$bats_file" >/tmp/validate-constitution-validation.log 2>&1 \
+                || { cat /tmp/validate-constitution-validation.log >&2; fail "$bats_file: failed"; }
+        done
+    fi
+}
+
 check_autospec_fleet_scripts() {
     info "autospec-fleet scripts"
     local skill_dir="skills/autospec-fleet"
@@ -3012,6 +3035,7 @@ main() {
     check_docs_drift_gate_regen_conditional_parity
     check_worktree_ladder_assert_parity
     check_autospec_sweep_config_contract
+    check_constitution_validation_contract
     check_autospec_fleet_scripts
     check_fleet_gui_subcommand_lockstep
     check_team_personality_contract
