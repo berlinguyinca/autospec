@@ -13,23 +13,27 @@ write GitHub comments, create branches, merge PRs, or run scheduled automation.
 bash scripts/autospec-constitution-audit.sh
 ```
 
-The unified audit runs:
+The unified audit v2 runs:
 
-1. Constitution/baseline validation
-2. Baseline composition
+1. Policy source validation
+2. Policy source lockfile generation
 3. Digital Twin build
-4. Rule extraction
-5. Effective rule resolution
-6. Rule checks
-7. Constitutional gap report v1
-8. Maturity scoring
-9. Issue plan v2 generation
+4. Structured Baseline composition
+5. Structured-first rule extraction
+6. Effective rule resolution
+7. Rule checks
+8. Quality gate reporting
+9. Constitutional gap report v1
+10. Maturity scoring
+11. Issue plan v3 generation
+12. Policy compatibility reporting
 
 ## Rule Extraction
 
 Rules can come from structured YAML/JSON rule files or from Markdown doctrine
-heuristics. Structured rules are preferred. Markdown extraction is best-effort
-and evidence-scored; ambiguous doctrine becomes `manual_review`.
+heuristics. Structured rules are the primary source. Markdown extraction is
+best-effort fallback only and is lower confidence; ambiguous doctrine becomes
+`manual_review`.
 
 ## Effective Rules
 
@@ -55,12 +59,14 @@ metadata, MCP metadata, docs, tests, and repository inventory.
 production, enterprise, and autonomous maturity. v1 is percentage-based with
 blocking required-rule failures.
 
-## Issue Plan v2
+## Issue Plan v3
 
-`issue-plan-v2.{json,md}` and `.autospec/backlog/issues-v2/*.md` are local
-drafts only. They include source rule IDs, severity, category, evidence, missing
-evidence, acceptance criteria, validation expectations, and worker eligibility
-hints. No GitHub issues are created by this batch.
+`issue-plan-v3.{json,md}` and `.autospec/backlog/issues-v3/*.md` are local
+drafts only. They include source rule IDs, doctrine, baseline pack, source file,
+severity, maturity level, category, evidence, missing evidence, remediation
+hints, suggested labels, acceptance criteria, quality gates, risk, validation
+expectations, and metadata expectations. No GitHub issues are created by this
+batch.
 
 ## Difference From Heuristic Gap Reports
 
@@ -72,9 +78,15 @@ Constitution/Baseline repositories provide richer structured rule sidecars.
 ## Recommended Sequence
 
 ```bash
+bash scripts/autospec-validate-policy-sources.sh
+bash scripts/autospec-lock-policy-sources.sh
 bash scripts/autospec-build-digital-twin.sh
+bash scripts/autospec-baseline-compose.sh
 bash scripts/autospec-extract-constitution-rules.sh
 bash scripts/autospec-check-rules.sh
 bash scripts/autospec-constitutional-gap-v1.sh
+bash scripts/autospec-policy-compatibility.sh
 bash scripts/autospec-constitution-audit.sh
 ```
+
+See also: `docs/runbooks/POLICY_SOURCES.md`.

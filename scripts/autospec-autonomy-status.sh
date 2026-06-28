@@ -66,6 +66,9 @@ repeated = load(os.path.join(reports, "repeated-failures.json"), {"has_repeated_
 rule_checks = load(os.path.join(reports, "rule-check-results.json"), {"results": []})
 maturity = load(os.path.join(reports, "maturity-score.json"), {"levels": []})
 audit = load(os.path.join(reports, "constitution-audit.json"), {})
+policy_sources = load(os.path.join(state, "policy-sources.json"), {})
+policy_validation = load(os.path.join(reports, "policy-source-validation.json"), {})
+policy_compatibility = load(os.path.join(reports, "policy-compatibility.json"), {})
 
 promotions = [load(path, {}) for path in sorted(glob.glob(os.path.join(state, "promotions", "*.json")))]
 verifications = [load(path, {}) for path in sorted(glob.glob(os.path.join(state, "verifications", "*.json")))]
@@ -85,8 +88,12 @@ ready_to_run = not locked and not stopped and not budget_exhausted and not needs
 required_rule_failures = [r for r in rule_checks.get("results", []) if r.get("severity") == "required" and r.get("status") == "fail"]
 production_maturity = next((level for level in maturity.get("levels", []) if level.get("level") == "production"), {})
 issue_plan_v2 = os.path.join(reports, "issue-plan-v2.json")
+issue_plan_v3 = os.path.join(reports, "issue-plan-v3.json")
 issue_plan_v1 = os.path.join(reports, "issue-plan.json")
 issue_plan_v2_newer = os.path.exists(issue_plan_v2) and (not os.path.exists(issue_plan_v1) or os.path.getmtime(issue_plan_v2) >= os.path.getmtime(issue_plan_v1))
+issue_plan_v3_newer = os.path.exists(issue_plan_v3) and (not os.path.exists(issue_plan_v1) or os.path.getmtime(issue_plan_v3) >= os.path.getmtime(issue_plan_v1))
+lockfile = os.path.join(root, ".autospec", "policy-sources.lock.json")
+extraction = load(os.path.join(reports, "rule-extraction.json"), {})
 
 summary = {
     "managed_issues": managed,
@@ -122,11 +129,19 @@ report = {
     "rule_audit": {
         "fresh": bool(rule_checks.get("results")),
         "constitution_audit_status": audit.get("status", "unknown"),
+        "policy_source_status": policy_validation.get("status", "unknown"),
+        "policy_lockfile_present": os.path.exists(lockfile),
+        "structured_rules": extraction.get("structured_rules", 0),
+        "heuristic_rules": extraction.get("heuristic_rules", 0),
+        "policy_compatibility_status": policy_compatibility.get("status", "unknown"),
+        "policy_compatibility_warnings": len(policy_compatibility.get("findings", [])),
         "maturity_status": production_maturity.get("status", "unknown"),
         "maturity_score": production_maturity.get("score", 0.0),
         "top_failing_required_rules": [r.get("rule_id") for r in required_rule_failures[:5]],
         "expired_waivers": [f for f in load(os.path.join(reports, "rule-extraction.json"), {}).get("waiver_findings", []) if f.get("code") == "WAIVER_EXPIRED"],
         "issue_plan_v2_newer_than_v1": issue_plan_v2_newer,
+        "issue_plan_v3_newer_than_v1": issue_plan_v3_newer,
+        "latest_constitution_audit_v2": audit.get("generated_at", "unknown"),
     },
     "planned_backlog_items": len(issue_plan.get("issues", [])),
     "guide_skill_quick_commands": [
@@ -136,6 +151,8 @@ report = {
     ],
     "top_recommended_next_commands": [
         "bash scripts/autospec-constitution-audit.sh",
+        "bash scripts/autospec-validate-policy-sources.sh",
+        "bash scripts/autospec-policy-compatibility.sh",
         "bash scripts/autospec-build-digital-twin.sh",
         "bash scripts/autospec-autonomy-status.sh",
         "bash scripts/autospec-supervisor-loop.sh --dry-run --max-cycles 3",
@@ -185,9 +202,15 @@ md = [
     "| Check | Status |",
     "| --- | --- |",
     f"| Rule check freshness | {str(bool(rule_checks.get('results'))).lower()} |",
+    f"| Structured policy sources | constitution={policy_sources.get('constitution', {}).get('structured_available', False)} baselines={policy_sources.get('baselines', {}).get('structured_available', False)} |",
+    f"| Policy validation status | {policy_validation.get('status', 'unknown')} |",
+    f"| Policy lockfile | {'present' if os.path.exists(lockfile) else 'missing'} |",
+    f"| Structured vs heuristic rules | {extraction.get('structured_rules', 0)} / {extraction.get('heuristic_rules', 0)} |",
+    f"| Policy compatibility | {policy_compatibility.get('status', 'unknown')} ({len(policy_compatibility.get('findings', []))} findings) |",
     f"| Constitution audit status | {audit.get('status', 'unknown')} |",
     f"| Production maturity | {production_maturity.get('status', 'unknown')} ({production_maturity.get('score', 0.0)}) |",
     f"| Issue plan v2 newer than v1 | {str(issue_plan_v2_newer).lower()} |",
+    f"| Issue plan v3 newer than v1 | {str(issue_plan_v3_newer).lower()} |",
     "",
     "### Top Failing Required Rules",
     "",

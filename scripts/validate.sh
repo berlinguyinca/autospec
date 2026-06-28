@@ -768,6 +768,10 @@ check_constitution_validation_contract() {
     local impact_script="scripts/autospec-impact-analysis.sh"
     local drift_script="scripts/autospec-metadata-drift.sh"
     local constitution_rules_script="scripts/autospec-constitution-rules.py"
+    local load_policy_script="scripts/autospec-load-policy-sources.sh"
+    local validate_policy_script="scripts/autospec-validate-policy-sources.sh"
+    local lock_policy_script="scripts/autospec-lock-policy-sources.sh"
+    local compatibility_script="scripts/autospec-policy-compatibility.sh"
     local extract_rules_script="scripts/autospec-extract-constitution-rules.sh"
     local check_rules_script="scripts/autospec-check-rules.sh"
     local gap_v1_script="scripts/autospec-constitutional-gap-v1.sh"
@@ -783,22 +787,23 @@ check_constitution_validation_contract() {
     local local_control_bats="tests/unit/test_local_autonomy_control.bats"
     local digital_twin_bats="tests/unit/test_digital_twin.bats"
     local constitution_rules_bats="tests/unit/test_constitution_rules.bats"
+    local policy_sources_bats="tests/unit/test_policy_sources_v2.bats"
     [ -f "$constitution_rules_script" ] || fail "$constitution_rules_script: required file missing"
     [ -x "$constitution_rules_script" ] || fail "$constitution_rules_script: not executable"
     [ -f "$digital_twin_script" ] || fail "$digital_twin_script: required file missing"
     [ -x "$digital_twin_script" ] || fail "$digital_twin_script: not executable"
-    for script in "$validation_script" "$composition_script" "$metadata_script" "$baseline_gap_script" "$constitutional_gap_script" "$issue_plan_script" "$bot_state_script" "$dry_run_script" "$ensure_labels_script" "$publish_issues_script" "$sync_issues_script" "$worker_v1_script" "$verifier_script" "$promote_script" "$remediation_script" "$worker_one_script" "$publish_stuck_script" "$sync_guidance_script" "$supervisor_cycle_script" "$status_script" "$supervisor_loop_script" "$budget_script" "$repeated_failures_script" "$resume_script" "$guide_issue_script" "$build_twin_script" "$impact_script" "$drift_script" "$extract_rules_script" "$check_rules_script" "$gap_v1_script" "$audit_script"; do
+    for script in "$validation_script" "$composition_script" "$metadata_script" "$baseline_gap_script" "$constitutional_gap_script" "$issue_plan_script" "$bot_state_script" "$dry_run_script" "$ensure_labels_script" "$publish_issues_script" "$sync_issues_script" "$worker_v1_script" "$verifier_script" "$promote_script" "$remediation_script" "$worker_one_script" "$publish_stuck_script" "$sync_guidance_script" "$supervisor_cycle_script" "$status_script" "$supervisor_loop_script" "$budget_script" "$repeated_failures_script" "$resume_script" "$guide_issue_script" "$build_twin_script" "$impact_script" "$drift_script" "$extract_rules_script" "$check_rules_script" "$gap_v1_script" "$audit_script" "$load_policy_script" "$validate_policy_script" "$lock_policy_script" "$compatibility_script"; do
         [ -f "$script" ] || fail "$script: required file missing"
         [ -x "$script" ] || fail "$script: not executable"
         bash -n "$script" || fail "$script: bash syntax error"
     done
     python3 -m py_compile "$digital_twin_script" || fail "$digital_twin_script: Python syntax error"
     python3 -m py_compile "$constitution_rules_script" || fail "$constitution_rules_script: Python syntax error"
-    for bats_file in "$validation_bats" "$composition_bats" "$intelligence_bats" "$issue_plan_bats" "$publishing_bats" "$worker_v1_bats" "$verifier_bats" "$autonomy_pipeline_bats" "$local_control_bats" "$digital_twin_bats" "$constitution_rules_bats"; do
+    for bats_file in "$validation_bats" "$composition_bats" "$intelligence_bats" "$issue_plan_bats" "$publishing_bats" "$worker_v1_bats" "$verifier_bats" "$autonomy_pipeline_bats" "$local_control_bats" "$digital_twin_bats" "$constitution_rules_bats" "$policy_sources_bats"; do
         [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
     done
     if command -v bats >/dev/null 2>&1; then
-        for bats_file in "$validation_bats" "$composition_bats" "$intelligence_bats" "$issue_plan_bats" "$publishing_bats" "$worker_v1_bats" "$verifier_bats" "$autonomy_pipeline_bats" "$local_control_bats" "$digital_twin_bats" "$constitution_rules_bats"; do
+        for bats_file in "$validation_bats" "$composition_bats" "$intelligence_bats" "$issue_plan_bats" "$publishing_bats" "$worker_v1_bats" "$verifier_bats" "$autonomy_pipeline_bats" "$local_control_bats" "$digital_twin_bats" "$constitution_rules_bats" "$policy_sources_bats"; do
             info "  running: $bats_file"
             bats "$bats_file" >/tmp/validate-constitution-validation.log 2>&1 \
                 || { cat /tmp/validate-constitution-validation.log >&2; fail "$bats_file: failed"; }
