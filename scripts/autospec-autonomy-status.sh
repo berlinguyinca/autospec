@@ -118,6 +118,7 @@ report = {
         "autospec-guide: What command should I run next?",
     ],
     "top_recommended_next_commands": [
+        "bash scripts/autospec-build-digital-twin.sh",
         "bash scripts/autospec-autonomy-status.sh",
         "bash scripts/autospec-supervisor-loop.sh --dry-run --max-cycles 3",
         "bash scripts/autospec-supervisor-cycle.sh --dry-run --issue <number>",

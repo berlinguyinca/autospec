@@ -167,7 +167,7 @@ report = {
         "implementation_started": False,
         "network_required": False,
     },
-    "recommended_next_command": "bash scripts/autospec-autonomy-dry-run.sh --repo-root <repo>",
+    "recommended_next_command": "bash scripts/autospec-build-digital-twin.sh --repo-root <repo>",
 }
 write_json(json_path, report)
 
@@ -219,6 +219,7 @@ lines.extend([
     "## Recommended Next Command",
     "",
     "```bash",
+    "bash scripts/autospec-build-digital-twin.sh --repo-root <repo>",
     "bash scripts/autospec-autonomy-dry-run.sh --repo-root <repo>",
     "```",
     "",
