@@ -36,6 +36,8 @@ import sys
 root = os.path.realpath(sys.argv[1])
 reports = os.path.join(root, ".autospec", "reports")
 state = os.path.join(root, ".autospec", "state")
+run_lock = os.path.join(root, ".autospec", "run.lock")
+stop_flag = os.path.expanduser("~/.autospec/stop.flag")
 
 def load(path, default):
     try:
@@ -59,6 +61,8 @@ published = load(os.path.join(state, "published-issues.json"), {"issues": []})
 handover = load(os.path.join(state, "stuck-handovers.json"), {"handovers": []})
 supervisor = load(os.path.join(state, "supervisor-runs.json"), {"runs": []})
 issue_plan = load(os.path.join(reports, "issue-plan.json"), {"issues": []})
+budget = load(os.path.join(reports, "autonomy-budget.json"), {"overall_status": "unknown", "budgets": []})
+repeated = load(os.path.join(reports, "repeated-failures.json"), {"has_repeated_failures": False, "repeated_failures": []})
 
 promotions = [load(path, {}) for path in sorted(glob.glob(os.path.join(state, "promotions", "*.json")))]
 verifications = [load(path, {}) for path in sorted(glob.glob(os.path.join(state, "verifications", "*.json")))]
@@ -70,6 +74,11 @@ stuck = sum(1 for item in handover.get("handovers", []) if item.get("state") in 
 ready = sum(1 for item in handover.get("handovers", []) if item.get("state") == "ready-to-resume")
 guidance = sum(1 for item in handover.get("handovers", []) if item.get("guidance_detected") or item.get("state") == "ready-to-resume")
 blocked = sum(1 for item in verifications if item.get("verdict") in {"blocked", "needs_guidance"})
+locked = os.path.isdir(run_lock)
+stopped = os.path.exists(stop_flag)
+budget_exhausted = budget.get("overall_status") == "exhausted"
+needs_guidance = stuck > 0 or blocked > 0 or bool(repeated.get("has_repeated_failures"))
+ready_to_run = not locked and not stopped and not budget_exhausted and not needs_guidance
 
 summary = {
     "managed_issues": managed,
@@ -80,6 +89,11 @@ summary = {
     "blocked_items": blocked,
     "guidance_provided": guidance,
     "ready_to_resume": ready,
+    "ready_to_run": ready_to_run,
+    "stopped": stopped,
+    "locked": locked,
+    "budget_exhausted": budget_exhausted,
+    "needs_guidance": needs_guidance,
 }
 report = {
     "version": 1,
@@ -88,8 +102,24 @@ report = {
     "stuck_guidance_queue": handover.get("handovers", []),
     "pr_review_queue": promotions,
     "recent_supervisor_runs": supervisor.get("runs", [])[-5:],
+    "loop_readiness": {
+        "ready_to_run": ready_to_run,
+        "lock_status": "locked" if locked else "unlocked",
+        "stop_flag_status": "present" if stopped else "absent",
+        "budget_status": budget.get("overall_status", "unknown"),
+        "repeated_failures": repeated.get("has_repeated_failures", False),
+    },
+    "budget": budget,
+    "repeated_failures": repeated,
     "planned_backlog_items": len(issue_plan.get("issues", [])),
+    "guide_skill_quick_commands": [
+        "autospec-guide: What is autospec working on?",
+        "autospec-guide: What is stuck?",
+        "autospec-guide: What command should I run next?",
+    ],
     "top_recommended_next_commands": [
+        "bash scripts/autospec-autonomy-status.sh",
+        "bash scripts/autospec-supervisor-loop.sh --dry-run --max-cycles 3",
         "bash scripts/autospec-supervisor-cycle.sh --dry-run --issue <number>",
         "bash scripts/autospec-sync-guidance.sh --dry-run",
         "bash scripts/autospec-promote-pr.sh --dry-run --pr <number>",
@@ -106,6 +136,11 @@ cards = [
     ("Blocked items", blocked),
     ("Guidance provided", guidance),
     ("Ready to resume", ready),
+    ("Ready to run", int(ready_to_run)),
+    ("Stopped", int(stopped)),
+    ("Locked", int(locked)),
+    ("Budget exhausted", int(budget_exhausted)),
+    ("Needs guidance", int(needs_guidance)),
 ]
 md = [
     "# Autospec Autonomy Status",
@@ -115,6 +150,16 @@ md = [
     "| Metric | Count |",
     "| --- | ---: |",
     *[f"| {name} | {value} |" for name, value in cards],
+    "",
+    "## Loop Readiness",
+    "",
+    "| Check | Status |",
+    "| --- | --- |",
+    f"| Ready to run | {str(ready_to_run).lower()} |",
+    f"| Lock status | {'locked' if locked else 'unlocked'} |",
+    f"| Stop flag status | {'present' if stopped else 'absent'} |",
+    f"| Budget status | {budget.get('overall_status', 'unknown')} |",
+    f"| Repeated failures | {str(repeated.get('has_repeated_failures', False)).lower()} |",
     "",
     "## Current Active Work",
     "",
@@ -164,6 +209,32 @@ if supervisor.get("runs"):
 else:
     md.append("| none | none | none |")
 md += [
+    "",
+    "## Budget Status",
+    "",
+    "| Budget | Used | Limit | Status |",
+    "| --- | ---: | ---: | --- |",
+]
+for row in budget.get("budgets", []):
+    md.append(f"| {row.get('budget')} | {row.get('used')} | {row.get('limit')} | {row.get('status')} |")
+if not budget.get("budgets"):
+    md.append("| unknown | 0 | 0 | unknown |")
+md += [
+    "",
+    "## Repeated Failures",
+    "",
+    "| Kind | Subject | Count |",
+    "| --- | --- | ---: |",
+]
+for item in repeated.get("repeated_failures", []):
+    md.append(f"| {item.get('kind')} | {item.get('subject')} | {item.get('count')} |")
+if not repeated.get("repeated_failures"):
+    md.append("| none | none | 0 |")
+md += [
+    "",
+    "## Guide Skill Quick Commands",
+    "",
+    *[f"- `{cmd}`" for cmd in report["guide_skill_quick_commands"]],
     "",
     "## Top Recommended Next Commands",
     "",
