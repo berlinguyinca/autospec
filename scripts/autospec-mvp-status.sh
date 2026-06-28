@@ -68,8 +68,34 @@ def write_text(path, text):
 
 rules = load(os.path.join(state, "rule-check-results.json"), load(os.path.join(reports, "rule-check-results.json"), {"results": []}))
 published = load(os.path.join(state, "published-issues.json"), {"issues": []})
+preflight = load(os.path.join(reports, "preflight.json"), {})
+command_audit = load(os.path.join(reports, "command-audit.json"), {})
+state_validation = load(os.path.join(reports, "state-validation.json"), {})
+sensitive_audit = load(os.path.join(reports, "sensitive-output-audit.json"), {})
+mvp_smoke = load(os.path.join(reports, "mvp-smoke.json"), {})
+report_index = load(os.path.join(reports, "report-index.json"), {})
+recovery_status = load(os.path.join(reports, "recovery-status.json"), {})
+signals = {
+    "preflight": preflight.get("verdict", "unknown"),
+    "command_audit": "pass" if command_audit.get("summary", {}).get("commands_total", 0) else "unknown",
+    "state_validation": state_validation.get("status", "unknown"),
+    "sensitive_output_audit": sensitive_audit.get("status", "unknown"),
+    "mvp_smoke": mvp_smoke.get("verdict", "unknown"),
+    "report_index": "pass" if report_index.get("reports") else "unknown",
+    "recovery_status": "warn" if recovery_status.get("active_lock") else "pass" if recovery_status else "unknown",
+}
+blocking_values = {"blocked", "fail"}
+warning_values = {"warn", "pass_with_warnings", "needs_fixes", "unknown"}
+if any(value in blocking_values for value in signals.values()):
+    readiness = "MVP_BLOCKED"
+elif any(value in warning_values for value in signals.values()):
+    readiness = "MVP_READY_WITH_WARNINGS"
+else:
+    readiness = "MVP_READY"
 status = {
     "schema": 1,
+    "readiness": readiness,
+    "release_readiness_signals": signals,
     "engine_capabilities": {
         "policy_sources": exists(".autospec/policy-sources.lock.json") or exists(".autospec/state/policy-sources.json"),
         "digital_twin": exists(".autospec/state/digital-twin.json"),
@@ -151,6 +177,11 @@ md = "\n".join([
     "## Recommended next milestones",
     "",
     "\n".join(f"- {item}" for item in status["recommended_next_milestones"]),
+    "",
+    "## Release readiness signals",
+    "",
+    f"- Readiness: **{readiness}**",
+    "\n".join(f"- {key}: `{value}`" for key, value in signals.items()),
 ])
 write_text(os.path.join(reports, "mvp-status.md"), md)
 print("mvp status: wrote reports")

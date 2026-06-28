@@ -12,6 +12,98 @@ repo overview.
 
 Autospec works across **Claude Code**, **OpenCode**, and **Codex CLI**.
 
+## Autospec Constitution MVP
+
+Autospec now includes a local, operator-invoked Constitution MVP for turning
+structured Constitution and Baseline policy into repository intelligence,
+rule-audit reports, v3 backlog issues, and bounded autonomous implementation
+cycles.
+
+### What it does
+
+- Loads local `autospec-constitution` and `autospec-baselines` repositories.
+- Builds a Digital Twin and Knowledge Graph for the target repository.
+- Evaluates structured rules and quality gates.
+- Generates `issue-plan-v3` backlog drafts from failed rules.
+- Publishes structured backlog issues only when explicitly confirmed.
+- Runs bounded worker, verifier, promotion, and supervisor flows.
+- Onboards existing repositories and bootstraps new projects metadata-first.
+
+### What it does not do yet
+
+- It does not install GitHub Actions.
+- It does not enable scheduled automation.
+- It does not merge or approve its own PRs.
+- It does not automatically upgrade dependencies, run migrations, or change auth/security behavior.
+- AI/NLAI and product baseline scaffolds generate specs/issues, not full app features.
+
+### Required companion repos
+
+For structured policy mode, keep sibling local checkouts available:
+
+```text
+autospec/
+autospec-constitution/
+autospec-baselines/
+```
+
+### Local-only operation
+
+All autonomy is operator-invoked. Dry-run is the default. Confirmed writes require
+explicit `--confirm`. GitHub writes are limited to commands that clearly document
+confirmed mode.
+
+### First commands
+
+```bash
+bash scripts/autospec-preflight.sh
+bash scripts/autospec-start.sh --dry-run
+bash scripts/autospec-mvp-smoke.sh --dry-run
+```
+
+### Existing repo onboarding
+
+```bash
+bash scripts/autospec-onboard-existing-repo.sh --dry-run --profiles web,ai-platform
+bash scripts/autospec-onboard-existing-repo.sh --confirm --profiles web,ai-platform
+```
+
+### New project bootstrap
+
+```bash
+bash scripts/autospec-bootstrap-new-project.sh --dry-run --name example --profiles web,ai-platform --application-type web
+```
+
+### Constitution audit
+
+```bash
+bash scripts/autospec-constitution-audit.sh
+```
+
+### Publishing backlog issues
+
+```bash
+bash scripts/autospec-audit-to-backlog.sh --dry-run
+bash scripts/autospec-audit-to-backlog.sh --confirm
+```
+
+### One autonomous issue cycle
+
+```bash
+bash scripts/autospec-autonomy-status.sh
+bash scripts/autospec-supervisor-cycle.sh --dry-run --next
+bash scripts/autospec-supervisor-cycle.sh --confirm --next
+```
+
+### Safety guarantees
+
+- No GitHub Actions are installed by Autospec.
+- No scheduled automation is enabled.
+- All autonomy is operator-invoked.
+- Dry-run is the default.
+- Confirmed writes require explicit `--confirm`.
+- Autospec does not merge or approve its own PRs.
+
 ## Getting Started
 
 Pick the skill that matches where you are:

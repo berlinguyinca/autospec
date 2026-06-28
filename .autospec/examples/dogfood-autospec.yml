@@ -1,0 +1,24 @@
+constitution:
+  source: local
+  path: ../autospec-constitution
+  version: 0.1.0
+
+baselines:
+  source: local
+  path: ../autospec-baselines
+  profiles:
+    - internal-tool
+    - ai-platform
+    - testing
+
+application:
+  type: internal-tool
+  maturity_target: production
+
+autonomy:
+  supervisor:
+    enabled: true
+    default_mode: dry_run
+    max_issues_per_cycle: 1
+  worker:
+    allow_code_changes: false

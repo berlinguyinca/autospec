@@ -5,6 +5,14 @@ All commands are operator-invoked local commands. No GitHub Actions, cron, or sc
 | Command | Purpose | Dry-run | Confirm | Writes local files? | Writes GitHub? | Primary reports | Next command |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `scripts/autospec-start.sh` | Recommend the right entry flow | yes | accepted | reports only | no | `.autospec/reports/start-plan.md` | onboarding or bootstrap |
+| `scripts/autospec-preflight.sh` | Check local environment readiness | yes/default | n/a | reports | no | `.autospec/reports/preflight.md` | MVP smoke |
+| `scripts/autospec-mvp-smoke.sh` | Run safe local MVP smoke checks | yes/default | n/a | reports | no | `.autospec/reports/mvp-smoke.md` | fix blockers or MVP status |
+| `scripts/autospec-command-audit.sh` | Audit command consistency | yes/default | n/a | reports | no | `.autospec/reports/command-audit.md` | update command docs |
+| `scripts/autospec-report-index.sh` | Index generated reports | yes/default | n/a | reports | no | `.autospec/reports/REPORT_INDEX.md` | MVP status |
+| `scripts/autospec-validate-state.sh` | Validate generated state/report artifacts | yes/default | n/a | reports | no | `.autospec/reports/state-validation.md` | sensitive audit |
+| `scripts/autospec-sensitive-output-audit.sh` | Scan generated Autospec outputs for secrets | yes/default | n/a | reports | no | `.autospec/reports/sensitive-output-audit.md` | fix leaks |
+| `scripts/autospec-recovery-status.sh` | Show locks, runs, stuck handovers, and recovery path | yes/default | n/a | reports | no | `.autospec/reports/recovery-status.md` | resume/cleanup/status |
+| `scripts/autospec-clean-generated-reports.sh` | Clean generated report artifacts only | yes | yes | reports | no | `.autospec/reports/clean-generated-reports.md` | rerun reports |
 | `scripts/autospec-onboard-existing-repo.sh` | Read-first existing repo onboarding | yes | yes | metadata/reports | no | `.autospec/reports/onboarding-result.md` | `autospec-constitution-audit.sh` |
 | `scripts/autospec-bootstrap-new-project.sh` | Metadata-first new project bootstrap | yes | yes | metadata/specs | no | `.autospec/reports/bootstrap-result.md` | scaffold generators |
 | `scripts/autospec-constitution-audit.sh` | Structured policy audit | yes/default | n/a | reports/state | no | `.autospec/reports/constitution-audit.md` | `autospec-audit-to-backlog.sh` |
