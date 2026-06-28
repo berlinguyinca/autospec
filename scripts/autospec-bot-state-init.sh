@@ -15,7 +15,9 @@ Writes:
   .autospec/state/bot-control-plane.json
   .autospec/state/autonomous-backlog.json
   .autospec/state/control-labels.yml
+  .autospec/state/bot-state-machine.yml
   .autospec/reports/control-labels.md
+  .autospec/reports/bot-state-machine.md
   .autospec/templates/autonomous-issue.md
 EOF
 }
@@ -52,7 +54,9 @@ templates_dir = os.path.join(repo_root, ".autospec", "templates")
 control_path = os.path.join(state_dir, "bot-control-plane.json")
 backlog_path = os.path.join(state_dir, "autonomous-backlog.json")
 control_labels_path = os.path.join(state_dir, "control-labels.yml")
+bot_state_machine_path = os.path.join(state_dir, "bot-state-machine.yml")
 control_labels_report_path = os.path.join(reports_dir, "control-labels.md")
+bot_state_machine_report_path = os.path.join(reports_dir, "bot-state-machine.md")
 template_path = os.path.join(templates_dir, "autonomous-issue.md")
 issue_plan_path = os.path.join(reports_dir, "issue-plan.json")
 
@@ -255,6 +259,119 @@ control_labels = [
         "state_machine_effect": "Keeps item in backlog but deprioritizes until dependencies and primary work settle.",
     },
 ]
+bot_states = [
+    "candidate",
+    "claimed",
+    "active",
+    "paused",
+    "blocked",
+    "stuck",
+    "guidance-provided",
+    "ready-to-resume",
+    "completed",
+    "cancelled",
+]
+bot_transitions = [
+    {
+        "from": "candidate",
+        "to": "claimed",
+        "required_labels_before": ["autospec:managed", "autospec:discovered"],
+        "labels_to_add": [],
+        "labels_to_remove": [],
+        "required_evidence": ["issue draft exists in .autospec/backlog/issues", "issue appears in .autospec/reports/issue-plan.json"],
+        "human_action_required": False,
+    },
+    {
+        "from": "claimed",
+        "to": "active",
+        "required_labels_before": ["autospec:managed"],
+        "labels_to_add": ["autospec:active"],
+        "labels_to_remove": ["autospec:paused", "autospec:resume"],
+        "required_evidence": ["claim record exists", "dependencies are satisfied or explicitly deferred"],
+        "human_action_required": False,
+    },
+    {
+        "from": "active",
+        "to": "completed",
+        "required_labels_before": ["autospec:managed", "autospec:active"],
+        "labels_to_add": ["autospec:needs-review"],
+        "labels_to_remove": ["autospec:active", "autospec:blocked", "autospec:stuck", "autospec:resume"],
+        "required_evidence": ["validation evidence is attached", "required docs/tests are complete", "review gate is satisfied"],
+        "human_action_required": False,
+    },
+    {
+        "from": "active",
+        "to": "stuck",
+        "required_labels_before": ["autospec:managed", "autospec:active"],
+        "labels_to_add": ["autospec:stuck", "autospec:needs-guidance"],
+        "labels_to_remove": ["autospec:active", "autospec:resume"],
+        "required_evidence": ["repeated no-progress attempts are recorded", "blocker summary is attached"],
+        "human_action_required": True,
+    },
+    {
+        "from": "active",
+        "to": "blocked",
+        "required_labels_before": ["autospec:managed", "autospec:active"],
+        "labels_to_add": ["autospec:blocked"],
+        "labels_to_remove": ["autospec:active", "autospec:resume"],
+        "required_evidence": ["specific blocker is recorded", "next required external action is documented"],
+        "human_action_required": True,
+    },
+    {
+        "from": "active",
+        "to": "paused",
+        "required_labels_before": ["autospec:managed", "autospec:active"],
+        "labels_to_add": ["autospec:paused"],
+        "labels_to_remove": ["autospec:active", "autospec:resume"],
+        "required_evidence": ["pause request or stop sentinel is recorded"],
+        "human_action_required": True,
+    },
+    {
+        "from": "stuck",
+        "to": "guidance-provided",
+        "required_labels_before": ["autospec:managed", "autospec:stuck", "autospec:needs-guidance"],
+        "labels_to_add": ["autospec:guidance-provided"],
+        "labels_to_remove": ["autospec:needs-guidance"],
+        "required_evidence": ["operator guidance is recorded", "guidance references the stuck blocker"],
+        "human_action_required": True,
+    },
+    {
+        "from": "guidance-provided",
+        "to": "ready-to-resume",
+        "required_labels_before": ["autospec:managed", "autospec:guidance-provided"],
+        "labels_to_add": ["autospec:resume"],
+        "labels_to_remove": ["autospec:stuck"],
+        "required_evidence": ["guidance has been consumed into resume context"],
+        "human_action_required": False,
+    },
+    {
+        "from": "ready-to-resume",
+        "to": "claimed",
+        "required_labels_before": ["autospec:managed", "autospec:resume"],
+        "labels_to_add": [],
+        "labels_to_remove": ["autospec:resume", "autospec:guidance-provided", "autospec:paused", "autospec:blocked"],
+        "required_evidence": ["resume context exists", "dependencies are satisfied or explicitly deferred"],
+        "human_action_required": False,
+    },
+    {
+        "from": "blocked",
+        "to": "ready-to-resume",
+        "required_labels_before": ["autospec:managed", "autospec:blocked"],
+        "labels_to_add": ["autospec:resume"],
+        "labels_to_remove": ["autospec:blocked"],
+        "required_evidence": ["blocker resolution is recorded"],
+        "human_action_required": True,
+    },
+    {
+        "from": "paused",
+        "to": "ready-to-resume",
+        "required_labels_before": ["autospec:managed", "autospec:paused"],
+        "labels_to_add": ["autospec:resume"],
+        "labels_to_remove": ["autospec:paused"],
+        "required_evidence": ["resume request is recorded"],
+        "human_action_required": True,
+    },
+]
 ready = [
     {
         "number": issue.get("number"),
@@ -317,6 +434,55 @@ with open(control_labels_report_path, "w", encoding="utf-8") as fh:
     fh.write("\n".join(label_lines))
     fh.write("\n")
 
+with open(bot_state_machine_path, "w", encoding="utf-8") as fh:
+    fh.write("version: 1\n")
+    fh.write("states:\n")
+    for state in bot_states:
+        fh.write(f"  - {yaml_scalar(state)}\n")
+    fh.write("transitions:\n")
+    for transition in bot_transitions:
+        fh.write(f"  - from: {yaml_scalar(transition['from'])}\n")
+        fh.write(f"    to: {yaml_scalar(transition['to'])}\n")
+        fh.write("    required_labels_before:\n")
+        fh.write("\n".join(yaml_list(transition["required_labels_before"], 6)) + "\n")
+        fh.write("    labels_to_add:\n")
+        fh.write("\n".join(yaml_list(transition["labels_to_add"], 6)) + "\n")
+        fh.write("    labels_to_remove:\n")
+        fh.write("\n".join(yaml_list(transition["labels_to_remove"], 6)) + "\n")
+        fh.write("    required_evidence:\n")
+        fh.write("\n".join(yaml_list(transition["required_evidence"], 6)) + "\n")
+        fh.write(f"    human_action_required: {str(transition['human_action_required']).lower()}\n")
+
+state_machine_lines = [
+    "# Bot State Machine",
+    "",
+    "Local v0 state machine for Autospec-managed dry-run backlog items. This report is documentation only; it does not move issues or mutate labels.",
+    "",
+    "## States",
+    "",
+]
+for state in bot_states:
+    state_machine_lines.append(f"- `{state}`")
+state_machine_lines.extend([
+    "",
+    "## Transitions",
+    "",
+    "| From | To | Required labels before | Labels to add | Labels to remove | Required evidence | Human action required |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
+])
+for transition in bot_transitions:
+    state_machine_lines.append(
+        f"| `{transition['from']}` | `{transition['to']}` | "
+        f"{', '.join(transition['required_labels_before']) or 'none'} | "
+        f"{', '.join(transition['labels_to_add']) or 'none'} | "
+        f"{', '.join(transition['labels_to_remove']) or 'none'} | "
+        f"{'; '.join(transition['required_evidence']) or 'none'} | "
+        f"{str(transition['human_action_required']).lower()} |"
+    )
+with open(bot_state_machine_report_path, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(state_machine_lines))
+    fh.write("\n")
+
 template = """# {{title}}
 
 ## Control Plane
@@ -349,5 +515,6 @@ with open(template_path, "w", encoding="utf-8") as fh:
 print("bot state init: PASS")
 print("state: .autospec/state/bot-control-plane.json, .autospec/state/autonomous-backlog.json")
 print("labels: .autospec/state/control-labels.yml, .autospec/reports/control-labels.md")
+print("state machine: .autospec/state/bot-state-machine.yml, .autospec/reports/bot-state-machine.md")
 print("template: .autospec/templates/autonomous-issue.md")
 PY

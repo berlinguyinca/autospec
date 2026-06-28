@@ -287,6 +287,71 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "bot state initializer writes bot state machine" {
+  mkdir -p "$TEST_TMPDIR/repo"
+  write_reports "$TEST_TMPDIR/repo"
+  bash "$PLAN" --repo-root "$TEST_TMPDIR/repo" >/dev/null
+
+  bash "$BOT_STATE" --repo-root "$TEST_TMPDIR/repo" >/dev/null
+
+  [ -f "$TEST_TMPDIR/repo/.autospec/state/bot-state-machine.yml" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/reports/bot-state-machine.md" ]
+  run python3 - "$TEST_TMPDIR/repo/.autospec/state/bot-state-machine.yml" <<'PY'
+import sys
+import yaml
+data = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+expected_states = [
+    "candidate",
+    "claimed",
+    "active",
+    "paused",
+    "blocked",
+    "stuck",
+    "guidance-provided",
+    "ready-to-resume",
+    "completed",
+    "cancelled",
+]
+expected_transitions = [
+    ("candidate", "claimed"),
+    ("claimed", "active"),
+    ("active", "completed"),
+    ("active", "stuck"),
+    ("active", "blocked"),
+    ("active", "paused"),
+    ("stuck", "guidance-provided"),
+    ("guidance-provided", "ready-to-resume"),
+    ("ready-to-resume", "claimed"),
+    ("blocked", "ready-to-resume"),
+    ("paused", "ready-to-resume"),
+]
+required = ["required_labels_before", "labels_to_add", "labels_to_remove", "required_evidence", "human_action_required"]
+states = data.get("states", [])
+transitions = {(item.get("from"), item.get("to")): item for item in data.get("transitions", [])}
+missing = []
+for state in expected_states:
+    if state not in states:
+        missing.append(f"state:{state}")
+for edge in expected_transitions:
+    item = transitions.get(edge)
+    if not item:
+        missing.append(f"transition:{edge[0]}->{edge[1]}")
+        continue
+    for field in required:
+        if field not in item:
+            missing.append(f"{edge[0]}->{edge[1]}:{field}")
+if transitions[("stuck", "guidance-provided")]["human_action_required"] is not True:
+    missing.append("stuck->guidance-provided:human_action_required")
+if "autospec:active" not in transitions[("claimed", "active")]["labels_to_add"]:
+    missing.append("claimed->active:adds-active")
+print("\n".join(missing))
+sys.exit(1 if missing else 0)
+PY
+  [ "$status" -eq 0 ]
+  grep -q '| `candidate` | `claimed` |' "$TEST_TMPDIR/repo/.autospec/reports/bot-state-machine.md"
+  grep -q '| `stuck` | `guidance-provided` |' "$TEST_TMPDIR/repo/.autospec/reports/bot-state-machine.md"
+}
+
 @test "bot state initializer does not overwrite manual state unless requested" {
   mkdir -p "$TEST_TMPDIR/repo/.autospec/state" "$TEST_TMPDIR/repo/.autospec/reports"
   printf '{"mode":"manual"}\n' > "$TEST_TMPDIR/repo/.autospec/state/bot-control-plane.json"
