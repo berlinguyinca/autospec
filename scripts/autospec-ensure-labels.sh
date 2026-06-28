@@ -9,11 +9,13 @@ set -eu
 usage() {
     cat <<'EOF'
 Usage:
-  autospec-ensure-labels.sh [--repo-root <dir>] [--confirm] [--repo OWNER/REPO]
+  autospec-ensure-labels.sh [--repo-root <dir>] [--dry-run|--confirm] [--repo OWNER/REPO]
 
 Writes:
-  .autospec/reports/github-labels.json
-  .autospec/reports/github-labels.md
+  .autospec/reports/github-label-plan.json   (dry-run)
+  .autospec/reports/github-label-plan.md     (dry-run)
+  .autospec/reports/github-label-apply.json  (--confirm)
+  .autospec/reports/github-label-apply.md    (--confirm)
 EOF
 }
 
@@ -28,6 +30,7 @@ GH_REPO=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --repo-root) [ "$#" -ge 2 ] || die "--repo-root requires a value"; REPO_ROOT="$2"; shift 2 ;;
+        --dry-run) CONFIRM=0; shift ;;
         --confirm) CONFIRM=1; shift ;;
         --repo) [ "$#" -ge 2 ] || die "--repo requires OWNER/REPO"; GH_REPO="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -56,8 +59,8 @@ gh_repo = sys.argv[3]
 state_dir = os.path.join(repo_root, ".autospec", "state")
 reports_dir = os.path.join(repo_root, ".autospec", "reports")
 labels_path = os.path.join(state_dir, "control-labels.yml")
-json_report = os.path.join(reports_dir, "github-labels.json")
-md_report = os.path.join(reports_dir, "github-labels.md")
+json_report = os.path.join(reports_dir, "github-label-apply.json" if confirm else "github-label-plan.json")
+md_report = os.path.join(reports_dir, "github-label-apply.md" if confirm else "github-label-plan.md")
 
 COLORS = {
     "autospec:managed": "5319e7",
@@ -106,7 +109,22 @@ def run_gh(args):
     return completed.stdout.strip()
 
 
-def write_reports(mode, status, actions, errors):
+def manual_instruction(name, description, color):
+    repo_args = f"--repo {gh_repo} " if gh_repo else ""
+    return {
+        "label": name,
+        "command": f"gh {repo_args}label create {name} --color {color} --description {description!r} --force",
+        "description": description,
+        "color": color,
+    }
+
+
+def permission_error(text):
+    lowered = text.lower()
+    return any(token in lowered for token in ["permission", "403", "resource not accessible", "forbidden", "not authorized"])
+
+
+def write_reports(mode, status, actions, errors, manual_instructions):
     report = {
         "version": 1,
         "mode": mode,
@@ -114,6 +132,7 @@ def write_reports(mode, status, actions, errors):
         "source": ".autospec/state/control-labels.yml",
         "labels": actions,
         "errors": errors,
+        "manual_instructions": manual_instructions,
         "side_effects": {"github_api_calls": bool(confirm), "github_labels_written": bool(confirm and not errors)},
     }
     write_json(json_report, report)
@@ -123,15 +142,23 @@ def write_reports(mode, status, actions, errors):
         f"Status: **{status.upper()}**",
         f"Mode: `{mode}`",
         "",
-        "| Label | Action | Color | Description |",
-        "| --- | --- | --- | --- |",
+        "| Label | Action | Color | Description | Purpose | State-machine effect |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for item in actions:
-        lines.append(f"| `{item['name']}` | {item['action']} | `{item['color']}` | {item['description']} |")
+        lines.append(f"| `{item['name']}` | {item['action']} | `{item['color']}` | {item['description']} | {item['purpose']} | {item['state_machine_effect']} |")
     if errors:
         lines.extend(["", "## Errors", ""])
         for error in errors:
             lines.append(f"- {error}")
+    if manual_instructions:
+        lines.extend(["", "## Manual creation instructions", ""])
+        lines.append("The GitHub token/app/CLI could not create one or more labels. Create the missing labels manually with:")
+        lines.append("")
+        lines.append("```bash")
+        for item in manual_instructions:
+            lines.append(item["command"])
+        lines.append("```")
     with open(md_report, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
         fh.write("\n")
@@ -139,15 +166,18 @@ def write_reports(mode, status, actions, errors):
 
 if not os.path.isfile(labels_path):
     error = "missing .autospec/state/control-labels.yml; run scripts/autospec-bot-state-init.sh first"
-    write_reports("confirm" if confirm else "dry_run", "error", [], [error])
+    write_reports("confirm" if confirm else "dry_run", "error", [], [error], [])
     print(f"label provisioning: ERROR - {error}")
     sys.exit(2)
 
 labels = load_labels()
 actions = []
 errors = []
+manual_instructions = []
 for name, spec in labels:
-    description = str(spec.get("purpose", ""))[:100]
+    purpose = str(spec.get("purpose", ""))
+    state_machine_effect = str(spec.get("state_machine_effect", ""))
+    description = purpose[:100]
     color = COLORS.get(name, "ededed")
     action = "would_create_or_update"
     if confirm:
@@ -156,17 +186,30 @@ for name, spec in labels:
             action = "created_or_updated"
         except Exception as exc:
             action = "failed"
-            errors.append(f"{name}: {exc}")
-    actions.append({"name": name, "description": description, "color": color, "action": action})
+            error = f"{name}: {exc}"
+            errors.append(error)
+            if permission_error(error):
+                manual_instructions.append(manual_instruction(name, description, color))
+    actions.append({
+        "name": name,
+        "description": description,
+        "color": color,
+        "purpose": purpose,
+        "state_machine_effect": state_machine_effect,
+        "action": action,
+    })
 
 status = "fail" if errors else "pass"
 mode = "confirm" if confirm else "dry_run"
-write_reports(mode, status, actions, errors)
+write_reports(mode, status, actions, errors, manual_instructions)
 if errors:
     print("label provisioning: FAIL")
     for error in errors:
         print(f"- {error}")
     sys.exit(1)
 print("label provisioning: PASS" if confirm else "label provisioning: DRY-RUN")
-print("reports: .autospec/reports/github-labels.json, .autospec/reports/github-labels.md")
+if confirm:
+    print("reports: .autospec/reports/github-label-apply.json, .autospec/reports/github-label-apply.md")
+else:
+    print("reports: .autospec/reports/github-label-plan.json, .autospec/reports/github-label-plan.md")
 PY
