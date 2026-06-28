@@ -11,6 +11,7 @@ usage() {
     cat <<'EOF'
 Usage:
   autospec-worker-v1.sh [--repo-root <dir>] [--issue-id <id>] [--dry-run|--confirm]
+  autospec-worker-v1.sh [--repo-root <dir>] [--dry-run|--confirm] --remediate --pr <number> [--branch <name>]
 
 Inputs:
   .autospec/reports/issue-plan.json
@@ -36,14 +37,21 @@ die() {
 }
 
 REPO_ROOT="$(pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 ISSUE_ID=""
 CONFIRM=0
+REMEDIATE=0
+PR=""
+BRANCH=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --repo-root) [ "$#" -ge 2 ] || die "--repo-root requires a value"; REPO_ROOT="$2"; shift 2 ;;
         --issue-id) [ "$#" -ge 2 ] || die "--issue-id requires a value"; ISSUE_ID="$2"; shift 2 ;;
         --dry-run) CONFIRM=0; shift ;;
         --confirm) CONFIRM=1; shift ;;
+        --remediate) REMEDIATE=1; shift ;;
+        --pr) [ "$#" -ge 2 ] || die "--pr requires a value"; PR="$2"; shift 2 ;;
+        --branch) [ "$#" -ge 2 ] || die "--branch requires a value"; BRANCH="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown arg: $1" ;;
     esac
@@ -51,6 +59,15 @@ done
 
 [ -d "$REPO_ROOT" ] || die "--repo-root does not exist: $REPO_ROOT"
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
+
+if [ "$REMEDIATE" -eq 1 ]; then
+    set -- --repo-root "$REPO_ROOT"
+    [ "$CONFIRM" -eq 1 ] && set -- "$@" --confirm || set -- "$@" --dry-run
+    set -- "$@" --remediate
+    [ -n "$PR" ] && set -- "$@" --pr "$PR"
+    [ -n "$BRANCH" ] && set -- "$@" --branch "$BRANCH"
+    exec bash "$SCRIPT_DIR/autospec-worker-one.sh" "$@"
+fi
 
 python3 - "$REPO_ROOT" "$ISSUE_ID" "$CONFIRM" <<'PY'
 import fnmatch
