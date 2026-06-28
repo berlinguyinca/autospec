@@ -2,27 +2,30 @@
 
 ## Summary
 
-- Total requirements: 92
-- Status counts: {"deferred": 3, "documented_only": 1, "implemented": 54, "missing": 2, "partial": 1, "scaffolded": 24, "validated": 7}
+- Total requirements: 105
+- Status counts: {"deferred": 3, "documented_only": 1, "implemented": 67, "missing": 2, "partial": 1, "scaffolded": 24, "validated": 7}
 - runtime feature evidence is tracked through runtime adapters, feature slices, generation records, metadata sync, verification, worker v4, and runtime status reports.
+- runtime evidence is tracked through app launch profiles, Playwright evidence runs, screenshots/contact sheets, accessibility/visual audits, tutorials, mock AI/NLAI simulations, evidence bundles, and product quality scorecards.
 
 ## Coverage Matrix
 
 | Category | Total | Statuses |
 | --- | ---: | --- |
-| `ai_platform` | 9 | deferred: 1, implemented: 1, scaffolded: 7 |
-| `autonomous_development` | 22 | deferred: 1, documented_only: 1, implemented: 19, scaffolded: 1 |
+| `ai_platform` | 11 | deferred: 1, implemented: 3, scaffolded: 7 |
+| `autonomous_development` | 24 | deferred: 1, documented_only: 1, implemented: 21, scaffolded: 1 |
 | `diagnostics` | 4 | implemented: 1, scaffolded: 3 |
 | `digital_twin` | 7 | implemented: 5, missing: 2 |
 | `docs_tutorial_pdf` | 5 | implemented: 1, partial: 1, scaffolded: 3 |
+| `documentation` | 1 | implemented: 1 |
 | `engineering` | 8 | deferred: 1, implemented: 4, validated: 3 |
 | `nlai` | 4 | implemented: 1, scaffolded: 3 |
 | `policy` | 9 | implemented: 9 |
-| `product_baseline` | 10 | implemented: 7, scaffolded: 3 |
+| `product_baseline` | 11 | implemented: 8, scaffolded: 3 |
+| `reporting` | 1 | implemented: 1 |
 | `reporting_analytics_visualization` | 4 | implemented: 1, scaffolded: 2, validated: 1 |
 | `security` | 1 | implemented: 1 |
-| `testing` | 6 | implemented: 3, validated: 3 |
-| `ui_ux` | 3 | implemented: 1, scaffolded: 2 |
+| `testing` | 9 | implemented: 6, validated: 3 |
+| `ui_ux` | 6 | implemented: 4, scaffolded: 2 |
 
 ## Requirements
 
@@ -109,6 +112,19 @@
 | `runtime.status` | product_baseline | implemented | high | scripts/autospec-runtime-feature-status.sh |
 | `runtime.verification` | product_baseline | implemented | critical | scripts/autospec-verify-runtime-feature.sh |
 | `runtime.worker_v4` | autonomous_development | implemented | critical | scripts/autospec-worker-one.sh |
+| `runtime_evidence.accessibility` | ui_ux | implemented | high | scripts/autospec-accessibility-evidence-audit.sh |
+| `runtime_evidence.ai_nlai_simulation` | ai_platform | implemented | high | scripts/autospec-simulate-ai-nlai.sh |
+| `runtime_evidence.app_harness` | testing | implemented | high | scripts/autospec-app-harness.sh |
+| `runtime_evidence.app_launch_profiles` | testing | implemented | high | scripts/autospec-detect-app-launch.sh, schemas/autospec-state/app-launch-profile.schema.json |
+| `runtime_evidence.bundle` | autonomous_development | implemented | critical | scripts/autospec-build-evidence-bundle.sh |
+| `runtime_evidence.contact_sheets` | ui_ux | implemented | high | scripts/autospec-generate-screenshot-contact-sheet.sh |
+| `runtime_evidence.pdf_reports` | reporting | implemented | medium | scripts/autospec-pdf-artifact-plan.sh, scripts/autospec-generate-report-artifacts.sh, scripts/autospec-validate-report-artifact.sh |
+| `runtime_evidence.playwright_runner` | testing | implemented | high | scripts/autospec-run-playwright-evidence.sh |
+| `runtime_evidence.scorecard_status` | product_baseline | implemented | high | scripts/autospec-product-quality-scorecard.sh, scripts/autospec-runtime-evidence-status.sh |
+| `runtime_evidence.token_usage` | ai_platform | implemented | high | scripts/autospec-token-usage-evidence.sh |
+| `runtime_evidence.tutorials` | documentation | implemented | medium | scripts/autospec-generate-tutorial-artifacts.sh |
+| `runtime_evidence.visual_polish` | ui_ux | implemented | high | scripts/autospec-visual-polish-audit.sh |
+| `runtime_evidence.worker_v5_verifier_v6_supervisor_v5` | autonomous_development | implemented | critical | scripts/autospec-worker-one.sh, scripts/autospec-verify-worker-pr.sh, scripts/autospec-supervisor-cycle.sh |
 | `security.no_auto_auth_migrations` | engineering | deferred | critical | docs/KNOWN_LIMITATIONS.md |
 | `security.privacy_audit` | security | implemented | high | scripts/autospec-security-privacy-audit.sh, .autospec/reports/security-privacy-audit.json |
 | `target_app.full_ai_runtime` | ai_platform | deferred | high | docs/KNOWN_LIMITATIONS.md |

@@ -18,7 +18,7 @@ Target-App Runtime Implementers v1 now supports recognized-stack shell/partial s
 
 ## Phase 5 — UI visual generation and review
 
-Add stronger visual review and generation workflows.
+Runtime Evidence & Product Quality Automation v1 provides screenshot contact sheets, heuristic visual polish audits, accessibility evidence, tutorials, PDF/report plans, mock AI/NLAI simulations, and evidence bundles. Future work should add stronger human-in-the-loop visual review and richer product QA only after the local evidence layer is stable.
 
 ## Phase 6 — Dependency and modernization automation
 

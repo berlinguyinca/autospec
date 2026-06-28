@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -583,6 +585,28 @@ def worker_runtime(root: Path, feature_id: str, issue: str, confirm: bool) -> in
     ])
     write_text(reports(root) / "worker-runtime-feature-result.md", md)
     write_text(reports(root) / "worker-pr-body.md", md)
+    if code == 0:
+        evidence_helper = Path(__file__).with_name("autospec-evidence-v1-lib.py")
+        if evidence_helper.exists():
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(evidence_helper),
+                    "--repo-root",
+                    str(root),
+                    "--command",
+                    "worker-evidence",
+                    "--issue",
+                    issue,
+                    "--feature",
+                    feature_id,
+                ],
+                cwd=str(root),
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
     return code
 
 
@@ -592,7 +616,8 @@ def runtime_status(root: Path) -> int:
     generations = [load_json(path, {}) for path in sorted((state(root) / "runtime-generations").glob("*.json"))]
     available = [a for a in adapters if a.get("match_status") == "available"]
     blocked = [f for f in features if not any(f["id"] in a.get("supported_feature_slices", []) for a in available)]
-    payload = {"schema": 1, "supported_adapters": [a["id"] for a in available], "detected_stack": stack_profile(root).get("primary_profile", {}), "safe_feature_slices": [f["id"] for f in features if f not in blocked], "generated_runtime_features": generations, "blocked_runtime_features": [f["id"] for f in blocked]}
+    runtime_evidence = load_json(reports(root) / "runtime-evidence-status.json", {})
+    payload = {"schema": 1, "supported_adapters": [a["id"] for a in available], "detected_stack": stack_profile(root).get("primary_profile", {}), "safe_feature_slices": [f["id"] for f in features if f not in blocked], "generated_runtime_features": generations, "blocked_runtime_features": [f["id"] for f in blocked], "runtime_evidence_status": runtime_evidence.get("summary", runtime_evidence.get("status", "unknown"))}
     write_json(reports(root) / "runtime-feature-status.json", payload)
     write_text(reports(root) / "runtime-feature-status.md", "\n".join([
         "# Runtime Feature Status",
@@ -639,7 +664,8 @@ def runtime_status(root: Path) -> int:
         "",
         "## Test/evidence status",
         "",
-        "- See Playwright generation reports.",
+        f"- Runtime evidence status: `{payload['runtime_evidence_status']}`",
+        "- See Playwright generation and runtime evidence reports.",
         "",
         "## Metadata sync status",
         "",

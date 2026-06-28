@@ -243,6 +243,16 @@ runtime_generation = load_json(os.path.join(reports_dir, "runtime-generation-res
 runtime_verification = load_json(os.path.join(reports_dir, "runtime-feature-verification.json"), {})
 runtime_metadata_sync = load_json(os.path.join(reports_dir, "runtime-metadata-sync.json"), {})
 playwright_generation = load_json(os.path.join(reports_dir, "playwright-generation-result.json"), {})
+playwright_evidence_run = load_json(os.path.join(reports_dir, "playwright-evidence-run.json"), {})
+screenshot_contact_sheet = load_json(os.path.join(reports_dir, "screenshot-contact-sheet.json"), {})
+visual_polish_audit = load_json(os.path.join(reports_dir, "visual-polish-audit.json"), {})
+accessibility_evidence_audit = load_json(os.path.join(reports_dir, "accessibility-evidence-audit.json"), {})
+tutorial_artifacts = load_json(os.path.join(reports_dir, "tutorial-artifacts.json"), {})
+pdf_artifact_plan = load_json(os.path.join(reports_dir, "pdf-artifact-plan.json"), {})
+report_artifact_generation = load_json(os.path.join(reports_dir, "report-artifact-generation.json"), {})
+ai_nlai_simulation = load_json(os.path.join(reports_dir, "ai-nlai-simulation.json"), {})
+token_usage_evidence = load_json(os.path.join(reports_dir, "token-usage-evidence.json"), {})
+evidence_bundle = load_json(os.path.join(reports_dir, "evidence-bundle.json"), {})
 patch_plan_data = load_json(os.path.join(reports_dir, "patch-plan.json"), {})
 stack_profile = load_json(os.path.join(state_dir, "stack-profile.json"), load_json(os.path.join(reports_dir, "stack-profile.json"), {}))
 rule_recheck = load_json(os.path.join(reports_dir, "rule-recheck.json"), {})
@@ -484,6 +494,13 @@ runtime_claim_honesty = {"status": "not_required", "summary": "No runtime claim 
 ui_ux_evidence = {"status": "not_required", "summary": "No UI runtime shell was generated.", "evidence": []}
 playwright_evidence_review = {"status": "not_required", "summary": "No Playwright runtime evidence was provided.", "evidence": []}
 metadata_synchronization = {"status": "not_required", "summary": "No runtime metadata sync artifact was provided.", "evidence": []}
+evidence_bundle_review = {"status": "not_required", "summary": "No runtime/UI/AI/reporting evidence bundle was required.", "evidence": []}
+screenshot_evidence_review = {"status": "not_required", "summary": "No screenshot evidence was required.", "evidence": []}
+accessibility_evidence_review = {"status": "not_required", "summary": "No accessibility evidence was required.", "evidence": []}
+tutorial_pdf_report_evidence = {"status": "not_required", "summary": "No tutorial/PDF/report evidence was required.", "evidence": []}
+ai_nlai_simulation_evidence = {"status": "not_required", "summary": "No AI/NLAI simulation evidence was required.", "evidence": []}
+token_usage_evidence_review = {"status": "not_required", "summary": "No token usage evidence was required.", "evidence": []}
+evidence_gaps = {"status": "pass", "summary": "No evidence gaps detected.", "evidence": []}
 
 if worker_recipe_execution:
     recipe_id = worker_recipe_execution.get("recipe_id") or worker_recipe_execution.get("recipe", {}).get("id", "")
@@ -597,6 +614,64 @@ if runtime_generation:
     }
     dimensions.append(dimension("runtime_metadata_sync", metadata_synchronization["status"], metadata_synchronization["summary"], metadata_synchronization["evidence"], "Run autospec-sync-runtime-metadata or document skip rationale." if not runtime_metadata_sync else ""))
 
+evidence_required = bool(runtime_generation) or any(token in "\n".join([pr_body, packet_md, json.dumps(source_issue)]).lower() for token in ["ui", "runtime", "ai", "nlai", "report", "dashboard"])
+bundle_secret_findings = evidence_bundle.get("findings", []) if isinstance(evidence_bundle.get("findings"), list) else []
+bundle_has_secret = any("secret" in str(item).lower() for item in bundle_secret_findings)
+if evidence_required:
+    evidence_bundle_review = {
+        "status": "fail" if bundle_has_secret else "pass" if evidence_bundle else "warn",
+        "summary": "Evidence bundle exists and is secret-clean." if evidence_bundle and not bundle_has_secret else "Evidence bundle contains secret-like content." if bundle_has_secret else "Evidence bundle is missing for runtime/UI/AI/reporting work.",
+        "evidence": [f"bundle={bool(evidence_bundle)}", *[str(item) for item in bundle_secret_findings[:5]]],
+    }
+    dimensions.append(dimension("evidence_bundle_review", evidence_bundle_review["status"], evidence_bundle_review["summary"], evidence_bundle_review["evidence"], "Build an Autospec evidence bundle or remove secret-like evidence content." if evidence_bundle_review["status"] != "pass" else ""))
+
+    screenshot_sources = []
+    if playwright_evidence_run:
+        screenshot_sources.extend(playwright_evidence_run.get("screenshots", []) if isinstance(playwright_evidence_run.get("screenshots"), list) else [])
+    if screenshot_contact_sheet:
+        screenshot_sources.extend(screenshot_contact_sheet.get("source_screenshots", []) if isinstance(screenshot_contact_sheet.get("source_screenshots"), list) else [])
+    screenshot_evidence_review = {
+        "status": "pass" if screenshot_sources or screenshot_contact_sheet else "warn",
+        "summary": "Screenshot/contact-sheet evidence is present." if screenshot_sources or screenshot_contact_sheet else "Screenshot/contact-sheet evidence is missing or not applicable.",
+        "evidence": screenshot_sources[:10],
+    }
+    dimensions.append(dimension("screenshot_evidence", screenshot_evidence_review["status"], screenshot_evidence_review["summary"], screenshot_evidence_review["evidence"], "Run Playwright evidence and contact-sheet generation, or document why unavailable." if screenshot_evidence_review["status"] != "pass" else ""))
+
+    accessibility_evidence_review = {
+        "status": "pass" if accessibility_evidence_audit else "warn",
+        "summary": "Accessibility evidence audit exists." if accessibility_evidence_audit else "Accessibility evidence audit is missing.",
+        "evidence": accessibility_evidence_audit.get("evidence", []) if isinstance(accessibility_evidence_audit.get("evidence"), list) else [],
+    }
+    dimensions.append(dimension("accessibility_evidence", accessibility_evidence_review["status"], accessibility_evidence_review["summary"], accessibility_evidence_review["evidence"], "Run autospec-accessibility-evidence-audit or create an adoption issue." if not accessibility_evidence_audit else ""))
+
+    tutorial_pdf_report_evidence = {
+        "status": "pass" if tutorial_artifacts or pdf_artifact_plan or report_artifact_generation else "warn",
+        "summary": "Tutorial/PDF/report artifact evidence is present." if tutorial_artifacts or pdf_artifact_plan or report_artifact_generation else "Tutorial/PDF/report artifact evidence is missing or not applicable.",
+        "evidence": [name for name, data in [("tutorial", tutorial_artifacts), ("pdf", pdf_artifact_plan), ("report", report_artifact_generation)] if data],
+    }
+    dimensions.append(dimension("tutorial_pdf_report_evidence", tutorial_pdf_report_evidence["status"], tutorial_pdf_report_evidence["summary"], tutorial_pdf_report_evidence["evidence"], "Generate tutorial, PDF, or report artifact plans for user-facing/reporting work." if tutorial_pdf_report_evidence["status"] != "pass" else ""))
+
+    ai_text = "\n".join([pr_body, packet_md, json.dumps(runtime_generation)])
+    ai_related = bool(re.search(r"\b(ai|nlai|rag|token|mcp|model|provider|assistant)\b", ai_text, re.I))
+    if ai_related:
+        ai_status = ai_nlai_simulation.get("status", "")
+        ai_nlai_simulation_evidence = {
+            "status": "pass" if ai_status in {"simulated_pass", "simulated_warn"} else "fail" if ai_related else "not_required",
+            "summary": "AI/NLAI mock simulation evidence exists." if ai_status else "AI/NLAI runtime claim lacks mock simulation evidence.",
+            "evidence": [f"scenario={ai_nlai_simulation.get('scenario', 'missing')}", f"status={ai_status or 'missing'}"],
+        }
+        dimensions.append(dimension("ai_nlai_simulation_evidence", ai_nlai_simulation_evidence["status"], ai_nlai_simulation_evidence["summary"], ai_nlai_simulation_evidence["evidence"], "Run autospec-simulate-ai-nlai with mock-only evidence before claiming AI/NLAI runtime behavior." if ai_nlai_simulation_evidence["status"] != "pass" else ""))
+
+        token_usage_evidence_review = {
+            "status": "pass" if token_usage_evidence else "warn",
+            "summary": "Token usage evidence plan exists." if token_usage_evidence else "Token usage evidence plan is missing for AI-related work.",
+            "evidence": token_usage_evidence.get("missing", []) if isinstance(token_usage_evidence.get("missing"), list) else [],
+        }
+        dimensions.append(dimension("token_usage_evidence", token_usage_evidence_review["status"], token_usage_evidence_review["summary"], token_usage_evidence_review["evidence"], "Run autospec-token-usage-evidence for AI multi-user/token-cost claims." if not token_usage_evidence else ""))
+
+    gaps = [item["dimension"] for item in dimensions if item["dimension"] in {"evidence_bundle_review", "screenshot_evidence", "accessibility_evidence", "tutorial_pdf_report_evidence", "ai_nlai_simulation_evidence", "token_usage_evidence"} and item["status"] in {"fail", "warn", "unknown"}]
+    evidence_gaps = {"status": "fail" if any(item["dimension"] == "ai_nlai_simulation_evidence" and item["status"] == "fail" for item in dimensions) or bundle_has_secret else "warn" if gaps else "pass", "summary": "Evidence gaps require reviewer attention." if gaps else "Evidence bundle review found no blocking gaps.", "evidence": gaps}
+
 statuses = {item["dimension"]: item["status"] for item in dimensions}
 if statuses.get("forbidden_paths") == "fail" or statuses.get("risk_classification") == "fail":
     verdict = "blocked"
@@ -643,6 +718,13 @@ report = {
     "ui_ux_evidence": ui_ux_evidence,
     "playwright_evidence": playwright_evidence_review,
     "metadata_synchronization": metadata_synchronization,
+    "evidence_bundle_review": evidence_bundle_review,
+    "screenshot_evidence": screenshot_evidence_review,
+    "accessibility_evidence": accessibility_evidence_review,
+    "tutorial_pdf_report_evidence": tutorial_pdf_report_evidence,
+    "ai_nlai_simulation_evidence": ai_nlai_simulation_evidence,
+    "token_usage_evidence": token_usage_evidence_review,
+    "evidence_gaps": evidence_gaps,
     "acceptance_criteria": criterion_rows,
     "required_actions": required_actions,
     "side_effects": {"github_comment": bool(confirm and pr_arg), "approved": False, "merged": False, "pushed": False},
@@ -788,6 +870,41 @@ md = "\n".join([
     "",
     f"- Status: `{metadata_synchronization['status']}`",
     f"- Summary: {metadata_synchronization['summary']}",
+    "",
+    "## Evidence Bundle Review",
+    "",
+    f"- Status: `{evidence_bundle_review['status']}`",
+    f"- Summary: {evidence_bundle_review['summary']}",
+    "",
+    "## Screenshot Evidence",
+    "",
+    f"- Status: `{screenshot_evidence_review['status']}`",
+    f"- Summary: {screenshot_evidence_review['summary']}",
+    "",
+    "## Accessibility Evidence",
+    "",
+    f"- Status: `{accessibility_evidence_review['status']}`",
+    f"- Summary: {accessibility_evidence_review['summary']}",
+    "",
+    "## Tutorial/PDF/Report Evidence",
+    "",
+    f"- Status: `{tutorial_pdf_report_evidence['status']}`",
+    f"- Summary: {tutorial_pdf_report_evidence['summary']}",
+    "",
+    "## AI/NLAI Simulation Evidence",
+    "",
+    f"- Status: `{ai_nlai_simulation_evidence['status']}`",
+    f"- Summary: {ai_nlai_simulation_evidence['summary']}",
+    "",
+    "## Token Usage Evidence",
+    "",
+    f"- Status: `{token_usage_evidence_review['status']}`",
+    f"- Summary: {token_usage_evidence_review['summary']}",
+    "",
+    "## Evidence Gaps",
+    "",
+    f"- Status: `{evidence_gaps['status']}`",
+    f"- Summary: {evidence_gaps['summary']}",
     "",
     "## Rule Recheck",
     "",

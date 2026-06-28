@@ -98,6 +98,9 @@ runtime_plan = load(os.path.join(reports, "runtime-implementation-plan.json"), l
 runtime_candidates = runtime_plan.get("plans", []) if isinstance(runtime_plan, dict) else []
 safe_runtime_candidates = [item for item in runtime_candidates if item.get("status") in {"safe_to_generate", "safe_shell_only"}]
 selected_runtime_context = safe_runtime_candidates[0] if safe_runtime_candidates else (runtime_candidates[0] if runtime_candidates else {})
+runtime_evidence_status = load(os.path.join(reports, "runtime-evidence-status.json"), {})
+playwright_evidence_run = load(os.path.join(reports, "playwright-evidence-run.json"), {})
+evidence_bundle = load(os.path.join(reports, "evidence-bundle.json"), {})
 rule_ids = selected_context.get("rule_ids") or selected_context.get("source_rule_ids") or []
 quality_gate_ids = selected_context.get("quality_gate_ids") or selected_context.get("quality_gates") or []
 risk = selected_context.get("risk", {}) if isinstance(selected_context.get("risk", {}), dict) else {}
@@ -158,6 +161,16 @@ plan = {
             "runtime_feature_mode": "shell_only",
             "allow_partial_runtime": True,
             "allow_complete_runtime": False,
+        },
+        "evidence_readiness": {
+            "playwright_available": bool(playwright_evidence_run) or os.path.exists(os.path.join(root, "playwright.config.ts")) or os.path.exists(os.path.join(root, "playwright.config.js")),
+            "screenshots_possible": bool(playwright_evidence_run.get("screenshots")) if isinstance(playwright_evidence_run, dict) else False,
+            "tutorial_artifacts_possible": True,
+            "ai_nlai_simulation_possible": True,
+            "token_usage_evidence_possible": True,
+            "evidence_bundle_required": bool(selected_runtime_context.get("feature_slice_id")),
+            "evidence_bundle_present": bool(evidence_bundle),
+            "evidence_risk": "low" if runtime_evidence_status else "unknown",
         },
     },
     "steps": steps,
@@ -253,6 +266,17 @@ plan_md.extend([
     "    allow_partial_runtime: true",
     "    allow_complete_runtime: false",
     "```",
+    "",
+    "## Evidence Readiness",
+    "",
+    f"- Playwright available: `{str(plan['selected_issue_context']['evidence_readiness']['playwright_available']).lower()}`",
+    f"- Screenshots possible: `{str(plan['selected_issue_context']['evidence_readiness']['screenshots_possible']).lower()}`",
+    f"- Tutorial artifacts possible: `{str(plan['selected_issue_context']['evidence_readiness']['tutorial_artifacts_possible']).lower()}`",
+    f"- AI/NLAI simulation possible: `{str(plan['selected_issue_context']['evidence_readiness']['ai_nlai_simulation_possible']).lower()}`",
+    f"- Token usage evidence possible: `{str(plan['selected_issue_context']['evidence_readiness']['token_usage_evidence_possible']).lower()}`",
+    f"- Evidence bundle required: `{str(plan['selected_issue_context']['evidence_readiness']['evidence_bundle_required']).lower()}`",
+    f"- Evidence bundle present: `{str(plan['selected_issue_context']['evidence_readiness']['evidence_bundle_present']).lower()}`",
+    f"- Evidence risk: `{plan['selected_issue_context']['evidence_readiness']['evidence_risk']}`",
     "",
     "## Expected Validation",
     "",

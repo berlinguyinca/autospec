@@ -24,6 +24,8 @@ The engine loads local policy sources, validates them, locks reproducible inputs
 
 The engine also runs doctrine audits for architecture governance, UI/UX, Playwright evidence, documentation artifacts, reporting/analytics, AI platform, NLAI, diagnostics, dependency governance, modernization planning, and security/privacy. These audits are local, heuristic, evidence-based, and produce reports plus local backlog drafts without GitHub writes.
 
+Runtime Evidence & Product Quality Automation adds local proof artifacts for generated target-app slices: app launch profiles, confirm-only app harness runs, Playwright evidence, responsive screenshots/contact sheets, visual polish audits, accessibility evidence, tutorial artifacts, PDF/report artifact plans, mock-only AI/NLAI simulations, token usage evidence, evidence bundles, and product quality scorecards. These are operator-invoked and never install dependencies or call external AI providers by default.
+
 ## Digital Twin
 
 The Digital Twin summarizes repository inventory, technologies, capabilities, surfaces, settings, permissions, AI/MCP indicators, domain model, workflow map, knowledge graph, impact analysis, and metadata drift.
@@ -67,6 +69,8 @@ Diagnostics expectations include health, logs, metrics/traces, frontend white-sc
 ## Testing/tutorial/PDF/reporting
 
 Testing doctrine includes unit, integration, contract, e2e, visual, accessibility, performance, migration, deterministic tests, focused validation, and evidence capture. Tutorials, screenshots, PDF guides, report formatting, and documentation drift detection are represented as rules and target-repo scaffolds.
+
+Runtime evidence reports must separate proof from plans: Playwright evidence requires existing Playwright tooling, PDF generation requires existing PDF tooling, visual polish is heuristic, accessibility evidence is not certification, and AI/NLAI simulations are mock-only unless an operator explicitly configures safe provider calls outside the default model.
 
 ## UI/UX
 
