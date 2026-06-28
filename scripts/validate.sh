@@ -740,18 +740,22 @@ check_constitution_validation_contract() {
     info "constitution/baseline local validation contract"
     local validation_script="scripts/autospec-constitution-validate.sh"
     local composition_script="scripts/autospec-baseline-compose.sh"
+    local metadata_script="scripts/autospec-discover-metadata.sh"
+    local baseline_gap_script="scripts/autospec-baseline-gap.sh"
+    local constitutional_gap_script="scripts/autospec-constitutional-gap.sh"
     local validation_bats="tests/unit/test_constitution_validation.bats"
     local composition_bats="tests/unit/test_baseline_composition.bats"
-    for script in "$validation_script" "$composition_script"; do
+    local intelligence_bats="tests/unit/test_repository_intelligence.bats"
+    for script in "$validation_script" "$composition_script" "$metadata_script" "$baseline_gap_script" "$constitutional_gap_script"; do
         [ -f "$script" ] || fail "$script: required file missing"
         [ -x "$script" ] || fail "$script: not executable"
         bash -n "$script" || fail "$script: bash syntax error"
     done
-    for bats_file in "$validation_bats" "$composition_bats"; do
+    for bats_file in "$validation_bats" "$composition_bats" "$intelligence_bats"; do
         [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
     done
     if command -v bats >/dev/null 2>&1; then
-        for bats_file in "$validation_bats" "$composition_bats"; do
+        for bats_file in "$validation_bats" "$composition_bats" "$intelligence_bats"; do
             info "  running: $bats_file"
             bats "$bats_file" >/tmp/validate-constitution-validation.log 2>&1 \
                 || { cat /tmp/validate-constitution-validation.log >&2; fail "$bats_file: failed"; }
