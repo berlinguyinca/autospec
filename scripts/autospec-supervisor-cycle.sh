@@ -6,7 +6,7 @@ set -eu
 usage() {
     cat <<'EOF'
 Usage:
-  autospec-supervisor-cycle.sh [--repo-root DIR] [--dry-run|--confirm] [--repo OWNER/REPO] [--issue NUMBER]
+  autospec-supervisor-cycle.sh [--repo-root DIR] [--dry-run|--confirm] [--repo OWNER/REPO] [--issue NUMBER] [--next]
 EOF
 }
 
@@ -28,6 +28,7 @@ while [ "$#" -gt 0 ]; do
         --confirm) CONFIRM=1; shift ;;
         --repo) GH_REPO="$2"; shift 2 ;;
         --issue) ISSUE="$2"; shift 2 ;;
+        --next) shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown arg: $1" ;;
     esac
@@ -89,6 +90,10 @@ def select_issue():
     return "1", {}
 
 selected_issue, selected_context = select_issue()
+recipe_plan = load(os.path.join(reports, "rule-to-recipe-plan.json"), load(os.path.join(state, "rule-to-recipe-plan.json"), {}))
+recipe_candidates = recipe_plan.get("items", []) if isinstance(recipe_plan, dict) else []
+safe_recipe_candidates = [item for item in recipe_candidates if item.get("status") == "recipe_available"]
+selected_recipe_context = safe_recipe_candidates[0] if safe_recipe_candidates else (recipe_candidates[0] if recipe_candidates else {})
 rule_ids = selected_context.get("rule_ids") or selected_context.get("source_rule_ids") or []
 quality_gate_ids = selected_context.get("quality_gate_ids") or selected_context.get("quality_gates") or []
 risk = selected_context.get("risk", {}) if isinstance(selected_context.get("risk", {}), dict) else {}
@@ -131,6 +136,12 @@ plan = {
         "risk": risk,
         "worker_eligibility": eligibility,
         "why_selected": "v3 structured-rule issue has highest source priority" if selected_context.get("plan_version") == "v3" else "highest available compatible issue source",
+        "recipe_availability": {
+            "status": selected_recipe_context.get("status", "not_available"),
+            "recipe_id": selected_recipe_context.get("recipe_id", ""),
+            "capability": selected_recipe_context.get("capability", ""),
+            "safe_candidate_count": len(safe_recipe_candidates),
+        },
     },
     "steps": steps,
     "limits": {
@@ -175,6 +186,25 @@ plan_md.extend([
     "## Worker Eligibility",
     "",
     f"`{eligibility}`",
+    "",
+    "## Recipe Availability",
+    "",
+    f"- Status: `{plan['selected_issue_context']['recipe_availability']['status']}`",
+    f"- Recipe: `{plan['selected_issue_context']['recipe_availability']['recipe_id'] or 'none'}`",
+    f"- Capability: `{plan['selected_issue_context']['recipe_availability']['capability'] or 'unknown'}`",
+    f"- Safe recipe candidates: `{len(safe_recipe_candidates)}`",
+    "",
+    "## Stack Confidence",
+    "",
+    "See `.autospec/reports/stack-profile.md` when stack-specific scaffold recipes are considered.",
+    "",
+    "## Expected Outputs",
+    "",
+    "Recipe-backed issues produce patch plans, recipe execution reports, and rule recheck evidence where feasible.",
+    "",
+    "## Why This Is Safe",
+    "",
+    "Supervisor dry-run only plans one issue, performs no GitHub writes, and prefers recipe-backed bounded work.",
     "",
     "## Expected Validation",
     "",

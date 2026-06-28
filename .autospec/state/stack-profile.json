@@ -1,0 +1,29 @@
+{
+  "primary_profile": {
+    "confidence": 0.65,
+    "evidence": [
+      "python files or pyproject"
+    ],
+    "id": "python-cli-tool",
+    "notes": [],
+    "supported_recipes": [
+      "metadata-drift-test"
+    ],
+    "unsupported_recipes": []
+  },
+  "profiles": [
+    {
+      "confidence": 0.65,
+      "evidence": [
+        "python files or pyproject"
+      ],
+      "id": "python-cli-tool",
+      "notes": [],
+      "supported_recipes": [
+        "metadata-drift-test"
+      ],
+      "unsupported_recipes": []
+    }
+  ],
+  "schema": 1
+}

@@ -1,0 +1,22 @@
+{
+  "high_risk_guidance_issues": 0,
+  "planning_only_issues": 0,
+  "recent_recipe_executions": [],
+  "recipe_count": 30,
+  "safe_implementable_issues": 0,
+  "scaffoldable_issues": 0,
+  "schema": 1,
+  "stack_profile": {
+    "confidence": 0.65,
+    "evidence": [
+      "python files or pyproject"
+    ],
+    "id": "python-cli-tool",
+    "notes": [],
+    "supported_recipes": [
+      "metadata-drift-test"
+    ],
+    "unsupported_recipes": []
+  },
+  "worker_capabilities": 17
+}

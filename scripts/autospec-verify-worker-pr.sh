@@ -238,6 +238,10 @@ validation_plan = load_json(os.path.join(reports_dir, "worker-validation-plan.js
 validation = load_json(os.path.join(reports_dir, "worker-validation.json"), {})
 diff_review = load_json(os.path.join(reports_dir, "worker-diff-review.json"), {})
 worker_result = load_json(os.path.join(reports_dir, "worker-result.json"), {})
+worker_recipe_execution = load_json(os.path.join(reports_dir, "worker-recipe-execution.json"), {})
+patch_plan_data = load_json(os.path.join(reports_dir, "patch-plan.json"), {})
+stack_profile = load_json(os.path.join(state_dir, "stack-profile.json"), load_json(os.path.join(reports_dir, "stack-profile.json"), {}))
+rule_recheck = load_json(os.path.join(reports_dir, "rule-recheck.json"), {})
 baseline_comp = load_json(os.path.join(reports_dir, "baseline-composition.json"), {})
 baseline_gap = load_json(os.path.join(reports_dir, "baseline-gap-analysis.json"), {})
 constitutional_gap = load_json(os.path.join(reports_dir, "constitutional-gap-report.json"), {})
@@ -463,6 +467,71 @@ dimensions.append(dimension("human_readability", "pass" if readable else "warn",
 followup_ok = (not pr_arg) or md_section_exists(pr_body, "Follow-up issues") or "stuck" in pr_body.lower() or os.path.isfile(os.path.join(reports_dir, "worker-stuck-handoff.md"))
 dimensions.append(dimension("stuck_or_followup_handling", "pass" if followup_ok else "warn", "Follow-up or stuck handling is documented." if followup_ok else "Follow-up/stuck handling is missing.", []))
 
+recipe_review = {"status": "not_required", "summary": "No recipe execution artifact was provided.", "evidence": []}
+patch_plan_compliance = {"status": "not_required", "summary": "No recipe patch plan was provided.", "evidence": []}
+template_application_review = {"status": "not_required", "summary": "No template application artifact was provided.", "evidence": []}
+stack_profile_review = {"status": "not_required", "summary": "No stack-specific recipe execution was provided.", "evidence": []}
+rule_recheck_review = {"status": "not_required", "summary": "No rule recheck artifact was provided.", "evidence": []}
+scaffold_honesty = {"status": "pass", "summary": "No scaffolded work is being claimed as complete runtime implementation.", "evidence": []}
+
+if worker_recipe_execution:
+    recipe_id = worker_recipe_execution.get("recipe_id") or worker_recipe_execution.get("recipe", {}).get("id", "")
+    capability = worker_recipe_execution.get("capability", "")
+    execution_status = worker_recipe_execution.get("status", "unknown")
+    recipe_review = {
+        "status": "pass" if execution_status in {"executed", "planned", "dry_run"} else "warn",
+        "summary": f"Recipe execution artifact reviewed for `{recipe_id or 'unknown'}`.",
+        "evidence": [f"status={execution_status}", f"capability={capability or 'unknown'}"],
+    }
+    dimensions.append(dimension("recipe_review", recipe_review["status"], recipe_review["summary"], recipe_review["evidence"]))
+
+    plan_recipe = patch_plan_data.get("recipe_id") or patch_plan_data.get("recipe", {}).get("id", "")
+    patch_status = "pass" if patch_plan_data and (not recipe_id or not plan_recipe or plan_recipe == recipe_id) else "warn"
+    patch_plan_compliance = {
+        "status": patch_status,
+        "summary": "Patch plan exists and is tied to recipe execution." if patch_status == "pass" else "Patch plan is missing or does not match recipe execution.",
+        "evidence": [f"recipe={recipe_id or 'unknown'}", f"patch_plan_recipe={plan_recipe or 'unknown'}"],
+    }
+    dimensions.append(dimension("patch_plan_compliance", patch_status, patch_plan_compliance["summary"], patch_plan_compliance["evidence"], "Regenerate the patch plan from the selected recipe." if patch_status != "pass" else ""))
+
+    template_application = load_json(os.path.join(reports_dir, "template-apply-result.json"), {})
+    unsafe_overwrite = bool(template_application.get("unsafe_overwrite"))
+    template_application_review = {
+        "status": "fail" if unsafe_overwrite else "pass",
+        "summary": "Template application did not report unsafe overwrites." if not unsafe_overwrite else "Template application reported an unsafe overwrite.",
+        "evidence": [json.dumps(template_application, sort_keys=True)] if template_application else ["no template application result"],
+    }
+    dimensions.append(dimension("template_application_review", template_application_review["status"], template_application_review["summary"], template_application_review["evidence"], "Do not overwrite non-generated files." if unsafe_overwrite else ""))
+
+    primary_stack = stack_profile.get("primary") or {}
+    confidence = float(primary_stack.get("confidence", 0) or 0)
+    stack_specific = capability in {"ui_scaffold", "api_scaffold", "settings_scaffold"}
+    stack_status = "pass" if (not stack_specific or confidence >= 0.8) else "fail"
+    stack_profile_review = {
+        "status": stack_status,
+        "summary": "Stack confidence is sufficient for the selected recipe." if stack_status == "pass" else "Stack-specific scaffold ran without sufficient stack confidence.",
+        "evidence": [f"stack={primary_stack.get('id', 'unknown')}", f"confidence={confidence:.2f}", f"capability={capability or 'unknown'}"],
+    }
+    dimensions.append(dimension("stack_profile_review", stack_status, stack_profile_review["summary"], stack_profile_review["evidence"], "Use spec-only scaffold or add human guidance for uncertain stacks." if stack_status != "pass" else ""))
+
+    recheck_results = rule_recheck.get("results", [])
+    recheck_status = "pass" if recheck_results else "warn"
+    rule_recheck_review = {
+        "status": recheck_status,
+        "summary": "Rule recheck evidence is present." if recheck_results else "Rule recheck evidence is missing or skipped.",
+        "evidence": [json.dumps(recheck_results[:3], sort_keys=True)] if recheck_results else [rule_recheck.get("skip_rationale", "missing")],
+    }
+    dimensions.append(dimension("rule_recheck_review", recheck_status, rule_recheck_review["summary"], rule_recheck_review["evidence"], "Run autospec-rule-recheck for recipe-backed work or document a skip rationale." if recheck_status != "pass" else ""))
+
+    recipe_mode = worker_recipe_execution.get("mode") or worker_recipe_execution.get("implementation_mode", "")
+    false_runtime_claim = recipe_mode in {"scaffold", "planning_only", "docs", "metadata", "test"} and re.search(r"\b(fully implemented|runtime complete|production-ready runtime)\b", pr_body, re.I)
+    scaffold_honesty = {
+        "status": "fail" if false_runtime_claim else "pass",
+        "summary": "Scaffolded work is represented honestly." if not false_runtime_claim else "Scaffolded work is being claimed as complete runtime implementation.",
+        "evidence": [f"mode={recipe_mode or 'unknown'}"],
+    }
+    dimensions.append(dimension("scaffold_honesty", scaffold_honesty["status"], scaffold_honesty["summary"], scaffold_honesty["evidence"], "Describe scaffolded output as scaffolded, not complete runtime behavior." if false_runtime_claim else ""))
+
 statuses = {item["dimension"]: item["status"] for item in dimensions}
 if statuses.get("forbidden_paths") == "fail" or statuses.get("risk_classification") == "fail":
     verdict = "blocked"
@@ -496,6 +565,12 @@ report = {
     "quality_gate_review": quality_gate_review,
     "maturity_impact": maturity_impact,
     "rule_progress_verification": rule_progress_verification,
+    "recipe_review": recipe_review,
+    "patch_plan_compliance": patch_plan_compliance,
+    "template_application_review": template_application_review,
+    "stack_profile_review": stack_profile_review,
+    "rule_recheck_review": rule_recheck_review,
+    "scaffold_honesty": scaffold_honesty,
     "acceptance_criteria": criterion_rows,
     "required_actions": required_actions,
     "side_effects": {"github_comment": bool(confirm and pr_arg), "approved": False, "merged": False, "pushed": False},
@@ -571,6 +646,36 @@ md = "\n".join([
     "| Rule | Before | After | Evidence | Verifier status |",
     "| --- | --- | --- | --- | --- |",
     "\n".join(f"| `{row['rule_id']}` | {row['before']} | {row['after']} | {'; '.join(row.get('evidence', [])) or 'none'} | {row['verifier_status']} |" for row in rule_progress_rows) or "| none | unknown | unknown | none | not_required |",
+    "",
+    "## Recipe Review",
+    "",
+    f"- Status: `{recipe_review['status']}`",
+    f"- Summary: {recipe_review['summary']}",
+    "",
+    "## Patch Plan Compliance",
+    "",
+    f"- Status: `{patch_plan_compliance['status']}`",
+    f"- Summary: {patch_plan_compliance['summary']}",
+    "",
+    "## Template Application Review",
+    "",
+    f"- Status: `{template_application_review['status']}`",
+    f"- Summary: {template_application_review['summary']}",
+    "",
+    "## Stack Profile Review",
+    "",
+    f"- Status: `{stack_profile_review['status']}`",
+    f"- Summary: {stack_profile_review['summary']}",
+    "",
+    "## Rule Recheck Review",
+    "",
+    f"- Status: `{rule_recheck_review['status']}`",
+    f"- Summary: {rule_recheck_review['summary']}",
+    "",
+    "## Scaffold vs Implementation Honesty",
+    "",
+    f"- Status: `{scaffold_honesty['status']}`",
+    f"- Summary: {scaffold_honesty['summary']}",
     "",
     "## Remaining Constitutional Gaps",
     "",

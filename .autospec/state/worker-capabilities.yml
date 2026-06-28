@@ -1,0 +1,600 @@
+schema: 1
+capabilities:
+- id: docs
+  title: Docs
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: false
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: false
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: specs
+  title: Specs
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: false
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: false
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: metadata
+  title: Metadata
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: false
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: false
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: tests
+  title: Tests
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: true
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: true
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: cli
+  title: Cli
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: false
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: true
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: scripts
+  title: Scripts
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: false
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: true
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: ui_scaffold
+  title: Ui Scaffold
+  status: experimental
+  risk_level: medium
+  allowed_by_default: false
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+    - src/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 3
+  max_lines_changed: 120
+  requires_tests: true
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: true
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: api_scaffold
+  title: Api Scaffold
+  status: experimental
+  risk_level: medium
+  allowed_by_default: false
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+    - src/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 3
+  max_lines_changed: 120
+  requires_tests: true
+  requires_verifier: true
+  requires_human_guidance: true
+  requires_architecture_review: true
+  can_modify_code: true
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: settings_scaffold
+  title: Settings Scaffold
+  status: experimental
+  risk_level: medium
+  allowed_by_default: false
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+    - src/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 3
+  max_lines_changed: 120
+  requires_tests: true
+  requires_verifier: true
+  requires_human_guidance: true
+  requires_architecture_review: true
+  can_modify_code: true
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: ai_scaffold
+  title: Ai Scaffold
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: false
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: false
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: nlai_scaffold
+  title: Nlai Scaffold
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: false
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: false
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: diagnostics_scaffold
+  title: Diagnostics Scaffold
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: false
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: false
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: reporting_scaffold
+  title: Reporting Scaffold
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: false
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: false
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: playwright_scaffold
+  title: Playwright scaffolds
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: true
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: true
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: security_privacy_docs
+  title: Security Privacy Docs
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: false
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: false
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: dependency_planning
+  title: Dependency Planning
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: false
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: false
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance
+- id: modernization_planning
+  title: Modernization Planning
+  status: enabled
+  risk_level: low
+  allowed_by_default: true
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  requires_tests: false
+  requires_verifier: true
+  requires_human_guidance: false
+  requires_architecture_review: false
+  can_modify_code: false
+  can_modify_dependencies: false
+  can_modify_database: false
+  can_modify_auth_security: false
+  supported_repo_types: []
+  supported_technologies: []
+  input_requirements:
+    - structured rule or explicit operator request
+  output_artifacts:
+    - .autospec/reports
+  validation_expectations:
+    - focused validation or honest skip rationale
+  fallback_when_unsafe: stuck/guidance

@@ -79,6 +79,7 @@ report_quality = load(os.path.join(reports, "report-quality.json"), {})
 check_type_coverage = load(os.path.join(reports, "check-type-coverage.json"), {})
 template_coverage = load(os.path.join(reports, "template-coverage.json"), {})
 release_candidate_gate = load(os.path.join(reports, "release-candidate-gate.json"), {})
+autonomy_v2_status = load(os.path.join(reports, "autonomy-v2-status.json"), {})
 spec_coverage = load(os.path.join(reports, "spec-coverage.json"), {})
 coverage_requirements = spec_coverage.get("requirements", []) if isinstance(spec_coverage.get("requirements"), list) else []
 critical_missing = [r for r in coverage_requirements if r.get("priority") == "critical" and r.get("status") == "missing" and r.get("requirement_type") != "target_app_scaffold"]
@@ -98,6 +99,7 @@ signals = {
     "check_type_coverage": "pass" if check_type_coverage.get("matrix") else "unknown",
     "template_coverage": "pass" if template_coverage.get("categories") else "unknown",
     "release_candidate_gate": release_candidate_gate.get("verdict", "unknown"),
+    "autonomy_v2": "pass" if autonomy_v2_status.get("summary") or autonomy_v2_status.get("worker_capabilities") else "unknown",
     "spec_coverage": "fail" if critical_missing else "warn" if high_partial or documented_only else "pass" if coverage_requirements else "unknown",
 }
 blocking_values = {"blocked", "fail", "RC_BLOCKED", "RC_NOT_READY"}
@@ -133,6 +135,7 @@ status = {
         "onboarding": exists("scripts/autospec-onboard-existing-repo.sh"),
         "bootstrap": exists("scripts/autospec-bootstrap-new-project.sh"),
         "ai_nlai_scaffolds": exists("scripts/autospec-generate-ai-nlai-scaffold.sh"),
+        "autonomy_v2_recipes": exists("scripts/autospec-recipe-index.sh") and exists("scripts/autospec-rule-to-recipe-plan.sh") and exists("scripts/autospec-worker-one.sh"),
     },
     "policy_source_status": "present" if exists(".autospec/state/policy-sources.json") else "unknown",
     "baseline_source_status": "present" if exists(".autospec/reports/baseline-composition.json") else "unknown",
@@ -190,6 +193,10 @@ md = "\n".join([
     "",
     "- AI/NLAI scaffold generator is available.",
     "",
+    "## Autonomy v2 recipe support",
+    "",
+    "- Worker capabilities, implementation recipes, rule-to-recipe planning, patch plans, stack profiles, rule rechecks, and recipe-aware verifier review are available.",
+    "",
     "## Safety guarantees",
     "",
     "- No GitHub Actions or schedulers.",
@@ -218,6 +225,10 @@ md = "\n".join([
     f"- Documented-only requirements: {len(documented_only)}",
     f"- Scaffolded target-app requirements: {len(scaffolded)}",
     f"- Implemented requirements: {len(implemented)}",
+    "",
+    "## Autonomy v2 status",
+    "",
+    f"- Signal: `{signals.get('autonomy_v2', 'unknown')}`",
     f"- MVP readiness impact: `{status['spec_coverage']['mvp_readiness_impact']}`",
 ])
 write_text(os.path.join(reports, "mvp-status.md"), md)

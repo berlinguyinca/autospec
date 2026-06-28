@@ -2,15 +2,15 @@
 
 ## Summary
 
-- Total requirements: 74
-- Status counts: {"deferred": 3, "documented_only": 1, "implemented": 37, "missing": 2, "partial": 1, "scaffolded": 23, "validated": 7}
+- Total requirements: 83
+- Status counts: {"deferred": 3, "documented_only": 1, "implemented": 45, "missing": 2, "partial": 1, "scaffolded": 24, "validated": 7}
 
 ## Coverage Matrix
 
 | Category | Total | Statuses |
 | --- | ---: | --- |
 | `ai_platform` | 9 | deferred: 1, implemented: 1, scaffolded: 7 |
-| `autonomous_development` | 12 | deferred: 1, documented_only: 1, implemented: 10 |
+| `autonomous_development` | 21 | deferred: 1, documented_only: 1, implemented: 18, scaffolded: 1 |
 | `diagnostics` | 4 | implemented: 1, scaffolded: 3 |
 | `digital_twin` | 6 | implemented: 4, missing: 2 |
 | `docs_tutorial_pdf` | 5 | implemented: 1, partial: 1, scaffolded: 3 |
@@ -47,6 +47,15 @@
 | `autonomy.supervisor.single_cycle` | autonomous_development | implemented | critical | scripts/autospec-supervisor-cycle.sh |
 | `autonomy.verifier.independent` | autonomous_development | implemented | critical | scripts/autospec-verify-worker-pr.sh |
 | `autonomy.worker.low_risk_code` | autonomous_development | implemented | critical | scripts/autospec-worker-v1.sh |
+| `autonomy_v2.patch_plan` | autonomous_development | implemented | critical | scripts/autospec-build-patch-plan.sh |
+| `autonomy_v2.recipe_execution` | autonomous_development | implemented | critical | scripts/autospec-worker-one.sh |
+| `autonomy_v2.recipe_registry` | autonomous_development | implemented | critical | scripts/autospec-recipe-index.sh, .autospec/state/implementation-recipes.json |
+| `autonomy_v2.rule_recheck` | autonomous_development | implemented | high | scripts/autospec-rule-recheck.sh |
+| `autonomy_v2.rule_to_recipe` | autonomous_development | implemented | critical | scripts/autospec-rule-to-recipe-plan.sh |
+| `autonomy_v2.scaffold_honesty` | autonomous_development | scaffolded | critical | docs/runbooks/SCAFFOLD_VS_IMPLEMENTATION.md |
+| `autonomy_v2.stack_profiles` | autonomous_development | implemented | high | scripts/autospec-detect-stack-profile.sh |
+| `autonomy_v2.template_apply` | autonomous_development | implemented | high | scripts/autospec-apply-template.sh |
+| `autonomy_v2.worker_capabilities` | autonomous_development | implemented | critical | scripts/autospec-recipe-index.sh, .autospec/state/worker-capabilities.yml |
 | `diagnostics.audit` | diagnostics | implemented | high | scripts/autospec-diagnostics-audit.sh, .autospec/reports/diagnostics-audit.json |
 | `diagnostics.health_logs_metrics` | diagnostics | scaffolded | high | .autospec/templates/product-baseline/diagnostics-status-page-spec.md |
 | `diagnostics.incident_safe_remediation` | diagnostics | scaffolded | medium | .autospec/templates/product-baseline/diagnostics-status-page-spec.md |

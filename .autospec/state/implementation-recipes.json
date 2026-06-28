@@ -1,0 +1,2746 @@
+{
+  "recipes": [
+    {
+      "acceptance_criteria": [
+        "In-app documentation center scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "docs"
+      ],
+      "applies_to_rules": [
+        "required_in_app_documentation",
+        "docs.in_app_docs"
+      ],
+      "capability": "docs",
+      "category": "docs",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "in-app-docs-center",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/in-app-documentation-center.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "docs"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "In-app documentation center",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/in-app-documentation-center.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "In-app documentation center",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "RAG-ready documentation scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "docs"
+      ],
+      "applies_to_rules": [
+        "required_rag_ready_documentation"
+      ],
+      "capability": "docs",
+      "category": "docs",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "rag-ready-docs",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/rag-ready-docs.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "docs"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "RAG-ready documentation",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/rag-ready-docs.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "RAG-ready documentation",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Tutorial documentation scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "docs"
+      ],
+      "applies_to_rules": [
+        "required_tutorials_for_user_workflows"
+      ],
+      "capability": "docs",
+      "category": "docs",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "tutorial-docs",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/tutorials/autospec-tutorial.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "docs"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Tutorial documentation",
+      "test_plan": {
+        "generated_tests": [
+          "docs/tutorials/autospec-tutorial.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Tutorial documentation",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Playwright viewport matrix scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "playwright_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_playwright_viewport_matrix",
+        "testing.playwright.viewport"
+      ],
+      "capability": "playwright_scaffold",
+      "category": "tests",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "playwright-viewport-matrix",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "tests/e2e/autospec-viewport.spec.ts"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "test"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": [
+          "react",
+          "vite",
+          "nextjs",
+          "playwright"
+        ]
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Playwright viewport matrix",
+      "test_plan": {
+        "generated_tests": [
+          "tests/e2e/autospec-viewport.spec.ts"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Playwright viewport matrix",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Accessibility smoke test scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "playwright_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_accessibility_checklist",
+        "required_playwright_accessibility_flow"
+      ],
+      "capability": "playwright_scaffold",
+      "category": "tests",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "accessibility-smoke",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "tests/e2e/autospec-accessibility.spec.ts"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "test"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": [
+          "playwright"
+        ]
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Accessibility smoke test",
+      "test_plan": {
+        "generated_tests": [
+          "tests/e2e/autospec-accessibility.spec.ts"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Accessibility smoke test",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Metadata drift test scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "tests"
+      ],
+      "applies_to_rules": [
+        "required_docs_drift_check"
+      ],
+      "capability": "tests",
+      "category": "tests",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "metadata-drift-test",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "tests/unit/autospec-metadata-drift.bats"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "test"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Metadata drift test",
+      "test_plan": {
+        "generated_tests": [
+          "tests/unit/autospec-metadata-drift.bats"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Metadata drift test",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Settings page scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "settings_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_settings_area",
+        "required_ai_settings_page"
+      ],
+      "capability": "settings_scaffold",
+      "category": "ui",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "settings-page-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "src/components/AutospecSettings.tsx"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "scaffold"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": [
+          "react",
+          "vite",
+          "nextjs"
+        ]
+      },
+      "risk": {
+        "level": "medium",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Settings page scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "src/components/AutospecSettings.tsx"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Settings page scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Documentation route scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "ui_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_in_app_docs"
+      ],
+      "capability": "ui_scaffold",
+      "category": "ui",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "documentation-route-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "src/components/AutospecDocs.tsx"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "scaffold"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": [
+          "react",
+          "vite",
+          "nextjs"
+        ]
+      },
+      "risk": {
+        "level": "medium",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Documentation route scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "src/components/AutospecDocs.tsx"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Documentation route scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Status page scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "diagnostics_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_status_page"
+      ],
+      "capability": "diagnostics_scaffold",
+      "category": "ui",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "status-page-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/status-page.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "scaffold"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": [
+          "react",
+          "vite",
+          "nextjs"
+        ]
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Status page scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/status-page.md"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Status page scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Feedback flow scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "ui_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_feedback_flow"
+      ],
+      "capability": "ui_scaffold",
+      "category": "ui",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "feedback-flow-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/feedback-flow.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "scaffold"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": [
+          "react",
+          "vite",
+          "nextjs"
+        ]
+      },
+      "risk": {
+        "level": "medium",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Feedback flow scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/feedback-flow.md"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Feedback flow scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "AI provider config scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "ai_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_ai_provider_abstraction",
+        "ai.provider"
+      ],
+      "capability": "ai_scaffold",
+      "category": "ai",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "ai-provider-config-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/ai-provider-abstraction.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "scaffold"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "AI provider config scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/ai-provider-abstraction.md"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "AI provider config scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "RAG assistant scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "ai_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_rag_indexing",
+        "required_rag_capability"
+      ],
+      "capability": "ai_scaffold",
+      "category": "ai",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "rag-assistant-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/rag-assistant.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "scaffold"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "RAG assistant scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/rag-assistant.md"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "RAG assistant scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Token usage scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "ai_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_token_usage_tracking",
+        "required_multi_user_token_usage_tracking"
+      ],
+      "capability": "ai_scaffold",
+      "category": "ai",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "token-usage-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/token-usage.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "planning_only"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Token usage scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/token-usage.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Token usage scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "AI settings page scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "ai_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_ai_settings_page",
+        "required_ai_settings"
+      ],
+      "capability": "ai_scaffold",
+      "category": "ai",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "ai-settings-page-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/ai-settings-page.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "scaffold"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "AI settings page scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/ai-settings-page.md"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "AI settings page scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "MCP registry scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "ai_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_mcp_registry",
+        "required_diagnostic_mcp_registry"
+      ],
+      "capability": "ai_scaffold",
+      "category": "ai",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "mcp-registry-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/mcp-registry.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "scaffold"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "MCP registry scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/mcp-registry.md"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "MCP registry scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "NLAI capability interface scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "nlai_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_nlai_capability_registry",
+        "required_nlai_tool_interface"
+      ],
+      "capability": "nlai_scaffold",
+      "category": "nlai",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "capability-interface-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/nlai-capability-interface.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "scaffold"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "NLAI capability interface",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/nlai-capability-interface.md"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "NLAI capability interface",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Pretty rendering scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "nlai_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_pretty_human_output",
+        "required_pretty_rendering"
+      ],
+      "capability": "nlai_scaffold",
+      "category": "nlai",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "pretty-rendering-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/pretty-rendering.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "scaffold"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Pretty rendering scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/pretty-rendering.md"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Pretty rendering scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "SQL query interface spec scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "nlai_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_nlai_sql_generation_for_data_apps"
+      ],
+      "capability": "nlai_scaffold",
+      "category": "nlai",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "sql-query-interface-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/sql-query-interface.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "planning_only"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "SQL query interface spec",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/sql-query-interface.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "SQL query interface spec",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "File operations interface spec scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "nlai_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_nlai_file_operations_for_file_apps"
+      ],
+      "capability": "nlai_scaffold",
+      "category": "nlai",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "file-operations-interface-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/file-operations-interface.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "planning_only"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "File operations interface spec",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/file-operations-interface.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "File operations interface spec",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Health check scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "diagnostics_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_health_check"
+      ],
+      "capability": "diagnostics_scaffold",
+      "category": "diagnostics",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "health-check-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/health-check.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "scaffold"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Health check scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/health-check.md"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Health check scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "White-screen diagnostic scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "diagnostics_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_white_screen_diagnosis"
+      ],
+      "capability": "diagnostics_scaffold",
+      "category": "diagnostics",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "white-screen-diagnostic-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "tests/e2e/autospec-white-screen.spec.ts"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "test"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": [
+          "playwright"
+        ]
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "White-screen diagnostic scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "tests/e2e/autospec-white-screen.spec.ts"
+        ],
+        "required": true,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "White-screen diagnostic scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Incident report scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "diagnostics_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_incident_report_template"
+      ],
+      "capability": "diagnostics_scaffold",
+      "category": "diagnostics",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "incident-report-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/incident-report-template.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "docs"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Incident report scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/incident-report-template.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Incident report scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Metrics definition scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "reporting_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_metrics_definitions"
+      ],
+      "capability": "reporting_scaffold",
+      "category": "reporting",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "metrics-definition-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/metrics-definition.yml"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "docs"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Metrics definition scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/metrics-definition.yml"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Metrics definition scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Report template scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "reporting_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_report_generation"
+      ],
+      "capability": "reporting_scaffold",
+      "category": "reporting",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "report-template-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/report-template.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "docs"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Report template scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/report-template.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Report template scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Visualization standard scaffold scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "reporting_scaffold"
+      ],
+      "applies_to_rules": [
+        "required_visualization_library_standard"
+      ],
+      "capability": "reporting_scaffold",
+      "category": "reporting",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "visualization-standard-scaffold",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/visualization-standard.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "docs"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Visualization standard scaffold",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/visualization-standard.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Visualization standard scaffold",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Dependency governance policy scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "dependency_planning"
+      ],
+      "applies_to_rules": [
+        "required_dependency_governance_policy"
+      ],
+      "capability": "dependency_planning",
+      "category": "dependencies",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "governance-policy",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/dependency-governance.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "planning_only"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Dependency governance policy",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/dependency-governance.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Dependency governance policy",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Modernization plan scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "modernization_planning"
+      ],
+      "applies_to_rules": [
+        "required_modernization_plan"
+      ],
+      "capability": "modernization_planning",
+      "category": "dependencies",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "modernization-plan",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/modernization-plan.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "planning_only"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "low",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Modernization plan",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/modernization-plan.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Modernization plan",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Threat model doc scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "security_privacy_docs"
+      ],
+      "applies_to_rules": [
+        "required_threat_model"
+      ],
+      "capability": "security_privacy_docs",
+      "category": "security-privacy",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "threat-model-doc",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/threat-model.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "docs"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "medium",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Threat model doc",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/threat-model.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Threat model doc",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "Permission model doc scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "security_privacy_docs"
+      ],
+      "applies_to_rules": [
+        "required_permission_model_for_multi_user"
+      ],
+      "capability": "security_privacy_docs",
+      "category": "security-privacy",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "permission-model-doc",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/permission-model.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "docs"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "medium",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "Permission model doc",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/permission-model.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "Permission model doc",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    },
+    {
+      "acceptance_criteria": [
+        "PII retention doc scaffold/spec exists.",
+        "Rule recheck is honest about before/after status."
+      ],
+      "applies_to_capabilities": [
+        "security_privacy_docs"
+      ],
+      "applies_to_rules": [
+        "required_pii_inventory",
+        "required_retention_policy"
+      ],
+      "capability": "security_privacy_docs",
+      "category": "security-privacy",
+      "docs": {
+        "update": [
+          "docs/specs"
+        ]
+      },
+      "id": "pii-retention-doc",
+      "implementation": {
+        "allowed_paths": [
+          "docs/**",
+          ".autospec/**",
+          "tests/**",
+          "src/**"
+        ],
+        "expected_files": {
+          "create": [
+            "docs/specs/pii-retention.md"
+          ],
+          "inspect": [],
+          "update": []
+        },
+        "forbidden_paths": [
+          ".github/workflows/**",
+          ".env",
+          ".env.*",
+          "**/migrations/**",
+          "package.json",
+          "pyproject.toml"
+        ],
+        "max_files_changed": 5,
+        "max_lines_changed": 250,
+        "mode": "docs"
+      },
+      "metadata": {
+        "update": [
+          ".autospec/state"
+        ]
+      },
+      "repo_conditions": {
+        "application_types": [
+          "web",
+          "cli"
+        ],
+        "optional_files": [],
+        "required_files": [],
+        "technologies": []
+      },
+      "risk": {
+        "level": "medium",
+        "requires_architecture_review": false,
+        "requires_human_guidance": false
+      },
+      "status": "supported",
+      "stuck_if": [
+        "stack confidence is low",
+        "capability is disabled",
+        "forbidden path required"
+      ],
+      "summary": "PII retention doc",
+      "test_plan": {
+        "generated_tests": [
+          "docs/specs/pii-retention.md"
+        ],
+        "required": false,
+        "suggested_commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ]
+      },
+      "title": "PII retention doc",
+      "validation": {
+        "commands": [
+          "bash scripts/autospec-rule-recheck.sh --dry-run"
+        ],
+        "required_evidence": [
+          "report"
+        ]
+      }
+    }
+  ],
+  "schema": 1,
+  "summary": {
+    "supported": 30,
+    "total": 30
+  }
+}

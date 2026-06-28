@@ -1,11 +1,28 @@
 #!/usr/bin/env bash
 # scripts/autospec-worker-one.sh — one-item worker wrapper/remediation gate.
 set -eu
-usage(){ echo "Usage: autospec-worker-one.sh [--repo-root DIR] [--dry-run|--confirm] --remediate --pr N [--branch NAME]"; }
+usage(){ cat <<'EOF'
+Usage:
+  autospec-worker-one.sh [--repo-root DIR] [--dry-run|--confirm] --remediate --pr N [--branch NAME]
+  autospec-worker-one.sh [--repo-root DIR] [--dry-run|--confirm] --issue N --recipe RECIPE_ID
+  autospec-worker-one.sh [--repo-root DIR] [--dry-run|--confirm] --issue N --auto-recipe
+EOF
+}
 die(){ printf 'autospec-worker-one: %s\n' "$*" >&2; exit 2; }
-REPO_ROOT="$(pwd)"; CONFIRM=0; REMEDIATE=0; PR=""; BRANCH=""
-while [ "$#" -gt 0 ]; do case "$1" in --repo-root) REPO_ROOT="$2"; shift 2;; --dry-run) CONFIRM=0; shift;; --confirm) CONFIRM=1; shift;; --remediate) REMEDIATE=1; shift;; --pr) PR="$2"; shift 2;; --branch) BRANCH="$2"; shift 2;; -h|--help) usage; exit 0;; *) die "unknown arg: $1";; esac; done
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+REPO_ROOT="$(pwd)"; CONFIRM=0; REMEDIATE=0; PR=""; BRANCH=""; ISSUE="1"; RECIPE=""; AUTO_RECIPE=0
+while [ "$#" -gt 0 ]; do case "$1" in --repo-root) REPO_ROOT="$2"; shift 2;; --dry-run) CONFIRM=0; shift;; --confirm) CONFIRM=1; shift;; --remediate) REMEDIATE=1; shift;; --pr) PR="$2"; shift 2;; --branch) BRANCH="$2"; shift 2;; --issue) ISSUE="$2"; shift 2;; --recipe) RECIPE="$2"; shift 2;; --auto-recipe) AUTO_RECIPE=1; shift;; -h|--help) usage; exit 0;; *) die "unknown arg: $1";; esac; done
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
+
+if [ -n "$RECIPE" ] || [ "$AUTO_RECIPE" -eq 1 ]; then
+    mode_flag="--dry-run"
+    [ "$CONFIRM" -eq 1 ] && mode_flag="--confirm"
+    args=("$SCRIPT_DIR/autospec-autonomy-v2-lib.py" --command worker-recipe --repo-root "$REPO_ROOT" "$mode_flag" --issue "$ISSUE")
+    [ -n "$RECIPE" ] && args+=(--recipe "$RECIPE")
+    [ "$AUTO_RECIPE" -eq 1 ] && args+=(--auto-recipe)
+    exec python3 "${args[@]}"
+fi
+
 python3 - "$REPO_ROOT" "$CONFIRM" "$REMEDIATE" "$PR" "$BRANCH" <<'PY'
 import json, os, sys
 root, confirm, remediate, pr, branch = os.path.realpath(sys.argv[1]), sys.argv[2]=='1', sys.argv[3]=='1', sys.argv[4], sys.argv[5]

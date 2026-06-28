@@ -10,7 +10,7 @@ Move more doctrine into structured Constitution and Baseline rules.
 
 ## Phase 3 — Deeper worker capabilities
 
-Expand rule-aware worker behavior after verifier evidence is strong.
+Expand beyond Autonomy v2 recipes only after verifier evidence is strong. Current v2 support is bounded to capability-gated recipes, patch plans, templates, scaffold generation, and rule rechecks.
 
 ## Phase 4 — Target-app AI/NLAI runtime generators
 

@@ -1,0 +1,70 @@
+id: ai-settings-page-scaffold
+title: AI settings page scaffold
+summary: AI settings page scaffold
+category: ai
+applies_to_rules:
+  - required_ai_settings_page
+  - required_ai_settings
+applies_to_capabilities:
+  - ai_scaffold
+repo_conditions:
+  application_types:
+    - web
+    - cli
+  technologies:
+    []
+  required_files:
+    []
+  optional_files:
+    []
+risk:
+  level: low
+  requires_human_guidance: false
+  requires_architecture_review: false
+implementation:
+  mode: scaffold
+  allowed_paths:
+    - docs/**
+    - .autospec/**
+    - tests/**
+    - src/**
+  forbidden_paths:
+    - .github/workflows/**
+    - .env
+    - .env.*
+    - **/migrations/**
+    - package.json
+    - pyproject.toml
+  max_files_changed: 5
+  max_lines_changed: 250
+  expected_files:
+    create:
+      - docs/specs/ai-settings-page.md
+    update:
+      []
+    inspect:
+      []
+test_plan:
+  required: true
+  suggested_commands:
+    - bash scripts/autospec-rule-recheck.sh --dry-run
+  generated_tests:
+    - docs/specs/ai-settings-page.md
+validation:
+  commands:
+    - bash scripts/autospec-rule-recheck.sh --dry-run
+  required_evidence:
+    - report
+docs:
+  update:
+    - docs/specs
+metadata:
+  update:
+    - .autospec/state
+acceptance_criteria:
+  - AI settings page scaffold scaffold/spec exists.
+  - Rule recheck is honest about before/after status.
+stuck_if:
+  - stack confidence is low
+  - capability is disabled
+  - forbidden path required
