@@ -19,6 +19,7 @@ Writes:
   .autospec/reports/control-labels.md
   .autospec/reports/bot-state-machine.md
   .autospec/templates/autonomous-issue.md
+  .autospec/templates/stuck-issue.md
 EOF
 }
 
@@ -58,6 +59,7 @@ bot_state_machine_path = os.path.join(state_dir, "bot-state-machine.yml")
 control_labels_report_path = os.path.join(reports_dir, "control-labels.md")
 bot_state_machine_report_path = os.path.join(reports_dir, "bot-state-machine.md")
 template_path = os.path.join(templates_dir, "autonomous-issue.md")
+stuck_template_path = os.path.join(templates_dir, "stuck-issue.md")
 issue_plan_path = os.path.join(reports_dir, "issue-plan.json")
 
 
@@ -512,9 +514,55 @@ template = """# {{title}}
 with open(template_path, "w", encoding="utf-8") as fh:
     fh.write(template)
 
+stuck_template = """# bot stuck: <task>
+
+## Bot stuck
+
+**Bot:** <bot name>
+**Original issue:** #<number or local issue draft>
+**Branch:** `<branch or none>`
+**State:** stuck
+
+## What I was trying to do
+
+...
+
+## What I tried
+
+- ...
+- ...
+- ...
+
+## Why I cannot proceed safely
+
+...
+
+## Exact guidance needed
+
+...
+
+## Options I considered
+
+1. ...
+2. ...
+3. ...
+
+## Recommended human action
+
+...
+
+## Resume criteria
+
+- [ ] guidance provided in a comment or issue update
+- [ ] `autospec:guidance-provided` or `autospec:resume` applied
+- [ ] blocker resolved
+"""
+with open(stuck_template_path, "w", encoding="utf-8") as fh:
+    fh.write(stuck_template)
+
 print("bot state init: PASS")
 print("state: .autospec/state/bot-control-plane.json, .autospec/state/autonomous-backlog.json")
 print("labels: .autospec/state/control-labels.yml, .autospec/reports/control-labels.md")
 print("state machine: .autospec/state/bot-state-machine.yml, .autospec/reports/bot-state-machine.md")
-print("template: .autospec/templates/autonomous-issue.md")
+print("templates: .autospec/templates/autonomous-issue.md, .autospec/templates/stuck-issue.md")
 PY

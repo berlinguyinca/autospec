@@ -352,6 +352,26 @@ PY
   grep -q '| `stuck` | `guidance-provided` |' "$TEST_TMPDIR/repo/.autospec/reports/bot-state-machine.md"
 }
 
+@test "bot state initializer writes stuck issue template" {
+  mkdir -p "$TEST_TMPDIR/repo"
+  write_reports "$TEST_TMPDIR/repo"
+  bash "$PLAN" --repo-root "$TEST_TMPDIR/repo" >/dev/null
+
+  bash "$BOT_STATE" --repo-root "$TEST_TMPDIR/repo" >/dev/null
+
+  [ -f "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md" ]
+  grep -q '^# bot stuck: <task>$' "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md"
+  grep -q '^## Bot stuck$' "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md"
+  grep -q '^## What I was trying to do$' "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md"
+  grep -q '^## What I tried$' "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md"
+  grep -q '^## Why I cannot proceed safely$' "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md"
+  grep -q '^## Exact guidance needed$' "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md"
+  grep -q '^## Options I considered$' "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md"
+  grep -q '^## Recommended human action$' "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md"
+  grep -q '^## Resume criteria$' "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md"
+  grep -q 'autospec:guidance-provided` or `autospec:resume` applied' "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md"
+}
+
 @test "bot state initializer does not overwrite manual state unless requested" {
   mkdir -p "$TEST_TMPDIR/repo/.autospec/state" "$TEST_TMPDIR/repo/.autospec/reports"
   printf '{"mode":"manual"}\n' > "$TEST_TMPDIR/repo/.autospec/state/bot-control-plane.json"
