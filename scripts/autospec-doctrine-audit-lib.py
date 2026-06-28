@@ -42,6 +42,11 @@ REPORT_NAMES = {
     "modernization": "modernization-plan",
     "security": "security-privacy-audit",
 }
+STATE_ALIASES = {
+    "playwright": "playwright-evidence",
+    "docs": "doc-artifacts",
+    "reporting": "reporting-analytics",
+}
 
 
 def load_json(path: Path, default):
@@ -333,6 +338,8 @@ def write_audit(root: Path, audit: str, report: dict) -> None:
     report = {**report, "findings": findings, "side_effects": {"github_writes": False, "dependencies_updated": False, **report.get("side_effects", {})}}
     write_json(reports / f"{name}.json", report)
     write_json(state / f"{name}.json", report)
+    if audit in STATE_ALIASES:
+        write_json(state / f"{STATE_ALIASES[audit]}.json", report)
     rows = "\n".join(f"| `{key}` | {value.get('status')} | {', '.join(value.get('evidence', [])) or 'none'} | {', '.join(value.get('missing_evidence', [])) or 'none'} |" for key, value in sorted(report.get("checks", {}).items()))
     extra = ""
     if audit == "architecture":

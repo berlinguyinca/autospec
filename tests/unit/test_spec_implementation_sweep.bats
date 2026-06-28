@@ -105,6 +105,7 @@ JSON
 
   run bash "$PW" --repo-root "$TEST_TMPDIR/repo" --dry-run
   [ "$status" -eq 0 ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/state/playwright-evidence.json" ]
   run jq -r '.checks.playwright_config.status' "$TEST_TMPDIR/repo/.autospec/reports/playwright-evidence-audit.json"
   [ "$output" = "pass" ]
   run jq -r '.checks.viewport_matrix.status' "$TEST_TMPDIR/repo/.autospec/reports/playwright-evidence-audit.json"
@@ -121,7 +122,9 @@ JSON
   done
 
   [ -f "$TEST_TMPDIR/repo/.autospec/reports/doc-artifact-audit.md" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/state/doc-artifacts.json" ]
   [ -f "$TEST_TMPDIR/repo/.autospec/reports/reporting-analytics-audit.md" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/state/reporting-analytics.json" ]
   [ -f "$TEST_TMPDIR/repo/.autospec/reports/ai-platform-audit.md" ]
   [ -f "$TEST_TMPDIR/repo/.autospec/reports/nlai-audit.md" ]
   [ -f "$TEST_TMPDIR/repo/.autospec/reports/diagnostics-audit.md" ]

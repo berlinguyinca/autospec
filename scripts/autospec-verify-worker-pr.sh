@@ -54,6 +54,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 repo_root = os.path.realpath(sys.argv[1])
 confirm = sys.argv[2] == "1"
@@ -115,6 +116,27 @@ def read_text(path):
             return fh.read()
     except Exception:
         return ""
+
+
+def repo_has_architecture_evidence(repo_root):
+    evidence = []
+    for base, dirs, files in os.walk(repo_root):
+        rel_base = os.path.relpath(base, repo_root)
+        if rel_base == ".":
+            rel_base = ""
+        parts = set(Path(rel_base).parts)
+        if {".git", "node_modules", "__pycache__"} & parts:
+            dirs[:] = []
+            continue
+        if rel_base.startswith(".autospec/templates"):
+            dirs[:] = []
+            continue
+        for name in files:
+            rel_path = os.path.join(rel_base, name).strip(os.sep)
+            low = rel_path.lower()
+            if re.search(r"(^|/)adr[s]?/|architecture.*\.md|decision", low):
+                evidence.append(rel_path)
+    return sorted(evidence)
 
 
 def write_json(path, data):
@@ -367,6 +389,29 @@ elif classification == "low-risk-code" and any(any(token in path.lower() for tok
     dimensions.append(dimension("risk_classification", "fail", "Actual diff touches high-risk paths despite low-risk classification.", changed_files, "Reclassify or split the issue."))
 else:
     dimensions.append(dimension("risk_classification", "pass", f"Risk classification exists: {classification}.", risk.get("classification_reasons", [])))
+
+architecture_expected = (
+    classification in {"architecture-required", "high-risk-code"}
+    or "autospec:architecture" in source_issue.get("suggested_labels", [])
+    or "autospec:risk-high" in source_issue.get("suggested_labels", [])
+    or (isinstance(source_issue.get("risk"), dict) and source_issue.get("risk", {}).get("level") == "high")
+)
+if architecture_expected:
+    arch_report = load_json(os.path.join(reports_dir, "architecture-governance.json"), {})
+    arch_checks = arch_report.get("checks", {}) if isinstance(arch_report.get("checks"), dict) else {}
+    arch_evidence = []
+    for key in ["adrs", "architecture_map", "design_pattern_rationale", "impact_analysis"]:
+        item = arch_checks.get(key, {}) if isinstance(arch_checks.get(key), dict) else {}
+        arch_evidence.extend(item.get("evidence", []) if isinstance(item.get("evidence"), list) else [])
+    if not arch_evidence:
+        arch_evidence = repo_has_architecture_evidence(repo_root)
+    dimensions.append(dimension(
+        "architecture_governance",
+        "pass" if arch_evidence else "warn",
+        "Architecture Governance evidence exists." if arch_evidence else "Architecture Governance evidence is missing for architecture/high-risk work.",
+        arch_evidence,
+        "Add an ADR, architecture notes, design-pattern rationale, or impact analysis before promotion." if not arch_evidence else "",
+    ))
 
 patch_budget = diff_review.get("patch_budget", {})
 budget_passed = patch_budget.get("passed") is True

@@ -311,3 +311,16 @@ PY
   grep -q 'pr comment 7 --body-file' "$TEST_TMPDIR/gh.log"
   ! grep -Eq 'pr (review|merge)' "$TEST_TMPDIR/gh.log"
 }
+
+@test "verifier warns when architecture or high-risk work lacks ADR evidence" {
+  mkdir -p "$TEST_TMPDIR/repo"
+  write_worker_artifacts "$TEST_TMPDIR/repo" "architecture-required" "pass" "false" "true"
+  write_pr_body "$TEST_TMPDIR/repo"
+
+  run bash "$VERIFY" --repo-root "$TEST_TMPDIR/repo" --dry-run --issue 1
+
+  [ "$status" -eq 0 ]
+  run jq -r '.dimensions[] | select(.dimension=="architecture_governance") | .status' "$TEST_TMPDIR/repo/.autospec/reports/verifier-report.json"
+  [ "$output" = "warn" ]
+  grep -q "Architecture Governance" "$TEST_TMPDIR/repo/.autospec/reports/verifier-report.md"
+}
