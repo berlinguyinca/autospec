@@ -11,6 +11,14 @@ how to pause/resume a repo-local autonomy run.
 Autospec guide is an operator control surface. It explains and invokes existing
 local commands; it must not invent new flows.
 
+<!-- autospec-block:startup-self-update SKILL_NAME=autospec-guide -->
+
+## Self-update mode
+
+If the operator asks to update this skill, reinstall the autospec-guide skill
+with its local `install.sh --update` path or the suite bootstrapper. Do not run
+autonomy commands during self-update.
+
 ## Operating Rules
 
 - Prefer dry-run first.
@@ -24,29 +32,49 @@ local commands; it must not invent new flows.
 - Do not add GitHub Actions, cron, scheduled CI, or background automation.
 - GitHub issue/PR writes require explicit operator confirmation.
 
+## Harness Adapter
+
+| Capability | Guidance |
+| --- | --- |
+| Subagent model tier | Use `TIER_B` for optional local status summarization helpers; fall back to direct script output when no subagent is needed. |
+
+> **Model tier:** `TIER_B` (implementation work) for optional status summarization only; most guide operations should run local scripts directly.
+
+## Harness detection
+
+Detect the active harness before optional subagent dispatch:
+
+1. Claude Code: `TIER_A` is Opus with maximum thinking; `TIER_B` is Sonnet with medium thinking.
+2. OpenCode: `TIER_A` is the top task tier; `TIER_B` is the smaller task tier.
+3. Codex CLI: `TIER_A` is current top GPT; `TIER_B` is the current spark/cost-optimized model.
+
+If `TIER_B` is unavailable, silently retry the same optional summarization with `TIER_A`.
+Most guide operations should not dispatch a subagent; run the existing local
+script and summarize the report.
+
 ## Commands To Use
 
-- `bash scripts/autospec-autonomy-status.sh`
-- `bash scripts/autospec-sync-guidance.sh --dry-run`
-- `bash scripts/autospec-publish-stuck.sh --dry-run --work-item <id>`
-- `bash scripts/autospec-supervisor-cycle.sh --dry-run --issue <number>`
-- `bash scripts/autospec-supervisor-loop.sh --dry-run --max-cycles 3`
-- `bash scripts/autospec-stop.sh --status`
-- `bash scripts/autospec-stop.sh --graceful`
-- `bash scripts/autospec-resume.sh`
-- `bash scripts/autospec-guide-issue.sh --dry-run --stuck <issue-number> --message-file <file>`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomy-status.sh"`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-sync-guidance.sh" --dry-run`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-publish-stuck.sh" --dry-run --work-item <id>`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-supervisor-cycle.sh" --dry-run --issue <number>`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-supervisor-loop.sh" --dry-run --max-cycles 3`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --status`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --graceful`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-resume.sh"`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guide-issue.sh" --dry-run --stuck <issue-number> --message-file <file>`
 
 ## Intent Mapping
 
 | Operator asks | Do this |
 | --- | --- |
-| What is autospec working on? | Run `scripts/autospec-autonomy-status.sh` and summarize active work. |
+| What is autospec working on? | Run `autospec-autonomy-status.sh` through `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}` and summarize active work. |
 | What is stuck? | Run status, then inspect `.autospec/state/stuck-handovers.json` and `guidance-sync.md` if present. |
 | Why is issue 123 stuck? | Read the matching stuck handoff and stuck publish report, then summarize blockers and exact guidance needed. |
 | Tell the bot to use option 2 and continue. | Write a guidance message file, dry-run `autospec-guide-issue.sh`, then ask for explicit confirmation before `--confirm --resume`. |
-| Pause all autospec work on this repo. | Run `scripts/autospec-stop.sh --graceful` and report the stop flag status. |
-| Resume the bot for issue 123. | Run `scripts/autospec-resume.sh`, then recommend the next dry-run loop or supervisor command. Do not start it automatically. |
-| Show me the current autonomy status. | Run `scripts/autospec-autonomy-status.sh`. |
+| Pause all autospec work on this repo. | Run `autospec-stop.sh --graceful` through `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}` and report the stop flag status. |
+| Resume the bot for issue 123. | Run `autospec-resume.sh` through `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}`, then recommend the next dry-run loop or supervisor command. Do not start it automatically. |
+| Show me the current autonomy status. | Run `autospec-autonomy-status.sh` through `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}`. |
 | What PRs need human review? | Use the status report PR review queue and promotion reports. |
 | What command should I run next? | Use the status report next recommended command unless a stop flag, lock, budget, or guidance blocker is present. |
 
@@ -66,5 +94,5 @@ When posting guidance to a stuck issue, include:
 - [ ] `autospec:resume` is present only when the operator asked to resume
 ```
 
-After posting guidance, run `bash scripts/autospec-sync-guidance.sh --dry-run` and
+After posting guidance, run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-sync-guidance.sh" --dry-run` and
 tell the operator that sync does not resume work automatically.

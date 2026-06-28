@@ -65,8 +65,25 @@ blocking required-rule failures.
 drafts only. They include source rule IDs, doctrine, baseline pack, source file,
 severity, maturity level, category, evidence, missing evidence, remediation
 hints, suggested labels, acceptance criteria, quality gates, risk, validation
-expectations, and metadata expectations. No GitHub issues are created by this
-batch.
+expectations, and metadata expectations.
+
+Publish structured-rule drafts only through the explicit backlog bridge:
+
+```bash
+bash scripts/autospec-audit-to-backlog.sh --dry-run
+bash scripts/autospec-audit-to-backlog.sh --confirm
+```
+
+Dry-run answers what the Constitution says is missing and what v3 backlog would
+be created. Confirmed mode publishes v3 issues with idempotency markers; it does
+not run a worker, create a PR, approve, or merge.
+
+Use direct publishing when the audit has already been run:
+
+```bash
+bash scripts/autospec-publish-issues.sh --dry-run --plan v3
+bash scripts/autospec-publish-issues.sh --confirm --plan v3
+```
 
 ## Difference From Heuristic Gap Reports
 
@@ -87,6 +104,7 @@ bash scripts/autospec-check-rules.sh
 bash scripts/autospec-constitutional-gap-v1.sh
 bash scripts/autospec-policy-compatibility.sh
 bash scripts/autospec-constitution-audit.sh
+bash scripts/autospec-audit-to-backlog.sh --dry-run
 ```
 
 See also: `docs/runbooks/POLICY_SOURCES.md`.

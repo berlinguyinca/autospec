@@ -61,6 +61,8 @@ published = load(os.path.join(state, "published-issues.json"), {"issues": []})
 handover = load(os.path.join(state, "stuck-handovers.json"), {"handovers": []})
 supervisor = load(os.path.join(state, "supervisor-runs.json"), {"runs": []})
 issue_plan = load(os.path.join(reports, "issue-plan.json"), {"issues": []})
+issue_plan_v3_data = load(os.path.join(reports, "issue-plan-v3.json"), {"issues": []})
+sync_v3 = load(os.path.join(reports, "github-issue-sync-v3.json"), {"summary": {}})
 budget = load(os.path.join(reports, "autonomy-budget.json"), {"overall_status": "unknown", "budgets": []})
 repeated = load(os.path.join(reports, "repeated-failures.json"), {"has_repeated_failures": False, "repeated_failures": []})
 rule_checks = load(os.path.join(reports, "rule-check-results.json"), {"results": []})
@@ -86,7 +88,15 @@ budget_exhausted = budget.get("overall_status") == "exhausted"
 needs_guidance = stuck > 0 or blocked > 0 or bool(repeated.get("has_repeated_failures"))
 ready_to_run = not locked and not stopped and not budget_exhausted and not needs_guidance
 required_rule_failures = [r for r in rule_checks.get("results", []) if r.get("severity") == "required" and r.get("status") == "fail"]
+recommended_rule_failures = [r for r in rule_checks.get("results", []) if r.get("severity") == "recommended" and r.get("status") == "fail"]
+manual_review_rules = [r for r in rule_checks.get("results", []) if r.get("status") == "manual_review"]
+v3_published = [item for item in published.get("issues", []) if item.get("plan_version") == "v3"]
+v3_drafts = issue_plan_v3_data.get("issues", []) if isinstance(issue_plan_v3_data.get("issues"), list) else []
+v3_published_ids = {item.get("local_issue_id") for item in v3_published}
+unpublished_v3 = [item for item in v3_drafts if item.get("issue_id") not in v3_published_ids]
+waived_opted_out = [r for r in rule_checks.get("results", []) if r.get("status") in {"waived", "opted_out"}]
 production_maturity = next((level for level in maturity.get("levels", []) if level.get("level") == "production"), {})
+expired_waivers = [f for f in load(os.path.join(reports, "rule-extraction.json"), {}).get("waiver_findings", []) if f.get("code") == "WAIVER_EXPIRED"]
 issue_plan_v2 = os.path.join(reports, "issue-plan-v2.json")
 issue_plan_v3 = os.path.join(reports, "issue-plan-v3.json")
 issue_plan_v1 = os.path.join(reports, "issue-plan.json")
@@ -138,10 +148,22 @@ report = {
         "maturity_status": production_maturity.get("status", "unknown"),
         "maturity_score": production_maturity.get("score", 0.0),
         "top_failing_required_rules": [r.get("rule_id") for r in required_rule_failures[:5]],
-        "expired_waivers": [f for f in load(os.path.join(reports, "rule-extraction.json"), {}).get("waiver_findings", []) if f.get("code") == "WAIVER_EXPIRED"],
+        "expired_waivers": expired_waivers,
         "issue_plan_v2_newer_than_v1": issue_plan_v2_newer,
         "issue_plan_v3_newer_than_v1": issue_plan_v3_newer,
         "latest_constitution_audit_v2": audit.get("generated_at", "unknown"),
+    },
+    "structured_policy_backlog": {
+        "required_failures": len(required_rule_failures),
+        "recommended_failures": len(recommended_rule_failures),
+        "manual_review_rules": len(manual_review_rules),
+        "v3_issues_published": len(v3_published),
+        "unpublished_v3_issue_drafts": len(unpublished_v3),
+        "v3_issues_stale": sync_v3.get("summary", {}).get("stale_v3_issues", 0),
+        "waived_or_opted_out_gaps": len(waived_opted_out),
+        "expired_waivers": len(expired_waivers),
+        "top_maturity_blockers": production_maturity.get("blocking_gaps", [])[:5],
+        "ready_v3_issues": len([item for item in v3_published if item.get("state", "open") == "open"]),
     },
     "planned_backlog_items": len(issue_plan.get("issues", [])),
     "guide_skill_quick_commands": [
@@ -211,6 +233,31 @@ md = [
     f"| Production maturity | {production_maturity.get('status', 'unknown')} ({production_maturity.get('score', 0.0)}) |",
     f"| Issue plan v2 newer than v1 | {str(issue_plan_v2_newer).lower()} |",
     f"| Issue plan v3 newer than v1 | {str(issue_plan_v3_newer).lower()} |",
+    "",
+    "## Structured Policy Backlog",
+    "",
+    "| Metric | Count |",
+    "| --- | ---: |",
+    f"| Required failures | {len(required_rule_failures)} |",
+    f"| Recommended failures | {len(recommended_rule_failures)} |",
+    f"| Manual review rules | {len(manual_review_rules)} |",
+    f"| V3 issues published | {len(v3_published)} |",
+    f"| Unpublished v3 issue drafts | {len(unpublished_v3)} |",
+    f"| V3 issues stale | {sync_v3.get('summary', {}).get('stale_v3_issues', 0)} |",
+    f"| Waived/opted-out gaps | {len(waived_opted_out)} |",
+    f"| Expired waivers | {len(expired_waivers)} |",
+    f"| Maturity blockers | {len(production_maturity.get('blocking_gaps', []))} |",
+    f"| Ready v3 issues | {report['structured_policy_backlog']['ready_v3_issues']} |",
+    "",
+    "### Top Maturity Blockers",
+    "",
+]
+if production_maturity.get("blocking_gaps"):
+    for blocker in production_maturity.get("blocking_gaps", [])[:5]:
+        md.append(f"- `{blocker}`")
+else:
+    md.append("- None.")
+md += [
     "",
     "### Top Failing Required Rules",
     "",

@@ -39,6 +39,7 @@ REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
 
 python3 - "$REPO_ROOT" "$GH_REPO" <<'PY'
 import datetime
+import hashlib
 import json
 import os
 import subprocess
@@ -51,6 +52,8 @@ reports_dir = os.path.join(repo_root, ".autospec", "reports")
 ledger_path = os.path.join(state_dir, "published-issues.json")
 json_report = os.path.join(reports_dir, "github-issue-sync.json")
 md_report = os.path.join(reports_dir, "github-issue-sync.md")
+json_report_v3 = os.path.join(reports_dir, "github-issue-sync-v3.json")
+md_report_v3 = os.path.join(reports_dir, "github-issue-sync-v3.md")
 
 
 def now_iso():
@@ -120,6 +123,10 @@ def marker_value(body, marker):
     return ""
 
 
+def stable_hash(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 ledger = load_json(ledger_path, {})
 if not isinstance(ledger.get("issues"), list):
     error = "missing .autospec/state/published-issues.json schema 1 issues array; run scripts/autospec-publish-issues.sh --confirm first"
@@ -134,6 +141,8 @@ errors = []
 closed = []
 guidance = []
 resume = []
+rule_results = load_json(os.path.join(state_dir, "rule-check-results.json"), load_json(os.path.join(reports_dir, "rule-check-results.json"), {"results": []}))
+rules_by_id = {r.get("rule_id"): r for r in rule_results.get("results", []) if isinstance(r, dict)}
 for item in ledger.get("issues", []):
     local_id = item.get("local_issue_id")
     number = item.get("github_issue_number")
@@ -207,6 +216,57 @@ report = {
 }
 write_json(json_report, report)
 
+v3_items = [item for item in ledger.get("issues", []) if item.get("plan_version") == "v3"]
+rule_to_issues = {}
+for item in ledger.get("issues", []):
+    for rid in item.get("rule_ids", []) or []:
+        rule_to_issues.setdefault(rid, []).append(item.get("local_issue_id"))
+stale = []
+disappeared = []
+closed_still_failing = []
+waived_open = []
+changed_hash = []
+duplicates = []
+for item in v3_items:
+    for rid in item.get("rule_ids", []) or []:
+        rule = rules_by_id.get(rid)
+        if not rule:
+            disappeared.append({"local_issue_id": item.get("local_issue_id"), "rule_id": rid})
+            continue
+        if rule.get("status") == "pass" and item.get("state", "open") == "open":
+            stale.append({"local_issue_id": item.get("local_issue_id"), "rule_id": rid})
+        if rule.get("status") in {"waived", "opted_out"} and item.get("state", "open") == "open":
+            waived_open.append({"local_issue_id": item.get("local_issue_id"), "rule_id": rid, "status": rule.get("status")})
+        if rule.get("status") == "fail" and item.get("state") == "closed":
+            closed_still_failing.append({"local_issue_id": item.get("local_issue_id"), "rule_id": rid})
+        current_hash = stable_hash(rule)
+        if item.get("rule_result_hash") and item.get("rule_result_hash") != current_hash:
+            changed_hash.append({"local_issue_id": item.get("local_issue_id"), "rule_id": rid})
+for rid, ids in sorted(rule_to_issues.items()):
+    if len(ids) > 1:
+        duplicates.append({"rule_id": rid, "local_issue_ids": sorted(ids)})
+report_v3 = {
+    "version": 1,
+    "status": status,
+    "published_v3_issues": v3_items,
+    "stale_v3_issues": stale,
+    "disappeared_rule_issues": disappeared,
+    "source_rule_changed_hash": changed_hash,
+    "closed_issues_still_failing": closed_still_failing,
+    "waived_or_opted_out_open_issues": waived_open,
+    "duplicate_issues": duplicates,
+    "summary": {
+        "published_v3_issues": len(v3_items),
+        "stale_v3_issues": len(stale),
+        "disappeared_rule_issues": len(disappeared),
+        "source_rule_changed_hash": len(changed_hash),
+        "closed_issues_still_failing": len(closed_still_failing),
+        "waived_or_opted_out_open_issues": len(waived_open),
+        "duplicate_issues": len(duplicates),
+    },
+}
+write_json(json_report_v3, report_v3)
+
 lines = [
     "# GitHub Issue Sync",
     "",
@@ -244,6 +304,37 @@ if errors:
 lines.extend(["", "## Next Command", "", "```bash\nbash scripts/autospec-publish-issues.sh --dry-run\n```"])
 with open(md_report, "w", encoding="utf-8") as fh:
     fh.write("\n".join(lines))
+    fh.write("\n")
+
+lines_v3 = [
+    "# GitHub Issue Sync v3",
+    "",
+    f"Status: **{status.upper()}**",
+    "",
+    "## Summary",
+    "",
+    "| Metric | Count |",
+    "| --- | ---: |",
+    f"| Published v3 issues | {len(v3_items)} |",
+    f"| Stale v3 issues | {len(stale)} |",
+    f"| Disappeared rules | {len(disappeared)} |",
+    f"| Changed rule hashes | {len(changed_hash)} |",
+    f"| Closed but still failing | {len(closed_still_failing)} |",
+    f"| Waived/opted-out open | {len(waived_open)} |",
+    f"| Duplicate issues | {len(duplicates)} |",
+    "",
+    "## Findings",
+    "",
+]
+for section, rows in [("Stale", stale), ("Disappeared", disappeared), ("Changed hash", changed_hash), ("Closed still failing", closed_still_failing), ("Waived/opted-out", waived_open), ("Duplicates", duplicates)]:
+    lines_v3.append(f"### {section}")
+    if rows:
+        for row in rows:
+            lines_v3.append(f"- `{row.get('rule_id')}` {row}")
+    else:
+        lines_v3.append("- None.")
+with open(md_report_v3, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(lines_v3))
     fh.write("\n")
 
 if errors:

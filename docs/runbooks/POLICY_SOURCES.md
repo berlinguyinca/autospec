@@ -90,7 +90,31 @@ Failed structured rules generate local drafts under:
 - `.autospec/reports/issue-plan-v3.json`
 - `.autospec/reports/issue-plan-v3.md`
 
-No GitHub issues are published by this batch.
+Publish them only through explicit operator commands:
+
+```bash
+bash scripts/autospec-audit-to-backlog.sh --dry-run
+bash scripts/autospec-publish-issues.sh --dry-run --plan v3
+bash scripts/autospec-publish-issues.sh --confirm --plan v3
+```
+
+V3 issue bodies include idempotency markers for plan version, local issue ID,
+rule ID(s), rule-result hash, source-gap hash, and body hash. The published
+ledger stores rule IDs, quality gates, source policy files, maturity, category,
+and severity so supervisor, worker, verifier, and promotion reports can explain
+each autonomous action.
+
+Older v1/v2 plans remain readable. When no `--plan` is supplied, publishing
+prefers v3, then v2, then v1.
+
+## Supervisor And Verification Traceability
+
+Structured v3 issues are the preferred autonomy source. Supervisor dry-runs show
+the selected source rule(s), baseline pack, rule severity, maturity target,
+quality gates, worker eligibility, and expected validation. Worker packets carry
+the same structured policy context. Verifier reports add policy traceability,
+rule compliance, quality gate review, and maturity impact sections; promotion
+requires those checks for v3 issues.
 
 ## Compatibility Report
 

@@ -10,7 +10,7 @@ set -eu
 usage() {
     cat <<'EOF'
 Usage:
-  autospec-worker-v1.sh [--repo-root <dir>] [--issue-id <id>] [--dry-run|--confirm]
+  autospec-worker-v1.sh [--repo-root <dir>] [--issue-id <id>|--issue <number>] [--dry-run|--confirm]
   autospec-worker-v1.sh [--repo-root <dir>] [--dry-run|--confirm] --remediate --pr <number> [--branch <name>]
 
 Inputs:
@@ -46,7 +46,7 @@ BRANCH=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --repo-root) [ "$#" -ge 2 ] || die "--repo-root requires a value"; REPO_ROOT="$2"; shift 2 ;;
-        --issue-id) [ "$#" -ge 2 ] || die "--issue-id requires a value"; ISSUE_ID="$2"; shift 2 ;;
+        --issue-id|--issue) [ "$#" -ge 2 ] || die "$1 requires a value"; ISSUE_ID="$2"; shift 2 ;;
         --dry-run) CONFIRM=0; shift ;;
         --confirm) CONFIRM=1; shift ;;
         --remediate) REMEDIATE=1; shift ;;
@@ -90,6 +90,8 @@ reports_dir = os.path.join(autospec_dir, "reports")
 state_dir = os.path.join(autospec_dir, "state")
 config_path = os.path.join(autospec_dir, "autospec.yml")
 issue_plan_path = os.path.join(reports_dir, "issue-plan.json")
+issue_plan_v2_path = os.path.join(reports_dir, "issue-plan-v2.json")
+issue_plan_v3_path = os.path.join(reports_dir, "issue-plan-v3.json")
 
 risk_json = os.path.join(reports_dir, "worker-risk-classification.json")
 risk_md = os.path.join(reports_dir, "worker-risk-classification.md")
@@ -102,6 +104,7 @@ stuck_md = os.path.join(reports_dir, "worker-stuck-handoff.md")
 worker_result_json = os.path.join(reports_dir, "worker-result.json")
 worker_result_md = os.path.join(reports_dir, "worker-result.md")
 packet_md = os.path.join(state_dir, "implementation-packet.md")
+packet_json = os.path.join(state_dir, "implementation-packet.json")
 
 HIGH_RISK = [
     "auth", "authorization", "permissions", "secrets", "encryption",
@@ -183,16 +186,35 @@ def read_issue(issue):
 
 
 def pick_issue():
-    plan = load_json(issue_plan_path, {})
-    issues = plan.get("issues", []) if isinstance(plan.get("issues"), list) else []
+    plans = [
+        ("v3", issue_plan_v3_path),
+        ("v2", issue_plan_v2_path),
+        ("v1", issue_plan_path),
+    ]
+    ledger = load_json(os.path.join(state_dir, "published-issues.json"), {"issues": []})
+    ledger_items = ledger.get("issues", []) if isinstance(ledger.get("issues"), list) else []
     if requested_issue_id:
-        for issue in issues:
-            if issue.get("issue_id") == requested_issue_id:
-                return issue, len(issues)
+        ledger_item = next((item for item in ledger_items if str(item.get("github_issue_number")) == str(requested_issue_id) or str(item.get("local_issue_id")) == str(requested_issue_id)), {})
+        requested_local_id = ledger_item.get("local_issue_id", requested_issue_id)
+        for version, path in plans:
+            plan = load_json(path, {})
+            issues = plan.get("issues", []) if isinstance(plan.get("issues"), list) else []
+            for issue in issues:
+                if issue.get("issue_id") == requested_local_id:
+                    merged = dict(issue)
+                    merged.update({key: value for key, value in ledger_item.items() if value not in (None, "", [])})
+                    merged["plan_version"] = ledger_item.get("plan_version", version)
+                    merged["worker_item_id"] = str(requested_issue_id)
+                    return merged, len(issues)
         raise SystemExit(f"autospec-worker-v1: issue not found: {requested_issue_id}")
-    if not issues:
-        raise SystemExit("autospec-worker-v1: missing issue-plan.json issues")
-    return sorted(issues, key=lambda item: item.get("issue_id", ""))[0], len(issues)
+    for version, path in plans:
+        plan = load_json(path, {})
+        issues = plan.get("issues", []) if isinstance(plan.get("issues"), list) else []
+        if issues:
+            issue = dict(sorted(issues, key=lambda item: item.get("issue_id", ""))[0])
+            issue["plan_version"] = version
+            return issue, len(issues)
+    raise SystemExit("autospec-worker-v1: missing issue-plan issues")
 
 
 def words(issue, body):
@@ -202,6 +224,16 @@ def words(issue, body):
 
 
 def base_classification(issue, body):
+    structured_risk = issue.get("risk", {}) if isinstance(issue.get("risk", {}), dict) else {}
+    if issue.get("plan_version") == "v3":
+        if structured_risk.get("requires_architecture_review"):
+            return "needs-guidance", ["structured rule requires architecture review"]
+        if structured_risk.get("requires_human_review"):
+            return "needs-guidance", ["structured rule requires human review"]
+        if str(structured_risk.get("level", "")).lower() == "high":
+            return "needs-guidance", ["structured rule risk level is high"]
+        if issue.get("unsupported_check_type"):
+            return "needs-guidance", ["structured rule check type is unsupported"]
     text = words(issue, body)
     title = str(issue.get("title", "")).lower()
     labels = set(issue.get("suggested_labels", []))
@@ -352,6 +384,7 @@ def stuck_text(issue, classification, reasons, required="worker v2 or human impl
 
 worker_config, project_commands = load_config()
 issue, issue_count = pick_issue()
+structured_policy = issue.get("plan_version") == "v3"
 body = read_issue(issue)
 text = words(issue, body)
 expected_files = extract_paths(text)
@@ -371,6 +404,21 @@ elif classification == "low-risk-code" and worker_config.get("require_tests_for_
     stuck_reasons.append("No focused test path, validation script, golden fixture, or snapshot/report fixture was inferable.")
 elif classification != "low-risk-code" and code_like and classification not in {"docs-only", "spec-only", "metadata-only", "test-only"}:
     stuck_reasons.extend(reasons)
+
+if structured_policy:
+    structured_risk = issue.get("risk", {}) if isinstance(issue.get("risk", {}), dict) else {}
+    if str(structured_risk.get("level", "")).lower() == "high":
+        classification = "needs-guidance"
+        eligible = False
+        stuck_reasons.append("Structured rule risk.level is high; worker v1 requires stuck/guidance.")
+    if structured_risk.get("requires_human_review"):
+        classification = "needs-guidance"
+        eligible = False
+        stuck_reasons.append("Structured rule requires human review.")
+    if structured_risk.get("requires_architecture_review"):
+        classification = "needs-guidance"
+        eligible = False
+        stuck_reasons.append("Structured rule requires architecture review.")
 
 plan = validation_plan(test_candidates, project_commands)
 numstat = git_numstat()
@@ -413,6 +461,18 @@ risk_report = {
     "classification_reasons": reasons + stuck_reasons,
     "code_change_eligible": bool(eligible),
     "worker_config": worker_config,
+    "structured_policy_context": {
+        "plan_version": issue.get("plan_version", "legacy"),
+        "rule_ids": issue.get("source_rule_ids") or issue.get("rule_ids") or [],
+        "quality_gate_ids": issue.get("quality_gate_ids") or [re.sub(r"[^a-z0-9_.-]+", "_", str(g).lower()).strip("_") for g in issue.get("quality_gates", [])],
+        "category": issue.get("category", ""),
+        "severity": issue.get("rule_severity") or issue.get("severity", ""),
+        "maturity_target": issue.get("maturity_level", ""),
+        "source_doctrine": issue.get("source_doctrine", ""),
+        "source_baseline_pack": issue.get("source_baseline_pack", ""),
+        "source_policy_file": issue.get("source_file", ""),
+        "risk": issue.get("risk", {}),
+    },
 }
 write_json(risk_json, risk_report)
 write_text(risk_md, "\n".join([
@@ -473,8 +533,52 @@ write_text(diff_md, "\n".join([
     "\n".join(f"- `{item['path']}` (+{item['added']} -{item['removed']})" for item in diff_report["files_changed"]) or "- No local diff detected.",
 ]))
 
+structured_context = risk_report["structured_policy_context"]
 packet = "\n".join([
     f"# Implementation packet: {issue.get('title')}",
+    "",
+    "## Structured Policy Context",
+    "",
+    f"- Plan version: `{structured_context['plan_version']}`",
+    f"- Category: `{structured_context['category'] or 'unknown'}`",
+    f"- Severity: `{structured_context['severity'] or 'unknown'}`",
+    f"- Maturity target: `{structured_context['maturity_target'] or 'unknown'}`",
+    "",
+    "## Rule IDs",
+    "",
+    "\n".join(f"- `{rid}`" for rid in structured_context["rule_ids"]) or "- None.",
+    "",
+    "## Source Doctrine",
+    "",
+    structured_context["source_doctrine"] or "n/a",
+    "",
+    "## Source Baseline Pack",
+    "",
+    structured_context["source_baseline_pack"] or "n/a",
+    "",
+    "## Quality Gates",
+    "",
+    "\n".join(f"- `{gid}`" for gid in structured_context["quality_gate_ids"]) or "- None.",
+    "",
+    "## Rule Check Evidence",
+    "",
+    "\n".join(f"- {item}" for item in issue.get("evidence", [])) or "- None.",
+    "",
+    "## Missing Evidence",
+    "",
+    "\n".join(f"- {item}" for item in issue.get("missing_evidence", [])) or "- None.",
+    "",
+    "## Maturity Target",
+    "",
+    structured_context["maturity_target"] or "unknown",
+    "",
+    "## Structured Acceptance Criteria",
+    "",
+    "\n".join(f"- [ ] {item}" for item in issue.get("acceptance_criteria", [])) or "- None.",
+    "",
+    "## Policy-Derived Validation Expectations",
+    "",
+    "\n".join(f"- `{item}`" for item in issue.get("validation_expectations", [])) or "- None.",
     "",
     "## Risk classification",
     "",
@@ -517,6 +621,26 @@ packet = "\n".join([
     "- No focused test or validation path is inferable.",
 ])
 write_text(packet_md, packet)
+write_json(packet_json, {
+    "version": 2,
+    "issue_id": issue.get("issue_id"),
+    "title": issue.get("title"),
+    "classification": classification,
+    "structured_policy_context": {
+        **structured_context,
+        "rule_check_evidence": issue.get("evidence", []),
+        "missing_evidence": issue.get("missing_evidence", []),
+        "acceptance_criteria": issue.get("acceptance_criteria", []),
+        "validation_expectations": issue.get("validation_expectations", []),
+        "metadata_expectations": issue.get("metadata_expectations", []),
+        "remediation_hint": issue.get("remediation_hint", ""),
+    },
+    "code_change_eligible": bool(eligible),
+})
+work_item_id = str(issue.get("worker_item_id") or issue.get("github_issue_number") or issue.get("issue_id") or "unknown")
+work_item_dir = os.path.join(state_dir, "work-items", work_item_id)
+write_text(os.path.join(work_item_dir, "implementation-packet.md"), packet)
+write_json(os.path.join(work_item_dir, "implementation-packet.json"), load_json(packet_json, {}))
 
 pr_body = "\n".join([
     f"# {issue.get('title')}",
@@ -564,8 +688,10 @@ write_text(pr_body_md, pr_body)
 
 if stuck_reasons or not pr_allowed and classification in {"needs-guidance", "high-risk-code", "unsupported", "medium-risk-code", "architecture-required"}:
     write_text(stuck_md, stuck_text(issue, classification, stuck_reasons or reasons))
+    write_text(os.path.join(work_item_dir, "stuck-handoff.md"), stuck_text(issue, classification, stuck_reasons or reasons))
 elif budget_failures:
     write_text(stuck_md, stuck_text(issue, classification, budget_failures))
+    write_text(os.path.join(work_item_dir, "stuck-handoff.md"), stuck_text(issue, classification, budget_failures))
 
 next_command = f"bash scripts/autospec-verify-worker-pr.sh --dry-run --work-item .autospec/state"
 worker_result = {
@@ -598,4 +724,6 @@ print("worker v1: PASS")
 print(f"issue: {issue.get('issue_id')}")
 print(f"classification: {classification}")
 print("mode: confirm" if confirm else "mode: dry-run")
+if structured_policy and classification == "needs-guidance":
+    sys.exit(1)
 PY

@@ -72,18 +72,31 @@ def run_script(args):
 
 def select_issue():
     if issue:
-        return str(issue)
-    plan = load(os.path.join(reports, "issue-plan.json"), {})
-    issues = plan.get("issues", [])
-    if issues:
-        return str(issues[0].get("github_issue_number") or issues[0].get("issue_number") or 1)
+        return str(issue), {}
     published = load(os.path.join(state, "published-issues.json"), {})
     items = published.get("issues", [])
     if items:
-        return str(items[0].get("github_issue_number") or 1)
-    return "1"
+        ordered = sorted(items, key=lambda x: ({"v3": 0, "v2": 1, "v1": 2}.get(x.get("plan_version", "v1"), 3), x.get("local_issue_id", "")))
+        selected = ordered[0]
+        return str(selected.get("github_issue_number") or selected.get("local_issue_id") or 1), selected
+    for version, filename in [("v3", "issue-plan-v3.json"), ("v2", "issue-plan-v2.json"), ("v1", "issue-plan.json")]:
+        plan = load(os.path.join(reports, filename), {})
+        issues = plan.get("issues", [])
+        if issues:
+            selected = dict(sorted(issues, key=lambda item: item.get("issue_id", ""))[0])
+            selected["plan_version"] = version
+            return str(selected.get("github_issue_number") or selected.get("issue_number") or selected.get("issue_id") or 1), selected
+    return "1", {}
 
-selected_issue = select_issue()
+selected_issue, selected_context = select_issue()
+rule_ids = selected_context.get("rule_ids") or selected_context.get("source_rule_ids") or []
+quality_gate_ids = selected_context.get("quality_gate_ids") or selected_context.get("quality_gates") or []
+risk = selected_context.get("risk", {}) if isinstance(selected_context.get("risk", {}), dict) else {}
+eligibility = "eligible"
+if str(risk.get("level", "")).lower() == "high" or risk.get("requires_architecture_review"):
+    eligibility = "stuck_guidance"
+elif risk.get("requires_human_review"):
+    eligibility = "docs_spec_metadata_only"
 steps = [
     "sync published issues",
     "sync guidance",
@@ -99,6 +112,26 @@ plan = {
     "mode": "confirm" if confirm else "dry_run",
     "planned_issue_count": 1,
     "selected_issue": selected_issue,
+    "selected_issue_context": {
+        "plan_version": selected_context.get("plan_version", "legacy"),
+        "local_issue_id": selected_context.get("local_issue_id") or selected_context.get("issue_id", ""),
+        "rule_ids": rule_ids,
+        "quality_gate_ids": quality_gate_ids,
+        "category": selected_context.get("category", ""),
+        "severity": selected_context.get("severity") or selected_context.get("rule_severity", ""),
+        "maturity_target": selected_context.get("maturity_level", ""),
+        "source_doctrine": selected_context.get("source_doctrine", ""),
+        "source_baseline_pack": selected_context.get("source_baseline_pack", ""),
+        "source_policy_file": selected_context.get("source_file", "") or (selected_context.get("source_policy_files") or [""])[0],
+        "rule_check_evidence": selected_context.get("evidence", []),
+        "missing_evidence": selected_context.get("missing_evidence", []),
+        "remediation_hint": selected_context.get("remediation_hint", ""),
+        "structured_acceptance_criteria": selected_context.get("acceptance_criteria", []),
+        "structured_validation_expectations": selected_context.get("validation_expectations", []),
+        "risk": risk,
+        "worker_eligibility": eligibility,
+        "why_selected": "v3 structured-rule issue has highest source priority" if selected_context.get("plan_version") == "v3" else "highest available compatible issue source",
+    },
     "steps": steps,
     "limits": {
         "max_issues_per_cycle": 1,
@@ -108,19 +141,60 @@ plan = {
     },
 }
 write_json(os.path.join(reports, "supervisor-cycle-plan.json"), plan)
-write_text(
-    os.path.join(reports, "supervisor-cycle-plan.md"),
-    "\n".join([
-        "# Supervisor Cycle Plan",
-        "",
-        f"Selected issue: `{selected_issue}`",
-        "",
-        "## Planned Steps",
-        *[f"- {s}" for s in steps],
-        "",
-        "This cycle is capped at one issue and performs no merge or approval.",
-    ]),
-)
+plan_md = [
+    "# Supervisor Cycle Plan",
+    "",
+    "## Selected Issue",
+    "",
+    f"Selected issue: `{selected_issue}`",
+    "",
+    "## Source Rule(s)",
+    "",
+]
+plan_md.extend([f"- `{rid}`" for rid in rule_ids] if rule_ids else ["- None."])
+plan_md.extend([
+    "",
+    "## Source Baseline Pack",
+    "",
+    f"`{selected_context.get('source_baseline_pack', '') or 'n/a'}`",
+    "",
+    "## Rule Severity",
+    "",
+    f"`{selected_context.get('severity') or selected_context.get('rule_severity') or 'unknown'}`",
+    "",
+    "## Maturity Target",
+    "",
+    f"`{selected_context.get('maturity_level', 'unknown')}`",
+    "",
+    "## Quality Gates",
+    "",
+])
+plan_md.extend([f"- `{gid}`" for gid in quality_gate_ids] if quality_gate_ids else ["- None."])
+plan_md.extend([
+    "",
+    "## Worker Eligibility",
+    "",
+    f"`{eligibility}`",
+    "",
+    "## Expected Validation",
+    "",
+])
+validation_expectations = selected_context.get("validation_expectations", [])
+plan_md.extend([f"- `{cmd}`" for cmd in validation_expectations] if validation_expectations else ["- None."])
+plan_md.extend([
+    "",
+    "## Why This Issue Was Selected",
+    "",
+    plan["selected_issue_context"]["why_selected"],
+    "",
+    "## Planned Steps",
+])
+plan_md.extend([f"- {s}" for s in steps])
+plan_md.extend([
+    "",
+    "This cycle is capped at one issue and performs no merge or approval.",
+])
+write_text(os.path.join(reports, "supervisor-cycle-plan.md"), "\n".join(plan_md))
 
 if not confirm:
     print("supervisor cycle plan: PASS")

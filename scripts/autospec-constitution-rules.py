@@ -350,59 +350,6 @@ def result(rule, status, confidence, summary, evidence=None, missing=None):
     return {"rule_id": rule["rule_id"], "title": rule["title"], "category": rule["category"], "severity": rule["severity"], "status": status, "confidence": confidence, "summary": summary, "evidence": evidence or [], "missing_evidence": missing or [], "affected_metadata": [], "suggested_issue_title": "" if status in {"pass", "waived", "opted_out"} else f"feat: satisfy {rule['rule_id']}", "acceptance_criteria": rule.get("acceptance_criteria", []), "remediation_hint": rule.get("remediation_hint", "")}
 
 
-def check_rule(root: Path, rule: dict, inv: dict, caps: dict, tech_names: set[str], tech_sprawl: list[dict]):
-    resolution = rule.get("resolution")
-    if resolution in {"waived", "opted_out"}:
-        return result(rule, resolution, 1.0, f"Rule is {resolution}.", [json.dumps(rule.get("waiver"), sort_keys=True)] if rule.get("waiver") else [])
-    if resolution == "manual_review" or rule.get("check_type") == "manual_review":
-        return result(rule, "manual_review", rule.get("confidence", 0.3), "Rule requires manual interpretation.", rule.get("extraction_evidence", []))
-    if resolution != "active":
-        return result(rule, "not_applicable", 0.9, f"Rule inactive: {resolution}.", [])
-    ct = rule.get("check_type")
-    expected = rule.get("expected", {})
-    files = {f["path"] for f in inv.get("files", [])}
-    if ct in {"required_file", "required_metadata"}:
-        target = expected.get("file") or expected.get("path")
-        ok = bool(target and (root / target).exists())
-        return result(rule, "pass" if ok else "fail", 0.9, f"Required file {target} {'exists' if ok else 'is missing'}.", [target] if ok else [], [target] if not ok else [])
-    if ct == "required_directory":
-        target = expected.get("directory")
-        ok = bool(target and (root / target).is_dir())
-        return result(rule, "pass" if ok else "fail", 0.9, f"Required directory {target} {'exists' if ok else 'is missing'}.", [target] if ok else [], [target] if not ok else [])
-    if ct in {"required_tool", "required_dependency"}:
-        tool = expected.get("tool") or expected.get("dependency")
-        ok = tool in tech_names
-        return result(rule, "pass" if ok else "fail", 0.85, f"Required tool/dependency `{tool}` {'was found' if ok else 'was not found'}.", [tool] if ok else [], [tool] if not ok else [])
-    if ct == "required_capability":
-        cid = expected.get("capability")
-        ok = any(c.get("id") == cid for c in caps.get("capabilities", []))
-        return result(rule, "pass" if ok else "fail", 0.8, f"Required capability `{cid}` {'was found' if ok else 'was not found'}.", [cid] if ok else [], [cid] if not ok else [])
-    if ct in {"required_doc", "required_tutorial"}:
-        docs = inv.get("files_by_purpose", {}).get("documentation", [])
-        ok = bool(docs)
-        return result(rule, "pass" if ok else "fail", 0.75, "Documentation evidence exists." if ok else "Documentation evidence is missing.", docs, [] if ok else ["documentation"])
-    if ct == "required_test":
-        tests = inv.get("files_by_purpose", {}).get("test", [])
-        ok = bool(tests)
-        return result(rule, "pass" if ok else "fail", 0.75, "Test evidence exists." if ok else "Test evidence is missing.", tests, [] if ok else ["test"])
-    if ct == "required_surface":
-        purpose = expected.get("surface", "")
-        ok = bool(inv.get("files_by_purpose", {}).get(purpose))
-        return result(rule, "pass" if ok else "fail", 0.7, f"Surface `{purpose}` {'exists' if ok else 'is missing'}.")
-    if ct in {"required_setting", "required_ai_capability", "required_mcp_capability", "required_report", "required_visualization_standard"}:
-        keyword = expected.get("name") or expected.get("file") or rule["category"]
-        ok = any(keyword and keyword.lower() in f.lower() for f in files)
-        return result(rule, "pass" if ok else "unknown", 0.5, f"Heuristic check for `{keyword}` {'found evidence' if ok else 'needs review'}.")
-    if ct == "forbidden_dependency_sprawl":
-        category = expected.get("category", "")
-        matches = [s for s in tech_sprawl if category.replace("_", " ") in s.get("message", "") or category in s.get("message", "")]
-        return result(rule, "fail" if matches else "pass", 0.8, "Forbidden dependency sprawl detected." if matches else "No forbidden dependency sprawl detected.", [m["message"] for m in matches], ["standardized dependency category"] if matches else [])
-    if ct == "forbidden_missing_metadata":
-        missing = [p for p in [".autospec/state/digital-twin.json", ".autospec/state/knowledge-graph.json"] if not (root / p).exists()]
-        return result(rule, "fail" if missing else "pass", 0.9, "Metadata missing." if missing else "Required metadata exists.", [], missing)
-    return result(rule, "manual_review", 0.2, f"Unsupported v1 check type: {ct}.", rule.get("extraction_evidence", []))
-
-
 def checks_md(report: dict) -> str:
     lines = ["# Rule Check Results", "", "| Rule | Category | Severity | Status | Summary |", "| --- | --- | --- | --- | --- |"]
     for r in report["results"]:
@@ -999,67 +946,141 @@ def file_exists_any(root: Path, paths: list[str]) -> tuple[bool, list[str]]:
     return bool(hits), hits
 
 
-def check_rule(root: Path, rule: dict, inv: dict, caps: dict, tech_names: set[str], tech_sprawl: list[dict]):  # v2 override
+def _expected_paths(expected: dict, *keys: str) -> list[str]:
+    if isinstance(expected.get("paths"), list):
+        return [str(p) for p in expected["paths"]]
+    for key in keys:
+        if expected.get(key):
+            return [str(expected[key])]
+    return [""]
+
+
+def _check_required_file(root: Path, rule: dict, expected: dict, *_context):
+    paths = _expected_paths(expected, "file", "path")
+    ok, hits = file_exists_any(root, paths)
+    return result(rule, "pass" if ok else "fail", 0.9, "Required file evidence exists." if ok else "Required file evidence is missing.", hits, [] if ok else [p for p in paths if p])
+
+
+def _check_required_directory(root: Path, rule: dict, expected: dict, *_context):
+    paths = _expected_paths(expected, "directory", "path")
+    hits = [p for p in paths if p and (root / p).is_dir()]
+    return result(rule, "pass" if hits else "fail", 0.9, "Required directory exists." if hits else "Required directory is missing.", hits, [] if hits else [p for p in paths if p])
+
+
+def _check_required_metadata(root: Path, rule: dict, expected: dict, *_context):
+    name = expected.get("metadata") or expected.get("file") or expected.get("path")
+    candidates = [str(name)] if str(name).startswith(".autospec/") else [f".autospec/state/{name}.json", f".autospec/state/{name}.yml", f".autospec/state/{name}.md"]
+    ok, hits = file_exists_any(root, candidates)
+    return result(rule, "pass" if ok else "fail", 0.9, f"Required metadata `{name}` {'exists' if ok else 'is missing'}.", hits, [] if ok else candidates)
+
+
+def _check_required_tool(_root: Path, rule: dict, expected: dict, tech_names: set[str], _sprawl: list[dict], _inv: dict, _caps: dict, all_text: str):
+    name = expected.get("name") or expected.get("tool") or expected.get("dependency")
+    ok = str(name) in tech_names or str(name).lower() in all_text
+    return result(rule, "pass" if ok else "fail", 0.85, f"Required tool/dependency `{name}` {'was found' if ok else 'was not found'}.", [str(name)] if ok else [], [str(name)] if not ok else [])
+
+
+def _check_forbidden_tool(_root: Path, rule: dict, expected: dict, tech_names: set[str], _sprawl: list[dict], _inv: dict, _caps: dict, all_text: str):
+    name = expected.get("name") or expected.get("tool") or expected.get("dependency")
+    found = str(name) in tech_names or str(name).lower() in all_text
+    return result(rule, "fail" if found else "pass", 0.85, f"Forbidden tool/dependency `{name}` {'was found' if found else 'was not found'}.", [str(name)] if found else [], [])
+
+
+def _check_required_capability(_root: Path, rule: dict, expected: dict, _tech_names, _sprawl, _inv: dict, caps: dict, _all_text: str):
+    cid = expected.get("id") or expected.get("capability") or expected.get("name")
+    cap_ids = {c.get("id") for c in caps.get("capabilities", []) if isinstance(c, dict)}
+    ok = cid in cap_ids
+    return result(rule, "pass" if ok else "fail", 0.8, f"Required capability `{cid}` {'was found' if ok else 'was not found'}.", [str(cid)] if ok else [], [str(cid)] if not ok else [])
+
+
+def _check_required_doc(_root: Path, rule: dict, _expected: dict, _tech_names, _sprawl, inv: dict, _caps: dict, _all_text: str):
+    docs = inv.get("files_by_purpose", {}).get("documentation", [])
+    return result(rule, "pass" if docs else "fail", 0.75, "Documentation evidence exists." if docs else "Documentation evidence is missing.", docs, [] if docs else ["documentation"])
+
+
+def _check_required_test(_root: Path, rule: dict, _expected: dict, _tech_names, _sprawl, inv: dict, _caps: dict, _all_text: str):
+    tests = inv.get("files_by_purpose", {}).get("test", [])
+    return result(rule, "pass" if tests else "fail", 0.75, "Test evidence exists." if tests else "Test evidence is missing.", tests, [] if tests else ["test"])
+
+
+def _check_required_surface(_root: Path, rule: dict, expected: dict, _tech_names, _sprawl, inv: dict, _caps: dict, _all_text: str):
+    surface = expected.get("surface", "ui")
+    paths = inv.get("files_by_purpose", {}).get(str(surface), [])
+    return result(rule, "pass" if paths else "fail", 0.7, f"Surface `{surface}` {'exists' if paths else 'is missing'}.", paths, [] if paths else [str(surface)])
+
+
+def _check_keyword_evidence(_root: Path, rule: dict, expected: dict, _tech_names, _sprawl, _inv: dict, _caps: dict, all_text: str):
+    keywords = expected.get("keywords") if isinstance(expected.get("keywords"), list) else [expected.get("name") or expected.get("file") or rule["category"]]
+    hits = [str(k) for k in keywords if str(k).lower() in all_text]
+    return result(rule, "pass" if hits else "unknown", 0.5, "Heuristic evidence found." if hits else "Heuristic check needs review.", hits, [str(k) for k in keywords if k] if not hits else [])
+
+
+def _check_dependency_sprawl(_root: Path, rule: dict, expected: dict, _tech_names, tech_sprawl: list[dict], _inv: dict, _caps: dict, _all_text: str):
+    cats = expected.get("categories") if isinstance(expected.get("categories"), list) else [expected.get("category", "")]
+    matches = [s for s in tech_sprawl if any(str(c).replace("_", " ") in s.get("message", "") or str(c) in s.get("message", "") for c in cats)]
+    return result(rule, "fail" if matches else "pass", 0.8, "Forbidden dependency sprawl detected." if matches else "No forbidden dependency sprawl detected.", [m["message"] for m in matches], ["standardized dependency category"] if matches else [])
+
+
+def _check_missing_metadata(root: Path, rule: dict, _expected: dict, *_context):
+    missing = [p for p in [".autospec/state/digital-twin.json", ".autospec/state/knowledge-graph.json"] if not (root / p).exists()]
+    return result(rule, "fail" if missing else "pass", 0.9, "Metadata missing." if missing else "Required metadata exists.", [], missing)
+
+
+RULE_CHECK_HANDLERS = {
+    "required_file": _check_required_file,
+    "required_directory": _check_required_directory,
+    "required_metadata": _check_required_metadata,
+    "required_tool": _check_required_tool,
+    "required_dependency": _check_required_tool,
+    "forbidden_dependency": _check_forbidden_tool,
+    "forbidden_tool": _check_forbidden_tool,
+    "required_capability": _check_required_capability,
+    "required_ai_capability": _check_required_capability,
+    "required_mcp_capability": _check_required_capability,
+    "required_doc": _check_required_doc,
+    "required_tutorial": _check_required_doc,
+    "required_test": _check_required_test,
+    "required_surface": _check_required_surface,
+    "required_setting": _check_keyword_evidence,
+    "required_report": _check_keyword_evidence,
+    "required_visualization_standard": _check_keyword_evidence,
+    "forbidden_dependency_sprawl": _check_dependency_sprawl,
+    "forbidden_missing_metadata": _check_missing_metadata,
+}
+
+
+def resolved_rule_result(rule: dict):
     resolution = rule.get("resolution")
+    inactive = {
+        "inactive_profile_mismatch",
+        "inactive_maturity_level",
+        "inactive_application_type",
+        "inactive_technology_mismatch",
+        "inactive_repo_condition",
+    }
     if resolution in {"waived", "opted_out"}:
-        return result(rule, resolution, 1.0, f"Rule is {resolution}.", [json.dumps(rule.get("waiver"), sort_keys=True)] if rule.get("waiver") else [])
-    if resolution in {"inactive_profile_mismatch", "inactive_maturity_level", "inactive_application_type", "inactive_technology_mismatch", "inactive_repo_condition"}:
+        evidence = [json.dumps(rule.get("waiver"), sort_keys=True)] if rule.get("waiver") else []
+        return result(rule, resolution, 1.0, f"Rule is {resolution}.", evidence)
+    if resolution in inactive:
         return result(rule, "not_applicable", 0.9, f"Rule inactive: {resolution}.")
     if resolution in {"unsupported_check_type", "invalid"}:
         return result(rule, "manual_review", 0.2, f"Rule requires engine support or repair: {resolution}.", rule.get("extraction_evidence", []))
     if resolution == "manual_review" or rule.get("check_type") == "manual_review":
         return result(rule, "manual_review", rule.get("confidence", 0.3), "Rule requires manual interpretation.", rule.get("extraction_evidence", []))
+    return None
+
+
+def check_rule(root: Path, rule: dict, inv: dict, caps: dict, tech_names: set[str], tech_sprawl: list[dict]):  # v2 override
+    resolved = resolved_rule_result(rule)
+    if resolved is not None:
+        return resolved
     ct = rule.get("check_type")
     expected = rule.get("expected", {}) if isinstance(rule.get("expected"), dict) else {}
     files = {f["path"] for f in inv.get("files", []) if isinstance(f, dict) and f.get("path")}
     all_text = "\n".join(sorted(files)).lower()
-    if ct == "required_file":
-        paths = expected.get("paths") if isinstance(expected.get("paths"), list) else [expected.get("file") or expected.get("path") or ""]
-        ok, hits = file_exists_any(root, [str(p) for p in paths])
-        return result(rule, "pass" if ok else "fail", 0.9, "Required file evidence exists." if ok else "Required file evidence is missing.", hits, [] if ok else [str(p) for p in paths if p])
-    if ct in {"required_directory"}:
-        paths = expected.get("paths") if isinstance(expected.get("paths"), list) else [expected.get("directory") or expected.get("path") or ""]
-        hits = [str(p) for p in paths if p and (root / str(p)).is_dir()]
-        return result(rule, "pass" if hits else "fail", 0.9, "Required directory exists." if hits else "Required directory is missing.", hits, [] if hits else [str(p) for p in paths if p])
-    if ct == "required_metadata":
-        name = expected.get("metadata") or expected.get("file") or expected.get("path")
-        candidates = [str(name)] if str(name).startswith(".autospec/") else [f".autospec/state/{name}.json", f".autospec/state/{name}.yml", f".autospec/state/{name}.md"]
-        ok, hits = file_exists_any(root, candidates)
-        return result(rule, "pass" if ok else "fail", 0.9, f"Required metadata `{name}` {'exists' if ok else 'is missing'}.", hits, [] if ok else candidates)
-    if ct in {"required_tool", "required_dependency"}:
-        name = expected.get("name") or expected.get("tool") or expected.get("dependency")
-        ok = str(name) in tech_names or str(name).lower() in all_text
-        return result(rule, "pass" if ok else "fail", 0.85, f"Required tool/dependency `{name}` {'was found' if ok else 'was not found'}.", [str(name)] if ok else [], [str(name)] if not ok else [])
-    if ct in {"forbidden_dependency", "forbidden_tool"}:
-        name = expected.get("name") or expected.get("tool") or expected.get("dependency")
-        found = str(name) in tech_names or str(name).lower() in all_text
-        return result(rule, "fail" if found else "pass", 0.85, f"Forbidden tool/dependency `{name}` {'was found' if found else 'was not found'}.", [str(name)] if found else [], [])
-    if ct in {"required_capability", "required_ai_capability", "required_mcp_capability"}:
-        cid = expected.get("id") or expected.get("capability") or expected.get("name")
-        cap_ids = {c.get("id") for c in caps.get("capabilities", []) if isinstance(c, dict)}
-        ok = cid in cap_ids
-        return result(rule, "pass" if ok else "fail", 0.8, f"Required capability `{cid}` {'was found' if ok else 'was not found'}.", [str(cid)] if ok else [], [str(cid)] if not ok else [])
-    if ct in {"required_doc", "required_tutorial"}:
-        docs = inv.get("files_by_purpose", {}).get("documentation", [])
-        return result(rule, "pass" if docs else "fail", 0.75, "Documentation evidence exists." if docs else "Documentation evidence is missing.", docs, [] if docs else ["documentation"])
-    if ct == "required_test":
-        tests = inv.get("files_by_purpose", {}).get("test", [])
-        return result(rule, "pass" if tests else "fail", 0.75, "Test evidence exists." if tests else "Test evidence is missing.", tests, [] if tests else ["test"])
-    if ct == "required_surface":
-        surface = expected.get("surface", "ui")
-        paths = inv.get("files_by_purpose", {}).get(str(surface), [])
-        return result(rule, "pass" if paths else "fail", 0.7, f"Surface `{surface}` {'exists' if paths else 'is missing'}.", paths, [] if paths else [str(surface)])
-    if ct in {"required_setting", "required_report", "required_visualization_standard"}:
-        keywords = expected.get("keywords") if isinstance(expected.get("keywords"), list) else [expected.get("name") or expected.get("file") or rule["category"]]
-        ok = any(str(k).lower() in all_text for k in keywords if k)
-        return result(rule, "pass" if ok else "unknown", 0.5, "Heuristic evidence found." if ok else "Heuristic check needs review.", [str(k) for k in keywords if str(k).lower() in all_text], [str(k) for k in keywords if k] if not ok else [])
-    if ct == "forbidden_dependency_sprawl":
-        cats = expected.get("categories") if isinstance(expected.get("categories"), list) else [expected.get("category", "")]
-        matches = [s for s in tech_sprawl if any(str(c).replace("_", " ") in s.get("message", "") or str(c) in s.get("message", "") for c in cats)]
-        return result(rule, "fail" if matches else "pass", 0.8, "Forbidden dependency sprawl detected." if matches else "No forbidden dependency sprawl detected.", [m["message"] for m in matches], ["standardized dependency category"] if matches else [])
-    if ct == "forbidden_missing_metadata":
-        missing = [p for p in [".autospec/state/digital-twin.json", ".autospec/state/knowledge-graph.json"] if not (root / p).exists()]
-        return result(rule, "fail" if missing else "pass", 0.9, "Metadata missing." if missing else "Required metadata exists.", [], missing)
+    handler = RULE_CHECK_HANDLERS.get(ct)
+    if handler:
+        return handler(root, rule, expected, tech_names, tech_sprawl, inv, caps, all_text)
     return result(rule, "manual_review", 0.2, f"Unsupported check type: {ct}.", rule.get("extraction_evidence", []))
 
 
@@ -1204,23 +1225,17 @@ def main() -> int:
     parser.add_argument("--repo-root", default=os.getcwd())
     args = parser.parse_args()
     root = Path(args.repo_root).resolve()
-    if args.command == "load":
-        return policy_load(root)
-    if args.command == "validate-sources":
-        return validate_policy_sources(root)
-    if args.command == "lock-sources":
-        return lock_policy_sources(root)
-    if args.command == "extract":
-        return extract(root)
-    if args.command == "check":
-        return check(root)
-    if args.command == "gap":
-        return gap(root)
-    if args.command == "audit":
-        return audit(root)
-    if args.command == "compatibility":
-        return policy_compatibility(root)
-    return 2
+    handlers = {
+        "load": policy_load,
+        "validate-sources": validate_policy_sources,
+        "lock-sources": lock_policy_sources,
+        "extract": extract,
+        "check": check,
+        "gap": gap,
+        "audit": audit,
+        "compatibility": policy_compatibility,
+    }
+    return handlers.get(args.command, lambda _root: 2)(root)
 
 
 if __name__ == "__main__":

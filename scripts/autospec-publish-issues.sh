@@ -9,7 +9,7 @@ set -eu
 usage() {
     cat <<'EOF'
 Usage:
-  autospec-publish-issues.sh [--repo-root <dir>] [--dry-run|--confirm] [--repo OWNER/REPO] [--reopen]
+  autospec-publish-issues.sh [--repo-root <dir>] [--dry-run|--confirm] [--repo OWNER/REPO] [--reopen] [--plan v1|v2|v3]
 
 Inputs:
   .autospec/reports/issue-plan.json
@@ -36,6 +36,7 @@ CONFIRM=0
 MODE_SET=0
 REOPEN=0
 GH_REPO=""
+PLAN_VERSION=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --repo-root) [ "$#" -ge 2 ] || die "--repo-root requires a value"; REPO_ROOT="$2"; shift 2 ;;
@@ -43,6 +44,7 @@ while [ "$#" -gt 0 ]; do
         --confirm) CONFIRM=1; MODE_SET=1; shift ;;
         --repo) [ "$#" -ge 2 ] || die "--repo requires OWNER/REPO"; GH_REPO="$2"; shift 2 ;;
         --reopen) REOPEN=1; shift ;;
+        --plan) [ "$#" -ge 2 ] || die "--plan requires v1, v2, or v3"; PLAN_VERSION="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown arg: $1" ;;
     esac
@@ -51,7 +53,7 @@ done
 [ -d "$REPO_ROOT" ] || die "--repo-root does not exist: $REPO_ROOT"
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
 
-python3 - "$REPO_ROOT" "$CONFIRM" "$MODE_SET" "$GH_REPO" "$REOPEN" <<'PY'
+python3 - "$REPO_ROOT" "$CONFIRM" "$MODE_SET" "$GH_REPO" "$REOPEN" "$PLAN_VERSION" <<'PY'
 import datetime
 import hashlib
 import json
@@ -71,14 +73,34 @@ confirm = sys.argv[2] == "1"
 mode_set = sys.argv[3] == "1"
 gh_repo = sys.argv[4]
 reopen_closed = sys.argv[5] == "1"
+requested_plan_version = sys.argv[6]
 reports_dir = os.path.join(repo_root, ".autospec", "reports")
 state_dir = os.path.join(repo_root, ".autospec", "state")
 config_path = os.path.join(repo_root, ".autospec", "autospec.yml")
-issue_plan_path = os.path.join(reports_dir, "issue-plan.json")
 labels_path = os.path.join(state_dir, "control-labels.yml")
 ledger_path = os.path.join(state_dir, "published-issues.json")
-json_report = os.path.join(reports_dir, "github-issue-publish-result.json" if confirm else "github-issue-publish-plan.json")
-md_report = os.path.join(reports_dir, "github-issue-publish-result.md" if confirm else "github-issue-publish-plan.md")
+
+
+def select_plan():
+    candidates = {
+        "v3": (os.path.join(reports_dir, "issue-plan-v3.json"), os.path.join(repo_root, ".autospec", "backlog", "issues-v3")),
+        "v2": (os.path.join(reports_dir, "issue-plan-v2.json"), os.path.join(repo_root, ".autospec", "backlog", "issues-v2")),
+        "v1": (os.path.join(reports_dir, "issue-plan.json"), os.path.join(repo_root, ".autospec", "backlog", "issues")),
+    }
+    if requested_plan_version:
+        if requested_plan_version not in candidates:
+            raise SystemExit("autospec-publish-issues: --plan must be v1, v2, or v3")
+        return requested_plan_version, candidates[requested_plan_version]
+    for version in ["v3", "v2", "v1"]:
+        if os.path.isfile(candidates[version][0]):
+            return version, candidates[version]
+    return "v1", candidates["v1"]
+
+
+plan_version, (issue_plan_path, backlog_dir) = select_plan()
+suffix = "-v3" if plan_version == "v3" else ""
+json_report = os.path.join(reports_dir, f"github-issue-publish-{'result' if confirm else 'plan'}{suffix}.json")
+md_report = os.path.join(reports_dir, f"github-issue-publish-{'result' if confirm else 'plan'}{suffix}.md")
 
 
 def now_iso():
@@ -172,7 +194,24 @@ def issue_number_from_url(url):
 
 
 def source_gap_hash(issue):
-    return sha256(json.dumps(issue.get("source_gap", {}), sort_keys=True))
+    payload = {
+        "source_gap": issue.get("source_gap", {}),
+        "rule_ids": issue.get("source_rule_ids") or issue.get("rule_ids") or [],
+        "missing_evidence": issue.get("missing_evidence", []),
+        "status": issue.get("status", ""),
+    }
+    return sha256(json.dumps(payload, sort_keys=True))
+
+
+def rule_result_hash(issue):
+    payload = {
+        "rule_ids": issue.get("source_rule_ids") or issue.get("rule_ids") or [],
+        "evidence": issue.get("evidence", []),
+        "missing_evidence": issue.get("missing_evidence", []),
+        "acceptance_criteria": issue.get("acceptance_criteria", []),
+        "quality_gates": issue.get("quality_gates", []),
+    }
+    return sha256(json.dumps(payload, sort_keys=True))
 
 
 def body_for_issue(issue):
@@ -180,13 +219,25 @@ def body_for_issue(issue):
     with open(draft_path, "r", encoding="utf-8") as fh:
         draft_body = fh.read()
     source_hash = source_gap_hash(issue)
-    base = "\n".join([
-        f"<!-- autospec-local-issue-id: {issue['issue_id']} -->",
-        f"<!-- autospec-source-gap-hash: {source_hash} -->",
-        "<!-- autospec-body-hash: __AUTOSPEC_BODY_HASH__ -->",
-        "",
-        draft_body,
-    ])
+    markers = []
+    if plan_version == "v3":
+        rule_ids = issue.get("source_rule_ids") or issue.get("rule_ids") or []
+        markers.append("<!-- autospec-plan-version: v3 -->")
+        markers.append(f"<!-- autospec-local-issue-id: {issue['issue_id']} -->")
+        if len(rule_ids) == 1:
+            markers.append(f"<!-- autospec-rule-id: {rule_ids[0]} -->")
+        if rule_ids:
+            markers.append(f"<!-- autospec-rule-ids: {','.join(rule_ids)} -->")
+        markers.append(f"<!-- autospec-rule-result-hash: {rule_result_hash(issue)} -->")
+        markers.append(f"<!-- autospec-source-gap-hash: {source_hash} -->")
+        markers.append("<!-- autospec-body-hash: __AUTOSPEC_BODY_HASH__ -->")
+    else:
+        markers = [
+            f"<!-- autospec-local-issue-id: {issue['issue_id']} -->",
+            f"<!-- autospec-source-gap-hash: {source_hash} -->",
+            "<!-- autospec-body-hash: __AUTOSPEC_BODY_HASH__ -->",
+        ]
+    base = "\n".join(markers + ["", draft_body])
     body_hash = sha256(base.replace("<!-- autospec-body-hash: __AUTOSPEC_BODY_HASH__ -->", ""))
     body = base.replace("<!-- autospec-body-hash: __AUTOSPEC_BODY_HASH__ -->", f"<!-- autospec-body-hash: {body_hash} -->")
     return body, source_hash, body_hash
@@ -202,9 +253,11 @@ def write_temp_body(body):
 def labels_for_issue(issue):
     labels = list(issue.get("suggested_labels", []))
     labels.extend(["autospec:managed", "autospec:discovered"])
-    if issue.get("risk") == "High":
+    risk = issue.get("risk", {})
+    risk_level = risk.get("level") if isinstance(risk, dict) else issue.get("risk")
+    if str(risk_level).lower() == "high":
         labels.append("autospec:risk-high")
-    if issue.get("risk") == "High" or "architecture" in str(issue.get("feature_family", "")).lower():
+    if str(risk_level).lower() == "high" or "architecture" in str(issue.get("feature_family", "")).lower():
         labels.append("autospec:architecture")
     return sorted(dict.fromkeys(labels))
 
@@ -290,6 +343,15 @@ def find_existing_issue_by_marker(issue_id):
     return data[0] if data else None
 
 
+def find_existing_issue_by_rule(rule_ids):
+    for rid in rule_ids:
+        output = run_gh(["issue", "list", "--search", f"autospec-rule-id: {rid}", "--state", "open", "--json", "number,url,title,state", "--limit", "1"])
+        data = parse_json_list(output)
+        if data:
+            return data[0]
+    return None
+
+
 def find_existing_issue_by_title(title):
     output = run_gh(["issue", "list", "--search", title, "--state", "open", "--json", "number,url,title,state", "--limit", "20"])
     for item in parse_json_list(output):
@@ -318,13 +380,17 @@ def permission_hint(text):
 
 
 def summarize(actions):
+    created = sum(1 for item in actions if item["action"] == "created")
+    updated = sum(1 for item in actions if item["action"] in ["updated", "reopened_updated"])
     return {
         "local_issue_drafts": len(actions),
         "already_published": sum(1 for item in actions if item["action"] in ["unchanged", "would_update", "updated", "skipped_closed", "reopened_updated"]),
         "to_create": sum(1 for item in actions if item["action"] == "would_create"),
         "to_update": sum(1 for item in actions if item["action"] == "would_update"),
-        "created": sum(1 for item in actions if item["action"] == "created"),
-        "updated": sum(1 for item in actions if item["action"] in ["updated", "reopened_updated"]),
+        "created": created,
+        "updated": updated,
+        "github_issues_created": bool(confirm and created),
+        "github_issues_updated": bool(confirm and updated),
         "skipped": sum(1 for item in actions if item["action"].startswith("skipped")),
         "missing_labels": sorted({failure.split(":", 1)[0] for item in actions for failure in item.get("label_failures", [])}),
         "permission_auth_problems": sum(1 for item in actions for error in item.get("errors", []) if permission_hint(error)),
@@ -338,6 +404,7 @@ def write_reports(mode, status, actions, errors, warnings):
     summary = summarize(actions)
     report = {
         "version": 1,
+        "plan_version": plan_version,
         "mode": mode,
         "status": status,
         "config": config,
@@ -361,6 +428,7 @@ def write_reports(mode, status, actions, errors, warnings):
         "",
         f"Status: **{status.upper()}**",
         f"Mode: `{mode}`",
+        f"Plan version: `{plan_version}`",
         "",
         "## Summary",
         "",
@@ -385,6 +453,11 @@ def write_reports(mode, status, actions, errors, warnings):
         gh_issue = item.get("github_issue_url") or item.get("github_issue_number") or ""
         label_failures = "<br>".join(item.get("label_failures", [])) or "none"
         lines.append(f"| `{item['local_issue_id']}` | {item['action']} | {gh_issue} | {label_failures} | {item['title']} |")
+    if plan_version == "v3":
+        lines.extend(["", "## V3 Idempotency Marker Preview", ""])
+        for item in actions:
+            for marker in item.get("markers", []):
+                lines.append(f"- `{item['local_issue_id']}` {marker}")
     if warnings:
         lines.extend(["", "## Warnings", ""])
         for warning in warnings:
@@ -423,7 +496,7 @@ warnings = []
 known_labels = known_control_labels()
 
 if not issues:
-    error = "missing issue plan entries; run scripts/autospec-plan-issues.sh before publishing"
+    error = f"missing {plan_version} issue plan entries; run the matching plan command before publishing"
     write_reports("confirm" if confirm else "dry_run", "error", [], [error], [])
     print(f"issue publishing: ERROR - {error}")
     sys.exit(2)
@@ -432,6 +505,9 @@ for issue in issues:
     issue_id = issue.get("issue_id")
     title = issue.get("title", "")
     body, source_hash, body_hash = body_for_issue(issue)
+    rule_ids = issue.get("source_rule_ids") or issue.get("rule_ids") or []
+    quality_gate_ids = issue.get("quality_gate_ids") or [re.sub(r"[^a-z0-9_.-]+", "_", str(g).lower()).strip("_") for g in issue.get("quality_gates", [])]
+    source_policy_files = [x for x in [issue.get("source_file")] if x]
     labels = labels_for_issue(issue)
     available_labels = [label for label in labels if not label.startswith("autospec:") or not known_labels or label in known_labels]
     unavailable_labels = [label for label in labels if label.startswith("autospec:") and known_labels and label not in known_labels]
@@ -463,6 +539,8 @@ for issue in issues:
                     action = "reopened_updated"
                 if not github_number:
                     existing = find_existing_issue_by_marker(issue_id)
+                    if not existing and plan_version == "v3":
+                        existing = find_existing_issue_by_rule(rule_ids)
                     if not existing:
                         existing = find_existing_issue_by_title(title)
                         if existing:
@@ -491,6 +569,13 @@ for issue in issues:
                 timestamp = now_iso()
                 upsert_ledger_issue(ledger, {
                     "local_issue_id": issue_id,
+                    "plan_version": plan_version,
+                    "rule_ids": rule_ids,
+                    "quality_gate_ids": quality_gate_ids,
+                    "source_policy_files": source_policy_files,
+                    "maturity_level": issue.get("maturity_level", ""),
+                    "category": issue.get("category", ""),
+                    "severity": issue.get("rule_severity") or issue.get("severity", ""),
                     "title": title,
                     "source_gap_hash": source_hash,
                     "body_hash": body_hash,
@@ -522,10 +607,19 @@ for issue in issues:
         "github_issue_url": github_url,
         "github_url": github_url,
         "labels": labels,
+        "plan_version": plan_version,
+        "rule_ids": rule_ids,
+        "quality_gate_ids": quality_gate_ids,
+        "source_policy_files": source_policy_files,
+        "maturity_level": issue.get("maturity_level", ""),
+        "category": issue.get("category", ""),
+        "severity": issue.get("rule_severity") or issue.get("severity", ""),
         "label_failures": label_failures,
         "source_gap_hash": source_hash,
+        "rule_result_hash": rule_result_hash(issue),
         "body_hash": body_hash,
         "errors": item_errors,
+        "markers": [line for line in body.splitlines() if line.startswith("<!-- autospec-")],
     })
 
 mode = "confirm" if confirm else "dry_run"
@@ -540,7 +634,7 @@ if errors:
     sys.exit(1)
 print("issue publishing: PASS" if confirm else "issue publishing: DRY-RUN")
 if confirm:
-    print("reports: .autospec/reports/github-issue-publish-result.json, .autospec/reports/github-issue-publish-result.md")
+    print(f"reports: .autospec/reports/github-issue-publish-result{suffix}.json, .autospec/reports/github-issue-publish-result{suffix}.md")
 else:
-    print("reports: .autospec/reports/github-issue-publish-plan.json, .autospec/reports/github-issue-publish-plan.md")
+    print(f"reports: .autospec/reports/github-issue-publish-plan{suffix}.json, .autospec/reports/github-issue-publish-plan{suffix}.md")
 PY

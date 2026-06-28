@@ -185,10 +185,13 @@ def criterion_status(criterion, evidence_text):
 
 
 def source_issue_from_plan(processed_issue_id):
-    plan = load_json(os.path.join(reports_dir, "issue-plan.json"), {})
-    for item in plan.get("issues", []) if isinstance(plan.get("issues"), list) else []:
-        if not processed_issue_id or item.get("issue_id") == processed_issue_id:
-            return item
+    for filename in ["issue-plan-v3.json", "issue-plan-v2.json", "issue-plan.json"]:
+        plan = load_json(os.path.join(reports_dir, filename), {})
+        for item in plan.get("issues", []) if isinstance(plan.get("issues"), list) else []:
+            if not processed_issue_id or item.get("issue_id") == processed_issue_id:
+                found = dict(item)
+                found["plan_version"] = "v3" if filename.endswith("v3.json") else "v2" if filename.endswith("v2.json") else "v1"
+                return found
     return {}
 
 
@@ -217,7 +220,10 @@ baseline_comp = load_json(os.path.join(reports_dir, "baseline-composition.json")
 baseline_gap = load_json(os.path.join(reports_dir, "baseline-gap-analysis.json"), {})
 constitutional_gap = load_json(os.path.join(reports_dir, "constitutional-gap-report.json"), {})
 rule_checks = load_json(os.path.join(reports_dir, "rule-check-results.json"), {})
-packet_md = read_text(os.path.join(state_dir, "implementation-packet.md"))
+work_item_packet_json = os.path.join(work_item_arg, "implementation-packet.json") if work_item_arg else ""
+work_item_packet_md = os.path.join(work_item_arg, "implementation-packet.md") if work_item_arg else ""
+packet_data = load_json(work_item_packet_json, load_json(os.path.join(state_dir, "implementation-packet.json"), {}))
+packet_md = read_text(work_item_packet_md) or read_text(os.path.join(state_dir, "implementation-packet.md"))
 worker_pr_body = read_text(os.path.join(reports_dir, "worker-pr-body.md"))
 pr = load_pr()
 pr_body = pr.get("body") or worker_pr_body or packet_md
@@ -258,13 +264,15 @@ else:
     failed_ac = [row for row in criterion_rows if row["status"] in {"not_satisfied", "unknown"}]
     dimensions.append(dimension("acceptance_criteria", "warn" if failed_ac else "pass", "Acceptance criteria were reviewed with simple evidence matching.", [row["criterion"] for row in criterion_rows], "Add missing AC evidence." if failed_ac else ""))
 
-trace_text = "\n".join([pr_body, packet_md])
+policy_context = packet_data.get("structured_policy_context", {}) if isinstance(packet_data.get("structured_policy_context"), dict) else {}
+trace_text = "\n".join([pr_body, packet_md, json.dumps(policy_context, sort_keys=True), json.dumps(source_issue, sort_keys=True)])
 constitution_ok = bool(re.search(r"constitution|doctrine|quality gate", trace_text, re.I))
-baseline_ok = bool(re.search(r"baseline|source gap|pack", trace_text, re.I))
+baseline_ok = bool(re.search(r"baseline|source gap|pack", trace_text, re.I)) or bool(policy_context.get("source_baseline_pack") or source_issue.get("source_baseline_pack"))
 dimensions.append(dimension("constitution_alignment", "pass" if constitution_ok else "fail", "Constitution/doctrine traceability is present." if constitution_ok else "Constitution/doctrine traceability is missing.", ["constitutional-gap-report.json" if constitutional_gap else ""]))
 dimensions.append(dimension("baseline_alignment", "pass" if baseline_ok else "fail", "Baseline/source-gap traceability is present." if baseline_ok else "Baseline/source-gap traceability is missing.", ["baseline-composition.json" if baseline_comp else "", "baseline-gap-analysis.json" if baseline_gap else ""]))
 
-rule_ids = sorted(set(re.findall(r"\b[a-z][a-z0-9_]*(?:\.[a-z0-9_]+){2,}\b", "\n".join([pr_body, packet_md, issue_body, json.dumps(source_issue)]))))
+rule_ids = sorted(set((policy_context.get("rule_ids") or []) + re.findall(r"\b[a-z][a-z0-9_]*(?:\.[a-z0-9_]+){2,}\b", "\n".join([pr_body, packet_md, issue_body, json.dumps(source_issue)]))))
+quality_gate_ids = sorted(set(policy_context.get("quality_gate_ids") or source_issue.get("quality_gate_ids", []) or []))
 rule_known = {item.get("rule_id") for item in rule_checks.get("results", []) if isinstance(item, dict)}
 rule_evidence = [rid for rid in rule_ids if not rule_known or rid in rule_known]
 managed_issue = "autospec:managed" in source_issue.get("suggested_labels", []) or "autospec:managed" in pr_body
@@ -275,6 +283,33 @@ elif rule_context_available and (managed_issue or source_issue):
     dimensions.append(dimension("rule_traceability", "warn", "Autospec-generated work does not reference a source rule ID.", [], "Add the source rule ID from issue-plan-v2 or rule-check-results."))
 else:
     dimensions.append(dimension("rule_traceability", "pass", "No rule-audit context was available for this v0 verification path.", []))
+
+v3_context_expected = source_issue.get("plan_version") == "v3" or bool(policy_context.get("rule_ids"))
+if v3_context_expected:
+    policy_status = "pass" if rule_ids and bool(policy_context) else "warn"
+    policy_summary = "Structured policy context is traceable through the packet." if policy_status == "pass" else "Structured policy context is missing or incomplete."
+else:
+    policy_status = "pass"
+    policy_summary = "Structured policy context is not required for this legacy verification path."
+policy_traceability = {
+    "status": policy_status,
+    "rule_ids": rule_ids,
+    "quality_gate_ids": quality_gate_ids,
+    "summary": policy_summary,
+    "missing": [] if policy_status == "pass" else ["structured_policy_context.rule_ids"],
+}
+dimensions.append(dimension("policy_traceability", policy_status, policy_summary, rule_ids, "Add structured policy context to the implementation packet." if policy_status != "pass" else ""))
+quality_gate_review = {
+    "status": "pass" if quality_gate_ids or not v3_context_expected else "warn",
+    "quality_gate_ids": quality_gate_ids,
+    "summary": "Quality gates are referenced." if quality_gate_ids else "No quality gates were referenced.",
+}
+maturity_impact = {
+    "status": "known" if policy_context.get("maturity_target") or source_issue.get("maturity_level") else "unknown",
+    "maturity_target": policy_context.get("maturity_target") or source_issue.get("maturity_level", ""),
+    "category": policy_context.get("category") or source_issue.get("category", ""),
+    "severity": policy_context.get("severity") or source_issue.get("rule_severity") or source_issue.get("severity", ""),
+}
 
 if classification == "unknown":
     dimensions.append(dimension("risk_classification", "fail", "Worker risk classification is missing.", [], "Run worker v1 before verification."))
@@ -362,6 +397,9 @@ report = {
     "verdict": verdict,
     "source": {"issue": issue_arg, "pr": pr_arg, "work_item": work_item_arg, "processed_issue_id": processed_issue_id},
     "dimensions": dimensions,
+    "policy_traceability": policy_traceability,
+    "quality_gate_review": quality_gate_review,
+    "maturity_impact": maturity_impact,
     "acceptance_criteria": criterion_rows,
     "required_actions": required_actions,
     "side_effects": {"github_comment": bool(confirm and pr_arg), "approved": False, "merged": False, "pushed": False},
@@ -407,6 +445,28 @@ md = "\n".join([
     f"- Classification: `{classification}`",
     f"- Patch budget: `{statuses.get('patch_budget', 'unknown')}`",
     f"- Forbidden paths: `{statuses.get('forbidden_paths', 'unknown')}`",
+    "",
+    "## Policy Traceability",
+    "",
+    f"- Status: `{policy_traceability['status']}`",
+    f"- Rule IDs: {', '.join(f'`{rid}`' for rid in rule_ids) if rule_ids else 'none'}",
+    "",
+    "## Rule Compliance",
+    "",
+    "| Rule ID | Previous status | Expected status after PR | Evidence | Verifier status |",
+    "| --- | --- | --- | --- | --- |",
+    "\n".join(f"| `{rid}` | unknown | improved | packet/PR references rule | {policy_traceability['status']} |" for rid in rule_ids) or "| none | unknown | unknown | none | warn |",
+    "",
+    "## Quality Gate Review",
+    "",
+    f"- Status: `{quality_gate_review['status']}`",
+    f"- Quality gates: {', '.join(f'`{gid}`' for gid in quality_gate_ids) if quality_gate_ids else 'none'}",
+    "",
+    "## Maturity Impact",
+    "",
+    f"- Target: `{maturity_impact['maturity_target'] or 'unknown'}`",
+    f"- Category: `{maturity_impact['category'] or 'unknown'}`",
+    f"- Severity: `{maturity_impact['severity'] or 'unknown'}`",
     "",
     "## Validation evidence",
     "",

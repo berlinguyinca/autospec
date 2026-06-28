@@ -62,8 +62,16 @@ risk = load(os.path.join(reports, "worker-risk-classification.json"), {})
 diff = load(os.path.join(reports, "worker-diff-review.json"), {})
 verdict = verifier.get("verdict")
 dimensions = {d.get("dimension"): d for d in verifier.get("dimensions", []) if isinstance(d, dict)}
+policy_traceability = verifier.get("policy_traceability", {})
+quality_gate_review = verifier.get("quality_gate_review", {})
+maturity_impact = verifier.get("maturity_impact", {})
+policy_traceability_status = policy_traceability.get("status") or dimensions.get("policy_traceability", {}).get("status") or "legacy_not_applicable"
+quality_gate_status = quality_gate_review.get("status", "unknown")
+policy_traceability_required = bool(policy_traceability) or "policy_traceability" in dimensions
 blocked = []
 if verdict not in {"pass", "pass_with_warnings"}: blocked.append(f"verifier verdict is {verdict or 'missing'}")
+if policy_traceability_required and policy_traceability_status in {"fail", "unknown"}: blocked.append("policy traceability is missing or failed")
+if policy_traceability_required and quality_gate_status == "fail": blocked.append("blocking quality gate finding")
 if dimensions.get("validation_evidence", {}).get("status") == "fail": blocked.append("missing validation for code changes")
 if dimensions.get("forbidden_paths", {}).get("status") == "fail": blocked.append("forbidden path finding")
 if dimensions.get("pr_body_completeness", {}).get("status") == "fail": blocked.append("PR body missing required sections")
@@ -82,9 +90,9 @@ if confirm and pr and allowed:
         gh(["issue", "edit", pr, "--remove-label", label]); actions.append(f"remove {label}")
 
 source_id = f"pr-{pr}" if pr else f"issue-{issue or 'unknown'}"
-report = {"version":1,"mode":"confirm" if confirm else "dry_run","source":{"pr":pr,"issue":issue},"verifier_verdict":verdict,"promotion_allowed":allowed,"labels_to_add":labels_add,"labels_to_remove":labels_remove,"ready_for_review_allowed":False,"blocked_reasons":blocked,"actions":actions,"side_effects":{"approved":False,"merged":False}}
+report = {"version":1,"mode":"confirm" if confirm else "dry_run","source":{"pr":pr,"issue":issue},"verifier_verdict":verdict,"promotion_allowed":allowed,"policy_traceability_status":policy_traceability_status,"quality_gate_status":quality_gate_status,"maturity_impact":maturity_impact,"labels_to_add":labels_add,"labels_to_remove":labels_remove,"ready_for_review_allowed":False,"blocked_reasons":blocked,"actions":actions,"side_effects":{"approved":False,"merged":False}}
 write_json(out_json, report); write_json(os.path.join(promotions, f"{source_id}.json"), report)
-md = "\n".join(["# Promotion Gate", "", f"Verdict: **{'allowed' if allowed else 'blocked'}**", "", "## Evidence", f"- Verifier verdict: `{verdict}`", f"- Risk classification: `{classification or 'unknown'}`", "", "## Labels", *[f"- add `{l}`" for l in labels_add], *[f"- remove `{l}`" for l in labels_remove], "", "## Blocked reasons", *(f"- {b}" for b in blocked or ["None."]), "", "## Next recommended command", "`bash scripts/autospec-autonomy-status.sh`"])
+md = "\n".join(["# Promotion Gate", "", f"Verdict: **{'allowed' if allowed else 'blocked'}**", "", "## Evidence", f"- Verifier verdict: `{verdict}`", f"- Risk classification: `{classification or 'unknown'}`", f"- Policy traceability: `{policy_traceability_status}`", f"- Quality gates: `{quality_gate_status}`", "", "## Maturity Impact", f"- Target: `{maturity_impact.get('maturity_target', 'unknown')}`", f"- Category: `{maturity_impact.get('category', 'unknown')}`", f"- Severity: `{maturity_impact.get('severity', 'unknown')}`", "", "## Labels", *[f"- add `{l}`" for l in labels_add], *[f"- remove `{l}`" for l in labels_remove], "", "## Blocked reasons", *(f"- {b}" for b in blocked or ["None."]), "", "## Next recommended command", "`bash scripts/autospec-autonomy-status.sh`"])
 write_text(out_md, md); write_text(os.path.join(promotions, f"{source_id}.md"), md)
 print("promotion: PASS" if allowed else "promotion: BLOCKED")
 sys.exit(0 if allowed else 1)

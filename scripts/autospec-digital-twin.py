@@ -91,28 +91,22 @@ def walk(root: Path) -> list[str]:
 def purpose(path: str) -> str:
     lower = path.lower()
     name = Path(path).name.lower()
-    if lower.startswith("tests/") or ".test." in lower or ".spec." in lower or name.startswith("test_"):
-        return "test"
-    if lower.startswith("docs/") or name.startswith("readme") or lower.endswith(".md"):
-        return "documentation"
-    if lower.startswith("scripts/") or lower.endswith(".sh"):
-        return "script"
-    if lower.startswith(".github/workflows/"):
-        return "ci_workflow"
-    if name in {"package.json", "pyproject.toml", "requirements.txt", "go.mod", "cargo.toml", "tsconfig.json"} or lower.endswith((".yml", ".yaml", ".toml")):
-        return "config"
-    if "dockerfile" in name or "docker-compose" in name or name == "containerfile":
-        return "container"
-    if "migration" in lower or lower.startswith(("db/", "database/")) or lower.endswith(".sql"):
-        return "database"
-    if "/pages/" in lower or "/components/" in lower or lower.endswith((".tsx", ".jsx")):
-        return "ui"
-    if "/api/" in lower or "route" in lower or "server" in lower:
-        return "api"
-    if "/ai/" in lower or "rag" in lower or "embedding" in lower or "assistant" in lower:
-        return "ai"
-    if lower.startswith(".autospec/"):
-        return "generated"
+    rules = [
+        ("test", lambda: lower.startswith("tests/") or ".test." in lower or ".spec." in lower or name.startswith("test_")),
+        ("documentation", lambda: lower.startswith("docs/") or name.startswith("readme") or lower.endswith(".md")),
+        ("script", lambda: lower.startswith("scripts/") or lower.endswith(".sh")),
+        ("ci_workflow", lambda: lower.startswith(".github/workflows/")),
+        ("config", lambda: name in {"package.json", "pyproject.toml", "requirements.txt", "go.mod", "cargo.toml", "tsconfig.json"} or lower.endswith((".yml", ".yaml", ".toml"))),
+        ("container", lambda: "dockerfile" in name or "docker-compose" in name or name == "containerfile"),
+        ("database", lambda: "migration" in lower or lower.startswith(("db/", "database/")) or lower.endswith(".sql")),
+        ("ui", lambda: "/pages/" in lower or "/components/" in lower or lower.endswith((".tsx", ".jsx"))),
+        ("api", lambda: "/api/" in lower or "route" in lower or "server" in lower),
+        ("ai", lambda: "/ai/" in lower or "rag" in lower or "embedding" in lower or "assistant" in lower),
+        ("generated", lambda: lower.startswith(".autospec/")),
+    ]
+    for label, matches in rules:
+        if matches():
+            return label
     return "source" if Path(path).suffix in LANG else "unknown"
 
 

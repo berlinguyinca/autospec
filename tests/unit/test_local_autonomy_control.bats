@@ -187,8 +187,9 @@ JSON
   [ -f "$REPO_ROOT/skills/autospec-guide/README.md" ]
   [ -f "$REPO_ROOT/skills/autospec-guide/install.sh" ]
   [ -f "$REPO_ROOT/skills/autospec-guide/uninstall.sh" ]
-  grep -q 'scripts/autospec-supervisor-loop.sh' "$REPO_ROOT/skills/autospec-guide/SKILL.md"
-  grep -q 'scripts/autospec-resume.sh' "$REPO_ROOT/skills/autospec-guide/SKILL.md"
+  grep -q 'AUTOSPEC_SCRIPTS_DIR' "$REPO_ROOT/skills/autospec-guide/SKILL.md"
+  grep -q 'autospec-supervisor-loop.sh' "$REPO_ROOT/skills/autospec-guide/SKILL.md"
+  grep -q 'autospec-resume.sh' "$REPO_ROOT/skills/autospec-guide/SKILL.md"
   grep -q 'never merge PRs' "$REPO_ROOT/skills/autospec-guide/SKILL.md"
   grep -q 'never approve PRs' "$REPO_ROOT/skills/autospec-guide/SKILL.md"
   diff <(awk '/^---$/{c++; next} c>=2' "$REPO_ROOT/skills/autospec-guide/SKILL.md") "$REPO_ROOT/skills/autospec-guide/codex/prompt.md"
