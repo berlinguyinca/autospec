@@ -15,7 +15,7 @@ teardown() {
 
 write_repo() {
   local repo="$1"
-  mkdir -p "$repo/.autospec/state" "$repo/.autospec/reports" "$repo/.autospec/backlog/issues-v3" "$repo/docs/specs" "$repo/src/pages" "$repo/src/components" "$repo/tests/e2e"
+  mkdir -p "$repo/.autospec/state" "$repo/.autospec/reports" "$repo/.autospec/backlog/issues-v3" "$repo/docs/specs" "$repo/src/pages" "$repo/src/components" "$repo/tests/e2e" "$repo/scripts"
   cat > "$repo/.autospec/autospec.yml" <<'YAML'
 application:
   type: web
@@ -26,6 +26,10 @@ baselines:
     - ai-platform
 YAML
   cp -R "$REPO_ROOT/.autospec/templates" "$repo/.autospec/templates"
+  cp "$REPO_ROOT/scripts/autospec-build-digital-twin.sh" "$repo/scripts/autospec-build-digital-twin.sh"
+  cp "$REPO_ROOT/scripts/autospec-digital-twin.py" "$repo/scripts/autospec-digital-twin.py"
+  cp "$REPO_ROOT/scripts/autospec-metadata-drift.sh" "$repo/scripts/autospec-metadata-drift.sh"
+  cp "$REPO_ROOT/scripts/autospec-promote-pr.sh" "$repo/scripts/autospec-promote-pr.sh"
   cat > "$repo/.autospec/state/digital-twin.json" <<'JSON'
 {"schema":1,"repo":"fixture","summary":{"application_type":"web","detected_capabilities":3},"confidence":0.7,"warnings":[]}
 JSON
@@ -82,6 +86,21 @@ MD
   [[ "$output" == *"implemented"* ]]
   [[ "$output" == *"scaffolded"* ]]
   [[ "$output" == *"deferred"* ]]
+}
+
+@test "release candidate closure rows are implemented with evidence" {
+  mkdir -p "$TEST_TMPDIR/repo"
+  write_repo "$TEST_TMPDIR/repo"
+  bash "$COVERAGE" --repo-root "$TEST_TMPDIR/repo" --dry-run >/dev/null
+
+  for requirement_id in digital_twin.knowledge_graph digital_twin.surfaces docs.drift_detection autonomy.no_self_approval; do
+    run jq -r --arg id "$requirement_id" '.requirements[] | select(.id==$id) | .status' "$TEST_TMPDIR/repo/.autospec/reports/spec-coverage.json"
+    [ "$status" -eq 0 ]
+    [ "$output" = "implemented" ]
+
+    run jq -r --arg id "$requirement_id" '.requirements[] | select(.id==$id) | (.evidence | length > 0)' "$TEST_TMPDIR/repo/.autospec/reports/spec-coverage.json"
+    [ "$output" = "true" ]
+  done
 }
 
 @test "new rule check types are evaluated heuristically without crashing" {

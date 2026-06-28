@@ -22,6 +22,7 @@
 - Product/AI/NLAI feature recipes can generate specs, metadata plans, issue drafts, templates, and bounded scaffolds. Stack-specific runtime files are generated only when the target stack is confidently detected and the recipe/capability permits it.
 - Recognized-stack runtime shells are implemented for product, AI, NLAI, reporting, and Playwright evidence slices. They are shell/partial implementations unless tests and metadata prove complete behavior.
 - Runtime evidence artifacts can prove local renderability only when launch profiles, dependencies, and Playwright/tooling already exist. Autospec plans/adopts missing tooling through local issues and does not install dependencies.
+- Digital Twin surface maps, knowledge graph, and summary files are generated state under `.autospec/state/`. They are implemented by `scripts/autospec-build-digital-twin.sh`/`scripts/autospec-digital-twin.py`, but a fresh checkout must run the builder to refresh live state evidence.
 
 ## Validated by policy/rules only
 
@@ -29,6 +30,7 @@
 - These are represented by structured rules/checks/gates and may generate backlog issues, but many require target-repository implementation.
 - Doctrine audits add heuristic evidence collection and local issue drafts. A pass means Autospec found evidence; it is not a substitute for human review on high-risk product/runtime behavior.
 - Visual polish and accessibility evidence audits are heuristic and evidence-based. They are not human design review, WCAG certification, or security/privacy approval.
+- Documentation drift detection is implemented through the metadata drift validator. It is heuristic and focused on stale/missing metadata links, orphan docs/tests, and required Digital Twin files; it is not a semantic documentation correctness proof.
 - Specialist agents are deterministic role/checklist/review systems, not independent LLM personas unless a future runtime explicitly connects them.
 - Review quorum is an internal promotion gate and does not replace human review or approval.
 - Learning ledger and memory index are repo-local; there is no cross-repo global learning service in this batch.

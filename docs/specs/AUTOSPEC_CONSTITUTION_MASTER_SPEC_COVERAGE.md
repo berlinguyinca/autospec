@@ -3,7 +3,7 @@
 ## Summary
 
 - Total requirements: 112
-- Status counts: {"deferred": 3, "documented_only": 1, "implemented": 74, "missing": 2, "partial": 1, "scaffolded": 24, "validated": 7}
+- Status counts: {"deferred": 3, "implemented": 78, "scaffolded": 24, "validated": 7}
 - runtime feature evidence is tracked through runtime adapters, feature slices, generation records, metadata sync, verification, worker v4, and runtime status reports.
 - runtime evidence is tracked through app launch profiles, Playwright evidence runs, screenshots/contact sheets, accessibility/visual audits, tutorials, mock AI/NLAI simulations, evidence bundles, and product quality scorecards.
 - specialist governance is tracked through Autonomy v3 specialist agents, assignments, review packets, deterministic findings, review quorum, medium-risk planning, guidance requests, IDRs, learning ledger, retrospectives, memory index, repeated-miss planning, policy proposals, and council reports.
@@ -13,10 +13,10 @@
 | Category | Total | Statuses |
 | --- | ---: | --- |
 | `ai_platform` | 11 | deferred: 1, implemented: 3, scaffolded: 7 |
-| `autonomous_development` | 30 | deferred: 1, documented_only: 1, implemented: 27, scaffolded: 1 |
+| `autonomous_development` | 30 | deferred: 1, implemented: 28, scaffolded: 1 |
 | `diagnostics` | 4 | implemented: 1, scaffolded: 3 |
-| `digital_twin` | 7 | implemented: 5, missing: 2 |
-| `docs_tutorial_pdf` | 5 | implemented: 1, partial: 1, scaffolded: 3 |
+| `digital_twin` | 7 | implemented: 7 |
+| `docs_tutorial_pdf` | 5 | implemented: 2, scaffolded: 3 |
 | `documentation` | 1 | implemented: 1 |
 | `engineering` | 8 | deferred: 1, implemented: 4, validated: 3 |
 | `nlai` | 4 | implemented: 1, scaffolded: 3 |
@@ -45,7 +45,7 @@
 | `autonomy.issue_publish_sync` | autonomous_development | implemented | critical | scripts/autospec-publish-issues.sh, scripts/autospec-sync-published-issues.sh |
 | `autonomy.locks_budgets_stop` | autonomous_development | implemented | critical | scripts/autospec-repo-lock.sh, scripts/autospec-autonomy-budget.sh, scripts/autospec-stop.sh, scripts/autospec-resume.sh |
 | `autonomy.loop.local_bounded` | autonomous_development | implemented | critical | scripts/autospec-supervisor-loop.sh |
-| `autonomy.no_self_approval` | autonomous_development | documented_only | critical | docs/RELEASE_READINESS.md, docs/KNOWN_LIMITATIONS.md |
+| `autonomy.no_self_approval` | autonomous_development | implemented | critical | scripts/autospec-promote-pr.sh, scripts/autospec-verify-worker-pr.sh, scripts/autospec-supervisor-cycle.sh, docs/RELEASE_READINESS.md, docs/KNOWN_LIMITATIONS.md |
 | `autonomy.promotion_gate` | autonomous_development | implemented | critical | scripts/autospec-promote-pr.sh |
 | `autonomy.remediation_loop` | autonomous_development | implemented | high | scripts/autospec-plan-remediation.sh |
 | `autonomy.stuck_guidance` | autonomous_development | implemented | high | scripts/autospec-publish-stuck.sh, scripts/autospec-sync-guidance.sh |
@@ -74,10 +74,10 @@
 | `diagnostics.white_screen_playwright` | diagnostics | scaffolded | high | .autospec/templates/product-baseline/diagnostics-status-page-spec.md |
 | `digital_twin.impact_drift` | digital_twin | implemented | high | scripts/autospec-impact-analysis.sh, scripts/autospec-metadata-drift.sh |
 | `digital_twin.inventory` | digital_twin | implemented | critical | scripts/autospec-build-digital-twin.sh |
-| `digital_twin.knowledge_graph` | digital_twin | missing | high | none |
-| `digital_twin.surfaces` | digital_twin | missing | high | none |
+| `digital_twin.knowledge_graph` | digital_twin | implemented | high | scripts/autospec-build-digital-twin.sh, scripts/autospec-digital-twin.py |
+| `digital_twin.surfaces` | digital_twin | implemented | high | scripts/autospec-build-digital-twin.sh, scripts/autospec-digital-twin.py |
 | `docs.artifact_audit` | docs_tutorial_pdf | implemented | high | scripts/autospec-doc-artifact-audit.sh, .autospec/reports/doc-artifact-audit.json |
-| `docs.drift_detection` | docs_tutorial_pdf | partial | medium | scripts/autospec-metadata-drift.sh |
+| `docs.drift_detection` | docs_tutorial_pdf | implemented | medium | scripts/autospec-metadata-drift.sh, scripts/autospec-digital-twin.py |
 | `docs.pdf_guides` | docs_tutorial_pdf | scaffolded | medium | .autospec/templates/product-baseline/reporting-dashboard-spec.md |
 | `docs.repo_in_app_rag` | docs_tutorial_pdf | scaffolded | high | .autospec/templates/product-baseline/in-app-documentation-center-spec.md |
 | `docs.tutorials_screenshots` | docs_tutorial_pdf | scaffolded | medium | .autospec/templates/product-baseline/onboarding-tutorials-spec.md |
@@ -147,4 +147,4 @@
 
 ## Required Follow-up Backlog
 
-- Drafts written: 4
+- Drafts written: 0
