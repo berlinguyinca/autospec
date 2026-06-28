@@ -19,6 +19,19 @@ Optional doctrine coverage check before release hardening:
 ```bash
 bash scripts/autospec-doctrine-audit.sh --dry-run --all
 bash scripts/autospec-spec-coverage.sh --dry-run
+bash scripts/autospec-red-row-burndown.sh --dry-run --priority critical,high
+bash scripts/autospec-release-candidate-gate.sh --dry-run
+```
+
+## Release Candidate Closure
+
+```bash
+bash scripts/autospec-cross-repo-compatibility.sh --dry-run
+bash scripts/autospec-check-type-coverage.sh
+bash scripts/autospec-template-coverage.sh
+bash scripts/autospec-command-contract-check.sh
+bash scripts/autospec-report-quality.sh
+bash scripts/autospec-dogfood-rc.sh --dry-run
 ```
 
 ## Walkthrough B — New Project Bootstrap

@@ -75,6 +75,10 @@ sensitive_audit = load(os.path.join(reports, "sensitive-output-audit.json"), {})
 mvp_smoke = load(os.path.join(reports, "mvp-smoke.json"), {})
 report_index = load(os.path.join(reports, "report-index.json"), {})
 recovery_status = load(os.path.join(reports, "recovery-status.json"), {})
+report_quality = load(os.path.join(reports, "report-quality.json"), {})
+check_type_coverage = load(os.path.join(reports, "check-type-coverage.json"), {})
+template_coverage = load(os.path.join(reports, "template-coverage.json"), {})
+release_candidate_gate = load(os.path.join(reports, "release-candidate-gate.json"), {})
 spec_coverage = load(os.path.join(reports, "spec-coverage.json"), {})
 coverage_requirements = spec_coverage.get("requirements", []) if isinstance(spec_coverage.get("requirements"), list) else []
 critical_missing = [r for r in coverage_requirements if r.get("priority") == "critical" and r.get("status") == "missing" and r.get("requirement_type") != "target_app_scaffold"]
@@ -90,10 +94,14 @@ signals = {
     "mvp_smoke": mvp_smoke.get("verdict", "unknown"),
     "report_index": "pass" if report_index.get("reports") else "unknown",
     "recovery_status": "warn" if recovery_status.get("active_lock") else "pass" if recovery_status else "unknown",
+    "report_quality": report_quality.get("status", "unknown"),
+    "check_type_coverage": "pass" if check_type_coverage.get("matrix") else "unknown",
+    "template_coverage": "pass" if template_coverage.get("categories") else "unknown",
+    "release_candidate_gate": release_candidate_gate.get("verdict", "unknown"),
     "spec_coverage": "fail" if critical_missing else "warn" if high_partial or documented_only else "pass" if coverage_requirements else "unknown",
 }
-blocking_values = {"blocked", "fail"}
-warning_values = {"warn", "pass_with_warnings", "needs_fixes", "unknown"}
+blocking_values = {"blocked", "fail", "RC_BLOCKED", "RC_NOT_READY"}
+warning_values = {"warn", "pass_with_warnings", "needs_fixes", "unknown", "RC_READY_WITH_WARNINGS"}
 if any(value in blocking_values for value in signals.values()):
     readiness = "MVP_BLOCKED"
 elif any(value in warning_values for value in signals.values()):

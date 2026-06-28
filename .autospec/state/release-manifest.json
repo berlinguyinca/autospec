@@ -1,0 +1,33 @@
+{
+  "companion_repos": {
+    "baselines": "autospec-baselines",
+    "constitution": "autospec-constitution"
+  },
+  "date": "2026-06-28",
+  "engine": "autospec",
+  "known_limitations": [
+    "Target-app AI/NLAI runtime remains scaffolded",
+    "No automatic migrations",
+    "No automatic auth/security changes"
+  ],
+  "required_commands": [
+    "scripts/autospec-release-candidate-gate.sh",
+    "scripts/autospec-dogfood-rc.sh",
+    "scripts/autospec-mvp-status.sh"
+  ],
+  "required_reports": [
+    "release-candidate-gate",
+    "mvp-status",
+    "spec-coverage",
+    "doctrine-audit"
+  ],
+  "safety_guarantees": [
+    "No GitHub Actions",
+    "No scheduler",
+    "Dry-run default",
+    "Confirm required for writes",
+    "No auto-merge",
+    "No self-approval"
+  ],
+  "version": "0.1.0-constitution-mvp"
+}

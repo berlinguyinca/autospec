@@ -58,8 +58,23 @@ confirmed mode.
 ```bash
 bash scripts/autospec-preflight.sh
 bash scripts/autospec-start.sh --dry-run
+bash scripts/autospec-release-candidate-gate.sh --dry-run
 bash scripts/autospec-mvp-smoke.sh --dry-run
+bash scripts/autospec-mvp-status.sh
 ```
+
+### Try this first
+
+```bash
+bash scripts/autospec-preflight.sh
+bash scripts/autospec-start.sh --dry-run
+bash scripts/autospec-release-candidate-gate.sh --dry-run
+bash scripts/autospec-mvp-status.sh
+```
+
+The release-candidate gate reads current local reports, checks command/report
+quality, scans for sensitive output and forbidden automation, and reports one of
+`RC_READY`, `RC_READY_WITH_WARNINGS`, `RC_NOT_READY`, or `RC_BLOCKED`.
 
 ### Existing repo onboarding
 
@@ -102,7 +117,8 @@ bash scripts/autospec-supervisor-cycle.sh --confirm --next
 - All autonomy is operator-invoked.
 - Dry-run is the default.
 - Confirmed writes require explicit `--confirm`.
-- Autospec does not merge or approve its own PRs.
+- Autospec does not auto-merge or approve its own PRs.
+- Autospec does not self-approve.
 
 ## Getting Started
 

@@ -38,5 +38,13 @@ All commands are operator-invoked local commands. No GitHub Actions, cron, or sc
 | `scripts/autospec-modernization-plan.sh` | Generate local modernization plan/backlog without updating dependencies | yes/default | n/a | reports/backlog | no | `.autospec/reports/modernization-plan.md` | human review |
 | `scripts/autospec-security-privacy-audit.sh` | Audit threat model, secrets policy, permission model, audit logs, PII, retention, privacy/security review | yes/default | n/a | reports/state | no | `.autospec/reports/security-privacy-audit.md` | doctrine audit |
 | `scripts/autospec-doctrine-audit.sh` | Run doctrine audits and generate local doctrine issue drafts | yes/default | n/a | reports/state/backlog | no | `.autospec/reports/doctrine-audit.md` | spec coverage |
+| `scripts/autospec-red-row-burndown.sh` | Classify critical/high red rows from MVP/spec/doctrine reports into local backlog | yes/default | local only | reports/backlog | no | `.autospec/reports/red-row-burndown-plan.md` | release candidate gate |
+| `scripts/autospec-cross-repo-compatibility.sh` | Validate engine, Constitution, and Baseline compatibility without modifying sibling repos | yes/default | n/a | reports | no | `.autospec/reports/cross-repo-compatibility.md` | check-type coverage |
+| `scripts/autospec-check-type-coverage.sh` | Report implementation/test/docs coverage for rule check types | yes/default | n/a | reports | no | `.autospec/reports/check-type-coverage.md` | template coverage |
+| `scripts/autospec-template-coverage.sh` | Report template/scaffold completeness and local follow-up drafts | yes/default | n/a | reports/backlog | no | `.autospec/reports/template-coverage.md` | command contract |
+| `scripts/autospec-command-contract-check.sh` | Check command help, dry-run/confirm, reports, runbook coverage, and write safety | yes/default | n/a | reports | no | `.autospec/reports/command-contract-check.md` | report quality |
+| `scripts/autospec-report-quality.sh` | Audit generated Markdown/JSON reports for readability, parseability, and sensitive output | yes/default | n/a | reports | no | `.autospec/reports/report-quality.md` | release candidate gate |
+| `scripts/autospec-release-candidate-gate.sh` | Final local MVP release-candidate gate | yes/default | n/a | reports | no | `.autospec/reports/release-candidate-gate.md` | dogfood RC |
+| `scripts/autospec-dogfood-rc.sh` | Run the release-candidate flow against Autospec itself with local sibling policies | yes/default | n/a | reports | no | `.autospec/reports/dogfood-rc.md` | fix RC blockers |
 
 Dry-run remains the default where a command has side effects. Confirm is required for GitHub writes.

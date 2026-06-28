@@ -24,7 +24,15 @@ bash scripts/autospec-constitution-audit.sh
 bash scripts/autospec-audit-to-backlog.sh --dry-run
 bash scripts/autospec-autonomy-status.sh
 bash scripts/autospec-supervisor-cycle.sh --dry-run --next
+bash scripts/autospec-dogfood-rc.sh --dry-run
 ```
+
+## Release Candidate Dogfood
+
+`scripts/autospec-dogfood-rc.sh --dry-run` runs the release-candidate flow
+against Autospec itself. It reports missing sibling Constitution/Baseline repos
+with setup instructions, runs local compatibility/doctrine/spec/RC checks where
+available, and never publishes issues or executes a confirmed worker.
 
 ## Safety
 

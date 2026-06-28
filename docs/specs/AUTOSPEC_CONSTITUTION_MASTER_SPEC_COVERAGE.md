@@ -2,8 +2,8 @@
 
 ## Summary
 
-- Total requirements: 70
-- Status counts: {"deferred": 3, "documented_only": 1, "implemented": 33, "missing": 2, "partial": 1, "scaffolded": 23, "validated": 7}
+- Total requirements: 74
+- Status counts: {"deferred": 3, "documented_only": 1, "implemented": 37, "missing": 2, "partial": 1, "scaffolded": 23, "validated": 7}
 
 ## Coverage Matrix
 
@@ -16,8 +16,8 @@
 | `docs_tutorial_pdf` | 5 | implemented: 1, partial: 1, scaffolded: 3 |
 | `engineering` | 8 | deferred: 1, implemented: 4, validated: 3 |
 | `nlai` | 4 | implemented: 1, scaffolded: 3 |
-| `policy` | 6 | implemented: 6 |
-| `product_baseline` | 3 | scaffolded: 3 |
+| `policy` | 9 | implemented: 9 |
+| `product_baseline` | 4 | implemented: 1, scaffolded: 3 |
 | `reporting_analytics_visualization` | 4 | implemented: 1, scaffolded: 2, validated: 1 |
 | `security` | 1 | implemented: 1 |
 | `testing` | 5 | implemented: 2, validated: 3 |
@@ -82,6 +82,10 @@
 | `product.analytics_reporting` | product_baseline | scaffolded | high | .autospec/templates/product-baseline/analytics-metrics-spec.md, .autospec/templates/product-baseline/reporting-dashboard-spec.md |
 | `product.docs_settings_tutorials` | product_baseline | scaffolded | high | .autospec/templates/product-baseline/in-app-documentation-center-spec.md, .autospec/templates/product-baseline/settings-area-spec.md |
 | `product.feedback_status_search_admin` | product_baseline | scaffolded | medium | .autospec/templates/product-baseline/feedback-support-flow-spec.md, .autospec/templates/product-baseline/diagnostics-status-page-spec.md |
+| `release.check_type_coverage` | policy | implemented | high | scripts/autospec-check-type-coverage.sh, .autospec/reports/check-type-coverage.json |
+| `release.rc_gate` | policy | implemented | critical | scripts/autospec-release-candidate-gate.sh, .autospec/reports/release-candidate-gate.json |
+| `release.report_quality` | policy | implemented | high | scripts/autospec-report-quality.sh, .autospec/reports/report-quality.json |
+| `release.template_coverage` | product_baseline | implemented | high | scripts/autospec-template-coverage.sh, .autospec/reports/template-coverage.json |
 | `reporting.analytics_audit` | reporting_analytics_visualization | implemented | high | scripts/autospec-reporting-analytics-audit.sh, .autospec/reports/reporting-analytics-audit.json |
 | `reporting.exports` | reporting_analytics_visualization | scaffolded | high | .autospec/templates/product-baseline/reporting-dashboard-spec.md |
 | `reporting.metrics` | reporting_analytics_visualization | scaffolded | high | .autospec/templates/product-baseline/analytics-metrics-spec.md |

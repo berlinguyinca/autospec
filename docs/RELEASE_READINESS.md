@@ -71,4 +71,6 @@ bash scripts/autospec-sensitive-output-audit.sh
 bash scripts/autospec-command-audit.sh
 bash scripts/autospec-validate-state.sh
 bash scripts/autospec-mvp-status.sh
+bash scripts/autospec-release-candidate-gate.sh --dry-run
+bash scripts/autospec-dogfood-rc.sh --dry-run
 ```
