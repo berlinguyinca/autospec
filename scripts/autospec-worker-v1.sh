@@ -642,6 +642,70 @@ work_item_dir = os.path.join(state_dir, "work-items", work_item_id)
 write_text(os.path.join(work_item_dir, "implementation-packet.md"), packet)
 write_json(os.path.join(work_item_dir, "implementation-packet.json"), load_json(packet_json, {}))
 
+rule_ids = structured_context["rule_ids"]
+rule_results = load_json(os.path.join(state_dir, "rule-check-results.json"), load_json(os.path.join(reports_dir, "rule-check-results.json"), {"results": []}))
+rule_by_id = {item.get("rule_id"): item for item in rule_results.get("results", []) if isinstance(item, dict)}
+before_rules = []
+after_rules = []
+for rid in rule_ids:
+    item = rule_by_id.get(rid, {})
+    before_status = item.get("status", "unknown")
+    evidence = item.get("evidence", [])
+    before_rules.append({"rule_id": rid, "status": before_status, "evidence": evidence})
+    after_status = before_status
+    after_evidence = list(evidence)
+    if classification in {"docs-only", "spec-only", "metadata-only", "test-only"} and before_status in {"fail", "unknown"}:
+        after_status = "partial"
+        after_evidence.append("worker produced implementation packet and local rule-progress evidence; rerun rule checks to prove final status")
+    after_rules.append({"rule_id": rid, "status": after_status, "evidence": after_evidence})
+rule_progress = {
+    "schema": 1,
+    "issue": issue.get("github_issue_number") or issue.get("issue_id"),
+    "rule_ids": rule_ids,
+    "before": before_rules,
+    "after": after_rules,
+    "changed": before_rules != after_rules,
+    "confidence": 0.6 if before_rules else 0.2,
+    "remaining_gaps": [
+        {"rule_id": item["rule_id"], "status": item["status"]}
+        for item in after_rules
+        if item["status"] in {"fail", "partial", "unknown"}
+    ],
+    "recommended_next_checks": [
+        "bash scripts/autospec-build-digital-twin.sh",
+        "bash scripts/autospec-check-rules.sh",
+        "bash scripts/autospec-verify-worker-pr.sh --dry-run --work-item .autospec/state/work-items/" + work_item_id,
+    ],
+}
+write_json(os.path.join(reports_dir, "worker-rule-progress.json"), rule_progress)
+write_json(os.path.join(work_item_dir, "rule-progress.json"), rule_progress)
+rule_progress_md = "\n".join([
+    "# Worker Rule Progress",
+    "",
+    f"- Issue: `{rule_progress['issue']}`",
+    f"- Changed: `{str(rule_progress['changed']).lower()}`",
+    f"- Confidence: `{rule_progress['confidence']}`",
+    "",
+    "## Rule Progress",
+    "",
+    "| Rule | Before | After | Evidence |",
+    "| --- | --- | --- | --- |",
+    "\n".join(
+        f"| `{rid}` | {before_rules[idx]['status'] if idx < len(before_rules) else 'unknown'} | {after_rules[idx]['status'] if idx < len(after_rules) else 'unknown'} | {'; '.join(after_rules[idx].get('evidence', [])) if idx < len(after_rules) else 'none'} |"
+        for idx, rid in enumerate(rule_ids)
+    ) or "| none | unknown | unknown | none |",
+    "",
+    "## Remaining Constitutional Gaps",
+    "",
+    "\n".join(f"- `{item['rule_id']}` remains `{item['status']}`" for item in rule_progress["remaining_gaps"]) or "- None.",
+    "",
+    "## Recommended next checks",
+    "",
+    "\n".join(f"- `{cmd}`" for cmd in rule_progress["recommended_next_checks"]),
+])
+write_text(os.path.join(reports_dir, "worker-rule-progress.md"), rule_progress_md)
+write_text(os.path.join(work_item_dir, "rule-progress.md"), rule_progress_md)
+
 pr_body = "\n".join([
     f"# {issue.get('title')}",
     "",
@@ -674,6 +738,15 @@ pr_body = "\n".join([
     "",
     "- Worker reports under `.autospec/reports` and `.autospec/state` are expected to change.",
     "",
+    "## Rule Progress",
+    "",
+    "| Rule | Before | After | Evidence |",
+    "| --- | --- | --- | --- |",
+    "\n".join(
+        f"| `{rid}` | {before_rules[idx]['status'] if idx < len(before_rules) else 'unknown'} | {after_rules[idx]['status'] if idx < len(after_rules) else 'unknown'} | {'; '.join(after_rules[idx].get('evidence', [])) if idx < len(after_rules) else 'none'} |"
+        for idx, rid in enumerate(rule_ids)
+    ) or "| none | unknown | unknown | none |",
+    "",
     "## Stuck/follow-up criteria",
     "",
     "- Escalate if validation fails, diff scope widens, or review finds risk above low-risk code.",
@@ -704,6 +777,7 @@ worker_result = {
         "validation_plan": ".autospec/reports/worker-validation-plan.json",
         "diff_review": ".autospec/reports/worker-diff-review.json",
         "pr_body": ".autospec/reports/worker-pr-body.md",
+        "rule_progress": ".autospec/reports/worker-rule-progress.json",
     },
     "next_recommended_command": next_command,
 }

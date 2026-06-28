@@ -1,5 +1,7 @@
 # Autospec Autonomy Runbook
 
+See also [Command Index](COMMANDS.md) and [MVP Walkthrough](MVP_WALKTHROUGH.md).
+
 Autospec autonomy is dry-run first. Commands that can write to GitHub require
 `--confirm`; none of the commands in this runbook merge, approve, or push to the
 default branch.

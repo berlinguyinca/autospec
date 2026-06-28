@@ -224,6 +224,8 @@ work_item_packet_json = os.path.join(work_item_arg, "implementation-packet.json"
 work_item_packet_md = os.path.join(work_item_arg, "implementation-packet.md") if work_item_arg else ""
 packet_data = load_json(work_item_packet_json, load_json(os.path.join(state_dir, "implementation-packet.json"), {}))
 packet_md = read_text(work_item_packet_md) or read_text(os.path.join(state_dir, "implementation-packet.md"))
+work_item_rule_progress_json = os.path.join(work_item_arg, "rule-progress.json") if work_item_arg else ""
+rule_progress = load_json(work_item_rule_progress_json, load_json(os.path.join(reports_dir, "worker-rule-progress.json"), {}))
 worker_pr_body = read_text(os.path.join(reports_dir, "worker-pr-body.md"))
 pr = load_pr()
 pr_body = pr.get("body") or worker_pr_body or packet_md
@@ -310,6 +312,54 @@ maturity_impact = {
     "category": policy_context.get("category") or source_issue.get("category", ""),
     "severity": policy_context.get("severity") or source_issue.get("rule_severity") or source_issue.get("severity", ""),
 }
+rule_progress_required = v3_context_expected
+rule_progress_rows = []
+rule_progress_status = "not_required"
+if rule_progress_required and not rule_progress.get("rule_ids"):
+    rule_progress_status = "missing"
+elif rule_progress_required:
+    before_by_id = {item.get("rule_id"): item for item in rule_progress.get("before", []) if isinstance(item, dict)}
+    after_by_id = {item.get("rule_id"): item for item in rule_progress.get("after", []) if isinstance(item, dict)}
+    row_failures = []
+    for rid in rule_progress.get("rule_ids", []):
+        before_status = before_by_id.get(rid, {}).get("status", "unknown")
+        after_status = after_by_id.get(rid, {}).get("status", "unknown")
+        evidence = after_by_id.get(rid, {}).get("evidence", [])
+        row_status = "pass"
+        if after_status == "pass" and not evidence:
+            row_status = "fail"
+        elif after_status in {"fail", "unknown"}:
+            row_status = "warn"
+        elif after_status == "partial":
+            row_status = "warn"
+        if re.search(r"\b(rule|constitutional|compliance)\b.{0,40}\b(complete|fixed)\b", pr_body, re.I | re.S) and after_status != "pass":
+            row_status = "fail"
+        if row_status == "fail":
+            row_failures.append(rid)
+        rule_progress_rows.append({
+            "rule_id": rid,
+            "before": before_status,
+            "after": after_status,
+            "evidence": evidence,
+            "verifier_status": row_status,
+        })
+    rule_progress_status = "fail" if row_failures else "warn" if any(row["verifier_status"] == "warn" for row in rule_progress_rows) else "pass"
+else:
+    rule_progress_rows = []
+rule_progress_verification = {
+    "status": rule_progress_status,
+    "required": rule_progress_required,
+    "rows": rule_progress_rows,
+    "summary": "Rule progress evidence was reviewed." if rule_progress_status not in {"missing", "not_required"} else "Rule progress evidence is missing." if rule_progress_status == "missing" else "Rule progress evidence is not required for this legacy path.",
+}
+if rule_progress_required:
+    dimensions.append(dimension(
+        "rule_progress",
+        "fail" if rule_progress_status == "fail" else "warn" if rule_progress_status in {"missing", "warn"} else "pass",
+        rule_progress_verification["summary"],
+        [row["rule_id"] for row in rule_progress_rows],
+        "Run worker v2/rule-aware worker and include rule-progress evidence." if rule_progress_status in {"missing", "fail"} else "",
+    ))
 
 if classification == "unknown":
     dimensions.append(dimension("risk_classification", "fail", "Worker risk classification is missing.", [], "Run worker v1 before verification."))
@@ -400,6 +450,7 @@ report = {
     "policy_traceability": policy_traceability,
     "quality_gate_review": quality_gate_review,
     "maturity_impact": maturity_impact,
+    "rule_progress_verification": rule_progress_verification,
     "acceptance_criteria": criterion_rows,
     "required_actions": required_actions,
     "side_effects": {"github_comment": bool(confirm and pr_arg), "approved": False, "merged": False, "pushed": False},
@@ -467,6 +518,22 @@ md = "\n".join([
     f"- Target: `{maturity_impact['maturity_target'] or 'unknown'}`",
     f"- Category: `{maturity_impact['category'] or 'unknown'}`",
     f"- Severity: `{maturity_impact['severity'] or 'unknown'}`",
+    "",
+    "## Rule Progress Verification",
+    "",
+    f"- Status: `{rule_progress_verification['status']}`",
+    "",
+    "| Rule | Before | After | Evidence | Verifier status |",
+    "| --- | --- | --- | --- | --- |",
+    "\n".join(f"| `{row['rule_id']}` | {row['before']} | {row['after']} | {'; '.join(row.get('evidence', [])) or 'none'} | {row['verifier_status']} |" for row in rule_progress_rows) or "| none | unknown | unknown | none | not_required |",
+    "",
+    "## Remaining Constitutional Gaps",
+    "",
+    "\n".join(f"- `{row['rule_id']}` remains `{row['after']}`" for row in rule_progress_rows if row["after"] in {"fail", "partial", "unknown"}) or "- None.",
+    "",
+    "## Maturity Impact Verification",
+    "",
+    f"- Status: `{maturity_impact['status']}`",
     "",
     "## Validation evidence",
     "",

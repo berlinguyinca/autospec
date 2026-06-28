@@ -1,5 +1,7 @@
 # Autospec Constitution Audit
 
+See also [Command Index](COMMANDS.md) and [MVP Walkthrough](MVP_WALKTHROUGH.md).
+
 The Constitution audit converts local Constitution doctrine and Baseline pack
 rules into machine-checkable rules, evaluates those rules against the Digital
 Twin, and produces report-only remediation plans.

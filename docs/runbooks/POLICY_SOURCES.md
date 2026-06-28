@@ -1,5 +1,7 @@
 # Autospec Policy Sources
 
+See also [Command Index](COMMANDS.md) and [MVP Walkthrough](MVP_WALKTHROUGH.md).
+
 Autospec consumes policy from local Constitution and Baseline repositories. Structured YAML/JSON is the primary source of truth. Markdown doctrine and playbook prose remains the human explanation and is used as a lower-confidence fallback only when structured files are absent.
 
 No GitHub Actions, cron jobs, schedulers, or background automation are used. All commands are operator invoked and local filesystem only.
