@@ -72,6 +72,16 @@ install_recording_gh() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_STUB_LOG"
 if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+  body_file=""
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--body-file" ]; then body_file="$arg"; fi
+    prev="$arg"
+  done
+  if [ -n "$body_file" ]; then
+    cp "$body_file" "${GH_STUB_LOG}.last-body"
+    cat "$body_file" >> "${GH_STUB_LOG}.bodies"
+  fi
   count_file="${GH_STUB_LOG}.create-count"
   count=0
   [ -f "$count_file" ] && count="$(cat "$count_file")"
@@ -81,6 +91,16 @@ if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
   exit 0
 fi
 if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
+  body_file=""
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--body-file" ]; then body_file="$arg"; fi
+    prev="$arg"
+  done
+  if [ -n "$body_file" ]; then
+    cp "$body_file" "${GH_STUB_LOG}.last-body"
+    cat "$body_file" >> "${GH_STUB_LOG}.bodies"
+  fi
   exit 0
 fi
 if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
@@ -88,6 +108,42 @@ if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
   exit 0
 fi
 if [ "$1" = "label" ] && [ "$2" = "create" ]; then
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$bin/gh"
+  : > "$log"
+}
+
+install_label_failing_issue_gh() {
+  local bin="$1"
+  local log="$2"
+  mkdir -p "$bin"
+  cat > "$bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_STUB_LOG"
+if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "autospec:managed" ]; then
+      printf 'label autospec:managed not found\n' >&2
+      exit 1
+    fi
+  done
+  printf 'https://github.com/example/repo/issues/9\n'
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "autospec:managed" ]; then
+      printf 'label autospec:managed not found\n' >&2
+      exit 1
+    fi
+  done
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+  printf '[]\n'
   exit 0
 fi
 exit 0
@@ -168,14 +224,14 @@ SH
   prepare_backlog "$TEST_TMPDIR/repo"
   install_failing_gh "$TEST_TMPDIR/bin"
 
-  PATH="$TEST_TMPDIR/bin:$PATH" run bash "$PUBLISH" --repo-root "$TEST_TMPDIR/repo"
+  PATH="$TEST_TMPDIR/bin:$PATH" run bash "$PUBLISH" --repo-root "$TEST_TMPDIR/repo" --dry-run
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"issue publishing: DRY-RUN"* ]]
-  [ -f "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish.json" ]
-  [ -f "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish.md" ]
-  [ ! -f "$TEST_TMPDIR/repo/.autospec/state/github-issue-sync-ledger.json" ]
-  run jq -r '.side_effects.github_api_calls' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish.json"
+  [ -f "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-plan.json" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-plan.md" ]
+  [ ! -f "$TEST_TMPDIR/repo/.autospec/state/published-issues.json" ]
+  run jq -r '.side_effects.github_api_calls' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-plan.json"
   [ "$output" = "false" ]
 }
 
@@ -188,16 +244,21 @@ SH
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"issue publishing: PASS"* ]]
-  [ -f "$TEST_TMPDIR/repo/.autospec/state/github-issue-sync-ledger.json" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/state/published-issues.json" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-result.json" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-result.md" ]
   grep -q 'issue create' "$TEST_TMPDIR/gh.log"
-  run jq -r '.items["001-test-add-baseline-testing-evidence"].github_number' "$TEST_TMPDIR/repo/.autospec/state/github-issue-sync-ledger.json"
+  grep -q '<!-- autospec-local-issue-id: 001-test-add-baseline-testing-evidence -->' "$TEST_TMPDIR/gh.log.bodies"
+  grep -q '<!-- autospec-source-gap-hash:' "$TEST_TMPDIR/gh.log.bodies"
+  grep -q '<!-- autospec-body-hash:' "$TEST_TMPDIR/gh.log.bodies"
+  run jq -r '.items["001-test-add-baseline-testing-evidence"].github_number' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
   [ "$output" = "1" ]
 }
 
 @test "issue publishing confirm updates ledgered issues instead of duplicating" {
   mkdir -p "$TEST_TMPDIR/repo/.autospec/state"
   prepare_backlog "$TEST_TMPDIR/repo"
-  cat > "$TEST_TMPDIR/repo/.autospec/state/github-issue-sync-ledger.json" <<'JSON'
+  cat > "$TEST_TMPDIR/repo/.autospec/state/published-issues.json" <<'JSON'
 {
   "version": 1,
   "items": {
@@ -217,6 +278,21 @@ JSON
   [ "$status" -eq 0 ]
   grep -q 'issue edit 44' "$TEST_TMPDIR/gh.log"
   grep -q 'issue create' "$TEST_TMPDIR/gh.log"
-  run jq -r '.items["001-test-add-baseline-testing-evidence"].github_number' "$TEST_TMPDIR/repo/.autospec/state/github-issue-sync-ledger.json"
+  run jq -r '.items["001-test-add-baseline-testing-evidence"].github_number' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
   [ "$output" = "44" ]
+}
+
+@test "issue publishing confirm still creates issue when labels fail and reports failed labels" {
+  mkdir -p "$TEST_TMPDIR/repo"
+  prepare_backlog "$TEST_TMPDIR/repo"
+  install_label_failing_issue_gh "$TEST_TMPDIR/bin" "$TEST_TMPDIR/gh.log"
+
+  GH_STUB_LOG="$TEST_TMPDIR/gh.log" PATH="$TEST_TMPDIR/bin:$PATH" run bash "$PUBLISH" --repo-root "$TEST_TMPDIR/repo" --confirm
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"issue publishing: PASS"* ]]
+  grep -q 'issue create --title test: add baseline testing evidence --body-file' "$TEST_TMPDIR/gh.log"
+  grep -q 'issue edit 9 --add-label autospec:managed' "$TEST_TMPDIR/gh.log"
+  run jq -r '.actions[].label_failures[]?' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-result.json"
+  [[ "$output" == *"autospec:managed"* ]]
 }
