@@ -1,0 +1,4 @@
+// Template: capture screenshots for primary workflows and store stable artifact names.
+test('primary workflow screenshot evidence', async ({ page }) => {
+  await page.screenshot({ path: 'artifacts/screenshots/primary-workflow.png', fullPage: true });
+});

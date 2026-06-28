@@ -145,6 +145,17 @@ primary operator dashboard for managed issues, worker PRs, verifier state,
 stuck/guidance queues, structured policy backlog, maturity blockers, stale v3
 issues, and next commands.
 
+## Doctrine Backlog
+
+Structured-rule issues remain the primary autonomy backlog. Doctrine audit
+drafts under `.autospec/backlog/doctrine/` are local planning artifacts until an
+operator explicitly routes them through an issue publishing command.
+
+```bash
+bash scripts/autospec-doctrine-audit.sh --dry-run --all
+bash scripts/autospec-autonomy-status.sh
+```
+
 ## Safety Guarantees
 
 - Dry-run remains the default.

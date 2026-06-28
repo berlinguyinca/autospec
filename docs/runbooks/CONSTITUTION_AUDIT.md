@@ -109,4 +109,13 @@ bash scripts/autospec-constitution-audit.sh
 bash scripts/autospec-audit-to-backlog.sh --dry-run
 ```
 
+For broader doctrine coverage across architecture, UI/UX, testing evidence,
+documentation, reporting, AI/NLAI, diagnostics, dependencies, modernization,
+and security/privacy, run:
+
+```bash
+bash scripts/autospec-spec-implementation-sweep.sh --dry-run --priority critical,high
+bash scripts/autospec-doctrine-audit.sh --dry-run --all
+```
+
 See also: `docs/runbooks/POLICY_SOURCES.md`.

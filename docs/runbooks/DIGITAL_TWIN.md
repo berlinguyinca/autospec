@@ -59,6 +59,18 @@ validation hints, risk hints, and missing evidence.
 bash scripts/autospec-metadata-drift.sh
 ```
 
+## Doctrine Audit Consumers
+
+Doctrine audits consume Digital Twin state where available and fall back to
+local repository heuristics when metadata is incomplete.
+
+```bash
+bash scripts/autospec-ui-ux-audit.sh --dry-run
+bash scripts/autospec-ai-platform-audit.sh --dry-run
+bash scripts/autospec-nlai-audit.sh --dry-run
+bash scripts/autospec-doctrine-audit.sh --dry-run --all
+```
+
 Drift detection reports stale references, missing required metadata, orphan docs,
 orphan tests, and capability references to missing implementation files. It does
 not modify files.

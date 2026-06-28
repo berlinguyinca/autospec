@@ -2,25 +2,26 @@
 
 ## Summary
 
-- Total requirements: 58
-- Status counts: {"deferred": 3, "documented_only": 1, "implemented": 21, "missing": 2, "partial": 1, "scaffolded": 23, "validated": 7}
+- Total requirements: 70
+- Status counts: {"deferred": 3, "documented_only": 1, "implemented": 33, "missing": 2, "partial": 1, "scaffolded": 23, "validated": 7}
 
 ## Coverage Matrix
 
 | Category | Total | Statuses |
 | --- | ---: | --- |
-| `ai_platform` | 8 | deferred: 1, scaffolded: 7 |
+| `ai_platform` | 9 | deferred: 1, implemented: 1, scaffolded: 7 |
 | `autonomous_development` | 12 | deferred: 1, documented_only: 1, implemented: 10 |
-| `diagnostics` | 3 | scaffolded: 3 |
+| `diagnostics` | 4 | implemented: 1, scaffolded: 3 |
 | `digital_twin` | 6 | implemented: 4, missing: 2 |
-| `docs_tutorial_pdf` | 4 | partial: 1, scaffolded: 3 |
-| `engineering` | 5 | deferred: 1, implemented: 1, validated: 3 |
-| `nlai` | 3 | scaffolded: 3 |
-| `policy` | 5 | implemented: 5 |
+| `docs_tutorial_pdf` | 5 | implemented: 1, partial: 1, scaffolded: 3 |
+| `engineering` | 8 | deferred: 1, implemented: 4, validated: 3 |
+| `nlai` | 4 | implemented: 1, scaffolded: 3 |
+| `policy` | 6 | implemented: 6 |
 | `product_baseline` | 3 | scaffolded: 3 |
-| `reporting_analytics_visualization` | 3 | scaffolded: 2, validated: 1 |
-| `testing` | 4 | implemented: 1, validated: 3 |
-| `ui_ux` | 2 | scaffolded: 2 |
+| `reporting_analytics_visualization` | 4 | implemented: 1, scaffolded: 2, validated: 1 |
+| `security` | 1 | implemented: 1 |
+| `testing` | 5 | implemented: 2, validated: 3 |
+| `ui_ux` | 3 | implemented: 1, scaffolded: 2 |
 
 ## Requirements
 
@@ -29,6 +30,7 @@
 | `ai.agent_tool_memory_mcp` | ai_platform | scaffolded | high | .autospec/templates/ai-platform/mcp-diagnostics-spec.md |
 | `ai.cost_quota_dashboard` | ai_platform | scaffolded | high | .autospec/templates/ai-platform/token-usage-dashboard-spec.md |
 | `ai.openai_ollama_support` | ai_platform | scaffolded | high | .autospec/templates/ai-platform/ai-platform-spec.md |
+| `ai.platform_audit` | ai_platform | implemented | high | scripts/autospec-ai-platform-audit.sh, .autospec/reports/ai-platform-audit.json |
 | `ai.provider_abstraction` | ai_platform | scaffolded | high | .autospec/templates/ai-platform/ai-platform-spec.md |
 | `ai.rag_embeddings` | ai_platform | scaffolded | high | .autospec/templates/ai-platform/rag-assistant-spec.md |
 | `ai.settings_admin` | ai_platform | scaffolded | high | .autospec/templates/ai-platform/ai-settings-page-spec.md |
@@ -45,6 +47,7 @@
 | `autonomy.supervisor.single_cycle` | autonomous_development | implemented | critical | scripts/autospec-supervisor-cycle.sh |
 | `autonomy.verifier.independent` | autonomous_development | implemented | critical | scripts/autospec-verify-worker-pr.sh |
 | `autonomy.worker.low_risk_code` | autonomous_development | implemented | critical | scripts/autospec-worker-v1.sh |
+| `diagnostics.audit` | diagnostics | implemented | high | scripts/autospec-diagnostics-audit.sh, .autospec/reports/diagnostics-audit.json |
 | `diagnostics.health_logs_metrics` | diagnostics | scaffolded | high | .autospec/templates/product-baseline/diagnostics-status-page-spec.md |
 | `diagnostics.incident_safe_remediation` | diagnostics | scaffolded | medium | .autospec/templates/product-baseline/diagnostics-status-page-spec.md |
 | `diagnostics.white_screen_playwright` | diagnostics | scaffolded | high | .autospec/templates/product-baseline/diagnostics-status-page-spec.md |
@@ -52,14 +55,20 @@
 | `digital_twin.inventory` | digital_twin | implemented | critical | scripts/autospec-build-digital-twin.sh |
 | `digital_twin.knowledge_graph` | digital_twin | missing | high | none |
 | `digital_twin.surfaces` | digital_twin | missing | high | none |
+| `docs.artifact_audit` | docs_tutorial_pdf | implemented | high | scripts/autospec-doc-artifact-audit.sh, .autospec/reports/doc-artifact-audit.json |
 | `docs.drift_detection` | docs_tutorial_pdf | partial | medium | scripts/autospec-metadata-drift.sh |
 | `docs.pdf_guides` | docs_tutorial_pdf | scaffolded | medium | .autospec/templates/product-baseline/reporting-dashboard-spec.md |
 | `docs.repo_in_app_rag` | docs_tutorial_pdf | scaffolded | high | .autospec/templates/product-baseline/in-app-documentation-center-spec.md |
 | `docs.tutorials_screenshots` | docs_tutorial_pdf | scaffolded | medium | .autospec/templates/product-baseline/onboarding-tutorials-spec.md |
+| `doctrine.unified_audit` | policy | implemented | high | scripts/autospec-doctrine-audit.sh, .autospec/reports/doctrine-audit.json, .autospec/reports/doctrine-issue-plan.json |
+| `engineering.architecture_governance_audit` | engineering | implemented | high | scripts/autospec-architecture-governance.sh, .autospec/reports/architecture-governance.json |
+| `engineering.dependency_governance_audit` | engineering | implemented | high | scripts/autospec-dependency-governance.sh, .autospec/reports/dependency-governance.json |
 | `engineering.design_patterns_adrs` | engineering | validated | medium | none |
 | `engineering.library_standardization` | engineering | validated | high | scripts/autospec-check-rules.sh |
 | `engineering.modernization_migration` | engineering | validated | medium | none |
+| `engineering.modernization_planner` | engineering | implemented | high | scripts/autospec-modernization-plan.sh, .autospec/reports/modernization-plan.json |
 | `engineering.risk_budgets` | engineering | implemented | critical | scripts/autospec-worker-v1.sh |
+| `nlai.audit` | nlai | implemented | high | scripts/autospec-nlai-audit.sh, .autospec/reports/nlai-audit.json |
 | `nlai.capability_interface` | nlai | scaffolded | high | .autospec/templates/ai-platform/nlai-capability-interface-spec.md |
 | `nlai.data_sql_file_reports` | nlai | scaffolded | high | .autospec/templates/ai-platform/nlai-capability-interface-spec.md |
 | `nlai.pretty_rendering` | nlai | scaffolded | high | .autospec/templates/ai-platform/pretty-rendering-spec.md |
@@ -73,15 +82,19 @@
 | `product.analytics_reporting` | product_baseline | scaffolded | high | .autospec/templates/product-baseline/analytics-metrics-spec.md, .autospec/templates/product-baseline/reporting-dashboard-spec.md |
 | `product.docs_settings_tutorials` | product_baseline | scaffolded | high | .autospec/templates/product-baseline/in-app-documentation-center-spec.md, .autospec/templates/product-baseline/settings-area-spec.md |
 | `product.feedback_status_search_admin` | product_baseline | scaffolded | medium | .autospec/templates/product-baseline/feedback-support-flow-spec.md, .autospec/templates/product-baseline/diagnostics-status-page-spec.md |
+| `reporting.analytics_audit` | reporting_analytics_visualization | implemented | high | scripts/autospec-reporting-analytics-audit.sh, .autospec/reports/reporting-analytics-audit.json |
 | `reporting.exports` | reporting_analytics_visualization | scaffolded | high | .autospec/templates/product-baseline/reporting-dashboard-spec.md |
 | `reporting.metrics` | reporting_analytics_visualization | scaffolded | high | .autospec/templates/product-baseline/analytics-metrics-spec.md |
 | `reporting.visualization_standard` | reporting_analytics_visualization | validated | high | none |
 | `security.no_auto_auth_migrations` | engineering | deferred | critical | docs/KNOWN_LIMITATIONS.md |
+| `security.privacy_audit` | security | implemented | high | scripts/autospec-security-privacy-audit.sh, .autospec/reports/security-privacy-audit.json |
 | `target_app.full_ai_runtime` | ai_platform | deferred | high | docs/KNOWN_LIMITATIONS.md |
 | `testing.performance_migration` | testing | validated | medium | none |
+| `testing.playwright_evidence_audit` | testing | implemented | high | scripts/autospec-playwright-evidence-audit.sh, .autospec/reports/playwright-evidence-audit.json |
 | `testing.playwright_viewport_visual` | testing | validated | high | none |
 | `testing.unit_integration_contract` | testing | validated | high | none |
 | `testing.validation_evidence` | testing | implemented | critical | scripts/autospec-worker-v1.sh, scripts/autospec-verify-worker-pr.sh |
+| `ui_ux.audit` | ui_ux | implemented | high | scripts/autospec-ui-ux-audit.sh, .autospec/reports/ui-ux-audit.json |
 | `ui_ux.pretty_output` | ui_ux | scaffolded | high | .autospec/templates/ai-platform/pretty-rendering-spec.md |
 | `ui_ux.responsive_accessible_states` | ui_ux | scaffolded | high | .autospec/templates/product-baseline/visual-design-system-spec.md |
 

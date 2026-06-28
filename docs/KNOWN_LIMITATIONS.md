@@ -7,17 +7,20 @@
 - Existing repository onboarding and new project metadata-first bootstrap.
 - Local supervisor cycle/loop, worker v0/v1/v2 rule-progress evidence, verifier, promotion gate, stuck/guidance flow, budgets, locks, stop/resume, and status reports.
 - Release-candidate diagnostics: preflight, MVP smoke, command audit, report index, state validation, sensitive-output audit, recovery status, and generated-report cleanup.
+- Spec coverage implementation sweep, architecture governance, UI/UX, Playwright evidence, documentation artifact, reporting/analytics, AI platform, NLAI, diagnostics, dependency governance, modernization, security/privacy, and unified doctrine audits.
 
 ## Implemented as target-repo scaffolds
 
 - AI platform, provider abstraction, OpenAI-compatible/Ollama support, AI settings, RAG assistant, token/cost tracking dashboard, MCP diagnostics, NLAI capability interface, and pretty rendering.
 - Product baseline features: in-app documentation center, settings area, onboarding tutorials, reporting dashboard, analytics metrics, feedback/support flow, diagnostics/status page, and visual design system.
 - Tutorial/PDF/reporting/visualization expectations are scaffolded as specs and issue drafts for target repositories, not implemented as generic app runtime code.
+- Architecture, UI/UX, testing, documentation, reporting, AI/NLAI, diagnostics, dependency, and security/privacy templates provide target-repo implementation plans. They are not generic runtime implementations.
 
 ## Validated by policy/rules only
 
 - Design-pattern discipline, ADR expectations, dependency governance, modernization planning, migration discipline, Playwright viewport/screenshot expectations, visual/accessibility/performance/migration testing doctrine, reporting chart-selection standards, and documentation drift expectations.
 - These are represented by structured rules/checks/gates and may generate backlog issues, but many require target-repository implementation.
+- Doctrine audits add heuristic evidence collection and local issue drafts. A pass means Autospec found evidence; it is not a substitute for human review on high-risk product/runtime behavior.
 
 ## Deferred beyond MVP
 

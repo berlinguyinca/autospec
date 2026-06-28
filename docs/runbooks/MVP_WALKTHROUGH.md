@@ -14,6 +14,13 @@ bash scripts/autospec-audit-to-backlog.sh --confirm
 bash scripts/autospec-supervisor-cycle.sh --dry-run --next
 ```
 
+Optional doctrine coverage check before release hardening:
+
+```bash
+bash scripts/autospec-doctrine-audit.sh --dry-run --all
+bash scripts/autospec-spec-coverage.sh --dry-run
+```
+
 ## Walkthrough B — New Project Bootstrap
 
 ```bash

@@ -22,6 +22,8 @@ Baselines compose application, technology, AI, governance, testing, reporting, a
 
 The engine loads local policy sources, validates them, locks reproducible inputs, composes baseline packs, extracts structured rules, resolves effective rules with waivers/opt-outs, checks rules against repository metadata, generates gap reports, scores maturity, and drafts issue-plan-v3 backlog.
 
+The engine also runs doctrine audits for architecture governance, UI/UX, Playwright evidence, documentation artifacts, reporting/analytics, AI platform, NLAI, diagnostics, dependency governance, modernization planning, and security/privacy. These audits are local, heuristic, evidence-based, and produce reports plus local backlog drafts without GitHub writes.
+
 ## Digital Twin
 
 The Digital Twin summarizes repository inventory, technologies, capabilities, surfaces, settings, permissions, AI/MCP indicators, domain model, workflow map, knowledge graph, impact analysis, and metadata drift.
@@ -78,9 +80,11 @@ High-risk auth, authorization, permissions, secrets, encryption, billing, paymen
 
 Autospec continuously compares policy expectations to repository reality through rule audits, spec coverage, backlog generation, worker/verifier evidence, smoke reports, and release readiness reports.
 
+Spec coverage implementation sweeps read the master requirements inventory and classify remaining work into safe engine work, rule checks, scaffolds, templates, fixtures, target-repo work, human-guidance work, or beyond-MVP deferral. They do not implement arbitrary target application features inside Autospec.
+
 ## Implemented MVP scope
 
-The MVP implements structured policy loading/checking, Digital Twin v1, issue-plan-v3, issue publishing/sync, worker/verifier/supervisor, onboarding, bootstrap, scaffolds, local control, status, smoke, recovery, sensitive-output audit, and spec coverage closure.
+The MVP implements structured policy loading/checking, Digital Twin v1, issue-plan-v3, issue publishing/sync, worker/verifier/supervisor, onboarding, bootstrap, scaffolds, doctrine audits, local control, status, smoke, recovery, sensitive-output audit, and spec coverage closure.
 
 ## Beyond-MVP scope
 

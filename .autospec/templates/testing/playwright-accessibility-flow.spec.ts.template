@@ -1,0 +1,4 @@
+// Template: add project-appropriate accessibility checks and attach violations as evidence.
+test('accessibility evidence', async ({ page }) => {
+  await page.keyboard.press('Tab');
+});
