@@ -11,6 +11,7 @@
 - Autonomy v2 worker capability registry, implementation recipe registry, rule-to-recipe planner, patch-plan builder, template application, stack-profile detection, recipe-backed worker dry-run execution, rule recheck, and recipe-aware verifier/supervisor reporting.
 - Target-App Runtime Implementers v1 for recognized stacks: runtime adapters, feature slices, runtime plans, bounded runtime shell generation, Playwright evidence generation, metadata sync, runtime verification, worker v4 dispatch, verifier v5 runtime review, supervisor runtime visibility, and runtime status.
 - Runtime Evidence & Product Quality Automation v1: app launch profile detection, confirm-only app harness planning, operator-invoked Playwright evidence runs, screenshot contact sheets, visual/accessibility evidence audits, tutorial artifacts, PDF/report artifact planning, mock-only AI/NLAI simulation, token usage evidence, evidence bundles, product quality scorecards, verifier v6 evidence review, worker v5 evidence planning, and supervisor v5 evidence readiness.
+- Autonomy v3 specialist governance: deterministic specialist role registry, assignments, review packets, checklist findings, review quorum, medium-risk planning, guidance requests, implementation decision records, learning ledger, policy improvement proposals, retrospectives, memory index, repeated-miss issue planning, council reports, supervisor v6 planning visibility, and specialist/learning/autonomy v3 status dashboards.
 
 ## Implemented as target-repo scaffolds
 
@@ -28,6 +29,9 @@
 - These are represented by structured rules/checks/gates and may generate backlog issues, but many require target-repository implementation.
 - Doctrine audits add heuristic evidence collection and local issue drafts. A pass means Autospec found evidence; it is not a substitute for human review on high-risk product/runtime behavior.
 - Visual polish and accessibility evidence audits are heuristic and evidence-based. They are not human design review, WCAG certification, or security/privacy approval.
+- Specialist agents are deterministic role/checklist/review systems, not independent LLM personas unless a future runtime explicitly connects them.
+- Review quorum is an internal promotion gate and does not replace human review or approval.
+- Learning ledger and memory index are repo-local; there is no cross-repo global learning service in this batch.
 
 ## Deferred beyond MVP
 
@@ -39,6 +43,8 @@
 - Full visual UI generation.
 - Guaranteed screenshot/PDF generation in arbitrary repositories without existing local tooling.
 - Real external AI/provider simulation; AI/NLAI simulation is mock-only by default.
+- Automatic application of policy proposals to `autospec-constitution` or `autospec-baselines`.
+- Medium-risk code execution; medium-risk work is planned, decomposed, and routed to guidance instead.
 - Arbitrary target-app runtime feature generation without a recognized stack, bounded recipe, patch plan, validation path, and verifier review.
 - Full end-to-end target-app runtime implementation beyond shell/partial slices.
 - Scheduled/background automation.
@@ -59,3 +65,4 @@
 - Worker v3 recipe execution remains bounded by the worker capability registry, stack profiles, patch budgets, and verifier review.
 - Worker v4 runtime feature execution remains opt-in through explicit feature invocation; supervisor runtime generation is disabled by default.
 - Worker v5 evidence generation remains bounded to local artifacts. Confirm is required for process launches and user-facing artifact writes; missing tools produce adoption issues/specs instead of implicit installation.
+- Autonomy v3 does not grant merge, approval, quorum bypass, verifier bypass, or automatic resume authority.

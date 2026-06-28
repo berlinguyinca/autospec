@@ -532,6 +532,10 @@ def evidence_bundle(root: Path, issue: str, feature: str, confirm: bool) -> int:
 def scorecard(root: Path) -> int:
     categories = ["Product intent", "Architecture", "Testing", "UI/UX", "Accessibility", "Documentation", "Tutorials", "Reporting", "Analytics/visualization", "AI platform", "NLAI", "Diagnostics", "Security/privacy", "Operations", "Metadata/Digital Twin", "Autonomy readiness"]
     rows = [{"category": c, "score": 50, "status": "partial", "evidence": [], "missing_evidence": ["more runtime proof"], "top_next_action": "Build evidence bundle"} for c in categories]
+    if (reports(root) / "autonomy-v3-status.json").exists():
+        for row in rows:
+            if row["category"] == "Autonomy readiness":
+                row.update({"score": 70, "status": "good", "evidence": [".autospec/reports/autonomy-v3-status.json"], "missing_evidence": ["human review remains final authority"], "top_next_action": "Run review quorum and council report"})
     payload = {"schema": 1, "note": "heuristic scorecard, not certification", "categories": rows}
     write_json(reports(root) / "product-quality-scorecard.json", payload)
     write_text(reports(root) / "product-quality-scorecard.md", "# Product Quality Scorecard\n\nThis is a heuristic scorecard, not a certification.\n\n| Category | Score | Status | Top next action |\n| --- | ---: | --- | --- |\n" + "\n".join(f"| {r['category']} | {r['score']} | {r['status']} | {r['top_next_action']} |" for r in rows))

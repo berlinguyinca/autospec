@@ -101,6 +101,9 @@ selected_runtime_context = safe_runtime_candidates[0] if safe_runtime_candidates
 runtime_evidence_status = load(os.path.join(reports, "runtime-evidence-status.json"), {})
 playwright_evidence_run = load(os.path.join(reports, "playwright-evidence-run.json"), {})
 evidence_bundle = load(os.path.join(reports, "evidence-bundle.json"), {})
+specialist_assignment = load(os.path.join(reports, "specialist-assignment.json"), {})
+review_quorum = load(os.path.join(reports, "review-quorum.json"), {})
+learning_status = load(os.path.join(reports, "learning-status.json"), {})
 rule_ids = selected_context.get("rule_ids") or selected_context.get("source_rule_ids") or []
 quality_gate_ids = selected_context.get("quality_gate_ids") or selected_context.get("quality_gates") or []
 risk = selected_context.get("risk", {}) if isinstance(selected_context.get("risk", {}), dict) else {}
@@ -171,6 +174,14 @@ plan = {
             "evidence_bundle_required": bool(selected_runtime_context.get("feature_slice_id")),
             "evidence_bundle_present": bool(evidence_bundle),
             "evidence_risk": "low" if runtime_evidence_status else "unknown",
+        },
+        "specialist_plan": {
+            "enabled": True,
+            "assigned_specialists": [item.get("specialist_id") for item in specialist_assignment.get("assignments", [])],
+            "quorum_required_for_runtime": True,
+            "quorum_verdict": review_quorum.get("verdict", "not_present"),
+            "learning_update_after_cycle": True,
+            "learning_entries": learning_status.get("entries", 0),
         },
     },
     "steps": steps,
@@ -277,6 +288,29 @@ plan_md.extend([
     f"- Evidence bundle required: `{str(plan['selected_issue_context']['evidence_readiness']['evidence_bundle_required']).lower()}`",
     f"- Evidence bundle present: `{str(plan['selected_issue_context']['evidence_readiness']['evidence_bundle_present']).lower()}`",
     f"- Evidence risk: `{plan['selected_issue_context']['evidence_readiness']['evidence_risk']}`",
+    "",
+    "## Specialist Plan",
+    "",
+    f"- Enabled: `{str(plan['selected_issue_context']['specialist_plan']['enabled']).lower()}`",
+    f"- Assigned specialists: `{', '.join(plan['selected_issue_context']['specialist_plan']['assigned_specialists']) or 'none'}`",
+    "",
+    "## Review Quorum Requirements",
+    "",
+    f"- Required for runtime/AI/security/medium-risk: `{str(plan['selected_issue_context']['specialist_plan']['quorum_required_for_runtime']).lower()}`",
+    f"- Current quorum verdict: `{plan['selected_issue_context']['specialist_plan']['quorum_verdict']}`",
+    "",
+    "## Decision Records",
+    "",
+    "- Implementation Decision Records are generated for medium-risk planning, adapter/recipe decisions, and important refusals.",
+    "",
+    "## Learning Outputs",
+    "",
+    f"- Learning update after cycle: `{str(plan['selected_issue_context']['specialist_plan']['learning_update_after_cycle']).lower()}`",
+    f"- Current learning entries: `{plan['selected_issue_context']['specialist_plan']['learning_entries']}`",
+    "",
+    "## Retrospective Outputs",
+    "",
+    "- Retrospectives summarize successes, failures, guidance, repeated misses, policy gaps, and next improvements.",
     "",
     "## Expected Validation",
     "",

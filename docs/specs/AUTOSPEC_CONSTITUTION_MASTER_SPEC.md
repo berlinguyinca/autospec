@@ -26,6 +26,8 @@ The engine also runs doctrine audits for architecture governance, UI/UX, Playwri
 
 Runtime Evidence & Product Quality Automation adds local proof artifacts for generated target-app slices: app launch profiles, confirm-only app harness runs, Playwright evidence, responsive screenshots/contact sheets, visual polish audits, accessibility evidence, tutorial artifacts, PDF/report artifact plans, mock-only AI/NLAI simulations, token usage evidence, evidence bundles, and product quality scorecards. These are operator-invoked and never install dependencies or call external AI providers by default.
 
+Autonomy v3 adds deterministic engineering-organization governance: specialist role registries, specialist assignment, review packets, checklist findings, review quorum, medium-risk planning, guidance requests, implementation decision records, learning ledger, policy improvement proposals, retrospectives, repo-local memory index, repeated-miss issue planning, council reports, supervisor v6 planning visibility, and specialist/learning/status dashboards. These are review and planning systems; they do not create LLM personas, merge, approve, bypass verifier/quorum, apply sibling-repo policy changes, or execute medium-risk code automatically.
+
 ## Digital Twin
 
 The Digital Twin summarizes repository inventory, technologies, capabilities, surfaces, settings, permissions, AI/MCP indicators, domain model, workflow map, knowledge graph, impact analysis, and metadata drift.
@@ -79,6 +81,8 @@ UI/UX doctrine includes mobile/tablet/desktop responsiveness, accessibility, key
 ## Security/privacy/operations
 
 High-risk auth, authorization, permissions, secrets, encryption, billing, payments, migrations, data deletion, deployment, infrastructure, public API breaking changes, privacy/security policies, and multi-service behavior require human guidance.
+
+Medium-risk work receives plans, ADRs, decomposition, tests, rollback, evidence strategy, and guidance requests before any implementation. Review quorum is internal Autospec evidence and does not replace human approval.
 
 ## Continuous evolution
 

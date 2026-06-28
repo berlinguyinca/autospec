@@ -82,6 +82,7 @@ release_candidate_gate = load(os.path.join(reports, "release-candidate-gate.json
 autonomy_v2_status = load(os.path.join(reports, "autonomy-v2-status.json"), {})
 runtime_feature_status = load(os.path.join(reports, "runtime-feature-status.json"), {})
 runtime_evidence_status = load(os.path.join(reports, "runtime-evidence-status.json"), {})
+autonomy_v3_status = load(os.path.join(reports, "autonomy-v3-status.json"), {})
 spec_coverage = load(os.path.join(reports, "spec-coverage.json"), {})
 coverage_requirements = spec_coverage.get("requirements", []) if isinstance(spec_coverage.get("requirements"), list) else []
 critical_missing = [r for r in coverage_requirements if r.get("priority") == "critical" and r.get("status") == "missing" and r.get("requirement_type") != "target_app_scaffold"]
@@ -104,6 +105,7 @@ signals = {
     "autonomy_v2": "pass" if autonomy_v2_status.get("summary") or autonomy_v2_status.get("worker_capabilities") else "unknown",
     "runtime_features": "pass" if runtime_feature_status.get("supported_adapters") or runtime_feature_status.get("generated_runtime_features") else "unknown",
     "runtime_evidence": "pass" if runtime_evidence_status.get("summary") else "unknown",
+    "autonomy_v3": "pass" if autonomy_v3_status.get("summary") else "unknown",
     "spec_coverage": "fail" if critical_missing else "warn" if high_partial or documented_only else "pass" if coverage_requirements else "unknown",
 }
 blocking_values = {"blocked", "fail", "RC_BLOCKED", "RC_NOT_READY"}
@@ -142,6 +144,7 @@ status = {
         "autonomy_v2_recipes": exists("scripts/autospec-recipe-index.sh") and exists("scripts/autospec-rule-to-recipe-plan.sh") and exists("scripts/autospec-worker-one.sh"),
         "runtime_feature_generation": exists("scripts/autospec-runtime-adapter-index.sh") and exists("scripts/autospec-generate-runtime-feature.sh") and exists("scripts/autospec-verify-runtime-feature.sh"),
         "runtime_evidence_automation": exists("scripts/autospec-detect-app-launch.sh") and exists("scripts/autospec-run-playwright-evidence.sh") and exists("scripts/autospec-build-evidence-bundle.sh") and exists("scripts/autospec-product-quality-scorecard.sh"),
+        "autonomy_v3_specialist_governance": exists("scripts/autospec-specialist-index.sh") and exists("scripts/autospec-review-quorum.sh") and exists("scripts/autospec-update-learning-ledger.sh") and exists("scripts/autospec-autonomy-v3-status.sh"),
     },
     "policy_source_status": "present" if exists(".autospec/state/policy-sources.json") else "unknown",
     "baseline_source_status": "present" if exists(".autospec/reports/baseline-composition.json") else "unknown",
@@ -213,6 +216,11 @@ md = "\n".join([
     f"- Signal: `{signals.get('runtime_evidence', 'unknown')}`",
     "- Runtime evidence is local/operator-invoked and covers app launch profiles, Playwright runs, screenshots/contact sheets, accessibility/visual audits, tutorials, AI/NLAI mock simulations, token usage evidence, evidence bundles, and product quality scorecards.",
     "",
+    "## Autonomy v3 specialist governance",
+    "",
+    f"- Signal: `{signals.get('autonomy_v3', 'unknown')}`",
+    "- Specialist agents, review quorum, medium-risk planning, guidance requests, IDRs, learning ledger, retrospectives, memory index, repeated-miss planning, policy proposals, council reports, and v3 status are local deterministic governance surfaces.",
+    "",
     "## Safety guarantees",
     "",
     "- No GitHub Actions or schedulers.",
@@ -247,6 +255,7 @@ md = "\n".join([
     f"- Signal: `{signals.get('autonomy_v2', 'unknown')}`",
     f"- Runtime feature signal: `{signals.get('runtime_features', 'unknown')}`",
     f"- Runtime evidence signal: `{signals.get('runtime_evidence', 'unknown')}`",
+    f"- Autonomy v3 signal: `{signals.get('autonomy_v3', 'unknown')}`",
     f"- MVP readiness impact: `{status['spec_coverage']['mvp_readiness_impact']}`",
 ])
 write_text(os.path.join(reports, "mvp-status.md"), md)

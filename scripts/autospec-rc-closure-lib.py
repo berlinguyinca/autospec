@@ -484,6 +484,7 @@ def release_candidate_gate(root: Path, script_root: Path) -> int:
     autonomy_v2 = load_json(reports(root) / "autonomy-v2-status.json", {})
     runtime_features = load_json(reports(root) / "runtime-feature-status.json", {})
     runtime_evidence = load_json(reports(root) / "runtime-evidence-status.json", {})
+    autonomy_v3 = load_json(reports(root) / "autonomy-v3-status.json", {})
     blockers = []
     warnings = []
     for req in spec.get("requirements", []):
@@ -501,6 +502,8 @@ def release_candidate_gate(root: Path, script_root: Path) -> int:
         warnings.append("Runtime feature status report has not been generated")
     if not runtime_evidence:
         warnings.append("Runtime evidence status report has not been generated")
+    if not autonomy_v3:
+        warnings.append("Autonomy v3 status report has not been generated")
     try:
         cp = subprocess.run(["git", "status", "--porcelain", "--", ".github/workflows"], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         workflow_status = cp.stdout.splitlines() if cp.returncode == 0 else []
@@ -528,7 +531,7 @@ def release_candidate_gate(root: Path, script_root: Path) -> int:
         "",
         "## Capability summary",
         "",
-        "- Structured policy, Digital Twin, audits, backlog, Autonomy v2 recipes, runtime feature shells, runtime evidence, and autonomy commands are checked through local reports.",
+        "- Structured policy, Digital Twin, audits, backlog, Autonomy v2 recipes, runtime feature shells, runtime evidence, Autonomy v3 specialist governance, and autonomy commands are checked through local reports.",
         "",
         "## Implemented engine capabilities",
         "",

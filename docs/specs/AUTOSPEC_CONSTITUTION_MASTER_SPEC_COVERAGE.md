@@ -2,24 +2,25 @@
 
 ## Summary
 
-- Total requirements: 105
-- Status counts: {"deferred": 3, "documented_only": 1, "implemented": 67, "missing": 2, "partial": 1, "scaffolded": 24, "validated": 7}
+- Total requirements: 112
+- Status counts: {"deferred": 3, "documented_only": 1, "implemented": 74, "missing": 2, "partial": 1, "scaffolded": 24, "validated": 7}
 - runtime feature evidence is tracked through runtime adapters, feature slices, generation records, metadata sync, verification, worker v4, and runtime status reports.
 - runtime evidence is tracked through app launch profiles, Playwright evidence runs, screenshots/contact sheets, accessibility/visual audits, tutorials, mock AI/NLAI simulations, evidence bundles, and product quality scorecards.
+- specialist governance is tracked through Autonomy v3 specialist agents, assignments, review packets, deterministic findings, review quorum, medium-risk planning, guidance requests, IDRs, learning ledger, retrospectives, memory index, repeated-miss planning, policy proposals, and council reports.
 
 ## Coverage Matrix
 
 | Category | Total | Statuses |
 | --- | ---: | --- |
 | `ai_platform` | 11 | deferred: 1, implemented: 3, scaffolded: 7 |
-| `autonomous_development` | 24 | deferred: 1, documented_only: 1, implemented: 21, scaffolded: 1 |
+| `autonomous_development` | 30 | deferred: 1, documented_only: 1, implemented: 27, scaffolded: 1 |
 | `diagnostics` | 4 | implemented: 1, scaffolded: 3 |
 | `digital_twin` | 7 | implemented: 5, missing: 2 |
 | `docs_tutorial_pdf` | 5 | implemented: 1, partial: 1, scaffolded: 3 |
 | `documentation` | 1 | implemented: 1 |
 | `engineering` | 8 | deferred: 1, implemented: 4, validated: 3 |
 | `nlai` | 4 | implemented: 1, scaffolded: 3 |
-| `policy` | 9 | implemented: 9 |
+| `policy` | 10 | implemented: 10 |
 | `product_baseline` | 11 | implemented: 8, scaffolded: 3 |
 | `reporting` | 1 | implemented: 1 |
 | `reporting_analytics_visualization` | 4 | implemented: 1, scaffolded: 2, validated: 1 |
@@ -60,6 +61,13 @@
 | `autonomy_v2.stack_profiles` | autonomous_development | implemented | high | scripts/autospec-detect-stack-profile.sh |
 | `autonomy_v2.template_apply` | autonomous_development | implemented | high | scripts/autospec-apply-template.sh |
 | `autonomy_v2.worker_capabilities` | autonomous_development | implemented | critical | scripts/autospec-recipe-index.sh, .autospec/state/worker-capabilities.yml |
+| `autonomy_v3.learning_memory` | autonomous_development | implemented | high | scripts/autospec-update-learning-ledger.sh, scripts/autospec-retrospective.sh, scripts/autospec-build-memory-index.sh, scripts/autospec-plan-repeated-miss-issues.sh |
+| `autonomy_v3.medium_risk_planning` | autonomous_development | implemented | high | scripts/autospec-medium-risk-plan.sh, scripts/autospec-build-guidance-request.sh |
+| `autonomy_v3.policy_proposals_council` | policy | implemented | high | scripts/autospec-policy-improvement-proposals.sh, scripts/autospec-council-report.sh |
+| `autonomy_v3.specialist_assignment` | autonomous_development | implemented | critical | scripts/autospec-assign-specialists.sh, scripts/autospec-specialist-review-packets.sh |
+| `autonomy_v3.specialist_registry` | autonomous_development | implemented | critical | scripts/autospec-specialist-index.sh, .autospec/state/specialist-agents.json |
+| `autonomy_v3.specialist_review_quorum` | autonomous_development | implemented | critical | scripts/autospec-run-specialist-review.sh, scripts/autospec-review-quorum.sh |
+| `autonomy_v3.status` | autonomous_development | implemented | high | scripts/autospec-specialist-status.sh, scripts/autospec-learning-status.sh, scripts/autospec-autonomy-v3-status.sh |
 | `diagnostics.audit` | diagnostics | implemented | high | scripts/autospec-diagnostics-audit.sh, .autospec/reports/diagnostics-audit.json |
 | `diagnostics.health_logs_metrics` | diagnostics | scaffolded | high | .autospec/templates/product-baseline/diagnostics-status-page-spec.md |
 | `diagnostics.incident_safe_remediation` | diagnostics | scaffolded | medium | .autospec/templates/product-baseline/diagnostics-status-page-spec.md |

@@ -2,11 +2,11 @@
 
 ## What is included
 
-- Structured policy loading, Digital Twin, rule checks, doctrine audits, spec coverage, issue-plan-v3, onboarding, bootstrap, and local autonomy controls.
+- Structured policy loading, Digital Twin, rule checks, doctrine audits, spec coverage, issue-plan-v3, onboarding, bootstrap, local autonomy controls, runtime evidence automation, and Autonomy v3 specialist/quorum/learning governance.
 
 ## What is intentionally not included
 
-- GitHub Actions, schedulers, auto-merge, self-approval, automatic dependency upgrades, migrations, and auth/security behavior changes.
+- GitHub Actions, schedulers, auto-merge, self-approval, automatic dependency upgrades, migrations, auth/security behavior changes, automatic medium-risk execution, sibling-repo policy modification, real multi-agent LLM execution, quorum bypass, verifier bypass, and automatic resume without guidance.
 
 ## Companion repositories
 
@@ -46,6 +46,8 @@ Use `scripts/autospec-audit-to-backlog.sh --dry-run` before any confirmed publis
 ## Worker/verifier/supervisor
 
 Use supervisor dry-run before confirmed worker execution.
+
+Autonomy v3 adds deterministic specialist assignments, review packets, checklist findings, review quorum, medium-risk plans, guidance requests, IDRs, learning ledger, policy proposals, retrospectives, memory index, repeated-miss planning, council reports, and v3 status dashboards. These are review/planning surfaces, not merge or approval authority.
 
 ## AI/NLAI/product scaffolds
 

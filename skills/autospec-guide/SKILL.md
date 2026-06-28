@@ -26,6 +26,7 @@ autonomy commands during self-update.
 - never merge PRs.
 - never approve PRs.
 - Never bypass verifier.
+- never bypass quorum.
 - Never remove stuck/blocked labels without evidence.
 - Never resume work without explicit operator guidance.
 - When posting guidance, include exact resume criteria.
@@ -63,6 +64,13 @@ script and summarize the report.
 - `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" --graceful`
 - `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-resume.sh"`
 - `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guide-issue.sh" --dry-run --stuck <issue-number> --message-file <file>`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-specialist-index.sh"`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-assign-specialists.sh" --dry-run --issue <number>`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-review-quorum.sh" --dry-run --issue <number>`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-council-report.sh" --dry-run --issue <number>`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-medium-risk-plan.sh" --dry-run --issue <number>`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-update-learning-ledger.sh" --dry-run`
+- `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomy-v3-status.sh"`
 
 ## Intent Mapping
 
@@ -77,6 +85,21 @@ script and summarize the report.
 | Show me the current autonomy status. | Run `autospec-autonomy-status.sh` through `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}`. |
 | What PRs need human review? | Use the status report PR review queue and promotion reports. |
 | What command should I run next? | Use the status report next recommended command unless a stop flag, lock, budget, or guidance blocker is present. |
+| Which specialists need to review this? | Run `autospec-assign-specialists.sh --dry-run --issue <number>` and summarize required specialists. |
+| Why is the review quorum blocked? | Run `autospec-review-quorum.sh --dry-run --issue <number>` and summarize blocking findings. |
+| Summarize the council report. | Run or read `autospec-council-report.sh --dry-run --issue <number>`. |
+| What did Autospec learn from the last run? | Read learning ledger/status and retrospective reports. |
+| What policy improvements are suggested? | Run `autospec-policy-improvement-proposals.sh --dry-run` and summarize local proposals. |
+| Should this medium-risk issue be split? | Run `autospec-medium-risk-plan.sh --dry-run --issue <number>` and summarize decomposition/guidance. |
+
+## Autonomy v3 Concepts
+
+- Specialist agents are deterministic role/checklist packets, not autonomous LLM personas by default.
+- Review quorum is an internal promotion gate, not human approval.
+- Council reports synthesize specialist findings deterministically.
+- Medium-risk planning produces plans, ADRs, decomposition, tests, rollback, and guidance requests; it does not execute code.
+- Learning ledger, retrospectives, memory index, and policy improvement proposals are repo-local unless a separate confirmed publishing flow is used.
+- Always distinguish implemented, scaffolded, planned, review-only, blocked, and deferred capabilities.
 
 ## Guidance Posting Format
 
