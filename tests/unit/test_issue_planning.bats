@@ -241,6 +241,52 @@ JSON
   [ "$output" = "test: add baseline testing evidence" ]
 }
 
+@test "bot state initializer writes control label taxonomy" {
+  mkdir -p "$TEST_TMPDIR/repo"
+  write_reports "$TEST_TMPDIR/repo"
+  bash "$PLAN" --repo-root "$TEST_TMPDIR/repo" >/dev/null
+
+  bash "$BOT_STATE" --repo-root "$TEST_TMPDIR/repo" >/dev/null
+
+  [ -f "$TEST_TMPDIR/repo/.autospec/state/control-labels.yml" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/reports/control-labels.md" ]
+  run grep -c '^  autospec:' "$TEST_TMPDIR/repo/.autospec/state/control-labels.yml"
+  [ "$output" = "14" ]
+  for label in \
+    autospec:managed \
+    autospec:discovered \
+    autospec:active \
+    autospec:paused \
+    autospec:blocked \
+    autospec:stuck \
+    autospec:needs-guidance \
+    autospec:guidance-provided \
+    autospec:resume \
+    autospec:needs-review \
+    autospec:architecture \
+    autospec:risk-high \
+    autospec:self-improvement \
+    autospec:follow-up
+  do
+    grep -q "  $label:" "$TEST_TMPDIR/repo/.autospec/state/control-labels.yml"
+    grep -q "| \`$label\` |" "$TEST_TMPDIR/repo/.autospec/reports/control-labels.md"
+  done
+  run python3 - "$TEST_TMPDIR/repo/.autospec/state/control-labels.yml" <<'PY'
+import sys
+import yaml
+data = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+required = ["purpose", "may_apply", "may_remove", "compatible_labels", "incompatible_labels", "state_machine_effect"]
+missing = []
+for label, spec in data["labels"].items():
+    for field in required:
+        if field not in spec:
+            missing.append(f"{label}:{field}")
+print("\n".join(missing))
+sys.exit(1 if missing else 0)
+PY
+  [ "$status" -eq 0 ]
+}
+
 @test "bot state initializer does not overwrite manual state unless requested" {
   mkdir -p "$TEST_TMPDIR/repo/.autospec/state" "$TEST_TMPDIR/repo/.autospec/reports"
   printf '{"mode":"manual"}\n' > "$TEST_TMPDIR/repo/.autospec/state/bot-control-plane.json"
