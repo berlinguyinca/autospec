@@ -63,6 +63,9 @@ supervisor = load(os.path.join(state, "supervisor-runs.json"), {"runs": []})
 issue_plan = load(os.path.join(reports, "issue-plan.json"), {"issues": []})
 budget = load(os.path.join(reports, "autonomy-budget.json"), {"overall_status": "unknown", "budgets": []})
 repeated = load(os.path.join(reports, "repeated-failures.json"), {"has_repeated_failures": False, "repeated_failures": []})
+rule_checks = load(os.path.join(reports, "rule-check-results.json"), {"results": []})
+maturity = load(os.path.join(reports, "maturity-score.json"), {"levels": []})
+audit = load(os.path.join(reports, "constitution-audit.json"), {})
 
 promotions = [load(path, {}) for path in sorted(glob.glob(os.path.join(state, "promotions", "*.json")))]
 verifications = [load(path, {}) for path in sorted(glob.glob(os.path.join(state, "verifications", "*.json")))]
@@ -79,6 +82,11 @@ stopped = os.path.exists(stop_flag)
 budget_exhausted = budget.get("overall_status") == "exhausted"
 needs_guidance = stuck > 0 or blocked > 0 or bool(repeated.get("has_repeated_failures"))
 ready_to_run = not locked and not stopped and not budget_exhausted and not needs_guidance
+required_rule_failures = [r for r in rule_checks.get("results", []) if r.get("severity") == "required" and r.get("status") == "fail"]
+production_maturity = next((level for level in maturity.get("levels", []) if level.get("level") == "production"), {})
+issue_plan_v2 = os.path.join(reports, "issue-plan-v2.json")
+issue_plan_v1 = os.path.join(reports, "issue-plan.json")
+issue_plan_v2_newer = os.path.exists(issue_plan_v2) and (not os.path.exists(issue_plan_v1) or os.path.getmtime(issue_plan_v2) >= os.path.getmtime(issue_plan_v1))
 
 summary = {
     "managed_issues": managed,
@@ -111,6 +119,15 @@ report = {
     },
     "budget": budget,
     "repeated_failures": repeated,
+    "rule_audit": {
+        "fresh": bool(rule_checks.get("results")),
+        "constitution_audit_status": audit.get("status", "unknown"),
+        "maturity_status": production_maturity.get("status", "unknown"),
+        "maturity_score": production_maturity.get("score", 0.0),
+        "top_failing_required_rules": [r.get("rule_id") for r in required_rule_failures[:5]],
+        "expired_waivers": [f for f in load(os.path.join(reports, "rule-extraction.json"), {}).get("waiver_findings", []) if f.get("code") == "WAIVER_EXPIRED"],
+        "issue_plan_v2_newer_than_v1": issue_plan_v2_newer,
+    },
     "planned_backlog_items": len(issue_plan.get("issues", [])),
     "guide_skill_quick_commands": [
         "autospec-guide: What is autospec working on?",
@@ -118,6 +135,7 @@ report = {
         "autospec-guide: What command should I run next?",
     ],
     "top_recommended_next_commands": [
+        "bash scripts/autospec-constitution-audit.sh",
         "bash scripts/autospec-build-digital-twin.sh",
         "bash scripts/autospec-autonomy-status.sh",
         "bash scripts/autospec-supervisor-loop.sh --dry-run --max-cycles 3",
@@ -161,6 +179,25 @@ md = [
     f"| Stop flag status | {'present' if stopped else 'absent'} |",
     f"| Budget status | {budget.get('overall_status', 'unknown')} |",
     f"| Repeated failures | {str(repeated.get('has_repeated_failures', False)).lower()} |",
+    "",
+    "## Rule Audit",
+    "",
+    "| Check | Status |",
+    "| --- | --- |",
+    f"| Rule check freshness | {str(bool(rule_checks.get('results'))).lower()} |",
+    f"| Constitution audit status | {audit.get('status', 'unknown')} |",
+    f"| Production maturity | {production_maturity.get('status', 'unknown')} ({production_maturity.get('score', 0.0)}) |",
+    f"| Issue plan v2 newer than v1 | {str(issue_plan_v2_newer).lower()} |",
+    "",
+    "### Top Failing Required Rules",
+    "",
+]
+if required_rule_failures:
+    for rule in required_rule_failures[:5]:
+        md.append(f"- `{rule.get('rule_id')}`")
+else:
+    md.append("- None.")
+md += [
     "",
     "## Current Active Work",
     "",

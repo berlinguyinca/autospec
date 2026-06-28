@@ -216,6 +216,7 @@ worker_result = load_json(os.path.join(reports_dir, "worker-result.json"), {})
 baseline_comp = load_json(os.path.join(reports_dir, "baseline-composition.json"), {})
 baseline_gap = load_json(os.path.join(reports_dir, "baseline-gap-analysis.json"), {})
 constitutional_gap = load_json(os.path.join(reports_dir, "constitutional-gap-report.json"), {})
+rule_checks = load_json(os.path.join(reports_dir, "rule-check-results.json"), {})
 packet_md = read_text(os.path.join(state_dir, "implementation-packet.md"))
 worker_pr_body = read_text(os.path.join(reports_dir, "worker-pr-body.md"))
 pr = load_pr()
@@ -262,6 +263,18 @@ constitution_ok = bool(re.search(r"constitution|doctrine|quality gate", trace_te
 baseline_ok = bool(re.search(r"baseline|source gap|pack", trace_text, re.I))
 dimensions.append(dimension("constitution_alignment", "pass" if constitution_ok else "fail", "Constitution/doctrine traceability is present." if constitution_ok else "Constitution/doctrine traceability is missing.", ["constitutional-gap-report.json" if constitutional_gap else ""]))
 dimensions.append(dimension("baseline_alignment", "pass" if baseline_ok else "fail", "Baseline/source-gap traceability is present." if baseline_ok else "Baseline/source-gap traceability is missing.", ["baseline-composition.json" if baseline_comp else "", "baseline-gap-analysis.json" if baseline_gap else ""]))
+
+rule_ids = sorted(set(re.findall(r"\b[a-z][a-z0-9_]*(?:\.[a-z0-9_]+){2,}\b", "\n".join([pr_body, packet_md, issue_body, json.dumps(source_issue)]))))
+rule_known = {item.get("rule_id") for item in rule_checks.get("results", []) if isinstance(item, dict)}
+rule_evidence = [rid for rid in rule_ids if not rule_known or rid in rule_known]
+managed_issue = "autospec:managed" in source_issue.get("suggested_labels", []) or "autospec:managed" in pr_body
+rule_context_available = bool(rule_known) or os.path.isfile(os.path.join(reports_dir, "issue-plan-v2.json"))
+if rule_evidence:
+    dimensions.append(dimension("rule_traceability", "pass", "Autospec rule IDs are referenced by the worker/PR evidence.", rule_evidence))
+elif rule_context_available and (managed_issue or source_issue):
+    dimensions.append(dimension("rule_traceability", "warn", "Autospec-generated work does not reference a source rule ID.", [], "Add the source rule ID from issue-plan-v2 or rule-check-results."))
+else:
+    dimensions.append(dimension("rule_traceability", "pass", "No rule-audit context was available for this v0 verification path.", []))
 
 if classification == "unknown":
     dimensions.append(dimension("risk_classification", "fail", "Worker risk classification is missing.", [], "Run worker v1 before verification."))

@@ -12,6 +12,7 @@ bash scripts/autospec-publish-issues.sh --dry-run
 bash scripts/autospec-publish-issues.sh --confirm
 bash scripts/autospec-autonomy-status.sh
 bash scripts/autospec-build-digital-twin.sh
+bash scripts/autospec-constitution-audit.sh
 bash scripts/autospec-supervisor-loop.sh --dry-run --max-cycles 3
 bash scripts/autospec-supervisor-loop.sh --confirm --max-cycles 3
 bash scripts/autospec-supervisor-cycle.sh --dry-run --issue <number>
