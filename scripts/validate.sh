@@ -748,12 +748,13 @@ check_constitution_validation_contract() {
     local dry_run_script="scripts/autospec-autonomy-dry-run.sh"
     local ensure_labels_script="scripts/autospec-ensure-labels.sh"
     local publish_issues_script="scripts/autospec-publish-issues.sh"
+    local sync_issues_script="scripts/autospec-sync-published-issues.sh"
     local validation_bats="tests/unit/test_constitution_validation.bats"
     local composition_bats="tests/unit/test_baseline_composition.bats"
     local intelligence_bats="tests/unit/test_repository_intelligence.bats"
     local issue_plan_bats="tests/unit/test_issue_planning.bats"
     local publishing_bats="tests/unit/test_github_publishing.bats"
-    for script in "$validation_script" "$composition_script" "$metadata_script" "$baseline_gap_script" "$constitutional_gap_script" "$issue_plan_script" "$bot_state_script" "$dry_run_script" "$ensure_labels_script" "$publish_issues_script"; do
+    for script in "$validation_script" "$composition_script" "$metadata_script" "$baseline_gap_script" "$constitutional_gap_script" "$issue_plan_script" "$bot_state_script" "$dry_run_script" "$ensure_labels_script" "$publish_issues_script" "$sync_issues_script"; do
         [ -f "$script" ] || fail "$script: required file missing"
         [ -x "$script" ] || fail "$script: not executable"
         bash -n "$script" || fail "$script: bash syntax error"

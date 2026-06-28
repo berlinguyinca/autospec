@@ -7,6 +7,7 @@ setup() {
   BOT_STATE="$REPO_ROOT/scripts/autospec-bot-state-init.sh"
   ENSURE_LABELS="$REPO_ROOT/scripts/autospec-ensure-labels.sh"
   PUBLISH="$REPO_ROOT/scripts/autospec-publish-issues.sh"
+  SYNC="$REPO_ROOT/scripts/autospec-sync-published-issues.sh"
   TEST_TMPDIR="$(mktemp -d /tmp/autospec-github-publishing-XXXXXX)"
 }
 
@@ -71,6 +72,7 @@ install_recording_gh() {
   cat > "$bin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_STUB_LOG"
+if [ "$1" = "--repo" ]; then shift 2; fi
 if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
   body_file=""
   prev=""
@@ -123,6 +125,7 @@ install_label_failing_issue_gh() {
   cat > "$bin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_STUB_LOG"
+if [ "$1" = "--repo" ]; then shift 2; fi
 if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
   for arg in "$@"; do
     if [ "$arg" = "autospec:managed" ]; then
@@ -144,6 +147,120 @@ if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
 fi
 if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
   printf '[]\n'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$bin/gh"
+  : > "$log"
+}
+
+install_marker_existing_gh() {
+  local bin="$1"
+  local log="$2"
+  mkdir -p "$bin"
+  cat > "$bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_STUB_LOG"
+if [ "$1" = "--repo" ]; then shift 2; fi
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+  if printf '%s\n' "$*" | grep -q 'autospec-local-issue-id:'; then
+    printf '[{"number":77,"url":"https://github.com/example/repo/issues/77","title":"test: add baseline testing evidence","state":"OPEN"}]\n'
+  else
+    printf '[]\n'
+  fi
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$bin/gh"
+  : > "$log"
+}
+
+install_title_fallback_gh() {
+  local bin="$1"
+  local log="$2"
+  mkdir -p "$bin"
+  cat > "$bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_STUB_LOG"
+if [ "$1" = "--repo" ]; then shift 2; fi
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+  if printf '%s\n' "$*" | grep -q 'autospec-local-issue-id:'; then
+    printf '[]\n'
+  else
+    printf '[{"number":88,"url":"https://github.com/example/repo/issues/88","title":"test: add baseline testing evidence","state":"OPEN"}]\n'
+  fi
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$bin/gh"
+  : > "$log"
+}
+
+install_closed_issue_gh() {
+  local bin="$1"
+  local log="$2"
+  mkdir -p "$bin"
+  cat > "$bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_STUB_LOG"
+if [ "$1" = "--repo" ]; then shift 2; fi
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  printf '{"number":44,"url":"https://github.com/example/repo/issues/44","title":"old","state":"CLOSED","labels":[{"name":"autospec:managed"}]}\n'
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "reopen" ]; then
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$bin/gh"
+  : > "$log"
+}
+
+install_permission_denied_issue_gh() {
+  local bin="$1"
+  local log="$2"
+  mkdir -p "$bin"
+  cat > "$bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_STUB_LOG"
+if [ "$1" = "--repo" ]; then shift 2; fi
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+  printf '[]\n'
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+  printf 'HTTP 403: Resource not accessible by integration\n' >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$bin/gh"
+  : > "$log"
+}
+
+install_sync_gh() {
+  local bin="$1"
+  local log="$2"
+  mkdir -p "$bin"
+  cat > "$bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_STUB_LOG"
+if [ "$1" = "--repo" ]; then shift 2; fi
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  printf '{"number":44,"url":"https://github.com/example/repo/issues/44","title":"published title","state":"OPEN","labels":[{"name":"autospec:managed"},{"name":"autospec:needs-guidance"}]}\n'
   exit 0
 fi
 exit 0
@@ -235,6 +352,20 @@ SH
   [ "$output" = "false" ]
 }
 
+@test "issue publishing absent config defaults to dry-run without GitHub calls" {
+  mkdir -p "$TEST_TMPDIR/repo"
+  prepare_backlog "$TEST_TMPDIR/repo"
+  rm -f "$TEST_TMPDIR/repo/.autospec/autospec.yml"
+  install_failing_gh "$TEST_TMPDIR/bin"
+
+  PATH="$TEST_TMPDIR/bin:$PATH" run bash "$PUBLISH" --repo-root "$TEST_TMPDIR/repo"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"issue publishing: DRY-RUN"* ]]
+  [ -f "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-plan.md" ]
+  [ ! -f "$TEST_TMPDIR/repo/.autospec/state/published-issues.json" ]
+}
+
 @test "issue publishing confirm creates issues and writes sync ledger" {
   mkdir -p "$TEST_TMPDIR/repo"
   prepare_backlog "$TEST_TMPDIR/repo"
@@ -251,8 +382,24 @@ SH
   grep -q '<!-- autospec-local-issue-id: 001-test-add-baseline-testing-evidence -->' "$TEST_TMPDIR/gh.log.bodies"
   grep -q '<!-- autospec-source-gap-hash:' "$TEST_TMPDIR/gh.log.bodies"
   grep -q '<!-- autospec-body-hash:' "$TEST_TMPDIR/gh.log.bodies"
-  run jq -r '.items["001-test-add-baseline-testing-evidence"].github_number' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
+  run jq -r '.issues[] | select(.local_issue_id=="001-test-add-baseline-testing-evidence") | .github_issue_number' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
   [ "$output" = "1" ]
+}
+
+@test "issue publishing writes schema 1 issues-array ledger with repo and timestamps" {
+  mkdir -p "$TEST_TMPDIR/repo"
+  prepare_backlog "$TEST_TMPDIR/repo"
+  install_recording_gh "$TEST_TMPDIR/bin" "$TEST_TMPDIR/gh.log"
+
+  GH_STUB_LOG="$TEST_TMPDIR/gh.log" PATH="$TEST_TMPDIR/bin:$PATH" run bash "$PUBLISH" --repo-root "$TEST_TMPDIR/repo" --repo example/repo --confirm
+
+  [ "$status" -eq 0 ]
+  run jq -r '.schema' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
+  [ "$output" = "1" ]
+  run jq -r '.repo' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
+  [ "$output" = "example/repo" ]
+  run jq -r '.issues[0] | [.local_issue_id,.github_issue_number,.state,.last_published_at,.last_synced_at] | @tsv' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
+  [[ "$output" == 001-test-add-baseline-testing-evidence$'\t'1$'\t'open$'\t'*Z$'\t'*Z ]]
 }
 
 @test "issue publishing confirm updates ledgered issues instead of duplicating" {
@@ -260,15 +407,18 @@ SH
   prepare_backlog "$TEST_TMPDIR/repo"
   cat > "$TEST_TMPDIR/repo/.autospec/state/published-issues.json" <<'JSON'
 {
-  "version": 1,
-  "items": {
-    "001-test-add-baseline-testing-evidence": {
-      "github_number": 44,
-      "github_url": "https://github.com/example/repo/issues/44",
+  "schema": 1,
+  "repo": "example/repo",
+  "issues": [
+    {
+      "local_issue_id": "001-test-add-baseline-testing-evidence",
+      "github_issue_number": 44,
+      "github_issue_url": "https://github.com/example/repo/issues/44",
       "body_hash": "old",
-      "title": "old"
+      "title": "old",
+      "state": "open"
     }
-  }
+  ]
 }
 JSON
   install_recording_gh "$TEST_TMPDIR/bin" "$TEST_TMPDIR/gh.log"
@@ -278,7 +428,7 @@ JSON
   [ "$status" -eq 0 ]
   grep -q 'issue edit 44' "$TEST_TMPDIR/gh.log"
   grep -q 'issue create' "$TEST_TMPDIR/gh.log"
-  run jq -r '.items["001-test-add-baseline-testing-evidence"].github_number' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
+  run jq -r '.issues[] | select(.local_issue_id=="001-test-add-baseline-testing-evidence") | .github_issue_number' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
   [ "$output" = "44" ]
 }
 
@@ -295,4 +445,113 @@ JSON
   grep -q 'issue edit 9 --add-label autospec:managed' "$TEST_TMPDIR/gh.log"
   run jq -r '.actions[].label_failures[]?' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-result.json"
   [[ "$output" == *"autospec:managed"* ]]
+}
+
+@test "issue publishing links existing open issue by marker before creating duplicate" {
+  mkdir -p "$TEST_TMPDIR/repo"
+  prepare_backlog "$TEST_TMPDIR/repo"
+  install_marker_existing_gh "$TEST_TMPDIR/bin" "$TEST_TMPDIR/gh.log"
+
+  GH_STUB_LOG="$TEST_TMPDIR/gh.log" PATH="$TEST_TMPDIR/bin:$PATH" run bash "$PUBLISH" --repo-root "$TEST_TMPDIR/repo" --repo example/repo --confirm
+
+  [ "$status" -eq 0 ]
+  grep -q 'issue list --search autospec-local-issue-id: 001-test-add-baseline-testing-evidence' "$TEST_TMPDIR/gh.log"
+  grep -q 'issue edit 77' "$TEST_TMPDIR/gh.log"
+  ! grep -q 'issue create' "$TEST_TMPDIR/gh.log"
+  run jq -r '.issues[] | select(.local_issue_id=="001-test-add-baseline-testing-evidence") | .github_issue_number' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
+  [ "$output" = "77" ]
+}
+
+@test "issue publishing links exact title fallback with warning before creating duplicate" {
+  mkdir -p "$TEST_TMPDIR/repo"
+  prepare_backlog "$TEST_TMPDIR/repo"
+  install_title_fallback_gh "$TEST_TMPDIR/bin" "$TEST_TMPDIR/gh.log"
+
+  GH_STUB_LOG="$TEST_TMPDIR/gh.log" PATH="$TEST_TMPDIR/bin:$PATH" run bash "$PUBLISH" --repo-root "$TEST_TMPDIR/repo" --repo example/repo --confirm
+
+  [ "$status" -eq 0 ]
+  ! grep -q 'issue create' "$TEST_TMPDIR/gh.log"
+  run jq -r '.warnings[]?' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-result.json"
+  [[ "$output" == *"exact title fallback"* ]]
+  grep -q 'exact title fallback' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-result.md"
+}
+
+@test "issue publishing skips closed ledger issue unless reopen flag is supplied" {
+  mkdir -p "$TEST_TMPDIR/repo/.autospec/state"
+  prepare_backlog "$TEST_TMPDIR/repo"
+  cat > "$TEST_TMPDIR/repo/.autospec/state/published-issues.json" <<'JSON'
+{
+  "schema": 1,
+  "repo": "example/repo",
+  "issues": [
+    {
+      "local_issue_id": "001-test-add-baseline-testing-evidence",
+      "title": "old",
+      "github_issue_number": 44,
+      "github_issue_url": "https://github.com/example/repo/issues/44",
+      "state": "closed"
+    }
+  ]
+}
+JSON
+  install_closed_issue_gh "$TEST_TMPDIR/bin" "$TEST_TMPDIR/gh.log"
+
+  GH_STUB_LOG="$TEST_TMPDIR/gh.log" PATH="$TEST_TMPDIR/bin:$PATH" run bash "$PUBLISH" --repo-root "$TEST_TMPDIR/repo" --repo example/repo --confirm
+
+  [ "$status" -eq 0 ]
+  grep -q 'issue view 44' "$TEST_TMPDIR/gh.log"
+  ! grep -q 'issue reopen 44' "$TEST_TMPDIR/gh.log"
+  grep -q 'closed; skipped' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-result.md"
+
+  : > "$TEST_TMPDIR/gh.log"
+  GH_STUB_LOG="$TEST_TMPDIR/gh.log" PATH="$TEST_TMPDIR/bin:$PATH" run bash "$PUBLISH" --repo-root "$TEST_TMPDIR/repo" --repo example/repo --confirm --reopen
+
+  [ "$status" -eq 0 ]
+  grep -q 'issue reopen 44' "$TEST_TMPDIR/gh.log"
+}
+
+@test "issue publishing permission failure writes actionable report" {
+  mkdir -p "$TEST_TMPDIR/repo"
+  prepare_backlog "$TEST_TMPDIR/repo"
+  install_permission_denied_issue_gh "$TEST_TMPDIR/bin" "$TEST_TMPDIR/gh.log"
+
+  GH_STUB_LOG="$TEST_TMPDIR/gh.log" PATH="$TEST_TMPDIR/bin:$PATH" run bash "$PUBLISH" --repo-root "$TEST_TMPDIR/repo" --repo example/repo --confirm
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"issue publishing: FAIL"* ]]
+  grep -q 'Resource not accessible' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-result.md"
+  grep -q 'Check GitHub issue permissions' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-publish-result.md"
+}
+
+@test "issue sync updates local ledger state and reports drift labels and closed issues" {
+  mkdir -p "$TEST_TMPDIR/repo/.autospec/state" "$TEST_TMPDIR/repo/.autospec/backlog/issues"
+  cat > "$TEST_TMPDIR/repo/.autospec/state/published-issues.json" <<'JSON'
+{
+  "schema": 1,
+  "repo": "example/repo",
+  "issues": [
+    {
+      "local_issue_id": "001-test-add-baseline-testing-evidence",
+      "title": "local title",
+      "body_hash": "local",
+      "labels": ["autospec:managed"],
+      "github_issue_number": 44,
+      "github_issue_url": "https://github.com/example/repo/issues/44",
+      "state": "open"
+    }
+  ]
+}
+JSON
+  install_sync_gh "$TEST_TMPDIR/bin" "$TEST_TMPDIR/gh.log"
+
+  GH_STUB_LOG="$TEST_TMPDIR/gh.log" PATH="$TEST_TMPDIR/bin:$PATH" run bash "$SYNC" --repo-root "$TEST_TMPDIR/repo" --repo example/repo
+
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/reports/github-issue-sync.json" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/reports/github-issue-sync.md" ]
+  run jq -r '.issues[0].title' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
+  [ "$output" = "published title" ]
+  run jq -r '.issues[0].labels | join(",")' "$TEST_TMPDIR/repo/.autospec/state/published-issues.json"
+  [ "$output" = "autospec:managed,autospec:needs-guidance" ]
+  grep -q 'needs guidance' "$TEST_TMPDIR/repo/.autospec/reports/github-issue-sync.md"
 }
