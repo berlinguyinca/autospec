@@ -91,6 +91,10 @@ def ac_list(items):
 
 def category_for(capability, section=""):
     text = f"{capability} {section}".lower()
+    if "architecture" in text or "migration" in text or "boundary" in text:
+        return "architecture"
+    if "metadata" in text or "configuration" in text or "config" in text or "autospec" in text:
+        return "metadata"
     if "doc" in text:
         return "documentation"
     if "test" in text or "qa" in text or "playwright" in text or "e2e" in text:
@@ -106,7 +110,26 @@ def category_for(capability, section=""):
     return "baseline"
 
 
+def planning_bucket_for(category, capability, title, risk):
+    text = f"{category} {capability} {title}".lower()
+    if category == "metadata" or "metadata" in text or "configuration" in text or "config" in text:
+        return {"rank": 1, "name": "foundational metadata/configuration work"}
+    if category == "testing" or "validation" in text:
+        return {"rank": 2, "name": "missing tests/validation"}
+    if category == "documentation" or "documentation" in text or "user-visible" in text or "docs" in text:
+        return {"rank": 3, "name": "documentation/user-visible baseline gaps"}
+    if category == "ai-platform":
+        return {"rank": 5, "name": "AI platform gaps"}
+    if category == "operations":
+        return {"rank": 6, "name": "operations/diagnostics gaps"}
+    if category == "architecture" or "migration" in text or risk == "High":
+        return {"rank": 7, "name": "high-risk architecture migrations"}
+    return {"rank": 4, "name": "low-risk product features"}
+
+
 def risk_for(status, priority):
+    if priority == "critical":
+        return "High"
     if priority == "high" or status == "missing":
         return "Medium"
     if status == "unknown":
@@ -148,6 +171,8 @@ def issue_from_gap(number, gap, constitutional=None):
     title = str(gap.get("suggested_issue_title") or f"feat: close {capability} baseline gap")
     section_name = constitutional.get("section", "") if constitutional else ""
     category = category_for(capability, section_name)
+    risk = risk_for(status, priority.lower())
+    planning_bucket = planning_bucket_for(category, capability, title, risk)
     evidence = [str(item) for item in gap.get("evidence", [])] or ["gap analysis did not provide evidence"]
     confidence = float(gap.get("confidence", 0.0) or 0.0)
     acceptance = []
@@ -161,8 +186,10 @@ def issue_from_gap(number, gap, constitutional=None):
     suggested_labels = ["autospec:managed", "autospec:discovered", f"autospec:{category}"]
     if profile and profile != "baseline":
         suggested_labels.append(f"baseline:{profile}")
+    issue_id = f"{number:03d}-{slugify(title)}"
     return {
         "number": number,
+        "issue_id": issue_id,
         "title": title,
         "summary": f"Close the `{capability}` gap discovered for the `{profile}` baseline profile.",
         "source_gap": {
@@ -179,9 +206,12 @@ def issue_from_gap(number, gap, constitutional=None):
         "evidence": evidence,
         "confidence": confidence,
         "priority": priority,
-        "risk": risk_for(status, priority.lower()),
+        "risk": risk,
+        "planning_bucket": planning_bucket,
         "suggested_labels": suggested_labels,
         "dependencies": [],
+        "depends_on": [],
+        "blocked_reason": None,
         "implementation_scope": [
             f"Add or expose repository evidence for `{capability}`.",
             "Keep implementation limited to files needed to satisfy the gap.",
@@ -224,7 +254,7 @@ def constitutional_issue_lookup(report):
 
 
 def write_issue_file(issue):
-    filename = f"{issue['number']:03d}-{slugify(issue['title'])}.md"
+    filename = f"{issue['issue_id']}.md"
     path = os.path.join(backlog_dir, filename)
     lines = [
         f"# {issue['title']}",
@@ -264,7 +294,11 @@ def write_issue_file(issue):
         "",
         "## Dependencies",
         "",
-        md_list(issue["dependencies"]),
+        md_list(issue["depends_on"]),
+        "",
+        "## Blocked reason",
+        "",
+        issue["blocked_reason"] or "None.",
         "",
         "## Implementation scope",
         "",
@@ -335,6 +369,15 @@ candidate_gaps = [
     if gap.get("status") not in {"present", "opted_out"} and gap.get("suggested_issue_title")
 ]
 candidate_gaps.sort(key=lambda item: (
+    planning_bucket_for(
+        category_for(
+            str(item[1].get("capability", "")),
+            constitution_lookup.get(str(item[1].get("suggested_issue_title", "")), {}).get("section", ""),
+        ),
+        str(item[1].get("capability", "")),
+        str(item[1].get("suggested_issue_title", "")),
+        risk_for(str(item[1].get("status", "unknown")), str(item[1].get("priority", "")).lower()),
+    )["rank"],
     {"high": 0, "medium": 1, "low": 2, "none": 3}.get(str(item[1].get("priority", "")).lower(), 2),
     item[0],
 ))
@@ -348,8 +391,26 @@ issues = []
 for idx, (_, gap) in enumerate(candidate_gaps, start=1):
     title = str(gap.get("suggested_issue_title"))
     issue = issue_from_gap(idx, gap, constitution_lookup.get(title))
-    write_issue_file(issue)
     issues.append(issue)
+
+foundation_ids = [issue["issue_id"] for issue in issues if issue["planning_bucket"]["rank"] == 1]
+documentation_ids = [issue["issue_id"] for issue in issues if issue["planning_bucket"]["rank"] == 3]
+product_ids = [issue["issue_id"] for issue in issues if issue["planning_bucket"]["rank"] == 4]
+for issue in issues:
+    dependencies = []
+    rank = issue["planning_bucket"]["rank"]
+    if rank > 1:
+        dependencies.extend(foundation_ids)
+    if rank == 5:
+        dependencies.extend(documentation_ids)
+        dependencies.extend(product_ids)
+    if rank in {6, 7}:
+        dependencies.extend([prior["issue_id"] for prior in issues if prior["planning_bucket"]["rank"] < rank])
+    dependencies = sorted(dict.fromkeys(dep for dep in dependencies if dep != issue["issue_id"]))
+    issue["depends_on"] = dependencies
+    issue["dependencies"] = dependencies
+    issue["blocked_reason"] = "Depends on lower-risk backlog items." if dependencies else None
+    write_issue_file(issue)
 
 plan = {
     "version": 1,
@@ -382,11 +443,12 @@ lines = [
     f"- Mode: `{plan['mode']}`",
     f"- Draft issues: {len(issues)}",
     "",
-    "| # | Title | Priority | Risk | Draft |",
-    "| ---: | --- | --- | --- | --- |",
+    "| # | Title | Bucket | Priority | Risk | Depends on | Draft |",
+    "| ---: | --- | --- | --- | --- | --- | --- |",
 ]
 for issue in issues:
-    lines.append(f"| {issue['number']} | {issue['title']} | {issue['priority']} | {issue['risk']} | `{issue['draft_path']}` |")
+    depends = ", ".join(issue["depends_on"]) if issue["depends_on"] else "none"
+    lines.append(f"| {issue['number']} | {issue['title']} | {issue['planning_bucket']['name']} | {issue['priority']} | {issue['risk']} | {depends} | `{issue['draft_path']}` |")
 lines.extend(["", "## Safety", "", "- GitHub writes: false", "- Branches created: false", "- PRs created: false", "- Autonomous implementation started: false", ""])
 with open(issue_plan_md, "w", encoding="utf-8") as fh:
     fh.write("\n".join(lines))

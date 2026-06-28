@@ -181,6 +181,46 @@ JSON
   [[ "$output" == *".autospec/reports/baseline-gap-analysis.json"* ]]
 }
 
+@test "issue planner orders by planning bucket and generates dependencies" {
+  mkdir -p "$TEST_TMPDIR/repo/.autospec/reports"
+  cat > "$TEST_TMPDIR/repo/.autospec/reports/metadata-discovery.json" <<'JSON'
+{"version":1,"facts":{"repo_name":{"value":"planner-fixture","confidence":1.0,"evidence":["fixture"]}}}
+JSON
+  cat > "$TEST_TMPDIR/repo/.autospec/reports/baseline-composition.json" <<'JSON'
+{"version":1,"status":"pass","baselines":{"requested_profiles":["web","ai-platform","ops"]},"composed":{"capabilities":[]}}
+JSON
+  cat > "$TEST_TMPDIR/repo/.autospec/reports/baseline-gap-analysis.json" <<'JSON'
+{
+  "version": 1,
+  "status": "fail",
+  "matrix": [
+    {"feature_family":"ops","capability":"operations","status":"missing","confidence":0.7,"evidence":["no CI"],"priority":"high","suggested_issue_title":"chore: add operations diagnostics"},
+    {"feature_family":"web","capability":"documentation","status":"missing","confidence":0.7,"evidence":["no docs UI"],"priority":"high","suggested_issue_title":"docs: add documentation center"},
+    {"feature_family":"ai-platform","capability":"ai assistant","status":"missing","confidence":0.6,"evidence":["no AI"],"priority":"high","suggested_issue_title":"feat: add AI assistant"},
+    {"feature_family":"architecture","capability":"architecture migration","status":"missing","confidence":0.5,"evidence":["legacy boundary"],"priority":"high","suggested_issue_title":"refactor: migrate architecture boundary"},
+    {"feature_family":"web","capability":"settings ui","status":"missing","confidence":0.7,"evidence":["no settings"],"priority":"low","suggested_issue_title":"feat: add settings area"},
+    {"feature_family":"baseline","capability":"metadata configuration","status":"missing","confidence":0.8,"evidence":["missing config"],"priority":"medium","suggested_issue_title":"chore: add autospec metadata config"},
+    {"feature_family":"web","capability":"testing","status":"missing","confidence":0.8,"evidence":["no tests"],"priority":"high","suggested_issue_title":"test: add validation coverage"}
+  ]
+}
+JSON
+  cat > "$TEST_TMPDIR/repo/.autospec/reports/constitutional-gap-report.json" <<'JSON'
+{"version":1,"status":"fail","sections":{},"next_recommended_issues":[]}
+JSON
+
+  bash "$PLAN" --repo-root "$TEST_TMPDIR/repo" >/dev/null
+
+  run jq -r '.issues[].title' "$TEST_TMPDIR/repo/.autospec/reports/issue-plan.json"
+  [ "$output" = $'chore: add autospec metadata config\ntest: add validation coverage\ndocs: add documentation center\nfeat: add settings area\nfeat: add AI assistant\nchore: add operations diagnostics\nrefactor: migrate architecture boundary' ]
+  run jq -r '.issues[] | select(.title=="feat: add AI assistant") | .depends_on[]' "$TEST_TMPDIR/repo/.autospec/reports/issue-plan.json"
+  [[ "$output" == *"001-chore-add-autospec-metadata-config"* ]]
+  [[ "$output" == *"003-docs-add-documentation-center"* ]]
+  [[ "$output" == *"004-feat-add-settings-area"* ]]
+  run jq -r '.issues[] | select(.title=="refactor: migrate architecture boundary") | .blocked_reason' "$TEST_TMPDIR/repo/.autospec/reports/issue-plan.json"
+  [[ "$output" == *"Depends on lower-risk backlog items"* ]]
+  grep -q '001-chore-add-autospec-metadata-config' "$TEST_TMPDIR/repo/.autospec/backlog/issues/005-feat-add-ai-assistant.md"
+}
+
 @test "bot state initializer writes inert local control-plane model" {
   mkdir -p "$TEST_TMPDIR/repo"
   write_reports "$TEST_TMPDIR/repo"
