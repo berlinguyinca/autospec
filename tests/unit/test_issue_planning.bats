@@ -5,6 +5,7 @@ setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   PLAN="$REPO_ROOT/scripts/autospec-plan-issues.sh"
   BOT_STATE="$REPO_ROOT/scripts/autospec-bot-state-init.sh"
+  DRY_RUN="$REPO_ROOT/scripts/autospec-autonomy-dry-run.sh"
   TEST_TMPDIR="$(mktemp -d /tmp/autospec-issue-planning-XXXXXX)"
 }
 
@@ -370,6 +371,30 @@ PY
   grep -q '^## Recommended human action$' "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md"
   grep -q '^## Resume criteria$' "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md"
   grep -q 'autospec:guidance-provided` or `autospec:resume` applied' "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md"
+}
+
+@test "combined autonomy dry-run writes summary reports" {
+  mkdir -p "$TEST_TMPDIR/repo"
+  write_reports "$TEST_TMPDIR/repo"
+
+  run bash "$DRY_RUN" --repo-root "$TEST_TMPDIR/repo"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"autonomy dry-run: PASS"* ]]
+  [ -f "$TEST_TMPDIR/repo/.autospec/reports/autonomy-dry-run.json" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/reports/autonomy-dry-run.md" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/reports/issue-plan.json" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/state/control-labels.yml" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/state/bot-state-machine.yml" ]
+  [ -f "$TEST_TMPDIR/repo/.autospec/templates/stuck-issue.md" ]
+  run jq -r '.status' "$TEST_TMPDIR/repo/.autospec/reports/autonomy-dry-run.json"
+  [ "$output" = "pass" ]
+  run jq -r '.side_effects.github_api_calls' "$TEST_TMPDIR/repo/.autospec/reports/autonomy-dry-run.json"
+  [ "$output" = "false" ]
+  grep -q '## Detected App Type / Stack' "$TEST_TMPDIR/repo/.autospec/reports/autonomy-dry-run.md"
+  grep -q '## Proposed Issue Backlog' "$TEST_TMPDIR/repo/.autospec/reports/autonomy-dry-run.md"
+  grep -q '## Stuck / Guidance Protocol' "$TEST_TMPDIR/repo/.autospec/reports/autonomy-dry-run.md"
+  grep -q 'bash scripts/autospec-autonomy-dry-run.sh --repo-root' "$TEST_TMPDIR/repo/.autospec/reports/autonomy-dry-run.md"
 }
 
 @test "bot state initializer does not overwrite manual state unless requested" {

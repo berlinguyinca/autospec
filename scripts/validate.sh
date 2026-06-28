@@ -745,11 +745,12 @@ check_constitution_validation_contract() {
     local constitutional_gap_script="scripts/autospec-constitutional-gap.sh"
     local issue_plan_script="scripts/autospec-plan-issues.sh"
     local bot_state_script="scripts/autospec-bot-state-init.sh"
+    local dry_run_script="scripts/autospec-autonomy-dry-run.sh"
     local validation_bats="tests/unit/test_constitution_validation.bats"
     local composition_bats="tests/unit/test_baseline_composition.bats"
     local intelligence_bats="tests/unit/test_repository_intelligence.bats"
     local issue_plan_bats="tests/unit/test_issue_planning.bats"
-    for script in "$validation_script" "$composition_script" "$metadata_script" "$baseline_gap_script" "$constitutional_gap_script" "$issue_plan_script" "$bot_state_script"; do
+    for script in "$validation_script" "$composition_script" "$metadata_script" "$baseline_gap_script" "$constitutional_gap_script" "$issue_plan_script" "$bot_state_script" "$dry_run_script"; do
         [ -f "$script" ] || fail "$script: required file missing"
         [ -x "$script" ] || fail "$script: not executable"
         bash -n "$script" || fail "$script: bash syntax error"
