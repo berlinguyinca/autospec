@@ -24,5 +24,6 @@ All commands are operator-invoked local commands. No GitHub Actions, cron, or sc
 | `scripts/autospec-promote-pr.sh` | Mark verifier-passed PR ready for human review | yes | yes | reports/state | confirm may label/comment | `.autospec/reports/promotion-result.md` | human review |
 | `scripts/autospec-autonomy-status.sh` | Summarize autonomy state | yes/default | n/a | reports | no | `.autospec/reports/autonomy-status.md` | recommended command |
 | `scripts/autospec-mvp-status.sh` | Summarize MVP readiness | yes/default | n/a | reports | no | `.autospec/reports/mvp-status.md` | hardening |
+| `scripts/autospec-spec-coverage.sh` | Map original Constitution vision to implementation/scaffold/validation/deferred evidence | yes | yes | reports/spec coverage backlog | no | `.autospec/reports/spec-coverage.md` | fix gaps or release smoke |
 
 Dry-run remains the default where a command has side effects. Confirm is required for GitHub writes.

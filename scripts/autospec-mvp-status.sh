@@ -75,6 +75,13 @@ sensitive_audit = load(os.path.join(reports, "sensitive-output-audit.json"), {})
 mvp_smoke = load(os.path.join(reports, "mvp-smoke.json"), {})
 report_index = load(os.path.join(reports, "report-index.json"), {})
 recovery_status = load(os.path.join(reports, "recovery-status.json"), {})
+spec_coverage = load(os.path.join(reports, "spec-coverage.json"), {})
+coverage_requirements = spec_coverage.get("requirements", []) if isinstance(spec_coverage.get("requirements"), list) else []
+critical_missing = [r for r in coverage_requirements if r.get("priority") == "critical" and r.get("status") == "missing" and r.get("requirement_type") != "target_app_scaffold"]
+high_partial = [r for r in coverage_requirements if r.get("priority") == "high" and r.get("status") == "partial"]
+documented_only = [r for r in coverage_requirements if r.get("status") == "documented_only"]
+scaffolded = [r for r in coverage_requirements if r.get("status") == "scaffolded"]
+implemented = [r for r in coverage_requirements if r.get("status") == "implemented"]
 signals = {
     "preflight": preflight.get("verdict", "unknown"),
     "command_audit": "pass" if command_audit.get("summary", {}).get("commands_total", 0) else "unknown",
@@ -83,6 +90,7 @@ signals = {
     "mvp_smoke": mvp_smoke.get("verdict", "unknown"),
     "report_index": "pass" if report_index.get("reports") else "unknown",
     "recovery_status": "warn" if recovery_status.get("active_lock") else "pass" if recovery_status else "unknown",
+    "spec_coverage": "fail" if critical_missing else "warn" if high_partial or documented_only else "pass" if coverage_requirements else "unknown",
 }
 blocking_values = {"blocked", "fail"}
 warning_values = {"warn", "pass_with_warnings", "needs_fixes", "unknown"}
@@ -96,6 +104,17 @@ status = {
     "schema": 1,
     "readiness": readiness,
     "release_readiness_signals": signals,
+    "spec_coverage": {
+        "total_requirements": len(coverage_requirements),
+        "critical_missing_requirements": len(critical_missing),
+        "critical_missing_requirement_ids": [r.get("id") for r in critical_missing],
+        "high_priority_partial_requirements": len(high_partial),
+        "high_priority_partial_requirement_ids": [r.get("id") for r in high_partial],
+        "documented_only_requirements": len(documented_only),
+        "scaffolded_target_app_requirements": len(scaffolded),
+        "implemented_requirements": len(implemented),
+        "mvp_readiness_impact": "blocks_mvp_ready" if critical_missing else "warnings_only" if high_partial or documented_only else "clear" if coverage_requirements else "unknown",
+    },
     "engine_capabilities": {
         "policy_sources": exists(".autospec/policy-sources.lock.json") or exists(".autospec/state/policy-sources.json"),
         "digital_twin": exists(".autospec/state/digital-twin.json"),
@@ -182,6 +201,16 @@ md = "\n".join([
     "",
     f"- Readiness: **{readiness}**",
     "\n".join(f"- {key}: `{value}`" for key, value in signals.items()),
+    "",
+    "## Spec coverage",
+    "",
+    f"- Total requirements: {len(coverage_requirements)}",
+    f"- Critical missing requirements: {len(critical_missing)}",
+    f"- High-priority partial requirements: {len(high_partial)}",
+    f"- Documented-only requirements: {len(documented_only)}",
+    f"- Scaffolded target-app requirements: {len(scaffolded)}",
+    f"- Implemented requirements: {len(implemented)}",
+    f"- MVP readiness impact: `{status['spec_coverage']['mvp_readiness_impact']}`",
 ])
 write_text(os.path.join(reports, "mvp-status.md"), md)
 print("mvp status: wrote reports")

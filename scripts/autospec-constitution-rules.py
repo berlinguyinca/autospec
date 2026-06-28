@@ -478,6 +478,14 @@ SUPPORTED_CHECK_TYPES = {
     "required_ai_capability", "required_mcp_capability", "required_report", "required_tutorial",
     "required_visualization_standard", "forbidden_dependency_sprawl", "forbidden_missing_metadata",
     "forbidden_dependency", "forbidden_tool", "manual_review",
+    "required_playwright_viewport_matrix", "required_playwright_screenshots", "required_in_app_docs",
+    "required_settings_area", "required_ai_settings", "required_token_usage_tracking",
+    "required_ai_usage_dashboard", "required_rag_capability", "required_provider_abstraction",
+    "required_ollama_support", "required_openai_compatible_support", "required_mcp_registry",
+    "required_nlai_capability_interface", "required_pretty_rendering", "required_raw_json_avoidance_policy",
+    "required_report_generation", "required_pdf_output", "required_tutorial_generation",
+    "required_design_tokens", "required_accessibility_evidence", "required_diagnostics_white_screen_flow",
+    "required_incident_report_template", "required_dependency_governance", "required_modernization_plan",
 }
 STRUCTURED_CATEGORIES = {
     "product", "domain", "architecture", "engineering", "testing", "ui", "ux", "accessibility",
@@ -1010,9 +1018,37 @@ def _check_required_surface(_root: Path, rule: dict, expected: dict, _tech_names
 
 
 def _check_keyword_evidence(_root: Path, rule: dict, expected: dict, _tech_names, _sprawl, _inv: dict, _caps: dict, all_text: str):
-    keywords = expected.get("keywords") if isinstance(expected.get("keywords"), list) else [expected.get("name") or expected.get("file") or rule["category"]]
+    defaults = {
+        "required_playwright_viewport_matrix": ["playwright", "viewport", "matrix"],
+        "required_playwright_screenshots": ["playwright", "screenshot"],
+        "required_in_app_docs": ["in-app documentation", "docs center", "documentation center"],
+        "required_settings_area": ["settings"],
+        "required_ai_settings": ["ai settings", "model settings"],
+        "required_token_usage_tracking": ["token usage", "tokens"],
+        "required_ai_usage_dashboard": ["usage dashboard", "cost tracking"],
+        "required_rag_capability": ["rag", "retrieval", "embedding"],
+        "required_provider_abstraction": ["provider abstraction", "provider"],
+        "required_ollama_support": ["ollama"],
+        "required_openai_compatible_support": ["openai-compatible", "openai compatible", "base url"],
+        "required_mcp_registry": ["mcp registry", "mcp"],
+        "required_nlai_capability_interface": ["nlai", "capability interface", "tool interface"],
+        "required_pretty_rendering": ["pretty rendering", "render json", "render yaml"],
+        "required_raw_json_avoidance_policy": ["raw json", "avoid raw json"],
+        "required_report_generation": ["report generation", "reports"],
+        "required_pdf_output": ["pdf"],
+        "required_tutorial_generation": ["tutorial"],
+        "required_design_tokens": ["design tokens"],
+        "required_accessibility_evidence": ["accessibility", "a11y"],
+        "required_diagnostics_white_screen_flow": ["white-screen", "white screen", "diagnostics"],
+        "required_incident_report_template": ["incident report"],
+        "required_dependency_governance": ["dependency governance", "dependency sprawl"],
+        "required_modernization_plan": ["modernization", "migration plan"],
+    }
+    keywords = expected.get("keywords") if isinstance(expected.get("keywords"), list) else defaults.get(rule.get("check_type"), [expected.get("name") or expected.get("file") or rule["category"]])
     hits = [str(k) for k in keywords if str(k).lower() in all_text]
-    return result(rule, "pass" if hits else "unknown", 0.5, "Heuristic evidence found." if hits else "Heuristic check needs review.", hits, [str(k) for k in keywords if k] if not hits else [])
+    status = "pass" if len(hits) >= max(1, min(2, len(keywords))) else ("partial" if hits else "fail")
+    confidence = 0.65 if hits else 0.45
+    return result(rule, status, confidence, "Heuristic evidence found." if hits else "Heuristic evidence is missing.", hits, [str(k) for k in keywords if k and str(k) not in hits] if status != "pass" else [])
 
 
 def _check_dependency_sprawl(_root: Path, rule: dict, expected: dict, _tech_names, tech_sprawl: list[dict], _inv: dict, _caps: dict, _all_text: str):
@@ -1044,6 +1080,30 @@ RULE_CHECK_HANDLERS = {
     "required_setting": _check_keyword_evidence,
     "required_report": _check_keyword_evidence,
     "required_visualization_standard": _check_keyword_evidence,
+    "required_playwright_viewport_matrix": _check_keyword_evidence,
+    "required_playwright_screenshots": _check_keyword_evidence,
+    "required_in_app_docs": _check_keyword_evidence,
+    "required_settings_area": _check_keyword_evidence,
+    "required_ai_settings": _check_keyword_evidence,
+    "required_token_usage_tracking": _check_keyword_evidence,
+    "required_ai_usage_dashboard": _check_keyword_evidence,
+    "required_rag_capability": _check_keyword_evidence,
+    "required_provider_abstraction": _check_keyword_evidence,
+    "required_ollama_support": _check_keyword_evidence,
+    "required_openai_compatible_support": _check_keyword_evidence,
+    "required_mcp_registry": _check_keyword_evidence,
+    "required_nlai_capability_interface": _check_keyword_evidence,
+    "required_pretty_rendering": _check_keyword_evidence,
+    "required_raw_json_avoidance_policy": _check_keyword_evidence,
+    "required_report_generation": _check_keyword_evidence,
+    "required_pdf_output": _check_keyword_evidence,
+    "required_tutorial_generation": _check_keyword_evidence,
+    "required_design_tokens": _check_keyword_evidence,
+    "required_accessibility_evidence": _check_keyword_evidence,
+    "required_diagnostics_white_screen_flow": _check_keyword_evidence,
+    "required_incident_report_template": _check_keyword_evidence,
+    "required_dependency_governance": _check_keyword_evidence,
+    "required_modernization_plan": _check_keyword_evidence,
     "forbidden_dependency_sprawl": _check_dependency_sprawl,
     "forbidden_missing_metadata": _check_missing_metadata,
 }
