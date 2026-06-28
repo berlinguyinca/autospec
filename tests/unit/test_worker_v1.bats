@@ -251,6 +251,9 @@ PY
   grep -q '## Risk classification' "$TEST_TMPDIR/repo/.autospec/reports/worker-pr-body.md"
   grep -q '## Validation evidence' "$TEST_TMPDIR/repo/.autospec/reports/worker-pr-body.md"
   grep -q '## Diff safety review' "$TEST_TMPDIR/repo/.autospec/reports/worker-pr-body.md"
+  grep -q 'autospec-verify-worker-pr.sh' "$TEST_TMPDIR/repo/.autospec/reports/worker-result.md"
+  run jq -r '.next_recommended_command' "$TEST_TMPDIR/repo/.autospec/reports/worker-result.json"
+  [[ "$output" == *"autospec-verify-worker-pr.sh"* ]]
   run jq -r '.processed_issue_id' "$TEST_TMPDIR/repo/.autospec/reports/worker-risk-classification.json"
   [ "$output" = "001-fix-report-formatting" ]
 }

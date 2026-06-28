@@ -82,6 +82,8 @@ diff_json = os.path.join(reports_dir, "worker-diff-review.json")
 diff_md = os.path.join(reports_dir, "worker-diff-review.md")
 pr_body_md = os.path.join(reports_dir, "worker-pr-body.md")
 stuck_md = os.path.join(reports_dir, "worker-stuck-handoff.md")
+worker_result_json = os.path.join(reports_dir, "worker-result.json")
+worker_result_md = os.path.join(reports_dir, "worker-result.md")
 packet_md = os.path.join(state_dir, "implementation-packet.md")
 
 HIGH_RISK = [
@@ -547,6 +549,33 @@ if stuck_reasons or not pr_allowed and classification in {"needs-guidance", "hig
     write_text(stuck_md, stuck_text(issue, classification, stuck_reasons or reasons))
 elif budget_failures:
     write_text(stuck_md, stuck_text(issue, classification, budget_failures))
+
+next_command = f"bash scripts/autospec-verify-worker-pr.sh --dry-run --work-item .autospec/state"
+worker_result = {
+    "version": 1,
+    "issue_id": issue.get("issue_id"),
+    "classification": classification,
+    "pr_creation_allowed": bool(pr_allowed),
+    "reports": {
+        "risk_classification": ".autospec/reports/worker-risk-classification.json",
+        "validation_plan": ".autospec/reports/worker-validation-plan.json",
+        "diff_review": ".autospec/reports/worker-diff-review.json",
+        "pr_body": ".autospec/reports/worker-pr-body.md",
+    },
+    "next_recommended_command": next_command,
+}
+write_json(worker_result_json, worker_result)
+write_text(worker_result_md, "\n".join([
+    "# Worker Result",
+    "",
+    f"- Issue: `{issue.get('issue_id')}`",
+    f"- Classification: `{classification}`",
+    f"- PR creation allowed: `{str(bool(pr_allowed)).lower()}`",
+    "",
+    "## Next Recommended Command",
+    "",
+    f"```bash\n{next_command}\n```",
+]))
 
 print("worker v1: PASS")
 print(f"issue: {issue.get('issue_id')}")
