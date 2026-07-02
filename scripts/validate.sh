@@ -288,6 +288,14 @@ check_keyword_routing_section() {
         # trio row in lockstep with it.
         grep -q '| `fix`' "$skill_dir/$trio" \
             || fail "autospec-listen: $trio missing 'fix' -> /autospec verb-map row"
+        grep -q 'post_approval_execution_ready' "$skill_dir/$trio" \
+            || fail "autospec-listen: $trio missing post-approval execution-ready routing contract"
+        grep -q 'AUTOSPEC_LISTENER_AUTO_IMPLEMENT_OPEN' "$skill_dir/$trio" \
+            || fail "autospec-listen: $trio missing auto-implement open-count routing hint"
+        grep -q 'plan_exit_ready' "$skill_dir/$trio" \
+            || fail "autospec-listen: $trio missing completed Plan-mode handoff route (issue #1462)"
+        grep -q 'AUTOSPEC_LISTENER_PLAN_EXIT_READY' "$skill_dir/$trio" \
+            || fail "autospec-listen: $trio missing Plan-exit-ready state hint (issue #1462)"
     done
     # The explore-confirm gate literal honored in the trio MUST exactly match the
     # one emitted by the classifier (scripts/listener-match.sh, issue #909).
@@ -297,6 +305,16 @@ check_keyword_routing_section() {
     # emitted by the classifier (scripts/listener-match.sh, issue #954).
     grep -q 'autospec fix imperative' scripts/listener-match.sh \
         || fail "scripts/listener-match.sh missing 'fix' imperative route (classifier/trio drift)"
+    grep -q 'post_approval_execution_ready' scripts/listener-match.sh \
+        || fail "scripts/listener-match.sh missing post-approval execution-ready route (issue #1461)"
+    grep -q 'post-approval: open auto-implement issues route to autospec-run' skills/autospec-shared/tests/unit/listener-match.bats \
+        || fail "listener-match.bats missing post-approval open auto-implement route coverage (issue #1461)"
+    grep -q 'plan_exit_ready' scripts/listener-match.sh \
+        || fail "scripts/listener-match.sh missing completed Plan-mode handoff route (issue #1462)"
+    grep -q 'plan-exit: completed saved implementation plan routes to autospec autonomous' skills/autospec-shared/tests/unit/listener-match.bats \
+        || fail "listener-match.bats missing completed Plan-mode handoff coverage (issue #1462)"
+    grep -q 'plan-exit: destructive action gate does not route' skills/autospec-shared/tests/unit/listener-match.bats \
+        || fail "listener-match.bats missing Plan-exit destructive-action gate coverage (issue #1462)"
 }
 
 # Gap-remediation invariants (issue #535, deps #533/#534): the autospec-run
@@ -2262,6 +2280,32 @@ check_lint_heredoc_handling() {
     fi
 }
 
+check_lint_reuse_triage() {
+    info "lint reuse-triage RULE_IDs: tests/lint/test_reuse_triage.bats"
+    [ -f tests/lint/test_reuse_triage.bats ] \
+        || fail "tests/lint/test_reuse_triage.bats: bats coverage missing (issue #1439)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/lint/test_reuse_triage.bats"
+        bats tests/lint/test_reuse_triage.bats >/tmp/validate-lint-reuse-triage.log 2>&1 \
+            || { cat /tmp/validate-lint-reuse-triage.log >&2; fail "tests/lint/test_reuse_triage.bats: failed"; }
+    fi
+}
+
+check_reviewer_reuse_lens() {
+    info "reviewer reuse lens: tests/reviewer/test_reuse_lens.bats (issue #1440)"
+    [ -f tests/reviewer/test_reuse_lens.bats ] \
+        || fail "tests/reviewer/test_reuse_lens.bats: bats coverage missing (issue #1440)"
+    grep -q -- '--reuse-flags' scripts/gen-reviewer-prompt.sh \
+        || fail "scripts/gen-reviewer-prompt.sh missing --reuse-flags support (issue #1440)"
+    grep -q -- '--reuse-flags' skills/autospec-run/SKILL.md \
+        || fail "skills/autospec-run/SKILL.md does not pass --reuse-flags to gen-reviewer-prompt.sh (issue #1440)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/reviewer/test_reuse_lens.bats"
+        bats tests/reviewer/test_reuse_lens.bats >/tmp/validate-reviewer-reuse-lens.log 2>&1 \
+            || { cat /tmp/validate-reviewer-reuse-lens.log >&2; fail "tests/reviewer/test_reuse_lens.bats: failed"; }
+    fi
+}
+
 # Quality-differential harness (issue #1023, spec §5 D4): the boilerplate guard
 # (scripts/quality-differential.sh) plus its synthetic self-test negative pair
 # and the >=3 refine-lens fixtures whose deterministic path is the documented
@@ -2950,6 +2994,8 @@ main() {
     check_reviewer_contract
     check_closeout_contract
     check_lint_heredoc_handling
+    check_lint_reuse_triage
+    check_reviewer_reuse_lens
     check_quality_differential
     check_usage_limit_helper
     check_supersession_contract
@@ -3033,6 +3079,7 @@ main() {
     check_conductor_wiring_contract
     check_autonomous_phase2_suite
     check_persona_suite
+    check_reuse_lens_suite
 
     # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
@@ -3543,9 +3590,10 @@ check_autospec_explore_discovery_contract() {
             grep -q "$r" "$trio" \
                 || fail "$trio: missing discovery researcher reference '$r'"
         done
-        grep -q 'dedup . verify . ROI . pattern-synthesis . severity-first rank' "$trio" \
-            || grep -q 'dedup -> verify -> ROI -> pattern-synthesis -> severity-first rank' "$trio" \
-            || fail "$trio: missing aggregator stage order (dedup -> verify -> ROI -> pattern-synthesis -> severity-first rank)"
+        # Locale-robust: `.{1,3}` spans either the 3-byte UTF-8 arrow (→, which a
+        # single BRE `.` cannot match under a C locale) or the 2-byte ASCII `->`.
+        grep -qE 'dedup .{1,3} gap-confirm .{1,3} verify .{1,3} ROI .{1,3} pattern-synthesis .{1,3} severity-first rank' "$trio" \
+            || fail "$trio: missing aggregator stage order (dedup -> gap-confirm -> verify -> ROI -> pattern-synthesis -> severity-first rank)"
         for sev in silent-wrong correctness stability operability feature nicety; do
             grep -q "$sev" "$trio" \
                 || fail "$trio: missing severity band '$sev'"
@@ -4310,6 +4358,33 @@ check_persona_suite() {
     done
     if [ "$_any" -eq 0 ]; then
         fail "tests/persona/*.bats: no persona contract tests found (issue #1418)"
+    fi
+}
+
+# tests/reuse-lens/*.bats — the interrogation ledger + precision proof + AUTOSPEC_REUSE_LENS
+# flag suite (issue #1442). tests/reuse-lens/ is a NET-NEW top-level test dir with no
+# existing glob, so it would rot ungated without this gate. Mirror the persona suite's
+# per-file run. The gate is also required by the gate-atomicity rule
+# (feedback_validate_must_gate_every_test_dir): every new tests/<dir>/ MUST be
+# enumerated in validate.sh in the same commit that creates it.
+check_reuse_lens_suite() {
+    info "reuse-lens suite: tests/reuse-lens/*.bats (issue #1442)"
+    if ! command -v bats >/dev/null 2>&1; then
+        info "  bats not available — skipping reuse-lens suite"
+        return 0
+    fi
+    local _any=0
+    local t
+    for t in tests/reuse-lens/*.bats; do
+        [ -f "$t" ] || continue
+        _any=1
+        info "  running: $t"
+        bats "$t" >/tmp/validate-reuse-lens-suite.log 2>&1 \
+            || { cat /tmp/validate-reuse-lens-suite.log >&2; \
+                 fail "$t: failed (issue #1442)"; }
+    done
+    if [ "$_any" -eq 0 ]; then
+        fail "tests/reuse-lens/*.bats: no reuse-lens tests found (issue #1442)"
     fi
 }
 

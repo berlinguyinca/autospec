@@ -111,19 +111,19 @@ teardown() {
 
 @test "state file contains only hashes + timestamps, never prompt content" {
     export AUTOSPEC_CONTINUE_NOW=1000
-    SECRET="distinctive_prompt_marker_xyz789"
+    PROMPT_MARKER_TEXT="prompt content marker redacted fixture"
     cat > "$MSG" <<EOF
 some prose
 
 ## Next steps
-- $SECRET
+- $PROMPT_MARKER_TEXT
 EOF
     run bash "$SCRIPT" --from-message "$MSG" --no-loop --skip-refine
     [ "$status" -eq 0 ]
     [ -f "$AUTOSPEC_CONTINUE_HISTORY" ]
 
     # MUST NOT contain the prompt content.
-    ! grep -q "$SECRET" "$AUTOSPEC_CONTINUE_HISTORY"
+    ! grep -q "$PROMPT_MARKER_TEXT" "$AUTOSPEC_CONTINUE_HISTORY"
     ! grep -q "Next steps" "$AUTOSPEC_CONTINUE_HISTORY"
 
     # MUST contain the hash + timestamp schema fields.

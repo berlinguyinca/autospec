@@ -272,47 +272,145 @@ function renderTutorial(audience, feature, directive) {
 const SECTION_AUDIENCE_GATE = {
   config_reference: ['admin', 'developer'],
   rationale:        ['developer'],
+  algorithm:        ['developer', 'general'],
+  config_profiles: ['admin', 'developer'],
+  settings:         ['admin', 'developer'],
+  implementation_snippets: ['developer'],
 };
 
-function renderFeatureSections(audience, feature) {
-  const lines = [];
+function hasContent(value) {
+  if (!value) return false;
+  if (typeof value === 'string') return value.trim() !== '';
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
 
-  function maybeSection(heading, fieldValue) {
-    if (!fieldValue || (typeof fieldValue === 'string' && fieldValue.trim() === '')) return;
-    if (Array.isArray(fieldValue) && fieldValue.length === 0) return;
-    lines.push(`## ${heading}`, '');
-    if (Array.isArray(fieldValue)) {
-      for (const item of fieldValue) lines.push(`- ${item}`);
-      lines.push('');
-    } else {
-      lines.push(String(fieldValue), '');
+function audienceAllows(entry, audienceName) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return true;
+  if (!Array.isArray(entry.audiences) || entry.audiences.length === 0) return true;
+  return entry.audiences.includes(audienceName);
+}
+
+
+function listForAudience(value, audienceName) {
+  const picked = pickForAudience(value, audienceName);
+  if (picked == null) return [];
+  return Array.isArray(picked) ? picked : [picked];
+}
+
+function renderProfileItem(item) {
+  if (typeof item === 'string') return item;
+  if (!item || typeof item !== 'object') return String(item);
+  const name = item.name ? `**${item.name}**` : '**profile**';
+  const parts = [];
+  if (item.description) parts.push(String(item.description));
+  if (item.changes) parts.push(`Changes: ${Array.isArray(item.changes) ? item.changes.join(', ') : item.changes}`);
+  return `${name}${parts.length ? ` — ${parts.join('; ')}` : ''}`;
+}
+
+function renderSettingsTable(settings, audienceName) {
+  const rows = (settings || []).filter(item => audienceAllows(item, audienceName));
+  if (rows.length === 0) return [];
+  const lines = ['## Settings', '', '| Name | Type | Default | Description |', '| --- | --- | --- | --- |'];
+  for (const item of rows) {
+    if (typeof item === 'string') {
+      lines.push(`| ${item} |  |  |  |`);
+      continue;
     }
+    const name = item && item.name != null ? String(item.name) : '';
+    const type = item && item.type != null ? String(item.type) : '';
+    const def = item && Object.prototype.hasOwnProperty.call(item, 'default') ? String(item.default) : '';
+    const desc = item && item.description != null ? String(item.description) : '';
+    lines.push(`| ${name ? `\`${name}\`` : ''} | ${type ? `\`${type}\`` : ''} | ${def ? `\`${def}\`` : ''} | ${desc} |`);
   }
+  lines.push('');
+  return lines;
+}
 
+function readSourceLines({ sourceRoot, sourcePath, startLine, endLine }) {
+  if (!sourcePath || !Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine) {
+    throw new Error(`implementation snippet needs source_path plus valid start_line/end_line`);
+  }
+  assertSafeRelative(sourcePath, 'implementation snippet source_path');
+  const abs = path.join(sourceRoot || process.cwd(), sourcePath);
+  let raw;
+  try { raw = fs.readFileSync(abs, 'utf8'); }
+  catch { throw new Error(`implementation snippet source not found: ${sourcePath}`); }
+  const lines = raw.split('\n');
+  if (endLine > lines.length) {
+    throw new Error(`implementation snippet line range ${sourcePath}:${startLine}-${endLine} exceeds source length ${lines.length}`);
+  }
+  return lines.slice(startLine - 1, endLine).join('\n').replace(/\n+$/, '');
+}
+
+function renderImplementationSnippets(snippets, audienceName, sourceRoot) {
+  const rows = (snippets || []).filter(item => audienceAllows(item, audienceName));
+  if (rows.length === 0) return [];
+  const lines = ['## Implementation', ''];
+  for (const item of rows) {
+    if (!item || typeof item !== 'object') continue;
+    const sourcePath = item.source_path || item.sourcePath || item.path;
+    const startLine = Number(item.start_line ?? item.startLine ?? item.line_start);
+    const endLine = Number(item.end_line ?? item.endLine ?? item.line_end ?? startLine);
+    const title = item.title || item.label || '';
+    const lang = (item.language || item.lang || '').trim() || path.extname(sourcePath || '').replace(/^\./, '') || 'text';
+    const code = readSourceLines({ sourceRoot, sourcePath, startLine, endLine });
+    if (title) lines.push(`### ${title}`, '');
+    lines.push(`Source: \`${sourcePath}:${startLine}-${endLine}\``, '');
+    lines.push(`<!-- implementation-snippet: ${sourcePath}:${startLine}-${endLine} -->`);
+    lines.push(`\`\`\`${lang}`);
+    lines.push(code);
+    lines.push('```');
+    lines.push('');
+  }
+  return lines;
+}
+
+function appendMarkdownSection(lines, heading, fieldValue) {
+  if (!hasContent(fieldValue)) return;
+  lines.push(`## ${heading}`, '');
+  if (Array.isArray(fieldValue)) {
+    for (const item of fieldValue) lines.push(`- ${item}`);
+    lines.push('');
+  } else {
+    lines.push(String(fieldValue), '');
+  }
+}
+
+function appendCoreFeatureSections(lines, audience, feature, pick) {
+  appendMarkdownSection(lines, 'Data model', pick('data_model') || '');
+  appendMarkdownSection(lines, 'Invariants & constraints', pick('invariants') || '');
+  appendMarkdownSection(lines, 'Errors & failure modes', pick('errors') || '');
+  if (SECTION_AUDIENCE_GATE.config_reference.includes(audience.name)) {
+    appendMarkdownSection(lines, 'Configuration', pick('config_reference') || '');
+  }
+  if (SECTION_AUDIENCE_GATE.rationale.includes(audience.name)) {
+    appendMarkdownSection(lines, 'Why', pick('rationale') || '');
+  }
+  appendMarkdownSection(lines, 'Related features', feature.depends_on || []);
+}
+
+function renderFeatureSections(audience, feature, sourceRoot) {
+  const lines = [];
   const pick = (field) => pickForAudience(feature[field], audience.name);
 
-  // data_model — all audiences
-  maybeSection('Data model', pick('data_model') || '');
-
-  // invariants — all audiences
-  maybeSection('Invariants & constraints', pick('invariants') || '');
-
-  // errors — all audiences
-  maybeSection('Errors & failure modes', pick('errors') || '');
-
-  // config_reference — admin + developer only
-  if (SECTION_AUDIENCE_GATE.config_reference.includes(audience.name)) {
-    maybeSection('Configuration', pick('config_reference') || '');
+  if (SECTION_AUDIENCE_GATE.algorithm.includes(audience.name)) {
+    appendMarkdownSection(lines, 'How it works (algorithm)', pick('algorithm') || '');
+  }
+  if (SECTION_AUDIENCE_GATE.config_profiles.includes(audience.name)) {
+    const profiles = listForAudience(feature.config_profiles, audience.name);
+    const visibleProfiles = profiles.filter(item => audienceAllows(item, audience.name));
+    appendMarkdownSection(lines, 'Configuration profiles', visibleProfiles.map(renderProfileItem));
+  }
+  if (SECTION_AUDIENCE_GATE.settings.includes(audience.name)) {
+    lines.push(...renderSettingsTable(listForAudience(feature.settings, audience.name), audience.name));
+  }
+  if (SECTION_AUDIENCE_GATE.implementation_snippets.includes(audience.name)) {
+    lines.push(...renderImplementationSnippets(listForAudience(feature.implementation_snippets, audience.name), audience.name, sourceRoot));
   }
 
-  // rationale — developer only
-  if (SECTION_AUDIENCE_GATE.rationale.includes(audience.name)) {
-    maybeSection('Why', pick('rationale') || '');
-  }
-
-  // depends_on — shared (feature ids, not prose).
-  maybeSection('Related features', feature.depends_on || []);
-
+  appendCoreFeatureSections(lines, audience, feature, pick);
   return lines;
 }
 
@@ -350,7 +448,7 @@ function renderExamples(feature, audienceName) {
   return lines;
 }
 
-function renderFeature(audience, feature, directive) {
+function renderFeature(audience, feature, directive, sourceRoot) {
   const globs = featureSrcGlobs(feature);
   const summary = pickForAudience(feature.summary, audience.name);
   const specSections = pickForAudience(feature.spec_sections, audience.name);
@@ -381,7 +479,7 @@ function renderFeature(audience, feature, directive) {
     }
   }
   // Append the six LLM-targeted sections (issue #1129); empty fields are omitted.
-  lines.push(...renderFeatureSections(audience, feature));
+  lines.push(...renderFeatureSections(audience, feature, sourceRoot));
   // Append verified runnable examples (issue #1133); empty examples[] emits nothing.
   lines.push(...renderExamples(feature, audience.name));
   if (directive) lines.push(`<!-- regen-directive: ${directive} -->`, '');
@@ -584,6 +682,7 @@ export async function generateAudienceDocs({
   maxRetries = 5,
   aiReviewStub = process.env.AUTOSPEC_AI_REVIEW_STUB || undefined,
   failOnIdenticalAudiences = false,
+  sourceRoot = process.cwd(),
 } = {}) {
   if (!Array.isArray(audiences) || audiences.length === 0) {
     throw new Error('generateAudienceDocs: at least one audience is required');
@@ -616,7 +715,7 @@ export async function generateAudienceDocs({
       });
       pageSpecs.push({
         relPath: `${base}/features/${feature.slug}.md`,
-        render: d => renderFeature(audience, feature, d),
+        render: d => renderFeature(audience, feature, d, sourceRoot),
         feature,
       });
     }

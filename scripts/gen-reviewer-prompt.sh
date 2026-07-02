@@ -51,6 +51,7 @@ PREV_FINDINGS_FILE=""
 ISSUE_BODY_FILE=""
 ISSUE_LABELS=""
 REPO="${AUTOSPEC_REPO:-}"
+REUSE_FLAGS_FILE=""
 
 DIFF_CLIP_LINES=8000
 
@@ -61,6 +62,7 @@ gen-reviewer-prompt.sh — compose Phase 4 fused guardian+LGTM reviewer prompt
 Usage:
   scripts/gen-reviewer-prompt.sh --pr-diff <file> [--prev-findings <file>]
     [--issue-body <file>] [--issue-labels <csv>] [--repo <owner/repo>]
+    [--reuse-flags <file>]
   scripts/gen-reviewer-prompt.sh --help
 
 Required:
@@ -71,6 +73,9 @@ Optional:
   --issue-body <file>      Path to issue body markdown, including team lenses
   --issue-labels <csv>     Comma-separated issue labels (for cache-prefix tagging)
   --repo <owner/repo>      Repository slug (default: from AUTOSPEC_REPO env)
+  --reuse-flags <file>     Path to reuse-triage findings file (from lint-implementation.sh);
+                           when present, appends a build-vs-buy reuse block to the dynamic
+                           suffix. Absent or empty → output byte-identical to baseline.
 
 Diff clipping: diffs over 8000 lines are clipped with a "[diff clipped at 8000 lines]" marker.
 
@@ -96,6 +101,9 @@ while [ $# -gt 0 ]; do
     --repo)
       [ -z "${2:-}" ] && { printf 'gen-reviewer-prompt.sh: --repo requires a value\n' >&2; exit 1; }
       REPO="$2"; shift 2 ;;
+    --reuse-flags)
+      [ -z "${2:-}" ] && { printf 'gen-reviewer-prompt.sh: --reuse-flags requires a value\n' >&2; exit 1; }
+      REUSE_FLAGS_FILE="$2"; shift 2 ;;
     *)
       printf 'gen-reviewer-prompt.sh: unknown option: %s\n' "$1" >&2; exit 1 ;;
   esac
@@ -121,6 +129,11 @@ fi
 
 if [ -n "$ISSUE_BODY_FILE" ] && [ ! -f "$ISSUE_BODY_FILE" ]; then
   printf 'gen-reviewer-prompt.sh: issue-body file not found: %s\n' "$ISSUE_BODY_FILE" >&2
+  exit 1
+fi
+
+if [ -n "$REUSE_FLAGS_FILE" ] && [ ! -f "$REUSE_FLAGS_FILE" ]; then
+  printf 'gen-reviewer-prompt.sh: reuse-flags file not found: %s\n' "$REUSE_FLAGS_FILE" >&2
   exit 1
 fi
 
@@ -219,3 +232,41 @@ ${ISSUE_BODY:-"(Issue body not provided. Fetch it before applying issue-scope, T
 
 **Verdict:** If Part 1 has ZERO blocking findings (INFO lines OK) AND Part 2 has no findings: return ONLY the token: \`LGTM\`. Otherwise return a numbered findings list — RULE_ID findings first, then LGTM findings.
 SUFFIX2
+
+# ---------------------------------------------------------------------------
+# Reuse interrogation block (dynamic suffix only; cached prefix untouched)
+# Appended ONLY when --reuse-flags <file> is present and non-empty.
+# ---------------------------------------------------------------------------
+if [ -n "$REUSE_FLAGS_FILE" ]; then
+  REUSE_FLAGS_CONTENT=""
+  if [ -s "$REUSE_FLAGS_FILE" ]; then
+    REUSE_FLAGS_CONTENT=$(cat "$REUSE_FLAGS_FILE")
+  fi
+  if [ -n "$REUSE_FLAGS_CONTENT" ]; then
+    cat <<REUSE_BLOCK
+
+---
+
+## Build-vs-buy / reuse interrogation
+
+Triage detected the following reuse signals in this diff (from lint-implementation.sh):
+
+\`\`\`
+${REUSE_FLAGS_CONTENT}
+\`\`\`
+
+For each flagged item above, apply the following protocol:
+
+1. **Search the repository first** — run \`rg -w <symbol>\` across \`scripts/\`, \`scripts/lib/\`, and repo source to find any existing implementation.
+2. **Check relevant package registries or well-known libraries** if no repo match is found (e.g. npm, PyPI, crates.io, standard library).
+3. **Emit a per-item verdict** (evidence-bound — the verdict MUST name the matched util, file, or library; never assert from belief alone):
+   - \`BLOCK: reuse <existing-util> at <path>\` — only if evidence confirms an existing match.
+   - \`ADVISE: consider <alternative>\` — if a simpler alternative exists but is not an exact match.
+   - \`PASS\` — no reuse opportunity found after search.
+
+**Simplicity axis (ADVISE-only):** suggestions toward more code or new abstractions may never BLOCK; only suggestions toward *less* code (reuse existing, remove duplication) may BLOCK, and only when tied to a named finding above.
+
+A BLOCK from this section is subject to a refute pass: if a second reviewer context disagrees, the BLOCK is suppressed. Do not BLOCK on belief — evidence is required.
+REUSE_BLOCK
+  fi
+fi

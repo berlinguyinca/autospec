@@ -10,8 +10,8 @@ creates an isolated sandbox branch (`autospec/explore/<date>-<slug>`) off `origi
 runs a roster of parallel researchers each round — **7 universal** (spec-vs-code,
 prior reports, codebase signals, open issues, source analysis, dependency health,
 internet) **+ 4 discovery** (quality-resilience, dogfooding, self-leverage,
-style-normalization) **+ N domain specialists** — aggregates through dedup → verify
-→ ROI → pattern-synthesis → severity-first rank, files 1-5 auto-implement issues per
+style-normalization) **+ N domain specialists** — aggregates through dedup →
+gap-confirm → verify → ROI → pattern-synthesis → severity-first rank, files 1-5 auto-implement issues per
 round, drains them via `/autospec-run` with PRs targeting the sandbox, and continues
 until the operator stops it. The operator inspects the sandbox when ready and either
 merges into `main` or discards.
@@ -103,8 +103,8 @@ Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B"
    │  1. research cycle:                      │
    │     - 7 universal + 4 discovery + N      │
    │       specialist researchers in parallel │
-   │     - dedup -> verify -> ROI ->          │
-   │       synthesis -> severity-first rank   │
+   │     - dedup -> gap-confirm -> verify ->  │
+   │       ROI -> synthesis -> rank           │
    │  2. spec-first filing (1-5 per round):   │
    │     render round design spec ->          │
    │     commit+push spec to SANDBOX ->       │
@@ -399,10 +399,29 @@ specialists**:
   roster" below.
 
 **Aggregator stage order** (in the `explore-research-cycle.sh` aggregator):
-`dedup → verify → ROI → pattern-synthesis → severity-first rank`.
+`dedup → gap-confirm → verify → ROI → pattern-synthesis → severity-first rank`.
 
 1. **Dedup** — by normalized title across all researchers (unchanged).
-2. **Verify (adversarial)** — every deduped proposal is handed to one
+2. **Gap-confirmation (deterministic)** — every proposal may carry a
+   machine-checkable `gap_check` object
+   (`{kind: "absent"|"present", needle, haystack}`,
+   schema `schemas/autospec-explore-proposal.schema.json`) which the aggregator
+   re-verifies against the CURRENT files BEFORE any LLM verify runs. A
+   `kind:"absent"` claim ("X is missing") is **dropped if the needle is found**
+   (the gap does not exist); a `kind:"present"` claim ("this call site exists")
+   is **dropped if the needle is absent**. `haystack` is a repo-relative file,
+   glob, or `"<repo>"` for a repo-wide `git grep` — paths that escape the repo
+   or malformed checks fail closed (dropped). Sources in `GAP_CLAIMING_SOURCES`
+   (default `source-analysis`, `self-leverage`; configurable via
+   `AUTOSPEC_EXPLORE_GAP_CLAIMING_SOURCES`) whose proposal carries no valid
+   `gap_check` are **refuted by default** — they assert a gap but offer nothing
+   to confirm. This is the primary precision lever for grounded sources: it is
+   what stops "X is undocumented / untested / unbundled" proposals for things
+   that already exist. Counters: `proposals_after_gap_confirm`,
+   `gap_unconfirmed_dropped`, `gap_check_malformed`. A single source that floods
+   a large multi-source pool past `AUTOSPEC_EXPLORE_SATURATION_FRACTION`
+   (default 0.40) is down-sampled + score-penalized (`saturated_sources`).
+3. **Verify (adversarial)** — every surviving proposal is handed to one
    independent Tier-B skeptic prompted "Try to refute this proposal; default to
    refuted=true under uncertainty." Refuted proposals are dropped; survivors
    carry `{verdict, reason}`. This is the primary false-positive lever.
@@ -431,14 +450,22 @@ specialists**:
    total absence of skeptic capability → no map, pass 2 no-ops to the
    **observable** `verify_mode=no-op-unverified` with a
    `code_health:explore_verify_noop` warning (never a silent all-survive).
-3. **ROI gate** — drop proposals with an empty `named_consumer`. **Only the 4
+
+   **Fail-closed in the autonomous path.** When the run is autonomous
+   (`AUTOSPEC_EXPLORE_AUTONOMOUS=1`, set by `--once` and the conductor) AND
+   `verify_mode` degraded to `no-op-unverified`, the aggregator caps the final
+   output to ZERO, emits `code_health:explore_verify_unavailable_failclosed`,
+   and sets `failclosed:true` — an unattended run never auto-files an unverified
+   proposal. Interactive runs keep the historical all-survive behavior (there
+   the operator is the skeptic). `--once` reports this as a dry cycle.
+4. **ROI gate** — drop proposals with an empty `named_consumer`. **Only the 4
    discovery researchers and `specialist:<slug>` sources are ROI-gated**
    (new-source rollout safety); the 7 legacy universal researchers are exempt.
-4. **Pattern synthesis** — survivors are grouped by a coarse class key; any
+5. **Pattern synthesis** — survivors are grouped by a coarse class key; any
    class with ≥2 members (or matching a recurring `docs/memory/` theme)
    collapses into one `structural-fix` proposal whose evidence lists every
    instance and the single guard that would catch them all.
-5. **Severity-first rank** — the **primary** sort key is the severity band;
+6. **Severity-first rank** — the **primary** sort key is the severity band;
    `confidence × source_weight / complexity` breaks ties.
 
 **Severity enum** (highest → lowest blast radius through auto-merge + lock-step):

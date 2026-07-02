@@ -1,7 +1,7 @@
 ---
 name: feedback_explore_once_unverified_near_zero_precision
-description: autospec-explore local discovery on the autospec repo produced 183 raw candidates and 0 verified filing candidates; never auto-file --once output unverified
-metadata: 
+description: autospec-explore local discovery on the autospec repo is ~2% raw / ~0% post-verify precision; never auto-file --once output unverified
+metadata:
   node_type: memory
   type: feedback
   originSessionId: 37d298e0-f75e-4f7a-8457-db86f85c4404
@@ -9,7 +9,7 @@ metadata:
 
 A local-tier `/autospec-explore` discovery pass on the autospec repo itself (10
 sources, no internet, `--stage dedup`) produced **183 raw deduped proposals** that
-collapsed to **0 confidently file-worthy** after file-level verification:
+collapsed to **0 confidently file-worthy** after adversarial verification:
 
 - `quality-resilience` (100) and `self-leverage` (50) both saturated at their per-round
   caps — a saturation signal, not signal. `self-leverage` grepped *prose in spec docs*
@@ -24,9 +24,9 @@ collapsed to **0 confidently file-worthy** after file-level verification:
   (claimed missing — the [[feedback_installer_excludes_runtime_libs]] bug is already fixed).
 
 **Why:** The `--once` path's adversarial-verify stage degrades to `no-op-unverified` when
-run as a bare bash subprocess (no LLM skeptic wired in). Filing unverified `--once`
-output as `auto-implement` would flood `main` with noise — and even the "grounded"
-sources carry false evidence that only direct file inspection catches.
+run as a bare bash subprocess (no LLM skeptic wired in). At ~2% raw precision, filing
+unverified `--once` output as `auto-implement` would flood `main` with noise — and even the
+"grounded" sources carry false evidence that only direct file inspection catches.
 
 **How to apply:** When a conductor escalates to Tier-2 discovery, do NOT run
 `/autospec-explore --once` as a bare subprocess and auto-file. Instead run `--stage dedup`

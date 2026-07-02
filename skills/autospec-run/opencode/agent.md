@@ -1003,6 +1003,21 @@ inline label-swap path below.
 >        fi
 >        det_exit=$?
 >
+>      Reuse lens (issues #1439/#1440/#1442): when armed, extract the reuse-triage
+>      RULE_IDs from the deterministic findings so the reviewer prompt receives the
+>      build-vs-buy block. Flag-OFF or no reuse hits → `_reuse_flags_file` stays empty
+>      → the reviewer prompt is byte-identical to today (the `${_reuse_flags_file:+…}`
+>      expansion below adds nothing):
+>        ```bash
+>        _reuse_flags_file=""
+>        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ] && [ -f /tmp/guardian-<PR>.md ]; then
+>          _reuse_candidate=$(mktemp -t autospec-reuse-flags-XXXXXX)
+>          grep -E '^(REINVENT_REPO_UTIL|NEW_DEP_UNJUSTIFIED|NEW_ABSTRACTION_SINGLE_CALLER):' \
+>            /tmp/guardian-<PR>.md > "$_reuse_candidate" 2>/dev/null || true
+>          if [ -s "$_reuse_candidate" ]; then _reuse_flags_file="$_reuse_candidate"; fi
+>        fi
+>        ```
+>
 >      **Model tier:** `TIER_B` for ALL issues — including `regression` and `priority:high`. The single fused reviewer carries the regression gap-check (see brief below), so no second Tier-A pass is dispatched. **Escape hatch:** `AUTOSPEC_REVIEWER_TIER` overrides the reviewer tier — unset (or any value other than `opus`) → `TIER_B` (sonnet); set `AUTOSPEC_REVIEWER_TIER=opus` to restore `TIER_A` for the reviewer. Silently fall back to `TIER_A` if `TIER_B` is unavailable.
 >
 >      **Assemble reviewer prompt** — call `gen-reviewer-prompt.sh` to compose the combined prompt (static cached prefix + dynamic suffix):
@@ -1020,7 +1035,8 @@ inline label-swap path below.
 >        --issue-body "/tmp/issue-<ISSUE>-body.md" \
 >        --prev-findings "/tmp/guardian-<PR>.md" \
 >        --issue-labels "<ISSUE_LABELS>" \
->        --repo "<REPO>")
+>        --repo "<REPO>" \
+>        ${_reuse_flags_file:+--reuse-flags "$_reuse_flags_file"})
 >      ```
 >      Pass `combined_reviewer_prompt` as the reviewer subagent prompt. The static cached prefix is framed by `<!-- CACHE BOUNDARY -->` markers; pass it with `cache_control: { type: "ephemeral" }` so Anthropic's prompt cache can reuse it across inner-loop iterations.
 >
@@ -1050,7 +1066,19 @@ inline label-swap path below.
 >        >
 >        > **Hard limit:** max **25 tool calls total** (Parts 1 + 2 combined). If budget exhausted, append `RULE_ID:OUT_OF_SCOPE: reviewer budget exhausted; PR needs human review` and proceed to verdict.
 >        >
->        > **Verdict:** If Part 1 has ZERO blocking findings (INFO lines OK) AND Part 2 has no findings: return ONLY the token: `LGTM`. Otherwise return a numbered findings list — RULE_ID findings first, then LGTM findings.
+>        > **Simplicity axis is ADVISE-only (anti-gold-plating):** the reuse / build-vs-buy / "how could this be better?" axis may argue only toward *less* code — reuse a named existing util (`scripts/lib/`, repo source), adopt a named library, or delete an unneeded abstraction — and only when tied to a named acceptance criterion. It may NEVER emit a `BLOCK` that demands *more* code, a new abstraction, or speculative generality; such suggestions are at most `ADVISE` and never halt the commit. Every reuse verdict must name the matched util or library (evidence-bound), never assert a match from belief.
+>        >
+>        > **Verdict:** If Part 1 has ZERO blocking findings (INFO lines OK) AND Part 2 has no findings: return ONLY the token: `LGTM`. Otherwise return a numbered findings list — RULE_ID findings first, then LGTM findings. A reuse `BLOCK` is provisional until it survives the refute pass below.
+>
+>      **Reuse-BLOCK refute pass (before consuming the verdict):** If the findings list contains a build-vs-buy / reuse `BLOCK`, do NOT halt on it yet. Dispatch a **cheap refute pass** — one short `TIER_B` second voter (≤5 tool calls) whose only job is to *kill* the BLOCK: `rg`-search the repo for the named util/library and confirm the claimed reuse target actually exists, is reachable, and fits this call site. **Majority rules:** keep the BLOCK only if the refuter also upholds it; if the refuter refutes it (the named target is absent, unreachable, or ill-fitting), demote that BLOCK to `ADVISE`, drop it from the blocking findings, and continue. If demotion leaves no remaining blocking findings, treat the verdict as `LGTM`. This keeps a hallucinated "library exists" from stalling the merge (`feedback_llm_validator_adaptive_retry`). **Record the outcome of this reuse `BLOCK` decision to the reuse-lens ledger HERE** (issue #1442) — at the decision point, so precision = upheld ÷ total is computed only over real reuse BLOCKs and never from phantom rows on clean passes. Set `_reuse_block_raised=1`, `_reuse_trigger` to the flagged RULE_ID, and `_reuse_upheld=true` when the refuter upheld the BLOCK or `_reuse_upheld=false` when it was refuted/demoted-to-ADVISE, then:
+>        ```bash
+>        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ] && [ "${_reuse_block_raised:-0}" = "1" ]; then
+>          bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/interrogation-ledger.sh" record \
+>            --issue "<ISSUE>" --pr "<PR>" --trigger "${_reuse_trigger:-REINVENT_REPO_UTIL}" \
+>            --verdict BLOCK --upheld "${_reuse_upheld:-true}" \
+>          || true  # write failure is best-effort; never blocks the PR
+>        fi
+>        ```
 >
 >      If `LGTM` && det_exit == 0:
 >        gh pr comment <PR> --body "<!-- guardian-block --> Review: clean. <!-- /-->"
@@ -1061,6 +1089,9 @@ inline label-swap path below.
 >            --dispatch-id "<DISPATCH_ID>-reviewer" --role reviewer --issue "<ISSUE>" \
 >            --tokens-json ".autospec/tokens-<ISSUE>-reviewer.json"
 >        fi
+>        # Reuse-lens verdict is recorded at the refute-pass decision point above
+>        # (issue #1442), not here — recording in this LGTM-only branch produced
+>        # phantom BLOCK rows on clean passes and never recorded upheld BLOCKs.
 >        # monitor exits to parking state HERE — orchestrator relaunches when ~/.autospec/ci-state/<PR>.signal settles
 >        # On relaunch: run ci-wait-poll.sh <PR>; break SUCCESS if exit 0 (pass)
 >        break SUCCESS only if the full suite passed and required checks pass.
@@ -1301,10 +1332,11 @@ Loop (`round = 1 … MAX`):
    else
      REVIEW_SINCE="${BATCH_START_DATE}"  # round 1: full batch window
    fi
-   /autospec-review --remediation --since "${REVIEW_SINCE}" --emit-gaps "${GAPS_FILE}"
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/invoke-review.sh" \
+     --remediation --since "${REVIEW_SINCE}" --emit-gaps "${GAPS_FILE}"
    ```
 
-   **Round 1** keeps the full `BATCH_START_DATE` batch window — this preserves the per-PR-LGTM-misses-integration value (the broad pass catches cross-PR integration gaps the per-PR LGTMs missed). **Round ≥2** scopes `--since` to ONLY the newly-filed gap PRs from the prior round (`GAP_ROUND_SINCE`, the timestamp captured just before the prior round's gap PRs began merging — see step 4), so the re-review doesn't re-scan the entire already-reviewed batch, only the freshly-shipped gap remediations. On review failure, log a warning, treat as 0 survivors, and fall back to the final report (never block run completion).
+   **Harness-neutral invocation:** `invoke-review.sh` detects the active harness (Claude Code / Codex CLI / OpenCode) via `autospec-harness-detect.sh` and dispatches `/autospec-review` using the correct per-harness argv form. If the review backend is unavailable it emits `code_health:phase55_broad_review_backend_unavailable` to stderr and appends a visible diagnostic gap to `GAPS_FILE` — it never silently produces an empty gap file that would look like a clean pass. **Round 1** keeps the full `BATCH_START_DATE` batch window — this preserves the per-PR-LGTM-misses-integration value (the broad pass catches cross-PR integration gaps the per-PR LGTMs missed). **Round ≥2** scopes `--since` to ONLY the newly-filed gap PRs from the prior round (`GAP_ROUND_SINCE`, the timestamp captured just before the prior round's gap PRs began merging — see step 4), so the re-review doesn't re-scan the entire already-reviewed batch, only the freshly-shipped gap remediations. On review failure, log a warning, treat as 0 survivors, and fall back to the final report (never block run completion).
 1b. **Docs-completeness dimension** (spec §D6 row 2 — runs only on round 1, after the broad review emits `${GAPS_FILE}`): the gap-remediation review also audits documentation completeness for the work shipped during this batch window. Every feature shipped in the window (scoped by `run-batch-start.sh --read`) must have a page for every configured audience (the `documentation.audiences` from #917's doc config), and there must be no outstanding `visual_stale` / `example_stale` drift signals (`check-doc-drift.sh`). Run the deterministic helper and **append** its gaps onto the existing `${GAPS_FILE}` so they file, dedupe, and converge through the SAME gap-remediation machinery used in step 2 (do NOT build a parallel loop):
 
    ```bash

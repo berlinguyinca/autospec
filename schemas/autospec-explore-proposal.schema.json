@@ -42,6 +42,28 @@
       "type": "string",
       "description": "Free text naming a skill/workflow/operator step that benefits from this proposal today. Empty string means no named consumer; new-source proposals with an empty value are dropped by the ROI gate (Issue C). Legacy researchers that omit this field are defaulted to \"\" by the aggregator and are NOT auto-dropped."
     },
+    "gap_check": {
+      "type": "object",
+      "description": "Optional machine-checkable claim the deterministic gap-confirmation stage (between dedup and verify) re-verifies against current files before the proposal is ranked. `absent`: needle is claimed MISSING from haystack — dropped if found. `present`: needle is claimed to EXIST in haystack — dropped if absent. Any proposal carrying a gap_check is verified; additionally, proposals from a gap-claiming source (default: source-analysis/self-leverage, configurable via AUTOSPEC_EXPLORE_GAP_CLAIMING_SOURCES) that omit gap_check are refuted by default.",
+      "required": ["kind", "needle", "haystack"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["absent", "present"]
+        },
+        "needle": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Fixed string searched for (not a regex). For kind=absent it is the thing claimed missing; for kind=present it is the call-site/pattern claimed to exist."
+        },
+        "haystack": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Repo-relative file, glob, or the literal \"<repo>\" for a repo-wide git grep. Must resolve inside the repository (no absolute paths, no `..` escape)."
+        }
+      }
+    },
     "score": {
       "type": "number",
       "description": "Aggregator-computed ranking score (confidence * source_weight / complexity)."

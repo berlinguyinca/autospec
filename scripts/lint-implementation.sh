@@ -54,6 +54,15 @@ RULE_IDs enforced (deterministic detectors):
   VACUOUS_EMPTY_TEST            Empty test body: it(\"...\", () => {}) or @test with only braces.
   VACUOUS_NO_ASSERT             Loop or function test body with no assert/expect call (WARN).
 
+  REINVENT_REPO_UTIL  Net-new function whose name duplicates an existing helper found by rg
+                    across scripts/. Opt-out: # linter:allow-REINVENT_REPO_UTIL <reason>.
+  NEW_DEP_UNJUSTIFIED  Dependency added to a manifest (requirements.txt, package.json,
+                    go.mod, Cargo.toml, pyproject.toml, Gemfile) without a 'why:' marker
+                    in the same hunk. Opt-out: # linter:allow-NEW_DEP_UNJUSTIFIED <reason>.
+  NEW_ABSTRACTION_SINGLE_CALLER  New *manager*|*factory*|*adapter*|*wrapper*|*base*|*abstract*
+                    file with ≤1 external call site found by rg. Opt-out:
+                    # linter:allow-NEW_ABSTRACTION_SINGLE_CALLER <reason>.
+
 RULE_IDs checked by LLM guardian (not this script):
 
   HALLUCINATED_API  Symbol referenced in diff not found in repo or dependency manifests.
@@ -1167,6 +1176,202 @@ check_duplicate_names() {
     fi
 }
 
+# ── §3.x REINVENT_REPO_UTIL detector ─────────────────────────────────────────
+# Net-new function definition duplicating an existing helper found by rg across
+# scripts/. Heuristic: new name() def where rg --fixed-strings finds it in
+# another .sh/.bash file under scripts/. Fail-open: rg absent or error → silent.
+
+detect_reinvent_repo_util() {
+    if ! command -v rg >/dev/null 2>&1; then
+        return 0
+    fi
+
+    while IFS= read -r diff_file; do
+        [ -z "$diff_file" ] && continue
+        case "$diff_file" in
+            *.sh|*.bash) ;;
+            *) continue ;;
+        esac
+
+        while IFS=: read -r lineno content; do
+            # Match bash-style function definitions: name() { or function name() {
+            if printf '%s' "$content" | grep -qE \
+                '^[[:space:]]*(function[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)'; then
+                # Extract function name, skipping the "function" keyword
+                local _rru_name
+                _rru_name="$(printf '%s' "$content" \
+                    | sed 's/^[[:space:]]*//' \
+                    | sed 's/^function[[:space:]]*//' \
+                    | grep -oE '^[A-Za-z_][A-Za-z0-9_]*')"
+                [ -z "$_rru_name" ] && continue
+                # Skip ubiquitous generic names that legitimately recur
+                case "$_rru_name" in
+                    main|setup|teardown|run|help|usage|init|cleanup|die|err|warn|log) continue ;;
+                esac
+                # Search for existing definition in scripts/; fail-open on rg error
+                local _rru_matches=""
+                _rru_matches="$(rg --fixed-strings "${_rru_name}()" \
+                    --glob '*.sh' --glob '*.bash' -l scripts/ 2>/dev/null || true)"
+                [ -z "$_rru_matches" ] && continue
+                # Exclude the file being added itself
+                local _rru_others=""
+                _rru_others="$(printf '%s\n' "$_rru_matches" \
+                    | grep -vF "$diff_file" || true)"
+                [ -z "$_rru_others" ] && continue
+                if ! is_line_allowed "REINVENT_REPO_UTIL" "$diff_file" "$lineno"; then
+                    local _rru_first
+                    _rru_first="$(printf '%s\n' "$_rru_others" | head -1)"
+                    emit_capped "REINVENT_REPO_UTIL" "$diff_file" "$lineno" \
+                        "function '${_rru_name}' already defined in ${_rru_first}"
+                fi
+            fi
+        done <<EOF
+$(get_added_lines_with_lineno "$diff_file")
+EOF
+    done <<EOF
+$(get_diff_files)
+EOF
+}
+
+# ── §3.x NEW_DEP_UNJUSTIFIED detector ────────────────────────────────────────
+# Dependency added to a manifest without a why: justification in the same hunk.
+
+_ndj_dep_pattern() {
+    case "$1" in
+        *requirements.txt) printf '^[A-Za-z][A-Za-z0-9_.-]' ;;
+        *package.json)     printf '"[A-Za-z@][^"]+": "[0-9^~*>=]' ;;
+        *go.mod)           printf '^[[:space:]]*(require[[:space:]]+)?[A-Za-z][^ ]* v[0-9]' ;;
+        *Cargo.toml)       printf '^[a-z_-][a-z0-9_-]* *= *"' ;;
+        *pyproject.toml)   printf '[A-Za-z][A-Za-z0-9_-]*[[:space:]]*[>=<!]' ;;
+        *Gemfile)          printf "^gem ['\"]" ;;
+        *)                 printf '' ;;
+    esac
+}
+
+detect_new_dep_unjustified() {
+    local _ndj_tmp
+    _ndj_tmp="$(mktemp -t lint-dep-unjust.XXXXXX)"
+
+    while IFS= read -r diff_file; do
+        [ -z "$diff_file" ] && continue
+        local _ndj_pat
+        _ndj_pat="$(_ndj_dep_pattern "$diff_file")"
+        if [ -z "$_ndj_pat" ]; then
+            continue
+        fi
+
+        # Parse this file's diff hunk-by-hunk.
+        # Output "LINENO:CONTENT" for dep-add lines in hunks that lack a why: marker.
+        awk -v tgt="$diff_file" -v pat="$_ndj_pat" '
+            /^diff --git / {
+                in_file = ($0 ~ " b/" tgt "$")
+                next
+            }
+            !in_file { next }
+            /^@@ / {
+                if (n > 0 && !has_why) {
+                    for (i = 0; i < n; i++) print lnos[i] ":" lines[i]
+                }
+                n = 0; has_why = 0
+                hdr = $0; sub(/.*\+/, "", hdr); sub(/[^0-9].*/, "", hdr)
+                cur = hdr + 0; next
+            }
+            /^\+\+\+ |^--- / { next }
+            /^ / {
+                cur++
+                if ($0 ~ /[Ww]hy:/) has_why = 1
+                next
+            }
+            /^\+/ {
+                cur++
+                content = substr($0, 2)
+                if (content ~ /[Ww]hy:/) { has_why = 1; next }
+                if (match(content, pat)) {
+                    lines[n] = content; lnos[n] = cur; n++
+                }
+            }
+            END {
+                if (n > 0 && !has_why) {
+                    for (i = 0; i < n; i++) print lnos[i] ":" lines[i]
+                }
+            }
+        ' "$TMP_DIFF" > "$_ndj_tmp"
+
+        while IFS= read -r _ndj_entry; do
+            [ -z "$_ndj_entry" ] && continue
+            local _ndj_lno _ndj_rest
+            _ndj_lno="$(printf '%s' "$_ndj_entry" | cut -d: -f1)"
+            _ndj_rest="$(printf '%s' "$_ndj_entry" | cut -d: -f2-)"
+            if ! is_line_allowed "NEW_DEP_UNJUSTIFIED" "$diff_file" "$_ndj_lno"; then
+                emit_capped "NEW_DEP_UNJUSTIFIED" "$diff_file" "$_ndj_lno" \
+                    "dependency added without 'why:' justification: ${_ndj_rest}"
+            fi
+        done < "$_ndj_tmp"
+    done <<EOF
+$(get_diff_files)
+EOF
+
+    rm -f "$_ndj_tmp"
+}
+
+# ── §3.x NEW_ABSTRACTION_SINGLE_CALLER detector ───────────────────────────────
+# Net-new file matching *manager*|*factory*|*adapter*|*wrapper*|*base*|*abstract*
+# with ≤1 external call site found by rg in the tree. Fail-open: rg error → silent.
+
+detect_new_abstraction_single_caller() {
+    if ! command -v rg >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local _nasc_tmp
+    _nasc_tmp="$(mktemp -t lint-nasc.XXXXXX)"
+
+    # Collect all net-new files from the diff (those with "new file mode" header)
+    awk '
+        /^diff --git / {
+            f = $0; sub(/^diff --git a\/[^ ]* b\//, "", f); is_new = 0
+        }
+        /^new file mode/ { is_new = 1 }
+        is_new && /^@@ / { print f; is_new = 0 }
+    ' "$TMP_DIFF" | sort -u > "$_nasc_tmp"
+
+    while IFS= read -r _nasc_file; do
+        [ -z "$_nasc_file" ] && continue
+        local _nasc_bname _nasc_stem _nasc_lower
+        _nasc_bname="$(basename "$_nasc_file")"
+        _nasc_stem="$(printf '%s' "$_nasc_bname" | sed 's/\.[^.]*$//')"
+        _nasc_lower="$(printf '%s' "$_nasc_stem" | tr '[:upper:]' '[:lower:]')"
+        case "$_nasc_lower" in
+            *manager*|*factory*|*adapter*|*wrapper*|*base*|*abstract*) ;;
+            *) continue ;;
+        esac
+        # Check linter:allow on the diff file (line "-" means no specific line)
+        # For new files with no line reference, check the file if it exists
+        # Count external callers (files referencing this stem, excluding itself).
+        # rg exits 0=matches found, 1=no matches, 2+=error.
+        # Treat exit ≥2 as tooling error → fail-open (skip, no finding).
+        local _nasc_rg_out _nasc_rg_status=0
+        _nasc_rg_out="$(mktemp -t lint-nasc-rg.XXXXXX)"
+        rg --fixed-strings "$_nasc_stem" -l . > "$_nasc_rg_out" 2>/dev/null \
+            || _nasc_rg_status=$?
+        if [ "$_nasc_rg_status" -ge 2 ]; then
+            rm -f "$_nasc_rg_out"
+            continue
+        fi
+        local _nasc_count=0
+        _nasc_count="$(sed 's|^\./||' "$_nasc_rg_out" \
+            | grep -vF "$_nasc_file" \
+            | wc -l | tr -d ' ')"
+        rm -f "$_nasc_rg_out"
+        if [ "${_nasc_count:-0}" -le 1 ]; then
+            emit_capped "NEW_ABSTRACTION_SINGLE_CALLER" "$_nasc_file" "-" \
+                "new abstraction '${_nasc_stem}' has ${_nasc_count} external caller(s) — consider inlining if single-use"
+        fi
+    done < "$_nasc_tmp"
+
+    rm -f "$_nasc_tmp"
+}
+
 # ── directives output mode ────────────────────────────────────────────────────
 # Maps each RULE_ID to a short imperative directive line.
 
@@ -1190,6 +1395,9 @@ rule_directive() {
         VACUOUS_EMPTY_TEST) printf 'Add at least one assertion to the empty test body.' ;;
         VACUOUS_NO_ASSERT) printf 'Add an assert/expect/run+grep call to the test so it can actually fail.' ;;
         ASSERTION_DENSITY) printf 'Add at least one assert/expect/run/grep call to each test block — zero-assertion tests cannot catch regressions.' ;;
+        REINVENT_REPO_UTIL) printf 'Reuse the existing helper found in scripts/ instead of re-implementing the same function.' ;;
+        NEW_DEP_UNJUSTIFIED) printf "Add a '# why: <reason>' comment in the same diff hunk justifying this new dependency." ;;
+        NEW_ABSTRACTION_SINGLE_CALLER) printf 'Inline this abstraction — with only one caller, the named wrapper adds indirection without value.' ;;
         *)               printf 'Fix the flagged %s violation before re-pushing.' "$rule_id" ;;
     esac
 }
@@ -1219,6 +1427,14 @@ if [ "$DIRECTIVES" -eq 1 ]; then
         fi
         if [ "$ASSERTION_DENSITY" -eq 1 ]; then
             detect_assertion_density
+        fi
+        # Reuse-interrogation triage (issue #1439) is part of the reuse lens and
+        # must be inert unless AUTOSPEC_REUSE_LENS=1 — otherwise the lens fires
+        # while disarmed (flag-OFF byte-identical AC; spec Error handling §).
+        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ]; then
+            detect_reinvent_repo_util
+            detect_new_dep_unjustified
+            detect_new_abstraction_single_caller
         fi
     } > "$TMP_FINDINGS" 2>&1
 
@@ -1250,6 +1466,12 @@ else
     fi
     if [ "$ASSERTION_DENSITY" -eq 1 ]; then
         detect_assertion_density
+    fi
+    # Reuse-interrogation triage (issue #1439): inert unless the lens is armed.
+    if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ]; then
+        detect_reinvent_repo_util
+        detect_new_dep_unjustified
+        detect_new_abstraction_single_caller
     fi
 fi
 
