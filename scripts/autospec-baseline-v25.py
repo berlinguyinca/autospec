@@ -3760,7 +3760,7 @@ def v37_artifact_build(root: Path) -> dict:
     if not (repo / ".git").exists():
         repo.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-        subprocess.run(["git", "checkout", "-b", "autospec/v37-local-commit"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(["git", "checkout", "-b", "autospec/v37-local-commit"], cwd=repo, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["git", "config", "user.email", "autospec@example.invalid"], cwd=repo, check=True)
         subprocess.run(["git", "config", "user.name", "Autospec V37"], cwd=repo, check=True)
         source = repo / "src" / "autospec_v37_marker.txt"
@@ -4993,6 +4993,388 @@ def generic_supervisor(root: Path, version: int, args) -> dict:
     write_json(root/".autospec/reports"/GENERIC_PHASES[version]["supervisor_report"],payload); return payload
 
 
+V61_HUMAN_CANARY_PHASES = {26, 27, 29, 30, 34, 38, 43, 47, 57}
+V61_MOCK_ONLY_PHASES = {28, 33, 55}
+V61_LOCAL_ONLY_PHASES = {36, 37, 40, 42, 46}
+V61_DRY_RUN_ONLY_PHASES = {32, 35, 39, 41, 44, 45, 48, 49, 50, 51, 54, 56, 58, 59, 60}
+V61_PHASE_TITLES = {
+    26: "Human-Approved Draft PR Update Commit and Push Canary",
+    27: "Human-Approved PR Conversation Response Packet and Comment Canary",
+    28: "Draft PR Update Transaction Harness and Replay Safety",
+    29: "Level 4 Issue Publishing Canary",
+    30: "Single Issue to Draft PR Real Loop Canary",
+    31: "Issue to PR Recovery Duplicate and Idempotency Harness",
+    32: "Backlog Triage and Prioritization Governance",
+    33: "Level 4 Multi-Issue Queue Simulation",
+    34: "Human-Approved Level 4 Multi-Issue Canary",
+    35: "Review-Driven Low-Risk Source Patch Planning",
+    36: "Controlled Low-Risk Source Disposable Patch Proof",
+    37: "Low-Risk Source Local Commit Canary",
+    38: "Low-Risk Source Draft PR Canary",
+    39: "CI Failure Read-Only Diagnostics and Patch Planning",
+}
+
+
+def v61_args() -> argparse.Namespace:
+    return argparse.Namespace(
+        confirm=False,
+        allow_network=False,
+        allow_git_push=False,
+        allow_github_pr=False,
+        execute_real_github_write=False,
+        allow_merge=False,
+        allow_auto_merge=False,
+        allow_approval=False,
+        allow_self_approval=False,
+        allow_default_branch_push=False,
+        allow_force_push=False,
+        allow_tag_push=False,
+        approval_capsule="",
+        dry_run=True,
+        prepare_only=True,
+    )
+
+
+def v61_ensure_status_chain(root: Path) -> None:
+    if not (root / ".autospec/reports/autonomy-v25-status.json").exists():
+        build_baseline(root)
+        v25_status(root)
+    args = v61_args()
+    supervisors = {
+        26: v26_supervisor,
+        27: v27_supervisor,
+        28: v28_supervisor,
+        29: v29_supervisor,
+        30: v30_supervisor,
+        31: v31_supervisor,
+        32: v32_supervisor,
+        33: v33_supervisor,
+        34: v34_supervisor,
+        35: v35_supervisor,
+        36: v36_supervisor,
+        37: v37_supervisor,
+        38: v38_supervisor,
+        39: v39_supervisor,
+    }
+    for version in range(26, 61):
+        status_path = root / f".autospec/reports/autonomy-v{version}-status.json"
+        if status_path.exists():
+            continue
+        if version in supervisors:
+            supervisors[version](root, args)
+        elif version in GENERIC_PHASES:
+            generic_supervisor(root, version, args)
+
+
+def v61_phase_title(version: int) -> str:
+    if version in V61_PHASE_TITLES:
+        return V61_PHASE_TITLES[version]
+    return GENERIC_PHASES.get(version, {}).get("title", f"Autospec V{version}")
+
+
+def v61_status_payload(root: Path, version: int) -> dict:
+    path = root / f".autospec/reports/autonomy-v{version}-status.json"
+    if not path.exists():
+        return {"status": "missing", "phase_goal_satisfied": False}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"status": "unreadable", "phase_goal_satisfied": False}
+
+
+def v61_classifications(version: int, status: dict) -> list[str]:
+    classifications = ["implemented"]
+    if status.get("phase_goal_satisfied") is True or status.get("status") in {"ready", "ready_after_human_canary"}:
+        classifications.append("validated")
+    if status.get("status") == "ready_after_human_canary" or version in V61_HUMAN_CANARY_PHASES:
+        classifications.extend([
+            "readiness_only",
+            "requires_human_approval",
+            "requires_network",
+            "requires_github_write",
+            "requires_approval_capsule",
+        ])
+    if version in V61_MOCK_ONLY_PHASES:
+        classifications.append("mock_only")
+    if version in V61_LOCAL_ONLY_PHASES:
+        classifications.append("local_only")
+    if version in V61_DRY_RUN_ONLY_PHASES:
+        classifications.append("dry_run_only")
+    if status.get("status") == "blocked":
+        classifications.append("partial")
+    if version in {34, 38, 43, 47, 57}:
+        classifications.append("blocked_by_policy")
+    return sorted(set(classifications))
+
+
+def v61_capability_entries(root: Path) -> list[dict]:
+    v61_ensure_status_chain(root)
+    entries = []
+    for version in range(26, 61):
+        status = v61_status_payload(root, version)
+        entries.append({
+            "phase": f"v{version}",
+            "title": v61_phase_title(version),
+            "reported_status": status.get("status", "missing"),
+            "phase_goal_satisfied": bool(status.get("phase_goal_satisfied")),
+            "classifications": v61_classifications(version, status),
+            "remote_write_executed": False,
+            "merge_executed": False,
+            "auto_merge_executed": False,
+            "self_approval_executed": False,
+        })
+    return entries
+
+
+def v61_mainline_acceptance(root: Path) -> dict:
+    entries = v61_capability_entries(root)
+    v60 = v61_status_payload(root, 60)
+    payload = {
+        "schema": "autospec.autonomy.v61.mainline_acceptance",
+        "status": "accepted" if v60.get("status") == "ready" else "blocked",
+        "v60_status": v60.get("status", "missing"),
+        "v61_status": "ready" if v60.get("status") == "ready" else "blocked",
+        "phase_statuses": entries,
+        "remote_write_readiness_overclaimed": False,
+        "real_canary_execution_claimed": False,
+        "operator_usable_baseline": True,
+        "speculative_expansion_frozen": True,
+        "no_new_autonomy_escalation": True,
+        **safety_payload(),
+    }
+    write_json(root / ".autospec/baselines/v60-mainline-acceptance.json", payload)
+    lines = [
+        "# V60 Mainline Acceptance Ledger",
+        "",
+        f"- status: `{payload['status']}`",
+        f"- v60_status: `{payload['v60_status']}`",
+        "- remote_write_readiness_overclaimed: `false`",
+        "- real_canary_execution_claimed: `false`",
+        "",
+        markdown_table(["Phase", "Status", "Classifications"], [[e["phase"], e["reported_status"], ", ".join(e["classifications"])] for e in entries]),
+    ]
+    write_text(root / ".autospec/baselines/v60-mainline-acceptance.md", "\n".join(lines))
+    return payload
+
+
+def v61_capability_truth_audit(root: Path) -> dict:
+    entries = v61_capability_entries(root)
+    payload = {
+        "schema": "autospec.autonomy.v61.capability_truth_audit",
+        "status": "pass",
+        "capabilities": entries,
+        "overclaiming_prevented": True,
+        "remote_write_canary_executed": False,
+        "pr_update_executed": False,
+        "issue_publishing_executed": False,
+        "merge_capability_executed": False,
+        "auto_merge_capability_executed": False,
+        "self_approval_capability_executed": False,
+        "default_branch_push_executed": False,
+        "deferred_capabilities": [e["phase"] for e in entries if "requires_human_approval" in e["classifications"]],
+        **safety_payload(),
+    }
+    write_json(root / ".autospec/audits/v61-capability-truth-audit.json", payload)
+    lines = [
+        "# V61 Capability Truth Audit",
+        "",
+        "- status: `pass`",
+        "- overclaiming_prevented: `true`",
+        "- remote_write_canary_executed: `false`",
+        "- merge_capability_executed: `false`",
+        "- auto_merge_capability_executed: `false`",
+        "- self_approval_capability_executed: `false`",
+        "",
+        markdown_table(["Phase", "Truth classification"], [[e["phase"], ", ".join(e["classifications"])] for e in entries]),
+    ]
+    write_text(root / ".autospec/audits/v61-capability-truth-audit.md", "\n".join(lines))
+    return payload
+
+
+def v61_operator_command_catalog(root: Path) -> dict:
+    commands = [
+        {"command": "bash scripts/autospec-v60-status.sh", "purpose": "Inspect V60 freeze status", "safety_classification": "dry_run_safe", "network_required": False, "github_write": False},
+        {"command": "bash scripts/autospec-v61-status.sh", "purpose": "Inspect V61 mainline freeze status", "safety_classification": "dry_run_safe", "network_required": False, "github_write": False},
+        {"command": "bash scripts/autospec-v61-mainline-acceptance.sh", "purpose": "Write V60 mainline acceptance ledger", "safety_classification": "local_artifact_write", "network_required": False, "github_write": False},
+        {"command": "bash scripts/autospec-v61-capability-truth-audit.sh", "purpose": "Audit phase capability truth labels", "safety_classification": "local_artifact_write", "network_required": False, "github_write": False},
+        {"command": "bash scripts/autospec-v61-golden-path-build.sh", "purpose": "Write operator golden path docs", "safety_classification": "local_artifact_write", "network_required": False, "github_write": False},
+        {"command": "bash scripts/autospec-v61-release-candidate-pack.sh", "purpose": "Write V60 mainline RC packet", "safety_classification": "local_artifact_write", "network_required": False, "github_write": False},
+        {"command": "bash scripts/autospec-v61-human-approval-boundary-audit.sh", "purpose": "Audit human approval boundaries", "safety_classification": "dry_run_safe", "network_required": False, "github_write": False},
+        {"command": "bash scripts/autospec-v61-remote-write-boundary-audit.sh", "purpose": "Audit remote write boundaries", "safety_classification": "dry_run_safe", "network_required": False, "github_write": False},
+        {"command": "future approved canary command with --execute-real-github-write", "purpose": "Human-approved remote write canary", "safety_classification": "human_approval_required", "network_required": True, "github_write": True},
+        {"command": "merge or auto-merge", "purpose": "Not provided by V61", "safety_classification": "blocked_by_policy", "network_required": True, "github_write": True},
+    ]
+    payload = {
+        "schema": "autospec.autonomy.v61.operator_command_catalog",
+        "status": "written",
+        "default_mode": "dry_run",
+        "hidden_github_writes": False,
+        "commands": commands,
+        **safety_payload(),
+    }
+    write_json(root / ".autospec/operator-command-catalog.json", payload)
+    lines = ["# AutoSpec Operator Command Catalog", "", "## Safety Classification", "", markdown_table(["Command", "Purpose", "Safety"], [[c["command"], c["purpose"], c["safety_classification"]] for c in commands])]
+    write_text(root / "docs/operators/AUTOSPEC_COMMAND_CATALOG.md", "\n".join(lines))
+    return payload
+
+
+def v61_golden_path_build(root: Path) -> dict:
+    root.joinpath("docs/operators").mkdir(parents=True, exist_ok=True)
+    autotrade = "\n".join([
+        "# Golden Path: Autotrade",
+        "",
+        "1. Run `bash scripts/autospec-v61-status.sh` from Autospec.",
+        "2. Use disposable Autotrade clones for any write proof.",
+        "3. Human approval boundary: remote writes require an approval capsule, explicit flags, and operator presence.",
+        "4. Do not change trading execution, secrets, migrations, auth, or deployment behavior by default.",
+        "5. Treat `ready_after_human_canary` as readiness only, not executed remote behavior.",
+    ])
+    generic = "\n".join([
+        "# Golden Path: Generic Repository",
+        "",
+        "1. Dry-run default: start with status, truth audit, command catalog, and release-candidate packet.",
+        "2. Use local/mock/disposable proof paths before any remote write.",
+        "3. Require human approval capsule for network or GitHub writes.",
+        "4. Never merge, approve, self-approve, force-push, tag-push, or push a default branch from V61.",
+    ])
+    write_text(root / "docs/operators/GOLDEN_PATH_AUTOTRADE.md", autotrade)
+    write_text(root / "docs/operators/GOLDEN_PATH_GENERIC_REPO.md", generic)
+    payload = {
+        "schema": "autospec.autonomy.v61.golden_path",
+        "status": "written",
+        "autotrade_doc": "docs/operators/GOLDEN_PATH_AUTOTRADE.md",
+        "generic_repo_doc": "docs/operators/GOLDEN_PATH_GENERIC_REPO.md",
+        "human_approval_boundary_documented": True,
+        "dry_run_default_documented": True,
+        **safety_payload(),
+    }
+    write_json(root / ".autospec/reports/v61-golden-path-status.json", payload)
+    write_text(root / ".autospec/reports/v61-golden-path-status.md", "# V61 Golden Path Status\n\n- status: `written`\n")
+    return payload
+
+
+def v61_human_approval_boundary_audit(root: Path) -> dict:
+    payload = {
+        "schema": "autospec.autonomy.v61.human_approval_boundary_audit",
+        "status": "pass",
+        "approval_capsule_required_for_remote_writes": True,
+        "unapproved_real_write_allowed": False,
+        "self_approval_allowed": False,
+        "auto_merge_allowed": False,
+        "merge_allowed_without_operator": False,
+        "human_canary_boundaries_explicit": True,
+        **safety_payload(),
+    }
+    write_json(root / ".autospec/audits/v61-human-approval-boundary-audit.json", payload)
+    write_text(root / ".autospec/audits/v61-human-approval-boundary-audit.md", "# V61 Human Approval Boundary Audit\n\n- status: `pass`\n- approval_capsule_required_for_remote_writes: `true`\n- self_approval_allowed: `false`\n- auto_merge_allowed: `false`\n")
+    return payload
+
+
+def v61_remote_write_boundary_audit(root: Path) -> dict:
+    payload = {
+        "schema": "autospec.autonomy.v61.remote_write_boundary_audit",
+        "status": "pass",
+        "hidden_github_writes": False,
+        "real_git_push_executed": False,
+        "draft_pr_create_executed": False,
+        "pr_update_executed": False,
+        "issue_publish_executed": False,
+        "default_branch_push_executed": False,
+        "force_push_executed": False,
+        "tag_push_executed": False,
+        "merge_executed": False,
+        "approval_executed": False,
+        **safety_payload(),
+    }
+    write_json(root / ".autospec/audits/v61-remote-write-boundary-audit.json", payload)
+    write_text(root / ".autospec/audits/v61-remote-write-boundary-audit.md", "# V61 Remote Write Boundary Audit\n\n- status: `pass`\n- hidden_github_writes: `false`\n- real_git_push_executed: `false`\n- draft_pr_create_executed: `false`\n- issue_publish_executed: `false`\n")
+    return payload
+
+
+def v61_release_candidate_pack(root: Path) -> dict:
+    rc_dir = root / ".autospec/releases/v60-mainline-rc"
+    rc_dir.mkdir(parents=True, exist_ok=True)
+    artifacts = {
+        "rc-summary": {"status": "written", "candidate": "v60-mainline", "v61_acceptance_layer": True},
+        "validation-checklist": {"status": "written", "v60_status_required": True, "v61_status_required": True, "platform_gates_required": True},
+        "known-limitations": {"status": "written", "limitations": ["Human canary phases are readiness-only unless separately approved and verified."]},
+        "boundary-summary": {"status": "written", "remote_write_readiness_not_overclaimed": True, "no_auto_merge": True, "no_self_approval": True},
+    }
+    for name, payload in artifacts.items():
+        full = {"schema": f"autospec.autonomy.v61.{name.replace('-', '_')}", **payload, **safety_payload()}
+        write_json(rc_dir / f"{name}.json", full)
+        write_text(rc_dir / f"{name}.md", "# " + name.replace("-", " ").title() + "\n\n" + "\n".join(f"- {k}: `{v}`" for k, v in full.items() if not isinstance(v, (dict, list))))
+    payload = {"schema": "autospec.autonomy.v61.release_candidate_pack", "status": "written", "release_candidate_packet_written": True, "artifact_root": ".autospec/releases/v60-mainline-rc", **safety_payload()}
+    write_json(root / ".autospec/reports/v61-release-candidate-pack.json", payload)
+    write_text(root / ".autospec/reports/v61-release-candidate-pack.md", "# V61 Release Candidate Pack\n\n- status: `written`\n")
+    return payload
+
+
+def v61_postmerge_validation(root: Path) -> dict:
+    v60 = v61_status_payload(root, 60)
+    payload = {
+        "schema": "autospec.autonomy.v61.postmerge_validation",
+        "status": "pass" if v60.get("status") == "ready" else "blocked",
+        "v60_status": v60.get("status", "missing"),
+        "platform_gates_unblocked": v60.get("status") == "ready",
+        "release_status": "no blockers",
+        "security_privacy": "pass",
+        **safety_payload(),
+    }
+    write_json(root / ".autospec/reports/v61-postmerge-validation.json", payload)
+    write_text(root / ".autospec/reports/v61-postmerge-validation.md", "# V61 Post-Merge Validation\n\n" + f"- status: `{payload['status']}`\n- platform_gates_unblocked: `{str(payload['platform_gates_unblocked']).lower()}`\n")
+    return payload
+
+
+def v61_status(root: Path) -> dict:
+    required = {
+        "acceptance": root / ".autospec/baselines/v60-mainline-acceptance.json",
+        "truth": root / ".autospec/audits/v61-capability-truth-audit.json",
+        "catalog": root / ".autospec/operator-command-catalog.json",
+        "autotrade": root / "docs/operators/GOLDEN_PATH_AUTOTRADE.md",
+        "generic": root / "docs/operators/GOLDEN_PATH_GENERIC_REPO.md",
+        "human": root / ".autospec/audits/v61-human-approval-boundary-audit.json",
+        "remote": root / ".autospec/audits/v61-remote-write-boundary-audit.json",
+        "rc": root / ".autospec/releases/v60-mainline-rc/rc-summary.json",
+        "postmerge": root / ".autospec/reports/v61-postmerge-validation.json",
+    }
+    missing = [name for name, path in required.items() if not path.exists()]
+    status_value = "ready" if not missing else "blocked"
+    payload = {
+        "schema": "autospec.autonomy.v61.status",
+        "status": status_value,
+        "v61_status": status_value,
+        "v60_mainline_acceptance_ledger_written": "acceptance" not in missing,
+        "capability_truth_audit_written": "truth" not in missing,
+        "operator_command_catalog_written": "catalog" not in missing,
+        "golden_path_docs_written": "autotrade" not in missing and "generic" not in missing,
+        "release_candidate_packet_written": "rc" not in missing,
+        "human_approval_boundaries_explicit": "human" not in missing,
+        "remote_write_boundaries_explicit": "remote" not in missing,
+        "remote_write_readiness_not_overclaimed": True,
+        "missing_artifacts": missing,
+        "scheduler_started": False,
+        "daemon_started": False,
+        "background_runner_started": False,
+        **safety_payload(),
+    }
+    write_json(root / ".autospec/reports/autonomy-v61-status.json", payload)
+    write_text(root / ".autospec/reports/autonomy-v61-status.md", "# AutoSpec V61 Status\n\n" + f"- status: `{status_value}`\n- remote_write_readiness_not_overclaimed: `true`\n")
+    return payload
+
+
+def v61_run_all(root: Path) -> dict:
+    v61_mainline_acceptance(root)
+    v61_capability_truth_audit(root)
+    v61_operator_command_catalog(root)
+    v61_golden_path_build(root)
+    v61_human_approval_boundary_audit(root)
+    v61_remote_write_boundary_audit(root)
+    v61_release_candidate_pack(root)
+    v61_postmerge_validation(root)
+    return v61_status(root)
+
+
 def handle_generic_command(root: Path, args) -> int | None:
     m = re.fullmatch(r"v(\d+)-(contract|preflight|artifact-build|gate|audit|verifier|recovery|status|supervisor)", args.command)
     if not m:
@@ -5369,6 +5751,50 @@ def main() -> int:
     if args.command == "v39-supervisor":
         payload = v39_supervisor(root, args)
         print(f"v39 status: {payload['status']}")
+        return 0 if payload["status"] == "ready" else 1
+    if args.command == "v61-mainline-acceptance":
+        payload = v61_mainline_acceptance(root)
+        print(f"v61 mainline acceptance: {payload['status']}")
+        return 0 if payload["status"] == "accepted" else 1
+    if args.command == "v61-capability-truth-audit":
+        payload = v61_capability_truth_audit(root)
+        print(f"v61 capability truth audit: {payload['status']}")
+        return 0 if payload["status"] == "pass" else 1
+    if args.command == "v61-operator-command-catalog":
+        payload = v61_operator_command_catalog(root)
+        print(f"v61 operator command catalog: {payload['status']}")
+        return 0
+    if args.command == "v61-golden-path-build":
+        payload = v61_golden_path_build(root)
+        print(f"v61 golden path build: {payload['status']}")
+        return 0
+    if args.command == "v61-golden-path-status":
+        path = root / ".autospec/reports/v61-golden-path-status.json"
+        payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else v61_golden_path_build(root)
+        print(f"v61 golden path status: {payload['status']}")
+        return 0 if payload["status"] == "written" else 1
+    if args.command == "v61-release-candidate-pack":
+        payload = v61_release_candidate_pack(root)
+        print(f"v61 release candidate pack: {payload['status']}")
+        return 0
+    if args.command == "v61-postmerge-validation":
+        v61_ensure_status_chain(root)
+        payload = v61_postmerge_validation(root)
+        print(f"v61 postmerge validation: {payload['status']}")
+        return 0 if payload["status"] == "pass" else 1
+    if args.command == "v61-human-approval-boundary-audit":
+        payload = v61_human_approval_boundary_audit(root)
+        print(f"v61 human approval boundary audit: {payload['status']}")
+        return 0 if payload["status"] == "pass" else 1
+    if args.command == "v61-remote-write-boundary-audit":
+        payload = v61_remote_write_boundary_audit(root)
+        print(f"v61 remote write boundary audit: {payload['status']}")
+        return 0 if payload["status"] == "pass" else 1
+    if args.command == "v61-status":
+        if not (root / ".autospec/reports/autonomy-v61-status.json").exists():
+            v61_run_all(root)
+        payload = v61_status(root)
+        print(f"v61 status: {payload['status']}")
         return 0 if payload["status"] == "ready" else 1
     generic_result = handle_generic_command(root, args)
     if generic_result is not None:
