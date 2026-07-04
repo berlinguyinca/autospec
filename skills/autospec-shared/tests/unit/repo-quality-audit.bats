@@ -242,6 +242,206 @@ EOF
     grep -q 'design-template-guard / design-template-contract' "$OUT_MD"
 }
 
+@test "audit discovers route coverage meta scripts without running them by default" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    cat > "$REPO/package.json" <<'EOF'
+{
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test:route-coverage": "node scripts/check-route-registry.js"
+  }
+}
+EOF
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    jq -e '.verification.lanes["test:route-coverage"].status == "not run"' "$OUT_JSON"
+    jq -e '.verification.lanes["test:route-coverage"].command == "npm run test:route-coverage"' "$OUT_JSON"
+    ! jq -e '.findings[] | select(.probe=="route-registry-drift")' "$OUT_JSON"
+}
+
+@test "audit discovers direct Playwright route coverage meta specs without route-specific npm scripts" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    mkdir -p "$REPO/e2e-playwright"
+    touch "$REPO/e2e-playwright/route-coverage.meta.spec.ts"
+    cat > "$REPO/package.json" <<'EOF'
+{
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "e2e": "npx playwright test"
+  }
+}
+EOF
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    jq -e '.verification.lanes["route-coverage:e2e-playwright/route-coverage.meta.spec.ts"].status == "not run"' "$OUT_JSON"
+    jq -e '.verification.lanes["route-coverage:e2e-playwright/route-coverage.meta.spec.ts"].command == "CI=1 npx playwright test e2e-playwright/route-coverage.meta.spec.ts --project=chrome"' "$OUT_JSON"
+}
+
+@test "audit runs discovered direct Playwright route coverage meta specs when command probes are enabled" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    mkdir -p "$REPO/e2e-playwright" "$TEST_TMP/bin"
+    touch "$REPO/e2e-playwright/route-coverage.meta.spec.ts"
+    cat > "$REPO/package.json" <<'EOF'
+{
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "e2e": "npx playwright test"
+  }
+}
+EOF
+    cat > "$TEST_TMP/bin/npm" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "--version") echo "11.16.0"; exit 0 ;;
+  "run -s test"|"run -s typecheck"|"run -s lint") exit 0 ;;
+esac
+exit 0
+EOF
+    cat > "$TEST_TMP/bin/npx" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "playwright test e2e-playwright/route-coverage.meta.spec.ts --project=chrome")
+    cat <<'LOG'
+Route coverage meta test failed
+Live routes missing from ROUTE_REGISTRY:
+• "database/samples"
+LOG
+    exit 1
+    ;;
+esac
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/npm" "$TEST_TMP/bin/npx"
+    export PATH="$TEST_TMP/bin:$PATH"
+    export AUTOSPEC_QUALITY_AUDIT_RUN_COMMANDS=1
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    jq -e '.verification.lanes["route-coverage:e2e-playwright/route-coverage.meta.spec.ts"].status == "configured but failing"' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="route-registry-drift" and .route_family=="database" and (.missing_routes | index("database/samples")))' "$OUT_JSON"
+}
+
+@test "audit parses route registry drift and compiler warnings into bounded family issues" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    mkdir -p "$TEST_TMP/bin"
+    cat > "$REPO/package.json" <<'EOF'
+{
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test:route-coverage": "node scripts/check-route-registry.js"
+  }
+}
+EOF
+    cat > "$TEST_TMP/bin/npm" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "--version") echo "11.16.0"; exit 0 ;;
+  "run -s test"|"run -s typecheck"|"run -s lint") exit 0 ;;
+  "run -s test:route-coverage")
+    cat <<'LOG'
+Route coverage meta test failed
+baseURL: http://127.0.0.1:4200
+Live routes missing from ROUTE_REGISTRY:
+• "admin/assistant-site-defaults"
+• "stats/admin/state-over-time"
+• "stats/database-content"
+Missing smoke-test catalog entry: system
+Warning: src/app/app.component.ts:15:10 - warning NG8113: RouterLink is not used within the template
+LOG
+    exit 1
+    ;;
+esac
+exit 0
+EOF
+    export GH_LOG="$TEST_TMP/gh.log"
+    export GH_OPEN="$TEST_TMP/open.json"
+    printf '[]\n' > "$GH_OPEN"
+    cat > "$TEST_TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s|%s\n' "$PWD" "$*" >> "$GH_LOG"
+case "$*" in
+  *"issue list"*) cat "$GH_OPEN"; exit 0 ;;
+  *"label create"*) exit 0 ;;
+  *"issue create"*) echo "https://github.com/example/repo/issues/30"; exit 0 ;;
+esac
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/npm" "$TEST_TMP/bin/gh"
+    export PATH="$TEST_TMP/bin:$PATH"
+    export AUTOSPEC_QUALITY_AUDIT_RUN_COMMANDS=1
+    export AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES=1
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD" --file-issues
+    [ "$status" -eq 0 ]
+    jq -e '.verification.lanes["test:route-coverage"].status == "configured but failing"' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="route-registry-drift" and .route_family=="admin" and (.missing_routes | index("admin/assistant-site-defaults")))' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="route-registry-drift" and .route_family=="stats" and (.missing_routes | index("stats/admin/state-over-time")) and (.missing_routes | index("stats/database-content")))' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="route-registry-drift" and .route_family=="system" and (.missing_routes | index("system")))' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="route-coverage-compiler-warning" and .warning_code=="NG8113" and (.body | contains("RouterLink")))' "$OUT_JSON"
+    jq -e '.issue_links | map(select(.dedupe_key=="route-registry-drift:test:route-coverage:admin")) | length == 1' "$OUT_JSON"
+    jq -e '.issue_links | map(select(.dedupe_key=="route-registry-drift:test:route-coverage:stats")) | length == 1' "$OUT_JSON"
+    jq -e '.issue_links | map(select(.dedupe_key=="route-registry-drift:test:route-coverage:system")) | length == 1' "$OUT_JSON"
+    grep -q 'route-registry-drift / app-follow-up' "$OUT_MD"
+    grep -q 'NG8113' "$OUT_MD"
+}
+
+@test "audit classifies route coverage setup failures without route drift findings" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    mkdir -p "$TEST_TMP/bin"
+    cat > "$REPO/package.json" <<'EOF'
+{
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test:route-coverage": "playwright test route-coverage.spec.ts"
+  }
+}
+EOF
+    cat > "$TEST_TMP/bin/npm" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "--version") echo "11.16.0"; exit 0 ;;
+  "run -s test"|"run -s typecheck"|"run -s lint") exit 0 ;;
+  "run -s test:route-coverage")
+    echo "Error: connect ECONNREFUSED 127.0.0.1:4200"
+    echo "Is the dev server running?"
+    exit 1
+    ;;
+esac
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/npm"
+    export PATH="$TEST_TMP/bin:$PATH"
+    export AUTOSPEC_QUALITY_AUDIT_RUN_COMMANDS=1
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    jq -e '.verification.lanes["test:route-coverage"].status == "setup failure"' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="route-coverage-setup" and .classification=="verification-contract-drift")' "$OUT_JSON"
+    ! jq -e '.findings[] | select(.probe=="route-registry-drift")' "$OUT_JSON"
+}
+
 @test "audit reports missing scripts as not configured verification-contract drift" {
     OUT_JSON="$TEST_TMP/audit.json"
     OUT_MD="$TEST_TMP/audit.md"
