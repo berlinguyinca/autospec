@@ -203,6 +203,150 @@ EOF
     jq -e '.findings[] | select(.probe=="security-sensitive-storage" and .storage_api=="document.cookie" and .sensitive_term=="authorization")' "$OUT_JSON"
 }
 
+@test "audit ranks maintainability hotspots and files bounded behavior-lock follow-ups" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    mkdir -p "$REPO/src/app/feature" "$TEST_TMP/bin"
+    {
+        echo "/* eslint-disable @typescript-eslint/no-explicit-any */"
+        echo "// @ts-ignore legacy fixture"
+        for i in $(seq 1 25); do
+            echo "export const value$i: any = console.log('debug-$i') as any;"
+        done
+    } > "$REPO/src/app/feature/giant.service.ts"
+    cat > "$REPO/src/app/feature/giant.service.spec.ts" <<'EOF'
+describe.skip('giant service', () => {
+  it.skip('has a behavior lock', () => {});
+});
+EOF
+    export GH_LOG="$TEST_TMP/gh.log"
+    export GH_OPEN="$TEST_TMP/open.json"
+    printf '[]\n' > "$GH_OPEN"
+    cat > "$TEST_TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s|%s\n' "$PWD" "$*" >> "$GH_LOG"
+case "$*" in
+  *"issue list"*) cat "$GH_OPEN"; exit 0 ;;
+  *"label create"*) exit 0 ;;
+  *"issue create"*) echo "https://github.com/example/repo/issues/40"; exit 0 ;;
+esac
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/gh"
+    export PATH="$TEST_TMP/bin:$PATH"
+    export AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES=1
+    export AUTOSPEC_QUALITY_AUDIT_LARGE_FILE_LINES=10
+    export AUTOSPEC_QUALITY_AUDIT_ANY_THRESHOLD=2
+    export AUTOSPEC_QUALITY_AUDIT_DEBUG_THRESHOLD=2
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD" --file-issues
+    [ "$status" -eq 0 ]
+    jq -e '.findings[] | select(.probe=="maintainability-hotspot" and .file=="src/app/feature/giant.service.ts" and .rank==1 and .hotspot_kind=="source" and .any_count >= 25 and .debug_logging_count >= 25 and .eslint_disable_count==1 and .ts_ignore_count==1 and (.remediation | contains("behavior locks")))' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="maintainability-hotspot" and .file=="src/app/feature/giant.service.spec.ts" and .disabled_test_count==2)' "$OUT_JSON"
+    jq -e '.issue_links | map(select(.dedupe_key=="maintainability-hotspot:src/app/feature/giant.service.ts")) | length == 1' "$OUT_JSON"
+    jq -e '.issue_links | map(select(.dedupe_key=="any-usage:src/app/feature/giant.service.ts" or .dedupe_key=="debug-logging-hotspots:src/app/feature/giant.service.ts" or .dedupe_key=="eslint-disable:src/app/feature/giant.service.ts" or .dedupe_key=="ts-ignore:src/app/feature/giant.service.ts")) | length == 0' "$OUT_JSON"
+    run jq -e '.residual_risks[] | select(test("any-usage:src/app/feature/giant.service.ts|debug-logging-hotspots:src/app/feature/giant.service.ts|eslint-disable:src/app/feature/giant.service.ts|ts-ignore:src/app/feature/giant.service.ts"))' "$OUT_JSON"
+    [ "$status" -ne 0 ]
+    grep -q 'bounded refactor issue' "$GH_LOG"
+    grep -q 'behavior locks or regression tests' "$GH_LOG"
+    grep -q 'maintainability-hotspot / maintainability-hotspot' "$OUT_MD"
+}
+
+@test "audit does not emit blank hotspots when only generated files exist" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    rm -rf "$REPO/src" "$REPO/tests"
+    mkdir -p "$REPO/dist"
+    for i in $(seq 1 20); do
+        echo "export const generated$i: any = console.log('generated-$i') as any;"
+    done > "$REPO/dist/bundle.js"
+    export AUTOSPEC_QUALITY_AUDIT_ANY_THRESHOLD=2
+    export AUTOSPEC_QUALITY_AUDIT_DEBUG_THRESHOLD=2
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"No such file"* ]]
+    run jq -e '.findings[] | select(.probe=="maintainability-hotspot")' "$OUT_JSON"
+    [ "$status" -ne 0 ]
+}
+
+@test "audit ignores generated maintainability hotspots" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    mkdir -p "$REPO/dist" "$REPO/src/app/maintained"
+    for i in $(seq 1 80); do
+        echo "export const generated$i: any = console.log('generated-$i') as any;"
+    done > "$REPO/dist/bundle.js"
+    for i in $(seq 1 5); do
+        echo "export const maintained$i: any = console.log('maintained-$i') as any;"
+    done > "$REPO/src/app/maintained/source.ts"
+    export AUTOSPEC_QUALITY_AUDIT_ANY_THRESHOLD=2
+    export AUTOSPEC_QUALITY_AUDIT_DEBUG_THRESHOLD=2
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    run jq -e '.findings[] | select(.probe=="maintainability-hotspot" and .file=="dist/bundle.js")' "$OUT_JSON"
+    [ "$status" -ne 0 ]
+    jq -e '.findings[] | select(.probe=="maintainability-hotspot" and .file=="src/app/maintained/source.ts")' "$OUT_JSON"
+}
+
+@test "audit ranks newer denser test-backed maintainability hotspots first" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    mkdir -p "$REPO/src/app/ranking"
+    for i in $(seq 1 100); do
+        echo "export const oldValue$i: any = $i as any;"
+    done > "$REPO/src/app/ranking/aa-old.ts"
+    for i in $(seq 1 20); do
+        echo "export const newValue$i: any = $i as any;"
+    done > "$REPO/src/app/ranking/zz-new.ts"
+    cat > "$REPO/src/app/ranking/zz-new.spec.ts" <<'EOF'
+describe('zz-new', () => {
+  it('locks behavior', () => {});
+});
+EOF
+    git -C "$REPO" init >/dev/null
+    git -C "$REPO" config user.email test@example.com
+    git -C "$REPO" config user.name Test
+    git -C "$REPO" add .
+    GIT_AUTHOR_DATE="2024-01-01T00:00:00Z" GIT_COMMITTER_DATE="2024-01-01T00:00:00Z" git -C "$REPO" commit -m old >/dev/null
+    printf '\nexport const recentTouch = true;\n' >> "$REPO/src/app/ranking/zz-new.ts"
+    git -C "$REPO" add .
+    GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" git -C "$REPO" commit -m new >/dev/null
+    export AUTOSPEC_QUALITY_AUDIT_ANY_THRESHOLD=2
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    jq -e '.findings[] | select(.probe=="maintainability-hotspot" and .file=="src/app/ranking/zz-new.ts" and .rank==1 and .recent_touch=="2026-01-01" and .test_signal=="adjacent-spec")' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="maintainability-hotspot" and .file=="src/app/ranking/aa-old.ts" and .any_density > 0)' "$OUT_JSON"
+}
+
+@test "audit validates maintainability threshold config" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    cat > "$REPO/.autospec/quality-audit.json" <<'EOF'
+{
+  "maintainability": {
+    "debug_threshold": "abc"
+  }
+}
+EOF
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"debug_threshold must be a non-negative integer"* ]]
+}
+
+@test "audit rejects malformed quality-audit threshold config" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    printf '{not-json\n' > "$REPO/.autospec/quality-audit.json"
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *".autospec/quality-audit.json must be valid JSON"* ]]
+}
+
 @test "audit discovers design/template guard scripts without running them by default" {
     OUT_JSON="$TEST_TMP/audit.json"
     OUT_MD="$TEST_TMP/audit.md"

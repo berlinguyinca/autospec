@@ -54,8 +54,10 @@ VERIFICATION_ND="$TMP_DIR/verification-lanes.ndjson"
 RUNTIME_JSON="$TMP_DIR/runtime.json"
 ARTIFACTS_JSON="$TMP_DIR/artifacts.json"
 STORAGE_KEYS="$TMP_DIR/storage-keys.txt"
+HOTSPOTS_ND="$TMP_DIR/maintainability-hotspots.ndjson"
+HOTSPOT_KEYS="$TMP_DIR/maintainability-hotspot-keys.txt"
 touch "$FINDINGS_ND" "$SUPPRESSED_ND" "$ISSUES_ND" "$RISKS_ND" "$VERIFICATION_ND"
-touch "$STORAGE_KEYS"
+touch "$STORAGE_KEYS" "$HOTSPOTS_ND" "$HOTSPOT_KEYS"
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -264,6 +266,41 @@ add_sensitive_storage_finding() {
     --arg storage_key "$storage_key" \
     --arg excerpt "$excerpt" \
     '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key,storage_api:$storage_api,sensitive_term:$sensitive_term,storage_key:(if $storage_key == "" then null else $storage_key end),excerpt:$excerpt}'
+}
+
+add_maintainability_hotspot_finding() {
+  file="$1"; rank="$2"; score="$3"; lines="$4"; kind="$5"; any_count="$6"; debug_count="$7"; disabled_count="$8"; eslint_count="$9"; ts_ignore_count="${10}"; recent_touch="${11}"; any_density="${12}"; test_signal="${13}"
+  key="maintainability-hotspot:$file"
+  target="$FINDINGS_ND"
+  classification="maintainability-hotspot"
+  if is_accepted "$key"; then
+    classification="inherited-accepted-debt"
+    target="$SUPPRESSED_ND"
+  fi
+  title="ranked maintainability hotspot #$rank: $file"
+  body="Rank #$rank maintainability hotspot ($kind) scored $score from $lines lines, any=$any_count, any_density=$any_density, debug_logging=$debug_count, disabled_tests=$disabled_count, eslint_disable=$eslint_count, ts_ignore=$ts_ignore_count, recent_touch=$recent_touch, test_signal=$test_signal. File a bounded refactor issue for this file/cluster only, and require behavior locks or regression tests before cleanup edits."
+  json_append "$target" \
+    --arg probe "maintainability-hotspot" \
+    --arg classification "$classification" \
+    --arg severity "medium" \
+    --arg file "$file" \
+    --argjson line "0" \
+    --arg title "$title" \
+    --arg body "$body" \
+    --arg key "$key" \
+    --argjson rank "$rank" \
+    --argjson score "$score" \
+    --argjson lines "$lines" \
+    --arg kind "$kind" \
+    --argjson any_count "$any_count" \
+    --argjson debug_count "$debug_count" \
+    --argjson disabled_count "$disabled_count" \
+    --argjson eslint_count "$eslint_count" \
+    --argjson ts_ignore_count "$ts_ignore_count" \
+    --arg recent_touch "$recent_touch" \
+    --argjson any_density "$any_density" \
+    --arg test_signal "$test_signal" \
+    '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key,rank:$rank,score:$score,hotspot_kind:$kind,lines:$lines,any_count:$any_count,any_density:$any_density,debug_logging_count:$debug_count,disabled_test_count:$disabled_count,eslint_disable_count:$eslint_count,ts_ignore_count:$ts_ignore_count,recent_touch:$recent_touch,test_signal:$test_signal,remediation:"bounded refactor follow-up; behavior locks/regression tests required before cleanup edits"}'
 }
 
 rel_path() {
@@ -779,7 +816,10 @@ write_runtime_json() {
 
 scan_text_files() {
   find "$REPO" \
-    \( -path "$REPO/.git" -o -path "$REPO/node_modules" -o -path "$REPO/.autospec" \) -prune -o \
+    \( -path "$REPO/.git" -o -path "$REPO/node_modules" -o -path "$REPO/.autospec" \
+      -o -path "$REPO/dist" -o -path "$REPO/build" -o -path "$REPO/coverage" \
+      -o -path "$REPO/.angular" -o -path "$REPO/.next" -o -path "$REPO/out" \
+      -o -path "$REPO/vendor" -o -path "$REPO/public/build" \) -prune -o \
     -type f \( -name '*.js' -o -name '*.jsx' -o -name '*.ts' -o -name '*.tsx' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.html' -o -name '*.vue' -o -name '*.svelte' -o -name '*.py' -o -name '*.sh' \) \
 	    -print
 }
@@ -801,6 +841,157 @@ storage_key_for_line() {
     key="$(printf '%s\n' "$line" | sed -nE "s/.*(localStorage|sessionStorage)\[['\"]([^'\"]+)['\"]\].*/\2/p" | head -1)"
   fi
   printf '%s' "$key"
+}
+
+file_kind_for() {
+  file="$1"
+  case "$file" in
+    *.spec.ts|*.spec.tsx|*.test.ts|*.test.tsx|*.spec.js|*.test.js) printf 'spec' ;;
+    *.html|*.vue|*.svelte) printf 'template' ;;
+    *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) printf 'source' ;;
+    *) printf 'other' ;;
+  esac
+}
+
+recent_touch_for() {
+  file="$1"
+  if (cd "$REPO" && git rev-parse --is-inside-work-tree >/dev/null 2>&1); then
+    touched="$(cd "$REPO" && git log -1 --format=%cs -- "$file" 2>/dev/null || true)"
+    [ -n "$touched" ] || touched="untracked"
+    printf '%s' "$touched"
+  else
+    printf 'unknown'
+  fi
+}
+
+recent_rank_for() {
+  touch_date="$1"
+  case "$touch_date" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s' "$touch_date" | tr -d '-' ;;
+    *) printf '0' ;;
+  esac
+}
+
+json_config_value() {
+  key="$1"
+  config_file="$REPO/.autospec/quality-audit.json"
+  [ -f "$config_file" ] || return 0
+  jq -r --arg key "$key" '.maintainability[$key] // empty' "$config_file"
+}
+
+validate_quality_audit_config() {
+  config_file="$REPO/.autospec/quality-audit.json"
+  [ -f "$config_file" ] || return 0
+  if ! jq -e 'type == "object"' "$config_file" >/dev/null 2>&1; then
+    printf 'repo-quality-audit: .autospec/quality-audit.json must be valid JSON object\n' >&2
+    exit 1
+  fi
+  if ! jq -e '(.maintainability // {}) | type == "object"' "$config_file" >/dev/null 2>&1; then
+    printf 'repo-quality-audit: .autospec/quality-audit.json maintainability must be an object\n' >&2
+    exit 1
+  fi
+}
+
+non_negative_int_or_die() {
+  name="$1"; value="$2"
+  case "$value" in
+    ''|*[!0-9]*)
+      printf 'repo-quality-audit: %s must be a non-negative integer\n' "$name" >&2
+      exit 1
+      ;;
+  esac
+}
+
+maintainability_threshold() {
+  config_key="$1"; env_name="$2"; default_value="$3"
+  env_value="$(eval "printf '%s' \"\${$env_name-}\"")"
+  if [ -n "$env_value" ]; then
+    value="$env_value"
+  else
+    value="$(json_config_value "$config_key")"
+    [ -n "$value" ] || value="$default_value"
+  fi
+  non_negative_int_or_die "$config_key" "$value"
+  printf '%s' "$value"
+}
+
+validate_quality_audit_config
+
+TEST_FILE_EXTENSIONS=".spec.ts .spec.tsx .test.ts .test.tsx .spec.js .test.js"
+
+test_signal_for() {
+  rel="$1"; kind="$2"
+  case "$kind" in
+    spec) printf 'self-spec'; return 0 ;;
+  esac
+  base="${rel%.*}"
+  for ext in $TEST_FILE_EXTENSIONS; do
+    if [ -f "$REPO/$base$ext" ]; then
+      printf 'adjacent-spec'
+      return 0
+    fi
+  done
+  printf 'none'
+}
+
+cap_score_component() {
+  value="$1"; cap="$2"
+  if [ "$value" -gt "$cap" ]; then
+    printf '%s' "$cap"
+  else
+    printf '%s' "$value"
+  fi
+}
+
+record_hotspot_metrics() {
+  rel="$1"; lines="$2"; kind="$3"; any_count="$4"; debug_count="$5"; disabled_count="$6"; eslint_count="$7"; ts_ignore_count="$8"; recent_touch="$9"; test_signal="${10}"
+  threshold_lines="$(maintainability_threshold "large_file_lines" "AUTOSPEC_QUALITY_AUDIT_LARGE_FILE_LINES" "800")"
+  threshold_any="$(maintainability_threshold "any_threshold" "AUTOSPEC_QUALITY_AUDIT_ANY_THRESHOLD" "10")"
+  threshold_debug="$(maintainability_threshold "debug_threshold" "AUTOSPEC_QUALITY_AUDIT_DEBUG_THRESHOLD" "5")"
+  threshold_disabled="$(maintainability_threshold "disabled_test_threshold" "AUTOSPEC_QUALITY_AUDIT_DISABLED_TEST_THRESHOLD" "1")"
+  threshold_disable="$(maintainability_threshold "disable_comment_threshold" "AUTOSPEC_QUALITY_AUDIT_DISABLE_COMMENT_THRESHOLD" "1")"
+  if [ "$lines" -lt "$threshold_lines" ] \
+    && [ "$any_count" -lt "$threshold_any" ] \
+    && [ "$debug_count" -lt "$threshold_debug" ] \
+    && [ "$disabled_count" -lt "$threshold_disabled" ] \
+    && [ "$eslint_count" -lt "$threshold_disable" ] \
+    && [ "$ts_ignore_count" -lt "$threshold_disable" ]; then
+    return 0
+  fi
+  [ "$lines" -gt 0 ] || lines=1
+  any_density_per_1000=$(( any_count * 1000 / lines ))
+  any_density="$(jq -n --argjson density "$any_density_per_1000" '$density / 1000')"
+  any_component="$(cap_score_component "$((any_count * 3))" 60)"
+  debug_component="$(cap_score_component "$((debug_count * 2))" 40)"
+  score=$(( lines / 100 + any_component + any_density_per_1000 / 10 + debug_component + disabled_count * 25 + eslint_count * 10 + ts_ignore_count * 15 ))
+  case "$kind" in
+    source) score=$((score + 10)) ;;
+    template) score=$((score + 8)) ;;
+    spec) score=$((score + 4)) ;;
+  esac
+  case "$test_signal" in
+    adjacent-spec) score=$((score + 25)) ;;
+    self-spec) score=$((score + 10)) ;;
+  esac
+  recent_rank="$(recent_rank_for "$recent_touch")"
+  if [ "$recent_rank" -gt 0 ]; then
+    score=$((score + 20))
+  fi
+  json_append "$HOTSPOTS_ND" \
+    --arg file "$rel" \
+    --arg kind "$kind" \
+    --arg recent_touch "$recent_touch" \
+    --arg test_signal "$test_signal" \
+    --argjson score "$score" \
+    --argjson recent_rank "$recent_rank" \
+    --argjson lines "$lines" \
+    --argjson any_density "$any_density" \
+    --argjson any_count "$any_count" \
+    --argjson debug_count "$debug_count" \
+    --argjson disabled_count "$disabled_count" \
+    --argjson eslint_count "$eslint_count" \
+    --argjson ts_ignore_count "$ts_ignore_count" \
+    '{file:$file,kind:$kind,recent_touch:$recent_touch,test_signal:$test_signal,score:$score,recent_rank:$recent_rank,lines:$lines,any_density:$any_density,any_count:$any_count,debug_count:$debug_count,disabled_count:$disabled_count,eslint_count:$eslint_count,ts_ignore_count:$ts_ignore_count}'
 }
 
 # Probe: dirty git status.
@@ -879,7 +1070,10 @@ fi
 
 # Probe: security-sensitive storage, focused/skipped tests, any usage, debug logging.
 while IFS= read -r f; do
+  [ -n "$f" ] || continue
   rel="$(rel_path "$f")"
+  lines="$(wc -l < "$f" | tr -d ' ')"
+  kind="$(file_kind_for "$rel")"
   while IFS= read -r storage_hit; do
     [ -n "$storage_hit" ] || continue
     line_no="$(printf '%s\n' "$storage_hit" | cut -d: -f1)"
@@ -898,6 +1092,7 @@ while IFS= read -r f; do
 $(grep -nE 'localStorage|sessionStorage|document\.cookie' "$f" 2>/dev/null || true)
 EOF
   focus_hits="$(grep -nE '\b(describe|it|test)\.(only|skip)\b|@skip|\.skip\(' "$f" 2>/dev/null || true)"
+  disabled_count="$(printf '%s\n' "$focus_hits" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
   if [ -n "$focus_hits" ]; then
     first_line="$(printf '%s\n' "$focus_hits" | head -1 | cut -d: -f1)"
     add_finding "focused-skipped-tests" "app-follow-up" "medium" "$rel" "${first_line:-0}" \
@@ -906,6 +1101,7 @@ EOF
       "focused-skipped-tests:$rel"
   fi
   any_hits="$(grep -nE '\bas any\b|: *any\b|<any>' "$f" 2>/dev/null || true)"
+  any_count="$(printf '%s\n' "$any_hits" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
   if [ -n "$any_hits" ]; then
     first_line="$(printf '%s\n' "$any_hits" | head -1 | cut -d: -f1)"
     add_finding "any-usage" "app-follow-up" "low" "$rel" "${first_line:-0}" \
@@ -914,6 +1110,7 @@ EOF
       "any-usage:$rel"
   fi
   debug_hits="$(grep -nE '\b(console\.(log|debug|warn|error)|debugger)\b' "$f" 2>/dev/null || true)"
+  debug_count="$(printf '%s\n' "$debug_hits" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
   if [ -n "$debug_hits" ]; then
     first_line="$(printf '%s\n' "$debug_hits" | head -1 | cut -d: -f1)"
     add_finding "debug-logging-hotspots" "app-follow-up" "low" "$rel" "${first_line:-0}" \
@@ -921,9 +1118,52 @@ EOF
       "Debug logging or debugger statements remain in application code." \
       "debug-logging-hotspots:$rel"
   fi
+  eslint_hits="$(grep -nE 'eslint-disable' "$f" 2>/dev/null || true)"
+  eslint_count="$(printf '%s\n' "$eslint_hits" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+  if [ -n "$eslint_hits" ]; then
+    first_line="$(printf '%s\n' "$eslint_hits" | head -1 | cut -d: -f1)"
+    add_finding "eslint-disable-usage" "app-follow-up" "medium" "$rel" "${first_line:-0}" \
+      "eslint-disable usage" \
+      "eslint-disable comments can hide maintainability and correctness regressions from static checks." \
+      "eslint-disable:$rel"
+  fi
+  ts_ignore_hits="$(grep -nE '@ts-ignore|@ts-expect-error' "$f" 2>/dev/null || true)"
+  ts_ignore_count="$(printf '%s\n' "$ts_ignore_hits" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+  if [ -n "$ts_ignore_hits" ]; then
+    first_line="$(printf '%s\n' "$ts_ignore_hits" | head -1 | cut -d: -f1)"
+    add_finding "ts-ignore-usage" "app-follow-up" "medium" "$rel" "${first_line:-0}" \
+      "TypeScript suppression usage" \
+      "@ts-ignore or @ts-expect-error suppressions should be justified and reduced during bounded cleanup." \
+      "ts-ignore:$rel"
+  fi
+  recent_touch="$(recent_touch_for "$rel")"
+  test_signal="$(test_signal_for "$rel" "$kind")"
+  record_hotspot_metrics "$rel" "$lines" "$kind" "$any_count" "$debug_count" "$disabled_count" "$eslint_count" "$ts_ignore_count" "$recent_touch" "$test_signal"
 done <<EOF
 $(scan_text_files)
 EOF
+
+if [ -s "$HOTSPOTS_ND" ]; then
+  rank=0
+  jq -c -s 'sort_by(-.score, -.recent_rank, -.any_density, -.lines, .file) | .[:10] | .[]' "$HOTSPOTS_ND" | while IFS= read -r hotspot; do
+    [ -n "$hotspot" ] || continue
+    rank=$((rank + 1))
+    file="$(printf '%s' "$hotspot" | jq -r '.file')"
+    printf 'maintainability-hotspot:%s\n' "$file" >> "$HOTSPOT_KEYS"
+    score="$(printf '%s' "$hotspot" | jq -r '.score')"
+    lines="$(printf '%s' "$hotspot" | jq -r '.lines')"
+    kind="$(printf '%s' "$hotspot" | jq -r '.kind')"
+    any_count="$(printf '%s' "$hotspot" | jq -r '.any_count')"
+    any_density="$(printf '%s' "$hotspot" | jq -r '.any_density')"
+    debug_count="$(printf '%s' "$hotspot" | jq -r '.debug_count')"
+    disabled_count="$(printf '%s' "$hotspot" | jq -r '.disabled_count')"
+    eslint_count="$(printf '%s' "$hotspot" | jq -r '.eslint_count')"
+    ts_ignore_count="$(printf '%s' "$hotspot" | jq -r '.ts_ignore_count')"
+    recent_touch="$(printf '%s' "$hotspot" | jq -r '.recent_touch')"
+    test_signal="$(printf '%s' "$hotspot" | jq -r '.test_signal')"
+    add_maintainability_hotspot_finding "$file" "$rank" "$score" "$lines" "$kind" "$any_count" "$debug_count" "$disabled_count" "$eslint_count" "$ts_ignore_count" "$recent_touch" "$any_density" "$test_signal"
+  done
+fi
 
 # Probe: large files.
 while IFS= read -r f; do
@@ -976,6 +1216,16 @@ existing_issue_for_finding() {
     'first(.[] | select((.title == $title) or ((.body // "") | contains($key)))) // empty'
 }
 
+coalesced_by_hotspot() {
+  probe="$1"; file="$2"
+  case "$probe" in
+    any-usage|debug-logging-hotspots|eslint-disable-usage|ts-ignore-usage)
+      grep -Fx "maintainability-hotspot:$file" "$HOTSPOT_KEYS" >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 if [ "$issue_policy_permits" -eq 1 ]; then
   (cd "$REPO" && gh label create quality-audit --color d4c5f9 --force >/dev/null 2>&1) || true
   (cd "$REPO" && gh label create auto-implement --color 0e8a16 --force >/dev/null 2>&1) || true
@@ -987,6 +1237,11 @@ if [ "$issue_policy_permits" -eq 1 ]; then
     finding="$(jq -c ".[$i]" "$FINDINGS_JSON")"
     i=$((i + 1))
     key="$(printf '%s' "$finding" | jq -r '.dedupe_key')"
+    probe="$(printf '%s' "$finding" | jq -r '.probe')"
+    file="$(printf '%s' "$finding" | jq -r '.file')"
+    if coalesced_by_hotspot "$probe" "$file"; then
+      continue
+    fi
     if printf '%s\n' "$created_issue_keys" | grep -Fx "$key" >/dev/null 2>&1; then
       continue
     fi
@@ -1020,6 +1275,11 @@ while [ "$i" -lt "$finding_count" ]; do
   finding="$(jq -c ".[$i]" "$FINDINGS_JSON")"
   i=$((i + 1))
   key="$(printf '%s' "$finding" | jq -r '.dedupe_key')"
+  probe="$(printf '%s' "$finding" | jq -r '.probe')"
+  file="$(printf '%s' "$finding" | jq -r '.file')"
+  if coalesced_by_hotspot "$probe" "$file" && [ -n "$issue_keys" ] && printf 'maintainability-hotspot:%s\n' "$file" | grep -E "^($issue_keys)$" >/dev/null 2>&1; then
+    continue
+  fi
   if [ -n "$issue_keys" ] && printf '%s\n' "$key" | grep -E "^($issue_keys)$" >/dev/null 2>&1; then
     continue
   fi
