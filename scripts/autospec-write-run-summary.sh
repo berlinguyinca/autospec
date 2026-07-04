@@ -222,6 +222,13 @@ if [ -n "$QUALITY_AUDIT_JSON" ] && [ -f "$QUALITY_AUDIT_JSON" ] \
         else
             printf '(not recorded)\n'
         fi
+        printf '\n### Artifacts\n\n'
+        if ! jq -r '.artifacts // {} | to_entries[]? | "- " + .key + ": `" + (.value|tostring) + "`"' "$QUALITY_AUDIT_JSON" 2>/dev/null \
+            | grep -q '^-' ; then
+            printf '(none)\n'
+        else
+            jq -r '.artifacts // {} | to_entries[]? | "- " + .key + ": `" + (.value|tostring) + "`"' "$QUALITY_AUDIT_JSON" 2>/dev/null
+        fi
         printf '\n### Verification lanes\n\n'
         if jq -e '.verification.lanes' "$QUALITY_AUDIT_JSON" >/dev/null 2>&1; then
             jq -r '

@@ -23,6 +23,7 @@ EOF
     cat > "$REPO/src/app.js" <<'EOF'
 console.log('debug');
 localStorage.setItem('token', token);
+sessionStorage.setItem('user_groups', groups.join(','));
 if (value == null) {}
 EOF
     cat > "$REPO/src/routes.js" <<'EOF'
@@ -59,7 +60,8 @@ teardown() {
     jq -e '.status == "fail"' "$OUT_JSON"
     jq -e '.summary.total_findings >= 4' "$OUT_JSON"
     jq -e '.summary.suppressed_findings == 1' "$OUT_JSON"
-    jq -e '.findings[] | select(.probe=="security-sensitive-storage" and .classification=="current-branch-regression")' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="security-sensitive-storage" and .classification=="client-credential-storage" and .storage_api=="localStorage" and .sensitive_term=="token")' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="security-sensitive-storage" and .storage_api=="sessionStorage" and .storage_key=="user_groups")' "$OUT_JSON"
     jq -e '.findings[] | select(.probe=="focused-skipped-tests" and .classification=="app-follow-up")' "$OUT_JSON"
     jq -e '.suppressed[] | select(.classification=="inherited-accepted-debt")' "$OUT_JSON"
     jq -e '.residual_risks[] | select(test("Unfiled"))' "$OUT_JSON"
@@ -109,7 +111,7 @@ EOF
     ! jq -e '.residual_risks[] | select(test("focused-skipped-tests:tests/app.spec.js"))' "$OUT_JSON"
 }
 
-@test "audit command probes detect failing verification and dependency advisories when enabled" {
+@test "audit command probes detect failing verification and classified dependency advisories when enabled" {
     OUT_JSON="$TEST_TMP/audit.json"
     OUT_MD="$TEST_TMP/audit.md"
     cat > "$REPO/package.json" <<'EOF'
@@ -122,7 +124,8 @@ EOF
     "audit": "npm audit"
   },
   "dependencies": {
-    "left-pad": "1.3.0"
+    "mathjs": "11.12.0",
+    "xlsx": "0.18.5"
   }
 }
 EOF
@@ -134,7 +137,29 @@ case "$*" in
   "run -s test"|"run -s typecheck") exit 0 ;;
   "run -s audit -- --json")
     cat <<'JSON'
-{"metadata":{"vulnerabilities":{"total":1}},"vulnerabilities":{"left-pad":{"severity":"high"}}}
+{
+  "metadata": {"vulnerabilities": {"low": 1, "moderate": 1, "high": 2, "critical": 0, "total": 4}},
+  "vulnerabilities": {
+    "mathjs": {
+      "name": "mathjs",
+      "severity": "high",
+      "isDirect": true,
+      "fixAvailable": {"name": "mathjs", "version": "15.2.0", "isSemVerMajor": true}
+    },
+    "xlsx": {
+      "name": "xlsx",
+      "severity": "high",
+      "isDirect": true,
+      "fixAvailable": false
+    },
+    "dompurify": {
+      "name": "dompurify",
+      "severity": "moderate",
+      "isDirect": false,
+      "fixAvailable": true
+    }
+  }
+}
 JSON
     exit 1
     ;;
@@ -151,7 +176,31 @@ EOF
     jq -e '.verification.lanes.test.status == "passed"' "$OUT_JSON"
     jq -e '.verification.lanes.typecheck.status == "passed"' "$OUT_JSON"
     jq -e '.findings[] | select(.probe=="verification-command" and .classification=="verification-contract-drift" and .dedupe_key=="verification-command:lint")' "$OUT_JSON"
-    jq -e '.findings[] | select(.probe=="dependency-audit-advisories" and .dedupe_key=="dependency-audit:advisories")' "$OUT_JSON"
+    jq -e '.artifacts.npm_audit | test("artifacts/npm-audit.json$")' "$OUT_JSON"
+    [ -f "$(dirname "$OUT_JSON")/artifacts/npm-audit.json" ]
+    jq -e '.findings[] | select(.probe=="dependency-audit-advisory" and .package_name=="mathjs" and .dependency_type=="direct" and .fix_available==true and .semver_major_fix==true)' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="dependency-audit-advisory" and .package_name=="xlsx" and .dependency_type=="direct" and .fix_available==false)' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="dependency-audit-advisory" and .package_name=="dompurify" and .dependency_type=="transitive" and .advisory_severity=="moderate")' "$OUT_JSON"
+    grep -q 'npm_audit' "$OUT_MD"
+}
+
+@test "audit detects API key and authorization group browser storage patterns" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    mkdir -p "$REPO/src/app/services"
+    cat > "$REPO/src/app/services/auth.service.ts" <<'EOF'
+localStorage.setItem('x-api-key', apiKey);
+const accessToken = localStorage.getItem('access_token');
+sessionStorage.setItem('user_groups', JSON.stringify(groups));
+document.cookie = `authorization=${token}`;
+EOF
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    jq -e '.findings[] | select(.probe=="security-sensitive-storage" and .storage_api=="localStorage" and .storage_key=="x-api-key" and .sensitive_term=="x-api-key")' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="security-sensitive-storage" and .storage_api=="localStorage" and .storage_key=="access_token")' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="security-sensitive-storage" and .storage_api=="sessionStorage" and .storage_key=="user_groups")' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="security-sensitive-storage" and .storage_api=="document.cookie" and .sensitive_term=="authorization")' "$OUT_JSON"
 }
 
 @test "audit discovers design/template guard scripts without running them by default" {
