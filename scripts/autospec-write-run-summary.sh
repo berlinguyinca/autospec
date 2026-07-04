@@ -211,6 +211,27 @@ if [ -n "$QUALITY_AUDIT_JSON" ] && [ -f "$QUALITY_AUDIT_JSON" ] \
         printf -- '- Suppressed findings: %s\n' "$QA_SUPPRESSED"
         printf -- '- Filed issues: %s\n' "$QA_ISSUES"
         printf -- '- Unfiled residual risks: %s\n' "$QA_RISKS"
+        printf '\n### Runtime and engines\n\n'
+        if jq -e '.runtime' "$QUALITY_AUDIT_JSON" >/dev/null 2>&1; then
+            jq -r '
+              "- node: " + (.runtime.node.version // "unavailable") + " (engine: " + (.runtime.node.engine // "not configured") + ", status: " + (.runtime.node.status // "unknown") + ")",
+              "- npm: " + (.runtime.package_managers.npm.version // "unavailable") + " (engine: " + (.runtime.package_managers.npm.engine // "not configured") + ", status: " + (.runtime.package_managers.npm.status // "unknown") + ")",
+              "- pnpm: " + (.runtime.package_managers.pnpm.version // "unavailable") + " (engine: " + (.runtime.package_managers.pnpm.engine // "not configured") + ", status: " + (.runtime.package_managers.pnpm.status // "unknown") + ")",
+              "- yarn: " + (.runtime.package_managers.yarn.version // "unavailable") + " (engine: " + (.runtime.package_managers.yarn.engine // "not configured") + ", status: " + (.runtime.package_managers.yarn.status // "unknown") + ")"
+            ' "$QUALITY_AUDIT_JSON" 2>/dev/null
+        else
+            printf '(not recorded)\n'
+        fi
+        printf '\n### Verification lanes\n\n'
+        if jq -e '.verification.lanes' "$QUALITY_AUDIT_JSON" >/dev/null 2>&1; then
+            jq -r '
+              .verification.lanes
+              | to_entries[]
+              | "- " + .key + ": " + (.value.status // "unknown") + (if .value.command then " (`" + .value.command + "`)" else "" end)
+            ' "$QUALITY_AUDIT_JSON" 2>/dev/null
+        else
+            printf '(not recorded)\n'
+        fi
         printf '\n### Issue links\n\n'
         if ! jq -r '.issue_links[]? | "- " + (.title // "quality audit issue") + " — " + (.url // "")' "$QUALITY_AUDIT_JSON" 2>/dev/null \
             | grep -q '^-' ; then

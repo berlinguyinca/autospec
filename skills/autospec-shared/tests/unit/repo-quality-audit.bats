@@ -63,8 +63,15 @@ teardown() {
     jq -e '.findings[] | select(.probe=="focused-skipped-tests" and .classification=="app-follow-up")' "$OUT_JSON"
     jq -e '.suppressed[] | select(.classification=="inherited-accepted-debt")' "$OUT_JSON"
     jq -e '.residual_risks[] | select(test("Unfiled"))' "$OUT_JSON"
+    jq -e '.runtime.node.version | length > 0' "$OUT_JSON"
+    jq -e '.runtime.package_managers.npm.version | length > 0' "$OUT_JSON"
+    jq -e '.verification.lanes.lint.status == "not run"' "$OUT_JSON"
+    jq -e '.verification.lanes.test.status == "not run"' "$OUT_JSON"
+    jq -e '.verification.lanes.typecheck.status == "not run"' "$OUT_JSON"
     grep -q '^# autospec repo quality audit' "$OUT_MD"
     grep -q 'security-sensitive-storage' "$OUT_MD"
+    grep -q '## Verification contract' "$OUT_MD"
+    grep -q 'lint: not run' "$OUT_MD"
 }
 
 @test "audit files deduplicated follow-up issues only when policy permits" {
@@ -140,6 +147,100 @@ EOF
 
     run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
     [ "$status" -eq 0 ]
-    jq -e '.findings[] | select(.probe=="verification-command" and .dedupe_key=="verification-command:lint")' "$OUT_JSON"
+    jq -e '.verification.lanes.lint.status == "configured but failing"' "$OUT_JSON"
+    jq -e '.verification.lanes.test.status == "passed"' "$OUT_JSON"
+    jq -e '.verification.lanes.typecheck.status == "passed"' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="verification-command" and .classification=="verification-contract-drift" and .dedupe_key=="verification-command:lint")' "$OUT_JSON"
     jq -e '.findings[] | select(.probe=="dependency-audit-advisories" and .dedupe_key=="dependency-audit:advisories")' "$OUT_JSON"
+}
+
+@test "audit reports missing scripts as not configured verification-contract drift" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    cat > "$REPO/package.json" <<'EOF'
+{
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test"
+  }
+}
+EOF
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    jq -e '.verification.lanes.lint.status == "not configured"' "$OUT_JSON"
+    jq -e '.verification.lanes.typecheck.status == "not configured"' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="package-manager-scripts" and .classification=="verification-contract-drift" and .dedupe_key=="package-script-missing:lint")' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="package-manager-scripts" and .classification=="verification-contract-drift" and .dedupe_key=="package-script-missing:typecheck")' "$OUT_JSON"
+}
+
+@test "audit validates caret-or engine ranges against recorded runtime versions" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    cat > "$REPO/package.json" <<'EOF'
+{
+  "engines": { "node": "^20.19.0 || ^22.12.0", "npm": ">=10.0.0" },
+  "scripts": {
+    "test": "node --test",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  }
+}
+EOF
+    mkdir -p "$TEST_TMP/bin"
+    cat > "$TEST_TMP/bin/node" <<'EOF'
+#!/usr/bin/env bash
+echo "v26.3.0"
+EOF
+    cat > "$TEST_TMP/bin/npm" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "--version") echo "11.16.0"; exit 0 ;;
+esac
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/node" "$TEST_TMP/bin/npm"
+    export PATH="$TEST_TMP/bin:$PATH"
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    jq -e '.runtime.node.version == "26.3.0"' "$OUT_JSON"
+    jq -e '.runtime.node.engine == "^20.19.0 || ^22.12.0"' "$OUT_JSON"
+    jq -e '.runtime.node.status == "configured but failing"' "$OUT_JSON"
+    jq -e '.runtime.package_managers.npm.status == "passed"' "$OUT_JSON"
+    jq -e '.findings[] | select(.dedupe_key=="runtime-engine:node-version" and .classification=="verification-contract-drift")' "$OUT_JSON"
+}
+
+@test "audit validates space-separated compound engine ranges without truncating upper bounds" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    cat > "$REPO/package.json" <<'EOF'
+{
+  "engines": { "node": ">=20 <23" },
+  "scripts": {
+    "test": "node --test",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  }
+}
+EOF
+    mkdir -p "$TEST_TMP/bin"
+    cat > "$TEST_TMP/bin/node" <<'EOF'
+#!/usr/bin/env bash
+echo "v26.3.0"
+EOF
+    cat > "$TEST_TMP/bin/npm" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "--version") echo "11.16.0"; exit 0 ;;
+esac
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/node" "$TEST_TMP/bin/npm"
+    export PATH="$TEST_TMP/bin:$PATH"
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    jq -e '.runtime.node.status == "configured but failing"' "$OUT_JSON"
+    jq -e '.findings[] | select(.dedupe_key=="runtime-engine:node-version" and (.body | contains(">=20 <23")))' "$OUT_JSON"
 }

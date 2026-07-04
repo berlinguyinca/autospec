@@ -2350,6 +2350,16 @@ check_repo_quality_audit_loop() {
         || fail "autospec-release missing repo quality audit call point (issue #1476)"
     grep -q -- '--quality-audit-json' scripts/autospec-write-run-summary.sh \
         || fail "autospec-write-run-summary.sh missing --quality-audit-json (issue #1476)"
+    grep -qF 'verification-contract-drift' skills/autospec-shared/scripts/repo-quality-audit.sh \
+        || fail "repo-quality-audit.sh missing verification-contract-drift classification (issue #1477)"
+    grep -qF 'verification:{' skills/autospec-shared/scripts/repo-quality-audit.sh \
+        || fail "repo-quality-audit.sh missing structured verification lane JSON (issue #1477)"
+    grep -qF 'runtime:$runtime' skills/autospec-shared/scripts/repo-quality-audit.sh \
+        || fail "repo-quality-audit.sh missing structured runtime JSON (issue #1477)"
+    grep -qF '### Verification lanes' scripts/autospec-write-run-summary.sh \
+        || fail "autospec-write-run-summary.sh missing verification lane summary (issue #1477)"
+    grep -qF '### Runtime and engines' scripts/autospec-write-run-summary.sh \
+        || fail "autospec-write-run-summary.sh missing runtime/engine summary (issue #1477)"
     if command -v bats >/dev/null 2>&1; then
         info "  running: skills/autospec-shared/tests/unit/repo-quality-audit.bats"
         bats skills/autospec-shared/tests/unit/repo-quality-audit.bats >/tmp/validate-repo-quality-audit.log 2>&1 \
