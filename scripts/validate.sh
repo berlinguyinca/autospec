@@ -2329,6 +2329,37 @@ check_quality_differential() {
     fi
 }
 
+# Repo quality audit loop (issue #1476): the shared read-only audit helper,
+# focused Bats coverage, and run-summary rendering must stay gated because the
+# audit is called from autospec-run, autospec-qa, autospec-review, and release.
+check_repo_quality_audit_loop() {
+    info "repo quality audit loop: shared helper + run-summary coverage (issue #1476)"
+    [ -f skills/autospec-shared/scripts/repo-quality-audit.sh ] \
+        || fail "skills/autospec-shared/scripts/repo-quality-audit.sh: missing (issue #1476)"
+    [ -x skills/autospec-shared/scripts/repo-quality-audit.sh ] \
+        || fail "skills/autospec-shared/scripts/repo-quality-audit.sh: not executable (issue #1476)"
+    bash -n skills/autospec-shared/scripts/repo-quality-audit.sh \
+        || fail "skills/autospec-shared/scripts/repo-quality-audit.sh: bash -n failed"
+    grep -q 'repo-quality-audit.sh' skills/autospec-run/SKILL.md \
+        || fail "autospec-run missing repo quality audit call point (issue #1476)"
+    grep -q 'repo-quality-audit.sh' skills/autospec-qa/SKILL.md \
+        || fail "autospec-qa missing repo quality audit call point (issue #1476)"
+    grep -q 'repo-quality-audit.sh' skills/autospec-review/SKILL.md \
+        || fail "autospec-review missing repo quality audit call point (issue #1476)"
+    grep -q 'repo-quality-audit.sh' skills/autospec-release/SKILL.md \
+        || fail "autospec-release missing repo quality audit call point (issue #1476)"
+    grep -q -- '--quality-audit-json' scripts/autospec-write-run-summary.sh \
+        || fail "autospec-write-run-summary.sh missing --quality-audit-json (issue #1476)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: skills/autospec-shared/tests/unit/repo-quality-audit.bats"
+        bats skills/autospec-shared/tests/unit/repo-quality-audit.bats >/tmp/validate-repo-quality-audit.log 2>&1 \
+            || { cat /tmp/validate-repo-quality-audit.log >&2; fail "repo-quality-audit.bats: failed"; }
+        info "  running: tests/autospec/test_quality_audit_summary.bats"
+        bats tests/autospec/test_quality_audit_summary.bats >/tmp/validate-quality-audit-summary.log 2>&1 \
+            || { cat /tmp/validate-quality-audit-summary.log >&2; fail "test_quality_audit_summary.bats: failed"; }
+    fi
+}
+
 # Autonomous-mode contract (issue #662): the autospec + autospec-listen +
 # autospec-define + autospec-run trios each carry an "## Autonomous mode"
 # section, the autonomy-gate script is installed, and the bats coverage exists.
@@ -2997,6 +3028,7 @@ main() {
     check_lint_reuse_triage
     check_reviewer_reuse_lens
     check_quality_differential
+    check_repo_quality_audit_loop
     check_usage_limit_helper
     check_supersession_contract
     check_ship_completeness

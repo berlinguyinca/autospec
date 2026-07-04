@@ -32,6 +32,7 @@
 set -eu
 
 REPO_DIR="${REPO_DIR:-$(pwd)}"
+REPO_DIR="$(cd "$REPO_DIR" && pwd -P)"
 VERDICT_FILE="${VERDICT_FILE:-$REPO_DIR/.autospec/qa-verdict.json}"
 
 mkdir -p "$(dirname "$VERDICT_FILE")"
@@ -45,8 +46,19 @@ DIRECTIVE_REPEATED_STRUCTURE='Extract the N branches into a table + single dispa
 
 emit_finding() {
     local file="$1" lang="$2" rule_id="$3" line="$4" func="$5"
+    file="$(relative_repo_path "$file")"
     printf '{"category":"code_health:brute_force_string_heuristics","rule_id":"%s","language":"%s","file":"%s","function":"%s","line":%s}\n' \
         "$rule_id" "$lang" "$file" "$func" "$line" >> "$VERDICT_FILE"
+}
+
+relative_repo_path() {
+    local file="$1"
+    local physical
+    physical="$(cd "$(dirname "$file")" && pwd -P)/$(basename "$file")"
+    case "$physical" in
+        "$REPO_DIR"/*) printf '%s\n' "${physical#"$REPO_DIR"/}" ;;
+        *) printf '%s\n' "$file" ;;
+    esac
 }
 
 file_issue() {

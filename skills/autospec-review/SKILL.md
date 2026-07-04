@@ -133,6 +133,23 @@ Pipeline:
 
 4. When `--emit-gaps PATH` is given, write to PATH; otherwise default to `~/.autospec/gaps-<run_id>.json`. The driver (`gap-remediation-loop.sh`) reads this file. On review-subagent failure, write an empty array (`[]`) so the driver converges cleanly, and log a warning — never block run completion.
 
+5. Run the shared read-only repo quality audit and link its artifacts from the
+   review report:
+
+   ```bash
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-quality-audit.sh" \
+     --repo . \
+     --json ".autospec/repo-quality-audit.json" \
+     --markdown ".autospec/repo-quality-audit.md" \
+     ${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:+--file-issues}
+   ```
+
+   Treat audit findings as a separate repo-wide quality signal, not as
+   spec-coverage rows. Findings are already classified as `app-follow-up`,
+   `autospec-process-gap`, `inherited-accepted-debt`, or
+   `current-branch-regression`; preserve those classifications when filing or
+   reporting follow-ups.
+
 ## Phase 0 — Preflight
 
 1. Read repo state. Resolve `repo` from `gh repo view --json
