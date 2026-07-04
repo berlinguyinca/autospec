@@ -9,6 +9,14 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Added
 
+#### V61 external launch readiness (2026-07-03)
+- Rewrote the top-level README for external developers with pitch, quickstart, demo, architecture, comparison, maturity, and contribution guidance.
+- Added the docs launch set: `docs/index.md`, `docs/quickstart.md`, `docs/concepts.md`, `docs/architecture.md`, `docs/workflows.md`, `docs/faq.md`, and `docs/roadmap.md`.
+- Added public community and trust files: `CONTRIBUTING.md`, `SECURITY.md`, `SAFETY.md`, `ROADMAP.md`, GitHub issue templates, and a PR template.
+- Added demo and launch materials under `examples/hello-autospec/`, `docs/assets/`, `scripts/demo-recording.sh`, and `marketing/`.
+- Added `scripts/validate-launch-readiness.sh`, which prints `AUTOSPEC_V61_LAUNCH_READY=true` when required launch artifacts are present.
+- Added V25/V60/public launch release-state gates under `.autospec/` plus `scripts/validate-v25-baseline.sh`, `scripts/validate-v60-release.sh`, and `scripts/validate-public-launch-readiness.sh`.
+
 #### Auto context rollover — perpetual-session monitor (2026-05-31 → 2026-06-01)
 - New `autospec-session` launcher wraps `claude` / `codex` / `opencode` in a tmux daemon that injects `/compact` at 50% context and `/create-handoff` → `/clear` → resume at 80%, same terminal and process.
 - NORMAL/COMPACTED/ROLLED state-machine engine, per-harness transcript adapters (Claude transcript, Codex `info:null` fallback, OpenCode SQLite), Claude PreCompact hook mode (no tmux), opt-in `install.sh` prompt, cancel-window overlay, handoff validation gate, and a cost/value telemetry ledger. (#743–#776, #777, #783, #801–#819, #897)
