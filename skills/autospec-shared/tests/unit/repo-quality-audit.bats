@@ -154,6 +154,94 @@ EOF
     jq -e '.findings[] | select(.probe=="dependency-audit-advisories" and .dedupe_key=="dependency-audit:advisories")' "$OUT_JSON"
 }
 
+@test "audit discovers design/template guard scripts without running them by default" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    cat > "$REPO/package.json" <<'EOF'
+{
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:styles": "node scripts/lint-styles.js",
+    "lint:templates": "node scripts/lint-templates.js"
+  }
+}
+EOF
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    jq -e '.verification.lanes["lint:styles"].status == "not run"' "$OUT_JSON"
+    jq -e '.verification.lanes["lint:templates"].status == "not run"' "$OUT_JSON"
+    ! jq -e '.findings[] | select(.probe=="design-template-guard")' "$OUT_JSON"
+}
+
+@test "audit parses failing design/template guards and files one bounded issue per surface" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    mkdir -p "$REPO/src/app/shared-components/correction-report-panel" "$TEST_TMP/bin"
+    cat > "$REPO/src/app/shared-components/correction-report-panel/correction-report-panel.component.html" <<'EOF'
+<div class="my-2 alert alert-danger">Error</div>
+EOF
+    cat > "$REPO/package.json" <<'EOF'
+{
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:styles": "node scripts/lint-styles.js",
+    "lint:templates": "node scripts/lint-templates.js"
+  }
+}
+EOF
+    cat > "$TEST_TMP/bin/npm" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "--version") echo "11.16.0"; exit 0 ;;
+  "run -s test"|"run -s typecheck"|"run -s lint") exit 0 ;;
+  "run -s lint:styles")
+    echo "src/app/shared-components/correction-report-panel/correction-report-panel.component.html:1: disallowed Bootstrap class my-2"
+    echo "src/app/shared-components/correction-report-panel/correction-report-panel.component.html:1: disallowed Bootstrap class alert-danger"
+    exit 1
+    ;;
+  "run -s lint:templates")
+    echo "src/app/shared-components/correction-report-panel/correction-report-panel.component.html:1: template guard [alert-primary]"
+    exit 1
+    ;;
+esac
+exit 0
+EOF
+    export GH_LOG="$TEST_TMP/gh.log"
+    export GH_OPEN="$TEST_TMP/open.json"
+    printf '[]\n' > "$GH_OPEN"
+    cat > "$TEST_TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s|%s\n' "$PWD" "$*" >> "$GH_LOG"
+case "$*" in
+  *"issue list"*) cat "$GH_OPEN"; exit 0 ;;
+  *"label create"*) exit 0 ;;
+  *"issue create"*) echo "https://github.com/example/repo/issues/20"; exit 0 ;;
+esac
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/npm" "$TEST_TMP/bin/gh"
+    export PATH="$TEST_TMP/bin:$PATH"
+    export AUTOSPEC_QUALITY_AUDIT_RUN_COMMANDS=1
+    export AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES=1
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD" --file-issues
+    [ "$status" -eq 0 ]
+    jq -e '.verification.lanes["lint:styles"].status == "configured but failing"' "$OUT_JSON"
+    jq -e '.verification.lanes["lint:templates"].status == "configured but failing"' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="design-template-guard" and .classification=="design-template-contract" and .guard_script=="lint:styles" and .file=="src/app/shared-components/correction-report-panel/correction-report-panel.component.html" and .line==1 and .["class"]=="my-2")' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="design-template-guard" and .guard_script=="lint:templates" and .rule=="alert-primary" and .["class"]=="alert-primary")' "$OUT_JSON"
+    jq -e '.issue_links | map(select(.dedupe_key=="design-template-guard:lint:styles:src/app/shared-components/correction-report-panel/correction-report-panel.component.html")) | length == 1' "$OUT_JSON"
+    jq -e '.issue_links | map(select(.dedupe_key=="design-template-guard:lint:templates:src/app/shared-components/correction-report-panel/correction-report-panel.component.html")) | length == 1' "$OUT_JSON"
+    grep -q 'design-template-guard / design-template-contract' "$OUT_MD"
+}
+
 @test "audit reports missing scripts as not configured verification-contract drift" {
     OUT_JSON="$TEST_TMP/audit.json"
     OUT_MD="$TEST_TMP/audit.md"
