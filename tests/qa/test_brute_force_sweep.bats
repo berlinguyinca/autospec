@@ -364,3 +364,14 @@ TS
         [ "$status" -ne 0 ]
     fi
 }
+
+@test "sweep emits repo-relative file paths for allowlist portability" {
+    run env REPO_DIR="$TMPDIR_FIXT" VERDICT_FILE="$TMPDIR_FIXT/.autospec/qa-verdict.json" \
+        bash "$SWEEP"
+    [ "$status" -eq 0 ]
+    [ -f "$TMPDIR_FIXT/.autospec/qa-verdict.json" ]
+    run grep -F "\"file\":\"$TMPDIR_FIXT" "$TMPDIR_FIXT/.autospec/qa-verdict.json"
+    [ "$status" -ne 0 ]
+    run grep -F '"file":"src/classify.py"' "$TMPDIR_FIXT/.autospec/qa-verdict.json"
+    [ "$status" -eq 0 ]
+}

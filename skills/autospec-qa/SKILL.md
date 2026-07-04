@@ -425,6 +425,25 @@ documentation_gate`, mirroring the no-mock smoke handling.
 line — `docs: no documentation config found (exit 2), gate skipped` — and
 continues without emitting a finding. No other skip condition is permitted.
 
+## Repo quality audit
+
+After QA proof artifacts are written, run the shared read-only quality audit so
+the QA report carries repo-wide code-quality, verification, dependency, route,
+security, and maintainability gaps discovered during revalidation:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-quality-audit.sh" \
+  --repo . \
+  --json ".autospec/repo-quality-audit.json" \
+  --markdown ".autospec/repo-quality-audit.md" \
+  ${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:+--file-issues}
+```
+
+Include the audit `status`, filed issue links, suppressed findings, and unfiled
+residual risks in the final QA verdict. The helper is read-only with respect to
+source files; it only writes audit artifacts and optional deduplicated GitHub
+issues when operator policy permits issue creation.
+
 ## Evidence provenance gate
 
 Every `PASS` must cite provenance that another reviewer can inspect:

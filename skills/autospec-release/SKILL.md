@@ -197,6 +197,21 @@ the explicit skill invocation was unavailable.
    - If a legacy path cannot be removed yet, create a deprecation issue that
      names the owner, replacement path, and removal trigger.
 
+8a. Repo quality audit
+   - Run the shared read-only audit before computing the release verdict:
+     ```bash
+     bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-quality-audit.sh" \
+       --repo . \
+       --json ".autospec/repo-quality-audit.json" \
+       --markdown ".autospec/repo-quality-audit.md" \
+       ${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:+--file-issues}
+     ```
+   - Include audit status, filed issue links, suppressed findings, and unfiled
+     residual risks in the release report.
+   - Release PASS is blocked by unresolved `current-branch-regression` security
+     or verification findings unless they are explicitly classified as inherited
+     accepted debt in `.autospec/quality-audit-accepted.json`.
+
 9. Verdict computation and release iteration loop
 
    The deterministic computation is implemented by

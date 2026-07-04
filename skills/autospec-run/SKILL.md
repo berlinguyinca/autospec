@@ -1289,6 +1289,7 @@ bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-write-run-summar
   --elapsed "$ELAPSED_HHMM" \
   --done-challenge-file "$DONE_CHALLENGE_FILE" \
   --next-steps-file "$NEXT_STEPS_FILE" \
+  --quality-audit-json ".autospec/repo-quality-audit.json" \
   --output ".autospec/run-summary.md"
 ```
 
@@ -1417,6 +1418,31 @@ Loop (`round = 1 … MAX`):
 **Termination guarantees:** convergence (0 survivors) ends the loop immediately; the `dedupe_key` prevents re-filing the same gap across rounds; the hard cap `AUTOSPEC_GAP_MAX_ROUNDS` (default 2) stops the loop and surfaces any remainder to the operator.
 
 **Feed Phase 6:** report (a) gaps closed this phase, (b) findings the filter suppressed, and (c) gaps still open after the cap. Failures from `/autospec-review` or the driver log a warning but do NOT fail the overall run.
+
+## Phase 5.6 — Repo quality audit
+
+Run the shared read-only repository quality audit after Phase 5.5 converges or
+hits its cap, before Phase 6 writes the final run summary:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-quality-audit.sh" \
+  --repo . \
+  --json ".autospec/repo-quality-audit.json" \
+  --markdown ".autospec/repo-quality-audit.md" \
+  ${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:+--file-issues}
+```
+
+The audit writes structured findings classified as `app-follow-up`,
+`autospec-process-gap`, `inherited-accepted-debt`, or
+`current-branch-regression`. Probes cover dirty git status, package-manager
+scripts, runtime engine compatibility, typecheck/lint/test availability, route
+coverage, design/template guards, dependency audit readiness,
+security-sensitive storage, focused/skipped tests, large files, TypeScript
+`any` usage, and debug logging hotspots. When
+`AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES=1` and `gh` is available, the helper may
+file deduplicated `quality-audit` follow-up issues; otherwise it records
+unfiled residual risks in the JSON/Markdown artifacts. Failures of the audit
+helper should be reported as a warning in Phase 6, not hidden.
 
 ## Constraints (apply throughout)
 
