@@ -52,7 +52,10 @@ ISSUES_ND="$TMP_DIR/issues.ndjson"
 RISKS_ND="$TMP_DIR/risks.ndjson"
 VERIFICATION_ND="$TMP_DIR/verification-lanes.ndjson"
 RUNTIME_JSON="$TMP_DIR/runtime.json"
+ARTIFACTS_JSON="$TMP_DIR/artifacts.json"
+STORAGE_KEYS="$TMP_DIR/storage-keys.txt"
 touch "$FINDINGS_ND" "$SUPPRESSED_ND" "$ISSUES_ND" "$RISKS_ND" "$VERIFICATION_ND"
+touch "$STORAGE_KEYS"
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -198,6 +201,71 @@ add_route_setup_failure_finding() {
     '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key,route_coverage_script:$script}'
 }
 
+add_dependency_advisory_finding() {
+  manager="$1"; package_name="$2"; advisory_severity="$3"; dependency_type="$4"; fix_available="$5"; semver_major="$6"; artifact="$7"
+  key="dependency-audit:$manager:$package_name"
+  target="$FINDINGS_ND"
+  classification="dependency-security"
+  if is_accepted "$key"; then
+    classification="inherited-accepted-debt"
+    target="$SUPPRESSED_ND"
+  fi
+  if [ "$fix_available" = "false" ]; then
+    fix_text="No package-manager fix is available; human review or replacement is required."
+  elif [ "$semver_major" = "true" ]; then
+    fix_text="A fix is available, but it requires a semver-major upgrade."
+  else
+    fix_text="A package-manager fix is available."
+  fi
+  json_append "$target" \
+    --arg probe "dependency-audit-advisory" \
+    --arg classification "$classification" \
+    --arg severity "$advisory_severity" \
+    --arg file "package.json" \
+    --argjson line "0" \
+    --arg title "$manager audit reports $advisory_severity advisory in $package_name" \
+    --arg body "$manager audit reports a $advisory_severity advisory in $package_name ($dependency_type dependency). $fix_text Raw audit JSON: $artifact." \
+    --arg key "$key" \
+    --arg manager "$manager" \
+    --arg package_name "$package_name" \
+    --arg advisory_severity "$advisory_severity" \
+    --arg dependency_type "$dependency_type" \
+    --argjson fix_available "$fix_available" \
+    --argjson semver_major "$semver_major" \
+    --arg artifact "$artifact" \
+    '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key,dependency_manager:$manager,package_name:$package_name,advisory_severity:$advisory_severity,dependency_type:$dependency_type,fix_available:$fix_available,semver_major_fix:$semver_major,raw_artifact:$artifact}'
+}
+
+add_sensitive_storage_finding() {
+  file="$1"; line="$2"; storage_api="$3"; sensitive_term="$4"; storage_key="$5"; excerpt="$6"
+  key="security-sensitive-storage:$file:$storage_api:$sensitive_term"
+  [ -z "$storage_key" ] || key="$key:$storage_key"
+  if grep -Fx "$key" "$STORAGE_KEYS" >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '%s\n' "$key" >> "$STORAGE_KEYS"
+  target="$FINDINGS_ND"
+  classification="client-credential-storage"
+  if is_accepted "$key" || is_accepted "security-sensitive-storage:$file"; then
+    classification="inherited-accepted-debt"
+    target="$SUPPRESSED_ND"
+  fi
+  json_append "$target" \
+    --arg probe "security-sensitive-storage" \
+    --arg classification "$classification" \
+    --arg severity "high" \
+    --arg file "$file" \
+    --argjson line "$line" \
+    --arg title "security-sensitive browser storage in $file" \
+    --arg body "Detected $storage_api access involving sensitive term '$sensitive_term'${storage_key:+ and storage key '$storage_key'}. Browser storage for tokens, API keys, credentials, auth state, or group authorization state should be reviewed. Excerpt: $excerpt" \
+    --arg key "$key" \
+    --arg storage_api "$storage_api" \
+    --arg sensitive_term "$sensitive_term" \
+    --arg storage_key "$storage_key" \
+    --arg excerpt "$excerpt" \
+    '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key,storage_api:$storage_api,sensitive_term:$sensitive_term,storage_key:(if $storage_key == "" then null else $storage_key end),excerpt:$excerpt}'
+}
+
 rel_path() {
   case "$1" in
     "$REPO"/*) printf '%s' "${1#"$REPO"/}" ;;
@@ -218,6 +286,14 @@ run_probe_commands_enabled() {
 summarize_command_output() {
   file="$1"
   tr '\n' ' ' < "$file" | cut -c1-500
+}
+
+artifact_rel_path() {
+  file="$1"
+  case "$file" in
+    "$REPO"/*) printf '%s' "${file#"$REPO"/}" ;;
+    *) printf '%s' "$file" ;;
+  esac
 }
 
 record_verification_lane() {
@@ -509,11 +585,36 @@ probe_npm_audit_script() {
   audit_rc=0
   (cd "$REPO" && npm run -s audit -- --json) >"$out" 2>&1 || audit_rc=$?
   if jq -e '((.metadata.vulnerabilities.total // 0) > 0) or (((.vulnerabilities // {}) | length) > 0)' "$out" >/dev/null 2>&1; then
+    artifact_dir="$(dirname "$JSON_OUT")/artifacts"
+    mkdir -p "$artifact_dir"
+    artifact_path="$artifact_dir/npm-audit.json"
+    cp "$out" "$artifact_path"
+    artifact_rel="$(artifact_rel_path "$artifact_path")"
     total="$(jq -r '.metadata.vulnerabilities.total // ((.vulnerabilities // {}) | length)' "$out" 2>/dev/null || echo "unknown")"
-    add_finding "dependency-audit-advisories" "current-branch-regression" "high" "package.json" 0 \
-      "dependency audit reports advisories" \
-      "The opt-in dependency audit probe reported ${total} vulnerability/advisory record(s)." \
-      "dependency-audit:advisories"
+    advisory_count="$(jq '((.vulnerabilities // {}) | length)' "$out" 2>/dev/null || echo 0)"
+    if [ "$advisory_count" -gt 0 ]; then
+      jq -r '
+      (.vulnerabilities // {}) | to_entries[]
+      | .key as $name
+      | .value as $v
+      | [
+          $name,
+          ($v.severity // "unknown"),
+          (if ($v.isDirect // false) then "direct" else "transitive" end),
+          (if (($v.fixAvailable // false) == false) then "false" else "true" end),
+          (if (($v.fixAvailable | type) == "object" and ($v.fixAvailable.isSemVerMajor // false)) then "true" else "false" end)
+        ] | @tsv
+      ' "$out" | while IFS="$(printf '\t')" read -r package_name advisory_severity dependency_type fix_available semver_major; do
+        [ -n "$package_name" ] || continue
+        add_dependency_advisory_finding "npm" "$package_name" "$advisory_severity" "$dependency_type" "$fix_available" "$semver_major" "$artifact_rel"
+      done
+    else
+      add_finding "dependency-audit-advisories" "dependency-security" "high" "package.json" 0 \
+        "dependency audit reports advisories" \
+        "The npm audit JSON reported ${total} vulnerability/advisory record(s), but did not expose per-package vulnerability metadata. Raw audit JSON: $artifact_rel." \
+        "dependency-audit:advisories"
+    fi
+    jq -n --arg npm_audit "$artifact_rel" '{npm_audit:$npm_audit}' > "$ARTIFACTS_JSON"
     record_verification_lane "audit" "configured but failing" "$command_text" "audit reported ${total} vulnerability/advisory record(s)"
     return 0
   fi
@@ -680,7 +781,26 @@ scan_text_files() {
   find "$REPO" \
     \( -path "$REPO/.git" -o -path "$REPO/node_modules" -o -path "$REPO/.autospec" \) -prune -o \
     -type f \( -name '*.js' -o -name '*.jsx' -o -name '*.ts' -o -name '*.tsx' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.html' -o -name '*.vue' -o -name '*.svelte' -o -name '*.py' -o -name '*.sh' \) \
-    -print
+	    -print
+}
+
+sensitive_storage_term() {
+  line="$1"
+  printf '%s\n' "$line" | grep -Eio 'x-api-key|access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|token|secret|password|credential|authorization|bearer|auth|user[_-]?groups?|groups?' | head -1 || true
+}
+
+storage_api_for_line() {
+  line="$1"
+  printf '%s\n' "$line" | grep -Eo 'localStorage|sessionStorage|document\.cookie' | head -1 || true
+}
+
+storage_key_for_line() {
+  line="$1"
+  key="$(printf '%s\n' "$line" | sed -nE "s/.*(localStorage|sessionStorage)\.(getItem|setItem|removeItem)\([[:space:]]*['\"]([^'\"]+)['\"].*/\3/p" | head -1)"
+  if [ -z "$key" ]; then
+    key="$(printf '%s\n' "$line" | sed -nE "s/.*(localStorage|sessionStorage)\[['\"]([^'\"]+)['\"]\].*/\2/p" | head -1)"
+  fi
+  printf '%s' "$key"
 }
 
 # Probe: dirty git status.
@@ -760,14 +880,23 @@ fi
 # Probe: security-sensitive storage, focused/skipped tests, any usage, debug logging.
 while IFS= read -r f; do
   rel="$(rel_path "$f")"
-  security_hits="$(grep -nE '(localStorage|sessionStorage|document\.cookie).*(token|secret|password|auth)|((token|secret|password|auth).*(localStorage|sessionStorage|document\.cookie))' "$f" 2>/dev/null || true)"
-  if [ -n "$security_hits" ]; then
-    first_line="$(printf '%s\n' "$security_hits" | head -1 | cut -d: -f1)"
-    add_finding "security-sensitive-storage" "current-branch-regression" "high" "$rel" "${first_line:-0}" \
-      "security-sensitive browser storage" \
-      "Security-sensitive token/secret/password storage pattern detected in browser storage or cookies." \
-      "security-sensitive-storage:$rel"
-  fi
+  while IFS= read -r storage_hit; do
+    [ -n "$storage_hit" ] || continue
+    line_no="$(printf '%s\n' "$storage_hit" | cut -d: -f1)"
+    line_text="$(printf '%s\n' "$storage_hit" | cut -d: -f2-)"
+    storage_api="$(storage_api_for_line "$line_text")"
+    sensitive_term="$(sensitive_storage_term "$line_text")"
+    storage_key="$(storage_key_for_line "$line_text")"
+    if [ -z "$sensitive_term" ] && [ -n "$storage_key" ]; then
+      sensitive_term="$(sensitive_storage_term "$storage_key")"
+    fi
+    [ -n "$storage_api" ] || continue
+    [ -n "$sensitive_term" ] || continue
+    excerpt="$(printf '%s' "$line_text" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | cut -c1-240)"
+    add_sensitive_storage_finding "$rel" "${line_no:-0}" "$storage_api" "$sensitive_term" "$storage_key" "$excerpt"
+  done <<EOF
+$(grep -nE 'localStorage|sessionStorage|document\.cookie' "$f" 2>/dev/null || true)
+EOF
   focus_hits="$(grep -nE '\b(describe|it|test)\.(only|skip)\b|@skip|\.skip\(' "$f" 2>/dev/null || true)"
   if [ -n "$focus_hits" ]; then
     first_line="$(printf '%s\n' "$focus_hits" | head -1 | cut -d: -f1)"
@@ -828,6 +957,7 @@ VERIFICATION_JSON="$TMP_DIR/verification-lanes.json"
 ndjson_to_array "$FINDINGS_ND" > "$FINDINGS_JSON"
 ndjson_to_array "$SUPPRESSED_ND" > "$SUPPRESSED_JSON"
 ndjson_to_array "$VERIFICATION_ND" > "$VERIFICATION_JSON"
+[ -f "$ARTIFACTS_JSON" ] || printf '{}\n' > "$ARTIFACTS_JSON"
 
 issue_policy_permits=0
 if [ "$FILE_ISSUES" -eq 1 ] && [ "${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:-0}" = "1" ] && command -v gh >/dev/null 2>&1; then
@@ -915,6 +1045,7 @@ jq -n \
   --argjson issue_links "$(cat "$ISSUES_JSON")" \
   --argjson residual_risks "$(cat "$RISKS_JSON")" \
   --argjson runtime "$(cat "$RUNTIME_JSON")" \
+  --argjson artifacts "$(cat "$ARTIFACTS_JSON")" \
   --argjson verification_lanes "$(cat "$VERIFICATION_JSON")" \
   --argjson total_findings "$total_findings" \
   --argjson suppressed_findings "$suppressed_findings" \
@@ -930,6 +1061,7 @@ jq -n \
       issue_links:$issue_links_count,
       unfiled_residual_risks:$risk_count
     },
+    artifacts:$artifacts,
     runtime:$runtime,
     verification:{
       lanes:($verification_lanes | map({key:.lane,value:{status:.status,command:.command,detail:.detail}}) | from_entries)
@@ -947,6 +1079,13 @@ jq -n \
   printf -- '- Suppressed findings: %s\n' "$suppressed_findings"
   printf -- '- Filed issues: %s\n' "$issue_count"
   printf -- '- Unfiled residual risks: %s\n\n' "$risk_count"
+  printf '## Artifacts\n\n'
+  if [ "$(jq 'length' "$ARTIFACTS_JSON")" -eq 0 ]; then
+    printf '(none)\n\n'
+  else
+    jq -r 'to_entries[] | "- " + .key + ": `" + (.value|tostring) + "`"' "$ARTIFACTS_JSON"
+    printf '\n'
+  fi
   printf '## Runtime and engines\n\n'
   jq -r '
     "- node: " + (.node.version // "unavailable") + " (engine: " + (.node.engine // "not configured") + ", status: " + .node.status + ")",

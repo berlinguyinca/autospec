@@ -23,6 +23,9 @@ setup() {
       "yarn": {"version": null, "engine": null, "status": "not configured"}
     }
   },
+  "artifacts": {
+    "npm_audit": ".autospec/artifacts/npm-audit.json"
+  },
   "verification": {
     "lanes": {
       "lint": {"status": "configured but failing", "command": "npm run lint"},
@@ -66,6 +69,8 @@ teardown() {
     grep -qF -- '### Runtime and engines' "$OUT"
     grep -qF -- '- node: 20.11.1 (engine: >=20, status: passed)' "$OUT"
     grep -qF -- '- npm: 10.2.4 (engine: >=10, status: passed)' "$OUT"
+    grep -qF -- '### Artifacts' "$OUT"
+    grep -qF -- '- npm_audit: `.autospec/artifacts/npm-audit.json`' "$OUT"
     grep -qF -- '### Verification lanes' "$OUT"
     grep -qF -- '- lint: configured but failing (`npm run lint`)' "$OUT"
     grep -qF -- '- test: passed (`npm run test`)' "$OUT"
