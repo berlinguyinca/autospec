@@ -125,6 +125,79 @@ add_guard_finding() {
     '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key,guard_script:$guard_script,rule:(if $rule == "" then null else $rule end),class:(if $class_name == "" then null else $class_name end),excerpt:(if $excerpt == "" then null else $excerpt end)}'
 }
 
+add_route_registry_drift_finding() {
+  script="$1"; family="$2"; routes_json="$3"
+  count="$(printf '%s' "$routes_json" | jq 'length')"
+  sample="$(printf '%s' "$routes_json" | jq -r 'join(", ")')"
+  key="route-registry-drift:$script:$family"
+  target="$FINDINGS_ND"
+  classification="app-follow-up"
+  if is_accepted "$key"; then
+    classification="inherited-accepted-debt"
+    target="$SUPPRESSED_ND"
+  fi
+  json_append "$target" \
+    --arg probe "route-registry-drift" \
+    --arg classification "$classification" \
+    --arg severity "high" \
+    --arg file "package.json" \
+    --argjson line "0" \
+    --arg title "route registry drift in $family routes" \
+    --arg body "Route coverage meta test $script reported $count live route(s) missing from the curated route registry or smoke-test catalog for family $family: $sample." \
+    --arg key "$key" \
+    --arg script "$script" \
+    --arg family "$family" \
+    --argjson routes "$routes_json" \
+    '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key,route_coverage_script:$script,route_family:$family,missing_routes:$routes}'
+}
+
+add_route_compiler_warning_finding() {
+  script="$1"; code="$2"; line_text="$3"; idx="$4"
+  excerpt="$(printf '%s' "$line_text" | cut -c1-240)"
+  key="route-coverage-warning:$script:$code:$idx"
+  target="$FINDINGS_ND"
+  classification="app-follow-up"
+  if is_accepted "$key"; then
+    classification="inherited-accepted-debt"
+    target="$SUPPRESSED_ND"
+  fi
+  json_append "$target" \
+    --arg probe "route-coverage-compiler-warning" \
+    --arg classification "$classification" \
+    --arg severity "medium" \
+    --arg file "package.json" \
+    --argjson line "0" \
+    --arg title "route coverage compiler warning $code" \
+    --arg body "Route coverage meta test $script emitted Angular compiler warning $code. Output: $excerpt" \
+    --arg key "$key" \
+    --arg script "$script" \
+    --arg code "$code" \
+    --arg excerpt "$excerpt" \
+    '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key,route_coverage_script:$script,warning_code:$code,excerpt:$excerpt}'
+}
+
+add_route_setup_failure_finding() {
+  script="$1"; summary="$2"
+  key="route-coverage-setup:$script"
+  target="$FINDINGS_ND"
+  classification="verification-contract-drift"
+  if is_accepted "$key"; then
+    classification="inherited-accepted-debt"
+    target="$SUPPRESSED_ND"
+  fi
+  json_append "$target" \
+    --arg probe "route-coverage-setup" \
+    --arg classification "$classification" \
+    --arg severity "high" \
+    --arg file "package.json" \
+    --argjson line "0" \
+    --arg title "route coverage meta test setup failed" \
+    --arg body "Route coverage meta test could not reach its required local server or setup dependency. First output: ${summary:-<empty>}" \
+    --arg key "$key" \
+    --arg script "$script" \
+    '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key,route_coverage_script:$script}'
+}
+
 rel_path() {
   case "$1" in
     "$REPO"/*) printf '%s' "${1#"$REPO"/}" ;;
@@ -224,6 +297,165 @@ probe_design_template_guard_script() {
     fi
     record_verification_lane "$script" "configured but failing" "$command_text" "${summary:-<empty>}"
   else
+    record_verification_lane "$script" "passed" "$command_text" "command probe exited 0"
+  fi
+}
+
+route_coverage_scripts() {
+  [ -f "$REPO/package.json" ] || return 0
+  jq -r '
+    (.scripts // {}) | to_entries[]
+    | select(((.key + " " + .value) | ascii_downcase | test("route"))
+        and ((.key + " " + .value) | ascii_downcase | test("coverage|registry|smoke|catalog|meta")))
+    | .key
+  ' "$REPO/package.json" 2>/dev/null | sort -u
+}
+
+route_coverage_targets() {
+  route_coverage_scripts | while IFS= read -r script; do
+    [ -n "$script" ] || continue
+    printf 'npm-script\t%s\tnpm run %s\n' "$script" "$script"
+  done
+  for spec in \
+    "e2e-playwright/route-coverage.meta.spec.ts" \
+    "e2e-playwright/route-coverage.spec.ts" \
+    "tests/route-coverage.meta.spec.ts" \
+    "tests/route-coverage.spec.ts"
+  do
+    [ -f "$REPO/$spec" ] || continue
+    printf 'playwright-spec\troute-coverage:%s\tCI=1 npx playwright test %s --project=chrome\n' "$spec" "$spec"
+  done
+}
+
+route_family_for() {
+  route="$1"
+  first="${route%%/*}"
+  case "$first" in
+    ""|"."|".."|":"*) printf 'root' ;;
+    *) printf '%s' "$first" | tr -c 'A-Za-z0-9_.-' '-' | sed 's/^-*//; s/-*$//; s/^$/root/' ;;
+  esac
+}
+
+route_coverage_setup_failed() {
+  out="$1"
+  grep -Eiq 'ECONNREFUSED|ERR_CONNECTION_REFUSED|server[^[:alnum:]]+(not )?running|dev server|baseURL|base url|connection refused|unable to connect|could not connect|failed to connect|address already in use|EADDRINUSE' "$out"
+}
+
+extract_route_registry_missing_routes() {
+  out="$1"
+  awk '
+    function clean(s) {
+      gsub(/\r/, "", s)
+      gsub(/^[[:space:]]*([-*]|•)[[:space:]]*/, "", s)
+      gsub(/^[[:space:]]*(Missing|missing)[^:]*:[[:space:]]*/, "", s)
+      gsub(/[`"'\'';,]/, "", s)
+      sub(/[[:space:]]+$/, "", s)
+      sub(/^[[:space:]]+/, "", s)
+      sub(/[[:space:]].*$/, "", s)
+      sub(/^\/+/, "", s)
+      sub(/\/+$/, "", s)
+      return s
+    }
+    function valid(s) {
+      return s != "" && s !~ /^(ROUTE_REGISTRY|Route|route|routes|registry|catalog)$/ && s ~ /^[A-Za-z0-9_.:-]+(\/[A-Za-z0-9_.:-]+)*$/
+    }
+    {
+      low = tolower($0)
+      if (low ~ /(live routes missing|missing.*(route_registry|route registry|smoke-test catalog|smoke test catalog|route catalog|registry)|not registered|unregistered)/) {
+        in_missing = 1
+        if ($0 ~ /:/) {
+          cand = $0
+          sub(/^.*:/, "", cand)
+          cand = clean(cand)
+          if (valid(cand)) print cand
+        }
+        next
+      }
+      if (in_missing && $0 ~ /^[[:space:]]*([-*]|•)[[:space:]]*"?[A-Za-z0-9_.:-]+(\/[A-Za-z0-9_.:-]+)*/) {
+        cand = clean($0)
+        if (valid(cand)) print cand
+        next
+      }
+      if (in_missing && $0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*([-*]|•)/) {
+        in_missing = 0
+      }
+    }
+  ' "$out" | sort -u
+}
+
+parse_route_coverage_output() {
+  script="$1"; out="$2"
+  routes_file="$TMP_DIR/route-coverage-routes.tsv"
+  : > "$routes_file"
+  while IFS= read -r route; do
+    [ -n "$route" ] || continue
+    family="$(route_family_for "$route")"
+    printf '%s\t%s\n' "$family" "$route" >> "$routes_file"
+  done <<EOF
+$(extract_route_registry_missing_routes "$out")
+EOF
+
+  if [ -s "$routes_file" ]; then
+    cut -f1 "$routes_file" | sort -u | while IFS= read -r family; do
+      [ -n "$family" ] || continue
+      routes_json="$(awk -F '\t' -v family="$family" '$1 == family {print $2}' "$routes_file" | sort -u | jq -R . | jq -s '.')"
+      add_route_registry_drift_finding "$script" "$family" "$routes_json"
+    done
+  fi
+
+  warning_idx=0
+  while IFS= read -r warning_line; do
+    [ -n "$warning_line" ] || continue
+    code="$(printf '%s\n' "$warning_line" | grep -Eo 'NG[0-9]{4}' | head -1 || true)"
+    [ -n "$code" ] || continue
+    warning_idx=$((warning_idx + 1))
+    add_route_compiler_warning_finding "$script" "$code" "$warning_line" "$warning_idx"
+  done <<EOF
+$(grep -E 'NG[0-9]{4}' "$out" 2>/dev/null || true)
+EOF
+
+  [ -s "$routes_file" ] || [ "$warning_idx" -gt 0 ]
+}
+
+probe_route_coverage_script() {
+  kind="$1"; script="$2"; command_text="$3"
+  if ! run_probe_commands_enabled; then
+    record_verification_lane "$script" "not run" "$command_text" "command probe disabled"
+    return 0
+  fi
+  safe_script="$(printf '%s' "$script" | tr ':/' '--')"
+  out="$TMP_DIR/route-coverage-$safe_script.log"
+  if [ "$kind" = "playwright-spec" ]; then
+    spec="${script#route-coverage:}"
+    if (cd "$REPO" && CI=1 npx playwright test "$spec" --project=chrome) >"$out" 2>&1; then
+      status=0
+    else
+      status=$?
+    fi
+  else
+    if (cd "$REPO" && npm run -s "$script") >"$out" 2>&1; then
+      status=0
+    else
+      status=$?
+    fi
+  fi
+  if [ "$status" -ne 0 ]; then
+    summary="$(summarize_command_output "$out")"
+    if parse_route_coverage_output "$script" "$out"; then
+      :
+    elif route_coverage_setup_failed "$out"; then
+      add_route_setup_failure_finding "$script" "$summary"
+      record_verification_lane "$script" "setup failure" "$command_text" "${summary:-<empty>}"
+      return 0
+    else
+      add_finding "route-coverage-command" "verification-contract-drift" "high" "package.json" 0 \
+        "route coverage meta test fails" \
+        "Configured route coverage meta test $script exited non-zero, but autospec could not parse route registry drift from its output. First output: ${summary:-<empty>}" \
+        "route-coverage-command:$script"
+    fi
+    record_verification_lane "$script" "configured but failing" "$command_text" "${summary:-<empty>}"
+  else
+    parse_route_coverage_output "$script" "$out" || true
     record_verification_lane "$script" "passed" "$command_text" "command probe exited 0"
   fi
 }
@@ -471,6 +703,12 @@ if [ -f "$REPO/package.json" ]; then
   for script in lint:styles lint:templates; do
     probe_design_template_guard_script "$script"
   done
+  while IFS="$(printf '\t')" read -r kind script command_text; do
+    [ -n "$script" ] || continue
+    probe_route_coverage_script "$kind" "$script" "$command_text"
+  done <<EOF
+$(route_coverage_targets)
+EOF
   probe_npm_audit_script
   if ! jq -e '.engines.node // empty' "$REPO/package.json" >/dev/null 2>&1; then
     add_finding "runtime-engine-compatibility" "autospec-process-gap" "low" "package.json" 0 \
