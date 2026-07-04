@@ -91,6 +91,40 @@ add_finding() {
     '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key}'
 }
 
+add_guard_finding() {
+  guard_script="$1"; file="$2"; line="$3"; rule="$4"; class_name="$5"; excerpt="$6"
+  key="design-template-guard:$guard_script:$file"
+  target="$FINDINGS_ND"
+  classification="design-template-contract"
+  if is_accepted "$key"; then
+    classification="inherited-accepted-debt"
+    target="$SUPPRESSED_ND"
+  fi
+  title="design/template guard failure in $file"
+  if [ -n "$class_name" ]; then
+    body="Repo-specific $guard_script reported design-system class '$class_name' in $file."
+  elif [ -n "$rule" ]; then
+    body="Repo-specific $guard_script reported template/design contract rule '$rule' in $file."
+  else
+    body="Repo-specific $guard_script reported a design/template contract violation in $file."
+  fi
+  [ -z "$excerpt" ] || body="$body Output: $excerpt"
+  json_append "$target" \
+    --arg probe "design-template-guard" \
+    --arg classification "$classification" \
+    --arg severity "high" \
+    --arg file "$file" \
+    --argjson line "$line" \
+    --arg title "$title" \
+    --arg body "$body" \
+    --arg key "$key" \
+    --arg guard_script "$guard_script" \
+    --arg rule "$rule" \
+    --arg class_name "$class_name" \
+    --arg excerpt "$excerpt" \
+    '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key,guard_script:$guard_script,rule:(if $rule == "" then null else $rule end),class:(if $class_name == "" then null else $class_name end),excerpt:(if $excerpt == "" then null else $excerpt end)}'
+}
+
 rel_path() {
   case "$1" in
     "$REPO"/*) printf '%s' "${1#"$REPO"/}" ;;
@@ -121,6 +155,77 @@ record_verification_lane() {
     --arg command "$command_text" \
     --arg detail "$detail" \
     '{lane:$lane,status:$status,command:(if $command == "" then null else $command end),detail:(if $detail == "" then null else $detail end)}'
+}
+
+extract_guard_file() {
+  line="$1"
+  printf '%s\n' "$line" | grep -Eo '[[:alnum:]_./-]+\.(html|vue|svelte|css|scss|sass|less)' | head -1 || true
+}
+
+extract_guard_line_number() {
+  line="$1"; file="$2"
+  [ -n "$file" ] || { printf '0'; return 0; }
+  printf '%s\n' "$line" | sed -nE "s#.*${file//\//\\/}[:( ]([0-9]+).*#\\1#p" | head -1
+}
+
+extract_guard_rule() {
+  line="$1"
+  rule="$(printf '%s\n' "$line" | grep -Eo '\[[A-Za-z0-9_-]+\]' | head -1 | tr -d '[]' || true)"
+  if [ -z "$rule" ]; then
+    rule="$(printf '%s\n' "$line" | sed -nE 's/.*rule[[:space:]:=]+["'"'"'`]?([A-Za-z0-9_-]+).*/\1/p' | head -1)"
+  fi
+  printf '%s' "$rule"
+}
+
+extract_guard_class() {
+  line="$1"
+  printf '%s\n' "$line" \
+    | grep -Eo '(^|[^A-Za-z0-9_-])(m[trblxyse]?-[0-9]+|p[trblxyse]?-[0-9]+|alert(-[A-Za-z0-9_-]+)?|btn(-[A-Za-z0-9_-]+)?|badge(-[A-Za-z0-9_-]+)?|text-[A-Za-z0-9_-]+|bg-[A-Za-z0-9_-]+|border(-[A-Za-z0-9_-]+)?|d-[A-Za-z0-9_-]+|row|col(-[A-Za-z0-9_-]+)?)([^A-Za-z0-9_-]|$)' \
+    | sed -E 's/^[^A-Za-z0-9_-]*//; s/[^A-Za-z0-9_-]*$//' \
+    | head -1 || true
+}
+
+parse_design_template_guard_output() {
+  script="$1"; out="$2"
+  parsed=0
+  while IFS= read -r line_text; do
+    [ -n "$line_text" ] || continue
+    file="$(extract_guard_file "$line_text")"
+    [ -n "$file" ] || continue
+    file="$(rel_path "$REPO/$file")"
+    line_no="$(extract_guard_line_number "$line_text" "$file")"
+    case "$line_no" in ''|*[!0-9]*) line_no=0 ;; esac
+    rule="$(extract_guard_rule "$line_text")"
+    class_name="$(extract_guard_class "$line_text")"
+    excerpt="$(printf '%s' "$line_text" | cut -c1-240)"
+    add_guard_finding "$script" "$file" "$line_no" "$rule" "$class_name" "$excerpt"
+    parsed=$((parsed + 1))
+  done < "$out"
+  [ "$parsed" -gt 0 ]
+}
+
+probe_design_template_guard_script() {
+  script="$1"
+  has_package_script "$script" || return 0
+  command_text="npm run $script"
+  if ! run_probe_commands_enabled; then
+    record_verification_lane "$script" "not run" "$command_text" "command probe disabled"
+    return 0
+  fi
+  safe_script="$(printf '%s' "$script" | tr ':/' '--')"
+  out="$TMP_DIR/npm-$safe_script.log"
+  if ! (cd "$REPO" && npm run -s "$script") >"$out" 2>&1; then
+    summary="$(summarize_command_output "$out")"
+    if ! parse_design_template_guard_output "$script" "$out"; then
+      add_finding "design-template-guard" "design-template-contract" "high" "package.json" 0 \
+        "npm $script design/template guard fails" \
+        "Repo-specific npm $script guard exited non-zero during the opt-in audit probe. First output: ${summary:-<empty>}" \
+        "design-template-guard:$script"
+    fi
+    record_verification_lane "$script" "configured but failing" "$command_text" "${summary:-<empty>}"
+  else
+    record_verification_lane "$script" "passed" "$command_text" "command probe exited 0"
+  fi
 }
 
 probe_npm_verification_script() {
@@ -363,6 +468,9 @@ if [ -f "$REPO/package.json" ]; then
   for script in test lint typecheck; do
     probe_npm_verification_script "$script"
   done
+  for script in lint:styles lint:templates; do
+    probe_design_template_guard_script "$script"
+  done
   probe_npm_audit_script
   if ! jq -e '.engines.node // empty' "$REPO/package.json" >/dev/null 2>&1; then
     add_finding "runtime-engine-compatibility" "autospec-process-gap" "low" "package.json" 0 \
@@ -506,10 +614,14 @@ if [ "$issue_policy_permits" -eq 1 ]; then
   (cd "$REPO" && gh label create autospec:v2-flow --color 1d76db --force >/dev/null 2>&1) || true
   count="$(jq 'length' "$FINDINGS_JSON")"
   i=0
+  created_issue_keys=""
   while [ "$i" -lt "$count" ]; do
     finding="$(jq -c ".[$i]" "$FINDINGS_JSON")"
     i=$((i + 1))
     key="$(printf '%s' "$finding" | jq -r '.dedupe_key')"
+    if printf '%s\n' "$created_issue_keys" | grep -Fx "$key" >/dev/null 2>&1; then
+      continue
+    fi
     title="$(printf '%s' "$finding" | jq -r '"autospec audit: " + .title')"
     existing="$(existing_issue_for_finding "$key" "$title")"
     if [ -n "$existing" ]; then
@@ -517,6 +629,8 @@ if [ "$issue_policy_permits" -eq 1 ]; then
       existing_url="$(printf '%s' "$existing" | jq -r '.url // ""')"
       json_append "$ISSUES_ND" --arg title "$existing_title" --arg url "$existing_url" --arg key "$key" \
         '{title:$title,url:$url,dedupe_key:$key,existing:true}'
+      created_issue_keys="${created_issue_keys}${key}
+"
       continue
     fi
     body="$(printf '%s' "$finding" | jq -r '"## Goal\n" + .body + "\n\n## Acceptance criteria\n- [ ] Address `" + .dedupe_key + "` in `" + .file + "`.\n\n---\n- probe: " + .probe + "\n- classification: " + .classification + "\n- severity: " + .severity + "\n- dedupe_key: " + .dedupe_key')"
@@ -524,6 +638,8 @@ if [ "$issue_policy_permits" -eq 1 ]; then
     if [ -n "$url" ]; then
       json_append "$ISSUES_ND" --arg title "$title" --arg url "$url" --arg key "$key" \
         '{title:$title,url:$url,dedupe_key:$key}'
+      created_issue_keys="${created_issue_keys}${key}
+"
     fi
   done
 fi
