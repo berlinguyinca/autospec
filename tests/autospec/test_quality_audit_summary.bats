@@ -15,6 +15,22 @@ setup() {
     "issue_links": 1,
     "unfiled_residual_risks": 2
   },
+  "runtime": {
+    "node": {"version": "20.11.1", "engine": ">=20", "status": "passed"},
+    "package_managers": {
+      "npm": {"version": "10.2.4", "engine": ">=10", "status": "passed"},
+      "pnpm": {"version": null, "engine": null, "status": "not configured"},
+      "yarn": {"version": null, "engine": null, "status": "not configured"}
+    }
+  },
+  "verification": {
+    "lanes": {
+      "lint": {"status": "configured but failing", "command": "npm run lint"},
+      "test": {"status": "passed", "command": "npm run test"},
+      "typecheck": {"status": "not run", "command": "npm run typecheck"},
+      "audit": {"status": "not configured", "command": null}
+    }
+  },
   "issue_links": [
     {"title": "autospec audit: missing lint script", "url": "https://github.com/example/repo/issues/99"}
   ],
@@ -47,6 +63,14 @@ teardown() {
     grep -qF -- '- Status: fail' "$OUT"
     grep -qF -- '- Findings: 3' "$OUT"
     grep -qF -- '- Filed issues: 1' "$OUT"
+    grep -qF -- '### Runtime and engines' "$OUT"
+    grep -qF -- '- node: 20.11.1 (engine: >=20, status: passed)' "$OUT"
+    grep -qF -- '- npm: 10.2.4 (engine: >=10, status: passed)' "$OUT"
+    grep -qF -- '### Verification lanes' "$OUT"
+    grep -qF -- '- lint: configured but failing (`npm run lint`)' "$OUT"
+    grep -qF -- '- test: passed (`npm run test`)' "$OUT"
+    grep -qF -- '- typecheck: not run (`npm run typecheck`)' "$OUT"
+    grep -qF -- '- audit: not configured' "$OUT"
     grep -qF -- '- autospec audit: missing lint script — https://github.com/example/repo/issues/99' "$OUT"
     grep -qF -- '- legacy debug logging (`debug-logging-hotspots:src/legacy.js`)' "$OUT"
     grep -qF -- '- Unfiled app-follow-up: route coverage gaps' "$OUT"

@@ -50,7 +50,9 @@ FINDINGS_ND="$TMP_DIR/findings.ndjson"
 SUPPRESSED_ND="$TMP_DIR/suppressed.ndjson"
 ISSUES_ND="$TMP_DIR/issues.ndjson"
 RISKS_ND="$TMP_DIR/risks.ndjson"
-touch "$FINDINGS_ND" "$SUPPRESSED_ND" "$ISSUES_ND" "$RISKS_ND"
+VERIFICATION_ND="$TMP_DIR/verification-lanes.ndjson"
+RUNTIME_JSON="$TMP_DIR/runtime.json"
+touch "$FINDINGS_ND" "$SUPPRESSED_ND" "$ISSUES_ND" "$RISKS_ND" "$VERIFICATION_ND"
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -111,23 +113,61 @@ summarize_command_output() {
   tr '\n' ' ' < "$file" | cut -c1-500
 }
 
+record_verification_lane() {
+  lane="$1"; status="$2"; command_text="$3"; detail="$4"
+  json_append "$VERIFICATION_ND" \
+    --arg lane "$lane" \
+    --arg status "$status" \
+    --arg command "$command_text" \
+    --arg detail "$detail" \
+    '{lane:$lane,status:$status,command:(if $command == "" then null else $command end),detail:(if $detail == "" then null else $detail end)}'
+}
+
 probe_npm_verification_script() {
   script="$1"
-  has_package_script "$script" || return 0
-  run_probe_commands_enabled || return 0
+  if ! has_package_script "$script"; then
+    add_finding "package-manager-scripts" "verification-contract-drift" "medium" "package.json" 0 \
+      "missing npm $script script" \
+      "package.json does not declare a $script script, so autospec cannot discover a standard $script gate." \
+      "package-script-missing:$script"
+    record_verification_lane "$script" "not configured" "" "package.json does not declare this script"
+    return 0
+  fi
+  command_text="npm run $script"
+  if ! run_probe_commands_enabled; then
+    record_verification_lane "$script" "not run" "$command_text" "command probe disabled"
+    return 0
+  fi
   out="$TMP_DIR/npm-$script.log"
   if ! (cd "$REPO" && npm run -s "$script") >"$out" 2>&1; then
     summary="$(summarize_command_output "$out")"
-    add_finding "verification-command" "current-branch-regression" "high" "package.json" 0 \
+    add_finding "verification-command" "verification-contract-drift" "high" "package.json" 0 \
       "npm $script script fails" \
       "Configured npm $script script exited non-zero during the opt-in audit probe. First output: ${summary:-<empty>}" \
       "verification-command:$script"
+    record_verification_lane "$script" "configured but failing" "$command_text" "${summary:-<empty>}"
+  else
+    record_verification_lane "$script" "passed" "$command_text" "command probe exited 0"
   fi
 }
 
 probe_npm_audit_script() {
-  has_package_script audit || return 0
-  run_probe_commands_enabled || return 0
+  if ! has_package_script audit; then
+    dep_count="$(jq '((.dependencies // {}) + (.devDependencies // {})) | length' "$REPO/package.json" 2>/dev/null || echo 0)"
+    if [ "$dep_count" -gt 0 ]; then
+      add_finding "dependency-audit" "verification-contract-drift" "medium" "package.json" 0 \
+        "missing dependency audit script" \
+        "Dependencies are declared but no package-manager audit script is available for release/readiness checks." \
+        "dependency-audit:missing-script"
+    fi
+    record_verification_lane "audit" "not configured" "" "package.json does not declare an audit script"
+    return 0
+  fi
+  command_text="npm run audit"
+  if ! run_probe_commands_enabled; then
+    record_verification_lane "audit" "not run" "$command_text" "command probe disabled"
+    return 0
+  fi
   out="$TMP_DIR/npm-audit.json"
   audit_rc=0
   (cd "$REPO" && npm run -s audit -- --json) >"$out" 2>&1 || audit_rc=$?
@@ -137,16 +177,166 @@ probe_npm_audit_script() {
       "dependency audit reports advisories" \
       "The opt-in dependency audit probe reported ${total} vulnerability/advisory record(s)." \
       "dependency-audit:advisories"
+    record_verification_lane "audit" "configured but failing" "$command_text" "audit reported ${total} vulnerability/advisory record(s)"
     return 0
   fi
   if [ "$audit_rc" -ne 0 ]; then
     summary="$(summarize_command_output "$out")"
-    add_finding "dependency-audit-command" "current-branch-regression" "high" "package.json" 0 \
+    add_finding "dependency-audit-command" "verification-contract-drift" "high" "package.json" 0 \
       "npm audit script fails" \
       "Configured npm audit script exited non-zero during the opt-in audit probe. First output: ${summary:-<empty>}" \
       "dependency-audit:command-failed"
+    record_verification_lane "audit" "configured but failing" "$command_text" "${summary:-<empty>}"
     return 0
   fi
+  record_verification_lane "audit" "passed" "$command_text" "command probe exited 0"
+}
+
+version_compare_key() {
+  printf '%s' "$1" | sed 's/^v//; s/[^0-9.].*$//' | awk -F. '{printf "%06d%06d%06d", $1+0, $2+0, $3+0}'
+}
+
+version_major() {
+  printf '%s' "$1" | sed 's/^v//; s/[^0-9.].*$//' | awk -F. '{print $1+0}'
+}
+
+version_satisfies_atom() {
+  version="$1"; atom="$2"
+  atom="$(printf '%s' "$atom" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  case "$atom" in
+    \>=*)
+      required="$(printf '%s' "${atom#>=}" | sed 's/^[[:space:]]*//')"
+      [ "$(version_compare_key "$version")" -ge "$(version_compare_key "$required")" ]
+      ;;
+    \<*)
+      required="$(printf '%s' "${atom#<}" | sed 's/^[[:space:]]*//')"
+      [ "$(version_compare_key "$version")" -lt "$(version_compare_key "$required")" ]
+      ;;
+    \^*)
+      required="${atom#^}"
+      [ "$(version_major "$version")" -eq "$(version_major "$required")" ] \
+        && [ "$(version_compare_key "$version")" -ge "$(version_compare_key "$required")" ]
+      ;;
+    [0-9]*)
+      required="$(printf '%s' "$atom" | sed 's/[[:space:]].*$//')"
+      [ "$(version_compare_key "$version")" -eq "$(version_compare_key "$required")" ]
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+version_satisfies_constraint() {
+  version="$1"; constraint="$2"
+  remaining="$constraint"
+  saw_supported=0
+  while :; do
+    alternative="${remaining%%||*}"
+    [ "$alternative" != "$remaining" ] && remaining="${remaining#*||}" || remaining=""
+    alt_supported=0
+    alt_failed=0
+    for atom in $alternative; do
+      if version_satisfies_atom "$version" "$atom"; then
+        alt_supported=1
+      else
+        rc=$?
+        if [ "$rc" -eq 2 ]; then
+          alt_failed=2
+          break
+        fi
+        alt_supported=1
+        alt_failed=1
+      fi
+    done
+    [ "$alt_supported" -eq 1 ] && saw_supported=1
+    [ "$alt_supported" -eq 1 ] && [ "$alt_failed" -eq 0 ] && return 0
+    [ -n "$remaining" ] || break
+  done
+  [ "$saw_supported" -eq 1 ] && return 1
+  return 2
+}
+
+engine_status() {
+  tool="$1"; version="$2"; constraint="$3"
+  if [ -z "$constraint" ]; then
+    printf 'not configured'
+    return 0
+  fi
+  if [ -z "$version" ]; then
+    printf 'configured but failing'
+    return 0
+  fi
+  if version_satisfies_constraint "$version" "$constraint"; then
+    printf 'passed'
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      printf 'not run'
+    else
+      printf 'configured but failing'
+    fi
+  fi
+}
+
+tool_version() {
+  tool="$1"
+  command -v "$tool" >/dev/null 2>&1 || return 0
+  if [ "$tool" = "node" ]; then
+    "$tool" -v 2>/dev/null | sed 's/^v//' | head -1
+  else
+    "$tool" --version 2>/dev/null | head -1
+  fi
+}
+
+write_runtime_json() {
+  if [ -f "$REPO/package.json" ]; then
+    node_engine="$(jq -r '.engines.node // ""' "$REPO/package.json")"
+    npm_engine="$(jq -r '.engines.npm // ""' "$REPO/package.json")"
+    pnpm_engine="$(jq -r '.engines.pnpm // ""' "$REPO/package.json")"
+    yarn_engine="$(jq -r '.engines.yarn // ""' "$REPO/package.json")"
+  else
+    node_engine=""; npm_engine=""; pnpm_engine=""; yarn_engine=""
+  fi
+  node_version="$(tool_version node)"
+  npm_version="$(tool_version npm)"
+  pnpm_version="$(tool_version pnpm)"
+  yarn_version="$(tool_version yarn)"
+  node_status="$(engine_status node "$node_version" "$node_engine")"
+  npm_status="$(engine_status npm "$npm_version" "$npm_engine")"
+  pnpm_status="$(engine_status pnpm "$pnpm_version" "$pnpm_engine")"
+  yarn_status="$(engine_status yarn "$yarn_version" "$yarn_engine")"
+  jq -n \
+    --arg node_version "$node_version" --arg node_engine "$node_engine" --arg node_status "$node_status" \
+    --arg npm_version "$npm_version" --arg npm_engine "$npm_engine" --arg npm_status "$npm_status" \
+    --arg pnpm_version "$pnpm_version" --arg pnpm_engine "$pnpm_engine" --arg pnpm_status "$pnpm_status" \
+    --arg yarn_version "$yarn_version" --arg yarn_engine "$yarn_engine" --arg yarn_status "$yarn_status" \
+    '{
+      node:{version:(if $node_version == "" then null else $node_version end),engine:(if $node_engine == "" then null else $node_engine end),status:$node_status},
+      package_managers:{
+        npm:{version:(if $npm_version == "" then null else $npm_version end),engine:(if $npm_engine == "" then null else $npm_engine end),status:$npm_status},
+        pnpm:{version:(if $pnpm_version == "" then null else $pnpm_version end),engine:(if $pnpm_engine == "" then null else $pnpm_engine end),status:$pnpm_status},
+        yarn:{version:(if $yarn_version == "" then null else $yarn_version end),engine:(if $yarn_engine == "" then null else $yarn_engine end),status:$yarn_status}
+      }
+    }' > "$RUNTIME_JSON"
+
+  if [ "$node_status" = "configured but failing" ]; then
+    add_finding "runtime-engine-compatibility" "verification-contract-drift" "high" "package.json" 0 \
+      "local Node runtime does not satisfy engines.node" \
+      "Current Node ${node_version:-<missing>} does not satisfy engines.node ${node_engine}." \
+      "runtime-engine:node-version"
+  fi
+  for manager in npm pnpm yarn; do
+    status="$(jq -r --arg manager "$manager" '.package_managers[$manager].status' "$RUNTIME_JSON")"
+    engine="$(jq -r --arg manager "$manager" '.package_managers[$manager].engine // ""' "$RUNTIME_JSON")"
+    version="$(jq -r --arg manager "$manager" '.package_managers[$manager].version // ""' "$RUNTIME_JSON")"
+    if [ "$status" = "configured but failing" ]; then
+      add_finding "runtime-engine-compatibility" "verification-contract-drift" "high" "package.json" 0 \
+        "local $manager runtime does not satisfy engines.$manager" \
+        "Current $manager ${version:-<missing>} does not satisfy engines.$manager ${engine}." \
+        "runtime-engine:$manager-version"
+    fi
+  done
 }
 
 scan_text_files() {
@@ -168,49 +358,26 @@ if (cd "$REPO" && git rev-parse --is-inside-work-tree >/dev/null 2>&1); then
 fi
 
 # Probe: package-manager scripts, runtime engine, typecheck/lint/test/audit.
+write_runtime_json
 if [ -f "$REPO/package.json" ]; then
   for script in test lint typecheck; do
-    if ! has_package_script "$script"; then
-      add_finding "package-manager-scripts" "autospec-process-gap" "medium" "package.json" 0 \
-        "missing npm $script script" \
-        "package.json does not declare a $script script, so autospec cannot discover a standard $script gate." \
-        "package-script-missing:$script"
-    else
-      probe_npm_verification_script "$script"
-    fi
+    probe_npm_verification_script "$script"
   done
-  if ! has_package_script audit; then
-    dep_count="$(jq '((.dependencies // {}) + (.devDependencies // {})) | length' "$REPO/package.json" 2>/dev/null || echo 0)"
-    if [ "$dep_count" -gt 0 ]; then
-      add_finding "dependency-audit" "autospec-process-gap" "medium" "package.json" 0 \
-        "missing dependency audit script" \
-        "Dependencies are declared but no package-manager audit script is available for release/readiness checks." \
-        "dependency-audit:missing-script"
-    fi
-  else
-    probe_npm_audit_script
-  fi
+  probe_npm_audit_script
   if ! jq -e '.engines.node // empty' "$REPO/package.json" >/dev/null 2>&1; then
     add_finding "runtime-engine-compatibility" "autospec-process-gap" "low" "package.json" 0 \
       "missing Node engine declaration" \
       "package.json has no engines.node constraint, so autospec cannot compare local and expected runtime versions." \
       "runtime-engine:node-missing"
-  elif command -v node >/dev/null 2>&1; then
-    required="$(jq -r '.engines.node' "$REPO/package.json")"
-    current="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
-    min="$(printf '%s' "$required" | sed -n 's/.*>=\([0-9][0-9]*\).*/\1/p')"
-    if [ -n "$min" ] && [ -n "$current" ] && [ "$current" -lt "$min" ]; then
-      add_finding "runtime-engine-compatibility" "current-branch-regression" "high" "package.json" 0 \
-        "local Node runtime is below engines.node" \
-        "Current Node major $current does not satisfy engines.node $required." \
-        "runtime-engine:node-version"
-    fi
   fi
 else
   add_finding "package-manager-scripts" "autospec-process-gap" "medium" "." 0 \
     "missing package manager manifest" \
     "No package.json was found; JS/TS verification probes cannot discover scripts." \
     "package-manifest:missing"
+  for script in test lint typecheck audit; do
+    record_verification_lane "$script" "not configured" "" "package.json missing"
+  done
 fi
 
 # Probe: route coverage.
@@ -311,8 +478,10 @@ FINDINGS_JSON="$TMP_DIR/findings.json"
 SUPPRESSED_JSON="$TMP_DIR/suppressed.json"
 ISSUES_JSON="$TMP_DIR/issues.json"
 RISKS_JSON="$TMP_DIR/risks.json"
+VERIFICATION_JSON="$TMP_DIR/verification-lanes.json"
 ndjson_to_array "$FINDINGS_ND" > "$FINDINGS_JSON"
 ndjson_to_array "$SUPPRESSED_ND" > "$SUPPRESSED_JSON"
+ndjson_to_array "$VERIFICATION_ND" > "$VERIFICATION_JSON"
 
 issue_policy_permits=0
 if [ "$FILE_ISSUES" -eq 1 ] && [ "${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:-0}" = "1" ] && command -v gh >/dev/null 2>&1; then
@@ -391,6 +560,8 @@ jq -n \
   --argjson suppressed "$(cat "$SUPPRESSED_JSON")" \
   --argjson issue_links "$(cat "$ISSUES_JSON")" \
   --argjson residual_risks "$(cat "$RISKS_JSON")" \
+  --argjson runtime "$(cat "$RUNTIME_JSON")" \
+  --argjson verification_lanes "$(cat "$VERIFICATION_JSON")" \
   --argjson total_findings "$total_findings" \
   --argjson suppressed_findings "$suppressed_findings" \
   --argjson issue_links_count "$issue_count" \
@@ -405,6 +576,10 @@ jq -n \
       issue_links:$issue_links_count,
       unfiled_residual_risks:$risk_count
     },
+    runtime:$runtime,
+    verification:{
+      lanes:($verification_lanes | map({key:.lane,value:{status:.status,command:.command,detail:.detail}}) | from_entries)
+    },
     findings:$findings,
     suppressed:$suppressed,
     issue_links:$issue_links,
@@ -418,6 +593,20 @@ jq -n \
   printf -- '- Suppressed findings: %s\n' "$suppressed_findings"
   printf -- '- Filed issues: %s\n' "$issue_count"
   printf -- '- Unfiled residual risks: %s\n\n' "$risk_count"
+  printf '## Runtime and engines\n\n'
+  jq -r '
+    "- node: " + (.node.version // "unavailable") + " (engine: " + (.node.engine // "not configured") + ", status: " + .node.status + ")",
+    "- npm: " + (.package_managers.npm.version // "unavailable") + " (engine: " + (.package_managers.npm.engine // "not configured") + ", status: " + .package_managers.npm.status + ")",
+    "- pnpm: " + (.package_managers.pnpm.version // "unavailable") + " (engine: " + (.package_managers.pnpm.engine // "not configured") + ", status: " + .package_managers.pnpm.status + ")",
+    "- yarn: " + (.package_managers.yarn.version // "unavailable") + " (engine: " + (.package_managers.yarn.engine // "not configured") + ", status: " + .package_managers.yarn.status + ")"
+  ' "$RUNTIME_JSON"
+  printf '\n## Verification contract\n\n'
+  if [ "$(jq 'length' "$VERIFICATION_JSON")" -eq 0 ]; then
+    printf '(none)\n'
+  else
+    jq -r '.[] | "- " + .lane + ": " + .status + (if .command then " (`" + .command + "`)" else "" end)' "$VERIFICATION_JSON"
+  fi
+  printf '\n'
   printf '## Findings\n\n'
   if [ "$total_findings" -eq 0 ]; then
     printf '(none)\n'
