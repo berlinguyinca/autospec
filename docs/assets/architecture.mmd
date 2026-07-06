@@ -9,4 +9,7 @@ flowchart LR
     gates --> merge[Merge or blocker report]
     merge --> story[/autospec-story/]
     gates --> qa[/autospec-qa/]
-
+    spec --> rust[Rust core metadata parser]
+    rust --> graph[Dependency graph + state]
+    graph --> cli[autospec CLI]
+    cli --> showcase[Local showcase + growth report]

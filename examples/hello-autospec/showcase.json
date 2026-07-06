@@ -1,0 +1,6 @@
+{
+  "command": "showcase",
+  "status": "ok",
+  "demo": "examples/hello-autospec",
+  "network": "disabled"
+}

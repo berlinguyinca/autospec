@@ -65,3 +65,78 @@ copy_required_launch_files() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"README.md missing quickstart"* ]]
 }
+
+copy_public_launch_files() {
+  copy_required_launch_files
+
+  mkdir -p "$TMP_REPO/.autospec/releases" \
+    "$TMP_REPO/.autospec/reports" \
+    "$TMP_REPO/.autospec/handoff" \
+    "$TMP_REPO/docs/assets"
+
+  printf 'AUTOSPEC_PUBLIC_LAUNCH_READY=true\n' > "$TMP_REPO/.autospec/releases/launch-candidate.md"
+  printf 'final launch readiness\n' > "$TMP_REPO/.autospec/reports/final-launch-readiness.md"
+  printf 'V74 Final Release Candidate\nAUTOSPEC_PUBLIC_LAUNCH_READY=true\n' > "$TMP_REPO/.autospec/releases/final-release-candidate.md"
+  printf 'Final Platform Evidence\nbash scripts/validate.sh\n' > "$TMP_REPO/.autospec/reports/final-platform-evidence.md"
+  printf 'handoff\n' > "$TMP_REPO/.autospec/handoff/codex-final-handoff.md"
+  printf 'release checklist\n' > "$TMP_REPO/docs/release-checklist.md"
+  printf 'public launch checklist\n' > "$TMP_REPO/docs/public-launch-checklist.md"
+  printf 'good first issues\n' > "$TMP_REPO/docs/good-first-issues.md"
+  printf 'screenshots placeholder\n' > "$TMP_REPO/docs/assets/screenshots-placeholder.md"
+  printf 'social preview placeholder\n' > "$TMP_REPO/docs/assets/social-preview-placeholder.md"
+  printf 'Comparison\nCurrent Maturity And Limitations\nbash scripts/demo-recording.sh\nquickstart\n' > "$TMP_REPO/README.md"
+
+  for gate in validate-v25-baseline.sh validate-v60-release.sh validate-launch-readiness.sh; do
+    cat > "$TMP_REPO/scripts/$gate" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+printf 'stub gate passed\n'
+EOF
+    chmod +x "$TMP_REPO/scripts/$gate"
+  done
+}
+
+@test "public launch validator requires V74 final release candidate artifacts" {
+  copy_public_launch_files
+  rm "$TMP_REPO/.autospec/releases/final-release-candidate.md"
+
+  run bash "$TMP_REPO/scripts/validate-public-launch-readiness.sh"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"missing .autospec/releases/final-release-candidate.md"* ]]
+}
+
+@test "public launch validator rejects stale failing QA verdict without supersession marker" {
+  copy_public_launch_files
+  cat > "$TMP_REPO/.autospec/qa-verdict.json" <<'EOF'
+{
+  "verdict": "FAIL",
+  "head_sha": "older-sha"
+}
+EOF
+
+  run bash "$TMP_REPO/scripts/validate-public-launch-readiness.sh"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"stale failing .autospec/qa-verdict.json lacks historical supersession marker"* ]]
+}
+
+@test "public launch validator accepts stale failing QA verdict when marked historical" {
+  copy_public_launch_files
+  cat > "$TMP_REPO/.autospec/qa-verdict.json" <<'EOF'
+{
+  "verdict": "FAIL",
+  "head_sha": "older-sha",
+  "evidence_status": "historical_stale_not_current_launch_evidence",
+  "superseded_by": [
+    "bash scripts/validate.sh --fast",
+    "bash scripts/validate-public-launch-readiness.sh"
+  ]
+}
+EOF
+
+  run bash "$TMP_REPO/scripts/validate-public-launch-readiness.sh"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"AUTOSPEC_PUBLIC_LAUNCH_READY=true"* ]]
+}

@@ -9,6 +9,13 @@ the repo uses conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor
 
 ### Added
 
+#### V62-V74 final platform release candidate (2026-07-06)
+- Added an additive Rust workspace with `autospec-core` and `autospec-cli` for spec parsing, dependency ordering, state transitions, validation primitives, execution queue types, agent contracts, safety policy, evidence bundles, release reports, and local-only growth reporting.
+- Added the `autospec` CLI command surface with implemented `doctor` plus documented JSON/stub boundaries for `status`, `plan`, `validate`, `report`, `showcase`, and `growth-report`.
+- Added JSON schemas for spec metadata, execution order, spec state, run reports, agent results, evidence bundles, and release reports.
+- Added V74 release-candidate evidence under `.autospec/releases/` and `.autospec/reports/`, with public launch validation now requiring the final release candidate artifacts.
+- Updated docs, demo, safety, CLI reference, and growth trackers so the public launch story reflects the V62-V73 platform slice rather than V61-only readiness.
+
 #### V61 external launch readiness (2026-07-03)
 - Rewrote the top-level README for external developers with pitch, quickstart, demo, architecture, comparison, maturity, and contribution guidance.
 - Added the docs launch set: `docs/index.md`, `docs/quickstart.md`, `docs/concepts.md`, `docs/architecture.md`, `docs/workflows.md`, `docs/faq.md`, and `docs/roadmap.md`.

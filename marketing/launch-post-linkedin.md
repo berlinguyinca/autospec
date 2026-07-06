@@ -12,7 +12,7 @@ Start here:
 git clone https://github.com/berlinguyinca/autospec.git
 cd autospec
 bash scripts/demo-recording.sh
+cargo run --quiet --bin autospec -- doctor --json
 ```
 
 I am looking for feedback from developers using Claude Code, Codex CLI, or OpenCode on real repositories.
-

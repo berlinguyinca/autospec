@@ -38,6 +38,17 @@ bash scripts/demo-recording.sh
 
 The demo script prints a recording outline and points at `examples/hello-autospec/`. It does not create GitHub issues, push branches, or mutate another repository.
 
+## Try The Rust CLI
+
+The Rust CLI is additive while the existing skills and shell scripts remain the main workflow surface.
+
+```bash
+cargo run --bin autospec -- doctor --json
+cargo run --bin autospec -- --help
+```
+
+Commands such as `run`, `resume`, `init`, and `benchmark` are present as explicit non-zero stubs until later V62+ work wires them to the execution queue.
+
 ## Use AutoSpec In A Target Repo
 
 In your AI coding harness, start with planning:

@@ -28,3 +28,6 @@ Anything that affects production data, credentials, security posture, destructiv
 
 Look for fresh validation output, a closeout report with cited artifacts, passing CI where relevant, and a release verdict when shipping.
 
+## Does the Rust CLI replace the existing skills?
+
+No. The Rust CLI is additive V62+ platform work. Current users should still use the documented `/autospec-*` skills and shell validators unless a CLI command is explicitly documented as implemented.

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autospec.local/schemas/autospec-run-report.schema.json",
+  "title": "AutoSpec Run Report",
+  "type": "object",
+  "required": ["run_id", "passed", "failed", "blocked", "deferred", "superseded"],
+  "properties": {
+    "run_id": { "type": "string", "minLength": 1 },
+    "passed": { "type": "integer", "minimum": 0 },
+    "failed": { "type": "integer", "minimum": 0 },
+    "blocked": { "type": "integer", "minimum": 0 },
+    "deferred": { "type": "integer", "minimum": 0 },
+    "superseded": { "type": "integer", "minimum": 0 }
+  },
+  "additionalProperties": false
+}

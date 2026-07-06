@@ -1,0 +1,36 @@
+pub mod agent;
+pub mod error;
+pub mod evidence;
+pub mod execution;
+pub mod graph;
+pub mod growth;
+pub mod safety;
+pub mod spec;
+pub mod state;
+pub mod validation;
+
+pub use error::AutospecError;
+
+pub const WORKSPACE_NAME: &str = "autospec";
+pub const RUST_CORE_CHECK: &str = "rust-core-workspace";
+
+pub fn doctor_report_json() -> String {
+    format!(
+        "{{\"status\":\"ok\",\"workspace\":\"{}\",\"checks\":[\"{}\"]}}\n",
+        WORKSPACE_NAME, RUST_CORE_CHECK
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doctor_report_names_workspace_and_core_check() {
+        let report = doctor_report_json();
+
+        assert!(report.contains("\"status\":\"ok\""));
+        assert!(report.contains("\"workspace\":\"autospec\""));
+        assert!(report.contains("\"rust-core-workspace\""));
+    }
+}

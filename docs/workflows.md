@@ -23,6 +23,20 @@ Output:
 - Reviewer result
 - Closeout report
 
+## V62+ Core State
+
+The Rust core adds a planning foundation beneath the existing workflows. Specs move through explicit lifecycle states: planned, ready, running, passed, failed, blocked, deferred, and superseded. Validation registry entries record command, working directory, timeout, and whether a gate is required.
+
+This core state does not replace `/autospec-run`; it gives later V66+ queue work a deterministic state model while current shell workflows remain the operational surface.
+
+The V66 queue layer builds on that state with ordered entries, attempts, failure classification, blocked-spec handoff markdown, and final run-report summaries. Agent execution remains a later integration layer; the queue is the resumable local model.
+
+## Rust CLI
+
+The `autospec` Rust binary exposes the V62+ command surface while preserving the skill-first workflow. `doctor`, `status`, `plan`, `validate`, `report`, `showcase`, and `growth-report` support `--json`. Mutating commands that are not wired yet, such as `init`, `run`, `resume`, and `benchmark`, exit non-zero with an explicit `not yet implemented` message.
+
+See [`docs/cli-reference.md`](cli-reference.md) for the command table.
+
 ## Split An Existing Spec
 
 Use `/autospec-split` when a design already exists under `docs/specs/`.
@@ -65,4 +79,3 @@ Output:
 - Graceful stop, immediate pause, or resume action
 - Preserved issue context
 - Clean monitor state
-

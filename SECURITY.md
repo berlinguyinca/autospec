@@ -23,3 +23,4 @@ Maintainers will triage reports based on exploitability, blast radius, and wheth
 
 AutoSpec can execute shell commands and interact with GitHub through the operator's environment. Do not run it in repositories or shells where the available credentials exceed the work you are willing to delegate.
 
+The V72 Rust safety layer blocks common unsafe operation categories in safe mode and redacts common token/key shapes in text evidence. Treat that as a guardrail, not a sandbox: operators still own credential scope, shell environment, and production access.

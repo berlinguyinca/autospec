@@ -6,7 +6,6 @@ AutoSpec is a repository of skills, scripts, schemas, and docs for running AI-as
 
 It helps turn feature requests into design specs, linked GitHub issues, model-fit labels, implementation PRs, validation gates, and closeout reports.
 
-It currently targets Claude Code, Codex CLI, and OpenCode. The V61 launch focus is documentation, examples, safety posture, and a deterministic launch-readiness validator rather than new autonomy features.
+It currently targets Claude Code, Codex CLI, and OpenCode. The current release-candidate focus is documentation, examples, safety posture, deterministic launch-readiness validation, and an additive Rust core/CLI foundation.
 
 Repo: https://github.com/berlinguyinca/autospec
-
