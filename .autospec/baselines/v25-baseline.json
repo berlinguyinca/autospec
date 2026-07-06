@@ -1,0 +1,29 @@
+{
+  "baseline": "v25",
+  "status": "ready",
+  "generated_at": "2026-07-03",
+  "head_sha": "e65d6df1314d65fe9a370418ad5955500642a7bc",
+  "repository": "Berlinguyinca/autospec",
+  "source": "launch-readiness recovery pass",
+  "inventory": {
+    "spec_files": 155,
+    "skill_surfaces": 31,
+    "script_files": 113,
+    "test_files": 493,
+    "launch_docs": 7
+  },
+  "validation": {
+    "cargo_fmt_check": "not_applicable_no_cargo_toml",
+    "cargo_clippy_all_targets_all_features": "not_applicable_no_cargo_toml",
+    "cargo_test_all": "not_applicable_no_cargo_toml",
+    "validate_fast": "pass",
+    "validate_launch_readiness": "pass",
+    "qa_artifact_schema_validation": "pass_with_missing_optional_artifact_warnings"
+  },
+  "notes": [
+    "At the time this V25 baseline was captured, no Cargo.toml or Rust source files were present in that checkout.",
+    "The stale .autospec/qa-verdict.json predates this launch pass and is not treated as current launch evidence.",
+    "V25 baseline readiness is represented by this baseline JSON plus .autospec/releases/v25.md and supporting reports."
+  ],
+  "gate": "V25_BASELINE_READY=true"
+}
