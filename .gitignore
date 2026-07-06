@@ -42,12 +42,20 @@ batch-donel.json
 !.autospec/growth/
 !.autospec/growth/**
 # Keep final-platform release-candidate evidence.
+!.autospec/baselines/
+.autospec/baselines/*
+!.autospec/baselines/v25-baseline.json
 !.autospec/releases/
 .autospec/releases/*
+!.autospec/releases/v25.md
+!.autospec/releases/v60.md
 !.autospec/releases/launch-candidate.md
 !.autospec/releases/final-release-candidate.md
 !.autospec/reports/
 .autospec/reports/*
+!.autospec/reports/repository-audit.md
+!.autospec/reports/spec-inventory.md
+!.autospec/reports/dependency-validation.md
 !.autospec/reports/final-launch-readiness.md
 !.autospec/reports/final-platform-evidence.md
 !.autospec/handoff/
