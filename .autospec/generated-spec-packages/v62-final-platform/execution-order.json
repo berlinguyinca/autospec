@@ -1,0 +1,16 @@
+[
+  "v61-recovery-public-launch-validation",
+  "v62-rust-core-workspace",
+  "v63-spec-metadata-parser",
+  "v64-dependency-graph-ordering",
+  "v65-spec-state-validation",
+  "v66-autonomous-execution-queue",
+  "v67-agent-integration-contracts",
+  "v68-evidence-release-reporting",
+  "v69-cli-productization",
+  "v70-documentation-hardening",
+  "v72-trust-safety-hardening",
+  "v71-demo-launch-assets",
+  "v73-metrics-growth-tooling",
+  "v74-final-release-candidate"
+]

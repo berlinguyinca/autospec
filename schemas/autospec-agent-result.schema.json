@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autospec.local/schemas/autospec-agent-result.schema.json",
+  "title": "AutoSpec Agent Result",
+  "type": "object",
+  "required": ["result", "files_changed", "validation", "blockers", "handoff"],
+  "properties": {
+    "result": { "type": "string" },
+    "files_changed": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "validation": { "type": "string" },
+    "blockers": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "handoff": { "type": "string" }
+  },
+  "additionalProperties": false
+}

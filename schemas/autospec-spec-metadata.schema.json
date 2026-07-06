@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autospec.local/schemas/autospec-spec-metadata.schema.json",
+  "title": "AutoSpec Spec Metadata",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "version",
+    "status",
+    "objective",
+    "dependencies",
+    "acceptance_criteria",
+    "validation_command"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^v[0-9]+-[a-z0-9-]+$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^V[0-9]+$"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ready", "completed", "blocked", "deferred", "superseded"]
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^v[0-9]+-[a-z0-9-]+$"
+      }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "validation_command": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autospec.local/schemas/autospec-release-report.schema.json",
+  "title": "AutoSpec Release Report",
+  "type": "object",
+  "required": ["version", "passed", "failed", "blocked", "deferred", "superseded"],
+  "properties": {
+    "version": { "type": "string" },
+    "passed": { "type": "integer", "minimum": 0 },
+    "failed": { "type": "integer", "minimum": 0 },
+    "blocked": { "type": "integer", "minimum": 0 },
+    "deferred": { "type": "integer", "minimum": 0 },
+    "superseded": { "type": "integer", "minimum": 0 }
+  },
+  "additionalProperties": false
+}

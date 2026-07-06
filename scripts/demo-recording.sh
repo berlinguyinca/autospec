@@ -7,6 +7,8 @@ cat <<EOF
 AutoSpec demo outline
 =====================
 
+Safe mode: demo only. No network, GitHub mutation, branch push, merge, release upload, or destructive filesystem operation is required.
+
 1. Start at README.md and read the one-line pitch.
 2. Open examples/hello-autospec/spec.md.
 3. Open examples/hello-autospec/sample-issue.md.
@@ -20,4 +22,3 @@ This demo is read-only. It does not create GitHub issues, push branches, or muta
 
 Repository: $ROOT
 EOF
-

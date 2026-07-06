@@ -11,7 +11,7 @@ git clone https://github.com/berlinguyinca/autospec.git
 cd autospec
 bash scripts/validate.sh --fast
 bash scripts/demo-recording.sh
+cargo run --quiet --bin autospec -- doctor --json
 ```
 
 Good first feedback: install friction, unclear docs, missing examples, and places where the workflow feels too heavy.
-

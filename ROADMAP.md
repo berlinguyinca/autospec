@@ -2,27 +2,25 @@
 
 This file is the public roadmap summary. Detailed design history lives under `docs/specs/`.
 
-## V61 External Launch Readiness
+## V74 Final Release Candidate
 
-Status: in progress.
+Status: release-candidate validation.
 
 Goals:
 
-- External-facing README.
-- Docs launch set.
-- Community and safety files.
-- Demo materials.
-- Launch copy.
-- Launch-readiness validator.
+- Preserve the external-facing README, docs launch set, community files, demo, and launch copy.
+- Keep V25/V60/V61/public launch gates current.
+- Ship the additive Rust core workspace and CLI reference without replacing the validated shell workflows.
+- Capture release-candidate evidence under `.autospec/releases/` and `.autospec/reports/`.
 
-## After V61
+## After V74
 
 - Record the demo video and link it from the README.
 - Collect external installation feedback.
 - Improve examples for common stacks.
 - Continue hardening validation and release gates.
 - Replace screenshot and social-preview placeholders with real launch assets.
-- Keep V25/V60/V61/public launch gates current as release evidence changes.
+- Mature `autospec init`, `status`, `plan`, `validate`, `run`, `resume`, `report`, `showcase`, `benchmark`, and `growth-report` from explicit stubs into operational Rust-backed commands.
 
 ## Later
 

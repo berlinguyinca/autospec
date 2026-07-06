@@ -6,5 +6,6 @@ Feature request -> design spec -> GitHub issues -> model-fit labels -> PRs -> va
 
 Built for Claude Code, Codex CLI, and OpenCode.
 
-Repo: https://github.com/berlinguyinca/autospec
+Current release candidate adds an additive Rust core/CLI foundation while keeping the validated shell workflows.
 
+Repo: https://github.com/berlinguyinca/autospec

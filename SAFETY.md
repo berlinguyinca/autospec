@@ -10,6 +10,8 @@ AutoSpec is designed for auditable agentic development, not blind delegation.
 - Deterministic validation before success claims.
 - Closeout reports that identify hidden failure risk.
 - Human ownership of production, credentials, and destructive actions.
+- V72 safe mode blocks destructive git, credential access, production mutation, filesystem deletion, and network publication by default in the Rust core.
+- Evidence and logs should redact common GitHub token and AWS access-key shapes before being shared.
 
 ## Operator Responsibilities
 
@@ -22,4 +24,3 @@ AutoSpec is designed for auditable agentic development, not blind delegation.
 ## Not A Guarantee
 
 AutoSpec reduces coordination risk, but it cannot guarantee that generated code is correct, secure, compliant, or appropriate for production. Use normal engineering review for security-sensitive, legal, financial, medical, infrastructure, and data-migration work.
-

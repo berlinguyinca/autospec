@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autospec.local/schemas/autospec-spec-state.schema.json",
+  "title": "AutoSpec Spec State",
+  "type": "object",
+  "required": ["spec_id", "state", "deferred_reason", "superseded_by"],
+  "properties": {
+    "spec_id": {
+      "type": "string",
+      "pattern": "^v[0-9]+-[a-z0-9-]+$"
+    },
+    "state": {
+      "type": "string",
+      "enum": ["planned", "ready", "running", "passed", "failed", "blocked", "deferred", "superseded"]
+    },
+    "deferred_reason": {
+      "type": ["string", "null"]
+    },
+    "superseded_by": {
+      "type": ["string", "null"],
+      "pattern": "^v[0-9]+-[a-z0-9-]+$"
+    }
+  },
+  "additionalProperties": false
+}

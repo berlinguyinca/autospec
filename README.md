@@ -105,6 +105,14 @@ flowchart LR
 
 The Mermaid source lives in [`docs/assets/architecture.mmd`](docs/assets/architecture.mmd). See [`docs/architecture.md`](docs/architecture.md) for the longer explanation.
 
+## Rust Core Workspace
+
+AutoSpec now includes an early Rust workspace under `crates/` for the V62+ core platform work. The Rust surface is intentionally narrow: `autospec-core` owns future spec parsing, dependency ordering, state, validation, and evidence primitives, while `autospec-cli` currently exposes only `autospec doctor`.
+
+The existing shell, Python, JavaScript, and skill workflows remain the operational surface for current users. The Rust workspace is additive until later V62+ specs wire stable commands.
+
+See [`docs/cli-reference.md`](docs/cli-reference.md) for the current Rust CLI command surface and which commands are implemented versus explicit stubs.
+
 ## Core Workflows
 
 | Goal | Start with | Output |
@@ -152,6 +160,7 @@ Start here:
 - [`docs/good-first-issues.md`](docs/good-first-issues.md)
 - [`docs/release-checklist.md`](docs/release-checklist.md)
 - [`docs/public-launch-checklist.md`](docs/public-launch-checklist.md)
+- [`docs/cli-reference.md`](docs/cli-reference.md)
 
 ## Contributing
 
