@@ -115,6 +115,75 @@ _install_stub() {
   grep -q 'autospec-run-called' "$run_log"
 }
 
+# ── 1b. Runtime PATH includes ~/.autospec/bin for installed helper commands ──
+@test "conductor: prefixes ~/.autospec/bin onto PATH before gate runs" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '"'"'{"tier":1,"action":"run-backlog","reason":"test"}\n'"'"''
+
+  mkdir -p "$HOME/.autospec/bin"
+  local path_log="$TEST_TMP/path.log"
+  _install_stub "autonomous-premerge-gate.sh" \
+    "case \":\$PATH:\" in *\":\$HOME/.autospec/bin:\"*) printf 'merge-ok\n'; printf 'path-ok\n' >> \"$path_log\";; *) printf 'halt missing-path\n'; exit 2;; esac"
+
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  local run_log="$TEST_TMP/run.log"
+  export AUTOSPEC_RUN_CMD="printf 'autospec-run-called\n' >> '$run_log'"
+
+  run bash -c "
+    export PATH='$FAKE_BIN:/usr/bin:/bin'
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ -f "$path_log" ]
+  grep -q 'path-ok' "$path_log"
+}
+
+# ── 1c. Phase-1 discovery park exits without sandbox/explore side effects ────
+@test "conductor: park action exits without running backlog or discovery" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '"'"'{"tier":1,"action":"park","reason":"discovery tiers disabled in Phase 1"}\n'"'"''
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  local run_log="$TEST_TMP/run.log"
+  export AUTOSPEC_RUN_CMD="printf 'should-not-run\n' >> '$run_log'"
+  export AUTOSPEC_EXPLORE_CMD="printf 'should-not-explore\n' >> '$run_log'"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=5 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [[ "$output" == *"parking"* ]]
+  if [ -f "$run_log" ]; then
+    ! grep -q 'should-not-' "$run_log"
+  fi
+}
+
 @test "conductor: empty Tier-1 queue skips drain and spend increment" {
   _install_stub "autonomous-control-channel.sh" \
     'exit 0'

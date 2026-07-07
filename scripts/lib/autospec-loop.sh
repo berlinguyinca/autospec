@@ -436,6 +436,13 @@ PY
 #   set -eu; if/then/fi for one-sided conditionals; no RETURN traps;
 #   jq: use capture()/== never interpolated test() for dynamic values.
 autospec_conductor_run() {
+    if [ -n "${HOME:-}" ]; then
+        case ":${PATH:-}:" in
+            *":$HOME/.autospec/bin:"*) ;;
+            *) PATH="$HOME/.autospec/bin:${PATH:-}"; export PATH ;;
+        esac
+    fi
+
     # Resolve scripts directory: explicit override > AUTOSPEC_SCRIPTS_DIR > sibling of lib/.
     local _sdir
     _sdir="${CONDUCTOR_SCRIPTS_DIR:-${AUTOSPEC_SCRIPTS_DIR:-$(cd "$_AUTOSPEC_LOOP_LIB_DIR/.." && pwd)}}"
@@ -801,12 +808,19 @@ fi'
         local _action
         _action="$(printf '%s' "$_tier_json" \
             | jq -r '.action // "run-backlog"' 2>/dev/null || echo "run-backlog")"
+        local _reason
+        _reason="$(printf '%s' "$_tier_json" \
+            | jq -r '.reason // ""' 2>/dev/null || echo "")"
 
         printf '[conductor] tier=%s action=%s\n' "$_tier" "$_action" >&2
 
         # ── Step 4 + 5: Tier-1 drain gated on premerge check ─────────────────
         local _work_done=0
-        if [ "$_tier" = "1" ] && [ "$_action" = "run-backlog" ]; then
+        if [ "$_action" = "park" ]; then
+            printf '[conductor] parking: %s\n' "$_reason" >&2
+            _stop_reason="waterfall:park:${_reason}"
+            break
+        elif [ "$_tier" = "1" ] && [ "$_action" = "run-backlog" ]; then
             local _skip_tier1_cycle=0
             local _queue_ready_len=""
             local _queue_batch_len=""
@@ -988,6 +1002,12 @@ fi'
 
         elif [ "$_action" = "run-explore-once" ] || [ "$_action" = "run-explore-once-internet" ]; then
             # ── Tier 2/3: discovery via autospec-explore --once ───────────────
+            if [ "${AUTOSPEC_ENABLE_DISCOVERY_TIERS:-0}" != "1" ]; then
+                printf '[conductor] Tier %s discovery disabled in Phase 1 — parking: %s\n' \
+                    "$_tier" "$_reason" >&2
+                _stop_reason="discovery-disabled:${_reason}"
+                break
+            fi
             # F3: ensure explore sandbox exists before filing discovery issues.
             # Idempotent — explore-sandbox.sh is a no-op when the branch already
             # exists.  The implementer's phase4 contract reads explore-mode.json

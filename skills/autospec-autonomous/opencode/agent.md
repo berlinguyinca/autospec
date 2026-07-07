@@ -139,11 +139,11 @@ This is the primary Phase-1 loop body.
 
 | Tier | Description | Phase |
 |------|-------------|-------|
-| Tier 2 | Local discovery via `/autospec-explore` single-cycle interface — activates after 2 dry Tier-1 cycles. **Blocked on `autospec-explore` single-cycle interface (not yet built).** | Phase 2 |
-| Tier 3 | Competitor / internet discovery via `/autospec-explore --research-sources internet`. **Blocked on Phase 2 being proven.** | Phase 2 |
+| Tier 2 | Local discovery via `/autospec-explore` single-cycle interface — activates after 2 dry Tier-1 cycles only when `AUTOSPEC_ENABLE_DISCOVERY_TIERS=1`. **Blocked by default in Phase 1.** | Phase 2 |
+| Tier 3 | Competitor / internet discovery via `/autospec-explore --research-sources internet` only when `AUTOSPEC_ENABLE_DISCOVERY_TIERS=1`. **Blocked by default in Phase 1.** | Phase 2 |
 | Tier 4 | Operator polish lenses, persona model, self-brainstorm panel, `/autospec-persona` interview. | Phase 3 |
 
-The conductor detects a dry cycle count (`dry_cycle >= 2`) but does NOT activate Tier 2 or above in Phase 1. It parks and notifies the operator instead. This is a deliberate safety gate: prove the backlog loop ships to `main` safely before enabling autonomous discovery.
+The conductor detects a dry cycle count (`dry_cycle >= 2`) but does NOT activate Tier 2 or above in Phase 1. It parks and notifies the operator instead. This is a deliberate safety gate: prove the backlog loop ships to `main` safely before enabling autonomous discovery. Operators can enable the implemented-but-off discovery path explicitly with `AUTOSPEC_ENABLE_DISCOVERY_TIERS=1`.
 
 ## Usage observability (F6a spike finding)
 
