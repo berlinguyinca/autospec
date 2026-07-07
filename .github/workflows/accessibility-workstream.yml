@@ -1,0 +1,36 @@
+name: Accessibility workstream
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  accessibility-workstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate accessibility workstream contract
+        run: |
+          bash -n scripts/accessibility-workstream.sh
+          bash scripts/accessibility-workstream.sh validate-design-doc --doc docs/runbooks/accessibility-workstream.md
+          work="$(mktemp -d)"
+          ledger="$work/scans.jsonl"
+          bash scripts/accessibility-workstream.sh record-scan \
+            --ledger "$ledger" --commit "${GITHUB_SHA}" --theme light \
+            --axe-violations 0 --pa11y-errors 0 --lighthouse-a11y 100 \
+            --ibm-violations 0 --auto-fixable 0 --judgment-findings 0
+          bash scripts/accessibility-workstream.sh record-scan \
+            --ledger "$ledger" --commit "${GITHUB_SHA}" --theme dark \
+            --axe-violations 0 --pa11y-errors 0 --lighthouse-a11y 100 \
+            --ibm-violations 0 --auto-fixable 0 --judgment-findings 0
+          bash scripts/accessibility-workstream.sh gate --ledger "$ledger" --commit "${GITHUB_SHA}"
+      - name: Run accessibility deterministic gate when scans exist
+        run: |
+          if [ -f .autospec/accessibility/scans.jsonl ]; then
+            bash scripts/accessibility-workstream.sh gate \
+              --ledger .autospec/accessibility/scans.jsonl \
+              --commit "${GITHUB_SHA}" \
+              --findings-out .autospec/accessibility/findings.jsonl
+          else
+            echo "No accessibility scans present; contract validation covered helper/runbook wiring."
+          fi
