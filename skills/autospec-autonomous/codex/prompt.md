@@ -63,6 +63,7 @@ or after `. "$HOME/.autospec/env"`:
 |---------|---------|
 | `autospec-autonomous [start]` | Start the detached conductor. |
 | `autospec-autonomous-status` | Print PID, log path, conductor state, spend ledger, and recent log tail. |
+| `autospec-autonomous-timeline` | Print a chronological plain-English activity report from the conductor log. |
 | `autospec-autonomous-logs` | Print the current conductor log tail. |
 | `autospec-autonomous-watch` | Follow the current conductor log. |
 | `autospec-autonomous-stop --graceful` | Request stop after the current issue/cycle boundary. |
@@ -80,8 +81,10 @@ omx exec --cd "$AUTOSPEC_REPO_DIR" --dangerously-bypass-approvals-and-sandbox '$
 ```
 
 Use `autospec-autonomous status --json` for monitoring integrations. Use
-`--repo-dir DIR` when launching from outside the target checkout, and use
-`--repo OWNER/REPO` when the GitHub slug cannot be detected.
+`autospec-autonomous timeline --lines N` when an operator needs a human-readable
+sequence such as `4:30 am - implemented feature X` and `4:45 am - started
+research on X`. Use `--repo-dir DIR` when launching from outside the target
+checkout, and use `--repo OWNER/REPO` when the GitHub slug cannot be detected.
 
 ## Required capabilities & harness adapter
 
@@ -279,7 +282,7 @@ autospec-autonomous start [--max-cycles N] [--dry-run] [--no-digest] [--poll-int
 - `skills/autospec-autonomous/SKILL.md` — Claude Code adapter (authoritative).
 - `skills/autospec-autonomous/codex/prompt.md` — Codex CLI mirror (lockstep).
 - `skills/autospec-autonomous/opencode/agent.md` — OpenCode mirror (lockstep).
-- `autospec-autonomous.sh` — installed operator lifecycle command (`start`, `status`, `logs`, `watch`, `stop`, `restart`).
+- `autospec-autonomous.sh` — installed operator lifecycle command (`start`, `status`, `timeline`, `logs`, `watch`, `stop`, `restart`).
 - `autospec-autonomous-run-drain.sh` — installed Tier-1 drain wrapper that runs `$autospec-run` through `omx exec`.
 - `autospec-loop.sh` (shared loop driver, `${AUTOSPEC_SCRIPTS_DIR}/lib/`) — extended with `autospec_conductor_run()`, the never-idle conductor entry point wiring control-channel → waterfall → Tier 1.5 promotion / Tier 2–4 discovery → premerge-gate → drain → spend-ledger → resilience → digest (issue #1378).
 - `autonomous-control-channel.sh` — label query → command decision (Phase 1, Issue #1373).

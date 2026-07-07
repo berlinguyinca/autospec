@@ -237,7 +237,7 @@ install_autonomous_operator_commands() {
 
     mkdir -p "$autospec_bin_dir"
     chmod +x "$launcher"
-    for command in autospec-autonomous autospec-autonomous-status autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-stop autospec-autonomous-restart; do
+    for command in autospec-autonomous autospec-autonomous-status autospec-autonomous-timeline autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-stop autospec-autonomous-restart; do
         target="$autospec_bin_dir/$command"
         subcommand="${command#autospec-autonomous-}"
         if [ "$subcommand" = "$command" ]; then

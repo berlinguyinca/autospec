@@ -34,6 +34,47 @@ teardown() {
   [ "$output" = "second" ]
 }
 
+@test "operator cli: timeline summarizes conductor log in plain English" {
+  mkdir -p "$HOME/.autospec/autonomous-operator" "$TEST_TMP/logs"
+  printf '%s\n' "$TEST_TMP/logs/conductor.log" > "$HOME/.autospec/autonomous-operator/conductor.logpath"
+  cat > "$TEST_TMP/logs/conductor.log" <<'EOF'
+{
+  "updated_at": "2026-07-07T09:45:04Z"
+}
+Hook audit addressed.
+Changed:
+- `scripts/check-doc-drift.sh`
+- `skills/autospec-shared/scripts/check-doc-drift.sh`
+Verified:
+- `bash -n scripts/check-doc-drift.sh`
+- `bats skills/autospec-shared/tests/unit/check-doc-drift.bats --filter 'docs: skip|partial match'`
+[conductor] cycle 2 starting
+HEARTBEAT_AT:1783417565
+[conductor] tier=1 action=run-backlog
+[conductor] main-health pending — skipping drain this cycle
+{
+  "updated_at": "2026-07-07T09:46:13Z"
+}
+[conductor] cycle 3 starting
+HEARTBEAT_AT:1783417633
+[conductor] tier=1 action=run-backlog
+workdir: /tmp/autospec
+user
+$autospec-run
+EOF
+
+  run bash "$CLI" timeline --lines 80
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"autospec-autonomous timeline"* ]]
+  [[ "$output" == *"addressed a hook audit finding."* ]]
+  [[ "$output" == *"updated scripts/check-doc-drift.sh and skills/autospec-shared/scripts/check-doc-drift.sh."* ]]
+  [[ "$output" == *"verified 2 checks:"* ]]
+  [[ "$output" == *"started autonomous cycle 2."* ]]
+  [[ "$output" == *"skipped the backlog drain because main health was still pending."* ]]
+  [[ "$output" == *"started autospec-run in /tmp/autospec."* ]]
+}
+
 @test "operator cli: status finds spend ledger with alternate .git slug" {
   mkdir -p "$HOME/.autospec/autonomous-spend/berlinguyinca_autospec.git"
   printf '{"issues":7,"tokens":0}\n' > "$HOME/.autospec/autonomous-spend/berlinguyinca_autospec.git/spend.json"

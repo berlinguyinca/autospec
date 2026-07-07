@@ -46,7 +46,7 @@ grep -qxF '. "$HOME/.autospec/env"' "$TEST_HOME/.bashrc" || {
     exit 1
 }
 
-for command in autospec-autonomous autospec-autonomous-status autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-stop autospec-autonomous-restart; do
+for command in autospec-autonomous autospec-autonomous-status autospec-autonomous-timeline autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-stop autospec-autonomous-restart; do
     [ -x "$TEST_HOME/.autospec/bin/$command" ] || {
         echo "FAIL: $command wrapper was not installed"
         ls -la "$TEST_HOME/.autospec/bin" || true

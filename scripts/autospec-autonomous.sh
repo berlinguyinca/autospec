@@ -26,11 +26,12 @@ AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES="${AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES:-}"
 
 usage() {
     cat <<'EOF'
-Usage: autospec-autonomous [start|status|logs|watch|stop|restart] [options]
+Usage: autospec-autonomous [start|status|timeline|logs|watch|stop|restart] [options]
 
 Commands:
   start      Start the detached autonomous conductor (default).
   status     Print PID, log path, conductor state, and spend ledger summary.
+  timeline   Print a chronological plain-English activity report.
   logs       Print the current conductor log tail.
   watch      Follow the current conductor log.
   stop       Write the autospec stop sentinel for a running conductor.
@@ -46,7 +47,7 @@ Options:
   --repo-dir DIR          Run autospec-run from this checkout.
   --repo OWNER/REPO       Override GitHub repo slug for conductor helpers.
   --log PATH              Write the conductor log to PATH.
-  --lines N               Log lines for logs/status output.
+  --lines N               Log lines for logs/status/timeline output.
   --json                  Machine-readable status output.
   --foreground            Run in the current shell instead of detaching.
   --force                 Replace stale PID metadata or restart a live process.
@@ -180,6 +181,194 @@ print_status() {
     fi
 }
 
+print_timeline() {
+    if [ "$LOG_OVERRIDE" -eq 1 ]; then
+        _log="${AUTOSPEC_AUTONOMOUS_LOG:-}"
+    else
+        _log="$(read_logpath || true)"
+    fi
+    [ -n "$_log" ] || die "no conductor log path recorded"
+    [ -f "$_log" ] || die "conductor log not found: $_log"
+    if ! command -v python3 >/dev/null 2>&1; then
+        die "timeline requires python3"
+    fi
+
+    python3 - "$_log" "$LINES" <<'PY'
+from collections import deque
+from datetime import datetime, timezone
+import re
+import sys
+
+log_path = sys.argv[1]
+try:
+    line_count = int(sys.argv[2])
+except (IndexError, ValueError):
+    line_count = 200
+
+with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+    lines = list(deque(handle, maxlen=max(line_count, 1)))
+
+events = []
+current_time = None
+last_workdir = ""
+
+
+def parse_iso(value):
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def set_updated_time(line):
+    global current_time
+    match = re.search(r'"updated_at"\s*:\s*"([^"]+)"', line)
+    if match:
+        parsed = parse_iso(match.group(1))
+        if parsed is not None:
+            current_time = parsed
+
+
+def set_heartbeat_time(line):
+    global current_time
+    match = re.match(r"HEARTBEAT_AT:(\d+)\s*$", line)
+    if match:
+        current_time = datetime.fromtimestamp(int(match.group(1)), tz=timezone.utc)
+
+
+def add(text, when=None):
+    clean = " ".join(text.strip().split())
+    if clean:
+        events.append((when if when is not None else current_time, clean))
+
+
+def summarize_paths(paths):
+    if not paths:
+        return ""
+    if len(paths) == 1:
+        return paths[0]
+    if len(paths) == 2:
+        return f"{paths[0]} and {paths[1]}"
+    return f"{', '.join(paths[:-1])}, and {paths[-1]}"
+
+
+i = 0
+while i < len(lines):
+    raw = lines[i].rstrip("\n")
+    line = raw.strip()
+    set_updated_time(line)
+    set_heartbeat_time(line)
+
+    if line.startswith("workdir:"):
+        last_workdir = line.split(":", 1)[1].strip()
+
+    cycle = re.match(r"\[conductor\] cycle ([0-9]+) starting", line)
+    if cycle:
+        add(f"started autonomous cycle {cycle.group(1)}")
+        i += 1
+        continue
+
+    tier = re.match(r"\[conductor\] tier=([0-9]+) action=([a-z0-9_-]+)", line)
+    if tier:
+        action = tier.group(2).replace("-", " ")
+        if tier.group(1) == "1" and tier.group(2) == "run-backlog":
+            add("started Tier 1 backlog-to-main work")
+        else:
+            add(f"started Tier {tier.group(1)} {action}")
+        i += 1
+        continue
+
+    if "main-health pending" in line and "skipping drain" in line:
+        add("skipped the backlog drain because main health was still pending")
+        i += 1
+        continue
+
+    if "Hook audit addressed." in line:
+        add("addressed a hook audit finding")
+        i += 1
+        continue
+
+    if line == "Changed:":
+        changed = []
+        j = i + 1
+        while j < len(lines):
+            item = lines[j].strip()
+            if item.startswith("- "):
+                changed.append(item[2:].strip("` "))
+                j += 1
+                continue
+            break
+        summary = summarize_paths(changed)
+        if summary:
+            add(f"updated {summary}")
+        i = j
+        continue
+
+    if line == "Verified:":
+        verified = []
+        j = i + 1
+        while j < len(lines):
+            item = lines[j].strip()
+            if item.startswith("- "):
+                verified.append(item[2:].strip())
+                j += 1
+                continue
+            break
+        if verified:
+            add(f"verified {len(verified)} checks: {', '.join(verified)}")
+        i = j
+        continue
+
+    if line == "user" and i + 1 < len(lines) and lines[i + 1].strip() == "$autospec-run":
+        if last_workdir:
+            add(f"started autospec-run in {last_workdir}")
+        else:
+            add("started autospec-run")
+        i += 2
+        continue
+
+    if line.startswith("$autospec-run"):
+        add("started autospec-run")
+        i += 1
+        continue
+
+    pr = re.search(r"https://github\.com/[^/]+/[^/]+/pull/([0-9]+)", line)
+    if pr:
+        add(f"opened or referenced PR #{pr.group(1)}")
+
+    i += 1
+
+
+def fmt(when):
+    if when is None:
+        return "time unknown"
+    local = when.astimezone()
+    text = local.strftime("%I:%M %p").lstrip("0").lower()
+    return text
+
+
+if not events:
+    print("No timeline events found in the selected log window.")
+    sys.exit(0)
+
+first_known = next((when for when, _ in events if when is not None), None)
+if first_known is not None:
+    events = [(first_known if when is None else when, text) for when, text in events]
+
+print("autospec-autonomous timeline")
+previous = None
+seen = set()
+for when, text in events:
+    row = (fmt(when), text)
+    if row == previous or row in seen:
+        continue
+    previous = row
+    seen.add(row)
+    suffix = "" if row[1].endswith((".", "!", "?")) else "."
+    print(f"{row[0]} - {row[1]}{suffix}")
+PY
+}
+
 ensure_not_running() {
     _pid="$(read_pid || true)"
     if is_pid_alive "$_pid"; then
@@ -288,7 +477,7 @@ stop_conductor() {
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        start|status|logs|watch|stop|restart|run-foreground)
+        start|status|timeline|logs|watch|stop|restart|run-foreground)
             ACTION="$1"
             ;;
         --max-cycles)
@@ -384,6 +573,9 @@ case "$ACTION" in
         ;;
     status)
         print_status
+        ;;
+    timeline)
+        print_timeline
         ;;
     logs)
         show_logs
