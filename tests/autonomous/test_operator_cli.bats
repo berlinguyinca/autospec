@@ -199,6 +199,35 @@ EOF
   [[ "$output" == *"next item start estimate: after current item finishes, roughly 15-45 minutes of handoff overhead"* ]]
 }
 
+@test "operator cli: timeline reconciles heartbeat-active issue into forecast progress" {
+  mkdir -p "$HOME/.autospec/autonomous-operator" "$TEST_TMP/logs"
+  printf '%s\n' "$TEST_TMP/logs/conductor.log" > "$HOME/.autospec/autonomous-operator/conductor.logpath"
+  cat > "$TEST_TMP/logs/conductor.log" <<'EOF'
+{
+  "ready": [
+    {"number": 1543, "title": "feat: autonomy guardrails"},
+    {"number": 1544, "title": "feat: immutable verifier"}
+  ],
+  "blocked": [],
+  "claimed": [],
+  "batch": [
+    {"number": 1543, "title": "feat: autonomy guardrails"}
+  ]
+}
+EOF
+  mkdir -p "$HOME/.autospec/process-heartbeats/berlinguyinca__autospec"
+  cat > "$HOME/.autospec/process-heartbeats/berlinguyinca__autospec/1543.json" <<'EOF'
+{"issue":"1543","branch":"feat/issue-1543-autonomy-guardrails","step":"claimed","ts":1783466193,"repo":"berlinguyinca/autospec"}
+EOF
+
+  run bash "$CLI" timeline --lines 80
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"things left: 2 total (1 ready, 1 in progress, 0 blocked)"* ]]
+  [[ "$output" == *"planned next: finish #1543 feat: autonomy guardrails"* ]]
+  [[ "$output" == *"then start #1544 feat: immutable verifier"* ]]
+}
+
 @test "operator cli: monitor prints timeline report at requested interval" {
   mkdir -p "$HOME/.autospec/autonomous-operator" "$TEST_TMP/logs"
   printf '%s\n' "$TEST_TMP/logs/conductor.log" > "$HOME/.autospec/autonomous-operator/conductor.logpath"
