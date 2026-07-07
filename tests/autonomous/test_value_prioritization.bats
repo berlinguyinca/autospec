@@ -46,7 +46,8 @@ write_jsonl() {
 
     run bash "$WATERFALL" --candidate-file "$candidates" --value-floor 1 --backlog-count 0 --open-issue-count 0 --dry-cycles 99 --tier15-dry-cycles 99 --tier2-dry-cycles 99 --tier3-dry-cycles 99 --tier4-dry-cycles 99
     [ "$status" -eq 0 ]
-    [[ "$output" == *'"action":"idle-rescan"'* ]]
+    [[ "$output" == *'"action":"run-backlog"'* ]]
+    [[ "$output" == *'idle-rescan:'* ]]
     [[ "$output" != *'"action":"park"'* ]]
 }
 
@@ -76,7 +77,8 @@ write_jsonl() {
 
     run bash "$WATERFALL" --candidate-file "$candidates" --value-floor 1 --human-gate-blast-radius 4 --backlog-count 0
     [ "$status" -eq 0 ]
-    [[ "$output" == *'"action":"human-gate"'* ]]
+    [[ "$output" == *'"action":"control"'* ]]
+    [[ "$output" == *'human-gate:'* ]]
 }
 
 @test "design doc cites SAFe WSJF and Cost of Delay" {

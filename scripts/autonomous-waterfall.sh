@@ -123,11 +123,11 @@ if [ -n "$CANDIDATE_FILE" ] && [ -s "$CANDIDATE_FILE" ]; then
         _prio_score="$(printf '%s' "$_prio_json" | jq -r '.top.score // 0' 2>/dev/null || echo 0)"
         case "$_prio_decision" in
             human_gate)
-                emit 1 "human-gate" "value queue selected fenced/high-blast-radius candidate ${_prio_top}; route to human gate"
+                emit 0 "control" "human-gate: value queue selected fenced/high-blast-radius candidate ${_prio_top}; route to human gate"
                 exit 0
                 ;;
             idle)
-                emit 1 "idle-rescan" "highest candidate score ${_prio_score} below value floor ${VALUE_FLOOR}; idle and re-scan"
+                emit 1 "run-backlog" "idle-rescan: highest candidate score ${_prio_score} below value floor ${VALUE_FLOOR}; idle and re-scan"
                 exit 0
                 ;;
             run)
