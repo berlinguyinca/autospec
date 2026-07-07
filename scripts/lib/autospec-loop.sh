@@ -860,11 +860,6 @@ fi'
             printf '[conductor] Tier 1.5 promotion result: dry=%s filed=%s
 '                 "$_promote_dry" "$_promote_filed" >&2
             if [ "$_promote_dry" = "false" ] || { [ "$_promote_filed" -gt 0 ] 2>/dev/null; }; then
-                _dry_cycles=0
-                _tier15_dry_cycles=0
-                _tier2_dry_cycles=0
-                _tier3_dry_cycles=0
-                _tier4_dry_cycles=0
                 _work_done=1
             else
                 _tier15_dry_cycles=$((_tier15_dry_cycles + 1))
@@ -1032,8 +1027,6 @@ fi'
                             fi
                         fi
                         _work_done=1
-                        _dry_cycles=0
-                        _tier15_dry_cycles=0
                     fi
                     ;;
                 block*)
@@ -1086,11 +1079,6 @@ fi'
             printf '[conductor] Tier 3 architecture result: dry=%s filed=%s
 '                 "$_arch_dry" "$_arch_filed" >&2
             if [ "$_arch_dry" = "false" ] || { [ "$_arch_filed" -gt 0 ] 2>/dev/null; }; then
-                _dry_cycles=0
-                _tier15_dry_cycles=0
-                _tier2_dry_cycles=0
-                _tier3_dry_cycles=0
-                _tier4_dry_cycles=0
                 _work_done=1
             else
                 _tier3_dry_cycles=$((_tier3_dry_cycles + 1))
@@ -1194,11 +1182,6 @@ fi'
                     # waterfall selects Tier 1 next cycle.
                     printf '[conductor] Tier %s filed %s candidate(s) — floating back to Tier 1\n' \
                         "$_tier" "$_explore_filed" >&2
-                    _dry_cycles=0
-                    _tier15_dry_cycles=0
-                    _tier2_dry_cycles=0
-                    _tier3_dry_cycles=0
-                    _tier4_dry_cycles=0
                     _work_done=1
                     # F3: track in-flight discovery issues so the main-merge
                     # refusal gate blocks Tier-1 drain until they are consumed.
@@ -1225,6 +1208,15 @@ fi'
             printf '[conductor] unknown waterfall action=%s for tier=%s — skipping\n' \
                 "$_action" "$_tier" >&2
             _dry_cycles=$((_dry_cycles + 1))
+        fi
+
+        # Any successful tier work floats the next selection back to Tier 1.
+        if [ "$_work_done" -eq 1 ]; then
+            _dry_cycles=0
+            _tier15_dry_cycles=0
+            _tier2_dry_cycles=0
+            _tier3_dry_cycles=0
+            _tier4_dry_cycles=0
         fi
 
         # ── Step 6a: Usage governor soft-park (F6) ───────────────────────────
