@@ -191,6 +191,34 @@ install_one() {
     fi
 }
 
+ensure_autospec_bin_path() {
+    autospec_bin_dir="$HOME/.autospec/bin"
+    autospec_env_file="$HOME/.autospec/env"
+    autospec_env_line='. "$HOME/.autospec/env"'
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "  [dry-run] mkdir -p \"$autospec_bin_dir\""
+        info "  [dry-run] write $autospec_env_file and source it from ~/.zshrc + ~/.bashrc"
+        return 0
+    fi
+
+    mkdir -p "$autospec_bin_dir"
+    cat > "$autospec_env_file" <<'EOF'
+# autospec runtime command path
+AUTOSPEC_BIN_DIR="$HOME/.autospec/bin"
+case ":$PATH:" in
+    *":$AUTOSPEC_BIN_DIR:"*) ;;
+    *) export PATH="$AUTOSPEC_BIN_DIR:$PATH" ;;
+esac
+EOF
+
+    for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+        [ -f "$rc" ] || touch "$rc"
+        grep -qxF "$autospec_env_line" "$rc" || printf '%s\n' "$autospec_env_line" >> "$rc"
+    done
+    info "  PATH configured: $autospec_bin_dir via $autospec_env_file"
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --harness)
@@ -288,6 +316,10 @@ fi
 if [ "$dep_warnings" -gt 0 ]; then
     warn "${dep_warnings} dependency warning(s) above. The skill files will still install."
 fi
+
+info ""
+info "Runtime command PATH:"
+ensure_autospec_bin_path
 
 info ""
 info "Shared autospec helper scripts:"

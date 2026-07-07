@@ -90,6 +90,32 @@ run_or_report() {
     fi
 }
 
+ensure_autospec_bin_path() {
+    autospec_bin_dir="$HOME/.autospec/bin"
+    autospec_env_file="$HOME/.autospec/env"
+    autospec_env_line='. "$HOME/.autospec/env"'
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] ensure_autospec_bin_path: would create $autospec_bin_dir and $autospec_env_file"
+        info "[dry-run] ensure_autospec_bin_path: would source $autospec_env_file from ~/.zshrc and ~/.bashrc"
+        return 0
+    fi
+
+    mkdir -p "$autospec_bin_dir"
+    cat > "$autospec_env_file" <<'EOF'
+# autospec runtime command path
+AUTOSPEC_BIN_DIR="$HOME/.autospec/bin"
+case ":$PATH:" in
+    *":$AUTOSPEC_BIN_DIR:"*) ;;
+    *) export PATH="$AUTOSPEC_BIN_DIR:$PATH" ;;
+esac
+EOF
+
+    ensure_line_in_file "$HOME/.zshrc" "$autospec_env_line"
+    ensure_line_in_file "$HOME/.bashrc" "$autospec_env_line"
+    info "ensure_autospec_bin_path: $autospec_bin_dir is sourced via ~/.autospec/env"
+}
+
 offer_gitignore() {
     # Offer to ignore autospec runtime scratch files while keeping the tracked
     # project config `.autospec/autospec.yml` visible to git.
@@ -1143,6 +1169,7 @@ copy_repo_scripts
 copy_runtime_subdirs
 copy_runtime_skill_scripts
 copy_schemas
+ensure_autospec_bin_path
 ensure_system_tools
 bootstrap_peer_ecosystems
 bootstrap_turbo

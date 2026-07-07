@@ -10,9 +10,11 @@
 #   Tier 1 — Backlog (open auto-implement issues via gh).
 #   Tier 2 — Local discovery: explore --once over local sources (spec-vs-code,
 #             codebase-signals, source-analysis, dependency-health, prior-reports).
-#             Selected after Tier 1 is dry for AUTOSPEC_AUTO_DRY_CYCLES cycles.
+#             Phase-1 default: disabled; enable explicitly with
+#             AUTOSPEC_ENABLE_DISCOVERY_TIERS=1.
 #   Tier 3 — Internet discovery: explore --once --research-sources internet.
-#             Selected after Tier 2 is dry for AUTOSPEC_AUTO_DRY_CYCLES cycles.
+#             Phase-1 default: disabled; enable explicitly with
+#             AUTOSPEC_ENABLE_DISCOVERY_TIERS=1.
 #
 # Dry-cycle escalation:
 #   The caller tracks dry cycles per tier and passes --dry-cycles (Tier 1) and
@@ -46,6 +48,7 @@ TIER2_DRY_CYCLES=0
 REPO=""
 BACKLOG_COUNT_INJECT=""          # non-empty → skip gh call
 DRY_CYCLES_THRESHOLD="${AUTOSPEC_AUTO_DRY_CYCLES:-2}"
+DISCOVERY_TIERS_ENABLED="${AUTOSPEC_ENABLE_DISCOVERY_TIERS:-0}"
 
 # ─── helpers ───────────────────────────────────────────────────────────────────
 usage() {
@@ -62,6 +65,9 @@ Options:
 
 Env:
   AUTOSPEC_AUTO_DRY_CYCLES   Dry-cycle escalation threshold (default 2).
+  AUTOSPEC_ENABLE_DISCOVERY_TIERS
+                              Set to 1 to allow Tier 2/3 discovery. Default 0
+                              parks after the Tier-1 dry threshold in Phase 1.
 
 Output (stdout):
   {"tier":<0|1|2|3>,"action":"<string>","reason":"<string>"}
@@ -127,6 +133,13 @@ fi
 # Backlog is empty — check Tier-1 dry-cycle threshold before escalating.
 if [ "$DRY_CYCLES" -lt "$DRY_CYCLES_THRESHOLD" ] 2>/dev/null; then
     emit 1 "run-backlog" "backlog empty but dry-cycles=$DRY_CYCLES < threshold=$DRY_CYCLES_THRESHOLD; staying at Tier 1"
+    exit 0
+fi
+
+# Phase 1 only enables Tier 0 + Tier 1. Discovery tiers are an explicit opt-in
+# until the Phase 2/3 discovery contract is intentionally activated.
+if [ "$DISCOVERY_TIERS_ENABLED" != "1" ]; then
+    emit 1 "park" "Tier 1 dry for $DRY_CYCLES cycle(s) >= threshold=$DRY_CYCLES_THRESHOLD; discovery tiers disabled in Phase 1"
     exit 0
 fi
 

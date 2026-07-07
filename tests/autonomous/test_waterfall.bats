@@ -3,8 +3,9 @@
 #
 # Tier 0: control label always preempts.
 # Tier 1: backlog present → run-backlog; empty + dry-cycles < threshold → stay Tier 1.
-# Tier 2: Tier 1 dry >= threshold → run-explore-once (local sources).
-# Tier 3: Tier 2 dry >= threshold → run-explore-once-internet.
+# Phase-1 park: Tier 1 dry >= threshold → park unless discovery tiers are enabled.
+# Tier 2: opt-in Tier 1 dry >= threshold → run-explore-once (local sources).
+# Tier 3: opt-in Tier 2 dry >= threshold → run-explore-once-internet.
 # Refill: non-empty backlog always floats back to Tier 1 regardless of dry-cycles.
 # gh is stubbed via PATH injection; no real network calls.
 
@@ -96,10 +97,20 @@ teardown() {
     [[ "$output" == *'"tier":1'* ]]
 }
 
-# ─── Tier 2 escalation ─────────────────────────────────────────────────────────
+# ─── Phase-1 park / Tier 2 opt-in ─────────────────────────────────────────────
 
-@test "Tier 2: Tier-1 dry x2 (default threshold) selects run-explore-once" {
+@test "Phase 1: Tier-1 dry x2 parks by default instead of entering discovery" {
     run bash "$SCRIPT" \
+        --backlog-count 0 \
+        --dry-cycles 2
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"tier":1'* ]]
+    [[ "$output" == *'"action":"park"'* ]]
+    [[ "$output" == *'discovery tiers disabled in Phase 1'* ]]
+}
+
+@test "Tier 2: explicit discovery enable lets Tier-1 dry x2 select run-explore-once" {
+    AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
         --backlog-count 0 \
         --dry-cycles 2
     [ "$status" -eq 0 ]
@@ -107,8 +118,8 @@ teardown() {
     [[ "$output" == *'"action":"run-explore-once"'* ]]
 }
 
-@test "Tier 2: Tier-1 dry above threshold also selects Tier 2 when Tier-2 counter is 0" {
-    run bash "$SCRIPT" \
+@test "Tier 2: explicit discovery enable lets dry above threshold select Tier 2 when Tier-2 counter is 0" {
+    AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
         --backlog-count 0 \
         --dry-cycles 5 \
         --tier2-dry-cycles 0
@@ -117,8 +128,8 @@ teardown() {
     [[ "$output" == *'"action":"run-explore-once"'* ]]
 }
 
-@test "Tier 2: Tier-1 dry >= threshold, Tier-2 dry < threshold stays at Tier 2" {
-    run bash "$SCRIPT" \
+@test "Tier 2: explicit discovery enable keeps Tier-1 dry >= threshold, Tier-2 dry < threshold at Tier 2" {
+    AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
         --backlog-count 0 \
         --dry-cycles 2 \
         --tier2-dry-cycles 1
@@ -135,8 +146,18 @@ teardown() {
     [[ "$output" == *'"tier":1'* ]]
 }
 
-@test "Tier 2: custom threshold=3 escalates at dry-cycles=3" {
+@test "Phase 1: custom threshold=3 parks at dry-cycles=3 by default" {
     AUTOSPEC_AUTO_DRY_CYCLES=3 run bash "$SCRIPT" \
+        --backlog-count 0 \
+        --dry-cycles 3 \
+        --tier2-dry-cycles 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"tier":1'* ]]
+    [[ "$output" == *'"action":"park"'* ]]
+}
+
+@test "Tier 2: custom threshold=3 escalates at dry-cycles=3 when discovery is enabled" {
+    AUTOSPEC_AUTO_DRY_CYCLES=3 AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
         --backlog-count 0 \
         --dry-cycles 3 \
         --tier2-dry-cycles 0
@@ -147,8 +168,8 @@ teardown() {
 
 # ─── Tier 3 escalation ─────────────────────────────────────────────────────────
 
-@test "Tier 3: Tier-2 dry x2 selects run-explore-once-internet" {
-    run bash "$SCRIPT" \
+@test "Tier 3: explicit discovery enable lets Tier-2 dry x2 select run-explore-once-internet" {
+    AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
         --backlog-count 0 \
         --dry-cycles 2 \
         --tier2-dry-cycles 2
@@ -157,8 +178,8 @@ teardown() {
     [[ "$output" == *'"action":"run-explore-once-internet"'* ]]
 }
 
-@test "Tier 3: Tier-2 dry above threshold also selects Tier 3" {
-    run bash "$SCRIPT" \
+@test "Tier 3: explicit discovery enable lets Tier-2 dry above threshold select Tier 3" {
+    AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
         --backlog-count 0 \
         --dry-cycles 10 \
         --tier2-dry-cycles 5
@@ -167,8 +188,8 @@ teardown() {
     [[ "$output" == *'"action":"run-explore-once-internet"'* ]]
 }
 
-@test "Tier 3: custom threshold=3 escalates at tier2-dry-cycles=3" {
-    AUTOSPEC_AUTO_DRY_CYCLES=3 run bash "$SCRIPT" \
+@test "Tier 3: explicit discovery enable lets custom threshold=3 escalate at tier2-dry-cycles=3" {
+    AUTOSPEC_AUTO_DRY_CYCLES=3 AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
         --backlog-count 0 \
         --dry-cycles 3 \
         --tier2-dry-cycles 3
@@ -211,7 +232,7 @@ teardown() {
     [[ "$output" == *'"reason":'* ]]
 }
 
-@test "Tier 2 output contains tier, action, reason keys" {
+@test "park output contains tier, action, reason keys" {
     run bash "$SCRIPT" --backlog-count 0 --dry-cycles 2 --tier2-dry-cycles 0
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":'* ]]
@@ -220,7 +241,7 @@ teardown() {
 }
 
 @test "Tier 3 output contains tier, action, reason keys" {
-    run bash "$SCRIPT" --backlog-count 0 --dry-cycles 2 --tier2-dry-cycles 2
+    AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" --backlog-count 0 --dry-cycles 2 --tier2-dry-cycles 2
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":'* ]]
     [[ "$output" == *'"action":'* ]]

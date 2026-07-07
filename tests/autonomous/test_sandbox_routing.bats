@@ -110,6 +110,7 @@ EOF
     export AUTOSPEC_RUN_CMD="printf 'run-cmd-invoked\n' >> $RUN_CMD_LOG"
     export AUTOSPEC_EXPLORE_CMD="bash $EXPLORE_SCRIPT"
     export AUTOSPEC_SANDBOX_BIN="$SCRIPTS_DIR/explore-sandbox.sh"
+    export AUTOSPEC_ENABLE_DISCOVERY_TIERS=1
     # No real repo — no lock/heartbeat/notify.
     unset CONDUCTOR_REPO 2>/dev/null || true
     unset AUTOSPEC_REPO  2>/dev/null || true
