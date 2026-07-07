@@ -41,7 +41,7 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
 SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
-AUTONOMOUS_SCRIPT_FILES="autonomous-control-channel.sh autonomous-persona-sources.sh autonomous-persona-synth.sh autonomous-persona-mine.sh autonomous-priority-match.sh autonomous-premerge-gate.sh autonomous-resilience.sh autonomous-spend-ledger.sh autonomous-usage-governor.sh autonomous-waterfall.sh autospec-autonomy-gate.sh usage-observe.sh"
+AUTONOMOUS_SCRIPT_FILES="autospec-autonomous.sh autospec-autonomous-run-drain.sh autonomous-control-channel.sh autonomous-persona-sources.sh autonomous-persona-synth.sh autonomous-persona-mine.sh autonomous-priority-match.sh autonomous-premerge-gate.sh autonomous-resilience.sh autonomous-spend-ledger.sh autonomous-usage-governor.sh autonomous-waterfall.sh autospec-autonomy-gate.sh usage-observe.sh"
 LIB_FILES="autospec-loop.sh autospec-harness-detect.sh"
 
 err()  { printf 'error: %s\n' "$*" >&2; }
@@ -219,6 +219,45 @@ EOF
     info "  PATH configured: $autospec_bin_dir via $autospec_env_file"
 }
 
+install_autonomous_operator_commands() {
+    autospec_bin_dir="$HOME/.autospec/bin"
+    autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+    launcher="$autospec_scripts_dir/autospec-autonomous.sh"
+    installed_home="$HOME"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "  [dry-run] install autospec-autonomous command wrappers in $autospec_bin_dir"
+        return 0
+    fi
+
+    if [ ! -f "$launcher" ]; then
+        warn "autonomous launcher missing at $launcher; command wrappers not installed"
+        return 0
+    fi
+
+    mkdir -p "$autospec_bin_dir"
+    chmod +x "$launcher"
+    for command in autospec-autonomous autospec-autonomous-status autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-stop autospec-autonomous-restart; do
+        target="$autospec_bin_dir/$command"
+        subcommand="${command#autospec-autonomous-}"
+        if [ "$subcommand" = "$command" ]; then
+            subcommand=""
+        fi
+        {
+            printf '%s\n' '#!/usr/bin/env bash'
+            printf '%s\n' 'set -eu'
+            printf 'export HOME=%s\n' "$(printf '%s' "$installed_home" | sed 's/[\\"`$]/\\&/g')"
+            if [ -n "$subcommand" ]; then
+                printf 'exec "%s" %s "$@"\n' "$launcher" "$subcommand"
+            else
+                printf 'exec "%s" "$@"\n' "$launcher"
+            fi
+        } > "$target"
+        chmod +x "$target"
+    done
+    info "  command wrappers installed: $autospec_bin_dir/autospec-autonomous*"
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --harness)
@@ -332,6 +371,10 @@ install_autonomous_scripts
 info ""
 info "Runtime lib files (scripts/lib/):"
 install_lib_files
+
+info ""
+info "Autonomous command wrappers:"
+install_autonomous_operator_commands
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 OPENCODE_DIR="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"

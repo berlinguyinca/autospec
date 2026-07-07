@@ -48,10 +48,40 @@ If the feature-request argument matches the regex `^\s*stop(\s+--\w+)*\s*$` (cas
 
 1. Delegate to the shared stop helper:
    ```bash
-   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop.sh" "$@"
+   autospec-autonomous stop "$@"
    ```
 2. Honor `--graceful` (write `~/.autospec/stop.flag` and `~/.autospec/autonomous-stop.flag`; running iteration finishes) and `--immediate` (also write `~/.autospec/refine-loop-stop.flag`; abort at next iteration boundary).
 3. Print the stop summary and exit. Do not enter the autonomous pipeline.
+
+## Operator commands and monitoring
+
+The installer creates command wrappers in `~/.autospec/bin` and configures shells
+to source `~/.autospec/env`, so these commands should resolve after a fresh shell
+or after `. "$HOME/.autospec/env"`:
+
+| Command | Purpose |
+|---------|---------|
+| `autospec-autonomous [start]` | Start the detached conductor. |
+| `autospec-autonomous-status` | Print PID, log path, conductor state, spend ledger, and recent log tail. |
+| `autospec-autonomous-logs` | Print the current conductor log tail. |
+| `autospec-autonomous-watch` | Follow the current conductor log. |
+| `autospec-autonomous-stop --graceful` | Request stop after the current issue/cycle boundary. |
+| `autospec-autonomous-stop --immediate` | Request immediate stop at the next major boundary. |
+| `autospec-autonomous-restart` | Stop through the sentinel path, then launch a new conductor. |
+
+All wrappers delegate to `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh`.
+The launcher records PID and log metadata under
+`~/.autospec/autonomous-operator/`, keeps logs under `~/.autospec/logs/`, and
+uses `autospec-autonomous-run-drain.sh` as the safe Tier-1 drain command. The
+drain command invokes:
+
+```bash
+omx exec --cd "$AUTOSPEC_REPO_DIR" --dangerously-bypass-approvals-and-sandbox '$autospec-run'
+```
+
+Use `autospec-autonomous status --json` for monitoring integrations. Use
+`--repo-dir DIR` when launching from outside the target checkout, and use
+`--repo OWNER/REPO` when the GitHub slug cannot be detected.
 
 ## Required capabilities & harness adapter
 
@@ -230,6 +260,12 @@ bats suite mocks as a subprocess.
     [--poll-interval-sec N]
 ```
 
+Equivalent installed shell command:
+
+```bash
+autospec-autonomous start [--max-cycles N] [--dry-run] [--no-digest] [--poll-interval-sec N]
+```
+
 - `--max-cycles N` — outer loop cycle cap. Default unlimited.
 - `--budget-tokens N` — lifetime token ceiling (sets `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS`). Default 50M.
 - `--budget-hours N` — wall-time budget. Default unlimited.
@@ -243,6 +279,8 @@ bats suite mocks as a subprocess.
 - `skills/autospec-autonomous/SKILL.md` — Claude Code adapter (authoritative).
 - `skills/autospec-autonomous/codex/prompt.md` — Codex CLI mirror (lockstep).
 - `skills/autospec-autonomous/opencode/agent.md` — OpenCode mirror (lockstep).
+- `autospec-autonomous.sh` — installed operator lifecycle command (`start`, `status`, `logs`, `watch`, `stop`, `restart`).
+- `autospec-autonomous-run-drain.sh` — installed Tier-1 drain wrapper that runs `$autospec-run` through `omx exec`.
 - `autospec-loop.sh` (shared loop driver, `${AUTOSPEC_SCRIPTS_DIR}/lib/`) — extended with `autospec_conductor_run()`, the never-idle conductor entry point wiring control-channel → waterfall → Tier 1.5 promotion / Tier 2–4 discovery → premerge-gate → drain → spend-ledger → resilience → digest (issue #1378).
 - `autonomous-control-channel.sh` — label query → command decision (Phase 1, Issue #1373).
 - `autonomous-waterfall.sh` — Tier 0/1/1.5/2/3/4 selection logic (Issue #1374, activated by issue #1529).
