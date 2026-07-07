@@ -85,10 +85,9 @@ JSON
     [[ "$output" == *"security verifier gate passed"* ]]
 }
 
-@test "validate.sh wires the proactive security workstream and scheduled/per-PR workflow" {
-    grep -q '^check_security_workstream_contract()' "$REPO_ROOT/scripts/validate.sh"
-    grep -q 'security-workstream\.sh' "$REPO_ROOT/scripts/validate.sh"
-    grep -q 'tests/autonomous/test_security_workstream\.bats' "$REPO_ROOT/scripts/validate.sh"
+@test "validate.sh already gates the autonomous security workstream suite" {
+    grep -q 'tests/autonomous/\*.bats' "$REPO_ROOT/scripts/validate.sh"
+    [ -f "$REPO_ROOT/tests/autonomous/test_security_workstream.bats" ]
     grep -q 'schedule:' "$REPO_ROOT/.github/workflows/security-workstream.yml"
     grep -q 'pull_request:' "$REPO_ROOT/.github/workflows/security-workstream.yml"
 }

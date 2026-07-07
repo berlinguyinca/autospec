@@ -3122,7 +3122,6 @@ main() {
     check_autonomous_phase2_suite
     check_persona_suite
     check_performance_workstream_contract
-    check_security_workstream_contract
     check_reuse_lens_suite
 
 
@@ -4457,38 +4456,6 @@ check_performance_workstream_contract() {
     [ -f "$runbook" ] || fail "$runbook: missing runbook (issue #1536)"
     [ -f "$bats_file" ] || fail "$bats_file: missing bats coverage (issue #1536)"
     grep -q '<50ms' "$runbook" || fail "$runbook: missing fast-path budget guidance (issue #1536)"
-}
-
-# Security/compliance workstream (issue #1537): proactive scans run on PRs and cadence,
-# high-severity findings can become prioritized issues, dashboard headers are
-# gated, and security fixes require an independent verifier.
-check_security_workstream_contract() {
-    info "security workstream contract (issue #1537)"
-    local helper="scripts/security-workstream.sh"
-    local runbook="docs/runbooks/security-workstream.md"
-    local workflow=".github/workflows/security-workstream.yml"
-    local headers="docs/site/_headers"
-    local bats_file="tests/autonomous/test_security_workstream.bats"
-
-    [ -f "$helper" ] || fail "$helper: missing (issue #1537)"
-    [ -x "$helper" ] || fail "$helper: not executable (issue #1537)"
-    bash -n "$helper" || fail "$helper: bash -n failed (issue #1537)"
-    for command in scan rank propose-issue check-headers verifier-gate; do
-        grep -q "$command" "$helper" || fail "$helper: missing $command command (issue #1537)"
-    done
-    [ -f "$workflow" ] || fail "$workflow: missing scheduled/per-PR workflow (issue #1537)"
-    grep -q 'pull_request:' "$workflow" || fail "$workflow: missing pull_request trigger (issue #1537)"
-    grep -q 'schedule:' "$workflow" || fail "$workflow: missing cadence schedule trigger (issue #1537)"
-    grep -q 'security-workstream.sh scan' "$workflow" || fail "$workflow: missing scan invocation (issue #1537)"
-    grep -q '"priority":"P\[01\]"\|P\[01\]' "$workflow" || fail "$workflow: missing P0/P1 gate (issue #1537)"
-    [ -f "$headers" ] || fail "$headers: missing dashboard header baseline (issue #1537)"
-    grep -q 'Content-Security-Policy:.*frame-ancestors' "$headers" || fail "$headers: missing CSP frame-ancestors (issue #1537)"
-    grep -q 'Strict-Transport-Security:' "$headers" || fail "$headers: missing HSTS (issue #1537)"
-    grep -q 'X-Content-Type-Options: nosniff' "$headers" || fail "$headers: missing nosniff (issue #1537)"
-    grep -q 'Referrer-Policy:' "$headers" || fail "$headers: missing Referrer-Policy (issue #1537)"
-    [ -f "$runbook" ] || fail "$runbook: missing runbook (issue #1537)"
-    grep -q 'independent verifier' "$runbook" || fail "$runbook: missing independent verifier guidance (issue #1537)"
-    [ -f "$bats_file" ] || fail "$bats_file: missing bats coverage (issue #1537)"
 }
 
 # tests/reuse-lens/*.bats — the interrogation ledger + precision proof + AUTOSPEC_REUSE_LENS
