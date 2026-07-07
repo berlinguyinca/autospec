@@ -1,0 +1,23 @@
+name: UX/UI workstream
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ux-ui-workstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate UX/UI workstream contract
+        run: bash scripts/validate.sh
+      - name: Run UX/UI deterministic gate when snapshots exist
+        run: |
+          if [ -f .autospec/ux-ui/snapshots.jsonl ]; then
+            bash scripts/ux-ui-workstream.sh gate \
+              --ledger .autospec/ux-ui/snapshots.jsonl \
+              --commit "${GITHUB_SHA}" \
+              --regressions-out .autospec/ux-ui/regressions.jsonl
+          else
+            echo "No UX/UI snapshots present; contract validation covers helper/runbook wiring."
+          fi
