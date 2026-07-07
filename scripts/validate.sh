@@ -3123,7 +3123,32 @@ main() {
     check_persona_suite
     check_reuse_lens_suite
 
-    # Top-level installer / uninstaller (introduced in PR #11) — only check syntax
+
+# Architecture fitness-function engine (issue #1533): the declarative registry
+# must remain runnable as a merge gate, and its contract tests must be part of
+# the default suite so architectural drift blocks before merge.
+check_architecture_fitness_engine() {
+    info "architecture fitness functions: registry + CI gate (issue #1533)"
+    local runner="scripts/architecture-fitness.sh"
+    local registry=".autospec/architecture-fitness.yml"
+    [ -f "$runner" ] || fail "$runner: required architecture fitness runner missing (issue #1533)"
+    [ -f "$registry" ] || fail "$registry: required architecture fitness registry missing (issue #1533)"
+    bash -n "$runner" || fail "$runner: bash syntax error (issue #1533)"
+    grep -q '^fitness_functions:' "$registry"         || fail "$registry: missing fitness_functions registry root (issue #1533)"
+    grep -q 'threshold:' "$registry"         || fail "$registry: missing threshold declarations (issue #1533)"
+    grep -q 'gate: true' "$registry"         || fail "$registry: missing gated functions (issue #1533)"
+    bash scripts/architecture-fitness.sh run --registry "$registry" >/tmp/validate-architecture-fitness.log 2>&1         || { cat /tmp/validate-architecture-fitness.log >&2; fail "architecture fitness gate failed (issue #1533)"; }
+    if command -v bats >/dev/null 2>&1; then
+        local t
+        for t in tests/architecture-fitness/*.bats; do
+            [ -f "$t" ] || continue
+            info "  running: $t"
+            bats "$t" >/tmp/validate-architecture-fitness-bats.log 2>&1                 || { cat /tmp/validate-architecture-fitness-bats.log >&2; fail "$t: failed (issue #1533)"; }
+        done
+    fi
+}
+
+# Top-level installer / uninstaller (introduced in PR #11) — only check syntax
     # if present; absence is OK before that PR lands.
     check_bash_syntax "install.sh"
     check_bash_syntax "uninstall.sh"
