@@ -72,7 +72,7 @@ fitness_functions:
     type: command_max_ms
     gate: true
     threshold: 50
-    command: 'true'
+    command: '/usr/bin/true'
     metric: elapsed_ms
     issue:
       title: 'fix: restore architecture fitness fast-path latency budget'
