@@ -147,12 +147,32 @@ teardown() {
     [ "$output" = "true" ]
 }
 
+@test "release merged removes in-progress label without restoring auto-implement" {
+    bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-a >/dev/null
+
+    run bash "$RELEASE" --issue 42 --repo testorg/testrepo --worker-id worker-a --state merged --pr 99
+
+    [ "$status" -eq 0 ]
+    ! grep -Fx in-progress-by-bot "$LABELS"
+    ! grep -Fx auto-implement "$LABELS"
+    run jq -r '.[0].body | contains("\"state\": \"merged\"") and contains("\"pr\": \"99\"")' "$COMMENTS"
+    [ "$output" = "true" ]
+}
+
 @test "claim-issue.sh exits 0 for claimed and 2 for already claimed" {
     run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-a
     [ "$status" -eq 0 ]
 
     run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-b
     [ "$status" -eq 2 ]
+}
+
+@test "claim records explicit cluster lease seconds in run-state" {
+    AUTOSPEC_CLAIM_LEASE_SECONDS=7200 run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-a
+
+    [ "$status" -eq 0 ]
+    run bash -c "jq -r '.[0].body' '$COMMENTS' | awk '/autospec-run-state:begin/{inside=1; next} /autospec-run-state:end/{inside=0} inside{print}' | jq -r '.ttl_seconds'"
+    [ "$output" = "7200" ]
 }
 
 @test "claim-issue.sh exits 2 when run-state ownership is lost" {

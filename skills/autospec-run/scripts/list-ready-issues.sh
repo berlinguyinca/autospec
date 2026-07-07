@@ -18,6 +18,7 @@ die() {
 
 repo=""
 batch_size=1
+max_repo_workers="${AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS:-0}"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -30,6 +31,7 @@ done
 
 case "$batch_size" in *[!0-9]*|'') die "--batch-size must be an integer" ;; esac
 [ "$batch_size" -gt 0 ] || batch_size=1
+case "$max_repo_workers" in *[!0-9]*|'') max_repo_workers=0 ;; esac
 
 if [ -z "$repo" ]; then
     repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
@@ -55,6 +57,12 @@ trap 'rm -f "$AUTO_FILE" "$ACTIVE_FILE" "$READY_FILE" "$BLOCKED_FILE" "$CONFLICT
 
 issue_list auto-implement > "$AUTO_FILE"
 issue_list in-progress-by-bot > "$ACTIVE_FILE"
+active_count="$(jq 'length' "$ACTIVE_FILE")"
+if [ "$max_repo_workers" -gt 0 ] && [ "$active_count" -ge "$max_repo_workers" ]; then
+    effective_batch_size=0
+else
+    effective_batch_size="$batch_size"
+fi
 printf '[]\n' > "$READY_FILE"
 printf '[]\n' > "$BLOCKED_FILE"
 printf '[]\n' > "$CONFLICTS_FILE"
@@ -158,10 +166,18 @@ jq -n \
     --slurpfile conflicts "$CONFLICTS_FILE" \
     --slurpfile claimed "$ACTIVE_FILE" \
     --argjson batch_size "$batch_size" \
+    --argjson effective_batch_size "$effective_batch_size" \
+    --argjson max_repo_workers "$max_repo_workers" \
+    --argjson active_count "$active_count" \
     '{
       ready: ($ready[0] | sort_by(.number)),
       blocked: ($blocked[0] | sort_by(.number)),
       claimed: ($claimed[0] | sort_by(.number)),
       conflicts: ($conflicts[0] | sort_by(.number)),
-      batch: ($ready[0] | sort_by(.number) | .[:$batch_size])
+      worker_cap: {
+        max_repo_workers: $max_repo_workers,
+        active_count: $active_count,
+        reached: (($max_repo_workers > 0) and ($active_count >= $max_repo_workers))
+      },
+      batch: ($ready[0] | sort_by(.number) | .[:$effective_batch_size])
     }'

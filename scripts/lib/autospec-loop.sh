@@ -1113,10 +1113,12 @@ fi'
 
         # ── Step 6: Spend-ledger tally (autonomous-spend-ledger.sh) ──────────
         if [ -f "$_spend" ]; then
-            bash "$_spend" add \
-                --tokens 0 \
-                --issues "$_work_done" \
-                2>/dev/null || true
+            if [ "$_dry" != "1" ]; then
+                bash "$_spend" add \
+                    --tokens 0 \
+                    --issues "$_work_done" \
+                    2>/dev/null || true
+            fi
             local _spend_check
             _spend_check="$(bash "$_spend" check 2>/dev/null || echo "continue")"
             case "$_spend_check" in
