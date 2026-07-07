@@ -3121,6 +3121,7 @@ main() {
     check_conductor_wiring_contract
     check_autonomous_phase2_suite
     check_persona_suite
+    check_performance_workstream_contract
     check_reuse_lens_suite
 
 
@@ -4434,6 +4435,27 @@ check_persona_suite() {
     if [ "$_any" -eq 0 ]; then
         fail "tests/persona/*.bats: no persona contract tests found (issue #1418)"
     fi
+}
+
+# Performance workstream (issue #1536): benchmark baselines, regression gate,
+# regression issue filing, before/after optimization reports, and the shared
+# <50ms fast-path guard must stay wired into the default validation surface.
+check_performance_workstream_contract() {
+    info "performance workstream contract (issue #1536)"
+    local helper="scripts/performance-workstream.sh"
+    local runbook="docs/runbooks/performance-workstream.md"
+    local bats_file="tests/autonomous/test_performance_workstream.bats"
+
+    [ -f "$helper" ] || fail "$helper: missing (issue #1536)"
+    [ -x "$helper" ] || fail "$helper: not executable (issue #1536)"
+    bash -n "$helper" || fail "$helper: bash -n failed (issue #1536)"
+    grep -q 'record-benchmark' "$helper" || fail "$helper: missing record-benchmark command (issue #1536)"
+    grep -q 'propose-regression-issue' "$helper" || fail "$helper: missing regression issue command (issue #1536)"
+    grep -q 'optimization-report' "$helper" || fail "$helper: missing optimization report command (issue #1536)"
+    grep -q 'fast-path-guard' "$helper" || fail "$helper: missing fast-path guard command (issue #1536)"
+    [ -f "$runbook" ] || fail "$runbook: missing runbook (issue #1536)"
+    [ -f "$bats_file" ] || fail "$bats_file: missing bats coverage (issue #1536)"
+    grep -q '<50ms' "$runbook" || fail "$runbook: missing fast-path budget guidance (issue #1536)"
 }
 
 # tests/reuse-lens/*.bats — the interrogation ledger + precision proof + AUTOSPEC_REUSE_LENS
