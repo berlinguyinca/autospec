@@ -86,6 +86,14 @@ Each cycle executes in order:
 **Phase 1 scope:** Tier 0 + Tier 1 only. Tiers 2–4 (explore-backed discovery, persona,
 self-brainstorm) are Phase 2/3 roadmap entries and are **not yet enabled**.
 
+### Troubleshooting: main-health check-runs
+
+When legacy commit statuses are absent, main-health reads GitHub check-runs on
+`main`. Release-publish failures for `Publish @autospec/cli to npm` and
+`Open PR on homebrew-autospec tap` are ignored by default, so they do not block
+main-health or Tier-1 merges. Override the ignored check-run name regex with
+`AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS`.
+
 ## Usage observability (F6a spike finding)
 
 The Phase-2 usage governor parks the loop before quota exhaustion. The F6a spike
