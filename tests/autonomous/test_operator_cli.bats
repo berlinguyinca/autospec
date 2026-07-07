@@ -167,6 +167,62 @@ EOF
   [ "$(printf '%s\n' "$output" | grep -c "#1538 feat: autonomous UX/UI optimization tier")" -eq 1 ]
 }
 
+@test "operator cli: timeline reports item durations and next-start estimate" {
+  mkdir -p "$HOME/.autospec/autonomous-operator" "$TEST_TMP/logs"
+  printf '%s\n' "$TEST_TMP/logs/conductor.log" > "$HOME/.autospec/autonomous-operator/conductor.logpath"
+  cat > "$TEST_TMP/logs/conductor.log" <<'EOF'
+{
+  "ready": [
+    {"number": 1540, "title": "feat: documentation freshness tier"},
+    {"number": 1541, "title": "feat: RAG documentation database tier"}
+  ],
+  "blocked": [],
+  "claimed": [
+    {"number": 1539, "title": "feat: accessibility standards tier"}
+  ],
+  "batch": [
+    {"number": 1540, "title": "feat: documentation freshness tier"}
+  ]
+}
+{"issue":"1539","branch":"feat/issue-1539-accessibility","step":"claimed","ts":1783440000,"repo":"berlinguyinca/autospec"}
+{"issue":"1539","branch":"feat/issue-1539-accessibility","step":"tests_started","ts":1783441800,"repo":"berlinguyinca/autospec"}
+{"issue":"1538","branch":"feat/issue-1538-ux","step":"claimed","ts":1783430000,"repo":"berlinguyinca/autospec"}
+{"issue":"1538","branch":"feat/issue-1538-ux","step":"merged","ts":1783437200,"repo":"berlinguyinca/autospec"}
+EOF
+
+  run bash "$CLI" timeline --lines 80
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"item timing"* ]]
+  [[ "$output" == *"#1539 current step tests started after 30 minutes"* ]]
+  [[ "$output" == *"#1538 completed in 2 hours"* ]]
+  [[ "$output" == *"next item start estimate: after current item finishes, roughly 15-45 minutes of handoff overhead"* ]]
+}
+
+@test "operator cli: monitor prints timeline report at requested interval" {
+  mkdir -p "$HOME/.autospec/autonomous-operator" "$TEST_TMP/logs"
+  printf '%s\n' "$TEST_TMP/logs/conductor.log" > "$HOME/.autospec/autonomous-operator/conductor.logpath"
+  cat > "$TEST_TMP/logs/conductor.log" <<'EOF'
+{
+  "ready": [
+    {"number": 1540, "title": "feat: documentation freshness tier"}
+  ],
+  "blocked": [],
+  "claimed": [],
+  "batch": [
+    {"number": 1540, "title": "feat: documentation freshness tier"}
+  ]
+}
+EOF
+
+  run bash "$CLI" monitor --interval-sec 0 --iterations 2 --lines 80
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c "autospec-autonomous monitor")" -eq 2 ]
+  [[ "$output" == *"things left: 1 total"* ]]
+  [[ "$output" == *"planned next: start #1540 feat: documentation freshness tier"* ]]
+}
+
 @test "operator cli: status finds spend ledger with alternate .git slug" {
   mkdir -p "$HOME/.autospec/autonomous-spend/berlinguyinca_autospec.git"
   printf '{"issues":7,"tokens":0}\n' > "$HOME/.autospec/autonomous-spend/berlinguyinca_autospec.git/spend.json"
