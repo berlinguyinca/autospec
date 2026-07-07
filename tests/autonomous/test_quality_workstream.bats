@@ -49,6 +49,8 @@ JSONL
     [[ "$body" == *"Verified red"* ]]
     [[ "$body" == *"Verified green"* ]]
     [[ "$body" == *"cargo test -p autospec-core rejects_boundary_value"* ]]
+    run bash "$REPO_ROOT/scripts/lint-issue.sh" "$WORK/issues/autospec-core-crates-autospec-core-src-lib-rs.md"
+    [ "$status" -eq 0 ]
 }
 
 @test "flake: quarantines nondeterministic tests and tracks flake-rate metric" {
@@ -56,9 +58,13 @@ JSONL
     [ "$status" -eq 0 ]
     [[ "$output" == *"quarantined tests::sometimes_times_out"* ]]
     grep -q '"flakes":1' "$WORK/flakes.jsonl"
+    ! grep -q '"coverage":100' "$WORK/flakes.jsonl"
+    ! grep -q '"mutation":100' "$WORK/flakes.jsonl"
     grep -q '"test":"tests::sometimes_times_out"' "$WORK/quarantine.jsonl"
     grep -q 'failed 2/5 retries' "$WORK/issues/autospec-cli-tests-sometimes-times-out.md"
     grep -q 'hardening' "$WORK/issues/autospec-cli-tests-sometimes-times-out.md"
+    run bash "$REPO_ROOT/scripts/lint-issue.sh" "$WORK/issues/autospec-cli-tests-sometimes-times-out.md"
+    [ "$status" -eq 0 ]
 }
 
 @test "readonly: locks test files and check-readonly rejects writable assertions" {

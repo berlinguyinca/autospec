@@ -112,21 +112,26 @@ def cmd_gate(args):
     findings = []
     for crate, crate_rows in sorted(by_crate.items()):
         crate_rows.sort(key=lambda r: r.get("timestamp", ""))
-        latest = crate_rows[-1]
-        previous = crate_rows[-2] if len(crate_rows) > 1 else None
-        if latest["coverage"] < min_cov:
-            findings.append(f"COVERAGE_BELOW_FLOOR:{crate}:{latest['coverage']}%<{min_cov}%")
-        if latest["mutation"] < min_mut:
-            findings.append(f"MUTATION_BELOW_FLOOR:{crate}:{latest['mutation']}%<{min_mut}%")
-        if latest["flakes"] > max_flakes:
-            findings.append(f"FLAKE_RATE_ABOVE_FLOOR:{crate}:{latest['flakes']}>{max_flakes}")
-        if previous:
-            if latest["coverage"] < previous["coverage"]:
-                findings.append(f"COVERAGE_REGRESSION:{crate}:{previous['coverage']}%->{latest['coverage']}%")
-            if latest["mutation"] < previous["mutation"]:
-                findings.append(f"MUTATION_REGRESSION:{crate}:{previous['mutation']}%->{latest['mutation']}%")
-            if latest["flakes"] > previous["flakes"]:
-                findings.append(f"FLAKE_RATE_REGRESSION:{crate}:{previous['flakes']}->{latest['flakes']}")
+        quality_rows = [r for r in crate_rows if isinstance(r.get("coverage"), int) and isinstance(r.get("mutation"), int)]
+        flake_rows = [r for r in crate_rows if isinstance(r.get("flakes"), int)]
+        latest_quality = quality_rows[-1] if quality_rows else None
+        previous_quality = quality_rows[-2] if len(quality_rows) > 1 else None
+        latest_flake = flake_rows[-1] if flake_rows else None
+        previous_flake = flake_rows[-2] if len(flake_rows) > 1 else None
+        if latest_quality:
+            if latest_quality["coverage"] < min_cov:
+                findings.append(f"COVERAGE_BELOW_FLOOR:{crate}:{latest_quality['coverage']}%<{min_cov}%")
+            if latest_quality["mutation"] < min_mut:
+                findings.append(f"MUTATION_BELOW_FLOOR:{crate}:{latest_quality['mutation']}%<{min_mut}%")
+        if latest_flake and latest_flake["flakes"] > max_flakes:
+            findings.append(f"FLAKE_RATE_ABOVE_FLOOR:{crate}:{latest_flake['flakes']}>{max_flakes}")
+        if previous_quality and latest_quality:
+            if latest_quality["coverage"] < previous_quality["coverage"]:
+                findings.append(f"COVERAGE_REGRESSION:{crate}:{previous_quality['coverage']}%->{latest_quality['coverage']}%")
+            if latest_quality["mutation"] < previous_quality["mutation"]:
+                findings.append(f"MUTATION_REGRESSION:{crate}:{previous_quality['mutation']}%->{latest_quality['mutation']}%")
+        if previous_flake and latest_flake and latest_flake["flakes"] > previous_flake["flakes"]:
+            findings.append(f"FLAKE_RATE_REGRESSION:{crate}:{previous_flake['flakes']}->{latest_flake['flakes']}")
     if findings:
         for finding in findings:
             print(finding)
@@ -154,22 +159,30 @@ Labels: auto-implement, test-quality, mutation-testing
 
 ## Goal
 
-Add or strengthen a regression test that kills the surviving mutant in `{file_path}`.
+Add a regression test that kills the surviving mutant in `{file_path}`.
 
-## Context
+## Files to read first
 
-Surviving mutant: `{mutant}`
+- `{file_path}`
+- The nearest existing test file for `{crate}`.
+
+## Implementation outline
+
+- Add or strengthen a focused test for the surviving mutant `{mutant}`.
+- Keep existing assertions intact; do not weaken or delete test expectations.
+- Restore the intended implementation after proving the mutant-specific test fails.
+
+## Tests required
+
+- [ ] `{test_cmd}` verifies the red/green mutant-killing loop.
 
 ## Acceptance criteria
 
-- [ ] Add a focused test that fails while the mutant is present in `{file_path}`.
-- [ ] Restore the intended implementation and verify the focused test passes.
-- [ ] Do not weaken or delete existing assertions in test files.
+- [ ] `{file_path}` has a focused regression test for surviving mutant `{mutant}`.
+- [ ] `{test_cmd}` fails while the mutant is present and passes after restore.
+- [ ] No existing assertion is weakened or deleted in test files.
 
-## Verification
-
-Verified red: run `{test_cmd}` against the mutant and confirm it fails.
-Verified green: run `{test_cmd}` after restoring the intended code and confirm it passes.
+## Smoke test
 
 ### Primary smoke test (inner loop)
 
@@ -195,7 +208,7 @@ def cmd_propose(args):
 
 def cmd_quarantine(args):
     timestamp = args.timestamp or now_iso()
-    metric = {"timestamp": timestamp, "crate": args.crate, "coverage": 100, "mutation": 100, "flakes": 1}
+    metric = {"timestamp": timestamp, "crate": args.crate, "type": "flake", "flakes": 1}
     append_jsonl(args.ledger, metric)
     qrow = {"timestamp": timestamp, "crate": args.crate, "test": args.test, "reason": args.reason}
     append_jsonl(args.quarantine, qrow)
@@ -207,18 +220,34 @@ Labels: auto-implement, hardening, test-quality, flake
 
 ## Goal
 
-Remove nondeterminism from `{args.test}` while preserving or strengthening its assertions.
+Stabilize `{args.test}` without weakening its assertions.
+
+## Files to read first
+
+- The test file containing `{args.test}`.
+- The production code exercised by `{args.test}`.
 
 ## Context
 
 Quarantine reason: {args.reason}
-Crate: `{args.crate}`
+
+## Implementation outline
+
+- Reproduce the flake with a retry loop before changing code.
+- Fix nondeterminism in production code or test setup while preserving assertions.
+- Remove the quarantine entry after the retry loop is stable.
+
+## Tests required
+
+- [ ] `cargo test -p {args.crate} {args.test}` passes repeatedly after the fix.
 
 ## Acceptance criteria
 
-- [ ] Reproduce the flake with retries before changing code.
-- [ ] Fix the nondeterministic behavior or test setup without weakening assertions.
-- [ ] Remove the quarantine entry after the retry loop is stable.
+- [ ] `{args.test}` is reproduced as flaky before implementation work starts.
+- [ ] `{args.test}` passes repeatedly after the nondeterministic path is fixed.
+- [ ] No assertion in `{args.test}` is weakened or deleted.
+
+## Smoke test
 
 ### Primary smoke test (inner loop)
 
