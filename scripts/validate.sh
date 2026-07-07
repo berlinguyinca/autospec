@@ -2979,6 +2979,33 @@ run_skill_set() {
     fi
 }
 
+# Documentation generation & freshness tier (issue #1540): the composite CI gate
+# must compose drift detection, docs-as-tests examples, llms exports, and
+# doc-update issue proposal/filing so docs remain a verified source of truth.
+check_doc_freshness_tier_contract() {
+    info "documentation freshness tier contract (issue #1540)"
+    local helper="skills/autospec-shared/scripts/doc-freshness-tier.sh"
+    local bats_file="skills/autospec-shared/tests/unit/doc-freshness-tier.bats"
+    local workflow=".github/workflows/autospec-doc-drift.yml"
+
+    [ -f "$helper" ] || fail "$helper: missing (issue #1540)"
+    [ -x "$helper" ] || fail "$helper: not executable (issue #1540)"
+    bash -n "$helper" || fail "$helper: bash -n failed (issue #1540)"
+    grep -q 'check-doc-drift.sh' "$helper" || fail "$helper: missing check-doc-drift composition (issue #1540)"
+    grep -q 'verify-examples.mjs' "$helper" || fail "$helper: missing docs-as-tests composition (issue #1540)"
+    grep -q 'gen-llms-txt.sh' "$helper" || fail "$helper: missing llms export regeneration (issue #1540)"
+    grep -q 'gh issue create' "$helper" || fail "$helper: missing doc-update issue filing (issue #1540)"
+    [ -f "$bats_file" ] || fail "$bats_file: missing bats coverage (issue #1540)"
+    [ -f "$workflow" ] || fail "$workflow: missing PR workflow (issue #1540)"
+    grep -q 'doc-freshness-tier.sh' "$workflow" || fail "$workflow: workflow must invoke doc-freshness-tier.sh (issue #1540)"
+    grep -q 'issues: write' "$workflow" || fail "$workflow: workflow needs issues: write for doc-update filing (issue #1540)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-doc-freshness-tier.log 2>&1 \
+            || { cat /tmp/validate-doc-freshness-tier.log >&2; fail "$bats_file: failed (issue #1540)"; }
+    fi
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -3076,6 +3103,7 @@ main() {
     check_qa_verdict_contract
     check_release_verdict_script
     check_docs_amendment_presence
+    check_doc_freshness_tier_contract
     check_autospec_autonomous_contract
     check_autospec_autonomous_skill_contract
     check_conductor_wiring_contract
