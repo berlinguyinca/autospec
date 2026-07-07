@@ -96,9 +96,10 @@ JSON
     [[ "$output" == *"rag design doc validated"* ]]
 }
 
-@test "validate.sh wires the RAG workstream helper, config, runbook, and bats suite" {
-    grep -q '^check_rag_workstream_contract()' "$REPO_ROOT/scripts/validate.sh"
-    grep -q 'rag-workstream\.sh' "$REPO_ROOT/scripts/validate.sh"
-    grep -q 'tests/autonomous/test_rag_workstream\.bats' "$REPO_ROOT/scripts/validate.sh"
+@test "validate.sh auto-globs the RAG workstream bats suite and required artifacts exist" {
+    grep -q 'tests/autonomous/\*.bats' "$REPO_ROOT/scripts/validate.sh"
+    grep -q 'check_autonomous_phase2_suite' "$REPO_ROOT/scripts/validate.sh"
     [ -f "$REPO_ROOT/.autospec/rag-workstream/config.json" ]
+    [ -x "$REPO_ROOT/scripts/rag-workstream.sh" ]
+    [ -f "$REPO_ROOT/docs/runbooks/rag-documentation-database.md" ]
 }

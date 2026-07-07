@@ -3123,7 +3123,6 @@ main() {
     check_persona_suite
     check_performance_workstream_contract
     check_ux_ui_workstream_contract
-    check_rag_workstream_contract
     check_reuse_lens_suite
 
 
@@ -4519,35 +4518,6 @@ check_reuse_lens_suite() {
     if [ "$_any" -eq 0 ]; then
         fail "tests/reuse-lens/*.bats: no reuse-lens tests found (issue #1442)"
     fi
-}
-
-# RAG documentation database workstream (issue #1541): parent/orchestrator gate
-# for configurable RAG knobs, config-versioned index hashing, eval promotion,
-# freshness/chunk/citation guards, source citations, and child-issue handoff.
-check_rag_workstream_contract() {
-    info "RAG documentation database workstream contract (issue #1541)"
-    local helper="scripts/rag-workstream.sh"
-    local config=".autospec/rag-workstream/config.json"
-    local runbook="docs/runbooks/rag-documentation-database.md"
-    local bats_file="tests/autonomous/test_rag_workstream.bats"
-
-    [ -f "$helper" ] || fail "$helper: missing (issue #1541)"
-    [ -x "$helper" ] || fail "$helper: not executable (issue #1541)"
-    bash -n "$helper" || fail "$helper: bash -n failed (issue #1541)"
-    grep -q 'config-version' "$helper" || fail "$helper: missing config-version command (issue #1541)"
-    grep -q 'freshness-check' "$helper" || fail "$helper: missing stale-index freshness guard (issue #1541)"
-    grep -q 'citation-check' "$helper" || fail "$helper: missing citation verification guard (issue #1541)"
-    grep -q 'chunk-boundary-check' "$helper" || fail "$helper: missing chunk-boundary guard (issue #1541)"
-    grep -q 'RAGAS_FAITHFULNESS_FLOOR' "$helper" || fail "$helper: missing RAGAS faithfulness floor gate (issue #1541)"
-    [ -f "$config" ] || fail "$config: missing default RAG config (issue #1541)"
-    [ -f "$runbook" ] || fail "$runbook: missing runbook (issue #1541)"
-    [ -f "$bats_file" ] || fail "$bats_file: missing bats coverage (issue #1541)"
-    grep -q '"late_chunking": true' "$config" || fail "$config: missing late chunking knob (issue #1541)"
-    grep -q '"contextual_prefix": true' "$config" || fail "$config: missing contextual prefix knob (issue #1541)"
-    grep -q '"mode": "hybrid_dense_bm25_rrf"' "$config" || fail "$config: missing hybrid RRF retrieval mode (issue #1541)"
-    grep -q '"ragas_faithfulness_floor": 0.90' "$config" || fail "$config: missing RAGAS faithfulness floor (issue #1541)"
-    bash "$helper" validate-design-doc --doc "$runbook" >/tmp/validate-rag-workstream-doc.log 2>&1 \
-        || { cat /tmp/validate-rag-workstream-doc.log >&2; fail "$runbook: design doc validation failed (issue #1541)"; }
 }
 
 main "$@"
