@@ -133,6 +133,8 @@ then reports `observable:true` with that percent.
 | `AUTOSPEC_DISABLE_DISCOVERY_TIERS`     | `0`                   | Emergency fail-closed park at Tier-1 dry threshold.        |
 | `AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD`     | auto-detect           | Override Tier-1.5 promotion/decomposition/classification.  |
 | `AUTOSPEC_ARCHITECTURE_IMPROVEMENT_CMD` | auto-detect          | Override Tier-3 architecture/coverage work generation.     |
+| `AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS` | `1800`                | No-output stall budget for one `$autospec-run` drain; `0` disables. |
+| `AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS` | `15`                  | Poll interval for Tier-1 drain output progress.            |
 
 ## Design spec
 

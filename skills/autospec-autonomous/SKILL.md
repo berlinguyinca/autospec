@@ -281,6 +281,11 @@ autospec-autonomous start [--max-cycles N] [--dry-run] [--no-digest] [--poll-int
 - `--no-digest` — skip daily digest writes.
 - `--poll-interval-sec N` — cycle polling interval in seconds. Default 60.
 
+Tier-1 drain watchdog controls:
+
+- `AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS` — no-output stall budget for one `$autospec-run` drain. Default 1800; set `0` to disable.
+- `AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS` — poll interval for drain output progress. Default 15.
+
 ## Skill family layout
 
 - `skills/autospec-autonomous/SKILL.md` — Claude Code adapter (authoritative).
