@@ -601,6 +601,22 @@ check_mutation_and_negative_path() {
     fi
 }
 
+# Continuous test-quality workstream (issue #1534): metric ledger + mutation
+# survivor proposals + flake quarantine + read-only test-file enforcement. Keep
+# this cheap and deterministic; the full mutation run remains on-demand.
+check_test_quality_workstream() {
+    info "test-quality workstream: script + bats (issue #1534)"
+    local script="scripts/test-quality-workstream.sh"
+    local bats_file="tests/test-quality-workstream.bats"
+    [ -x "$script" ] || fail "$script: required executable missing (issue #1534)"
+    bash -n "$script" || fail "$script: bash syntax error (issue #1534)"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing (issue #1534)"
+    if command -v bats >/dev/null 2>&1; then
+        bats "$bats_file" >/tmp/validate-test-quality-workstream.log 2>&1 \
+            || { cat /tmp/validate-test-quality-workstream.log >&2; fail "$bats_file: failed"; }
+    fi
+}
+
 # Context-monitor python suites (epic #1280) — these were green on main but never
 # wired into the gate, so they could silently re-rot. Run the full pytest suite
 # over `packages tests` with PYTHONPATH pointed at the context-monitor package
@@ -3020,6 +3036,7 @@ main() {
     check_codex_skills_install
     check_shared_script_install
     check_mutation_and_negative_path
+    check_test_quality_workstream
     check_python_suites
 
     check_agents_md_subagent_section
