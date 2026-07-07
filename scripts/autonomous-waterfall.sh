@@ -28,6 +28,12 @@ TIER4_DRY_CYCLES=0
 REPO=""
 BACKLOG_COUNT_INJECT=""
 OPEN_ISSUE_COUNT_INJECT=""
+CANDIDATE_FILE="${AUTOSPEC_PRIORITY_CANDIDATES:-}"
+RECENT_TOUCHES_FILE="${AUTOSPEC_RECENT_TOUCHES:-}"
+VALUE_FLOOR="${AUTOSPEC_VALUE_FLOOR:-1}"
+RECENT_DECAY="${AUTOSPEC_RECENT_DECAY:-0.5}"
+HUMAN_GATE_BLAST_RADIUS="${AUTOSPEC_HUMAN_GATE_BLAST_RADIUS:-4}"
+PRIORITY_QUEUE_OUT="${AUTOSPEC_PRIORITY_QUEUE_OUT:-}"
 DRY_CYCLES_THRESHOLD="${AUTOSPEC_AUTO_DRY_CYCLES:-2}"
 DISCOVERY_TIERS_DISABLED="${AUTOSPEC_DISABLE_DISCOVERY_TIERS:-0}"
 
@@ -45,12 +51,19 @@ Options:
   --repo OWNER/REPO           GitHub repo slug.
   --backlog-count N           Inject auto-implement backlog count (for testing).
   --open-issue-count N        Inject non-auto open issue count (for testing).
+  --candidate-file FILE       Candidate JSON/JSONL queue to value-score.
+  --recent-touches FILE       Recent touch JSON/JSONL for anti-thrash decay.
+  --value-floor N             Idle when top score is below this floor (default 1).
+  --recent-decay N            Recent-touch multiplier (default 0.5).
+  --human-gate-blast-radius N Route at/above this blast radius to human gate.
   -h, --help                  Print this help.
 
 Env:
   AUTOSPEC_AUTO_DRY_CYCLES        Dry-cycle escalation threshold (default 2).
   AUTOSPEC_DISABLE_DISCOVERY_TIERS Set to 1 for an emergency fail-closed park at
                                   the Tier-1 dry threshold.
+  AUTOSPEC_PRIORITY_CANDIDATES     Candidate JSON/JSONL file for value-gated scoring.
+  AUTOSPEC_VALUE_FLOOR             Priority floor below which conductor idles.
 
 Output (stdout):
   {"tier":<0|1|1.5|2|3|4>,"action":"<string>","reason":"<string>"}
@@ -73,6 +86,11 @@ while [ "$#" -gt 0 ]; do
         --repo)               REPO="$2"; shift 2 ;;
         --backlog-count)      BACKLOG_COUNT_INJECT="$2"; shift 2 ;;
         --open-issue-count)   OPEN_ISSUE_COUNT_INJECT="$2"; shift 2 ;;
+        --candidate-file)     CANDIDATE_FILE="$2"; shift 2 ;;
+        --recent-touches)     RECENT_TOUCHES_FILE="$2"; shift 2 ;;
+        --value-floor)        VALUE_FLOOR="$2"; shift 2 ;;
+        --recent-decay)       RECENT_DECAY="$2"; shift 2 ;;
+        --human-gate-blast-radius) HUMAN_GATE_BLAST_RADIUS="$2"; shift 2 ;;
         -h|--help)            usage; exit 0 ;;
         *) printf 'autonomous-waterfall: unknown arg: %s\n' "$1" >&2; usage; exit 2 ;;
     esac
@@ -81,6 +99,43 @@ done
 if [ -n "$CONTROL_DECISION" ]; then
     emit 0 "control" "$CONTROL_DECISION"
     exit 0
+fi
+
+# Optional value-gated cross-workstream scorer. When a candidate file is supplied,
+# it becomes the top-level arbiter: run the highest-value safe item, idle below
+# the value floor, or route fenced/high-blast-radius work to a human gate.
+if [ -n "$CANDIDATE_FILE" ] && [ -s "$CANDIDATE_FILE" ]; then
+    _prioritize="${AUTOSPEC_PRIORITIZE_BIN:-}"
+    if [ -z "$_prioritize" ] && [ -f "$(dirname "$0")/autonomous-prioritize.sh" ]; then
+        _prioritize="$(dirname "$0")/autonomous-prioritize.sh"
+    fi
+    if [ -n "$_prioritize" ]; then
+        _prio_cmd=(bash "$_prioritize" score --candidates "$CANDIDATE_FILE" --value-floor "$VALUE_FLOOR" --recent-decay "$RECENT_DECAY" --human-gate-blast-radius "$HUMAN_GATE_BLAST_RADIUS")
+        if [ -n "$RECENT_TOUCHES_FILE" ]; then
+            _prio_cmd+=(--recent-touches "$RECENT_TOUCHES_FILE")
+        fi
+        if [ -n "$PRIORITY_QUEUE_OUT" ]; then
+            _prio_cmd+=(--out "$PRIORITY_QUEUE_OUT")
+        fi
+        _prio_json="$("${_prio_cmd[@]}" 2>/dev/null || true)"
+        _prio_decision="$(printf '%s' "$_prio_json" | jq -r '.decision // empty' 2>/dev/null || true)"
+        _prio_top="$(printf '%s' "$_prio_json" | jq -r '.top.id // "none"' 2>/dev/null || echo none)"
+        _prio_score="$(printf '%s' "$_prio_json" | jq -r '.top.score // 0' 2>/dev/null || echo 0)"
+        case "$_prio_decision" in
+            human_gate)
+                emit 1 "human-gate" "value queue selected fenced/high-blast-radius candidate ${_prio_top}; route to human gate"
+                exit 0
+                ;;
+            idle)
+                emit 1 "idle-rescan" "highest candidate score ${_prio_score} below value floor ${VALUE_FLOOR}; idle and re-scan"
+                exit 0
+                ;;
+            run)
+                emit 1 "run-backlog" "value queue selected candidate ${_prio_top} score ${_prio_score}"
+                exit 0
+                ;;
+        esac
+    fi
 fi
 
 if [ -z "$REPO" ]; then
