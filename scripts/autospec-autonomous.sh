@@ -17,6 +17,8 @@ FORCE=0
 STOP_MODE="--graceful"
 FOREGROUND=0
 LOG_OVERRIDE=0
+MONITOR_INTERVAL=300
+MONITOR_ITERATIONS=0
 CONDUCTOR_MAX_CYCLES="${CONDUCTOR_MAX_CYCLES:-}"
 CONDUCTOR_POLL_INTERVAL="${CONDUCTOR_POLL_INTERVAL:-}"
 CONDUCTOR_DRY_RUN="${CONDUCTOR_DRY_RUN:-0}"
@@ -26,12 +28,13 @@ AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES="${AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES:-}"
 
 usage() {
     cat <<'EOF'
-Usage: autospec-autonomous [start|status|timeline|logs|watch|stop|restart] [options]
+Usage: autospec-autonomous [start|status|timeline|monitor|logs|watch|stop|restart] [options]
 
 Commands:
   start      Start the detached autonomous conductor (default).
   status     Print PID, log path, conductor state, and spend ledger summary.
   timeline   Print a chronological plain-English activity report.
+  monitor    Print the timeline/report repeatedly; default interval is 300 seconds.
   logs       Print the current conductor log tail.
   watch      Follow the current conductor log.
   stop       Write the autospec stop sentinel for a running conductor.
@@ -48,6 +51,8 @@ Options:
   --repo OWNER/REPO       Override GitHub repo slug for conductor helpers.
   --log PATH              Write the conductor log to PATH.
   --lines N               Log lines for logs/status/timeline output.
+  --interval-sec N        Monitor refresh interval. Default 300.
+  --iterations N          Monitor iteration cap. Default unlimited.
   --json                  Machine-readable status output.
   --foreground            Run in the current shell instead of detaching.
   --force                 Replace stale PID metadata or restart a live process.
@@ -326,7 +331,56 @@ def format_duration_range(low_minutes, high_minutes):
         return f"{low_minutes}-{high_minutes} minutes"
     if low_minutes >= 60 and low_minutes % 60 == 0 and high_minutes % 60 == 0:
         return f"{low_minutes // 60}-{high_minutes // 60} hours"
+    if low_minutes >= 60 and high_minutes >= 60:
+        low_hours = low_minutes / 60
+        high_hours = high_minutes / 60
+        low_text = str(int(low_hours)) if low_hours.is_integer() else f"{low_hours:.1f}"
+        high_text = str(int(high_hours)) if high_hours.is_integer() else f"{high_hours:.1f}"
+        return f"{low_text}-{high_text} hours"
     return f"{format_duration(low_minutes)}-{format_duration(high_minutes)}"
+
+
+def format_elapsed(seconds):
+    minutes = max(0, int(round(seconds / 60)))
+    return format_duration(minutes)
+
+
+def issue_timings(lines):
+    history = {}
+    for obj in json_objects_from_text("\n".join(lines)):
+        if not isinstance(obj, dict) or "issue" not in obj or "ts" not in obj:
+            continue
+        try:
+            issue = int(obj["issue"])
+            ts = int(obj["ts"])
+        except (TypeError, ValueError):
+            continue
+        step = " ".join(str(obj.get("step") or "working").replace("_", " ").split())
+        record = history.setdefault(issue, {"first": ts, "last": ts, "step": step, "done": False})
+        record["first"] = min(record["first"], ts)
+        if ts >= record["last"]:
+            record["last"] = ts
+            record["step"] = step
+        if step in {"merged", "complete", "completed", "done", "pr merged"}:
+            record["done"] = True
+            record["last"] = max(record["last"], ts)
+    if not history:
+        return []
+
+    active = []
+    completed = []
+    for issue, record in history.items():
+        elapsed = format_elapsed(record["last"] - record["first"])
+        if record["done"]:
+            completed.append((record["last"], f"#{issue} completed in {elapsed}"))
+        else:
+            active.append((record["last"], f"#{issue} current step {record['step']} after {elapsed}"))
+    active.sort(reverse=True)
+    completed.sort(reverse=True)
+    rows = ["item timing"]
+    rows.extend(text for _, text in active[:3])
+    rows.extend(text for _, text in completed[:3])
+    return rows
 
 
 def latest_forecast(lines):
@@ -361,12 +415,15 @@ def latest_forecast(lines):
     if claimed:
         planned_label = issue_label(claimed[0])
         rows.append(f"planned next: finish {planned_label}")
+        rows.append("next item start estimate: after current item finishes, roughly 15-45 minutes of handoff overhead")
     elif batch:
         planned_label = issue_label(batch[0])
         rows.append(f"planned next: start {planned_label}")
+        rows.append("next item start estimate: likely within the next conductor cycle")
     elif ready:
         planned_label = issue_label(ready[0])
         rows.append(f"planned next: start {planned_label}")
+        rows.append("next item start estimate: likely within the next conductor cycle")
 
     if batch:
         batch_label = issue_label(batch[0])
@@ -476,8 +533,9 @@ def fmt(when):
 
 
 forecast_rows = latest_forecast(all_lines)
+timing_rows = issue_timings(all_lines)
 
-if not events and not forecast_rows:
+if not events and not forecast_rows and not timing_rows:
     print("No timeline events found in the selected log window.")
     sys.exit(0)
 
@@ -501,6 +559,12 @@ if forecast_rows:
     if events:
         print("")
     for row in forecast_rows:
+        print(row)
+
+if timing_rows:
+    if events or forecast_rows:
+        print("")
+    for row in timing_rows:
         print(row)
 PY
 }
@@ -611,9 +675,23 @@ stop_conductor() {
     bash "$_stop" "$STOP_MODE"
 }
 
+monitor_report() {
+    _iteration=0
+    while :; do
+        _iteration=$((_iteration + 1))
+        printf 'autospec-autonomous monitor %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+        print_timeline
+        if [ "$MONITOR_ITERATIONS" -gt 0 ] && [ "$_iteration" -ge "$MONITOR_ITERATIONS" ]; then
+            break
+        fi
+        sleep "$MONITOR_INTERVAL"
+        printf '\n'
+    done
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        start|status|timeline|logs|watch|stop|restart|run-foreground)
+        start|status|timeline|monitor|logs|watch|stop|restart|run-foreground)
             ACTION="$1"
             ;;
         --max-cycles)
@@ -670,6 +748,18 @@ while [ $# -gt 0 ]; do
         --lines=*)
             LINES="${1#--lines=}"
             ;;
+        --interval-sec)
+            shift; MONITOR_INTERVAL="${1:-300}"
+            ;;
+        --interval-sec=*)
+            MONITOR_INTERVAL="${1#--interval-sec=}"
+            ;;
+        --iterations)
+            shift; MONITOR_ITERATIONS="${1:-0}"
+            ;;
+        --iterations=*)
+            MONITOR_ITERATIONS="${1#--iterations=}"
+            ;;
         --json)
             JSON=1
             ;;
@@ -712,6 +802,9 @@ case "$ACTION" in
         ;;
     timeline)
         print_timeline
+        ;;
+    monitor)
+        monitor_report
         ;;
     logs)
         show_logs
