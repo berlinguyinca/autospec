@@ -46,4 +46,26 @@ grep -qxF '. "$HOME/.autospec/env"' "$TEST_HOME/.bashrc" || {
     exit 1
 }
 
+for command in autospec-autonomous autospec-autonomous-status autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-stop autospec-autonomous-restart; do
+    [ -x "$TEST_HOME/.autospec/bin/$command" ] || {
+        echo "FAIL: $command wrapper was not installed"
+        ls -la "$TEST_HOME/.autospec/bin" || true
+        cat /tmp/autospec-install-path.out
+        exit 1
+    }
+done
+
+"$TEST_HOME/.autospec/bin/autospec-autonomous" status --json >/tmp/autospec-autonomous-status.json || {
+    echo "FAIL: autospec-autonomous status command did not run"
+    cat /tmp/autospec-autonomous-status.json 2>/dev/null || true
+    cat /tmp/autospec-install-path.out
+    exit 1
+}
+
+grep -q '"running":false' /tmp/autospec-autonomous-status.json || {
+    echo "FAIL: autospec-autonomous status did not report stopped state"
+    cat /tmp/autospec-autonomous-status.json
+    exit 1
+}
+
 echo "PASS"
