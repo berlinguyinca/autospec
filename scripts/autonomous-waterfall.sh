@@ -6,123 +6,100 @@
 #   { "tier": N, "action": "<string>", "reason": "<string>" }
 #
 # Tiers:
-#   Tier 0 — Control channel (preempts everything): a control label is present.
-#   Tier 1 — Backlog (open auto-implement issues via gh).
-#   Tier 2 — Local discovery: explore --once over local sources (spec-vs-code,
-#             codebase-signals, source-analysis, dependency-health, prior-reports).
-#             Phase-1 default: disabled; enable explicitly with
-#             AUTOSPEC_ENABLE_DISCOVERY_TIERS=1.
-#   Tier 3 — Internet discovery: explore --once --research-sources internet.
-#             Phase-1 default: disabled; enable explicitly with
-#             AUTOSPEC_ENABLE_DISCOVERY_TIERS=1.
+#   Tier 0   — Control channel (preempts everything): a control label is present.
+#   Tier 1   — Backlog (open auto-implement issues via gh).
+#   Tier 1.5 — Promote/decompose/classify existing open issues into the pipeline.
+#   Tier 2   — Local discovery: explore --once over local sources.
+#   Tier 3   — Architecture, test-coverage, and technical-debt improvement.
+#   Tier 4   — Internet/operator-polish discovery.
 #
 # Dry-cycle escalation:
-#   The caller tracks dry cycles per tier and passes --dry-cycles (Tier 1) and
-#   --tier2-dry-cycles (Tier 2). A non-empty backlog floats selection back to
-#   Tier 1 next cycle (dry counters are managed by the conductor).
-#
-# Usage:
-#   autonomous-waterfall.sh [options]
-#
-# Options:
-#   --control-decision LABEL   Active control label (e.g. autospec:pause).
-#                              Empty string / omit = no control signal.
-#   --dry-cycles N             Consecutive Tier-1 dry cycles so far (default 0).
-#   --tier2-dry-cycles N       Consecutive Tier-2 dry cycles so far (default 0).
-#   --repo OWNER/REPO          GitHub repo for backlog count (default: detect
-#                              from git remote).
-#   --backlog-count N          Inject backlog count directly (skips gh call;
-#                              useful for testing).
-#   -h, --help                 Print this help.
-#
-# Exit codes:
-#   0  — decision emitted to stdout
-#   2  — usage error
+#   The caller tracks dry cycles per tier and passes them in. A non-empty backlog
+#   always floats selection back to Tier 1.
 
 set -u
 
-# ─── defaults ──────────────────────────────────────────────────────────────────
 CONTROL_DECISION=""
 DRY_CYCLES=0
+TIER15_DRY_CYCLES=0
 TIER2_DRY_CYCLES=0
+TIER3_DRY_CYCLES=0
+TIER4_DRY_CYCLES=0
 REPO=""
-BACKLOG_COUNT_INJECT=""          # non-empty → skip gh call
+BACKLOG_COUNT_INJECT=""
+OPEN_ISSUE_COUNT_INJECT=""
 DRY_CYCLES_THRESHOLD="${AUTOSPEC_AUTO_DRY_CYCLES:-2}"
-DISCOVERY_TIERS_ENABLED="${AUTOSPEC_ENABLE_DISCOVERY_TIERS:-0}"
+DISCOVERY_TIERS_DISABLED="${AUTOSPEC_DISABLE_DISCOVERY_TIERS:-0}"
 
-# ─── helpers ───────────────────────────────────────────────────────────────────
 usage() {
-    cat <<'EOF'
+    cat <<'USAGE'
 Usage: autonomous-waterfall.sh [options]
 
 Options:
-  --control-decision LABEL   Active control label (autospec:pause, etc.).
-  --dry-cycles N             Consecutive Tier-1 dry cycles (default 0).
-  --tier2-dry-cycles N       Consecutive Tier-2 dry cycles (default 0).
-  --repo OWNER/REPO          GitHub repo slug.
-  --backlog-count N          Inject backlog count (bypasses gh; for testing).
-  -h, --help                 Print this help.
+  --control-decision LABEL    Active control label (autospec:pause, etc.).
+  --dry-cycles N              Consecutive Tier-1 dry cycles (default 0).
+  --tier15-dry-cycles N       Consecutive Tier-1.5 dry cycles (default 0).
+  --tier2-dry-cycles N        Consecutive Tier-2 dry cycles (default 0).
+  --tier3-dry-cycles N        Consecutive Tier-3 dry cycles (default 0).
+  --tier4-dry-cycles N        Consecutive Tier-4 dry cycles (default 0).
+  --repo OWNER/REPO           GitHub repo slug.
+  --backlog-count N           Inject auto-implement backlog count (for testing).
+  --open-issue-count N        Inject non-auto open issue count (for testing).
+  -h, --help                  Print this help.
 
 Env:
-  AUTOSPEC_AUTO_DRY_CYCLES   Dry-cycle escalation threshold (default 2).
-  AUTOSPEC_ENABLE_DISCOVERY_TIERS
-                              Set to 1 to allow Tier 2/3 discovery. Default 0
-                              parks after the Tier-1 dry threshold in Phase 1.
+  AUTOSPEC_AUTO_DRY_CYCLES        Dry-cycle escalation threshold (default 2).
+  AUTOSPEC_DISABLE_DISCOVERY_TIERS Set to 1 for an emergency fail-closed park at
+                                  the Tier-1 dry threshold.
 
 Output (stdout):
-  {"tier":<0|1|2|3>,"action":"<string>","reason":"<string>"}
-EOF
+  {"tier":<0|1|1.5|2|3|4>,"action":"<string>","reason":"<string>"}
+USAGE
 }
 
 emit() {
     local tier="$1" action="$2" reason="$3"
-    # Minimal JSON — no external deps required.
     printf '{"tier":%s,"action":"%s","reason":"%s"}\n' "$tier" "$action" "$reason"
 }
 
-# ─── arg parsing ───────────────────────────────────────────────────────────────
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --control-decision)  CONTROL_DECISION="$2";    shift 2 ;;
-        --dry-cycles)        DRY_CYCLES="$2";          shift 2 ;;
-        --tier2-dry-cycles)  TIER2_DRY_CYCLES="$2";   shift 2 ;;
-        --repo)              REPO="$2";                shift 2 ;;
-        --backlog-count)     BACKLOG_COUNT_INJECT="$2"; shift 2 ;;
-        -h|--help)           usage; exit 0 ;;
+        --control-decision)   CONTROL_DECISION="$2"; shift 2 ;;
+        --dry-cycles)         DRY_CYCLES="$2"; shift 2 ;;
+        --tier15-dry-cycles)  TIER15_DRY_CYCLES="$2"; shift 2 ;;
+        --tier2-dry-cycles)   TIER2_DRY_CYCLES="$2"; shift 2 ;;
+        --tier3-dry-cycles)   TIER3_DRY_CYCLES="$2"; shift 2 ;;
+        --tier4-dry-cycles)   TIER4_DRY_CYCLES="$2"; shift 2 ;;
+        --repo)               REPO="$2"; shift 2 ;;
+        --backlog-count)      BACKLOG_COUNT_INJECT="$2"; shift 2 ;;
+        --open-issue-count)   OPEN_ISSUE_COUNT_INJECT="$2"; shift 2 ;;
+        -h|--help)            usage; exit 0 ;;
         *) printf 'autonomous-waterfall: unknown arg: %s\n' "$1" >&2; usage; exit 2 ;;
     esac
 done
 
-# ─── Tier 0 — Control channel (always preempts) ────────────────────────────────
 if [ -n "$CONTROL_DECISION" ]; then
     emit 0 "control" "$CONTROL_DECISION"
     exit 0
 fi
 
-# ─── Tier 1 — Backlog: open auto-implement issues ──────────────────────────────
-backlog_count=0
+if [ -z "$REPO" ]; then
+    REPO="$(git remote get-url origin 2>/dev/null \
+        | sed -E 's|.*github\.com[:/]||; s|\.git$||')" || true
+fi
 
+backlog_count=0
 if [ -n "$BACKLOG_COUNT_INJECT" ]; then
     backlog_count="$BACKLOG_COUNT_INJECT"
-else
-    # Detect repo slug from git remote when not provided.
-    if [ -z "$REPO" ]; then
-        REPO="$(git remote get-url origin 2>/dev/null \
-            | sed -E 's|.*github\.com[:/]||; s|\.git$||')" || true
-    fi
-
-    if [ -n "$REPO" ]; then
-        # Count open issues with the auto-implement label.
-        # gh may not be available in tests; treat failure as empty backlog.
-        raw="$(gh issue list \
-            --repo "$REPO" \
-            --label auto-implement \
-            --state open \
-            --limit 1000 \
-            --json number \
-            --jq 'length' 2>/dev/null)" || raw=""
-        backlog_count="${raw:-0}"
-    fi
+elif [ -n "$REPO" ]; then
+    raw="$(gh issue list \
+        --repo "$REPO" \
+        --label auto-implement \
+        --state open \
+        --limit 1000 \
+        --json number \
+        --jq 'length' 2>/dev/null)" || raw=""
+    backlog_count="${raw:-0}"
 fi
 
 if [ "$backlog_count" -gt 0 ] 2>/dev/null; then
@@ -130,27 +107,50 @@ if [ "$backlog_count" -gt 0 ] 2>/dev/null; then
     exit 0
 fi
 
-# Backlog is empty — check Tier-1 dry-cycle threshold before escalating.
 if [ "$DRY_CYCLES" -lt "$DRY_CYCLES_THRESHOLD" ] 2>/dev/null; then
     emit 1 "run-backlog" "backlog empty but dry-cycles=$DRY_CYCLES < threshold=$DRY_CYCLES_THRESHOLD; staying at Tier 1"
     exit 0
 fi
 
-# Phase 1 only enables Tier 0 + Tier 1. Discovery tiers are an explicit opt-in
-# until the Phase 2/3 discovery contract is intentionally activated.
-if [ "$DISCOVERY_TIERS_ENABLED" != "1" ]; then
-    emit 1 "park" "Tier 1 dry for $DRY_CYCLES cycle(s) >= threshold=$DRY_CYCLES_THRESHOLD; discovery tiers disabled in Phase 1"
+if [ "$DISCOVERY_TIERS_DISABLED" = "1" ]; then
+    emit 1 "park" "Tier 1 dry for $DRY_CYCLES cycle(s) >= threshold=$DRY_CYCLES_THRESHOLD; discovery tiers disabled by AUTOSPEC_DISABLE_DISCOVERY_TIERS"
     exit 0
 fi
 
-# ─── Tier 2 — Local discovery via explore --once ───────────────────────────────
-# Tier 1 has been dry for >= threshold cycles. Check whether Tier 2 is also
-# saturated before escalating to Tier 3.
+open_issue_count=0
+if [ -n "$OPEN_ISSUE_COUNT_INJECT" ]; then
+    open_issue_count="$OPEN_ISSUE_COUNT_INJECT"
+elif [ -n "$REPO" ]; then
+    raw="$(gh issue list \
+        --repo "$REPO" \
+        --state open \
+        --limit 1000 \
+        --json number,labels \
+        --jq '[.[] | select(([.labels[].name] | index("auto-implement") | not) and ([.labels[].name] | index("paused-by-user") | not) and ([.labels[].name] | index("locked-by-autospec-processor") | not))] | length' \
+        2>/dev/null)" || raw=""
+    open_issue_count="${raw:-0}"
+fi
+
+if [ "$open_issue_count" -gt 0 ] 2>/dev/null && \
+        [ "$TIER15_DRY_CYCLES" -lt "$DRY_CYCLES_THRESHOLD" ] 2>/dev/null; then
+    emit 1.5 "promote-open-issues" "Tier 1 dry and $open_issue_count non-auto open issue(s) available; promoting/decomposing/classifying existing issues"
+    exit 0
+fi
+
 if [ "$TIER2_DRY_CYCLES" -lt "$DRY_CYCLES_THRESHOLD" ] 2>/dev/null; then
-    emit 2 "run-explore-once" "Tier 1 dry for $DRY_CYCLES cycle(s) >= threshold=$DRY_CYCLES_THRESHOLD; running local discovery (tier2-dry-cycles=$TIER2_DRY_CYCLES)"
+    emit 2 "run-explore-once" "Tier 1/Tier 1.5 dry; running local discovery (tier2-dry-cycles=$TIER2_DRY_CYCLES)"
     exit 0
 fi
 
-# ─── Tier 3 — Internet discovery via explore --once --research-sources internet ─
-emit 3 "run-explore-once-internet" "Tier 2 dry for $TIER2_DRY_CYCLES cycle(s) >= threshold=$DRY_CYCLES_THRESHOLD; running internet discovery"
+if [ "$TIER3_DRY_CYCLES" -lt "$DRY_CYCLES_THRESHOLD" ] 2>/dev/null; then
+    emit 3 "run-architecture-improvement" "Tier 2 dry; generating architecture/test-coverage improvement work (tier3-dry-cycles=$TIER3_DRY_CYCLES)"
+    exit 0
+fi
+
+if [ "$TIER4_DRY_CYCLES" -lt "$DRY_CYCLES_THRESHOLD" ] 2>/dev/null; then
+    emit 4 "run-explore-once-internet" "Tier 3 dry; running internet/operator-polish discovery (tier4-dry-cycles=$TIER4_DRY_CYCLES)"
+    exit 0
+fi
+
+emit 4 "park" "all tiers dry: Tier 1 backlog, Tier 1.5 open-issue promotion, Tier 2 local discovery, Tier 3 architecture/test coverage, and Tier 4 internet/operator discovery exhausted"
 exit 0
