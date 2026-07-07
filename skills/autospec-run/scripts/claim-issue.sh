@@ -10,6 +10,8 @@ RUN_STATE="$SCRIPT_DIR/run-state.sh"
 # locate this worker's own marked comment.
 begin_marker="<!-- autospec-run-state:begin -->"
 end_marker="<!-- autospec-run-state:end -->"
+terminal_begin_marker="<!-- autospec-run-terminal:begin -->"
+terminal_end_marker="<!-- autospec-run-terminal:end -->"
 
 # own_marked_comment_id REPO ISSUE WORKER — print the highest id among marked
 # lock comments whose embedded worker_id LITERALLY equals this worker's id (its
@@ -25,10 +27,10 @@ own_marked_comment_id() {
              | sort_by(.id) | (.[-1].id // empty)' 2>/dev/null || true
 }
 
-# lowest_lock_field REPO ISSUE FIELD — print FIELD (.id, .updated_at, or the
-# embedded worker_id) of the LOWEST-numeric-id marked lock comment, i.e. the CAS
-# linearization point. updated_at is the SERVER timestamp from the GitHub API —
-# never a local clock. Empty if no marked lock exists.
+# lowest_lock_field REPO ISSUE FIELD — print FIELD (.id, .updated_at, or an
+# embedded run-state field) of the LOWEST-numeric-id marked lock comment, i.e.
+# the CAS linearization point. updated_at is the SERVER timestamp from the
+# GitHub API — never a local clock. Empty if no marked lock exists.
 lowest_lock_field() {
     gh api "repos/$1/issues/$2/comments" --jq '. // []' 2>/dev/null \
         | jq -r --arg b "$begin_marker" --arg e "$end_marker" --arg f "$3" '
@@ -37,7 +39,28 @@ lowest_lock_field() {
             | if $c == null then ""
               elif $f == "worker_id" then
                 ($c.body | capture("\"worker_id\"\\s*:\\s*\"(?<w>[^\"]*)\"").w // "")
+              elif $f == "state" then
+                ($c.body | capture("\"state\"\\s*:\\s*\"(?<s>[^\"]*)\"").s // "")
               else ($c[$f] // "") end' 2>/dev/null || true
+}
+
+terminal_merged_exists() {
+    gh api "repos/$1/issues/$2/comments" --jq '. // []' 2>/dev/null \
+        | jq -e --arg b "$terminal_begin_marker" --arg e "$terminal_end_marker" '
+            any(.[]; ((.body//"")|contains($b) and contains($e)) and
+              (((.body//"")|capture("\"state\"\\s*:\\s*\"(?<s>[^\"]*)\"").s // "") == "merged"))
+          ' >/dev/null 2>&1
+}
+
+exit_already_merged() {
+    own_comment_id="$(own_marked_comment_id "$repo" "$issue" "$worker_id")"
+    if [ -n "$own_comment_id" ] && [ "$own_comment_id" != "null" ]; then
+        gh api "repos/$repo/issues/comments/$own_comment_id" -X DELETE >/dev/null 2>&1 || true
+    fi
+    gh issue edit "$issue" --repo "$repo" --remove-label in-progress-by-bot >/dev/null 2>&1 || true
+    jq -n --argjson issue "$issue" --arg repo "$repo" --arg reason "already_merged" \
+        '{claimed:false, issue:$issue, repo:$repo, reason:$reason}'
+    exit 2
 }
 
 # iso_to_epoch ISO8601Z — parse a server UTC timestamp (YYYY-MM-DDThh:mm:ssZ) to
@@ -48,6 +71,31 @@ iso_to_epoch() {
     date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null \
         || date -u -d "$1" +%s 2>/dev/null \
         || true
+}
+
+create_claim_comment() {
+    repo="$1"
+    issue="$2"
+    worker_id="$3"
+    branch="$4"
+    ttl_seconds="$5"
+    now_iso="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    state_json="$(jq -n \
+        --arg repo "$repo" \
+        --arg issue "$issue" \
+        --arg worker_id "$worker_id" \
+        --arg branch "$branch" \
+        --arg now_iso "$now_iso" \
+        --argjson ttl_seconds "$ttl_seconds" \
+        '{schema:1, repo:$repo, issue:($issue|tonumber), worker_id:$worker_id, state:"claimed", branch:$branch, pr:"", step:"claimed", paths:[], claimed_at:$now_iso, updated_at:$now_iso, ttl_seconds:$ttl_seconds}')"
+    body_file="$(mktemp -t autospec-run-state.XXXXXX)"
+    trap 'rm -f "$body_file"' EXIT
+    {
+        printf '%s\n' "$begin_marker"
+        printf '%s\n' "$state_json"
+        printf '%s\n' "$end_marker"
+    } > "$body_file"
+    gh issue comment "$issue" --repo "$repo" --body-file "$body_file" >/dev/null
 }
 
 usage() {
@@ -118,7 +166,19 @@ fi
 # lock, or a lock we already own, also falls through (normal claim/refresh).
 reclaim_secs="${AUTOSPEC_CLAIM_LEASE_SECONDS:-${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}}"
 case "$reclaim_secs" in *[!0-9]*|'') reclaim_secs=10800 ;; esac
+claim_settle_seconds="${AUTOSPEC_CLAIM_SETTLE_SECONDS:-0.2}"
+case "$claim_settle_seconds" in *[!0-9.]*|'') claim_settle_seconds=0.2 ;; esac
+claim_confirm_reads="${AUTOSPEC_CLAIM_CONFIRM_READS:-5}"
+case "$claim_confirm_reads" in *[!0-9]*|'') claim_confirm_reads=5 ;; esac
+[ "$claim_confirm_reads" -gt 0 ] || claim_confirm_reads=1
 reclaiming=""
+if terminal_merged_exists "$repo" "$issue"; then
+    exit_already_merged
+fi
+lowest_state="$(lowest_lock_field "$repo" "$issue" state)"
+if [ "$lowest_state" = "merged" ]; then
+    exit_already_merged
+fi
 lowest_owner="$(lowest_lock_field "$repo" "$issue" worker_id)"
 if [ -n "$lowest_owner" ] && [ "$lowest_owner" != "$worker_id" ]; then
     lowest_updated_at="$(lowest_lock_field "$repo" "$issue" updated_at)"
@@ -148,36 +208,65 @@ if [ -n "$lowest_owner" ] && [ "$lowest_owner" != "$worker_id" ]; then
     reclaiming="$lowest_owner"
 fi
 
-"$RUN_STATE" upsert \
-    --issue "$issue" \
-    --repo "$repo" \
-    --worker-id "$worker_id" \
-    --state claimed \
-    --step claimed \
-    --branch "$branch" \
-    --ttl-seconds "$reclaim_secs" >/dev/null
-
-verified_state_json="$("$RUN_STATE" read --issue "$issue" --repo "$repo" 2>/dev/null || true)"
-verified_owner="$(printf '%s\n' "$verified_state_json" | jq -r '.worker_id // empty' 2>/dev/null || true)"
-verified_state="$(printf '%s\n' "$verified_state_json" | jq -r '.state // empty' 2>/dev/null || true)"
-if [ "$verified_owner" != "$worker_id" ] || [ "$verified_state" != "claimed" ]; then
-    # Lost race: the lowest-id lock comment is owned by a different worker.
-    # Self-clean by deleting ONLY this worker's own marked lock comment, never
-    # the winner's lower-id comment. Fail-closed if it cannot be found.
-    own_comment_id="$(own_marked_comment_id "$repo" "$issue" "$worker_id")"
-    if [ -n "$own_comment_id" ] && [ "$own_comment_id" != "null" ]; then
-        gh api "repos/$repo/issues/comments/$own_comment_id" -X DELETE >/dev/null 2>&1 || true
-    fi
-    printf 'claim-issue: claim lost (issue %s owned by %s)\n' "$issue" "$verified_owner" >&2
-    jq -n \
-        --argjson issue "$issue" \
-        --arg repo "$repo" \
-        --arg worker_id "$worker_id" \
-        --arg owner "$verified_owner" \
-        --arg state "$verified_state" \
-        '{claimed:false, issue:$issue, repo:$repo, worker_id:$worker_id, reason:"claim_lost", observed_owner:$owner, observed_state:$state}'
-    exit 2
+if [ -n "$reclaiming" ] || [ "$lowest_owner" = "$worker_id" ]; then
+    "$RUN_STATE" upsert \
+        --issue "$issue" \
+        --repo "$repo" \
+        --worker-id "$worker_id" \
+        --state claimed \
+        --step claimed \
+        --branch "$branch" \
+        --ttl-seconds "$reclaim_secs" >/dev/null
+else
+    create_claim_comment "$repo" "$issue" "$worker_id" "$branch" "$reclaim_secs"
 fi
+
+verified_owner=""
+verified_state=""
+confirm_read=1
+while [ "$confirm_read" -le "$claim_confirm_reads" ]; do
+    if [ "$claim_settle_seconds" != "0" ] && [ "$claim_settle_seconds" != "0.0" ]; then
+        sleep "$claim_settle_seconds" 2>/dev/null || sleep 1
+    fi
+    verified_state_json="$("$RUN_STATE" read --issue "$issue" --repo "$repo" 2>/dev/null || true)"
+    verified_owner="$(printf '%s\n' "$verified_state_json" | jq -r '.worker_id // empty' 2>/dev/null || true)"
+    verified_state="$(printf '%s\n' "$verified_state_json" | jq -r '.state // empty' 2>/dev/null || true)"
+    post_labels="$(gh issue view "$issue" --repo "$repo" --json labels --jq '.labels[].name' 2>/dev/null || true)"
+    if terminal_merged_exists "$repo" "$issue"; then
+        exit_already_merged
+    fi
+    if [ "$verified_owner" != "$worker_id" ] || [ "$verified_state" != "claimed" ]; then
+        # Lost race: the lowest-id lock comment is owned by a different worker.
+        # Self-clean by deleting ONLY this worker's own marked lock comment, never
+        # the winner's lower-id comment. Fail-closed if it cannot be found.
+        own_comment_id="$(own_marked_comment_id "$repo" "$issue" "$worker_id")"
+        if [ -n "$own_comment_id" ] && [ "$own_comment_id" != "null" ]; then
+            gh api "repos/$repo/issues/comments/$own_comment_id" -X DELETE >/dev/null 2>&1 || true
+        fi
+        printf 'claim-issue: claim lost (issue %s owned by %s)\n' "$issue" "$verified_owner" >&2
+        jq -n \
+            --argjson issue "$issue" \
+            --arg repo "$repo" \
+            --arg worker_id "$worker_id" \
+            --arg owner "$verified_owner" \
+            --arg state "$verified_state" \
+            '{claimed:false, issue:$issue, repo:$repo, worker_id:$worker_id, reason:"claim_lost", observed_owner:$owner, observed_state:$state}'
+        exit 2
+    fi
+    if ! printf '%s\n' "$post_labels" | grep -Fx in-progress-by-bot >/dev/null 2>&1; then
+        own_comment_id="$(own_marked_comment_id "$repo" "$issue" "$worker_id")"
+        if [ -n "$own_comment_id" ] && [ "$own_comment_id" != "null" ]; then
+            gh api "repos/$repo/issues/comments/$own_comment_id" -X DELETE >/dev/null 2>&1 || true
+        fi
+        jq -n \
+            --argjson issue "$issue" \
+            --arg repo "$repo" \
+            --arg worker_id "$worker_id" \
+            '{claimed:false, issue:$issue, repo:$repo, worker_id:$worker_id, reason:"claim_lost", observed_state:"inactive_labels"}'
+        exit 2
+    fi
+    confirm_read=$((confirm_read + 1))
+done
 
 if [ -n "$reclaiming" ]; then
     printf 'claim-issue: stale lease reclaimed (issue %s, prior owner %s, ttl %ss)\n' \
