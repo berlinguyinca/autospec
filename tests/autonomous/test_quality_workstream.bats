@@ -2,7 +2,7 @@
 # tests/test-quality-workstream.bats — contract tests for issue #1534 continuous test-quality workstream.
 
 setup() {
-    REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+    REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     SCRIPT="$REPO_ROOT/scripts/test-quality-workstream.sh"
     WORK="$(mktemp -d -t test-quality-workstream.XXXXXX)"
 }
