@@ -464,7 +464,6 @@ autospec_conductor_run() {
     local _usage_limit="${_sdir}/autospec-usage-limit.sh"
     local _governor="${_sdir}/autonomous-usage-governor.sh"
     local _list_ready="${AUTOSPEC_LIST_READY_BIN:-}"
-    local _idle_rescan_secs="${AUTOSPEC_IDLE_RESCAN_SECS:-60}"
 
     # ── Ledger wiring (F5) ─────────────────────────────────────────────────────
     # Resolve repo root (parent of scripts/ dir) for ledger data file path.
@@ -473,10 +472,6 @@ autospec_conductor_run() {
 
     # Resolve outcome ledger data path (env override > default under repo root).
     local _ledger_path="${AUTOSPEC_EXPLORE_LEDGER:-${_repo_root}/.autospec/explore-ledger.jsonl}"
-    if [ -z "${AUTOSPEC_PRIORITY_QUEUE_OUT:-}" ]; then
-        AUTOSPEC_PRIORITY_QUEUE_OUT="${_repo_root}/.autospec/autonomous-priority-queue.json"
-        export AUTOSPEC_PRIORITY_QUEUE_OUT
-    fi
 
     # Resolve explore-ledger.sh (fail-open: missing script is benign).
     local _ledger_sh=""
@@ -832,20 +827,6 @@ fi'
         if [ "$_action" = "park" ]; then
             printf '[conductor] parking: %s\n' "$_reason" >&2
             _stop_reason="waterfall:park:${_reason}"
-            break
-        elif [ "$_action" = "idle-rescan" ]; then
-            printf '[conductor] value floor idle: %s — re-scanning after %ss\n' \
-                "$_reason" "$_idle_rescan_secs" >&2
-            _dry_cycles=$((_dry_cycles + 1))
-            if [ "$_dry" != "1" ] && [ "$_idle_rescan_secs" -gt 0 ] 2>/dev/null; then
-                sleep "$_idle_rescan_secs"
-            fi
-        elif [ "$_action" = "human-gate" ]; then
-            printf '[conductor] human gate required: %s\n' "$_reason" >&2
-            if [ -n "$_notify_sh" ]; then
-                bash "$_notify_sh" "autospec-autonomous human gate" "$_reason" || true
-            fi
-            _stop_reason="value-gate:human-gate"
             break
         elif [ "$_action" = "promote-open-issues" ]; then
             # ── Tier 1.5: promote/decompose/classify existing open issues ─────
@@ -1385,11 +1366,6 @@ _conductor_maybe_write_digest() {
     local _priorities_section=""
     _priorities_section="$(_conductor_digest_priorities_section "$_priorities_file" 2>/dev/null || true)"
 
-    # Build value-priority queue block (fail-soft: absent queue → omit block).
-    local _value_queue_file="${AUTOSPEC_PRIORITY_QUEUE_OUT:-${repo_root}/.autospec/autonomous-priority-queue.json}"
-    local _value_queue_section=""
-    _value_queue_section="$(_conductor_digest_value_queue_section "$_value_queue_file" 2>/dev/null || true)"
-
     {
         printf '## autospec-autonomous daily digest — %s\n\n' "$today"
         printf 'Conductor: `autospec_conductor_run` (scripts/lib/autospec-loop.sh)\n\n'
@@ -1409,24 +1385,6 @@ _conductor_maybe_write_digest() {
     } > "$digest_file" || true
     printf '[conductor] daily digest written to %s\n' "$digest_file" >&2
     printf '%s' "$today"
-}
-
-
-# _conductor_digest_value_queue_section PRIORITY_QUEUE_JSON
-#   Emit a compact ranked value queue, including considered-and-skipped reasons.
-_conductor_digest_value_queue_section() {
-    local queue_file="$1"
-    [ -f "$queue_file" ] || return 0
-    jq -r '
-      def row($r): "| " + (($r.id // "unknown")|tostring) + " | " + (($r.workstream // "unknown")|tostring) + " | " + (($r.score // 0)|tostring) + " | " + (($r.route // "run")|tostring) + " |";
-      "### Value-gated priority queue\n\n" +
-      "Formula: `" + (.formula // "(Severity × Value × Confidence × Reversibility) / (Effort × BlastRadius)") + "`. Decision: `" + (.decision // "unknown") + "`.\n\n" +
-      "| Candidate | Workstream | Score | Route |\n|---|---:|---:|---|\n" +
-      ((.ranked // [])[:10] | map(row(.)) | join("\n")) +
-      (if ((.considered_and_skipped // []) | length) > 0 then
-        "\n\nConsidered and skipped: " + ((.considered_and_skipped // [])[:10] | map(((.id // "unknown")|tostring) + " (" + (.reason // "unknown") + ")") | join(", "))
-       else "" end)
-    ' "$queue_file" 2>/dev/null || true
 }
 
 # _conductor_digest_persona_section PERSONA_FILE
