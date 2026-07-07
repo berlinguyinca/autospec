@@ -197,11 +197,20 @@ print_timeline() {
     if ! command -v python3 >/dev/null 2>&1; then
         die "timeline requires python3"
     fi
+    _repo="${CONDUCTOR_REPO:-$(detect_repo_slug)}"
+    _heartbeat_dirs=""
+    if [ -n "$_repo" ]; then
+        _slug_underscore="$(printf '%s' "$_repo" | tr '/:' '__')"
+        _slug_double_underscore="$(printf '%s' "$_repo" | sed 's#[/:]#__#g')"
+        _slug_dash="$(printf '%s' "$_repo" | tr '/:' '-')"
+        _heartbeat_dirs="$HOME/.autospec/process-heartbeats/$_slug_underscore:$HOME/.autospec/process-heartbeats/$_slug_double_underscore:$HOME/.autospec/process-heartbeats/$_slug_dash"
+    fi
 
-    python3 - "$_log" "$LINES" <<'PY'
+    python3 - "$_log" "$LINES" "$_heartbeat_dirs" <<'PY'
 from collections import deque
 from datetime import datetime, timezone
 import json
+import os
 import re
 import sys
 
@@ -210,10 +219,28 @@ try:
     line_count = int(sys.argv[2])
 except (IndexError, ValueError):
     line_count = 200
+heartbeat_dirs = []
+if len(sys.argv) > 3 and sys.argv[3]:
+    heartbeat_dirs = [path for path in sys.argv[3].split(":") if path]
 
 with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
     all_lines = handle.readlines()
-    lines = list(deque(all_lines, maxlen=max(line_count, 1)))
+
+for heartbeat_dir in heartbeat_dirs:
+    if not os.path.isdir(heartbeat_dir):
+        continue
+    for name in sorted(os.listdir(heartbeat_dir)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(heartbeat_dir, name)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as heartbeat:
+                all_lines.append(heartbeat.read())
+                all_lines.append("\n")
+        except OSError:
+            continue
+
+lines = list(deque(all_lines, maxlen=max(line_count, 1)))
 
 events = []
 current_time = None
@@ -345,17 +372,36 @@ def format_elapsed(seconds):
     return format_duration(minutes)
 
 
+def heartbeat_step_and_ts(obj):
+    step = " ".join(str(obj.get("step") or obj.get("status") or "working").replace("_", " ").split())
+    ts_value = obj.get("ts")
+    if isinstance(ts_value, int):
+        return step, ts_value
+    if isinstance(ts_value, str) and ts_value.isdigit():
+        return step, int(ts_value)
+    updated_at = obj.get("updated_at")
+    if isinstance(updated_at, str):
+        parsed = parse_iso(updated_at)
+        if parsed is not None:
+            return step, int(parsed.timestamp())
+    return step, None
+
+
 def issue_timings(lines):
     history = {}
     for obj in json_objects_from_text("\n".join(lines)):
         if not isinstance(obj, dict) or "issue" not in obj or "ts" not in obj:
+            if not isinstance(obj, dict) or "issue" not in obj or "updated_at" not in obj:
+                continue
+        if not isinstance(obj, dict):
             continue
         try:
             issue = int(obj["issue"])
-            ts = int(obj["ts"])
         except (TypeError, ValueError):
             continue
-        step = " ".join(str(obj.get("step") or "working").replace("_", " ").split())
+        step, ts = heartbeat_step_and_ts(obj)
+        if ts is None:
+            continue
         record = history.setdefault(issue, {"first": ts, "last": ts, "step": step, "done": False})
         record["first"] = min(record["first"], ts)
         if ts >= record["last"]:
@@ -383,6 +429,34 @@ def issue_timings(lines):
     return rows
 
 
+def active_heartbeat_numbers(lines):
+    history = {}
+    for obj in json_objects_from_text("\n".join(lines)):
+        if not isinstance(obj, dict) or "issue" not in obj:
+            continue
+        try:
+            issue = int(obj["issue"])
+        except (TypeError, ValueError):
+            continue
+        step, ts = heartbeat_step_and_ts(obj)
+        if ts is None:
+            continue
+        record = history.setdefault(issue, {"last": ts, "step": step, "done": False})
+        if ts >= record["last"]:
+            record["last"] = ts
+            record["step"] = step
+        if step in {"merged", "complete", "completed", "done", "pr merged"}:
+            record["done"] = True
+            record["last"] = max(record["last"], ts)
+    return {issue for issue, record in history.items() if not record["done"]}
+
+
+def remove_issue_numbers(group, numbers):
+    if not numbers:
+        return group
+    return [issue for issue in group if issue_number(issue) not in numbers]
+
+
 def latest_forecast(lines):
     text = "\n".join(lines)
     latest = None
@@ -398,6 +472,22 @@ def latest_forecast(lines):
     claimed = latest.get("claimed") if isinstance(latest.get("claimed"), list) else []
     blocked = latest.get("blocked") if isinstance(latest.get("blocked"), list) else []
     batch = latest.get("batch") if isinstance(latest.get("batch"), list) else []
+    active_numbers = active_heartbeat_numbers(lines)
+    candidates_by_number = {
+        issue_number(issue): issue
+        for issue in unique_issues(ready, claimed, blocked, batch)
+        if issue_number(issue) is not None
+    }
+    promoted_numbers = active_numbers.intersection(candidates_by_number)
+    if promoted_numbers:
+        already_claimed = {issue_number(issue) for issue in claimed}
+        claimed = claimed + [
+            candidates_by_number[number]
+            for number in sorted(promoted_numbers)
+            if number not in already_claimed
+        ]
+        ready = remove_issue_numbers(ready, promoted_numbers)
+        batch = remove_issue_numbers(batch, promoted_numbers)
     all_issues = unique_issues(ready, claimed, blocked, batch)
     total = len(all_issues)
     if total == 0:
@@ -429,6 +519,8 @@ def latest_forecast(lines):
         batch_label = issue_label(batch[0])
         if batch_label and batch_label != planned_label and not any(batch_label == issue_label(issue) for issue in claimed):
             rows.append(f"then start {batch_label}")
+    elif claimed and ready:
+        rows.append(f"then start {issue_label(ready[0])}")
     elif len(ready) > 1:
         rows.append(f"then start {issue_label(ready[1])}")
 
