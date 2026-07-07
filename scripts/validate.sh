@@ -3122,6 +3122,7 @@ main() {
     check_autonomous_phase2_suite
     check_persona_suite
     check_performance_workstream_contract
+    check_ux_ui_workstream_contract
     check_reuse_lens_suite
 
 
@@ -4456,6 +4457,40 @@ check_performance_workstream_contract() {
     [ -f "$runbook" ] || fail "$runbook: missing runbook (issue #1536)"
     [ -f "$bats_file" ] || fail "$bats_file: missing bats coverage (issue #1536)"
     grep -q '<50ms' "$runbook" || fail "$runbook: missing fast-path budget guidance (issue #1536)"
+}
+
+
+# UX/UI workstream (issue #1538): Core Web Vitals, Lighthouse CI, token lint,
+# visual regression, interaction health, both-theme validation, prioritized
+# regression issue filing, and measured before/after proof must stay wired into
+# the default validation surface.
+check_ux_ui_workstream_contract() {
+    info "UX/UI workstream contract (issue #1538)"
+    local helper="scripts/ux-ui-workstream.sh"
+    local runbook="docs/runbooks/ux-ui-workstream.md"
+    local bats_file="tests/autonomous/test_ux_ui_workstream.bats"
+    local workflow=".github/workflows/ux-ui-workstream.yml"
+
+    [ -f "$helper" ] || fail "$helper: missing (issue #1538)"
+    [ -x "$helper" ] || fail "$helper: not executable (issue #1538)"
+    bash -n "$helper" || fail "$helper: bash -n failed (issue #1538)"
+    grep -q 'record-snapshot' "$helper" || fail "$helper: missing record-snapshot command (issue #1538)"
+    grep -q 'propose-regression-issue' "$helper" || fail "$helper: missing regression issue command (issue #1538)"
+    grep -q 'improvement-report' "$helper" || fail "$helper: missing before/after report command (issue #1538)"
+    grep -q 'validate-design-doc' "$helper" || fail "$helper: missing design-doc validator (issue #1538)"
+    [ -f "$runbook" ] || fail "$runbook: missing runbook (issue #1538)"
+    [ -f "$bats_file" ] || fail "$bats_file: missing bats coverage (issue #1538)"
+    [ -f "$workflow" ] || fail "$workflow: missing PR workflow (issue #1538)"
+    grep -q 'LCP <= 2.5s' "$runbook" || fail "$runbook: missing LCP budget (issue #1538)"
+    grep -q 'INP <= 200ms' "$runbook" || fail "$runbook: missing INP budget (issue #1538)"
+    grep -q 'CLS <= 0.1' "$runbook" || fail "$runbook: missing CLS budget (issue #1538)"
+    grep -q 'web.dev Web Vitals' "$runbook" || fail "$runbook: missing web.dev citation (issue #1538)"
+    grep -q 'Lighthouse CI' "$runbook" || fail "$runbook: missing Lighthouse CI citation (issue #1538)"
+    grep -q 'Nielsen Norman Group heuristics' "$runbook" || fail "$runbook: missing NN/g citation (issue #1538)"
+    grep -q 'HEART' "$runbook" || fail "$runbook: missing HEART citation (issue #1538)"
+    grep -q 'light' "$runbook" || fail "$runbook: missing light theme validation (issue #1538)"
+    grep -q 'dark' "$runbook" || fail "$runbook: missing dark theme validation (issue #1538)"
+    grep -q 'ux-ui-workstream\.sh gate' "$workflow" || fail "$workflow: missing deterministic gate invocation (issue #1538)"
 }
 
 # tests/reuse-lens/*.bats — the interrogation ledger + precision proof + AUTOSPEC_REUSE_LENS

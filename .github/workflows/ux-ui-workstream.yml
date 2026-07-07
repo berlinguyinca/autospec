@@ -1,0 +1,38 @@
+name: UX/UI workstream
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ux-ui-workstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate UX/UI workstream contract
+        run: |
+          bash -n scripts/ux-ui-workstream.sh
+          bash scripts/ux-ui-workstream.sh validate-design-doc --doc docs/runbooks/ux-ui-workstream.md
+          work="$(mktemp -d)"
+          ledger="$work/snapshots.jsonl"
+          bash scripts/ux-ui-workstream.sh record-snapshot \
+            --ledger "$ledger" --commit "${GITHUB_SHA}" --theme light \
+            --lcp-ms 2200 --inp-ms 150 --cls 0.05 --lighthouse-performance 94 \
+            --token-violations 0 --visual-diff-pct 0.04 --console-errors 0 \
+            --failed-requests 0 --tap-target-violations 0 --horizontal-overflow 0
+          bash scripts/ux-ui-workstream.sh record-snapshot \
+            --ledger "$ledger" --commit "${GITHUB_SHA}" --theme dark \
+            --lcp-ms 2300 --inp-ms 170 --cls 0.07 --lighthouse-performance 93 \
+            --token-violations 0 --visual-diff-pct 0.05 --console-errors 0 \
+            --failed-requests 0 --tap-target-violations 0 --horizontal-overflow 0
+          bash scripts/ux-ui-workstream.sh gate --ledger "$ledger" --commit "${GITHUB_SHA}"
+      - name: Run UX/UI deterministic gate when snapshots exist
+        run: |
+          if [ -f .autospec/ux-ui/snapshots.jsonl ]; then
+            bash scripts/ux-ui-workstream.sh gate \
+              --ledger .autospec/ux-ui/snapshots.jsonl \
+              --commit "${GITHUB_SHA}" \
+              --regressions-out .autospec/ux-ui/regressions.jsonl
+          else
+            echo "No UX/UI snapshots present; contract validation covered helper/runbook wiring."
+          fi
