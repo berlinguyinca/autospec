@@ -335,7 +335,7 @@ def latest_forecast(lines):
     for obj in json_objects_from_text(text):
         if not isinstance(obj, dict):
             continue
-        if any(key in obj for key in ("ready", "claimed", "blocked", "batch")):
+        if any(isinstance(obj.get(key), list) for key in ("ready", "claimed", "blocked", "batch")):
             latest = obj
     if latest is None:
         return None
@@ -357,16 +357,20 @@ def latest_forecast(lines):
         f"rough ETA: about {format_duration_range(low_minutes, high_minutes)} at 45-90 minutes per item",
     ]
 
+    planned_label = ""
     if claimed:
-        rows.append(f"planned next: finish {issue_label(claimed[0])}")
+        planned_label = issue_label(claimed[0])
+        rows.append(f"planned next: finish {planned_label}")
     elif batch:
-        rows.append(f"planned next: start {issue_label(batch[0])}")
+        planned_label = issue_label(batch[0])
+        rows.append(f"planned next: start {planned_label}")
     elif ready:
-        rows.append(f"planned next: start {issue_label(ready[0])}")
+        planned_label = issue_label(ready[0])
+        rows.append(f"planned next: start {planned_label}")
 
     if batch:
         batch_label = issue_label(batch[0])
-        if batch_label and not any(batch_label == issue_label(issue) for issue in claimed):
+        if batch_label and batch_label != planned_label and not any(batch_label == issue_label(issue) for issue in claimed):
             rows.append(f"then start {batch_label}")
     elif len(ready) > 1:
         rows.append(f"then start {issue_label(ready[1])}")

@@ -142,6 +142,31 @@ EOF
   [[ "$output" == *"things left: 2 total (1 ready, 1 in progress, 0 blocked)"* ]]
 }
 
+@test "operator cli: timeline forecast ignores scalar claimed fields after coordinator state" {
+  mkdir -p "$HOME/.autospec/autonomous-operator" "$TEST_TMP/logs"
+  printf '%s\n' "$TEST_TMP/logs/conductor.log" > "$HOME/.autospec/autonomous-operator/conductor.logpath"
+  cat > "$TEST_TMP/logs/conductor.log" <<'EOF'
+{
+  "ready": [
+    {"number": 1538, "title": "feat: autonomous UX/UI optimization tier"}
+  ],
+  "blocked": [],
+  "claimed": [],
+  "batch": [
+    {"number": 1538, "title": "feat: autonomous UX/UI optimization tier"}
+  ]
+}
+{"claimed": false}
+EOF
+
+  run bash "$CLI" timeline --lines 80
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"autospec-autonomous forecast"* ]]
+  [[ "$output" == *"things left: 1 total (1 ready, 0 in progress, 0 blocked)"* ]]
+  [ "$(printf '%s\n' "$output" | grep -c "#1538 feat: autonomous UX/UI optimization tier")" -eq 1 ]
+}
+
 @test "operator cli: status finds spend ledger with alternate .git slug" {
   mkdir -p "$HOME/.autospec/autonomous-spend/berlinguyinca_autospec.git"
   printf '{"issues":7,"tokens":0}\n' > "$HOME/.autospec/autonomous-spend/berlinguyinca_autospec.git/spend.json"
