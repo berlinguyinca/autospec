@@ -136,6 +136,12 @@ no-op on clean installs (`feedback_installer_excludes_runtime_libs`):
   `--priorities` + `autospec:steer` (which already deliver steering today). If the
   delta is only "rank slightly differently," cut it (`feedback_roi_check_new_components`).
 
+## Value-gated prioritization model
+
+The conductor's cross-workstream queue uses a SAFe WSJF-inspired score, with Cost of Delay represented by severity, value, and confidence signals and divided by implementation size/risk: `Priority = (Severity × Value × Confidence × Reversibility) / (Effort × BlastRadius)`. This keeps the waterfall aligned with SAFe WSJF / Cost of Delay guidance while adding autospec-specific safety divisors: high blast-radius or fenced changes route to a human gate, and candidates below the value floor idle for a re-scan instead of manufacturing low-value work.
+
+Recently touched files receive deterministic score decay so the conductor does not ping-pong A→B→A across adjacent cycles. The daily digest includes the ranked queue and considered-and-skipped reasons when a value queue has been produced.
+
 ## The priority waterfall
 
 One **cycle** = evaluate tiers top-down, execute the first tier that has work,
