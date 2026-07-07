@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # Unit tests for the documentation generation & freshness tier (#1540).
 
-SCRIPT="$BATS_TEST_DIRNAME/../../scripts/doc-freshness-tier.sh"
+SCRIPT="$BATS_TEST_DIRNAME/../../skills/autospec-shared/scripts/doc-freshness-tier.sh"
 
 setup() {
   WORK="$(mktemp -d)"
