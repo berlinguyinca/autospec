@@ -3079,6 +3079,7 @@ main() {
     check_autospec_autonomous_contract
     check_autospec_autonomous_skill_contract
     check_conductor_wiring_contract
+    check_autonomy_guardrails_foundation
     check_autospec_refine_contract
     check_autospec_continue_contract
     check_autospec_loop_contract
@@ -3119,6 +3120,7 @@ main() {
     check_autospec_autonomous_contract
     check_autospec_autonomous_skill_contract
     check_conductor_wiring_contract
+    check_autonomy_guardrails_foundation
     check_autonomous_phase2_suite
     check_persona_suite
     check_performance_workstream_contract
@@ -4382,6 +4384,43 @@ check_conductor_wiring_contract() {
         bats "$bats_file" >/tmp/validate-conductor-wiring.log 2>&1 \
             || { cat /tmp/validate-conductor-wiring.log >&2; \
                  fail "$bats_file: failed (issue #1378)"; }
+    fi
+}
+
+# Autonomy guardrails foundation (issue #1543): immutable-verifier diff guard,
+# high-risk blast-radius quarantine, provenance, rollback hook, and design notes
+# stay wired into validation before child issues deepen each mechanism.
+check_autonomy_guardrails_foundation() {
+    info "autonomy guardrails foundation: helper + premerge/resilience wiring + docs/tests (issue #1543)"
+    [ -x scripts/autonomous-guardrails.sh ] \
+        || fail "scripts/autonomous-guardrails.sh: missing or not executable (issue #1543)"
+    bash -n scripts/autonomous-guardrails.sh \
+        || fail "scripts/autonomous-guardrails.sh: bash syntax error (issue #1543)"
+    grep -q 'diff-guard' scripts/autonomous-premerge-gate.sh \
+        || fail "autonomous-premerge-gate.sh missing immutable diff guard wiring (issue #1543)"
+    grep -q 'blast-radius' scripts/autonomous-premerge-gate.sh \
+        || fail "autonomous-premerge-gate.sh missing blast-radius wiring (issue #1543)"
+    grep -q 'provenance' scripts/autonomous-premerge-gate.sh \
+        || fail "autonomous-premerge-gate.sh missing provenance recording (issue #1543)"
+    grep -q 'post-merge-health' scripts/autonomous-resilience.sh \
+        || fail "autonomous-resilience.sh missing post-merge-health rollback hook (issue #1543)"
+    grep -q 'autonomous-guardrails.sh' skills/autospec-autonomous/install.sh \
+        || fail "autospec-autonomous install manifest missing autonomous-guardrails.sh (issue #1543)"
+    grep -q 'autonomous-guardrails.sh' skills/autospec-autonomous/uninstall.sh \
+        || fail "autospec-autonomous uninstall manifest missing autonomous-guardrails.sh (issue #1543)"
+    [ -f docs/specs/2026-07-07-autonomy-guardrails-foundation-design.md ] \
+        || fail "autonomy guardrails design doc missing (issue #1543)"
+    grep -q 'Skalse' docs/specs/2026-07-07-autonomy-guardrails-foundation-design.md \
+        || fail "design doc missing reward-hacking literature citation (issue #1543)"
+    grep -q 'specification gaming' docs/specs/2026-07-07-autonomy-guardrails-foundation-design.md \
+        || fail "design doc missing specification-gaming citation (issue #1543)"
+    [ -f tests/autonomous/test_guardrails_foundation.bats ] \
+        || fail "tests/autonomous/test_guardrails_foundation.bats missing (issue #1543)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/autonomous/test_guardrails_foundation.bats"
+        bats tests/autonomous/test_guardrails_foundation.bats >/tmp/validate-guardrails-foundation.log 2>&1 \
+            || { cat /tmp/validate-guardrails-foundation.log >&2; \
+                 fail "tests/autonomous/test_guardrails_foundation.bats: failed (issue #1543)"; }
     fi
 }
 

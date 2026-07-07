@@ -14,6 +14,7 @@
 #   lock   check   --repo OWNER/REPO
 #   quarantine  --repo OWNER/REPO --issue N [--failures N]
 #   main-health --repo OWNER/REPO
+#   post-merge-health --repo OWNER/REPO --provenance <json>
 #
 # Machine-readable output on stdout — one DECISION:<token> line per call:
 #   DECISION:state-written
@@ -26,6 +27,7 @@
 #   DECISION:continue        — main status green
 #   DECISION:wait            — main status pending
 #   DECISION:halt            — main status red (exit 1)
+#   DECISION:rollback        — post-merge health failed and rollback dispatched
 #
 # Single-instance lock reconciled with autospec-resume (NOT a second lock):
 #   Reclaimable ONLY when holder heartbeat_at satisfies
@@ -625,6 +627,61 @@ cmd_main_health() {
 }
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+# ── Subcommand: post-merge-health ─────────────────────────────────────────────
+# post-merge-health --repo OWNER/REPO --provenance <json>
+cmd_post_merge_health() {
+    local repo="" provenance=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --repo) repo="${2:-}"; shift 2 ;;
+            --provenance) provenance="${2:-}"; shift 2 ;;
+            *) die "post-merge-health: unknown option: $1" ;;
+        esac
+    done
+    repo="$(resolve_repo "$repo")"
+    if [ -z "$provenance" ] || [ ! -f "$provenance" ]; then
+        die "post-merge-health: --provenance JSON is required"
+    fi
+
+    local health_output health_status
+    set +e
+    health_output="$(cmd_main_health --repo "$repo" 2>&1)"
+    health_status="$?"
+    set -e
+    printf '%s\n' "$health_output"
+
+    if [ "$health_status" -eq 0 ]; then
+        if printf '%s\n' "$health_output" | grep -q '^DECISION:continue$'; then
+            say "DECISION:no-rollback"
+            return 0
+        fi
+        say "DECISION:wait"
+        return 0
+    fi
+
+    if ! printf '%s\n' "$health_output" | grep -q '^DECISION:halt$'; then
+        say "DECISION:wait"
+        return 0
+    fi
+
+    local rollback_handle rollback_cmd pr
+    rollback_handle="$(jq -r '.rollback_handle // empty' "$provenance" 2>/dev/null || echo "")"
+    pr="$(jq -r '.pr // empty' "$provenance" 2>/dev/null || echo "")"
+    if [ -z "$rollback_handle" ]; then
+        die "post-merge-health: provenance missing rollback_handle"
+    fi
+    rollback_cmd="${AUTOSPEC_ROLLBACK_CMD:-}"
+    if [ -n "$rollback_cmd" ]; then
+        "$rollback_cmd" --repo "$repo" --handle "$rollback_handle" --pr "$pr" || true
+    else
+        notify_op "autospec: rollback required" \
+            "Post-merge health failed for ${repo}; rollback handle ${rollback_handle}"
+    fi
+    say "DECISION:rollback"
+    say "ROLLBACK_HANDLE:${rollback_handle}"
+    exit 1
+}
+
 usage() {
     cat <<'EOF'
 Usage: autonomous-resilience.sh <subcommand> [options]
@@ -637,6 +694,7 @@ Subcommands:
   lock   check   --repo OWNER/REPO
   quarantine  --repo OWNER/REPO --issue N [--failures N]
   main-health --repo OWNER/REPO
+  post-merge-health --repo OWNER/REPO --provenance <json>
 
 Outputs DECISION:<token> lines on stdout.
 Exit 0 = ok; 1 = lock-held/quarantine/halt; 2 = usage error.
@@ -655,6 +713,7 @@ case "$CMD" in
     lock)         cmd_lock         "$@" ;;
     quarantine)   cmd_quarantine   "$@" ;;
     main-health)  cmd_main_health  "$@" ;;
+    post-merge-health) cmd_post_merge_health "$@" ;;
     --help|-h)    usage; exit 0 ;;
     *)            die "unknown subcommand '${CMD}'. Run with --help for usage." ;;
 esac

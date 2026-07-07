@@ -9,6 +9,8 @@
 # Usage:
 #   autonomous-premerge-gate.sh [--pr-branch <branch>] [--repo <owner/repo>]
 #                                [--pr <number>] [--max-attempts <N>]
+#                                [--changed-files <file>] [--gate-evidence <json>]
+#                                [--rollback-handle <ref>] [--provenance-out <json>]
 #                                [--notify-sh <path>] [--dry-run]
 #
 # Verdict output (stdout, last line):
@@ -32,6 +34,10 @@ REPO=""
 PR_NUMBER=""
 MAX_ATTEMPTS="${AUTOSPEC_PREMERGE_MAX_ATTEMPTS:-5}"
 NOTIFY_SH=""
+CHANGED_FILES=""
+GATE_EVIDENCE=""
+ROLLBACK_HANDLE=""
+PROVENANCE_OUT=""
 DRY_RUN=0
 
 # Resolve notify.sh path: env override → relative to this script → PATH lookup
@@ -57,6 +63,10 @@ Options:
   --pr <number>           PR number for labelling (optional).
   --max-attempts <N>      Max fix-and-recheck cycles per stage (default: 5).
   --notify-sh <path>      Path to notify.sh (default: auto-detected).
+  --changed-files <file>  Newline-delimited changed files for immutable/blast checks.
+  --gate-evidence <json>  Passing gate evidence JSON to record on merge-ok.
+  --rollback-handle <ref> Rollback ref/command handle to record on merge-ok.
+  --provenance-out <json> Output path for merge provenance JSON.
   --dry-run               Print what would run without executing.
 
 Environment:
@@ -86,6 +96,10 @@ while [ $# -gt 0 ]; do
         --pr)          PR_NUMBER="${2:-}"; shift 2 ;;
         --max-attempts) MAX_ATTEMPTS="${2:-5}"; shift 2 ;;
         --notify-sh)   NOTIFY_SH="${2:-}"; shift 2 ;;
+        --changed-files) CHANGED_FILES="${2:-}"; shift 2 ;;
+        --gate-evidence) GATE_EVIDENCE="${2:-}"; shift 2 ;;
+        --rollback-handle) ROLLBACK_HANDLE="${2:-}"; shift 2 ;;
+        --provenance-out) PROVENANCE_OUT="${2:-}"; shift 2 ;;
         --dry-run)     DRY_RUN=1; shift ;;
         --help|-h)     usage; exit 0 ;;
         *) printf '%s: unknown argument: %s\n' "$SCRIPT_NAME" "$1" >&2
@@ -274,6 +288,35 @@ _apply_needs_human_label() {
     fi
 }
 
+
+# ── Guardrail helper ─────────────────────────────────────────────────────────
+_guardrails_sh() {
+    local dir
+    dir="$(cd "$(dirname "$0")" && pwd)"
+    printf '%s/autonomous-guardrails.sh' "$dir"
+}
+
+_apply_guardrail_block_label() {
+    _apply_needs_human_label
+}
+
+# ── Pre-QA deterministic guardrails ──────────────────────────────────────────
+if [ -n "$CHANGED_FILES" ]; then
+    GUARDRAILS_SH="$(_guardrails_sh)"
+    if ! guard_output="$(bash "$GUARDRAILS_SH" diff-guard --changed-files "$CHANGED_FILES" 2>&1)"; then
+        printf "%s\n" "$guard_output"
+        _apply_guardrail_block_label
+        printf "block immutable_verifier_modified\n"
+        exit 1
+    fi
+    if ! blast_output="$(bash "$GUARDRAILS_SH" blast-radius --changed-files "$CHANGED_FILES" 2>&1)"; then
+        printf "%s\n" "$blast_output"
+        _apply_guardrail_block_label
+        printf "block high_risk_blast_radius\n"
+        exit 1
+    fi
+fi
+
 # ── Stage 1: QA fix-and-recheck loop ─────────────────────────────────────────
 attempt=1
 while true; do
@@ -337,6 +380,18 @@ while true; do
 
     # Both stages clear — gate passes.
     info "No blocking findings on QA+secaudit. Gate passes."
+    if [ -n "$PROVENANCE_OUT" ]; then
+        if [ -z "$CHANGED_FILES" ] || [ -z "$GATE_EVIDENCE" ] || [ -z "$ROLLBACK_HANDLE" ] || [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
+            die "--provenance-out requires --changed-files, --gate-evidence, --rollback-handle, --repo, and --pr"
+        fi
+        bash "$(_guardrails_sh)" provenance \
+            --repo "$REPO" \
+            --pr "$PR_NUMBER" \
+            --changed-files "$CHANGED_FILES" \
+            --gate-evidence "$GATE_EVIDENCE" \
+            --rollback-handle "$ROLLBACK_HANDLE" \
+            --out "$PROVENANCE_OUT" >&2
+    fi
     printf 'merge-ok\n'
     exit 0
 done

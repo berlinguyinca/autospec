@@ -17,7 +17,7 @@
 set -eu
 
 SKILL_NAME="autospec-autonomous"
-AUTONOMOUS_SCRIPT_FILES="autonomous-control-channel.sh autonomous-premerge-gate.sh autonomous-resilience.sh autonomous-spend-ledger.sh autonomous-waterfall.sh autospec-autonomy-gate.sh"
+AUTONOMOUS_SCRIPT_FILES="autonomous-control-channel.sh autonomous-guardrails.sh autonomous-premerge-gate.sh autonomous-resilience.sh autonomous-spend-ledger.sh autonomous-waterfall.sh autospec-autonomy-gate.sh"
 LIB_FILES="autospec-loop.sh autospec-harness-detect.sh"
 
 HARNESS=""
