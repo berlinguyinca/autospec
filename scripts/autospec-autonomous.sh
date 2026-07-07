@@ -196,6 +196,7 @@ print_timeline() {
     python3 - "$_log" "$LINES" <<'PY'
 from collections import deque
 from datetime import datetime, timezone
+import json
 import re
 import sys
 
@@ -206,7 +207,8 @@ except (IndexError, ValueError):
     line_count = 200
 
 with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
-    lines = list(deque(handle, maxlen=max(line_count, 1)))
+    all_lines = handle.readlines()
+    lines = list(deque(all_lines, maxlen=max(line_count, 1)))
 
 events = []
 current_time = None
@@ -250,6 +252,128 @@ def summarize_paths(paths):
     if len(paths) == 2:
         return f"{paths[0]} and {paths[1]}"
     return f"{', '.join(paths[:-1])}, and {paths[-1]}"
+
+
+def json_objects_from_text(text):
+    decoder = json.JSONDecoder()
+    index = 0
+    while index < len(text):
+        start = text.find("{", index)
+        if start == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        yield obj
+        index = start + max(end, 1)
+
+
+def issue_number(issue):
+    if not isinstance(issue, dict):
+        return None
+    value = issue.get("number")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def issue_label(issue):
+    if not isinstance(issue, dict):
+        return ""
+    number = issue_number(issue)
+    title = " ".join(str(issue.get("title") or "").split())
+    if number is not None and title:
+        return f"#{number} {title}"
+    if number is not None:
+        return f"#{number}"
+    return title
+
+
+def unique_issues(*groups):
+    by_number = {}
+    unnumbered = []
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for issue in group:
+            label = issue_label(issue)
+            if not label:
+                continue
+            number = issue_number(issue)
+            if number is None:
+                if label not in unnumbered:
+                    unnumbered.append(label)
+            else:
+                by_number[number] = issue
+    return list(by_number.values()) + [{"title": label} for label in unnumbered]
+
+
+def format_duration(minutes):
+    if minutes < 60:
+        return f"{minutes} minutes"
+    hours = minutes / 60
+    if hours.is_integer():
+        return f"{int(hours)} hours"
+    return f"{hours:.1f} hours"
+
+
+def format_duration_range(low_minutes, high_minutes):
+    if high_minutes < 60:
+        return f"{low_minutes}-{high_minutes} minutes"
+    if low_minutes >= 60 and low_minutes % 60 == 0 and high_minutes % 60 == 0:
+        return f"{low_minutes // 60}-{high_minutes // 60} hours"
+    return f"{format_duration(low_minutes)}-{format_duration(high_minutes)}"
+
+
+def latest_forecast(lines):
+    text = "\n".join(lines)
+    latest = None
+    for obj in json_objects_from_text(text):
+        if not isinstance(obj, dict):
+            continue
+        if any(key in obj for key in ("ready", "claimed", "blocked", "batch")):
+            latest = obj
+    if latest is None:
+        return None
+
+    ready = latest.get("ready") if isinstance(latest.get("ready"), list) else []
+    claimed = latest.get("claimed") if isinstance(latest.get("claimed"), list) else []
+    blocked = latest.get("blocked") if isinstance(latest.get("blocked"), list) else []
+    batch = latest.get("batch") if isinstance(latest.get("batch"), list) else []
+    all_issues = unique_issues(ready, claimed, blocked, batch)
+    total = len(all_issues)
+    if total == 0:
+        return None
+
+    low_minutes = total * 45
+    high_minutes = total * 90
+    rows = [
+        "autospec-autonomous forecast",
+        f"things left: {total} total ({len(ready)} ready, {len(claimed)} in progress, {len(blocked)} blocked)",
+        f"rough ETA: about {format_duration_range(low_minutes, high_minutes)} at 45-90 minutes per item",
+    ]
+
+    if claimed:
+        rows.append(f"planned next: finish {issue_label(claimed[0])}")
+    elif batch:
+        rows.append(f"planned next: start {issue_label(batch[0])}")
+    elif ready:
+        rows.append(f"planned next: start {issue_label(ready[0])}")
+
+    if batch:
+        batch_label = issue_label(batch[0])
+        if batch_label and not any(batch_label == issue_label(issue) for issue in claimed):
+            rows.append(f"then start {batch_label}")
+    elif len(ready) > 1:
+        rows.append(f"then start {issue_label(ready[1])}")
+
+    if blocked:
+        rows.append(f"blocked later: {issue_label(blocked[0])}")
+    return rows
 
 
 i = 0
@@ -347,7 +471,9 @@ def fmt(when):
     return text
 
 
-if not events:
+forecast_rows = latest_forecast(all_lines)
+
+if not events and not forecast_rows:
     print("No timeline events found in the selected log window.")
     sys.exit(0)
 
@@ -366,6 +492,12 @@ for when, text in events:
     seen.add(row)
     suffix = "" if row[1].endswith((".", "!", "?")) else "."
     print(f"{row[0]} - {row[1]}{suffix}")
+
+if forecast_rows:
+    if events:
+        print("")
+    for row in forecast_rows:
+        print(row)
 PY
 }
 

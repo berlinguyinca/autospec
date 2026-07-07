@@ -63,7 +63,7 @@ or after `. "$HOME/.autospec/env"`:
 |---------|---------|
 | `autospec-autonomous [start]` | Start the detached conductor. |
 | `autospec-autonomous-status` | Print PID, log path, conductor state, spend ledger, and recent log tail. |
-| `autospec-autonomous-timeline` | Print a chronological plain-English activity report from the conductor log. |
+| `autospec-autonomous-timeline` | Print a chronological plain-English activity report plus queue forecast from the conductor log. |
 | `autospec-autonomous-logs` | Print the current conductor log tail. |
 | `autospec-autonomous-watch` | Follow the current conductor log. |
 | `autospec-autonomous-stop --graceful` | Request stop after the current issue/cycle boundary. |
@@ -83,7 +83,8 @@ omx exec --cd "$AUTOSPEC_REPO_DIR" --dangerously-bypass-approvals-and-sandbox '$
 Use `autospec-autonomous status --json` for monitoring integrations. Use
 `autospec-autonomous timeline --lines N` when an operator needs a human-readable
 sequence such as `4:30 am - implemented feature X` and `4:45 am - started
-research on X`. Use `--repo-dir DIR` when launching from outside the target
+research on X`, followed by estimated remaining work, rough ETA, and planned next
+steps when coordinator state is present in the log. Use `--repo-dir DIR` when launching from outside the target
 checkout, and use `--repo OWNER/REPO` when the GitHub slug cannot be detected.
 
 ## Required capabilities & harness adapter
