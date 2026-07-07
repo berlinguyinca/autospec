@@ -207,7 +207,8 @@ except (IndexError, ValueError):
     line_count = 200
 
 with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
-    lines = list(deque(handle, maxlen=max(line_count, 1)))
+    all_lines = handle.readlines()
+    lines = list(deque(all_lines, maxlen=max(line_count, 1)))
 
 events = []
 current_time = None
@@ -470,7 +471,7 @@ def fmt(when):
     return text
 
 
-forecast_rows = latest_forecast(lines)
+forecast_rows = latest_forecast(all_lines)
 
 if not events and not forecast_rows:
     print("No timeline events found in the selected log window.")
