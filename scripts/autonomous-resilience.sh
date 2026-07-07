@@ -540,7 +540,9 @@ cmd_main_health() {
     repo="$(resolve_repo "$repo")"
 
     # Use gh api (not ci-wait.sh which is per-PR).
-    # endpoint: /repos/{owner}/{repo}/commits/main/status  → .state field
+    # First check the legacy commit-status endpoint. Repos that use GitHub
+    # Actions check-runs without legacy statuses report state=pending and
+    # total_count=0 there, so fall through to check-runs in that specific case.
     local api_output
     api_output="$("$GH" api "repos/${repo}/commits/main/status" 2>/dev/null || echo "")"
 
@@ -551,9 +553,11 @@ cmd_main_health() {
         return
     fi
 
-    # Extract .state safely — never interpolate into jq test()
-    local ci_state
+    # Extract fields safely — never interpolate into jq test()
+    local ci_state status_count has_status_count
     ci_state="$(printf '%s' "$api_output" | jq -r '.state // empty' 2>/dev/null || echo "")"
+    status_count="$(printf '%s' "$api_output" | jq -r '.total_count // (.statuses | length) // 0' 2>/dev/null || echo "0")"
+    has_status_count="$(printf '%s' "$api_output" | jq -r 'has("total_count")' 2>/dev/null || echo "false")"
 
     case "$ci_state" in
         success)
@@ -561,6 +565,47 @@ cmd_main_health() {
             say "CI_STATE:success"
             ;;
         pending|"")
+            if [ "$has_status_count" = "true" ] && [ "${status_count:-0}" = "0" ]; then
+                local checks_output
+                checks_output="$("$GH" api "repos/${repo}/commits/main/check-runs?per_page=100" 2>/dev/null || echo "")"
+                if [ -z "$checks_output" ]; then
+                    say "DECISION:wait"
+                    say "CI_STATE:${ci_state:-unknown}"
+                    say "REASON:check-runs-api-failed"
+                    return
+                fi
+
+                local check_count incomplete_count failure_count unknown_count ignored_failure_count
+                local ignore_checks_regex="${AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS:-^(Publish @autospec/cli to npm|Open PR on homebrew-autospec tap)$}"
+                check_count="$(printf '%s' "$checks_output" | jq -r '.total_count // (.check_runs | length) // 0' 2>/dev/null || echo "0")"
+                incomplete_count="$(printf '%s' "$checks_output" | jq -r --arg ignore "$ignore_checks_regex" '[.check_runs[]? | select((.name // "") | test($ignore) | not) | select(.status != "completed")] | length' 2>/dev/null || echo "1")"
+                failure_count="$(printf '%s' "$checks_output" | jq -r --arg ignore "$ignore_checks_regex" '[.check_runs[]? | select((.name // "") | test($ignore) | not) | select(.status == "completed") | select((.conclusion // "") as $c | ($c == "failure" or $c == "cancelled" or $c == "timed_out" or $c == "action_required" or $c == "startup_failure"))] | length' 2>/dev/null || echo "1")"
+                unknown_count="$(printf '%s' "$checks_output" | jq -r --arg ignore "$ignore_checks_regex" '[.check_runs[]? | select((.name // "") | test($ignore) | not) | select(.status == "completed") | select((.conclusion // "") as $c | ($c != "success" and $c != "neutral" and $c != "skipped" and $c != "failure" and $c != "cancelled" and $c != "timed_out" and $c != "action_required" and $c != "startup_failure"))] | length' 2>/dev/null || echo "1")"
+                ignored_failure_count="$(printf '%s' "$checks_output" | jq -r --arg ignore "$ignore_checks_regex" '[.check_runs[]? | select((.name // "") | test($ignore)) | select(.status == "completed") | select((.conclusion // "") as $c | ($c == "failure" or $c == "cancelled" or $c == "timed_out" or $c == "action_required" or $c == "startup_failure"))] | length' 2>/dev/null || echo "0")"
+
+                if [ "${failure_count:-1}" -gt 0 ]; then
+                    notify_op "autospec: main-health halt" \
+                        "Main branch check-runs are failing for ${repo} — halting Tier-1 merges"
+                    say "DECISION:halt"
+                    say "CI_STATE:failure"
+                    say "CHECK_RUNS:${check_count:-0}"
+                    say "IGNORED_CHECK_RUN_FAILURES:${ignored_failure_count:-0}"
+                    exit 1
+                fi
+                if [ "${incomplete_count:-1}" -gt 0 ] || [ "${unknown_count:-1}" -gt 0 ]; then
+                    say "DECISION:wait"
+                    say "CI_STATE:pending"
+                    say "CHECK_RUNS:${check_count:-0}"
+                    say "IGNORED_CHECK_RUN_FAILURES:${ignored_failure_count:-0}"
+                    return
+                fi
+
+                say "DECISION:continue"
+                say "CI_STATE:checks-success"
+                say "CHECK_RUNS:${check_count:-0}"
+                say "IGNORED_CHECK_RUN_FAILURES:${ignored_failure_count:-0}"
+                return
+            fi
             say "DECISION:wait"
             say "CI_STATE:${ci_state:-unknown}"
             ;;

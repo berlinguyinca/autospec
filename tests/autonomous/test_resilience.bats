@@ -309,6 +309,99 @@ EOF
     printf '%s\n' "$output" | grep -q "DECISION:wait"
 }
 
+@test "main-health: no legacy statuses uses successful check-runs → DECISION:continue" {
+    GH_LOG="$TMP/gh-main-health.log"
+    cat > "$STUB_DIR/gh" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >> "$GH_LOG"
+case "\$*" in
+  *"commits/main/status"*)
+    printf '%s\n' '{"state":"pending","total_count":0,"statuses":[]}'
+    ;;
+  *"commits/main/check-runs"*)
+    printf '%s\n' '{"total_count":2,"check_runs":[{"name":"pytest","status":"completed","conclusion":"success"},{"name":"doc-drift","status":"completed","conclusion":"skipped"}]}'
+    ;;
+  *)
+    printf '%s\n' '{}'
+    ;;
+esac
+EOF
+    chmod +x "$STUB_DIR/gh"
+
+    run bash "$RESILIENCE" main-health --repo "$REPO"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "DECISION:continue"
+    grep -q "commits/main/check-runs" "$GH_LOG"
+}
+
+@test "main-health: no legacy statuses and no check-runs configured → DECISION:continue" {
+    cat > "$STUB_DIR/gh" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *"commits/main/status"*)
+    printf '%s\n' '{"state":"pending","total_count":0,"statuses":[]}'
+    ;;
+  *"commits/main/check-runs"*)
+    printf '%s\n' '{"total_count":0,"check_runs":[]}'
+    ;;
+  *)
+    printf '%s\n' '{}'
+    ;;
+esac
+EOF
+    chmod +x "$STUB_DIR/gh"
+
+    run bash "$RESILIENCE" main-health --repo "$REPO"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "DECISION:continue"
+    printf '%s\n' "$output" | grep -q "CHECK_RUNS:0"
+}
+
+@test "main-health: ignores optional release-publish check-run failures" {
+    cat > "$STUB_DIR/gh" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *"commits/main/status"*)
+    printf '%s\n' '{"state":"pending","total_count":0,"statuses":[]}'
+    ;;
+  *"commits/main/check-runs"*)
+    printf '%s\n' '{"total_count":3,"check_runs":[{"name":"Publish @autospec/cli to npm","status":"completed","conclusion":"failure"},{"name":"Open PR on homebrew-autospec tap","status":"completed","conclusion":"skipped"},{"name":"pytest","status":"completed","conclusion":"success"}]}'
+    ;;
+  *)
+    printf '%s\n' '{}'
+    ;;
+esac
+EOF
+    chmod +x "$STUB_DIR/gh"
+
+    run bash "$RESILIENCE" main-health --repo "$REPO"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "DECISION:continue"
+    printf '%s\n' "$output" | grep -q "IGNORED_CHECK_RUN_FAILURES:1"
+}
+
+@test "main-health: failing validation check-run → DECISION:halt and exit 1" {
+    cat > "$STUB_DIR/gh" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *"commits/main/status"*)
+    printf '%s\n' '{"state":"pending","total_count":0,"statuses":[]}'
+    ;;
+  *"commits/main/check-runs"*)
+    printf '%s\n' '{"total_count":1,"check_runs":[{"name":"pytest","status":"completed","conclusion":"failure"}]}'
+    ;;
+  *)
+    printf '%s\n' '{}'
+    ;;
+esac
+EOF
+    chmod +x "$STUB_DIR/gh"
+
+    run bash "$RESILIENCE" main-health --repo "$REPO"
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "DECISION:halt"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 9. main-health: failure → DECISION:halt and exit 1
 # ─────────────────────────────────────────────────────────────────────────────
