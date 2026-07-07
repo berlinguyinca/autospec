@@ -53,6 +53,22 @@ JSONL
     [ "$status" -eq 0 ]
 }
 
+
+@test "survivor: multiple mutants in the same file produce distinct issues" {
+    MUTANTS="$WORK/duplicate-survivors.jsonl"
+    cat > "$MUTANTS" <<'JSONL'
+{"crate":"autospec-core","file":"crates/autospec-core/src/lib.rs","mutant":"replace >= with >","test":"cargo test -p autospec-core boundary_ge"}
+{"crate":"autospec-core","file":"crates/autospec-core/src/lib.rs","mutant":"replace == with !=","test":"cargo test -p autospec-core equality_check"}
+JSONL
+
+    run bash "$SCRIPT" propose-mutant-issue --mutants "$MUTANTS" --out "$WORK/dupe-issues"
+    [ "$status" -eq 0 ]
+    [ -f "$WORK/dupe-issues/autospec-core-crates-autospec-core-src-lib-rs.md" ]
+    [ -f "$WORK/dupe-issues/autospec-core-crates-autospec-core-src-lib-rs-2.md" ]
+    grep -q 'replace >= with >' "$WORK/dupe-issues/autospec-core-crates-autospec-core-src-lib-rs.md"
+    grep -q 'replace == with !=' "$WORK/dupe-issues/autospec-core-crates-autospec-core-src-lib-rs-2.md"
+}
+
 @test "flake: quarantines nondeterministic tests and tracks flake-rate metric" {
     run bash "$SCRIPT" quarantine-flake --ledger "$WORK/flakes.jsonl" --quarantine "$WORK/quarantine.jsonl" --issues-dir "$WORK/issues" --crate autospec-cli --test "tests::sometimes_times_out" --reason "failed 2/5 retries" --timestamp 2026-07-07T03:00:00Z
     [ "$status" -eq 0 ]

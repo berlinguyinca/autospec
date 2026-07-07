@@ -198,8 +198,14 @@ def cmd_propose(args):
         print("propose-mutant-issue: no surviving mutants found", file=sys.stderr)
         return 2
     Path(args.out).mkdir(parents=True, exist_ok=True)
-    for row in rows:
-        file_name = slug(f"{row.get('crate','crate')}-{row.get('file','file')}") + ".md"
+    seen = {}
+    for index, row in enumerate(rows, start=1):
+        base = slug(f"{row.get('crate','crate')}-{row.get('file','file')}")
+        seen[base] = seen.get(base, 0) + 1
+        unique = base if seen[base] == 1 else f"{base}-{seen[base]}"
+        if row.get("id") or row.get("line"):
+            unique = slug(f"{base}-{row.get('id', row.get('line'))}")
+        file_name = unique + ".md"
         out = Path(args.out) / file_name
         out.write_text(mutant_issue_body(row), encoding="utf-8")
         print(f"wrote {out}")
