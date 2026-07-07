@@ -1,0 +1,79 @@
+# Declarative architecture fitness-function registry.
+# Each entry is runnable by scripts/architecture-fitness.sh and can act as a CI gate.
+fitness_functions:
+  - id: financial_no_f64
+    name: Financial paths avoid binary floating point
+    description: Money, price, quantity, and PNL paths must not introduce f64.
+    type: forbidden_pattern
+    gate: true
+    threshold: 0
+    paths:
+      - crates/**/*.rs
+      - scripts/**/*money*
+      - scripts/**/*price*
+      - scripts/**/*pnl*
+    pattern: '\bf64\b'
+    metric: forbidden_f64_occurrences
+    issue:
+      title: 'fix: remove f64 from financial path'
+      labels: ['auto-implement', 'architecture-fitness']
+
+  - id: shell_no_destructive_git
+    name: Shell scripts avoid destructive git operations
+    description: Automation must not hard-reset or force-push from repository scripts.
+    type: forbidden_pattern
+    gate: true
+    threshold: 0
+    paths:
+      - scripts/**/*.sh
+      - skills/**/scripts/**/*.sh
+    exclude_paths:
+      - scripts/lint-implementation.sh
+      - scripts/autospec-autonomy-gate.sh
+    pattern: 'git (reset --hard|push --force)'
+    metric: destructive_git_occurrences
+    issue:
+      title: 'fix: remove destructive git operation from automation'
+      labels: ['auto-implement', 'architecture-fitness']
+
+  - id: rust_core_cli_direction
+    name: Rust CLI depends inward on core only
+    description: Tier-0 Rust crates keep the CLI depending on core, never core on CLI.
+    type: forbidden_pattern
+    gate: true
+    threshold: 0
+    paths:
+      - crates/autospec-core/**/*.rs
+      - crates/autospec-core/Cargo.toml
+    pattern: 'autospec[-_]cli'
+    metric: core_to_cli_dependency_occurrences
+    issue:
+      title: 'fix: restore Rust core dependency direction'
+      labels: ['auto-implement', 'architecture-fitness']
+
+  - id: async_safety_no_await_holding_lock
+    name: Async safety lint stays enabled
+    description: CI must preserve clippy await_holding_lock coverage when clippy config is present.
+    type: forbidden_pattern
+    gate: true
+    threshold: 0
+    paths:
+      - crates/**/*.rs
+      - scripts/**/*.sh
+    pattern: 'allow\([^)]*await_holding_lock'
+    metric: await_holding_lock_allowances
+    issue:
+      title: 'fix: remove await_holding_lock allowance'
+      labels: ['auto-implement', 'architecture-fitness']
+
+  - id: latency_budget_validate_fast
+    name: Fitness engine fast path stays below 50ms
+    description: The engine's local no-op benchmark must remain under the fast-path budget.
+    type: command_max_ms
+    gate: true
+    threshold: 50
+    command: 'true'
+    metric: elapsed_ms
+    issue:
+      title: 'fix: restore architecture fitness fast-path latency budget'
+      labels: ['auto-implement', 'architecture-fitness']
