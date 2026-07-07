@@ -63,7 +63,8 @@ or after `. "$HOME/.autospec/env"`:
 |---------|---------|
 | `autospec-autonomous [start]` | Start the detached conductor. |
 | `autospec-autonomous-status` | Print PID, log path, conductor state, spend ledger, and recent log tail. |
-| `autospec-autonomous-timeline` | Print a chronological plain-English activity report plus queue forecast from the conductor log. |
+| `autospec-autonomous-timeline` | Print a chronological plain-English activity report plus queue forecast, ETA, and item timing from the conductor log. |
+| `autospec-autonomous-monitor` | Reprint the timeline/report on an interval. Default every 300 seconds. |
 | `autospec-autonomous-logs` | Print the current conductor log tail. |
 | `autospec-autonomous-watch` | Follow the current conductor log. |
 | `autospec-autonomous-stop --graceful` | Request stop after the current issue/cycle boundary. |
@@ -86,6 +87,9 @@ sequence such as `4:30 am - implemented feature X` and `4:45 am - started
 research on X`, followed by estimated remaining work, rough ETA, and planned next
 steps when coordinator state is present in the log. Use `--repo-dir DIR` when launching from outside the target
 checkout, and use `--repo OWNER/REPO` when the GitHub slug cannot be detected.
+Use `autospec-autonomous monitor --interval-sec 300` for a recurring operator
+report that says where the run is, what it is working on, elapsed item timing,
+remaining work, rough ETA, and the planned next item.
 
 ## Required capabilities & harness adapter
 
