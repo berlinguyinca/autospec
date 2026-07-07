@@ -83,8 +83,8 @@ Options:
   --qa-gate-pass-on-partial   Treat a PARTIAL gate verdict as PASS (default
                               PARTIAL blocks, matching QA's PARTIAL!=PASS rule).
   --once                      Run exactly ONE research pass over the resolved
-                              --research-sources, emit a 6-key yield JSON
-                              {tier,proposals_seen,new_candidates,filed,dry,reason}
+                              --research-sources, emit a yield JSON
+                              {tier,proposals_seen,new_candidates,filed,dry,reason,candidates}
                               to stdout, then return. Never enters the perpetual
                               loop; never calls the drain command. dry=true when
                               new_candidates==0 after dedup. Test hook:
@@ -270,7 +270,7 @@ _explore_run_handoff() {
 }
 
 # ── --once: single-cycle no-loop mode (F1). ────────────────────────────────────
-# Runs exactly ONE research pass, emits a 6-key yield JSON, and returns.
+# Runs exactly ONE research pass, emits a yield JSON with candidate issue details, and returns.
 # Never enters the perpetual loop; never calls invoke_drain; never creates a
 # sandbox branch. The conductor calls this per cycle and counts consecutive
 # dry=true results for tier escalation (F2).
@@ -282,6 +282,8 @@ _explore_run_handoff() {
 #   filed           issues actually created via gh issue create
 #   dry             true when new_candidates==0 after dedup
 #   reason          human-readable summary string
+#   candidates      machine-readable issue objects with title, body, labels,
+#                   severity, ROI score, evidence, source, and confidence
 #
 # Test hook: AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD — when set, runs instead of the
 # real explore-research-cycle.sh call. The mock receives AUTOSPEC_EXPLORE_ONCE_OUT
@@ -318,27 +320,119 @@ if [ "$ONCE" -eq 1 ]; then
             > "$_once_dir/research.log" 2>&1 || true
     fi
 
-    # Extract counts from the cycle output.
+    # Extract the pre-dedup count and render the post-verify survivors into the
+    # conductor-facing candidate issue contract. Keep this derivation in one
+    # Python pass so body text, labels, evidence, and ROI score stay in sync with
+    # the exact proposals that will be filed.
     _once_seen=0
-    _once_new=0
+    _once_candidates="$_once_dir/candidates.json"
+    printf '%s\n' '[]' > "$_once_candidates"
     if [ -f "$_once_out" ]; then
-        _once_seen="$(python3 -c "
+        python3 - "$_once_out" "$_once_candidates" "$_once_tier" "$RESEARCH_SOURCES" <<'PY'
 import json, sys
+
+src_path, out_path, tier, sources = sys.argv[1:5]
 try:
-    d = json.load(open(sys.argv[1]))
-    print(d.get('proposals_total', 0))
+    data = json.load(open(src_path))
 except Exception:
-    print(0)
-" "$_once_out" 2>/dev/null)" || _once_seen=0
-        _once_new="$(python3 -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    print(len(d.get('proposals', [])))
-except Exception:
-    print(0)
-" "$_once_out" 2>/dev/null)" || _once_new=0
+    data = {}
+
+def ctx_label(complexity):
+    return {"small": "ctx:32k", "medium": "ctx:64k", "large": "ctx:120k"}.get(
+        str(complexity or "").lower(), "ctx:64k"
+    )
+
+def reasoning_label(severity, complexity):
+    sev = str(severity or "feature").lower()
+    comp = str(complexity or "medium").lower()
+    if sev in ("silent-wrong", "correctness", "stability") or comp == "large":
+        return "reasoning:deep"
+    if sev == "nicety":
+        return "reasoning:shallow"
+    return "reasoning:medium"
+
+def clean_text(value, default=""):
+    value = default if value is None else value
+    return str(value).replace("\r", "").strip()
+
+candidates = []
+for proposal in data.get("proposals", []) or []:
+    title = clean_text(proposal.get("title"))
+    if not title:
+        continue
+    evidence = clean_text(proposal.get("evidence"))
+    severity = clean_text(proposal.get("severity"), "feature") or "feature"
+    complexity = clean_text(proposal.get("estimated_complexity"), "medium").lower() or "medium"
+    if complexity not in ("small", "medium", "large"):
+        complexity = "medium"
+    source = clean_text(proposal.get("source"), "unknown") or "unknown"
+    named_consumer = clean_text(proposal.get("named_consumer"))
+    try:
+        confidence = max(0.0, min(1.0, float(proposal.get("confidence", 0.5))))
+    except Exception:
+        confidence = 0.5
+    try:
+        roi_score = float(proposal.get("score", confidence))
+    except Exception:
+        roi_score = confidence
+    labels = ["auto-implement", ctx_label(complexity), reasoning_label(severity, complexity), "explore"]
+    body = "\n".join([
+        "Auto-filed by /autospec-explore --once (single-cycle discovery).",
+        "",
+        "## Goal",
+        f"Resolve the verified discovery candidate `{title}` using the evidence from `{source}`.",
+        "",
+        "## Discovery candidate",
+        f"- Tier: {tier}",
+        f"- Source: {source}",
+        f"- Research sources: {sources}",
+        f"- Severity: {severity}",
+        f"- Estimated complexity: {complexity}",
+        f"- Confidence: {confidence:.2f}",
+        f"- ROI score: {roi_score:.4f}",
+        f"- Named consumer: {named_consumer or 'n/a'}",
+        "",
+        "## Evidence",
+        evidence or "n/a",
+        "",
+        "## Verification",
+        "Adversarial verify: passed before filing by the explore research-cycle finalize gate.",
+        "ROI gate: passed (candidate survived severity-first rank).",
+        "",
+        "## Model fit",
+        f"- {labels[1]}",
+        f"- {labels[2]}",
+        "",
+        "## Acceptance criteria",
+        f"- [ ] The PR references `{title[:55]}` in its closeout artifacts.",
+        "- [ ] The implementation cites `Adversarial verify` evidence before editing.",
+        "- [ ] `bash scripts/validate.sh` passes after the change.",
+        "",
+        "### Primary smoke test (inner loop)",
+        "```bash",
+        "bash scripts/validate.sh",
+        "```",
+    ])
+    candidates.append({
+        "title": title,
+        "body": body,
+        "severity": severity,
+        "labels": labels,
+        "roi_score": round(roi_score, 4),
+        "evidence": evidence,
+        "source": source,
+        "estimated_complexity": complexity,
+        "confidence": round(confidence, 4),
+        "named_consumer": named_consumer,
+    })
+
+with open(out_path, "w") as fh:
+    json.dump(candidates, fh, separators=(",", ":"))
+    fh.write("\n")
+PY
+        _once_seen="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('proposals_total', 0))" "$_once_out" 2>/dev/null || echo 0)"
     fi
+    _once_new="$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" "$_once_candidates" 2>/dev/null || echo 0)"
     # Did the cycle fail closed (autonomous + no skeptic verdicts)? This is
     # distinct from a genuine dry well — surfacing it stops the conductor from
     # misreading "verify unavailable" as "repo exhausted".
@@ -364,43 +458,35 @@ except Exception:
         _once_dry="true"
     fi
 
-    # File surviving proposals as issues (best-effort; never blocks the mode).
+    # File surviving candidates as issues (best-effort; never blocks the mode).
     _once_filed=0
-    if [ "$_once_new" -gt 0 ] && [ -f "$_once_out" ] && command -v gh >/dev/null 2>&1; then
-        _once_tsv="$_once_dir/proposals.tsv"
-        python3 -c "
-import json, sys
+    if [ "$_once_new" -gt 0 ] && [ -f "$_once_candidates" ] && command -v gh >/dev/null 2>&1; then
+        _once_filed="$(python3 - "$_once_candidates" <<'PY'
+import json, subprocess, sys
 try:
-    d = json.load(open(sys.argv[1]))
-    for p in d.get('proposals', []):
-        title = (p.get('title', '') or '').replace('\n', ' ').replace('\t', ' ')
-        src = (p.get('source', '') or 'unknown').replace('\n', ' ').replace('\t', ' ')
-        comp = (p.get('estimated_complexity', '') or 'medium').lower()
-        try:
-            conf = float(p.get('confidence', 0.5))
-        except Exception:
-            conf = 0.5
-        if comp not in ('small', 'medium', 'large'):
-            comp = 'medium'
-        conf = max(0.0, min(1.0, conf))
-        print('%s\t%s\t%s\t%.2f' % (title, src, comp, conf))
+    candidates = json.load(open(sys.argv[1]))
 except Exception:
-    pass
-" "$_once_out" > "$_once_tsv" 2>/dev/null || : > "$_once_tsv"
-
-        while IFS="$(printf '\t')" read -r _t_title _t_src _t_comp _t_conf; do
-            [ -z "$_t_title" ] && continue
-            _t_body="Auto-filed by /autospec-explore --once (tier=$_once_tier).
-
-Source: $_t_src ($RESEARCH_SOURCES)."
-            if gh issue create \
-                --title "$_t_title" \
-                --body "$_t_body" \
-                --label auto-implement \
-                >/dev/null 2>&1; then
-                _once_filed=$((_once_filed + 1))
-            fi
-        done < "$_once_tsv"
+    candidates = []
+count = 0
+for candidate in candidates:
+    title = str(candidate.get("title", "")).strip()
+    body = str(candidate.get("body", ""))
+    labels = candidate.get("labels", []) or []
+    if not title:
+        continue
+    cmd = ["gh", "issue", "create", "--title", title, "--body", body]
+    for label in labels:
+        label = str(label).strip()
+        if label:
+            cmd.extend(["--label", label])
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        count += 1
+    except Exception:
+        pass
+print(count)
+PY
+)" || _once_filed=0
     fi
 
     # Compose the reason string. A fail-closed pass is NOT a dry well — report it
@@ -415,9 +501,25 @@ Source: $_t_src ($RESEARCH_SOURCES)."
         _once_reason="filed $_once_filed of $_once_new candidates from $_once_tier research pass"
     fi
 
-    # Emit the 6-key yield JSON.
-    printf '{"tier":"%s","proposals_seen":%d,"new_candidates":%d,"filed":%d,"dry":%s,"reason":"%s"}\n' \
-        "$_once_tier" "$_once_seen" "$_once_new" "$_once_filed" "$_once_dry" "$_once_reason"
+    # Emit the yield JSON. The legacy 6 keys remain stable; `candidates` is the
+    # machine-readable single-cycle issue list consumed by autonomous discovery.
+    python3 - "$_once_tier" "$_once_seen" "$_once_new" "$_once_filed" "$_once_dry" "$_once_reason" "$_once_candidates" <<'PY'
+import json, sys
+_, tier, seen, new, filed, dry, reason, candidates_path = sys.argv
+try:
+    candidates = json.load(open(candidates_path))
+except Exception:
+    candidates = []
+print(json.dumps({
+    "tier": tier,
+    "proposals_seen": int(seen),
+    "new_candidates": int(new),
+    "filed": int(filed),
+    "dry": dry == "true",
+    "reason": reason,
+    "candidates": candidates,
+}, separators=(",", ":")))
+PY
     exit 0
 fi
 

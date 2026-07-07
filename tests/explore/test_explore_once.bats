@@ -286,6 +286,63 @@ assert d['dry'] is False, f'expected dry=false, got: {d}'
 "
 }
 
+
+@test "--once emits machine-readable candidates with evidence, labels, ROI score, and body" {
+    local proposals='[{"title":"fix: verified gap","evidence":"scripts/x.sh:12 missing guard","estimated_complexity":"medium","confidence":0.8,"source":"source-analysis","severity":"correctness","named_consumer":"autospec-run","score":0.42}]'
+    local cycle_cmd
+    cycle_cmd="$(make_cycle_cmd 1 "$proposals")"
+
+    export AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$cycle_cmd"
+
+    run bash "$REPO_ROOT/scripts/autospec-explore.sh" "test prompt" \
+        --once \
+        --research-sources source-analysis \
+        2>/dev/null
+    [ "$status" -eq 0 ]
+
+    printf '%s\n' "$output" | python3 -c "
+import sys, json
+lines = [l for l in sys.stdin.read().splitlines() if l.strip().startswith('{')]
+assert lines, 'no JSON line in output'
+d = json.loads(lines[-1])
+c = d.get('candidates')
+assert isinstance(c, list) and len(c) == 1, d
+cand = c[0]
+for k in ('title','body','severity','labels','roi_score','evidence'):
+    assert k in cand, (k, cand)
+assert cand['title'] == 'fix: verified gap', cand
+assert cand['severity'] == 'correctness', cand
+assert cand['evidence'] == 'scripts/x.sh:12 missing guard', cand
+assert abs(cand['roi_score'] - 0.42) < 0.0001, cand
+assert 'auto-implement' in cand['labels'], cand
+assert 'ctx:64k' in cand['labels'], cand
+assert 'reasoning:deep' in cand['labels'], cand
+assert 'scripts/x.sh:12 missing guard' in cand['body'], cand
+assert 'Adversarial verify' in cand['body'], cand
+"
+}
+
+@test "--once files candidates with evidence-rich body and model-fit labels" {
+    local proposals='[{"title":"fix: label body gap","evidence":"lib/y.sh:7 failing path","estimated_complexity":"small","confidence":0.7,"source":"spec-vs-code","severity":"feature","named_consumer":"autospec-run","score":0.7}]'
+    local cycle_cmd
+    cycle_cmd="$(make_cycle_cmd 1 "$proposals")"
+
+    export AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$cycle_cmd"
+
+    run bash "$REPO_ROOT/scripts/autospec-explore.sh" "test prompt" \
+        --once \
+        --research-sources spec-vs-code \
+        2>/dev/null
+    [ "$status" -eq 0 ]
+
+    grep -q -- '--label auto-implement' "$TMP/.autospec/gh-calls.log"
+    grep -q -- '--label ctx:32k' "$TMP/.autospec/gh-calls.log"
+    grep -q -- '--label reasoning:medium' "$TMP/.autospec/gh-calls.log"
+    grep -q 'lib/y.sh:7 failing path' "$TMP/.autospec/gh-calls.log"
+    grep -q 'Adversarial verify: passed' "$TMP/.autospec/gh-calls.log"
+}
+
+
 @test "--once fails closed (autonomous, no skeptic): files 0 and reports verify-unavailable-failclosed" {
     # Run the REAL cycle (no AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD mock) with a fixture
     # researcher. --once forces autonomous; with no verdict map the cycle fails
