@@ -115,6 +115,51 @@ _install_stub() {
   grep -q 'autospec-run-called' "$run_log"
 }
 
+@test "conductor: empty Tier-1 queue skips drain and spend increment" {
+  _install_stub "autonomous-control-channel.sh" \
+    'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '"'"'{"tier":1,"action":"run-backlog","reason":"test"}\n'"'"''
+  _install_stub "list-ready-issues.sh" \
+    'printf '"'"'{"ready":[],"blocked":[],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'"'"''
+
+  local gate_log="$TEST_TMP/gate.log"
+  _install_stub "autonomous-premerge-gate.sh" \
+    "printf 'merge-ok\n'; printf 'gate-called\n' >> \"$gate_log\""
+
+  local spend_log="$TEST_TMP/spend.log"
+  _install_stub "autonomous-spend-ledger.sh" \
+    "case \"\${1:-}\" in add) printf 'spend-add\n' >> '$spend_log';; check) printf 'continue\n';; *) exit 0;; esac"
+
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  local run_log="$TEST_TMP/run.log"
+  export AUTOSPEC_RUN_CMD="printf 'should-not-run\n' >> '$run_log'"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  [ ! -f "$gate_log" ]
+  if [ -f "$run_log" ]; then
+    ! grep -q 'should-not-run' "$run_log"
+  fi
+  if [ -f "$spend_log" ]; then
+    ! grep -q 'spend-add' "$spend_log"
+  fi
+  [[ "$output" == *"Tier-1 queue empty"* ]]
+}
+
 # ── 2. Gate blocks → drain is skipped, no run invocation ─────────────────────
 @test "conductor: gate block skips drain in that cycle" {
   _install_stub "autonomous-control-channel.sh" 'exit 0'

@@ -454,6 +454,7 @@ autospec_conductor_run() {
     local _resilience="${_sdir}/autonomous-resilience.sh"
     local _usage_limit="${_sdir}/autospec-usage-limit.sh"
     local _governor="${_sdir}/autonomous-usage-governor.sh"
+    local _list_ready="${AUTOSPEC_LIST_READY_BIN:-}"
 
     # ── Ledger wiring (F5) ─────────────────────────────────────────────────────
     # Resolve repo root (parent of scripts/ dir) for ledger data file path.
@@ -610,6 +611,13 @@ autospec_conductor_run() {
     local _eff_persona="${HOME}/.autospec/operator-persona.md"
     if [ -f "${_repo_root}/.autospec/operator-persona.effective.md" ]; then
         _eff_persona="${_repo_root}/.autospec/operator-persona.effective.md"
+    fi
+    if [ -z "$_list_ready" ]; then
+        if [ -f "${_sdir}/list-ready-issues.sh" ]; then
+            _list_ready="${_sdir}/list-ready-issues.sh"
+        elif [ -f "${_repo_root}/skills/autospec-run/scripts/list-ready-issues.sh" ]; then
+            _list_ready="${_repo_root}/skills/autospec-run/scripts/list-ready-issues.sh"
+        fi
     fi
     if [ -f "$_priority_match_sh" ] && [ -f "$_priorities_file" ] \
         && [ -s "$_priorities_file" ] && [ -f "$_cycle_sh" ]; then
@@ -799,7 +807,33 @@ fi'
         # ── Step 4 + 5: Tier-1 drain gated on premerge check ─────────────────
         local _work_done=0
         if [ "$_tier" = "1" ] && [ "$_action" = "run-backlog" ]; then
+            local _skip_tier1_cycle=0
+            local _queue_ready_len=""
+            local _queue_batch_len=""
+            local _queue_cap_reached="false"
+            if [ -n "$_list_ready" ] && [ -f "$_list_ready" ] && [ -n "$_repo" ]; then
+                local _queue_json
+                _queue_json="$(bash "$_list_ready" --repo "$_repo" --batch-size 1 2>/dev/null || true)"
+                _queue_ready_len="$(printf '%s' "$_queue_json" | jq -r '.ready | length' 2>/dev/null || true)"
+                _queue_batch_len="$(printf '%s' "$_queue_json" | jq -r '.batch | length' 2>/dev/null || true)"
+                _queue_cap_reached="$(printf '%s' "$_queue_json" | jq -r '.worker_cap.reached // false' 2>/dev/null || echo false)"
+                case "$_queue_ready_len" in *[!0-9]*|'') _queue_ready_len="" ;; esac
+                case "$_queue_batch_len" in *[!0-9]*|'') _queue_batch_len="" ;; esac
+                if [ "$_queue_cap_reached" = "true" ]; then
+                    printf '[conductor] Tier-1 worker cap reached — skipping drain this cycle\n' >&2
+                    _work_done=0
+                    _queue_batch_len=0
+                    _queue_ready_len="${_queue_ready_len:-1}"
+                    _skip_tier1_cycle=1
+                fi
+                if [ "${_queue_ready_len:-0}" -eq 0 ] && [ "${_queue_batch_len:-0}" -eq 0 ]; then
+                    printf '[conductor] Tier-1 queue empty — dry cycle\n' >&2
+                    _dry_cycles=$((_dry_cycles + 1))
+                    _skip_tier1_cycle=1
+                fi
+            fi
 
+            if [ "$_skip_tier1_cycle" != "1" ]; then
             # Pre-merge gate MUST be present and emit merge-ok (fail-closed).
             if [ ! -f "$_gate" ]; then
                 printf '[conductor] HALT: autonomous-premerge-gate.sh missing at %s\n' \
@@ -950,6 +984,7 @@ fi'
                     _dry_cycles=$((_dry_cycles + 1))
                     ;;
             esac
+            fi
 
         elif [ "$_action" = "run-explore-once" ] || [ "$_action" = "run-explore-once-internet" ]; then
             # ── Tier 2/3: discovery via autospec-explore --once ───────────────
