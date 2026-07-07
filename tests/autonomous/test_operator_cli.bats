@@ -111,6 +111,37 @@ EOF
   [[ "$output" == *"blocked later: #1540 feat: documentation freshness tier"* ]]
 }
 
+@test "operator cli: timeline forecast uses latest coordinator state outside selected event window" {
+  mkdir -p "$HOME/.autospec/autonomous-operator" "$TEST_TMP/logs"
+  printf '%s\n' "$TEST_TMP/logs/conductor.log" > "$HOME/.autospec/autonomous-operator/conductor.logpath"
+  cat > "$TEST_TMP/logs/conductor.log" <<'EOF'
+{
+  "ready": [
+    {"number": 1538, "title": "feat: autonomous UX/UI optimization tier"}
+  ],
+  "blocked": [],
+  "claimed": [
+    {"number": 1537, "title": "feat: proactive security scanning workstream"}
+  ],
+  "batch": [
+    {"number": 1538, "title": "feat: autonomous UX/UI optimization tier"}
+  ]
+}
+2026-07-07T17:30:19Z
+{"issue":"1538","branch":"feat/issue-1538-ux-ui-optimization-tier","step":"tests_started"}
+2026-07-07T17:31:19Z
+{"issue":"1538","branch":"feat/issue-1538-ux-ui-optimization-tier","step":"tests_started"}
+2026-07-07T17:32:20Z
+{"issue":"1538","branch":"feat/issue-1538-ux-ui-optimization-tier","step":"tests_started"}
+EOF
+
+  run bash "$CLI" timeline --lines 2
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"autospec-autonomous forecast"* ]]
+  [[ "$output" == *"things left: 2 total (1 ready, 1 in progress, 0 blocked)"* ]]
+}
+
 @test "operator cli: status finds spend ledger with alternate .git slug" {
   mkdir -p "$HOME/.autospec/autonomous-spend/berlinguyinca_autospec.git"
   printf '{"issues":7,"tokens":0}\n' > "$HOME/.autospec/autonomous-spend/berlinguyinca_autospec.git/spend.json"
