@@ -55,27 +55,22 @@ SOURCE_TOKENS = [
     "HEART",
 ]
 
-
 def now_iso():
     return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-
 def ensure_parent(path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-
 
 def append_jsonl(path, row):
     ensure_parent(path)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
 
-
 def write_jsonl(path, rows):
     ensure_parent(path)
     with open(path, "w", encoding="utf-8") as fh:
         for row in rows:
             fh.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
-
 
 def read_jsonl(path):
     rows = []
@@ -88,7 +83,6 @@ def read_jsonl(path):
                 rows.append(json.loads(line))
     return rows
 
-
 def nonneg_float(value, flag):
     try:
         parsed = float(value)
@@ -97,7 +91,6 @@ def nonneg_float(value, flag):
     if parsed < 0:
         raise SystemExit(f"{flag} must be a non-negative number")
     return parsed
-
 
 def nonneg_int(value, flag):
     try:
@@ -108,10 +101,8 @@ def nonneg_int(value, flag):
         raise SystemExit(f"{flag} must be a non-negative integer")
     return parsed
 
-
 def pct3(value):
     return f"{float(value):.3f}"
-
 
 def fmt_num(value):
     if isinstance(value, int):
@@ -121,10 +112,8 @@ def fmt_num(value):
         return str(int(value))
     return f"{value:.3f}".rstrip("0").rstrip(".")
 
-
 def slug(value):
     return re.sub(r"[^A-Za-z0-9]+", "-", str(value)).strip("-").lower() or "item"
-
 
 def latest_by_theme(rows, commit):
     selected = [r for r in rows if r.get("commit") == commit]
@@ -132,7 +121,6 @@ def latest_by_theme(rows, commit):
     for row in selected:
         by_theme[row["theme"]] = row
     return by_theme
-
 
 def tag_for(metric, theme, value, budget):
     if metric == "lcp_ms":
@@ -156,7 +144,6 @@ def tag_for(metric, theme, value, budget):
     if metric == "horizontal_overflow":
         return f"HORIZONTAL_OVERFLOW:{theme}:{int(value)}"
     return f"UX_UI_BUDGET_BREACH:{theme}:{metric}:{value}>{budget}"
-
 
 def finding_rows(by_theme, commit):
     findings = []
@@ -188,7 +175,6 @@ def finding_rows(by_theme, commit):
                 })
     return findings
 
-
 def finding_line(finding):
     tag = finding["tag"]
     theme = finding.get("theme", "unknown")
@@ -200,7 +186,6 @@ def finding_line(finding):
     if tag == "METRIC_MISSING":
         return f"METRIC_MISSING:{theme}:{metric}"
     return tag_for(metric, theme, value, budget)
-
 
 def cmd_record(args):
     row = {
@@ -222,7 +207,6 @@ def cmd_record(args):
     print(f"recorded UX/UI snapshot commit={row['commit']} theme={row['theme']} lcp={int(row['lcp_ms'])}ms inp={int(row['inp_ms'])}ms cls={pct3(row['cls'])} lighthouse={row['lighthouse_performance']}")
     return 0
 
-
 def cmd_gate(args):
     rows = read_jsonl(args.ledger)
     if not rows:
@@ -238,7 +222,6 @@ def cmd_gate(args):
         return 1
     print("ux-ui gate passed (CWV, Lighthouse, token lint, visual diff, interactions, light+dark themes)")
     return 0
-
 
 def issue_body(rows):
     commit = rows[0].get("commit", "unknown")
@@ -290,7 +273,6 @@ Restore CWV/Lighthouse UX budgets for `{commit}` in `scripts/ux-ui-workstream.sh
 ```
 """
 
-
 def cmd_propose(args):
     rows = read_jsonl(args.regressions)
     if not rows:
@@ -302,7 +284,6 @@ def cmd_propose(args):
     path.write_text(issue_body(rows), encoding="utf-8")
     print(f"wrote {path}")
     return 0
-
 
 def compare_rows(before_rows, after_rows):
     before = {r["theme"]: r for r in before_rows}
@@ -331,7 +312,6 @@ def compare_rows(before_rows, after_rows):
                     regressions.append(f"COLLATERAL_REGRESSION:{theme}:{metric}:{fmt_num(b)}->{fmt_num(a)}")
     return improvements, regressions
 
-
 def cmd_report(args):
     before_rows = read_jsonl(args.before)
     after_rows = read_jsonl(args.after)
@@ -351,7 +331,6 @@ def cmd_report(args):
     Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"wrote {args.out}")
     return 0
-
 
 def cmd_validate_doc(args):
     path = Path(args.doc)
@@ -373,51 +352,34 @@ def cmd_validate_doc(args):
     print("design doc validated")
     return 0
 
-
 def parser():
     root = argparse.ArgumentParser(prog="ux-ui-workstream.sh")
     sub = root.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("record-snapshot")
-    p.add_argument("--ledger", required=True)
-    p.add_argument("--commit", required=True)
+    for flag in ["ledger", "commit", "lcp-ms", "inp-ms", "cls", "lighthouse-performance",
+                 "token-violations", "visual-diff-pct", "console-errors", "failed-requests",
+                 "tap-target-violations", "horizontal-overflow"]:
+        p.add_argument(f"--{flag}", required=True)
     p.add_argument("--theme", required=True, choices=THEMES)
-    p.add_argument("--lcp-ms", required=True)
-    p.add_argument("--inp-ms", required=True)
-    p.add_argument("--cls", required=True)
-    p.add_argument("--lighthouse-performance", required=True)
-    p.add_argument("--token-violations", required=True)
-    p.add_argument("--visual-diff-pct", required=True)
-    p.add_argument("--console-errors", required=True)
-    p.add_argument("--failed-requests", required=True)
-    p.add_argument("--tap-target-violations", required=True)
-    p.add_argument("--horizontal-overflow", required=True)
     p.add_argument("--timestamp")
     p.set_defaults(func=cmd_record)
 
-    p = sub.add_parser("gate")
-    p.add_argument("--ledger", required=True)
-    p.add_argument("--commit", required=True)
-    p.add_argument("--regressions-out")
-    p.set_defaults(func=cmd_gate)
-
-    p = sub.add_parser("propose-regression-issue")
-    p.add_argument("--regressions", required=True)
-    p.add_argument("--out", required=True)
-    p.set_defaults(func=cmd_propose)
-
-    p = sub.add_parser("improvement-report")
-    p.add_argument("--before", required=True)
-    p.add_argument("--after", required=True)
-    p.add_argument("--out", required=True)
-    p.set_defaults(func=cmd_report)
-
-    p = sub.add_parser("validate-design-doc")
-    p.add_argument("--doc", required=True)
-    p.set_defaults(func=cmd_validate_doc)
+    command_specs = [
+        ("gate", ["ledger", "commit"], ["regressions-out"], cmd_gate),
+        ("propose-regression-issue", ["regressions", "out"], [], cmd_propose),
+        ("improvement-report", ["before", "after", "out"], [], cmd_report),
+        ("validate-design-doc", ["doc"], [], cmd_validate_doc),
+    ]
+    for name, required_flags, optional_flags, func in command_specs:
+        p = sub.add_parser(name)
+        for flag in required_flags:
+            p.add_argument(f"--{flag}", required=True)
+        for flag in optional_flags:
+            p.add_argument(f"--{flag}")
+        p.set_defaults(func=func)
 
     return root
-
 
 args = parser().parse_args()
 raise SystemExit(args.func(args))
