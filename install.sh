@@ -120,6 +120,7 @@ install_autonomous_operator_commands() {
     autospec_bin_dir="$HOME/.autospec/bin"
     autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
     launcher="$autospec_scripts_dir/autospec-autonomous.sh"
+    installed_home="$HOME"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] install_autonomous_operator_commands: would install autospec-autonomous command wrappers in $autospec_bin_dir"
@@ -142,6 +143,7 @@ install_autonomous_operator_commands() {
         {
             printf '%s\n' '#!/usr/bin/env bash'
             printf '%s\n' 'set -eu'
+            printf 'export HOME=%s\n' "$(printf '%s' "$installed_home" | sed 's/[\\"`$]/\\&/g')"
             if [ -n "$subcommand" ]; then
                 printf 'exec "%s" %s "$@"\n' "$launcher" "$subcommand"
             else

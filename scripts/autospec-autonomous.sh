@@ -16,6 +16,7 @@ LINES=80
 FORCE=0
 STOP_MODE="--graceful"
 FOREGROUND=0
+LOG_OVERRIDE=0
 CONDUCTOR_MAX_CYCLES="${CONDUCTOR_MAX_CYCLES:-}"
 CONDUCTOR_POLL_INTERVAL="${CONDUCTOR_POLL_INTERVAL:-}"
 CONDUCTOR_DRY_RUN="${CONDUCTOR_DRY_RUN:-0}"
@@ -258,14 +259,22 @@ PY
 }
 
 show_logs() {
-    _log="${AUTOSPEC_AUTONOMOUS_LOG:-$(read_logpath || true)}"
+    if [ "$LOG_OVERRIDE" -eq 1 ]; then
+        _log="${AUTOSPEC_AUTONOMOUS_LOG:-}"
+    else
+        _log="$(read_logpath || true)"
+    fi
     [ -n "$_log" ] || die "no conductor log path recorded"
     [ -f "$_log" ] || die "conductor log not found: $_log"
     tail -n "$LINES" "$_log"
 }
 
 watch_logs() {
-    _log="${AUTOSPEC_AUTONOMOUS_LOG:-$(read_logpath || true)}"
+    if [ "$LOG_OVERRIDE" -eq 1 ]; then
+        _log="${AUTOSPEC_AUTONOMOUS_LOG:-}"
+    else
+        _log="$(read_logpath || true)"
+    fi
     [ -n "$_log" ] || die "no conductor log path recorded"
     [ -f "$_log" ] || die "conductor log not found: $_log"
     tail -n "$LINES" -f "$_log"
@@ -325,10 +334,10 @@ while [ $# -gt 0 ]; do
             CONDUCTOR_REPO="${1#--repo=}"; export CONDUCTOR_REPO
             ;;
         --log)
-            shift; AUTOSPEC_AUTONOMOUS_LOG="${1:-}"; export AUTOSPEC_AUTONOMOUS_LOG
+            shift; AUTOSPEC_AUTONOMOUS_LOG="${1:-}"; export AUTOSPEC_AUTONOMOUS_LOG; LOG_OVERRIDE=1
             ;;
         --log=*)
-            AUTOSPEC_AUTONOMOUS_LOG="${1#--log=}"; export AUTOSPEC_AUTONOMOUS_LOG
+            AUTOSPEC_AUTONOMOUS_LOG="${1#--log=}"; export AUTOSPEC_AUTONOMOUS_LOG; LOG_OVERRIDE=1
             ;;
         --lines)
             shift; LINES="${1:-80}"

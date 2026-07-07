@@ -4284,7 +4284,7 @@ check_fab_container_dockerfile() {
 # contract silently SHADOWED and disabled the #662 flag contract (bash uses the
 # last definition).  Keep these names distinct (Phase 5.5 integration fix, #1380).
 check_autospec_autonomous_skill_contract() {
-    info "autospec-autonomous skill contract: Self-update + Stop + harness-adapter + Phase-1 waterfall (issue #1372)"
+    info "autospec-autonomous skill contract: Self-update + Stop + harness-adapter + never-idle waterfall (issues #1372/#1529)"
     local skill_dir="skills/autospec-autonomous"
     for f in "$skill_dir/SKILL.md" \
               "$skill_dir/codex/prompt.md" \
@@ -4304,8 +4304,16 @@ check_autospec_autonomous_skill_contract() {
             || fail "$f: missing Tier 0 (control channel) in Phase-1 waterfall (issue #1372)"
         grep -q 'Tier 1' "$f" \
             || fail "$f: missing Tier 1 (backlog→main) in Phase-1 waterfall (issue #1372)"
-        grep -q 'not yet enabled' "$f" \
-            || fail "$f: tiers 2-4 must be marked 'not yet enabled' (issue #1372)"
+        grep -q 'Tier 1.5' "$f" \
+            || fail "$f: missing Tier 1.5 open-issue promotion in never-idle waterfall (issue #1529)"
+        grep -q 'Tier 2' "$f" \
+            || fail "$f: missing Tier 2 local discovery in never-idle waterfall (issue #1529)"
+        grep -q 'Tier 3' "$f" \
+            || fail "$f: missing Tier 3 architecture/test-coverage improvement in never-idle waterfall (issue #1529)"
+        grep -q 'Tier 4' "$f" \
+            || fail "$f: missing Tier 4 internet/operator discovery in never-idle waterfall (issue #1529)"
+        grep -q 'parks only when' "$f" \
+            || fail "$f: missing named park-only conditions for never-idle waterfall (issue #1529)"
     done
 }
 

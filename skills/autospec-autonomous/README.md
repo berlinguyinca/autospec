@@ -1,12 +1,13 @@
 # autospec-autonomous
 
 Perpetual self-driving conductor for the **autospec** suite. It runs the autospec
-machinery unattended for weeks, walking a priority waterfall (Tier 0 control channel +
-Tier 1 backlog → main), obeying a GitHub control channel for live steering, and parking
-before quota exhaustion.
+machinery unattended for weeks, walking a never-idle priority waterfall (Tier 0 control channel + Tier 1 backlog →
+main + Tier 1.5 open-issue promotion + Tier 2 local discovery + Tier 3
+architecture/coverage improvement + Tier 4 internet/operator discovery), obeying a
+GitHub control channel for live steering, and parking before quota exhaustion.
 
-**Phase 1 scope:** Tier 0 + Tier 1 only. Tiers 2–4 (explore-backed discovery, persona,
-self-brainstorm) are Phase 2/3 roadmap entries.
+The conductor parks only when every tier is dry, a stop/pause control signal is set,
+or the usage/spend governor trips.
 
 Works on **Claude Code**, **OpenCode**, and **Codex CLI**.
 
@@ -72,19 +73,22 @@ Apply these labels to any open issue to send a Tier-0 control-channel signal:
 Tier 0 always preempts Tier 1. A `stop` or `pause` signal is honored at the next
 cycle boundary — never mid-issue.
 
-## Phase-1 waterfall
+## Never-idle waterfall
 
 Each cycle executes in order:
 
 1. **Tier-0 poll** — read GitHub control channel (`autonomous-control-channel.sh`).
-2. **Tier selection** — `autonomous-waterfall.sh` picks Tier 0 or Tier 1.
+2. **Tier selection** — `autonomous-waterfall.sh` picks the highest-priority tier with work.
 3. **Tier-1 drain** — pick the highest-priority `auto-implement` issue and invoke `/autospec-run`.
-4. **Pre-merge gate** — `autonomous-premerge-gate.sh` + `autospec-autonomy-gate.sh` validate before merge.
-5. **Spend ledger** — `autonomous-spend-ledger.sh` tallies tokens/issues; parks when `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS` or the issue ceiling is reached.
-6. **Resilience** — `autonomous-resilience.sh` handles failures; notifies operator on persistent errors.
+4. **Tier-1.5 promotion** — when Tier 1 is dry but other issues are open, promote/decompose/classify safe work into `auto-implement`.
+5. **Tier-2 local discovery** — run `/autospec-explore --once` over local repo signals and file verified work.
+6. **Tier-3 architecture/coverage improvement** — generate high-ROI architecture, debt, and test-coverage work.
+7. **Tier-4 internet/operator discovery** — run internet/operator-polish discovery and file verified work.
+8. **Pre-merge gate** — Tier-1 drains still require `autonomous-premerge-gate.sh` + `autospec-autonomy-gate.sh` before merge.
+9. **Spend ledger/governor** — park when usage or lifetime token/issue ceilings are reached.
+10. **Resilience** — `autonomous-resilience.sh` handles failures; notifies operator on persistent errors.
 
-**Phase 1 scope:** Tier 0 + Tier 1 only. Tiers 2–4 (explore-backed discovery, persona,
-self-brainstorm) are Phase 2/3 roadmap entries and are **not yet enabled**.
+Set `AUTOSPEC_DISABLE_DISCOVERY_TIERS=1` only as an emergency fail-closed override; otherwise Tier 1.5–4 are active by default.
 
 ### Troubleshooting: main-health check-runs
 
@@ -126,6 +130,9 @@ then reports `observable:true` with that percent.
 | `CODEX_HOME`                          | `~/.codex`            | Codex CLI home directory.                                  |
 | `AUTOSPEC_AUTONOMOUS_REF`             | `main`                | Git ref to fetch from when piped via curl.                 |
 | `AUTOSPEC_AUTONOMOUS_RAW_BASE`        | —                     | Override the raw GitHub URL base entirely.                 |
+| `AUTOSPEC_DISABLE_DISCOVERY_TIERS`     | `0`                   | Emergency fail-closed park at Tier-1 dry threshold.        |
+| `AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD`     | auto-detect           | Override Tier-1.5 promotion/decomposition/classification.  |
+| `AUTOSPEC_ARCHITECTURE_IMPROVEMENT_CMD` | auto-detect          | Override Tier-3 architecture/coverage work generation.     |
 
 ## Design spec
 

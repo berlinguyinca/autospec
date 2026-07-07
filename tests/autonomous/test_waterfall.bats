@@ -3,9 +3,10 @@
 #
 # Tier 0: control label always preempts.
 # Tier 1: backlog present → run-backlog; empty + dry-cycles < threshold → stay Tier 1.
-# Phase-1 park: Tier 1 dry >= threshold → park unless discovery tiers are enabled.
-# Tier 2: opt-in Tier 1 dry >= threshold → run-explore-once (local sources).
-# Tier 3: opt-in Tier 2 dry >= threshold → run-explore-once-internet.
+# Tier 1.5: Tier 1 dry >= threshold + open issues → promote open issues.
+# Tier 2: promotion dry + Tier 1 dry >= threshold → run-explore-once (local sources).
+# Tier 3: Tier 2 dry >= threshold → architecture/test-coverage improvement.
+# Tier 4: Tier 3 dry >= threshold → run-explore-once-internet; park only after Tier 4 dry.
 # Refill: non-empty backlog always floats back to Tier 1 regardless of dry-cycles.
 # gh is stubbed via PATH injection; no real network calls.
 
@@ -97,41 +98,47 @@ teardown() {
     [[ "$output" == *'"tier":1'* ]]
 }
 
-# ─── Phase-1 park / Tier 2 opt-in ─────────────────────────────────────────────
+# ─── Tier 1.5 promotion / Tier 2 local discovery ─────────────────────────────
 
-@test "Phase 1: Tier-1 dry x2 parks by default instead of entering discovery" {
+@test "Tier 1.5: Tier-1 dry x2 with open issues promotes instead of parking" {
     run bash "$SCRIPT" \
         --backlog-count 0 \
+        --open-issue-count 3 \
         --dry-cycles 2
     [ "$status" -eq 0 ]
-    [[ "$output" == *'"tier":1'* ]]
-    [[ "$output" == *'"action":"park"'* ]]
-    [[ "$output" == *'discovery tiers disabled in Phase 1'* ]]
+    [[ "$output" == *'"tier":1.5'* ]]
+    [[ "$output" == *'"action":"promote-open-issues"'* ]]
 }
 
-@test "Tier 2: explicit discovery enable lets Tier-1 dry x2 select run-explore-once" {
-    AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
+@test "Tier 2: default waterfall enters local discovery after promotion is dry" {
+    run bash "$SCRIPT" \
         --backlog-count 0 \
-        --dry-cycles 2
+        --open-issue-count 0 \
+        --dry-cycles 2 \
+        --tier15-dry-cycles 2
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":2'* ]]
     [[ "$output" == *'"action":"run-explore-once"'* ]]
 }
 
-@test "Tier 2: explicit discovery enable lets dry above threshold select Tier 2 when Tier-2 counter is 0" {
-    AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
+@test "Tier 2: dry above threshold selects Tier 2 when Tier-2 counter is 0" {
+    run bash "$SCRIPT" \
         --backlog-count 0 \
+        --open-issue-count 0 \
         --dry-cycles 5 \
+        --tier15-dry-cycles 5 \
         --tier2-dry-cycles 0
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":2'* ]]
     [[ "$output" == *'"action":"run-explore-once"'* ]]
 }
 
-@test "Tier 2: explicit discovery enable keeps Tier-1 dry >= threshold, Tier-2 dry < threshold at Tier 2" {
-    AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
+@test "Tier 2: Tier-2 dry below threshold remains at local discovery" {
+    run bash "$SCRIPT" \
         --backlog-count 0 \
+        --open-issue-count 0 \
         --dry-cycles 2 \
+        --tier15-dry-cycles 2 \
         --tier2-dry-cycles 1
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":2'* ]]
@@ -146,56 +153,70 @@ teardown() {
     [[ "$output" == *'"tier":1'* ]]
 }
 
-@test "Phase 1: custom threshold=3 parks at dry-cycles=3 by default" {
+@test "Tier 2: custom threshold=3 escalates at dry-cycles=3 after promotion dry" {
     AUTOSPEC_AUTO_DRY_CYCLES=3 run bash "$SCRIPT" \
         --backlog-count 0 \
+        --open-issue-count 0 \
         --dry-cycles 3 \
-        --tier2-dry-cycles 0
-    [ "$status" -eq 0 ]
-    [[ "$output" == *'"tier":1'* ]]
-    [[ "$output" == *'"action":"park"'* ]]
-}
-
-@test "Tier 2: custom threshold=3 escalates at dry-cycles=3 when discovery is enabled" {
-    AUTOSPEC_AUTO_DRY_CYCLES=3 AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
-        --backlog-count 0 \
-        --dry-cycles 3 \
+        --tier15-dry-cycles 3 \
         --tier2-dry-cycles 0
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":2'* ]]
     [[ "$output" == *'"action":"run-explore-once"'* ]]
 }
 
-# ─── Tier 3 escalation ─────────────────────────────────────────────────────────
+# ─── Tier 3/4 escalation ──────────────────────────────────────────────────────
 
-@test "Tier 3: explicit discovery enable lets Tier-2 dry x2 select run-explore-once-internet" {
-    AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
+@test "Tier 3: Tier-2 dry x2 selects architecture improvement" {
+    run bash "$SCRIPT" \
         --backlog-count 0 \
+        --open-issue-count 0 \
         --dry-cycles 2 \
+        --tier15-dry-cycles 2 \
         --tier2-dry-cycles 2
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":3'* ]]
-    [[ "$output" == *'"action":"run-explore-once-internet"'* ]]
+    [[ "$output" == *'"action":"run-architecture-improvement"'* ]]
 }
 
-@test "Tier 3: explicit discovery enable lets Tier-2 dry above threshold select Tier 3" {
-    AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
+@test "Tier 3: Tier-2 dry above threshold selects architecture improvement" {
+    run bash "$SCRIPT" \
         --backlog-count 0 \
+        --open-issue-count 0 \
         --dry-cycles 10 \
+        --tier15-dry-cycles 10 \
         --tier2-dry-cycles 5
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":3'* ]]
+    [[ "$output" == *'"action":"run-architecture-improvement"'* ]]
+}
+
+@test "Tier 4: Tier-3 dry x2 selects internet discovery" {
+    run bash "$SCRIPT" \
+        --backlog-count 0 \
+        --open-issue-count 0 \
+        --dry-cycles 2 \
+        --tier15-dry-cycles 2 \
+        --tier2-dry-cycles 2 \
+        --tier3-dry-cycles 2
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"tier":4'* ]]
     [[ "$output" == *'"action":"run-explore-once-internet"'* ]]
 }
 
-@test "Tier 3: explicit discovery enable lets custom threshold=3 escalate at tier2-dry-cycles=3" {
-    AUTOSPEC_AUTO_DRY_CYCLES=3 AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
+@test "Park: all tiers dry parks with all-tiers-dry reason" {
+    run bash "$SCRIPT" \
         --backlog-count 0 \
-        --dry-cycles 3 \
-        --tier2-dry-cycles 3
+        --open-issue-count 0 \
+        --dry-cycles 2 \
+        --tier15-dry-cycles 2 \
+        --tier2-dry-cycles 2 \
+        --tier3-dry-cycles 2 \
+        --tier4-dry-cycles 2
     [ "$status" -eq 0 ]
-    [[ "$output" == *'"tier":3'* ]]
-    [[ "$output" == *'"action":"run-explore-once-internet"'* ]]
+    [[ "$output" == *'"tier":4'* ]]
+    [[ "$output" == *'"action":"park"'* ]]
+    [[ "$output" == *'all tiers dry'* ]]
 }
 
 # ─── Refill floats back to Tier 1 ─────────────────────────────────────────────
@@ -206,13 +227,16 @@ teardown() {
     run bash "$SCRIPT" \
         --backlog-count 1 \
         --dry-cycles 99 \
-        --tier2-dry-cycles 99
+        --tier15-dry-cycles 99 \
+        --tier2-dry-cycles 99 \
+        --tier3-dry-cycles 99 \
+        --tier4-dry-cycles 99
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":1'* ]]
     [[ "$output" == *'"action":"run-backlog"'* ]]
 }
 
-@test "Refill: backlog-count 3 after Tier 3 escalation returns to Tier 1" {
+@test "Refill: backlog-count 3 after higher-tier escalation returns to Tier 1" {
     run bash "$SCRIPT" \
         --backlog-count 3 \
         --dry-cycles 5 \
@@ -233,7 +257,7 @@ teardown() {
 }
 
 @test "park output contains tier, action, reason keys" {
-    run bash "$SCRIPT" --backlog-count 0 --dry-cycles 2 --tier2-dry-cycles 0
+    run bash "$SCRIPT" --backlog-count 0 --open-issue-count 0 --dry-cycles 2 --tier15-dry-cycles 2 --tier2-dry-cycles 2 --tier3-dry-cycles 2 --tier4-dry-cycles 2
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":'* ]]
     [[ "$output" == *'"action":'* ]]
@@ -241,7 +265,7 @@ teardown() {
 }
 
 @test "Tier 3 output contains tier, action, reason keys" {
-    AUTOSPEC_ENABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" --backlog-count 0 --dry-cycles 2 --tier2-dry-cycles 2
+    run bash "$SCRIPT" --backlog-count 0 --open-issue-count 0 --dry-cycles 2 --tier15-dry-cycles 2 --tier2-dry-cycles 2
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":'* ]]
     [[ "$output" == *'"action":'* ]]

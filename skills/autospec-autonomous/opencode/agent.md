@@ -16,8 +16,11 @@ This skill is a **conductor**, not a new engine. It reuses without reimplementin
 `autospec-run` (the merge pipeline), `autospec-autonomy-gate.sh`, `autospec-usage-limit.sh`,
 `worktree-guard.sh`, `autospec-loop.sh` (the shared loop driver), and `/autospec-resume`.
 
-**Phase 1 scope:** Tier 0 (control channel) + Tier 1 (backlog → `main`). Tiers 2–4 are
-documented below but **not yet enabled — Phase 2/3** (see Phase-1 waterfall contract).
+**Never-idle scope:** Tier 0 (control channel), Tier 1 (backlog → `main`), Tier 1.5
+(open-issue promotion), Tier 2 (local discovery), Tier 3 (architecture/test-coverage
+improvement), and Tier 4 (internet/operator-polish discovery) are active by default.
+The conductor parks only when every tier is dry, a stop/pause control signal is set,
+or the usage/spend governor trips.
 
 Manage your own context — never exceed 60%. Delegate to subagents whenever your
 harness supports it; do not run the waterfall or issue drain directly in the main
@@ -122,17 +125,19 @@ Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B"
 
 ## Phase-1 waterfall contract
 
-**Implementation:** the Phase-1 loop body is `autospec_conductor_run()` defined in
+**Implementation:** the never-idle loop body is `autospec_conductor_run()` defined in
 the shared loop driver (`${AUTOSPEC_SCRIPTS_DIR}/lib/autospec-loop.sh`, issue #1378).
 Each cycle the function calls `autonomous-control-channel.sh` (Tier-0 preempt),
-then `autonomous-waterfall.sh` (tier selection), then `autonomous-premerge-gate.sh`
-(must emit `merge-ok` before any drain), then the `autospec-run` drain, then
-`autonomous-spend-ledger.sh` (park on cap), then `autonomous-resilience.sh`
+then `autonomous-waterfall.sh` (tier selection), then Tier-specific work. Tier-1
+drains run `autonomous-premerge-gate.sh` (must emit `merge-ok` before any drain)
+before invoking `autospec-run`; promotion/discovery tiers file or classify work back
+into `auto-implement` so the next cycle returns to Tier 1. The loop then calls
+`autonomous-spend-ledger.sh` (park on cap), `autonomous-resilience.sh`
 (state/heartbeat/lock/main-health), and finally the once-per-UTC-day digest stub.
 On park, `_conductor_arm_resume()` writes resume context and arms a
 ScheduleWakeup/cron wake via `autospec-usage-limit.sh`.
 
-Phase 1 is the **only phase built now**. The conductor walks tiers in priority order each cycle:
+The conductor walks tiers in priority order each cycle:
 
 ### Tier 0 — control channel (always preempts)
 
@@ -146,17 +151,17 @@ At every **cycle boundary** (never mid-issue), read reserved GitHub labels via
 | `autospec:priority`    | Re-sort the Tier-1 backlog by the label body before the next drain. |
 | `autospec:steer`       | Parse the label body as a directive; update the active waterfall intent; remove the label. |
 
-Tier 0 always preempts Tier 1. A `stop` or `pause` signal received mid-drain is honored at the NEXT cycle boundary, not mid-issue (never kills an in-flight implementer).
+Tier 0 always preempts every lower tier. A `stop` or `pause` signal received mid-drain is honored at the NEXT cycle boundary, not mid-issue (never kills an in-flight implementer).
 
-### Tier 1 — backlog → `main` (Phase 1 active)
+### Tier 1 — backlog → `main`
 
 Drain `auto-implement` issues from the repository backlog to `main` via `/autospec-run`.
-This is the primary Phase-1 loop body.
+This is the primary merge loop body.
 
 **Single cycle:**
 1. **Worktree assert** — `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert` MUST exit 0. Non-zero → emit `code_health` identifier, park, notify.
 2. **Tier-0 poll** — read control channel before any issue is picked.
-3. **Pick next issue** — select the highest-priority `auto-implement` issue not already in flight (respecting `autospec:priority` directives). If none → `dry_cycle++`; if `dry_cycle >= 2` → Tier 2 would activate, but **Tier 2 is not yet enabled — Phase 2/3**.
+3. **Pick next issue** — select the highest-priority `auto-implement` issue not already in flight (respecting `autospec:priority` directives). If none → `dry_cycle++`; once the dry threshold is reached, cascade to Tier 1.5 instead of parking.
 4. **Pre-merge gate** — run `autospec-autonomy-gate.sh` (Phase-1: `autospec-qa` only; `autospec-secaudit` is Phase-2 prerequisite and MUST NOT be referenced until built). If missing → emit `code_health:autonomous_gate_missing`; halt merges; notify.
 5. **Drain** — invoke `/autospec-run` for the selected issue. Inherits all existing `autospec-run` guards: worktree isolation, claim-guard, admin-merge authority, lock-step validation.
 6. **Main-health check** — after each merge, poll `gh api repos/{owner}/{repo}/commits/main/status`. Green → continue. Pending → wait one poll interval. Red → halt Tier-1 merges; file `autospec:needs-human`; notify.
@@ -165,15 +170,55 @@ This is the primary Phase-1 loop body.
 9. **Daily digest** — once per UTC day, write `.autospec/autonomous-digest.md` and open/update a pinned issue with the summary.
 10. **Loop** — return to step 2.
 
-### Tiers 2–4 — not yet enabled (Phase 2/3)
+### Tier 1.5 — promote existing open issues
 
-| Tier | Description | Phase |
-|------|-------------|-------|
-| Tier 2 | Local discovery via `/autospec-explore` single-cycle interface — activates after 2 dry Tier-1 cycles only when `AUTOSPEC_ENABLE_DISCOVERY_TIERS=1`. **Blocked by default in Phase 1.** | Phase 2 |
-| Tier 3 | Competitor / internet discovery via `/autospec-explore --research-sources internet` only when `AUTOSPEC_ENABLE_DISCOVERY_TIERS=1`. **Blocked by default in Phase 1.** | Phase 2 |
-| Tier 4 | Operator polish lenses, persona model, self-brainstorm panel, `/autospec-persona` interview. | Phase 3 |
+When Tier 1 is dry but other open issues exist, the conductor promotes latent work
+into the pipeline before attempting discovery:
 
-The conductor detects a dry cycle count (`dry_cycle >= 2`) but does NOT activate Tier 2 or above in Phase 1. It parks and notifies the operator instead. This is a deliberate safety gate: prove the backlog loop ships to `main` safely before enabling autonomous discovery. Operators can enable the implemented-but-off discovery path explicitly with `AUTOSPEC_ENABLE_DISCOVERY_TIERS=1`.
+- decompose open epics or tracked specs into linked `auto-implement` children via
+  the configured promotion command (`AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD` seam);
+- re-evaluate `blocked-dependency` issues and promote only those whose blockers
+  are resolved;
+- classify `needs-classify` / unlabeled ready issues so they can enter the
+  `auto-implement` queue.
+
+Promotion-sourced work still flows through Tier 1 and inherits autonomy, premerge,
+worktree, claim, validation, and merge gates. If promotion is dry for the configured
+dry threshold, the conductor continues to Tier 2.
+
+### Tier 2 — local codebase discovery
+
+Run `/autospec-explore --once` over local sources (spec-vs-code, prior reports,
+codebase signals, open issues, source analysis, dependency health). Verified, ranked
+findings are filed as `auto-implement` issues and drained by Tier 1. Discovery uses
+the explore sandbox safety model; it never merges unverified work directly to `main`.
+
+### Tier 3 — architecture/test-coverage improvement
+
+When local discovery is dry, generate higher-order improvement work: architecture rot,
+complexity hotspots, duplication, dead code, and measurable test-coverage gaps. The
+`AUTOSPEC_ARCHITECTURE_IMPROVEMENT_CMD` seam may provide a specialized generator;
+otherwise the conductor uses the available explore single-cycle interface with
+architecture/test-coverage/technical-debt sources. Filed work returns to Tier 1.
+
+### Tier 4 — internet/operator-polish discovery
+
+When Tier 3 is dry, run `/autospec-explore --once --research-sources internet` plus
+operator-polish/persona lenses as available. Filed work returns to Tier 1.
+
+### Park conditions
+
+The conductor parks only when one of these named conditions fires:
+
+- `control:pause` / `control:graceful-stop` from Tier 0;
+- `usage-governor:park` or `spend-ledger:park`;
+- `waterfall:park:all tiers dry` after Tier 1 backlog, Tier 1.5 promotion, Tier 2
+  local discovery, Tier 3 architecture/coverage work, and Tier 4 discovery are all dry;
+- fail-closed health conditions such as missing premerge gate or red `main`.
+
+Set `AUTOSPEC_DISABLE_DISCOVERY_TIERS=1` only as an emergency fail-closed override;
+with that override, the conductor parks at the Tier-1 dry threshold and names the
+disable condition in the park reason.
 
 ## Usage observability (F6a spike finding)
 
@@ -240,9 +285,9 @@ autospec-autonomous start [--max-cycles N] [--dry-run] [--no-digest] [--poll-int
 - `skills/autospec-autonomous/opencode/agent.md` — OpenCode mirror (lockstep).
 - `autospec-autonomous.sh` — installed operator lifecycle command (`start`, `status`, `logs`, `watch`, `stop`, `restart`).
 - `autospec-autonomous-run-drain.sh` — installed Tier-1 drain wrapper that runs `$autospec-run` through `omx exec`.
-- `autospec-loop.sh` (shared loop driver, `${AUTOSPEC_SCRIPTS_DIR}/lib/`) — extended with `autospec_conductor_run()`, the Phase-1 conductor entry point wiring control-channel → waterfall → premerge-gate → drain → spend-ledger → resilience → digest (issue #1378).
+- `autospec-loop.sh` (shared loop driver, `${AUTOSPEC_SCRIPTS_DIR}/lib/`) — extended with `autospec_conductor_run()`, the never-idle conductor entry point wiring control-channel → waterfall → Tier 1.5 promotion / Tier 2–4 discovery → premerge-gate → drain → spend-ledger → resilience → digest (issue #1378).
 - `autonomous-control-channel.sh` — label query → command decision (Phase 1, Issue #1373).
-- `autonomous-waterfall.sh` — tier selection logic (Phase 1, Issue #1374).
+- `autonomous-waterfall.sh` — Tier 0/1/1.5/2/3/4 selection logic (Issue #1374, activated by issue #1529).
 - `autonomous-spend-ledger.sh` — cumulative token/issue tally + kill-switch (Phase 1, Issue #1375).
 - `autonomous-premerge-gate.sh` — blocking autospec-qa pre-merge barrier (Phase 1, Issue #1376).
 - `autonomous-resilience.sh` — run-state, lock, quarantine, main-health (Phase 1, Issue #1377).
@@ -260,6 +305,7 @@ Trio edits use `derive-trio.sh --in-place` + `gen-skill-goldens.sh`; never hand-
 - **`/autospec-run` fails** → per-issue failure cap; after cap → `autospec:needs-human`; no merge.
 - **Main CI red** → halt Tier-1 merges; file `autospec:needs-human`; notify.
 - **Spend ceiling reached** → park; write `~/.autospec/autonomous-stop.flag`; notify.
+- **All waterfall tiers dry** → park with an `all tiers dry` reason naming exhausted tiers; notify.
 - **Control-channel read error** → log `code_health:autonomous_control_channel_error`; treat as no-op for that cycle; continue.
 - **Single-instance lock conflict** — reuses `autospec-resume` staleness thresholds (300s/10800s). A live lock blocks a second conductor. A stale lock (heartbeat older than threshold) is reclaimable by the fresh process.
 
