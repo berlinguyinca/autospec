@@ -236,6 +236,44 @@ _install_stub() {
   [[ "$output" == *"park"* ]] || [[ "$output" == *"spend-ledger"* ]]
 }
 
+# ── 4b. Dry-run must not mutate persistent spend-ledger totals ───────────────
+@test "conductor: dry-run does not call spend-ledger add" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '"'"'{"tier":1,"action":"run-backlog","reason":"test"}\n'"'"''
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+
+  cp "$REPO_ROOT/scripts/autonomous-spend-ledger.sh" "$FAKE_SCRIPTS/autonomous-spend-ledger.sh"
+  chmod +x "$FAKE_SCRIPTS/autonomous-spend-ledger.sh"
+
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; main-health) printf "DECISION:continue\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  local run_log="$TEST_TMP/run.log"
+  export AUTOSPEC_RUN_CMD="printf 'should-not-run\n' >> '$run_log'"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=1 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  run bash "$REPO_ROOT/scripts/autonomous-spend-ledger.sh" status --repo-dir "$REPO_ROOT"
+  [ "$status" -eq 0 ]
+  run jq -r '.issues' <<<"$output"
+  [ "$output" = "0" ]
+  if [ -f "$run_log" ]; then
+    ! grep -q 'should-not-run' "$run_log"
+  fi
+}
+
 # ── 5. Missing gate script → halt with code_health identifier ─────────────────
 @test "conductor: missing premerge-gate emits code_health halt and exits" {
   _install_stub "autonomous-control-channel.sh" 'exit 0'

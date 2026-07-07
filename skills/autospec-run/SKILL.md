@@ -1163,9 +1163,12 @@ inline label-swap path below.
 >    # (`AUTOSPEC_FULL_TEST_COMMAND`, Operator/full verification, then `bash scripts/validate.sh` fallback).
 >    # If it fails, fix the failure, recommit, push, rerun the full suite and review, and do NOT run `gh pr merge`.
 >    gh pr merge <PR> --admin --squash --delete-branch
+>    "$COORD_RELEASE" --issue "<ISSUE>" --repo {repo} \
+>      --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" \
+>      --state merged --branch "<BRANCH>" --pr "<PR>" || true
 >    case "$_notify_fired" in *:merged:*) ;; *) _notify_fired="${_notify_fired}:merged:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: merged" "PR #<PR> merged on {repo}" || true ;; esac
 >    ```
->    The block ends with the admin-merge; merge auto-closes the issue.
+>    The block ends with the admin-merge and merged-state claim release; merge auto-closes the issue.
 >    ```bash
 >    # Stop-sentinel: abort if an immediate stop flag is present after this step.
 >    if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop-check.sh" "$ISSUE" "$BRANCH" "$LAST_STEP"; then
@@ -1225,11 +1228,21 @@ Each session derives its own `AUTOSPEC_WORKER_ID` if not overridden; the default
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS` | `0` (disabled) | Repo-wide active-worker cap. When active `in-progress-by-bot` issues meet the cap, `list-ready-issues.sh` returns an empty `.batch` while still reporting `.ready`. Use this to throttle one workstation or a cluster. |
+| `AUTOSPEC_CLAIM_LEASE_SECONDS` | `10800` | Cross-machine claim lease TTL written into the GitHub run-state comment and used by `claim-issue.sh` stale-reclaim decisions. |
 | `AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS` | `1800` | Minimum age before a `claimed` heartbeat triggers the GitHub cross-check. Set higher (e.g., `3600`) for hosts with slow worktree setup. |
-| `AUTOSPEC_WATCHDOG_RECLAIM_SECS` | `10800` | Age after which any non-`claimed` stale heartbeat is reclaimed. |
+| `AUTOSPEC_WATCHDOG_RECLAIM_SECS` | `10800` | Legacy fallback for claim lease age when `AUTOSPEC_CLAIM_LEASE_SECONDS` is unset; also used by watchdog stale cleanup. |
 | `AUTOSPEC_WATCHDOG_STALE_SECS` | `1800` | Age at which a heartbeat is considered stale for nudging. |
 
 If a cross-check GitHub API call fails (offline / rate-limited), the watchdog treats the claim as live and skips the reclaim — fail-safe by design.
+
+Recommended starting caps:
+
+| Deployment | `AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS` | `AUTOSPEC_BATCH_SIZE` | `AUTOSPEC_CLAIM_LEASE_SECONDS` |
+|---|---:|---:|---:|
+| 10 workers | `6` | `1` | `10800` |
+| 25 workers | `12` | `1` | `10800` |
+| 50 workers | `20` | `1` | `14400` |
 
 ## Phase 5 — Periodic status updates
 

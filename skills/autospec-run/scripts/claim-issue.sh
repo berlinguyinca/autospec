@@ -116,7 +116,7 @@ fi
 # and the fresh winner's lock is never overwritten; (3) ONLY if the lowest-id
 # lock is STALE do we fall through to the upsert/reclaim path below. No existing
 # lock, or a lock we already own, also falls through (normal claim/refresh).
-reclaim_secs="${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}"
+reclaim_secs="${AUTOSPEC_CLAIM_LEASE_SECONDS:-${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}}"
 case "$reclaim_secs" in *[!0-9]*|'') reclaim_secs=10800 ;; esac
 reclaiming=""
 lowest_owner="$(lowest_lock_field "$repo" "$issue" worker_id)"
@@ -154,7 +154,8 @@ fi
     --worker-id "$worker_id" \
     --state claimed \
     --step claimed \
-    --branch "$branch" >/dev/null
+    --branch "$branch" \
+    --ttl-seconds "$reclaim_secs" >/dev/null
 
 verified_state_json="$("$RUN_STATE" read --issue "$issue" --repo "$repo" 2>/dev/null || true)"
 verified_owner="$(printf '%s\n' "$verified_state_json" | jq -r '.worker_id // empty' 2>/dev/null || true)"

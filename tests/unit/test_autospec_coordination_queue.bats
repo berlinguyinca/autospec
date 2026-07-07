@@ -140,6 +140,29 @@ EOF
     [ "$output" = "10,11,12,13" ]
 }
 
+@test "planner returns empty batch when repo worker cap is reached" {
+    jq -n \
+      --arg b1 "$(body_with_path skills/a.sh)" \
+      --arg b2 "$(body_with_path skills/b.sh)" \
+      '[
+        {number:10,title:"a",body:$b1,labels:[{name:"auto-implement"}]},
+        {number:11,title:"b",body:$b2,labels:[{name:"auto-implement"}]}
+      ]' > "$AUTO_JSON"
+    jq -n --arg body "$(body_with_path skills/active.sh)" \
+      '[{number:9,title:"active",body:$body,labels:[{name:"in-progress-by-bot"}]}]' > "$ACTIVE_JSON"
+
+    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=1 run bash "$SCRIPT" --repo testorg/testrepo --batch-size 2
+
+    [ "$status" -eq 0 ]
+    planner_output="$output"
+    run bash -c "printf '%s' '$planner_output' | jq -r '.ready | length'"
+    [ "$output" = "2" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.batch | length'"
+    [ "$output" = "0" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.worker_cap.reached'"
+    [ "$output" = "true" ]
+}
+
 @test "planner excludes overlapping path skills/foo.sh" {
     jq -n --arg body "$(body_with_path skills/foo.sh)" \
       '[{number:20,title:"candidate",body:$body,labels:[{name:"auto-implement"}]}]' > "$AUTO_JSON"

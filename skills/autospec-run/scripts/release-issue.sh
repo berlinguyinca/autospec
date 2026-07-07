@@ -8,7 +8,7 @@ RUN_STATE="$SCRIPT_DIR/run-state.sh"
 
 usage() {
     cat <<'EOF'
-Usage: release-issue.sh --issue <N> [--repo owner/repo] [--worker-id <id>] [--state released|failed] [--branch <branch>] [--pr <PR>]
+Usage: release-issue.sh --issue <N> [--repo owner/repo] [--worker-id <id>] [--state released|failed|merged] [--branch <branch>] [--pr <PR>]
 EOF
 }
 
@@ -39,7 +39,7 @@ done
 
 [ -n "$issue" ] || die "--issue is required"
 case "$issue" in *[!0-9]*|'') die "--issue must be an integer" ;; esac
-case "$state" in released|failed) ;; *) die "--state must be released or failed" ;; esac
+case "$state" in released|failed|merged) ;; *) die "--state must be released, failed, or merged" ;; esac
 
 if [ -z "$repo" ]; then
     repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
@@ -52,7 +52,14 @@ if [ -z "$worker_id" ]; then
     worker_id="${host}:${user}:shell:$$:$(date -u +%s)"
 fi
 
-gh issue edit "$issue" --repo "$repo" --remove-label in-progress-by-bot --add-label auto-implement >/dev/null 2>&1 || true
+case "$state" in
+    merged)
+        gh issue edit "$issue" --repo "$repo" --remove-label in-progress-by-bot >/dev/null 2>&1 || true
+        ;;
+    *)
+        gh issue edit "$issue" --repo "$repo" --remove-label in-progress-by-bot --add-label auto-implement >/dev/null 2>&1 || true
+        ;;
+esac
 
 "$RUN_STATE" upsert \
     --issue "$issue" \
