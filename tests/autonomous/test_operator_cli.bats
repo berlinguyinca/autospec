@@ -34,6 +34,18 @@ teardown() {
   [ "$output" = "second" ]
 }
 
+@test "operator cli: status finds spend ledger with alternate .git slug" {
+  mkdir -p "$HOME/.autospec/autonomous-spend/berlinguyinca_autospec.git"
+  printf '{"issues":7,"tokens":0}\n' > "$HOME/.autospec/autonomous-spend/berlinguyinca_autospec.git/spend.json"
+
+  run bash "$CLI" status --json
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'berlinguyinca_autospec.git/spend.json'* ]]
+  [[ "$output" == *'"issues":"7"'* ]]
+  [[ "$output" == *'"tokens":"0"'* ]]
+}
+
 @test "operator cli: stop delegates to autospec-stop helper" {
   mkdir -p "$TEST_TMP/scripts"
   cat > "$TEST_TMP/scripts/autospec-stop.sh" <<'EOF'

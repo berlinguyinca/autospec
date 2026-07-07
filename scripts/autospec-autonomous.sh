@@ -118,7 +118,21 @@ current_ledger_file() {
         _slug="$(printf '%s' "$_repo" | tr '/:' '__')"
     fi
     [ -n "$_slug" ] || return 0
-    printf '%s/.autospec/autonomous-spend/%s/spend.json\n' "$HOME" "$_slug"
+    _ledger="$HOME/.autospec/autonomous-spend/$_slug/spend.json"
+    if [ -f "$_ledger" ]; then
+        printf '%s\n' "$_ledger"
+        return 0
+    fi
+    case "$_slug" in
+        *.git) _alt="${_slug%.git}" ;;
+        *) _alt="${_slug}.git" ;;
+    esac
+    _alt_ledger="$HOME/.autospec/autonomous-spend/$_alt/spend.json"
+    if [ -f "$_alt_ledger" ]; then
+        printf '%s\n' "$_alt_ledger"
+        return 0
+    fi
+    printf '%s\n' "$_ledger"
 }
 
 print_status() {

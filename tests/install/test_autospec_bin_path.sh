@@ -55,7 +55,7 @@ for command in autospec-autonomous autospec-autonomous-status autospec-autonomou
     }
 done
 
-"$TEST_HOME/.autospec/bin/autospec-autonomous" status --json >/tmp/autospec-autonomous-status.json || {
+HOME="$TEST_HOME" "$TEST_HOME/.autospec/bin/autospec-autonomous" status --json >/tmp/autospec-autonomous-status.json || {
     echo "FAIL: autospec-autonomous status command did not run"
     cat /tmp/autospec-autonomous-status.json 2>/dev/null || true
     cat /tmp/autospec-install-path.out
