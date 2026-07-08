@@ -13,8 +13,11 @@ STOP_FLAG_FILE=""
 DEFAULT_LOG_ROOT="${AUTOSPEC_AUTONOMOUS_LOG_DIR:-$HOME/.autospec/logs}"
 DEFAULT_LOG_DIR=""
 
+ORIGINAL_ARGV=("$@")
+
 ACTION="start"
 JSON=0
+ALL=0
 LINES=80
 FORCE=0
 STOP_MODE="--graceful"
@@ -31,11 +34,12 @@ AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES="${AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES:-}"
 
 usage() {
     cat <<'EOF'
-Usage: autospec-autonomous [start|status|timeline|monitor|logs|watch|stop|restart] [options]
+Usage: autospec-autonomous [start|list|status|timeline|monitor|logs|watch|stop|restart] [options]
 
 Commands:
   start      Start the detached autonomous conductor (default).
-  status     Print PID, log path, conductor state, and spend ledger summary.
+  list       Enumerate all repo-scoped conductors under the operator directory.
+  status     Print PID, log path, conductor state, and spend ledger summary. Use --all for list JSON.
   timeline   Print a chronological plain-English activity report.
   monitor    Print the timeline/report repeatedly; default interval is 300 seconds.
   logs       Print the current conductor log tail.
@@ -56,7 +60,8 @@ Options:
   --lines N               Log lines for logs/status/timeline output.
   --interval-sec N        Monitor refresh interval. Default 300.
   --iterations N          Monitor iteration cap. Default unlimited.
-  --json                  Machine-readable status output.
+  --json                  Machine-readable status/list output.
+  --all                   With status, enumerate all conductor operator dirs.
   --foreground            Run in the current shell instead of detaching.
   --force                 Replace stale PID metadata or restart a live process.
   --graceful              Stop after the current iteration (default).
@@ -105,6 +110,28 @@ read_logpath() {
     if [ -f "$_legacy" ]; then
         sed -n '1p' "$_legacy"
     fi
+}
+
+legacy_flat_logpath() {
+    [ -d "$DEFAULT_LOG_ROOT" ] || return 0
+    find "$DEFAULT_LOG_ROOT" -maxdepth 1 -type f -name 'autospec-autonomous-*.log' 2>/dev/null | sort | tail -n 1
+}
+
+resolve_logpath() {
+    _recorded="$(read_logpath || true)"
+    if [ -n "$_recorded" ] && [ -f "$_recorded" ]; then
+        printf '%s
+' "$_recorded"
+        return 0
+    fi
+    _legacy_flat="$(legacy_flat_logpath || true)"
+    if [ -n "$_legacy_flat" ]; then
+        printf '%s
+' "$_legacy_flat"
+        return 0
+    fi
+    printf '%s
+' "$_recorded"
 }
 
 read_scoped_pid() {
@@ -196,13 +223,180 @@ current_ledger_file() {
     printf '%s\n' "$_ledger"
 }
 
+
+slug_to_repo() {
+    _slug="$1"
+    case "$_slug" in
+        *_*)
+            _owner="${_slug%%_*}"
+            _name="${_slug#*_}"
+            printf '%s/%s\n' "$_owner" "$_name"
+            ;;
+        *)
+            printf '%s\n' "$_slug"
+            ;;
+    esac
+}
+
+launch_file_for_state_dir() {
+    printf '%s/launch.json\n' "$1"
+}
+
+write_launch_provenance() {
+    _repo_dir="${AUTOSPEC_REPO_DIR:-$DEFAULT_REPO_DIR}"
+    _repo="${CONDUCTOR_REPO:-$(detect_repo_slug)}"
+    _started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    _tty="${TTY:-$(tty 2>/dev/null || true)}"
+    _session_id="${STY:-${TMUX_PANE:-}}"
+    if [ -z "$_session_id" ]; then
+        _session_id="$(ps -o sid= -p $$ 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+    mkdir -p "$STATE_DIR"
+    {
+        printf '{'
+        printf '"argv":['
+        _arg_first=1
+        for _arg in "${ORIGINAL_ARGV[@]}"; do
+            if [ "$_arg_first" -eq 0 ]; then printf ','; fi
+            _arg_first=0
+            json_escape "$_arg"
+        done
+        printf ']'
+        printf ',"started_at":%s' "$(json_escape "$_started_at")"
+        printf ',"tty":%s' "$(json_escape "$_tty")"
+        printf ',"session_id":%s' "$(json_escape "$_session_id")"
+        printf ',"repo":%s' "$(json_escape "$_repo")"
+        printf ',"repo_dir":%s' "$(json_escape "$_repo_dir")"
+        printf '}\n'
+    } > "$STATE_DIR/launch.json"
+}
+
+json_from_file() {
+    _file="$1"
+    _expr="$2"
+    _default="$3"
+    if [ -f "$_file" ] && command -v jq >/dev/null 2>&1; then
+        jq -r "$_expr" "$_file" 2>/dev/null || printf '%s\n' "$_default"
+    else
+        printf '%s\n' "$_default"
+    fi
+}
+
+json_compact_from_file() {
+    _file="$1"
+    _expr="$2"
+    _default="$3"
+    if [ -f "$_file" ] && command -v jq >/dev/null 2>&1; then
+        jq -c "$_expr" "$_file" 2>/dev/null || printf '%s\n' "$_default"
+    else
+        printf '%s\n' "$_default"
+    fi
+}
+
+heartbeat_age_seconds() {
+    _heartbeat="$1"
+    case "$_heartbeat" in
+        ''|*[!0-9]*) printf '' ; return 0 ;;
+    esac
+    _now="$(date +%s)"
+    printf '%s\n' "$((_now - _heartbeat))"
+}
+
+conductor_row_load() {
+    _dir="$1"
+    _slug="$(basename "$_dir")"
+    _pid="$(tr -d '[:space:]' < "$_dir/conductor.pid")"
+    _alive=false
+    is_pid_alive "$_pid" && _alive=true
+    _log=""
+    [ -f "$_dir/conductor.logpath" ] && _log="$(sed -n '1p' "$_dir/conductor.logpath")"
+    if [ -z "$_log" ] || [ ! -f "$_log" ]; then
+        _log="$(legacy_flat_logpath || true)"
+    fi
+    _launch="$(launch_file_for_state_dir "$_dir")"
+    _repo="$(json_from_file "$_launch" '.repo // empty' "")"
+    [ -n "$_repo" ] || _repo="$(slug_to_repo "$_slug")"
+    _repo_dir="$(json_from_file "$_launch" '.repo_dir // empty' "")"
+    _started_at="$(json_from_file "$_launch" '.started_at // empty' "")"
+    _tty="$(json_from_file "$_launch" '.tty // empty' "")"
+    _session_id="$(json_from_file "$_launch" '.session_id // empty' "")"
+    _argv="$(json_compact_from_file "$_launch" '.argv // []' '[]')"
+    _state_file="$HOME/.autospec/autonomous/$_slug/state.json"
+    _state_status="$(json_from_file "$_state_file" '.status // empty' "")"
+    _last_cycle="$(json_from_file "$_state_file" '(.cycle // .last_cycle // "")' "")"
+    _heartbeat="$(json_from_file "$_state_file" '(.heartbeat_at // .updated_at // "")' "")"
+    _heartbeat_age="$(heartbeat_age_seconds "$_heartbeat")"
+    _park_state=""
+    case "$_state_status" in
+        parked*|soft-park*|*park*) _park_state="$_state_status" ;;
+    esac
+}
+
+print_conductor_json_row() {
+    printf '{'
+    printf '"slug":%s' "$(json_escape "$_slug")"
+    printf ',"repo":%s' "$(json_escape "$_repo")"
+    printf ',"pid":%s' "$(json_escape "$_pid")"
+    printf ',"alive":%s' "$_alive"
+    printf ',"log":%s' "$(json_escape "$_log")"
+    printf ',"last_cycle":%s' "$(json_escape "$_last_cycle")"
+    printf ',"heartbeat_at":%s' "$(json_escape "$_heartbeat")"
+    printf ',"heartbeat_age_seconds":%s' "$(json_escape "$_heartbeat_age")"
+    printf ',"park_state":%s' "$(json_escape "$_park_state")"
+    printf ',"state_status":%s' "$(json_escape "$_state_status")"
+    printf ',"started_at":%s' "$(json_escape "$_started_at")"
+    printf ',"tty":%s' "$(json_escape "$_tty")"
+    printf ',"session_id":%s' "$(json_escape "$_session_id")"
+    printf ',"repo_dir":%s' "$(json_escape "$_repo_dir")"
+    printf ',"argv":%s' "$_argv"
+    printf '}'
+}
+
+print_conductor_text_row() {
+    info "  $_repo ($_slug)"
+    info "    pid: ${_pid:-n/a} alive=$_alive"
+    info "    log: ${_log:-n/a}"
+    [ -n "$_state_status$_last_cycle$_heartbeat_age" ] && \
+        info "    state: ${_state_status:-n/a} cycle=${_last_cycle:-n/a} heartbeat_age_seconds=${_heartbeat_age:-n/a}"
+    [ -n "$_started_at$_tty$_session_id" ] && \
+        info "    launch: started_at=${_started_at:-n/a} tty=${_tty:-n/a} session=${_session_id:-n/a}"
+}
+
+print_conductor_list() {
+    if [ ! -d "$STATE_ROOT" ]; then
+        if [ "$JSON" -eq 1 ]; then
+            printf '{"conductors":[]}\n'
+        else
+            info "autospec-autonomous conductors"
+            info "  none"
+        fi
+        return 0
+    fi
+
+    _first=1
+    [ "$JSON" -eq 1 ] && printf '{"conductors":[' || info "autospec-autonomous conductors"
+    for _dir in "$STATE_ROOT"/*; do
+        [ -d "$_dir" ] || continue
+        [ -f "$_dir/conductor.pid" ] || continue
+        conductor_row_load "$_dir"
+        if [ "$JSON" -eq 1 ]; then
+            [ "$_first" -eq 0 ] && printf ','
+            _first=0
+            print_conductor_json_row
+        else
+            print_conductor_text_row
+        fi
+    done
+    [ "$JSON" -eq 1 ] && printf ']}\n'
+}
+
 print_status() {
     _pid="$(read_pid || true)"
     _alive=false
     if is_pid_alive "$_pid"; then
         _alive=true
     fi
-    _log="$(read_logpath || true)"
+    _log="$(resolve_logpath || true)"
     _state="$(current_state_file || true)"
     _ledger="$(current_ledger_file || true)"
     _state_status=""
@@ -257,7 +451,7 @@ print_timeline() {
     if [ "$LOG_OVERRIDE" -eq 1 ]; then
         _log="${AUTOSPEC_AUTONOMOUS_LOG:-}"
     else
-        _log="$(read_logpath || true)"
+        _log="$(resolve_logpath || true)"
     fi
     [ -n "$_log" ] || die "no conductor log path recorded"
     [ -f "$_log" ] || die "conductor log not found: $_log"
@@ -760,6 +954,7 @@ start_foreground() {
 start_detached() {
     ensure_not_running
     mkdir -p "$STATE_DIR" "$DEFAULT_LOG_DIR"
+    write_launch_provenance
     _log="${AUTOSPEC_AUTONOMOUS_LOG:-}"
     if [ -z "$_log" ]; then
         _stamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -813,7 +1008,7 @@ show_logs() {
     if [ "$LOG_OVERRIDE" -eq 1 ]; then
         _log="${AUTOSPEC_AUTONOMOUS_LOG:-}"
     else
-        _log="$(read_logpath || true)"
+        _log="$(resolve_logpath || true)"
     fi
     [ -n "$_log" ] || die "no conductor log path recorded"
     [ -f "$_log" ] || die "conductor log not found: $_log"
@@ -824,7 +1019,7 @@ watch_logs() {
     if [ "$LOG_OVERRIDE" -eq 1 ]; then
         _log="${AUTOSPEC_AUTONOMOUS_LOG:-}"
     else
-        _log="$(read_logpath || true)"
+        _log="$(resolve_logpath || true)"
     fi
     [ -n "$_log" ] || die "no conductor log path recorded"
     [ -f "$_log" ] || die "conductor log not found: $_log"
@@ -853,7 +1048,7 @@ monitor_report() {
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        start|status|timeline|monitor|logs|watch|stop|restart|run-foreground)
+        start|list|status|timeline|monitor|logs|watch|stop|restart|run-foreground)
             ACTION="$1"
             ;;
         --max-cycles)
@@ -925,6 +1120,9 @@ while [ $# -gt 0 ]; do
         --json)
             JSON=1
             ;;
+        --all)
+            ALL=1
+            ;;
         --foreground)
             FOREGROUND=1
             ;;
@@ -961,8 +1159,15 @@ case "$ACTION" in
             start_detached
         fi
         ;;
+    list)
+        print_conductor_list
+        ;;
     status)
-        print_status
+        if [ "$ALL" -eq 1 ]; then
+            print_conductor_list
+        else
+            print_status
+        fi
         ;;
     timeline)
         print_timeline
