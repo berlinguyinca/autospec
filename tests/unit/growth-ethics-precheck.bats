@@ -76,3 +76,32 @@ teardown() { rm -rf "$TMP"; unset GROWTH_NOW_EPOCH; }
   run bash "$PC" --cadence "$TMP/c.json" "$TMP/l.jsonl" reddit
   [ "$status" -ne 0 ]
 }
+
+@test "cadence interop: real ledger appended via growth-ledger.sh --append trips numeric-ts cap" {
+  echo '{"approval":{"cadence_caps":{"default_per_platform_per_week":1}},"targets":{"communities":[]}}' > "$TMP/c.json"
+  local ledger="$TMP/l.jsonl"
+  GROWTH_LEDGER="$ledger" bash "$REPO_ROOT/skills/autospec-shared/scripts/growth-ledger.sh" --append \
+    '{"round":1,"source":"community","title":"t1","norm_title":"t1","channel":"reddit","kind":"outbound","issue":11,"outcome":"published","reason":"","ts":990000,"platform":"reddit"}'
+  GROWTH_LEDGER="$ledger" bash "$REPO_ROOT/skills/autospec-shared/scripts/growth-ledger.sh" --append \
+    '{"round":1,"source":"community","title":"t2","norm_title":"t2","channel":"reddit","kind":"outbound","issue":12,"outcome":"published","reason":"","ts":990001,"platform":"reddit"}'
+  run bash "$PC" --cadence "$TMP/c.json" "$ledger" reddit
+  [ "$status" -ne 0 ]
+}
+
+@test "cadence interop: real ledger with ISO-8601 ts trips cap" {
+  echo '{"approval":{"cadence_caps":{"default_per_platform_per_week":1}},"targets":{"communities":[]}}' > "$TMP/c.json"
+  local ledger="$TMP/l.jsonl"
+  local iso
+  iso="$(date -u -r 990000 +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d @990000 +%Y-%m-%dT%H:%M:%SZ)"
+  GROWTH_LEDGER="$ledger" bash "$REPO_ROOT/skills/autospec-shared/scripts/growth-ledger.sh" --append \
+    "{\"round\":1,\"source\":\"community\",\"title\":\"t1\",\"norm_title\":\"t1\",\"channel\":\"reddit\",\"kind\":\"outbound\",\"issue\":11,\"outcome\":\"published\",\"reason\":\"\",\"ts\":\"$iso\",\"platform\":\"reddit\"}"
+  run bash "$PC" --cadence "$TMP/c.json" "$ledger" reddit
+  [ "$status" -ne 0 ]
+}
+
+@test "cadence: unparseable ledger ts fails closed" {
+  echo '{"approval":{"cadence_caps":{"default_per_platform_per_week":2}},"targets":{"communities":[]}}' > "$TMP/c.json"
+  echo '{"platform":"reddit","outcome":"published","ts":"garbage-not-a-date"}' > "$TMP/l.jsonl"
+  run bash "$PC" --cadence "$TMP/c.json" "$TMP/l.jsonl" reddit
+  [ "$status" -ne 0 ]
+}

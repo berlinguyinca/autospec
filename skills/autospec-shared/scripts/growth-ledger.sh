@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # growth-ledger.sh — append-only JSONL outcome ledger for autospec-grow.
 # Mirrors explore-ledger.sh: append-only, readers take latest line per issue.
+# Outbound lines SHOULD also carry an optional "platform" string (e.g. "reddit"),
+# consumed by growth-ethics-precheck.sh's cadence gate; --append stores extra
+# keys verbatim, so this is a convention, not a REQUIRED key (artifact lines
+# have no platform).
 set -euo pipefail
 
 LEDGER="${GROWTH_LEDGER:-.autospec/growth/ledger.jsonl}"

@@ -45,9 +45,14 @@ check_cadence() {
      // .approval.cadence_caps.default_per_platform_per_week // 2' "$cfg")"
   local now cutoff count
   now="$(now_epoch)"; cutoff=$(( now - WEEK_SECONDS ))
-  count="$(jq -r --arg p "$platform" --argjson cut "$cutoff" \
-    'select(.platform==$p and .outcome=="published" and (.ts|tonumber) >= $cut)' \
-    "$ledger" 2>/dev/null | jq -s 'length')"
+  if ! count="$(jq -s --arg p "$platform" --argjson cut "$cutoff" '
+      map(select(.platform==$p and .outcome=="published"))
+      | map(.ts | (if type=="number" then . else (fromdateiso8601? // error("unparseable ts")) end))
+      | map(select(. >= $cut))
+      | length' "$ledger")"; then
+    echo "cadence: unparseable ledger timestamp, refusing (fail-closed): $ledger" >&2
+    exit 1
+  fi
   if [ "$count" -ge "$cap" ]; then
     echo "cadence cap reached for $platform: $count/$cap published in the last 7 days" >&2
     exit 1
