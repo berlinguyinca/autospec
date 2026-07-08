@@ -315,14 +315,24 @@ _lock_staleness() {
     local existing_json="$1"
     local now="$2"
 
-    local heartbeat_at status lock_pid
+    local heartbeat_at status lock_pid lock_host
     heartbeat_at="$(printf '%s' "$existing_json" | jq -r '.heartbeat_at // empty' 2>/dev/null || echo "")"
     status="$(printf '%s' "$existing_json" | jq -r '.status // empty' 2>/dev/null || echo "")"
     lock_pid="$(printf '%s' "$existing_json" | jq -r '.lock_pid // empty' 2>/dev/null || echo "")"
+    lock_host="$(printf '%s' "$existing_json" | jq -r '.lock_host // empty' 2>/dev/null || echo "")"
 
     # No lock → available (not stale, but caller treats absence as available)
     if [ -z "$lock_pid" ]; then
         printf 'no-lock'
+        return
+    fi
+
+    # Same-host holders can be probed directly. If the recorded process is gone,
+    # reclaim immediately instead of waiting for the cross-host heartbeat timeout.
+    local this_host
+    this_host="${AUTOSPEC_HOST:-$(hostname 2>/dev/null || echo "")}"
+    if [ -n "$lock_host" ] && [ -n "$this_host" ] && [ "$lock_host" = "$this_host" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
+        printf 'stale'
         return
     fi
 
