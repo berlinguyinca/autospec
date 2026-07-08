@@ -695,6 +695,12 @@ fi'
 
     # ── Main cycle loop ───────────────────────────────────────────────────────
     while true; do
+        if [ -f "${AUTOSPEC_STOP_FLAG_FILE:-${HOME}/.autospec/stop.flag}" ]; then
+            printf '[conductor] operator stop flag detected: %s\n' \
+                "${AUTOSPEC_STOP_FLAG_FILE:-${HOME}/.autospec/stop.flag}" >&2
+            _stop_reason="operator:stop-flag"
+            break
+        fi
         _cycle=$((_cycle + 1))
         printf '[conductor] cycle %s starting\n' "$_cycle" >&2
 

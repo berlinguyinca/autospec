@@ -5,10 +5,13 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-STATE_DIR="${AUTOSPEC_AUTONOMOUS_OPERATOR_DIR:-$HOME/.autospec/autonomous-operator}"
-PID_FILE="${AUTOSPEC_AUTONOMOUS_PID_FILE:-$STATE_DIR/conductor.pid}"
-LOGPATH_FILE="${AUTOSPEC_AUTONOMOUS_LOGPATH_FILE:-$STATE_DIR/conductor.logpath}"
-DEFAULT_LOG_DIR="${AUTOSPEC_AUTONOMOUS_LOG_DIR:-$HOME/.autospec/logs}"
+STATE_ROOT="${AUTOSPEC_AUTONOMOUS_OPERATOR_DIR:-$HOME/.autospec/autonomous-operator}"
+STATE_DIR=""
+PID_FILE=""
+LOGPATH_FILE=""
+STOP_FLAG_FILE=""
+DEFAULT_LOG_ROOT="${AUTOSPEC_AUTONOMOUS_LOG_DIR:-$HOME/.autospec/logs}"
+DEFAULT_LOG_DIR=""
 
 ACTION="start"
 JSON=0
@@ -85,12 +88,28 @@ is_pid_alive() {
 read_pid() {
     if [ -f "$PID_FILE" ]; then
         tr -d '[:space:]' < "$PID_FILE"
+        return 0
+    fi
+    _legacy="$(legacy_pid_file)"
+    if [ -f "$_legacy" ]; then
+        tr -d '[:space:]' < "$_legacy"
     fi
 }
 
 read_logpath() {
     if [ -f "$LOGPATH_FILE" ]; then
         sed -n '1p' "$LOGPATH_FILE"
+        return 0
+    fi
+    _legacy="$(legacy_logpath_file)"
+    if [ -f "$_legacy" ]; then
+        sed -n '1p' "$_legacy"
+    fi
+}
+
+read_scoped_pid() {
+    if [ -f "$PID_FILE" ]; then
+        tr -d '[:space:]' < "$PID_FILE"
     fi
 }
 
@@ -99,10 +118,45 @@ detect_repo_slug() {
         printf '%s\n' "$CONDUCTOR_REPO"
         return 0
     fi
+    _repo_dir="${AUTOSPEC_REPO_DIR:-$DEFAULT_REPO_DIR}"
+    _origin="$(git -C "$_repo_dir" config --get remote.origin.url 2>/dev/null || true)"
+    if [ -n "$_origin" ]; then
+        printf '%s\n' "$_origin" | sed 's#.*github.com[:/]##; s#/$##; s#\.git$##'
+        return 0
+    fi
     if command -v gh >/dev/null 2>&1; then
-        gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null && return 0
+        (cd "$_repo_dir" 2>/dev/null && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) && return 0
     fi
     printf ''
+}
+
+scope_slug() {
+    _repo="$(detect_repo_slug || true)"
+    if [ -n "$_repo" ]; then
+        printf '%s' "$_repo" | sed 's#[/:]#_#g; s#[^A-Za-z0-9._-]#_#g'
+        return 0
+    fi
+    _repo_dir="${AUTOSPEC_REPO_DIR:-$DEFAULT_REPO_DIR}"
+    _real="$(cd "$_repo_dir" 2>/dev/null && pwd -P || printf '%s' "$_repo_dir")"
+    printf 'dir_%s' "$(printf '%s' "$_real" | sed 's#[^A-Za-z0-9._-]#_#g')"
+}
+
+configure_scope_paths() {
+    _scope="$(scope_slug)"
+    [ -n "$_scope" ] || _scope="unknown"
+    STATE_DIR="${STATE_ROOT%/}/$_scope"
+    PID_FILE="${AUTOSPEC_AUTONOMOUS_PID_FILE:-$STATE_DIR/conductor.pid}"
+    LOGPATH_FILE="${AUTOSPEC_AUTONOMOUS_LOGPATH_FILE:-$STATE_DIR/conductor.logpath}"
+    STOP_FLAG_FILE="${AUTOSPEC_STOP_FLAG_FILE:-$STATE_DIR/stop.flag}"
+    DEFAULT_LOG_DIR="${DEFAULT_LOG_ROOT%/}/$_scope"
+}
+
+legacy_pid_file() {
+    printf '%s/conductor.pid\n' "${STATE_ROOT%/}"
+}
+
+legacy_logpath_file() {
+    printf '%s/conductor.logpath\n' "${STATE_ROOT%/}"
 }
 
 current_state_file() {
@@ -163,6 +217,9 @@ print_status() {
         printf '"running":%s' "$_alive"
         printf ',"pid":%s' "$(json_escape "$_pid")"
         printf ',"log":%s' "$(json_escape "$_log")"
+        printf ',"pid_file":%s' "$(json_escape "$PID_FILE")"
+        printf ',"logpath_file":%s' "$(json_escape "$LOGPATH_FILE")"
+        printf ',"stop_flag_file":%s' "$(json_escape "$STOP_FLAG_FILE")"
         printf ',"state_file":%s' "$(json_escape "$_state")"
         printf ',"ledger_file":%s' "$(json_escape "$_ledger")"
         printf ',"issues":%s' "$(json_escape "$_issues")"
@@ -175,6 +232,8 @@ print_status() {
     info "  running: $_alive"
     info "  pid:     ${_pid:-n/a}"
     info "  log:     ${_log:-n/a}"
+    info "  pidfile: $PID_FILE"
+    info "  stop:    $STOP_FLAG_FILE"
     info "  state:   ${_state:-n/a}"
     info "  ledger:  ${_ledger:-n/a}"
     if [ -n "$_issues$_tokens" ]; then
@@ -662,7 +721,7 @@ PY
 }
 
 ensure_not_running() {
-    _pid="$(read_pid || true)"
+    _pid="$(read_scoped_pid || true)"
     if is_pid_alive "$_pid"; then
         if [ "$FORCE" -eq 1 ]; then
             kill "$_pid" >/dev/null 2>&1 || true
@@ -678,6 +737,7 @@ start_foreground() {
     export CONDUCTOR_SCRIPTS_DIR="${CONDUCTOR_SCRIPTS_DIR:-$SCRIPT_DIR}"
     export AUTOSPEC_SCRIPTS_DIR="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR}"
     export AUTOSPEC_RUN_CMD="${AUTOSPEC_RUN_CMD:-$SCRIPT_DIR/autospec-autonomous-run-drain.sh}"
+    export AUTOSPEC_STOP_FLAG_FILE="$STOP_FLAG_FILE"
     [ -n "$CONDUCTOR_MAX_CYCLES" ] && export CONDUCTOR_MAX_CYCLES
     [ -n "$CONDUCTOR_POLL_INTERVAL" ] && export CONDUCTOR_POLL_INTERVAL
     export CONDUCTOR_DRY_RUN CONDUCTOR_NO_DIGEST
@@ -699,6 +759,7 @@ start_detached() {
     fi
     _repo_dir="${AUTOSPEC_REPO_DIR:-$DEFAULT_REPO_DIR}"
     _repo="${CONDUCTOR_REPO:-$(detect_repo_slug)}"
+    export AUTOSPEC_STOP_FLAG_FILE="$STOP_FLAG_FILE"
 
     if command -v python3 >/dev/null 2>&1; then
         _pid="$(
@@ -709,6 +770,7 @@ env = os.environ.copy()
 env["AUTOSPEC_REPO_DIR"] = repo_dir
 env["CONDUCTOR_SCRIPTS_DIR"] = scripts_dir
 env["AUTOSPEC_SCRIPTS_DIR"] = scripts_dir
+env["AUTOSPEC_STOP_FLAG_FILE"] = os.environ.get("AUTOSPEC_STOP_FLAG_FILE", "")
 if repo:
     env["CONDUCTOR_REPO"] = repo
 log = open(log_path, "ab", buffering=0)
@@ -764,7 +826,7 @@ watch_logs() {
 stop_conductor() {
     _stop="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR}/autospec-stop.sh"
     [ -x "$_stop" ] || die "missing stop helper: $_stop"
-    bash "$_stop" "$STOP_MODE"
+    AUTOSPEC_STOP_FLAG_FILE="$STOP_FLAG_FILE" bash "$_stop" "$STOP_MODE"
 }
 
 monitor_report() {
@@ -878,6 +940,8 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+configure_scope_paths
+
 case "$ACTION" in
     run-foreground)
         start_foreground
@@ -908,7 +972,7 @@ case "$ACTION" in
         stop_conductor
         ;;
     restart)
-        _pid="$(read_pid || true)"
+        _pid="$(read_scoped_pid || true)"
         if is_pid_alive "$_pid"; then
             if [ "$FORCE" -eq 1 ]; then
                 kill "$_pid" >/dev/null 2>&1 || true
