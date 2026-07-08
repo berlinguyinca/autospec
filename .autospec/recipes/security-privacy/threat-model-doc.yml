@@ -1,0 +1,69 @@
+id: "threat-model-doc"
+title: "Threat model doc"
+summary: "Threat model doc"
+category: "security-privacy"
+applies_to_rules:
+  - "required_threat_model"
+applies_to_capabilities:
+  - "security_privacy_docs"
+repo_conditions:
+  application_types:
+    - "web"
+    - "cli"
+  technologies:
+    []
+  required_files:
+    []
+  optional_files:
+    []
+risk:
+  level: "medium"
+  requires_human_guidance: false
+  requires_architecture_review: false
+implementation:
+  mode: "docs"
+  allowed_paths:
+    - "docs/**"
+    - ".autospec/**"
+    - "tests/**"
+    - "src/**"
+  forbidden_paths:
+    - ".github/workflows/**"
+    - ".env"
+    - ".env.*"
+    - "**/migrations/**"
+    - "package.json"
+    - "pyproject.toml"
+  max_files_changed: 5
+  max_lines_changed: 250
+  expected_files:
+    create:
+      - "docs/specs/threat-model.md"
+    update:
+      []
+    inspect:
+      []
+test_plan:
+  required: false
+  suggested_commands:
+    - "bash scripts/autospec-rule-recheck.sh --dry-run"
+  generated_tests:
+    - "docs/specs/threat-model.md"
+validation:
+  commands:
+    - "bash scripts/autospec-rule-recheck.sh --dry-run"
+  required_evidence:
+    - "report"
+docs:
+  update:
+    - "docs/specs"
+metadata:
+  update:
+    - ".autospec/state"
+acceptance_criteria:
+  - "Threat model doc scaffold/spec exists."
+  - "Rule recheck is honest about before/after status."
+stuck_if:
+  - "stack confidence is low"
+  - "capability is disabled"
+  - "forbidden path required"

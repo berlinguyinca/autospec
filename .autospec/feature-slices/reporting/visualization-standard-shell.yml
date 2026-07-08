@@ -1,0 +1,21 @@
+id: visualization-standard-shell
+title: Visualization standard shell
+category: reporting
+summary: Visualization standard shell
+source_rules:
+  - required_visualization_library_standard
+source_baselines:
+  - reporting
+requires_adapter: true
+supported_adapters:
+  - react-vite
+  - nextjs-app-router
+  - nextjs-pages-router
+implementation_kind: docs
+runtime_claim_level: shell
+risk_level: low
+not_in_scope:
+  - database migrations
+  - auth/security behavior changes
+  - dependency installation
+  - provider calls

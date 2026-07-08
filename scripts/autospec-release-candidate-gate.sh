@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
-cd "$(dirname "$0")/.."
-bash scripts/autospec-release-validation.sh --repo-root . >/dev/null
-echo "release_candidate_gate: no blockers"
+set -eu
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$DIR/autospec-rc-closure-lib.py" --command rc-gate "$@"

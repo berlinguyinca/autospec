@@ -1,0 +1,5 @@
+schema: 1
+statistics:
+  - id: example.statistic
+    definition: Describe calculation and product purpose.
+    caveats: []

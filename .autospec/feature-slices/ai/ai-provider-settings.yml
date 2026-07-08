@@ -1,0 +1,22 @@
+id: ai-provider-settings
+title: AI provider settings shell
+category: ai
+summary: AI provider settings shell
+source_rules:
+  - required_ai_provider_abstraction
+  - required_ai_settings_page
+source_baselines:
+  - ai
+requires_adapter: true
+supported_adapters:
+  - react-vite
+  - nextjs-app-router
+  - nextjs-pages-router
+implementation_kind: mixed
+runtime_claim_level: shell
+risk_level: low
+not_in_scope:
+  - database migrations
+  - auth/security behavior changes
+  - dependency installation
+  - provider calls

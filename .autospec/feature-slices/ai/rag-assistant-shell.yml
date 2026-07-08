@@ -1,0 +1,21 @@
+id: rag-assistant-shell
+title: RAG assistant shell
+category: ai
+summary: RAG assistant shell
+source_rules:
+  - required_rag_indexing
+source_baselines:
+  - ai
+requires_adapter: true
+supported_adapters:
+  - react-vite
+  - nextjs-app-router
+  - nextjs-pages-router
+implementation_kind: route
+runtime_claim_level: shell
+risk_level: low
+not_in_scope:
+  - database migrations
+  - auth/security behavior changes
+  - dependency installation
+  - provider calls

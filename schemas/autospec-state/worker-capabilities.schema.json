@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Autospec Worker Capabilities",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "capabilities"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "status",
+          "risk_level",
+          "allowed_by_default",
+          "requires_verifier"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "enabled",
+              "disabled",
+              "experimental",
+              "planned"
+            ]
+          },
+          "risk_level": {
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "allowed_by_default": {
+            "type": "boolean"
+          },
+          "allowed_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "forbidden_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "max_files_changed": {
+            "type": "integer"
+          },
+          "max_lines_changed": {
+            "type": "integer"
+          },
+          "requires_tests": {
+            "type": "boolean"
+          },
+          "requires_verifier": {
+            "const": true
+          },
+          "requires_human_guidance": {
+            "type": "boolean"
+          },
+          "requires_architecture_review": {
+            "type": "boolean"
+          },
+          "can_modify_code": {
+            "type": "boolean"
+          },
+          "can_modify_dependencies": {
+            "const": false
+          },
+          "can_modify_database": {
+            "const": false
+          },
+          "can_modify_auth_security": {
+            "const": false
+          }
+        }
+      }
+    }
+  }
+}

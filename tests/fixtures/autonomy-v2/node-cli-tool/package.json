@@ -1,0 +1,6 @@
+{
+  "bin": {
+    "fixture-cli": "bin/fixture.js"
+  },
+  "dependencies": {}
+}

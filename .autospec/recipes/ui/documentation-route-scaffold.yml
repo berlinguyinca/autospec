@@ -1,0 +1,71 @@
+id: "documentation-route-scaffold"
+title: "Documentation route scaffold"
+summary: "Documentation route scaffold"
+category: "ui"
+applies_to_rules:
+  - "required_in_app_docs"
+applies_to_capabilities:
+  - "ui_scaffold"
+repo_conditions:
+  application_types:
+    - "web"
+    - "cli"
+  technologies:
+    - "react"
+    - "vite"
+    - "nextjs"
+  required_files:
+    []
+  optional_files:
+    []
+risk:
+  level: "medium"
+  requires_human_guidance: false
+  requires_architecture_review: false
+implementation:
+  mode: "scaffold"
+  allowed_paths:
+    - "docs/**"
+    - ".autospec/**"
+    - "tests/**"
+    - "src/**"
+  forbidden_paths:
+    - ".github/workflows/**"
+    - ".env"
+    - ".env.*"
+    - "**/migrations/**"
+    - "package.json"
+    - "pyproject.toml"
+  max_files_changed: 5
+  max_lines_changed: 250
+  expected_files:
+    create:
+      - "src/components/AutospecDocs.tsx"
+    update:
+      []
+    inspect:
+      []
+test_plan:
+  required: true
+  suggested_commands:
+    - "bash scripts/autospec-rule-recheck.sh --dry-run"
+  generated_tests:
+    - "src/components/AutospecDocs.tsx"
+validation:
+  commands:
+    - "bash scripts/autospec-rule-recheck.sh --dry-run"
+  required_evidence:
+    - "report"
+docs:
+  update:
+    - "docs/specs"
+metadata:
+  update:
+    - ".autospec/state"
+acceptance_criteria:
+  - "Documentation route scaffold scaffold/spec exists."
+  - "Rule recheck is honest about before/after status."
+stuck_if:
+  - "stack confidence is low"
+  - "capability is disabled"
+  - "forbidden path required"

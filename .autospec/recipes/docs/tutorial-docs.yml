@@ -1,0 +1,69 @@
+id: "tutorial-docs"
+title: "Tutorial documentation"
+summary: "Tutorial documentation"
+category: "docs"
+applies_to_rules:
+  - "required_tutorials_for_user_workflows"
+applies_to_capabilities:
+  - "docs"
+repo_conditions:
+  application_types:
+    - "web"
+    - "cli"
+  technologies:
+    []
+  required_files:
+    []
+  optional_files:
+    []
+risk:
+  level: "low"
+  requires_human_guidance: false
+  requires_architecture_review: false
+implementation:
+  mode: "docs"
+  allowed_paths:
+    - "docs/**"
+    - ".autospec/**"
+    - "tests/**"
+    - "src/**"
+  forbidden_paths:
+    - ".github/workflows/**"
+    - ".env"
+    - ".env.*"
+    - "**/migrations/**"
+    - "package.json"
+    - "pyproject.toml"
+  max_files_changed: 5
+  max_lines_changed: 250
+  expected_files:
+    create:
+      - "docs/tutorials/autospec-tutorial.md"
+    update:
+      []
+    inspect:
+      []
+test_plan:
+  required: false
+  suggested_commands:
+    - "bash scripts/autospec-rule-recheck.sh --dry-run"
+  generated_tests:
+    - "docs/tutorials/autospec-tutorial.md"
+validation:
+  commands:
+    - "bash scripts/autospec-rule-recheck.sh --dry-run"
+  required_evidence:
+    - "report"
+docs:
+  update:
+    - "docs/specs"
+metadata:
+  update:
+    - ".autospec/state"
+acceptance_criteria:
+  - "Tutorial documentation scaffold/spec exists."
+  - "Rule recheck is honest about before/after status."
+stuck_if:
+  - "stack confidence is low"
+  - "capability is disabled"
+  - "forbidden path required"

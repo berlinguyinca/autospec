@@ -736,6 +736,81 @@ check_autospec_sweep_config_contract() {
     done
 }
 
+check_constitution_validation_contract() {
+    info "constitution/baseline local validation contract"
+    local validation_script="scripts/autospec-constitution-validate.sh"
+    local composition_script="scripts/autospec-baseline-compose.sh"
+    local metadata_script="scripts/autospec-discover-metadata.sh"
+    local baseline_gap_script="scripts/autospec-baseline-gap.sh"
+    local constitutional_gap_script="scripts/autospec-constitutional-gap.sh"
+    local issue_plan_script="scripts/autospec-plan-issues.sh"
+    local bot_state_script="scripts/autospec-bot-state-init.sh"
+    local dry_run_script="scripts/autospec-autonomy-dry-run.sh"
+    local ensure_labels_script="scripts/autospec-ensure-labels.sh"
+    local publish_issues_script="scripts/autospec-publish-issues.sh"
+    local sync_issues_script="scripts/autospec-sync-published-issues.sh"
+    local worker_v1_script="scripts/autospec-worker-v1.sh"
+    local verifier_script="scripts/autospec-verify-worker-pr.sh"
+    local promote_script="scripts/autospec-promote-pr.sh"
+    local remediation_script="scripts/autospec-plan-remediation.sh"
+    local worker_one_script="scripts/autospec-worker-one.sh"
+    local publish_stuck_script="scripts/autospec-publish-stuck.sh"
+    local sync_guidance_script="scripts/autospec-sync-guidance.sh"
+    local supervisor_cycle_script="scripts/autospec-supervisor-cycle.sh"
+    local status_script="scripts/autospec-autonomy-status.sh"
+    local supervisor_loop_script="scripts/autospec-supervisor-loop.sh"
+    local budget_script="scripts/autospec-autonomy-budget.sh"
+    local repeated_failures_script="scripts/autospec-repeated-failures.sh"
+    local resume_script="scripts/autospec-resume.sh"
+    local guide_issue_script="scripts/autospec-guide-issue.sh"
+    local digital_twin_script="scripts/autospec-digital-twin.py"
+    local build_twin_script="scripts/autospec-build-digital-twin.sh"
+    local impact_script="scripts/autospec-impact-analysis.sh"
+    local drift_script="scripts/autospec-metadata-drift.sh"
+    local constitution_rules_script="scripts/autospec-constitution-rules.py"
+    local load_policy_script="scripts/autospec-load-policy-sources.sh"
+    local validate_policy_script="scripts/autospec-validate-policy-sources.sh"
+    local lock_policy_script="scripts/autospec-lock-policy-sources.sh"
+    local compatibility_script="scripts/autospec-policy-compatibility.sh"
+    local extract_rules_script="scripts/autospec-extract-constitution-rules.sh"
+    local check_rules_script="scripts/autospec-check-rules.sh"
+    local gap_v1_script="scripts/autospec-constitutional-gap-v1.sh"
+    local audit_script="scripts/autospec-constitution-audit.sh"
+    local validation_bats="tests/unit/test_constitution_validation.bats"
+    local composition_bats="tests/unit/test_baseline_composition.bats"
+    local intelligence_bats="tests/unit/test_repository_intelligence.bats"
+    local issue_plan_bats="tests/unit/test_issue_planning.bats"
+    local publishing_bats="tests/unit/test_github_publishing.bats"
+    local worker_v1_bats="tests/unit/test_worker_v1.bats"
+    local verifier_bats="tests/unit/test_verifier_v0.bats"
+    local autonomy_pipeline_bats="tests/unit/test_autonomy_pipeline.bats"
+    local local_control_bats="tests/unit/test_local_autonomy_control.bats"
+    local digital_twin_bats="tests/unit/test_digital_twin.bats"
+    local constitution_rules_bats="tests/unit/test_constitution_rules.bats"
+    local policy_sources_bats="tests/unit/test_policy_sources_v2.bats"
+    [ -f "$constitution_rules_script" ] || fail "$constitution_rules_script: required file missing"
+    [ -x "$constitution_rules_script" ] || fail "$constitution_rules_script: not executable"
+    [ -f "$digital_twin_script" ] || fail "$digital_twin_script: required file missing"
+    [ -x "$digital_twin_script" ] || fail "$digital_twin_script: not executable"
+    for script in "$validation_script" "$composition_script" "$metadata_script" "$baseline_gap_script" "$constitutional_gap_script" "$issue_plan_script" "$bot_state_script" "$dry_run_script" "$ensure_labels_script" "$publish_issues_script" "$sync_issues_script" "$worker_v1_script" "$verifier_script" "$promote_script" "$remediation_script" "$worker_one_script" "$publish_stuck_script" "$sync_guidance_script" "$supervisor_cycle_script" "$status_script" "$supervisor_loop_script" "$budget_script" "$repeated_failures_script" "$resume_script" "$guide_issue_script" "$build_twin_script" "$impact_script" "$drift_script" "$extract_rules_script" "$check_rules_script" "$gap_v1_script" "$audit_script" "$load_policy_script" "$validate_policy_script" "$lock_policy_script" "$compatibility_script"; do
+        [ -f "$script" ] || fail "$script: required file missing"
+        [ -x "$script" ] || fail "$script: not executable"
+        bash -n "$script" || fail "$script: bash syntax error"
+    done
+    python3 -m py_compile "$digital_twin_script" || fail "$digital_twin_script: Python syntax error"
+    python3 -m py_compile "$constitution_rules_script" || fail "$constitution_rules_script: Python syntax error"
+    for bats_file in "$validation_bats" "$composition_bats" "$intelligence_bats" "$issue_plan_bats" "$publishing_bats" "$worker_v1_bats" "$verifier_bats" "$autonomy_pipeline_bats" "$local_control_bats" "$digital_twin_bats" "$constitution_rules_bats" "$policy_sources_bats"; do
+        [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
+    done
+    if command -v bats >/dev/null 2>&1; then
+        for bats_file in "$validation_bats" "$composition_bats" "$intelligence_bats" "$issue_plan_bats" "$publishing_bats" "$worker_v1_bats" "$verifier_bats" "$autonomy_pipeline_bats" "$local_control_bats" "$digital_twin_bats" "$constitution_rules_bats" "$policy_sources_bats"; do
+            info "  running: $bats_file"
+            bats "$bats_file" >/tmp/validate-constitution-validation.log 2>&1 \
+                || { cat /tmp/validate-constitution-validation.log >&2; fail "$bats_file: failed"; }
+        done
+    fi
+}
+
 check_autospec_fleet_scripts() {
     info "autospec-fleet scripts"
     local skill_dir="skills/autospec-fleet"
@@ -743,6 +818,36 @@ check_autospec_fleet_scripts() {
         [ -f "$skill_dir/scripts/$f" ] || fail "$skill_dir/scripts/$f: required file missing"
         bash -n "$skill_dir/scripts/$f" || fail "$skill_dir/scripts/$f: bash syntax error"
     done
+}
+
+check_generated_yaml_parse() {
+    info "generated YAML parse gate: .autospec catalogs"
+    python3 - <<'PY' || fail "generated YAML parse gate failed"
+import pathlib
+import sys
+
+try:
+    import yaml
+except Exception as exc:
+    print(f"PyYAML unavailable: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+roots = [pathlib.Path(".autospec")]
+failures = []
+for root in roots:
+    if not root.exists():
+        continue
+    for path in sorted(list(root.rglob("*.yml")) + list(root.rglob("*.yaml"))):
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                yaml.safe_load(fh)
+        except Exception as exc:
+            failures.append(f"{path}: {exc}")
+
+if failures:
+    print("\n".join(failures), file=sys.stderr)
+    sys.exit(1)
+PY
 }
 
 # Lockstep check: the literal line '/autospec-fleet gui' must appear in all
@@ -3054,6 +3159,8 @@ main() {
     check_docs_drift_gate_regen_conditional_parity
     check_worktree_ladder_assert_parity
     check_autospec_sweep_config_contract
+    check_constitution_validation_contract
+    check_generated_yaml_parse
     check_autospec_fleet_scripts
     check_fleet_gui_subcommand_lockstep
     check_team_personality_contract

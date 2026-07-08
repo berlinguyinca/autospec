@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "blocked_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "command": {
+      "type": "string"
+    },
+    "confidence": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+    },
+    "evidence": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "id": {
+      "type": "string"
+    },
+    "notes": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "requires_dependencies": {
+      "type": "boolean"
+    },
+    "requires_network": {
+      "type": "boolean"
+    },
+    "safe_for_dry_run": {
+      "type": "boolean"
+    },
+    "schema": {
+      "const": 1
+    },
+    "title": {
+      "type": "string"
+    },
+    "type": {
+      "enum": [
+        "web",
+        "api",
+        "cli",
+        "docs",
+        "unknown"
+      ]
+    },
+    "url": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "id",
+    "title",
+    "command",
+    "url",
+    "type",
+    "confidence",
+    "evidence",
+    "requires_dependencies",
+    "requires_network",
+    "safe_for_dry_run",
+    "notes",
+    "blocked_reason"
+  ],
+  "type": "object"
+}

@@ -1,0 +1,21 @@
+id: ai-usage-token-dashboard
+title: AI usage token dashboard shell
+category: ai
+summary: AI usage token dashboard shell
+source_rules:
+  - required_token_usage_tracking
+source_baselines:
+  - ai
+requires_adapter: true
+supported_adapters:
+  - react-vite
+  - nextjs-app-router
+  - nextjs-pages-router
+implementation_kind: mixed
+runtime_claim_level: shell
+risk_level: low
+not_in_scope:
+  - database migrations
+  - auth/security behavior changes
+  - dependency installation
+  - provider calls

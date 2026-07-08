@@ -1,0 +1,12 @@
+-- Template: token usage ledger. Adapt names/types to the target stack.
+create table ai_token_usage (
+  id text primary key,
+  user_id text,
+  team_id text,
+  provider text not null,
+  model text not null,
+  input_tokens integer not null,
+  output_tokens integer not null,
+  estimated_cost decimal(12, 6),
+  created_at timestamp not null
+);

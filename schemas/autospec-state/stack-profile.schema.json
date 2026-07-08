@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Autospec Stack Profile",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "primary",
+    "profiles"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "primary": {
+      "type": "object",
+      "required": [
+        "id",
+        "confidence",
+        "evidence"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "supported_recipes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unsupported_recipes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "profiles": {
+      "type": "array"
+    }
+  }
+}

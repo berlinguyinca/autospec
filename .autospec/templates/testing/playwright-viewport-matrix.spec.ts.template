@@ -1,0 +1,15 @@
+// Template: cover 320x640, 375x812, 768x1024, 1024x768, 1440x900, 1920x1080.
+test.describe('viewport matrix', () => {
+  for (const viewport of [
+    { width: 320, height: 640 },
+    { width: 375, height: 812 },
+    { width: 768, height: 1024 },
+    { width: 1024, height: 768 },
+    { width: 1440, height: 900 },
+    { width: 1920, height: 1080 },
+  ]) {
+    test(`${viewport.width}x${viewport.height}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+    });
+  }
+});

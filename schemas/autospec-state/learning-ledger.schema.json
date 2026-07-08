@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "entries": {
+      "items": {
+        "additionalProperties": true,
+        "required": [
+          "schema",
+          "id",
+          "source",
+          "summary",
+          "category",
+          "lesson_type",
+          "frequency",
+          "status"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema": {
+      "const": 1
+    }
+  },
+  "required": [
+    "schema",
+    "entries"
+  ],
+  "type": "object"
+}

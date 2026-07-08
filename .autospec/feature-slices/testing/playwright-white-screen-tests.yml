@@ -1,0 +1,21 @@
+id: playwright-white-screen-tests
+title: Playwright white-screen tests
+category: testing
+summary: Playwright white-screen tests
+source_rules:
+  - required_playwright_white_screen_repro
+source_baselines:
+  - testing
+requires_adapter: true
+supported_adapters:
+  - react-vite
+  - nextjs-app-router
+  - nextjs-pages-router
+implementation_kind: test
+runtime_claim_level: partial
+risk_level: low
+not_in_scope:
+  - database migrations
+  - auth/security behavior changes
+  - dependency installation
+  - provider calls

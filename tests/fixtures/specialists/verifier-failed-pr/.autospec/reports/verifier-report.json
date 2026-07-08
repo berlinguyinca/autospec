@@ -1,0 +1,11 @@
+{
+  "dimensions": [
+    {
+      "dimension": "test_evidence",
+      "status": "fail",
+      "summary": "Missing focused test"
+    }
+  ],
+  "schema": 1,
+  "verdict": "needs_changes"
+}
