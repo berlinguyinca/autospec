@@ -18,9 +18,10 @@ This skill is a **conductor**, not a new engine. It reuses without reimplementin
 
 **Never-idle scope:** Tier 0 (control channel), Tier 1 (backlog → `main`), Tier 1.5
 (open-issue promotion), Tier 2 (local discovery), Tier 3 (architecture/test-coverage
-improvement), and Tier 4 (internet/operator-polish discovery) are active by default.
-The conductor parks only when every tier is dry, a stop/pause control signal is set,
-or the usage/spend governor trips.
+improvement), Tier 4 (internet/operator-polish discovery), and the Phase-4 quality/
+surface/RAG floors are active by default. A dry queue never causes convergence-stop;
+below the value floor the conductor idles on a re-scan heartbeat. It parks only when
+a stop/pause control signal or usage/spend governor trips.
 
 Manage your own context — never exceed 60%. Delegate to subagents whenever your
 harness supports it; do not run the waterfall or issue drain directly in the main
@@ -104,7 +105,7 @@ This workflow assumes six capabilities. Map each one to your harness's actual to
 | Read-only codebase research | `Agent` (subagent_type=Explore)      | `task` agent in read-only mode           | `apply_patch` read-only / shell `grep`   | Do the search in-thread with `rg`/`grep`           |
 | Foreground delegation       | `Agent` (subagent_type=general-purpose) | nested `task` agent, await output     | spawn nested CLI session                 | Do the work in-thread (more context cost)          |
 | Background delegation       | `Agent` with `run_in_background: true` | detached `task` agent                  | nohup'd CLI session writing to a logfile | Run the monitor in a separate terminal/tmux pane   |
-| Ask the user a question     | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn     |
+| Ask the user a question     | **Forbidden in conductor path**       | **forbidden**                            | **forbidden**                            | Out-of-band `autospec:*` labels / priorities file only |
 | Self-paced future wakeup    | `ScheduleWakeup` inside a `/loop`    | a recurring `task` or local `cron`       | local `cron`/`launchd` calling the CLI   | The user runs a status-update prompt manually      |
 | Subagent model tier         | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: `gpt-5.1-codex-spark` + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; retry the same subagent UP on unavailability |
 <!-- autospec-block:harness-adapter-core -->
@@ -131,6 +132,18 @@ Detect your harness by checking available tools before any pipeline step runs:
 
 Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B" reference below resolves to these harness-specific values.
 
+## Phase-4 never-idle / never-ask reconciliation
+
+`docs/specs/2026-07-06-autospec-autonomous-platform-design.md` is the current source of record for the autonomous conductor. It supersedes the Phase-1/2/3 dry-cycle park, blocking notify, and startup `AskUserQuestion` semantics while extending the rest of the shipped platform. Apply these reconciliations in every implementation path:
+
+- **R1 — dry backlog is value-floor idle, not converge-stop.** `AUTOSPEC_AUTO_DRY_CYCLES` is observability only. A dry Tier 1 descends through Tier 1.5, Tier 2, Tier 3, Tier 4, and the always-available quality/surface/RAG floors. If the best measured candidate is below `AUTOSPEC_VALUE_FLOOR`, enter `idle-rescan` and re-arm `_conductor_arm_resume()` for `AUTOSPEC_RESCAN_INTERVAL`; do not park for lack of work.
+- **R2 — blocking notify is async quarantine-and-continue.** Worktree, gate, main-health, secaudit, blast-radius, or per-issue failure fences emit `code_health:*`, label/file `autospec:needs-human` where appropriate, and continue to the next candidate or sandbox-only tier. Notifications are informational and non-modal.
+- **R3 — no startup or proceed prompt.** The conductor must not emit `AskUserQuestion` or wait on operator input for priorities, planning, decomposition, prioritization, approvals, or proceed decisions. It infers priorities from `autonomous-priorities.md`, operator persona, and Tier-0 control labels.
+- **R4 — kill-switch/resource park remains authoritative.** Spend ledger, usage governor, `autospec:pause`, and `autospec:stop` may park/exit at cycle boundaries; never-idle does not override resource or operator-control limits.
+- **R5 — convergence-stop and resource-park are distinct.** Convergence-stop (no work left) is forbidden. Resource-park (quota/spend/operator control) is allowed and must name the resource/control reason.
+
+Every tier must emit a measured before/after or ranking signal. No target-repo-specific heuristic may be hardcoded; capability detection and `.autospec/autonomous.yml` decide which quality, surface, and RAG tiers run.
+
 ## Phase-1 waterfall contract
 
 **Implementation:** the never-idle loop body is `autospec_conductor_run()` defined in
@@ -140,10 +153,11 @@ then `autonomous-waterfall.sh` (tier selection), then Tier-specific work. Tier-1
 drains run `autonomous-premerge-gate.sh` (must emit `merge-ok` before any drain)
 before invoking `autospec-run`; promotion/discovery tiers file or classify work back
 into `auto-implement` so the next cycle returns to Tier 1. The loop then calls
-`autonomous-spend-ledger.sh` (park on cap), `autonomous-resilience.sh`
+`autonomous-spend-ledger.sh` (resource-park on cap), `autonomous-resilience.sh`
 (state/heartbeat/lock/main-health), and finally the once-per-UTC-day digest stub.
-On park, `_conductor_arm_resume()` writes resume context and arms a
-ScheduleWakeup/cron wake via `autospec-usage-limit.sh`.
+On resource-park or value-floor idle, `_conductor_arm_resume()` writes resume context
+and arms a ScheduleWakeup/cron wake via `autospec-usage-limit.sh` or
+`AUTOSPEC_RESCAN_INTERVAL`, with the state named as resource-park vs idle-rescan.
 
 The conductor walks tiers in priority order each cycle:
 
@@ -155,7 +169,7 @@ At every **cycle boundary** (never mid-issue), read reserved GitHub labels via
 | Label                  | Command                                                              |
 |------------------------|----------------------------------------------------------------------|
 | `autospec:stop`        | Write `~/.autospec/stop.flag`; finish the current issue; exit cleanly. |
-| `autospec:pause`       | Park the loop; notify operator; wait for resume or `autospec:stop`. |
+| `autospec:pause`       | Resource/control-park the loop; notify asynchronously; wait for resume or `autospec:stop`. |
 | `autospec:priority`    | Re-sort the Tier-1 backlog by the label body before the next drain. |
 | `autospec:steer`       | Parse the label body as a directive; update the active waterfall intent; remove the label. |
 
@@ -167,13 +181,13 @@ Drain `auto-implement` issues from the repository backlog to `main` via `/autosp
 This is the primary merge loop body.
 
 **Single cycle:**
-1. **Worktree assert** — `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert` MUST exit 0. Non-zero → emit `code_health` identifier, park, notify.
+1. **Worktree assert** — `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert` MUST exit 0. Non-zero → emit `code_health` identifier, quarantine that lane, notify asynchronously, and continue to the next safe candidate.
 2. **Tier-0 poll** — read control channel before any issue is picked.
-3. **Pick next issue** — select the highest-priority `auto-implement` issue not already in flight (respecting `autospec:priority` directives). If none → `dry_cycle++`; once the dry threshold is reached, cascade to Tier 1.5 instead of parking.
-4. **Pre-merge gate** — run `autospec-autonomy-gate.sh` (Phase-1: `autospec-qa` only; `autospec-secaudit` is Phase-2 prerequisite and MUST NOT be referenced until built). If missing → emit `code_health:autonomous_gate_missing`; halt merges; notify.
+3. **Pick next issue** — select the highest-priority/value `auto-implement` issue not already in flight (respecting `autospec:priority` directives). If none, record dry observability and cascade to Tier 1.5; never park or ask because the backlog is empty.
+4. **Pre-merge gate** — run `autospec-autonomy-gate.sh` (qa+secaudit when available). If missing or fenced → emit `code_health:autonomous_gate_missing`, quarantine/file `autospec:needs-human`, halt only that merge lane, and continue.
 5. **Drain** — invoke `/autospec-run` for the selected issue. Inherits all existing `autospec-run` guards: worktree isolation, claim-guard, admin-merge authority, lock-step validation.
-6. **Main-health check** — after each merge, poll `gh api repos/{owner}/{repo}/commits/main/status`. Green → continue. Pending → wait one poll interval. Red → halt Tier-1 merges; file `autospec:needs-human`; notify.
-7. **Spend ledger** — tally tokens/issues in `~/.autospec/autonomous-spend.json` (path-scoped). At `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS` (or issue count) → **park and notify** (cumulative cost kill-switch).
+6. **Main-health check** — after each merge, poll `gh api repos/{owner}/{repo}/commits/main/status`. Green → continue. Pending → wait one poll interval. Red → halt Tier-1 main merges, file `autospec:needs-human`, notify asynchronously, and continue only safe non-main/sandbox candidates until main is green.
+7. **Spend ledger** — tally tokens/issues in `~/.autospec/autonomous-spend.json` (path-scoped). At `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS` (or issue count) → **resource-park and notify** (cumulative cost kill-switch).
 8. **Usage-limit recovery** — inherits `autospec-usage-limit.sh`. When the harness reports a deterministic quota pause, arm the supervisor with the resume command and exit. Supervisor relaunches after reset.
 9. **Daily digest** — once per UTC day, write `.autospec/autonomous-digest.md` and open/update a pinned issue with the summary.
 10. **Loop** — return to step 2.
@@ -191,8 +205,9 @@ into the pipeline before attempting discovery:
   `auto-implement` queue.
 
 Promotion-sourced work still flows through Tier 1 and inherits autonomy, premerge,
-worktree, claim, validation, and merge gates. If promotion is dry for the configured
-dry threshold, the conductor continues to Tier 2.
+worktree, claim, validation, and merge gates. If promotion is dry, the conductor
+records the dry signal and continues to Tier 2; the dry count never triggers a
+convergence-stop.
 
 ### Tier 2 — local codebase discovery
 
@@ -214,19 +229,23 @@ architecture/test-coverage/technical-debt sources. Filed work returns to Tier 1.
 When Tier 3 is dry, run `/autospec-explore --once --research-sources internet` plus
 operator-polish/persona lenses as available. Filed work returns to Tier 1.
 
+### Quality / surface / RAG floors and value-floor idle
+
+After Tier 4, evaluate the Phase-4 quality floor (architecture fitness, coverage/mutation, debt/dead code/dependency CVE, performance, security), surface and knowledge tiers (UX/UI, accessibility, standards, docs freshness), and RAG eval-tuning tier when capability detection says the repo supports them. Each candidate must carry a measured signal and a value score. If every enabled tier is dry or the best score is below `AUTOSPEC_VALUE_FLOOR`, enter `idle-rescan`: write resume context, publish an informational notification/digest entry, and re-arm `_conductor_arm_resume()` for `AUTOSPEC_RESCAN_INTERVAL` (default 30m). This is not a park and not a terminal convergence stop.
+
 ### Park conditions
 
-The conductor parks only when one of these named conditions fires:
+The conductor parks only when one of these named resource/control conditions fires:
 
 - `control:pause` / `control:graceful-stop` from Tier 0;
 - `usage-governor:park` or `spend-ledger:park`;
-- `waterfall:park:all tiers dry` after Tier 1 backlog, Tier 1.5 promotion, Tier 2
-  local discovery, Tier 3 architecture/coverage work, and Tier 4 discovery are all dry;
-- fail-closed health conditions such as missing premerge gate or red `main`.
+- explicit kill-switch/resource exhaustion from the harness or operator control channel.
+
+Fail-closed health conditions such as missing premerge gate, red `main`, fenced blast radius, or unfixable secaudit quarantine the affected work and continue to the next safe candidate; they do not prompt or globally park unless they also trip a resource/control condition.
 
 Set `AUTOSPEC_DISABLE_DISCOVERY_TIERS=1` only as an emergency fail-closed override;
-with that override, the conductor parks at the Tier-1 dry threshold and names the
-disable condition in the park reason.
+with that override, the conductor skips discovery/floor tiers and names the disable
+condition in the digest, but still distinguishes idle-rescan from resource-park.
 
 ## Usage observability (F6a spike finding)
 
@@ -321,14 +340,14 @@ Trio edits use `derive-trio.sh --in-place` + `gen-skill-goldens.sh`; never hand-
 
 ## Error handling
 
-- **Worktree assert fails** → emit `code_health` identifier; park; notify operator.
-- **Gate script missing** → `code_health:autonomous_gate_missing`; halt merges; notify.
+- **Worktree assert fails** → emit `code_health` identifier; quarantine that lane; notify asynchronously; continue.
+- **Gate script missing** → `code_health:autonomous_gate_missing`; quarantine/file `autospec:needs-human`; halt only affected merges; continue.
 - **`/autospec-run` fails** → per-issue failure cap; after cap → `autospec:needs-human`; no merge.
 - **Harness wait handle disappears after a PR is green** → reconcile via PR/issue
   state; merge the green in-progress PR and continue.
-- **Main CI red** → halt Tier-1 merges; file `autospec:needs-human`; notify.
-- **Spend ceiling reached** → park; write `~/.autospec/autonomous-stop.flag`; notify.
-- **All waterfall tiers dry** → park with an `all tiers dry` reason naming exhausted tiers; notify.
+- **Main CI red** → halt Tier-1 main merges; file `autospec:needs-human`; notify asynchronously; continue safe sandbox/non-main candidates.
+- **Spend ceiling reached** → resource-park; write `~/.autospec/autonomous-stop.flag`; notify.
+- **All enabled tiers dry or below value floor** → idle-rescan with exhausted tiers and best score named; notify asynchronously; re-arm resume heartbeat.
 - **Control-channel read error** → log `code_health:autonomous_control_channel_error`; treat as no-op for that cycle; continue.
 - **Single-instance lock conflict** — reuses `autospec-resume` staleness thresholds (300s/10800s). A live lock blocks a second conductor. A stale lock (heartbeat older than threshold) is reclaimable by the fresh process.
 

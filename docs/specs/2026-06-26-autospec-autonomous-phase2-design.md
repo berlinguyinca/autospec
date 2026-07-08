@@ -8,10 +8,14 @@
 (lock/run-state/main-health/quarantine), `autospec-qa` pre-merge gate, cumulative
 spend kill-switch. Phase 5.5 audit (#1380) confirmed the safety invariants hold.
 
+## Phase-4 supersession note (2026-07-06)
+
+`docs/specs/2026-07-06-autospec-autonomous-platform-design.md` supersedes Phase-2 dry-cycle park semantics. Discovery tiers are part of the default never-idle cascade; `AUTOSPEC_DISABLE_DISCOVERY_TIERS=1` is an emergency kill-switch, not the normal opt-in. Dry discovery results feed the value-ranked waterfall and eventually idle-rescan below `AUTOSPEC_VALUE_FLOOR`; they do not converge-stop. Blocking notify failures quarantine asynchronously and continue.
+
 ## Goal
 
 Enable the conductor's **discovery tiers** so that when the backlog is dry it
-generates its own high-value work — Tier 2 (local spec-vs-code discovery) and
+continues the default never-idle cascade and generates its own high-value work — Tier 2 (local spec-vs-code discovery) and
 Tier 3 (competitor reverse-engineering) — drains it onto an isolated **sandbox
 branch** for batched operator review (never `main`), adds **security** to the
 pre-merge gate, learns from an **outcome ledger**, and parks pre-emptively at a
@@ -57,11 +61,11 @@ bats. This is the single seam that prevents the two-perpetual-loops hazard.
 ### F2 — Tier 2/3 enablement in the conductor
 
 `scripts/autonomous-waterfall.sh`: replace the Phase-1 "not-yet-enabled" stubs for
-Tiers 2-3 with real selection. After Tier 1 is dry for `AUTOSPEC_AUTO_DRY_CYCLES`
-(default 2) consecutive cycles → **Tier 2** (`explore --once` over local sources:
+Tiers 2-3 with real selection. After Tier 1 is dry, record the dry signal and rank
+**Tier 2** (`explore --once` over local sources:
 spec-vs-code, codebase-signals, source-analysis, dependency-health, prior-reports).
-Tier 2 dry for the same threshold → **Tier 3** (`explore --once --research-sources
-internet`). A higher tier refilling (backlog issue appears) floats selection back
+Tier 2 dry results feed **Tier 3** (`explore --once --research-sources
+internet`) and then the Phase-4 quality/surface/RAG floors. A higher tier refilling (backlog issue appears) floats selection back
 up next cycle. Wire into `autospec_conductor_run()`. `+` bats for the escalation
 state machine.
 
@@ -143,8 +147,9 @@ External boundaries (gh, explore, secaudit, notifier, usage API) mocked as
 subprocesses. No gitignored fixtures; bats `[ -f ]` writes a real temp file first;
 `set -eu` + if/then/fi; jq capture()/== not test().
 
-- `tests/autonomous/test_waterfall.bats` (extend) — Tier 1 dry×2 → Tier 2; Tier 2
-  dry×2 → Tier 3; refill floats back up.
+- `tests/autonomous/test_waterfall.bats` (extend) — Tier 1 dry records observability
+  then ranks Tier 2; Tier 2 dry feeds Tier 3/floor tiers; below value floor →
+  idle-rescan; refill floats back up.
 - `tests/explore/test_explore_once.bats` — `--once` runs one pass, emits the yield
   JSON, never enters the loop, never auto-drains.
 - `tests/autonomous/test_sandbox_routing.bats` — discovery PRs target sandbox;

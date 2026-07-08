@@ -3078,6 +3078,7 @@ main() {
     check_docs_amendment_presence
     check_autospec_autonomous_contract
     check_autospec_autonomous_skill_contract
+    check_autospec_autonomous_phase4_design_contract
     check_conductor_wiring_contract
     check_autonomy_guardrails_foundation
     check_autospec_refine_contract
@@ -3119,6 +3120,7 @@ main() {
     check_autospec_fab_contract
     check_autospec_autonomous_contract
     check_autospec_autonomous_skill_contract
+    check_autospec_autonomous_phase4_design_contract
     check_conductor_wiring_contract
     check_autonomy_guardrails_foundation
     check_autonomous_phase2_suite
@@ -4343,6 +4345,63 @@ check_autospec_autonomous_skill_contract() {
             || fail "$f: missing Tier 4 internet/operator discovery in never-idle waterfall (issue #1529)"
         grep -q 'parks only when' "$f" \
             || fail "$f: missing named park-only conditions for never-idle waterfall (issue #1529)"
+    done
+}
+
+# Phase-4 autonomous platform source-of-truth contract (issue #1556): the
+# never-idle/never-ask semantics must stay reconciled across the design spec,
+# prior Phase 1-3 docs, and the multi-harness skill trio.
+check_autospec_autonomous_phase4_design_contract() {
+    info "autospec-autonomous Phase-4 platform design reconciliation (issue #1556)"
+    local spec="docs/specs/2026-07-06-autospec-autonomous-platform-design.md"
+    [ -f "$spec" ] || fail "$spec: missing Phase-4 autonomous platform design (issue #1556)"
+    grep -q '^# /autospec-autonomous — Never-Idle, Never-Ask Autonomous Software Architecture Platform (design spec)' "$spec" \
+        || fail "$spec: missing canonical Phase-4 design title (issue #1556)"
+    for phrase in \
+        'Never converge-stop' \
+        'Never ask' \
+        'Fences are async quarantine' \
+        'Every improvement carries a measurable before/after signal' \
+        'AUTOSPEC_VALUE_FLOOR' \
+        'capability detection' \
+        'No target-repo specifics'; do
+        grep -q "$phrase" "$spec" \
+            || fail "$spec: missing Phase-4 phrase '$phrase' (issue #1556)"
+    done
+
+    for doc in \
+        docs/specs/2026-06-25-autospec-autonomous-design.md \
+        docs/specs/2026-06-26-autospec-autonomous-phase2-design.md \
+        docs/specs/2026-06-26-autospec-autonomous-phase3-design.md; do
+        grep -q 'Phase-4 supersession note (2026-07-06)' "$doc" \
+            || fail "$doc: missing Phase-4 supersession note (issue #1556)"
+        grep -q '2026-07-06-autospec-autonomous-platform-design.md' "$doc" \
+            || fail "$doc: missing Phase-4 source-of-record link (issue #1556)"
+    done
+
+    for f in \
+        skills/autospec-autonomous/SKILL.md \
+        skills/autospec-autonomous/codex/prompt.md \
+        skills/autospec-autonomous/opencode/agent.md; do
+        grep -q 'Phase-4 never-idle / never-ask reconciliation' "$f" \
+            || fail "$f: missing Phase-4 reconciliation section (issue #1556)"
+        grep -q 'AUTOSPEC_VALUE_FLOOR' "$f" \
+            || fail "$f: missing value-floor idle contract (issue #1556)"
+        grep -q 'idle-rescan' "$f" \
+            || fail "$f: missing idle-rescan state (issue #1556)"
+        grep -q 'async quarantine-and-continue' "$f" \
+            || fail "$f: missing async quarantine contract (issue #1556)"
+        grep -q 'must not emit `AskUserQuestion`' "$f" \
+            || fail "$f: missing no-AskUserQuestion conductor contract (issue #1556)"
+        grep -q 'Every tier must emit a measured before/after or ranking signal' "$f" \
+            || fail "$f: missing measured-signal contract (issue #1556)"
+        grep -q 'No target-repo-specific heuristic may be hardcoded' "$f" \
+            || fail "$f: missing environment-agnostic contract (issue #1556)"
+        grep -q 'resource-park and notify' "$f" \
+            || fail "$f: missing resource-park distinction (issue #1556)"
+        if grep -q 'waterfall:park:all tiers dry' "$f"; then
+            fail "$f: stale all-tiers-dry park remains (issue #1556)"
+        fi
     done
 }
 

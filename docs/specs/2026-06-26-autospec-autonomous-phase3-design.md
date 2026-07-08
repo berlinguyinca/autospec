@@ -13,6 +13,10 @@ critic). Both flagged the self-brainstorm panel as the riskiest (two P0s) and
 lowest-ROI piece; per operator decision (2026-06-26) the **panel is deferred** to a
 gated follow-up (see "Deferred"). All other review findings are folded in below.
 
+## Phase-4 supersession note (2026-07-06)
+
+`docs/specs/2026-07-06-autospec-autonomous-platform-design.md` supersedes the Phase-3 startup `AskUserQuestion` gate. Persona and priority intake remain inputs, but the conductor must infer or read them from persisted files and Tier-0 labels without blocking on operator input.
+
 ## Goal
 
 Make the conductor decide *what to build next the way the operator would* by
@@ -146,8 +150,8 @@ process-sub — `feedback_bash32_process_sub_test_file`).
 
 Two parts, one child:
 1. **Intake.** `--priorities "a; b; c"` flag (and, first run with none supplied,
-   **one** `AskUserQuestion` startup gate — the only allowed startup question — then
-   proceed). Persists to `~/.autospec/autonomous-priorities.md` (operator-editable
+   no `AskUserQuestion`; infer from persisted priorities, operator persona, and
+   Tier-0 control labels, then proceed). Persists to `~/.autospec/autonomous-priorities.md` (operator-editable
    mid-run; appendable via an `autospec:steer` issue). **Wires the control payload
    (review P1 #4):** the conductor's control-channel handling currently discards
    `DIRECTIVE:`/`PRIORITY_ISSUE:` lines after `printf`; F4 captures them into the
