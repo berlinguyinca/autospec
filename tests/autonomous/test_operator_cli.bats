@@ -277,3 +277,60 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(cat "$HOME/stop.args")" = "--immediate" ]
 }
+
+
+@test "operator cli: repo B start ignores repo A live conductor metadata" {
+  sleep 30 &
+  repo_a_pid="$!"
+  trap 'kill "$repo_a_pid" 2>/dev/null || true' RETURN
+  mkdir -p "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec"
+  printf '%s\n' "$repo_a_pid" > "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/conductor.pid"
+  printf '%s\n' "$TEST_TMP/repo-a.log" > "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/conductor.logpath"
+
+  mkdir -p "$TEST_TMP/bin"
+  cat > "$TEST_TMP/bin/python3" <<'PY_FAKE'
+#!/usr/bin/env bash
+printf '424242\n'
+PY_FAKE
+  chmod +x "$TEST_TMP/bin/python3"
+
+  PATH="$TEST_TMP/bin:$PATH" CONDUCTOR_REPO="metabolomics-us/go-modules" run bash "$CLI" start --repo metabolomics-us/go-modules --repo-dir "$REPO_ROOT"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"autospec-autonomous started"* ]]
+  [ -f "$HOME/.autospec/autonomous-operator/metabolomics-us_go-modules/conductor.pid" ]
+  [ "$(cat "$HOME/.autospec/autonomous-operator/metabolomics-us_go-modules/conductor.pid")" = "424242" ]
+}
+
+@test "operator cli: status logs and stop use repo-scoped conductor paths" {
+  mkdir -p "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec" \
+    "$HOME/.autospec/autonomous-operator/metabolomics-us_go-modules" \
+    "$TEST_TMP/logs" "$TEST_TMP/scripts"
+  printf '111111\n' > "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/conductor.pid"
+  printf '%s\n' "$TEST_TMP/logs/autospec.log" > "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/conductor.logpath"
+  printf 'autospec only\n' > "$TEST_TMP/logs/autospec.log"
+  printf '222222\n' > "$HOME/.autospec/autonomous-operator/metabolomics-us_go-modules/conductor.pid"
+  printf '%s\n' "$TEST_TMP/logs/go-modules.log" > "$HOME/.autospec/autonomous-operator/metabolomics-us_go-modules/conductor.logpath"
+  printf 'go modules only\n' > "$TEST_TMP/logs/go-modules.log"
+  cat > "$TEST_TMP/scripts/autospec-stop.sh" <<'EOF_STOP'
+#!/usr/bin/env bash
+printf '%s\n' "${AUTOSPEC_STOP_FLAG_FILE:-}" > "$HOME/stop.flag.path"
+printf '%s\n' "$*" > "$HOME/stop.args"
+EOF_STOP
+  chmod +x "$TEST_TMP/scripts/autospec-stop.sh"
+
+  CONDUCTOR_REPO="metabolomics-us/go-modules" run bash "$CLI" status --json --repo metabolomics-us/go-modules
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'autonomous-operator/metabolomics-us_go-modules/conductor.pid'* ]]
+  [[ "$output" == *'go-modules.log'* ]]
+  [[ "$output" != *'autospec.log'* ]]
+
+  CONDUCTOR_REPO="metabolomics-us/go-modules" run bash "$CLI" logs --repo metabolomics-us/go-modules --lines 1
+  [ "$status" -eq 0 ]
+  [ "$output" = "go modules only" ]
+
+  AUTOSPEC_SCRIPTS_DIR="$TEST_TMP/scripts" CONDUCTOR_REPO="metabolomics-us/go-modules" run bash "$CLI" stop --repo metabolomics-us/go-modules --immediate
+  [ "$status" -eq 0 ]
+  [ "$(cat "$HOME/stop.args")" = "--immediate" ]
+  [ "$(cat "$HOME/stop.flag.path")" = "$HOME/.autospec/autonomous-operator/metabolomics-us_go-modules/stop.flag" ]
+}

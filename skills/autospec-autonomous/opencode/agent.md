@@ -55,7 +55,7 @@ If the feature-request argument matches the regex `^\s*stop(\s+--\w+)*\s*$` (cas
    ```bash
    autospec-autonomous stop "$@"
    ```
-2. Honor `--graceful` (write `~/.autospec/stop.flag` and `~/.autospec/autonomous-stop.flag`; running iteration finishes) and `--immediate` (also write `~/.autospec/refine-loop-stop.flag`; abort at next iteration boundary).
+2. Honor `--graceful` and `--immediate` by writing the target project's scoped stop sentinel under `~/.autospec/autonomous-operator/<repo-scope>/stop.flag`; running iterations finish at the next conductor boundary without signaling another repository's conductor.
 3. Print the stop summary and exit. Do not enter the autonomous pipeline.
 
 ## Operator commands and monitoring
@@ -77,9 +77,13 @@ or after `. "$HOME/.autospec/env"`:
 | `autospec-autonomous-restart` | Stop through the sentinel path, then launch a new conductor. |
 
 All wrappers delegate to `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh`.
-The launcher records PID and log metadata under
-`~/.autospec/autonomous-operator/`, keeps logs under `~/.autospec/logs/`, and
-uses `autospec-autonomous-run-drain.sh` as the safe Tier-1 drain command. The
+The launcher records PID, stop, and log metadata under
+`~/.autospec/autonomous-operator/<repo-scope>/`, keeps logs under
+`~/.autospec/logs/<repo-scope>/`, and uses `autospec-autonomous-run-drain.sh` as
+the safe Tier-1 drain command. `<repo-scope>` is derived from `--repo OWNER/REPO`,
+from the target checkout's GitHub remote, or from the repo directory path as a
+fallback, so one repository's live conductor does not block or receive stop/log
+commands for another repository. The
 drain command invokes:
 
 ```bash
@@ -168,7 +172,7 @@ At every **cycle boundary** (never mid-issue), read reserved GitHub labels via
 
 | Label                  | Command                                                              |
 |------------------------|----------------------------------------------------------------------|
-| `autospec:stop`        | Write `~/.autospec/stop.flag`; finish the current issue; exit cleanly. |
+| `autospec:stop`        | Write the target project's scoped stop flag; finish the current issue; exit cleanly. |
 | `autospec:pause`       | Resource/control-park the loop; notify asynchronously; wait for resume or `autospec:stop`. |
 | `autospec:priority`    | Re-sort the Tier-1 backlog by the label body before the next drain. |
 | `autospec:steer`       | Parse the label body as a directive; update the active waterfall intent; remove the label. |

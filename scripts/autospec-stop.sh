@@ -17,8 +17,8 @@
 
 set -eu
 
-FLAG_DIR="${HOME}/.autospec"
-FLAG_FILE="${FLAG_DIR}/stop.flag"
+FLAG_FILE="${AUTOSPEC_STOP_FLAG_FILE:-${HOME}/.autospec/stop.flag}"
+FLAG_DIR="$(dirname "$FLAG_FILE")"
 
 # ---------- helpers ----------------------------------------------------------
 
@@ -30,7 +30,7 @@ usage() {
     cat <<EOF
 Usage: $0 [--graceful|--immediate|--status|--resume|--help]
 
-Manage the autospec stop sentinel flag (~/.autospec/stop.flag).
+Manage the autospec stop sentinel flag (${AUTOSPEC_STOP_FLAG_FILE:-~/.autospec/stop.flag}).
 
 Flags:
   --graceful   Write sentinel mode=graceful; monitor exits after current issue.
