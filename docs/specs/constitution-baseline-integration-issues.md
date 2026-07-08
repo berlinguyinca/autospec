@@ -1,287 +1,469 @@
 # Constitution and Baseline Integration Follow-up Issues
 
-Source spec:
-`docs/specs/2026-06-27-constitution-baseline-integration.md`
+Source spec: `docs/specs/2026-06-27-constitution-baseline-integration.md`
 
-These issues intentionally decompose implementation after the spec-first PR. Each
-issue should stay small, ship with validation, and avoid enabling full
-Constitution enforcement before the loader, lockfile, and composition contracts
-exist. They must preserve the current autonomous platform contract: blocking
-source failures produce deterministic validation evidence, and autonomous runs
-quarantine the affected work item instead of prompting or blocking unrelated queue
-items.
+These issue drafts decompose implementation after the spec-first PR. Each draft is
+small, validation-backed, and preserves the current autonomous platform contract:
+blocking source failures produce deterministic validation evidence, and
+autonomous runs quarantine the affected work item instead of prompting or blocking
+unrelated queue items.
 
-## 1. feat: add constitution and baseline config schema
+## Issue 1: feat: add constitution and baseline config schema
 
 ## Goal
 
-Add schema validation for `.autospec/autospec.yml` `constitution` and `baselines` blocks.
+Add `.autospec/autospec.yml` schema validation for `constitution` and `baselines`.
+
+## Files to read first
+
+- `docs/specs/2026-06-27-constitution-baseline-integration.md`
+- `.autospec/autospec.yml`
+- `scripts/validate.sh`
+
+## Files touched
+
+- `schemas/autospec-state/constitution-baseline.schema.json`
+- `scripts/validate.sh`
+- `tests/unit/test_constitution_config_schema.bats`
 
 ## Implementation outline
 
-- `schemas/` or the existing config-schema location: add fields from the source
-  spec.
-- `scripts/validate.sh`: include the new schema check if config schema checks are
-  already gated there.
-- `tests/unit/`: add valid and invalid config fixtures.
+- Add schema fields for `constitution.source` and `baselines.sources`.
+- Reject duplicate `baselines.sources[].id` values.
+- Wire the schema check into `scripts/validate.sh`.
+
+## Tests required
+
+- `tests/unit/test_constitution_config_schema.bats`
 
 ## Acceptance criteria
 
-- [ ] `.autospec/autospec.yml` accepts `constitution.source.type` values `local` and `github`.
-- [ ] `.autospec/autospec.yml` rejects duplicate `baselines.sources[].id` values.
-- [ ] GitHub sources require `repo` and validate a 40-character `commit` when locked.
-- [ ] `bash scripts/validate.sh --changed=origin/main` passes.
+- [ ] `constitution.source.type` accepts `local` and `github` in `*.yml` fixtures.
+- [ ] Duplicate `baselines.sources[].id` values fail `test_constitution_config_schema.bats`.
+- [ ] GitHub sources validate a 40-character `commit` when locked.
+
+## Dependencies
+
+none
+
+## Verification
 
 ### Primary smoke test (inner loop)
 
 ```bash
-bash scripts/validate.sh --changed=origin/main
+bats tests/unit/test_constitution_config_schema.bats
 ```
 
-## 2. feat: add local constitution loader
+## Issue 2: feat: add local constitution loader
 
 ## Goal
 
-Add a local-path Constitution loader that emits normalized Constitution JSON.
+Add a local-path Constitution loader that emits normalized `constitution.json`.
+
+## Files to read first
+
+- `docs/specs/2026-06-27-constitution-baseline-integration.md`
+- `scripts/autospec-constitution-validate.sh`
+- `tests/unit/test_constitution_validation.bats`
+
+## Files touched
+
+- `scripts/autospec-constitution-validate.sh`
+- `scripts/autospec-constitution-rules.py`
+- `tests/unit/test_constitution_validation.bats`
 
 ## Implementation outline
 
-- Add a loader script or library entry point for `constitution.source.type: local`.
-- Validate source root, manifest kind, schema version, profile name, and required
-  files.
+- Load `constitution.source.type: local` from repo-contained relative paths.
 - Reject relative paths that traverse outside the repository root.
-- Allow absolute local paths only as an explicit workstation-local opt-in.
-- Add fixtures under `tests/fixtures/constitution/`.
+- Allow absolute local paths only as explicit workstation-local input.
+
+## Tests required
+
+- `tests/unit/test_constitution_validation.bats`
 
 ## Acceptance criteria
 
-- [ ] A local path source loads a `kind: constitution` manifest from `tests/fixtures/constitution`.
-- [ ] Loader rejects a missing manifest with a non-zero exit.
-- [ ] Loader rejects profile inheritance cycles in fixture `cycle`.
-- [ ] `bash scripts/validate.sh --changed=origin/main` passes.
+- [ ] `tests/fixtures/constitution` loads a `kind: constitution` manifest.
+- [ ] `../autospec-constitution` exits non-zero in `test_constitution_validation.bats`.
+- [ ] Profile inheritance cycles in fixture `cycle` exit non-zero.
+
+## Dependencies
+
+Depends on issue #1
+
+## Verification
 
 ### Primary smoke test (inner loop)
 
 ```bash
-bash scripts/validate.sh --changed=origin/main
+bats tests/unit/test_constitution_validation.bats
 ```
 
-## 3. feat: add GitHub constitution loader
+## Issue 3: feat: add GitHub constitution loader
 
 ## Goal
 
-Add a GitHub Constitution loader that resolves versions to pinned commit SHAs.
+Add a GitHub Constitution loader that resolves versions to pinned `commit` SHAs.
+
+## Files to read first
+
+- `docs/specs/2026-06-27-constitution-baseline-integration.md`
+- `scripts/autospec-constitution-validate.sh`
+- `tests/unit/test_policy_sources_v2.bats`
+
+## Files touched
+
+- `scripts/autospec-load-policy-sources.sh`
+- `scripts/autospec-lock-policy-sources.sh`
+- `tests/unit/test_policy_sources_v2.bats`
 
 ## Implementation outline
 
-- Add resolver support for `constitution.source.type: github`.
-- Resolve `version` through `git ls-remote` or GitHub API only in explicit
-  refresh flows.
-- Require locked execution to use `commit`.
-- Cache or stage fetched content without changing engine behavior or writing to
-  companion repositories.
+- Resolve `version` through GitHub only in explicit refresh flows.
+- Refuse normal execution for unlocked GitHub sources.
+- Emit current-repo lockfile diffs without companion-repo writes.
+
+## Tests required
+
+- `tests/unit/test_policy_sources_v2.bats`
 
 ## Acceptance criteria
 
-- [ ] Loader resolves tag `v1.0.0` fixture refs to a 40-character `commit` in refresh mode.
-- [ ] Loader rejects a `version` and `commit` mismatch.
-- [ ] Normal execution refuses an unlocked GitHub Constitution source.
-- [ ] Refresh output is a current-repo lockfile diff, not a companion-repo write.
-- [ ] `bash scripts/validate.sh --changed=origin/main` passes.
+- [ ] Tag `v1.0.0` fixture refs resolve to a 40-character `commit`.
+- [ ] A `version` and `commit` mismatch exits non-zero.
+- [ ] Refresh output writes current-repo lockfile evidence only.
+
+## Dependencies
+
+Depends on issue #1
+
+## Verification
 
 ### Primary smoke test (inner loop)
 
 ```bash
-bash scripts/validate.sh --changed=origin/main
+bats tests/unit/test_policy_sources_v2.bats
 ```
 
-## 4. feat: add baseline pack loader
+## Issue 4: feat: add baseline pack loader
 
 ## Goal
 
-Add a baseline pack loader that emits normalized playbook profile data.
+Add a baseline pack loader that emits normalized `baseline-profiles.json`.
+
+## Files to read first
+
+- `docs/specs/2026-06-27-constitution-baseline-integration.md`
+- `scripts/autospec-baseline-compose.sh`
+- `tests/unit/test_baseline_composition.bats`
+
+## Files touched
+
+- `scripts/autospec-baseline-compose.sh`
+- `scripts/autospec-baseline-gap.sh`
+- `tests/unit/test_baseline_composition.bats`
 
 ## Implementation outline
 
-- Load baseline pack manifests from configured local and GitHub sources.
+- Load local and locked GitHub baseline pack manifests.
 - Resolve profile references as `<source-id>/<profile-id>`.
-- Validate pack schema version and Constitution compatibility declaration.
-- Preserve provenance per loaded field.
+- Keep baseline recommendations subordinate to Constitution law.
+
+## Tests required
+
+- `tests/unit/test_baseline_composition.bats`
 
 ## Acceptance criteria
 
-- [ ] Loader resolves `core/spec-first` from a configured `baselines.sources[].id`.
-- [ ] Loader rejects an unknown profile reference.
-- [ ] Loader distinguishes advisory baseline recommendations from Constitution law.
-- [ ] `bash scripts/validate.sh --changed=origin/main` passes.
+- [ ] `core/spec-first` resolves from configured `baselines.sources[].id`.
+- [ ] Unknown profile reference `core/missing` exits non-zero.
+- [ ] Advisory baseline rules remain separate from Constitution law.
+
+## Dependencies
+
+Depends on issue #2
+
+## Verification
 
 ### Primary smoke test (inner loop)
 
 ```bash
-bash scripts/validate.sh --changed=origin/main
+bats tests/unit/test_baseline_composition.bats
 ```
 
-## 5. feat: add constitution lockfile
+## Issue 5: feat: add constitution lockfile
 
 ## Goal
 
 Add `.autospec/constitution.lock.json` generation and refresh semantics.
 
+## Files to read first
+
+- `docs/specs/2026-06-27-constitution-baseline-integration.md`
+- `scripts/autospec-lock-policy-sources.sh`
+- `tests/unit/test_policy_sources_v2.bats`
+
+## Files touched
+
+- `scripts/autospec-lock-policy-sources.sh`
+- `schemas/autospec-state/constitution-lock.schema.json`
+- `tests/unit/test_policy_sources_v2.bats`
+
 ## Implementation outline
 
-- Add lockfile schema with Constitution, baseline, and composition sections.
-- Implement `--refresh-lock` path for resolving versions to commits.
-- Refuse normal GitHub-source execution without a lockfile commit.
-- Emit reviewable dependency-update evidence for every changed pin.
-- Add fixtures for deterministic lockfile output.
+- Generate deterministic lockfile JSON with Constitution and baseline pins.
+- Report changed pins as dependency-update evidence.
+- Refuse normal GitHub-source execution without locked commits.
+
+## Tests required
+
+- `tests/unit/test_policy_sources_v2.bats`
 
 ## Acceptance criteria
 
 - [ ] `.autospec/constitution.lock.json` records Constitution `repo`, `version`, and `commit`.
-- [ ] `.autospec/constitution.lock.json` records each baseline source `id` and `commit`.
-- [ ] `--refresh-lock` rewrites a changed version pin in one deterministic JSON file.
-- [ ] Changed pins are reported as dependency-update evidence for review.
-- [ ] `bash scripts/validate.sh --changed=origin/main` passes.
+- [ ] Each baseline source records `id` and 40-character `commit`.
+- [ ] `--refresh-lock` rewrites one deterministic JSON file.
+
+## Dependencies
+
+Depends on issue #3
+
+## Verification
 
 ### Primary smoke test (inner loop)
 
 ```bash
-bash scripts/validate.sh --changed=origin/main
+bats tests/unit/test_policy_sources_v2.bats
 ```
 
-## 6. feat: add profile composition resolver
+## Issue 6: feat: add profile composition resolver
 
 ## Goal
 
-Add a resolver that composes Constitution defaults, baseline profiles, local overrides, and runtime flags.
+Add an `effective-profile.json` resolver for law, playbooks, overrides, and flags.
+
+## Files to read first
+
+- `docs/specs/2026-06-27-constitution-baseline-integration.md`
+- `scripts/autospec-baseline-compose.sh`
+- `tests/unit/test_baseline_composition.bats`
+
+## Files touched
+
+- `scripts/autospec-baseline-compose.sh`
+- `schemas/autospec-state/effective-profile.schema.json`
+- `tests/unit/test_baseline_composition.bats`
 
 ## Implementation outline
 
-- Implement the four-layer precedence order from the source spec.
-- Merge lists by stable ID and maps by schema-defined strategy.
+- Apply the four-layer precedence order from the source spec.
 - Reject attempts to weaken non-overrideable Constitution law.
-- Emit `effective-profile.json` plus JSON-pointer provenance.
+- Emit JSON-pointer provenance for winning composed values.
+
+## Tests required
+
+- `tests/unit/test_baseline_composition.bats`
 
 ## Acceptance criteria
 
-- [ ] Resolver output is deterministic JSON for the same fixture input.
+- [ ] Resolver output is deterministic JSON for fixture `composition/basic`.
 - [ ] Constitution-required validation cannot be removed by local override.
-- [ ] Duplicate profile references are idempotent and load once.
-- [ ] `bash scripts/validate.sh --changed=origin/main` passes.
+- [ ] Duplicate profile references load exactly 1 time.
+
+## Dependencies
+
+Depends on issue #4
+
+## Verification
 
 ### Primary smoke test (inner loop)
 
 ```bash
-bash scripts/validate.sh --changed=origin/main
+bats tests/unit/test_baseline_composition.bats
 ```
 
-## 7. feat: add constitution/baseline validation command
+## Issue 7: feat: add constitution validation command
 
 ## Goal
 
-Add a command that validates config, sources, lockfile, and profile composition.
+Add `autospec-constitution-validate.sh` gate for config, sources, lockfile, and composition.
+
+## Files to read first
+
+- `docs/specs/2026-06-27-constitution-baseline-integration.md`
+- `scripts/autospec-constitution-validate.sh`
+- `scripts/validate.sh`
+
+## Files touched
+
+- `scripts/autospec-constitution-validate.sh`
+- `scripts/validate.sh`
+- `tests/unit/test_constitution_validation.bats`
 
 ## Implementation outline
 
-- Add a CLI or script entry point for Constitution/Baseline validation.
-- Run config validation, source validation, lockfile validation, and composition
-  validation in order.
-- Emit machine-readable JSON and human-readable summary output.
-- Return non-zero for required source failures while preserving enough evidence
-  for autonomous quarantine.
-- Wire the command into repository validation only after fixtures pass.
+- Run config, source, lockfile, and composition validation in order.
+- Return non-zero for required source failures.
+- Preserve JSON evidence for autonomous quarantine records.
+
+## Tests required
+
+- `tests/unit/test_constitution_validation.bats`
 
 ## Acceptance criteria
 
-- [ ] Validation command exits 0 for valid local fixtures.
-- [ ] Validation command exits non-zero for an unlocked GitHub source.
-- [ ] Validation command reports missing profile references by source ID and profile ID.
-- [ ] Validation output can be attached to an autonomous quarantine record.
-- [ ] `bash scripts/validate.sh --changed=origin/main` passes.
+- [ ] Valid local fixtures exit 0 in `test_constitution_validation.bats`.
+- [ ] An unlocked GitHub source exits non-zero.
+- [ ] Validation JSON includes `quarantine_evidence` for required source failures.
+
+## Dependencies
+
+Depends on issue #6
+
+## Verification
 
 ### Primary smoke test (inner loop)
 
 ```bash
-bash scripts/validate.sh --changed=origin/main
+bats tests/unit/test_constitution_validation.bats
 ```
 
-## 8. feat: add gap analysis input contract
+## Issue 8: feat: add gap analysis input contract
 
 ## Goal
 
-Add a generator for the gap-analysis input envelope defined by the source spec.
+Add a generator for `gap-analysis-input.json` from repo inventory and profile data.
+
+## Files to read first
+
+- `docs/specs/2026-06-27-constitution-baseline-integration.md`
+- `scripts/autospec-baseline-gap.sh`
+- `tests/unit/test_repository_intelligence.bats`
+
+## Files touched
+
+- `scripts/autospec-baseline-gap.sh`
+- `scripts/autospec-discover-metadata.sh`
+- `tests/unit/test_repository_intelligence.bats`
 
 ## Implementation outline
 
 - Read effective profile, lockfile, repo inventory, and prior findings.
-- Emit `version`, `repo`, `constitution`, `effective_profile`,
-  `baseline_profiles`, `inventory`, and `prior_findings`.
-- Keep the analyzer itself out of scope.
+- Emit repo branch/SHA metadata and profile identifiers.
+- Keep analyzer execution out of scope for this issue.
+
+## Tests required
+
+- `tests/unit/test_repository_intelligence.bats`
 
 ## Acceptance criteria
 
 - [ ] Generated input includes `.git` branch and SHA metadata.
-- [ ] Generated input includes Constitution profile and rule data.
+- [ ] Generated input includes Constitution profile and 1 rule entry.
 - [ ] Generated input includes baseline profile IDs from `.autospec/autospec.yml`.
-- [ ] `bash scripts/validate.sh --changed=origin/main` passes.
+
+## Dependencies
+
+Depends on issue #7
+
+## Verification
 
 ### Primary smoke test (inner loop)
 
 ```bash
-bash scripts/validate.sh --changed=origin/main
+bats tests/unit/test_repository_intelligence.bats
 ```
 
-## 9. feat: add metadata generation input contract
+## Issue 9: feat: add constitution metadata generation
 
 ## Goal
 
-Add metadata generation from effective profile, lockfile, git metadata, and command context.
+Add metadata generation from lockfile, effective profile, git metadata, and command context.
+
+## Files to read first
+
+- `docs/specs/2026-06-27-constitution-baseline-integration.md`
+- `scripts/autospec-discover-metadata.sh`
+- `tests/unit/test_repository_intelligence.bats`
+
+## Files touched
+
+- `scripts/autospec-discover-metadata.sh`
+- `schemas/autospec-state/constitution-metadata.schema.json`
+- `tests/unit/test_repository_intelligence.bats`
 
 ## Implementation outline
 
 - Read `.autospec/constitution.lock.json` and effective profile digest.
 - Accept command context such as `autospec-define` or `autospec-run`.
-- Emit deterministic metadata safe for spec, issue, PR, and closeout embedding.
-- Explicitly mark enforcement as absent unless validation actually ran.
+- Mark enforcement as absent unless validation actually ran.
+
+## Tests required
+
+- `tests/unit/test_repository_intelligence.bats`
 
 ## Acceptance criteria
 
-- [ ] Metadata output includes Constitution `repo`, `version`, `commit`, and `profile`.
-- [ ] Metadata output includes baseline source `id`, `version`, `commit`, and profiles.
-- [ ] Metadata output includes command context and current git SHA.
-- [ ] `bash scripts/validate.sh --changed=origin/main` passes.
+- [ ] Metadata includes Constitution `repo`, `version`, `commit`, and `profile`.
+- [ ] Metadata includes baseline source `id`, `version`, `commit`, and profiles.
+- [ ] Metadata includes command context and current git SHA.
+
+## Dependencies
+
+Depends on issue #7
+
+## Verification
 
 ### Primary smoke test (inner loop)
 
 ```bash
-bash scripts/validate.sh --changed=origin/main
+bats tests/unit/test_repository_intelligence.bats
 ```
 
-## 10. dogfood: configure autospec to use autospec-constitution and autospec-baselines
+## Issue 10: dogfood: consume locked constitution and baselines
 
 ## Goal
 
-Configure this repository's `.autospec/autospec.yml` to consume `autospec-constitution` and `autospec-baselines` as locked catalog inputs.
+Configure this repo to consume locked `autospec-constitution` and `autospec-baselines` inputs.
+
+## Files to read first
+
+- `docs/specs/2026-06-27-constitution-baseline-integration.md`
+- `.autospec/autospec.yml`
+- `docs/companion-repositories.md`
+
+## Files touched
+
+- `.autospec/autospec.yml`
+- `.autospec/constitution.lock.json`
+- `docs/companion-repositories.md`
 
 ## Implementation outline
 
-- Add real Constitution and baseline sources after the loader and lockfile phases
-  are shipped.
-- Commit `.autospec/constitution.lock.json` with pinned SHAs.
-- Run the validation command and the existing repo validation suite.
-- Document any repo-specific local overrides.
-- Keep companion repository updates proposal-only; do not create companion PRs
-  from this dogfood issue.
+- Add real Constitution and baseline sources after loader and lockfile phases ship.
+- Commit pinned SHAs in `.autospec/constitution.lock.json`.
+- Keep companion repository updates proposal-only.
+
+## Tests required
+
+- `bash scripts/validate.sh`
 
 ## Acceptance criteria
 
-- [ ] `.autospec/autospec.yml` references `berlinguyinca/autospec-constitution`.
-- [ ] `.autospec/autospec.yml` references `berlinguyinca/autospec-baselines`.
-- [ ] `.autospec/constitution.lock.json` pins both repositories by 40-character SHA.
-- [ ] `bash scripts/validate.sh && bats tests/unit tests/smoke` passes.
+- [ ] `.autospec/autospec.yml` references `autospec-constitution` as a locked source.
+- [ ] `.autospec/constitution.lock.json` contains 2 companion repository SHAs.
+- [ ] `docs/companion-repositories.md` states companion writes remain proposal-only.
+
+## Dependencies
+
+Depends on issue #9
+
+## Verification
 
 ### Primary smoke test (inner loop)
 
 ```bash
-bash scripts/validate.sh && bats tests/unit tests/smoke
+bash scripts/validate.sh
 ```
