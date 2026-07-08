@@ -1,0 +1,4 @@
+{ "rows": [
+  { "keys": ["fast x cli"], "clicks": 12, "impressions": 400, "position": 6.2 },
+  { "keys": ["x tool"],     "clicks": 3,  "impressions": 150, "position": 14.0 }
+] }
