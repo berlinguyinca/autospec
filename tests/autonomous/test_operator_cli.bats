@@ -8,6 +8,10 @@ setup() {
   mkdir -p "$HOME"
   export CONDUCTOR_REPO="berlinguyinca/autospec"
   export AUTOSPEC_REPO_DIR="$REPO_ROOT"
+  # These cases exercise logs/timeline/monitor parsing, not per-repo operator
+  # scoping (covered in tests/autospec/test_autonomous.bats). Pin the operator
+  # dir so recorded PID/logpath live where the fixtures write them (#1577).
+  export AUTOSPEC_AUTONOMOUS_OPERATOR_DIR="$HOME/.autospec/autonomous-operator"
 }
 
 teardown() {

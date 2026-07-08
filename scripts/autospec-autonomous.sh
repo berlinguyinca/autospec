@@ -111,22 +111,25 @@ detect_repo_slug() {
 #   3. cwd git origin                             4. gh detection
 # Emits an empty string when none resolve.
 resolve_repo_owner_repo() {
+    _raw=""
     if [ -n "${CONDUCTOR_REPO:-}" ]; then
-        printf '%s' "$CONDUCTOR_REPO"
-        return 0
+        _raw="$CONDUCTOR_REPO"
+    else
+        if [ -n "${AUTOSPEC_REPO_DIR:-}" ]; then
+            _raw="$(git -C "$AUTOSPEC_REPO_DIR" config --get remote.origin.url 2>/dev/null || true)"
+        fi
+        if [ -z "$_raw" ]; then
+            _raw="$(git config --get remote.origin.url 2>/dev/null || true)"
+        fi
+        if [ -z "$_raw" ]; then
+            _raw="$(detect_repo_slug)"
+        fi
     fi
-    _origin=""
-    if [ -n "${AUTOSPEC_REPO_DIR:-}" ]; then
-        _origin="$(git -C "$AUTOSPEC_REPO_DIR" config --get remote.origin.url 2>/dev/null || true)"
-    fi
-    if [ -z "$_origin" ]; then
-        _origin="$(git config --get remote.origin.url 2>/dev/null || true)"
-    fi
-    if [ -n "$_origin" ]; then
-        printf '%s' "$_origin" | sed 's#.*github.com[:/]##; s#\.git$##; s#/$##'
-        return 0
-    fi
-    detect_repo_slug
+    [ -n "$_raw" ] || return 0
+    # Normalize every source to bare owner/repo (a plain owner/repo is a no-op;
+    # a git URL / trailing .git / trailing slash is stripped) so the same repo
+    # named via --repo, git origin, or gh always maps to one operator dir.
+    printf '%s' "$_raw" | sed 's#.*github.com[:/]##; s#\.git$##; s#/$##'
 }
 
 # Canonical filesystem slug for the resolved repo, matching the conductor's
@@ -143,7 +146,9 @@ operator_slug() {
             return 0
         fi
     fi
-    printf '%s' "$_or" | tr '/:' '__'
+    # Fallback mirrors repo-slug.sh --canonical (owner/repo -> owner__repo) so the
+    # slug is identical whether or not the helper is present.
+    printf '%s' "$_or" | sed 's#/#__#g'
 }
 
 # Scope the operator dir (PID/logpath/lock) per repo so conductors for different
@@ -719,6 +724,27 @@ if timing_rows:
 PY
 }
 
+# True when this repo's own conductor state file shows a running conductor with a
+# fresh heartbeat.  This is a per-repo signal (never another repo's), used as an
+# upgrade backstop: a conductor started before per-repo operator scoping recorded
+# its PID only at the pre-scoping global path, so the scoped PID file is absent
+# even though it is live.  The per-repo state file is written regardless of
+# operator-dir scoping, so it still reflects that instance. (#1577)
+repo_conductor_heartbeat_fresh() {
+    _slug="$(operator_slug)"
+    [ -n "$_slug" ] || return 1
+    _sf="$HOME/.autospec/autonomous/$_slug/state.json"
+    [ -f "$_sf" ] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    _st="$(jq -r '.status // ""' "$_sf" 2>/dev/null || echo "")"
+    case "$_st" in running*) ;; *) return 1 ;; esac
+    _hb="$(jq -r '.heartbeat_at // 0' "$_sf" 2>/dev/null || echo 0)"
+    case "$_hb" in ''|*[!0-9]*) return 1 ;; esac
+    _now="$(date +%s)"
+    _age=$(( _now - _hb ))
+    [ "$_age" -ge 0 ] && [ "$_age" -lt "${AUTOSPEC_AUTONOMOUS_LIVE_HEARTBEAT_SECS:-10800}" ]
+}
+
 ensure_not_running() {
     _pid="$(read_pid || true)"
     if is_pid_alive "$_pid"; then
@@ -728,6 +754,13 @@ ensure_not_running() {
         else
             die "conductor already running with pid $_pid; use status, watch, stop, or --force"
         fi
+        return 0
+    fi
+    # No scoped PID record, but this repo's state file shows a live conductor
+    # (e.g. one started before per-repo operator scoping).  Refuse to launch a
+    # duplicate for the same repo; the operator can stop it or use --force.
+    if [ "$FORCE" -ne 1 ] && repo_conductor_heartbeat_fresh; then
+        die "a conductor for this repo appears active (per-repo state heartbeat is fresh) but has no PID file under $STATE_DIR; stop it, migrate its PID file, or use --force"
     fi
 }
 

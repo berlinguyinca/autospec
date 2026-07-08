@@ -153,3 +153,47 @@ setup() {
   kill "$live_pid" 2>/dev/null || true
   rm -rf "$tmp"
 }
+
+# Upgrade backstop: a conductor started before per-repo scoping has no scoped PID
+# file, but its per-repo state file still shows a fresh heartbeat.  `start` must
+# refuse to launch a duplicate for that repo (issue #1577).
+@test "autonomous: start refuses when per-repo state shows a fresh-heartbeat conductor" {
+  command -v jq >/dev/null 2>&1 || skip "jq required"
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/.autospec/autonomous/owner__repo-a"
+  now="$(date +%s)"
+  printf '{"repo":"owner/repo-a","status":"running:cycle-5","heartbeat_at":%s}\n' "$now" \
+    > "$tmp/.autospec/autonomous/owner__repo-a/state.json"
+  # Neutralize the drain so a guard regression cannot spawn real work.
+  # AUTOSPEC_RUN_CMD=true neutralizes the drain; the guard dies before any spawn.
+  run env HOME="$tmp" AUTOSPEC_RUN_CMD=true CONDUCTOR_MAX_CYCLES=1 AUTOSPEC_NO_SELF_UPDATE=1 \
+    bash "$AUTONOMOUS" start --repo owner/repo-a
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"appears active"* ]]
+  rm -rf "$tmp"
+}
+
+# The guard reads only THIS repo's state file, so a fresh heartbeat for a
+# different repo (or a stale one for this repo) must not block start.  Asserted
+# without a real spawn: a dead scoped PID + no fresh own-state means the guard
+# helper returns false, which the fire-case above contrasts.
+@test "autonomous: guard keys on the current repo's own state slug" {
+  command -v jq >/dev/null 2>&1 || skip "jq required"
+  tmp="$(mktemp -d)"
+  now="$(date +%s)"
+  # Fresh, running — but for repo-a only.
+  mkdir -p "$tmp/.autospec/autonomous/owner__repo-a"
+  printf '{"repo":"owner/repo-a","status":"running:cycle-5","heartbeat_at":%s}\n' "$now" \
+    > "$tmp/.autospec/autonomous/owner__repo-a/state.json"
+  # repo-b's own state is stale — must not count as live.
+  mkdir -p "$tmp/.autospec/autonomous/owner__repo-b"
+  printf '{"repo":"owner/repo-b","status":"running:cycle-9","heartbeat_at":1}\n' \
+    > "$tmp/.autospec/autonomous/owner__repo-b/state.json"
+  # status never calls the guard, but confirms repo-b resolves to its own slug
+  # (owner__repo-b), i.e. it cannot read repo-a's fresh state.
+  run env HOME="$tmp" bash "$AUTONOMOUS" status --json --repo owner/repo-b
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"owner__repo-b/conductor.pid"* ]]
+  [[ "$output" != *"owner__repo-a"* ]]
+  rm -rf "$tmp"
+}
