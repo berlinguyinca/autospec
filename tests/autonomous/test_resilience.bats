@@ -472,3 +472,44 @@ EOF
     local expected_dir="$AUTOSPEC_STATE_DIR/autonomous/berlinguyinca__autospec"
     [ -f "$expected_dir/state.json" ]
 }
+
+@test "main-health: ignores matching failed legacy commit statuses" {
+    cat > "$STUB_DIR/gh" <<'EOF_GH'
+#!/bin/bash
+case "$*" in
+  *"commits/main/status"*)
+    printf '%s\n' '{"state":"failure","total_count":2,"statuses":[{"context":"Unit Tests","state":"failure"},{"context":"Deploy to Test","state":"error"}]}'
+    ;;
+  *"commits/main/check-runs"*)
+    printf '%s\n' '{"total_count":0,"check_runs":[]}'
+    ;;
+  *)
+    printf '%s\n' '{}'
+    ;;
+esac
+EOF_GH
+    chmod +x "$STUB_DIR/gh"
+
+    AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS='^(Unit Tests|Deploy to Test)$' run bash "$RESILIENCE" main-health --repo "$REPO"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "DECISION:continue"
+}
+
+@test "main-health: halts when a non-ignored legacy commit status fails" {
+    cat > "$STUB_DIR/gh" <<'EOF_GH'
+#!/bin/bash
+case "$*" in
+  *"commits/main/status"*)
+    printf '%s\n' '{"state":"failure","total_count":2,"statuses":[{"context":"Unit Tests","state":"failure"},{"context":"Required Gate","state":"failure"}]}'
+    ;;
+  *)
+    printf '%s\n' '{}'
+    ;;
+esac
+EOF_GH
+    chmod +x "$STUB_DIR/gh"
+
+    AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS='^Unit Tests$' run bash "$RESILIENCE" main-health --repo "$REPO"
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "DECISION:halt"
+}

@@ -334,3 +334,39 @@ EOF_STOP
   [ "$(cat "$HOME/stop.args")" = "--immediate" ]
   [ "$(cat "$HOME/stop.flag.path")" = "$HOME/.autospec/autonomous-operator/metabolomics-us_go-modules/stop.flag" ]
 }
+
+@test "operator cli: detached start preserves dry-run and no-digest across re-exec" {
+  local harness="$TEST_TMP/harness"
+  local scripts_dir="$harness/scripts"
+  local repo_dir="$harness/repo"
+  local log_file="$TEST_TMP/conductor.log"
+  mkdir -p "$scripts_dir/lib" "$repo_dir"
+  cp "$CLI" "$scripts_dir/autospec-autonomous.sh"
+  chmod +x "$scripts_dir/autospec-autonomous.sh"
+  cat > "$scripts_dir/lib/autospec-loop.sh" <<'LIBEOF'
+autospec_conductor_run() {
+  printf 'DRY=%s\n' "${CONDUCTOR_DRY_RUN:-unset}"
+  printf 'NO_DIGEST=%s\n' "${CONDUCTOR_NO_DIGEST:-unset}"
+}
+LIBEOF
+
+  run bash "$scripts_dir/autospec-autonomous.sh" start \
+    --repo-dir "$repo_dir" \
+    --repo berlinguyinca/autospec \
+    --log "$log_file" \
+    --max-cycles 1 \
+    --poll-interval-sec 0 \
+    --dry-run \
+    --no-digest \
+    --force
+  [ "$status" -eq 0 ]
+
+  local tries=0
+  while [ "$tries" -lt 50 ] && ! grep -q '^DRY=' "$log_file" 2>/dev/null; do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+
+  grep -q '^DRY=1$' "$log_file"
+  grep -q '^NO_DIGEST=1$' "$log_file"
+}

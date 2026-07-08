@@ -849,34 +849,34 @@ while [ $# -gt 0 ]; do
             ACTION="$1"
             ;;
         --max-cycles)
-            shift; CONDUCTOR_MAX_CYCLES="${1:-}"
+            shift; CONDUCTOR_MAX_CYCLES="${1:-}"; export CONDUCTOR_MAX_CYCLES
             ;;
         --max-cycles=*)
-            CONDUCTOR_MAX_CYCLES="${1#--max-cycles=}"
+            CONDUCTOR_MAX_CYCLES="${1#--max-cycles=}"; export CONDUCTOR_MAX_CYCLES
             ;;
         --dry-run)
-            CONDUCTOR_DRY_RUN=1
+            CONDUCTOR_DRY_RUN=1; export CONDUCTOR_DRY_RUN
             ;;
         --no-digest)
-            CONDUCTOR_NO_DIGEST=1
+            CONDUCTOR_NO_DIGEST=1; export CONDUCTOR_NO_DIGEST
             ;;
         --poll-interval-sec)
-            shift; CONDUCTOR_POLL_INTERVAL="${1:-}"
+            shift; CONDUCTOR_POLL_INTERVAL="${1:-}"; export CONDUCTOR_POLL_INTERVAL
             ;;
         --poll-interval-sec=*)
-            CONDUCTOR_POLL_INTERVAL="${1#--poll-interval-sec=}"
+            CONDUCTOR_POLL_INTERVAL="${1#--poll-interval-sec=}"; export CONDUCTOR_POLL_INTERVAL
             ;;
         --budget-tokens)
-            shift; AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS="${1:-}"
+            shift; AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS="${1:-}"; export AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS
             ;;
         --budget-tokens=*)
-            AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS="${1#--budget-tokens=}"
+            AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS="${1#--budget-tokens=}"; export AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS
             ;;
         --budget-issues)
-            shift; AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES="${1:-}"
+            shift; AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES="${1:-}"; export AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES
             ;;
         --budget-issues=*)
-            AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES="${1#--budget-issues=}"
+            AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES="${1#--budget-issues=}"; export AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES
             ;;
         --repo-dir)
             shift; AUTOSPEC_REPO_DIR="${1:-}"; export AUTOSPEC_REPO_DIR
