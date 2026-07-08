@@ -4408,6 +4408,10 @@ check_autonomy_guardrails_foundation() {
         || fail "autonomous-resilience.sh missing queryable merge audit log (issue #1546)"
     grep -q 'FOLLOWUP_ISSUE' scripts/autonomous-resilience.sh \
         || fail "autonomous-resilience.sh missing rollback follow-up issue evidence (issue #1546)"
+    grep -q 'separation-of-powers' scripts/autonomous-premerge-gate.sh \
+        || fail "autonomous-premerge-gate.sh missing separation-of-powers enforcement (issue #1547)"
+    grep -q 'refute by default' scripts/gen-reviewer-prompt.sh \
+        || fail "gen-reviewer-prompt.sh missing adversarial verifier prompt wording (issue #1547)"
     grep -q 'autonomous-guardrails.sh' skills/autospec-autonomous/install.sh \
         || fail "autospec-autonomous install manifest missing autonomous-guardrails.sh (issue #1543)"
     grep -q 'autonomous-guardrails.sh' skills/autospec-autonomous/uninstall.sh \
@@ -4425,6 +4429,10 @@ check_autonomy_guardrails_foundation() {
         bats tests/autonomous/test_guardrails_foundation.bats >/tmp/validate-guardrails-foundation.log 2>&1 \
             || { cat /tmp/validate-guardrails-foundation.log >&2; \
                  fail "tests/autonomous/test_guardrails_foundation.bats: failed (issue #1543)"; }
+        info "  running: tests/autonomous/test_separation_of_powers.bats"
+        bats tests/autonomous/test_separation_of_powers.bats >/tmp/validate-separation-of-powers.log 2>&1 \
+            || { cat /tmp/validate-separation-of-powers.log >&2; \
+                 fail "tests/autonomous/test_separation_of_powers.bats: failed (issue #1547)"; }
     fi
 }
 
