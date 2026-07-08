@@ -20,12 +20,19 @@ The parent gate enforces these invariants before child issues fill in the concre
 
 ```bash
 bash scripts/rag-workstream.sh config-version --config .autospec/rag-workstream/config.json
+bash scripts/rag-workstream.sh ingest-index --config .autospec/rag-workstream/config.json --root . --out reports/rag/index.json
 bash scripts/rag-workstream.sh gate --baseline reports/rag/baseline.json --candidate reports/rag/candidate.json --target-metric ndcg --faithfulness-floor 0.90 --promote-out reports/rag/promoted.json
 bash scripts/rag-workstream.sh freshness-check --manifest reports/rag/index-manifest.json --root .
 bash scripts/rag-workstream.sh chunk-boundary-check --chunks reports/rag/chunks.json
 bash scripts/rag-workstream.sh citation-check --claims reports/rag/claims.json --chunks reports/rag/chunks.json
 bash scripts/rag-workstream.sh validate-design-doc --doc docs/runbooks/rag-documentation-database.md
 ```
+
+## Issue #1548 ingestion/index contract
+
+`ingest-index` materializes a deterministic local JSON scaffold rather than calling a live embedding service. It walks the configured corpus (`llms.txt`, `llms-full.txt`, and Markdown docs by default), splits Markdown by headings outside code fences, keeps heading text attached to its body, and honors `chunking.chunk_size` / `chunking.overlap` when large sections need secondary block splitting.
+
+Each emitted index carries `embedding_model_id`, `chunking.chunk_config_hash`, and `index_metadata.version_tuple`. The chunk hash is computed from the strategy, size/overlap, late-chunking toggle, contextual-prefix toggle, and boundary-preservation knobs; changing any of those values changes `index_version` and requires the downstream embedder to cleanly re-embed instead of appending into an old embedding space. When `chunking.contextual_prefix` is enabled, each chunk gets a cheap deterministic prefix in the style of Anthropic Contextual Retrieval; when `chunking.late_chunking` is enabled, the placeholder embedding input hash is derived from the full document to model Jina-style late chunking without adding external dependencies.
 
 ## Child issue handoff boundaries
 
