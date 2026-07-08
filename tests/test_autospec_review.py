@@ -283,3 +283,111 @@ def test_cli_write_csv_emits_snapshot_and_ledger(tmp_path):
         "--ledger", str(ledger),
     ])
     assert snapshot.exists() and ledger.exists()
+
+
+def _trial_gap(**overrides):
+    base = {
+        "gap_id": "G1",
+        "dimension": "correctness",
+        "severity": "medium",
+        "file": "scripts/example.sh",
+        "line": 7,
+        "title": "missing guard",
+        "body": "Add the missing guard.",
+        "dedupe_key": "scripts-example-missing-guard",
+        "evidence": "scripts/example.sh lacks REQUIRED_TOKEN",
+        "falsifier": {
+            "kind": "absent",
+            "needle": "REQUIRED_TOKEN",
+            "haystack": "scripts/example.sh",
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def test_reasoning_trial_keeps_absent_claim_when_needle_missing(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts/example.sh").write_text("#!/usr/bin/env bash\n")
+    events = tmp_path / "events.jsonl"
+
+    result = ara.run_reasoning_trial(
+        [_trial_gap()],
+        repo_root=repo,
+        events_path=events,
+    )
+
+    assert [g["gap_id"] for g in result.survivors] == ["G1"]
+    assert result.refuted == []
+    assert result.needs_evidence == []
+    event_lines = [json.loads(line) for line in events.read_text().splitlines()]
+    assert [e["event"] for e in event_lines] == [
+        "trial_started",
+        "candidate_evaluated",
+        "trial_finished",
+    ]
+    assert event_lines[1]["verdict"] == "survived"
+
+
+def test_reasoning_trial_refutes_absent_claim_when_needle_present(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts/example.sh").write_text("REQUIRED_TOKEN=1\n")
+
+    result = ara.run_reasoning_trial([_trial_gap()], repo_root=repo)
+
+    assert result.survivors == []
+    assert [g["gap_id"] for g in result.refuted] == ["G1"]
+    assert result.refuted[0]["trial_reason"] == "absent needle is present"
+
+
+def test_reasoning_trial_marks_missing_falsifier_as_needs_evidence(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    candidate = _trial_gap()
+    candidate.pop("falsifier")
+
+    result = ara.run_reasoning_trial([candidate], repo_root=repo)
+
+    assert result.survivors == []
+    assert result.refuted == []
+    assert [g["gap_id"] for g in result.needs_evidence] == ["G1"]
+    assert "falsifier" in result.needs_evidence[0]["trial_reason"]
+
+
+def test_reasoning_trial_cli_writes_survivors_and_report(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts/example.sh").write_text("# no token\n")
+    candidates = tmp_path / "candidates.json"
+    candidates.write_text(json.dumps([
+        _trial_gap(gap_id="G1"),
+        _trial_gap(
+            gap_id="G2",
+            falsifier={
+                "kind": "present",
+                "needle": "no token",
+                "haystack": "scripts/example.sh",
+            },
+        ),
+    ]))
+    survivors = tmp_path / "survivors.json"
+    report = tmp_path / "report.json"
+    events = tmp_path / "events.jsonl"
+
+    subprocess.check_call([
+        sys.executable, str(SCRIPT), "reasoning-trial",
+        "--repo-root", str(repo),
+        "--candidates", str(candidates),
+        "--out", str(survivors),
+        "--report", str(report),
+        "--events", str(events),
+    ])
+
+    assert [g["gap_id"] for g in json.loads(survivors.read_text())] == ["G1", "G2"]
+    summary = json.loads(report.read_text())
+    assert summary["survived"] == 2
+    assert summary["refuted"] == 0
+    assert summary["needs_evidence"] == 0
+    assert events.read_text().count("\n") == 4

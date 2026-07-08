@@ -296,6 +296,161 @@ import json as _json
 import sys
 
 
+@dataclass(frozen=True)
+class ReasoningTrialResult:
+    survivors: list[dict]
+    refuted: list[dict]
+    needs_evidence: list[dict]
+
+
+def _candidate_id(candidate: dict, index: int) -> str:
+    return str(candidate.get("gap_id") or candidate.get("dedupe_key") or f"candidate-{index}")
+
+
+def _resolve_trial_haystack(repo_root: Path, haystack: str) -> Path | None:
+    if not haystack or "\n" in haystack:
+        return None
+    repo_root = Path(repo_root).resolve()
+    path = (repo_root / haystack).resolve()
+    try:
+        path.relative_to(repo_root)
+    except ValueError:
+        return None
+    if not path.is_file():
+        return None
+    return path
+
+
+def _trial_verdict(candidate: dict, repo_root: Path) -> tuple[str, str]:
+    falsifier = candidate.get("falsifier")
+    if not isinstance(falsifier, dict):
+        return "needs_evidence", "missing falsifier"
+
+    kind = str(falsifier.get("kind", "")).strip()
+    needle = falsifier.get("needle")
+    haystack = falsifier.get("haystack")
+    if kind not in {"absent", "present"}:
+        return "needs_evidence", f"unsupported falsifier kind: {kind or '<empty>'}"
+    if not isinstance(needle, str) or needle == "" or "\n" in needle:
+        return "needs_evidence", "falsifier needle must be a non-empty single-line string"
+    if not isinstance(haystack, str):
+        return "needs_evidence", "falsifier haystack must be a repo-relative file path"
+
+    path = _resolve_trial_haystack(repo_root, haystack)
+    if path is None:
+        return "needs_evidence", "falsifier haystack is missing or outside the repo"
+
+    text = path.read_text(encoding="utf-8", errors="replace")
+    found = needle in text
+    if kind == "absent":
+        if found:
+            return "refuted", "absent needle is present"
+        return "survived", "absent needle is still missing"
+    if found:
+        return "survived", "present needle exists"
+    return "refuted", "present needle is missing"
+
+
+def _with_trial_reason(candidate: dict, reason: str) -> dict:
+    out = dict(candidate)
+    out["trial_reason"] = reason
+    return out
+
+
+def _write_trial_event(events_path: Path | None, event: dict) -> None:
+    if events_path is None:
+        return
+    events_path = Path(events_path)
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    with events_path.open("a", encoding="utf-8") as f:
+        f.write(_json.dumps(event, sort_keys=True) + "\n")
+
+
+def run_reasoning_trial(
+    candidates: Sequence[dict],
+    *,
+    repo_root: Path,
+    events_path: Path | None = None,
+) -> ReasoningTrialResult:
+    """Run a deterministic conjecture/falsifier pass over candidate gaps.
+
+    Each candidate may carry a ``falsifier`` object:
+    ``{"kind":"absent"|"present", "needle":"...", "haystack":"repo/file"}``.
+    The command records replayable JSONL events and returns three explicit
+    buckets. Candidates without a check are not filed; they are marked
+    ``needs_evidence`` so the reviewer can gather better proof.
+    """
+    if events_path is not None:
+        events_path = Path(events_path)
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        events_path.write_text("", encoding="utf-8")
+
+    repo_root = Path(repo_root)
+    _write_trial_event(events_path, {
+        "event": "trial_started",
+        "candidate_count": len(candidates),
+    })
+
+    survivors: list[dict] = []
+    refuted: list[dict] = []
+    needs_evidence: list[dict] = []
+
+    for index, candidate in enumerate(candidates):
+        verdict, reason = _trial_verdict(candidate, repo_root)
+        enriched = _with_trial_reason(candidate, reason)
+        if verdict == "survived":
+            survivors.append(enriched)
+        elif verdict == "refuted":
+            refuted.append(enriched)
+        else:
+            needs_evidence.append(enriched)
+
+        _write_trial_event(events_path, {
+            "event": "candidate_evaluated",
+            "candidate_id": _candidate_id(candidate, index),
+            "verdict": verdict,
+            "reason": reason,
+        })
+
+    _write_trial_event(events_path, {
+        "event": "trial_finished",
+        "survived": len(survivors),
+        "refuted": len(refuted),
+        "needs_evidence": len(needs_evidence),
+    })
+    return ReasoningTrialResult(survivors, refuted, needs_evidence)
+
+
+def _cli_reasoning_trial(args: argparse.Namespace) -> int:
+    candidates = _json.loads(Path(args.candidates).read_text(encoding="utf-8"))
+    if not isinstance(candidates, list):
+        raise SystemExit("reasoning-trial: --candidates must contain a JSON array")
+    result = run_reasoning_trial(
+        candidates,
+        repo_root=Path(args.repo_root),
+        events_path=Path(args.events) if args.events else None,
+    )
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(_json.dumps(result.survivors, indent=2), encoding="utf-8")
+
+    if args.report:
+        report_path = Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(_json.dumps({
+            "schema": "autospec.reasoning_trial.v1",
+            "candidates": len(candidates),
+            "survived": len(result.survivors),
+            "refuted": len(result.refuted),
+            "needs_evidence": len(result.needs_evidence),
+            "refuted_candidates": result.refuted,
+            "needs_evidence_candidates": result.needs_evidence,
+            "events": args.events or "",
+        }, indent=2), encoding="utf-8")
+    return 0
+
+
 def _cli_discover(args: argparse.Namespace) -> int:
     repo_root = Path(args.repo_root)
     globs = (args.glob,) if args.glob else DEFAULT_SPEC_GLOBS
@@ -414,6 +569,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--issue")
     p.add_argument("--pr")
     p.set_defaults(fn=_cli_update_status)
+
+    p = sub.add_parser("reasoning-trial")
+    p.add_argument("--repo-root", default=".")
+    p.add_argument("--candidates", required=True)
+    p.add_argument("--out", required=True,
+                   help="write surviving candidates as gap JSON")
+    p.add_argument("--report",
+                   help="write trial summary JSON with refuted/needs-evidence buckets")
+    p.add_argument("--events",
+                   help="write replayable JSONL trial event log")
+    p.set_defaults(fn=_cli_reasoning_trial)
 
     args = parser.parse_args(argv)
     return args.fn(args)
