@@ -116,41 +116,54 @@ EOF
     info "ensure_autospec_bin_path: $autospec_bin_dir is sourced via ~/.autospec/env"
 }
 
+write_autonomous_operator_wrapper() {
+    target="$1"
+    subcommand="$2"
+
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'set -eu'
+        if [ -n "$subcommand" ]; then
+            printf '%s\n' 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh" '"$subcommand"' "$@"'
+        else
+            printf '%s\n' 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh" "$@"'
+        fi
+    } > "$target"
+    chmod +x "$target"
+}
+
 install_autonomous_operator_commands() {
     autospec_bin_dir="$HOME/.autospec/bin"
     autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
     launcher="$autospec_scripts_dir/autospec-autonomous.sh"
-    installed_home="$HOME"
+    canonical_launcher="$HOME/.autospec/scripts/autospec-autonomous.sh"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] install_autonomous_operator_commands: would install autospec-autonomous command wrappers in $autospec_bin_dir"
         return 0
     fi
 
+    case "$autospec_scripts_dir/" in
+        "$HOME/.autospec/"*) ;;
+        *)
+            warn "install_autonomous_operator_commands: ignoring non-persistent AUTOSPEC_SCRIPTS_DIR=$autospec_scripts_dir for wrapper exec target; wrappers resolve at runtime via \${AUTOSPEC_SCRIPTS_DIR:-\$HOME/.autospec/scripts}"
+            launcher="$canonical_launcher"
+            ;;
+    esac
+
     if [ ! -f "$launcher" ]; then
-        warn "install_autonomous_operator_commands: missing $launcher; skipping wrappers"
-        return 0
+        warn "install_autonomous_operator_commands: launcher not present yet at $launcher; writing runtime-resolving wrappers anyway"
     fi
 
     mkdir -p "$autospec_bin_dir"
-    chmod +x "$launcher"
-    for command in autospec-autonomous autospec-autonomous-status autospec-autonomous-timeline autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-stop autospec-autonomous-restart; do
+    [ -f "$launcher" ] && chmod +x "$launcher"
+    for command in autospec-autonomous autospec-autonomous-status autospec-autonomous-timeline autospec-autonomous-monitor autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-stop autospec-autonomous-restart; do
         target="$autospec_bin_dir/$command"
         subcommand="${command#autospec-autonomous-}"
         if [ "$subcommand" = "$command" ]; then
             subcommand=""
         fi
-        {
-            printf '%s\n' '#!/usr/bin/env bash'
-            printf '%s\n' 'set -eu'
-            printf 'export HOME=%s\n' "$(printf '%s' "$installed_home" | sed 's/[\\"`$]/\\&/g')"
-            if [ -n "$subcommand" ]; then
-                printf 'exec "%s" %s "$@"\n' "$launcher" "$subcommand"
-            else
-                printf 'exec "%s" "$@"\n' "$launcher"
-            fi
-        } > "$target"
-        chmod +x "$target"
+        write_autonomous_operator_wrapper "$target" "$subcommand"
     done
     info "install_autonomous_operator_commands: installed autonomous command wrappers in $autospec_bin_dir"
 }
