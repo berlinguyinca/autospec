@@ -12,7 +12,7 @@ usage() {
 Usage:
   autonomous-guardrails.sh diff-guard --changed-files <file> [--lane implementer|verifier]
   autonomous-guardrails.sh mutation-guard --baseline <json> --current <json>
-  autonomous-guardrails.sh blast-radius --changed-files <file>
+  autonomous-guardrails.sh blast-radius --changed-files <file> [--fenced-surfaces <yml>] [--json]
   autonomous-guardrails.sh provenance \
       --repo OWNER/REPO --pr N --changed-files <file> --gate-evidence <json> \
       --rollback-handle <ref-or-command> --out <json>
@@ -20,7 +20,7 @@ Usage:
 Decisions:
   diff-guard exits 1 with DECISION:block when an implementer changes test/eval-harness files.
   mutation-guard exits 1 with DECISION:block when current mutation score drops below baseline.
-  blast-radius exits 1 with DECISION:block when fenced/high-risk paths changed.
+  blast-radius exits 1 with DECISION:quarantine when fenced/high-risk paths changed.
   provenance writes autospec.autonomous.merge_provenance.v1 JSON.
 USAGE
 }
@@ -47,6 +47,25 @@ is_immutable_verifier_path() {
     esac
 }
 
+default_fenced_surfaces_file() {
+    if [ -n "${AUTOSPEC_FENCED_SURFACES_FILE:-}" ]; then
+        printf '%s' "$AUTOSPEC_FENCED_SURFACES_FILE"
+        return 0
+    fi
+    if [ -f .autospec/fenced-surfaces.yml ]; then
+        printf '%s' .autospec/fenced-surfaces.yml
+        return 0
+    fi
+    if [ -f .autospec/autospec.yml ]; then
+        printf '%s' .autospec/autospec.yml
+        return 0
+    fi
+    printf ''
+}
+
+# Legacy fallback stays in code so older repos without fenced_surfaces config
+# remain fail-safe for known dangerous surfaces. New repos should configure
+# fenced_surfaces in .autospec/autospec.yml or pass --fenced-surfaces.
 is_high_risk_path() {
     case "$1" in
         scripts/autospec-autonomous.sh|scripts/autonomous-*.sh|scripts/autospec-autonomous-run-drain.sh) return 0 ;;
@@ -54,6 +73,7 @@ is_high_risk_path() {
         skills/autospec*/SKILL.md|skills/autospec*/codex/prompt.md|skills/autospec*/opencode/agent.md) return 0 ;;
         .github/workflows/*|install.sh|bootstrap.sh|uninstall.sh) return 0 ;;
         schemas/*|packages/*|crates/*|Cargo.toml|Cargo.lock) return 0 ;;
+        trading-system/money/*|trading-system/money/**|trading-system/risk/*|trading-system/risk/**|trading-system/execution/*|trading-system/execution/**) return 0 ;;
         *migration*|*secret*|*auth*|*token*) return 0 ;;
         *) return 1 ;;
     esac
@@ -155,56 +175,49 @@ cmd_mutation_guard() {
 }
 
 cmd_blast_radius() {
-    local changed_files=""
+    local changed_files="" fenced_surfaces="" json=0
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --changed-files) changed_files="${2:-}"; shift 2 ;;
+            --fenced-surfaces) fenced_surfaces="${2:-}"; shift 2 ;;
+            --json) json=1; shift ;;
             -h|--help) usage; exit 0 ;;
             *) die "blast-radius: unknown option: $1" ;;
         esac
     done
     require_file "$changed_files" "--changed-files"
+    if [ -z "$fenced_surfaces" ]; then
+        fenced_surfaces="$(default_fenced_surfaces_file)"
+    fi
 
-    local tmp
-    tmp="$(mktemp "${TMPDIR:-/tmp}/autonomous-blast-radius.XXXXXX")"
-    while IFS= read -r path; do
-        if is_high_risk_path "$path"; then
-            printf '%s\n' "$path" >> "$tmp"
-        fi
-    done <<EOF_CHANGED
-$(read_changed_files "$changed_files")
-EOF_CHANGED
-
-    if [ -s "$tmp" ]; then
-        printf 'DECISION:block\n'
-        printf 'REASON:high_risk_blast_radius\n'
-        sed 's/^/PATH:/' "$tmp"
-        rm -f "$tmp"
+    local result status dir
+    dir="$(cd "$(dirname "$0")" && pwd)"
+    result="$(python3 "$dir/blast-radius-classifier.py" --changed-files "$changed_files" --fenced-surfaces "$fenced_surfaces")"
+    status="$(printf '%s' "$result" | jq -r '.exit_status')"
+    if [ "$json" -eq 1 ]; then
+        printf '%s\n' "$result" | jq 'del(.exit_status)'
+        exit "$status"
+    fi
+    if [ "$status" -ne 0 ]; then
+        printf 'DECISION:quarantine\n'
+        printf 'REASON:%s\n' "$(printf '%s' "$result" | jq -r '.reason')"
+        printf '%s\n' "$result" | jq -r '.fenced_matches[]? | "SURFACE:" + .surface + ":" + .path + ":" + .reason'
+        printf '%s\n' "$result" | jq -r '.paths[]? | "PATH:" + .'
         exit 1
     fi
-    rm -f "$tmp"
     printf 'DECISION:allow\n'
+    printf 'LABEL:%s\n' "$(printf '%s' "$result" | jq -r '.label')"
 }
 
 blast_radius_json() {
-    local changed_files="$1"
-    local tmp
-    tmp="$(mktemp "${TMPDIR:-/tmp}/autonomous-blast-radius-json.XXXXXX")"
-    while IFS= read -r path; do
-        if is_high_risk_path "$path"; then
-            printf '%s\n' "$path" >> "$tmp"
-        fi
-    done <<EOF_CHANGED
-$(read_changed_files "$changed_files")
-EOF_CHANGED
-    if [ -s "$tmp" ]; then
-        jq -n --argjson paths "$(json_array_from_lines < "$tmp")" '{decision:"block", reason:"high_risk_blast_radius", paths:$paths}'
-    else
-        jq -n '{decision:"allow", reason:null, paths:[]}'
+    local changed_files="$1" fenced_surfaces="${2:-}"
+    if [ -z "$fenced_surfaces" ]; then
+        fenced_surfaces="$(default_fenced_surfaces_file)"
     fi
-    rm -f "$tmp"
+    local dir
+    dir="$(cd "$(dirname "$0")" && pwd)"
+    python3 "$dir/blast-radius-classifier.py" --changed-files "$changed_files" --fenced-surfaces "$fenced_surfaces" | jq 'del(.exit_status)'
 }
-
 cmd_provenance() {
     local repo="" pr="" changed_files="" gate_evidence="" rollback_handle="" out=""
     while [ "$#" -gt 0 ]; do

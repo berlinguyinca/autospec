@@ -72,7 +72,7 @@ FILES
     printf '%s\n' "$output" | grep -q 'scripts/validate.sh'
 }
 
-@test "premerge gate blocks high-risk fenced blast-radius paths before QA" {
+@test "premerge gate quarantines high-risk fenced blast-radius paths before QA" {
     changed="$TMP/changed.txt"
     printf 'scripts/autospec-autonomous.sh\nREADME.md\n' > "$changed"
     export AUTOSPEC_QA_PRESENT_OVERRIDE=true
@@ -84,8 +84,8 @@ FILES
         --repo berlinguyinca/autospec \
         --pr 1543
 
-    [ "$status" -eq 1 ]
-    printf '%s\n' "$output" | grep -q '^block high_risk_blast_radius$'
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q '^quarantine fenced_surface$'
     grep -q 'autospec:needs-human' "$GH_LOG"
 }
 

@@ -65,15 +65,30 @@ write_jsonl() {
     [ "$(printf '%s' "$output" | jq -r '.ranked[] | select(.id=="A") | .decay_applied')" = "true" ]
 }
 
-@test "fenced or high blast-radius candidates route to human gate" {
+@test "fenced top candidate is quarantined while next runnable candidate proceeds" {
     candidates="$TMP/high-risk.jsonl"
-    write_jsonl "$candidates" \
-      '{"id":"schema-1","workstream":"security","severity":5,"value":5,"confidence":1,"reversibility":1,"effort":1,"blast_radius":5,"fenced":true,"files":["migrations/001.sql"]}'
+    write_jsonl "$candidates"       '{"id":"schema-1","workstream":"security","severity":10,"value":10,"confidence":1,"reversibility":1,"effort":1,"blast_radius":1,"fenced":true,"files":["migrations/001.sql"]}'       '{"id":"docs-1","workstream":"docs","severity":3,"value":3,"confidence":1,"reversibility":1,"effort":1,"blast_radius":1,"files":["docs/runbooks/OPERATIONS.md"]}'
+
+    run bash "$PRIORITIZE" score --candidates "$candidates" --value-floor 1 --human-gate-blast-radius 4
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '.decision')" = "run" ]
+    [ "$(printf '%s' "$output" | jq -r '.top.id')" = "docs-1" ]
+    [ "$(printf '%s' "$output" | jq -r '[.considered_and_skipped[] | select(.id=="schema-1" and .reason=="human_gate")] | length')" -eq 1 ]
+
+    run bash "$WATERFALL" --candidate-file "$candidates" --value-floor 1 --human-gate-blast-radius 4 --backlog-count 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"action":"run-backlog"'* ]]
+    [[ "$output" == *'value queue selected candidate docs-1'* ]]
+}
+
+@test "all fenced or high blast-radius candidates route to human gate" {
+    candidates="$TMP/all-high-risk.jsonl"
+    write_jsonl "$candidates"       '{"id":"schema-1","workstream":"security","severity":5,"value":5,"confidence":1,"reversibility":1,"effort":1,"blast_radius":5,"fenced":true,"files":["migrations/001.sql"]}'
 
     run bash "$PRIORITIZE" score --candidates "$candidates" --value-floor 1 --human-gate-blast-radius 4
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq -r '.decision')" = "human_gate" ]
-    [ "$(printf '%s' "$output" | jq -r '.top.route')" = "human_gate" ]
+    [ "$(printf '%s' "$output" | jq -r '.top')" = "null" ]
 
     run bash "$WATERFALL" --candidate-file "$candidates" --value-floor 1 --human-gate-blast-radius 4 --backlog-count 0
     [ "$status" -eq 0 ]

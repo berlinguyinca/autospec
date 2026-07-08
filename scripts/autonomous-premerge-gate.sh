@@ -10,6 +10,8 @@ CHANGED_FILES=""
 GATE_EVIDENCE=""
 ROLLBACK_HANDLE=""
 PROVENANCE_OUT=""
+FENCED_SURFACES=""
+QUARANTINE_OUT=""
 DRY_RUN=0
 LANE="implementer"
 MUTATION_BASELINE=""
@@ -36,6 +38,8 @@ Options:
   --notify-sh <path>      Path to notify.sh (default: auto-detected).
   --lane <name>           Actor lane for immutable verifier bypass (implementer/verifier).
   --changed-files <file>  Newline-delimited changed files for immutable/blast checks.
+  --fenced-surfaces <yml> Config-driven fenced-surface registry.
+  --quarantine-out <json> Write async human-review quarantine provenance JSON.
   --gate-evidence <json>  Passing gate evidence JSON to record on merge-ok.
   --mutation-baseline <json> Baseline mutation ledger JSON.
   --mutation-current <json>  Current mutation ledger JSON.
@@ -71,6 +75,8 @@ while [ $# -gt 0 ]; do
         --mutation-current) MUTATION_CURRENT="${2:-}"; shift 2 ;;
         --rollback-handle) ROLLBACK_HANDLE="${2:-}"; shift 2 ;;
         --provenance-out) PROVENANCE_OUT="${2:-}"; shift 2 ;;
+        --fenced-surfaces) FENCED_SURFACES="${2:-}"; shift 2 ;;
+        --quarantine-out) QUARANTINE_OUT="${2:-}"; shift 2 ;;
         --dry-run)     DRY_RUN=1; shift ;;
         --help|-h)     usage; exit 0 ;;
         *) printf '%s: unknown argument: %s\n' "$SCRIPT_NAME" "$1" >&2
@@ -225,6 +231,31 @@ _guardrails_sh() {
 _apply_guardrail_block_label() {
     _apply_needs_human_label
 }
+_write_quarantine_record() {
+    local classification_json="$1" out="$2"
+    [ -n "$out" ] || return 0
+    local generated_at changed_json
+    generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if [ -n "$CHANGED_FILES" ] && [ -f "$CHANGED_FILES" ]; then
+        changed_json="$(sed '/^[[:space:]]*$/d; s#^\./##' "$CHANGED_FILES" \
+            | jq -R -s 'split("\n") | map(select(length > 0))')"
+    else
+        changed_json='[]'
+    fi
+    mkdir -p "$(dirname "$out")"
+    jq -n \
+        --arg schema 'autospec.autonomous.quarantine.v1' \
+        --arg queue 'human-review' \
+        --arg repo "$REPO" \
+        --arg pr "${PR_NUMBER:-0}" \
+        --arg branch "$PR_BRANCH" \
+        --arg generated_at "$generated_at" \
+        --arg reason 'fenced_surface' \
+        --argjson changed_files "$changed_json" \
+        --argjson classification "$classification_json" \
+        '{schema:$schema, queue:$queue, repo:$repo, pr:($pr|tonumber), branch:$branch, generated_at:$generated_at, reason:$reason, changed_files:$changed_files, classification:$classification}' \
+        > "$out"
+}
 if [ -n "$CHANGED_FILES" ]; then
     GUARDRAILS_SH="$(_guardrails_sh)"
     if ! guard_output="$(bash "$GUARDRAILS_SH" diff-guard --lane "$LANE" --changed-files "$CHANGED_FILES" 2>&1)"; then
@@ -233,11 +264,20 @@ if [ -n "$CHANGED_FILES" ]; then
         printf "block immutable_verifier_modified\n"
         exit 1
     fi
-    if ! blast_output="$(bash "$GUARDRAILS_SH" blast-radius --changed-files "$CHANGED_FILES" 2>&1)"; then
+    blast_status=0
+    if [ -n "$FENCED_SURFACES" ]; then
+        blast_output="$(bash "$GUARDRAILS_SH" blast-radius --changed-files "$CHANGED_FILES" --fenced-surfaces "$FENCED_SURFACES" --json 2>&1)" || blast_status=$?
+    else
+        blast_output="$(bash "$GUARDRAILS_SH" blast-radius --changed-files "$CHANGED_FILES" --json 2>&1)" || blast_status=$?
+    fi
+    if [ "$blast_status" -ne 0 ]; then
         printf "%s\n" "$blast_output"
         _apply_guardrail_block_label
-        printf "block high_risk_blast_radius\n"
-        exit 1
+        _write_quarantine_record "$blast_output" "$QUARANTINE_OUT"
+        _notify "autospec: quarantined" \
+            "Pre-merge gate quarantined $PR_BRANCH for fenced-surface blast radius; continuing autonomous loop."
+        printf "quarantine fenced_surface\n"
+        exit 0
     fi
 fi
 if [ -n "$MUTATION_BASELINE" ] || [ -n "$MUTATION_CURRENT" ]; then
