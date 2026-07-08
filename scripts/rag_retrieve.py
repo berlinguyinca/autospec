@@ -5,6 +5,7 @@ import json
 from typing import Iterable
 
 from rag_retrieve_core import evaluate, retrieve
+from rag_query_router import route_evaluate
 
 
 def read_json_file(path: str):
@@ -51,6 +52,9 @@ def build_cli_parser():
     eval_parser = sub.add_parser("retrieve-eval")
     add_common_args(eval_parser)
     eval_parser.add_argument("--golden", required=True)
+    router_eval_parser = sub.add_parser("query-router-eval")
+    add_common_args(router_eval_parser)
+    router_eval_parser.add_argument("--golden", required=True)
     return parser
 
 
@@ -66,8 +70,10 @@ def main(argv=None):
     index, config = read_json_file(args.index), read_json_file(args.config)
     if args.cmd == "retrieve":
         emit_json_document(retrieve(index, config, args.query, parse_filter(args.filter), mode=args.mode, overrides=overrides(args)))
-    else:
+    elif args.cmd == "retrieve-eval":
         emit_json_document(evaluate(index, config, read_json_file(args.golden), args.mode, overrides(args)))
+    else:
+        emit_json_document(route_evaluate(index, config, read_json_file(args.golden), args.mode, overrides(args)))
     return 0
 
 
