@@ -94,6 +94,7 @@ CSV ledger, and route regressions back through `/autospec-split` with
 | `--spec-glob PATTERN` | Override default spec discovery globs |
 | `--remediation` | Broad-dimension review (spec-coverage + correctness + test-quality + integration-wiring + docs) with false-positive filter, for the end-of-run gap-remediation loop |
 | `--emit-gaps PATH` | Write the machine-readable gap JSON to PATH (implies `--remediation`) |
+| `--reasoning-trial` | In remediation mode, run candidate findings through the deterministic conjecture/falsifier trial before emitting gaps |
 
 ## Remediation mode (`--remediation` / `--emit-gaps`)
 
@@ -113,7 +114,30 @@ Pipeline:
 
 1. Dispatch the broad review subagent(s) at Tier A. Collect candidate findings, each tagged with `dimension`, `severity`, `file`, `line`, `title`, `body`, and a stable `dedupe_key`.
 2. **False-positive filter (required before emit):** pipe candidate findings through an evaluate-findings/critic pass. Mark each finding `verdict: keep` or `verdict: false_positive`. When uncertain, drop it (`false_positive`) — never ship a false positive into the auto-implement queue.
-3. Write the surviving findings to a temp findings file, then shape them into the gap contract:
+3. **Reasoning trial (optional, high-uncertainty gate):** when `--reasoning-trial` is passed, or when the review is autonomous and the finding is `reasoning:deep`/`priority:high`, require each kept finding to carry a falsifier:
+
+   ```json
+   {"falsifier":{"kind":"absent","needle":"expected-token","haystack":"repo-relative/path"}}
+   ```
+
+   Run the deterministic trial before emitting gaps:
+
+   ```bash
+   python3 scripts/autospec_review_audit.py reasoning-trial \
+     --repo-root . \
+     --candidates /tmp/autospec-review/remediation-findings.json \
+     --out /tmp/autospec-review/remediation-findings-survived.json \
+     --report ".autospec/reasoning-trials/${RUN_ID}/summary.json" \
+     --events ".autospec/reasoning-trials/${RUN_ID}/events.jsonl"
+   ```
+
+   Use only the `--out` survivors as the findings input for `emit-gaps.sh`. Treat
+   `refuted` findings as false positives. Treat `needs_evidence` as not fileable
+   yet; record them in the review report so the next audit can gather better
+   proof. This gives the Phase 5.5 loop a replayable conjecture/falsifier trail
+   without adding another LLM call.
+
+4. Write the surviving findings to a temp findings file, then shape them into the gap contract:
 
    ```bash
    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/emit-gaps.sh" \
@@ -131,9 +155,9 @@ Pipeline:
      "dedupe_key":"cross-repo-search-trailing-pipe"}]
    ```
 
-4. When `--emit-gaps PATH` is given, write to PATH; otherwise default to `~/.autospec/gaps-<run_id>.json`. The driver (`gap-remediation-loop.sh`) reads this file. On review-subagent failure, write an empty array (`[]`) so the driver converges cleanly, and log a warning — never block run completion.
+5. When `--emit-gaps PATH` is given, write to PATH; otherwise default to `~/.autospec/gaps-<run_id>.json`. The driver (`gap-remediation-loop.sh`) reads this file. On review-subagent failure, write an empty array (`[]`) so the driver converges cleanly, and log a warning — never block run completion.
 
-5. Run the shared read-only repo quality audit and link its artifacts from the
+6. Run the shared read-only repo quality audit and link its artifacts from the
    review report:
 
    ```bash
@@ -167,7 +191,7 @@ Pipeline:
 Invoke the helper script directly (no LLM):
 
 ```bash
-python scripts/autospec_review_audit.py discover \
+python3 scripts/autospec_review_audit.py discover \
   --repo-root . \
   --since "${SINCE:-1900-01-01}" \
   ${SPEC_GLOB:+--glob "$SPEC_GLOB"} \
@@ -177,7 +201,7 @@ python scripts/autospec_review_audit.py discover \
 Then for each spec, build the linkage:
 
 ```bash
-python scripts/autospec_review_audit.py link \
+python3 scripts/autospec_review_audit.py link \
   --repo "$REPO" \
   --specs /tmp/autospec-review/specs.json \
   --out  /tmp/autospec-review/linkage.json
@@ -220,7 +244,7 @@ the contract. Do not ship false positives — when uncertain, omit.
 
 For each subagent's JSON return:
 
-1. `python scripts/autospec_review_audit.py validate-subagent
+1. `python3 scripts/autospec_review_audit.py validate-subagent
    --input /tmp/.../subagent-NN.json
    --spec-path "..." --linked-numbers "1 2 3" --spec-text-file ...`
 2. On schema failure, retry the subagent ONCE with the validation error
@@ -239,7 +263,7 @@ Aggregate all subagent outputs into one rows list. For each gap:
 Then:
 
 ```bash
-python scripts/autospec_review_audit.py write-csv \
+python3 scripts/autospec_review_audit.py write-csv \
   --rows /tmp/autospec-review/rows.json \
   --snapshot reports/autospec-review/${AUDIT_DATE}-${RUN_ID}.csv \
   --ledger   reports/autospec-review/gaps.csv
@@ -314,7 +338,7 @@ For each regression spec file:
      ${RUN_ID}. See gap_id <id> in
      reports/autospec-review/gaps.csv."`
 3. Update CSV rows: write `remediation_issue=#<num>`, flip
-   `status=filed`. Use `python scripts/autospec_review_audit.py
+   `status=filed`. Use `python3 scripts/autospec_review_audit.py
    update-status --gap-id <id> --status filed --issue <num>`.
 
 ## Finalization
