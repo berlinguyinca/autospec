@@ -17,6 +17,7 @@ Usage:
   rag-workstream.sh ingest-index --config FILE --root DIR --out FILE
   rag-workstream.sh retrieve --index FILE --config FILE --query TEXT [--filter KEY=VALUE] [knobs]
   rag-workstream.sh retrieve-eval --index FILE --config FILE --golden FILE [--mode hybrid|dense|bm25] [knobs]
+  rag-workstream.sh query-router-eval --index FILE --config FILE --golden FILE [--mode hybrid|dense|bm25] [knobs]
 USAGE
 }
 
@@ -32,7 +33,7 @@ if [ "${1:-}" = "ingest-index" ]; then
     exit $?
 fi
 
-if [ "${1:-}" = "retrieve" ] || [ "${1:-}" = "retrieve-eval" ]; then
+if [ "${1:-}" = "retrieve" ] || [ "${1:-}" = "retrieve-eval" ] || [ "${1:-}" = "query-router-eval" ]; then
     CMD="$1"
     shift
     SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"

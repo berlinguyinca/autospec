@@ -233,3 +233,75 @@ assert hybrid["retrieval"]["mrr"] >= base["retrieval"]["mrr"], (base, hybrid)
 assert hybrid["retrieval"]["queries"] == 2
 PY
 }
+
+@test "query-router-eval: routes transforms per query class and disables net-negative transforms" {
+    cat > "$WORK/config.json" <<'JSON'
+{
+  "corpus": {"include": ["docs/**/*.md"]},
+  "chunking": {"strategy": "structure_aware", "late_chunking": false, "contextual_prefix": false, "chunk_size": 900, "overlap": 0},
+  "embedding": {"model_id": "local-test-embed", "index_version_prefix": "rag-index-v1"},
+  "retrieval": {"dense_top_k": 6, "bm25_top_k": 6, "rrf_k": 60, "fusion_weight": 0.50, "rerank_top_n": 6, "final_n": 2},
+  "query_transform": {
+    "rewrite": "routed",
+    "hyde": "routed",
+    "multi_query": "routed",
+    "decomposition": "routed",
+    "max_added_tokens": 80,
+    "min_recall_lift": 0.01,
+    "rewrite_expansions": {"rrf_k": "reciprocal rank fusion constant rrf_k"}
+  },
+  "freshness": {"serve_latest": true, "invalidate_by": ["doc_id", "content_hash"]},
+  "eval": {"target_metric": "ndcg", "ragas_faithfulness_floor": 0.90}
+}
+JSON
+    cat > "$WORK/index.json" <<'JSON'
+{
+  "schema_version": 1,
+  "index_version": "rag-index-v1:test",
+  "chunks": [
+    {"chunk_id":"easy-target","doc_id":"retrieval","source_path":"docs/retrieval.md","heading":"Hybrid retrieval","text":"Hybrid retrieval combines dense vector search with BM25 keyword search for documentation.","metadata":{"doc_version":"v2","section":"search"}},
+    {"chunk_id":"sparse-target","doc_id":"rrf","source_path":"docs/rrf.md","heading":"Reciprocal Rank Fusion","text":"The reciprocal rank fusion constant controls how dense and sparse rankings are fused.","metadata":{"doc_version":"v2","section":"search"}},
+    {"chunk_id":"hyde-decoy","doc_id":"hyde","source_path":"docs/hyde.md","heading":"HyDE rrf_k","text":"Hypothetical documents add generic implementation details and can distract exact rrf_k lookups.","metadata":{"doc_version":"v2","section":"search"}},
+    {"chunk_id":"rrfk-decoy","doc_id":"legacy","source_path":"docs/legacy.md","heading":"Legacy rrf_k notes","text":"Legacy rrf_k notes mention an obsolete tuning knob only.","metadata":{"doc_version":"v2","section":"search"}},
+    {"chunk_id":"setup-decoy","doc_id":"setup-overview","source_path":"docs/setup-overview.md","heading":"Bootstrap and AUTOSPEC_HOME overview","text":"A short overview mentions bootstrap and AUTOSPEC_HOME without install or configure details.","metadata":{"doc_version":"v2","section":"setup"}},
+    {"chunk_id":"install-target","doc_id":"install","source_path":"docs/install.md","heading":"Install autospec","text":"Bootstrap autospec by running the install script before preparing the workspace.","metadata":{"doc_version":"v2","section":"setup"}},
+    {"chunk_id":"configure-target","doc_id":"configure","source_path":"docs/configure.md","heading":"Configure AUTOSPEC_HOME","text":"Set AUTOSPEC_HOME so autospec stores run state in the expected directory.","metadata":{"doc_version":"v2","section":"setup"}}
+  ]
+}
+JSON
+    cat > "$WORK/golden.json" <<'JSON'
+{
+  "queries": [
+    {"query":"hybrid retrieval dense bm25", "query_class":"easy", "relevant":{"easy-target":3}, "filters":{"doc_version":"v2", "section":"search"}},
+    {"query":"rrf_k", "query_class":"sparse", "relevant":{"sparse-target":3}, "filters":{"doc_version":"v2", "section":"search"}},
+    {"query":"bootstrap and AUTOSPEC_HOME", "query_class":"multi_hop", "relevant":{"install-target":2,"configure-target":2}, "filters":{"doc_version":"v2", "section":"setup"}}
+  ]
+}
+JSON
+
+    run bash "$SCRIPT" query-router-eval --index "$WORK/index.json" --config "$WORK/config.json" --golden "$WORK/golden.json"
+    [ "$status" -eq 0 ]
+    python3 - "$output" <<'PY'
+import json, sys
+out=json.loads(sys.argv[1])
+assert out["retrieval"]["queries"] == 3, out
+by_query={row["query"]: row for row in out["per_query"]}
+easy=by_query["hybrid retrieval dense bm25"]
+assert easy["query_class"] == "easy", easy
+assert easy["enabled_transforms"] == [], easy
+assert easy["decisions"]["rewrite"]["enabled"] is False, easy
+sparse=by_query["rrf_k"]
+assert sparse["query_class"] == "sparse", sparse
+assert "rewrite" in sparse["enabled_transforms"], sparse
+assert sparse["decisions"]["rewrite"]["recall_lift"] > 0, sparse
+assert sparse["decisions"]["hyde"]["enabled"] is False, sparse
+assert sparse["decisions"]["hyde"]["reason"] == "net_negative", sparse
+assert sparse["decisions"]["hyde"]["added_tokens"] > 0, sparse
+multi=by_query["bootstrap and AUTOSPEC_HOME"]
+assert multi["query_class"] == "multi_hop", multi
+assert "decomposition" in multi["enabled_transforms"], multi
+assert multi["decisions"]["decomposition"]["recall_lift"] > 0, multi
+assert multi["metrics"]["recall_at_k"] > multi["baseline_metrics"]["recall_at_k"], multi
+assert set(multi["results"][:2]) == {"install-target", "configure-target"}, multi
+PY
+}

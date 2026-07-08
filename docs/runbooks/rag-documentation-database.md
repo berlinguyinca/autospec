@@ -23,6 +23,7 @@ bash scripts/rag-workstream.sh config-version --config .autospec/rag-workstream/
 bash scripts/rag-workstream.sh ingest-index --config .autospec/rag-workstream/config.json --root . --out reports/rag/index.json
 bash scripts/rag-workstream.sh retrieve --index reports/rag/index.json --config .autospec/rag-workstream/config.json --query "rrf_k" --filter doc_version=v2
 bash scripts/rag-workstream.sh retrieve-eval --index reports/rag/index.json --config .autospec/rag-workstream/config.json --golden reports/rag/golden.json --mode hybrid --final-n 8
+bash scripts/rag-workstream.sh query-router-eval --index reports/rag/index.json --config .autospec/rag-workstream/config.json --golden reports/rag/golden.json --mode hybrid --final-n 8
 bash scripts/rag-workstream.sh gate --baseline reports/rag/baseline.json --candidate reports/rag/candidate.json --target-metric ndcg --faithfulness-floor 0.90 --promote-out reports/rag/promoted.json
 bash scripts/rag-workstream.sh freshness-check --manifest reports/rag/index-manifest.json --root .
 bash scripts/rag-workstream.sh chunk-boundary-check --chunks reports/rag/chunks.json
@@ -42,6 +43,10 @@ Each emitted index carries `embedding_model_id`, `chunking.chunk_config_hash`, a
 `retrieve` reads the materialized JSON index and applies metadata filters before any ranking, so knobs like `doc_version`, `section`, and `product_area` prune stale or off-area chunks before dense/BM25 scoring. The local dense lane is a deterministic hash-token placeholder rather than an embedding API; it deliberately remains dependency-free while preserving the tuning surface for `dense_top_k`. BM25 supplies exact-term coverage for jargon and config keys, and `fusion_weight` combines dense and sparse ranks through Reciprocal Rank Fusion (`rrf_k`). The retriever over-fetches with `dense_top_k` and `bm25_top_k`, keeps the top `rerank_top_n` fused candidates, applies a deterministic lexical reranker, and returns `final_n` chunks.
 
 `retrieve-eval` runs the same retrieval path against a small golden set and reports nDCG, MRR, precision@k, and recall@k. Use `--mode dense` as the deterministic baseline and `--mode hybrid` for the always-hybrid production contract; the issue #1549 fixture proves the hybrid BM25+RRF path improves nDCG over dense-only on exact jargon while preserving metadata filtering.
+
+## Issue #1550 query-transform router contract
+
+`query-router-eval` classifies each golden query as `easy`, `sparse`, or `multi_hop`, generates only the transforms eligible for that class, and measures each candidate transform against the untransformed baseline. Easy queries keep the original query unless a fixture explicitly marks a harder class; sparse queries may use deterministic jargon rewrite or HyDE; multi-hop queries may use multi-query fan-out or decomposition. The command emits per-transform recall lift, nDCG lift, added query count, added token count, and a latency-cost proxy. A transform is enabled only when measured recall lift is positive and the configured `query_transform.max_added_tokens` budget is not exceeded, so net-negative transforms remain off instead of becoming blanket retrieval cost.
 
 ## Child issue handoff boundaries
 
