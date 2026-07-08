@@ -205,6 +205,10 @@ print_status() {
     _log="$(read_logpath || true)"
     _state="$(current_state_file || true)"
     _ledger="$(current_ledger_file || true)"
+    _state_status=""
+    if [ -f "$_state" ] && command -v jq >/dev/null 2>&1; then
+        _state_status="$(jq -r '.status // empty' "$_state" 2>/dev/null || true)"
+    fi
     _issues=""
     _tokens=""
     if [ -f "$_ledger" ] && command -v jq >/dev/null 2>&1; then
@@ -221,6 +225,7 @@ print_status() {
         printf ',"logpath_file":%s' "$(json_escape "$LOGPATH_FILE")"
         printf ',"stop_flag_file":%s' "$(json_escape "$STOP_FLAG_FILE")"
         printf ',"state_file":%s' "$(json_escape "$_state")"
+        printf ',"state_status":%s' "$(json_escape "$_state_status")"
         printf ',"ledger_file":%s' "$(json_escape "$_ledger")"
         printf ',"issues":%s' "$(json_escape "$_issues")"
         printf ',"tokens":%s' "$(json_escape "$_tokens")"
@@ -235,6 +240,9 @@ print_status() {
     info "  pidfile: $PID_FILE"
     info "  stop:    $STOP_FLAG_FILE"
     info "  state:   ${_state:-n/a}"
+    if [ -n "$_state_status" ]; then
+        info "  status:  $_state_status"
+    fi
     info "  ledger:  ${_ledger:-n/a}"
     if [ -n "$_issues$_tokens" ]; then
         info "  spend:   issues=${_issues:-n/a} tokens=${_tokens:-n/a}"

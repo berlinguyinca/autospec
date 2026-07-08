@@ -23,6 +23,19 @@ teardown() {
   [[ "$output" == *'autonomous/berlinguyinca_autospec/state.json'* ]]
 }
 
+
+@test "operator cli: status reports terminal conductor state from state.json" {
+  mkdir -p "$HOME/.autospec/autonomous/berlinguyinca_autospec"
+  cat > "$HOME/.autospec/autonomous/berlinguyinca_autospec/state.json" <<'EOF_STATE'
+{"status":"stopped:signal:TERM:cycle-160","heartbeat_at":1783417633}
+EOF_STATE
+
+  run bash "$CLI" status --json
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"state_status":"stopped:signal:TERM:cycle-160"'* ]]
+}
+
 @test "operator cli: logs reads recorded conductor log path" {
   mkdir -p "$HOME/.autospec/autonomous-operator" "$TEST_TMP/logs"
   printf '%s\n' "$TEST_TMP/logs/conductor.log" > "$HOME/.autospec/autonomous-operator/conductor.logpath"

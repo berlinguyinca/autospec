@@ -437,6 +437,80 @@ PY
 # Safety rules (AGENTS.md):
 #   set -eu; if/then/fi for one-sided conditionals; no RETURN traps;
 #   jq: use capture()/== never interpolated test() for dynamic values.
+
+# _autospec_conductor_record_stop: emit one terminal marker and persist terminal
+# state.  Uses globals because POSIX signal traps cannot receive Bash locals
+# safely while the conductor may be interrupted inside a child command.
+_autospec_conductor_record_stop() {
+    local reason="${1:-unknown}"
+    local cycle="${2:-${_AUTOSPEC_CONDUCTOR_CYCLE:-0}}"
+    local shape="${3:-normal}"
+    if [ "${_AUTOSPEC_CONDUCTOR_STOP_RECORDED:-0}" = "1" ]; then
+        return 0
+    fi
+    _AUTOSPEC_CONDUCTOR_STOP_RECORDED=1
+    if [ "$shape" = "signal" ]; then
+        printf '[conductor] stopped: %s (cycle=%s)\n' "$reason" "$cycle" >&2
+    else
+        printf '[conductor] stopped: %s (cycles=%s)\n' "$reason" "$cycle" >&2
+    fi
+    if [ -n "${_AUTOSPEC_CONDUCTOR_RESILIENCE:-}" ] \
+        && [ -f "$_AUTOSPEC_CONDUCTOR_RESILIENCE" ] \
+        && [ -n "${_AUTOSPEC_CONDUCTOR_REPO:-}" ]; then
+        bash "$_AUTOSPEC_CONDUCTOR_RESILIENCE" state write \
+            --repo "$_AUTOSPEC_CONDUCTOR_REPO" \
+            --status "stopped:${reason}:cycle-${cycle}" \
+            --session "${_AUTOSPEC_CONDUCTOR_SESSION:-}" \
+            2>/dev/null || true
+    fi
+}
+
+_autospec_conductor_release_lock() {
+    if [ "${_AUTOSPEC_CONDUCTOR_LOCK_HELD:-0}" != "1" ]; then
+        return 0
+    fi
+    _AUTOSPEC_CONDUCTOR_LOCK_HELD=0
+    if [ -n "${_AUTOSPEC_CONDUCTOR_RESILIENCE:-}" ] \
+        && [ -f "$_AUTOSPEC_CONDUCTOR_RESILIENCE" ] \
+        && [ -n "${_AUTOSPEC_CONDUCTOR_REPO:-}" ]; then
+        bash "$_AUTOSPEC_CONDUCTOR_RESILIENCE" lock release \
+            --repo "$_AUTOSPEC_CONDUCTOR_REPO" \
+            --session "${_AUTOSPEC_CONDUCTOR_SESSION:-}" \
+            2>/dev/null || true
+    fi
+}
+
+_autospec_conductor_signal_exit_code() {
+    case "$1" in
+        HUP) printf '129' ;;
+        INT) printf '130' ;;
+        QUIT) printf '131' ;;
+        TERM) printf '143' ;;
+        *) printf '128' ;;
+    esac
+}
+
+_autospec_conductor_on_signal() {
+    local sig="$1"
+    local cycle="${_AUTOSPEC_CONDUCTOR_CYCLE:-0}"
+    _autospec_conductor_record_stop "signal:${sig}" "$cycle" signal
+    _autospec_conductor_release_lock
+    trap - EXIT HUP INT QUIT TERM
+    exit "$(_autospec_conductor_signal_exit_code "$sig")"
+}
+
+_autospec_conductor_on_exit() {
+    local rc="$?"
+    if [ "${_AUTOSPEC_CONDUCTOR_STOP_RECORDED:-0}" != "1" ]; then
+        local reason="abnormal-exit:${rc}"
+        if [ "$rc" -eq 0 ]; then
+            reason="unknown"
+        fi
+        _autospec_conductor_record_stop "$reason" "${_AUTOSPEC_CONDUCTOR_CYCLE:-0}" normal
+    fi
+    _autospec_conductor_release_lock
+}
+
 autospec_conductor_run() {
     if [ -n "${HOME:-}" ]; then
         case ":${PATH:-}:" in
@@ -679,6 +753,18 @@ fi'
     local _stop_reason=""
     local _conductor_session="${AUTOSPEC_SESSION_ID:-conductor-$$}"
 
+    _AUTOSPEC_CONDUCTOR_CYCLE=0
+    _AUTOSPEC_CONDUCTOR_STOP_RECORDED=0
+    _AUTOSPEC_CONDUCTOR_LOCK_HELD=0
+    _AUTOSPEC_CONDUCTOR_RESILIENCE="$_resilience"
+    _AUTOSPEC_CONDUCTOR_REPO="$_repo"
+    _AUTOSPEC_CONDUCTOR_SESSION="$_conductor_session"
+    trap '_autospec_conductor_on_signal HUP' HUP
+    trap '_autospec_conductor_on_signal INT' INT
+    trap '_autospec_conductor_on_signal QUIT' QUIT
+    trap '_autospec_conductor_on_signal TERM' TERM
+    trap '_autospec_conductor_on_exit' EXIT
+
     # Acquire single-instance conductor lock (fail-open: errors never block).
     # Reuses resume's 300s/10800s staleness thresholds — never contradicts resume.
     if [ -f "$_resilience" ] && [ -n "$_repo" ]; then
@@ -689,7 +775,12 @@ fi'
             2>/dev/null || true)"
         if printf '%s' "$_lock_out" | grep -q 'DECISION:lock-held'; then
             printf '[conductor] WARN: another conductor holds the lock — exiting\n' >&2
+            _autospec_conductor_record_stop "lock-held" "$_cycle" normal
+            trap - EXIT HUP INT QUIT TERM
             return 1
+        fi
+        if printf '%s' "$_lock_out" | grep -q 'DECISION:lock-acquired'; then
+            _AUTOSPEC_CONDUCTOR_LOCK_HELD=1
         fi
     fi
 
@@ -702,6 +793,7 @@ fi'
             break
         fi
         _cycle=$((_cycle + 1))
+        _AUTOSPEC_CONDUCTOR_CYCLE="$_cycle"
         printf '[conductor] cycle %s starting\n' "$_cycle" >&2
 
         # ── Step 1: Resilience heartbeat ──────────────────────────────────────
@@ -1301,16 +1393,9 @@ fi'
         fi
     done
 
-    # Release conductor lock on exit.
-    if [ -f "$_resilience" ] && [ -n "$_repo" ]; then
-        bash "$_resilience" lock release \
-            --repo "$_repo" \
-            --session "$_conductor_session" \
-            2>/dev/null || true
-    fi
-
-    printf '[conductor] stopped: %s (cycles=%s)\n' \
-        "${_stop_reason:-unknown}" "$_cycle" >&2
+    _autospec_conductor_record_stop "${_stop_reason:-unknown}" "$_cycle" normal
+    _autospec_conductor_release_lock
+    trap - EXIT HUP INT QUIT TERM
 }
 
 # _conductor_maybe_write_digest: write the daily digest when the UTC day changes.

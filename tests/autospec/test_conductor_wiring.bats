@@ -451,6 +451,55 @@ _install_stub() {
   [[ "$output" == *"graceful-stop"* ]] || [[ "$output" == *"control"* ]]
 }
 
+
+@test "conductor: SIGTERM writes stopped marker, terminal state, and releases lock" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    "printf '%s\n' '{\"tier\":1,\"action\":\"run-backlog\",\"reason\":\"test\"}'"
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+
+  local resilience_log="$TEST_TMP/resilience.log"
+  cat > "$FAKE_SCRIPTS/autonomous-resilience.sh" <<EOF
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  'lock acquire') printf 'lock:acquire\n' >> '$resilience_log'; printf 'DECISION:lock-acquired\nLOCK_SESSION:test\n' ;;
+  'lock release') printf 'lock:release\n' >> '$resilience_log'; printf 'DECISION:lock-released\n' ;;
+  'state write')
+    shift 2
+    status=''
+    while [ "\$#" -gt 0 ]; do
+      case "\$1" in --status) status="\$2"; shift 2 ;; *) shift ;; esac
+    done
+    printf 'state:%s\n' "\$status" >> '$resilience_log'
+    printf 'DECISION:state-written\n'
+    ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$FAKE_SCRIPTS/autonomous-resilience.sh"
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  export AUTOSPEC_RUN_CMD='kill -TERM "$PPID"; sleep 1'
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=0 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 143 ]
+  [[ "$output" == *"[conductor] stopped: signal:TERM (cycle=1)"* ]]
+  grep -q 'state:stopped:signal:TERM:cycle-1' "$resilience_log"
+  grep -q 'lock:release' "$resilience_log"
+}
+
 # ── 7. autospec_conductor_run exists in the loop lib ─────────────────────────
 @test "conductor: autospec_conductor_run() is defined in scripts/lib/autospec-loop.sh" {
   run grep -c '^autospec_conductor_run()' "$LOOP_LIB"
