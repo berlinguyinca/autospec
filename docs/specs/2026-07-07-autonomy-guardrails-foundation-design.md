@@ -36,11 +36,19 @@ rollback hook that children can extend.
 3. `scripts/autonomous-premerge-gate.sh` runs those deterministic checks before
    QA/security scans when `--changed-files` is supplied. Blocking decisions apply
    `autospec:needs-human` through the existing label path and exit before merge.
-4. Successful gates may write
+4. `scripts/autonomous-guardrails.sh separation-of-powers --lane-metadata <json>`
+   validates deterministic lane metadata before approval: `author`, `verifier`,
+   and `approver` identities must be distinct, and `verifier_prompt` must be
+   adversarial/refute-oriented plus independent of author context.
+5. `scripts/autonomous-premerge-gate.sh --lane-metadata <json>` runs that
+   separation-of-powers check before QA/security scans. A violation exits with
+   `block separation_of_powers`, so an author-produced verification cannot merge.
+6. Successful gates may write
    `autospec.autonomous.merge_provenance.v1` via `--provenance-out`, capturing
-   repo, PR, changed files, rollback handle, gate evidence, and blast-radius
-   decision. #1546 can make this a durable audit ledger.
-5. `scripts/autonomous-resilience.sh post-merge-health` reuses `main-health`; a
+   repo, PR, changed files, rollback handle, gate evidence, blast-radius
+   decision, `separation_of_powers`, and auditable `lane_metadata` when provided.
+   #1546 can make this a durable audit ledger.
+7. `scripts/autonomous-resilience.sh post-merge-health` reuses `main-health`; a
    halt dispatches `AUTOSPEC_ROLLBACK_CMD --handle <rollback_handle>` from the
    provenance record. #1546 can replace the stub dispatch with the final rollback
    executor and canary signals.
@@ -50,5 +58,5 @@ rollback hook that children can extend.
 - No new dependencies.
 - No attempt to build the full human-review queue.
 - No mutation-testing implementation beyond the immutable verifier diff guard.
-- No final separation-of-powers identity model beyond deterministic provenance;
-  #1547 owns the author/verifier/approver identity enforcement.
+- No remote identity attestation beyond caller-supplied lane metadata; #1547
+  enforces deterministic separation for metadata that the pipeline supplies.
