@@ -6,7 +6,8 @@ from pathlib import Path
 
 from rag_ingest_common import write_index_json
 from rag_ingest_config import chunk_settings_hash, validate_chunk_settings
-from rag_ingest_index import build_index, build_incremental_index
+from rag_ingest_freshness import build_incremental_index
+from rag_ingest_index import build_index
 
 
 def parse_args():

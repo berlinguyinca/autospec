@@ -1,9 +1,10 @@
 """Core deterministic local retrieval/evaluation API."""
-import hashlib
 import math
 from collections import Counter
 from pathlib import Path
 from typing import Dict, Mapping, Sequence
+
+from rag_freshness import apply_freshness_guard
 
 from rag_retrieve_rank import bm25_rank, dense_rank, rerank_score, rrf_fuse
 from rag_retrieve_text import candidate_chunks, chunk_metadata
@@ -27,39 +28,8 @@ def retrieve(index: Mapping, config: Mapping, query: str, filters: Mapping[str, 
     rows = _result_rows(by_id, reranked, int(knobs["final_n"]))
     out = {"query": query, "mode": mode, "filters": dict(filters), "knobs": knobs, "stages": {"candidates": len(chunks), "dense": len(dense), "bm25": len(bm25), "fused": len(fused), "reranked": len(reranked)}, "freshness": {"status": "ok", "findings": []}, "answer_status": "ok", "results": rows}
     if root:
-        _apply_freshness_guard(out, rows, Path(root))
+        apply_freshness_guard(out, rows, Path(root))
     return out
-
-
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for block in iter(lambda: fh.read(1024 * 1024), b""):
-            h.update(block)
-    return h.hexdigest()
-
-
-def _apply_freshness_guard(out: Dict, rows: Sequence[Mapping], root: Path) -> None:
-    findings = []
-    for row in rows:
-        source = row.get("source_path") or row.get("doc_id")
-        expected = str(row.get("doc_content_hash") or row.get("metadata", {}).get("doc_content_hash", ""))
-        if not source or not expected:
-            continue
-        path = root / str(source)
-        if not path.exists():
-            findings.append({"chunk_id": row.get("chunk_id"), "doc_id": row.get("doc_id"), "status": "missing_doc", "source_path": str(source)})
-            continue
-        actual = _sha256_file(path)
-        if expected != actual:
-            findings.append({"chunk_id": row.get("chunk_id"), "doc_id": row.get("doc_id"), "status": "hash_mismatch", "source_path": str(source), "expected": expected, "actual": actual})
-    if findings and rows and findings[0].get("chunk_id") == rows[0].get("chunk_id"):
-        out["freshness"] = {"status": "stale_top_hit", "findings": findings}
-        out["answer_status"] = "rejected_stale_top_hit"
-        out["stale_results"] = list(rows)
-        out["results"] = []
-    else:
-        out["freshness"] = {"status": "ok" if not findings else "non_top_stale", "findings": findings}
 
 
 def _rerank(query: str, by_id: Mapping[str, Mapping], fused: Mapping[str, float], top_n: int):
