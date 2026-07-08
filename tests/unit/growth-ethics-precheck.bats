@@ -1,0 +1,52 @@
+#!/usr/bin/env bats
+
+REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
+PC="$REPO_ROOT/skills/autospec-shared/scripts/growth-ethics-precheck.sh"
+
+setup() { TMP="$(mktemp -d)"; export GROWTH_NOW_EPOCH=1000000; }
+teardown() { rm -rf "$TMP"; unset GROWTH_NOW_EPOCH; }
+
+@test "script exists and is bash -n clean" {
+  [ -f "$PC" ]; run bash -n "$PC"; [ "$status" -eq 0 ]
+}
+
+@test "disclosure: plain non-sponsored draft passes" {
+  printf 'Check out our open-source CLI, it is fast.\n' > "$TMP/d.md"
+  run bash "$PC" --disclosure "$TMP/d.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "disclosure: sponsored draft WITHOUT marker fails" {
+  printf 'This sponsored post highlights our tool.\n' > "$TMP/d.md"
+  run bash "$PC" --disclosure "$TMP/d.md"
+  [ "$status" -ne 0 ]
+}
+
+@test "disclosure: sponsored draft WITH marker passes" {
+  printf 'This sponsored post highlights our tool.\n#ad\n' > "$TMP/d.md"
+  run bash "$PC" --disclosure "$TMP/d.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "cadence: under cap passes" {
+  echo '{"approval":{"cadence_caps":{"default_per_platform_per_week":2}},"targets":{"communities":[]}}' > "$TMP/c.json"
+  # one published line, 1 day ago (epoch 1000000 - 86400)
+  echo '{"platform":"reddit","outcome":"published","ts":913600}' > "$TMP/l.jsonl"
+  run bash "$PC" --cadence "$TMP/c.json" "$TMP/l.jsonl" reddit
+  [ "$status" -eq 0 ]
+}
+
+@test "cadence: at cap fails" {
+  echo '{"approval":{"cadence_caps":{"default_per_platform_per_week":2}},"targets":{"communities":[]}}' > "$TMP/c.json"
+  printf '{"platform":"reddit","outcome":"published","ts":990000}\n{"platform":"reddit","outcome":"published","ts":990001}\n' > "$TMP/l.jsonl"
+  run bash "$PC" --cadence "$TMP/c.json" "$TMP/l.jsonl" reddit
+  [ "$status" -ne 0 ]
+}
+
+@test "cadence: old publishes outside 7-day window do not count" {
+  echo '{"approval":{"cadence_caps":{"default_per_platform_per_week":1}},"targets":{"communities":[]}}' > "$TMP/c.json"
+  # published 8 days ago: 1000000 - 8*86400 = 308800
+  echo '{"platform":"reddit","outcome":"published","ts":308800}' > "$TMP/l.jsonl"
+  run bash "$PC" --cadence "$TMP/c.json" "$TMP/l.jsonl" reddit
+  [ "$status" -eq 0 ]
+}
