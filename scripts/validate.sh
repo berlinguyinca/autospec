@@ -4404,6 +4404,10 @@ check_autonomy_guardrails_foundation() {
         || fail "autonomous-premerge-gate.sh missing provenance recording (issue #1543)"
     grep -q 'post-merge-health' scripts/autonomous-resilience.sh \
         || fail "autonomous-resilience.sh missing post-merge-health rollback hook (issue #1543)"
+    grep -q 'audit-log' scripts/autonomous-resilience.sh \
+        || fail "autonomous-resilience.sh missing queryable merge audit log (issue #1546)"
+    grep -q 'FOLLOWUP_ISSUE' scripts/autonomous-resilience.sh \
+        || fail "autonomous-resilience.sh missing rollback follow-up issue evidence (issue #1546)"
     grep -q 'autonomous-guardrails.sh' skills/autospec-autonomous/install.sh \
         || fail "autospec-autonomous install manifest missing autonomous-guardrails.sh (issue #1543)"
     grep -q 'autonomous-guardrails.sh' skills/autospec-autonomous/uninstall.sh \

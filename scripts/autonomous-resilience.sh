@@ -15,6 +15,7 @@
 #   quarantine  --repo OWNER/REPO --issue N [--failures N]
 #   main-health --repo OWNER/REPO
 #   post-merge-health --repo OWNER/REPO --provenance <json>
+#   audit-log query --repo OWNER/REPO [--audit-log <jsonl>] [--pr N] [--event NAME]
 #
 # Machine-readable output on stdout — one DECISION:<token> line per call:
 #   DECISION:state-written
@@ -123,6 +124,55 @@ read_state_json() {
     else
         printf '{}'
     fi
+}
+
+audit_log_path() {
+    local repo="$1" explicit="${2:-}"
+    if [ -n "$explicit" ]; then
+        printf '%s' "$explicit"
+        return
+    fi
+    if [ -n "${AUTOSPEC_MERGE_AUDIT_LOG:-}" ]; then
+        printf '%s' "$AUTOSPEC_MERGE_AUDIT_LOG"
+        return
+    fi
+    printf '%s/merge-audit.jsonl' "$(state_dir "$repo")"
+}
+
+append_audit_event() {
+    local repo="$1" audit_log="$2" event_json="$3"
+    mkdir -p "$(dirname "$audit_log")"
+    printf '%s\n' "$event_json" >> "$audit_log"
+    say "AUDIT_LOG:${audit_log}"
+}
+
+write_post_merge_audit_event() {
+    local repo="$1" provenance="$2" event="$3" health_output="$4" followup_url="${5:-}"
+    local audit_log event_json
+    audit_log="$(audit_log_path "$repo" "")"
+    event_json="$(jq -c -n \
+        --slurpfile prov "$provenance" \
+        --arg schema "autospec.autonomous.merge_audit.v1" \
+        --arg event "$event" \
+        --arg repo "$repo" \
+        --arg followup_issue_url "$followup_url" \
+        --arg health_output "$health_output" \
+        --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '($prov[0] // {}) as $p
+         | {
+             schema:$schema,
+             event:$event,
+             repo:$repo,
+             pr:($p.pr // 0),
+             workstream:($p.workstream // $p.lane // $p.source // "unknown"),
+             verifier_lane:($p.verifier_lane // $p.verifier // "unknown"),
+             rollback_handle:($p.rollback_handle // ""),
+             followup_issue_url:($followup_issue_url | select(length > 0) // null),
+             gate_evidence:($p.gate_evidence // null),
+             health_output:$health_output,
+             generated_at:$generated_at
+           }')"
+    append_audit_event "$repo" "$audit_log" "$event_json"
 }
 
 # Write state.json atomically via temp+mv.
@@ -652,6 +702,7 @@ cmd_post_merge_health() {
 
     if [ "$health_status" -eq 0 ]; then
         if printf '%s\n' "$health_output" | grep -q '^DECISION:continue$'; then
+            write_post_merge_audit_event "$repo" "$provenance" "post_merge_healthy" "$health_output" ""
             say "DECISION:no-rollback"
             return 0
         fi
@@ -664,9 +715,11 @@ cmd_post_merge_health() {
         return 0
     fi
 
-    local rollback_handle rollback_cmd pr
+    local rollback_handle rollback_cmd pr workstream verifier_lane followup_url
     rollback_handle="$(jq -r '.rollback_handle // empty' "$provenance" 2>/dev/null || echo "")"
     pr="$(jq -r '.pr // empty' "$provenance" 2>/dev/null || echo "")"
+    workstream="$(jq -r '.workstream // .lane // .source // "unknown"' "$provenance" 2>/dev/null || echo "unknown")"
+    verifier_lane="$(jq -r '.verifier_lane // .verifier // "unknown"' "$provenance" 2>/dev/null || echo "unknown")"
     if [ -z "$rollback_handle" ]; then
         die "post-merge-health: provenance missing rollback_handle"
     fi
@@ -677,9 +730,59 @@ cmd_post_merge_health() {
         notify_op "autospec: rollback required" \
             "Post-merge health failed for ${repo}; rollback handle ${rollback_handle}"
     fi
+    followup_url="$("$GH" issue create \
+        --repo "$repo" \
+        --title "autospec-autonomous rollback after post-merge health failure for PR #${pr:-unknown}" \
+        --body "$(printf 'Post-merge health failed after autonomous merge.\\n\\nRepo: %s\\nPR: #%s\\nRollback handle: `%s`\\nWorkstream: %s\\nVerifier lane: %s\\n\\nHealth evidence:\\n```\\n%s\\n```\\n' "$repo" "${pr:-unknown}" "$rollback_handle" "$workstream" "$verifier_lane" "$health_output")" \
+        --label "auto-implement" \
+        --label "regression" \
+        2>/dev/null || true)"
+    if [ -n "$followup_url" ]; then
+        say "FOLLOWUP_ISSUE:${followup_url}"
+    else
+        say "FOLLOWUP_ISSUE:unfiled"
+    fi
+    write_post_merge_audit_event "$repo" "$provenance" "post_merge_rollback" "$health_output" "$followup_url"
     say "DECISION:rollback"
     say "ROLLBACK_HANDLE:${rollback_handle}"
     exit 1
+}
+
+# ── Subcommand: audit-log ─────────────────────────────────────────────────────
+# audit-log query --repo OWNER/REPO [--audit-log <jsonl>] [--pr N] [--event NAME]
+cmd_audit_log() {
+    local subcmd="${1:-}"; shift || true
+    case "$subcmd" in
+        query) _audit_log_query "$@" ;;
+        *) die "audit-log: unknown subcommand '${subcmd}'. Use query." ;;
+    esac
+}
+
+_audit_log_query() {
+    local repo="" audit_log="" pr="" event=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --repo) repo="${2:-}"; shift 2 ;;
+            --audit-log) audit_log="${2:-}"; shift 2 ;;
+            --pr) pr="${2:-}"; shift 2 ;;
+            --event) event="${2:-}"; shift 2 ;;
+            *) die "audit-log query: unknown option: $1" ;;
+        esac
+    done
+    repo="$(resolve_repo "$repo")"
+    audit_log="$(audit_log_path "$repo" "$audit_log")"
+    if [ ! -f "$audit_log" ]; then
+        printf '[]\n'
+        return 0
+    fi
+    jq -s \
+        --arg repo "$repo" \
+        --arg pr "$pr" \
+        --arg event "$event" \
+        'map(select((.repo // "") == $repo))
+         | if $pr == "" then . else map(select((.pr|tostring) == $pr)) end
+        | if $event == "" then . else map(select((.event // "") == $event)) end' \
+        "$audit_log"
 }
 
 usage() {
@@ -695,6 +798,7 @@ Subcommands:
   quarantine  --repo OWNER/REPO --issue N [--failures N]
   main-health --repo OWNER/REPO
   post-merge-health --repo OWNER/REPO --provenance <json>
+  audit-log query --repo OWNER/REPO [--audit-log <jsonl>] [--pr N] [--event NAME]
 
 Outputs DECISION:<token> lines on stdout.
 Exit 0 = ok; 1 = lock-held/quarantine/halt; 2 = usage error.
@@ -714,6 +818,7 @@ case "$CMD" in
     quarantine)   cmd_quarantine   "$@" ;;
     main-health)  cmd_main_health  "$@" ;;
     post-merge-health) cmd_post_merge_health "$@" ;;
+    audit-log)    cmd_audit_log    "$@" ;;
     --help|-h)    usage; exit 0 ;;
     *)            die "unknown subcommand '${CMD}'. Run with --help for usage." ;;
 esac

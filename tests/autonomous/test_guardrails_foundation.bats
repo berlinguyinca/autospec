@@ -150,3 +150,88 @@ STUB
     printf '%s\n' "$output" | grep -q 'DECISION:rollback'
     grep -q 'rollback-ref-1543' "$ROLLBACK_LOG"
 }
+
+@test "post-merge rollback appends queryable audit event and files follow-up issue" {
+    provenance="$TMP/provenance.json"
+    audit_log="$TMP/audit/merge-audit.jsonl"
+    cat > "$provenance" <<'JSON'
+{
+  "schema": "autospec.autonomous.merge_provenance.v1",
+  "repo": "berlinguyinca/autospec",
+  "pr": 1546,
+  "workstream": "autonomous-guardrails",
+  "verifier_lane": "guardian",
+  "rollback_handle": "rollback-ref-1546",
+  "gate_evidence": {"suite":"validate","result":"pass"}
+}
+JSON
+    ROLLBACK_LOG="$TMP/rollback.log"
+    export ROLLBACK_LOG
+    cat > "$STUB_DIR/rollback-stub" <<'STUB'
+#!/bin/bash
+printf 'rollback %s\n' "$*" >> "$ROLLBACK_LOG"
+STUB
+    chmod +x "$STUB_DIR/rollback-stub"
+    cat > "$STUB_DIR/gh" <<'STUB'
+#!/bin/bash
+printf 'gh %s\n' "$*" >> "$GH_LOG"
+case "$*" in
+  *'commits/main/status'*) printf '{"state":"failure","statuses":[{"state":"failure","description":"validate failed"}]}\n' ;;
+  issue\ create*) printf 'https://github.com/berlinguyinca/autospec/issues/2001\n' ;;
+  *) printf '{}\n' ;;
+esac
+STUB
+    chmod +x "$STUB_DIR/gh"
+    export AUTOSPEC_GH_CMD="$STUB_DIR/gh"
+    export AUTOSPEC_ROLLBACK_CMD="$STUB_DIR/rollback-stub"
+    export AUTOSPEC_MERGE_AUDIT_LOG="$audit_log"
+
+    run bash "$RESILIENCE" post-merge-health --repo berlinguyinca/autospec --provenance "$provenance"
+
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q 'DECISION:rollback'
+    printf '%s\n' "$output" | grep -q 'FOLLOWUP_ISSUE:'
+    grep -q 'rollback-ref-1546' "$ROLLBACK_LOG"
+    grep -q 'issue create' "$GH_LOG"
+    jq -e 'select(.event == "post_merge_rollback" and .pr == 1546 and .rollback_handle == "rollback-ref-1546" and .followup_issue_url != null)' "$audit_log"
+
+    run bash "$RESILIENCE" audit-log query --repo berlinguyinca/autospec --audit-log "$audit_log" --pr 1546
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | jq -e 'length == 1 and .[0].event == "post_merge_rollback" and .[0].workstream == "autonomous-guardrails"'
+}
+
+@test "post-merge healthy signal appends queryable provenance audit event" {
+    provenance="$TMP/provenance.json"
+    audit_log="$TMP/audit/merge-audit.jsonl"
+    cat > "$provenance" <<'JSON'
+{
+  "schema": "autospec.autonomous.merge_provenance.v1",
+  "repo": "berlinguyinca/autospec",
+  "pr": 1546,
+  "workstream": "autonomous-guardrails",
+  "verifier_lane": "guardian",
+  "rollback_handle": "rollback-ref-1546",
+  "gate_evidence": {"suite":"validate","result":"pass"}
+}
+JSON
+    cat > "$STUB_DIR/gh" <<'STUB'
+#!/bin/bash
+case "$*" in
+  *'commits/main/status'*) printf '{"state":"success","statuses":[]}\n' ;;
+  *) printf '{}\n' ;;
+esac
+STUB
+    chmod +x "$STUB_DIR/gh"
+    export AUTOSPEC_GH_CMD="$STUB_DIR/gh"
+    export AUTOSPEC_MERGE_AUDIT_LOG="$audit_log"
+
+    run bash "$RESILIENCE" post-merge-health --repo berlinguyinca/autospec --provenance "$provenance"
+
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q 'DECISION:no-rollback'
+    jq -e 'select(.event == "post_merge_healthy" and .pr == 1546 and .rollback_handle == "rollback-ref-1546" and .gate_evidence.result == "pass")' "$audit_log"
+
+    run bash "$RESILIENCE" audit-log query --repo berlinguyinca/autospec --audit-log "$audit_log" --event post_merge_healthy
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | jq -e 'length == 1 and .[0].event == "post_merge_healthy" and .[0].verifier_lane == "guardian"'
+}
