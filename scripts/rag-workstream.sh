@@ -14,8 +14,8 @@ Usage:
   rag-workstream.sh chunk-boundary-check --chunks FILE
   rag-workstream.sh citation-check --claims FILE --chunks FILE
   rag-workstream.sh validate-design-doc --doc FILE
-  rag-workstream.sh ingest-index --config FILE --root DIR --out FILE
-  rag-workstream.sh retrieve --index FILE --config FILE --query TEXT [--filter KEY=VALUE] [knobs]
+  rag-workstream.sh ingest-index --config FILE --root DIR --out FILE [--previous-index FILE] [--changed-doc PATH]
+  rag-workstream.sh retrieve --index FILE --config FILE --query TEXT [--filter KEY=VALUE] [--root DIR] [knobs]
   rag-workstream.sh retrieve-eval --index FILE --config FILE --golden FILE [--mode hybrid|dense|bm25] [knobs]
   rag-workstream.sh query-router-eval --index FILE --config FILE --golden FILE [--mode hybrid|dense|bm25] [knobs]
   rag-workstream.sh eval-golden --index FILE --config FILE --golden FILE [--out FILE] [--mode hybrid|dense|bm25] [knobs]
@@ -254,8 +254,13 @@ def cmd_citation_check(args):
         if not span:
             findings.append(f"SUPPORTING_SPAN_MISSING:{chunk_id}")
             continue
-        if span.lower() not in str(chunk.get("text", "")).lower():
+        text = str(chunk.get("text", ""))
+        if span.lower() not in text.lower():
             findings.append(f"UNSUPPORTED_CITATION:{chunk_id}:{span}")
+            continue
+        asserted = str(claim.get("asserted_text", claim.get("claim", ""))).strip()
+        if asserted and asserted.lower() not in text.lower() and asserted.lower() not in span.lower():
+            findings.append(f"UNSUPPORTED_CITATION:{chunk_id}:{asserted}")
     if findings:
         for finding in findings:
             print(finding)

@@ -305,3 +305,4 @@ assert multi["metrics"]["recall_at_k"] > multi["baseline_metrics"]["recall_at_k"
 assert set(multi["results"][:2]) == {"install-target", "configure-target"}, multi
 PY
 }
+

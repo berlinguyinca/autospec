@@ -21,7 +21,9 @@ The parent gate enforces these invariants before child issues fill in the concre
 ```bash
 bash scripts/rag-workstream.sh config-version --config .autospec/rag-workstream/config.json
 bash scripts/rag-workstream.sh ingest-index --config .autospec/rag-workstream/config.json --root . --out reports/rag/index.json
-bash scripts/rag-workstream.sh retrieve --index reports/rag/index.json --config .autospec/rag-workstream/config.json --query "rrf_k" --filter doc_version=v2
+bash scripts/rag-workstream.sh ingest-index --config .autospec/rag-workstream/config.json --root . --previous-index reports/rag/index.json --changed-doc docs/runbooks/rag-documentation-database.md --out reports/rag/index.next.json
+bash scripts/rag-workstream.sh retrieve --index reports/rag/index.json --config .autospec/rag-workstream/config.json --query "rrf_k" --root .
+bash scripts/rag-workstream.sh retrieve --index reports/rag/index.json --config .autospec/rag-workstream/config.json --query "rrf_k" --filter doc_version=1
 bash scripts/rag-workstream.sh retrieve-eval --index reports/rag/index.json --config .autospec/rag-workstream/config.json --golden .autospec/rag-workstream/golden-set.json --mode hybrid --final-n 8
 bash scripts/rag-workstream.sh query-router-eval --index reports/rag/index.json --config .autospec/rag-workstream/config.json --golden .autospec/rag-workstream/golden-set.json --mode hybrid --final-n 8
 bash scripts/rag-workstream.sh eval-golden --index reports/rag/index.json --config .autospec/rag-workstream/config.json --golden .autospec/rag-workstream/golden-set.json --out reports/rag/golden-eval.json
@@ -39,10 +41,16 @@ bash scripts/rag-workstream.sh validate-design-doc --doc docs/runbooks/rag-docum
 
 Each emitted index carries `embedding_model_id`, `chunking.chunk_config_hash`, and `index_metadata.version_tuple`. The chunk hash is computed from the strategy, size/overlap, late-chunking toggle, contextual-prefix toggle, and boundary-preservation knobs; changing any of those values changes `index_version` and requires the downstream embedder to cleanly re-embed instead of appending into an old embedding space. When `chunking.contextual_prefix` is enabled, each chunk gets a cheap deterministic prefix in the style of Anthropic Contextual Retrieval; when `chunking.late_chunking` is enabled, the placeholder embedding input hash is derived from the full document to model Jina-style late chunking without adding external dependencies.
 
+`ingest-index --previous-index ... --changed-doc ...` performs deterministic incremental reindexing. It compares each current corpus file to the previous index's `docs_by_id[doc_id].latest_content_hash`, preserves untouched chunks byte-for-byte, marks changed document chunks as `is_latest=false`, and emits a new version for the touched doc only. The new chunk IDs include `doc_id`, content hash, version, ordinal, and text, which gives the downstream vector store a stable `doc_id` + content-hash invalidation key while preserving prior versions for explicit `doc_version` filters.
+
 
 ## Issue #1549 retrieval contract
 
 `retrieve` reads the materialized JSON index and applies metadata filters before any ranking, so knobs like `doc_version`, `section`, and `product_area` prune stale or off-area chunks before dense/BM25 scoring. The local dense lane is a deterministic hash-token placeholder rather than an embedding API; it deliberately remains dependency-free while preserving the tuning surface for `dense_top_k`. BM25 supplies exact-term coverage for jargon and config keys, and `fusion_weight` combines dense and sparse ranks through Reciprocal Rank Fusion (`rrf_k`). The retriever over-fetches with `dense_top_k` and `bm25_top_k`, keeps the top `rerank_top_n` fused candidates, applies a deterministic lexical reranker, and returns `final_n` chunks.
+
+When an index includes `docs_by_id`, retrieval serves only chunks marked `is_latest` unless the caller supplies a `doc_version` filter. Supplying `--root` enables the freshness guard: top hits are checked against the current file content hash, and a stale top hit returns `answer_status=rejected_stale_top_hit` with the stale rows quarantined under `stale_results` instead of answering from old content.
+
+`citation-check` requires each claim to name a retrieved `chunk_id`, provide a `supporting_span`, and keep both the supporting span and asserted claim text inside the cited chunk. Missing chunks, absent spans, or unsupported claim text are rejected before an answer can cite them.
 
 `retrieve-eval` runs the same retrieval path against a small golden set and reports nDCG, MRR, precision@k, and recall@k. Use `--mode dense` as the deterministic baseline and `--mode hybrid` for the always-hybrid production contract; the issue #1549 fixture proves the hybrid BM25+RRF path improves nDCG over dense-only on exact jargon while preserving metadata filtering.
 
