@@ -90,7 +90,9 @@ drain command invokes:
 omx exec --cd "$AUTOSPEC_REPO_DIR" --dangerously-bypass-approvals-and-sandbox '$autospec-run'
 ```
 
-Use `autospec-autonomous status --json` for monitoring integrations. Use
+Use `autospec-autonomous status --json` for monitoring integrations; its payload
+includes `state_status` when the conductor has written terminal or running state.
+Use
 `autospec-autonomous timeline --lines N` when an operator needs a human-readable
 sequence such as `4:30 am - implemented feature X` and `4:45 am - started
 research on X`, followed by estimated remaining work, rough ETA, and planned next
