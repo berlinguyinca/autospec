@@ -5,7 +5,8 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-STATE_DIR="${AUTOSPEC_AUTONOMOUS_OPERATOR_DIR:-$HOME/.autospec/autonomous-operator}"
+OPERATOR_BASE="$HOME/.autospec/autonomous-operator"
+STATE_DIR="${AUTOSPEC_AUTONOMOUS_OPERATOR_DIR:-$OPERATOR_BASE}"
 PID_FILE="${AUTOSPEC_AUTONOMOUS_PID_FILE:-$STATE_DIR/conductor.pid}"
 LOGPATH_FILE="${AUTOSPEC_AUTONOMOUS_LOGPATH_FILE:-$STATE_DIR/conductor.logpath}"
 DEFAULT_LOG_DIR="${AUTOSPEC_AUTONOMOUS_LOG_DIR:-$HOME/.autospec/logs}"
@@ -105,6 +106,60 @@ detect_repo_slug() {
     printf ''
 }
 
+# Resolve the "owner/repo" this invocation is about, in priority order:
+#   1. --repo / CONDUCTOR_REPO (explicit)         2. --repo-dir git origin
+#   3. cwd git origin                             4. gh detection
+# Emits an empty string when none resolve.
+resolve_repo_owner_repo() {
+    if [ -n "${CONDUCTOR_REPO:-}" ]; then
+        printf '%s' "$CONDUCTOR_REPO"
+        return 0
+    fi
+    _origin=""
+    if [ -n "${AUTOSPEC_REPO_DIR:-}" ]; then
+        _origin="$(git -C "$AUTOSPEC_REPO_DIR" config --get remote.origin.url 2>/dev/null || true)"
+    fi
+    if [ -z "$_origin" ]; then
+        _origin="$(git config --get remote.origin.url 2>/dev/null || true)"
+    fi
+    if [ -n "$_origin" ]; then
+        printf '%s' "$_origin" | sed 's#.*github.com[:/]##; s#\.git$##; s#/$##'
+        return 0
+    fi
+    detect_repo_slug
+}
+
+# Canonical filesystem slug for the resolved repo, matching the conductor's
+# state-dir convention (repo-slug.sh --canonical → owner__repo).  Falls back to
+# an inline transform if the helper is unavailable.  Empty when no repo resolves.
+operator_slug() {
+    _or="$(resolve_repo_owner_repo)"
+    [ -n "$_or" ] || return 0
+    _canon="$SCRIPT_DIR/repo-slug.sh"
+    if [ -f "$_canon" ]; then
+        _s="$(bash "$_canon" --canonical "$_or" 2>/dev/null || true)"
+        if [ -n "$_s" ]; then
+            printf '%s' "$_s"
+            return 0
+        fi
+    fi
+    printf '%s' "$_or" | tr '/:' '__'
+}
+
+# Scope the operator dir (PID/logpath/lock) per repo so conductors for different
+# repositories are independent singletons rather than one machine-global one
+# (issue #1577).  Explicit env overrides win and disable per-repo scoping.
+resolve_operator_paths() {
+    if [ -z "${AUTOSPEC_AUTONOMOUS_OPERATOR_DIR:-}" ]; then
+        _slug="$(operator_slug)"
+        if [ -n "$_slug" ]; then
+            STATE_DIR="$OPERATOR_BASE/$_slug"
+        fi
+    fi
+    PID_FILE="${AUTOSPEC_AUTONOMOUS_PID_FILE:-$STATE_DIR/conductor.pid}"
+    LOGPATH_FILE="${AUTOSPEC_AUTONOMOUS_LOGPATH_FILE:-$STATE_DIR/conductor.logpath}"
+}
+
 current_state_file() {
     _repo="${CONDUCTOR_REPO:-$(detect_repo_slug)}"
     if [ -n "$_repo" ]; then
@@ -163,6 +218,8 @@ print_status() {
         printf '"running":%s' "$_alive"
         printf ',"pid":%s' "$(json_escape "$_pid")"
         printf ',"log":%s' "$(json_escape "$_log")"
+        printf ',"operator_dir":%s' "$(json_escape "$STATE_DIR")"
+        printf ',"pid_file":%s' "$(json_escape "$PID_FILE")"
         printf ',"state_file":%s' "$(json_escape "$_state")"
         printf ',"ledger_file":%s' "$(json_escape "$_ledger")"
         printf ',"issues":%s' "$(json_escape "$_issues")"
@@ -174,6 +231,7 @@ print_status() {
     info "autospec-autonomous status"
     info "  running: $_alive"
     info "  pid:     ${_pid:-n/a}"
+    info "  pidfile: $PID_FILE"
     info "  log:     ${_log:-n/a}"
     info "  state:   ${_state:-n/a}"
     info "  ledger:  ${_ledger:-n/a}"
@@ -877,6 +935,9 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# Scope operator PID/logpath/lock per repo now that --repo/--repo-dir are parsed.
+resolve_operator_paths
 
 case "$ACTION" in
     run-foreground)

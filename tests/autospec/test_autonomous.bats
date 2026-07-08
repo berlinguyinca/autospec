@@ -4,6 +4,7 @@
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   GATE="$REPO_ROOT/scripts/autospec-autonomy-gate.sh"
+  AUTONOMOUS="$REPO_ROOT/scripts/autospec-autonomous.sh"
 }
 
 # --- 1. clear request → all gates skipped (gate returns OK on cost/scope) ---
@@ -99,4 +100,56 @@ setup() {
 @test "gate: bash -n clean" {
   run bash -n "$GATE"
   [ "$status" -eq 0 ]
+}
+
+# --- issue #1577: conductors are scoped per repo, not a global singleton ---
+
+@test "autonomous: bash -n clean" {
+  run bash -n "$AUTONOMOUS"
+  [ "$status" -eq 0 ]
+}
+
+@test "autonomous: operator pid file is scoped by repo slug" {
+  tmp="$(mktemp -d)"
+  run env HOME="$tmp" bash "$AUTONOMOUS" status --json --repo owner/repo-a
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"autonomous-operator/owner__repo-a/conductor.pid"* ]]
+  rm -rf "$tmp"
+}
+
+@test "autonomous: different repos resolve to different pid files" {
+  tmp="$(mktemp -d)"
+  a="$(env HOME="$tmp" bash "$AUTONOMOUS" status --json --repo owner/repo-a)"
+  b="$(env HOME="$tmp" bash "$AUTONOMOUS" status --json --repo owner/repo-b)"
+  [[ "$a" == *"owner__repo-a"* ]]
+  [[ "$b" == *"owner__repo-b"* ]]
+  [ "$a" != "$b" ]
+  rm -rf "$tmp"
+}
+
+@test "autonomous: explicit AUTOSPEC_AUTONOMOUS_OPERATOR_DIR disables per-repo scoping" {
+  tmp="$(mktemp -d)"
+  run env HOME="$tmp" AUTOSPEC_AUTONOMOUS_OPERATOR_DIR="$tmp/fixed" \
+    bash "$AUTONOMOUS" status --json --repo owner/repo-a
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$tmp/fixed/conductor.pid"* ]]
+  [[ "$output" != *"owner__repo-a"* ]]
+  rm -rf "$tmp"
+}
+
+@test "autonomous: a live conductor in repo A does not appear running for repo B" {
+  tmp="$(mktemp -d)"
+  # A long-lived process stands in for repo A's live conductor.
+  sleep 300 &
+  live_pid="$!"
+  mkdir -p "$tmp/.autospec/autonomous-operator/owner__repo-a"
+  printf '%s\n' "$live_pid" > "$tmp/.autospec/autonomous-operator/owner__repo-a/conductor.pid"
+
+  a="$(env HOME="$tmp" bash "$AUTONOMOUS" status --json --repo owner/repo-a)"
+  b="$(env HOME="$tmp" bash "$AUTONOMOUS" status --json --repo owner/repo-b)"
+  [[ "$a" == *'"running":true'* ]]
+  [[ "$b" == *'"running":false'* ]]
+
+  kill "$live_pid" 2>/dev/null || true
+  rm -rf "$tmp"
 }
