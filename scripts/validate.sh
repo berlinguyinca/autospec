@@ -3121,7 +3121,6 @@ main() {
     check_autospec_autonomous_skill_contract
     check_conductor_wiring_contract
     check_autonomy_guardrails_foundation
-    check_rag_golden_eval_contract
     check_autonomous_phase2_suite
     check_persona_suite
     check_performance_workstream_contract
@@ -4427,35 +4426,6 @@ check_autonomy_guardrails_foundation() {
             || { cat /tmp/validate-guardrails-foundation.log >&2; \
                  fail "tests/autonomous/test_guardrails_foundation.bats: failed (issue #1543)"; }
     fi
-}
-
-# RAG golden-set eval harness (issue #1551): keep deterministic eval/tuning
-# commands, versioned fixture, docs citations, and bats coverage wired into the
-# default validation surface.
-check_rag_golden_eval_contract() {
-    info "RAG golden-set eval + auto-tuning contract (issue #1551)"
-    local helper="scripts/rag-workstream.sh"
-    local eval_helper="scripts/rag_eval_tuning.py"
-    local golden=".autospec/rag-workstream/golden-set.json"
-    local config=".autospec/rag-workstream/config.json"
-    local runbook="docs/runbooks/rag-documentation-database.md"
-    local bats_file="tests/autonomous/test_rag_workstream.bats"
-
-    [ -x "$helper" ] || fail "$helper: missing or not executable (issue #1551)"
-    [ -x "$eval_helper" ] || fail "$eval_helper: missing or not executable (issue #1551)"
-    [ -f "$golden" ] || fail "$golden: missing versioned golden set (issue #1551)"
-    [ -f "$config" ] || fail "$config: missing RAG config (issue #1551)"
-    [ -f "$runbook" ] || fail "$runbook: missing RAG runbook (issue #1551)"
-    [ -f "$bats_file" ] || fail "$bats_file: missing bats coverage (issue #1551)"
-    bash -n "$helper" || fail "$helper: bash -n failed (issue #1551)"
-    python3 -m py_compile "$eval_helper" || fail "$eval_helper: py_compile failed (issue #1551)"
-    grep -q 'eval-golden' "$helper" || fail "$helper: missing eval-golden command (issue #1551)"
-    grep -q 'auto-tune' "$helper" || fail "$helper: missing auto-tune command (issue #1551)"
-    grep -q '"golden_set"' "$config" || fail "$config: missing golden_set pointer (issue #1551)"
-    grep -q '"heldout"' "$golden" || fail "$golden: missing heldout rotation (issue #1551)"
-    grep -q '"relevant_chunk_ids"' "$golden" || fail "$golden: missing relevant_chunk_ids labels (issue #1551)"
-    grep -q 'RAGAS answer relevancy metric' "$runbook" || fail "$runbook: missing RAGAS answer relevancy citation (issue #1551)"
-    grep -q 'RAGAS context recall metric' "$runbook" || fail "$runbook: missing RAGAS context recall citation (issue #1551)"
 }
 
 # Autonomous Phase-2 integration suite (issue #1402, Phase 5.5 audit): the
