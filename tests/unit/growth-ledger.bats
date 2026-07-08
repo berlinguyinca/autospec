@@ -44,3 +44,13 @@ line() { echo "{\"round\":1,\"source\":\"$1\",\"title\":\"t\",\"norm_title\":\"t
   run bash "$LG" --validate
   [ "$status" -ne 0 ]
 }
+
+@test "--stats on empty ledger emits valid JSON object {}" {
+  # GROWTH_LEDGER env var is set to a temp path that doesn't exist yet
+  run bash "$LG" --stats --json
+  [ "$status" -eq 0 ]
+  # Output must be valid JSON and be an object type
+  echo "$output" | jq -e 'type == "object"'
+  # Output must be exactly {}
+  [ "$output" = "{}" ]
+}

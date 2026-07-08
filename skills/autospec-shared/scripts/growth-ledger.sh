@@ -45,7 +45,12 @@ do_show() {
 }
 
 do_stats() {
-  latest | jq '
+  local rows; rows="$(latest)"
+  if [ -z "$rows" ] || [ "$rows" = "null" ] || [ "$rows" = "[]" ]; then
+    echo '{}'
+    return 0
+  fi
+  echo "$rows" | jq '
     group_by(.source) | map({
       key: .[0].source,
       value: {
