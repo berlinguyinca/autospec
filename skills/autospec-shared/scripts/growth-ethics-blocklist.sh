@@ -25,21 +25,28 @@ case "$cmd" in
   --effective)
     cfg="${1:?config path required}"
     [ -f "$cfg" ] || { echo "config not found: $cfg" >&2; exit 2; }
+    if ! jq -e . "$cfg" >/dev/null 2>&1; then
+      echo "cannot parse config: $cfg" >&2; exit 1
+    fi
     extra="$(jq -r '(.guardrails.extra_blocks // [])[]' "$cfg" 2>/dev/null || true)"
     printf '%s\n%s\n' "$BUILTIN_BLOCKS" "$extra" | awk 'NF' | sort -u
     ;;
   --assert-not-weakened)
     cfg="${1:?config path required}"
     [ -f "$cfg" ] || { echo "config not found: $cfg" >&2; exit 2; }
-    # Fail closed if the config declares ANY allow/exclude list naming a builtin.
+    if ! jq -e . "$cfg" >/dev/null 2>&1; then
+      echo "cannot parse config: $cfg" >&2; exit 1
+    fi
+    # Fail closed if the config names a builtin anywhere under .guardrails
+    # (except .guardrails.extra_blocks, which legitimately adds blocks).
+    if ! strings="$(jq -r 'del(.guardrails.extra_blocks) | .guardrails // {} | [.. | strings] | .[]' "$cfg")"; then
+      echo "cannot evaluate guardrails: $cfg" >&2; exit 1
+    fi
     denied=""
-    for key in allow allowlist exclude remove disable; do
-      hits="$(jq -r --arg k "$key" '(.guardrails[$k] // [])[]' "$cfg" 2>/dev/null || true)"
-      for h in $hits; do
-        if printf '%s\n' "$BUILTIN_BLOCKS" | grep -qx "$h"; then
-          denied="$denied $h"
-        fi
-      done
+    for s in $strings; do
+      if printf '%s\n' "$BUILTIN_BLOCKS" | grep -qx "$s"; then
+        denied="$denied $s"
+      fi
     done
     if [ -n "$denied" ]; then
       echo "growth.yml attempts to weaken built-in ethics blocks:$denied" >&2

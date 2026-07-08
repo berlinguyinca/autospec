@@ -39,3 +39,33 @@ BUILTINS="fake_reviews undisclosed_incentivized_reviews review_gating rating_vot
   [ "$status" -ne 0 ]
   [[ "$output" == *"fake_reviews"* ]]
 }
+
+@test "--assert-not-weakened fails on malformed JSON" {
+  echo 'not json {{{' > "$TMP/c.json"
+  run bash "$BL" --assert-not-weakened "$TMP/c.json"
+  [ "$status" -ne 0 ]
+}
+
+@test "--assert-not-weakened fails on a string-valued disable key" {
+  echo '{"guardrails":{"disable":"fake_reviews"}}' > "$TMP/c.json"
+  run bash "$BL" --assert-not-weakened "$TMP/c.json"
+  [ "$status" -ne 0 ]
+}
+
+@test "--assert-not-weakened fails on an unlisted key naming a builtin" {
+  echo '{"guardrails":{"disabled_blocks":["fake_reviews"]}}' > "$TMP/c.json"
+  run bash "$BL" --assert-not-weakened "$TMP/c.json"
+  [ "$status" -ne 0 ]
+}
+
+@test "--assert-not-weakened passes when extra_blocks redundantly names a builtin" {
+  echo '{"guardrails":{"extra_blocks":["fake_reviews"]}}' > "$TMP/c.json"
+  run bash "$BL" --assert-not-weakened "$TMP/c.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "--effective fails on malformed JSON" {
+  echo 'not json {{{' > "$TMP/c.json"
+  run bash "$BL" --effective "$TMP/c.json"
+  [ "$status" -ne 0 ]
+}
