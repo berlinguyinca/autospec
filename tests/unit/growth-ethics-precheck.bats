@@ -50,3 +50,29 @@ teardown() { rm -rf "$TMP"; unset GROWTH_NOW_EPOCH; }
   run bash "$PC" --cadence "$TMP/c.json" "$TMP/l.jsonl" reddit
   [ "$status" -eq 0 ]
 }
+
+@test "disclosure: sponsored draft with only a substring-like #adventure marker fails" {
+  printf 'This sponsored post. Check #adventure for more.\n' > "$TMP/d.md"
+  run bash "$PC" --disclosure "$TMP/d.md"
+  [ "$status" -ne 0 ]
+}
+
+@test "disclosure: sponsored draft with a genuine standalone #ad token passes" {
+  printf 'This sponsored post.\n#ad\n' > "$TMP/d.md"
+  run bash "$PC" --disclosure "$TMP/d.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "cadence: community-specific cap overrides higher default cap" {
+  echo '{"approval":{"cadence_caps":{"default_per_platform_per_week":5}},"targets":{"communities":[{"platform":"reddit","cadence_cap_per_week":1}]}}' > "$TMP/c.json"
+  echo '{"platform":"reddit","outcome":"published","ts":990000}' > "$TMP/l.jsonl"
+  run bash "$PC" --cadence "$TMP/c.json" "$TMP/l.jsonl" reddit
+  [ "$status" -ne 0 ]
+}
+
+@test "cadence: malformed ledger fails closed" {
+  echo '{"approval":{"cadence_caps":{"default_per_platform_per_week":2}},"targets":{"communities":[]}}' > "$TMP/c.json"
+  printf 'not valid json\n' > "$TMP/l.jsonl"
+  run bash "$PC" --cadence "$TMP/c.json" "$TMP/l.jsonl" reddit
+  [ "$status" -ne 0 ]
+}
