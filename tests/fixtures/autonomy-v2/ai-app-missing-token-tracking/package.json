@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "openai": "latest",
+    "react": "latest"
+  }
+}

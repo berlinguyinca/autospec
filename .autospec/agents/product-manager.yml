@@ -1,0 +1,3 @@
+id: product-manager
+title: Product Manager
+owns_categories: [product_baseline]

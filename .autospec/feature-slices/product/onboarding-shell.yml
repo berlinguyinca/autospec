@@ -1,0 +1,21 @@
+id: onboarding-shell
+title: Onboarding shell
+category: product
+summary: Onboarding shell
+source_rules:
+  - required_onboarding
+source_baselines:
+  - product
+requires_adapter: true
+supported_adapters:
+  - react-vite
+  - nextjs-app-router
+  - nextjs-pages-router
+implementation_kind: route
+runtime_claim_level: shell
+risk_level: low
+not_in_scope:
+  - database migrations
+  - auth/security behavior changes
+  - dependency installation
+  - provider calls

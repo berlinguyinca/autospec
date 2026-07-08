@@ -1,0 +1,10 @@
+{
+  "blocking_findings": [
+    {
+      "specialist": "security-engineer",
+      "verdict": "blocked"
+    }
+  ],
+  "schema": 1,
+  "verdict": "blocked"
+}

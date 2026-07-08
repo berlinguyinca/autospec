@@ -1,0 +1,18 @@
+{
+  "entries": [
+    {
+      "category": "testing",
+      "evidence": [
+        "test_evidence"
+      ],
+      "frequency": 2,
+      "id": "learn-missing-focused-test",
+      "lesson_type": "test_needed",
+      "schema": 1,
+      "source": "verifier",
+      "status": "candidate",
+      "summary": "Missing focused test"
+    }
+  ],
+  "schema": 1
+}

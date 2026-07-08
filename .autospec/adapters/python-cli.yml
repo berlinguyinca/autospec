@@ -1,0 +1,26 @@
+id: "python-cli"
+title: "Python CLI"
+stack_profiles:
+  - "python-cli-tool"
+status: "enabled"
+confidence_required: 0.8
+supported_feature_slices:
+  - "report-export-shell"
+allowed_paths:
+  - "src/**"
+  - "docs/**"
+  - ".autospec/**"
+  - "tests/**"
+forbidden_paths:
+  - ".github/workflows/**"
+  - ".env"
+  - ".env.*"
+  - "**/migrations/**"
+  - "package.json"
+  - "pyproject.toml"
+validation:
+  focused_commands:
+    - "bash scripts/autospec-verify-runtime-feature.sh --dry-run"
+risk:
+  default_level: "low"
+  requires_human_guidance: false

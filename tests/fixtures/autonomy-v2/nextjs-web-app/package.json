@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "next": "latest",
+    "react": "latest",
+    "typescript": "latest"
+  },
+  "devDependencies": {
+    "@playwright/test": "latest"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "chart.js": "latest",
+    "d3": "latest",
+    "recharts": "latest",
+    "react": "latest"
+  }
+}

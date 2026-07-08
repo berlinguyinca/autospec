@@ -1,0 +1,6 @@
+schema: 1
+metrics:
+  - id: example.metric
+    title: Example metric
+    product_purpose: Describe why this metric matters.
+    owner: product

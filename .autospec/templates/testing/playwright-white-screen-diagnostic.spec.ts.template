@@ -1,0 +1,5 @@
+// Template: capture console and network failures for white-screen diagnostics.
+test('white-screen diagnostic evidence', async ({ page }) => {
+  const messages: string[] = [];
+  page.on('console', message => messages.push(message.text()));
+});

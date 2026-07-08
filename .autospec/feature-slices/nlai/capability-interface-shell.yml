@@ -1,0 +1,21 @@
+id: capability-interface-shell
+title: NLAI capability interface shell
+category: nlai
+summary: NLAI capability interface shell
+source_rules:
+  - required_nlai_capability_registry
+source_baselines:
+  - nlai
+requires_adapter: true
+supported_adapters:
+  - react-vite
+  - nextjs-app-router
+  - nextjs-pages-router
+implementation_kind: route
+runtime_claim_level: shell
+risk_level: low
+not_in_scope:
+  - database migrations
+  - auth/security behavior changes
+  - dependency installation
+  - provider calls

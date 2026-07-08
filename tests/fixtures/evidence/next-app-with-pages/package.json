@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "next": "1.0.0",
+    "react": "1.0.0",
+    "react-dom": "1.0.0"
+  },
+  "scripts": {
+    "dev": "next dev"
+  }
+}

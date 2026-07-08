@@ -1,0 +1,3 @@
+id: dependency-steward
+title: Dependency Steward
+owns_categories: [dependencies]

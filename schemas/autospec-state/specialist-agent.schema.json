@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "can_approve_autospec_internally": {
+      "const": false
+    },
+    "can_block_promotion": {
+      "type": "boolean"
+    },
+    "default_review_dimensions": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "forbidden_actions": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "id": {
+      "type": "string"
+    },
+    "owns_categories": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "permissions": {
+      "type": "object"
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "title",
+    "owns_categories",
+    "default_review_dimensions",
+    "can_block_promotion",
+    "can_approve_autospec_internally",
+    "forbidden_actions",
+    "permissions"
+  ],
+  "type": "object"
+}
