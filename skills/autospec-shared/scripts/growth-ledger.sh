@@ -59,8 +59,8 @@ do_stats() {
       key: .[0].source,
       value: {
         filed:        (map(select(.issue != 0)) | length),
-        merged_clean: (map(select(.outcome=="merged_clean")) | length),
-        published:    (map(select(.outcome=="published")) | length),
+        merged_clean: (map(select(.issue != 0 and .outcome=="merged_clean")) | length),
+        published:    (map(select(.issue != 0 and .outcome=="published")) | length),
         refuted:      (map(select(.outcome=="refuted")) | length)
       }
     }) | from_entries'

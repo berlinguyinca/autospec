@@ -39,6 +39,15 @@ line() { echo "{\"round\":1,\"source\":\"$1\",\"title\":\"t\",\"norm_title\":\"t
   echo "$output" | jq -e '.community.refuted == 1'
 }
 
+@test "stats: issue:0 published row does not inflate published count" {
+  bash "$LG" --append "$(line community artifact 9 pending)"
+  bash "$LG" --append "$(line community outbound 0 published)"
+  run bash "$LG" --stats --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.community.published == 0'
+  echo "$output" | jq -e '.community.filed == 1'
+}
+
 @test "validate rejects a line missing a required key" {
   echo '{"round":1,"source":"x"}' > "$GROWTH_LEDGER"
   run bash "$LG" --validate
