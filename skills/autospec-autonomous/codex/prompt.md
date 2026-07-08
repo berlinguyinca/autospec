@@ -63,7 +63,8 @@ or after `. "$HOME/.autospec/env"`:
 | Command | Purpose |
 |---------|---------|
 | `autospec-autonomous [start]` | Start the detached conductor. |
-| `autospec-autonomous-status` | Print PID, log path, conductor state, spend ledger, and recent log tail. |
+| `autospec-autonomous list` | Enumerate repo-scoped conductors with PID, liveness, log path, state, heartbeat, and launch provenance. |
+| `autospec-autonomous-status` | Print PID, log path, conductor state, spend ledger, and recent log tail; pass `--all --json` to enumerate all conductors. |
 | `autospec-autonomous-timeline` | Print a chronological plain-English activity report plus queue forecast, ETA, and item timing from the conductor log. |
 | `autospec-autonomous-monitor` | Reprint the timeline/report on an interval. Default every 300 seconds. |
 | `autospec-autonomous-logs` | Print the current conductor log tail. |
@@ -88,6 +89,10 @@ omx exec --cd "$AUTOSPEC_REPO_DIR" --dangerously-bypass-approvals-and-sandbox '$
 
 Use `autospec-autonomous status --json` for monitoring integrations; its payload
 includes `state_status` when the conductor has written terminal or running state.
+Use `autospec-autonomous list --json` or `autospec-autonomous status --all --json`
+for fleet visibility across `~/.autospec/autonomous-operator/*/conductor.pid`; each
+row includes repo slug, PID liveness, log path, state/park/heartbeat metadata, and
+launch provenance from `launch.json`.
 Use
 `autospec-autonomous timeline --lines N` when an operator needs a human-readable
 sequence such as `4:30 am - implemented feature X` and `4:45 am - started
@@ -325,7 +330,7 @@ monitor failures, not proof that the issue failed.
 - `skills/autospec-autonomous/SKILL.md` — Claude Code adapter (authoritative).
 - `skills/autospec-autonomous/codex/prompt.md` — Codex CLI mirror (lockstep).
 - `skills/autospec-autonomous/opencode/agent.md` — OpenCode mirror (lockstep).
-- `autospec-autonomous.sh` — installed operator lifecycle command (`start`, `status`, `timeline`, `logs`, `watch`, `stop`, `restart`).
+- `autospec-autonomous.sh` — installed operator lifecycle command (`start`, `list`, `status`, `timeline`, `logs`, `watch`, `stop`, `restart`).
 - `autospec-autonomous-run-drain.sh` — installed Tier-1 drain wrapper that runs `$autospec-run` through `omx exec`.
 - `autospec-loop.sh` (shared loop driver, `${AUTOSPEC_SCRIPTS_DIR}/lib/`) — extended with `autospec_conductor_run()`, the never-idle conductor entry point wiring control-channel → waterfall → Tier 1.5 promotion / Tier 2–4 discovery → premerge-gate → drain → spend-ledger → resilience → digest (issue #1378).
 - `autonomous-control-channel.sh` — label query → command decision (Phase 1, Issue #1373).
