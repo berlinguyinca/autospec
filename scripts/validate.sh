@@ -3234,6 +3234,7 @@ main() {
     check_ux_ui_workstream_contract
     check_reuse_lens_suite
     check_control_plane_bootstrap_contract
+    check_growth_shared_contract
 
 
 # Architecture fitness-function engine (issue #1533): the declarative registry
@@ -4693,6 +4694,43 @@ check_control_plane_bootstrap_contract() {
         info "  running: $bats_file"
         bash "$bats_file" >/tmp/validate-control-plane-bootstrap.log 2>&1 \
             || { cat /tmp/validate-control-plane-bootstrap.log >&2; fail "$bats_file: failed (issue #1611)"; }
+    fi
+}
+
+# growth-shared contract: the AutoSpec Growth foundation's six shared
+# primitives (config schema validator, ethics blocklist, ethics pre-check,
+# append-only ledger, source weights, measurement seam) must stay bash -n
+# clean and pass their bats coverage. tests/unit/growth-*.bats is a NET-NEW
+# set of suites with no existing glob, so per the gate-atomicity rule
+# (feedback_validate_must_gate_every_test_dir) it must be enumerated here in
+# the same commit that lands it.
+check_growth_shared_contract() {
+    info "growth-shared contract: bash -n + tests/unit/growth-*.bats"
+    local s
+    for s in validate-growth-config growth-ethics-blocklist growth-ethics-precheck \
+             growth-ledger growth-source-weights growth-measure; do
+        check_bash_syntax "skills/autospec-shared/scripts/$s.sh"
+        [ -f "skills/autospec-shared/scripts/$s.sh" ] \
+            || fail "skills/autospec-shared/scripts/$s.sh: required growth-shared script missing"
+    done
+    if ! command -v bats >/dev/null 2>&1; then
+        info "  bats not available — skipping growth-shared bats suites"
+        return 0
+    fi
+    local _any=0
+    local t
+    for t in tests/unit/growth-config-validate.bats tests/unit/growth-ethics-blocklist.bats \
+             tests/unit/growth-ethics-precheck.bats tests/unit/growth-ledger.bats \
+             tests/unit/growth-source-weights.bats tests/unit/growth-measure.bats; do
+        [ -f "$t" ] || fail "$t: growth-shared bats coverage missing"
+        _any=1
+        info "  running: $t"
+        bats "$t" >/tmp/validate-growth-shared-suite.log 2>&1 \
+            || { cat /tmp/validate-growth-shared-suite.log >&2; \
+                 fail "$t: failed (growth-shared contract)"; }
+    done
+    if [ "$_any" -eq 0 ]; then
+        fail "tests/unit/growth-*.bats: no growth-shared contract tests found"
     fi
 }
 
