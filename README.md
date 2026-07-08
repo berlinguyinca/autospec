@@ -142,8 +142,14 @@ Known limitations:
 
 - The full workflow assumes GitHub issue and PR access.
 - Some release and QA gates depend on optional tools such as `bats`, `ajv`, `yq`, browser automation, or target-repo services.
-- Long-running autonomous workflows are powerful but intentionally outside the V61 launch focus.
+- The V61-V74 launch slice is complete; long-running autonomous workflows are
+  now tracked as the Phase-4 platform workstream rather than as launch blockers.
 - Public docs are improving; skill-level READMEs remain the most detailed operational references.
+
+For the current autonomous platform source of truth, see
+[`docs/specs/2026-07-06-autospec-autonomous-platform-design.md`](docs/specs/2026-07-06-autospec-autonomous-platform-design.md).
+For companion repository boundaries, see
+[`docs/companion-repositories.md`](docs/companion-repositories.md).
 
 ## Documentation
 

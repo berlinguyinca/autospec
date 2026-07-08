@@ -22,6 +22,7 @@ AutoSpec is a spec-first workflow suite for AI-assisted software delivery. These
 - [User manual](USER_MANUAL.md)
 - [Autonomy charter](AUTONOMY-CHARTER.md)
 - [Target repo setup](target-repo-setup.md)
+- [Companion repository map](companion-repositories.md)
 
 ## Launch Artifacts
 
@@ -30,3 +31,4 @@ AutoSpec is a spec-first workflow suite for AI-assisted software delivery. These
 - [Screenshots placeholder](assets/screenshots-placeholder.md)
 - [Social preview placeholder](assets/social-preview-placeholder.md)
 - [V60 final report](reports/v60-final-report.md)
+- [Spec state reconciliation report](reports/spec-state-reconciliation-2026-07-08.md)
