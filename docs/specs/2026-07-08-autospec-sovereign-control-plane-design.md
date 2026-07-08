@@ -281,6 +281,7 @@ CostRecorded
 OperatorIntervened
 PolicyResolved
 WorkerHeartbeat
+ProgressUpdated
 ```
 
 Every event includes:
@@ -315,8 +316,26 @@ actual_cost_usd
 risk_level
 status
 summary
+progress_percent
+progress_phase
+current_item_title
+current_item_url
+queue_ready_count
+queue_blocked_count
+queue_claimed_count
+queue_remaining_count
+estimated_next_item_at
+estimated_completion_at
+planned_next_step
 artifact_links[]
 ```
+
+Progress fields are normalized operator telemetry, not decoration. Autospec should
+emit `ProgressUpdated` whenever the conductor selects work, starts implementation,
+opens a PR, starts validation, blocks, parks, merges, or recalculates queue state.
+When exact completion is unknowable, the emitter should still provide bounded,
+human-readable progress: current phase, current work item, queue counts, planned
+next step, and a best-effort ETA with confidence.
 
 Ordering:
 
@@ -355,6 +374,7 @@ POST /v1/events/batch
 GET  /v1/projects
 GET  /v1/projects/resolve?repo=OWNER/REPO
 GET  /v1/projects/:id/runs
+GET  /v1/runs/:id/progress
 GET  /v1/runs/:id/timeline
 GET  /v1/runs/:id/events?after_event_id=...
 GET  /v1/runs/:id/costs
@@ -377,6 +397,34 @@ with 5s, 10s, 30s, and paused options. Responses include:
 }
 ```
 
+`GET /v1/runs/:id/progress` returns the latest normalized progress snapshot:
+
+```json
+{
+  "run_id": "run_...",
+  "status": "running",
+  "progress_percent": 42,
+  "phase": "implementation",
+  "current_item": {
+    "title": "Build observatory operator UI shell",
+    "url": "https://github.com/..."
+  },
+  "queue": {
+    "ready": 3,
+    "claimed": 1,
+    "blocked": 11,
+    "remaining": 14
+  },
+  "elapsed_ms": 5400000,
+  "current_item_elapsed_ms": 1200000,
+  "estimated_next_item_at": "2026-07-08T20:20:00Z",
+  "estimated_completion_at": "2026-07-08T23:30:00Z",
+  "eta_confidence": "low",
+  "planned_next_step": "wait for PR checks, merge if green, then pick #1606",
+  "last_event_id": "evt_..."
+}
+```
+
 ## Developer/Operator UI
 
 The UI is dense, utilitarian, and operator-focused. It should feel like GitHub
@@ -386,20 +434,32 @@ executive BI dashboard.
 Primary screens:
 
 1. **Live Fleet** — projects, repos, status, current item, agent, model, elapsed,
-   cost, risk, last event.
+   cost, risk, last event, and an inline progress bar for each active run.
 2. **Run Timeline** — chronological human-readable activity stream.
-3. **Work Item Detail** — issue, policy decision, branch/worktree, PR, commits,
+3. **Run Progress** — a plain-English progress panel with percent complete,
+   current phase, current item, item elapsed time, queue counts, estimated time
+   until the next item starts, estimated completion, planned next step, stale
+   heartbeat warnings, and the last event that changed the estimate.
+4. **Work Item Detail** — issue, policy decision, branch/worktree, PR, commits,
    validations, CI, cost, duration, blocker, artifacts.
-4. **Queue/Backlog** — `auto-implement`, `needs-classify`,
+5. **Queue/Backlog** — `auto-implement`, `needs-classify`,
    `needs-autospec-template`, blocked issues, priority order.
-5. **Failures/Blockers** — failed CI, failed validation, secret scan, stale lock,
+6. **Failures/Blockers** — failed CI, failed validation, secret scan, stale lock,
    malformed issue, missing policy, main red, quota park.
-6. **Workers/Agents** — host, repo, PID/session, cycle, heartbeat, lock owner,
+7. **Workers/Agents** — host, repo, PID/session, cycle, heartbeat, lock owner,
    model/harness, last log line, status.
-7. **Policy Decision Inspector** — resolved policy, policy digest, project class,
+8. **Policy Decision Inspector** — resolved policy, policy digest, project class,
    priority score, risk score, privacy tier, merge permission, rejected alternatives.
-8. **Cost/Duration/Outcome Reports** — per org, workspace, project, repo, operator,
+9. **Cost/Duration/Outcome Reports** — per org, workspace, project, repo, operator,
    worker, model, skill, issue, PR, and time window.
+
+The progress bar must be useful even when autospec cannot know the true total
+amount of future work. For backlog-drain runs, compute percent from completed
+work items over completed + ready + claimed + blocked known work. For never-idle
+discovery loops, cap progress at the current bounded batch or cycle window and
+label the run as continuous. A stale heartbeat, missing PR, blocked validation,
+quota park, or human-needed state must be reflected beside the bar instead of
+pretending forward progress is happening.
 
 Filters:
 
@@ -507,6 +567,10 @@ Policy validation must pass before a downloaded governance policy is trusted.
   in Postgres.
 - The web UI shows fleet, timeline, work item, blockers, workers, policy decision,
   and cost/duration/outcome views with 10-second polling.
+- The web UI shows a per-run progress bar and progress detail panel with current
+  item, queue counts, elapsed time, ETA, planned next step, and stale/error state.
+- `GET /v1/runs/:id/progress` returns the latest progress snapshot and updates
+  from `ProgressUpdated` plus existing run/work-item events.
 - Autospec emits structured events to a local outbox and flushes them when configured.
 - Autospec continues working when the observatory is offline.
 - Privacy-tier enforcement rejects over-shared events both client-side and server-side.
@@ -535,4 +599,3 @@ Future version specs are tracked in
 `docs/specs/2026-07-08-autospec-sovereign-control-plane-future-versions.md`.
 They are intentionally outside MVP scope but must shape data-model and API
 decisions so v1 does not paint the platform into a corner.
-
