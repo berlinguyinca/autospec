@@ -13,14 +13,16 @@ Usage:
   autonomous-guardrails.sh diff-guard --changed-files <file> [--lane implementer|verifier]
   autonomous-guardrails.sh mutation-guard --baseline <json> --current <json>
   autonomous-guardrails.sh blast-radius --changed-files <file> [--fenced-surfaces <yml>] [--json]
+  autonomous-guardrails.sh separation-of-powers --lane-metadata <json> [--json]
   autonomous-guardrails.sh provenance \
       --repo OWNER/REPO --pr N --changed-files <file> --gate-evidence <json> \
-      --rollback-handle <ref-or-command> --out <json>
+      [--lane-metadata <json>] --rollback-handle <ref-or-command> --out <json>
 
 Decisions:
   diff-guard exits 1 with DECISION:block when an implementer changes test/eval-harness files.
   mutation-guard exits 1 with DECISION:block when current mutation score drops below baseline.
   blast-radius exits 1 with DECISION:quarantine when fenced/high-risk paths changed.
+  separation-of-powers exits 1 when author/verifier/approver overlap or verifier prompt is not adversarial+independent.
   provenance writes autospec.autonomous.merge_provenance.v1 JSON.
 USAGE
 }
@@ -218,8 +220,84 @@ blast_radius_json() {
     dir="$(cd "$(dirname "$0")" && pwd)"
     python3 "$dir/blast-radius-classifier.py" --changed-files "$changed_files" --fenced-surfaces "$fenced_surfaces" | jq 'del(.exit_status)'
 }
+
+separation_of_powers_json() {
+    local lane_metadata="$1"
+    jq -c '
+        def actor($k):
+          (.[$k] // {}) as $v
+          | if ($v|type) == "object" then {
+              lane: (($v.lane // $v.name // $v.id // "")|tostring),
+              agent_id: (($v.agent_id // $v.agent // $v.context_id // $v.id // $v.lane // "")|tostring)
+            }
+            else {lane: ($v|tostring), agent_id: ($v|tostring)} end;
+        def norm: ascii_downcase | gsub("[^a-z0-9]+"; "-") | gsub("(^-)|(-$)"; "");
+        (actor("author")) as $author
+        | (actor("verifier")) as $verifier
+        | (actor("approver")) as $approver
+        | (.verifier_prompt // {}) as $prompt
+        | (($prompt.mode // "")|tostring|ascii_downcase) as $mode
+        | (($prompt.context // "")|tostring|ascii_downcase) as $context
+        | (($prompt.text // $prompt.body // "")|tostring|ascii_downcase) as $text
+        | [
+            (if (($author.agent_id|norm) == "" or ($verifier.agent_id|norm) == "" or ($approver.agent_id|norm) == "") then "missing_lane_identity" else empty end),
+            (if (($author.agent_id|norm) != "" and ($author.agent_id|norm) == ($verifier.agent_id|norm)) or (($author.lane|norm) != "" and ($author.lane|norm) == ($verifier.lane|norm)) then "author_verifier_overlap" else empty end),
+            (if (($author.agent_id|norm) != "" and ($author.agent_id|norm) == ($approver.agent_id|norm)) or (($author.lane|norm) != "" and ($author.lane|norm) == ($approver.lane|norm)) then "author_approver_overlap" else empty end),
+            (if (($verifier.agent_id|norm) != "" and ($verifier.agent_id|norm) == ($approver.agent_id|norm)) or (($verifier.lane|norm) != "" and ($verifier.lane|norm) == ($approver.lane|norm)) then "verifier_approver_overlap" else empty end),
+            (if (($mode|test("adversarial|refute")) or ($text|test("adversarial|refute"))) then empty else "verifier_prompt_not_adversarial" end),
+            (if (($context|test("independent")) or ($text|test("independent"))) then empty else "verifier_prompt_not_independent" end)
+          ] as $violations
+        | {
+            schema: "autospec.autonomous.separation_of_powers.v1",
+            decision: (if ($violations|length) == 0 then "allow" else "block" end),
+            reason: (if ($violations|length) == 0 then "distinct_adversarial_lanes" else "separation_of_powers_violation" end),
+            violations: $violations,
+            lane_metadata: {author:$author, verifier:$verifier, approver:$approver},
+            verifier_prompt: {mode:$mode, context:$context}
+          }
+    ' "$lane_metadata"
+}
+
+emit_separation_of_powers() {
+    local result="$1"
+    if [ "$(printf '%s' "$result" | jq -r '.decision')" = "allow" ]; then
+        printf 'DECISION:allow\n'
+        printf 'REASON:distinct_adversarial_lanes\n'
+        return 0
+    fi
+    printf 'DECISION:block\n'
+    printf 'REASON:separation_of_powers_violation\n'
+    printf '%s\n' "$result" | jq -r '.violations[] | "VIOLATION:" + .'
+}
+
+cmd_separation_of_powers() {
+    local lane_metadata="" json=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --lane-metadata) lane_metadata="${2:-}"; shift 2 ;;
+            --json) json=1; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "separation-of-powers: unknown option: $1" ;;
+        esac
+    done
+    require_file "$lane_metadata" "--lane-metadata"
+
+    local result
+    if ! result="$(separation_of_powers_json "$lane_metadata")"; then
+        die "separation-of-powers: invalid JSON: $lane_metadata"
+    fi
+
+    if [ "$json" -eq 1 ]; then
+        printf '%s\n' "$result"
+    else
+        emit_separation_of_powers "$result"
+    fi
+
+    [ "$(printf '%s' "$result" | jq -r '.decision')" = "allow" ]
+}
+
 cmd_provenance() {
-    local repo="" pr="" changed_files="" gate_evidence="" rollback_handle="" out=""
+    local repo="" pr="" changed_files="" gate_evidence="" rollback_handle="" out="" lane_metadata=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --repo) repo="${2:-}"; shift 2 ;;
@@ -227,6 +305,7 @@ cmd_provenance() {
             --changed-files) changed_files="${2:-}"; shift 2 ;;
             --gate-evidence) gate_evidence="${2:-}"; shift 2 ;;
             --rollback-handle) rollback_handle="${2:-}"; shift 2 ;;
+            --lane-metadata) lane_metadata="${2:-}"; shift 2 ;;
             --out) out="${2:-}"; shift 2 ;;
             -h|--help) usage; exit 0 ;;
             *) die "provenance: unknown option: $1" ;;
@@ -238,13 +317,18 @@ cmd_provenance() {
     [ -n "$out" ] || die "provenance: --out is required"
     require_file "$changed_files" "--changed-files"
     require_file "$gate_evidence" "--gate-evidence"
-
-    local changed_json evidence_json blast_json generated_at
+    local changed_json evidence_json blast_json generated_at separation_json lane_metadata_json
     changed_json="$(read_changed_files "$changed_files" | json_array_from_lines)"
     evidence_json="$(cat "$gate_evidence")"
     blast_json="$(blast_radius_json "$changed_files")"
+    if [ -n "$lane_metadata" ]; then
+        separation_json="$(cmd_separation_of_powers --lane-metadata "$lane_metadata" --json)"
+        lane_metadata_json="$(printf '%s' "$separation_json" | jq -c '.lane_metadata')"
+    else
+        separation_json='{"schema":"autospec.autonomous.separation_of_powers.v1","decision":"not_recorded","reason":"lane_metadata_not_provided","violations":[]}'
+        lane_metadata_json='null'
+    fi
     generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
     mkdir -p "$(dirname "$out")"
     jq -n \
         --arg schema 'autospec.autonomous.merge_provenance.v1' \
@@ -255,7 +339,9 @@ cmd_provenance() {
         --argjson changed_files "$changed_json" \
         --argjson gate_evidence "$evidence_json" \
         --argjson blast_radius "$blast_json" \
-        '{schema:$schema, repo:$repo, pr:$pr, generated_at:$generated_at, rollback_handle:$rollback_handle, changed_files:$changed_files, gate_evidence:$gate_evidence, blast_radius:$blast_radius}' \
+        --argjson separation_of_powers "$separation_json" \
+        --argjson lane_metadata "$lane_metadata_json" \
+        '{schema:$schema, repo:$repo, pr:$pr, generated_at:$generated_at, rollback_handle:$rollback_handle, changed_files:$changed_files, gate_evidence:$gate_evidence, blast_radius:$blast_radius, separation_of_powers:$separation_of_powers, lane_metadata:$lane_metadata}' \
         > "$out"
     printf 'DECISION:provenance-written\n'
     printf 'PROVENANCE:%s\n' "$out"
@@ -268,6 +354,7 @@ main() {
         diff-guard) cmd_diff_guard "$@" ;;
         mutation-guard) cmd_mutation_guard "$@" ;;
         blast-radius) cmd_blast_radius "$@" ;;
+        separation-of-powers) cmd_separation_of_powers "$@" ;;
         provenance) cmd_provenance "$@" ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown subcommand: $sub" ;;

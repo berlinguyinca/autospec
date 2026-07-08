@@ -16,6 +16,7 @@ DRY_RUN=0
 LANE="implementer"
 MUTATION_BASELINE=""
 MUTATION_CURRENT=""
+LANE_METADATA=""
 _default_notify_sh() {
     local dir
     dir="$(cd "$(dirname "$0")" && pwd)"
@@ -43,6 +44,7 @@ Options:
   --gate-evidence <json>  Passing gate evidence JSON to record on merge-ok.
   --mutation-baseline <json> Baseline mutation ledger JSON.
   --mutation-current <json>  Current mutation ledger JSON.
+  --lane-metadata <json>  Author/verifier/approver lane metadata for separation-of-powers enforcement.
   --rollback-handle <ref> Rollback ref/command handle to record on merge-ok.
   --provenance-out <json> Output path for merge provenance JSON.
   --dry-run               Print what would run without executing.
@@ -73,6 +75,7 @@ while [ $# -gt 0 ]; do
         --gate-evidence) GATE_EVIDENCE="${2:-}"; shift 2 ;;
         --mutation-baseline) MUTATION_BASELINE="${2:-}"; shift 2 ;;
         --mutation-current) MUTATION_CURRENT="${2:-}"; shift 2 ;;
+        --lane-metadata) LANE_METADATA="${2:-}"; shift 2 ;;
         --rollback-handle) ROLLBACK_HANDLE="${2:-}"; shift 2 ;;
         --provenance-out) PROVENANCE_OUT="${2:-}"; shift 2 ;;
         --fenced-surfaces) FENCED_SURFACES="${2:-}"; shift 2 ;;
@@ -256,6 +259,15 @@ _write_quarantine_record() {
         '{schema:$schema, queue:$queue, repo:$repo, pr:($pr|tonumber), branch:$branch, generated_at:$generated_at, reason:$reason, changed_files:$changed_files, classification:$classification}' \
         > "$out"
 }
+if [ -n "$LANE_METADATA" ]; then
+    GUARDRAILS_SH="$(_guardrails_sh)"
+    if ! separation_output="$(bash "$GUARDRAILS_SH" separation-of-powers --lane-metadata "$LANE_METADATA" 2>&1)"; then
+        printf "%s\n" "$separation_output"
+        _apply_guardrail_block_label
+        printf "block separation_of_powers\n"
+        exit 1
+    fi
+fi
 if [ -n "$CHANGED_FILES" ]; then
     GUARDRAILS_SH="$(_guardrails_sh)"
     if ! guard_output="$(bash "$GUARDRAILS_SH" diff-guard --lane "$LANE" --changed-files "$CHANGED_FILES" 2>&1)"; then
@@ -344,6 +356,7 @@ while true; do
             --pr "$PR_NUMBER" \
             --changed-files "$CHANGED_FILES" \
             --gate-evidence "$GATE_EVIDENCE" \
+            ${LANE_METADATA:+--lane-metadata "$LANE_METADATA"} \
             --rollback-handle "$ROLLBACK_HANDLE" \
             --out "$PROVENANCE_OUT" >&2
     fi
