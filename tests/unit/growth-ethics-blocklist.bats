@@ -69,3 +69,15 @@ BUILTINS="fake_reviews undisclosed_incentivized_reviews review_gating rating_vot
   run bash "$BL" --effective "$TMP/c.json"
   [ "$status" -ne 0 ]
 }
+
+@test "--assert-not-weakened passes for benign dotted string in guardrails" {
+  echo '{"guardrails":{"note":"fake.reviews"}}' > "$TMP/c.json"
+  run bash "$BL" --assert-not-weakened "$TMP/c.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "--assert-not-weakened passes for glob char in guardrails" {
+  echo '{"guardrails":{"note":"*"}}' > "$TMP/c.json"
+  run bash "$BL" --assert-not-weakened "$TMP/c.json"
+  [ "$status" -eq 0 ]
+}

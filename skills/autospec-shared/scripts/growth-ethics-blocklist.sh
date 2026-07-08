@@ -43,11 +43,12 @@ case "$cmd" in
       echo "cannot evaluate guardrails: $cfg" >&2; exit 1
     fi
     denied=""
-    for s in $strings; do
-      if printf '%s\n' "$BUILTIN_BLOCKS" | grep -qx "$s"; then
-        denied="$denied $s"
-      fi
-    done
+    while IFS= read -r s; do
+      [ -n "$s" ] || continue
+      if printf '%s\n' "$BUILTIN_BLOCKS" | grep -qFx "$s"; then denied="$denied $s"; fi
+    done <<EOF
+$strings
+EOF
     if [ -n "$denied" ]; then
       echo "growth.yml attempts to weaken built-in ethics blocks:$denied" >&2
       exit 1
