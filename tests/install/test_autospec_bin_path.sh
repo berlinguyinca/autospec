@@ -82,6 +82,70 @@ for command in autospec-autonomous autospec-autonomous-status autospec-autonomou
     }
 done
 
+
+# Regression: an already-installed stale wrapper from the pre-fix generator must
+# be healed during --update, not left broken until a clean reinstall.
+cat > "$TEST_HOME/.autospec/bin/autospec-autonomous-status" <<'STALE'
+#!/usr/bin/env bash
+set -eu
+exec "/tmp/gone/autospec-autonomous.sh" status "$@"
+STALE
+chmod +x "$TEST_HOME/.autospec/bin/autospec-autonomous-status"
+
+HOME="$TEST_HOME" \
+AUTOSPEC_SCRIPTS_DIR="$TEMP_SCRIPTS_DIR" \
+AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
+AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
+AUTOSPEC_SKIP_SUPERPOWERS=1 \
+AUTOSPEC_SKIP_OH_MY_CODEX=1 \
+AUTOSPEC_SKIP_OH_MY_OPENCODE=1 \
+AUTOSPEC_SKIP_OH_MY_CLAUDE=1 \
+AUTOSPEC_NO_STAR_PROMPT=1 \
+CI=1 \
+bash "$SCRIPT_DIR/install.sh" --skill autospec-autonomous --harness codex --update >/tmp/autospec-install-heal.out 2>&1
+
+grep -q 'heal_autonomous_operator_wrappers: healed' /tmp/autospec-install-heal.out || {
+    echo "FAIL: --update did not log healed stale autonomous wrapper"
+    cat /tmp/autospec-install-heal.out
+    exit 1
+}
+
+grep -qF 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh" status "$@"' "$TEST_HOME/.autospec/bin/autospec-autonomous-status" || {
+    echo "FAIL: stale autospec-autonomous-status wrapper was not rewritten to runtime-resolving form"
+    cat "$TEST_HOME/.autospec/bin/autospec-autonomous-status"
+    exit 1
+}
+
+HOME="$TEST_HOME" "$TEST_HOME/.autospec/bin/autospec-autonomous-status" --json >/tmp/autospec-autonomous-status-healed.json || {
+    echo "FAIL: healed autospec-autonomous-status command did not execute"
+    cat /tmp/autospec-autonomous-status-healed.json 2>/dev/null || true
+    cat /tmp/autospec-install-heal.out
+    exit 1
+}
+
+grep -q '"running":false' /tmp/autospec-autonomous-status-healed.json || {
+    echo "FAIL: healed autospec-autonomous-status did not resolve under HOME/.autospec"
+    cat /tmp/autospec-autonomous-status-healed.json
+    exit 1
+}
+
+HOME="$TEST_HOME" \
+AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
+AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
+AUTOSPEC_SKIP_SUPERPOWERS=1 \
+AUTOSPEC_SKIP_OH_MY_CODEX=1 \
+AUTOSPEC_SKIP_OH_MY_OPENCODE=1 \
+AUTOSPEC_SKIP_OH_MY_CLAUDE=1 \
+AUTOSPEC_NO_STAR_PROMPT=1 \
+CI=1 \
+bash "$SCRIPT_DIR/install.sh" --skill autospec-autonomous --harness codex --update >/tmp/autospec-install-heal-noop.out 2>&1
+
+if grep -q 'heal_autonomous_operator_wrappers: healed' /tmp/autospec-install-heal-noop.out; then
+    echo "FAIL: heal step rewrote already-correct autonomous wrapper"
+    cat /tmp/autospec-install-heal-noop.out
+    exit 1
+fi
+
 HOME="$TEST_HOME" "$TEST_HOME/.autospec/bin/autospec-autonomous-status" --json >/tmp/autospec-autonomous-status.json || {
     echo "FAIL: autospec-autonomous-status command did not run after ephemeral scripts dir deletion"
     cat /tmp/autospec-autonomous-status.json 2>/dev/null || true

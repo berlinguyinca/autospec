@@ -251,3 +251,38 @@ CURLSHIM
     ! echo "$output" | grep -q "WARN:"
     ! echo "$output" | grep -q "\[autospec\]"
 }
+
+@test "up-to-date self-update heals stale autonomous wrapper before remote no-op" {
+    mkdir -p "$HOME/.autospec/bin" "$HOME/.autospec/scripts"
+    date -u -v-25H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -d '25 hours ago' +'%Y-%m-%dT%H:%M:%SZ' \
+        > "$HOME/.autospec/last-update-check"
+    echo "abc1234" > "$HOME/.autospec/installed-version"
+
+    cat > "$HOME/.autospec/bin/autospec-autonomous-status" <<'STALE'
+#!/usr/bin/env bash
+set -eu
+exec "/tmp/gone/autospec-autonomous.sh" status "$@"
+STALE
+    chmod +x "$HOME/.autospec/bin/autospec-autonomous-status"
+    cat > "$HOME/.autospec/scripts/autospec-autonomous.sh" <<'LAUNCHER'
+#!/usr/bin/env bash
+printf '{"running":false,"args":"%s"}\n' "$*"
+LAUNCHER
+    chmod +x "$HOME/.autospec/scripts/autospec-autonomous.sh"
+
+    cat > "$SHIMDIR/curl" << 'CURLSHIM'
+#!/usr/bin/env bash
+printf '{"sha":"abc1234"}\n'
+exit 0
+CURLSHIM
+    chmod +x "$SHIMDIR/curl"
+
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "heal_autonomous_operator_wrappers: healed"
+    grep -qF 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh" status "$@"' "$HOME/.autospec/bin/autospec-autonomous-status"
+    run bash -c "HOME='${HOME}' '${HOME}/.autospec/bin/autospec-autonomous-status' --json"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q '"running":false'
+}
