@@ -291,6 +291,14 @@ Tier-1 drain watchdog controls:
 - `AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS` — no-output stall budget for one `$autospec-run` drain. Default 1800; set `0` to disable.
 - `AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS` — poll interval for drain output progress. Default 15.
 
+If the harness wait/session handle disappears during a drain (for example Codex
+reports `write_stdin failed: Unknown process id`) or the drain wrapper times out,
+`autospec-autonomous-run-drain.sh` must reconcile GitHub state before failing:
+find open `issue-N` PRs for issues still labeled `in-progress-by-bot`, require all
+reported checks to be terminal `SUCCESS`/`SKIPPED`/`NEUTRAL`, admin-merge the PR,
+remove `in-progress-by-bot`, and return success. Stale local wait handles are
+monitor failures, not proof that the issue failed.
+
 ## Skill family layout
 
 - `skills/autospec-autonomous/SKILL.md` — Claude Code adapter (authoritative).
@@ -316,6 +324,8 @@ Trio edits use `derive-trio.sh --in-place` + `gen-skill-goldens.sh`; never hand-
 - **Worktree assert fails** → emit `code_health` identifier; park; notify operator.
 - **Gate script missing** → `code_health:autonomous_gate_missing`; halt merges; notify.
 - **`/autospec-run` fails** → per-issue failure cap; after cap → `autospec:needs-human`; no merge.
+- **Harness wait handle disappears after a PR is green** → reconcile via PR/issue
+  state; merge the green in-progress PR and continue.
 - **Main CI red** → halt Tier-1 merges; file `autospec:needs-human`; notify.
 - **Spend ceiling reached** → park; write `~/.autospec/autonomous-stop.flag`; notify.
 - **All waterfall tiers dry** → park with an `all tiers dry` reason naming exhausted tiers; notify.

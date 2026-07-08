@@ -66,3 +66,52 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"omx completed"* ]]
 }
+
+@test "run-drain: recovers stale wait handle by merging green in-progress PR" {
+  cat > "$TEST_TMP/bin/omx" <<'EOF'
+#!/usr/bin/env bash
+printf 'codex_core::tools::router: error=write_stdin failed: Unknown process id 83740\n' >&2
+exit 1
+EOF
+  chmod +x "$TEST_TMP/bin/omx"
+
+  cat > "$TEST_TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf 'gh %s\n' "$*" >> "$HOME/gh.log"
+case "$*" in
+  *"repo view"*)
+    printf 'berlinguyinca/autospec\n'
+    ;;
+  "pr list --repo berlinguyinca/autospec --state open --json number,headRefName,statusCheckRollup,isDraft"*)
+    cat <<'JSON'
+[{"number":1578,"headRefName":"feat/issue-1545-blast-radius-quarantine","isDraft":false,"statusCheckRollup":[{"name":"pytest","status":"COMPLETED","conclusion":"SUCCESS"},{"name":"GitGuardian Security Checks","status":"COMPLETED","conclusion":"SUCCESS"},{"name":"doc-drift","status":"COMPLETED","conclusion":"SKIPPED"}]}]
+JSON
+    ;;
+  "issue view 1545 --repo berlinguyinca/autospec --json state,labels"*)
+    printf '{"state":"OPEN","labels":[{"name":"in-progress-by-bot"}]}\n'
+    ;;
+  "pr merge 1578 --repo berlinguyinca/autospec --admin --squash --delete-branch"*)
+    printf '{"state":"MERGED"}\n' > "$HOME/pr-1578.json"
+    ;;
+  "pr view 1578 --repo berlinguyinca/autospec --json state,mergedAt"*)
+    cat "${HOME}/pr-1578.json"
+    ;;
+  "issue edit 1545 --repo berlinguyinca/autospec --remove-label in-progress-by-bot"*)
+    ;;
+  *)
+    printf 'unexpected gh args: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+EOF
+  chmod +x "$TEST_TMP/bin/gh"
+
+  PATH="$TEST_TMP/bin:$PATH" \
+  AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=10 \
+  AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS=1 \
+  run bash "$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"stale wait handle recovery merged PR #1578 for issue #1545"* ]]
+  grep -q "gh pr merge 1578" "$HOME/gh.log"
+}
