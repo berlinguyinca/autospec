@@ -1,34 +1,6 @@
 #!/usr/bin/env bash
-# scripts/autonomous-premerge-gate.sh — blocking autospec-qa + autospec-secaudit
-#                                        pre-merge barrier.
-#
-# Phase 1: autospec-qa. Phase 2 (F4): autospec-secaudit added after qa.
-# Both skills run in sequence; either can block the merge on high/severe/
-# critical/medium findings. Missing either skill HALTS fail-closed.
-#
-# Usage:
-#   autonomous-premerge-gate.sh [--pr-branch <branch>] [--repo <owner/repo>]
-#                                [--pr <number>] [--max-attempts <N>]
-#                                [--changed-files <file>] [--gate-evidence <json>]
-#                                [--rollback-handle <ref>] [--provenance-out <json>]
-#                                [--notify-sh <path>] [--dry-run]
-#
-# Verdict output (stdout, last line):
-#   merge-ok                  — no blocking findings; safe to merge
-#   block <reason>            — retries exhausted or fix rejected; human needed
-#   halt <code_health:id>     — configured scan skill missing; STOP immediately
-#
-# Exit codes:
-#   0 — merge-ok
-#   1 — block (needs human)
-#   2 — halt (code_health; configured skill missing)
-#   3 — invocation error
-
 set -eu
-
 SCRIPT_NAME="autonomous-premerge-gate"
-
-# ── Defaults ──────────────────────────────────────────────────────────────────
 PR_BRANCH=""
 REPO=""
 PR_NUMBER=""
@@ -39,8 +11,9 @@ GATE_EVIDENCE=""
 ROLLBACK_HANDLE=""
 PROVENANCE_OUT=""
 DRY_RUN=0
-
-# Resolve notify.sh path: env override → relative to this script → PATH lookup
+LANE="implementer"
+MUTATION_BASELINE=""
+MUTATION_CURRENT=""
 _default_notify_sh() {
     local dir
     dir="$(cd "$(dirname "$0")" && pwd)"
@@ -52,43 +25,38 @@ _default_notify_sh() {
         printf ''
     fi
 }
-
 usage() {
     cat <<'EOF'
 Usage: autonomous-premerge-gate.sh [OPTIONS]
-
 Options:
   --pr-branch <branch>    Branch to validate (default: current branch).
   --repo <owner/repo>     GitHub repo slug for labelling (default: detected).
   --pr <number>           PR number for labelling (optional).
   --max-attempts <N>      Max fix-and-recheck cycles per stage (default: 5).
   --notify-sh <path>      Path to notify.sh (default: auto-detected).
+  --lane <name>           Actor lane for immutable verifier bypass (implementer/verifier).
   --changed-files <file>  Newline-delimited changed files for immutable/blast checks.
   --gate-evidence <json>  Passing gate evidence JSON to record on merge-ok.
+  --mutation-baseline <json> Baseline mutation ledger JSON.
+  --mutation-current <json>  Current mutation ledger JSON.
   --rollback-handle <ref> Rollback ref/command handle to record on merge-ok.
   --provenance-out <json> Output path for merge provenance JSON.
   --dry-run               Print what would run without executing.
-
 Environment:
   AUTOSPEC_PREMERGE_MAX_ATTEMPTS  Override max attempts (default 5).
   AUTOSPEC_QA_CMD                 Override the qa command (default: autospec-qa).
   AUTOSPEC_SECAUDIT_CMD           Override the secaudit command (default: autospec-secaudit).
   AUTOSPEC_NOTIFY                 Set to 0 to suppress notifications.
-
 Exit 0 = merge-ok; 1 = block; 2 = halt (code_health); 3 = invocation error.
 EOF
 }
-
 die() {
     printf '%s: ERROR: %s\n' "$SCRIPT_NAME" "$1" >&2
     exit 3
 }
-
 info() {
     printf '[%s] %s\n' "$SCRIPT_NAME" "$*" >&2
 }
-
-# ── Argument parsing ──────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
     case "$1" in
         --pr-branch)   PR_BRANCH="${2:-}"; shift 2 ;;
@@ -96,8 +64,11 @@ while [ $# -gt 0 ]; do
         --pr)          PR_NUMBER="${2:-}"; shift 2 ;;
         --max-attempts) MAX_ATTEMPTS="${2:-5}"; shift 2 ;;
         --notify-sh)   NOTIFY_SH="${2:-}"; shift 2 ;;
+        --lane)        LANE="${2:-}"; shift 2 ;;
         --changed-files) CHANGED_FILES="${2:-}"; shift 2 ;;
         --gate-evidence) GATE_EVIDENCE="${2:-}"; shift 2 ;;
+        --mutation-baseline) MUTATION_BASELINE="${2:-}"; shift 2 ;;
+        --mutation-current) MUTATION_CURRENT="${2:-}"; shift 2 ;;
         --rollback-handle) ROLLBACK_HANDLE="${2:-}"; shift 2 ;;
         --provenance-out) PROVENANCE_OUT="${2:-}"; shift 2 ;;
         --dry-run)     DRY_RUN=1; shift ;;
@@ -107,12 +78,9 @@ while [ $# -gt 0 ]; do
            exit 3 ;;
     esac
 done
-
-# ── Resolve notify.sh ─────────────────────────────────────────────────────────
 if [ -z "$NOTIFY_SH" ]; then
     NOTIFY_SH="$(_default_notify_sh)"
 fi
-
 _notify() {
     local title="$1" body="$2"
     if [ -n "$NOTIFY_SH" ] && [ -x "$NOTIFY_SH" ]; then
@@ -123,82 +91,60 @@ _notify() {
         info "notify: $title — $body"
     fi
 }
-
-# ── Resolve current branch if not supplied ────────────────────────────────────
 if [ -z "$PR_BRANCH" ]; then
     PR_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 fi
 if [ -z "$PR_BRANCH" ] || [ "$PR_BRANCH" = "HEAD" ]; then
     die "could not determine PR branch; pass --pr-branch"
 fi
-
+case "$LANE" in
+    implementer|verifier) ;;
+    *) die "--lane must be implementer or verifier" ;;
+esac
 info "Validating branch: $PR_BRANCH"
+info "Actor lane: $LANE"
 info "Max fix-and-recheck attempts: $MAX_ATTEMPTS"
-
-# ── Resolve scan commands ─────────────────────────────────────────────────────
 QA_CMD="${AUTOSPEC_QA_CMD:-autospec-qa}"
 SECAUDIT_CMD="${AUTOSPEC_SECAUDIT_CMD:-autospec-secaudit}"
-
-# ── Presence checks for configured scan skills ────────────────────────────────
-# A missing scan skill HALTS (fail closed). Never silently skip.
 _qa_skill_present() {
     if [ -n "${AUTOSPEC_QA_PRESENT_OVERRIDE:-}" ]; then
-        # Test seam: override for unit tests.
         if [ "$AUTOSPEC_QA_PRESENT_OVERRIDE" = "true" ]; then
             return 0
         else
             return 1
         fi
     fi
-    # Real check: qa command reachable in PATH or as an installed script.
     command -v "$QA_CMD" >/dev/null 2>&1
 }
-
 _secaudit_skill_present() {
     if [ -n "${AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE:-}" ]; then
-        # Test seam: override for unit tests.
         if [ "$AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE" = "true" ]; then
             return 0
         else
             return 1
         fi
     fi
-    # Real check: secaudit command reachable in PATH or as an installed script.
     command -v "$SECAUDIT_CMD" >/dev/null 2>&1
 }
-
 if ! _qa_skill_present; then
-    # Emit machine-readable halt with code_health identifier.
     printf 'halt code_health:qa_skill_missing\n'
     info "HALT: configured scan skill '$QA_CMD' is not installed or not in PATH."
     info "Install autospec-qa before re-running the pre-merge gate."
     exit 2
 fi
-
 info "Scan skill '$QA_CMD' is present."
-
 if ! _secaudit_skill_present; then
-    # Emit machine-readable halt with code_health identifier.
     printf 'halt code_health:secaudit_skill_missing\n'
     info "HALT: configured scan skill '$SECAUDIT_CMD' is not installed or not in PATH."
     info "Install autospec-secaudit before re-running the pre-merge gate."
     exit 2
 fi
-
 info "Scan skill '$SECAUDIT_CMD' is present."
-
-# ── Shared severity classifier ────────────────────────────────────────────────
-# Output contract: scan commands write severity-tagged findings.
-# We look for lines matching high/severe/medium/critical as blocking.
-
 _count_blocking_findings() {
-    # Reads scan output from stdin; counts high/severe/medium/critical findings.
-    # Patterns: "severity: high", "SEVERITY: MEDIUM", "[HIGH]", etc.
     grep -ciE \
         '(severity[[:space:]]*:[[:space:]]*(high|severe|critical|medium)|\[(high|severe|critical|medium)\]|^(high|severe|critical|medium)[[:space:]])' \
         || true
 }
-
 _has_blocking_findings() {
     local scan_output="$1"
     local count
@@ -209,7 +155,6 @@ _has_blocking_findings() {
         return 1  # no blocking findings
     fi
 }
-
 _log_low_findings() {
     local scan_output="$1" label="$2"
     local low_findings
@@ -220,34 +165,22 @@ _log_low_findings() {
         printf '%s\n' "$low_findings" >&2
     fi
 }
-
-# ── Run qa on branch ──────────────────────────────────────────────────────────
 _run_qa() {
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] would run: $QA_CMD --branch $PR_BRANCH"
         printf ''
         return 0
     fi
-    # Run qa; capture combined output. qa exit code is informational only —
-    # we parse the output for blocking severities ourselves.
     "$QA_CMD" --branch "$PR_BRANCH" 2>&1 || true
 }
-
-# ── Run secaudit on branch ────────────────────────────────────────────────────
 _run_secaudit() {
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] would run: $SECAUDIT_CMD --branch $PR_BRANCH"
         printf ''
         return 0
     fi
-    # Run secaudit; capture combined output. Exit code is informational only.
     "$SECAUDIT_CMD" --branch "$PR_BRANCH" 2>&1 || true
 }
-
-# ── Fix dispatch ──────────────────────────────────────────────────────────────
-# Dispatch a fix request for blocking findings on the PR branch.
-# In the real conductor this calls a Tier-B implementer; here we call
-# a FIX_CMD that callers can stub (AUTOSPEC_FIX_CMD env or default gh comment).
 _dispatch_fix() {
     local attempt="$1" scan_output="$2" stage="$3"
     local fix_cmd="${AUTOSPEC_FIX_CMD:-}"
@@ -256,15 +189,12 @@ _dispatch_fix() {
         if [ "$DRY_RUN" -eq 1 ]; then
             info "[dry-run] would run: $fix_cmd --branch $PR_BRANCH"
         else
-            # Pass findings summary to the fix command via stdin.
             printf '%s' "$scan_output" | "$fix_cmd" --branch "$PR_BRANCH" || true
         fi
     else
         info "No AUTOSPEC_FIX_CMD set; recording findings for operator review."
     fi
 }
-
-# ── Needs-human labelling ─────────────────────────────────────────────────────
 _apply_needs_human_label() {
     if [ -z "$REPO" ] && [ -z "$PR_NUMBER" ]; then
         info "No --repo/--pr supplied; skipping label application."
@@ -287,23 +217,17 @@ _apply_needs_human_label() {
         fi
     fi
 }
-
-
-# ── Guardrail helper ─────────────────────────────────────────────────────────
 _guardrails_sh() {
     local dir
     dir="$(cd "$(dirname "$0")" && pwd)"
     printf '%s/autonomous-guardrails.sh' "$dir"
 }
-
 _apply_guardrail_block_label() {
     _apply_needs_human_label
 }
-
-# ── Pre-QA deterministic guardrails ──────────────────────────────────────────
 if [ -n "$CHANGED_FILES" ]; then
     GUARDRAILS_SH="$(_guardrails_sh)"
-    if ! guard_output="$(bash "$GUARDRAILS_SH" diff-guard --changed-files "$CHANGED_FILES" 2>&1)"; then
+    if ! guard_output="$(bash "$GUARDRAILS_SH" diff-guard --lane "$LANE" --changed-files "$CHANGED_FILES" 2>&1)"; then
         printf "%s\n" "$guard_output"
         _apply_guardrail_block_label
         printf "block immutable_verifier_modified\n"
@@ -316,20 +240,25 @@ if [ -n "$CHANGED_FILES" ]; then
         exit 1
     fi
 fi
-
-# ── Stage 1: QA fix-and-recheck loop ─────────────────────────────────────────
+if [ -n "$MUTATION_BASELINE" ] || [ -n "$MUTATION_CURRENT" ]; then
+    [ -n "$MUTATION_BASELINE" ] || die "--mutation-current requires --mutation-baseline"
+    [ -n "$MUTATION_CURRENT" ] || die "--mutation-baseline requires --mutation-current"
+    GUARDRAILS_SH="$(_guardrails_sh)"
+    if ! mutation_output="$(bash "$GUARDRAILS_SH" mutation-guard --baseline "$MUTATION_BASELINE" --current "$MUTATION_CURRENT" 2>&1)"; then
+        printf "%s\n" "$mutation_output"
+        _apply_guardrail_block_label
+        printf "block mutation_score_regression\n"
+        exit 1
+    fi
+fi
 attempt=1
 while true; do
     info "=== QA run (attempt $attempt/$MAX_ATTEMPTS) ==="
-
     qa_output=""
     qa_output="$(_run_qa)"
-
     _log_low_findings "$qa_output" "QA"
-
     if _has_blocking_findings "$qa_output"; then
         if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
-            # Retries exhausted and branch is still dirty — do NOT merge.
             info "Max attempts ($MAX_ATTEMPTS) reached with QA blocking findings still present."
             _apply_needs_human_label
             _notify "autospec: needs-human" \
@@ -337,32 +266,22 @@ while true; do
             printf 'block retries_exhausted\n'
             exit 1
         fi
-
         info "Blocking QA findings detected; dispatching fix (attempt $attempt/$MAX_ATTEMPTS)."
         _dispatch_fix "$attempt" "$qa_output" "qa"
         attempt=$((attempt + 1))
-        # Loop: re-run qa on the (now-patched) branch.
         continue
     fi
-
-    # QA stage clear — proceed to secaudit stage.
     info "QA stage clear on attempt $attempt."
     break
 done
-
-# ── Stage 2: secaudit fix-and-recheck loop ────────────────────────────────────
 secaudit_attempt=1
 while true; do
     info "=== secaudit run (attempt $secaudit_attempt/$MAX_ATTEMPTS) ==="
-
     secaudit_output=""
     secaudit_output="$(_run_secaudit)"
-
     _log_low_findings "$secaudit_output" "secaudit"
-
     if _has_blocking_findings "$secaudit_output"; then
         if [ "$secaudit_attempt" -ge "$MAX_ATTEMPTS" ]; then
-            # Retries exhausted and branch is still dirty — do NOT merge.
             info "Max attempts ($MAX_ATTEMPTS) reached with secaudit blocking findings still present."
             _apply_needs_human_label
             _notify "autospec: needs-human" \
@@ -370,15 +289,11 @@ while true; do
             printf 'block retries_exhausted\n'
             exit 1
         fi
-
         info "Blocking secaudit findings detected; dispatching fix (attempt $secaudit_attempt/$MAX_ATTEMPTS)."
         _dispatch_fix "$secaudit_attempt" "$secaudit_output" "secaudit"
         secaudit_attempt=$((secaudit_attempt + 1))
-        # Loop: re-run secaudit on the (now-patched) branch.
         continue
     fi
-
-    # Both stages clear — gate passes.
     info "No blocking findings on QA+secaudit. Gate passes."
     if [ -n "$PROVENANCE_OUT" ]; then
         if [ -z "$CHANGED_FILES" ] || [ -z "$GATE_EVIDENCE" ] || [ -z "$ROLLBACK_HANDLE" ] || [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then

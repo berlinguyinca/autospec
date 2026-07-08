@@ -10,14 +10,16 @@ SCRIPT_NAME="autonomous-guardrails"
 usage() {
     cat <<'USAGE'
 Usage:
-  autonomous-guardrails.sh diff-guard --changed-files <file>
+  autonomous-guardrails.sh diff-guard --changed-files <file> [--lane implementer|verifier]
+  autonomous-guardrails.sh mutation-guard --baseline <json> --current <json>
   autonomous-guardrails.sh blast-radius --changed-files <file>
   autonomous-guardrails.sh provenance \
       --repo OWNER/REPO --pr N --changed-files <file> --gate-evidence <json> \
       --rollback-handle <ref-or-command> --out <json>
 
 Decisions:
-  diff-guard exits 1 with DECISION:block when test/eval-harness files changed.
+  diff-guard exits 1 with DECISION:block when an implementer changes test/eval-harness files.
+  mutation-guard exits 1 with DECISION:block when current mutation score drops below baseline.
   blast-radius exits 1 with DECISION:block when fenced/high-risk paths changed.
   provenance writes autospec.autonomous.merge_provenance.v1 JSON.
 USAGE
@@ -62,15 +64,20 @@ json_array_from_lines() {
 }
 
 cmd_diff_guard() {
-    local changed_files=""
+    local changed_files="" lane="implementer"
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --changed-files) changed_files="${2:-}"; shift 2 ;;
+            --lane) lane="${2:-}"; shift 2 ;;
             -h|--help) usage; exit 0 ;;
             *) die "diff-guard: unknown option: $1" ;;
         esac
     done
     require_file "$changed_files" "--changed-files"
+    case "$lane" in
+        implementer|verifier) ;;
+        *) die "diff-guard: --lane must be implementer or verifier" ;;
+    esac
 
     local tmp
     tmp="$(mktemp "${TMPDIR:-/tmp}/autonomous-diff-guard.XXXXXX")"
@@ -82,15 +89,69 @@ cmd_diff_guard() {
 $(read_changed_files "$changed_files")
 EOF_CHANGED
 
-    if [ -s "$tmp" ]; then
+    if [ -s "$tmp" ] && [ "$lane" != "verifier" ]; then
         printf 'DECISION:block\n'
         printf 'REASON:immutable_verifier_modified\n'
         sed 's/^/PATH:/' "$tmp"
         rm -f "$tmp"
         exit 1
     fi
+    if [ -s "$tmp" ]; then
+        printf 'DECISION:allow\n'
+        printf 'REASON:verifier_lane_bypass\n'
+        sed 's/^/PATH:/' "$tmp"
+        rm -f "$tmp"
+        return 0
+    fi
     rm -f "$tmp"
     printf 'DECISION:allow\n'
+}
+
+cmd_mutation_guard() {
+    local baseline="" current=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --baseline) baseline="${2:-}"; shift 2 ;;
+            --current) current="${2:-}"; shift 2 ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "mutation-guard: unknown option: $1" ;;
+        esac
+    done
+    require_file "$baseline" "--baseline"
+    require_file "$current" "--current"
+
+    local baseline_score current_score mutants
+    baseline_score="$(jq -r 'if has("score") then .score else ((.killed // 0) * 100 / (.total // 1) | floor) end' "$baseline")"
+    current_score="$(jq -r 'if has("score") then .score else ((.killed // 0) * 100 / (.total // 1) | floor) end' "$current")"
+
+    case "$baseline_score:$current_score" in
+        *null*|*:*null*|*[^0-9.:]*) die "mutation-guard: scores must be numeric or derivable from killed/total" ;;
+    esac
+
+    if awk "BEGIN { exit !($current_score < $baseline_score) }"; then
+        printf 'DECISION:block\n'
+        printf 'REASON:mutation_score_regression\n'
+        printf 'BASELINE:%s\n' "$baseline_score"
+        printf 'CURRENT:%s\n' "$current_score"
+        mutants="$(jq -r '
+            (.surviving_mutants // .survivors // .mutants // [])[]
+            | select((.status // "survived") != "killed")
+            | "MUTANT:" + ((.id // .name // "unknown")|tostring)
+              + ":" + ((.file // .path // "unknown")|tostring)
+              + ":" + ((.line // 0)|tostring)
+              + ":" + ((.description // .mutator // .operator // "surviving mutant")|tostring)
+        ' "$current")"
+        if [ -n "$mutants" ]; then
+            printf '%s\n' "$mutants"
+        else
+            printf 'MUTANT:unknown:unknown:0:mutation score regressed without survivor details\n'
+        fi
+        exit 1
+    fi
+
+    printf 'DECISION:allow\n'
+    printf 'BASELINE:%s\n' "$baseline_score"
+    printf 'CURRENT:%s\n' "$current_score"
 }
 
 cmd_blast_radius() {
@@ -192,6 +253,7 @@ main() {
     local sub="$1"; shift
     case "$sub" in
         diff-guard) cmd_diff_guard "$@" ;;
+        mutation-guard) cmd_mutation_guard "$@" ;;
         blast-radius) cmd_blast_radius "$@" ;;
         provenance) cmd_provenance "$@" ;;
         -h|--help) usage; exit 0 ;;
