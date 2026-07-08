@@ -18,6 +18,8 @@ Usage:
   rag-workstream.sh retrieve --index FILE --config FILE --query TEXT [--filter KEY=VALUE] [knobs]
   rag-workstream.sh retrieve-eval --index FILE --config FILE --golden FILE [--mode hybrid|dense|bm25] [knobs]
   rag-workstream.sh query-router-eval --index FILE --config FILE --golden FILE [--mode hybrid|dense|bm25] [knobs]
+  rag-workstream.sh eval-golden --index FILE --config FILE --golden FILE [--out FILE] [--mode hybrid|dense|bm25] [knobs]
+  rag-workstream.sh auto-tune --index FILE --config FILE --golden FILE --candidate-config FILE --audit-log FILE --promote-out FILE --quarantine-out FILE
 USAGE
 }
 
@@ -41,6 +43,14 @@ if [ "${1:-}" = "retrieve" ] || [ "${1:-}" = "retrieve-eval" ] || [ "${1:-}" = "
     exit $?
 fi
 
+if [ "${1:-}" = "eval-golden" ] || [ "${1:-}" = "auto-tune" ]; then
+    CMD="$1"
+    shift
+    SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+    python3 "$SCRIPT_DIR/rag_eval_tuning.py" "$CMD" "$@"
+    exit $?
+fi
+
 python3 - "$@" <<'PY'
 import argparse
 import hashlib
@@ -55,6 +65,8 @@ SOURCE_TOKENS = [
     "https://www.anthropic.com/engineering/contextual-retrieval",
     "RAGAS",
     "https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/faithfulness/",
+    "https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/answer_relevance/",
+    "https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/context_recall/",
     "Jina late-chunking",
     "https://jina.ai/news/late-chunking-in-long-context-embedding-models/",
     "llms.txt",
@@ -269,6 +281,10 @@ def cmd_validate_design_doc(args):
         "hybrid dense + BM25",
         "Reciprocal Rank Fusion",
         "RAGAS faithfulness floor",
+        "answer relevancy",
+        "context recall",
+        "golden-set",
+        "auto-tune",
         "content-hash invalidation",
         "citation verification",
         "promote only score-positive",

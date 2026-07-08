@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "version": "rag-golden-v1",
+  "description": "Small in-repo seed golden set for deterministic RAG retrieval and generation-metric contract tests; production rotations can expand to 50-200 mined examples without changing schema.",
+  "heldout": {
+    "fold": 0,
+    "modulus": 5,
+    "rotation": "query ordinal modulo modulus; increment fold to rotate held-out slice"
+  },
+  "queries": [
+    {
+      "id": "rag-q001",
+      "question": "Which command builds a deterministic RAG index?",
+      "ideal_answer": "Run rag-workstream.sh ingest-index with the RAG config, repo root, and output index path.",
+      "relevant_chunk_ids": ["rag-runbook-ingest"],
+      "filters": {"product_area": "rag", "section": "ingestion"},
+      "source": "docs/runbooks/rag-documentation-database.md"
+    },
+    {
+      "id": "rag-q002",
+      "question": "How does hybrid retrieval combine dense and sparse ranking?",
+      "ideal_answer": "Hybrid retrieval combines dense vector search with BM25 through Reciprocal Rank Fusion before reranking.",
+      "relevant_chunk_ids": ["rag-runbook-retrieval"],
+      "filters": {"product_area": "rag", "section": "retrieval"},
+      "source": "docs/runbooks/rag-documentation-database.md"
+    },
+    {
+      "id": "rag-q003",
+      "question": "When should query transforms be enabled?",
+      "ideal_answer": "Query transforms are enabled only for query classes where golden-set measurement shows positive recall or nDCG lift within the token budget.",
+      "relevant_chunk_ids": ["rag-runbook-query-router"],
+      "filters": {"product_area": "rag", "section": "query_transform"},
+      "source": "docs/runbooks/rag-documentation-database.md"
+    },
+    {
+      "id": "rag-q004",
+      "question": "What blocks promotion of a candidate RAG config?",
+      "ideal_answer": "Promotion is blocked when the target retrieval metric fails to improve or RAGAS-style faithfulness regresses below the configured floor.",
+      "relevant_chunk_ids": ["rag-runbook-eval"],
+      "filters": {"product_area": "rag", "section": "eval"},
+      "source": "docs/runbooks/rag-documentation-database.md"
+    },
+    {
+      "id": "rag-q005",
+      "question": "How does the RAG workstream prevent stale indexes?",
+      "ideal_answer": "Freshness uses document content hashes so stale indexes are rejected and latest versions are served by default.",
+      "relevant_chunk_ids": ["rag-runbook-freshness"],
+      "filters": {"product_area": "rag", "section": "freshness"},
+      "source": "docs/runbooks/rag-documentation-database.md"
+    }
+  ]
+}
