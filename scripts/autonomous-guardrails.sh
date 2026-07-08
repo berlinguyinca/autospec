@@ -190,8 +190,9 @@ cmd_blast_radius() {
         fenced_surfaces="$(default_fenced_surfaces_file)"
     fi
 
-    local result status
-    result="$(blast_radius_classification_json "$changed_files" "$fenced_surfaces")"
+    local result status dir
+    dir="$(cd "$(dirname "$0")" && pwd)"
+    result="$(python3 "$dir/blast-radius-classifier.py" --changed-files "$changed_files" --fenced-surfaces "$fenced_surfaces")"
     status="$(printf '%s' "$result" | jq -r '.exit_status')"
     if [ "$json" -eq 1 ]; then
         printf '%s\n' "$result" | jq 'del(.exit_status)'
@@ -208,19 +209,14 @@ cmd_blast_radius() {
     printf 'LABEL:%s\n' "$(printf '%s' "$result" | jq -r '.label')"
 }
 
-blast_radius_classification_json() {
-    local changed_files="$1" fenced_surfaces="${2:-}" dir
-    dir="$(cd "$(dirname "$0")" && pwd)"
-    python3 "$dir/blast-radius-classifier.py" \
-        --changed-files "$changed_files" \
-        --fenced-surfaces "$fenced_surfaces"
-}
 blast_radius_json() {
     local changed_files="$1" fenced_surfaces="${2:-}"
     if [ -z "$fenced_surfaces" ]; then
         fenced_surfaces="$(default_fenced_surfaces_file)"
     fi
-    blast_radius_classification_json "$changed_files" "$fenced_surfaces" | jq 'del(.exit_status)'
+    local dir
+    dir="$(cd "$(dirname "$0")" && pwd)"
+    python3 "$dir/blast-radius-classifier.py" --changed-files "$changed_files" --fenced-surfaces "$fenced_surfaces" | jq 'del(.exit_status)'
 }
 cmd_provenance() {
     local repo="" pr="" changed_files="" gate_evidence="" rollback_handle="" out=""
