@@ -53,6 +53,8 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 
 # Infrastructure gotchas
 
+- [Background pipeline exit masking](feedback_background_pipeline_exit_masking.md) — `cmd | tail; echo` background tasks report exit 0 even when the gate failed; parse the gate's own final status line, and zsh uses lowercase `pipestatus`
+
 - [Installer excludes runtime libs](feedback_installer_excludes_runtime_libs.md) — install.sh drops scripts/lib/ runtime libs; autospec-explore hard-crashes on a clean install; ship-completeness doesn't catch it
 - [Explore codebase-signals false positives](feedback_explore_codebase_signals_false_positives.md) — TODO/FIXME grep matches prose, assets, and its own source; noise dominates ranking; constitution gate drops 0/45
 - [Explore --once unverified ~0% precision](feedback_explore_once_unverified_near_zero_precision.md) — local discovery on autospec repo: 183 raw → 0 verified; even source-analysis was 4/4 false on direct check; never auto-file --once bare-subprocess output, verify evidence against files first
