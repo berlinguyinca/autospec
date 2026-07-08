@@ -15,6 +15,8 @@ Usage:
   rag-workstream.sh citation-check --claims FILE --chunks FILE
   rag-workstream.sh validate-design-doc --doc FILE
   rag-workstream.sh ingest-index --config FILE --root DIR --out FILE
+  rag-workstream.sh retrieve --index FILE --config FILE --query TEXT [--filter KEY=VALUE] [knobs]
+  rag-workstream.sh retrieve-eval --index FILE --config FILE --golden FILE [--mode hybrid|dense|bm25] [knobs]
 USAGE
 }
 
@@ -27,6 +29,14 @@ if [ "${1:-}" = "ingest-index" ]; then
     shift
     SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
     python3 "$SCRIPT_DIR/rag-ingest-index.py" "$@"
+    exit $?
+fi
+
+if [ "${1:-}" = "retrieve" ] || [ "${1:-}" = "retrieve-eval" ]; then
+    CMD="$1"
+    shift
+    SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+    python3 "$SCRIPT_DIR/rag_retrieve.py" "$CMD" "$@"
     exit $?
 fi
 
@@ -51,7 +61,7 @@ SOURCE_TOKENS = [
 ]
 CHILD_TOKENS = ["#1548", "#1549", "#1550", "#1551", "#1552"]
 REQUIRED_CONFIG_SECTIONS = ["corpus", "chunking", "embedding", "retrieval", "query_transform", "freshness", "eval"]
-REQUIRED_RETRIEVAL_KNOBS = ["dense_top_k", "bm25_top_k", "rrf_k", "rerank_top_n", "final_n"]
+REQUIRED_RETRIEVAL_KNOBS = ["dense_top_k", "bm25_top_k", "rrf_k", "fusion_weight", "rerank_top_n", "final_n"]
 
 
 def load_json(path):
