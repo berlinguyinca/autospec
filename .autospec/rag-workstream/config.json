@@ -1,8 +1,16 @@
 {
   "schema_version": 1,
   "corpus": {
-    "include": ["llms.txt", "llms-full.txt", "docs/**/*.md", "README.md", "SKILLS.md"],
-    "exclude": ["docs/memory/diary/**"]
+    "include": [
+      "llms.txt",
+      "llms-full.txt",
+      "docs/**/*.md",
+      "README.md",
+      "SKILLS.md"
+    ],
+    "exclude": [
+      "docs/memory/diary/**"
+    ]
   },
   "chunking": {
     "strategy": "structure_aware",
@@ -25,7 +33,12 @@
     "fusion_weight": 0.5,
     "rerank_top_n": 50,
     "final_n": 8,
-    "metadata_filters": ["index_version", "doc_version", "section", "product_area"]
+    "metadata_filters": [
+      "index_version",
+      "doc_version",
+      "section",
+      "product_area"
+    ]
   },
   "query_transform": {
     "rewrite": true,
@@ -35,15 +48,31 @@
   },
   "freshness": {
     "serve_latest": true,
-    "invalidate_by": ["doc_id", "content_hash"],
+    "invalidate_by": [
+      "doc_id",
+      "content_hash"
+    ],
     "keep_prior_versions_filterable": true
   },
   "eval": {
     "target_metric": "ndcg",
-    "retrieval_metrics": ["precision_at_k", "recall_at_k", "mrr", "ndcg"],
-    "ragas_metrics": ["faithfulness", "answer_relevancy", "context_precision", "context_recall"],
-    "ragas_faithfulness_floor": 0.90,
-    "promote_only_score_positive": true
+    "retrieval_metrics": [
+      "precision_at_k",
+      "recall_at_k",
+      "mrr",
+      "ndcg"
+    ],
+    "ragas_metrics": [
+      "faithfulness",
+      "answer_relevancy",
+      "context_precision",
+      "context_recall"
+    ],
+    "ragas_faithfulness_floor": 0.9,
+    "promote_only_score_positive": true,
+    "golden_set": ".autospec/rag-workstream/golden-set.json",
+    "heldout_fold": 0,
+    "heldout_modulus": 5
   },
   "handoffs": {
     "1548": "ingestion, structure-aware chunking, late/contextual chunking, and config-versioned index materialization",

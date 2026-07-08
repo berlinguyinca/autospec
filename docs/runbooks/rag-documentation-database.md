@@ -22,8 +22,10 @@ The parent gate enforces these invariants before child issues fill in the concre
 bash scripts/rag-workstream.sh config-version --config .autospec/rag-workstream/config.json
 bash scripts/rag-workstream.sh ingest-index --config .autospec/rag-workstream/config.json --root . --out reports/rag/index.json
 bash scripts/rag-workstream.sh retrieve --index reports/rag/index.json --config .autospec/rag-workstream/config.json --query "rrf_k" --filter doc_version=v2
-bash scripts/rag-workstream.sh retrieve-eval --index reports/rag/index.json --config .autospec/rag-workstream/config.json --golden reports/rag/golden.json --mode hybrid --final-n 8
-bash scripts/rag-workstream.sh query-router-eval --index reports/rag/index.json --config .autospec/rag-workstream/config.json --golden reports/rag/golden.json --mode hybrid --final-n 8
+bash scripts/rag-workstream.sh retrieve-eval --index reports/rag/index.json --config .autospec/rag-workstream/config.json --golden .autospec/rag-workstream/golden-set.json --mode hybrid --final-n 8
+bash scripts/rag-workstream.sh query-router-eval --index reports/rag/index.json --config .autospec/rag-workstream/config.json --golden .autospec/rag-workstream/golden-set.json --mode hybrid --final-n 8
+bash scripts/rag-workstream.sh eval-golden --index reports/rag/index.json --config .autospec/rag-workstream/config.json --golden .autospec/rag-workstream/golden-set.json --out reports/rag/golden-eval.json
+bash scripts/rag-workstream.sh auto-tune --index reports/rag/index.json --config .autospec/rag-workstream/config.json --golden .autospec/rag-workstream/golden-set.json --candidate-config reports/rag/candidate-config.json --audit-log reports/rag/tuning-ledger.ndjson --promote-out reports/rag/promoted.json --quarantine-out reports/rag/quarantine.json
 bash scripts/rag-workstream.sh gate --baseline reports/rag/baseline.json --candidate reports/rag/candidate.json --target-metric ndcg --faithfulness-floor 0.90 --promote-out reports/rag/promoted.json
 bash scripts/rag-workstream.sh freshness-check --manifest reports/rag/index-manifest.json --root .
 bash scripts/rag-workstream.sh chunk-boundary-check --chunks reports/rag/chunks.json
@@ -48,6 +50,15 @@ Each emitted index carries `embedding_model_id`, `chunking.chunk_config_hash`, a
 
 `query-router-eval` classifies each golden query as `easy`, `sparse`, or `multi_hop`, generates only the transforms eligible for that class, and measures each candidate transform against the untransformed baseline. Easy queries keep the original query unless a fixture explicitly marks a harder class; sparse queries may use deterministic jargon rewrite or HyDE; multi-hop queries may use multi-query fan-out or decomposition. The command emits per-transform recall lift, nDCG lift, added query count, added token count, and a latency-cost proxy. A transform is enabled only when measured recall lift is positive and the configured `query_transform.max_added_tokens` budget is not exceeded, so net-negative transforms remain off instead of becoming blanket retrieval cost.
 
+
+## Issue #1551 golden-set eval and auto-tuning contract
+
+The seed golden set lives at `.autospec/rag-workstream/golden-set.json` with `schema_version`, `version`, `{question, ideal_answer, relevant_chunk_ids}`, metadata filters, and a deterministic held-out rotation (`fold` / `modulus`). The checked-in seed stays small for repository weight, but the schema is the production contract for a 50–200 example mined corpus. Incrementing the held-out fold rotates the withheld slice so chunking/retrieval/router knobs cannot overfit a fixed visible subset.
+
+`eval-golden` runs the retrieval path over every golden query and emits precision@k, recall@k, MRR, nDCG, plus RAGAS-shaped generation metrics: faithfulness, answer relevancy, context precision, and context recall. Commit-time scores are deterministic placeholders over retrieved chunk support; the field names and promotion floors intentionally mirror the nightly LLM-judge/RAGAS contract without making local validation call an API.
+
+`auto-tune` evaluates the baseline config and a candidate config, appends both score records to an NDJSON audit ledger, and writes exactly one unattended decision artifact. It promotes only when the configured target retrieval metric (default nDCG) improves and faithfulness stays at or above the floor with no baseline regression. Any target-metric miss or faithfulness breach writes the quarantine report for human review (#1545) and returns non-zero; it never prompts mid-run.
+
 ## Child issue handoff boundaries
 
 - #1548 owns ingestion, structure-aware splitting, Jina late chunking, contextual-prefix generation, and materialized index writes.
@@ -61,5 +72,7 @@ Each emitted index carries `embedding_model_id`, `chunking.chunk_config_hash`, a
 - Anthropic Contextual Retrieval: https://www.anthropic.com/engineering/contextual-retrieval — cited for contextual prefixes, contextual BM25, and reported retrieval-failure reductions.
 - RAGAS faithfulness metric: https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/faithfulness/ — cited for checking whether answer claims are supported by retrieved context.
 - RAGAS context precision metric: https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/context_precision/ — cited for retriever ranking quality.
+- RAGAS answer relevancy metric: https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/answer_relevance/ — cited for answer/query alignment in nightly generation scoring.
+- RAGAS context recall metric: https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/context_recall/ — cited for whether retrieved context covers the answer requirements.
 - Jina late-chunking: https://jina.ai/news/late-chunking-in-long-context-embedding-models/ — cited for producing contextual chunk embeddings after long-context embedding.
 - llms.txt proposal: https://llmstxt.org/ — cited for using `llms.txt` as a machine-readable documentation corpus input.
