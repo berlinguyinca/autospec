@@ -6,7 +6,10 @@ Source spec:
 These issues intentionally decompose implementation after the spec-first PR. Each
 issue should stay small, ship with validation, and avoid enabling full
 Constitution enforcement before the loader, lockfile, and composition contracts
-exist.
+exist. They must preserve the current autonomous platform contract: blocking
+source failures produce deterministic validation evidence, and autonomous runs
+quarantine the affected work item instead of prompting or blocking unrelated queue
+items.
 
 ## 1. feat: add constitution and baseline config schema
 
@@ -46,7 +49,8 @@ Add a local-path Constitution loader that emits normalized Constitution JSON.
 - Add a loader script or library entry point for `constitution.source.type: local`.
 - Validate source root, manifest kind, schema version, profile name, and required
   files.
-- Reject path traversal outside the source root.
+- Reject relative paths that traverse outside the repository root.
+- Allow absolute local paths only as an explicit workstation-local opt-in.
 - Add fixtures under `tests/fixtures/constitution/`.
 
 ## Acceptance criteria
@@ -71,15 +75,18 @@ Add a GitHub Constitution loader that resolves versions to pinned commit SHAs.
 ## Implementation outline
 
 - Add resolver support for `constitution.source.type: github`.
-- Resolve `version` through `git ls-remote` or GitHub API.
+- Resolve `version` through `git ls-remote` or GitHub API only in explicit
+  refresh flows.
 - Require locked execution to use `commit`.
-- Cache or stage fetched content without changing engine behavior.
+- Cache or stage fetched content without changing engine behavior or writing to
+  companion repositories.
 
 ## Acceptance criteria
 
-- [ ] Loader resolves tag `v1.0.0` fixture refs to a 40-character `commit`.
+- [ ] Loader resolves tag `v1.0.0` fixture refs to a 40-character `commit` in refresh mode.
 - [ ] Loader rejects a `version` and `commit` mismatch.
 - [ ] Normal execution refuses an unlocked GitHub Constitution source.
+- [ ] Refresh output is a current-repo lockfile diff, not a companion-repo write.
 - [ ] `bash scripts/validate.sh --changed=origin/main` passes.
 
 ### Primary smoke test (inner loop)
@@ -125,6 +132,7 @@ Add `.autospec/constitution.lock.json` generation and refresh semantics.
 - Add lockfile schema with Constitution, baseline, and composition sections.
 - Implement `--refresh-lock` path for resolving versions to commits.
 - Refuse normal GitHub-source execution without a lockfile commit.
+- Emit reviewable dependency-update evidence for every changed pin.
 - Add fixtures for deterministic lockfile output.
 
 ## Acceptance criteria
@@ -132,6 +140,7 @@ Add `.autospec/constitution.lock.json` generation and refresh semantics.
 - [ ] `.autospec/constitution.lock.json` records Constitution `repo`, `version`, and `commit`.
 - [ ] `.autospec/constitution.lock.json` records each baseline source `id` and `commit`.
 - [ ] `--refresh-lock` rewrites a changed version pin in one deterministic JSON file.
+- [ ] Changed pins are reported as dependency-update evidence for review.
 - [ ] `bash scripts/validate.sh --changed=origin/main` passes.
 
 ### Primary smoke test (inner loop)
@@ -178,6 +187,8 @@ Add a command that validates config, sources, lockfile, and profile composition.
 - Run config validation, source validation, lockfile validation, and composition
   validation in order.
 - Emit machine-readable JSON and human-readable summary output.
+- Return non-zero for required source failures while preserving enough evidence
+  for autonomous quarantine.
 - Wire the command into repository validation only after fixtures pass.
 
 ## Acceptance criteria
@@ -185,6 +196,7 @@ Add a command that validates config, sources, lockfile, and profile composition.
 - [ ] Validation command exits 0 for valid local fixtures.
 - [ ] Validation command exits non-zero for an unlocked GitHub source.
 - [ ] Validation command reports missing profile references by source ID and profile ID.
+- [ ] Validation output can be attached to an autonomous quarantine record.
 - [ ] `bash scripts/validate.sh --changed=origin/main` passes.
 
 ### Primary smoke test (inner loop)
@@ -249,7 +261,7 @@ bash scripts/validate.sh --changed=origin/main
 
 ## Goal
 
-Configure this repository's `.autospec/autospec.yml` to consume `autospec-constitution` and `autospec-baselines`.
+Configure this repository's `.autospec/autospec.yml` to consume `autospec-constitution` and `autospec-baselines` as locked catalog inputs.
 
 ## Implementation outline
 
@@ -258,6 +270,8 @@ Configure this repository's `.autospec/autospec.yml` to consume `autospec-consti
 - Commit `.autospec/constitution.lock.json` with pinned SHAs.
 - Run the validation command and the existing repo validation suite.
 - Document any repo-specific local overrides.
+- Keep companion repository updates proposal-only; do not create companion PRs
+  from this dogfood issue.
 
 ## Acceptance criteria
 
@@ -271,4 +285,3 @@ Configure this repository's `.autospec/autospec.yml` to consume `autospec-consti
 ```bash
 bash scripts/validate.sh && bats tests/unit tests/smoke
 ```
-

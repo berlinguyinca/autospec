@@ -1,26 +1,36 @@
 # Constitution and Baseline Integration Foundation
 
 **Date:** 2026-06-27
-**Status:** spec-first foundation; no engine implementation in this phase.
+**Status:** reconciled spec-first foundation; no engine implementation in this
+phase.
 
 ## Goal
 
-Teach autospec how it will discover, pin, validate, and compose external
-Autospec Constitution and Autospec Baseline repositories before any runtime engine
-behavior is built.
+Teach autospec how it will discover, pin, validate, and compose Constitution and
+Baseline catalog inputs before any runtime engine behavior is built.
 
 Autospec Constitution is the law: normative rules, severity definitions, and
 non-negotiable gates. Autospec Baselines are the playbooks: reusable profile
 packs, workflow defaults, validation recipes, metadata templates, and gap-analysis
-schemas. Autospec is the engine: it reads the law and playbooks, resolves a local
-profile, then drives specs, issues, validation, metadata, and gap reports from the
-resolved contract.
+schemas. Autospec is the engine: it reads the law and playbooks as locked catalog
+inputs, resolves a local profile, then drives specs, issues, validation, metadata,
+and gap reports from the resolved contract.
+
+This spec is subordinate to the current autonomous platform design. It defines
+source and composition contracts only. Autonomous execution must keep using the
+Phase-4 no-ask, quarantine-first model: invalid or unavailable catalog inputs
+produce deterministic non-zero validation evidence and, when encountered inside an
+autonomous run, route the affected work item into quarantine instead of prompting
+or silently continuing.
 
 ## Non-goals
 
 - No constitution enforcement engine in this phase.
 - No baseline pack execution in this phase.
 - No automatic repository cloning, network fetching, or lockfile writer yet.
+- No write bridge to `autospec-constitution`, `autospec-baselines`, or any other
+  companion repository. Lock refresh output is a reviewable dependency update in
+  the current repo, not an automatic companion PR.
 - No behavior changes to existing autospec skills, scripts, or validation gates.
 - No migration of existing `.autospec/autospec.yml` files beyond documenting the
   future shape.
@@ -87,10 +97,12 @@ loader must refuse execution without a pinned commit unless explicitly running i
 ### Local path
 
 Local sources read from a path relative to the repository root unless the path is
-absolute. The loader must not follow paths outside the repository unless the user
-explicitly uses an absolute path. Local sources are trusted only for local
-development; metadata must record that they are unpinned and not reproducible
-unless a content digest is captured in the lockfile.
+absolute. Relative local paths must remain inside the repository. The loader must
+reject relative traversal such as `../autospec-constitution`; users who
+intentionally need a workstation-local companion checkout must opt in with an
+absolute path. Local sources are trusted only for local development; metadata must
+record that they are unpinned and not reproducible unless a content digest is
+captured in the lockfile.
 
 Example:
 
@@ -98,15 +110,17 @@ Example:
 constitution:
   source:
     type: local
-    path: ../autospec-constitution
+    path: .autospec/constitution/local
 ```
 
 ### GitHub repository
 
 GitHub sources identify `owner/name`, an optional subpath, and a desired version.
 The resolver maps `version` to a commit SHA, records the SHA in the lockfile, and
-future reads use the SHA. Network access is allowed only in lock refresh or initial
-resolution paths; normal engine runs consume the lockfile.
+future reads use the SHA. Network access is allowed only in explicit lock refresh
+or initial resolution paths; normal engine runs consume the lockfile. A lock
+refresh is treated like a dependency update: it produces a reviewable diff in the
+current repository and must not push to companion repositories.
 
 Example:
 
@@ -147,8 +161,10 @@ document that the engine can treat as authoritative.
 - Expose a stable JSON document for downstream consumers.
 - Emit provenance for every rule: source type, repo/path, version, commit, file,
   and section anchor.
-- Fail closed when `constitution.required: true` and resolution or validation
-  fails.
+- Emit a non-zero validation result when `constitution.required: true` and
+  resolution or validation fails. Autonomous runs convert that failure into
+  quarantine evidence for the affected work item rather than prompting the
+  operator or blocking unrelated queue items.
 
 The loader must not interpret baseline playbooks as law. Baselines may recommend
 checks and workflows, but only the Constitution defines mandatory rule semantics.
@@ -282,6 +298,9 @@ Lockfile rules:
 - The lockfile is committed when the project intends reproducible execution.
 - A changed lockfile is a reviewable dependency update, not an incidental
   generated artifact.
+- Autonomous refresh attempts open or update current-repo evidence only. Companion
+  repository writes remain proposal-only until a separate bridge ships with proof
+  and approval gates.
 
 ## Gap analysis input/output contract
 
@@ -414,13 +433,13 @@ Generation rules:
 6. **Profile composition resolver.** Compose law, playbooks, local overrides, and
    runtime flags into `effective-profile.json`.
 7. **Validation command.** Add an explicit command that validates config, sources,
-   lockfile, and composition.
+   lockfile, and composition, returning non-zero for blocking source failures.
 8. **Gap analysis input contract.** Produce the analyzer input envelope from repo
    inventory and effective profile.
 9. **Metadata generation input contract.** Generate provenance metadata for specs,
    issues, PRs, and reports.
 10. **Dogfood.** Configure this repository to consume `autospec-constitution` and
-    `autospec-baselines` through the documented contract.
+    `autospec-baselines` as locked catalog inputs through the documented contract.
 
 ## Acceptance criteria
 
