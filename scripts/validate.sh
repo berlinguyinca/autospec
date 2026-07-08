@@ -3080,6 +3080,7 @@ main() {
     check_autospec_autonomous_skill_contract
     check_conductor_wiring_contract
     check_autonomy_guardrails_foundation
+    check_blast_radius_quarantine_contract
     check_autospec_refine_contract
     check_autospec_continue_contract
     check_autospec_loop_contract
@@ -3121,6 +3122,7 @@ main() {
     check_autospec_autonomous_skill_contract
     check_conductor_wiring_contract
     check_autonomy_guardrails_foundation
+    check_blast_radius_quarantine_contract
     check_autonomous_phase2_suite
     check_persona_suite
     check_performance_workstream_contract
@@ -4421,6 +4423,35 @@ check_autonomy_guardrails_foundation() {
         bats tests/autonomous/test_guardrails_foundation.bats >/tmp/validate-guardrails-foundation.log 2>&1 \
             || { cat /tmp/validate-guardrails-foundation.log >&2; \
                  fail "tests/autonomous/test_guardrails_foundation.bats: failed (issue #1543)"; }
+    fi
+}
+
+# Blast-radius quarantine (issue #1545): fenced-surface classification must be
+# config-driven, premerge must quarantine rather than modal-prompt/block the
+# autonomous loop, and the value queue must continue to the next runnable item.
+check_blast_radius_quarantine_contract() {
+    info "blast-radius quarantine contract (issue #1545)"
+    [ -f tests/autonomous/test_blast_radius_quarantine.bats ] \
+        || fail "tests/autonomous/test_blast_radius_quarantine.bats missing (issue #1545)"
+    [ -f docs/specs/2026-07-07-blast-radius-quarantine-design.md ] \
+        || fail "blast-radius quarantine design doc missing (issue #1545)"
+    grep -q '^fenced_surfaces:' .autospec/autospec.yml \
+        || fail ".autospec/autospec.yml missing fenced_surfaces registry (issue #1545)"
+    grep -q 'trading-system/risk/\*\*' .autospec/autospec.yml \
+        || fail ".autospec/autospec.yml missing trading-system risk fence (issue #1545)"
+    grep -q -- '--fenced-surfaces' scripts/autonomous-guardrails.sh \
+        || fail "autonomous-guardrails.sh missing --fenced-surfaces option (issue #1545)"
+    grep -q -- '--quarantine-out' scripts/autonomous-premerge-gate.sh \
+        || fail "autonomous-premerge-gate.sh missing --quarantine-out option (issue #1545)"
+    grep -q 'autospec.autonomous.quarantine.v1' scripts/autonomous-premerge-gate.sh \
+        || fail "autonomous-premerge-gate.sh missing quarantine provenance schema (issue #1545)"
+    grep -q 'runnable = \[r for r in ranked' scripts/autonomous-prioritize.sh \
+        || fail "autonomous-prioritize.sh must select the next runnable candidate after fenced quarantine (issue #1545)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/autonomous/test_blast_radius_quarantine.bats"
+        bats tests/autonomous/test_blast_radius_quarantine.bats >/tmp/validate-blast-radius-quarantine.log 2>&1 \
+            || { cat /tmp/validate-blast-radius-quarantine.log >&2; \
+                 fail "tests/autonomous/test_blast_radius_quarantine.bats: failed (issue #1545)"; }
     fi
 }
 

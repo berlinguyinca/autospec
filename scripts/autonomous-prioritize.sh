@@ -5,7 +5,7 @@
 # queue using the issue #1542 WSJF-derived formula:
 #   priority = (severity * value * confidence * reversibility) / (effort * blast_radius)
 # Recently touched files receive a deterministic decay multiplier to avoid
-# A→B→A ping-pong, and fenced/high-blast-radius candidates route to a human gate.
+# A→B→A ping-pong, and fenced/high-blast-radius candidates are quarantined/skipped so the conductor can run the next safe candidate in the same cycle.
 
 set -eu
 
@@ -19,7 +19,7 @@ Options:
   --recent-touches FILE          JSON/JSONL paths recently touched by the agent.
   --value-floor N                Minimum runnable priority score (default: 1).
   --recent-decay N               Multiplier for recently touched candidates (default: 0.5).
-  --human-gate-blast-radius N    Blast-radius threshold for human gate (default: 4).
+  --human-gate-blast-radius N    Blast-radius threshold for async human quarantine (default: 4).
   --out FILE                     Also write the priority queue JSON to FILE.
   -h, --help                     Print this help.
 
@@ -175,15 +175,14 @@ for idx, row in enumerate(read_records(cand_path)):
     ranked.append(enriched)
 
 ranked.sort(key=lambda r: (-float(r.get("score", 0)), str(r.get("workstream", "")), str(r.get("id", ""))))
-top = ranked[0] if ranked else None
-if top is None:
-    decision = "idle"
-elif top.get("route") == "human_gate":
-    decision = "human_gate"
-elif float(top.get("score", 0)) < value_floor:
-    decision = "idle"
-else:
+runnable = [r for r in ranked if r.get("route") != "human_gate" and not r.get("below_value_floor")]
+top = runnable[0] if runnable else None
+if top is not None:
     decision = "run"
+elif ranked and any(r.get("route") == "human_gate" for r in ranked):
+    decision = "human_gate"
+else:
+    decision = "idle"
 
 considered_and_skipped = []
 for row in ranked:
