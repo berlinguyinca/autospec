@@ -9,7 +9,9 @@
 # Usage:
 #   autonomous-premerge-gate.sh [--pr-branch <branch>] [--repo <owner/repo>]
 #                                [--pr <number>] [--max-attempts <N>]
+#                                [--lane implementer|verifier]
 #                                [--changed-files <file>] [--gate-evidence <json>]
+#                                [--mutation-baseline <json>] [--mutation-current <json>]
 #                                [--rollback-handle <ref>] [--provenance-out <json>]
 #                                [--notify-sh <path>] [--dry-run]
 #
@@ -39,6 +41,9 @@ GATE_EVIDENCE=""
 ROLLBACK_HANDLE=""
 PROVENANCE_OUT=""
 DRY_RUN=0
+LANE="implementer"
+MUTATION_BASELINE=""
+MUTATION_CURRENT=""
 
 # Resolve notify.sh path: env override → relative to this script → PATH lookup
 _default_notify_sh() {
@@ -63,8 +68,11 @@ Options:
   --pr <number>           PR number for labelling (optional).
   --max-attempts <N>      Max fix-and-recheck cycles per stage (default: 5).
   --notify-sh <path>      Path to notify.sh (default: auto-detected).
+  --lane <name>           Actor lane for immutable verifier bypass (implementer/verifier).
   --changed-files <file>  Newline-delimited changed files for immutable/blast checks.
   --gate-evidence <json>  Passing gate evidence JSON to record on merge-ok.
+  --mutation-baseline <json> Baseline mutation ledger JSON.
+  --mutation-current <json>  Current mutation ledger JSON.
   --rollback-handle <ref> Rollback ref/command handle to record on merge-ok.
   --provenance-out <json> Output path for merge provenance JSON.
   --dry-run               Print what would run without executing.
@@ -96,8 +104,11 @@ while [ $# -gt 0 ]; do
         --pr)          PR_NUMBER="${2:-}"; shift 2 ;;
         --max-attempts) MAX_ATTEMPTS="${2:-5}"; shift 2 ;;
         --notify-sh)   NOTIFY_SH="${2:-}"; shift 2 ;;
+        --lane)        LANE="${2:-}"; shift 2 ;;
         --changed-files) CHANGED_FILES="${2:-}"; shift 2 ;;
         --gate-evidence) GATE_EVIDENCE="${2:-}"; shift 2 ;;
+        --mutation-baseline) MUTATION_BASELINE="${2:-}"; shift 2 ;;
+        --mutation-current) MUTATION_CURRENT="${2:-}"; shift 2 ;;
         --rollback-handle) ROLLBACK_HANDLE="${2:-}"; shift 2 ;;
         --provenance-out) PROVENANCE_OUT="${2:-}"; shift 2 ;;
         --dry-run)     DRY_RUN=1; shift ;;
@@ -132,7 +143,13 @@ if [ -z "$PR_BRANCH" ] || [ "$PR_BRANCH" = "HEAD" ]; then
     die "could not determine PR branch; pass --pr-branch"
 fi
 
+case "$LANE" in
+    implementer|verifier) ;;
+    *) die "--lane must be implementer or verifier" ;;
+esac
+
 info "Validating branch: $PR_BRANCH"
+info "Actor lane: $LANE"
 info "Max fix-and-recheck attempts: $MAX_ATTEMPTS"
 
 # ── Resolve scan commands ─────────────────────────────────────────────────────
@@ -303,7 +320,7 @@ _apply_guardrail_block_label() {
 # ── Pre-QA deterministic guardrails ──────────────────────────────────────────
 if [ -n "$CHANGED_FILES" ]; then
     GUARDRAILS_SH="$(_guardrails_sh)"
-    if ! guard_output="$(bash "$GUARDRAILS_SH" diff-guard --changed-files "$CHANGED_FILES" 2>&1)"; then
+    if ! guard_output="$(bash "$GUARDRAILS_SH" diff-guard --lane "$LANE" --changed-files "$CHANGED_FILES" 2>&1)"; then
         printf "%s\n" "$guard_output"
         _apply_guardrail_block_label
         printf "block immutable_verifier_modified\n"
@@ -313,6 +330,18 @@ if [ -n "$CHANGED_FILES" ]; then
         printf "%s\n" "$blast_output"
         _apply_guardrail_block_label
         printf "block high_risk_blast_radius\n"
+        exit 1
+    fi
+fi
+
+if [ -n "$MUTATION_BASELINE" ] || [ -n "$MUTATION_CURRENT" ]; then
+    [ -n "$MUTATION_BASELINE" ] || die "--mutation-current requires --mutation-baseline"
+    [ -n "$MUTATION_CURRENT" ] || die "--mutation-baseline requires --mutation-current"
+    GUARDRAILS_SH="$(_guardrails_sh)"
+    if ! mutation_output="$(bash "$GUARDRAILS_SH" mutation-guard --baseline "$MUTATION_BASELINE" --current "$MUTATION_CURRENT" 2>&1)"; then
+        printf "%s\n" "$mutation_output"
+        _apply_guardrail_block_label
+        printf "block mutation_score_regression\n"
         exit 1
     fi
 fi
