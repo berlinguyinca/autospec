@@ -19,6 +19,22 @@ hb() { # hb <issue> <step> <ts> [pr] [branch]
         "$1" "${5:-feat/x}" "$2" "$3" "${4:-}" > "$AUTOSPEC_HEARTBEAT_DIR/me_repo/$1.json"
 }
 
+status_with_queue_stub() {
+    mkdir -p "$TMP/status-bin" "$TMP/status-scripts"
+    cp "$S" "$TMP/status-scripts/autospec-run-status.sh"
+    chmod +x "$TMP/status-scripts/autospec-run-status.sh"
+    cat > "$TMP/status-bin/gh" <<'EOF_GH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "repo view") printf '{"nameWithOwner":"me/repo"}\n' ;;
+  *) printf '[]\n' ;;
+esac
+EOF_GH
+    chmod +x "$TMP/status-bin/gh"
+    cat > "$TMP/status-scripts/list-ready-issues.sh"
+    chmod +x "$TMP/status-scripts/list-ready-issues.sh"
+}
+
 @test "shows in-flight issues with step and age" {
     hb 101 tests_passed "$NOW"
     run bash "$S" --repo me/repo
@@ -61,6 +77,53 @@ hb() { # hb <issue> <step> <ts> [pr] [branch]
     [ "$(printf '%s' "$output" | jq -r '.issues[0].issue')" = "105" ]
     [ "$(printf '%s' "$output" | jq -r '.issues[0].stale')" = "true" ]
     [ "$(printf '%s' "$output" | jq 'has("queue")')" = "true" ]
+}
+
+@test "--json reports claimed issue without heartbeat" {
+    status_with_queue_stub <<'EOF_QUEUE'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"ready":[],"blocked":[],"claimed":[{"number":1604,"title":"enumerate running conductors"}],"conflicts":[],"batch":[]}
+JSON
+EOF_QUEUE
+
+    run env PATH="$TMP/status-bin:$PATH" bash "$TMP/status-scripts/autospec-run-status.sh" --repo me/repo --json
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '.claimed_without_heartbeat[0].issue')" = "1604" ]
+}
+
+@test "human status prints claimed issue without heartbeat when no heartbeat table exists" {
+    status_with_queue_stub <<'EOF_QUEUE'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"ready":[],"blocked":[],"claimed":[{"number":1604,"title":"enumerate running conductors"}],"conflicts":[],"batch":[]}
+JSON
+EOF_QUEUE
+
+    run env PATH="$TMP/status-bin:$PATH" bash "$TMP/status-scripts/autospec-run-status.sh" --repo me/repo
+
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q 'claimed without heartbeat (1):'
+    printf '%s\n' "$output" | grep -q '#1604'
+    printf '%s\n' "$output" | grep -q 'enumerate running conductors'
+}
+
+@test "claimed issue with matching heartbeat is not reported as missing heartbeat" {
+    status_with_queue_stub <<'EOF_QUEUE'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"ready":[],"blocked":[],"claimed":[{"number":1604,"title":"enumerate running conductors"}],"conflicts":[],"batch":[]}
+JSON
+EOF_QUEUE
+    mkdir -p "$AUTOSPEC_HEARTBEAT_DIR/me__repo"
+    printf '{"issue":1604,"branch":"feat/issue-1604","step":"implementing","ts":%s,"pr":"","repo":"me/repo","host":"h1"}\n' \
+        "$NOW" > "$AUTOSPEC_HEARTBEAT_DIR/me__repo/1604.json"
+
+    run env PATH="$TMP/status-bin:$PATH" bash "$TMP/status-scripts/autospec-run-status.sh" --repo me/repo --json
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '.claimed_without_heartbeat | length')" = "0" ]
 }
 
 @test "jq missing -> exit 2 (fail-closed)" {
