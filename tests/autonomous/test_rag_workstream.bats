@@ -103,3 +103,72 @@ JSON
     [ -x "$REPO_ROOT/scripts/rag-workstream.sh" ]
     [ -f "$REPO_ROOT/docs/runbooks/rag-documentation-database.md" ]
 }
+
+@test "ingest-index: deterministic structure-aware chunks and versioned local index" {
+    mkdir -p "$WORK/docs"
+    cat > "$WORK/docs/fixture.md" <<'MD'
+# Install
+Run the setup command.
+
+```bash
+autospec install
+```
+
+## Configure
+Set `AUTOSPEC_HOME` before running.
+
+Details stay with configure.
+MD
+    cat > "$WORK/config.json" <<'JSON'
+{
+  "corpus": {"include": ["docs/**/*.md"]},
+  "chunking": {"strategy": "structure_aware", "late_chunking": false, "contextual_prefix": true, "chunk_size": 70, "overlap": 0},
+  "embedding": {"model_id": "local-test-embed", "index_version_prefix": "rag-index-v1"},
+  "retrieval": {"dense_top_k": 50, "bm25_top_k": 50, "rrf_k": 60, "rerank_top_n": 50, "final_n": 8},
+  "query_transform": {"rewrite": false, "hyde": false, "multi_query": false},
+  "freshness": {"serve_latest": true, "invalidate_by": ["doc_id", "content_hash"]},
+  "eval": {"target_metric": "ndcg", "ragas_faithfulness_floor": 0.90}
+}
+JSON
+    run bash "$SCRIPT" ingest-index --config "$WORK/config.json" --root "$WORK" --out "$WORK/index.json"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"rag ingest-index wrote"* ]]
+
+    python3 - "$WORK/index.json" <<'PY'
+import json, sys
+idx=json.load(open(sys.argv[1]))
+assert idx["embedding_model_id"] == "local-test-embed"
+assert idx["chunking"]["chunk_config_hash"]
+assert idx["index_version"].startswith("rag-index-v1:local-test-embed:")
+assert idx["index_metadata"]["reembed_policy"] == "clean_reembed_on_model_or_chunk_config_change"
+chunks=idx["chunks"]
+assert len(chunks) >= 2, chunks
+assert chunks[0]["heading"] == "Install"
+assert "Run the setup command." in chunks[0]["text"], chunks[0]["text"]
+assert chunks[0]["text"].count("```") == 2, chunks[0]["text"]
+assert chunks[0]["contextual_prefix"].startswith("Document: docs/fixture.md > Install")
+assert all(not (c["text"].strip().startswith("#") and len([l for l in c["text"].splitlines() if l.strip()]) == 1) for c in chunks)
+PY
+
+    cp "$WORK/index.json" "$WORK/index.first.json"
+    run bash "$SCRIPT" ingest-index --config "$WORK/config.json" --root "$WORK" --out "$WORK/index.second.json"
+    [ "$status" -eq 0 ]
+    cmp "$WORK/index.first.json" "$WORK/index.second.json"
+
+    python3 - "$WORK/config.json" <<'PY'
+import json, sys
+p=sys.argv[1]
+d=json.load(open(p))
+d["chunking"]["contextual_prefix"] = False
+json.dump(d, open(p,"w"), sort_keys=True)
+PY
+    run bash "$SCRIPT" ingest-index --config "$WORK/config.json" --root "$WORK" --out "$WORK/index.changed.json"
+    [ "$status" -eq 0 ]
+    python3 - "$WORK/index.first.json" "$WORK/index.changed.json" <<'PY'
+import json, sys
+a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2]))
+assert a["chunking"]["chunk_config_hash"] != b["chunking"]["chunk_config_hash"]
+assert a["index_version"] != b["index_version"]
+assert not b["chunks"][0].get("contextual_prefix")
+PY
+}

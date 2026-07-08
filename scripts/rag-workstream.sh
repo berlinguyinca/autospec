@@ -14,12 +14,20 @@ Usage:
   rag-workstream.sh chunk-boundary-check --chunks FILE
   rag-workstream.sh citation-check --claims FILE --chunks FILE
   rag-workstream.sh validate-design-doc --doc FILE
+  rag-workstream.sh ingest-index --config FILE --root DIR --out FILE
 USAGE
 }
 
 if [ "${1:-}" = "--help" ] || [ $# -eq 0 ]; then
     usage
     exit 0
+fi
+
+if [ "${1:-}" = "ingest-index" ]; then
+    shift
+    SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+    python3 "$SCRIPT_DIR/rag-ingest-index.py" "$@"
+    exit $?
 fi
 
 python3 - "$@" <<'PY'
@@ -83,6 +91,7 @@ def sha256_file(path):
 def chunks_by_id(chunks_doc):
     chunks = chunks_doc.get("chunks", chunks_doc if isinstance(chunks_doc, list) else [])
     return {str(chunk.get("chunk_id")): chunk for chunk in chunks}
+
 
 
 def cmd_config_version(args):
