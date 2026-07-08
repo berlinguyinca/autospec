@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, Mapping, Sequence
 
 
-def sha256_file(path: Path) -> str:
+def sha256_path(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
         for block in iter(lambda: fh.read(1024 * 1024), b""):
@@ -21,7 +21,7 @@ def freshness_finding(row: Mapping, root: Path):
     path = root / str(source)
     if not path.exists():
         return {"chunk_id": row.get("chunk_id"), "doc_id": row.get("doc_id"), "status": "missing_doc", "source_path": str(source)}
-    actual = sha256_file(path)
+    actual = sha256_path(path)
     return None if expected == actual else {"chunk_id": row.get("chunk_id"), "doc_id": row.get("doc_id"), "status": "hash_mismatch", "source_path": str(source), "expected": expected, "actual": actual}
 
 
