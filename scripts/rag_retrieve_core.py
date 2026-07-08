@@ -1,6 +1,8 @@
 """Core deterministic local retrieval/evaluation API."""
+import hashlib
 import math
 from collections import Counter
+from pathlib import Path
 from typing import Dict, Mapping, Sequence
 
 from rag_retrieve_rank import bm25_rank, dense_rank, rerank_score, rrf_fuse
@@ -14,7 +16,7 @@ def retrieval_knobs(config: Mapping, overrides: Mapping[str, int | float | None]
     return knobs
 
 
-def retrieve(index: Mapping, config: Mapping, query: str, filters: Mapping[str, str] | None = None, mode: str = "hybrid", overrides: Mapping[str, int | float | None] | None = None) -> Dict:
+def retrieve(index: Mapping, config: Mapping, query: str, filters: Mapping[str, str] | None = None, mode: str = "hybrid", overrides: Mapping[str, int | float | None] | None = None, root: str | None = None) -> Dict:
     filters, knobs = filters or {}, retrieval_knobs(config, overrides or {})
     chunks = candidate_chunks(index, filters)
     by_id = {str(chunk.get("chunk_id")): chunk for chunk in chunks}
@@ -22,7 +24,42 @@ def retrieve(index: Mapping, config: Mapping, query: str, filters: Mapping[str, 
     bm25 = bm25_rank(query, chunks, int(knobs["bm25_top_k"]))
     fused = rrf_fuse(dense, bm25, int(knobs["rrf_k"]), float(knobs["fusion_weight"]), mode)
     reranked = _rerank(query, by_id, fused, int(knobs["rerank_top_n"]))
-    return {"query": query, "mode": mode, "filters": dict(filters), "knobs": knobs, "stages": {"candidates": len(chunks), "dense": len(dense), "bm25": len(bm25), "fused": len(fused), "reranked": len(reranked)}, "results": _result_rows(by_id, reranked, int(knobs["final_n"]))}
+    rows = _result_rows(by_id, reranked, int(knobs["final_n"]))
+    out = {"query": query, "mode": mode, "filters": dict(filters), "knobs": knobs, "stages": {"candidates": len(chunks), "dense": len(dense), "bm25": len(bm25), "fused": len(fused), "reranked": len(reranked)}, "freshness": {"status": "ok", "findings": []}, "answer_status": "ok", "results": rows}
+    if root:
+        _apply_freshness_guard(out, rows, Path(root))
+    return out
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _apply_freshness_guard(out: Dict, rows: Sequence[Mapping], root: Path) -> None:
+    findings = []
+    for row in rows:
+        source = row.get("source_path") or row.get("doc_id")
+        expected = str(row.get("doc_content_hash") or row.get("metadata", {}).get("doc_content_hash", ""))
+        if not source or not expected:
+            continue
+        path = root / str(source)
+        if not path.exists():
+            findings.append({"chunk_id": row.get("chunk_id"), "doc_id": row.get("doc_id"), "status": "missing_doc", "source_path": str(source)})
+            continue
+        actual = _sha256_file(path)
+        if expected != actual:
+            findings.append({"chunk_id": row.get("chunk_id"), "doc_id": row.get("doc_id"), "status": "hash_mismatch", "source_path": str(source), "expected": expected, "actual": actual})
+    if findings and rows and findings[0].get("chunk_id") == rows[0].get("chunk_id"):
+        out["freshness"] = {"status": "stale_top_hit", "findings": findings}
+        out["answer_status"] = "rejected_stale_top_hit"
+        out["stale_results"] = list(rows)
+        out["results"] = []
+    else:
+        out["freshness"] = {"status": "ok" if not findings else "non_top_stale", "findings": findings}
 
 
 def _rerank(query: str, by_id: Mapping[str, Mapping], fused: Mapping[str, float], top_n: int):
@@ -33,7 +70,15 @@ def _rerank(query: str, by_id: Mapping[str, Mapping], fused: Mapping[str, float]
 
 
 def _result_rows(by_id: Mapping[str, Mapping], reranked, final_n: int):
-    return [{"rank": rank, "chunk_id": cid, "doc_id": by_id[cid].get("doc_id"), "source_path": by_id[cid].get("source_path", by_id[cid].get("path")), "heading": by_id[cid].get("heading", ""), "score": round(score, 6), "fused_score": round(fused_score, 6), "reranker_score": round(reranker_score, 6), "metadata": chunk_metadata(by_id[cid])} for rank, (cid, score, fused_score, reranker_score) in enumerate(reranked[:final_n], 1)]
+    rows = []
+    for rank, (cid, score, fused_score, reranker_score) in enumerate(reranked[:final_n], 1):
+        chunk = by_id[cid]
+        row = {"rank": rank, "chunk_id": cid, "doc_id": chunk.get("doc_id"), "source_path": chunk.get("source_path", chunk.get("path")), "heading": chunk.get("heading", ""), "score": round(score, 6), "fused_score": round(fused_score, 6), "reranker_score": round(reranker_score, 6), "metadata": chunk_metadata(chunk)}
+        for key in ("doc_content_hash", "doc_version", "is_latest"):
+            if key in chunk:
+                row[key] = chunk[key]
+        rows.append(row)
+    return rows
 
 
 def evaluate(index: Mapping, config: Mapping, golden: Mapping, mode: str, overrides: Mapping[str, int | float | None]) -> Dict:
@@ -41,10 +86,12 @@ def evaluate(index: Mapping, config: Mapping, golden: Mapping, mode: str, overri
     queries = golden.get("queries", golden if isinstance(golden, list) else [])
     knobs = retrieval_knobs(config, overrides)
     for row in queries:
-        out = retrieve(index, config, row["query"], row.get("filters", {}), mode=mode, overrides=overrides)
-        metrics = query_metrics(out["results"], row.get("relevant", {}), int(knobs["final_n"]))
+        query_text = row.get("query", row.get("question", ""))
+        relevant = row.get("relevant", {cid: 1 for cid in row.get("relevant_chunk_ids", [])})
+        out = retrieve(index, config, query_text, row.get("filters", {}), mode=mode, overrides=overrides)
+        metrics = query_metrics(out["results"], relevant, int(knobs["final_n"]))
         totals.update(metrics)
-        rows.append({"query": row["query"], "filters": row.get("filters", {}), "results": [r["chunk_id"] for r in out["results"]], "metrics": {k: round(v, 6) for k, v in metrics.items()}})
+        rows.append({"query": query_text, "filters": row.get("filters", {}), "results": [r["chunk_id"] for r in out["results"]], "metrics": {k: round(v, 6) for k, v in metrics.items()}})
     count = max(len(rows), 1)
     return {"mode": mode, "knobs": knobs, "retrieval": {k: round(totals[k] / count, 6) for k in ("ndcg", "mrr", "recall_at_k", "precision_at_k")} | {"queries": len(rows)}, "per_query": rows}
 

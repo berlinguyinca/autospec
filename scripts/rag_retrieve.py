@@ -49,6 +49,7 @@ def build_cli_parser():
     add_common_args(retrieve_parser)
     retrieve_parser.add_argument("--query", required=True)
     retrieve_parser.add_argument("--filter", action="append", default=[])
+    retrieve_parser.add_argument("--root", help="Repo root for top-hit freshness guard")
     eval_parser = sub.add_parser("retrieve-eval")
     add_common_args(eval_parser)
     eval_parser.add_argument("--golden", required=True)
@@ -69,7 +70,7 @@ def main(argv=None):
     args = build_cli_parser().parse_args(argv)
     index, config = read_json_file(args.index), read_json_file(args.config)
     if args.cmd == "retrieve":
-        emit_json_document(retrieve(index, config, args.query, parse_filter(args.filter), mode=args.mode, overrides=overrides(args)))
+        emit_json_document(retrieve(index, config, args.query, parse_filter(args.filter), mode=args.mode, overrides=overrides(args), root=args.root))
     elif args.cmd == "retrieve-eval":
         emit_json_document(evaluate(index, config, read_json_file(args.golden), args.mode, overrides(args)))
     else:

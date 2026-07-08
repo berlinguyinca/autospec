@@ -31,7 +31,15 @@ def chunk_metadata(chunk: Mapping) -> Dict[str, str]:
 
 def candidate_chunks(index: Mapping, filters: Mapping[str, str]):
     chunks = index.get("chunks", index if isinstance(index, list) else [])
-    return [chunk for chunk in chunks if all(str(chunk_metadata(chunk).get(key, "")) == str(value) for key, value in filters.items())]
+    latest_default = bool(index.get("docs_by_id")) and "doc_version" not in filters
+    rows = []
+    for chunk in chunks:
+        if latest_default and chunk.get("is_latest") is False:
+            continue
+        metadata = chunk_metadata(chunk)
+        if all(str(metadata.get(key, "")) == str(value) for key, value in filters.items()):
+            rows.append(chunk)
+    return rows
 
 
 def count_overlap(query_counts: Counter, doc_counts: Counter) -> float:
