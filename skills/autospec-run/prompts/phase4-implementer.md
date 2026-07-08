@@ -56,7 +56,11 @@ Before changing any code:
 3. Run a quick pattern survey for analogous existing implementations: `grep -r <key term> --include="*.<ext>"` and `find . -name "<pattern>"`. The goal is to identify the existing conventions you should follow, not to produce a survey artifact.
 4. If the issue's contract is ambiguous in a way that affects implementation (two valid interpretations, missing acceptance criteria), post a clarifying comment on the issue and exit. Do not guess.
 
+> **Advisor gate `impl-haiku` (only on the `claude-haiku-cloud` profile).** Before taking the ambiguous-contract exit-to-queue branch in step 4, run the `## Advisor escalation` protocol from `autospec-run/SKILL.md` with `--gate impl-haiku`, sending the specific ambiguity as the question and the relevant issue-body excerpt as context. If the advisor returns `plan`/`correction`, apply it and continue implementing instead of exiting; if it returns `stop` (or precheck was cap-reached / disabled), take the normal exit-to-queue path. This lets the cheap Haiku tier resolve the occasional hard call without a full round-trip to a stronger implementer.
+
 ## Implement
+
+> **Advisor gate `impl-decision` (any profile).** When you face a design or architecture sub-decision you cannot reasonably resolve within your tier's budget, run the `## Advisor escalation` protocol with `--gate impl-decision` before guessing. Apply a returned `plan`/`correction`; on `stop` take the soft-fail path. The shared per-issue cap bounds how often this fires, so reserve it for genuinely stuck decisions rather than routine choices.
 
 1. Stay within the context and reasoning budget implied by the issue's `ctx:*` / `reasoning:*` labels. If you hit budget pressure, stop and post a comment on the issue rather than producing rushed work.
 2. Follow the conventions surfaced during Expand. Do not introduce new patterns that diverge from surrounding code unless the issue explicitly asks for them.
