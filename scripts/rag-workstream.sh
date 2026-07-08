@@ -23,6 +23,13 @@ if [ "${1:-}" = "--help" ] || [ $# -eq 0 ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "ingest-index" ]; then
+    shift
+    SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+    python3 "$SCRIPT_DIR/rag-ingest-index.py" "$@"
+    exit $?
+fi
+
 python3 - "$@" <<'PY'
 import argparse
 import hashlib
@@ -86,237 +93,6 @@ def chunks_by_id(chunks_doc):
     return {str(chunk.get("chunk_id")): chunk for chunk in chunks}
 
 
-
-def stable_rel(path, root):
-    return path.resolve().relative_to(root.resolve()).as_posix()
-
-
-def file_hash_text(text):
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def chunk_config(config):
-    chunking = dict(config.get("chunking", {}))
-    return {
-        "strategy": chunking.get("strategy", "structure_aware"),
-        "chunk_size": int(chunking.get("chunk_size", 900)),
-        "overlap": int(chunking.get("overlap", 0)),
-        "late_chunking": bool(chunking.get("late_chunking", False)),
-        "contextual_prefix": bool(chunking.get("contextual_prefix", False)),
-        "preserve_code_fences": bool(chunking.get("preserve_code_fences", True)),
-        "preserve_heading_body": bool(chunking.get("preserve_heading_body", True)),
-    }
-
-
-def chunk_config_hash(config):
-    return hashlib.sha256(canonical(chunk_config(config)).encode("utf-8")).hexdigest()[:16]
-
-
-def iter_corpus_files(root, config):
-    corpus = config.get("corpus", {})
-    includes = corpus.get("include", ["llms.txt", "llms-full.txt", "docs/**/*.md"])
-    excludes = corpus.get("exclude", [])
-    paths = []
-    for pattern in includes:
-        if any(ch in pattern for ch in "*?["):
-            paths.extend(root.glob(pattern))
-        else:
-            candidate = root / pattern
-            if candidate.exists():
-                paths.append(candidate)
-    unique = []
-    seen = set()
-    for path in sorted(paths, key=lambda x: stable_rel(x, root)):
-        if not path.is_file():
-            continue
-        rel = stable_rel(path, root)
-        if rel in seen:
-            continue
-        if any(Path(rel).match(pattern) for pattern in excludes):
-            continue
-        seen.add(rel)
-        unique.append(path)
-    return unique
-
-
-def heading_title(line):
-    m = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
-    if not m:
-        return ""
-    return m.group(2).strip()
-
-
-def markdown_sections(text):
-    lines = text.splitlines()
-    sections = []
-    current = []
-    current_heading = "Document"
-    in_fence = False
-    for line in lines:
-        if line.startswith("```"):
-            in_fence = not in_fence
-        if not in_fence and re.match(r"^#{1,6}\s+", line) and current:
-            sections.append((current_heading, "\n".join(current).strip() + "\n"))
-            current = []
-        if not in_fence and re.match(r"^#{1,6}\s+", line):
-            current_heading = heading_title(line)
-        current.append(line)
-    if current:
-        sections.append((current_heading, "\n".join(current).strip() + "\n"))
-    return sections
-
-
-def section_blocks(section_text):
-    blocks = []
-    current = []
-    in_fence = False
-    for line in section_text.splitlines():
-        if line.startswith("```"):
-            in_fence = not in_fence
-            current.append(line)
-            if not in_fence:
-                blocks.append("\n".join(current).strip() + "\n")
-                current = []
-            continue
-        if in_fence:
-            current.append(line)
-            continue
-        if not line.strip():
-            if current:
-                blocks.append("\n".join(current).strip() + "\n")
-                current = []
-            continue
-        current.append(line)
-    if current:
-        blocks.append("\n".join(current).strip() + "\n")
-    return blocks
-
-
-def split_section(heading, section_text, max_chars, overlap):
-    # Keep the markdown heading attached to every emitted slice so no chunk is a
-    # bare heading detached from body text. Code-fence blocks are never split.
-    blocks = section_blocks(section_text)
-    if not blocks:
-        return []
-    heading_block = blocks[0] if re.match(r"^#{1,6}\s+", blocks[0]) else ""
-    body_blocks = blocks[1:] if heading_block else blocks
-    if not body_blocks:
-        return [section_text]
-    chunks = []
-    current = heading_block
-    previous_tail = ""
-    for block in body_blocks:
-        candidate = current + block
-        if len(candidate) > max_chars and current.strip() != heading_block.strip():
-            chunks.append(current)
-            tail = current[-overlap:] if overlap > 0 else ""
-            previous_tail = tail.lstrip()
-            current = heading_block
-            if previous_tail and previous_tail not in current:
-                current += previous_tail + "\n"
-        current += block
-    if current.strip():
-        chunks.append(current)
-    return chunks
-
-
-def make_contextual_prefix(rel, heading, ordinal):
-    location = f"Document: {rel}"
-    if heading and heading != "Document":
-        location += f" > {heading}"
-    return f"{location}. Chunk {ordinal} context: use this passage as part of the autospec documentation corpus."
-
-
-def make_chunk(rel, doc_hash, text, heading, ordinal, cfg, full_doc_text):
-    prefix = make_contextual_prefix(rel, heading, ordinal) if cfg["contextual_prefix"] else ""
-    embedding_basis = full_doc_text if cfg["late_chunking"] else ((prefix + "\n") if prefix else "") + text
-    chunk_id = hashlib.sha256(f"{rel}\0{ordinal}\0{text}".encode("utf-8")).hexdigest()[:16]
-    record = {
-        "chunk_id": chunk_id,
-        "doc_id": rel,
-        "source_path": rel,
-        "doc_content_hash": doc_hash,
-        "ordinal": ordinal,
-        "heading": heading,
-        "text": text,
-        "text_hash": file_hash_text(text),
-        "embedding_input_hash": file_hash_text(embedding_basis),
-        "strategy": cfg["strategy"],
-        "late_chunking": cfg["late_chunking"],
-    }
-    if prefix:
-        record["contextual_prefix"] = prefix
-    return record
-
-
-def validate_ingest_config(config):
-    missing = [section for section in REQUIRED_CONFIG_SECTIONS if section not in config]
-    if missing:
-        return None, "CONFIG_SECTION_MISSING:" + ",".join(missing)
-    cfg = chunk_config(config)
-    if cfg["strategy"] != "structure_aware":
-        return None, f"UNSUPPORTED_CHUNK_STRATEGY:{cfg['strategy']}"
-    if cfg["chunk_size"] <= 0:
-        return None, "CHUNK_SIZE_INVALID:must_be_positive"
-    if cfg["overlap"] < 0 or cfg["overlap"] >= cfg["chunk_size"]:
-        return None, "CHUNK_OVERLAP_INVALID:must_be_nonnegative_and_less_than_chunk_size"
-    return cfg, None
-
-
-def chunk_markdown_doc(path, root, cfg, first_ordinal):
-    rel = stable_rel(path, root)
-    text = path.read_text(encoding="utf-8")
-    doc_hash = file_hash_text(text)
-    pairs = []
-    for heading, section_text in markdown_sections(text):
-        parts = split_section(heading, section_text, cfg["chunk_size"], cfg["overlap"])
-        for part in parts:
-            nonblank = [line.strip() for line in part.splitlines() if line.strip()]
-            if heading and len(nonblank) <= 1:
-                continue
-            pairs.append((heading, part))
-    chunks = [make_chunk(rel, doc_hash, part, heading, first_ordinal + i, cfg, text)
-              for i, (heading, part) in enumerate(pairs)]
-    doc = {"doc_id": rel, "path": rel, "content_hash": doc_hash, "chunk_count": len(chunks)}
-    return doc, chunks
-
-
-def build_local_index(config, root):
-    cfg_hash = chunk_config_hash(config)
-    cfg = chunk_config(config)
-    model_id = str(config.get("embedding", {}).get("model_id", "local-deterministic"))
-    prefix = config.get("embedding", {}).get("index_version_prefix", "rag-index-v1")
-    docs, chunks = [], []
-    for path in iter_corpus_files(root, config):
-        doc, new_chunks = chunk_markdown_doc(path, root, cfg, len(chunks) + 1)
-        docs.append(doc)
-        chunks.extend(new_chunks)
-    return {
-        "schema_version": 1,
-        "index_version": f"{prefix}:{model_id}:{cfg_hash}",
-        "embedding_model_id": model_id,
-        "chunking": {**cfg, "chunk_config_hash": cfg_hash},
-        "index_metadata": {
-            "reembed_policy": "clean_reembed_on_model_or_chunk_config_change",
-            "version_tuple": {"embedding_model_id": model_id, "chunk_config_hash": cfg_hash},
-            "generated_by": "scripts/rag-workstream.sh ingest-index",
-        },
-        "docs": docs,
-        "chunks": chunks,
-    }
-
-
-def cmd_ingest_index(args):
-    config = load_json(args.config)
-    cfg, error = validate_ingest_config(config)
-    if error:
-        print(error)
-        return 1
-    out = Path(args.out)
-    index = build_local_index(config, Path(args.root))
-    write_json(out, index)
-    print(f"rag ingest-index wrote {len(index['chunks'])} chunks from {len(index['docs'])} docs to {out}")
-    return 0
 
 def cmd_config_version(args):
     config = load_json(args.config)
@@ -527,11 +303,6 @@ def build_parser():
     p = sub.add_parser("validate-design-doc")
     p.add_argument("--doc", required=True)
     p.set_defaults(func=cmd_validate_design_doc)
-    p = sub.add_parser("ingest-index")
-    p.add_argument("--config", required=True)
-    p.add_argument("--root", required=True)
-    p.add_argument("--out", required=True)
-    p.set_defaults(func=cmd_ingest_index)
     return parser
 
 
