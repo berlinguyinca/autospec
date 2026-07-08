@@ -41,7 +41,7 @@ def overrides(args):
     return {"dense_top_k": args.dense_top_k, "bm25_top_k": args.bm25_top_k, "rrf_k": args.rrf_k, "fusion_weight": args.fusion_weight, "rerank_top_n": args.rerank_top_n, "final_n": args.final_n}
 
 
-def build_parser():
+def build_cli_parser():
     parser = argparse.ArgumentParser(prog="rag_retrieve.py")
     sub = parser.add_subparsers(dest="cmd", required=True)
     retrieve_parser = sub.add_parser("retrieve")
@@ -62,7 +62,7 @@ def add_common_args(parser):
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    args = build_cli_parser().parse_args(argv)
     index, config = read_json_file(args.index), read_json_file(args.config)
     if args.cmd == "retrieve":
         emit_json_document(retrieve(index, config, args.query, parse_filter(args.filter), mode=args.mode, overrides=overrides(args)))
