@@ -77,14 +77,23 @@ teardown() {
 write_locked_state() {
     local heartbeat_at="$1"
     local status="${2:-running}"
+    write_locked_state_for_holder "$heartbeat_at" "$status" "other-host" "other-session-99" "9999"
+}
+
+write_locked_state_for_holder() {
+    local heartbeat_at="$1"
+    local status="$2"
+    local host="$3"
+    local session="$4"
+    local pid="$5"
     jq -n \
         --arg repo "$REPO" \
         --arg slug "berlinguyinca__autospec" \
         --arg status "$status" \
-        --arg host "other-host" \
-        --arg session "other-session-99" \
+        --arg host "$host" \
+        --arg session "$session" \
         --argjson ts "$heartbeat_at" \
-        --argjson pid 9999 \
+        --argjson pid "$pid" \
         '{
             repo: $repo,
             slug: $slug,
@@ -126,6 +135,35 @@ write_locked_state() {
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Stale heartbeat (age >= RECLAIM_SECS=10800) is reclaimable
 # ─────────────────────────────────────────────────────────────────────────────
+@test "lock acquire: reclaims same-host lock immediately when holder pid is dead despite fresh heartbeat" {
+    local now
+    now="$(date -u +%s)"
+    local dead_pid="999999"
+    if kill -0 "$dead_pid" 2>/dev/null; then
+        skip "sentinel pid $dead_pid unexpectedly exists"
+    fi
+    write_locked_state_for_holder "$now" "running:cycle-160" "$AUTOSPEC_HOST" "dead-session-160" "$dead_pid"
+
+    run bash "$RESILIENCE" lock acquire --repo "$REPO" --session "new-session-after-crash"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "DECISION:lock-acquired"
+
+    local new_session
+    new_session="$(jq -r '.lock_session' "$STATE_DIR/state.json")"
+    [ "$new_session" = "new-session-after-crash" ]
+}
+
+@test "lock acquire: keeps cross-host fresh heartbeat live even when pid is not locally probeable" {
+    local now
+    now="$(date -u +%s)"
+    write_locked_state_for_holder "$now" "running:cycle-160" "other-host" "remote-session-160" "999999"
+
+    run bash "$RESILIENCE" lock acquire --repo "$REPO" --session "blocked-local-session"
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "DECISION:lock-held"
+    printf '%s\n' "$output" | grep -q "HOLDER_HOST:other-host"
+}
+
 @test "lock acquire: reclaimable when heartbeat is stale (age >= 10800s)" {
     local now
     now="$(date -u +%s)"
