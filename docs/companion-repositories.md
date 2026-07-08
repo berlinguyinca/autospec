@@ -52,3 +52,33 @@ Reference: `scripts/autospec-v61-v70.py` action group for V65.
   ships only schemas, examples, and local validation.
 - Companion governance is intentionally conservative until write bridges have
   separate proof and approval gates.
+
+## Control Plane Governance Dry Run
+
+`autospec-control-plane bootstrap --dry-run` renders the proposed
+`autospec-governance` repository scaffold for local inspection without creating
+GitHub repositories, committing files, pushing branches, or invoking `gh`.
+
+The governance dry run prints the MVP policy repository layout from the
+sovereign control-plane design:
+
+- `policies/open-source-maintainer-default.yml` and the other default policy
+  packs;
+- reusable rule catalogs under `rules/` for QA, testing, documentation,
+  security, accessibility, performance, skill generation, and release readiness;
+- JSON schemas under `schemas/` for policies, rules, project classes, and
+  priority configuration;
+- project-class fixtures under `fixtures/projects/`;
+- deterministic Bats validation placeholders under `tests/`;
+- authoring and operator docs under `docs/`.
+
+Example:
+
+```bash
+scripts/autospec-control-plane.sh bootstrap --dry-run \
+  --owner berlinguyinca \
+  --governance-repo autospec-governance
+```
+
+This command is governance-only in the current MVP slice; observatory repository
+creation and policy semantic implementation remain separate follow-up work.

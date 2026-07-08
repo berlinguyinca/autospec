@@ -3233,6 +3233,7 @@ main() {
     check_performance_workstream_contract
     check_ux_ui_workstream_contract
     check_reuse_lens_suite
+    check_control_plane_bootstrap_contract
 
 
 # Architecture fitness-function engine (issue #1533): the declarative registry
@@ -4667,6 +4668,31 @@ check_reuse_lens_suite() {
     done
     if [ "$_any" -eq 0 ]; then
         fail "tests/reuse-lens/*.bats: no reuse-lens tests found (issue #1442)"
+    fi
+}
+
+# Control-plane governance bootstrap dry-run (issue #1611): the entrypoint must
+# stay offline-safe, documented, syntax-clean, and gated by the focused Bats
+# smoke test that also works through the issue's `bash tests/...` command.
+check_control_plane_bootstrap_contract() {
+    info "control-plane governance bootstrap dry-run (issue #1611)"
+    local helper="scripts/autospec-control-plane.sh"
+    local doc="docs/companion-repositories.md"
+    local bats_file="tests/control-plane-bootstrap.bats"
+
+    [ -f "$helper" ] || fail "$helper: missing (issue #1611)"
+    [ -x "$helper" ] || fail "$helper: not executable (issue #1611)"
+    bash -n "$helper" || fail "$helper: bash -n failed (issue #1611)"
+    "$helper" --help | grep -q 'bootstrap --dry-run' \
+        || fail "$helper --help must document bootstrap --dry-run (issue #1611)"
+    [ -f "$doc" ] || fail "$doc: missing companion repository docs (issue #1611)"
+    grep -q 'Control Plane Governance Dry Run' "$doc" \
+        || fail "$doc: missing dry-run governance scaffold docs (issue #1611)"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing (issue #1611)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bash "$bats_file" >/tmp/validate-control-plane-bootstrap.log 2>&1 \
+            || { cat /tmp/validate-control-plane-bootstrap.log >&2; fail "$bats_file: failed (issue #1611)"; }
     fi
 }
 
