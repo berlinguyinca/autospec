@@ -22,6 +22,7 @@
     "dense_top_k": 50,
     "bm25_top_k": 50,
     "rrf_k": 60,
+    "fusion_weight": 0.5,
     "rerank_top_n": 50,
     "final_n": 8,
     "metadata_filters": ["index_version", "doc_version", "section", "product_area"]

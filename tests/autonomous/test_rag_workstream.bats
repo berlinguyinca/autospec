@@ -17,7 +17,7 @@ teardown() {
   "corpus": {"include": ["llms.txt", "llms-full.txt", "docs/**/*.md"]},
   "chunking": {"strategy": "structure_aware", "late_chunking": true, "contextual_prefix": true, "chunk_size": 900, "overlap": 120},
   "embedding": {"model_id": "jina-embeddings-v2-base-en"},
-  "retrieval": {"dense_top_k": 50, "bm25_top_k": 50, "rrf_k": 60, "rerank_top_n": 50, "final_n": 8},
+  "retrieval": {"dense_top_k": 50, "bm25_top_k": 50, "rrf_k": 60, "fusion_weight": 0.50, "rerank_top_n": 50, "final_n": 8},
   "query_transform": {"rewrite": true, "hyde": "routed", "multi_query": "routed"},
   "freshness": {"serve_latest": true, "invalidate_by": ["doc_id", "content_hash"]},
   "eval": {"target_metric": "ndcg", "ragas_faithfulness_floor": 0.90}
@@ -124,7 +124,7 @@ MD
   "corpus": {"include": ["docs/**/*.md"]},
   "chunking": {"strategy": "structure_aware", "late_chunking": false, "contextual_prefix": true, "chunk_size": 70, "overlap": 0},
   "embedding": {"model_id": "local-test-embed", "index_version_prefix": "rag-index-v1"},
-  "retrieval": {"dense_top_k": 50, "bm25_top_k": 50, "rrf_k": 60, "rerank_top_n": 50, "final_n": 8},
+  "retrieval": {"dense_top_k": 50, "bm25_top_k": 50, "rrf_k": 60, "fusion_weight": 0.50, "rerank_top_n": 50, "final_n": 8},
   "query_transform": {"rewrite": false, "hyde": false, "multi_query": false},
   "freshness": {"serve_latest": true, "invalidate_by": ["doc_id", "content_hash"]},
   "eval": {"target_metric": "ndcg", "ragas_faithfulness_floor": 0.90}
@@ -170,5 +170,66 @@ a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2]))
 assert a["chunking"]["chunk_config_hash"] != b["chunking"]["chunk_config_hash"]
 assert a["index_version"] != b["index_version"]
 assert not b["chunks"][0].get("contextual_prefix")
+PY
+}
+
+@test "retrieve-eval: hybrid BM25+dense RRF reranking filters metadata and beats dense baseline" {
+    cat > "$WORK/config.json" <<'JSON'
+{
+  "corpus": {"include": ["docs/**/*.md"]},
+  "chunking": {"strategy": "structure_aware", "late_chunking": false, "contextual_prefix": false, "chunk_size": 900, "overlap": 0},
+  "embedding": {"model_id": "local-test-embed", "index_version_prefix": "rag-index-v1"},
+  "retrieval": {"dense_top_k": 4, "bm25_top_k": 4, "rrf_k": 60, "fusion_weight": 0.50, "rerank_top_n": 4, "final_n": 2},
+  "query_transform": {"rewrite": false, "hyde": false, "multi_query": false},
+  "freshness": {"serve_latest": true, "invalidate_by": ["doc_id", "content_hash"]},
+  "eval": {"target_metric": "ndcg", "ragas_faithfulness_floor": 0.90}
+}
+JSON
+    cat > "$WORK/index.json" <<'JSON'
+{
+  "schema_version": 1,
+  "index_version": "rag-index-v1:test",
+  "chunks": [
+    {"chunk_id":"dense-decoy","doc_id":"guide-v2","source_path":"docs/guide.md","heading":"Semantic search","text":"Semantic retrieval uses vector meaning for broad conceptual matching in the documentation search layer.","metadata":{"doc_version":"v2","section":"search","product_area":"docs"}},
+    {"chunk_id":"rrf-target","doc_id":"rag-v2","source_path":"docs/rag.md","heading":"Hybrid retrieval","text":"RRF combines dense vector results with BM25 exact-term matches for jargon such as rrf_k and Reciprocal Rank Fusion.","metadata":{"doc_version":"v2","section":"search","product_area":"docs"}},
+    {"chunk_id":"old-version","doc_id":"rag-v1","source_path":"docs/rag-old.md","heading":"Old hybrid retrieval","text":"RRF legacy notes mention rrf_k but belong to the prior product version.","metadata":{"doc_version":"v1","section":"search","product_area":"docs"}},
+    {"chunk_id":"unrelated","doc_id":"ops-v2","source_path":"docs/ops.md","heading":"Operations","text":"Deployment runbooks describe rollout windows and incident response.","metadata":{"doc_version":"v2","section":"ops","product_area":"platform"}}
+  ]
+}
+JSON
+    cat > "$WORK/golden.json" <<'JSON'
+{
+  "queries": [
+    {"query":"rrf_k", "relevant":{"rrf-target":3}, "filters":{"doc_version":"v2", "section":"search"}},
+    {"query":"semantic vector documentation search", "relevant":{"dense-decoy":2}, "filters":{"doc_version":"v2", "product_area":"docs"}}
+  ]
+}
+JSON
+
+    run bash "$SCRIPT" retrieve --index "$WORK/index.json" --config "$WORK/config.json" --query "rrf_k" --filter doc_version=v2 --filter section=search
+    [ "$status" -eq 0 ]
+    python3 - "$output" <<'PY'
+import json, sys
+out=json.loads(sys.argv[1])
+ids=[r["chunk_id"] for r in out["results"]]
+assert ids[0] == "rrf-target", ids
+assert "old-version" not in ids, ids
+assert out["knobs"]["fusion_weight"] == 0.5
+assert out["stages"]["reranked"] <= out["knobs"]["rerank_top_n"]
+PY
+
+    run bash "$SCRIPT" retrieve-eval --index "$WORK/index.json" --config "$WORK/config.json" --golden "$WORK/golden.json" --mode dense --final-n 2
+    [ "$status" -eq 0 ]
+    dense_json="$output"
+    run bash "$SCRIPT" retrieve-eval --index "$WORK/index.json" --config "$WORK/config.json" --golden "$WORK/golden.json" --mode hybrid --final-n 2
+    [ "$status" -eq 0 ]
+    hybrid_json="$output"
+    python3 - "$dense_json" "$hybrid_json" <<'PY'
+import json, sys
+base=json.loads(sys.argv[1])
+hybrid=json.loads(sys.argv[2])
+assert hybrid["retrieval"]["ndcg"] > base["retrieval"]["ndcg"], (base, hybrid)
+assert hybrid["retrieval"]["mrr"] >= base["retrieval"]["mrr"], (base, hybrid)
+assert hybrid["retrieval"]["queries"] == 2
 PY
 }

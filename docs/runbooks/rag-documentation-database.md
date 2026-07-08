@@ -21,6 +21,8 @@ The parent gate enforces these invariants before child issues fill in the concre
 ```bash
 bash scripts/rag-workstream.sh config-version --config .autospec/rag-workstream/config.json
 bash scripts/rag-workstream.sh ingest-index --config .autospec/rag-workstream/config.json --root . --out reports/rag/index.json
+bash scripts/rag-workstream.sh retrieve --index reports/rag/index.json --config .autospec/rag-workstream/config.json --query "rrf_k" --filter doc_version=v2
+bash scripts/rag-workstream.sh retrieve-eval --index reports/rag/index.json --config .autospec/rag-workstream/config.json --golden reports/rag/golden.json --mode hybrid --final-n 8
 bash scripts/rag-workstream.sh gate --baseline reports/rag/baseline.json --candidate reports/rag/candidate.json --target-metric ndcg --faithfulness-floor 0.90 --promote-out reports/rag/promoted.json
 bash scripts/rag-workstream.sh freshness-check --manifest reports/rag/index-manifest.json --root .
 bash scripts/rag-workstream.sh chunk-boundary-check --chunks reports/rag/chunks.json
@@ -33,6 +35,13 @@ bash scripts/rag-workstream.sh validate-design-doc --doc docs/runbooks/rag-docum
 `ingest-index` materializes a deterministic local JSON scaffold rather than calling a live embedding service. It walks the configured corpus (`llms.txt`, `llms-full.txt`, and Markdown docs by default), splits Markdown by headings outside code fences, keeps heading text attached to its body, and honors `chunking.chunk_size` / `chunking.overlap` when large sections need secondary block splitting.
 
 Each emitted index carries `embedding_model_id`, `chunking.chunk_config_hash`, and `index_metadata.version_tuple`. The chunk hash is computed from the strategy, size/overlap, late-chunking toggle, contextual-prefix toggle, and boundary-preservation knobs; changing any of those values changes `index_version` and requires the downstream embedder to cleanly re-embed instead of appending into an old embedding space. When `chunking.contextual_prefix` is enabled, each chunk gets a cheap deterministic prefix in the style of Anthropic Contextual Retrieval; when `chunking.late_chunking` is enabled, the placeholder embedding input hash is derived from the full document to model Jina-style late chunking without adding external dependencies.
+
+
+## Issue #1549 retrieval contract
+
+`retrieve` reads the materialized JSON index and applies metadata filters before any ranking, so knobs like `doc_version`, `section`, and `product_area` prune stale or off-area chunks before dense/BM25 scoring. The local dense lane is a deterministic hash-token placeholder rather than an embedding API; it deliberately remains dependency-free while preserving the tuning surface for `dense_top_k`. BM25 supplies exact-term coverage for jargon and config keys, and `fusion_weight` combines dense and sparse ranks through Reciprocal Rank Fusion (`rrf_k`). The retriever over-fetches with `dense_top_k` and `bm25_top_k`, keeps the top `rerank_top_n` fused candidates, applies a deterministic lexical reranker, and returns `final_n` chunks.
+
+`retrieve-eval` runs the same retrieval path against a small golden set and reports nDCG, MRR, precision@k, and recall@k. Use `--mode dense` as the deterministic baseline and `--mode hybrid` for the always-hybrid production contract; the issue #1549 fixture proves the hybrid BM25+RRF path improves nDCG over dense-only on exact jargon while preserving metadata filtering.
 
 ## Child issue handoff boundaries
 
