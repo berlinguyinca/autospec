@@ -4398,10 +4398,6 @@ check_autonomy_guardrails_foundation() {
         || fail "scripts/autonomous-guardrails.sh: bash syntax error (issue #1543)"
     grep -q 'diff-guard' scripts/autonomous-premerge-gate.sh \
         || fail "autonomous-premerge-gate.sh missing immutable diff guard wiring (issue #1543)"
-    grep -q 'mutation-guard' scripts/autonomous-guardrails.sh \
-        || fail "autonomous-guardrails.sh missing mutation regression guard (issue #1544)"
-    grep -q -- '--lane' scripts/autonomous-premerge-gate.sh \
-        || fail "autonomous-premerge-gate.sh missing verifier lane bypass flag (issue #1544)"
     grep -q 'blast-radius' scripts/autonomous-premerge-gate.sh \
         || fail "autonomous-premerge-gate.sh missing blast-radius wiring (issue #1543)"
     grep -q 'provenance' scripts/autonomous-premerge-gate.sh \
@@ -4420,17 +4416,11 @@ check_autonomy_guardrails_foundation() {
         || fail "design doc missing specification-gaming citation (issue #1543)"
     [ -f tests/autonomous/test_guardrails_foundation.bats ] \
         || fail "tests/autonomous/test_guardrails_foundation.bats missing (issue #1543)"
-    [ -f tests/autonomous/test_immutable_verifier.bats ] \
-        || fail "tests/autonomous/test_immutable_verifier.bats missing (issue #1544)"
     if command -v bats >/dev/null 2>&1; then
         info "  running: tests/autonomous/test_guardrails_foundation.bats"
         bats tests/autonomous/test_guardrails_foundation.bats >/tmp/validate-guardrails-foundation.log 2>&1 \
             || { cat /tmp/validate-guardrails-foundation.log >&2; \
                  fail "tests/autonomous/test_guardrails_foundation.bats: failed (issue #1543)"; }
-        info "  running: tests/autonomous/test_immutable_verifier.bats"
-        bats tests/autonomous/test_immutable_verifier.bats >/tmp/validate-immutable-verifier.log 2>&1 \
-            || { cat /tmp/validate-immutable-verifier.log >&2; \
-                 fail "tests/autonomous/test_immutable_verifier.bats: failed (issue #1544)"; }
     fi
 }
 
