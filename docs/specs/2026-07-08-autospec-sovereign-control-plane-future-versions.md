@@ -19,7 +19,8 @@ Scope:
 - generate `autospec-governance`;
 - generate `autospec-observatory`;
 - ingest structured autospec events;
-- expose developer/operator dashboards;
+- expose developer/operator dashboards with per-run progress bars, queue counts,
+  current item, ETA, planned next step, and stale/error state;
 - support project classification, API keys, privacy tiers, cost/duration/outcome
   reports, and 10-second polling;
 - add autospec local outbox, policy resolver, and companion repo bootstrap.
@@ -27,6 +28,7 @@ Scope:
 Exit criteria:
 
 - dogfood run against `berlinguyinca/autospec` is visible in observatory;
+- dogfood run progress is visible as a live progress bar and detail panel;
 - governance policy validation passes;
 - observatory API and UI run locally and in a containerized deployment;
 - telemetry loss does not block autospec work.
@@ -176,4 +178,3 @@ Acceptance criteria:
 - Event schemas are versioned and backwards compatible.
 - GitHub remains the source of truth for issues, PRs, commits, and merge state.
 - The observatory is analytics/reporting first until V4.
-
