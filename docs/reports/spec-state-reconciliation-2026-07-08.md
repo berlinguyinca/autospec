@@ -128,6 +128,7 @@ Summary:
 
 ## Next Human Action
 
-Gert should decide whether to close or refresh draft PRs #1495 and #1496, then
-run the issue-classification/template sweep so Phase-4 autonomous work can move
-through the normal AutoSpec queue cleanly.
+Gert should review the refreshed #1495 spec PR and keep #1496 on the
+validation/security refresh path, then run the issue-classification/template
+sweep so Phase-4 autonomous work can move through the normal AutoSpec queue
+cleanly.
