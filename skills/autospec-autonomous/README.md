@@ -90,12 +90,13 @@ Each cycle executes in order:
 
 Set `AUTOSPEC_DISABLE_DISCOVERY_TIERS=1` only as an emergency fail-closed override; otherwise Tier 1.5–4 are active by default.
 
-### Troubleshooting: main-health check-runs
+### Troubleshooting: main-health checks and legacy statuses
 
-When legacy commit statuses are absent, main-health reads GitHub check-runs on
-`main`. Release-publish failures for `Publish @autospec/cli to npm` and
-`Open PR on homebrew-autospec tap` are ignored by default, so they do not block
-main-health or Tier-1 merges. Override the ignored check-run name regex with
+Main-health first evaluates legacy commit statuses on `main`, then falls back to
+GitHub check-runs when no legacy statuses are present after filtering. Release-
+publish failures for `Publish @autospec/cli to npm` and `Open PR on homebrew-
+autospec tap` are ignored by default, so they do not block main-health or Tier-1
+merges. Override the ignored check-run name / legacy status context regex with
 `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS`.
 
 ## Usage observability (F6a spike finding)

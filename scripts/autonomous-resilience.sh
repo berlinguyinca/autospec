@@ -611,6 +611,27 @@ cmd_main_health() {
     status_count="$(printf '%s' "$api_output" | jq -r '.total_count // (.statuses | length) // 0' 2>/dev/null || echo "0")"
     has_status_count="$(printf '%s' "$api_output" | jq -r 'has("total_count")' 2>/dev/null || echo "false")"
 
+    # Legacy commit statuses (TeamCity/Jenkins/Buildkite classic/etc.) feed the
+    # combined .state above. Apply the same ignore seam used for check-runs to
+    # .statuses[].context before deciding whether red main should halt.
+    local ignore_checks_regex="${AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS:-^(Publish @autospec/cli to npm|Open PR on homebrew-autospec tap)$}"
+    if [ "$has_status_count" = "true" ] && [ "${status_count:-0}" -gt 0 ]; then
+        local effective_state
+        effective_state="$(printf '%s' "$api_output" | jq -r --arg ignore "$ignore_checks_regex" '
+            [.statuses[]? | select((.context // "") | test($ignore) | not)] as $kept
+            | if ($kept | length) == 0 then "no-legacy"
+              elif ($kept | any(.state == "failure" or .state == "error")) then "failure"
+              elif ($kept | any(.state == "pending")) then "pending"
+              else "success" end
+        ' 2>/dev/null || echo "")"
+        if [ "$effective_state" = "no-legacy" ]; then
+            status_count="0"
+            ci_state="pending"
+        elif [ -n "$effective_state" ]; then
+            ci_state="$effective_state"
+        fi
+    fi
+
     case "$ci_state" in
         success)
             say "DECISION:continue"
@@ -628,7 +649,6 @@ cmd_main_health() {
                 fi
 
                 local check_count incomplete_count failure_count unknown_count ignored_failure_count
-                local ignore_checks_regex="${AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS:-^(Publish @autospec/cli to npm|Open PR on homebrew-autospec tap)$}"
                 check_count="$(printf '%s' "$checks_output" | jq -r '.total_count // (.check_runs | length) // 0' 2>/dev/null || echo "0")"
                 incomplete_count="$(printf '%s' "$checks_output" | jq -r --arg ignore "$ignore_checks_regex" '[.check_runs[]? | select((.name // "") | test($ignore) | not) | select(.status != "completed")] | length' 2>/dev/null || echo "1")"
                 failure_count="$(printf '%s' "$checks_output" | jq -r --arg ignore "$ignore_checks_regex" '[.check_runs[]? | select((.name // "") | test($ignore) | not) | select(.status == "completed") | select((.conclusion // "") as $c | ($c == "failure" or $c == "cancelled" or $c == "timed_out" or $c == "action_required" or $c == "startup_failure"))] | length' 2>/dev/null || echo "1")"
