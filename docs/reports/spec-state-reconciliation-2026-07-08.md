@@ -93,15 +93,16 @@ Recommended handling:
 
 ## Open Draft PRs
 
-- #1495: draft constitution baseline integration spec. It is stale relative to
-  current `main` and should be reconciled against the Phase-4 platform source of
-  truth before leaving draft.
+- #1495: draft constitution baseline integration spec. Refreshed in the PR to
+  treat constitution and baseline repositories as locked catalog inputs, preserve
+  Phase-4 quarantine-first autonomous semantics, and keep companion write bridges
+  proposal-only.
 - #1496: draft local constitution and baseline validation. It has failing checks
   and should not be merged as-is.
 
-Recommended disposition: close or refresh both drafts after confirming whether
-their remaining constitution-baseline ideas are already covered by the current
-autonomous platform governance and V65 companion proposal-only bridge.
+Recommended disposition: #1495 may leave draft after validation/review on the
+refreshed spec; #1496 still requires a validation and security refresh before
+merge because it contains implementation and generated artifacts.
 
 ## Companion Repository Utilization
 
