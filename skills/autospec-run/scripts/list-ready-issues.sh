@@ -75,8 +75,22 @@ extract_paths() {
     ' | grep -Eo '`[^`]+`' | tr -d '`' | grep -E '[/][^[:space:]]+|^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' || true
 }
 
+# Emit only the body lines inside the "## Dependencies" section (heading
+# exclusive), stopping at the next "## " heading or end of body. Mirrors
+# scripts/lint-issue.sh extract_section so dep parsing matches the authoritative
+# section convention. Scoping is required so prose "#B depends on #A" outside the
+# section (e.g. a "## Shared contracts" sequencing note) is never read as a real
+# dependency edge (issue #1663).
+dependencies_section() {
+    awk '
+      $0 == "## Dependencies" { in_section=1; next }
+      in_section && /^## / { exit }
+      in_section { print }
+    '
+}
+
 extract_deps() {
-    jq -r '.body // ""' | grep -Eoi 'Depends on[[:space:]]+(issue[[:space:]]+)?#?[0-9]+' | grep -Eo '[0-9]+' || true
+    jq -r '.body // ""' | dependencies_section | grep -Eoi 'Depends on[[:space:]]+(issue[[:space:]]+)?#?[0-9]+' | grep -Eo '[0-9]+' || true
 }
 
 issue_view_json() {
@@ -129,6 +143,25 @@ dep_re = re.compile(r"Depends on\s+(?:issue\s+)?#?(\d+)", re.IGNORECASE)
 start = int(os.environ["START_ISSUE"])
 target = int(os.environ["TARGET_ISSUE"])
 
+
+def dependencies_section(body):
+    """Return only the lines inside the "## Dependencies" section (heading
+    exclusive), stopping at the next "## " heading. Mirrors the shell
+    dependencies_section() so prose "depends on #N" outside the section never
+    forms a phantom edge in cycle detection (issue #1663)."""
+    lines = []
+    in_section = False
+    for line in body.splitlines():
+        if line == "## Dependencies":
+            in_section = True
+            continue
+        if in_section and line.startswith("## "):
+            break
+        if in_section:
+            lines.append(line)
+    return "\n".join(lines)
+
+
 with open(os.environ["AUTO_FILE"], encoding="utf-8") as handle:
     issues = {int(item["number"]): item.get("body") or "" for item in json.load(handle)}
 
@@ -141,7 +174,10 @@ issues.setdefault(start, target_json.get("body") or "")
 seen = set()
 
 def deps_for(issue):
-    return [int(match) for match in dep_re.findall(issues.get(issue, ""))]
+    return [
+        int(match)
+        for match in dep_re.findall(dependencies_section(issues.get(issue, "")))
+    ]
 
 def reaches(issue):
     if issue in seen:
