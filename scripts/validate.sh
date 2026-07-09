@@ -3202,6 +3202,7 @@ main() {
     check_autospec_explore_contract
     check_explore_trio_worktree_assert
     check_autospec_explore_discovery_contract
+    check_autospec_explore_stage2_intersect_contract
     check_autospec_explore_style_normalization_contract
     check_autospec_explore_spec_first_contract
     check_autospec_explore_qa_gate_contract
@@ -3646,6 +3647,46 @@ check_explore_trio_worktree_assert() {
             || { cat /tmp/validate-explore-worktree-assert.log >&2; fail "$bats_file: failed"; }
     fi
     info "explore-trio worktree assert: all three adapter files carry D4 assert + lock-step verified"
+}
+
+# autospec-explore Stage-2 intersect contract (#1654): the discovery two-stage
+# funnel's Stage 2 must be documented in lock-step across all three trio bodies —
+# the `## Stage-2 intersect` heading, the `internet-forums` source weighted 0.4,
+# reuse of the recurrence prefilter + existing repo-domain derivation, emission in
+# the EXISTING explore candidate schema (not a redefinition), and the untrusted-
+# DATA trust boundary. A prose-only intermediate that skips the derived mirrors
+# fails this closed. Also asserts the prefilter the prose relies on exists.
+check_autospec_explore_stage2_intersect_contract() {
+    info "autospec-explore Stage-2 intersect contract (#1654)"
+    local prefilter="skills/autospec-shared/scripts/discovery-intersect-prefilter.sh"
+    [ -f "$prefilter" ] || fail "$prefilter: Stage-2 recurrence prefilter missing"
+    [ -x "$prefilter" ] || fail "$prefilter: file not executable"
+    bash -n "$prefilter" || fail "$prefilter: bash syntax error"
+    local pschema="schemas/autospec-explore-proposal.schema.json"
+    [ -f "$pschema" ] || fail "$pschema: existing explore candidate schema missing"
+    for trio in \
+        skills/autospec-explore/SKILL.md \
+        skills/autospec-explore/codex/prompt.md \
+        skills/autospec-explore/opencode/agent.md
+    do
+        [ -f "$trio" ] || fail "$trio: required adapter file missing"
+        grep -q '^## Stage-2 intersect' "$trio" \
+            || fail "$trio: missing '## Stage-2 intersect' section"
+        grep -q 'internet-forums' "$trio" \
+            || fail "$trio: missing internet-forums Stage-2 discovery source"
+        grep -q 'internet-forums.*0\.4\|0\.4.*internet-forums' "$trio" \
+            || grep -qE '`internet-forums` = \*\*?0\.4' "$trio" \
+            || fail "$trio: internet-forums source must be weighted 0.4"
+        grep -q 'discovery-intersect-prefilter\.sh' "$trio" \
+            || fail "$trio: Stage-2 must cite discovery-intersect-prefilter.sh"
+        grep -qi 'repo-domain derivation' "$trio" \
+            || fail "$trio: Stage-2 must reuse the existing repo-domain derivation"
+        grep -q 'autospec-explore-proposal\.schema\.json' "$trio" \
+            || fail "$trio: Stage-2 must emit the existing explore candidate schema (cite, not redefine)"
+        grep -qi 'untrusted' "$trio" \
+            || fail "$trio: Stage-2 must state the untrusted-DATA trust boundary"
+    done
+    info "autospec-explore Stage-2 intersect contract: trio lock-step verified"
 }
 
 # autospec-explore style-normalization discovery contract: SPA/webapp visual
