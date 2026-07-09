@@ -128,6 +128,8 @@ Hold the normalized envelope(s) (or the empty envelope) for G1 lens dispatches.
 
 ## Phase G1 — Lens research (delegate, one Tier-A subagent per lens)
 
+> **Model tier:** `TIER_A` (research) — top model with extended thinking; resolved at startup.
+
 Dispatch the full **Lens roster** below in parallel — one foreground Tier-A
 subagent per lens, each bounded to a fresh context (config summary + G0
 measurement envelope + that lens's evidence sources only; do not fork the full
@@ -217,6 +219,8 @@ different phrasing, should normalize to the same key) — this is what
 `grow-define-pipeline.sh`'s dedup step matches against the ledger.
 
 ## Phase G2 — Pipeline (delegate verify, then deterministic rank)
+
+> **Model tier:** `TIER_A` (verify) — top model with extended thinking; resolved at startup.
 
 1. **Adversarial verify (delegate, one Tier-A subagent per candidate, or
    batched per lens if your harness supports structured batch output).** For

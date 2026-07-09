@@ -4982,7 +4982,7 @@ check_grow_define_contract() {
         [ -f "$d/$t" ] || { fail "$d/$t: missing"; continue; }
         grep -q '^## Self-update mode' "$d/$t" || fail "$d/$t: missing Self-update mode"
         grep -q '^## Lens roster' "$d/$t"      || fail "$d/$t: missing Lens roster"
-        grep -q 'Model' "$d/$t"                || fail "$d/$t: missing Model-tier reference"
+        grep -qF '**Model tier:**' "$d/$t"     || fail "$d/$t: missing **Model tier:** directive"
     done
     # all 6 lenses named in SKILL.md
     for lens in technical-seo keyword-gap content-opportunity community directory backlink; do
