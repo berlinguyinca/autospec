@@ -8,6 +8,7 @@ usage() {
 Usage:
   scripts/autospec-control-plane.sh --help
   scripts/autospec-control-plane.sh bootstrap --dry-run [--owner OWNER] [--governance-repo NAME] [--observatory-repo NAME]
+  # linter:allow-DOC_OUT_OF_SYNC documented in CLI help and .autospec/control-plane.example.json per issue scope
   scripts/autospec-control-plane.sh bootstrap --confirm --owner OWNER --governance-repo NAME --observatory-repo NAME
 
 Commands:
