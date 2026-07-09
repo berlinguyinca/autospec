@@ -4,6 +4,7 @@
 
 - Structured policy loading, Digital Twin, rule checks, doctrine audits, spec coverage, issue-plan-v3, onboarding, bootstrap, local autonomy controls, runtime evidence automation, and Autonomy v3 specialist/quorum/learning governance.
 - Release-candidate closure reclassified the last non-green engine rows with concrete evidence: Digital Twin surfaces and knowledge graph are implemented by the Digital Twin builder, documentation drift detection is implemented by metadata drift validation, and no-self-approval is enforced by verifier/promotion/supervisor side-effect gates.
+- Autospec-run queue coordination treats umbrella epic/tracker dependency edges as non-blocking references, reports dependency cycles distinctly, and escalates unresolved all-blocked conductor backlogs with `autospec:needs-human`.
 
 ## What is intentionally not included
 

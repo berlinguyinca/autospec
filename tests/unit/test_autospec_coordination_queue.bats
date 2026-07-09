@@ -8,6 +8,7 @@ setup() {
     AUTO_JSON="$TEST_TMP/auto.json"
     ACTIVE_JSON="$TEST_TMP/active.json"
     STATES_JSON="$TEST_TMP/states.json"
+    ISSUE_VIEWS_JSON="$TEST_TMP/views.json"
 
     mkdir -p "$TEST_TMP/bin"
     cat > "$TEST_TMP/bin/gh" <<'SH'
@@ -37,6 +38,10 @@ fi
 
 if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
   issue="$3"
+  if printf '%s\n' "$*" | grep -q -- '--json'; then
+    jq -c --arg issue "$issue" '.[$issue] // {"state":"OPEN","body":"","labels":[]}' "${AUTOSPEC_TEST_VIEWS_JSON:?}"
+    exit 0
+  fi
   jq -r --arg issue "$issue" '.[$issue] // "OPEN"' "${AUTOSPEC_TEST_STATES_JSON:?}"
   exit 0
 fi
@@ -48,8 +53,10 @@ SH
     export AUTOSPEC_TEST_AUTO_JSON="$AUTO_JSON"
     export AUTOSPEC_TEST_ACTIVE_JSON="$ACTIVE_JSON"
     export AUTOSPEC_TEST_STATES_JSON="$STATES_JSON"
+    export AUTOSPEC_TEST_VIEWS_JSON="$ISSUE_VIEWS_JSON"
     printf '[]\n' > "$ACTIVE_JSON"
     printf '{}\n' > "$STATES_JSON"
+    printf '{}\n' > "$ISSUE_VIEWS_JSON"
 }
 
 teardown() {
@@ -118,6 +125,143 @@ EOF
     [ "$output" = "2" ]
     run bash -c "printf '%s' '$planner_output' | jq -r '.ready | length'"
     [ "$output" = "0" ]
+}
+
+@test "epic-labeled open dependency is non-blocking and observable" {
+    body2="$(cat <<'EOF'
+## Goal
+Implement epic child fixture.
+
+## Implementation outline
+- `skills/child.sh`: update fixture path.
+
+## Dependencies
+Depends on issue #1
+EOF
+)"
+    jq -n --arg body "$body2" '[{number:2,title:"child",body:$body,labels:[{name:"auto-implement"}]}]' > "$AUTO_JSON"
+    jq -n '{"1":{"state":"OPEN","body":"## Goal\nTrack children.\n","labels":[{"name":"epic"}]}}' > "$ISSUE_VIEWS_JSON"
+    printf '{"1":"OPEN"}\n' > "$STATES_JSON"
+
+    run bash "$SCRIPT" --repo testorg/testrepo
+
+    [ "$status" -eq 0 ]
+    planner_output="$output"
+    run bash -c "printf '%s' '$planner_output' | jq -r '.ready[0].number'"
+    [ "$output" = "2" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.ready[0].non_blocking_refs[0].issue'"
+    [ "$output" = "1" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.ready[0].non_blocking_refs[0].reason'"
+    [ "$output" = "epic_label" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.blocked | length'"
+    [ "$output" = "0" ]
+}
+
+@test "non-epic sibling dependency still blocks" {
+    body2="$(cat <<'EOF'
+## Goal
+Implement sibling child fixture.
+
+## Implementation outline
+- `skills/child.sh`: update fixture path.
+
+## Dependencies
+Depends on issue #1
+EOF
+)"
+    jq -n --arg body "$body2" '[{number:2,title:"child",body:$body,labels:[{name:"auto-implement"}]}]' > "$AUTO_JSON"
+    jq -n '{"1":{"state":"OPEN","body":"## Goal\nImplement sibling.\n","labels":[{"name":"auto-implement"}]}}' > "$ISSUE_VIEWS_JSON"
+    printf '{"1":"OPEN"}\n' > "$STATES_JSON"
+
+    run bash "$SCRIPT" --repo testorg/testrepo
+
+    [ "$status" -eq 0 ]
+    planner_output="$output"
+    run bash -c "printf '%s' '$planner_output' | jq -r '.blocked[0].number'"
+    [ "$output" = "2" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.blocked[0].reason'"
+    [ "$output" = "blocked_dependencies" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.blocked[0].unmet_dependencies[0]'"
+    [ "$output" = "1" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.ready | length'"
+    [ "$output" = "0" ]
+}
+
+@test "dependency cycle is reported distinctly instead of empty" {
+    body2="$(cat <<'EOF'
+## Goal
+Implement cyclic A.
+
+## Implementation outline
+- `skills/a.sh`: update fixture path.
+
+## Dependencies
+Depends on issue #1
+EOF
+)"
+    body1="$(cat <<'EOF'
+## Goal
+Implement cyclic B.
+
+## Implementation outline
+- `skills/b.sh`: update fixture path.
+
+## Dependencies
+Depends on issue #2
+EOF
+)"
+    jq -n --arg body "$body2" '[{number:2,title:"cyclic-a",body:$body,labels:[{name:"auto-implement"}]}]' > "$AUTO_JSON"
+    jq -n --arg body "$body1" '{"1":{"state":"OPEN","body":$body,"labels":[{"name":"auto-implement"}]}}' > "$ISSUE_VIEWS_JSON"
+    printf '{"1":"OPEN"}\n' > "$STATES_JSON"
+
+    run bash "$SCRIPT" --repo testorg/testrepo
+
+    [ "$status" -eq 0 ]
+    planner_output="$output"
+    run bash -c "printf '%s' '$planner_output' | jq -r '.blocked[0].number'"
+    [ "$output" = "2" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.blocked[0].reason'"
+    [ "$output" = "blocked_cycle" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.blocked[0].cycle_dependencies[0]'"
+    [ "$output" = "1" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.blocked | length'"
+    [ "$output" = "1" ]
+}
+
+@test "children tracker back-edge is non-blocking and marked as a cycle reference" {
+    body2="$(cat <<'EOF'
+## Goal
+Implement tracker child fixture.
+
+## Implementation outline
+- `skills/child.sh`: update fixture path.
+
+## Dependencies
+Depends on issue #1
+EOF
+)"
+    tracker="$(cat <<'EOF'
+## Goal
+Track children.
+
+## Children
+- [ ] #2 implement child
+EOF
+)"
+    jq -n --arg body "$body2" '[{number:2,title:"child",body:$body,labels:[{name:"auto-implement"}]}]' > "$AUTO_JSON"
+    jq -n --arg body "$tracker" '{"1":{"state":"OPEN","body":$body,"labels":[]}}' > "$ISSUE_VIEWS_JSON"
+    printf '{"1":"OPEN"}\n' > "$STATES_JSON"
+
+    run bash "$SCRIPT" --repo testorg/testrepo
+
+    [ "$status" -eq 0 ]
+    planner_output="$output"
+    run bash -c "printf '%s' '$planner_output' | jq -r '.ready[0].number'"
+    [ "$output" = "2" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.ready[0].non_blocking_refs[0].reason'"
+    [ "$output" = "children_back_edge" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.ready[0].non_blocking_refs[0].cycle'"
+    [ "$output" = "true" ]
 }
 
 @test "planner groups 4 independent issues in one batch" {

@@ -511,6 +511,41 @@ _autospec_conductor_on_exit() {
     _autospec_conductor_release_lock
 }
 
+_autospec_conductor_all_blocked_refs() {
+    printf '%s' "$1" \
+        | jq -r '[.blocked[]? | "#\(.number) reason=\(.reason // "blocked") deps=\((.unmet_dependencies // []) | join(","))"] | join("; ")' \
+        2>/dev/null || true
+}
+
+_autospec_conductor_queue_count() {
+    printf '%s' "$1" | jq -r "$2" 2>/dev/null || true
+}
+
+_autospec_conductor_escalate_all_blocked() {
+    local repo="$1"
+    local queue_json="$2"
+    local count="$3"
+    local refs="$4"
+    local no_digest="$5"
+
+    printf '[conductor] autospec:needs-human — Tier-1 all-blocked unresolved after Tier 1.5 promotion (%s issues)%s\n' \
+        "$count" "${refs:+: ${refs}}" >&2
+    gh label create autospec:needs-human --repo "$repo" --color d73a4a --force >/dev/null 2>&1 || true
+    printf '%s\n' "$queue_json" | jq -r '.blocked[]?.number' 2>/dev/null \
+        | while IFS= read -r _blocked_issue; do
+            [ -n "$_blocked_issue" ] || continue
+            gh issue edit "$_blocked_issue" --repo "$repo" --add-label autospec:needs-human >/dev/null 2>&1 || true
+        done
+    if [ "$no_digest" = "1" ]; then
+        return 0
+    fi
+    mkdir -p "${HOME}/.autospec" 2>/dev/null || true
+    printf '%s Tier-1 all-blocked unresolved (%s issues): %s\n' \
+        "$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown)" \
+        "$count" "${refs:-unknown blockers}" \
+        >> "${HOME}/.autospec/autonomous-digest.md" 2>/dev/null || true
+}
+
 autospec_conductor_run() {
     if [ -n "${HOME:-}" ]; then
         case ":${PATH:-}:" in
@@ -905,8 +940,11 @@ fi'
         # reused by the drain step below instead of re-querying.
         local _queue_ready_len=""
         local _queue_batch_len=""
+        local _queue_blocked_len=""
         local _queue_cap_reached="false"
         local _ready_count=""
+        local _all_blocked_count=0
+        local _all_blocked_refs=""
         if [ -n "$_list_ready" ] && [ -f "$_list_ready" ] && [ -n "$_repo" ]; then
             local _queue_json
             _queue_json="$(bash "$_list_ready" --repo "$_repo" --batch-size 1 2>/dev/null || true)"
@@ -917,16 +955,23 @@ fi'
             # readiness-aware count (which itself falls back to the naive gh
             # count) rather than being forced to 0 on a blip.
             if printf '%s' "$_queue_json" | jq -e 'has("ready")' >/dev/null 2>&1; then
-                _queue_ready_len="$(printf '%s' "$_queue_json" | jq -r '.ready | length' 2>/dev/null || true)"
-                _queue_batch_len="$(printf '%s' "$_queue_json" | jq -r '.batch | length' 2>/dev/null || true)"
-                _queue_cap_reached="$(printf '%s' "$_queue_json" | jq -r '.worker_cap.reached // false' 2>/dev/null || echo false)"
+                _queue_ready_len="$(_autospec_conductor_queue_count "$_queue_json" '.ready | length')"
+                _queue_batch_len="$(_autospec_conductor_queue_count "$_queue_json" '.batch | length')"
+                _queue_blocked_len="$(_autospec_conductor_queue_count "$_queue_json" '.blocked | length')"
+                _queue_cap_reached="$(_autospec_conductor_queue_count "$_queue_json" '.worker_cap.reached // false')"
+                [ -n "$_queue_cap_reached" ] || _queue_cap_reached="false"
                 case "$_queue_ready_len" in *[!0-9]*|'') _queue_ready_len="" ;; esac
                 case "$_queue_batch_len" in *[!0-9]*|'') _queue_batch_len="" ;; esac
+                case "$_queue_blocked_len" in *[!0-9]*|'') _queue_blocked_len="" ;; esac
                 if [ "$_queue_cap_reached" = "true" ]; then
                     # A capped cycle is not drainable work — never pins Tier-1.
                     _ready_count=0
                 else
                     _ready_count=$(( ${_queue_ready_len:-0} + ${_queue_batch_len:-0} ))
+                fi
+                if [ "${_ready_count:-0}" -eq 0 ] && [ "${_queue_blocked_len:-0}" -gt 0 ]; then
+                    _all_blocked_count="${_queue_blocked_len:-0}"
+                    _all_blocked_refs="$(_autospec_conductor_all_blocked_refs "$_queue_json")"
                 fi
             fi
         fi
@@ -998,6 +1043,10 @@ fi'
                 _tier15_dry_cycles=$((_tier15_dry_cycles + 1))
                 printf '[conductor] Tier 1.5 dry (tier15-dry-cycles=%s)
 '                     "$_tier15_dry_cycles" >&2
+                if [ "${_all_blocked_count:-0}" -gt 0 ] && [ "$_dry" != "1" ]; then
+                    _autospec_conductor_escalate_all_blocked \
+                        "$_repo" "$_queue_json" "$_all_blocked_count" "$_all_blocked_refs" "$_no_digest"
+                fi
             fi
 
         elif [ "$_tier" = "1" ] && [ "$_action" = "run-backlog" ]; then
@@ -1014,7 +1063,13 @@ fi'
                     _skip_tier1_cycle=1
                 fi
                 if [ "${_queue_ready_len:-0}" -eq 0 ] && [ "${_queue_batch_len:-0}" -eq 0 ]; then
-                    printf '[conductor] Tier-1 queue empty — dry cycle\n' >&2
+                    if [ "${_queue_blocked_len:-0}" -gt 0 ]; then
+                        printf '[conductor] Tier-1 all-blocked (%s issues) — dry cycle%s\n' \
+                            "$_queue_blocked_len" \
+                            "${_all_blocked_refs:+: ${_all_blocked_refs}}" >&2
+                    else
+                        printf '[conductor] Tier-1 queue empty — dry cycle\n' >&2
+                    fi
                     _dry_cycles=$((_dry_cycles + 1))
                     _skip_tier1_cycle=1
                 fi

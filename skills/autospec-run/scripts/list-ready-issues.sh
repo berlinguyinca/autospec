@@ -79,8 +79,90 @@ extract_deps() {
     jq -r '.body // ""' | grep -Eoi 'Depends on[[:space:]]+(issue[[:space:]]+)?#?[0-9]+' | grep -Eo '[0-9]+' || true
 }
 
-issue_state() {
-    gh issue view "$1" --repo "$repo" --json state --jq .state 2>/dev/null || printf 'OPEN\n'
+issue_view_json() {
+    gh issue view "$1" --repo "$repo" --json state,body,labels 2>/dev/null \
+        || printf '{"state":"OPEN","body":"","labels":[]}\n'
+}
+
+dep_label_is_non_blocking() {
+    target_json="$1"
+    labels="${AUTOSPEC_NON_BLOCKING_DEP_LABELS:-epic umbrella}"
+    printf '%s\n' "$target_json" \
+        | jq -e --arg labels "$labels" '
+            ($labels | gsub(","; " ") | split(" ") | map(select(length > 0) | ascii_downcase)) as $allowed
+            | any((.labels // [])[]?.name; (. | ascii_downcase) as $name | $allowed | index($name))
+          ' >/dev/null 2>&1
+}
+
+target_tracks_dependent() {
+    target_json="$1"
+    dependent="$2"
+    printf '%s\n' "$target_json" | jq -r '.body // ""' | awk -v issue="$dependent" '
+      function header_name(line) {
+        sub(/^##[[:space:]]*/, "", line)
+        sub(/[[:space:]]*#*[[:space:]]*$/, "", line)
+        return tolower(line)
+      }
+      /^##[[:space:]]+/ {
+        h=header_name($0)
+        in_tracker=(h ~ /^(children|child issues|tasks|task list|subtasks)$/)
+        next
+      }
+      in_tracker && $0 ~ ("#" issue "([^0-9]|$)") && $0 ~ /^[[:space:]]*[-*][[:space:]]*(\[[ xX]\][[:space:]]*)?/ {
+        found=1
+      }
+      END { exit(found ? 0 : 1) }
+    '
+}
+
+dependency_path_reaches() {
+    start="$1"
+    target="$2"
+    target_json="$3"
+    START_ISSUE="$start" TARGET_ISSUE="$target" TARGET_JSON="$target_json" AUTO_FILE="$AUTO_FILE" python3 <<'PY'
+import json
+import os
+import re
+import sys
+
+dep_re = re.compile(r"Depends on\s+(?:issue\s+)?#?(\d+)", re.IGNORECASE)
+start = int(os.environ["START_ISSUE"])
+target = int(os.environ["TARGET_ISSUE"])
+
+with open(os.environ["AUTO_FILE"], encoding="utf-8") as handle:
+    issues = {int(item["number"]): item.get("body") or "" for item in json.load(handle)}
+
+try:
+    target_json = json.loads(os.environ.get("TARGET_JSON") or "{}")
+except json.JSONDecodeError:
+    target_json = {}
+issues.setdefault(start, target_json.get("body") or "")
+
+seen = set()
+
+def deps_for(issue):
+    return [int(match) for match in dep_re.findall(issues.get(issue, ""))]
+
+def reaches(issue):
+    if issue in seen:
+        return False
+    seen.add(issue)
+    for dep in deps_for(issue):
+        if dep == target or reaches(dep):
+            return True
+    return False
+
+sys.exit(0 if reaches(start) else 1)
+PY
+}
+
+json_array_from_words() {
+    words="$1"
+    if [ -z "$words" ]; then
+        printf '[]'
+    else
+        printf '%s\n' "$words" | tr ' ' '\n' | awk 'NF' | jq -R 'tonumber' | jq -s .
+    fi
 }
 
 json_append() {
@@ -105,14 +187,52 @@ for number in $candidate_numbers; do
     issue_json="$(jq -c --argjson number "$number" '.[] | select(.number == $number)' "$AUTO_FILE")"
     deps="$(printf '%s\n' "$issue_json" | extract_deps | sort -n | uniq)"
     unmet=""
+    cycle_deps=""
+    non_blocking_refs="[]"
     for dep in $deps; do
-        state="$(issue_state "$dep")"
+        target_json="$(issue_view_json "$dep")"
+        state="$(printf '%s\n' "$target_json" | jq -r '.state // "OPEN"' 2>/dev/null || printf 'OPEN')"
         if [ "$state" != "CLOSED" ]; then
+            non_blocking_reason=""
+            non_blocking_cycle="false"
+            if dep_label_is_non_blocking "$target_json"; then
+                non_blocking_reason="epic_label"
+            elif target_tracks_dependent "$target_json" "$number"; then
+                non_blocking_reason="children_back_edge"
+                non_blocking_cycle="true"
+            fi
+            if [ -n "$non_blocking_reason" ]; then
+                ref="$(jq -n \
+                    --argjson issue "$dep" \
+                    --arg reason "$non_blocking_reason" \
+                    --argjson cycle "$non_blocking_cycle" \
+                    '{issue:$issue, reason:$reason, cycle:$cycle}')"
+                non_blocking_refs="$(printf '%s\n' "$non_blocking_refs" | jq --argjson ref "$ref" '. + [$ref]')"
+                continue
+            fi
+            if dependency_path_reaches "$dep" "$number" "$target_json"; then
+                cycle_deps="${cycle_deps}${cycle_deps:+ }${dep}"
+            fi
             unmet="${unmet}${unmet:+ }${dep}"
         fi
     done
     if [ -n "$unmet" ]; then
-        object="$(printf '%s\n' "$issue_json" | jq --arg unmet "$unmet" '. + {reason:"blocked_dependencies", unmet_dependencies:($unmet | split(" ") | map(tonumber))}')"
+        unmet_json="$(json_array_from_words "$unmet")"
+        cycle_json="$(json_array_from_words "$cycle_deps")"
+        reason="blocked_dependencies"
+        if [ -n "$cycle_deps" ]; then
+            reason="blocked_cycle"
+        fi
+        object="$(printf '%s\n' "$issue_json" | jq \
+            --arg reason "$reason" \
+            --argjson unmet "$unmet_json" \
+            --argjson cycles "$cycle_json" \
+            --argjson non_blocking_refs "$non_blocking_refs" \
+            '. + {
+              reason:$reason,
+              unmet_dependencies:$unmet,
+              non_blocking_refs:$non_blocking_refs
+            } + (if ($cycles | length) > 0 then {cycle_dependencies:$cycles} else {} end)')"
         json_append "$BLOCKED_FILE" "$object"
         continue
     fi
@@ -156,7 +276,10 @@ for number in $candidate_numbers; do
         continue
     fi
 
-    object="$(printf '%s\n' "$issue_json" | jq --argjson paths "$(printf '%s\n' "$candidate_paths" | jq -R . | jq -s .)" '. + {paths:$paths}')"
+    object="$(printf '%s\n' "$issue_json" | jq \
+        --argjson paths "$(printf '%s\n' "$candidate_paths" | jq -R . | jq -s .)" \
+        --argjson non_blocking_refs "$non_blocking_refs" \
+        '. + {paths:$paths, non_blocking_refs:$non_blocking_refs}')"
     json_append "$READY_FILE" "$object"
 done
 
