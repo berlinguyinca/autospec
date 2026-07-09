@@ -521,6 +521,44 @@ labels and patches each body with a `## Model fit` block.
 >    only when the difference is a true outlier (e.g. one sibling pulls in a
 >    schema-wide refactor that no other sibling touches).
 >
+>
+> ### Issue intent safety gate
+>
+> Before adding or preserving `auto-implement`, run the issue intent safety
+> gate with `scripts/lint-issue-safety.sh`:
+>
+> ```bash
+> _body_file="$(mktemp)"
+> gh issue view <N> --repo {repo} --json body --jq '.body' > "$_body_file"
+> _author="$(gh issue view <N> --repo {repo} --json author --jq '.author.login // empty')"
+> _title="$(gh issue view <N> --repo {repo} --json title --jq '.title')"
+> bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue-safety.sh" \
+>   --json --actor "$_author" --title "$_title" "$_body_file" > /tmp/safety-<N>.json
+> _safety_status=$?
+> ```
+>
+> If `_safety_status` is `0`, create labels `safety:reviewed` and
+> `security:quarantined` idempotently, add `safety:reviewed`, remove
+> `security:quarantined`, patch a passing `## Safety review` block into the
+> issue body, and continue with label application, body patching, board
+> assignment, dependency checks, and quality audit.
+>
+> ```bash
+> gh label create safety:reviewed --force --repo {repo}
+> gh label create security:quarantined --force --repo {repo}
+> gh issue edit <N> --add-label safety:reviewed --remove-label security:quarantined --repo {repo}
+> ```
+>
+> If `_safety_status` is `1` or `2`, create label `security:quarantined`, add
+> it, remove `auto-implement` and `needs-classify`, patch a blocking `## Safety
+> review` block, comment with the safety findings, and skip the issue. Do not
+> transition `needs-classify` to `auto-implement`.
+>
+> ```bash
+> gh label create security:quarantined --force --repo {repo}
+> gh issue edit <N> --add-label security:quarantined --remove-label auto-implement --remove-label needs-classify --repo {repo}
+> ```
+>
 > 4. **Apply labels.** Idempotent at run start:
 >    `gh label create ctx:32k  --color c5def5 --force --repo {repo}`,
 >    `gh label create ctx:64k  --color c5def5 --force --repo {repo}`,
@@ -588,37 +626,6 @@ labels and patches each body with a `## Model fit` block.
 >    - **closed-dep warning** — emit `WARN: child #<N> depends on closed issue #<M>` for each `Depends on #M` line where `gh issue view #<M> --json state` is `CLOSED`.
 >    - **child-less tracker dep warning** — emit `WARN: child #<N> depends on tracker #<M> with no children` when `#<M>` carries `type:tracker` and has no other open `auto-implement` deps pointing at it.
 >    - **circular sibling-dep hard fail** — exit non-zero if any cycle exists among the just-created children's `Depends on #N` edges.
->
->    ### Issue intent safety gate
->
->    Before adding or preserving `auto-implement`, run the issue intent safety gate with `scripts/lint-issue-safety.sh`:
->
->    ```bash
->    _body_file="$(mktemp)"
->    gh issue view <N> --repo {repo} --json body --jq '.body' > "$_body_file"
->    _author="$(gh issue view <N> --repo {repo} --json author --jq '.author.login // empty')"
->    _title="$(gh issue view <N> --repo {repo} --json title --jq '.title')"
->    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue-safety.sh" \
->      --json --actor "$_author" --title "$_title" "$_body_file" > /tmp/safety-<N>.json
->    _safety_status=$?
->    ```
->
->    If `_safety_status` is `0`, create labels `safety:reviewed` and `security:quarantined` idempotently, add `safety:reviewed`, remove `security:quarantined`, and patch a passing `## Safety review` block into the issue body:
->
->    ```bash
->    gh label create safety:reviewed --force --repo {repo}
->    gh label create security:quarantined --force --repo {repo}
->    gh issue edit <N> --add-label safety:reviewed --remove-label security:quarantined --repo {repo}
->    ```
->
->    If `_safety_status` is `1` or `2`, create label `security:quarantined`, add it, remove `auto-implement` and `needs-classify`, patch a blocking `## Safety review` block, comment with the safety findings, and skip the issue:
->
->    ```bash
->    gh label create security:quarantined --force --repo {repo}
->    gh issue edit <N> --add-label security:quarantined --remove-label auto-implement --remove-label needs-classify --repo {repo}
->    ```
->
->    Do not transition `needs-classify` to `auto-implement`.
 >
 > 8. **Post-filing quality audit.** For each child issue (skip `type:tracker`):
 >    - Pull body: `gh issue view <N> --repo {repo} --json body -q .body > /tmp/audit-<N>.md`

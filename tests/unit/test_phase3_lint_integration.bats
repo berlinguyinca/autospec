@@ -122,3 +122,35 @@ setup() {
         grep -q "remove-label needs-classify" "$file"
     done
 }
+
+@test "autospec classify prompts place the safety gate before queue-preserving phase 3.5 steps" {
+    assert_before() {
+        local needle_a="$1"
+        local needle_b="$2"
+        local file="$3"
+        local line_a
+        local line_b
+
+        line_a="$(grep -nF "$needle_a" "$file" | head -n1 | cut -d: -f1)"
+        line_b="$(grep -nF "$needle_b" "$file" | head -n1 | cut -d: -f1)"
+
+        [ "$line_a" -lt "$line_b" ]
+    }
+
+    assert_before '### Issue intent safety gate' '### Label transition for `needs-classify` issues' \
+        "$REPO_ROOT/skills/autospec-classify/SKILL.md"
+    assert_before '### Issue intent safety gate' 'Apply labels.' \
+        "$REPO_ROOT/skills/autospec-classify/SKILL.md"
+    assert_before '### Issue intent safety gate' 'Apply labels.' \
+        "$REPO_ROOT/skills/autospec/SKILL.md"
+    assert_before '### Issue intent safety gate' 'Apply labels.' \
+        "$REPO_ROOT/skills/autospec-define/SKILL.md"
+    assert_before '### Issue intent safety gate' '7. **Dependency-edge sanity checks.**' \
+        "$REPO_ROOT/skills/autospec/SKILL.md"
+    assert_before '### Issue intent safety gate' 'Board assignment' \
+        "$REPO_ROOT/skills/autospec/SKILL.md"
+    assert_before '### Issue intent safety gate' '7. **Dependency-edge sanity checks.**' \
+        "$REPO_ROOT/skills/autospec-define/SKILL.md"
+    assert_before '### Issue intent safety gate' 'Board assignment' \
+        "$REPO_ROOT/skills/autospec-define/SKILL.md"
+}

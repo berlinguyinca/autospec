@@ -114,11 +114,40 @@ Prepend the output block (if non-empty) to your working context. This surfaces l
    - Filter out any issue whose labels include `type:tracker`.
    - Apply the `--issues` filter if provided.
 
+### Issue intent safety gate
+
+Before adding or preserving `auto-implement`, run the issue intent safety gate with `scripts/lint-issue-safety.sh`:
+
+```bash
+_body_file="$(mktemp)"
+gh issue view <N> --repo {repo} --json body --jq '.body' > "$_body_file"
+_author="$(gh issue view <N> --repo {repo} --json author --jq '.author.login // empty')"
+_title="$(gh issue view <N> --repo {repo} --json title --jq '.title')"
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue-safety.sh" \
+  --json --actor "$_author" --title "$_title" "$_body_file" > /tmp/safety-<N>.json
+_safety_status=$?
+```
+
+If `_safety_status` is `0`, create labels `safety:reviewed` and `security:quarantined` idempotently, add `safety:reviewed`, remove `security:quarantined`, patch a passing `## Safety review` block into the issue body, and only then continue with the remaining per-issue steps.
+
+```bash
+gh label create safety:reviewed --force --repo {repo}
+gh label create security:quarantined --force --repo {repo}
+gh issue edit <N> --add-label safety:reviewed --remove-label security:quarantined --repo {repo}
+```
+
+If `_safety_status` is `1` or `2`, create label `security:quarantined`, add it, remove `auto-implement` and `needs-classify`, patch a blocking `## Safety review` block, comment with the safety findings, and skip the issue. Do not transition `needs-classify` to `auto-implement`.
+
+```bash
+gh label create security:quarantined --force --repo {repo}
+gh issue edit <N> --add-label security:quarantined --remove-label auto-implement --remove-label needs-classify --repo {repo}
+```
+
 ### Label transition for `needs-classify` issues
 
 For every issue in the candidate set whose labels include
-`needs-classify`, after Step 4 of the per-issue procedure (the label
-application step) ALSO perform the following transition:
+`needs-classify`, after Step 4 of the per-issue procedure, and only when
+`_safety_status` is `0`, ALSO perform the following transition:
 
 - `gh issue edit <N> --add-label auto-implement --remove-label needs-classify --repo {repo}`
 
@@ -126,6 +155,8 @@ This moves the listener-filed issue from the `needs-classify` bucket
 into the implementation queue. Issues that were already labeled
 `auto-implement` (and not `needs-classify`) are re-classified in place;
 their labels do not change beyond the `ctx:*` / `reasoning:*` additions.
+If `_safety_status` is not `0`, the issue must remain quarantined and
+must not be promoted into `auto-implement`.
 
 ## Rubric
 
@@ -210,37 +241,6 @@ For each candidate issue:
    markers), replace it in place. Never stack duplicate blocks.
 
    Apply via `gh issue edit <N> --body-file <tmp>`.
-
-### Issue intent safety gate
-
-Before adding or preserving `auto-implement`, run the issue intent safety gate with `scripts/lint-issue-safety.sh`:
-
-```bash
-_body_file="$(mktemp)"
-gh issue view <N> --repo {repo} --json body --jq '.body' > "$_body_file"
-_author="$(gh issue view <N> --repo {repo} --json author --jq '.author.login // empty')"
-_title="$(gh issue view <N> --repo {repo} --json title --jq '.title')"
-bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue-safety.sh" \
-  --json --actor "$_author" --title "$_title" "$_body_file" > /tmp/safety-<N>.json
-_safety_status=$?
-```
-
-If `_safety_status` is `0`, create labels `safety:reviewed` and `security:quarantined` idempotently, add `safety:reviewed`, remove `security:quarantined`, and patch a passing `## Safety review` block into the issue body:
-
-```bash
-gh label create safety:reviewed --force --repo {repo}
-gh label create security:quarantined --force --repo {repo}
-gh issue edit <N> --add-label safety:reviewed --remove-label security:quarantined --repo {repo}
-```
-
-If `_safety_status` is `1` or `2`, create label `security:quarantined`, add it, remove `auto-implement` and `needs-classify`, patch a blocking `## Safety review` block, comment with the safety findings, and skip the issue:
-
-```bash
-gh label create security:quarantined --force --repo {repo}
-gh issue edit <N> --add-label security:quarantined --remove-label auto-implement --remove-label needs-classify --repo {repo}
-```
-
-Do not transition `needs-classify` to `auto-implement`.
 
 5. **Board assignment** (only if `--apply-boards`):
    - Read `~/.autospec/project-map.yml`. If the file is missing, auto-init it

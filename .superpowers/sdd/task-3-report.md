@@ -23,3 +23,13 @@ Implemented the issue intent safety gate wiring for `autospec`, `autospec-define
 
 ## Concerns
 - The repository still has the pre-existing phase-4 docs-drift baseline failure in `tests/phase4/test_docs_drift_gate_regen_conditional.sh`.
+
+## Review Fix
+
+### RED
+- `bats tests/unit/test_phase3_lint_integration.bats` failed on the new order assertion before the prompt rewrite.
+
+### GREEN
+- `bats tests/unit/test_phase3_lint_integration.bats` passed after moving the safety gate ahead of the transition / queue-preserving Phase 3.5 steps.
+- Targeted lock-step check passed for `skills/autospec`, `skills/autospec-define`, and `skills/autospec-classify` after syncing `SKILL.md`, `codex/prompt.md`, and `opencode/agent.md`.
+- `bash scripts/validate.sh --fast` advanced through the touched trios and then failed later on the known unrelated docs-drift baseline in `tests/phase4/test_docs_drift_gate_regen_conditional.sh` (`skills/autospec-run/SKILL.md` heredoc parse failure).
