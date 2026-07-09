@@ -4,7 +4,9 @@
 CONTROL_PLANE_OBSERVATORY_EVENTS_RENDER_LIB="${CONTROL_PLANE_OBSERVATORY_EVENTS_RENDER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/autospec-control-plane-observatory-events-render.sh}"
 # shellcheck source=scripts/lib/autospec-control-plane-observatory-events-render.sh
 . "$CONTROL_PLANE_OBSERVATORY_EVENTS_RENDER_LIB"
-
+CONTROL_PLANE_OBSERVATORY_UI_RENDER_LIB="${CONTROL_PLANE_OBSERVATORY_UI_RENDER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/autospec-control-plane-observatory-ui-render.sh}"
+# shellcheck source=scripts/lib/autospec-control-plane-observatory-ui-render.sh
+. "$CONTROL_PLANE_OBSERVATORY_UI_RENDER_LIB"
 
 render_observatory_compose() {
     cat <<'YAML'
@@ -285,6 +287,8 @@ render_observatory_file_templates() {
     render_observatory_event_ingestion_contract
     render_file_header "$observatory_repo" "apps/web/README.md"
     render_observatory_web_readme
+    render_file_header "$observatory_repo" "apps/web/src/App.tsx"
+    render_observatory_web_app_shell
     render_file_header "$observatory_repo" "packages/event-schema/README.md"
     render_observatory_event_schema_readme
     render_file_header "$observatory_repo" "packages/event-schema/src/events.ts"
@@ -319,6 +323,7 @@ ${observatory_repo}/
   ${observatory_repo}/apps/api/src/auth/
   ${observatory_repo}/apps/api/src/ingest/
   ${observatory_repo}/apps/web/
+  ${observatory_repo}/apps/web/src/
   ${observatory_repo}/packages/
   ${observatory_repo}/packages/event-schema/
   ${observatory_repo}/packages/event-schema/src/

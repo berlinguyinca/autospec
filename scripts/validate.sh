@@ -4684,6 +4684,8 @@ check_control_plane_bootstrap_contract() {
     local observatory_bats_file="tests/control-plane-observatory.bats"
     local observatory_auth_bats_file="tests/control-plane-observatory-auth.bats"
     local control_plane_events_bats_file="tests/control-plane-events.bats"
+    local control_plane_ui_bats_file="tests/control-plane-ui.bats"
+    local control_plane_ui_smoke_bats_file="tests/smoke/control-plane-ui.bats"
 
     [ -f "$helper" ] || fail "$helper: missing (issue #1611)"
     [ -x "$helper" ] || fail "$helper: not executable (issue #1611)"
@@ -4694,6 +4696,8 @@ check_control_plane_bootstrap_contract() {
     bash -n "scripts/lib/autospec-control-plane-observatory-render.sh" || fail "scripts/lib/autospec-control-plane-observatory-render.sh: bash -n failed"
     [ -f "scripts/lib/autospec-control-plane-observatory-events-render.sh" ] || fail "scripts/lib/autospec-control-plane-observatory-events-render.sh: missing (event renderer)"
     bash -n "scripts/lib/autospec-control-plane-observatory-events-render.sh" || fail "scripts/lib/autospec-control-plane-observatory-events-render.sh: bash -n failed"
+    [ -f "scripts/lib/autospec-control-plane-observatory-ui-render.sh" ] || fail "scripts/lib/autospec-control-plane-observatory-ui-render.sh: missing (UI renderer)"
+    bash -n "scripts/lib/autospec-control-plane-observatory-ui-render.sh" || fail "scripts/lib/autospec-control-plane-observatory-ui-render.sh: bash -n failed"
     "$helper" --help | grep -q 'bootstrap --dry-run' \
         || fail "$helper --help must document bootstrap --dry-run (issue #1611)"
     [ -f "$doc" ] || fail "$doc: missing companion repository docs (issue #1611)"
@@ -4704,6 +4708,8 @@ check_control_plane_bootstrap_contract() {
     [ -f "$observatory_bats_file" ] || fail "$observatory_bats_file: bats coverage missing (issue #1613)"
     [ -f "$observatory_auth_bats_file" ] || fail "$observatory_auth_bats_file: bats coverage missing (issue #1614)"
     [ -f "$control_plane_events_bats_file" ] || fail "$control_plane_events_bats_file: bats coverage missing (issue #1615)"
+    [ -f "$control_plane_ui_bats_file" ] || fail "$control_plane_ui_bats_file: bats coverage missing (issue #1616)"
+    [ -f "$control_plane_ui_smoke_bats_file" ] || fail "$control_plane_ui_smoke_bats_file: smoke bats coverage missing (issue #1616)"
     if command -v bats >/dev/null 2>&1; then
         info "  running: $bats_file"
         bash "$bats_file" >/tmp/validate-control-plane-bootstrap.log 2>&1 \
@@ -4720,6 +4726,12 @@ check_control_plane_bootstrap_contract() {
         info "  running: $control_plane_events_bats_file"
         bash "$control_plane_events_bats_file" >/tmp/validate-control-plane-events.log 2>&1 \
             || { cat /tmp/validate-control-plane-events.log >&2; fail "$control_plane_events_bats_file: failed (issue #1615)"; }
+        info "  running: $control_plane_ui_bats_file"
+        bash "$control_plane_ui_bats_file" >/tmp/validate-control-plane-ui.log 2>&1 \
+            || { cat /tmp/validate-control-plane-ui.log >&2; fail "$control_plane_ui_bats_file: failed (issue #1616)"; }
+        info "  running: $control_plane_ui_smoke_bats_file"
+        bash "$control_plane_ui_smoke_bats_file" >/tmp/validate-control-plane-ui-smoke.log 2>&1 \
+            || { cat /tmp/validate-control-plane-ui-smoke.log >&2; fail "$control_plane_ui_smoke_bats_file: failed (issue #1616)"; }
     fi
 }
 

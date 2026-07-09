@@ -96,6 +96,12 @@ sovereign control-plane design:
 
 - `autospec-observatory/apps/api/` and `apps/web/` README seed files for the
   future API-key authenticated event ingestion service and operator UI;
+- `apps/web/src/App.tsx` with the operator UI shell pages: Live Fleet, Run
+  Timeline, Run Progress, Work Item Detail, Queue/Backlog, Failures/Blockers,
+  Workers/Agents, Policy Decision Inspector, and Cost/Duration/Outcome Reports.
+  The shell uses 10-second `poll_after_ms` polling, includes per-run progress
+  bars and a Run Progress detail panel with percent complete, phase/current item,
+  item elapsed time, queue counts, ETA, planned next step, and stale/error state;
 - `apps/api/src/auth/api-keys.ts` with the scoped API-key model. Keys include
   `owner_org_id`, project and repository allow lists, `privacy_tier_limit`, and
   the MVP scopes `events:write`, `events:read`, `projects:read`,
