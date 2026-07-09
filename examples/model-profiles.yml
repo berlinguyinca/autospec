@@ -39,14 +39,7 @@ claude-haiku-cloud:
   allowed: ctx:small,ctx:medium,reasoning:shallow,reasoning:medium
 
 # ── Advisor pattern (docs/specs/2026-07-08-autospec-advisor-pattern-design.md) ──
-# On-demand strong-model escalation for cheap-tier executors. A cheap executor
-# runs the loop and escalates bounded hard decisions to a harness-native TIER_A
-# advisor (advice-only). Off by default. The `impl-haiku` gate is promoted first
-# and alone; add the others only after advisor-report.sh shows promote=true
-# (observed LGTM-first-pass >= baseline AND net cost/issue <= sonnet-solo).
-#   AUTOSPEC_ADVISOR=on              enable the layer (default: off)
-#   AUTOSPEC_ADVISOR_GATES=...       comma list of enabled gates
-#                                    (default: impl-haiku; others: reviewer, retry, impl-decision)
-#   AUTOSPEC_ADVISOR_MAX_USES=3      per-issue cap, shared across all gates
-#   AUTOSPEC_ADVISOR_MAX_CHARS=2800  guidance budget (~700 tokens)
-# Rollback: AUTOSPEC_ADVISOR=off, or drop a gate from AUTOSPEC_ADVISOR_GATES.
+# On-demand strong-model escalation for cheap-tier executors is NOT configured
+# here — it lives in the `advisor:` block of .autospec/autospec.yml as a single
+# `policy: auto|on|off` + budget. Under `auto`, autospec self-governs which gates
+# are active from its own telemetry (no per-gate levers). See that file.
