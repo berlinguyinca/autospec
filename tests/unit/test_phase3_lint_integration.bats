@@ -69,11 +69,28 @@ setup() {
 }
 
 @test "phase 3 prompts run safety pre-filing retry before gh issue create" {
+    assert_before() {
+        local needle_a="$1"
+        local needle_b="$2"
+        local file="$3"
+        local line_a
+        local line_b
+
+        line_a="$(grep -nF "$needle_a" "$file" | head -n1 | cut -d: -f1)"
+        line_b="$(grep -nF "$needle_b" "$file" | head -n1 | cut -d: -f1)"
+
+        [ -n "$line_a" ] && [ -n "$line_b" ] && [ "$line_a" -lt "$line_b" ]
+    }
+
     for file in "$REPO_ROOT/skills/autospec/SKILL.md" "$REPO_ROOT/skills/autospec-define/SKILL.md"; do
+        assert_before "Pre-filing lint loop" "Pre-filing safety loop" "$file"
+        grep -q 'On pass (exit 0), proceed to the safety loop' "$file"
+        ! grep -q 'proceed to `gh issue create` as normal' "$file"
         grep -q "Pre-filing safety loop" "$file"
         grep -q "MAX_SAFETY_RETRIES=5" "$file"
         grep -q "lint-issue-safety.sh" "$file"
         grep -q "skip that child" "$file"
+        grep -q 'after the issue-quality lint passes and before `gh issue create`' "$file"
     done
 }
 
