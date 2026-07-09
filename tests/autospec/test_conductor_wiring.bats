@@ -785,3 +785,54 @@ EOF
   # (1.5/2/3/4) or a park, proving the cascade was reached.
   [ "$tier1_lines" -lt "$total_tier_lines" ]
 }
+
+# ── 22. Transient list-ready-issues.sh failure must NOT inject --backlog-count 0
+#        (peer-review must-fix #1632): a helper blip must not masquerade as an
+#        empty backlog — omit the flag so the waterfall's own readiness-aware
+#        count (with naive-gh fallback) still runs. ───────────────────────────
+@test "conductor: list-ready-issues.sh failure omits --backlog-count (no forced-0)" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+
+  cat > "$FAKE_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  issue) echo '1' ;;
+  repo)  echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
+  *)     exit 0 ;;
+esac
+EOF
+  chmod +x "$FAKE_BIN/gh"
+
+  # Helper fails (transient): exits non-zero, emits nothing parseable.
+  _install_stub "list-ready-issues.sh" \
+    'echo "list-ready: transient error" >&2; exit 1'
+
+  local waterfall_args_log="$TEST_TMP/waterfall-args.log"
+  _install_stub "autonomous-waterfall.sh" \
+    "printf '%s\n' \"\$*\" >> '$waterfall_args_log'; printf '{\"tier\":1,\"action\":\"run-backlog\",\"reason\":\"test\"}\n'"
+
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+  export AUTOSPEC_RUN_CMD="true"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  [ -f "$waterfall_args_log" ]
+  # The helper failed -> the loop must NOT have injected --backlog-count at all
+  # (neither 0 nor any value) so the waterfall keeps its naive-gh fallback.
+  ! grep -q -- '--backlog-count' "$waterfall_args_log"
+}

@@ -910,16 +910,24 @@ fi'
         if [ -n "$_list_ready" ] && [ -f "$_list_ready" ] && [ -n "$_repo" ]; then
             local _queue_json
             _queue_json="$(bash "$_list_ready" --repo "$_repo" --batch-size 1 2>/dev/null || true)"
-            _queue_ready_len="$(printf '%s' "$_queue_json" | jq -r '.ready | length' 2>/dev/null || true)"
-            _queue_batch_len="$(printf '%s' "$_queue_json" | jq -r '.batch | length' 2>/dev/null || true)"
-            _queue_cap_reached="$(printf '%s' "$_queue_json" | jq -r '.worker_cap.reached // false' 2>/dev/null || echo false)"
-            case "$_queue_ready_len" in *[!0-9]*|'') _queue_ready_len="" ;; esac
-            case "$_queue_batch_len" in *[!0-9]*|'') _queue_batch_len="" ;; esac
-            if [ "$_queue_cap_reached" = "true" ]; then
-                # A capped cycle is not drainable work — never pins Tier-1.
-                _ready_count=0
-            else
-                _ready_count=$(( ${_queue_ready_len:-0} + ${_queue_batch_len:-0} ))
+            # Only trust the reading when the helper produced parseable JSON with
+            # a .ready array. A transient helper/GitHub failure must NOT
+            # masquerade as an empty backlog: leaving _ready_count empty omits
+            # --backlog-count below, so the waterfall runs its OWN
+            # readiness-aware count (which itself falls back to the naive gh
+            # count) rather than being forced to 0 on a blip.
+            if printf '%s' "$_queue_json" | jq -e 'has("ready")' >/dev/null 2>&1; then
+                _queue_ready_len="$(printf '%s' "$_queue_json" | jq -r '.ready | length' 2>/dev/null || true)"
+                _queue_batch_len="$(printf '%s' "$_queue_json" | jq -r '.batch | length' 2>/dev/null || true)"
+                _queue_cap_reached="$(printf '%s' "$_queue_json" | jq -r '.worker_cap.reached // false' 2>/dev/null || echo false)"
+                case "$_queue_ready_len" in *[!0-9]*|'') _queue_ready_len="" ;; esac
+                case "$_queue_batch_len" in *[!0-9]*|'') _queue_batch_len="" ;; esac
+                if [ "$_queue_cap_reached" = "true" ]; then
+                    # A capped cycle is not drainable work — never pins Tier-1.
+                    _ready_count=0
+                else
+                    _ready_count=$(( ${_queue_ready_len:-0} + ${_queue_batch_len:-0} ))
+                fi
             fi
         fi
 
