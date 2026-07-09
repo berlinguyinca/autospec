@@ -127,9 +127,16 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$PROMPT" ]; then
-    echo "autospec-explore: missing initial prompt" >&2
-    usage
-    exit 2
+    if [ "$ONCE" -eq 1 ]; then
+        # --once discovery sweeps are prompt-less by design (conductor Tier
+        # 2/4 invocations never supply an initial prompt). Default to a
+        # generic repo-discovery seed instead of hard-failing (issue #1625).
+        PROMPT="Discover the highest-value defects and improvements in this repository."
+    else
+        echo "autospec-explore: missing initial prompt" >&2
+        usage
+        exit 2
+    fi
 fi
 
 # Budget hours → seconds for the shared loop driver env contract.
