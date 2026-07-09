@@ -4686,6 +4686,7 @@ check_control_plane_bootstrap_contract() {
     local control_plane_events_bats_file="tests/control-plane-events.bats"
     local control_plane_ui_bats_file="tests/control-plane-ui.bats"
     local control_plane_ui_smoke_bats_file="tests/smoke/control-plane-ui.bats"
+    local observatory_outbox_bats_file="tests/observatory-outbox.bats"
 
     [ -f "$helper" ] || fail "$helper: missing (issue #1611)"
     [ -x "$helper" ] || fail "$helper: not executable (issue #1611)"
@@ -4710,6 +4711,13 @@ check_control_plane_bootstrap_contract() {
     [ -f "$control_plane_events_bats_file" ] || fail "$control_plane_events_bats_file: bats coverage missing (issue #1615)"
     [ -f "$control_plane_ui_bats_file" ] || fail "$control_plane_ui_bats_file: bats coverage missing (issue #1616)"
     [ -f "$control_plane_ui_smoke_bats_file" ] || fail "$control_plane_ui_smoke_bats_file: smoke bats coverage missing (issue #1616)"
+    [ -f "scripts/autospec-observatory-events.sh" ] || fail "scripts/autospec-observatory-events.sh: missing (issue #1618)"
+    [ -x "scripts/autospec-observatory-events.sh" ] || fail "scripts/autospec-observatory-events.sh: not executable (issue #1618)"
+    bash -n "scripts/autospec-observatory-events.sh" || fail "scripts/autospec-observatory-events.sh: bash -n failed (issue #1618)"
+    [ -f "docs/runbooks/OBSERVATORY.md" ] || fail "docs/runbooks/OBSERVATORY.md: missing observatory runbook (issue #1618)"
+    grep -q ".autospec/observatory/outbox/<run-id>.jsonl" "docs/runbooks/OBSERVATORY.md" \
+        || fail "docs/runbooks/OBSERVATORY.md: missing outbox path (issue #1618)"
+    [ -f "$observatory_outbox_bats_file" ] || fail "$observatory_outbox_bats_file: bats coverage missing (issue #1618)"
     if command -v bats >/dev/null 2>&1; then
         info "  running: $bats_file"
         bash "$bats_file" >/tmp/validate-control-plane-bootstrap.log 2>&1 \
@@ -4732,6 +4740,9 @@ check_control_plane_bootstrap_contract() {
         info "  running: $control_plane_ui_smoke_bats_file"
         bash "$control_plane_ui_smoke_bats_file" >/tmp/validate-control-plane-ui-smoke.log 2>&1 \
             || { cat /tmp/validate-control-plane-ui-smoke.log >&2; fail "$control_plane_ui_smoke_bats_file: failed (issue #1616)"; }
+        info "  running: $observatory_outbox_bats_file"
+        AUTOSPEC_OBSERVATORY_OFFLINE=1 bash "$observatory_outbox_bats_file" >/tmp/validate-observatory-outbox.log 2>&1 \
+            || { cat /tmp/validate-observatory-outbox.log >&2; fail "$observatory_outbox_bats_file: failed (issue #1618)"; }
     fi
 }
 
