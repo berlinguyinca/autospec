@@ -261,6 +261,22 @@ Write the agreed design to `docs/specs/YYYY-MM-DD-<topic>-design.md`, then run a
 
 The spec must be implementable end-to-end by an agent reading only the spec.
 
+### Documentation visualization
+
+When the requested work creates or regenerates documentation, the design spec
+MUST require Mermaid diagrams and charts where acceptable. Add a concrete visual
+plan for queues, routers, state machines, data flow, control flow, algorithms,
+architecture boundaries, timelines, ownership relationships, decision spaces,
+roadmaps, or metric trends whenever one of those structures exists in the target
+feature. Select the Mermaid type that fits the explanation: flowchart, sequence
+diagram, state diagram, class/entity diagram, Gantt, timeline, journey, quadrant
+chart, gitGraph, mindmap, block, architecture, Sankey, XY, pie, kanban, or
+another Mermaid-supported diagram type. Prefer Mermaid blocks in Markdown for
+reviewer-visible explanations; use `docs/assets/diagrams/` only when a generated
+asset is needed outside a Markdown page. If no diagram is useful, the spec must
+state `Mermaid: not applicable` with the reason, so omission is explicit rather
+than accidental.
+
 If this is a fresh repo, commit the spec to `main` directly (`git add docs/... && git commit -m "docs: <topic> design spec" && git push`) so subsequent issues can reference it as a tracked file.
 
 For an existing repo, land the spec via a short-lived PR so CI can validate it.

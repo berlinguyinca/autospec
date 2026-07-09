@@ -3216,6 +3216,7 @@ main() {
     check_autospec_resume_contract
     check_palette_single_source
     check_autospec_doc_contract
+    check_mermaid_documentation_contract
     check_watchdog_worktree_gc
     check_qa_documentation_gate
     check_agents_md_git_hygiene
@@ -4370,6 +4371,66 @@ check_autospec_doc_contract() {
         bats "$bats_file" >/tmp/validate-autospec-doc-bats.log 2>&1 \
             || { cat /tmp/validate-autospec-doc-bats.log >&2; fail "$bats_file: failed"; }
     fi
+}
+
+# Mermaid documentation contract: documentation-generating autospec tasks should
+# include explanatory Mermaid diagrams whenever the underlying domain has a
+# meaningful flow, routing path, queue, state machine, architecture boundary, or
+# algorithm to show. This is prompt-level behavior, so the gate checks the
+# authoritative skill trios for concrete instructions rather than a generated
+# artifact that may not exist in every target repo.
+check_mermaid_documentation_contract() {
+    info "mermaid documentation contract for doc-generating autospec tasks"
+
+    local f
+    for f in skills/autospec/SKILL.md skills/autospec/codex/prompt.md skills/autospec/opencode/agent.md \
+             skills/autospec-define/SKILL.md skills/autospec-define/codex/prompt.md skills/autospec-define/opencode/agent.md; do
+        [ -f "$f" ] || fail "$f: required file missing"
+        grep -q 'Documentation visualization' "$f" \
+            || fail "$f: missing Documentation visualization contract"
+        grep -q 'Mermaid diagrams and charts where acceptable' "$f" \
+            || fail "$f: missing Mermaid diagrams/charts wording"
+        grep -q 'queues, routers, state machines, data flow, control flow, algorithms,' "$f" \
+            || fail "$f: missing concrete Mermaid candidate list"
+        grep -q 'architecture boundaries, timelines' "$f" \
+            || fail "$f: missing Mermaid architecture/timeline candidate"
+        grep -q 'roadmaps, or metric trends' "$f" \
+            || fail "$f: missing Mermaid roadmap/metric candidate"
+        grep -q 'flowchart, sequence' "$f" \
+            || fail "$f: missing Mermaid flowchart/sequence taxonomy"
+        grep -q 'Gantt, timeline, journey, quadrant' "$f" \
+            || fail "$f: missing Mermaid chart taxonomy"
+        grep -q 'Sankey, XY, pie, kanban' "$f" \
+            || fail "$f: missing Mermaid metric/work-queue taxonomy"
+    done
+
+    for f in skills/autospec-doc/SKILL.md skills/autospec-doc/codex/prompt.md skills/autospec-doc/opencode/agent.md; do
+        [ -f "$f" ] || fail "$f: required file missing"
+        grep -q '## Mermaid diagrams' "$f" \
+            || fail "$f: missing Mermaid diagrams section"
+        grep -q 'docs/assets/diagrams' "$f" \
+            || fail "$f: missing diagram asset destination"
+        grep -q 'Mermaid diagrams and charts where' "$f" \
+            || fail "$f: missing Mermaid diagrams/charts generation wording"
+        grep -q 'queue, router, state machine,' "$f" \
+            || fail "$f: missing doc-generation Mermaid candidate list"
+        grep -q 'data flow, control flow, algorithm' "$f" \
+            || fail "$f: missing doc-generation Mermaid flow/algorithm candidate"
+        grep -q 'algorithm, architecture boundary' "$f" \
+            || fail "$f: missing doc-generation Mermaid architecture-boundary candidate"
+        grep -q 'roadmap, or metric trend' "$f" \
+            || fail "$f: missing doc-generation Mermaid roadmap/metric candidate"
+        grep -q '`flowchart`' "$f" \
+            || fail "$f: missing Mermaid flowchart type guidance"
+        grep -q '`gantt` or `timeline`' "$f" \
+            || fail "$f: missing Mermaid roadmap chart guidance"
+        grep -q '`sankey`' "$f" \
+            || fail "$f: missing Mermaid weighted-flow chart guidance"
+        grep -q '`xychart` or `pie`' "$f" \
+            || fail "$f: missing Mermaid metric chart guidance"
+        grep -q '`kanban`' "$f" \
+            || fail "$f: missing Mermaid work-queue chart guidance"
+    done
 }
 
 # Issue #956: QA documentation gate (D3).

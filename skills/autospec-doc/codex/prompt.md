@@ -265,6 +265,32 @@ file may hardcode the palette hexes, and `validate.sh` enforces this.
 The palette also themes generated mermaid diagrams. *(palette resolution +
 mermaid theming filled in by #920.)*
 
+## Mermaid diagrams
+
+Generated documentation MUST include Mermaid diagrams and charts where
+acceptable. During audience authoring, `--full`, and scoped regeneration,
+identify whether each documented feature exposes a queue, router, state machine,
+data flow, control flow, algorithm, architecture boundary, timeline, ownership
+relationship, decision space, roadmap, or metric trend that would be clearer as
+a diagram or chart. `init` seeds starter scopes and later diagram expectations;
+it does not need to invent feature diagrams before feature content exists. When
+a diagram does apply, emit a Markdown `mermaid` fence in the relevant audience
+page and keep any shared/generated diagram source under `docs/assets/diagrams/`.
+Choose the Mermaid type that matches the content:
+`flowchart` for algorithms and control flow, `sequenceDiagram` for request or
+message handoffs, `stateDiagram-v2` for lifecycle/state transitions, `classDiagram`
+or `erDiagram` for ownership/data relationships, `gantt` or `timeline` for
+roadmaps, `journey` for user workflows, `quadrantChart` for decision spaces,
+`gitGraph` for branch/release flow, `mindmap` or `block` for conceptual
+structure, `architecture` for system boundaries, `sankey` for weighted flows,
+`xychart` or `pie` for metrics, and `kanban` for work queues.
+
+If no diagram is useful for a generated page, record `Mermaid: not applicable`
+near the generated section metadata with the reason. The omission must be
+auditable, not silent. Diagram text must be grounded in the same source ranges
+and vocabulary as the prose; do not invent components, queues, routes, or states
+just to satisfy the diagram requirement.
+
 ## llms-full.txt
 
 `--full` (and the orchestrator's concatenation step) emit an `llms-full.txt` at
