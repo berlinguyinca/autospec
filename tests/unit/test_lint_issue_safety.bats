@@ -60,3 +60,24 @@ setup() {
     echo "$output" | grep -q '"decision":"SAFETY_AMBIGUOUS"'
     echo "$output" | grep -q '"rule_id":"vague-data-cleanup"'
 }
+
+@test "autospec config schema accepts issue_intent_gate policy" {
+    run python3 - "$REPO_ROOT/.autospec/autospec.yml" "$REPO_ROOT/schemas/autospec-config.schema.json" <<'PY'
+import json
+import sys
+try:
+    import yaml
+    import jsonschema
+except Exception as exc:
+    print(f"missing optional validator module: {exc}")
+    raise SystemExit(0)
+config_path, schema_path = sys.argv[1], sys.argv[2]
+with open(config_path, "r", encoding="utf-8") as fh:
+    doc = yaml.safe_load(fh)
+assert "issue_intent_gate" in doc["safety"], "missing safety.issue_intent_gate default"
+with open(schema_path, "r", encoding="utf-8") as fh:
+    schema = json.load(fh)
+jsonschema.validate(doc, schema)
+PY
+    [ "$status" -eq 0 ]
+}

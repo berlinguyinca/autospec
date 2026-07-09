@@ -176,6 +176,55 @@
         },
         "never_clone_raw_secrets": {
           "const": true
+        },
+        "issue_intent_gate": {
+          "type": "object",
+          "required": ["enabled", "default_decision", "require_pass_marker_for_run"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "default_decision": { "enum": ["quarantine_uncertain"] },
+            "require_pass_marker_for_run": { "type": "boolean" },
+            "quarantine_labels": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "remove_labels_on_quarantine": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "block_patterns": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/issue_intent_rule" }
+            },
+            "ambiguous_patterns": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/issue_intent_rule" }
+            },
+            "semantic_review": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "trigger_on": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
+            "trusted_actors": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/trusted_issue_actor" }
+            },
+            "trusted_actor_rules": {
+              "type": "object",
+              "properties": {
+                "require_scope_match": { "type": "boolean" },
+                "never_bypass": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -209,6 +258,32 @@
         },
         "focus": { "type": "string", "minLength": 1 },
         "require_scope": { "type": "boolean" }
+      }
+    },
+    "issue_intent_rule": {
+      "type": "object",
+      "required": ["id", "severity", "patterns"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "severity": { "enum": ["block", "ambiguous"] },
+        "patterns": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        }
+      }
+    },
+    "trusted_issue_actor": {
+      "type": "object",
+      "required": ["login", "trust", "allowed_risk"],
+      "properties": {
+        "login": { "type": "string", "minLength": 1 },
+        "trust": { "type": "string", "minLength": 1 },
+        "allowed_risk": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        }
       }
     }
   }

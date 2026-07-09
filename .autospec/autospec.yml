@@ -159,6 +159,74 @@ safety:
   production_access: 'strict_isolation'
   secrets_policy: references_only
   never_clone_raw_secrets: true
+  issue_intent_gate:
+    enabled: true
+    default_decision: quarantine_uncertain
+    require_pass_marker_for_run: true
+    quarantine_labels:
+      - security:quarantined
+    remove_labels_on_quarantine:
+      - auto-implement
+      - needs-classify
+    block_patterns:
+      - id: production-data-destruction
+        severity: block
+        patterns:
+          - "(?i)delete .*production"
+          - "(?i)drop .*prod(uction)? .*database"
+      - id: secret-exfiltration
+        severity: block
+        patterns:
+          - "(?i)(dump|print|exfiltrate|send).*secret"
+          - "(?i)(aws|github|stripe).*token"
+      - id: instruction-bypass
+        severity: block
+        patterns:
+          - "(?i)ignore (all )?(previous|system|developer|agent) instructions"
+          - "(?i)bypass (ci|tests|hooks|review|guardian)"
+      - id: destructive-shell
+        severity: block
+        patterns:
+          - "rm -rf /"
+          - "(?i)curl .*\\| *(sh|bash)"
+    ambiguous_patterns:
+      - id: vague-data-cleanup
+        severity: ambiguous
+        patterns:
+          - "(?i)clean (old|bad|stale)? ?data"
+      - id: weaken-security-control
+        severity: ambiguous
+        patterns:
+          - "(?i)(relax|disable|remove).*security"
+          - "(?i)(relax|disable|remove).*(auth|audit|logging)"
+      - id: production-or-infra-touch
+        severity: ambiguous
+        patterns:
+          - "(?i)(production|prod|billing|payments|migration|terraform|iam|kms)"
+    semantic_review:
+      enabled: true
+      trigger_on:
+        - deterministic_ambiguous
+        - risky_keyword
+        - auth_or_secrets
+        - production_or_infra
+    trusted_actors:
+      - login: berlinguyinca
+        trust: repo_owner
+        allowed_risk:
+          - test_data_reset
+          - fixture_regeneration
+          - local_dev_cleanup
+          - documented_migration_replay
+    trusted_actor_rules:
+      require_scope_match: true
+      never_bypass:
+        - secret_exfiltration
+        - credential_printing
+        - auth_backdoor
+        - production_data_destruction
+        - instruction_bypass
+        - ci_or_review_bypass
 compatibility:
   legacy_skill_contracts: read_if_present
   source_of_truth: .autospec/autospec.yml
