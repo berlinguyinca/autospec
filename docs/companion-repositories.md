@@ -56,10 +56,11 @@ Reference: `scripts/autospec-v61-v70.py` action group for V65.
 ## Control Plane Governance Dry Run
 
 `autospec-control-plane bootstrap --dry-run` renders the proposed
-`autospec-governance` repository scaffold for local inspection without creating
-GitHub repositories, committing files, pushing branches, or invoking `gh`.
+`autospec-governance` and `autospec-observatory` repository scaffolds for local
+inspection without creating GitHub repositories, committing files, pushing
+branches, or invoking `gh`.
 
-The governance dry run prints the MVP policy repository layout from the
+The governance portion prints the MVP policy repository layout from the
 sovereign control-plane design:
 
 - `policies/open-source-maintainer-default.yml` and the other default policy
@@ -90,5 +91,19 @@ scripts/autospec-control-plane.sh bootstrap --dry-run \
   --governance-repo autospec-governance
 ```
 
-This command is governance-only in the current MVP slice; observatory repository
-creation and policy semantic implementation remain separate follow-up work.
+The observatory portion prints the SaaS-ready service scaffold paths from the
+sovereign control-plane design:
+
+- `autospec-observatory/apps/api/` and `apps/web/` README seed files for the
+  future API-key authenticated event ingestion service and operator UI;
+- shared package seed paths under `packages/event-schema/`, `packages/db/`, and
+  `packages/ui/`;
+- `migrations/README.md`, explicitly noting that this dry run does not generate
+  live database migrations;
+- `docs/local-operations.md` for local operator notes;
+- `docker-compose.yml` with a local `postgres:16` service named
+  `observatory-postgres`.
+
+This command remains dry-run-only in the current MVP slice; observatory service
+startup, live API implementation, and database migrations remain separate
+follow-up work.

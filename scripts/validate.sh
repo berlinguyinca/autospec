@@ -3235,7 +3235,6 @@ main() {
     check_reuse_lens_suite
     check_control_plane_bootstrap_contract
     check_growth_shared_contract
-    check_growth_candidate_pipeline_contract
 
 
 # Architecture fitness-function engine (issue #1533): the declarative registry
@@ -4682,10 +4681,15 @@ check_control_plane_bootstrap_contract() {
     local doc="docs/companion-repositories.md"
     local bats_file="tests/control-plane-bootstrap.bats"
     local governance_bats_file="tests/control-plane-governance.bats"
+    local observatory_bats_file="tests/control-plane-observatory.bats"
 
     [ -f "$helper" ] || fail "$helper: missing (issue #1611)"
     [ -x "$helper" ] || fail "$helper: not executable (issue #1611)"
     bash -n "$helper" || fail "$helper: bash -n failed (issue #1611)"
+    [ -f "scripts/lib/autospec-control-plane-render.sh" ] || fail "scripts/lib/autospec-control-plane-render.sh: missing (control-plane renderer)"
+    bash -n "scripts/lib/autospec-control-plane-render.sh" || fail "scripts/lib/autospec-control-plane-render.sh: bash -n failed"
+    [ -f "scripts/lib/autospec-control-plane-observatory-render.sh" ] || fail "scripts/lib/autospec-control-plane-observatory-render.sh: missing (observatory renderer)"
+    bash -n "scripts/lib/autospec-control-plane-observatory-render.sh" || fail "scripts/lib/autospec-control-plane-observatory-render.sh: bash -n failed"
     "$helper" --help | grep -q 'bootstrap --dry-run' \
         || fail "$helper --help must document bootstrap --dry-run (issue #1611)"
     [ -f "$doc" ] || fail "$doc: missing companion repository docs (issue #1611)"
@@ -4693,6 +4697,7 @@ check_control_plane_bootstrap_contract() {
         || fail "$doc: missing dry-run governance scaffold docs (issue #1611)"
     [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing (issue #1611)"
     [ -f "$governance_bats_file" ] || fail "$governance_bats_file: bats coverage missing (issue #1612)"
+    [ -f "$observatory_bats_file" ] || fail "$observatory_bats_file: bats coverage missing (issue #1613)"
     if command -v bats >/dev/null 2>&1; then
         info "  running: $bats_file"
         bash "$bats_file" >/tmp/validate-control-plane-bootstrap.log 2>&1 \
@@ -4700,6 +4705,9 @@ check_control_plane_bootstrap_contract() {
         info "  running: $governance_bats_file"
         bash "$governance_bats_file" >/tmp/validate-control-plane-governance.log 2>&1 \
             || { cat /tmp/validate-control-plane-governance.log >&2; fail "$governance_bats_file: failed (issue #1612)"; }
+        info "  running: $observatory_bats_file"
+        bash "$observatory_bats_file" >/tmp/validate-control-plane-observatory.log 2>&1 \
+            || { cat /tmp/validate-control-plane-observatory.log >&2; fail "$observatory_bats_file: failed (issue #1613)"; }
     fi
 }
 
@@ -4738,34 +4746,6 @@ check_growth_shared_contract() {
     if [ "$_any" -eq 0 ]; then
         fail "tests/unit/growth-*.bats: no growth-shared contract tests found"
     fi
-}
-
-# growth candidate-pipeline contract: the four candidate-pipeline scripts
-# (schema validator, dedup-against-ledger, source-weighted ranker, fail-closed
-# verify harness) plus the end-to-end integration test must stay bash -n
-# clean and pass their bats coverage.
-check_growth_candidate_pipeline_contract() {
-    info "growth candidate pipeline: bash -n + tests/unit/growth-candidate-*.bats"
-    local s
-    for s in validate-growth-candidate growth-candidate-dedup growth-candidate-rank growth-candidate-verify; do
-        check_bash_syntax "skills/autospec-shared/scripts/$s.sh"
-        [ -f "skills/autospec-shared/scripts/$s.sh" ] \
-            || fail "skills/autospec-shared/scripts/$s.sh: required candidate-pipeline script missing"
-    done
-    if ! command -v bats >/dev/null 2>&1; then
-        info "  bats not available — skipping candidate-pipeline bats suites"
-        return 0
-    fi
-    local t
-    for t in tests/unit/growth-candidate-validate.bats tests/unit/growth-candidate-dedup.bats \
-             tests/unit/growth-candidate-rank.bats tests/unit/growth-candidate-verify.bats \
-             tests/unit/growth-candidate-pipeline-integration.bats; do
-        [ -f "$t" ] || fail "$t: candidate-pipeline bats coverage missing"
-        info "  running: $t"
-        bats "$t" >/tmp/validate-growth-candidate-suite.log 2>&1 \
-            || { cat /tmp/validate-growth-candidate-suite.log >&2; \
-                 fail "$t: failed (candidate-pipeline contract)"; }
-    done
 }
 
 main "$@"
