@@ -4680,6 +4680,7 @@ check_control_plane_bootstrap_contract() {
     local helper="scripts/autospec-control-plane.sh"
     local doc="docs/companion-repositories.md"
     local bats_file="tests/control-plane-bootstrap.bats"
+    local governance_bats_file="tests/control-plane-governance.bats"
 
     [ -f "$helper" ] || fail "$helper: missing (issue #1611)"
     [ -x "$helper" ] || fail "$helper: not executable (issue #1611)"
@@ -4690,10 +4691,14 @@ check_control_plane_bootstrap_contract() {
     grep -q 'Control Plane Governance Dry Run' "$doc" \
         || fail "$doc: missing dry-run governance scaffold docs (issue #1611)"
     [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing (issue #1611)"
+    [ -f "$governance_bats_file" ] || fail "$governance_bats_file: bats coverage missing (issue #1612)"
     if command -v bats >/dev/null 2>&1; then
         info "  running: $bats_file"
         bash "$bats_file" >/tmp/validate-control-plane-bootstrap.log 2>&1 \
             || { cat /tmp/validate-control-plane-bootstrap.log >&2; fail "$bats_file: failed (issue #1611)"; }
+        info "  running: $governance_bats_file"
+        bash "$governance_bats_file" >/tmp/validate-control-plane-governance.log 2>&1 \
+            || { cat /tmp/validate-control-plane-governance.log >&2; fail "$governance_bats_file: failed (issue #1612)"; }
     fi
 }
 
