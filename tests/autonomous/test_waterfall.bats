@@ -204,7 +204,10 @@ teardown() {
     [[ "$output" == *'"action":"run-explore-once-internet"'* ]]
 }
 
-@test "Park: all tiers dry parks with all-tiers-dry reason" {
+@test "Idle-rescan: all tiers dry idles-and-rescans instead of convergence-parking" {
+    # Never-idle contract (R1/R5, F1 of the 2026-07-06 platform design): a fully
+    # dry cascade must enter idle-rescan, NOT terminate. Only resource/control
+    # park may exit the loop — convergence-stop is forbidden.
     run bash "$SCRIPT" \
         --backlog-count 0 \
         --open-issue-count 0 \
@@ -215,8 +218,21 @@ teardown() {
         --tier4-dry-cycles 2
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":4'* ]]
-    [[ "$output" == *'"action":"park"'* ]]
+    [[ "$output" == *'"action":"idle-rescan"'* ]]
     [[ "$output" == *'all tiers dry'* ]]
+    # Must NOT convergence-park.
+    [[ "$output" != *'"action":"park"'* ]]
+}
+
+@test "Emergency kill-switch: AUTOSPEC_DISABLE_DISCOVERY_TIERS=1 still parks (distinct from idle-rescan)" {
+    # The documented fail-closed emergency park must remain park, NOT idle-rescan.
+    AUTOSPEC_DISABLE_DISCOVERY_TIERS=1 run bash "$SCRIPT" \
+        --backlog-count 0 \
+        --dry-cycles 2
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"action":"park"'* ]]
+    [[ "$output" == *'discovery tiers disabled'* ]]
+    [[ "$output" != *'"action":"idle-rescan"'* ]]
 }
 
 # ─── Refill floats back to Tier 1 ─────────────────────────────────────────────
@@ -256,7 +272,7 @@ teardown() {
     [[ "$output" == *'"reason":'* ]]
 }
 
-@test "park output contains tier, action, reason keys" {
+@test "idle-rescan output contains tier, action, reason keys" {
     run bash "$SCRIPT" --backlog-count 0 --open-issue-count 0 --dry-cycles 2 --tier15-dry-cycles 2 --tier2-dry-cycles 2 --tier3-dry-cycles 2 --tier4-dry-cycles 2
     [ "$status" -eq 0 ]
     [[ "$output" == *'"tier":'* ]]
