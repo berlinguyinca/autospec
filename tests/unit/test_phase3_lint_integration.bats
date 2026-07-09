@@ -118,6 +118,8 @@ setup() {
         grep -q "scripts/lint-issue-safety.sh" "$file"
         grep -q "security:quarantined" "$file"
         grep -q "safety:reviewed" "$file"
+        grep -q "<!-- autospec-safety:begin -->" "$file"
+        grep -q "<!-- autospec-safety:end -->" "$file"
         grep -q "remove-label auto-implement" "$file"
         grep -q "remove-label needs-classify" "$file"
     done

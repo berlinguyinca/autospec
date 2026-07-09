@@ -547,6 +547,23 @@ labels and patches each body with a `## Model fit` block.
 > issue body, and continue with label application, body patching, board
 > assignment, dependency checks, and quality audit.
 >
+> The block format must include the marker wrapper so later runs can replace it
+> in place:
+>
+> ```markdown
+> ## Safety review
+>
+> - **decision:** `SAFETY_PASS`
+> - **actor:** `<author>`
+> - **trust:** `<trust>`
+> - **matched rules:** `<rule ids or none>`
+> - **reason:** <reason>
+>
+> <!-- autospec-safety:begin -->
+> *Auto-reviewed by issue intent safety gate on YYYY-MM-DD.*
+> <!-- autospec-safety:end -->
+> ```
+>
 > ```bash
 > gh label create safety:reviewed --force --repo {repo}
 > gh label create security:quarantined --force --repo {repo}
@@ -555,8 +572,9 @@ labels and patches each body with a `## Model fit` block.
 >
 > If `_safety_status` is `1` or `2`, create label `security:quarantined`, add
 > it, remove `auto-implement` and `needs-classify`, patch a blocking `## Safety
-> review` block, comment with the safety findings, and skip the issue. Do not
-> transition `needs-classify` to `auto-implement`.
+> review` block with the same `<!-- autospec-safety:begin -->` /
+> `<!-- autospec-safety:end -->` wrapper, comment with the safety findings, and
+> skip the issue. Do not transition `needs-classify` to `auto-implement`.
 >
 > ```bash
 > gh label create security:quarantined --force --repo {repo}

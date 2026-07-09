@@ -134,13 +134,29 @@ _safety_status=$?
 
 If `_safety_status` is `0`, create labels `safety:reviewed` and `security:quarantined` idempotently, add `safety:reviewed`, remove `security:quarantined`, patch a passing `## Safety review` block into the issue body, and only then continue with the remaining per-issue steps.
 
+The block format must include the marker wrapper so later runs can replace it in place:
+
+```markdown
+## Safety review
+
+- **decision:** `SAFETY_PASS`
+- **actor:** `<author>`
+- **trust:** `<trust>`
+- **matched rules:** `<rule ids or none>`
+- **reason:** <reason>
+
+<!-- autospec-safety:begin -->
+*Auto-reviewed by issue intent safety gate on YYYY-MM-DD.*
+<!-- autospec-safety:end -->
+```
+
 ```bash
 gh label create safety:reviewed --force --repo {repo}
 gh label create security:quarantined --force --repo {repo}
 gh issue edit <N> --add-label safety:reviewed --remove-label security:quarantined --repo {repo}
 ```
 
-If `_safety_status` is `1` or `2`, create label `security:quarantined`, add it, remove `auto-implement` and `needs-classify`, patch a blocking `## Safety review` block, comment with the safety findings, and skip the issue. Do not transition `needs-classify` to `auto-implement`.
+If `_safety_status` is `1` or `2`, create label `security:quarantined`, add it, remove `auto-implement` and `needs-classify`, patch a blocking `## Safety review` block with the same `<!-- autospec-safety:begin -->` / `<!-- autospec-safety:end -->` wrapper, comment with the safety findings, and skip the issue. Do not transition `needs-classify` to `auto-implement`.
 
 ```bash
 gh label create security:quarantined --force --repo {repo}

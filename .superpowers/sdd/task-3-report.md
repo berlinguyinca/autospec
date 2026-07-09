@@ -33,3 +33,17 @@ Implemented the issue intent safety gate wiring for `autospec`, `autospec-define
 - `bats tests/unit/test_phase3_lint_integration.bats` passed after moving the safety gate ahead of the transition / queue-preserving Phase 3.5 steps.
 - Targeted lock-step check passed for `skills/autospec`, `skills/autospec-define`, and `skills/autospec-classify` after syncing `SKILL.md`, `codex/prompt.md`, and `opencode/agent.md`.
 - `bash scripts/validate.sh --fast` advanced through the touched trios and then failed later on the known unrelated docs-drift baseline in `tests/phase4/test_docs_drift_gate_regen_conditional.sh` (`skills/autospec-run/SKILL.md` heredoc parse failure).
+
+## Review Fix 2
+
+### RED
+- `bats tests/unit/test_phase3_lint_integration.bats` failed on the new marker assertion before the prompt regeneration (`grep -q "<!-- autospec-safety:begin -->"`).
+
+### GREEN
+- Added marker-delimited `## Safety review` guidance to `skills/autospec-classify/SKILL.md`, `skills/autospec/SKILL.md`, and `skills/autospec-define/SKILL.md`.
+- Regenerated `skills/autospec*/codex/prompt.md` and `skills/autospec*/opencode/agent.md` from the updated SKILL sources with the repo trio generator.
+- `bats tests/unit/test_phase3_lint_integration.bats` passes.
+- `bash scripts/derive-trio.sh skills/autospec --check`
+- `bash scripts/derive-trio.sh skills/autospec-define --check`
+- `bash scripts/derive-trio.sh skills/autospec-classify --check`
+- `bash scripts/validate.sh --fast` now gets through the touched trios and only fails later on the existing phase-4 docs-drift baseline in `tests/phase4/test_docs_drift_gate_regen_conditional.sh` (`skills/autospec-run/SKILL.md` heredoc parse failure).
