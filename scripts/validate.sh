@@ -4804,6 +4804,10 @@ check_control_plane_bootstrap_contract() {
     local control_plane_reports_integration_bats_file="tests/integration/control-plane-reports.bats"
     local control_plane_ui_smoke_bats_file="tests/smoke/control-plane-ui.bats"
     local observatory_outbox_bats_file="tests/observatory-outbox.bats"
+    local policy_resolution_bats_file="tests/policy-resolution.bats"
+    local control_plane_confirm_bats_file="tests/control-plane-confirm.bats"
+    local control_plane_dogfood_bats_file="tests/control-plane-dogfood.bats"
+    local control_plane_events_integration_bats_file="tests/integration/control-plane-events.bats"
 
     [ -f "$helper" ] || fail "$helper: missing (issue #1611)"
     [ -x "$helper" ] || fail "$helper: not executable (issue #1611)"
@@ -4839,6 +4843,10 @@ check_control_plane_bootstrap_contract() {
     grep -q ".autospec/observatory/outbox/<run-id>.jsonl" "docs/runbooks/OBSERVATORY.md" \
         || fail "docs/runbooks/OBSERVATORY.md: missing outbox path (issue #1618)"
     [ -f "$observatory_outbox_bats_file" ] || fail "$observatory_outbox_bats_file: bats coverage missing (issue #1618)"
+    [ -f "$policy_resolution_bats_file" ] || fail "$policy_resolution_bats_file: bats coverage missing (issue #1619)"
+    [ -f "$control_plane_confirm_bats_file" ] || fail "$control_plane_confirm_bats_file: bats coverage missing (issue #1620)"
+    [ -f "$control_plane_dogfood_bats_file" ] || fail "$control_plane_dogfood_bats_file: bats coverage missing (issue #1621)"
+    [ -f "$control_plane_events_integration_bats_file" ] || fail "$control_plane_events_integration_bats_file: integration coverage missing (issue #1615)"
     if command -v bats >/dev/null 2>&1; then
         info "  running: $bats_file"
         bash "$bats_file" >/tmp/validate-control-plane-bootstrap.log 2>&1 \
@@ -4858,6 +4866,9 @@ check_control_plane_bootstrap_contract() {
         info "  running: $control_plane_ui_bats_file"
         bash "$control_plane_ui_bats_file" >/tmp/validate-control-plane-ui.log 2>&1 \
             || { cat /tmp/validate-control-plane-ui.log >&2; fail "$control_plane_ui_bats_file: failed (issue #1616)"; }
+        info "  running: $control_plane_events_integration_bats_file"
+        bash "$control_plane_events_integration_bats_file" >/tmp/validate-control-plane-events-integration.log 2>&1 \
+            || { cat /tmp/validate-control-plane-events-integration.log >&2; fail "$control_plane_events_integration_bats_file: failed (issue #1615)"; }
         info "  running: $control_plane_reports_bats_file"
         bash "$control_plane_reports_bats_file" >/tmp/validate-control-plane-reports.log 2>&1 \
             || { cat /tmp/validate-control-plane-reports.log >&2; fail "$control_plane_reports_bats_file: failed (issue #1617)"; }
@@ -4870,6 +4881,15 @@ check_control_plane_bootstrap_contract() {
         info "  running: $observatory_outbox_bats_file"
         AUTOSPEC_OBSERVATORY_OFFLINE=1 bash "$observatory_outbox_bats_file" >/tmp/validate-observatory-outbox.log 2>&1 \
             || { cat /tmp/validate-observatory-outbox.log >&2; fail "$observatory_outbox_bats_file: failed (issue #1618)"; }
+        info "  running: $policy_resolution_bats_file"
+        bash "$policy_resolution_bats_file" >/tmp/validate-policy-resolution.log 2>&1 \
+            || { cat /tmp/validate-policy-resolution.log >&2; fail "$policy_resolution_bats_file: failed (issue #1619)"; }
+        info "  running: $control_plane_confirm_bats_file"
+        bash "$control_plane_confirm_bats_file" >/tmp/validate-control-plane-confirm.log 2>&1 \
+            || { cat /tmp/validate-control-plane-confirm.log >&2; fail "$control_plane_confirm_bats_file: failed (issue #1620)"; }
+        info "  running: $control_plane_dogfood_bats_file"
+        bash "$control_plane_dogfood_bats_file" >/tmp/validate-control-plane-dogfood.log 2>&1 \
+            || { cat /tmp/validate-control-plane-dogfood.log >&2; fail "$control_plane_dogfood_bats_file: failed (issue #1621)"; }
     fi
 }
 
