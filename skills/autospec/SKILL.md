@@ -444,6 +444,17 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > | `SMOKE_PLACEHOLDER: contains "<TODO>"` | `RESOLVE: Replace placeholders \`<TODO>/TBD/XXX/...\` with the actual command before filing.` |
 > | `SMOKE_NOT_FENCED` | `ADD: Primary smoke test section must contain exactly one fenced code block.` |
 
+> **Pre-filing safety loop (adaptive, MAX_SAFETY_RETRIES=5):** For each candidate child body, after the issue-quality lint passes and before `gh issue create`, run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue-safety.sh" --title "<candidate title>" /tmp/draft-<slug>.md`. If the exit code is `1` or `2`, append the safety findings to the next generation prompt as cumulative directives:
+>
+> | Finding | Directive appended to next prompt |
+> |---|---|
+> | `SAFETY_BLOCK: production-data-destruction` | `BLOCKED: remove production data destruction from scope; rewrite for test/dev data only or split to human-reviewed production plan.` |
+> | `SAFETY_BLOCK: secret-exfiltration` | `BLOCKED: never request printing, dumping, sending, or exposing secrets or tokens.` |
+> | `SAFETY_BLOCK: instruction-bypass` | `BLOCKED: never ask the implementer to ignore AGENTS.md, system/developer instructions, CI, review, hooks, or guardian checks.` |
+> | `SAFETY_AMBIGUOUS` | `CLARIFY: add explicit non-production scope, affected paths, guardrails, and verification command; otherwise skip filing.` |
+>
+> Repeat up to `MAX_SAFETY_RETRIES=5`. If attempt 5 still returns non-zero, print all drafts plus safety findings inline and skip that child. Do not file unsafe or ambiguous child issues.
+
 ### Small-LLM friendliness (applies to every child issue)
 
 Children are written assuming the implementer is a 32B-class local model with **pre-staged context**, not a search-driven cloud agent:

@@ -68,6 +68,15 @@ setup() {
     grep -q 'needs-quality-bar' "$REPO_ROOT/skills/autospec-define/opencode/agent.md"
 }
 
+@test "phase 3 prompts run safety pre-filing retry before gh issue create" {
+    for file in "$REPO_ROOT/skills/autospec/SKILL.md" "$REPO_ROOT/skills/autospec-define/SKILL.md"; do
+        grep -q "Pre-filing safety loop" "$file"
+        grep -q "MAX_SAFETY_RETRIES=5" "$file"
+        grep -q "lint-issue-safety.sh" "$file"
+        grep -q "skip that child" "$file"
+    done
+}
+
 # ── skills/autospec-classify ──────────────────────────────────────────────────
 
 @test "autospec-classify audit trio: SKILL.md mentions installed lint-issue.sh" {
