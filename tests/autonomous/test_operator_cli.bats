@@ -8,6 +8,7 @@ setup() {
   mkdir -p "$HOME"
   export CONDUCTOR_REPO="berlinguyinca/autospec"
   export AUTOSPEC_REPO_DIR="$REPO_ROOT"
+  unset AUTOSPEC_STOP_FLAG_FILE
 }
 
 teardown() {

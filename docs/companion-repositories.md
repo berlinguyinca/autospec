@@ -111,6 +111,15 @@ sovereign control-plane design:
   `GET /v1/runs/:id/progress`. Progress snapshots expose `progress_percent`,
   `phase`, current item, queue counts, elapsed time, ETA, planned next step, and
   `last_event_id`, and reads are scoped to the key's org/project boundaries;
+- `apps/api/src/reports.ts` with scaffolded report routes for Project weekly
+  summary, Client billing export, Open-source maintenance report, Agent
+  performance report, Cost anomaly report, Blocked work report, and Autonomous
+  ROI report. Report rows include `estimated_cost_usd`, `actual_cost_usd`,
+  `duration_ms`, `blocked_time_ms`, `status_outcome`, and `roi_summary`;
+- `apps/web/src/ReportFilters.tsx` with MVP operator filters for date range,
+  project classification, org/company, workspace, project, repo, operator,
+  worker, agent/harness/model, skill/workflow, policy version, privacy tier,
+  risk level, status/outcome, cost range, and duration range;
 - `apps/api/src/ingest/events.ts` and `packages/event-schema/src/events.ts`
   with the scaffolded ingestion contract. Generated events require `event_id`,
   `run_id`, `sequence`, timestamps, project/repository identifiers, and
