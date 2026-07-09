@@ -220,6 +220,25 @@ seeded at the low-risk `impl-haiku` gate, and ticked once per end-of-run sweep:
 `policy: on` activates every gate within budget (no self-tuning); `policy: off`
 is inert. **Rollback** is one line: `policy: off`.
 
+### Measurement pipeline (what feeds the tick)
+
+The sweep calls one orchestrator, `advisor-sweep-tick.sh`, which:
+
+1. **Observes** — `advisor-observe.sh` derives the batch's LGTM-first-pass rate
+   and mean cost/issue from autospec's main telemetry JSONL, using the *same*
+   formulas as `gen-telemetry-dashboard.sh` (LGTM-first-pass = reviewer issues
+   whose first dispatch had `cache_read > 0`; cost/issue = mean input+output
+   tokens per issue).
+2. **Snapshots the baseline on first activation** — the first sweep where the
+   advisor is active freezes the current (pre-advisor) metrics into
+   `.autospec/advisor-baseline.json` and stops. This is the **auto-snapshot**
+   baseline: no operator input, captured before the advisor has influenced
+   anything. (Cost is the executor-side cost/issue; the advisor's own call cost
+   is bounded by the cap and tracked separately — the primary signal is whether
+   escalation reduced retries/first-pass failures.)
+3. **Ticks** — thereafter it feeds baseline + observed to `advisor-govern.sh`.
+   Fail-safe: not-`auto`, no telemetry, or no reviewer signal → a logged no-op.
+
 ## Telemetry
 
 Each `record` appends one line to `.autospec/telemetry/advisor-escalate.jsonl`:
@@ -228,10 +247,9 @@ Each `record` appends one line to `.autospec/telemetry/advisor-escalate.jsonl`:
 {"ts","issue","repo","gate","verdict","tokens_in","tokens_out","use_count","over_budget"}
 ```
 
-The quality/cost inputs to the governance tick are the batch's LGTM-first-pass
-rate and net cost/issue (executor + advisor tokens), compared to the no-advisor /
-Sonnet-solo baselines. `advisor-report.sh` summarizes the JSONL and computes the
-same `promote` predicate for inspection.
+`advisor-report.sh` summarizes this JSONL (per-gate calls/verdicts/tokens) and
+computes the `promote` predicate for inspection. The governance decision itself
+is driven by `advisor-sweep-tick.sh` against the auto-snapshot baseline (above).
 
 ## Files touched
 
@@ -241,6 +259,8 @@ New:
 - `skills/autospec-shared/scripts/advisor-report.sh` (+ `.bats`)
 - `skills/autospec-shared/scripts/advisor-config.sh` (+ `.bats`) — YAML config resolver
 - `skills/autospec-shared/scripts/advisor-govern.sh` (+ `.bats`) — self-governance ratchet
+- `skills/autospec-shared/scripts/advisor-observe.sh` (+ `.bats`) — observed metrics from main telemetry
+- `skills/autospec-shared/scripts/advisor-sweep-tick.sh` (+ `.bats`) — sweep orchestrator (baseline + tick)
 
 Modified:
 
