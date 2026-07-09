@@ -7,6 +7,9 @@ CONTROL_PLANE_OBSERVATORY_EVENTS_RENDER_LIB="${CONTROL_PLANE_OBSERVATORY_EVENTS_
 CONTROL_PLANE_OBSERVATORY_UI_RENDER_LIB="${CONTROL_PLANE_OBSERVATORY_UI_RENDER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/autospec-control-plane-observatory-ui-render.sh}"
 # shellcheck source=scripts/lib/autospec-control-plane-observatory-ui-render.sh
 . "$CONTROL_PLANE_OBSERVATORY_UI_RENDER_LIB"
+CONTROL_PLANE_OBSERVATORY_REPORTS_RENDER_LIB="${CONTROL_PLANE_OBSERVATORY_REPORTS_RENDER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/autospec-control-plane-observatory-reports-render.sh}"
+# shellcheck source=scripts/lib/autospec-control-plane-observatory-reports-render.sh
+. "$CONTROL_PLANE_OBSERVATORY_REPORTS_RENDER_LIB"
 
 render_observatory_compose() {
     cat <<'YAML'
@@ -159,6 +162,13 @@ export const OBSERVATORY_ROUTES = [
   "GET /v1/runs/:id/timeline",
   "GET /v1/runs/:id/events?after_event_id=...",
   "GET /v1/runs/:id/costs",
+  "GET /v1/reports/project-weekly-summary",
+  "GET /v1/reports/client-billing-export",
+  "GET /v1/reports/open-source-maintenance-report",
+  "GET /v1/reports/agent-performance-report",
+  "GET /v1/reports/cost-anomaly-report",
+  "GET /v1/reports/blocked-work-report",
+  "GET /v1/reports/autonomous-roi-report",
   "GET /v1/fleet/summary",
   "GET /v1/workers?status=active",
   "GET /v1/policies/effective?project_id=...",
@@ -285,10 +295,14 @@ render_observatory_file_templates() {
     render_observatory_routes
     render_file_header "$observatory_repo" "apps/api/src/ingest/events.ts"
     render_observatory_event_ingestion_contract
+    render_file_header "$observatory_repo" "apps/api/src/reports.ts"
+    render_observatory_reports_contract
     render_file_header "$observatory_repo" "apps/web/README.md"
     render_observatory_web_readme
     render_file_header "$observatory_repo" "apps/web/src/App.tsx"
     render_observatory_web_app_shell
+    render_file_header "$observatory_repo" "apps/web/src/ReportFilters.tsx"
+    render_observatory_report_filter_ui
     render_file_header "$observatory_repo" "packages/event-schema/README.md"
     render_observatory_event_schema_readme
     render_file_header "$observatory_repo" "packages/event-schema/src/events.ts"
@@ -322,8 +336,10 @@ ${observatory_repo}/
   ${observatory_repo}/apps/api/src/
   ${observatory_repo}/apps/api/src/auth/
   ${observatory_repo}/apps/api/src/ingest/
+  ${observatory_repo}/apps/api/src/reports.ts
   ${observatory_repo}/apps/web/
   ${observatory_repo}/apps/web/src/
+  ${observatory_repo}/apps/web/src/ReportFilters.tsx
   ${observatory_repo}/packages/
   ${observatory_repo}/packages/event-schema/
   ${observatory_repo}/packages/event-schema/src/
