@@ -75,6 +75,19 @@ teardown() { rm -rf "$TMP"; }
   echo "$output" | jq -e '.active == ["impl-haiku"]' >/dev/null
 }
 
+@test "existing baseline + zero signal → hold, active set unchanged (paramount)" {
+  printf '{"lgtm_first_pass":0.9,"cost_per_issue":100}' > "$BASE"
+  : > "$MAIN"                       # no reviewer signal this window
+  mk_adv_samples 25
+  mkdir -p "$AUTOSPEC_ADVISOR_STATE_DIR"
+  printf '{"active":["impl-haiku","retry"]}' > "$AUTOSPEC_ADVISOR_STATE_DIR/active-gates.json"
+  run bash "$SCRIPT" --main-telemetry "$MAIN" --advisor-telemetry "$ADV" --baseline-file "$BASE" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.action == "hold"' >/dev/null
+  # must NOT retract on absent signal — active set is untouched
+  jq -e '.active == ["impl-haiku","retry"]' "$AUTOSPEC_ADVISOR_STATE_DIR/active-gates.json" >/dev/null
+}
+
 @test "below the sample floor → hold" {
   printf '{"lgtm_first_pass":0.5,"cost_per_issue":500}' > "$BASE"
   mk_main_good

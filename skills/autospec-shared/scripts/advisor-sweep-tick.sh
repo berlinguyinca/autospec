@@ -64,12 +64,16 @@ if [ "$rev_issues" -lt 1 ]; then
 fi
 
 # 3a. First activation → freeze the (pre-advisor) baseline and stop.
+# The write is fail-open: a read-only .autospec/ (mkdir/mktemp/jq/mv failure)
+# degrades to a logged no-op rather than aborting the sweep.
 if [ ! -f "$BASELINE_FILE" ]; then
-  mkdir -p "$(dirname "$BASELINE_FILE")"
-  tmp="$(mktemp "${BASELINE_FILE}.XXXXXX")"
-  jq -cn --argjson l "$o_lgtm" --argjson c "$o_cost" \
-    '{lgtm_first_pass:$l,cost_per_issue:$c,captured:true}' > "$tmp"
-  mv "$tmp" "$BASELINE_FILE"
+  if ! ( mkdir -p "$(dirname "$BASELINE_FILE")" \
+         && tmp="$(mktemp "${BASELINE_FILE}.XXXXXX")" \
+         && jq -cn --argjson l "$o_lgtm" --argjson c "$o_cost" \
+              '{lgtm_first_pass:$l,cost_per_issue:$c,captured:true}' > "$tmp" \
+         && mv "$tmp" "$BASELINE_FILE" ); then
+    emit '{"action":"skip","reason":"baseline write failed"}'
+  fi
   emit "$(jq -cn --argjson l "$o_lgtm" --argjson c "$o_cost" \
     '{action:"baseline-captured",baseline:{lgtm_first_pass:$l,cost_per_issue:$c}}')"
 fi

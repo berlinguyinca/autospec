@@ -5,9 +5,10 @@
 # Metrics (computed with the SAME formulas as gen-telemetry-dashboard.sh):
 #   lgtm_first_pass  — fraction (0..1) of reviewer issues whose FIRST reviewer
 #                      dispatch (by ts) had cache_read > 0 (warm-cache first pass)
-#   cost_per_issue   — mean total (input+output) tokens per distinct issue
-#                      (executor-side cost; the advisor's own bounded call cost is
-#                      tracked separately in advisor-escalate.jsonl)
+#   cost_per_issue   — mean total (input+output) tokens per distinct issue across
+#                      all roles in the main telemetry (implementer + reviewer +
+#                      …); the advisor's own bounded call cost is tracked
+#                      separately in advisor-escalate.jsonl and not included here
 #   reviewer_issues  — distinct issues with a reviewer dispatch
 #   issues           — distinct issues total
 #
