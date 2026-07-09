@@ -127,3 +127,36 @@ bash scripts/autospec-policy-compatibility.sh
 ```
 
 The report lists unsupported check types, schema mismatches, pack composition issues, rule conflicts, and recommended engine follow-up issues.
+
+## Runtime Policy Resolution And Privacy Scrubbing
+
+Run the local resolver before emitting observatory events:
+
+```bash
+bash scripts/autospec-policy-resolver.sh --repo .
+```
+
+Resolution order is deterministic and emitted as `policy_resolution_trace`:
+
+1. repo-local `.autospec/autonomous.yml`;
+2. observatory project assignment (`.autospec/observatory-assignment.yml` or `--observatory-assignment <file>`);
+3. governance default from `--governance-dir <dir>` and `--project-class <class>`;
+4. built-in safe fallback.
+
+Governance policies are trusted only after digest validation when the caller passes
+`--expected-policy-digest sha256:<hex>`. A mismatch exits non-zero before the
+policy can be used.
+
+To scrub one event before upload:
+
+```bash
+bash scripts/autospec-policy-resolver.sh \
+  --repo . \
+  --event-file .autospec/outbox/event.json \
+  --api-key-privacy-tier summary
+```
+
+Privacy tiers are enforced before upload. `metadata-only` output removes artifact
+details and raw logs. `full-debug` raw logs require both a resolved policy that
+allows raw logs and an explicit fixture/API-key allowance via
+`--allow-full-debug-raw-logs`; otherwise the resolver rejects the event locally.
