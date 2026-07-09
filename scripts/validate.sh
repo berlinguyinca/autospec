@@ -3204,6 +3204,7 @@ main() {
     check_autospec_explore_discovery_contract
     check_autospec_explore_stage2_intersect_contract
     check_autospec_explore_userspace_roster_contract
+    check_autospec_autonomous_tier4_discovery_contract
     check_autospec_explore_style_normalization_contract
     check_autospec_explore_spec_first_contract
     check_autospec_explore_qa_gate_contract
@@ -3716,6 +3717,50 @@ check_autospec_explore_userspace_roster_contract() {
             || fail "$trio: userspace roster must state the untrusted-DATA trust boundary"
     done
     info "autospec-explore userspace roster contract: trio lock-step verified"
+}
+
+# autospec-autonomous Tier-4 discovery activation contract (#1659): the conductor's
+# Tier 4 must document the REAL discovery invocation in lock-step across all three
+# trio bodies — `/autospec-explore --once` with the `internet-forums` + three
+# userspace harvesters, gated by `discovery.enabled` + the `--no-internet` /
+# `--no-userspace` flags, with verified/ranked candidates returning to Tier 1 and
+# draining to `main` only through the normal readiness gate (never direct-merge),
+# the untrusted-DATA trust boundary, and trend memory that accumulates across idle
+# cycles. A prose-only intermediate that skips the derived mirrors fails this closed.
+check_autospec_autonomous_tier4_discovery_contract() {
+    info "autospec-autonomous Tier-4 discovery activation contract (#1659)"
+    for trio in \
+        skills/autospec-autonomous/SKILL.md \
+        skills/autospec-autonomous/codex/prompt.md \
+        skills/autospec-autonomous/opencode/agent.md
+    do
+        [ -f "$trio" ] || fail "$trio: required adapter file missing"
+        grep -q -- '/autospec-explore --once' "$trio" \
+            || fail "$trio: Tier 4 must invoke '/autospec-explore --once' discovery"
+        grep -q 'internet-forums' "$trio" \
+            || fail "$trio: Tier 4 must name the internet-forums discovery source"
+        grep -q 'userspace-usage' "$trio" \
+            || fail "$trio: Tier 4 must name the userspace-usage discovery source"
+        grep -q 'userspace-env' "$trio" \
+            || fail "$trio: Tier 4 must name the userspace-env discovery source"
+        grep -q 'userspace-corpus' "$trio" \
+            || fail "$trio: Tier 4 must name the userspace-corpus discovery source"
+        grep -q 'discovery\.enabled' "$trio" \
+            || fail "$trio: Tier 4 must gate on discovery.enabled config"
+        grep -q -- '--no-userspace' "$trio" \
+            || fail "$trio: Tier 4 must cite the --no-userspace flag"
+        grep -q -- '--no-internet' "$trio" \
+            || fail "$trio: Tier 4 must cite the --no-internet flag"
+        grep -qi 'normal readiness gate' "$trio" \
+            || fail "$trio: Tier 4 must drain candidates via the normal readiness gate"
+        grep -qi 'never merges to .main. directly\|never merged directly\|never direct-merge' "$trio" \
+            || fail "$trio: Tier 4 must state candidates never merge to main directly"
+        grep -qi 'untrusted' "$trio" \
+            || fail "$trio: Tier 4 must state the untrusted-DATA trust boundary"
+        grep -qi 'accumulate' "$trio" \
+            || fail "$trio: Tier 4 must state trend memory accumulates across idle cycles"
+    done
+    info "autospec-autonomous Tier-4 discovery activation contract: trio lock-step verified"
 }
 
 # autospec-explore style-normalization discovery contract: SPA/webapp visual
