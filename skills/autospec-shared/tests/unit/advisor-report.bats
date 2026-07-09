@@ -54,3 +54,18 @@ teardown() { rm -rf "$TMP"; }
   run bash "$SCRIPT" --telemetry "$TMP/nope.jsonl" --json
   [ "$status" -eq 1 ]
 }
+
+@test "non-numeric baseline exits 1 cleanly (no jq stack)" {
+  run bash "$SCRIPT" --telemetry "$TMP/t.jsonl" \
+    --baseline-lgtm abc --observed-lgtm 0.7 --baseline-cost 1000 --observed-cost 900 --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'must be numeric'
+}
+
+@test "a malformed telemetry line is skipped, not fatal" {
+  printf 'not json at all\n' >> "$TMP/t.jsonl"
+  run bash "$SCRIPT" --telemetry "$TMP/t.jsonl" --json
+  [ "$status" -eq 0 ]
+  # The three well-formed lines still aggregate.
+  echo "$output" | jq -e '.["impl-haiku"].calls == 2' >/dev/null
+}

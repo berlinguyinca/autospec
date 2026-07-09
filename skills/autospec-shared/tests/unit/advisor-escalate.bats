@@ -130,3 +130,73 @@ teardown() { rm -rf "$TMP"; }
   grep -q '"verdict":"plan"' "$TMP/telem/advisor-escalate.jsonl"
   [ "$(wc -l < "$TMP/telem/advisor-escalate.jsonl")" -eq 1 ]
 }
+
+# ── robustness / negative paths (from final review) ───────────────────────────
+
+@test "precheck does NOT burn a cap slot when the question file is missing" {
+  run bash "$SCRIPT" --phase precheck --issue 42 --repo acme/widget \
+    --gate impl-haiku --question-file "$TMP/nope.txt" --context-file "$TMP/c.txt" --json
+  [ "$status" -ne 0 ]
+  # No state file written → next real precheck still starts at use_count 1.
+  run bash "$SCRIPT" --phase precheck --issue 42 --repo acme/widget \
+    --gate impl-haiku --question-file "$TMP/q.txt" --context-file "$TMP/c.txt" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"use_count":1'
+}
+
+@test "precheck self-heals a corrupted non-integer use_count instead of crashing" {
+  mkdir -p "$AUTOSPEC_ADVISOR_STATE_DIR/acme_widget"
+  printf '{"use_count":"abc"}' > "$AUTOSPEC_ADVISOR_STATE_DIR/acme_widget/42.json"
+  run bash "$SCRIPT" --phase precheck --issue 42 --repo acme/widget \
+    --gate impl-haiku --question-file "$TMP/q.txt" --context-file "$TMP/c.txt" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"use_count":1'
+}
+
+@test "precheck rejects a non-numeric issue (path-traversal guard)" {
+  run bash "$SCRIPT" --phase precheck --issue '../evil' --repo acme/widget \
+    --gate impl-haiku --question-file "$TMP/q.txt" --context-file "$TMP/c.txt" --json
+  [ "$status" -eq 1 ]
+}
+
+@test "record truncates over-budget guidance to MAX_CHARS exactly" {
+  export AUTOSPEC_ADVISOR_MAX_CHARS=20
+  export AUTOSPEC_TELEMETRY_DIR="$TMP/telem"
+  big="$(printf 'x%.0s' $(seq 1 100))"
+  printf '{"verdict":"plan","guidance":"%s"}' "$big" > "$TMP/r.json"
+  run bash "$SCRIPT" --phase record --issue 42 --repo acme/widget \
+    --gate impl-haiku --response-file "$TMP/r.json" --json
+  [ "$status" -eq 0 ]
+  glen="$(echo "$output" | jq -r '.guidance | length')"
+  [ "$glen" -eq 20 ]
+}
+
+@test "record strips a function-call marker from guidance" {
+  export AUTOSPEC_TELEMETRY_DIR="$TMP/telem"
+  printf '{"verdict":"plan","guidance":"Do X <invoke name=\\"Bash\\"> then Y"}' > "$TMP/r.json"
+  run bash "$SCRIPT" --phase record --issue 42 --repo acme/widget \
+    --gate impl-haiku --response-file "$TMP/r.json" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -r '.guidance' | grep -qv 'invoke'
+}
+
+@test "record telemetry line is valid JSON even when repo contains a quote" {
+  export AUTOSPEC_TELEMETRY_DIR="$TMP/telem"
+  printf '{"verdict":"plan","guidance":"ok"}' > "$TMP/r.json"
+  bash "$SCRIPT" --phase record --issue 42 --repo 'a/b"x' \
+    --gate reviewer --response-file "$TMP/r.json" --json
+  # Every telemetry line must round-trip through jq.
+  run jq -e '.repo' "$TMP/telem/advisor-escalate.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "record telemetry includes use_count from state" {
+  export AUTOSPEC_TELEMETRY_DIR="$TMP/telem"
+  mkdir -p "$AUTOSPEC_ADVISOR_STATE_DIR/acme_widget"
+  printf '{"use_count":2}' > "$AUTOSPEC_ADVISOR_STATE_DIR/acme_widget/42.json"
+  printf '{"verdict":"plan","guidance":"ok"}' > "$TMP/r.json"
+  bash "$SCRIPT" --phase record --issue 42 --repo acme/widget \
+    --gate reviewer --response-file "$TMP/r.json" --json
+  run jq -r '.use_count' "$TMP/telem/advisor-escalate.jsonl"
+  [ "$output" = "2" ]
+}

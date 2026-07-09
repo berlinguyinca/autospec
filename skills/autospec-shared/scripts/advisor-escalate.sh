@@ -46,7 +46,26 @@ ENABLED="${AUTOSPEC_ADVISOR:-off}"
 GATES="${AUTOSPEC_ADVISOR_GATES:-impl-haiku}"
 HARNESS="${AUTOSPEC_HARNESS:-claude}"
 
+# Numeric issue guard — prevents path traversal / injection in the state path.
+# Fail-open: a non-numeric issue is a usage error the caller treats as "skip".
+case "$ISSUE" in
+  ''|*[!0-9]*) printf 'advisor-escalate.sh: --issue must be a positive integer\n' >&2; exit 1 ;;
+esac
+
 repo_slug() { printf '%s' "$1" | tr '/' '_'; }
+
+# Read the current per-issue use_count, coercing any corrupted/non-integer value
+# to 0 so a hand-edited or truncated state file self-heals instead of crashing.
+read_use_count() {
+  local sf="$1" v=0
+  if [ -f "$sf" ]; then
+    v="$(jq -r '.use_count // 0' "$sf" 2>/dev/null || printf '0')"
+  fi
+  case "$v" in
+    ''|*[!0-9]*) v=0 ;;
+  esac
+  printf '%s' "$v"
+}
 
 gate_enabled() {
   # word-boundary membership test on a comma list, no regex injection
@@ -84,25 +103,31 @@ do_precheck() {
     exit 8
   fi
 
+  # Validate inputs BEFORE touching state — a missing payload file must never
+  # burn a cap slot. Fail-open: usage error the caller treats as "skip".
+  if [ -z "$QUESTION_FILE" ] || [ ! -f "$QUESTION_FILE" ]; then
+    printf 'advisor-escalate.sh: --question-file missing or not a file\n' >&2
+    exit 1
+  fi
+  if [ -z "$CONTEXT_FILE" ] || [ ! -f "$CONTEXT_FILE" ]; then
+    printf 'advisor-escalate.sh: --context-file missing or not a file\n' >&2
+    exit 1
+  fi
+
   local sf dir used next payload
   sf="$(state_file)"
   dir="$(dirname "$sf")"
   mkdir -p "$dir"
 
-  used=0
-  if [ -f "$sf" ]; then
-    used="$(jq -r '.use_count // 0' "$sf" 2>/dev/null || printf '0')"
-  fi
+  used="$(read_use_count "$sf")"
 
   if [ "$used" -ge "$MAX_USES" ]; then
     printf '{"decision":"CAP-REACHED"}\n'
     exit 7
   fi
 
-  next=$((used + 1))
-  printf '{"use_count":%d}\n' "$next" > "$sf"
-
-  # Curate a decision-scoped payload: question first, then context.
+  # Curate the decision-scoped payload FIRST; only burn a cap slot once the
+  # payload is fully materialized (so a mid-write failure never spends a slot).
   payload="$(mktemp -t advisor-payload-XXXXXX)"
   {
     printf '## Question\n'
@@ -110,6 +135,9 @@ do_precheck() {
     printf '\n\n## Context\n'
     cat "$CONTEXT_FILE"
   } > "$payload"
+
+  next=$((used + 1))
+  printf '{"use_count":%d}\n' "$next" > "$sf"
 
   jq -cn --arg h "$HARNESS" --arg cli "$(cli_fallback_for "$HARNESS")" \
         --argjson uc "$next" --arg pf "$payload" \
@@ -122,10 +150,26 @@ emit_stop_failsafe() {
   jq -cn --arg g "$reason" '{verdict:"stop",guidance:$g,over_budget:false}'
 }
 
+# Append one telemetry record, always built with jq so values containing quotes,
+# backslashes, or newlines can never emit an invalid JSONL line (which would
+# later crash advisor-report.sh's jq parse).
+append_telemetry() {
+  local tf="$1" ts="$2" verdict="$3" uc="$4" tokens_out="$5" over="$6" failsafe="$7"
+  jq -cn \
+    --arg ts "$ts" --arg issue "$ISSUE" --arg repo "$REPO" --arg gate "$GATE" \
+    --arg verdict "$verdict" --argjson uc "$uc" --argjson tout "$tokens_out" \
+    --argjson ob "$over" --argjson fs "$failsafe" \
+    '{ts:$ts,issue:$issue,repo:$repo,gate:$gate,verdict:$verdict,
+      tokens_in:0,tokens_out:$tout,use_count:$uc,over_budget:$ob,failsafe:$fs}' \
+    >> "$tf"
+}
+
 do_record() {
-  local ts tf verdict guidance over len out_len
+  local ts tf sf used verdict guidance over len out_len out_tokens
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)"
   tf="$(telemetry_file)"
+  sf="$(state_file)"
+  used="$(read_use_count "$sf")"
 
   # Parse + validate. Any failure → fail-safe stop, exit 2.
   verdict="$(jq -r '.verdict // empty' "$RESPONSE_FILE" 2>/dev/null || printf '')"
@@ -135,14 +179,15 @@ do_record() {
     plan|correction|stop) : ;;
     *)
       emit_stop_failsafe "advisor response unparseable; fail-safe stop"
-      printf '{"ts":"%s","issue":"%s","repo":"%s","gate":"%s","verdict":"stop","tokens_in":0,"tokens_out":0,"over_budget":false,"failsafe":true}\n' \
-        "$ts" "$ISSUE" "$REPO" "$GATE" >> "$tf"
+      append_telemetry "$tf" "$ts" "stop" "$used" 0 false true
       exit 2
       ;;
   esac
 
-  # Strip anything that looks like a tool call marker (advice-only).
-  guidance="$(printf '%s' "$guidance" | sed -e 's/<[^>]*tool[^>]*>//g')"
+  # Strip known tool-call / function-call marker tags (advice-only). Downstream
+  # must still treat guidance as untrusted prose — this is defense-in-depth, not
+  # a guarantee.
+  guidance="$(printf '%s' "$guidance" | sed -E 's#</?(antml:invoke|invoke|function_calls|tool[^>]*)[^>]*>##g')"
 
   # Budget: char-count proxy (~4 chars/token).
   over=false
@@ -152,12 +197,12 @@ do_record() {
     over=true
   fi
   out_len=${#guidance}
+  out_tokens=$(( (out_len + 3) / 4 ))
 
   jq -cn --arg v "$verdict" --arg g "$guidance" --argjson ob "$over" \
     '{verdict:$v,guidance:$g,over_budget:$ob}'
 
-  printf '{"ts":"%s","issue":"%s","repo":"%s","gate":"%s","verdict":"%s","tokens_in":0,"tokens_out":%d,"over_budget":%s}\n' \
-    "$ts" "$ISSUE" "$REPO" "$GATE" "$verdict" "$out_len" "$over" >> "$tf"
+  append_telemetry "$tf" "$ts" "$verdict" "$used" "$out_tokens" "$over" false
   exit 0
 }
 

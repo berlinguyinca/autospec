@@ -33,8 +33,21 @@ if [ -z "$TELEMETRY" ] || [ ! -f "$TELEMETRY" ]; then
   exit 1
 fi
 
-# Per-gate aggregation.
-summary="$(jq -s '
+# Validate any supplied baseline as numeric BEFORE handing it to jq --argjson
+# (a non-numeric value would abort jq with a raw parse error under set -e).
+for _pair in "baseline-lgtm:$BL_LGTM" "observed-lgtm:$OB_LGTM" \
+             "baseline-cost:$BL_COST" "observed-cost:$OB_COST"; do
+  _name="${_pair%%:*}"; _val="${_pair#*:}"
+  if [ -n "$_val" ]; then
+    case "$_val" in
+      ''|*[!0-9.]*|*.*.*) printf 'advisor-report.sh: --%s must be numeric: %s\n' "$_name" "$_val" >&2; exit 1 ;;
+    esac
+  fi
+done
+
+# Per-gate aggregation. Read line-by-line with `fromjson?` so a single malformed
+# telemetry line is skipped rather than aborting the whole report.
+summary="$(jq -R 'fromjson? // empty' "$TELEMETRY" | jq -s '
   group_by(.gate) | map({
     key: .[0].gate,
     value: {
@@ -46,7 +59,7 @@ summary="$(jq -s '
       total_tokens_out: (map(.tokens_out // 0) | add)
     }
   }) | from_entries
-' "$TELEMETRY")"
+')"
 
 # Promotion gate arithmetic (only when all four baselines are present).
 promote_obj="{}"
