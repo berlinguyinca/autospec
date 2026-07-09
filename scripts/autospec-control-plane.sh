@@ -20,11 +20,7 @@ Defaults:
   --observatory-repo NAME   autospec-observatory (dry-run only; --confirm requires explicit value)
 
 Environment:
-  AUTOSPEC_CONTROL_PLANE_WORKDIR   Scratch clone root for --confirm (default: mktemp -d)
   AUTOSPEC_OBSERVATORY_URL         Enables bootstrap event emission via scripts/autospec-observatory-events.sh
-  AUTOSPEC_OBSERVATORY_DIR         Event outbox root when event emission is enabled
-  AUTOSPEC_RUN_ID                  Run id for emitted bootstrap events (default: control-plane-bootstrap)
-
 The dry-run renderer is intentionally offline-only: it prints policy files,
 rules, schemas, fixtures, tests, docs, and observatory service scaffold files
 planned for companion repositories and never creates repositories, commits,
