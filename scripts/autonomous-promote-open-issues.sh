@@ -198,8 +198,11 @@ EOF
     [ -n "$ctx" ] || ctx="64k"
     [ -n "$reasoning" ] || reasoning="medium"
 
-    # Ensure labels exist (idempotent). Mirror autospec-classify colors.
-    gh label create "auto-implement" --color "0e8a16" --repo "$repo" --force >/dev/null 2>&1 || true
+    # Ensure labels exist (idempotent). Create auto-implement WITHOUT --force so
+    # we never recolor the repo's pre-existing label (cosmetic-mutation guard);
+    # ctx:*/reasoning:* mirror autospec-classify colors (safe to --force — they
+    # are this feature's own labels).
+    gh label create "auto-implement" --repo "$repo" >/dev/null 2>&1 || true
     gh label create "ctx:${ctx}" --color "c5def5" --repo "$repo" --force >/dev/null 2>&1 || true
     gh label create "reasoning:${reasoning}" --color "c2e0c6" --repo "$repo" --force >/dev/null 2>&1 || true
 
