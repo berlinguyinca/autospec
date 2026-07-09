@@ -107,3 +107,18 @@ setup() {
         "$REPO_ROOT/skills/autospec-classify/opencode/agent.md" | wc -l | tr -d ' ')
     [ "$COUNT" -eq 3 ]
 }
+
+@test "autospec classify prompts require issue intent safety gate before auto-implement" {
+    for file in \
+        "$REPO_ROOT/skills/autospec-classify/SKILL.md" \
+        "$REPO_ROOT/skills/autospec/SKILL.md" \
+        "$REPO_ROOT/skills/autospec-define/SKILL.md"
+    do
+        grep -q "Issue intent safety gate" "$file"
+        grep -q "scripts/lint-issue-safety.sh" "$file"
+        grep -q "security:quarantined" "$file"
+        grep -q "safety:reviewed" "$file"
+        grep -q "remove-label auto-implement" "$file"
+        grep -q "remove-label needs-classify" "$file"
+    done
+}

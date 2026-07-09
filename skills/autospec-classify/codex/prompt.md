@@ -65,7 +65,6 @@ This workflow assumes a small set of capabilities. Map each one to your harness'
 
 **Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches use a **two-tier policy**: Tier A (top model + extended thinking) for spec work and Tier B (cheaper model + medium thinking) for implementation work. This skill's per-issue classification is **deterministic-first**: the deterministic rubric runs with no LLM call, and only ambiguous issues escalate to a single Tier-B LLM tie-breaker — never Tier A. The orchestrator keeps the user's invoked model. Fall back UP the tier on quota/capacity or other unavailability by retrying the same subagent with the stronger tier while preserving parent context.
 
-
 ## Harness detection (run once at skill start, before Phase 0)
 
 Detect your harness by checking available tools before any phase:
@@ -211,6 +210,37 @@ For each candidate issue:
    markers), replace it in place. Never stack duplicate blocks.
 
    Apply via `gh issue edit <N> --body-file <tmp>`.
+
+### Issue intent safety gate
+
+Before adding or preserving `auto-implement`, run the issue intent safety gate with `scripts/lint-issue-safety.sh`:
+
+```bash
+_body_file="$(mktemp)"
+gh issue view <N> --repo {repo} --json body --jq '.body' > "$_body_file"
+_author="$(gh issue view <N> --repo {repo} --json author --jq '.author.login // empty')"
+_title="$(gh issue view <N> --repo {repo} --json title --jq '.title')"
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue-safety.sh" \
+  --json --actor "$_author" --title "$_title" "$_body_file" > /tmp/safety-<N>.json
+_safety_status=$?
+```
+
+If `_safety_status` is `0`, create labels `safety:reviewed` and `security:quarantined` idempotently, add `safety:reviewed`, remove `security:quarantined`, and patch a passing `## Safety review` block into the issue body:
+
+```bash
+gh label create safety:reviewed --force --repo {repo}
+gh label create security:quarantined --force --repo {repo}
+gh issue edit <N> --add-label safety:reviewed --remove-label security:quarantined --repo {repo}
+```
+
+If `_safety_status` is `1` or `2`, create label `security:quarantined`, add it, remove `auto-implement` and `needs-classify`, patch a blocking `## Safety review` block, comment with the safety findings, and skip the issue:
+
+```bash
+gh label create security:quarantined --force --repo {repo}
+gh issue edit <N> --add-label security:quarantined --remove-label auto-implement --remove-label needs-classify --repo {repo}
+```
+
+Do not transition `needs-classify` to `auto-implement`.
 
 5. **Board assignment** (only if `--apply-boards`):
    - Read `~/.autospec/project-map.yml`. If the file is missing, auto-init it
