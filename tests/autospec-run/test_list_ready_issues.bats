@@ -167,3 +167,11 @@ EOF
     [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(400) != null')" = "true" ]
     [ "$(printf '%s' "$output" | jq -r '.blocked | map(.number) | index(400) != null')" = "false" ]
 }
+
+@test "autospec-run prompt refuses quarantined or unreviewed auto-implement issues" {
+    prompt="$REPO_ROOT/skills/autospec-run/SKILL.md"
+    grep -q "safety:reviewed" "$prompt"
+    grep -q "security:quarantined" "$prompt"
+    grep -q "autospec-safety:begin" "$prompt"
+    grep -q "refuse" "$prompt"
+}
