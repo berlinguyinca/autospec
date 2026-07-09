@@ -28,6 +28,7 @@ setup() {
     export AUTOSPEC_WATCHDOG_GC_ONLY="1"
     export AUTOSPEC_WATCHDOG_GC_DIR="$TEST_TMP/wt"   # scan root for /tmp/wt-* analogues
     export AUTOSPEC_HOST="host-A"
+    export AUTOSPEC_CONFIG_FILE="$TEST_TMP/missing-autospec.yml"
 
     mkdir -p "$AUTOSPEC_WATCHDOG_DIR/o_n"
     mkdir -p "$AUTOSPEC_WATCHDOG_GC_DIR"

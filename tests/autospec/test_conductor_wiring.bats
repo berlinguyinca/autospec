@@ -22,6 +22,7 @@ setup() {
   # Fake scripts directory that holds stub helper scripts.
   FAKE_SCRIPTS="$TEST_TMP/fake-scripts"
   mkdir -p "$FAKE_SCRIPTS"
+  cp "$REPO_ROOT/scripts/autospec-runtime-config.sh" "$FAKE_SCRIPTS/autospec-runtime-config.sh"
 
   # Fake PATH so every helper call hits our stubs.
   FAKE_BIN="$TEST_TMP/fake-bin"
@@ -916,4 +917,48 @@ EOF
 
   [ "$status" -eq 0 ]
   grep -q -- '--batch-size 3' "$list_ready_args_log"
+}
+
+@test "conductor: autospec config overrides env for queue batch request" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+
+  mkdir -p "$TEST_TMP/.autospec"
+  cat > "$TEST_TMP/.autospec/autospec.yml" <<'YAML'
+version: 1
+autonomous:
+  concurrency:
+    batch_size: 2
+    max_concurrent_repo_workers: 4
+YAML
+
+  local list_ready_args_log="$TEST_TMP/list-ready-config-args.log"
+  _install_stub "list-ready-issues.sh" \
+    "printf '%s\n' \"\$*\" >> '$list_ready_args_log'; printf '{\"ready\":[{\"number\":1},{\"number\":2},{\"number\":3},{\"number\":4}],\"blocked\":[],\"claimed\":[],\"conflicts\":[],\"worker_cap\":{\"max_repo_workers\":4,\"active_count\":0,\"remaining\":4,\"reached\":false},\"batch\":[{\"number\":1},{\"number\":2},{\"number\":3},{\"number\":4}]}\n'"
+
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '\''{"tier":1,"action":"run-backlog","reason":"test"}\n'\'''
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; main-health) printf "DECISION:continue\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+  export AUTOSPEC_CONFIG_FILE="$TEST_TMP/.autospec/autospec.yml"
+  export AUTOSPEC_BATCH_SIZE=1
+  export AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=1
+  export AUTOSPEC_RUN_CMD="true"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  grep -q -- '--batch-size 4' "$list_ready_args_log"
 }

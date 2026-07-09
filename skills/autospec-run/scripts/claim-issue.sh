@@ -5,6 +5,16 @@ set -eu
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 RUN_STATE="$SCRIPT_DIR/run-state.sh"
+if [ -f "$SCRIPT_DIR/../../../scripts/autospec-runtime-config.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/../../../scripts/autospec-runtime-config.sh"
+elif [ -f "$SCRIPT_DIR/autospec-runtime-config.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/autospec-runtime-config.sh"
+elif [ -f "$HOME/.autospec/scripts/autospec-runtime-config.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$HOME/.autospec/scripts/autospec-runtime-config.sh"
+fi
 
 # Lock-comment markers — must match run-state.sh so the loser self-clean can
 # locate this worker's own marked comment.
@@ -164,11 +174,26 @@ fi
 # and the fresh winner's lock is never overwritten; (3) ONLY if the lowest-id
 # lock is STALE do we fall through to the upsert/reclaim path below. No existing
 # lock, or a lock we already own, also falls through (normal claim/refresh).
-reclaim_secs="${AUTOSPEC_CLAIM_LEASE_SECONDS:-${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}}"
+if command -v autospec_runtime_config_int >/dev/null 2>&1; then
+    reclaim_secs="$(autospec_runtime_config_int autonomous.claims.lease_seconds AUTOSPEC_CLAIM_LEASE_SECONDS "")"
+    if [ -z "$reclaim_secs" ]; then
+        reclaim_secs="$(autospec_runtime_config_int autonomous.watchdog.reclaim_secs AUTOSPEC_WATCHDOG_RECLAIM_SECS 10800)"
+    fi
+else
+    reclaim_secs="${AUTOSPEC_CLAIM_LEASE_SECONDS:-${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}}"
+fi
 case "$reclaim_secs" in *[!0-9]*|'') reclaim_secs=10800 ;; esac
-claim_settle_seconds="${AUTOSPEC_CLAIM_SETTLE_SECONDS:-0.2}"
+if command -v autospec_runtime_config_get >/dev/null 2>&1; then
+    claim_settle_seconds="$(autospec_runtime_config_get autonomous.claims.settle_seconds "${AUTOSPEC_CLAIM_SETTLE_SECONDS:-0.2}")"
+else
+    claim_settle_seconds="${AUTOSPEC_CLAIM_SETTLE_SECONDS:-0.2}"
+fi
 case "$claim_settle_seconds" in *[!0-9.]*|'') claim_settle_seconds=0.2 ;; esac
-claim_confirm_reads="${AUTOSPEC_CLAIM_CONFIRM_READS:-5}"
+if command -v autospec_runtime_config_int >/dev/null 2>&1; then
+    claim_confirm_reads="$(autospec_runtime_config_int autonomous.claims.confirm_reads AUTOSPEC_CLAIM_CONFIRM_READS 5)"
+else
+    claim_confirm_reads="${AUTOSPEC_CLAIM_CONFIRM_READS:-5}"
+fi
 case "$claim_confirm_reads" in *[!0-9]*|'') claim_confirm_reads=5 ;; esac
 [ "$claim_confirm_reads" -gt 0 ] || claim_confirm_reads=1
 reclaiming=""

@@ -54,6 +54,7 @@ SH
     export AUTOSPEC_TEST_ACTIVE_JSON="$ACTIVE_JSON"
     export AUTOSPEC_TEST_STATES_JSON="$STATES_JSON"
     export AUTOSPEC_TEST_VIEWS_JSON="$ISSUE_VIEWS_JSON"
+    export AUTOSPEC_CONFIG_FILE="$TEST_TMP/missing-autospec.yml"
     printf '[]\n' > "$ACTIVE_JSON"
     printf '{}\n' > "$STATES_JSON"
     printf '{}\n' > "$ISSUE_VIEWS_JSON"
@@ -277,7 +278,7 @@ EOF
         {number:13,title:"d",body:$b4,labels:[{name:"auto-implement"}]}
       ]' > "$AUTO_JSON"
 
-    run bash "$SCRIPT" --repo testorg/testrepo --batch-size 4
+    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=0 run bash "$SCRIPT" --repo testorg/testrepo --batch-size 4
 
     [ "$status" -eq 0 ]
     run bash -c "printf '%s' '$output' | jq -r '.batch | map(.number) | join(\",\")'"
@@ -328,6 +329,71 @@ EOF
     [ "$output" = "1" ]
     run bash -c "printf '%s' '$planner_output' | jq -r '.batch | map(.number) | join(\",\")'"
     [ "$output" = "10" ]
+}
+
+@test "planner reads max repo workers from autospec config before env" {
+    jq -n \
+      --arg b1 "$(body_with_path skills/a.sh)" \
+      --arg b2 "$(body_with_path skills/b.sh)" \
+      --arg b3 "$(body_with_path skills/c.sh)" \
+      '[
+        {number:10,title:"a",body:$b1,labels:[{name:"auto-implement"}]},
+        {number:11,title:"b",body:$b2,labels:[{name:"auto-implement"}]},
+        {number:12,title:"c",body:$b3,labels:[{name:"auto-implement"}]}
+      ]' > "$AUTO_JSON"
+    cat > "$TEST_TMP/autospec.yml" <<'YAML'
+version: 1
+autonomous:
+  concurrency:
+    max_concurrent_repo_workers: 2
+YAML
+
+    AUTOSPEC_CONFIG_FILE="$TEST_TMP/autospec.yml" \
+      AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=1 \
+      run bash "$SCRIPT" --repo testorg/testrepo --batch-size 3
+
+    [ "$status" -eq 0 ]
+    planner_output="$output"
+    run bash -c "printf '%s' '$planner_output' | jq -r '.worker_cap.max_repo_workers'"
+    [ "$output" = "2" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.batch | map(.number) | join(\",\")'"
+    [ "$output" = "10,11" ]
+}
+
+@test "planner auto-discovers max repo workers from autospec config" {
+    jq -n \
+      --arg b1 "$(body_with_path skills/a.sh)" \
+      --arg b2 "$(body_with_path skills/b.sh)" \
+      --arg b3 "$(body_with_path skills/c.sh)" \
+      --arg b4 "$(body_with_path skills/d.sh)" \
+      '[
+        {number:10,title:"a",body:$b1,labels:[{name:"auto-implement"}]},
+        {number:11,title:"b",body:$b2,labels:[{name:"auto-implement"}]},
+        {number:12,title:"c",body:$b3,labels:[{name:"auto-implement"}]},
+        {number:13,title:"d",body:$b4,labels:[{name:"auto-implement"}]}
+      ]' > "$AUTO_JSON"
+    cat > "$TEST_TMP/autospec.yml" <<'YAML'
+version: 1
+autonomous:
+  concurrency:
+    max_concurrent_repo_workers: auto
+YAML
+    cat > "$TEST_TMP/bin/getconf" <<'SH'
+#!/usr/bin/env bash
+printf '16\n'
+SH
+    chmod +x "$TEST_TMP/bin/getconf"
+
+    AUTOSPEC_CONFIG_FILE="$TEST_TMP/autospec.yml" \
+      AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=1 \
+      run bash "$SCRIPT" --repo testorg/testrepo --batch-size 4
+
+    [ "$status" -eq 0 ]
+    planner_output="$output"
+    run bash -c "printf '%s' '$planner_output' | jq -r '.worker_cap.max_repo_workers'"
+    [ "$output" = "4" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.batch | map(.number) | join(\",\")'"
+    [ "$output" = "10,11,12,13" ]
 }
 
 @test "planner explains serialized labels and keeps deep work one-at-a-time" {

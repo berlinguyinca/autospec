@@ -4,6 +4,7 @@ setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   TEST_TMP="$(mktemp -d)"
   export HOME="$TEST_TMP/home"
+  export AUTOSPEC_CONFIG_FILE="$TEST_TMP/missing-autospec.yml"
   mkdir -p "$HOME" "$TEST_TMP/bin"
 }
 

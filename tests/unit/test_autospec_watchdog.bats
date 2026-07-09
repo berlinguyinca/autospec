@@ -12,6 +12,7 @@ setup() {
     export AUTOSPEC_WATCHDOG_STALE_SECS=1800
     export AUTOSPEC_WATCHDOG_RECLAIM_SECS=10800
     export AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS=300
+    export AUTOSPEC_CONFIG_FILE="$HOME/missing-autospec.yml"
     mkdir -p "$AUTOSPEC_WATCHDOG_DIR"
 
     STUB_BIN="$(mktemp -d)"
