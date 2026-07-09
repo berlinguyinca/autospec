@@ -125,6 +125,14 @@ _run_conductor() {
     bash -c "source '$LOOP_LIB'; autospec_conductor_run" 2>&1
 }
 
+# Run conductor under `set -eu`, matching the real autospec-autonomous.sh
+# contract (line 3 `set -eu`, sources the lib, then calls the function). This
+# seam catches `set -e` aborts that the plain _run_conductor (no errexit)
+# silently tolerates — e.g. a failing `var="$(explore)"` capture (issue #1625).
+_run_conductor_set_e() {
+    bash -c "set -eu; source '$LOOP_LIB'; autospec_conductor_run" 2>&1
+}
+
 # ── 1. Tier 2 entry ──────────────────────────────────────────────────────────
 
 @test "Tier 2 entry calls explore-sandbox.sh" {
@@ -182,6 +190,78 @@ EOF
 
     _run_conductor
     [ -f "$MODE_FILE" ]
+}
+
+# ── 2b. Issue #1625: explore-error vs genuine dry ────────────────────────────
+#
+# A crash (non-zero exit) from the explore subprocess must surface a visible
+# code_health:explore_error signal — NOT be silently reported as a clean dry
+# cycle. A clean exit reporting dry:true must still report dry normally.
+
+@test "Tier 2: explore crash (non-zero exit) surfaces code_health:explore_error, not a clean dry" {
+    cat > "$SCRIPTS_DIR/autonomous-waterfall.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '{"tier":2,"action":"run-explore-once","reason":"tier2-crash-test"}\n'
+exit 0
+EOF
+
+    # Simulate a crashing explore subprocess (e.g. usage error, missing dep).
+    cat > "$EXPLORE_SCRIPT" <<'EOF'
+#!/usr/bin/env bash
+echo "autospec-explore: missing initial prompt" >&2
+exit 2
+EOF
+    chmod +x "$EXPLORE_SCRIPT"
+
+    run _run_conductor
+    # Combine into one final && chain: a bats test only fails on its LAST
+    # command's status, so an intermediate [[ ]] that returns non-zero is
+    # silently tolerated. Keeping both assertions as the final command makes
+    # this a real guard.
+    [[ "$output" == *"code_health:explore_error"* ]] \
+        && [[ "$output" != *"Tier 2 explore result: dry="* ]] \
+        || { echo "FAIL output: $output"; false; }
+}
+
+@test "Tier 2: explore crash surfaces explore_error under set -eu (no errexit abort)" {
+    # Regression for the set -e capture bug: a bare `var=\"\$(explore)\"` aborts
+    # the whole conductor under set -e before the rc is inspected, so the
+    # explore_error path never runs. This test exercises the real set -eu
+    # contract (autospec-autonomous.sh) — the plain _run_conductor misses it.
+    cat > "$SCRIPTS_DIR/autonomous-waterfall.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '{"tier":2,"action":"run-explore-once","reason":"tier2-crash-set-e"}\n'
+exit 0
+EOF
+
+    cat > "$EXPLORE_SCRIPT" <<'EOF'
+#!/usr/bin/env bash
+echo "autospec-explore: missing initial prompt" >&2
+exit 2
+EOF
+    chmod +x "$EXPLORE_SCRIPT"
+
+    run _run_conductor_set_e
+    # Single final && chain (see note above) — the positive explore_error
+    # assertion must be part of the last command or bats won't enforce it.
+    [[ "$output" == *"code_health:explore_error"* ]] \
+        && [[ "$output" != *"Tier 2 explore result: dry="* ]] \
+        || { echo "FAIL output: $output"; false; }
+}
+
+@test "Tier 2: explore clean exit with dry:true still reports a genuine dry (no false error)" {
+    cat > "$SCRIPTS_DIR/autonomous-waterfall.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '{"tier":2,"action":"run-explore-once","reason":"tier2-dry-test"}\n'
+exit 0
+EOF
+
+    # Default $EXPLORE_SCRIPT from setup() already exits 0 with dry:true.
+
+    run _run_conductor
+    [[ "$output" == *"Tier 2 explore result: dry=true filed=0"* ]] \
+        && [[ "$output" != *"code_health:explore_error"* ]] \
+        || { echo "FAIL output: $output"; false; }
 }
 
 # ── 3. Main-merge refusal while discovery in-flight ──────────────────────────

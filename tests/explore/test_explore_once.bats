@@ -372,3 +372,49 @@ assert d['reason'] == 'verify-unavailable-failclosed', d
     # No issue was created (fail-closed filed nothing).
     ! grep -q 'issue create' "$TMP/.autospec/gh-calls.log" 2>/dev/null
 }
+
+@test "--once with no initial prompt does not exit 2 (issue #1625)" {
+    # The conductor's Tier 2/4 discovery block invokes '--once' with no
+    # positional prompt. --once must default to a generic discovery seed
+    # instead of hard-failing with the usage error (exit 2).
+    local proposals='[]'
+    local cycle_cmd
+    cycle_cmd="$(make_cycle_cmd 0 "$proposals")"
+
+    export AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$cycle_cmd"
+
+    run bash "$REPO_ROOT/scripts/autospec-explore.sh" \
+        --once \
+        --research-sources spec-vs-code \
+        2>&1
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"missing initial prompt"* ]]
+
+    printf '%s\n' "$output" | python3 -c "
+import sys, json
+lines = [l for l in sys.stdin.read().splitlines() if l.strip().startswith('{')]
+assert lines, f'no JSON line in output: {sys.stdin}'
+d = json.loads(lines[-1])
+assert d['dry'] is True, f'expected dry=true, got: {d}'
+"
+}
+
+@test "--once with initial prompt still works unchanged (no regression)" {
+    local proposals='[{"title":"feat: gamma","evidence":"e","estimated_complexity":"small","confidence":0.8,"source":"spec-vs-code","severity":"feature","named_consumer":"test"}]'
+    local cycle_cmd
+    cycle_cmd="$(make_cycle_cmd 1 "$proposals")"
+
+    export AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$cycle_cmd"
+
+    run bash "$REPO_ROOT/scripts/autospec-explore.sh" "explicit prompt" \
+        --once \
+        --research-sources spec-vs-code \
+        2>/dev/null
+    [ "$status" -eq 0 ]
+}
+
+@test "missing initial prompt without --once still exits 2 (unchanged contract)" {
+    run bash "$REPO_ROOT/scripts/autospec-explore.sh" --research-sources spec-vs-code
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"missing initial prompt"* ]]
+}

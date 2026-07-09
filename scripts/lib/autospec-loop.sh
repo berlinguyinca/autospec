@@ -1253,43 +1253,69 @@ fi'
                 fi
             else
                 # Build the --once invocation for the selected tier.
-                local _explore_out
+                local _explore_out _explore_rc _explore_err_file
+                _explore_err_file="$(mktemp "${TMPDIR:-/tmp}/autospec-explore-once.XXXXXX" 2>/dev/null || echo /tmp/autospec-explore-once.$$)"
                 if [ "$_dry" = "1" ]; then
                     printf '[conductor] [dry-run] would invoke explore --once for Tier %s\n' \
                         "$_tier" >&2
                     # Simulate a dry yield in dry-run mode.
                     _explore_out='{"tier":"local","proposals_seen":0,"new_candidates":0,"filed":0,"dry":true,"reason":"dry-run"}'
+                    _explore_rc=0
                 elif [ "$_action" = "run-explore-once-internet" ]; then
                     printf '[conductor] Tier 4: invoking explore --once --research-sources internet\n' >&2
                     # F4: wrap with priority-aware cycle when priorities are available.
+                    # NOTE: capture rc via if/then/else — a bare `var="$(cmd)"`
+                    # assignment aborts the whole conductor under `set -e`
+                    # (autospec-autonomous.sh runs `set -eu`) when explore
+                    # exits non-zero, skipping the explore_error path entirely.
                     if [ -n "$_priority_cycle_cmd" ]; then
-                        _explore_out="$(AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$_priority_cycle_cmd" \
+                        if _explore_out="$(AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$_priority_cycle_cmd" \
                             AUTOSPEC_CYCLE_SH="$_cycle_sh" \
                             AUTOSPEC_PRIORITY_MATCH_BIN="$_priority_match_sh" \
                             AUTOSPEC_PRIORITIES_FILE="$_priorities_file" \
                             AUTOSPEC_PERSONA_FILE="$_eff_persona" \
                             bash -c "$_explore_cmd --once --research-sources internet" \
-                            2>/dev/null || printf '{"dry":true,"reason":"explore-error"}')"
+                            2>"$_explore_err_file")"; then _explore_rc=0; else _explore_rc=$?; fi
                     else
-                        _explore_out="$(bash -c "$_explore_cmd --once --research-sources internet" \
-                            2>/dev/null || printf '{"dry":true,"reason":"explore-error"}')"
+                        if _explore_out="$(bash -c "$_explore_cmd --once --research-sources internet" \
+                            2>"$_explore_err_file")"; then _explore_rc=0; else _explore_rc=$?; fi
                     fi
                 else
                     printf '[conductor] Tier 2: invoking explore --once (local sources)\n' >&2
                     # F4: wrap with priority-aware cycle when priorities are available.
+                    # (if/then/else rc capture — see note above; set -e safe.)
                     if [ -n "$_priority_cycle_cmd" ]; then
-                        _explore_out="$(AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$_priority_cycle_cmd" \
+                        if _explore_out="$(AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$_priority_cycle_cmd" \
                             AUTOSPEC_CYCLE_SH="$_cycle_sh" \
                             AUTOSPEC_PRIORITY_MATCH_BIN="$_priority_match_sh" \
                             AUTOSPEC_PRIORITIES_FILE="$_priorities_file" \
                             AUTOSPEC_PERSONA_FILE="$_eff_persona" \
                             bash -c "$_explore_cmd --once" \
-                            2>/dev/null || printf '{"dry":true,"reason":"explore-error"}')"
+                            2>"$_explore_err_file")"; then _explore_rc=0; else _explore_rc=$?; fi
                     else
-                        _explore_out="$(bash -c "$_explore_cmd --once" \
-                            2>/dev/null || printf '{"dry":true,"reason":"explore-error"}')"
+                        if _explore_out="$(bash -c "$_explore_cmd --once" \
+                            2>"$_explore_err_file")"; then _explore_rc=0; else _explore_rc=$?; fi
                     fi
                 fi
+
+                # A non-zero exit means explore crashed or never started (bad
+                # invocation, missing dep, misconfig) — this is a VISIBLE
+                # health signal, not a silent dry (issue #1625). Only a clean
+                # exit (rc=0) reporting dry:true is a genuine "no candidates".
+                local _explore_is_error=0
+                if [ "$_explore_rc" -ne 0 ]; then
+                    _explore_is_error=1
+                    local _explore_err_tail
+                    _explore_err_tail="$(tail -n 5 "$_explore_err_file" 2>/dev/null || true)"
+                    printf '[conductor] Tier %s explore ERROR: exit=%s code_health:explore_error\n' \
+                        "$_tier" "$_explore_rc" >&2
+                    if [ -n "$_explore_err_tail" ]; then
+                        printf '[conductor] Tier %s explore stderr:\n%s\n' \
+                            "$_tier" "$_explore_err_tail" >&2
+                    fi
+                    _explore_out='{"dry":true,"filed":0,"reason":"explore-error"}'
+                fi
+                rm -f "$_explore_err_file" 2>/dev/null || true
 
                 # Parse yield JSON for dryness.
                 local _explore_dry
@@ -1299,8 +1325,13 @@ fi'
                 _explore_filed="$(printf '%s' "$_explore_out" \
                     | jq -r '.filed // 0' 2>/dev/null || echo 0)"
 
-                printf '[conductor] Tier %s explore result: dry=%s filed=%s\n' \
-                    "$_tier" "$_explore_dry" "$_explore_filed" >&2
+                if [ "$_explore_is_error" -eq 1 ]; then
+                    printf '[conductor] Tier %s explore result: ERROR (exit=%s) — not a clean dry\n' \
+                        "$_tier" "$_explore_rc" >&2
+                else
+                    printf '[conductor] Tier %s explore result: dry=%s filed=%s\n' \
+                        "$_tier" "$_explore_dry" "$_explore_filed" >&2
+                fi
 
                 if [ "$_explore_dry" = "false" ]; then
                     # New candidates were filed — they become Tier-1 backlog.
@@ -1317,15 +1348,30 @@ fi'
                             "$_explore_filed" "$_inflight_discovery" >&2
                     fi
                 else
-                    # Explore was dry for this tier.
-                    if [ "$_tier" = "2" ]; then
-                        _tier2_dry_cycles=$((_tier2_dry_cycles + 1))
-                        printf '[conductor] Tier 2 dry (tier2-dry-cycles=%s)\n' \
-                            "$_tier2_dry_cycles" >&2
+                    if [ "$_explore_is_error" -eq 1 ]; then
+                        # Crash/misconfig, not a genuine "no candidates" — still
+                        # counts as non-productive for waterfall progression,
+                        # but logged distinctly from a clean dry (issue #1625).
+                        if [ "$_tier" = "2" ]; then
+                            _tier2_dry_cycles=$((_tier2_dry_cycles + 1))
+                            printf '[conductor] Tier 2 explore_error (tier2-dry-cycles=%s)\n' \
+                                "$_tier2_dry_cycles" >&2
+                        else
+                            _tier4_dry_cycles=$((_tier4_dry_cycles + 1))
+                            printf '[conductor] Tier 4 explore_error (tier4-dry-cycles=%s)\n' \
+                                "$_tier4_dry_cycles" >&2
+                        fi
                     else
-                        _tier4_dry_cycles=$((_tier4_dry_cycles + 1))
-                        printf '[conductor] Tier 4 dry (tier4-dry-cycles=%s)\n' \
-                            "$_tier4_dry_cycles" >&2
+                        # Explore was genuinely dry for this tier.
+                        if [ "$_tier" = "2" ]; then
+                            _tier2_dry_cycles=$((_tier2_dry_cycles + 1))
+                            printf '[conductor] Tier 2 dry (tier2-dry-cycles=%s)\n' \
+                                "$_tier2_dry_cycles" >&2
+                        else
+                            _tier4_dry_cycles=$((_tier4_dry_cycles + 1))
+                            printf '[conductor] Tier 4 dry (tier4-dry-cycles=%s)\n' \
+                                "$_tier4_dry_cycles" >&2
+                        fi
                     fi
                 fi
             fi
