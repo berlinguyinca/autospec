@@ -43,6 +43,12 @@ for part in sys.argv[2].split("."):
         node = node[part]
     else:
         sys.exit(0)
+# YAML 1.1 (PyYAML) parses bare on/off/yes/no as booleans. Normalize back to the
+# on/off vocabulary so the documented `policy: off` kill switch is honored.
+if node is True:
+    print("on"); sys.exit(0)
+if node is False:
+    print("off"); sys.exit(0)
 if isinstance(node, (dict, list)):
     sys.exit(0)
 print(node)

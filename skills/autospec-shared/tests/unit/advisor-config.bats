@@ -66,3 +66,30 @@ EOF
   run bash "$SCRIPT" --key nope.nope
   [ "$status" -ne 0 ]
 }
+
+@test "unquoted policy: off (YAML boolean) is honored as off, not auto" {
+  cat > "$AUTOSPEC_CONFIG_FILE" <<'EOF'
+advisor:
+  policy: off
+EOF
+  [ "$(bash "$SCRIPT" --key policy)" = "off" ]
+}
+
+@test "unquoted policy: on (YAML boolean) is honored as on" {
+  cat > "$AUTOSPEC_CONFIG_FILE" <<'EOF'
+advisor:
+  policy: on
+EOF
+  [ "$(bash "$SCRIPT" --key policy)" = "on" ]
+}
+
+@test "malformed yaml falls back to defaults (fail-open)" {
+  printf 'advisor:\n  policy: [unterminated\n' > "$AUTOSPEC_CONFIG_FILE"
+  [ "$(bash "$SCRIPT" --key policy)" = "auto" ]
+}
+
+@test "non-dict advisor node falls back to defaults" {
+  printf 'advisor: "just a string"\n' > "$AUTOSPEC_CONFIG_FILE"
+  [ "$(bash "$SCRIPT" --key policy)" = "auto" ]
+  [ "$(bash "$SCRIPT" --key budget.max_calls_per_issue)" = "3" ]
+}

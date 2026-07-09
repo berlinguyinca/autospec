@@ -47,18 +47,30 @@ STATE_FILE="$STATE_ROOT/active-gates.json"
 # Emit a JSON array of the active gate list from a space-separated string.
 active_json() { printf '%s\n' "$1" | tr ' ' '\n' | grep -v '^$' | jq -R . | jq -cs .; }
 
+# Read the active set, sanitized: keep only known gates, in ORDER, and always
+# include the seed. This self-heals a corrupted/hand-edited active-gates.json
+# (unknown names, wrong order, non-array) and guarantees the retract `sed` only
+# ever operates on metachar-free ORDER names.
 read_active() {
+  local raw="$SEED" a
   if [ -f "$STATE_FILE" ]; then
-    local a
     a="$(jq -r '.active // [] | join(" ")' "$STATE_FILE" 2>/dev/null || printf '')"
-    [ -n "$a" ] && { printf '%s' "$a"; return; }
+    [ -n "$a" ] && raw="$a"
   fi
-  printf '%s' "$SEED"
+  local out="" g
+  for g in $ORDER; do
+    case " $raw " in *" $g "*) out="${out:+$out }$g" ;; esac
+  done
+  case " $out " in *" $SEED "*) : ;; *) out="$SEED${out:+ $out}" ;; esac
+  printf '%s' "$out"
 }
 
 write_active() {
   mkdir -p "$STATE_ROOT"
-  jq -cn --argjson a "$(active_json "$1")" '{active:$a}' > "$STATE_FILE"
+  local tmp
+  tmp="$(mktemp "${STATE_FILE}.XXXXXX")"
+  jq -cn --argjson a "$(active_json "$1")" '{active:$a}' > "$tmp"
+  mv "$tmp" "$STATE_FILE"   # atomic swap — no torn read under a concurrent tick
 }
 
 # Next gate in ORDER not yet in the active set; empty if the set is full.
@@ -75,13 +87,21 @@ case "$CMD" in
     exit 0
     ;;
   tick)
+    # Require a well-formed non-negative number (reject '', lone '.', '1.', '.5',
+    # multi-dot) — an invalid --argjson would otherwise abort under set -e.
     for v in "$BL_LGTM" "$OB_LGTM" "$BL_COST" "$OB_COST"; do
-      case "$v" in ''|*[!0-9.]*|*.*.*) printf 'advisor-govern.sh: baselines must be numeric\n' >&2; exit 1 ;; esac
+      case "$v" in
+        ''|*[!0-9.]*|*.*.*|.*|*.) printf 'advisor-govern.sh: baselines must be numeric: %s\n' "$v" >&2; exit 1 ;;
+      esac
     done
     [ -f "$TELEMETRY" ] || { printf 'advisor-govern.sh: telemetry not found: %s\n' "$TELEMETRY" >&2; exit 1; }
 
     active="$(read_active)"
-    samples="$(grep -c . "$TELEMETRY" 2>/dev/null || printf 0)"
+    # grep -c prints 0 AND exits 1 on an empty file; swallow the status without
+    # emitting a second line (which would make `samples` non-numeric and, under
+    # set -e, fall through to promote on zero evidence).
+    samples="$(grep -c . "$TELEMETRY" 2>/dev/null || true)"
+    samples="${samples:-0}"
 
     promote="$(jq -n --argjson bl "$BL_LGTM" --argjson ol "$OB_LGTM" \
                      --argjson bc "$BL_COST" --argjson oc "$OB_COST" \

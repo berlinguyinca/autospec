@@ -49,6 +49,20 @@ teardown() { rm -rf "$TMP"; }
   echo "$output" | grep -q '"decision":"GO"'
 }
 
+@test "policy auto with no governance state defaults to the impl-haiku seed only (real govern integration)" {
+  export AUTOSPEC_ADVISOR_POLICY=auto
+  unset AUTOSPEC_ADVISOR_ACTIVE_GATES   # exercise the real advisor-govern.sh show path
+  # seed gate is active
+  run bash "$SCRIPT" --phase precheck --issue 42 --repo acme/widget \
+    --gate impl-haiku --question-file "$TMP/q.txt" --context-file "$TMP/c.txt" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"decision":"GO"'
+  # a non-seed gate is NOT active by default (fail toward less, never all-on)
+  run bash "$SCRIPT" --phase precheck --issue 43 --repo acme/widget \
+    --gate reviewer --question-file "$TMP/q.txt" --context-file "$TMP/c.txt" --json
+  [ "$status" -eq 8 ]
+}
+
 # ── precheck: cap ─────────────────────────────────────────────────────────────
 
 @test "precheck cap-reached after MAX_USES exits 7" {

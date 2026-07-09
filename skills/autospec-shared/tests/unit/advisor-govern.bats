@@ -78,3 +78,47 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.active == ["impl-haiku","retry","reviewer"]' >/dev/null
 }
+
+@test "empty telemetry file holds — never promotes on zero evidence" {
+  : > "$TMP/empty.jsonl"
+  run bash "$SCRIPT" tick --telemetry "$TMP/empty.jsonl" --min-samples 20 \
+    --baseline-lgtm 0.7 --observed-lgtm 0.9 --baseline-cost 1000 --observed-cost 500 --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.action == "hold"' >/dev/null
+  echo "$output" | jq -e '.active == ["impl-haiku"]' >/dev/null
+  echo "$output" | jq -e '.samples == 0' >/dev/null
+}
+
+@test "promotes on an exact tie (quality == baseline AND cost == baseline)" {
+  mk_telemetry 25 "$TMP/t.jsonl"
+  run bash "$SCRIPT" tick --telemetry "$TMP/t.jsonl" --min-samples 20 \
+    --baseline-lgtm 0.7 --observed-lgtm 0.7 --baseline-cost 1000 --observed-cost 1000 --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.action == "promote"' >/dev/null
+}
+
+@test "full active set is stable — a promote tick does not grow past the order" {
+  mk_telemetry 25 "$TMP/t.jsonl"
+  # Seed the state at the full set.
+  mkdir -p "$AUTOSPEC_ADVISOR_STATE_DIR"
+  printf '{"active":["impl-haiku","retry","reviewer","impl-decision"]}' > "$STATE"
+  run bash "$SCRIPT" tick --telemetry "$TMP/t.jsonl" --min-samples 20 \
+    --baseline-lgtm 0.7 --observed-lgtm 0.9 --baseline-cost 1000 --observed-cost 500 --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.active == ["impl-haiku","retry","reviewer","impl-decision"]' >/dev/null
+}
+
+@test "corrupted active-gates.json self-heals: unknown names dropped, seed kept, ORDER normalized" {
+  mkdir -p "$AUTOSPEC_ADVISOR_STATE_DIR"
+  printf '{"active":["reviewer","bogus/name","impl-haiku"]}' > "$STATE"
+  run bash "$SCRIPT" show --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.active == ["impl-haiku","reviewer"]' >/dev/null
+}
+
+@test "non-numeric baseline exits 1 (no set -e abort)" {
+  mk_telemetry 25 "$TMP/t.jsonl"
+  run bash "$SCRIPT" tick --telemetry "$TMP/t.jsonl" --min-samples 20 \
+    --baseline-lgtm 1. --observed-lgtm 0.8 --baseline-cost 1000 --observed-cost 800 --json
+  [ "$status" -eq 1 ]
+}
