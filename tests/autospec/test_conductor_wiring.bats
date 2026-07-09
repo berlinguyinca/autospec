@@ -640,6 +640,48 @@ EOF
   [[ "$output" == *"Tier 1.5 promotion result: dry=false filed=2"* ]]
 }
 
+@test "conductor: Tier 1.5 auto-detects autonomous-promote-open-issues.sh script (no CMD override)" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '\''{"tier":1.5,"action":"promote-open-issues","reason":"open issues"}\n'\'''
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  # Drop the real-script filename into _sdir (FAKE_SCRIPTS) so the loop's
+  # path-based auto-detect selects it. The stub records that it ran and emits a
+  # loop-parseable dry result (its default report-only behavior).
+  local promote_log="$TEST_TMP/promote-autodetect.log"
+  _install_stub "autonomous-promote-open-issues.sh" \
+    "printf 'autodetect-promote-called %s\n' \"\$*\" >> '$promote_log'; printf '{\"dry\":true,\"filed\":0,\"promoted\":[],\"skipped\":[],\"reason\":\"report-only\"}\n'"
+
+  # IMPORTANT: do NOT set AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD — this test exercises
+  # the path-based auto-detect, not the env override.
+  unset AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD
+
+  run bash -c "
+    unset AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  [ -f "$promote_log" ]
+  grep -q 'autodetect-promote-called' "$promote_log"
+  # The loop must invoke the auto-detected script with --apply (safe: the script
+  # is double-gated and stays report-only without the env opt-in).
+  grep -q -- '--apply' "$promote_log"
+}
+
 @test "conductor: Tier 3 architecture improvement command files work and floats to Tier 1" {
   _install_stub "autonomous-control-channel.sh" 'exit 0'
   _install_stub "autonomous-waterfall.sh" \

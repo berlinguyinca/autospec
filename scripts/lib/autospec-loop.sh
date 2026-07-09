@@ -1037,10 +1037,21 @@ fi'
             break
         elif [ "$_action" = "promote-open-issues" ]; then
             # ── Tier 1.5: promote/decompose/classify existing open issues ─────
+            # Auto-detect the promotion command when the operator hasn't pinned
+            # one via AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD. Preference order:
+            #   1. autospec-classify skill on PATH (rare as a real binary);
+            #   2. the real promote-open-issues script (scripts/autonomous-
+            #      promote-open-issues.sh) — passed --apply, which is SAFE
+            #      because that script is double-gated and still no-ops (report-
+            #      only) unless AUTOSPEC_PROMOTE_OPEN_ISSUES_APPLY=1 is also set;
+            #   3. the classify-model-fit --help no-op placeholder (final
+            #      fallback so the tier is never left command-less).
             local _promote_cmd="${AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD:-}"
             if [ -z "$_promote_cmd" ]; then
                 if command -v autospec-classify >/dev/null 2>&1; then
                     _promote_cmd="autospec-classify --apply-boards"
+                elif [ -f "${_sdir}/autonomous-promote-open-issues.sh" ]; then
+                    _promote_cmd="bash ${_sdir}/autonomous-promote-open-issues.sh --apply"
                 elif [ -f "${_sdir}/classify-model-fit.sh" ]; then
                     _promote_cmd="bash ${_sdir}/classify-model-fit.sh --help >/dev/null"
                 fi
