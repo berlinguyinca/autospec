@@ -43,7 +43,13 @@ USE_SYMLINK=0
 DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
-SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh inject-relevant-memory.sh validate-growth-config.sh validate-growth-candidate.sh growth-measure.sh growth-source-weights.sh growth-candidate-dedup.sh growth-candidate-verify.sh growth-candidate-rank.sh growth-ledger.sh grow-define-pipeline.sh grow-define-file-issues.sh"
+SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
+# Shared runtime helpers this skill calls via ${AUTOSPEC_SCRIPTS_DIR}/<name> and
+# that live under skills/autospec-shared/scripts/ (not repo-root scripts/). They
+# MUST ship into ~/.autospec/scripts so a standalone install of
+# autospec-grow-define can run the skill in a target repo without this checkout
+# present.
+SHARED_LIB_SCRIPT_FILES="inject-relevant-memory.sh validate-growth-config.sh validate-growth-candidate.sh growth-measure.sh growth-source-weights.sh growth-candidate-dedup.sh growth-candidate-verify.sh growth-candidate-rank.sh growth-ledger.sh grow-define-pipeline.sh grow-define-file-issues.sh"
 
 # ---------- helpers --------------------------------------------------------
 
@@ -107,6 +113,14 @@ fetch_source_files() {
             exit 1
         fi
     done
+    mkdir -p "$TMP_FETCH_DIR/lib-scripts"
+    for rel in $SHARED_LIB_SCRIPT_FILES; do
+        if ! curl -fsSL "$RAW_REPO_BASE/skills/autospec-shared/scripts/$rel" \
+            -o "$TMP_FETCH_DIR/lib-scripts/$rel"; then
+            err "failed to download $RAW_REPO_BASE/skills/autospec-shared/scripts/$rel"
+            exit 1
+        fi
+    done
     SKILL_DIR="$TMP_FETCH_DIR"
 }
 
@@ -129,6 +143,35 @@ install_shared_scripts() {
     fi
     for rel in $SHARED_SCRIPT_FILES; do
         install_one "$src_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
+        case "$rel" in
+            *.sh) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;;
+        esac
+    done
+}
+
+# resolve_shared_lib_scripts_dir — locate skills/autospec-shared/scripts/ in a
+# full checkout, or the fetched lib-scripts/ dir when running from stdin.
+resolve_shared_lib_scripts_dir() {
+    checkout_root="$(cd "$SKILL_DIR/../.." 2>/dev/null && pwd || true)"
+    if [ -n "$checkout_root" ] && [ -d "$checkout_root/skills/autospec-shared/scripts" ]; then
+        printf '%s\n' "$checkout_root/skills/autospec-shared/scripts"
+    elif [ -d "$SKILL_DIR/lib-scripts" ]; then
+        printf '%s\n' "$SKILL_DIR/lib-scripts"
+    else
+        printf ''
+    fi
+}
+
+# install_shared_lib_scripts — ship the shared-lib runtime helpers this skill
+# calls at runtime into ~/.autospec/scripts so the skill works standalone.
+install_shared_lib_scripts() {
+    lib_dir="$(resolve_shared_lib_scripts_dir)"
+    if [ -z "$lib_dir" ]; then
+        err "missing shared-lib scripts directory; cannot install autospec-grow-define helpers"
+        return 1
+    fi
+    for rel in $SHARED_LIB_SCRIPT_FILES; do
+        install_one "$lib_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
         case "$rel" in
             *.sh) run "chmod +x \"$HOME/.autospec/scripts/$rel\"" ;;
         esac
@@ -270,6 +313,7 @@ fi
 info ""
 info "Shared autospec helper scripts:"
 install_shared_scripts
+install_shared_lib_scripts
 
 # ---------- per-harness paths ---------------------------------------------
 
