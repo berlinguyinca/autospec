@@ -101,9 +101,18 @@ sovereign control-plane design:
   the MVP scopes `events:write`, `events:read`, `projects:read`,
   `projects:write`, `runs:read`, `costs:read`, and `admin:keys`;
 - `apps/api/src/routes.ts` with the v1 route list, including
+  `POST /v1/events`, `POST /v1/events/batch`, and
   `GET /v1/runs/:id/progress`. Progress snapshots expose `progress_percent`,
   `phase`, current item, queue counts, elapsed time, ETA, planned next step, and
   `last_event_id`, and reads are scoped to the key's org/project boundaries;
+- `apps/api/src/ingest/events.ts` and `packages/event-schema/src/events.ts`
+  with the scaffolded ingestion contract. Generated events require `event_id`,
+  `run_id`, `sequence`, timestamps, project/repository identifiers, and
+  privacy metadata. `ProgressUpdated` is part of the event type list and uses
+  the same dedupe and per-run sequence ordering rules as every other event.
+  Duplicate event_id is ignored; repeated sequences are stored once and
+  flagged, sequence gaps are exposed for UI review, and late events are stored
+  by both `occurred_at` and `received_at`;
 - shared package seed paths under `packages/event-schema/`, `packages/db/`, and
   `packages/ui/`;
 - deterministic migration seeds for `orgs`, `projects`, `runs`, and `events`;

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Observatory render helpers for scripts/autospec-control-plane.sh.
 
+CONTROL_PLANE_OBSERVATORY_EVENTS_RENDER_LIB="${CONTROL_PLANE_OBSERVATORY_EVENTS_RENDER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/autospec-control-plane-observatory-events-render.sh}"
+# shellcheck source=scripts/lib/autospec-control-plane-observatory-events-render.sh
+. "$CONTROL_PLANE_OBSERVATORY_EVENTS_RENDER_LIB"
+
+
 render_observatory_compose() {
     cat <<'YAML'
 services:
@@ -51,6 +56,10 @@ Seed package for run, cycle, work-item, worker, cost, blocker, progress, and
 policy-decision events. Events must carry project classification and
 `privacy_tier` metadata so client and server privacy enforcement can reject
 over-shared payloads.
+
+Duplicate event_id is ignored. `sequence` is monotonic per run_id; repeated
+sequences are stored once and flagged, sequence gaps are exposed for UI review,
+and late events are stored by occurred_at and received_at.
 MD
 }
 
@@ -155,6 +164,27 @@ export const OBSERVATORY_ROUTES = [
   "DELETE /v1/api-keys/:id",
 ] as const;
 
+export interface EventIngestResult {
+  accepted: number;
+  duplicates_ignored: number;
+  repeated_sequences_flagged: number;
+  sequence_gaps_flagged: number;
+  late_events_stored: number;
+}
+
+export async function handleEventIngest(event: ObservatoryEvent): Promise<EventIngestResult> {
+  return handleEventBatchIngest({ events: [event] });
+}
+
+export async function handleEventBatchIngest(batch: ObservatoryEventBatch): Promise<EventIngestResult> {
+  validateObservatoryEventBatch(batch);
+  // Duplicate event_id is ignored.
+  // sequence is monotonic per run_id; repeated sequence values are stored once and flagged.
+  // Sequence gaps are exposed for UI review.
+  // Late events are stored by occurred_at and received_at.
+  return ingestValidatedEvents(batch.events);
+}
+
 export interface RunProgressSnapshot {
   run_id: string;
   status: "queued" | "running" | "blocked" | "complete" | "failed";
@@ -222,14 +252,20 @@ render_observatory_events_migration() {
     cat <<'SQL'
 CREATE TABLE events (
   id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL UNIQUE,
   owner_org_id TEXT NOT NULL REFERENCES orgs(id),
   project_id TEXT NOT NULL REFERENCES projects(id),
   run_id TEXT REFERENCES runs(id),
+  sequence INTEGER NOT NULL,
   event_scope TEXT NOT NULL,
   privacy_tier TEXT NOT NULL,
   event_payload JSONB NOT NULL,
   occurred_at TIMESTAMPTZ NOT NULL,
-  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  duplicate_ignored BOOLEAN NOT NULL DEFAULT false,
+  repeated_sequence BOOLEAN NOT NULL DEFAULT false,
+  sequence_gap_after INTEGER,
+  UNIQUE (run_id, sequence)
 );
 SQL
 }
@@ -245,10 +281,14 @@ render_observatory_file_templates() {
     render_observatory_api_key_model
     render_file_header "$observatory_repo" "apps/api/src/routes.ts"
     render_observatory_routes
+    render_file_header "$observatory_repo" "apps/api/src/ingest/events.ts"
+    render_observatory_event_ingestion_contract
     render_file_header "$observatory_repo" "apps/web/README.md"
     render_observatory_web_readme
     render_file_header "$observatory_repo" "packages/event-schema/README.md"
     render_observatory_event_schema_readme
+    render_file_header "$observatory_repo" "packages/event-schema/src/events.ts"
+    render_observatory_event_schema
     render_file_header "$observatory_repo" "packages/db/README.md"
     render_observatory_db_readme
     render_file_header "$observatory_repo" "packages/ui/README.md"
@@ -277,9 +317,11 @@ ${observatory_repo}/
   ${observatory_repo}/apps/api/
   ${observatory_repo}/apps/api/src/
   ${observatory_repo}/apps/api/src/auth/
+  ${observatory_repo}/apps/api/src/ingest/
   ${observatory_repo}/apps/web/
   ${observatory_repo}/packages/
   ${observatory_repo}/packages/event-schema/
+  ${observatory_repo}/packages/event-schema/src/
   ${observatory_repo}/packages/db/
   ${observatory_repo}/packages/ui/
   ${observatory_repo}/migrations/
