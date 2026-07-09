@@ -4682,6 +4682,7 @@ check_control_plane_bootstrap_contract() {
     local bats_file="tests/control-plane-bootstrap.bats"
     local governance_bats_file="tests/control-plane-governance.bats"
     local observatory_bats_file="tests/control-plane-observatory.bats"
+    local observatory_auth_bats_file="tests/control-plane-observatory-auth.bats"
 
     [ -f "$helper" ] || fail "$helper: missing (issue #1611)"
     [ -x "$helper" ] || fail "$helper: not executable (issue #1611)"
@@ -4698,6 +4699,7 @@ check_control_plane_bootstrap_contract() {
     [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing (issue #1611)"
     [ -f "$governance_bats_file" ] || fail "$governance_bats_file: bats coverage missing (issue #1612)"
     [ -f "$observatory_bats_file" ] || fail "$observatory_bats_file: bats coverage missing (issue #1613)"
+    [ -f "$observatory_auth_bats_file" ] || fail "$observatory_auth_bats_file: bats coverage missing (issue #1614)"
     if command -v bats >/dev/null 2>&1; then
         info "  running: $bats_file"
         bash "$bats_file" >/tmp/validate-control-plane-bootstrap.log 2>&1 \
@@ -4708,6 +4710,9 @@ check_control_plane_bootstrap_contract() {
         info "  running: $observatory_bats_file"
         bash "$observatory_bats_file" >/tmp/validate-control-plane-observatory.log 2>&1 \
             || { cat /tmp/validate-control-plane-observatory.log >&2; fail "$observatory_bats_file: failed (issue #1613)"; }
+        info "  running: $observatory_auth_bats_file"
+        bash "$observatory_auth_bats_file" >/tmp/validate-control-plane-observatory-auth.log 2>&1 \
+            || { cat /tmp/validate-control-plane-observatory-auth.log >&2; fail "$observatory_auth_bats_file: failed (issue #1614)"; }
     fi
 }
 
