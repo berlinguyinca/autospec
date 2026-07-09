@@ -897,6 +897,40 @@ fi'
             esac
         fi
 
+        # ── Step 2b: Dependency-aware ready count (#1632) ─────────────────────
+        # Compute the same readiness definition the Tier-1 drain (Step 4/5) uses
+        # BEFORE calling the waterfall, and inject it as the waterfall's Tier-1
+        # gate — one source of truth, so a fully-blocked backlog (or a
+        # worker-cap-reached cycle) does not pin Tier-1 forever. Cached here and
+        # reused by the drain step below instead of re-querying.
+        local _queue_ready_len=""
+        local _queue_batch_len=""
+        local _queue_cap_reached="false"
+        local _ready_count=""
+        if [ -n "$_list_ready" ] && [ -f "$_list_ready" ] && [ -n "$_repo" ]; then
+            local _queue_json
+            _queue_json="$(bash "$_list_ready" --repo "$_repo" --batch-size 1 2>/dev/null || true)"
+            # Only trust the reading when the helper produced parseable JSON with
+            # a .ready array. A transient helper/GitHub failure must NOT
+            # masquerade as an empty backlog: leaving _ready_count empty omits
+            # --backlog-count below, so the waterfall runs its OWN
+            # readiness-aware count (which itself falls back to the naive gh
+            # count) rather than being forced to 0 on a blip.
+            if printf '%s' "$_queue_json" | jq -e 'has("ready")' >/dev/null 2>&1; then
+                _queue_ready_len="$(printf '%s' "$_queue_json" | jq -r '.ready | length' 2>/dev/null || true)"
+                _queue_batch_len="$(printf '%s' "$_queue_json" | jq -r '.batch | length' 2>/dev/null || true)"
+                _queue_cap_reached="$(printf '%s' "$_queue_json" | jq -r '.worker_cap.reached // false' 2>/dev/null || echo false)"
+                case "$_queue_ready_len" in *[!0-9]*|'') _queue_ready_len="" ;; esac
+                case "$_queue_batch_len" in *[!0-9]*|'') _queue_batch_len="" ;; esac
+                if [ "$_queue_cap_reached" = "true" ]; then
+                    # A capped cycle is not drainable work — never pins Tier-1.
+                    _ready_count=0
+                else
+                    _ready_count=$(( ${_queue_ready_len:-0} + ${_queue_batch_len:-0} ))
+                fi
+            fi
+        fi
+
         # ── Step 3: Waterfall tier selection ──────────────────────────────────
         local _tier_json
         _tier_json="$(bash "$_waterfall" \
@@ -906,6 +940,7 @@ fi'
             --tier3-dry-cycles "$_tier3_dry_cycles" \
             --tier4-dry-cycles "$_tier4_dry_cycles" \
             ${_repo:+--repo "$_repo"} \
+            ${_ready_count:+--backlog-count "$_ready_count"} \
             2>/dev/null \
             || printf '{"tier":1,"action":"run-backlog","reason":"waterfall-unavailable"}')"
         local _tier
@@ -967,17 +1002,10 @@ fi'
 
         elif [ "$_tier" = "1" ] && [ "$_action" = "run-backlog" ]; then
             local _skip_tier1_cycle=0
-            local _queue_ready_len=""
-            local _queue_batch_len=""
-            local _queue_cap_reached="false"
+            # Reuse the readiness snapshot already computed in Step 2b (same
+            # list-ready-issues.sh call the waterfall's --backlog-count used) —
+            # do not re-query.
             if [ -n "$_list_ready" ] && [ -f "$_list_ready" ] && [ -n "$_repo" ]; then
-                local _queue_json
-                _queue_json="$(bash "$_list_ready" --repo "$_repo" --batch-size 1 2>/dev/null || true)"
-                _queue_ready_len="$(printf '%s' "$_queue_json" | jq -r '.ready | length' 2>/dev/null || true)"
-                _queue_batch_len="$(printf '%s' "$_queue_json" | jq -r '.batch | length' 2>/dev/null || true)"
-                _queue_cap_reached="$(printf '%s' "$_queue_json" | jq -r '.worker_cap.reached // false' 2>/dev/null || echo false)"
-                case "$_queue_ready_len" in *[!0-9]*|'') _queue_ready_len="" ;; esac
-                case "$_queue_batch_len" in *[!0-9]*|'') _queue_batch_len="" ;; esac
                 if [ "$_queue_cap_reached" = "true" ]; then
                     printf '[conductor] Tier-1 worker cap reached — skipping drain this cycle\n' >&2
                     _work_done=0

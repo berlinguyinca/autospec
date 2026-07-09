@@ -669,3 +669,170 @@ EOF
   grep -q 'arch-called' "$arch_log"
   [[ "$output" == *"Tier 3 architecture result: dry=false filed=1"* ]]
 }
+
+# ── 20. Waterfall's Tier-1 gate receives the readiness-aware count, not the
+#        naive open-auto-implement count (#1632: blocked-backlog livelock) ───
+@test "conductor: waterfall receives readiness-aware backlog-count matching the drain queue" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+
+  # Naive gh open auto-implement count is 1 (all blocked) — must NOT be what
+  # the waterfall is gated on.
+  cat > "$FAKE_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  issue) echo '[{"number":42}]' ;;
+  repo)  echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
+  *)     exit 0 ;;
+esac
+EOF
+  chmod +x "$FAKE_BIN/gh"
+
+  # Dependency-aware list-ready-issues.sh: nothing ready, one blocked.
+  _install_stub "list-ready-issues.sh" \
+    'printf '"'"'{"ready":[],"blocked":[{"number":42}],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'"'"''
+
+  # waterfall stub: record the args it was invoked with, then behave like the
+  # real script would for a readiness-aware backlog-count of 0.
+  local waterfall_args_log="$TEST_TMP/waterfall-args.log"
+  _install_stub "autonomous-waterfall.sh" \
+    "printf '%s\n' \"\$*\" >> '$waterfall_args_log'; printf '{\"tier\":1.5,\"action\":\"promote-open-issues\",\"reason\":\"test\"}\n'"
+
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  local arch_log="$TEST_TMP/arch.log"
+  export AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD="printf '{\"dry\":false,\"filed\":1}\n'; printf 'promote-called\n' >> '$arch_log'"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  [ -f "$waterfall_args_log" ]
+  # The naive gh count (1) must NOT have been passed — the loop injected the
+  # dependency-aware ready count (0: all blocked) instead.
+  grep -q -- '--backlog-count 0' "$waterfall_args_log"
+}
+
+# ── 21. N consecutive all-blocked Tier-1 cycles must escalate past Tier 1 ────
+# Regression guard for the observed livelock: a conductor whose only
+# auto-implement issue is dependency-blocked must NOT spin tier=1 forever.
+# Uses the REAL waterfall script so the wiring is exercised end-to-end.
+@test "conductor: consecutive all-blocked cycles escalate past Tier 1 (no livelock)" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+
+  # gh's `--json ... --jq 'length'`/`--jq '[...] | length'` flags are applied
+  # by the real `gh` binary itself, so real callers always get back a bare
+  # scalar count — not the raw JSON array. Mirror that here: the naive
+  # open-auto-implement count is misleadingly 1 (the sole issue exists but is
+  # dependency-blocked), which is exactly the condition #1632 fixes.
+  cat > "$FAKE_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  issue) echo '1' ;;
+  repo)  echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
+  *)     exit 0 ;;
+esac
+EOF
+  chmod +x "$FAKE_BIN/gh"
+
+  _install_stub "list-ready-issues.sh" \
+    'printf '"'"'{"ready":[],"blocked":[{"number":42}],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'"'"''
+
+  cp "$REPO_ROOT/scripts/autonomous-waterfall.sh" "$FAKE_SCRIPTS/autonomous-waterfall.sh"
+  chmod +x "$FAKE_SCRIPTS/autonomous-waterfall.sh"
+
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+  export AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD="printf '{\"dry\":true,\"filed\":0}\n'"
+
+  # 5 cycles: default AUTOSPEC_AUTO_DRY_CYCLES threshold is 2, so cycle 3+
+  # must show a tier other than bare "1" (dry cycles 0 and 1 are still logged
+  # as tier=1 — that is expected/correct; the livelock is an UNBOUNDED run of
+  # tier=1 that never advances).
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=5 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  # Count how many of the (at most 5) "tier=" lines are bare tier=1.
+  tier1_lines="$(printf '%s\n' "$output" | grep -c '^\[conductor\] tier=1 ' || true)"
+  total_tier_lines="$(printf '%s\n' "$output" | grep -c '^\[conductor\] tier=' || true)"
+  [ "$total_tier_lines" -ge 1 ]
+  # Must NOT be all tier=1 — the run must show at least one non-1 tier
+  # (1.5/2/3/4) or a park, proving the cascade was reached.
+  [ "$tier1_lines" -lt "$total_tier_lines" ]
+}
+
+# ── 22. Transient list-ready-issues.sh failure must NOT inject --backlog-count 0
+#        (peer-review must-fix #1632): a helper blip must not masquerade as an
+#        empty backlog — omit the flag so the waterfall's own readiness-aware
+#        count (with naive-gh fallback) still runs. ───────────────────────────
+@test "conductor: list-ready-issues.sh failure omits --backlog-count (no forced-0)" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+
+  cat > "$FAKE_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  issue) echo '1' ;;
+  repo)  echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
+  *)     exit 0 ;;
+esac
+EOF
+  chmod +x "$FAKE_BIN/gh"
+
+  # Helper fails (transient): exits non-zero, emits nothing parseable.
+  _install_stub "list-ready-issues.sh" \
+    'echo "list-ready: transient error" >&2; exit 1'
+
+  local waterfall_args_log="$TEST_TMP/waterfall-args.log"
+  _install_stub "autonomous-waterfall.sh" \
+    "printf '%s\n' \"\$*\" >> '$waterfall_args_log'; printf '{\"tier\":1,\"action\":\"run-backlog\",\"reason\":\"test\"}\n'"
+
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+  export AUTOSPEC_RUN_CMD="true"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  [ -f "$waterfall_args_log" ]
+  # The helper failed -> the loop must NOT have injected --backlog-count at all
+  # (neither 0 nor any value) so the waterfall keeps its naive-gh fallback.
+  ! grep -q -- '--backlog-count' "$waterfall_args_log"
+}

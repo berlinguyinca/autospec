@@ -145,16 +145,43 @@ fi
 
 backlog_count=0
 if [ -n "$BACKLOG_COUNT_INJECT" ]; then
+    # Primary path (#1632): the caller (lib/autospec-loop.sh) already computed
+    # the dependency-aware ready count via list-ready-issues.sh — trust it.
     backlog_count="$BACKLOG_COUNT_INJECT"
-elif [ -n "$REPO" ]; then
-    raw="$(gh issue list \
-        --repo "$REPO" \
-        --label auto-implement \
-        --state open \
-        --limit 1000 \
-        --json number \
-        --jq 'length' 2>/dev/null)" || raw=""
-    backlog_count="${raw:-0}"
+else
+    # Defense-in-depth (#1632): no injected count — this is a standalone
+    # invocation (tests, other callers). Prefer the dependency-aware
+    # list-ready-issues.sh (ready+batch) over the naive open-issue-count `gh`
+    # query, so a fully-blocked backlog yields backlog_count=0 here too — one
+    # readiness definition, matching the drain. Fall back to the naive `gh`
+    # count only when list-ready-issues.sh is unavailable.
+    _list_ready_bin="${AUTOSPEC_LIST_READY_BIN:-}"
+    if [ -z "$_list_ready_bin" ]; then
+        _wf_dir="$(cd "$(dirname "$0")" && pwd)"
+        if [ -x "$_wf_dir/list-ready-issues.sh" ]; then
+            _list_ready_bin="$_wf_dir/list-ready-issues.sh"
+        elif [ -x "$_wf_dir/../skills/autospec-run/scripts/list-ready-issues.sh" ]; then
+            _list_ready_bin="$_wf_dir/../skills/autospec-run/scripts/list-ready-issues.sh"
+        fi
+    fi
+    if [ -n "$_list_ready_bin" ] && [ -x "$_list_ready_bin" ] && [ -n "$REPO" ]; then
+        _ready_json="$(bash "$_list_ready_bin" --repo "$REPO" --batch-size 1 2>/dev/null)"
+        backlog_count="$(printf '%s' "$_ready_json" \
+            | jq -r 'if (.worker_cap.reached // false) then 0 else ((.ready|length) + (.batch|length)) end' \
+              2>/dev/null)"
+        case "$backlog_count" in *[!0-9]*|'') backlog_count="" ;; esac
+    fi
+    if [ -z "$backlog_count" ] && [ -n "$REPO" ]; then
+        raw="$(gh issue list \
+            --repo "$REPO" \
+            --label auto-implement \
+            --state open \
+            --limit 1000 \
+            --json number \
+            --jq 'length' 2>/dev/null)" || raw=""
+        backlog_count="${raw:-0}"
+    fi
+    backlog_count="${backlog_count:-0}"
 fi
 
 if [ "$backlog_count" -gt 0 ] 2>/dev/null; then
