@@ -363,16 +363,25 @@ The cap defaults to 3 attempts but is configurable via the
 ```bash
 max_attempts="${AUTOSPEC_REBASE_MAX_ATTEMPTS:-3}"
 attempt=0
+# Advisory checks (e.g. self-hosted TeamCity) are operator-declared via
+# AUTOSPEC_PR_ADVISORY_CHECKS, defaulting to the same regex the conductor's
+# main-health gate already honors (AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS) — one
+# shared definition, not two divergent lists. Unset/empty ("^$") matches no
+# real check name, so default behavior is unchanged: every FAILURE blocks.
+adv="${AUTOSPEC_PR_ADVISORY_CHECKS:-${AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS:-^$}}"
 wait_for_ci_green() {
-    # Block until every check in the rollup has a non-null conclusion AND none
-    # is a FAILURE/CANCELLED/TIMED_OUT. A null conclusion means "still running"
-    # — counting nulls as SUCCESS would let the gate exit while CI is pending.
-    # An empty rollup also waits (a brand-new update-branch may not have
-    # registered its checks yet).
+    # Block until every NON-ADVISORY check in the rollup has a non-null
+    # conclusion AND none is a FAILURE/CANCELLED/TIMED_OUT. A null conclusion
+    # means "still running" — counting nulls as SUCCESS would let the gate
+    # exit while CI is pending. An empty rollup also waits (a brand-new
+    # update-branch may not have registered its checks yet). Checks whose
+    # name/context matches $adv are advisory: a FAILURE or pending state on
+    # them never blocks or stalls the gate — they are excluded from both the
+    # `bad` and `pending` counts below. Non-advisory checks are unaffected.
     while :; do
         rollup=$(gh pr view <PR> --json statusCheckRollup --jq '.statusCheckRollup // []')
-        pending=$(printf '%s' "$rollup" | jq '[.[] | select(.conclusion == null)] | length')
-        bad=$(printf '%s' "$rollup" | jq '[.[] | select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED")] | length')
+        pending=$(printf '%s' "$rollup" | jq --arg adv "$adv" '[.[] | select((((.name // .context // "") as $n | $n != "" and ($n | test($adv)))) | not) | select(.conclusion == null)] | length')
+        bad=$(printf '%s' "$rollup" | jq --arg adv "$adv" '[.[] | select((((.name // .context // "") as $n | $n != "" and ($n | test($adv)))) | not) | select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED")] | length')
         total=$(printf '%s' "$rollup" | jq 'length')
         if [ "$bad" != "0" ]; then
             gh issue comment <issue> --body "PR #<PR>: a required check failed after rebase-and-retest (FAILURE/CANCELLED/TIMED_OUT). Pausing for operator review."

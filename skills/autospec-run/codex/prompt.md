@@ -247,7 +247,7 @@ same session id (a fresh session gets a new id), and `--force` overrides it.
 
 Record this durable preference in `AGENTS.md` (idempotent — skip if already present):
 
-> **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (`gh pr merge <#> --admin --squash --delete-branch`) when (a) the full target-repo validation/test suite has passed locally after the branch is current with `main`, (b) all required CI checks pass — slow optional checks like TeamCity may be pending only after the full local suite is green, (c) the self-review subagent returned `LGTM`, (d) PR closes an `auto-implement` issue from a `feat/*` branch.
+> **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (`gh pr merge <#> --admin --squash --delete-branch`) when (a) the full target-repo validation/test suite has passed locally after the branch is current with `main`, (b) all **non-advisory** required CI checks pass — checks matching `AUTOSPEC_PR_ADVISORY_CHECKS` (default `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS`; e.g. self-hosted TeamCity) are advisory and may be pending **or failing** once the full local suite is green, (c) the self-review subagent returned `LGTM`, (d) PR closes an `auto-implement` issue from a `feat/*` branch.
 
 **Off-peak tip:** For queues of 10+ issues (8+ hour runs), consider launching at night or on weekends. Usage limits are shared across all sessions — running long batches off-peak preserves daytime tokens for interactive work.
 
@@ -1114,11 +1114,17 @@ inline label-swap path below.
 >    ```bash
 >    max_attempts="${AUTOSPEC_REBASE_MAX_ATTEMPTS:-3}"
 >    attempt=0
+>    # Advisory checks (e.g. self-hosted TeamCity) are operator-declared via
+>    # AUTOSPEC_PR_ADVISORY_CHECKS, defaulting to the same regex the conductor's
+>    # main-health gate already honors (AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS) —
+>    # one shared definition. Unset/empty ("^$") matches no real check name, so
+>    # default behavior is unchanged: every FAILURE blocks.
+>    adv="${AUTOSPEC_PR_ADVISORY_CHECKS:-${AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS:-^$}}"
 >    wait_for_ci_green() {
 >        while :; do
 >            rollup=$(gh pr view <PR> --json statusCheckRollup --jq '.statusCheckRollup // []')
->            pending=$(printf '%s' "$rollup" | jq '[.[] | select(.conclusion == null)] | length')
->            bad=$(printf '%s' "$rollup" | jq '[.[] | select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED")] | length')
+>            pending=$(printf '%s' "$rollup" | jq --arg adv "$adv" '[.[] | select((((.name // .context // "") as $n | $n != "" and ($n | test($adv)))) | not) | select(.conclusion == null)] | length')
+>            bad=$(printf '%s' "$rollup" | jq --arg adv "$adv" '[.[] | select((((.name // .context // "") as $n | $n != "" and ($n | test($adv)))) | not) | select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED")] | length')
 >            total=$(printf '%s' "$rollup" | jq 'length')
 >            if [ "$bad" != "0" ]; then
 >                gh issue comment <ISSUE> --body "PR #<PR>: a required check failed after rebase-and-retest. Pausing for operator review."
