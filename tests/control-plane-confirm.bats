@@ -55,6 +55,18 @@ teardown() {
   [ ! -s "$GH_LOG" ]
 }
 
+@test "bootstrap --confirm rejects unsafe repo path names before gh" {
+  cd "$PROJECT_DIR"
+  run bash "$SCRIPT" bootstrap --confirm \
+    --owner test-owner \
+    --governance-repo ../unsafe \
+    --observatory-repo autospec-observatory
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"repo names must"* ]]
+  [ ! -s "$GH_LOG" ]
+}
+
 @test "bootstrap --confirm creates companion repos and writes control-plane config" {
   cd "$PROJECT_DIR"
   run bash "$SCRIPT" bootstrap --confirm \

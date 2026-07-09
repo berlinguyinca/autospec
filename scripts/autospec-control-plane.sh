@@ -56,6 +56,19 @@ repo_full_name() {
     printf '%s/%s' "$1" "$2"
 }
 
+validate_owner_and_repo_names() {
+    owner="$1"
+    governance_repo="$2"
+    observatory_repo="$3"
+    printf '%s' "$owner" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]{0,38}$'         || fail "--owner must be a GitHub owner slug containing only letters, numbers, or hyphens"
+    for repo_name in "$governance_repo" "$observatory_repo"; do
+        printf '%s' "$repo_name" | grep -Eq '^[A-Za-z0-9._-]+$'             || fail "repo names must contain only letters, numbers, dots, underscores, or hyphens"
+        case "$repo_name" in
+            .*|*/*|*'..'*) fail "repo names must not be hidden, contain slashes, or contain '..'" ;;
+        esac
+    done
+}
+
 repo_url_for() {
     full_name="$1"
     gh repo view "$full_name" --json url --jq .url 2>/dev/null || return 1
@@ -357,6 +370,7 @@ bootstrap() {
             || fail "--confirm requires --owner, --governance-repo, and --observatory-repo"
         [ -n "$owner" ] && [ -n "$governance_repo" ] && [ -n "$observatory_repo" ] \
             || fail "--confirm requires non-empty owner and repo names"
+        validate_owner_and_repo_names "$owner" "$governance_repo" "$observatory_repo"
         bootstrap_confirm "$owner" "$governance_repo" "$observatory_repo"
         return 0
     fi
