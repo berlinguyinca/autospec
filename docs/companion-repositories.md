@@ -68,9 +68,19 @@ sovereign control-plane design:
   security, accessibility, performance, skill generation, and release readiness;
 - JSON schemas under `schemas/` for policies, rules, project classes, and
   priority configuration;
-- project-class fixtures under `fixtures/projects/`;
+- project-class fixtures under `fixtures/projects/` for all six MVP classes
+  (`open-source`, `private-personal`, `private-company`, `client-project`,
+  `research`, and `sandbox`);
 - deterministic Bats validation placeholders under `tests/`;
 - authoring and operator docs under `docs/`.
+
+The rendered policy authoring contract is data-only: each policy pack declares a
+`policy_id`, `version`, `project_class`, `privacy_tier`, priority waterfall,
+merge rules, cost limits, evidence requirements, and referenced rule catalogs.
+Rule catalogs are YAML fixtures with deterministic check names; they are not
+executable policy scripts. The dry-run also emits `policy.schema.json` and
+`rule.schema.json` templates so companion-repository authors can validate policy
+shape before any hosted resolver exists.
 
 Example:
 
