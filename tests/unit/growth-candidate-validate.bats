@@ -63,3 +63,18 @@ JSON
   printf 'not json {{{' > "$TMP/b.json"
   run bash "$V" "$TMP/b.json"; [ "$status" -ne 0 ]
 }
+
+@test "rejects numeric title" {
+  f="$(valid)"; jq '.title=5' "$f" > "$TMP/b.json"
+  run bash "$V" "$TMP/b.json"; [ "$status" -ne 0 ]; [[ "$output" == *"title"* ]]
+}
+
+@test "rejects array norm_title" {
+  f="$(valid)"; jq '.norm_title=["x"]' "$f" > "$TMP/b.json"
+  run bash "$V" "$TMP/b.json"; [ "$status" -ne 0 ]; [[ "$output" == *"norm_title"* ]]
+}
+
+@test "rejects non-object JSON" {
+  printf '[1,2,3]' > "$TMP/b.json"
+  run bash "$V" "$TMP/b.json"; [ "$status" -ne 0 ]; [[ "$output" == *"object"* ]]
+}
