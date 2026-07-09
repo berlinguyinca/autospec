@@ -33,7 +33,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 for prompt in "$V2_PROMPT" "$LEGACY_PROMPT"; do
     name="$(basename "$(dirname "$prompt")")/$(basename "$prompt")"
-    for kw in "mergeStateStatus" "gh pr update-branch" "BEHIND" "DIRTY" "CLEAN" "AUTOSPEC_REBASE_MAX_ATTEMPTS"; do
+    for kw in "mergeStateStatus" "gh pr update-branch" "BEHIND" "DIRTY" "CLEAN" "AUTOSPEC_REBASE_MAX_ATTEMPTS" "AUTOSPEC_PR_ADVISORY_CHECKS" "AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS"; do
         grep -qF "$kw" "$prompt" || fail "$name: missing rebase-gate keyword '$kw'"
     done
 done
@@ -174,6 +174,14 @@ SLEEPSHIM
         if [ -n "${AUTOSPEC_REBASE_MAX_ATTEMPTS:-}" ]; then
             printf 'export AUTOSPEC_REBASE_MAX_ATTEMPTS=%s\n' "$AUTOSPEC_REBASE_MAX_ATTEMPTS"
         fi
+        # Advisory-CI config (issue #1636): propagate operator overrides so
+        # the gate's advisory-filter seam can be exercised per scenario.
+        if [ -n "${AUTOSPEC_PR_ADVISORY_CHECKS:-}" ]; then
+            printf 'export AUTOSPEC_PR_ADVISORY_CHECKS=%s\n' "$(printf '%q' "$AUTOSPEC_PR_ADVISORY_CHECKS")"
+        fi
+        if [ -n "${AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS:-}" ]; then
+            printf 'export AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS=%s\n' "$(printf '%q' "$AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS")"
+        fi
         printf '%s\n' "$GATE_BLOCK" | sed -e 's/<PR>/123/g' -e 's/<issue>/311/g'
     } > "$runner"
     chmod +x "$runner"
@@ -229,5 +237,42 @@ run_scenario "BEHIND" 1 0 "update-branch" "update_branch_fail" 1
 
 # (f) CI re-run reports FAILURE conclusion: comment + non-zero exit, no merge.
 run_scenario "BEHIND CLEAN" 1 0 "required check failed" "ci_failure" 0 '[{"conclusion":"FAILURE"}]'
+
+# --- Advisory-CI config (issue #1636) ---------------------------------------
+# The per-PR rebase-and-retest gate must honor an operator-declared advisory
+# check list (AUTOSPEC_PR_ADVISORY_CHECKS, defaulting to
+# AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS — the same regex the conductor's
+# main-health gate already uses), excluding matched checks from both the
+# `bad` and `pending` counts.
+
+# (g) Advisory check FAILURE, non-advisory SUCCESS, adv regex matches ⇒
+# tolerated (bad=0) — a clean, locally-validated PR can still admin-merge.
+AUTOSPEC_PR_ADVISORY_CHECKS='^TeamCity Unit Tests$' \
+    run_scenario "BEHIND CLEAN" 0 1 "" "advisory_failure_tolerated" 0 \
+    '[{"conclusion":"FAILURE","name":"TeamCity Unit Tests"},{"conclusion":"SUCCESS","name":"pytest"}]'
+
+# (h) Non-advisory check FAILURE still blocks even with an advisory regex
+# configured — regex only exempts the named advisory check, never a real one.
+AUTOSPEC_PR_ADVISORY_CHECKS='^TeamCity Unit Tests$' \
+    run_scenario "BEHIND CLEAN" 1 0 "required check failed" "non_advisory_failure_blocks" 0 \
+    '[{"conclusion":"FAILURE","name":"pytest"},{"conclusion":"SUCCESS","name":"TeamCity Unit Tests"}]'
+
+# (i) Advisory check merely pending + non-advisory SUCCESS ⇒ tolerated
+# (matches the pre-existing "pending optional checks" behavior).
+AUTOSPEC_PR_ADVISORY_CHECKS='^TeamCity Unit Tests$' \
+    run_scenario "BEHIND CLEAN" 0 1 "" "advisory_pending_tolerated" 0 \
+    '[{"conclusion":null,"name":"TeamCity Unit Tests"},{"conclusion":"SUCCESS","name":"pytest"}]'
+
+# (j) Regression guard: advisory config unset/empty ⇒ any FAILURE still
+# blocks exactly like today (default behavior unchanged).
+run_scenario "BEHIND CLEAN" 1 0 "required check failed" "advisory_unset_still_blocks" 0 \
+    '[{"conclusion":"FAILURE","name":"TeamCity Unit Tests"}]'
+
+# (k) AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS alone (no AUTOSPEC_PR_ADVISORY_CHECKS
+# override) is honored as the default advisory source — single shared
+# definition, not two divergent lists.
+AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS='^TeamCity Unit Tests$' \
+    run_scenario "BEHIND CLEAN" 0 1 "" "shared_main_health_ignore_checks_default" 0 \
+    '[{"conclusion":"FAILURE","name":"TeamCity Unit Tests"},{"conclusion":"SUCCESS","name":"pytest"}]'
 
 echo "PASS"

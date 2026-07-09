@@ -95,7 +95,7 @@ top GPT" at call time so the skill survives model-family churn.
 
 Admin-merge `auto-implement` PRs (`gh pr merge <#> --admin --squash --delete-branch`) when:
 - The full target-repo validation/test suite has passed locally after the branch is current with `main`.
-- All required CI checks pass (slow optional checks pending is acceptable only after the full local suite is green).
+- All **non-advisory** required CI checks pass — checks matching `AUTOSPEC_PR_ADVISORY_CHECKS` (default `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS`; e.g. self-hosted TeamCity) are advisory and may be pending **or failing** once the full local suite is green.
 - The self-review subagent returned `LGTM`.
 - PR closes an `auto-implement` issue from a `feat/*` branch.
 
