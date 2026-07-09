@@ -234,5 +234,11 @@ if [ "$TIER4_DRY_CYCLES" -lt "$DRY_CYCLES_THRESHOLD" ] 2>/dev/null; then
     exit 0
 fi
 
-emit 4 "park" "all tiers dry: Tier 1 backlog, Tier 1.5 open-issue promotion, Tier 2 local discovery, Tier 3 architecture/test coverage, and Tier 4 internet/operator discovery exhausted"
+# Never-idle contract (docs/specs/2026-07-06-autospec-autonomous-platform-design.md,
+# R1/R5, F1): a fully-dry cascade must NOT convergence-park. It enters idle-rescan
+# — the conductor arms resume and re-scans after AUTOSPEC_RESCAN_INTERVAL, keeping
+# the loop alive. Only resource/control park (spend ledger, usage governor, control
+# labels) or the AUTOSPEC_DISABLE_DISCOVERY_TIERS emergency kill-switch above may
+# exit; convergence-stop is forbidden.
+emit 4 "idle-rescan" "all tiers dry; idle and re-scan: Tier 1 backlog, Tier 1.5 open-issue promotion, Tier 2 local discovery, Tier 3 architecture/test coverage, and Tier 4 internet/operator discovery exhausted"
 exit 0

@@ -563,6 +563,9 @@ autospec_conductor_run() {
     local _poll="${CONDUCTOR_POLL_INTERVAL:-60}"
     local _dry="${CONDUCTOR_DRY_RUN:-0}"
     local _no_digest="${CONDUCTOR_NO_DIGEST:-0}"
+    # Never-idle: idle-rescan heartbeat interval (default 30m per the 2026-07-06
+    # platform design). A fully-dry cascade idles here rather than converge-stops.
+    local _rescan_interval="${AUTOSPEC_RESCAN_INTERVAL:-1800}"
 
     # Resolve helper script paths.
     local _control_ch="${_sdir}/autonomous-control-channel.sh"
@@ -1035,6 +1038,23 @@ fi'
             printf '[conductor] parking: %s\n' "$_reason" >&2
             _stop_reason="waterfall:park:${_reason}"
             break
+        elif [ "$_action" = "idle-rescan" ]; then
+            # ── Never-idle: value-floor / all-tiers-dry idle (F1) ─────────────
+            # A fully-dry cascade is NOT a convergence-stop. Arm resume context
+            # (belt-and-suspenders if the process dies mid-idle), notify async/
+            # informationally, sleep the re-scan interval, then CONTINUE the loop.
+            # Falls through (no break/continue) so resource-park (governor/spend)
+            # and the --max-cycles cap below still apply — idle never bypasses them.
+            printf '[conductor] idle-rescan: %s\n' "$_reason" >&2
+            _conductor_arm_resume \
+                "$_sdir" "$_repo" "$_conductor_session" \
+                "$_notify_sh" "idle-rescan:${_reason}"
+            _work_done=0
+            if [ "$_dry" != "1" ] && [ "$_rescan_interval" -gt 0 ] 2>/dev/null; then
+                printf '[conductor] idle-rescan: sleeping %ss before re-scan\n' \
+                    "$_rescan_interval" >&2
+                sleep "$_rescan_interval" || true
+            fi
         elif [ "$_action" = "promote-open-issues" ]; then
             # ── Tier 1.5: promote/decompose/classify existing open issues ─────
             # Auto-detect the promotion command when the operator hasn't pinned
