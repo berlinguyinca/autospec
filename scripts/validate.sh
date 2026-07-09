@@ -3235,6 +3235,7 @@ main() {
     check_reuse_lens_suite
     check_control_plane_bootstrap_contract
     check_growth_shared_contract
+    check_growth_candidate_pipeline_contract
 
 
 # Architecture fitness-function engine (issue #1533): the declarative registry
@@ -4737,6 +4738,34 @@ check_growth_shared_contract() {
     if [ "$_any" -eq 0 ]; then
         fail "tests/unit/growth-*.bats: no growth-shared contract tests found"
     fi
+}
+
+# growth candidate-pipeline contract: the four candidate-pipeline scripts
+# (schema validator, dedup-against-ledger, source-weighted ranker, fail-closed
+# verify harness) plus the end-to-end integration test must stay bash -n
+# clean and pass their bats coverage.
+check_growth_candidate_pipeline_contract() {
+    info "growth candidate pipeline: bash -n + tests/unit/growth-candidate-*.bats"
+    local s
+    for s in validate-growth-candidate growth-candidate-dedup growth-candidate-rank growth-candidate-verify; do
+        check_bash_syntax "skills/autospec-shared/scripts/$s.sh"
+        [ -f "skills/autospec-shared/scripts/$s.sh" ] \
+            || fail "skills/autospec-shared/scripts/$s.sh: required candidate-pipeline script missing"
+    done
+    if ! command -v bats >/dev/null 2>&1; then
+        info "  bats not available — skipping candidate-pipeline bats suites"
+        return 0
+    fi
+    local t
+    for t in tests/unit/growth-candidate-validate.bats tests/unit/growth-candidate-dedup.bats \
+             tests/unit/growth-candidate-rank.bats tests/unit/growth-candidate-verify.bats \
+             tests/unit/growth-candidate-pipeline-integration.bats; do
+        [ -f "$t" ] || fail "$t: candidate-pipeline bats coverage missing"
+        info "  running: $t"
+        bats "$t" >/tmp/validate-growth-candidate-suite.log 2>&1 \
+            || { cat /tmp/validate-growth-candidate-suite.log >&2; \
+                 fail "$t: failed (candidate-pipeline contract)"; }
+    done
 }
 
 main "$@"
