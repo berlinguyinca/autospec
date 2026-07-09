@@ -939,6 +939,13 @@ start_foreground() {
     export CONDUCTOR_SCRIPTS_DIR="${CONDUCTOR_SCRIPTS_DIR:-$SCRIPT_DIR}"
     export AUTOSPEC_SCRIPTS_DIR="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR}"
     export AUTOSPEC_RUN_CMD="${AUTOSPEC_RUN_CMD:-$SCRIPT_DIR/autospec-autonomous-run-drain.sh}"
+    # Tier-2/3/4 discovery must run the explore SKILL through the LLM harness
+    # (mirroring AUTOSPEC_RUN_CMD's drain wrapper). Without this, the loop falls
+    # back to bare `bash autospec-explore.sh --once`, which has no orchestrator
+    # to dispatch researcher subagents + fail-closed verify — every proposal is
+    # refused and discovery is structurally dry. Same `:-` guard so operators/
+    # tests can override.
+    export AUTOSPEC_EXPLORE_CMD="${AUTOSPEC_EXPLORE_CMD:-$SCRIPT_DIR/autospec-autonomous-explore-drain.sh}"
     export AUTOSPEC_STOP_FLAG_FILE="$STOP_FLAG_FILE"
     [ -n "$CONDUCTOR_MAX_CYCLES" ] && export CONDUCTOR_MAX_CYCLES
     [ -n "$CONDUCTOR_POLL_INTERVAL" ] && export CONDUCTOR_POLL_INTERVAL
