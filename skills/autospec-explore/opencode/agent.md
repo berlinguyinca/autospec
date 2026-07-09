@@ -154,6 +154,7 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
     [--research-sources <comma-list>] \
     [--no-internet] \
     [--internet-allowlist <comma-list>] \
+    [--no-userspace] \
     [--qa-gate] \
     [--qa-gate-pass-on-partial] \
     [--no-initial-handoff] \
@@ -181,6 +182,15 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
   competitor-research-appropriate domains (GitHub, official product
   docs, HackerNews, etc.). Forbidden by default: paywalled content,
   social media, pastebin-class sites.
+- `--no-userspace` — disable the userspace discovery sources (parity with
+  `--no-internet`): `userspace-usage`, `userspace-env`, and
+  `userspace-corpus`. These mine the operator's own local
+  `${AUTOSPEC_STATE_DIR:-$HOME/.autospec}` usage/env/corpus into the trend
+  ledger for the Stage-2 intersect. All three are untrusted **DATA**,
+  derived-only (sanitized excerpts, never raw copies), and pass through the
+  same fail-closed adversarial verify — this flag only suppresses their
+  ingest, it does not relax the trust boundary. Also honored by the
+  `discovery.userspace.opt_out` config key (`.autospec/autospec.yml`).
 - `--qa-gate` — **default OFF.** Run `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-qa-gate.sh` ONCE at loop
   termination (operator_stop / cap), before the final summary's
   promotion-readiness block, to gate the merge instructions on a sandbox-HEAD
@@ -320,6 +330,12 @@ Aggregation:
    - `internet-forums` = 0.4 (Stage-2 intersect discovery source — external
      forum/RSS trends, grounded only after the repo-domain intersect; see
      "Stage-2 intersect" below)
+   - `userspace-usage` = 0.6 (Stage-2 intersect discovery source — operator's
+     own local usage signals; untrusted derived DATA, gated by `--no-userspace`)
+   - `userspace-env` = 0.5 (Stage-2 intersect discovery source — operator's
+     local environment signals; untrusted derived DATA, gated by `--no-userspace`)
+   - `userspace-corpus` = 0.5 (Stage-2 intersect discovery source — operator's
+     local corpus signals; untrusted derived DATA, gated by `--no-userspace`)
    Inspect/rebuild the ledger and view current weights via `/autospec-explore-ledger`.
 3. **Filtering**: drop proposals that match recently-filed issue titles
    (last 7 days) to prevent oscillation.
@@ -555,7 +571,9 @@ internet researcher's fetched content (trust boundary).
 The discovery engine feeds explore through a **two-stage funnel** whose Stage 2
 lives here. Stage 1 (repo-independent harvest, out of this skill) accumulates
 normalized trend signals from external + userspace sources — the
-`internet-forums` source (weight **0.4**) plus the userspace sources — into the
+`internet-forums` source (weight **0.4**) plus the userspace sources
+(`userspace-usage` **0.6**, `userspace-env` **0.5**, `userspace-corpus`
+**0.5**; suppressible with `--no-userspace`) — into the
 durable cross-repo **trend ledger** (`.autospec/trends/ledger.jsonl`, one
 `jq -c` signal object per line). Stage 2 is where THIS repo enters:
 

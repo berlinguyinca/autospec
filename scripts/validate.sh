@@ -3203,6 +3203,7 @@ main() {
     check_explore_trio_worktree_assert
     check_autospec_explore_discovery_contract
     check_autospec_explore_stage2_intersect_contract
+    check_autospec_explore_userspace_roster_contract
     check_autospec_explore_style_normalization_contract
     check_autospec_explore_spec_first_contract
     check_autospec_explore_qa_gate_contract
@@ -3687,6 +3688,34 @@ check_autospec_explore_stage2_intersect_contract() {
             || fail "$trio: Stage-2 must state the untrusted-DATA trust boundary"
     done
     info "autospec-explore Stage-2 intersect contract: trio lock-step verified"
+}
+
+# autospec-explore userspace roster contract (#1658): the three userspace
+# discovery sources and the `--no-userspace` flag must be documented in lock-step
+# across all three trio bodies — the roster/source-weight priors `userspace-usage`
+# = 0.6, `userspace-env` = 0.5, `userspace-corpus` = 0.5, and a `--no-userspace`
+# flag with parity to `--no-internet`. A prose-only intermediate that skips the
+# derived mirrors fails this closed.
+check_autospec_explore_userspace_roster_contract() {
+    info "autospec-explore userspace roster contract (#1658)"
+    for trio in \
+        skills/autospec-explore/SKILL.md \
+        skills/autospec-explore/codex/prompt.md \
+        skills/autospec-explore/opencode/agent.md
+    do
+        [ -f "$trio" ] || fail "$trio: required adapter file missing"
+        grep -q -- '--no-userspace' "$trio" \
+            || fail "$trio: missing '--no-userspace' flag (parity with --no-internet)"
+        grep -qE '`userspace-usage` = \*\*?0\.6|userspace-usage.*0\.6|0\.6.*userspace-usage' "$trio" \
+            || fail "$trio: userspace-usage source must be weighted 0.6"
+        grep -qE '`userspace-env` = \*\*?0\.5|userspace-env.*0\.5|0\.5.*userspace-env' "$trio" \
+            || fail "$trio: userspace-env source must be weighted 0.5"
+        grep -qE '`userspace-corpus` = \*\*?0\.5|userspace-corpus.*0\.5|0\.5.*userspace-corpus' "$trio" \
+            || fail "$trio: userspace-corpus source must be weighted 0.5"
+        grep -qi 'untrusted' "$trio" \
+            || fail "$trio: userspace roster must state the untrusted-DATA trust boundary"
+    done
+    info "autospec-explore userspace roster contract: trio lock-step verified"
 }
 
 # autospec-explore style-normalization discovery contract: SPA/webapp visual
