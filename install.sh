@@ -219,6 +219,50 @@ install_autonomous_operator_commands() {
     info "install_autonomous_operator_commands: installed autonomous command wrappers in $autospec_bin_dir"
 }
 
+write_scanner_shim() {
+    target="$1"
+    skill="$2"
+
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' '# autospec premerge-gate scanner shim (installed by install.sh).'
+        printf '%s\n' '# The gate (autonomous-premerge-gate.sh) resolves this scanner with'
+        printf '%s\n' '# `command -v`; the real scanner is a harness skill, not a PATH command, so'
+        printf '%s\n' '# this shim runs it headlessly via omx (parity with the drain wrapper) and'
+        printf '%s\n' '# streams findings to stdout. It deliberately does NOT set'
+        printf '%s\n' '# AUTOSPEC_*_PRESENT_OVERRIDE, which would fake presence and skip the scan.'
+        printf '%s\n' 'set -eu'
+        printf '%s\n' 'REPO_DIR="${AUTOSPEC_REPO_DIR:-$PWD}"'
+        printf '%s\n' 'if ! command -v omx >/dev/null 2>&1; then'
+        printf '    echo "%s: omx not found on PATH; cannot invoke the %s skill" >&2\n' "$skill" "$skill"
+        printf '%s\n' '    exit 2'
+        printf '%s\n' 'fi'
+        # omx exec wraps `codex exec [OPTIONS] [PROMPT]`: fold any gate args (e.g.
+        # --branch <b>) INTO the single prompt so codex does not reject them as
+        # unknown options (which would silently empty the scan).
+        printf "PROMPT='\$%s'\n" "$skill"
+        printf '%s\n' 'if [ "$#" -gt 0 ]; then'
+        printf '%s\n' '    PROMPT="$PROMPT $*"'
+        printf '%s\n' 'fi'
+        printf '%s\n' 'exec omx exec --cd "$REPO_DIR" --dangerously-bypass-approvals-and-sandbox "$PROMPT"'
+    } > "$target"
+    chmod +x "$target"
+}
+
+install_scanner_shims() {
+    autospec_bin_dir="$HOME/.autospec/bin"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] install_scanner_shims: would install autospec-qa/autospec-secaudit premerge-gate shims in $autospec_bin_dir"
+        return 0
+    fi
+
+    mkdir -p "$autospec_bin_dir"
+    write_scanner_shim "$autospec_bin_dir/autospec-qa" "autospec-qa"
+    write_scanner_shim "$autospec_bin_dir/autospec-secaudit" "autospec-secaudit"
+    info "install_scanner_shims: installed premerge-gate scanner shims (autospec-qa, autospec-secaudit) in $autospec_bin_dir"
+}
+
 offer_gitignore() {
     # Offer to ignore autospec runtime scratch files while keeping the tracked
     # project config `.autospec/autospec.yml` visible to git.
@@ -1274,6 +1318,7 @@ copy_runtime_skill_scripts
 copy_schemas
 ensure_autospec_bin_path
 install_autonomous_operator_commands
+install_scanner_shims
 ensure_system_tools
 bootstrap_peer_ecosystems
 bootstrap_turbo
