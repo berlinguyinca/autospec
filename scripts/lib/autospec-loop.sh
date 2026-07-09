@@ -905,8 +905,11 @@ fi'
         # reused by the drain step below instead of re-querying.
         local _queue_ready_len=""
         local _queue_batch_len=""
+        local _queue_blocked_len=""
         local _queue_cap_reached="false"
         local _ready_count=""
+        local _all_blocked_count=0
+        local _all_blocked_refs=""
         if [ -n "$_list_ready" ] && [ -f "$_list_ready" ] && [ -n "$_repo" ]; then
             local _queue_json
             _queue_json="$(bash "$_list_ready" --repo "$_repo" --batch-size 1 2>/dev/null || true)"
@@ -919,14 +922,22 @@ fi'
             if printf '%s' "$_queue_json" | jq -e 'has("ready")' >/dev/null 2>&1; then
                 _queue_ready_len="$(printf '%s' "$_queue_json" | jq -r '.ready | length' 2>/dev/null || true)"
                 _queue_batch_len="$(printf '%s' "$_queue_json" | jq -r '.batch | length' 2>/dev/null || true)"
+                _queue_blocked_len="$(printf '%s' "$_queue_json" | jq -r '.blocked | length' 2>/dev/null || true)"
                 _queue_cap_reached="$(printf '%s' "$_queue_json" | jq -r '.worker_cap.reached // false' 2>/dev/null || echo false)"
                 case "$_queue_ready_len" in *[!0-9]*|'') _queue_ready_len="" ;; esac
                 case "$_queue_batch_len" in *[!0-9]*|'') _queue_batch_len="" ;; esac
+                case "$_queue_blocked_len" in *[!0-9]*|'') _queue_blocked_len="" ;; esac
                 if [ "$_queue_cap_reached" = "true" ]; then
                     # A capped cycle is not drainable work — never pins Tier-1.
                     _ready_count=0
                 else
                     _ready_count=$(( ${_queue_ready_len:-0} + ${_queue_batch_len:-0} ))
+                fi
+                if [ "${_ready_count:-0}" -eq 0 ] && [ "${_queue_blocked_len:-0}" -gt 0 ]; then
+                    _all_blocked_count="${_queue_blocked_len:-0}"
+                    _all_blocked_refs="$(printf '%s' "$_queue_json" \
+                        | jq -r '[.blocked[]? | "#\(.number) reason=\(.reason // "blocked") deps=\((.unmet_dependencies // []) | join(","))"] | join("; ")' \
+                        2>/dev/null || true)"
                 fi
             fi
         fi
@@ -998,6 +1009,26 @@ fi'
                 _tier15_dry_cycles=$((_tier15_dry_cycles + 1))
                 printf '[conductor] Tier 1.5 dry (tier15-dry-cycles=%s)
 '                     "$_tier15_dry_cycles" >&2
+                if [ "${_all_blocked_count:-0}" -gt 0 ] && [ "$_dry" != "1" ]; then
+                    printf '[conductor] autospec:needs-human — Tier-1 all-blocked unresolved after Tier 1.5 promotion (%s issues)%s\n' \
+                        "$_all_blocked_count" \
+                        "${_all_blocked_refs:+: ${_all_blocked_refs}}" >&2
+                    gh label create autospec:needs-human --repo "$_repo" --color d73a4a --force >/dev/null 2>&1 || true
+                    printf '%s\n' "$_queue_json" \
+                        | jq -r '.blocked[]?.number' 2>/dev/null \
+                        | while IFS= read -r _blocked_issue; do
+                            [ -n "$_blocked_issue" ] || continue
+                            gh issue edit "$_blocked_issue" --repo "$_repo" --add-label autospec:needs-human >/dev/null 2>&1 || true
+                        done
+                    if [ "$_no_digest" != "1" ]; then
+                        mkdir -p "${HOME}/.autospec" 2>/dev/null || true
+                        printf '%s Tier-1 all-blocked unresolved (%s issues): %s\n' \
+                            "$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown)" \
+                            "$_all_blocked_count" \
+                            "${_all_blocked_refs:-unknown blockers}" \
+                            >> "${HOME}/.autospec/autonomous-digest.md" 2>/dev/null || true
+                    fi
+                fi
             fi
 
         elif [ "$_tier" = "1" ] && [ "$_action" = "run-backlog" ]; then
@@ -1014,7 +1045,13 @@ fi'
                     _skip_tier1_cycle=1
                 fi
                 if [ "${_queue_ready_len:-0}" -eq 0 ] && [ "${_queue_batch_len:-0}" -eq 0 ]; then
-                    printf '[conductor] Tier-1 queue empty — dry cycle\n' >&2
+                    if [ "${_queue_blocked_len:-0}" -gt 0 ]; then
+                        printf '[conductor] Tier-1 all-blocked (%s issues) — dry cycle%s\n' \
+                            "$_queue_blocked_len" \
+                            "${_all_blocked_refs:+: ${_all_blocked_refs}}" >&2
+                    else
+                        printf '[conductor] Tier-1 queue empty — dry cycle\n' >&2
+                    fi
                     _dry_cycles=$((_dry_cycles + 1))
                     _skip_tier1_cycle=1
                 fi
