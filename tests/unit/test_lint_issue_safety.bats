@@ -47,6 +47,13 @@ setup() {
     echo "$output" | grep -q "production-data-destruction"
 }
 
+@test "lint-issue-safety: empty policy lists still preserve built-in production deletion block" {
+    run bash "$LINT" --config "$FIX/weakening-policy.yml" --title "Delete production data" "$FIX/malicious-production-delete.md"
+    [ "$status" -eq 2 ]
+    echo "$output" | grep -q "SAFETY_BLOCK"
+    echo "$output" | grep -q "production-data-destruction"
+}
+
 @test "lint-issue-safety: json mode emits decision field" {
     run bash "$LINT" --json --title "Clean old data" "$FIX/ambiguous-clean-data.md"
     [ "$status" -eq 1 ]

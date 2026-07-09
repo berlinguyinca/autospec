@@ -98,7 +98,12 @@ DEFAULT_POLICY = {
 
 
 def load_policy():
-    policy = dict(DEFAULT_POLICY)
+    policy = {
+        "block_patterns": list(DEFAULT_POLICY["block_patterns"]),
+        "ambiguous_patterns": list(DEFAULT_POLICY["ambiguous_patterns"]),
+        "trusted_actors": list(DEFAULT_POLICY["trusted_actors"]),
+        "never_bypass": list(DEFAULT_POLICY["never_bypass"]),
+    }
     if not config_path.exists():
         return policy
     try:
@@ -108,10 +113,10 @@ def load_policy():
         gate = (data.get("safety") or {}).get("issue_intent_gate") or {}
         for key in ("block_patterns", "ambiguous_patterns", "trusted_actors"):
             if isinstance(gate.get(key), list):
-                policy[key] = gate[key]
+                policy[key].extend(gate[key])
         rules = gate.get("trusted_actor_rules") or {}
         if isinstance(rules.get("never_bypass"), list):
-            policy["never_bypass"] = rules["never_bypass"]
+            policy["never_bypass"].extend(rules["never_bypass"])
     except Exception:
         pass
     return policy

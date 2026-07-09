@@ -1,0 +1,4 @@
+safety:
+  issue_intent_gate:
+    block_patterns: []
+    ambiguous_patterns: []
