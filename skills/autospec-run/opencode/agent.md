@@ -1460,7 +1460,13 @@ helper should be reported as a warning in Phase 6, not hidden.
 
 ## Advisor escalation
 
-When enabled (`AUTOSPEC_ADVISOR=on` and the gate id is in `AUTOSPEC_ADVISOR_GATES`), a bounded hard decision may be escalated to a harness-native TIER_A **advisor** that returns advice only. This is the [advisor strategy](https://claude.com/blog/the-advisor-strategy): a cheap executor runs the loop and pulls in the strong model only at the exact hard moment. The advisor never calls tools and produces no user-facing output. Off by default; `impl-haiku` is the first gate promoted (see `examples/model-profiles.yml`).
+A bounded hard decision may be escalated to a harness-native TIER_A **advisor** that returns advice only. This is the [advisor strategy](https://claude.com/blog/the-advisor-strategy): a cheap executor runs the loop and pulls in the strong model only at the exact hard moment. The advisor never calls tools and produces no user-facing output.
+
+Configured by the `advisor:` block in `.autospec/autospec.yml` — a single `policy: auto | on | off` plus a budget, NOT per-gate levers. **You never enumerate gates**; `advisor-escalate.sh precheck` resolves everything and returns `DISABLED` (exit 8) when a gate is not active.
+
+**Self-governance (`policy: auto`, the default).** Autospec decides which gates are active, like an architect adjusting a standing order from results. The active set is seeded at the low-risk `impl-haiku` gate and self-tuned by `advisor-govern.sh`: it promotes the next gate in a fixed safety order (`impl-haiku → retry → reviewer → impl-decision`) only when the run's quality ≥ baseline AND cost ≤ baseline over a minimum-sample floor, and retracts the last-added gate on regression (never below the seed). `policy: on` activates every gate within budget; `policy: off` is inert.
+
+**Governance tick (run once during the end-of-run sweep, `policy: auto` only).** Compute the batch's LGTM-first-pass rate and net cost/issue, then `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/advisor-govern.sh tick --telemetry .autospec/telemetry/advisor-escalate.jsonl --baseline-lgtm <b> --observed-lgtm <o> --baseline-cost <b> --observed-cost <o> --json` so the active gate set self-adjusts before the next run. Below the sample floor it holds. Use `advisor-report.sh` to inspect the telemetry behind the decision.
 
 **Protocol (every gate):**
 

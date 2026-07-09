@@ -182,11 +182,45 @@ The advisor returns exactly one JSON object, no tools, no user-facing prose:
 The prose contract instructs the executor to prompt the advisor with: *"Return
 advice only. You have no tools and produce no user-facing output."*
 
-**Cap:** `AUTOSPEC_ADVISOR_MAX_USES` (default `3`) per issue, counted in the
+**Cap:** `budget.max_calls_per_issue` (default `3`) per issue, counted in the
 per-issue state file, **shared across all four gates** so a single issue cannot
 run away. Cap-reached → the gate no-ops to today's behavior.
 
-## Telemetry & rollout/rollback gate
+## Configuration & self-governance
+
+Configuration is a single declarative block in `.autospec/autospec.yml` — **not**
+env-var levers (env vars survive only as CI/test overrides):
+
+```yaml
+advisor:
+  policy: auto          # auto | on | off  (default: auto)
+  budget:
+    max_calls_per_issue: 3
+    guidance_char_cap: 2800
+```
+
+The operator sets **intent (`policy`) + bounds (`budget`)**, mirroring the
+existing `improvement_budget` / `sweep` pattern. `advisor-config.sh` resolves
+these (precedence: env override > yaml > default); `advisor-escalate.sh` consumes
+the resolved values.
+
+**`policy: auto` — autospec self-governs the active gate set.** Rather than the
+operator enumerating gates, autospec decides which are active from its own
+telemetry, like an enterprise architect adjusting a standing order from results.
+`advisor-govern.sh` maintains an active set (state file `active-gates.json`),
+seeded at the low-risk `impl-haiku` gate, and ticked once per end-of-run sweep:
+
+- **Promote** the next gate in the fixed safety order
+  (`impl-haiku → retry → reviewer → impl-decision`) — one per tick — only when,
+  over a **minimum-sample floor**, quality ≥ baseline AND cost ≤ baseline.
+- **Retract** the last-added gate on regression (never below the `impl-haiku`
+  seed).
+- **Hold** below the sample floor.
+
+`policy: on` activates every gate within budget (no self-tuning); `policy: off`
+is inert. **Rollback** is one line: `policy: off`.
+
+## Telemetry
 
 Each `record` appends one line to `.autospec/telemetry/advisor-escalate.jsonl`:
 
@@ -194,33 +228,23 @@ Each `record` appends one line to `.autospec/telemetry/advisor-escalate.jsonl`:
 {"ts","issue","repo","gate","verdict","tokens_in","tokens_out","use_count","over_budget"}
 ```
 
-**Rollout order (full layer built, enabled incrementally):** the whole layer is
-behind `AUTOSPEC_ADVISOR` (default `off`), with per-gate enablement via
-`AUTOSPEC_ADVISOR_GATES=impl-haiku,retry,...`. All four gates ship, but
-**`impl-haiku` enables first and alone.** Promotion of the other three requires,
-over a rolling window (mirroring the `claude-haiku-cloud` trial gate in
-`examples/model-profiles.yml`):
-
-- **LGTM-first-pass rate** on the Haiku path ≥ its no-advisor baseline (quality
-  did not regress), **and**
-- **net cost/issue** (executor + advisor tokens) ≤ the Sonnet-solo baseline (the
-  economics held).
-
-`scripts/advisor-report.sh` summarizes the JSONL into that decision table.
-
-**Rollback** is one env flip: `AUTOSPEC_ADVISOR=off` (whole layer) or drop a gate
-from `AUTOSPEC_ADVISOR_GATES`.
+The quality/cost inputs to the governance tick are the batch's LGTM-first-pass
+rate and net cost/issue (executor + advisor tokens), compared to the no-advisor /
+Sonnet-solo baselines. `advisor-report.sh` summarizes the JSONL and computes the
+same `promote` predicate for inspection.
 
 ## Files touched
 
 New:
 
-- `skills/autospec-shared/scripts/advisor-escalate.sh`
-- `skills/autospec-shared/scripts/advisor-report.sh`
-- `skills/autospec-shared/tests/unit/advisor-escalate.bats`
-- `skills/autospec-shared/tests/unit/advisor-report.bats`
+- `skills/autospec-shared/scripts/advisor-escalate.sh` (+ `.bats`)
+- `skills/autospec-shared/scripts/advisor-report.sh` (+ `.bats`)
+- `skills/autospec-shared/scripts/advisor-config.sh` (+ `.bats`) — YAML config resolver
+- `skills/autospec-shared/scripts/advisor-govern.sh` (+ `.bats`) — self-governance ratchet
 
 Modified:
+
+- `.autospec/autospec.yml` — the declarative `advisor:` block (`policy` + `budget`).
 
 - `skills/autospec-run/SKILL.md` — advisor-invocation contract + `reviewer`/gate
   prose (**trio**: regenerate `codex/prompt.md` + `opencode/agent.md` via
@@ -264,7 +288,7 @@ line.
 - Fresh-install smoke: after `install.sh`, `advisor-escalate.sh` and
   `advisor-report.sh` resolve on `~/.autospec/scripts/` (ship-completeness).
 - `validate.sh` passes (trio lock-step + goldens consistent after derivation).
-- With `AUTOSPEC_ADVISOR=off`, every gate is a no-op and Phase 4 behavior is
+- With `advisor.policy: off`, every gate is a no-op and Phase 4 behavior is
   byte-identical to today.
 
 ## Decomposition guidance (for planning)
