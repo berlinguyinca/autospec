@@ -947,7 +947,13 @@ fi'
         local _all_blocked_refs=""
         if [ -n "$_list_ready" ] && [ -f "$_list_ready" ] && [ -n "$_repo" ]; then
             local _queue_json
-            _queue_json="$(bash "$_list_ready" --repo "$_repo" --batch-size 1 2>/dev/null || true)"
+            local _queue_batch_request="${AUTOSPEC_BATCH_SIZE:-1}"
+            case "$_queue_batch_request" in *[!0-9]*|'') _queue_batch_request=1 ;; esac
+            [ "$_queue_batch_request" -gt 0 ] || _queue_batch_request=1
+            if [ "${AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS:-0}" -gt "$_queue_batch_request" ] 2>/dev/null; then
+                _queue_batch_request="${AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS:-0}"
+            fi
+            _queue_json="$(bash "$_list_ready" --repo "$_repo" --batch-size "$_queue_batch_request" 2>/dev/null || true)"
             # Only trust the reading when the helper produced parseable JSON with
             # a .ready array. A transient helper/GitHub failure must NOT
             # masquerade as an empty backlog: leaving _ready_count empty omits

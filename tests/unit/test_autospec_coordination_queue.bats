@@ -307,6 +307,52 @@ EOF
     [ "$output" = "true" ]
 }
 
+@test "planner limits batch to remaining repo worker capacity" {
+    jq -n \
+      --arg b1 "$(body_with_path skills/a.sh)" \
+      --arg b2 "$(body_with_path skills/b.sh)" \
+      --arg b3 "$(body_with_path skills/c.sh)" \
+      '[
+        {number:10,title:"a",body:$b1,labels:[{name:"auto-implement"}]},
+        {number:11,title:"b",body:$b2,labels:[{name:"auto-implement"}]},
+        {number:12,title:"c",body:$b3,labels:[{name:"auto-implement"}]}
+      ]' > "$AUTO_JSON"
+    jq -n --arg body "$(body_with_path skills/active.sh)" \
+      '[{number:9,title:"active",body:$body,labels:[{name:"in-progress-by-bot"}]}]' > "$ACTIVE_JSON"
+
+    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=2 run bash "$SCRIPT" --repo testorg/testrepo --batch-size 3
+
+    [ "$status" -eq 0 ]
+    planner_output="$output"
+    run bash -c "printf '%s' '$planner_output' | jq -r '.worker_cap.remaining'"
+    [ "$output" = "1" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.batch | map(.number) | join(\",\")'"
+    [ "$output" = "10" ]
+}
+
+@test "planner explains serialized labels and keeps deep work one-at-a-time" {
+    jq -n \
+      --arg deep "$(body_with_path skills/deep.sh)" \
+      --arg safe "$(body_with_path skills/safe.sh)" \
+      '[
+        {number:40,title:"deep",body:$deep,labels:[{name:"auto-implement"},{name:"reasoning:deep"}]},
+        {number:41,title:"safe",body:$safe,labels:[{name:"auto-implement"}]}
+      ]' > "$AUTO_JSON"
+
+    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=3 run bash "$SCRIPT" --repo testorg/testrepo --batch-size 3
+
+    [ "$status" -eq 0 ]
+    planner_output="$output"
+    run bash -c "printf '%s' '$planner_output' | jq -r '.ready[] | select(.number == 40).parallel_safe'"
+    [ "$output" = "false" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.ready[] | select(.number == 40).serialization_reasons[0]'"
+    [ "$output" = "reasoning:deep" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.ready[] | select(.number == 41).parallel_safe'"
+    [ "$output" = "true" ]
+    run bash -c "printf '%s' '$planner_output' | jq -r '.batch | map(.number) | join(\",\")'"
+    [ "$output" = "40" ]
+}
+
 @test "planner excludes overlapping path skills/foo.sh" {
     jq -n --arg body "$(body_with_path skills/foo.sh)" \
       '[{number:20,title:"candidate",body:$body,labels:[{name:"auto-implement"}]}]' > "$AUTO_JSON"

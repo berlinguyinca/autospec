@@ -58,8 +58,16 @@ trap 'rm -f "$AUTO_FILE" "$ACTIVE_FILE" "$READY_FILE" "$BLOCKED_FILE" "$CONFLICT
 issue_list auto-implement > "$AUTO_FILE"
 issue_list in-progress-by-bot > "$ACTIVE_FILE"
 active_count="$(jq 'length' "$ACTIVE_FILE")"
+if [ "$max_repo_workers" -gt 0 ]; then
+    remaining_workers=$((max_repo_workers - active_count))
+    [ "$remaining_workers" -gt 0 ] || remaining_workers=0
+else
+    remaining_workers="$batch_size"
+fi
 if [ "$max_repo_workers" -gt 0 ] && [ "$active_count" -ge "$max_repo_workers" ]; then
     effective_batch_size=0
+elif [ "$max_repo_workers" -gt 0 ] && [ "$batch_size" -gt "$remaining_workers" ]; then
+    effective_batch_size="$remaining_workers"
 else
     effective_batch_size="$batch_size"
 fi
@@ -208,6 +216,15 @@ json_append() {
     mv "$file.tmp" "$file"
 }
 
+serialization_reasons_for_issue() {
+    jq -r '
+      [ (.labels // [])[]?.name
+        | select(. == "reasoning:deep" or . == "priority:high" or . == "regression" or . == "audit" or . == "release") ]
+      | unique
+      | .[]
+    '
+}
+
 active_paths_for_issue() {
     active_issue="$1"
     jq -c --argjson issue "$active_issue" '.[] | select(.number == $issue)' "$ACTIVE_FILE" | extract_paths
@@ -312,10 +329,18 @@ for number in $candidate_numbers; do
         continue
     fi
 
+    serialization_reasons="$(printf '%s\n' "$issue_json" | serialization_reasons_for_issue)"
+    serialization_reasons_json="$(printf '%s\n' "$serialization_reasons" | awk 'NF' | jq -R . | jq -s .)"
     object="$(printf '%s\n' "$issue_json" | jq \
         --argjson paths "$(printf '%s\n' "$candidate_paths" | jq -R . | jq -s .)" \
         --argjson non_blocking_refs "$non_blocking_refs" \
-        '. + {paths:$paths, non_blocking_refs:$non_blocking_refs}')"
+        --argjson serialization_reasons "$serialization_reasons_json" \
+        '. + {
+          paths:$paths,
+          non_blocking_refs:$non_blocking_refs,
+          serialization_reasons:$serialization_reasons,
+          parallel_safe:(($serialization_reasons | length) == 0)
+        }')"
     json_append "$READY_FILE" "$object"
 done
 
@@ -328,6 +353,7 @@ jq -n \
     --argjson effective_batch_size "$effective_batch_size" \
     --argjson max_repo_workers "$max_repo_workers" \
     --argjson active_count "$active_count" \
+    --argjson remaining_workers "$remaining_workers" \
     '{
       ready: ($ready[0] | sort_by(.number)),
       blocked: ($blocked[0] | sort_by(.number)),
@@ -336,7 +362,14 @@ jq -n \
       worker_cap: {
         max_repo_workers: $max_repo_workers,
         active_count: $active_count,
+        remaining: $remaining_workers,
         reached: (($max_repo_workers > 0) and ($active_count >= $max_repo_workers))
       },
-      batch: ($ready[0] | sort_by(.number) | .[:$effective_batch_size])
+      batch: (
+        ($ready[0] | sort_by(.number)) as $sorted
+        | if $effective_batch_size == 0 then []
+          elif ($sorted[0].parallel_safe == false) then [$sorted[0]]
+          else [$sorted[] | select(.parallel_safe != false)][: $effective_batch_size]
+          end
+      )
     }'

@@ -1,7 +1,7 @@
 # Autospec Autonomous Throughput Optimization
 
 **Date:** 2026-07-08
-**Status:** draft for implementation
+**Status:** implemented
 **Builds on:** `docs/specs/2026-07-06-autospec-autonomous-platform-design.md`, `docs/specs/2026-07-08-autospec-sovereign-control-plane-design.md`
 
 ## Goal
@@ -97,11 +97,20 @@ Acceptance criteria:
 - `AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS` controls the cap.
 - The queue explains why each issue is parallel-safe or serialized.
 
-## First Implementation Slice
+## Implementation Status
 
-Implement Phase 1 now. It is read-only/status-only, improves operator feedback
-immediately, and creates the measurement surface needed for later reclaim and
-parallel scheduling.
+- Phase 1 is implemented by `autospec-run-status.sh`, including
+  `claimed_without_heartbeat`.
+- Phase 2 is implemented by the existing watchdog, run-state, claim, and
+  release helpers; validation covers stale claim reclaim, open-PR hold, same-host
+  liveness preservation, and absent run-state reclaim.
+- Phase 3 is implemented through the existing `ci-wait.sh` sentinel contract and
+  conductor batch selection: CI-waiting work remains claimed while remaining
+  worker capacity can select unrelated safe issues.
+- Phase 4 is implemented by `list-ready-issues.sh` and the conductor: batch
+  selection is capped by `AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS`, excludes path
+  conflicts, and serializes `reasoning:deep`, `priority:high`, `regression`,
+  `audit`, and `release` work with explicit reasons.
 
 ## Validation
 

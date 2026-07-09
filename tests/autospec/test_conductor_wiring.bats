@@ -884,3 +884,36 @@ EOF
   # (neither 0 nor any value) so the waterfall keeps its naive-gh fallback.
   ! grep -q -- '--backlog-count' "$waterfall_args_log"
 }
+
+@test "conductor: asks list-ready-issues for remaining worker-cap batch size" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+
+  local list_ready_args_log="$TEST_TMP/list-ready-args.log"
+  _install_stub "list-ready-issues.sh" \
+    "printf '%s\n' \"\$*\" >> '$list_ready_args_log'; printf '{\"ready\":[{\"number\":1},{\"number\":2},{\"number\":3}],\"blocked\":[],\"claimed\":[{\"number\":9}],\"conflicts\":[],\"worker_cap\":{\"max_repo_workers\":3,\"active_count\":1,\"remaining\":2,\"reached\":false},\"batch\":[{\"number\":1},{\"number\":2}]}\n'"
+
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '\''{"tier":1,"action":"run-backlog","reason":"test"}\n'\'''
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; main-health) printf "DECISION:continue\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+  export AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=3
+  export AUTOSPEC_RUN_CMD="true"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  grep -q -- '--batch-size 3' "$list_ready_args_log"
+}
