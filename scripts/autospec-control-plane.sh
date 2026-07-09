@@ -217,7 +217,7 @@ policy_resolution:
 EOF_FIXTURE
 }
 
-render_governance_file_templates() {
+render_schema_templates() {
     governance_repo="$1"
 
     render_file_header "$governance_repo" "schemas/policy.schema.json"
@@ -228,6 +228,10 @@ render_governance_file_templates() {
     render_project_class_schema
     render_file_header "$governance_repo" "schemas/priority.schema.json"
     render_priority_schema
+}
+
+render_policy_templates() {
+    governance_repo="$1"
 
     render_file_header "$governance_repo" "policies/open-source-maintainer-default.yml"
     render_policy_pack "open-source-maintainer-default" "open-source" "summary" "false" "25" "security,ci-health,tests,docs,release-hygiene,accessibility"
@@ -241,6 +245,10 @@ render_governance_file_templates() {
     render_policy_pack "research-default" "research" "summary" "false" "50" "reproducibility,notebooks,data-safety,provenance,result-docs"
     render_file_header "$governance_repo" "policies/sandbox-default.yml"
     render_policy_pack "sandbox-default" "sandbox" "evidence" "true" "10" "experimentation,debug-capture,cleanup,cost-limits"
+}
+
+render_rule_templates() {
+    governance_repo="$1"
 
     render_file_header "$governance_repo" "rules/qa.yml"
     render_rule_catalog "qa" "qa-runtime-proof" "evidence" "runtime proof exists for runtime claims"
@@ -258,6 +266,10 @@ render_governance_file_templates() {
     render_rule_catalog "skill-generation" "skill-generation-merge-gate" "merge" "generated skills pass lock-step validation before merge"
     render_file_header "$governance_repo" "rules/release-readiness.yml"
     render_rule_catalog "release-readiness" "release-readiness-merge-gate" "merge" "release PRs require green validation before merge"
+}
+
+render_project_fixtures() {
+    governance_repo="$1"
 
     render_file_header "$governance_repo" "fixtures/projects/open-source-cli.yml"
     render_project_fixture "open-source-cli" "open-source" "open-source-maintainer-default"
@@ -271,6 +283,15 @@ render_governance_file_templates() {
     render_project_fixture "research-notebook" "research" "research-default"
     render_file_header "$governance_repo" "fixtures/projects/sandbox-lab.yml"
     render_project_fixture "sandbox-lab" "sandbox" "sandbox-default"
+}
+
+render_governance_file_templates() {
+    governance_repo="$1"
+
+    render_schema_templates "$governance_repo"
+    render_policy_templates "$governance_repo"
+    render_rule_templates "$governance_repo"
+    render_project_fixtures "$governance_repo"
 }
 
 render_governance_dry_run() {
