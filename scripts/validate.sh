@@ -3238,6 +3238,8 @@ main() {
     check_reuse_lens_suite
     check_control_plane_bootstrap_contract
     check_growth_shared_contract
+    check_growth_candidate_pipeline_contract
+    check_grow_define_contract
 
 
 # Architecture fitness-function engine (issue #1533): the declarative registry
@@ -4928,6 +4930,71 @@ check_growth_shared_contract() {
     if [ "$_any" -eq 0 ]; then
         fail "tests/unit/growth-*.bats: no growth-shared contract tests found"
     fi
+}
+
+# growth candidate-pipeline contract: the four candidate-pipeline scripts
+# (schema validator, dedup-against-ledger, source-weighted ranker, fail-closed
+# verify harness) plus the end-to-end integration test must stay bash -n
+# clean and pass their bats coverage.
+check_growth_candidate_pipeline_contract() {
+    info "growth candidate pipeline: bash -n + tests/unit/growth-candidate-*.bats"
+    local s
+    for s in validate-growth-candidate growth-candidate-dedup growth-candidate-rank growth-candidate-verify; do
+        check_bash_syntax "skills/autospec-shared/scripts/$s.sh"
+        [ -f "skills/autospec-shared/scripts/$s.sh" ] \
+            || fail "skills/autospec-shared/scripts/$s.sh: required candidate-pipeline script missing"
+    done
+    if ! command -v bats >/dev/null 2>&1; then
+        info "  bats not available — skipping candidate-pipeline bats suites"
+        return 0
+    fi
+    local t
+    for t in tests/unit/growth-candidate-validate.bats tests/unit/growth-candidate-dedup.bats \
+             tests/unit/growth-candidate-rank.bats tests/unit/growth-candidate-verify.bats \
+             tests/unit/growth-candidate-pipeline-integration.bats; do
+        [ -f "$t" ] || fail "$t: candidate-pipeline bats coverage missing"
+        info "  running: $t"
+        bats "$t" >/tmp/validate-growth-candidate-suite.log 2>&1 \
+            || { cat /tmp/validate-growth-candidate-suite.log >&2; \
+                 fail "$t: failed (candidate-pipeline contract)"; }
+    done
+}
+
+# grow-define contract: the /autospec-grow-define trio (lens roster +
+# deterministic pipeline orchestration) must stay lock-step derived, carry
+# its required structural sections, and pass its bats coverage including the
+# mock-driven end-to-end smoke test.
+check_grow_define_contract() {
+    info "grow-define: lock-step + goldens + structural sections + smoke"
+    local d="skills/autospec-grow-define"
+    local rc=0
+    # scripts bash -n
+    for s in grow-define-pipeline grow-define-file-issues; do
+        check_bash_syntax "skills/autospec-shared/scripts/$s.sh"
+    done
+    # trio lock-step derivation
+    if ! scripts/derive-trio.sh "$d" --check >/dev/null 2>&1; then
+        fail "$d: trio drift — run derive-trio.sh --in-place + gen-skill-goldens.sh"
+    fi
+    # required structural sections across the trio
+    local t
+    for t in SKILL.md codex/prompt.md opencode/agent.md; do
+        [ -f "$d/$t" ] || { fail "$d/$t: missing"; continue; }
+        grep -q '^## Self-update mode' "$d/$t" || fail "$d/$t: missing Self-update mode"
+        grep -q '^## Lens roster' "$d/$t"      || fail "$d/$t: missing Lens roster"
+        grep -qF '**Model tier:**' "$d/$t"     || fail "$d/$t: missing **Model tier:** directive"
+    done
+    # all 6 lenses named in SKILL.md
+    for lens in technical-seo keyword-gap content-opportunity community directory backlink; do
+        grep -q "$lens" "$d/SKILL.md" || fail "$d/SKILL.md: lens $lens not named in roster"
+    done
+    if command -v bats >/dev/null 2>&1; then
+        for b in tests/unit/grow-define-pipeline.bats tests/unit/grow-define-file-issues.bats tests/autospec-grow-define/smoke.bats; do
+            info "  running: $b"
+            bats "$b" >/tmp/validate-grow-define.log 2>&1 || { cat /tmp/validate-grow-define.log >&2; fail "$b: failed"; }
+        done
+    fi
+    return "$rc"
 }
 
 main "$@"
