@@ -5,8 +5,8 @@ setup() {
   SCRIPT="${BATS_TEST_DIRNAME}/../../scripts/advisor-escalate.sh"
   TMP="$(mktemp -d)"
   export AUTOSPEC_ADVISOR_STATE_DIR="$TMP/state"
-  export AUTOSPEC_ADVISOR=on
-  export AUTOSPEC_ADVISOR_GATES=impl-haiku,retry,reviewer,impl-decision
+  export AUTOSPEC_CONFIG_FILE="$TMP/none.yml"   # hermetic: no repo autospec.yml
+  export AUTOSPEC_ADVISOR_POLICY=on             # policy override (all gates enabled)
   export AUTOSPEC_HARNESS=claude
   printf 'How should I resolve the ambiguous contract?' > "$TMP/q.txt"
   printf 'Issue #42 context here.' > "$TMP/c.txt"
@@ -24,19 +24,29 @@ teardown() { rm -rf "$TMP"; }
   echo "$output" | grep -q '"use_count":1'
 }
 
-@test "precheck disabled when AUTOSPEC_ADVISOR=off exits 8" {
-  export AUTOSPEC_ADVISOR=off
+@test "precheck disabled when policy is off exits 8" {
+  export AUTOSPEC_ADVISOR_POLICY=off
   run bash "$SCRIPT" --phase precheck --issue 42 --repo acme/widget \
     --gate impl-haiku --question-file "$TMP/q.txt" --context-file "$TMP/c.txt" --json
   [ "$status" -eq 8 ]
   echo "$output" | grep -q '"decision":"DISABLED"'
 }
 
-@test "precheck disabled when gate not in AUTOSPEC_ADVISOR_GATES exits 8" {
-  export AUTOSPEC_ADVISOR_GATES=impl-haiku
+@test "precheck (policy auto) disabled when gate not in the governed active set" {
+  export AUTOSPEC_ADVISOR_POLICY=auto
+  export AUTOSPEC_ADVISOR_ACTIVE_GATES=impl-haiku
   run bash "$SCRIPT" --phase precheck --issue 42 --repo acme/widget \
     --gate reviewer --question-file "$TMP/q.txt" --context-file "$TMP/c.txt" --json
   [ "$status" -eq 8 ]
+}
+
+@test "precheck (policy auto) enabled for a gate in the governed active set" {
+  export AUTOSPEC_ADVISOR_POLICY=auto
+  export AUTOSPEC_ADVISOR_ACTIVE_GATES=impl-haiku,retry
+  run bash "$SCRIPT" --phase precheck --issue 42 --repo acme/widget \
+    --gate retry --question-file "$TMP/q.txt" --context-file "$TMP/c.txt" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"decision":"GO"'
 }
 
 # ── precheck: cap ─────────────────────────────────────────────────────────────

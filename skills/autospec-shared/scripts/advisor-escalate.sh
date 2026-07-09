@@ -39,11 +39,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+advisor_config() { "$SCRIPT_DIR/advisor-config.sh" --key "$1" 2>/dev/null || printf ''; }
+
 STATE_ROOT="${AUTOSPEC_ADVISOR_STATE_DIR:-$HOME/.autospec/advisor-state}"
-MAX_USES="${AUTOSPEC_ADVISOR_MAX_USES:-3}"
-MAX_CHARS="${AUTOSPEC_ADVISOR_MAX_CHARS:-2800}"
-ENABLED="${AUTOSPEC_ADVISOR:-off}"
-GATES="${AUTOSPEC_ADVISOR_GATES:-impl-haiku}"
+# Config-resolved (advisor: block in .autospec/autospec.yml; env = CI/test override).
+POLICY="$(advisor_config policy)"; POLICY="${POLICY:-auto}"
+MAX_USES="$(advisor_config budget.max_calls_per_issue)"; MAX_USES="${MAX_USES:-3}"
+MAX_CHARS="$(advisor_config budget.guidance_char_cap)"; MAX_CHARS="${MAX_CHARS:-2800}"
 HARNESS="${AUTOSPEC_HARNESS:-claude}"
 
 # Numeric issue guard — prevents path traversal / injection in the state path.
@@ -67,10 +70,26 @@ read_use_count() {
   printf '%s' "$v"
 }
 
+# The governed active gate set under `policy: auto` (self-tuned by
+# advisor-govern.sh). AUTOSPEC_ADVISOR_ACTIVE_GATES is a CI/test override.
+governed_active() {
+  if [ -n "${AUTOSPEC_ADVISOR_ACTIVE_GATES:-}" ]; then
+    printf '%s' "$AUTOSPEC_ADVISOR_ACTIVE_GATES" | tr ',' ' '
+    return
+  fi
+  "$SCRIPT_DIR/advisor-govern.sh" show 2>/dev/null | jq -r '.active | join(" ")' 2>/dev/null || printf 'impl-haiku'
+}
+
+# Gate resolution follows the single policy knob, never a lever list:
+#   off  → never; on → always; auto → gate is in the governed active set.
 gate_enabled() {
-  # word-boundary membership test on a comma list, no regex injection
-  case ",${GATES}," in
-    *",${GATE},"*) return 0 ;;
+  case "$POLICY" in
+    off) return 1 ;;
+    on) return 0 ;;
+    auto)
+      local active; active="$(governed_active)"
+      case " $active " in *" $GATE "*) return 0 ;; *) return 1 ;; esac
+      ;;
     *) return 1 ;;
   esac
 }
@@ -94,10 +113,7 @@ telemetry_file() {
 }
 
 do_precheck() {
-  if [ "$ENABLED" != "on" ]; then
-    printf '{"decision":"DISABLED"}\n'
-    exit 8
-  fi
+  # Single gate decision: policy off/on/auto + governed active set.
   if ! gate_enabled; then
     printf '{"decision":"DISABLED"}\n'
     exit 8
