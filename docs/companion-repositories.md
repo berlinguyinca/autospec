@@ -96,14 +96,21 @@ sovereign control-plane design:
 
 - `autospec-observatory/apps/api/` and `apps/web/` README seed files for the
   future API-key authenticated event ingestion service and operator UI;
+- `apps/api/src/auth/api-keys.ts` with the scoped API-key model. Keys include
+  `owner_org_id`, project and repository allow lists, `privacy_tier_limit`, and
+  the MVP scopes `events:write`, `events:read`, `projects:read`,
+  `projects:write`, `runs:read`, `costs:read`, and `admin:keys`;
+- `apps/api/src/routes.ts` with the v1 route list, including
+  `GET /v1/runs/:id/progress`. Progress snapshots expose `progress_percent`,
+  `phase`, current item, queue counts, elapsed time, ETA, planned next step, and
+  `last_event_id`, and reads are scoped to the key's org/project boundaries;
 - shared package seed paths under `packages/event-schema/`, `packages/db/`, and
   `packages/ui/`;
-- `migrations/README.md`, explicitly noting that this dry run does not generate
-  live database migrations;
+- deterministic migration seeds for `orgs`, `projects`, `runs`, and `events`;
 - `docs/local-operations.md` for local operator notes;
 - `docker-compose.yml` with a local `postgres:16` service named
   `observatory-postgres`.
 
 This command remains dry-run-only in the current MVP slice; observatory service
-startup, live API implementation, and database migrations remain separate
+startup, live API implementation, and client event emitters remain separate
 follow-up work.
