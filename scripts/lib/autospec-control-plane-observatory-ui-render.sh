@@ -2,6 +2,15 @@
 # UI-specific observatory render helpers.
 
 render_observatory_web_app_shell() {
+    render_observatory_ui_types
+    render_observatory_ui_polling
+    render_observatory_ui_progress_bar
+    render_observatory_ui_live_fleet
+    render_observatory_ui_run_progress
+    render_observatory_ui_page_stubs
+}
+
+render_observatory_ui_types() {
     cat <<'TSX'
 type PollingEnvelope<T> = {
   data: T;
@@ -41,6 +50,11 @@ export const OPERATOR_UI_PAGES = [
   "Policy Decision Inspector",
   "Cost / Duration / Outcome Reports",
 ] as const;
+TSX
+}
+
+render_observatory_ui_polling() {
+    cat <<'TSX'
 
 async function pollJson<T>(path: string): Promise<PollingEnvelope<T>> {
   const response = await fetch(path, { headers: { accept: "application/json" } });
@@ -80,6 +94,11 @@ export function scheduleOperatorPoll<T>(
     if (timer) clearTimeout(timer);
   };
 }
+TSX
+}
+
+render_observatory_ui_progress_bar() {
+    cat <<'TSX'
 
 function formatMs(ms: number): string {
   const minutes = Math.floor(ms / 60000);
@@ -107,6 +126,11 @@ export function ProgressBar({ progress }: { progress: RunProgressSnapshot }) {
     </div>
   );
 }
+TSX
+}
+
+render_observatory_ui_live_fleet() {
+    cat <<'TSX'
 
 export function LiveFleet({ runs }: { runs: RunProgressSnapshot[] }) {
   return (
@@ -114,27 +138,13 @@ export function LiveFleet({ runs }: { runs: RunProgressSnapshot[] }) {
       <h1 id="live-fleet-heading">Live Fleet</h1>
       <p>10-second polling via poll_after_ms keeps active runs current without realtime streams.</p>
       <table>
-        <thead>
-          <tr>
-            <th>Repo</th>
-            <th>Status</th>
-            <th>Current item</th>
-            <th>Phase</th>
-            <th>Queue counts</th>
-            <th>ETA</th>
-            <th>Progress</th>
-          </tr>
-        </thead>
+        <thead><tr><th>Repo</th><th>Status</th><th>Current item</th><th>Phase</th><th>Queue counts</th><th>ETA</th><th>Progress</th></tr></thead>
         <tbody>
           {runs.map((run) => (
             <tr key={run.run_id}>
-              <td>{run.repo_full_name}</td>
-              <td>{run.status}</td>
-              <td>{run.current_item?.title ?? "No active item"}</td>
-              <td>{run.phase}</td>
+              <td>{run.repo_full_name}</td><td>{run.status}</td><td>{run.current_item?.title ?? "No active item"}</td><td>{run.phase}</td>
               <td>{`${run.queue.ready} ready / ${run.queue.claimed} claimed / ${run.queue.blocked} blocked / ${run.queue.remaining} remaining`}</td>
-              <td>{run.estimated_completion_at ?? "ETA unavailable"}</td>
-              <td><ProgressBar progress={run} /></td>
+              <td>{run.estimated_completion_at ?? "ETA unavailable"}</td><td><ProgressBar progress={run} /></td>
             </tr>
           ))}
         </tbody>
@@ -142,6 +152,11 @@ export function LiveFleet({ runs }: { runs: RunProgressSnapshot[] }) {
     </section>
   );
 }
+TSX
+}
+
+render_observatory_ui_run_progress() {
+    cat <<'TSX'
 
 export function RunProgress({ progress }: { progress: RunProgressSnapshot }) {
   return (
@@ -149,20 +164,13 @@ export function RunProgress({ progress }: { progress: RunProgressSnapshot }) {
       <h2 id="run-progress-heading">Run Progress</h2>
       <ProgressBar progress={progress} />
       <dl>
-        <dt>Current phase</dt>
-        <dd>{progress.phase}</dd>
-        <dt>Current item</dt>
-        <dd>{progress.current_item?.title ?? "No active item"}</dd>
-        <dt>Item elapsed time</dt>
-        <dd>{formatMs(progress.current_item_elapsed_ms)}</dd>
-        <dt>Queue counts</dt>
-        <dd>{`${progress.queue.ready} ready, ${progress.queue.claimed} claimed, ${progress.queue.blocked} blocked, ${progress.queue.remaining} remaining`}</dd>
-        <dt>ETA</dt>
-        <dd>{progress.estimated_completion_at ?? "unknown"} ({progress.eta_confidence} confidence)</dd>
-        <dt>Planned next step</dt>
-        <dd>{progress.planned_next_step ?? "waiting for the next event"}</dd>
-        <dt>Last estimate event</dt>
-        <dd>{progress.last_event_summary ?? progress.last_event_id ?? "none"}</dd>
+        <dt>Current phase</dt><dd>{progress.phase}</dd>
+        <dt>Current item</dt><dd>{progress.current_item?.title ?? "No active item"}</dd>
+        <dt>Item elapsed time</dt><dd>{formatMs(progress.current_item_elapsed_ms)}</dd>
+        <dt>Queue counts</dt><dd>{`${progress.queue.ready} ready, ${progress.queue.claimed} claimed, ${progress.queue.blocked} blocked, ${progress.queue.remaining} remaining`}</dd>
+        <dt>ETA</dt><dd>{progress.estimated_completion_at ?? "unknown"} ({progress.eta_confidence} confidence)</dd>
+        <dt>Planned next step</dt><dd>{progress.planned_next_step ?? "waiting for the next event"}</dd>
+        <dt>Last estimate event</dt><dd>{progress.last_event_summary ?? progress.last_event_id ?? "none"}</dd>
       </dl>
       {progress.stale_heartbeat_warning || progress.status === "failed" ? (
         <aside role="alert">stale/error state: {progress.stale_heartbeat_warning ?? progress.status}</aside>
@@ -170,6 +178,11 @@ export function RunProgress({ progress }: { progress: RunProgressSnapshot }) {
     </section>
   );
 }
+TSX
+}
+
+render_observatory_ui_page_stubs() {
+    cat <<'TSX'
 
 export function RunTimeline() {
   return <section><h2>Run Timeline</h2><p>Chronological activity stream from /v1/runs/:id/timeline.</p></section>;
