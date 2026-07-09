@@ -92,6 +92,21 @@ make_git_repo() {
   [ ! -f "$CAPTURE_FILE" ]
 }
 
+@test "start: reported invocation — --repo matching slug, no --repo-dir, from inside the checkout resolves to cwd with no warning" {
+  local checkout="$TEST_TMP/checkout"
+  make_git_repo "$checkout" "https://github.com/acme/widget.git"
+
+  run bash -c "cd '$checkout' && bash '$CLI' start --repo acme/widget --force"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"autospec-autonomous started"* ]]
+  [[ "$output" != *"warning"* ]]
+  local captured expected
+  captured="$(cd "$(cat "$CAPTURE_FILE")" && pwd -P)"
+  expected="$(cd "$checkout" && pwd -P)"
+  [ "$captured" = "$expected" ]
+}
+
 @test "start: --repo slug not in checkout origin warns but still launches" {
   local checkout="$TEST_TMP/checkout"
   make_git_repo "$checkout" "https://github.com/acme/widget.git"
