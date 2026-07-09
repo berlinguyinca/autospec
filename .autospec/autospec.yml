@@ -63,6 +63,18 @@ continuous_improvement:
     create_or_update_specs: true
     file_issues: true
     route_fixes_via_autospec_run: true
+# Advisor pattern: a cheap Phase 4 executor escalates bounded hard decisions to a
+# harness-native TIER_A advisor (advice-only). You set intent + bounds; autospec
+# self-governs which gates are active. policy: auto | on | off.
+#   auto — autospec promotes/retracts gates from its own telemetry (sweep loop),
+#          seeded at the low-risk impl-haiku gate, within budget.
+#   on   — all gates active within budget (no self-tuning).
+#   off  — inert.
+advisor:
+  policy: auto
+  budget:
+    max_calls_per_issue: 3
+    guidance_char_cap: 2800
 documentation:
   enabled: true
   audiences:

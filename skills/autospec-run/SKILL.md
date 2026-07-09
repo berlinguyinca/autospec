@@ -1459,6 +1459,29 @@ file deduplicated `quality-audit` follow-up issues; otherwise it records
 unfiled residual risks in the JSON/Markdown artifacts. Failures of the audit
 helper should be reported as a warning in Phase 6, not hidden.
 
+## Advisor escalation
+
+A bounded hard decision may be escalated to a harness-native TIER_A **advisor** that returns advice only. This is the [advisor strategy](https://claude.com/blog/the-advisor-strategy): a cheap executor runs the loop and pulls in the strong model only at the exact hard moment. The advisor never calls tools and produces no user-facing output.
+
+Configured by the `advisor:` block in `.autospec/autospec.yml` — a single `policy: auto | on | off` plus a budget, NOT per-gate levers. **You never enumerate gates**; `advisor-escalate.sh precheck` resolves everything and returns `DISABLED` (exit 8) when a gate is not active.
+
+**Self-governance (`policy: auto`, the default).** Autospec decides which gates are active, like an architect adjusting a standing order from results. The active set is seeded at the low-risk `impl-haiku` gate and self-tuned by `advisor-govern.sh`: it promotes the next gate in a fixed safety order (`impl-haiku → retry → reviewer → impl-decision`) only when the run's quality ≥ baseline AND cost ≤ baseline over a minimum-sample floor, and retracts the last-added gate on regression (never below the seed). `policy: on` activates every gate within budget; `policy: off` is inert.
+
+**Governance tick (run once during the end-of-run sweep, `policy: auto` only).** Compute the batch's LGTM-first-pass rate and net cost/issue, then `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/advisor-govern.sh tick --telemetry .autospec/telemetry/advisor-escalate.jsonl --baseline-lgtm <b> --observed-lgtm <o> --baseline-cost <b> --observed-cost <o> --json` so the active gate set self-adjusts before the next run. Below the sample floor it holds. Use `advisor-report.sh` to inspect the telemetry behind the decision.
+
+**Protocol (every gate):**
+
+1. Write the decision-scoped question to a temp file and the minimal relevant context to a second temp file. Do NOT dump the whole issue/diff — a bloated payload inflates `tokens_in` and erases the cost win.
+2. Run `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/advisor-escalate.sh --phase precheck --issue <N> --repo <R> --gate <id> --question-file <q> --context-file <c> --json`. A non-zero exit (`7` cap-reached, `8` disabled) means skip escalation and proceed exactly as if no advisor exists.
+3. On `GO`, dispatch the advisor via the highest rung your context supports:
+   - (1) the native advisor tool if your harness exposes it; else
+   - (2) a read-only TIER_A subagent — Claude Code `Agent(model: opus)`, OpenCode `task` top-tier — this is the preferred path; else
+   - (3) the `cli_fallback` command from the precheck output (Codex `codex exec`; `claude -p` / `opencode run` are legacy). Use rung 3 only when your context lacks a subagent tool — e.g. a background-dispatched implementer does not inherit the `Agent` tool.
+   Prompt the advisor with the curated payload and: "Return advice only as one JSON object `{verdict, guidance, confidence}`. You have no tools and produce no user-facing output. guidance <= 700 tokens."
+4. Run `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/advisor-escalate.sh --phase record --issue <N> --repo <R> --gate <id> --response-file <resp> --json`. Act on the validated verdict: `plan`/`correction` → apply and continue; `stop` → soft-fail (return-to-queue + comment). An unparseable response is recorded as a fail-safe `stop`.
+
+**`reviewer` gate:** after the LGTM reviewer forms a verdict that is neither a clean LGTM nor a hard BLOCK (a borderline call), run the protocol with `--gate reviewer` to have the advisor uphold or refine the verdict before it is issued. This complements the existing reuse-BLOCK cheap-refute pass rather than replacing it.
+
 ## Constraints (apply throughout)
 
 - **Cadence**: sub-hour polling needs an in-session background subagent or a local cron. Cloud cron services (e.g. Anthropic remote routines) typically have a 1-hour minimum and are not appropriate.
