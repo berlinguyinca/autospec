@@ -390,3 +390,190 @@ EOF
     [ "$status" -eq 0 ]
     printf '%s\n' "$output" | grep -q "^merge-ok$"
 }
+
+# ─── Native verdict extension (issue #1693 / autotrade #1350) ─────────────────
+# The real qa/secaudit skills do not print "severity: high" tokens; qa writes
+# .autospec/qa-verdict.json and secaudit prints a "secaudit: must-fix=<N>" line.
+# These cases prove the gate honors those native verdicts while the stdout
+# severity grep (covered above) stays intact.
+
+# Helper: point the gate at a temp repo dir and seed its .autospec/ dir.
+_seed_repo() {
+    export AUTOSPEC_REPO_DIR="$TMP/repo"
+    mkdir -p "$TMP/repo/.autospec"
+}
+
+# ─── 13. qa-verdict.json verdict=FAIL blocks even with empty qa stdout ────────
+
+@test "qa-verdict.json verdict=FAIL blocks merge, exit 1" {
+    # qa stdout is silent (no severity tokens); the native verdict must block.
+    cat > "$TMP/bin/autospec-qa" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$TMP/bin/autospec-qa"
+
+    _seed_repo
+    cat > "$TMP/repo/.autospec/qa-verdict.json" <<'EOF'
+{"verdict":"FAIL","findings":[]}
+EOF
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --max-attempts 1 \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "^block"
+    printf '%s\n' "$output" | grep -qv "^merge-ok$"
+}
+
+# ─── 14. qa-verdict.json findings[].release_blocking=true blocks ──────────────
+
+@test "qa-verdict.json release_blocking finding blocks merge, exit 1" {
+    cat > "$TMP/bin/autospec-qa" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$TMP/bin/autospec-qa"
+
+    _seed_repo
+    cat > "$TMP/repo/.autospec/qa-verdict.json" <<'EOF'
+{"verdict":"PARTIAL","findings":[{"id":"F1","release_blocking":false},{"id":"F2","release_blocking":true}]}
+EOF
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --max-attempts 1 \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "^block"
+}
+
+# ─── 15. qa-verdict.json verdict=PASS → merge-ok ─────────────────────────────
+
+@test "qa-verdict.json verdict=PASS + clean secaudit → merge-ok" {
+    cat > "$TMP/bin/autospec-qa" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$TMP/bin/autospec-qa"
+
+    _seed_repo
+    cat > "$TMP/repo/.autospec/qa-verdict.json" <<'EOF'
+{"verdict":"PASS","findings":[{"id":"F1","release_blocking":false}]}
+EOF
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^merge-ok$"
+}
+
+# ─── 16. qa-verdict.json verdict=PARTIAL (no release_blocking) → merge-ok ─────
+
+@test "qa-verdict.json verdict=PARTIAL without release_blocking → merge-ok" {
+    cat > "$TMP/bin/autospec-qa" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$TMP/bin/autospec-qa"
+
+    _seed_repo
+    cat > "$TMP/repo/.autospec/qa-verdict.json" <<'EOF'
+{"verdict":"PARTIAL","findings":[{"id":"F1","release_blocking":false}]}
+EOF
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^merge-ok$"
+}
+
+# ─── 17. secaudit "must-fix=2" summary line blocks ───────────────────────────
+
+@test "secaudit must-fix=2 summary line blocks merge, exit 1" {
+    # secaudit stdout has no severity tokens, only the deterministic summary.
+    cat > "$TMP/bin/autospec-secaudit" <<'EOF'
+#!/usr/bin/env bash
+printf 'secaudit: must-fix=2 advisory=0 scanners-degraded=none\n'
+exit 0
+EOF
+    chmod +x "$TMP/bin/autospec-secaudit"
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --max-attempts 1 \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "^block"
+}
+
+# ─── 18. secaudit "must-fix=0" summary line → merge-ok ───────────────────────
+
+@test "secaudit must-fix=0 summary line → merge-ok" {
+    cat > "$TMP/bin/autospec-secaudit" <<'EOF'
+#!/usr/bin/env bash
+printf 'secaudit: must-fix=0 advisory=3 scanners-degraded=none\n'
+exit 0
+EOF
+    chmod +x "$TMP/bin/autospec-secaudit"
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^merge-ok$"
+}
+
+# ─── 19. Malformed qa-verdict.json does not crash → stdout-only behavior ──────
+
+@test "malformed qa-verdict.json falls back to stdout-only, does not crash" {
+    cat > "$TMP/bin/autospec-qa" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$TMP/bin/autospec-qa"
+
+    _seed_repo
+    # Not valid JSON.
+    printf '{ this is not json ::: \n' > "$TMP/repo/.autospec/qa-verdict.json"
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    # No blocking severity tokens on stdout and malformed verdict → merge-ok.
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^merge-ok$"
+    # WARN surfaced to stderr (bats merges into $output).
+    printf '%s\n' "$output" | grep -q "WARN: could not parse"
+}

@@ -164,6 +164,39 @@ _has_blocking_findings() {
         return 1  # no blocking findings
     fi
 }
+_qa_verdict_blocks() {
+    # Native qa verdict: blocks when .autospec/qa-verdict.json has
+    # verdict == "FAIL" or any findings[].release_blocking == true.
+    # PARTIAL alone does not block. Missing/malformed → non-blocking (stdout-only).
+    if [ "$DRY_RUN" -eq 1 ]; then
+        return 1
+    fi
+    local verdict_file="${AUTOSPEC_REPO_DIR:-$PWD}/.autospec/qa-verdict.json"
+    command -v jq >/dev/null 2>&1 || return 1
+    [ -f "$verdict_file" ] || return 1
+    local blocks
+    if ! blocks=$(jq -r \
+        'if (.verdict == "FAIL") or (any(.findings[]?; .release_blocking == true)) then "block" else "ok" end' \
+        "$verdict_file" 2>/dev/null); then
+        info "WARN: could not parse $verdict_file; falling back to stdout-only QA verdict."
+        return 1
+    fi
+    [ "$blocks" = "block" ]
+}
+_secaudit_summary_blocks() {
+    # Native secaudit verdict: blocks when the deterministic summary line
+    # "secaudit: must-fix=<N> ..." reports N > 0. must-fix=0 is non-blocking.
+    local out="$1"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        return 1
+    fi
+    local mustfix
+    mustfix=$(printf '%s\n' "$out" \
+        | grep -oE 'secaudit:[[:space:]]+must-fix=[0-9]+' \
+        | grep -oE '[0-9]+' \
+        | head -n1 || true)
+    [ -n "$mustfix" ] && [ "$mustfix" -gt 0 ]
+}
 _log_low_findings() {
     local scan_output="$1" label="$2"
     local low_findings
@@ -309,7 +342,7 @@ while true; do
     qa_output=""
     qa_output="$(_run_qa)"
     _log_low_findings "$qa_output" "QA"
-    if _has_blocking_findings "$qa_output"; then
+    if _has_blocking_findings "$qa_output" || _qa_verdict_blocks; then
         if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
             info "Max attempts ($MAX_ATTEMPTS) reached with QA blocking findings still present."
             _apply_needs_human_label
@@ -332,7 +365,7 @@ while true; do
     secaudit_output=""
     secaudit_output="$(_run_secaudit)"
     _log_low_findings "$secaudit_output" "secaudit"
-    if _has_blocking_findings "$secaudit_output"; then
+    if _has_blocking_findings "$secaudit_output" || _secaudit_summary_blocks "$secaudit_output"; then
         if [ "$secaudit_attempt" -ge "$MAX_ATTEMPTS" ]; then
             info "Max attempts ($MAX_ATTEMPTS) reached with secaudit blocking findings still present."
             _apply_needs_human_label
