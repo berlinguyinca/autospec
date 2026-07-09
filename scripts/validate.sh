@@ -4686,6 +4686,7 @@ check_control_plane_bootstrap_contract() {
     local control_plane_events_bats_file="tests/control-plane-events.bats"
     local control_plane_ui_bats_file="tests/control-plane-ui.bats"
     local control_plane_reports_bats_file="tests/control-plane-reports.bats"
+    local control_plane_reports_integration_bats_file="tests/integration/control-plane-reports.bats"
     local control_plane_ui_smoke_bats_file="tests/smoke/control-plane-ui.bats"
 
     [ -f "$helper" ] || fail "$helper: missing (issue #1611)"
@@ -4713,6 +4714,7 @@ check_control_plane_bootstrap_contract() {
     [ -f "$control_plane_events_bats_file" ] || fail "$control_plane_events_bats_file: bats coverage missing (issue #1615)"
     [ -f "$control_plane_ui_bats_file" ] || fail "$control_plane_ui_bats_file: bats coverage missing (issue #1616)"
     [ -f "$control_plane_reports_bats_file" ] || fail "$control_plane_reports_bats_file: bats coverage missing (issue #1617)"
+    [ -f "$control_plane_reports_integration_bats_file" ] || fail "$control_plane_reports_integration_bats_file: integration coverage missing (issue #1617)"
     [ -f "$control_plane_ui_smoke_bats_file" ] || fail "$control_plane_ui_smoke_bats_file: smoke bats coverage missing (issue #1616)"
     if command -v bats >/dev/null 2>&1; then
         info "  running: $bats_file"
@@ -4736,6 +4738,9 @@ check_control_plane_bootstrap_contract() {
         info "  running: $control_plane_reports_bats_file"
         bash "$control_plane_reports_bats_file" >/tmp/validate-control-plane-reports.log 2>&1 \
             || { cat /tmp/validate-control-plane-reports.log >&2; fail "$control_plane_reports_bats_file: failed (issue #1617)"; }
+        info "  running: $control_plane_reports_integration_bats_file"
+        bash "$control_plane_reports_integration_bats_file" >/tmp/validate-control-plane-reports-integration.log 2>&1 \
+            || { cat /tmp/validate-control-plane-reports-integration.log >&2; fail "$control_plane_reports_integration_bats_file: failed (issue #1617)"; }
         info "  running: $control_plane_ui_smoke_bats_file"
         bash "$control_plane_ui_smoke_bats_file" >/tmp/validate-control-plane-ui-smoke.log 2>&1 \
             || { cat /tmp/validate-control-plane-ui-smoke.log >&2; fail "$control_plane_ui_smoke_bats_file: failed (issue #1616)"; }
