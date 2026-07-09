@@ -1,93 +1,120 @@
 # AutoSpec
 
-AutoSpec turns a feature idea into specs, GitHub issues, validation gates, and reviewable pull requests for AI-assisted software teams.
+AutoSpec turns everyday software-development intent into durable specs, GitHub
+issues, validation gates, pull requests, review evidence, and project memory.
 
-AutoSpec is for developers who want agentic coding work to leave a trail: what was requested, what was specified, what was split into implementation units, what was validated, and what still needs human judgment.
+It is built for developers who use AI coding agents but do not want important
+work to disappear into an unstructured chat transcript. AutoSpec gives the agent
+a workflow: clarify the request, write down the plan, split the work into
+reviewable issues, implement behind tests, prove what changed, and leave a trail
+that a maintainer can inspect later.
 
-## What AutoSpec Does
+## Why Developers Use It
 
-AutoSpec is a multi-harness workflow suite for Claude Code, Codex CLI, and OpenCode. It provides skills that help an AI coding agent:
+Most agent-assisted coding breaks down in the same places: the request was vague,
+the agent changed too much, the tests were an afterthought, the PR summary was
+hand-wavy, or nobody remembers why the work was split the way it was.
 
-- Turn a rough product request into a written design spec.
-- Decompose that spec into linked GitHub issues sized for different model capabilities.
-- Classify work by context size and reasoning depth.
-- Run implementation loops that open PRs, validate changes, review results, and merge when configured gates pass.
-- Stop, resume, audit, and explain long-running agent work.
-- Keep docs, tests, QA proof, and repository memory aligned over time.
+AutoSpec helps with that day-to-day reality. It is not a hosted product and it is
+not "press a button and trust the robot." It is an operating system for using
+coding agents on real repositories:
 
-## Why It Matters
+- Capture a rough feature idea before it turns into hidden scope creep.
+- Convert the idea into a written spec with acceptance criteria.
+- Split the spec into GitHub issues small enough for focused agent work.
+- Label issues by context size and reasoning depth so they can be routed sanely.
+- Run implementation loops that create branches, PRs, validation output, reviews,
+  and closeout reports.
+- Stop, resume, audit, and explain long-running agent work without losing state.
+- Keep docs, QA proof, repository memory, and release-readiness checks connected
+  to the actual changes.
 
-AI code is only useful when the team can trust where it came from and why it changed. AutoSpec makes agent work more auditable by keeping specs, issues, validation scripts, PR summaries, and final reports connected.
+The result is a workflow where AI can do more of the mechanical development work
+while the human still has the artifacts needed to judge risk.
 
-It does not promise unattended magic. It gives you a structured operating system for agentic development: scoped work, explicit validation, safety rails, and artifacts a maintainer can inspect.
+## Autonomous Development Model
 
-## Getting Started: 5-Minute Quickstart
+AutoSpec is increasingly centered on autonomous development: not a single large
+agent prompt, but a supervised conductor that keeps turning evidence-backed
+work into safe, reviewable progress.
 
-Prerequisites: Git, Bash, GitHub CLI (`gh`), `jq`, Python 3, and one supported AI coding harness.
+In quick form:
 
-One-command install for users who want the latest `main` installer:
+1. **Intent enters the system.** A developer writes a feature request, files an
+   issue, asks for a spec, or lets `/autospec-listen` capture an imperative
+   request from conversation.
+2. **Planning becomes durable.** `/autospec-define`, `/autospec-refine`, or
+   `/autospec-split` turns that intent into specs, linked issues, acceptance
+   criteria, model-fit labels, and primary smoke tests.
+3. **The queue runs itself.** `/autospec-run` claims ready `auto-implement`
+   issues, creates isolated worktrees, implements behind validation gates,
+   opens PRs, requests review, records closeout evidence, and merges only when
+   configured gates pass.
+4. **The conductor keeps finding work.** `/autospec-autonomous` walks a
+   never-idle priority waterfall: control-channel commands first, then backlog
+   work, open-issue promotion, local discovery, architecture and coverage
+   improvements, and later broader discovery inputs.
+5. **Safety rails stay active.** Stop/resume sentinels, usage and spend ledgers,
+   QA gates, security audits, release checks, branch/worktree isolation, and
+   closeout reports make the loop interruptible and inspectable.
+6. **The system learns.** Story, sweep, explore-ledger, docs, persona, and memory
+   flows feed back into better issue selection, better prompts, and better
+   operator alignment.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash
+The practical goal is simple: a developer should be able to point AutoSpec at a
+repository, give it a direction, and get a sequence of small, reviewable,
+validated changes rather than one opaque burst of code.
+
+For the full skill map, including every autonomous, planning, QA, recovery,
+security, documentation, and reporting surface, see [`SKILLS.md`](SKILLS.md).
+
+## A Normal Day With AutoSpec
+
+Use AutoSpec when a normal chat prompt would be too fragile and a full manual
+project-management pass would be too slow.
+
+```text
+/autospec-define Add CSV export to the reports page with tests and documentation
 ```
 
-1. Clone the repository:
+AutoSpec investigates the repo, writes a design spec, creates a parent issue,
+splits the work into child issues, adds model-fit labels, and prepares the queue.
 
-   ```bash
-   git clone https://github.com/berlinguyinca/autospec.git
-   cd autospec
-   ```
-
-2. Run the local validator:
-
-   ```bash
-   bash scripts/validate.sh --fast
-   ```
-
-3. Install the skills into your harness:
-
-   ```bash
-   bash install.sh --skill all --harness all
-   ```
-
-4. In a target repository, start with planning:
-
-   ```text
-   /autospec-define Add a small feature with tests and documentation
-   ```
-
-5. When issues are ready, run implementation:
-
-   ```text
-   /autospec-run
-   ```
-
-For a no-side-effect walkthrough, read [`examples/hello-autospec/`](examples/hello-autospec/) and run:
-
-```bash
-bash scripts/demo-recording.sh
+```text
+/autospec-run
 ```
 
-## Install
+AutoSpec then processes ready issues: it creates a worktree and branch, drives a
+test-first implementation loop, opens a PR, runs validation, asks for review,
+records evidence, and merges when configured gates pass. If something is blocked,
+it leaves the issue and PR in a state a developer can understand and resume.
 
-From a local checkout:
+That makes it useful for routine work:
 
-```bash
-bash install.sh --skill all --harness all
-```
+- Turning a Slack-style feature request into tracked engineering work.
+- Splitting a messy improvement into a sequence of reviewable PRs.
+- Letting an agent handle small implementation issues while preserving proof.
+- Revalidating a running app after agent changes.
+- Producing a release-readiness report before shipping.
+- Explaining what has shipped by reading specs, issues, PRs, docs, and git
+  history together.
 
-For target repositories that will use GitHub issues and PRs, read [`docs/target-repo-setup.md`](docs/target-repo-setup.md) before running implementation workflows.
+## Core Workflows
 
-## Demo
+| Goal | Start with | Output |
+| --- | --- | --- |
+| Capture a chat request as tracked work | `/autospec-listen` | Draft issue, spec handoff, or routed workflow |
+| Plan a feature without implementing it | `/autospec-define` | Design spec plus classified GitHub issues |
+| Plan and ship in one flow | `/autospec` | Spec, issue tree, PRs, reviews, and final report |
+| Ship already-classified issues | `/autospec-run` | PRs with validation, review, and closeout reports |
+| Classify existing issues | `/autospec-classify` | `ctx:*` and `reasoning:*` labels plus model-fit notes |
+| Split an existing spec | `/autospec-split` | Linked issues ready for classification |
+| Revalidate a running app | `/autospec-qa` | QA proof, findings, and stronger tests |
+| Audit release readiness | `/autospec-release` | Release verdict and blocker report |
+| Explain what exists | `/autospec-story` | Cited product and implementation narrative |
+| Stop or resume a monitor | `/autospec-stop` | Clean pause, graceful stop, or resumed queue |
 
-The launch demo is intentionally conservative. It shows the shape of an AutoSpec run without creating GitHub issues or pushing branches:
-
-- [`examples/hello-autospec/spec.md`](examples/hello-autospec/spec.md) shows a tiny input spec.
-- [`examples/hello-autospec/sample-issue.md`](examples/hello-autospec/sample-issue.md) shows the issue shape an implementer receives.
-- [`examples/hello-autospec/expected-closeout.md`](examples/hello-autospec/expected-closeout.md) shows the result-first closeout evidence AutoSpec expects.
-- [`docs/assets/demo-placeholder.md`](docs/assets/demo-placeholder.md) is the shot list for a real recording.
-
-## Architecture
+## How The Pieces Fit
 
 ```mermaid
 flowchart LR
@@ -103,48 +130,119 @@ flowchart LR
     gates --> qa[/autospec-qa/]
 ```
 
-The Mermaid source lives in [`docs/assets/architecture.mmd`](docs/assets/architecture.mmd). See [`docs/architecture.md`](docs/architecture.md) for the longer explanation.
+AutoSpec is a multi-harness workflow suite for Claude Code, Codex CLI, and
+OpenCode. The current operational surface is the installed skill set plus shell
+validation scripts. The early Rust workspace under `crates/` is additive: it is
+building a stricter future core for spec parsing, state, validation, evidence,
+and queue primitives while the existing workflows remain the path users run
+today.
 
-## Rust Core Workspace
+See [`docs/architecture.md`](docs/architecture.md) for the longer system
+overview and [`docs/cli-reference.md`](docs/cli-reference.md) for the current
+Rust CLI command surface.
 
-AutoSpec now includes an early Rust workspace under `crates/` for the V62+ core platform work. The Rust surface is intentionally narrow: `autospec-core` owns future spec parsing, dependency ordering, state, validation, and evidence primitives, while `autospec-cli` currently exposes only `autospec doctor`.
+## Getting Started Quickstart
 
-The existing shell, Python, JavaScript, and skill workflows remain the operational surface for current users. The Rust workspace is additive until later V62+ specs wire stable commands.
+Prerequisites:
 
-See [`docs/cli-reference.md`](docs/cli-reference.md) for the current Rust CLI command surface and which commands are implemented versus explicit stubs.
+- Git
+- Bash
+- GitHub CLI (`gh`)
+- `jq`
+- Python 3
+- One supported AI coding harness: Claude Code, Codex CLI, or OpenCode
 
-## Core Workflows
+Optional but useful: `bats`, `ajv`, `yq`, and browser automation tools for deeper
+validation.
 
-| Goal | Start with | Output |
-| --- | --- | --- |
-| Capture a chat request as tracked work | `/autospec-listen` | Draft issue, spec handoff, or routed workflow |
-| Plan a feature without implementing it | `/autospec-define` | Design spec plus classified GitHub issues |
-| Ship already-classified issues | `/autospec-run` | PRs with validation, review, and closeout reports |
-| Split an existing spec | `/autospec-split` | Linked issues ready for classification |
-| Revalidate a running app | `/autospec-qa` | QA proof, findings, and stronger tests |
-| Audit release readiness | `/autospec-release` | Release verdict and blocker report |
-| Explain what exists | `/autospec-story` | Cited product and implementation narrative |
+Install the latest `main` version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash
+```
+
+Or install from a checkout when developing AutoSpec itself:
+
+```bash
+git clone https://github.com/berlinguyinca/autospec.git
+cd autospec
+bash scripts/validate.sh --fast
+bash install.sh --skill all --harness all
+```
+
+In a target repository:
+
+```text
+/autospec-define Add a small feature with tests and documentation
+```
+
+When the generated issues are ready:
+
+```text
+/autospec-run
+```
+
+## Install
+
+For day-to-day use, install the latest `main` version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash
+```
+
+From a local checkout:
+
+```bash
+bash install.sh --skill all --harness all
+```
+
+For target repositories that will use GitHub issues and PRs, read
+[`docs/target-repo-setup.md`](docs/target-repo-setup.md) before running
+implementation workflows.
+
+## No-Side-Effect Demo
+
+The launch demo shows the shape of an AutoSpec run without creating GitHub issues
+or pushing branches:
+
+```bash
+bash scripts/demo-recording.sh
+```
+
+Useful demo artifacts:
+
+- [`examples/hello-autospec/spec.md`](examples/hello-autospec/spec.md) shows a tiny input spec.
+- [`examples/hello-autospec/sample-issue.md`](examples/hello-autospec/sample-issue.md) shows the issue shape an implementer receives.
+- [`examples/hello-autospec/expected-closeout.md`](examples/hello-autospec/expected-closeout.md) shows the result-first closeout evidence AutoSpec expects.
 
 ## Comparison
 
-| Approach | Best for | Tradeoff |
-| --- | --- | --- |
-| Plain chat with an AI coder | One-off edits | Little durable context, weak audit trail |
-| GitHub issues only | Human-led backlog management | Does not define agent execution protocol |
-| CI only | Verifying code after it exists | Does not shape issue quality or agent behavior |
-| AutoSpec | Spec-first agentic development with traceability | More ceremony than a quick manual patch |
+| Plain agent chat | AutoSpec |
+| --- | --- |
+| Prompt and result live mostly in conversation history. | Specs, issues, PRs, validation logs, and closeouts persist in the repo workflow. |
+| Scope often expands silently. | Work is decomposed into explicit issues with acceptance criteria. |
+| Model choice is usually ad hoc. | Issues are labeled by context and reasoning needs. |
+| Testing depends on the individual prompt. | Implementation loops are built around validation gates and closeout evidence. |
+| Long runs are hard to interrupt cleanly. | Monitors can stop, resume, release claims, and report blockers. |
+| Post-hoc summaries are easy to overtrust. | Claims are tied to artifacts and re-runnable commands. |
 
 ## Current Maturity And Limitations
 
-AutoSpec is launch-ready for developers comfortable with shell tools, GitHub CLI, and AI coding harnesses. It is not a hosted product and it is not a replacement for maintainers reviewing risky work.
+AutoSpec is ready for developers comfortable with shell tools, GitHub CLI, and AI
+coding harnesses. It is most useful on repositories that already have a real test
+or validation command.
 
-Known limitations:
+Known limits:
 
-- The full workflow assumes GitHub issue and PR access.
-- Some release and QA gates depend on optional tools such as `bats`, `ajv`, `yq`, browser automation, or target-repo services.
-- The V61-V74 launch slice is complete; long-running autonomous workflows are
-  now tracked as the Phase-4 platform workstream rather than as launch blockers.
-- Public docs are improving; skill-level READMEs remain the most detailed operational references.
+- The full implementation workflow assumes GitHub issue and PR access.
+- Some QA and release gates depend on optional tools such as `bats`, `ajv`, `yq`,
+  browser automation, or target-repo services.
+- The Rust CLI includes implemented commands and explicit stubs; skills and shell
+  workflows remain the main user surface today.
+- AutoSpec does not remove maintainer responsibility for production impact,
+  credentials, destructive operations, security policy, or risky merges.
+- Public docs are improving; skill-level READMEs remain the most detailed
+  operational references.
 
 For the current autonomous platform source of truth, see
 [`docs/specs/2026-07-06-autospec-autonomous-platform-design.md`](docs/specs/2026-07-06-autospec-autonomous-platform-design.md).
@@ -167,9 +265,14 @@ Start here:
 - [`docs/release-checklist.md`](docs/release-checklist.md)
 - [`docs/public-launch-checklist.md`](docs/public-launch-checklist.md)
 - [`docs/cli-reference.md`](docs/cli-reference.md)
+- [`SKILLS.md`](SKILLS.md)
 
 ## Contributing
 
-AutoSpec needs users who will try it on real repositories and report where the workflow is unclear, too heavy, or too trusting. Good first contributions include docs fixes, demo improvements, validation coverage, and small safety hardening patches.
+AutoSpec needs users who will try it on real repositories and report where the
+workflow is unclear, too heavy, or too trusting. Good first contributions include
+docs fixes, demo improvements, validation coverage, and small safety hardening
+patches.
 
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SAFETY.md`](SAFETY.md), and [`SECURITY.md`](SECURITY.md) before opening a PR.
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SAFETY.md`](SAFETY.md), and
+[`SECURITY.md`](SECURITY.md) before opening a PR.

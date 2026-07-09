@@ -8,6 +8,7 @@ AutoSpec is a spec-first workflow suite for AI-assisted software delivery. These
 - [Concepts](concepts.md) - the vocabulary AutoSpec uses.
 - [Architecture](architecture.md) - how requests become specs, issues, PRs, and reports.
 - [Workflows](workflows.md) - which skill to use for each job.
+- [Skill guide](../SKILLS.md) - every skill, what it does, how it works, and when to use it.
 - [FAQ](faq.md) - common launch questions and limitations.
 - [Roadmap](roadmap.md) - what is next after V61.
 - [Good first issues](good-first-issues.md) - launch-friendly contribution areas.
