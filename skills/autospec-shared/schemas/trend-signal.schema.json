@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "autospec trend signal",
+  "type": "object",
+  "required": ["source", "kind", "summary", "norm_key", "evidence_ref", "first_seen", "recurrence", "sanitized_excerpt", "ts"],
+  "properties": {
+    "source":             { "type": "string", "minLength": 1 },
+    "kind":               { "type": "string", "minLength": 1 },
+    "summary":            { "type": "string", "minLength": 1 },
+    "norm_key":           { "type": "string", "minLength": 1 },
+    "evidence_ref":       { "type": "string", "minLength": 1 },
+    "first_seen":         { "type": "string", "minLength": 1 },
+    "recurrence":         { "type": "integer" },
+    "sanitized_excerpt":  { "type": "string" },
+    "ts":                 { "type": "string", "minLength": 1 }
+  }
+}
