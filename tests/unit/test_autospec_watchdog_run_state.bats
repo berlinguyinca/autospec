@@ -10,6 +10,7 @@ setup() {
     export AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS=300
     export AUTOSPEC_WATCHDOG_RECLAIM_SECS=10800
     export AUTOSPEC_WATCHDOG_STALE_SECS=1800
+    export AUTOSPEC_CONFIG_FILE="$TEST_TMP/missing-autospec.yml"
     export LABELS="$TEST_TMP/labels.txt"
     export COMMENTS="$TEST_TMP/comments.json"
     export PR_STATE="$TEST_TMP/pr-state.txt"

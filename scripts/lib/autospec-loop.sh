@@ -947,11 +947,34 @@ fi'
         local _all_blocked_refs=""
         if [ -n "$_list_ready" ] && [ -f "$_list_ready" ] && [ -n "$_repo" ]; then
             local _queue_json
-            local _queue_batch_request="${AUTOSPEC_BATCH_SIZE:-1}"
+            local _runtime_config_sh=""
+            local _queue_batch_request=""
+            local _queue_max_workers=""
+            if [ -f "${_repo_root}/scripts/autospec-runtime-config.sh" ]; then
+                _runtime_config_sh="${_repo_root}/scripts/autospec-runtime-config.sh"
+            elif [ -f "${_sdir}/autospec-runtime-config.sh" ]; then
+                _runtime_config_sh="${_sdir}/autospec-runtime-config.sh"
+            elif [ -f "$HOME/.autospec/scripts/autospec-runtime-config.sh" ]; then
+                _runtime_config_sh="$HOME/.autospec/scripts/autospec-runtime-config.sh"
+            fi
+            if [ -n "$_runtime_config_sh" ]; then
+                # shellcheck source=/dev/null
+                . "$_runtime_config_sh"
+            fi
+            if command -v autospec_runtime_batch_size >/dev/null 2>&1; then
+                _queue_batch_request="$(autospec_runtime_batch_size)"
+            else
+                _queue_batch_request="${AUTOSPEC_BATCH_SIZE:-1}"
+            fi
             case "$_queue_batch_request" in *[!0-9]*|'') _queue_batch_request=1 ;; esac
             [ "$_queue_batch_request" -gt 0 ] || _queue_batch_request=1
-            if [ "${AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS:-0}" -gt "$_queue_batch_request" ] 2>/dev/null; then
-                _queue_batch_request="${AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS:-0}"
+            if command -v autospec_runtime_repo_workers >/dev/null 2>&1; then
+                _queue_max_workers="$(autospec_runtime_repo_workers)"
+            else
+                _queue_max_workers="${AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS:-0}"
+            fi
+            if [ "${_queue_max_workers:-0}" -gt "$_queue_batch_request" ] 2>/dev/null; then
+                _queue_batch_request="${_queue_max_workers:-0}"
             fi
             _queue_json="$(bash "$_list_ready" --repo "$_repo" --batch-size "$_queue_batch_request" 2>/dev/null || true)"
             # Only trust the reading when the helper produced parseable JSON with

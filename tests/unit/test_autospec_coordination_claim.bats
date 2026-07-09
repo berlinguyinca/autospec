@@ -115,6 +115,7 @@ SH
     export AUTOSPEC_TEST_LABELS="$LABELS"
     export AUTOSPEC_TEST_COMMENTS="$COMMENTS"
     export AUTOSPEC_TEST_CALLS="$CALLS"
+    export AUTOSPEC_CONFIG_FILE="$TEST_TMP/missing-autospec.yml"
     export AUTOSPEC_TEST_FORCE_OWNER=""
 }
 

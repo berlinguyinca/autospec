@@ -1,26 +1,68 @@
 # autospec configuration reference
 
-The operator-relevant `AUTOSPEC_*` environment variables, grouped by area. (Internal
-plumbing vars such as `AUTOSPEC_SCRIPTS_DIR`, `AUTOSPEC_REPO_ROOT`, and test-only
-`AUTOSPEC_TEST_*` overrides are intentionally omitted.) Behavior toggles that are
-flag-files rather than env vars live in [`FLAGS.md`](FLAGS.md).
+The canonical operator configuration file is `.autospec/autospec.yml`. Runtime
+scripts read that file first, then fall back to legacy `AUTOSPEC_*` environment
+variables, then built-in or auto-discovered defaults. Use env vars only for
+one-off compatibility overrides when no config key is present.
 
-Set them in your shell, an `.env`, or inline for one run:
-```bash
-AUTOSPEC_BATCH_SIZE=1 /autospec-run        # one issue per subagent
+Behavior toggles that are flag-files rather than env vars live in [`FLAGS.md`](FLAGS.md).
+
+## Autonomous runtime
+
+```yaml
+autonomous:
+  concurrency:
+    batch_size: auto
+    max_concurrent_repo_workers: auto
+  claims:
+    lease_seconds: 10800
+    settle_seconds: 0.2
+    confirm_reads: 5
+  watchdog:
+    stale_secs: 1800
+    reclaim_secs: 10800
+    claimed_timeout_secs: 1800
+    nudge_cooldown_secs: 900
+  drain:
+    stall_secs: 1800
+    poll_secs: 15
 ```
+
+`auto` discovers a conservative local worker cap from CPU count, clamped to 1-4.
+For a larger workstation or cluster, set `max_concurrent_repo_workers` explicitly.
+
+| Config key | Legacy env fallback | Effect |
+|---|---|---|
+| `autonomous.repo_dir` | `AUTOSPEC_REPO_DIR` | Checkout used by autonomous drain commands. |
+| `autonomous.repo` | `AUTOSPEC_REPO` / `AUTOSPEC_WATCHDOG_REPO` | GitHub `owner/name` when not inferable. |
+| `autonomous.heartbeat_dir` | `AUTOSPEC_HEARTBEAT_DIR` / `AUTOSPEC_WATCHDOG_DIR` | Shared worker heartbeat root. |
+| `autonomous.concurrency.batch_size` | `AUTOSPEC_BATCH_SIZE` | Queue snapshot size requested by the conductor. |
+| `autonomous.concurrency.max_concurrent_repo_workers` | `AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS` | Repo-wide active worker cap. |
+| `autonomous.claims.lease_seconds` | `AUTOSPEC_CLAIM_LEASE_SECONDS` | Cross-machine claim lease TTL. |
+| `autonomous.claims.settle_seconds` | `AUTOSPEC_CLAIM_SETTLE_SECONDS` | Delay before confirming a GitHub claim. |
+| `autonomous.claims.confirm_reads` | `AUTOSPEC_CLAIM_CONFIRM_READS` | Claim ownership confirmation reads. |
+| `autonomous.watchdog.stale_secs` | `AUTOSPEC_WATCHDOG_STALE_SECS` | Heartbeat age before nudging. |
+| `autonomous.watchdog.reclaim_secs` | `AUTOSPEC_WATCHDOG_RECLAIM_SECS` | Stale claim reclaim age. |
+| `autonomous.watchdog.claimed_timeout_secs` | `AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS` | Claimed-step release threshold. |
+| `autonomous.watchdog.nudge_cooldown_secs` | `AUTOSPEC_WATCHDOG_NUDGE_COOLDOWN_SECS` | Minimum time between watchdog nudges. |
+| `autonomous.watchdog.state_file` | `AUTOSPEC_WATCHDOG_STATE_FILE` | Nudge cooldown state file. |
+| `autonomous.watchdog.gc_dir` | `AUTOSPEC_WATCHDOG_GC_DIR` | Orphan worktree GC root. |
+| `autonomous.watchdog.gc_heartbeat_fresh_secs` | `AUTOSPEC_WATCHDOG_GC_HEARTBEAT_FRESH_SECS` | Fresh-heartbeat guard for GC. |
+| `autonomous.drain.stall_secs` | `AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS` | No-output timeout for one drain run. |
+| `autonomous.drain.poll_secs` | `AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS` | Drain output poll interval. |
+
+The remaining tables list older operator-facing env knobs that do not yet have
+dedicated config keys.
 
 ## Core paths & repo
 | Var | Default | Effect |
 |---|---|---|
 | `AUTOSPEC_STATE_DIR` | `~/.autospec` | Root for run-state, heartbeats, flag files. |
 | `AUTOSPEC_DIR` | `~/.autospec` | Legacy alias for the state dir in some scripts. |
-| `AUTOSPEC_REPO` | gh context | `owner/name` slug when not inferable from the checkout. |
 
 ## Batch, caps & budgets
 | Var | Default | Effect |
 |---|---|---|
-| `AUTOSPEC_BATCH_SIZE` | `1` | Issues processed per subagent. `reasoning:deep` issues force-stay at 1. |
 | `AUTOSPEC_AUTONOMOUS_ISSUE_CAP` | (unset) | Max issues an autonomous run will process before stopping. |
 | `AUTOSPEC_AUTONOMOUS_TOKEN_CAP` | (unset) | Token ceiling for an autonomous run. |
 | `AUTOSPEC_LOOP_TOKEN_CAP` | (unset) | Token ceiling for loop entrypoints (`--loop`, explore). |
@@ -48,8 +90,6 @@ AUTOSPEC_BATCH_SIZE=1 /autospec-run        # one issue per subagent
 ## Crash-resume & watchdog
 | Var | Default | Effect |
 |---|---|---|
-| `AUTOSPEC_WATCHDOG_STALE_SECS` | (skill default) | Age after which a heartbeat is considered stale. |
-| `AUTOSPEC_WATCHDOG_RECLAIM_SECS` | (skill default) | Age after which a stale claim lease may be reclaimed. |
 | `AUTOSPEC_RESUME_COMMAND` | derived | Command the usage-limit supervisor relaunches on reset. |
 
 ## Security (autospec-secaudit)

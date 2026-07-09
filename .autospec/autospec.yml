@@ -63,6 +63,30 @@ continuous_improvement:
     create_or_update_specs: true
     file_issues: true
     route_fixes_via_autospec_run: true
+autonomous:
+  repo_dir: auto
+  repo: auto
+  heartbeat_dir: auto
+  concurrency:
+    batch_size: auto
+    max_concurrent_repo_workers: auto
+  claims:
+    lease_seconds: 10800
+    settle_seconds: 0.2
+    confirm_reads: 5
+  watchdog:
+    heartbeat_dir: auto
+    repo: auto
+    stale_secs: 1800
+    reclaim_secs: 10800
+    claimed_timeout_secs: 1800
+    nudge_cooldown_secs: 900
+    state_file: auto
+    gc_dir: /tmp
+    gc_heartbeat_fresh_secs: 1800
+  drain:
+    stall_secs: 1800
+    poll_secs: 15
 # Advisor pattern: a cheap Phase 4 executor escalates bounded hard decisions to a
 # harness-native TIER_A advisor (advice-only). You set intent + bounds; autospec
 # self-governs which gates are active. policy: auto | on | off.

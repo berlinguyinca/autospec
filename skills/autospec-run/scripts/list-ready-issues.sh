@@ -18,7 +18,24 @@ die() {
 
 repo=""
 batch_size=1
-max_repo_workers="${AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS:-0}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/../../../scripts/autospec-runtime-config.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/../../../scripts/autospec-runtime-config.sh"
+elif [ -f "$SCRIPT_DIR/autospec-runtime-config.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/autospec-runtime-config.sh"
+elif [ -f "$HOME/.autospec/scripts/autospec-runtime-config.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$HOME/.autospec/scripts/autospec-runtime-config.sh"
+fi
+
+if command -v autospec_runtime_repo_workers >/dev/null 2>&1; then
+    max_repo_workers="$(autospec_runtime_repo_workers)"
+else
+    max_repo_workers="${AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS:-0}"
+fi
 
 while [ "$#" -gt 0 ]; do
     case "$1" in

@@ -3,9 +3,27 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="${AUTOSPEC_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-DRAIN_STALL_SECS="${AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS:-1800}"
-DRAIN_POLL_SECS="${AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS:-15}"
+if [ -f "$SCRIPT_DIR/autospec-runtime-config.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/autospec-runtime-config.sh"
+elif [ -f "$HOME/.autospec/scripts/autospec-runtime-config.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$HOME/.autospec/scripts/autospec-runtime-config.sh"
+fi
+
+DEFAULT_REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+if command -v autospec_runtime_config_path >/dev/null 2>&1; then
+    REPO_DIR="$(autospec_runtime_config_path autonomous.repo_dir AUTOSPEC_REPO_DIR "$DEFAULT_REPO_DIR")"
+else
+    REPO_DIR="${AUTOSPEC_REPO_DIR:-$DEFAULT_REPO_DIR}"
+fi
+if command -v autospec_runtime_config_int >/dev/null 2>&1; then
+    DRAIN_STALL_SECS="$(autospec_runtime_config_int autonomous.drain.stall_secs AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS 1800)"
+    DRAIN_POLL_SECS="$(autospec_runtime_config_int autonomous.drain.poll_secs AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS 15)"
+else
+    DRAIN_STALL_SECS="${AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS:-1800}"
+    DRAIN_POLL_SECS="${AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS:-15}"
+fi
 
 if ! command -v omx >/dev/null 2>&1; then
     printf 'autospec-autonomous-run-drain: omx not found on PATH\n' >&2

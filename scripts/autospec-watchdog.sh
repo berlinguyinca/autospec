@@ -17,27 +17,61 @@
 
 set -eu
 
-WATCHDOG_BASE="${AUTOSPEC_HEARTBEAT_DIR:-${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}}"
-WATCHDOG_REPO="${AUTOSPEC_WATCHDOG_REPO:-${AUTOSPEC_REPO:-}}"
-WATCHDOG_STALE_SECS="${AUTOSPEC_WATCHDOG_STALE_SECS:-1800}"
-WATCHDOG_RECLAIM_SECS="${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}"
-WATCHDOG_CLAIMED_TIMEOUT_SECS="${AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS:-1800}"
-WATCHDOG_NUDGE_COOLDOWN_SECS="${AUTOSPEC_WATCHDOG_NUDGE_COOLDOWN_SECS:-900}"
-STATE_FILE="${AUTOSPEC_WATCHDOG_STATE_FILE:-$HOME/.autospec/watchdog-state.tsv}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/autospec-runtime-config.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$SCRIPT_DIR/autospec-runtime-config.sh"
+elif [ -f "$HOME/.autospec/scripts/autospec-runtime-config.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$HOME/.autospec/scripts/autospec-runtime-config.sh"
+fi
+
+if command -v autospec_runtime_config_get >/dev/null 2>&1; then
+    _watchdog_base_cfg="$(autospec_runtime_config_get autonomous.heartbeat_dir "")"
+    if [ -n "$_watchdog_base_cfg" ] && [ "$_watchdog_base_cfg" != "auto" ]; then
+        WATCHDOG_BASE="$_watchdog_base_cfg"
+    else
+        WATCHDOG_BASE="$(autospec_runtime_config_path autonomous.watchdog.heartbeat_dir AUTOSPEC_WATCHDOG_DIR "${AUTOSPEC_HEARTBEAT_DIR:-$HOME/.autospec/process-heartbeats}")"
+    fi
+    WATCHDOG_REPO="$(autospec_runtime_config_get autonomous.repo "")"
+    [ "$WATCHDOG_REPO" = "auto" ] && WATCHDOG_REPO=""
+    [ -n "$WATCHDOG_REPO" ] || WATCHDOG_REPO="$(autospec_runtime_config_path autonomous.watchdog.repo AUTOSPEC_WATCHDOG_REPO "${AUTOSPEC_REPO:-}")"
+    WATCHDOG_STALE_SECS="$(autospec_runtime_config_int autonomous.watchdog.stale_secs AUTOSPEC_WATCHDOG_STALE_SECS 1800)"
+    WATCHDOG_RECLAIM_SECS="$(autospec_runtime_config_int autonomous.watchdog.reclaim_secs AUTOSPEC_WATCHDOG_RECLAIM_SECS 10800)"
+    WATCHDOG_CLAIMED_TIMEOUT_SECS="$(autospec_runtime_config_int autonomous.watchdog.claimed_timeout_secs AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS 1800)"
+    WATCHDOG_NUDGE_COOLDOWN_SECS="$(autospec_runtime_config_int autonomous.watchdog.nudge_cooldown_secs AUTOSPEC_WATCHDOG_NUDGE_COOLDOWN_SECS 900)"
+    STATE_FILE="$(autospec_runtime_config_path autonomous.watchdog.state_file AUTOSPEC_WATCHDOG_STATE_FILE "$HOME/.autospec/watchdog-state.tsv")"
+else
+    WATCHDOG_BASE="${AUTOSPEC_HEARTBEAT_DIR:-${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}}"
+    WATCHDOG_REPO="${AUTOSPEC_WATCHDOG_REPO:-${AUTOSPEC_REPO:-}}"
+    WATCHDOG_STALE_SECS="${AUTOSPEC_WATCHDOG_STALE_SECS:-1800}"
+    WATCHDOG_RECLAIM_SECS="${AUTOSPEC_WATCHDOG_RECLAIM_SECS:-10800}"
+    WATCHDOG_CLAIMED_TIMEOUT_SECS="${AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS:-1800}"
+    WATCHDOG_NUDGE_COOLDOWN_SECS="${AUTOSPEC_WATCHDOG_NUDGE_COOLDOWN_SECS:-900}"
+    STATE_FILE="${AUTOSPEC_WATCHDOG_STATE_FILE:-$HOME/.autospec/watchdog-state.tsv}"
+fi
 
 # Orphaned-worktree GC (crash-resume design, Child 3). The GC pass scans this
 # root for `wt-*` worktree directories and prunes only those that are provably
 # safe to remove (no un-pushed commits, issue closed/unlabeled, no live
 # heartbeat). Default root is /tmp where autospec runners create `/tmp/wt-*`.
-WATCHDOG_GC_DIR="${AUTOSPEC_WATCHDOG_GC_DIR:-/tmp}"
+if command -v autospec_runtime_config_path >/dev/null 2>&1; then
+    WATCHDOG_GC_DIR="$(autospec_runtime_config_path autonomous.watchdog.gc_dir AUTOSPEC_WATCHDOG_GC_DIR /tmp)"
+else
+    WATCHDOG_GC_DIR="${AUTOSPEC_WATCHDOG_GC_DIR:-/tmp}"
+fi
 # Heartbeat is considered "live" if its ts is within this many seconds of now.
-WATCHDOG_GC_HEARTBEAT_FRESH_SECS="${AUTOSPEC_WATCHDOG_GC_HEARTBEAT_FRESH_SECS:-${AUTOSPEC_WATCHDOG_STALE_SECS:-1800}}"
+if command -v autospec_runtime_config_int >/dev/null 2>&1; then
+    WATCHDOG_GC_HEARTBEAT_FRESH_SECS="$(autospec_runtime_config_int autonomous.watchdog.gc_heartbeat_fresh_secs AUTOSPEC_WATCHDOG_GC_HEARTBEAT_FRESH_SECS "$WATCHDOG_STALE_SECS")"
+else
+    WATCHDOG_GC_HEARTBEAT_FRESH_SECS="${AUTOSPEC_WATCHDOG_GC_HEARTBEAT_FRESH_SECS:-${AUTOSPEC_WATCHDOG_STALE_SECS:-1800}}"
+fi
 
 WATCHDOG_LOG_PREFIX="[autospec-watchdog]"
 
 # Sibling helpers (F2 liveness + F4 canonical slug). Resolved relative to this
 # script so a checkout/worktree picks up its own copies; overridable for tests.
-WATCHDOG_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WATCHDOG_SCRIPT_DIR="$SCRIPT_DIR"
 WORKER_LIVENESS_SH="${AUTOSPEC_WORKER_LIVENESS_SH:-$WATCHDOG_SCRIPT_DIR/worker-liveness.sh}"
 REPO_SLUG_SH="${AUTOSPEC_REPO_SLUG_SH:-$WATCHDOG_SCRIPT_DIR/repo-slug.sh}"
 
