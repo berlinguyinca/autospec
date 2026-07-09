@@ -4692,6 +4692,8 @@ check_control_plane_bootstrap_contract() {
     bash -n "scripts/lib/autospec-control-plane-render.sh" || fail "scripts/lib/autospec-control-plane-render.sh: bash -n failed"
     [ -f "scripts/lib/autospec-control-plane-observatory-render.sh" ] || fail "scripts/lib/autospec-control-plane-observatory-render.sh: missing (observatory renderer)"
     bash -n "scripts/lib/autospec-control-plane-observatory-render.sh" || fail "scripts/lib/autospec-control-plane-observatory-render.sh: bash -n failed"
+    [ -f "scripts/lib/autospec-control-plane-observatory-events-render.sh" ] || fail "scripts/lib/autospec-control-plane-observatory-events-render.sh: missing (event renderer)"
+    bash -n "scripts/lib/autospec-control-plane-observatory-events-render.sh" || fail "scripts/lib/autospec-control-plane-observatory-events-render.sh: bash -n failed"
     "$helper" --help | grep -q 'bootstrap --dry-run' \
         || fail "$helper --help must document bootstrap --dry-run (issue #1611)"
     [ -f "$doc" ] || fail "$doc: missing companion repository docs (issue #1611)"
