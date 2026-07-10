@@ -42,7 +42,7 @@ state.
 
 ### Review counter-team
 
-**Operator-experience & security review** — security advisor (DSN handling, insert-only
+**Operator-experience & security review** — security advisor (DSN handling, EXECUTE-only
 blast radius, payload injection), SRE (does a dead/slow database ever slow a run?),
 operator advocate (is setup really one env file? is "optional" really zero-touch?).
 Challenge: grep-audit that NO emit path can block, and that no code path prints the DSN.
@@ -54,26 +54,33 @@ reachable Postgres server; agents at all sites need only OUTBOUND connectivity t
 (firewall-friendly; nothing listens on agent machines).
 
 ```
-autospec agents ──psql INSERT (emit-event.sh + local spool)──> Postgres
+autospec agents ──psql ingest() (emit-event.sh + local spool)──> Postgres
                                                                   │ read-only role
                                               Grafana/Metabase ◄──┘  (v1 UI; custom
                                                                       GUI deferred)
 ```
 
-1. **Wire contract = one jsonb blob.** Agents only ever execute
-   `INSERT INTO autospec.events_raw(payload) VALUES (:'payload'::jsonb)`. All typing and
-   normalization happens database-side (views/triggers in the autospec-db repo). Agents
-   never couple to typed columns, so the typed layer can migrate freely without breaking
-   in-field emitters.
+1. **Wire contract = one jsonb blob through one function.** Agents only ever execute
+   `SELECT autospec.ingest(:'payload'::jsonb)`. The function (owned by autospec-db,
+   SECURITY DEFINER) performs the idempotent insert internally; all typing and
+   normalization happens database-side (views in the autospec-db repo). Agents never
+   couple to typed columns or even the table, so the storage layer can migrate freely
+   without breaking in-field emitters. (Falsified alternative, do not implement: a raw
+   `INSERT ... ON CONFLICT` from the agent role — Postgres requires SELECT on the
+   arbiter index for `ON CONFLICT`, which the least-privilege agent role deliberately
+   lacks; verified against postgres:16.)
 2. **One shared helper** `skills/autospec-shared/scripts/emit-event.sh` is the only
    integration point. Guards, in order: `AUTOSPEC_DB_DSN` unset → exit 0; `psql` not on
-   PATH → exit 0; insert with the psql `:'payload'` variable idiom (payload is BOUND,
-   never spliced into SQL text — regex/quote/`$$` content in titles cannot inject);
-   failure → append the event line to `~/.autospec/db-spool.jsonl` and exit 0.
+   PATH → exit 0; call `ingest()` with the psql `:'payload'` variable idiom (payload is
+   BOUND, never spliced into SQL text — regex/quote/`$$` content in titles cannot
+   inject; NB psql only interpolates `:'var'` in stdin/`-f` input, NOT inside `-c`
+   strings, so the helper feeds its SQL via stdin); failure → append the event line to
+   `~/.autospec/db-spool.jsonl` and exit 0.
 3. **Spool drain** rides the next successful emit (or heartbeat tick — no new loop):
-   each event carries a client-generated `event_uuid`; the drain re-inserts spool lines
-   and the unique index + `ON CONFLICT DO NOTHING` makes replays harmless
-   (at-least-once, idempotent).
+   each event carries a client-generated `event_uuid`; the drain replays spool lines
+   through the same `ingest()` call, whose internal unique-index + `ON CONFLICT DO
+   NOTHING` makes replays harmless (at-least-once, idempotent; live emit and drain
+   share one code path).
 4. **Chokepoint wiring, never per-site.** Emission hooks into the shared lifecycle
    helpers that all runs already pass through — NOT into individual skills/scripts
    (the origin:self grep-audit across five sibling issues is the cautionary tale):
@@ -93,8 +100,8 @@ autospec agents ──psql INSERT (emit-event.sh + local spool)──> Postgres
    for this repo.
 7. **Repo split.** This repo owns: the event payload contract (below), `emit-event.sh`,
    chokepoint wiring, and tests. The standalone **autospec-db** repo owns: SQL
-   migrations (`events_raw`, typed views, stall view), role bootstrap (insert-only
-   `autospec_emit`, read-only `autospec_read`), Grafana dashboard JSON, and an optional
+   migrations (`events_raw`, `ingest()`, typed views, stall view), role bootstrap
+   (EXECUTE-only `autospec_emit`, read-only `autospec_read`), Grafana dashboard JSON, and an optional
    `docker-compose.yml` (postgres + grafana) for adopters without a server. A custom
    `autospec-gui` is DEFERRED until dashboards pinch (write operations like remote
    stop would revive it).
@@ -121,7 +128,7 @@ truth); autospec-db pins a version.
 DSN handling: `~/.autospec/db.env` (chmod 600) exporting `AUTOSPEC_DB_DSN` with
 `sslmode=require` + `connect_timeout=2`; sourced by session bootstrap. The DSN is never
 echoed, never logged, never in any resolved command line that reaches a transcript.
-Server-side hardening (TLS, SCRAM, insert-only grants, pg_hba scoping) is documented in
+Server-side hardening (TLS, SCRAM, EXECUTE-only agent grants, pg_hba scoping) is documented in
 autospec-db, not enforceable here.
 
 ## Error handling
