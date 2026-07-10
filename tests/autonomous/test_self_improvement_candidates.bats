@@ -85,3 +85,37 @@ SH
     grep -q 'needs-classify' "$GH_LOG"
 }
 
+@test "apply emits issue bodies that pass issue-quality lint" {
+    seed_repo_gaps
+    cat > "$TMP/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_LOG"
+case "$*" in
+  *"label create"*) exit 0 ;;
+  *"issue create"*)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--body-file" ]; then
+        cp "$2" "$CAPTURED_BODY"
+      fi
+      shift
+    done
+    printf 'https://github.com/berlinguyinca/autospec/issues/999\n'
+    exit 0
+    ;;
+  *"repo view"*) printf 'berlinguyinca/autospec\n'; exit 0 ;;
+esac
+exit 0
+SH
+    chmod +x "$TMP/bin/gh"
+    export PATH="$TMP/bin:$PATH"
+    export GH_LOG="$TMP/gh.log"
+    export CAPTURED_BODY="$TMP/issue-body.md"
+    export AUTOSPEC_SELF_IMPROVEMENT_APPLY=1
+
+    run bash "$SCRIPT" apply --repo-root "$TMP/repo" --repo berlinguyinca/autospec --apply --limit 1
+
+    [ "$status" -eq 0 ]
+    [ -s "$CAPTURED_BODY" ]
+    run bash "$REPO_ROOT/scripts/lint-issue.sh" "$CAPTURED_BODY"
+    [ "$status" -eq 0 ]
+}

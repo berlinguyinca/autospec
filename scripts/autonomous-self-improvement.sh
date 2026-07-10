@@ -158,11 +158,20 @@ case "$cmd" in
             title="$(printf '%s' "$row" | jq -r '.title')"
             evidence="$(printf '%s' "$row" | jq -r '.evidence // ""')"
             files="$(printf '%s' "$row" | jq -r '.files | map("`" + . + "`") | join(", ")')"
+            primary_file="$(printf '%s' "$row" | jq -r '.files[0] // "scripts/autonomous-self-improvement.sh"')"
             {
                 printf '## Goal\n%s.\n\n' "$title"
                 printf '## Context\nAutoSpec discovered this deterministic self-improvement candidate while the autonomous queue was dry.\n\n'
                 printf '## Evidence\n- %s\n- Files: %s\n\n' "$evidence" "$files"
-                printf '## Suggested acceptance criteria\n- [ ] A focused implementation issue exists or this issue is classified into `auto-implement`.\n'
+                printf '## Files to read first\n- `%s`\n\n' "$primary_file"
+                printf '## Implementation outline\n- Inspect `%s` and classify this candidate into focused implementation scope.\n\n' "$primary_file"
+                printf '## Tests required\n- `bash scripts/validate.sh --fast --changed=origin/main`\n\n'
+                printf '### Primary smoke test (inner loop)\n'
+                printf '```bash\n'
+                printf 'bash scripts/validate.sh --fast --changed=origin/main\n'
+                printf '```\n\n'
+                printf '## Acceptance criteria\n'
+                printf -- '- [ ] `scripts/validate.sh` passes after the classified change.\n'
             } > "$tmp.body"
             gh issue create --repo "$repo" --title "$title" --body-file "$tmp.body" --label needs-classify >/dev/null
             filed=$((filed + 1))
