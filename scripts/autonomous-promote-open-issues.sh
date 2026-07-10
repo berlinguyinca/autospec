@@ -310,7 +310,7 @@ while [ "$i" -lt "$cand_count" ]; do
     esac
 
     # ── 3. Eligibility routing (fail-closed to hold) ─────────────────────────
-    elig_json="$(bash "$GROOM_ELIGIBILITY" "$BODY_FILE" --labels "$labels_csv" --repo "$repo" 2>/dev/null || printf '{"decision":"hold","reason":"eligibility-error"}')"
+    elig_json="$(bash "$GROOM_ELIGIBILITY" "$BODY_FILE" --labels "$labels_csv" --repo "$repo" --title "$title" 2>/dev/null || printf '{"decision":"hold","reason":"eligibility-error"}')"
     decision="$(printf '%s' "$elig_json" | jq -r '.decision // "hold"' 2>/dev/null || printf 'hold')"
     ereason="$(printf '%s' "$elig_json" | jq -r '.reason // ""' 2>/dev/null || printf '')"
     [ -n "$decision" ] || decision="hold"
