@@ -5,21 +5,24 @@
 # §Architecture item 8).
 #
 # Covers:
-#   1. Trusted-actor promote: merges the roll-up PR and resets the
-#      integration branch.
-#   2. Untrusted-actor promote is refused upstream by
-#      autonomous-control-channel.sh (DECISION:promote-refused) — the
-#      conductor consumer must never call `gh pr merge`.
-#   3. Discard: closes the roll-up PR (which deletes the integration
-#      branch), reopens its manifest issues with a discarded-from-rollup
-#      comment.
-#   4. Promote with no open roll-up: clean no-op with a comment, no merge
-#      call and no reset call.
+#   1. Trusted promote: merges the CI-green roll-up PR (no --delete-branch)
+#      then resets — order pinned via a shared sequence log — closes the
+#      control issue, clears the trigger label, clears the #1767
+#      self-originated pause marker.
+#   2. Refused promote/discard (control channel vetoed): comment only, no
+#      action, trigger label cleared (no per-cycle re-emit).
+#   3. Promote no-op paths (no roll-up) comment + clear the label.
+#   4. Red/unsettled CI: promote refuses to merge, comments, clears label.
+#   5. Merge-ok/reset-fail: control issue stays open; a re-fired promote
+#      with the roll-up MERGED re-attempts reset (idempotent recovery).
+#   6. Discard: reopen list comes from the PR BODY manifest (never from
+#      spoofable PR comments), close verified before anything else happens,
+#      re-run posts no duplicate reopen comments, pause marker cleared.
 #
 # Mocking strategy mirrors tests/autonomous/test_conductor_provenance_dispatch.bats:
 # helper scripts stubbed via CONDUCTOR_SCRIPTS_DIR; gh stubbed via a fake PATH
-# dir that logs every invocation to a file; bash 3.2-safe (no process
-# substitution; fixtures written to real temp files). No real GitHub calls.
+# dir that logs every invocation; bash 3.2-safe (no process substitution;
+# fixtures written to real temp files). No real GitHub calls.
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -37,13 +40,16 @@ setup() {
     export PATH="$FAKE_BIN:$PATH"
 
     GH_LOG="$TEST_TMP/gh-calls.log"
-    touch "$GH_LOG"
-    export GH_LOG
-
     INTBRANCH_LOG="$TEST_TMP/intbranch-calls.log"
-    touch "$INTBRANCH_LOG"
+    SEQ_LOG="$TEST_TMP/seq.log"
+    touch "$GH_LOG" "$INTBRANCH_LOG" "$SEQ_LOG"
 
-    export LOOP_LIB REPO_ROOT FAKE_SCRIPTS TEST_TMP FAKE_BIN GH_LOG INTBRANCH_LOG
+    # repo_root inside the conductor = parent of CONDUCTOR_SCRIPTS_DIR.
+    mkdir -p "$TEST_TMP/.autospec"
+    PAUSE_FILE="$TEST_TMP/.autospec/self-originated-pause.json"
+
+    export LOOP_LIB REPO_ROOT FAKE_SCRIPTS TEST_TMP FAKE_BIN \
+        GH_LOG INTBRANCH_LOG SEQ_LOG PAUSE_FILE
 }
 
 teardown() {
@@ -67,28 +73,42 @@ _install_common_stubs() {
         'printf '\''{"tier":1,"action":"run-backlog","reason":"test"}\n'\'''
 }
 
-# Fake gh — logs every invocation as a single space-joined line, and answers
-# `pr view <N> --json comments` fixed fixture / `repo` lookups fail-open.
+# Fake gh — logs every invocation to GH_LOG and SEQ_LOG, routes queries to
+# per-test fixture files:
+#   $TEST_TMP/ci.json                 statusCheckRollup array (default [])
+#   $TEST_TMP/pr-body.txt             roll-up PR body (default empty)
+#   $TEST_TMP/pr-close-rc             exit code for `pr close` (default 0)
+#   $TEST_TMP/issue-comments-<n>.txt  bodies for `issue view <n> --json comments`
+# `repo view` answers the defaultBranchRef jq output ("main").
 _install_gh() {
-    local comments_json="${1:-[]}"
     cat > "$FAKE_BIN/gh" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$GH_LOG"
-case "\${1:-}" in
-    issue)
-        case "\${2:-}" in
-            list) echo "[]" ;;
-            *) exit 0 ;;
+printf 'gh %s\n' "\$*" >> "$SEQ_LOG"
+case "\${1:-} \${2:-}" in
+    "repo view")
+        echo "main"
+        ;;
+    "pr view")
+        case "\$*" in
+            *statusCheckRollup*) cat "$TEST_TMP/ci.json" 2>/dev/null || echo "[]" ;;
+            *"--json body"*)     cat "$TEST_TMP/pr-body.txt" 2>/dev/null || true ;;
+            *)                   echo "" ;;
         esac
         ;;
-    pr)
-        case "\${2:-}" in
-            view) printf '%s' '$comments_json' | jq -c '{comments: .}' ;;
-            *) exit 0 ;;
-        esac
+    "pr close")
+        rc="\$(cat "$TEST_TMP/pr-close-rc" 2>/dev/null || printf '0')"
+        exit "\$rc"
         ;;
-    repo) echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
-    *) exit 0 ;;
+    "issue view")
+        cat "$TEST_TMP/issue-comments-\${3:-}.txt" 2>/dev/null || true
+        ;;
+    "issue list")
+        echo "[]"
+        ;;
+    *)
+        exit 0
+        ;;
 esac
 EOF
     chmod +x "$FAKE_BIN/gh"
@@ -106,9 +126,9 @@ EOF
 
 # integration-branch stub: `status` emits fixed rollup_pr number/state (pass
 # rollup_pr as a bare number or "null"; rollup_state as a bare word like OPEN,
-# or "null" for "no roll-up" — this helper does the JSON quoting itself so
-# callers never hand-quote JSON literals). `reset` logs + exits 0 unless
-# $TEST_TMP/reset-rc says otherwise.
+# or "null" — this helper does the JSON quoting itself). `reset` logs + exits
+# with the rc recorded in $TEST_TMP/reset-rc (default 0). Both are logged to
+# SEQ_LOG for cross-stub ordering assertions.
 _install_intbranch() {
     local rollup_pr="${1:-null}" rollup_state_raw="${2:-null}" rollup_state_json
     if [ "$rollup_state_raw" = "null" ]; then
@@ -119,6 +139,7 @@ _install_intbranch() {
     cat > "$FAKE_SCRIPTS/autonomous-integration-branch.sh" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$INTBRANCH_LOG"
+printf 'intbranch %s\n' "\$*" >> "$SEQ_LOG"
 case "\${1:-}" in
     status)
         printf '{"branch":"autospec/autonomous-main","rollup_pr":{"number":$rollup_pr,"state":$rollup_state_json},"accumulated_pr_count":1,"age_days":1,"diff_lines":10}\n'
@@ -147,35 +168,61 @@ _run_cycle() {
     " 2>&1
 }
 
+# Fixture: a roll-up PR body whose manifest lists issues 11 and 12.
+_write_manifest_body() {
+    cat > "$TEST_TMP/pr-body.txt" <<'EOF'
+Roll-up PR intro text.
+<!-- autospec-rollup-manifest:begin -->
+## Autonomous roll-up manifest
+
+- **Integration branch:** `autospec/autonomous-main` -> `main`
+- **Accumulated merged PRs:** 2
+- **Landed issues:**
+  - #11 — first feature (worker PR [#101](url), +10/-2) — origin: origin:self
+  - #12 — second feature
+<!-- autospec-rollup-manifest:end -->
+Trailing text mentioning - #999 outside the manifest markers.
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # promote: trusted actor (control-channel already vetted) — merges + resets.
 # ---------------------------------------------------------------------------
 
-@test "promote by trusted actor merges the roll-up PR and resets the integration branch" {
+@test "promote merges the CI-green roll-up (no --delete-branch) then resets, closes issue, clears label + pause marker" {
     _install_common_stubs
     _install_control_channel "DECISION:promote
 PROMOTE_ISSUE:501"
-    _install_gh '[]'
+    _install_gh
     _install_intbranch 42 "OPEN"
+    printf '[]' > "$TEST_TMP/ci.json"
+    printf '{"reason":"rollup-red"}\n' > "$PAUSE_FILE"
 
     _run_cycle
     [ "$status" -eq 0 ]
 
-    grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash --delete-branch$" "$GH_LOG"
+    # Merge is admin+squash but NEVER --delete-branch (reset recreates the branch).
+    grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+    ! grep -q -- "--delete-branch" "$GH_LOG"
     grep -q "^reset --parent main --repo test-owner/test-repo$" "$INTBRANCH_LOG"
+    # Order pinned via the shared sequence log: merge BEFORE reset.
+    merge_line="$(grep -n "^gh pr merge 42" "$SEQ_LOG" | head -1 | cut -d: -f1)"
+    reset_line="$(grep -n "^intbranch reset" "$SEQ_LOG" | head -1 | cut -d: -f1)"
+    [ -n "$merge_line" ]
+    [ -n "$reset_line" ]
+    [ "$merge_line" -lt "$reset_line" ]
     grep -q "^issue close 501 --repo test-owner/test-repo$" "$GH_LOG"
+    # Trigger label cleared (one-shot: no per-cycle re-emit).
+    grep -q "^issue edit 501 --repo test-owner/test-repo --remove-label autospec:promote$" "$GH_LOG"
+    # #1767 pause marker cleared: promote is the operator exit from rollup-red.
+    [ ! -f "$PAUSE_FILE" ]
 }
 
-# ---------------------------------------------------------------------------
-# promote: untrusted actor — control-channel refuses; conductor must never
-# call `gh pr merge`.
-# ---------------------------------------------------------------------------
-
-@test "promote by untrusted actor is refused: no merge call, comment only" {
+@test "refused promote: comment only, no merge call, trigger label cleared" {
     _install_common_stubs
     _install_control_channel "DECISION:promote-refused
 PROMOTE_ISSUE:502"
-    _install_gh '[]'
+    _install_gh
     _install_intbranch 42 "OPEN"
 
     _run_cycle
@@ -184,17 +231,30 @@ PROMOTE_ISSUE:502"
     ! grep -q "^pr merge" "$GH_LOG"
     [ ! -s "$INTBRANCH_LOG" ]
     grep -q "^issue comment 502 --repo test-owner/test-repo" "$GH_LOG"
+    grep -q "^issue edit 502 --repo test-owner/test-repo --remove-label autospec:promote$" "$GH_LOG"
 }
 
-# ---------------------------------------------------------------------------
-# promote: no open roll-up — clean no-op, comment only, no merge/reset.
-# ---------------------------------------------------------------------------
+@test "refused discard: comment only, no close call, trigger label cleared" {
+    _install_common_stubs
+    _install_control_channel "DECISION:discard-refused
+DISCARD_ISSUE:504"
+    _install_gh
+    _install_intbranch 42 "OPEN"
 
-@test "promote with no open roll-up is a clean no-op (comment, no merge, no reset)" {
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    ! grep -q "^pr close" "$GH_LOG"
+    ! grep -q "^issue reopen" "$GH_LOG"
+    grep -q "^issue comment 504 --repo test-owner/test-repo" "$GH_LOG"
+    grep -q "^issue edit 504 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
+}
+
+@test "promote with no open roll-up is a clean no-op (comment, no merge, no reset, label cleared)" {
     _install_common_stubs
     _install_control_channel "DECISION:promote
 PROMOTE_ISSUE:503"
-    _install_gh '[]'
+    _install_gh
     _install_intbranch "null" "null"
 
     _run_cycle
@@ -203,19 +263,89 @@ PROMOTE_ISSUE:503"
     ! grep -q "^pr merge" "$GH_LOG"
     ! grep -q "^reset" "$INTBRANCH_LOG"
     grep -q "^issue comment 503 --repo test-owner/test-repo" "$GH_LOG"
+    grep -q "^issue edit 503 --repo test-owner/test-repo --remove-label autospec:promote$" "$GH_LOG"
+}
+
+@test "promote with red CI is refused: comment, no merge call, label cleared" {
+    _install_common_stubs
+    _install_control_channel "DECISION:promote
+PROMOTE_ISSUE:505"
+    _install_gh
+    _install_intbranch 42 "OPEN"
+    printf '[{"name":"pytest","conclusion":"FAILURE"}]' > "$TEST_TMP/ci.json"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    ! grep -q "^pr merge" "$GH_LOG"
+    ! grep -q "^reset" "$INTBRANCH_LOG"
+    grep -q "^issue comment 505 --repo test-owner/test-repo" "$GH_LOG"
+    grep -q "^issue edit 505 --repo test-owner/test-repo --remove-label autospec:promote$" "$GH_LOG"
+}
+
+@test "promote with unsettled (pending) CI is refused: no merge call" {
+    _install_common_stubs
+    _install_control_channel "DECISION:promote
+PROMOTE_ISSUE:506"
+    _install_gh
+    _install_intbranch 42 "OPEN"
+    printf '[{"name":"pytest","conclusion":null}]' > "$TEST_TMP/ci.json"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    ! grep -q "^pr merge" "$GH_LOG"
+    grep -q "^issue comment 506 --repo test-owner/test-repo" "$GH_LOG"
+}
+
+@test "merge-ok/reset-fail leaves the control issue open; re-fired promote on MERGED roll-up recovers via reset" {
+    _install_common_stubs
+    _install_control_channel "DECISION:promote
+PROMOTE_ISSUE:507"
+    _install_gh
+    _install_intbranch 42 "OPEN"
+    printf '[]' > "$TEST_TMP/ci.json"
+    printf '1' > "$TEST_TMP/reset-rc"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    # Phase 1: merged, reset failed → NO issue close (stays open for retry),
+    # label still cleared (operator re-fires by re-applying it).
+    grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+    ! grep -q "^issue close 507" "$GH_LOG"
+    grep -q "^issue edit 507 --repo test-owner/test-repo --remove-label autospec:promote$" "$GH_LOG"
+
+    # Phase 2: operator re-applies the label; the roll-up is now MERGED and
+    # reset succeeds → recovery path resets WITHOUT re-merging, closes the
+    # issue, clears the pause marker.
+    : > "$GH_LOG"; : > "$INTBRANCH_LOG"; : > "$SEQ_LOG"
+    _install_intbranch 42 "MERGED"
+    printf '0' > "$TEST_TMP/reset-rc"
+    printf '{"reason":"rollup-red"}\n' > "$PAUSE_FILE"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    ! grep -q "^pr merge" "$GH_LOG"
+    grep -q "^reset --parent main --repo test-owner/test-repo$" "$INTBRANCH_LOG"
+    grep -q "^issue close 507 --repo test-owner/test-repo$" "$GH_LOG"
+    grep -q "^issue edit 507 --repo test-owner/test-repo --remove-label autospec:promote$" "$GH_LOG"
+    [ ! -f "$PAUSE_FILE" ]
 }
 
 # ---------------------------------------------------------------------------
-# discard: closes the roll-up PR (deletes the branch via --delete-branch),
-# reopens its manifest issues with a discarded-from-rollup comment.
+# discard: manifest-driven reopen, verified close, idempotent re-run.
 # ---------------------------------------------------------------------------
 
-@test "discard closes the roll-up PR, deletes the branch, and reopens its issues" {
+@test "discard closes the roll-up, reopens manifest issues with comments, clears label + pause marker" {
     _install_common_stubs
     _install_control_channel "DECISION:discard
 DISCARD_ISSUE:601"
-    _install_gh '[{"body":"<!-- autospec-rollup:issue-11 -->\nlanded #11"},{"body":"<!-- autospec-rollup:issue-12 -->\nlanded #12"}]'
+    _install_gh
     _install_intbranch 77 "OPEN"
+    _write_manifest_body
+    printf '{"reason":"rollup-red"}\n' > "$PAUSE_FILE"
 
     _run_cycle
     [ "$status" -eq 0 ]
@@ -226,16 +356,85 @@ DISCARD_ISSUE:601"
     grep -q "^issue comment 11 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
     grep -q "^issue comment 12 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
     grep -q "^issue close 601 --repo test-owner/test-repo$" "$GH_LOG"
+    grep -q "^issue edit 601 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
+    [ ! -f "$PAUSE_FILE" ]
+    # Refs outside the manifest markers are never honored.
+    ! grep -q "^issue reopen 999" "$GH_LOG"
+}
+
+@test "discard reopen list ignores fake markers in PR comments (body manifest is authoritative)" {
+    _install_common_stubs
+    _install_control_channel "DECISION:discard
+DISCARD_ISSUE:604"
+    _install_gh
+    _install_intbranch 77 "OPEN"
+    # Body manifest lists ONLY #11. A stranger's PR comment with fake
+    # rollup markers for #999 must be ignored — the handler never reads
+    # PR comments for the reopen list.
+    cat > "$TEST_TMP/pr-body.txt" <<'EOF'
+<!-- autospec-rollup-manifest:begin -->
+- **Landed issues:**
+  - #11 — the only real landed issue
+<!-- autospec-rollup-manifest:end -->
+EOF
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    grep -q "^issue reopen 11 --repo test-owner/test-repo$" "$GH_LOG"
+    ! grep -q "^issue reopen 999" "$GH_LOG"
+    ! grep -q "^issue comment 999" "$GH_LOG"
+    # The reopen list must not have been derived from PR comments at all.
+    ! grep -q "^pr view 77 --repo test-owner/test-repo --json comments" "$GH_LOG"
+}
+
+@test "discard aborts when pr close fails: nothing reopened, control issue left open, label cleared" {
+    _install_common_stubs
+    _install_control_channel "DECISION:discard
+DISCARD_ISSUE:605"
+    _install_gh
+    _install_intbranch 77 "OPEN"
+    _write_manifest_body
+    printf '1' > "$TEST_TMP/pr-close-rc"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    grep -q "^pr close 77" "$GH_LOG"
+    ! grep -q "^issue reopen" "$GH_LOG"
+    ! grep -q "^issue close 605" "$GH_LOG"
+    grep -q "^issue comment 605 --repo test-owner/test-repo" "$GH_LOG"
+    grep -q "^issue edit 605 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
+}
+
+@test "discard re-run posts no duplicate reopen comments (idempotency marker in issue comments)" {
+    _install_common_stubs
+    _install_control_channel "DECISION:discard
+DISCARD_ISSUE:606"
+    _install_gh
+    _install_intbranch 77 "OPEN"
+    _write_manifest_body
+    # Issue 11 already carries the discarded-from-rollup comment for PR #77
+    # (prior run before a crash); issue 12 does not.
+    printf 'discarded-from-rollup: roll-up PR #77 was discarded via control-channel issue #606; reopened for re-drain.\n' \
+        > "$TEST_TMP/issue-comments-11.txt"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    ! grep -q "^issue reopen 11 " "$GH_LOG"
+    ! grep -q "^issue comment 11 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
+    grep -q "^issue reopen 12 --repo test-owner/test-repo$" "$GH_LOG"
+    grep -q "^issue comment 12 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
 }
 
 @test "discard with a merged roll-up is a clean no-op (never reopens landed issues)" {
     _install_common_stubs
     _install_control_channel "DECISION:discard
 DISCARD_ISSUE:603"
-    # status falls back to the MERGED roll-up when no open one exists —
-    # discard must not close it or reopen its already-landed issues.
-    _install_gh '[{"body":"<!-- autospec-rollup:issue-21 -->\nlanded #21"}]'
+    _install_gh
     _install_intbranch 88 "MERGED"
+    _write_manifest_body
 
     _run_cycle
     [ "$status" -eq 0 ]
@@ -243,13 +442,14 @@ DISCARD_ISSUE:603"
     ! grep -q "^pr close" "$GH_LOG"
     ! grep -q "^issue reopen" "$GH_LOG"
     grep -q "^issue comment 603 --repo test-owner/test-repo" "$GH_LOG"
+    grep -q "^issue edit 603 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
 }
 
-@test "discard with no open roll-up is a clean no-op (comment only)" {
+@test "discard with no open roll-up is a clean no-op (comment only, label cleared)" {
     _install_common_stubs
     _install_control_channel "DECISION:discard
 DISCARD_ISSUE:602"
-    _install_gh '[]'
+    _install_gh
     _install_intbranch "null" "null"
 
     _run_cycle
@@ -258,4 +458,5 @@ DISCARD_ISSUE:602"
     ! grep -q "^pr close" "$GH_LOG"
     ! grep -q "^issue reopen" "$GH_LOG"
     grep -q "^issue comment 602 --repo test-owner/test-repo" "$GH_LOG"
+    grep -q "^issue edit 602 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
 }

@@ -293,12 +293,13 @@ EOF
 # list --label autospec:promote` AND `gh api .../timeline`.
 # ---------------------------------------------------------------------------
 
-# Helper: gh stub for promote — routes `issue list` with the promote label to
-# the label fixture and `api .../timeline` to the timeline fixture; all other
-# invocations return "[]". Pass "FAIL" as the timeline fixture to make the
-# api call exit 1 (timeline unavailable → must fail closed).
-make_gh_promote_stub() {
-    local label_fixture="$1" timeline_fixture="$2"
+# Helper: gh stub for the dual-trust labels — routes `issue list` with the
+# TARGET label to the label fixture and `api .../timeline` to the timeline
+# fixture; all other invocations return "[]". Pass "FAIL" as the timeline
+# fixture to make the api call exit 1 (timeline unavailable → must fail
+# closed). Works for autospec:promote and autospec:discard alike.
+make_gh_trust_stub() {
+    local target_label="$1" label_fixture="$2" timeline_fixture="$3"
     cat > "$TMP/bin/gh" <<EOF
 #!/usr/bin/env bash
 mode=""
@@ -306,7 +307,7 @@ found_label=""
 for a in "\$@"; do
     case "\$a" in
         api) mode="api" ;;
-        autospec:promote) found_label="1" ;;
+        "$target_label") found_label="1" ;;
     esac
 done
 if [ "\$mode" = "api" ]; then
@@ -323,6 +324,11 @@ else
 fi
 EOF
     chmod +x "$TMP/bin/gh"
+}
+
+# Back-compat alias used by the promote tests below.
+make_gh_promote_stub() {
+    make_gh_trust_stub "autospec:promote" "$1" "$2"
 }
 
 @test "autospec:promote by trusted author + trusted label actor → DECISION:promote + PROMOTE_ISSUE" {
@@ -393,18 +399,61 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# autospec:discard → DECISION:discard + DISCARD_ISSUE
+# autospec:discard → DECISION:discard (trusted actor) or DECISION:discard-refused
+#
+# IDENTICAL dual trust gate to promote: issue author AND last
+# autospec:discard labeled-event actor must both be trusted; fail closed.
 # ---------------------------------------------------------------------------
 
-@test "autospec:discard label → DECISION:discard + DISCARD_ISSUE" {
+@test "autospec:discard by trusted author + trusted label actor → DECISION:discard + DISCARD_ISSUE" {
     local fixture="$TMP/discard.json"
+    local timeline="$TMP/discard_timeline.json"
     printf '[{"number":301,"title":"discard the roll-up","body":"abandon it","author":{"login":"berlinguyinca"}}]' > "$fixture"
-    make_gh_label_stub "autospec:discard" "$fixture"
+    printf '[{"event":"labeled","label":{"name":"autospec:discard"},"actor":{"login":"berlinguyinca"}}]' > "$timeline"
+    make_gh_trust_stub "autospec:discard" "$fixture" "$timeline"
 
     run bash "$CONTROL_CHANNEL"
     [ "$status" -eq 0 ]
     printf '%s\n' "$output" | grep -q "^DECISION:discard$"
     printf '%s\n' "$output" | grep -q "^DISCARD_ISSUE:301$"
+}
+
+@test "autospec:discard by untrusted author is refused (no DECISION:discard)" {
+    local fixture="$TMP/discard_untrusted.json"
+    local timeline="$TMP/discard_timeline.json"
+    printf '[{"number":302,"title":"discard the roll-up","body":"abandon it","author":{"login":"some-random-user"}}]' > "$fixture"
+    printf '[{"event":"labeled","label":{"name":"autospec:discard"},"actor":{"login":"berlinguyinca"}}]' > "$timeline"
+    make_gh_trust_stub "autospec:discard" "$fixture" "$timeline"
+
+    run bash "$CONTROL_CHANNEL"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^DECISION:discard-refused$"
+    printf '%s\n' "$output" | grep -q "^DISCARD_ISSUE:302$"
+    ! printf '%s\n' "$output" | grep -q "^DECISION:discard$"
+}
+
+@test "autospec:discard label applied by untrusted actor is refused (label spoofing)" {
+    local fixture="$TMP/discard_spoof.json"
+    local timeline="$TMP/discard_spoof_timeline.json"
+    printf '[{"number":303,"title":"old trusted issue","body":"abandon it","author":{"login":"berlinguyinca"}}]' > "$fixture"
+    printf '[{"event":"labeled","label":{"name":"autospec:discard"},"actor":{"login":"drive-by-triager"}}]' > "$timeline"
+    make_gh_trust_stub "autospec:discard" "$fixture" "$timeline"
+
+    run bash "$CONTROL_CHANNEL"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^DECISION:discard-refused$"
+    ! printf '%s\n' "$output" | grep -q "^DECISION:discard$"
+}
+
+@test "autospec:discard with unavailable timeline is refused (fail closed)" {
+    local fixture="$TMP/discard_no_timeline.json"
+    printf '[{"number":304,"title":"discard the roll-up","body":"abandon it","author":{"login":"berlinguyinca"}}]' > "$fixture"
+    make_gh_trust_stub "autospec:discard" "$fixture" "FAIL"
+
+    run bash "$CONTROL_CHANNEL"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^DECISION:discard-refused$"
+    ! printf '%s\n' "$output" | grep -q "^DECISION:discard$"
 }
 
 # ---------------------------------------------------------------------------

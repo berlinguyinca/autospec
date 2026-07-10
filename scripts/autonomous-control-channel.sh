@@ -12,7 +12,7 @@
 #   autospec:pause     →  DECISION:pause      (write autonomous-pause.flag)
 #   autospec:stop      →  DECISION:graceful-stop
 #   autospec:promote   →  DECISION:promote    (trusted actor only — merge roll-up + reset)
-#   autospec:discard   →  DECISION:discard    (close roll-up, delete branch, reopen issues)
+#   autospec:discard   →  DECISION:discard    (trusted actor only — close roll-up, delete branch, reopen issues)
 #
 # Output (stdout):
 #   One line per found label, ordered by severity (stop > pause > steer > priority).
@@ -26,16 +26,14 @@
 #   Additional line for priority:
 #     PRIORITY_ISSUE:<number>
 #
-#   Additional lines for promote (only when the issue author is a trusted
-#   actor per safety.issue_intent_gate.trusted_actors — otherwise refused):
-#     PROMOTE_ISSUE:<number>
-#
-#   Additional line for an untrusted promote attempt (refused, fail closed):
-#     DECISION:promote-refused
-#     PROMOTE_ISSUE:<number>
-#
-#   Additional line for discard:
-#     DISCARD_ISSUE:<number>
+#   Additional lines for promote/discard (both are trusted-actor-only, fail
+#   closed: the issue AUTHOR and the actor of the LAST corresponding labeled
+#   timeline event must both be logins in
+#   safety.issue_intent_gate.trusted_actors — otherwise refused):
+#     DECISION:promote           + PROMOTE_ISSUE:<number>   (trusted)
+#     DECISION:promote-refused   + PROMOTE_ISSUE:<number>   (untrusted/unverifiable)
+#     DECISION:discard           + DISCARD_ISSUE:<number>   (trusted)
+#     DECISION:discard-refused   + DISCARD_ISSUE:<number>   (untrusted/unverifiable)
 #
 # Side effects:
 #   - :pause    → writes ~/.autospec/autonomous-pause.flag (atomic via temp+mv)
@@ -43,9 +41,10 @@
 #   - :steer    → caller should remove label autospec:steer from the issue
 #   - :promote  → caller (conductor) merges the roll-up PR and runs
 #                 `autonomous-integration-branch.sh reset` when trusted;
-#                 refused (no action) when the issue author is untrusted
+#                 refused (no action) when trust cannot be proven
 #   - :discard  → caller (conductor) closes the roll-up PR, deletes the
-#                 integration branch, and reopens its issues
+#                 integration branch, and reopens its issues when trusted;
+#                 refused (no action) when trust cannot be proven
 #
 # Usage:
 #   bash scripts/autonomous-control-channel.sh [--repo OWNER/REPO] [--state-dir DIR]
@@ -115,7 +114,7 @@ Reserved labels (checked in severity order — stop is highest):
   autospec:steer     → DECISION:steer  (emits DIRECTIVE:<body>)
   autospec:priority  → DECISION:priority
   autospec:promote   → DECISION:promote (trusted actor only) or DECISION:promote-refused
-  autospec:discard   → DECISION:discard
+  autospec:discard   → DECISION:discard (trusted actor only) or DECISION:discard-refused
 
 Output: one DECISION line per found label, highest severity first.
 EOF
@@ -190,17 +189,18 @@ control_channel_trusted_logins() {
     printf '%s' "$raw" | jq -r '.[]?.login // empty' 2>/dev/null || true
 }
 
-# control_channel_promote_label_actor ISSUE — print the login of the actor
-# who applied the LAST `autospec:promote` labeled timeline event, or nothing
-# on any gh/parse failure (callers MUST fail closed on empty). The command
-# authority for promote is the LABEL, not just the issue author — anyone
-# with triage rights can label an old trusted-authored issue, so the label
+# control_channel_label_actor LABEL ISSUE — print the login of the actor who
+# applied the LAST `<LABEL>` labeled timeline event, or nothing on any
+# gh/parse failure (callers MUST fail closed on empty). The command authority
+# for promote/discard is the LABEL, not just the issue author — anyone with
+# triage rights can label an old trusted-authored issue, so the label
 # applicator is verified too (mirrors approval_via_label in
 # autonomous-provenance.sh, including the --paginate page-2 normalization:
 # `gh api --paginate` emits one JSON array per page, flattened via
-# `jq -es 'add'`).
-control_channel_promote_label_actor() {
-    local issue="$1" path out flat
+# `jq -es 'add'`). LABEL is a fixed constant from RESERVED_LABELS, passed via
+# --arg (never interpolated into the jq program).
+control_channel_label_actor() {
+    local label="$1" issue="$2" path out flat
     if [ -n "$REPO" ]; then
         path="repos/${REPO}/issues/${issue}/timeline"
     else
@@ -209,9 +209,20 @@ control_channel_promote_label_actor() {
     fi
     out="$("$GH" api --paginate "$path" 2>/dev/null)" || return 0
     flat="$(printf '%s' "$out" | jq -es 'add // []' 2>/dev/null)" || return 0
-    printf '%s' "$flat" | jq -r '
-        [.[] | select(.event == "labeled" and .label.name == "autospec:promote")]
+    printf '%s' "$flat" | jq -r --arg l "$label" '
+        [.[] | select(.event == "labeled" and .label.name == $l)]
         | last | .actor.login // empty' 2>/dev/null || true
+}
+
+# control_channel_dual_trust LABEL AUTHOR ISSUE — exit 0 only when BOTH the
+# issue author AND the actor of the last <LABEL> labeled timeline event are
+# trusted logins. Any missing/unverifiable datum fails closed (exit 1).
+control_channel_dual_trust() {
+    local label="$1" author="$2" issue="$3" trusted label_actor
+    trusted="$(control_channel_trusted_logins)"
+    label_actor="$(control_channel_label_actor "$label" "$issue")"
+    control_channel_is_trusted_login "$author" "$trusted" \
+        && control_channel_is_trusted_login "$label_actor" "$trusted"
 }
 
 # control_channel_is_trusted_login LOGIN TRUSTED_NEWLINE_LIST — exit 0 only
@@ -298,7 +309,7 @@ emit_decision() {
             #      event is a trusted login — the label is the command
             #      authority, and anyone with triage rights could label an
             #      old trusted-authored issue (approval-spoofing).
-            local issue_number author_login label_actor trusted
+            local issue_number author_login
             issue_number="$(printf '%s' "$issues_json" | jq -r '.[0].number // empty' 2>/dev/null || echo "")"
             author_login="$(printf '%s' "$issues_json" | jq -r '.[0].author.login // empty' 2>/dev/null || echo "")"
 
@@ -307,30 +318,36 @@ emit_decision() {
                 return 0
             fi
 
-            trusted="$(control_channel_trusted_logins)"
-            label_actor="$(control_channel_promote_label_actor "$issue_number")"
-            if control_channel_is_trusted_login "$author_login" "$trusted" \
-                && control_channel_is_trusted_login "$label_actor" "$trusted"; then
+            if control_channel_dual_trust "autospec:promote" "$author_login" "$issue_number"; then
                 printf 'DECISION:promote\n'
                 printf 'PROMOTE_ISSUE:%s\n' "$issue_number"
             else
-                warn "promote: issue #$issue_number refused — author '$author_login' or label actor '$label_actor' is not a trusted actor (fail closed)"
+                warn "promote: issue #$issue_number refused — author '$author_login' or the autospec:promote label applicator is not a trusted actor (fail closed)"
                 printf 'DECISION:promote-refused\n'
                 printf 'PROMOTE_ISSUE:%s\n' "$issue_number"
             fi
             ;;
 
         "autospec:discard")
-            local discard_issue_number
+            # IDENTICAL dual trust gate to promote — discard destroys the
+            # roll-up and reopens issues, so it is operator authority too.
+            local discard_issue_number discard_author_login
             discard_issue_number="$(printf '%s' "$issues_json" | jq -r '.[0].number // empty' 2>/dev/null || echo "")"
+            discard_author_login="$(printf '%s' "$issues_json" | jq -r '.[0].author.login // empty' 2>/dev/null || echo "")"
 
             if [ -z "$discard_issue_number" ]; then
                 warn "discard: could not extract issue number from JSON"
                 return 0
             fi
 
-            printf 'DECISION:discard\n'
-            printf 'DISCARD_ISSUE:%s\n' "$discard_issue_number"
+            if control_channel_dual_trust "autospec:discard" "$discard_author_login" "$discard_issue_number"; then
+                printf 'DECISION:discard\n'
+                printf 'DISCARD_ISSUE:%s\n' "$discard_issue_number"
+            else
+                warn "discard: issue #$discard_issue_number refused — author '$discard_author_login' or the autospec:discard label applicator is not a trusted actor (fail closed)"
+                printf 'DECISION:discard-refused\n'
+                printf 'DISCARD_ISSUE:%s\n' "$discard_issue_number"
+            fi
             ;;
 
         "autospec:recalibrate-persona")
