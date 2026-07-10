@@ -82,6 +82,15 @@ teardown() {
   ! printf '%s' "$output" | grep -q 's3cr3t-token'
 }
 
+@test "sourcing the shim does not mutate the caller's shell options" {
+  export PATH="$TMP/bin:$PATH"
+  run bash -c "set +e +u +o pipefail; . '$SHIM'; set -o | awk '\$1 ~ /^(errexit|nounset|pipefail)\$/ {print \$1\":\"\$2}'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"errexit:off"* ]]
+  [[ "$output" == *"nounset:off"* ]]
+  [[ "$output" == *"pipefail:off"* ]]
+}
+
 @test "falls back to ~/.autospec/bin/autospec-db when not on PATH" {
   export AUTOSPEC_DB_DSN="postgres://user:secret@host/db"
   export HOME="$TMP/home"

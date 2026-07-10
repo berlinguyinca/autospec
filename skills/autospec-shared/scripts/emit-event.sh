@@ -12,15 +12,14 @@
 # Guarantees: every path returns exit 0; emission never blocks, retries
 # inline, or alters a caller's exit/return value; AUTOSPEC_DB_DSN is never
 # echoed or logged.
-set -euo pipefail
-
-# Mirrors growth-ledger.sh's shared-script header idiom.
+#
+# No top-level `set -euo pipefail` here (unlike growth-ledger.sh, which is
+# invoked as its own process): this file is SOURCED into a long-lived
+# chokepoint script, and a file-scope `set` would mutate the caller's shell
+# options (errexit/nounset/pipefail) for the rest of its run — its own
+# "never alters a caller" guarantee. Each guard below is written to be safe
+# under the caller's own `set -u`.
 emit_event() {
-  # Reuses growth-ledger.sh's shared-script `set -euo pipefail` header idiom —
-  # no reuse of a helper function itself, since no existing script resolves
-  # the autospec-db binary or dispatches to it (file-system + exec, not the
-  # ledger's jq/JSONL append pattern).
-
   # Guard 1: no DSN configured means telemetry is off — silent no-op.
   if [ -z "${AUTOSPEC_DB_DSN:-}" ]; then
     return 0
@@ -31,8 +30,8 @@ emit_event() {
   local bin=""
   if command -v autospec-db >/dev/null 2>&1; then
     bin="$(command -v autospec-db)"
-  elif [ -x "${HOME}/.autospec/bin/autospec-db" ]; then
-    bin="${HOME}/.autospec/bin/autospec-db"
+  elif [ -x "${HOME:-}/.autospec/bin/autospec-db" ]; then
+    bin="${HOME:-}/.autospec/bin/autospec-db"
   else
     return 0
   fi
