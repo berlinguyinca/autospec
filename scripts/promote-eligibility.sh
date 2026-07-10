@@ -30,16 +30,21 @@ MAX_FILES=3
 
 BODY_FILE=""
 LABELS=""
+REPO=""
 
 usage() {
   cat <<'EOF'
 promote-eligibility.sh — deterministic fail-closed eligibility scorer
 
 Usage:
-  scripts/promote-eligibility.sh <body-file> --labels "<csv>"
+  scripts/promote-eligibility.sh <body-file> --labels "<csv>" [--repo OWNER/REPO]
 
 Environment:
   GH_NONEXISTENT  test hook: treat any "Depends on #N" as nonexistent
+
+--repo scopes the "Depends on #N" existence check to the grooming target repo
+(gh issue view N --repo OWNER/REPO); without it, gh infers repo from cwd, which
+is wrong when grooming a repo other than the current checkout.
 
 Exit codes:
   0  success
@@ -55,6 +60,10 @@ while [ $# -gt 0 ]; do
       ;;
     --labels)
       LABELS="${2:-}"
+      shift 2
+      ;;
+    --repo)
+      REPO="${2:-}"
       shift 2
       ;;
     -*)
@@ -137,7 +146,15 @@ if [ -n "$DEP_NUM" ]; then
   if [ "${GH_NONEXISTENT:-0}" = "1" ]; then
     DEP_EXISTS=0
   elif command -v gh >/dev/null 2>&1; then
-    if gh issue view "$DEP_NUM" >/dev/null 2>&1; then
+    # Scope to --repo when provided so cross-repo grooming checks the RIGHT repo
+    # (bare `gh issue view N` infers repo from cwd — wrong target otherwise).
+    if [ -n "$REPO" ]; then
+      if gh issue view "$DEP_NUM" --repo "$REPO" >/dev/null 2>&1; then
+        DEP_EXISTS=1
+      else
+        DEP_EXISTS=0
+      fi
+    elif gh issue view "$DEP_NUM" >/dev/null 2>&1; then
       DEP_EXISTS=1
     else
       DEP_EXISTS=0
