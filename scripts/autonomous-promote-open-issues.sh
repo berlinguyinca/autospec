@@ -19,8 +19,17 @@
 #   2. classify (unlabeled/needs-classify): add ctx:/reasoning:, drop needs-classify.
 #   3. eligibility:
 #        eligible       → promote now (add auto-implement, drop needs-autospec-template)
-#        needs-template → promote ONLY if `template-promote` ∈ govern active set
-#                         (route:groom for the loop), ELSE hold:needs-human
+#        needs-template → deterministic codex template-fill (groom-fill.sh), then:
+#                           fill fails        → hold:needs-human (fail-closed)
+#                           template-promote ∈ govern active set (graduated)
+#                                             → auto: apply filled body,
+#                                               add auto-implement, drop needs-autospec-template
+#                           else (seed)       → canary: apply filled body,
+#                                               add groom:proposed (human approves via
+#                                               auto-implement / rejects via groom:rejected),
+#                                               drop needs-autospec-template
+#                         Candidates already carrying groom:proposed/groom:rejected are
+#                         skipped (already-groomed) before any decision (no re-fill).
 #        epic           → route:split (do NOT decompose here)
 #        hold / error   → hold:needs-human
 #   4. every mutation posts an audit comment stating decision + reason.
@@ -60,6 +69,7 @@ GROOM_CLASSIFY="${AUTOSPEC_GROOM_CLASSIFY_SCRIPT:-$SCRIPT_DIR/classify-model-fit
 GROOM_ELIGIBILITY="${AUTOSPEC_GROOM_ELIGIBILITY_SCRIPT:-$SCRIPT_DIR/promote-eligibility.sh}"
 GROOM_GOVERN="${AUTOSPEC_GROOM_GOVERN_SCRIPT:-$SHARED_DIR/grooming-govern.sh}"
 GROOM_CONFIG="${AUTOSPEC_GROOM_CONFIG_SCRIPT:-$SHARED_DIR/grooming-config.sh}"
+GROOM_FILL="${AUTOSPEC_GROOM_FILL_SCRIPT:-$SCRIPT_DIR/groom-fill.sh}"
 
 usage() {
     cat <<'EOF'
@@ -127,7 +137,8 @@ HELD_FILE="$(mktemp -t promote-held.XXXXXX)"
 QUARANTINED_FILE="$(mktemp -t promote-quar.XXXXXX)"
 ROUTED_FILE="$(mktemp -t promote-routed.XXXXXX)"
 BODY_FILE="$(mktemp -t promote-body.XXXXXX)"
-trap 'rm -f "$SKIPPED_FILE" "$HELD_FILE" "$QUARANTINED_FILE" "$ROUTED_FILE" "$BODY_FILE"' EXIT
+bf=""
+trap 'rm -f "$SKIPPED_FILE" "$HELD_FILE" "$QUARANTINED_FILE" "$ROUTED_FILE" "$BODY_FILE" "${bf:-}"' EXIT
 printf '[]\n' > "$SKIPPED_FILE"
 printf '[]\n' > "$HELD_FILE"
 printf '[]\n' > "$QUARANTINED_FILE"
@@ -248,6 +259,17 @@ while [ "$i" -lt "$cand_count" ]; do
     labels_csv="$(printf '%s' "$detail" | jq -r '[.labels[]?.name] | join(",")' 2>/dev/null || printf '')"
     printf '%s' "$body" > "$BODY_FILE"
 
+    # ── 0. Already-groomed skip (before any decision → no re-fill) ────────────
+    # A candidate that already carries the canary proposal (`groom:proposed`) or
+    # a human rejection (`groom:rejected`) is a completed grooming outcome; never
+    # re-fill or re-route it.
+    case ",${labels_csv}," in
+        *",groom:proposed,"*|*",groom:rejected,"*)
+            record_skip "$num" "already-groomed"
+            continue
+            ;;
+    esac
+
     # ── 1. Safety gate (fail-closed) ─────────────────────────────────────────
     safety_out="$(bash "$GROOM_SAFETY" --title "$title" "$BODY_FILE" 2>/dev/null || true)"
     safety_decision="$(printf '%s\n' "$safety_out" | grep -Eo 'SAFETY_(PASS|AMBIGUOUS|BLOCK)' | head -1 || true)"
@@ -303,25 +325,57 @@ while [ "$i" -lt "$cand_count" ]; do
             promoted_nums="${promoted_nums}${promoted_nums:+ }${num}"
             ;;
         needs-template)
+            # Deterministic LLM template-fill (codex exec via groom-fill.sh),
+            # then route by the govern ratchet: canary (seed) proposes for a human;
+            # auto (graduated: template-promote active) queues straight into
+            # auto-implement. Fail-closed: any fill failure holds for a human.
             active="$(bash "$GROOM_GOVERN" show 2>/dev/null | jq -r '.active // [] | join(" ")' 2>/dev/null || printf '')"
-            has_tp=0
-            case " $active " in
-                *" template-promote "*) has_tp=1 ;;
-            esac
-            if [ "$has_tp" = "1" ]; then
-                # LLM-template promotion is self-governance-enabled → hand to the
-                # groom loop (do NOT go straight to auto-implement).
-                ensure_label "route:groom"
-                gh issue edit "$num" --repo "$repo" \
-                    --add-label "route:groom" >/dev/null 2>&1 || true
-                audit_comment "$num" "grooming: routed to template-groom loop — needs-template with template-promote gate active (${ereason})."
-                record_routed "$num" "groom" "needs-template:${ereason}"
-            else
+            fill_out="$(bash "$GROOM_FILL" --issue "$num" --repo "$repo" 2>/dev/null || printf '')"
+            fill_ok="$(printf '%s' "$fill_out" | jq -r '.ok // false' 2>/dev/null || printf 'false')"
+            if [ "$fill_ok" != "true" ]; then
+                freason="$(printf '%s' "$fill_out" | jq -r '.reason // "fill-error"' 2>/dev/null || printf 'fill-error')"
                 ensure_label "hold:needs-human"
                 gh issue edit "$num" --repo "$repo" \
                     --add-label "hold:needs-human" >/dev/null 2>&1 || true
-                audit_comment "$num" "grooming: held for human — needs-template but template-promote gate not active (${ereason})."
-                record_held "$num" "needs-template:${ereason}"
+                audit_comment "$num" "grooming: codex template-fill unavailable/failed (${freason}) — held for human (${ereason})."
+                record_held "$num" "needs-template:fill-${freason}"
+            else
+                fbody="$(printf '%s' "$fill_out" | jq -r '.body' 2>/dev/null || printf '')"
+                if [ -z "$fbody" ] || [ "$fbody" = "null" ]; then
+                    # Defense-in-depth: a contract-violating fill (ok:true with
+                    # no/null body) must never reach auto-implement or overwrite
+                    # the issue body — hold for a human instead.
+                    ensure_label "hold:needs-human"
+                    gh issue edit "$num" --repo "$repo" \
+                        --add-label "hold:needs-human" >/dev/null 2>&1 || true
+                    audit_comment "$num" "grooming: codex template-fill returned an empty body — held for human (${ereason})."
+                    record_held "$num" "needs-template:fill-empty-body"
+                else
+                    bf="$(mktemp "${TMPDIR:-/tmp}/groom-body.XXXXXX")"
+                    printf '%s' "$fbody" > "$bf"
+                    case " $active " in
+                        *" template-promote "*)
+                            # Graduated → auto: filled body queued straight into auto-implement.
+                            ensure_label "auto-implement"
+                            gh issue edit "$num" --repo "$repo" --body-file "$bf" \
+                                --add-label "auto-implement" \
+                                --remove-label "needs-autospec-template" >/dev/null 2>&1 || true
+                            audit_comment "$num" "grooming: auto-template-groomed — template-promote gate active (${ereason})."
+                            record_routed "$num" "groom-auto" "needs-template:${ereason}"
+                            ;;
+                        *)
+                            # Seed → canary: filled body proposed for human approval.
+                            ensure_label "groom:proposed"
+                            gh issue edit "$num" --repo "$repo" --body-file "$bf" \
+                                --add-label "groom:proposed" \
+                                --remove-label "needs-autospec-template" >/dev/null 2>&1 || true
+                            audit_comment "$num" "grooming: template drafted for human approval (canary) — approve by adding auto-implement, reject with groom:rejected (${ereason})."
+                            record_routed "$num" "groom-canary" "needs-template:${ereason}"
+                            ;;
+                    esac
+                    rm -f "$bf"
+                    bf=""
+                fi
             fi
             ;;
         epic)

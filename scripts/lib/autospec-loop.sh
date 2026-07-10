@@ -1217,22 +1217,19 @@ fi'
             # The promoter (autonomous-promote-open-issues.sh) already owns the
             # deterministic safety→classify→eligibility→promote/groom/split/hold
             # pipeline and its own policy gate — the loop does NOT duplicate that
-            # logic. It only (a) records one telemetry line per promoted issue so
-            # grooming-observe.sh can compute a clean-merge rate later (reverted/
-            # reopened are unknown at promote time and are enriched elsewhere —
-            # emitted false here), and (b) ticks the self-governance ratchet
+            # logic. It only (a) records telemetry: one line per eligible promote
+            # (template_groomed:false) and one line per template groom routed by
+            # the promoter (template_groomed:true, canary per action), each with
+            # outcome:null; (b) runs a reconcile pass (groom-reconcile.sh) that
+            # stamps closing_pr + outcome onto unresolved+closed records from
+            # GitHub BEFORE observing; and (c) ticks the self-governance ratchet
             # (grooming-govern.sh) when policy resolves to auto. A non-auto
             # policy must NOT tick (guarded below). Skipped entirely during the
             # conductor's own --dry-run (nothing real happened this cycle).
             #
-            # `needs-template` candidates: when the promoter routes an issue to
-            # `route:groom` (template-promote gate active), the prose contract
-            # for a future Tier-B fill-in is: dispatch a subagent to fill the
-            # template sections for that issue, re-run groom-validate.sh against
-            # the result (feeding findings back on failure, up to
-            # `budget.groom_attempts_per_issue` retries from grooming-config.sh),
-            # then hand the issue back to the promoter to finalize (promote or
-            # hold). This wiring task does not implement that dispatch loop.
+            # grooming template-fill is performed deterministically by the
+            # promoter via groom-fill.sh (codex exec) — canary(seed)/auto
+            # (graduated); the loop only records telemetry + ticks governance.
             if [ "$_dry" != "1" ]; then
                 local _groom_config_sh="${AUTOSPEC_GROOMING_CONFIG_BIN:-}"
                 if [ -z "$_groom_config_sh" ]; then
@@ -1265,18 +1262,28 @@ fi'
                     [ -n "$_groom_policy" ] || _groom_policy="auto"
                 fi
 
-                # Append one telemetry record per promoted issue (jq-built, never
-                # printf, so the JSON is always well-formed).
+                # Append telemetry records (jq-built, never printf, so the JSON is
+                # always well-formed). Eligible promotes populate the baseline
+                # (template_groomed:false); promoter-routed template grooms
+                # (action groom-canary|groom-auto) populate the graduation sample
+                # (template_groomed:true, canary per action). outcome + closing_pr
+                # start null and are stamped later by the reconcile pass.
                 local _groom_telemetry="${AUTOSPEC_GROOMING_TELEMETRY:-${HOME}/.autospec/grooming-telemetry.jsonl}"
                 local _groom_promoted_json
                 _groom_promoted_json="$(printf '%s' "$_promote_out" | jq -c '.promoted // []' 2>/dev/null || printf '[]')"
                 local _groom_promoted_count
                 _groom_promoted_count="$(printf '%s' "$_groom_promoted_json" | jq 'length' 2>/dev/null || printf '0')"
                 case "$_groom_promoted_count" in ''|*[!0-9]*) _groom_promoted_count=0 ;; esac
-                if [ "$_groom_promoted_count" -gt 0 ] 2>/dev/null; then
+                local _groom_routed_json
+                _groom_routed_json="$(printf '%s' "$_promote_out" | jq -c '[.routed[]? | select(.action|type=="string" and startswith("groom-"))]' 2>/dev/null || printf '[]')"
+                local _groom_routed_count
+                _groom_routed_count="$(printf '%s' "$_groom_routed_json" | jq 'length' 2>/dev/null || printf '0')"
+                case "$_groom_routed_count" in ''|*[!0-9]*) _groom_routed_count=0 ;; esac
+                if [ "$_groom_promoted_count" -gt 0 ] 2>/dev/null || [ "$_groom_routed_count" -gt 0 ] 2>/dev/null; then
                     mkdir -p "$(dirname "$_groom_telemetry")" 2>/dev/null || true
                     local _groom_ts
                     _groom_ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo 'unknown')"
+                    # Eligible promotes → baseline population (template_groomed:false).
                     local _gi=0
                     while [ "$_gi" -lt "$_groom_promoted_count" ]; do
                         local _gnum
@@ -1285,14 +1292,56 @@ fi'
                             jq -cn \
                                 --argjson issue "$_gnum" \
                                 --arg ts "$_groom_ts" \
-                                '{ts:$ts, issue:$issue, source:"grooming", groomed:true,
-                                  reverted:false, reopened:false, labels:[], verdict:null}' \
+                                '{ts:$ts, issue:$issue, source:"grooming", template_groomed:false,
+                                  closing_pr:null, outcome:null}' \
                                 >> "$_groom_telemetry" 2>/dev/null || true
                         fi
                         _gi=$((_gi + 1))
                     done
-                    printf '[conductor] Tier 1.5 grooming telemetry: appended %s record(s) to %s\n' \
-                        "$_groom_promoted_count" "$_groom_telemetry" >&2
+                    # Template grooms → graduation sample (template_groomed:true).
+                    local _rj=0
+                    while [ "$_rj" -lt "$_groom_routed_count" ]; do
+                        local _rnum _ract
+                        _rnum="$(printf '%s' "$_groom_routed_json" | jq -r ".[$_rj].issue" 2>/dev/null || printf '')"
+                        _ract="$(printf '%s' "$_groom_routed_json" | jq -r ".[$_rj].action" 2>/dev/null || printf '')"
+                        if [ -n "$_rnum" ] && [ "$_rnum" != "null" ]; then
+                            local _canary=false
+                            if [ "$_ract" = "groom-canary" ]; then
+                                _canary=true
+                            fi
+                            jq -cn \
+                                --argjson issue "$_rnum" \
+                                --arg ts "$_groom_ts" \
+                                --argjson canary "$_canary" \
+                                '{ts:$ts, issue:$issue, source:"grooming", template_groomed:true,
+                                  canary:$canary, closing_pr:null, outcome:null}' \
+                                >> "$_groom_telemetry" 2>/dev/null || true
+                        fi
+                        _rj=$((_rj + 1))
+                    done
+                    printf '[conductor] Tier 1.5 grooming telemetry: appended %s promote + %s groom record(s) to %s\n' \
+                        "$_groom_promoted_count" "$_groom_routed_count" "$_groom_telemetry" >&2
+                fi
+
+                # Reconcile outcomes into the telemetry log BEFORE observing —
+                # stamps closing_pr + outcome for unresolved+closed records from
+                # GitHub (fail-closed: a gh failure leaves the record unresolved).
+                # Resolved the same lazy way as observe/govern; skipped when policy
+                # is off. (_dry != 1 is already guaranteed by the enclosing guard.)
+                if [ "$_groom_policy" != "off" ]; then
+                    local _groom_reconcile_sh="${AUTOSPEC_GROOMING_RECONCILE_BIN:-}"
+                    if [ -z "$_groom_reconcile_sh" ]; then
+                        if [ -f "${_sdir}/groom-reconcile.sh" ]; then
+                            _groom_reconcile_sh="${_sdir}/groom-reconcile.sh"
+                        elif [ -f "${_sdir}/../scripts/groom-reconcile.sh" ]; then
+                            _groom_reconcile_sh="${_sdir}/../scripts/groom-reconcile.sh"
+                        fi
+                    fi
+                    if [ -n "$_groom_reconcile_sh" ] && [ -f "$_groom_telemetry" ]; then
+                        bash "$_groom_reconcile_sh" \
+                            --telemetry "$_groom_telemetry" \
+                            --repo "$_repo" >/dev/null 2>&1 || true
+                    fi
                 fi
 
                 # Self-governance tick — auto policy ONLY (must not tick on/off).
@@ -1300,8 +1349,17 @@ fi'
                     local _groom_observed
                     _groom_observed="$(bash "$_groom_observe_sh" --telemetry "$_groom_telemetry" 2>/dev/null || printf '')"
                     if [ -n "$_groom_observed" ]; then
-                        local _groom_min_samples="${AUTOSPEC_GROOMING_MIN_SAMPLES:-20}"
-                        case "$_groom_min_samples" in ''|*[!0-9]*) _groom_min_samples=20 ;; esac
+                        # NOTE: canary_floor is the SINGLE floor govern applies to
+                        # BOTH the groomed-sample count AND the baseline-sample count
+                        # (its widen-guard needs baseline_samples >= min-samples). So
+                        # canary->auto graduation can't fire until >= canary_floor
+                        # eligible-promotes have ALSO closed+reconciled — intentional
+                        # fail-closed coupling (no widening without a real baseline).
+                        local _groom_min_samples="${AUTOSPEC_GROOMING_MIN_SAMPLES:-}"
+                        if [ -z "$_groom_min_samples" ] && [ -n "$_groom_config_sh" ]; then
+                            _groom_min_samples="$(bash "$_groom_config_sh" --key budget.canary_floor 2>/dev/null || printf '5')"
+                        fi
+                        case "$_groom_min_samples" in ''|*[!0-9]*) _groom_min_samples=5 ;; esac
                         local _groom_tick_out
                         _groom_tick_out="$(bash "$_groom_govern_sh" tick \
                             --observed "$_groom_observed" \

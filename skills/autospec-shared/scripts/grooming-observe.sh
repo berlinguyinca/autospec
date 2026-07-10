@@ -3,17 +3,31 @@
 # vs a baseline from autospec's telemetry JSONL. Feeds grooming-govern.sh's
 # promote/retract decision.
 #
-# A groomed issue is "clean" if its PR merged with no revert, no reopen, and
-# no escalate:human label/verdict. Baseline is computed the same way over
-# ungroomed (non-grooming-sourced) issues, so the ratchet only promotes when
-# grooming performs at least as well as the ambient issue population.
+# A record is "template-groom" when .template_groomed == true — these are the
+# LLM template-fill records the canary→auto ratchet governs. Everything else
+# is baseline (ambient/non-template-groom population).
+#
+# A record is "resolved" when it carries a reconciled `outcome` (non-null),
+# or — for pre-enhancement (back-compat) records with no `outcome` field at
+# all — when it carries the legacy `reverted`/`reopened` shape. Unresolved
+# records (outcome explicitly null, no closing verdict yet) are excluded from
+# both samples and rate: never-closed issues must not count as clean or
+# unclean.
+#
+# is_clean: when `outcome` is present, clean iff outcome == "clean". For
+# back-compat records without `outcome`, fall back to v1's rule: no revert,
+# no reopen, and no escalate:human label/verdict.
 #
 # Metrics:
-#   groomed_clean_merge_rate  — fraction (0..1) of groomed issues that were clean
-#   baseline_clean_merge_rate — fraction (0..1) of ungroomed issues that were clean
-#   samples                   — count of groomed issues (the promotion sample floor)
-#   baseline_samples          — count of ungroomed issues (govern's widen-guard:
-#                               never widen without a real baseline population)
+#   groomed_clean_merge_rate  — fraction (0..1) of resolved template-groom
+#                               records that were clean
+#   baseline_clean_merge_rate — fraction (0..1) of resolved non-template-groom
+#                               records that were clean
+#   samples                   — count of resolved template-groom records (the
+#                               promotion sample floor)
+#   baseline_samples          — count of resolved non-template-groom records
+#                               (govern's widen-guard: never widen without a
+#                               real baseline population)
 #
 # Fail-safe: a missing/empty/garbled telemetry file yields zeroed metrics and
 # exit 0 (never blocks the sweep). Malformed lines are skipped.
@@ -37,21 +51,23 @@ if [ -z "$TELEMETRY" ] || [ ! -f "$TELEMETRY" ]; then
   zeroed; exit 0
 fi
 
-# Parse defensively (skip malformed lines), then aggregate. A record is
-# considered "groomed" when .groomed == true (or .source == "grooming");
-# it is "clean" when it lacks revert/reopen and its verdict/labels don't
-# include escalate:human.
+# Parse defensively (skip malformed lines), then aggregate. See header comment
+# for the template-groom/baseline partition and reconciled-outcome semantics.
 out="$(jq -R 'fromjson? // empty' "$TELEMETRY" 2>/dev/null | jq -s '
-  def is_groomed: (.groomed == true) or (.source == "grooming");
+  def is_template_groom: (.template_groomed == true);
+  def is_resolved: (has("outcome") and (.outcome != null))
+                   or ((has("outcome") | not) and (has("reverted") or has("reopened")));
   def is_clean:
-    (.reverted != true)
-    and (.reopened != true)
-    and ((.labels // []) | index("escalate:human") | not)
-    and (.verdict != "escalate:human");
-  ([.[] | select(is_groomed)]) as $g
-  | ([.[] | select(is_groomed | not)]) as $b
-  | ($g | length) as $gn
-  | ($b | length) as $bn
+    if (has("outcome") and (.outcome != null)) then (.outcome == "clean")
+    else
+      ((.reverted != true) and (.reopened != true)
+       and ((.labels // []) | index("escalate:human") | not)
+       and (.verdict != "escalate:human"))
+    end;
+  ([.[] | select(is_resolved)]) as $r
+  | ([$r[] | select(is_template_groom)]) as $g
+  | ([$r[] | select(is_template_groom | not)]) as $b
+  | ($g | length) as $gn | ($b | length) as $bn
   | ([$g[] | select(is_clean)] | length) as $gc
   | ([$b[] | select(is_clean)] | length) as $bc
   | {
