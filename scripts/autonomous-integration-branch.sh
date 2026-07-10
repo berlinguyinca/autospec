@@ -200,6 +200,13 @@ ensure_local_branch() {
     fi
 }
 
+fetch_parent_tip() {
+    git fetch origin "$PARENT" "${dashdash}quiet" || {
+        err "code_health:autonomous_integration_parent_fetch_failed parent=${PARENT#origin/}"
+        exit 1
+    }
+}
+
 write_mode_file() {
     local branch="$1" slug="$2" base="$3" head_sha="$4" root mode_file
     root="$(repo_root)"
@@ -222,7 +229,7 @@ cmd_ensure() {
     pref="$(parent_ref)"
     slug="$(repo_slug)"
 
-    git fetch origin "$PARENT" "${dashdash}quiet" || true
+    fetch_parent_tip
     if branch_exists "$branch"; then
         info "integration branch already exists: $branch (reusing)"
         ensure_local_branch "$branch"
@@ -242,7 +249,7 @@ cmd_sync() {
     branch="$(integration_branch)"
     pref="$(parent_ref)"
 
-    git fetch origin "$PARENT" "${dashdash}quiet" || true
+    fetch_parent_tip
     ensure_local_branch "$branch"
     git checkout "$branch"
     if ! git merge "${dashdash}no-edit" "$pref"; then
@@ -258,7 +265,7 @@ cmd_reset() {
     branch="$(integration_branch)"
     pref="$(parent_ref)"
 
-    git fetch origin "$PARENT" "${dashdash}quiet" || true
+    fetch_parent_tip
     git branch -f "$branch" "$pref"
     git push -u origin "$branch"
 }

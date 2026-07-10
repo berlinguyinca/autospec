@@ -2,7 +2,15 @@
 # tests/autonomous/test_integration_branch.bats — autonomous integration branch lifecycle.
 
 write_fake_git() {
-    cat > "$FAKE_BIN/git" <<'EOF'
+    write_fake_git_header > "$FAKE_BIN/git"
+    write_fake_git_refs >> "$FAKE_BIN/git"
+    write_fake_git_history >> "$FAKE_BIN/git"
+    write_fake_git_footer >> "$FAKE_BIN/git"
+    chmod +x "$FAKE_BIN/git"
+}
+
+write_fake_git_header() {
+    cat <<'EOF'
 #!/usr/bin/env bash
 set -eu
 state_get() { grep "^$1=" "$GIT_STATE" | tail -1 | cut -d= -f2-; }
@@ -19,7 +27,16 @@ case "${1:-}" in
             printf 'sha-%s\n' "${2:-HEAD}"
         fi
         ;;
-    fetch|branch|push|checkout) exit 0 ;;
+EOF
+}
+
+write_fake_git_refs() {
+    cat <<'EOF'
+    fetch)
+        if [ "$(state_get fetch_failure)" = "1" ]; then exit 9; fi
+        exit 0
+        ;;
+    branch|push|checkout) exit 0 ;;
     show-ref)
         if [ "$(state_get branch_exists)" = "1" ]; then exit 0; fi
         exit 1
@@ -31,6 +48,11 @@ case "${1:-}" in
         fi
         exit 2
         ;;
+EOF
+}
+
+write_fake_git_history() {
+    cat <<'EOF'
     merge) if [ "$(state_get merge_conflict)" = "1" ]; then exit 1; fi ;;
     merge-base) state_get integration_sha ;;
     log)
@@ -46,10 +68,14 @@ case "${1:-}" in
             i=$((i + 1))
         done
         ;;
+EOF
+}
+
+write_fake_git_footer() {
+    cat <<'EOF'
     *) exit 0 ;;
 esac
 EOF
-    chmod +x "$FAKE_BIN/git"
 }
 
 write_fake_gh() {
@@ -83,7 +109,7 @@ EOF
 }
 
 write_fake_state() {
-    printf 'parent_sha=parent111\nintegration_sha=integration222\nbranch_exists=0\nmerge_conflict=0\ndiff_lines=12\nage_epoch=1700000000\nlog_failure=0\ndiff_failure=0\n' > "$GIT_STATE"
+    printf 'parent_sha=parent111\nintegration_sha=integration222\nbranch_exists=0\nmerge_conflict=0\ndiff_lines=12\nage_epoch=1700000000\nlog_failure=0\ndiff_failure=0\nfetch_failure=0\n' > "$GIT_STATE"
     printf '[{"number":77,"state":"OPEN"}]\n' > "$GH_ROLLUP_JSON"
     printf '[{"number":11},{"number":12},{"number":13}]\n' > "$GH_ACCUMULATED_JSON"
 }
@@ -157,12 +183,46 @@ YAML
     grep -q 'merge --abort' "$GIT_CALLS"
 }
 
+@test "ensure fails when parent fetch fails before branch creation" {
+    printf 'fetch_failure=1\n' >> "$GIT_STATE"
+
+    run bash "$SCRIPT" ensure --parent main --repo berlinguyinca/autospec
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"autonomous_integration_parent_fetch_failed"* ]]
+    ! grep -q '^branch ' "$GIT_CALLS"
+    ! grep -q '^push ' "$GIT_CALLS"
+}
+
+@test "sync fails when parent fetch fails before merge or push" {
+    printf 'branch_exists=1\nfetch_failure=1\n' >> "$GIT_STATE"
+
+    run bash "$SCRIPT" sync --parent main
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"autonomous_integration_parent_fetch_failed"* ]]
+    ! grep -q '^checkout ' "$GIT_CALLS"
+    ! grep -q '^merge ' "$GIT_CALLS"
+    ! grep -q '^push ' "$GIT_CALLS"
+}
+
 @test "reset recreates integration branch from new parent tip" {
     run bash "$SCRIPT" reset --parent main
 
     [ "$status" -eq 0 ]
     grep -q 'branch -f autospec/autonomous-main origin/main' "$GIT_CALLS"
     grep -q 'push -u origin autospec/autonomous-main' "$GIT_CALLS"
+}
+
+@test "reset fails when parent fetch fails before branch reset" {
+    printf 'fetch_failure=1\n' >> "$GIT_STATE"
+
+    run bash "$SCRIPT" reset --parent main
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"autonomous_integration_parent_fetch_failed"* ]]
+    ! grep -q '^branch -f ' "$GIT_CALLS"
+    ! grep -q '^push ' "$GIT_CALLS"
 }
 
 @test "status emits rollup pr, accumulated worker count, age days, and diff lines" {
