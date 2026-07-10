@@ -1296,6 +1296,13 @@ fi'
                     _arch_cmd="bash $_explore_script --once --research-sources architecture,test-coverage,technical-debt"
                 elif command -v autospec-explore >/dev/null 2>&1; then
                     _arch_cmd="autospec-explore --once --research-sources architecture,test-coverage,technical-debt"
+                elif [ -f "${_sdir}/autonomous-self-improvement.sh" ]; then
+                    printf -v _arch_cmd 'bash %q apply --repo-root %q' \
+                        "${_sdir}/autonomous-self-improvement.sh" "$_repo_root"
+                    if [ -n "$_repo" ]; then
+                        printf -v _arch_cmd '%s --repo %q' "$_arch_cmd" "$_repo"
+                    fi
+                    _arch_cmd="${_arch_cmd} --apply"
                 fi
             fi
 
