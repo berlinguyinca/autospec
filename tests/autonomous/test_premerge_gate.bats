@@ -764,3 +764,38 @@ GHSTUB
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -q "block self_originated_direct_merge"
 }
+
+@test "unresolved PR base ref fails closed and blocks" {
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+    export AUTOSPEC_CONFIG_FILE="$TMP/missing-autospec.yml"
+    # Empty base simulates a gh/API failure resolving baseRefName.
+    _stub_gh_self_originated "" "main" "780" "1"
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --pr 506 --repo acme/widgets \
+        --check-self-originated \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "block self_originated_direct_merge"
+}
+
+@test "unresolved default branch treats base as protected; self provenance blocks" {
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+    export AUTOSPEC_CONFIG_FILE="$TMP/missing-autospec.yml"
+    # Empty default branch simulates a gh repo view failure; base main must
+    # still be treated as protected (fail closed), so self provenance blocks.
+    _stub_gh_self_originated "main" "" "781" "1"
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --pr 507 --repo acme/widgets \
+        --check-self-originated \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "block self_originated_direct_merge"
+}

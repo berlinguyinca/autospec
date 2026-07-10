@@ -383,13 +383,15 @@ cmd_self_originated() {
     local base
     base="$(gh pr view "$pr" --repo "$repo" --json baseRefName --jq '.baseRefName' 2>/dev/null || true)"
     if [ -z "$base" ]; then
-        # Base ref could not be resolved (gh/API unavailable) — this is a
-        # defense-in-depth check layered on top of the primary integration-
-        # branch routing, so an infra hiccup here allows rather than blocks
-        # every PR; the primary routing and other gates still apply.
-        printf 'DECISION:allow\n'
-        printf 'REASON:base_ref_unresolved\n'
-        return 0
+        # Base ref could not be resolved (gh/API unavailable) — fail CLOSED,
+        # like every enforcement layer on this surface: an API hiccup must
+        # not let a self-originated PR slip onto a protected parent. The
+        # check is opt-in (--check-self-originated in the premerge gate), so
+        # callers that never asked for it are unaffected.
+        printf 'DECISION:block\n'
+        printf 'REASON:self_originated_direct_merge\n'
+        printf 'DETAIL:base ref could not be resolved for PR %s\n' "$pr"
+        exit 1
     fi
 
     # Integration branches (prefix match) are never protected, regardless of
@@ -406,6 +408,12 @@ cmd_self_originated() {
 
     local default_branch configured_protected combined_csv
     default_branch="$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || true)"
+    if [ -z "$default_branch" ]; then
+        # Default branch could not be resolved — fail CLOSED: without it the
+        # protected set is unknowable, so treat the base as protected and
+        # let provenance (itself fail-closed to `self`) decide below.
+        default_branch="$base"
+    fi
     configured_protected="$(autospec_runtime_config_get "autonomous.self_originated.protected_branches" "")"
     combined_csv="$default_branch"
     if [ -n "$configured_protected" ]; then
