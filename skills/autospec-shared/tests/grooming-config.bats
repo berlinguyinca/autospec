@@ -52,3 +52,34 @@ EOF
   [ "$status" -eq 0 ]
   [ "$output" = "auto" ]
 }
+
+@test "canary_floor: default is 5 when unset" {
+  run env -u AUTOSPEC_GROOMING_CANARY_FLOOR AUTOSPEC_CONFIG_FILE=/nonexistent \
+    bash "$SCRIPT" --key budget.canary_floor
+  [ "$status" -eq 0 ]
+  [ "$output" = "5" ]
+}
+
+@test "canary_floor: env override wins" {
+  run env AUTOSPEC_GROOMING_CANARY_FLOOR=9 bash "$SCRIPT" --key budget.canary_floor
+  [ "$status" -eq 0 ]
+  [ "$output" = "9" ]
+}
+
+@test "canary_floor: reads from yaml grooming.budget.canary_floor" {
+  cfg="$BATS_TEST_TMPDIR/autospec.yml"
+  printf 'grooming:\n  budget:\n    canary_floor: 7\n' > "$cfg"
+  run env -u AUTOSPEC_GROOMING_CANARY_FLOOR AUTOSPEC_CONFIG_FILE="$cfg" \
+    bash "$SCRIPT" --key budget.canary_floor
+  [ "$status" -eq 0 ]
+  [ "$output" = "7" ]
+}
+
+@test "canary_floor: non-numeric yaml falls back to default 5" {
+  cfg="$BATS_TEST_TMPDIR/autospec.yml"
+  printf 'grooming:\n  budget:\n    canary_floor: banana\n' > "$cfg"
+  run env -u AUTOSPEC_GROOMING_CANARY_FLOOR AUTOSPEC_CONFIG_FILE="$cfg" \
+    bash "$SCRIPT" --key budget.canary_floor
+  [ "$status" -eq 0 ]
+  [ "$output" = "5" ]
+}

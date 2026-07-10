@@ -112,6 +112,7 @@ grooming:
   budget:
     max_issues_per_cycle: 5
     groom_attempts_per_issue: 2
+    canary_floor: 5
 documentation:
   enabled: true
   audiences:
