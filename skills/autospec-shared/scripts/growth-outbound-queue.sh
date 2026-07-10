@@ -32,15 +32,20 @@ build_body() {
 read_state() {
   local csv="${1:-}"
   # Split on commas; exact match each token (string equality, never regex).
-  local IFS=','; local tok; local approved=0 rejected=0 edited=0
+  local IFS=','; local tok; local approved=0 rejected=0 edited=0 published=0
   for tok in $csv; do
     case "$tok" in
-      "growth/rejected") rejected=1 ;;
-      "growth/approved") approved=1 ;;
-      "growth/edited")   edited=1 ;;
+      "growth/published") published=1 ;;
+      "growth/rejected")  rejected=1 ;;
+      "growth/approved")  approved=1 ;;
+      "growth/edited")    edited=1 ;;
     esac
   done
-  if [ "$rejected" -eq 1 ]; then echo "rejected"
+  # `published` is terminal (human confirmed the post is live): it outranks the
+  # decision labels so R3 records the ledger line and closes the issue, even if
+  # a prior decision label still lingers.
+  if [ "$published" -eq 1 ]; then echo "published"
+  elif [ "$rejected" -eq 1 ]; then echo "rejected"
   elif [ "$approved" -eq 1 ]; then echo "approved"
   elif [ "$edited" -eq 1 ]; then echo "edited"
   else echo "pending"; fi

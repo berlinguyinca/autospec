@@ -1069,9 +1069,12 @@ fi'
             # Human-decided approval control issues awaiting R3 (control repo).
             # Spec Tier G2: service-growth-outbound must also fire on any open
             # growth/needs-approval issue carrying a decision label. Without this,
-            # R3 only runs by accident of a still-open draft.
+            # R3 only runs by accident of a still-open draft. `growth/published`
+            # is included so a human-confirmed post self-triggers R3 to record
+            # the terminal published ledger line and close the issue (otherwise
+            # that attribution line is only written opportunistically).
             _g_approvals="$(gh issue list --repo "$_growth_control_repo" --state open --label growth/needs-approval --json labels \
-                --jq '[.[] | select(.labels | map(.name) | any(. == "growth/approved" or . == "growth/edited" or . == "growth/rejected"))] | length' 2>/dev/null || echo 0)"
+                --jq '[.[] | select(.labels | map(.name) | any(. == "growth/approved" or . == "growth/edited" or . == "growth/rejected" or . == "growth/published"))] | length' 2>/dev/null || echo 0)"
             case "$_g_approvals" in *[!0-9]*) _g_approvals=0 ;; esac
             # Outbound tier fires on drafts-to-draft OR approvals-to-service.
             _g_outbound_pending=$(( _g_outbound + _g_approvals ))

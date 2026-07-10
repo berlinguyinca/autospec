@@ -326,6 +326,64 @@ EOF
   grep -q -- '--growth-outbound-pending 1' "$waterfall_args_log"
 }
 
+# ── Follow-up: a human-confirmed published issue self-triggers the tier ────
+# A growth/needs-approval issue the human marked growth/published (no other
+# decision label) must raise --growth-outbound-pending so R3 records the
+# terminal published ledger line and closes it, rather than waiting for
+# unrelated outbound work. Exercises the real any(...) filter's published clause.
+@test "growth/published control issue raises --growth-outbound-pending (no drafts)" {
+  _install_common_stubs
+  mkdir -p "$TEST_TMP/.autospec"
+  cat > "$TEST_TMP/.autospec/growth.yml" <<'YAML'
+product:
+  name: Acme
+site:
+  url: https://acme.dev
+  repo_path: .
+measurement: {}
+approval:
+  control_repo: acme/growth
+YAML
+  cp "$REPO_ROOT/skills/autospec-shared/scripts/validate-growth-config.sh" \
+    "$FAKE_SCRIPTS/validate-growth-config.sh"
+  chmod +x "$FAKE_SCRIPTS/validate-growth-config.sh"
+
+  # One needs-approval issue carrying ONLY growth/published (terminal, human
+  # confirmed). The real any(...) filter must count it via the published clause.
+  cat > "$FAKE_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+args=("$@")
+if printf '%s ' "$@" | grep -q 'growth/needs-approval'; then
+  json='[{"labels":[{"name":"growth/needs-approval"},{"name":"growth/awaiting-publish"},{"name":"growth/published"}]}]'
+  jqexpr=""
+  i=0
+  while [ "$i" -lt "${#args[@]}" ]; do
+    if [ "${args[$i]}" = "--jq" ]; then jqexpr="${args[$((i+1))]}"; fi
+    i=$((i+1))
+  done
+  if [ -n "$jqexpr" ]; then printf '%s' "$json" | jq -r "$jqexpr"; else printf '%s' "$json"; fi
+  exit 0
+fi
+case "${1:-}" in
+  issue) echo "[]" ;;
+  repo)  echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
+  *)     exit 0 ;;
+esac
+EOF
+  chmod +x "$FAKE_BIN/gh"
+
+  local waterfall_args_log="$TEST_TMP/waterfall-args.log"
+  _install_stub "autonomous-waterfall.sh" \
+    "printf '%s\n' \"\$*\" >> '$waterfall_args_log'; printf '{\"tier\":1,\"action\":\"run-backlog\",\"reason\":\"test\"}\n'"
+  export AUTOSPEC_RUN_CMD="true"
+
+  _run_cycle
+
+  [ "$status" -eq 0 ]
+  [ -f "$waterfall_args_log" ]
+  grep -q -- '--growth-outbound-pending 1' "$waterfall_args_log"
+}
+
 # ── Minor #1: grow.backlog_floor from config is threaded to the waterfall ──
 @test "grow.backlog_floor is threaded as --growth-backlog-floor" {
   _install_common_stubs
