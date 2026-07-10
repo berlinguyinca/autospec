@@ -22,13 +22,16 @@ while IFS= read -r line; do
   rationale="$(echo "$line" | jq -r '.rationale // ""')"
 
   if [ "$kind" = "artifact" ]; then
-    labels="auto-implement,growth:artifact,growth:$channel"
+    labels="auto-implement,growth:artifact,growth:$channel,origin:self"
     body="$(printf 'Growth artifact (lens: %s, channel: %s)\n\n%s\n\nFiled by /autospec-grow-define.' "$lens" "$channel" "$rationale")"
   else
-    labels="growth:outbound,growth/needs-draft,growth:$channel"
+    labels="growth:outbound,growth/needs-draft,growth:$channel,origin:self"
     body="$(printf 'Growth outbound draft needed (lens: %s, channel: %s)\n\nTarget/rule: see rationale.\n\n%s\n\nDrafted + gated + queued by /autospec-grow-run.' "$lens" "$channel" "$rationale")"
   fi
 
+  # origin:self provenance (issue #1745): idempotent, best-effort label
+  # auto-creation — a create/exists failure never blocks filing.
+  gh label create origin:self --color 8250df --force >/dev/null 2>&1 || true
   if ! url="$(gh issue create --title "$title" --body "$body" --label "$labels" 2>/dev/null)"; then
     echo "grow-define: gh issue create failed for: $title (skipped)" >&2
     continue
