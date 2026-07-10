@@ -74,11 +74,17 @@ autospec agents ──autospec-db binary (emit + spool, pgx)──> Postgres
    assembly fragility.)
 2. **One shared shim** `skills/autospec-shared/scripts/emit-event.sh` is the only
    core-repo integration point (chokepoints source it and call
-   `emit_event <kind> [key=value]...`). Guards, in order: `AUTOSPEC_DB_DSN` unset →
-   exit 0; `autospec-db` binary not found (PATH, then
-   `~/.autospec/bin/autospec-db`) → exit 0; otherwise exec the binary with the
-   caller's args. The shim adds no logic beyond guard + dispatch — payload assembly,
-   timeout (2s), spool, and drain all live in the binary.
+   `emit_event <kind> [key=value]...`). Guards, in order: neither `AUTOSPEC_DB_DSN`
+   set nor `~/.autospec/db.env` present → return 0; `autospec-db` binary not found
+   (PATH, then `~/.autospec/bin/autospec-db`) → return 0; otherwise invoke the
+   binary with the caller's args. The binary is the single config authority: the
+   shim's config guard exists only to avoid spawning a process on unconfigured
+   machines and MUST be strictly weaker than (never stricter than) the binary's own
+   config check — `install` produces db.env without exporting the DSN, so a
+   DSN-only guard would silently drop all telemetry from contexts where session
+   bootstrap has not run (cron, subagents, conductors). The shim adds no logic
+   beyond guard + dispatch — payload assembly, timeout (2s), spool, and drain all
+   live in the binary.
 3. **Spool + drain are binary-internal**: on any failure the binary appends the event
    line to `~/.autospec/db-spool.jsonl` (flock-guarded — concurrent emitters from
    parallel runs are safe) and exits 0; every successful emit opportunistically drains
@@ -157,7 +163,9 @@ autospec-db, not enforceable here.
 
 Core repo: TDD, bats, the `autospec-db` binary mocked via a PATH-shim stub logging
 argv; no live database and no real binary anywhere in core CI. Required cases:
-unset-DSN → zero binary invocations (the optionality proof); binary absent → exit 0;
+no DSN and no db.env → zero binary invocations (the optionality proof); db.env
+present with DSN unset → binary IS invoked (the bootstrap-independence proof);
+binary absent → exit 0;
 each chokepoint passes the mapped kind + fields; DSN never appears in any output. New
 suites must be registered in a `scripts/validate.sh` check_* gate (enumerated, not
 globbed). autospec-db repo: Go unit tests (spool locking, payload construction,
