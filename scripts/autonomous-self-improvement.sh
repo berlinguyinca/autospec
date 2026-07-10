@@ -156,22 +156,38 @@ case "$cmd" in
                 break
             fi
             title="$(printf '%s' "$row" | jq -r '.title')"
+            title_goal="$(printf '%s' "$title" | sed 's/[.?!][[:space:]]*$//')"
             evidence="$(printf '%s' "$row" | jq -r '.evidence // ""')"
-            files="$(printf '%s' "$row" | jq -r '.files | map("`" + . + "`") | join(", ")')"
-            primary_file="$(printf '%s' "$row" | jq -r '.files[0] // "scripts/autonomous-self-improvement.sh"')"
+            files_plain="$(printf '%s' "$row" | jq -r '.files[:3][]')"
+            files_inline="$(printf '%s' "$row" | jq -r '.files[:3] | map("`" + . + "`") | join(", ")')"
+            first_file="$(printf '%s' "$files_plain" | sed '/^[[:space:]]*$/d' | head -n 1)"
+            [ -n "$first_file" ] || first_file="scripts/autonomous-self-improvement.sh"
             {
-                printf '## Goal\n%s.\n\n' "$title"
-                printf '## Context\nAutoSpec discovered this deterministic self-improvement candidate while the autonomous queue was dry.\n\n'
-                printf '## Evidence\n- %s\n- Files: %s\n\n' "$evidence" "$files"
-                printf '## Files to read first\n- `%s`\n\n' "$primary_file"
-                printf '## Implementation outline\n- Inspect `%s` and classify this candidate into focused implementation scope.\n\n' "$primary_file"
-                printf '## Tests required\n- `bash scripts/validate.sh --fast --changed=origin/main`\n\n'
-                printf '### Primary smoke test (inner loop)\n'
+                printf '## Goal\nResolve `%s`: %s.\n\n' "$first_file" "$title_goal"
+                printf '## Files to read first\n'
+                printf '%s\n' "$files_plain" | sed '/^[[:space:]]*$/d; s/^/- /'
+                printf '\n## Implementation outline\n'
+                printf '1. Inspect the evidence line and confirm the issue still reproduces.\n'
+                printf '2. Make the smallest change in the files listed under `## Files touched`.\n'
+                printf '3. Run the primary smoke test and record the result.\n\n'
+                printf '## Tests required\n- bash scripts/validate.sh --fast --changed=origin/main\n\n'
+                printf '## Dependencies\nnone\n\n'
+                printf '## Files touched\n'
+                printf '%s\n' "$files_plain" | sed '/^[[:space:]]*$/d; s/^/- /'
+                printf '\n## Context\nAutoSpec discovered this deterministic self-improvement candidate while the autonomous queue was dry.\n\n'
+                printf '## Evidence\n- %s\n- Files: %s\n\n' "$evidence" "$files_inline"
+                printf '## Acceptance criteria\n'
+                printf '%s\n' '- [ ] `bash scripts/validate.sh --fast --changed=origin/main` exits 0 after the change.'
+                printf '%s\n\n' '- [ ] The final PR closes or supersedes this `needs-classify` issue.'
+                printf '## Verification\n\n'
+                printf '### Primary smoke test (inner loop)\n\n'
                 printf '```bash\n'
                 printf 'bash scripts/validate.sh --fast --changed=origin/main\n'
                 printf '```\n\n'
-                printf '## Acceptance criteria\n'
-                printf -- '- [ ] `scripts/validate.sh` passes after the classified change.\n'
+                printf '### Operator/full verification\n\n'
+                printf '```bash\n'
+                printf 'bash scripts/validate.sh\n'
+                printf '```\n'
             } > "$tmp.body"
             gh issue create --repo "$repo" --title "$title" --body-file "$tmp.body" --label needs-classify >/dev/null
             filed=$((filed + 1))
