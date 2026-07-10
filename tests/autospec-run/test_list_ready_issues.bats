@@ -273,3 +273,35 @@ EOF
     [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(503) != null')" = "false" ]
     [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==503) | .reason')" = "safety_gate_failed" ]
 }
+
+@test "malformed in-block safety decisions are blocked before ready queue" {
+    cases='[
+      {"number":504,"title":"not-pass","block":"- **decision:** `NOT_SAFETY_PASS`"},
+      {"number":505,"title":"passive","block":"- **decision:** `SAFETY_PASSIVE`"},
+      {"number":506,"title":"prose-only","block":"Reviewer prose says SAFETY_PASS but omits the decision line."},
+      {"number":507,"title":"duplicate-decision","block":"- **decision:** `SAFETY_PASS`\n- **decision:** `SAFETY_PASS`"}
+    ]'
+
+    printf '%s\n' "$cases" | jq -c '.[]' | while IFS= read -r case_json; do
+        number="$(printf '%s\n' "$case_json" | jq -r '.number')"
+        title="$(printf '%s\n' "$case_json" | jq -r '.title')"
+        block="$(printf '%s\n' "$case_json" | jq -r '.block')"
+        body="$(cat <<EOF
+## Safety review
+
+<!-- autospec-safety:begin -->
+$block
+<!-- autospec-safety:end -->
+
+## Implementation outline
+
+- edit \`unsafe/$title.sh\`
+EOF
+)"
+        write_auto_issue "$number" "$title" "$body"
+
+        output="$(run_list_ready)"
+        [ "$(printf '%s' "$output" | jq -r --argjson number "$number" '.ready | map(.number) | index($number) != null')" = "false" ]
+        [ "$(printf '%s' "$output" | jq -r --argjson number "$number" '.blocked[] | select(.number==$number) | .reason')" = "safety_gate_failed" ]
+    done
+}

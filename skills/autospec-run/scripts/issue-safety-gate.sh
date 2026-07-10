@@ -57,10 +57,16 @@ if not previous_headings or previous_headings[-1] != "## Safety review":
     sys.exit(0)
 
 block = body[begin + len(BEGIN):end]
-if "SAFETY_PASS" not in block:
+decision_prefix = "- **decision:**"
+decision_pass = "- **decision:** `SAFETY_PASS`"
+decision_lines = [
+    line for line in block.splitlines()
+    if line.strip().startswith(decision_prefix)
+]
+if len(decision_lines) != 1:
     result(False, "missing_safety_pass")
     sys.exit(0)
-if "SAFETY_BLOCK" in block or "SAFETY_AMBIGUOUS" in block:
+if decision_lines[0] != decision_pass:
     result(False, "non_pass_safety_decision")
     sys.exit(0)
 

@@ -202,7 +202,7 @@ setup() {
     done
 
     grep -q "both \`<!-- autospec-safety:begin -->\` and \`<!-- autospec-safety:end -->\`" "$REPO_ROOT/skills/autospec-run/SKILL.md"
-    grep -q "current marker-delimited block does not contain \`SAFETY_PASS\`" "$REPO_ROOT/skills/autospec-run/SKILL.md"
+    grep -Fq 'exactly one decision line equal to `- **decision:** \`SAFETY_PASS\``' "$REPO_ROOT/skills/autospec-run/SKILL.md"
 }
 
 @test "docs mention issue intent safety gate" {

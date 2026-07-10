@@ -121,3 +121,33 @@ EOF
     [ "$(echo "$output" | jq -r '.reason')" = "safety_gate_failed" ]
     [ ! -s "$FIXTURE_DIR/edit.log" ]
 }
+
+@test "claim refuses malformed in-block safety decisions before label mutation" {
+    cases='[
+      {"title":"not-pass","block":"- **decision:** `NOT_SAFETY_PASS`"},
+      {"title":"passive","block":"- **decision:** `SAFETY_PASSIVE`"},
+      {"title":"prose-only","block":"Reviewer prose says SAFETY_PASS but omits the decision line."},
+      {"title":"duplicate-decision","block":"- **decision:** `SAFETY_PASS`\n- **decision:** `SAFETY_PASS`"}
+    ]'
+
+    printf '%s\n' "$cases" | jq -c '.[]' | while IFS= read -r case_json; do
+        title="$(printf '%s\n' "$case_json" | jq -r '.title')"
+        block="$(printf '%s\n' "$case_json" | jq -r '.block')"
+        body="$(cat <<EOF
+## Safety review
+
+<!-- autospec-safety:begin -->
+$block
+<!-- autospec-safety:end -->
+EOF
+)"
+        : > "$FIXTURE_DIR/edit.log"
+        write_issue "$body" '[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
+
+        run run_claim
+
+        [ "$status" -eq 2 ]
+        [ "$(echo "$output" | jq -r '.reason')" = "safety_gate_failed" ]
+        [ ! -s "$FIXTURE_DIR/edit.log" ]
+    done
+}
