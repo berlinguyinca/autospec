@@ -413,6 +413,17 @@ GATE=$(gh issue view "$ISSUE" --json labels --jq '[.labels[].name] | join(",")' 
   (`rm -rf build && .venv/bin/python src/generate.py`) → `stl-release-gate.py`
   on affected models (blocking geometry stages must pass; vision is advisory) →
   unittest, and the Primary smoke is the model's focused regression test.
+- `GATE=growth` — the issue carries `growth:artifact`. Keep the **standard
+  implementer**, and add one **content-quality gate** to Phase 4 before the
+  standard reviewer + `growth-ethics` + `autospec-secaudit` gates: run
+  `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/growth-content-quality-precheck.sh`
+  on the changed content (deterministic pre-checks: keyword-density ceiling,
+  FTC-disclosure presence, citation presence), then a `TIER_A` reviewer for
+  E-E-A-T / brand-voice, wrapped in the standard 5-attempt adaptive-retry loop
+  that feeds findings back as directives. A failing gate blocks merge
+  (fail-closed); it never ships unreviewed growth content. This makes the gate
+  fire for every path that reaches a `growth:artifact` issue — the autonomous
+  Tier-1 drain and `/autospec-grow-run` R1 alike.
 - `GATE=default` — every other issue keeps the standard implementer + gate.
 
 The branch is the only difference; the fab branch's gate prose lives in
