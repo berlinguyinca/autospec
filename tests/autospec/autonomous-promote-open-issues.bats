@@ -70,13 +70,37 @@ SH
 JSON
   }
 
+  # apply-safety-review stub seam: mk_apply_safety "pass" (exit 0, logs
+  # add-label safety:reviewed) or "quarantine" (exit 1, logs
+  # add-label security:quarantined).
+  mk_apply_safety() {
+    if [ "$1" = "pass" ]; then
+      cat > "$TMP/bin/applysafety.sh" <<'SH'
+#!/usr/bin/env bash
+# log the mutation intent so tests can assert it
+printf '%s\n' "apply-safety add-label safety:reviewed issue" >> "$GH_LOG"
+printf '%s\n' '{"decision":"SAFETY_PASS","stamped":true}'
+exit 0
+SH
+    else
+      cat > "$TMP/bin/applysafety.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "apply-safety add-label security:quarantined issue" >> "$GH_LOG"
+printf '%s\n' '{"decision":"SAFETY_AMBIGUOUS","stamped":false}'
+exit 1
+SH
+    fi
+    chmod +x "$TMP/bin/applysafety.sh"
+    export AUTOSPEC_GROOM_APPLY_SAFETY_SCRIPT="$TMP/bin/applysafety.sh"
+  }
+
   # Force config defaults (policy=auto) — no repo autospec.yml bleed-through.
   export AUTOSPEC_CONFIG_FILE="$TMP/nonexistent.yml"
 }
 teardown() { rm -rf "$TMP"; }
 
 @test "eligible needs-classify issue is promoted with audit comment" {
-  mk_safety "SAFETY_PASS"; mk_elig "eligible"
+  mk_safety "SAFETY_PASS"; mk_elig "eligible"; mk_apply_safety "pass"
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
   grep -q 'add-label auto-implement' "$GH_LOG"
@@ -96,7 +120,7 @@ teardown() { rm -rf "$TMP"; }
   # Semantic change vs v1: needs-template with the template-promote gate NOT
   # active no longer holds — it template-fills (canary) and proposes for human
   # approval. The hold path now only triggers on fill failure (see below).
-  mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill ok
+  mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill ok; mk_apply_safety "pass"
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote"]}'
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
@@ -107,7 +131,7 @@ teardown() { rm -rf "$TMP"; }
 }
 
 @test "needs-template + template-promote active → auto: auto-implement, no groom:proposed" {
-  mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill ok
+  mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill ok; mk_apply_safety "pass"
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote","template-promote"]}'
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
@@ -159,4 +183,49 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
   [ ! -s "$GH_LOG" ] || ! grep -q 'issue edit' "$GH_LOG"
   echo "$output" | jq -e '.dry == true'
+}
+
+@test "canary is monitor-ready: stamps safety:reviewed + ctx/reasoning, no auto-implement" {
+  mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill ok; mk_apply_safety "pass"
+  export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote"]}'
+  run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  grep -q 'add-label groom:proposed' "$GH_LOG"
+  grep -q 'add-label safety:reviewed' "$GH_LOG"
+  grep -q 'add-label ctx:' "$GH_LOG"
+  grep -q 'reasoning:' "$GH_LOG"
+  ! grep -q 'add-label auto-implement' "$GH_LOG"
+}
+
+@test "final-body safety quarantine blocks promotion of an eligible candidate" {
+  mk_safety "SAFETY_PASS"; mk_elig "eligible"; mk_apply_safety "quarantine"
+  run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  grep -q 'add-label security:quarantined' "$GH_LOG"
+  ! grep -q 'add-label auto-implement' "$GH_LOG"
+  printf '%s' "$output" | jq -e '.quarantined[] | select(.issue==42)' >/dev/null
+}
+
+@test "classify runs for a needs-template candidate with no ctx/reasoning labels" {
+  mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill ok; mk_apply_safety "pass"
+  export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote"]}'
+  mk_view_labels '{"name":"needs-autospec-template"}'
+  run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  grep -q 'add-label ctx:' "$GH_LOG"
+  grep -q 'reasoning:' "$GH_LOG"
+  grep -q 'remove-label needs-classify' "$GH_LOG"
+}
+
+@test "final-body safety quarantine blocks promotion of a filled needs-template candidate" {
+  # The higher-risk fill-generated path: a filled body that fails the final-body
+  # safety stamp must be quarantined and never proposed/promoted.
+  mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill ok; mk_apply_safety "quarantine"
+  export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote"]}'
+  run bash "$SCRIPT" --repo o/r --apply
+  [ "$status" -eq 0 ]
+  grep -q 'add-label security:quarantined' "$GH_LOG"
+  ! grep -q 'add-label groom:proposed' "$GH_LOG"
+  ! grep -q 'add-label auto-implement' "$GH_LOG"
+  printf '%s' "$output" | jq -e '.quarantined[] | select(.issue==42)' >/dev/null
 }

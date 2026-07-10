@@ -70,6 +70,7 @@ GROOM_ELIGIBILITY="${AUTOSPEC_GROOM_ELIGIBILITY_SCRIPT:-$SCRIPT_DIR/promote-elig
 GROOM_GOVERN="${AUTOSPEC_GROOM_GOVERN_SCRIPT:-$SHARED_DIR/grooming-govern.sh}"
 GROOM_CONFIG="${AUTOSPEC_GROOM_CONFIG_SCRIPT:-$SHARED_DIR/grooming-config.sh}"
 GROOM_FILL="${AUTOSPEC_GROOM_FILL_SCRIPT:-$SCRIPT_DIR/groom-fill.sh}"
+GROOM_APPLY_SAFETY="${AUTOSPEC_GROOM_APPLY_SAFETY_SCRIPT:-$SCRIPT_DIR/apply-safety-review.sh}"
 
 usage() {
     cat <<'EOF'
@@ -211,6 +212,40 @@ ensure_label() {
     gh label create "$1" --repo "$repo" >/dev/null 2>&1 || true
 }
 
+finalize_ready() {
+    # $1 = issue number, $2 = FINAL body file (exact text that will live on the issue),
+    # $3 = existing labels csv.
+    fr_num="$1"; fr_body="$2"; fr_labels="$3"
+
+    # 1. Model-fit classify (skip if BOTH ctx:* and reasoning:* already present).
+    case ",${fr_labels}," in
+        *",ctx:"*",reasoning:"*|*",reasoning:"*",ctx:"*) : ;;  # already classified
+        *)
+            fr_cls="$(bash "$GROOM_CLASSIFY" "$fr_body" --json 2>/dev/null || printf '{}')"
+            fr_ctx="$(printf '%s' "$fr_cls" | jq -r '.ctx // "64k"' 2>/dev/null || printf '64k')"
+            fr_rsn="$(printf '%s' "$fr_cls" | jq -r '.reasoning // "medium"' 2>/dev/null || printf 'medium')"
+            [ -n "$fr_ctx" ] || fr_ctx="64k"
+            [ -n "$fr_rsn" ] || fr_rsn="medium"
+            ensure_label "ctx:${fr_ctx}"
+            ensure_label "reasoning:${fr_rsn}"
+            gh issue edit "$fr_num" --repo "$repo" \
+                --add-label "ctx:${fr_ctx},reasoning:${fr_rsn}" \
+                --remove-label "needs-classify" >/dev/null 2>&1 || true
+            ;;
+    esac
+
+    # 2. Safety-stamp on the FINAL body (fail-closed: non-PASS → quarantine, return 1).
+    #    apply-safety-review itself writes safety:reviewed + block (PASS) or
+    #    security:quarantined + strips queue labels (non-PASS).
+    fr_safe_rc=0
+    bash "$GROOM_APPLY_SAFETY" --issue "$fr_num" --repo "$repo" \
+        --body-file "$fr_body" --title "$title" --actor "$author" --apply >/dev/null 2>&1 || fr_safe_rc=$?
+    if [ "$fr_safe_rc" -ne 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
 # ── Report-only path: mutate nothing, list candidates as report-only ──────────
 if [ "$apply_enabled" != "1" ]; then
     i=0
@@ -244,7 +279,7 @@ while [ "$i" -lt "$cand_count" ]; do
     class="$(printf '%s' "$cand" | jq -r '.class // "unlabeled"' 2>/dev/null || printf 'unlabeled')"
 
     # Fetch full issue detail (body + labels) for the gates.
-    detail="$(gh issue view "$num" --repo "$repo" --json number,title,body,labels 2>/dev/null || printf '')"
+    detail="$(gh issue view "$num" --repo "$repo" --json number,title,body,labels,author 2>/dev/null || printf '')"
     if [ -z "$detail" ]; then
         record_skip "$num" "detail-fetch-error"
         continue
@@ -257,6 +292,7 @@ while [ "$i" -lt "$cand_count" ]; do
     title="$(printf '%s' "$detail" | jq -r '.title // ""' 2>/dev/null || printf '')"
     body="$(printf '%s' "$detail" | jq -r '.body // ""' 2>/dev/null || printf '')"
     labels_csv="$(printf '%s' "$detail" | jq -r '[.labels[]?.name] | join(",")' 2>/dev/null || printf '')"
+    author="$(printf '%s' "$detail" | jq -r '.author.login // ""' 2>/dev/null || printf '')"
     printf '%s' "$body" > "$BODY_FILE"
 
     # ── 0. Already-groomed skip (before any decision → no re-fill) ────────────
@@ -291,25 +327,7 @@ while [ "$i" -lt "$cand_count" ]; do
         continue
     fi
 
-    # ── 2. Classify (unlabeled / needs-classify) ─────────────────────────────
-    ctx=""
-    reasoning=""
-    case "$class" in
-        unlabeled|needs-classify)
-            classify_json="$(bash "$GROOM_CLASSIFY" "$BODY_FILE" --json 2>/dev/null || printf '{}')"
-            ctx="$(printf '%s' "$classify_json" | jq -r '.ctx // "64k"' 2>/dev/null || printf '64k')"
-            reasoning="$(printf '%s' "$classify_json" | jq -r '.reasoning // "medium"' 2>/dev/null || printf 'medium')"
-            [ -n "$ctx" ] || ctx="64k"
-            [ -n "$reasoning" ] || reasoning="medium"
-            ensure_label "ctx:${ctx}"
-            ensure_label "reasoning:${reasoning}"
-            gh issue edit "$num" --repo "$repo" \
-                --add-label "ctx:${ctx},reasoning:${reasoning}" \
-                --remove-label "needs-classify" >/dev/null 2>&1 || true
-            ;;
-    esac
-
-    # ── 3. Eligibility routing (fail-closed to hold) ─────────────────────────
+    # ── 2. Eligibility routing (fail-closed to hold) ─────────────────────────
     elig_json="$(bash "$GROOM_ELIGIBILITY" "$BODY_FILE" --labels "$labels_csv" --repo "$repo" --title "$title" 2>/dev/null || printf '{"decision":"hold","reason":"eligibility-error"}')"
     decision="$(printf '%s' "$elig_json" | jq -r '.decision // "hold"' 2>/dev/null || printf 'hold')"
     ereason="$(printf '%s' "$elig_json" | jq -r '.reason // ""' 2>/dev/null || printf '')"
@@ -317,6 +335,11 @@ while [ "$i" -lt "$cand_count" ]; do
 
     case "$decision" in
         eligible)
+            if ! finalize_ready "$num" "$BODY_FILE" "$labels_csv"; then
+                audit_comment "$num" "grooming: final-body safety gate did not pass (quarantined or stamp error) — not promoted."
+                record_quarantine "$num" "safety:final-body"
+                continue
+            fi
             ensure_label "auto-implement"
             gh issue edit "$num" --repo "$repo" \
                 --add-label "auto-implement" \
@@ -353,11 +376,18 @@ while [ "$i" -lt "$cand_count" ]; do
                 else
                     bf="$(mktemp "${TMPDIR:-/tmp}/groom-body.XXXXXX")"
                     printf '%s' "$fbody" > "$bf"
+                    if ! finalize_ready "$num" "$bf" "$labels_csv"; then
+                        audit_comment "$num" "grooming: final-body safety gate did not pass (quarantined or stamp error) — not promoted."
+                        record_quarantine "$num" "safety:final-body"
+                        rm -f "$bf"
+                        bf=""
+                        continue
+                    fi
                     case " $active " in
                         *" template-promote "*)
                             # Graduated → auto: filled body queued straight into auto-implement.
                             ensure_label "auto-implement"
-                            gh issue edit "$num" --repo "$repo" --body-file "$bf" \
+                            gh issue edit "$num" --repo "$repo" \
                                 --add-label "auto-implement" \
                                 --remove-label "needs-autospec-template" >/dev/null 2>&1 || true
                             audit_comment "$num" "grooming: auto-template-groomed — template-promote gate active (${ereason})."
@@ -366,7 +396,7 @@ while [ "$i" -lt "$cand_count" ]; do
                         *)
                             # Seed → canary: filled body proposed for human approval.
                             ensure_label "groom:proposed"
-                            gh issue edit "$num" --repo "$repo" --body-file "$bf" \
+                            gh issue edit "$num" --repo "$repo" \
                                 --add-label "groom:proposed" \
                                 --remove-label "needs-autospec-template" >/dev/null 2>&1 || true
                             audit_comment "$num" "grooming: template drafted for human approval (canary) — approve by adding auto-implement, reject with groom:rejected (${ereason})."
