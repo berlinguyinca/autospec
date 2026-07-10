@@ -1077,9 +1077,9 @@ YAML
   grep -q '"issue":101' "$telemetry_file"
   grep -q '"issue":102' "$telemetry_file"
   grep -q '"source":"grooming"' "$telemetry_file"
-  grep -q '"groomed":true' "$telemetry_file"
-  grep -q '"reverted":false' "$telemetry_file"
-  grep -q '"reopened":false' "$telemetry_file"
+  grep -q '"template_groomed":false' "$telemetry_file"
+  grep -q '"closing_pr":null' "$telemetry_file"
+  grep -q '"outcome":null' "$telemetry_file"
 
   # policy=off — governance tick must NOT be invoked.
   [ ! -f "$govern_log" ]
