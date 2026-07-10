@@ -548,8 +548,7 @@ _autospec_conductor_queue_count() {
 # the label.
 
 # _autospec_conductor_default_branch REPO — repo default branch, `main`
-# fallback (new call sites only; pre-existing hardcoded `--parent main`
-# sites are noted for a separate audit).
+# fallback when GitHub does not expose a defaultBranchRef.
 _autospec_conductor_default_branch() {
     local repo="$1" b
     b="$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name // empty' 2>/dev/null || true)"
@@ -1842,7 +1841,8 @@ fi'
                                         | jq -r '.batch[]?.number // empty' 2>/dev/null || true)"
                                 fi
                                 if [ -n "$_prov_batch" ]; then
-                                    local _prov_self="" _prov_operator="" _prov_n _prov_val
+                                    local _prov_self="" _prov_operator="" _prov_n _prov_val _prov_parent_branch
+                                    _prov_parent_branch="$(_autospec_conductor_default_branch "$_repo")"
                                     while IFS= read -r _prov_n; do
                                         if [ -z "$_prov_n" ]; then
                                             continue
@@ -1906,7 +1906,7 @@ EOF_PROV_BATCH
                                     fi
                                     if [ -n "$_prov_self" ] && [ -z "$_sm_park_reason" ] && [ -n "$_intbranch_sh" ]; then
                                         local _sm_status_json="" _sm_status_rc=0
-                                        _sm_status_json="$(bash "$_intbranch_sh" status --parent main \
+                                        _sm_status_json="$(bash "$_intbranch_sh" status --parent "$_prov_parent_branch" \
                                             ${_repo:+--repo "$_repo"} 2>/dev/null)" || _sm_status_rc=$?
                                         if [ "$_sm_status_rc" -eq 0 ] && [ -n "$_sm_status_json" ]; then
                                             local _sm_runtime_config_sh=""
@@ -1959,10 +1959,10 @@ EOF_PROV_BATCH
                                         fi
                                     elif [ -n "$_prov_self" ]; then
                                         local _prov_int_rc=0
-                                        bash "$_intbranch_sh" ensure --parent main \
+                                        bash "$_intbranch_sh" ensure --parent "$_prov_parent_branch" \
                                             --repo "$_repo" 1>&2 || _prov_int_rc=$?
                                         if [ "$_prov_int_rc" -eq 0 ]; then
-                                            bash "$_intbranch_sh" sync --parent main \
+                                            bash "$_intbranch_sh" sync --parent "$_prov_parent_branch" \
                                                 --repo "$_repo" 1>&2 || _prov_int_rc=$?
                                         fi
                                         if [ "$_prov_int_rc" -ne 0 ]; then
@@ -2027,7 +2027,7 @@ EOF_PROV_BATCH
                                                     case "$_sm_pr" in ''|*[!0-9]*) _sm_pr="" ;; esac
                                                     if [ -n "$_sm_issue" ] && [ -n "$_sm_pr" ]; then
                                                         local _sm_sync_rc=0
-                                                        bash "$_intbranch_sh" sync --parent main \
+                                                        bash "$_intbranch_sh" sync --parent "$_prov_parent_branch" \
                                                             ${_repo:+--repo "$_repo"} 1>&2 || _sm_sync_rc=$?
                                                         if [ "$_sm_sync_rc" -eq 65 ]; then
                                                             printf 'code_health:integration_sync_conflict\n' >&2
@@ -2046,7 +2046,7 @@ EOF_PROV_BATCH
                                                         else
                                                             local _sm_rollup_out _sm_rollup_rc=0
                                                             _sm_rollup_out="$(bash "$_intbranch_sh" rollup-update \
-                                                                --parent main --issue "$_sm_issue" --pr "$_sm_pr" \
+                                                                --parent "$_prov_parent_branch" --issue "$_sm_issue" --pr "$_sm_pr" \
                                                                 ${_repo:+--repo "$_repo"} 2>&1)" || _sm_rollup_rc=$?
                                                             printf '%s\n' "$_sm_rollup_out" >&2
                                                             if [ "$_sm_rollup_rc" -ne 0 ]; then
@@ -2213,9 +2213,11 @@ EOF_PROV_BATCH
             # routing is unavailable or ensure fails (fail-open to F3).
             local _discovery_mode_ready=0
             if [ -n "$_intbranch_sh" ] && [ -n "$_repo" ]; then
+                local _discovery_parent_branch
+                _discovery_parent_branch="$(_autospec_conductor_default_branch "$_repo")"
                 printf '[conductor] Tier %s: ensuring integration branch as discovery base\n' \
                     "$_tier" >&2
-                if bash "$_intbranch_sh" ensure --parent main --repo "$_repo" 1>&2; then
+                if bash "$_intbranch_sh" ensure --parent "$_discovery_parent_branch" --repo "$_repo" 1>&2; then
                     _discovery_mode_ready=1
                 fi
             fi
