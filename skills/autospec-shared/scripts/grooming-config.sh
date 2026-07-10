@@ -29,10 +29,17 @@ yaml_get() {
   command -v python3 >/dev/null 2>&1 || return 0
   python3 - "$CONFIG_FILE" "$path" <<'PY' 2>/dev/null || true
 import sys, yaml
+# Distinguish parse-failure (file present but won't parse) from key-absent so
+# the caller can fail-closed on a corrupt config instead of silently defaulting.
+# __PARSE_ERROR__ is the sentinel; an empty file (None) is treated as key-absent.
 try:
-    d = yaml.safe_load(open(sys.argv[1])) or {}
+    d = yaml.safe_load(open(sys.argv[1]))
 except Exception:
+    print("__PARSE_ERROR__"); sys.exit(0)
+if d is None:
     sys.exit(0)
+if not isinstance(d, dict):
+    print("__PARSE_ERROR__"); sys.exit(0)
 node = d.get("grooming", {})
 if not isinstance(node, dict):
     sys.exit(0)
@@ -74,6 +81,7 @@ case "$KEY" in
   policy)
     v="$(resolve "${AUTOSPEC_GROOMING_POLICY:-}" "policy" "auto")"
     case "$v" in
+      __PARSE_ERROR__) printf 'off\n' ;;  # present-but-broken config → fail CLOSED
       auto|on|off) printf '%s\n' "$v" ;;
       *) printf 'auto\n' ;;   # invalid value → safe default
     esac

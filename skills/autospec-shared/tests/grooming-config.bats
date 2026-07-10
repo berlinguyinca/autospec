@@ -33,3 +33,22 @@ EOF
   printf 'grooming:\n  budget:\n    groom_attempts_per_issue: -3\n' > "$AUTOSPEC_CONFIG_FILE"
   run bash "$SCRIPT" --key budget.groom_attempts_per_issue; [ "$output" = "2" ]
 }
+@test "corrupt/unparseable config fails CLOSED to off (present-but-broken != absent)" {
+  # A tab in indentation makes PyYAML raise; the kill switch must NOT silently
+  # re-enable grooming by falling back to the auto default.
+  printf 'grooming:\n\tpolicy: on\n  bogus: [unterminated\n' > "$AUTOSPEC_CONFIG_FILE"
+  run bash "$SCRIPT" --key policy
+  [ "$status" -eq 0 ]
+  [ "$output" = "off" ]
+}
+@test "top-level non-mapping config fails CLOSED to off" {
+  printf -- '- just\n- a\n- list\n' > "$AUTOSPEC_CONFIG_FILE"
+  run bash "$SCRIPT" --key policy
+  [ "$output" = "off" ]
+}
+@test "missing config file resolves to auto (absent != broken)" {
+  rm -f "$AUTOSPEC_CONFIG_FILE"
+  run bash "$SCRIPT" --key policy
+  [ "$status" -eq 0 ]
+  [ "$output" = "auto" ]
+}
