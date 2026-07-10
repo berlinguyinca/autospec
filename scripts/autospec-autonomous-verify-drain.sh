@@ -120,11 +120,17 @@ for i, p in enumerate(items, 1):
     lines.append("  estimated_complexity: %s" % json.dumps(p.get("estimated_complexity", "")))
     lines.append("  confidence: %s" % json.dumps(p.get("confidence", "")))
     lines.append("")
-lines.append("Output ONLY a single JSON object, no prose, keyed by the EXACT norm_title")
-lines.append("strings above (verbatim — do not rephrase or normalize them). Each value is")
+lines.append("Output a single JSON object keyed by the EXACT norm_title strings above")
+lines.append("(verbatim — do not rephrase or normalize them). Each value is")
 lines.append("{\"verdict\":\"survived\"|\"refuted\",\"reason\":\"<one short sentence>\"}.")
-lines.append("Every proposal must appear exactly once. Example shape:")
+lines.append("Every proposal must appear exactly once.")
+lines.append("")
+lines.append("Wrap the JSON object between these two sentinel lines, each ALONE on its")
+lines.append("own line, with NOTHING else on those lines, so it can be recovered from")
+lines.append("surrounding harness output:")
+lines.append("===AUTOSPEC_VERDICTS_BEGIN===")
 lines.append('{"<norm_title>":{"verdict":"refuted","reason":"..."}}')
+lines.append("===AUTOSPEC_VERDICTS_END===")
 sys.stdout.write("\n".join(lines))
 PY
     rm -f "$PROMPT_FILE"
@@ -189,10 +195,18 @@ if [ "$omx_rc" -ne 0 ]; then
 fi
 
 # ── Extract + normalize the verdict map from the (chatty) omx stdout. ─────────
-# Writes VERDICTS_OUT only on a parseable dict; exits non-zero otherwise so the
-# consumer's `exit 0 && [ -s ... ]` gate fails closed.
+# Real codex/omx output is NOT a clean fenced block — the verdict arrives as raw
+# JSON buried in brace-heavy chatter (shell-var braces, hook telemetry, the final
+# message printed twice, a `tokens used` block, JSON-ish footers). Recovery is:
+#   1. PRIMARY — the JSON between the LAST ===AUTOSPEC_VERDICTS_BEGIN/END=== pair.
+#   2. FALLBACK — among ALL candidate dicts (fenced + balanced-brace spans), pick
+#      the one with the GREATEST key-overlap with the known norm_titles (NOT just
+#      the first parseable dict, which is often a telemetry object → empty map).
+# If proposals existed but ZERO verdicts overlapping `known` are recovered, that
+# is an extraction FAILURE (not "all refuted"): exit non-zero WITHOUT writing a
+# map, so the consumer's `exit 0 && [ -s ... ]` gate fails closed OBSERVABLY.
 if python3 - "$DEDUPED_IN" "$HARNESS_LOG" "$VERDICTS_OUT" <<'PY'; then
-import json, sys
+import json, re, sys
 
 dedup_path, log_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -201,10 +215,12 @@ known = {p["norm_title"] for p in (dd.get("deduped") or []) if p.get("norm_title
 
 text = open(log_path, "r", errors="replace").read()
 
+BEGIN = "===AUTOSPEC_VERDICTS_BEGIN==="
+END = "===AUTOSPEC_VERDICTS_END==="
+
 
 def candidates(s):
     # 1. Fenced ```json ... ``` (or bare ```) blocks, first to last.
-    import re
     for m in re.finditer(r"```(?:json)?\s*(.*?)```", s, re.DOTALL | re.IGNORECASE):
         yield m.group(1)
     # 2. Balanced brace scan, last to first (LLMs put the answer last).
@@ -226,26 +242,57 @@ def candidates(s):
 
 
 parsed = None
-for cand in candidates(text):
-    try:
-        obj = json.loads(cand)
-    except Exception:
-        continue
-    if isinstance(obj, dict):
-        parsed = obj
-        break
 
+# 1. PRIMARY: text between the LAST BEGIN marker and the first END after it.
+begins = [m.end() for m in re.finditer(re.escape(BEGIN), text)]
+ends = [m.start() for m in re.finditer(re.escape(END), text)]
+if begins and ends:
+    b = begins[-1]
+    after = [e for e in ends if e > b]
+    if after:
+        try:
+            obj = json.loads(text[b:after[0]])
+            if isinstance(obj, dict):
+                parsed = obj
+        except Exception:
+            parsed = None
+
+# 2. FALLBACK: best key-overlap with `known` across all candidate dicts.
 if parsed is None:
-    sys.stderr.write("verify-drain: no parseable JSON object in skeptic output\n")
-    sys.exit(2)
+    best = None
+    best_overlap = -1
+    for cand in candidates(text):
+        try:
+            obj = json.loads(cand)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        overlap = len(set(obj.keys()) & known)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best = obj
+    parsed = best
 
 out = {}
-for k, v in parsed.items():
-    if k not in known or not isinstance(v, dict):
-        continue
-    verdict = "survived" if v.get("verdict") == "survived" else "refuted"
-    reason = str(v.get("reason") or "")
-    out[k] = {"verdict": verdict, "reason": reason}
+if isinstance(parsed, dict):
+    for k, v in parsed.items():
+        if k not in known or not isinstance(v, dict):
+            continue
+        verdict = "survived" if v.get("verdict") == "survived" else "refuted"
+        reason = str(v.get("reason") or "")
+        out[k] = {"verdict": verdict, "reason": reason}
+
+# Fail LOUD on extraction failure: proposals existed (known is non-empty here —
+# the N==0 case already returned {}+exit0 in bash) but nothing was recovered.
+# Do NOT write a map; exit non-zero so explore records the code_health warning
+# rather than silently filing nothing while looking successful.
+if not out:
+    sys.stderr.write(
+        "verify-drain: recovered zero verdicts overlapping known proposals; "
+        "extraction failure, failing closed\n"
+    )
+    sys.exit(3)
 
 json.dump(out, open(out_path, "w"))
 PY
