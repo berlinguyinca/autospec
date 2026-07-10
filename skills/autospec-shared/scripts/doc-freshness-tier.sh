@@ -205,11 +205,17 @@ run_examples_and_llms_for_doc_changes() {
   done
   if [ "${#full_docs[@]}" -gt 0 ]; then
     [ -f "$VERIFY_EXAMPLES_MJS" ] || { echo "doc-freshness-tier: verify-examples.mjs not found" >&2; return 2; }
-    node "$VERIFY_EXAMPLES_MJS" "${full_docs[@]}"
+    if ! node "$VERIFY_EXAMPLES_MJS" "${full_docs[@]}"; then
+      echo "doc-freshness-tier: docs-as-tests example verification failed" >&2
+      return 1
+    fi
   fi
 
   [ -f "$GEN_LLMS_TXT_SH" ] || { echo "doc-freshness-tier: gen-llms-txt.sh not found" >&2; return 2; }
-  bash "$GEN_LLMS_TXT_SH" --repo-root "$REPO_ROOT"
+  if ! bash "$GEN_LLMS_TXT_SH" --repo-root "$REPO_ROOT"; then
+    echo "doc-freshness-tier: llms export regeneration failed" >&2
+    return 1
+  fi
 
   if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     if ! git -C "$REPO_ROOT" diff --quiet -- llms.txt llms-full.txt docs/.llm-manifest.json 2>/dev/null; then
