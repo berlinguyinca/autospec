@@ -11,6 +11,8 @@
 #   autospec:steer     →  DECISION:steer      (emit issue body as directive)
 #   autospec:pause     →  DECISION:pause      (write autonomous-pause.flag)
 #   autospec:stop      →  DECISION:graceful-stop
+#   autospec:promote   →  DECISION:promote    (trusted actor only — merge roll-up + reset)
+#   autospec:discard   →  DECISION:discard    (close roll-up, delete branch, reopen issues)
 #
 # Output (stdout):
 #   One line per found label, ordered by severity (stop > pause > steer > priority).
@@ -24,10 +26,26 @@
 #   Additional line for priority:
 #     PRIORITY_ISSUE:<number>
 #
+#   Additional lines for promote (only when the issue author is a trusted
+#   actor per safety.issue_intent_gate.trusted_actors — otherwise refused):
+#     PROMOTE_ISSUE:<number>
+#
+#   Additional line for an untrusted promote attempt (refused, fail closed):
+#     DECISION:promote-refused
+#     PROMOTE_ISSUE:<number>
+#
+#   Additional line for discard:
+#     DISCARD_ISSUE:<number>
+#
 # Side effects:
-#   - :pause  → writes ~/.autospec/autonomous-pause.flag (atomic via temp+mv)
-#   - :stop   → caller is expected to invoke autospec-stop.sh --graceful
-#   - :steer  → caller should remove label autospec:steer from the issue
+#   - :pause    → writes ~/.autospec/autonomous-pause.flag (atomic via temp+mv)
+#   - :stop     → caller is expected to invoke autospec-stop.sh --graceful
+#   - :steer    → caller should remove label autospec:steer from the issue
+#   - :promote  → caller (conductor) merges the roll-up PR and runs
+#                 `autonomous-integration-branch.sh reset` when trusted;
+#                 refused (no action) when the issue author is untrusted
+#   - :discard  → caller (conductor) closes the roll-up PR, deletes the
+#                 integration branch, and reopens its issues
 #
 # Usage:
 #   bash scripts/autonomous-control-channel.sh [--repo OWNER/REPO] [--state-dir DIR]
@@ -51,7 +69,7 @@ set -eu
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-RESERVED_LABELS="autospec:stop autospec:pause autospec:steer autospec:priority autospec:recalibrate-persona"
+RESERVED_LABELS="autospec:stop autospec:pause autospec:steer autospec:priority autospec:recalibrate-persona autospec:promote autospec:discard"
 
 FLAG_DIR="${AUTOSPEC_CONTROL_STATE_DIR:-${HOME}/.autospec}"
 PAUSE_FLAG="${FLAG_DIR}/autonomous-pause.flag"
@@ -60,6 +78,20 @@ RECALIBRATE_FLAG="${FLAG_DIR}/persona-recalibrate.flag"
 GH="${AUTOSPEC_GH_CMD:-gh}"
 
 REPO="${AUTOSPEC_REPO:-}"
+
+# ---------------------------------------------------------------------------
+# Runtime config (for the promote trusted-actor gate). Sourced defensively —
+# a missing helper leaves autospec_runtime_config_get undefined and the
+# trusted-actor check below fails closed (empty trusted list → refused).
+# ---------------------------------------------------------------------------
+CONTROL_CHANNEL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${CONTROL_CHANNEL_SCRIPT_DIR}/autospec-runtime-config.sh" ]; then
+    # shellcheck source=./autospec-runtime-config.sh
+    . "${CONTROL_CHANNEL_SCRIPT_DIR}/autospec-runtime-config.sh"
+elif [ -f "${HOME}/.autospec/scripts/autospec-runtime-config.sh" ]; then
+    # shellcheck source=/dev/null
+    . "${HOME}/.autospec/scripts/autospec-runtime-config.sh"
+fi
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -82,6 +114,8 @@ Reserved labels (checked in severity order — stop is highest):
   autospec:pause     → DECISION:pause  (writes autonomous-pause.flag)
   autospec:steer     → DECISION:steer  (emits DIRECTIVE:<body>)
   autospec:priority  → DECISION:priority
+  autospec:promote   → DECISION:promote (trusted actor only) or DECISION:promote-refused
+  autospec:discard   → DECISION:discard
 
 Output: one DECISION line per found label, highest severity first.
 EOF
@@ -118,7 +152,7 @@ query_label() {
         --label "$label" \
         --state open \
         --limit 10 \
-        --json number,title,body \
+        --json number,title,body,author \
         $REPO_FLAG \
         2>/dev/null \
     || echo "[]"
@@ -135,6 +169,42 @@ write_pause_flag() {
     tmp="$(mktemp "${FLAG_DIR}/.autonomous-pause.XXXXXX")"
     printf 'pause\n%s\n' "$stamp" > "$tmp"
     mv "$tmp" "$PAUSE_FLAG"
+}
+
+# ---------------------------------------------------------------------------
+# control_channel_trusted_logins — newline-separated logins from
+# safety.issue_intent_gate.trusted_actors, or empty on missing/invalid config.
+# Mirrors autonomous-provenance.sh's trusted_actor_logins() parsing
+# convention (same config key, same jq shape) so `promote` and the
+# provenance resolver agree on who counts as trusted.
+# ---------------------------------------------------------------------------
+control_channel_trusted_logins() {
+    local raw
+    if ! command -v autospec_runtime_config_get >/dev/null 2>&1; then
+        return 0
+    fi
+    raw="$(autospec_runtime_config_get "safety.issue_intent_gate.trusted_actors" "[]")"
+    if ! printf '%s' "$raw" | jq -e . >/dev/null 2>&1; then
+        return 0
+    fi
+    printf '%s' "$raw" | jq -r '.[]?.login // empty' 2>/dev/null || true
+}
+
+# control_channel_is_trusted_login LOGIN TRUSTED_NEWLINE_LIST — exit 0 only
+# on an exact match (never test()/match() against issue-derived values, per
+# feedback_jq_test_regex_metachar_injection).
+control_channel_is_trusted_login() {
+    local login="$1" trusted="$2" cand
+    [ -n "$login" ] || return 1
+    while IFS= read -r cand; do
+        [ -n "$cand" ] || continue
+        if [ "$cand" = "$login" ]; then
+            return 0
+        fi
+    done <<EOF_TRUSTED
+$trusted
+EOF_TRUSTED
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -195,6 +265,44 @@ emit_decision() {
             fi
             ;;
 
+        "autospec:promote")
+            # Trusted-actor-only: verify the control issue's AUTHOR (not a
+            # comment/label approval) is a login in
+            # safety.issue_intent_gate.trusted_actors. Fail closed — any
+            # missing/unparseable data refuses the promote.
+            local issue_number author_login trusted
+            issue_number="$(printf '%s' "$issues_json" | jq -r '.[0].number // empty' 2>/dev/null || echo "")"
+            author_login="$(printf '%s' "$issues_json" | jq -r '.[0].author.login // empty' 2>/dev/null || echo "")"
+
+            if [ -z "$issue_number" ]; then
+                warn "promote: could not extract issue number from JSON"
+                return 0
+            fi
+
+            trusted="$(control_channel_trusted_logins)"
+            if control_channel_is_trusted_login "$author_login" "$trusted"; then
+                printf 'DECISION:promote\n'
+                printf 'PROMOTE_ISSUE:%s\n' "$issue_number"
+            else
+                warn "promote: issue #$issue_number author '$author_login' is not a trusted actor — refusing"
+                printf 'DECISION:promote-refused\n'
+                printf 'PROMOTE_ISSUE:%s\n' "$issue_number"
+            fi
+            ;;
+
+        "autospec:discard")
+            local discard_issue_number
+            discard_issue_number="$(printf '%s' "$issues_json" | jq -r '.[0].number // empty' 2>/dev/null || echo "")"
+
+            if [ -z "$discard_issue_number" ]; then
+                warn "discard: could not extract issue number from JSON"
+                return 0
+            fi
+
+            printf 'DECISION:discard\n'
+            printf 'DISCARD_ISSUE:%s\n' "$discard_issue_number"
+            ;;
+
         "autospec:recalibrate-persona")
             # Write a flag file so the next conductor cycle triggers a persona
             # refresh / interview re-run.  Atomic via temp+mv; idempotent.
@@ -213,7 +321,8 @@ emit_decision() {
 # ---------------------------------------------------------------------------
 # Main: query each reserved label in severity order, emit decisions.
 # ---------------------------------------------------------------------------
-# Severity order: stop (highest) > pause > steer > priority > recalibrate-persona (lowest).
+# Severity order: stop (highest) > pause > steer > priority > recalibrate-persona
+# > promote > discard (lowest).
 for label in $RESERVED_LABELS; do
     issues_json="$(query_label "$label")"
     emit_decision "$label" "$issues_json"

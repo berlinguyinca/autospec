@@ -532,6 +532,140 @@ _autospec_conductor_queue_count() {
     printf '%s' "$1" | jq -r "$2" 2>/dev/null || true
 }
 
+# ── Control-channel promote/discard consumers (integration-branch design §8) ──
+# Trust for `promote` is already vetted upstream by
+# autonomous-control-channel.sh (issue author checked against
+# safety.issue_intent_gate.trusted_actors, fail closed); these consumers act
+# on the DECISION the control channel already produced. All gh/git calls are
+# best-effort (fail-open comments) — a GitHub hiccup here must never crash
+# the outer conductor loop.
+
+# _autospec_conductor_handle_promote REPO INTBRANCH_SH ISSUE — merge the open
+# roll-up PR (integration branch -> parent) and reset the integration branch.
+# A missing/absent/non-open roll-up is a clean no-op (comment only, no merge
+# call), not a failure — the operator may fire `promote` speculatively.
+_autospec_conductor_handle_promote() {
+    local repo="$1" intbranch_sh="$2" issue="$3"
+    if [ -z "$issue" ]; then
+        return 0
+    fi
+    if [ -z "$repo" ] || [ -z "$intbranch_sh" ]; then
+        return 0
+    fi
+
+    local status_json rollup_pr rollup_state
+    status_json="$(bash "$intbranch_sh" status --parent main --repo "$repo" 2>/dev/null || true)"
+    rollup_pr="$(printf '%s' "$status_json" | jq -r '.rollup_pr.number // empty' 2>/dev/null || true)"
+    rollup_state="$(printf '%s' "$status_json" | jq -r '.rollup_pr.state // empty' 2>/dev/null || true)"
+
+    case "$rollup_pr" in
+        ''|*[!0-9]*)
+            printf '[conductor] promote: no roll-up PR found for issue #%s — nothing to promote\n' "$issue" >&2
+            gh issue comment "$issue" --repo "$repo" \
+                --body "promote: no open roll-up PR found — nothing to promote." >/dev/null 2>&1 || true
+            return 0
+            ;;
+    esac
+    if [ "$rollup_state" != "OPEN" ]; then
+        printf '[conductor] promote: roll-up PR #%s is not open (state=%s) — nothing to promote\n' \
+            "$rollup_pr" "$rollup_state" >&2
+        gh issue comment "$issue" --repo "$repo" \
+            --body "promote: roll-up PR #${rollup_pr} is not open (state=${rollup_state}) — nothing to promote." \
+            >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    printf '[conductor] promote: merging roll-up PR #%s (issue #%s)\n' "$rollup_pr" "$issue" >&2
+    if ! gh pr merge "$rollup_pr" --repo "$repo" --admin --squash --delete-branch >/dev/null 2>&1; then
+        gh issue comment "$issue" --repo "$repo" \
+            --body "promote: failed to merge roll-up PR #${rollup_pr}. Pausing for operator review." \
+            >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    if bash "$intbranch_sh" reset --parent main --repo "$repo" >&2; then
+        gh issue comment "$issue" --repo "$repo" \
+            --body "promote: merged roll-up PR #${rollup_pr} and reset the integration branch." \
+            >/dev/null 2>&1 || true
+        gh issue close "$issue" --repo "$repo" >/dev/null 2>&1 || true
+    else
+        gh issue comment "$issue" --repo "$repo" \
+            --body "promote: merged roll-up PR #${rollup_pr} but the integration-branch reset failed. Operator review needed." \
+            >/dev/null 2>&1 || true
+    fi
+}
+
+# _autospec_conductor_handle_promote_refused REPO ISSUE — the control channel
+# already refused (untrusted author); comment on the issue, never merge.
+_autospec_conductor_handle_promote_refused() {
+    local repo="$1" issue="$2"
+    if [ -z "$issue" ]; then
+        return 0
+    fi
+    printf '[conductor] DECISION:promote-refused — issue #%s author is not a trusted actor; refusing (no merge attempted)\n' \
+        "$issue" >&2
+    if [ -n "$repo" ]; then
+        gh issue comment "$issue" --repo "$repo" \
+            --body "promote refused: issue author is not a trusted actor (safety.issue_intent_gate.trusted_actors). No merge was attempted." \
+            >/dev/null 2>&1 || true
+    fi
+}
+
+# _autospec_conductor_handle_discard REPO INTBRANCH_SH ISSUE — close the open
+# roll-up PR (which also deletes the integration branch via --delete-branch),
+# then reopen every issue named in the roll-up's per-feature comment markers
+# (<!-- autospec-rollup:issue-N -->) with a discarded-from-rollup comment. A
+# missing/absent roll-up is a clean no-op.
+_autospec_conductor_handle_discard() {
+    local repo="$1" intbranch_sh="$2" issue="$3"
+    if [ -z "$issue" ]; then
+        return 0
+    fi
+    if [ -z "$repo" ] || [ -z "$intbranch_sh" ]; then
+        return 0
+    fi
+
+    local status_json rollup_pr
+    status_json="$(bash "$intbranch_sh" status --parent main --repo "$repo" 2>/dev/null || true)"
+    rollup_pr="$(printf '%s' "$status_json" | jq -r '.rollup_pr.number // empty' 2>/dev/null || true)"
+
+    case "$rollup_pr" in
+        ''|*[!0-9]*)
+            printf '[conductor] discard: no roll-up PR found for issue #%s — nothing to discard\n' "$issue" >&2
+            gh issue comment "$issue" --repo "$repo" \
+                --body "discard: no open roll-up PR found — nothing to discard." >/dev/null 2>&1 || true
+            return 0
+            ;;
+    esac
+
+    local comment_bodies rolled_issues
+    comment_bodies="$(gh pr view "$rollup_pr" --repo "$repo" --json comments --jq '.comments[].body' 2>/dev/null || true)"
+    rolled_issues="$(printf '%s\n' "$comment_bodies" \
+        | grep -o 'autospec-rollup:issue-[0-9][0-9]*' \
+        | sed 's/autospec-rollup:issue-//' \
+        | sort -un || true)"
+
+    printf '[conductor] discard: closing roll-up PR #%s and deleting its integration branch (issue #%s)\n' \
+        "$rollup_pr" "$issue" >&2
+    gh pr close "$rollup_pr" --repo "$repo" --delete-branch >/dev/null 2>&1 || true
+
+    if [ -n "$rolled_issues" ]; then
+        local n
+        printf '%s\n' "$rolled_issues" | while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            gh issue reopen "$n" --repo "$repo" >/dev/null 2>&1 || true
+            gh issue comment "$n" --repo "$repo" \
+                --body "discarded-from-rollup: roll-up PR #${rollup_pr} was discarded via control-channel issue #${issue}; reopened for re-drain." \
+                >/dev/null 2>&1 || true
+        done
+    fi
+
+    gh issue comment "$issue" --repo "$repo" \
+        --body "discard: closed roll-up PR #${rollup_pr}, deleted the integration branch, and reopened its issues." \
+        >/dev/null 2>&1 || true
+    gh issue close "$issue" --repo "$repo" >/dev/null 2>&1 || true
+}
+
 _autospec_conductor_escalate_all_blocked() {
     local repo="$1"
     local queue_json="$2"
@@ -963,6 +1097,28 @@ fi'
                     # control-channel.sh wrote persona-recalibrate.flag; step 1b of
                     # the next cycle consumes it and forces a persona refresh.
                     printf '[conductor] DECISION:persona-recalibrate — refresh forced next cycle\n' >&2
+                    ;;
+                promote)
+                    local _promote_issue
+                    _promote_issue="$(printf '%s' "$_ctrl_out" \
+                        | grep '^PROMOTE_ISSUE:' | head -1 | sed 's/^PROMOTE_ISSUE://' || true)"
+                    printf '[conductor] DECISION:promote received (issue #%s) — merging roll-up + resetting integration branch\n' \
+                        "${_promote_issue:-unknown}" >&2
+                    _autospec_conductor_handle_promote "$_repo" "$_intbranch_sh" "$_promote_issue" || true
+                    ;;
+                promote-refused)
+                    local _promote_refused_issue
+                    _promote_refused_issue="$(printf '%s' "$_ctrl_out" \
+                        | grep '^PROMOTE_ISSUE:' | head -1 | sed 's/^PROMOTE_ISSUE://' || true)"
+                    _autospec_conductor_handle_promote_refused "$_repo" "$_promote_refused_issue" || true
+                    ;;
+                discard)
+                    local _discard_issue
+                    _discard_issue="$(printf '%s' "$_ctrl_out" \
+                        | grep '^DISCARD_ISSUE:' | head -1 | sed 's/^DISCARD_ISSUE://' || true)"
+                    printf '[conductor] DECISION:discard received (issue #%s) — closing roll-up, deleting integration branch, reopening issues\n' \
+                        "${_discard_issue:-unknown}" >&2
+                    _autospec_conductor_handle_discard "$_repo" "$_intbranch_sh" "$_discard_issue" || true
                     ;;
             esac
         fi

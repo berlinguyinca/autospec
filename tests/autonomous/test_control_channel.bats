@@ -282,6 +282,65 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# autospec:promote → DECISION:promote (trusted actor) or DECISION:promote-refused
+#
+# Trust is resolved against the real repo's .autospec/autospec.yml
+# (safety.issue_intent_gate.trusted_actors: berlinguyinca), same convention
+# as tests/autonomous/test_provenance_resolution.bats: "berlinguyinca" is
+# the trusted login, any other login is untrusted.
+# ---------------------------------------------------------------------------
+
+@test "autospec:promote by trusted actor → DECISION:promote + PROMOTE_ISSUE" {
+    local fixture="$TMP/promote_trusted.json"
+    printf '[{"number":201,"title":"promote the roll-up","body":"ship it","author":{"login":"berlinguyinca"}}]' > "$fixture"
+    make_gh_label_stub "autospec:promote" "$fixture"
+
+    run bash "$CONTROL_CHANNEL"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^DECISION:promote$"
+    printf '%s\n' "$output" | grep -q "^PROMOTE_ISSUE:201$"
+}
+
+@test "autospec:promote by untrusted actor is refused (no DECISION:promote)" {
+    local fixture="$TMP/promote_untrusted.json"
+    printf '[{"number":202,"title":"promote the roll-up","body":"ship it","author":{"login":"some-random-user"}}]' > "$fixture"
+    make_gh_label_stub "autospec:promote" "$fixture"
+
+    run bash "$CONTROL_CHANNEL"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^DECISION:promote-refused$"
+    printf '%s\n' "$output" | grep -q "^PROMOTE_ISSUE:202$"
+    # Must NEVER emit the trusted decision token for an untrusted actor.
+    ! printf '%s\n' "$output" | grep -q "^DECISION:promote$"
+}
+
+@test "autospec:promote with missing author resolves untrusted (fail closed)" {
+    local fixture="$TMP/promote_no_author.json"
+    printf '[{"number":203,"title":"promote the roll-up","body":"ship it"}]' > "$fixture"
+    make_gh_label_stub "autospec:promote" "$fixture"
+
+    run bash "$CONTROL_CHANNEL"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^DECISION:promote-refused$"
+    ! printf '%s\n' "$output" | grep -q "^DECISION:promote$"
+}
+
+# ---------------------------------------------------------------------------
+# autospec:discard → DECISION:discard + DISCARD_ISSUE
+# ---------------------------------------------------------------------------
+
+@test "autospec:discard label → DECISION:discard + DISCARD_ISSUE" {
+    local fixture="$TMP/discard.json"
+    printf '[{"number":301,"title":"discard the roll-up","body":"abandon it","author":{"login":"berlinguyinca"}}]' > "$fixture"
+    make_gh_label_stub "autospec:discard" "$fixture"
+
+    run bash "$CONTROL_CHANNEL"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^DECISION:discard$"
+    printf '%s\n' "$output" | grep -q "^DISCARD_ISSUE:301$"
+}
+
+# ---------------------------------------------------------------------------
 # gh failure is fail-open (no crash, no output)
 # ---------------------------------------------------------------------------
 
