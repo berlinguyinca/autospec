@@ -1717,12 +1717,29 @@ EOF_PROV_BATCH
                                                             printf '{"reason":"sync_failed","issue":%s,"pr":%s}\n' \
                                                                 "$_sm_issue" "$_sm_pr" > "$_sm_pause_file" 2>/dev/null || true
                                                         else
-                                                            local _sm_rollup_out
+                                                            local _sm_rollup_out _sm_rollup_rc=0
                                                             _sm_rollup_out="$(bash "$_intbranch_sh" rollup-update \
                                                                 --parent main --issue "$_sm_issue" --pr "$_sm_pr" \
-                                                                ${_repo:+--repo "$_repo"} 2>&1)"
+                                                                ${_repo:+--repo "$_repo"} 2>&1)" || _sm_rollup_rc=$?
                                                             printf '%s\n' "$_sm_rollup_out" >&2
-                                                            if printf '%s\n' "$_sm_rollup_out" | grep -q '^rollup-red$'; then
+                                                            if [ "$_sm_rollup_rc" -ne 0 ]; then
+                                                                # rollup-update itself already parks/notifies on gh
+                                                                # failure (exit 8/9) or multi-open (exit 9), but that
+                                                                # is a one-shot notify — the conductor must ALSO
+                                                                # persist a pause marker here so later cycles don't
+                                                                # resume dispatch until an operator clears it
+                                                                # (peer-review must-fix: a nonzero, non-rollup-red
+                                                                # exit must never fall through to the pause-clearing
+                                                                # branch below).
+                                                                printf '[conductor] selfmerge-aftermath: rollup-update failed rc=%s — parking self-originated tiers\n' \
+                                                                    "$_sm_rollup_rc" >&2
+                                                                printf '{"reason":"rollup_update_failed","issue":%s,"pr":%s}\n' \
+                                                                    "$_sm_issue" "$_sm_pr" > "$_sm_pause_file" 2>/dev/null || true
+                                                                if [ -n "$_notify_sh" ]; then
+                                                                    bash "$_notify_sh" "autospec-autonomous" \
+                                                                        "rollup-update failed (rc=${_sm_rollup_rc}) — self-originated tiers parked" || true
+                                                                fi
+                                                            elif printf '%s\n' "$_sm_rollup_out" | grep -q '^rollup-red$'; then
                                                                 printf '[conductor] selfmerge-aftermath: rollup-red — pausing further self-originated merges\n' >&2
                                                                 printf '{"reason":"rollup_red","issue":%s,"pr":%s}\n' \
                                                                     "$_sm_issue" "$_sm_pr" > "$_sm_pause_file" 2>/dev/null || true

@@ -16,10 +16,19 @@
 #      parks the self subset + notifies; the operator subset is unaffected.
 #   4. A post-merge `sync` exit 65 parks self-originated tiers, writes the
 #      code_health:integration_sync_conflict marker, and notifies.
-#   5. A clean rollup-update (no rollup-red) clears any stale pause marker.
+#   5. A clean rollup-update (no rollup-red, exit 0) writes no pause marker;
+#      a nonzero rollup-update exit (e.g. a parked gh failure) ALSO writes a
+#      pause marker, since a non-"rollup-red" failure must never silently
+#      fall through to the pause-clearing branch (peer-review must-fix).
 #   6. A Tier-1 cycle with no last-outcome.json (ordinary backlog work, no
 #      self-originated merge yet) is a silent no-op — no sync/rollup-update
 #      calls, no pause file written.
+#
+# Note: once self-originated-pause.json exists, the pre-dispatch gate parks
+# the self subset BEFORE any dispatch/aftermath code runs — so an existing
+# pause marker is never cleared by a later cycle's clean merge (by design:
+# clearing requires an operator/control-channel action, out of this issue's
+# scope per its "Out of scope: control-channel promote/discard" line).
 #
 # Mocking strategy mirrors tests/autonomous/test_conductor_provenance_dispatch.bats:
 # helper scripts stubbed via CONDUCTOR_SCRIPTS_DIR; gh stubbed via a fake PATH
@@ -226,6 +235,40 @@ _run_cycle() {
 
   [ "$status" -eq 0 ]
   [ ! -f "$PAUSE_FILE" ]
+}
+
+@test "rollup-update nonzero exit (non-rollup-red failure) still parks self-originated tiers" {
+  _install_common_stubs
+  _install_provenance
+  _install_list_ready "101"
+  printf '{"issue":101,"pr":501,"outcome":"merged","self_originated":true}\n' > "$OUTCOME_FILE"
+
+  cat > "$FAKE_SCRIPTS/autonomous-integration-branch.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$INT_CALL_LOG"
+case "\${1:-}" in
+  ensure)
+    mkdir -p "$TEST_TMP/.autospec"
+    printf '{"branch":"autospec/autonomous-main","slug":"test-owner/test-repo","base":"main","head_sha":"abc123","kind":"integration"}\n' > "$MODE_FILE"
+    ;;
+  sync)
+    exit 0
+    ;;
+  rollup-update)
+    echo "rollup PR create failed twice" >&2
+    exit 8
+    ;;
+esac
+exit 0
+EOF
+  chmod +x "$FAKE_SCRIPTS/autonomous-integration-branch.sh"
+
+  _run_cycle
+
+  [ "$status" -eq 0 ]
+  [ -f "$PAUSE_FILE" ]
+  [ "$(jq -r '.reason' "$PAUSE_FILE")" = "rollup_update_failed" ]
+  grep -q 'rollup-update failed' "$NOTIFY_LOG"
 }
 
 # ── 2. rollup-red pauses self-originated merges; operator tier proceeds ──────
