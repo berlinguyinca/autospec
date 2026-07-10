@@ -36,9 +36,16 @@ rate for template-groomed issues — but that rate cannot exist until
 - In the **seed** state, grooming still runs, but the filled template is
   **proposed for human approval**, not auto-promoted. Each human-approved groom
   that later merges cleanly is a real telemetry sample.
-- Once the ratchet sees `canary_floor` template-groom clean samples **at or above
-  the ambient baseline** (and `baseline_samples ≥ min-samples`), it graduates
-  `template-promote` to **auto** (no human gate).
+- Graduation to **auto** fires when ALL hold: (a) the count of **resolved**
+  template-groom samples ≥ `canary_floor`; (b) the template-groom clean-merge rate
+  ≥ the ambient baseline rate ("at least as good as the population"); (c)
+  `baseline_samples ≥ canary_floor`. Note `canary_floor` is the single floor
+  applied to BOTH the groomed-sample and baseline-sample counts — so graduation
+  also waits until enough eligible-promotes have closed+reconciled to form a real
+  baseline. Clean-ness enters via the rate comparison (b), not as a separate
+  clean-only count; a low absolute clean rate can still graduate only if the
+  baseline is equally low. This is govern's existing (shipped) ratchet semantics,
+  reused unchanged.
 - Retract-on-regression **never drops below the seed** — so the failure mode is
   "fall back to the human gate (canary)," never "grooming off."
 

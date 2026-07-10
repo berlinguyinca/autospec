@@ -1320,6 +1320,12 @@ fi'
                     local _groom_observed
                     _groom_observed="$(bash "$_groom_observe_sh" --telemetry "$_groom_telemetry" 2>/dev/null || printf '')"
                     if [ -n "$_groom_observed" ]; then
+                        # NOTE: canary_floor is the SINGLE floor govern applies to
+                        # BOTH the groomed-sample count AND the baseline-sample count
+                        # (its widen-guard needs baseline_samples >= min-samples). So
+                        # canary->auto graduation can't fire until >= canary_floor
+                        # eligible-promotes have ALSO closed+reconciled — intentional
+                        # fail-closed coupling (no widening without a real baseline).
                         local _groom_min_samples="${AUTOSPEC_GROOMING_MIN_SAMPLES:-}"
                         if [ -z "$_groom_min_samples" ] && [ -n "$_groom_config_sh" ]; then
                             _groom_min_samples="$(bash "$_groom_config_sh" --key budget.canary_floor 2>/dev/null || printf '5')"
