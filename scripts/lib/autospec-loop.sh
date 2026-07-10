@@ -625,9 +625,10 @@ _autospec_conductor_handle_discard() {
         return 0
     fi
 
-    local status_json rollup_pr
+    local status_json rollup_pr rollup_state
     status_json="$(bash "$intbranch_sh" status --parent main --repo "$repo" 2>/dev/null || true)"
     rollup_pr="$(printf '%s' "$status_json" | jq -r '.rollup_pr.number // empty' 2>/dev/null || true)"
+    rollup_state="$(printf '%s' "$status_json" | jq -r '.rollup_pr.state // empty' 2>/dev/null || true)"
 
     case "$rollup_pr" in
         ''|*[!0-9]*)
@@ -637,6 +638,17 @@ _autospec_conductor_handle_discard() {
             return 0
             ;;
     esac
+    # `status` falls back to the MERGED roll-up when no open one exists —
+    # discarding that would reopen already-landed issues. Only an OPEN
+    # roll-up is discardable (mirrors promote's state guard).
+    if [ "$rollup_state" != "OPEN" ]; then
+        printf '[conductor] discard: roll-up PR #%s is not open (state=%s) — nothing to discard\n' \
+            "$rollup_pr" "$rollup_state" >&2
+        gh issue comment "$issue" --repo "$repo" \
+            --body "discard: roll-up PR #${rollup_pr} is not open (state=${rollup_state}) — nothing to discard." \
+            >/dev/null 2>&1 || true
+        return 0
+    fi
 
     local comment_bodies rolled_issues
     comment_bodies="$(gh pr view "$rollup_pr" --repo "$repo" --json comments --jq '.comments[].body' 2>/dev/null || true)"
