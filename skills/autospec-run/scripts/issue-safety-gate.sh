@@ -1,12 +1,37 @@
 #!/usr/bin/env bash
 # issue-safety-gate.sh — shared fail-closed autospec-run issue safety predicate.
 
+AUTOSPEC_ISSUE_SAFETY_GATE_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+autospec_issue_safety_linter_path() {
+    if [ -n "${AUTOSPEC_SCRIPTS_DIR:-}" ] && [ -f "$AUTOSPEC_SCRIPTS_DIR/lint-issue-safety.sh" ]; then
+        printf '%s\n' "$AUTOSPEC_SCRIPTS_DIR/lint-issue-safety.sh"
+        return 0
+    fi
+    if [ -f "$AUTOSPEC_ISSUE_SAFETY_GATE_DIR/lint-issue-safety.sh" ]; then
+        printf '%s\n' "$AUTOSPEC_ISSUE_SAFETY_GATE_DIR/lint-issue-safety.sh"
+        return 0
+    fi
+    if [ -f "$AUTOSPEC_ISSUE_SAFETY_GATE_DIR/../../../scripts/lint-issue-safety.sh" ]; then
+        printf '%s\n' "$AUTOSPEC_ISSUE_SAFETY_GATE_DIR/../../../scripts/lint-issue-safety.sh"
+        return 0
+    fi
+    if [ -f "$HOME/.autospec/scripts/lint-issue-safety.sh" ]; then
+        printf '%s\n' "$HOME/.autospec/scripts/lint-issue-safety.sh"
+        return 0
+    fi
+    return 1
+}
+
 autospec_issue_safety_gate_result() {
     issue_json="$(cat)"
-    ISSUE_JSON="$issue_json" python3 - <<'PY'
+    linter_path="$(autospec_issue_safety_linter_path || true)"
+    ISSUE_JSON="$issue_json" AUTOSPEC_ISSUE_SAFETY_LINTER="$linter_path" python3 - <<'PY'
 import json
 import os
+import subprocess
 import sys
+import tempfile
 
 BEGIN = "<!-- autospec-safety:begin -->"
 END = "<!-- autospec-safety:end -->"
@@ -68,6 +93,41 @@ if len(decision_lines) != 1:
     sys.exit(0)
 if decision_lines[0] != decision_pass:
     result(False, "non_pass_safety_decision")
+    sys.exit(0)
+
+linter = os.environ.get("AUTOSPEC_ISSUE_SAFETY_LINTER") or ""
+if not linter:
+    result(False, "missing_safety_linter")
+    sys.exit(0)
+
+title = str(issue.get("title") or "")
+author = issue.get("author") or {}
+actor = author.get("login") if isinstance(author, dict) else ""
+actor = str(actor or "")
+body_without_review = body[:prefix.rfind("## Safety review")] + body[end + len(END):]
+with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+    handle.write(body_without_review)
+    body_file = handle.name
+try:
+    cmd = ["bash", linter, "--json", "--title", title]
+    if actor:
+        cmd.extend(["--actor", actor])
+    cmd.append(body_file)
+    completed = subprocess.run(cmd, text=True, capture_output=True, check=False)
+finally:
+    try:
+        os.unlink(body_file)
+    except OSError:
+        pass
+
+if completed.returncode == 1:
+    result(False, "current_body_safety_ambiguous")
+    sys.exit(0)
+if completed.returncode == 2:
+    result(False, "current_body_safety_block")
+    sys.exit(0)
+if completed.returncode != 0:
+    result(False, "current_body_safety_error")
     sys.exit(0)
 
 result(True, "pass")

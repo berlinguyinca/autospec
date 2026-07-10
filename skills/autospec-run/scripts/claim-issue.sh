@@ -160,7 +160,7 @@ if [ -z "$worker_id" ]; then
     worker_id="${host}:${user}:shell:$$:$(date -u +%s)"
 fi
 
-issue_json="$(gh issue view "$issue" --repo "$repo" --json labels,body 2>/dev/null || printf '{}\n')"
+issue_json="$(gh issue view "$issue" --repo "$repo" --json labels,body,title,author 2>/dev/null || printf '{}\n')"
 labels="$(printf '%s\n' "$issue_json" | jq -r '.labels[]?.name' 2>/dev/null || true)"
 if ! printf '%s\n' "$labels" | grep -Fx auto-implement >/dev/null 2>&1; then
     jq -n --argjson issue "$issue" --arg repo "$repo" --arg reason "not_auto_implement" \

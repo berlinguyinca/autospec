@@ -66,7 +66,7 @@ issue_list() {
         --state open \
         --label "$label" \
         --limit 200 \
-        --json number,title,body,labels
+        --json number,title,body,labels,author
 }
 
 AUTO_FILE="$(mktemp -t autospec-auto-issues.XXXXXX)"
