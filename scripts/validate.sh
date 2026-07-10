@@ -3248,6 +3248,7 @@ main() {
     check_grow_define_contract
     check_grow_run_pipeline_contract
     check_grow_run_contract
+    check_db_telemetry_contract
 
 
 # Architecture fitness-function engine (issue #1533): the declarative registry
@@ -5129,6 +5130,27 @@ check_grow_run_contract() {
         info "  running: tests/autospec-grow-run/smoke.bats"
         bats tests/autospec-grow-run/smoke.bats >/tmp/validate-grow-run.log 2>&1 \
             || { cat /tmp/validate-grow-run.log >&2; fail "tests/autospec-grow-run/smoke.bats: failed"; }
+    fi
+}
+
+check_db_telemetry_contract() {
+    info "db telemetry: emit-event shim contract (issue #1770)"
+    local f="skills/autospec-shared/scripts/emit-event.sh"
+    [ -f "$f" ] || { fail "$f: missing"; return 1; }
+    bash -n "$f" || fail "$f: bash syntax error"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/unit/emit-event.bats"
+        bats tests/unit/emit-event.bats >/tmp/validate-emit-event.log 2>&1 \
+            || { cat /tmp/validate-emit-event.log >&2; fail "tests/unit/emit-event.bats: failed"; }
+        # emit-event-wiring.bats is the SHARED per-chokepoint wiring suite
+        # (#1771-#1776); it does not exist until the first chokepoint issue
+        # lands, so only run it once present rather than failing this
+        # foundation issue closed on a file that is intentionally out of scope.
+        if [ -f tests/unit/emit-event-wiring.bats ]; then
+            info "  running: tests/unit/emit-event-wiring.bats"
+            bats tests/unit/emit-event-wiring.bats >/tmp/validate-emit-event-wiring.log 2>&1 \
+                || { cat /tmp/validate-emit-event-wiring.log >&2; fail "tests/unit/emit-event-wiring.bats: failed"; }
+        fi
     fi
 }
 
