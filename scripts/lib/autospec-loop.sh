@@ -433,6 +433,17 @@ PY
 #   AUTOSPEC_EXPLORE_LEDGER_BIN   explicit path to explore-ledger.sh (for tests)
 #   AUTOSPEC_EXPLORE_WEIGHTS_BIN  explicit path to explore-source-weights.sh (for tests)
 #   AUTOSPEC_LAST_OUTCOME_FILE    path the run command writes discovery outcomes to
+#   AUTOSPEC_PROVENANCE_BIN         explicit path to autonomous-provenance.sh (for tests)
+#   AUTOSPEC_INTEGRATION_BRANCH_BIN explicit path to autonomous-integration-branch.sh (for tests)
+#
+# Dispatch-time provenance split (integration-branch design §Architecture 5):
+# when autonomous-provenance.sh + autonomous-integration-branch.sh resolve and
+# a repo slug is known, the Tier-1 drain resolves each batch issue's provenance
+# from GitHub labels (re-derived every cycle; no session memory) and dispatches
+# the operator subset (mode file parked; PRs target the parent) separately from
+# the self subset (kind=integration mode file active; PRs target the
+# integration branch). Each dispatch exports AUTOSPEC_RUN_ONLY_ISSUES — a
+# space-separated issue-number list scoping that run invocation.
 #
 # Safety rules (AGENTS.md):
 #   set -eu; if/then/fi for one-sided conditionals; no RETURN traps;
@@ -626,6 +637,24 @@ autospec_conductor_run() {
         _sandbox_sh="$AUTOSPEC_SANDBOX_BIN"
     elif [ -f "${_sdir}/explore-sandbox.sh" ]; then
         _sandbox_sh="${_sdir}/explore-sandbox.sh"
+    fi
+
+    # ── Provenance + integration-branch wiring (integration-branch design §5) ──
+    # Reusing the F3 env-seam resolution idiom above (AUTOSPEC_*_BIN override >
+    # sibling of scripts/). Both scripts AND a repo slug must resolve for the
+    # dispatch-time provenance split to activate; otherwise the Tier-1 drain
+    # keeps today's single-dispatch behavior (back-compat, capability-gated).
+    local _provenance_sh=""
+    if [ -n "${AUTOSPEC_PROVENANCE_BIN:-}" ] && [ -x "$AUTOSPEC_PROVENANCE_BIN" ]; then
+        _provenance_sh="$AUTOSPEC_PROVENANCE_BIN"
+    elif [ -f "${_sdir}/autonomous-provenance.sh" ]; then
+        _provenance_sh="${_sdir}/autonomous-provenance.sh"
+    fi
+    local _intbranch_sh=""
+    if [ -n "${AUTOSPEC_INTEGRATION_BRANCH_BIN:-}" ] && [ -x "$AUTOSPEC_INTEGRATION_BRANCH_BIN" ]; then
+        _intbranch_sh="$AUTOSPEC_INTEGRATION_BRANCH_BIN"
+    elif [ -f "${_sdir}/autonomous-integration-branch.sh" ]; then
+        _intbranch_sh="${_sdir}/autonomous-integration-branch.sh"
     fi
 
     # ── Persona synthesis wiring (F2) ──────────────────────────────────────────
@@ -1408,7 +1437,121 @@ fi'
                         else
                             local _run_cmd="${AUTOSPEC_RUN_CMD:-}"
                             if [ -n "$_run_cmd" ]; then
-                                bash -c "$_run_cmd" 2>&1 || true
+                                # ── Dispatch-time provenance split (integration-branch
+                                # design §Architecture item 5). Provenance is re-resolved
+                                # from GitHub labels EVERY cycle — never cached in memory
+                                # — so a crash/resume re-derives identical routing. self
+                                # issues dispatch with the kind=integration mode file
+                                # active (Phase 4 targets the integration branch);
+                                # operator issues dispatch with the mode file parked
+                                # (Phase 4 targets the parent as today). Lock-step rules
+                                # are unchanged: the split only scopes each dispatch via
+                                # AUTOSPEC_RUN_ONLY_ISSUES; dep gating stays in the run
+                                # path. Split requires the resolver + branch scripts, a
+                                # repo slug, and a non-empty batch snapshot; otherwise
+                                # single-dispatch exactly as before.
+                                local _prov_batch=""
+                                if [ -n "$_provenance_sh" ] && [ -n "$_intbranch_sh" ] \
+                                    && [ -n "$_repo" ] && [ -n "${_queue_json:-}" ]; then
+                                    _prov_batch="$(printf '%s' "$_queue_json" \
+                                        | jq -r '.batch[]?.number // empty' 2>/dev/null || true)"
+                                fi
+                                if [ -n "$_prov_batch" ]; then
+                                    local _prov_self="" _prov_operator="" _prov_n _prov_val
+                                    while IFS= read -r _prov_n; do
+                                        if [ -z "$_prov_n" ]; then
+                                            continue
+                                        fi
+                                        # Fail closed: resolver failure or unexpected
+                                        # output routes the issue to the integration
+                                        # branch (self), never to the parent.
+                                        _prov_val="$(bash "$_provenance_sh" resolve \
+                                            --issue "$_prov_n" --repo "$_repo" \
+                                            2>/dev/null || printf 'self')"
+                                        if [ "$_prov_val" = "operator" ]; then
+                                            _prov_operator="${_prov_operator:+${_prov_operator} }${_prov_n}"
+                                        else
+                                            _prov_self="${_prov_self:+${_prov_self} }${_prov_n}"
+                                        fi
+                                    done <<EOF_PROV_BATCH
+$_prov_batch
+EOF_PROV_BATCH
+                                    # Operator subset first: park a kind=integration
+                                    # mode file so Phase 4 targets the parent. A
+                                    # kind=explore mode file (standalone explore
+                                    # session) is never touched here.
+                                    if [ -n "$_prov_operator" ]; then
+                                        local _prov_mode_file="${_repo_root}/.autospec/explore-mode.json"
+                                        local _prov_mode_kind=""
+                                        if [ -f "$_prov_mode_file" ]; then
+                                            _prov_mode_kind="$(jq -r '.kind // empty' \
+                                                "$_prov_mode_file" 2>/dev/null || printf '')"
+                                        fi
+                                        if [ "$_prov_mode_kind" = "integration" ]; then
+                                            mv -f "$_prov_mode_file" "${_prov_mode_file}.parked" 2>/dev/null \
+                                                || rm -f "$_prov_mode_file" 2>/dev/null || true
+                                            printf '[conductor] provenance: parked integration mode file for operator batch\n' >&2
+                                        fi
+                                        printf '[conductor] provenance: dispatching operator batch (issues: %s) -> parent\n' \
+                                            "$_prov_operator" >&2
+                                        AUTOSPEC_RUN_ONLY_ISSUES="$_prov_operator" \
+                                            bash -c "$_run_cmd" 2>&1 || true
+                                    fi
+                                    # Self subset: ensure + sync the integration branch
+                                    # so its kind=integration mode file routes Phase 4
+                                    # PRs to it. A sync merge conflict (exit 65) parks
+                                    # the self subset this cycle and notifies — never
+                                    # bypassed; the operator dispatch above is
+                                    # unaffected. Any other ensure/sync failure also
+                                    # parks the self subset (fail closed: self work is
+                                    # never dispatched at the parent).
+                                    if [ -n "$_prov_self" ]; then
+                                        local _prov_int_rc=0
+                                        bash "$_intbranch_sh" ensure --parent main \
+                                            --repo "$_repo" 1>&2 || _prov_int_rc=$?
+                                        if [ "$_prov_int_rc" -eq 0 ]; then
+                                            bash "$_intbranch_sh" sync --parent main \
+                                                --repo "$_repo" 1>&2 || _prov_int_rc=$?
+                                        fi
+                                        if [ "$_prov_int_rc" -ne 0 ]; then
+                                            # Peer-review must-fix: ensure may have
+                                            # written a kind=integration mode file
+                                            # before sync failed — park it so nothing
+                                            # routes Phase 4 work onto a conflicted /
+                                            # unsynced integration branch until a later
+                                            # cycle's ensure+sync succeeds.
+                                            local _prov_fail_mode="${_repo_root}/.autospec/explore-mode.json"
+                                            local _prov_fail_kind=""
+                                            if [ -f "$_prov_fail_mode" ]; then
+                                                _prov_fail_kind="$(jq -r '.kind // empty' \
+                                                    "$_prov_fail_mode" 2>/dev/null || printf '')"
+                                            fi
+                                            if [ "$_prov_fail_kind" = "integration" ]; then
+                                                mv -f "$_prov_fail_mode" "${_prov_fail_mode}.parked" 2>/dev/null \
+                                                    || rm -f "$_prov_fail_mode" 2>/dev/null || true
+                                            fi
+                                        fi
+                                        if [ "$_prov_int_rc" -eq 65 ]; then
+                                            printf 'code_health:integration_sync_conflict\n' >&2
+                                            printf '[conductor] provenance: integration sync conflict — parking self batch (issues: %s)\n' \
+                                                "$_prov_self" >&2
+                                            if [ -n "$_notify_sh" ]; then
+                                                bash "$_notify_sh" "autospec-autonomous" \
+                                                    "integration branch sync conflict — self-originated batch parked for operator resolution" || true
+                                            fi
+                                        elif [ "$_prov_int_rc" -ne 0 ]; then
+                                            printf '[conductor] provenance: integration branch unavailable (rc=%s) — parking self batch (issues: %s)\n' \
+                                                "$_prov_int_rc" "$_prov_self" >&2
+                                        else
+                                            printf '[conductor] provenance: dispatching self batch (issues: %s) -> integration branch\n' \
+                                                "$_prov_self" >&2
+                                            AUTOSPEC_RUN_ONLY_ISSUES="$_prov_self" \
+                                                bash -c "$_run_cmd" 2>&1 || true
+                                        fi
+                                    fi
+                                else
+                                    bash -c "$_run_cmd" 2>&1 || true
+                                fi
                             else
                                 printf '[conductor] WARN: AUTOSPEC_RUN_CMD not set; skipping drain\n' >&2
                             fi
@@ -1528,7 +1671,21 @@ fi'
             # Idempotent — explore-sandbox.sh is a no-op when the branch already
             # exists.  The implementer's phase4 contract reads explore-mode.json
             # and targets the sandbox base; conductor does not duplicate that logic.
-            if [ -n "$_sandbox_sh" ]; then
+            # Integration-branch design §Architecture item 2 (unification):
+            # under conductor-driven discovery the sandbox IS the integration
+            # branch — ensure it so the kind=integration mode file routes
+            # Phase 4 PRs to it, instead of minting an ephemeral explore
+            # sandbox. Fall back to the ephemeral sandbox when integration
+            # routing is unavailable or ensure fails (fail-open to F3).
+            local _discovery_mode_ready=0
+            if [ -n "$_intbranch_sh" ] && [ -n "$_repo" ]; then
+                printf '[conductor] Tier %s: ensuring integration branch as discovery base\n' \
+                    "$_tier" >&2
+                if bash "$_intbranch_sh" ensure --parent main --repo "$_repo" 1>&2; then
+                    _discovery_mode_ready=1
+                fi
+            fi
+            if [ "$_discovery_mode_ready" -eq 0 ] && [ -n "$_sandbox_sh" ]; then
                 printf '[conductor] Tier %s: ensuring explore sandbox (F3)\n' "$_tier" >&2
                 bash "$_sandbox_sh" --base main 2>/dev/null || true
             fi
