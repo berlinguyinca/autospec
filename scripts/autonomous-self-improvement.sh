@@ -2,6 +2,8 @@
 # autonomous-self-improvement.sh — deterministic low-hanging-fruit candidate source.
 set -eu
 
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+
 usage() {
     cat <<'EOF'
 Usage:
@@ -45,86 +47,7 @@ candidate_file() {
 }
 
 emit_candidates() {
-    python3 - "$repo_root" <<'PY'
-import json
-import re
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1]).resolve()
-
-
-def emit(row):
-    print(json.dumps(row, sort_keys=True))
-
-
-def rel(path):
-    return path.relative_to(root).as_posix()
-
-
-commands_dir = root / "crates" / "autospec-cli" / "src" / "commands"
-if commands_dir.is_dir():
-    for path in sorted(commands_dir.glob("*.rs")):
-        if path.name == "mod.rs":
-            continue
-        name = path.stem.replace("_", "-")
-        text = path.read_text(encoding="utf-8")
-        if "not_implemented(" in text:
-            emit({
-                "id": f"cli-stub-{name}",
-                "workstream": "cli-productization",
-                "title": f"Implement autospec {name} beyond the explicit stub",
-                "severity": 3,
-                "value": 4,
-                "confidence": 1,
-                "reversibility": 1,
-                "effort": 3,
-                "blast_radius": 2,
-                "files": [rel(path), "docs/cli-reference.md"],
-                "evidence": f"{rel(path)} calls not_implemented",
-            })
-
-reports = sorted((root / "docs" / "reports").glob("*.md")) if (root / "docs" / "reports").is_dir() else []
-for report in reports:
-    text = report.read_text(encoding="utf-8")
-    in_risks = False
-    for line in text.splitlines():
-        if re.match(r"^## (Remaining Risks|Recommended handling|Next Human Action)", line):
-            in_risks = True
-            continue
-        if in_risks and line.startswith("## "):
-            in_risks = False
-        if in_risks and line.startswith("- "):
-            slug = re.sub(r"[^a-z0-9]+", "-", line[2:].lower()).strip("-")[:48] or "report-risk"
-            emit({
-                "id": f"report-risk-{slug}",
-                "workstream": "report-risk",
-                "title": line[2:].strip().rstrip("."),
-                "severity": 2,
-                "value": 3,
-                "confidence": 0.8,
-                "reversibility": 1,
-                "effort": 2,
-                "blast_radius": 1,
-                "files": [rel(report)],
-                "evidence": f"{rel(report)} risk bullet",
-            })
-
-if not (root / "scripts" / "autospec-run-events.sh").exists():
-    emit({
-        "id": "missing-run-events",
-        "workstream": "operability",
-        "title": "Add run event recording, explanation, and replay evidence",
-        "severity": 4,
-        "value": 5,
-        "confidence": 1,
-        "reversibility": 1,
-        "effort": 2,
-        "blast_radius": 1,
-        "files": ["scripts/autospec-run-events.sh", "tests/autonomous/test_run_events.bats"],
-        "evidence": "run black-box helper absent",
-    })
-PY
+    python3 "$script_dir/autonomous-self-improvement-candidates.py" "$repo_root"
 }
 
 case "$cmd" in
