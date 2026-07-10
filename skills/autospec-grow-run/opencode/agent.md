@@ -264,8 +264,19 @@ publication is always a human action taken outside this skill.
    **Missing credentials or a fetch error degrade that specific provider to
    `{}`** (logged with the reason) — this never aborts the run; the
    remaining adapters and the rest of R4 still proceed.
-2. Run attribution over the before/after measurement envelopes and the
-   ledger:
+
+   Each adapter emits its own `{provider, metrics, ts}` envelope. **Merge all
+   the adapters' envelopes for one snapshot into a single combined envelope**
+   before attribution — `growth-attribute.sh` reads one envelope's `.metrics`,
+   so passing a single adapter's output would silently drop the other
+   providers:
+   ```bash
+   # combine this snapshot's per-adapter outputs (adapter-*.json) into one
+   jq -s 'reduce .[] as $x ({provider:"combined", metrics:{}, ts:(.[0].ts)};
+          .metrics += $x.metrics)' adapter-*.json > snapshot.json
+   ```
+2. Run attribution over the merged before/after snapshot envelopes (each built
+   by the merge above at the start and end of the window) and the ledger:
    ```bash
    bash "$AUTOSPEC_SCRIPTS_DIR/growth-attribute.sh" <before.json> <after.json> <ledger.jsonl>
    ```
