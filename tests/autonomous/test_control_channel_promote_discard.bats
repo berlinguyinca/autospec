@@ -79,6 +79,7 @@ _install_common_stubs() {
 #   $TEST_TMP/pr-body.txt             roll-up PR body (default empty)
 #   $TEST_TMP/pr-close-rc             exit code for `pr close` (default 0)
 #   $TEST_TMP/issue-reopen-rc         exit code for `issue reopen` (default 0)
+#   $TEST_TMP/issue-reopen-rc-<n>     per-issue reopen exit code override
 #   $TEST_TMP/issue-comments-<n>.txt  bodies for `issue view <n> --json comments`
 # `repo view` answers the defaultBranchRef jq output ("main").
 _install_gh() {
@@ -105,7 +106,7 @@ case "\${1:-} \${2:-}" in
         cat "$TEST_TMP/issue-comments-\${3:-}.txt" 2>/dev/null || true
         ;;
     "issue reopen")
-        rc="\$(cat "$TEST_TMP/issue-reopen-rc" 2>/dev/null || printf '0')"
+        rc="\$(cat "$TEST_TMP/issue-reopen-rc-\${3:-}" 2>/dev/null || cat "$TEST_TMP/issue-reopen-rc" 2>/dev/null || printf '0')"
         exit "\$rc"
         ;;
     "issue list")
@@ -485,6 +486,48 @@ DISCARD_ISSUE:607"
     grep -q "^issue edit 607 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
     # Pause marker must NOT be cleared on a partial failure.
     [ -f "$PAUSE_FILE" ]
+}
+
+@test "discard retry after close-ok/reopen-fail reopens remainder and closes control issue" {
+    _install_common_stubs
+    _install_control_channel "DECISION:discard
+DISCARD_ISSUE:608"
+    _install_gh
+    _install_intbranch 77 "OPEN"
+    _write_manifest_body
+    printf '1' > "$TEST_TMP/issue-reopen-rc-12"
+    printf '{"reason":"rollup-red"}\n' > "$PAUSE_FILE"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    grep -q "^pr close 77 --repo test-owner/test-repo --delete-branch$" "$GH_LOG"
+    grep -q "^issue reopen 11 --repo test-owner/test-repo$" "$GH_LOG"
+    grep -q "^issue comment 11 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
+    grep -q "^issue reopen 12 --repo test-owner/test-repo$" "$GH_LOG"
+    ! grep -q "^issue comment 12 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
+    ! grep -q "^issue close 608" "$GH_LOG"
+    [ -f "$TEST_TMP/.autospec/discard-pending.json" ]
+    [ -f "$PAUSE_FILE" ]
+
+    : > "$GH_LOG"; : > "$INTBRANCH_LOG"; : > "$SEQ_LOG"
+    _install_intbranch 77 "CLOSED"
+    rm -f "$TEST_TMP/issue-reopen-rc-12"
+    printf 'discarded-from-rollup: roll-up PR #77 was discarded via control-channel issue #608; reopened for re-drain.\n' \
+        > "$TEST_TMP/issue-comments-11.txt"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    ! grep -q "^pr close 77" "$GH_LOG"
+    ! grep -q "^issue reopen 11 " "$GH_LOG"
+    ! grep -q "^issue comment 11 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
+    grep -q "^issue reopen 12 --repo test-owner/test-repo$" "$GH_LOG"
+    grep -q "^issue comment 12 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
+    grep -q "^issue close 608 --repo test-owner/test-repo$" "$GH_LOG"
+    grep -q "^issue edit 608 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
+    [ ! -f "$TEST_TMP/.autospec/discard-pending.json" ]
+    [ ! -f "$PAUSE_FILE" ]
 }
 
 @test "discard with a merged roll-up is a clean no-op (never reopens landed issues)" {

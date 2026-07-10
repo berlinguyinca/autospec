@@ -150,6 +150,8 @@ scripts' subcommands.
 - Roll-up comment idempotency marker: `<!-- autospec-rollup:issue-<N> -->`.
 - Roll-up body manifest markers: `<!-- autospec-rollup-manifest:begin/end -->` (regenerated
   wholesale between markers).
+- Discard retry manifest: `.autospec/discard-pending.json` stores the control issue, roll-up
+  PR number, and manifest issue list until all reopen/comment operations finish.
 - No schema/DB changes; all state lives in GitHub (labels, PRs, comments) + the mode file.
 
 ## Error handling
