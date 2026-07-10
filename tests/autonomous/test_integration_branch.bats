@@ -559,6 +559,19 @@ YAML
     [ "$status" -eq 2 ]
 }
 
+@test "rollup-update parks when multiple open roll-up PRs exist instead of guessing" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '[{"number":77,"state":"OPEN"},{"number":78,"state":"OPEN"}]\n' > "$GH_ROLLUP_JSON"
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -eq 9 ]
+    [[ "$output" == *"code_health:integration_rollup_multiple_open"* ]]
+    ! grep -q '^pr edit ' "$GH_CALLS"
+    ! grep -q '^pr comment ' "$GH_CALLS"
+    ! grep -q '^pr merge' "$GH_CALLS"
+}
+
 @test "rollup-update fails when the integration branch is missing" {
     run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
 

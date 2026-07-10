@@ -530,7 +530,7 @@ cmd_rollup_update() {
     local pr_json pr_title pr_url pr_adds pr_dels
     local comments_json comment_bodies marker prior_issues landed_issues
     local body_json body accumulated_pr_count diff_lines manifest_file new_body
-    local comment_body ci_json bad initial_body n
+    local comment_body ci_json bad initial_body n notifier
 
     branch="$(integration_branch)"
     pref="$(parent_ref)"
@@ -547,6 +547,17 @@ cmd_rollup_update() {
     rollup_json="$(rollup_gh pr list --repo "$slug" --head "$branch" --base "$parent" --state open --json number)" \
         || rollup_park "rollup PR query failed branch=$branch"
     require_json_array "rollup PR query" "$rollup_json"
+    # The contract is a SINGLE open roll-up PR. More than one means a prior
+    # invariant broke; guessing could update/comment the wrong PR, so park for
+    # operator resolution instead (peer-review must-fix).
+    if printf '%s' "$rollup_json" | jq -e 'length > 1' >/dev/null 2>&1; then
+        err "code_health:integration_rollup_multiple_open branch=$branch count=$(printf '%s' "$rollup_json" | jq 'length')"
+        notifier="$(find_notify)"
+        if [ -n "$notifier" ]; then
+            bash "$notifier" "autospec: rollup-update parked" "multiple open roll-up PRs on $branch" >/dev/null 2>&1 || true
+        fi
+        exit 9
+    fi
     rollup_num="$(printf '%s' "$rollup_json" | jq -r 'if length > 0 then (sort_by(.number) | .[0].number) else empty end')"
 
     if [ -z "$rollup_num" ]; then
