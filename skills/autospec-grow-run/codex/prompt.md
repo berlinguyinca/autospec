@@ -261,20 +261,23 @@ For each open `growth/needs-approval` control issue in `approval.control_repo`:
    ```bash
    bash "$AUTOSPEC_SCRIPTS_DIR/growth-outbound-queue.sh" --read-state <label-csv>
    ```
-2. Route by state, then **clear the decision label** you just serviced so the
-   conductor's outbound tier does not re-service the same control issue every
-   cycle (the tier fires whenever a `growth/needs-approval` issue still carries
-   an `approved`/`edited`/`rejected` decision label):
+2. Route by state, then **clear the serviced state** so the conductor's
+   outbound tier does not re-service the same control issue every cycle (the
+   tier fires whenever a `growth/needs-approval` issue still carries an
+   `approved`/`edited`/`rejected`/`published` state label):
    - **`approved`** — emit a one-click-publish package (the exact copy +
      target URL/venue + any submission metadata) as a **comment** on the
      control issue. The agent **never posts on the human's behalf** — the
      comment is the deliverable. Then remove `growth/approved` and add
      `growth/awaiting-publish` so the package is not re-emitted each cycle.
-     Only record a `published` ledger line (with the resulting URL) after the
-     human confirms publication themselves (e.g. by pasting the live URL back
-     into the issue, or by applying a `published` label) — never infer
-     publication. When you later see an `awaiting-publish` issue the human has
-     marked `published`, write the `published` ledger line and close it.
+     Do **not** record a `published` ledger line yet — publication is not
+     confirmed. The issue now sits in `awaiting-publish` (no decision label),
+     so the tier stops selecting it until the human acts.
+   - **`published`** — the human has confirmed the post is live (pasted the
+     URL and applied `growth/published`). Append a `published` ledger line
+     carrying the live URL, then **close** the control issue. This is the
+     terminal state; closing it drops it from the tier's pending count. Never
+     infer publication — only this human-applied label triggers the record.
    - **`edited`** — treat the edited copy as a new draft: re-run the R2
      gate sequence (structural validation → ethics gate → cadence →
      relevance) and re-queue (which files a fresh control issue). Then close
@@ -282,10 +285,12 @@ For each open `growth/needs-approval` control issue in `approval.control_repo`:
    - **`rejected`** — append a `rejected` ledger line and close out; do not
      retry automatically.
 
-Clearing the decision label (or closing the issue) on every branch is
+Clearing the serviced state (relabel or close) on every branch is
 load-bearing: it is the R3-side mirror of R2's source-issue retirement, and it
 is what makes the shared `growth-outbound-pending` signal fall back to zero so
-Tier G3 (measure) and Tier G1 (define) are not starved.
+Tier G3 (measure) and Tier G1 (define) are not starved. Because the tier also
+counts `growth/published`, a human-confirmed post self-triggers the terminal
+record promptly instead of waiting for unrelated outbound work.
 
 Reiterate the invariant: **the agent never auto-posts** anything to an
 external platform under any control-issue state, including `approved` —
