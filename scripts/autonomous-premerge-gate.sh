@@ -52,6 +52,9 @@ Environment:
   AUTOSPEC_PREMERGE_MAX_ATTEMPTS  Override max attempts (default 5).
   AUTOSPEC_QA_CMD                 Override the qa command (default: autospec-qa).
   AUTOSPEC_SECAUDIT_CMD           Override the secaudit command (default: autospec-secaudit).
+  AUTOSPEC_DESIGN_GATES_CMD       Override the design-gates runner (default: sibling
+                                  autospec-design-gates.sh). The stage is opt-in: it only
+                                  runs when .autospec/design-gates.yml exists in the repo.
   AUTOSPEC_NOTIFY                 Set to 0 to suppress notifications.
 Exit 0 = merge-ok; 1 = block; 2 = halt (code_health); 3 = invocation error.
 EOF
@@ -376,6 +379,67 @@ if [ -n "$MUTATION_BASELINE" ] || [ -n "$MUTATION_CURRENT" ]; then
         printf "block mutation_score_regression\n"
         exit 1
     fi
+fi
+_default_design_gates_cmd() {
+    local dir
+    dir="$(cd "$(dirname "$0")" && pwd)"
+    if [ -x "$dir/autospec-design-gates.sh" ]; then
+        printf '%s' "$dir/autospec-design-gates.sh"
+    elif command -v autospec-design-gates.sh >/dev/null 2>&1; then
+        printf 'autospec-design-gates.sh'
+    else
+        printf ''
+    fi
+}
+DESIGN_GATES_CMD="${AUTOSPEC_DESIGN_GATES_CMD:-}"
+if [ -z "$DESIGN_GATES_CMD" ]; then
+    DESIGN_GATES_CMD="$(_default_design_gates_cmd)"
+fi
+_run_design_gates() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] would run: $DESIGN_GATES_CMD --repo-root ${AUTOSPEC_REPO_DIR:-$PWD}${CHANGED_FILES:+ --changed-files $CHANGED_FILES}"
+        printf 'autospec-design-gates: SKIPPED (0 run, 0 failed, 0 unmapped)\n'
+        return 0
+    fi
+    if [ -n "$CHANGED_FILES" ]; then
+        "$DESIGN_GATES_CMD" --repo-root "${AUTOSPEC_REPO_DIR:-$PWD}" --changed-files "$CHANGED_FILES" 2>&1 || true
+    else
+        "$DESIGN_GATES_CMD" --repo-root "${AUTOSPEC_REPO_DIR:-$PWD}" 2>&1 || true
+    fi
+}
+_design_gates_block() {
+    # The runner's own final status line is authoritative (its exit code is
+    # deliberately masked above so a fix-and-recheck loop can drive retries).
+    local out="$1"
+    printf '%s\n' "$out" | grep -qE '^autospec-design-gates: FAIL '
+}
+if [ -z "$DESIGN_GATES_CMD" ]; then
+    info "design-gates: runner not installed; skipping stage."
+elif [ ! -f "${AUTOSPEC_REPO_DIR:-$PWD}/.autospec/design-gates.yml" ] && [ "$DRY_RUN" -eq 0 ]; then
+    info "design-gates: no .autospec/design-gates.yml; skipping stage."
+else
+    design_attempt=1
+    while true; do
+        info "=== design-gates run (attempt $design_attempt/$MAX_ATTEMPTS) ==="
+        design_output="$(_run_design_gates)"
+        if _design_gates_block "$design_output"; then
+            if [ "$design_attempt" -ge "$MAX_ATTEMPTS" ]; then
+                info "Max attempts ($MAX_ATTEMPTS) reached with design-gate failures still present."
+                printf '%s\n' "$design_output"
+                _apply_needs_human_label
+                _notify "autospec: needs-human" \
+                    "Pre-merge gate exhausted $MAX_ATTEMPTS design-gate attempts on $PR_BRANCH; blocking gates remain."
+                printf 'block retries_exhausted\n'
+                exit 1
+            fi
+            info "Blocking design-gate failures detected; dispatching fix (attempt $design_attempt/$MAX_ATTEMPTS)."
+            _dispatch_fix "$design_attempt" "$design_output" "design-gates"
+            design_attempt=$((design_attempt + 1))
+            continue
+        fi
+        info "design-gates stage clear on attempt $design_attempt."
+        break
+    done
 fi
 attempt=1
 while true; do
