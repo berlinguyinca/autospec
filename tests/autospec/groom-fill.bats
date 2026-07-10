@@ -83,3 +83,23 @@ SH
   [ "$status" -eq 1 ]
   [ "$(printf '%s' "$output" | jq -r .reason)" = "codex-error" ]
 }
+
+@test "passes 'exec --skip-git-repo-check' to codex (headless trust flag)" {
+  # Real codex refuses in a non-trusted dir without --skip-git-repo-check, which
+  # would fail-close every groom. Stubs ignore args, so this records + asserts
+  # the exact invocation to lock the flag against regression.
+  cat > "$BIN_DIR/codex-argrec" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$ARGREC"
+cat >/dev/null
+printf '## Summary\nok\n'
+SH
+  chmod +x "$BIN_DIR/codex-argrec"
+  run env ARGREC="$BATS_TEST_TMPDIR/args.txt" \
+          AUTOSPEC_GROOM_FILL_BIN="$BIN_DIR/codex-argrec" \
+          AUTOSPEC_GROOM_VALIDATE_BIN="$BIN_DIR/validate-ok" \
+      bash "$FILL_SH" --issue 1 --repo o/r --title T --body B
+  [ "$status" -eq 0 ]
+  grep -q 'exec' "$BATS_TEST_TMPDIR/args.txt"
+  grep -q -- '--skip-git-repo-check' "$BATS_TEST_TMPDIR/args.txt"
+}
