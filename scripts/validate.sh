@@ -1014,6 +1014,10 @@ check_lint_issue_helpers() {
     bad_count="$(ls tests/fixtures/issue-quality/bad-*.md 2>/dev/null | wc -l | tr -d ' ')"
     [ "$bad_count" -ge 4 ] \
         || fail "tests/fixtures/issue-quality/: need >=4 bad-*.md fixtures, found ${bad_count}"
+    info "  bats: tests/unit/test_lint_issue_safety.bats"
+    bats tests/unit/test_lint_issue_safety.bats >/tmp/validate-lint-issue-safety.log 2>&1 \
+        || { cat /tmp/validate-lint-issue-safety.log >&2; \
+             fail "tests/unit/test_lint_issue_safety.bats: failed"; }
 }
 
 # Lint-implementation helpers invariants (introduced by issue #212):
