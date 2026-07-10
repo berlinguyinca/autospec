@@ -63,6 +63,20 @@ gh_api_json() {
     fi
 }
 
+# gh_api_json_paginated <path> — like gh_api_json but follows all pages
+# (--paginate flattens multi-page array responses into one JSON array), so a
+# forged/older label or comment event does not hide behind page 2+ of a
+# noisy issue's timeline/comments.
+gh_api_json_paginated() {
+    local path="$1" out
+    out="$(gh api --paginate "$path" 2>/dev/null)" || { printf ''; return 0; }
+    if is_valid_json "$out"; then
+        printf '%s' "$out"
+    else
+        printf ''
+    fi
+}
+
 # trusted_actor_logins — newline-separated logins from
 # safety.issue_intent_gate.trusted_actors, or empty on missing/invalid config.
 trusted_actor_logins() {
@@ -100,7 +114,7 @@ has_label() {
 # untrusted/bot actor.
 approval_via_label() {
     local repo="$1" issue="$2" trusted="$3" timeline_json last_actor
-    timeline_json="$(gh_api_json "repos/$repo/issues/$issue/timeline")"
+    timeline_json="$(gh_api_json_paginated "repos/$repo/issues/$issue/timeline")"
     [ -n "$timeline_json" ] || return 1
     last_actor="$(printf '%s' "$timeline_json" | jq -r '
         [.[] | select(.event == "labeled" and .label.name == "approved-by-operator")]
@@ -116,7 +130,7 @@ approval_via_label() {
 # lint-issue-safety.sh's trusted-actor comment-parsing intent.
 approval_via_comment() {
     local repo="$1" issue="$2" trusted="$3" comments_json candidate
-    comments_json="$(gh_api_json "repos/$repo/issues/$issue/comments")"
+    comments_json="$(gh_api_json_paginated "repos/$repo/issues/$issue/comments")"
     [ -n "$comments_json" ] || return 1
     while IFS= read -r candidate; do
         [ -n "$candidate" ] || continue

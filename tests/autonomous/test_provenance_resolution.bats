@@ -32,7 +32,13 @@ make_gh_stub() {
     local issue_file="$1" timeline_file="$2" comments_file="$3"
     cat > "$TMP/bin/gh" <<EOF
 #!/usr/bin/env bash
-path="\$2"
+# Find the request path among the args (may follow --paginate).
+path=""
+for a in "\$@"; do
+    case "\$a" in
+        repos/*) path="\$a" ;;
+    esac
+done
 case "\$path" in
     */timeline) cat "$timeline_file" ;;
     */comments) cat "$comments_file" ;;
@@ -76,6 +82,24 @@ write_empty() {
     make_gh_stub "$TMP/issue.json" "$TMP/timeline.json" "$(empty_json)"
 
     run bash "$PROVENANCE" resolve --issue 2 --repo "$REPO"
+    [ "$status" -eq 0 ]
+    [ "$output" = "self" ]
+}
+
+# ---------------------------------------------------------------------------
+# Pagination boundary: --paginate flattens multi-page timeline responses into
+# one array; an OLDER trusted label event followed by a NEWER untrusted
+# relabel must still resolve self (the untrusted actor's re-application is
+# authoritative as the LAST event, not the first).
+# ---------------------------------------------------------------------------
+
+@test "older trusted label event followed by newer untrusted relabel resolves self" {
+    printf '[{"event":"labeled","label":{"name":"approved-by-operator"},"actor":{"login":"berlinguyinca"}},{"event":"labeled","label":{"name":"approved-by-operator"},"actor":{"login":"mallory-bot"}}]' > "$TMP/timeline.json"
+    write_empty
+    printf '{"number":11,"labels":[{"name":"origin:self"},{"name":"approved-by-operator"}],"user":{"login":"autospec-bot","type":"Bot"}}' > "$TMP/issue.json"
+    make_gh_stub "$TMP/issue.json" "$TMP/timeline.json" "$(empty_json)"
+
+    run bash "$PROVENANCE" resolve --issue 11 --repo "$REPO"
     [ "$status" -eq 0 ]
     [ "$output" = "self" ]
 }
