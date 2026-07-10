@@ -70,6 +70,10 @@ write_fake_git_history() {
         ;;
     log)
         if [ "$(state_get log_failure)" = "1" ]; then exit 3; fi
+        if [ "${2:-}" = "--format=%B" ]; then
+            state_get merge_log_body | tr '|' '\n'
+            exit 0
+        fi
         state_get age_epoch
         ;;
     diff)
@@ -97,6 +101,7 @@ write_fake_gh() {
 set -eu
 printf '%s\n' "$*" >> "$GH_CALLS"
 if [ "${GH_FAILURE:-0}" = "1" ]; then
+    echo "gh: api boom" >&2
     exit 5
 fi
 case "${1:-} ${2:-}" in
@@ -110,6 +115,38 @@ case "${1:-} ${2:-}" in
                 ;;
         esac
         ;;
+    "pr create")
+        printf '[{"number":88,"state":"OPEN"}]\n' > "$GH_ROLLUP_JSON"
+        if [ "${GH_CREATE_FAIL:-0}" = "1" ]; then
+            echo "gh: create blew up client-side after server accepted" >&2
+            exit 1
+        fi
+        printf 'https://github.com/example/repo/pull/88\n'
+        ;;
+    "pr view")
+        case " $* " in
+            *" --json body "*)
+                cat "$GH_PR_BODY_JSON"
+                ;;
+            *" --json comments "*)
+                cat "$GH_PR_COMMENTS_JSON"
+                ;;
+            *" --json statusCheckRollup "*)
+                cat "$GH_CI_JSON"
+                ;;
+            *" --json title,url,additions,deletions "*)
+                printf '{"title":"Worker PR title","url":"https://github.com/example/repo/pull/202","additions":8,"deletions":4}\n'
+                ;;
+            *)
+                printf '{}\n'
+                ;;
+        esac
+        ;;
+    "issue view")
+        cat "$GH_ISSUE_JSON"
+        ;;
+    "pr edit"|"pr comment"|"label create")
+        ;;
     *)
         printf '{}\n'
         ;;
@@ -119,8 +156,12 @@ EOF
 }
 
 write_fake_state() {
-    printf 'parent_sha=parent111\nintegration_sha=integration222\nbranch_exists=0\nmerge_conflict=0\ndiff_added=8\ndiff_deleted=4\nage_epoch=1700000000\nlog_failure=0\ndiff_failure=0\nfetch_failure=0\npush_failure=0\nrevlist_failure=0\nmerge_pr_count=3\ncurrent_branch=main\n' > "$GIT_STATE"
+    printf 'parent_sha=parent111\nintegration_sha=integration222\nbranch_exists=0\nmerge_conflict=0\ndiff_added=8\ndiff_deleted=4\nage_epoch=1700000000\nlog_failure=0\ndiff_failure=0\nfetch_failure=0\npush_failure=0\nrevlist_failure=0\nmerge_pr_count=3\ncurrent_branch=main\nmerge_log_body=\n' > "$GIT_STATE"
     printf '[{"number":77,"state":"OPEN"}]\n' > "$GH_ROLLUP_JSON"
+    printf '{"body":"Roll-up PR\\n\\n<!-- autospec-rollup-manifest:begin -->\\nstale manifest\\n<!-- autospec-rollup-manifest:end -->\\n"}\n' > "$GH_PR_BODY_JSON"
+    printf '{"comments":[]}\n' > "$GH_PR_COMMENTS_JSON"
+    printf '{"statusCheckRollup":[]}\n' > "$GH_CI_JSON"
+    printf '{"title":"Add feature X","url":"https://github.com/example/repo/issues/101","labels":[{"name":"origin:self"},{"name":"auto-implement"}]}\n' > "$GH_ISSUE_JSON"
 }
 
 setup_file() {
@@ -140,7 +181,12 @@ setup() {
     export GIT_STATE="$TMP/git-state"
     export GIT_ROOT="$TMP/repo"
     export GH_ROLLUP_JSON="$TMP/gh-rollup.json"
+    export GH_PR_BODY_JSON="$TMP/gh-pr-body.json"
+    export GH_PR_COMMENTS_JSON="$TMP/gh-pr-comments.json"
+    export GH_CI_JSON="$TMP/gh-ci.json"
+    export GH_ISSUE_JSON="$TMP/gh-issue.json"
     export GH_FAILURE=0
+    export GH_CREATE_FAIL=0
     export AUTOSPEC_CONFIG_FILE="$TMP/autospec.yml"
     export PATH="$FAKE_BIN:$PATH"
 
@@ -415,4 +461,208 @@ YAML
     remote_integration_sha="$(cd "$real_root" && "$REAL_GIT_BIN" ls-remote origin autospec/autonomous-main | cut -f1)"
     remote_main_sha="$(cd "$real_root" && "$REAL_GIT_BIN" ls-remote origin main | cut -f1)"
     [ "$remote_integration_sha" = "$remote_main_sha" ]
+}
+
+@test "rollup-update first landing creates the roll-up PR with needs-human label and manifest" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '[]\n' > "$GH_ROLLUP_JSON"
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -eq 0 ]
+    grep -q '^label create autospec:needs-human --repo example/repo' "$GH_CALLS"
+    grep -q '^pr create --repo example/repo --head autospec/autonomous-main --base main' "$GH_CALLS"
+    grep -q -- '--label autospec:needs-human' "$GH_CALLS"
+    # body regenerated against the created PR (number 88 from the mock) with manifest markers + landed issue
+    grep -q '^pr edit 88 --repo example/repo --body' "$GH_CALLS"
+    grep -q 'autospec-rollup-manifest:begin' "$GH_CALLS"
+    grep -q '#101' "$GH_CALLS"
+    # exactly one per-feature comment, carrying the idempotency marker
+    [ "$(grep -c '^pr comment ' "$GH_CALLS")" -eq 1 ]
+    grep -q 'autospec-rollup:issue-101' "$GH_CALLS"
+    # never auto-merges and stays quiet on green CI
+    ! grep -q '^pr merge' "$GH_CALLS"
+    [[ "$output" != *"rollup-red"* ]]
+}
+
+@test "rollup-update second landing updates the manifest body and adds exactly one new comment" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '{"comments":[{"body":"<!-- autospec-rollup:issue-55 -->\\n### #55 — Prior feature title\\n\\n- Issue: [#55](https://github.com/example/repo/issues/55)"}]}\n' > "$GH_PR_COMMENTS_JSON"
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -eq 0 ]
+    ! grep -q '^pr create' "$GH_CALLS"
+    [ "$(grep -c '^pr edit 77 --repo example/repo --body' "$GH_CALLS")" -eq 1 ]
+    # regenerated manifest carries both the prior and the new issue, and the
+    # prior issue's line is enriched with its title from the durable comment
+    edit_call="$(awk '/^pr edit 77 /,0' "$GH_CALLS")"
+    [[ "$edit_call" == *"#55"* ]]
+    [[ "$edit_call" == *"Prior feature title"* ]]
+    [[ "$edit_call" == *"#101"* ]]
+    [[ "$edit_call" != *"stale manifest"* ]]
+    [ "$(grep -c '^pr comment ' "$GH_CALLS")" -eq 1 ]
+    grep -q 'autospec-rollup:issue-101' "$GH_CALLS"
+    ! grep -q '^pr merge' "$GH_CALLS"
+}
+
+@test "rollup-update re-run with existing issue marker posts no duplicate comment" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '{"comments":[{"body":"<!-- autospec-rollup:issue-101 -->\\nalready posted"}]}\n' > "$GH_PR_COMMENTS_JSON"
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^pr comment ' "$GH_CALLS")" -eq 0 ]
+    # body manifest is still regenerated (crash-safe resume keeps the manifest current)
+    grep -q '^pr edit 77 --repo example/repo --body' "$GH_CALLS"
+    ! grep -q '^pr merge' "$GH_CALLS"
+}
+
+@test "rollup-update prints rollup-red on stdout when the roll-up CI is red" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '{"statusCheckRollup":[{"name":"ci","conclusion":"FAILURE"}]}\n' > "$GH_CI_JSON"
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"rollup-red"* ]]
+    ! grep -q '^pr merge' "$GH_CALLS"
+}
+
+@test "rollup-update stays quiet on green CI" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '{"statusCheckRollup":[{"name":"ci","conclusion":"SUCCESS"}]}\n' > "$GH_CI_JSON"
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"rollup-red"* ]]
+    ! grep -q '^pr merge' "$GH_CALLS"
+}
+
+@test "rollup-update retries a failed gh query once then parks" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    export GH_FAILURE=1
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -eq 8 ]
+    [[ "$output" == *"code_health:integration_rollup_gh_failed"* ]]
+    # attempt-2 stderr is surfaced in the park message for diagnosability
+    [[ "$output" == *"last_gh_stderr="*"gh: api boom"* ]]
+    # the first gh query was attempted exactly twice (retry once)
+    [ "$(grep -c '^pr list ' "$GH_CALLS")" -eq 2 ]
+    ! grep -q '^pr merge' "$GH_CALLS"
+}
+
+@test "rollup-update requires --issue and --pr" {
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --pr 202
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--issue is required"* ]]
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--pr is required"* ]]
+}
+
+@test "rollup-update rejects non-numeric --issue and --pr values" {
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue abc --pr 202
+    [ "$status" -eq 2 ]
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr xyz
+    [ "$status" -eq 2 ]
+}
+
+@test "rollup-update parks when multiple open roll-up PRs exist instead of guessing" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '[{"number":77,"state":"OPEN"},{"number":78,"state":"OPEN"}]\n' > "$GH_ROLLUP_JSON"
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -eq 9 ]
+    [[ "$output" == *"code_health:integration_rollup_multiple_open"* ]]
+    ! grep -q '^pr edit ' "$GH_CALLS"
+    ! grep -q '^pr comment ' "$GH_CALLS"
+    ! grep -q '^pr merge' "$GH_CALLS"
+}
+
+@test "rollup-update fails when the integration branch is missing" {
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"autonomous_integration_branch_missing"* ]]
+    ! grep -q '^pr create' "$GH_CALLS"
+    ! grep -q '^pr comment ' "$GH_CALLS"
+}
+
+@test "rollup-update create failure with PR existing on re-query does not create a duplicate" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '[]\n' > "$GH_ROLLUP_JSON"
+    export GH_CREATE_FAIL=1
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -eq 0 ]
+    # create was attempted exactly ONCE — the re-query found the PR, so no
+    # blind retry opened a duplicate roll-up
+    [ "$(grep -c '^pr create ' "$GH_CALLS")" -eq 1 ]
+    [[ "$output" == *"already existed after failed create"* ]]
+    # the run proceeds against the found PR (number 88 from the mock)
+    grep -q '^pr edit 88 --repo example/repo --body' "$GH_CALLS"
+    [ "$(grep -c '^pr comment ' "$GH_CALLS")" -eq 1 ]
+    ! grep -q '^pr merge' "$GH_CALLS"
+}
+
+@test "rollup-update manifest keeps an issue whose comment post parked, via branch history" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf 'merge_log_body=feat: prior thing (#301)|Closes #55\n' >> "$GIT_STATE"
+    printf '{"comments":[]}\n' > "$GH_PR_COMMENTS_JSON"
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -eq 0 ]
+    edit_call="$(awk '/^pr edit 77 /,0' "$GH_CALLS")"
+    [[ "$edit_call" == *"#55"* ]]
+    [[ "$edit_call" == *"#101"* ]]
+    ! grep -q '^pr merge' "$GH_CALLS"
+}
+
+@test "rollup-update preserves trailing body content when the end marker is missing" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '{"body":"Intro\\n\\n<!-- autospec-rollup-manifest:begin -->\\nold manifest\\nTrailing content that must survive"}\n' > "$GH_PR_BODY_JSON"
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -eq 0 ]
+    edit_call="$(awk '/^pr edit 77 /,0' "$GH_CALLS")"
+    [[ "$edit_call" == *"Trailing content that must survive"* ]]
+    [[ "$edit_call" == *"autospec-rollup-manifest:end"* ]]
+    [[ "$edit_call" == *"#101"* ]]
+    ! grep -q '^pr merge' "$GH_CALLS"
+}
+
+@test "rollup-update parks through the park contract on a non-array PR list payload" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '{"not":"array"}\n' > "$GH_ROLLUP_JSON"
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -eq 8 ]
+    [[ "$output" == *"code_health:integration_rollup_gh_failed"* ]]
+    [[ "$output" == *"invalid JSON"* ]]
+    ! grep -q '^pr edit ' "$GH_CALLS"
+    ! grep -q '^pr comment ' "$GH_CALLS"
+    ! grep -q '^pr merge' "$GH_CALLS"
+}
+
+@test "rollup-update prints rollup-red for a legacy StatusContext with state FAILURE" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '{"statusCheckRollup":[{"context":"legacy-teamcity","state":"FAILURE"}]}\n' > "$GH_CI_JSON"
+
+    run bash "$SCRIPT" rollup-update --parent main --repo example/repo --issue 101 --pr 202
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"rollup-red"* ]]
+    ! grep -q '^pr merge' "$GH_CALLS"
 }

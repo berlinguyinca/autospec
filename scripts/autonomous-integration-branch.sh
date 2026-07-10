@@ -18,22 +18,30 @@ COMMAND="${1:-}"
 PARENT="main"
 REPO=""
 TAKEOVER=0
+ISSUE=""
+PR_NUM=""
 
 usage() {
     cat <<EOF
-Usage: $0 <ensure|sync|reset|status> --parent <branch> [--repo <owner/repo>] [--takeover]
+Usage: $0 <ensure|sync|reset|status|rollup-update> --parent <branch> [--repo <owner/repo>] [--takeover]
 
 Subcommands:
-  ensure  Create or reuse autospec/autonomous-<parent>, push it, and write .autospec/explore-mode.json.
-  sync    Merge the parent tip into the integration branch; conflicts abort with exit 65.
-  reset   Recreate the integration branch from the parent tip and push it (requires the
-          rollup PR to be merged or absent).
-  status  Emit JSON with rollup PR state, accumulated PR count, age days, and diff lines.
+  ensure         Create or reuse autospec/autonomous-<parent>, push it, and write .autospec/explore-mode.json.
+  sync           Merge the parent tip into the integration branch; conflicts abort with exit 65.
+  reset          Recreate the integration branch from the parent tip and push it (requires the
+                 rollup PR to be merged or absent).
+  status         Emit JSON with rollup PR state, accumulated PR count, age days, and diff lines.
+  rollup-update  --issue <N> --pr <M>: ensure the single open roll-up PR (integration -> parent)
+                 exists, regenerate its manifest body, and post one idempotent per-feature
+                 comment. Never auto-merges. Prints "rollup-red" on stdout when the roll-up's
+                 CI is red.
 
 Flags:
   --parent <branch>     Parent branch this integration branch tracks (default: main).
   --repo <owner/repo>   Repo slug for gh calls (default: derived from origin remote).
   --takeover            ensure only: overwrite a conflicting .autospec/explore-mode.json.
+  --issue <N>           rollup-update only: the issue number that just landed.
+  --pr <M>              rollup-update only: the worker PR number that just landed.
 EOF
 }
 
@@ -61,6 +69,22 @@ while [ $# -gt 0 ]; do
         --takeover)
             TAKEOVER=1
             ;;
+        --issue)
+            shift
+            [ $# -gt 0 ] || { err "--issue requires a value"; exit 2; }
+            ISSUE="$1"
+            ;;
+        --issue=*)
+            ISSUE="${1#--issue=}"
+            ;;
+        --pr)
+            shift
+            [ $# -gt 0 ] || { err "--pr requires a value"; exit 2; }
+            PR_NUM="$1"
+            ;;
+        --pr=*)
+            PR_NUM="${1#--pr=}"
+            ;;
         -h|--help)
             usage; exit 0 ;;
         *)
@@ -70,7 +94,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "$COMMAND" in
-    ensure|sync|reset|status) ;;
+    ensure|sync|reset|status|rollup-update) ;;
     -h|--help) usage; exit 0 ;;
     *) err "unknown subcommand: ${COMMAND:-<none>}"; usage; exit 2 ;;
 esac
@@ -78,6 +102,15 @@ esac
 if [ -z "$PARENT" ]; then
     err "--parent is required"
     exit 2
+fi
+
+if [ "$COMMAND" = "rollup-update" ]; then
+    case "$ISSUE" in
+        ''|*[!0-9]*) err "--issue is required for rollup-update and must be numeric"; exit 2 ;;
+    esac
+    case "$PR_NUM" in
+        ''|*[!0-9]*) err "--pr is required for rollup-update and must be numeric"; exit 2 ;;
+    esac
 fi
 
 config_get() {
@@ -226,6 +259,9 @@ cleanup_tmp_worktree() {
         rm -rf "$CURRENT_TMP_WT"
     fi
     CURRENT_TMP_WT=""
+    if [ -n "${ROLLUP_GH_ERRFILE:-}" ]; then
+        rm -f "$ROLLUP_GH_ERRFILE"
+    fi
 }
 trap cleanup_tmp_worktree EXIT
 
@@ -422,9 +458,269 @@ cmd_status() {
     printf '}\n'
 }
 
+# --- rollup-update: maintain the single open roll-up PR (integration -> parent) ---
+
+ROLLUP_MANIFEST_BEGIN='<!-- autospec-rollup-manifest:begin -->'
+ROLLUP_MANIFEST_END='<!-- autospec-rollup-manifest:end -->'
+
+# Reusing the notify.sh resolution from autonomous-spend-ledger.sh (fail-open:
+# notifier errors never block the park verdict).
+find_notify() {
+    if command -v notify.sh >/dev/null 2>&1; then
+        printf 'notify.sh'
+        return 0
+    fi
+    if [ -f "$script_dir/../skills/autospec-shared/scripts/notify.sh" ]; then
+        printf '%s' "$script_dir/../skills/autospec-shared/scripts/notify.sh"
+        return 0
+    fi
+    printf ''
+}
+
+# gh API failures in rollup-update: retry once, then park with notification
+# (spec §Error handling). The merge into the integration branch has already
+# happened; the comment retries on the next landing via the idempotency scan.
+# Attempt-2 stderr is preserved in a file (a subshell-set variable would be
+# lost) so rollup_park can surface the actual GitHub CLI failure.
+ROLLUP_GH_ERRFILE="${TMPDIR:-/tmp}/rollup-gh-stderr.$$"
+rollup_gh() {
+    local out
+    if out="$(gh "$@" 2>/dev/null)"; then
+        printf '%s' "$out"
+        return 0
+    fi
+    if out="$(gh "$@" 2>"$ROLLUP_GH_ERRFILE")"; then
+        printf '%s' "$out"
+        return 0
+    fi
+    return 1
+}
+
+rollup_park() {
+    local notifier gh_stderr=""
+    if [ -s "$ROLLUP_GH_ERRFILE" ]; then
+        gh_stderr="$(tr '\n' ' ' < "$ROLLUP_GH_ERRFILE" | cut -c1-300)"
+    fi
+    err "code_health:integration_rollup_gh_failed $*${gh_stderr:+ last_gh_stderr=$gh_stderr}"
+    notifier="$(find_notify)"
+    if [ -n "$notifier" ]; then
+        bash "$notifier" "autospec: rollup-update parked" "$*" >/dev/null 2>&1 || true
+    fi
+    rm -f "$ROLLUP_GH_ERRFILE"
+    exit 8
+}
+
+# Park with the multiple-open code: the single-open-roll-up contract is broken
+# and guessing could update/comment the wrong PR; operator must resolve.
+rollup_park_multiple() {
+    local count="$1" notifier
+    err "code_health:integration_rollup_multiple_open branch=$branch count=$count"
+    notifier="$(find_notify)"
+    if [ -n "$notifier" ]; then
+        bash "$notifier" "autospec: rollup-update parked" "multiple open roll-up PRs on $branch" >/dev/null 2>&1 || true
+    fi
+    exit 9
+}
+
+# Query the head+base-scoped open roll-up PR. Prints its number, or empty when
+# none exists. gh failure or a non-array payload goes through the park contract
+# (rollup_park, exit 8) — never the status-probe exit; >1 open PR parks exit 9.
+# Relies on bash dynamic scoping for $slug/$branch/$parent (same idiom op_sync
+# uses for $pref/$branch).
+query_single_open_rollup() {
+    local json count
+    json="$(rollup_gh pr list --repo "$slug" --head "$branch" --base "$parent" --state open --json number)" \
+        || rollup_park "rollup PR query failed branch=$branch"
+    printf '%s' "$json" | jq -e 'type == "array"' >/dev/null 2>&1 \
+        || rollup_park "rollup PR query returned invalid JSON branch=$branch"
+    count="$(printf '%s' "$json" | jq 'length')"
+    if [ "$count" -gt 1 ]; then
+        rollup_park_multiple "$count"
+    fi
+    printf '%s' "$json" | jq -r 'if length > 0 then .[0].number else empty end'
+}
+
+# Regenerate the PR body manifest wholesale between the manifest markers. The
+# fresh manifest is read from the file in $2 to keep awk free of shell-escaping
+# hazards. Splices ONLY when both markers are present and correctly ordered;
+# missing or unbalanced markers fail closed to the append-fresh-block path so
+# trailing body content is never silently truncated.
+regenerate_manifest_body() {
+    local body="$1" manifest_file="$2" begin_line end_line
+    begin_line="$(printf '%s\n' "$body" | grep -nF "$ROLLUP_MANIFEST_BEGIN" | head -1 | cut -d: -f1 || true)"
+    end_line="$(printf '%s\n' "$body" | grep -nF "$ROLLUP_MANIFEST_END" | head -1 | cut -d: -f1 || true)"
+    if [ -n "$begin_line" ] && [ -n "$end_line" ] && [ "$begin_line" -lt "$end_line" ]; then
+        printf '%s\n' "$body" | awk -v mfile="$manifest_file" '
+            /<!-- autospec-rollup-manifest:begin -->/ {
+                print
+                while ((getline line < mfile) > 0) print line
+                close(mfile)
+                skip = 1
+                next
+            }
+            /<!-- autospec-rollup-manifest:end -->/ { print; skip = 0; next }
+            skip { next }
+            { print }'
+    else
+        printf '%s\n\n%s\n' "$body" "$ROLLUP_MANIFEST_BEGIN"
+        cat "$manifest_file"
+        printf '%s\n' "$ROLLUP_MANIFEST_END"
+    fi
+}
+
+cmd_rollup_update() {
+    local branch pref slug parent rollup_json rollup_num
+    local issue_json issue_title issue_url origin_labels
+    local pr_json pr_title pr_url pr_adds pr_dels
+    local comments_json comment_bodies marker prior_issues landed_issues
+    local body_json body accumulated_pr_count diff_lines manifest_file new_body
+    local comment_body ci_json bad initial_body n create_err
+    local merged_issue_refs prior_line prior_title
+
+    branch="$(integration_branch)"
+    pref="$(parent_ref)"
+    slug="$(repo_slug)"
+    parent="${PARENT#origin/}"
+
+    fetch_parent_tip
+    branch_exists "$branch" || {
+        err "code_health:autonomous_integration_branch_missing branch=$branch"
+        exit 1
+    }
+    ensure_local_branch "$branch"
+
+    rollup_num="$(query_single_open_rollup)"
+
+    if [ -z "$rollup_num" ]; then
+        # First self-originated landing: create the roll-up PR. Label it for
+        # human review; this PR is NEVER auto-merged by any autospec path.
+        gh label create "autospec:needs-human" --repo "$slug" --color "d93f0b" --force >/dev/null 2>&1 || true
+        initial_body="$(printf 'Autonomous self-originated work accumulated on `%s`, awaiting human review. This PR is never auto-merged by autospec.\n\n%s\n%s\n' \
+            "$branch" "$ROLLUP_MANIFEST_BEGIN" "$ROLLUP_MANIFEST_END")"
+        # NEVER blind-retry `gh pr create`: a client-side failure can follow a
+        # server-side success, and a blind second create would open a duplicate
+        # roll-up PR. On failure, re-run the head+base-scoped open-PR query
+        # FIRST and only retry the create if it is still empty.
+        if ! create_err="$(gh pr create --repo "$slug" --head "$branch" --base "$parent" \
+                --title "Autonomous roll-up: $branch -> $parent" \
+                --body "$initial_body" \
+                --label "autospec:needs-human" 2>&1 >/dev/null)"; then
+            rollup_num="$(query_single_open_rollup)"
+            if [ -z "$rollup_num" ]; then
+                gh pr create --repo "$slug" --head "$branch" --base "$parent" \
+                    --title "Autonomous roll-up: $branch -> $parent" \
+                    --body "$initial_body" \
+                    --label "autospec:needs-human" >/dev/null 2>&1 \
+                    || rollup_park "rollup PR create failed twice branch=$branch create_stderr=${create_err:-<none>}"
+            else
+                info "roll-up PR #$rollup_num already existed after failed create (no duplicate created)"
+            fi
+        fi
+        if [ -z "$rollup_num" ]; then
+            rollup_num="$(query_single_open_rollup)"
+            [ -n "$rollup_num" ] || rollup_park "rollup PR missing after create branch=$branch"
+            info "created roll-up PR #$rollup_num ($branch -> $parent)"
+        fi
+    fi
+
+    # Landed-feature facts for the manifest + per-feature comment.
+    issue_json="$(rollup_gh issue view "$ISSUE" --repo "$slug" --json title,url,labels)" \
+        || rollup_park "issue view failed issue=$ISSUE"
+    issue_title="$(printf '%s' "$issue_json" | jq -r '.title // "unknown"')"
+    issue_url="$(printf '%s' "$issue_json" | jq -r '.url // ""')"
+    origin_labels="$(printf '%s' "$issue_json" | jq -r '[.labels[]?.name // empty | select(startswith("origin:") or startswith("tier:"))] | join(", ")')"
+    [ -n "$origin_labels" ] || origin_labels="unknown"
+
+    pr_json="$(rollup_gh pr view "$PR_NUM" --repo "$slug" --json title,url,additions,deletions)" \
+        || rollup_park "worker PR view failed pr=$PR_NUM"
+    pr_title="$(printf '%s' "$pr_json" | jq -r '.title // "unknown"')"
+    pr_url="$(printf '%s' "$pr_json" | jq -r '.url // ""')"
+    pr_adds="$(printf '%s' "$pr_json" | jq -r '.additions // 0')"
+    pr_dels="$(printf '%s' "$pr_json" | jq -r '.deletions // 0')"
+
+    # Prior landings are derived from durable GitHub comment markers, never
+    # in-memory state, so a crash/resume re-derives the identical manifest.
+    comments_json="$(rollup_gh pr view "$rollup_num" --repo "$slug" --json comments)" \
+        || rollup_park "rollup comments query failed pr=$rollup_num"
+    comment_bodies="$(printf '%s' "$comments_json" | jq -r '.comments[]?.body // ""')"
+    marker="<!-- autospec-rollup:issue-${ISSUE} -->"
+    prior_issues="$(printf '%s\n' "$comment_bodies" | grep -o 'autospec-rollup:issue-[0-9][0-9]*' | sed 's/autospec-rollup:issue-//' || true)"
+    # Durable SECOND source: "Closes #N" references recorded in the integration
+    # branch's commit history. A landing whose comment post parked (gh outage)
+    # has no marker yet, but its worker PR already merged — the union keeps it
+    # in every later manifest instead of silently dropping it.
+    merged_issue_refs="$(git log --format=%B "$pref..$branch" 2>/dev/null | grep -oE '[Cc]loses #[0-9]+' | grep -oE '[0-9]+' || true)"
+    landed_issues="$(printf '%s\n%s\n%s\n' "$prior_issues" "$merged_issue_refs" "$ISSUE" | grep -v '^$' | sort -un)"
+
+    # Cumulative stats vs the parent (same probes the status subcommand uses).
+    accumulated_pr_count="$(status_accumulated_pr_count "$pref" "$branch")"
+    diff_lines="$(status_diff_lines "$pref" "$branch")"
+
+    manifest_file="$(mktemp "${TMPDIR:-/tmp}/rollup-manifest.XXXXXX")"
+    {
+        printf '## Autonomous roll-up manifest\n\n'
+        printf -- '- **Integration branch:** `%s` -> `%s`\n' "$branch" "$parent"
+        printf -- '- **Accumulated merged PRs:** %s\n' "$accumulated_pr_count"
+        printf -- '- **Cumulative diff vs `%s`:** %s lines changed\n' "$parent" "$diff_lines"
+        printf -- '- **Landed issues:**\n'
+        for n in $landed_issues; do
+            if [ "$n" = "$ISSUE" ]; then
+                printf -- '  - #%s — %s (worker PR [#%s](%s), +%s/-%s) — origin: %s\n' \
+                    "$n" "$issue_title" "$PR_NUM" "$pr_url" "$pr_adds" "$pr_dels" "$origin_labels"
+            else
+                # Enrich with the title from the line following the durable
+                # comment marker ("### #N — Title") so the manifest alone
+                # lists titles; issues known only from git history fall back.
+                prior_line="$(printf '%s\n' "$comment_bodies" | grep -A1 -F "<!-- autospec-rollup:issue-${n} -->" | sed -n '2p' || true)"
+                prior_title="${prior_line#"### #${n} — "}"
+                if [ -n "$prior_title" ] && [ "$prior_title" != "$prior_line" ]; then
+                    printf -- '  - #%s — %s\n' "$n" "$prior_title"
+                else
+                    printf -- '  - #%s — see its roll-up comment below\n' "$n"
+                fi
+            fi
+        done
+    } > "$manifest_file"
+
+    body_json="$(rollup_gh pr view "$rollup_num" --repo "$slug" --json body)" \
+        || rollup_park "rollup body query failed pr=$rollup_num"
+    body="$(printf '%s' "$body_json" | jq -r '.body // ""')"
+    new_body="$(regenerate_manifest_body "$body" "$manifest_file")"
+    rm -f "$manifest_file"
+    rollup_gh pr edit "$rollup_num" --repo "$slug" --body "$new_body" >/dev/null \
+        || rollup_park "rollup body edit failed pr=$rollup_num"
+
+    # One idempotent per-feature comment, keyed by the issue marker: scan the
+    # existing comments BEFORE posting so a crash/resume never double-posts.
+    if printf '%s\n' "$comment_bodies" | grep -qF "$marker"; then
+        info "roll-up comment for issue #$ISSUE already present (skipping)"
+    else
+        comment_body="$(printf '%s\n### #%s — %s\n\n- Issue: [#%s](%s)\n- Worker PR: [#%s](%s)\n- Summary: %s\n- Origin tier/source: %s\n- Gate evidence: [%s/checks](%s/checks)\n- Diff: +%s/-%s\n' \
+            "$marker" "$ISSUE" "$issue_title" "$ISSUE" "$issue_url" "$PR_NUM" "$pr_url" "$pr_title" "$origin_labels" "$PR_NUM" "$pr_url" "$pr_adds" "$pr_dels")"
+        rollup_gh pr comment "$rollup_num" --repo "$slug" --body "$comment_body" >/dev/null \
+            || rollup_park "rollup comment post failed pr=$rollup_num issue=$ISSUE"
+        info "posted roll-up comment for issue #$ISSUE"
+    fi
+
+    # Red roll-up CI -> conductor pause signal on stdout (spec §Error handling).
+    ci_json="$(rollup_gh pr view "$rollup_num" --repo "$slug" --json statusCheckRollup)" \
+        || rollup_park "rollup CI query failed pr=$rollup_num"
+    # CheckRun items carry .conclusion; legacy StatusContext items carry .state
+    # (FAILURE/ERROR) — select both shapes so red commit statuses are not
+    # invisible.
+    bad="$(printf '%s' "$ci_json" | jq '[.statusCheckRollup // [] | .[] | select((.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED") or (.state=="FAILURE" or .state=="ERROR"))] | length' 2>/dev/null || printf '')"
+    case "$bad" in
+        ''|*[!0-9]*) rollup_park "rollup CI payload unparsable pr=$rollup_num" ;;
+    esac
+    if [ "$bad" -gt 0 ]; then
+        printf 'rollup-red\n'
+    fi
+}
+
 case "$COMMAND" in
     ensure) cmd_ensure ;;
     sync)   cmd_sync ;;
     reset)  cmd_reset ;;
     status) cmd_status ;;
+    rollup-update) cmd_rollup_update ;;
 esac
