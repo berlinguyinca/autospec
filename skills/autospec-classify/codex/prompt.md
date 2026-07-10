@@ -149,13 +149,12 @@ The block format must include the marker wrapper so later runs can replace it in
 ```markdown
 ## Safety review
 
+<!-- autospec-safety:begin -->
 - **decision:** `SAFETY_PASS`
 - **actor:** `<author>`
 - **trust:** `<trust>`
 - **matched rules:** `<rule ids or none>`
 - **reason:** <reason>
-
-<!-- autospec-safety:begin -->
 *Auto-reviewed by issue intent safety gate on YYYY-MM-DD.*
 <!-- autospec-safety:end -->
 ```

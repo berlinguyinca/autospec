@@ -20,6 +20,10 @@ repo=""
 batch_size=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SAFETY_GATE="$SCRIPT_DIR/issue-safety-gate.sh"
+[ -f "$SAFETY_GATE" ] || die "missing issue safety gate helper: $SAFETY_GATE"
+# shellcheck source=/dev/null
+. "$SAFETY_GATE"
 if [ -f "$SCRIPT_DIR/../../../scripts/autospec-runtime-config.sh" ]; then
     # shellcheck source=/dev/null
     . "$SCRIPT_DIR/../../../scripts/autospec-runtime-config.sh"
@@ -255,6 +259,13 @@ ready_paths_for_issue() {
 candidate_numbers="$(jq -r 'sort_by(.number) | .[].number' "$AUTO_FILE")"
 for number in $candidate_numbers; do
     issue_json="$(jq -c --argjson number "$number" '.[] | select(.number == $number)' "$AUTO_FILE")"
+    safety_gate_result="$(printf '%s\n' "$issue_json" | autospec_issue_safety_gate_result)"
+    if ! printf '%s\n' "$safety_gate_result" | jq -e '.ok == true' >/dev/null 2>&1; then
+        object="$(printf '%s\n' "$issue_json" | jq --argjson safety_gate "$safety_gate_result" '. + {reason:"safety_gate_failed", safety_gate:$safety_gate}')"
+        json_append "$BLOCKED_FILE" "$object"
+        continue
+    fi
+
     deps="$(printf '%s\n' "$issue_json" | extract_deps | sort -n | uniq)"
     unmet=""
     cycle_deps=""

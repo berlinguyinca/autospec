@@ -71,8 +71,33 @@ run_list_ready() {
     PATH="$MOCK_BIN:$PATH" bash "$SCRIPT" --repo "test/repo" --batch-size 10 2>/dev/null
 }
 
+safe_body() {
+    cat <<'EOF'
+## Safety review
+
+<!-- autospec-safety:begin -->
+- **decision:** `SAFETY_PASS`
+<!-- autospec-safety:end -->
+
+EOF
+}
+
+write_auto_issue() {
+    number="$1"
+    title="$2"
+    body="$3"
+    if [ "$#" -ge 4 ]; then
+        labels_json="$4"
+    else
+        labels_json='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
+    fi
+    jq -n --argjson number "$number" --arg title "$title" --arg body "$body" --argjson labels "$labels_json" \
+      '[{number:$number,title:$title,body:$body,labels:$labels}]' > "$FIXTURE_DIR/auto.json"
+}
+
 @test "prose 'depends on #N' outside ## Dependencies yields NO edge (issue is ready)" {
-    body="$(cat <<'EOF'
+    body="$(safe_body)
+$(cat <<'EOF'
 ## Summary
 
 A standalone feature.
@@ -86,8 +111,7 @@ Sequencing note: #101 depends on #102. Handle #101 before #102.
 - edit `foo/bar.sh`
 EOF
 )"
-    jq -n --arg body "$body" \
-      '[{number:100,title:"decoy",body:$body,labels:[]}]' > "$FIXTURE_DIR/auto.json"
+    write_auto_issue 100 "decoy" "$body"
 
     output="$(run_list_ready)"
     # #100 is ready (no real deps), not blocked on the phantom #102 edge.
@@ -98,7 +122,8 @@ EOF
 }
 
 @test "real 'Depends on issue #N' in ## Dependencies still parses (blocks); decoy prose ignored" {
-    body="$(cat <<'EOF'
+    body="$(safe_body)
+$(cat <<'EOF'
 ## Summary
 
 Depends on a real upstream issue.
@@ -116,8 +141,7 @@ Depends on issue #201
 - edit `baz/qux.sh`
 EOF
 )"
-    jq -n --arg body "$body" \
-      '[{number:200,title:"real-dep",body:$body,labels:[]}]' > "$FIXTURE_DIR/auto.json"
+    write_auto_issue 200 "real-dep" "$body"
 
     output="$(run_list_ready)"
     # Real dep #201 must block #200.
@@ -130,7 +154,8 @@ EOF
 }
 
 @test "multiple real deps in ## Dependencies all parse" {
-    body="$(cat <<'EOF'
+    body="$(safe_body)
+$(cat <<'EOF'
 ## Dependencies
 
 Depends on issue #301
@@ -141,8 +166,7 @@ Depends on issue #302
 - edit `a/b.sh`
 EOF
 )"
-    jq -n --arg body "$body" \
-      '[{number:300,title:"multi-dep",body:$body,labels:[]}]' > "$FIXTURE_DIR/auto.json"
+    write_auto_issue 300 "multi-dep" "$body"
 
     output="$(run_list_ready)"
     unmet="$(printf '%s' "$output" | jq -c '.blocked[] | select(.number==300) | .unmet_dependencies | sort')"
@@ -150,7 +174,8 @@ EOF
 }
 
 @test "no ## Dependencies section yields no edges (issue is ready)" {
-    body="$(cat <<'EOF'
+    body="$(safe_body)
+$(cat <<'EOF'
 ## Summary
 
 Fully standalone.
@@ -160,18 +185,91 @@ Fully standalone.
 - edit `c/d.sh`
 EOF
 )"
-    jq -n --arg body "$body" \
-      '[{number:400,title:"standalone",body:$body,labels:[]}]' > "$FIXTURE_DIR/auto.json"
+    write_auto_issue 400 "standalone" "$body"
 
     output="$(run_list_ready)"
     [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(400) != null')" = "true" ]
     [ "$(printf '%s' "$output" | jq -r '.blocked | map(.number) | index(400) != null')" = "false" ]
 }
 
-@test "autospec-run prompt refuses quarantined or unreviewed auto-implement issues" {
-    prompt="$REPO_ROOT/skills/autospec-run/SKILL.md"
-    grep -q "safety:reviewed" "$prompt"
-    grep -q "security:quarantined" "$prompt"
-    grep -q "autospec-safety:begin" "$prompt"
-    grep -q "refuse" "$prompt"
+@test "security-quarantined issue is blocked before ready queue" {
+    body="$(safe_body)
+$(cat <<'EOF'
+## Summary
+
+Unsafe issue must not reach the ready queue.
+
+## Implementation outline
+
+- edit `unsafe/quarantined.sh`
+EOF
+)"
+    labels='[{"name":"auto-implement"},{"name":"safety:reviewed"},{"name":"security:quarantined"}]'
+    write_auto_issue 500 "quarantined" "$body" "$labels"
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(500) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked | map(.number) | index(500) != null')" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==500) | .reason')" = "safety_gate_failed" ]
+}
+
+@test "unreviewed issue is blocked before ready queue" {
+    body="$(safe_body)
+$(cat <<'EOF'
+## Summary
+
+Missing label must fail closed.
+
+## Implementation outline
+
+- edit `unsafe/unreviewed.sh`
+EOF
+)"
+    labels='[{"name":"auto-implement"}]'
+    write_auto_issue 501 "unreviewed" "$body" "$labels"
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(501) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked | map(.number) | index(501) != null')" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==501) | .reason')" = "safety_gate_failed" ]
+}
+
+@test "missing safety markers are blocked before ready queue" {
+    body="$(cat <<'EOF'
+## Safety review
+
+- **decision:** `SAFETY_PASS`
+
+## Implementation outline
+
+- edit `unsafe/no-markers.sh`
+EOF
+)"
+    write_auto_issue 502 "no-markers" "$body"
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(502) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==502) | .reason')" = "safety_gate_failed" ]
+}
+
+@test "SAFETY_PASS outside markers is blocked before ready queue" {
+    body="$(cat <<'EOF'
+## Safety review
+
+- **decision:** `SAFETY_PASS`
+
+<!-- autospec-safety:begin -->
+- **decision:** `SAFETY_AMBIGUOUS`
+<!-- autospec-safety:end -->
+
+## Implementation outline
+
+- edit `unsafe/stale-pass.sh`
+EOF
+)"
+    write_auto_issue 503 "stale-pass" "$body"
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(503) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==503) | .reason')" = "safety_gate_failed" ]
 }

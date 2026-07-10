@@ -5,6 +5,13 @@ set -eu
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 RUN_STATE="$SCRIPT_DIR/run-state.sh"
+SAFETY_GATE="$SCRIPT_DIR/issue-safety-gate.sh"
+[ -f "$SAFETY_GATE" ] || {
+    printf 'claim-issue: missing issue safety gate helper: %s\n' "$SAFETY_GATE" >&2
+    exit 1
+}
+# shellcheck source=/dev/null
+. "$SAFETY_GATE"
 if [ -f "$SCRIPT_DIR/../../../scripts/autospec-runtime-config.sh" ]; then
     # shellcheck source=/dev/null
     . "$SCRIPT_DIR/../../../scripts/autospec-runtime-config.sh"
@@ -153,10 +160,18 @@ if [ -z "$worker_id" ]; then
     worker_id="${host}:${user}:shell:$$:$(date -u +%s)"
 fi
 
-labels="$(gh issue view "$issue" --repo "$repo" --json labels --jq '.labels[].name' 2>/dev/null || true)"
+issue_json="$(gh issue view "$issue" --repo "$repo" --json labels,body 2>/dev/null || printf '{}\n')"
+labels="$(printf '%s\n' "$issue_json" | jq -r '.labels[]?.name' 2>/dev/null || true)"
 if ! printf '%s\n' "$labels" | grep -Fx auto-implement >/dev/null 2>&1; then
     jq -n --argjson issue "$issue" --arg repo "$repo" --arg reason "not_auto_implement" \
         '{claimed:false, issue:$issue, repo:$repo, reason:$reason}'
+    exit 2
+fi
+
+safety_gate_result="$(printf '%s\n' "$issue_json" | autospec_issue_safety_gate_result)"
+if ! printf '%s\n' "$safety_gate_result" | jq -e '.ok == true' >/dev/null 2>&1; then
+    jq -n --argjson issue "$issue" --arg repo "$repo" --argjson safety_gate "$safety_gate_result" \
+        '{claimed:false, issue:$issue, repo:$repo, reason:"safety_gate_failed", safety_gate:$safety_gate}'
     exit 2
 fi
 

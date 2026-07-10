@@ -191,6 +191,20 @@ setup() {
     done
 }
 
+@test "safety review templates put passing decision inside marker block" {
+    for file in "$REPO_ROOT/skills/autospec-classify/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md" "$REPO_ROOT/skills/autospec-define/SKILL.md"; do
+        awk '
+          /autospec-safety:begin/ { in_block=1; next }
+          /autospec-safety:end/ { if (in_block && found) ok=1; in_block=0; next }
+          in_block && /SAFETY_PASS/ { found=1 }
+          END { exit(ok ? 0 : 1) }
+        ' "$file"
+    done
+
+    grep -q "both \`<!-- autospec-safety:begin -->\` and \`<!-- autospec-safety:end -->\`" "$REPO_ROOT/skills/autospec-run/SKILL.md"
+    grep -q "current marker-delimited block does not contain \`SAFETY_PASS\`" "$REPO_ROOT/skills/autospec-run/SKILL.md"
+}
+
 @test "docs mention issue intent safety gate" {
     grep -q "lint-issue-safety.sh" "$REPO_ROOT/docs/API_REFERENCE.md"
     grep -q "issue_intent_gate" "$REPO_ROOT/docs/CONFIG_REFERENCE.md"

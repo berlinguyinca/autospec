@@ -445,7 +445,7 @@ During the normal monitor loop:
 > 1. Read labels and body with `gh issue view ISSUE --json labels,body,title,author`.
 > 2. If labels include `security:quarantined`, comment `Refusing to process: issue is security-quarantined.` and skip the issue.
 > 3. If labels do not include `safety:reviewed`, comment `Refusing to process: missing safety:reviewed label. Run /autospec-classify.` and skip the issue.
-> 4. If the body lacks `<!-- autospec-safety:begin -->` and a `SAFETY_PASS` decision, comment `Refusing to process: missing passing Safety review block. Run /autospec-classify.` and skip the issue.
+> 4. If the body lacks exactly one marker-delimited `## Safety review` block with both `<!-- autospec-safety:begin -->` and `<!-- autospec-safety:end -->`, or the current marker-delimited block does not contain `SAFETY_PASS`, comment `Refusing to process: missing passing Safety review block. Run /autospec-classify.` and skip the issue.
 > 5. Only after these checks pass may the monitor remove `auto-implement` and add `in-progress-by-bot`.
 
 1. Run `list-ready-issues.sh --repo {repo} --batch-size "$effective_batch_size"`

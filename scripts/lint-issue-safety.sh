@@ -85,6 +85,7 @@ DEFAULT_POLICY = {
         {"id": "production-data-destruction", "patterns": [r"(?i)delete .*production", r"(?i)drop .*prod(uction)? .*database"]},
         {"id": "secret-exfiltration", "patterns": [r"(?i)(dump|print|exfiltrate|send).*secret", r"(?i)(aws|github|stripe).*token"]},
         {"id": "instruction-bypass", "patterns": [r"(?i)ignore (all )?(previous|system|developer|agent) instructions", r"(?i)bypass (ci|tests|hooks|review|guardian)"]},
+        {"id": "auth-backdoor", "patterns": [r"(?i)\b(auth|login|password|token|admin)[ -]?(backdoor|bypass)\b", r"(?i)\b(backdoor|bypass)\b.*\b(auth|login|password|token|admin)\b", r"(?i)\bmagic (token|password|login)\b"]},
         {"id": "destructive-shell", "patterns": [r"rm -rf /", r"(?i)curl .*\| *(sh|bash)"]},
     ],
     "ambiguous_patterns": [
@@ -93,16 +94,31 @@ DEFAULT_POLICY = {
         {"id": "production-or-infra-touch", "patterns": [r"(?i)(production|prod|billing|payments|migration|terraform|iam|kms)"]},
     ],
     "trusted_actors": [{"login": "berlinguyinca", "allowed_risk": ["test_data_reset", "fixture_regeneration", "local_dev_cleanup", "documented_migration_replay"]}],
-    "never_bypass": ["secret-exfiltration", "instruction-bypass", "production-data-destruction"],
+    "never_bypass": ["secret-exfiltration", "instruction-bypass", "production-data-destruction", "auth-backdoor"],
 }
+
+
+def normalize_rule_id(rule_id):
+    return str(rule_id).strip().replace("_", "-")
+
+
+def normalize_rule_rows(rows):
+    normalized = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        copy = dict(row)
+        copy["id"] = normalize_rule_id(copy.get("id", "unnamed-rule"))
+        normalized.append(copy)
+    return normalized
 
 
 def load_policy():
     policy = {
-        "block_patterns": list(DEFAULT_POLICY["block_patterns"]),
-        "ambiguous_patterns": list(DEFAULT_POLICY["ambiguous_patterns"]),
+        "block_patterns": normalize_rule_rows(DEFAULT_POLICY["block_patterns"]),
+        "ambiguous_patterns": normalize_rule_rows(DEFAULT_POLICY["ambiguous_patterns"]),
         "trusted_actors": list(DEFAULT_POLICY["trusted_actors"]),
-        "never_bypass": list(DEFAULT_POLICY["never_bypass"]),
+        "never_bypass": [normalize_rule_id(rule) for rule in DEFAULT_POLICY["never_bypass"]],
     }
     if not config_path.exists():
         return policy
@@ -113,10 +129,13 @@ def load_policy():
         gate = (data.get("safety") or {}).get("issue_intent_gate") or {}
         for key in ("block_patterns", "ambiguous_patterns", "trusted_actors"):
             if isinstance(gate.get(key), list):
-                policy[key].extend(gate[key])
+                if key.endswith("_patterns"):
+                    policy[key].extend(normalize_rule_rows(gate[key]))
+                else:
+                    policy[key].extend(gate[key])
         rules = gate.get("trusted_actor_rules") or {}
         if isinstance(rules.get("never_bypass"), list):
-            policy["never_bypass"].extend(rules["never_bypass"])
+            policy["never_bypass"].extend(normalize_rule_id(rule) for rule in rules["never_bypass"])
     except Exception:
         pass
     return policy
@@ -124,7 +143,7 @@ def load_policy():
 
 def add_matches(findings, severity, rows):
     for row in rows:
-        rid = str(row.get("id", "unnamed-rule"))
+        rid = normalize_rule_id(row.get("id", "unnamed-rule"))
         for pattern in row.get("patterns", []):
             try:
                 if re.search(pattern, text):
@@ -132,6 +151,18 @@ def add_matches(findings, severity, rows):
                     break
             except re.error:
                 findings.append({"severity": "block", "rule_id": "invalid-policy-regex", "pattern": str(pattern)})
+
+
+def dedupe_findings(findings):
+    seen = set()
+    unique = []
+    for finding in findings:
+        key = (finding.get("severity"), finding.get("rule_id"), finding.get("pattern"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(finding)
+    return unique
 
 
 def is_trusted_test_reset(policy):
@@ -149,12 +180,17 @@ policy = load_policy()
 findings = []
 add_matches(findings, "block", policy["block_patterns"])
 add_matches(findings, "ambiguous", policy["ambiguous_patterns"])
+findings = dedupe_findings(findings)
 
 if is_trusted_test_reset(policy):
     never = set(policy.get("never_bypass", []))
     blocking = [f for f in findings if f["severity"] == "block" and f["rule_id"] in never]
     if not blocking:
-        findings = [{"severity": "info", "rule_id": "trusted:test_data_reset", "pattern": actor}]
+        downgradable = {"production-or-infra-touch", "vague-data-cleanup"}
+        kept = [f for f in findings if f["rule_id"] not in downgradable]
+        if len(kept) != len(findings):
+            kept.append({"severity": "info", "rule_id": "trusted:test_data_reset", "pattern": actor})
+        findings = kept
 
 blocking = [f for f in findings if f["severity"] == "block"]
 ambiguous = [f for f in findings if f["severity"] == "ambiguous"]

@@ -578,13 +578,13 @@ labels and patches each body with a `## Model fit` block.
 > ```markdown
 > ## Safety review
 >
+> <!-- autospec-safety:begin -->
 > - **decision:** `SAFETY_PASS`
 > - **actor:** `<author>`
 > - **trust:** `<trust>`
 > - **matched rules:** `<rule ids or none>`
 > - **reason:** <reason>
 >
-> <!-- autospec-safety:begin -->
 > *Auto-reviewed by issue intent safety gate on YYYY-MM-DD.*
 > <!-- autospec-safety:end -->
 > ```

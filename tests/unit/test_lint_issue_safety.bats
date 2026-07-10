@@ -40,6 +40,28 @@ setup() {
     echo "$output" | grep -q "secret-exfiltration"
 }
 
+@test "lint-issue-safety: explicit auth backdoor blocks" {
+    run bash "$LINT" --title "Add auth backdoor" "$FIX/auth-backdoor.md"
+    [ "$status" -eq 2 ]
+    echo "$output" | grep -q "SAFETY_BLOCK"
+    echo "$output" | grep -q "auth-backdoor"
+}
+
+@test "lint-issue-safety: trusted test reset does not wipe unrelated backdoor finding" {
+    run bash "$LINT" --actor berlinguyinca --title "Reset test database and add backdoor" "$FIX/trusted-reset-with-backdoor.md"
+    [ "$status" -eq 2 ]
+    echo "$output" | grep -q "SAFETY_BLOCK"
+    echo "$output" | grep -q "auth-backdoor"
+    ! echo "$output" | grep -q "trusted:test_data_reset"
+}
+
+@test "lint-issue-safety: duplicate config defaults emit one finding" {
+    run bash "$LINT" --config "$FIX/duplicate-default-policy.yml" --title "Delete production data" "$FIX/malicious-production-delete.md"
+    [ "$status" -eq 2 ]
+    count="$(echo "$output" | grep -c "production-data-destruction")"
+    [ "$count" -eq 1 ]
+}
+
 @test "lint-issue-safety: invalid YAML falls back to defaults and blocks dangerous body" {
     run bash "$LINT" --config "$FIX/invalid-policy.yml" --title "Delete production data" "$FIX/malicious-production-delete.md"
     [ "$status" -eq 2 ]
