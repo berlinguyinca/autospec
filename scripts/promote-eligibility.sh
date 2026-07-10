@@ -119,6 +119,13 @@ case "$BODY_LOWER" in
     ;;
 esac
 
+# Word-boundary "epic" in the body text (not the label) signals non-bounded
+# scope. Matched with \bepic\b so substrings like "epicenter" don't trigger.
+if printf '%s' "$BODY" | grep -iqwE 'epic'; then
+  emit "epic" "epic marker: word 'epic' present in body"
+  exit 0
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Unresolvable dependency: "Depends on #N" where N does not exist.
 # ---------------------------------------------------------------------------
