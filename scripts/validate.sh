@@ -5138,12 +5138,13 @@ check_grow_run_contract() {
 # ungated — exactly the #1185/#1211 pattern where a green-in-isolation suite rots
 # because no validate check ever runs it. Mirrors check_autospec_fab_contract.
 check_grooming_contract() {
-    info "backlog-grooming: gate all seven grooming bats suites (ungated-tests regression #1185/#1211)"
+    info "backlog-grooming: gate all eight grooming bats suites (ungated-tests regression #1185/#1211)"
     local f name
     for f in \
         "tests/autospec/list-groomable.bats" \
         "tests/autospec/promote-eligibility.bats" \
         "tests/autospec/groom-validate.bats" \
+        "tests/autospec/groom-fill.bats" \
         "tests/autospec/autonomous-promote-open-issues.bats" \
         "skills/autospec-shared/tests/grooming-config.bats" \
         "skills/autospec-shared/tests/unit/grooming-govern.bats" \
