@@ -32,16 +32,29 @@ make_gh_stub() {
     local issue_file="$1" timeline_file="$2" comments_file="$3"
     cat > "$TMP/bin/gh" <<EOF
 #!/usr/bin/env bash
-# Find the request path among the args (may follow --paginate).
-path=""
+# Find the request path among the args; note whether --paginate was passed.
+path=""; paginate=0
 for a in "\$@"; do
     case "\$a" in
         repos/*) path="\$a" ;;
+        --paginate) paginate=1 ;;
     esac
 done
+emit() {
+    # Real \`gh api --paginate\` emits ONE JSON ARRAY PER PAGE as
+    # concatenated documents, NOT a single flattened array. Mirror that:
+    # the fixture is page 1; a .page2 sibling file (if present) is page 2,
+    # otherwise an empty page-2 array — so every paginated call exercises
+    # the resolver's multi-document normalization.
+    cat "\$1"
+    if [ "\$paginate" -eq 1 ]; then
+        printf '\n'
+        if [ -f "\$1.page2" ]; then cat "\$1.page2"; else printf '[]\n'; fi
+    fi
+}
 case "\$path" in
-    */timeline) cat "$timeline_file" ;;
-    */comments) cat "$comments_file" ;;
+    */timeline) emit "$timeline_file" ;;
+    */comments) emit "$comments_file" ;;
     *) cat "$issue_file" ;;
 esac
 EOF
@@ -87,19 +100,51 @@ write_empty() {
 }
 
 # ---------------------------------------------------------------------------
-# Pagination boundary: --paginate flattens multi-page timeline responses into
-# one array; an OLDER trusted label event followed by a NEWER untrusted
-# relabel must still resolve self (the untrusted actor's re-application is
-# authoritative as the LAST event, not the first).
+# Pagination boundary: gh api --paginate emits one JSON array per page; the
+# resolver must flatten pages and judge the LAST labeled event across ALL
+# pages. Negative: an older trusted label event (page 1) followed by a newer
+# untrusted relabel (page 2) resolves self. Positive: an older untrusted
+# event (page 1) superseded by a genuinely-last trusted event (page 2), with
+# the label currently present, resolves operator.
 # ---------------------------------------------------------------------------
 
-@test "older trusted label event followed by newer untrusted relabel resolves self" {
-    printf '[{"event":"labeled","label":{"name":"approved-by-operator"},"actor":{"login":"berlinguyinca"}},{"event":"labeled","label":{"name":"approved-by-operator"},"actor":{"login":"mallory-bot"}}]' > "$TMP/timeline.json"
+@test "older trusted label event on page 1, newer untrusted relabel on page 2 resolves self" {
+    printf '[{"event":"labeled","label":{"name":"approved-by-operator"},"actor":{"login":"berlinguyinca"}}]' > "$TMP/timeline.json"
+    printf '[{"event":"labeled","label":{"name":"approved-by-operator"},"actor":{"login":"mallory-bot"}}]' > "$TMP/timeline.json.page2"
     write_empty
     printf '{"number":11,"labels":[{"name":"origin:self"},{"name":"approved-by-operator"}],"user":{"login":"autospec-bot","type":"Bot"}}' > "$TMP/issue.json"
     make_gh_stub "$TMP/issue.json" "$TMP/timeline.json" "$(empty_json)"
 
     run bash "$PROVENANCE" resolve --issue 11 --repo "$REPO"
+    [ "$status" -eq 0 ]
+    [ "$output" = "self" ]
+}
+
+@test "trusted label event genuinely last on page 2 resolves operator" {
+    printf '[{"event":"labeled","label":{"name":"approved-by-operator"},"actor":{"login":"mallory-bot"}}]' > "$TMP/timeline.json"
+    printf '[{"event":"labeled","label":{"name":"approved-by-operator"},"actor":{"login":"berlinguyinca"}}]' > "$TMP/timeline.json.page2"
+    write_empty
+    printf '{"number":12,"labels":[{"name":"origin:self"},{"name":"approved-by-operator"}],"user":{"login":"autospec-bot","type":"Bot"}}' > "$TMP/issue.json"
+    make_gh_stub "$TMP/issue.json" "$TMP/timeline.json" "$(empty_json)"
+
+    run bash "$PROVENANCE" resolve --issue 12 --repo "$REPO"
+    [ "$status" -eq 0 ]
+    [ "$output" = "operator" ]
+}
+
+# ---------------------------------------------------------------------------
+# Revocation: GitHub keeps `labeled` events in the timeline after the label
+# is removed. A trusted labeled event with the label no longer present on
+# the issue must NOT count as approval.
+# ---------------------------------------------------------------------------
+
+@test "trusted labeled event with label since removed resolves self (revocation)" {
+    printf '[{"event":"labeled","label":{"name":"approved-by-operator"},"actor":{"login":"berlinguyinca"}}]' > "$TMP/timeline.json"
+    write_empty
+    printf '{"number":13,"labels":[{"name":"origin:self"}],"user":{"login":"autospec-bot","type":"Bot"}}' > "$TMP/issue.json"
+    make_gh_stub "$TMP/issue.json" "$TMP/timeline.json" "$(empty_json)"
+
+    run bash "$PROVENANCE" resolve --issue 13 --repo "$REPO"
     [ "$status" -eq 0 ]
     [ "$output" = "self" ]
 }
@@ -120,8 +165,8 @@ write_empty() {
 }
 
 # ---------------------------------------------------------------------------
-# Rule 2 (comment path): trusted-actor `^approve(d)?\b` comment resolves
-# operator, reusing lint-issue-safety.sh's trusted-actor parsing intent.
+# Rule 2 (comment path): an issue comment matching `^approve(d)?\b` authored
+# by a safety.issue_intent_gate.trusted_actors login resolves operator.
 # ---------------------------------------------------------------------------
 
 @test "approve comment from trusted actor resolves operator" {
@@ -221,6 +266,18 @@ EOF
 @test "missing --issue exits non-zero" {
     run bash "$PROVENANCE" resolve --repo "$REPO"
     [ "$status" -ne 0 ]
+}
+
+@test "non-numeric --issue dies with diagnostic, never prints self" {
+    run bash "$PROVENANCE" resolve --issue abc --repo "$REPO"
+    [ "$status" -eq 2 ]
+    printf '%s\n' "$output" | grep -q "must be numeric"
+}
+
+@test "malformed --repo dies with diagnostic, never prints self" {
+    run bash "$PROVENANCE" resolve --issue 1 --repo not-a-slug
+    [ "$status" -eq 2 ]
+    printf '%s\n' "$output" | grep -q "OWNER/REPO"
 }
 
 @test "unknown subcommand exits non-zero" {

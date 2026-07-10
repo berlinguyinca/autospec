@@ -4,9 +4,10 @@
 # docs/specs/2026-07-10-autonomous-integration-branch-design.md
 # (§Architecture item 3, §Data model, §Error handling).
 #
-# Reuses scripts/lint-issue-safety.sh's trusted-actor comment idiom
-# (`^approve(d)?\b` authored by a trusted-actor login) and mirrors
-# scripts/autonomous-guardrails.sh's subcommand/arg-parse/die idiom.
+# Approval comments are matched with `^approve(d)?\b` and validated against
+# the `safety.issue_intent_gate.trusted_actors` logins from the runtime
+# config; the script mirrors scripts/autonomous-guardrails.sh's
+# subcommand/arg-parse/die idiom.
 #
 # Provenance is durable by construction: labels + comments live on GitHub, so
 # a resumed conductor re-derives the identical answer; nothing dispatch
@@ -33,9 +34,10 @@ Prints exactly one of:
 Ordered rules (first match wins):
   1. origin:self label present AND no approval marker           -> self
   2. approval marker present                                    -> operator
-     (label `approved-by-operator` whose LAST `labeled` timeline
-      event actor is a trusted actor; OR an issue comment matching
-      ^approve(d)?\b authored by a trusted actor)
+     (label `approved-by-operator` CURRENTLY on the issue whose LAST
+      `labeled` timeline event actor is a trusted actor — removing
+      the label revokes; OR an issue comment matching ^approve(d)?\b
+      authored by a trusted actor)
   3. no origin:self label AND issue author is a human (not a bot) -> operator
   4. anything else (unknown author, missing labels, API failure/
      ambiguity)                                                  -> self
@@ -63,15 +65,19 @@ gh_api_json() {
     fi
 }
 
-# gh_api_json_paginated <path> — like gh_api_json but follows all pages
-# (--paginate flattens multi-page array responses into one JSON array), so a
-# forged/older label or comment event does not hide behind page 2+ of a
-# noisy issue's timeline/comments.
+# gh_api_json_paginated <path> — like gh_api_json but follows all pages, so
+# a forged/older label or comment event does not hide behind page 2+ of a
+# noisy issue's timeline/comments. `gh api --paginate` emits ONE JSON ARRAY
+# PER PAGE (concatenated documents, not a single flattened array), so the
+# output is normalized here with `jq -es 'add'` into one flat array; every
+# caller sees a single array regardless of page count. Returns "" on any
+# failure or non-array output.
 gh_api_json_paginated() {
-    local path="$1" out
+    local path="$1" out flat
     out="$(gh api --paginate "$path" 2>/dev/null)" || { printf ''; return 0; }
-    if is_valid_json "$out"; then
-        printf '%s' "$out"
+    flat="$(printf '%s' "$out" | jq -es 'add // []' 2>/dev/null)" || { printf ''; return 0; }
+    if printf '%s' "$flat" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        printf '%s' "$flat"
     else
         printf ''
     fi
@@ -108,12 +114,16 @@ has_label() {
     printf '%s' "$1" | jq -e --arg l "$2" '[.labels[]?.name // empty] | any(. == $l)' >/dev/null 2>&1
 }
 
-# approval_via_label <repo> <issue> <trusted-logins> — exit 0 if the LAST
-# `labeled` timeline event for `approved-by-operator` was actioned by a
-# trusted login; forgery-proof against a label re-applied by an
-# untrusted/bot actor.
+# approval_via_label <repo> <issue> <trusted-logins> <issue-json> — exit 0
+# only when the `approved-by-operator` label is CURRENTLY present on the
+# issue AND the LAST `labeled` timeline event for it was actioned by a
+# trusted login. The presence check makes label removal an effective
+# revocation (GitHub keeps `labeled` events in the timeline after the label
+# is removed); the last-event check is forgery-proof against a label
+# re-applied by an untrusted/bot actor.
 approval_via_label() {
-    local repo="$1" issue="$2" trusted="$3" timeline_json last_actor
+    local repo="$1" issue="$2" trusted="$3" issue_json="$4" timeline_json last_actor
+    has_label "$issue_json" "approved-by-operator" || return 1
     timeline_json="$(gh_api_json_paginated "repos/$repo/issues/$issue/timeline")"
     [ -n "$timeline_json" ] || return 1
     last_actor="$(printf '%s' "$timeline_json" | jq -r '
@@ -126,8 +136,8 @@ approval_via_label() {
 }
 
 # approval_via_comment <repo> <issue> <trusted-logins> — exit 0 if any
-# comment matching ^approve(d)?\b was authored by a trusted login. Reuses
-# lint-issue-safety.sh's trusted-actor comment-parsing intent.
+# comment matching ^approve(d)?\b was authored by a trusted login (the
+# trusted_actors logins come from safety.issue_intent_gate config).
 approval_via_comment() {
     local repo="$1" issue="$2" trusted="$3" comments_json candidate
     comments_json="$(gh_api_json_paginated "repos/$repo/issues/$issue/comments")"
@@ -155,6 +165,14 @@ cmd_resolve() {
     done
     [ -n "$issue" ] || die "resolve: --issue is required"
     [ -n "$repo" ] || die "resolve: --repo is required"
+    case "$issue" in
+        *[!0-9]*|'') die "resolve: --issue must be numeric, got: $issue" ;;
+    esac
+    case "$repo" in
+        */*/*|*/|/*|'') die "resolve: --repo must be OWNER/REPO, got: $repo" ;;
+        */*) : ;;
+        *) die "resolve: --repo must be OWNER/REPO, got: $repo" ;;
+    esac
 
     local issue_json
     issue_json="$(gh_api_json "repos/$repo/issues/$issue")"
@@ -172,7 +190,7 @@ cmd_resolve() {
     trusted="$(trusted_actor_logins)"
 
     local approved=1
-    if approval_via_label "$repo" "$issue" "$trusted"; then
+    if approval_via_label "$repo" "$issue" "$trusted" "$issue_json"; then
         approved=0
     elif approval_via_comment "$repo" "$issue" "$trusted"; then
         approved=0
