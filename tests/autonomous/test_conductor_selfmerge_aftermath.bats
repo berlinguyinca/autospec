@@ -53,11 +53,16 @@ setup() {
 
   cat > "$FAKE_BIN/gh" <<'EOF'
 #!/usr/bin/env bash
-case "${1:-}" in
-  issue) echo "[]" ;;
-  repo)  echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
-  *)     exit 0 ;;
-esac
+if [ "${1:-}" = "repo" ] && [ "${2:-}" = "view" ]; then
+  case "$*" in
+    *defaultBranchRef*) printf '%s\n' "${AUTOSPEC_TEST_DEFAULT_BRANCH:-main}" ;;
+    *) echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
+  esac
+elif [ "${1:-}" = "issue" ]; then
+  echo "[]"
+else
+  exit 0
+fi
 EOF
   chmod +x "$FAKE_BIN/gh"
 

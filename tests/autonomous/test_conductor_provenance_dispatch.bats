@@ -44,11 +44,16 @@ setup() {
 
   cat > "$FAKE_BIN/gh" <<'EOF'
 #!/usr/bin/env bash
-case "${1:-}" in
-  issue) echo "[]" ;;
-  repo)  echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
-  *)     exit 0 ;;
-esac
+if [ "${1:-}" = "repo" ] && [ "${2:-}" = "view" ]; then
+  case "$*" in
+    *defaultBranchRef*) printf '%s\n' "${AUTOSPEC_TEST_DEFAULT_BRANCH:-main}" ;;
+    *) echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
+  esac
+elif [ "${1:-}" = "issue" ]; then
+  echo "[]"
+else
+  exit 0
+fi
 EOF
   chmod +x "$FAKE_BIN/gh"
 
@@ -227,6 +232,23 @@ _run_cycle() {
   [ "$status" -eq 0 ]
   [ -f "$MODE_FILE" ]
   [ "$(jq -r '.kind // empty' "$MODE_FILE")" = "integration" ]
+}
+
+
+@test "non-main default branch: integration calls use derived parent trunk" {
+  _install_common_stubs
+  _install_provenance
+  _install_intbranch
+  _install_list_ready "101"
+  export AUTOSPEC_TEST_DEFAULT_BRANCH="trunk"
+
+  _run_cycle
+
+  [ "$status" -eq 0 ]
+  grep -q '^status --parent trunk' "$INT_CALL_LOG"
+  grep -q '^ensure --parent trunk' "$INT_CALL_LOG"
+  grep -q '^sync --parent trunk' "$INT_CALL_LOG"
+  ! grep -q -- '--parent main' "$INT_CALL_LOG"
 }
 
 # ── 2. Operator batch ─────────────────────────────────────────────────────────
