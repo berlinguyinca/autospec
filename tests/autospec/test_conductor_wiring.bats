@@ -1037,3 +1037,89 @@ YAML
   [ "$status" -eq 0 ]
   grep -q -- '--batch-size 4' "$list_ready_args_log"
 }
+
+# ── 23. Tier 1.5 grooming: telemetry appended per promoted issue ────────────
+@test "conductor: Tier 1.5 grooming appends telemetry record per promoted issue" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '\''{"tier":1.5,"action":"promote-open-issues","reason":"open issues"}\n'\'''
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  # Policy "off" — grooming still runs promotion (that's the promoter's own
+  # gate), but no governance tick should fire (asserted below via absence).
+  _install_stub "grooming-config.sh" 'case "${2:-}" in policy) printf "off\n";; *) printf "5\n";; esac'
+  local govern_log="$TEST_TMP/govern.log"
+  _install_stub "grooming-govern.sh" "printf 'govern-called %s\n' \"\$*\" >> '$govern_log'; printf '{}\n'"
+  _install_stub "grooming-observe.sh" 'printf '\''{"groomed_clean_merge_rate":0,"baseline_clean_merge_rate":0,"samples":0}\n'\'''
+
+  export AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD='printf '\''{"dry":false,"filed":2,"promoted":[101,102]}\n'\'''
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  local telemetry_file="$HOME/.autospec/grooming-telemetry.jsonl"
+  [ -f "$telemetry_file" ]
+  [ "$(wc -l < "$telemetry_file" | tr -d ' ')" = "2" ]
+  grep -q '"issue":101' "$telemetry_file"
+  grep -q '"issue":102' "$telemetry_file"
+  grep -q '"source":"grooming"' "$telemetry_file"
+  grep -q '"groomed":true' "$telemetry_file"
+  grep -q '"reverted":false' "$telemetry_file"
+  grep -q '"reopened":false' "$telemetry_file"
+
+  # policy=off — governance tick must NOT be invoked.
+  [ ! -f "$govern_log" ]
+}
+
+# ── 24. Tier 1.5 grooming: policy=auto invokes the governance tick ──────────
+@test "conductor: Tier 1.5 grooming policy=auto invokes govern tick, policy=off does not" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '\''{"tier":1.5,"action":"promote-open-issues","reason":"open issues"}\n'\'''
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  _install_stub "grooming-config.sh" 'case "${2:-}" in policy) printf "auto\n";; *) printf "5\n";; esac'
+  local govern_log="$TEST_TMP/govern.log"
+  _install_stub "grooming-govern.sh" "printf 'govern-called %s\n' \"\$*\" >> '$govern_log'; printf '{\"active\":[\"eligible-promote\"],\"action\":\"hold\",\"samples\":0}\n'"
+  local observe_log="$TEST_TMP/observe.log"
+  _install_stub "grooming-observe.sh" "printf 'observe-called %s\n' \"\$*\" >> '$observe_log'; printf '{\"groomed_clean_merge_rate\":0,\"baseline_clean_merge_rate\":0,\"samples\":0}\n'"
+
+  export AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD='printf '\''{"dry":false,"filed":1,"promoted":[201]}\n'\'''
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  [ -f "$govern_log" ]
+  grep -q 'govern-called tick --observed' "$govern_log"
+  grep -q -- '--min-samples' "$govern_log"
+  [ -f "$observe_log" ]
+  grep -q -- '--telemetry' "$observe_log"
+}

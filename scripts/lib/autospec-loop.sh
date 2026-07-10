@@ -1183,6 +1183,108 @@ fi'
             _promote_filed="$(printf '%s' "$_promote_out" | jq -r '.filed // .promoted // 0' 2>/dev/null || echo 0)"
             printf '[conductor] Tier 1.5 promotion result: dry=%s filed=%s
 '                 "$_promote_dry" "$_promote_filed" >&2
+
+            # ── Grooming telemetry + self-governance tick ─────────────────────
+            # The promoter (autonomous-promote-open-issues.sh) already owns the
+            # deterministic safety→classify→eligibility→promote/groom/split/hold
+            # pipeline and its own policy gate — the loop does NOT duplicate that
+            # logic. It only (a) records one telemetry line per promoted issue so
+            # grooming-observe.sh can compute a clean-merge rate later (reverted/
+            # reopened are unknown at promote time and are enriched elsewhere —
+            # emitted false here), and (b) ticks the self-governance ratchet
+            # (grooming-govern.sh) when policy resolves to auto. A non-auto
+            # policy must NOT tick (guarded below). Skipped entirely during the
+            # conductor's own --dry-run (nothing real happened this cycle).
+            #
+            # `needs-template` candidates: when the promoter routes an issue to
+            # `route:groom` (template-promote gate active), the prose contract
+            # for a future Tier-B fill-in is: dispatch a subagent to fill the
+            # template sections for that issue, re-run groom-validate.sh against
+            # the result (feeding findings back on failure, up to
+            # `budget.groom_attempts_per_issue` retries from grooming-config.sh),
+            # then hand the issue back to the promoter to finalize (promote or
+            # hold). This wiring task does not implement that dispatch loop.
+            if [ "$_dry" != "1" ]; then
+                local _groom_config_sh="${AUTOSPEC_GROOMING_CONFIG_BIN:-}"
+                if [ -z "$_groom_config_sh" ]; then
+                    if [ -f "${_sdir}/grooming-config.sh" ]; then
+                        _groom_config_sh="${_sdir}/grooming-config.sh"
+                    elif [ -f "${_sdir}/../skills/autospec-shared/scripts/grooming-config.sh" ]; then
+                        _groom_config_sh="${_sdir}/../skills/autospec-shared/scripts/grooming-config.sh"
+                    fi
+                fi
+                local _groom_observe_sh="${AUTOSPEC_GROOMING_OBSERVE_BIN:-}"
+                if [ -z "$_groom_observe_sh" ]; then
+                    if [ -f "${_sdir}/grooming-observe.sh" ]; then
+                        _groom_observe_sh="${_sdir}/grooming-observe.sh"
+                    elif [ -f "${_sdir}/../skills/autospec-shared/scripts/grooming-observe.sh" ]; then
+                        _groom_observe_sh="${_sdir}/../skills/autospec-shared/scripts/grooming-observe.sh"
+                    fi
+                fi
+                local _groom_govern_sh="${AUTOSPEC_GROOMING_GOVERN_BIN:-}"
+                if [ -z "$_groom_govern_sh" ]; then
+                    if [ -f "${_sdir}/grooming-govern.sh" ]; then
+                        _groom_govern_sh="${_sdir}/grooming-govern.sh"
+                    elif [ -f "${_sdir}/../skills/autospec-shared/scripts/grooming-govern.sh" ]; then
+                        _groom_govern_sh="${_sdir}/../skills/autospec-shared/scripts/grooming-govern.sh"
+                    fi
+                fi
+
+                local _groom_policy="auto"
+                if [ -n "$_groom_config_sh" ]; then
+                    _groom_policy="$(bash "$_groom_config_sh" --key policy 2>/dev/null || printf 'auto')"
+                    [ -n "$_groom_policy" ] || _groom_policy="auto"
+                fi
+
+                # Append one telemetry record per promoted issue (jq-built, never
+                # printf, so the JSON is always well-formed).
+                local _groom_telemetry="${AUTOSPEC_GROOMING_TELEMETRY:-${HOME}/.autospec/grooming-telemetry.jsonl}"
+                local _groom_promoted_json
+                _groom_promoted_json="$(printf '%s' "$_promote_out" | jq -c '.promoted // []' 2>/dev/null || printf '[]')"
+                local _groom_promoted_count
+                _groom_promoted_count="$(printf '%s' "$_groom_promoted_json" | jq 'length' 2>/dev/null || printf '0')"
+                case "$_groom_promoted_count" in ''|*[!0-9]*) _groom_promoted_count=0 ;; esac
+                if [ "$_groom_promoted_count" -gt 0 ] 2>/dev/null; then
+                    mkdir -p "$(dirname "$_groom_telemetry")" 2>/dev/null || true
+                    local _groom_ts
+                    _groom_ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo 'unknown')"
+                    local _gi=0
+                    while [ "$_gi" -lt "$_groom_promoted_count" ]; do
+                        local _gnum
+                        _gnum="$(printf '%s' "$_groom_promoted_json" | jq -r ".[$_gi]" 2>/dev/null || printf '')"
+                        if [ -n "$_gnum" ]; then
+                            jq -cn \
+                                --argjson issue "$_gnum" \
+                                --arg ts "$_groom_ts" \
+                                '{ts:$ts, issue:$issue, source:"grooming", groomed:true,
+                                  reverted:false, reopened:false, labels:[], verdict:null}' \
+                                >> "$_groom_telemetry" 2>/dev/null || true
+                        fi
+                        _gi=$((_gi + 1))
+                    done
+                    printf '[conductor] Tier 1.5 grooming telemetry: appended %s record(s) to %s\n' \
+                        "$_groom_promoted_count" "$_groom_telemetry" >&2
+                fi
+
+                # Self-governance tick — auto policy ONLY (must not tick on/off).
+                if [ "$_groom_policy" = "auto" ] && [ -n "$_groom_observe_sh" ] && [ -n "$_groom_govern_sh" ]; then
+                    local _groom_observed
+                    _groom_observed="$(bash "$_groom_observe_sh" --telemetry "$_groom_telemetry" 2>/dev/null || printf '')"
+                    if [ -n "$_groom_observed" ]; then
+                        local _groom_min_samples="${AUTOSPEC_GROOMING_MIN_SAMPLES:-20}"
+                        case "$_groom_min_samples" in ''|*[!0-9]*) _groom_min_samples=20 ;; esac
+                        local _groom_tick_out
+                        _groom_tick_out="$(bash "$_groom_govern_sh" tick \
+                            --observed "$_groom_observed" \
+                            --min-samples "$_groom_min_samples" 2>/dev/null || printf '')"
+                        if [ -n "$_groom_tick_out" ]; then
+                            printf '[conductor] Tier 1.5 grooming governance tick: %s\n' \
+                                "$_groom_tick_out" >&2
+                        fi
+                    fi
+                fi
+            fi
+
             if [ "$_promote_dry" = "false" ] || { [ "$_promote_filed" -gt 0 ] 2>/dev/null; }; then
                 _work_done=1
             else
