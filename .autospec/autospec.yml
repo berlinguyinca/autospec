@@ -99,6 +99,19 @@ advisor:
   budget:
     max_calls_per_issue: 3
     guidance_char_cap: 2800
+# Backlog auto-grooming: promotes/templates/splits stale or malformed open issues
+# toward auto-implement readiness, gated by the same safety/classify/eligibility
+# checks as manual triage. You set intent + bounds; autospec self-governs which
+# grooming actions are active. policy: auto | on | off.
+#   auto — autospec promotes/retracts grooming actions from its own telemetry,
+#          seeded conservatively, within budget.
+#   on   — grooming runs every Tier-1.5 cycle within budget (no self-tuning).
+#   off  — inert.
+grooming:
+  policy: auto
+  budget:
+    max_issues_per_cycle: 5
+    groom_attempts_per_issue: 2
 documentation:
   enabled: true
   audiences:
