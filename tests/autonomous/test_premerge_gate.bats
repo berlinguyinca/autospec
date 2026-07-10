@@ -637,3 +637,130 @@ EOF
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -qv "^merge-ok$"
 }
+
+# ─── 22-26. self-originated gate (issue #1742) ────────────────────────────────
+# New scripts/autonomous-guardrails.sh self-originated subcommand, wired into
+# autonomous-premerge-gate.sh mirroring the diff-guard block
+# (autonomous-premerge-gate.sh:~338-371): block self_originated_direct_merge +
+# autospec:needs-human label + exit 1. Per
+# docs/specs/2026-07-10-autonomous-integration-branch-design.md §Error handling
+# fenced-surfaces ordering, blast-radius quarantine evaluates FIRST and wins.
+
+# Stub gh for the self-originated gate's lookups:
+#   gh pr view <pr> --repo <repo> --json baseRefName        -> $base
+#   gh repo view <repo> --json defaultBranchRef              -> $default_branch
+#   gh pr view <pr> --repo <repo> --json closingIssuesReferences -> $issue
+#   gh api repos/<repo>/issues/<issue>[/comments|/timeline]   -> provenance lookups
+_stub_gh_self_originated() {
+    local base="$1" default_branch="$2" issue="$3" origin_self="$4" user_type="${5:-User}" user_login="${6:-a-human}"
+    local labels_json='[]'
+    if [ "$origin_self" = "1" ]; then
+        labels_json='[{"name":"origin:self"}]'
+    fi
+    cat > "$TMP/bin/gh" <<GHSTUB
+#!/usr/bin/env bash
+case "\$*" in
+    *"pr view"*"baseRefName"*)
+        printf '%s\n' "$base" ;;
+    *"repo view"*"defaultBranchRef"*)
+        printf '%s\n' "$default_branch" ;;
+    *"pr view"*"closingIssuesReferences"*)
+        printf '%s\n' "$issue" ;;
+    *"api"*"issues/$issue"*"comments"*)
+        printf '[]\n' ;;
+    *"api"*"issues/$issue"*"timeline"*)
+        printf '[]\n' ;;
+    *"api"*"issues/$issue"*)
+        printf '{"labels":%s,"user":{"login":"%s","type":"%s"}}\n' '$labels_json' "$user_login" "$user_type" ;;
+    *"pr edit"*)
+        printf 'labeled\n' ;;
+    *)
+        exit 0 ;;
+esac
+GHSTUB
+    chmod +x "$TMP/bin/gh"
+}
+
+@test "self-originated PR on protected parent (main) blocks with needs-human label" {
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+    export AUTOSPEC_CONFIG_FILE="$TMP/missing-autospec.yml"
+    _stub_gh_self_originated "main" "main" "777" "1"
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --pr 501 --repo acme/widgets \
+        --check-self-originated \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "block self_originated_direct_merge"
+}
+
+@test "self-originated PR based on the integration branch passes the check" {
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+    export AUTOSPEC_CONFIG_FILE="$TMP/missing-autospec.yml"
+    _stub_gh_self_originated "autospec/autonomous-main" "main" "777" "1"
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --pr 502 --repo acme/widgets \
+        --check-self-originated \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^merge-ok$"
+}
+
+@test "operator-originated PR based on the parent passes the check" {
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+    export AUTOSPEC_CONFIG_FILE="$TMP/missing-autospec.yml"
+    _stub_gh_self_originated "main" "main" "778" "0" "User" "alice"
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --pr 503 --repo acme/widgets \
+        --check-self-originated \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^merge-ok$"
+}
+
+@test "blast-radius quarantine on a fenced surface wins over the self-originated gate" {
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+    export AUTOSPEC_CONFIG_FILE="$TMP/missing-autospec.yml"
+    _stub_gh_self_originated "main" "main" "779" "1"
+
+    printf 'scripts/autonomous-example.sh\n' > "$TMP/changed-files.txt"
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --pr 504 --repo acme/widgets \
+        --check-self-originated \
+        --changed-files "$TMP/changed-files.txt" \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "quarantine fenced_surface"
+    printf '%s\n' "$output" | grep -qv "self_originated_direct_merge"
+}
+
+@test "self-originated PR with no linked issue fails closed and blocks" {
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+    export AUTOSPEC_CONFIG_FILE="$TMP/missing-autospec.yml"
+    _stub_gh_self_originated "main" "main" "" "1"
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --pr 505 --repo acme/widgets \
+        --check-self-originated \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "block self_originated_direct_merge"
+}
