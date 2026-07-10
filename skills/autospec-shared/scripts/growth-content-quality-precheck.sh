@@ -26,7 +26,11 @@ fi
 
 # --- citation presence -------------------------------------------------------
 if [ "$MIN_CITATIONS" -gt 0 ]; then
-  links="$(grep -Eoc 'https?://[^[:space:])]+' "$content" || true)"
+  # Count link OCCURRENCES, not matching lines: `grep -o` emits one match per
+  # line, `wc -l` totals them. (`grep -c` counts lines and would undercount
+  # multiple links on one line.) The subshell + `|| true` keeps a no-match
+  # (grep exit 1) from aborting under set -euo pipefail.
+  links="$( { grep -Eo 'https?://[^[:space:])]+' "$content" || true; } | wc -l | tr -d '[:space:]')"
   [ -n "$links" ] || links=0
   if [ "$links" -lt "$MIN_CITATIONS" ]; then
     echo "content-quality: $links citation(s) found, need >= $MIN_CITATIONS" >&2
