@@ -214,7 +214,7 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
   {"tier":"local|competitor","proposals_seen":N,"new_candidates":N,
    "filed":N,"dry":true|false,"reason":"...",
    "candidates":[{"title":"...","body":"...","severity":"...",
-     "labels":["auto-implement","ctx:64k","reasoning:medium","explore"],
+     "labels":["auto-implement","origin:self","ctx:64k","reasoning:medium","explore"],
      "roi_score":0.42,"evidence":"..."}]}
   ```
   `tier="competitor"` when `--research-sources` includes `internet`, else
@@ -236,9 +236,11 @@ Behavioural contract:
    otherwise `"local"`).
 2. Runs `explore-research-cycle.sh --stage full` exactly once with the resolved
    `--research-sources` and `--max-issues-per-round`.
-3. Converts verified survivors into `candidates[]` objects containing `title`, evidence-rich `body`, `severity`, `labels` (`auto-implement` + ctx/reasoning + `explore`), `roi_score`, and `evidence`; `len(candidates)` → `new_candidates`.
-4. Files each surviving proposal via `gh issue create --label auto-implement`
-   (best-effort; never aborts on `gh` failure); counts successes as `filed`.
+3. Converts verified survivors into `candidates[]` objects containing `title`, evidence-rich `body`, `severity`, `labels` (`auto-implement` + `origin:self` + ctx/reasoning + `explore`), `roi_score`, and `evidence`; `len(candidates)` → `new_candidates`.
+4. Files each surviving proposal via `gh issue create --label auto-implement --label origin:self`,
+   first running the idempotent, best-effort `gh label create origin:self --color 8250df --force`
+   guard so the label always exists (label-create failure never aborts filing); the `gh issue create`
+   call itself is also best-effort and never aborts on `gh` failure; counts successes as `filed`.
 5. Sets `dry=true` when `new_candidates==0`; sets `reason` accordingly.
 6. Prints the yield JSON (legacy summary keys plus `candidates[]`) to stdout and exits 0.
 

@@ -16,7 +16,7 @@ REPO_ROOT="${AUTOSPEC_REPO_ROOT:-}"
 MODE=""
 MODE_ARG=""
 DRY_RUN=0
-DOC_UPDATE_LABELS="${AUTOSPEC_DOC_UPDATE_LABELS:-auto-implement}"
+DOC_UPDATE_LABELS="${AUTOSPEC_DOC_UPDATE_LABELS:-auto-implement,origin:self}"
 
 usage() {
   cat <<'USAGE'
@@ -180,6 +180,8 @@ ${sources:-<none>}
     echo "doc-freshness-tier: gh CLI unavailable; cannot file doc-update issue" >&2
     return 1
   fi
+  # origin:self provenance (issue #1785): idempotent, best-effort label
+  gh label create origin:self --color 8250df --force >/dev/null 2>&1 || true
   IFS=',' read -r -a _labels <<< "$DOC_UPDATE_LABELS"
   for label in "${_labels[@]}"; do
     [ -n "$label" ] && labels_args+=(--label "$label")

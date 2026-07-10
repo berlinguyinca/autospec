@@ -1230,6 +1230,8 @@ if [ "$issue_policy_permits" -eq 1 ]; then
   (cd "$REPO" && gh label create quality-audit --color d4c5f9 --force >/dev/null 2>&1) || true
   (cd "$REPO" && gh label create auto-implement --color 0e8a16 --force >/dev/null 2>&1) || true
   (cd "$REPO" && gh label create autospec:v2-flow --color 1d76db --force >/dev/null 2>&1) || true
+  # origin:self provenance (issue #1785): idempotent, best-effort label
+  (cd "$REPO" && gh label create origin:self --color 8250df --force >/dev/null 2>&1) || true
   count="$(jq 'length' "$FINDINGS_JSON")"
   i=0
   created_issue_keys=""
@@ -1257,7 +1259,7 @@ if [ "$issue_policy_permits" -eq 1 ]; then
       continue
     fi
     body="$(printf '%s' "$finding" | jq -r '"## Goal\n" + .body + "\n\n## Acceptance criteria\n- [ ] Address `" + .dedupe_key + "` in `" + .file + "`.\n\n---\n- probe: " + .probe + "\n- classification: " + .classification + "\n- severity: " + .severity + "\n- dedupe_key: " + .dedupe_key')"
-    url="$(cd "$REPO" && gh issue create --title "$title" --body "$body" --label "quality-audit" --label "auto-implement" --label "autospec:v2-flow" 2>/dev/null || true)"
+    url="$(cd "$REPO" && gh issue create --title "$title" --body "$body" --label "quality-audit" --label "auto-implement" --label "autospec:v2-flow" --label "origin:self" 2>/dev/null || true)"
     if [ -n "$url" ]; then
       json_append "$ISSUES_ND" --arg title "$title" --arg url "$url" --arg key "$key" \
         '{title:$title,url:$url,dedupe_key:$key}'
