@@ -292,3 +292,13 @@ fenced_surfaces:
       - scripts/worktree-guard.sh
       - scripts/claim-guard.sh
       - scripts/autospec-autonomy-gate.sh
+telemetry:
+  # The ONLY operator-facing flag surface for autospec-db telemetry
+  # (spec: docs/specs/2026-07-10-autospec-db-telemetry-design.md §Configuration).
+  # Env vars are yaml-derived plumbing / CI-test overrides only. Credentials
+  # live in chmod-600 ~/.autospec/db.conf + db.env — never here.
+  enabled: true              # false => loader exports AUTOSPEC_DB_DISABLE=1
+  host_label: ''             # '' = short hostname; set per-site labels via env override until #1776 resolves machine scoping
+  spool_max_bytes: 10485760  # local spool cap; oldest lines dropped first
+  install:
+    db_module: prompt        # prompt | always | never — install.sh behavior for the optional autospec-db module
