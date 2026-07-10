@@ -37,7 +37,7 @@ advisor, test engineer. This is telemetry-plane engineering: the risks this team
 notice are emission blocking or failing a run, credential leakage into transcripts, SQL
 injection through event payloads, spool replay duplication, and clock skew across sites.
 Carry into child issues: bash 3.2 compatibility, `set -eu` discipline,
-subprocess-mocked bats tests (psql PATH shim, never a live database), no in-memory-only
+subprocess-mocked bats tests (binary PATH shim, never a live database), no in-memory-only
 state.
 
 ### Review counter-team
@@ -54,33 +54,37 @@ reachable Postgres server; agents at all sites need only OUTBOUND connectivity t
 (firewall-friendly; nothing listens on agent machines).
 
 ```
-autospec agents ──psql ingest() (emit-event.sh + local spool)──> Postgres
+autospec agents ──autospec-db binary (emit + spool, pgx)──> Postgres
                                                                   │ read-only role
                                               Grafana/Metabase ◄──┘  (v1 UI; custom
                                                                       GUI deferred)
 ```
 
-1. **Wire contract = one jsonb blob through one function.** Agents only ever execute
-   `SELECT autospec.ingest(:'payload'::jsonb)`. The function (owned by autospec-db,
-   SECURITY DEFINER) performs the idempotent insert internally; all typing and
-   normalization happens database-side (views in the autospec-db repo). Agents never
-   couple to typed columns or even the table, so the storage layer can migrate freely
-   without breaking in-field emitters. (Falsified alternative, do not implement: a raw
-   `INSERT ... ON CONFLICT` from the agent role — Postgres requires SELECT on the
-   arbiter index for `ON CONFLICT`, which the least-privilege agent role deliberately
-   lacks; verified against postgres:16.)
-2. **One shared helper** `skills/autospec-shared/scripts/emit-event.sh` is the only
-   integration point. Guards, in order: `AUTOSPEC_DB_DSN` unset → exit 0; `psql` not on
-   PATH → exit 0; call `ingest()` with the psql `:'payload'` variable idiom (payload is
-   BOUND, never spliced into SQL text — regex/quote/`$$` content in titles cannot
-   inject; NB psql only interpolates `:'var'` in stdin/`-f` input, NOT inside `-c`
-   strings, so the helper feeds its SQL via stdin); failure → append the event line to
-   `~/.autospec/db-spool.jsonl` and exit 0.
-3. **Spool drain** rides the next successful emit (or heartbeat tick — no new loop):
-   each event carries a client-generated `event_uuid`; the drain replays spool lines
-   through the same `ingest()` call, whose internal unique-index + `ON CONFLICT DO
-   NOTHING` makes replays harmless (at-least-once, idempotent; live emit and drain
-   share one code path).
+1. **Transport = the `autospec-db` Go binary** (static, embedded pgx driver — NO
+   `psql` or any other host dependency), shipped from the autospec-db repo via
+   GitHub Releases for darwin/arm64, darwin/amd64, linux/amd64, linux/arm64.
+   `autospec-db emit <kind> [key=value]...` builds the `autospec.events.v1` payload
+   (event_uuid, ts, session_id from the harness env fallback chain, host) and executes
+   `SELECT autospec.ingest($1::jsonb)` as a bound parameter — injection-free by
+   construction. The `ingest()` function (SECURITY DEFINER, owned by autospec-db)
+   performs the idempotent insert internally; agents never couple to typed columns or
+   even the table. (Historical falsified alternatives, do not implement: raw
+   `INSERT ... ON CONFLICT` from the agent role — requires SELECT on the arbiter which
+   the role lacks; psql-based emit — rejected for the host dependency and shell JSON
+   assembly fragility.)
+2. **One shared shim** `skills/autospec-shared/scripts/emit-event.sh` is the only
+   core-repo integration point (chokepoints source it and call
+   `emit_event <kind> [key=value]...`). Guards, in order: `AUTOSPEC_DB_DSN` unset →
+   exit 0; `autospec-db` binary not found (PATH, then
+   `~/.autospec/bin/autospec-db`) → exit 0; otherwise exec the binary with the
+   caller's args. The shim adds no logic beyond guard + dispatch — payload assembly,
+   timeout (2s), spool, and drain all live in the binary.
+3. **Spool + drain are binary-internal**: on any failure the binary appends the event
+   line to `~/.autospec/db-spool.jsonl` (flock-guarded — concurrent emitters from
+   parallel runs are safe) and exits 0; every successful emit opportunistically drains
+   the spool through the same `ingest()` path, idempotent via `event_uuid` +
+   `ON CONFLICT DO NOTHING` (at-least-once; live emit and drain share one code path).
+   `autospec-db drain` forces a drain manually.
 4. **Chokepoint wiring, never per-site.** Emission hooks into the shared lifecycle
    helpers that all runs already pass through — NOT into individual skills/scripts
    (the origin:self grep-audit across five sibling issues is the cautionary tale):
@@ -98,13 +102,20 @@ autospec agents ──psql ingest() (emit-event.sh + local spool)──> Postgre
    heartbeat is older than a threshold with no terminal event. Agents contain zero
    stall logic. Alerting (ntfy/Slack) attaches to that view in Grafana — out of scope
    for this repo.
-7. **Repo split.** This repo owns: the event payload contract (below), `emit-event.sh`,
-   chokepoint wiring, and tests. The standalone **autospec-db** repo owns: SQL
-   migrations (`events_raw`, `ingest()`, typed views, stall view), role bootstrap
-   (EXECUTE-only `autospec_emit`, read-only `autospec_read`), Grafana dashboard JSON, and an optional
-   `docker-compose.yml` (postgres + grafana) for adopters without a server. A custom
-   `autospec-gui` is DEFERRED until dashboards pinch (write operations like remote
-   stop would revive it).
+7. **Repo split.** This repo owns: the event payload contract (below), the
+   `emit-event.sh` shim, chokepoint wiring, and bats tests (which PATH-shim a stub
+   `autospec-db` binary — never the real one, never a live database). The standalone
+   **autospec-db** repo (Go module) owns: the `autospec-db` binary (`install`,
+   `migrate`, `emit`, `drain`, `sessions [--stalled]`, `doctor` subcommands), SQL
+   migrations embedded via embed.FS (`events_raw`, `ingest()`, typed views, stall
+   view; the `autospec.schema_migrations` tracking table and filenames are preserved
+   from the shell era so existing deployments no-op), role convergence (EXECUTE-only
+   `autospec_emit`, read-only `autospec_read`), goreleaser + CI release pipeline, a
+   thin `install.sh` bootstrap (platform-detect → fetch release binary →
+   `autospec-db install`), Grafana dashboard JSON, and an optional
+   `docker-compose.yml` for adopters without a server. A custom `autospec-gui` is
+   DEFERRED — `autospec-db sessions --stalled` covers terminal monitoring, Grafana
+   covers dashboards.
 
 ## Data model
 
@@ -133,8 +144,9 @@ autospec-db, not enforceable here.
 
 ## Error handling
 
-- DSN unset / psql absent / insert fails / spool unwritable → silent no-op or spool;
-  exit 0 in ALL cases. `emit-event.sh` may never propagate a non-zero exit to a caller.
+- DSN unset / binary absent / insert fails / spool unwritable → silent no-op or spool;
+  exit 0 in ALL cases. Neither the `emit-event.sh` shim nor `autospec-db emit` may ever
+  propagate a non-zero exit to a caller (the binary recovers panics and exits 0).
 - Spool grows unbounded only while the database is unreachable; drain truncates on
   success; a size cap (default 10 MB, `AUTOSPEC_DB_SPOOL_MAX_BYTES`) drops oldest lines
   first — telemetry is lossy-by-design, runs are not.
@@ -143,12 +155,15 @@ autospec-db, not enforceable here.
 
 ## Testing
 
-TDD, bats, psql mocked via PATH shim logging argv; no live database anywhere in CI.
-Required cases: unset-DSN emits zero psql invocations (the optionality proof); psql
-absent → exit 0; insert failure → line lands in spool, exit 0; drain replays with
-`ON CONFLICT` semantics (shim asserts event_uuid present); payload with quotes/`$$`/
-backslashes arrives bound, not spliced; DSN never appears in any output. New suites
-must be registered in a `scripts/validate.sh` check_* gate (enumerated, not globbed).
+Core repo: TDD, bats, the `autospec-db` binary mocked via a PATH-shim stub logging
+argv; no live database and no real binary anywhere in core CI. Required cases:
+unset-DSN → zero binary invocations (the optionality proof); binary absent → exit 0;
+each chokepoint passes the mapped kind + fields; DSN never appears in any output. New
+suites must be registered in a `scripts/validate.sh` check_* gate (enumerated, not
+globbed). autospec-db repo: Go unit tests (spool locking, payload construction,
+config parsing, env fallback chain) + integration tests against a real dockerized
+Postgres in CI (migrations parity incl. shell-era `schema_migrations` rows, ingest
+dedup, role blast radius, stall view).
 
 ## Out of scope
 
@@ -195,7 +210,7 @@ plugin, mirroring the existing `maybe_prompt_star` prompt discipline exactly
 
 ## Decomposition hints
 
-1. `emit-event.sh` + spool + contract doc + bats (foundation; everything depends on it)
+1. `emit-event.sh` shim (guard + dispatch to the binary) + contract doc + bats (foundation; everything depends on it — spool/payload/drain are binary-side, NOT core-side)
 2. heartbeat + run-state chokepoint wiring
 3. claim-guard + ledger-append chokepoint wiring
 4. `feature.described` + park/stop chokepoint wiring
