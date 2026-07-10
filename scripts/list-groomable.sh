@@ -85,8 +85,12 @@ if ! printf '%s' "$closed_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
 fi
 
 # ── Build closed-issue hash set (sha256 of title + first-200-body-chars) ───
+# Declared up front so the single EXIT trap can clean them even if `set -e` fires
+# between their mktemp below and the tail cleanup (leak-on-early-exit guard).
+dedup_skips_file=""
+kept_file=""
 closed_hashes_file="$(mktemp -t list-groomable-closed.XXXXXX)"
-trap 'rm -f "$closed_hashes_file"' EXIT
+trap 'rm -f "$closed_hashes_file" "$dedup_skips_file" "$kept_file"' EXIT
 
 # Compute the dedup hash for a single issue JSON object. Basis is
 # title + first-200-codepoints-of-body, built entirely in jq (`-j` = raw, no
@@ -110,7 +114,7 @@ while IFS= read -r closed_issue; do
 done > "$closed_hashes_file"
 
 # ── Classify + filter open issues via jq ────────────────────────────────────
-excluded_labels='["auto-implement","epic","paused-by-user","autospec:needs-human","wontfix","duplicate","security:quarantined"]'
+excluded_labels='["auto-implement","no-auto","epic","paused-by-user","autospec:needs-human","wontfix","duplicate","security:quarantined"]'
 
 filtered_json="$(printf '%s' "$open_json" | jq -c --argjson excluded "$excluded_labels" '
     def is_excluded_label:

@@ -32,6 +32,18 @@ JSON
   echo "$output" | jq -e '.candidates[] | select(.number==11).class == "needs-template"'
 }
 
+@test "excludes a no-auto-labeled issue (spec guardrail)" {
+  export GH_ISSUES_FIXTURE="$TMP/open.json"
+  cat > "$GH_ISSUES_FIXTURE" <<'JSON'
+[{"number":50,"title":"fix: keep","body":"aaaaaaaaaaaaaaaaaaaa","labels":[{"name":"needs-classify"}]},
+ {"number":51,"title":"fix: skip","body":"bbbbbbbbbbbbbbbbbbbb","labels":[{"name":"needs-classify"},{"name":"no-auto"}]}]
+JSON
+  run bash "$SCRIPT" --repo o/r --budget 10
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '[.candidates[].number] == [50]'
+  echo "$output" | jq -e '.skipped[] | select(.number==51).reason == "excluded-label"'
+}
+
 @test "budget caps candidate count, oldest-first" {
   export GH_ISSUES_FIXTURE="$TMP/open.json"
   cat > "$GH_ISSUES_FIXTURE" <<'JSON'
