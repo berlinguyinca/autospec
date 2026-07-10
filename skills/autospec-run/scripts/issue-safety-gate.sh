@@ -76,12 +76,24 @@ if begin < 0 or end < 0 or begin >= end:
     sys.exit(0)
 
 prefix = body[:begin]
-previous_headings = [line.strip() for line in prefix.splitlines() if line.startswith("## ")]
-if not previous_headings or previous_headings[-1] != "## Safety review":
+heading_start = None
+heading_end = None
+cursor = 0
+for raw_line in prefix.splitlines(keepends=True):
+    line_text = raw_line.rstrip("\r\n")
+    if line_text.startswith("## "):
+        if line_text.strip() == "## Safety review":
+            heading_start = cursor
+            heading_end = cursor + len(raw_line)
+        else:
+            heading_start = None
+            heading_end = None
+    cursor += len(raw_line)
+
+if heading_start is None or heading_end is None:
     result(False, "missing_safety_review_heading")
     sys.exit(0)
-safety_heading_start = prefix.rfind("## Safety review")
-safety_preamble = prefix[safety_heading_start + len("## Safety review"):]
+safety_preamble = prefix[heading_end:]
 if any(line.strip() for line in safety_preamble.splitlines()):
     result(False, "unexpected_safety_review_preamble")
     sys.exit(0)
@@ -111,7 +123,7 @@ title = str(issue.get("title") or "")
 author = issue.get("author") or {}
 actor = author.get("login") if isinstance(author, dict) else ""
 actor = str(actor or "")
-body_without_review = body[:safety_heading_start] + body[end + len(END):]
+body_without_review = body[:heading_start] + body[end + len(END):]
 with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
     handle.write(body_without_review)
     body_file = handle.name
