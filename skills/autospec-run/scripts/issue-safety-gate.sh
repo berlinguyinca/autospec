@@ -84,10 +84,12 @@ if not previous_headings or previous_headings[-1] != "## Safety review":
 block = body[begin + len(BEGIN):end]
 decision_prefix = "- **decision:**"
 decision_pass = "- **decision:** `SAFETY_PASS`"
-decision_lines = [
-    line for line in block.splitlines()
-    if line.strip().startswith(decision_prefix)
-]
+block_lines = [line.strip() for line in block.splitlines() if line.strip()]
+unexpected_lines = [line for line in block_lines if not line.startswith(decision_prefix)]
+if unexpected_lines:
+    result(False, "unexpected_safety_block_content")
+    sys.exit(0)
+decision_lines = [line for line in block_lines if line.startswith(decision_prefix)]
 if len(decision_lines) != 1:
     result(False, "missing_safety_pass")
     sys.exit(0)
