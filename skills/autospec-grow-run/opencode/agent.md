@@ -12,9 +12,8 @@ handle human approvals → measure and attribute.** This skill picks up
 where `/autospec-grow-define` stops.
 
 Manage your own context — never exceed 60%. Delegate to subagents whenever
-your harness supports it; do not draft outbound copy, run the content-quality
-review, or run the ethics gate directly in the main conversation when a
-subagent can do it.
+your harness supports it; do not draft outbound copy or run the ethics gate
+directly in the main conversation when a subagent can do it.
 
 <!-- autospec-block:startup-self-update SKILL_NAME=autospec-grow-run -->
 
@@ -108,7 +107,6 @@ skill start, before Phase R0.
 
 | Phase | Model tier | Why |
 |---|---|---|
-| R1 content-quality gate reviewer | `TIER_A` | Judgment-heavy: assessing genuine quality/value, not just mechanical density/citation counts. |
 | R2 outbound draft | `TIER_A` | Drafting on-topic, non-spammy outreach copy that respects each venue's self-promo rule requires judgment. |
 | R2/R3 ethics gate reviewer | `TIER_A` | Must actively look for disclosure gaps, spam framing, and policy violations — cheap models default to agreeing. |
 | R4 attribution synthesis / learnings memo | `TIER_A` | Turning raw ledger + metric deltas into a defensible per-lens attribution narrative is judgment-heavy. |
