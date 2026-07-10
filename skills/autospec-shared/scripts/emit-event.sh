@@ -20,8 +20,13 @@
 # "never alters a caller" guarantee. Each guard below is written to be safe
 # under the caller's own `set -u`.
 emit_event() {
-  # Guard 1: no DSN configured means telemetry is off — silent no-op.
-  if [ -z "${AUTOSPEC_DB_DSN:-}" ]; then
+  # Guard 1: no-op only when NEITHER AUTOSPEC_DB_DSN is set NOR
+  # ~/.autospec/db.env exists. The binary is the single config authority —
+  # `install` writes db.env without exporting the DSN into the session, so a
+  # DSN-only guard would silently drop telemetry from contexts where session
+  # bootstrap hasn't sourced db.env yet (cron, subagents, conductors). This
+  # guard must stay strictly weaker than the binary's own config check.
+  if [ -z "${AUTOSPEC_DB_DSN:-}" ] && [ ! -f "${HOME:-}/.autospec/db.env" ]; then
     return 0
   fi
 
