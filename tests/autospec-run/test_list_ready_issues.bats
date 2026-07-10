@@ -91,8 +91,9 @@ write_auto_issue() {
     else
         labels_json='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
     fi
-    jq -n --argjson number "$number" --arg title "$title" --arg body "$body" --argjson labels "$labels_json" \
-      '[{number:$number,title:$title,body:$body,labels:$labels}]' > "$FIXTURE_DIR/auto.json"
+    author_login="${5:-}"
+    jq -n --argjson number "$number" --arg title "$title" --arg body "$body" --argjson labels "$labels_json" --arg author_login "$author_login" \
+      '[{number:$number,title:$title,body:$body,labels:$labels} + (if $author_login != "" then {author:{login:$author_login}} else {} end)]' > "$FIXTURE_DIR/auto.json"
 }
 
 @test "prose 'depends on #N' outside ## Dependencies yields NO edge (issue is ready)" {
@@ -444,4 +445,23 @@ EOF
     [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(513) != null')" = "false" ]
     [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==513) | .reason')" = "safety_gate_failed" ]
     [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==513) | .safety_gate.reason')" = "current_body_safety_block" ]
+}
+
+@test "trusted actor test database reset can enter ready queue" {
+    body="$(safe_body)
+$(cat <<'EOF'
+## Summary
+
+Reset and repopulate the test database. Production is out of scope.
+
+## Implementation outline
+
+- edit `tests/fixtures/test-db-reset.sql`
+EOF
+)"
+    write_auto_issue 514 "trusted-test-reset" "$body" '[{"name":"auto-implement"},{"name":"safety:reviewed"}]' "berlinguyinca"
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(514) != null')" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked | map(.number) | index(514) != null')" = "false" ]
 }
