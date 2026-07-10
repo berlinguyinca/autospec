@@ -259,6 +259,9 @@ cleanup_tmp_worktree() {
         rm -rf "$CURRENT_TMP_WT"
     fi
     CURRENT_TMP_WT=""
+    if [ -n "${ROLLUP_GH_ERRFILE:-}" ]; then
+        rm -f "$ROLLUP_GH_ERRFILE"
+    fi
 }
 trap cleanup_tmp_worktree EXIT
 
@@ -477,13 +480,16 @@ find_notify() {
 # gh API failures in rollup-update: retry once, then park with notification
 # (spec §Error handling). The merge into the integration branch has already
 # happened; the comment retries on the next landing via the idempotency scan.
+# Attempt-2 stderr is preserved in a file (a subshell-set variable would be
+# lost) so rollup_park can surface the actual GitHub CLI failure.
+ROLLUP_GH_ERRFILE="${TMPDIR:-/tmp}/rollup-gh-stderr.$$"
 rollup_gh() {
     local out
     if out="$(gh "$@" 2>/dev/null)"; then
         printf '%s' "$out"
         return 0
     fi
-    if out="$(gh "$@" 2>/dev/null)"; then
+    if out="$(gh "$@" 2>"$ROLLUP_GH_ERRFILE")"; then
         printf '%s' "$out"
         return 0
     fi
@@ -491,21 +497,59 @@ rollup_gh() {
 }
 
 rollup_park() {
-    local notifier
-    err "code_health:integration_rollup_gh_failed $*"
+    local notifier gh_stderr=""
+    if [ -s "$ROLLUP_GH_ERRFILE" ]; then
+        gh_stderr="$(tr '\n' ' ' < "$ROLLUP_GH_ERRFILE" | cut -c1-300)"
+    fi
+    err "code_health:integration_rollup_gh_failed $*${gh_stderr:+ last_gh_stderr=$gh_stderr}"
     notifier="$(find_notify)"
     if [ -n "$notifier" ]; then
         bash "$notifier" "autospec: rollup-update parked" "$*" >/dev/null 2>&1 || true
     fi
+    rm -f "$ROLLUP_GH_ERRFILE"
     exit 8
 }
 
-# Regenerate the PR body manifest wholesale between the manifest markers.
-# Body arrives on stdin; the fresh manifest is read from the file in $2 to keep
-# awk free of shell-escaping hazards. Appends a marker block when absent.
+# Park with the multiple-open code: the single-open-roll-up contract is broken
+# and guessing could update/comment the wrong PR; operator must resolve.
+rollup_park_multiple() {
+    local count="$1" notifier
+    err "code_health:integration_rollup_multiple_open branch=$branch count=$count"
+    notifier="$(find_notify)"
+    if [ -n "$notifier" ]; then
+        bash "$notifier" "autospec: rollup-update parked" "multiple open roll-up PRs on $branch" >/dev/null 2>&1 || true
+    fi
+    exit 9
+}
+
+# Query the head+base-scoped open roll-up PR. Prints its number, or empty when
+# none exists. gh failure or a non-array payload goes through the park contract
+# (rollup_park, exit 8) — never the status-probe exit; >1 open PR parks exit 9.
+# Relies on bash dynamic scoping for $slug/$branch/$parent (same idiom op_sync
+# uses for $pref/$branch).
+query_single_open_rollup() {
+    local json count
+    json="$(rollup_gh pr list --repo "$slug" --head "$branch" --base "$parent" --state open --json number)" \
+        || rollup_park "rollup PR query failed branch=$branch"
+    printf '%s' "$json" | jq -e 'type == "array"' >/dev/null 2>&1 \
+        || rollup_park "rollup PR query returned invalid JSON branch=$branch"
+    count="$(printf '%s' "$json" | jq 'length')"
+    if [ "$count" -gt 1 ]; then
+        rollup_park_multiple "$count"
+    fi
+    printf '%s' "$json" | jq -r 'if length > 0 then .[0].number else empty end'
+}
+
+# Regenerate the PR body manifest wholesale between the manifest markers. The
+# fresh manifest is read from the file in $2 to keep awk free of shell-escaping
+# hazards. Splices ONLY when both markers are present and correctly ordered;
+# missing or unbalanced markers fail closed to the append-fresh-block path so
+# trailing body content is never silently truncated.
 regenerate_manifest_body() {
-    local body="$1" manifest_file="$2"
-    if printf '%s\n' "$body" | grep -qF "$ROLLUP_MANIFEST_BEGIN"; then
+    local body="$1" manifest_file="$2" begin_line end_line
+    begin_line="$(printf '%s\n' "$body" | grep -nF "$ROLLUP_MANIFEST_BEGIN" | head -1 | cut -d: -f1 || true)"
+    end_line="$(printf '%s\n' "$body" | grep -nF "$ROLLUP_MANIFEST_END" | head -1 | cut -d: -f1 || true)"
+    if [ -n "$begin_line" ] && [ -n "$end_line" ] && [ "$begin_line" -lt "$end_line" ]; then
         printf '%s\n' "$body" | awk -v mfile="$manifest_file" '
             /<!-- autospec-rollup-manifest:begin -->/ {
                 print
@@ -530,7 +574,8 @@ cmd_rollup_update() {
     local pr_json pr_title pr_url pr_adds pr_dels
     local comments_json comment_bodies marker prior_issues landed_issues
     local body_json body accumulated_pr_count diff_lines manifest_file new_body
-    local comment_body ci_json bad initial_body n notifier
+    local comment_body ci_json bad initial_body n create_err
+    local merged_issue_refs prior_line prior_title
 
     branch="$(integration_branch)"
     pref="$(parent_ref)"
@@ -544,21 +589,7 @@ cmd_rollup_update() {
     }
     ensure_local_branch "$branch"
 
-    rollup_json="$(rollup_gh pr list --repo "$slug" --head "$branch" --base "$parent" --state open --json number)" \
-        || rollup_park "rollup PR query failed branch=$branch"
-    require_json_array "rollup PR query" "$rollup_json"
-    # The contract is a SINGLE open roll-up PR. More than one means a prior
-    # invariant broke; guessing could update/comment the wrong PR, so park for
-    # operator resolution instead (peer-review must-fix).
-    if printf '%s' "$rollup_json" | jq -e 'length > 1' >/dev/null 2>&1; then
-        err "code_health:integration_rollup_multiple_open branch=$branch count=$(printf '%s' "$rollup_json" | jq 'length')"
-        notifier="$(find_notify)"
-        if [ -n "$notifier" ]; then
-            bash "$notifier" "autospec: rollup-update parked" "multiple open roll-up PRs on $branch" >/dev/null 2>&1 || true
-        fi
-        exit 9
-    fi
-    rollup_num="$(printf '%s' "$rollup_json" | jq -r 'if length > 0 then (sort_by(.number) | .[0].number) else empty end')"
+    rollup_num="$(query_single_open_rollup)"
 
     if [ -z "$rollup_num" ]; then
         # First self-originated landing: create the roll-up PR. Label it for
@@ -566,17 +597,30 @@ cmd_rollup_update() {
         gh label create "autospec:needs-human" --repo "$slug" --color "d93f0b" --force >/dev/null 2>&1 || true
         initial_body="$(printf 'Autonomous self-originated work accumulated on `%s`, awaiting human review. This PR is never auto-merged by autospec.\n\n%s\n%s\n' \
             "$branch" "$ROLLUP_MANIFEST_BEGIN" "$ROLLUP_MANIFEST_END")"
-        rollup_gh pr create --repo "$slug" --head "$branch" --base "$parent" \
-            --title "Autonomous roll-up: $branch -> $parent" \
-            --body "$initial_body" \
-            --label "autospec:needs-human" >/dev/null \
-            || rollup_park "rollup PR create failed branch=$branch"
-        rollup_json="$(rollup_gh pr list --repo "$slug" --head "$branch" --base "$parent" --state open --json number)" \
-            || rollup_park "rollup PR re-query failed branch=$branch"
-        require_json_array "rollup PR re-query" "$rollup_json"
-        rollup_num="$(printf '%s' "$rollup_json" | jq -r 'if length > 0 then (sort_by(.number) | .[0].number) else empty end')"
-        [ -n "$rollup_num" ] || rollup_park "rollup PR missing after create branch=$branch"
-        info "created roll-up PR #$rollup_num ($branch -> $parent)"
+        # NEVER blind-retry `gh pr create`: a client-side failure can follow a
+        # server-side success, and a blind second create would open a duplicate
+        # roll-up PR. On failure, re-run the head+base-scoped open-PR query
+        # FIRST and only retry the create if it is still empty.
+        if ! create_err="$(gh pr create --repo "$slug" --head "$branch" --base "$parent" \
+                --title "Autonomous roll-up: $branch -> $parent" \
+                --body "$initial_body" \
+                --label "autospec:needs-human" 2>&1 >/dev/null)"; then
+            rollup_num="$(query_single_open_rollup)"
+            if [ -z "$rollup_num" ]; then
+                gh pr create --repo "$slug" --head "$branch" --base "$parent" \
+                    --title "Autonomous roll-up: $branch -> $parent" \
+                    --body "$initial_body" \
+                    --label "autospec:needs-human" >/dev/null 2>&1 \
+                    || rollup_park "rollup PR create failed twice branch=$branch create_stderr=${create_err:-<none>}"
+            else
+                info "roll-up PR #$rollup_num already existed after failed create (no duplicate created)"
+            fi
+        fi
+        if [ -z "$rollup_num" ]; then
+            rollup_num="$(query_single_open_rollup)"
+            [ -n "$rollup_num" ] || rollup_park "rollup PR missing after create branch=$branch"
+            info "created roll-up PR #$rollup_num ($branch -> $parent)"
+        fi
     fi
 
     # Landed-feature facts for the manifest + per-feature comment.
@@ -601,7 +645,12 @@ cmd_rollup_update() {
     comment_bodies="$(printf '%s' "$comments_json" | jq -r '.comments[]?.body // ""')"
     marker="<!-- autospec-rollup:issue-${ISSUE} -->"
     prior_issues="$(printf '%s\n' "$comment_bodies" | grep -o 'autospec-rollup:issue-[0-9][0-9]*' | sed 's/autospec-rollup:issue-//' || true)"
-    landed_issues="$(printf '%s\n%s\n' "$prior_issues" "$ISSUE" | grep -v '^$' | sort -un)"
+    # Durable SECOND source: "Closes #N" references recorded in the integration
+    # branch's commit history. A landing whose comment post parked (gh outage)
+    # has no marker yet, but its worker PR already merged — the union keeps it
+    # in every later manifest instead of silently dropping it.
+    merged_issue_refs="$(git log --format=%B "$pref..$branch" 2>/dev/null | grep -oE '[Cc]loses #[0-9]+' | grep -oE '[0-9]+' || true)"
+    landed_issues="$(printf '%s\n%s\n%s\n' "$prior_issues" "$merged_issue_refs" "$ISSUE" | grep -v '^$' | sort -un)"
 
     # Cumulative stats vs the parent (same probes the status subcommand uses).
     accumulated_pr_count="$(status_accumulated_pr_count "$pref" "$branch")"
@@ -619,7 +668,16 @@ cmd_rollup_update() {
                 printf -- '  - #%s — %s (worker PR [#%s](%s), +%s/-%s) — origin: %s\n' \
                     "$n" "$issue_title" "$PR_NUM" "$pr_url" "$pr_adds" "$pr_dels" "$origin_labels"
             else
-                printf -- '  - #%s — see its roll-up comment below\n' "$n"
+                # Enrich with the title from the line following the durable
+                # comment marker ("### #N — Title") so the manifest alone
+                # lists titles; issues known only from git history fall back.
+                prior_line="$(printf '%s\n' "$comment_bodies" | grep -A1 -F "<!-- autospec-rollup:issue-${n} -->" | sed -n '2p' || true)"
+                prior_title="${prior_line#"### #${n} — "}"
+                if [ -n "$prior_title" ] && [ "$prior_title" != "$prior_line" ]; then
+                    printf -- '  - #%s — %s\n' "$n" "$prior_title"
+                else
+                    printf -- '  - #%s — see its roll-up comment below\n' "$n"
+                fi
             fi
         done
     } > "$manifest_file"
@@ -647,7 +705,10 @@ cmd_rollup_update() {
     # Red roll-up CI -> conductor pause signal on stdout (spec §Error handling).
     ci_json="$(rollup_gh pr view "$rollup_num" --repo "$slug" --json statusCheckRollup)" \
         || rollup_park "rollup CI query failed pr=$rollup_num"
-    bad="$(printf '%s' "$ci_json" | jq '[.statusCheckRollup // [] | .[] | select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED")] | length' 2>/dev/null || printf '')"
+    # CheckRun items carry .conclusion; legacy StatusContext items carry .state
+    # (FAILURE/ERROR) — select both shapes so red commit statuses are not
+    # invisible.
+    bad="$(printf '%s' "$ci_json" | jq '[.statusCheckRollup // [] | .[] | select((.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED") or (.state=="FAILURE" or .state=="ERROR"))] | length' 2>/dev/null || printf '')"
     case "$bad" in
         ''|*[!0-9]*) rollup_park "rollup CI payload unparsable pr=$rollup_num" ;;
     esac
