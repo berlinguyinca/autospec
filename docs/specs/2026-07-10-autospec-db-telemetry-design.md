@@ -157,6 +157,42 @@ custom autospec-gui; alert routing; NATS/SQS or any broker; multi-hub sync; GitH
 polling changes; retro-ingestion of historical ledgers (possible later via a one-shot
 backfill script in autospec-db).
 
+## Installer integration (autospec core install.sh)
+
+The repo-root `install.sh` offers the database module as a first-class optional
+plugin, mirroring the existing `maybe_prompt_star` prompt discipline exactly
+(TTY-guard via `/dev/tty` with `[ -t 0 ] && [ -t 1 ]` fallback, quiet under
+`CI`, quiet under `--dry-run`, env opt-out):
+
+1. **Detection.** The module counts as installed when `~/.autospec/db.env`
+   exists (configured) OR `~/.autospec/autospec-db/` exists (fetched). A
+   config-only state (`~/.autospec/db.conf` present but no `db.env`) means a
+   half-finished install: treat as installed for prompting purposes and print
+   the finish hint instead of re-prompting.
+2. **Fresh install (module absent).** Prompt
+   `Install the optional database telemetry module (autospec-db)? [y/N]`.
+   Default No; decline is remembered for the session only (no marker file — a
+   later re-install may re-ask). On yes, run the autospec-db one-line
+   installer (`curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec-db/main/install.sh | bash`)
+   and surface its output verbatim — including the edit-db.conf-and-re-run
+   message on first configuration. An installer failure warns and continues;
+   it NEVER fails the autospec install.
+3. **Update (`--update`) or module already installed.** No prompt. If the
+   module is installed, re-run its installer to converge to the latest version
+   (it is idempotent: refreshes the checkout, applies only new migrations,
+   converges roles, leaves passwords untouched). If absent during `--update`,
+   stay silent — updates never introduce new prompts.
+4. **Env controls.** `AUTOSPEC_NO_DB_PROMPT=1` suppresses the prompt;
+   `AUTOSPEC_INSTALL_DB=1` forces install/update without prompting (CI and
+   scripted installs); `AUTOSPEC_INSTALL_DB=0` forces skip even when installed
+   (leaves the module untouched, including no update).
+5. **Testing.** bats with a PATH-shim `curl` stub (never fetches) and a fake
+   `$HOME`: absent+decline → no fetch; absent+yes → installer invoked;
+   installed+`--update` → installer invoked without prompt; `AUTOSPEC_INSTALL_DB=0`
+   → untouched; non-TTY + no env → silent skip; installer failure → autospec
+   install still exits 0. Register the suite in a `scripts/validate.sh`
+   check_* gate (enumerated, not globbed).
+
 ## Decomposition hints
 
 1. `emit-event.sh` + spool + contract doc + bats (foundation; everything depends on it)
@@ -164,3 +200,4 @@ backfill script in autospec-db).
 3. claim-guard + ledger-append chokepoint wiring
 4. `feature.described` + park/stop chokepoint wiring
 5. session bootstrap sourcing of `~/.autospec/db.env` + docs
+6. install.sh optional-db-module prompt + auto-update (Installer integration section)
