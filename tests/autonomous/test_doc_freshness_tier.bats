@@ -42,6 +42,22 @@ EOF2
   [[ "$output" == *"scripts/new-flag.sh"* ]]
 }
 
+@test "doc-update issue filing stamps origin:self (issue #1785)" {
+  write_fake_drift '{"passed":false,"drift":[{"doc_file":"docs/user/api.md","heading":"Flags","matching_source_files":["scripts/new-flag.sh"],"reason":"flag changed"}],"missing_scope":[],"visual_stale":[],"example_stale":[],"skipped":false}' 1
+  cat > "$WORK/bin/gh" <<'EOF2'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_LOG"
+case "$*" in
+  *"issue create"*) echo "https://github.com/example/repo/issues/1"; exit 0 ;;
+esac
+exit 0
+EOF2
+  chmod +x "$WORK/bin/gh"
+  GH_LOG="$WORK/gh.log" run env PATH="$WORK/bin:$PATH" GH_LOG="$WORK/gh.log" AUTOSPEC_CHECK_DRIFT_SH="$WORK/bin/check-doc-drift.sh" bash "$SCRIPT" --working-tree --repo-root "$WORK/repo"
+  grep -q 'label create origin:self' "$WORK/gh.log"
+  tr '\n' ' ' < "$WORK/gh.log" | grep -qE 'issue create.*--label origin:self'
+}
+
 @test "changed docs run docs-as-tests and llms export regeneration" {
   write_fake_drift '{"passed":true,"drift":[],"missing_scope":[],"visual_stale":[],"example_stale":[],"skipped":false}' 0
   cat > "$WORK/bin/verify-examples.mjs" <<'EOF2'
