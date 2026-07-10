@@ -1249,6 +1249,7 @@ Each session derives its own `AUTOSPEC_WORKER_ID` if not overridden; the default
 | Variable | Default | Purpose |
 |---|---|---|
 | `AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS` | `0` (disabled) | Repo-wide active-worker cap. When active `in-progress-by-bot` issues meet the cap, `list-ready-issues.sh` returns an empty `.batch` while still reporting `.ready`. Use this to throttle one workstation or a cluster. |
+| `AUTOSPEC_RUN_ONLY_ISSUES` | unset (unconstrained) | Space-separated issue-number allowlist. When set and non-empty, `list-ready-issues.sh` scopes `.ready`/`.blocked`/`.batch` to only those issue numbers — set by the autonomous conductor's dispatch-time provenance split so the operator and self-originated batches each drain their own subset. Unset or empty keeps the full-queue scan. |
 | `AUTOSPEC_CLAIM_LEASE_SECONDS` | `10800` | Cross-machine claim lease TTL written into the GitHub run-state comment and used by `claim-issue.sh` stale-reclaim decisions. |
 | `AUTOSPEC_CLAIM_SETTLE_SECONDS` | `0.2` | Short post-upsert readback delay so simultaneous comment creates converge before a worker reports claim success. |
 | `AUTOSPEC_CLAIM_CONFIRM_READS` | `5` | Number of settled lowest-lock readbacks required before `claim-issue.sh` reports claim success. |
