@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "growth-outbound-draft",
+  "type": "object",
+  "required": ["issue", "platform", "target_url", "body", "self_promo_rule", "evidence"],
+  "properties": {
+    "issue": { "type": "integer" },
+    "platform": { "type": "string", "minLength": 1 },
+    "target_url": { "type": "string", "minLength": 1 },
+    "body": { "type": "string", "minLength": 1 },
+    "self_promo_rule": { "type": "string", "minLength": 1 },
+    "disclosure": { "type": "string" },
+    "evidence": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": true
+}
