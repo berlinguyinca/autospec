@@ -38,6 +38,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [/autospec autonomy scope](feedback_autospec_autonomy_scope.md) — auto-merge spec PRs, collapse low-stakes brainstorm to default-locks, surface only run/defer/refine + destructive-remote actions
 - [Skill per capability](feedback_autospec_skill_per_capability.md) — operator-facing capabilities ship as top-level /autospec-<verb> skills; inline sub-modes are convenience shortcuts only
 - [Autospec mode-dispatch must not shell out user text](feedback_autospec_no_shell_user_text.md) — Self-update/Stop mode sections must be pure prose; no bash heredocs of `{FEATURE_DESCRIPTION}`
+- [Refine-then-run workflow shorthand](feedback_refine_then_run_workflow.md) — user's normal autospec flow is refine, review checkpoint, then run; route imperative shorthand through autospec-listen
 
 # Quality / framework discipline
 
@@ -76,6 +77,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [Autospec tooling optimization — tracker #421](project_autospec_tooling_optimization.md) — convert LLM-driven steps to deterministic tools
 - [Autospec mutation testing — tracker #420](project_autospec_mutation_testing.md) — test-of-tests layer: mutation gate + assertion-density floor + negative-path-pair lint
 - [Babysit-tax → Autonomy Charter](project_babysit_tax_autonomy_charter.md) — session mining: operator confirmations are ~always rubber-stamps of the agent's own recommendation; build a standing recommendation=action charter, auto-chain define→run→explore, push notifications on async waits
+- [Tier 1.5 promotion activation](project_tier15_promotion_activation.md) — autospec-autonomous issue-promotion gates, stale-install caveats, and explore verifier bridge status
 
 <!-- Archived (shipped or session-historical; files kept on disk, removed from index):
 - project_2026_05_22_23_session_close.md — historical session close 2026-05-22→23
