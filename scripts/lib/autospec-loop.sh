@@ -583,16 +583,20 @@ _autospec_conductor_clear_self_pause() {
 # PR's status checks are fully settled with no failures. An empty rollup (no
 # CI configured) counts as green; a failed probe fails CLOSED (refuse the
 # merge — promote must never admin-merge red/unknown CI; the operator's
-# manual GitHub merge stays the explicit override).
+# manual GitHub merge stays the explicit override). Green is an ALLOWLIST of
+# explicitly-good terminal conclusions (SUCCESS/NEUTRAL/SKIPPED) — a
+# blocklist would fail open on enum values it doesn't know about
+# (STARTUP_FAILURE, STALE, future additions). conclusion==null (still
+# running, or a legacy status context reporting `state` instead) counts as
+# unsettled and refuses — fail closed.
 _autospec_conductor_rollup_ci_green() {
-    local repo="$1" pr="$2" rollup bad pending
+    local repo="$1" pr="$2" rollup not_green
     rollup="$(gh pr view "$pr" --repo "$repo" --json statusCheckRollup --jq '.statusCheckRollup // []' 2>/dev/null || true)"
     if [ -z "$rollup" ]; then
         return 1
     fi
-    bad="$(printf '%s' "$rollup" | jq '[.[] | select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED")] | length' 2>/dev/null || echo 1)"
-    pending="$(printf '%s' "$rollup" | jq '[.[] | select(.conclusion == null)] | length' 2>/dev/null || echo 1)"
-    [ "$bad" = "0" ] && [ "$pending" = "0" ]
+    not_green="$(printf '%s' "$rollup" | jq '[.[] | select((.conclusion=="SUCCESS" or .conclusion=="NEUTRAL" or .conclusion=="SKIPPED") | not)] | length' 2>/dev/null || echo 1)"
+    [ "$not_green" = "0" ]
 }
 
 # _autospec_conductor_handle_promote REPO INTBRANCH_SH ISSUE REPO_ROOT —
@@ -776,9 +780,14 @@ _autospec_conductor_handle_discard() {
         return 1
     fi
 
+    # Reopen loop tracks per-issue failures — the discard path is
+    # destructive, so a reopen/comment failure must NOT be swallowed and
+    # reported as success. A plain for-loop (not a piped while) keeps the
+    # counter out of a subshell; the manifest-derived tokens are numeric.
+    local reopen_failures=0
     if [ -n "$rolled_issues" ]; then
         local n existing_marker
-        printf '%s\n' "$rolled_issues" | while IFS= read -r n; do
+        for n in $rolled_issues; do
             [ -n "$n" ] || continue
             # Idempotency: a re-run (crash/resume, label re-applied) must not
             # duplicate the reopen comment for the same roll-up.
@@ -787,11 +796,31 @@ _autospec_conductor_handle_discard() {
             if [ "${existing_marker:-0}" != "0" ]; then
                 continue
             fi
-            gh issue reopen "$n" --repo "$repo" >/dev/null 2>&1 || true
-            gh issue comment "$n" --repo "$repo" \
+            if ! gh issue reopen "$n" --repo "$repo" >/dev/null 2>&1; then
+                printf '[conductor] discard: failed to reopen issue #%s\n' "$n" >&2
+                reopen_failures=$((reopen_failures + 1))
+                continue
+            fi
+            if ! gh issue comment "$n" --repo "$repo" \
                 --body "discarded-from-rollup: roll-up PR #${rollup_pr} was discarded via control-channel issue #${issue}; reopened for re-drain." \
-                >/dev/null 2>&1 || true
+                >/dev/null 2>&1; then
+                printf '[conductor] discard: failed to comment on reopened issue #%s\n' "$n" >&2
+                reopen_failures=$((reopen_failures + 1))
+            fi
         done
+    fi
+
+    if [ "$reopen_failures" -gt 0 ]; then
+        # Partial failure: do NOT claim success or close the control issue —
+        # re-firing autospec:discard retries; the per-issue idempotency
+        # marker above makes the retry skip the issues that did complete.
+        printf '[conductor] discard: %s issue reopen/comment failure(s) — leaving control issue #%s open for retry\n' \
+            "$reopen_failures" "$issue" >&2
+        gh issue comment "$issue" --repo "$repo" \
+            --body "discard: closed roll-up PR #${rollup_pr}, but ${reopen_failures} issue reopen/comment call(s) failed. Re-apply autospec:discard to retry the remainder (already-processed issues are skipped)." \
+            >/dev/null 2>&1 || true
+        _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:discard"
+        return 1
     fi
 
     _autospec_conductor_clear_self_pause "$repo_root"
