@@ -36,6 +36,12 @@ HUMAN_GATE_BLAST_RADIUS="${AUTOSPEC_HUMAN_GATE_BLAST_RADIUS:-4}"
 PRIORITY_QUEUE_OUT="${AUTOSPEC_PRIORITY_QUEUE_OUT:-}"
 DRY_CYCLES_THRESHOLD="${AUTOSPEC_AUTO_DRY_CYCLES:-2}"
 DISCOVERY_TIERS_DISABLED="${AUTOSPEC_DISABLE_DISCOVERY_TIERS:-0}"
+GROWTH_ENABLED="${AUTOSPEC_GROWTH_ENABLED:-0}"
+GROWTH_OUTBOUND_PENDING=""
+GROWTH_BACKLOG=""
+GROWTH_BACKLOG_FLOOR="${AUTOSPEC_GROWTH_BACKLOG_FLOOR:-3}"
+GROWTH_MEASURE_DUE="0"
+TIERG_DRY_CYCLES=0
 
 usage() {
     cat <<'USAGE'
@@ -56,6 +62,12 @@ Options:
   --value-floor N             Idle when top score is below this floor (default 1).
   --recent-decay N            Recent-touch multiplier (default 0.5).
   --human-gate-blast-radius N Route at/above this blast radius to human gate.
+  --growth-enabled 0|1        Enable capability-gated GROWTH tiers 5-7 (default 0).
+  --growth-outbound-pending N Pending outbound draft/approval item count.
+  --growth-backlog N          Current growth-artifact backlog count.
+  --growth-backlog-floor M    Backlog floor below which growth define runs (default 3).
+  --growth-measure-due 0|1    Growth measure interval elapsed.
+  --tierg-dry-cycles N        Consecutive growth-define dry cycles (default 0).
   -h, --help                  Print this help.
 
 Env:
@@ -64,9 +76,11 @@ Env:
                                   the Tier-1 dry threshold.
   AUTOSPEC_PRIORITY_CANDIDATES     Candidate JSON/JSONL file for value-gated scoring.
   AUTOSPEC_VALUE_FLOOR             Priority floor below which conductor idles.
+  AUTOSPEC_GROWTH_ENABLED          Enable capability-gated GROWTH tiers 5-7 (default 0).
+  AUTOSPEC_GROWTH_BACKLOG_FLOOR    Growth backlog floor (default 3).
 
 Output (stdout):
-  {"tier":<0|1|1.5|2|3|4>,"action":"<string>","reason":"<string>"}
+  {"tier":<0|1|1.5|2|3|4|5|6|7>,"action":"<string>","reason":"<string>"}
 USAGE
 }
 
@@ -91,6 +105,12 @@ while [ "$#" -gt 0 ]; do
         --value-floor)        VALUE_FLOOR="$2"; shift 2 ;;
         --recent-decay)       RECENT_DECAY="$2"; shift 2 ;;
         --human-gate-blast-radius) HUMAN_GATE_BLAST_RADIUS="$2"; shift 2 ;;
+        --growth-enabled)          GROWTH_ENABLED="$2"; shift 2 ;;
+        --growth-outbound-pending) GROWTH_OUTBOUND_PENDING="$2"; shift 2 ;;
+        --growth-backlog)          GROWTH_BACKLOG="$2"; shift 2 ;;
+        --growth-backlog-floor)    GROWTH_BACKLOG_FLOOR="$2"; shift 2 ;;
+        --growth-measure-due)      GROWTH_MEASURE_DUE="$2"; shift 2 ;;
+        --tierg-dry-cycles)        TIERG_DRY_CYCLES="$2"; shift 2 ;;
         -h|--help)            usage; exit 0 ;;
         *) printf 'autonomous-waterfall: unknown arg: %s\n' "$1" >&2; usage; exit 2 ;;
     esac
@@ -232,6 +252,28 @@ fi
 if [ "$TIER4_DRY_CYCLES" -lt "$DRY_CYCLES_THRESHOLD" ] 2>/dev/null; then
     emit 4 "run-explore-once-internet" "Tier 3 dry; running internet/operator-polish discovery (tier4-dry-cycles=$TIER4_DRY_CYCLES)"
     exit 0
+fi
+
+# ── Growth tiers (capability-gated on .autospec/growth.yml; the caller sets
+# --growth-enabled). Appended after Tier 4 so Tiers 0–4 keep their numbers.
+# growth:artifact IMPLEMENTATION already competes in Tier 1 (auto-implement);
+# these tiers are the growth META-work (outbound service, candidate research,
+# measurement) that fills otherwise-idle cycles.
+if [ "$GROWTH_ENABLED" = "1" ]; then
+    if [ -n "$GROWTH_OUTBOUND_PENDING" ] && [ "$GROWTH_OUTBOUND_PENDING" -gt 0 ] 2>/dev/null; then
+        emit 5 "service-growth-outbound" "growth: $GROWTH_OUTBOUND_PENDING outbound draft/approval item(s) pending"
+        exit 0
+    fi
+    if [ -n "$GROWTH_BACKLOG" ] && \
+            [ "$GROWTH_BACKLOG" -lt "$GROWTH_BACKLOG_FLOOR" ] 2>/dev/null && \
+            [ "$TIERG_DRY_CYCLES" -lt "$DRY_CYCLES_THRESHOLD" ] 2>/dev/null; then
+        emit 6 "run-growth-define" "growth: artifact backlog=$GROWTH_BACKLOG below floor=$GROWTH_BACKLOG_FLOOR; researching candidates (tierg-dry-cycles=$TIERG_DRY_CYCLES)"
+        exit 0
+    fi
+    if [ "$GROWTH_MEASURE_DUE" = "1" ]; then
+        emit 7 "run-growth-measure" "growth: measure interval elapsed; measuring and re-weighting"
+        exit 0
+    fi
 fi
 
 # Never-idle contract (docs/specs/2026-07-06-autospec-autonomous-platform-design.md,
