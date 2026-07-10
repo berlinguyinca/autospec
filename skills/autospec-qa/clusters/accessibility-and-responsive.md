@@ -65,3 +65,30 @@ matches the adopted design language. It runs only when the repo has a root
 4. **Heal** — the existing autospec-qa self-heal loop files/fixes the blocking
    `visual_fidelity` findings like any other category and re-judges until they
    clear. This makes the adopted DESIGN.md *enforced*, not decorative.
+
+## Baseline design gates (rules.yaml — enforced when the repo opts in)
+
+Runs only when the repo has `.autospec/design-gates.yml` (a baseline-pack
+consumer mapping machine-checkable rule ids to local commands). Otherwise skip —
+nothing is configured to enforce.
+
+1. **Execute** the deterministic gates and produce the evidence report:
+   ```bash
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-design-gates.sh" \
+     --repo-root .
+   ```
+   The runner writes `.autospec/reports/design-gates.{json,md}` and prints a
+   single authoritative status line
+   (`autospec-design-gates: PASS|FAIL|SKIPPED (…)`). SKIPPED is a clean pass.
+2. **Shape findings** from `.autospec/reports/design-gates.json`:
+   - each `gates[]` entry with `status:"fail"` → one qa-verdict finding with
+     `category:"design_gate"`, `release_blocking` = its `blocking` flag, and the
+     gate's `output_tail` as evidence;
+   - `status:"unmapped"` entries with `severity:"blocker"` → one advisory
+     (non-blocking) finding listing the unmapped ids, so coverage gaps stay
+     visible without wedging the loop.
+3. **Judge the critic checklist** — for UI-touching PRs, use the report's
+   `critic_checklist` (the pack's `check: vlm|review` rules) and
+   `pack_quality_gates` as the rubric for the vision/critique pass above; cite
+   the rule id in any finding it produces. Default to PARTIAL when unsure,
+   mirroring the visual-fidelity loop.

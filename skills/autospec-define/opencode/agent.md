@@ -540,7 +540,7 @@ labels and patches each body with a `## Model fit` block.
 > ### Issue intent safety gate
 >
 > Before adding or preserving `auto-implement`, run the issue intent safety
-> gate with `scripts/lint-issue-safety.sh`:
+> gate with `lint-issue-safety.sh`:
 >
 > ```bash
 > _body_file="$(mktemp)"

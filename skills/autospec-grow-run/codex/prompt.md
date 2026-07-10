@@ -8,9 +8,8 @@ handle human approvals → measure and attribute.** This skill picks up
 where `/autospec-grow-define` stops.
 
 Manage your own context — never exceed 60%. Delegate to subagents whenever
-your harness supports it; do not draft outbound copy, run the content-quality
-review, or run the ethics gate directly in the main conversation when a
-subagent can do it.
+your harness supports it; do not draft outbound copy or run the ethics gate
+directly in the main conversation when a subagent can do it.
 
 <!-- autospec-block:startup-self-update SKILL_NAME=autospec-grow-run -->
 
@@ -45,6 +44,28 @@ normal pipeline:
 
 If no install path is detected, print `Self-update: no installed copy of
 autospec-grow-run found; run install.sh first.` and exit.
+
+## Run modes
+
+The invocation argument (after the `update` check above) selects which phases
+run. Match the argument case-insensitively, ignoring surrounding whitespace:
+
+- **`outbound`** (argument matches `^\s*outbound\s*$`) — **outbound-only
+  mode**: run R0 (detect) then R2 (draft → gate → queue) and R3 (handle
+  approvals). **Skip R1 and R4.** The artifact drain (R1) is the autonomous
+  conductor's Tier 1 job, and measurement (R4) is its own cadence-gated tier;
+  re-running either here would duplicate that work.
+- **`measure`** (argument matches `^\s*measure\s*$`) — **measure-only
+  mode**: run R0 (detect) then R4 (measure & attribute). **Skip R1, R2, and
+  R3.** This is what the conductor's cadence-gated measure tier invokes.
+- **anything else / no argument** — **full pipeline**: R0 → R1 → R2 → R3 → R4,
+  exactly as described below.
+
+Resolve the mode once in R0 and hold it for the run. Each phase below names
+the modes it runs in; when a phase is skipped for the active mode, do not
+emit its ledger lines or notifications — proceed to the next phase it applies
+to. The conductor's outbound and measure tiers rely on these narrow modes so
+each tier does exactly its own slice of work.
 
 ## Required capabilities & harness adapter
 
@@ -104,7 +125,6 @@ skill start, before Phase R0.
 
 | Phase | Model tier | Why |
 |---|---|---|
-| R1 content-quality gate reviewer | `TIER_A` | Judgment-heavy: assessing genuine quality/value, not just mechanical density/citation counts. |
 | R2 outbound draft | `TIER_A` | Drafting on-topic, non-spammy outreach copy that respects each venue's self-promo rule requires judgment. |
 | R2/R3 ethics gate reviewer | `TIER_A` | Must actively look for disclosure gaps, spam framing, and policy violations — cheap models default to agreeing. |
 | R4 attribution synthesis / learnings memo | `TIER_A` | Turning raw ledger + metric deltas into a defensible per-lens attribution narrative is judgment-heavy. |
@@ -128,6 +148,11 @@ they recur.
 
 ## R0 — Detect
 
+*(runs in every mode)*
+
+0. Resolve the **run mode** from the invocation argument (see **Run modes**
+   above): `outbound`, `measure`, or full pipeline. Hold it for the run — it
+   decides which of R1–R4 execute.
 1. Detect your harness (see above) and resolve `TIER_A`/`TIER_B`.
 2. Check for `.autospec/growth.yml`. If absent, print:
    `"No .autospec/growth.yml found — this repo is not opted into autospec-growth. See skills/autospec-grow-define/README.md to configure a product/site and try again."`
@@ -147,6 +172,8 @@ they recur.
 
 ## R1 — Artifact drain
 
+*(full pipeline only — skipped in `outbound` and `measure` modes)*
+
 1. Enumerate open `growth:artifact` issues in the target repo:
    ```bash
    gh issue list --repo <owner/name> --label growth:artifact --state open --json number,title,labels
@@ -155,29 +182,20 @@ they recur.
    - Invoke `/autospec-run` against that single issue (invoked as the
      existing skill, not forked/reimplemented — this skill does not
      duplicate `/autospec-run`'s own decompose/implement/merge machinery).
-   - Once `/autospec-run` produces a diff/PR body for the issue, run the
-     **content-quality gate** before the issue is allowed to auto-merge:
-     1. Deterministic pre-checks:
-        ```bash
-        bash "$AUTOSPEC_SCRIPTS_DIR/growth-content-quality-precheck.sh" <content.md>
-        ```
-        (keyword-density ceiling + citation presence; delegates FTC
-        disclosure to `growth-ethics-precheck.sh`).
-     2. A `TIER_A` reviewer subagent judges genuine value/quality beyond the
-        mechanical checks.
-     3. Wrap both in a **5-attempt adaptive-retry loop**: on failure, feed
-        the precheck output and reviewer findings back to the implementer as
-        directives and retry, up to 5 attempts, before giving up on that
-        issue.
-   - The standard code reviewer, the `growth-ethics` gate, and
-     `autospec-secaudit` also run before auto-merge, exactly as they would
-     for any other `/autospec-run` issue — the content-quality gate is
-     additive, not a replacement.
+     Because the issue carries `growth:artifact`, `/autospec-run` itself
+     runs the content-quality gate (`GATE=growth`: deterministic
+     `growth-content-quality-precheck.sh` pre-checks plus a `TIER_A`
+     reviewer, with adaptive retry on failure) before allowing that
+     issue's PR to auto-merge, alongside the standard code reviewer, the
+     `growth-ethics` gate, and `autospec-secaudit`. R1 does not re-run any
+     of these — the gate is single-sourced in `/autospec-run`.
    - Append a ledger line: `merged_clean` on success, `failed` on a
      per-issue failure. A per-issue failure does **not** stop the drain —
      move on to the next `growth:artifact` issue.
 
 ## R2 — Outbound draft → gate → queue
+
+*(full pipeline and `outbound` mode — skipped in `measure` mode)*
 
 For each open `growth:outbound` (or `growth/needs-draft`) issue, in turn:
 
@@ -196,7 +214,10 @@ For each open `growth:outbound` (or `growth/needs-draft`) issue, in turn:
    followed by a `TIER_A` `growth-ethics` reviewer subagent, both wrapped in
    a **5-attempt adaptive-retry loop** (findings fed back as re-draft
    directives). If the gate is still blocked after 5 attempts, append a
-   `rejected` ledger line and move on — do not queue a blocked draft.
+   `rejected` ledger line, **retire the source issue** (remove its
+   `growth/needs-draft` label, add `growth/rejected`), and move on — do not
+   queue a blocked draft. Retiring it stops the conductor's outbound tier from
+   re-drafting the same hopeless issue every cycle.
 4. **Cadence check**:
    ```bash
    bash "$AUTOSPEC_SCRIPTS_DIR/growth-ethics-precheck.sh" --cadence <config.json> <ledger.jsonl> <platform>
@@ -214,8 +235,17 @@ For each open `growth:outbound` (or `growth/needs-draft`) issue, in turn:
    ```
 7. **File the control issue** — create a `growth/needs-approval` issue in
    `approval.control_repo` (from config) carrying the built body.
-8. Append a `pending` ledger line for the queued draft.
-9. Send a `PushNotification` so a human knows an approval is waiting.
+8. **Retire the source draft issue** — once the control issue is filed,
+   remove the `growth/needs-draft` label from the source `growth:outbound`
+   issue (and add `growth/queued`). This is load-bearing: the conductor's
+   outbound tier fires whenever an open `growth/needs-draft` issue exists, so
+   a source issue left labelled would be re-drafted every cycle — filing a
+   duplicate control issue and PushNotification each time, and starving the
+   define/measure tiers. Do this only on a successful queue (a cadence
+   *refusal* in step 4 intentionally leaves the label so the draft retries
+   when the venue's window reopens).
+9. Append a `pending` ledger line for the queued draft.
+10. Send a `PushNotification` so a human knows an approval is waiting.
 
 **Outbound is package-only.** This skill only ever prepares and files a
 draft for human approval — it never posts, submits, or publishes outbound
@@ -223,31 +253,52 @@ content to any external platform on its own.
 
 ## R3 — Handle approvals
 
+*(full pipeline and `outbound` mode — skipped in `measure` mode)*
+
 For each open `growth/needs-approval` control issue in `approval.control_repo`:
 
 1. Read the issue's labels:
    ```bash
    bash "$AUTOSPEC_SCRIPTS_DIR/growth-outbound-queue.sh" --read-state <label-csv>
    ```
-2. Route by state:
+2. Route by state, then **clear the serviced state** so the conductor's
+   outbound tier does not re-service the same control issue every cycle (the
+   tier fires whenever a `growth/needs-approval` issue still carries an
+   `approved`/`edited`/`rejected`/`published` state label):
    - **`approved`** — emit a one-click-publish package (the exact copy +
      target URL/venue + any submission metadata) as a **comment** on the
      control issue. The agent **never posts on the human's behalf** — the
-     comment is the deliverable. Only record a `published` ledger line
-     (with the resulting URL) after the human confirms publication
-     themselves (e.g. by pasting the live URL back into the issue, or by
-     applying a `published` label) — never infer publication.
+     comment is the deliverable. Then remove `growth/approved` and add
+     `growth/awaiting-publish` so the package is not re-emitted each cycle.
+     Do **not** record a `published` ledger line yet — publication is not
+     confirmed. The issue now sits in `awaiting-publish` (no decision label),
+     so the tier stops selecting it until the human acts.
+   - **`published`** — the human has confirmed the post is live (pasted the
+     URL and applied `growth/published`). Append a `published` ledger line
+     carrying the live URL, then **close** the control issue. This is the
+     terminal state; closing it drops it from the tier's pending count. Never
+     infer publication — only this human-applied label triggers the record.
    - **`edited`** — treat the edited copy as a new draft: re-run the R2
      gate sequence (structural validation → ethics gate → cadence →
-     relevance) and re-queue.
+     relevance) and re-queue (which files a fresh control issue). Then close
+     this superseded control issue (removing `growth/edited`).
    - **`rejected`** — append a `rejected` ledger line and close out; do not
      retry automatically.
+
+Clearing the serviced state (relabel or close) on every branch is
+load-bearing: it is the R3-side mirror of R2's source-issue retirement, and it
+is what makes the shared `growth-outbound-pending` signal fall back to zero so
+Tier G3 (measure) and Tier G1 (define) are not starved. Because the tier also
+counts `growth/published`, a human-confirmed post self-triggers the terminal
+record promptly instead of waiting for unrelated outbound work.
 
 Reiterate the invariant: **the agent never auto-posts** anything to an
 external platform under any control-issue state, including `approved` —
 publication is always a human action taken outside this skill.
 
 ## R4 — Measure & attribute
+
+*(full pipeline and `measure` mode — skipped in `outbound` mode)*
 
 1. Run each adapter configured in `.autospec/growth.yml` (`measurement`
    block), e.g.:
@@ -288,6 +339,27 @@ publication is always a human action taken outside this skill.
    attribution output (which lenses/channels are earning their budget,
    which are mostly refuted or unpublished) and store/print it alongside the
    run summary.
+5. **Record the measure cycle in the ledger.** Append exactly one
+   `kind:"measure"` line so the conductor's cadence gate
+   (`growth-measure-due.sh`) can tell when this repo was last measured —
+   without it, the measure tier fires every cycle forever. Use the canonical
+   append-only writer, which enforces the full 10-key line schema:
+   ```bash
+   bash "$AUTOSPEC_SCRIPTS_DIR/growth-ledger.sh" --append "$(jq -n \
+     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+     --arg reason "$MEASURE_SUMMARY" \
+     '{round:0, source:"measure", title:"measure cycle",
+       norm_title:("measure-" + $ts), channel:"measurement",
+       kind:"measure", issue:0, outcome:"measured",
+       reason:$reason, ts:$ts}')"
+   ```
+   `issue:0` keeps the line out of the per-issue `latest` collapse (it is
+   recorded individually, like a refutation). Append this line whenever R4
+   runs to completion — in both full-pipeline and `measure` mode — even when
+   every adapter degraded to `{}`, because a completed (if empty) measure
+   pass still resets the cadence clock. Set `$MEASURE_SUMMARY` to a one-line
+   digest of the attribution result (or the degradation reason if all
+   adapters returned `{}`).
 
 ## Stop
 
@@ -301,6 +373,7 @@ Phase R4 complete on {repo}.
 - attribution: <summary of per-lens contribution / adapter degradations>
 - ledger: <path to .autospec/growth/ledger.jsonl>
 
-Hand off to your external conductor (/autospec-grow), or re-run
-/autospec-grow-define to plan the next cycle.
+Growth runs unattended under /autospec-autonomous, which drives this skill's
+outbound and measure modes on its own cadence; re-run /autospec-grow-define
+to plan the next cycle, or invoke this skill directly for a one-off pass.
 ```
