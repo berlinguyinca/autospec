@@ -228,6 +228,23 @@ DISCARD_ISSUE:601"
     grep -q "^issue close 601 --repo test-owner/test-repo$" "$GH_LOG"
 }
 
+@test "discard with a merged roll-up is a clean no-op (never reopens landed issues)" {
+    _install_common_stubs
+    _install_control_channel "DECISION:discard
+DISCARD_ISSUE:603"
+    # status falls back to the MERGED roll-up when no open one exists —
+    # discard must not close it or reopen its already-landed issues.
+    _install_gh '[{"body":"<!-- autospec-rollup:issue-21 -->\nlanded #21"}]'
+    _install_intbranch 88 "MERGED"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    ! grep -q "^pr close" "$GH_LOG"
+    ! grep -q "^issue reopen" "$GH_LOG"
+    grep -q "^issue comment 603 --repo test-owner/test-repo" "$GH_LOG"
+}
+
 @test "discard with no open roll-up is a clean no-op (comment only)" {
     _install_common_stubs
     _install_control_channel "DECISION:discard

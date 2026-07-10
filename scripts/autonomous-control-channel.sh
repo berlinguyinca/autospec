@@ -190,6 +190,30 @@ control_channel_trusted_logins() {
     printf '%s' "$raw" | jq -r '.[]?.login // empty' 2>/dev/null || true
 }
 
+# control_channel_promote_label_actor ISSUE — print the login of the actor
+# who applied the LAST `autospec:promote` labeled timeline event, or nothing
+# on any gh/parse failure (callers MUST fail closed on empty). The command
+# authority for promote is the LABEL, not just the issue author — anyone
+# with triage rights can label an old trusted-authored issue, so the label
+# applicator is verified too (mirrors approval_via_label in
+# autonomous-provenance.sh, including the --paginate page-2 normalization:
+# `gh api --paginate` emits one JSON array per page, flattened via
+# `jq -es 'add'`).
+control_channel_promote_label_actor() {
+    local issue="$1" path out flat
+    if [ -n "$REPO" ]; then
+        path="repos/${REPO}/issues/${issue}/timeline"
+    else
+        # gh substitutes {owner}/{repo} from the current git remote.
+        path="repos/{owner}/{repo}/issues/${issue}/timeline"
+    fi
+    out="$("$GH" api --paginate "$path" 2>/dev/null)" || return 0
+    flat="$(printf '%s' "$out" | jq -es 'add // []' 2>/dev/null)" || return 0
+    printf '%s' "$flat" | jq -r '
+        [.[] | select(.event == "labeled" and .label.name == "autospec:promote")]
+        | last | .actor.login // empty' 2>/dev/null || true
+}
+
 # control_channel_is_trusted_login LOGIN TRUSTED_NEWLINE_LIST — exit 0 only
 # on an exact match (never test()/match() against issue-derived values, per
 # feedback_jq_test_regex_metachar_injection).
@@ -266,11 +290,15 @@ emit_decision() {
             ;;
 
         "autospec:promote")
-            # Trusted-actor-only: verify the control issue's AUTHOR (not a
-            # comment/label approval) is a login in
-            # safety.issue_intent_gate.trusted_actors. Fail closed — any
-            # missing/unparseable data refuses the promote.
-            local issue_number author_login trusted
+            # Trusted-actor-only, fail closed on any missing/unparseable
+            # data. TWO checks must both pass against
+            # safety.issue_intent_gate.trusted_actors:
+            #   1. the control issue's AUTHOR is a trusted login, AND
+            #   2. the actor of the LAST `autospec:promote` labeled timeline
+            #      event is a trusted login — the label is the command
+            #      authority, and anyone with triage rights could label an
+            #      old trusted-authored issue (approval-spoofing).
+            local issue_number author_login label_actor trusted
             issue_number="$(printf '%s' "$issues_json" | jq -r '.[0].number // empty' 2>/dev/null || echo "")"
             author_login="$(printf '%s' "$issues_json" | jq -r '.[0].author.login // empty' 2>/dev/null || echo "")"
 
@@ -280,11 +308,13 @@ emit_decision() {
             fi
 
             trusted="$(control_channel_trusted_logins)"
-            if control_channel_is_trusted_login "$author_login" "$trusted"; then
+            label_actor="$(control_channel_promote_label_actor "$issue_number")"
+            if control_channel_is_trusted_login "$author_login" "$trusted" \
+                && control_channel_is_trusted_login "$label_actor" "$trusted"; then
                 printf 'DECISION:promote\n'
                 printf 'PROMOTE_ISSUE:%s\n' "$issue_number"
             else
-                warn "promote: issue #$issue_number author '$author_login' is not a trusted actor — refusing"
+                warn "promote: issue #$issue_number refused — author '$author_login' or label actor '$label_actor' is not a trusted actor (fail closed)"
                 printf 'DECISION:promote-refused\n'
                 printf 'PROMOTE_ISSUE:%s\n' "$issue_number"
             fi
