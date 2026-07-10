@@ -148,19 +148,21 @@ The classifier uses the stricter of deterministic and semantic decisions. `SAFET
 
 If `_safety_status` is `0`, create labels `safety:reviewed` and `security:quarantined` idempotently, add `safety:reviewed`, remove `security:quarantined`, patch a passing `## Safety review` block into the issue body, and only then continue with the remaining per-issue steps.
 
-The block format must include the marker wrapper so later runs can replace it in place:
+The block format must keep only the machine decision inside the marker wrapper; put human-readable metadata outside the markers so autospec-run can parse it fail-closed:
 
 ```markdown
 ## Safety review
 
 <!-- autospec-safety:begin -->
 - **decision:** `SAFETY_PASS`
+<!-- autospec-safety:end -->
+
 - **actor:** `<author>`
 - **trust:** `<trust>`
 - **matched rules:** `<rule ids or none>`
 - **reason:** <reason>
+
 *Auto-reviewed by issue intent safety gate on YYYY-MM-DD.*
-<!-- autospec-safety:end -->
 ```
 
 ```bash

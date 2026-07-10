@@ -568,21 +568,22 @@ labels and patches each body with a `## Model fit` block.
 > issue body, and continue with label application, body patching, board
 > assignment, dependency checks, and quality audit.
 >
-> The block format must include the marker wrapper so later runs can replace it
-> in place:
+> The block format must keep only the machine decision inside the marker wrapper; put
+> human-readable metadata outside the markers so autospec-run can parse it fail-closed:
 >
 > ```markdown
 > ## Safety review
 >
 > <!-- autospec-safety:begin -->
 > - **decision:** `SAFETY_PASS`
+> <!-- autospec-safety:end -->
+>
 > - **actor:** `<author>`
 > - **trust:** `<trust>`
 > - **matched rules:** `<rule ids or none>`
 > - **reason:** <reason>
 >
 > *Auto-reviewed by issue intent safety gate on YYYY-MM-DD.*
-> <!-- autospec-safety:end -->
 > ```
 >
 > ```bash
