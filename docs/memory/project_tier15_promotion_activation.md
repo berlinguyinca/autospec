@@ -96,4 +96,4 @@ test_explore_e2e.bats):** verify cmd reads `$AUTOSPEC_EXPLORE_DEDUPED_IN` = `{"d
 
 **No conductor restart needed to pick up verify-drain fixes:** `AUTOSPEC_EXPLORE_VERIFY_CMD` points at the script PATH and explore invokes it fresh (`bash -c`) each Tier-4 cycle, so refreshing the on-disk copy (`install.sh --update`) is enough — the running conductor uses the new script on its next explore cycle. (A restart IS needed only to re-export a NEWLY-ADDED launcher env seam, e.g. #1704's initial wiring.)
 
-Related: [[feedback-refine-then-run-workflow]]
+Related: [[feedback_refine_then_run_workflow]]
