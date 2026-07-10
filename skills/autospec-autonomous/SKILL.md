@@ -1,6 +1,6 @@
 ---
 name: autospec-autonomous
-description: Use when the user wants /autospec-autonomous to run the autospec machinery unattended for weeks — a perpetual self-driving conductor that walks a never-idle priority waterfall (Tier 0 control channel + Tier 1 backlog→main + Tier 1.5 open-issue promotion + Tier 2 local discovery + Tier 3 architecture/coverage improvement + Tier 4 internet/operator discovery), parks before quota exhaustion, obeys a GitHub control channel for live steering, and resumes automatically.
+description: Use when the user wants /autospec-autonomous to run the autospec machinery unattended for weeks — a perpetual self-driving conductor that walks a never-idle priority waterfall (Tier 0 control channel + Tier 1 backlog→main + Tier 1.5 open-issue promotion + Tier 2 local discovery + Tier 3 architecture/coverage improvement + Tier 4 internet/operator discovery + capability-gated Tiers 5-7 growth outbound/define/measure), parks before quota exhaustion, obeys a GitHub control channel for live steering, and resumes automatically.
 ---
 
 # autospec-autonomous workflow (harness-neutral)
@@ -18,10 +18,12 @@ This skill is a **conductor**, not a new engine. It reuses without reimplementin
 
 **Never-idle scope:** Tier 0 (control channel), Tier 1 (backlog → `main`), Tier 1.5
 (open-issue promotion), Tier 2 (local discovery), Tier 3 (architecture/test-coverage
-improvement), Tier 4 (internet/operator-polish discovery), and the Phase-4 quality/
-surface/RAG floors are active by default. A dry queue never causes convergence-stop;
-below the value floor the conductor idles on a re-scan heartbeat. It parks only when
-a stop/pause control signal or usage/spend governor trips.
+improvement), Tier 4 (internet/operator-polish discovery), the capability-gated
+Tiers 5-7 GROWTH meta-work (outbound service / define / measure — active only when
+`.autospec/growth.yml` is present and valid), and the Phase-4 quality/surface/RAG
+floors are active by default. A dry queue never causes convergence-stop; below the
+value floor the conductor idles on a re-scan heartbeat. It parks only when a
+stop/pause control signal or usage/spend governor trips.
 
 Manage your own context — never exceed 60%. Delegate to subagents whenever your
 harness supports it; do not run the waterfall or issue drain directly in the main
@@ -257,6 +259,27 @@ cycles, each idle tick **accumulates** trend memory rather than restarting:
 `recurrence` climbs for durable trends so the intersect stage surfaces them once the
 repo has a matching gap. Filed work returns to Tier 1.
 
+### Tiers 5-7 — growth outbound / define / measure (capability-gated)
+
+Appended after Tier 4 so Tiers 0-4 keep their numbers. Active only when
+`.autospec/growth.yml` is present and valid (capability detection); when absent
+these tiers never fire and the waterfall is byte-identical to the growth-disabled
+behavior. `growth:artifact` **implementation** already competes in Tier 1
+(`auto-implement`) — Tiers 5-7 are the growth **meta-work** (research candidates,
+service the outbound queue, measure and re-weight sources), and they compete under
+the same one shared conductor quota as every other tier, never a separate budget.
+
+- **Tier 5 — service outbound queue.** When approval/publish drafts are pending,
+  invoke `/autospec-grow-run` outbound. It only prepares and stages drafts —
+  publishing is never auto-posted.
+- **Tier 6 — research candidates.** When the growth-artifact backlog is below its
+  floor, invoke `/autospec-grow-define` to research and file new candidates.
+- **Tier 7 — measure and re-weight.** When the measure interval has elapsed,
+  invoke `/autospec-grow-run` measure to score outcomes and re-weight sources.
+
+If no growth tier has work, fall through to `idle-rescan` exactly as when growth
+is disabled.
+
 ### Quality / surface / RAG floors and value-floor idle
 
 After Tier 4, evaluate the Phase-4 quality floor (architecture fitness, coverage/mutation, debt/dead code/dependency CVE, performance, security), surface and knowledge tiers (UX/UI, accessibility, standards, docs freshness), and RAG eval-tuning tier when capability detection says the repo supports them. Each candidate must carry a measured signal and a value score. If every enabled tier is dry or the best score is below `AUTOSPEC_VALUE_FLOOR`, enter `idle-rescan`: write resume context, publish an informational notification/digest entry, and re-arm `_conductor_arm_resume()` for `AUTOSPEC_RESCAN_INTERVAL` (default 30m). This is not a park and not a terminal convergence stop.
@@ -355,7 +378,7 @@ monitor failures, not proof that the issue failed.
 - `autospec-autonomous-run-drain.sh` — installed Tier-1 drain wrapper that runs `$autospec-run` through `omx exec`.
 - `autospec-loop.sh` (shared loop driver, `${AUTOSPEC_SCRIPTS_DIR}/lib/`) — extended with `autospec_conductor_run()`, the never-idle conductor entry point wiring control-channel → waterfall → Tier 1.5 promotion / Tier 2–4 discovery → premerge-gate → drain → spend-ledger → resilience → digest (issue #1378).
 - `autonomous-control-channel.sh` — label query → command decision (Phase 1, Issue #1373).
-- `autonomous-waterfall.sh` — Tier 0/1/1.5/2/3/4 selection logic (Issue #1374, activated by issue #1529).
+- `autonomous-waterfall.sh` — Tier 0/1/1.5/2/3/4 selection logic (Issue #1374, activated by issue #1529), plus capability-gated Tiers 5-7 growth outbound/define/measure (growth conductor fold-in).
 - `autonomous-spend-ledger.sh` — cumulative token/issue tally + kill-switch (Phase 1, Issue #1375).
 - `autonomous-premerge-gate.sh` — blocking autospec-qa pre-merge barrier (Phase 1, Issue #1376).
 - `autonomous-resilience.sh` — run-state, lock, quarantine, main-health (Phase 1, Issue #1377).

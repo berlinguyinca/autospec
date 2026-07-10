@@ -4664,6 +4664,20 @@ check_conductor_wiring_contract() {
         || fail "$lib: control-channel wiring missing from conductor loop (issue #1378)"
     grep -q 'autonomous-waterfall\|waterfall' "$lib" \
         || fail "$lib: waterfall wiring missing from conductor loop (issue #1378)"
+    local waterfall="scripts/autonomous-waterfall.sh"
+    [ -f "$waterfall" ] \
+        || fail "$waterfall: waterfall selection script missing (issue #1378)"
+    bash -n "$waterfall" \
+        || fail "$waterfall: bash syntax error (issue #1378)"
+    # Capability-gated GROWTH tiers (growth conductor fold-in, Plan 5): the
+    # waterfall-cascade and loop-dispatch bats live under tests/autonomous/ and
+    # already run via check_autonomous_phase2_suite's glob below; assert their
+    # presence here so a missing file fails loudly at the conductor-wiring gate
+    # rather than silently shrinking that glob.
+    local t
+    for t in tests/autonomous/test_waterfall_growth.bats tests/autonomous/test_loop_growth_dispatch.bats; do
+        [ -f "$t" ] || fail "$t: growth-tier bats coverage missing (growth conductor fold-in)"
+    done
     local skill="skills/autospec-autonomous/SKILL.md"
     [ -f "$skill" ] \
         || fail "$skill: SKILL.md missing (issue #1378)"
@@ -4973,7 +4987,7 @@ check_growth_shared_contract() {
     info "growth-shared contract: bash -n + tests/unit/growth-*.bats"
     local s
     for s in validate-growth-config growth-ethics-blocklist growth-ethics-precheck \
-             growth-ledger growth-source-weights growth-measure; do
+             growth-ledger growth-source-weights growth-measure growth-measure-due; do
         check_bash_syntax "skills/autospec-shared/scripts/$s.sh"
         [ -f "skills/autospec-shared/scripts/$s.sh" ] \
             || fail "skills/autospec-shared/scripts/$s.sh: required growth-shared script missing"
@@ -4986,7 +5000,8 @@ check_growth_shared_contract() {
     local t
     for t in tests/unit/growth-config-validate.bats tests/unit/growth-ethics-blocklist.bats \
              tests/unit/growth-ethics-precheck.bats tests/unit/growth-ledger.bats \
-             tests/unit/growth-source-weights.bats tests/unit/growth-measure.bats; do
+             tests/unit/growth-source-weights.bats tests/unit/growth-measure.bats \
+             tests/unit/growth-measure-due.bats; do
         [ -f "$t" ] || fail "$t: growth-shared bats coverage missing"
         _any=1
         info "  running: $t"

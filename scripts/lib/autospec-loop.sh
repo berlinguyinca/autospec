@@ -784,6 +784,9 @@ fi'
     local _tier2_dry_cycles=0
     local _tier3_dry_cycles=0
     local _tier4_dry_cycles=0
+    # GROWTH fold-in: Tier G1 (run-growth-define) dry-cycle counter. Only ever
+    # incremented/reset when growth is enabled (see _growth_enabled below).
+    local _tierg_dry_cycles=0
     # F3: count of discovery issues filed by Tier 2/3 cycles that have not yet
     # been consumed by F5 outcome processing.  Non-zero → refuse Tier-1 main merge.
     local _inflight_discovery=0
@@ -1008,6 +1011,85 @@ fi'
             fi
         fi
 
+        # ── GROWTH fold-in: capability detection ──────────────────────────────
+        # Growth tiers are opted-in per repo via .autospec/growth.yml. Growth
+        # stays fully inert (byte-identical waterfall/loop behavior) unless the
+        # file exists AND passes validate-growth-config.sh — any missing file,
+        # missing yq/jq, or validation failure leaves _growth_enabled=0 and no
+        # --growth-* flags are threaded into the waterfall call below.
+        local _growth_enabled=0
+        local _growth_control_repo=""
+        local _growth_backlog_floor=""
+        if [ -f "${_repo_root}/.autospec/growth.yml" ] && command -v yq >/dev/null 2>&1; then
+            local _gv="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/validate-growth-config.sh"
+            [ -f "$_gv" ] || _gv="${_sdir}/validate-growth-config.sh"
+            if [ -f "$_gv" ]; then
+                local _gjson
+                _gjson="$(yq -o=json '.' "${_repo_root}/.autospec/growth.yml" 2>/dev/null || true)"
+                if [ -n "$_gjson" ]; then
+                    local _gjson_tmp
+                    _gjson_tmp="$(mktemp 2>/dev/null || printf '%s/.autospec-growth-cfg.%s.json' "${TMPDIR:-/tmp}" "$$")"
+                    printf '%s' "$_gjson" > "$_gjson_tmp" 2>/dev/null || true
+                    if bash "$_gv" "$_gjson_tmp" >/dev/null 2>&1; then
+                        _growth_enabled=1
+                        # Repo that holds the growth/needs-approval control
+                        # issues (Tier G2's approval-servicing signal). Defaults
+                        # to the product repo when approval.control_repo is unset.
+                        _growth_control_repo="$(printf '%s' "$_gjson" | jq -r '.approval.control_repo // empty' 2>/dev/null || true)"
+                        # Configured backlog floor for Tier G1 (grow-define);
+                        # honored symmetrically with grow.measure_interval. Empty
+                        # -> the waterfall keeps its env/default floor.
+                        _growth_backlog_floor="$(printf '%s' "$_gjson" | jq -r '.grow.backlog_floor // empty' 2>/dev/null || true)"
+                        case "$_growth_backlog_floor" in *[!0-9]*) _growth_backlog_floor="" ;; esac
+                    fi
+                    rm -f "$_gjson_tmp" 2>/dev/null || true
+                fi
+            fi
+        elif [ -f "${_repo_root}/.autospec/growth.yml" ] && [ "$_cycle" -eq 1 ]; then
+            # growth.yml present but yq missing: growth stays disabled
+            # (fail-closed). Say so ONCE (first cycle only — not every cycle of
+            # a perpetual loop) so the operator can diagnose why their opted-in
+            # repo shows no growth activity.
+            printf '[conductor] growth.yml present but yq not installed — growth tiers disabled (install yq to enable)\n' >&2
+        fi
+        [ -n "$_growth_control_repo" ] || _growth_control_repo="$_repo"
+
+        # ── GROWTH fold-in: cheap per-cycle state (only when enabled) ─────────
+        # Each query is individually guarded: a `gh`/helper failure yields
+        # 0/not-due rather than aborting the cycle (growth tiers never take the
+        # loop down).
+        local _growth_flags=""
+        if [ "$_growth_enabled" = "1" ]; then
+            local _g_backlog _g_outbound _g_approvals _g_outbound_pending _g_measure_due
+            _g_backlog="$(gh issue list --repo "$_repo" --state open --label growth:artifact --json number --jq 'length' 2>/dev/null || echo '')"
+            case "$_g_backlog" in *[!0-9]*) _g_backlog="" ;; esac
+            # Drafts awaiting R2 (product repo).
+            _g_outbound="$(gh issue list --repo "$_repo" --state open --label growth/needs-draft --json number --jq 'length' 2>/dev/null || echo 0)"
+            case "$_g_outbound" in *[!0-9]*) _g_outbound=0 ;; esac
+            # Human-decided approval control issues awaiting R3 (control repo).
+            # Spec Tier G2: service-growth-outbound must also fire on any open
+            # growth/needs-approval issue carrying a decision label. Without this,
+            # R3 only runs by accident of a still-open draft.
+            _g_approvals="$(gh issue list --repo "$_growth_control_repo" --state open --label growth/needs-approval --json labels \
+                --jq '[.[] | select(.labels | map(.name) | any(. == "growth/approved" or . == "growth/edited" or . == "growth/rejected"))] | length' 2>/dev/null || echo 0)"
+            case "$_g_approvals" in *[!0-9]*) _g_approvals=0 ;; esac
+            # Outbound tier fires on drafts-to-draft OR approvals-to-service.
+            _g_outbound_pending=$(( _g_outbound + _g_approvals ))
+            _g_measure_due="$(bash "${_sdir}/growth-measure-due.sh" "$_repo_root" 2>/dev/null || echo 0)"
+            _growth_flags="--growth-enabled 1 --growth-outbound-pending ${_g_outbound_pending:-0} --tierg-dry-cycles ${_tierg_dry_cycles:-0}"
+            # if/then/fi, not `[ ] && ...`: a failing test short-circuits to a
+            # non-zero statement exit under `set -e` and would abort the loop.
+            if [ -n "$_g_backlog" ]; then
+                _growth_flags="$_growth_flags --growth-backlog $_g_backlog"
+            fi
+            if [ "$_g_measure_due" = "1" ]; then
+                _growth_flags="$_growth_flags --growth-measure-due 1"
+            fi
+            if [ -n "$_growth_backlog_floor" ]; then
+                _growth_flags="$_growth_flags --growth-backlog-floor $_growth_backlog_floor"
+            fi
+        fi
+
         # ── Step 3: Waterfall tier selection ──────────────────────────────────
         local _tier_json
         _tier_json="$(bash "$_waterfall" \
@@ -1018,6 +1100,7 @@ fi'
             --tier4-dry-cycles "$_tier4_dry_cycles" \
             ${_repo:+--repo "$_repo"} \
             ${_ready_count:+--backlog-count "$_ready_count"} \
+            ${_growth_flags} \
             2>/dev/null \
             || printf '{"tier":1,"action":"run-backlog","reason":"waterfall-unavailable"}')"
         local _tier
@@ -1497,6 +1580,94 @@ fi'
                     fi
                 fi
             fi
+
+        elif [ "$_action" = "run-growth-define" ]; then
+            # ── Tier G1: growth candidate research + decompose ─────────────
+            local _gd_cmd="${AUTOSPEC_GROWTH_DEFINE_CMD:-}"
+            [ -n "$_gd_cmd" ] || _gd_cmd="autospec-grow-define"
+
+            local _gd_out
+            if [ "$_dry" = "1" ]; then
+                printf '[conductor] [dry-run] would generate Tier G1 growth-define work\n' >&2
+                _gd_out='{"dry":true,"filed":0,"reason":"dry-run"}'
+            elif [ -n "$_gd_cmd" ]; then
+                printf '[conductor] Tier G1: running growth-define\n' >&2
+                _gd_out="$(bash -c "$_gd_cmd" 2>/dev/null || printf '{"dry":true,"filed":0,"reason":"growth-define-error"}')"
+            else
+                printf '[conductor] WARN: no growth-define command available — treating Tier G1 as dry\n' >&2
+                _gd_out='{"dry":true,"filed":0,"reason":"growth-define-command-missing"}'
+            fi
+
+            local _gd_dry _gd_filed
+            _gd_dry="$(printf '%s' "$_gd_out" | jq -r 'if has("dry") then .dry else true end' 2>/dev/null || echo 'true')"
+            _gd_filed="$(printf '%s' "$_gd_out" | jq -r '.filed // 0' 2>/dev/null || echo 0)"
+            printf '[conductor] Tier G1 growth-define result: dry=%s filed=%s\n' \
+                "$_gd_dry" "$_gd_filed" >&2
+            if [ "$_gd_dry" = "false" ] || { [ "$_gd_filed" -gt 0 ] 2>/dev/null; }; then
+                _work_done=1
+            else
+                _tierg_dry_cycles=$((_tierg_dry_cycles + 1))
+                printf '[conductor] Tier G1 dry (tierg-dry-cycles=%s)\n' \
+                    "$_tierg_dry_cycles" >&2
+            fi
+
+        elif [ "$_action" = "service-growth-outbound" ]; then
+            # ── Tier G2: outbound draft -> ethics/cadence gate -> approval
+            # queue, and servicing pending human approvals. Always "work" when
+            # it runs cleanly (no dry-cycle counter — this is a service poll,
+            # not a discovery cascade).
+            local _go_cmd="${AUTOSPEC_GROWTH_OUTBOUND_CMD:-}"
+            # Bare fallback runs grow-run's OUTBOUND-ONLY mode (R0+R2+R3), not
+            # the full pipeline — the artifact drain (R1) is already Tier 1's
+            # job, so a full-pipeline fallback would redundantly re-drain it.
+            [ -n "$_go_cmd" ] || _go_cmd="autospec-grow-run outbound"
+
+            local _go_out
+            if [ "$_dry" = "1" ]; then
+                printf '[conductor] [dry-run] would service Tier G2 growth outbound queue\n' >&2
+                _go_out='{"dry":true,"filed":0,"reason":"dry-run"}'
+            elif [ -n "$_go_cmd" ]; then
+                printf '[conductor] Tier G2: servicing growth outbound queue\n' >&2
+                _go_out="$(bash -c "$_go_cmd" 2>/dev/null || printf '{"dry":true,"filed":0,"reason":"growth-outbound-error"}')"
+            else
+                printf '[conductor] WARN: no growth-outbound command available — treating Tier G2 as dry\n' >&2
+                _go_out='{"dry":true,"filed":0,"reason":"growth-outbound-command-missing"}'
+            fi
+
+            local _go_dry
+            _go_dry="$(printf '%s' "$_go_out" | jq -r 'if has("dry") then .dry else true end' 2>/dev/null || echo 'true')"
+            printf '[conductor] Tier G2 growth-outbound result: dry=%s\n' "$_go_dry" >&2
+            if [ "$_go_dry" != "true" ]; then
+                _work_done=1
+            fi
+
+        elif [ "$_action" = "run-growth-measure" ]; then
+            # ── Tier G3: measure & attribute (cadence-gated, not per-cycle) ─
+            local _gm_cmd="${AUTOSPEC_GROWTH_MEASURE_CMD:-}"
+            # Bare fallback runs grow-run's MEASURE-ONLY mode (R0+R4), not the
+            # full pipeline — measure/attribute is all Tier G3 owes; a full
+            # fallback would redundantly re-drain artifacts and re-queue outbound.
+            [ -n "$_gm_cmd" ] || _gm_cmd="autospec-grow-run measure"
+
+            local _gm_out
+            if [ "$_dry" = "1" ]; then
+                printf '[conductor] [dry-run] would run Tier G3 growth measure/attribute\n' >&2
+                _gm_out='{"dry":true,"filed":0,"reason":"dry-run"}'
+            elif [ -n "$_gm_cmd" ]; then
+                printf '[conductor] Tier G3: running growth measure/attribute\n' >&2
+                _gm_out="$(bash -c "$_gm_cmd" 2>/dev/null || printf '{"dry":true,"filed":0,"reason":"growth-measure-error"}')"
+            else
+                printf '[conductor] WARN: no growth-measure command available — treating Tier G3 as dry\n' >&2
+                _gm_out='{"dry":true,"filed":0,"reason":"growth-measure-command-missing"}'
+            fi
+
+            local _gm_dry
+            _gm_dry="$(printf '%s' "$_gm_out" | jq -r 'if has("dry") then .dry else true end' 2>/dev/null || echo 'true')"
+            printf '[conductor] Tier G3 growth-measure result: dry=%s\n' "$_gm_dry" >&2
+            if [ "$_gm_dry" != "true" ]; then
+                _work_done=1
+            fi
+
         else
             # Unknown action — log and treat as dry cycle.
             printf '[conductor] unknown waterfall action=%s for tier=%s — skipping\n' \
@@ -1511,6 +1682,7 @@ fi'
             _tier2_dry_cycles=0
             _tier3_dry_cycles=0
             _tier4_dry_cycles=0
+            _tierg_dry_cycles=0
         fi
 
         # ── Step 6a: Usage governor soft-park (F6) ───────────────────────────
