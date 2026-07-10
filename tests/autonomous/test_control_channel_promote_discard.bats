@@ -78,6 +78,7 @@ _install_common_stubs() {
 #   $TEST_TMP/ci.json                 statusCheckRollup array (default [])
 #   $TEST_TMP/pr-body.txt             roll-up PR body (default empty)
 #   $TEST_TMP/pr-close-rc             exit code for `pr close` (default 0)
+#   $TEST_TMP/issue-reopen-rc         exit code for `issue reopen` (default 0)
 #   $TEST_TMP/issue-comments-<n>.txt  bodies for `issue view <n> --json comments`
 # `repo view` answers the defaultBranchRef jq output ("main").
 _install_gh() {
@@ -102,6 +103,10 @@ case "\${1:-} \${2:-}" in
         ;;
     "issue view")
         cat "$TEST_TMP/issue-comments-\${3:-}.txt" 2>/dev/null || true
+        ;;
+    "issue reopen")
+        rc="\$(cat "$TEST_TMP/issue-reopen-rc" 2>/dev/null || printf '0')"
+        exit "\$rc"
         ;;
     "issue list")
         echo "[]"
@@ -298,6 +303,35 @@ PROMOTE_ISSUE:506"
     grep -q "^issue comment 506 --repo test-owner/test-repo" "$GH_LOG"
 }
 
+@test "promote with STARTUP_FAILURE conclusion is refused (allowlist, not blocklist)" {
+    _install_common_stubs
+    _install_control_channel "DECISION:promote
+PROMOTE_ISSUE:508"
+    _install_gh
+    _install_intbranch 42 "OPEN"
+    printf '[{"name":"pytest","conclusion":"STARTUP_FAILURE"}]' > "$TEST_TMP/ci.json"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    ! grep -q "^pr merge" "$GH_LOG"
+    grep -q "^issue comment 508 --repo test-owner/test-repo" "$GH_LOG"
+}
+
+@test "promote with all-green conclusions (SUCCESS/NEUTRAL/SKIPPED) merges" {
+    _install_common_stubs
+    _install_control_channel "DECISION:promote
+PROMOTE_ISSUE:509"
+    _install_gh
+    _install_intbranch 42 "OPEN"
+    printf '[{"name":"a","conclusion":"SUCCESS"},{"name":"b","conclusion":"NEUTRAL"},{"name":"c","conclusion":"SKIPPED"}]' > "$TEST_TMP/ci.json"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    grep -q "^pr merge 42 --repo test-owner/test-repo --admin --squash$" "$GH_LOG"
+}
+
 @test "merge-ok/reset-fail leaves the control issue open; re-fired promote on MERGED roll-up recovers via reset" {
     _install_common_stubs
     _install_control_channel "DECISION:promote
@@ -426,6 +460,31 @@ DISCARD_ISSUE:606"
     ! grep -q "^issue comment 11 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
     grep -q "^issue reopen 12 --repo test-owner/test-repo$" "$GH_LOG"
     grep -q "^issue comment 12 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
+}
+
+@test "discard with reopen failures: partial-failure comment, control issue left open, pause marker kept" {
+    _install_common_stubs
+    _install_control_channel "DECISION:discard
+DISCARD_ISSUE:607"
+    _install_gh
+    _install_intbranch 77 "OPEN"
+    _write_manifest_body
+    printf '1' > "$TEST_TMP/issue-reopen-rc"
+    printf '{"reason":"rollup-red"}\n' > "$PAUSE_FILE"
+
+    _run_cycle
+    [ "$status" -eq 0 ]
+
+    grep -q "^pr close 77" "$GH_LOG"
+    grep -q "^issue reopen 11" "$GH_LOG"
+    # Reopen failed → no per-issue comment, no control-issue close, no
+    # success claim; label still cleared so the operator re-fires explicitly.
+    ! grep -q "^issue comment 11 --repo test-owner/test-repo --body discarded-from-rollup" "$GH_LOG"
+    ! grep -q "^issue close 607" "$GH_LOG"
+    grep -q "^issue comment 607 --repo test-owner/test-repo" "$GH_LOG"
+    grep -q "^issue edit 607 --repo test-owner/test-repo --remove-label autospec:discard$" "$GH_LOG"
+    # Pause marker must NOT be cleared on a partial failure.
+    [ -f "$PAUSE_FILE" ]
 }
 
 @test "discard with a merged roll-up is a clean no-op (never reopens landed issues)" {
