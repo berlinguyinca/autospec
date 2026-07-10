@@ -77,6 +77,19 @@ CONFLICTS_FILE="$(mktemp -t autospec-conflicts.XXXXXX)"
 trap 'rm -f "$AUTO_FILE" "$ACTIVE_FILE" "$READY_FILE" "$BLOCKED_FILE" "$CONFLICTS_FILE"' EXIT
 
 issue_list auto-implement > "$AUTO_FILE"
+
+# AUTOSPEC_RUN_ONLY_ISSUES scopes the ready/batch queue to a space-separated
+# issue-number list (set by the conductor's dispatch-time provenance split —
+# scripts/lib/autospec-loop.sh — so the operator and self-originated batches
+# each drain only their own subset instead of the full ready queue). Unset or
+# empty keeps today's full-queue behavior (fail-open to unconstrained).
+if [ -n "${AUTOSPEC_RUN_ONLY_ISSUES:-}" ]; then
+    only_json="$(printf '%s\n' "$AUTOSPEC_RUN_ONLY_ISSUES" | tr ' ' '\n' | awk 'NF' | jq -R 'tonumber' | jq -s .)"
+    jq --argjson only "$only_json" '[.[] | select(([.number] - $only | length) == 0)]' \
+        "$AUTO_FILE" > "$AUTO_FILE.tmp"
+    mv "$AUTO_FILE.tmp" "$AUTO_FILE"
+fi
+
 issue_list in-progress-by-bot > "$ACTIVE_FILE"
 active_count="$(jq 'length' "$ACTIVE_FILE")"
 if [ "$max_repo_workers" -gt 0 ]; then

@@ -447,6 +447,42 @@ EOF
     [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==513) | .safety_gate.reason')" = "current_body_safety_block" ]
 }
 
+@test "AUTOSPEC_RUN_ONLY_ISSUES scopes the ready/batch queue to the given numbers" {
+    # write_auto_issue overwrites the fixture file, so build the full
+    # multi-issue batch fixture directly.
+    body_14="$(safe_body)
+## Implementation outline
+
+- edit \`c/scoped.sh\`
+"
+    body_13="$(safe_body)
+## Implementation outline
+
+- edit \`b/unscoped.sh\`
+"
+    body_12="$(safe_body)
+## Implementation outline
+
+- edit \`a/scoped.sh\`
+"
+    jq -n --arg b12 "$body_12" --arg b13 "$body_13" --arg b14 "$body_14" '
+      [
+        {number:12,title:"scoped-a",body:$b12,labels:[{name:"auto-implement"},{name:"safety:reviewed"}]},
+        {number:13,title:"unscoped",body:$b13,labels:[{name:"auto-implement"},{name:"safety:reviewed"}]},
+        {number:14,title:"scoped-b",body:$b14,labels:[{name:"auto-implement"},{name:"safety:reviewed"}]}
+      ]' > "$FIXTURE_DIR/auto.json"
+
+    output="$(AUTOSPEC_RUN_ONLY_ISSUES="12 14" run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(13) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.batch | map(.number) | index(13) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(12) != null')" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(14) != null')" = "true" ]
+
+    # Unset (or empty) AUTOSPEC_RUN_ONLY_ISSUES still drains #13.
+    output_unscoped="$(run_list_ready)"
+    [ "$(printf '%s' "$output_unscoped" | jq -r '.ready | map(.number) | index(13) != null')" = "true" ]
+}
+
 @test "trusted actor test database reset can enter ready queue" {
     body="$(safe_body)
 $(cat <<'EOF'
