@@ -1018,6 +1018,7 @@ fi'
         # missing yq/jq, or validation failure leaves _growth_enabled=0 and no
         # --growth-* flags are threaded into the waterfall call below.
         local _growth_enabled=0
+        local _growth_control_repo=""
         if [ -f "${_repo_root}/.autospec/growth.yml" ] && command -v yq >/dev/null 2>&1; then
             local _gv="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/validate-growth-config.sh"
             [ -f "$_gv" ] || _gv="${_sdir}/validate-growth-config.sh"
@@ -1030,11 +1031,16 @@ fi'
                     printf '%s' "$_gjson" > "$_gjson_tmp" 2>/dev/null || true
                     if bash "$_gv" "$_gjson_tmp" >/dev/null 2>&1; then
                         _growth_enabled=1
+                        # Repo that holds the growth/needs-approval control
+                        # issues (Tier G2's approval-servicing signal). Defaults
+                        # to the product repo when approval.control_repo is unset.
+                        _growth_control_repo="$(printf '%s' "$_gjson" | jq -r '.approval.control_repo // empty' 2>/dev/null || true)"
                     fi
                     rm -f "$_gjson_tmp" 2>/dev/null || true
                 fi
             fi
         fi
+        [ -n "$_growth_control_repo" ] || _growth_control_repo="$_repo"
 
         # ── GROWTH fold-in: cheap per-cycle state (only when enabled) ─────────
         # Each query is individually guarded: a `gh`/helper failure yields
@@ -1042,13 +1048,23 @@ fi'
         # loop down).
         local _growth_flags=""
         if [ "$_growth_enabled" = "1" ]; then
-            local _g_backlog _g_outbound _g_measure_due
+            local _g_backlog _g_outbound _g_approvals _g_outbound_pending _g_measure_due
             _g_backlog="$(gh issue list --repo "$_repo" --state open --label growth:artifact --json number --jq 'length' 2>/dev/null || echo '')"
             case "$_g_backlog" in *[!0-9]*) _g_backlog="" ;; esac
+            # Drafts awaiting R2 (product repo).
             _g_outbound="$(gh issue list --repo "$_repo" --state open --label growth/needs-draft --json number --jq 'length' 2>/dev/null || echo 0)"
             case "$_g_outbound" in *[!0-9]*) _g_outbound=0 ;; esac
+            # Human-decided approval control issues awaiting R3 (control repo).
+            # Spec Tier G2: service-growth-outbound must also fire on any open
+            # growth/needs-approval issue carrying a decision label. Without this,
+            # R3 only runs by accident of a still-open draft.
+            _g_approvals="$(gh issue list --repo "$_growth_control_repo" --state open --label growth/needs-approval --json labels \
+                --jq '[.[] | select(.labels | map(.name) | any(. == "growth/approved" or . == "growth/edited" or . == "growth/rejected"))] | length' 2>/dev/null || echo 0)"
+            case "$_g_approvals" in *[!0-9]*) _g_approvals=0 ;; esac
+            # Outbound tier fires on drafts-to-draft OR approvals-to-service.
+            _g_outbound_pending=$(( _g_outbound + _g_approvals ))
             _g_measure_due="$(bash "${_sdir}/growth-measure-due.sh" "$_repo_root" 2>/dev/null || echo 0)"
-            _growth_flags="--growth-enabled 1 --growth-outbound-pending ${_g_outbound:-0} --tierg-dry-cycles ${_tierg_dry_cycles:-0}"
+            _growth_flags="--growth-enabled 1 --growth-outbound-pending ${_g_outbound_pending:-0} --tierg-dry-cycles ${_tierg_dry_cycles:-0}"
             # if/then/fi, not `[ ] && ...`: a failing test short-circuits to a
             # non-zero statement exit under `set -e` and would abort the loop.
             if [ -n "$_g_backlog" ]; then

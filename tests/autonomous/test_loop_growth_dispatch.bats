@@ -264,3 +264,52 @@ YAML
   [ -f "$waterfall_args_log" ]
   grep -q -- '--growth-enabled 1' "$waterfall_args_log"
 }
+
+# ── Fix #2: approval control issues feed --growth-outbound-pending ─────────
+# Spec Tier G2: service-growth-outbound must fire on drafts-to-draft OR
+# growth/needs-approval control issues carrying a decision label — even with
+# ZERO open drafts. Without this the R3 approval-servicing tier never triggers.
+@test "decision-labeled needs-approval issues raise --growth-outbound-pending (no drafts)" {
+  _install_common_stubs
+  mkdir -p "$TEST_TMP/.autospec"
+  cat > "$TEST_TMP/.autospec/growth.yml" <<'YAML'
+product:
+  name: Acme
+site:
+  url: https://acme.dev
+  repo_path: .
+measurement: {}
+approval:
+  control_repo: acme/growth
+YAML
+  cp "$REPO_ROOT/skills/autospec-shared/scripts/validate-growth-config.sh" \
+    "$FAKE_SCRIPTS/validate-growth-config.sh"
+  chmod +x "$FAKE_SCRIPTS/validate-growth-config.sh"
+
+  # gh stub: 0 drafts (default []→coerced to 0), but the needs-approval query
+  # returns a count of 1 (a control issue carrying a decision label).
+  cat > "$FAKE_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+if printf '%s ' "$@" | grep -q 'growth/needs-approval'; then
+  echo 1; exit 0
+fi
+case "${1:-}" in
+  issue) echo "[]" ;;
+  repo)  echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
+  *)     exit 0 ;;
+esac
+EOF
+  chmod +x "$FAKE_BIN/gh"
+
+  local waterfall_args_log="$TEST_TMP/waterfall-args.log"
+  _install_stub "autonomous-waterfall.sh" \
+    "printf '%s\n' \"\$*\" >> '$waterfall_args_log'; printf '{\"tier\":1,\"action\":\"run-backlog\",\"reason\":\"test\"}\n'"
+  export AUTOSPEC_RUN_CMD="true"
+
+  _run_cycle
+
+  [ "$status" -eq 0 ]
+  [ -f "$waterfall_args_log" ]
+  # 0 drafts + 1 approval = pending 1, not 0.
+  grep -q -- '--growth-outbound-pending 1' "$waterfall_args_log"
+}

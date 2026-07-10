@@ -214,7 +214,10 @@ For each open `growth:outbound` (or `growth/needs-draft`) issue, in turn:
    followed by a `TIER_A` `growth-ethics` reviewer subagent, both wrapped in
    a **5-attempt adaptive-retry loop** (findings fed back as re-draft
    directives). If the gate is still blocked after 5 attempts, append a
-   `rejected` ledger line and move on — do not queue a blocked draft.
+   `rejected` ledger line, **retire the source issue** (remove its
+   `growth/needs-draft` label, add `growth/rejected`), and move on — do not
+   queue a blocked draft. Retiring it stops the conductor's outbound tier from
+   re-drafting the same hopeless issue every cycle.
 4. **Cadence check**:
    ```bash
    bash "$AUTOSPEC_SCRIPTS_DIR/growth-ethics-precheck.sh" --cadence <config.json> <ledger.jsonl> <platform>
@@ -232,8 +235,17 @@ For each open `growth:outbound` (or `growth/needs-draft`) issue, in turn:
    ```
 7. **File the control issue** — create a `growth/needs-approval` issue in
    `approval.control_repo` (from config) carrying the built body.
-8. Append a `pending` ledger line for the queued draft.
-9. Send a `PushNotification` so a human knows an approval is waiting.
+8. **Retire the source draft issue** — once the control issue is filed,
+   remove the `growth/needs-draft` label from the source `growth:outbound`
+   issue (and add `growth/queued`). This is load-bearing: the conductor's
+   outbound tier fires whenever an open `growth/needs-draft` issue exists, so
+   a source issue left labelled would be re-drafted every cycle — filing a
+   duplicate control issue and PushNotification each time, and starving the
+   define/measure tiers. Do this only on a successful queue (a cadence
+   *refusal* in step 4 intentionally leaves the label so the draft retries
+   when the venue's window reopens).
+9. Append a `pending` ledger line for the queued draft.
+10. Send a `PushNotification` so a human knows an approval is waiting.
 
 **Outbound is package-only.** This skill only ever prepares and files a
 draft for human approval — it never posts, submits, or publishes outbound
@@ -249,19 +261,31 @@ For each open `growth/needs-approval` control issue in `approval.control_repo`:
    ```bash
    bash "$AUTOSPEC_SCRIPTS_DIR/growth-outbound-queue.sh" --read-state <label-csv>
    ```
-2. Route by state:
+2. Route by state, then **clear the decision label** you just serviced so the
+   conductor's outbound tier does not re-service the same control issue every
+   cycle (the tier fires whenever a `growth/needs-approval` issue still carries
+   an `approved`/`edited`/`rejected` decision label):
    - **`approved`** — emit a one-click-publish package (the exact copy +
      target URL/venue + any submission metadata) as a **comment** on the
      control issue. The agent **never posts on the human's behalf** — the
-     comment is the deliverable. Only record a `published` ledger line
-     (with the resulting URL) after the human confirms publication
-     themselves (e.g. by pasting the live URL back into the issue, or by
-     applying a `published` label) — never infer publication.
+     comment is the deliverable. Then remove `growth/approved` and add
+     `growth/awaiting-publish` so the package is not re-emitted each cycle.
+     Only record a `published` ledger line (with the resulting URL) after the
+     human confirms publication themselves (e.g. by pasting the live URL back
+     into the issue, or by applying a `published` label) — never infer
+     publication. When you later see an `awaiting-publish` issue the human has
+     marked `published`, write the `published` ledger line and close it.
    - **`edited`** — treat the edited copy as a new draft: re-run the R2
      gate sequence (structural validation → ethics gate → cadence →
-     relevance) and re-queue.
+     relevance) and re-queue (which files a fresh control issue). Then close
+     this superseded control issue (removing `growth/edited`).
    - **`rejected`** — append a `rejected` ledger line and close out; do not
      retry automatically.
+
+Clearing the decision label (or closing the issue) on every branch is
+load-bearing: it is the R3-side mirror of R2's source-issue retirement, and it
+is what makes the shared `growth-outbound-pending` signal fall back to zero so
+Tier G3 (measure) and Tier G1 (define) are not starved.
 
 Reiterate the invariant: **the agent never auto-posts** anything to an
 external platform under any control-issue state, including `approved` —
