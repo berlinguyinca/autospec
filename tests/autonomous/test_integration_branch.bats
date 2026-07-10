@@ -21,7 +21,7 @@ case "${1:-}" in
             printf '%s\n' "$GIT_ROOT"
         elif [ "${2:-}" = "origin/main" ]; then
             state_get parent_sha
-        elif [ "${2:-}" = "autospec/autonomous-main" ]; then
+        elif [ "${2:-}" = "autospec/autonomous-main" ] || [ "${2:-}" = "autospec/autonomous-feat/x" ]; then
             state_get integration_sha
         else
             printf 'sha-%s\n' "${2:-HEAD}"
@@ -37,10 +37,15 @@ write_fake_git_refs() {
         exit 0
         ;;
     branch)
-        if [ "${2:-}" = "-f" ] && [ "$(state_get current_branch)" = "${3:-}" ]; then exit 7; fi
         exit 0
         ;;
-    push|checkout) exit 0 ;;
+    push)
+        if [ "$(state_get push_failure)" = "1" ]; then exit 8; fi
+        exit 0
+        ;;
+    checkout|worktree)
+        exit 0
+        ;;
     show-ref)
         if [ "$(state_get branch_exists)" = "1" ]; then exit 0; fi
         exit 1
@@ -59,18 +64,22 @@ write_fake_git_history() {
     cat <<'EOF'
     merge) if [ "$(state_get merge_conflict)" = "1" ]; then exit 1; fi ;;
     merge-base) state_get integration_sha ;;
+    rev-list)
+        if [ "$(state_get revlist_failure)" = "1" ]; then exit 6; fi
+        state_get merge_pr_count
+        ;;
     log)
         if [ "$(state_get log_failure)" = "1" ]; then exit 3; fi
         state_get age_epoch
         ;;
     diff)
         if [ "$(state_get diff_failure)" = "1" ]; then exit 4; fi
-        i=0
-        lines="$(state_get diff_lines)"
-        while [ "$i" -lt "$lines" ]; do
-            printf 'diff line %s\n' "$i"
-            i=$((i + 1))
-        done
+        added="$(state_get diff_added)"
+        deleted="$(state_get diff_deleted)"
+        printf '%s\t%s\tfile.txt\n' "$added" "$deleted"
+        ;;
+    config)
+        printf 'https://github.com/berlinguyinca/autospec.git\n'
         ;;
 EOF
 }
@@ -96,9 +105,6 @@ case "${1:-} ${2:-}" in
             *" --head autospec/autonomous-main --base main "*)
                 cat "$GH_ROLLUP_JSON"
                 ;;
-            *" --base autospec/autonomous-main "*)
-                cat "$GH_ACCUMULATED_JSON"
-                ;;
             *)
                 printf '[]\n'
                 ;;
@@ -113,9 +119,13 @@ EOF
 }
 
 write_fake_state() {
-    printf 'parent_sha=parent111\nintegration_sha=integration222\nbranch_exists=0\nmerge_conflict=0\ndiff_lines=12\nage_epoch=1700000000\nlog_failure=0\ndiff_failure=0\nfetch_failure=0\ncurrent_branch=main\n' > "$GIT_STATE"
+    printf 'parent_sha=parent111\nintegration_sha=integration222\nbranch_exists=0\nmerge_conflict=0\ndiff_added=8\ndiff_deleted=4\nage_epoch=1700000000\nlog_failure=0\ndiff_failure=0\nfetch_failure=0\npush_failure=0\nrevlist_failure=0\nmerge_pr_count=3\ncurrent_branch=main\n' > "$GIT_STATE"
     printf '[{"number":77,"state":"OPEN"}]\n' > "$GH_ROLLUP_JSON"
-    printf '[{"number":11},{"number":12},{"number":13}]\n' > "$GH_ACCUMULATED_JSON"
+}
+
+setup_file() {
+    REAL_GIT_BIN="$(command -v git)"
+    export REAL_GIT_BIN
 }
 
 setup() {
@@ -130,7 +140,6 @@ setup() {
     export GIT_STATE="$TMP/git-state"
     export GIT_ROOT="$TMP/repo"
     export GH_ROLLUP_JSON="$TMP/gh-rollup.json"
-    export GH_ACCUMULATED_JSON="$TMP/gh-accumulated.json"
     export GH_FAILURE=0
     export AUTOSPEC_CONFIG_FILE="$TMP/autospec.yml"
     export PATH="$FAKE_BIN:$PATH"
@@ -176,15 +185,71 @@ YAML
     [ "$(jq -r '.base' "$GIT_ROOT/.autospec/explore-mode.json")" = "dev" ]
 }
 
+@test "ensure accepts nested parent branch names" {
+    run bash "$SCRIPT" ensure --parent feat/x --repo example/repo
+
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.branch' "$GIT_ROOT/.autospec/explore-mode.json")" = "autospec/autonomous-feat/x" ]
+    [ "$(jq -r '.base' "$GIT_ROOT/.autospec/explore-mode.json")" = "feat/x" ]
+}
+
+@test "ensure refuses to clobber a conflicting explore-mode.json" {
+    mkdir -p "$GIT_ROOT/.autospec"
+    printf '{"branch":"autospec/explore/2026-01-01-abc","slug":"x/y","base":"main","head_sha":"abc","kind":"explore"}\n' \
+        > "$GIT_ROOT/.autospec/explore-mode.json"
+
+    run bash "$SCRIPT" ensure --parent main --repo berlinguyinca/autospec
+
+    [ "$status" -eq 6 ]
+    [[ "$output" == *"code_health:integration_mode_conflict"* ]]
+    [ "$(jq -r '.kind' "$GIT_ROOT/.autospec/explore-mode.json")" = "explore" ]
+}
+
+@test "ensure is idempotent when the mode file already records this integration branch" {
+    mkdir -p "$GIT_ROOT/.autospec"
+    printf '{"branch":"autospec/autonomous-main","slug":"berlinguyinca/autospec","base":"main","head_sha":"old","kind":"integration"}\n' \
+        > "$GIT_ROOT/.autospec/explore-mode.json"
+
+    run bash "$SCRIPT" ensure --parent main --repo berlinguyinca/autospec
+
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.head_sha' "$GIT_ROOT/.autospec/explore-mode.json")" = "integration222" ]
+}
+
+@test "ensure --takeover overwrites a conflicting explore-mode.json" {
+    mkdir -p "$GIT_ROOT/.autospec"
+    printf '{"branch":"autospec/explore/2026-01-01-abc","slug":"x/y","base":"main","head_sha":"abc","kind":"explore"}\n' \
+        > "$GIT_ROOT/.autospec/explore-mode.json"
+
+    run bash "$SCRIPT" ensure --parent main --repo berlinguyinca/autospec --takeover
+
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.kind' "$GIT_ROOT/.autospec/explore-mode.json")" = "integration" ]
+    [ "$(jq -r '.branch' "$GIT_ROOT/.autospec/explore-mode.json")" = "autospec/autonomous-main" ]
+}
+
+@test "sync happy path merges parent tip in a temp worktree and pushes the integration branch" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+
+    run bash "$SCRIPT" sync --parent main --repo example/repo
+
+    [ "$status" -eq 0 ]
+    grep -q 'worktree add --detach' "$GIT_CALLS"
+    grep -q 'merge --no-edit origin/main' "$GIT_CALLS"
+    grep -q 'push origin HEAD:autospec/autonomous-main' "$GIT_CALLS"
+    ! grep -q '^checkout autospec/autonomous-main$' "$GIT_CALLS"
+}
+
 @test "sync aborts conflicted parent merge and exits 65" {
     printf 'branch_exists=1\nmerge_conflict=1\n' >> "$GIT_STATE"
 
     run bash "$SCRIPT" sync --parent main
 
     [ "$status" -eq 65 ]
-    grep -q 'checkout autospec/autonomous-main' "$GIT_CALLS"
+    grep -q 'worktree add --detach' "$GIT_CALLS"
     grep -q 'merge --no-edit origin/main' "$GIT_CALLS"
     grep -q 'merge --abort' "$GIT_CALLS"
+    ! grep -q '^push ' "$GIT_CALLS"
 }
 
 @test "ensure fails when parent fetch fails before branch creation" {
@@ -210,23 +275,37 @@ YAML
     ! grep -q '^push ' "$GIT_CALLS"
 }
 
-@test "reset recreates integration branch from new parent tip" {
-    run bash "$SCRIPT" reset --parent main
+@test "sync fails closed when the push fails" {
+    printf 'branch_exists=1\npush_failure=1\n' >> "$GIT_STATE"
 
-    [ "$status" -eq 0 ]
-    grep -q 'checkout -B autospec/autonomous-main origin/main' "$GIT_CALLS"
-    grep -q 'push -u origin autospec/autonomous-main' "$GIT_CALLS"
+    run bash "$SCRIPT" sync --parent main
+
+    [ "$status" -ne 0 ]
+    grep -q 'merge --no-edit origin/main' "$GIT_CALLS"
 }
 
-@test "reset works when integration branch is already checked out" {
-    printf 'current_branch=autospec/autonomous-main\n' >> "$GIT_STATE"
+@test "reset recreates integration branch from new parent tip when no rollup pr is open" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '[]\n' > "$GH_ROLLUP_JSON"
 
-    run bash "$SCRIPT" reset --parent main
+    run bash "$SCRIPT" reset --parent main --repo example/repo
 
     [ "$status" -eq 0 ]
-    grep -q 'checkout -B autospec/autonomous-main origin/main' "$GIT_CALLS"
-    ! grep -q '^branch -f autospec/autonomous-main ' "$GIT_CALLS"
-    grep -q 'push -u origin autospec/autonomous-main' "$GIT_CALLS"
+    grep -q 'worktree add --detach' "$GIT_CALLS"
+    grep -q 'push origin :autospec/autonomous-main' "$GIT_CALLS"
+    grep -q 'push origin HEAD:autospec/autonomous-main' "$GIT_CALLS"
+}
+
+@test "reset refuses when the rollup pr is still open" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '[{"number":77,"state":"OPEN"}]\n' > "$GH_ROLLUP_JSON"
+
+    run bash "$SCRIPT" reset --parent main --repo berlinguyinca/autospec
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"code_health:integration_reset_rollup_open"* ]]
+    ! grep -q '^push ' "$GIT_CALLS"
+    ! grep -q 'worktree add' "$GIT_CALLS"
 }
 
 @test "reset fails when parent fetch fails before branch reset" {
@@ -236,11 +315,11 @@ YAML
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"autonomous_integration_parent_fetch_failed"* ]]
-    ! grep -q '^checkout -B ' "$GIT_CALLS"
     ! grep -q '^push ' "$GIT_CALLS"
+    ! grep -q 'worktree add' "$GIT_CALLS"
 }
 
-@test "status emits rollup pr, accumulated worker count, age days, and diff lines" {
+@test "status emits rollup pr, current-cycle merged pr count, age days, and diff lines" {
     printf 'branch_exists=1\n' >> "$GIT_STATE"
 
     run bash "$SCRIPT" status --parent main
@@ -252,8 +331,8 @@ YAML
     [ "$(printf '%s' "$output" | jq -r '.accumulated_pr_count')" = "3" ]
     [ "$(printf '%s' "$output" | jq -r '.diff_lines')" = "12" ]
     [ "$(printf '%s' "$output" | jq -r '.age_days >= 0')" = "true" ]
-    grep -q 'pr list --repo berlinguyinca/autospec --head autospec/autonomous-main --base main --state all --json number,state' "$GH_CALLS"
-    grep -q 'pr list --repo berlinguyinca/autospec --base autospec/autonomous-main --state all --json number' "$GH_CALLS"
+    grep -q 'pr list --repo berlinguyinca/autospec --head autospec/autonomous-main --base main --state open --json number,state' "$GH_CALLS"
+    grep -q 'rev-list --count --merges origin/main..autospec/autonomous-main' "$GIT_CALLS"
 }
 
 @test "status succeeds with explicit empty rollup pr when no rollup exists" {
@@ -294,4 +373,46 @@ YAML
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"status probe failed"* ]]
+}
+
+@test "--parent with a missing value dies instead of silently defaulting" {
+    run bash "$SCRIPT" ensure --parent
+
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--parent requires a value"* ]]
+}
+
+@test "sync leaves the caller checkout's HEAD and branch untouched (real git)" {
+    real_root="$TMP/realrepo"
+    origin_git="$TMP/origin.git"
+    mkdir -p "$real_root"
+    "$REAL_GIT_BIN" init -q -b main "$real_root"
+    ( cd "$real_root" && "$REAL_GIT_BIN" commit -q --allow-empty -m init )
+    "$REAL_GIT_BIN" init -q --bare "$origin_git"
+    ( cd "$real_root" && "$REAL_GIT_BIN" remote add origin "$origin_git" )
+    ( cd "$real_root" && "$REAL_GIT_BIN" push -q origin main )
+    ( cd "$real_root" && "$REAL_GIT_BIN" branch autospec/autonomous-main main )
+    ( cd "$real_root" && "$REAL_GIT_BIN" push -q origin autospec/autonomous-main )
+    ( cd "$real_root" && "$REAL_GIT_BIN" commit -q --allow-empty -m parent-advance )
+    ( cd "$real_root" && "$REAL_GIT_BIN" push -q origin main )
+    ( cd "$real_root" && "$REAL_GIT_BIN" checkout -q main )
+
+    head_before="$(cd "$real_root" && "$REAL_GIT_BIN" rev-parse HEAD)"
+    branch_before="$(cd "$real_root" && "$REAL_GIT_BIN" branch --show-current)"
+
+    real_git_dir="$(dirname "$REAL_GIT_BIN")"
+    PATH="$real_git_dir:$FAKE_BIN:$PATH" run bash -c \
+        "cd '$real_root' && bash '$SCRIPT' sync --parent main --repo example/repo"
+
+    [ "$status" -eq 0 ]
+
+    head_after="$(cd "$real_root" && "$REAL_GIT_BIN" rev-parse HEAD)"
+    branch_after="$(cd "$real_root" && "$REAL_GIT_BIN" branch --show-current)"
+
+    [ "$head_before" = "$head_after" ]
+    [ "$branch_before" = "$branch_after" ]
+
+    remote_integration_sha="$(cd "$real_root" && "$REAL_GIT_BIN" ls-remote origin autospec/autonomous-main | cut -f1)"
+    remote_main_sha="$(cd "$real_root" && "$REAL_GIT_BIN" ls-remote origin main | cut -f1)"
+    [ "$remote_integration_sha" = "$remote_main_sha" ]
 }
