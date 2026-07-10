@@ -66,7 +66,16 @@ SH
 printf '%s\n' "$*" >> "$GH_LOG"
 case "$*" in
   *"label create"*) exit 0 ;;
-  *"issue create"*) printf 'https://github.com/berlinguyinca/autospec/issues/999\n'; exit 0 ;;
+  *"issue create"*)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--body-file" ]; then
+        cp "$2" "$GH_BODY"
+      fi
+      shift
+    done
+    printf 'https://github.com/berlinguyinca/autospec/issues/999\n'
+    exit 0
+    ;;
   *"repo view"*) printf 'berlinguyinca/autospec\n'; exit 0 ;;
 esac
 exit 0
@@ -74,6 +83,7 @@ SH
     chmod +x "$TMP/bin/gh"
     export PATH="$TMP/bin:$PATH"
     export GH_LOG="$TMP/gh.log"
+    export GH_BODY="$TMP/body.md"
     export AUTOSPEC_SELF_IMPROVEMENT_APPLY=1
 
     run bash "$SCRIPT" apply --repo-root "$TMP/repo" --repo berlinguyinca/autospec --apply --limit 1
@@ -83,5 +93,13 @@ SH
     [ "$(printf '%s' "$output" | jq -r '.filed')" = "1" ]
     grep -q 'issue create' "$GH_LOG"
     grep -q 'needs-classify' "$GH_LOG"
+    grep -q '^## Acceptance criteria$' "$GH_BODY"
+    bash "$REPO_ROOT/scripts/lint-issue.sh" "$GH_BODY"
+    [ "$(awk '
+        /### Primary smoke test \(inner loop\)/ { in_smoke=1; next }
+        in_smoke && /^```/ { fence++; next }
+        in_smoke && fence == 1 && NF && $0 !~ /^[[:space:]]*#/ { count++ }
+        in_smoke && fence == 2 { print count + 0; exit }
+    ' "$GH_BODY")" = "1" ]
 }
 
