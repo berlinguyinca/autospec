@@ -577,3 +577,63 @@ EOF
     # WARN surfaced to stderr (bats merges into $output).
     printf '%s\n' "$output" | grep -q "WARN: could not parse"
 }
+
+# ─── 20. Native PASS verdict is authoritative over the skill's own [medium] ───
+#         advisory stdout lines (autospec #1718 / autotrade #1350 AC #3). The qa
+#         skill emits "[medium]" process advisories (dirty-git-status,
+#         missing-manifest) it itself marks non-blocking; the legacy stdout grep
+#         used to block them, overriding the native PASS. It must not.
+
+@test "qa-verdict.json verdict=PASS + [medium] advisory stdout → merge-ok" {
+    cat > "$TMP/bin/autospec-qa" <<'EOF'
+#!/usr/bin/env bash
+printf -- '- [medium] dirty-git-status / current-branch-regression — working tree has uncommitted changes\n'
+printf -- '- [medium] package-manager-scripts / autospec-process-gap — missing package manager manifest\n'
+exit 0
+EOF
+    chmod +x "$TMP/bin/autospec-qa"
+
+    _seed_repo
+    cat > "$TMP/repo/.autospec/qa-verdict.json" <<'EOF'
+{"verdict":"PASS","findings":[{"id":"F1","release_blocking":false}]}
+EOF
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^merge-ok$"
+}
+
+# ─── 21. Backstop: even with a native PASS verdict, a high/severe/critical ────
+#         stdout token still blocks (guards against a verdict that under-reports
+#         a real severe finding). Only [medium] is demoted, not high/critical.
+
+@test "qa-verdict.json verdict=PASS but critical stdout token still blocks" {
+    cat > "$TMP/bin/autospec-qa" <<'EOF'
+#!/usr/bin/env bash
+printf 'severity: critical — hardcoded private key committed to source\n'
+exit 0
+EOF
+    chmod +x "$TMP/bin/autospec-qa"
+
+    _seed_repo
+    cat > "$TMP/repo/.autospec/qa-verdict.json" <<'EOF'
+{"verdict":"PASS","findings":[{"id":"F1","release_blocking":false}]}
+EOF
+
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+    # Single attempt so the backstop-block is observed without a fix loop.
+    run bash "$SCRIPT" \
+        --pr-branch "feat/test-branch" \
+        --max-attempts 1 \
+        --notify-sh "$TMP/bin/notify.sh"
+
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -qv "^merge-ok$"
+}
