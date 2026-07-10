@@ -9,7 +9,7 @@ provider="$(jq -r '.measurement.analytics.provider // "plausible"' "$cfg")"
 site="$(jq -r '.measurement.analytics.site // ""' "$cfg")"
 tok_env="$(jq -r '.measurement.analytics.token_env // "PLAUSIBLE_API_TOKEN"' "$cfg")"
 [ -n "$site" ] || { echo "analytics adapter: .measurement.analytics.site missing" >&2; exit 1; }
-tok="$(eval "printf '%s' \"\${$tok_env:-}\"")"
+tok="${!tok_env:-}"
 [ -n "$tok" ] || { echo "analytics adapter: \$$tok_env unset (fail-closed)" >&2; exit 1; }
 case "$provider" in
   plausible) url="https://plausible.io/api/v1/stats/aggregate?site_id=$site&metrics=visitors,pageviews" ;;
@@ -18,6 +18,7 @@ case "$provider" in
 esac
 fetch="${GROWTH_FETCH_CMD:-curl -fsSL}"
 raw="$($fetch "$url")" || { echo "analytics adapter: fetch failed" >&2; exit 1; }
+trap 'rm -f "${tmp:-}"' EXIT
 tmp="$(mktemp)"; printf '%s' "$raw" > "$tmp"
 bash "$here/growth-measure.sh" --normalize analytics "$tmp"
 rm -f "$tmp"

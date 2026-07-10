@@ -8,11 +8,12 @@ here="$(cd "$(dirname "$0")" && pwd)"
 site="$(jq -r '.measurement.gsc.site // ""' "$cfg")"
 tok_env="$(jq -r '.measurement.gsc.token_env // "GSC_TOKEN"' "$cfg")"
 [ -n "$site" ] || { echo "gsc adapter: .measurement.gsc.site missing" >&2; exit 1; }
-tok="$(eval "printf '%s' \"\${$tok_env:-}\"")"
+tok="${!tok_env:-}"
 [ -n "$tok" ] || { echo "gsc adapter: \$$tok_env unset (fail-closed)" >&2; exit 1; }
 url="https://searchconsole.googleapis.com/webmasters/v3/sites/$site/searchAnalytics/query"
 fetch="${GROWTH_FETCH_CMD:-curl -fsSL}"
 raw="$($fetch "$url")" || { echo "gsc adapter: fetch failed" >&2; exit 1; }
+trap 'rm -f "${tmp:-}"' EXIT
 tmp="$(mktemp)"; printf '%s' "$raw" > "$tmp"
 bash "$here/growth-measure.sh" --normalize gsc "$tmp"
 rm -f "$tmp"
