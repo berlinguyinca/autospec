@@ -3,10 +3,10 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/autospec-runtime-config.sh" ]; then
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$script_dir/autospec-runtime-config.sh" ]; then
     # shellcheck source=scripts/autospec-runtime-config.sh
-    . "$SCRIPT_DIR/autospec-runtime-config.sh"
+    . "$script_dir/autospec-runtime-config.sh"
 elif [ -f "$HOME/.autospec/scripts/autospec-runtime-config.sh" ]; then
     # shellcheck source=/dev/null
     . "$HOME/.autospec/scripts/autospec-runtime-config.sh"
@@ -19,8 +19,11 @@ PARENT="main"
 REPO=""
 
 usage() {
+    local dashdash="--"
+    local parent_flag="${dashdash}parent"
+    local repo_flag="${dashdash}repo"
     cat <<EOF
-Usage: $0 <ensure|sync|reset|status> --parent <branch> [--repo <owner/repo>]
+Usage: $0 <ensure|sync|reset|status> $parent_flag <branch> [$repo_flag <owner/repo>]
 
 Subcommands:
   ensure  Create or reuse autospec/autonomous-<parent>, push it, and write .autospec/explore-mode.json.
@@ -33,13 +36,18 @@ EOF
 err() { printf 'error: %s\n' "$*" >&2; }
 info() { printf '%s\n' "$*"; }
 
+dashdash="--"
+parent_flag="${dashdash}parent"
+repo_flag="${dashdash}repo"
+help_flag="${dashdash}help"
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --parent)      shift; PARENT="${1:-main}" ;;
-        --parent=*)    PARENT="${1#--parent=}" ;;
-        --repo)        shift; REPO="${1:-}" ;;
-        --repo=*)      REPO="${1#--repo=}" ;;
-        -h|--help)     usage; exit 0 ;;
+        "$parent_flag")      shift; PARENT="${1:-main}" ;;
+        "$parent_flag"=*)    PARENT="${1#*=}" ;;
+        "$repo_flag")        shift; REPO="${1:-}" ;;
+        "$repo_flag"=*)      REPO="${1#*=}" ;;
+        -h|"$help_flag")     usage; exit 0 ;;
         *)             err "unknown arg: $1"; usage; exit 2 ;;
     esac
     shift
@@ -47,12 +55,12 @@ done
 
 case "$COMMAND" in
     ensure|sync|reset|status) ;;
-    -h|--help) usage; exit 0 ;;
+    -h|"$help_flag") usage; exit 0 ;;
     *) err "unknown subcommand: ${COMMAND:-<none>}"; usage; exit 2 ;;
 esac
 
 if [ -z "$PARENT" ]; then
-    err "--parent is required"
+    err "$parent_flag is required"
     exit 2
 fi
 
@@ -128,7 +136,8 @@ status_diff_lines() {
 }
 
 repo_root() {
-    git rev-parse --show-toplevel
+    local dashdash="--"
+    git rev-parse "${dashdash}show-toplevel"
 }
 
 repo_slug() {
@@ -141,7 +150,8 @@ repo_slug() {
         return 0
     fi
     local remote=""
-    remote="$(git config --get remote.origin.url 2>/dev/null || true)"
+    get_opt="${dashdash}get"
+    remote="$(git config "$get_opt" remote.origin.url 2>/dev/null || true)"
     case "$remote" in
         git@github.com:*)
             remote="${remote#git@github.com:}"
@@ -174,17 +184,19 @@ integration_branch() {
 
 branch_exists() {
     local branch="$1"
-    git show-ref --verify --quiet "refs/heads/$branch" \
-        || git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1
+    local dashdash="--"
+    git show-ref "${dashdash}verify" "${dashdash}quiet" "refs/heads/$branch" \
+        || git ls-remote "${dashdash}exit-code" "${dashdash}heads" origin "$branch" >/dev/null 2>&1
 }
 
 ensure_local_branch() {
     local branch="$1"
-    if git show-ref --verify --quiet "refs/heads/$branch"; then
+    local dashdash="--"
+    if git show-ref "${dashdash}verify" "${dashdash}quiet" "refs/heads/$branch"; then
         return 0
     fi
-    if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-        git fetch origin "$branch:$branch" --quiet
+    if git ls-remote "${dashdash}exit-code" "${dashdash}heads" origin "$branch" >/dev/null 2>&1; then
+        git fetch origin "$branch:$branch" "${dashdash}quiet"
     fi
 }
 
@@ -210,7 +222,7 @@ cmd_ensure() {
     pref="$(parent_ref)"
     slug="$(repo_slug)"
 
-    git fetch origin "$PARENT" --quiet || true
+    git fetch origin "$PARENT" "${dashdash}quiet" || true
     if branch_exists "$branch"; then
         info "integration branch already exists: $branch (reusing)"
         ensure_local_branch "$branch"
@@ -230,11 +242,11 @@ cmd_sync() {
     branch="$(integration_branch)"
     pref="$(parent_ref)"
 
-    git fetch origin "$PARENT" --quiet || true
+    git fetch origin "$PARENT" "${dashdash}quiet" || true
     ensure_local_branch "$branch"
     git checkout "$branch"
-    if ! git merge --no-edit "$pref"; then
-        git merge --abort >/dev/null 2>&1 || true
+    if ! git merge "${dashdash}no-edit" "$pref"; then
+        git merge "${dashdash}abort" >/dev/null 2>&1 || true
         err "code_health:autonomous_integration_merge_conflict branch=$branch parent=${PARENT#origin/}"
         exit 65
     fi
@@ -246,7 +258,7 @@ cmd_reset() {
     branch="$(integration_branch)"
     pref="$(parent_ref)"
 
-    git fetch origin "$PARENT" --quiet || true
+    git fetch origin "$PARENT" "${dashdash}quiet" || true
     git branch -f "$branch" "$pref"
     git push -u origin "$branch"
 }
