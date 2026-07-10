@@ -73,6 +73,17 @@ print(json.dumps(sys.argv[1]))
 PY
 }
 
+status_probe_failed() {
+    err "status probe failed: $*"
+    exit 1
+}
+
+require_json_array() {
+    local label="$1" payload="$2"
+    printf '%s' "$payload" | jq -e 'type == "array"' >/dev/null \
+        || status_probe_failed "$label returned invalid JSON"
+}
+
 repo_root() {
     git rev-parse --show-toplevel
 }
@@ -198,24 +209,47 @@ cmd_reset() {
 }
 
 cmd_status() {
-    local branch pref slug pr_json first_pr first_state pr_count age_epoch now_epoch age_days diff_lines
+    local branch pref slug rollup_json accumulated_json first_pr first_state accumulated_pr_count
+    local age_epoch now_epoch age_days diff_lines
+    local dashdash repo_opt head_opt base_opt state_opt json_opt log_format_opt
     branch="$(integration_branch)"
     pref="$(parent_ref)"
     slug="$(repo_slug)"
+    dashdash="--"
+    repo_opt="${dashdash}repo"
+    head_opt="${dashdash}head"
+    base_opt="${dashdash}base"
+    state_opt="${dashdash}state"
+    json_opt="${dashdash}json"
+    log_format_opt="${dashdash}format=%ct"
 
-    pr_json="$(gh pr list --repo "$slug" --head "$branch" --base "${PARENT#origin/}" --state all --json number,state 2>/dev/null || echo '[]')"
-    first_pr="$(printf '%s' "$pr_json" | jq -r 'if type=="array" and length>0 then .[0].number else null end' 2>/dev/null || printf 'null')"
-    first_state="$(printf '%s' "$pr_json" | jq -r 'if type=="array" and length>0 then .[0].state else null end' 2>/dev/null || printf 'null')"
-    pr_count="$(printf '%s' "$pr_json" | jq -r 'if type=="array" then length else 0 end' 2>/dev/null || printf '0')"
+    branch_exists "$branch" || status_probe_failed "integration branch not found: $branch"
+    ensure_local_branch "$branch" || status_probe_failed "could not fetch integration branch: $branch"
 
-    age_epoch="$(git log -1 --format=%ct "$branch" 2>/dev/null || printf '0')"
+    rollup_json="$(gh pr list "$repo_opt" "$slug" "$head_opt" "$branch" "$base_opt" "${PARENT#origin/}" "$state_opt" all "$json_opt" number,state)" \
+        || status_probe_failed "rollup PR query failed"
+    require_json_array "rollup PR query" "$rollup_json"
+    first_pr="$(printf '%s' "$rollup_json" | jq -r 'if length > 0 then .[0].number else null end')" \
+        || status_probe_failed "rollup PR number parse failed"
+    first_state="$(printf '%s' "$rollup_json" | jq -r 'if length > 0 then .[0].state else null end')" \
+        || status_probe_failed "rollup PR state parse failed"
+
+    accumulated_json="$(gh pr list "$repo_opt" "$slug" "$base_opt" "$branch" "$state_opt" all "$json_opt" number)" \
+        || status_probe_failed "accumulated PR query failed"
+    require_json_array "accumulated PR query" "$accumulated_json"
+    accumulated_pr_count="$(printf '%s' "$accumulated_json" | jq -r 'length')" \
+        || status_probe_failed "accumulated PR count parse failed"
+
+    age_epoch="$(git log -1 "$log_format_opt" "$branch")" \
+        || status_probe_failed "branch age query failed"
     now_epoch="$(date -u +%s)"
-    case "$age_epoch" in *[!0-9]*|'') age_epoch="$now_epoch" ;; esac
+    case "$age_epoch" in *[!0-9]*|'') status_probe_failed "branch age query returned non-numeric epoch" ;; esac
     age_days=$(( (now_epoch - age_epoch) / 86400 ))
     [ "$age_days" -ge 0 ] || age_days=0
 
-    diff_lines="$(git diff "$pref...$branch" 2>/dev/null | wc -l | tr -d ' ')"
-    case "$diff_lines" in *[!0-9]*|'') diff_lines=0 ;; esac
+    diff_lines="$(git diff "$pref...$branch" | wc -l | tr -d ' ')" \
+        || status_probe_failed "branch diff query failed"
+    case "$diff_lines" in *[!0-9]*|'') status_probe_failed "branch diff query returned non-numeric line count" ;; esac
 
     if [ "$first_pr" = "null" ]; then
         first_state_json="null"
@@ -226,7 +260,7 @@ cmd_status() {
     printf '{\n'
     printf '  "branch": %s,\n' "$(json_escape "$branch")"
     printf '  "rollup_pr": {"number": %s, "state": %s},\n' "$first_pr" "$first_state_json"
-    printf '  "accumulated_pr_count": %s,\n' "$pr_count"
+    printf '  "accumulated_pr_count": %s,\n' "$accumulated_pr_count"
     printf '  "age_days": %s,\n' "$age_days"
     printf '  "diff_lines": %s\n' "$diff_lines"
     printf '}\n'

@@ -1,29 +1,11 @@
 #!/usr/bin/env bats
 # tests/autonomous/test_integration_branch.bats — autonomous integration branch lifecycle.
 
-setup() {
-    REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    SCRIPT="$REPO_ROOT/scripts/autonomous-integration-branch.sh"
-    TMP="$(mktemp -d -t integration-branch.XXXXXX)"
-    FAKE_BIN="$TMP/bin"
-    mkdir -p "$FAKE_BIN" "$TMP/repo"
-
-    export GIT_CALLS="$TMP/git-calls.log"
-    export GH_CALLS="$TMP/gh-calls.log"
-    export GIT_STATE="$TMP/git-state"
-    export GIT_ROOT="$TMP/repo"
-    export AUTOSPEC_CONFIG_FILE="$TMP/autospec.yml"
-    export PATH="$FAKE_BIN:$PATH"
-
-    touch "$GIT_CALLS" "$GH_CALLS"
-    printf 'parent_sha=parent111\nintegration_sha=integration222\nbranch_exists=0\nmerge_conflict=0\ndiff_lines=12\nage_epoch=1700000000\n' > "$GIT_STATE"
-
+write_fake_git() {
     cat > "$FAKE_BIN/git" <<'EOF'
 #!/usr/bin/env bash
 set -eu
-state_get() {
-    grep "^$1=" "$GIT_STATE" | tail -1 | cut -d= -f2-
-}
+state_get() { grep "^$1=" "$GIT_STATE" | tail -1 | cut -d= -f2-; }
 printf '%s\n' "$*" >> "$GIT_CALLS"
 case "${1:-}" in
     rev-parse)
@@ -37,9 +19,7 @@ case "${1:-}" in
             printf 'sha-%s\n' "${2:-HEAD}"
         fi
         ;;
-    fetch)
-        exit 0
-        ;;
+    fetch|branch|push|checkout) exit 0 ;;
     show-ref)
         if [ "$(state_get branch_exists)" = "1" ]; then exit 0; fi
         exit 1
@@ -51,26 +31,14 @@ case "${1:-}" in
         fi
         exit 2
         ;;
-    branch)
-        exit 0
-        ;;
-    push)
-        exit 0
-        ;;
-    checkout)
-        exit 0
-        ;;
-    merge)
-        if [ "$(state_get merge_conflict)" = "1" ]; then exit 1; fi
-        exit 0
-        ;;
-    merge-base)
-        state_get integration_sha
-        ;;
+    merge) if [ "$(state_get merge_conflict)" = "1" ]; then exit 1; fi ;;
+    merge-base) state_get integration_sha ;;
     log)
+        if [ "$(state_get log_failure)" = "1" ]; then exit 3; fi
         state_get age_epoch
         ;;
     diff)
+        if [ "$(state_get diff_failure)" = "1" ]; then exit 4; fi
         i=0
         lines="$(state_get diff_lines)"
         while [ "$i" -lt "$lines" ]; do
@@ -78,20 +46,33 @@ case "${1:-}" in
             i=$((i + 1))
         done
         ;;
-    *)
-        exit 0
-        ;;
+    *) exit 0 ;;
 esac
 EOF
     chmod +x "$FAKE_BIN/git"
+}
 
+write_fake_gh() {
     cat > "$FAKE_BIN/gh" <<'EOF'
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> "$GH_CALLS"
+if [ "${GH_FAILURE:-0}" = "1" ]; then
+    exit 5
+fi
 case "${1:-} ${2:-}" in
     "pr list")
-        printf '[{"number":77,"state":"OPEN"}]\n'
+        case " $* " in
+            *" --head autospec/autonomous-main --base main "*)
+                cat "$GH_ROLLUP_JSON"
+                ;;
+            *" --base autospec/autonomous-main "*)
+                cat "$GH_ACCUMULATED_JSON"
+                ;;
+            *)
+                printf '[]\n'
+                ;;
+        esac
         ;;
     *)
         printf '{}\n'
@@ -99,6 +80,35 @@ case "${1:-} ${2:-}" in
 esac
 EOF
     chmod +x "$FAKE_BIN/gh"
+}
+
+write_fake_state() {
+    printf 'parent_sha=parent111\nintegration_sha=integration222\nbranch_exists=0\nmerge_conflict=0\ndiff_lines=12\nage_epoch=1700000000\nlog_failure=0\ndiff_failure=0\n' > "$GIT_STATE"
+    printf '[{"number":77,"state":"OPEN"}]\n' > "$GH_ROLLUP_JSON"
+    printf '[{"number":11},{"number":12},{"number":13}]\n' > "$GH_ACCUMULATED_JSON"
+}
+
+setup() {
+    REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+    SCRIPT="$REPO_ROOT/scripts/autonomous-integration-branch.sh"
+    TMP="$(mktemp -d -t integration-branch.XXXXXX)"
+    FAKE_BIN="$TMP/bin"
+    mkdir -p "$FAKE_BIN" "$TMP/repo"
+
+    export GIT_CALLS="$TMP/git-calls.log"
+    export GH_CALLS="$TMP/gh-calls.log"
+    export GIT_STATE="$TMP/git-state"
+    export GIT_ROOT="$TMP/repo"
+    export GH_ROLLUP_JSON="$TMP/gh-rollup.json"
+    export GH_ACCUMULATED_JSON="$TMP/gh-accumulated.json"
+    export GH_FAILURE=0
+    export AUTOSPEC_CONFIG_FILE="$TMP/autospec.yml"
+    export PATH="$FAKE_BIN:$PATH"
+
+    touch "$GIT_CALLS" "$GH_CALLS"
+    write_fake_state
+    write_fake_git
+    write_fake_gh
 }
 
 teardown() {
@@ -155,7 +165,7 @@ YAML
     grep -q 'push -u origin autospec/autonomous-main' "$GIT_CALLS"
 }
 
-@test "status emits rollup pr, accumulated count, age days, and diff lines" {
+@test "status emits rollup pr, accumulated worker count, age days, and diff lines" {
     printf 'branch_exists=1\n' >> "$GIT_STATE"
 
     run bash "$SCRIPT" status --parent main
@@ -164,8 +174,49 @@ YAML
     [ "$(printf '%s' "$output" | jq -r '.branch')" = "autospec/autonomous-main" ]
     [ "$(printf '%s' "$output" | jq -r '.rollup_pr.number')" = "77" ]
     [ "$(printf '%s' "$output" | jq -r '.rollup_pr.state')" = "OPEN" ]
-    [ "$(printf '%s' "$output" | jq -r '.accumulated_pr_count')" = "1" ]
+    [ "$(printf '%s' "$output" | jq -r '.accumulated_pr_count')" = "3" ]
     [ "$(printf '%s' "$output" | jq -r '.diff_lines')" = "12" ]
     [ "$(printf '%s' "$output" | jq -r '.age_days >= 0')" = "true" ]
     grep -q 'pr list --repo berlinguyinca/autospec --head autospec/autonomous-main --base main --state all --json number,state' "$GH_CALLS"
+    grep -q 'pr list --repo berlinguyinca/autospec --base autospec/autonomous-main --state all --json number' "$GH_CALLS"
+}
+
+@test "status succeeds with explicit empty rollup pr when no rollup exists" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    printf '[]\n' > "$GH_ROLLUP_JSON"
+
+    run bash "$SCRIPT" status --parent main
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '.rollup_pr.number')" = "null" ]
+    [ "$(printf '%s' "$output" | jq -r '.rollup_pr.state')" = "null" ]
+    [ "$(printf '%s' "$output" | jq -r '.accumulated_pr_count')" = "3" ]
+}
+
+@test "status fails visibly when gh query fails" {
+    printf 'branch_exists=1\n' >> "$GIT_STATE"
+    export GH_FAILURE=1
+
+    run bash "$SCRIPT" status --parent main
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"status probe failed"* ]]
+}
+
+@test "status fails visibly when git log fails" {
+    printf 'branch_exists=1\nlog_failure=1\n' >> "$GIT_STATE"
+
+    run bash "$SCRIPT" status --parent main
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"status probe failed"* ]]
+}
+
+@test "status fails visibly when git diff fails" {
+    printf 'branch_exists=1\ndiff_failure=1\n' >> "$GIT_STATE"
+
+    run bash "$SCRIPT" status --parent main
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"status probe failed"* ]]
 }
