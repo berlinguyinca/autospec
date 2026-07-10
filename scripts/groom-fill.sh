@@ -72,7 +72,11 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
             "$TITLE" "$BODY" "${directives:+PREVIOUS VALIDATION FINDINGS TO FIX:\n$directives}")"
 
   set +e
-  filled="$(printf '%s' "$prompt" | "$FILL_BIN" exec 2>/dev/null)"
+  # --skip-git-repo-check matches autospec's canonical codex invocation
+  # (peer-review / advisor dispatcher). Without it `codex exec` refuses to run in
+  # a non-trusted / non-git directory ("Not inside a trusted directory"), which
+  # would fail-close every groom to hold on an otherwise-working codex install.
+  filled="$(printf '%s' "$prompt" | "$FILL_BIN" exec --skip-git-repo-check 2>/dev/null)"
   rc=$?
   set -e
   if [ "$rc" -ne 0 ]; then
