@@ -263,6 +263,8 @@ Maps repo slugs to local paths. See `examples/project-map.yml`.
 | `auto-implement` | Ready for the monitor to pick up |
 | `in-progress-by-bot` | Claimed by an active monitor worker |
 | `needs-classify` | Filed by listener; needs `ctx:*` + `reasoning:*` labels |
+| `safety:reviewed` | Issue has a passing issue-intent safety review |
+| `security:quarantined` | Issue is blocked or ambiguous; autospec-run refuses it until a human edits and reclassifies |
 | `ctx:32k` / `ctx:64k` / `ctx:120k` | Model context budget hint |
 | `reasoning:standard` / `reasoning:deep` | Reasoning tier hint |
 

@@ -182,3 +182,17 @@ setup() {
     assert_before '### Issue intent safety gate' 'Board assignment' \
         "$REPO_ROOT/skills/autospec-define/SKILL.md"
 }
+
+@test "classification prompts include Tier A semantic safety review" {
+    for file in "$REPO_ROOT/skills/autospec-classify/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md" "$REPO_ROOT/skills/autospec-define/SKILL.md"; do
+        grep -q "Tier A semantic safety reviewer" "$file"
+        grep -q "SAFETY_AMBIGUOUS" "$file"
+        grep -q "SAFETY_BLOCK" "$file"
+    done
+}
+
+@test "docs mention issue intent safety gate" {
+    grep -q "lint-issue-safety.sh" "$REPO_ROOT/docs/API_REFERENCE.md"
+    grep -q "issue_intent_gate" "$REPO_ROOT/docs/CONFIG_REFERENCE.md"
+    grep -q "security:quarantined" "$REPO_ROOT/docs/USER_MANUAL.md"
+}

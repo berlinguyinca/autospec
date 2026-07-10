@@ -68,6 +68,15 @@ Usage: bash lint-issue.sh <issue-number> [--repo <owner/repo>]
 
 Exit: 0 = pass, 1 = fail with diagnostics.
 
+### `lint-issue-safety.sh`
+
+Issue-intent safety gate for GitHub issue bodies before they enter the `auto-implement` queue.
+
+Usage:
+`bash scripts/lint-issue-safety.sh [--json] [--actor LOGIN] [--title TITLE] [--config PATH] <body-file>`
+
+Exit codes: `0=SAFETY_PASS`, `1=SAFETY_AMBIGUOUS`, `2=SAFETY_BLOCK`, `64=usage error`.
+
 ### `lint-implementation.sh`
 
 Scans implementation PRs for rule violations (OUT_OF_SCOPE, MISSING_TEST, COMPLEXITY,
