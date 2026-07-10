@@ -82,6 +82,36 @@ for command in autospec-autonomous autospec-autonomous-status autospec-autonomou
     }
 done
 
+# Premerge-gate scanner shims (issue: autospec#1693 / autotrade#1350 Part 1 systemic):
+# the gate resolves autospec-qa / autospec-secaudit with `command -v`, so the
+# installer must place PATH-resolvable shims that run the skill headlessly via omx.
+for scanner in autospec-qa autospec-secaudit; do
+    shim="$TEST_HOME/.autospec/bin/$scanner"
+    [ -x "$shim" ] || {
+        echo "FAIL: $scanner premerge-gate shim was not installed"
+        ls -la "$TEST_HOME/.autospec/bin" || true
+        cat /tmp/autospec-install-path.out
+        exit 1
+    }
+    grep -qF "\$$scanner" "$shim" || {
+        echo "FAIL: $scanner shim does not invoke the \$$scanner skill"
+        cat "$shim"
+        exit 1
+    }
+    grep -qF 'omx exec' "$shim" || {
+        echo "FAIL: $scanner shim does not run the skill via omx exec"
+        cat "$shim"
+        exit 1
+    }
+    # Must not FAKE presence by assigning *_PRESENT_OVERRIDE (a comment mentioning
+    # that it avoids the override is fine; an actual assignment is not).
+    if grep -qE 'PRESENT_OVERRIDE[[:space:]]*=' "$shim"; then
+        echo "FAIL: $scanner shim fakes presence via *_PRESENT_OVERRIDE instead of running the scan"
+        cat "$shim"
+        exit 1
+    fi
+done
+
 
 # Regression: an already-installed stale wrapper from the pre-fix generator must
 # be healed during --update, not left broken until a clean reinstall.

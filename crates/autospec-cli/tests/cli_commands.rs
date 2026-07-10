@@ -54,6 +54,23 @@ fn cli_commands_json_modes_emit_json() {
 }
 
 #[test]
+fn doctor_readiness_json_reports_workflow_safety() {
+    let output = autospec()
+        .args(["doctor", "--readiness", "--json"])
+        .output()
+        .expect("autospec doctor runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"command\":\"doctor\""));
+    assert!(stdout.contains("\"mode\":\"readiness\""));
+    assert!(stdout.contains("\"workflow_recommendations\""));
+    assert!(stdout.contains("\"define\""));
+    assert!(stdout.contains("\"run\""));
+    assert!(stdout.contains("\"autonomous\""));
+}
+
+#[test]
 fn cli_commands_unimplemented_mutating_commands_are_explicit() {
     for command in ["init", "run", "resume", "benchmark"] {
         let output = autospec().arg(command).output().expect("autospec runs");

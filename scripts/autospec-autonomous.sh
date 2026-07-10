@@ -54,7 +54,8 @@ Options:
   --poll-interval-sec N   Set CONDUCTOR_POLL_INTERVAL.
   --budget-tokens N       Set AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS.
   --budget-issues N       Set AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES.
-  --repo-dir DIR          Run autospec-run from this checkout.
+  --repo-dir DIR          Run autospec-run from this checkout. Defaults to the
+                          launch cwd's git top-level, else the install dir.
   --repo OWNER/REPO       Override GitHub repo slug for conductor helpers.
   --log PATH              Write the conductor log to PATH.
   --lines N               Log lines for logs/status/timeline output.
@@ -939,6 +940,19 @@ start_foreground() {
     export CONDUCTOR_SCRIPTS_DIR="${CONDUCTOR_SCRIPTS_DIR:-$SCRIPT_DIR}"
     export AUTOSPEC_SCRIPTS_DIR="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR}"
     export AUTOSPEC_RUN_CMD="${AUTOSPEC_RUN_CMD:-$SCRIPT_DIR/autospec-autonomous-run-drain.sh}"
+    # Tier-2/3/4 discovery must run the explore SKILL through the LLM harness
+    # (mirroring AUTOSPEC_RUN_CMD's drain wrapper). Without this, the loop falls
+    # back to bare `bash autospec-explore.sh --once`, which has no orchestrator
+    # to dispatch researcher subagents + fail-closed verify — every proposal is
+    # refused and discovery is structurally dry. Same `:-` guard so operators/
+    # tests can override.
+    export AUTOSPEC_EXPLORE_CMD="${AUTOSPEC_EXPLORE_CMD:-$SCRIPT_DIR/autospec-autonomous-explore-drain.sh}"
+    # explore's adversarial verify stage is fail-closed: an autonomous --once run
+    # with NO skeptic verdicts files ZERO proposals. Without a verifier wired,
+    # detached discovery generates proposals every idle cycle but files nothing.
+    # This bridge runs the skeptic through the LLM harness (omx). Same `:-` guard
+    # so operators/tests can override.
+    export AUTOSPEC_EXPLORE_VERIFY_CMD="${AUTOSPEC_EXPLORE_VERIFY_CMD:-bash $SCRIPT_DIR/autospec-autonomous-verify-drain.sh}"
     export AUTOSPEC_STOP_FLAG_FILE="$STOP_FLAG_FILE"
     [ -n "$CONDUCTOR_MAX_CYCLES" ] && export CONDUCTOR_MAX_CYCLES
     [ -n "$CONDUCTOR_POLL_INTERVAL" ] && export CONDUCTOR_POLL_INTERVAL
@@ -953,6 +967,33 @@ start_foreground() {
 
 start_detached() {
     ensure_not_running
+    # Resolve + validate the repo dir BEFORE provenance so launch.json, the
+    # detect_repo_slug below, and the spawned child all agree on one value.
+    # When AUTOSPEC_REPO_DIR is unset (no --repo-dir), prefer the launch cwd's
+    # git checkout over DEFAULT_REPO_DIR (=$SCRIPT_DIR/.. = ~/.autospec when
+    # installed) so `start --repo OWNER/REPO` targets the real repo, not the
+    # installed script copies. DEFAULT_REPO_DIR stays the last-resort fallback.
+    _repo_dir="${AUTOSPEC_REPO_DIR:-}"
+    if [ -z "$_repo_dir" ]; then
+        _repo_dir="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+        [ -n "$_repo_dir" ] || _repo_dir="$DEFAULT_REPO_DIR"
+    fi
+    # Fail loud (Rule 12): never launch the conductor against a non-checkout —
+    # the omx-bridged explore/drain would `--cd` into it and analyze garbage,
+    # burning tokens silently.
+    if ! git -C "$_repo_dir" rev-parse --show-toplevel >/dev/null 2>&1; then
+        die "resolved repo dir ($_repo_dir) is not a git checkout — pass --repo-dir /path/to/checkout (or run from inside the checkout)"
+    fi
+    export AUTOSPEC_REPO_DIR="$_repo_dir"
+    # Non-fatal wrong-dir signal: warn when an explicit --repo slug is not present
+    # in the checkout's origin remote (forks/mirrors are legitimate — do not die).
+    if [ -n "${CONDUCTOR_REPO:-}" ]; then
+        _origin_url="$(git -C "$_repo_dir" config --get remote.origin.url 2>/dev/null || true)"
+        case "$_origin_url" in
+            *"$CONDUCTOR_REPO"*) : ;;
+            *) printf 'autospec-autonomous: warning: repo dir %s origin (%s) does not contain --repo %s — possible wrong checkout\n' "$_repo_dir" "$_origin_url" "$CONDUCTOR_REPO" >&2 ;;
+        esac
+    fi
     mkdir -p "$STATE_DIR" "$DEFAULT_LOG_DIR"
     write_launch_provenance
     _log="${AUTOSPEC_AUTONOMOUS_LOG:-}"
@@ -960,7 +1001,7 @@ start_detached() {
         _stamp="$(date -u +%Y%m%dT%H%M%SZ)"
         _log="$DEFAULT_LOG_DIR/autospec-autonomous-$_stamp.log"
     fi
-    _repo_dir="${AUTOSPEC_REPO_DIR:-$DEFAULT_REPO_DIR}"
+    _repo_dir="$AUTOSPEC_REPO_DIR"
     _repo="${CONDUCTOR_REPO:-$(detect_repo_slug)}"
     export AUTOSPEC_STOP_FLAG_FILE="$STOP_FLAG_FILE"
 

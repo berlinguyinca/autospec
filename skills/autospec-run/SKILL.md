@@ -901,7 +901,7 @@ inline label-swap path below.
 >          const flag = process.env.AUTOSPEC_WITH_DOCS === '1';
 >          const { generate } = resolveAutoRegenerate({ config: cfg, issueBody: body, withDocsFlag: flag });
 >          process.stdout.write(generate ? '1' : '0');
->          __REGEN_EOF__
+> __REGEN_EOF__
 >          )
 >          if [ "${_REGEN:-0}" = "1" ]; then
 >            # auto_regenerate is ON — run the regenerate self-heal path.

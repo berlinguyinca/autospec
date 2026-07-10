@@ -355,6 +355,8 @@ EOF_STOP
   local repo_dir="$harness/repo"
   local log_file="$TEST_TMP/conductor.log"
   mkdir -p "$scripts_dir/lib" "$repo_dir"
+  # start_detached fails loud unless --repo-dir is a real git checkout.
+  git -C "$repo_dir" init -q
   cp "$CLI" "$scripts_dir/autospec-autonomous.sh"
   chmod +x "$scripts_dir/autospec-autonomous.sh"
   cat > "$scripts_dir/lib/autospec-loop.sh" <<'LIBEOF'
