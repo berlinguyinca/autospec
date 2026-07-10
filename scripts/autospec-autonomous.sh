@@ -947,6 +947,12 @@ start_foreground() {
     # refused and discovery is structurally dry. Same `:-` guard so operators/
     # tests can override.
     export AUTOSPEC_EXPLORE_CMD="${AUTOSPEC_EXPLORE_CMD:-$SCRIPT_DIR/autospec-autonomous-explore-drain.sh}"
+    # explore's adversarial verify stage is fail-closed: an autonomous --once run
+    # with NO skeptic verdicts files ZERO proposals. Without a verifier wired,
+    # detached discovery generates proposals every idle cycle but files nothing.
+    # This bridge runs the skeptic through the LLM harness (omx). Same `:-` guard
+    # so operators/tests can override.
+    export AUTOSPEC_EXPLORE_VERIFY_CMD="${AUTOSPEC_EXPLORE_VERIFY_CMD:-bash $SCRIPT_DIR/autospec-autonomous-verify-drain.sh}"
     export AUTOSPEC_STOP_FLAG_FILE="$STOP_FLAG_FILE"
     [ -n "$CONDUCTOR_MAX_CYCLES" ] && export CONDUCTOR_MAX_CYCLES
     [ -n "$CONDUCTOR_POLL_INTERVAL" ] && export CONDUCTOR_POLL_INTERVAL
