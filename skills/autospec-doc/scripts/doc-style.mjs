@@ -288,7 +288,7 @@ function extractStateChain(body) {
   for (let i = 0; i < best.length - 1; i++) {
     const from = best[i];
     const to = best[i + 1];
-    const key = `${from} ${to}`;
+    const key = `${from}\u0000${to}`;
     if (seen.has(key)) continue;
     seen.add(key);
     pairs.push({ from, to });

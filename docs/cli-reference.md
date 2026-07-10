@@ -6,6 +6,7 @@ The Rust CLI is additive. Existing `/autospec-*` skills and shell scripts remain
 | --- | --- | --- |
 | `autospec init` | no | documented stub, exits non-zero |
 | `autospec doctor --json` | yes | implemented |
+| `autospec doctor --readiness --json` | yes | implemented target-repo readiness report |
 | `autospec status --json` | yes | local status stub |
 | `autospec plan --json` | yes | package inspection stub |
 | `autospec validate --json` | yes | validation stub pointing to shell gates |
