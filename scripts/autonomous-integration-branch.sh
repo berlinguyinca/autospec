@@ -266,7 +266,7 @@ cmd_reset() {
     pref="$(parent_ref)"
 
     fetch_parent_tip
-    git branch -f "$branch" "$pref"
+    git checkout -B "$branch" "$pref"
     git push -u origin "$branch"
 }
 

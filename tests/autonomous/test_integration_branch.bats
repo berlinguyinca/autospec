@@ -36,7 +36,11 @@ write_fake_git_refs() {
         if [ "$(state_get fetch_failure)" = "1" ]; then exit 9; fi
         exit 0
         ;;
-    branch|push|checkout) exit 0 ;;
+    branch)
+        if [ "${2:-}" = "-f" ] && [ "$(state_get current_branch)" = "${3:-}" ]; then exit 7; fi
+        exit 0
+        ;;
+    push|checkout) exit 0 ;;
     show-ref)
         if [ "$(state_get branch_exists)" = "1" ]; then exit 0; fi
         exit 1
@@ -109,7 +113,7 @@ EOF
 }
 
 write_fake_state() {
-    printf 'parent_sha=parent111\nintegration_sha=integration222\nbranch_exists=0\nmerge_conflict=0\ndiff_lines=12\nage_epoch=1700000000\nlog_failure=0\ndiff_failure=0\nfetch_failure=0\n' > "$GIT_STATE"
+    printf 'parent_sha=parent111\nintegration_sha=integration222\nbranch_exists=0\nmerge_conflict=0\ndiff_lines=12\nage_epoch=1700000000\nlog_failure=0\ndiff_failure=0\nfetch_failure=0\ncurrent_branch=main\n' > "$GIT_STATE"
     printf '[{"number":77,"state":"OPEN"}]\n' > "$GH_ROLLUP_JSON"
     printf '[{"number":11},{"number":12},{"number":13}]\n' > "$GH_ACCUMULATED_JSON"
 }
@@ -210,7 +214,18 @@ YAML
     run bash "$SCRIPT" reset --parent main
 
     [ "$status" -eq 0 ]
-    grep -q 'branch -f autospec/autonomous-main origin/main' "$GIT_CALLS"
+    grep -q 'checkout -B autospec/autonomous-main origin/main' "$GIT_CALLS"
+    grep -q 'push -u origin autospec/autonomous-main' "$GIT_CALLS"
+}
+
+@test "reset works when integration branch is already checked out" {
+    printf 'current_branch=autospec/autonomous-main\n' >> "$GIT_STATE"
+
+    run bash "$SCRIPT" reset --parent main
+
+    [ "$status" -eq 0 ]
+    grep -q 'checkout -B autospec/autonomous-main origin/main' "$GIT_CALLS"
+    ! grep -q '^branch -f autospec/autonomous-main ' "$GIT_CALLS"
     grep -q 'push -u origin autospec/autonomous-main' "$GIT_CALLS"
 }
 
@@ -221,7 +236,7 @@ YAML
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"autonomous_integration_parent_fetch_failed"* ]]
-    ! grep -q '^branch -f ' "$GIT_CALLS"
+    ! grep -q '^checkout -B ' "$GIT_CALLS"
     ! grep -q '^push ' "$GIT_CALLS"
 }
 
