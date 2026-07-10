@@ -32,10 +32,10 @@ normal pipeline:
    Run this one-liner once; it refreshes all autospec skills across all
    harnesses. When you author this skill's own `SKILL.md` by hand, mirror the
    change into the trio by editing `skills/autospec-grow-run/SKILL.md` and
-   then re-deriving `codex/prompt.md` and `opencode/agent.md` with
-   `scripts/derive-trio.sh autospec-grow-run --in-place`, then regenerating
-   `tests/skill-goldens/autospec-grow-run.sha256` with
-   `scripts/gen-skill-goldens.sh autospec-grow-run` — never hand-edit the
+   then re-deriving `codex/prompt.md` and `opencode/agent.md` with the repo's
+   trio-derivation helper (`derive-trio.sh`, run `--in-place`), then
+   regenerating the skill goldens with the repo's golden-generation helper
+   (`gen-skill-goldens.sh`) for `autospec-grow-run` — never hand-edit the
    derived copies.
 3. **Show the diff** between the prior installed file(s) and the freshly
    fetched copy (e.g. `diff <(cat <prior>) <(curl -fsSL ...SKILL.md)` or the
@@ -48,7 +48,7 @@ autospec-grow-run found; run install.sh first.` and exit.
 
 ## Required capabilities & harness adapter
 
-This workflow assumes six capabilities. Map each one to your harness's
+This workflow assumes seven capabilities. Map each one to your harness's
 actual tool. If a capability is missing, use the listed fallback.
 
 | Capability                  | Claude Code                          | OpenCode                                 | Codex CLI                                | Fallback if missing                                |
@@ -59,6 +59,7 @@ actual tool. If a capability is missing, use the listed fallback.
 | HTTP calls for measurement adapters | `curl` via Bash | `curl` via shell tool | `curl` via shell | Degrade that adapter to `{}` and continue |
 | Human-visible run notifications | `PushNotification` | inline message / OS notify equivalent | inline message | Print the notice to the transcript and continue |
 | Browser (site/UI verification, best-effort) | `autospec-playwright` / Claude-in-Chrome if available | equivalent browser tool if available | not typically available | Skip browser verification; note it as unverified |
+| Subagent model tier         | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: `gpt-5.1-codex-spark` + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; retry the same subagent UP on unavailability |
 <!-- autospec-block:harness-adapter-core -->
 
 **Persistent project notes**: write durable preferences to **`AGENTS.md`** in
