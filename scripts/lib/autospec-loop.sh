@@ -1563,7 +1563,74 @@ EOF_PROV_BATCH
                                     # unaffected. Any other ensure/sync failure also
                                     # parks the self subset (fail closed: self work is
                                     # never dispatched at the parent).
-                                    if [ -n "$_prov_self" ]; then
+                                    #
+                                    # ── Self-merge aftermath pre-gate (spec item 7 caps
+                                    # + item 5/Error-handling rollup-red pause). A
+                                    # durable pause marker (written by the aftermath
+                                    # block below on rollup-red / post-merge sync
+                                    # conflict) and the live caps probe both park the
+                                    # self subset BEFORE dispatch — the operator subset
+                                    # above is never affected by either.
+                                    local _sm_pause_file="${_repo_root}/.autospec/self-originated-pause.json"
+                                    local _sm_park_reason=""
+                                    if [ -n "$_prov_self" ] && [ -f "$_sm_pause_file" ]; then
+                                        _sm_park_reason="$(jq -r '.reason // "paused"' \
+                                            "$_sm_pause_file" 2>/dev/null || printf 'paused')"
+                                    fi
+                                    if [ -n "$_prov_self" ] && [ -z "$_sm_park_reason" ] && [ -n "$_intbranch_sh" ]; then
+                                        local _sm_status_json="" _sm_status_rc=0
+                                        _sm_status_json="$(bash "$_intbranch_sh" status --parent main \
+                                            ${_repo:+--repo "$_repo"} 2>/dev/null)" || _sm_status_rc=$?
+                                        if [ "$_sm_status_rc" -eq 0 ] && [ -n "$_sm_status_json" ]; then
+                                            local _sm_runtime_config_sh=""
+                                            if [ -f "${_repo_root}/scripts/autospec-runtime-config.sh" ]; then
+                                                _sm_runtime_config_sh="${_repo_root}/scripts/autospec-runtime-config.sh"
+                                            elif [ -f "${_sdir}/autospec-runtime-config.sh" ]; then
+                                                _sm_runtime_config_sh="${_sdir}/autospec-runtime-config.sh"
+                                            elif [ -f "$HOME/.autospec/scripts/autospec-runtime-config.sh" ]; then
+                                                _sm_runtime_config_sh="$HOME/.autospec/scripts/autospec-runtime-config.sh"
+                                            fi
+                                            if [ -n "$_sm_runtime_config_sh" ]; then
+                                                # shellcheck source=/dev/null
+                                                . "$_sm_runtime_config_sh"
+                                            fi
+                                            local _sm_cap_open _sm_cap_age _sm_cap_diff
+                                            local _sm_max_open _sm_max_age _sm_max_diff
+                                            _sm_cap_open="$(printf '%s' "$_sm_status_json" | jq -r '.accumulated_pr_count // 0' 2>/dev/null || echo 0)"
+                                            _sm_cap_age="$(printf '%s' "$_sm_status_json" | jq -r '.age_days // 0' 2>/dev/null || echo 0)"
+                                            _sm_cap_diff="$(printf '%s' "$_sm_status_json" | jq -r '.diff_lines // 0' 2>/dev/null || echo 0)"
+                                            if command -v autospec_runtime_config_get >/dev/null 2>&1; then
+                                                _sm_max_open="$(autospec_runtime_config_get "autonomous.self_originated.max_open_prs" "20")"
+                                                _sm_max_age="$(autospec_runtime_config_get "autonomous.self_originated.max_age_days" "14")"
+                                                _sm_max_diff="$(autospec_runtime_config_get "autonomous.self_originated.max_diff_lines" "5000")"
+                                            else
+                                                _sm_max_open=20; _sm_max_age=14; _sm_max_diff=5000
+                                            fi
+                                            case "$_sm_cap_open" in *[!0-9]*|'') _sm_cap_open=0 ;; esac
+                                            case "$_sm_cap_age" in *[!0-9]*|'') _sm_cap_age=0 ;; esac
+                                            case "$_sm_cap_diff" in *[!0-9]*|'') _sm_cap_diff=0 ;; esac
+                                            case "$_sm_max_open" in *[!0-9]*|'') _sm_max_open=20 ;; esac
+                                            case "$_sm_max_age" in *[!0-9]*|'') _sm_max_age=14 ;; esac
+                                            case "$_sm_max_diff" in *[!0-9]*|'') _sm_max_diff=5000 ;; esac
+                                            if [ "$_sm_cap_open" -gt "$_sm_max_open" ]; then
+                                                _sm_park_reason="max_open_prs:${_sm_cap_open}>${_sm_max_open}"
+                                            elif [ "$_sm_cap_age" -gt "$_sm_max_age" ]; then
+                                                _sm_park_reason="max_age_days:${_sm_cap_age}>${_sm_max_age}"
+                                            elif [ "$_sm_cap_diff" -gt "$_sm_max_diff" ]; then
+                                                _sm_park_reason="max_diff_lines:${_sm_cap_diff}>${_sm_max_diff}"
+                                            fi
+                                        fi
+                                    fi
+
+                                    if [ -n "$_prov_self" ] && [ -n "$_sm_park_reason" ]; then
+                                        printf 'code_health:self_originated_parked\n' >&2
+                                        printf '[conductor] self-originated tiers parked (%s) — issues: %s\n' \
+                                            "$_sm_park_reason" "$_prov_self" >&2
+                                        if [ -n "$_notify_sh" ]; then
+                                            bash "$_notify_sh" "autospec-autonomous" \
+                                                "self-originated tiers parked: ${_sm_park_reason}" || true
+                                        fi
+                                    elif [ -n "$_prov_self" ]; then
                                         local _prov_int_rc=0
                                         bash "$_intbranch_sh" ensure --parent main \
                                             --repo "$_repo" 1>&2 || _prov_int_rc=$?
@@ -1605,6 +1672,88 @@ EOF_PROV_BATCH
                                                 "$_prov_self" >&2
                                             AUTOSPEC_RUN_ONLY_ISSUES="$_prov_self" \
                                                 bash -c "$_run_cmd" 2>&1 || true
+
+                                            # ── Self-merge aftermath (spec item 5 tail):
+                                            # after a self-originated PR merges into the
+                                            # integration branch, sync the parent in and
+                                            # run rollup-update so the roll-up PR gains a
+                                            # manifest entry + per-feature comment. Merge
+                                            # detection comes from the SAME per-cycle
+                                            # outcome file Step 5b already consumes below
+                                            # — extended here with self_originated/pr
+                                            # fields; a Tier-1 backlog cycle that never
+                                            # wrote one is a silent no-op.
+                                            local _sm_outcome_file
+                                            _sm_outcome_file="${AUTOSPEC_LAST_OUTCOME_FILE:-${_repo_root}/.autospec/last-outcome.json}"
+                                            if [ -f "$_sm_outcome_file" ]; then
+                                                local _sm_is_self _sm_out_val _sm_issue _sm_pr
+                                                _sm_is_self="$(jq -r '.self_originated // false' \
+                                                    "$_sm_outcome_file" 2>/dev/null || printf 'false')"
+                                                _sm_out_val="$(jq -r '.outcome // ""' \
+                                                    "$_sm_outcome_file" 2>/dev/null || printf '')"
+                                                if [ "$_sm_is_self" = "true" ] && [ "$_sm_out_val" = "merged" ]; then
+                                                    _sm_issue="$(jq -r '.issue // empty' \
+                                                        "$_sm_outcome_file" 2>/dev/null || printf '')"
+                                                    _sm_pr="$(jq -r '.pr // empty' \
+                                                        "$_sm_outcome_file" 2>/dev/null || printf '')"
+                                                    case "$_sm_issue" in ''|*[!0-9]*) _sm_issue="" ;; esac
+                                                    case "$_sm_pr" in ''|*[!0-9]*) _sm_pr="" ;; esac
+                                                    if [ -n "$_sm_issue" ] && [ -n "$_sm_pr" ]; then
+                                                        local _sm_sync_rc=0
+                                                        bash "$_intbranch_sh" sync --parent main \
+                                                            ${_repo:+--repo "$_repo"} 1>&2 || _sm_sync_rc=$?
+                                                        if [ "$_sm_sync_rc" -eq 65 ]; then
+                                                            printf 'code_health:integration_sync_conflict\n' >&2
+                                                            printf '[conductor] selfmerge-aftermath: post-merge sync conflict — parking self-originated tiers\n' >&2
+                                                            printf '{"reason":"sync_conflict","issue":%s,"pr":%s}\n' \
+                                                                "$_sm_issue" "$_sm_pr" > "$_sm_pause_file" 2>/dev/null || true
+                                                            if [ -n "$_notify_sh" ]; then
+                                                                bash "$_notify_sh" "autospec-autonomous" \
+                                                                    "integration branch post-merge sync conflict — self-originated tiers parked" || true
+                                                            fi
+                                                        elif [ "$_sm_sync_rc" -ne 0 ]; then
+                                                            printf '[conductor] selfmerge-aftermath: post-merge sync failed rc=%s — parking self-originated tiers\n' \
+                                                                "$_sm_sync_rc" >&2
+                                                            printf '{"reason":"sync_failed","issue":%s,"pr":%s}\n' \
+                                                                "$_sm_issue" "$_sm_pr" > "$_sm_pause_file" 2>/dev/null || true
+                                                        else
+                                                            local _sm_rollup_out _sm_rollup_rc=0
+                                                            _sm_rollup_out="$(bash "$_intbranch_sh" rollup-update \
+                                                                --parent main --issue "$_sm_issue" --pr "$_sm_pr" \
+                                                                ${_repo:+--repo "$_repo"} 2>&1)" || _sm_rollup_rc=$?
+                                                            printf '%s\n' "$_sm_rollup_out" >&2
+                                                            if [ "$_sm_rollup_rc" -ne 0 ]; then
+                                                                # rollup-update itself already parks/notifies on gh
+                                                                # failure (exit 8/9) or multi-open (exit 9), but that
+                                                                # is a one-shot notify — the conductor must ALSO
+                                                                # persist a pause marker here so later cycles don't
+                                                                # resume dispatch until an operator clears it
+                                                                # (peer-review must-fix: a nonzero, non-rollup-red
+                                                                # exit must never fall through to the pause-clearing
+                                                                # branch below).
+                                                                printf '[conductor] selfmerge-aftermath: rollup-update failed rc=%s — parking self-originated tiers\n' \
+                                                                    "$_sm_rollup_rc" >&2
+                                                                printf '{"reason":"rollup_update_failed","issue":%s,"pr":%s}\n' \
+                                                                    "$_sm_issue" "$_sm_pr" > "$_sm_pause_file" 2>/dev/null || true
+                                                                if [ -n "$_notify_sh" ]; then
+                                                                    bash "$_notify_sh" "autospec-autonomous" \
+                                                                        "rollup-update failed (rc=${_sm_rollup_rc}) — self-originated tiers parked" || true
+                                                                fi
+                                                            elif printf '%s\n' "$_sm_rollup_out" | grep -q '^rollup-red$'; then
+                                                                printf '[conductor] selfmerge-aftermath: rollup-red — pausing further self-originated merges\n' >&2
+                                                                printf '{"reason":"rollup_red","issue":%s,"pr":%s}\n' \
+                                                                    "$_sm_issue" "$_sm_pr" > "$_sm_pause_file" 2>/dev/null || true
+                                                                if [ -n "$_notify_sh" ]; then
+                                                                    bash "$_notify_sh" "autospec-autonomous" \
+                                                                        "roll-up CI red — self-originated merges paused pending green or discard" || true
+                                                                fi
+                                                            else
+                                                                rm -f "$_sm_pause_file" 2>/dev/null || true
+                                                            fi
+                                                        fi
+                                                    fi
+                                                fi
+                                            fi
                                         fi
                                     fi
                                 else
