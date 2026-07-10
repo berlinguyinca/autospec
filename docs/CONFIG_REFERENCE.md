@@ -51,13 +51,16 @@ For a larger workstation or cluster, set `max_concurrent_repo_workers` explicitl
 | `autonomous.drain.stall_secs` | `AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS` | No-output timeout for one drain run. |
 | `autonomous.drain.poll_secs` | `AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS` | Drain output poll interval. |
 
-The remaining tables list older operator-facing env knobs that do not yet have
-dedicated config keys.
-
 ### Self-originated integration branch
 
-Config read via `autospec_runtime_config_get` (`scripts/autospec-runtime-config.sh`),
-no legacy env fallback — these are new keys.
+Config contract for the autonomous self-originated integration-branch design
+(`docs/specs/2026-07-10-autonomous-integration-branch-design.md`). Resolved
+via `autospec_runtime_config_get` (`scripts/autospec-runtime-config.sh`), no
+legacy env fallback — these are new keys. The consumer scripts
+(`scripts/autonomous-integration-branch.sh`, the `self-originated` subcommand
+of `scripts/autonomous-guardrails.sh`) land in separate follow-up issues
+(#1740, #1742, and a conductor-wiring child); this section documents the
+config contract those consumers must honor once landed.
 
 ```yaml
 autonomous:
@@ -83,6 +86,9 @@ operator-originated tiers keep draining unaffected. Provenance and roll-up
 state carry two GitHub labels: `origin:self` (issue was filed by the
 autonomous system itself) and `approved-by-operator` (a trusted-actor approval
 marker that flips an issue's provenance from `self` to `operator` pre-dispatch).
+
+The remaining tables list older operator-facing env knobs that do not yet have
+dedicated config keys.
 
 ## Issue intent safety
 
