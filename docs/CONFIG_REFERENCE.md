@@ -51,6 +51,42 @@ For a larger workstation or cluster, set `max_concurrent_repo_workers` explicitl
 | `autonomous.drain.stall_secs` | `AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS` | No-output timeout for one drain run. |
 | `autonomous.drain.poll_secs` | `AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS` | Drain output poll interval. |
 
+### Self-originated integration branch
+
+Config contract for the autonomous self-originated integration-branch design
+(`docs/specs/2026-07-10-autonomous-integration-branch-design.md`). Resolved
+via `autospec_runtime_config_get` (`scripts/autospec-runtime-config.sh`), no
+legacy env fallback — these are new keys. The consumer scripts
+(`scripts/autonomous-integration-branch.sh`, the `self-originated` subcommand
+of `scripts/autonomous-guardrails.sh`) land in separate follow-up issues
+(#1740, #1742, and a conductor-wiring child); this section documents the
+config contract those consumers must honor once landed.
+
+```yaml
+autonomous:
+  self_originated:
+    integration_branch_prefix: "autospec/autonomous-"
+    max_open_prs: 20
+    max_age_days: 14
+    max_diff_lines: 5000
+    allow_direct_merge: false
+```
+
+| Config key | Type | Default | Consumer | Effect |
+|---|---|---|---|---|
+| `autonomous.self_originated.integration_branch_prefix` | string | `autospec/autonomous-` | `scripts/autonomous-integration-branch.sh` (`ensure`, `reset`) | Prefix used to derive the shared integration branch name from the parent branch. |
+| `autonomous.self_originated.max_open_prs` | int | `20` | `scripts/autonomous-integration-branch.sh status` | Cap on open worker PRs accumulated on the integration branch before the conductor parks self-originated tiers. |
+| `autonomous.self_originated.max_age_days` | int | `14` | `scripts/autonomous-integration-branch.sh status` | Cap on the integration branch's age before the conductor parks self-originated tiers. |
+| `autonomous.self_originated.max_diff_lines` | int | `5000` | `scripts/autonomous-integration-branch.sh status` | Cap on cumulative diff size vs. the parent before the conductor parks self-originated tiers. |
+| `autonomous.self_originated.allow_direct_merge` | bool | `false` | `scripts/autonomous-guardrails.sh self-originated` (premerge gate) | When `false`, a self-originated PR based directly on a protected parent branch is blocked (`block self_originated_direct_merge`) instead of merged; flipping to `true` requires a trusted-actor marker recorded in the same config commit that changes the value, so the bypass itself is attributable and reviewable, not a casual toggle. |
+
+Any of the three caps (`max_open_prs`, `max_age_days`, `max_diff_lines`) being
+exceeded parks only the self-originated tiers and sends a notification;
+operator-originated tiers keep draining unaffected. Provenance and roll-up
+state carry two GitHub labels: `origin:self` (issue was filed by the
+autonomous system itself) and `approved-by-operator` (a trusted-actor approval
+marker that flips an issue's provenance from `self` to `operator` pre-dispatch).
+
 The remaining tables list older operator-facing env knobs that do not yet have
 dedicated config keys.
 
