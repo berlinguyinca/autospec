@@ -8,9 +8,9 @@ here="$(cd "$(dirname "$0")" && pwd)"
 provider="$(jq -r '.measurement.analytics.provider // "plausible"' "$cfg")"
 site="$(jq -r '.measurement.analytics.site // ""' "$cfg")"
 tok_env="$(jq -r '.measurement.analytics.token_env // "PLAUSIBLE_API_TOKEN"' "$cfg")"
-[ -n "$site" ] || exit 1
+[ -n "$site" ] || { echo "analytics adapter: .measurement.analytics.site missing" >&2; exit 1; }
 tok="$(eval "printf '%s' \"\${$tok_env:-}\"")"
-[ -n "$tok" ] || exit 1
+[ -n "$tok" ] || { echo "analytics adapter: \$$tok_env unset (fail-closed)" >&2; exit 1; }
 case "$provider" in
   plausible) url="https://plausible.io/api/v1/stats/aggregate?site_id=$site&metrics=visitors,pageviews" ;;
   ga4)       url="https://analyticsdata.googleapis.com/v1beta/properties/$site:runReport" ;;

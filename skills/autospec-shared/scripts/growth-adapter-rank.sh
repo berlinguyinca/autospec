@@ -7,9 +7,9 @@ cfg="${1:-}"; [ -n "$cfg" ] || { echo "usage: growth-adapter-rank.sh <config.jso
 here="$(cd "$(dirname "$0")" && pwd)"
 endpoint="$(jq -r '.measurement.rank.endpoint // ""' "$cfg")"
 tok_env="$(jq -r '.measurement.rank.token_env // "RANK_TOKEN"' "$cfg")"
-[ -n "$endpoint" ] || exit 1
+[ -n "$endpoint" ] || { echo "rank adapter: .measurement.rank.endpoint missing" >&2; exit 1; }
 tok="$(eval "printf '%s' \"\${$tok_env:-}\"")"
-[ -n "$tok" ] || exit 1
+[ -n "$tok" ] || { echo "rank adapter: \$$tok_env unset (fail-closed)" >&2; exit 1; }
 fetch="${GROWTH_FETCH_CMD:-curl -fsSL}"
 raw="$($fetch "$endpoint")" || { echo "rank adapter: fetch failed" >&2; exit 1; }
 tmp="$(mktemp)"; printf '%s' "$raw" > "$tmp"

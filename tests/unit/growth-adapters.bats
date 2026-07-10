@@ -1,3 +1,5 @@
+bats_require_minimum_version 1.5.0
+
 setup() {
   DIR="$BATS_TEST_DIRNAME/../../skills/autospec-shared/scripts"
   TMP="$(mktemp -d)"
@@ -20,10 +22,16 @@ teardown() { rm -rf "$TMP"; }
   [ "$(echo "$output" | jq -r '.provider')" = "github" ]
   [ "$(echo "$output" | jq -r '.metrics.stars')" = "10" ]
 }
-@test "github adapter fails closed when token env unset" {
+@test "github adapter fails closed when token env unset (empty stdout, loud stderr)" {
   echo '{"measurement":{"github":{"repo":"a/b","token_env":"MISSING_TOK"}}}' > "$TMP/cfg.json"
-  run bash "$DIR/growth-adapter-github.sh" "$TMP/cfg.json"; [ "$status" -ne 0 ]
+  # --separate-stderr so we can assert the envelope stdout is empty (nothing
+  # partial leaked) AND that fail-closed is LOUD (a machine-readable reason on
+  # stderr), not a silent exit. All four adapters share this guard pattern.
+  run --separate-stderr bash "$DIR/growth-adapter-github.sh" "$TMP/cfg.json"
+  [ "$status" -ne 0 ]
   [ -z "$output" ]
+  [ -n "$stderr" ]
+  [[ "$stderr" == *"fail-closed"* ]]
 }
 @test "analytics adapter emits normalized envelope" {
   echo '{"results":{"visitors":{"value":9},"pageviews":{"value":20}}}' > "$TMP/a.json"

@@ -11,10 +11,10 @@ here="$(cd "$(dirname "$0")" && pwd)"
 
 repo="$(jq -r '.measurement.github.repo // ""' "$cfg")"
 tok_env="$(jq -r '.measurement.github.token_env // "GITHUB_TOKEN"' "$cfg")"
-[ -n "$repo" ] || exit 1
+[ -n "$repo" ] || { echo "github adapter: .measurement.github.repo missing" >&2; exit 1; }
 # Indirect env lookup, bash 3.2 safe.
 tok="$(eval "printf '%s' \"\${$tok_env:-}\"")"
-[ -n "$tok" ] || exit 1
+[ -n "$tok" ] || { echo "github adapter: \$$tok_env unset (fail-closed)" >&2; exit 1; }
 
 fetch="${GROWTH_FETCH_CMD:-curl -fsSL}"
 raw="$($fetch "https://api.github.com/repos/$repo")" || { echo "github adapter: fetch failed" >&2; exit 1; }
