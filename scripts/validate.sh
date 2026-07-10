@@ -3150,6 +3150,7 @@ main() {
     check_repo_quality_audit_loop
     check_usage_limit_helper
     check_supersession_contract
+    check_grooming_contract
     check_ship_completeness
     check_phase4_guardian_block_lockstep
     check_phase1_bounded_context_contract
@@ -5114,6 +5115,32 @@ check_grow_run_contract() {
         bats tests/autospec-grow-run/smoke.bats >/tmp/validate-grow-run.log 2>&1 \
             || { cat /tmp/validate-grow-run.log >&2; fail "tests/autospec-grow-run/smoke.bats: failed"; }
     fi
+}
+
+# Backlog auto-grooming: gate ALL grooming bats suites so they can never regress
+# unnoticed. The suites (list-groomable, promote-eligibility, groom-validate,
+# autonomous-promote-open-issues, grooming-config/govern/observe) were previously
+# ungated — exactly the #1185/#1211 pattern where a green-in-isolation suite rots
+# because no validate check ever runs it. Mirrors check_autospec_fab_contract.
+check_grooming_contract() {
+    info "backlog-grooming: gate all seven grooming bats suites (ungated-tests regression #1185/#1211)"
+    local f name
+    for f in \
+        "tests/autospec/list-groomable.bats" \
+        "tests/autospec/promote-eligibility.bats" \
+        "tests/autospec/groom-validate.bats" \
+        "tests/autospec/autonomous-promote-open-issues.bats" \
+        "skills/autospec-shared/tests/grooming-config.bats" \
+        "skills/autospec-shared/tests/unit/grooming-govern.bats" \
+        "skills/autospec-shared/tests/unit/grooming-observe.bats"; do
+        [ -f "$f" ] || fail "$f: required grooming bats suite missing (grooming contract)"
+        if command -v bats >/dev/null 2>&1; then
+            name="$(basename "$f")"
+            info "  running: $f"
+            bats "$f" >"/tmp/validate-grooming-$name.log" 2>&1 \
+                || { cat "/tmp/validate-grooming-$name.log" >&2; fail "$f: failed"; }
+        fi
+    done
 }
 
 main "$@"
