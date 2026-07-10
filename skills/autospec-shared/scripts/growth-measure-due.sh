@@ -47,6 +47,13 @@ interval_seconds=$(( interval_days * DAY_SECONDS ))
 
 now="$(now_epoch)"
 
+# Count measure lines independently of ts-parseability so we can tell
+# "never measured" (genuinely due) apart from "measure lines exist but every
+# ts is malformed" (a broken ledger — must fail-closed, not spuriously fire).
+measure_count=""
+measure_count="$(jq -s -r '[.[] | select(.kind == "measure")] | length' "$ledger" 2>/dev/null)" || measure_count=""
+case "$measure_count" in ''|*[!0-9]*) not_due ;; esac
+
 last_ts_epoch=""
 last_ts_epoch="$(jq -s -r '
     map(select(.kind == "measure"))
@@ -57,7 +64,13 @@ last_ts_epoch="$(jq -s -r '
 ' "$ledger" 2>/dev/null)" || last_ts_epoch=""
 
 if [ -z "$last_ts_epoch" ]; then
-    # No prior measure line — never measured, so it is due.
+    if [ "$measure_count" -gt 0 ]; then
+        # Measure lines exist but none carries a parseable ts — malformed
+        # ledger. Fail-closed to not-due rather than treating it as "never
+        # measured" and firing a spurious measure cycle.
+        not_due
+    fi
+    # No measure line at all — never measured, so it is due.
     printf '1\n'
     exit 0
 fi

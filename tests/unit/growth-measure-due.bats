@@ -103,6 +103,18 @@ YAML
   [ "$output" = "0" ]
 }
 
+# A measure line whose ts is unparseable must NOT be read as "never measured
+# -> due"; a broken ledger fails closed (0), never spuriously firing a cycle.
+@test "measure line with unparseable ts -> fail-closed not due (0)" {
+  # Valid JSON line (so the whole-file jq parse guard passes) carrying kind
+  # measure but a garbage ts that fromdateiso8601 cannot parse.
+  bash "$LEDGER_SH" --append \
+    '{"round":0,"source":"measure","title":"m","norm_title":"m","channel":"measurement","kind":"measure","issue":0,"outcome":"measured","reason":"","ts":"not-a-date"}'
+  run bash "$SCRIPT" "$TMP"
+  [ "$status" -eq 0 ]
+  [ "$output" = "0" ]
+}
+
 @test "malformed ledger -> fail-closed not due (0)" {
   mkdir -p "$(dirname "$GROWTH_LEDGER")"
   printf 'not json\n' > "$GROWTH_LEDGER"

@@ -1019,6 +1019,7 @@ fi'
         # --growth-* flags are threaded into the waterfall call below.
         local _growth_enabled=0
         local _growth_control_repo=""
+        local _growth_backlog_floor=""
         if [ -f "${_repo_root}/.autospec/growth.yml" ] && command -v yq >/dev/null 2>&1; then
             local _gv="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/validate-growth-config.sh"
             [ -f "$_gv" ] || _gv="${_sdir}/validate-growth-config.sh"
@@ -1035,10 +1036,21 @@ fi'
                         # issues (Tier G2's approval-servicing signal). Defaults
                         # to the product repo when approval.control_repo is unset.
                         _growth_control_repo="$(printf '%s' "$_gjson" | jq -r '.approval.control_repo // empty' 2>/dev/null || true)"
+                        # Configured backlog floor for Tier G1 (grow-define);
+                        # honored symmetrically with grow.measure_interval. Empty
+                        # -> the waterfall keeps its env/default floor.
+                        _growth_backlog_floor="$(printf '%s' "$_gjson" | jq -r '.grow.backlog_floor // empty' 2>/dev/null || true)"
+                        case "$_growth_backlog_floor" in *[!0-9]*) _growth_backlog_floor="" ;; esac
                     fi
                     rm -f "$_gjson_tmp" 2>/dev/null || true
                 fi
             fi
+        elif [ -f "${_repo_root}/.autospec/growth.yml" ] && [ "$_cycle" -eq 1 ]; then
+            # growth.yml present but yq missing: growth stays disabled
+            # (fail-closed). Say so ONCE (first cycle only — not every cycle of
+            # a perpetual loop) so the operator can diagnose why their opted-in
+            # repo shows no growth activity.
+            printf '[conductor] growth.yml present but yq not installed — growth tiers disabled (install yq to enable)\n' >&2
         fi
         [ -n "$_growth_control_repo" ] || _growth_control_repo="$_repo"
 
@@ -1072,6 +1084,9 @@ fi'
             fi
             if [ "$_g_measure_due" = "1" ]; then
                 _growth_flags="$_growth_flags --growth-measure-due 1"
+            fi
+            if [ -n "$_growth_backlog_floor" ]; then
+                _growth_flags="$_growth_flags --growth-backlog-floor $_growth_backlog_floor"
             fi
         fi
 
