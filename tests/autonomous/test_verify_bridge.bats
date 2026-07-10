@@ -123,6 +123,115 @@ assert m['add retry logic']['verdict'] == 'refuted', m
 "
 }
 
+# ── robust extraction: real codex/omx output shape ────────────────────────────
+# The REAL failure (#1707): against live omx the skeptic emits perfect verdicts,
+# but they arrive as RAW JSON buried in brace-heavy chatter — NOT a clean fenced
+# block. Shell-var braces (${VAR:-default}), hook telemetry lines, the final
+# message printed TWICE, a `tokens used` block, and a trailing JSON-ish telemetry
+# footer that closes LAST. The old extractor took the FIRST parseable dict (the
+# footer, keys ∉ known) → normalized to {} → wrote {} and exited 0 → explore
+# refuted-by-default and filed nothing while looking successful.
+
+@test "REAL SHAPE: recovers verdicts from raw JSON buried in brace-heavy codex chatter (no fenced block)" {
+    cat > "$TMP/bin/omx" <<'EOF'
+#!/usr/bin/env bash
+cat <<'OUT'
+reasoning effort: high
+--------
+user
+Adversarial skeptic. DEFAULT REFUTED. Judge the proposals.
+hook: SessionStart
+exec
+/bin/bash -lc 'cat /home/u/.autospec/skills/explore/SKILL.md >/dev/null; echo "using ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts} and {other braces} in here"'
+hook: PreToolUse Completed
+codex
+{"add retry logic":{"verdict":"survived","reason":"evidence reproduces the gap"},"bogus claim":{"verdict":"refuted","reason":"no supporting evidence"}}
+hook: Stop
+hook: Stop Completed
+tokens used
+30982
+{"add retry logic":{"verdict":"survived","reason":"evidence reproduces the gap"},"bogus claim":{"verdict":"refuted","reason":"no supporting evidence"}}
+{"event":"turn_complete","tokens":30982,"model":"codex-high"}
+OUT
+exit 0
+EOF
+    chmod +x "$TMP/bin/omx"
+
+    run bash "$BRIDGE"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [ -s "$VERDICTS_OUT" ]
+    python3 -c "
+import json
+m = json.load(open('$VERDICTS_OUT'))
+# Both known proposals must be recovered with the correct verdicts — not {}.
+assert m['add retry logic']['verdict'] == 'survived', m
+assert m['bogus claim']['verdict'] == 'refuted', m
+# The telemetry footer key must never leak in.
+assert 'event' not in m, m
+"
+}
+
+@test "SENTINELS: recovers verdicts wrapped in BEGIN/END markers amid noise" {
+    cat > "$TMP/bin/omx" <<'EOF'
+#!/usr/bin/env bash
+cat <<'OUT'
+reasoning effort: high
+hook: SessionStart
+exec /bin/bash -lc 'echo "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts} {noise}"'
+hook: Stop Completed
+Here is my determination:
+===AUTOSPEC_VERDICTS_BEGIN===
+{"add retry logic":{"verdict":"survived","reason":"clear reproduced evidence"},"bogus claim":{"verdict":"refuted","reason":"restates the title"}}
+===AUTOSPEC_VERDICTS_END===
+tokens used
+41231
+{"event":"turn_complete","tokens":41231}
+OUT
+exit 0
+EOF
+    chmod +x "$TMP/bin/omx"
+
+    run bash "$BRIDGE"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    python3 -c "
+import json
+m = json.load(open('$VERDICTS_OUT'))
+assert m['add retry logic']['verdict'] == 'survived', m
+assert m['bogus claim']['verdict'] == 'refuted', m
+"
+}
+
+@test "FAIL-CLOSED (extraction): deduped had proposals but no recoverable verdict overlapping known -> non-zero, no populated map" {
+    # Chatter with only UNRELATED JSON objects (no key intersects known). This is
+    # an extraction FAILURE, not 'all refuted' — must fail LOUD, not write {}+exit0.
+    cat > "$TMP/bin/omx" <<'EOF'
+#!/usr/bin/env bash
+cat <<'OUT'
+reasoning effort: high
+hook: SessionStart
+exec /bin/bash -lc 'echo "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts} {stuff}"'
+hook: Stop Completed
+I could not format a verdict.
+{"event":"turn_complete","tokens":1200,"model":"codex-high"}
+{"unrelated":{"foo":"bar"}}
+OUT
+exit 0
+EOF
+    chmod +x "$TMP/bin/omx"
+
+    run bash "$BRIDGE"
+    [ "$status" -ne 0 ]
+    # Must NOT have written a populated/all-survived map.
+    python3 -c "
+import json, os
+p = '$VERDICTS_OUT'
+if os.path.exists(p) and os.path.getsize(p) > 0:
+    m = json.load(open(p))
+    assert m == {} or all(v.get('verdict') != 'survived' for v in m.values()), ('leaked verdicts on extraction failure', m)
+    assert len(m) == 0, ('populated map written on extraction failure', m)
+"
+}
+
 # ── fail-closed: safety-critical ──────────────────────────────────────────────
 
 @test "FAIL-CLOSED: omx exits non-zero (even with valid-looking output) -> non-zero, no all-survived" {
