@@ -84,6 +84,49 @@ require_json_array() {
         || status_probe_failed "$label returned invalid JSON"
 }
 
+status_gh_options() {
+    local dashdash="--"
+    STATUS_REPO_OPT="${dashdash}repo"
+    STATUS_HEAD_OPT="${dashdash}head"
+    STATUS_BASE_OPT="${dashdash}base"
+    STATUS_STATE_OPT="${dashdash}state"
+    STATUS_JSON_OPT="${dashdash}json"
+}
+
+status_rollup_json() {
+    local slug="$1" branch="$2" parent="$3"
+    status_gh_options
+    gh pr list "$STATUS_REPO_OPT" "$slug" "$STATUS_HEAD_OPT" "$branch" \
+        "$STATUS_BASE_OPT" "$parent" "$STATUS_STATE_OPT" all \
+        "$STATUS_JSON_OPT" number,state
+}
+
+status_accumulated_json() {
+    local slug="$1" branch="$2"
+    status_gh_options
+    gh pr list "$STATUS_REPO_OPT" "$slug" "$STATUS_BASE_OPT" "$branch" \
+        "$STATUS_STATE_OPT" all "$STATUS_JSON_OPT" number
+}
+
+status_age_days() {
+    local branch="$1" dashdash="--" age_epoch now_epoch age_days
+    age_epoch="$(git log -1 "${dashdash}format=%ct" "$branch")" \
+        || status_probe_failed "branch age query failed"
+    now_epoch="$(date -u +%s)"
+    case "$age_epoch" in *[!0-9]*|'') status_probe_failed "branch age query returned non-numeric epoch" ;; esac
+    age_days=$(( (now_epoch - age_epoch) / 86400 ))
+    [ "$age_days" -ge 0 ] || age_days=0
+    printf '%s\n' "$age_days"
+}
+
+status_diff_lines() {
+    local pref="$1" branch="$2" diff_lines
+    diff_lines="$(git diff "$pref...$branch" | wc -l | tr -d ' ')" \
+        || status_probe_failed "branch diff query failed"
+    case "$diff_lines" in *[!0-9]*|'') status_probe_failed "branch diff query returned non-numeric line count" ;; esac
+    printf '%s\n' "$diff_lines"
+}
+
 repo_root() {
     git rev-parse --show-toplevel
 }
@@ -211,45 +254,27 @@ cmd_reset() {
 cmd_status() {
     local branch pref slug rollup_json accumulated_json first_pr first_state accumulated_pr_count
     local age_epoch now_epoch age_days diff_lines
-    local dashdash repo_opt head_opt base_opt state_opt json_opt log_format_opt
     branch="$(integration_branch)"
     pref="$(parent_ref)"
     slug="$(repo_slug)"
-    dashdash="--"
-    repo_opt="${dashdash}repo"
-    head_opt="${dashdash}head"
-    base_opt="${dashdash}base"
-    state_opt="${dashdash}state"
-    json_opt="${dashdash}json"
-    log_format_opt="${dashdash}format=%ct"
 
     branch_exists "$branch" || status_probe_failed "integration branch not found: $branch"
     ensure_local_branch "$branch" || status_probe_failed "could not fetch integration branch: $branch"
 
-    rollup_json="$(gh pr list "$repo_opt" "$slug" "$head_opt" "$branch" "$base_opt" "${PARENT#origin/}" "$state_opt" all "$json_opt" number,state)" \
-        || status_probe_failed "rollup PR query failed"
+    rollup_json="$(status_rollup_json "$slug" "$branch" "${PARENT#origin/}")" || status_probe_failed "rollup PR query failed"
     require_json_array "rollup PR query" "$rollup_json"
     first_pr="$(printf '%s' "$rollup_json" | jq -r 'if length > 0 then .[0].number else null end')" \
         || status_probe_failed "rollup PR number parse failed"
     first_state="$(printf '%s' "$rollup_json" | jq -r 'if length > 0 then .[0].state else null end')" \
         || status_probe_failed "rollup PR state parse failed"
 
-    accumulated_json="$(gh pr list "$repo_opt" "$slug" "$base_opt" "$branch" "$state_opt" all "$json_opt" number)" \
-        || status_probe_failed "accumulated PR query failed"
+    accumulated_json="$(status_accumulated_json "$slug" "$branch")" || status_probe_failed "accumulated PR query failed"
     require_json_array "accumulated PR query" "$accumulated_json"
     accumulated_pr_count="$(printf '%s' "$accumulated_json" | jq -r 'length')" \
         || status_probe_failed "accumulated PR count parse failed"
 
-    age_epoch="$(git log -1 "$log_format_opt" "$branch")" \
-        || status_probe_failed "branch age query failed"
-    now_epoch="$(date -u +%s)"
-    case "$age_epoch" in *[!0-9]*|'') status_probe_failed "branch age query returned non-numeric epoch" ;; esac
-    age_days=$(( (now_epoch - age_epoch) / 86400 ))
-    [ "$age_days" -ge 0 ] || age_days=0
-
-    diff_lines="$(git diff "$pref...$branch" | wc -l | tr -d ' ')" \
-        || status_probe_failed "branch diff query failed"
-    case "$diff_lines" in *[!0-9]*|'') status_probe_failed "branch diff query returned non-numeric line count" ;; esac
+    age_days="$(status_age_days "$branch")"
+    diff_lines="$(status_diff_lines "$pref" "$branch")"
 
     if [ "$first_pr" = "null" ]; then
         first_state_json="null"
