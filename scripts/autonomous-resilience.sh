@@ -760,12 +760,14 @@ cmd_post_merge_health() {
         notify_op "autospec: rollback required" \
             "Post-merge health failed for ${repo}; rollback handle ${rollback_handle}"
     fi
+    "$GH" label create origin:self --repo "$repo" --color 8250df --force >/dev/null 2>&1 || true
     followup_url="$("$GH" issue create \
         --repo "$repo" \
         --title "autospec-autonomous rollback after post-merge health failure for PR #${pr:-unknown}" \
         --body "$(printf 'Post-merge health failed after autonomous merge.\\n\\nRepo: %s\\nPR: #%s\\nRollback handle: `%s`\\nWorkstream: %s\\nVerifier lane: %s\\n\\nHealth evidence:\\n```\\n%s\\n```\\n' "$repo" "${pr:-unknown}" "$rollback_handle" "$workstream" "$verifier_lane" "$health_output")" \
         --label "auto-implement" \
         --label "regression" \
+        --label "origin:self" \
         2>/dev/null || true)"
     if [ -n "$followup_url" ]; then
         say "FOLLOWUP_ISSUE:${followup_url}"
