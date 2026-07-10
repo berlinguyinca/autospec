@@ -324,6 +324,9 @@ _run_cycle() {
   ! grep -q 'issues=101' "$RUN_CMD_LOG"
   # Notification fired.
   grep -q 'sync conflict' "$NOTIFY_LOG"
+  # The kind=integration mode file written by ensure must be parked, so no
+  # later dispatch routes work onto the conflicted integration branch.
+  [ ! -f "$MODE_FILE" ]
 }
 
 @test "ensure failure (non-65): self subset parked, no dispatch onto parent" {

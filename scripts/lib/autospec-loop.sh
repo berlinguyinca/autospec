@@ -1513,6 +1513,24 @@ EOF_PROV_BATCH
                                             bash "$_intbranch_sh" sync --parent main \
                                                 --repo "$_repo" 1>&2 || _prov_int_rc=$?
                                         fi
+                                        if [ "$_prov_int_rc" -ne 0 ]; then
+                                            # Peer-review must-fix: ensure may have
+                                            # written a kind=integration mode file
+                                            # before sync failed — park it so nothing
+                                            # routes Phase 4 work onto a conflicted /
+                                            # unsynced integration branch until a later
+                                            # cycle's ensure+sync succeeds.
+                                            local _prov_fail_mode="${_repo_root}/.autospec/explore-mode.json"
+                                            local _prov_fail_kind=""
+                                            if [ -f "$_prov_fail_mode" ]; then
+                                                _prov_fail_kind="$(jq -r '.kind // empty' \
+                                                    "$_prov_fail_mode" 2>/dev/null || printf '')"
+                                            fi
+                                            if [ "$_prov_fail_kind" = "integration" ]; then
+                                                mv -f "$_prov_fail_mode" "${_prov_fail_mode}.parked" 2>/dev/null \
+                                                    || rm -f "$_prov_fail_mode" 2>/dev/null || true
+                                            fi
+                                        fi
                                         if [ "$_prov_int_rc" -eq 65 ]; then
                                             printf 'code_health:integration_sync_conflict\n' >&2
                                             printf '[conductor] provenance: integration sync conflict — parking self batch (issues: %s)\n' \
