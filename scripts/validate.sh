@@ -2613,6 +2613,22 @@ check_autospec_run_summary_contract() {
     fi
 }
 
+
+check_db_module_install() {
+    info "install.sh autospec-db optional module: tests/unit/install-db-module.bats"
+    [ -f tests/unit/install-db-module.bats ] \
+        || fail "tests/unit/install-db-module.bats: bats coverage missing (issue #1777)"
+    grep -q 'maybe_prompt_db_module' install.sh \
+        || fail "install.sh missing maybe_prompt_db_module (issue #1777)"
+    grep -qF 'Install the optional database telemetry module (autospec-db)? [y/N]' install.sh \
+        || fail "install.sh missing autospec-db prompt text (issue #1777)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/unit/install-db-module.bats"
+        bats tests/unit/install-db-module.bats >/tmp/validate-install-db-module.log 2>&1 \
+            || { cat /tmp/validate-install-db-module.log >&2; fail "tests/unit/install-db-module.bats: failed"; }
+    fi
+}
+
 check_install_tests() {
     info "install tests: tests/install/*.sh"
     if [ -d tests/install ]; then
@@ -3197,6 +3213,7 @@ main() {
     check_autospec_loop_contract
     check_autospec_run_summary_contract
     check_install_tests
+    check_db_module_install
     check_phase4_tests
     check_autospec_parallel_dispatch_contract
     check_autospec_explore_implementer_base
