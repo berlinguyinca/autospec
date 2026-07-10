@@ -100,7 +100,7 @@ YML
 discovery:
   rate_limits:
     internet-forums:
-      token: sk-live-abc123
+      token: x
 YML
   run bash "$V" "$TMP/c.yml"
   [ "$status" -eq 1 ]
