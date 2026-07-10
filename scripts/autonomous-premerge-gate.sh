@@ -183,6 +183,47 @@ _qa_verdict_blocks() {
     fi
     [ "$blocks" = "block" ]
 }
+_qa_verdict_present() {
+    # True when a parseable native qa verdict artifact exists — in which case it
+    # is authoritative for the QA stage (see _qa_stage_blocks). A missing or
+    # malformed file is NOT authoritative (falls back to the stdout grep, which
+    # still surfaces the parse WARN via _qa_verdict_blocks). DRY_RUN has no
+    # native authority, mirroring _qa_verdict_blocks.
+    [ "$DRY_RUN" -eq 1 ] && return 1
+    local verdict_file="${AUTOSPEC_REPO_DIR:-$PWD}/.autospec/qa-verdict.json"
+    command -v jq >/dev/null 2>&1 || return 1
+    [ -f "$verdict_file" ] || return 1
+    jq -e . "$verdict_file" >/dev/null 2>&1
+}
+_has_severe_findings() {
+    # High/severe/critical-only variant of _count_blocking_findings (drops the
+    # "medium" tier). Used as a backstop when the native qa verdict is
+    # authoritative: a severe stdout token still blocks even if the verdict
+    # under-reports it, but the qa skill's own "[medium]" advisory lines
+    # (dirty-git-status, missing-manifest — which it marks non-blocking) do not.
+    local scan_output="$1" count
+    count=$(printf '%s' "$scan_output" | grep -ciE \
+        '(severity[[:space:]]*:[[:space:]]*(high|severe|critical)|\[(high|severe|critical)\]|^(high|severe|critical)[[:space:]])' \
+        || true)
+    [ "${count:-0}" -gt 0 ]
+}
+_qa_stage_blocks() {
+    # QA blocking decision. When a native qa verdict artifact is present and
+    # parseable it is AUTHORITATIVE: it already separates release-blocking
+    # findings from advisory ones, so the legacy stdout severity grep — which
+    # false-blocks on the skill's own "[medium]" advisory lines — must not
+    # override a non-blocking native verdict. A high/severe/critical stdout
+    # token still blocks as a backstop against an under-reporting verdict.
+    # With no parseable artifact, fall back to the full legacy stdout grep
+    # (still calling _qa_verdict_blocks so a malformed-but-present file surfaces
+    # the parse WARN). (autospec #1718 / autotrade #1350 AC #3.)
+    local qa_output="$1"
+    if _qa_verdict_present; then
+        _qa_verdict_blocks || _has_severe_findings "$qa_output"
+        return $?
+    fi
+    _has_blocking_findings "$qa_output" || _qa_verdict_blocks
+}
 _secaudit_summary_blocks() {
     # Native secaudit verdict: blocks when the deterministic summary line
     # "secaudit: must-fix=<N> ..." reports N > 0. must-fix=0 is non-blocking.
@@ -342,7 +383,7 @@ while true; do
     qa_output=""
     qa_output="$(_run_qa)"
     _log_low_findings "$qa_output" "QA"
-    if _has_blocking_findings "$qa_output" || _qa_verdict_blocks; then
+    if _qa_stage_blocks "$qa_output"; then
         if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
             info "Max attempts ($MAX_ATTEMPTS) reached with QA blocking findings still present."
             _apply_needs_human_label
