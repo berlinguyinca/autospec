@@ -1,7 +1,7 @@
 ---
 name: feedback_refine_then_run_workflow
 description: "User's standard autospec workflow is /autospec-refine then /autospec-run; prefers keyword auto-routing shorthands over typing slash commands."
-metadata: 
+metadata:
   node_type: memory
   type: feedback
   originSessionId: f656413f-97c2-491e-a407-119d14e2bcbe

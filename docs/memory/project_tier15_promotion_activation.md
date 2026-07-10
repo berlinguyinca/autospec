@@ -1,7 +1,7 @@
 ---
 name: project-tier15-promotion-activation
 description: "How autospec-autonomous Tier 1.5 issue-promotion actually activates, and why the existing needs-classify backlog is unpromotable."
-metadata: 
+metadata:
   node_type: memory
   type: project
   originSessionId: ad29d98b-2c40-47a9-baf7-c4a47462e9db
