@@ -5072,7 +5072,7 @@ check_grow_define_contract() {
         grep -q "$lens" "$d/SKILL.md" || fail "$d/SKILL.md: lens $lens not named in roster"
     done
     if command -v bats >/dev/null 2>&1; then
-        for b in tests/unit/grow-define-pipeline.bats tests/unit/grow-define-file-issues.bats tests/unit/filing-origin-self-explore-growth.bats tests/autospec-grow-define/smoke.bats; do
+        for b in tests/unit/grow-define-pipeline.bats tests/unit/grow-define-file-issues.bats tests/unit/filing-origin-self-explore-growth.bats tests/unit/qa-filing-origin-self.bats tests/autospec-grow-define/smoke.bats; do
             info "  running: $b"
             bats "$b" >/tmp/validate-grow-define.log 2>&1 || { cat /tmp/validate-grow-define.log >&2; fail "$b: failed"; }
         done
