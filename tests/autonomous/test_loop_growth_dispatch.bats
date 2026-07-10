@@ -286,12 +286,24 @@ YAML
     "$FAKE_SCRIPTS/validate-growth-config.sh"
   chmod +x "$FAKE_SCRIPTS/validate-growth-config.sh"
 
-  # gh stub: 0 drafts (default []→coerced to 0), but the needs-approval query
-  # returns a count of 1 (a control issue carrying a decision label).
+  # gh stub: 0 drafts (default []→coerced to 0). For the needs-approval query
+  # it returns REAL `--json labels` JSON and honors `--jq`, so the loop's own
+  # `any(. == "growth/approved" or ...)` filter actually runs — a broken filter
+  # would surface here. Canned data: two open needs-approval issues, only one
+  # of which carries a decision label, so the correct filter yields 1.
   cat > "$FAKE_BIN/gh" <<'EOF'
 #!/usr/bin/env bash
+args=("$@")
 if printf '%s ' "$@" | grep -q 'growth/needs-approval'; then
-  echo 1; exit 0
+  json='[{"labels":[{"name":"growth/needs-approval"},{"name":"growth/approved"}]},{"labels":[{"name":"growth/needs-approval"}]}]'
+  jqexpr=""
+  i=0
+  while [ "$i" -lt "${#args[@]}" ]; do
+    if [ "${args[$i]}" = "--jq" ]; then jqexpr="${args[$((i+1))]}"; fi
+    i=$((i+1))
+  done
+  if [ -n "$jqexpr" ]; then printf '%s' "$json" | jq -r "$jqexpr"; else printf '%s' "$json"; fi
+  exit 0
 fi
 case "${1:-}" in
   issue) echo "[]" ;;
