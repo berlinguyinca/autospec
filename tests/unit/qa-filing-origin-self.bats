@@ -9,7 +9,7 @@ setup() {
   mkdir -p "$TMP/bin"
   cat > "$TMP/bin/gh" <<'SH'
 #!/usr/bin/env bash
-printf '%q ' "$@" >> "$GH_LOG"; printf '\n' >> "$GH_LOG"
+printf '%s ' "$@" | tr '\n' ' ' >> "$GH_LOG"; printf '\n' >> "$GH_LOG"
 if [ "$1 $2" = "label create" ] && [ -n "${GH_LABEL_FAIL:-}" ]; then
   echo "label create failed" >&2
   exit 1

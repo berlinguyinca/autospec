@@ -119,6 +119,7 @@ if ! command -v gh >/dev/null 2>&1; then
     exit 2
 fi
 
+# origin:self provenance (issue #1744): idempotent, best-effort label
 ensure_origin_self_label() {
     gh label create origin:self --color 8250df --force >/dev/null 2>&1 || true
 }

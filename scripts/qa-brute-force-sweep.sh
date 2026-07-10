@@ -44,6 +44,7 @@ mkdir -p "$(dirname "$VERDICT_FILE")"
 DIRECTIVE_STRING_MATCH='Replace substring checks with the proper domain primitive (SMARTS/AST/parsed URL/IP/date/schema). Substring-on-name is brittle to synonyms, locants, salt forms, escaping, and case.'
 DIRECTIVE_REPEATED_STRUCTURE='Extract the N branches into a table + single dispatcher loop. In Python use a list of tuples or dict; in Java/Scala use a Map/sealed-trait registry; in Rust use a &[(predicate, value)] slice; in Go use a []struct{...} table. Each new entry should be one row, not a ~10-line block.'
 
+# origin:self provenance (issue #1744): idempotent, best-effort label
 ensure_origin_self_label() {
     gh label create origin:self --color 8250df --force >/dev/null 2>&1 || true
 }
