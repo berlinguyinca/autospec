@@ -84,7 +84,9 @@ DEFAULT_POLICY = {
     "block_patterns": [
         {"id": "production-data-destruction", "patterns": [r"(?i)delete .*production", r"(?i)drop .*prod(uction)? .*database"]},
         {"id": "secret-exfiltration", "patterns": [r"(?i)(dump|print|exfiltrate|send).*secret", r"(?i)(aws|github|stripe).*token"]},
+        {"id": "credential-printing", "patterns": [r"(?i)(print|dump|log|write|show|expose|send).*(credential|password|api[ -]?key|private[ -]?key|token)", r"(?i)(credential|password|api[ -]?key|private[ -]?key|token).*(to (the )?(log|console|stdout)|in logs?)"]},
         {"id": "instruction-bypass", "patterns": [r"(?i)ignore (all )?(previous|system|developer|agent) instructions", r"(?i)bypass (ci|tests|hooks|review|guardian)"]},
+        {"id": "ci-or-review-bypass", "patterns": [r"(?i)(disable|turn off|remove|skip).*(ci|checks?|tests?|hooks?|review|guardian)", r"(?i)(ci|checks?|tests?|hooks?|review|guardian).*(disable|turn off|remove|skip)"]},
         {"id": "auth-backdoor", "patterns": [r"(?i)\b(auth|login|password|token|admin)[ -]?(backdoor|bypass)\b", r"(?i)\b(backdoor|bypass)\b.*\b(auth|login|password|token|admin)\b", r"(?i)\bmagic (token|password|login)\b"]},
         {"id": "destructive-shell", "patterns": [r"rm -rf /", r"(?i)curl .*\| *(sh|bash)"]},
     ],
@@ -94,7 +96,7 @@ DEFAULT_POLICY = {
         {"id": "production-or-infra-touch", "patterns": [r"(?i)(production|prod|billing|payments|migration|terraform|iam|kms)"]},
     ],
     "trusted_actors": [{"login": "berlinguyinca", "allowed_risk": ["test_data_reset", "fixture_regeneration", "local_dev_cleanup", "documented_migration_replay"]}],
-    "never_bypass": ["secret-exfiltration", "instruction-bypass", "production-data-destruction", "auth-backdoor"],
+    "never_bypass": ["secret-exfiltration", "credential-printing", "instruction-bypass", "ci-or-review-bypass", "production-data-destruction", "auth-backdoor"],
 }
 
 

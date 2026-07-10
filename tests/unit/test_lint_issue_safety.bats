@@ -40,6 +40,20 @@ setup() {
     echo "$output" | grep -q "secret-exfiltration"
 }
 
+@test "lint-issue-safety: credential printing blocks" {
+    run bash "$LINT" --title "Print repository credentials" "$FIX/credential-printing.md"
+    [ "$status" -eq 2 ]
+    echo "$output" | grep -q "SAFETY_BLOCK"
+    echo "$output" | grep -q "credential-printing"
+}
+
+@test "lint-issue-safety: disabling ci checks blocks" {
+    run bash "$LINT" --title "Disable CI checks" "$FIX/ci-disable.md"
+    [ "$status" -eq 2 ]
+    echo "$output" | grep -q "SAFETY_BLOCK"
+    echo "$output" | grep -q "ci-or-review-bypass"
+}
+
 @test "lint-issue-safety: explicit auth backdoor blocks" {
     run bash "$LINT" --title "Add auth backdoor" "$FIX/auth-backdoor.md"
     [ "$status" -eq 2 ]
