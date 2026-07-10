@@ -11,7 +11,11 @@
 #   grooming-govern.sh tick --observed <json> [--min-samples N]
 #
 # --observed JSON shape (from grooming-observe.sh):
-#   {"groomed_clean_merge_rate":F,"baseline_clean_merge_rate":F,"samples":N}
+#   {"groomed_clean_merge_rate":F,"baseline_clean_merge_rate":F,"samples":N,
+#    "baseline_samples":N}
+# Widen-guard: never widen unless BOTH samples and baseline_samples meet the
+# floor — a zero/empty baseline is no quality signal (baseline_samples absent
+# defaults to 0 → hold). Retract-on-regression is unchanged.
 #
 # State: ${AUTOSPEC_GROOMING_STATE_DIR:-$HOME/.autospec/grooming-state}/active-gates.json
 set -eu
@@ -99,6 +103,8 @@ case "$CMD" in
     active="$(read_active)"
     samples="$(printf '%s' "$OBSERVED" | jq -r '.samples')"
     samples_int="$(printf '%s' "$OBSERVED" | jq -r '.samples | floor')"
+    # baseline_samples may be absent in legacy observations; default 0 → fail-closed.
+    baseline_samples_int="$(printf '%s' "$OBSERVED" | jq -r '(.baseline_samples // 0) | floor')"
 
     promote="$(printf '%s' "$OBSERVED" | jq '
       (.groomed_clean_merge_rate >= .baseline_clean_merge_rate)')"
@@ -107,10 +113,16 @@ case "$CMD" in
     if [ "$samples_int" -lt "$MIN_SAMPLES" ]; then
       action="hold"
     elif [ "$promote" = "true" ]; then
-      ng="$(next_gate "$active")"
-      if [ -n "$ng" ]; then
-        active="$active $ng"
-        action="promote"
+      # WIDEN-GUARD: never widen on an empty/zero baseline. A groomed_rate of 1.0
+      # vs a baseline_rate of 0.0 over baseline_samples=0 is NO real quality
+      # signal — promoting there would defeat the fail-closed seed. Require a
+      # baseline population at least as large as the sample floor before widening.
+      if [ "$baseline_samples_int" -ge "$MIN_SAMPLES" ]; then
+        ng="$(next_gate "$active")"
+        if [ -n "$ng" ]; then
+          active="$active $ng"
+          action="promote"
+        fi
       fi
     else
       # regression: drop the last-added gate, never the seed

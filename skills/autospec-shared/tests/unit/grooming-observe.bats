@@ -30,6 +30,19 @@ teardown() { rm -rf "$TMP"; }
   echo "$output" | jq -e '.baseline_clean_merge_rate == 1' >/dev/null
 }
 
+@test "emits baseline_samples counting ungroomed records (widen-guard input)" {
+  run bash "$SCRIPT" --telemetry "$T" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.baseline_samples == 2' >/dev/null
+}
+
+@test "zeroed metrics include baseline_samples:0" {
+  : > "$TMP/empty.jsonl"
+  run bash "$SCRIPT" --telemetry "$TMP/empty.jsonl" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.baseline_samples == 0' >/dev/null
+}
+
 @test "empty/missing telemetry yields zeroed metrics, exit 0 (fail-safe)" {
   : > "$TMP/empty.jsonl"
   run bash "$SCRIPT" --telemetry "$TMP/empty.jsonl" --json

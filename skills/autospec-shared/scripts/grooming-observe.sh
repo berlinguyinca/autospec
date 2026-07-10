@@ -12,6 +12,8 @@
 #   groomed_clean_merge_rate  — fraction (0..1) of groomed issues that were clean
 #   baseline_clean_merge_rate — fraction (0..1) of ungroomed issues that were clean
 #   samples                   — count of groomed issues (the promotion sample floor)
+#   baseline_samples          — count of ungroomed issues (govern's widen-guard:
+#                               never widen without a real baseline population)
 #
 # Fail-safe: a missing/empty/garbled telemetry file yields zeroed metrics and
 # exit 0 (never blocks the sweep). Malformed lines are skipped.
@@ -29,7 +31,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-zeroed() { printf '{"groomed_clean_merge_rate":0,"baseline_clean_merge_rate":0,"samples":0}\n'; }
+zeroed() { printf '{"groomed_clean_merge_rate":0,"baseline_clean_merge_rate":0,"samples":0,"baseline_samples":0}\n'; }
 
 if [ -z "$TELEMETRY" ] || [ ! -f "$TELEMETRY" ]; then
   zeroed; exit 0
@@ -55,7 +57,8 @@ out="$(jq -R 'fromjson? // empty' "$TELEMETRY" 2>/dev/null | jq -s '
   | {
       groomed_clean_merge_rate:  (if $gn > 0 then ($gc / $gn) else 0 end),
       baseline_clean_merge_rate: (if $bn > 0 then ($bc / $bn) else 0 end),
-      samples: $gn
+      samples: $gn,
+      baseline_samples: $bn
     }
 ' 2>/dev/null)" || true
 
