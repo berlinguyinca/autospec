@@ -180,6 +180,38 @@ custom autospec-gui; alert routing; NATS/SQS or any broker; multi-hub sync; GitH
 polling changes; retro-ingestion of historical ledgers (possible later via a one-shot
 backfill script in autospec-db).
 
+## Configuration — autospec.yml is the ONLY operator-facing flag surface
+
+Operator rule (2026-07-10): every behavioral flag lives in the `telemetry:`
+block of `.autospec/autospec.yml` and nowhere else. Env vars exist ONLY as
+internal plumbing derived from the yaml (and as CI/test overrides), exactly
+mirroring the `advisor:` block precedent (`advisor-config.sh`; precedence
+env > yaml > built-in default; `AUTOSPEC_CONFIG_FILE` overrides the path).
+Credentials are NOT flags: `~/.autospec/db.conf` / `~/.autospec/db.env` are
+chmod-600 machine secrets and never move into the repo-committed yaml.
+
+```yaml
+telemetry:
+  enabled: true              # false = hard off (loader exports AUTOSPEC_DB_DISABLE=1)
+  host_label: ''             # '' = short hostname; else stamps every event's host
+  spool_max_bytes: 10485760  # local spool cap; oldest lines dropped first
+  install:
+    db_module: prompt        # prompt | always | never — install.sh behavior for
+                             # the optional autospec-db module
+```
+
+A `telemetry-config.sh` helper (mirroring `advisor-config.sh`: python3+yaml,
+empty-on-miss, `--key` dotted lookup) resolves the block; the session
+bootstrap (decomposition hint 5) exports the plumbing envs from it:
+`enabled: false` → `AUTOSPEC_DB_DISABLE=1`; `host_label` →
+`AUTOSPEC_DB_HOST_LABEL`; `spool_max_bytes` → `AUTOSPEC_DB_SPOOL_MAX_BYTES`.
+The installer integration reads `telemetry.install.db_module` instead of
+operator-set env vars (`AUTOSPEC_INSTALL_DB` / `AUTOSPEC_NO_DB_PROMPT` remain
+recognized as CI/test overrides only, never documented as the operator
+interface). The `autospec-db` binary itself stays env-driven — it is the
+mechanism layer in a standalone repo; the yaml is policy, and core owns the
+yaml→env mapping.
+
 ## Installer integration (autospec core install.sh)
 
 The repo-root `install.sh` offers the database module as a first-class optional
@@ -205,10 +237,12 @@ plugin, mirroring the existing `maybe_prompt_star` prompt discipline exactly
    (it is idempotent: refreshes the checkout, applies only new migrations,
    converges roles, leaves passwords untouched). If absent during `--update`,
    stay silent — updates never introduce new prompts.
-4. **Env controls.** `AUTOSPEC_NO_DB_PROMPT=1` suppresses the prompt;
-   `AUTOSPEC_INSTALL_DB=1` forces install/update without prompting (CI and
-   scripted installs); `AUTOSPEC_INSTALL_DB=0` forces skip even when installed
-   (leaves the module untouched, including no update).
+4. **Flag source.** Behavior is driven by `telemetry.install.db_module` in
+   `.autospec/autospec.yml` (`prompt` default | `always` = install/update
+   without asking | `never` = leave untouched, including no update). The env
+   vars `AUTOSPEC_NO_DB_PROMPT=1` and `AUTOSPEC_INSTALL_DB=1|0` are CI/test
+   overrides only (precedence env > yaml > default), never the operator
+   interface.
 5. **Testing.** bats with a PATH-shim `curl` stub (never fetches) and a fake
    `$HOME`: absent+decline → no fetch; absent+yes → installer invoked;
    installed+`--update` → installer invoked without prompt; `AUTOSPEC_INSTALL_DB=0`
@@ -222,5 +256,5 @@ plugin, mirroring the existing `maybe_prompt_star` prompt discipline exactly
 2. heartbeat + run-state chokepoint wiring
 3. claim-guard + ledger-append chokepoint wiring
 4. `feature.described` + park/stop chokepoint wiring
-5. session bootstrap sourcing of `~/.autospec/db.env` + docs
+5. `telemetry-config.sh` (yaml resolver mirroring advisor-config.sh) + session bootstrap: source `~/.autospec/db.env` + export plumbing envs from the `telemetry:` block + docs
 6. install.sh optional-db-module prompt + auto-update (Installer integration section)
