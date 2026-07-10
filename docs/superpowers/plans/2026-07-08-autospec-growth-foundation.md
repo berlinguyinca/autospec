@@ -74,7 +74,7 @@ JSON
 }
 
 @test "rejects an inline secret in measurement.analytics" {
-  f="$(valid_json)"; jq '.measurement.analytics.token = "sk-live-abc123"' "$f" > "$TMP/bad.json"
+  f="$(valid_json)"; jq '.measurement.analytics.token = "REDACTED_INLINE_SECRET_PLACEHOLDER"' "$f" > "$TMP/bad.json"
   run bash "$V" "$TMP/bad.json"
   [ "$status" -ne 0 ]
   [[ "$output" == *"secret"* || "$output" == *"token_env"* ]]

@@ -3245,6 +3245,8 @@ main() {
     check_growth_shared_contract
     check_growth_candidate_pipeline_contract
     check_grow_define_contract
+    check_grow_run_pipeline_contract
+    check_grow_run_contract
 
 
 # Architecture fitness-function engine (issue #1533): the declarative registry
@@ -5060,6 +5062,58 @@ check_grow_define_contract() {
         done
     fi
     return "$rc"
+}
+
+# grow-run pipeline contract: the eight R1/R2/R4 outbound + measurement
+# scripts (draft validation, content-quality precheck, outbound queue,
+# attribution, and the four measurement adapters) must stay bash -n clean
+# and pass their bats coverage.
+check_grow_run_pipeline_contract() {
+    info "grow-run pipeline: bash -n + bats coverage"
+    local d="skills/autospec-shared/scripts"
+    local s
+    for s in validate-outbound-draft growth-content-quality-precheck \
+             growth-outbound-queue growth-attribute \
+             growth-adapter-github growth-adapter-analytics \
+             growth-adapter-gsc growth-adapter-rank; do
+        check_bash_syntax "$d/$s.sh"
+        [ -f "$d/$s.sh" ] \
+            || fail "$d/$s.sh: required grow-run pipeline script missing"
+    done
+    if ! command -v bats >/dev/null 2>&1; then
+        info "  bats not available — skipping grow-run pipeline bats suites"
+        return 0
+    fi
+    local t
+    for t in tests/unit/validate-outbound-draft.bats tests/unit/growth-content-quality-precheck.bats \
+             tests/unit/growth-outbound-queue.bats tests/unit/growth-adapters.bats \
+             tests/unit/growth-attribute.bats tests/unit/growth-measure.bats; do
+        [ -f "$t" ] || fail "$t: grow-run pipeline bats coverage missing"
+        info "  running: $t"
+        bats "$t" >/tmp/validate-grow-run-pipeline.log 2>&1 \
+            || { cat /tmp/validate-grow-run-pipeline.log >&2; \
+                 fail "$t: failed (grow-run pipeline contract)"; }
+    done
+}
+
+# grow-run contract: the /autospec-grow-run trio must carry its required
+# structural sections and pass its bats coverage including the mock-driven
+# end-to-end smoke test.
+check_grow_run_contract() {
+    info "grow-run: structural sections + smoke"
+    local d="skills/autospec-grow-run"
+    local f="$d/SKILL.md"
+    [ -f "$f" ] || { fail "$f: missing"; return 1; }
+    grep -qF '**Model tier:**' "$f"       || fail "$f: missing Model tier directive"
+    grep -q '^## Self-update mode' "$f"   || fail "$f: missing Self-update mode"
+    grep -q '^## R1 — Artifact drain' "$f"        || fail "$f: missing R1"
+    grep -q '^## R2 — Outbound' "$f"              || fail "$f: missing R2"
+    grep -q '^## R4 — Measure' "$f"               || fail "$f: missing R4"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/autospec-grow-run/smoke.bats"
+        bats tests/autospec-grow-run/smoke.bats >/tmp/validate-grow-run.log 2>&1 \
+            || { cat /tmp/validate-grow-run.log >&2; fail "tests/autospec-grow-run/smoke.bats: failed"; }
+    fi
 }
 
 main "$@"

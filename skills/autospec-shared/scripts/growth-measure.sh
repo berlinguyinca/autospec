@@ -27,6 +27,24 @@ normalize() {
         metrics: { stars: (.stargazers_count // 0), forks: (.forks_count // 0) },
         ts: $ts }' "$raw"
       ;;
+    analytics)
+      jq --argjson ts "$ts" '{
+        provider: "analytics",
+        metrics: {
+          visitors: (.results.visitors.value // .visitors // 0),
+          pageviews: (.results.pageviews.value // .pageviews // 0)
+        },
+        ts: $ts }' "$raw"
+      ;;
+    rank)
+      jq --argjson ts "$ts" '{
+        provider: "rank",
+        metrics: {
+          avg_position: ((([.keywords[]?.position] | add) // 0) / ([.keywords[]? ] | length | if . == 0 then 1 else . end)),
+          keywords: [.keywords[]? | {keyword, position}]
+        },
+        ts: $ts }' "$raw"
+      ;;
     *)
       echo "unknown provider: $provider" >&2; exit 1 ;;
   esac
