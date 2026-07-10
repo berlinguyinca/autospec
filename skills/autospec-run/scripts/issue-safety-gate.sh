@@ -80,6 +80,11 @@ previous_headings = [line.strip() for line in prefix.splitlines() if line.starts
 if not previous_headings or previous_headings[-1] != "## Safety review":
     result(False, "missing_safety_review_heading")
     sys.exit(0)
+safety_heading_start = prefix.rfind("## Safety review")
+safety_preamble = prefix[safety_heading_start + len("## Safety review"):]
+if any(line.strip() for line in safety_preamble.splitlines()):
+    result(False, "unexpected_safety_review_preamble")
+    sys.exit(0)
 
 block = body[begin + len(BEGIN):end]
 decision_prefix = "- **decision:**"
@@ -106,7 +111,7 @@ title = str(issue.get("title") or "")
 author = issue.get("author") or {}
 actor = author.get("login") if isinstance(author, dict) else ""
 actor = str(actor or "")
-body_without_review = body[:prefix.rfind("## Safety review")] + body[end + len(END):]
+body_without_review = body[:safety_heading_start] + body[end + len(END):]
 with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
     handle.write(body_without_review)
     body_file = handle.name
