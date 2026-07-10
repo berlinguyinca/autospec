@@ -49,6 +49,28 @@ normal pipeline:
 If no install path is detected, print `Self-update: no installed copy of
 autospec-grow-run found; run install.sh first.` and exit.
 
+## Run modes
+
+The invocation argument (after the `update` check above) selects which phases
+run. Match the argument case-insensitively, ignoring surrounding whitespace:
+
+- **`outbound`** (argument matches `^\s*outbound\s*$`) — **outbound-only
+  mode**: run R0 (detect) then R2 (draft → gate → queue) and R3 (handle
+  approvals). **Skip R1 and R4.** The artifact drain (R1) is the autonomous
+  conductor's Tier 1 job, and measurement (R4) is its own cadence-gated tier;
+  re-running either here would duplicate that work.
+- **`measure`** (argument matches `^\s*measure\s*$`) — **measure-only
+  mode**: run R0 (detect) then R4 (measure & attribute). **Skip R1, R2, and
+  R3.** This is what the conductor's cadence-gated measure tier invokes.
+- **anything else / no argument** — **full pipeline**: R0 → R1 → R2 → R3 → R4,
+  exactly as described below.
+
+Resolve the mode once in R0 and hold it for the run. Each phase below names
+the modes it runs in; when a phase is skipped for the active mode, do not
+emit its ledger lines or notifications — proceed to the next phase it applies
+to. The conductor's outbound and measure tiers rely on these narrow modes so
+each tier does exactly its own slice of work.
+
 ## Required capabilities & harness adapter
 
 This workflow assumes seven capabilities. Map each one to your harness's
@@ -130,6 +152,11 @@ they recur.
 
 ## R0 — Detect
 
+*(runs in every mode)*
+
+0. Resolve the **run mode** from the invocation argument (see **Run modes**
+   above): `outbound`, `measure`, or full pipeline. Hold it for the run — it
+   decides which of R1–R4 execute.
 1. Detect your harness (see above) and resolve `TIER_A`/`TIER_B`.
 2. Check for `.autospec/growth.yml`. If absent, print:
    `"No .autospec/growth.yml found — this repo is not opted into autospec-growth. See skills/autospec-grow-define/README.md to configure a product/site and try again."`
@@ -148,6 +175,8 @@ they recur.
    `<config.json>` path for the rest of the run.
 
 ## R1 — Artifact drain
+
+*(full pipeline only — skipped in `outbound` and `measure` modes)*
 
 1. Enumerate open `growth:artifact` issues in the target repo:
    ```bash
@@ -169,6 +198,8 @@ they recur.
      move on to the next `growth:artifact` issue.
 
 ## R2 — Outbound draft → gate → queue
+
+*(full pipeline and `outbound` mode — skipped in `measure` mode)*
 
 For each open `growth:outbound` (or `growth/needs-draft`) issue, in turn:
 
@@ -214,6 +245,8 @@ content to any external platform on its own.
 
 ## R3 — Handle approvals
 
+*(full pipeline and `outbound` mode — skipped in `measure` mode)*
+
 For each open `growth/needs-approval` control issue in `approval.control_repo`:
 
 1. Read the issue's labels:
@@ -239,6 +272,8 @@ external platform under any control-issue state, including `approved` —
 publication is always a human action taken outside this skill.
 
 ## R4 — Measure & attribute
+
+*(full pipeline and `measure` mode — skipped in `outbound` mode)*
 
 1. Run each adapter configured in `.autospec/growth.yml` (`measurement`
    block), e.g.:
@@ -279,6 +314,27 @@ publication is always a human action taken outside this skill.
    attribution output (which lenses/channels are earning their budget,
    which are mostly refuted or unpublished) and store/print it alongside the
    run summary.
+5. **Record the measure cycle in the ledger.** Append exactly one
+   `kind:"measure"` line so the conductor's cadence gate
+   (`growth-measure-due.sh`) can tell when this repo was last measured —
+   without it, the measure tier fires every cycle forever. Use the canonical
+   append-only writer, which enforces the full 10-key line schema:
+   ```bash
+   bash "$AUTOSPEC_SCRIPTS_DIR/growth-ledger.sh" --append "$(jq -n \
+     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+     --arg reason "$MEASURE_SUMMARY" \
+     '{round:0, source:"measure", title:"measure cycle",
+       norm_title:("measure-" + $ts), channel:"measurement",
+       kind:"measure", issue:0, outcome:"measured",
+       reason:$reason, ts:$ts}')"
+   ```
+   `issue:0` keeps the line out of the per-issue `latest` collapse (it is
+   recorded individually, like a refutation). Append this line whenever R4
+   runs to completion — in both full-pipeline and `measure` mode — even when
+   every adapter degraded to `{}`, because a completed (if empty) measure
+   pass still resets the cadence clock. Set `$MEASURE_SUMMARY` to a one-line
+   digest of the attribution result (or the degradation reason if all
+   adapters returned `{}`).
 
 ## Stop
 
@@ -292,6 +348,7 @@ Phase R4 complete on {repo}.
 - attribution: <summary of per-lens contribution / adapter degradations>
 - ledger: <path to .autospec/growth/ledger.jsonl>
 
-Hand off to your external conductor (/autospec-grow), or re-run
-/autospec-grow-define to plan the next cycle.
+Growth runs unattended under /autospec-autonomous, which drives this skill's
+outbound and measure modes on its own cadence; re-run /autospec-grow-define
+to plan the next cycle, or invoke this skill directly for a one-off pass.
 ```

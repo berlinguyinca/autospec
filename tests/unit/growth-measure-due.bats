@@ -77,6 +77,32 @@ YAML
   [ "$output" = "1" ]
 }
 
+# Pin against the EXACT line skills/autospec-grow-run/SKILL.md R4 step 5 tells
+# the agent to append (round:0, source:"measure", channel:"measurement",
+# norm_title:"measure-<ts>"). The generic measure_line() helper above is a
+# hand-built fixture; if the SKILL's documented JSON drifted (wrong key, wrong
+# `kind`), this end-to-end test — and only this one — would catch it: the line
+# must (a) satisfy growth-ledger.sh's 10-key REQUIRED schema on --append AND
+# (b) be recognized by growth-measure-due.sh so the cadence clock resets.
+@test "SKILL R4 documented measure line appends cleanly and resets cadence" {
+  local ts="2026-06-01T00:00:00Z"
+  # Built exactly as SKILL.md R4 step 5's jq documents it.
+  local line
+  line="$(jq -n --arg ts "$ts" --arg reason "all adapters degraded to {}" \
+    '{round:0, source:"measure", title:"measure cycle",
+      norm_title:("measure-" + $ts), channel:"measurement",
+      kind:"measure", issue:0, outcome:"measured",
+      reason:$reason, ts:$ts}')"
+  # (a) canonical appender accepts it (10-key schema enforced, exit 0).
+  run bash "$LEDGER_SH" --append "$line"
+  [ "$status" -eq 0 ]
+  # (b) within-interval -> the just-written line resets the cadence to not-due.
+  export GROWTH_NOW_EPOCH=1780617600  # 2026-06-05T00:00:00Z, 4 days later
+  run bash "$SCRIPT" "$TMP"
+  [ "$status" -eq 0 ]
+  [ "$output" = "0" ]
+}
+
 @test "malformed ledger -> fail-closed not due (0)" {
   mkdir -p "$(dirname "$GROWTH_LEDGER")"
   printf 'not json\n' > "$GROWTH_LEDGER"

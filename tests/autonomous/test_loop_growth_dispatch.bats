@@ -170,6 +170,52 @@ _run_cycle() {
   [[ "$output" == *"Tier G3 growth-measure result: dry=true"* ]]
 }
 
+# ── Bare fallbacks invoke the NARROW modes (Task 7 Part A) ─────────────────
+# When no AUTOSPEC_GROWTH_*_CMD seam is set, the outbound/measure tiers must
+# fall back to grow-run's outbound-only / measure-only modes — NOT the full
+# pipeline, which would redundantly re-drain artifacts (Tier 1's job).
+@test "service-growth-outbound bare fallback calls 'autospec-grow-run outbound'" {
+  _install_common_stubs
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '\''{"tier":5,"action":"service-growth-outbound","reason":"test"}\n'\'''
+
+  local run_log="$TEST_TMP/grow-run-args.log"
+  cat > "$FAKE_BIN/autospec-grow-run" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$run_log'
+printf '{"dry":false,"filed":0}\n'
+EOF
+  chmod +x "$FAKE_BIN/autospec-grow-run"
+  unset AUTOSPEC_GROWTH_OUTBOUND_CMD
+
+  _run_cycle
+
+  [ "$status" -eq 0 ]
+  [ -f "$run_log" ]
+  grep -qx 'outbound' "$run_log"
+}
+
+@test "run-growth-measure bare fallback calls 'autospec-grow-run measure'" {
+  _install_common_stubs
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '\''{"tier":7,"action":"run-growth-measure","reason":"test"}\n'\'''
+
+  local run_log="$TEST_TMP/grow-run-args.log"
+  cat > "$FAKE_BIN/autospec-grow-run" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$run_log'
+printf '{"dry":false,"filed":0}\n'
+EOF
+  chmod +x "$FAKE_BIN/autospec-grow-run"
+  unset AUTOSPEC_GROWTH_MEASURE_CMD
+
+  _run_cycle
+
+  [ "$status" -eq 0 ]
+  [ -f "$run_log" ]
+  grep -qx 'measure' "$run_log"
+}
+
 # ── Safety invariant: growth-disabled repos never see growth flags ────────
 @test "growth-disabled (no .autospec/growth.yml): waterfall never receives --growth-* flags" {
   _install_common_stubs

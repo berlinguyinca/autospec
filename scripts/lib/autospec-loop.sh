@@ -1049,8 +1049,14 @@ fi'
             case "$_g_outbound" in *[!0-9]*) _g_outbound=0 ;; esac
             _g_measure_due="$(bash "${_sdir}/growth-measure-due.sh" "$_repo_root" 2>/dev/null || echo 0)"
             _growth_flags="--growth-enabled 1 --growth-outbound-pending ${_g_outbound:-0} --tierg-dry-cycles ${_tierg_dry_cycles:-0}"
-            [ -n "$_g_backlog" ] && _growth_flags="$_growth_flags --growth-backlog $_g_backlog"
-            [ "$_g_measure_due" = "1" ] && _growth_flags="$_growth_flags --growth-measure-due 1"
+            # if/then/fi, not `[ ] && ...`: a failing test short-circuits to a
+            # non-zero statement exit under `set -e` and would abort the loop.
+            if [ -n "$_g_backlog" ]; then
+                _growth_flags="$_growth_flags --growth-backlog $_g_backlog"
+            fi
+            if [ "$_g_measure_due" = "1" ]; then
+                _growth_flags="$_growth_flags --growth-measure-due 1"
+            fi
         fi
 
         # ── Step 3: Waterfall tier selection ──────────────────────────────────
@@ -1580,7 +1586,10 @@ fi'
             # it runs cleanly (no dry-cycle counter — this is a service poll,
             # not a discovery cascade).
             local _go_cmd="${AUTOSPEC_GROWTH_OUTBOUND_CMD:-}"
-            [ -n "$_go_cmd" ] || _go_cmd="autospec-grow-run"
+            # Bare fallback runs grow-run's OUTBOUND-ONLY mode (R0+R2+R3), not
+            # the full pipeline — the artifact drain (R1) is already Tier 1's
+            # job, so a full-pipeline fallback would redundantly re-drain it.
+            [ -n "$_go_cmd" ] || _go_cmd="autospec-grow-run outbound"
 
             local _go_out
             if [ "$_dry" = "1" ]; then
@@ -1604,7 +1613,10 @@ fi'
         elif [ "$_action" = "run-growth-measure" ]; then
             # ── Tier G3: measure & attribute (cadence-gated, not per-cycle) ─
             local _gm_cmd="${AUTOSPEC_GROWTH_MEASURE_CMD:-}"
-            [ -n "$_gm_cmd" ] || _gm_cmd="autospec-grow-run"
+            # Bare fallback runs grow-run's MEASURE-ONLY mode (R0+R4), not the
+            # full pipeline — measure/attribute is all Tier G3 owes; a full
+            # fallback would redundantly re-drain artifacts and re-queue outbound.
+            [ -n "$_gm_cmd" ] || _gm_cmd="autospec-grow-run measure"
 
             local _gm_out
             if [ "$_dry" = "1" ]; then
