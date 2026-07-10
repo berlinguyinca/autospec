@@ -155,24 +155,13 @@ they recur.
    - Invoke `/autospec-run` against that single issue (invoked as the
      existing skill, not forked/reimplemented — this skill does not
      duplicate `/autospec-run`'s own decompose/implement/merge machinery).
-   - Once `/autospec-run` produces a diff/PR body for the issue, run the
-     **content-quality gate** before the issue is allowed to auto-merge:
-     1. Deterministic pre-checks:
-        ```bash
-        bash "$AUTOSPEC_SCRIPTS_DIR/growth-content-quality-precheck.sh" <content.md>
-        ```
-        (keyword-density ceiling + citation presence; delegates FTC
-        disclosure to `growth-ethics-precheck.sh`).
-     2. A `TIER_A` reviewer subagent judges genuine value/quality beyond the
-        mechanical checks.
-     3. Wrap both in a **5-attempt adaptive-retry loop**: on failure, feed
-        the precheck output and reviewer findings back to the implementer as
-        directives and retry, up to 5 attempts, before giving up on that
-        issue.
-   - The standard code reviewer, the `growth-ethics` gate, and
-     `autospec-secaudit` also run before auto-merge, exactly as they would
-     for any other `/autospec-run` issue — the content-quality gate is
-     additive, not a replacement.
+     Because the issue carries `growth:artifact`, `/autospec-run` itself
+     runs the content-quality gate (`GATE=growth`: deterministic
+     `growth-content-quality-precheck.sh` pre-checks plus a `TIER_A`
+     reviewer, with adaptive retry on failure) before allowing that
+     issue's PR to auto-merge, alongside the standard code reviewer, the
+     `growth-ethics` gate, and `autospec-secaudit`. R1 does not re-run any
+     of these — the gate is single-sourced in `/autospec-run`.
    - Append a ledger line: `merged_clean` on success, `failed` on a
      per-issue failure. A per-issue failure does **not** stop the drain —
      move on to the next `growth:artifact` issue.
