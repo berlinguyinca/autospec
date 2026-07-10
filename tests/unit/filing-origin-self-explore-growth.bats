@@ -96,6 +96,31 @@ DRIVER
     tr '\n' ' ' < "$GH_LOG" | grep -qE 'issue create.*--label origin:self'
 }
 
+@test "explore fallback filing: stderr-visible retry also carries --label origin:self" {
+    # Primary issue create fails (exit 1, no URL); the retry succeeds. Both
+    # invocations must carry origin:self — the retry is a distinct call site.
+    cat > "$STUB_DIR/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_LOG"
+case "$*" in
+  *"label create"*) exit 0 ;;
+  *"issue create"*)
+    n="$(cat "$GH_CREATE_COUNT" 2>/dev/null || echo 0)"; n=$((n+1)); echo "$n" > "$GH_CREATE_COUNT"
+    if [ "$n" -eq 1 ]; then echo "gh: transient failure" >&2; exit 1; fi
+    printf 'https://github.com/berlinguyinca/autospec/issues/322\n'; exit 0 ;;
+esac
+exit 0
+SH
+    chmod +x "$STUB_DIR/gh"
+    export GH_CREATE_COUNT="$TMP/gh.create.count"
+    run _run_explore_raw_filing
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    # Both the failed primary and the successful retry were invoked.
+    [ "$(cat "$GH_CREATE_COUNT")" -eq 2 ]
+    # Two labeled issue-create invocations in the log (primary + retry).
+    [ "$(tr '\n' ' ' < "$GH_LOG" | grep -o -- '--label auto-implement --label origin:self' | wc -l | tr -d ' ')" -eq 2 ]
+}
+
 # ── skills/autospec-shared/scripts/grow-define-file-issues.sh ───────────────
 
 _grow_gh_stub() {
