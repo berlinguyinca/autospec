@@ -28,6 +28,22 @@ teardown() { rm -rf "$TMP"; unset GROWTH_NOW_EPOCH; }
   echo "$output" | jq -e '.metrics.forks == 5'
 }
 
+@test "normalize analytics (plausible-shaped)" {
+  echo '{"results":{"visitors":{"value":120},"pageviews":{"value":540}}}' > "$TMP/a.json"
+  run bash "$M" --normalize analytics "$TMP/a.json"; [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.provider')" = "analytics" ]
+  [ "$(echo "$output" | jq -r '.metrics.visitors')" = "120" ]
+  [ "$(echo "$output" | jq -r '.metrics.pageviews')" = "540" ]
+  [ "$(echo "$output" | jq -r '.ts')" = "1000000" ]
+}
+
+@test "normalize rank" {
+  echo '{"keywords":[{"keyword":"a","position":4},{"keyword":"b","position":12}]}' > "$TMP/r.json"
+  run bash "$M" --normalize rank "$TMP/r.json"; [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.provider')" = "rank" ]
+  [ "$(echo "$output" | jq -r '.metrics.avg_position')" = "8" ]
+}
+
 @test "unknown provider fails" {
   echo '{}' > "$TMP/x.json"
   run bash "$M" --normalize wat "$TMP/x.json"
