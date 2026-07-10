@@ -119,9 +119,16 @@ if ! command -v gh >/dev/null 2>&1; then
     exit 2
 fi
 
+ensure_origin_self_label() {
+    gh label create origin:self --color 8250df --force >/dev/null 2>&1 || true
+}
+
+ensure_origin_self_label
+
 if gh issue create \
     --title "$TITLE" \
     --label "auto-implement,autospec:v2-flow" \
+    --label origin:self \
     --body "$BODY" >/dev/null 2>&1; then
     echo "$DEDUP_KEY" >> "$DEDUP_CACHE"
     exit 0
