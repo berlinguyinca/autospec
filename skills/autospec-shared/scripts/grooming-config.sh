@@ -9,13 +9,14 @@
 #   grooming-config.sh --key policy                            # auto | on | off
 #   grooming-config.sh --key budget.max_issues_per_cycle       # integer
 #   grooming-config.sh --key budget.groom_attempts_per_issue   # integer
+#   grooming-config.sh --key budget.canary_floor               # integer
 set -eu
 
 KEY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --key) KEY="${2:-}"; shift 2 ;;
-    --help|-h) printf 'Usage: grooming-config.sh --key <policy|budget.max_issues_per_cycle|budget.groom_attempts_per_issue>\n'; exit 0 ;;
+    --help|-h) printf 'Usage: grooming-config.sh --key <policy|budget.max_issues_per_cycle|budget.groom_attempts_per_issue|budget.canary_floor>\n'; exit 0 ;;
     *) printf 'grooming-config.sh: unknown option: %s\n' "$1" >&2; exit 1 ;;
   esac
 done
@@ -94,6 +95,11 @@ case "$KEY" in
   budget.groom_attempts_per_issue)
     v="$(resolve "${AUTOSPEC_GROOMING_GROOM_ATTEMPTS:-}" "budget.groom_attempts_per_issue" "2")"
     case "$v" in ''|*[!0-9]*) v=2 ;; esac
+    printf '%s\n' "$v"
+    ;;
+  budget.canary_floor)
+    v="$(resolve "${AUTOSPEC_GROOMING_CANARY_FLOOR:-}" "budget.canary_floor" "5")"
+    case "$v" in ''|*[!0-9]*) v=5 ;; esac
     printf '%s\n' "$v"
     ;;
   *)

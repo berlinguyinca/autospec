@@ -5072,7 +5072,7 @@ check_grow_define_contract() {
         grep -q "$lens" "$d/SKILL.md" || fail "$d/SKILL.md: lens $lens not named in roster"
     done
     if command -v bats >/dev/null 2>&1; then
-        for b in tests/unit/grow-define-pipeline.bats tests/unit/grow-define-file-issues.bats tests/autospec-grow-define/smoke.bats; do
+        for b in tests/unit/grow-define-pipeline.bats tests/unit/grow-define-file-issues.bats tests/unit/filing-origin-self-explore-growth.bats tests/autospec-grow-define/smoke.bats; do
             info "  running: $b"
             bats "$b" >/tmp/validate-grow-define.log 2>&1 || { cat /tmp/validate-grow-define.log >&2; fail "$b: failed"; }
         done
@@ -5138,13 +5138,16 @@ check_grow_run_contract() {
 # ungated — exactly the #1185/#1211 pattern where a green-in-isolation suite rots
 # because no validate check ever runs it. Mirrors check_autospec_fab_contract.
 check_grooming_contract() {
-    info "backlog-grooming: gate all seven grooming bats suites (ungated-tests regression #1185/#1211)"
+    info "backlog-grooming: gate all ten grooming bats suites (ungated-tests regression #1185/#1211)"
     local f name
     for f in \
         "tests/autospec/list-groomable.bats" \
         "tests/autospec/promote-eligibility.bats" \
         "tests/autospec/groom-validate.bats" \
+        "tests/autospec/groom-fill.bats" \
+        "tests/autospec/groom-reconcile.bats" \
         "tests/autospec/autonomous-promote-open-issues.bats" \
+        "tests/autospec/test_loop_grooming.bats" \
         "skills/autospec-shared/tests/grooming-config.bats" \
         "skills/autospec-shared/tests/unit/grooming-govern.bats" \
         "skills/autospec-shared/tests/unit/grooming-observe.bats"; do

@@ -15,7 +15,10 @@
 #                     fix:/feat: intent-or-repro AND bounded scope
 #                     (<= MAX_FILES referenced file paths, no epic marker).
 #   epic           — has "epic" label or an epic marker in the body.
-#   needs-template — groomable but not eligible (multi-file/complex).
+#   needs-template — groomable but not eligible: multi-file/complex, OR clear
+#                     actionable intent expressed structurally (acceptance-criteria
+#                     checkboxes, intent section headers, or a conventional-commit
+#                     --title prefix) without a fix:/feat: body token.
 #   hold           — ambiguous / unresolvable-dependency / too-thin.
 #                     Fail-closed: anything uncertain lands here.
 #
@@ -31,13 +34,17 @@ MAX_FILES=3
 BODY_FILE=""
 LABELS=""
 REPO=""
+TITLE=""
 
 usage() {
   cat <<'EOF'
 promote-eligibility.sh — deterministic fail-closed eligibility scorer
 
 Usage:
-  scripts/promote-eligibility.sh <body-file> --labels "<csv>" [--repo OWNER/REPO]
+  scripts/promote-eligibility.sh <body-file> --labels "<csv>" [--repo OWNER/REPO] [--title "<title>"]
+
+--title lets a conventional-commit intent prefix (fix:/feat:/gap:/...) count as
+clear intent even when the body has no fix:/feat: token.
 
 Environment:
   GH_NONEXISTENT  test hook: treat any "Depends on #N" as nonexistent
@@ -64,6 +71,10 @@ while [ $# -gt 0 ]; do
       ;;
     --repo)
       REPO="${2:-}"
+      shift 2
+      ;;
+    --title)
+      TITLE="${2:-}"
       shift 2
       ;;
     -*)
@@ -96,6 +107,7 @@ fi
 BODY="$(cat "$BODY_FILE")"
 BODY_LOWER="$(printf '%s' "$BODY" | tr '[:upper:]' '[:lower:]')"
 LABELS_LOWER="$(printf '%s' "$LABELS" | tr '[:upper:]' '[:lower:]')"
+TITLE_LOWER="$(printf '%s' "$TITLE" | tr '[:upper:]' '[:lower:]')"
 
 emit() {
   decision="$1"
@@ -197,6 +209,31 @@ if [ "$HAS_INTENT" -eq 0 ]; then
 fi
 
 if [ "$HAS_INTENT" -eq 0 ]; then
+  # Structured-intent recognition: an issue can express clear actionable intent
+  # through structure (acceptance-criteria checkboxes, intent section headers, or
+  # a conventional-commit title prefix) rather than a fix:/feat: body token. Such
+  # issues have intent but lack the autospec template scaffolding, so route them
+  # to needs-template (codex fill) instead of holding for a human. Fail-closed is
+  # preserved: a genuinely thin/unstructured body still falls through to hold.
+  STRUCTURED_REASON=""
+  if printf '%s' "$BODY" | grep -qE '^[[:space:]]*[-*][[:space:]]+\[[ xX]\]'; then
+    STRUCTURED_REASON="acceptance-criteria checkboxes present"
+  elif printf '%s' "$BODY" | grep -qiE '^#{2,}[[:space:]]+(goal|objective|proposed|problem|summary|acceptance|suggested ac|observed)([[:space:]]|$)'; then
+    # Line-anchored (not substring) so "## goalkeeper" / quoted prose can't false-hit.
+    STRUCTURED_REASON="structured intent section header present"
+  else
+    case "$TITLE_LOWER" in
+      fix:*|feat:*|gap:*|chore:*|refactor:*|perf:*|docs:*|test:*|ci:*|build:*|revert:*)
+        STRUCTURED_REASON="title states typed intent (${TITLE_LOWER%%:*}:)"
+        ;;
+    esac
+  fi
+
+  if [ -n "$STRUCTURED_REASON" ]; then
+    emit "needs-template" "clear intent via ${STRUCTURED_REASON}; needs autospec template structure"
+    exit 0
+  fi
+
   emit "hold" "ambiguous: no clear fix/feat intent or repro found in body"
   exit 0
 fi

@@ -17,6 +17,8 @@ LANE="implementer"
 MUTATION_BASELINE=""
 MUTATION_CURRENT=""
 LANE_METADATA=""
+PROTECTED_BRANCHES=""
+SELF_ORIGINATED_CHECK=0
 _default_notify_sh() {
     local dir
     dir="$(cd "$(dirname "$0")" && pwd)"
@@ -40,6 +42,13 @@ Options:
   --lane <name>           Actor lane for immutable verifier bypass (implementer/verifier).
   --changed-files <file>  Newline-delimited changed files for immutable/blast checks.
   --fenced-surfaces <yml> Config-driven fenced-surface registry.
+  --check-self-originated Enable the self-originated direct-merge gate
+                          (requires --pr and --repo; opt-in so callers that
+                          only pass --pr/--repo for labeling are unaffected).
+  --protected-branches <csv> Extra protected parent branches for the
+                          self-originated gate (beyond the repo default
+                          branch and autonomous.self_originated.protected_branches
+                          config).
   --quarantine-out <json> Write async human-review quarantine provenance JSON.
   --gate-evidence <json>  Passing gate evidence JSON to record on merge-ok.
   --mutation-baseline <json> Baseline mutation ledger JSON.
@@ -83,6 +92,8 @@ while [ $# -gt 0 ]; do
         --provenance-out) PROVENANCE_OUT="${2:-}"; shift 2 ;;
         --fenced-surfaces) FENCED_SURFACES="${2:-}"; shift 2 ;;
         --quarantine-out) QUARANTINE_OUT="${2:-}"; shift 2 ;;
+        --protected-branches) PROTECTED_BRANCHES="${2:-}"; shift 2 ;;
+        --check-self-originated) SELF_ORIGINATED_CHECK=1; shift ;;
         --dry-run)     DRY_RUN=1; shift ;;
         --help|-h)     usage; exit 0 ;;
         *) printf '%s: unknown argument: %s\n' "$SCRIPT_NAME" "$1" >&2
@@ -367,6 +378,26 @@ if [ -n "$CHANGED_FILES" ]; then
             "Pre-merge gate quarantined $PR_BRANCH for fenced-surface blast radius; continuing autonomous loop."
         printf "quarantine fenced_surface\n"
         exit 0
+    fi
+fi
+# Self-originated direct-merge gate (issue #1742, defense in depth for
+# docs/specs/2026-07-10-autonomous-integration-branch-design.md §Architecture
+# item 6). Opt-in via --check-self-originated (mirrors how diff-guard/
+# blast-radius are gated on --changed-files and mutation-guard on
+# --mutation-baseline/--mutation-current) so callers that already pass
+# --pr/--repo purely for labeling/provenance-out are unaffected. Deliberately
+# placed AFTER the blast-radius quarantine block above: per §Error handling,
+# fenced-surfaces quarantine evaluates FIRST and wins — if blast-radius
+# already quarantined and exited, this never runs.
+if [ "$SELF_ORIGINATED_CHECK" -eq 1 ]; then
+    [ -n "$PR_NUMBER" ] || die "--check-self-originated requires --pr"
+    [ -n "$REPO" ] || die "--check-self-originated requires --repo"
+    GUARDRAILS_SH="$(_guardrails_sh)"
+    if ! self_originated_output="$(bash "$GUARDRAILS_SH" self-originated --pr "$PR_NUMBER" --repo "$REPO" ${PROTECTED_BRANCHES:+--protected-branches "$PROTECTED_BRANCHES"} 2>&1)"; then
+        printf "%s\n" "$self_originated_output"
+        _apply_guardrail_block_label
+        printf "block self_originated_direct_merge\n"
+        exit 1
     fi
 fi
 if [ -n "$MUTATION_BASELINE" ] || [ -n "$MUTATION_CURRENT" ]; then
