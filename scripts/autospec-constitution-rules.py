@@ -940,10 +940,10 @@ def extract(root: Path) -> int:  # v2 override
         constitution_rules = generic_structured_rules(constitution_path, "constitution", profiles)
     if not baseline_rules and baseline_path:
         baseline_rules = generic_structured_rules(baseline_path, "baseline", profiles)
-    if not constitution_rules and constitution_path and constitution_path.exists():
+    if constitution_path and constitution_path.exists():
         for path in sorted(constitution_path.rglob("*.md")):
             constitution_rules.extend(markdown_rule_v2(constitution_path, path, "constitution"))
-    if not baseline_rules and baseline_path and baseline_path.exists():
+    if baseline_path and baseline_path.exists():
         for path in sorted(baseline_path.rglob("*.md")):
             baseline_rules.extend(markdown_rule_v2(baseline_path, path, "baseline"))
     constitution_rules = unique_rules(constitution_rules)

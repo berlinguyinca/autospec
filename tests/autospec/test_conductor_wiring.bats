@@ -18,6 +18,7 @@ setup() {
   TEST_TMP="$(mktemp -d)"
   export HOME="$TEST_TMP"
   mkdir -p "$HOME/.autospec"
+  export AUTOSPEC_CONFIG_FILE="$TEST_TMP/missing-autospec.yml"
 
   # Fake scripts directory that holds stub helper scripts.
   FAKE_SCRIPTS="$TEST_TMP/fake-scripts"

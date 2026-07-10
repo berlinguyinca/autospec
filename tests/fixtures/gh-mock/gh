@@ -14,6 +14,18 @@ comments="${AUTOSPEC_TEST_COMMENTS:?}"
 calls="${AUTOSPEC_TEST_CALLS:?}"
 printf '%s\n' "$*" >> "$calls"
 
+labels_json() {
+    jq -Rn '
+      [inputs | select(length > 0) | {name:.}] as $labels |
+      {
+        labels:$labels,
+        body:"## Safety review\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n",
+        title:"Autospec test issue",
+        author:{login:"autospec-test"}
+      }
+    ' < "$labels"
+}
+
 force_owner() {
     if [ -n "${AUTOSPEC_TEST_FORCE_OWNER:-}" ]; then
         sed "s/\"worker_id\": \"[^\"]*\"/\"worker_id\": \"${AUTOSPEC_TEST_FORCE_OWNER}\"/"
@@ -29,7 +41,20 @@ if [ "$1" = "label" ] && [ "$2" = "create" ]; then
     exit 0
 fi
 if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
-    cat "$labels"; exit 0
+    jq_expr=""
+    shift 2
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --jq) jq_expr="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [ -n "$jq_expr" ]; then
+        labels_json | jq -r "$jq_expr"
+    else
+        labels_json
+    fi
+    exit 0
 fi
 if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
     shift 2; add=""; remove=""

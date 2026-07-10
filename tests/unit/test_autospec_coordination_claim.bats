@@ -9,7 +9,7 @@ setup() {
     LABELS="$TEST_TMP/labels.txt"
     COMMENTS="$TEST_TMP/comments.json"
     CALLS="$TEST_TMP/calls.log"
-    printf 'auto-implement\nctx:32k\n' > "$LABELS"
+    printf 'auto-implement\nctx:32k\nsafety:reviewed\n' > "$LABELS"
     printf '[]\n' > "$COMMENTS"
 
     mkdir -p "$TEST_TMP/bin"
@@ -28,10 +28,35 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
 fi
 
 if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  wants_comments=0
   if printf '%s\n' "$*" | grep -q -- '--json comments'; then
+    wants_comments=1
+  fi
+  jq_expr=""
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --jq) jq_expr="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [ "$wants_comments" -eq 1 ]; then
     cat "$comments"
   else
-    cat "$labels"
+    issue_json="$(jq -Rn '
+      [inputs | select(length > 0) | {name:.}] as $labels |
+      {
+        labels:$labels,
+        body:"## Safety review\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n",
+        title:"Autospec test issue",
+        author:{login:"autospec-test"}
+      }
+    ' < "$labels")"
+    if [ -n "$jq_expr" ]; then
+      printf '%s\n' "$issue_json" | jq -r "$jq_expr"
+    else
+      printf '%s\n' "$issue_json"
+    fi
   fi
   exit 0
 fi
