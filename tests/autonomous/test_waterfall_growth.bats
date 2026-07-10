@@ -47,3 +47,9 @@ DRY="--dry-cycles 9 --tier15-dry-cycles 9 --tier2-dry-cycles 9 --tier3-dry-cycle
   [[ "$output" == *'"tier":1'* ]]
   [[ "$output" != *growth* ]]
 }
+
+@test "growth-absent waterfall decision unchanged vs baseline" {
+  a="$(bash "$SCRIPT" $DRY)"
+  [[ "$a" == *idle-rescan* ]]
+  [[ "$a" != *growth* ]]
+}
