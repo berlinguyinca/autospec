@@ -159,9 +159,9 @@ case "$cmd" in
             title_goal="$(printf '%s' "$title" | sed 's/[.?!][[:space:]]*$//')"
             evidence="$(printf '%s' "$row" | jq -r '.evidence // ""')"
             files_plain="$(printf '%s' "$row" | jq -r '.files[:3][]')"
-            files_inline="$(printf '%s' "$files_plain" | sed '/^[[:space:]]*$/d' | sed 's/.*/`&`/' | paste -sd ', ' -)"
+            files_inline="$(printf '%s' "$row" | jq -r '.files[:3] | map("`" + . + "`") | join(", ")')"
             first_file="$(printf '%s' "$files_plain" | sed '/^[[:space:]]*$/d' | head -n 1)"
-            [ -n "$first_file" ] || first_file="AGENTS.md"
+            [ -n "$first_file" ] || first_file="scripts/autonomous-self-improvement.sh"
             {
                 printf '## Goal\nResolve `%s`: %s.\n\n' "$first_file" "$title_goal"
                 printf '## Files to read first\n'
@@ -170,19 +170,19 @@ case "$cmd" in
                 printf '1. Inspect the evidence line and confirm the issue still reproduces.\n'
                 printf '2. Make the smallest change in the files listed under `## Files touched`.\n'
                 printf '3. Run the primary smoke test and record the result.\n\n'
-                printf '## Tests required\n- bash scripts/validate.sh --fast\n\n'
+                printf '## Tests required\n- bash scripts/validate.sh --fast --changed=origin/main\n\n'
                 printf '## Dependencies\nnone\n\n'
                 printf '## Files touched\n'
                 printf '%s\n' "$files_plain" | sed '/^[[:space:]]*$/d; s/^/- /'
                 printf '\n## Context\nAutoSpec discovered this deterministic self-improvement candidate while the autonomous queue was dry.\n\n'
                 printf '## Evidence\n- %s\n- Files: %s\n\n' "$evidence" "$files_inline"
                 printf '## Acceptance criteria\n'
-                printf '%s\n' '- [ ] `bash scripts/validate.sh --fast` exits 0 after the change.'
+                printf '%s\n' '- [ ] `bash scripts/validate.sh --fast --changed=origin/main` exits 0 after the change.'
                 printf '%s\n\n' '- [ ] The final PR closes or supersedes this `needs-classify` issue.'
                 printf '## Verification\n\n'
                 printf '### Primary smoke test (inner loop)\n\n'
                 printf '```bash\n'
-                printf 'bash scripts/validate.sh --fast\n'
+                printf 'bash scripts/validate.sh --fast --changed=origin/main\n'
                 printf '```\n\n'
                 printf '### Operator/full verification\n\n'
                 printf '```bash\n'
