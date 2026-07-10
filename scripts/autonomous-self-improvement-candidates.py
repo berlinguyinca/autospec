@@ -20,11 +20,8 @@ def candidate_rel(path):
 
 def emit_cli_stub_candidates():
     commands_dir = ROOT / "crates" / "autospec-cli" / "src" / "commands"
-    if not commands_dir.is_dir():
-        return
-    for path in sorted(commands_dir.glob("*.rs")):
-        if path.name == "mod.rs":
-            continue
+    paths = [path for path in sorted(commands_dir.glob("*.rs")) if path.name != "mod.rs"] if commands_dir.is_dir() else []
+    for path in paths:
         name = path.stem.replace("_", "-")
         text = path.read_text(encoding="utf-8")
         if "not_implemented(" not in text:

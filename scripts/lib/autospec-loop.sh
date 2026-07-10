@@ -1297,10 +1297,10 @@ fi'
                 elif command -v autospec-explore >/dev/null 2>&1; then
                     _arch_cmd="autospec-explore --once --research-sources architecture,test-coverage,technical-debt"
                 elif [ -f "${_sdir}/autonomous-self-improvement.sh" ]; then
+                    local _self_improvement_script="${_sdir}/autonomous-self-improvement.sh"
                     local _self_improvement_repo_arg=""
                     [ -z "$_repo" ] || printf -v _self_improvement_repo_arg ' --repo %q' "$_repo"
-                    printf -v _arch_cmd 'bash %q apply --repo-root %q%s --apply' \
-                        "${_sdir}/autonomous-self-improvement.sh" "$_repo_root" "$_self_improvement_repo_arg"
+                    printf -v _arch_cmd 'bash %q apply --repo-root %q%s --apply' "$_self_improvement_script" "$_repo_root" "$_self_improvement_repo_arg"
                 fi
             fi
 
