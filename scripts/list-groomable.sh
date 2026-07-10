@@ -88,9 +88,25 @@ fi
 closed_hashes_file="$(mktemp -t list-groomable-closed.XXXXXX)"
 trap 'rm -f "$closed_hashes_file"' EXIT
 
-printf '%s' "$closed_json" | jq -r '.[] | (.title // "") + ((.body // "")[0:200])' | \
-while IFS= read -r basis; do
-    printf '%s' "$basis" | shasum -a 256 | awk '{print $1}'
+# Compute the dedup hash for a single issue JSON object. Basis is
+# title + first-200-codepoints-of-body, built entirely in jq (`-j` = raw, no
+# trailing newline) and piped straight into shasum. This is used verbatim on
+# BOTH the closed side and the open side so the hash basis is symmetric:
+#   - embedded newlines in title/body are preserved (no `while read` splitting),
+#   - truncation is jq codepoint `[0:200]` on both sides (no cut/byte skew),
+#   - no command substitution, so no trailing-newline stripping asymmetry.
+compute_hash() {
+    # $1 = single issue JSON object
+    printf '%s' "$1" | jq -j '(.title // "") + ((.body // "")[0:200])' | shasum -a 256 | awk '{print $1}'
+}
+
+# Build the closed-issue hash set, one record at a time (jq -c emits one compact
+# object per line; embedded newlines are JSON-escaped, so line-splitting is safe
+# here — the raw text is only ever reconstructed inside compute_hash via jq).
+printf '%s' "$closed_json" | jq -c '.[]' | \
+while IFS= read -r closed_issue; do
+    [ -n "$closed_issue" ] || continue
+    compute_hash "$closed_issue"
 done > "$closed_hashes_file"
 
 # ── Classify + filter open issues via jq ────────────────────────────────────
@@ -139,10 +155,7 @@ count="$(printf '%s' "$candidates_pre" | jq 'length')"
 i=0
 while [ "$i" -lt "$count" ]; do
     issue="$(printf '%s' "$candidates_pre" | jq -c ".[$i]")"
-    title="$(printf '%s' "$issue" | jq -r '.title')"
-    body="$(printf '%s' "$issue" | jq -r '.body')"
-    basis="$(printf '%s%s' "$title" "$(printf '%s' "$body" | cut -c1-200)")"
-    hash="$(printf '%s' "$basis" | shasum -a 256 | awk '{print $1}')"
+    hash="$(compute_hash "$issue")"
     number="$(printf '%s' "$issue" | jq -r '.number')"
 
     if grep -qx "$hash" "$closed_hashes_file" 2>/dev/null; then

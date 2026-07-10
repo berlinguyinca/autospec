@@ -42,3 +42,21 @@ JSON
   run bash "$SCRIPT" --repo o/r --budget 2
   echo "$output" | jq -e '[.candidates[].number] == [20,25]'
 }
+
+@test "dedups open candidate against closed no-op whose body has a newline in first 200 chars" {
+  export GH_ISSUES_FIXTURE="$TMP/open.json"
+  # Open candidate 40 shares title + first-200-body-chars with a closed no-op.
+  # The shared body contains a literal newline within the first 200 chars —
+  # this is the regression case: a newline-naive closed-hash builder splits the
+  # basis and never matches, so this candidate would wrongly survive dedup.
+  cat > "$GH_ISSUES_FIXTURE" <<'JSON'
+[{"number":40,"title":"noop finding","body":"line one\nline two padding padding padding","labels":[{"name":"needs-classify"}]},
+ {"number":41,"title":"real work","body":"zzzzzzzzzzzzzzzzzzzz","labels":[{"name":"needs-classify"}]}]
+JSON
+  export GH_CLOSED_FIXTURE='[{"number":9,"title":"noop finding","body":"line one\nline two padding padding padding"}]'
+  run bash "$SCRIPT" --repo o/r --budget 10
+  [ "$status" -eq 0 ]
+  # 40 must be dropped as a closed-no-op dup; 41 must survive.
+  echo "$output" | jq -e '[.candidates[].number] == [41]'
+  echo "$output" | jq -e '.skipped[] | select(.number==40).reason == "dup-of-closed-noop"'
+}
