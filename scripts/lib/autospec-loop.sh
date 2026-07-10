@@ -578,6 +578,62 @@ _autospec_conductor_clear_self_pause() {
     fi
 }
 
+_autospec_conductor_discard_pending_file() {
+    local repo_root="$1"
+    [ -n "$repo_root" ] || return 1
+    printf '%s/.autospec/discard-pending.json\n' "$repo_root"
+}
+
+_autospec_conductor_write_discard_pending() {
+    local repo_root="$1" issue="$2" rollup_pr="$3" rolled_issues="$4"
+    local pending_file pending_dir tmp updated_at
+    pending_file="$(_autospec_conductor_discard_pending_file "$repo_root" 2>/dev/null || true)"
+    [ -n "$pending_file" ] || return 1
+    pending_dir="$(dirname "$pending_file")"
+    mkdir -p "$pending_dir" 2>/dev/null || return 1
+    tmp="$(mktemp "${pending_file}.XXXXXX" 2>/dev/null || true)"
+    [ -n "$tmp" ] || return 1
+    updated_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf unknown)"
+    if printf '%s\n' "$rolled_issues" \
+        | AUTOSPEC_DISCARD_CONTROL_ISSUE="$issue" \
+            AUTOSPEC_DISCARD_ROLLUP_PR="$rollup_pr" \
+            AUTOSPEC_DISCARD_UPDATED_AT="$updated_at" \
+            jq -R -s \
+        '{
+            control_issue: (env.AUTOSPEC_DISCARD_CONTROL_ISSUE | tonumber),
+            rollup_pr: (env.AUTOSPEC_DISCARD_ROLLUP_PR | tonumber),
+            pending_issues: (split("\n") | map(select(length > 0) | tonumber)),
+            updated_at: env.AUTOSPEC_DISCARD_UPDATED_AT
+        }' > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$pending_file"
+    else
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+    fi
+}
+
+_autospec_conductor_read_discard_pending() {
+    local repo_root="$1" issue="$2" pending_file
+    pending_file="$(_autospec_conductor_discard_pending_file "$repo_root" 2>/dev/null || true)"
+    [ -n "$pending_file" ] && [ -f "$pending_file" ] || return 1
+    AUTOSPEC_DISCARD_CONTROL_ISSUE="$issue" jq -er '
+        select((.control_issue // 0) == (env.AUTOSPEC_DISCARD_CONTROL_ISSUE | tonumber))
+        | (.rollup_pr | tostring),
+          ((.pending_issues // []) | map(tostring) | join("\n"))
+    ' "$pending_file" 2>/dev/null
+}
+
+_autospec_conductor_clear_discard_pending() {
+    local repo_root="$1" issue="$2" pending_file
+    pending_file="$(_autospec_conductor_discard_pending_file "$repo_root" 2>/dev/null || true)"
+    [ -n "$pending_file" ] && [ -f "$pending_file" ] || return 0
+    if AUTOSPEC_DISCARD_CONTROL_ISSUE="$issue" jq -e \
+        '(.control_issue // 0) == (env.AUTOSPEC_DISCARD_CONTROL_ISSUE | tonumber)' \
+        "$pending_file" >/dev/null 2>&1; then
+        rm -f "$pending_file" 2>/dev/null || true
+    fi
+}
+
 # _autospec_conductor_rollup_ci_green REPO PR — exit 0 only when the roll-up
 # PR's status checks are fully settled with no failures. An empty rollup (no
 # CI configured) counts as green; a failed probe fails CLOSED (refuse the
@@ -727,24 +783,38 @@ _autospec_conductor_handle_discard() {
     fi
 
     local parent status_json rollup_pr rollup_state
+    local pending_data pending_rollup pending_issues discard_retry=0
     parent="$(_autospec_conductor_default_branch "$repo")"
     status_json="$(bash "$intbranch_sh" status --parent "$parent" --repo "$repo" 2>/dev/null || true)"
     rollup_pr="$(printf '%s' "$status_json" | jq -r '.rollup_pr.number // empty' 2>/dev/null || true)"
     rollup_state="$(printf '%s' "$status_json" | jq -r '.rollup_pr.state // empty' 2>/dev/null || true)"
+    pending_data="$(_autospec_conductor_read_discard_pending "$repo_root" "$issue" 2>/dev/null || true)"
+    if [ -n "$pending_data" ]; then
+        pending_rollup="$(printf '%s\n' "$pending_data" | sed -n '1p')"
+        pending_issues="$(printf '%s\n' "$pending_data" | sed '1d')"
+    fi
 
     case "$rollup_pr" in
         ''|*[!0-9]*)
+            if [ -n "${pending_rollup:-}" ] && [ "$rollup_state" != "MERGED" ] && [ -n "${pending_issues:-}" ]; then
+                rollup_pr="$pending_rollup"
+                discard_retry=1
+            else
             printf '[conductor] discard: no roll-up PR found for issue #%s — nothing to discard\n' "$issue" >&2
             gh issue comment "$issue" --repo "$repo" \
                 --body "discard: no open roll-up PR found — nothing to discard." >/dev/null 2>&1 || true
             _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:discard"
             return 0
+            fi
             ;;
     esac
     # `status` falls back to the MERGED roll-up when no open one exists —
     # discarding that would reopen already-landed issues. Only an OPEN
     # roll-up is discardable (mirrors promote's state guard).
-    if [ "$rollup_state" != "OPEN" ]; then
+    if [ "$discard_retry" != "1" ] && [ "$rollup_state" != "OPEN" ]; then
+        if [ -n "${pending_rollup:-}" ] && [ "$pending_rollup" = "$rollup_pr" ] && [ "$rollup_state" != "MERGED" ] && [ -n "${pending_issues:-}" ]; then
+            discard_retry=1
+        else
         printf '[conductor] discard: roll-up PR #%s is not open (state=%s) — nothing to discard\n' \
             "$rollup_pr" "$rollup_state" >&2
         gh issue comment "$issue" --repo "$repo" \
@@ -752,22 +822,37 @@ _autospec_conductor_handle_discard() {
             >/dev/null 2>&1 || true
         _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:discard"
         return 0
+        fi
     fi
 
     # Landed-issue list from the PR BODY manifest (between the
     # autospec-rollup-manifest markers): manifest lines are
     # `  - #N — <title> ...`; take the FIRST issue ref per line.
     local rollup_body rolled_issues
-    rollup_body="$(gh pr view "$rollup_pr" --repo "$repo" --json body --jq '.body // ""' 2>/dev/null || true)"
-    rolled_issues="$(printf '%s\n' "$rollup_body" \
-        | awk '/<!-- autospec-rollup-manifest:begin -->/{f=1;next} /<!-- autospec-rollup-manifest:end -->/{f=0} f' \
-        | grep -E '^[[:space:]]*- #[0-9]+' \
-        | sed -E 's/^[[:space:]]*- #([0-9]+).*/\1/' \
-        | sort -un || true)"
+    if [ "$discard_retry" = "1" ]; then
+        rolled_issues="$pending_issues"
+        printf '[conductor] discard: retrying pending discard for roll-up PR #%s (issue #%s)\n' \
+            "$rollup_pr" "$issue" >&2
+    else
+        rollup_body="$(gh pr view "$rollup_pr" --repo "$repo" --json body --jq '.body // ""' 2>/dev/null || true)"
+        rolled_issues="$(printf '%s\n' "$rollup_body" \
+            | awk '/<!-- autospec-rollup-manifest:begin -->/{f=1;next} /<!-- autospec-rollup-manifest:end -->/{f=0} f' \
+            | grep -E '^[[:space:]]*- #[0-9]+' \
+            | sed -E 's/^[[:space:]]*- #([0-9]+).*/\1/' \
+            | sort -un || true)"
 
-    printf '[conductor] discard: closing roll-up PR #%s and deleting its integration branch (issue #%s)\n' \
-        "$rollup_pr" "$issue" >&2
-    if ! gh pr close "$rollup_pr" --repo "$repo" --delete-branch >/dev/null 2>&1; then
+        if [ -n "$rolled_issues" ] && ! _autospec_conductor_write_discard_pending "$repo_root" "$issue" "$rollup_pr" "$rolled_issues"; then
+            printf '[conductor] discard: failed to persist retry manifest for roll-up PR #%s — aborting discard\n' "$rollup_pr" >&2
+            gh issue comment "$issue" --repo "$repo" \
+                --body "discard: failed to persist retry manifest for roll-up PR #${rollup_pr}; nothing was closed or reopened. Re-apply autospec:discard to retry." \
+                >/dev/null 2>&1 || true
+            _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:discard"
+            return 1
+        fi
+
+        printf '[conductor] discard: closing roll-up PR #%s and deleting its integration branch (issue #%s)\n' \
+            "$rollup_pr" "$issue" >&2
+        if ! gh pr close "$rollup_pr" --repo "$repo" --delete-branch >/dev/null 2>&1; then
         # Close failed → nothing else happens (no reopen, no control-issue
         # close): a half-discarded state must not reopen issues whose work
         # is still in an open roll-up.
@@ -775,8 +860,10 @@ _autospec_conductor_handle_discard() {
         gh issue comment "$issue" --repo "$repo" \
             --body "discard: failed to close roll-up PR #${rollup_pr}; nothing was reopened. Re-apply autospec:discard to retry." \
             >/dev/null 2>&1 || true
+        _autospec_conductor_clear_discard_pending "$repo_root" "$issue"
         _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:discard"
         return 1
+        fi
     fi
 
     # Reopen loop tracks per-issue failures — the discard path is
@@ -822,6 +909,7 @@ _autospec_conductor_handle_discard() {
         return 1
     fi
 
+    _autospec_conductor_clear_discard_pending "$repo_root" "$issue"
     _autospec_conductor_clear_self_pause "$repo_root"
     gh issue comment "$issue" --repo "$repo" \
         --body "discard: closed roll-up PR #${rollup_pr}, deleted the integration branch, and reopened its issues." \
