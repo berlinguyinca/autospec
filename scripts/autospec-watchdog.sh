@@ -240,7 +240,7 @@ run_state_comment_ids_for_issue() {
     # Fetch via the REST comments endpoint because `gh issue view --json
     # comments` exposes GraphQL node ids, while DELETE needs the numeric REST
     # comment id.
-    gh api "repos/$REPO_FULL/issues/$issue/comments" \
+    gh api --paginate "repos/$REPO_FULL/issues/$issue/comments?per_page=100" \
         --jq '[.[]? | select((.body // "") | contains("<!-- autospec-run-state:begin -->") and contains("<!-- autospec-run-state:end -->"))] | sort_by(.created_at, .id) | .[].id' \
         2>/dev/null
 }
