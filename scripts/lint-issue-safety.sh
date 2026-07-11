@@ -86,7 +86,28 @@ DEFAULT_POLICY = {
         {"id": "secret-exfiltration", "patterns": [r"(?i)(dump|print|exfiltrate|send).*secret", r"(?i)(aws|github|stripe).*token"]},
         {"id": "credential-printing", "patterns": [r"(?i)(print|dump|log|write|show|expose|send).*(credential|password|api[ -]?key|private[ -]?key|token)", r"(?i)(credential|password|api[ -]?key|private[ -]?key|token).*(to (the )?(log|console|stdout)|in logs?)"]},
         {"id": "instruction-bypass", "patterns": [r"(?i)ignore (all )?(previous|system|developer|agent) instructions", r"(?i)bypass (ci|tests|hooks|review|guardian)"]},
-        {"id": "ci-or-review-bypass", "patterns": [r"(?i)(disable|turn off|remove|skip).*(ci|checks?|tests?|hooks?|review|guardian)", r"(?i)(ci|checks?|tests?|hooks?|review|guardian).*(disable|turn off|remove|skip)"]},
+        # Same-sentence bounded gaps ([^.!?\n]{0,120}) instead of an unbounded `.*`,
+        # which matched across unrelated clauses/sections (e.g. a benign "…pending CI
+        # and skips every drain cycle" reaching a later "## Tests" heading — issue
+        # #1799). Arm 1 (verb→noun) catches imperative/modal bypasses in any tense:
+        # "disable CI", "skip the tests", "CI should skip the run", "make CI skip
+        # checks", "disable the rule that requires passing CI". Arm 2 (noun→verb)
+        # matches bare-imperative + passive verb forms via the trailing \b
+        # (disabled?/removed?/skip(ped)?/…) but NOT the 3rd-person present -s form
+        # ("skips"/"disables"/"removes"): "CI checks disabled", "disable it",
+        # "CI … skip running the suite" all block, while "CI and skips every drain
+        # cycle" (a present-tense verb with a DIFFERENT subject) does not.
+        #
+        # KNOWN, ACCEPTED RESIDUALS (deliberate cost of precision — regex cannot parse
+        # grammar; both vetted by adversarial security review as low-medium, since
+        # imperative/modal/passive/gerund — how bypass REQUESTS actually read — all
+        # still block): (1) cross-sentence — a verb in a different sentence than the
+        # ci-noun ("There is a review requirement. Remove it.") is not matched; (2)
+        # declarative present-indicative with the ci-noun as subject and no trailing
+        # ci-noun ("CI skips it whenever this label is set") is not matched — same
+        # grammatical shape as the benign #1799 false positive, so verb morphology
+        # cannot separate them. The auto-merge gate is one of several safety layers.
+        {"id": "ci-or-review-bypass", "patterns": [r"(?i)(disable|turn off|remove|skip)[^.!?\n]{0,120}(ci|checks?|tests?|hooks?|review|guardian)", r"(?i)(ci|checks?|tests?|hooks?|review|guardian)[^.!?\n]{0,120}\b(disabled?|turned? off|removed?|skip(?:ped)?|bypassed?|ignored?|suppressed?)\b"]},
         {"id": "auth-backdoor", "patterns": [r"(?i)\b(auth|login|password|token|admin)[ -]?(backdoor|bypass)\b", r"(?i)\b(backdoor|bypass)\b.*\b(auth|login|password|token|admin)\b", r"(?i)\bmagic (token|password|login)\b"]},
         {"id": "destructive-shell", "patterns": [r"rm -rf /", r"(?i)curl .*\| *(sh|bash)"]},
     ],

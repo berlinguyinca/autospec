@@ -54,6 +54,42 @@ setup() {
     echo "$output" | grep -q "ci-or-review-bypass"
 }
 
+@test "lint-issue-safety: passive CI-bypass phrasing still blocks" {
+    # "CI checks were disabled … review requirement removed" — real bypass in
+    # passive/noun-first voice must stay caught by the past-participle arm.
+    run bash "$LINT" --title "Speed up merges" "$FIX/ci-passive-bypass.md"
+    [ "$status" -eq 2 ]
+    echo "$output" | grep -q "SAFETY_BLOCK"
+    echo "$output" | grep -q "ci-or-review-bypass"
+}
+
+@test "lint-issue-safety: active noun-first bypass with object pronoun blocks" {
+    # "disable it … remove them" (CI-noun is the verb's object, active voice) —
+    # must stay caught; guards the past-participle-only regression.
+    run bash "$LINT" --title "Speed up merges" "$FIX/ci-active-pronoun-bypass.md"
+    [ "$status" -eq 2 ]
+    echo "$output" | grep -q "SAFETY_BLOCK"
+    echo "$output" | grep -q "ci-or-review-bypass"
+}
+
+@test "lint-issue-safety: long single-sentence CI-bypass still blocks" {
+    # verb→noun with a >40-char but same-sentence gap must stay caught; guards
+    # the too-tight gap-cap regression.
+    run bash "$LINT" --title "Loosen protection" "$FIX/ci-longgap-bypass.md"
+    [ "$status" -eq 2 ]
+    echo "$output" | grep -q "SAFETY_BLOCK"
+    echo "$output" | grep -q "ci-or-review-bypass"
+}
+
+@test "lint-issue-safety: descriptive CI prose does not false-positive (issue #1799)" {
+    # Benign bug-description "…pending CI and skips every drain cycle" plus a
+    # later "## Tests" heading must NOT match ci-or-review-bypass. Guards the
+    # unbounded-`.*` cross-clause/cross-section false positive that stranded #1463.
+    run bash "$LINT" --title "fix: prevent conductor idle loop" "$FIX/ci-descriptive-benign.md"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "SAFETY_PASS"
+}
+
 @test "lint-issue-safety: explicit auth backdoor blocks" {
     run bash "$LINT" --title "Add auth backdoor" "$FIX/auth-backdoor.md"
     [ "$status" -eq 2 ]
