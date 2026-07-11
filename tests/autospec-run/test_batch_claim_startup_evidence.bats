@@ -10,6 +10,7 @@ setup() {
     MOCK_BIN="$TMPDIR_BATS/bin"
     mkdir -p "$MOCK_BIN"
     : > "$TMPDIR_BATS/edit.log"
+    : > "$TMPDIR_BATS/clear.log"
     mkdir -p "$TMPDIR_BATS/heartbeats/test__repo"
 
     write_issue_list > "$TMPDIR_BATS/auto.json"
@@ -25,6 +26,9 @@ write_git_mock() {
 #!/usr/bin/env bash
 if [ "\$1" = "ls-remote" ]; then
     # No remote branch ref exists for the issue-1858 startup-failure fixture.
+    if [ "\${GIT_LS_REMOTE_FAIL:-0}" = "1" ]; then
+        exit 2
+    fi
     exit 0
 fi
 if [ "\$1" = "show-ref" ] && printf '%s\n' "\$*" | grep -q 'fix/issue-1858-startup-failed'; then
@@ -61,6 +65,9 @@ case "\$sub" in
     ;;
   "issue edit")
     printf '%s\n' "\$*" >> "\$TMPDIR_BATS/edit.log"
+    if [ "\${ISSUE_EDIT_FAIL:-0}" = "1" ]; then
+      exit 1
+    fi
     exit 0
     ;;
   "repo view")
@@ -78,6 +85,7 @@ case "\$sub" in
       exit 0
     fi
     if [ "\${1:-}" = "api" ] && [ "\${2:-}" = "repos/test/repo/issues/comments/10" ]; then
+      printf '%s\n' "\$*" >> "\$TMPDIR_BATS/clear.log"
       exit 0
     fi
     printf '[]\n'
@@ -129,6 +137,7 @@ run_list_ready() {
     [ "$(printf '%s\n' "$output" | jq -r '.worker_cap.active_count')" = "0" ]
     [ "$(printf '%s\n' "$output" | jq -r '.batch | map(.number) | join(",")')" = "1859,1860,1861" ]
     grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$TMPDIR_BATS/edit.log"
+    grep -q -- '^api repos/test/repo/issues/comments/10 -X DELETE' "$TMPDIR_BATS/clear.log"
 }
 
 @test "transient run-state read failures preserve claimed issue instead of requeueing it" {
@@ -139,4 +148,24 @@ run_list_ready() {
     [ "$(printf '%s\n' "$output" | jq -r '.worker_cap.active_count')" = "1" ]
     [ "$(printf '%s\n' "$output" | jq -r '.batch | map(.number) | join(",")')" = "1859,1860,1861" ]
     [ ! -s "$TMPDIR_BATS/edit.log" ]
+    [ ! -s "$TMPDIR_BATS/clear.log" ]
+}
+
+@test "transient remote branch probe failures preserve claimed issue instead of requeueing it" {
+    GIT_LS_REMOTE_FAIL=1 run run_list_ready
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | join(",")')" = "1858" ]
+    [ "$(printf '%s\n' "$output" | jq -r '.worker_cap.active_count')" = "1" ]
+    [ ! -s "$TMPDIR_BATS/edit.log" ]
+    [ ! -s "$TMPDIR_BATS/clear.log" ]
+}
+
+@test "failed stale requeue label mutation preserves claimed issue and run-state" {
+    ISSUE_EDIT_FAIL=1 run run_list_ready
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | join(",")')" = "1858" ]
+    grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$TMPDIR_BATS/edit.log"
+    [ ! -s "$TMPDIR_BATS/clear.log" ]
 }

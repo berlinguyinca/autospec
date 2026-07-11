@@ -262,7 +262,8 @@ branch_ref_exists() {
     [ -n "$branch_name" ] || return 1
     git show-ref --verify --quiet "refs/heads/$branch_name" 2>/dev/null && return 0
     git show-ref --verify --quiet "refs/remotes/origin/$branch_name" 2>/dev/null && return 0
-    [ -n "$(git ls-remote --heads origin "$branch_name" 2>/dev/null || true)" ]
+    remote_ref="$(git ls-remote --heads origin "$branch_name" 2>/dev/null)" || return 2
+    [ -n "$remote_ref" ]
 }
 
 startup_claim_has_evidence() {
@@ -270,7 +271,12 @@ startup_claim_has_evidence() {
     state_json="$2"
     issue_heartbeat_exists "$issue_number" && return 0
     branch_name="$(printf '%s\n' "$state_json" | jq -r '.branch // empty' 2>/dev/null || true)"
-    branch_ref_exists "$branch_name" && return 0
+    if [ -n "$branch_name" ]; then
+        branch_status=0
+        branch_ref_exists "$branch_name" || branch_status="$?"
+        [ "$branch_status" -eq 0 ] && return 0
+        [ "$branch_status" -eq 2 ] && return 0
+    fi
     pr_number="$(printf '%s\n' "$state_json" | jq -r '.pr // empty' 2>/dev/null || true)"
     [ -n "$pr_number" ] && return 0
     return 1
@@ -289,14 +295,19 @@ release_startup_claim_if_stale() {
     else
         age="$timeout"
     fi
-    if [ "$age" -ge "$timeout" ]; then
-        gh issue edit "$issue_number" --repo "$repo" \
-            --remove-label in-progress-by-bot \
-            --add-label auto-implement >/dev/null 2>&1 || true
-        if [ -x "$RUN_STATE" ]; then
-            "$RUN_STATE" clear --issue "$issue_number" --repo "$repo" >/dev/null 2>&1 || true
-        fi
+    if [ "$age" -lt "$timeout" ]; then
+        return 1
     fi
+
+    if ! gh issue edit "$issue_number" --repo "$repo" \
+        --remove-label in-progress-by-bot \
+        --add-label auto-implement >/dev/null 2>&1; then
+        return 1
+    fi
+    if [ -x "$RUN_STATE" ]; then
+        "$RUN_STATE" clear --issue "$issue_number" --repo "$repo" >/dev/null 2>&1 || true
+    fi
+    return 0
 }
 
 filter_active_startup_claims() {
@@ -313,7 +324,9 @@ filter_active_startup_claims() {
             json_append "$filtered_file" "$active_object"
             continue
         fi
-        release_startup_claim_if_stale "$active_number" "$state_json"
+        if ! release_startup_claim_if_stale "$active_number" "$state_json"; then
+            json_append "$filtered_file" "$active_object"
+        fi
     done
     mv "$filtered_file" "$ACTIVE_FILE"
 }
