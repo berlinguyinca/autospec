@@ -154,6 +154,17 @@ cmd_write() {
         die "write: failed to build registry JSON"
     fi
     mv "$tmp" "$path"
+
+    # Telemetry (issue #1772): fire-and-forget heartbeat emit after the
+    # registry write. Guarded source — an absent shim/binary/DSN is a silent
+    # no-op and never alters this command's exit status or output.
+    _H="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+    if [ -f "$_H/emit-event.sh" ]; then
+        # shellcheck source=/dev/null
+        . "$_H/emit-event.sh"
+        emit_event heartbeat repo="$repo" issue="" step="" pr="" || true
+    fi
+
     printf '%s\n' "$path"
 }
 
