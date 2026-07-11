@@ -259,6 +259,101 @@ SH
   [[ "$output" != *"secret"* ]]
 }
 
+# ── chokepoint: skills/autospec-shared/scripts/explore-ledger.sh (issue #1773) ──
+# ── chokepoint: skills/autospec-shared/scripts/growth-ledger.sh (issue #1773) ───
+#
+# Both ledgers resolve the shim at the same installed-runtime path and stamp
+# repo= via a local-only `git config --get remote.origin.url` (no network
+# call), so these cases run inside a throwaway git repo under TMP.
+
+EXPLORE_LEDGER_SH="$REPO_ROOT/skills/autospec-shared/scripts/explore-ledger.sh"
+GROWTH_LEDGER_SH="$REPO_ROOT/skills/autospec-shared/scripts/growth-ledger.sh"
+
+# _repo_cwd sets up a throwaway git repo (with an origin remote, so
+# _repo_slug() has something to resolve) as the ledger's cwd.
+_repo_cwd() {
+  REPO_DIR="$TMP/repo"
+  mkdir -p "$REPO_DIR"
+  ( cd "$REPO_DIR" && git init -q && git remote add origin https://github.com/o/n.git )
+}
+
+@test "explore-ledger append emits exactly one artifact.filed event" {
+  _enable_emit
+  _repo_cwd
+  export AUTOSPEC_EXPLORE_LEDGER="$TMP/explore-ledger.jsonl"
+
+  run bash -c "cd '$REPO_DIR' && bash '$EXPLORE_LEDGER_SH' --append '{\"round\":1,\"source\":\"s\",\"title\":\"t\",\"norm_title\":\"t\",\"complexity\":\"small\",\"confidence\":0.9,\"issue\":7,\"pr\":null,\"outcome\":\"pending\",\"reason\":\"\",\"ts\":\"2026-01-01T00:00:00Z\"}'"
+  [ "$status" -eq 0 ]
+
+  [ -f "$BIN_LOG" ]
+  [ "$(wc -l < "$BIN_LOG" | tr -d ' ')" -eq 1 ]
+  # Exact-line assertion: a substring match would miss a malformed repo
+  # value like repo=o/n.git (the staged remote ends in .git on purpose).
+  [ "$(cat "$BIN_LOG")" = "emit artifact.filed repo=o/n issue=7 detail=explore" ]
+}
+
+@test "growth-ledger append emits exactly one artifact.filed event" {
+  _enable_emit
+  _repo_cwd
+  export GROWTH_LEDGER="$TMP/growth-ledger.jsonl"
+
+  run bash -c "cd '$REPO_DIR' && bash '$GROWTH_LEDGER_SH' --append '{\"round\":1,\"source\":\"s\",\"title\":\"t\",\"norm_title\":\"t\",\"channel\":\"c\",\"kind\":\"artifact\",\"issue\":9,\"outcome\":\"pending\",\"reason\":\"\",\"ts\":\"2026-01-01T00:00:00Z\"}'"
+  [ "$status" -eq 0 ]
+
+  [ -f "$BIN_LOG" ]
+  [ "$(wc -l < "$BIN_LOG" | tr -d ' ')" -eq 1 ]
+  # Exact-line assertion: a substring match would miss a malformed repo
+  # value like repo=o/n.git (the staged remote ends in .git on purpose).
+  [ "$(cat "$BIN_LOG")" = "emit artifact.filed repo=o/n issue=9 detail=growth" ]
+}
+
+@test "unset AUTOSPEC_DB_DSN yields 0 emit-binary calls from explore-ledger append" {
+  mkdir -p "$TMP/scripts"
+  cp "$SHIM" "$TMP/scripts/emit-event.sh"
+  export AUTOSPEC_SCRIPTS_DIR="$TMP/scripts"
+  export PATH="$TMP/bin:$PATH"
+  _repo_cwd
+  export AUTOSPEC_EXPLORE_LEDGER="$TMP/explore-ledger-nodsn.jsonl"
+
+  run bash -c "cd '$REPO_DIR' && bash '$EXPLORE_LEDGER_SH' --append '{\"round\":1,\"source\":\"s\",\"title\":\"t\",\"norm_title\":\"t\",\"complexity\":\"small\",\"confidence\":0.9,\"issue\":7,\"pr\":null,\"outcome\":\"pending\",\"reason\":\"\",\"ts\":\"2026-01-01T00:00:00Z\"}'"
+  [ "$status" -eq 0 ]
+  [ ! -s "$BIN_LOG" ]
+}
+
+@test "unset AUTOSPEC_DB_DSN yields 0 emit-binary calls from growth-ledger append" {
+  mkdir -p "$TMP/scripts"
+  cp "$SHIM" "$TMP/scripts/emit-event.sh"
+  export AUTOSPEC_SCRIPTS_DIR="$TMP/scripts"
+  export PATH="$TMP/bin:$PATH"
+  _repo_cwd
+  export GROWTH_LEDGER="$TMP/growth-ledger-nodsn.jsonl"
+
+  run bash -c "cd '$REPO_DIR' && bash '$GROWTH_LEDGER_SH' --append '{\"round\":1,\"source\":\"s\",\"title\":\"t\",\"norm_title\":\"t\",\"channel\":\"c\",\"kind\":\"artifact\",\"issue\":9,\"outcome\":\"pending\",\"reason\":\"\",\"ts\":\"2026-01-01T00:00:00Z\"}'"
+  [ "$status" -eq 0 ]
+  [ ! -s "$BIN_LOG" ]
+}
+
+@test "ledger append emit never alters the append's exit code or ledger content when telemetry is disabled" {
+  # Same ledger paths for both runs so the appended line is byte-for-byte
+  # comparable, not just similarly shaped.
+  _repo_cwd
+  export AUTOSPEC_EXPLORE_LEDGER="$TMP/explore-ledger-cmp.jsonl"
+  append_json='{"round":1,"source":"s","title":"t","norm_title":"t","complexity":"small","confidence":0.9,"issue":7,"pr":null,"outcome":"pending","reason":"","ts":"2026-01-01T00:00:00Z"}'
+
+  run bash -c "cd '$REPO_DIR' && bash '$EXPLORE_LEDGER_SH' --append '$append_json'"
+  disabled_status="$status"
+  disabled_ledger="$(cat "$AUTOSPEC_EXPLORE_LEDGER")"
+  rm -f "$AUTOSPEC_EXPLORE_LEDGER"
+
+  _enable_emit
+  run bash -c "cd '$REPO_DIR' && bash '$EXPLORE_LEDGER_SH' --append '$append_json'"
+  enabled_status="$status"
+  enabled_ledger="$(cat "$AUTOSPEC_EXPLORE_LEDGER")"
+
+  [ "$disabled_status" -eq "$enabled_status" ]
+  [ "$disabled_ledger" = "$enabled_ledger" ]
+}
+
 # --- telemetry-config.sh (issue #1776) ---------------------------------
 # yaml resolver mirroring advisor-config.sh: env > yaml > built-in default.
 

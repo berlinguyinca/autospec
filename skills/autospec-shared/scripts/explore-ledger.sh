@@ -104,6 +104,24 @@ _normalize_title() {
 
 _now_ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# _repo_slug — best-effort local-only "owner/name" derivation from the origin
+# remote for telemetry's repo= field, mirroring repo_slug() in
+# scripts/autonomous-integration-branch.sh. No network call (never
+# `gh repo view`): a ledger append must never gain latency from telemetry.
+# Prints nothing on any miss (unknown remote shape ⇒ no output, so the
+# caller skips the emit rather than sending a malformed repo value).
+_repo_slug() {
+  local remote
+  remote="$(git config --get remote.origin.url 2>/dev/null || true)"
+  case "$remote" in
+    git@github.com:*)       remote="${remote#git@github.com:}" ;;
+    https://github.com/*)   remote="${remote#https://github.com/}" ;;
+    ssh://git@github.com/*) remote="${remote#ssh://git@github.com/}" ;;
+    *) return 0 ;;
+  esac
+  printf '%s\n' "${remote%.git}"
+}
+
 # _outcome_ok <value> — 0 if value is in the allowed outcome set.
 _outcome_ok() {
   local o
@@ -199,6 +217,25 @@ case "$CMD" in
     # Re-emit compact (single line) to guarantee one object per line.
     compact="$(printf '%s' "$APPEND_OBJ" | jq -c '.')" || _die "could not compact JSON" 1
     printf '%s\n' "$compact" >> "$LEDGER"
+
+    # Telemetry (issue #1773): fire-and-forget artifact.filed emit after the
+    # append. Guarded source (absent shim/binary/DSN is a silent no-op) and
+    # wrapped in `{ ... } || true` so nothing here can ever alter this
+    # command's exit status or output — the ledger append is authoritative,
+    # telemetry is best-effort.
+    {
+      _AF_H="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+      if [ -f "$_AF_H/emit-event.sh" ]; then
+        # shellcheck source=/dev/null
+        . "$_AF_H/emit-event.sh"
+        _af_repo="$(_repo_slug)"
+        _af_issue="$(printf '%s' "$compact" | jq -r '.issue // 0' 2>/dev/null)"
+        if [ -n "$_af_repo" ]; then
+          emit_event artifact.filed repo="$_af_repo" issue="$_af_issue" detail=explore
+        fi
+      fi
+    } || true
+
     exit 0
     ;;
 
