@@ -334,6 +334,27 @@ check_gap_remediation_section() {
     done
 }
 
+
+# Autospec gap miner contract (issue #1468): deterministic self-improvement
+# gaps must be extracted, deduped, label-shaped, and ledgered before filing.
+check_autospec_gap_miner_contract() {
+    info "autospec gap miner contract"
+    [ -x scripts/autospec-gap-miner.sh ] \
+        || fail "scripts/autospec-gap-miner.sh missing or not executable"
+    [ -f docs/memory/autospec-gap-ledger.md ] \
+        || fail "docs/memory/autospec-gap-ledger.md missing"
+    grep -q 'autospec-gap-miner.sh' skills/autospec-run/SKILL.md \
+        || fail "autospec-run SKILL.md missing gap miner closeout invocation"
+    grep -q 'autospec-gap-miner.sh' skills/autospec-run/codex/prompt.md \
+        || fail "autospec-run codex prompt missing gap miner closeout invocation"
+    grep -q 'autospec-gap-miner.sh' skills/autospec-run/opencode/agent.md \
+        || fail "autospec-run opencode agent missing gap miner closeout invocation"
+    grep -q 'tests/validate-autospec-gap-miner.sh' scripts/validate.sh \
+        || fail "scripts/validate.sh missing gap miner test registration"
+    bash -n scripts/autospec-gap-miner.sh
+    bash tests/validate-autospec-gap-miner.sh
+}
+
 # Remediation-mode invariants (issue #535, dep #533): the autospec-review trio
 # must carry a `## Remediation mode` heading in all three trio files
 # (SKILL.md, opencode/agent.md, codex/prompt.md) so the broad-review/gap-emit
@@ -3204,6 +3225,7 @@ main() {
     check_stop_mode_section
     check_keyword_routing_section
     check_gap_remediation_section
+    check_autospec_gap_miner_contract
     check_review_remediation_section
     check_enforcement_defaults_section
     check_codex_skills_install
