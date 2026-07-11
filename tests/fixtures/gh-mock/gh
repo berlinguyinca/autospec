@@ -29,7 +29,16 @@ if [ "$1" = "label" ] && [ "$2" = "create" ]; then
     exit 0
 fi
 if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
-    cat "$labels"; exit 0
+    for arg in "$@"; do
+        if [ "$arg" = "--jq" ]; then
+            cat "$labels"
+            exit 0
+        fi
+    done
+    label_json="$(jq -R -s 'split("\n") | map(select(length > 0)) | map({name:.})' "$labels")"
+    jq -n --argjson labels "$label_json" \
+        '{labels:$labels, body:"## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n", title:"mock issue", author:{login:"berlinguyinca", is_bot:false}}'
+    exit 0
 fi
 if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
     shift 2; add=""; remove=""

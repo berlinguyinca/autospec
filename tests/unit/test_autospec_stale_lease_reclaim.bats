@@ -19,7 +19,7 @@ setup() {
     LABELS="$TEST_TMP/labels.txt"
     COMMENTS="$TEST_TMP/comments.json"
     CALLS="$TEST_TMP/calls.log"
-    printf 'auto-implement\nctx:32k\n' > "$LABELS"
+    printf 'auto-implement\nctx:32k\nsafety:reviewed\n' > "$LABELS"
     printf '[]\n' > "$COMMENTS"
 
     # Shared PATH-shadow gh stub (see tests/fixtures/gh-mock/gh). It returns the

@@ -42,6 +42,10 @@ kill_tree() {
     kill "$_pid" 2>/dev/null || true
 }
 
+child_is_running() {
+    jobs -pr | grep -qx "$child_pid"
+}
+
 detect_repo() {
     if [ -n "${CONDUCTOR_REPO:-}" ]; then
         printf '%s\n' "$CONDUCTOR_REPO"
@@ -52,6 +56,34 @@ detect_repo() {
         return 0
     fi
     gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true
+}
+
+repo_heartbeat_dirs() {
+    _repo="$1"
+    [ -n "$_repo" ] || return 0
+    _base="${AUTOSPEC_HEARTBEAT_DIR:-${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}}"
+    _owner="${_repo%%/*}"
+    _name="${_repo##*/}"
+    printf '%s/%s__%s\n' "$_base" "$_owner" "$_name"
+    printf '%s/%s_%s\n' "$_base" "$_owner" "$_name"
+    printf '%s/%s-%s\n' "$_base" "$_owner" "$_name"
+}
+
+newest_heartbeat_mtime() {
+    _repo="$1"
+    _newest=0
+    for _dir in $(repo_heartbeat_dirs "$_repo"); do
+        [ -d "$_dir" ] || continue
+        for _file in "$_dir"/*.json; do
+            [ -f "$_file" ] || continue
+            _mtime="$(stat -f %m "$_file" 2>/dev/null || stat -c %Y "$_file" 2>/dev/null || printf '0')"
+            case "$_mtime" in *[!0-9]*|'') _mtime=0 ;; esac
+            if [ "$_mtime" -gt "$_newest" ]; then
+                _newest="$_mtime"
+            fi
+        done
+    done
+    printf '%s\n' "$_newest"
 }
 
 issue_has_in_progress_label() {
@@ -161,12 +193,21 @@ fi
 
 last_size="$(stat_size)"
 last_progress_epoch="$(date +%s)"
+detected_repo="$(detect_repo)"
+last_heartbeat_mtime="$(newest_heartbeat_mtime "$detected_repo")"
 
-while kill -0 "$child_pid" 2>/dev/null; do
+while child_is_running; do
     sleep "$DRAIN_POLL_SECS"
+    child_is_running || break
     current_size="$(stat_size)"
     if [ -n "$current_size" ] && [ "$current_size" != "$last_size" ]; then
         last_size="$current_size"
+        last_progress_epoch="$(date +%s)"
+        continue
+    fi
+    current_heartbeat_mtime="$(newest_heartbeat_mtime "$detected_repo")"
+    if [ "$current_heartbeat_mtime" -gt "$last_heartbeat_mtime" ]; then
+        last_heartbeat_mtime="$current_heartbeat_mtime"
         last_progress_epoch="$(date +%s)"
         continue
     fi

@@ -17,7 +17,7 @@ setup() {
     LABELS="$TEST_TMP/labels.txt"
     COMMENTS="$TEST_TMP/comments.json"
     CALLS="$TEST_TMP/calls.log"
-    printf 'auto-implement\nctx:32k\n' > "$LABELS"
+    printf 'auto-implement\nctx:32k\nsafety:reviewed\n' > "$LABELS"
     printf '[]\n' > "$COMMENTS"
 
     # Shared PATH-shadow gh stub (see tests/fixtures/gh-mock/gh).
@@ -84,7 +84,7 @@ JSON
     # lost. worker-b must DELETE only its OWN comment (101), never the winner's
     # lowest id (100).
     seed_descending_array_order
-    printf 'auto-implement\nctx:32k\n' > "$LABELS"
+    printf 'auto-implement\nctx:32k\nsafety:reviewed\n' > "$LABELS"
 
     AUTOSPEC_TEST_FORCE_OWNER=worker-a run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-b
     [ "$status" -eq 2 ]
@@ -120,7 +120,7 @@ JSON
   }
 ]
 JSON
-    printf 'auto-implement\nctx:32k\n' > "$LABELS"
+    printf 'auto-implement\nctx:32k\nsafety:reviewed\n' > "$LABELS"
 
     AUTOSPEC_TEST_FORCE_OWNER=winner-a run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id 'mac.lan:bob:monitor:1'
     [ "$status" -eq 2 ]

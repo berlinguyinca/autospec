@@ -1385,6 +1385,25 @@ check_autospec_run_continuation_contract() {
     done
 }
 
+# Codex native subagent compatibility: full-history forks inherit agent type,
+# model, and reasoning effort in current Codex. autospec-run must therefore use
+# bounded handoffs whenever it asks for explicit subagent metadata.
+check_autospec_run_codex_bounded_handoff() {
+    info "autospec-run Codex bounded subagent handoff contract"
+    for f in \
+        skills/autospec-run/SKILL.md \
+        skills/autospec-run/codex/prompt.md \
+        skills/autospec-run/opencode/agent.md
+    do
+        [ -f "$f" ] || fail "$f: required file missing"
+        grep -F 'Codex native subagents with explicit `agent_type`, `model`, or `reasoning_effort` MUST use a bounded handoff, not a full-history fork' "$f" >/dev/null \
+            || fail "$f missing Codex bounded handoff directive"
+        if grep -F 'for Codex native subagents, fork/inherit the current conversation context' "$f" >/dev/null 2>&1; then
+            fail "$f still directs Codex native subagents to fork/inherit the parent context"
+        fi
+    done
+}
+
 # Phase 4 single-agent absorbed-discipline (issue #648): the autospec-run trio
 # must (1) carry the canonical constraint sentence stating that subagents spawned
 # by background `Agent` calls do NOT inherit the `Agent` tool, (2) reference the
@@ -3156,6 +3175,7 @@ main() {
     check_phase4_issue_start_summary
     check_phase4_immediate_next_issue_pickup
     check_autospec_run_continuation_contract
+    check_autospec_run_codex_bounded_handoff
     check_phase4_single_agent_discipline
     check_phase4_adaptive_retry
     check_phase4_full_test_suite_gate
@@ -4309,10 +4329,12 @@ check_palette_single_source() {
         while IFS= read -r hit; do
             # Normalize path (strip leading ./)
             local norm_hit="${hit#./}"
+            case "$norm_hit" in .claude/worktrees/*) continue ;; esac
             [ "$norm_hit" = "$doc_style" ]      && continue
             [ "$norm_hit" = "$doc_style_test" ] && continue
             violations+=("$norm_hit contains palette hex $hex")
-        done < <(grep -rl "$hex" --include="*.mjs" --include="*.sh" . 2>/dev/null || true)
+        done < <(grep -rl "$hex" --include="*.mjs" --include="*.sh" \
+            --exclude-dir=.git --exclude-dir=.claude/worktrees . 2>/dev/null || true)
     done <<< "$hexes"
 
     if [ "${#violations[@]}" -gt 0 ]; then

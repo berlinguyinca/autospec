@@ -4,6 +4,7 @@
 
 HB_WRITE="${BATS_TEST_DIRNAME}/../skills/autospec-run/scripts/heartbeat-write.sh"
 HB_READ="${BATS_TEST_DIRNAME}/../skills/autospec-run/scripts/heartbeat-read.sh"
+RUN_STATUS="${BATS_TEST_DIRNAME}/../skills/autospec-run/scripts/autospec-run-status.sh"
 WATCHDOG="${BATS_TEST_DIRNAME}/../scripts/autospec-watchdog.sh"
 
 setup() {
@@ -117,6 +118,56 @@ teardown() {
     # Reading issue 50 for repoB returns only repoB's heartbeat
     content="$(bash "$HB_READ" --issue 50 --repo "orgB/repoY")"
     echo "$content" | grep -q '"repo":"orgB/repoY"'
+}
+
+@test "heartbeat-read.sh --issue prefers newer legacy heartbeat over older canonical heartbeat" {
+    mkdir -p "$TEST_TMP/testorg__testrepo" "$TEST_TMP/testorg-testrepo"
+    printf '{"issue":"42","branch":"feat/x","step":"claimed","ts":100,"pr":"","repo":"testorg/testrepo"}\n' \
+        > "$TEST_TMP/testorg__testrepo/42.json"
+    printf '{"issue":"42","branch":"feat/x","step":"tests_started","updated_at":"2026-07-11T07:36:25Z","repo":"testorg/testrepo"}\n' \
+        > "$TEST_TMP/testorg-testrepo/42.json"
+    touch -t 202607110700 "$TEST_TMP/testorg__testrepo/42.json"
+    touch -t 202607110736 "$TEST_TMP/testorg-testrepo/42.json"
+
+    run bash "$HB_READ" --issue 42 --repo "testorg/testrepo"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q '"step":"tests_started"'
+}
+
+@test "autospec-run-status prefers newer legacy heartbeat over older canonical heartbeat" {
+    mkdir -p "$TEST_TMP/testorg__testrepo" "$TEST_TMP/testorg-testrepo"
+    printf '{"issue":"42","branch":"feat/x","step":"claimed","ts":100,"pr":"","repo":"testorg/testrepo"}\n' \
+        > "$TEST_TMP/testorg__testrepo/42.json"
+    printf '{"issue":"42","branch":"feat/x","step":"tests_started","updated_at":"2026-07-11T07:36:25Z","repo":"testorg/testrepo"}\n' \
+        > "$TEST_TMP/testorg-testrepo/42.json"
+    touch -t 202607110700 "$TEST_TMP/testorg__testrepo/42.json"
+    touch -t 202607110736 "$TEST_TMP/testorg-testrepo/42.json"
+
+    run bash "$RUN_STATUS" --repo "testorg/testrepo" --json
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q '"step":"tests_started"'
+    ! echo "$output" | grep -q '"step":"claimed"'
+}
+
+@test "autospec-run-status hides unclaimed stale heartbeats when queue state is known" {
+    mkdir -p "$TEST_TMP/status-bin" "$TEST_TMP/testorg__testrepo"
+    cp "$RUN_STATUS" "$TEST_TMP/status-bin/autospec-run-status.sh"
+    cat > "$TEST_TMP/status-bin/list-ready-issues.sh" <<'EOF'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"ready":[],"blocked":[],"claimed":[{"number":42,"title":"active"}],"conflicts":[],"batch":[]}
+JSON
+EOF
+    chmod +x "$TEST_TMP/status-bin/autospec-run-status.sh" "$TEST_TMP/status-bin/list-ready-issues.sh"
+    printf '{"issue":"42","branch":"feat/x","step":"tests_started","ts":100,"pr":"","repo":"testorg/testrepo"}\n' \
+        > "$TEST_TMP/testorg__testrepo/42.json"
+    printf '{"issue":"99","branch":"feat/old","step":"pr_created","ts":100,"pr":"101","repo":"testorg/testrepo"}\n' \
+        > "$TEST_TMP/testorg__testrepo/99.json"
+
+    run bash "$TEST_TMP/status-bin/autospec-run-status.sh" --repo "testorg/testrepo" --json
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q '"issue":42'
+    ! echo "$output" | grep -q '"issue":99'
 }
 
 # ── watchdog migration ────────────────────────────────────────────────────────

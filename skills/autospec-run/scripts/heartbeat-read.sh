@@ -61,12 +61,17 @@ done
 # resolve the heartbeat dir for a reader: canonical-first, legacy fallback.
 # Degraded inline fallback stays canonical (owner__name) if repo-slug.sh is
 # absent so a reader never keys legacy against a canonical writer.
-_resolve_slug_dir() {
-    if command -v resolve_slug_dir >/dev/null 2>&1; then
-        resolve_slug_dir "$1" "$2"
-    else
-        printf '%s/%s' "$1" "$(printf '%s' "$2" | sed 's#/#__#')"
-    fi
+_slug_dirs() {
+    _base="$1"
+    _repo="$2"
+    _owner="${_repo%%/*}"
+    _name="${_repo##*/}"
+    _canonical="${_base}/${_owner}__${_name}"
+    _legacy_under="${_base}/${_owner}_${_name}"
+    _legacy_hyphen="${_base}/${_owner}-${_name}"
+    printf '%s\n' "$_canonical"
+    [ "$_legacy_under" = "$_canonical" ] || printf '%s\n' "$_legacy_under"
+    [ "$_legacy_hyphen" = "$_canonical" ] || [ "$_legacy_hyphen" = "$_legacy_under" ] || printf '%s\n' "$_legacy_hyphen"
 }
 
 # ── Resolve repo slug ─────────────────────────────────────────────────────────
@@ -87,22 +92,39 @@ resolve_repo() {
 }
 
 REPO_FULL="$(resolve_repo "${REPO_VAL:-}")"
-TARGET_DIR="$(_resolve_slug_dir "$HEARTBEAT_BASE" "$REPO_FULL")"
 
 # ── Read heartbeats ───────────────────────────────────────────────────────────
 
 if [ -n "$ISSUE" ]; then
-    HB_FILE="${TARGET_DIR}/${ISSUE}.json"
-    if [ -f "$HB_FILE" ]; then
-        cat "$HB_FILE"
-    fi
+    newest_file=""
+    newest_mtime="-1"
+    for TARGET_DIR in $(_slug_dirs "$HEARTBEAT_BASE" "$REPO_FULL"); do
+        HB_FILE="${TARGET_DIR}/${ISSUE}.json"
+        [ -f "$HB_FILE" ] || continue
+        mtime="$(stat -f %m "$HB_FILE" 2>/dev/null || stat -c %Y "$HB_FILE" 2>/dev/null || echo 0)"
+        case "$mtime" in *[!0-9]*|'') mtime=0 ;; esac
+        if [ "$mtime" -gt "$newest_mtime" ]; then
+            newest_mtime="$mtime"
+            newest_file="$HB_FILE"
+        fi
+    done
+    [ -n "$newest_file" ] && cat "$newest_file"
     exit 0
 fi
 
-# List all heartbeat files in the repo's subdir
-if [ -d "$TARGET_DIR" ]; then
-    for f in "${TARGET_DIR}"/*.json; do
-        [ -f "$f" ] || continue
-        printf '%s\n' "$f"
-    done
-fi
+# List all heartbeat files in compatible repo slug dirs.
+seen_files=""
+for TARGET_DIR in $(_slug_dirs "$HEARTBEAT_BASE" "$REPO_FULL"); do
+    if [ -d "$TARGET_DIR" ]; then
+        for f in "${TARGET_DIR}"/*.json; do
+            [ -f "$f" ] || continue
+            case "$seen_files" in *"
+$f
+"*) continue ;; esac
+            seen_files="${seen_files}
+$f
+"
+            printf '%s\n' "$f"
+        done
+    fi
+done

@@ -23,7 +23,8 @@ setup() {
     # Isolated temp directory — real home avoided so ~/.autospec/ not polluted.
     TMP="$(mktemp -d -t premerge_gate.XXXXXX)"
     export PATH="$TMP/bin:$PATH"
-    mkdir -p "$TMP/bin"
+    export AUTOSPEC_REPO_DIR="$TMP/repo"
+    mkdir -p "$TMP/bin" "$AUTOSPEC_REPO_DIR/.autospec"
 
     # Default stubs: autospec-qa skill present (returns 0 findings).
     cat > "$TMP/bin/autospec-qa" <<'EOF'

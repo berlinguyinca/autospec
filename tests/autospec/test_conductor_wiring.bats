@@ -910,6 +910,53 @@ EOF
   grep -q 'issue edit 42 --repo test-owner/test-repo --add-label autospec:needs-human' "$gh_log"
 }
 
+@test "conductor: safety-gate all-blocked backlog stops before filing more discovery" {
+  local gh_log="$TEST_TMP/gh.log"
+  local waterfall_log="$TEST_TMP/waterfall.log"
+  cat > "$FAKE_BIN/gh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_log"
+case "\${1:-}" in
+  issue) echo '1' ;;
+  label) exit 0 ;;
+  repo)  echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
+  *)     exit 0 ;;
+esac
+EOF
+  chmod +x "$FAKE_BIN/gh"
+
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "list-ready-issues.sh" \
+    'printf '"'"'{"ready":[],"blocked":[{"number":42,"reason":"safety_gate_failed","safety_gate":{"ok":false,"reason":"missing_safety_reviewed"}},{"number":43,"reason":"safety_gate_failed","safety_gate":{"ok":false,"reason":"missing_safety_reviewed"}}],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'"'"''
+  _install_stub "autonomous-waterfall.sh" \
+    "printf 'waterfall-called\n' >> '$waterfall_log'; printf '{\"tier\":2,\"action\":\"run-explore-once\",\"reason\":\"test\"}\n'"
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=3 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"autospec:needs-human"* ]]
+  [[ "$output" == *"blocked-backlog: all implementation candidates failed the autospec safety gate"* ]]
+  [[ "$output" == *"stopped: blocked-backlog:safety_gate_failed"* ]]
+  grep -q 'issue edit 42 --repo test-owner/test-repo --add-label autospec:needs-human' "$gh_log"
+  grep -q 'issue edit 43 --repo test-owner/test-repo --add-label autospec:needs-human' "$gh_log"
+  [ ! -f "$waterfall_log" ]
+}
+
 # ── 22. Transient list-ready-issues.sh failure must NOT inject --backlog-count 0
 #        (peer-review must-fix #1632): a helper blip must not masquerade as an
 #        empty backlog — omit the flag so the waterfall's own readiness-aware
