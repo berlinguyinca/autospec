@@ -180,12 +180,39 @@ case "$command_name" in
 	    for duplicate_id in $(state_comment_ids | sed '1d'); do
 	        gh_api_retry "repos/$repo/issues/comments/$duplicate_id" -X DELETE >/dev/null || true
 	    done
+
+	    # Telemetry (issue #1772): fire-and-forget session emit after the
+	    # upsert. No prior state comment -> session.started; a prior
+	    # comment being overwritten -> session.step. Guarded source: an
+	    # absent shim/binary/DSN is a silent no-op and never alters this
+	    # command's exit status or output.
+	    _RS_H="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+	    if [ -f "$_RS_H/emit-event.sh" ]; then
+	        # shellcheck source=/dev/null
+	        . "$_RS_H/emit-event.sh"
+	        if [ -z "$existing" ]; then
+	            emit_event session.started repo="$repo" issue="$issue" step="$step" || true
+	        else
+	            emit_event session.step repo="$repo" issue="$issue" step="$step" || true
+	        fi
+	    fi
+
 	    printf '%s\n' "$state_json" | jq .
 	    ;;
 	clear)
 	    for comment_id in $(state_comment_ids); do
 	        gh_api_retry "repos/$repo/issues/comments/$comment_id" -X DELETE >/dev/null
 	    done
+
+	    # Telemetry (issue #1772): fire-and-forget terminal emit after
+	    # clear. Guarded source: an absent shim/binary/DSN is a silent
+	    # no-op and never alters this command's exit status or output.
+	    _RS_H="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+	    if [ -f "$_RS_H/emit-event.sh" ]; then
+	        # shellcheck source=/dev/null
+	        . "$_RS_H/emit-event.sh"
+	        emit_event session.terminal repo="$repo" issue="$issue" step="" || true
+	    fi
 	    ;;
     *)
         usage >&2
