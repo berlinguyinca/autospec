@@ -56,7 +56,7 @@ if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
       prev="$a"
     done
     comments_for_issue="$(jq --argjson issue "$issue" \
-      '[.[] | select(.number == $issue)]' "${COMMENTS:?}")"
+      '((if type == "array" then . else [.] end) | [.[] | select(.number == $issue) | . + {id:(.node_id // ("IC_" + ((.id // .number) | tostring))), createdAt:(.createdAt // .created_at)}])' "${COMMENTS:?}")"
     printf '{"comments":%s}\n' "$comments_for_issue" | jq -r "${filter:-.}"
   else
     cat "${LABELS:?}"
@@ -87,14 +87,24 @@ fi
 if [ "$1" = "api" ]; then
   path="$2"
   method="GET"
+  filter=""
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -X) method="$2"; shift 2 ;;
+      --jq) filter="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
   case "$path $method" in
+    repos/testorg/testrepo/issues/*/comments\ GET)
+      issue="${path#repos/testorg/testrepo/issues/}"
+      issue="${issue%/comments}"
+      jq --argjson issue "$issue" \
+        '((if type == "array" then . else [.] end) | [.[] | select(.number == $issue) | . + {id:(.rest_id // .id // .number), created_at:(.created_at // .createdAt)}])' "${COMMENTS:?}" \
+        | jq -r "${filter:-.}"
+      exit 0
+      ;;
     repos/testorg/testrepo/issues/comments/*\ DELETE)
       id="${path##*/}"
       jq --argjson id "$id" '[.[] | select((.id // -1) != $id)]' "${COMMENTS:?}" > "${COMMENTS}.tmp"
@@ -130,8 +140,13 @@ write_state_comment() {
       --arg state "$state" \
       --arg updated_at "$updated_at" \
       --arg pr "$pr" \
+      --arg node_id "IC_${issue}00" \
       '[{
         number: $issue,
+        id: ($issue * 100),
+        node_id: $node_id,
+        created_at: $updated_at,
+        createdAt: $updated_at,
         body: ("<!-- autospec-run-state:begin -->\n" +
           ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:"worker-a",state:$state,branch:"feat/x",pr:$pr,step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
           "\n<!-- autospec-run-state:end -->")
@@ -197,8 +212,13 @@ write_state_worker() {
       --arg state "$state" \
       --arg updated_at "$updated_at" \
       --arg worker_id "$worker_id" \
+      --arg node_id "IC_${issue}00" \
       '[{
         number: $issue,
+        id: ($issue * 100),
+        node_id: $node_id,
+        created_at: $updated_at,
+        createdAt: $updated_at,
         body: ("<!-- autospec-run-state:begin -->\n" +
           ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:$worker_id,state:$state,branch:"feat/x",pr:"",step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
           "\n<!-- autospec-run-state:end -->")
@@ -289,8 +309,9 @@ state_comment_obj() {
     jq -n \
       --argjson issue "$issue" --arg state "$state" --arg updated_at "$updated_at" \
       --arg worker_id "$worker_id" --arg created_at "$created_at" --argjson id "$id" \
+      --arg node_id "IC_${id}" \
       '{
-        number: $issue, createdAt: $created_at, id: $id,
+        number: $issue, createdAt: $created_at, created_at: $created_at, id: $id, node_id: $node_id,
         body: ("<!-- autospec-run-state:begin -->\n" +
           ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:$worker_id,state:$state,branch:"feat/x",pr:"",step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
           "\n<!-- autospec-run-state:end -->")

@@ -236,10 +236,12 @@ issue_meta() {
 
 run_state_comment_ids_for_issue() {
     issue="$1"
-    # shellcheck disable=SC2086
-    gh issue view "$issue" $REPO_ARGS \
-        --json comments \
-        --jq '[.comments[]? | select((.body // "") | contains("<!-- autospec-run-state:begin -->") and contains("<!-- autospec-run-state:end -->"))] | sort_by(.createdAt, .id) | .[].id' \
+    [ -n "${REPO_FULL:-}" ] || return 1
+    # Fetch via the REST comments endpoint because `gh issue view --json
+    # comments` exposes GraphQL node ids, while DELETE needs the numeric REST
+    # comment id.
+    gh api "repos/$REPO_FULL/issues/$issue/comments" \
+        --jq '[.[]? | select((.body // "") | contains("<!-- autospec-run-state:begin -->") and contains("<!-- autospec-run-state:end -->"))] | sort_by(.created_at, .id) | .[].id' \
         2>/dev/null
 }
 
