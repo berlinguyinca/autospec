@@ -881,13 +881,17 @@ KINDS
   cat > "$TMP/kind-coverage-patterns.txt" <<'PATTERNS'
 artifact.filed|emit artifact.filed
 claim|emit claim
-feature.described|feature.described
+feature.described|emit feature\.described
 heartbeat|emit heartbeat
 session.parked|emit session.parked
 session.started|emit session.started
 session.step|emit session.step
 session.terminal|emit session.terminal
 PATTERNS
+
+  cut -d '|' -f 1 "$TMP/kind-coverage-patterns.txt" | sort -u > "$TMP/kind-coverage-kinds.txt"
+  run diff -u "$expected" "$TMP/kind-coverage-kinds.txt"
+  [ "$status" -eq 0 ]
 
   while IFS='|' read -r kind pattern; do
     grep -Fq "$kind" "$expected"
