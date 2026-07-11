@@ -279,9 +279,7 @@ startup_claim_has_evidence() {
 release_startup_claim_if_stale() {
     issue_number="$1"
     state_json="$2"
-    timeout="${AUTOSPEC_STARTUP_EVIDENCE_TIMEOUT_SECS:-300}"
-    case "$timeout" in *[!0-9]*|'') timeout=300 ;; esac
-    [ "$timeout" -gt 0 ] || timeout=300
+    timeout=300
 
     updated_at="$(printf '%s\n' "$state_json" | jq -r '.updated_at // .claimed_at // empty' 2>/dev/null || true)"
     updated_epoch="$(iso_to_epoch "$updated_at")"

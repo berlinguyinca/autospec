@@ -15,6 +15,11 @@ setup() {
     write_issue_list > "$TMPDIR_BATS/auto.json"
     jq -n --arg body "$(safe_body)" '[{number:1858,title:"startup failed",body:$body,labels:[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]}]' > "$TMPDIR_BATS/active.json"
 
+    write_git_mock
+    write_gh_mock
+}
+
+write_git_mock() {
     REAL_GIT="$(command -v git)"
     cat > "$MOCK_BIN/git" <<MOCKEOF
 #!/usr/bin/env bash
@@ -25,7 +30,9 @@ fi
 exec "$REAL_GIT" "\$@"
 MOCKEOF
     chmod +x "$MOCK_BIN/git"
+}
 
+write_gh_mock() {
     cat > "$MOCK_BIN/gh" <<MOCKEOF
 #!/usr/bin/env bash
 set -eu
@@ -104,7 +111,6 @@ run_list_ready() {
     PATH="$MOCK_BIN:$PATH" \
     AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=3 \
     AUTOSPEC_HEARTBEAT_DIR="$TMPDIR_BATS/heartbeats" \
-    AUTOSPEC_STARTUP_EVIDENCE_TIMEOUT_SECS=300 \
       bash "$SCRIPT" --repo test/repo --batch-size 3
 }
 
