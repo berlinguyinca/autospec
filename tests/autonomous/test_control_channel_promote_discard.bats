@@ -169,6 +169,7 @@ _run_cycle() {
         CONDUCTOR_POLL_INTERVAL=0 \
         CONDUCTOR_DRY_RUN=0 \
         CONDUCTOR_NO_DIGEST=1 \
+        AUTOSPEC_RUN_CMD= \
         AUTOSPEC_INTEGRATION_BRANCH_BIN='$FAKE_SCRIPTS/autonomous-integration-branch.sh' \
         autospec_conductor_run
     " 2>&1

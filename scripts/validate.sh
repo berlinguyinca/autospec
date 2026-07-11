@@ -1899,6 +1899,18 @@ check_autospec_playwright_skill_present() {
     bash -n "$validate_sh" || fail "$validate_sh: bash syntax error"
     bash "$validate_sh" >/dev/null 2>&1 \
         || { bash "$validate_sh" >&2; fail "$validate_sh: structural lint failed"; }
+    local member
+    for member in "$skill_dir/SKILL.md" "$skill_dir/codex/prompt.md" "$skill_dir/opencode/agent.md"; do
+        [ -f "$member" ] || fail "$member: required Playwright adapter body missing"
+        grep -q '^## Loaded-data dashboard evidence' "$member" \
+            || fail "$member: missing loaded-data dashboard evidence section"
+        grep -q 'at least one loaded-data assertion' "$member" \
+            || fail "$member: missing loaded-data assertion requirement"
+        grep -q '/loading|skeleton|empty/i' "$member" \
+            || fail "$member: missing loading/skeleton/empty baseline rejection"
+        grep -q 'after catch-all mocks' "$member" \
+            || fail "$member: missing fixture-after-catch-all-mocks requirement"
+    done
 }
 
 check_autospec_qa_contract() {
@@ -3189,6 +3201,7 @@ main() {
     check_usage_limit_helper
     check_supersession_contract
     check_grooming_contract
+    check_run_groom_preflight_contract
     check_ship_completeness
     check_phase4_guardian_block_lockstep
     check_phase1_bounded_context_contract
@@ -5234,6 +5247,29 @@ check_grooming_contract() {
                 || { cat "/tmp/validate-grooming-$name.log" >&2; fail "$f: failed"; }
         fi
     done
+}
+
+check_run_groom_preflight_contract() {
+    info "autospec-run: backlog grooming preflight helper + explicit bats gate"
+    local helper="skills/autospec-run/scripts/run-groom-preflight.sh"
+    local bats_file="tests/unit/test_run_groom_preflight.bats"
+
+    [ -f "$helper" ] || fail "$helper: missing"
+    bash -n "$helper" || fail "$helper: bash syntax error"
+    [ -f "$bats_file" ] || fail "$bats_file: missing"
+
+    grep -q 'Backlog grooming preflight' skills/autospec-run/SKILL.md \
+        || fail "skills/autospec-run/SKILL.md: missing Backlog grooming preflight prose"
+    grep -q 'double gate' skills/autospec-run/SKILL.md \
+        || fail "skills/autospec-run/SKILL.md: missing double gate prose"
+    grep -q 'no discovery' skills/autospec-run/SKILL.md \
+        || fail "skills/autospec-run/SKILL.md: missing no discovery prose"
+
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-run-groom-preflight.log 2>&1 \
+            || { cat /tmp/validate-run-groom-preflight.log >&2; fail "$bats_file: failed"; }
+    fi
 }
 
 main "$@"

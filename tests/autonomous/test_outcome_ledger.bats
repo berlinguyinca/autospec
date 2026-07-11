@@ -95,6 +95,7 @@ SH
     export AUTOSPEC_EXPLORE_LEDGER="$TMP/repo/.autospec/explore-ledger.jsonl"
     export AUTOSPEC_LAST_OUTCOME_FILE="$TMP/repo/.autospec/last-outcome.json"
     export AUTOSPEC_ENABLE_DISCOVERY_TIERS=1
+    export AUTOSPEC_EXPLORE_CMD="printf '{\"dry\":true,\"filed\":0,\"reason\":\"stub\"}'"
 
     # Use $TMP/bin as CONDUCTOR_SCRIPTS_DIR so all helpers resolve to our stubs.
     export CONDUCTOR_SCRIPTS_DIR="$TMP/bin"
