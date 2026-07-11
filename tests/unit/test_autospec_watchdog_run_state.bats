@@ -56,7 +56,7 @@ if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
       prev="$a"
     done
     comments_for_issue="$(jq --argjson issue "$issue" \
-      '[.[] | select(.number == $issue)]' "${COMMENTS:?}")"
+      '((if type == "array" then . else [.] end) | [.[] | select(.number == $issue) | . + {id:(.node_id // ("IC_" + ((.id // .number) | tostring))), createdAt:(.createdAt // .created_at)}])' "${COMMENTS:?}")"
     printf '{"comments":%s}\n' "$comments_for_issue" | jq -r "${filter:-.}"
   else
     cat "${LABELS:?}"
@@ -81,6 +81,45 @@ if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
 fi
 
 if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
+  exit 0
+fi
+
+if [ "$1" = "api" ]; then
+  paginate=0
+  if [ "${2:-}" = "--paginate" ]; then
+    paginate=1
+    shift
+  fi
+  path="$2"
+  path="${path%%\?*}"
+  method="GET"
+  filter=""
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --paginate) paginate=1; shift ;;
+      -X) method="$2"; shift 2 ;;
+      --jq) filter="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "$path $method" in
+    repos/testorg/testrepo/issues/*/comments\ GET)
+      issue="${path#repos/testorg/testrepo/issues/}"
+      issue="${issue%/comments}"
+      jq --argjson issue "$issue" --argjson paginate "$paginate" \
+        '((if type == "array" then . else [.] end) |
+          [.[] | select(.number == $issue) | select(($paginate == 1) or ((.page // 1) == 1)) | . + {id:(.rest_id // .id // .number), created_at:(.created_at // .createdAt)}])' "${COMMENTS:?}" \
+        | jq -r "${filter:-.}"
+      exit 0
+      ;;
+    repos/testorg/testrepo/issues/comments/*\ DELETE)
+      id="${path##*/}"
+      jq --argjson id "$id" '[.[] | select((.id // -1) != $id)]' "${COMMENTS:?}" > "${COMMENTS}.tmp"
+      mv "${COMMENTS}.tmp" "${COMMENTS}"
+      exit 0
+      ;;
+  esac
   exit 0
 fi
 
@@ -109,8 +148,13 @@ write_state_comment() {
       --arg state "$state" \
       --arg updated_at "$updated_at" \
       --arg pr "$pr" \
+      --arg node_id "IC_${issue}00" \
       '[{
         number: $issue,
+        id: ($issue * 100),
+        node_id: $node_id,
+        created_at: $updated_at,
+        createdAt: $updated_at,
         body: ("<!-- autospec-run-state:begin -->\n" +
           ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:"worker-a",state:$state,branch:"feat/x",pr:$pr,step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
           "\n<!-- autospec-run-state:end -->")
@@ -176,8 +220,13 @@ write_state_worker() {
       --arg state "$state" \
       --arg updated_at "$updated_at" \
       --arg worker_id "$worker_id" \
+      --arg node_id "IC_${issue}00" \
       '[{
         number: $issue,
+        id: ($issue * 100),
+        node_id: $node_id,
+        created_at: $updated_at,
+        createdAt: $updated_at,
         body: ("<!-- autospec-run-state:begin -->\n" +
           ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:$worker_id,state:$state,branch:"feat/x",pr:"",step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
           "\n<!-- autospec-run-state:end -->")
@@ -268,8 +317,9 @@ state_comment_obj() {
     jq -n \
       --argjson issue "$issue" --arg state "$state" --arg updated_at "$updated_at" \
       --arg worker_id "$worker_id" --arg created_at "$created_at" --argjson id "$id" \
+      --arg node_id "IC_${id}" \
       '{
-        number: $issue, createdAt: $created_at, id: $id,
+        number: $issue, createdAt: $created_at, created_at: $created_at, id: $id, node_id: $node_id, page: 1,
         body: ("<!-- autospec-run-state:begin -->\n" +
           ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:$worker_id,state:$state,branch:"feat/x",pr:"",step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
           "\n<!-- autospec-run-state:end -->")
@@ -283,6 +333,57 @@ state_comment_obj() {
 # Tests mirror the F1+F2+F3 pattern: heartbeat step="implementing", threshold
 # overridden small, and STALE_SECS set below RECLAIM_SECS so the age=360 hb
 # reaches the reclaim branch (not the "too fresh" early-continue).
+
+
+@test "issue 1779: two watchdog reclaims clear stale run-state before the next queue read" {
+    isolate_heartbeat_pass
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=3600
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    stale="$(date -u -v-2H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '2 hours ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    write_hb 1779 expand_start 7200
+    jq -n --argjson comment "$(state_comment_obj 1779 expand_start "$stale" "oldhost:me:shell:1779" "2020-01-01T00:00:00Z" 177900)" '[$comment]' > "$COMMENTS"
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=1"* ]]
+    [ ! -f "$(HB_DIR_FOR)/1779.json" ]
+    run jq '[.[] | select(.number == 1779 and ((.body // "") | contains("autospec-run-state:begin")))] | length' "$COMMENTS"
+    [ "$output" = "0" ]
+
+    # A second consecutive reclaim attempt for the same issue must not observe
+    # or report the old worker_id after the first pass cleared the stale lease.
+    printf 'OPEN in-progress-by-bot\n' > "$LABELS"
+    write_hb 1779 expand_start 7200
+    : > "$CALLS"
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=1"* ]]
+    [ ! -f "$(HB_DIR_FOR)/1779.json" ]
+    ! grep -q 'oldhost:me:shell:1779' "$CALLS"
+}
+
+@test "issue 1779: paginated REST comments are searched before clearing stale run-state" {
+    isolate_heartbeat_pass
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=3600
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    stale="$(date -u -v-2H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '2 hours ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    write_hb 1779 expand_start 7200
+    jq -n \
+      --argjson unmarked '{"number":1779,"id":177901,"node_id":"IC_177901","createdAt":"2019-01-01T00:00:00Z","created_at":"2019-01-01T00:00:00Z","page":1,"body":"ordinary comment"}' \
+      --argjson marked "$(state_comment_obj 1779 expand_start "$stale" "oldhost:me:shell:1779" "2020-01-01T00:00:00Z" 177902 | jq '.page = 2')" \
+      '[$unmarked, $marked]' > "$COMMENTS"
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=1"* ]]
+    [ ! -f "$(HB_DIR_FOR)/1779.json" ]
+    run jq '[.[] | select(.number == 1779 and ((.body // "") | contains("autospec-run-state:begin")))] | length' "$COMMENTS"
+    [ "$output" = "0" ]
+    grep -q -- '--paginate repos/testorg/testrepo/issues/1779/comments?per_page=100' "$CALLS"
+}
 
 @test "F5: live same-host pid on non-claimed step past 3h is NOT reclaimed" {
     isolate_heartbeat_pass

@@ -362,6 +362,15 @@ ready_paths_for_issue() {
 }
 
 issue_list in-progress-by-bot > "$ACTIVE_FILE"
+# Reconcile stuck active claims before worker-cap decisions. If a worker opened
+# a linked PR but crashed before recording `.pr`, the issue otherwise remains
+# in-progress forever with run-state step=claimed/pr="". This helper records the
+# linked PR and posts one actionable post-PR handoff blocker without relabeling.
+if [ -x "$RUN_STATE" ]; then
+    for active_issue in $(jq -r '.[].number' "$ACTIVE_FILE"); do
+        "$RUN_STATE" reconcile-linked-pr --issue "$active_issue" --repo "$repo" >/dev/null 2>&1 || true
+    done
+fi
 filter_active_startup_claims
 active_count="$(jq 'length' "$ACTIVE_FILE")"
 if [ "$max_repo_workers" -gt 0 ]; then

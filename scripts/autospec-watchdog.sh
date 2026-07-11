@@ -234,14 +234,42 @@ issue_meta() {
         2>/dev/null || true
 }
 
+run_state_comment_ids_for_issue() {
+    issue="$1"
+    [ -n "${REPO_FULL:-}" ] || return 1
+    # Fetch via the REST comments endpoint because `gh issue view --json
+    # comments` exposes GraphQL node ids, while DELETE needs the numeric REST
+    # comment id.
+    gh api --paginate "repos/$REPO_FULL/issues/$issue/comments?per_page=100" \
+        --jq '[.[]? | select((.body // "") | contains("<!-- autospec-run-state:begin -->") and contains("<!-- autospec-run-state:end -->"))] | sort_by(.created_at, .id) | .[].id' \
+        2>/dev/null
+}
+
+clear_run_state_comments_for_issue() {
+    issue="$1"
+    ids="$(run_state_comment_ids_for_issue "$issue")" || return 1
+    for comment_id in $ids; do
+        # shellcheck disable=SC2086
+        gh api "repos/$REPO_FULL/issues/comments/$comment_id" -X DELETE >/dev/null 2>&1 || return 1
+    done
+    return 0
+}
+
 reclaim_issue() {
     local issue="$1"
     local age="$2"
 
+    # Clear the stale authoritative run-state lease before making the issue
+    # claimable again. Otherwise the next queue/claim cycle can briefly observe
+    # `in-progress-by-bot` with the previous worker_id and report a fresh claim
+    # for a dead worker. If GitHub cannot clear the lease, fail closed and leave
+    # labels untouched for the next watchdog tick.
+    clear_run_state_comments_for_issue "$issue" || return 1
+
     # shellcheck disable=SC2086
     gh issue edit "$issue" $REPO_ARGS \
         --remove-label in-progress-by-bot \
-        --add-label auto-implement >/dev/null 2>&1 || true
+        --add-label auto-implement >/dev/null 2>&1 || return 1
     # shellcheck disable=SC2086
     gh issue comment "$issue" $REPO_ARGS \
         --body "autospec watchdog released and reclaimed this issue after ${age}s with no live owner." >/dev/null 2>&1 || true
@@ -587,10 +615,13 @@ for hb in "$WATCHDOG_DIR"/*.json; do
         # PID-liveness decide whether to actually reclaim (F1+F2+F3). A live
         # owner is never reclaimed — this closes the go-modules #1055 regression.
         if [ "$(reclaim_decision "$issue" "$WATCHDOG_CLAIMED_TIMEOUT_SECS")" = "reclaim" ]; then
-            reclaim_issue "$issue" "$age"
-            claimed_released=$((claimed_released + 1))
-            state_unset "$issue"
-            rm -f "$hb"
+            if reclaim_issue "$issue" "$age"; then
+                claimed_released=$((claimed_released + 1))
+                state_unset "$issue"
+                rm -f "$hb"
+            else
+                skipped=$((skipped + 1))
+            fi
         fi
         continue
     fi
@@ -604,10 +635,13 @@ for hb in "$WATCHDOG_DIR"/*.json; do
         # by the claimed-timeout path (F1+F2+F3 invariant, closes #1367).
         # A live worker is never reclaimed; gh API failure fail-safes to hold.
         if [ "$(reclaim_decision "$issue" "$WATCHDOG_RECLAIM_SECS")" = "reclaim" ]; then
-            reclaim_issue "$issue" "$age"
-            reclaimed=$((reclaimed + 1))
-            state_unset "$issue"
-            rm -f "$hb"
+            if reclaim_issue "$issue" "$age"; then
+                reclaimed=$((reclaimed + 1))
+                state_unset "$issue"
+                rm -f "$hb"
+            else
+                skipped=$((skipped + 1))
+            fi
         fi
         continue
     fi
@@ -681,14 +715,20 @@ reconcile_run_state_comments() {
             if [ "$(worker_liveness "$worker_id")" = "alive" ]; then
                 continue
             fi
-            reclaim_issue "$issue" "$age"
-            claimed_released=$((claimed_released + 1))
+            if reclaim_issue "$issue" "$age"; then
+                claimed_released=$((claimed_released + 1))
+            else
+                skipped=$((skipped + 1))
+            fi
             continue
         fi
 
         if [ "$age" -ge "$ttl" ]; then
-            reclaim_issue "$issue" "$age"
-            reclaimed=$((reclaimed + 1))
+            if reclaim_issue "$issue" "$age"; then
+                reclaimed=$((reclaimed + 1))
+            else
+                skipped=$((skipped + 1))
+            fi
         fi
     done
 }
