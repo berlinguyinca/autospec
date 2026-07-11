@@ -93,6 +93,17 @@ fn issue_lint_prose_only_acceptance_criteria_does_not_emit_ac_prose() {
 }
 
 #[test]
+fn issue_lint_verification_fallback_emits_smoke_multi_line() {
+    let body = "## Goal\nAdd `IssueQualityRule` fixtures.\n\n## Acceptance criteria\n- [ ] `cargo test issue_lint` passes.\n\n## Verification\n```bash\ncargo test issue_lint\ncargo test --all\n```\n";
+
+    let findings = lint_issue_body(body);
+
+    assert!(findings
+        .iter()
+        .any(|finding| finding.rule == IssueQualityRule::SmokeMultiLine));
+}
+
+#[test]
 fn issue_lint_multi_line_smoke_block_emits_smoke_multi_line() {
     let body = valid_issue_body(
         "Add `IssueQualityRule` fixtures.",
