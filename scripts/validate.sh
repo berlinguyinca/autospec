@@ -1877,6 +1877,18 @@ check_autospec_playwright_skill_present() {
     bash -n "$validate_sh" || fail "$validate_sh: bash syntax error"
     bash "$validate_sh" >/dev/null 2>&1 \
         || { bash "$validate_sh" >&2; fail "$validate_sh: structural lint failed"; }
+    local member
+    for member in "$skill_dir/SKILL.md" "$skill_dir/codex/prompt.md" "$skill_dir/opencode/agent.md"; do
+        [ -f "$member" ] || fail "$member: required Playwright adapter body missing"
+        grep -q '^## Loaded-data dashboard evidence' "$member" \
+            || fail "$member: missing loaded-data dashboard evidence section"
+        grep -q 'at least one loaded-data assertion' "$member" \
+            || fail "$member: missing loaded-data assertion requirement"
+        grep -q '/loading|skeleton|empty/i' "$member" \
+            || fail "$member: missing loading/skeleton/empty baseline rejection"
+        grep -q 'after catch-all mocks' "$member" \
+            || fail "$member: missing fixture-after-catch-all-mocks requirement"
+    done
 }
 
 check_autospec_qa_contract() {

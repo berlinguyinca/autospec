@@ -99,6 +99,25 @@ silently retry with `TIER_A`. Never ask the user.
 
 4. **Exit code.** Exit 0 on success, 1 on Stage 2A failure.
 
+## Loaded-data dashboard evidence
+
+For autospec-created dashboard E2E or visual tests, do not accept a fixture,
+screenshot, or baseline until the test proves the dashboard is past its loading
+shell and has rendered service-backed data. The authored test must include at least one loaded-data assertion against
+a stable KPI, table row, service field, or route-specific datum that comes from the installed fixture response rather
+than from placeholder UI chrome.
+
+Reject any visual baseline or snapshot whose visible page still matches
+`/loading|skeleton|empty/i`, including loading spinners, skeleton cards, empty
+states, or placeholder-only dashboards. If such text or UI is still present,
+wait for the loaded-data assertion to pass or fix the fixture route before
+capturing the baseline.
+
+When dashboard tests install network fixtures, register broad catch-all mocks
+first, then install route-specific dashboard fixtures after catch-all mocks so
+the loaded service response wins over fallback handlers. The acceptance proof
+must cite the loaded-data assertion and the fixture route that supplies it.
+
 ## Out of scope
 
 - Stage 2A machinery (owned by `autospec-test` issue #996).
