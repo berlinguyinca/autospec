@@ -287,11 +287,9 @@ _repo_cwd() {
 
   [ -f "$BIN_LOG" ]
   [ "$(wc -l < "$BIN_LOG" | tr -d ' ')" -eq 1 ]
-  run cat "$BIN_LOG"
-  [[ "$output" == *"emit artifact.filed"* ]]
-  [[ "$output" == *"repo=o/n"* ]]
-  [[ "$output" == *"issue=7"* ]]
-  [[ "$output" == *"detail=explore"* ]]
+  # Exact-line assertion: a substring match would miss a malformed repo
+  # value like repo=o/n.git (the staged remote ends in .git on purpose).
+  [ "$(cat "$BIN_LOG")" = "emit artifact.filed repo=o/n issue=7 detail=explore" ]
 }
 
 @test "growth-ledger append emits exactly one artifact.filed event" {
@@ -304,11 +302,9 @@ _repo_cwd() {
 
   [ -f "$BIN_LOG" ]
   [ "$(wc -l < "$BIN_LOG" | tr -d ' ')" -eq 1 ]
-  run cat "$BIN_LOG"
-  [[ "$output" == *"emit artifact.filed"* ]]
-  [[ "$output" == *"repo=o/n"* ]]
-  [[ "$output" == *"issue=9"* ]]
-  [[ "$output" == *"detail=growth"* ]]
+  # Exact-line assertion: a substring match would miss a malformed repo
+  # value like repo=o/n.git (the staged remote ends in .git on purpose).
+  [ "$(cat "$BIN_LOG")" = "emit artifact.filed repo=o/n issue=9 detail=growth" ]
 }
 
 @test "unset AUTOSPEC_DB_DSN yields 0 emit-binary calls from explore-ledger append" {

@@ -13,11 +13,21 @@ REQUIRED='["round","source","title","norm_title","channel","kind","issue","outco
 ensure_dir() { mkdir -p "$(dirname "$LEDGER")"; }
 
 # _repo_slug — best-effort local-only "owner/name" derivation from the origin
-# remote for telemetry's repo= field. No network call (never `gh repo view`):
-# a ledger append must never gain latency from telemetry. Empty on any miss.
+# remote for telemetry's repo= field, mirroring repo_slug() in
+# scripts/autonomous-integration-branch.sh. No network call (never
+# `gh repo view`): a ledger append must never gain latency from telemetry.
+# Prints nothing on any miss (unknown remote shape ⇒ no output, so the
+# caller skips the emit rather than sending a malformed repo value).
 _repo_slug() {
-  git config --get remote.origin.url 2>/dev/null \
-    | sed -E 's#^.*[:/]([^/]+/[^/]+)(\.git)?$#\1#'
+  local remote
+  remote="$(git config --get remote.origin.url 2>/dev/null || true)"
+  case "$remote" in
+    git@github.com:*)       remote="${remote#git@github.com:}" ;;
+    https://github.com/*)   remote="${remote#https://github.com/}" ;;
+    ssh://git@github.com/*) remote="${remote#ssh://git@github.com/}" ;;
+    *) return 0 ;;
+  esac
+  printf '%s\n' "${remote%.git}"
 }
 
 do_append() {
@@ -40,9 +50,12 @@ do_append() {
     if [ -f "$_gl_h/emit-event.sh" ]; then
       # shellcheck source=/dev/null
       . "$_gl_h/emit-event.sh"
-      local _gl_issue
+      local _gl_repo _gl_issue
+      _gl_repo="$(_repo_slug)"
       _gl_issue="$(echo "$obj" | jq -r '.issue // 0' 2>/dev/null)"
-      emit_event artifact.filed repo="$(_repo_slug)" issue="$_gl_issue" detail=growth
+      if [ -n "$_gl_repo" ]; then
+        emit_event artifact.filed repo="$_gl_repo" issue="$_gl_issue" detail=growth
+      fi
     fi
   } || true
 }

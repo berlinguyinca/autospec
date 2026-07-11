@@ -105,11 +105,21 @@ _normalize_title() {
 _now_ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # _repo_slug — best-effort local-only "owner/name" derivation from the origin
-# remote for telemetry's repo= field. No network call (never `gh repo view`):
-# a ledger append must never gain latency from telemetry. Empty on any miss.
+# remote for telemetry's repo= field, mirroring repo_slug() in
+# scripts/autonomous-integration-branch.sh. No network call (never
+# `gh repo view`): a ledger append must never gain latency from telemetry.
+# Prints nothing on any miss (unknown remote shape ⇒ no output, so the
+# caller skips the emit rather than sending a malformed repo value).
 _repo_slug() {
-  git config --get remote.origin.url 2>/dev/null \
-    | sed -E 's#^.*[:/]([^/]+/[^/]+)(\.git)?$#\1#'
+  local remote
+  remote="$(git config --get remote.origin.url 2>/dev/null || true)"
+  case "$remote" in
+    git@github.com:*)       remote="${remote#git@github.com:}" ;;
+    https://github.com/*)   remote="${remote#https://github.com/}" ;;
+    ssh://git@github.com/*) remote="${remote#ssh://git@github.com/}" ;;
+    *) return 0 ;;
+  esac
+  printf '%s\n' "${remote%.git}"
 }
 
 # _outcome_ok <value> — 0 if value is in the allowed outcome set.
@@ -218,8 +228,11 @@ case "$CMD" in
       if [ -f "$_AF_H/emit-event.sh" ]; then
         # shellcheck source=/dev/null
         . "$_AF_H/emit-event.sh"
+        _af_repo="$(_repo_slug)"
         _af_issue="$(printf '%s' "$compact" | jq -r '.issue // 0' 2>/dev/null)"
-        emit_event artifact.filed repo="$(_repo_slug)" issue="$_af_issue" detail=explore
+        if [ -n "$_af_repo" ]; then
+          emit_event artifact.filed repo="$_af_repo" issue="$_af_issue" detail=explore
+        fi
       fi
     } || true
 
