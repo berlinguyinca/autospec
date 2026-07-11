@@ -200,15 +200,13 @@ YAML
 }
 
 @test "install-db-module: resolver absent keeps current default behavior (suite unchanged-green)" {
-    TELEMETRY_CFG="$REPO_ROOT/skills/autospec-shared/scripts/telemetry-config.sh"
-    TELEMETRY_CFG_BAK="$FAKE_HOME/telemetry-config.sh.bak"
-    mv "$TELEMETRY_CFG" "$TELEMETRY_CFG_BAK"
+    # AUTOSPEC_TELEMETRY_CONFIG_SH points at a nonexistent path, simulating a
+    # checkout without the #1776 resolver, without touching the real tracked
+    # script (avoids mutating the worktree mid-suite).
+    export AUTOSPEC_TELEMETRY_CONFIG_SH="$FAKE_HOME/no-such-telemetry-config.sh"
     export AUTOSPEC_NO_DB_PROMPT=1
     run bash "$RUNNER"
-    status_val="$status"
-    output_val="$output"
-    mv "$TELEMETRY_CFG_BAK" "$TELEMETRY_CFG"
-    [ "$status_val" -eq 0 ]
+    [ "$status" -eq 0 ]
     [ ! -f "$LOG" ]
-    [[ "$output_val" != *"Install the optional database telemetry module"* ]]
+    [[ "$output" != *"Install the optional database telemetry module"* ]]
 }
