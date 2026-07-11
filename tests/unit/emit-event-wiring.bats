@@ -353,3 +353,164 @@ _repo_cwd() {
   [ "$disabled_status" -eq "$enabled_status" ]
   [ "$disabled_ledger" = "$enabled_ledger" ]
 }
+
+# --- telemetry-config.sh (issue #1776) ---------------------------------
+# yaml resolver mirroring advisor-config.sh: env > yaml > built-in default.
+
+TELCFG="$REPO_ROOT/skills/autospec-shared/scripts/telemetry-config.sh"
+
+@test "telemetry-config.sh: exists and is bash -n clean" {
+  [ -f "$TELCFG" ]
+  run bash -n "$TELCFG"
+  [ "$status" -eq 0 ]
+}
+
+@test "telemetry-config.sh: enabled false in yaml resolves to false" {
+  cd "$TMP"
+  mkdir -p .autospec
+  cat > .autospec/autospec.yml <<'YAML'
+telemetry:
+  enabled: false
+  host_label: 'site-a'
+  spool_max_bytes: 555
+  install:
+    db_module: never
+YAML
+  run bash "$TELCFG" --key enabled
+  [ "$status" -eq 0 ]
+  [ "$output" = "false" ]
+}
+
+@test "telemetry-config.sh: host_label and spool_max_bytes map from yaml" {
+  cd "$TMP"
+  mkdir -p .autospec
+  cat > .autospec/autospec.yml <<'YAML'
+telemetry:
+  enabled: true
+  host_label: 'site-a'
+  spool_max_bytes: 555
+YAML
+  run bash "$TELCFG" --key host_label
+  [ "$status" -eq 0 ]
+  [ "$output" = "site-a" ]
+
+  run bash "$TELCFG" --key spool_max_bytes
+  [ "$status" -eq 0 ]
+  [ "$output" = "555" ]
+}
+
+@test "telemetry-config.sh: pre-set env wins over yaml" {
+  cd "$TMP"
+  mkdir -p .autospec
+  cat > .autospec/autospec.yml <<'YAML'
+telemetry:
+  enabled: false
+  host_label: 'from-yaml'
+  spool_max_bytes: 999
+YAML
+  AUTOSPEC_TELEMETRY_ENABLED=true run bash "$TELCFG" --key enabled
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+
+  AUTOSPEC_DB_HOST_LABEL=from-env run bash "$TELCFG" --key host_label
+  [ "$status" -eq 0 ]
+  [ "$output" = "from-env" ]
+
+  AUTOSPEC_DB_SPOOL_MAX_BYTES=42 run bash "$TELCFG" --key spool_max_bytes
+  [ "$status" -eq 0 ]
+  [ "$output" = "42" ]
+}
+
+@test "telemetry-config.sh: missing yaml file falls back to built-in defaults" {
+  cd "$TMP"
+  # no .autospec/autospec.yml at all
+  run bash "$TELCFG" --key enabled
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+
+  run bash "$TELCFG" --key host_label
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+
+  run bash "$TELCFG" --key spool_max_bytes
+  [ "$status" -eq 0 ]
+  [ "$output" = "10485760" ]
+
+  run bash "$TELCFG" --key install.db_module
+  [ "$status" -eq 0 ]
+  [ "$output" = "prompt" ]
+}
+
+@test "telemetry-config.sh: yaml file present but missing telemetry block falls back to defaults" {
+  cd "$TMP"
+  mkdir -p .autospec
+  cat > .autospec/autospec.yml <<'YAML'
+advisor:
+  policy: auto
+YAML
+  run bash "$TELCFG" --key enabled
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+}
+
+# --- session bootstrap: ~/.autospec/env sources db.env + telemetry envs -
+# Exercises the REAL install.sh ensure_autospec_bin_path function (extracted
+# verbatim) rather than a reimplementation, so a bug in the actual heredoc
+# would be caught here.
+
+INSTALL_SH="$REPO_ROOT/install.sh"
+INSTALL_HELPERS="$REPO_ROOT/scripts/lib/install-helpers.sh"
+
+# Runs the real ensure_autospec_bin_path() against an isolated $TMP/home,
+# with $TMP/home/.autospec/scripts/telemetry-config.sh installed so the
+# generated env file's runtime calls resolve against our test fixtures.
+run_ensure_autospec_bin_path() {
+  mkdir -p "$TMP/home/.autospec/scripts" "$TMP/home/repo/.autospec"
+  cp "$TELCFG" "$TMP/home/.autospec/scripts/telemetry-config.sh"
+  FN_SNIPPET="$TMP/ensure_autospec_bin_path.sh"
+  sed -n '/^ensure_autospec_bin_path()/,/^}/p' "$INSTALL_SH" > "$FN_SNIPPET"
+  HOME="$TMP/home" DRY_RUN=0 bash -c '
+    set -eu
+    info() { :; }
+    . "'"$INSTALL_HELPERS"'"
+    . "'"$FN_SNIPPET"'"
+    ensure_autospec_bin_path
+  '
+}
+
+@test "session bootstrap: ~/.autospec/env sources db.env guarded by [ -f ]" {
+  run_ensure_autospec_bin_path
+  grep -q '\[ -f "\$HOME/.autospec/db.env" \] && \. "\$HOME/.autospec/db.env"' "$TMP/home/.autospec/env"
+}
+
+@test "session bootstrap: absent db.env leaves AUTOSPEC_DB_DSN unset" {
+  run_ensure_autospec_bin_path
+  rm -f "$TMP/home/.autospec/db.env"
+  run bash -c '. "'"$TMP"'/home/.autospec/env"; echo "DSN=${AUTOSPEC_DB_DSN:-unset}"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DSN=unset"* ]]
+}
+
+@test "session bootstrap: enabled false in yaml exports AUTOSPEC_DB_DISABLE=1" {
+  run_ensure_autospec_bin_path
+  cat > "$TMP/home/repo/.autospec/autospec.yml" <<'YAML'
+telemetry:
+  enabled: false
+  host_label: ''
+  spool_max_bytes: 10485760
+YAML
+  run bash -c 'cd "'"$TMP"'/home/repo" && HOME="'"$TMP"'/home" . "'"$TMP"'/home/.autospec/env"; echo "DISABLE=${AUTOSPEC_DB_DISABLE:-unset}"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DISABLE=1"* ]]
+}
+
+@test "session bootstrap: a pre-set AUTOSPEC_DB_DISABLE wins over yaml enabled:true" {
+  run_ensure_autospec_bin_path
+  cat > "$TMP/home/repo/.autospec/autospec.yml" <<'YAML'
+telemetry:
+  enabled: true
+YAML
+  run bash -c 'cd "'"$TMP"'/home/repo" && HOME="'"$TMP"'/home" AUTOSPEC_DB_DISABLE=1 . "'"$TMP"'/home/.autospec/env"; echo "DISABLE=${AUTOSPEC_DB_DISABLE:-unset}"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DISABLE=1"* ]]
+}

@@ -128,6 +128,28 @@ env > yaml > default).
 | `AUTOSPEC_DB_DISABLE` | `=1` hard off — telemetry fully disabled |
 | `AUTOSPEC_SCRIPTS_DIR` | installed-scripts dir (default `$HOME/.autospec/scripts`) |
 
+### DSN setup
+
+The DSN itself is never yaml-configured — it lives only in `~/.autospec/db.env`,
+a `chmod 600` file that exports `AUTOSPEC_DB_DSN` (with `sslmode=require` and
+`connect_timeout=2` in the connection string), e.g.:
+
+```bash
+# ~/.autospec/db.env (chmod 600; never committed, never echoed)
+export AUTOSPEC_DB_DSN='postgres://user:pass@host:5432/db?sslmode=require&connect_timeout=2'
+```
+
+Session bootstrap (`~/.autospec/env`, installed by `install.sh`
+`ensure_autospec_bin_path`) sources `db.env` guarded by `[ -f ]` — an absent
+`db.env` is a total no-op, no directory or file is created implicitly. The same
+bootstrap step calls `telemetry-config.sh` to derive `AUTOSPEC_DB_DISABLE`,
+`AUTOSPEC_DB_HOST_LABEL`, and `AUTOSPEC_DB_SPOOL_MAX_BYTES` from the
+`telemetry:` yaml block, honoring env > yaml > default precedence so a
+pre-set env var (CI override, ad-hoc shell export) always wins. Because
+`telemetry.enabled: false` is enforced by this config loader — it exports
+`AUTOSPEC_DB_DISABLE=1` before any chokepoint runs — the shim never even
+attempts to resolve the binary when telemetry is disabled via yaml.
+
 ## Transport internals live in the `autospec-db` repo
 
 Everything below is owned by the standalone **autospec-db** Go module — NOT this
