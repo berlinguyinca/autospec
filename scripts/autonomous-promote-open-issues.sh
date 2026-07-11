@@ -200,6 +200,20 @@ case "$cand_count" in
     ''|*[!0-9]*) cand_count=0 ;;
 esac
 
+list_skip_count="$(printf '%s' "$list_json" | jq '.skipped | length' 2>/dev/null || printf '0')"
+case "$list_skip_count" in
+    ''|*[!0-9]*) list_skip_count=0 ;;
+esac
+i=0
+while [ "$i" -lt "$list_skip_count" ]; do
+    skip_issue="$(printf '%s' "$list_json" | jq -r ".skipped[$i].issue // .skipped[$i].number // empty" 2>/dev/null || printf '')"
+    skip_reason="$(printf '%s' "$list_json" | jq -r ".skipped[$i].reason // \"selector-skip\"" 2>/dev/null || printf 'selector-skip')"
+    if [ -n "$skip_issue" ]; then
+        record_skip "$skip_issue" "$skip_reason"
+    fi
+    i=$((i + 1))
+done
+
 # ── Audit-comment helper ──────────────────────────────────────────────────────
 audit_comment() {
     # $1 = issue number, $2 = body text

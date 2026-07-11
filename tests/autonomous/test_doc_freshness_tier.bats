@@ -62,7 +62,7 @@ EOF2
   write_fake_drift '{"passed":true,"drift":[],"missing_scope":[],"visual_stale":[],"example_stale":[],"skipped":false}' 0
   cat > "$WORK/bin/verify-examples.mjs" <<'EOF2'
 #!/usr/bin/env node
-const fs = require('fs');
+import fs from 'node:fs';
 fs.appendFileSync(process.env.CALL_LOG, `verify ${process.argv.slice(2).join(' ')}\n`);
 EOF2
   chmod +x "$WORK/bin/verify-examples.mjs"
@@ -84,4 +84,30 @@ EOF2
   [ "$status" -eq 0 ]
   [[ "$(cat "$WORK/calls.log")" == *"verify $WORK/repo/docs/user.md"* ]]
   [[ "$(cat "$WORK/calls.log")" == *"gen --repo-root $WORK/repo"* ]]
+}
+
+@test "docs-as-tests verifier failure blocks the freshness gate" {
+  write_fake_drift '{"passed":true,"drift":[],"missing_scope":[],"visual_stale":[],"example_stale":[],"skipped":false}' 0
+  cat > "$WORK/bin/verify-examples.mjs" <<'EOF2'
+#!/usr/bin/env node
+process.exit(9);
+EOF2
+  chmod +x "$WORK/bin/verify-examples.mjs"
+  cat > "$WORK/bin/gen-llms-txt.sh" <<'EOF2'
+#!/usr/bin/env bash
+printf 'gen %s\n' "$*" >> "$CALL_LOG"
+EOF2
+  chmod +x "$WORK/bin/gen-llms-txt.sh"
+  printf '# User docs\n' > "$WORK/repo/docs/user.md"
+  cat > "$DIFF" <<'EOF2'
+diff --git a/docs/user.md b/docs/user.md
++++ b/docs/user.md
+@@ -1 +1 @@
+-# Old
++# User docs
+EOF2
+  CALL_LOG="$WORK/calls.log" run env AUTOSPEC_CHECK_DRIFT_SH="$WORK/bin/check-doc-drift.sh" AUTOSPEC_VERIFY_EXAMPLES_MJS="$WORK/bin/verify-examples.mjs" AUTOSPEC_GEN_LLMS_TXT_SH="$WORK/bin/gen-llms-txt.sh" CALL_LOG="$WORK/calls.log" bash "$SCRIPT" --diff "$DIFF" --repo-root "$WORK/repo" --dry-run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"docs-as-tests example verification failed"* ]]
+  [ ! -e "$WORK/calls.log" ]
 }

@@ -1,6 +1,7 @@
 """Tests for autospec_context_monitor.handoff."""
 from __future__ import annotations
 
+import os
 import time
 from datetime import date, timedelta
 from pathlib import Path
@@ -64,6 +65,19 @@ def test_returns_newest_file_after_since(tmp_path):
 
     result = wait_for_handoff(tmp_path, since=since, timeout=5.0, poll=0.05)
     assert result == newer
+
+
+def test_check_handoff_accepts_files_with_timestamp_granularity_skew(tmp_path):
+    """check_handoff accepts files written after the trigger with tiny mtime skew."""
+    from autospec_context_monitor.handoff import check_handoff
+
+    handoff_dir = tmp_path / ".turbo" / "handoff"
+    since = time.time()
+    handoff = _write_md(handoff_dir, f"{TODAY}-same-tick.md")
+    skewed_mtime = since - 0.001
+    os.utime(handoff, (skewed_mtime, skewed_mtime))
+
+    assert check_handoff(tmp_path, since=since) == handoff
 
 
 def test_ignores_files_older_than_since(tmp_path):

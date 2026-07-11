@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -49,9 +48,11 @@ def _redirect(tmp_path, monkeypatch):
 
 
 def _write_valid_handoff(tmp_path) -> Path:
+    from autospec_context_monitor import handoff
+
     hd = tmp_path / ".turbo" / "handoff"
     hd.mkdir(parents=True, exist_ok=True)
-    p = hd / f"{date.today().isoformat()}-h.md"
+    p = hd / f"{handoff.date.today().isoformat()}-h.md"
     p.write_text(
         "# Handoff\n\n## Status\nok\n\n## Next step\ngo\n" + ("x" * 250),
         encoding="utf-8",

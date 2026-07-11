@@ -1468,7 +1468,9 @@ fi'
             [ -f "$_gv" ] || _gv="${_sdir}/validate-growth-config.sh"
             if [ -f "$_gv" ]; then
                 local _gjson
-                _gjson="$(yq -o=json '.' "${_repo_root}/.autospec/growth.yml" 2>/dev/null || true)"
+                _gjson="$(yq -o=json '.' "${_repo_root}/.autospec/growth.yml" 2>/dev/null \
+                    || yq '.' "${_repo_root}/.autospec/growth.yml" 2>/dev/null \
+                    || true)"
                 if [ -n "$_gjson" ]; then
                     local _gjson_tmp
                     _gjson_tmp="$(mktemp 2>/dev/null || printf '%s/.autospec-growth-cfg.%s.json' "${TMPDIR:-/tmp}" "$$")"

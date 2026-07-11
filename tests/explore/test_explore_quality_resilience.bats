@@ -49,15 +49,14 @@ for p in d["proposals"]:
 @test "quality-resilience: assertion-free bats file is flagged" {
     mkdir -p tests
     # A bats file with @test blocks but zero assert_* calls.
-    cat > tests/no_asserts.bats <<'EOF'
-#!/usr/bin/env bats
-@test "does something" {
-    run echo hello
-}
-@test "does something else" {
-    run ls /
-}
-EOF
+    printf '%s\n' \
+        '#!/usr/bin/env bats' \
+        '@test "does something" {' \
+        '    run echo hello' \
+        '}' \
+        '@test "does something else" {' \
+        '    run ls /' \
+        '}' > tests/no_asserts.bats
     git add -A && git commit -q -m "seed assertion-free bats"
     run bash "$REPO_ROOT/scripts/explore-research/quality-resilience.sh"
     [ "$status" -eq 0 ]
@@ -76,15 +75,14 @@ EOF
 #!/usr/bin/env bash
 make_slug() { echo "$1" | tr ' ' '-'; }
 EOF
-    cat > tests/test_slug.bats <<'EOF'
-#!/usr/bin/env bats
-source src/helper.sh
-@test "slug matches" {
-    expected=$(make_slug "hello world")
-    run make_slug "hello world"
-    assert_output "$expected"
-}
-EOF
+    printf '%s\n' \
+        '#!/usr/bin/env bats' \
+        'source src/helper.sh' \
+        '@test "slug matches" {' \
+        '    expected=$(make_slug "hello world")' \
+        '    run make_slug "hello world"' \
+        '    assert_output "$expected"' \
+        '}' > tests/test_slug.bats
     git add -A && git commit -q -m "seed self-consistent fixture"
     run bash "$REPO_ROOT/scripts/explore-research/quality-resilience.sh"
     [ "$status" -eq 0 ]

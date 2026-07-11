@@ -52,7 +52,10 @@ echo $((count + 1)) > "$count_file"
 
 safety="${{CCX_SHIM_SAFETY:-{safety_factor}}}"
 # The last positional arg to ccx is the job name (no extension).
-job_name="${{@: -1}}"
+job_name=""
+for arg do
+    job_name="$arg"
+done
 dat_file="${{job_name}}.dat"
 
 cat > "$dat_file" << EOF2

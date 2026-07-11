@@ -2,10 +2,9 @@
 # tests/autonomous/test_promote_open_issues.bats — unit tests for
 # scripts/autonomous-promote-open-issues.sh (Tier 1.5 real promotion command).
 #
-# The script promotes genuinely-ready open issues (primary class:
-# needs-classify) into the auto-implement queue. It is DOUBLE-GATED: it mutates
-# GitHub state only when --apply is passed AND
-# AUTOSPEC_PROMOTE_OPEN_ISSUES_APPLY=1 is set. Without both it is report-only.
+# The script promotes genuinely-ready open issues into the auto-implement queue.
+# It mutates GitHub state only when --apply is passed AND grooming policy is
+# auto/on. Without both it is report-only.
 #
 # gh is stubbed via PATH injection; every `gh` invocation is logged so tests
 # assert against recorded argv. No real network calls.
@@ -64,6 +63,65 @@ esac
 exit 0
 EOF
     chmod +x "$TMP/bin/gh"
+
+    cat > "$TMP/bin/groom-list.sh" <<'EOF'
+#!/usr/bin/env bash
+jq -c '
+  def labels: [.labels[]?.name];
+  reduce .[] as $issue (
+    {candidates: [], skipped: []};
+    ($issue | labels) as $labels
+    | if ($labels | index("auto-implement")) then
+        .skipped += [{issue: $issue.number, reason: "auto-implement"}]
+      elif ($labels | index("epic")) then
+        .skipped += [{issue: $issue.number, reason: "epic"}]
+      elif ($labels | index("needs-autospec-template")) then
+        .skipped += [{issue: $issue.number, reason: "needs-autospec-template"}]
+      elif ($labels | any(startswith("blocked"))) then
+        .skipped += [{issue: $issue.number, reason: "blocked"}]
+      elif (($issue.body // "") | length) < 80 then
+        .skipped += [{issue: $issue.number, reason: "insufficient-body"}]
+      else
+        .candidates += [{number: $issue.number, title: $issue.title, class: (if ($labels | index("needs-classify")) then "needs-classify" else "unlabeled" end)}]
+      end
+  )
+' "$ISSUES_JSON"
+EOF
+    chmod +x "$TMP/bin/groom-list.sh"
+
+    cat > "$TMP/bin/groom-safety.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'SAFETY_PASS\n'
+EOF
+    chmod +x "$TMP/bin/groom-safety.sh"
+
+    cat > "$TMP/bin/groom-classify.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '{"ctx":"64k","reasoning":"medium"}\n'
+EOF
+    chmod +x "$TMP/bin/groom-classify.sh"
+
+    cat > "$TMP/bin/groom-eligibility.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '{"decision":"eligible","reason":"test"}\n'
+EOF
+    chmod +x "$TMP/bin/groom-eligibility.sh"
+
+    cat > "$TMP/bin/groom-config.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"policy"*) printf '%s\n' "${AUTOSPEC_GROOMING_POLICY:-auto}" ;;
+  *"budget.max_issues_per_cycle"*) printf '5\n' ;;
+  *) printf '\n' ;;
+esac
+EOF
+    chmod +x "$TMP/bin/groom-config.sh"
+
+    export AUTOSPEC_GROOM_LIST_SCRIPT="$TMP/bin/groom-list.sh"
+    export AUTOSPEC_GROOM_SAFETY_SCRIPT="$TMP/bin/groom-safety.sh"
+    export AUTOSPEC_GROOM_CLASSIFY_SCRIPT="$TMP/bin/groom-classify.sh"
+    export AUTOSPEC_GROOM_ELIGIBILITY_SCRIPT="$TMP/bin/groom-eligibility.sh"
+    export AUTOSPEC_GROOM_CONFIG_SCRIPT="$TMP/bin/groom-config.sh"
 }
 
 teardown() {
@@ -86,10 +144,10 @@ teardown() {
     ! grep -q 'issue edit' "$GH_LOG"
 }
 
-# ── Double-gate: --apply alone (no env) stays report-only ──────────────────────
+# ── Policy gate: --apply with policy off stays report-only ─────────────────────
 
-@test "apply flag without env opt-in stays report-only (double gate)" {
-    run bash "$SCRIPT" --repo owner/repo --apply
+@test "apply flag with policy off stays report-only" {
+    AUTOSPEC_GROOMING_POLICY=off run bash "$SCRIPT" --repo owner/repo --apply
     [ "$status" -eq 0 ]
     echo "$output" | jq -e . >/dev/null
     [ "$(echo "$output" | jq -r '.dry')" = "true" ]
@@ -97,8 +155,8 @@ teardown() {
     ! grep -q 'issue edit' "$GH_LOG"
 }
 
-@test "env opt-in without --apply stays report-only (double gate)" {
-    AUTOSPEC_PROMOTE_OPEN_ISSUES_APPLY=1 run bash "$SCRIPT" --repo owner/repo
+@test "policy auto without --apply stays report-only" {
+    AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo owner/repo
     [ "$status" -eq 0 ]
     [ "$(echo "$output" | jq -r '.dry')" = "true" ]
     [ "$(echo "$output" | jq -r '.filed')" = "0" ]
@@ -108,7 +166,7 @@ teardown() {
 # ── Apply mode enabled (both gates) ────────────────────────────────────────────
 
 @test "apply mode enabled promotes the candidate with correct label mutations" {
-    AUTOSPEC_PROMOTE_OPEN_ISSUES_APPLY=1 run bash "$SCRIPT" --repo owner/repo --apply
+    AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo owner/repo --apply
     [ "$status" -eq 0 ]
     echo "$output" | jq -e . >/dev/null
     [ "$(echo "$output" | jq -r '.dry')" = "false" ]
@@ -136,7 +194,7 @@ teardown() {
   {"number": 205, "title": "already queued", "labels": [{"name": "needs-classify"},{"name": "auto-implement"}], "body": "A sufficiently long body that easily clears the eighty character minimum threshold for promotion selection."}
 ]
 EOF
-    AUTOSPEC_PROMOTE_OPEN_ISSUES_APPLY=1 run bash "$SCRIPT" --repo owner/repo --apply
+    AUTOSPEC_GROOMING_POLICY=auto run bash "$SCRIPT" --repo owner/repo --apply
     [ "$status" -eq 0 ]
     echo "$output" | jq -e . >/dev/null
     # Nothing promoted; nothing mutated.

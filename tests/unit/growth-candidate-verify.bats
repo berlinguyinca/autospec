@@ -31,7 +31,7 @@ echo "$TMP/c.json"; }
   [ -z "$output" ]
   [ "$(wc -l < "$GROWTH_LEDGER" | tr -d ' ')" -eq 1 ]
   run bash "$LG" --show --json
-  [[ "$output" == *'"outcome":"refuted"'* ]]
+  [ "$(printf '%s\n' "$output" | jq -r '.[0].outcome')" = "refuted" ]
   [[ "$output" == *'off-topic'* ]]
 }
 
