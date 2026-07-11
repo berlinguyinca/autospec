@@ -334,6 +334,27 @@ check_gap_remediation_section() {
     done
 }
 
+
+# Autospec gap miner contract (issue #1468): deterministic self-improvement
+# gaps must be extracted, deduped, label-shaped, and ledgered before filing.
+check_autospec_gap_miner_contract() {
+    info "autospec gap miner contract"
+    [ -x scripts/autospec-gap-miner.sh ] \
+        || fail "scripts/autospec-gap-miner.sh missing or not executable"
+    [ -f docs/memory/autospec-gap-ledger.md ] \
+        || fail "docs/memory/autospec-gap-ledger.md missing"
+    grep -q 'autospec-gap-miner.sh' skills/autospec-run/SKILL.md \
+        || fail "autospec-run SKILL.md missing gap miner closeout invocation"
+    grep -q 'autospec-gap-miner.sh' skills/autospec-run/codex/prompt.md \
+        || fail "autospec-run codex prompt missing gap miner closeout invocation"
+    grep -q 'autospec-gap-miner.sh' skills/autospec-run/opencode/agent.md \
+        || fail "autospec-run opencode agent missing gap miner closeout invocation"
+    grep -q 'tests/validate-autospec-gap-miner.sh' scripts/validate.sh \
+        || fail "scripts/validate.sh missing gap miner test registration"
+    bash -n scripts/autospec-gap-miner.sh
+    bash tests/validate-autospec-gap-miner.sh
+}
+
 # Remediation-mode invariants (issue #535, dep #533): the autospec-review trio
 # must carry a `## Remediation mode` heading in all three trio files
 # (SKILL.md, opencode/agent.md, codex/prompt.md) so the broad-review/gap-emit
@@ -1486,6 +1507,58 @@ check_phase4_full_test_suite_gate() {
         grep -q 'Record the exact full-suite command and passing output summary' "$f" \
             || fail "$f missing verification evidence requirement"
     done
+}
+
+
+# Data-scope reviewer lens (issue #1466): diagnostic endpoints with optional
+# filters must not widen empty or unsupported filters into unrelated records.
+check_data_scope_review_lens() {
+    info "data-scope reviewer lens: autospec + autospec-run trios"
+    for f in \
+        skills/autospec/SKILL.md \
+        skills/autospec/codex/prompt.md \
+        skills/autospec/opencode/agent.md \
+        skills/autospec-run/SKILL.md \
+        skills/autospec-run/codex/prompt.md \
+        skills/autospec-run/opencode/agent.md
+    do
+        grep -q 'data-scope invariant lens' "$f" \
+            || fail "$f missing data-scope invariant lens"
+        grep -q 'empty optional filters reject unless documented' "$f" \
+            || fail "$f missing empty optional filter rejection requirement"
+        grep -q 'unsupported-filter' "$f" \
+            || fail "$f missing unsupported-filter evidence requirement"
+        grep -q 'empty-filter' "$f" \
+            || fail "$f missing empty-filter evidence requirement"
+        grep -q 'job-only' "$f" \
+            || fail "$f missing job-only evidence requirement"
+        grep -q 'sample-only' "$f" \
+            || fail "$f missing sample-only evidence requirement"
+        grep -q 'job+sample' "$f" \
+            || fail "$f missing job+sample evidence requirement"
+    done
+}
+
+# Phase 4 final quality gate (issue #1469): autospec-run must discover and run
+# repository-specific full-workspace quality checks after the final full suite
+# and before autonomous admin merge. Rust workspaces specifically require
+# clippy across the workspace/all targets with warnings denied.
+check_phase4_final_quality_gate() {
+    info "phase4 final quality gate: autospec-run trio"
+    local bats_file="tests/unit/test_final_quality_gate.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing (issue #1469)"
+    for f in         skills/autospec-run/SKILL.md         skills/autospec-run/codex/prompt.md         skills/autospec-run/opencode/agent.md
+    do
+        grep -q 'Final quality gate' "$f"             || fail "$f missing Final quality gate section (issue #1469)"
+        grep -q 'cargo clippy --workspace --all-targets -- -D warnings' "$f"             || fail "$f missing Rust workspace clippy command (issue #1469)"
+        grep -q 'FINAL_QUALITY_GATE_FAILED' "$f"             || fail "$f missing final gate failure marker (issue #1469)"
+        grep -q '`crate`, `file`, `line`, and `rule` fields' "$f"             || fail "$f missing required failure fields (issue #1469)"
+        grep -q 'Do NOT run `gh pr merge` while the final quality gate is failing' "$f"             || fail "$f missing merge block on failing final quality gate (issue #1469)"
+    done
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-final-quality-gate.log 2>&1             || { cat /tmp/validate-final-quality-gate.log >&2; fail "$bats_file: failed"; }
+    fi
 }
 
 # Phase 4 cost-epic parity (issue #971): the cost-efficiency epic (#937) D1
@@ -3116,6 +3189,21 @@ run_skill_set() {
     fi
 }
 
+# Issue #1464: CI status comparison must remain available to distinguish
+# inherited base-branch check rot from branch-caused PR failures.
+check_phase4_ci_status_compare() {
+    info "phase4 CI status compare: helper + smoke coverage (issue #1464)"
+    local helper="scripts/ci-status-compare.sh"
+    local smoke="tests/smoke/ci-status-compare.sh"
+    [ -f "$helper" ] || fail "$helper: missing (issue #1464)"
+    [ -x "$helper" ] || fail "$helper: not executable (issue #1464)"
+    bash -n "$helper" || fail "$helper: bash syntax error (issue #1464)"
+    [ -f "$smoke" ] || fail "$smoke: missing (issue #1464)"
+    bash -n "$smoke" || fail "$smoke: bash syntax error (issue #1464)"
+    bash "$smoke" >/tmp/validate-ci-status-compare.log 2>&1 \
+        || { cat /tmp/validate-ci-status-compare.log >&2; fail "$smoke: failed (issue #1464)"; }
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -3152,6 +3240,7 @@ main() {
     check_stop_mode_section
     check_keyword_routing_section
     check_gap_remediation_section
+    check_autospec_gap_miner_contract
     check_review_remediation_section
     check_enforcement_defaults_section
     check_codex_skills_install
@@ -3179,6 +3268,7 @@ main() {
     check_usage_limit_helper
     check_supersession_contract
     check_grooming_contract
+    check_run_groom_preflight_contract
     check_ship_completeness
     check_phase4_guardian_block_lockstep
     check_phase1_bounded_context_contract
@@ -3188,6 +3278,9 @@ main() {
     check_phase4_single_agent_discipline
     check_phase4_adaptive_retry
     check_phase4_full_test_suite_gate
+    check_data_scope_review_lens
+    check_phase4_final_quality_gate
+    check_phase4_ci_status_compare
     check_phase4_cost_epic_parity_lockstep
     check_docs_drift_gate_regen_conditional_parity
     check_worktree_ladder_assert_parity
@@ -5223,6 +5316,29 @@ check_grooming_contract() {
                 || { cat "/tmp/validate-grooming-$name.log" >&2; fail "$f: failed"; }
         fi
     done
+}
+
+check_run_groom_preflight_contract() {
+    info "autospec-run: backlog grooming preflight helper + explicit bats gate"
+    local helper="skills/autospec-run/scripts/run-groom-preflight.sh"
+    local bats_file="tests/unit/test_run_groom_preflight.bats"
+
+    [ -f "$helper" ] || fail "$helper: missing"
+    bash -n "$helper" || fail "$helper: bash syntax error"
+    [ -f "$bats_file" ] || fail "$bats_file: missing"
+
+    grep -q 'Backlog grooming preflight' skills/autospec-run/SKILL.md \
+        || fail "skills/autospec-run/SKILL.md: missing Backlog grooming preflight prose"
+    grep -q 'double gate' skills/autospec-run/SKILL.md \
+        || fail "skills/autospec-run/SKILL.md: missing double gate prose"
+    grep -q 'no discovery' skills/autospec-run/SKILL.md \
+        || fail "skills/autospec-run/SKILL.md: missing no discovery prose"
+
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-run-groom-preflight.log 2>&1 \
+            || { cat /tmp/validate-run-groom-preflight.log >&2; fail "$bats_file: failed"; }
+    fi
 }
 
 main "$@"
