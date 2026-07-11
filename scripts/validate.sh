@@ -3168,6 +3168,21 @@ run_skill_set() {
     fi
 }
 
+# Issue #1464: CI status comparison must remain available to distinguish
+# inherited base-branch check rot from branch-caused PR failures.
+check_phase4_ci_status_compare() {
+    info "phase4 CI status compare: helper + smoke coverage (issue #1464)"
+    local helper="scripts/ci-status-compare.sh"
+    local smoke="tests/smoke/ci-status-compare.sh"
+    [ -f "$helper" ] || fail "$helper: missing (issue #1464)"
+    [ -x "$helper" ] || fail "$helper: not executable (issue #1464)"
+    bash -n "$helper" || fail "$helper: bash syntax error (issue #1464)"
+    [ -f "$smoke" ] || fail "$smoke: missing (issue #1464)"
+    bash -n "$smoke" || fail "$smoke: bash syntax error (issue #1464)"
+    bash "$smoke" >/tmp/validate-ci-status-compare.log 2>&1 \
+        || { cat /tmp/validate-ci-status-compare.log >&2; fail "$smoke: failed (issue #1464)"; }
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -3243,6 +3258,7 @@ main() {
     check_phase4_full_test_suite_gate
     check_data_scope_review_lens
     check_phase4_final_quality_gate
+    check_phase4_ci_status_compare
     check_phase4_cost_epic_parity_lockstep
     check_docs_drift_gate_regen_conditional_parity
     check_worktree_ladder_assert_parity

@@ -1169,8 +1169,35 @@ inline label-swap path below.
 >            bad=$(printf '%s' "$rollup" | jq --arg adv "$adv" '[.[] | select((((.name // .context // "") as $n | $n != "" and ($n | test($adv)))) | not) | select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED")] | length')
 >            total=$(printf '%s' "$rollup" | jq 'length')
 >            if [ "$bad" != "0" ]; then
->                gh issue comment <ISSUE> --body "PR #<PR>: a required check failed after rebase-and-retest. Pausing for operator review."
->                exit 1
+>                # Distinguish inherited base-branch CI rot from branch-caused failures
+>                # before blocking. Capture both rollups as merge evidence, then let
+>                # ci-status-compare.sh emit classification plus blocked_branch and
+>                # blocked_inherited arrays for the PR comment/final report.
+>                base_ref=$(gh pr view <PR> --json baseRefName --jq .baseRefName)
+>                head_checks="/tmp/autospec-ci-head-<PR>.json"
+>                base_checks="/tmp/autospec-ci-base-<PR>.json"
+>                compare_json="/tmp/autospec-ci-compare-<PR>.json"
+>                printf '%s\n' "$rollup" > "$head_checks"
+>                gh run list --branch "$base_ref" --limit 20 --json name,conclusion,status,url \
+>                  | jq '[.[] | {name, conclusion, status, detailsUrl: .url}]' > "$base_checks"
+>                bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ci-status-compare.sh" \
+>                  --head "$head_checks" --base "$base_checks" > "$compare_json"
+>                classification=$(jq -r '.classification' "$compare_json")
+>                target_url=$(jq -r '.target_url // ""' "$compare_json")
+>                case "$classification" in
+>                  inherited)
+>                    gh issue comment <ISSUE> --body "PR #<PR>: required checks are red, but ci-status-compare classified them as inherited base-branch CI rot (blocked_inherited). Merge evidence: ${target_url:-see attached rollup}; compare artifact: \`$compare_json\`. Pausing for operator review instead of marking the branch broken."
+>                    exit 1
+>                    ;;
+>                  branch_caused)
+>                    gh issue comment <ISSUE> --body "PR #<PR>: required checks failed and ci-status-compare classified them as branch-caused (blocked_branch). Merge evidence: ${target_url:-see attached rollup}; compare artifact: \`$compare_json\`."
+>                    exit 1
+>                    ;;
+>                  *)
+>                    gh issue comment <ISSUE> --body "PR #<PR>: required checks looked bad but ci-status-compare returned \`$classification\`; pausing for operator review. Compare artifact: \`$compare_json\`."
+>                    exit 1
+>                    ;;
+>                esac
 >            fi
 >            if [ "$total" != "0" ] && [ "$pending" = "0" ]; then return 0; fi
 >            sleep 30
