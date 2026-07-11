@@ -6,12 +6,20 @@ setup() {
   export HOME="$TEST_TMP/home"
   export AUTOSPEC_CONFIG_FILE="$TEST_TMP/missing-autospec.yml"
   mkdir -p "$HOME" "$TEST_TMP/bin"
-  rm -rf /tmp/autospec-run-1838
+  cleanup_closeout_fixture
+}
+
+cleanup_closeout_fixture() {
+  closeout_dir="/tmp/autospec-run-1838"
+  if [ "$closeout_dir" = "/tmp/autospec-run-1838" ]; then
+    find "$closeout_dir" -mindepth 1 -delete 2>/dev/null || true
+    rmdir "$closeout_dir" 2>/dev/null || true
+  fi
 }
 
 teardown() {
   rm -rf "$TEST_TMP"
-  rm -rf /tmp/autospec-run-1838
+  cleanup_closeout_fixture
 }
 
 @test "run-drain: exits when omx child makes no progress past stall timeout" {
