@@ -653,6 +653,25 @@ maybe_prompt_db_module() {
         return 0
     fi
 
+    # yaml-first gate (#1776 resolver): telemetry.install.db_module in
+    # .autospec/autospec.yml, with AUTOSPEC_INSTALL_DB_MODULE as an env
+    # override (env beats yaml in both directions) and "prompt" as the
+    # built-in default. Resolver script absent -> byte-identical legacy
+    # behavior (fall through to the installed/prompt logic below).
+    db_module_telemetry_config_sh="$REPO_ROOT/skills/autospec-shared/scripts/telemetry-config.sh"
+    if [ -f "$db_module_telemetry_config_sh" ]; then
+        db_module_mode="$(bash "$db_module_telemetry_config_sh" --key install.db_module 2>/dev/null || printf 'prompt')"
+        case "$db_module_mode" in
+            never)
+                return 0
+                ;;
+            always)
+                install_db_module
+                return 0
+                ;;
+        esac
+    fi
+
     if [ "$autospec_db_installed" -eq 1 ]; then
         install_db_module
         return 0

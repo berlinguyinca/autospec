@@ -141,3 +141,74 @@ write_db_prompt_runner() {
     grep -q 'check_db_module_install' "$REPO_ROOT/scripts/validate.sh"
     grep -q 'tests/unit/install-db-module.bats' "$REPO_ROOT/scripts/validate.sh"
 }
+
+@test "install-db-module: yaml db_module=never yields no fetch and no question" {
+    mkdir -p "$FAKE_HOME/cfg"
+    cat > "$FAKE_HOME/cfg/autospec.yml" <<'YAML'
+telemetry:
+  install:
+    db_module: never
+YAML
+    export AUTOSPEC_CONFIG_FILE="$FAKE_HOME/cfg/autospec.yml"
+    export UPDATE=1
+    run bash "$RUNNER"
+    [ "$status" -eq 0 ]
+    [ ! -f "$LOG" ]
+    [[ "$output" != *"Install the optional database telemetry module"* ]]
+}
+
+@test "install-db-module: yaml db_module=always invokes without a question" {
+    mkdir -p "$FAKE_HOME/cfg"
+    cat > "$FAKE_HOME/cfg/autospec.yml" <<'YAML'
+telemetry:
+  install:
+    db_module: always
+YAML
+    export AUTOSPEC_CONFIG_FILE="$FAKE_HOME/cfg/autospec.yml"
+    run bash "$RUNNER"
+    [ "$status" -eq 0 ]
+    grep -q 'autospec-db installer ran' "$LOG"
+    [[ "$output" != *"Install the optional database telemetry module"* ]]
+}
+
+@test "install-db-module: AUTOSPEC_INSTALL_DB=0 env override beats yaml always" {
+    mkdir -p "$FAKE_HOME/cfg"
+    cat > "$FAKE_HOME/cfg/autospec.yml" <<'YAML'
+telemetry:
+  install:
+    db_module: always
+YAML
+    export AUTOSPEC_CONFIG_FILE="$FAKE_HOME/cfg/autospec.yml"
+    export AUTOSPEC_INSTALL_DB=0
+    run bash "$RUNNER"
+    [ "$status" -eq 0 ]
+    [ ! -f "$LOG" ]
+}
+
+@test "install-db-module: AUTOSPEC_INSTALL_DB=1 env override beats yaml never" {
+    mkdir -p "$FAKE_HOME/cfg"
+    cat > "$FAKE_HOME/cfg/autospec.yml" <<'YAML'
+telemetry:
+  install:
+    db_module: never
+YAML
+    export AUTOSPEC_CONFIG_FILE="$FAKE_HOME/cfg/autospec.yml"
+    export AUTOSPEC_INSTALL_DB=1
+    run bash "$RUNNER"
+    [ "$status" -eq 0 ]
+    grep -q 'autospec-db installer ran' "$LOG"
+}
+
+@test "install-db-module: resolver absent keeps current default behavior (suite unchanged-green)" {
+    TELEMETRY_CFG="$REPO_ROOT/skills/autospec-shared/scripts/telemetry-config.sh"
+    TELEMETRY_CFG_BAK="$FAKE_HOME/telemetry-config.sh.bak"
+    mv "$TELEMETRY_CFG" "$TELEMETRY_CFG_BAK"
+    export AUTOSPEC_NO_DB_PROMPT=1
+    run bash "$RUNNER"
+    status_val="$status"
+    output_val="$output"
+    mv "$TELEMETRY_CFG_BAK" "$TELEMETRY_CFG"
+    [ "$status_val" -eq 0 ]
+    [ ! -f "$LOG" ]
+    [[ "$output_val" != *"Install the optional database telemetry module"* ]]
+}
