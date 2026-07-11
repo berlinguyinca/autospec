@@ -64,6 +64,22 @@ This criterion is prose, not a checkbox.",
 }
 
 #[test]
+fn issue_lint_spaced_checkbox_plus_prose_emits_ac_prose() {
+    let body = valid_issue_body(
+        "Add `IssueQualityRule` fixtures.",
+        "-   [ ] `cargo test issue_lint` passes.
+This criterion is prose, not a checkbox.",
+        "cargo test issue_lint",
+    );
+
+    let findings = lint_issue_body(&body);
+
+    assert!(findings
+        .iter()
+        .any(|finding| finding.rule == IssueQualityRule::AcProse));
+}
+
+#[test]
 fn issue_lint_prose_only_acceptance_criteria_does_not_emit_ac_prose() {
     let body = valid_issue_body(
         "Add `IssueQualityRule` fixtures.",
