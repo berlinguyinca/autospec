@@ -48,16 +48,30 @@ fn issue_lint_missing_goal_emits_goal_not_one_sentence() {
 }
 
 #[test]
-fn issue_lint_non_checkbox_acceptance_criteria_emits_ac_prose() {
+fn issue_lint_mixed_non_checkbox_acceptance_criteria_emits_ac_prose() {
     let body = valid_issue_body(
         "Add `IssueQualityRule` fixtures.",
-        "This criterion is prose, not a checkbox.",
+        "- [ ] `cargo test issue_lint` passes.
+This criterion is prose, not a checkbox.",
         "cargo test issue_lint",
     );
 
     let findings = lint_issue_body(&body);
 
     assert!(findings
+        .iter()
+        .any(|finding| finding.rule == IssueQualityRule::AcProse));
+}
+
+#[test]
+fn issue_lint_prose_only_acceptance_criteria_does_not_emit_ac_prose() {
+    let body = valid_issue_body(
+        "Add `IssueQualityRule` fixtures.",
+        "This shell-parity prose-only block is handled by `AC_EMPTY` later.",
+        "cargo test issue_lint",
+    );
+
+    assert!(!lint_issue_body(&body)
         .iter()
         .any(|finding| finding.rule == IssueQualityRule::AcProse));
 }
