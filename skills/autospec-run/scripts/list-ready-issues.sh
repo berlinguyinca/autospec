@@ -305,7 +305,12 @@ release_startup_claim_if_stale() {
         return 1
     fi
     if [ -x "$RUN_STATE" ]; then
-        "$RUN_STATE" clear --issue "$issue_number" --repo "$repo" >/dev/null 2>&1 || true
+        if ! "$RUN_STATE" clear --issue "$issue_number" --repo "$repo" >/dev/null 2>&1; then
+            gh issue edit "$issue_number" --repo "$repo" \
+                --remove-label auto-implement \
+                --add-label in-progress-by-bot >/dev/null 2>&1 || true
+            return 1
+        fi
     fi
     return 0
 }

@@ -86,6 +86,9 @@ case "\$sub" in
     fi
     if [ "\${1:-}" = "api" ] && [ "\${2:-}" = "repos/test/repo/issues/comments/10" ]; then
       printf '%s\n' "\$*" >> "\$TMPDIR_BATS/clear.log"
+      if [ "\${RUN_STATE_CLEAR_FAIL:-0}" = "1" ]; then
+        exit 1
+      fi
       exit 0
     fi
     printf '[]\n'
@@ -168,4 +171,14 @@ run_list_ready() {
     [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | join(",")')" = "1858" ]
     grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$TMPDIR_BATS/edit.log"
     [ ! -s "$TMPDIR_BATS/clear.log" ]
+}
+
+@test "failed run-state clear rolls labels back and preserves claimed issue" {
+    RUN_STATE_CLEAR_FAIL=1 AUTOSPEC_GH_API_RETRIES=1 run run_list_ready
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | join(",")')" = "1858" ]
+    grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$TMPDIR_BATS/edit.log"
+    grep -q -- '--remove-label auto-implement --add-label in-progress-by-bot' "$TMPDIR_BATS/edit.log"
+    grep -q -- '^api repos/test/repo/issues/comments/10 -X DELETE' "$TMPDIR_BATS/clear.log"
 }
