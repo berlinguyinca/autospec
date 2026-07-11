@@ -154,22 +154,25 @@ SH
 }
 
 @test "heartbeat write emit never alters the write's exit code or stdout when telemetry is disabled" {
-  export AUTOSPEC_ACTIVE_RUNS_DIR="$TMP/active-runs-disabled"
+  # Same AUTOSPEC_ACTIVE_RUNS_DIR for both runs so the printed path is
+  # byte-for-byte comparable, not just similarly shaped.
+  export AUTOSPEC_ACTIVE_RUNS_DIR="$TMP/active-runs"
+
   run bash "$REGISTRY" write --repo o/n --repo-dir /abs/checkout --harness claude --command "echo hi" --host h1
   disabled_status="$status"
   disabled_output="$output"
 
   _enable_emit
-  export AUTOSPEC_ACTIVE_RUNS_DIR="$TMP/active-runs-enabled"
+  export AUTOSPEC_ACTIVE_RUNS_DIR="$TMP/active-runs"
   run bash "$REGISTRY" write --repo o/n --repo-dir /abs/checkout --harness claude --command "echo hi" --host h1
   enabled_status="$status"
   enabled_output="$output"
 
-  # Both must resolve to the same registry path shape; the write's own
-  # observable contract (exit code + printed path) is unaffected by whether
-  # telemetry is wired in or fully no-opped.
+  # The write's own observable contract (exit code + printed path) is
+  # byte-identical whether telemetry is wired in and enabled, or fully
+  # no-opped (disabled/absent DSN).
   [ "$disabled_status" -eq "$enabled_status" ]
-  [[ "$disabled_output" == *"/o__n.json" ]]
+  [ "$disabled_output" = "$enabled_output" ]
   [[ "$enabled_output" == *"/o__n.json" ]]
 }
 
