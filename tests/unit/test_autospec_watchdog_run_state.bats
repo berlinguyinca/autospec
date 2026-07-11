@@ -84,6 +84,27 @@ if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
   exit 0
 fi
 
+if [ "$1" = "api" ]; then
+  path="$2"
+  method="GET"
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -X) method="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "$path $method" in
+    repos/testorg/testrepo/issues/comments/*\ DELETE)
+      id="${path##*/}"
+      jq --argjson id "$id" '[.[] | select((.id // -1) != $id)]' "${COMMENTS:?}" > "${COMMENTS}.tmp"
+      mv "${COMMENTS}.tmp" "${COMMENTS}"
+      exit 0
+      ;;
+  esac
+  exit 0
+fi
+
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   cat "$PR_STATE"
   exit 0
@@ -283,6 +304,36 @@ state_comment_obj() {
 # Tests mirror the F1+F2+F3 pattern: heartbeat step="implementing", threshold
 # overridden small, and STALE_SECS set below RECLAIM_SECS so the age=360 hb
 # reaches the reclaim branch (not the "too fresh" early-continue).
+
+
+@test "issue 1779: two watchdog reclaims clear stale run-state before the next queue read" {
+    isolate_heartbeat_pass
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=3600
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    stale="$(date -u -v-2H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '2 hours ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    write_hb 1779 expand_start 7200
+    jq -n --argjson comment "$(state_comment_obj 1779 expand_start "$stale" "oldhost:me:shell:1779" "2020-01-01T00:00:00Z" 177900)" '[$comment]' > "$COMMENTS"
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=1"* ]]
+    [ ! -f "$(HB_DIR_FOR)/1779.json" ]
+    run jq '[.[] | select(.number == 1779 and ((.body // "") | contains("autospec-run-state:begin")))] | length' "$COMMENTS"
+    [ "$output" = "0" ]
+
+    # A second consecutive reclaim attempt for the same issue must not observe
+    # or report the old worker_id after the first pass cleared the stale lease.
+    printf 'OPEN in-progress-by-bot\n' > "$LABELS"
+    write_hb 1779 expand_start 7200
+    : > "$CALLS"
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=1"* ]]
+    [ ! -f "$(HB_DIR_FOR)/1779.json" ]
+    ! grep -q 'oldhost:me:shell:1779' "$CALLS"
+}
 
 @test "F5: live same-host pid on non-claimed step past 3h is NOT reclaimed" {
     isolate_heartbeat_pass
