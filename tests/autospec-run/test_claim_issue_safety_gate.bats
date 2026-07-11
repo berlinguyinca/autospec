@@ -267,3 +267,33 @@ EOF
     [ "$(echo "$output" | jq -r '.safety_gate.reason')" = "current_body_safety_block" ]
     [ ! -s "$FIXTURE_DIR/edit.log" ]
 }
+
+@test "claim accepts generated safety metadata followed by guardian skip metadata" {
+    body="$(cat <<'EOF'
+## Goal
+
+Add `scripts/ci-status-compare.sh` so autospec classifies PR check failures as inherited from base or branch-caused.
+
+## Safety review
+
+<!-- autospec-safety:begin -->
+- **decision:** `SAFETY_PASS`
+<!-- autospec-safety:end -->
+
+- **trust:** `untrusted`
+- **matched rules:** `none`
+- **reason:** no blocking or ambiguous patterns matched
+
+*Auto-reviewed by issue intent safety gate on 2026-07-11.*
+
+Guardian: skip-OUT_OF_SCOPE, skip-COMPLEXITY # lock-step mirrors/goldens are mechanically required for autospec-run SKILL.md edits
+EOF
+)"
+    write_issue "$body" '[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
+
+    run run_claim
+
+    [ "$status" -eq 2 ]
+    [ "$(echo "$output" | jq -r '.reason')" = "label_mutation_failed" ]
+    grep -q -- "--remove-label auto-implement --add-label in-progress-by-bot" "$FIXTURE_DIR/edit.log"
+}

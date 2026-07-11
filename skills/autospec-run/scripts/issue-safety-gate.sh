@@ -29,6 +29,7 @@ autospec_issue_safety_gate_result() {
     ISSUE_JSON="$issue_json" AUTOSPEC_ISSUE_SAFETY_LINTER="$linter_path" python3 - <<'PY'
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -124,6 +125,11 @@ author = issue.get("author") or {}
 actor = author.get("login") if isinstance(author, dict) else ""
 actor = str(actor or "")
 body_without_review = body[:heading_start] + body[end + len(END):]
+body_without_review = "\n".join(
+    line
+    for line in body_without_review.splitlines()
+    if not re.match(r"^Guardian:\s+skip-[A-Z_]+(?:,\s*skip-[A-Z_]+)*\s+#\s+\S.+$", line)
+)
 with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
     handle.write(body_without_review)
     body_file = handle.name
