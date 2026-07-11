@@ -42,6 +42,31 @@ while IFS= read -r line; do
     continue
   fi
 
+  # Telemetry (issue #1774): fire-and-forget feature.described emit after a
+  # successful file. Guarded source (absent shim/binary/DSN is a silent
+  # no-op) and wrapped so nothing here can ever alter this script's exit
+  # code — filing is authoritative, telemetry is best-effort. The full issue
+  # body is passed as a single emit_event argument, bound (never spliced
+  # into query text) by the binary's ingest() call.
+  {
+    _gdfi_h="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+    if [ -f "$_gdfi_h/emit-event.sh" ]; then
+      # shellcheck source=/dev/null
+      . "$_gdfi_h/emit-event.sh"
+      _gdfi_remote="$(git config --get remote.origin.url 2>/dev/null || true)"
+      case "$_gdfi_remote" in
+        git@github.com:*)       _gdfi_repo="${_gdfi_remote#git@github.com:}" ;;
+        https://github.com/*)   _gdfi_repo="${_gdfi_remote#https://github.com/}" ;;
+        ssh://git@github.com/*) _gdfi_repo="${_gdfi_remote#ssh://git@github.com/}" ;;
+        *) _gdfi_repo="" ;;
+      esac
+      _gdfi_repo="${_gdfi_repo%.git}"
+      if [ -n "$_gdfi_repo" ]; then
+        emit_event feature.described repo="$_gdfi_repo" issue="$num" detail="$body"
+      fi
+    fi
+  } || true
+
   ledline="$(jq -n --arg s "$lens" --arg t "$title" --arg n "$norm" \
      --arg c "$channel" --arg k "$kind" --argjson i "$num" \
      '{round:1,source:$s,title:$t,norm_title:$n,channel:$c,kind:$k,issue:$i,outcome:"pending",reason:"",ts:"1970-01-01T00:00:00Z"}')"

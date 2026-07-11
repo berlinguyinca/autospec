@@ -354,6 +354,233 @@ _repo_cwd() {
   [ "$disabled_ledger" = "$enabled_ledger" ]
 }
 
+# ── chokepoint: scripts/claim-guard.sh (issue #1774) ────────────────────────
+# ── chokepoint: skills/autospec-shared/scripts/grow-define-file-issues.sh (issue #1774) ──
+#
+# claim-guard resolves the shim at the installed-runtime path and stamps
+# surface= from the raw target args; grow-define-file-issues.sh resolves it
+# the same way and stamps repo= via a local-only git remote lookup (no
+# network call, mirroring explore-ledger/growth-ledger). claim-guard's own
+# state is redirected under AUTOSPEC_STATE_DIR so no test ever touches a
+# real ~/.autospec/edit-claims store.
+
+CLAIM_GUARD_SH="$REPO_ROOT/scripts/claim-guard.sh"
+GROW_DEFINE_FILE_ISSUES_SH="$REPO_ROOT/skills/autospec-shared/scripts/grow-define-file-issues.sh"
+
+_claim_state_dir() {
+  AUTOSPEC_STATE_DIR="$TMP/claim-state"
+  mkdir -p "$AUTOSPEC_STATE_DIR"
+  export AUTOSPEC_STATE_DIR
+}
+
+# _install_gh_issue_stub: minimal `gh` stub for grow-define-file-issues.sh —
+# `gh label create` no-ops, `gh issue create` always succeeds and returns a
+# fixed issue URL (#501).
+_install_gh_issue_stub() {
+  cat > "$TMP/bin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "label" ]; then exit 0; fi
+if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+  echo "https://github.com/o/n/issues/501"
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$TMP/bin/gh"
+}
+
+@test "claim-guard acquire emits exactly one claim event with conflict=false" {
+  _enable_emit
+  _claim_state_dir
+  export AUTOSPEC_SESSION_ID="session-a"
+  export AUTOSPEC_CLAIM_GUARD=strict
+
+  run bash "$CLAIM_GUARD_SH" acquire scripts/foo.sh
+  [ "$status" -eq 0 ]
+
+  [ -f "$BIN_LOG" ]
+  [ "$(wc -l < "$BIN_LOG" | tr -d ' ')" -eq 1 ]
+  run cat "$BIN_LOG"
+  [[ "$output" == *"emit claim"* ]]
+  [[ "$output" == *"surface=scripts/foo.sh"* ]]
+  [[ "$output" == *"conflict=false"* ]]
+}
+
+@test "claim-guard release emits exactly one claim event" {
+  _enable_emit
+  _claim_state_dir
+  export AUTOSPEC_SESSION_ID="session-a"
+  export AUTOSPEC_CLAIM_GUARD=strict
+
+  bash "$CLAIM_GUARD_SH" acquire scripts/foo.sh >/dev/null
+  : > "$BIN_LOG"   # only assert on release's emit
+  run bash "$CLAIM_GUARD_SH" release scripts/foo.sh
+  [ "$status" -eq 0 ]
+
+  [ "$(wc -l < "$BIN_LOG" | tr -d ' ')" -eq 1 ]
+  run cat "$BIN_LOG"
+  [[ "$output" == *"emit claim"* ]]
+  [[ "$output" == *"surface=scripts/foo.sh"* ]]
+}
+
+@test "claim-guard acquire conflict emits claim event with conflict=true" {
+  _enable_emit
+  _claim_state_dir
+
+  AUTOSPEC_SESSION_ID="session-a" AUTOSPEC_CLAIM_GUARD=strict \
+    bash "$CLAIM_GUARD_SH" acquire scripts/foo.sh >/dev/null
+
+  : > "$BIN_LOG"   # only assert on the CONFLICTING session's emit
+  export AUTOSPEC_SESSION_ID="session-b"
+  export AUTOSPEC_CLAIM_GUARD=strict
+  run bash "$CLAIM_GUARD_SH" acquire scripts/foo.sh
+  [ "$status" -eq 6 ]
+
+  [ "$(wc -l < "$BIN_LOG" | tr -d ' ')" -eq 1 ]
+  run cat "$BIN_LOG"
+  [[ "$output" == *"emit claim"* ]]
+  [[ "$output" == *"conflict=true"* ]]
+}
+
+@test "a present-but-broken shim never alters claim-guard's exit code" {
+  # Regression (peer review, issue #1774): sourcing a shim that returns
+  # non-zero under claim-guard's `set -e` must not change acquire/release
+  # exit status — the source+emit block is wrapped in `{ ... } || true`.
+  _claim_state_dir
+  mkdir -p "$TMP/scripts"
+  printf 'return 7\n' > "$TMP/scripts/emit-event.sh"
+  export AUTOSPEC_SCRIPTS_DIR="$TMP/scripts"
+  export AUTOSPEC_SESSION_ID="session-a"
+  export AUTOSPEC_CLAIM_GUARD=strict
+
+  run bash "$CLAIM_GUARD_SH" acquire scripts/foo.sh
+  [ "$status" -eq 0 ]
+  run bash "$CLAIM_GUARD_SH" release scripts/foo.sh
+  [ "$status" -eq 0 ]
+}
+
+@test "unset AUTOSPEC_DB_DSN yields 0 emit-binary calls from claim-guard acquire" {
+  mkdir -p "$TMP/scripts"
+  cp "$SHIM" "$TMP/scripts/emit-event.sh"
+  export AUTOSPEC_SCRIPTS_DIR="$TMP/scripts"
+  export PATH="$TMP/bin:$PATH"
+  _claim_state_dir
+  export AUTOSPEC_SESSION_ID="session-a"
+  export AUTOSPEC_CLAIM_GUARD=strict
+
+  run bash "$CLAIM_GUARD_SH" acquire scripts/foo.sh
+  [ "$status" -eq 0 ]
+  [ ! -s "$BIN_LOG" ]
+}
+
+@test "claim-guard acquire/release emit never alters exit code when telemetry is disabled" {
+  _claim_state_dir
+  export AUTOSPEC_SESSION_ID="session-a"
+  export AUTOSPEC_CLAIM_GUARD=strict
+
+  run bash "$CLAIM_GUARD_SH" acquire scripts/foo.sh
+  disabled_acquire_status="$status"
+  disabled_acquire_output="$output"
+  run bash "$CLAIM_GUARD_SH" release scripts/foo.sh
+  disabled_release_status="$status"
+  disabled_release_output="$output"
+
+  _claim_state_dir
+  _enable_emit
+  export AUTOSPEC_SESSION_ID="session-a"
+  export AUTOSPEC_CLAIM_GUARD=strict
+  run bash "$CLAIM_GUARD_SH" acquire scripts/foo.sh
+  enabled_acquire_status="$status"
+  enabled_acquire_output="$output"
+  run bash "$CLAIM_GUARD_SH" release scripts/foo.sh
+  enabled_release_status="$status"
+  enabled_release_output="$output"
+
+  [ "$disabled_acquire_status" -eq "$enabled_acquire_status" ]
+  [ "$disabled_release_status" -eq "$enabled_release_status" ]
+  [ "$disabled_acquire_output" = "$enabled_acquire_output" ]
+  [ "$disabled_release_output" = "$enabled_release_output" ]
+}
+
+@test "grow-define-file-issues files an issue and emits exactly one feature.described event, body bound not spliced" {
+  _enable_emit
+  _repo_cwd
+  _install_gh_issue_stub
+  export GROWTH_LEDGER="$TMP/growth-ledger-feature.jsonl"
+
+  RANKED="$TMP/ranked.jsonl"
+  CONFIG="$TMP/config.json"
+  printf '{}\n' > "$CONFIG"
+  jq -nc --arg lens l --arg kind artifact --arg channel c --arg title T --arg norm t \
+    --arg rationale "quote's value \$\$ and \\backslash" \
+    '{lens:$lens,kind:$kind,channel:$channel,title:$title,norm_title:$norm,rationale:$rationale}' \
+    > "$RANKED"
+
+  run bash -c "cd '$REPO_DIR' && bash '$GROW_DEFINE_FILE_ISSUES_SH' '$RANKED' '$CONFIG'"
+  [ "$status" -eq 0 ]
+
+  [ -f "$BIN_LOG" ]
+  [ "$(grep -c '^emit feature\.described' "$BIN_LOG")" -eq 1 ]
+
+  expected="detail=Growth artifact (lens: l, channel: c)"
+  run grep -F -- "$expected" "$BIN_LOG"
+  [ "$status" -eq 0 ]
+
+  # The bound body carries the rationale's single quote, literal \$\$, and
+  # backslash byte-for-byte — proof it arrived as one bound argument rather
+  # than being spliced/re-interpreted through a shell or SQL layer.
+  expected_body="quote's value \$\$ and \\backslash"
+  run grep -F -- "$expected_body" "$BIN_LOG"
+  [ "$status" -eq 0 ]
+}
+
+@test "unset AUTOSPEC_DB_DSN yields 0 emit-binary calls from grow-define-file-issues" {
+  mkdir -p "$TMP/scripts"
+  cp "$SHIM" "$TMP/scripts/emit-event.sh"
+  export AUTOSPEC_SCRIPTS_DIR="$TMP/scripts"
+  export PATH="$TMP/bin:$PATH"
+  _repo_cwd
+  _install_gh_issue_stub
+  export GROWTH_LEDGER="$TMP/growth-ledger-feature-nodsn.jsonl"
+
+  RANKED="$TMP/ranked-nodsn.jsonl"
+  CONFIG="$TMP/config-nodsn.json"
+  printf '{}\n' > "$CONFIG"
+  jq -nc --arg lens l --arg kind artifact --arg channel c --arg title T --arg norm t \
+    --arg rationale "r" \
+    '{lens:$lens,kind:$kind,channel:$channel,title:$title,norm_title:$norm,rationale:$rationale}' \
+    > "$RANKED"
+
+  run bash -c "cd '$REPO_DIR' && bash '$GROW_DEFINE_FILE_ISSUES_SH' '$RANKED' '$CONFIG'"
+  [ "$status" -eq 0 ]
+  [ ! -s "$BIN_LOG" ]
+}
+
+@test "no claim or feature.described call-site ever carries the DSN value" {
+  _enable_emit
+  _claim_state_dir
+  export AUTOSPEC_SESSION_ID="session-a"
+  export AUTOSPEC_CLAIM_GUARD=strict
+  bash "$CLAIM_GUARD_SH" acquire scripts/foo.sh >/dev/null
+  bash "$CLAIM_GUARD_SH" release scripts/foo.sh >/dev/null
+
+  _repo_cwd
+  _install_gh_issue_stub
+  export GROWTH_LEDGER="$TMP/growth-ledger-dsn-leak.jsonl"
+  RANKED="$TMP/ranked-dsn-leak.jsonl"
+  CONFIG="$TMP/config-dsn-leak.json"
+  printf '{}\n' > "$CONFIG"
+  jq -nc --arg lens l --arg kind artifact --arg channel c --arg title T --arg norm t \
+    --arg rationale "r" \
+    '{lens:$lens,kind:$kind,channel:$channel,title:$title,norm_title:$norm,rationale:$rationale}' \
+    > "$RANKED"
+  bash -c "cd '$REPO_DIR' && bash '$GROW_DEFINE_FILE_ISSUES_SH' '$RANKED' '$CONFIG'" >/dev/null
+
+  run cat "$BIN_LOG"
+  [[ "$output" != *"postgresql://"* ]]
+  [[ "$output" != *"secret"* ]]
+}
+
 # --- telemetry-config.sh (issue #1776) ---------------------------------
 # yaml resolver mirroring advisor-config.sh: env > yaml > built-in default.
 
