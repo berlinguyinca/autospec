@@ -83,12 +83,18 @@ emit() { printf '%s\n' "$*" >&2; }
 emit_claim_event() {
     _cg_conflict="$1"; shift
     _cg_surface="$*"
-    _cg_h="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
-    if [ -f "$_cg_h/emit-event.sh" ]; then
-        # shellcheck source=/dev/null
-        . "$_cg_h/emit-event.sh"
-        emit_event claim surface="$_cg_surface" conflict="$_cg_conflict" || true
-    fi
+    # The whole source+emit block is wrapped in `{ ... } || true` (mirroring
+    # grow-define-file-issues.sh) so that even a present-but-BROKEN shim —
+    # whose `.` source returns non-zero under this script's `set -e` — can
+    # never alter the caller's exit code.
+    {
+        _cg_h="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+        if [ -f "$_cg_h/emit-event.sh" ]; then
+            # shellcheck source=/dev/null
+            . "$_cg_h/emit-event.sh"
+            emit_event claim surface="$_cg_surface" conflict="$_cg_conflict"
+        fi
+    } || true
     return 0
 }
 

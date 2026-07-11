@@ -442,6 +442,23 @@ SH
   [[ "$output" == *"conflict=true"* ]]
 }
 
+@test "a present-but-broken shim never alters claim-guard's exit code" {
+  # Regression (peer review, issue #1774): sourcing a shim that returns
+  # non-zero under claim-guard's `set -e` must not change acquire/release
+  # exit status — the source+emit block is wrapped in `{ ... } || true`.
+  _claim_state_dir
+  mkdir -p "$TMP/scripts"
+  printf 'return 7\n' > "$TMP/scripts/emit-event.sh"
+  export AUTOSPEC_SCRIPTS_DIR="$TMP/scripts"
+  export AUTOSPEC_SESSION_ID="session-a"
+  export AUTOSPEC_CLAIM_GUARD=strict
+
+  run bash "$CLAIM_GUARD_SH" acquire scripts/foo.sh
+  [ "$status" -eq 0 ]
+  run bash "$CLAIM_GUARD_SH" release scripts/foo.sh
+  [ "$status" -eq 0 ]
+}
+
 @test "unset AUTOSPEC_DB_DSN yields 0 emit-binary calls from claim-guard acquire" {
   mkdir -p "$TMP/scripts"
   cp "$SHIM" "$TMP/scripts/emit-event.sh"
