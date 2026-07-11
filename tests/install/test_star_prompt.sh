@@ -15,7 +15,8 @@
 #      so no read -r is left blocking:
 #        [1] auto-rollover prompt (prompt_user_for_auto_rollover)
 #        [2] Claude-hook-mode prompt (prompt_user_for_auto_rollover)
-#        [3] star prompt (maybe_prompt_star)  ← the reply under test
+#        [3] optional autospec-db prompt (maybe_prompt_db_module)
+#        [4] star prompt (maybe_prompt_star)  ← the reply under test
 #        [n] extra blanks as safety buffer
 #   3. npm and other slow tools are stubbed in fake_bin so the install
 #      completes in seconds without real network activity.
@@ -84,7 +85,8 @@ EOS
 }
 
 # run_install_with_star_reply <star_reply> <output_file> <log_file>
-# Answers: n (rollover), n (hook-mode), <star_reply> (star), + blank buffer.
+# Answers: n (rollover), n (hook-mode), n (autospec-db), <star_reply> (star),
+# + blank buffer.
 # Uses a temp file (not command substitution) so trailing newlines are preserved.
 run_install_with_star_reply() {
     local star_reply="$1" output_file="$2" log_file="$3"
@@ -98,9 +100,10 @@ run_install_with_star_reply() {
 
     # Write answers to a file; printf inside $() would strip trailing newlines,
     # leaving the last read -r in install.sh blocked on the pty (issue #854).
-    # Sequence: [1] n=rollover [2] n=hook-mode [3] <reply>=star [4+] buffer
+    # Sequence: [1] n=rollover [2] n=hook-mode [3] n=autospec-db
+    # [4] <reply>=star [5+] buffer
     ans_file="$tmp_root/answers-$$.txt"
-    printf 'n\nn\n%s\n\n\n\n\n' "$star_reply" > "$ans_file"
+    printf 'n\nn\nn\n%s\n\n\n\n\n' "$star_reply" > "$ans_file"
 
     rc=0
     timeout "$INSTALL_TIMEOUT" script -qfec "$cmd" "$output_file" < "$ans_file" >/dev/null || rc=$?

@@ -1208,6 +1208,7 @@ skills/autospec-run/scripts/fab-route.sh::fab-route.sh \
 skills/autospec-run/scripts/list-ready-issues.sh::list-ready-issues.sh \
 skills/autospec-run/scripts/post-token-report.sh::post-token-report.sh \
 skills/autospec-run/scripts/release-issue.sh::release-issue.sh \
+skills/autospec-run/scripts/run-groom-preflight.sh::run-groom-preflight.sh \
 skills/autospec-resume/scripts/resume-scan.sh::resume-scan.sh \
 skills/autospec-doc/scripts/doc-orchestrator-entry.mjs::doc-orchestrator.mjs \
 skills/autospec-harmonize/scripts/harmonize.sh::harmonize.sh \
@@ -1256,7 +1257,7 @@ skills/autospec-doc/scripts/gen-llms-full.mjs \
 skills/autospec-doc/scripts/verify-examples.mjs"
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] copy_runtime_skill_scripts: would copy 10 per-skill runtime scripts to $autospec_scripts_dir/"
+        info "[dry-run] copy_runtime_skill_scripts: would copy 11 per-skill runtime scripts to $autospec_scripts_dir/"
         info "[dry-run] copy_runtime_skill_scripts: would copy autospec-doc module closure to $(dirname "$autospec_scripts_dir")/skills/autospec-doc/scripts/"
         info "[dry-run] copy_runtime_skill_scripts: would mirror shared scripts to $(dirname "$autospec_scripts_dir")/skills/autospec-shared/scripts/"
         return 0
