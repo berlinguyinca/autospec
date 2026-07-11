@@ -117,7 +117,10 @@ fn is_checkbox_with_content(line: &str) -> bool {
     let Some(after_box) = after_space.strip_prefix("[ ]") else {
         return false;
     };
-    !after_box.trim().is_empty()
+    let Some(next) = after_box.chars().next() else {
+        return false;
+    };
+    next.is_whitespace() && !after_box.trim().is_empty()
 }
 
 fn check_primary_smoke(body: &str, findings: &mut Vec<IssueLintFinding>) {
