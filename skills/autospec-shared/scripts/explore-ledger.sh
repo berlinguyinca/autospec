@@ -104,6 +104,14 @@ _normalize_title() {
 
 _now_ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# _repo_slug — best-effort local-only "owner/name" derivation from the origin
+# remote for telemetry's repo= field. No network call (never `gh repo view`):
+# a ledger append must never gain latency from telemetry. Empty on any miss.
+_repo_slug() {
+  git config --get remote.origin.url 2>/dev/null \
+    | sed -E 's#^.*[:/]([^/]+/[^/]+)(\.git)?$#\1#'
+}
+
 # _outcome_ok <value> — 0 if value is in the allowed outcome set.
 _outcome_ok() {
   local o
@@ -199,6 +207,22 @@ case "$CMD" in
     # Re-emit compact (single line) to guarantee one object per line.
     compact="$(printf '%s' "$APPEND_OBJ" | jq -c '.')" || _die "could not compact JSON" 1
     printf '%s\n' "$compact" >> "$LEDGER"
+
+    # Telemetry (issue #1773): fire-and-forget artifact.filed emit after the
+    # append. Guarded source (absent shim/binary/DSN is a silent no-op) and
+    # wrapped in `{ ... } || true` so nothing here can ever alter this
+    # command's exit status or output — the ledger append is authoritative,
+    # telemetry is best-effort.
+    {
+      _AF_H="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+      if [ -f "$_AF_H/emit-event.sh" ]; then
+        # shellcheck source=/dev/null
+        . "$_AF_H/emit-event.sh"
+        _af_issue="$(printf '%s' "$compact" | jq -r '.issue // 0' 2>/dev/null)"
+        emit_event artifact.filed repo="$(_repo_slug)" issue="$_af_issue" detail=explore
+      fi
+    } || true
+
     exit 0
     ;;
 
