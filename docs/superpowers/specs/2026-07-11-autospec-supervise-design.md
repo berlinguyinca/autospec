@@ -133,6 +133,49 @@ File or update a repair issue when any hard cap trips:
 
 Label: `autonomy:runaway`.
 
+### Guideline Violation
+
+File or update a repair issue when the autonomous daemon violates repository
+operating rules, even if it is otherwise making progress. The first required
+check is branch/worktree hygiene:
+
+- implementation work must happen on a dedicated issue branch such as
+  `feat/<slug>`;
+- implementation work must happen in a linked worktree or other isolated issue
+  workspace, not in the primary checkout;
+- the daemon must not commit directly on `main`;
+- the daemon must not push directly to `main`;
+- merging a completed PR into `main` is allowed only after the normal
+  `autospec-run` validation and merge gate.
+
+This check exists because a conductor can appear productive while violating the
+repo's most important safety guideline. If autonomous mode works directly on
+`main` instead of creating dedicated branches per issue, the supervisor must
+treat that as a repairable daemon bug.
+
+Deterministic evidence sources:
+
+- `git -C <repo-dir> branch --show-current`
+- `git -C <repo-dir> status --short --branch`
+- `git -C <repo-dir> worktree list --porcelain`
+- recent commits on `main` compared with PR merge metadata;
+- `autospec-run-status --json` branch fields;
+- conductor logs that name checkout, branch, worktree, or merge commands.
+
+Actions:
+
+- file or update a repair issue with label `autonomy:guideline-violation`;
+- add `autospec:needs-human` to any affected in-progress issue if the violation
+  risks direct-main mutation;
+- request a graceful stop/restart only at a cycle boundary unless direct-main
+  mutation is still active;
+- include evidence showing expected branch/worktree behavior and observed
+  behavior.
+
+This class is separate from scope drift. Scope drift asks whether the work
+belongs to the product. Guideline violation asks whether the daemon is following
+the repository's operating rules while doing the work.
+
 ### Scope Drift
 
 Scope drift is product-scope drift. If a repository is a snake game, autonomous
@@ -285,7 +328,8 @@ Fix `<specific autonomous behavior>` so `autospec-autonomous` makes forward prog
 
 - Repo: `<OWNER/REPO>`
 - Conductor session: `<session id or pid>`
-- Failure class: `<stuck|no-work|runaway|scope-drift|regression>`
+- Failure class: `<stuck|no-work|runaway|guideline-violation|scope-drift|regression>`
+- Guideline violated: `<branch-hygiene|primary-checkout|direct-main-push|other>`
 - Supervisor signature: `<sha256>`
 - First observed: `<timestamp>`
 - Last observed: `<timestamp>`
@@ -319,6 +363,8 @@ bats tests/autonomous/<specific-test>.bats
 - Add a regression test using fixture logs/state.
 - Avoid new LLM calls in polling paths.
 - Avoid creating a second conductor.
+- Preserve branch/worktree hygiene: per-issue work on a dedicated branch and
+  isolated worktree; no direct `main` commits or pushes.
 ```
 
 ## Update And Restart Policy
@@ -393,12 +439,15 @@ The wrappers stay thin and dispatch to scripts.
   - deterministic classifier
 - `skills/autospec-shared/scripts/scope-review.sh`
   - companion review/restore/reject workflow
+- `skills/autospec-shared/scripts/autonomous-guideline-check.sh`
+  - deterministic branch/worktree/main-safety checks
 
 ### Tests
 
 - `tests/autonomous/test_supervise_stuck.bats`
 - `tests/autonomous/test_supervise_no_work.bats`
 - `tests/autonomous/test_supervise_scope_drift.bats`
+- `tests/autonomous/test_supervise_guideline_violation.bats`
 - `tests/autonomous/test_supervise_restart_boundary.bats`
 - `tests/autonomous/test_scope_review.bats`
 
@@ -415,6 +464,10 @@ Validation must be wired into `scripts/validate.sh --changed`.
 - Clear out-of-scope autonomous issues are quarantined and removed from
   `auto-implement`.
 - Ambiguous scope issues are soft-quarantined as `scope:needs-review`.
+- Direct implementation work on `main` files exactly one
+  `autonomy:guideline-violation` repair issue with branch/worktree evidence.
+- Normal PR merge-to-main after validation is not flagged as a guideline
+  violation.
 - `/autospec-scope-review --issue N --desired` restores the issue to
   `auto-implement` and updates `.autospec/autonomous-scope.yml`.
 - A landed supervisor-filed fix triggers autospec update and waits for
@@ -427,7 +480,7 @@ Validation must be wired into `scripts/validate.sh --changed`.
 ```text
 Create autospec-supervise as a low-token deterministic supervisor for autospec-autonomous.
 
-It must observe the existing autonomous conductor through machine-readable status, logs, heartbeats, and GitHub issue/PR state. It must not become a second conductor and must not implement fixes inline. On proven stuck/no-work/runaway/scope-drift behavior, it files lint-clean autospec repair issues with stable dedupe signatures. For scope drift it auto-quarantines clear drift and soft-quarantines ambiguous proposals by removing auto-implement and adding review labels. A companion autospec-scope-review command lets the operator mark quarantined work desired or rejected; desired work is restored and the repo scope config is updated from repo documentation, commit/PR/issue history, and the operator decision.
+It must observe the existing autonomous conductor through machine-readable status, logs, heartbeats, GitHub issue/PR state, and deterministic branch/worktree checks. It must not become a second conductor and must not implement fixes inline. On proven stuck/no-work/runaway/guideline-violation/scope-drift behavior, it files lint-clean autospec repair issues with stable dedupe signatures. For scope drift it auto-quarantines clear drift and soft-quarantines ambiguous proposals by removing auto-implement and adding review labels. For guideline violations it verifies that implementation work happens on dedicated issue branches and isolated worktrees, never by direct commits or pushes to `main`; normal validated PR merges into `main` are allowed. A companion autospec-scope-review command lets the operator mark quarantined work desired or rejected; desired work is restored and the repo scope config is updated from repo documentation, commit/PR/issue history, and the operator decision.
 
 Normal monitoring must use shell/JQ/gh only, with no LLM calls. After a supervisor-filed fix lands, update installed autospec, wait for the conductor cycle boundary, restart autospec-autonomous, and continue monitoring.
 ```
