@@ -844,3 +844,63 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" == *"DISABLE=1"* ]]
 }
+
+# --- Phase 5.5 integration audit (issue #1779) -------------------------
+# Lock the cross-child telemetry contract in one place: when a new shim-backed
+# emit kind is added, this test forces the shared wiring suite to cover it.
+
+@test "integration audit: wiring suite covers every shim-backed telemetry kind" {
+  actual="$TMP/actual-kinds.txt"
+  expected="$TMP/expected-kinds.txt"
+  find "$REPO_ROOT/scripts" "$REPO_ROOT/skills/autospec-run/scripts" "$REPO_ROOT/skills/autospec-shared/scripts" \
+    -type f -name '*.sh' \
+    ! -name 'emit-event.sh' \
+    ! -name 'autospec-observatory-events.sh' \
+    -print0 \
+    | xargs -0 grep -hE '^[[:space:]}]*emit_event[[:space:]]+[A-Za-z0-9_.-]+' \
+    | sed -E 's/^[[:space:]}]*emit_event[[:space:]]+([A-Za-z0-9_.-]+).*/\1/' \
+    | sort -u > "$actual"
+
+  cat > "$expected" <<'KINDS'
+artifact.filed
+claim
+feature.described
+heartbeat
+session.parked
+session.started
+session.step
+session.terminal
+KINDS
+
+  run diff -u "$expected" "$actual"
+  [ "$status" -eq 0 ]
+
+  coverage="$TMP/pre-audit-coverage.txt"
+  awk '/^# --- Phase 5[.]5 integration audit/{exit} {print}' "$BATS_TEST_FILENAME" > "$coverage"
+
+  cat > "$TMP/kind-coverage-patterns.txt" <<'PATTERNS'
+artifact.filed|emit artifact.filed
+claim|emit claim
+feature.described|emit feature\.described
+heartbeat|emit heartbeat
+session.parked|emit session.parked
+session.started|emit session.started
+session.step|emit session.step
+session.terminal|emit session.terminal
+PATTERNS
+
+  cut -d '|' -f 1 "$TMP/kind-coverage-patterns.txt" | sort -u > "$TMP/kind-coverage-kinds.txt"
+  run diff -u "$expected" "$TMP/kind-coverage-kinds.txt"
+  [ "$status" -eq 0 ]
+
+  while IFS='|' read -r kind pattern; do
+    grep -Fq "$kind" "$expected"
+    grep -Fq "$pattern" "$coverage"
+  done < "$TMP/kind-coverage-patterns.txt"
+}
+
+@test "integration audit: telemetry shim and chokepoints never invoke psql" {
+  run bash -c "grep -RIn --include='*.sh' '^[^#]*\bpsql\b' '$REPO_ROOT/skills/autospec-shared/scripts/emit-event.sh' '$REPO_ROOT/scripts/autospec-run-registry.sh' '$REPO_ROOT/skills/autospec-run/scripts/run-state.sh' '$REPO_ROOT/skills/autospec-shared/scripts/explore-ledger.sh' '$REPO_ROOT/skills/autospec-shared/scripts/growth-ledger.sh' '$REPO_ROOT/scripts/claim-guard.sh' '$REPO_ROOT/skills/autospec-shared/scripts/grow-define-file-issues.sh' '$REPO_ROOT/scripts/autonomous-usage-governor.sh' '$REPO_ROOT/scripts/autospec-stop-check.sh'"
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
