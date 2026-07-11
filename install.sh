@@ -23,6 +23,8 @@
 #
 # Honors:
 #   AUTOSPEC_NO_STAR_PROMPT=1  skip the optional GitHub star prompt.
+#   AUTOSPEC_NO_DB_PROMPT=1  skip the optional autospec-db prompt.
+#   AUTOSPEC_INSTALL_DB=1|0  force install/update or skip the optional autospec-db module.
 #   AUTOSPEC_SKIP_SYSTEM_TOOLS=1  skip best-effort CLI dependency installs.
 #   AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1  skip peer ecosystem bootstrap.
 #
@@ -598,6 +600,77 @@ bootstrap_turbo() {
     if [ "$cleaned_nested" -gt 0 ]; then
         info "bootstrap_turbo: cleaned $cleaned_nested nested symlinks from earlier broken runs"
     fi
+}
+
+install_db_module() {
+    db_installer_tmp="$(mktemp -t autospec-db-install.XXXXXX)"
+    if curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec-db/main/install.sh -o "$db_installer_tmp" \
+            && bash "$db_installer_tmp"; then
+        rm -f "$db_installer_tmp"
+        info "autospec-db installer completed."
+    else
+        rm -f "$db_installer_tmp"
+        warn "autospec-db installer failed; continuing"
+    fi
+}
+
+maybe_prompt_db_module() {
+    # Keep scripted installs quiet: no prompt during CI, dry-run, non-TTY, or opt-out.
+    [ "$DRY_RUN" -eq 0 ] || return 0
+
+    if [ "${AUTOSPEC_INSTALL_DB:-}" = "0" ]; then
+        return 0
+    fi
+
+    autospec_db_env="$HOME/.autospec/db.env"
+    autospec_db_conf="$HOME/.autospec/db.conf"
+    autospec_db_dir="$HOME/.autospec/autospec-db"
+
+    autospec_db_installed=0
+    if [ -f "$autospec_db_env" ] || [ -d "$autospec_db_dir" ]; then
+        autospec_db_installed=1
+    fi
+
+    if [ "${AUTOSPEC_INSTALL_DB:-}" = "1" ]; then
+        install_db_module
+        return 0
+    fi
+
+    if [ "$autospec_db_installed" -eq 1 ]; then
+        install_db_module
+        return 0
+    fi
+
+    if [ -f "$autospec_db_conf" ] && [ ! -f "$autospec_db_env" ]; then
+        info "autospec-db configuration is present at ~/.autospec/db.conf but ~/.autospec/db.env is missing. Finish configuration, then re-run the autospec-db installer."
+        return 0
+    fi
+
+    [ "$UPDATE" -eq 0 ] || return 0
+    [ "${AUTOSPEC_NO_DB_PROMPT:-0}" != "1" ] || return 0
+    [ "${CI:-}" = "" ] || return 0
+
+    answer=""
+    if { exec 3<>/dev/tty; } 2>/dev/null; then
+        info ""
+        printf 'Install the optional database telemetry module (autospec-db)? [y/N] ' >&3
+        read -r answer <&3 || { exec 3>&-; return 0; }
+        exec 3>&-
+    else
+        [ -t 0 ] && [ -t 1 ] || return 0
+        info ""
+        printf 'Install the optional database telemetry module (autospec-db)? [y/N] '
+        read -r answer || return 0
+    fi
+
+    case "$answer" in
+        y|Y|yes|YES|Yes)
+            install_db_module
+            ;;
+        *)
+            info "Skipping optional autospec-db telemetry module."
+            ;;
+    esac
 }
 
 maybe_prompt_star() {
@@ -1436,5 +1509,6 @@ if [ "$HOOK_MODE_ARG" = "claude" ]; then
     exit 0
 fi
 prompt_user_for_auto_rollover
+maybe_prompt_db_module
 maybe_prompt_star
 exit 0
