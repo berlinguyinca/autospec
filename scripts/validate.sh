@@ -5169,6 +5169,18 @@ check_db_telemetry_contract() {
         bats tests/unit/emit-event-wiring.bats >/tmp/validate-emit-event-wiring.log 2>&1 \
             || { cat /tmp/validate-emit-event-wiring.log >&2; fail "tests/unit/emit-event-wiring.bats: failed"; }
     fi
+    # /autospec-db-doctor (issue #1807): harness-facing wrapper around
+    # `autospec-db doctor`. Registered here (not globbed) so an unregistered
+    # suite never silently drops out of the gate.
+    [ -f skills/autospec-db-doctor/scripts/db-doctor.sh ] \
+        || fail "skills/autospec-db-doctor/scripts/db-doctor.sh: required db-doctor backend missing"
+    [ -f tests/unit/autospec-db-doctor.bats ] \
+        || fail "tests/unit/autospec-db-doctor.bats: required db-doctor test suite missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/unit/autospec-db-doctor.bats"
+        bats tests/unit/autospec-db-doctor.bats >/tmp/validate-autospec-db-doctor.log 2>&1 \
+            || { cat /tmp/validate-autospec-db-doctor.log >&2; fail "tests/unit/autospec-db-doctor.bats: failed"; }
+    fi
 }
 
 # Backlog auto-grooming: gate ALL grooming bats suites so they can never regress
