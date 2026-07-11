@@ -77,12 +77,20 @@ fn check_acceptance_criteria(body: &str, findings: &mut Vec<IssueLintFinding>) {
     let ac = section(body, "## Acceptance criteria")
         .or_else(|| section(body, "## Acceptance Criteria"))
         .unwrap_or("");
-
-    for (idx, line) in ac
+    let lines = ac
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .enumerate()
-    {
+        .collect::<Vec<_>>();
+    let checkbox_count = lines
+        .iter()
+        .filter(|line| line.trim_start().starts_with("- [ ]"))
+        .count();
+
+    if checkbox_count == 0 {
+        return;
+    }
+
+    for (idx, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();
         if !trimmed.starts_with("- [ ] ") || trimmed[6..].trim().is_empty() {
             findings.push(IssueLintFinding::new(
