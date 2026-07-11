@@ -6,17 +6,30 @@ setup() {
   export HOME="$TEST_TMP/home"
   export AUTOSPEC_CONFIG_FILE="$TEST_TMP/missing-autospec.yml"
   mkdir -p "$HOME" "$TEST_TMP/bin"
+  cleanup_closeout_fixture
+}
+
+cleanup_closeout_fixture() {
+  for closeout_dir in /tmp/autospec-run-1838 /tmp/autospec-run-9999; do
+    case "$closeout_dir" in
+      /tmp/autospec-run-1838|/tmp/autospec-run-9999)
+        find "$closeout_dir" -mindepth 1 -delete 2>/dev/null || true
+        rmdir "$closeout_dir" 2>/dev/null || true
+        ;;
+    esac
+  done
 }
 
 teardown() {
   rm -rf "$TEST_TMP"
+  cleanup_closeout_fixture
 }
 
 @test "run-drain: exits when omx child makes no progress past stall timeout" {
   cat > "$TEST_TMP/bin/omx" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$HOME/omx.pid"
-sleep 30
+exec sleep 30
 EOF
   chmod +x "$TEST_TMP/bin/omx"
 
@@ -28,10 +41,8 @@ EOF
 
   for _ in 1 2 3 4 5; do
     if ! kill -0 "$drain_pid" 2>/dev/null; then
-      set +e
-      wait "$drain_pid"
-      status="$?"
-      set -e
+      status=0
+      wait "$drain_pid" || status="$?"
       break
     fi
     sleep 1
@@ -109,6 +120,84 @@ EOF
 
   [ "$status" -eq 0 ]
   grep -q '"tick":3' "$HOME/.autospec/process-heartbeats/berlinguyinca_autospec/1842.json"
+}
+
+@test "run-drain: records closeout hang when issue wrapper has no child progress" {
+  cat > "$TEST_TMP/bin/omx" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$HOME/omx.pid"
+exec sleep 30
+EOF
+  chmod +x "$TEST_TMP/bin/omx"
+
+  PATH="$TEST_TMP/bin:$PATH" \
+  AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=1 \
+  AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS=1 \
+  AUTOSPEC_AUTONOMOUS_DRAIN_ISSUE=1838 \
+  bash "$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh" > "$TEST_TMP/drain.out" 2>&1 &
+  drain_pid="$!"
+
+  for _ in 1 2 3 4 5; do
+    if ! kill -0 "$drain_pid" 2>/dev/null; then
+      status=0
+      wait "$drain_pid" || status="$?"
+      break
+    fi
+    sleep 1
+  done
+
+  if kill -0 "$drain_pid" 2>/dev/null; then
+    kill "$drain_pid" 2>/dev/null || true
+    wait "$drain_pid" 2>/dev/null || true
+    cat "$TEST_TMP/drain.out"
+    false
+  fi
+
+  [ "${status:-0}" -eq 124 ]
+  grep -q "closeout hang" "$TEST_TMP/drain.out"
+  grep -q "#1838" "$TEST_TMP/drain.out"
+  grep -q "closeout hang" "/tmp/autospec-run-1838/closeout-hang.md"
+  grep -q "#1838" "/tmp/autospec-run-1838/closeout-hang.md"
+}
+
+
+@test "run-drain: records closeout hang for wrapper child with no artifact progress" {
+  cat > "$TEST_TMP/bin/omx" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$HOME/omx.pid"
+(sleep 30) &
+wait
+EOF
+  chmod +x "$TEST_TMP/bin/omx"
+
+  PATH="$TEST_TMP/bin:$PATH" \
+  AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=1 \
+  AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS=1 \
+  AUTOSPEC_AUTONOMOUS_DRAIN_ISSUE=9999 \
+  bash "$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh" > "$TEST_TMP/drain-wrapper.out" 2>&1 &
+  drain_pid="$!"
+
+  for _ in 1 2 3 4 5; do
+    if ! kill -0 "$drain_pid" 2>/dev/null; then
+      status=0
+      wait "$drain_pid" || status="$?"
+      break
+    fi
+    sleep 1
+  done
+
+  if kill -0 "$drain_pid" 2>/dev/null; then
+    kill "$drain_pid" 2>/dev/null || true
+    wait "$drain_pid" 2>/dev/null || true
+    cat "$TEST_TMP/drain-wrapper.out"
+    false
+  fi
+
+  [ "${status:-0}" -eq 124 ]
+  grep -q "closeout hang" "$TEST_TMP/drain-wrapper.out"
+  grep -q "#9999" "$TEST_TMP/drain-wrapper.out"
+  grep -q "closeout hang" "/tmp/autospec-run-9999/closeout-hang.md"
+  grep -q "#9999" "/tmp/autospec-run-9999/closeout-hang.md"
 }
 
 @test "run-drain: recovers stale wait handle by merging green in-progress PR" {
