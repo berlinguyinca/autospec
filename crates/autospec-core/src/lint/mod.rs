@@ -83,7 +83,7 @@ fn check_acceptance_criteria(body: &str, findings: &mut Vec<IssueLintFinding>) {
         .collect::<Vec<_>>();
     let checkbox_count = lines
         .iter()
-        .filter(|line| line.trim_start().starts_with("- [ ]"))
+        .filter(|line| starts_with_checkbox(line))
         .count();
 
     if checkbox_count == 0 {
@@ -91,8 +91,7 @@ fn check_acceptance_criteria(body: &str, findings: &mut Vec<IssueLintFinding>) {
     }
 
     for (idx, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("- [ ] ") || trimmed[6..].trim().is_empty() {
+        if !is_checkbox_with_content(line) {
             findings.push(IssueLintFinding::new(
                 IssueQualityRule::AcProse,
                 format!("AC line {} is not a checkbox", idx + 1),
@@ -101,8 +100,30 @@ fn check_acceptance_criteria(body: &str, findings: &mut Vec<IssueLintFinding>) {
     }
 }
 
+fn starts_with_checkbox(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(after_dash) = trimmed.strip_prefix('-') else {
+        return false;
+    };
+    after_dash.trim_start().starts_with("[ ]")
+}
+
+fn is_checkbox_with_content(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(after_dash) = trimmed.strip_prefix('-') else {
+        return false;
+    };
+    let after_space = after_dash.trim_start();
+    let Some(after_box) = after_space.strip_prefix("[ ]") else {
+        return false;
+    };
+    !after_box.trim().is_empty()
+}
+
 fn check_primary_smoke(body: &str, findings: &mut Vec<IssueLintFinding>) {
-    let Some(smoke_section) = subsection(body, "### Primary smoke test") else {
+    let Some(smoke_section) =
+        subsection(body, "### Primary smoke test").or_else(|| section(body, "## Verification"))
+    else {
         return;
     };
     let Some(block) = first_fenced_block(smoke_section) else {
