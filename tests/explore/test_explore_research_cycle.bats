@@ -24,6 +24,11 @@ EOF
     # Build a fake research dir with deterministic mini-researchers we control.
     export AUTOSPEC_RESEARCH_DIR="$TMP/fake-research"
     mkdir -p "$AUTOSPEC_RESEARCH_DIR"
+    # explore-research-cycle.sh prefers installed AUTOSPEC_SCRIPTS_DIR weights.
+    # Unit expectations here assert the canonical static priors, so force the
+    # weights resolver to a nonexistent path and prevent operator-local
+    # ~/.autospec/scripts/explore-source-weights.sh from changing rank order.
+    export AUTOSPEC_EXPLORE_WEIGHTS_BIN="$TMP/missing-explore-source-weights.sh"
 }
 
 teardown() {

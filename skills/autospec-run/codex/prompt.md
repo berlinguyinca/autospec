@@ -384,6 +384,22 @@ Pass the following prompt verbatim to each background subagent:
 >     fi
 >   fi
 
+>   # Backlog grooming preflight — run exactly one existing-backlog grooming
+>   # cycle before each queue scan when grooming policy is auto/on. The helper
+>   # invokes autonomous-promote-open-issues.sh --apply, but mutations are still
+>   # protected by the orchestrator's double gate: --apply AND grooming policy
+>   # in {auto,on}. This is no discovery: do not run Tier 2-4 discovery and do
+>   # not file new issues from this preflight.
+>   GROOM_PREFLIGHT="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/run-groom-preflight.sh"
+>   [ -x "$GROOM_PREFLIGHT" ] || GROOM_PREFLIGHT="skills/autospec-run/scripts/run-groom-preflight.sh"
+>   if [ -f "$GROOM_PREFLIGHT" ]; then
+>     bash "$GROOM_PREFLIGHT" \
+>       --repo "{repo}" \
+>       --report "${AUTOSPEC_RUN_REPORT:-$HOME/.autospec/autospec-run-report.md}" || true
+>   else
+>     echo "WARN: backlog grooming preflight helper missing; continuing drain"
+>   fi
+
 ### Queue priority sort (autospec-review interlock)
 
 When selecting the next `auto-implement` issue, sort:

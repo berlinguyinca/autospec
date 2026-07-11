@@ -23,6 +23,11 @@ setup() {
     TMP="$(mktemp -d -t sandbox-drift.XXXXXX)"
     export REBASE_LOG="$TMP/rebase.log"
     touch "$REBASE_LOG"
+    # Priority-score assertions cover the static DEFAULT_SRC_WEIGHTS table.
+    # explore-research-cycle.sh can otherwise pick up an operator-local
+    # installed explore-source-weights.sh and learned ledger weights, making this
+    # unit suite depend on workstation history.
+    export AUTOSPEC_EXPLORE_WEIGHTS_BIN="$TMP/missing-explore-source-weights.sh"
 
     # Build a fixture git repo with sandbox branch + commits behind main.
     FIXTURE_REPO="$TMP/repo"
