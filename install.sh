@@ -111,6 +111,23 @@ case ":$PATH:" in
     *":$AUTOSPEC_BIN_DIR:"*) ;;
     *) export PATH="$AUTOSPEC_BIN_DIR:$PATH" ;;
 esac
+
+# autospec-db telemetry: guarded db.env source (absent file = no-op) plus
+# yaml-derived plumbing envs from the .autospec/autospec.yml `telemetry:`
+# block (docs/contracts/autospec-events-v1.md §Configuration surface).
+# A pre-set env always wins over the yaml-derived value.
+[ -f "$HOME/.autospec/db.env" ] && . "$HOME/.autospec/db.env"
+_autospec_telemetry_cfg="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/telemetry-config.sh"
+if [ -f "$_autospec_telemetry_cfg" ]; then
+    if [ -z "${AUTOSPEC_DB_DISABLE:-}" ]; then
+        _autospec_telemetry_enabled="$(bash "$_autospec_telemetry_cfg" --key enabled 2>/dev/null || printf 'true')"
+        [ "$_autospec_telemetry_enabled" = "false" ] && export AUTOSPEC_DB_DISABLE=1
+        unset _autospec_telemetry_enabled
+    fi
+    export AUTOSPEC_DB_HOST_LABEL="$(bash "$_autospec_telemetry_cfg" --key host_label 2>/dev/null || printf '')"
+    export AUTOSPEC_DB_SPOOL_MAX_BYTES="$(bash "$_autospec_telemetry_cfg" --key spool_max_bytes 2>/dev/null || printf '10485760')"
+fi
+unset _autospec_telemetry_cfg
 EOF
 
     ensure_line_in_file "$HOME/.zshrc" "$autospec_env_line"
