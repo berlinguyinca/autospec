@@ -254,7 +254,7 @@ issue_heartbeat_exists() {
 issue_run_state() {
     issue_number="$1"
     [ -x "$RUN_STATE" ] || return 0
-    "$RUN_STATE" read --issue "$issue_number" --repo "$repo" 2>/dev/null || true
+    "$RUN_STATE" read --issue "$issue_number" --repo "$repo" 2>/dev/null
 }
 
 branch_ref_exists() {
@@ -305,7 +305,10 @@ filter_active_startup_claims() {
     active_numbers="$(jq -r 'sort_by(.number) | .[].number' "$ACTIVE_FILE")"
     for active_number in $active_numbers; do
         active_object="$(jq -c --argjson number "$active_number" '.[] | select(.number == $number)' "$ACTIVE_FILE")"
-        state_json="$(issue_run_state "$active_number")"
+        if ! state_json="$(issue_run_state "$active_number")"; then
+            json_append "$filtered_file" "$active_object"
+            continue
+        fi
         if startup_claim_has_evidence "$active_number" "$state_json"; then
             json_append "$filtered_file" "$active_object"
             continue

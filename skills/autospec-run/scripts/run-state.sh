@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run-state.sh — read/upsert/clear autospec-run GitHub issue state comments.
 
-set -eu
+set -euo pipefail
 
 BEGIN_MARKER="<!-- autospec-run-state:begin -->"
 END_MARKER="<!-- autospec-run-state:end -->"

@@ -27,6 +27,10 @@ if [ "\$1" = "ls-remote" ]; then
     # No remote branch ref exists for the issue-1858 startup-failure fixture.
     exit 0
 fi
+if [ "\$1" = "show-ref" ] && printf '%s\n' "\$*" | grep -q 'fix/issue-1858-startup-failed'; then
+    # No local branch ref exists for the issue-1858 startup-failure fixture.
+    exit 1
+fi
 exec "$REAL_GIT" "\$@"
 MOCKEOF
     chmod +x "$MOCK_BIN/git"
@@ -63,11 +67,14 @@ case "\$sub" in
     printf 'test/repo\n'
     ;;
   *)
+    if [ "\${FAIL_RUN_STATE_READ:-0}" = "1" ] && [ "\${1:-}" = "api" ] && [ "\${2:-}" = "repos/test/repo/issues/1858/comments" ]; then
+      exit 1
+    fi
     if [ "\${1:-}" = "api" ] && [ "\${2:-}" = "repos/test/repo/issues/1858/comments" ]; then
       body="<!-- autospec-run-state:begin -->
 \$(cat "\$FIXTURE")
 <!-- autospec-run-state:end -->"
-      jq -n --arg body "\$body" '[{id:10,body:$body,updated_at:"2000-01-01T00:00:00Z"}]'
+      jq -n --arg body "\$body" '[{id:10,body:\$body,updated_at:"2000-01-01T00:00:00Z"}]'
       exit 0
     fi
     if [ "\${1:-}" = "api" ] && [ "\${2:-}" = "repos/test/repo/issues/comments/10" ]; then
@@ -115,11 +122,21 @@ run_list_ready() {
 }
 
 @test "batch size 3 ignores and requeues startup-failed second worker with no heartbeat or branch" {
-    run run_list_ready
+    FAIL_RUN_STATE_READ=0 run run_list_ready
 
     [ "$status" -eq 0 ]
     [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | index(1858) == null')" = "true" ]
     [ "$(printf '%s\n' "$output" | jq -r '.worker_cap.active_count')" = "0" ]
     [ "$(printf '%s\n' "$output" | jq -r '.batch | map(.number) | join(",")')" = "1859,1860,1861" ]
     grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$TMPDIR_BATS/edit.log"
+}
+
+@test "transient run-state read failures preserve claimed issue instead of requeueing it" {
+    FAIL_RUN_STATE_READ=1 run run_list_ready
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | join(",")')" = "1858" ]
+    [ "$(printf '%s\n' "$output" | jq -r '.worker_cap.active_count')" = "1" ]
+    [ "$(printf '%s\n' "$output" | jq -r '.batch | map(.number) | join(",")')" = "1859,1860,1861" ]
+    [ ! -s "$TMPDIR_BATS/edit.log" ]
 }
