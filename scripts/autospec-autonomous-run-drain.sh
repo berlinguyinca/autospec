@@ -267,13 +267,10 @@ while kill -0 "$child_pid" 2>/dev/null; do
     now_epoch="$(date +%s)"
     idle_secs=$((now_epoch - last_progress_epoch))
     if [ "$idle_secs" -ge "$DRAIN_STALL_SECS" ]; then
-        if has_live_descendant "$child_pid"; then
-            if recover_green_in_progress_pr; then
-                exit 0
-            fi
-        else
-            record_closeout_hang || true
+        if has_live_descendant "$child_pid" && recover_green_in_progress_pr; then
+            exit 0
         fi
+        record_closeout_hang || true
         printf 'autospec-autonomous-run-drain: stalled after %ss with no output; terminating autospec-run child pid %s\n' \
             "$DRAIN_STALL_SECS" "$child_pid" >&2
         kill_tree "$child_pid"
