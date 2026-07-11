@@ -75,6 +75,7 @@ EOF
 
 teardown() {
     [ -n "${TMP:-}" ] && rm -rf "$TMP"
+    if [ -n "${EXTRA_WT:-}" ]; then rm -rf "$EXTRA_WT"; fi
 }
 
 # ─── 1. Clean qa + clean secaudit → merge-ok ─────────────────────────────────
@@ -636,6 +637,39 @@ EOF
 
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -qv "^merge-ok$"
+}
+
+
+# ─── 22. Worktree-local qa verdict beats stale parent AUTOSPEC_REPO_DIR ──────
+
+@test "qa-verdict lookup uses active /tmp/wt-* cwd, not stale parent AUTOSPEC_REPO_DIR" {
+    cat > "$TMP/bin/autospec-qa" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$TMP/bin/autospec-qa"
+
+    local parent_repo active_wt
+    parent_repo="$TMP/parent"
+    active_wt="$(mktemp -d /tmp/wt-premerge-gate.XXXXXX)"
+    export EXTRA_WT="$active_wt"
+    mkdir -p "$parent_repo/.autospec" "$active_wt/.autospec"
+    mkdir -p "$parent_repo/.git"
+    cat > "$parent_repo/.autospec/qa-verdict.json" <<'EOF'
+{"verdict":"FAIL","findings":[{"id":"STALE","release_blocking":true}]}
+EOF
+    cat > "$active_wt/.autospec/qa-verdict.json" <<'EOF'
+{"verdict":"PASS","findings":[]}
+EOF
+
+    export AUTOSPEC_REPO_DIR="$parent_repo"
+    export AUTOSPEC_QA_PRESENT_OVERRIDE=true
+    export AUTOSPEC_SECAUDIT_PRESENT_OVERRIDE=true
+
+    run bash -c "cd '$active_wt' && bash '$SCRIPT' --pr-branch 'feat/test-branch' --notify-sh '$TMP/bin/notify.sh'"
+
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "^merge-ok$"
 }
 
 # ─── 22-26. self-originated gate (issue #1742) ────────────────────────────────

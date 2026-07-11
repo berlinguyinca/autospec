@@ -163,6 +163,28 @@ if ! _secaudit_skill_present; then
     exit 2
 fi
 info "Scan skill '$SECAUDIT_CMD' is present."
+_repo_state_root() {
+    # Mutable repo-local artifacts (qa verdicts, design-gate config, etc.) must
+    # come from the active issue worktree. A long-lived autospec-run parent can
+    # leak AUTOSPEC_REPO_DIR from the primary checkout into a per-issue
+    # /tmp/wt-* worktree; prefer the current worktree in that case.
+    local pwd_real repo_real
+    pwd_real="$(pwd -P 2>/dev/null || pwd)"
+    repo_real=""
+    if [ -n "${AUTOSPEC_REPO_DIR:-}" ]; then
+        repo_real="$(cd "$AUTOSPEC_REPO_DIR" 2>/dev/null && pwd -P || printf '%s' "$AUTOSPEC_REPO_DIR")"
+    fi
+    case "$pwd_real" in
+        /tmp/wt-*|/private/tmp/wt-*)
+            if [ -n "$repo_real" ] && [ "$repo_real" != "$pwd_real" ] && [ -e "$repo_real/.git" ]; then
+                info "repo-state: ignoring stale AUTOSPEC_REPO_DIR=$repo_real; using active worktree $pwd_real"
+                printf '%s' "$pwd_real"
+                return 0
+            fi
+            ;;
+    esac
+    printf '%s' "${repo_real:-$pwd_real}"
+}
 _count_blocking_findings() {
     grep -ciE \
         '(severity[[:space:]]*:[[:space:]]*(high|severe|critical|medium)|\[(high|severe|critical|medium)\]|^(high|severe|critical|medium)[[:space:]])' \
@@ -185,7 +207,7 @@ _qa_verdict_blocks() {
     if [ "$DRY_RUN" -eq 1 ]; then
         return 1
     fi
-    local verdict_file="${AUTOSPEC_REPO_DIR:-$PWD}/.autospec/qa-verdict.json"
+    local verdict_file="$(_repo_state_root)/.autospec/qa-verdict.json"
     command -v jq >/dev/null 2>&1 || return 1
     [ -f "$verdict_file" ] || return 1
     local blocks
@@ -204,7 +226,7 @@ _qa_verdict_present() {
     # still surfaces the parse WARN via _qa_verdict_blocks). DRY_RUN has no
     # native authority, mirroring _qa_verdict_blocks.
     [ "$DRY_RUN" -eq 1 ] && return 1
-    local verdict_file="${AUTOSPEC_REPO_DIR:-$PWD}/.autospec/qa-verdict.json"
+    local verdict_file="$(_repo_state_root)/.autospec/qa-verdict.json"
     command -v jq >/dev/null 2>&1 || return 1
     [ -f "$verdict_file" ] || return 1
     jq -e . "$verdict_file" >/dev/null 2>&1
@@ -428,14 +450,14 @@ if [ -z "$DESIGN_GATES_CMD" ]; then
 fi
 _run_design_gates() {
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] would run: $DESIGN_GATES_CMD --repo-root ${AUTOSPEC_REPO_DIR:-$PWD}${CHANGED_FILES:+ --changed-files $CHANGED_FILES}"
+        info "[dry-run] would run: $DESIGN_GATES_CMD --repo-root $(_repo_state_root)${CHANGED_FILES:+ --changed-files $CHANGED_FILES}"
         printf 'autospec-design-gates: SKIPPED (0 run, 0 failed, 0 unmapped)\n'
         return 0
     fi
     if [ -n "$CHANGED_FILES" ]; then
-        "$DESIGN_GATES_CMD" --repo-root "${AUTOSPEC_REPO_DIR:-$PWD}" --changed-files "$CHANGED_FILES" 2>&1 || true
+        "$DESIGN_GATES_CMD" --repo-root "$(_repo_state_root)" --changed-files "$CHANGED_FILES" 2>&1 || true
     else
-        "$DESIGN_GATES_CMD" --repo-root "${AUTOSPEC_REPO_DIR:-$PWD}" 2>&1 || true
+        "$DESIGN_GATES_CMD" --repo-root "$(_repo_state_root)" 2>&1 || true
     fi
 }
 _design_gates_block() {
@@ -446,7 +468,7 @@ _design_gates_block() {
 }
 if [ -z "$DESIGN_GATES_CMD" ]; then
     info "design-gates: runner not installed; skipping stage."
-elif [ ! -f "${AUTOSPEC_REPO_DIR:-$PWD}/.autospec/design-gates.yml" ] && [ "$DRY_RUN" -eq 0 ]; then
+elif [ ! -f "$(_repo_state_root)/.autospec/design-gates.yml" ] && [ "$DRY_RUN" -eq 0 ]; then
     info "design-gates: no .autospec/design-gates.yml; skipping stage."
 else
     design_attempt=1

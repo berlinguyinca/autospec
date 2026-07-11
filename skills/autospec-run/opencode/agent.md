@@ -847,6 +847,11 @@ inline label-swap path below.
 >        echo "[ladder] fresh — created <BRANCH>"
 >        ;;
 >    esac
+>    # Reset repo-local state roots after entering the issue worktree. Parent
+>    # autospec-run processes may export AUTOSPEC_REPO_DIR for the primary
+>    # checkout; premerge/validation helpers must read mutable artifacts such as
+>    # .autospec/qa-verdict.json from this active worktree instead.
+>    export AUTOSPEC_REPO_DIR="$PWD"
 >    # MANDATORY assert gate: MUST exit 0 before the first file edit/commit. A
 >    # non-zero exit (in_primary_checkout / dirty / stale_base) is NEVER worked
 >    # around — comment the emitted code_health identifier on the issue, restore

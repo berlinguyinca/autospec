@@ -33,6 +33,9 @@ setup() {
   TEST_TMP="$(mktemp -d)"
   export HOME="$TEST_TMP"
   mkdir -p "$HOME/.autospec"
+  unset AUTOSPEC_RUN_ONLY_ISSUES
+  unset AUTOSPEC_PROVENANCE_BIN
+  unset AUTOSPEC_INTEGRATION_BRANCH_BIN
 
   FAKE_SCRIPTS="$TEST_TMP/fake-scripts"
   mkdir -p "$FAKE_SCRIPTS"
