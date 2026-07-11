@@ -443,5 +443,5 @@ done
 if [ -n "$promoted_nums" ]; then
     emit_json "false" "groomed backlog: promoted eligible candidate(s)"
 else
-    emit_json "false" "groomed backlog: no candidate met promotion bar"
+    emit_json "true" "groomed backlog: no candidate met promotion bar"
 fi

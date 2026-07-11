@@ -683,6 +683,54 @@ EOF
   grep -q -- '--apply' "$promote_log"
 }
 
+@test "conductor: Tier 1.5 dry=false with filed=0 still cascades past promotion" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+
+  # The real waterfall must see an empty Tier-1 queue but available non-auto
+  # issues, then continue to Tier 2 after two dry Tier 1.5 promotion cycles.
+  cat > "$FAKE_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  issue) echo '1' ;;
+  repo)  echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
+  *)     exit 0 ;;
+esac
+EOF
+  chmod +x "$FAKE_BIN/gh"
+
+  _install_stub "list-ready-issues.sh" \
+    'printf '"'"'{"ready":[],"blocked":[],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'"'"''
+
+  cp "$REPO_ROOT/scripts/autonomous-waterfall.sh" "$FAKE_SCRIPTS/autonomous-waterfall.sh"
+  chmod +x "$FAKE_SCRIPTS/autonomous-waterfall.sh"
+
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  export AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD="printf '{\"dry\":false,\"filed\":0,\"promoted\":[]}\n'"
+  export AUTOSPEC_EXPLORE_CMD="printf '{\"dry\":true,\"filed\":0,\"reason\":\"tier2-dry\"}\n'"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=5 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Tier 1.5 promotion result: dry=false filed=0"* ]]
+  [[ "$output" == *"Tier 1.5 dry (tier15-dry-cycles=2)"* ]]
+  [[ "$output" == *"tier=2 action=run-explore-once"* ]]
+}
+
 @test "conductor: Tier 3 architecture improvement command files work and floats to Tier 1" {
   _install_stub "autonomous-control-channel.sh" 'exit 0'
   _install_stub "autonomous-waterfall.sh" \
