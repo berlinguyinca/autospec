@@ -1165,16 +1165,24 @@ inline label-swap path below.
 >            total=$(printf '%s' "$rollup" | jq 'length')
 >            if [ "$bad" != "0" ]; then
 >                # Distinguish inherited base-branch CI rot from branch-caused failures
->                # before blocking. Capture both rollups as merge evidence, then let
+>                # before blocking. Capture the PR head rollup and the current base
+>                # commit's check/status contexts as merge evidence, then let
 >                # ci-status-compare.sh emit classification plus blocked_branch and
 >                # blocked_inherited arrays for the PR comment/final report.
->                base_ref=$(gh pr view <PR> --json baseRefName --jq .baseRefName)
+>                base_sha=$(gh pr view <PR> --json baseRefOid --jq .baseRefOid)
 >                head_checks="/tmp/autospec-ci-head-<PR>.json"
 >                base_checks="/tmp/autospec-ci-base-<PR>.json"
+>                base_check_runs="/tmp/autospec-ci-base-check-runs-<PR>.json"
+>                base_statuses="/tmp/autospec-ci-base-statuses-<PR>.json"
 >                compare_json="/tmp/autospec-ci-compare-<PR>.json"
 >                printf '%s\n' "$rollup" > "$head_checks"
->                gh run list --branch "$base_ref" --limit 20 --json name,conclusion,status,url \
->                  | jq '[.[] | {name, conclusion, status, detailsUrl: .url}]' > "$base_checks"
+>                gh api "repos/{repo}/commits/$base_sha/check-runs" --paginate \
+>                  --jq '[.check_runs[] | {name, conclusion, status, detailsUrl: .details_url}]' \
+>                  > "$base_check_runs"
+>                gh api "repos/{repo}/commits/$base_sha/status" \
+>                  --jq '[.statuses[] | {context, state, targetUrl: .target_url}]' \
+>                  > "$base_statuses"
+>                jq -s 'add' "$base_check_runs" "$base_statuses" > "$base_checks"
 >                bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ci-status-compare.sh" \
 >                  --head "$head_checks" --base "$base_checks" > "$compare_json"
 >                classification=$(jq -r '.classification' "$compare_json")
