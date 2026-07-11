@@ -2,22 +2,7 @@
 # tests/unit/test_autospec_linked_pr_reconcile.bats — queue scan reconciles
 # claimed issues whose linked PR exists but run-state still lacks `.pr`.
 
-setup() {
-    REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    LIST_READY="$REPO_ROOT/skills/autospec-run/scripts/list-ready-issues.sh"
-    RUN_STATE="$REPO_ROOT/skills/autospec-run/scripts/run-state.sh"
-    TEST_TMP="$(mktemp -d)"
-    AUTO_JSON="$TEST_TMP/auto.json"
-    ACTIVE_JSON="$TEST_TMP/active.json"
-    COMMENTS="$TEST_TMP/comments.json"
-    PRS="$TEST_TMP/prs.json"
-    CALLS="$TEST_TMP/calls.log"
-    mkdir -p "$TEST_TMP/bin"
-    printf '[]\n' > "$AUTO_JSON"
-    jq -n '[{number:42,title:"claimed",body:"",labels:[{name:"in-progress-by-bot"}]}]' > "$ACTIVE_JSON"
-    printf '[]\n' > "$COMMENTS"
-    jq -n '[{number:1857,title:"fix: claimed",url:"https://github.example/pr/1857",body:"Closes #42\n\n## Closeout report\n\n**Result** shipped."}]' > "$PRS"
-
+write_gh_stub() {
     cat > "$TEST_TMP/bin/gh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -73,6 +58,29 @@ if [ "$1" = "issue" ] && [ "$2" = "view" ]; then printf '{"state":"OPEN","body":
 exit 1
 SH
     chmod +x "$TEST_TMP/bin/gh"
+}
+
+setup_fixture_paths() {
+    REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+    LIST_READY="$REPO_ROOT/skills/autospec-run/scripts/list-ready-issues.sh"
+    RUN_STATE="$REPO_ROOT/skills/autospec-run/scripts/run-state.sh"
+    TEST_TMP="$(mktemp -d)"
+    AUTO_JSON="$TEST_TMP/auto.json"
+    ACTIVE_JSON="$TEST_TMP/active.json"
+    COMMENTS="$TEST_TMP/comments.json"
+    PRS="$TEST_TMP/prs.json"
+    CALLS="$TEST_TMP/calls.log"
+    mkdir -p "$TEST_TMP/bin"
+}
+
+seed_fixture_data() {
+    printf '[]\n' > "$AUTO_JSON"
+    jq -n '[{number:42,title:"claimed",body:"",labels:[{name:"in-progress-by-bot"}]}]' > "$ACTIVE_JSON"
+    printf '[]\n' > "$COMMENTS"
+    jq -n '[{number:1857,title:"fix: claimed",url:"https://github.example/pr/1857",body:"Closes #42\n\n## Closeout report\n\n**Result** shipped."}]' > "$PRS"
+}
+
+export_fixture_env() {
     export PATH="$TEST_TMP/bin:$PATH"
     export AUTOSPEC_TEST_AUTO_JSON="$AUTO_JSON"
     export AUTOSPEC_TEST_ACTIVE_JSON="$ACTIVE_JSON"
@@ -81,7 +89,13 @@ SH
     export AUTOSPEC_TEST_CALLS="$CALLS"
     export AUTOSPEC_CONFIG_FILE="$TEST_TMP/missing-autospec.yml"
     export AUTOSPEC_GH_API_RETRY_SLEEP=0
+}
 
+setup() {
+    setup_fixture_paths
+    seed_fixture_data
+    write_gh_stub
+    export_fixture_env
     bash "$RUN_STATE" upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state claimed --step claimed >/dev/null
 }
 
