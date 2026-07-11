@@ -480,8 +480,10 @@ SH
 
   run bash "$CLAIM_GUARD_SH" acquire scripts/foo.sh
   disabled_acquire_status="$status"
+  disabled_acquire_output="$output"
   run bash "$CLAIM_GUARD_SH" release scripts/foo.sh
   disabled_release_status="$status"
+  disabled_release_output="$output"
 
   _claim_state_dir
   _enable_emit
@@ -489,11 +491,15 @@ SH
   export AUTOSPEC_CLAIM_GUARD=strict
   run bash "$CLAIM_GUARD_SH" acquire scripts/foo.sh
   enabled_acquire_status="$status"
+  enabled_acquire_output="$output"
   run bash "$CLAIM_GUARD_SH" release scripts/foo.sh
   enabled_release_status="$status"
+  enabled_release_output="$output"
 
   [ "$disabled_acquire_status" -eq "$enabled_acquire_status" ]
   [ "$disabled_release_status" -eq "$enabled_release_status" ]
+  [ "$disabled_acquire_output" = "$enabled_acquire_output" ]
+  [ "$disabled_release_output" = "$enabled_release_output" ]
 }
 
 @test "grow-define-file-issues files an issue and emits exactly one feature.described event, body bound not spliced" {
