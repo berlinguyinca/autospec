@@ -34,12 +34,58 @@ stat_size() {
     stat -f '%z' /dev/fd/1 2>/dev/null || stat -c '%s' /dev/fd/1 2>/dev/null || printf ''
 }
 
+stat_file_signature() {
+    _file="$1"
+    [ -f "$_file" ] || return 0
+    _size="$(stat -f '%z' "$_file" 2>/dev/null || stat -c '%s' "$_file" 2>/dev/null || printf '')"
+    _mtime="$(stat -f '%m' "$_file" 2>/dev/null || stat -c '%Y' "$_file" 2>/dev/null || printf '')"
+    printf '%s:%s:%s\n' "$_file" "$_size" "$_mtime"
+}
+
+progress_file_candidates() {
+    if [ -n "${AUTOSPEC_AUTONOMOUS_DRAIN_LOG:-}" ]; then
+        printf '%s\n' "$AUTOSPEC_AUTONOMOUS_DRAIN_LOG"
+    fi
+    if [ -n "${AUTOSPEC_AUTONOMOUS_DRAIN_LOG_FILE:-}" ]; then
+        printf '%s\n' "$AUTOSPEC_AUTONOMOUS_DRAIN_LOG_FILE"
+    fi
+    if [ -n "${AUTOSPEC_AUTONOMOUS_DRAIN_LOG_GLOB:-}" ]; then
+        for _candidate in $AUTOSPEC_AUTONOMOUS_DRAIN_LOG_GLOB; do
+            [ -e "$_candidate" ] && printf '%s\n' "$_candidate"
+        done
+    fi
+    if [ -d "$HOME/.autospec/process-heartbeats" ]; then
+        find "$HOME/.autospec/process-heartbeats" -type f -name '*.json' -print 2>/dev/null || true
+    fi
+}
+
+progress_signature() {
+    printf 'stdout:%s\n' "$(stat_size)"
+    progress_file_candidates | sort -u | while IFS= read -r _candidate; do
+        [ -n "$_candidate" ] || continue
+        stat_file_signature "$_candidate"
+    done
+}
+
 kill_tree() {
     _pid="$1"
     for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
         kill_tree "$_child"
     done
     kill "$_pid" 2>/dev/null || true
+}
+
+has_live_descendant() {
+    _pid="$1"
+    for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
+        if kill -0 "$_child" 2>/dev/null; then
+            return 0
+        fi
+        if has_live_descendant "$_child"; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 detect_repo() {
@@ -159,20 +205,25 @@ if [ "${DRAIN_STALL_SECS:-0}" -le 0 ] 2>/dev/null; then
     exit "$?"
 fi
 
-last_size="$(stat_size)"
+last_progress_signature="$(progress_signature)"
 last_progress_epoch="$(date +%s)"
 
 while kill -0 "$child_pid" 2>/dev/null; do
     sleep "$DRAIN_POLL_SECS"
-    current_size="$(stat_size)"
-    if [ -n "$current_size" ] && [ "$current_size" != "$last_size" ]; then
-        last_size="$current_size"
+    current_progress_signature="$(progress_signature)"
+    if [ -n "$current_progress_signature" ] && [ "$current_progress_signature" != "$last_progress_signature" ]; then
+        last_progress_signature="$current_progress_signature"
         last_progress_epoch="$(date +%s)"
         continue
     fi
     now_epoch="$(date +%s)"
     idle_secs=$((now_epoch - last_progress_epoch))
     if [ "$idle_secs" -ge "$DRAIN_STALL_SECS" ]; then
+        if has_live_descendant "$child_pid"; then
+            if recover_green_in_progress_pr; then
+                exit 0
+            fi
+        fi
         printf 'autospec-autonomous-run-drain: stalled after %ss with no output; terminating autospec-run child pid %s\n' \
             "$DRAIN_STALL_SECS" "$child_pid" >&2
         kill_tree "$child_pid"
