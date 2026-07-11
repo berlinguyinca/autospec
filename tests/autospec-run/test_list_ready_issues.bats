@@ -501,3 +501,26 @@ EOF
     [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(514) != null')" = "true" ]
     [ "$(printf '%s' "$output" | jq -r '.blocked | map(.number) | index(514) != null')" = "false" ]
 }
+
+@test "autospec:needs-human issue is blocked and excluded from ready batch" {
+    body="$(safe_body)
+$(cat <<'BODY'
+## Summary
+
+Parked issue must wait for operator handling.
+
+## Implementation outline
+
+- edit `scripts/list-ready-issues.sh`
+BODY
+)"
+    labels='[{"name":"auto-implement"},{"name":"safety:reviewed"},{"name":"autospec:needs-human"}]'
+    write_auto_issue 1779 "needs-human" "$body" "$labels"
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(1779) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.batch | map(.number) | index(1779) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked | map(.number) | index(1779) != null')" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1779) | .reason')" = "autospec_needs_human" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1779) | .blocked_label')" = "autospec:needs-human" ]
+}

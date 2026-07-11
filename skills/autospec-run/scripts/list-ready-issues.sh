@@ -272,6 +272,12 @@ ready_paths_for_issue() {
 candidate_numbers="$(jq -r 'sort_by(.number) | .[].number' "$AUTO_FILE")"
 for number in $candidate_numbers; do
     issue_json="$(jq -c --argjson number "$number" '.[] | select(.number == $number)' "$AUTO_FILE")"
+    if printf '%s\n' "$issue_json" | jq -e 'any((.labels // [])[]?.name; . == "autospec:needs-human")' >/dev/null 2>&1; then
+        object="$(printf '%s\n' "$issue_json" | jq '. + {reason:"autospec_needs_human", blocked_label:"autospec:needs-human"}')"
+        json_append "$BLOCKED_FILE" "$object"
+        continue
+    fi
+
     safety_gate_result="$(printf '%s\n' "$issue_json" | autospec_issue_safety_gate_result)"
     if ! printf '%s\n' "$safety_gate_result" | jq -e '.ok == true' >/dev/null 2>&1; then
         object="$(printf '%s\n' "$issue_json" | jq --argjson safety_gate "$safety_gate_result" '. + {reason:"safety_gate_failed", safety_gate:$safety_gate}')"
