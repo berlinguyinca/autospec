@@ -2669,7 +2669,7 @@ check_install_tests() {
         for t in tests/install/*.sh; do
             [ -f "$t" ] || continue
             info "  running: $t"
-            AUTOSPEC_NO_DB_PROMPT=1 bash "$t" >/tmp/validate-install.log 2>&1 \
+            bash "$t" >/tmp/validate-install.log 2>&1 \
                 || { cat /tmp/validate-install.log >&2; fail "$t: failed"; }
         done
     fi
