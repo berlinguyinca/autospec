@@ -1488,6 +1488,28 @@ check_phase4_full_test_suite_gate() {
     done
 }
 
+# Phase 4 final quality gate (issue #1469): autospec-run must discover and run
+# repository-specific full-workspace quality checks after the final full suite
+# and before autonomous admin merge. Rust workspaces specifically require
+# clippy across the workspace/all targets with warnings denied.
+check_phase4_final_quality_gate() {
+    info "phase4 final quality gate: autospec-run trio"
+    local bats_file="tests/unit/test_final_quality_gate.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing (issue #1469)"
+    for f in         skills/autospec-run/SKILL.md         skills/autospec-run/codex/prompt.md         skills/autospec-run/opencode/agent.md
+    do
+        grep -q 'Final quality gate' "$f"             || fail "$f missing Final quality gate section (issue #1469)"
+        grep -q 'cargo clippy --workspace --all-targets -- -D warnings' "$f"             || fail "$f missing Rust workspace clippy command (issue #1469)"
+        grep -q 'FINAL_QUALITY_GATE_FAILED' "$f"             || fail "$f missing final gate failure marker (issue #1469)"
+        grep -q '`crate`, `file`, `line`, and `rule` fields' "$f"             || fail "$f missing required failure fields (issue #1469)"
+        grep -q 'Do NOT run `gh pr merge` while the final quality gate is failing' "$f"             || fail "$f missing merge block on failing final quality gate (issue #1469)"
+    done
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-final-quality-gate.log 2>&1             || { cat /tmp/validate-final-quality-gate.log >&2; fail "$bats_file: failed"; }
+    fi
+}
+
 # Phase 4 cost-epic parity (issue #971): the cost-efficiency epic (#937) D1
 # (per-issue token reporting) and D2 (batch=1 / fresh-subagent-per-issue) were
 # applied to the autospec-run trio but silently missed the autospec trio's
@@ -3189,6 +3211,7 @@ main() {
     check_phase4_single_agent_discipline
     check_phase4_adaptive_retry
     check_phase4_full_test_suite_gate
+    check_phase4_final_quality_gate
     check_phase4_cost_epic_parity_lockstep
     check_docs_drift_gate_regen_conditional_parity
     check_worktree_ladder_assert_parity

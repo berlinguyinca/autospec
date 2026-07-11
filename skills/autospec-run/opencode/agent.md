@@ -1202,6 +1202,49 @@ inline label-swap path below.
 >    # Run the **Full test suite gate** here using the same command resolution order
 >    # (`AUTOSPEC_FULL_TEST_COMMAND`, Operator/full verification, then `bash scripts/validate.sh` fallback).
 >    # If it fails, fix the failure, recommit, push, rerun the full suite and review, and do NOT run `gh pr merge`.
+>    #
+>    # Final quality gate (pre-merge, fail-closed): after the full suite passes and
+>    # before admin-merging, discover repository-specific whole-workspace quality
+>    # commands and run each one from the target repo root. Discovery is additive:
+>    #   1. If AUTOSPEC_FINAL_QUALITY_COMMAND is set, run it exactly as provided.
+>    #   2. If a root Cargo.toml exists and `cargo metadata --no-deps --format-version=1`
+>    #      succeeds, this is a Rust workspace; run:
+>    #      `cargo clippy --workspace --all-targets -- -D warnings`
+>    # Treat every discovered command as required merge evidence. Do NOT run `gh pr merge` while the final quality gate is failing.
+>    # On failure, post/comment a
+>    # `FINAL_QUALITY_GATE_FAILED` block that includes the command plus one finding
+>    # record with `crate`, `file`, `line`, and `rule` fields (use `unknown` only when
+>    # the tool output genuinely omits a field), then return to the fix/recommit/retry
+>    # loop and rerun the full suite plus final quality gate before merge.
+>    if [ -n "${AUTOSPEC_FINAL_QUALITY_COMMAND:-}" ]; then
+>      sh -lc "$AUTOSPEC_FINAL_QUALITY_COMMAND" || {
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=AUTOSPEC_FINAL_QUALITY_COMMAND crate=unknown file=unknown line=unknown rule=unknown"
+>        exit 1
+>      }
+>    fi
+>    if [ -f Cargo.toml ]; then
+>      if ! command -v cargo >/dev/null 2>&1; then
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-metadata crate=unknown file=Cargo.toml line=1 rule=cargo-unavailable"
+>        exit 1
+>      fi
+>      if ! cargo metadata --no-deps --format-version=1 >/tmp/autospec-cargo-metadata.json 2>/tmp/autospec-cargo-metadata.err; then
+>        _metadata_err=$(tr '
+' ' ' </tmp/autospec-cargo-metadata.err | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//' | cut -c1-500)
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-metadata crate=unknown file=Cargo.toml line=1 rule=${_metadata_err:-metadata-failed}"
+>        exit 1
+>      fi
+>      if ! cargo clippy --workspace --all-targets -- -D warnings >/tmp/autospec-final-quality-clippy.log 2>&1; then
+>        # Preserve raw clippy output and summarize the first diagnostic in a stable schema for reviewers.
+>        _crate=$(jq -r '.packages[0].name // "unknown"' /tmp/autospec-cargo-metadata.json 2>/dev/null || printf 'unknown')
+>        _location=$(grep -m1 -E '^[[:space:]]*-->' /tmp/autospec-final-quality-clippy.log | sed -E 's/^[[:space:]]*-->[[:space:]]*//' || true)
+>        _file=$(printf '%s' "$_location" | awk -F: '{print $1}')
+>        _line=$(printf '%s' "$_location" | awk -F: '{print $2}')
+>        _rule=$(grep -m1 -Eo 'clippy::[A-Za-z0-9_]+' /tmp/autospec-final-quality-clippy.log || true)
+>        if [ -z "$_rule" ]; then _rule=$(grep -m1 -E 'warning:|error:' /tmp/autospec-final-quality-clippy.log | sed 's/^ *//' | cut -c1-200 || true); fi
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-clippy crate=${_crate:-unknown} file=${_file:-unknown} line=${_line:-unknown} rule=${_rule:-unknown}"
+>        exit 1
+>      fi
+>    fi
 >    gh pr merge <PR> --admin --squash --delete-branch
 >    "$COORD_RELEASE" --issue "<ISSUE>" --repo {repo} \
 >      --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" \
