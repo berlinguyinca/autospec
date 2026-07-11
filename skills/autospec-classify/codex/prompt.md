@@ -144,7 +144,7 @@ The classifier uses the stricter of deterministic and semantic decisions. `SAFET
 
 If `_safety_status` is `0`, create labels `safety:reviewed` and `security:quarantined` idempotently, add `safety:reviewed`, remove `security:quarantined`, patch a passing `## Safety review` block into the issue body, and only then continue with the remaining per-issue steps.
 
-The block format must keep only the machine decision inside the marker wrapper; put human-readable metadata outside the markers so autospec-run can parse it fail-closed:
+The block format must keep only the machine decision inside the marker wrapper; put human-readable metadata outside the markers so autospec-run can parse it fail-closed. Emit ONLY linter-safe text in that metadata: autospec-run drift-checks a stamped issue by re-linting the whole body with only the decision-marker block removed, so any raw author login (e.g. a login like `liam` matches the `iam` pattern) or a `<reason>` that echoes matched-pattern text would make the gate falsely reject its own PASS block. Do NOT emit an `- **actor:**` line (the author is already in the issue metadata), and for a PASS keep `<reason>` to a fixed, pattern-free phrase:
 
 ```markdown
 ## Safety review
@@ -153,10 +153,9 @@ The block format must keep only the machine decision inside the marker wrapper; 
 - **decision:** `SAFETY_PASS`
 <!-- autospec-safety:end -->
 
-- **actor:** `<author>`
 - **trust:** `<trust>`
 - **matched rules:** `<rule ids or none>`
-- **reason:** <reason>
+- **reason:** no blocking or ambiguous patterns matched
 
 *Auto-reviewed by issue intent safety gate on YYYY-MM-DD.*
 ```
