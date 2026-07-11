@@ -581,6 +581,109 @@ SH
   [[ "$output" != *"secret"* ]]
 }
 
+# ── chokepoint: scripts/autonomous-usage-governor.sh (issue #1775) ──────────
+# ── chokepoint: scripts/autospec-stop-check.sh (issue #1775) ────────────────
+#
+# Both helpers source the shared shim from AUTOSPEC_SCRIPTS_DIR and emit
+# session.parked at their authoritative park/stop chokepoints. The tests keep
+# every dependency local: usage-observe.sh is PATH-shimmed, autospec-stop.sh is
+# intentionally absent, and autospec-db is the stub installed by setup().
+
+USAGE_GOVERNOR_SH="$REPO_ROOT/scripts/autonomous-usage-governor.sh"
+STOP_CHECK_SH="$REPO_ROOT/scripts/autospec-stop-check.sh"
+
+_install_usage_observe_stub() {
+  cat > "$TMP/bin/usage-observe.sh" <<'SH'
+#!/usr/bin/env bash
+printf '{"observable":true,"percent":95}\n'
+SH
+  chmod +x "$TMP/bin/usage-observe.sh"
+}
+
+_write_immediate_stop_flag() {
+  mkdir -p "$HOME/.autospec"
+  {
+    printf 'immediate\n'
+    printf '2026-07-11T00:00:00Z test@host\n'
+  } > "$HOME/.autospec/stop.flag"
+}
+
+@test "soft-park decision emits exactly one session.parked event" {
+  _enable_emit
+  _install_usage_observe_stub
+
+  run bash "$USAGE_GOVERNOR_SH" codex --repo-dir "$TMP/no-repo" --resume-at 2026-07-11T12:00:00Z
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"park 2026-07-11T12:00:00Z"* ]]
+
+  [ -f "$BIN_LOG" ]
+  [ "$(wc -l < "$BIN_LOG" | tr -d ' ')" -eq 1 ]
+  run cat "$BIN_LOG"
+  [ "$output" = "emit session.parked outcome=soft-park detail=2026-07-11T12:00:00Z" ]
+}
+
+@test "stop flag emits session.parked and still returns 42" {
+  _enable_emit
+  _write_immediate_stop_flag
+
+  run bash "$STOP_CHECK_SH" 1775 feat/wire-park-stop self_review
+  [ "$status" -eq 42 ]
+
+  [ -f "$BIN_LOG" ]
+  [ "$(wc -l < "$BIN_LOG" | tr -d ' ')" -eq 1 ]
+  run cat "$BIN_LOG"
+  [ "$output" = "emit session.parked outcome=stop detail=self_review" ]
+}
+
+@test "unset AUTOSPEC_DB_DSN yields 0 emit-binary calls from park and stop helpers" {
+  mkdir -p "$TMP/scripts"
+  cp "$SHIM" "$TMP/scripts/emit-event.sh"
+  export AUTOSPEC_SCRIPTS_DIR="$TMP/scripts"
+  export PATH="$TMP/bin:$PATH"
+  _install_usage_observe_stub
+
+  run bash "$USAGE_GOVERNOR_SH" codex --repo-dir "$TMP/no-repo" --resume-at 2026-07-11T12:00:00Z
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"park 2026-07-11T12:00:00Z"* ]]
+
+  _write_immediate_stop_flag
+  run bash "$STOP_CHECK_SH" 1775 feat/wire-park-stop stop_check
+  [ "$status" -eq 42 ]
+
+  [ ! -s "$BIN_LOG" ]
+}
+
+@test "no park or stop emitted call-site ever carries the DSN value" {
+  _enable_emit
+  _install_usage_observe_stub
+
+  bash "$USAGE_GOVERNOR_SH" codex --repo-dir "$TMP/no-repo" --resume-at 2026-07-11T12:00:00Z >/dev/null
+  _write_immediate_stop_flag
+  bash "$STOP_CHECK_SH" 1775 feat/wire-park-stop stop_check >/dev/null 2>&1 || [ "$?" -eq 42 ]
+
+  run cat "$BIN_LOG"
+  [[ "$output" != *"postgresql://"* ]]
+  [[ "$output" != *"secret"* ]]
+}
+
+@test "park and stop emit failures never alter authoritative return values" {
+  _enable_emit
+  cat > "$TMP/bin/autospec-db" <<'SH'
+#!/usr/bin/env bash
+exit 99
+SH
+  chmod +x "$TMP/bin/autospec-db"
+  _install_usage_observe_stub
+
+  run bash "$USAGE_GOVERNOR_SH" codex --repo-dir "$TMP/no-repo" --resume-at 2026-07-11T12:00:00Z
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"park 2026-07-11T12:00:00Z"* ]]
+
+  _write_immediate_stop_flag
+  run bash "$STOP_CHECK_SH" 1775 feat/wire-park-stop stop_check
+  [ "$status" -eq 42 ]
+}
+
 # --- telemetry-config.sh (issue #1776) ---------------------------------
 # yaml resolver mirroring advisor-config.sh: env > yaml > built-in default.
 
