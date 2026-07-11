@@ -1222,13 +1222,26 @@ inline label-swap path below.
 >        exit 1
 >      }
 >    fi
->    if [ -f Cargo.toml ] && cargo metadata --no-deps --format-version=1 >/tmp/autospec-cargo-metadata.json 2>/tmp/autospec-cargo-metadata.err; then
+>    if [ -f Cargo.toml ]; then
+>      if ! command -v cargo >/dev/null 2>&1; then
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-metadata crate=unknown file=Cargo.toml line=1 rule=cargo-unavailable"
+>        exit 1
+>      fi
+>      if ! cargo metadata --no-deps --format-version=1 >/tmp/autospec-cargo-metadata.json 2>/tmp/autospec-cargo-metadata.err; then
+>        _metadata_err=$(tr '
+' ' ' </tmp/autospec-cargo-metadata.err | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//' | cut -c1-500)
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-metadata crate=unknown file=Cargo.toml line=1 rule=${_metadata_err:-metadata-failed}"
+>        exit 1
+>      fi
 >      if ! cargo clippy --workspace --all-targets -- -D warnings >/tmp/autospec-final-quality-clippy.log 2>&1; then
 >        # Preserve raw clippy output and summarize the first diagnostic in a stable schema for reviewers.
->        # Implementations may enrich these fields from JSON diagnostics; the fallback keeps the schema present.
 >        _crate=$(jq -r '.packages[0].name // "unknown"' /tmp/autospec-cargo-metadata.json 2>/dev/null || printf 'unknown')
->        _first=$(grep -n -E 'warning:|error:' /tmp/autospec-final-quality-clippy.log | head -1 || true)
->        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-clippy crate=${_crate:-unknown} file=unknown line=unknown rule=${_first:-unknown}"
+>        _location=$(grep -m1 -E '^[[:space:]]*-->' /tmp/autospec-final-quality-clippy.log | sed -E 's/^[[:space:]]*-->[[:space:]]*//' || true)
+>        _file=$(printf '%s' "$_location" | awk -F: '{print $1}')
+>        _line=$(printf '%s' "$_location" | awk -F: '{print $2}')
+>        _rule=$(grep -m1 -Eo 'clippy::[A-Za-z0-9_]+' /tmp/autospec-final-quality-clippy.log || true)
+>        if [ -z "$_rule" ]; then _rule=$(grep -m1 -E 'warning:|error:' /tmp/autospec-final-quality-clippy.log | sed 's/^ *//' | cut -c1-200 || true); fi
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-clippy crate=${_crate:-unknown} file=${_file:-unknown} line=${_line:-unknown} rule=${_rule:-unknown}"
 >        exit 1
 >      fi
 >    fi

@@ -35,6 +35,27 @@ setup() {
   done
 }
 
+
+@test "Rust gate fails closed when cargo or metadata is unavailable" {
+  for f in "${AUTOSPEC_RUN_TRIO[@]}"; do
+    grep -q 'if \[ -f Cargo.toml \]; then' "$f"
+    grep -q 'command -v cargo' "$f"
+    grep -q 'command=cargo-metadata' "$f"
+    grep -q 'metadata-failed' "$f"
+    grep -q 'cargo-unavailable' "$f"
+  done
+}
+
+@test "clippy failure evidence parses file line and clippy rule before falling back" {
+  for f in "${AUTOSPEC_RUN_TRIO[@]}"; do
+    grep -Fq "grep -m1 -E '^[[:space:]]*-->'" "$f"
+    grep -Fq "awk -F: '{print \$1}'" "$f"
+    grep -Fq "awk -F: '{print \$2}'" "$f"
+    grep -Fq "grep -m1 -Eo 'clippy::" "$f"
+    ! grep -q 'command=cargo-clippy crate=${_crate:-unknown} file=unknown line=unknown' "$f"
+  done
+}
+
 @test "final quality gate appears before gh pr merge in the success path" {
   for f in "${AUTOSPEC_RUN_TRIO[@]}"; do
     gate_line="$(grep -n 'Final quality gate' "$f" | head -1 | cut -d: -f1)"
