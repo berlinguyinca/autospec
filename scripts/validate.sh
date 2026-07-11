@@ -5155,19 +5155,19 @@ check_db_telemetry_contract() {
     local f="skills/autospec-shared/scripts/emit-event.sh"
     [ -f "$f" ] || { fail "$f: missing"; return 1; }
     bash -n "$f" || fail "$f: bash syntax error"
+    # emit-event-wiring.bats is the SHARED per-chokepoint wiring suite
+    # (#1771-#1776) that every downstream chokepoint issue extends with its
+    # own @test cases; it is enumerated (never globbed) so a missing suite
+    # fails this gate closed rather than silently skipping coverage.
+    [ -f tests/unit/emit-event-wiring.bats ] \
+        || fail "tests/unit/emit-event-wiring.bats: required shared wiring suite missing"
     if command -v bats >/dev/null 2>&1; then
         info "  running: tests/unit/emit-event.bats"
         bats tests/unit/emit-event.bats >/tmp/validate-emit-event.log 2>&1 \
             || { cat /tmp/validate-emit-event.log >&2; fail "tests/unit/emit-event.bats: failed"; }
-        # emit-event-wiring.bats is the SHARED per-chokepoint wiring suite
-        # (#1771-#1776); it does not exist until the first chokepoint issue
-        # lands, so only run it once present rather than failing this
-        # foundation issue closed on a file that is intentionally out of scope.
-        if [ -f tests/unit/emit-event-wiring.bats ]; then
-            info "  running: tests/unit/emit-event-wiring.bats"
-            bats tests/unit/emit-event-wiring.bats >/tmp/validate-emit-event-wiring.log 2>&1 \
-                || { cat /tmp/validate-emit-event-wiring.log >&2; fail "tests/unit/emit-event-wiring.bats: failed"; }
-        fi
+        info "  running: tests/unit/emit-event-wiring.bats"
+        bats tests/unit/emit-event-wiring.bats >/tmp/validate-emit-event-wiring.log 2>&1 \
+            || { cat /tmp/validate-emit-event-wiring.log >&2; fail "tests/unit/emit-event-wiring.bats: failed"; }
     fi
 }
 
