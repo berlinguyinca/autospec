@@ -218,9 +218,11 @@ into the pipeline before attempting discovery:
   `auto-implement` queue.
 
 Promotion-sourced work still flows through Tier 1 and inherits autonomy, premerge,
-worktree, claim, validation, and merge gates. If promotion is dry, the conductor
-records the dry signal and continues to Tier 2; the dry count never triggers a
-convergence-stop.
+worktree, claim, validation, and merge gates. Tier 1.5 is work-yielding only
+when the promotion result reports `filed > 0` or a non-empty `promoted` set;
+`dry=false` with zero filed/promoted issues is still a dry promotion signal. If
+promotion is dry, the conductor records the dry signal and continues to Tier 2;
+the dry count never triggers a convergence-stop.
 
 ### Tier 2 — local codebase discovery
 

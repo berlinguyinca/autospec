@@ -1623,11 +1623,23 @@ fi'
                 _promote_out='{"dry":true,"filed":0,"reason":"promotion-command-missing"}'
             fi
 
-            local _promote_dry _promote_filed
+            local _promote_dry _promote_filed _promote_promoted
             _promote_dry="$(printf '%s' "$_promote_out" | jq -r 'if has("dry") then .dry else true end' 2>/dev/null || echo 'true')"
-            _promote_filed="$(printf '%s' "$_promote_out" | jq -r '.filed // .promoted // 0' 2>/dev/null || echo 0)"
-            printf '[conductor] Tier 1.5 promotion result: dry=%s filed=%s
-'                 "$_promote_dry" "$_promote_filed" >&2
+            _promote_filed="$(printf '%s' "$_promote_out" | jq -r '
+                if (.filed | type) == "number" then .filed
+                elif (.filed | type) == "string" then (.filed | tonumber? // 0)
+                else 0 end
+            ' 2>/dev/null || echo 0)"
+            _promote_promoted="$(printf '%s' "$_promote_out" | jq -r '
+                if (.promoted | type) == "array" then (.promoted | length)
+                elif (.promoted | type) == "number" then .promoted
+                elif (.promoted | type) == "string" then (.promoted | tonumber? // 0)
+                else 0 end
+            ' 2>/dev/null || echo 0)"
+            case "$_promote_filed" in ''|*[!0-9]*) _promote_filed=0 ;; esac
+            case "$_promote_promoted" in ''|*[!0-9]*) _promote_promoted=0 ;; esac
+            printf '[conductor] Tier 1.5 promotion result: dry=%s filed=%s promoted=%s
+'                 "$_promote_dry" "$_promote_filed" "$_promote_promoted" >&2
 
             # ── Grooming telemetry + self-governance tick ─────────────────────
             # The promoter (autonomous-promote-open-issues.sh) already owns the
@@ -1788,7 +1800,7 @@ fi'
                 fi
             fi
 
-            if [ "$_promote_dry" = "false" ] || { [ "$_promote_filed" -gt 0 ] 2>/dev/null; }; then
+            if [ "$_promote_filed" -gt 0 ] 2>/dev/null || [ "$_promote_promoted" -gt 0 ] 2>/dev/null; then
                 _work_done=1
             else
                 _tier15_dry_cycles=$((_tier15_dry_cycles + 1))
