@@ -875,9 +875,24 @@ KINDS
   run diff -u "$expected" "$actual"
   [ "$status" -eq 0 ]
 
-  while IFS= read -r kind; do
-    grep -q "$kind" "$BATS_TEST_FILENAME"
-  done < "$expected"
+  coverage="$TMP/pre-audit-coverage.txt"
+  awk '/^# --- Phase 5[.]5 integration audit/{exit} {print}' "$BATS_TEST_FILENAME" > "$coverage"
+
+  cat > "$TMP/kind-coverage-patterns.txt" <<'PATTERNS'
+artifact.filed|emit artifact.filed
+claim|emit claim
+feature.described|feature.described
+heartbeat|emit heartbeat
+session.parked|emit session.parked
+session.started|emit session.started
+session.step|emit session.step
+session.terminal|emit session.terminal
+PATTERNS
+
+  while IFS='|' read -r kind pattern; do
+    grep -Fq "$kind" "$expected"
+    grep -Fq "$pattern" "$coverage"
+  done < "$TMP/kind-coverage-patterns.txt"
 }
 
 @test "integration audit: telemetry shim and chokepoints never invoke psql" {
