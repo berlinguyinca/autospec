@@ -21,6 +21,8 @@ batch_size=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SAFETY_GATE="$SCRIPT_DIR/issue-safety-gate.sh"
+RUN_STATE="$SCRIPT_DIR/run-state.sh"
+HEARTBEAT_READ="$SCRIPT_DIR/heartbeat-read.sh"
 [ -f "$SAFETY_GATE" ] || die "missing issue safety gate helper: $SAFETY_GATE"
 # shellcheck source=/dev/null
 . "$SAFETY_GATE"
@@ -90,21 +92,6 @@ if [ -n "${AUTOSPEC_RUN_ONLY_ISSUES:-}" ]; then
     mv "$AUTO_FILE.tmp" "$AUTO_FILE"
 fi
 
-issue_list in-progress-by-bot > "$ACTIVE_FILE"
-active_count="$(jq 'length' "$ACTIVE_FILE")"
-if [ "$max_repo_workers" -gt 0 ]; then
-    remaining_workers=$((max_repo_workers - active_count))
-    [ "$remaining_workers" -gt 0 ] || remaining_workers=0
-else
-    remaining_workers="$batch_size"
-fi
-if [ "$max_repo_workers" -gt 0 ] && [ "$active_count" -ge "$max_repo_workers" ]; then
-    effective_batch_size=0
-elif [ "$max_repo_workers" -gt 0 ] && [ "$batch_size" -gt "$remaining_workers" ]; then
-    effective_batch_size="$remaining_workers"
-else
-    effective_batch_size="$batch_size"
-fi
 printf '[]\n' > "$READY_FILE"
 printf '[]\n' > "$BLOCKED_FILE"
 printf '[]\n' > "$CONFLICTS_FILE"
@@ -250,6 +237,86 @@ json_append() {
     mv "$file.tmp" "$file"
 }
 
+iso_to_epoch() {
+    [ -n "$1" ] || return 0
+    date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null \
+        || date -u -d "$1" +%s 2>/dev/null \
+        || true
+}
+
+issue_heartbeat_exists() {
+    issue_number="$1"
+    [ -x "$HEARTBEAT_READ" ] || return 1
+    heartbeat_json="$("$HEARTBEAT_READ" --issue "$issue_number" --repo "$repo" 2>/dev/null || true)"
+    [ -n "$heartbeat_json" ]
+}
+
+issue_run_state() {
+    issue_number="$1"
+    [ -x "$RUN_STATE" ] || return 0
+    "$RUN_STATE" read --issue "$issue_number" --repo "$repo" 2>/dev/null || true
+}
+
+branch_ref_exists() {
+    branch_name="$1"
+    [ -n "$branch_name" ] || return 1
+    git show-ref --verify --quiet "refs/heads/$branch_name" 2>/dev/null && return 0
+    git show-ref --verify --quiet "refs/remotes/origin/$branch_name" 2>/dev/null && return 0
+    [ -n "$(git ls-remote --heads origin "$branch_name" 2>/dev/null || true)" ]
+}
+
+startup_claim_has_evidence() {
+    issue_number="$1"
+    state_json="$2"
+    issue_heartbeat_exists "$issue_number" && return 0
+    branch_name="$(printf '%s\n' "$state_json" | jq -r '.branch // empty' 2>/dev/null || true)"
+    branch_ref_exists "$branch_name" && return 0
+    pr_number="$(printf '%s\n' "$state_json" | jq -r '.pr // empty' 2>/dev/null || true)"
+    [ -n "$pr_number" ] && return 0
+    return 1
+}
+
+release_startup_claim_if_stale() {
+    issue_number="$1"
+    state_json="$2"
+    timeout="${AUTOSPEC_STARTUP_EVIDENCE_TIMEOUT_SECS:-300}"
+    case "$timeout" in *[!0-9]*|'') timeout=300 ;; esac
+    [ "$timeout" -gt 0 ] || timeout=300
+
+    updated_at="$(printf '%s\n' "$state_json" | jq -r '.updated_at // .claimed_at // empty' 2>/dev/null || true)"
+    updated_epoch="$(iso_to_epoch "$updated_at")"
+    if [ -n "$updated_epoch" ]; then
+        now_epoch="$(date -u +%s)"
+        age=$((now_epoch - updated_epoch))
+    else
+        age="$timeout"
+    fi
+    if [ "$age" -ge "$timeout" ]; then
+        gh issue edit "$issue_number" --repo "$repo" \
+            --remove-label in-progress-by-bot \
+            --add-label auto-implement >/dev/null 2>&1 || true
+        if [ -x "$RUN_STATE" ]; then
+            "$RUN_STATE" clear --issue "$issue_number" --repo "$repo" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+filter_active_startup_claims() {
+    filtered_file="$(mktemp -t autospec-active-filtered.XXXXXX)"
+    printf '[]\n' > "$filtered_file"
+    active_numbers="$(jq -r 'sort_by(.number) | .[].number' "$ACTIVE_FILE")"
+    for active_number in $active_numbers; do
+        active_object="$(jq -c --argjson number "$active_number" '.[] | select(.number == $number)' "$ACTIVE_FILE")"
+        state_json="$(issue_run_state "$active_number")"
+        if startup_claim_has_evidence "$active_number" "$state_json"; then
+            json_append "$filtered_file" "$active_object"
+            continue
+        fi
+        release_startup_claim_if_stale "$active_number" "$state_json"
+    done
+    mv "$filtered_file" "$ACTIVE_FILE"
+}
+
 serialization_reasons_for_issue() {
     jq -r '
       [ (.labels // [])[]?.name
@@ -268,6 +335,23 @@ ready_paths_for_issue() {
     ready_issue="$1"
     jq -r --argjson issue "$ready_issue" '.[] | select(.number == $issue) | (.paths // [])[]' "$READY_FILE"
 }
+
+issue_list in-progress-by-bot > "$ACTIVE_FILE"
+filter_active_startup_claims
+active_count="$(jq 'length' "$ACTIVE_FILE")"
+if [ "$max_repo_workers" -gt 0 ]; then
+    remaining_workers=$((max_repo_workers - active_count))
+    [ "$remaining_workers" -gt 0 ] || remaining_workers=0
+else
+    remaining_workers="$batch_size"
+fi
+if [ "$max_repo_workers" -gt 0 ] && [ "$active_count" -ge "$max_repo_workers" ]; then
+    effective_batch_size=0
+elif [ "$max_repo_workers" -gt 0 ] && [ "$batch_size" -gt "$remaining_workers" ]; then
+    effective_batch_size="$remaining_workers"
+else
+    effective_batch_size="$batch_size"
+fi
 
 candidate_numbers="$(jq -r 'sort_by(.number) | .[].number' "$AUTO_FILE")"
 for number in $candidate_numbers; do

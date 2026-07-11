@@ -25,6 +25,11 @@ case "\$sub" in
     exit 0
     ;;
   "issue edit")
+    if [ -f "\${AUTOSPEC_HEARTBEAT_DIR:-\$FIXTURE_DIR/heartbeats}/test__repo/700.json" ]; then
+      printf 'heartbeat_present_at_edit=yes\n' >> "\$FIXTURE_DIR/edit.log"
+    else
+      printf 'heartbeat_present_at_edit=no\n' >> "\$FIXTURE_DIR/edit.log"
+    fi
     printf '%s\n' "\$*" >> "\$FIXTURE_DIR/edit.log"
     exit 1
     ;;
@@ -296,4 +301,16 @@ EOF
     [ "$status" -eq 2 ]
     [ "$(echo "$output" | jq -r '.reason')" = "label_mutation_failed" ]
     grep -q -- "--remove-label auto-implement --add-label in-progress-by-bot" "$FIXTURE_DIR/edit.log"
+}
+
+@test "claim writes startup heartbeat before adding in-progress label" {
+    write_issue "$(safe_block)" '[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
+    export AUTOSPEC_HEARTBEAT_DIR="$FIXTURE_DIR/heartbeats"
+
+    run run_claim
+
+    [ "$status" -eq 2 ]
+    [ "$(echo "$output" | jq -r '.reason')" = "label_mutation_failed" ]
+    [ -f "$FIXTURE_DIR/heartbeats/test__repo/700.json" ]
+    grep -q 'heartbeat_present_at_edit=yes' "$FIXTURE_DIR/edit.log"
 }

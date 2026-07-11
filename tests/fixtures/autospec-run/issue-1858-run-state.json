@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "repo": "test/repo",
+  "issue": 1858,
+  "worker_id": "worker-startup-failed",
+  "state": "claimed",
+  "branch": "fix/issue-1858-startup-failed",
+  "pr": "",
+  "step": "claimed",
+  "paths": [],
+  "claimed_at": "2000-01-01T00:00:00Z",
+  "updated_at": "2000-01-01T00:00:00Z",
+  "ttl_seconds": 10800
+}

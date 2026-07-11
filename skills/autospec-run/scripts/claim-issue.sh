@@ -5,6 +5,7 @@ set -eu
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 RUN_STATE="$SCRIPT_DIR/run-state.sh"
+HEARTBEAT_WRITE="$SCRIPT_DIR/heartbeat-write.sh"
 SAFETY_GATE="$SCRIPT_DIR/issue-safety-gate.sh"
 [ -f "$SAFETY_GATE" ] || {
     printf 'claim-issue: missing issue safety gate helper: %s\n' "$SAFETY_GATE" >&2
@@ -115,6 +116,25 @@ create_claim_comment() {
     gh issue comment "$issue" --repo "$repo" --body-file "$body_file" >/dev/null
 }
 
+write_startup_heartbeat() {
+    if [ -x "$HEARTBEAT_WRITE" ]; then
+        "$HEARTBEAT_WRITE" \
+            --issue "$issue" \
+            --repo "$repo" \
+            --step claimed \
+            --branch "$branch" >/dev/null
+        return
+    fi
+
+    heartbeat_base="${AUTOSPEC_HEARTBEAT_DIR:-${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}}"
+    slug="$(printf '%s' "$repo" | sed 's#/#__#')"
+    target_dir="$heartbeat_base/$slug"
+    mkdir -p "$target_dir"
+    now_ts="$(date -u +%s)"
+    printf '{"issue":"%s","branch":"%s","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' \
+        "$issue" "$branch" "$now_ts" "$repo" > "$target_dir/$issue.json"
+}
+
 usage() {
     cat <<'EOF'
 Usage: claim-issue.sh --issue <N> [--repo owner/repo] [--worker-id <id>] [--branch <branch>]
@@ -172,6 +192,12 @@ safety_gate_result="$(printf '%s\n' "$issue_json" | autospec_issue_safety_gate_r
 if ! printf '%s\n' "$safety_gate_result" | jq -e '.ok == true' >/dev/null 2>&1; then
     jq -n --argjson issue "$issue" --arg repo "$repo" --argjson safety_gate "$safety_gate_result" \
         '{claimed:false, issue:$issue, repo:$repo, reason:"safety_gate_failed", safety_gate:$safety_gate}'
+    exit 2
+fi
+
+if ! write_startup_heartbeat; then
+    jq -n --argjson issue "$issue" --arg repo "$repo" --arg reason "heartbeat_write_failed" \
+        '{claimed:false, issue:$issue, repo:$repo, reason:$reason}'
     exit 2
 fi
 
