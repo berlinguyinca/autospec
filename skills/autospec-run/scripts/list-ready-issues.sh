@@ -285,6 +285,7 @@ startup_claim_has_evidence() {
 release_startup_claim_if_stale() {
     issue_number="$1"
     state_json="$2"
+    release_startup_claim_result="preserve"
     timeout=300
 
     updated_at="$(printf '%s\n' "$state_json" | jq -r '.updated_at // .claimed_at // empty' 2>/dev/null || true)"
@@ -296,7 +297,8 @@ release_startup_claim_if_stale() {
         age="$timeout"
     fi
     if [ "$age" -lt "$timeout" ]; then
-        return 1
+        release_startup_claim_result="ignore"
+        return 0
     fi
 
     if ! gh issue edit "$issue_number" --repo "$repo" \
@@ -312,6 +314,7 @@ release_startup_claim_if_stale() {
             return 1
         fi
     fi
+    release_startup_claim_result="released"
     return 0
 }
 
@@ -329,7 +332,10 @@ filter_active_startup_claims() {
             json_append "$filtered_file" "$active_object"
             continue
         fi
+        release_startup_claim_result="preserve"
         if ! release_startup_claim_if_stale "$active_number" "$state_json"; then
+            json_append "$filtered_file" "$active_object"
+        elif [ "$release_startup_claim_result" = "preserve" ]; then
             json_append "$filtered_file" "$active_object"
         fi
     done

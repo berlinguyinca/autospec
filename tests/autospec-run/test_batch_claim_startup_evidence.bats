@@ -78,8 +78,13 @@ case "\$sub" in
       exit 1
     fi
     if [ "\${1:-}" = "api" ] && [ "\${2:-}" = "repos/test/repo/issues/1858/comments" ]; then
+      state_json="\$(cat "\$FIXTURE")"
+      if [ "\${FRESH_RUN_STATE:-0}" = "1" ]; then
+        now="\$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+        state_json="\$(jq --arg now "\$now" '.claimed_at = \$now | .updated_at = \$now' "\$FIXTURE")"
+      fi
       body="<!-- autospec-run-state:begin -->
-\$(cat "\$FIXTURE")
+\$state_json
 <!-- autospec-run-state:end -->"
       jq -n --arg body "\$body" '[{id:10,body:\$body,updated_at:"2000-01-01T00:00:00Z"}]'
       exit 0
@@ -149,6 +154,17 @@ run_list_ready() {
     [ "$status" -eq 0 ]
     [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | join(",")')" = "1858" ]
     [ "$(printf '%s\n' "$output" | jq -r '.worker_cap.active_count')" = "1" ]
+    [ "$(printf '%s\n' "$output" | jq -r '.batch | map(.number) | join(",")')" = "1859,1860,1861" ]
+    [ ! -s "$TMPDIR_BATS/edit.log" ]
+    [ ! -s "$TMPDIR_BATS/clear.log" ]
+}
+
+@test "young no-evidence startup claims are ignored for worker capacity until timeout" {
+    FRESH_RUN_STATE=1 run run_list_ready
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | join(",")')" = "" ]
+    [ "$(printf '%s\n' "$output" | jq -r '.worker_cap.active_count')" = "0" ]
     [ "$(printf '%s\n' "$output" | jq -r '.batch | map(.number) | join(",")')" = "1859,1860,1861" ]
     [ ! -s "$TMPDIR_BATS/edit.log" ]
     [ ! -s "$TMPDIR_BATS/clear.log" ]
