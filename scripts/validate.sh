@@ -1488,6 +1488,36 @@ check_phase4_full_test_suite_gate() {
     done
 }
 
+
+# Data-scope reviewer lens (issue #1466): diagnostic endpoints with optional
+# filters must not widen empty or unsupported filters into unrelated records.
+check_data_scope_review_lens() {
+    info "data-scope reviewer lens: autospec + autospec-run trios"
+    for f in \
+        skills/autospec/SKILL.md \
+        skills/autospec/codex/prompt.md \
+        skills/autospec/opencode/agent.md \
+        skills/autospec-run/SKILL.md \
+        skills/autospec-run/codex/prompt.md \
+        skills/autospec-run/opencode/agent.md
+    do
+        grep -q 'data-scope invariant lens' "$f" \
+            || fail "$f missing data-scope invariant lens"
+        grep -q 'empty optional filters reject unless documented' "$f" \
+            || fail "$f missing empty optional filter rejection requirement"
+        grep -q 'unsupported-filter' "$f" \
+            || fail "$f missing unsupported-filter evidence requirement"
+        grep -q 'empty-filter' "$f" \
+            || fail "$f missing empty-filter evidence requirement"
+        grep -q 'job-only' "$f" \
+            || fail "$f missing job-only evidence requirement"
+        grep -q 'sample-only' "$f" \
+            || fail "$f missing sample-only evidence requirement"
+        grep -q 'job+sample' "$f" \
+            || fail "$f missing job+sample evidence requirement"
+    done
+}
+
 # Phase 4 final quality gate (issue #1469): autospec-run must discover and run
 # repository-specific full-workspace quality checks after the final full suite
 # and before autonomous admin merge. Rust workspaces specifically require
@@ -3211,6 +3241,7 @@ main() {
     check_phase4_single_agent_discipline
     check_phase4_adaptive_retry
     check_phase4_full_test_suite_gate
+    check_data_scope_review_lens
     check_phase4_final_quality_gate
     check_phase4_cost_epic_parity_lockstep
     check_docs_drift_gate_regen_conditional_parity
