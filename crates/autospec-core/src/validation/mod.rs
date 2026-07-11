@@ -1,3 +1,5 @@
+pub mod affected;
+
 use std::collections::BTreeMap;
 use std::process::Command;
 
