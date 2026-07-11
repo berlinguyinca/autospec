@@ -27,6 +27,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 
 # Autospec workflow
 
+- [Autospec gap ledger](autospec-gap-ledger.md) — stable repeat-count ledger for mined review/CI/scope/QA misses filed as gap-remediation work
 - [Sync repo before /autospec design phases](feedback_pre_pipeline_sync.md) — check git fetch/status before brainstorming; stale local edits often duplicate landed upstream work
 - [autospec-split origin/main gate](feedback_autospec_split_origin_main_gate.md) — /autospec-split halts if spec not on origin/main; land spec first to avoid mid-pipeline PR detour
 - [Per-PR LGTM misses integration](feedback_per_pr_lgtm_misses_integration.md) — Phase 5.5 broad-audit caught 7 high-sev integration bugs that 19 per-PR LGTMs missed; never skip 5.5

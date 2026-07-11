@@ -1446,7 +1446,19 @@ Runs after the last issue in the batch closes/merges (queue drains, `ALL_DONE`),
 - `~/.autospec/no-review.flag` exists, OR
 - `--no-postreview` was passed to autospec-run.
 
-Otherwise run the bounded loop:
+Otherwise run the bounded loop. At closeout, also run the deterministic gap miner against available run evidence (review verdicts, fix commits, CI blockers, and QA/scope misses) so repeated misses become deduped `gap-remediation` issues and repeat counts land in `docs/memory/autospec-gap-ledger.md`:
+
+```bash
+if [ -s "${AUTOSPEC_RUN_GAP_EVENTS:-}" ]; then
+  bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-gap-miner.sh" \
+    --input "${AUTOSPEC_RUN_GAP_EVENTS}" \
+    --ledger docs/memory/autospec-gap-ledger.md \
+    --repo "${AUTOSPEC_REPO:-}" \
+    --file
+fi
+```
+
+Then continue the bounded Phase 5.5 loop:
 
 ```bash
 BATCH_START_DATE="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/run-batch-start.sh" --read)"
