@@ -21,7 +21,7 @@ Event payload contract `autospec.events.v1` — one JSON object per event.
 | `kind` | yes | one of the 8 kinds below |
 | `ts` | yes | client UTC ISO-8601 (server also stamps an authoritative `received_at`, clock-skew safe for stall math) |
 | `session_id` | yes | harness session-id fallback chain (`CLAUDE_CODE_SESSION_ID` → harness-neutral fallbacks) |
-| `host` | yes | `hostname -s` |
+| `host` | yes | `AUTOSPEC_DB_HOST_LABEL` when set to a non-empty value, else `hostname -s` (see `telemetry.host_label` below) |
 | `repo` | yes | `owner/name` |
 | `tier` | optional | kind-specific |
 | `issue` | optional | kind-specific |
@@ -95,6 +95,14 @@ autospec-db drain                        # force-drain the spool
 - **`AUTOSPEC_DB_DISABLE=1` — hard off.** When set, telemetry is fully disabled.
   The operator-facing surface is the `.autospec/autospec.yml` `telemetry:` block:
   `telemetry.enabled: false` makes the config loader export `AUTOSPEC_DB_DISABLE=1`.
+  **Enforcement point:** the config loader (`telemetry-config.sh`, session
+  bootstrap) is what honors this flag by never exporting `AUTOSPEC_DB_DSN` and
+  never writing `~/.autospec/db.env` in the first place — the shim itself (this
+  issue's scope stops at documenting the shim, not modifying it) has no
+  special-case branch for `AUTOSPEC_DB_DISABLE`; it only ever checks
+  `AUTOSPEC_DB_DSN` / `~/.autospec/db.env` presence. A disabled config that still
+  leaves a stale `db.env` on disk is out of scope here and tracked with the
+  loader work.
 - **Total no-op** when neither `AUTOSPEC_DB_DSN` is set NOR `~/.autospec/db.env`
   exists (`db.env` alone configures the binary — session bootstrap need not have
   exported the DSN), or when the `autospec-db` binary cannot be resolved.
