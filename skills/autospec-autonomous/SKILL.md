@@ -362,6 +362,14 @@ Tier-1 drain watchdog controls:
 
 - `AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS` — no-output stall budget for one `$autospec-run` drain. Default 1800; set `0` to disable.
 - `AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS` — poll interval for drain output progress. Default 15.
+- `AUTOSPEC_AUTONOMOUS_DRAIN_LOG` / `AUTOSPEC_AUTONOMOUS_DRAIN_LOG_FILE` — optional declared validation log file that counts as progress when long child validation redirects output.
+- `AUTOSPEC_AUTONOMOUS_DRAIN_LOG_GLOB` — optional shell glob for additional validation logs to count as progress.
+
+Heartbeat JSON updates under `~/.autospec/process-heartbeats/` also count as
+drain progress, so a quiet parent wrapper is not marked stalled while an issue
+worker is still advancing. If the stall budget is reached,
+`autospec-autonomous-run-drain.sh` checks for live descendant processes and
+runs GitHub reconciliation before terminating the `omx exec` child.
 
 If the harness wait/session handle disappears during a drain (for example Codex
 reports `write_stdin failed: Unknown process id`) or the drain wrapper times out,
