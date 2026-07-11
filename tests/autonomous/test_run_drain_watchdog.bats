@@ -68,6 +68,49 @@ EOF
   [[ "$output" == *"omx completed"* ]]
 }
 
+@test "run-drain: follows declared validation log progress from a quiet omx child" {
+  cat > "$TEST_TMP/bin/omx" <<'EOF'
+#!/usr/bin/env bash
+for _ in 1 2 3; do
+  printf 'validate tick\n' >> "$AUTOSPEC_AUTONOMOUS_DRAIN_LOG"
+  sleep 1
+done
+exit 0
+EOF
+  chmod +x "$TEST_TMP/bin/omx"
+
+  PATH="$TEST_TMP/bin:$PATH" \
+  AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=2 \
+  AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS=1 \
+  AUTOSPEC_AUTONOMOUS_DRAIN_LOG="$TEST_TMP/validate-1840-cleanenv.log" \
+  run bash "$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh"
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'validate tick' "$TEST_TMP/validate-1840-cleanenv.log")" -eq 3 ]
+}
+
+@test "run-drain: treats heartbeat updates as progress from a quiet omx child" {
+  cat > "$TEST_TMP/bin/omx" <<'EOF'
+#!/usr/bin/env bash
+heartbeat_dir="$HOME/.autospec/process-heartbeats/berlinguyinca_autospec"
+mkdir -p "$heartbeat_dir"
+for tick in 1 2 3; do
+  printf '{"issue":"1842","tick":%s}\n' "$tick" > "$heartbeat_dir/1842.json"
+  sleep 1
+done
+exit 0
+EOF
+  chmod +x "$TEST_TMP/bin/omx"
+
+  PATH="$TEST_TMP/bin:$PATH" \
+  AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=2 \
+  AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS=1 \
+  run bash "$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh"
+
+  [ "$status" -eq 0 ]
+  grep -q '"tick":3' "$HOME/.autospec/process-heartbeats/berlinguyinca_autospec/1842.json"
+}
+
 @test "run-drain: recovers stale wait handle by merging green in-progress PR" {
   cat > "$TEST_TMP/bin/omx" <<'EOF'
 #!/usr/bin/env bash
