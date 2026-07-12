@@ -1,4 +1,7 @@
 pub mod agent;
+pub mod autonomous {
+    pub mod audit;
+}
 pub mod error;
 pub mod evidence;
 pub mod execution;
