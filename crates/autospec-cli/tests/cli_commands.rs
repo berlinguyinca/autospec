@@ -5,28 +5,46 @@ fn autospec() -> Command {
     Command::new(env!("CARGO_BIN_EXE_autospec"))
 }
 
+fn help_command_names(help: &str) -> Vec<&str> {
+    help.lines()
+        .skip_while(|line| line.trim() != "COMMANDS:")
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty() && line.trim() != "OPTIONS:")
+        .filter_map(|line| line.split_whitespace().next())
+        .collect()
+}
+
+#[test]
+fn help_command_table_parser_returns_command_column_only() {
+    let help = "COMMANDS:\n    init           Initialize AutoSpec metadata\n    growth-report  Render metrics\n\nOPTIONS:\n    -h, --help       Print help\n";
+
+    assert_eq!(help_command_names(help), ["init", "growth-report"]);
+}
+
 #[test]
 fn cli_commands_help_lists_required_commands() {
     let output = autospec().arg("--help").output().expect("autospec runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    for command in [
-        "init",
-        "doctor",
-        "status",
-        "autonomous",
-        "plan",
-        "validate",
-        "run",
-        "resume",
-        "report",
-        "showcase",
-        "benchmark",
-        "growth-report",
-    ] {
-        assert!(stdout.contains(command), "help missing {command}");
-    }
+    assert_eq!(
+        help_command_names(&stdout),
+        [
+            "init",
+            "doctor",
+            "status",
+            "autonomous",
+            "plan",
+            "validate",
+            "run",
+            "runtime",
+            "resume",
+            "report",
+            "showcase",
+            "benchmark",
+            "growth-report",
+        ]
+    );
 }
 
 #[test]
@@ -828,6 +846,26 @@ fn autonomous_start_writes_launch_provenance_and_list_reports_it() {
     assert!(stdout.contains("\"launch\""));
     assert!(stdout.contains("\"repo\":\"berlinguyinca/autospec\""));
     cleanup_pids(&scope);
+}
+
+#[test]
+fn autonomous_list_reports_empty_object_for_malformed_launch_json() {
+    let temp = temp_dir("autospec-autonomous-launch-malformed");
+    let operator_dir = temp.join("operator");
+    let scope = operator_dir.join("berlinguyinca_autospec");
+    std::fs::create_dir_all(&scope).expect("scope dir");
+    std::fs::write(scope.join("launch.json"), "not-json").expect("launch json");
+
+    let output = autospec()
+        .args(["autonomous", "list", "--json"])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .output()
+        .expect("autospec autonomous list runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"scope\":\"berlinguyinca_autospec\""));
+    assert!(stdout.contains("\"launch\":{}"));
 }
 
 #[test]

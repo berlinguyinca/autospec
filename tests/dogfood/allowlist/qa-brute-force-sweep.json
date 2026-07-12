@@ -1,20 +1,8 @@
 [
   {
-    "file": "crates/autospec-cli/src/commands/autonomous.rs",
-    "function": "read_launch_json",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "inherited Rust autonomous CLI parser shape from main; refactor under Rust runtime consolidation, not issue #1886 conflict-loop fix"
-  },
-  {
     "file": "crates/autospec-cli/tests/cli_commands.rs",
     "function": "autospec",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "inherited Rust CLI command test helper from main; replace substring assertions in a dedicated CLI test cleanup"
-  },
-  {
-    "file": "scripts/autospec-baseline-v25.py",
-    "function": "handle_generic_command",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "pre-existing generated baseline command dispatcher; refactor separately from repo quality audit loop"
   }
 ]

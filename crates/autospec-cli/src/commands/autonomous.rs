@@ -954,12 +954,16 @@ fn write_launch_json(
     fs::write(&path, body).map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
 
+const JSON_OBJECT_START: char = '{';
+const EMPTY_JSON_OBJECT: &str = "{}";
+
 fn read_launch_json(state_dir: &Path) -> String {
     let raw = fs::read_to_string(state_dir.join("launch.json")).unwrap_or_default();
-    if raw.trim().starts_with('{') {
-        raw.trim().to_string()
+    let launch = raw.trim();
+    if launch.starts_with(JSON_OBJECT_START) {
+        launch.to_string()
     } else {
-        "{}".to_string()
+        EMPTY_JSON_OBJECT.to_string()
     }
 }
 
@@ -1130,10 +1134,11 @@ fn read_spend_json() -> String {
         &[".autospec", "autonomous-spend.json"],
     );
     let raw = fs::read_to_string(path).unwrap_or_default();
-    if raw.trim().starts_with('{') {
-        raw.trim().to_string()
+    let spend = raw.trim();
+    if spend.starts_with(JSON_OBJECT_START) {
+        spend.to_string()
     } else {
-        "{}".to_string()
+        EMPTY_JSON_OBJECT.to_string()
     }
 }
 
@@ -1382,40 +1387,53 @@ fn timeline_forecast(lines: &[String]) -> Option<Vec<String>> {
             format_duration_range((total * 45) as i64, (total * 90) as i64)
         ),
     ];
-    let mut planned = String::new();
-    if let Some(issue) = claimed.first() {
-        planned = issue_label(issue);
-        rows.push(format!("planned next: finish {planned}"));
-        rows.push(
-            "next item start estimate: after current item finishes, roughly 15-45 minutes of handoff overhead"
-                .to_string(),
-        );
-    } else if let Some(issue) = batch.first() {
-        planned = issue_label(issue);
-        rows.push(format!("planned next: start {planned}"));
-        rows.push("next item start estimate: likely within the next conductor cycle".to_string());
-    } else if let Some(issue) = ready.first() {
-        planned = issue_label(issue);
-        rows.push(format!("planned next: start {planned}"));
-        rows.push("next item start estimate: likely within the next conductor cycle".to_string());
+    let plan_candidates = [
+        (
+            claimed.first(),
+            "finish",
+            "after current item finishes, roughly 15-45 minutes of handoff overhead",
+        ),
+        (
+            batch.first(),
+            "start",
+            "likely within the next conductor cycle",
+        ),
+        (
+            ready.first(),
+            "start",
+            "likely within the next conductor cycle",
+        ),
+    ];
+    let planned = plan_candidates
+        .into_iter()
+        .find_map(|(issue, verb, estimate)| {
+            issue.map(|issue| (issue_label(issue), verb, estimate))
+        });
+    let planned_label = planned
+        .as_ref()
+        .map(|(label, _, _)| label.clone())
+        .unwrap_or_default();
+    if let Some((label, verb, estimate)) = planned {
+        rows.push(format!("planned next: {verb} {label}"));
+        rows.push(format!("next item start estimate: {estimate}"));
     }
-    if let Some(issue) = batch.first() {
-        let label = issue_label(issue);
-        if !label.is_empty()
-            && label != planned
-            && !claimed.iter().any(|item| issue_label(item) == label)
-        {
-            rows.push(format!("then start {label}"));
-        }
+
+    let then_start = if !batch.is_empty() {
+        batch.first().map(issue_label).filter(|label| {
+            !label.is_empty()
+                && label != &planned_label
+                && !claimed.iter().any(|item| issue_label(item) == *label)
+        })
     } else if !claimed.is_empty() {
-        if let Some(issue) = ready.first() {
-            rows.push(format!("then start {}", issue_label(issue)));
-        }
-    } else if ready.len() > 1 {
-        rows.push(format!("then start {}", issue_label(&ready[1])));
+        ready.first().map(issue_label)
+    } else {
+        ready.get(1).map(issue_label)
+    };
+    if let Some(label) = then_start {
+        rows.push(format!("then start {label}"));
     }
-    if let Some(issue) = blocked.first() {
-        rows.push(format!("blocked later: {}", issue_label(issue)));
+    if let Some(label) = blocked.first().map(issue_label) {
+        rows.push(format!("blocked later: {label}"));
     }
     Some(rows)
 }

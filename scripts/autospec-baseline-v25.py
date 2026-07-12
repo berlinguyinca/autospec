@@ -5465,7 +5465,81 @@ def v61_run_all(root: Path) -> dict:
     return v61_status(root)
 
 
-LEGACY_COMMAND_READY_STATUS = {
+def _generic_contract_command(root: Path, version: int, args) -> int:
+    generic_contract(root, version)
+    return 0
+
+
+def _generic_preflight_command(root: Path, version: int, args) -> int:
+    payload = generic_preflight(root, version)
+    return 0 if not payload["blockers"] else 1
+
+
+def _generic_artifact_build_command(root: Path, version: int, args) -> int:
+    generic_artifact_build(root, version)
+    return 0
+
+
+def _generic_gate_command(root: Path, version: int, args) -> int:
+    payload = generic_gate(root, version, args)
+    return 0 if not payload["blockers"] else 1
+
+
+def _generic_audit_command(root: Path, version: int, args) -> int:
+    generic_audit(root, version)
+    return 0
+
+
+def _generic_verifier_command(root: Path, version: int, args) -> int:
+    payload = generic_verifier(root, version)
+    return 0 if not payload["blockers"] else 1
+
+
+def _generic_recovery_command(root: Path, version: int, args) -> int:
+    generic_recovery(root, version)
+    return 0
+
+
+def _generic_status_command(root: Path, version: int, args) -> int:
+    payload = generic_status(root, version)
+    print(f"v{version} status: {payload['status']}")
+    return 0 if payload["status"] == GENERIC_PHASES[version].get("ready_status", "ready") else 1
+
+
+def _generic_supervisor_command(root: Path, version: int, args) -> int:
+    payload = generic_supervisor(root, version, args)
+    print(f"v{version} status: {payload['status']}")
+    return 0 if payload["status"] == GENERIC_PHASES[version].get("ready_status", "ready") else 1
+
+
+GENERIC_COMMAND_DISPATCHERS = (
+    ("contract", _generic_contract_command),
+    ("preflight", _generic_preflight_command),
+    ("artifact-build", _generic_artifact_build_command),
+    ("gate", _generic_gate_command),
+    ("audit", _generic_audit_command),
+    ("verifier", _generic_verifier_command),
+    ("recovery", _generic_recovery_command),
+    ("status", _generic_status_command),
+    ("supervisor", _generic_supervisor_command),
+)
+
+
+def handle_generic_command(root: Path, args) -> int | None:
+    generic_actions = "|".join(re.escape(action) for action, _handler in GENERIC_COMMAND_DISPATCHERS)
+    m = re.fullmatch(rf"v(\d+)-({generic_actions})", args.command)
+    if not m:
+        return None
+    version=int(m.group(1)); action=m.group(2)
+    if version not in GENERIC_PHASES:
+        return None
+    for registered_action, handler in GENERIC_COMMAND_DISPATCHERS:
+        if action == registered_action:
+            return handler(root, version, args)
+    return None
+
+
+LEGACY_VERSION_READY_STATUS = {
     26: "ready_after_human_canary",
     27: "ready_after_human_canary",
     28: "ready",
@@ -5482,132 +5556,53 @@ LEGACY_COMMAND_READY_STATUS = {
     39: "ready",
 }
 
-
-def _legacy_call_root(handler, root: Path, args, version: int) -> int:
-    handler(root)
-    return 0
-
-
-def _legacy_call_blocker_payload(handler, root: Path, args, version: int) -> int:
-    payload = handler(root)
-    return 0 if not payload["blockers"] else 1
-
-
-def _legacy_call_gate(handler, root: Path, args, version: int) -> int:
-    payload = handler(root, args)
-    return 0 if not payload["blockers"] else 1
+LEGACY_VERSION_ACTIONS = (
+    "contract",
+    "preflight",
+    "artifact-build",
+    "gate",
+    "audit",
+    "verifier",
+    "recovery",
+    "status",
+    "supervisor",
+)
 
 
-def _legacy_call_status(handler, root: Path, args, version: int) -> int:
-    payload = handler(root)
-    print(f"v{version} status: {payload['status']}")
-    return 0 if payload["status"] == LEGACY_COMMAND_READY_STATUS[version] else 1
-
-
-def _legacy_call_supervisor(handler, root: Path, args, version: int) -> int:
-    payload = handler(root, args)
-    print(f"v{version} status: {payload['status']}")
-    return 0 if payload["status"] == LEGACY_COMMAND_READY_STATUS[version] else 1
-
-
-LEGACY_ACTION_DISPATCH = {
-    "contract": _legacy_call_root,
-    "preflight": _legacy_call_blocker_payload,
-    "artifact-build": _legacy_call_root,
-    "gate": _legacy_call_gate,
-    "audit": _legacy_call_root,
-    "verifier": _legacy_call_blocker_payload,
-    "recovery": _legacy_call_root,
-    "status": _legacy_call_status,
-    "supervisor": _legacy_call_supervisor,
-}
-
-
-def handle_legacy_command(root: Path, args) -> int | None:
-    m = re.fullmatch(r"v(\d+)-(contract|preflight|artifact-build|gate|audit|verifier|recovery|status|supervisor)", args.command)
+def handle_legacy_version_command(root: Path, args) -> int | None:
+    actions = "|".join(re.escape(action) for action in LEGACY_VERSION_ACTIONS)
+    m = re.fullmatch(rf"v(\d+)-({actions})", args.command)
     if not m:
         return None
-    version = int(m.group(1))
+    version_text = m.group(1)
+    version = int(version_text)
     action = m.group(2)
-    if version not in LEGACY_COMMAND_READY_STATUS:
+    ready_status = LEGACY_VERSION_READY_STATUS.get(version)
+    if ready_status is None or version_text != str(version):
         return None
-
-    runner = LEGACY_ACTION_DISPATCH[action]
     handler = globals()[f"v{version}_{action.replace('-', '_')}"]
-    return runner(handler, root, args, version)
-
-
-def handle_generic_command(root: Path, args) -> int | None:
-    m = re.fullmatch(r"v(\d+)-(contract|preflight|artifact-build|gate|audit|verifier|recovery|status|supervisor)", args.command)
-    if not m:
-        return None
-    version=int(m.group(1)); action=m.group(2)
-    if version not in GENERIC_PHASES:
-        return None
-    if action == "contract": generic_contract(root, version); return 0
-    if action == "preflight": payload=generic_preflight(root, version); return 0 if not payload["blockers"] else 1
-    if action == "artifact-build": generic_artifact_build(root, version); return 0
-    if action == "gate": payload=generic_gate(root, version, args); return 0 if not payload["blockers"] else 1
-    if action == "audit": generic_audit(root, version); return 0
-    if action == "verifier": payload=generic_verifier(root, version); return 0 if not payload["blockers"] else 1
-    if action == "recovery": generic_recovery(root, version); return 0
-    if action == "status":
-        payload=generic_status(root, version); print(f"v{version} status: {payload['status']}"); return 0 if payload["status"] == GENERIC_PHASES[version].get("ready_status", "ready") else 1
-    if action == "supervisor":
-        payload=generic_supervisor(root, version, args); print(f"v{version} status: {payload['status']}"); return 0 if payload["status"] == GENERIC_PHASES[version].get("ready_status", "ready") else 1
-    return None
-
-
-def _core_spec_coverage_command(root: Path, args) -> int:
-    spec_coverage(root)
-    print("Spec Inventory: PASS")
+    if action in {"gate", "supervisor"}:
+        payload = handler(root, args)
+    else:
+        payload = handler(root)
+    if action in {"preflight", "gate", "verifier"}:
+        return 0 if not payload["blockers"] else 1
+    if action in {"status", "supervisor"}:
+        print(f"v{version} status: {payload['status']}")
+        return 0 if payload["status"] == ready_status else 1
     return 0
-
-
-def _core_release_validation_command(root: Path, args) -> int:
-    build_baseline(root)
-    release_validation(root)
-    print("Release Validation: PASS")
-    return 0
-
-
-def _core_baseline_validation_command(root: Path, args) -> int:
-    payload = baseline_validation(root)
-    for label in [
-        "Repository Audit",
-        "Spec Inventory",
-        "Dependency Graph",
-        "Documentation",
-        "CLI",
-        "Tests",
-        "Performance Baseline",
-        "Quality Baseline",
-        "Release Validation",
-    ]:
-        print(f"{label}: PASS")
-    print(f"V25_BASELINE_READY={'true' if payload['V25_BASELINE_READY'] else 'false'}")
-    return 0 if payload["V25_BASELINE_READY"] else 1
-
-
-def _core_v25_status_command(root: Path, args) -> int:
-    status = v25_status(root)
-    print(f"v25 status: {status['status']}")
-    print(f"V25_BASELINE_READY={'true' if status['V25_BASELINE_READY'] else 'false'}")
-    return 0 if status["V25_BASELINE_READY"] else 1
-
-
-def _command_payload_status(handler, root: Path, label: str, success_status: str) -> int:
-    payload = handler(root)
-    print(f"{label}: {payload['status']}")
-    return 0 if payload["status"] == success_status else 1
 
 
 def _v61_mainline_acceptance_command(root: Path, args) -> int:
-    return _command_payload_status(v61_mainline_acceptance, root, "v61 mainline acceptance", "accepted")
+    payload = v61_mainline_acceptance(root)
+    print(f"v61 mainline acceptance: {payload['status']}")
+    return 0 if payload["status"] == "accepted" else 1
 
 
 def _v61_capability_truth_audit_command(root: Path, args) -> int:
-    return _command_payload_status(v61_capability_truth_audit, root, "v61 capability truth audit", "pass")
+    payload = v61_capability_truth_audit(root)
+    print(f"v61 capability truth audit: {payload['status']}")
+    return 0 if payload["status"] == "pass" else 1
 
 
 def _v61_operator_command_catalog_command(root: Path, args) -> int:
@@ -5637,28 +5632,32 @@ def _v61_release_candidate_pack_command(root: Path, args) -> int:
 
 def _v61_postmerge_validation_command(root: Path, args) -> int:
     v61_ensure_status_chain(root)
-    return _command_payload_status(v61_postmerge_validation, root, "v61 postmerge validation", "pass")
+    payload = v61_postmerge_validation(root)
+    print(f"v61 postmerge validation: {payload['status']}")
+    return 0 if payload["status"] == "pass" else 1
 
 
 def _v61_human_approval_boundary_audit_command(root: Path, args) -> int:
-    return _command_payload_status(v61_human_approval_boundary_audit, root, "v61 human approval boundary audit", "pass")
+    payload = v61_human_approval_boundary_audit(root)
+    print(f"v61 human approval boundary audit: {payload['status']}")
+    return 0 if payload["status"] == "pass" else 1
 
 
 def _v61_remote_write_boundary_audit_command(root: Path, args) -> int:
-    return _command_payload_status(v61_remote_write_boundary_audit, root, "v61 remote write boundary audit", "pass")
+    payload = v61_remote_write_boundary_audit(root)
+    print(f"v61 remote write boundary audit: {payload['status']}")
+    return 0 if payload["status"] == "pass" else 1
 
 
 def _v61_status_command(root: Path, args) -> int:
     if not (root / ".autospec/reports/autonomy-v61-status.json").exists():
         v61_run_all(root)
-    return _command_payload_status(v61_status, root, "v61 status", "ready")
+    payload = v61_status(root)
+    print(f"v61 status: {payload['status']}")
+    return 0 if payload["status"] == "ready" else 1
 
 
-EXACT_COMMAND_DISPATCH = {
-    "spec-coverage": _core_spec_coverage_command,
-    "release-validation": _core_release_validation_command,
-    "baseline-validation": _core_baseline_validation_command,
-    "v25-status": _core_v25_status_command,
+V61_COMMAND_DISPATCHERS = {
     "v61-mainline-acceptance": _v61_mainline_acceptance_command,
     "v61-capability-truth-audit": _v61_capability_truth_audit_command,
     "v61-operator-command-catalog": _v61_operator_command_catalog_command,
@@ -5670,6 +5669,62 @@ EXACT_COMMAND_DISPATCH = {
     "v61-remote-write-boundary-audit": _v61_remote_write_boundary_audit_command,
     "v61-status": _v61_status_command,
 }
+
+
+def handle_v61_command(root: Path, args) -> int | None:
+    handler = V61_COMMAND_DISPATCHERS.get(args.command)
+    return None if handler is None else handler(root, args)
+
+
+def _core_spec_coverage_command(root: Path, args) -> int:
+    spec_coverage(root)
+    print("Spec Inventory: PASS")
+    return 0
+
+
+def _core_release_validation_command(root: Path, args) -> int:
+    build_baseline(root)
+    release_validation(root)
+    print("Release Validation: PASS")
+    return 0
+
+
+def _core_baseline_validation_command(root: Path, args) -> int:
+    payload = baseline_validation(root)
+    for label in (
+        "Repository Audit",
+        "Spec Inventory",
+        "Dependency Graph",
+        "Documentation",
+        "CLI",
+        "Tests",
+        "Performance Baseline",
+        "Quality Baseline",
+        "Release Validation",
+    ):
+        print(f"{label}: PASS")
+    print(f"V25_BASELINE_READY={'true' if payload['V25_BASELINE_READY'] else 'false'}")
+    return 0 if payload["V25_BASELINE_READY"] else 1
+
+
+def _core_v25_status_command(root: Path, args) -> int:
+    status = v25_status(root)
+    print(f"v25 status: {status['status']}")
+    print(f"V25_BASELINE_READY={'true' if status['V25_BASELINE_READY'] else 'false'}")
+    return 0 if status["V25_BASELINE_READY"] else 1
+
+
+EXACT_COMMAND_DISPATCHERS = {
+    "spec-coverage": _core_spec_coverage_command,
+    "release-validation": _core_release_validation_command,
+    "baseline-validation": _core_baseline_validation_command,
+    "v25-status": _core_v25_status_command,
+}
+
+
+def handle_exact_command(root: Path, args) -> int | None:
+    handler = EXACT_COMMAND_DISPATCHERS.get(args.command)
+    return None if handler is None else handler(root, args)
 
 
 def main() -> int:
@@ -5694,14 +5749,15 @@ def main() -> int:
     args = parser.parse_args()
     root = Path(args.repo_root).resolve()
 
-    exact_handler = EXACT_COMMAND_DISPATCH.get(args.command)
-    if exact_handler is not None:
-        return exact_handler(root, args)
-
-    legacy_result = handle_legacy_command(root, args)
+    exact_result = handle_exact_command(root, args)
+    if exact_result is not None:
+        return exact_result
+    legacy_result = handle_legacy_version_command(root, args)
     if legacy_result is not None:
         return legacy_result
-
+    v61_result = handle_v61_command(root, args)
+    if v61_result is not None:
+        return v61_result
     generic_result = handle_generic_command(root, args)
     if generic_result is not None:
         return generic_result
