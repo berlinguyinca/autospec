@@ -18,6 +18,13 @@ from pathlib import Path
 
 
 STATES = ("implemented", "scaffolded", "validated", "deferred", "experimental", "superseded")
+SPEC_STATE_RULES = [
+    ("superseded", ("superseded",), ("deprecated",)),
+    ("experimental", ("experimental",), ("experiment",)),
+    ("deferred", ("deferred", "beyond mvp"), ()),
+    ("validated", ("validated", "acceptance"), ()),
+    ("scaffolded", ("scaffold", "template"), ()),
+]
 REPORTS = [
     ".autospec/reports/repository-audit.md",
     ".autospec/spec-index.json",
@@ -111,16 +118,12 @@ def safety_payload() -> dict:
 def state_for_spec(path: Path) -> str:
     text = read_text(path).lower()
     name = path.name.lower()
-    if "superseded" in text or "deprecated" in name:
-        return "superseded"
-    if "experimental" in text or "experiment" in name:
-        return "experimental"
-    if "deferred" in text or "beyond mvp" in text:
-        return "deferred"
-    if "validated" in text or "acceptance" in text:
-        return "validated"
-    if "scaffold" in text or "template" in text:
-        return "scaffolded"
+    for state, text_markers, name_markers in SPEC_STATE_RULES:
+        if (
+            any(marker in text for marker in text_markers)
+            or any(marker in name for marker in name_markers)
+        ):
+            return state
     return "implemented"
 
 
