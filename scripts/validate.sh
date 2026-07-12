@@ -3439,6 +3439,7 @@ main() {
     check_grow_run_pipeline_contract
     check_grow_run_contract
     check_db_telemetry_contract
+    check_launch_readiness_contract
 
 
 # Architecture fitness-function engine (issue #1533): the declarative registry
@@ -5408,6 +5409,21 @@ check_run_groom_preflight_contract() {
         info "  running: $bats_file"
         bats "$bats_file" >/tmp/validate-run-groom-preflight.log 2>&1 \
             || { cat /tmp/validate-run-groom-preflight.log >&2; fail "$bats_file: failed"; }
+    fi
+}
+
+check_launch_readiness_contract() {
+    info "launch readiness: roadmap consolidation guard"
+    bash -n scripts/validate-launch-readiness.sh \
+        || fail "scripts/validate-launch-readiness.sh: bash syntax error"
+    grep -q 'ROADMAP.md must delegate to docs/roadmap.md' scripts/validate-launch-readiness.sh \
+        || fail "scripts/validate-launch-readiness.sh: missing root roadmap delegation guard"
+    grep -Fq 'Canonical roadmap details live in [docs/roadmap.md]' tests/launch/test_launch_readiness.bats \
+        || fail "tests/launch/test_launch_readiness.bats: missing canonical roadmap fixture"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/launch/test_launch_readiness.bats"
+        bats tests/launch/test_launch_readiness.bats >/tmp/validate-launch-readiness-bats.log 2>&1 \
+            || { cat /tmp/validate-launch-readiness-bats.log >&2; fail "tests/launch/test_launch_readiness.bats: failed"; }
     fi
 }
 
