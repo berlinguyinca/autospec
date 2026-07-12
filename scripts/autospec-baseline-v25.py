@@ -4765,200 +4765,254 @@ def generic_preflight(root: Path, version: int) -> dict:
     generic_write(root,version,"preflight",f"V{version} Preflight",payload); return payload
 
 
+
+# No reuse — the adjacent v61-v70 registry pattern is version-specific, so
+# generic v40-v60 artifact builders keep their existing payloads and use a
+# local registry dispatcher to preserve generated artifact bytes.
+
+def _build_generic_v40_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    fix={"schema":"autospec.autonomy.v40.local_fix_simulation","run_id":meta["run_id"],"fixes_applied":1,"patched_file":".autospec/autonomy/v40/disposable-fix/src/ci_fix_marker.txt","validation_result":"passed","github_writes_attempted":False}
+    target=artifact/"disposable-fix"/"src"; target.mkdir(parents=True, exist_ok=True); (target/"ci_fix_marker.txt").write_text("autospec v40 local CI fix simulation\n", encoding="utf-8")
+    write_json(artifact/"local-fix-simulation.json",fix); write_text(artifact/"local-fix-simulation.md","# V40 Local Fix Simulation\n\nOne local/disposable CI fix marker was applied and validated.\n")
+    write_json(artifact/"update-plan.json",{"schema":"autospec.autonomy.v40.update_plan","run_id":meta["run_id"],"plan_only":True,"push_attempted":False})
+    write_text(artifact/"update-plan.md","# V40 Update Plan\n\nPlan only; no push or PR update.\n")
+    write_text(artifact/"pr-handoff.md","# V40 PR Handoff\n\nLocal fix simulation is ready for later reviewed update planning.\n")
+
+def _build_generic_v41_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    dependency_plan={"schema":"autospec.autonomy.v41.dependency_plan","run_id":meta["run_id"],"plan_only":True,"package_operations":False,"lockfile_changed":False,"candidate_updates":[]}
+    preflight={"schema":"autospec.autonomy.v41.package_manager_preflight","run_id":meta["run_id"],"package_managers_detected":[],"install_attempted":False,"network_attempted":False}
+    risk={"schema":"autospec.autonomy.v41.ecosystem_risk","run_id":meta["run_id"],"risk":"none_selected","dependency_upgrade_attempted":False}
+    lockfile={"schema":"autospec.autonomy.v41.lockfile_policy","run_id":meta["run_id"],"lockfile_change_allowed_by_default":False,"lockfile_changed":False}
+    write_json(artifact/"dependency-plan.json",dependency_plan); write_text(artifact/"dependency-plan.md","# V41 Dependency Plan\n\nPlanning only; no package operation or lockfile change.\n")
+    write_json(artifact/"package-manager-preflight.json",preflight); write_text(artifact/"package-manager-preflight.md","# V41 Package Manager Preflight\n\nNo install or network operation was attempted.\n")
+    write_json(artifact/"ecosystem-risk.json",risk); write_text(artifact/"ecosystem-risk.md","# V41 Ecosystem Risk\n\nNo dependency selected for upgrade in planning mode.\n")
+    write_json(artifact/"lockfile-policy.json",lockfile); write_text(artifact/"lockfile-policy.md","# V41 Lockfile Policy\n\nLockfile changes are blocked by default.\n")
+
+def _build_generic_v42_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    proof={"schema":"autospec.autonomy.v42.disposable_dependency_proof","run_id":meta["run_id"],"dependency_updates_selected":1,"package_operation_simulated":True,"real_package_manager_invoked":False,"network_attempted":False,"lockfile_changed":False,"rollback_verified":True}
+    write_json(artifact/"disposable-dependency-proof.json",proof); write_text(artifact/"disposable-dependency-proof.md","# V42 Disposable Dependency Proof\n\nOne dependency update is modeled in a disposable artifact only; no real package manager or network ran.\n")
+    write_json(artifact/"rollback-evidence.json",{"schema":"autospec.autonomy.v42.rollback_evidence","run_id":meta["run_id"],"rollback_verified":True,"remote_cleanup_required":False})
+    write_text(artifact/"rollback-evidence.md","# V42 Rollback Evidence\n\nRollback is verified for the disposable modeled update.\n")
+
+def _build_generic_v43_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    write_json(artifact/"dependency-branch-push-plan.json",{"schema":"autospec.autonomy.v43.dependency_branch_push_plan","run_id":meta["run_id"],"execution":"blocked_until_approval","git_push_attempted":False})
+    write_text(artifact/"dependency-branch-push-plan.md","# V43 Dependency Branch Push Plan\n\nPlan only; no push performed.\n")
+    write_json(artifact/"draft-pr-plan.json",{"schema":"autospec.autonomy.v43.draft_pr_plan","run_id":meta["run_id"],"draft":True,"execution":"blocked_until_approval","draft_pr_create_attempted":False})
+    write_text(artifact/"draft-pr-plan.md","# V43 Draft PR Plan\n\nPlan only; no PR created.\n")
+    write_json(artifact/"approval-capsule-template.json",{"schema":"autospec.autonomy.v43.approval_capsule_template","run_id":meta["run_id"],"capsule_status":"template_only"})
+    write_text(artifact/"approval-capsule-template.md","# V43 Approval Capsule Template\n\nHuman approval required before dependency PR canary.\n")
+
+def _build_generic_v44_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    triage={"schema":"autospec.autonomy.v44.security_privacy_triage","run_id":meta["run_id"],"findings":[],"patching_attempted":False,"raw_secret_values_exposed":False}
+    risk={"schema":"autospec.autonomy.v44.risk_classification","run_id":meta["run_id"],"risk":"none_detected_in_local_artifacts","human_review_required":True}
+    sensitivity={"schema":"autospec.autonomy.v44.sensitivity_classification","run_id":meta["run_id"],"raw_secret_values_exposed":False,"pii_values_exposed":False}
+    decisions={"schema":"autospec.autonomy.v44.human_decisions","run_id":meta["run_id"],"decisions":["review_before_patch_planning"],"automatic_patching":False}
+    write_json(artifact/"security-privacy-triage.json",triage); write_text(artifact/"security-privacy-triage.md","# V44 Security/Privacy Triage\n\nRead-only triage artifacts only; no patching.\n")
+    write_json(artifact/"risk-classification.json",risk); write_text(artifact/"risk-classification.md","# V44 Risk Classification\n\nNo local artifact finding selected for automatic patching.\n")
+    write_json(artifact/"sensitivity-classification.json",sensitivity); write_text(artifact/"sensitivity-classification.md","# V44 Sensitivity Classification\n\nNo raw secret or PII values are emitted.\n")
+    write_json(artifact/"human-decisions.json",decisions); write_text(artifact/"human-decisions.md","# V44 Human Decisions\n\nHuman review is required before any patch planning.\n")
+
+def _build_generic_v45_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    plan={"schema":"autospec.autonomy.v45.security_patch_plan","run_id":meta["run_id"],"execution":"blocked_until_human_security_approval","auth_permission_changes_blocked":True,"secret_handling_changes_blocked":True,"patch_execution_attempted":False}
+    gate={"schema":"autospec.autonomy.v45.approval_gate","run_id":meta["run_id"],"human_security_approval_required":True,"approved":False}
+    write_json(artifact/"security-patch-plan.json",plan); write_text(artifact/"security-patch-plan.md","# V45 Security Patch Plan\n\nPatch plan only; execution is blocked by default.\n")
+    write_json(artifact/"security-approval-gate.json",gate); write_text(artifact/"security-approval-gate.md","# V45 Security Approval Gate\n\nHuman/security approval is required before patch proof.\n")
+
+def _build_generic_v46_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    target=artifact/"disposable-security-patch"/"docs"; target.mkdir(parents=True, exist_ok=True); (target/"SECURITY_BOUNDARIES.md").write_text("# Security Boundaries\n\nDisposable documentation/config patch proof only. No production secret handling.\n", encoding="utf-8")
+    proof={"schema":"autospec.autonomy.v46.disposable_patch_proof","run_id":meta["run_id"],"patches_applied":1,"validation_result":"passed","rollback_verified":True,"production_secret_handling":False}
+    write_json(artifact/"security-privacy-disposable-patch.json",proof); write_text(artifact/"security-privacy-disposable-patch.md","# V46 Disposable Security/Privacy Patch\n\nOne docs/config patch was applied under disposable artifacts.\n")
+    write_json(artifact/"escalation-boundaries.json",{"schema":"autospec.autonomy.v46.escalation_boundaries","run_id":meta["run_id"],"auth_permission_changes_blocked":True,"secret_handling_changes_blocked":True})
+    write_text(artifact/"escalation-boundaries.md","# V46 Escalation Boundaries\n\nAuth, permission, and secret-handling changes remain blocked.\n")
+
+def _build_generic_v47_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    proposal={"schema":"autospec.autonomy.v47.proposal_bundle","run_id":meta["run_id"],"target_repos":["autospec-constitution","autospec-baselines"],"verified":True,"companion_repo_write_attempted":False}
+    pr_plan={"schema":"autospec.autonomy.v47.companion_pr_plan","run_id":meta["run_id"],"draft":True,"execution":"blocked_until_approval","draft_pr_create_attempted":False}
+    approval={"schema":"autospec.autonomy.v47.approval_template","run_id":meta["run_id"],"capsule_status":"template_only"}
+    write_json(artifact/"proposal-bundle.json",proposal); write_text(artifact/"proposal-bundle.md","# V47 Proposal Bundle\n\nVerified governance proposal bundle; no companion repo write.\n")
+    write_json(artifact/"companion-pr-plan.json",pr_plan); write_text(artifact/"companion-pr-plan.md","# V47 Companion PR Plan\n\nDraft PR plan only; blocked until approval.\n")
+    write_json(artifact/"approval-capsule-template.json",approval); write_text(artifact/"approval-capsule-template.md","# V47 Approval Capsule Template\n\nHuman approval required before companion PR canary.\n")
+
+def _build_generic_v48_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    drift={"schema":"autospec.autonomy.v48.drift_report","run_id":meta["run_id"],"engine_constitution_baseline_drift":"modeled","law_changes_attempted":False}
+    proposals={"schema":"autospec.autonomy.v48.reconciliation_proposals","run_id":meta["run_id"],"proposal_only":True,"companion_repo_write_attempted":False}
+    compat={"schema":"autospec.autonomy.v48.compatibility_report","run_id":meta["run_id"],"compatible_with_current_baseline":True}
+    write_json(artifact/"drift-report.json",drift); write_text(artifact/"drift-report.md","# V48 Drift Report\n\nProposal-only drift comparison; no law changes.\n")
+    write_json(artifact/"reconciliation-proposals.json",proposals); write_text(artifact/"reconciliation-proposals.md","# V48 Reconciliation Proposals\n\nProposal-only; companion writes blocked.\n")
+    write_json(artifact/"compatibility-report.json",compat); write_text(artifact/"compatibility-report.md","# V48 Compatibility Report\n\nCurrent baseline remains compatible.\n")
+
+def _build_generic_v49_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    eval_payload={"schema":"autospec.autonomy.v49.learning_eval","run_id":meta["run_id"],"offline_only":True,"signals":["dogfood_runs","prs","issues","review_outcomes","failures"],"automatic_policy_changes":False}
+    ranking={"schema":"autospec.autonomy.v49.ranking_report","run_id":meta["run_id"],"ranking_improvement":"proposal_only","policy_changed":False}
+    failures={"schema":"autospec.autonomy.v49.failure_signal_report","run_id":meta["run_id"],"failure_signals_evaluated":True}
+    write_json(artifact/"learning-eval.json",eval_payload); write_text(artifact/"learning-eval.md","# V49 Learning Evaluation\n\nOffline evaluation only; no policy changes.\n")
+    write_json(artifact/"ranking-report.json",ranking); write_text(artifact/"ranking-report.md","# V49 Ranking Report\n\nRanking changes are proposals only.\n")
+    write_json(artifact/"failure-signal-report.json",failures); write_text(artifact/"failure-signal-report.md","# V49 Failure Signal Report\n\nFailure signals evaluated locally.\n")
+
+def _build_generic_v50_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    dashboard={"schema":"autospec.autonomy.v50.local_dashboard","run_id":meta["run_id"],"dashboard_mode":"local_artifacts","hidden_service_started":False,"scheduler":"absent","daemon":"absent","background_runner":"absent","operator_trust_summary":"local evidence only"}
+    run_status={"schema":"autospec.autonomy.v50.run_status_index","run_id":meta["run_id"],"previous_statuses":"ready" if generic_previous_ready(root,version) else "missing","current_status":"ready","claim_truth_reporting":"enabled"}
+    evidence={"schema":"autospec.autonomy.v50.evidence_index","run_id":meta["run_id"],"evidence_artifacts":["contract","preflight","gate","audit","verifier","recovery"],"raw_secret_values_exposed":False}
+    lease={"schema":"autospec.autonomy.v50.lease_status","run_id":meta["run_id"],"lease_required_for_writes":True,"write_lease_active":False,"real_write_allowed":False}
+    kill={"schema":"autospec.autonomy.v50.kill_switch_visibility","run_id":meta["run_id"],"kill_switch_visible":True,"auto_resume":False,"foreground_only":True}
+    truth={"schema":"autospec.autonomy.v50.claim_truth_report","run_id":meta["run_id"],"local_only_claims_labeled":True,"mock_or_dry_run_not_overclaimed":True,"forbidden_operations_attempted":False}
+    write_json(artifact/"local-dashboard.json",dashboard); write_text(artifact/"local-dashboard.md","# V50 Local Dashboard\n\nLocal artifact dashboard only; no service, scheduler, daemon, or background runner was started.\n")
+    write_json(artifact/"run-status-index.json",run_status); write_text(artifact/"run-status-index.md","# V50 Run Status Index\n\nRun status is represented as deterministic local artifacts.\n")
+    write_json(artifact/"evidence-index.json",evidence); write_text(artifact/"evidence-index.md","# V50 Evidence Index\n\nEvidence artifacts are indexed without raw secrets.\n")
+    write_json(artifact/"lease-status.json",lease); write_text(artifact/"lease-status.md","# V50 Lease Status\n\nNo write lease is active in local-artifact mode.\n")
+    write_json(artifact/"kill-switch-visibility.json",kill); write_text(artifact/"kill-switch-visibility.md","# V50 Kill-Switch Visibility\n\nForeground-only recovery is visible; auto-resume is disabled.\n")
+    write_json(artifact/"claim-truth-report.json",truth); write_text(artifact/"claim-truth-report.md","# V50 Claim Truth Report\n\nLocal, mock, and dry-run evidence is not overclaimed as remote execution.\n")
+
+def _build_generic_v51_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    design={"schema":"autospec.autonomy.v51.foreground_queue_design","run_id":meta["run_id"],"visible_invocation_required":True,"queue_service_started":False,"daemon":False,"scheduler":False,"background_runner":False}
+    lock_plan={"schema":"autospec.autonomy.v51.lock_plan","run_id":meta["run_id"],"lock_required":True,"lock_owner":"foreground_operator_invocation","auto_resume":False}
+    invocation={"schema":"autospec.autonomy.v51.visible_invocation_plan","run_id":meta["run_id"],"command_plan_only":True,"hidden_startup":False,"operator_attended_next_phase":"v52"}
+    scheduler_proof={"schema":"autospec.autonomy.v51.scheduler_absence_proof","run_id":meta["run_id"],"scheduler":"absent","cron":"absent","hidden_service":"absent"}
+    daemon_proof={"schema":"autospec.autonomy.v51.daemon_absence_proof","run_id":meta["run_id"],"daemon":"absent","pid_file_written":False,"background_process_started":False}
+    background_proof={"schema":"autospec.autonomy.v51.background_runner_absence_proof","run_id":meta["run_id"],"background_runner":"absent","auto_resume":False}
+    write_json(artifact/"foreground-queue-design.json",design); write_text(artifact/"foreground-queue-design.md","# V51 Foreground Queue Design\n\nReadiness-only design for a visibly invoked queue runner; no service was started.\n")
+    write_json(artifact/"lock-plan.json",lock_plan); write_text(artifact/"lock-plan.md","# V51 Lock Plan\n\nForeground lock plan only; no auto-resume.\n")
+    write_json(artifact/"visible-invocation-plan.json",invocation); write_text(artifact/"visible-invocation-plan.md","# V51 Visible Invocation Plan\n\nCommand plan only for a future operator-attended queue canary.\n")
+    write_json(artifact/"scheduler-absence-proof.json",scheduler_proof); write_text(artifact/"scheduler-absence-proof.md","# V51 Scheduler Absence Proof\n\nNo scheduler, cron, or hidden service is installed or started.\n")
+    write_json(artifact/"daemon-absence-proof.json",daemon_proof); write_text(artifact/"daemon-absence-proof.md","# V51 Daemon Absence Proof\n\nNo daemon or background process is started.\n")
+    write_json(artifact/"background-runner-absence-proof.json",background_proof); write_text(artifact/"background-runner-absence-proof.md","# V51 Background Runner Absence Proof\n\nNo background runner or auto-resume is enabled.\n")
+
+def _build_generic_v52_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    packet={"schema":"autospec.autonomy.v52.attended_queue_packet","run_id":meta["run_id"],"mode":"attended_queue","foreground_only":True,"operator_attended":True,"queue_items_executed":0,"github_write_attempted":False}
+    candidates={"schema":"autospec.autonomy.v52.tiny_candidate_set","run_id":meta["run_id"],"candidates":["local_artifact_probe"],"approved_candidate_count":1,"execution":"blocked_in_batch_prepare_only"}
+    lease={"schema":"autospec.autonomy.v52.finite_lease","run_id":meta["run_id"],"lease_scope":"foreground_canary_packet","lease_active":False,"requires_operator_attendance":True}
+    controls={"schema":"autospec.autonomy.v52.pause_stop_controls","run_id":meta["run_id"],"pause_visible":True,"stop_visible":True,"kill_switch_visible":True,"auto_resume":False}
+    progress={"schema":"autospec.autonomy.v52.foreground_progress","run_id":meta["run_id"],"progress_visible":True,"background_continuation":False,"steps_planned":["select_tiny_candidate_set","verify_lease","show_progress","stop_after_packet"]}
+    write_json(artifact/"attended-queue-packet.json",packet); write_text(artifact/"attended-queue-packet.md","# V52 Attended Queue Packet\n\nForeground-only attended queue canary packet. No queue item is executed in batch validation.\n")
+    write_json(artifact/"tiny-candidate-set.json",candidates); write_text(artifact/"tiny-candidate-set.md","# V52 Tiny Candidate Set\n\nOne local artifact candidate is modeled; execution remains blocked in batch prepare-only validation.\n")
+    write_json(artifact/"finite-lease.json",lease); write_text(artifact/"finite-lease.md","# V52 Finite Lease\n\nFinite lease is modeled; no active write lease is granted.\n")
+    write_json(artifact/"pause-stop-controls.json",controls); write_text(artifact/"pause-stop-controls.md","# V52 Pause/Stop Controls\n\nPause, stop, and kill-switch visibility are represented as local artifacts.\n")
+    write_json(artifact/"foreground-progress.json",progress); write_text(artifact/"foreground-progress.md","# V52 Foreground Progress\n\nProgress is visible and foreground-only; no background continuation occurs.\n")
+
+def _build_generic_v53_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    kill={"schema":"autospec.autonomy.v53.kill_switch_drill","run_id":meta["run_id"],"drill_mode":"local_mock","kill_switch_asserted":True,"destructive_action_attempted":False}
+    lease={"schema":"autospec.autonomy.v53.lease_revocation_drill","run_id":meta["run_id"],"lease_revoked_in_mock":True,"real_lease_revoked":False,"write_allowed_after_revocation":False}
+    stale={"schema":"autospec.autonomy.v53.stale_lock_drill","run_id":meta["run_id"],"stale_lock_detected":True,"auto_resume":False,"recommended_action":"foreground_review"}
+    partial={"schema":"autospec.autonomy.v53.partial_transaction_drill","run_id":meta["run_id"],"partial_transaction_modeled":True,"replay_attempted":False,"duplicate_write_attempted":False}
+    audit_trail={"schema":"autospec.autonomy.v53.audit_trail_drill","run_id":meta["run_id"],"audit_trail_complete":True,"raw_secret_values_exposed":False}
+    handoff={"schema":"autospec.autonomy.v53.failed_safe_handoff","run_id":meta["run_id"],"failed_safe_handoff_written":True,"human_review_required":True,"background_runner":"absent"}
+    write_json(artifact/"kill-switch-drill.json",kill); write_text(artifact/"kill-switch-drill.md","# V53 Kill Switch Drill\n\nLocal/mock drill only; no destructive action is attempted.\n")
+    write_json(artifact/"lease-revocation-drill.json",lease); write_text(artifact/"lease-revocation-drill.md","# V53 Lease Revocation Drill\n\nLease revocation is modeled locally; no real write lease remains active.\n")
+    write_json(artifact/"stale-lock-drill.json",stale); write_text(artifact/"stale-lock-drill.md","# V53 Stale Lock Drill\n\nStale lock handling recommends foreground review and never auto-resumes.\n")
+    write_json(artifact/"partial-transaction-drill.json",partial); write_text(artifact/"partial-transaction-drill.md","# V53 Partial Transaction Drill\n\nPartial transaction recovery is modeled without replaying writes.\n")
+    write_json(artifact/"audit-trail-drill.json",audit_trail); write_text(artifact/"audit-trail-drill.md","# V53 Audit Trail Drill\n\nAudit trail is complete and emits no raw secrets.\n")
+    write_json(artifact/"failed-safe-handoff.json",handoff); write_text(artifact/"failed-safe-handoff.md","# V53 Failed-Safe Handoff\n\nHuman review is required after failed-safe drill states.\n")
+
+def _build_generic_v54_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    inventory={"schema":"autospec.autonomy.v54.portfolio_inventory","run_id":meta["run_id"],"repos":["autospec","autotrade"],"read_only":True,"target_repo_writes_attempted":False}
+    ranking={"schema":"autospec.autonomy.v54.candidate_ranking","run_id":meta["run_id"],"ranking_mode":"plan_only","candidates_ranked":2,"automatic_dispatch":False}
+    deps={"schema":"autospec.autonomy.v54.shared_dependency_report","run_id":meta["run_id"],"shared_dependencies_detected":[],"package_operations":False}
+    rules={"schema":"autospec.autonomy.v54.shared_rule_report","run_id":meta["run_id"],"shared_rules":["no_default_branch_push","no_self_approval","no_auto_merge"],"policy_changes_attempted":False}
+    queue={"schema":"autospec.autonomy.v54.portfolio_queue_plan","run_id":meta["run_id"],"queue_plan_written":True,"execution":"not_started","target_repo_writes_attempted":False}
+    write_json(artifact/"portfolio-inventory.json",inventory); write_text(artifact/"portfolio-inventory.md","# V54 Portfolio Inventory\n\nRead-only portfolio inventory for Autospec and dogfood target context.\n")
+    write_json(artifact/"candidate-ranking.json",ranking); write_text(artifact/"candidate-ranking.md","# V54 Candidate Ranking\n\nPlanning-only ranking; no dispatch or target write.\n")
+    write_json(artifact/"shared-dependency-report.json",deps); write_text(artifact/"shared-dependency-report.md","# V54 Shared Dependency Report\n\nNo dependency operations are performed.\n")
+    write_json(artifact/"shared-rule-report.json",rules); write_text(artifact/"shared-rule-report.md","# V54 Shared Rule Report\n\nShared safety rules are reported without policy mutation.\n")
+    write_json(artifact/"portfolio-queue-plan.json",queue); write_text(artifact/"portfolio-queue-plan.md","# V54 Portfolio Queue Plan\n\nQueue plan only; no target repo writes.\n")
+
+def _build_generic_v55_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    clones={"schema":"autospec.autonomy.v55.disposable_clone_plan","run_id":meta["run_id"],"repos":["autospec","autotrade"],"clone_root":"/private/tmp/autospec-v55-*","original_target_writes":False}
+    change={"schema":"autospec.autonomy.v55.bounded_change_simulation","run_id":meta["run_id"],"simulation_only":True,"bounded_changes_modeled":2,"source_repo_modified":False}
+    conflicts={"schema":"autospec.autonomy.v55.conflict_detection","run_id":meta["run_id"],"conflicts_detected":False,"conflict_policy":"failed_safe_if_detected"}
+    fan_in={"schema":"autospec.autonomy.v55.fan_in_report","run_id":meta["run_id"],"simulated_repos":2,"validation_summary":"modeled_pass","remote_writes_attempted":False}
+    remote={"schema":"autospec.autonomy.v55.remote_write_negative_proof","run_id":meta["run_id"],"git_push_attempted":False,"github_write_attempted":False,"network_attempted":False}
+    write_json(artifact/"disposable-clone-plan.json",clones); write_text(artifact/"disposable-clone-plan.md","# V55 Disposable Clone Plan\n\nSimulation targets disposable clone paths only; original targets remain unchanged.\n")
+    write_json(artifact/"bounded-change-simulation.json",change); write_text(artifact/"bounded-change-simulation.md","# V55 Bounded Change Simulation\n\nBounded changes are modeled in simulation-only artifacts.\n")
+    write_json(artifact/"conflict-detection.json",conflicts); write_text(artifact/"conflict-detection.md","# V55 Conflict Detection\n\nNo conflicts are detected in the modeled fan-in plan.\n")
+    write_json(artifact/"fan-in-report.json",fan_in); write_text(artifact/"fan-in-report.md","# V55 Fan-In Report\n\nMulti-repo simulation fan-in is summarized without remote writes.\n")
+    write_json(artifact/"remote-write-negative-proof.json",remote); write_text(artifact/"remote-write-negative-proof.md","# V55 Remote Write Negative Proof\n\nNo push, GitHub write, or network operation occurred.\n")
+
+def _build_generic_v56_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    plan={"schema":"autospec.autonomy.v56.autotrade_feature_plan","run_id":meta["run_id"],"target":"autotrade","planning_only":True,"implementation_attempted":False,"candidates":["docs_evidence_observability_note"]}
+    boundaries={"schema":"autospec.autonomy.v56.domain_safety_boundaries","run_id":meta["run_id"],"trading_execution_changes_allowed":False,"secret_changes_allowed":False,"migration_changes_allowed":False,"auth_changes_allowed":False,"deployment_changes_allowed":False}
+    blocked={"schema":"autospec.autonomy.v56.blocked_categories_report","run_id":meta["run_id"],"blocked":["trading_execution","secrets","migrations","auth","deployment"],"blocked_categories_enforced":True}
+    ranking={"schema":"autospec.autonomy.v56.candidate_feature_ranking","run_id":meta["run_id"],"ranked_candidates":[{"id":"docs_evidence_observability_note","risk":"low","implementation":"deferred"}],"automatic_implementation":False}
+    write_json(artifact/"autotrade-feature-plan.json",plan); write_text(artifact/"autotrade-feature-plan.md","# V56 Autotrade Feature Plan\n\nPlanning only; implementation is deferred.\n")
+    write_json(artifact/"domain-safety-boundaries.json",boundaries); write_text(artifact/"domain-safety-boundaries.md","# V56 Domain Safety Boundaries\n\nTrading execution, secrets, migrations, auth, and deployment changes are blocked by default.\n")
+    write_json(artifact/"blocked-categories-report.json",blocked); write_text(artifact/"blocked-categories-report.md","# V56 Blocked Categories Report\n\nBlocked domain categories are enforced for planning.\n")
+    write_json(artifact/"candidate-feature-ranking.json",ranking); write_text(artifact/"candidate-feature-ranking.md","# V56 Candidate Feature Ranking\n\nOne low-risk candidate is ranked for future review; no implementation occurs.\n")
+
+def _build_generic_v57_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    packet={"schema":"autospec.autonomy.v57.canary_packet","run_id":meta["run_id"],"candidate":"docs_evidence_observability_note","execution":"locked_until_human_approval","implementation_attempted":False}
+    scope={"schema":"autospec.autonomy.v57.candidate_scope","run_id":meta["run_id"],"allowed":["docs","evidence","non_execution_helper"],"blocked":["trading_execution","secrets","migrations","auth","deployment"],"scope_safe":True}
+    approval={"schema":"autospec.autonomy.v57.approval_capsule_template","run_id":meta["run_id"],"approval_required":True,"capsule_status":"template_only","real_write_allowed":False}
+    branch_pr={"schema":"autospec.autonomy.v57.branch_pr_plan","run_id":meta["run_id"],"branch_plan":"non_default_after_approval","draft_pr_plan":"optional_after_approval","git_push_attempted":False,"draft_pr_create_attempted":False}
+    write_json(artifact/"canary-packet.json",packet); write_text(artifact/"canary-packet.md","# V57 Canary Packet\n\nOne domain-safe canary is prepared but locked until human approval.\n")
+    write_json(artifact/"candidate-scope.json",scope); write_text(artifact/"candidate-scope.md","# V57 Candidate Scope\n\nDocs/evidence or non-execution helper only; high-risk Autotrade domains remain blocked.\n")
+    write_json(artifact/"approval-capsule-template.json",approval); write_text(artifact/"approval-capsule-template.md","# V57 Approval Capsule Template\n\nTemplate only; no approval is provided in batch validation.\n")
+    write_json(artifact/"branch-pr-plan.json",branch_pr); write_text(artifact/"branch-pr-plan.md","# V57 Branch/PR Plan\n\nPlan only; no branch push or draft PR creation occurs.\n")
+
+def _build_generic_v58_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    freeze={"schema":"autospec.autonomy.v58.claim_freeze","run_id":meta["run_id"],"claims_frozen":True,"feature_expansion_attempted":False}
+    truth={"schema":"autospec.autonomy.v58.claim_truth_audit","run_id":meta["run_id"],"scaffolded_not_overclaimed":True,"dry_run_not_overclaimed":True,"local_only_not_overclaimed":True}
+    inventory={"schema":"autospec.autonomy.v58.status_inventory","run_id":meta["run_id"],"states":["implemented","scaffolded","validated","deferred"],"ambiguous_statuses":0}
+    bundle={"schema":"autospec.autonomy.v58.release_bundle_verification","run_id":meta["run_id"],"release_bundle_verified":True,"release_gates_blocked":False}
+    candidate={"schema":"autospec.autonomy.v58.v1_candidate_packet","run_id":meta["run_id"],"candidate":"v1.0","ready_for_human_review":True,"github_write_attempted":False}
+    write_json(artifact/"claim-freeze.json",freeze); write_text(artifact/"claim-freeze.md","# V58 Claim Freeze\n\nClaims are frozen for release hardening; no feature expansion occurs.\n")
+    write_json(artifact/"claim-truth-audit.json",truth); write_text(artifact/"claim-truth-audit.md","# V58 Claim Truth Audit\n\nScaffolded, dry-run, and local-only behavior is not overclaimed.\n")
+    write_json(artifact/"status-inventory.json",inventory); write_text(artifact/"status-inventory.md","# V58 Status Inventory\n\nImplemented, scaffolded, validated, and deferred statuses are inventoried.\n")
+    write_json(artifact/"release-bundle-verification.json",bundle); write_text(artifact/"release-bundle-verification.md","# V58 Release Bundle Verification\n\nRelease bundle verification is modeled as passing.\n")
+    write_json(artifact/"v1-candidate-packet.json",candidate); write_text(artifact/"v1-candidate-packet.md","# V58 v1.0 Candidate Packet\n\nCandidate packet is prepared for human review; no GitHub write occurs.\n")
+
+def _build_generic_v59_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    contracts={"schema":"autospec.autonomy.v59.plugin_contracts","run_id":meta["run_id"],"contracts_defined":True,"untrusted_plugin_execution_enabled":False}
+    permissions={"schema":"autospec.autonomy.v59.permission_model","run_id":meta["run_id"],"default_permissions":"deny","network_default":False,"filesystem_default":"artifact_only"}
+    sandbox={"schema":"autospec.autonomy.v59.sandbox_policy","run_id":meta["run_id"],"sandbox_required":True,"production_secret_access":False,"raw_env_access":False}
+    artifact_schema={"schema":"autospec.autonomy.v59.artifact_schema","run_id":meta["run_id"],"json_pretty":True,"markdown_primary":True,"raw_secret_values_exposed":False}
+    governance={"schema":"autospec.autonomy.v59.extension_governance","run_id":meta["run_id"],"review_required_for_plugins":True,"auto_enable_plugins":False}
+    write_json(artifact/"plugin-contracts.json",contracts); write_text(artifact/"plugin-contracts.md","# V59 Plugin Contracts\n\nPlugin contracts are specified; untrusted plugin execution remains disabled.\n")
+    write_json(artifact/"permission-model.json",permissions); write_text(artifact/"permission-model.md","# V59 Permission Model\n\nPermissions default to deny.\n")
+    write_json(artifact/"sandbox-policy.json",sandbox); write_text(artifact/"sandbox-policy.md","# V59 Sandbox Policy\n\nSandboxing is required; production secrets and raw env access are blocked.\n")
+    write_json(artifact/"artifact-schema.json",artifact_schema); write_text(artifact/"artifact-schema.md","# V59 Artifact Schema\n\nMarkdown remains primary and JSON remains deterministic.\n")
+    write_json(artifact/"extension-governance.json",governance); write_text(artifact/"extension-governance.md","# V59 Extension Governance\n\nPlugins require review and are not auto-enabled.\n")
+
+def _build_generic_v60_artifacts(root: Path, artifact: Path, meta: dict, version: int) -> None:
+    transfer={"schema":"autospec.autonomy.v60.governance_transfer_package","run_id":meta["run_id"],"transfer_ready":True,"no_auto_merge_default_preserved":True,"github_write_attempted":False}
+    manual={"schema":"autospec.autonomy.v60.operating_manual","run_id":meta["run_id"],"manual_written":True,"human_approval_required_for_remote_writes":True}
+    risk={"schema":"autospec.autonomy.v60.risk_register","run_id":meta["run_id"],"open_blockers":0,"residual_risks":["future phases require human review before real writes"]}
+    gates={"schema":"autospec.autonomy.v60.release_gates_packet","run_id":meta["run_id"],"release_gates_blocked":False,"security_privacy_blocked":False}
+    roadmap={"schema":"autospec.autonomy.v60.post_v60_roadmap","run_id":meta["run_id"],"next":"post-v60 governance transfer","auto_merge_default":False}
+    write_json(artifact/"governance-transfer-package.json",transfer); write_text(artifact/"governance-transfer-package.md","# V60 Governance Transfer Package\n\nGovernance transfer package is ready; no auto-merge default is preserved.\n")
+    write_json(artifact/"operating-manual.json",manual); write_text(artifact/"operating-manual.md","# V60 Operating Manual\n\nRemote writes remain gated by human approval and explicit flags.\n")
+    write_json(artifact/"risk-register.json",risk); write_text(artifact/"risk-register.md","# V60 Risk Register\n\nNo release blockers remain; future real writes require human review.\n")
+    write_json(artifact/"release-gates-packet.json",gates); write_text(artifact/"release-gates-packet.md","# V60 Release Gates Packet\n\nRelease and security/privacy gates are unblocked in local validation.\n")
+    write_json(artifact/"post-v60-roadmap.json",roadmap); write_text(artifact/"post-v60-roadmap.md","# V60 Post-v60 Roadmap\n\nNext phase is governance transfer; no auto-merge default remains preserved.\n")
+
+GENERIC_ARTIFACT_BUILDERS = {
+    40: _build_generic_v40_artifacts,
+    41: _build_generic_v41_artifacts,
+    42: _build_generic_v42_artifacts,
+    43: _build_generic_v43_artifacts,
+    44: _build_generic_v44_artifacts,
+    45: _build_generic_v45_artifacts,
+    46: _build_generic_v46_artifacts,
+    47: _build_generic_v47_artifacts,
+    48: _build_generic_v48_artifacts,
+    49: _build_generic_v49_artifacts,
+    50: _build_generic_v50_artifacts,
+    51: _build_generic_v51_artifacts,
+    52: _build_generic_v52_artifacts,
+    53: _build_generic_v53_artifacts,
+    54: _build_generic_v54_artifacts,
+    55: _build_generic_v55_artifacts,
+    56: _build_generic_v56_artifacts,
+    57: _build_generic_v57_artifacts,
+    58: _build_generic_v58_artifacts,
+    59: _build_generic_v59_artifacts,
+    60: _build_generic_v60_artifacts,
+}
+
+
 def generic_artifact_build(root: Path, version: int) -> dict:
     artifact=generic_dir(root,version); meta=GENERIC_PHASES[version]
-    if version == 40:
-        fix={"schema":"autospec.autonomy.v40.local_fix_simulation","run_id":meta["run_id"],"fixes_applied":1,"patched_file":".autospec/autonomy/v40/disposable-fix/src/ci_fix_marker.txt","validation_result":"passed","github_writes_attempted":False}
-        target=artifact/"disposable-fix"/"src"; target.mkdir(parents=True, exist_ok=True); (target/"ci_fix_marker.txt").write_text("autospec v40 local CI fix simulation\n", encoding="utf-8")
-        write_json(artifact/"local-fix-simulation.json",fix); write_text(artifact/"local-fix-simulation.md","# V40 Local Fix Simulation\n\nOne local/disposable CI fix marker was applied and validated.\n")
-        write_json(artifact/"update-plan.json",{"schema":"autospec.autonomy.v40.update_plan","run_id":meta["run_id"],"plan_only":True,"push_attempted":False})
-        write_text(artifact/"update-plan.md","# V40 Update Plan\n\nPlan only; no push or PR update.\n")
-        write_text(artifact/"pr-handoff.md","# V40 PR Handoff\n\nLocal fix simulation is ready for later reviewed update planning.\n")
-    if version == 41:
-        dependency_plan={"schema":"autospec.autonomy.v41.dependency_plan","run_id":meta["run_id"],"plan_only":True,"package_operations":False,"lockfile_changed":False,"candidate_updates":[]}
-        preflight={"schema":"autospec.autonomy.v41.package_manager_preflight","run_id":meta["run_id"],"package_managers_detected":[],"install_attempted":False,"network_attempted":False}
-        risk={"schema":"autospec.autonomy.v41.ecosystem_risk","run_id":meta["run_id"],"risk":"none_selected","dependency_upgrade_attempted":False}
-        lockfile={"schema":"autospec.autonomy.v41.lockfile_policy","run_id":meta["run_id"],"lockfile_change_allowed_by_default":False,"lockfile_changed":False}
-        write_json(artifact/"dependency-plan.json",dependency_plan); write_text(artifact/"dependency-plan.md","# V41 Dependency Plan\n\nPlanning only; no package operation or lockfile change.\n")
-        write_json(artifact/"package-manager-preflight.json",preflight); write_text(artifact/"package-manager-preflight.md","# V41 Package Manager Preflight\n\nNo install or network operation was attempted.\n")
-        write_json(artifact/"ecosystem-risk.json",risk); write_text(artifact/"ecosystem-risk.md","# V41 Ecosystem Risk\n\nNo dependency selected for upgrade in planning mode.\n")
-        write_json(artifact/"lockfile-policy.json",lockfile); write_text(artifact/"lockfile-policy.md","# V41 Lockfile Policy\n\nLockfile changes are blocked by default.\n")
-    if version == 42:
-        proof={"schema":"autospec.autonomy.v42.disposable_dependency_proof","run_id":meta["run_id"],"dependency_updates_selected":1,"package_operation_simulated":True,"real_package_manager_invoked":False,"network_attempted":False,"lockfile_changed":False,"rollback_verified":True}
-        write_json(artifact/"disposable-dependency-proof.json",proof); write_text(artifact/"disposable-dependency-proof.md","# V42 Disposable Dependency Proof\n\nOne dependency update is modeled in a disposable artifact only; no real package manager or network ran.\n")
-        write_json(artifact/"rollback-evidence.json",{"schema":"autospec.autonomy.v42.rollback_evidence","run_id":meta["run_id"],"rollback_verified":True,"remote_cleanup_required":False})
-        write_text(artifact/"rollback-evidence.md","# V42 Rollback Evidence\n\nRollback is verified for the disposable modeled update.\n")
-    if version == 43:
-        write_json(artifact/"dependency-branch-push-plan.json",{"schema":"autospec.autonomy.v43.dependency_branch_push_plan","run_id":meta["run_id"],"execution":"blocked_until_approval","git_push_attempted":False})
-        write_text(artifact/"dependency-branch-push-plan.md","# V43 Dependency Branch Push Plan\n\nPlan only; no push performed.\n")
-        write_json(artifact/"draft-pr-plan.json",{"schema":"autospec.autonomy.v43.draft_pr_plan","run_id":meta["run_id"],"draft":True,"execution":"blocked_until_approval","draft_pr_create_attempted":False})
-        write_text(artifact/"draft-pr-plan.md","# V43 Draft PR Plan\n\nPlan only; no PR created.\n")
-        write_json(artifact/"approval-capsule-template.json",{"schema":"autospec.autonomy.v43.approval_capsule_template","run_id":meta["run_id"],"capsule_status":"template_only"})
-        write_text(artifact/"approval-capsule-template.md","# V43 Approval Capsule Template\n\nHuman approval required before dependency PR canary.\n")
-    if version == 44:
-        triage={"schema":"autospec.autonomy.v44.security_privacy_triage","run_id":meta["run_id"],"findings":[],"patching_attempted":False,"raw_secret_values_exposed":False}
-        risk={"schema":"autospec.autonomy.v44.risk_classification","run_id":meta["run_id"],"risk":"none_detected_in_local_artifacts","human_review_required":True}
-        sensitivity={"schema":"autospec.autonomy.v44.sensitivity_classification","run_id":meta["run_id"],"raw_secret_values_exposed":False,"pii_values_exposed":False}
-        decisions={"schema":"autospec.autonomy.v44.human_decisions","run_id":meta["run_id"],"decisions":["review_before_patch_planning"],"automatic_patching":False}
-        write_json(artifact/"security-privacy-triage.json",triage); write_text(artifact/"security-privacy-triage.md","# V44 Security/Privacy Triage\n\nRead-only triage artifacts only; no patching.\n")
-        write_json(artifact/"risk-classification.json",risk); write_text(artifact/"risk-classification.md","# V44 Risk Classification\n\nNo local artifact finding selected for automatic patching.\n")
-        write_json(artifact/"sensitivity-classification.json",sensitivity); write_text(artifact/"sensitivity-classification.md","# V44 Sensitivity Classification\n\nNo raw secret or PII values are emitted.\n")
-        write_json(artifact/"human-decisions.json",decisions); write_text(artifact/"human-decisions.md","# V44 Human Decisions\n\nHuman review is required before any patch planning.\n")
-    if version == 45:
-        plan={"schema":"autospec.autonomy.v45.security_patch_plan","run_id":meta["run_id"],"execution":"blocked_until_human_security_approval","auth_permission_changes_blocked":True,"secret_handling_changes_blocked":True,"patch_execution_attempted":False}
-        gate={"schema":"autospec.autonomy.v45.approval_gate","run_id":meta["run_id"],"human_security_approval_required":True,"approved":False}
-        write_json(artifact/"security-patch-plan.json",plan); write_text(artifact/"security-patch-plan.md","# V45 Security Patch Plan\n\nPatch plan only; execution is blocked by default.\n")
-        write_json(artifact/"security-approval-gate.json",gate); write_text(artifact/"security-approval-gate.md","# V45 Security Approval Gate\n\nHuman/security approval is required before patch proof.\n")
-    if version == 46:
-        target=artifact/"disposable-security-patch"/"docs"; target.mkdir(parents=True, exist_ok=True); (target/"SECURITY_BOUNDARIES.md").write_text("# Security Boundaries\n\nDisposable documentation/config patch proof only. No production secret handling.\n", encoding="utf-8")
-        proof={"schema":"autospec.autonomy.v46.disposable_patch_proof","run_id":meta["run_id"],"patches_applied":1,"validation_result":"passed","rollback_verified":True,"production_secret_handling":False}
-        write_json(artifact/"security-privacy-disposable-patch.json",proof); write_text(artifact/"security-privacy-disposable-patch.md","# V46 Disposable Security/Privacy Patch\n\nOne docs/config patch was applied under disposable artifacts.\n")
-        write_json(artifact/"escalation-boundaries.json",{"schema":"autospec.autonomy.v46.escalation_boundaries","run_id":meta["run_id"],"auth_permission_changes_blocked":True,"secret_handling_changes_blocked":True})
-        write_text(artifact/"escalation-boundaries.md","# V46 Escalation Boundaries\n\nAuth, permission, and secret-handling changes remain blocked.\n")
-    if version == 47:
-        proposal={"schema":"autospec.autonomy.v47.proposal_bundle","run_id":meta["run_id"],"target_repos":["autospec-constitution","autospec-baselines"],"verified":True,"companion_repo_write_attempted":False}
-        pr_plan={"schema":"autospec.autonomy.v47.companion_pr_plan","run_id":meta["run_id"],"draft":True,"execution":"blocked_until_approval","draft_pr_create_attempted":False}
-        approval={"schema":"autospec.autonomy.v47.approval_template","run_id":meta["run_id"],"capsule_status":"template_only"}
-        write_json(artifact/"proposal-bundle.json",proposal); write_text(artifact/"proposal-bundle.md","# V47 Proposal Bundle\n\nVerified governance proposal bundle; no companion repo write.\n")
-        write_json(artifact/"companion-pr-plan.json",pr_plan); write_text(artifact/"companion-pr-plan.md","# V47 Companion PR Plan\n\nDraft PR plan only; blocked until approval.\n")
-        write_json(artifact/"approval-capsule-template.json",approval); write_text(artifact/"approval-capsule-template.md","# V47 Approval Capsule Template\n\nHuman approval required before companion PR canary.\n")
-    if version == 48:
-        drift={"schema":"autospec.autonomy.v48.drift_report","run_id":meta["run_id"],"engine_constitution_baseline_drift":"modeled","law_changes_attempted":False}
-        proposals={"schema":"autospec.autonomy.v48.reconciliation_proposals","run_id":meta["run_id"],"proposal_only":True,"companion_repo_write_attempted":False}
-        compat={"schema":"autospec.autonomy.v48.compatibility_report","run_id":meta["run_id"],"compatible_with_current_baseline":True}
-        write_json(artifact/"drift-report.json",drift); write_text(artifact/"drift-report.md","# V48 Drift Report\n\nProposal-only drift comparison; no law changes.\n")
-        write_json(artifact/"reconciliation-proposals.json",proposals); write_text(artifact/"reconciliation-proposals.md","# V48 Reconciliation Proposals\n\nProposal-only; companion writes blocked.\n")
-        write_json(artifact/"compatibility-report.json",compat); write_text(artifact/"compatibility-report.md","# V48 Compatibility Report\n\nCurrent baseline remains compatible.\n")
-    if version == 49:
-        eval_payload={"schema":"autospec.autonomy.v49.learning_eval","run_id":meta["run_id"],"offline_only":True,"signals":["dogfood_runs","prs","issues","review_outcomes","failures"],"automatic_policy_changes":False}
-        ranking={"schema":"autospec.autonomy.v49.ranking_report","run_id":meta["run_id"],"ranking_improvement":"proposal_only","policy_changed":False}
-        failures={"schema":"autospec.autonomy.v49.failure_signal_report","run_id":meta["run_id"],"failure_signals_evaluated":True}
-        write_json(artifact/"learning-eval.json",eval_payload); write_text(artifact/"learning-eval.md","# V49 Learning Evaluation\n\nOffline evaluation only; no policy changes.\n")
-        write_json(artifact/"ranking-report.json",ranking); write_text(artifact/"ranking-report.md","# V49 Ranking Report\n\nRanking changes are proposals only.\n")
-        write_json(artifact/"failure-signal-report.json",failures); write_text(artifact/"failure-signal-report.md","# V49 Failure Signal Report\n\nFailure signals evaluated locally.\n")
-    if version == 50:
-        dashboard={"schema":"autospec.autonomy.v50.local_dashboard","run_id":meta["run_id"],"dashboard_mode":"local_artifacts","hidden_service_started":False,"scheduler":"absent","daemon":"absent","background_runner":"absent","operator_trust_summary":"local evidence only"}
-        run_status={"schema":"autospec.autonomy.v50.run_status_index","run_id":meta["run_id"],"previous_statuses":"ready" if generic_previous_ready(root,version) else "missing","current_status":"ready","claim_truth_reporting":"enabled"}
-        evidence={"schema":"autospec.autonomy.v50.evidence_index","run_id":meta["run_id"],"evidence_artifacts":["contract","preflight","gate","audit","verifier","recovery"],"raw_secret_values_exposed":False}
-        lease={"schema":"autospec.autonomy.v50.lease_status","run_id":meta["run_id"],"lease_required_for_writes":True,"write_lease_active":False,"real_write_allowed":False}
-        kill={"schema":"autospec.autonomy.v50.kill_switch_visibility","run_id":meta["run_id"],"kill_switch_visible":True,"auto_resume":False,"foreground_only":True}
-        truth={"schema":"autospec.autonomy.v50.claim_truth_report","run_id":meta["run_id"],"local_only_claims_labeled":True,"mock_or_dry_run_not_overclaimed":True,"forbidden_operations_attempted":False}
-        write_json(artifact/"local-dashboard.json",dashboard); write_text(artifact/"local-dashboard.md","# V50 Local Dashboard\n\nLocal artifact dashboard only; no service, scheduler, daemon, or background runner was started.\n")
-        write_json(artifact/"run-status-index.json",run_status); write_text(artifact/"run-status-index.md","# V50 Run Status Index\n\nRun status is represented as deterministic local artifacts.\n")
-        write_json(artifact/"evidence-index.json",evidence); write_text(artifact/"evidence-index.md","# V50 Evidence Index\n\nEvidence artifacts are indexed without raw secrets.\n")
-        write_json(artifact/"lease-status.json",lease); write_text(artifact/"lease-status.md","# V50 Lease Status\n\nNo write lease is active in local-artifact mode.\n")
-        write_json(artifact/"kill-switch-visibility.json",kill); write_text(artifact/"kill-switch-visibility.md","# V50 Kill-Switch Visibility\n\nForeground-only recovery is visible; auto-resume is disabled.\n")
-        write_json(artifact/"claim-truth-report.json",truth); write_text(artifact/"claim-truth-report.md","# V50 Claim Truth Report\n\nLocal, mock, and dry-run evidence is not overclaimed as remote execution.\n")
-    if version == 51:
-        design={"schema":"autospec.autonomy.v51.foreground_queue_design","run_id":meta["run_id"],"visible_invocation_required":True,"queue_service_started":False,"daemon":False,"scheduler":False,"background_runner":False}
-        lock_plan={"schema":"autospec.autonomy.v51.lock_plan","run_id":meta["run_id"],"lock_required":True,"lock_owner":"foreground_operator_invocation","auto_resume":False}
-        invocation={"schema":"autospec.autonomy.v51.visible_invocation_plan","run_id":meta["run_id"],"command_plan_only":True,"hidden_startup":False,"operator_attended_next_phase":"v52"}
-        scheduler_proof={"schema":"autospec.autonomy.v51.scheduler_absence_proof","run_id":meta["run_id"],"scheduler":"absent","cron":"absent","hidden_service":"absent"}
-        daemon_proof={"schema":"autospec.autonomy.v51.daemon_absence_proof","run_id":meta["run_id"],"daemon":"absent","pid_file_written":False,"background_process_started":False}
-        background_proof={"schema":"autospec.autonomy.v51.background_runner_absence_proof","run_id":meta["run_id"],"background_runner":"absent","auto_resume":False}
-        write_json(artifact/"foreground-queue-design.json",design); write_text(artifact/"foreground-queue-design.md","# V51 Foreground Queue Design\n\nReadiness-only design for a visibly invoked queue runner; no service was started.\n")
-        write_json(artifact/"lock-plan.json",lock_plan); write_text(artifact/"lock-plan.md","# V51 Lock Plan\n\nForeground lock plan only; no auto-resume.\n")
-        write_json(artifact/"visible-invocation-plan.json",invocation); write_text(artifact/"visible-invocation-plan.md","# V51 Visible Invocation Plan\n\nCommand plan only for a future operator-attended queue canary.\n")
-        write_json(artifact/"scheduler-absence-proof.json",scheduler_proof); write_text(artifact/"scheduler-absence-proof.md","# V51 Scheduler Absence Proof\n\nNo scheduler, cron, or hidden service is installed or started.\n")
-        write_json(artifact/"daemon-absence-proof.json",daemon_proof); write_text(artifact/"daemon-absence-proof.md","# V51 Daemon Absence Proof\n\nNo daemon or background process is started.\n")
-        write_json(artifact/"background-runner-absence-proof.json",background_proof); write_text(artifact/"background-runner-absence-proof.md","# V51 Background Runner Absence Proof\n\nNo background runner or auto-resume is enabled.\n")
-    if version == 52:
-        packet={"schema":"autospec.autonomy.v52.attended_queue_packet","run_id":meta["run_id"],"mode":"attended_queue","foreground_only":True,"operator_attended":True,"queue_items_executed":0,"github_write_attempted":False}
-        candidates={"schema":"autospec.autonomy.v52.tiny_candidate_set","run_id":meta["run_id"],"candidates":["local_artifact_probe"],"approved_candidate_count":1,"execution":"blocked_in_batch_prepare_only"}
-        lease={"schema":"autospec.autonomy.v52.finite_lease","run_id":meta["run_id"],"lease_scope":"foreground_canary_packet","lease_active":False,"requires_operator_attendance":True}
-        controls={"schema":"autospec.autonomy.v52.pause_stop_controls","run_id":meta["run_id"],"pause_visible":True,"stop_visible":True,"kill_switch_visible":True,"auto_resume":False}
-        progress={"schema":"autospec.autonomy.v52.foreground_progress","run_id":meta["run_id"],"progress_visible":True,"background_continuation":False,"steps_planned":["select_tiny_candidate_set","verify_lease","show_progress","stop_after_packet"]}
-        write_json(artifact/"attended-queue-packet.json",packet); write_text(artifact/"attended-queue-packet.md","# V52 Attended Queue Packet\n\nForeground-only attended queue canary packet. No queue item is executed in batch validation.\n")
-        write_json(artifact/"tiny-candidate-set.json",candidates); write_text(artifact/"tiny-candidate-set.md","# V52 Tiny Candidate Set\n\nOne local artifact candidate is modeled; execution remains blocked in batch prepare-only validation.\n")
-        write_json(artifact/"finite-lease.json",lease); write_text(artifact/"finite-lease.md","# V52 Finite Lease\n\nFinite lease is modeled; no active write lease is granted.\n")
-        write_json(artifact/"pause-stop-controls.json",controls); write_text(artifact/"pause-stop-controls.md","# V52 Pause/Stop Controls\n\nPause, stop, and kill-switch visibility are represented as local artifacts.\n")
-        write_json(artifact/"foreground-progress.json",progress); write_text(artifact/"foreground-progress.md","# V52 Foreground Progress\n\nProgress is visible and foreground-only; no background continuation occurs.\n")
-    if version == 53:
-        kill={"schema":"autospec.autonomy.v53.kill_switch_drill","run_id":meta["run_id"],"drill_mode":"local_mock","kill_switch_asserted":True,"destructive_action_attempted":False}
-        lease={"schema":"autospec.autonomy.v53.lease_revocation_drill","run_id":meta["run_id"],"lease_revoked_in_mock":True,"real_lease_revoked":False,"write_allowed_after_revocation":False}
-        stale={"schema":"autospec.autonomy.v53.stale_lock_drill","run_id":meta["run_id"],"stale_lock_detected":True,"auto_resume":False,"recommended_action":"foreground_review"}
-        partial={"schema":"autospec.autonomy.v53.partial_transaction_drill","run_id":meta["run_id"],"partial_transaction_modeled":True,"replay_attempted":False,"duplicate_write_attempted":False}
-        audit_trail={"schema":"autospec.autonomy.v53.audit_trail_drill","run_id":meta["run_id"],"audit_trail_complete":True,"raw_secret_values_exposed":False}
-        handoff={"schema":"autospec.autonomy.v53.failed_safe_handoff","run_id":meta["run_id"],"failed_safe_handoff_written":True,"human_review_required":True,"background_runner":"absent"}
-        write_json(artifact/"kill-switch-drill.json",kill); write_text(artifact/"kill-switch-drill.md","# V53 Kill Switch Drill\n\nLocal/mock drill only; no destructive action is attempted.\n")
-        write_json(artifact/"lease-revocation-drill.json",lease); write_text(artifact/"lease-revocation-drill.md","# V53 Lease Revocation Drill\n\nLease revocation is modeled locally; no real write lease remains active.\n")
-        write_json(artifact/"stale-lock-drill.json",stale); write_text(artifact/"stale-lock-drill.md","# V53 Stale Lock Drill\n\nStale lock handling recommends foreground review and never auto-resumes.\n")
-        write_json(artifact/"partial-transaction-drill.json",partial); write_text(artifact/"partial-transaction-drill.md","# V53 Partial Transaction Drill\n\nPartial transaction recovery is modeled without replaying writes.\n")
-        write_json(artifact/"audit-trail-drill.json",audit_trail); write_text(artifact/"audit-trail-drill.md","# V53 Audit Trail Drill\n\nAudit trail is complete and emits no raw secrets.\n")
-        write_json(artifact/"failed-safe-handoff.json",handoff); write_text(artifact/"failed-safe-handoff.md","# V53 Failed-Safe Handoff\n\nHuman review is required after failed-safe drill states.\n")
-    if version == 54:
-        inventory={"schema":"autospec.autonomy.v54.portfolio_inventory","run_id":meta["run_id"],"repos":["autospec","autotrade"],"read_only":True,"target_repo_writes_attempted":False}
-        ranking={"schema":"autospec.autonomy.v54.candidate_ranking","run_id":meta["run_id"],"ranking_mode":"plan_only","candidates_ranked":2,"automatic_dispatch":False}
-        deps={"schema":"autospec.autonomy.v54.shared_dependency_report","run_id":meta["run_id"],"shared_dependencies_detected":[],"package_operations":False}
-        rules={"schema":"autospec.autonomy.v54.shared_rule_report","run_id":meta["run_id"],"shared_rules":["no_default_branch_push","no_self_approval","no_auto_merge"],"policy_changes_attempted":False}
-        queue={"schema":"autospec.autonomy.v54.portfolio_queue_plan","run_id":meta["run_id"],"queue_plan_written":True,"execution":"not_started","target_repo_writes_attempted":False}
-        write_json(artifact/"portfolio-inventory.json",inventory); write_text(artifact/"portfolio-inventory.md","# V54 Portfolio Inventory\n\nRead-only portfolio inventory for Autospec and dogfood target context.\n")
-        write_json(artifact/"candidate-ranking.json",ranking); write_text(artifact/"candidate-ranking.md","# V54 Candidate Ranking\n\nPlanning-only ranking; no dispatch or target write.\n")
-        write_json(artifact/"shared-dependency-report.json",deps); write_text(artifact/"shared-dependency-report.md","# V54 Shared Dependency Report\n\nNo dependency operations are performed.\n")
-        write_json(artifact/"shared-rule-report.json",rules); write_text(artifact/"shared-rule-report.md","# V54 Shared Rule Report\n\nShared safety rules are reported without policy mutation.\n")
-        write_json(artifact/"portfolio-queue-plan.json",queue); write_text(artifact/"portfolio-queue-plan.md","# V54 Portfolio Queue Plan\n\nQueue plan only; no target repo writes.\n")
-    if version == 55:
-        clones={"schema":"autospec.autonomy.v55.disposable_clone_plan","run_id":meta["run_id"],"repos":["autospec","autotrade"],"clone_root":"/private/tmp/autospec-v55-*","original_target_writes":False}
-        change={"schema":"autospec.autonomy.v55.bounded_change_simulation","run_id":meta["run_id"],"simulation_only":True,"bounded_changes_modeled":2,"source_repo_modified":False}
-        conflicts={"schema":"autospec.autonomy.v55.conflict_detection","run_id":meta["run_id"],"conflicts_detected":False,"conflict_policy":"failed_safe_if_detected"}
-        fan_in={"schema":"autospec.autonomy.v55.fan_in_report","run_id":meta["run_id"],"simulated_repos":2,"validation_summary":"modeled_pass","remote_writes_attempted":False}
-        remote={"schema":"autospec.autonomy.v55.remote_write_negative_proof","run_id":meta["run_id"],"git_push_attempted":False,"github_write_attempted":False,"network_attempted":False}
-        write_json(artifact/"disposable-clone-plan.json",clones); write_text(artifact/"disposable-clone-plan.md","# V55 Disposable Clone Plan\n\nSimulation targets disposable clone paths only; original targets remain unchanged.\n")
-        write_json(artifact/"bounded-change-simulation.json",change); write_text(artifact/"bounded-change-simulation.md","# V55 Bounded Change Simulation\n\nBounded changes are modeled in simulation-only artifacts.\n")
-        write_json(artifact/"conflict-detection.json",conflicts); write_text(artifact/"conflict-detection.md","# V55 Conflict Detection\n\nNo conflicts are detected in the modeled fan-in plan.\n")
-        write_json(artifact/"fan-in-report.json",fan_in); write_text(artifact/"fan-in-report.md","# V55 Fan-In Report\n\nMulti-repo simulation fan-in is summarized without remote writes.\n")
-        write_json(artifact/"remote-write-negative-proof.json",remote); write_text(artifact/"remote-write-negative-proof.md","# V55 Remote Write Negative Proof\n\nNo push, GitHub write, or network operation occurred.\n")
-    if version == 56:
-        plan={"schema":"autospec.autonomy.v56.autotrade_feature_plan","run_id":meta["run_id"],"target":"autotrade","planning_only":True,"implementation_attempted":False,"candidates":["docs_evidence_observability_note"]}
-        boundaries={"schema":"autospec.autonomy.v56.domain_safety_boundaries","run_id":meta["run_id"],"trading_execution_changes_allowed":False,"secret_changes_allowed":False,"migration_changes_allowed":False,"auth_changes_allowed":False,"deployment_changes_allowed":False}
-        blocked={"schema":"autospec.autonomy.v56.blocked_categories_report","run_id":meta["run_id"],"blocked":["trading_execution","secrets","migrations","auth","deployment"],"blocked_categories_enforced":True}
-        ranking={"schema":"autospec.autonomy.v56.candidate_feature_ranking","run_id":meta["run_id"],"ranked_candidates":[{"id":"docs_evidence_observability_note","risk":"low","implementation":"deferred"}],"automatic_implementation":False}
-        write_json(artifact/"autotrade-feature-plan.json",plan); write_text(artifact/"autotrade-feature-plan.md","# V56 Autotrade Feature Plan\n\nPlanning only; implementation is deferred.\n")
-        write_json(artifact/"domain-safety-boundaries.json",boundaries); write_text(artifact/"domain-safety-boundaries.md","# V56 Domain Safety Boundaries\n\nTrading execution, secrets, migrations, auth, and deployment changes are blocked by default.\n")
-        write_json(artifact/"blocked-categories-report.json",blocked); write_text(artifact/"blocked-categories-report.md","# V56 Blocked Categories Report\n\nBlocked domain categories are enforced for planning.\n")
-        write_json(artifact/"candidate-feature-ranking.json",ranking); write_text(artifact/"candidate-feature-ranking.md","# V56 Candidate Feature Ranking\n\nOne low-risk candidate is ranked for future review; no implementation occurs.\n")
-    if version == 57:
-        packet={"schema":"autospec.autonomy.v57.canary_packet","run_id":meta["run_id"],"candidate":"docs_evidence_observability_note","execution":"locked_until_human_approval","implementation_attempted":False}
-        scope={"schema":"autospec.autonomy.v57.candidate_scope","run_id":meta["run_id"],"allowed":["docs","evidence","non_execution_helper"],"blocked":["trading_execution","secrets","migrations","auth","deployment"],"scope_safe":True}
-        approval={"schema":"autospec.autonomy.v57.approval_capsule_template","run_id":meta["run_id"],"approval_required":True,"capsule_status":"template_only","real_write_allowed":False}
-        branch_pr={"schema":"autospec.autonomy.v57.branch_pr_plan","run_id":meta["run_id"],"branch_plan":"non_default_after_approval","draft_pr_plan":"optional_after_approval","git_push_attempted":False,"draft_pr_create_attempted":False}
-        write_json(artifact/"canary-packet.json",packet); write_text(artifact/"canary-packet.md","# V57 Canary Packet\n\nOne domain-safe canary is prepared but locked until human approval.\n")
-        write_json(artifact/"candidate-scope.json",scope); write_text(artifact/"candidate-scope.md","# V57 Candidate Scope\n\nDocs/evidence or non-execution helper only; high-risk Autotrade domains remain blocked.\n")
-        write_json(artifact/"approval-capsule-template.json",approval); write_text(artifact/"approval-capsule-template.md","# V57 Approval Capsule Template\n\nTemplate only; no approval is provided in batch validation.\n")
-        write_json(artifact/"branch-pr-plan.json",branch_pr); write_text(artifact/"branch-pr-plan.md","# V57 Branch/PR Plan\n\nPlan only; no branch push or draft PR creation occurs.\n")
-    if version == 58:
-        freeze={"schema":"autospec.autonomy.v58.claim_freeze","run_id":meta["run_id"],"claims_frozen":True,"feature_expansion_attempted":False}
-        truth={"schema":"autospec.autonomy.v58.claim_truth_audit","run_id":meta["run_id"],"scaffolded_not_overclaimed":True,"dry_run_not_overclaimed":True,"local_only_not_overclaimed":True}
-        inventory={"schema":"autospec.autonomy.v58.status_inventory","run_id":meta["run_id"],"states":["implemented","scaffolded","validated","deferred"],"ambiguous_statuses":0}
-        bundle={"schema":"autospec.autonomy.v58.release_bundle_verification","run_id":meta["run_id"],"release_bundle_verified":True,"release_gates_blocked":False}
-        candidate={"schema":"autospec.autonomy.v58.v1_candidate_packet","run_id":meta["run_id"],"candidate":"v1.0","ready_for_human_review":True,"github_write_attempted":False}
-        write_json(artifact/"claim-freeze.json",freeze); write_text(artifact/"claim-freeze.md","# V58 Claim Freeze\n\nClaims are frozen for release hardening; no feature expansion occurs.\n")
-        write_json(artifact/"claim-truth-audit.json",truth); write_text(artifact/"claim-truth-audit.md","# V58 Claim Truth Audit\n\nScaffolded, dry-run, and local-only behavior is not overclaimed.\n")
-        write_json(artifact/"status-inventory.json",inventory); write_text(artifact/"status-inventory.md","# V58 Status Inventory\n\nImplemented, scaffolded, validated, and deferred statuses are inventoried.\n")
-        write_json(artifact/"release-bundle-verification.json",bundle); write_text(artifact/"release-bundle-verification.md","# V58 Release Bundle Verification\n\nRelease bundle verification is modeled as passing.\n")
-        write_json(artifact/"v1-candidate-packet.json",candidate); write_text(artifact/"v1-candidate-packet.md","# V58 v1.0 Candidate Packet\n\nCandidate packet is prepared for human review; no GitHub write occurs.\n")
-    if version == 59:
-        contracts={"schema":"autospec.autonomy.v59.plugin_contracts","run_id":meta["run_id"],"contracts_defined":True,"untrusted_plugin_execution_enabled":False}
-        permissions={"schema":"autospec.autonomy.v59.permission_model","run_id":meta["run_id"],"default_permissions":"deny","network_default":False,"filesystem_default":"artifact_only"}
-        sandbox={"schema":"autospec.autonomy.v59.sandbox_policy","run_id":meta["run_id"],"sandbox_required":True,"production_secret_access":False,"raw_env_access":False}
-        artifact_schema={"schema":"autospec.autonomy.v59.artifact_schema","run_id":meta["run_id"],"json_pretty":True,"markdown_primary":True,"raw_secret_values_exposed":False}
-        governance={"schema":"autospec.autonomy.v59.extension_governance","run_id":meta["run_id"],"review_required_for_plugins":True,"auto_enable_plugins":False}
-        write_json(artifact/"plugin-contracts.json",contracts); write_text(artifact/"plugin-contracts.md","# V59 Plugin Contracts\n\nPlugin contracts are specified; untrusted plugin execution remains disabled.\n")
-        write_json(artifact/"permission-model.json",permissions); write_text(artifact/"permission-model.md","# V59 Permission Model\n\nPermissions default to deny.\n")
-        write_json(artifact/"sandbox-policy.json",sandbox); write_text(artifact/"sandbox-policy.md","# V59 Sandbox Policy\n\nSandboxing is required; production secrets and raw env access are blocked.\n")
-        write_json(artifact/"artifact-schema.json",artifact_schema); write_text(artifact/"artifact-schema.md","# V59 Artifact Schema\n\nMarkdown remains primary and JSON remains deterministic.\n")
-        write_json(artifact/"extension-governance.json",governance); write_text(artifact/"extension-governance.md","# V59 Extension Governance\n\nPlugins require review and are not auto-enabled.\n")
-    if version == 60:
-        transfer={"schema":"autospec.autonomy.v60.governance_transfer_package","run_id":meta["run_id"],"transfer_ready":True,"no_auto_merge_default_preserved":True,"github_write_attempted":False}
-        manual={"schema":"autospec.autonomy.v60.operating_manual","run_id":meta["run_id"],"manual_written":True,"human_approval_required_for_remote_writes":True}
-        risk={"schema":"autospec.autonomy.v60.risk_register","run_id":meta["run_id"],"open_blockers":0,"residual_risks":["future phases require human review before real writes"]}
-        gates={"schema":"autospec.autonomy.v60.release_gates_packet","run_id":meta["run_id"],"release_gates_blocked":False,"security_privacy_blocked":False}
-        roadmap={"schema":"autospec.autonomy.v60.post_v60_roadmap","run_id":meta["run_id"],"next":"post-v60 governance transfer","auto_merge_default":False}
-        write_json(artifact/"governance-transfer-package.json",transfer); write_text(artifact/"governance-transfer-package.md","# V60 Governance Transfer Package\n\nGovernance transfer package is ready; no auto-merge default is preserved.\n")
-        write_json(artifact/"operating-manual.json",manual); write_text(artifact/"operating-manual.md","# V60 Operating Manual\n\nRemote writes remain gated by human approval and explicit flags.\n")
-        write_json(artifact/"risk-register.json",risk); write_text(artifact/"risk-register.md","# V60 Risk Register\n\nNo release blockers remain; future real writes require human review.\n")
-        write_json(artifact/"release-gates-packet.json",gates); write_text(artifact/"release-gates-packet.md","# V60 Release Gates Packet\n\nRelease and security/privacy gates are unblocked in local validation.\n")
-        write_json(artifact/"post-v60-roadmap.json",roadmap); write_text(artifact/"post-v60-roadmap.md","# V60 Post-v60 Roadmap\n\nNext phase is governance transfer; no auto-merge default remains preserved.\n")
+    build_artifacts = GENERIC_ARTIFACT_BUILDERS.get(version)
+    if build_artifacts is not None:
+        build_artifacts(root, artifact, meta, version)
     expected=["contract","preflight","gate","audit","verifier","recovery",f"v{version}-status"]
     payload={"schema":f"autospec.autonomy.v{version}.artifact_index","run_id":meta["run_id"],"artifact_root":str(artifact.relative_to(root)),"expected_artifacts":expected+["artifact-index","closeout"],"status":"written",**generic_payload(version),**safety_payload()}
     payload["github_read_attempted"] = False; payload["pr_update_attempted"] = False
