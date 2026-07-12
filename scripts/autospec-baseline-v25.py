@@ -42,7 +42,7 @@ REPORTS = [
 
 
 def rel(root: Path, path: Path) -> str:
-    return str(path.relative_to(root))
+    return path.relative_to(root).as_posix()
 
 
 def rel_parts(root: Path, path: Path) -> tuple[str, ...]:
