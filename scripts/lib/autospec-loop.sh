@@ -968,6 +968,65 @@ _autospec_conductor_self_repair_pending_file() {
     printf '%s/.autospec/autonomous-self-repair-refresh.json\n' "$repo_root"
 }
 
+_autospec_conductor_integration_conflict_cooldown_file() {
+    local repo_root="$1"
+    printf '%s/.autospec/integration-conflict-cooldown\n' "$repo_root"
+}
+
+_autospec_conductor_normalize_issue_list() {
+    tr ' ' '\n' \
+        | sed '/^[[:space:]]*$/d' \
+        | sort -n \
+        | paste -sd ' ' -
+}
+
+_autospec_conductor_same_issue_list() {
+    local left="$1"
+    local right="$2"
+    local left_norm right_norm
+    left_norm="$(printf '%s\n' "$left" | _autospec_conductor_normalize_issue_list)"
+    right_norm="$(printf '%s\n' "$right" | _autospec_conductor_normalize_issue_list)"
+    [ "$left_norm" = "$right_norm" ]
+}
+
+_autospec_conductor_integration_conflict_cooldown_active() {
+    local repo_root="$1"
+    local issues="$2"
+    local cycle="$3"
+    local file until stored_issues rc
+    file="$(_autospec_conductor_integration_conflict_cooldown_file "$repo_root")"
+    [ -f "$file" ] || return 1
+
+    until="$(sed -n 's/^until_cycle=//p' "$file" 2>/dev/null | head -1)"
+    stored_issues="$(sed -n 's/^issues=//p' "$file" 2>/dev/null | head -1)"
+    rc="$(sed -n 's/^rc=//p' "$file" 2>/dev/null | head -1)"
+    case "$until" in ''|*[!0-9]*) rm -f "$file" 2>/dev/null || true; return 1 ;; esac
+    if [ "$cycle" -gt "$until" ] 2>/dev/null; then
+        rm -f "$file" 2>/dev/null || true
+        return 1
+    fi
+    _autospec_conductor_same_issue_list "$issues" "$stored_issues" || return 1
+    printf '[conductor] integration conflict cooldown: parking self batch (issues: %s, rc=%s, until-cycle=%s)\n' \
+        "$issues" "${rc:-unknown}" "$until" >&2
+    return 0
+}
+
+_autospec_conductor_arm_integration_conflict_cooldown() {
+    local repo_root="$1"
+    local issues="$2"
+    local cycle="$3"
+    local rc="$4"
+    local file until
+    file="$(_autospec_conductor_integration_conflict_cooldown_file "$repo_root")"
+    until=$((cycle + 4))
+    mkdir -p "$(dirname "$file")" 2>/dev/null || true
+    {
+        printf 'until_cycle=%s\n' "$until"
+        printf 'rc=%s\n' "$rc"
+        printf 'issues=%s\n' "$issues"
+    } > "$file" 2>/dev/null || true
+}
+
 _autospec_conductor_pr_touches_refresh_surface() {
     local repo="$1"
     local pr="$2"
@@ -2085,6 +2144,7 @@ fi'
                         else
                             local _run_cmd="${AUTOSPEC_RUN_CMD:-}"
                             if [ -n "$_run_cmd" ]; then
+                                local _tier1_drain_dispatched=0
                                 # ── Dispatch-time provenance split (integration-branch
                                 # design §Architecture item 5). Provenance is re-resolved
                                 # from GitHub labels EVERY cycle — never cached in memory
@@ -2145,6 +2205,7 @@ EOF_PROV_BATCH
                                             "$_prov_operator" >&2
                                         AUTOSPEC_RUN_ONLY_ISSUES="$_prov_operator" \
                                             bash -c "$_run_cmd" 2>&1 || true
+                                        _tier1_drain_dispatched=1
                                     fi
                                     # Self subset: ensure + sync the integration branch
                                     # so its kind=integration mode file routes Phase 4
@@ -2223,11 +2284,20 @@ EOF_PROV_BATCH
                                         fi
                                     elif [ -n "$_prov_self" ]; then
                                         local _prov_int_rc=0
-                                        bash "$_intbranch_sh" ensure --parent "$_prov_parent_branch" \
-                                            --repo "$_repo" 1>&2 || _prov_int_rc=$?
-                                        if [ "$_prov_int_rc" -eq 0 ]; then
-                                            bash "$_intbranch_sh" sync --parent "$_prov_parent_branch" \
+                                        if _autospec_conductor_integration_conflict_cooldown_active \
+                                            "$_repo_root" "$_prov_self" "$_cycle"; then
+                                            _prov_int_rc=6
+                                        else
+                                            bash "$_intbranch_sh" ensure --parent "$_prov_parent_branch" \
                                                 --repo "$_repo" 1>&2 || _prov_int_rc=$?
+                                            if [ "$_prov_int_rc" -eq 0 ]; then
+                                                bash "$_intbranch_sh" sync --parent "$_prov_parent_branch" \
+                                                    --repo "$_repo" 1>&2 || _prov_int_rc=$?
+                                            fi
+                                            if [ "$_prov_int_rc" -ne 0 ]; then
+                                                _autospec_conductor_arm_integration_conflict_cooldown \
+                                                    "$_repo_root" "$_prov_self" "$_cycle" "$_prov_int_rc"
+                                            fi
                                         fi
                                         if [ "$_prov_int_rc" -ne 0 ]; then
                                             # Peer-review must-fix: ensure may have
@@ -2263,6 +2333,7 @@ EOF_PROV_BATCH
                                                 "$_prov_self" >&2
                                             AUTOSPEC_RUN_ONLY_ISSUES="$_prov_self" \
                                                 bash -c "$_run_cmd" 2>&1 || true
+                                            _tier1_drain_dispatched=1
 
                                             # ── Self-merge aftermath (spec item 5 tail):
                                             # after a self-originated PR merges into the
@@ -2349,6 +2420,7 @@ EOF_PROV_BATCH
                                     fi
                                 else
                                     bash -c "$_run_cmd" 2>&1 || true
+                                    _tier1_drain_dispatched=1
                                 fi
                             else
                                 printf '[conductor] WARN: AUTOSPEC_RUN_CMD not set; skipping drain\n' >&2
@@ -2398,7 +2470,9 @@ EOF_PROV_BATCH
                                 rm -f "$_outcome_file" 2>/dev/null || true
                             fi
                         fi
-                        _work_done=1
+                        if [ "${_tier1_drain_dispatched:-0}" -eq 1 ]; then
+                            _work_done=1
+                        fi
                     fi
                     ;;
                 block*)
