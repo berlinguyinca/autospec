@@ -692,3 +692,41 @@ SH
     [[ "$output" == *"claimed_released=1"* ]]
     grep -q -- '--add-label auto-implement' "$CALLS"
 }
+
+@test "issue 1845: stale heartbeat with active worktree process is not reclaimed after 5400s" {
+    isolate_heartbeat_pass
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=5400
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    export AUTOSPEC_WATCHDOG_GC_DIR="$TEST_TMP"
+    export WORKER_LIVENESS_HOSTNAME="thishost"
+
+    branch="feat/1845-watchdog-run-state-reclaim"
+    wt="$TEST_TMP/wt-feat-1845-watchdog-run-state-reclaim"
+    mkdir -p "$wt"
+    git -C "$wt" init -q
+    git -C "$wt" checkout -q -b "$branch"
+
+    write_hb 1845 tests_started 5400
+    stale="$(date -u -v-90M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '90 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    jq -n \
+      --argjson fixture "$(cat "${BATS_TEST_DIRNAME}/../fixtures/autospec-run/issue-1845-run-state.json")" \
+      --arg stale "$stale" \
+      '[{number:1845,id:184500,node_id:"IC_184500",created_at:$stale,createdAt:$stale,body:("<!-- autospec-run-state:begin -->\n" + (($fixture | .updated_at = $stale | .claimed_at = $stale) | tojson) + "\n<!-- autospec-run-state:end -->")}]' > "$COMMENTS"
+
+    ( cd "$wt" && bash -c 'sleep 30' ) &
+    active_pid="$!"
+    trap 'kill "$active_pid" 2>/dev/null || true; wait "$active_pid" 2>/dev/null || true; rm -rf "$TEST_TMP"' EXIT
+
+    run bash "$WATCHDOG"
+
+    kill "$active_pid" 2>/dev/null || true
+    wait "$active_pid" 2>/dev/null || true
+    trap 'rm -rf "$TEST_TMP"' EXIT
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=0"* ]]
+    [[ "$output" == *"live-owner-no-heartbeat"* ]]
+    [ -f "$(HB_DIR_FOR)/1845.json" ]
+    grep -q 'in-progress-by-bot' "$LABELS"
+    ! grep -q -- '--add-label auto-implement' "$CALLS"
+}
