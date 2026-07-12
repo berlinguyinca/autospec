@@ -15,6 +15,7 @@ chmod +x "$TEST_TMP/install/probe.sh"
 
 run_install_only() {
     PROBE_OUT="$TEST_TMP/probe.out" \
+    AUTOSPEC_FORCE_LEGACY_SHELL=1 \
     AUTOSPEC_VALIDATE_INSTALL_TESTS_ONLY=1 \
     AUTOSPEC_VALIDATE_INSTALL_TEST_GLOB="$TEST_TMP/install/*.sh" \
     "$@"
