@@ -326,6 +326,49 @@ state_comment_obj() {
       }'
 }
 
+state_comment_obj_with_branch() {
+    local issue="$1" state="$2" updated_at="$3" worker_id="$4" branch="$5"
+    jq -n \
+      --argjson issue "$issue" --arg state "$state" --arg updated_at "$updated_at" \
+      --arg worker_id "$worker_id" --arg branch "$branch" \
+      '{
+        number: $issue, createdAt: $updated_at, created_at: $updated_at, id: ($issue * 100), node_id: ("IC_" + (($issue * 100) | tostring)), page: 1,
+        body: ("<!-- autospec-run-state:begin -->\n" +
+          ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:$worker_id,state:$state,branch:$branch,pr:"",step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
+          "\n<!-- autospec-run-state:end -->")
+      }'
+}
+
+start_validate_process_in_issue_worktree() {
+    local branch="$1"
+    export LOCAL_REPO="$TEST_TMP/local-repo"
+    export ISSUE_WORKTREE="$TEST_TMP/wt-issue-1845"
+    mkdir -p "$LOCAL_REPO"
+    git -C "$LOCAL_REPO" init -q
+    git -C "$LOCAL_REPO" config user.email test@example.com
+    git -C "$LOCAL_REPO" config user.name "Test User"
+    printf 'root\n' > "$LOCAL_REPO/README.md"
+    git -C "$LOCAL_REPO" add README.md
+    git -C "$LOCAL_REPO" commit -q -m initial
+    git -C "$LOCAL_REPO" worktree add -q -b "$branch" "$ISSUE_WORKTREE"
+    mkdir -p "$ISSUE_WORKTREE/scripts"
+    cat > "$ISSUE_WORKTREE/scripts/validate.sh" <<'SH'
+#!/usr/bin/env bash
+exec sleep 120
+SH
+    chmod +x "$ISSUE_WORKTREE/scripts/validate.sh"
+    bash -c 'cd "$1" && exec bash scripts/validate.sh' sh "$ISSUE_WORKTREE" >/dev/null 2>&1 &
+    VALIDATE_PID="$!"
+    export VALIDATE_PID
+}
+
+stop_validate_process() {
+    if [ -n "${VALIDATE_PID:-}" ]; then
+        kill "$VALIDATE_PID" >/dev/null 2>&1 || true
+        wait "$VALIDATE_PID" >/dev/null 2>&1 || true
+    fi
+}
+
 # ── F5: WATCHDOG_RECLAIM_SECS (3h) path — GitHub-authority gate (#1367) ─────────
 #
 # The bare 3h reclaim must also consult reclaim_decision so a live worker on a
@@ -453,6 +496,59 @@ SH
     [[ "$output" == *"reclaimed=1"* ]]
     [ ! -f "$(HB_DIR_FOR)/42.json" ]
     grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$CALLS"
+}
+
+@test "issue 1845: active local validate process in issue worktree prevents stale run-state reclaim after 5400s" {
+    export WORKER_LIVENESS_HOSTNAME="thishost"
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=300
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    branch="feat/1845-watchdog-run-state-reclaim"
+    stale="$(date -u -v-90M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '90 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    state_comment_obj_with_branch 1845 expand_start "$stale" "thishost:me:shell:999999" "$branch" | jq -s '.' > "$COMMENTS"
+    start_validate_process_in_issue_worktree "$branch"
+
+    run bash -c "cd \"$LOCAL_REPO\" && bash \"$WATCHDOG\""
+    stop_validate_process
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=0"* ]]
+    [[ "$output" == *"live_owner_no_heartbeat=1"* ]]
+    [[ "$output" == *"live-owner-no-heartbeat"* ]]
+    grep -q 'in-progress-by-bot' "$LABELS"
+    ! grep -q -- '--add-label auto-implement' "$CALLS"
+}
+
+@test "issue 1845: lsof fallback detects active worktree process when proc is unavailable" {
+    export WORKER_LIVENESS_HOSTNAME="thishost"
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=300
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    export AUTOSPEC_WATCHDOG_DISABLE_PROC=1
+    branch="feat/1845-watchdog-run-state-reclaim"
+    stale="$(date -u -v-90M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '90 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    state_comment_obj_with_branch 1845 expand_start "$stale" "thishost:me:shell:999999" "$branch" | jq -s '.' > "$COMMENTS"
+    start_validate_process_in_issue_worktree "$branch"
+    cat > "$TEST_TMP/bin/lsof" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf 'lsof %s
+' "$*" >> "${CALLS:?}"
+[ "$1" = "-t" ]
+[ "$2" = "+D" ]
+[ "$3" = "${ISSUE_WORKTREE:?}" ]
+printf '%s
+' "${VALIDATE_PID:?}"
+SH
+    chmod +x "$TEST_TMP/bin/lsof"
+
+    run bash -c "cd "$LOCAL_REPO" && bash "$WATCHDOG""
+    stop_validate_process
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=0"* ]]
+    [[ "$output" == *"live_owner_no_heartbeat=1"* ]]
+    grep -q "lsof -t +D $ISSUE_WORKTREE" "$CALLS"
+    grep -q 'in-progress-by-bot' "$LABELS"
+    ! grep -q -- '--add-label auto-implement' "$CALLS"
 }
 
 @test "F5: dead same-host pid on non-claimed step past 3h is reclaimed" {
