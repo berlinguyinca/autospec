@@ -220,3 +220,38 @@ fn execution_queue_rejects_path_like_run_ids_before_touching_disk() {
     assert!(queue.save(root.path()).is_err());
     assert!(ExecutionQueue::load_named(root.path(), "..").is_err());
 }
+
+#[test]
+fn execution_queue_rejects_a_document_stored_under_the_wrong_run_id() {
+    let root = TempProjectRoot::new();
+    let queue = ExecutionQueue::new_at(
+        "run-original",
+        vec!["v66-autonomous-execution-queue".to_string()],
+        40,
+    );
+    queue.save(root.path()).expect("queue saves");
+
+    let original = root.path().join(".autospec/runs/run-original/queue.json");
+    let misplaced = root.path().join(".autospec/runs/run-misplaced/queue.json");
+    fs::create_dir_all(misplaced.parent().expect("misplaced queue has parent"))
+        .expect("misplaced run directory is created");
+    fs::copy(original, misplaced).expect("queue is deliberately misplaced");
+
+    assert!(ExecutionQueue::load_named(root.path(), "run-misplaced").is_err());
+}
+
+#[test]
+fn execution_queue_cannot_restart_a_terminal_entry() {
+    let mut queue = ExecutionQueue::new_at(
+        "run-terminal",
+        vec!["v66-autonomous-execution-queue".to_string()],
+        50,
+    );
+    queue
+        .mark_passed_at("v66-autonomous-execution-queue", 51)
+        .expect("entry passes");
+
+    assert!(queue
+        .mark_started_at("v66-autonomous-execution-queue", 52)
+        .is_err());
+}

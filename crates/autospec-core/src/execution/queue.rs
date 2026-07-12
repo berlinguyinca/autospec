@@ -174,6 +174,12 @@ impl ExecutionQueue {
 
     pub fn mark_started_at(&mut self, spec_id: &str, timestamp: u64) -> Result<(), String> {
         self.update(spec_id, timestamp, |entry| {
+            if !matches!(
+                entry.status,
+                QueueStatus::Pending | QueueStatus::Failed | QueueStatus::Running
+            ) {
+                return Err(format!("cannot restart terminal queue entry: {spec_id}"));
+            }
             entry.status = QueueStatus::Running;
             entry.started_at.get_or_insert(timestamp);
             Ok(())
@@ -207,18 +213,26 @@ impl ExecutionQueue {
         retry_limit: u32,
     ) -> Result<(), String> {
         let timestamp = now();
-        self.update(spec_id, timestamp, |entry| {
+        let retry_limit_exceeded = {
+            let entry = self.entry_mut(spec_id)?;
             entry.attempts += 1;
             entry.failure_kind = Some(failure_kind);
+            entry.updated_at = timestamp;
             if entry.attempts > retry_limit {
                 entry.status = QueueStatus::Blocked;
                 entry.blocker = Some("retry limit exceeded".to_string());
-                Err(format!("retry limit exceeded for {spec_id}"))
+                true
             } else {
                 entry.status = QueueStatus::Failed;
-                Ok(())
+                false
             }
-        })
+        };
+        self.updated_at = timestamp;
+        if retry_limit_exceeded {
+            Err(format!("retry limit exceeded for {spec_id}"))
+        } else {
+            Ok(())
+        }
     }
     pub fn block(&mut self, spec_id: &str, reason: impl Into<String>) -> Result<(), String> {
         let reason = reason.into();
@@ -236,7 +250,13 @@ impl ExecutionQueue {
     }
     pub fn load_named(root: impl AsRef<Path>, run_id: &str) -> Result<Option<Self>, String> {
         let paths = QueuePaths::new(root.as_ref(), run_id)?;
-        load_with_recovery(&paths)
+        let queue = load_with_recovery(&paths)?;
+        if queue.as_ref().is_some_and(|queue| queue.run_id != run_id) {
+            return Err(format!(
+                "queue document run id does not match path: {run_id}"
+            ));
+        }
+        Ok(queue)
     }
     pub fn load_latest_incomplete(root: impl AsRef<Path>) -> Result<Option<Self>, String> {
         let runs = root.as_ref().join(".autospec").join("runs");
@@ -261,8 +281,16 @@ impl ExecutionQueue {
                 continue;
             }
             let run_id = entry.file_name().to_string_lossy().to_string();
-            let Ok(Some(queue)) = Self::load_named(root.as_ref(), &run_id) else {
-                continue;
+            let queue = match Self::load_named(root.as_ref(), &run_id) {
+                Ok(Some(queue)) => queue,
+                Ok(None) => continue,
+                Err(error)
+                    if error.starts_with("invalid queue file")
+                        || error.starts_with("invalid queue recovery file") =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
             };
             if queue.next_incomplete().is_some()
                 && latest.as_ref().is_none_or(|current| {
@@ -371,20 +399,23 @@ fn load_with_recovery(paths: &QueuePaths) -> Result<Option<ExecutionQueue>, Stri
                         "invalid queue file {}: {error}",
                         paths.primary.display()
                     )),
-                    FileQueue::Valid(_) => unreachable!(),
+                    FileQueue::Valid(_) | FileQueue::Operational(_) => unreachable!(),
                 },
                 FileQueue::Invalid(error) => Err(format!(
                     "invalid queue recovery file {}: {error}",
                     paths.temporary.display()
                 )),
+                FileQueue::Operational(error) => Err(error),
             }
         }
+        FileQueue::Operational(error) => Err(error),
     }
 }
 enum FileQueue {
     Missing,
     Valid(ExecutionQueue),
     Invalid(String),
+    Operational(String),
 }
 fn load_queue(path: &Path) -> FileQueue {
     match fs::read_to_string(path) {
@@ -393,7 +424,10 @@ fn load_queue(path: &Path) -> FileQueue {
             Err(error) => FileQueue::Invalid(error),
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => FileQueue::Missing,
-        Err(error) => FileQueue::Invalid(error.to_string()),
+        Err(error) => FileQueue::Operational(format!(
+            "failed to read queue file {}: {error}",
+            path.display()
+        )),
     }
 }
 fn write_document(paths: &QueuePaths, content: &str) -> Result<(), String> {
