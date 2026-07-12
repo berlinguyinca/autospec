@@ -110,13 +110,13 @@ else
 fi
 
 if [ ! -d "$WATCHDOG_BASE" ]; then
-    printf '%s\n' "service-watch: nudged=0 reclaimed=0 claimed_released=0 garbage_collected=0 invalid_schema=0 skipped=0"
+    printf '%s\n' "service-watch: nudged=0 reclaimed=0 claimed_released=0 garbage_collected=0 invalid_schema=0 skipped=0 live_owner_no_heartbeat=0"
     exit 0
 fi
 
 if ! command -v jq >/dev/null 2>&1; then
     echo "$WATCHDOG_LOG_PREFIX WARN: jq CLI not found; skipping heartbeat reconciliation" >&2
-    printf '%s\n' "service-watch: nudged=0 reclaimed=0 claimed_released=0 garbage_collected=0 invalid_schema=0 skipped=0"
+    printf '%s\n' "service-watch: nudged=0 reclaimed=0 claimed_released=0 garbage_collected=0 invalid_schema=0 skipped=0 live_owner_no_heartbeat=0"
     exit 0
 fi
 
@@ -190,6 +190,7 @@ claimed_released=0
 garbage_collected=0
 invalid_schema=0
 skipped=0
+live_owner_no_heartbeat=0
 
 if [ -n "$WATCHDOG_REPO" ]; then
     REPO_ARGS="--repo $WATCHDOG_REPO"
@@ -438,7 +439,7 @@ gc_orphaned_worktrees() {
 # watchdog GC bats fixture to exercise the real pass in isolation.
 if [ "${AUTOSPEC_WATCHDOG_GC_ONLY:-}" = "1" ]; then
     gc_orphaned_worktrees
-    printf 'service-watch: nudged=0 reclaimed=0 claimed_released=0 garbage_collected=%s invalid_schema=0 skipped=0\n' \
+    printf 'service-watch: nudged=0 reclaimed=0 claimed_released=0 garbage_collected=%s invalid_schema=0 skipped=0 live_owner_no_heartbeat=0\n' \
         "$garbage_collected"
     exit 0
 fi
@@ -493,6 +494,48 @@ worker_liveness() {
     fi
 }
 
+worktree_for_branch() {
+    branch="$1"
+    [ -n "$branch" ] || return 1
+    command -v git >/dev/null 2>&1 || return 1
+    git worktree list --porcelain 2>/dev/null | awk -v want="refs/heads/${branch}" '
+      /^worktree / { wt=substr($0, 10); next }
+      /^branch / && substr($0, 8) == want { print wt; exit }
+    '
+}
+
+processes_in_worktree() {
+    wt="$1"
+    [ -n "$wt" ] && [ -d "$wt" ] || { printf '0'; return 0; }
+    [ -d /proc ] || { printf '0'; return 0; }
+    count=0
+    for cwd_link in /proc/[0-9]*/cwd; do
+        [ -e "$cwd_link" ] || continue
+        pid="${cwd_link#/proc/}"
+        pid="${pid%/cwd}"
+        [ "$pid" != "$$" ] || continue
+        cwd="$(readlink "$cwd_link" 2>/dev/null || true)"
+        case "$cwd" in
+            "$wt"|"$wt"/*) count=$((count + 1)) ;;
+        esac
+    done
+    printf '%s' "$count"
+}
+
+note_live_owner_no_heartbeat() {
+    issue="$1"
+    branch="$2"
+    count="$3"
+    echo "$WATCHDOG_LOG_PREFIX live-owner-no-heartbeat issue #$issue branch=$branch active_local_processes=$count" >&2
+}
+
+active_local_worktree_process_count() {
+    branch="$1"
+    wt="$(worktree_for_branch "$branch")"
+    [ -n "$wt" ] || { printf '0'; return 0; }
+    processes_in_worktree "$wt"
+}
+
 # reclaim_decision <issue> <window_secs> → "reclaim" | "hold"
 #
 # Decision table for a `claimed` heartbeat already past the claimed-timeout:
@@ -523,6 +566,7 @@ reclaim_decision() {
     rd_state="$(printf '%s\n' "$rd_json" | jq -r '.state // .step // empty' 2>/dev/null || true)"
     rd_worker="$(printf '%s\n' "$rd_json" | jq -r '.worker_id // empty' 2>/dev/null || true)"
     rd_updated="$(printf '%s\n' "$rd_json" | jq -r '.updated_at // empty' 2>/dev/null || true)"
+    rd_branch="$(printf '%s\n' "$rd_json" | jq -r '.branch // empty' 2>/dev/null || true)"
 
     case "$rd_state" in
         ''|released|failed)
@@ -537,6 +581,21 @@ reclaim_decision() {
             printf 'hold'      # provably-live same-host owner — never reclaim
             return 0
             ;;
+    esac
+
+    rd_local_processes="$(active_local_worktree_process_count "$rd_branch")"
+    case "$rd_local_processes" in *[!0-9]*|'') rd_local_processes=0 ;; esac
+    if [ "$rd_local_processes" -gt 0 ]; then
+        if [ ! -f "${WATCHDOG_DIR}/${rd_issue}.json" ]; then
+            note_live_owner_no_heartbeat "$rd_issue" "$rd_branch" "$rd_local_processes"
+            printf 'hold_live_owner_no_heartbeat'
+            return 0
+        fi
+        printf 'hold'          # active process in issue worktree — never reclaim
+        return 0
+    fi
+
+    case "$(worker_liveness "$rd_worker")" in
         dead)
             printf 'reclaim'   # provably-dead same-host owner — safe to reclaim
             return 0
@@ -614,7 +673,9 @@ for hb in "$WATCHDOG_DIR"/*.json; do
         # The stale heartbeat is only the trigger. GitHub authority + same-host
         # PID-liveness decide whether to actually reclaim (F1+F2+F3). A live
         # owner is never reclaimed — this closes the go-modules #1055 regression.
-        if [ "$(reclaim_decision "$issue" "$WATCHDOG_CLAIMED_TIMEOUT_SECS")" = "reclaim" ]; then
+        decision="$(reclaim_decision "$issue" "$WATCHDOG_CLAIMED_TIMEOUT_SECS")"
+        [ "$decision" = "hold_live_owner_no_heartbeat" ] && live_owner_no_heartbeat=$((live_owner_no_heartbeat + 1))
+        if [ "$decision" = "reclaim" ]; then
             if reclaim_issue "$issue" "$age"; then
                 claimed_released=$((claimed_released + 1))
                 state_unset "$issue"
@@ -634,7 +695,9 @@ for hb in "$WATCHDOG_DIR"/*.json; do
         # Gate the 3h TTL reclaim on the same GitHub-authority cross-check used
         # by the claimed-timeout path (F1+F2+F3 invariant, closes #1367).
         # A live worker is never reclaimed; gh API failure fail-safes to hold.
-        if [ "$(reclaim_decision "$issue" "$WATCHDOG_RECLAIM_SECS")" = "reclaim" ]; then
+        decision="$(reclaim_decision "$issue" "$WATCHDOG_RECLAIM_SECS")"
+        [ "$decision" = "hold_live_owner_no_heartbeat" ] && live_owner_no_heartbeat=$((live_owner_no_heartbeat + 1))
+        if [ "$decision" = "reclaim" ]; then
             if reclaim_issue "$issue" "$age"; then
                 reclaimed=$((reclaimed + 1))
                 state_unset "$issue"
@@ -708,11 +771,12 @@ reconcile_run_state_comments() {
         esac
 
         if [ "$step" = "claimed" ] && [ "$age" -ge "$WATCHDOG_CLAIMED_TIMEOUT_SECS" ]; then
-            # F2 — never reclaim a provably-live same-host owner (#1055). A dead
-            # same-host pid is reclaimed; cross-host falls through to the stale
-            # GitHub `ts` already proven by `age >= claimed-timeout`.
-            worker_id="$(printf '%s\n' "$run_state_json" | jq -r '.worker_id // empty' 2>/dev/null || true)"
-            if [ "$(worker_liveness "$worker_id")" = "alive" ]; then
+            # Reuse the heartbeat reclaim decision so no-heartbeat run-state
+            # reconciliation also honors same-host PID and active-worktree
+            # process evidence.
+            decision="$(reclaim_decision "$issue" "$WATCHDOG_CLAIMED_TIMEOUT_SECS")"
+            [ "$decision" = "hold_live_owner_no_heartbeat" ] && live_owner_no_heartbeat=$((live_owner_no_heartbeat + 1))
+            if [ "$decision" != "reclaim" ]; then
                 continue
             fi
             if reclaim_issue "$issue" "$age"; then
@@ -724,6 +788,11 @@ reconcile_run_state_comments() {
         fi
 
         if [ "$age" -ge "$ttl" ]; then
+            decision="$(reclaim_decision "$issue" "$ttl")"
+            [ "$decision" = "hold_live_owner_no_heartbeat" ] && live_owner_no_heartbeat=$((live_owner_no_heartbeat + 1))
+            if [ "$decision" != "reclaim" ]; then
+                continue
+            fi
             if reclaim_issue "$issue" "$age"; then
                 reclaimed=$((reclaimed + 1))
             else
@@ -739,5 +808,5 @@ reconcile_run_state_comments
 gc_orphaned_worktrees
 
 save_state
-printf 'service-watch: nudged=%s reclaimed=%s claimed_released=%s garbage_collected=%s invalid_schema=%s skipped=%s\n' \
-    "$nudged" "$reclaimed" "$claimed_released" "$garbage_collected" "$invalid_schema" "$skipped"
+printf 'service-watch: nudged=%s reclaimed=%s claimed_released=%s garbage_collected=%s invalid_schema=%s skipped=%s live_owner_no_heartbeat=%s\n' \
+    "$nudged" "$reclaimed" "$claimed_released" "$garbage_collected" "$invalid_schema" "$skipped" "$live_owner_no_heartbeat"
