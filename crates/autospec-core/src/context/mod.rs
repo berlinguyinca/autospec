@@ -82,11 +82,7 @@ impl ContextMonitorEngine {
 
     /// Classify token usage from integer token counts.
     pub fn classify(&mut self, used_tokens: u64, max_tokens: u64) -> Vec<ContextAction> {
-        let pct = if max_tokens == 0 {
-            0.0
-        } else {
-            used_tokens as f64 / max_tokens as f64
-        };
+        let pct = usage_percent(used_tokens, max_tokens);
         self.classify_percent(pct)
     }
 
@@ -96,40 +92,60 @@ impl ContextMonitorEngine {
     /// to 80% first emits `compact`, matching the Python engine invariant.
     pub fn classify_percent(&mut self, pct: f64) -> Vec<ContextAction> {
         match self.state {
-            ContextState::Normal => {
-                if pct >= 0.50 {
-                    self.state = ContextState::Compacted;
-                    vec![ContextAction::new("compact")]
-                } else {
-                    Vec::new()
-                }
-            }
-            ContextState::Compacted => {
-                if pct >= 0.80 {
-                    self.state = ContextState::Rolled;
-                    vec![
-                        ContextAction::new("handoff"),
-                        ContextAction::new("clear"),
-                        ContextAction::new("resume"),
-                    ]
-                } else if pct < 0.30 {
-                    self.state = ContextState::Normal;
-                    vec![ContextAction::with_payload(
-                        "noop",
-                        "reset:compacted->normal",
-                    )]
-                } else {
-                    Vec::new()
-                }
-            }
-            ContextState::Rolled => {
-                if pct < 0.30 {
-                    self.state = ContextState::Normal;
-                    vec![ContextAction::with_payload("noop", "reset:rolled->normal")]
-                } else {
-                    Vec::new()
-                }
-            }
+            ContextState::Normal => self.classify_normal(pct),
+            ContextState::Compacted => self.classify_compacted(pct),
+            ContextState::Rolled => self.classify_rolled(pct),
         }
     }
+
+    fn classify_normal(&mut self, pct: f64) -> Vec<ContextAction> {
+        if pct < 0.50 {
+            return Vec::new();
+        }
+        self.state = ContextState::Compacted;
+        compact_actions()
+    }
+
+    fn classify_compacted(&mut self, pct: f64) -> Vec<ContextAction> {
+        if pct >= 0.80 {
+            self.state = ContextState::Rolled;
+            return rollover_actions();
+        }
+        if pct < 0.30 {
+            self.state = ContextState::Normal;
+            return reset_actions("reset:compacted->normal");
+        }
+        Vec::new()
+    }
+
+    fn classify_rolled(&mut self, pct: f64) -> Vec<ContextAction> {
+        if pct >= 0.30 {
+            return Vec::new();
+        }
+        self.state = ContextState::Normal;
+        reset_actions("reset:rolled->normal")
+    }
+}
+
+fn usage_percent(used_tokens: u64, max_tokens: u64) -> f64 {
+    if max_tokens == 0 {
+        0.0
+    } else {
+        used_tokens as f64 / max_tokens as f64
+    }
+}
+
+fn compact_actions() -> Vec<ContextAction> {
+    vec![ContextAction::new("compact")]
+}
+
+fn rollover_actions() -> Vec<ContextAction> {
+    ["handoff", "clear", "resume"]
+        .into_iter()
+        .map(ContextAction::new)
+        .collect()
+}
+
+fn reset_actions(payload: &'static str) -> Vec<ContextAction> {
+    vec![ContextAction::with_payload("noop", payload)]
 }
