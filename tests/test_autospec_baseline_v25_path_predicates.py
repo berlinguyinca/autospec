@@ -15,6 +15,15 @@ def load_baseline_module():
     return module
 
 
+
+def test_rel_uses_path_relative_posix_form(tmp_path):
+    module = load_baseline_module()
+    nested = tmp_path / "docs" / "operators" / "guide.md"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("# Guide\n", encoding="utf-8")
+
+    assert module.rel(tmp_path, nested) == "docs/operators/guide.md"
+
 def test_documentation_coverage_uses_path_tokens_not_substrings(tmp_path):
     module = load_baseline_module()
     docs = tmp_path / "docs"
