@@ -27,7 +27,7 @@ Output:
 
 The Rust core adds a planning foundation beneath the existing workflows. Specs move through explicit lifecycle states: planned, ready, running, passed, failed, blocked, deferred, and superseded. Validation registry entries record command, working directory, timeout, and whether a gate is required.
 
-This core state does not replace `/autospec-run`; it gives later V66+ queue work a deterministic state model while current shell workflows remain the operational surface.
+The lifecycle store persists a schema-versioned document at `.autospec/state/specs.json`. A save first writes and synchronizes `specs.json.tmp`, then promotes it. On startup, a complete temporary document can recover a missing or malformed primary file; a malformed document without that recovery file is an error, never an empty state. The state store remains non-executing and does not replace `/autospec-run`; it gives later V66+ queue work a deterministic state model while current shell workflows remain the operational surface.
 
 The V66 queue layer builds on that state with ordered entries, attempts, failure classification, blocked-spec handoff markdown, and final run-report summaries. Agent execution remains a later integration layer; the queue is the resumable local model.
 
