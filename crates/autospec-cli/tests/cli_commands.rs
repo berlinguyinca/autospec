@@ -63,6 +63,20 @@ fn status_json_reports_persisted_lifecycle_counts() {
 }
 
 #[test]
+fn report_json_renders_a_release_summary_from_persisted_state() {
+    let output = autospec()
+        .args(["report", "--json"])
+        .output()
+        .expect("report command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"version\":\"current\""));
+    assert!(stdout.contains("\"passed\":"));
+    assert!(stdout.contains("\"superseded\":"));
+}
+
+#[test]
 fn autonomous_start_dry_run_includes_monitor_and_supervisor_companions() {
     let output = autospec()
         .args([
