@@ -144,3 +144,86 @@ def test_handle_generic_command_uses_dispatch_table_for_all_generic_actions(tmp_
     assert calls[3][3] == (SimpleNamespace(command="v40-gate"),)
     assert calls[8][3] == (SimpleNamespace(command="v40-supervisor"),)
     assert capsys.readouterr().out == "v40 status: ready\nv40 status: ready\n"
+
+
+def test_legacy_version_commands_use_table_dispatch(tmp_path, monkeypatch, capsys):
+    module = load_baseline_module()
+
+    assert set(module.LEGACY_VERSION_READY_STATUS) == set(range(26, 40))
+    assert module.LEGACY_VERSION_ACTIONS == (
+        "contract",
+        "preflight",
+        "artifact-build",
+        "gate",
+        "audit",
+        "verifier",
+        "recovery",
+        "status",
+        "supervisor",
+    )
+
+    calls = []
+
+    def recorder(name, result=None):
+        def _record(root, *extra_args):
+            calls.append((name, root, extra_args))
+            return result or {}
+
+        return _record
+
+    monkeypatch.setattr(module, "v26_contract", recorder("contract"))
+    monkeypatch.setattr(module, "v26_preflight", recorder("preflight", {"blockers": []}))
+    monkeypatch.setattr(module, "v26_artifact_build", recorder("artifact-build"))
+    monkeypatch.setattr(module, "v26_gate", recorder("gate", {"blockers": []}))
+    monkeypatch.setattr(module, "v26_audit", recorder("audit"))
+    monkeypatch.setattr(module, "v26_verifier", recorder("verifier", {"blockers": []}))
+    monkeypatch.setattr(module, "v26_recovery", recorder("recovery"))
+    monkeypatch.setattr(module, "v26_status", recorder("status", {"status": "ready_after_human_canary"}))
+    monkeypatch.setattr(module, "v26_supervisor", recorder("supervisor", {"status": "ready_after_human_canary"}))
+
+    for action in module.LEGACY_VERSION_ACTIONS:
+        assert module.handle_legacy_version_command(tmp_path, SimpleNamespace(command=f"v26-{action}")) == 0
+
+    assert [call[0] for call in calls] == list(module.LEGACY_VERSION_ACTIONS)
+    assert all(call[1] == tmp_path for call in calls)
+    assert calls[3][2] == (SimpleNamespace(command="v26-gate"),)
+    assert calls[8][2] == (SimpleNamespace(command="v26-supervisor"),)
+    assert capsys.readouterr().out == "v26 status: ready_after_human_canary\nv26 status: ready_after_human_canary\n"
+    assert module.handle_legacy_version_command(tmp_path, SimpleNamespace(command="v40-contract")) is None
+    assert module.handle_legacy_version_command(tmp_path, SimpleNamespace(command="v026-contract")) is None
+
+
+def test_v61_commands_use_dispatch_table(tmp_path, monkeypatch, capsys):
+    module = load_baseline_module()
+    expected = (
+        "v61-mainline-acceptance",
+        "v61-capability-truth-audit",
+        "v61-operator-command-catalog",
+        "v61-golden-path-build",
+        "v61-golden-path-status",
+        "v61-release-candidate-pack",
+        "v61-postmerge-validation",
+        "v61-human-approval-boundary-audit",
+        "v61-remote-write-boundary-audit",
+        "v61-status",
+    )
+
+    assert tuple(module.V61_COMMAND_DISPATCHERS) == expected
+
+    calls = []
+
+    for command in expected:
+        def handler(root, args, command=command):
+            calls.append((command, root, args.command))
+            print(f"{command}: ok")
+            return 0
+
+        monkeypatch.setitem(module.V61_COMMAND_DISPATCHERS, command, handler)
+
+    for command in expected:
+        assert module.handle_v61_command(tmp_path, SimpleNamespace(command=command)) == 0
+
+    assert [call[0] for call in calls] == list(expected)
+    assert all(call[1] == tmp_path and call[2] == call[0] for call in calls)
+    assert module.handle_v61_command(tmp_path, SimpleNamespace(command="v62-status")) is None
+    assert capsys.readouterr().out == "".join(f"{command}: ok\n" for command in expected)
