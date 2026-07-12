@@ -2757,8 +2757,10 @@ check_install_tests() {
         info "  skipping install tests during nested --fast validation"
         return 0
     fi
-    if [ -d tests/install ]; then
-        for t in tests/install/*.sh; do
+    install_glob="${AUTOSPEC_VALIDATE_INSTALL_TEST_GLOB:-tests/install/*.sh}"
+    if [ -d tests/install ] || [ -n "${AUTOSPEC_VALIDATE_INSTALL_TEST_GLOB:-}" ]; then
+        # shellcheck disable=SC2086
+        for t in $install_glob; do
             [ -f "$t" ] || continue
             info "  running: $t"
             bash "$t" >/tmp/validate-install.log 2>&1 \
@@ -5386,5 +5388,10 @@ check_run_groom_preflight_contract() {
             || { cat /tmp/validate-run-groom-preflight.log >&2; fail "$bats_file: failed"; }
     fi
 }
+
+if [ "${AUTOSPEC_VALIDATE_INSTALL_TESTS_ONLY:-0}" = "1" ]; then
+    check_install_tests
+    exit 0
+fi
 
 main "$@"
