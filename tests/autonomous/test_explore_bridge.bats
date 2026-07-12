@@ -137,8 +137,9 @@ EOF
 
 @test "bridge degrades to a clean dry (exit 0) when omx is absent from PATH" {
     rm -f "$TMP/bin/omx"
-    # Ensure omx is genuinely unavailable for this run.
-    run env PATH="$TMP/bin:/usr/bin:/bin" bash "$BRIDGE" --once
+    ln -sf /usr/bin/dirname "$TMP/bin/dirname"
+    # Ensure omx is genuinely unavailable even on developer hosts with /usr/bin/omx or /bin/omx.
+    run env PATH="$TMP/bin" /usr/bin/bash "$BRIDGE" --once
     [ "$status" -eq 0 ]
     line="$(printf '%s\n' "$output" | grep '"filed"' | tail -1)"
     echo "$line" | jq -e '.dry == true' >/dev/null
