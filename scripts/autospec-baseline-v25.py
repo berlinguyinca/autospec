@@ -5465,24 +5465,77 @@ def v61_run_all(root: Path) -> dict:
     return v61_status(root)
 
 
+def _generic_contract_command(root: Path, version: int, args) -> int:
+    generic_contract(root, version)
+    return 0
+
+
+def _generic_preflight_command(root: Path, version: int, args) -> int:
+    payload = generic_preflight(root, version)
+    return 0 if not payload["blockers"] else 1
+
+
+def _generic_artifact_build_command(root: Path, version: int, args) -> int:
+    generic_artifact_build(root, version)
+    return 0
+
+
+def _generic_gate_command(root: Path, version: int, args) -> int:
+    payload = generic_gate(root, version, args)
+    return 0 if not payload["blockers"] else 1
+
+
+def _generic_audit_command(root: Path, version: int, args) -> int:
+    generic_audit(root, version)
+    return 0
+
+
+def _generic_verifier_command(root: Path, version: int, args) -> int:
+    payload = generic_verifier(root, version)
+    return 0 if not payload["blockers"] else 1
+
+
+def _generic_recovery_command(root: Path, version: int, args) -> int:
+    generic_recovery(root, version)
+    return 0
+
+
+def _generic_status_command(root: Path, version: int, args) -> int:
+    payload = generic_status(root, version)
+    print(f"v{version} status: {payload['status']}")
+    return 0 if payload["status"] == GENERIC_PHASES[version].get("ready_status", "ready") else 1
+
+
+def _generic_supervisor_command(root: Path, version: int, args) -> int:
+    payload = generic_supervisor(root, version, args)
+    print(f"v{version} status: {payload['status']}")
+    return 0 if payload["status"] == GENERIC_PHASES[version].get("ready_status", "ready") else 1
+
+
+GENERIC_COMMAND_DISPATCHERS = (
+    ("contract", _generic_contract_command),
+    ("preflight", _generic_preflight_command),
+    ("artifact-build", _generic_artifact_build_command),
+    ("gate", _generic_gate_command),
+    ("audit", _generic_audit_command),
+    ("verifier", _generic_verifier_command),
+    ("recovery", _generic_recovery_command),
+    ("status", _generic_status_command),
+    ("supervisor", _generic_supervisor_command),
+)
+
+
 def handle_generic_command(root: Path, args) -> int | None:
-    m = re.fullmatch(r"v(\d+)-(contract|preflight|artifact-build|gate|audit|verifier|recovery|status|supervisor)", args.command)
+    generic_actions = "|".join(re.escape(action) for action, _handler in GENERIC_COMMAND_DISPATCHERS)
+    m = re.fullmatch(rf"v(\d+)-({generic_actions})", args.command)
     if not m:
         return None
     version=int(m.group(1)); action=m.group(2)
     if version not in GENERIC_PHASES:
         return None
-    if action == "contract": generic_contract(root, version); return 0
-    if action == "preflight": payload=generic_preflight(root, version); return 0 if not payload["blockers"] else 1
-    if action == "artifact-build": generic_artifact_build(root, version); return 0
-    if action == "gate": payload=generic_gate(root, version, args); return 0 if not payload["blockers"] else 1
-    if action == "audit": generic_audit(root, version); return 0
-    if action == "verifier": payload=generic_verifier(root, version); return 0 if not payload["blockers"] else 1
-    if action == "recovery": generic_recovery(root, version); return 0
-    if action == "status":
-        payload=generic_status(root, version); print(f"v{version} status: {payload['status']}"); return 0 if payload["status"] == GENERIC_PHASES[version].get("ready_status", "ready") else 1
-    if action == "supervisor":
-        payload=generic_supervisor(root, version, args); print(f"v{version} status: {payload['status']}"); return 0 if payload["status"] == GENERIC_PHASES[version].get("ready_status", "ready") else 1
+    for registered_action, handler in GENERIC_COMMAND_DISPATCHERS:
+        if action == registered_action:
+            return handler(root, version, args)
     return None
 
 
