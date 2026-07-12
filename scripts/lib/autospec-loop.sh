@@ -943,6 +943,165 @@ _autospec_conductor_escalate_all_blocked() {
         >> "${HOME}/.autospec/autonomous-digest.md" 2>/dev/null || true
 }
 
+_autospec_conductor_main_sha() {
+    local repo_root="$1"
+    if [ -n "${AUTOSPEC_CONDUCTOR_MAIN_SHA_CMD:-}" ]; then
+        bash -c "$AUTOSPEC_CONDUCTOR_MAIN_SHA_CMD" 2>/dev/null | sed -n '1p'
+        return 0
+    fi
+    git -C "$repo_root" rev-parse --verify refs/remotes/origin/main 2>/dev/null \
+        || git -C "$repo_root" rev-parse --verify main 2>/dev/null \
+        || git -C "$repo_root" rev-parse --verify HEAD 2>/dev/null \
+        || true
+}
+
+_autospec_conductor_fetch_main() {
+    local repo_root="$1"
+    if [ -n "${AUTOSPEC_CONDUCTOR_MAIN_SHA_CMD:-}" ]; then
+        return 0
+    fi
+    git -C "$repo_root" fetch origin main >/dev/null 2>&1 || true
+}
+
+_autospec_conductor_self_repair_pending_file() {
+    local repo_root="$1"
+    printf '%s/.autospec/autonomous-self-repair-refresh.json\n' "$repo_root"
+}
+
+_autospec_conductor_pr_touches_refresh_surface() {
+    local repo="$1"
+    local pr="$2"
+    [ -n "$repo" ] || return 1
+    case "$pr" in ''|*[!0-9]*) return 1 ;; esac
+    command -v gh >/dev/null 2>&1 || return 1
+
+    gh pr view "$pr" --repo "$repo" --json files --jq '.files[].path' 2>/dev/null \
+        | while IFS= read -r _path; do
+            case "$_path" in
+                scripts/*|skills/*)
+                    printf 'yes\n'
+                    break
+                    ;;
+            esac
+        done | grep -q '^yes$'
+}
+
+_autospec_conductor_arm_self_repair_refresh() {
+    local repo_root="$1"
+    local repo="$2"
+    local pr="$3"
+    local old_sha="$4"
+    local cycle="$5"
+    [ -n "$old_sha" ] || return 0
+    _autospec_conductor_pr_touches_refresh_surface "$repo" "$pr" || return 0
+
+    local pending_file
+    pending_file="$(_autospec_conductor_self_repair_pending_file "$repo_root")"
+    mkdir -p "$(dirname "$pending_file")" 2>/dev/null || true
+    python3 - "$pending_file" "$repo" "$pr" "$old_sha" "$cycle" <<'PY' 2>/dev/null || true
+import json, sys, time
+path, repo, pr, old_sha, cycle = sys.argv[1:6]
+payload = {
+    "repo": repo,
+    "pr": int(pr),
+    "old_main_sha": old_sha,
+    "cycle": int(cycle),
+    "reason": "self-repair merge touched scripts/ or skills/",
+    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, sort_keys=True)
+    fh.write("\n")
+PY
+    printf '[conductor] self-repair refresh armed for PR #%s after cycle %s (main=%s)\n' \
+        "$pr" "$cycle" "$old_sha" >&2
+}
+
+_autospec_conductor_maybe_arm_self_repair_refresh() {
+    local repo_root="$1"
+    local repo="$2"
+    local outcome_file="$3"
+    local old_sha="$4"
+    local cycle="$5"
+    [ -f "$outcome_file" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local is_self outcome pr
+    is_self="$(jq -r '.self_originated // false' "$outcome_file" 2>/dev/null || printf 'false')"
+    outcome="$(jq -r '.outcome // ""' "$outcome_file" 2>/dev/null || printf '')"
+    pr="$(jq -r '.pr // empty' "$outcome_file" 2>/dev/null || printf '')"
+    [ "$is_self" = "true" ] || return 0
+    [ "$outcome" = "merged" ] || return 0
+    _autospec_conductor_arm_self_repair_refresh "$repo_root" "$repo" "$pr" "$old_sha" "$cycle"
+}
+
+_autospec_conductor_run_refresh_command() {
+    local repo_root="$1"
+    local old_sha="$2"
+    local new_sha="$3"
+    local pr="$4"
+
+    export AUTOSPEC_CONDUCTOR_REFRESH_OLD_SHA="$old_sha"
+    export AUTOSPEC_CONDUCTOR_REFRESH_NEW_SHA="$new_sha"
+    export AUTOSPEC_CONDUCTOR_REFRESH_PR="$pr"
+    if [ -n "${AUTOSPEC_CONDUCTOR_REFRESH_CMD:-}" ]; then
+        bash -c "$AUTOSPEC_CONDUCTOR_REFRESH_CMD"
+        return $?
+    fi
+    if [ -f "$repo_root/install.sh" ]; then
+        AUTOSPEC_AUTO_YES=1 \
+        AUTOSPEC_NO_STAR_PROMPT=1 \
+        AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
+        bash "$repo_root/install.sh" --update --skill autospec-autonomous --harness codex
+        return $?
+    fi
+    return 0
+}
+
+_autospec_conductor_maybe_refresh_self_repair() {
+    local repo_root="$1"
+    local repo="$2"
+    local dry="$3"
+    local pending_file
+    pending_file="$(_autospec_conductor_self_repair_pending_file "$repo_root")"
+    [ -f "$pending_file" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local old_sha pr new_sha digest_file pid_value
+    old_sha="$(jq -r '.old_main_sha // empty' "$pending_file" 2>/dev/null || printf '')"
+    pr="$(jq -r '.pr // empty' "$pending_file" 2>/dev/null || printf '')"
+    [ -n "$old_sha" ] || return 0
+
+    _autospec_conductor_fetch_main "$repo_root"
+    new_sha="$(_autospec_conductor_main_sha "$repo_root" | sed -n '1p')"
+    [ -n "$new_sha" ] || return 0
+    if [ "$new_sha" = "$old_sha" ]; then
+        return 0
+    fi
+
+    pid_value="${AUTOSPEC_CONDUCTOR_PID:-$$}"
+    printf '[conductor] self-repair refresh: %s -> %s (PR #%s, PID %s)\n' \
+        "$old_sha" "$new_sha" "${pr:-unknown}" "$pid_value" >&2
+    if [ "$dry" != "1" ]; then
+        _autospec_conductor_run_refresh_command "$repo_root" "$old_sha" "$new_sha" "$pr" \
+            >/dev/null 2>&1 || true
+    fi
+
+    digest_file="${repo_root}/.autospec/autonomous-digest.md"
+    mkdir -p "$(dirname "$digest_file")" 2>/dev/null || true
+    {
+        printf '\n## Self-repair refresh — %s\n\n' \
+            "$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown)"
+        printf -- '- PR: #%s\n' "${pr:-unknown}"
+        printf -- '- Conductor PID: `%s`\n' "$pid_value"
+        printf -- '- Main SHA: `%s -> %s`\n' "$old_sha" "$new_sha"
+        if [ -n "$repo" ]; then
+            printf -- '- Repo: `%s`\n' "$repo"
+        fi
+    } >> "$digest_file" 2>/dev/null || true
+    rm -f "$pending_file" 2>/dev/null || true
+}
+
 autospec_conductor_run() {
     if [ -n "${HOME:-}" ]; then
         case ":${PATH:-}:" in
@@ -1251,6 +1410,9 @@ fi'
         _cycle=$((_cycle + 1))
         _AUTOSPEC_CONDUCTOR_CYCLE="$_cycle"
         printf '[conductor] cycle %s starting\n' "$_cycle" >&2
+        _autospec_conductor_maybe_refresh_self_repair "$_repo_root" "$_repo" "$_dry" || true
+        local _cycle_main_sha
+        _cycle_main_sha="$(_autospec_conductor_main_sha "$_repo_root" | sed -n '1p')"
 
         # ── Step 1: Resilience heartbeat ──────────────────────────────────────
         if [ -f "$_resilience" ] && [ -n "$_repo" ]; then
@@ -2229,6 +2391,8 @@ EOF_PROV_BATCH
                                     printf '[conductor] F3: discovery outcome consumed; in-flight=%s\n' \
                                         "$_inflight_discovery" >&2
                                 fi
+                                _autospec_conductor_maybe_arm_self_repair_refresh \
+                                    "$_repo_root" "$_repo" "$_outcome_file" "$_cycle_main_sha" "$_cycle" || true
                                 # Always consume the outcome file so a later cycle never
                                 # re-processes a stale outcome (LOW review fix).
                                 rm -f "$_outcome_file" 2>/dev/null || true
