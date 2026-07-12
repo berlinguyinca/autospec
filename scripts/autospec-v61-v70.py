@@ -323,67 +323,102 @@ def write_action(root: Path, version: int, action: str) -> dict:
     return payload
 
 
+def _build_v62_artifacts(root: Path, base: Path) -> None:
+    targets = [
+        {"name": "autotrade", "path": "/Users/wohlgemuth/IdeaProjects/autotrade", "kind": "dogfood", "lease_status": "independent", "isolation_status": "original_unchanged", "blockers": []},
+        {"name": "external-placeholder", "path": "/private/tmp/autospec-v62-external-placeholder", "kind": "placeholder", "lease_status": "independent", "isolation_status": "read_only_placeholder", "blockers": ["operator_target_required"]},
+    ]
+    write_json(base / "target-registry.json", {"schema": "autospec.autonomy.v62.target_registry", "status": "written", "targets": targets, **safety()})
+    write_text(base / "pilot-matrix.md", "# V62 Pilot Matrix\n\n" + table(["Target", "Lease", "Isolation", "Blockers"], [[t["name"], t["lease_status"], t["isolation_status"], ", ".join(t["blockers"]) or "none"] for t in targets]))
+    write_text(base / "isolation-audit.md", "# V62 Isolation Audit\n\n- foreground_only: `true`\n- original_targets_written: `false`\n- hidden_network: `false`\n")
+    write_text(base / "evidence-aggregate.md", "# V62 Evidence Aggregate\n\nPer-target blockers are reported honestly; no writes or hidden network occurred.\n")
+
+
+def _build_v63_artifacts(root: Path, base: Path) -> None:
+    write_text(root / "docs/operators/INSTALL_AND_DOCTOR.md", "# Install And Doctor\n\nLocal doctor checks distinguish optional tools from blockers and perform no package installs.\n")
+    write_text(root / "docs/operators/COMMAND_SMOKE_GUIDE.md", "# Command Smoke Guide\n\nAll examples default to dry-run or read-only execution.\n")
+    write_text(base / "reproducibility-report.md", "# V63 Reproducibility Report\n\nDeterministic local report generation verified.\n")
+    write_text(base / "operator-onboarding-pack.md", "# V63 Operator Onboarding Pack\n\nRun local smoke scripts first; no hidden network or package installs.\n")
+
+
+def _build_v64_artifacts(root: Path, base: Path) -> None:
+    data = {"schema": "autospec.autonomy.v64.dashboard_data", "status": "written", "remote_write_capabilities": "gated/readiness-only unless evidence exists", **safety()}
+    write_json(base / "dashboard-data.json", data)
+    write_text(base / "index.html", "<!doctype html><title>Autospec V64 Dashboard</title><h1>Autospec Control Plane</h1><p>Static artifact only. No daemon, scheduler, telemetry, or background update.</p>")
+    write_text(base / "control-plane-summary.md", "# V64 Control Plane Summary\n\nStatic dashboard data is consolidated from local artifacts.\n")
+    write_text(base / "safety-matrix.md", "# V64 Safety Matrix\n\nRemote writes are gated/readiness-only unless audited execution evidence exists. Raw secrets are not exposed.\n")
+
+
+def _build_v65_artifacts(root: Path, base: Path) -> None:
+    write_text(base / "constitution-drift-audit.md", "# V65 Constitution Drift Audit\n\nProposal-only drift audit; no companion repo writes.\n")
+    write_text(base / "baseline-drift-audit.md", "# V65 Baseline Drift Audit\n\nBaseline drift is documented for manual review.\n")
+    write_text(base / "sync-proposal-plan.md", "# V65 Sync Proposal Plan\n\nManual patch bundle only; write bridge remains locked.\n")
+    write_text(base / "manual-pr-packet.md", "# V65 Manual PR Packet\n\nIncludes exact files, risk notes, and no automatic PR creation.\n")
+
+
+def _build_v66_artifacts(root: Path, base: Path) -> None:
+    write_text(base / "target-intake.md", "# V66 Target Intake\n\nOperator-supplied external target is modeled read-only.\n")
+    write_text(base / "digital-twin-summary.md", "# V66 Digital Twin Summary\n\nRead-only summary generated without writes.\n")
+    write_text(base / "backlog-recommendations.md", "# V66 Backlog Recommendations\n\nRecommendations only; no issue publishing.\n")
+    write_text(base / "issue-draft-pack.md", "# V66 Issue Draft Pack\n\nIssue drafts remain unpublished by default.\n")
+    write_text(base / "closeout.md", "# V66 Closeout\n\nExternal read-only pilot closeout; original target unchanged.\n")
+
+
+def _build_v67_artifacts(root: Path, base: Path) -> None:
+    disposable = base / "disposable-target/docs"
+    disposable.mkdir(parents=True, exist_ok=True)
+    (disposable / "autospec-v67-evidence.md").write_text("# V67 Disposable Evidence\n\nOne docs-only disposable patch.\n", encoding="utf-8")
+    write_text(base / "write-candidate.md", "# V67 Write Candidate\n\n- candidate_count: `1`\n- scope: `docs/evidence-only`\n")
+    write_text(base / "apply-result.md", "# V67 Apply Result\n\nDisposable patch applied under `.autospec` only.\n")
+    write_text(base / "rollback-verification.md", "# V67 Rollback Verification\n\nRollback verified for disposable proof; no remote cleanup required.\n")
+    write_text(base / "original-target-unchanged.md", "# V67 Original Target Unchanged\n\nOriginal external target writes: `false`.\n")
+
+
+def _build_v68_artifacts(root: Path, base: Path) -> None:
+    ledger = {"schema": "autospec.autonomy.v68.local_commit_ledger", "status": "written", "local_commits_created": 1, "branch": "autospec/v68-external-local-commit", "default_branch": False, "git_push_attempted": False, **safety()}
+    write_json(base / "local-commit-ledger.json", ledger)
+    write_text(base / "commit-verifier.md", "# V68 Commit Verifier\n\nOne local disposable commit is verified on a non-default branch. No push occurred.\n")
+    write_text(base / "revert-drill.md", "# V68 Revert Drill\n\nRevert drill is documented for the disposable local commit.\n")
+    write_text(base / "handoff.md", "# V68 Handoff\n\nLocal commit proof complete; remote writes remain blocked.\n")
+
+
+def _build_v69_artifacts(root: Path, base: Path) -> None:
+    approval = {"schema": "autospec.autonomy.v69.approval_capsule_template", "status": "template_only", "approval_capsule_verified": False, "real_write_allowed": False, "approval_phrase_required": "I_APPROVE_AUTOSPEC_V69_EXTERNAL_DRAFT_PR_CANARY", **safety()}
+    write_text(base / "canary-readiness.md", "# V69 Canary Readiness\n\nPrepare-only readiness passed. Real execution requires verified approval capsule.\n")
+    write_json(base / "approval-capsule-template.json", approval)
+    write_text(base / "remote-write-audit.md", "# V69 Remote Write Audit\n\n- real_git_push_executed: `false`\n- draft_pr_create_executed: `false`\n- issue_publish_executed: `false`\n- merge_attempted: `false`\n")
+    write_text(base / "recovery-plan.md", "# V69 Recovery Plan\n\nNo remote write occurred; rollback required: `false`.\n")
+
+
+def _build_v70_artifacts(root: Path, base: Path) -> None:
+    write_text(base / "release-summary.md", "# V70 Alpha Release Summary\n\nAlpha RC packages V61-V69 with accepted warnings.\n")
+    write_text(base / "pilot-program-matrix.md", "# V70 Pilot Program Matrix\n\nPilot governance is ready with explicit human actions.\n")
+    write_text(base / "operator-runbook.md", "# V70 Operator Runbook\n\nDry-run/read-only first; no hidden automation or auto-merge.\n")
+    write_text(base / "risk-register.md", "# V70 Risk Register\n\nAccepted warnings: V69 real canary remains human-approved only.\n")
+    write_text(base / "final-handoff.md", "# V70 Final Handoff\n\nAlpha ready with accepted warnings; next actions are human-governed.\n")
+    write_json(base / "evidence-index.json", {"schema": "autospec.autonomy.v70.evidence_index", "status": "written", "versions": [f"v{v}" for v in range(61, 70)], **safety()})
+
+
+REQUIRED_ARTIFACT_BUILDERS = (
+    (62, _build_v62_artifacts),
+    (63, _build_v63_artifacts),
+    (64, _build_v64_artifacts),
+    (65, _build_v65_artifacts),
+    (66, _build_v66_artifacts),
+    (67, _build_v67_artifacts),
+    (68, _build_v68_artifacts),
+    (69, _build_v69_artifacts),
+    (70, _build_v70_artifacts),
+)
+
+
 def build_required_artifacts(root: Path, version: int) -> None:
     base = root_dir(root, version)
     meta = PHASES[version]
-    if version == 62:
-        targets = [
-            {"name": "autotrade", "path": "/Users/wohlgemuth/IdeaProjects/autotrade", "kind": "dogfood", "lease_status": "independent", "isolation_status": "original_unchanged", "blockers": []},
-            {"name": "external-placeholder", "path": "/private/tmp/autospec-v62-external-placeholder", "kind": "placeholder", "lease_status": "independent", "isolation_status": "read_only_placeholder", "blockers": ["operator_target_required"]},
-        ]
-        write_json(base / "target-registry.json", {"schema": "autospec.autonomy.v62.target_registry", "status": "written", "targets": targets, **safety()})
-        write_text(base / "pilot-matrix.md", "# V62 Pilot Matrix\n\n" + table(["Target", "Lease", "Isolation", "Blockers"], [[t["name"], t["lease_status"], t["isolation_status"], ", ".join(t["blockers"]) or "none"] for t in targets]))
-        write_text(base / "isolation-audit.md", "# V62 Isolation Audit\n\n- foreground_only: `true`\n- original_targets_written: `false`\n- hidden_network: `false`\n")
-        write_text(base / "evidence-aggregate.md", "# V62 Evidence Aggregate\n\nPer-target blockers are reported honestly; no writes or hidden network occurred.\n")
-    elif version == 63:
-        write_text(root / "docs/operators/INSTALL_AND_DOCTOR.md", "# Install And Doctor\n\nLocal doctor checks distinguish optional tools from blockers and perform no package installs.\n")
-        write_text(root / "docs/operators/COMMAND_SMOKE_GUIDE.md", "# Command Smoke Guide\n\nAll examples default to dry-run or read-only execution.\n")
-        write_text(base / "reproducibility-report.md", "# V63 Reproducibility Report\n\nDeterministic local report generation verified.\n")
-        write_text(base / "operator-onboarding-pack.md", "# V63 Operator Onboarding Pack\n\nRun local smoke scripts first; no hidden network or package installs.\n")
-    elif version == 64:
-        data = {"schema": "autospec.autonomy.v64.dashboard_data", "status": "written", "remote_write_capabilities": "gated/readiness-only unless evidence exists", **safety()}
-        write_json(base / "dashboard-data.json", data)
-        write_text(base / "index.html", "<!doctype html><title>Autospec V64 Dashboard</title><h1>Autospec Control Plane</h1><p>Static artifact only. No daemon, scheduler, telemetry, or background update.</p>")
-        write_text(base / "control-plane-summary.md", "# V64 Control Plane Summary\n\nStatic dashboard data is consolidated from local artifacts.\n")
-        write_text(base / "safety-matrix.md", "# V64 Safety Matrix\n\nRemote writes are gated/readiness-only unless audited execution evidence exists. Raw secrets are not exposed.\n")
-    elif version == 65:
-        write_text(base / "constitution-drift-audit.md", "# V65 Constitution Drift Audit\n\nProposal-only drift audit; no companion repo writes.\n")
-        write_text(base / "baseline-drift-audit.md", "# V65 Baseline Drift Audit\n\nBaseline drift is documented for manual review.\n")
-        write_text(base / "sync-proposal-plan.md", "# V65 Sync Proposal Plan\n\nManual patch bundle only; write bridge remains locked.\n")
-        write_text(base / "manual-pr-packet.md", "# V65 Manual PR Packet\n\nIncludes exact files, risk notes, and no automatic PR creation.\n")
-    elif version == 66:
-        write_text(base / "target-intake.md", "# V66 Target Intake\n\nOperator-supplied external target is modeled read-only.\n")
-        write_text(base / "digital-twin-summary.md", "# V66 Digital Twin Summary\n\nRead-only summary generated without writes.\n")
-        write_text(base / "backlog-recommendations.md", "# V66 Backlog Recommendations\n\nRecommendations only; no issue publishing.\n")
-        write_text(base / "issue-draft-pack.md", "# V66 Issue Draft Pack\n\nIssue drafts remain unpublished by default.\n")
-        write_text(base / "closeout.md", "# V66 Closeout\n\nExternal read-only pilot closeout; original target unchanged.\n")
-    elif version == 67:
-        disposable = base / "disposable-target/docs"
-        disposable.mkdir(parents=True, exist_ok=True)
-        (disposable / "autospec-v67-evidence.md").write_text("# V67 Disposable Evidence\n\nOne docs-only disposable patch.\n", encoding="utf-8")
-        write_text(base / "write-candidate.md", "# V67 Write Candidate\n\n- candidate_count: `1`\n- scope: `docs/evidence-only`\n")
-        write_text(base / "apply-result.md", "# V67 Apply Result\n\nDisposable patch applied under `.autospec` only.\n")
-        write_text(base / "rollback-verification.md", "# V67 Rollback Verification\n\nRollback verified for disposable proof; no remote cleanup required.\n")
-        write_text(base / "original-target-unchanged.md", "# V67 Original Target Unchanged\n\nOriginal external target writes: `false`.\n")
-    elif version == 68:
-        ledger = {"schema": "autospec.autonomy.v68.local_commit_ledger", "status": "written", "local_commits_created": 1, "branch": "autospec/v68-external-local-commit", "default_branch": False, "git_push_attempted": False, **safety()}
-        write_json(base / "local-commit-ledger.json", ledger)
-        write_text(base / "commit-verifier.md", "# V68 Commit Verifier\n\nOne local disposable commit is verified on a non-default branch. No push occurred.\n")
-        write_text(base / "revert-drill.md", "# V68 Revert Drill\n\nRevert drill is documented for the disposable local commit.\n")
-        write_text(base / "handoff.md", "# V68 Handoff\n\nLocal commit proof complete; remote writes remain blocked.\n")
-    elif version == 69:
-        approval = {"schema": "autospec.autonomy.v69.approval_capsule_template", "status": "template_only", "approval_capsule_verified": False, "real_write_allowed": False, "approval_phrase_required": "I_APPROVE_AUTOSPEC_V69_EXTERNAL_DRAFT_PR_CANARY", **safety()}
-        write_text(base / "canary-readiness.md", "# V69 Canary Readiness\n\nPrepare-only readiness passed. Real execution requires verified approval capsule.\n")
-        write_json(base / "approval-capsule-template.json", approval)
-        write_text(base / "remote-write-audit.md", "# V69 Remote Write Audit\n\n- real_git_push_executed: `false`\n- draft_pr_create_executed: `false`\n- issue_publish_executed: `false`\n- merge_attempted: `false`\n")
-        write_text(base / "recovery-plan.md", "# V69 Recovery Plan\n\nNo remote write occurred; rollback required: `false`.\n")
-    elif version == 70:
-        write_text(base / "release-summary.md", "# V70 Alpha Release Summary\n\nAlpha RC packages V61-V69 with accepted warnings.\n")
-        write_text(base / "pilot-program-matrix.md", "# V70 Pilot Program Matrix\n\nPilot governance is ready with explicit human actions.\n")
-        write_text(base / "operator-runbook.md", "# V70 Operator Runbook\n\nDry-run/read-only first; no hidden automation or auto-merge.\n")
-        write_text(base / "risk-register.md", "# V70 Risk Register\n\nAccepted warnings: V69 real canary remains human-approved only.\n")
-        write_text(base / "final-handoff.md", "# V70 Final Handoff\n\nAlpha ready with accepted warnings; next actions are human-governed.\n")
-        write_json(base / "evidence-index.json", {"schema": "autospec.autonomy.v70.evidence_index", "status": "written", "versions": [f"v{v}" for v in range(61, 70)], **safety()})
+    for builder_version, build_artifacts in REQUIRED_ARTIFACT_BUILDERS:
+        if builder_version == version:
+            build_artifacts(root, base)
+            break
     write_json(base / "negative-proof.json", {"schema": f"autospec.autonomy.v{version}.negative_proof", "status": "pass", **safety()})
     write_json(base / "artifact-index.json", {"schema": f"autospec.autonomy.v{version}.artifact_index", "status": "written", "required": meta["required"], **safety()})
 
