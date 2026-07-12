@@ -834,9 +834,10 @@ reconcile_run_state_comments() {
         fi
 
         if [ "$step" = "claimed" ] && [ "$age" -ge "$WATCHDOG_CLAIMED_TIMEOUT_SECS" ]; then
-            # Reuse the heartbeat reclaim decision so no-heartbeat run-state
-            # reconciliation also honors same-host PID and active-worktree
-            # process evidence.
+            # Missing-heartbeat reconciliation uses the same GitHub-authority +
+            # same-host PID + local-worktree liveness gate as heartbeat-triggered
+            # reclaim. A stale run-state comment is only the trigger, not proof
+            # that the owner is dead.
             decision="$(reclaim_decision "$issue" "$WATCHDOG_CLAIMED_TIMEOUT_SECS")"
             [ "$decision" = "hold_live_owner_no_heartbeat" ] && live_owner_no_heartbeat=$((live_owner_no_heartbeat + 1))
             if [ "$decision" != "reclaim" ]; then
