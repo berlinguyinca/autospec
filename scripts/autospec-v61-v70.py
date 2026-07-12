@@ -399,26 +399,25 @@ def _build_v70_artifacts(root: Path, base: Path) -> None:
     write_json(base / "evidence-index.json", {"schema": "autospec.autonomy.v70.evidence_index", "status": "written", "versions": [f"v{v}" for v in range(61, 70)], **safety()})
 
 
-REQUIRED_ARTIFACT_BUILDERS = (
-    (62, _build_v62_artifacts),
-    (63, _build_v63_artifacts),
-    (64, _build_v64_artifacts),
-    (65, _build_v65_artifacts),
-    (66, _build_v66_artifacts),
-    (67, _build_v67_artifacts),
-    (68, _build_v68_artifacts),
-    (69, _build_v69_artifacts),
-    (70, _build_v70_artifacts),
-)
+REQUIRED_ARTIFACT_BUILDERS = {
+    62: _build_v62_artifacts,
+    63: _build_v63_artifacts,
+    64: _build_v64_artifacts,
+    65: _build_v65_artifacts,
+    66: _build_v66_artifacts,
+    67: _build_v67_artifacts,
+    68: _build_v68_artifacts,
+    69: _build_v69_artifacts,
+    70: _build_v70_artifacts,
+}
 
 
 def build_required_artifacts(root: Path, version: int) -> None:
     base = root_dir(root, version)
     meta = PHASES[version]
-    for builder_version, build_artifacts in REQUIRED_ARTIFACT_BUILDERS:
-        if builder_version == version:
-            build_artifacts(root, base)
-            break
+    build_artifacts = REQUIRED_ARTIFACT_BUILDERS.get(version)
+    if build_artifacts is not None:
+        build_artifacts(root, base)
     write_json(base / "negative-proof.json", {"schema": f"autospec.autonomy.v{version}.negative_proof", "status": "pass", **safety()})
     write_json(base / "artifact-index.json", {"schema": f"autospec.autonomy.v{version}.artifact_index", "status": "written", "required": meta["required"], **safety()})
 
