@@ -794,12 +794,15 @@ for p in d.get('proposals', []):
 Source: research cycle ($RESEARCH_SOURCES).
 
 $marker"
+        # origin:self provenance (issue #1745): idempotent, best-effort label
+        # auto-creation — a create/exists failure never blocks filing.
+        gh label create origin:self --color 8250df --force >/dev/null 2>&1 || true
         issue_url=""
-        issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement 2>/dev/null)" || issue_url=""
+        issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement --label origin:self 2>/dev/null)" || issue_url=""
         if [ -z "$issue_url" ]; then
             # Retry with stderr visible (gh diagnostics no longer suppressed);
             # stdout (the issue URL) is still captured into issue_url.
-            issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement)" || issue_url=""
+            issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement --label origin:self)" || issue_url=""
         fi
         [ -z "$issue_url" ] && continue
         issues_filed=$((issues_filed + 1))

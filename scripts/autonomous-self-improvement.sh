@@ -149,6 +149,7 @@ case "$cmd" in
         fi
         [ -n "$repo" ] || die "--repo is required when gh cannot infer it"
         gh label create needs-classify --repo "$repo" --color cfd3d7 --force >/dev/null 2>&1 || true
+        gh label create origin:self --repo "$repo" --color 8250df --force >/dev/null 2>&1 || true
         filed=0
         while IFS= read -r row; do
             [ -n "$row" ] || continue
@@ -189,7 +190,7 @@ case "$cmd" in
                 printf 'bash scripts/validate.sh\n'
                 printf '```\n'
             } > "$tmp.body"
-            gh issue create --repo "$repo" --title "$title" --body-file "$tmp.body" --label needs-classify >/dev/null
+            gh issue create --repo "$repo" --title "$title" --body-file "$tmp.body" --label needs-classify --label origin:self >/dev/null
             filed=$((filed + 1))
         done < "$tmp"
         jq -n --argjson filed "$filed" --argjson candidates "${total:-0}" '{dry:($filed == 0),filed:$filed,candidates:$candidates,reason:"filed deterministic self-improvement candidates"}'

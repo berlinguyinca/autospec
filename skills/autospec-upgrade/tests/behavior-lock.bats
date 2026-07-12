@@ -32,6 +32,12 @@ PKGJSON
   AUTOSPEC_DIR="$TEST_ROOT/.autospec"
   mkdir -p "$AUTOSPEC_DIR"
 
+  # behavior-lock.sh intentionally resolves mutation-gate.sh from
+  # AUTOSPEC_SCRIPTS_DIR before PATH. Point that resolver at the test's mock bin
+  # so an operator's installed ~/.autospec/scripts/mutation-gate.sh cannot leak
+  # into this no-network unit suite.
+  export AUTOSPEC_SCRIPTS_DIR="$MOCK_BIN"
+
   export TEST_ROOT MOCK_BIN DETECT_FILE AUTOSPEC_DIR
 }
 

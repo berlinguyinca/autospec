@@ -16,7 +16,7 @@ REPO_ROOT="${AUTOSPEC_REPO_ROOT:-}"
 MODE=""
 MODE_ARG=""
 DRY_RUN=0
-DOC_UPDATE_LABELS="${AUTOSPEC_DOC_UPDATE_LABELS:-auto-implement}"
+DOC_UPDATE_LABELS="${AUTOSPEC_DOC_UPDATE_LABELS:-auto-implement,origin:self}"
 
 usage() {
   cat <<'USAGE'
@@ -180,6 +180,8 @@ ${sources:-<none>}
     echo "doc-freshness-tier: gh CLI unavailable; cannot file doc-update issue" >&2
     return 1
   fi
+  # origin:self provenance (issue #1785): idempotent, best-effort label
+  gh label create origin:self --color 8250df --force >/dev/null 2>&1 || true
   IFS=',' read -r -a _labels <<< "$DOC_UPDATE_LABELS"
   for label in "${_labels[@]}"; do
     [ -n "$label" ] && labels_args+=(--label "$label")
@@ -203,11 +205,17 @@ run_examples_and_llms_for_doc_changes() {
   done
   if [ "${#full_docs[@]}" -gt 0 ]; then
     [ -f "$VERIFY_EXAMPLES_MJS" ] || { echo "doc-freshness-tier: verify-examples.mjs not found" >&2; return 2; }
-    node "$VERIFY_EXAMPLES_MJS" "${full_docs[@]}"
+    if ! node "$VERIFY_EXAMPLES_MJS" "${full_docs[@]}"; then
+      echo "doc-freshness-tier: docs-as-tests example verification failed" >&2
+      return 1
+    fi
   fi
 
   [ -f "$GEN_LLMS_TXT_SH" ] || { echo "doc-freshness-tier: gen-llms-txt.sh not found" >&2; return 2; }
-  bash "$GEN_LLMS_TXT_SH" --repo-root "$REPO_ROOT"
+  if ! bash "$GEN_LLMS_TXT_SH" --repo-root "$REPO_ROOT"; then
+    echo "doc-freshness-tier: llms export regeneration failed" >&2
+    return 1
+  fi
 
   if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     if ! git -C "$REPO_ROOT" diff --quiet -- llms.txt llms-full.txt docs/.llm-manifest.json 2>/dev/null; then

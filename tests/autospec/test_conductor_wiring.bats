@@ -18,6 +18,7 @@ setup() {
   TEST_TMP="$(mktemp -d)"
   export HOME="$TEST_TMP"
   mkdir -p "$HOME/.autospec"
+  export AUTOSPEC_CONFIG_FILE="$TEST_TMP/missing-autospec.yml"
 
   # Fake scripts directory that holds stub helper scripts.
   FAKE_SCRIPTS="$TEST_TMP/fake-scripts"
@@ -303,6 +304,66 @@ _install_stub() {
   local digest_count
   digest_count="$(printf '%s\n' "$output" | grep -c 'digest written' 2>/dev/null)" || digest_count=0
   [ "${digest_count:-0}" -le 1 ]
+}
+
+@test "conductor: self-repair merge refreshes before next drain cycle" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '"'"'{"tier":1,"action":"run-backlog","reason":"self-repair-refresh"}\n'"'"''
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; main-health) printf "DECISION:continue\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  local sha_file="$TEST_TMP/main-sha"
+  local outcome_file="$TEST_TMP/last-outcome.json"
+  local run_log="$TEST_TMP/run.log"
+  local refresh_log="$TEST_TMP/refresh.log"
+  local event_log="$TEST_TMP/events.log"
+  printf 'old-main-1878\n' > "$sha_file"
+
+  cat > "$FAKE_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
+  printf 'scripts/autospec-autonomous-run-drain.sh\n'
+  exit 0
+fi
+if [ "${1:-}" = "repo" ]; then
+  echo '{"nameWithOwner":"test-owner/test-repo"}'
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$FAKE_BIN/gh"
+
+  export AUTOSPEC_LAST_OUTCOME_FILE="$outcome_file"
+  export AUTOSPEC_CONDUCTOR_MAIN_SHA_CMD="cat '$sha_file'"
+  export AUTOSPEC_CONDUCTOR_REFRESH_CMD="printf 'refresh old=%s new=%s\n' \"\$AUTOSPEC_CONDUCTOR_REFRESH_OLD_SHA\" \"\$AUTOSPEC_CONDUCTOR_REFRESH_NEW_SHA\" >> '$refresh_log'; printf 'refresh\n' >> '$event_log'"
+  export AUTOSPEC_RUN_CMD="count=\$(wc -l < '$run_log' 2>/dev/null || printf 0); printf 'drain-%s\n' \"\$((count + 1))\" >> '$run_log'; printf 'drain-%s\n' \"\$((count + 1))\" >> '$event_log'; if [ \"\$count\" -eq 0 ]; then printf '{\"self_originated\":true,\"outcome\":\"merged\",\"issue\":1882,\"pr\":1878}\n' > '$outcome_file'; printf 'new-main-1878\n' > '$sha_file'; fi"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=2 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    AUTOSPEC_CONDUCTOR_PID=74150 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  grep -q 'refresh old=old-main-1878 new=new-main-1878' "$refresh_log"
+  grep -q 'drain-2' "$run_log"
+  printf 'drain-1\nrefresh\ndrain-2\n' > "$TEST_TMP/expected-events.log"
+  diff -u "$TEST_TMP/expected-events.log" "$event_log"
+
+  [[ "$output" == *"self-repair refresh: old-main-1878 -> new-main-1878"* ]]
+  grep -q 'old-main-1878 -> new-main-1878' "$TEST_TMP/.autospec/autonomous-digest.md"
+  grep -q 'Conductor PID: `74150`' "$TEST_TMP/.autospec/autonomous-digest.md"
 }
 
 # ── 4. Spend-ledger park writes resume context and arms ScheduleWakeup/cron ──
@@ -680,6 +741,54 @@ EOF
   # The loop must invoke the auto-detected script with --apply (safe: the script
   # is double-gated and stays report-only without the env opt-in).
   grep -q -- '--apply' "$promote_log"
+}
+
+@test "conductor: Tier 1.5 dry=false with filed=0 still cascades past promotion" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+
+  # The real waterfall must see an empty Tier-1 queue but available non-auto
+  # issues, then continue to Tier 2 after two dry Tier 1.5 promotion cycles.
+  cat > "$FAKE_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  issue) echo '1' ;;
+  repo)  echo '{"nameWithOwner":"test-owner/test-repo"}' ;;
+  *)     exit 0 ;;
+esac
+EOF
+  chmod +x "$FAKE_BIN/gh"
+
+  _install_stub "list-ready-issues.sh" \
+    'printf '"'"'{"ready":[],"blocked":[],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'"'"''
+
+  cp "$REPO_ROOT/scripts/autonomous-waterfall.sh" "$FAKE_SCRIPTS/autonomous-waterfall.sh"
+  chmod +x "$FAKE_SCRIPTS/autonomous-waterfall.sh"
+
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  export AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD="printf '{\"dry\":false,\"filed\":0,\"promoted\":[]}\n'"
+  export AUTOSPEC_EXPLORE_CMD="printf '{\"dry\":true,\"filed\":0,\"reason\":\"tier2-dry\"}\n'"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=5 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Tier 1.5 promotion result: dry=false filed=0"* ]]
+  [[ "$output" == *"Tier 1.5 dry (tier15-dry-cycles=2)"* ]]
+  [[ "$output" == *"tier=2 action=run-explore-once"* ]]
 }
 
 @test "conductor: Tier 3 architecture improvement command files work and floats to Tier 1" {
@@ -1083,4 +1192,90 @@ YAML
 
   [ "$status" -eq 0 ]
   grep -q -- '--batch-size 4' "$list_ready_args_log"
+}
+
+# ── 23. Tier 1.5 grooming: telemetry appended per promoted issue ────────────
+@test "conductor: Tier 1.5 grooming appends telemetry record per promoted issue" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '\''{"tier":1.5,"action":"promote-open-issues","reason":"open issues"}\n'\'''
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  # Policy "off" — grooming still runs promotion (that's the promoter's own
+  # gate), but no governance tick should fire (asserted below via absence).
+  _install_stub "grooming-config.sh" 'case "${2:-}" in policy) printf "off\n";; *) printf "5\n";; esac'
+  local govern_log="$TEST_TMP/govern.log"
+  _install_stub "grooming-govern.sh" "printf 'govern-called %s\n' \"\$*\" >> '$govern_log'; printf '{}\n'"
+  _install_stub "grooming-observe.sh" 'printf '\''{"groomed_clean_merge_rate":0,"baseline_clean_merge_rate":0,"samples":0}\n'\'''
+
+  export AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD='printf '\''{"dry":false,"filed":2,"promoted":[101,102]}\n'\'''
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  local telemetry_file="$HOME/.autospec/grooming-telemetry.jsonl"
+  [ -f "$telemetry_file" ]
+  [ "$(wc -l < "$telemetry_file" | tr -d ' ')" = "2" ]
+  grep -q '"issue":101' "$telemetry_file"
+  grep -q '"issue":102' "$telemetry_file"
+  grep -q '"source":"grooming"' "$telemetry_file"
+  grep -q '"template_groomed":false' "$telemetry_file"
+  grep -q '"closing_pr":null' "$telemetry_file"
+  grep -q '"outcome":null' "$telemetry_file"
+
+  # policy=off — governance tick must NOT be invoked.
+  [ ! -f "$govern_log" ]
+}
+
+# ── 24. Tier 1.5 grooming: policy=auto invokes the governance tick ──────────
+@test "conductor: Tier 1.5 grooming policy=auto invokes govern tick, policy=off does not" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '\''{"tier":1.5,"action":"promote-open-issues","reason":"open issues"}\n'\'''
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  _install_stub "grooming-config.sh" 'case "${2:-}" in policy) printf "auto\n";; *) printf "5\n";; esac'
+  local govern_log="$TEST_TMP/govern.log"
+  _install_stub "grooming-govern.sh" "printf 'govern-called %s\n' \"\$*\" >> '$govern_log'; printf '{\"active\":[\"eligible-promote\"],\"action\":\"hold\",\"samples\":0}\n'"
+  local observe_log="$TEST_TMP/observe.log"
+  _install_stub "grooming-observe.sh" "printf 'observe-called %s\n' \"\$*\" >> '$observe_log'; printf '{\"groomed_clean_merge_rate\":0,\"baseline_clean_merge_rate\":0,\"samples\":0}\n'"
+
+  export AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD='printf '\''{"dry":false,"filed":1,"promoted":[201]}\n'\'''
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  [ -f "$govern_log" ]
+  grep -q 'govern-called tick --observed' "$govern_log"
+  grep -q -- '--min-samples' "$govern_log"
+  [ -f "$observe_log" ]
+  grep -q -- '--telemetry' "$observe_log"
 }

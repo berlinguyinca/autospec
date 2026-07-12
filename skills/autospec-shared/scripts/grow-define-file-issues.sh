@@ -22,13 +22,16 @@ while IFS= read -r line; do
   rationale="$(echo "$line" | jq -r '.rationale // ""')"
 
   if [ "$kind" = "artifact" ]; then
-    labels="auto-implement,growth:artifact,growth:$channel"
+    labels="auto-implement,growth:artifact,growth:$channel,origin:self"
     body="$(printf 'Growth artifact (lens: %s, channel: %s)\n\n%s\n\nFiled by /autospec-grow-define.' "$lens" "$channel" "$rationale")"
   else
-    labels="growth:outbound,growth/needs-draft,growth:$channel"
+    labels="growth:outbound,growth/needs-draft,growth:$channel,origin:self"
     body="$(printf 'Growth outbound draft needed (lens: %s, channel: %s)\n\nTarget/rule: see rationale.\n\n%s\n\nDrafted + gated + queued by /autospec-grow-run.' "$lens" "$channel" "$rationale")"
   fi
 
+  # origin:self provenance (issue #1745): idempotent, best-effort label
+  # auto-creation — a create/exists failure never blocks filing.
+  gh label create origin:self --color 8250df --force >/dev/null 2>&1 || true
   if ! url="$(gh issue create --title "$title" --body "$body" --label "$labels" 2>/dev/null)"; then
     echo "grow-define: gh issue create failed for: $title (skipped)" >&2
     continue
@@ -38,6 +41,31 @@ while IFS= read -r line; do
     echo "grow-define: could not parse issue number from: $url (skipped)" >&2
     continue
   fi
+
+  # Telemetry (issue #1774): fire-and-forget feature.described emit after a
+  # successful file. Guarded source (absent shim/binary/DSN is a silent
+  # no-op) and wrapped so nothing here can ever alter this script's exit
+  # code — filing is authoritative, telemetry is best-effort. The full issue
+  # body is passed as a single emit_event argument, bound (never spliced
+  # into query text) by the binary's ingest() call.
+  {
+    _gdfi_h="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+    if [ -f "$_gdfi_h/emit-event.sh" ]; then
+      # shellcheck source=/dev/null
+      . "$_gdfi_h/emit-event.sh"
+      _gdfi_remote="$(git config --get remote.origin.url 2>/dev/null || true)"
+      case "$_gdfi_remote" in
+        git@github.com:*)       _gdfi_repo="${_gdfi_remote#git@github.com:}" ;;
+        https://github.com/*)   _gdfi_repo="${_gdfi_remote#https://github.com/}" ;;
+        ssh://git@github.com/*) _gdfi_repo="${_gdfi_remote#ssh://git@github.com/}" ;;
+        *) _gdfi_repo="" ;;
+      esac
+      _gdfi_repo="${_gdfi_repo%.git}"
+      if [ -n "$_gdfi_repo" ]; then
+        emit_event feature.described repo="$_gdfi_repo" issue="$num" detail="$body"
+      fi
+    fi
+  } || true
 
   ledline="$(jq -n --arg s "$lens" --arg t "$title" --arg n "$norm" \
      --arg c "$channel" --arg k "$kind" --argjson i "$num" \

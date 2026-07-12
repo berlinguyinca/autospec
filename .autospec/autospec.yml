@@ -99,6 +99,20 @@ advisor:
   budget:
     max_calls_per_issue: 3
     guidance_char_cap: 2800
+# Backlog auto-grooming: promotes/templates/splits stale or malformed open issues
+# toward auto-implement readiness, gated by the same safety/classify/eligibility
+# checks as manual triage. You set intent + bounds; autospec self-governs which
+# grooming actions are active. policy: auto | on | off.
+#   auto — autospec promotes/retracts grooming actions from its own telemetry,
+#          seeded conservatively, within budget.
+#   on   — grooming runs every Tier-1.5 cycle within budget (no self-tuning).
+#   off  — inert.
+grooming:
+  policy: auto
+  budget:
+    max_issues_per_cycle: 5
+    groom_attempts_per_issue: 2
+    canary_floor: 5
 documentation:
   enabled: true
   audiences:
@@ -278,3 +292,13 @@ fenced_surfaces:
       - scripts/worktree-guard.sh
       - scripts/claim-guard.sh
       - scripts/autospec-autonomy-gate.sh
+telemetry:
+  # The ONLY operator-facing flag surface for autospec-db telemetry
+  # (spec: docs/specs/2026-07-10-autospec-db-telemetry-design.md §Configuration).
+  # Env vars are yaml-derived plumbing / CI-test overrides only. Credentials
+  # live in chmod-600 ~/.autospec/db.conf + db.env — never here.
+  enabled: true              # false => loader exports AUTOSPEC_DB_DISABLE=1
+  host_label: ''             # '' = short hostname; set per-site labels via env override until #1776 resolves machine scoping
+  spool_max_bytes: 10485760  # local spool cap; oldest lines dropped first
+  install:
+    db_module: prompt        # prompt | always | never — install.sh behavior for the optional autospec-db module

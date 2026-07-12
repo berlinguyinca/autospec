@@ -237,9 +237,11 @@ into the pipeline before attempting discovery:
   `auto-implement` queue.
 
 Promotion-sourced work still flows through Tier 1 and inherits autonomy, premerge,
-worktree, claim, validation, and merge gates. If promotion is dry, the conductor
-records the dry signal and continues to Tier 2; the dry count never triggers a
-convergence-stop.
+worktree, claim, validation, and merge gates. Tier 1.5 is work-yielding only
+when the promotion result reports `filed > 0` or a non-empty `promoted` set;
+`dry=false` with zero filed/promoted issues is still a dry promotion signal. If
+promotion is dry, the conductor records the dry signal and continues to Tier 2;
+the dry count never triggers a convergence-stop.
 
 ### Tier 2 — local codebase discovery
 
@@ -400,6 +402,21 @@ Tier-1 drain watchdog controls:
 
 - `AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS` — no-output stall budget for one `$autospec-run` drain. Default 1800; set `0` to disable.
 - `AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS` — poll interval for drain output progress. Default 15.
+- `AUTOSPEC_AUTONOMOUS_DRAIN_LOG` / `AUTOSPEC_AUTONOMOUS_DRAIN_LOG_FILE` — optional declared validation log file that counts as progress when long child validation redirects output.
+- `AUTOSPEC_AUTONOMOUS_DRAIN_LOG_GLOB` — optional shell glob for additional validation logs to count as progress.
+- `AUTOSPEC_AUTONOMOUS_DRAIN_ISSUE` / `AUTOSPEC_ISSUE_NUMBER` — optional issue number used to track closeout artifacts and write `/tmp/autospec-run-<issue>/closeout-hang.md` evidence.
+- `AUTOSPEC_AUTONOMOUS_DRAIN_CLOSEOUT_ARTIFACTS` — optional whitespace-separated extra artifact paths whose mtime/size count as closeout progress.
+
+Heartbeat JSON updates under `~/.autospec/process-heartbeats/`, declared log
+files, and issue-scoped closeout artifacts (`.autospec/run-summary.md`,
+`/tmp/write-summary-<issue>.log`, and
+`/tmp/autospec-run-<issue>/done-challenge.md`) count as drain progress. A quiet
+parent wrapper is not marked stalled while an issue worker is still advancing.
+If the stall budget is reached, `autospec-autonomous-run-drain.sh` checks for
+live descendant processes and runs GitHub reconciliation before terminating the
+`omx exec` child. If an issue-scoped drain has no live descendant and no
+closeout artifact movement, it writes closeout-hang evidence before terminating
+so the conductor can advance with a precise failure reason.
 
 If the harness wait/session handle disappears during a drain (for example Codex
 reports `write_stdin failed: Unknown process id`) or the drain wrapper times out,

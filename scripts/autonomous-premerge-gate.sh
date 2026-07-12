@@ -17,6 +17,8 @@ LANE="implementer"
 MUTATION_BASELINE=""
 MUTATION_CURRENT=""
 LANE_METADATA=""
+PROTECTED_BRANCHES=""
+SELF_ORIGINATED_CHECK=0
 _default_notify_sh() {
     local dir
     dir="$(cd "$(dirname "$0")" && pwd)"
@@ -40,6 +42,13 @@ Options:
   --lane <name>           Actor lane for immutable verifier bypass (implementer/verifier).
   --changed-files <file>  Newline-delimited changed files for immutable/blast checks.
   --fenced-surfaces <yml> Config-driven fenced-surface registry.
+  --check-self-originated Enable the self-originated direct-merge gate
+                          (requires --pr and --repo; opt-in so callers that
+                          only pass --pr/--repo for labeling are unaffected).
+  --protected-branches <csv> Extra protected parent branches for the
+                          self-originated gate (beyond the repo default
+                          branch and autonomous.self_originated.protected_branches
+                          config).
   --quarantine-out <json> Write async human-review quarantine provenance JSON.
   --gate-evidence <json>  Passing gate evidence JSON to record on merge-ok.
   --mutation-baseline <json> Baseline mutation ledger JSON.
@@ -52,6 +61,9 @@ Environment:
   AUTOSPEC_PREMERGE_MAX_ATTEMPTS  Override max attempts (default 5).
   AUTOSPEC_QA_CMD                 Override the qa command (default: autospec-qa).
   AUTOSPEC_SECAUDIT_CMD           Override the secaudit command (default: autospec-secaudit).
+  AUTOSPEC_DESIGN_GATES_CMD       Override the design-gates runner (default: sibling
+                                  autospec-design-gates.sh). The stage is opt-in: it only
+                                  runs when .autospec/design-gates.yml exists in the repo.
   AUTOSPEC_NOTIFY                 Set to 0 to suppress notifications.
 Exit 0 = merge-ok; 1 = block; 2 = halt (code_health); 3 = invocation error.
 EOF
@@ -80,6 +92,8 @@ while [ $# -gt 0 ]; do
         --provenance-out) PROVENANCE_OUT="${2:-}"; shift 2 ;;
         --fenced-surfaces) FENCED_SURFACES="${2:-}"; shift 2 ;;
         --quarantine-out) QUARANTINE_OUT="${2:-}"; shift 2 ;;
+        --protected-branches) PROTECTED_BRANCHES="${2:-}"; shift 2 ;;
+        --check-self-originated) SELF_ORIGINATED_CHECK=1; shift ;;
         --dry-run)     DRY_RUN=1; shift ;;
         --help|-h)     usage; exit 0 ;;
         *) printf '%s: unknown argument: %s\n' "$SCRIPT_NAME" "$1" >&2
@@ -149,6 +163,28 @@ if ! _secaudit_skill_present; then
     exit 2
 fi
 info "Scan skill '$SECAUDIT_CMD' is present."
+_repo_state_root() {
+    # Mutable repo-local artifacts (qa verdicts, design-gate config, etc.) must
+    # come from the active issue worktree. A long-lived autospec-run parent can
+    # leak AUTOSPEC_REPO_DIR from the primary checkout into a per-issue
+    # /tmp/wt-* worktree; prefer the current worktree in that case.
+    local pwd_real repo_real
+    pwd_real="$(pwd -P 2>/dev/null || pwd)"
+    repo_real=""
+    if [ -n "${AUTOSPEC_REPO_DIR:-}" ]; then
+        repo_real="$(cd "$AUTOSPEC_REPO_DIR" 2>/dev/null && pwd -P || printf '%s' "$AUTOSPEC_REPO_DIR")"
+    fi
+    case "$pwd_real" in
+        /tmp/wt-*|/private/tmp/wt-*)
+            if [ -n "$repo_real" ] && [ "$repo_real" != "$pwd_real" ] && [ -e "$repo_real/.git" ]; then
+                info "repo-state: ignoring stale AUTOSPEC_REPO_DIR=$repo_real; using active worktree $pwd_real"
+                printf '%s' "$pwd_real"
+                return 0
+            fi
+            ;;
+    esac
+    printf '%s' "${repo_real:-$pwd_real}"
+}
 _count_blocking_findings() {
     grep -ciE \
         '(severity[[:space:]]*:[[:space:]]*(high|severe|critical|medium)|\[(high|severe|critical|medium)\]|^(high|severe|critical|medium)[[:space:]])' \
@@ -171,7 +207,7 @@ _qa_verdict_blocks() {
     if [ "$DRY_RUN" -eq 1 ]; then
         return 1
     fi
-    local verdict_file="${AUTOSPEC_REPO_DIR:-$PWD}/.autospec/qa-verdict.json"
+    local verdict_file="$(_repo_state_root)/.autospec/qa-verdict.json"
     command -v jq >/dev/null 2>&1 || return 1
     [ -f "$verdict_file" ] || return 1
     local blocks
@@ -190,7 +226,7 @@ _qa_verdict_present() {
     # still surfaces the parse WARN via _qa_verdict_blocks). DRY_RUN has no
     # native authority, mirroring _qa_verdict_blocks.
     [ "$DRY_RUN" -eq 1 ] && return 1
-    local verdict_file="${AUTOSPEC_REPO_DIR:-$PWD}/.autospec/qa-verdict.json"
+    local verdict_file="$(_repo_state_root)/.autospec/qa-verdict.json"
     command -v jq >/dev/null 2>&1 || return 1
     [ -f "$verdict_file" ] || return 1
     jq -e . "$verdict_file" >/dev/null 2>&1
@@ -366,6 +402,26 @@ if [ -n "$CHANGED_FILES" ]; then
         exit 0
     fi
 fi
+# Self-originated direct-merge gate (issue #1742, defense in depth for
+# docs/specs/2026-07-10-autonomous-integration-branch-design.md §Architecture
+# item 6). Opt-in via --check-self-originated (mirrors how diff-guard/
+# blast-radius are gated on --changed-files and mutation-guard on
+# --mutation-baseline/--mutation-current) so callers that already pass
+# --pr/--repo purely for labeling/provenance-out are unaffected. Deliberately
+# placed AFTER the blast-radius quarantine block above: per §Error handling,
+# fenced-surfaces quarantine evaluates FIRST and wins — if blast-radius
+# already quarantined and exited, this never runs.
+if [ "$SELF_ORIGINATED_CHECK" -eq 1 ]; then
+    [ -n "$PR_NUMBER" ] || die "--check-self-originated requires --pr"
+    [ -n "$REPO" ] || die "--check-self-originated requires --repo"
+    GUARDRAILS_SH="$(_guardrails_sh)"
+    if ! self_originated_output="$(bash "$GUARDRAILS_SH" self-originated --pr "$PR_NUMBER" --repo "$REPO" ${PROTECTED_BRANCHES:+--protected-branches "$PROTECTED_BRANCHES"} 2>&1)"; then
+        printf "%s\n" "$self_originated_output"
+        _apply_guardrail_block_label
+        printf "block self_originated_direct_merge\n"
+        exit 1
+    fi
+fi
 if [ -n "$MUTATION_BASELINE" ] || [ -n "$MUTATION_CURRENT" ]; then
     [ -n "$MUTATION_BASELINE" ] || die "--mutation-current requires --mutation-baseline"
     [ -n "$MUTATION_CURRENT" ] || die "--mutation-baseline requires --mutation-current"
@@ -376,6 +432,67 @@ if [ -n "$MUTATION_BASELINE" ] || [ -n "$MUTATION_CURRENT" ]; then
         printf "block mutation_score_regression\n"
         exit 1
     fi
+fi
+_default_design_gates_cmd() {
+    local dir
+    dir="$(cd "$(dirname "$0")" && pwd)"
+    if [ -x "$dir/autospec-design-gates.sh" ]; then
+        printf '%s' "$dir/autospec-design-gates.sh"
+    elif command -v autospec-design-gates.sh >/dev/null 2>&1; then
+        printf 'autospec-design-gates.sh'
+    else
+        printf ''
+    fi
+}
+DESIGN_GATES_CMD="${AUTOSPEC_DESIGN_GATES_CMD:-}"
+if [ -z "$DESIGN_GATES_CMD" ]; then
+    DESIGN_GATES_CMD="$(_default_design_gates_cmd)"
+fi
+_run_design_gates() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] would run: $DESIGN_GATES_CMD --repo-root $(_repo_state_root)${CHANGED_FILES:+ --changed-files $CHANGED_FILES}"
+        printf 'autospec-design-gates: SKIPPED (0 run, 0 failed, 0 unmapped)\n'
+        return 0
+    fi
+    if [ -n "$CHANGED_FILES" ]; then
+        "$DESIGN_GATES_CMD" --repo-root "$(_repo_state_root)" --changed-files "$CHANGED_FILES" 2>&1 || true
+    else
+        "$DESIGN_GATES_CMD" --repo-root "$(_repo_state_root)" 2>&1 || true
+    fi
+}
+_design_gates_block() {
+    # The runner's own final status line is authoritative (its exit code is
+    # deliberately masked above so a fix-and-recheck loop can drive retries).
+    local out="$1"
+    printf '%s\n' "$out" | grep -qE '^autospec-design-gates: FAIL '
+}
+if [ -z "$DESIGN_GATES_CMD" ]; then
+    info "design-gates: runner not installed; skipping stage."
+elif [ ! -f "$(_repo_state_root)/.autospec/design-gates.yml" ] && [ "$DRY_RUN" -eq 0 ]; then
+    info "design-gates: no .autospec/design-gates.yml; skipping stage."
+else
+    design_attempt=1
+    while true; do
+        info "=== design-gates run (attempt $design_attempt/$MAX_ATTEMPTS) ==="
+        design_output="$(_run_design_gates)"
+        if _design_gates_block "$design_output"; then
+            if [ "$design_attempt" -ge "$MAX_ATTEMPTS" ]; then
+                info "Max attempts ($MAX_ATTEMPTS) reached with design-gate failures still present."
+                printf '%s\n' "$design_output"
+                _apply_needs_human_label
+                _notify "autospec: needs-human" \
+                    "Pre-merge gate exhausted $MAX_ATTEMPTS design-gate attempts on $PR_BRANCH; blocking gates remain."
+                printf 'block retries_exhausted\n'
+                exit 1
+            fi
+            info "Blocking design-gate failures detected; dispatching fix (attempt $design_attempt/$MAX_ATTEMPTS)."
+            _dispatch_fix "$design_attempt" "$design_output" "design-gates"
+            design_attempt=$((design_attempt + 1))
+            continue
+        fi
+        info "design-gates stage clear on attempt $design_attempt."
+        break
+    done
 fi
 attempt=1
 while true; do

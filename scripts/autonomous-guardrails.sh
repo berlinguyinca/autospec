@@ -7,6 +7,10 @@ set -eu
 
 SCRIPT_NAME="autonomous-guardrails"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./autospec-runtime-config.sh
+. "$SCRIPT_DIR/autospec-runtime-config.sh"
+
 usage() {
     cat <<'USAGE'
 Usage:
@@ -17,6 +21,8 @@ Usage:
   autonomous-guardrails.sh provenance \
       --repo OWNER/REPO --pr N --changed-files <file> --gate-evidence <json> \
       [--lane-metadata <json>] --rollback-handle <ref-or-command> --out <json>
+  autonomous-guardrails.sh self-originated --pr N --repo OWNER/REPO \
+      [--protected-branches csv1,csv2]
 
 Decisions:
   diff-guard exits 1 with DECISION:block when an implementer changes test/eval-harness files.
@@ -24,6 +30,9 @@ Decisions:
   blast-radius exits 1 with DECISION:quarantine when fenced/high-risk paths changed.
   separation-of-powers exits 1 when author/verifier/approver overlap or verifier prompt is not adversarial+independent.
   provenance writes autospec.autonomous.merge_provenance.v1 JSON.
+  self-originated exits 1 with DECISION:block when a self-originated PR (per
+  scripts/autonomous-provenance.sh resolve) targets a protected parent branch
+  directly instead of the autonomous integration branch.
 USAGE
 }
 
@@ -347,6 +356,193 @@ cmd_provenance() {
     printf 'PROVENANCE:%s\n' "$out"
 }
 
+# _self_originated_base_config_get <base> <key> <default> — read a policy
+# knob from the MERGE BASE's .autospec/autospec.yml (origin/<base>), never
+# from the working tree: a self-originated PR could otherwise disarm the gate
+# by editing the config in its own diff (e.g. allow_direct_merge: true). If
+# the base copy cannot be read, fall back to the built-in default — never to
+# the worktree copy.
+_self_originated_base_config_get() {
+    local base="$1" key="$2" default="$3" tmp value
+    tmp="$(mktemp "${TMPDIR:-/tmp}/autonomous-self-originated-cfg.XXXXXX")"
+    if ! git show "origin/$base:.autospec/autospec.yml" > "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        printf '%s\n' "$default"
+        return 0
+    fi
+    value="$(AUTOSPEC_CONFIG_FILE="$tmp" autospec_runtime_config_get "$key" "$default")"
+    rm -f "$tmp"
+    printf '%s\n' "$value"
+}
+
+# cmd_self_originated — defense-in-depth premerge check (issue #1742,
+# docs/specs/2026-07-10-autonomous-integration-branch-design.md §Architecture
+# item 6). Blocks a self-originated PR (per autonomous-provenance.sh resolve)
+# that targets a protected parent branch directly, instead of the autonomous
+# integration branch. Fails CLOSED: any lookup ambiguity (unresolved base ref,
+# no linked issue, resolver failure, resolver output that is not exactly
+# `operator`) is treated as self on a protected base, mirroring
+# autonomous-provenance.sh's own fail-closed-to-self posture. Policy config
+# is read from the merge base, never the working tree.
+cmd_self_originated() {
+    local pr="" repo="" protected_branches=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --pr) pr="${2:-}"; shift 2 ;;
+            --repo) repo="${2:-}"; shift 2 ;;
+            --protected-branches) protected_branches="${2:-}"; shift 2 ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "self-originated: unknown option: $1" ;;
+        esac
+    done
+    [ -n "$pr" ] || die "self-originated: --pr is required"
+    [ -n "$repo" ] || die "self-originated: --repo is required"
+
+    # AUTOSPEC_PROVENANCE_SH is a test seam only (PATH shims cannot reach an
+    # absolute sibling-path invocation); production always uses the sibling.
+    local provenance_sh
+    provenance_sh="${AUTOSPEC_PROVENANCE_SH:-$SCRIPT_DIR/autonomous-provenance.sh}"
+
+    local base
+    base="$(gh pr view "$pr" --repo "$repo" --json baseRefName --jq '.baseRefName' 2>/dev/null || true)"
+    if [ -z "$base" ]; then
+        # Base ref could not be resolved (gh/API unavailable) — fail CLOSED,
+        # like every enforcement layer on this surface: an API hiccup must
+        # not let a self-originated PR slip onto a protected parent. The
+        # check is opt-in (--check-self-originated in the premerge gate), so
+        # callers that never asked for it are unaffected.
+        printf 'DECISION:block\n'
+        printf 'REASON:self_originated_direct_merge\n'
+        printf 'DETAIL:base ref could not be resolved for PR %s\n' "$pr"
+        exit 1
+    fi
+
+    # Integration branches (prefix match) are never protected, regardless of
+    # provenance — that is exactly where self-originated work is meant to land.
+    # An empty configured prefix would prefix-match EVERY base and exempt the
+    # whole gate, so it is snapped back to the built-in default.
+    local integration_prefix
+    integration_prefix="$(_self_originated_base_config_get "$base" "autonomous.self_originated.integration_branch_prefix" "autospec/autonomous-")"
+    [ -n "$integration_prefix" ] || integration_prefix="autospec/autonomous-"
+    case "$base" in
+        "$integration_prefix"*)
+            printf 'DECISION:allow\n'
+            printf 'REASON:integration_branch\n'
+            return 0
+            ;;
+    esac
+
+    local default_branch configured_protected combined_csv
+    default_branch="$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || true)"
+    if [ -z "$default_branch" ]; then
+        # Default branch could not be resolved — fail CLOSED: without it the
+        # protected set is unknowable, so treat the base as protected and
+        # let provenance (itself fail-closed to `self`) decide below.
+        default_branch="$base"
+    fi
+    configured_protected="$(_self_originated_base_config_get "$base" "autonomous.self_originated.protected_branches" "")"
+    combined_csv="$default_branch"
+    if [ -n "$configured_protected" ]; then
+        combined_csv="${combined_csv:+$combined_csv,}$configured_protected"
+    fi
+    if [ -n "$protected_branches" ]; then
+        combined_csv="${combined_csv:+$combined_csv,}$protected_branches"
+    fi
+
+    # Split the CSV once with glob expansion disabled (a `*` entry must stay
+    # literal, never expand against the cwd), trimming whitespace per entry
+    # so "main, release" protects release too.
+    local is_protected=1 candidate old_ifs
+    old_ifs="$IFS"
+    set -f
+    IFS=','
+    set -- $combined_csv
+    IFS="$old_ifs"
+    set +f
+    for candidate in "$@"; do
+        candidate="${candidate#"${candidate%%[![:space:]]*}"}"
+        candidate="${candidate%"${candidate##*[![:space:]]}"}"
+        if [ -z "$candidate" ]; then
+            continue
+        fi
+        if [ "$candidate" = "$base" ]; then
+            is_protected=0
+            break
+        fi
+    done
+
+    if [ "$is_protected" -ne 0 ]; then
+        printf 'DECISION:allow\n'
+        printf 'REASON:base_not_protected\n'
+        return 0
+    fi
+
+    # Base is a protected parent branch — provenance decides the rest. ALL
+    # linked issues are checked: a spurious extra `Closes #<operator-issue>`
+    # must not launder a self-originated change past the gate.
+    local issues
+    issues="$(gh pr view "$pr" --repo "$repo" --json closingIssuesReferences --jq '.closingIssuesReferences[].number' 2>/dev/null || true)"
+    if [ -z "$issues" ]; then
+        # No linked issue to resolve provenance from — fail closed to block
+        # on a protected base rather than guess.
+        printf 'DECISION:block\n'
+        printf 'REASON:self_originated_direct_merge\n'
+        printf 'BASE:%s\n' "$base"
+        printf 'DETAIL:no linked issue found to resolve provenance\n'
+        exit 1
+    fi
+
+    local issue self_issue="" provenance provenance_status
+    while IFS= read -r issue; do
+        if [ -z "$issue" ]; then
+            continue
+        fi
+        provenance_status=0
+        provenance="$(bash "$provenance_sh" resolve --issue "$issue" --repo "$repo" 2>/dev/null)" || provenance_status=$?
+        if [ "$provenance_status" -ne 0 ]; then
+            # Resolver failed — discard any partial stdout entirely and
+            # treat the issue as self (fail closed).
+            provenance="self"
+        fi
+        case "$provenance" in
+            operator) ;;
+            *)
+                # Only the exact token `operator` allows; `self`, partial
+                # output, or anything unexpected is treated as self.
+                self_issue="$issue"
+                break
+                ;;
+        esac
+    done <<EOF_ISSUES
+$issues
+EOF_ISSUES
+
+    if [ -z "$self_issue" ]; then
+        printf 'DECISION:allow\n'
+        printf 'REASON:operator_originated\n'
+        printf 'ISSUES:%s\n' "$(printf '%s' "$issues" | tr '\n' ',')"
+        return 0
+    fi
+
+    local allow_direct
+    allow_direct="$(_self_originated_base_config_get "$base" "autonomous.self_originated.allow_direct_merge" "false")"
+    case "$allow_direct" in
+        true|True|TRUE|1)
+            printf 'DECISION:allow\n'
+            printf 'REASON:allow_direct_merge_override\n'
+            printf 'BASE:%s\n' "$base"
+            printf 'ISSUE:%s\n' "$self_issue"
+            return 0
+            ;;
+    esac
+
+    printf 'DECISION:block\n'
+    printf 'REASON:self_originated_direct_merge\n'
+    printf 'BASE:%s\n' "$base"
+    printf 'ISSUE:%s\n' "$self_issue"
+    exit 1
+}
+
 main() {
     [ "$#" -gt 0 ] || { usage >&2; exit 2; }
     local sub="$1"; shift
@@ -356,6 +552,7 @@ main() {
         blast-radius) cmd_blast_radius "$@" ;;
         separation-of-powers) cmd_separation_of_powers "$@" ;;
         provenance) cmd_provenance "$@" ;;
+        self-originated) cmd_self_originated "$@" ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown subcommand: $sub" ;;
     esac

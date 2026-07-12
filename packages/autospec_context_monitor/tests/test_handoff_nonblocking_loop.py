@@ -13,8 +13,8 @@ These tests fail before the fix:
 """
 from __future__ import annotations
 
+import os
 import time
-from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -48,13 +48,23 @@ def _redirect(tmp_path, monkeypatch):
 
 
 def _write_valid_handoff(tmp_path) -> Path:
+    from autospec_context_monitor import handoff
+
     hd = tmp_path / ".turbo" / "handoff"
     hd.mkdir(parents=True, exist_ok=True)
-    p = hd / f"{date.today().isoformat()}-h.md"
+    p = hd / f"{handoff.date.today().isoformat()}-h.md"
     p.write_text(
         "# Handoff\n\n## Status\nok\n\n## Next step\ngo\n" + ("x" * 250),
         encoding="utf-8",
     )
+    # The monitor records `since = time.time()` immediately before injecting
+    # `/create-handoff`; with a patched zero-sleep poll loop, some filesystems
+    # can stamp this test file in the same timestamp tick, and the production
+    # freshness check intentionally requires `mtime > since`. Make the simulated
+    # harness write unambiguously newer so the test exercises the pending-handoff
+    # happy path instead of filesystem timestamp granularity.
+    future = time.time() + 1.0
+    os.utime(p, (future, future))
     return p
 
 

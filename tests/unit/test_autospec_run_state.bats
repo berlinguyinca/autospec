@@ -7,7 +7,9 @@ setup() {
     TEST_TMP="$(mktemp -d)"
     COMMENTS="$TEST_TMP/comments.json"
     CALLS="$TEST_TMP/calls.log"
+    PRS="$TEST_TMP/prs.json"
     printf '[]\n' > "$COMMENTS"
+    printf '[]\n' > "$PRS"
 
     mkdir -p "$TEST_TMP/bin"
     cat > "$TEST_TMP/bin/gh" <<'SH'
@@ -33,6 +35,16 @@ if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
   done
   jq --arg body "$(cat "$body_file")" '. + [{id: 1, body: $body}]' "$comments" > "$comments.tmp"
   mv "$comments.tmp" "$comments"
+  exit 0
+fi
+
+
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  if [ -f "${AUTOSPEC_TEST_PRS:-}" ]; then
+    cat "$AUTOSPEC_TEST_PRS"
+  else
+    printf '[]\n'
+  fi
   exit 0
 fi
 
@@ -80,6 +92,7 @@ SH
     export PATH="$TEST_TMP/bin:$PATH"
     export AUTOSPEC_TEST_COMMENTS="$COMMENTS"
     export AUTOSPEC_TEST_CALLS="$CALLS"
+    export AUTOSPEC_TEST_PRS="$PRS"
     export AUTOSPEC_TEST_FAIL_PATCH_ONCE=""
     export AUTOSPEC_TEST_PATCH_FAIL_MARKER="$TEST_TMP/patch-failed-once"
     export AUTOSPEC_GH_API_RETRY_SLEEP=0
@@ -181,4 +194,30 @@ JSON
     [ -f "$AUTOSPEC_TEST_PATCH_FAIL_MARKER" ]
     run bash "$SCRIPT" read --issue 42 --repo testorg/testrepo
     [[ "$output" == *'"state": "worktree_ready"'* ]]
+}
+
+
+@test "reconcile-linked-pr records open PR with one Closeout report before handoff relabel" {
+    bash "$SCRIPT" upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state claimed --step claimed >/dev/null
+    jq -n '[{number:1857,title:"fix: recover claim",url:"https://github.example/pr/1857",body:"Closes #42
+
+## Closeout report
+
+**Result** shipped."}]' > "$PRS"
+
+    run bash "$SCRIPT" reconcile-linked-pr --issue 42 --repo testorg/testrepo
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '.reconciled')" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r '.pr')" = "1857" ]
+
+    state="$(bash "$SCRIPT" read --issue 42 --repo testorg/testrepo)"
+    [ "$(printf '%s' "$state" | jq -r '.pr')" = "1857" ]
+    [ "$(printf '%s' "$state" | jq -r '.step')" = "post_pr_handoff_failed" ]
+    [ "$(printf '%s' "$state" | jq -r '.updated_at | length > 0')" = "true" ]
+
+    run jq -r '[.[].body | select(contains("autospec-linked-pr-run-state-reconcile:pr:1857"))] | length' "$COMMENTS"
+    [ "$output" = "1" ]
+    run jq -r '[.[].body | select(contains("Resume post-PR handoff from PR #1857"))] | length' "$COMMENTS"
+    [ "$output" = "1" ]
 }

@@ -295,7 +295,7 @@ run_governor() {
     _write_observe_mock_observable 90
     run_governor claude
     [ "$status" -eq 0 ]
-    [[ "$output" == park* ]]
+    printf '%s\n' "$output" | grep -q '^park '
     tmp_check="$(mktemp)"
     [ -f "$USAGE_LIMIT_LOG" ] && printf 'yes' > "$tmp_check" || printf 'no' > "$tmp_check"
     result="$(cat "$tmp_check")"

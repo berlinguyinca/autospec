@@ -113,7 +113,8 @@ CONTRACT_JSON_FILE="$(mktemp -t qa-deploy-contract.XXXXXX)"
 cleanup() { rm -f "$YQ_ERR" "$CONTRACT_JSON_FILE"; }
 trap cleanup EXIT
 
-if ! yq -o=json '.' "$CONTRACT_FILE" > "$CONTRACT_JSON_FILE" 2>"$YQ_ERR"; then
+if ! yq -o=json '.' "$CONTRACT_FILE" > "$CONTRACT_JSON_FILE" 2>"$YQ_ERR" \
+    && ! yq '.' "$CONTRACT_FILE" > "$CONTRACT_JSON_FILE" 2>"$YQ_ERR"; then
     emit_and_exit 2 "code_health:qa_deploy_invalid_contract" \
         "failed to parse $CONTRACT_FILE: $(cat "$YQ_ERR")"
 fi
@@ -132,9 +133,11 @@ fi
 
 # Use Node/Ajv2020 directly (same approach as validate-contract.sh: ajv-cli's
 # --spec flag has a known parsing bug for draft2020).
-AJV_OUT="$(node -e "
+AJV_BIN="$(command -v ajv 2>/dev/null || true)"
+AJV_OUT="$(AJV_BIN="$AJV_BIN" node -e "
 try {
   var fs = require('fs');
+  var path = require('path');
   var Ajv2020;
   try { Ajv2020 = require('ajv/dist/2020'); }
   catch(e) {
@@ -142,6 +145,13 @@ try {
       '/opt/homebrew/lib/node_modules/ajv-cli/node_modules/ajv/dist/2020',
       '/usr/local/lib/node_modules/ajv-cli/node_modules/ajv/dist/2020'
     ];
+    var ajvBin = process.env.AJV_BIN || '';
+    if (ajvBin) {
+      try {
+        var real = fs.realpathSync(ajvBin);
+        paths.unshift(path.join(path.dirname(path.dirname(real)), 'node_modules', 'ajv', 'dist', '2020'));
+      } catch(e0) {}
+    }
     for (var i = 0; i < paths.length; i++) {
       try { Ajv2020 = require(paths[i]); break; } catch(e2) {}
     }

@@ -126,10 +126,24 @@ WT_PATH="${AUTOSPEC_QA_GATE_WORKTREE:-/tmp/wt-explore-qa-gate-$$}"
 
 # Inline cleanup (no RETURN trap): remove the worktree we created.
 cleanup_worktree() {
+    local notify_pid=""
     if [ -n "${WT_PATH:-}" ] && [ -d "$WT_PATH" ]; then
+        if [ -f "$WT_PATH/.omx/state/notify-fallback.pid" ]; then
+            notify_pid="$(cat "$WT_PATH/.omx/state/notify-fallback.pid" 2>/dev/null || true)"
+            case "$notify_pid" in
+                ''|*[!0-9]*) notify_pid="" ;;
+            esac
+            if [ -n "$notify_pid" ]; then
+                kill "$notify_pid" >/dev/null 2>&1 || true
+            fi
+        fi
         git -C "$REPO_ROOT" worktree remove --force "$WT_PATH" >/dev/null 2>&1 || true
         git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
-        rm -rf "$WT_PATH" 2>/dev/null || true
+        for _cleanup_try in 1 2 3 4 5; do
+            rm -rf "$WT_PATH" 2>/dev/null || true
+            [ ! -d "$WT_PATH" ] && break
+            sleep 0.2
+        done
     fi
 }
 

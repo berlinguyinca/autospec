@@ -168,7 +168,10 @@ Add a regression test that kills the surviving mutant in `{file_path}`.
 
 ## Implementation outline
 
+- Surviving mutant: `{mutant}`.
 - Add or strengthen a focused test for the surviving mutant `{mutant}`.
+- Verified red: run `{test_cmd}` with the mutant present and confirm failure.
+- Verified green: restore the implementation and confirm `{test_cmd}` passes.
 - Keep existing assertions intact; do not weaken or delete test expectations.
 - Restore the intended implementation after proving the mutant-specific test fails.
 

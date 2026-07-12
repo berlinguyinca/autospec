@@ -13,6 +13,42 @@
 
 set -eu
 
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+AUTOSPEC_VALIDATE_LEGACY_ACTIVE_AT_ENTRY="${AUTOSPEC_VALIDATE_LEGACY_ACTIVE:-0}"
+
+autospec_delegate_validate_to_rust() {
+    if [ "${AUTOSPEC_FORCE_LEGACY_SHELL:-}" = 1 ]; then
+        printf 'validate: legacy shell path forced by AUTOSPEC_FORCE_LEGACY_SHELL=1 (issue #1861)\n' >&2
+        return 0
+    fi
+    if [ "${AUTOSPEC_VALIDATE_LEGACY_ACTIVE:-}" = 1 ]; then
+        return 0
+    fi
+    if [ "${AUTOSPEC_VALIDATE_FROM_RUST:-}" = 1 ]; then
+        return 0
+    fi
+
+    _autospec_bin=""
+    if [ -n "${AUTOSPEC_RUST_VALIDATE_BIN:-}" ] && [ -x "$AUTOSPEC_RUST_VALIDATE_BIN" ]; then
+        _autospec_bin="$AUTOSPEC_RUST_VALIDATE_BIN"
+    elif [ -x "$REPO_ROOT/target/debug/autospec" ]; then
+        _autospec_bin="$REPO_ROOT/target/debug/autospec"
+    else
+        _autospec_bin="$(command -v autospec 2>/dev/null || true)"
+    fi
+
+    if [ -z "$_autospec_bin" ]; then
+        printf 'validate: Rust validate wrapper unavailable; using legacy shell fallback (issue #1861)\n' >&2
+        return 0
+    fi
+
+    AUTOSPEC_VALIDATE_FROM_SHELL=1 exec "$_autospec_bin" validate "$@"
+}
+
+autospec_delegate_validate_to_rust "$@"
+export AUTOSPEC_VALIDATE_LEGACY_ACTIVE=1
+
 # ── Fast mode ────────────────────────────────────────────────────────────────
 # `--no-bats` / `--fast` skips the bats SUITES (the slow part, ~minutes) while
 # still running every structural check (lock-step, goldens, frontmatter, named
@@ -79,9 +115,10 @@ fi
 case "$JOBS" in ''|*[!0-9]*) JOBS=1 ;; esac
 [ "$JOBS" -ge 1 ] || JOBS=1
 [ "$RUN_BATS" = 1 ] || printf 'validate: fast mode — skipping bats suites (structural checks only)\n' >&2
-
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$REPO_ROOT"
+VALIDATE_NESTED_FAST_AT_ENTRY=0
+if [ "$AUTOSPEC_VALIDATE_LEGACY_ACTIVE_AT_ENTRY" = 1 ] && [ "$RUN_BATS" = 0 ]; then
+    VALIDATE_NESTED_FAST_AT_ENTRY=1
+fi
 
 # Scoped-mode setup: compute the changed-file list and source the affected-set
 # lib. AUTOSPEC_VALIDATE_CHANGED_OVERRIDE (a path to a pre-built changed-file
@@ -332,6 +369,27 @@ check_gap_remediation_section() {
                 || fail "$s: $trio missing '## Phase 5.5 — End-of-run gap remediation' section"
         done
     done
+}
+
+
+# Autospec gap miner contract (issue #1468): deterministic self-improvement
+# gaps must be extracted, deduped, label-shaped, and ledgered before filing.
+check_autospec_gap_miner_contract() {
+    info "autospec gap miner contract"
+    [ -x scripts/autospec-gap-miner.sh ] \
+        || fail "scripts/autospec-gap-miner.sh missing or not executable"
+    [ -f docs/memory/autospec-gap-ledger.md ] \
+        || fail "docs/memory/autospec-gap-ledger.md missing"
+    grep -q 'autospec-gap-miner.sh' skills/autospec-run/SKILL.md \
+        || fail "autospec-run SKILL.md missing gap miner closeout invocation"
+    grep -q 'autospec-gap-miner.sh' skills/autospec-run/codex/prompt.md \
+        || fail "autospec-run codex prompt missing gap miner closeout invocation"
+    grep -q 'autospec-gap-miner.sh' skills/autospec-run/opencode/agent.md \
+        || fail "autospec-run opencode agent missing gap miner closeout invocation"
+    grep -q 'tests/validate-autospec-gap-miner.sh' scripts/validate.sh \
+        || fail "scripts/validate.sh missing gap miner test registration"
+    bash -n scripts/autospec-gap-miner.sh
+    bash tests/validate-autospec-gap-miner.sh
 }
 
 # Remediation-mode invariants (issue #535, dep #533): the autospec-review trio
@@ -1507,6 +1565,58 @@ check_phase4_full_test_suite_gate() {
     done
 }
 
+
+# Data-scope reviewer lens (issue #1466): diagnostic endpoints with optional
+# filters must not widen empty or unsupported filters into unrelated records.
+check_data_scope_review_lens() {
+    info "data-scope reviewer lens: autospec + autospec-run trios"
+    for f in \
+        skills/autospec/SKILL.md \
+        skills/autospec/codex/prompt.md \
+        skills/autospec/opencode/agent.md \
+        skills/autospec-run/SKILL.md \
+        skills/autospec-run/codex/prompt.md \
+        skills/autospec-run/opencode/agent.md
+    do
+        grep -q 'data-scope invariant lens' "$f" \
+            || fail "$f missing data-scope invariant lens"
+        grep -q 'empty optional filters reject unless documented' "$f" \
+            || fail "$f missing empty optional filter rejection requirement"
+        grep -q 'unsupported-filter' "$f" \
+            || fail "$f missing unsupported-filter evidence requirement"
+        grep -q 'empty-filter' "$f" \
+            || fail "$f missing empty-filter evidence requirement"
+        grep -q 'job-only' "$f" \
+            || fail "$f missing job-only evidence requirement"
+        grep -q 'sample-only' "$f" \
+            || fail "$f missing sample-only evidence requirement"
+        grep -q 'job+sample' "$f" \
+            || fail "$f missing job+sample evidence requirement"
+    done
+}
+
+# Phase 4 final quality gate (issue #1469): autospec-run must discover and run
+# repository-specific full-workspace quality checks after the final full suite
+# and before autonomous admin merge. Rust workspaces specifically require
+# clippy across the workspace/all targets with warnings denied.
+check_phase4_final_quality_gate() {
+    info "phase4 final quality gate: autospec-run trio"
+    local bats_file="tests/unit/test_final_quality_gate.bats"
+    [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing (issue #1469)"
+    for f in         skills/autospec-run/SKILL.md         skills/autospec-run/codex/prompt.md         skills/autospec-run/opencode/agent.md
+    do
+        grep -q 'Final quality gate' "$f"             || fail "$f missing Final quality gate section (issue #1469)"
+        grep -q 'cargo clippy --workspace --all-targets -- -D warnings' "$f"             || fail "$f missing Rust workspace clippy command (issue #1469)"
+        grep -q 'FINAL_QUALITY_GATE_FAILED' "$f"             || fail "$f missing final gate failure marker (issue #1469)"
+        grep -q '`crate`, `file`, `line`, and `rule` fields' "$f"             || fail "$f missing required failure fields (issue #1469)"
+        grep -q 'Do NOT run `gh pr merge` while the final quality gate is failing' "$f"             || fail "$f missing merge block on failing final quality gate (issue #1469)"
+    done
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-final-quality-gate.log 2>&1             || { cat /tmp/validate-final-quality-gate.log >&2; fail "$bats_file: failed"; }
+    fi
+}
+
 # Phase 4 cost-epic parity (issue #971): the cost-efficiency epic (#937) D1
 # (per-issue token reporting) and D2 (batch=1 / fresh-subagent-per-issue) were
 # applied to the autospec-run trio but silently missed the autospec trio's
@@ -1896,6 +2006,18 @@ check_autospec_playwright_skill_present() {
     bash -n "$validate_sh" || fail "$validate_sh: bash syntax error"
     bash "$validate_sh" >/dev/null 2>&1 \
         || { bash "$validate_sh" >&2; fail "$validate_sh: structural lint failed"; }
+    local member
+    for member in "$skill_dir/SKILL.md" "$skill_dir/codex/prompt.md" "$skill_dir/opencode/agent.md"; do
+        [ -f "$member" ] || fail "$member: required Playwright adapter body missing"
+        grep -q '^## Loaded-data dashboard evidence' "$member" \
+            || fail "$member: missing loaded-data dashboard evidence section"
+        grep -q 'at least one loaded-data assertion' "$member" \
+            || fail "$member: missing loaded-data assertion requirement"
+        grep -q '/loading|skeleton|empty/i' "$member" \
+            || fail "$member: missing loading/skeleton/empty baseline rejection"
+        grep -q 'after catch-all mocks' "$member" \
+            || fail "$member: missing fixture-after-catch-all-mocks requirement"
+    done
 }
 
 check_autospec_qa_contract() {
@@ -2632,10 +2754,32 @@ check_autospec_run_summary_contract() {
     fi
 }
 
+
+check_db_module_install() {
+    info "install.sh autospec-db optional module: tests/unit/install-db-module.bats"
+    [ -f tests/unit/install-db-module.bats ] \
+        || fail "tests/unit/install-db-module.bats: bats coverage missing (issue #1777)"
+    grep -q 'maybe_prompt_db_module' install.sh \
+        || fail "install.sh missing maybe_prompt_db_module (issue #1777)"
+    grep -qF 'Install the optional database telemetry module (autospec-db)? [y/N]' install.sh \
+        || fail "install.sh missing autospec-db prompt text (issue #1777)"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/unit/install-db-module.bats"
+        bats tests/unit/install-db-module.bats >/tmp/validate-install-db-module.log 2>&1 \
+            || { cat /tmp/validate-install-db-module.log >&2; fail "tests/unit/install-db-module.bats: failed"; }
+    fi
+}
+
 check_install_tests() {
     info "install tests: tests/install/*.sh"
-    if [ -d tests/install ]; then
-        for t in tests/install/*.sh; do
+    if [ "$VALIDATE_NESTED_FAST_AT_ENTRY" = 1 ]; then
+        info "  skipping install tests during nested --fast validation"
+        return 0
+    fi
+    install_glob="${AUTOSPEC_VALIDATE_INSTALL_TEST_GLOB:-tests/install/*.sh}"
+    if [ -d tests/install ] || [ -n "${AUTOSPEC_VALIDATE_INSTALL_TEST_GLOB:-}" ]; then
+        # shellcheck disable=SC2086
+        for t in $install_glob; do
             [ -f "$t" ] || continue
             info "  running: $t"
             bash "$t" >/tmp/validate-install.log 2>&1 \
@@ -2663,10 +2807,15 @@ check_autospec_parallel_dispatch_contract() {
     bash -n "$helper" || fail "$helper: bash syntax error"
     bats_file="tests/autospec-run/test_parallel_dispatch.bats"
     [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
+    startup_bats_file="tests/autospec-run/test_batch_claim_startup_evidence.bats"
+    [ -f "$startup_bats_file" ] || fail "$startup_bats_file: startup-evidence bats coverage missing"
     if command -v bats >/dev/null 2>&1; then
         info "  running: $bats_file"
         bats "$bats_file" >/tmp/validate-parallel-dispatch.log 2>&1 \
             || { cat /tmp/validate-parallel-dispatch.log >&2; fail "$bats_file: failed"; }
+        info "  running: $startup_bats_file"
+        (unset AUTOSPEC_RUN_ONLY_ISSUES; bats "$startup_bats_file") >/tmp/validate-batch-claim-startup-evidence.log 2>&1 \
+            || { cat /tmp/validate-batch-claim-startup-evidence.log >&2; fail "$startup_bats_file: failed"; }
     fi
 }
 
@@ -3107,6 +3256,21 @@ run_skill_set() {
     fi
 }
 
+# Issue #1464: CI status comparison must remain available to distinguish
+# inherited base-branch check rot from branch-caused PR failures.
+check_phase4_ci_status_compare() {
+    info "phase4 CI status compare: helper + smoke coverage (issue #1464)"
+    local helper="scripts/ci-status-compare.sh"
+    local smoke="tests/smoke/ci-status-compare.sh"
+    [ -f "$helper" ] || fail "$helper: missing (issue #1464)"
+    [ -x "$helper" ] || fail "$helper: not executable (issue #1464)"
+    bash -n "$helper" || fail "$helper: bash syntax error (issue #1464)"
+    [ -f "$smoke" ] || fail "$smoke: missing (issue #1464)"
+    bash -n "$smoke" || fail "$smoke: bash syntax error (issue #1464)"
+    bash "$smoke" >/tmp/validate-ci-status-compare.log 2>&1 \
+        || { cat /tmp/validate-ci-status-compare.log >&2; fail "$smoke: failed (issue #1464)"; }
+}
+
 main() {
     info "scanning multi-harness skills under skills/ ..."
     skills="$(discover_skills)"
@@ -3143,6 +3307,7 @@ main() {
     check_stop_mode_section
     check_keyword_routing_section
     check_gap_remediation_section
+    check_autospec_gap_miner_contract
     check_review_remediation_section
     check_enforcement_defaults_section
     check_codex_skills_install
@@ -3169,6 +3334,8 @@ main() {
     check_repo_quality_audit_loop
     check_usage_limit_helper
     check_supersession_contract
+    check_grooming_contract
+    check_run_groom_preflight_contract
     check_ship_completeness
     check_phase4_guardian_block_lockstep
     check_phase1_bounded_context_contract
@@ -3179,6 +3346,9 @@ main() {
     check_phase4_single_agent_discipline
     check_phase4_adaptive_retry
     check_phase4_full_test_suite_gate
+    check_data_scope_review_lens
+    check_phase4_final_quality_gate
+    check_phase4_ci_status_compare
     check_phase4_cost_epic_parity_lockstep
     check_docs_drift_gate_regen_conditional_parity
     check_worktree_ladder_assert_parity
@@ -3216,6 +3386,7 @@ main() {
     check_autospec_loop_contract
     check_autospec_run_summary_contract
     check_install_tests
+    check_db_module_install
     check_phase4_tests
     check_autospec_parallel_dispatch_contract
     check_autospec_explore_implementer_base
@@ -3267,6 +3438,7 @@ main() {
     check_grow_define_contract
     check_grow_run_pipeline_contract
     check_grow_run_contract
+    check_db_telemetry_contract
 
 
 # Architecture fitness-function engine (issue #1533): the declarative registry
@@ -5093,7 +5265,7 @@ check_grow_define_contract() {
         grep -q "$lens" "$d/SKILL.md" || fail "$d/SKILL.md: lens $lens not named in roster"
     done
     if command -v bats >/dev/null 2>&1; then
-        for b in tests/unit/grow-define-pipeline.bats tests/unit/grow-define-file-issues.bats tests/autospec-grow-define/smoke.bats; do
+        for b in tests/unit/grow-define-pipeline.bats tests/unit/grow-define-file-issues.bats tests/unit/filing-origin-self-explore-growth.bats tests/unit/qa-filing-origin-self.bats tests/autospec-grow-define/smoke.bats; do
             info "  running: $b"
             bats "$b" >/tmp/validate-grow-define.log 2>&1 || { cat /tmp/validate-grow-define.log >&2; fail "$b: failed"; }
         done
@@ -5152,5 +5324,96 @@ check_grow_run_contract() {
             || { cat /tmp/validate-grow-run.log >&2; fail "tests/autospec-grow-run/smoke.bats: failed"; }
     fi
 }
+
+check_db_telemetry_contract() {
+    info "db telemetry: emit-event shim contract (issue #1770)"
+    local f="skills/autospec-shared/scripts/emit-event.sh"
+    [ -f "$f" ] || { fail "$f: missing"; return 1; }
+    bash -n "$f" || fail "$f: bash syntax error"
+    # emit-event-wiring.bats is the SHARED per-chokepoint wiring suite
+    # (#1771-#1776) that every downstream chokepoint issue extends with its
+    # own @test cases; it is enumerated (never globbed) so a missing suite
+    # fails this gate closed rather than silently skipping coverage.
+    [ -f tests/unit/emit-event-wiring.bats ] \
+        || fail "tests/unit/emit-event-wiring.bats: required shared wiring suite missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/unit/emit-event.bats"
+        bats tests/unit/emit-event.bats >/tmp/validate-emit-event.log 2>&1 \
+            || { cat /tmp/validate-emit-event.log >&2; fail "tests/unit/emit-event.bats: failed"; }
+        info "  running: tests/unit/emit-event-wiring.bats"
+        bats tests/unit/emit-event-wiring.bats >/tmp/validate-emit-event-wiring.log 2>&1 \
+            || { cat /tmp/validate-emit-event-wiring.log >&2; fail "tests/unit/emit-event-wiring.bats: failed"; }
+    fi
+    # /autospec-db-doctor (issue #1807): harness-facing wrapper around
+    # `autospec-db doctor`. Registered here (not globbed) so an unregistered
+    # suite never silently drops out of the gate.
+    [ -f skills/autospec-db-doctor/scripts/db-doctor.sh ] \
+        || fail "skills/autospec-db-doctor/scripts/db-doctor.sh: required db-doctor backend missing"
+    [ -f tests/unit/autospec-db-doctor.bats ] \
+        || fail "tests/unit/autospec-db-doctor.bats: required db-doctor test suite missing"
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: tests/unit/autospec-db-doctor.bats"
+        bats tests/unit/autospec-db-doctor.bats >/tmp/validate-autospec-db-doctor.log 2>&1 \
+            || { cat /tmp/validate-autospec-db-doctor.log >&2; fail "tests/unit/autospec-db-doctor.bats: failed"; }
+    fi
+}
+
+# Backlog auto-grooming: gate ALL grooming bats suites so they can never regress
+# unnoticed. The suites (list-groomable, promote-eligibility, groom-validate,
+# autonomous-promote-open-issues, grooming-config/govern/observe) were previously
+# ungated — exactly the #1185/#1211 pattern where a green-in-isolation suite rots
+# because no validate check ever runs it. Mirrors check_autospec_fab_contract.
+check_grooming_contract() {
+    info "backlog-grooming: gate all eleven grooming bats suites (ungated-tests regression #1185/#1211)"
+    local f name
+    for f in \
+        "tests/autospec/list-groomable.bats" \
+        "tests/autospec/promote-eligibility.bats" \
+        "tests/autospec/groom-validate.bats" \
+        "tests/autospec/groom-fill.bats" \
+        "tests/autospec/apply-safety-review.bats" \
+        "tests/autospec/groom-reconcile.bats" \
+        "tests/autospec/autonomous-promote-open-issues.bats" \
+        "tests/autospec/test_loop_grooming.bats" \
+        "skills/autospec-shared/tests/grooming-config.bats" \
+        "skills/autospec-shared/tests/unit/grooming-govern.bats" \
+        "skills/autospec-shared/tests/unit/grooming-observe.bats"; do
+        [ -f "$f" ] || fail "$f: required grooming bats suite missing (grooming contract)"
+        if command -v bats >/dev/null 2>&1; then
+            name="$(basename "$f")"
+            info "  running: $f"
+            bats "$f" >"/tmp/validate-grooming-$name.log" 2>&1 \
+                || { cat "/tmp/validate-grooming-$name.log" >&2; fail "$f: failed"; }
+        fi
+    done
+}
+
+check_run_groom_preflight_contract() {
+    info "autospec-run: backlog grooming preflight helper + explicit bats gate"
+    local helper="skills/autospec-run/scripts/run-groom-preflight.sh"
+    local bats_file="tests/unit/test_run_groom_preflight.bats"
+
+    [ -f "$helper" ] || fail "$helper: missing"
+    bash -n "$helper" || fail "$helper: bash syntax error"
+    [ -f "$bats_file" ] || fail "$bats_file: missing"
+
+    grep -q 'Backlog grooming preflight' skills/autospec-run/SKILL.md \
+        || fail "skills/autospec-run/SKILL.md: missing Backlog grooming preflight prose"
+    grep -q 'double gate' skills/autospec-run/SKILL.md \
+        || fail "skills/autospec-run/SKILL.md: missing double gate prose"
+    grep -q 'no discovery' skills/autospec-run/SKILL.md \
+        || fail "skills/autospec-run/SKILL.md: missing no discovery prose"
+
+    if command -v bats >/dev/null 2>&1; then
+        info "  running: $bats_file"
+        bats "$bats_file" >/tmp/validate-run-groom-preflight.log 2>&1 \
+            || { cat /tmp/validate-run-groom-preflight.log >&2; fail "$bats_file: failed"; }
+    fi
+}
+
+if [ "${AUTOSPEC_VALIDATE_INSTALL_TESTS_ONLY:-0}" = "1" ]; then
+    check_install_tests
+    exit 0
+fi
 
 main "$@"

@@ -1,9 +1,16 @@
 pub mod agent;
+pub mod autonomous {
+    pub mod audit;
+}
+pub mod claim;
+pub mod context;
 pub mod error;
 pub mod evidence;
 pub mod execution;
 pub mod graph;
 pub mod growth;
+pub mod lint;
+pub mod runtime_policy;
 pub mod safety;
 pub mod spec;
 pub mod state;

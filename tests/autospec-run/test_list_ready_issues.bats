@@ -23,6 +23,7 @@ setup() {
     mkdir -p "$MOCK_BIN"
     # Default active list: no in-progress workers.
     printf '[]\n' > "$FIXTURE_DIR/active.json"
+    printf '[]\n' > "$FIXTURE_DIR/prs.json"
     # Closed dep targets (space/newline separated numbers); default empty => OPEN.
     : > "$FIXTURE_DIR/closed"
 
@@ -53,6 +54,23 @@ case "\$sub" in
       state="CLOSED"
     fi
     printf '{"state":"%s","body":"","labels":[]}\n' "\$state"
+    ;;
+  "pr list")
+    if [ -f "$FIXTURE_DIR/pr-list-fail" ]; then
+      printf 'simulated pr list failure
+' >&2
+      exit 1
+    fi
+    filter=""; prev=""
+    for a in "\$@"; do
+      [ "\$prev" = "--jq" ] && filter="\$a"
+      prev="\$a"
+    done
+    if [ -n "\$filter" ]; then
+      jq -r "\$filter" "\$FIXTURE_DIR/prs.json"
+    else
+      cat "\$FIXTURE_DIR/prs.json"
+    fi
     ;;
   "repo view")
     printf 'test/repo\n' ;;
@@ -94,6 +112,31 @@ write_auto_issue() {
     author_login="${5:-}"
     jq -n --argjson number "$number" --arg title "$title" --arg body "$body" --argjson labels "$labels_json" --arg author_login "$author_login" \
       '[{number:$number,title:$title,body:$body,labels:$labels} + (if $author_login != "" then {author:{login:$author_login}} else {} end)]' > "$FIXTURE_DIR/auto.json"
+}
+
+write_open_linked_pr_1873_with_pytest_in_progress() {
+    jq -n '[{
+      number:1873,
+      state:"OPEN",
+      title:"Fix batch claims atomic worker startup",
+      body:"Fixes #1859\n\n## Closeout report\nResult: pending CI handoff.",
+      statusCheckRollup:[{name:"pytest",status:"IN_PROGRESS",conclusion:null}]
+    }]' > "$FIXTURE_DIR/prs.json"
+}
+
+
+write_open_linked_pr_1873_with_empty_checks() {
+    jq -n '[{
+      number:1873,
+      state:"OPEN",
+      title:"Fix batch claims atomic worker startup",
+      body:"Fixes #1859\n\n## Closeout report\nResult: checks not created yet.",
+      statusCheckRollup:[]
+    }]' > "$FIXTURE_DIR/prs.json"
+}
+
+write_malformed_pr_json() {
+    printf '{not json\n' > "$FIXTURE_DIR/prs.json"
 }
 
 @test "prose 'depends on #N' outside ## Dependencies yields NO edge (issue is ready)" {
@@ -191,6 +234,78 @@ EOF
     output="$(run_list_ready)"
     [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(400) != null')" = "true" ]
     [ "$(printf '%s' "$output" | jq -r '.blocked | map(.number) | index(400) != null')" = "false" ]
+}
+
+@test "issue 1877: issue 1859 is blocked while linked PR 1873 has pytest IN_PROGRESS" {
+    body="$(safe_body)
+$(cat <<'EOF'
+## Summary
+
+Stale issue with captured work in an open PR.
+
+## Implementation outline
+
+- edit `scripts/claim-issue.sh`
+EOF
+)"
+    write_auto_issue 1859 "batch claims atomic worker startup" "$body"
+    write_open_linked_pr_1873_with_pytest_in_progress
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(1859) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.batch | map(.number) | index(1859) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked | map(.number) | index(1859) != null')" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1859) | .reason')" = "linked_pr_open" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1859) | .linked_pr')" = "1873" ]
+}
+
+@test "issue 1877: issue 1859 is blocked while linked PR 1873 has no check rows yet" {
+    body="$(safe_body)
+$(cat <<'EOF'
+## Summary
+
+Stale issue with captured work in a just-opened PR.
+EOF
+)"
+    write_auto_issue 1859 "batch claims atomic worker startup" "$body"
+    write_open_linked_pr_1873_with_empty_checks
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(1859) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1859) | .reason')" = "linked_pr_open" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1859) | .linked_pr')" = "1873" ]
+}
+
+@test "issue 1877: PR evidence failure blocks candidate instead of reselecting it" {
+    body="$(safe_body)
+$(cat <<'EOF'
+## Summary
+
+Stale issue where GitHub PR evidence is temporarily unavailable.
+EOF
+)"
+    write_auto_issue 1859 "batch claims atomic worker startup" "$body"
+    touch "$FIXTURE_DIR/pr-list-fail"
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(1859) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1859) | .reason')" = "linked_pr_evidence_unavailable" ]
+}
+
+@test "issue 1877: malformed PR JSON blocks candidate instead of reselecting it" {
+    body="$(safe_body)
+$(cat <<'EOF'
+## Summary
+
+Stale issue where GitHub returned malformed PR evidence.
+EOF
+)"
+    write_auto_issue 1859 "batch claims atomic worker startup" "$body"
+    write_malformed_pr_json
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(1859) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1859) | .reason')" = "linked_pr_evidence_unavailable" ]
 }
 
 @test "security-quarantined issue is blocked before ready queue" {
@@ -447,6 +562,42 @@ EOF
     [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==513) | .safety_gate.reason')" = "current_body_safety_block" ]
 }
 
+@test "AUTOSPEC_RUN_ONLY_ISSUES scopes the ready/batch queue to the given numbers" {
+    # write_auto_issue overwrites the fixture file, so build the full
+    # multi-issue batch fixture directly.
+    body_14="$(safe_body)
+## Implementation outline
+
+- edit \`c/scoped.sh\`
+"
+    body_13="$(safe_body)
+## Implementation outline
+
+- edit \`b/unscoped.sh\`
+"
+    body_12="$(safe_body)
+## Implementation outline
+
+- edit \`a/scoped.sh\`
+"
+    jq -n --arg b12 "$body_12" --arg b13 "$body_13" --arg b14 "$body_14" '
+      [
+        {number:12,title:"scoped-a",body:$b12,labels:[{name:"auto-implement"},{name:"safety:reviewed"}]},
+        {number:13,title:"unscoped",body:$b13,labels:[{name:"auto-implement"},{name:"safety:reviewed"}]},
+        {number:14,title:"scoped-b",body:$b14,labels:[{name:"auto-implement"},{name:"safety:reviewed"}]}
+      ]' > "$FIXTURE_DIR/auto.json"
+
+    output="$(AUTOSPEC_RUN_ONLY_ISSUES="12 14" run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(13) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.batch | map(.number) | index(13) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(12) != null')" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(14) != null')" = "true" ]
+
+    # Unset (or empty) AUTOSPEC_RUN_ONLY_ISSUES still drains #13.
+    output_unscoped="$(run_list_ready)"
+    [ "$(printf '%s' "$output_unscoped" | jq -r '.ready | map(.number) | index(13) != null')" = "true" ]
+}
+
 @test "trusted actor test database reset can enter ready queue" {
     body="$(safe_body)
 $(cat <<'EOF'
@@ -464,4 +615,27 @@ EOF
     output="$(run_list_ready)"
     [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(514) != null')" = "true" ]
     [ "$(printf '%s' "$output" | jq -r '.blocked | map(.number) | index(514) != null')" = "false" ]
+}
+
+@test "autospec:needs-human issue is blocked and excluded from ready batch" {
+    body="$(safe_body)
+$(cat <<'BODY'
+## Summary
+
+Parked issue must wait for operator handling.
+
+## Implementation outline
+
+- edit `scripts/list-ready-issues.sh`
+BODY
+)"
+    labels='[{"name":"auto-implement"},{"name":"safety:reviewed"},{"name":"autospec:needs-human"}]'
+    write_auto_issue 1779 "needs-human" "$body" "$labels"
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(1779) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.batch | map(.number) | index(1779) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked | map(.number) | index(1779) != null')" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1779) | .reason')" = "autospec_needs_human" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1779) | .blocked_label')" = "autospec:needs-human" ]
 }

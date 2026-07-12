@@ -552,7 +552,13 @@ labels and patches each body with a `## Model fit` block.
 > assignment, dependency checks, and quality audit.
 >
 > The block format must keep only the machine decision inside the marker wrapper; put
-> human-readable metadata outside the markers so autospec-run can parse it fail-closed:
+> human-readable metadata outside the markers so autospec-run can parse it fail-closed.
+> Emit ONLY linter-safe text in that metadata: autospec-run drift-checks a stamped issue
+> by re-linting the whole body with only the decision-marker block removed, so any raw
+> author login (e.g. a login like `liam` matches the `iam` pattern) or a `<reason>` that
+> echoes matched-pattern text would make the gate falsely reject its own PASS block. Do
+> NOT emit an `- **actor:**` line (the author is already in the issue metadata), and for a
+> PASS keep `<reason>` to a fixed, pattern-free phrase:
 >
 > ```markdown
 > ## Safety review
@@ -561,10 +567,9 @@ labels and patches each body with a `## Model fit` block.
 > - **decision:** `SAFETY_PASS`
 > <!-- autospec-safety:end -->
 >
-> - **actor:** `<author>`
 > - **trust:** `<trust>`
 > - **matched rules:** `<rule ids or none>`
-> - **reason:** <reason>
+> - **reason:** no blocking or ambiguous patterns matched
 >
 > *Auto-reviewed by issue intent safety gate on YYYY-MM-DD.*
 > ```
@@ -1150,6 +1155,8 @@ Pass the following prompt verbatim to each background subagent:
 >        > 6. Check correctness, edge cases, missing tests, AGENTS.md compliance (TDD, no mocks, conventional commits), whether every new code unit exists for a concrete issue/spec requirement rather than convenience, and whether deprecated routes, caches, buckets, stores, workers, config keys, UI paths, docs, specs, tests, or fixtures were removed instead of revived to make tests pass.
 >        > 7. Collect findings as a numbered list.
 >        > 8. Critical self-question before LGTM: "What else could still pass here while the real user workflow fails, and how could this be better?" Check especially mocked-vs-deployed behavior, external service assumptions, fallback paths, user-visible outcomes, and missing no-mock smoke coverage. If the answer is actionable inside the issue scope, emit it as a finding or required test.
+
+>        > 8a. **data-scope invariant lens (diagnostic/filter endpoints):** When the issue touches endpoints, dashboards, reports, or diagnostics that accept optional job/sample/filter parameters, verify filters never widen to unrelated records. empty optional filters reject unless documented as a deliberate all-records mode. Require concrete evidence for `job-only`, `sample-only`, `job+sample`, `unsupported-filter`, and `empty-filter` paths; unsupported-filter and empty-filter cases must prove rejection or a documented scoped response, not silent broadening.
 >        > 9. **Regression gap-check (MANDATORY for `regression`/`priority:high` issues; skip otherwise):** ask "would the reviewer have caught the original gap?" If the fused review as written would NOT have caught the gap this regression closes, add the missing checklist item(s) to `reports/autospec-review/reviewer-lessons.md` (one entry per item, with parent `gap_id` and date) and apply those new checks to this diff before issuing the verdict. This folds the former second-pass regression meta-review into this single reviewer pass — the reviewer-lessons write-path is preserved here; there is no second Tier-A dispatch.
 >        >
 >        > **Hard limit:** max **25 tool calls total** (Parts 1 + 2 combined). If budget exhausted, append `RULE_ID:OUT_OF_SCOPE: reviewer budget exhausted; PR needs human review` and proceed to verdict.

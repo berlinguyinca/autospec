@@ -83,7 +83,7 @@ fi
 # ── Parse YAML → raw JSON via yq ─────────────────────────────────────────────
 
 RAW_JSON=""
-RAW_JSON="$(yq -o=json '.' "$FAB_YML" 2>&1)" || {
+RAW_JSON="$(yq -o=json '.' "$FAB_YML" 2>/dev/null || yq '.' "$FAB_YML" 2>&1)" || {
   printf 'load-fab-config: failed to parse %s: %s\n' "$FAB_YML" "$RAW_JSON" >&2
   exit 1
 }

@@ -34,6 +34,65 @@ stat_size() {
     stat -f '%z' /dev/fd/1 2>/dev/null || stat -c '%s' /dev/fd/1 2>/dev/null || printf ''
 }
 
+stat_file_signature() {
+    _file="$1"
+    [ -f "$_file" ] || return 0
+    _size="$(stat -f '%z' "$_file" 2>/dev/null || stat -c '%s' "$_file" 2>/dev/null || printf '')"
+    _mtime="$(stat -f '%m' "$_file" 2>/dev/null || stat -c '%Y' "$_file" 2>/dev/null || printf '')"
+    printf '%s:%s:%s\n' "$_file" "$_size" "$_mtime"
+}
+
+progress_file_candidates() {
+    if [ -n "${AUTOSPEC_AUTONOMOUS_DRAIN_LOG:-}" ]; then
+        printf '%s\n' "$AUTOSPEC_AUTONOMOUS_DRAIN_LOG"
+    fi
+    if [ -n "${AUTOSPEC_AUTONOMOUS_DRAIN_LOG_FILE:-}" ]; then
+        printf '%s\n' "$AUTOSPEC_AUTONOMOUS_DRAIN_LOG_FILE"
+    fi
+    if [ -n "${AUTOSPEC_AUTONOMOUS_DRAIN_LOG_GLOB:-}" ]; then
+        for _candidate in $AUTOSPEC_AUTONOMOUS_DRAIN_LOG_GLOB; do
+            [ -e "$_candidate" ] && printf '%s\n' "$_candidate"
+        done
+    fi
+    if [ -d "$HOME/.autospec/process-heartbeats" ]; then
+        find "$HOME/.autospec/process-heartbeats" -type f -name '*.json' -print 2>/dev/null || true
+    fi
+    closeout_file_candidates
+}
+
+drain_issue_number() {
+    if [ -n "${AUTOSPEC_AUTONOMOUS_DRAIN_ISSUE:-}" ]; then
+        printf '%s\n' "$AUTOSPEC_AUTONOMOUS_DRAIN_ISSUE"
+        return 0
+    fi
+    if [ -n "${AUTOSPEC_ISSUE_NUMBER:-}" ]; then
+        printf '%s\n' "$AUTOSPEC_ISSUE_NUMBER"
+        return 0
+    fi
+    return 1
+}
+
+closeout_file_candidates() {
+    _issue="$(drain_issue_number 2>/dev/null || true)"
+    if [ -n "${AUTOSPEC_AUTONOMOUS_DRAIN_CLOSEOUT_ARTIFACTS:-}" ]; then
+        for _candidate in $AUTOSPEC_AUTONOMOUS_DRAIN_CLOSEOUT_ARTIFACTS; do
+            [ -n "$_candidate" ] && printf '%s\n' "$_candidate"
+        done
+    fi
+    [ -n "$_issue" ] || return 0
+    printf '%s\n' "$REPO_DIR/.autospec/run-summary.md"
+    printf '%s\n' "/tmp/write-summary-${_issue}.log"
+    printf '%s\n' "/tmp/autospec-run-${_issue}/done-challenge.md"
+}
+
+progress_signature() {
+    printf 'stdout:%s\n' "$(stat_size)"
+    progress_file_candidates | sort -u | while IFS= read -r _candidate; do
+        [ -n "$_candidate" ] || continue
+        stat_file_signature "$_candidate"
+    done
+}
+
 kill_tree() {
     _pid="$1"
     for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
@@ -43,7 +102,20 @@ kill_tree() {
 }
 
 child_is_running() {
-    jobs -pr | grep -qx "$child_pid"
+    jobs -pr | grep -qx "$child_pid" || has_live_descendant "$child_pid"
+}
+
+has_live_descendant() {
+    _pid="$1"
+    for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
+        if kill -0 "$_child" 2>/dev/null; then
+            return 0
+        fi
+        if has_live_descendant "$_child"; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 detect_repo() {
@@ -180,6 +252,28 @@ EOF
     return 1
 }
 
+record_closeout_hang() {
+    _issue="$(drain_issue_number 2>/dev/null || true)"
+    [ -n "$_issue" ] || return 1
+    _dir="${AUTOSPEC_AUTONOMOUS_DRAIN_CLOSEOUT_DIR:-/tmp/autospec-run-${_issue}}"
+    mkdir -p "$_dir"
+    _artifact="$_dir/closeout-hang.md"
+    _now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    cat > "$_artifact" <<EOF
+# autospec closeout hang
+
+Issue #${_issue} hit a closeout hang at ${_now}: no drain output, no heartbeat/log/summary artifact progress, and no live worker descendant was detected.
+EOF
+    printf 'autospec-autonomous-run-drain: closeout hang for issue #%s; wrote %s\n' "$_issue" "$_artifact" >&2
+    if command -v gh >/dev/null 2>&1; then
+        _repo="$(detect_repo)"
+        if [ -n "$_repo" ]; then
+            gh issue comment "$_issue" --repo "$_repo" --body-file "$_artifact" >/dev/null 2>&1 || true
+        fi
+    fi
+    return 0
+}
+
 omx exec \
     --cd "$REPO_DIR" \
     --dangerously-bypass-approvals-and-sandbox \
@@ -191,7 +285,7 @@ if [ "${DRAIN_STALL_SECS:-0}" -le 0 ] 2>/dev/null; then
     exit "$?"
 fi
 
-last_size="$(stat_size)"
+last_progress_signature="$(progress_signature)"
 last_progress_epoch="$(date +%s)"
 detected_repo="$(detect_repo)"
 last_heartbeat_mtime="$(newest_heartbeat_mtime "$detected_repo")"
@@ -199,9 +293,9 @@ last_heartbeat_mtime="$(newest_heartbeat_mtime "$detected_repo")"
 while child_is_running; do
     sleep "$DRAIN_POLL_SECS"
     child_is_running || break
-    current_size="$(stat_size)"
-    if [ -n "$current_size" ] && [ "$current_size" != "$last_size" ]; then
-        last_size="$current_size"
+    current_progress_signature="$(progress_signature)"
+    if [ -n "$current_progress_signature" ] && [ "$current_progress_signature" != "$last_progress_signature" ]; then
+        last_progress_signature="$current_progress_signature"
         last_progress_epoch="$(date +%s)"
         continue
     fi
@@ -214,6 +308,10 @@ while child_is_running; do
     now_epoch="$(date +%s)"
     idle_secs=$((now_epoch - last_progress_epoch))
     if [ "$idle_secs" -ge "$DRAIN_STALL_SECS" ]; then
+        if has_live_descendant "$child_pid" && recover_green_in_progress_pr; then
+            exit 0
+        fi
+        record_closeout_hang || true
         printf 'autospec-autonomous-run-drain: stalled after %ss with no output; terminating autospec-run child pid %s\n' \
             "$DRAIN_STALL_SECS" "$child_pid" >&2
         kill_tree "$child_pid"

@@ -189,4 +189,38 @@ grep -q '"running":false' /tmp/autospec-autonomous-status.json || {
     exit 1
 }
 
+FAKE_AUTOSPEC_BIN="$(mktemp -d -t autospec-rust-validate.XXXXXX)"
+cat > "$FAKE_AUTOSPEC_BIN/autospec" <<'FAKE'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" > "$AUTOSPEC_VALIDATE_DELEGATION_ARGS"
+printf '%s\n' "${AUTOSPEC_VALIDATE_FROM_SHELL:-}" > "$AUTOSPEC_VALIDATE_DELEGATION_ENV"
+FAKE
+chmod +x "$FAKE_AUTOSPEC_BIN/autospec"
+AUTOSPEC_VALIDATE_DELEGATION_ARGS="$TEST_HOME/validate-delegation.args" \
+AUTOSPEC_VALIDATE_DELEGATION_ENV="$TEST_HOME/validate-delegation.env" \
+AUTOSPEC_RUST_VALIDATE_BIN="$FAKE_AUTOSPEC_BIN/autospec" \
+AUTOSPEC_VALIDATE_LEGACY_ACTIVE=0 \
+AUTOSPEC_FORCE_LEGACY_SHELL=0 \
+AUTOSPEC_VALIDATE_FROM_RUST=0 \
+AUTOSPEC_VALIDATE_FROM_SHELL=0 \
+bash "$SCRIPT_DIR/scripts/validate.sh" --fast >/tmp/autospec-validate-delegation.out 2>&1
+
+grep -qxF 'validate --fast' "$TEST_HOME/validate-delegation.args" || {
+    echo "FAIL: scripts/validate.sh did not delegate to autospec validate first"
+    cat /tmp/autospec-validate-delegation.out
+    exit 1
+}
+
+grep -qxF '1' "$TEST_HOME/validate-delegation.env" || {
+    echo "FAIL: scripts/validate.sh did not mark shell-originated Rust delegation"
+    cat "$TEST_HOME/validate-delegation.env"
+    exit 1
+}
+
+grep -qF 'AUTOSPEC_FORCE_LEGACY_SHELL=1 (issue #1861)' "$SCRIPT_DIR/scripts/validate.sh" || {
+    echo "FAIL: scripts/validate.sh does not document the force-legacy fallback warning"
+    exit 1
+}
+
 echo "PASS"

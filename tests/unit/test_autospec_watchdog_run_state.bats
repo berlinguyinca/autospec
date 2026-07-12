@@ -14,10 +14,12 @@ setup() {
     export LABELS="$TEST_TMP/labels.txt"
     export COMMENTS="$TEST_TMP/comments.json"
     export PR_STATE="$TEST_TMP/pr-state.txt"
+    export PRS="$TEST_TMP/prs.json"
     export CALLS="$TEST_TMP/calls.log"
     mkdir -p "$AUTOSPEC_WATCHDOG_DIR"
     printf 'OPEN in-progress-by-bot\n' > "$LABELS"
     printf 'OPEN\n' > "$PR_STATE"
+    printf '[]\n' > "$PRS"
 
     mkdir -p "$TEST_TMP/bin"
     cat > "$TEST_TMP/bin/gh" <<'SH'
@@ -56,7 +58,7 @@ if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
       prev="$a"
     done
     comments_for_issue="$(jq --argjson issue "$issue" \
-      '[.[] | select(.number == $issue)]' "${COMMENTS:?}")"
+      '((if type == "array" then . else [.] end) | [.[] | select(.number == $issue) | . + {id:(.node_id // ("IC_" + ((.id // .number) | tostring))), createdAt:(.createdAt // .created_at)}])' "${COMMENTS:?}")"
     printf '{"comments":%s}\n' "$comments_for_issue" | jq -r "${filter:-.}"
   else
     cat "${LABELS:?}"
@@ -81,6 +83,59 @@ if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
 fi
 
 if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
+  exit 0
+fi
+
+if [ "$1" = "api" ]; then
+  paginate=0
+  if [ "${2:-}" = "--paginate" ]; then
+    paginate=1
+    shift
+  fi
+  path="$2"
+  path="${path%%\?*}"
+  method="GET"
+  filter=""
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --paginate) paginate=1; shift ;;
+      -X) method="$2"; shift 2 ;;
+      --jq) filter="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "$path $method" in
+    repos/testorg/testrepo/issues/*/comments\ GET)
+      issue="${path#repos/testorg/testrepo/issues/}"
+      issue="${issue%/comments}"
+      jq --argjson issue "$issue" --argjson paginate "$paginate" \
+        '((if type == "array" then . else [.] end) |
+          [.[] | select(.number == $issue) | select(($paginate == 1) or ((.page // 1) == 1)) | . + {id:(.rest_id // .id // .number), created_at:(.created_at // .createdAt)}])' "${COMMENTS:?}" \
+        | jq -r "${filter:-.}"
+      exit 0
+      ;;
+    repos/testorg/testrepo/issues/comments/*\ DELETE)
+      id="${path##*/}"
+      jq --argjson id "$id" '[.[] | select((.id // -1) != $id)]' "${COMMENTS:?}" > "${COMMENTS}.tmp"
+      mv "${COMMENTS}.tmp" "${COMMENTS}"
+      exit 0
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  filter=""; prev=""
+  for a in "$@"; do
+    [ "$prev" = "--jq" ] && filter="$a"
+    prev="$a"
+  done
+  if [ -n "$filter" ]; then
+    jq -r "$filter" "${PRS:?}"
+  else
+    cat "${PRS:?}"
+  fi
   exit 0
 fi
 
@@ -109,8 +164,13 @@ write_state_comment() {
       --arg state "$state" \
       --arg updated_at "$updated_at" \
       --arg pr "$pr" \
+      --arg node_id "IC_${issue}00" \
       '[{
         number: $issue,
+        id: ($issue * 100),
+        node_id: $node_id,
+        created_at: $updated_at,
+        createdAt: $updated_at,
         body: ("<!-- autospec-run-state:begin -->\n" +
           ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:"worker-a",state:$state,branch:"feat/x",pr:$pr,step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
           "\n<!-- autospec-run-state:end -->")
@@ -132,6 +192,7 @@ write_state_comment() {
     stale="$(date -u -v-4H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '4 hours ago' +'%Y-%m-%dT%H:%M:%SZ')"
     write_state_comment 42 pr_created "$stale" "7" > "$COMMENTS"
     printf 'OPEN\n' > "$PR_STATE"
+    printf '[]\n' > "$PRS"
 
     run bash "$WATCHDOG"
 
@@ -176,12 +237,27 @@ write_state_worker() {
       --arg state "$state" \
       --arg updated_at "$updated_at" \
       --arg worker_id "$worker_id" \
+      --arg node_id "IC_${issue}00" \
       '[{
         number: $issue,
+        id: ($issue * 100),
+        node_id: $node_id,
+        created_at: $updated_at,
+        createdAt: $updated_at,
         body: ("<!-- autospec-run-state:begin -->\n" +
           ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:$worker_id,state:$state,branch:"feat/x",pr:"",step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
           "\n<!-- autospec-run-state:end -->")
       }]'
+}
+
+write_open_linked_pr_with_nonterminal_pytest() {
+    jq -n '[{
+      number:1873,
+      state:"OPEN",
+      title:"Fix batch claims atomic worker startup",
+      body:"Fixes #1859\n\n## Closeout report\nResult: pending CI handoff.",
+      statusCheckRollup:[{name:"pytest",status:"IN_PROGRESS",conclusion:null}]
+    }]' > "$PRS"
 }
 
 isolate_heartbeat_pass() {
@@ -262,18 +338,93 @@ isolate_heartbeat_pass() {
     grep -q -- '--add-label auto-implement' "$CALLS"
 }
 
+@test "issue 1877: issue 1859 is not reclaimed while linked PR 1873 has pytest IN_PROGRESS" {
+    isolate_heartbeat_pass
+    stale="$(date -u -v-10M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '10 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    write_hb 1859 claimed 360
+    write_state_worker 1859 claimed "$stale" "otherhost:me:shell:1859" > "$COMMENTS"
+    write_open_linked_pr_with_nonterminal_pytest
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"claimed_released=0"* ]]
+    [ -f "$(HB_DIR_FOR)/1859.json" ]
+    grep -q 'in-progress-by-bot' "$LABELS"
+    ! grep -q -- '--add-label auto-implement' "$CALLS"
+    grep -q -- 'pr list' "$CALLS"
+}
+
+@test "issue 1877: run-state reconcile also preserves issue 1859 while PR 1873 pytest is IN_PROGRESS" {
+    stale="$(date -u -v-10M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '10 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    write_state_worker 1859 claimed "$stale" "otherhost:me:shell:1859" > "$COMMENTS"
+    write_open_linked_pr_with_nonterminal_pytest
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"claimed_released=0"* ]]
+    grep -q 'in-progress-by-bot' "$LABELS"
+    ! grep -q -- '--add-label auto-implement' "$CALLS"
+    grep -q -- 'pr list' "$CALLS"
+}
+
 # A marked run-state comment with a marker body, parametrized worker_id/ts/order.
 state_comment_obj() {
     local issue="$1" state="$2" updated_at="$3" worker_id="$4" created_at="$5" id="$6"
     jq -n \
       --argjson issue "$issue" --arg state "$state" --arg updated_at "$updated_at" \
       --arg worker_id "$worker_id" --arg created_at "$created_at" --argjson id "$id" \
+      --arg node_id "IC_${id}" \
       '{
-        number: $issue, createdAt: $created_at, id: $id,
+        number: $issue, createdAt: $created_at, created_at: $created_at, id: $id, node_id: $node_id, page: 1,
         body: ("<!-- autospec-run-state:begin -->\n" +
           ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:$worker_id,state:$state,branch:"feat/x",pr:"",step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
           "\n<!-- autospec-run-state:end -->")
       }'
+}
+
+state_comment_obj_with_branch() {
+    local issue="$1" state="$2" updated_at="$3" worker_id="$4" branch="$5"
+    jq -n \
+      --argjson issue "$issue" --arg state "$state" --arg updated_at "$updated_at" \
+      --arg worker_id "$worker_id" --arg branch "$branch" \
+      '{
+        number: $issue, createdAt: $updated_at, created_at: $updated_at, id: ($issue * 100), node_id: ("IC_" + (($issue * 100) | tostring)), page: 1,
+        body: ("<!-- autospec-run-state:begin -->\n" +
+          ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:$worker_id,state:$state,branch:$branch,pr:"",step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
+          "\n<!-- autospec-run-state:end -->")
+      }'
+}
+
+start_validate_process_in_issue_worktree() {
+    local branch="$1"
+    export LOCAL_REPO="$TEST_TMP/local-repo"
+    export ISSUE_WORKTREE="$TEST_TMP/wt-issue-1845"
+    mkdir -p "$LOCAL_REPO"
+    git -C "$LOCAL_REPO" init -q
+    git -C "$LOCAL_REPO" config user.email test@example.com
+    git -C "$LOCAL_REPO" config user.name "Test User"
+    printf 'root\n' > "$LOCAL_REPO/README.md"
+    git -C "$LOCAL_REPO" add README.md
+    git -C "$LOCAL_REPO" commit -q -m initial
+    git -C "$LOCAL_REPO" worktree add -q -b "$branch" "$ISSUE_WORKTREE"
+    mkdir -p "$ISSUE_WORKTREE/scripts"
+    cat > "$ISSUE_WORKTREE/scripts/validate.sh" <<'SH'
+#!/usr/bin/env bash
+exec sleep 120
+SH
+    chmod +x "$ISSUE_WORKTREE/scripts/validate.sh"
+    bash -c 'cd "$1" && exec bash scripts/validate.sh' sh "$ISSUE_WORKTREE" >/dev/null 2>&1 &
+    VALIDATE_PID="$!"
+    export VALIDATE_PID
+}
+
+stop_validate_process() {
+    if [ -n "${VALIDATE_PID:-}" ]; then
+        kill "$VALIDATE_PID" >/dev/null 2>&1 || true
+        wait "$VALIDATE_PID" >/dev/null 2>&1 || true
+    fi
 }
 
 # ── F5: WATCHDOG_RECLAIM_SECS (3h) path — GitHub-authority gate (#1367) ─────────
@@ -283,6 +434,57 @@ state_comment_obj() {
 # Tests mirror the F1+F2+F3 pattern: heartbeat step="implementing", threshold
 # overridden small, and STALE_SECS set below RECLAIM_SECS so the age=360 hb
 # reaches the reclaim branch (not the "too fresh" early-continue).
+
+
+@test "issue 1779: two watchdog reclaims clear stale run-state before the next queue read" {
+    isolate_heartbeat_pass
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=3600
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    stale="$(date -u -v-2H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '2 hours ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    write_hb 1779 expand_start 7200
+    jq -n --argjson comment "$(state_comment_obj 1779 expand_start "$stale" "oldhost:me:shell:1779" "2020-01-01T00:00:00Z" 177900)" '[$comment]' > "$COMMENTS"
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=1"* ]]
+    [ ! -f "$(HB_DIR_FOR)/1779.json" ]
+    run jq '[.[] | select(.number == 1779 and ((.body // "") | contains("autospec-run-state:begin")))] | length' "$COMMENTS"
+    [ "$output" = "0" ]
+
+    # A second consecutive reclaim attempt for the same issue must not observe
+    # or report the old worker_id after the first pass cleared the stale lease.
+    printf 'OPEN in-progress-by-bot\n' > "$LABELS"
+    write_hb 1779 expand_start 7200
+    : > "$CALLS"
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=1"* ]]
+    [ ! -f "$(HB_DIR_FOR)/1779.json" ]
+    ! grep -q 'oldhost:me:shell:1779' "$CALLS"
+}
+
+@test "issue 1779: paginated REST comments are searched before clearing stale run-state" {
+    isolate_heartbeat_pass
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=3600
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    stale="$(date -u -v-2H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '2 hours ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    write_hb 1779 expand_start 7200
+    jq -n \
+      --argjson unmarked '{"number":1779,"id":177901,"node_id":"IC_177901","createdAt":"2019-01-01T00:00:00Z","created_at":"2019-01-01T00:00:00Z","page":1,"body":"ordinary comment"}' \
+      --argjson marked "$(state_comment_obj 1779 expand_start "$stale" "oldhost:me:shell:1779" "2020-01-01T00:00:00Z" 177902 | jq '.page = 2')" \
+      '[$unmarked, $marked]' > "$COMMENTS"
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=1"* ]]
+    [ ! -f "$(HB_DIR_FOR)/1779.json" ]
+    run jq '[.[] | select(.number == 1779 and ((.body // "") | contains("autospec-run-state:begin")))] | length' "$COMMENTS"
+    [ "$output" = "0" ]
+    grep -q -- '--paginate repos/testorg/testrepo/issues/1779/comments?per_page=100' "$CALLS"
+}
 
 @test "F5: live same-host pid on non-claimed step past 3h is NOT reclaimed" {
     isolate_heartbeat_pass
@@ -352,6 +554,83 @@ SH
     [[ "$output" == *"reclaimed=1"* ]]
     [ ! -f "$(HB_DIR_FOR)/42.json" ]
     grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$CALLS"
+}
+
+@test "issue 1845: active local validate process in issue worktree prevents stale run-state reclaim after 5400s" {
+    export WORKER_LIVENESS_HOSTNAME="thishost"
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=300
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    branch="feat/1845-watchdog-run-state-reclaim"
+    stale="$(date -u -v-90M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '90 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    state_comment_obj_with_branch 1845 expand_start "$stale" "thishost:me:shell:999999" "$branch" | jq -s '.' > "$COMMENTS"
+    start_validate_process_in_issue_worktree "$branch"
+
+    run bash -c "cd \"$LOCAL_REPO\" && bash \"$WATCHDOG\""
+    stop_validate_process
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=0"* ]]
+    [[ "$output" == *"live_owner_no_heartbeat=1"* ]]
+    [[ "$output" == *"live-owner-no-heartbeat"* ]]
+    grep -q 'in-progress-by-bot' "$LABELS"
+    ! grep -q -- '--add-label auto-implement' "$CALLS"
+}
+
+
+@test "issue 1845: stale heartbeat and active issue worktree process is not reclaimed" {
+    export WORKER_LIVENESS_HOSTNAME="thishost"
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=300
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    branch="feat/1845-watchdog-run-state-reclaim"
+    stale="$(date -u -v-90M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '90 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    state_comment_obj_with_branch 1845 expand_start "$stale" "thishost:me:shell:999999" "$branch" | jq -s '.' > "$COMMENTS"
+    start_validate_process_in_issue_worktree "$branch"
+    write_hb 1845 tests_started 5400
+    export ISSUE_LIST="$TEST_TMP/issue-list.txt"
+    : > "$ISSUE_LIST"
+
+    run bash -c "cd "$LOCAL_REPO" && bash "$WATCHDOG""
+    stop_validate_process
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=0"* ]]
+    [ -f "$(HB_DIR_FOR)/1845.json" ]
+    grep -q 'in-progress-by-bot' "$LABELS"
+    ! grep -q -- '--add-label auto-implement' "$CALLS"
+}
+
+@test "issue 1845: lsof fallback detects active worktree process when proc is unavailable" {
+    export WORKER_LIVENESS_HOSTNAME="thishost"
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=300
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    export AUTOSPEC_WATCHDOG_DISABLE_PROC=1
+    branch="feat/1845-watchdog-run-state-reclaim"
+    stale="$(date -u -v-90M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '90 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    state_comment_obj_with_branch 1845 expand_start "$stale" "thishost:me:shell:999999" "$branch" | jq -s '.' > "$COMMENTS"
+    start_validate_process_in_issue_worktree "$branch"
+    cat > "$TEST_TMP/bin/lsof" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf 'lsof %s
+' "$*" >> "${CALLS:?}"
+[ "$1" = "-w" ]
+[ "$2" = "-Fn" ]
+[ "$3" = "-d" ]
+[ "$4" = "cwd" ]
+wt_real="$(cd "${ISSUE_WORKTREE:?}" && pwd -P)"
+printf 'p%s\nn%s\n' "${VALIDATE_PID:?}" "$wt_real"
+SH
+    chmod +x "$TEST_TMP/bin/lsof"
+
+    run bash -c "cd "$LOCAL_REPO" && bash "$WATCHDOG""
+    stop_validate_process
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=0"* ]]
+    [[ "$output" == *"live_owner_no_heartbeat=1"* ]]
+    grep -q "lsof -w -Fn -d cwd" "$CALLS"
+    grep -q 'in-progress-by-bot' "$LABELS"
+    ! grep -q -- '--add-label auto-implement' "$CALLS"
 }
 
 @test "F5: dead same-host pid on non-claimed step past 3h is reclaimed" {

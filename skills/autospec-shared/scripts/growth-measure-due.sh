@@ -37,7 +37,10 @@ interval_days="$DEFAULT_INTERVAL_DAYS"
 config="${repo_root}/.autospec/growth.yml"
 if [ -f "$config" ] && command -v yq >/dev/null 2>&1; then
     configured=""
-    configured="$(yq -o=json '.' "$config" 2>/dev/null | jq -r '.grow.measure_interval // empty' 2>/dev/null)" || configured=""
+    configured="$( \
+        (yq -o=json '.' "$config" 2>/dev/null || yq '.' "$config" 2>/dev/null) \
+            | jq -r '.grow.measure_interval // empty' 2>/dev/null \
+    )" || configured=""
     case "$configured" in
         ''|*[!0-9]*) : ;;
         *) interval_days="$configured" ;;

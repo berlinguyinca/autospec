@@ -18,7 +18,7 @@ teardown() {
     run bash "$INSTALLER" --harness codex
 
     [ "$status" -eq 0 ]
-    for helper in run-state.sh list-ready-issues.sh claim-issue.sh release-issue.sh heartbeat-write.sh heartbeat-read.sh autospec-usage-limit.sh; do
+    for helper in run-state.sh issue-safety-gate.sh list-ready-issues.sh claim-issue.sh release-issue.sh heartbeat-write.sh heartbeat-read.sh autospec-usage-limit.sh; do
         [ -f "$HOME/.autospec/scripts/$helper" ]
         [ -x "$HOME/.autospec/scripts/$helper" ]
     done

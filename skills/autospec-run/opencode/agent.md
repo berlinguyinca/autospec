@@ -388,6 +388,22 @@ Pass the following prompt verbatim to each background subagent:
 >     fi
 >   fi
 
+>   # Backlog grooming preflight — run exactly one existing-backlog grooming
+>   # cycle before each queue scan when grooming policy is auto/on. The helper
+>   # invokes autonomous-promote-open-issues.sh --apply, but mutations are still
+>   # protected by the orchestrator's double gate: --apply AND grooming policy
+>   # in {auto,on}. This is no discovery: do not run Tier 2-4 discovery and do
+>   # not file new issues from this preflight.
+>   GROOM_PREFLIGHT="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/run-groom-preflight.sh"
+>   [ -x "$GROOM_PREFLIGHT" ] || GROOM_PREFLIGHT="skills/autospec-run/scripts/run-groom-preflight.sh"
+>   if [ -f "$GROOM_PREFLIGHT" ]; then
+>     bash "$GROOM_PREFLIGHT" \
+>       --repo "{repo}" \
+>       --report "${AUTOSPEC_RUN_REPORT:-$HOME/.autospec/autospec-run-report.md}" || true
+>   else
+>     echo "WARN: backlog grooming preflight helper missing; continuing drain"
+>   fi
+
 ### Queue priority sort (autospec-review interlock)
 
 When selecting the next `auto-implement` issue, sort:
@@ -831,6 +847,11 @@ inline label-swap path below.
 >        echo "[ladder] fresh — created <BRANCH>"
 >        ;;
 >    esac
+>    # Reset repo-local state roots after entering the issue worktree. Parent
+>    # autospec-run processes may export AUTOSPEC_REPO_DIR for the primary
+>    # checkout; premerge/validation helpers must read mutable artifacts such as
+>    # .autospec/qa-verdict.json from this active worktree instead.
+>    export AUTOSPEC_REPO_DIR="$PWD"
 >    # MANDATORY assert gate: MUST exit 0 before the first file edit/commit. A
 >    # non-zero exit (in_primary_checkout / dirty / stale_base) is NEVER worked
 >    # around — comment the emitted code_health identifier on the issue, restore
@@ -1081,6 +1102,8 @@ inline label-swap path below.
 >        > 6. Check correctness, edge cases, missing tests, AGENTS.md compliance (TDD, no mocks, conventional commits), whether every new code unit exists for a concrete issue/spec requirement rather than convenience, and whether deprecated routes, caches, buckets, stores, workers, config keys, UI paths, docs, specs, tests, or fixtures were removed instead of revived to make tests pass.
 >        > 7. Collect findings as a numbered list.
 >        > 8. Critical self-question before LGTM: "What else could still pass here while the real user workflow fails, and how could this be better?" Check especially mocked-vs-deployed behavior, external service assumptions, fallback paths, user-visible outcomes, and missing no-mock smoke coverage. If the answer is actionable inside the issue scope, emit it as a finding or required test.
+
+>        > 8a. **data-scope invariant lens (diagnostic/filter endpoints):** When the issue touches endpoints, dashboards, reports, or diagnostics that accept optional job/sample/filter parameters, verify filters never widen to unrelated records. empty optional filters reject unless documented as a deliberate all-records mode. Require concrete evidence for `job-only`, `sample-only`, `job+sample`, `unsupported-filter`, and `empty-filter` paths; unsupported-filter and empty-filter cases must prove rejection or a documented scoped response, not silent broadening.
 >        > 9. **Regression gap-check (MANDATORY for `regression`/`priority:high` issues; skip otherwise):** ask "would the reviewer have caught the original gap?" If the fused review as written would NOT have caught the gap this regression closes, add the missing checklist item(s) to `reports/autospec-review/reviewer-lessons.md` (one entry per item, with parent `gap_id` and date) and apply those new checks to this diff before issuing the verdict. This folds the former second-pass regression meta-review into this single reviewer pass — the reviewer-lessons write-path is preserved here; there is no second Tier-A dispatch.
 >        >
 >        > **Hard limit:** max **25 tool calls total** (Parts 1 + 2 combined). If budget exhausted, append `RULE_ID:OUT_OF_SCOPE: reviewer budget exhausted; PR needs human review` and proceed to verdict.
@@ -1150,8 +1173,43 @@ inline label-swap path below.
 >            bad=$(printf '%s' "$rollup" | jq --arg adv "$adv" '[.[] | select((((.name // .context // "") as $n | $n != "" and ($n | test($adv)))) | not) | select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED")] | length')
 >            total=$(printf '%s' "$rollup" | jq 'length')
 >            if [ "$bad" != "0" ]; then
->                gh issue comment <ISSUE> --body "PR #<PR>: a required check failed after rebase-and-retest. Pausing for operator review."
->                exit 1
+>                # Distinguish inherited base-branch CI rot from branch-caused failures
+>                # before blocking. Capture the PR head rollup and the current base
+>                # commit's check/status contexts as merge evidence, then let
+>                # ci-status-compare.sh emit classification plus blocked_branch and
+>                # blocked_inherited arrays for the PR comment/final report.
+>                base_sha=$(gh pr view <PR> --json baseRefOid --jq .baseRefOid)
+>                head_checks="/tmp/autospec-ci-head-<PR>.json"
+>                base_checks="/tmp/autospec-ci-base-<PR>.json"
+>                base_check_runs="/tmp/autospec-ci-base-check-runs-<PR>.json"
+>                base_statuses="/tmp/autospec-ci-base-statuses-<PR>.json"
+>                compare_json="/tmp/autospec-ci-compare-<PR>.json"
+>                printf '%s\n' "$rollup" > "$head_checks"
+>                gh api "repos/{repo}/commits/$base_sha/check-runs" --paginate \
+>                  --jq '[.check_runs[] | {name, conclusion, status, detailsUrl: .details_url}]' \
+>                  > "$base_check_runs"
+>                gh api "repos/{repo}/commits/$base_sha/status" \
+>                  --jq '[.statuses[] | {context, state, targetUrl: .target_url}]' \
+>                  > "$base_statuses"
+>                jq -s 'add' "$base_check_runs" "$base_statuses" > "$base_checks"
+>                bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ci-status-compare.sh" \
+>                  --head "$head_checks" --base "$base_checks" > "$compare_json"
+>                classification=$(jq -r '.classification' "$compare_json")
+>                target_url=$(jq -r '.target_url // ""' "$compare_json")
+>                case "$classification" in
+>                  inherited)
+>                    gh issue comment <ISSUE> --body "PR #<PR>: required checks are red, but ci-status-compare classified them as inherited base-branch CI rot (blocked_inherited). Merge evidence: ${target_url:-see attached rollup}; compare artifact: \`$compare_json\`. Pausing for operator review instead of marking the branch broken."
+>                    exit 1
+>                    ;;
+>                  branch_caused)
+>                    gh issue comment <ISSUE> --body "PR #<PR>: required checks failed and ci-status-compare classified them as branch-caused (blocked_branch). Merge evidence: ${target_url:-see attached rollup}; compare artifact: \`$compare_json\`."
+>                    exit 1
+>                    ;;
+>                  *)
+>                    gh issue comment <ISSUE> --body "PR #<PR>: required checks looked bad but ci-status-compare returned \`$classification\`; pausing for operator review. Compare artifact: \`$compare_json\`."
+>                    exit 1
+>                    ;;
+>                esac
 >            fi
 >            if [ "$total" != "0" ] && [ "$pending" = "0" ]; then return 0; fi
 >            sleep 30
@@ -1186,6 +1244,49 @@ inline label-swap path below.
 >    # Run the **Full test suite gate** here using the same command resolution order
 >    # (`AUTOSPEC_FULL_TEST_COMMAND`, Operator/full verification, then `bash scripts/validate.sh` fallback).
 >    # If it fails, fix the failure, recommit, push, rerun the full suite and review, and do NOT run `gh pr merge`.
+>    #
+>    # Final quality gate (pre-merge, fail-closed): after the full suite passes and
+>    # before admin-merging, discover repository-specific whole-workspace quality
+>    # commands and run each one from the target repo root. Discovery is additive:
+>    #   1. If AUTOSPEC_FINAL_QUALITY_COMMAND is set, run it exactly as provided.
+>    #   2. If a root Cargo.toml exists and `cargo metadata --no-deps --format-version=1`
+>    #      succeeds, this is a Rust workspace; run:
+>    #      `cargo clippy --workspace --all-targets -- -D warnings`
+>    # Treat every discovered command as required merge evidence. Do NOT run `gh pr merge` while the final quality gate is failing.
+>    # On failure, post/comment a
+>    # `FINAL_QUALITY_GATE_FAILED` block that includes the command plus one finding
+>    # record with `crate`, `file`, `line`, and `rule` fields (use `unknown` only when
+>    # the tool output genuinely omits a field), then return to the fix/recommit/retry
+>    # loop and rerun the full suite plus final quality gate before merge.
+>    if [ -n "${AUTOSPEC_FINAL_QUALITY_COMMAND:-}" ]; then
+>      sh -lc "$AUTOSPEC_FINAL_QUALITY_COMMAND" || {
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=AUTOSPEC_FINAL_QUALITY_COMMAND crate=unknown file=unknown line=unknown rule=unknown"
+>        exit 1
+>      }
+>    fi
+>    if [ -f Cargo.toml ]; then
+>      if ! command -v cargo >/dev/null 2>&1; then
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-metadata crate=unknown file=Cargo.toml line=1 rule=cargo-unavailable"
+>        exit 1
+>      fi
+>      if ! cargo metadata --no-deps --format-version=1 >/tmp/autospec-cargo-metadata.json 2>/tmp/autospec-cargo-metadata.err; then
+>        _metadata_err=$(tr '
+' ' ' </tmp/autospec-cargo-metadata.err | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//' | cut -c1-500)
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-metadata crate=unknown file=Cargo.toml line=1 rule=${_metadata_err:-metadata-failed}"
+>        exit 1
+>      fi
+>      if ! cargo clippy --workspace --all-targets -- -D warnings >/tmp/autospec-final-quality-clippy.log 2>&1; then
+>        # Preserve raw clippy output and summarize the first diagnostic in a stable schema for reviewers.
+>        _crate=$(jq -r '.packages[0].name // "unknown"' /tmp/autospec-cargo-metadata.json 2>/dev/null || printf 'unknown')
+>        _location=$(grep -m1 -E '^[[:space:]]*-->' /tmp/autospec-final-quality-clippy.log | sed -E 's/^[[:space:]]*-->[[:space:]]*//' || true)
+>        _file=$(printf '%s' "$_location" | awk -F: '{print $1}')
+>        _line=$(printf '%s' "$_location" | awk -F: '{print $2}')
+>        _rule=$(grep -m1 -Eo 'clippy::[A-Za-z0-9_]+' /tmp/autospec-final-quality-clippy.log || true)
+>        if [ -z "$_rule" ]; then _rule=$(grep -m1 -E 'warning:|error:' /tmp/autospec-final-quality-clippy.log | sed 's/^ *//' | cut -c1-200 || true); fi
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-clippy crate=${_crate:-unknown} file=${_file:-unknown} line=${_line:-unknown} rule=${_rule:-unknown}"
+>        exit 1
+>      fi
+>    fi
 >    gh pr merge <PR> --admin --squash --delete-branch
 >    "$COORD_RELEASE" --issue "<ISSUE>" --repo {repo} \
 >      --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" \
@@ -1253,6 +1354,7 @@ Each session derives its own `AUTOSPEC_WORKER_ID` if not overridden; the default
 | Variable | Default | Purpose |
 |---|---|---|
 | `AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS` | `0` (disabled) | Repo-wide active-worker cap. When active `in-progress-by-bot` issues meet the cap, `list-ready-issues.sh` returns an empty `.batch` while still reporting `.ready`. Use this to throttle one workstation or a cluster. |
+| `AUTOSPEC_RUN_ONLY_ISSUES` | unset (unconstrained) | Space-separated issue-number allowlist. When set and non-empty, `list-ready-issues.sh` scopes `.ready`/`.blocked`/`.batch` to only those issue numbers — set by the autonomous conductor's dispatch-time provenance split so the operator and self-originated batches each drain their own subset. Unset or empty keeps the full-queue scan. |
 | `AUTOSPEC_CLAIM_LEASE_SECONDS` | `10800` | Cross-machine claim lease TTL written into the GitHub run-state comment and used by `claim-issue.sh` stale-reclaim decisions. |
 | `AUTOSPEC_CLAIM_SETTLE_SECONDS` | `0.2` | Short post-upsert readback delay so simultaneous comment creates converge before a worker reports claim success. |
 | `AUTOSPEC_CLAIM_CONFIRM_READS` | `5` | Number of settled lowest-lock readbacks required before `claim-issue.sh` reports claim success. |
@@ -1353,7 +1455,19 @@ Runs after the last issue in the batch closes/merges (queue drains, `ALL_DONE`),
 - `~/.autospec/no-review.flag` exists, OR
 - `--no-postreview` was passed to autospec-run.
 
-Otherwise run the bounded loop:
+Otherwise run the bounded loop. At closeout, also run the deterministic gap miner against available run evidence (review verdicts, fix commits, CI blockers, and QA/scope misses) so repeated misses become deduped `gap-remediation` issues and repeat counts land in `docs/memory/autospec-gap-ledger.md`:
+
+```bash
+if [ -s "${AUTOSPEC_RUN_GAP_EVENTS:-}" ]; then
+  bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-gap-miner.sh" \
+    --input "${AUTOSPEC_RUN_GAP_EVENTS}" \
+    --ledger docs/memory/autospec-gap-ledger.md \
+    --repo "${AUTOSPEC_REPO:-}" \
+    --file
+fi
+```
+
+Then continue the bounded Phase 5.5 loop:
 
 ```bash
 BATCH_START_DATE="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/run-batch-start.sh" --read)"

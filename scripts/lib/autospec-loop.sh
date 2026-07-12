@@ -433,6 +433,17 @@ PY
 #   AUTOSPEC_EXPLORE_LEDGER_BIN   explicit path to explore-ledger.sh (for tests)
 #   AUTOSPEC_EXPLORE_WEIGHTS_BIN  explicit path to explore-source-weights.sh (for tests)
 #   AUTOSPEC_LAST_OUTCOME_FILE    path the run command writes discovery outcomes to
+#   AUTOSPEC_PROVENANCE_BIN         explicit path to autonomous-provenance.sh (for tests)
+#   AUTOSPEC_INTEGRATION_BRANCH_BIN explicit path to autonomous-integration-branch.sh (for tests)
+#
+# Dispatch-time provenance split (integration-branch design §Architecture 5):
+# when autonomous-provenance.sh + autonomous-integration-branch.sh resolve and
+# a repo slug is known, the Tier-1 drain resolves each batch issue's provenance
+# from GitHub labels (re-derived every cycle; no session memory) and dispatches
+# the operator subset (mode file parked; PRs target the parent) separately from
+# the self subset (kind=integration mode file active; PRs target the
+# integration branch). Each dispatch exports AUTOSPEC_RUN_ONLY_ISSUES — a
+# space-separated issue-number list scoping that run invocation.
 #
 # Safety rules (AGENTS.md):
 #   set -eu; if/then/fi for one-sided conditionals; no RETURN traps;
@@ -532,6 +543,392 @@ _autospec_conductor_queue_count() {
     printf '%s' "$1" | jq -r "$2" 2>/dev/null || true
 }
 
+# ── Control-channel promote/discard consumers (integration-branch design §8) ──
+# Trust for `promote` AND `discard` is already vetted upstream by
+# autonomous-control-channel.sh (issue author + last labeled-event actor both
+# checked against safety.issue_intent_gate.trusted_actors, fail closed);
+# these consumers act on the DECISION the control channel already produced.
+# All gh/git calls are best-effort (fail-open comments) — a GitHub hiccup
+# here must never crash the outer conductor loop.
+#
+# Trigger-state hygiene (memory: one-shot→tier must clear trigger state):
+# EVERY terminal path — refused, no-op, success, failure — removes the
+# autospec:promote / autospec:discard label after commenting, so the control
+# channel does not re-emit the same decision every cycle (duplicate comments
+# + severity starvation of lower tiers). The operator re-fires by re-applying
+# the label.
+
+# _autospec_conductor_default_branch REPO — repo default branch, `main`
+# fallback when GitHub does not expose a defaultBranchRef.
+_autospec_conductor_default_branch() {
+    local repo="$1" b
+    b="$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name // empty' 2>/dev/null || true)"
+    if [ -n "$b" ]; then
+        printf '%s\n' "$b"
+    else
+        printf 'main\n'
+    fi
+}
+
+# _autospec_conductor_clear_control_label REPO ISSUE LABEL — best-effort
+# trigger-state clear; never fails the caller.
+_autospec_conductor_clear_control_label() {
+    local repo="$1" issue="$2" label="$3"
+    if [ -n "$repo" ] && [ -n "$issue" ]; then
+        gh issue edit "$issue" --repo "$repo" --remove-label "$label" >/dev/null 2>&1 || true
+    fi
+}
+
+# _autospec_conductor_clear_self_pause REPO_ROOT — promote/discard are the
+# designed operator exits from a rollup-red/caps park (#1767): clear the
+# durable pause marker so self-originated tiers resume next cycle.
+_autospec_conductor_clear_self_pause() {
+    local repo_root="$1"
+    if [ -n "$repo_root" ]; then
+        rm -f "${repo_root}/.autospec/self-originated-pause.json" 2>/dev/null || true
+    fi
+}
+
+_autospec_conductor_discard_pending_file() {
+    local repo_root="$1"
+    [ -n "$repo_root" ] || return 1
+    printf '%s/.autospec/discard-pending.json\n' "$repo_root"
+}
+
+_autospec_conductor_write_discard_pending() {
+    local repo_root="$1" issue="$2" rollup_pr="$3" rolled_issues="$4"
+    local pending_file pending_dir tmp updated_at
+    pending_file="$(_autospec_conductor_discard_pending_file "$repo_root" 2>/dev/null || true)"
+    [ -n "$pending_file" ] || return 1
+    pending_dir="$(dirname "$pending_file")"
+    mkdir -p "$pending_dir" 2>/dev/null || return 1
+    tmp="$(mktemp "${pending_file}.XXXXXX" 2>/dev/null || true)"
+    [ -n "$tmp" ] || return 1
+    updated_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf unknown)"
+    if printf '%s\n' "$rolled_issues" \
+        | AUTOSPEC_DISCARD_CONTROL_ISSUE="$issue" \
+            AUTOSPEC_DISCARD_ROLLUP_PR="$rollup_pr" \
+            AUTOSPEC_DISCARD_UPDATED_AT="$updated_at" \
+            jq -R -s \
+        '{
+            control_issue: (env.AUTOSPEC_DISCARD_CONTROL_ISSUE | tonumber),
+            rollup_pr: (env.AUTOSPEC_DISCARD_ROLLUP_PR | tonumber),
+            pending_issues: (split("\n") | map(select(length > 0) | tonumber)),
+            updated_at: env.AUTOSPEC_DISCARD_UPDATED_AT
+        }' > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$pending_file"
+    else
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+    fi
+}
+
+_autospec_conductor_read_discard_pending() {
+    local repo_root="$1" issue="$2" pending_file
+    pending_file="$(_autospec_conductor_discard_pending_file "$repo_root" 2>/dev/null || true)"
+    [ -n "$pending_file" ] && [ -f "$pending_file" ] || return 1
+    AUTOSPEC_DISCARD_CONTROL_ISSUE="$issue" jq -er '
+        select((.control_issue // 0) == (env.AUTOSPEC_DISCARD_CONTROL_ISSUE | tonumber))
+        | (.rollup_pr | tostring),
+          ((.pending_issues // []) | map(tostring) | join("\n"))
+    ' "$pending_file" 2>/dev/null
+}
+
+_autospec_conductor_clear_discard_pending() {
+    local repo_root="$1" issue="$2" pending_file
+    pending_file="$(_autospec_conductor_discard_pending_file "$repo_root" 2>/dev/null || true)"
+    [ -n "$pending_file" ] && [ -f "$pending_file" ] || return 0
+    if AUTOSPEC_DISCARD_CONTROL_ISSUE="$issue" jq -e \
+        '(.control_issue // 0) == (env.AUTOSPEC_DISCARD_CONTROL_ISSUE | tonumber)' \
+        "$pending_file" >/dev/null 2>&1; then
+        rm -f "$pending_file" 2>/dev/null || true
+    fi
+}
+
+# _autospec_conductor_rollup_ci_green REPO PR — exit 0 only when the roll-up
+# PR's status checks are fully settled with no failures. An empty rollup (no
+# CI configured) counts as green; a failed probe fails CLOSED (refuse the
+# merge — promote must never admin-merge red/unknown CI; the operator's
+# manual GitHub merge stays the explicit override). Green is an ALLOWLIST of
+# explicitly-good terminal conclusions (SUCCESS/NEUTRAL/SKIPPED) — a
+# blocklist would fail open on enum values it doesn't know about
+# (STARTUP_FAILURE, STALE, future additions). conclusion==null (still
+# running, or a legacy status context reporting `state` instead) counts as
+# unsettled and refuses — fail closed.
+_autospec_conductor_rollup_ci_green() {
+    local repo="$1" pr="$2" rollup not_green
+    rollup="$(gh pr view "$pr" --repo "$repo" --json statusCheckRollup --jq '.statusCheckRollup // []' 2>/dev/null || true)"
+    if [ -z "$rollup" ]; then
+        return 1
+    fi
+    not_green="$(printf '%s' "$rollup" | jq '[.[] | select((.conclusion=="SUCCESS" or .conclusion=="NEUTRAL" or .conclusion=="SKIPPED") | not)] | length' 2>/dev/null || echo 1)"
+    [ "$not_green" = "0" ]
+}
+
+# _autospec_conductor_handle_promote REPO INTBRANCH_SH ISSUE REPO_ROOT —
+# merge the open, CI-green roll-up PR (integration branch -> parent) and
+# reset the integration branch. A missing/absent roll-up is a clean no-op
+# (comment only, no merge call). A MERGED roll-up re-attempts `reset` so a
+# prior merge-ok/reset-fail promote is recoverable by re-firing promote.
+_autospec_conductor_handle_promote() {
+    local repo="$1" intbranch_sh="$2" issue="$3" repo_root="${4:-}"
+    if [ -z "$issue" ]; then
+        return 0
+    fi
+    if [ -z "$repo" ] || [ -z "$intbranch_sh" ]; then
+        return 0
+    fi
+
+    local parent status_json rollup_pr rollup_state
+    parent="$(_autospec_conductor_default_branch "$repo")"
+    status_json="$(bash "$intbranch_sh" status --parent "$parent" --repo "$repo" 2>/dev/null || true)"
+    rollup_pr="$(printf '%s' "$status_json" | jq -r '.rollup_pr.number // empty' 2>/dev/null || true)"
+    rollup_state="$(printf '%s' "$status_json" | jq -r '.rollup_pr.state // empty' 2>/dev/null || true)"
+
+    case "$rollup_pr" in
+        ''|*[!0-9]*)
+            printf '[conductor] promote: no roll-up PR found for issue #%s — nothing to promote\n' "$issue" >&2
+            gh issue comment "$issue" --repo "$repo" \
+                --body "promote: no open roll-up PR found — nothing to promote." >/dev/null 2>&1 || true
+            _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:promote"
+            return 0
+            ;;
+    esac
+    if [ "$rollup_state" != "OPEN" ]; then
+        if [ "$rollup_state" = "MERGED" ]; then
+            # Recovery path: a previous promote merged the roll-up but its
+            # reset failed. Re-attempt reset so re-firing promote is
+            # idempotent recovery, not a dead end.
+            printf '[conductor] promote: roll-up PR #%s already merged — re-attempting integration-branch reset (recovery)\n' \
+                "$rollup_pr" >&2
+            if bash "$intbranch_sh" reset --parent "$parent" --repo "$repo" >&2; then
+                _autospec_conductor_clear_self_pause "$repo_root"
+                gh issue comment "$issue" --repo "$repo" \
+                    --body "promote: roll-up PR #${rollup_pr} was already merged; integration-branch reset completed (recovered)." \
+                    >/dev/null 2>&1 || true
+                gh issue close "$issue" --repo "$repo" >/dev/null 2>&1 || true
+            else
+                gh issue comment "$issue" --repo "$repo" \
+                    --body "promote: roll-up PR #${rollup_pr} is merged but the integration-branch reset failed again. Re-apply autospec:promote to retry, or reset manually." \
+                    >/dev/null 2>&1 || true
+            fi
+        else
+            printf '[conductor] promote: roll-up PR #%s is not open (state=%s) — nothing to promote\n' \
+                "$rollup_pr" "$rollup_state" >&2
+            gh issue comment "$issue" --repo "$repo" \
+                --body "promote: roll-up PR #${rollup_pr} is not open (state=${rollup_state}) — nothing to promote." \
+                >/dev/null 2>&1 || true
+        fi
+        _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:promote"
+        return 0
+    fi
+
+    # Red/unsettled CI must never be admin-merged; manual GitHub merge is
+    # the operator's explicit override.
+    if ! _autospec_conductor_rollup_ci_green "$repo" "$rollup_pr"; then
+        printf '[conductor] promote: roll-up PR #%s CI is red or unsettled — refusing to merge\n' "$rollup_pr" >&2
+        gh issue comment "$issue" --repo "$repo" \
+            --body "promote refused: roll-up PR #${rollup_pr} has red or unsettled CI. Fix CI (or merge manually on GitHub as an explicit override), then re-apply autospec:promote." \
+            >/dev/null 2>&1 || true
+        _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:promote"
+        return 0
+    fi
+
+    # No --delete-branch: reset recreates the integration branch from the
+    # parent tip, and deleting here could also remove a local branch in the
+    # conductor's checkout.
+    printf '[conductor] promote: merging roll-up PR #%s (issue #%s)\n' "$rollup_pr" "$issue" >&2
+    if ! gh pr merge "$rollup_pr" --repo "$repo" --admin --squash >/dev/null 2>&1; then
+        gh issue comment "$issue" --repo "$repo" \
+            --body "promote: failed to merge roll-up PR #${rollup_pr}. Re-apply autospec:promote to retry." \
+            >/dev/null 2>&1 || true
+        _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:promote"
+        return 1
+    fi
+
+    if bash "$intbranch_sh" reset --parent "$parent" --repo "$repo" >&2; then
+        _autospec_conductor_clear_self_pause "$repo_root"
+        gh issue comment "$issue" --repo "$repo" \
+            --body "promote: merged roll-up PR #${rollup_pr} and reset the integration branch." \
+            >/dev/null 2>&1 || true
+        gh issue close "$issue" --repo "$repo" >/dev/null 2>&1 || true
+    else
+        gh issue comment "$issue" --repo "$repo" \
+            --body "promote: merged roll-up PR #${rollup_pr} but the integration-branch reset failed. Re-apply autospec:promote to retry the reset (recovery is idempotent)." \
+            >/dev/null 2>&1 || true
+    fi
+    _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:promote"
+}
+
+# _autospec_conductor_handle_control_refused REPO ISSUE VERB — the control
+# channel refused (untrusted author or label applicator); comment on the
+# issue and clear the trigger label, never act.
+_autospec_conductor_handle_control_refused() {
+    local repo="$1" issue="$2" verb="$3"
+    if [ -z "$issue" ]; then
+        return 0
+    fi
+    printf '[conductor] DECISION:%s-refused — issue #%s author/label-applicator is not a trusted actor; refusing (no action taken)\n' \
+        "$verb" "$issue" >&2
+    if [ -n "$repo" ]; then
+        gh issue comment "$issue" --repo "$repo" \
+            --body "${verb} refused: the issue author or the autospec:${verb} label applicator is not a trusted actor (safety.issue_intent_gate.trusted_actors). No action was taken." \
+            >/dev/null 2>&1 || true
+        _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:${verb}"
+    fi
+}
+
+# _autospec_conductor_handle_discard REPO INTBRANCH_SH ISSUE REPO_ROOT —
+# close the open roll-up PR (deleting the integration branch), then reopen
+# every issue listed in the roll-up PR BODY's manifest (between the
+# autospec-rollup-manifest markers — bot/maintainer-written; PR COMMENTS are
+# writable by anyone and are never trusted for this) with a
+# discarded-from-rollup comment. A missing/merged roll-up is a clean no-op.
+_autospec_conductor_handle_discard() {
+    local repo="$1" intbranch_sh="$2" issue="$3" repo_root="${4:-}"
+    if [ -z "$issue" ]; then
+        return 0
+    fi
+    if [ -z "$repo" ] || [ -z "$intbranch_sh" ]; then
+        return 0
+    fi
+
+    local parent status_json rollup_pr rollup_state
+    local pending_data pending_rollup pending_issues discard_retry=0
+    parent="$(_autospec_conductor_default_branch "$repo")"
+    status_json="$(bash "$intbranch_sh" status --parent "$parent" --repo "$repo" 2>/dev/null || true)"
+    rollup_pr="$(printf '%s' "$status_json" | jq -r '.rollup_pr.number // empty' 2>/dev/null || true)"
+    rollup_state="$(printf '%s' "$status_json" | jq -r '.rollup_pr.state // empty' 2>/dev/null || true)"
+    pending_data="$(_autospec_conductor_read_discard_pending "$repo_root" "$issue" 2>/dev/null || true)"
+    if [ -n "$pending_data" ]; then
+        pending_rollup="$(printf '%s\n' "$pending_data" | sed -n '1p')"
+        pending_issues="$(printf '%s\n' "$pending_data" | sed '1d')"
+    fi
+
+    case "$rollup_pr" in
+        ''|*[!0-9]*)
+            if [ -n "${pending_rollup:-}" ] && [ "$rollup_state" != "MERGED" ] && [ -n "${pending_issues:-}" ]; then
+                rollup_pr="$pending_rollup"
+                discard_retry=1
+            else
+            printf '[conductor] discard: no roll-up PR found for issue #%s — nothing to discard\n' "$issue" >&2
+            gh issue comment "$issue" --repo "$repo" \
+                --body "discard: no open roll-up PR found — nothing to discard." >/dev/null 2>&1 || true
+            _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:discard"
+            return 0
+            fi
+            ;;
+    esac
+    # `status` falls back to the MERGED roll-up when no open one exists —
+    # discarding that would reopen already-landed issues. Only an OPEN
+    # roll-up is discardable (mirrors promote's state guard).
+    if [ "$discard_retry" != "1" ] && [ "$rollup_state" != "OPEN" ]; then
+        if [ -n "${pending_rollup:-}" ] && [ "$pending_rollup" = "$rollup_pr" ] && [ "$rollup_state" != "MERGED" ] && [ -n "${pending_issues:-}" ]; then
+            discard_retry=1
+        else
+        printf '[conductor] discard: roll-up PR #%s is not open (state=%s) — nothing to discard\n' \
+            "$rollup_pr" "$rollup_state" >&2
+        gh issue comment "$issue" --repo "$repo" \
+            --body "discard: roll-up PR #${rollup_pr} is not open (state=${rollup_state}) — nothing to discard." \
+            >/dev/null 2>&1 || true
+        _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:discard"
+        return 0
+        fi
+    fi
+
+    # Landed-issue list from the PR BODY manifest (between the
+    # autospec-rollup-manifest markers): manifest lines are
+    # `  - #N — <title> ...`; take the FIRST issue ref per line.
+    local rollup_body rolled_issues
+    if [ "$discard_retry" = "1" ]; then
+        rolled_issues="$pending_issues"
+        printf '[conductor] discard: retrying pending discard for roll-up PR #%s (issue #%s)\n' \
+            "$rollup_pr" "$issue" >&2
+    else
+        rollup_body="$(gh pr view "$rollup_pr" --repo "$repo" --json body --jq '.body // ""' 2>/dev/null || true)"
+        rolled_issues="$(printf '%s\n' "$rollup_body" \
+            | awk '/<!-- autospec-rollup-manifest:begin -->/{f=1;next} /<!-- autospec-rollup-manifest:end -->/{f=0} f' \
+            | grep -E '^[[:space:]]*- #[0-9]+' \
+            | sed -E 's/^[[:space:]]*- #([0-9]+).*/\1/' \
+            | sort -un || true)"
+
+        if [ -n "$rolled_issues" ] && ! _autospec_conductor_write_discard_pending "$repo_root" "$issue" "$rollup_pr" "$rolled_issues"; then
+            printf '[conductor] discard: failed to persist retry manifest for roll-up PR #%s — aborting discard\n' "$rollup_pr" >&2
+            gh issue comment "$issue" --repo "$repo" \
+                --body "discard: failed to persist retry manifest for roll-up PR #${rollup_pr}; nothing was closed or reopened. Re-apply autospec:discard to retry." \
+                >/dev/null 2>&1 || true
+            _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:discard"
+            return 1
+        fi
+
+        printf '[conductor] discard: closing roll-up PR #%s and deleting its integration branch (issue #%s)\n' \
+            "$rollup_pr" "$issue" >&2
+        if ! gh pr close "$rollup_pr" --repo "$repo" --delete-branch >/dev/null 2>&1; then
+        # Close failed → nothing else happens (no reopen, no control-issue
+        # close): a half-discarded state must not reopen issues whose work
+        # is still in an open roll-up.
+        printf '[conductor] discard: closing roll-up PR #%s FAILED — aborting discard\n' "$rollup_pr" >&2
+        gh issue comment "$issue" --repo "$repo" \
+            --body "discard: failed to close roll-up PR #${rollup_pr}; nothing was reopened. Re-apply autospec:discard to retry." \
+            >/dev/null 2>&1 || true
+        _autospec_conductor_clear_discard_pending "$repo_root" "$issue"
+        _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:discard"
+        return 1
+        fi
+    fi
+
+    # Reopen loop tracks per-issue failures — the discard path is
+    # destructive, so a reopen/comment failure must NOT be swallowed and
+    # reported as success. A plain for-loop (not a piped while) keeps the
+    # counter out of a subshell; the manifest-derived tokens are numeric.
+    local reopen_failures=0
+    if [ -n "$rolled_issues" ]; then
+        local n existing_marker
+        for n in $rolled_issues; do
+            [ -n "$n" ] || continue
+            # Idempotency: a re-run (crash/resume, label re-applied) must not
+            # duplicate the reopen comment for the same roll-up.
+            existing_marker="$(gh issue view "$n" --repo "$repo" --json comments --jq '.comments[].body' 2>/dev/null \
+                | grep -cF "discarded-from-rollup: roll-up PR #${rollup_pr}" || true)"
+            if [ "${existing_marker:-0}" != "0" ]; then
+                continue
+            fi
+            if ! gh issue reopen "$n" --repo "$repo" >/dev/null 2>&1; then
+                printf '[conductor] discard: failed to reopen issue #%s\n' "$n" >&2
+                reopen_failures=$((reopen_failures + 1))
+                continue
+            fi
+            if ! gh issue comment "$n" --repo "$repo" \
+                --body "discarded-from-rollup: roll-up PR #${rollup_pr} was discarded via control-channel issue #${issue}; reopened for re-drain." \
+                >/dev/null 2>&1; then
+                printf '[conductor] discard: failed to comment on reopened issue #%s\n' "$n" >&2
+                reopen_failures=$((reopen_failures + 1))
+            fi
+        done
+    fi
+
+    if [ "$reopen_failures" -gt 0 ]; then
+        # Partial failure: do NOT claim success or close the control issue —
+        # re-firing autospec:discard retries; the per-issue idempotency
+        # marker above makes the retry skip the issues that did complete.
+        printf '[conductor] discard: %s issue reopen/comment failure(s) — leaving control issue #%s open for retry\n' \
+            "$reopen_failures" "$issue" >&2
+        gh issue comment "$issue" --repo "$repo" \
+            --body "discard: closed roll-up PR #${rollup_pr}, but ${reopen_failures} issue reopen/comment call(s) failed. Re-apply autospec:discard to retry the remainder (already-processed issues are skipped)." \
+            >/dev/null 2>&1 || true
+        _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:discard"
+        return 1
+    fi
+
+    _autospec_conductor_clear_discard_pending "$repo_root" "$issue"
+    _autospec_conductor_clear_self_pause "$repo_root"
+    gh issue comment "$issue" --repo "$repo" \
+        --body "discard: closed roll-up PR #${rollup_pr}, deleted the integration branch, and reopened its issues." \
+        >/dev/null 2>&1 || true
+    gh issue close "$issue" --repo "$repo" >/dev/null 2>&1 || true
+    _autospec_conductor_clear_control_label "$repo" "$issue" "autospec:discard"
+}
+
 _autospec_conductor_escalate_all_blocked() {
     local repo="$1"
     local queue_json="$2"
@@ -555,6 +952,165 @@ _autospec_conductor_escalate_all_blocked() {
         "$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown)" \
         "$count" "${refs:-unknown blockers}" \
         >> "${HOME}/.autospec/autonomous-digest.md" 2>/dev/null || true
+}
+
+_autospec_conductor_main_sha() {
+    local repo_root="$1"
+    if [ -n "${AUTOSPEC_CONDUCTOR_MAIN_SHA_CMD:-}" ]; then
+        bash -c "$AUTOSPEC_CONDUCTOR_MAIN_SHA_CMD" 2>/dev/null | sed -n '1p'
+        return 0
+    fi
+    git -C "$repo_root" rev-parse --verify refs/remotes/origin/main 2>/dev/null \
+        || git -C "$repo_root" rev-parse --verify main 2>/dev/null \
+        || git -C "$repo_root" rev-parse --verify HEAD 2>/dev/null \
+        || true
+}
+
+_autospec_conductor_fetch_main() {
+    local repo_root="$1"
+    if [ -n "${AUTOSPEC_CONDUCTOR_MAIN_SHA_CMD:-}" ]; then
+        return 0
+    fi
+    git -C "$repo_root" fetch origin main >/dev/null 2>&1 || true
+}
+
+_autospec_conductor_self_repair_pending_file() {
+    local repo_root="$1"
+    printf '%s/.autospec/autonomous-self-repair-refresh.json\n' "$repo_root"
+}
+
+_autospec_conductor_pr_touches_refresh_surface() {
+    local repo="$1"
+    local pr="$2"
+    [ -n "$repo" ] || return 1
+    case "$pr" in ''|*[!0-9]*) return 1 ;; esac
+    command -v gh >/dev/null 2>&1 || return 1
+
+    gh pr view "$pr" --repo "$repo" --json files --jq '.files[].path' 2>/dev/null \
+        | while IFS= read -r _path; do
+            case "$_path" in
+                scripts/*|skills/*)
+                    printf 'yes\n'
+                    break
+                    ;;
+            esac
+        done | grep -q '^yes$'
+}
+
+_autospec_conductor_arm_self_repair_refresh() {
+    local repo_root="$1"
+    local repo="$2"
+    local pr="$3"
+    local old_sha="$4"
+    local cycle="$5"
+    [ -n "$old_sha" ] || return 0
+    _autospec_conductor_pr_touches_refresh_surface "$repo" "$pr" || return 0
+
+    local pending_file
+    pending_file="$(_autospec_conductor_self_repair_pending_file "$repo_root")"
+    mkdir -p "$(dirname "$pending_file")" 2>/dev/null || true
+    python3 - "$pending_file" "$repo" "$pr" "$old_sha" "$cycle" <<'PY' 2>/dev/null || true
+import json, sys, time
+path, repo, pr, old_sha, cycle = sys.argv[1:6]
+payload = {
+    "repo": repo,
+    "pr": int(pr),
+    "old_main_sha": old_sha,
+    "cycle": int(cycle),
+    "reason": "self-repair merge touched scripts/ or skills/",
+    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, sort_keys=True)
+    fh.write("\n")
+PY
+    printf '[conductor] self-repair refresh armed for PR #%s after cycle %s (main=%s)\n' \
+        "$pr" "$cycle" "$old_sha" >&2
+}
+
+_autospec_conductor_maybe_arm_self_repair_refresh() {
+    local repo_root="$1"
+    local repo="$2"
+    local outcome_file="$3"
+    local old_sha="$4"
+    local cycle="$5"
+    [ -f "$outcome_file" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local is_self outcome pr
+    is_self="$(jq -r '.self_originated // false' "$outcome_file" 2>/dev/null || printf 'false')"
+    outcome="$(jq -r '.outcome // ""' "$outcome_file" 2>/dev/null || printf '')"
+    pr="$(jq -r '.pr // empty' "$outcome_file" 2>/dev/null || printf '')"
+    [ "$is_self" = "true" ] || return 0
+    [ "$outcome" = "merged" ] || return 0
+    _autospec_conductor_arm_self_repair_refresh "$repo_root" "$repo" "$pr" "$old_sha" "$cycle"
+}
+
+_autospec_conductor_run_refresh_command() {
+    local repo_root="$1"
+    local old_sha="$2"
+    local new_sha="$3"
+    local pr="$4"
+
+    export AUTOSPEC_CONDUCTOR_REFRESH_OLD_SHA="$old_sha"
+    export AUTOSPEC_CONDUCTOR_REFRESH_NEW_SHA="$new_sha"
+    export AUTOSPEC_CONDUCTOR_REFRESH_PR="$pr"
+    if [ -n "${AUTOSPEC_CONDUCTOR_REFRESH_CMD:-}" ]; then
+        bash -c "$AUTOSPEC_CONDUCTOR_REFRESH_CMD"
+        return $?
+    fi
+    if [ -f "$repo_root/install.sh" ]; then
+        AUTOSPEC_AUTO_YES=1 \
+        AUTOSPEC_NO_STAR_PROMPT=1 \
+        AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
+        bash "$repo_root/install.sh" --update --skill autospec-autonomous --harness codex
+        return $?
+    fi
+    return 0
+}
+
+_autospec_conductor_maybe_refresh_self_repair() {
+    local repo_root="$1"
+    local repo="$2"
+    local dry="$3"
+    local pending_file
+    pending_file="$(_autospec_conductor_self_repair_pending_file "$repo_root")"
+    [ -f "$pending_file" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local old_sha pr new_sha digest_file pid_value
+    old_sha="$(jq -r '.old_main_sha // empty' "$pending_file" 2>/dev/null || printf '')"
+    pr="$(jq -r '.pr // empty' "$pending_file" 2>/dev/null || printf '')"
+    [ -n "$old_sha" ] || return 0
+
+    _autospec_conductor_fetch_main "$repo_root"
+    new_sha="$(_autospec_conductor_main_sha "$repo_root" | sed -n '1p')"
+    [ -n "$new_sha" ] || return 0
+    if [ "$new_sha" = "$old_sha" ]; then
+        return 0
+    fi
+
+    pid_value="${AUTOSPEC_CONDUCTOR_PID:-$$}"
+    printf '[conductor] self-repair refresh: %s -> %s (PR #%s, PID %s)\n' \
+        "$old_sha" "$new_sha" "${pr:-unknown}" "$pid_value" >&2
+    if [ "$dry" != "1" ]; then
+        _autospec_conductor_run_refresh_command "$repo_root" "$old_sha" "$new_sha" "$pr" \
+            >/dev/null 2>&1 || true
+    fi
+
+    digest_file="${repo_root}/.autospec/autonomous-digest.md"
+    mkdir -p "$(dirname "$digest_file")" 2>/dev/null || true
+    {
+        printf '\n## Self-repair refresh — %s\n\n' \
+            "$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown)"
+        printf -- '- PR: #%s\n' "${pr:-unknown}"
+        printf -- '- Conductor PID: `%s`\n' "$pid_value"
+        printf -- '- Main SHA: `%s -> %s`\n' "$old_sha" "$new_sha"
+        if [ -n "$repo" ]; then
+            printf -- '- Repo: `%s`\n' "$repo"
+        fi
+    } >> "$digest_file" 2>/dev/null || true
+    rm -f "$pending_file" 2>/dev/null || true
 }
 
 autospec_conductor_run() {
@@ -637,6 +1193,24 @@ autospec_conductor_run() {
         _sandbox_sh="$AUTOSPEC_SANDBOX_BIN"
     elif [ -f "${_sdir}/explore-sandbox.sh" ]; then
         _sandbox_sh="${_sdir}/explore-sandbox.sh"
+    fi
+
+    # ── Provenance + integration-branch wiring (integration-branch design §5) ──
+    # Reusing the F3 env-seam resolution idiom above (AUTOSPEC_*_BIN override >
+    # sibling of scripts/). Both scripts AND a repo slug must resolve for the
+    # dispatch-time provenance split to activate; otherwise the Tier-1 drain
+    # keeps today's single-dispatch behavior (back-compat, capability-gated).
+    local _provenance_sh=""
+    if [ -n "${AUTOSPEC_PROVENANCE_BIN:-}" ] && [ -x "$AUTOSPEC_PROVENANCE_BIN" ]; then
+        _provenance_sh="$AUTOSPEC_PROVENANCE_BIN"
+    elif [ -f "${_sdir}/autonomous-provenance.sh" ]; then
+        _provenance_sh="${_sdir}/autonomous-provenance.sh"
+    fi
+    local _intbranch_sh=""
+    if [ -n "${AUTOSPEC_INTEGRATION_BRANCH_BIN:-}" ] && [ -x "$AUTOSPEC_INTEGRATION_BRANCH_BIN" ]; then
+        _intbranch_sh="$AUTOSPEC_INTEGRATION_BRANCH_BIN"
+    elif [ -f "${_sdir}/autonomous-integration-branch.sh" ]; then
+        _intbranch_sh="${_sdir}/autonomous-integration-branch.sh"
     fi
 
     # ── Persona synthesis wiring (F2) ──────────────────────────────────────────
@@ -847,6 +1421,9 @@ fi'
         _cycle=$((_cycle + 1))
         _AUTOSPEC_CONDUCTOR_CYCLE="$_cycle"
         printf '[conductor] cycle %s starting\n' "$_cycle" >&2
+        _autospec_conductor_maybe_refresh_self_repair "$_repo_root" "$_repo" "$_dry" || true
+        local _cycle_main_sha
+        _cycle_main_sha="$(_autospec_conductor_main_sha "$_repo_root" | sed -n '1p')"
 
         # ── Step 1: Resilience heartbeat ──────────────────────────────────────
         if [ -f "$_resilience" ] && [ -n "$_repo" ]; then
@@ -945,6 +1522,34 @@ fi'
                     # control-channel.sh wrote persona-recalibrate.flag; step 1b of
                     # the next cycle consumes it and forces a persona refresh.
                     printf '[conductor] DECISION:persona-recalibrate — refresh forced next cycle\n' >&2
+                    ;;
+                promote)
+                    local _promote_issue
+                    _promote_issue="$(printf '%s' "$_ctrl_out" \
+                        | grep '^PROMOTE_ISSUE:' | head -1 | sed 's/^PROMOTE_ISSUE://' || true)"
+                    printf '[conductor] DECISION:promote received (issue #%s) — merging roll-up + resetting integration branch\n' \
+                        "${_promote_issue:-unknown}" >&2
+                    _autospec_conductor_handle_promote "$_repo" "$_intbranch_sh" "$_promote_issue" "$_repo_root" || true
+                    ;;
+                promote-refused)
+                    local _promote_refused_issue
+                    _promote_refused_issue="$(printf '%s' "$_ctrl_out" \
+                        | grep '^PROMOTE_ISSUE:' | head -1 | sed 's/^PROMOTE_ISSUE://' || true)"
+                    _autospec_conductor_handle_control_refused "$_repo" "$_promote_refused_issue" "promote" || true
+                    ;;
+                discard)
+                    local _discard_issue
+                    _discard_issue="$(printf '%s' "$_ctrl_out" \
+                        | grep '^DISCARD_ISSUE:' | head -1 | sed 's/^DISCARD_ISSUE://' || true)"
+                    printf '[conductor] DECISION:discard received (issue #%s) — closing roll-up, deleting integration branch, reopening issues\n' \
+                        "${_discard_issue:-unknown}" >&2
+                    _autospec_conductor_handle_discard "$_repo" "$_intbranch_sh" "$_discard_issue" "$_repo_root" || true
+                    ;;
+                discard-refused)
+                    local _discard_refused_issue
+                    _discard_refused_issue="$(printf '%s' "$_ctrl_out" \
+                        | grep '^DISCARD_ISSUE:' | head -1 | sed 's/^DISCARD_ISSUE://' || true)"
+                    _autospec_conductor_handle_control_refused "$_repo" "$_discard_refused_issue" "discard" || true
                     ;;
             esac
         fi
@@ -1053,7 +1658,9 @@ fi'
             [ -f "$_gv" ] || _gv="${_sdir}/validate-growth-config.sh"
             if [ -f "$_gv" ]; then
                 local _gjson
-                _gjson="$(yq -o=json '.' "${_repo_root}/.autospec/growth.yml" 2>/dev/null || true)"
+                _gjson="$(yq -o=json '.' "${_repo_root}/.autospec/growth.yml" 2>/dev/null \
+                    || yq '.' "${_repo_root}/.autospec/growth.yml" 2>/dev/null \
+                    || true)"
                 if [ -n "$_gjson" ]; then
                     local _gjson_tmp
                     _gjson_tmp="$(mktemp 2>/dev/null || printf '%s/.autospec-growth-cfg.%s.json' "${TMPDIR:-/tmp}" "$$")"
@@ -1206,12 +1813,184 @@ fi'
                 _promote_out='{"dry":true,"filed":0,"reason":"promotion-command-missing"}'
             fi
 
-            local _promote_dry _promote_filed
+            local _promote_dry _promote_filed _promote_promoted
             _promote_dry="$(printf '%s' "$_promote_out" | jq -r 'if has("dry") then .dry else true end' 2>/dev/null || echo 'true')"
-            _promote_filed="$(printf '%s' "$_promote_out" | jq -r '.filed // .promoted // 0' 2>/dev/null || echo 0)"
-            printf '[conductor] Tier 1.5 promotion result: dry=%s filed=%s
-'                 "$_promote_dry" "$_promote_filed" >&2
-            if [ "$_promote_dry" = "false" ] || { [ "$_promote_filed" -gt 0 ] 2>/dev/null; }; then
+            _promote_filed="$(printf '%s' "$_promote_out" | jq -r '
+                if (.filed | type) == "number" then .filed
+                elif (.filed | type) == "string" then (.filed | tonumber? // 0)
+                else 0 end
+            ' 2>/dev/null || echo 0)"
+            _promote_promoted="$(printf '%s' "$_promote_out" | jq -r '
+                if (.promoted | type) == "array" then (.promoted | length)
+                elif (.promoted | type) == "number" then .promoted
+                elif (.promoted | type) == "string" then (.promoted | tonumber? // 0)
+                else 0 end
+            ' 2>/dev/null || echo 0)"
+            case "$_promote_filed" in ''|*[!0-9]*) _promote_filed=0 ;; esac
+            case "$_promote_promoted" in ''|*[!0-9]*) _promote_promoted=0 ;; esac
+            printf '[conductor] Tier 1.5 promotion result: dry=%s filed=%s promoted=%s
+'                 "$_promote_dry" "$_promote_filed" "$_promote_promoted" >&2
+
+            # ── Grooming telemetry + self-governance tick ─────────────────────
+            # The promoter (autonomous-promote-open-issues.sh) already owns the
+            # deterministic safety→classify→eligibility→promote/groom/split/hold
+            # pipeline and its own policy gate — the loop does NOT duplicate that
+            # logic. It only (a) records telemetry: one line per eligible promote
+            # (template_groomed:false) and one line per template groom routed by
+            # the promoter (template_groomed:true, canary per action), each with
+            # outcome:null; (b) runs a reconcile pass (groom-reconcile.sh) that
+            # stamps closing_pr + outcome onto unresolved+closed records from
+            # GitHub BEFORE observing; and (c) ticks the self-governance ratchet
+            # (grooming-govern.sh) when policy resolves to auto. A non-auto
+            # policy must NOT tick (guarded below). Skipped entirely during the
+            # conductor's own --dry-run (nothing real happened this cycle).
+            #
+            # grooming template-fill is performed deterministically by the
+            # promoter via groom-fill.sh (codex exec) — canary(seed)/auto
+            # (graduated); the loop only records telemetry + ticks governance.
+            if [ "$_dry" != "1" ]; then
+                local _groom_config_sh="${AUTOSPEC_GROOMING_CONFIG_BIN:-}"
+                if [ -z "$_groom_config_sh" ]; then
+                    if [ -f "${_sdir}/grooming-config.sh" ]; then
+                        _groom_config_sh="${_sdir}/grooming-config.sh"
+                    elif [ -f "${_sdir}/../skills/autospec-shared/scripts/grooming-config.sh" ]; then
+                        _groom_config_sh="${_sdir}/../skills/autospec-shared/scripts/grooming-config.sh"
+                    fi
+                fi
+                local _groom_observe_sh="${AUTOSPEC_GROOMING_OBSERVE_BIN:-}"
+                if [ -z "$_groom_observe_sh" ]; then
+                    if [ -f "${_sdir}/grooming-observe.sh" ]; then
+                        _groom_observe_sh="${_sdir}/grooming-observe.sh"
+                    elif [ -f "${_sdir}/../skills/autospec-shared/scripts/grooming-observe.sh" ]; then
+                        _groom_observe_sh="${_sdir}/../skills/autospec-shared/scripts/grooming-observe.sh"
+                    fi
+                fi
+                local _groom_govern_sh="${AUTOSPEC_GROOMING_GOVERN_BIN:-}"
+                if [ -z "$_groom_govern_sh" ]; then
+                    if [ -f "${_sdir}/grooming-govern.sh" ]; then
+                        _groom_govern_sh="${_sdir}/grooming-govern.sh"
+                    elif [ -f "${_sdir}/../skills/autospec-shared/scripts/grooming-govern.sh" ]; then
+                        _groom_govern_sh="${_sdir}/../skills/autospec-shared/scripts/grooming-govern.sh"
+                    fi
+                fi
+
+                local _groom_policy="auto"
+                if [ -n "$_groom_config_sh" ]; then
+                    _groom_policy="$(bash "$_groom_config_sh" --key policy 2>/dev/null || printf 'auto')"
+                    [ -n "$_groom_policy" ] || _groom_policy="auto"
+                fi
+
+                # Append telemetry records (jq-built, never printf, so the JSON is
+                # always well-formed). Eligible promotes populate the baseline
+                # (template_groomed:false); promoter-routed template grooms
+                # (action groom-canary|groom-auto) populate the graduation sample
+                # (template_groomed:true, canary per action). outcome + closing_pr
+                # start null and are stamped later by the reconcile pass.
+                local _groom_telemetry="${AUTOSPEC_GROOMING_TELEMETRY:-${HOME}/.autospec/grooming-telemetry.jsonl}"
+                local _groom_promoted_json
+                _groom_promoted_json="$(printf '%s' "$_promote_out" | jq -c '.promoted // []' 2>/dev/null || printf '[]')"
+                local _groom_promoted_count
+                _groom_promoted_count="$(printf '%s' "$_groom_promoted_json" | jq 'length' 2>/dev/null || printf '0')"
+                case "$_groom_promoted_count" in ''|*[!0-9]*) _groom_promoted_count=0 ;; esac
+                local _groom_routed_json
+                _groom_routed_json="$(printf '%s' "$_promote_out" | jq -c '[.routed[]? | select(.action|type=="string" and startswith("groom-"))]' 2>/dev/null || printf '[]')"
+                local _groom_routed_count
+                _groom_routed_count="$(printf '%s' "$_groom_routed_json" | jq 'length' 2>/dev/null || printf '0')"
+                case "$_groom_routed_count" in ''|*[!0-9]*) _groom_routed_count=0 ;; esac
+                if [ "$_groom_promoted_count" -gt 0 ] 2>/dev/null || [ "$_groom_routed_count" -gt 0 ] 2>/dev/null; then
+                    mkdir -p "$(dirname "$_groom_telemetry")" 2>/dev/null || true
+                    local _groom_ts
+                    _groom_ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo 'unknown')"
+                    # Eligible promotes → baseline population (template_groomed:false).
+                    local _gi=0
+                    while [ "$_gi" -lt "$_groom_promoted_count" ]; do
+                        local _gnum
+                        _gnum="$(printf '%s' "$_groom_promoted_json" | jq -r ".[$_gi]" 2>/dev/null || printf '')"
+                        if [ -n "$_gnum" ]; then
+                            jq -cn \
+                                --argjson issue "$_gnum" \
+                                --arg ts "$_groom_ts" \
+                                '{ts:$ts, issue:$issue, source:"grooming", template_groomed:false,
+                                  closing_pr:null, outcome:null}' \
+                                >> "$_groom_telemetry" 2>/dev/null || true
+                        fi
+                        _gi=$((_gi + 1))
+                    done
+                    # Template grooms → graduation sample (template_groomed:true).
+                    local _rj=0
+                    while [ "$_rj" -lt "$_groom_routed_count" ]; do
+                        local _rnum _ract
+                        _rnum="$(printf '%s' "$_groom_routed_json" | jq -r ".[$_rj].issue" 2>/dev/null || printf '')"
+                        _ract="$(printf '%s' "$_groom_routed_json" | jq -r ".[$_rj].action" 2>/dev/null || printf '')"
+                        if [ -n "$_rnum" ] && [ "$_rnum" != "null" ]; then
+                            local _canary=false
+                            if [ "$_ract" = "groom-canary" ]; then
+                                _canary=true
+                            fi
+                            jq -cn \
+                                --argjson issue "$_rnum" \
+                                --arg ts "$_groom_ts" \
+                                --argjson canary "$_canary" \
+                                '{ts:$ts, issue:$issue, source:"grooming", template_groomed:true,
+                                  canary:$canary, closing_pr:null, outcome:null}' \
+                                >> "$_groom_telemetry" 2>/dev/null || true
+                        fi
+                        _rj=$((_rj + 1))
+                    done
+                    printf '[conductor] Tier 1.5 grooming telemetry: appended %s promote + %s groom record(s) to %s\n' \
+                        "$_groom_promoted_count" "$_groom_routed_count" "$_groom_telemetry" >&2
+                fi
+
+                # Reconcile outcomes into the telemetry log BEFORE observing —
+                # stamps closing_pr + outcome for unresolved+closed records from
+                # GitHub (fail-closed: a gh failure leaves the record unresolved).
+                # Resolved the same lazy way as observe/govern; skipped when policy
+                # is off. (_dry != 1 is already guaranteed by the enclosing guard.)
+                if [ "$_groom_policy" != "off" ]; then
+                    local _groom_reconcile_sh="${AUTOSPEC_GROOMING_RECONCILE_BIN:-}"
+                    if [ -z "$_groom_reconcile_sh" ]; then
+                        if [ -f "${_sdir}/groom-reconcile.sh" ]; then
+                            _groom_reconcile_sh="${_sdir}/groom-reconcile.sh"
+                        elif [ -f "${_sdir}/../scripts/groom-reconcile.sh" ]; then
+                            _groom_reconcile_sh="${_sdir}/../scripts/groom-reconcile.sh"
+                        fi
+                    fi
+                    if [ -n "$_groom_reconcile_sh" ] && [ -f "$_groom_telemetry" ]; then
+                        bash "$_groom_reconcile_sh" \
+                            --telemetry "$_groom_telemetry" \
+                            --repo "$_repo" >/dev/null 2>&1 || true
+                    fi
+                fi
+
+                # Self-governance tick — auto policy ONLY (must not tick on/off).
+                if [ "$_groom_policy" = "auto" ] && [ -n "$_groom_observe_sh" ] && [ -n "$_groom_govern_sh" ]; then
+                    local _groom_observed
+                    _groom_observed="$(bash "$_groom_observe_sh" --telemetry "$_groom_telemetry" 2>/dev/null || printf '')"
+                    if [ -n "$_groom_observed" ]; then
+                        # NOTE: canary_floor is the SINGLE floor govern applies to
+                        # BOTH the groomed-sample count AND the baseline-sample count
+                        # (its widen-guard needs baseline_samples >= min-samples). So
+                        # canary->auto graduation can't fire until >= canary_floor
+                        # eligible-promotes have ALSO closed+reconciled — intentional
+                        # fail-closed coupling (no widening without a real baseline).
+                        local _groom_min_samples="${AUTOSPEC_GROOMING_MIN_SAMPLES:-}"
+                        if [ -z "$_groom_min_samples" ] && [ -n "$_groom_config_sh" ]; then
+                            _groom_min_samples="$(bash "$_groom_config_sh" --key budget.canary_floor 2>/dev/null || printf '5')"
+                        fi
+                        case "$_groom_min_samples" in ''|*[!0-9]*) _groom_min_samples=5 ;; esac
+                        local _groom_tick_out
+                        _groom_tick_out="$(bash "$_groom_govern_sh" tick \
+                            --observed "$_groom_observed" \
+                            --min-samples "$_groom_min_samples" 2>/dev/null || printf '')"
+                        if [ -n "$_groom_tick_out" ]; then
+                            printf '[conductor] Tier 1.5 grooming governance tick: %s\n' \
+                                "$_groom_tick_out" >&2
+                        fi
+                    fi
+                fi
+            fi
+
+            if [ "$_promote_filed" -gt 0 ] 2>/dev/null || [ "$_promote_promoted" -gt 0 ] 2>/dev/null; then
                 _work_done=1
             else
                 _tier15_dry_cycles=$((_tier15_dry_cycles + 1))
@@ -1334,7 +2113,271 @@ fi'
                         else
                             local _run_cmd="${AUTOSPEC_RUN_CMD:-}"
                             if [ -n "$_run_cmd" ]; then
-                                bash -c "$_run_cmd" 2>&1 || true
+                                # ── Dispatch-time provenance split (integration-branch
+                                # design §Architecture item 5). Provenance is re-resolved
+                                # from GitHub labels EVERY cycle — never cached in memory
+                                # — so a crash/resume re-derives identical routing. self
+                                # issues dispatch with the kind=integration mode file
+                                # active (Phase 4 targets the integration branch);
+                                # operator issues dispatch with the mode file parked
+                                # (Phase 4 targets the parent as today). Lock-step rules
+                                # are unchanged: the split only scopes each dispatch via
+                                # AUTOSPEC_RUN_ONLY_ISSUES; dep gating stays in the run
+                                # path. Split requires the resolver + branch scripts, a
+                                # repo slug, and a non-empty batch snapshot; otherwise
+                                # single-dispatch exactly as before.
+                                local _prov_batch=""
+                                if [ -n "$_provenance_sh" ] && [ -n "$_intbranch_sh" ] \
+                                    && [ -n "$_repo" ] && [ -n "${_queue_json:-}" ]; then
+                                    _prov_batch="$(printf '%s' "$_queue_json" \
+                                        | jq -r '.batch[]?.number // empty' 2>/dev/null || true)"
+                                fi
+                                if [ -n "$_prov_batch" ]; then
+                                    local _prov_self="" _prov_operator="" _prov_n _prov_val _prov_parent_branch
+                                    _prov_parent_branch="$(_autospec_conductor_default_branch "$_repo")"
+                                    while IFS= read -r _prov_n; do
+                                        if [ -z "$_prov_n" ]; then
+                                            continue
+                                        fi
+                                        # Fail closed: resolver failure or unexpected
+                                        # output routes the issue to the integration
+                                        # branch (self), never to the parent.
+                                        _prov_val="$(bash "$_provenance_sh" resolve \
+                                            --issue "$_prov_n" --repo "$_repo" \
+                                            2>/dev/null || printf 'self')"
+                                        if [ "$_prov_val" = "operator" ]; then
+                                            _prov_operator="${_prov_operator:+${_prov_operator} }${_prov_n}"
+                                        else
+                                            _prov_self="${_prov_self:+${_prov_self} }${_prov_n}"
+                                        fi
+                                    done <<EOF_PROV_BATCH
+$_prov_batch
+EOF_PROV_BATCH
+                                    # Operator subset first: park a kind=integration
+                                    # mode file so Phase 4 targets the parent. A
+                                    # kind=explore mode file (standalone explore
+                                    # session) is never touched here.
+                                    if [ -n "$_prov_operator" ]; then
+                                        local _prov_mode_file="${_repo_root}/.autospec/explore-mode.json"
+                                        local _prov_mode_kind=""
+                                        if [ -f "$_prov_mode_file" ]; then
+                                            _prov_mode_kind="$(jq -r '.kind // empty' \
+                                                "$_prov_mode_file" 2>/dev/null || printf '')"
+                                        fi
+                                        if [ "$_prov_mode_kind" = "integration" ]; then
+                                            mv -f "$_prov_mode_file" "${_prov_mode_file}.parked" 2>/dev/null \
+                                                || rm -f "$_prov_mode_file" 2>/dev/null || true
+                                            printf '[conductor] provenance: parked integration mode file for operator batch\n' >&2
+                                        fi
+                                        printf '[conductor] provenance: dispatching operator batch (issues: %s) -> parent\n' \
+                                            "$_prov_operator" >&2
+                                        AUTOSPEC_RUN_ONLY_ISSUES="$_prov_operator" \
+                                            bash -c "$_run_cmd" 2>&1 || true
+                                    fi
+                                    # Self subset: ensure + sync the integration branch
+                                    # so its kind=integration mode file routes Phase 4
+                                    # PRs to it. A sync merge conflict (exit 65) parks
+                                    # the self subset this cycle and notifies — never
+                                    # bypassed; the operator dispatch above is
+                                    # unaffected. Any other ensure/sync failure also
+                                    # parks the self subset (fail closed: self work is
+                                    # never dispatched at the parent).
+                                    #
+                                    # ── Self-merge aftermath pre-gate (spec item 7 caps
+                                    # + item 5/Error-handling rollup-red pause). A
+                                    # durable pause marker (written by the aftermath
+                                    # block below on rollup-red / post-merge sync
+                                    # conflict) and the live caps probe both park the
+                                    # self subset BEFORE dispatch — the operator subset
+                                    # above is never affected by either.
+                                    local _sm_pause_file="${_repo_root}/.autospec/self-originated-pause.json"
+                                    local _sm_park_reason=""
+                                    if [ -n "$_prov_self" ] && [ -f "$_sm_pause_file" ]; then
+                                        _sm_park_reason="$(jq -r '.reason // "paused"' \
+                                            "$_sm_pause_file" 2>/dev/null || printf 'paused')"
+                                    fi
+                                    if [ -n "$_prov_self" ] && [ -z "$_sm_park_reason" ] && [ -n "$_intbranch_sh" ]; then
+                                        local _sm_status_json="" _sm_status_rc=0
+                                        _sm_status_json="$(bash "$_intbranch_sh" status --parent "$_prov_parent_branch" \
+                                            ${_repo:+--repo "$_repo"} 2>/dev/null)" || _sm_status_rc=$?
+                                        if [ "$_sm_status_rc" -eq 0 ] && [ -n "$_sm_status_json" ]; then
+                                            local _sm_runtime_config_sh=""
+                                            if [ -f "${_repo_root}/scripts/autospec-runtime-config.sh" ]; then
+                                                _sm_runtime_config_sh="${_repo_root}/scripts/autospec-runtime-config.sh"
+                                            elif [ -f "${_sdir}/autospec-runtime-config.sh" ]; then
+                                                _sm_runtime_config_sh="${_sdir}/autospec-runtime-config.sh"
+                                            elif [ -f "$HOME/.autospec/scripts/autospec-runtime-config.sh" ]; then
+                                                _sm_runtime_config_sh="$HOME/.autospec/scripts/autospec-runtime-config.sh"
+                                            fi
+                                            if [ -n "$_sm_runtime_config_sh" ]; then
+                                                # shellcheck source=/dev/null
+                                                . "$_sm_runtime_config_sh"
+                                            fi
+                                            local _sm_cap_open _sm_cap_age _sm_cap_diff
+                                            local _sm_max_open _sm_max_age _sm_max_diff
+                                            _sm_cap_open="$(printf '%s' "$_sm_status_json" | jq -r '.accumulated_pr_count // 0' 2>/dev/null || echo 0)"
+                                            _sm_cap_age="$(printf '%s' "$_sm_status_json" | jq -r '.age_days // 0' 2>/dev/null || echo 0)"
+                                            _sm_cap_diff="$(printf '%s' "$_sm_status_json" | jq -r '.diff_lines // 0' 2>/dev/null || echo 0)"
+                                            if command -v autospec_runtime_config_get >/dev/null 2>&1; then
+                                                _sm_max_open="$(autospec_runtime_config_get "autonomous.self_originated.max_open_prs" "20")"
+                                                _sm_max_age="$(autospec_runtime_config_get "autonomous.self_originated.max_age_days" "14")"
+                                                _sm_max_diff="$(autospec_runtime_config_get "autonomous.self_originated.max_diff_lines" "5000")"
+                                            else
+                                                _sm_max_open=20; _sm_max_age=14; _sm_max_diff=5000
+                                            fi
+                                            case "$_sm_cap_open" in *[!0-9]*|'') _sm_cap_open=0 ;; esac
+                                            case "$_sm_cap_age" in *[!0-9]*|'') _sm_cap_age=0 ;; esac
+                                            case "$_sm_cap_diff" in *[!0-9]*|'') _sm_cap_diff=0 ;; esac
+                                            case "$_sm_max_open" in *[!0-9]*|'') _sm_max_open=20 ;; esac
+                                            case "$_sm_max_age" in *[!0-9]*|'') _sm_max_age=14 ;; esac
+                                            case "$_sm_max_diff" in *[!0-9]*|'') _sm_max_diff=5000 ;; esac
+                                            if [ "$_sm_cap_open" -gt "$_sm_max_open" ]; then
+                                                _sm_park_reason="max_open_prs:${_sm_cap_open}>${_sm_max_open}"
+                                            elif [ "$_sm_cap_age" -gt "$_sm_max_age" ]; then
+                                                _sm_park_reason="max_age_days:${_sm_cap_age}>${_sm_max_age}"
+                                            elif [ "$_sm_cap_diff" -gt "$_sm_max_diff" ]; then
+                                                _sm_park_reason="max_diff_lines:${_sm_cap_diff}>${_sm_max_diff}"
+                                            fi
+                                        fi
+                                    fi
+
+                                    if [ -n "$_prov_self" ] && [ -n "$_sm_park_reason" ]; then
+                                        printf 'code_health:self_originated_parked\n' >&2
+                                        printf '[conductor] self-originated tiers parked (%s) — issues: %s\n' \
+                                            "$_sm_park_reason" "$_prov_self" >&2
+                                        if [ -n "$_notify_sh" ]; then
+                                            bash "$_notify_sh" "autospec-autonomous" \
+                                                "self-originated tiers parked: ${_sm_park_reason}" || true
+                                        fi
+                                    elif [ -n "$_prov_self" ]; then
+                                        local _prov_int_rc=0
+                                        bash "$_intbranch_sh" ensure --parent "$_prov_parent_branch" \
+                                            --repo "$_repo" 1>&2 || _prov_int_rc=$?
+                                        if [ "$_prov_int_rc" -eq 0 ]; then
+                                            bash "$_intbranch_sh" sync --parent "$_prov_parent_branch" \
+                                                --repo "$_repo" 1>&2 || _prov_int_rc=$?
+                                        fi
+                                        if [ "$_prov_int_rc" -ne 0 ]; then
+                                            # Peer-review must-fix: ensure may have
+                                            # written a kind=integration mode file
+                                            # before sync failed — park it so nothing
+                                            # routes Phase 4 work onto a conflicted /
+                                            # unsynced integration branch until a later
+                                            # cycle's ensure+sync succeeds.
+                                            local _prov_fail_mode="${_repo_root}/.autospec/explore-mode.json"
+                                            local _prov_fail_kind=""
+                                            if [ -f "$_prov_fail_mode" ]; then
+                                                _prov_fail_kind="$(jq -r '.kind // empty' \
+                                                    "$_prov_fail_mode" 2>/dev/null || printf '')"
+                                            fi
+                                            if [ "$_prov_fail_kind" = "integration" ]; then
+                                                mv -f "$_prov_fail_mode" "${_prov_fail_mode}.parked" 2>/dev/null \
+                                                    || rm -f "$_prov_fail_mode" 2>/dev/null || true
+                                            fi
+                                        fi
+                                        if [ "$_prov_int_rc" -eq 65 ]; then
+                                            printf 'code_health:integration_sync_conflict\n' >&2
+                                            printf '[conductor] provenance: integration sync conflict — parking self batch (issues: %s)\n' \
+                                                "$_prov_self" >&2
+                                            if [ -n "$_notify_sh" ]; then
+                                                bash "$_notify_sh" "autospec-autonomous" \
+                                                    "integration branch sync conflict — self-originated batch parked for operator resolution" || true
+                                            fi
+                                        elif [ "$_prov_int_rc" -ne 0 ]; then
+                                            printf '[conductor] provenance: integration branch unavailable (rc=%s) — parking self batch (issues: %s)\n' \
+                                                "$_prov_int_rc" "$_prov_self" >&2
+                                        else
+                                            printf '[conductor] provenance: dispatching self batch (issues: %s) -> integration branch\n' \
+                                                "$_prov_self" >&2
+                                            AUTOSPEC_RUN_ONLY_ISSUES="$_prov_self" \
+                                                bash -c "$_run_cmd" 2>&1 || true
+
+                                            # ── Self-merge aftermath (spec item 5 tail):
+                                            # after a self-originated PR merges into the
+                                            # integration branch, sync the parent in and
+                                            # run rollup-update so the roll-up PR gains a
+                                            # manifest entry + per-feature comment. Merge
+                                            # detection comes from the SAME per-cycle
+                                            # outcome file Step 5b already consumes below
+                                            # — extended here with self_originated/pr
+                                            # fields; a Tier-1 backlog cycle that never
+                                            # wrote one is a silent no-op.
+                                            local _sm_outcome_file
+                                            _sm_outcome_file="${AUTOSPEC_LAST_OUTCOME_FILE:-${_repo_root}/.autospec/last-outcome.json}"
+                                            if [ -f "$_sm_outcome_file" ]; then
+                                                local _sm_is_self _sm_out_val _sm_issue _sm_pr
+                                                _sm_is_self="$(jq -r '.self_originated // false' \
+                                                    "$_sm_outcome_file" 2>/dev/null || printf 'false')"
+                                                _sm_out_val="$(jq -r '.outcome // ""' \
+                                                    "$_sm_outcome_file" 2>/dev/null || printf '')"
+                                                if [ "$_sm_is_self" = "true" ] && [ "$_sm_out_val" = "merged" ]; then
+                                                    _sm_issue="$(jq -r '.issue // empty' \
+                                                        "$_sm_outcome_file" 2>/dev/null || printf '')"
+                                                    _sm_pr="$(jq -r '.pr // empty' \
+                                                        "$_sm_outcome_file" 2>/dev/null || printf '')"
+                                                    case "$_sm_issue" in ''|*[!0-9]*) _sm_issue="" ;; esac
+                                                    case "$_sm_pr" in ''|*[!0-9]*) _sm_pr="" ;; esac
+                                                    if [ -n "$_sm_issue" ] && [ -n "$_sm_pr" ]; then
+                                                        local _sm_sync_rc=0
+                                                        bash "$_intbranch_sh" sync --parent "$_prov_parent_branch" \
+                                                            ${_repo:+--repo "$_repo"} 1>&2 || _sm_sync_rc=$?
+                                                        if [ "$_sm_sync_rc" -eq 65 ]; then
+                                                            printf 'code_health:integration_sync_conflict\n' >&2
+                                                            printf '[conductor] selfmerge-aftermath: post-merge sync conflict — parking self-originated tiers\n' >&2
+                                                            printf '{"reason":"sync_conflict","issue":%s,"pr":%s}\n' \
+                                                                "$_sm_issue" "$_sm_pr" > "$_sm_pause_file" 2>/dev/null || true
+                                                            if [ -n "$_notify_sh" ]; then
+                                                                bash "$_notify_sh" "autospec-autonomous" \
+                                                                    "integration branch post-merge sync conflict — self-originated tiers parked" || true
+                                                            fi
+                                                        elif [ "$_sm_sync_rc" -ne 0 ]; then
+                                                            printf '[conductor] selfmerge-aftermath: post-merge sync failed rc=%s — parking self-originated tiers\n' \
+                                                                "$_sm_sync_rc" >&2
+                                                            printf '{"reason":"sync_failed","issue":%s,"pr":%s}\n' \
+                                                                "$_sm_issue" "$_sm_pr" > "$_sm_pause_file" 2>/dev/null || true
+                                                        else
+                                                            local _sm_rollup_out _sm_rollup_rc=0
+                                                            _sm_rollup_out="$(bash "$_intbranch_sh" rollup-update \
+                                                                --parent "$_prov_parent_branch" --issue "$_sm_issue" --pr "$_sm_pr" \
+                                                                ${_repo:+--repo "$_repo"} 2>&1)" || _sm_rollup_rc=$?
+                                                            printf '%s\n' "$_sm_rollup_out" >&2
+                                                            if [ "$_sm_rollup_rc" -ne 0 ]; then
+                                                                # rollup-update itself already parks/notifies on gh
+                                                                # failure (exit 8/9) or multi-open (exit 9), but that
+                                                                # is a one-shot notify — the conductor must ALSO
+                                                                # persist a pause marker here so later cycles don't
+                                                                # resume dispatch until an operator clears it
+                                                                # (peer-review must-fix: a nonzero, non-rollup-red
+                                                                # exit must never fall through to the pause-clearing
+                                                                # branch below).
+                                                                printf '[conductor] selfmerge-aftermath: rollup-update failed rc=%s — parking self-originated tiers\n' \
+                                                                    "$_sm_rollup_rc" >&2
+                                                                printf '{"reason":"rollup_update_failed","issue":%s,"pr":%s}\n' \
+                                                                    "$_sm_issue" "$_sm_pr" > "$_sm_pause_file" 2>/dev/null || true
+                                                                if [ -n "$_notify_sh" ]; then
+                                                                    bash "$_notify_sh" "autospec-autonomous" \
+                                                                        "rollup-update failed (rc=${_sm_rollup_rc}) — self-originated tiers parked" || true
+                                                                fi
+                                                            elif printf '%s\n' "$_sm_rollup_out" | grep -q '^rollup-red$'; then
+                                                                printf '[conductor] selfmerge-aftermath: rollup-red — pausing further self-originated merges\n' >&2
+                                                                printf '{"reason":"rollup_red","issue":%s,"pr":%s}\n' \
+                                                                    "$_sm_issue" "$_sm_pr" > "$_sm_pause_file" 2>/dev/null || true
+                                                                if [ -n "$_notify_sh" ]; then
+                                                                    bash "$_notify_sh" "autospec-autonomous" \
+                                                                        "roll-up CI red — self-originated merges paused pending green or discard" || true
+                                                                fi
+                                                            else
+                                                                rm -f "$_sm_pause_file" 2>/dev/null || true
+                                                            fi
+                                                        fi
+                                                    fi
+                                                fi
+                                            fi
+                                        fi
+                                    fi
+                                else
+                                    bash -c "$_run_cmd" 2>&1 || true
+                                fi
                             else
                                 printf '[conductor] WARN: AUTOSPEC_RUN_CMD not set; skipping drain\n' >&2
                             fi
@@ -1376,6 +2419,8 @@ fi'
                                     printf '[conductor] F3: discovery outcome consumed; in-flight=%s\n' \
                                         "$_inflight_discovery" >&2
                                 fi
+                                _autospec_conductor_maybe_arm_self_repair_refresh \
+                                    "$_repo_root" "$_repo" "$_outcome_file" "$_cycle_main_sha" "$_cycle" || true
                                 # Always consume the outcome file so a later cycle never
                                 # re-processes a stale outcome (LOW review fix).
                                 rm -f "$_outcome_file" 2>/dev/null || true
@@ -1454,7 +2499,23 @@ fi'
             # Idempotent — explore-sandbox.sh is a no-op when the branch already
             # exists.  The implementer's phase4 contract reads explore-mode.json
             # and targets the sandbox base; conductor does not duplicate that logic.
-            if [ -n "$_sandbox_sh" ]; then
+            # Integration-branch design §Architecture item 2 (unification):
+            # under conductor-driven discovery the sandbox IS the integration
+            # branch — ensure it so the kind=integration mode file routes
+            # Phase 4 PRs to it, instead of minting an ephemeral explore
+            # sandbox. Fall back to the ephemeral sandbox when integration
+            # routing is unavailable or ensure fails (fail-open to F3).
+            local _discovery_mode_ready=0
+            if [ -n "$_intbranch_sh" ] && [ -n "$_repo" ]; then
+                local _discovery_parent_branch
+                _discovery_parent_branch="$(_autospec_conductor_default_branch "$_repo")"
+                printf '[conductor] Tier %s: ensuring integration branch as discovery base\n' \
+                    "$_tier" >&2
+                if bash "$_intbranch_sh" ensure --parent "$_discovery_parent_branch" --repo "$_repo" 1>&2; then
+                    _discovery_mode_ready=1
+                fi
+            fi
+            if [ "$_discovery_mode_ready" -eq 0 ] && [ -n "$_sandbox_sh" ]; then
                 printf '[conductor] Tier %s: ensuring explore sandbox (F3)\n' "$_tier" >&2
                 bash "$_sandbox_sh" --base main 2>/dev/null || true
             fi

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run-state.sh — read/upsert/clear autospec-run GitHub issue state comments.
 
-set -eu
+set -euo pipefail
 
 BEGIN_MARKER="<!-- autospec-run-state:begin -->"
 END_MARKER="<!-- autospec-run-state:end -->"
@@ -9,9 +9,10 @@ END_MARKER="<!-- autospec-run-state:end -->"
 usage() {
     cat <<'EOF'
 Usage:
-  run-state.sh read   --issue <N> [--repo owner/repo]
-  run-state.sh upsert --issue <N> [--repo owner/repo] --worker-id <id> --state <state> [--step <step>] [--branch <b>] [--pr <p>] [--paths <json-or-csv>] [--ttl-seconds <N>]
-  run-state.sh clear  --issue <N> [--repo owner/repo]
+  run-state.sh read                --issue <N> [--repo owner/repo]
+  run-state.sh upsert              --issue <N> [--repo owner/repo] --worker-id <id> --state <state> [--step <step>] [--branch <b>] [--pr <p>] [--paths <json-or-csv>] [--ttl-seconds <N>]
+  run-state.sh reconcile-linked-pr --issue <N> [--repo owner/repo] [--worker-id <id>]
+  run-state.sh clear               --issue <N> [--repo owner/repo]
 EOF
 }
 
@@ -124,6 +125,50 @@ normalize_paths() {
     fi
 }
 
+
+linked_open_pr_json() {
+    # Return the lowest-numbered open PR whose body has a GitHub closing
+    # keyword for this issue and exactly one Closeout report. `gh pr list`
+    # failures are treated as no match so queue scans fail closed/non-blocking.
+    prs_json="$(gh pr list \
+        --repo "$repo" \
+        --state open \
+        --limit 100 \
+        --json number,title,body,url 2>/dev/null || printf '[]\n')"
+    printf '%s\n' "$prs_json" | jq -c --arg issue "$issue" '
+      def close_re($n):
+        "(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#" + $n + "([^0-9]|$)";
+      def closeout_count:
+        [match("(?im)^##[[:space:]]+Closeout report[[:space:]]*$"; "g")] | length;
+      [ .[]
+        | select((.body // "") | test(close_re($issue)))
+        | select(((.body // "") | closeout_count) == 1)
+      ] | sort_by(.number) | .[0] // empty
+    ' 2>/dev/null || true
+}
+
+reconcile_blocker_exists() {
+    marker="$1"
+    comments_json | jq -e --arg marker "$marker" '
+      any(.[]; (.body // "") | contains($marker))
+    ' >/dev/null 2>&1
+}
+
+post_reconcile_blocker() {
+    pr_number="$1"
+    marker="<!-- autospec-linked-pr-run-state-reconcile:pr:$pr_number -->"
+    if reconcile_blocker_exists "$marker"; then
+        return 0
+    fi
+    body_file="$(mktemp -t autospec-linked-pr-reconcile.XXXXXX)"
+    {
+        printf '%s\n' "$marker"
+        printf 'Autospec run-state reconciliation found linked PR #%s with one Closeout report while issue #%s was still in `claimed` state with no recorded PR. Resume post-PR handoff from PR #%s: run review/merge gates or comment the blocking gate failure, then release or merge the claim.\n' "$pr_number" "$issue" "$pr_number"
+    } > "$body_file"
+    gh issue comment "$issue" --repo "$repo" --body-file "$body_file" >/dev/null 2>&1 || true
+    rm -f "$body_file"
+}
+
 case "$command_name" in
     read)
         body="$(state_comment_body)"
@@ -180,12 +225,86 @@ case "$command_name" in
 	    for duplicate_id in $(state_comment_ids | sed '1d'); do
 	        gh_api_retry "repos/$repo/issues/comments/$duplicate_id" -X DELETE >/dev/null || true
 	    done
+
+	    # Telemetry (issue #1772): fire-and-forget session emit after the
+	    # upsert. No prior state comment -> session.started; a prior
+	    # comment being overwritten -> session.step. Guarded source: an
+	    # absent shim/binary/DSN is a silent no-op and never alters this
+	    # command's exit status or output.
+	    _RS_H="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+	    if [ -f "$_RS_H/emit-event.sh" ]; then
+	        # shellcheck source=/dev/null
+	        . "$_RS_H/emit-event.sh"
+	        if [ -z "$existing" ]; then
+	            emit_event session.started repo="$repo" issue="$issue" step="$step" || true
+	        else
+	            emit_event session.step repo="$repo" issue="$issue" step="$step" || true
+	        fi
+	    fi
+
 	    printf '%s\n' "$state_json" | jq .
 	    ;;
+
+    reconcile-linked-pr)
+        current_json="$($0 read --issue "$issue" --repo "$repo" 2>/dev/null || true)"
+        if [ -z "$current_json" ]; then
+            jq -n --argjson issue "$issue" --arg repo "$repo" --arg reason "missing_run_state" \
+                '{reconciled:false, issue:$issue, repo:$repo, reason:$reason}'
+            exit 0
+        fi
+        current_pr="$(printf '%s\n' "$current_json" | jq -r '.pr // ""' 2>/dev/null || true)"
+        if [ -n "$current_pr" ]; then
+            jq -n --argjson issue "$issue" --arg repo "$repo" --arg pr "$current_pr" --arg reason "pr_already_recorded" \
+                '{reconciled:false, issue:$issue, repo:$repo, pr:$pr, reason:$reason}'
+            exit 0
+        fi
+        current_worker="$(printf '%s\n' "$current_json" | jq -r '.worker_id // empty' 2>/dev/null || true)"
+        [ -n "$worker_id" ] || worker_id="$current_worker"
+        [ -n "$worker_id" ] || worker_id="reconcile-linked-pr"
+        current_branch="$(printf '%s\n' "$current_json" | jq -r '.branch // ""' 2>/dev/null || true)"
+        current_paths="$(printf '%s\n' "$current_json" | jq -c '.paths // []' 2>/dev/null || printf '[]')"
+        current_ttl="$(printf '%s\n' "$current_json" | jq -r '.ttl_seconds // 10800' 2>/dev/null || printf '10800')"
+        case "$current_ttl" in *[!0-9]*|'') current_ttl=10800 ;; esac
+
+        pr_json="$(linked_open_pr_json)"
+        if [ -z "$pr_json" ]; then
+            jq -n --argjson issue "$issue" --arg repo "$repo" --arg reason "no_linked_pr_with_one_closeout" \
+                '{reconciled:false, issue:$issue, repo:$repo, reason:$reason}'
+            exit 0
+        fi
+        pr_number="$(printf '%s\n' "$pr_json" | jq -r '.number')"
+
+        # Record the PR/step first. Any subsequent labels or handoff recovery
+        # sees a non-empty `.pr` plus a fresh `.updated_at` in the authoritative
+        # run-state comment.
+        updated_json="$($0 upsert \
+            --issue "$issue" \
+            --repo "$repo" \
+            --worker-id "$worker_id" \
+            --state claimed \
+            --step post_pr_handoff_failed \
+            --branch "$current_branch" \
+            --pr "$pr_number" \
+            --paths "$current_paths" \
+            --ttl-seconds "$current_ttl")"
+        post_reconcile_blocker "$pr_number"
+        printf '%s\n' "$updated_json" | jq --argjson reconciled true --argjson pr "$pr_number" \
+            '. + {reconciled:$reconciled, pr:($pr|tostring)}'
+        ;;
 	clear)
 	    for comment_id in $(state_comment_ids); do
 	        gh_api_retry "repos/$repo/issues/comments/$comment_id" -X DELETE >/dev/null
 	    done
+
+	    # Telemetry (issue #1772): fire-and-forget terminal emit after
+	    # clear. Guarded source: an absent shim/binary/DSN is a silent
+	    # no-op and never alters this command's exit status or output.
+	    _RS_H="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+	    if [ -f "$_RS_H/emit-event.sh" ]; then
+	        # shellcheck source=/dev/null
+	        . "$_RS_H/emit-event.sh"
+	        emit_event session.terminal repo="$repo" issue="$issue" step="" || true
+	    fi
 	    ;;
     *)
         usage >&2

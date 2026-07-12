@@ -7,6 +7,7 @@ setup() {
     MOCK_BIN="$FIXTURE_DIR/bin"
     mkdir -p "$MOCK_BIN"
     : > "$FIXTURE_DIR/edit.log"
+    : > "$FIXTURE_DIR/comment.log"
 
     cat > "$MOCK_BIN/gh" <<MOCKEOF
 #!/usr/bin/env bash
@@ -25,8 +26,20 @@ case "\$sub" in
     exit 0
     ;;
   "issue edit")
+    if [ -f "\${AUTOSPEC_HEARTBEAT_DIR:-\$FIXTURE_DIR/heartbeats}/test__repo/700.json" ]; then
+      printf 'heartbeat_present_at_edit=yes\n' >> "\$FIXTURE_DIR/edit.log"
+    else
+      printf 'heartbeat_present_at_edit=no\n' >> "\$FIXTURE_DIR/edit.log"
+    fi
     printf '%s\n' "\$*" >> "\$FIXTURE_DIR/edit.log"
-    exit 1
+    exit "\${ISSUE_EDIT_FAIL:-1}"
+    ;;
+  "issue comment")
+    printf '%s\n' "\$*" >> "\$FIXTURE_DIR/comment.log"
+    if [ "\${ISSUE_COMMENT_FAIL:-0}" = "1" ]; then
+      exit 1
+    fi
+    printf 'https://example.test/comment/1\n'
     ;;
   "repo view")
     printf 'test/repo\n'
@@ -62,7 +75,7 @@ write_issue() {
 }
 
 run_claim() {
-    PATH="$MOCK_BIN:$PATH" AUTOSPEC_CLAIM_CONFIRM_READS=1 AUTOSPEC_CLAIM_SETTLE_SECONDS=0 \
+    PATH="$MOCK_BIN:$PATH" AUTOSPEC_HEARTBEAT_DIR="${AUTOSPEC_HEARTBEAT_DIR:-$FIXTURE_DIR/heartbeats}" AUTOSPEC_CLAIM_CONFIRM_READS=1 AUTOSPEC_CLAIM_SETTLE_SECONDS=0 \
       bash "$SCRIPT" --issue 700 --repo test/repo --worker-id worker-a --branch feat/test
 }
 
@@ -142,6 +155,7 @@ $block
 EOF
 )"
         : > "$FIXTURE_DIR/edit.log"
+    : > "$FIXTURE_DIR/comment.log"
         write_issue "$body" '[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
 
         run run_claim
@@ -266,4 +280,60 @@ EOF
     [ "$(echo "$output" | jq -r '.reason')" = "safety_gate_failed" ]
     [ "$(echo "$output" | jq -r '.safety_gate.reason')" = "current_body_safety_block" ]
     [ ! -s "$FIXTURE_DIR/edit.log" ]
+}
+
+@test "claim accepts generated safety metadata followed by guardian skip metadata" {
+    body="$(cat <<'EOF'
+## Goal
+
+Add `scripts/ci-status-compare.sh` so autospec classifies PR check failures as inherited from base or branch-caused.
+
+## Safety review
+
+<!-- autospec-safety:begin -->
+- **decision:** `SAFETY_PASS`
+<!-- autospec-safety:end -->
+
+- **trust:** `untrusted`
+- **matched rules:** `none`
+- **reason:** no blocking or ambiguous patterns matched
+
+*Auto-reviewed by issue intent safety gate on 2026-07-11.*
+
+Guardian: skip-OUT_OF_SCOPE, skip-COMPLEXITY # lock-step mirrors/goldens are mechanically required for autospec-run SKILL.md edits
+EOF
+)"
+    write_issue "$body" '[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
+
+    run run_claim
+
+    [ "$status" -eq 2 ]
+    [ "$(echo "$output" | jq -r '.reason')" = "label_mutation_failed" ]
+    grep -q -- "--remove-label auto-implement --add-label in-progress-by-bot" "$FIXTURE_DIR/edit.log"
+}
+
+@test "claim removes startup heartbeat when label mutation fails" {
+    write_issue "$(safe_block)" '[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
+    export AUTOSPEC_HEARTBEAT_DIR="$FIXTURE_DIR/heartbeats"
+
+    run run_claim
+
+    [ "$status" -eq 2 ]
+    [ "$(echo "$output" | jq -r '.reason')" = "label_mutation_failed" ]
+    [ ! -f "$FIXTURE_DIR/heartbeats/test__repo/700.json" ]
+    grep -q 'heartbeat_present_at_edit=yes' "$FIXTURE_DIR/edit.log"
+}
+
+@test "claim restores labels and removes heartbeat when run-state comment creation fails" {
+    write_issue "$(safe_block)" '[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
+    export AUTOSPEC_HEARTBEAT_DIR="$FIXTURE_DIR/heartbeats"
+
+    ISSUE_EDIT_FAIL=0 ISSUE_COMMENT_FAIL=1 run run_claim
+
+    [ "$status" -eq 2 ]
+    [ "$(echo "$output" | jq -r '.reason')" = "run_state_create_failed" ]
+    [ ! -f "$FIXTURE_DIR/heartbeats/test__repo/700.json" ]
+    grep -q -- "--remove-label auto-implement --add-label in-progress-by-bot" "$FIXTURE_DIR/edit.log"
+    grep -q -- "--remove-label in-progress-by-bot --add-label auto-implement" "$FIXTURE_DIR/edit.log"
+    grep -q -- "--body-file" "$FIXTURE_DIR/comment.log"
 }
