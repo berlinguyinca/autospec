@@ -989,25 +989,62 @@ _autospec_conductor_same_issue_list() {
     [ "$left_norm" = "$right_norm" ]
 }
 
+_autospec_conductor_integration_requested_branch() {
+    local parent_branch="$1"
+    local prefix
+    if command -v autospec_runtime_config_get >/dev/null 2>&1; then
+        prefix="$(autospec_runtime_config_get "autonomous.self_originated.integration_branch_prefix" "autospec/autonomous-")"
+    else
+        prefix="autospec/autonomous-"
+    fi
+    printf '%s%s\n' "$prefix" "${parent_branch#origin/}"
+}
+
+_autospec_conductor_mode_file_field() {
+    local repo_root="$1"
+    local field="$2"
+    local mode_file="${repo_root}/.autospec/explore-mode.json"
+    [ -f "$mode_file" ] || { printf '<none>\n'; return 0; }
+    jq -r --arg field "$field" '.[$field] // "<none>"' "$mode_file" 2>/dev/null \
+        || printf '<none>\n'
+}
+
+_autospec_conductor_conflict_field() {
+    local payload="$1"
+    local field="$2"
+    printf '%s\n' "$payload" \
+        | sed -n "s/.*${field}=\\([^[:space:]]*\\).*/\\1/p" \
+        | tail -1
+}
+
 _autospec_conductor_integration_conflict_cooldown_active() {
     local repo_root="$1"
     local issues="$2"
     local cycle="$3"
-    local file until stored_issues rc
+    local requested_branch="$4"
+    local file until stored_issues rc stored_requested stored_existing stored_kind current_existing current_kind
     file="$(_autospec_conductor_integration_conflict_cooldown_file "$repo_root")"
     [ -f "$file" ] || return 1
 
     until="$(sed -n 's/^until_cycle=//p' "$file" 2>/dev/null | head -1)"
     stored_issues="$(sed -n 's/^issues=//p' "$file" 2>/dev/null | head -1)"
     rc="$(sed -n 's/^rc=//p' "$file" 2>/dev/null | head -1)"
+    stored_requested="$(sed -n 's/^requested_branch=//p' "$file" 2>/dev/null | head -1)"
+    stored_existing="$(sed -n 's/^existing_branch=//p' "$file" 2>/dev/null | head -1)"
+    stored_kind="$(sed -n 's/^existing_kind=//p' "$file" 2>/dev/null | head -1)"
     case "$until" in ''|*[!0-9]*) rm -f "$file" 2>/dev/null || true; return 1 ;; esac
     if [ "$cycle" -gt "$until" ] 2>/dev/null; then
         rm -f "$file" 2>/dev/null || true
         return 1
     fi
     _autospec_conductor_same_issue_list "$issues" "$stored_issues" || return 1
-    printf '[conductor] integration conflict cooldown: parking self batch (issues: %s, rc=%s, until-cycle=%s)\n' \
-        "$issues" "${rc:-unknown}" "$until" >&2
+    [ "${stored_requested:-}" = "$requested_branch" ] || return 1
+    current_existing="$(_autospec_conductor_mode_file_field "$repo_root" branch)"
+    current_kind="$(_autospec_conductor_mode_file_field "$repo_root" kind)"
+    [ "${stored_existing:-<none>}" = "$current_existing" ] || return 1
+    [ "${stored_kind:-<none>}" = "$current_kind" ] || return 1
+    printf '[conductor] integration conflict cooldown: excluding self batch (issues: %s, rc=%s, requested=%s, existing=%s, until-cycle=%s)\n' \
+        "$issues" "${rc:-unknown}" "$requested_branch" "${stored_existing:-<none>}" "$until" >&2
     return 0
 }
 
@@ -1016,15 +1053,54 @@ _autospec_conductor_arm_integration_conflict_cooldown() {
     local issues="$2"
     local cycle="$3"
     local rc="$4"
-    local file until
+    local payload="$5"
+    local requested_branch="$6"
+    local file until existing_branch existing_kind
     file="$(_autospec_conductor_integration_conflict_cooldown_file "$repo_root")"
+    existing_branch="$(_autospec_conductor_conflict_field "$payload" existing_branch)"
+    existing_kind="$(_autospec_conductor_conflict_field "$payload" existing_kind)"
+    [ -n "$requested_branch" ] || requested_branch="$(_autospec_conductor_conflict_field "$payload" requested_branch)"
+    [ -n "$existing_branch" ] || existing_branch="$(_autospec_conductor_mode_file_field "$repo_root" branch)"
+    [ -n "$existing_kind" ] || existing_kind="$(_autospec_conductor_mode_file_field "$repo_root" kind)"
     until=$((cycle + 4))
     mkdir -p "$(dirname "$file")" 2>/dev/null || true
     {
         printf 'until_cycle=%s\n' "$until"
         printf 'rc=%s\n' "$rc"
         printf 'issues=%s\n' "$issues"
+        printf 'requested_branch=%s\n' "$requested_branch"
+        printf 'existing_branch=%s\n' "${existing_branch:-<none>}"
+        printf 'existing_kind=%s\n' "${existing_kind:-<none>}"
     } > "$file" 2>/dev/null || true
+}
+
+_autospec_conductor_filter_integration_conflict_cooldown_queue() {
+    local repo_root="$1"
+    local queue_json="$2"
+    local cycle="$3"
+    local requested_branch="$4"
+    local file issues
+    file="$(_autospec_conductor_integration_conflict_cooldown_file "$repo_root")"
+    [ -f "$file" ] || { printf '%s' "$queue_json"; return 0; }
+    issues="$(sed -n 's/^issues=//p' "$file" 2>/dev/null | head -1)"
+    if [ -z "$issues" ] || ! _autospec_conductor_integration_conflict_cooldown_active \
+        "$repo_root" "$issues" "$cycle" "$requested_branch"; then
+        printf '%s' "$queue_json"
+        return 0
+    fi
+    SKIP_ISSUES="$issues" jq '
+      (.batch | length) as $batch_len |
+      (env.SKIP_ISSUES | split(" ") | map(select(length > 0))) as $skip |
+      .ready = [(.ready // [])[] | select((.number | tostring) as $n | ($skip | index($n) | not))] |
+      .batch = [(.batch // [])[] | select((.number | tostring) as $n | ($skip | index($n) | not))] |
+      if ((.batch | length) < $batch_len) then
+        .batch = (.ready[0:$batch_len])
+      else
+        .
+      end
+    ' 2>/dev/null <<EOF_QUEUE_FILTER
+$queue_json
+EOF_QUEUE_FILTER
 }
 
 _autospec_conductor_pr_touches_refresh_surface() {
@@ -1647,6 +1723,13 @@ fi'
                 _queue_batch_request="${_queue_max_workers:-0}"
             fi
             _queue_json="$(bash "$_list_ready" --repo "$_repo" --batch-size "$_queue_batch_request" 2>/dev/null || true)"
+            if [ -n "$_queue_json" ]; then
+                local _cooldown_parent_branch _cooldown_requested_branch
+                _cooldown_parent_branch="$(_autospec_conductor_default_branch "$_repo")"
+                _cooldown_requested_branch="$(_autospec_conductor_integration_requested_branch "$_cooldown_parent_branch")"
+                _queue_json="$(_autospec_conductor_filter_integration_conflict_cooldown_queue \
+                    "$_repo_root" "$_queue_json" "$_cycle" "$_cooldown_requested_branch")"
+            fi
             # Only trust the reading when the helper produced parseable JSON with
             # a .ready array. A transient helper/GitHub failure must NOT
             # masquerade as an empty backlog: leaving _ready_count empty omits
@@ -2283,21 +2366,31 @@ EOF_PROV_BATCH
                                                 "self-originated tiers parked: ${_sm_park_reason}" || true
                                         fi
                                     elif [ -n "$_prov_self" ]; then
-                                        local _prov_int_rc=0
+                                        local _prov_int_rc=0 _prov_requested_branch _prov_int_output _prov_int_tmp
+                                        _prov_requested_branch="$(_autospec_conductor_integration_requested_branch "$_prov_parent_branch")"
                                         if _autospec_conductor_integration_conflict_cooldown_active \
-                                            "$_repo_root" "$_prov_self" "$_cycle"; then
+                                            "$_repo_root" "$_prov_self" "$_cycle" "$_prov_requested_branch"; then
                                             _prov_int_rc=6
                                         else
+                                            _prov_int_tmp="$(mktemp -t autospec-intbranch-XXXXXX.log 2>/dev/null || printf '/tmp/autospec-intbranch-%s.log' "$$")"
+                                            : > "$_prov_int_tmp" 2>/dev/null || true
                                             bash "$_intbranch_sh" ensure --parent "$_prov_parent_branch" \
-                                                --repo "$_repo" 1>&2 || _prov_int_rc=$?
+                                                --repo "$_repo" 2>"$_prov_int_tmp" || _prov_int_rc=$?
+                                            _prov_int_output="$(cat "$_prov_int_tmp" 2>/dev/null || true)"
+                                            [ -z "$_prov_int_output" ] || printf '%s\n' "$_prov_int_output" >&2
                                             if [ "$_prov_int_rc" -eq 0 ]; then
+                                                : > "$_prov_int_tmp" 2>/dev/null || true
                                                 bash "$_intbranch_sh" sync --parent "$_prov_parent_branch" \
-                                                    --repo "$_repo" 1>&2 || _prov_int_rc=$?
+                                                    --repo "$_repo" 2>"$_prov_int_tmp" || _prov_int_rc=$?
+                                                _prov_int_output="$(cat "$_prov_int_tmp" 2>/dev/null || true)"
+                                                [ -z "$_prov_int_output" ] || printf '%s\n' "$_prov_int_output" >&2
                                             fi
                                             if [ "$_prov_int_rc" -ne 0 ]; then
                                                 _autospec_conductor_arm_integration_conflict_cooldown \
-                                                    "$_repo_root" "$_prov_self" "$_cycle" "$_prov_int_rc"
+                                                    "$_repo_root" "$_prov_self" "$_cycle" "$_prov_int_rc" \
+                                                    "$_prov_int_output" "$_prov_requested_branch"
                                             fi
+                                            rm -f "$_prov_int_tmp" 2>/dev/null || true
                                         fi
                                         if [ "$_prov_int_rc" -ne 0 ]; then
                                             # Peer-review must-fix: ensure may have
