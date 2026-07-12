@@ -275,7 +275,7 @@ install_shared_scripts
 
 info ""
 info "autospec-run skill helper scripts:"
-SKILL_SCRIPT_FILES="heartbeat-write.sh heartbeat-read.sh run-state.sh issue-safety-gate.sh list-ready-issues.sh claim-issue.sh release-issue.sh autospec-run-session-lock.sh fab-route.sh fab-completeness.sh"
+SKILL_SCRIPT_FILES="heartbeat-write.sh heartbeat-read.sh autospec-run-status.sh run-state.sh issue-safety-gate.sh list-ready-issues.sh claim-issue.sh release-issue.sh autospec-run-session-lock.sh fab-route.sh fab-completeness.sh"
 for rel in $SKILL_SCRIPT_FILES; do
     skill_scripts_src=""
     if [ -d "$SKILL_DIR/scripts" ]; then

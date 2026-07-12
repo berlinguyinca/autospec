@@ -17,6 +17,8 @@ setup() {
     export PATH="$STUB_DIR:$PATH"
     export AUTOSPEC_STATE_DIR="$TMP/state"
     mkdir -p "$AUTOSPEC_STATE_DIR"
+    export AUTOSPEC_REPO_DIR="$TMP/repo"
+    mkdir -p "$AUTOSPEC_REPO_DIR/.autospec"
     export AUTOSPEC_NOTIFY_SH="$STUB_DIR/notify.sh"
     export AUTOSPEC_GH_CMD="$STUB_DIR/gh"
 

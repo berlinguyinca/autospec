@@ -50,7 +50,7 @@ if [ -z "$repo" ] && command -v gh >/dev/null 2>&1; then
 fi
 HB_BASE="${AUTOSPEC_HEARTBEAT_DIR:-${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}}"
 
-# Resolve the heartbeat dir canonical-first with legacy fallback (F4). This
+# Resolve heartbeat dirs canonical-first with legacy fallback (F4). This
 # script runs under `set +e`, so we EXEC repo-slug.sh standalone rather than
 # source it (sourcing would flip on `set -euo pipefail`). Resolution order:
 # override → sibling (installed flat layout) → AUTOSPEC_SCRIPTS_DIR →
@@ -73,22 +73,61 @@ else
   hb_dir=""
 fi
 
+slug_dirs() {
+  _base="$1"
+  _repo="$2"
+  _owner="${_repo%%/*}"
+  _name="${_repo##*/}"
+  _canonical="${_base}/${_owner}__${_name}"
+  _legacy_under="${_base}/${_owner}_${_name}"
+  _legacy_hyphen="${_base}/${_owner}-${_name}"
+  printf '%s\n' "$_canonical"
+  [ "$_legacy_under" = "$_canonical" ] || printf '%s\n' "$_legacy_under"
+  [ "$_legacy_hyphen" = "$_canonical" ] || [ "$_legacy_hyphen" = "$_legacy_under" ] || printf '%s\n' "$_legacy_hyphen"
+}
+
 # Build a JSON array of per-issue rows by reading the heartbeat files directly
 # (no dependency on heartbeat-read.sh being co-installed).
 rows="[]"
-if [ -n "$repo" ] && [ -d "$hb_dir" ] && ls "$hb_dir"/*.json >/dev/null 2>&1; then
-  rows="$(cat "$hb_dir"/*.json 2>/dev/null | jq -s --argjson now "$now" --argjson stale "$STALE_SECS" '
-    [ .[] | {issue, step, branch, pr, host, ts,
-             age: ($now - (.ts // $now)),
-             stale: (($now - (.ts // $now)) > $stale) } ]
+if [ -n "$repo" ]; then
+  hb_candidates=""
+  for _dir in $(slug_dirs "$HB_BASE" "$repo"); do
+    [ -d "$_dir" ] || continue
+    for _file in "$_dir"/*.json; do
+      [ -f "$_file" ] || continue
+      _mtime="$(stat -f %m "$_file" 2>/dev/null || stat -c %Y "$_file" 2>/dev/null || echo 0)"
+      printf '%s' "${_mtime:-}" | grep -Eq '^[0-9]+$' || _mtime=0
+      hb_candidates="${hb_candidates}${_mtime}	${_file}
+"
+    done
+  done
+  if [ -n "$hb_candidates" ]; then
+    hb_files="$(printf '%s' "$hb_candidates" | sort -rn | awk -F '	' '
+      NF >= 2 {
+        key=$2
+        sub(/^.*\//, "", key)
+        sub(/\.json$/, "", key)
+        if (!seen[key]++) print $1 "\t" $2
+      }')"
+    rows="$(printf '%s\n' "$hb_files" | while IFS='	' read -r _mtime _file; do
+      [ -n "$_file" ] || continue
+      printf '%s' "${_mtime:-}" | grep -Eq '^[0-9]+$' || _mtime=0
+      jq --argjson mtime "$_mtime" '. + {_mtime:$mtime}' "$_file" 2>/dev/null
+    done | jq -s --argjson now "$now" --argjson stale "$STALE_SECS" '
+    [ .[] | ( .ts // ((.updated_at // "") | fromdateiso8601?) // ._mtime // $now ) as $seen_at
+      | {issue:(.issue | tonumber? // .), step, branch, pr, host, ts:$seen_at,
+             age: ($now - $seen_at),
+             stale: (($now - $seen_at) > $stale) } ]
     | sort_by(.issue)' 2>/dev/null)"
-  [ -n "$rows" ] || rows="[]"
+    [ -n "$rows" ] || rows="[]"
+  fi
 fi
 
 # Queue counts (best-effort; needs gh + list-ready-issues.sh, resolved
 # defensively as a sibling then via AUTOSPEC_SCRIPTS_DIR). Degrade to nulls.
 queue='{"ready":null,"blocked":null,"claimed":null}'
 queue_full='{"ready":[],"blocked":[],"claimed":[],"conflicts":[],"batch":[]}'
+queue_known=0
 queue_bin=""
 for _c in "$SCRIPT_DIR/list-ready-issues.sh" "${AUTOSPEC_SCRIPTS_DIR:-}/list-ready-issues.sh"; do
   [ -n "$_c" ] && [ -f "$_c" ] && { queue_bin="$_c"; break; }
@@ -100,9 +139,18 @@ if [ -n "$queue_bin" ] && command -v gh >/dev/null 2>&1; then
     [ -n "$queue_full" ] || queue_full='{"ready":[],"blocked":[],"claimed":[],"conflicts":[],"batch":[]}'
     queue="$(printf '%s' "$q" | jq '{ready:(.ready|length),blocked:(.blocked|length),claimed:(.claimed|length)}' 2>/dev/null)"
     [ -n "$queue" ] || queue='{"ready":null,"blocked":null,"claimed":null}'
+    queue_known=1
   fi
 fi
-claimed_without_heartbeat="$(jq -nc --argjson rows "$rows" --argjson queue "$queue_full" '
+all_rows="$rows"
+if [ "$queue_known" -eq 1 ]; then
+  rows="$(jq -nc --argjson rows "$all_rows" --argjson queue "$queue_full" '
+    ($queue.claimed // [] | map(.number | tonumber)) as $claimed_issues
+    | [ $rows[]? | (.issue | tonumber) as $issue | select($claimed_issues | index($issue)) ]
+  ' 2>/dev/null)"
+  [ -n "$rows" ] || rows="[]"
+fi
+claimed_without_heartbeat="$(jq -nc --argjson rows "$all_rows" --argjson queue "$queue_full" '
   ($rows | map(.issue | tonumber)) as $heartbeat_issues
   | [ $queue.claimed[]?
       | (.number | tonumber) as $issue

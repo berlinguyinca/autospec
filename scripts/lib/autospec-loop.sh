@@ -528,6 +528,17 @@ _autospec_conductor_all_blocked_refs() {
         2>/dev/null || true
 }
 
+_autospec_conductor_all_blocked_single_reason() {
+    printf '%s' "$1" \
+        | jq -r '
+            [ .blocked[]? | (.reason // "blocked") ] as $reasons
+            | if (($reasons | length) > 0 and ($reasons | unique | length) == 1)
+              then $reasons[0]
+              else ""
+              end
+        ' 2>/dev/null || true
+}
+
 _autospec_conductor_queue_count() {
     printf '%s' "$1" | jq -r "$2" 2>/dev/null || true
 }
@@ -1755,6 +1766,23 @@ fi'
                     _all_blocked_count="${_queue_blocked_len:-0}"
                     _all_blocked_refs="$(_autospec_conductor_all_blocked_refs "$_queue_json")"
                 fi
+            fi
+        fi
+
+        # A backlog where every implementation candidate is blocked by the
+        # autospec issue safety gate is a platform/readiness failure, not a
+        # dry product backlog. Continuing into discovery here only files more
+        # work that Tier 1 cannot legally claim. Pause the conductor and surface
+        # the blocker instead of growing an undrainable queue.
+        if [ "${_all_blocked_count:-0}" -gt 0 ] && [ "$_dry" != "1" ]; then
+            local _all_blocked_reason
+            _all_blocked_reason="$(_autospec_conductor_all_blocked_single_reason "$_queue_json")"
+            if [ "$_all_blocked_reason" = "safety_gate_failed" ]; then
+                _autospec_conductor_escalate_all_blocked \
+                    "$_repo" "$_queue_json" "$_all_blocked_count" "$_all_blocked_refs" "$_no_digest"
+                printf '[conductor] blocked-backlog: all implementation candidates failed the autospec safety gate — pausing discovery until readiness is repaired\n' >&2
+                _stop_reason="blocked-backlog:safety_gate_failed"
+                break
             fi
         fi
 

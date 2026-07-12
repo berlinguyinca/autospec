@@ -10,9 +10,21 @@ mkdir -p "$HOME/.autospec"
 write_autonomous_operator_wrapper() {
     target="$1"
     subcommand="$2"
+    rust_subcommand="$subcommand"
     {
         printf '%s\n' '#!/usr/bin/env bash'
         printf '%s\n' 'set -eu'
+        case "$subcommand" in
+            ""|start|status|list|timeline|monitor|supervise|logs|watch|cleanup|stop|restart)
+                printf '%s\n' 'if command -v autospec >/dev/null 2>&1; then'
+                if [ -n "$rust_subcommand" ]; then
+                    printf '%s\n' '    exec autospec autonomous '"$rust_subcommand"' "$@"'
+                else
+                    printf '%s\n' '    exec autospec autonomous "$@"'
+                fi
+                printf '%s\n' 'fi'
+                ;;
+        esac
         if [ -n "$subcommand" ]; then
             printf '%s\n' 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh" '"$subcommand"' "$@"'
         else
@@ -44,7 +56,7 @@ heal_autonomous_operator_wrappers() {
     autospec_bin_dir="$HOME/.autospec/bin"
     [ -d "$autospec_bin_dir" ] || return 0
     healed=0
-    for command in autospec-autonomous autospec-autonomous-status autospec-autonomous-timeline autospec-autonomous-monitor autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-stop autospec-autonomous-restart; do
+    for command in autospec-autonomous autospec-autonomous-start autospec-autonomous-status autospec-autonomous-list autospec-autonomous-timeline autospec-autonomous-monitor autospec-autonomous-supervise autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-cleanup autospec-autonomous-stop autospec-autonomous-restart; do
         target="$autospec_bin_dir/$command"
         [ -f "$target" ] || continue
         if autonomous_operator_wrapper_needs_heal "$target"; then

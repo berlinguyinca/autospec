@@ -38,8 +38,8 @@ cd skills/autospec-autonomous
 ## Usage
 
 ```
-/autospec-autonomous [--max-cycles N] [--budget-tokens N] [--budget-hours N] \
-    [--budget-issues N] [--dry-run] [--no-digest] [--poll-interval-sec N]
+/autospec-autonomous [--max-cycles N] [--budget-tokens N] [--budget-issues N] \
+    [--dry-run] [--no-digest] [--poll-interval-sec N]
 ```
 
 Self-update: `/autospec-autonomous update`

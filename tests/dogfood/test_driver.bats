@@ -75,6 +75,20 @@ JSON
     [[ "$output" == *"qa-noisy-sweep.sh findings=1 expected=1 status=PASS"* ]]
 }
 
+@test "findings under local agent worktrees are ignored" {
+    cat > "$TMP/scripts/qa-worktree-sweep.sh" <<'SH'
+#!/usr/bin/env bash
+printf '{"file":".claude/worktrees/feature/scripts/generated.py","function":"main","rule_id":"REPEATED_STRUCTURE_AS_CODE"}\n' >> "$VERDICT_FILE"
+SH
+    chmod +x "$TMP/scripts/qa-worktree-sweep.sh"
+    printf '[]\n' > "$TMP/tests/dogfood/allowlist/qa-worktree-sweep.json"
+
+    cd "$TMP"
+    run bash scripts/dogfood-detectors.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"qa-worktree-sweep.sh findings=0 expected=0 status=PASS"* ]]
+}
+
 @test "registered detector missing/non-executable → driver fails with clear message" {
     # Register a non-existent extra detector via .autospec/dogfood.yml.
     cat > "$TMP/.autospec/dogfood.yml" <<'YML'

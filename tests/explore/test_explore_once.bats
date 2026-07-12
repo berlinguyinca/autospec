@@ -336,10 +336,14 @@ assert 'Adversarial verify' in cand['body'], cand
     [ "$status" -eq 0 ]
 
     grep -q -- '--label auto-implement' "$TMP/.autospec/gh-calls.log"
+    grep -q -- '--label safety:reviewed' "$TMP/.autospec/gh-calls.log"
     grep -q -- '--label ctx:32k' "$TMP/.autospec/gh-calls.log"
     grep -q -- '--label reasoning:medium' "$TMP/.autospec/gh-calls.log"
     grep -q 'lib/y.sh:7 failing path' "$TMP/.autospec/gh-calls.log"
     grep -q 'Adversarial verify: passed' "$TMP/.autospec/gh-calls.log"
+    grep -q '<!-- autospec-safety:begin -->' "$TMP/.autospec/gh-calls.log"
+    grep -q -- '- \*\*decision:\*\* `SAFETY_PASS`' "$TMP/.autospec/gh-calls.log"
+    grep -q '<!-- autospec-safety:end -->' "$TMP/.autospec/gh-calls.log"
 }
 
 

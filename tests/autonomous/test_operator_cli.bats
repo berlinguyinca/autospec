@@ -266,6 +266,16 @@ EOF
   [[ "$output" == *"planned next: start #1540 feat: documentation freshness tier"* ]]
 }
 
+@test "operator cli: supervise prints one-line observer status" {
+  mkdir -p "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec"
+  printf '999999\n' > "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/conductor.pid"
+
+  run bash "$CLI" supervise --interval-sec 0 --iterations 1 --repo berlinguyinca/autospec
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == "autospec-supervise: ok repo=berlinguyinca/autospec conductor=stopped pid=999999 action=none" ]]
+}
+
 @test "operator cli: status finds spend ledger with alternate .git slug" {
   mkdir -p "$HOME/.autospec/autonomous-spend/berlinguyinca_autospec.git"
   printf '{"issues":7,"tokens":0}\n' > "$HOME/.autospec/autonomous-spend/berlinguyinca_autospec.git/spend.json"
@@ -314,6 +324,40 @@ PY_FAKE
   [[ "$output" == *"autospec-autonomous started"* ]]
   [ -f "$HOME/.autospec/autonomous-operator/metabolomics-us_go-modules/conductor.pid" ]
   [ "$(cat "$HOME/.autospec/autonomous-operator/metabolomics-us_go-modules/conductor.pid")" = "424242" ]
+}
+
+@test "operator cli: detached start also starts monitor and supervisor companions" {
+  mkdir -p "$TEST_TMP/bin"
+  cat > "$TEST_TMP/bin/python3" <<'PY_FAKE'
+#!/usr/bin/env bash
+state="$HOME/python-call-count"
+count=0
+[ -f "$state" ] && count="$(cat "$state")"
+count=$((count + 1))
+printf '%s\n' "$count" > "$state"
+printf '%s\n' "$*" >> "$HOME/python-argv.log"
+case "$count" in
+  1) printf '111111\n' ;;
+  2) printf '222222\n' ;;
+  3) printf '333333\n' ;;
+  *) printf '444444\n' ;;
+esac
+PY_FAKE
+  chmod +x "$TEST_TMP/bin/python3"
+
+  PATH="$TEST_TMP/bin:$PATH" \
+    CONDUCTOR_REPO="berlinguyinca/autospec" \
+    run bash "$CLI" start --repo berlinguyinca/autospec --repo-dir "$REPO_ROOT"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"autospec-autonomous started"* ]]
+  [[ "$output" == *"monitor pid: 222222"* ]]
+  [[ "$output" == *"supervisor pid: 333333"* ]]
+  [ "$(cat "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/conductor.pid")" = "111111" ]
+  [ "$(cat "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/monitor.pid")" = "222222" ]
+  [ "$(cat "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/supervisor.pid")" = "333333" ]
+  grep -q 'monitor --repo-dir' "$HOME/python-argv.log"
+  grep -q 'supervise --repo-dir' "$HOME/python-argv.log"
 }
 
 @test "operator cli: status logs and stop use repo-scoped conductor paths" {
@@ -366,7 +410,7 @@ autospec_conductor_run() {
 }
 LIBEOF
 
-  run bash "$scripts_dir/autospec-autonomous.sh" start \
+  AUTOSPEC_AUTONOMOUS_COMPANIONS=0 run bash "$scripts_dir/autospec-autonomous.sh" start \
     --repo-dir "$repo_dir" \
     --repo berlinguyinca/autospec \
     --log "$log_file" \

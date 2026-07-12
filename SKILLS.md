@@ -45,7 +45,7 @@ operator control.
   discovery signals. It parks when the queue is dry, a stop/pause signal exists,
   or the usage/spend governor trips.
 - How to use: run `/autospec-autonomous` with explicit budgets such as
-  `--max-cycles`, `--budget-tokens`, `--budget-hours`, or `--dry-run`; steer it
+  `--max-cycles`, `--budget-tokens`, `--budget-issues`, or `--dry-run`; steer it
   through the GitHub control channel and stop it with `/autospec-autonomous stop`
   or [`autospec-stop`](#autospec-stop).
 

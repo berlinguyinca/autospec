@@ -75,7 +75,7 @@ write_issue() {
 }
 
 run_claim() {
-    PATH="$MOCK_BIN:$PATH" AUTOSPEC_CLAIM_CONFIRM_READS=1 AUTOSPEC_CLAIM_SETTLE_SECONDS=0 \
+    PATH="$MOCK_BIN:$PATH" AUTOSPEC_HEARTBEAT_DIR="${AUTOSPEC_HEARTBEAT_DIR:-$FIXTURE_DIR/heartbeats}" AUTOSPEC_CLAIM_CONFIRM_READS=1 AUTOSPEC_CLAIM_SETTLE_SECONDS=0 \
       bash "$SCRIPT" --issue 700 --repo test/repo --worker-id worker-a --branch feat/test
 }
 

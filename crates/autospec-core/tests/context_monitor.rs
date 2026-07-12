@@ -22,10 +22,7 @@ fn context_monitor_compacted_rolls_over_with_handoff_clear_resume_order() {
     let actions = engine.classify_percent(80);
 
     assert_eq!(engine.state(), ContextState::Rolled);
-    assert_eq!(
-        action_kinds(&actions),
-        vec!["handoff", "clear", "resume"]
-    );
+    assert_eq!(action_kinds(&actions), vec!["handoff", "clear", "resume"]);
 }
 
 #[test]
@@ -74,6 +71,10 @@ fn context_monitor_scripted_sequence_matches_python_engine_parity() {
     {
         let actions = engine.classify_percent(pct);
         assert_eq!(engine.state(), expected_state, "state mismatch at {pct}");
-        assert_eq!(action_kinds(&actions), expected_action, "actions mismatch at {pct}");
+        assert_eq!(
+            action_kinds(&actions),
+            expected_action,
+            "actions mismatch at {pct}"
+        );
     }
 }

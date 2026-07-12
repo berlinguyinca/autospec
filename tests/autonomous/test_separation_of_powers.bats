@@ -16,7 +16,8 @@ setup() {
     mkdir -p "$STUB_DIR"
     export PATH="$STUB_DIR:$PATH"
     export AUTOSPEC_STATE_DIR="$TMP/state"
-    mkdir -p "$AUTOSPEC_STATE_DIR"
+    export AUTOSPEC_REPO_DIR="$TMP/repo"
+    mkdir -p "$AUTOSPEC_STATE_DIR" "$AUTOSPEC_REPO_DIR/.autospec"
 
     cat > "$STUB_DIR/autospec-qa" <<'STUB'
 #!/bin/bash

@@ -79,6 +79,35 @@ EOF
   [[ "$output" == *"omx completed"* ]]
 }
 
+@test "run-drain: active issue heartbeat counts as progress during stdout silence" {
+  cat > "$TEST_TMP/bin/omx" <<'EOF'
+#!/usr/bin/env bash
+sleep 4
+exit 0
+EOF
+  chmod +x "$TEST_TMP/bin/omx"
+
+  hb_dir="$HOME/.autospec/process-heartbeats/berlinguyinca__autospec"
+  mkdir -p "$hb_dir"
+  (
+    sleep 1
+    printf '{"issue":42,"step":"tests_started"}\n' > "$hb_dir/42.json"
+    sleep 1
+    printf '{"issue":42,"step":"tests_still_running"}\n' > "$hb_dir/42.json"
+  ) &
+  heartbeat_writer_pid="$!"
+
+  PATH="$TEST_TMP/bin:$PATH" \
+  CONDUCTOR_REPO=berlinguyinca/autospec \
+  AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS=3 \
+  AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS=1 \
+  run bash "$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh"
+
+  wait "$heartbeat_writer_pid"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"stalled after"* ]]
+}
+
 @test "run-drain: follows declared validation log progress from a quiet omx child" {
   cat > "$TEST_TMP/bin/omx" <<'EOF'
 #!/usr/bin/env bash

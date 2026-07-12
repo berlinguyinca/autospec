@@ -50,7 +50,7 @@ grep -qxF '. "$HOME/.autospec/env"' "$TEST_HOME/.bashrc" || {
     exit 1
 }
 
-for command in autospec-autonomous autospec-autonomous-status autospec-autonomous-timeline autospec-autonomous-monitor autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-stop autospec-autonomous-restart; do
+for command in autospec-autonomous autospec-autonomous-start autospec-autonomous-status autospec-autonomous-list autospec-autonomous-timeline autospec-autonomous-monitor autospec-autonomous-supervise autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-cleanup autospec-autonomous-stop autospec-autonomous-restart; do
     [ -x "$TEST_HOME/.autospec/bin/$command" ] || {
         echo "FAIL: $command wrapper was not installed"
         ls -la "$TEST_HOME/.autospec/bin" || true
@@ -74,9 +74,9 @@ if grep -R '^export HOME=' "$TEST_HOME/.autospec/bin"/autospec-autonomous*; then
     exit 1
 fi
 
-for command in autospec-autonomous autospec-autonomous-status autospec-autonomous-timeline autospec-autonomous-monitor autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-stop autospec-autonomous-restart; do
-    grep -qF 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh"' "$TEST_HOME/.autospec/bin/$command" || {
-        echo "FAIL: $command does not use the runtime-resolving launcher"
+for command in autospec-autonomous autospec-autonomous-start autospec-autonomous-status autospec-autonomous-list autospec-autonomous-timeline autospec-autonomous-monitor autospec-autonomous-supervise autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-cleanup autospec-autonomous-stop autospec-autonomous-restart; do
+    grep -qF 'command -v autospec >/dev/null 2>&1' "$TEST_HOME/.autospec/bin/$command" || {
+        echo "FAIL: $command does not try the Rust autospec launcher first"
         cat "$TEST_HOME/.autospec/bin/$command"
         exit 1
     }
@@ -140,8 +140,8 @@ grep -q 'heal_autonomous_operator_wrappers: healed' /tmp/autospec-install-heal.o
     exit 1
 }
 
-grep -qF 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh" status "$@"' "$TEST_HOME/.autospec/bin/autospec-autonomous-status" || {
-    echo "FAIL: stale autospec-autonomous-status wrapper was not rewritten to runtime-resolving form"
+grep -qF 'exec autospec autonomous status "$@"' "$TEST_HOME/.autospec/bin/autospec-autonomous-status" || {
+    echo "FAIL: stale autospec-autonomous-status wrapper was not rewritten to Rust-first form"
     cat "$TEST_HOME/.autospec/bin/autospec-autonomous-status"
     exit 1
 }

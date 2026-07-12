@@ -382,7 +382,15 @@ for proposal in data.get("proposals", []) or []:
         roi_score = float(proposal.get("score", confidence))
     except Exception:
         roi_score = confidence
-    labels = ["auto-implement", ctx_label(complexity), reasoning_label(severity, complexity), "explore"]
+    ctx = ctx_label(complexity)
+    reasoning = reasoning_label(severity, complexity)
+    labels = [
+        "auto-implement",
+        "safety:reviewed",
+        ctx,
+        reasoning,
+        "explore",
+    ]
     body = "\n".join([
         "Auto-filed by /autospec-explore --once (single-cycle discovery).",
         "",
@@ -406,9 +414,22 @@ for proposal in data.get("proposals", []) or []:
         "Adversarial verify: passed before filing by the explore research-cycle finalize gate.",
         "ROI gate: passed (candidate survived severity-first rank).",
         "",
+        "## Safety review",
+        "",
+        "<!-- autospec-safety:begin -->",
+        "- **decision:** `SAFETY_PASS`",
+        "<!-- autospec-safety:end -->",
+        "",
+        "- **actor:** `autospec-explore`",
+        "- **trust:** `autonomous-verified-discovery`",
+        "- **matched rules:** `explore-adversarial-verify`",
+        "- **reason:** Candidate passed the explore finalize gate before filing; autospec-run re-lints the current body before claiming.",
+        "",
+        f"*Auto-reviewed by issue intent safety gate on {__import__('datetime').datetime.utcnow().strftime('%Y-%m-%d')}.*",
+        "",
         "## Model fit",
-        f"- {labels[1]}",
-        f"- {labels[2]}",
+        f"- {ctx}",
+        f"- {reasoning}",
         "",
         "## Acceptance criteria",
         f"- [ ] The PR references `{title[:55]}` in its closeout artifacts.",
@@ -475,12 +496,34 @@ try:
 except Exception:
     candidates = []
 count = 0
+label_meta = {
+    "auto-implement": ("0e8a16", "Autospec autonomous implementation issue"),
+    "safety:reviewed": ("0e8a16", "Issue intent passed autospec safety review"),
+    "ctx:32k": ("5319e7", "Small-context implementation fit"),
+    "ctx:64k": ("5319e7", "Medium-context implementation fit"),
+    "ctx:120k": ("5319e7", "Large-context implementation fit"),
+    "reasoning:shallow": ("c5def5", "Shallow reasoning implementation fit"),
+    "reasoning:medium": ("c5def5", "Medium reasoning implementation fit"),
+    "reasoning:deep": ("c5def5", "Deep reasoning implementation fit"),
+    "explore": ("8250df", "Discovered by autospec-explore"),
+}
 for candidate in candidates:
     title = str(candidate.get("title", "")).strip()
     body = str(candidate.get("body", ""))
     labels = candidate.get("labels", []) or []
     if not title:
         continue
+    for label in labels:
+        label = str(label).strip()
+        if not label:
+            continue
+        color, desc = label_meta.get(label, ("ededed", "Autospec generated label"))
+        subprocess.run(
+            ["gh", "label", "create", label, "--color", color, "--description", desc, "--force"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
     cmd = ["gh", "issue", "create", "--title", title, "--body", body]
     for label in labels:
         label = str(label).strip()

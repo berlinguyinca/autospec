@@ -45,6 +45,18 @@ own_marked_comment_id() {
              | sort_by(.id) | (.[-1].id // empty)' 2>/dev/null || true
 }
 
+delete_own_marked_comment() {
+    _own_id="$(own_marked_comment_id "$repo" "$issue" "$worker_id")"
+    [ -n "$_own_id" ] || _own_id="${own_comment_id_before:-}"
+    if [ -n "$_own_id" ] && [ "$_own_id" != "null" ]; then
+        _lowest_id="$(lowest_lock_field "$repo" "$issue" id)"
+        if [ "$_own_id" != "$_lowest_id" ]; then
+            gh api "repos/$repo/issues/comments/$_own_id" -X DELETE >/dev/null 2>&1 || true
+        fi
+    fi
+    cleanup_startup_heartbeat
+}
+
 # lowest_lock_field REPO ISSUE FIELD — print FIELD (.id, .updated_at, or an
 # embedded run-state field) of the LOWEST-numeric-id marked lock comment, i.e.
 # the CAS linearization point. updated_at is the SERVER timestamp from the
@@ -254,6 +266,7 @@ fi
 case "$claim_confirm_reads" in *[!0-9]*|'') claim_confirm_reads=5 ;; esac
 [ "$claim_confirm_reads" -gt 0 ] || claim_confirm_reads=1
 reclaiming=""
+own_comment_id_before="$(own_marked_comment_id "$repo" "$issue" "$worker_id")"
 if terminal_merged_exists "$repo" "$issue"; then
     exit_already_merged
 fi
@@ -271,11 +284,7 @@ if [ -n "$lowest_owner" ] && [ "$lowest_owner" != "$worker_id" ]; then
     age=0
     if [ -n "$lock_epoch" ]; then age=$(( now_epoch - lock_epoch )); fi
     if [ "$age" -le "$reclaim_secs" ]; then
-        own_comment_id="$(own_marked_comment_id "$repo" "$issue" "$worker_id")"
-        if [ -n "$own_comment_id" ] && [ "$own_comment_id" != "null" ]; then
-            gh api "repos/$repo/issues/comments/$own_comment_id" -X DELETE >/dev/null 2>&1 || true
-        fi
-        cleanup_startup_heartbeat
+        delete_own_marked_comment
         printf 'claim-issue: claim lost (issue %s owned by %s, lock fresh)\n' "$issue" "$lowest_owner" >&2
         jq -n \
             --argjson issue "$issue" \
@@ -332,11 +341,7 @@ while [ "$confirm_read" -le "$claim_confirm_reads" ]; do
         # Lost race: the lowest-id lock comment is owned by a different worker.
         # Self-clean by deleting ONLY this worker's own marked lock comment, never
         # the winner's lower-id comment. Fail-closed if it cannot be found.
-        own_comment_id="$(own_marked_comment_id "$repo" "$issue" "$worker_id")"
-        if [ -n "$own_comment_id" ] && [ "$own_comment_id" != "null" ]; then
-            gh api "repos/$repo/issues/comments/$own_comment_id" -X DELETE >/dev/null 2>&1 || true
-        fi
-        cleanup_startup_heartbeat
+        delete_own_marked_comment
         printf 'claim-issue: claim lost (issue %s owned by %s)\n' "$issue" "$verified_owner" >&2
         jq -n \
             --argjson issue "$issue" \
@@ -348,11 +353,7 @@ while [ "$confirm_read" -le "$claim_confirm_reads" ]; do
         exit 2
     fi
     if ! printf '%s\n' "$post_labels" | grep -Fx in-progress-by-bot >/dev/null 2>&1; then
-        own_comment_id="$(own_marked_comment_id "$repo" "$issue" "$worker_id")"
-        if [ -n "$own_comment_id" ] && [ "$own_comment_id" != "null" ]; then
-            gh api "repos/$repo/issues/comments/$own_comment_id" -X DELETE >/dev/null 2>&1 || true
-        fi
-        cleanup_startup_heartbeat
+        delete_own_marked_comment
         jq -n \
             --argjson issue "$issue" \
             --arg repo "$repo" \
