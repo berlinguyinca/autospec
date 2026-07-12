@@ -5,28 +5,46 @@ fn autospec() -> Command {
     Command::new(env!("CARGO_BIN_EXE_autospec"))
 }
 
+fn help_command_names(help: &str) -> Vec<&str> {
+    help.lines()
+        .skip_while(|line| line.trim() != "COMMANDS:")
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty() && line.trim() != "OPTIONS:")
+        .filter_map(|line| line.split_whitespace().next())
+        .collect()
+}
+
+#[test]
+fn help_command_table_parser_returns_command_column_only() {
+    let help = "COMMANDS:\n    init           Initialize AutoSpec metadata\n    growth-report  Render metrics\n\nOPTIONS:\n    -h, --help       Print help\n";
+
+    assert_eq!(help_command_names(help), ["init", "growth-report"]);
+}
+
 #[test]
 fn cli_commands_help_lists_required_commands() {
     let output = autospec().arg("--help").output().expect("autospec runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    for command in [
-        "init",
-        "doctor",
-        "status",
-        "autonomous",
-        "plan",
-        "validate",
-        "run",
-        "resume",
-        "report",
-        "showcase",
-        "benchmark",
-        "growth-report",
-    ] {
-        assert!(stdout.contains(command), "help missing {command}");
-    }
+    assert_eq!(
+        help_command_names(&stdout),
+        [
+            "init",
+            "doctor",
+            "status",
+            "autonomous",
+            "plan",
+            "validate",
+            "run",
+            "runtime",
+            "resume",
+            "report",
+            "showcase",
+            "benchmark",
+            "growth-report",
+        ]
+    );
 }
 
 #[test]
