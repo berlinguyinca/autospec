@@ -1248,6 +1248,40 @@ _autospec_conductor_maybe_refresh_self_repair() {
     rm -f "$pending_file" 2>/dev/null || true
 }
 
+_autospec_conductor_repo_stop_flag_path() {
+    local repo="${1:-}"
+    local repo_root="${2:-}"
+    local state_root="${AUTOSPEC_AUTONOMOUS_OPERATOR_DIR:-$HOME/.autospec/autonomous-operator}"
+    local scope=""
+    if [ -n "$repo" ]; then
+        scope="$(printf '%s' "$repo" | sed 's#[/:]#_#g; s#[^A-Za-z0-9._-]#_#g')"
+    elif [ -n "$repo_root" ]; then
+        local real_root
+        real_root="$(cd "$repo_root" 2>/dev/null && pwd -P || printf '%s' "$repo_root")"
+        scope="dir_$(printf '%s' "$real_root" | sed 's#[^A-Za-z0-9._-]#_#g')"
+    fi
+    [ -n "$scope" ] || return 1
+    printf '%s/%s/stop.flag\n' "${state_root%/}" "$scope"
+}
+
+_autospec_conductor_operator_stop_flag_path() {
+    local repo="${1:-}"
+    local repo_root="${2:-}"
+    local repo_flag=""
+    repo_flag="$(_autospec_conductor_repo_stop_flag_path "$repo" "$repo_root" 2>/dev/null || true)"
+    if [ -n "$repo_flag" ] && [ -f "$repo_flag" ]; then
+        printf '%s\n' "$repo_flag"
+        return 0
+    fi
+
+    local isolated_flag="${AUTOSPEC_STOP_FLAG_FILE:-${HOME}/.autospec/stop.flag}"
+    if [ -f "$isolated_flag" ]; then
+        printf '%s\n' "$isolated_flag"
+        return 0
+    fi
+    return 1
+}
+
 autospec_conductor_run() {
     if [ -n "${HOME:-}" ]; then
         case ":${PATH:-}:" in
@@ -1547,9 +1581,11 @@ fi'
 
     # ── Main cycle loop ───────────────────────────────────────────────────────
     while true; do
-        if [ -f "${AUTOSPEC_STOP_FLAG_FILE:-${HOME}/.autospec/stop.flag}" ]; then
+        local _operator_stop_flag
+        _operator_stop_flag="$(_autospec_conductor_operator_stop_flag_path "$_repo" "$_repo_root" 2>/dev/null || true)"
+        if [ -n "$_operator_stop_flag" ]; then
             printf '[conductor] operator stop flag detected: %s\n' \
-                "${AUTOSPEC_STOP_FLAG_FILE:-${HOME}/.autospec/stop.flag}" >&2
+                "$_operator_stop_flag" >&2
             _stop_reason="operator:stop-flag"
             break
         fi

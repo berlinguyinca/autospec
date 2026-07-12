@@ -231,6 +231,75 @@ _install_stub() {
   [[ "$output" == *"Tier-1 queue empty"* ]]
 }
 
+@test "conductor: repo-scoped immediate stop wins before Tier-1 queue scan despite isolated stop env" {
+  _install_stub "autonomous-control-channel.sh" \
+    'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '"'"'{"tier":1,"action":"run-backlog","reason":"test"}\n'"'"''
+
+  local list_ready_log="$TEST_TMP/list-ready.log"
+  _install_stub "list-ready-issues.sh" \
+    "printf 'list-ready-issues.sh --repo test-owner/test-repo\n' >> '$list_ready_log'; printf '{\"ready\":[{\"number\":1886}],\"blocked\":[],\"claimed\":[],\"conflicts\":[],\"worker_cap\":{\"reached\":false},\"batch\":[{\"number\":1886}]}\n'"
+
+  local gate_log="$TEST_TMP/gate.log"
+  _install_stub "autonomous-premerge-gate.sh" \
+    "printf 'merge-ok\n'; printf 'gate-called\n' >> '$gate_log'"
+
+  local resilience_log="$TEST_TMP/resilience.log"
+  _install_stub "autonomous-resilience.sh" \
+    "case \"\${1:-} \${2:-}\" in
+       'state write')
+         shift 2
+         status=''
+         while [ \"\$#\" -gt 0 ]; do
+           case \"\$1\" in --status) status=\"\$2\"; shift 2 ;; *) shift ;; esac
+         done
+         printf 'state:%s\n' \"\$status\" >> '$resilience_log'
+         printf 'DECISION:state-written\n'
+         ;;
+       'lock acquire') printf 'DECISION:lock-acquired\nLOCK_SESSION:test\n' ;;
+       'lock release') printf 'DECISION:lock-released\n' ;;
+       *) exit 0 ;;
+     esac"
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  mkdir -p "$HOME/.autospec/autonomous-operator/test-owner_test-repo"
+  printf 'immediate\n2026-07-12T05:39:15Z test\n' \
+    > "$HOME/.autospec/autonomous-operator/test-owner_test-repo/stop.flag"
+
+  local run_log="$TEST_TMP/run.log"
+  export AUTOSPEC_RUN_CMD="printf 'lint-implementation.sh 1898 --issue 1886\nscripts/validate.sh\n' >> '$run_log'"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    AUTOSPEC_STOP_FLAG_FILE='$TEST_TMP/autospec-no-stop-1898.flag' \
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=5 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"operator stop flag detected"* ]]
+  [ ! -f "$list_ready_log" ]
+  [ ! -f "$gate_log" ]
+  if [ -f "$run_log" ]; then
+    ! grep -q 'lint-implementation.sh 1898 --issue 1886' "$run_log"
+    ! grep -q 'scripts/validate.sh' "$run_log"
+  fi
+  grep -q 'state:stopped:operator:stop-flag:cycle-0' "$resilience_log"
+
+  local status_json
+  status_json="$(bash "$REPO_ROOT/scripts/autospec-autonomous.sh" \
+    status --json --repo test-owner/test-repo)"
+  [ "$(printf '%s' "$status_json" | jq -r '.running')" = "false" ]
+}
+
 # ── 2. Gate blocks → drain is skipped, no run invocation ─────────────────────
 @test "conductor: gate block skips drain in that cycle" {
   _install_stub "autonomous-control-channel.sh" 'exit 0'
