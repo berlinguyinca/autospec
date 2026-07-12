@@ -34,11 +34,5 @@
     "function": "main",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
     "justification": "pre-existing generated baseline CLI dispatcher; refactor separately from repo quality audit loop"
-  },
-  {
-    "file": "scripts/autospec-baseline-v25.py",
-    "function": "rel",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "pre-existing path helper in generated baseline script; refactor separately from repo quality audit loop"
   }
 ]

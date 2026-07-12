@@ -45,6 +45,35 @@ def rel(root: Path, path: Path) -> str:
     return str(path.relative_to(root))
 
 
+def rel_parts(root: Path, path: Path) -> tuple[str, ...]:
+    return path.relative_to(root).parts
+
+
+def path_has_part(root: Path, path: Path, *parts: str) -> bool:
+    wanted = {part.lower() for part in parts}
+    return any(part.lower() in wanted for part in rel_parts(root, path))
+
+
+def path_name_has_token(path: Path, *tokens: str) -> bool:
+    name = path.name.lower()
+    return any(re.search(rf"(^|[-_.]){re.escape(token.lower())}($|[-_.])", name) for token in tokens)
+
+
+def path_has_component_token(root: Path, path: Path, *tokens: str) -> bool:
+    return path_name_has_token(path, *tokens) or any(
+        path_name_has_token(Path(part), *tokens) for part in path.relative_to(root).parent.parts
+    )
+
+
+def text_has_token(text: str, *tokens: str) -> bool:
+    normalized = text.lower()
+    return any(re.search(rf"(^|[^a-z0-9]){re.escape(token.lower())}([^a-z0-9]|$)", normalized) for token in tokens)
+
+
+def text_has_phrase(text: str, phrase: str) -> bool:
+    return re.search(re.escape(phrase.lower()), text.lower()) is not None
+
+
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -117,12 +146,12 @@ def safety_payload() -> dict:
 
 def state_for_spec(path: Path) -> str:
     text = read_text(path).lower()
-    name = path.name.lower()
     for state, text_markers, name_markers in SPEC_STATE_RULES:
-        if (
-            any(marker in text for marker in text_markers)
-            or any(marker in name for marker in name_markers)
-        ):
+        text_match = any(
+            text_has_phrase(text, marker) if " " in marker else text_has_token(text, marker)
+            for marker in text_markers
+        )
+        if text_match or path_name_has_token(path, *name_markers):
             return state
     return "implemented"
 
@@ -258,14 +287,14 @@ def dependency_validation(root: Path, specs: dict) -> dict:
 def documentation_coverage(root: Path) -> dict:
     docs = sorted((root / "docs").rglob("*.md"), key=lambda p: rel(root, p)) if (root / "docs").exists() else []
     readmes = sorted(root.glob("README*"))
-    runbooks = [p for p in docs if "runbook" in rel(root, p).lower() or "/runbooks/" in rel(root, p)]
+    runbooks = [p for p in docs if path_has_part(root, p, "runbooks") or path_name_has_token(p, "runbook", "runbooks")]
     feature_docs = {
         "README": bool(readmes),
         "docs": bool(docs),
         "runbooks": bool(runbooks),
-        "known_limitations": any("limitation" in p.name.lower() for p in docs),
-        "security": any("security" in rel(root, p).lower() for p in docs),
-        "roadmap": any("roadmap" in rel(root, p).lower() for p in docs),
+        "known_limitations": any(path_name_has_token(p, "limitation", "limitations") for p in docs),
+        "security": any(path_has_component_token(root, p, "security") for p in docs),
+        "roadmap": any(path_has_component_token(root, p, "roadmap") for p in docs),
         "release_notes": True,
     }
     payload = {
@@ -292,7 +321,7 @@ def cli_audit(root: Path) -> dict:
         entries.append({
             "path": rel(root, script),
             "exists": True,
-            "has_usage_or_help": "usage" in text.lower() or "--help" in text or script.name.startswith("autospec-"),
+            "has_usage_or_help": text_has_token(text, "usage") or text_has_phrase(text, "--help") or script.name.startswith("autospec-"),
             "executable": os.access(script, os.X_OK),
         })
     payload = {
@@ -319,8 +348,8 @@ def test_matrix(root: Path) -> dict:
         "bats": [rel(root, p) for p in bats],
         "python": [rel(root, p) for p in python_tests],
         "shell_validation": [rel(root, p) for p in validation_scripts],
-        "smoke": [rel(root, p) for p in bats if "smoke" in p.name or "release" in p.name or "v25" in p.name],
-        "regression": [rel(root, p) for p in bats if "autonomy" in p.name or "regression" in p.name],
+        "smoke": [rel(root, p) for p in bats if path_name_has_token(p, "smoke", "release", "v25")],
+        "regression": [rel(root, p) for p in bats if path_name_has_token(p, "autonomy", "regression")],
     }
     payload = {
         "schema": "autospec.v25.test_matrix",
@@ -339,7 +368,7 @@ def test_matrix(root: Path) -> dict:
 def count_loc(root: Path) -> dict:
     counts = {"python": 0, "shell": 0, "markdown": 0, "other": 0}
     for path in all_files(root):
-        if ".autospec/" in rel(root, path):
+        if path_has_part(root, path, ".autospec"):
             continue
         suffix = path.suffix.lower()
         lines = len(read_text(path).splitlines())
