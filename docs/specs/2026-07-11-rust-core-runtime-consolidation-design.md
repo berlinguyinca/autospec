@@ -27,3 +27,14 @@ above 80% emits `handoff`, `clear`, and `resume` in that order, and usage below
 30% resets `Compacted` or `Rolled` state back to `Normal` via a `noop` action
 with a diagnostic payload. Rust callers must execute returned actions outside
 the core crate; the core module only classifies usage and mutates local state.
+
+## Watchdog Linked PR Liveness
+
+`autospec-watchdog.sh` and `list-ready-issues.sh` treat linked open PRs as
+active ownership for their closing issue. A PR body that uses a GitHub closing
+keyword such as `Fixes #1859` keeps that issue out of stale-claim reclaim and
+out of the ready queue while the PR is still open. Nonterminal check rows,
+missing check rows on a newly opened PR, unavailable PR evidence, or malformed
+PR evidence all fail closed so the issue is not reselected before PR
+finalization. This preserves the handoff from worker ownership to PR/CI
+ownership without introducing a new queue state.

@@ -56,6 +56,11 @@ case "\$sub" in
     printf '{"state":"%s","body":"","labels":[]}\n' "\$state"
     ;;
   "pr list")
+    if [ -f "$FIXTURE_DIR/pr-list-fail" ]; then
+      printf 'simulated pr list failure
+' >&2
+      exit 1
+    fi
     filter=""; prev=""
     for a in "\$@"; do
       [ "\$prev" = "--jq" ] && filter="\$a"
@@ -117,6 +122,21 @@ write_open_linked_pr_1873_with_pytest_in_progress() {
       body:"Fixes #1859\n\n## Closeout report\nResult: pending CI handoff.",
       statusCheckRollup:[{name:"pytest",status:"IN_PROGRESS",conclusion:null}]
     }]' > "$FIXTURE_DIR/prs.json"
+}
+
+
+write_open_linked_pr_1873_with_empty_checks() {
+    jq -n '[{
+      number:1873,
+      state:"OPEN",
+      title:"Fix batch claims atomic worker startup",
+      body:"Fixes #1859\n\n## Closeout report\nResult: checks not created yet.",
+      statusCheckRollup:[]
+    }]' > "$FIXTURE_DIR/prs.json"
+}
+
+write_malformed_pr_json() {
+    printf '{not json\n' > "$FIXTURE_DIR/prs.json"
 }
 
 @test "prose 'depends on #N' outside ## Dependencies yields NO edge (issue is ready)" {
@@ -237,6 +257,55 @@ EOF
     [ "$(printf '%s' "$output" | jq -r '.blocked | map(.number) | index(1859) != null')" = "true" ]
     [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1859) | .reason')" = "linked_pr_open" ]
     [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1859) | .linked_pr')" = "1873" ]
+}
+
+@test "issue 1877: issue 1859 is blocked while linked PR 1873 has no check rows yet" {
+    body="$(safe_body)
+$(cat <<'EOF'
+## Summary
+
+Stale issue with captured work in a just-opened PR.
+EOF
+)"
+    write_auto_issue 1859 "batch claims atomic worker startup" "$body"
+    write_open_linked_pr_1873_with_empty_checks
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(1859) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1859) | .reason')" = "linked_pr_open" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1859) | .linked_pr')" = "1873" ]
+}
+
+@test "issue 1877: PR evidence failure blocks candidate instead of reselecting it" {
+    body="$(safe_body)
+$(cat <<'EOF'
+## Summary
+
+Stale issue where GitHub PR evidence is temporarily unavailable.
+EOF
+)"
+    write_auto_issue 1859 "batch claims atomic worker startup" "$body"
+    touch "$FIXTURE_DIR/pr-list-fail"
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(1859) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1859) | .reason')" = "linked_pr_evidence_unavailable" ]
+}
+
+@test "issue 1877: malformed PR JSON blocks candidate instead of reselecting it" {
+    body="$(safe_body)
+$(cat <<'EOF'
+## Summary
+
+Stale issue where GitHub returned malformed PR evidence.
+EOF
+)"
+    write_auto_issue 1859 "batch claims atomic worker startup" "$body"
+    write_malformed_pr_json
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(1859) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1859) | .reason')" = "linked_pr_evidence_unavailable" ]
 }
 
 @test "security-quarantined issue is blocked before ready queue" {
