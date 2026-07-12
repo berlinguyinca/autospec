@@ -154,7 +154,9 @@ run_list_ready() {
     [ "$status" -eq 0 ]
     [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | join(",")')" = "1858" ]
     [ "$(printf '%s\n' "$output" | jq -r '.worker_cap.active_count')" = "1" ]
-    [ "$(printf '%s\n' "$output" | jq -r '.batch | map(.number) | join(",")')" = "1859,1860,1861" ]
+    # A transient run-state read failure keeps the active worker counted for the
+    # repo-wide cap; with cap=3 and one preserved claim, only two new workers fit.
+    [ "$(printf '%s\n' "$output" | jq -r '.batch | map(.number) | join(",")')" = "1859,1860" ]
     [ ! -s "$TMPDIR_BATS/edit.log" ]
     [ ! -s "$TMPDIR_BATS/clear.log" ]
 }

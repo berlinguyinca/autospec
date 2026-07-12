@@ -6,6 +6,7 @@ pub mod plan;
 pub mod report;
 pub mod resume;
 pub mod run;
+pub mod runtime;
 pub mod showcase;
 pub mod status;
 pub mod validate;
@@ -17,6 +18,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("plan", "Inspect a generated spec package"),
     ("validate", "Run configured validation gates"),
     ("run", "Execute the spec queue"),
+    ("runtime", "Inspect runtime ownership policy"),
     ("resume", "Resume an interrupted run"),
     ("report", "Render release and run reports"),
     ("showcase", "Render a local demo showcase"),
@@ -44,6 +46,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             "plan" => plan::run(rest),
             "validate" => validate::run(rest),
             "run" => run::run(rest),
+            "runtime" => runtime::run(rest),
             "resume" => resume::run(rest),
             "report" => report::run(rest),
             "showcase" => showcase::run(rest),
