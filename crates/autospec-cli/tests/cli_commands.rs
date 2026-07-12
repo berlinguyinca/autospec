@@ -849,6 +849,26 @@ fn autonomous_start_writes_launch_provenance_and_list_reports_it() {
 }
 
 #[test]
+fn autonomous_list_reports_empty_object_for_malformed_launch_json() {
+    let temp = temp_dir("autospec-autonomous-launch-malformed");
+    let operator_dir = temp.join("operator");
+    let scope = operator_dir.join("berlinguyinca_autospec");
+    std::fs::create_dir_all(&scope).expect("scope dir");
+    std::fs::write(scope.join("launch.json"), "not-json").expect("launch json");
+
+    let output = autospec()
+        .args(["autonomous", "list", "--json"])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .output()
+        .expect("autospec autonomous list runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"scope\":\"berlinguyinca_autospec\""));
+    assert!(stdout.contains("\"launch\":{}"));
+}
+
+#[test]
 fn autonomous_start_records_argv_and_passthrough_options_in_launch_provenance() {
     let temp = temp_dir("autospec-autonomous-launch-argv");
     let operator_dir = temp.join("operator");
