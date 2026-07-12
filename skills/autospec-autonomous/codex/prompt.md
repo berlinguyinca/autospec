@@ -53,7 +53,7 @@ If the feature-request argument matches the regex `^\s*stop(\s+--\w+)*\s*$` (cas
    ```bash
    autospec-autonomous stop "$@"
    ```
-2. Honor `--graceful` and `--immediate` by writing the shell-compatible stop sentinel at `${AUTOSPEC_STOP_FLAG_FILE:-$HOME/.autospec/stop.flag}`. Graceful stop leaves the conductor to finish the current issue/cycle boundary while stopping the companion monitor/supervisor; immediate stop also terminates the recorded conductor PID.
+2. Honor `--graceful` and `--immediate` by writing the shell-compatible stop sentinel at `${AUTOSPEC_STOP_FLAG_FILE:-~/.autospec/autonomous-operator/<repo-scope>/stop.flag}`. Graceful stop leaves the conductor to finish the current issue/cycle boundary while stopping the companion monitor/supervisor; immediate stop also terminates the recorded conductor PID.
 3. Print the stop summary and exit. Do not enter the autonomous pipeline.
 
 ## Operator commands and monitoring
@@ -367,13 +367,13 @@ Equivalent installed shell command:
 autospec-autonomous start [--max-cycles N] [--dry-run] [--no-digest] [--poll-interval-sec N]
 ```
 
-- `--max-cycles N` — outer loop cycle cap. Default unlimited; recorded in Rust `launch.json`.
-- `--budget-tokens N` — lifetime token ceiling (sets `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS`). Default 50M; recorded in Rust `launch.json`.
+- `--max-cycles N` — outer loop cycle cap. Default unlimited; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
+- `--budget-tokens N` — lifetime token ceiling (sets `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS`). Default 50M; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
 - `--budget-hours N` — wall-time budget. Default unlimited; recorded in Rust `launch.json`.
-- `--budget-issues N` — lifetime issue ceiling. Default unlimited; recorded in Rust `launch.json`.
+- `--budget-issues N` — lifetime issue ceiling. Default unlimited; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
 - `--dry-run` — go through the waterfall steps but do not invoke `/autospec-run` or merge; log what would happen.
-- `--no-digest` — skip daily digest writes; recorded in Rust `launch.json`.
-- `--poll-interval-sec N` — cycle polling interval in seconds. Default 60; aliases the Rust lifecycle interval.
+- `--no-digest` — skip daily digest writes; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
+- `--poll-interval-sec N` — cycle polling interval in seconds. Default 60; aliases the Rust lifecycle interval and is forwarded through the Rust `run-foreground` shim.
 - `AUTOSPEC_AUTONOMOUS_COMPANIONS=0` — emergency/test opt-out for the default monitor/supervisor companion startup.
 - `AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD` — override supervisor command to start beside the monitor for the same repo scope.
 

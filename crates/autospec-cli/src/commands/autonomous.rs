@@ -14,10 +14,14 @@ struct Options {
     pid: String,
     interval_sec: u64,
     lines: usize,
+    iterations: u64,
     all: bool,
     dry_run: bool,
     once: bool,
     json: bool,
+    foreground: bool,
+    force: bool,
+    log_path: String,
     max_cycles: String,
     budget_tokens: String,
     budget_hours: String,
@@ -36,10 +40,14 @@ impl Default for Options {
             pid: String::new(),
             interval_sec: 300,
             lines: 50,
+            iterations: 0,
             all: false,
             dry_run: false,
             once: false,
             json: false,
+            foreground: false,
+            force: false,
+            log_path: String::new(),
             max_cycles: String::new(),
             budget_tokens: String::new(),
             budget_hours: String::new(),
@@ -177,11 +185,29 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .parse::<usize>()
                     .map_err(|_| format!("invalid --lines value: {raw}"))?;
             }
+            "--iterations" => {
+                index += 1;
+                let raw = args
+                    .get(index)
+                    .ok_or_else(|| "--iterations requires a value".to_string())?;
+                options.iterations = raw
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid --iterations value: {raw}"))?;
+            }
+            "--log" => {
+                index += 1;
+                options.log_path = args
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| "--log requires a value".to_string())?;
+            }
             "--all" => options.all = true,
             "--dry-run" => options.dry_run = true,
             "--no-digest" => options.no_digest = true,
             "--once" => options.once = true,
             "--json" => options.json = true,
+            "--foreground" => options.foreground = true,
+            "--force" => options.force = true,
             "--graceful" => options.stop_mode = StopMode::Graceful,
             "--immediate" => options.stop_mode = StopMode::Immediate,
             unknown => return Err(format!("unknown autospec autonomous option: {unknown}")),
@@ -214,6 +240,9 @@ fn start(options: Options) -> Result<(), String> {
     }
 
     validate_repo_dir(&options)?;
+    if options.foreground {
+        return run_foreground(options);
+    }
     let layout = RunLayout::new(&options)?;
     fs::create_dir_all(&layout.state_dir)
         .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
@@ -228,20 +257,29 @@ fn start(options: Options) -> Result<(), String> {
         &layout.state_dir,
         &layout.log_dir,
     )?;
-    let monitor = spawn_unit(
-        "monitor",
-        &commands.monitor,
-        &options.repo_dir,
-        &layout.state_dir,
-        &layout.log_dir,
-    )?;
-    let supervisor = spawn_unit(
-        "supervisor",
-        &commands.supervisor,
-        &options.repo_dir,
-        &layout.state_dir,
-        &layout.log_dir,
-    )?;
+    let (monitor, supervisor) = if companions_enabled() {
+        (
+            spawn_unit(
+                "monitor",
+                &commands.monitor,
+                &options.repo_dir,
+                &layout.state_dir,
+                &layout.log_dir,
+            )?,
+            spawn_unit(
+                "supervisor",
+                &commands.supervisor,
+                &options.repo_dir,
+                &layout.state_dir,
+                &layout.log_dir,
+            )?,
+        )
+    } else {
+        (
+            empty_unit("monitor", &layout.state_dir, &layout.log_dir),
+            empty_unit("supervisor", &layout.state_dir, &layout.log_dir),
+        )
+    };
 
     if options.json {
         println!(
@@ -262,7 +300,9 @@ fn start(options: Options) -> Result<(), String> {
 }
 
 fn monitor(options: Options) -> Result<(), String> {
+    let mut iteration = 0;
     loop {
+        iteration += 1;
         if options.json {
             println!(
                 "{{\"command\":\"autonomous\",\"subcommand\":\"monitor\",\"repo\":\"{}\",\"status\":\"ok\",\"action\":\"none\"}}",
@@ -271,7 +311,7 @@ fn monitor(options: Options) -> Result<(), String> {
         } else {
             println!("autospec-monitor: ok repo={} action=none", options.repo);
         }
-        if options.once {
+        if options.once || (options.iterations > 0 && iteration >= options.iterations) {
             break;
         }
         thread::sleep(Duration::from_secs(options.interval_sec));
@@ -280,7 +320,9 @@ fn monitor(options: Options) -> Result<(), String> {
 }
 
 fn supervise(options: Options) -> Result<(), String> {
+    let mut iteration = 0;
     loop {
+        iteration += 1;
         let layout = RunLayout::new(&options)?;
         let recorded = read_unit("conductor", &layout.state_dir);
         let watched_pid = if options.pid.is_empty() {
@@ -315,7 +357,7 @@ fn supervise(options: Options) -> Result<(), String> {
                 options.repo, conductor, watched_pid, action
             );
         }
-        if options.once {
+        if options.once || (options.iterations > 0 && iteration >= options.iterations) {
             break;
         }
         thread::sleep(Duration::from_secs(options.interval_sec));
@@ -353,7 +395,7 @@ fn status(options: Options) -> Result<(), String> {
 
 fn stop(options: Options) -> Result<(), String> {
     let layout = RunLayout::new(&options)?;
-    let stop_flag = write_stop_flag(options.stop_mode)?;
+    let stop_flag = write_stop_flag(&layout, options.stop_mode)?;
     let mut stopped = 0;
     let units: &[&str] = match options.stop_mode {
         StopMode::Graceful => &["supervisor", "monitor"],
@@ -395,7 +437,7 @@ fn restart(options: Options) -> Result<(), String> {
         }
     }
     wait_for_scope_stopped(&layout.state_dir);
-    clear_stop_flag()?;
+    clear_stop_flag(&layout)?;
     let commands = launch_commands(&options)?;
     fs::create_dir_all(&layout.state_dir)
         .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
@@ -408,20 +450,29 @@ fn restart(options: Options) -> Result<(), String> {
         &layout.state_dir,
         &layout.log_dir,
     )?;
-    let monitor = spawn_unit(
-        "monitor",
-        &commands.monitor,
-        &options.repo_dir,
-        &layout.state_dir,
-        &layout.log_dir,
-    )?;
-    let supervisor = spawn_unit(
-        "supervisor",
-        &commands.supervisor,
-        &options.repo_dir,
-        &layout.state_dir,
-        &layout.log_dir,
-    )?;
+    let (monitor, supervisor) = if companions_enabled() {
+        (
+            spawn_unit(
+                "monitor",
+                &commands.monitor,
+                &options.repo_dir,
+                &layout.state_dir,
+                &layout.log_dir,
+            )?,
+            spawn_unit(
+                "supervisor",
+                &commands.supervisor,
+                &options.repo_dir,
+                &layout.state_dir,
+                &layout.log_dir,
+            )?,
+        )
+    } else {
+        (
+            empty_unit("monitor", &layout.state_dir, &layout.log_dir),
+            empty_unit("supervisor", &layout.state_dir, &layout.log_dir),
+        )
+    };
     if stop_options.json {
         println!(
             "{{\"command\":\"autonomous\",\"subcommand\":\"restart\",\"repo\":\"{}\",\"stopped\":{},\"status\":\"started\",\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
@@ -603,6 +654,7 @@ fn cleanup(options: Options) -> Result<(), String> {
 }
 
 fn run_foreground(options: Options) -> Result<(), String> {
+    let layout = RunLayout::new(&options)?;
     let script = if Path::new("scripts/autospec-autonomous.sh").exists() {
         PathBuf::from("scripts/autospec-autonomous.sh")
     } else {
@@ -617,13 +669,21 @@ fn run_foreground(options: Options) -> Result<(), String> {
             script.display()
         ));
     }
-    let status = Command::new("bash")
+    let mut command = Command::new("bash");
+    command
         .arg(script)
         .arg("run-foreground")
         .arg("--repo")
         .arg(&options.repo)
         .arg("--repo-dir")
-        .arg(&options.repo_dir)
+        .arg(&options.repo_dir);
+    for arg in conductor_passthrough_args(&options) {
+        command.arg(arg);
+    }
+    if std::env::var("AUTOSPEC_STOP_FLAG_FILE").is_err() {
+        command.env("AUTOSPEC_STOP_FLAG_FILE", stop_flag_path(&layout));
+    }
+    let status = command
         .status()
         .map_err(|error| format!("cannot launch foreground conductor backend: {error}"))?;
     if status.success() {
@@ -715,7 +775,17 @@ fn launch_commands(options: &Options) -> Result<LaunchCommands, String> {
     let interval = options.interval_sec;
 
     let conductor = std::env::var("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD").unwrap_or_else(|_| {
-        format!("{exe} autonomous run-foreground --repo {repo} --repo-dir {repo_dir}")
+        let passthrough = conductor_passthrough_args(options)
+            .into_iter()
+            .map(|arg| shell_word(&arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let suffix = if passthrough.is_empty() {
+            String::new()
+        } else {
+            format!(" {passthrough}")
+        };
+        format!("{exe} autonomous run-foreground --repo {repo} --repo-dir {repo_dir}{suffix}")
     });
     let monitor = std::env::var("AUTOSPEC_AUTONOMOUS_MONITOR_CMD").unwrap_or_else(|_| {
         format!("{exe} autonomous monitor --repo {repo} --repo-dir {repo_dir} --interval-sec {interval}")
@@ -765,6 +835,48 @@ fn spawn_unit(
         logpath,
         logpath_file,
     })
+}
+
+fn empty_unit(name: &str, state_dir: &Path, log_dir: &Path) -> UnitRecord {
+    UnitRecord {
+        pid: String::new(),
+        pid_file: state_dir.join(format!("{name}.pid")),
+        logpath: log_dir.join(format!("autospec-autonomous-{name}.log")),
+        logpath_file: state_dir.join(format!("{name}.logpath")),
+    }
+}
+
+fn companions_enabled() -> bool {
+    std::env::var("AUTOSPEC_AUTONOMOUS_COMPANIONS")
+        .map(|value| value != "0")
+        .unwrap_or(true)
+}
+
+fn conductor_passthrough_args(options: &Options) -> Vec<String> {
+    let mut args = Vec::new();
+    if !options.max_cycles.is_empty() {
+        args.push("--max-cycles".to_string());
+        args.push(options.max_cycles.clone());
+    }
+    if options.no_digest {
+        args.push("--no-digest".to_string());
+    }
+    if options.interval_sec != 300 {
+        args.push("--poll-interval-sec".to_string());
+        args.push(options.interval_sec.to_string());
+    }
+    if !options.budget_tokens.is_empty() {
+        args.push("--budget-tokens".to_string());
+        args.push(options.budget_tokens.clone());
+    }
+    if !options.budget_issues.is_empty() {
+        args.push("--budget-issues".to_string());
+        args.push(options.budget_issues.clone());
+    }
+    if options.dry_run {
+        args.push("--dry-run".to_string());
+    }
+    args
 }
 
 fn write_launch_json(
@@ -1591,8 +1703,14 @@ fn json_object_strings(raw: &str) -> Vec<String> {
     objects
 }
 
-fn clear_stop_flag() -> Result<(), String> {
-    let flag = env_path("AUTOSPEC_STOP_FLAG_FILE", &[".autospec", "stop.flag"]);
+fn stop_flag_path(layout: &RunLayout) -> PathBuf {
+    std::env::var("AUTOSPEC_STOP_FLAG_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| layout.state_dir.join("stop.flag"))
+}
+
+fn clear_stop_flag(layout: &RunLayout) -> Result<(), String> {
+    let flag = stop_flag_path(layout);
     if flag.exists() {
         fs::remove_file(&flag)
             .map_err(|error| format!("cannot remove {}: {error}", flag.display()))?;
@@ -1600,8 +1718,8 @@ fn clear_stop_flag() -> Result<(), String> {
     Ok(())
 }
 
-fn write_stop_flag(mode: StopMode) -> Result<PathBuf, String> {
-    let flag = env_path("AUTOSPEC_STOP_FLAG_FILE", &[".autospec", "stop.flag"]);
+fn write_stop_flag(layout: &RunLayout, mode: StopMode) -> Result<PathBuf, String> {
+    let flag = stop_flag_path(layout);
     let dir = flag
         .parent()
         .ok_or_else(|| format!("cannot resolve parent for {}", flag.display()))?;

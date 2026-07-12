@@ -865,6 +865,142 @@ fn autonomous_start_records_argv_and_passthrough_options_in_launch_provenance() 
 }
 
 #[test]
+fn autonomous_start_default_conductor_forwards_enforced_backend_options() {
+    let output = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            "/tmp/autospec",
+            "--max-cycles",
+            "3",
+            "--budget-tokens",
+            "1000",
+            "--budget-issues",
+            "4",
+            "--no-digest",
+            "--poll-interval-sec",
+            "15",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("autospec autonomous start runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("autospec autonomous run-foreground"));
+    assert!(stdout.contains("--max-cycles 3"));
+    assert!(stdout.contains("--budget-tokens 1000"));
+    assert!(stdout.contains("--budget-issues 4"));
+    assert!(stdout.contains("--no-digest"));
+    assert!(stdout.contains("--poll-interval-sec 15"));
+    assert!(stdout.contains("--dry-run"));
+}
+
+#[test]
+fn autonomous_start_companion_opt_out_skips_monitor_and_supervisor_processes() {
+    let temp = temp_dir("autospec-autonomous-no-companions");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let repo_dir = temp.join("repo");
+    make_git_repo(&repo_dir, None);
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .output()
+        .expect("autospec autonomous start runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let scope = operator_dir.join("berlinguyinca_autospec");
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"conductor\":{\"pid\":\""));
+    assert!(stdout.contains("\"monitor\":{\"pid\":\"\""));
+    assert!(stdout.contains("\"supervisor\":{\"pid\":\"\""));
+    assert!(!scope.join("monitor.pid").exists());
+    assert!(!scope.join("supervisor.pid").exists());
+    cleanup_pids(&scope);
+}
+
+#[test]
+fn autonomous_stop_defaults_to_repo_scoped_stop_flag() {
+    let temp = temp_dir("autospec-autonomous-scoped-stop");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "stop",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .output()
+        .expect("autospec autonomous stop runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let scoped_flag = operator_dir
+        .join("berlinguyinca_autospec")
+        .join("stop.flag");
+
+    assert!(output.status.success());
+    assert!(stdout.contains(&json_path(&scoped_flag)));
+    assert_eq!(
+        std::fs::read_to_string(&scoped_flag)
+            .expect("scoped stop flag")
+            .lines()
+            .next(),
+        Some("graceful")
+    );
+}
+
+#[test]
+fn autonomous_monitor_and_supervise_accept_shell_compatibility_options() {
+    let monitor = autospec()
+        .args([
+            "autonomous",
+            "monitor",
+            "--iterations",
+            "1",
+            "--log",
+            "/tmp/ignored.log",
+        ])
+        .output()
+        .expect("autospec autonomous monitor runs");
+    let supervisor = autospec()
+        .args([
+            "autonomous",
+            "supervise",
+            "--iterations",
+            "1",
+            "--force",
+            "--log",
+            "/tmp/ignored.log",
+        ])
+        .output()
+        .expect("autospec autonomous supervise runs");
+
+    assert!(monitor.status.success());
+    assert!(supervisor.status.success());
+}
+
+#[test]
 fn autonomous_logs_falls_back_to_newest_legacy_flat_log() {
     let temp = temp_dir("autospec-autonomous-legacy-log");
     let operator_dir = temp.join("operator");
@@ -1183,6 +1319,10 @@ fn cleanup_pids(scope: &std::path::Path) {
             }
         }
     }
+}
+
+fn json_path(path: &std::path::Path) -> String {
+    path.display().to_string().replace('\\', "\\\\")
 }
 
 fn write_conductor_log(
