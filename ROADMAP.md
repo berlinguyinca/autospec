@@ -1,29 +1,22 @@
 # Roadmap
 
-This file is the public roadmap summary. Detailed design history lives under `docs/specs/`.
+This file is the public roadmap summary. The canonical roadmap now lives in
+[`docs/roadmap.md`](docs/roadmap.md), which is also the destination linked from
+`README.md` and `docs/index.md`.
 
-## V74 Final Release Candidate
+## Source of truth
 
-Status: release-candidate validation.
+Use `docs/roadmap.md` for the current near-term, medium-term, and launch-scope
+roadmap. Keeping one detailed roadmap prevents the root summary and docs site
+copy from drifting.
 
-Goals:
+## Editing rule
 
-- Preserve the external-facing README, docs launch set, community files, demo, and launch copy.
-- Keep V25/V60/V61/public launch gates current.
-- Ship the additive Rust core workspace and CLI reference without replacing the validated shell workflows.
-- Capture release-candidate evidence under `.autospec/releases/` and `.autospec/reports/`.
+When roadmap priorities change, edit `docs/roadmap.md` first. Update this root
+summary only when the canonical roadmap location or audience changes.
 
-## After V74
+## Discovery evidence
 
-- Record the demo video and link it from the README.
-- Collect external installation feedback.
-- Improve examples for common stacks.
-- Continue hardening validation and release gates.
-- Replace screenshot and social-preview placeholders with real launch assets.
-- Mature `autospec init`, `status`, `plan`, `validate`, `run`, `resume`, `report`, `showcase`, `benchmark`, and `growth-report` from explicit stubs into operational Rust-backed commands.
-
-## Later
-
-- Better hosted-docs publishing.
-- More target-repo templates.
-- Clearer partial-adoption guides for teams that want planning only, QA only, or release audits only.
+This consolidation addresses the autospec-explore source-analysis finding:
+`Adversarial verify: passed before filing` for divergent roadmap sources
+`ROADMAP.md` and `docs/roadmap.md`.
