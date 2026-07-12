@@ -390,7 +390,7 @@ Rust migration ownership:
   `autospec autonomous run-foreground`; that Rust shim delegates to the existing
   shell conductor backend.
 - **Shell-owned conductor body:** the waterfall implementation still lives behind
-  `scripts/autospec-autonomous.sh run-foreground`. Migrate that backend last,
+  `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh run-foreground`. Migrate that backend last,
   after Rust can call the same gates/drain scripts with parity tests.
 - **Timeline parity:** Rust `timeline` now owns chronological summaries,
   coordinator forecast rows, heartbeat-active issue reconciliation, and item
