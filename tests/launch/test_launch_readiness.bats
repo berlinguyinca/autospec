@@ -45,6 +45,7 @@ copy_required_launch_files() {
     mkdir -p "$TMP_REPO/$(dirname "$rel")"
     printf 'placeholder quickstart launch readiness\n' > "$TMP_REPO/$rel"
   done
+  printf '# Roadmap\n\nCanonical roadmap details live in [docs/roadmap.md](docs/roadmap.md).\n' > "$TMP_REPO/ROADMAP.md"
 }
 
 @test "launch readiness validator prints success marker when required artifacts exist" {
@@ -64,6 +65,16 @@ copy_required_launch_files() {
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"README.md missing quickstart"* ]]
+}
+
+@test "launch readiness validator rejects divergent root roadmap content" {
+  copy_required_launch_files
+  printf '# Roadmap\n\nThis duplicate roadmap will drift from docs/roadmap.md.\n' > "$TMP_REPO/ROADMAP.md"
+
+  run bash "$TMP_REPO/scripts/validate-launch-readiness.sh"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ROADMAP.md must delegate to docs/roadmap.md"* ]]
 }
 
 copy_public_launch_files() {

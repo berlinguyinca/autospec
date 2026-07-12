@@ -95,8 +95,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    let mut options = Options::default();
-    options.raw_args = args.to_vec();
+    let mut options = Options {
+        raw_args: args.to_vec(),
+        ..Default::default()
+    };
     let mut index = 0;
     if let Some(first) = args.first() {
         if !first.starts_with('-') {
@@ -1493,8 +1495,8 @@ fn timeline_timings(lines: &[String]) -> Vec<String> {
             ));
         }
     }
-    active.sort_by(|left, right| right.0.cmp(&left.0));
-    completed.sort_by(|left, right| right.0.cmp(&left.0));
+    active.sort_by_key(|row| std::cmp::Reverse(row.0));
+    completed.sort_by_key(|row| std::cmp::Reverse(row.0));
     let mut rows = vec!["item timing".to_string()];
     rows.extend(active.into_iter().take(3).map(|(_, row)| row));
     rows.extend(completed.into_iter().take(3).map(|(_, row)| row));
