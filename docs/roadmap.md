@@ -1,5 +1,9 @@
 # Roadmap
 
+
+> Canonical roadmap source: this page is the detailed source of truth. The root
+> `ROADMAP.md` is a short pointer to this page to avoid divergent roadmap copy.
+
 V74 is the completed release-candidate milestone for the launch slice: V61
 external readiness plus the additive V62-V73 Rust core, CLI, evidence, safety,
 demo, and growth-reporting foundation. The current post-launch horizon is the
