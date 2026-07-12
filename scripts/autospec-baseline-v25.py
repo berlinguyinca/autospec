@@ -5020,16 +5020,20 @@ def generic_artifact_build(root: Path, version: int) -> dict:
 
 
 def generic_gate(root: Path, version: int, args) -> dict:
-    blockers=[]; preflight=generic_preflight(root,version); write_requested=bool(getattr(args,"execute_real_github_write",False) or getattr(args,"allow_git_push",False) or getattr(args,"allow_github_pr",False))
+    blockers=[]; preflight=generic_preflight(root,version)
     if not generic_previous_ready(root,version): blockers.append("blocked_missing_prior_evidence")
     if preflight["blockers"]: blockers.extend(preflight["blockers"])
-    if getattr(args,"allow_network",False): blockers.append("blocked_forbidden_operation:network_not_allowed")
-    if write_requested: blockers.append("blocked_forbidden_operation:github_write_requested")
-    if getattr(args,"allow_merge",False) or getattr(args,"allow_auto_merge",False): blockers.append("blocked_forbidden_operation:merge_requested")
-    if getattr(args,"allow_approval",False) or getattr(args,"allow_self_approval",False): blockers.append("blocked_forbidden_operation:approval_requested")
-    if getattr(args,"allow_default_branch_push",False): blockers.append("blocked_forbidden_operation:default_branch_push_requested")
-    if getattr(args,"allow_force_push",False): blockers.append("blocked_forbidden_operation:force_push_requested")
-    if getattr(args,"allow_tag_push",False): blockers.append("blocked_forbidden_operation:tag_push_requested")
+    forbidden_flag_groups = [
+        ("blocked_forbidden_operation:network_not_allowed", ("allow_network",)),
+        ("blocked_forbidden_operation:github_write_requested", ("execute_real_github_write", "allow_git_push", "allow_github_pr")),
+        ("blocked_forbidden_operation:merge_requested", ("allow_merge", "allow_auto_merge")),
+        ("blocked_forbidden_operation:approval_requested", ("allow_approval", "allow_self_approval")),
+        ("blocked_forbidden_operation:default_branch_push_requested", ("allow_default_branch_push",)),
+        ("blocked_forbidden_operation:force_push_requested", ("allow_force_push",)),
+        ("blocked_forbidden_operation:tag_push_requested", ("allow_tag_push",)),
+    ]
+    for blocker, flags in forbidden_flag_groups:
+        if any(getattr(args, flag, False) for flag in flags): blockers.append(blocker)
     status="ready" if not blockers else blockers[0]
     payload={"schema":f"autospec.autonomy.v{version}.gate","run_id":GENERIC_PHASES[version]["run_id"],"decision":status,"status":status,"real_write_allowed":False,"blockers":sorted(set(blockers)),**generic_payload(version),**safety_payload()}
     payload["github_read_attempted"] = False; payload["pr_update_attempted"] = False
