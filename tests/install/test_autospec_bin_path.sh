@@ -201,7 +201,7 @@ AUTOSPEC_VALIDATE_DELEGATION_ARGS="$TEST_HOME/validate-delegation.args" \
 AUTOSPEC_VALIDATE_DELEGATION_ENV="$TEST_HOME/validate-delegation.env" \
 AUTOSPEC_RUST_VALIDATE_BIN="$FAKE_AUTOSPEC_BIN/autospec" \
 AUTOSPEC_VALIDATE_LEGACY_ACTIVE=0 \
-bash "$SCRIPT_DIR/scripts/validate.sh" --fast >/tmp/autospec-validate-delegation.out 2>&1
+env -u AUTOSPEC_FORCE_LEGACY_SHELL bash "$SCRIPT_DIR/scripts/validate.sh" --fast >/tmp/autospec-validate-delegation.out 2>&1
 
 grep -qxF 'validate --fast' "$TEST_HOME/validate-delegation.args" || {
     echo "FAIL: scripts/validate.sh did not delegate to autospec validate first"
