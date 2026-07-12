@@ -82,44 +82,44 @@ impl ContextMonitorEngine {
 
     /// Classify token usage from integer token counts.
     pub fn classify(&mut self, used_tokens: u64, max_tokens: u64) -> Vec<ContextAction> {
-        let pct = usage_percent(used_tokens, max_tokens);
-        self.classify_percent(pct)
+        let percent = usage_percent(used_tokens, max_tokens);
+        self.classify_percent(percent)
     }
 
-    /// Classify already-normalized usage percentage (`0.0` to `1.0`).
+    /// Classify usage as an integer percentage (`0` to `100`).
     ///
     /// The only rollover path is Normal → Compacted → Rolled; even a direct climb
     /// to 80% first emits `compact`, matching the Python engine invariant.
-    pub fn classify_percent(&mut self, pct: f64) -> Vec<ContextAction> {
+    pub fn classify_percent(&mut self, percent: u8) -> Vec<ContextAction> {
         match self.state {
-            ContextState::Normal => self.classify_normal(pct),
-            ContextState::Compacted => self.classify_compacted(pct),
-            ContextState::Rolled => self.classify_rolled(pct),
+            ContextState::Normal => self.classify_normal(percent),
+            ContextState::Compacted => self.classify_compacted(percent),
+            ContextState::Rolled => self.classify_rolled(percent),
         }
     }
 
-    fn classify_normal(&mut self, pct: f64) -> Vec<ContextAction> {
-        if pct < 0.50 {
+    fn classify_normal(&mut self, percent: u8) -> Vec<ContextAction> {
+        if percent < 50 {
             return Vec::new();
         }
         self.state = ContextState::Compacted;
         compact_actions()
     }
 
-    fn classify_compacted(&mut self, pct: f64) -> Vec<ContextAction> {
-        if pct >= 0.80 {
+    fn classify_compacted(&mut self, percent: u8) -> Vec<ContextAction> {
+        if percent >= 80 {
             self.state = ContextState::Rolled;
             return rollover_actions();
         }
-        if pct < 0.30 {
+        if percent < 30 {
             self.state = ContextState::Normal;
             return reset_actions("reset:compacted->normal");
         }
         Vec::new()
     }
 
-    fn classify_rolled(&mut self, pct: f64) -> Vec<ContextAction> {
-        if pct >= 0.30 {
+    fn classify_rolled(&mut self, percent: u8) -> Vec<ContextAction> {
+        if percent >= 30 {
             return Vec::new();
         }
         self.state = ContextState::Normal;
@@ -127,12 +127,12 @@ impl ContextMonitorEngine {
     }
 }
 
-fn usage_percent(used_tokens: u64, max_tokens: u64) -> f64 {
+fn usage_percent(used_tokens: u64, max_tokens: u64) -> u8 {
     if max_tokens == 0 {
-        0.0
-    } else {
-        used_tokens as f64 / max_tokens as f64
+        return 0;
     }
+    let percent = (u128::from(used_tokens) * 100) / u128::from(max_tokens);
+    percent.min(100) as u8
 }
 
 fn compact_actions() -> Vec<ContextAction> {
