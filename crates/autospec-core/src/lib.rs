@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod context;
 pub mod error;
 pub mod evidence;
 pub mod execution;
