@@ -14,10 +14,12 @@ setup() {
     export LABELS="$TEST_TMP/labels.txt"
     export COMMENTS="$TEST_TMP/comments.json"
     export PR_STATE="$TEST_TMP/pr-state.txt"
+    export PRS="$TEST_TMP/prs.json"
     export CALLS="$TEST_TMP/calls.log"
     mkdir -p "$AUTOSPEC_WATCHDOG_DIR"
     printf 'OPEN in-progress-by-bot\n' > "$LABELS"
     printf 'OPEN\n' > "$PR_STATE"
+    printf '[]\n' > "$PRS"
 
     mkdir -p "$TEST_TMP/bin"
     cat > "$TEST_TMP/bin/gh" <<'SH'
@@ -123,6 +125,20 @@ if [ "$1" = "api" ]; then
   exit 0
 fi
 
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  filter=""; prev=""
+  for a in "$@"; do
+    [ "$prev" = "--jq" ] && filter="$a"
+    prev="$a"
+  done
+  if [ -n "$filter" ]; then
+    jq -r "$filter" "${PRS:?}"
+  else
+    cat "${PRS:?}"
+  fi
+  exit 0
+fi
+
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   cat "$PR_STATE"
   exit 0
@@ -176,6 +192,7 @@ write_state_comment() {
     stale="$(date -u -v-4H +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '4 hours ago' +'%Y-%m-%dT%H:%M:%SZ')"
     write_state_comment 42 pr_created "$stale" "7" > "$COMMENTS"
     printf 'OPEN\n' > "$PR_STATE"
+    printf '[]\n' > "$PRS"
 
     run bash "$WATCHDOG"
 
@@ -231,6 +248,16 @@ write_state_worker() {
           ({schema:1,repo:"testorg/testrepo",issue:$issue,worker_id:$worker_id,state:$state,branch:"feat/x",pr:"",step:$state,paths:[],claimed_at:$updated_at,updated_at:$updated_at,ttl_seconds:300} | tojson) +
           "\n<!-- autospec-run-state:end -->")
       }]'
+}
+
+write_open_linked_pr_with_nonterminal_pytest() {
+    jq -n '[{
+      number:1873,
+      state:"OPEN",
+      title:"Fix batch claims atomic worker startup",
+      body:"Fixes #1859\n\n## Closeout report\nResult: pending CI handoff.",
+      statusCheckRollup:[{name:"pytest",status:"IN_PROGRESS",conclusion:null}]
+    }]' > "$PRS"
 }
 
 isolate_heartbeat_pass() {
@@ -309,6 +336,37 @@ isolate_heartbeat_pass() {
     [[ "$output" == *"claimed_released=1"* ]]
     [ ! -f "$(HB_DIR_FOR)/42.json" ]
     grep -q -- '--add-label auto-implement' "$CALLS"
+}
+
+@test "issue 1877: issue 1859 is not reclaimed while linked PR 1873 has pytest IN_PROGRESS" {
+    isolate_heartbeat_pass
+    stale="$(date -u -v-10M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '10 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    write_hb 1859 claimed 360
+    write_state_worker 1859 claimed "$stale" "otherhost:me:shell:1859" > "$COMMENTS"
+    write_open_linked_pr_with_nonterminal_pytest
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"claimed_released=0"* ]]
+    [ -f "$(HB_DIR_FOR)/1859.json" ]
+    grep -q 'in-progress-by-bot' "$LABELS"
+    ! grep -q -- '--add-label auto-implement' "$CALLS"
+    grep -q -- 'pr list' "$CALLS"
+}
+
+@test "issue 1877: run-state reconcile also preserves issue 1859 while PR 1873 pytest is IN_PROGRESS" {
+    stale="$(date -u -v-10M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '10 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    write_state_worker 1859 claimed "$stale" "otherhost:me:shell:1859" > "$COMMENTS"
+    write_open_linked_pr_with_nonterminal_pytest
+
+    run bash "$WATCHDOG"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"claimed_released=0"* ]]
+    grep -q 'in-progress-by-bot' "$LABELS"
+    ! grep -q -- '--add-label auto-implement' "$CALLS"
+    grep -q -- 'pr list' "$CALLS"
 }
 
 # A marked run-state comment with a marker body, parametrized worker_id/ts/order.

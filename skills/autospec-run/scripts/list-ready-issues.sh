@@ -286,6 +286,22 @@ startup_claim_has_evidence() {
     return 1
 }
 
+linked_open_pr_with_nonterminal_checks() {
+    issue_number="$1"
+    prs_json="$(gh pr list \
+        --repo "$repo" \
+        --state open \
+        --limit 100 \
+        --json number,state,body,statusCheckRollup 2>/dev/null)" || return 0
+    printf '%s\n' "$prs_json" | jq -c --arg issue "$issue_number" '
+      [ .[]
+        | select(((.state // "OPEN") | ascii_upcase) == "OPEN")
+        | select((.body // "") | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#" + $issue + "([^0-9]|$)"))
+        | select(any((.statusCheckRollup // [])[]?;
+            (((.status // "") | ascii_upcase) != "COMPLETED") or (.conclusion == null)))
+      ] | sort_by(.number) | .[0] // empty
+    ' 2>/dev/null || true
+}
 release_startup_claim_if_stale() {
     issue_number="$1"
     state_json="$2"
@@ -403,6 +419,14 @@ for number in $candidate_numbers; do
     safety_gate_result="$(printf '%s\n' "$issue_json" | autospec_issue_safety_gate_result)"
     if ! printf '%s\n' "$safety_gate_result" | jq -e '.ok == true' >/dev/null 2>&1; then
         object="$(printf '%s\n' "$issue_json" | jq --argjson safety_gate "$safety_gate_result" '. + {reason:"safety_gate_failed", safety_gate:$safety_gate}')"
+        json_append "$BLOCKED_FILE" "$object"
+        continue
+    fi
+
+    linked_pr_json="$(linked_open_pr_with_nonterminal_checks "$number")"
+    if [ -n "$linked_pr_json" ]; then
+        linked_pr_number="$(printf '%s\n' "$linked_pr_json" | jq -r '.number // empty' 2>/dev/null || true)"
+        object="$(printf '%s\n' "$issue_json" | jq --argjson linked_pr "$linked_pr_number" '. + {reason:"linked_pr_open", linked_pr:$linked_pr}')"
         json_append "$BLOCKED_FILE" "$object"
         continue
     fi

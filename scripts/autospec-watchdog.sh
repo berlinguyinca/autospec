@@ -563,6 +563,21 @@ active_local_worktree_process_count() {
     processes_in_worktree "$wt"
 }
 
+# Return the lowest-numbered open PR whose body links to the issue with a
+# GitHub closing keyword. A linked open PR means the worker has handed ownership
+# to the PR/checks path; the watchdog must not make the issue ready again while
+# that PR is still open.
+linked_open_pr_json_for_issue() {
+    lop_issue="$1"
+    # shellcheck disable=SC2086
+    lop_prs="$(gh pr list $REPO_ARGS --state open --limit 100 --json number,state,body,statusCheckRollup 2>/dev/null)" || return 1
+    printf '%s\n' "$lop_prs" | jq -c --arg issue "$lop_issue" '
+      [ .[]
+        | select(((.state // "OPEN") | ascii_upcase) == "OPEN")
+        | select((.body // "") | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#" + $issue + "([^0-9]|$)"))
+      ] | sort_by(.number) | .[0] // empty
+    '
+}
 # reclaim_decision <issue> <window_secs> → "reclaim" | "hold"
 #
 # Decision table for a `claimed` heartbeat already past the claimed-timeout:
@@ -574,6 +589,15 @@ active_local_worktree_process_count() {
 reclaim_decision() {
     rd_issue="$1"
     rd_window="$2"
+
+    if ! rd_linked_pr="$(linked_open_pr_json_for_issue "$rd_issue")"; then
+        printf 'hold'      # gh API unreachable — fail-safe: do not reclaim
+        return 0
+    fi
+    if [ -n "$rd_linked_pr" ]; then
+        printf 'hold'      # linked open PR owns the issue until PR finalization
+        return 0
+    fi
 
     # Fail-safe: if gh returns a non-zero exit (offline / rate-limited / auth
     # failure), we cannot prove the claim is stale → hold to never reclaim a
@@ -796,6 +820,14 @@ reconcile_run_state_comments() {
                 fi
                 ;;
         esac
+
+        if ! linked_pr_json="$(linked_open_pr_json_for_issue "$issue")"; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+        if [ -n "$linked_pr_json" ]; then
+            continue
+        fi
 
         if [ "$step" = "claimed" ] && [ "$age" -ge "$WATCHDOG_CLAIMED_TIMEOUT_SECS" ]; then
             # Reuse the heartbeat reclaim decision so no-heartbeat run-state
