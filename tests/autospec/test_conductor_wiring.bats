@@ -306,6 +306,66 @@ _install_stub() {
   [ "${digest_count:-0}" -le 1 ]
 }
 
+@test "conductor: self-repair merge refreshes before next drain cycle" {
+  _install_stub "autonomous-control-channel.sh" 'exit 0'
+  _install_stub "autonomous-waterfall.sh" \
+    'printf '"'"'{"tier":1,"action":"run-backlog","reason":"self-repair-refresh"}\n'"'"''
+  _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+  _install_stub "autonomous-spend-ledger.sh" \
+    'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  _install_stub "autonomous-resilience.sh" \
+    'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; main-health) printf "DECISION:continue\n";; *) exit 0;; esac'
+  _install_stub "autospec-usage-limit.sh" 'exit 0'
+
+  local sha_file="$TEST_TMP/main-sha"
+  local outcome_file="$TEST_TMP/last-outcome.json"
+  local run_log="$TEST_TMP/run.log"
+  local refresh_log="$TEST_TMP/refresh.log"
+  local event_log="$TEST_TMP/events.log"
+  printf 'old-main-1878\n' > "$sha_file"
+
+  cat > "$FAKE_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
+  printf 'scripts/autospec-autonomous-run-drain.sh\n'
+  exit 0
+fi
+if [ "${1:-}" = "repo" ]; then
+  echo '{"nameWithOwner":"test-owner/test-repo"}'
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$FAKE_BIN/gh"
+
+  export AUTOSPEC_LAST_OUTCOME_FILE="$outcome_file"
+  export AUTOSPEC_CONDUCTOR_MAIN_SHA_CMD="cat '$sha_file'"
+  export AUTOSPEC_CONDUCTOR_REFRESH_CMD="printf 'refresh old=%s new=%s\n' \"\$AUTOSPEC_CONDUCTOR_REFRESH_OLD_SHA\" \"\$AUTOSPEC_CONDUCTOR_REFRESH_NEW_SHA\" >> '$refresh_log'; printf 'refresh\n' >> '$event_log'"
+  export AUTOSPEC_RUN_CMD="count=\$(wc -l < '$run_log' 2>/dev/null || printf 0); printf 'drain-%s\n' \"\$((count + 1))\" >> '$run_log'; printf 'drain-%s\n' \"\$((count + 1))\" >> '$event_log'; if [ \"\$count\" -eq 0 ]; then printf '{\"self_originated\":true,\"outcome\":\"merged\",\"issue\":1882,\"pr\":1878}\n' > '$outcome_file'; printf 'new-main-1878\n' > '$sha_file'; fi"
+
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES=2 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    AUTOSPEC_CONDUCTOR_PID=74150 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+
+  [ "$status" -eq 0 ]
+  grep -q 'refresh old=old-main-1878 new=new-main-1878' "$refresh_log"
+  grep -q 'drain-2' "$run_log"
+  printf 'drain-1\nrefresh\ndrain-2\n' > "$TEST_TMP/expected-events.log"
+  diff -u "$TEST_TMP/expected-events.log" "$event_log"
+
+  [[ "$output" == *"self-repair refresh: old-main-1878 -> new-main-1878"* ]]
+  grep -q 'old-main-1878 -> new-main-1878' "$TEST_TMP/.autospec/autonomous-digest.md"
+  grep -q 'Conductor PID: `74150`' "$TEST_TMP/.autospec/autonomous-digest.md"
+}
+
 # ── 4. Spend-ledger park writes resume context and arms ScheduleWakeup/cron ──
 @test "conductor: spend-ledger park arms resume and exits" {
   _install_stub "autonomous-control-channel.sh" 'exit 0'
