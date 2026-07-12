@@ -15,6 +15,7 @@ set -eu
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
+AUTOSPEC_VALIDATE_LEGACY_ACTIVE_AT_ENTRY="${AUTOSPEC_VALIDATE_LEGACY_ACTIVE:-0}"
 
 autospec_delegate_validate_to_rust() {
     if [ "${AUTOSPEC_FORCE_LEGACY_SHELL:-}" = 1 ]; then
@@ -114,6 +115,10 @@ fi
 case "$JOBS" in ''|*[!0-9]*) JOBS=1 ;; esac
 [ "$JOBS" -ge 1 ] || JOBS=1
 [ "$RUN_BATS" = 1 ] || printf 'validate: fast mode — skipping bats suites (structural checks only)\n' >&2
+VALIDATE_NESTED_FAST_AT_ENTRY=0
+if [ "$AUTOSPEC_VALIDATE_LEGACY_ACTIVE_AT_ENTRY" = 1 ] && [ "$RUN_BATS" = 0 ]; then
+    VALIDATE_NESTED_FAST_AT_ENTRY=1
+fi
 
 # Scoped-mode setup: compute the changed-file list and source the affected-set
 # lib. AUTOSPEC_VALIDATE_CHANGED_OVERRIDE (a path to a pre-built changed-file
@@ -2748,6 +2753,10 @@ check_db_module_install() {
 
 check_install_tests() {
     info "install tests: tests/install/*.sh"
+    if [ "$VALIDATE_NESTED_FAST_AT_ENTRY" = 1 ]; then
+        info "  skipping install tests during nested --fast validation"
+        return 0
+    fi
     if [ -d tests/install ]; then
         for t in tests/install/*.sh; do
             [ -f "$t" ] || continue
