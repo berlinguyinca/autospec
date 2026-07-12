@@ -100,3 +100,47 @@ def test_generic_gate_preserves_forbidden_flag_blockers(tmp_path):
         ]
     )
     assert payload["real_write_allowed"] is False
+def test_handle_generic_command_uses_dispatch_table_for_all_generic_actions(tmp_path, monkeypatch, capsys):
+    module = load_baseline_module()
+    actions = (
+        "contract",
+        "preflight",
+        "artifact-build",
+        "gate",
+        "audit",
+        "verifier",
+        "recovery",
+        "status",
+        "supervisor",
+    )
+
+    assert tuple(name for name, _handler in module.GENERIC_COMMAND_DISPATCHERS) == actions
+
+    calls = []
+
+    def recorder(name, result=None):
+        def _record(root, version, *extra_args):
+            calls.append((name, root, version, extra_args))
+            return result
+
+        return _record
+
+    monkeypatch.setattr(module, "generic_contract", recorder("contract"))
+    monkeypatch.setattr(module, "generic_preflight", recorder("preflight", {"blockers": []}))
+    monkeypatch.setattr(module, "generic_artifact_build", recorder("artifact-build"))
+    monkeypatch.setattr(module, "generic_gate", recorder("gate", {"blockers": []}))
+    monkeypatch.setattr(module, "generic_audit", recorder("audit"))
+    monkeypatch.setattr(module, "generic_verifier", recorder("verifier", {"blockers": []}))
+    monkeypatch.setattr(module, "generic_recovery", recorder("recovery"))
+    monkeypatch.setattr(module, "generic_status", recorder("status", {"status": "ready"}))
+    monkeypatch.setattr(module, "generic_supervisor", recorder("supervisor", {"status": "ready"}))
+
+    for action in actions:
+        args = SimpleNamespace(command=f"v40-{action}")
+        assert module.handle_generic_command(tmp_path, args) == 0
+
+    assert [call[0] for call in calls] == list(actions)
+    assert all(call[1] == tmp_path and call[2] == 40 for call in calls)
+    assert calls[3][3] == (SimpleNamespace(command="v40-gate"),)
+    assert calls[8][3] == (SimpleNamespace(command="v40-supervisor"),)
+    assert capsys.readouterr().out == "v40 status: ready\nv40 status: ready\n"
