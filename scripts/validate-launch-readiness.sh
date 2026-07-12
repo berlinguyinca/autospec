@@ -26,6 +26,19 @@ require_readme_quickstart() {
   fi
 }
 
+require_root_roadmap_delegates() {
+  if [ ! -f ROADMAP.md ]; then
+    fail "missing ROADMAP.md"
+    return
+  fi
+  if ! grep -Eq '\[`?docs/roadmap\.md`?\]\(docs/roadmap\.md\)' ROADMAP.md; then
+    fail "ROADMAP.md must delegate to docs/roadmap.md"
+  fi
+  if grep -Eq '^## (Near Term|Medium Term|After V74|Later)' ROADMAP.md; then
+    fail "ROADMAP.md must not duplicate roadmap sections from docs/roadmap.md"
+  fi
+}
+
 require_group() {
   local group="$1"
   shift
@@ -37,6 +50,7 @@ require_group() {
 }
 
 require_readme_quickstart
+require_root_roadmap_delegates
 
 require_group "docs" \
   docs/index.md \
@@ -91,4 +105,3 @@ if [ "$failures" -ne 0 ]; then
 fi
 
 printf 'AUTOSPEC_V61_LAUNCH_READY=true\n'
-
