@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 from types import SimpleNamespace
 from pathlib import Path
@@ -100,3 +101,38 @@ def test_generic_gate_preserves_forbidden_flag_blockers(tmp_path):
         ]
     )
     assert payload["real_write_allowed"] is False
+
+
+def test_legacy_version_commands_are_table_dispatched():
+    module = load_baseline_module()
+
+    assert set(module.LEGACY_COMMAND_READY_STATUS) == set(range(26, 40))
+
+    module_source = MODULE_PATH.read_text(encoding="utf-8")
+    module_ast = ast.parse(module_source)
+    main_source = ast.get_source_segment(module_source, module_ast.body[-2])
+    assert main_source is not None
+    assert "handle_legacy_command(root, args)" in main_source
+    assert 'args.command == "v26-' not in main_source
+    assert 'args.command == "v39-' not in main_source
+
+
+def test_legacy_command_dispatch_preserves_status_return_codes(tmp_path, monkeypatch, capsys):
+    module = load_baseline_module()
+
+    def fake_v26_status(root):
+        return {"status": "ready_after_human_canary"}
+
+    def fake_v28_status(root):
+        return {"status": "blocked"}
+
+    monkeypatch.setattr(module, "v26_status", fake_v26_status)
+    monkeypatch.setattr(module, "v28_status", fake_v28_status)
+
+    ready_args = SimpleNamespace(command="v26-status")
+    blocked_args = SimpleNamespace(command="v28-status")
+
+    assert module.handle_legacy_command(tmp_path, ready_args) == 0
+    assert "v26 status: ready_after_human_canary" in capsys.readouterr().out
+    assert module.handle_legacy_command(tmp_path, blocked_args) == 1
+    assert "v28 status: blocked" in capsys.readouterr().out
