@@ -10,7 +10,7 @@ fn autonomous_audit_classifies_dry_promotion_zero_filed_as_no_work() {
 #[test]
 fn autonomous_audit_classifies_dry_run_live_mutation_as_guideline_violation() {
     let class =
-        classify_failure("autospec-autonomous --dry-run silently runs live and mutates GitHub");
+        classify_failure("autospec-autonomous dry-run silently runs live and mutates GitHub");
 
     assert_eq!(class, FailureClass::GuidelineViolation);
 }
