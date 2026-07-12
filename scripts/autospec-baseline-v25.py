@@ -5539,6 +5539,142 @@ def handle_generic_command(root: Path, args) -> int | None:
     return None
 
 
+LEGACY_VERSION_READY_STATUS = {
+    26: "ready_after_human_canary",
+    27: "ready_after_human_canary",
+    28: "ready",
+    29: "ready_after_human_canary",
+    30: "ready_after_human_canary",
+    31: "ready",
+    32: "ready",
+    33: "ready",
+    34: "ready_after_human_canary",
+    35: "ready",
+    36: "ready",
+    37: "ready",
+    38: "ready_after_human_canary",
+    39: "ready",
+}
+
+LEGACY_VERSION_ACTIONS = (
+    "contract",
+    "preflight",
+    "artifact-build",
+    "gate",
+    "audit",
+    "verifier",
+    "recovery",
+    "status",
+    "supervisor",
+)
+
+
+def handle_legacy_version_command(root: Path, args) -> int | None:
+    actions = "|".join(re.escape(action) for action in LEGACY_VERSION_ACTIONS)
+    m = re.fullmatch(rf"v(\d+)-({actions})", args.command)
+    if not m:
+        return None
+    version = int(m.group(1))
+    action = m.group(2)
+    ready_status = LEGACY_VERSION_READY_STATUS.get(version)
+    if ready_status is None:
+        return None
+    handler = globals()[f"v{version}_{action.replace('-', '_')}"]
+    if action in {"gate", "supervisor"}:
+        payload = handler(root, args)
+    else:
+        payload = handler(root)
+    if action in {"preflight", "gate", "verifier"}:
+        return 0 if not payload["blockers"] else 1
+    if action in {"status", "supervisor"}:
+        print(f"v{version} status: {payload['status']}")
+        return 0 if payload["status"] == ready_status else 1
+    return 0
+
+
+def _v61_mainline_acceptance_command(root: Path, args) -> int:
+    payload = v61_mainline_acceptance(root)
+    print(f"v61 mainline acceptance: {payload['status']}")
+    return 0 if payload["status"] == "accepted" else 1
+
+
+def _v61_capability_truth_audit_command(root: Path, args) -> int:
+    payload = v61_capability_truth_audit(root)
+    print(f"v61 capability truth audit: {payload['status']}")
+    return 0 if payload["status"] == "pass" else 1
+
+
+def _v61_operator_command_catalog_command(root: Path, args) -> int:
+    payload = v61_operator_command_catalog(root)
+    print(f"v61 operator command catalog: {payload['status']}")
+    return 0
+
+
+def _v61_golden_path_build_command(root: Path, args) -> int:
+    payload = v61_golden_path_build(root)
+    print(f"v61 golden path build: {payload['status']}")
+    return 0
+
+
+def _v61_golden_path_status_command(root: Path, args) -> int:
+    path = root / ".autospec/reports/v61-golden-path-status.json"
+    payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else v61_golden_path_build(root)
+    print(f"v61 golden path status: {payload['status']}")
+    return 0 if payload["status"] == "written" else 1
+
+
+def _v61_release_candidate_pack_command(root: Path, args) -> int:
+    payload = v61_release_candidate_pack(root)
+    print(f"v61 release candidate pack: {payload['status']}")
+    return 0
+
+
+def _v61_postmerge_validation_command(root: Path, args) -> int:
+    v61_ensure_status_chain(root)
+    payload = v61_postmerge_validation(root)
+    print(f"v61 postmerge validation: {payload['status']}")
+    return 0 if payload["status"] == "pass" else 1
+
+
+def _v61_human_approval_boundary_audit_command(root: Path, args) -> int:
+    payload = v61_human_approval_boundary_audit(root)
+    print(f"v61 human approval boundary audit: {payload['status']}")
+    return 0 if payload["status"] == "pass" else 1
+
+
+def _v61_remote_write_boundary_audit_command(root: Path, args) -> int:
+    payload = v61_remote_write_boundary_audit(root)
+    print(f"v61 remote write boundary audit: {payload['status']}")
+    return 0 if payload["status"] == "pass" else 1
+
+
+def _v61_status_command(root: Path, args) -> int:
+    if not (root / ".autospec/reports/autonomy-v61-status.json").exists():
+        v61_run_all(root)
+    payload = v61_status(root)
+    print(f"v61 status: {payload['status']}")
+    return 0 if payload["status"] == "ready" else 1
+
+
+V61_COMMAND_DISPATCHERS = {
+    "v61-mainline-acceptance": _v61_mainline_acceptance_command,
+    "v61-capability-truth-audit": _v61_capability_truth_audit_command,
+    "v61-operator-command-catalog": _v61_operator_command_catalog_command,
+    "v61-golden-path-build": _v61_golden_path_build_command,
+    "v61-golden-path-status": _v61_golden_path_status_command,
+    "v61-release-candidate-pack": _v61_release_candidate_pack_command,
+    "v61-postmerge-validation": _v61_postmerge_validation_command,
+    "v61-human-approval-boundary-audit": _v61_human_approval_boundary_audit_command,
+    "v61-remote-write-boundary-audit": _v61_remote_write_boundary_audit_command,
+    "v61-status": _v61_status_command,
+}
+
+
+def handle_v61_command(root: Path, args) -> int | None:
+    handler = V61_COMMAND_DISPATCHERS.get(args.command)
+    return None if handler is None else handler(root, args)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", default=".")
@@ -5587,358 +5723,12 @@ def main() -> int:
         print(f"v25 status: {status['status']}")
         print(f"V25_BASELINE_READY={'true' if status['V25_BASELINE_READY'] else 'false'}")
         return 0 if status["V25_BASELINE_READY"] else 1
-    if args.command == "v26-contract":
-        v26_contract(root); return 0
-    if args.command == "v26-preflight":
-        payload = v26_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v26-artifact-build":
-        v26_artifact_build(root); return 0
-    if args.command == "v26-gate":
-        payload = v26_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v26-audit":
-        v26_audit(root); return 0
-    if args.command == "v26-verifier":
-        payload = v26_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v26-recovery":
-        v26_recovery(root); return 0
-    if args.command == "v26-status":
-        payload = v26_status(root)
-        print(f"v26 status: {payload['status']}")
-        return 0 if payload["status"] == "ready_after_human_canary" else 1
-    if args.command == "v26-supervisor":
-        payload = v26_supervisor(root, args)
-        print(f"v26 status: {payload['status']}")
-        return 0 if payload["status"] == "ready_after_human_canary" else 1
-    if args.command == "v27-contract":
-        v27_contract(root); return 0
-    if args.command == "v27-preflight":
-        payload = v27_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v27-artifact-build":
-        v27_artifact_build(root); return 0
-    if args.command == "v27-gate":
-        payload = v27_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v27-audit":
-        v27_audit(root); return 0
-    if args.command == "v27-verifier":
-        payload = v27_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v27-recovery":
-        v27_recovery(root); return 0
-    if args.command == "v27-status":
-        payload = v27_status(root)
-        print(f"v27 status: {payload['status']}")
-        return 0 if payload["status"] == "ready_after_human_canary" else 1
-    if args.command == "v27-supervisor":
-        payload = v27_supervisor(root, args)
-        print(f"v27 status: {payload['status']}")
-        return 0 if payload["status"] == "ready_after_human_canary" else 1
-    if args.command == "v28-contract":
-        v28_contract(root); return 0
-    if args.command == "v28-preflight":
-        payload = v28_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v28-artifact-build":
-        v28_artifact_build(root); return 0
-    if args.command == "v28-gate":
-        payload = v28_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v28-audit":
-        v28_audit(root); return 0
-    if args.command == "v28-verifier":
-        payload = v28_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v28-recovery":
-        v28_recovery(root); return 0
-    if args.command == "v28-status":
-        payload = v28_status(root)
-        print(f"v28 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v28-supervisor":
-        payload = v28_supervisor(root, args)
-        print(f"v28 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v29-contract":
-        v29_contract(root); return 0
-    if args.command == "v29-preflight":
-        payload = v29_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v29-artifact-build":
-        v29_artifact_build(root); return 0
-    if args.command == "v29-gate":
-        payload = v29_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v29-audit":
-        v29_audit(root); return 0
-    if args.command == "v29-verifier":
-        payload = v29_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v29-recovery":
-        v29_recovery(root); return 0
-    if args.command == "v29-status":
-        payload = v29_status(root)
-        print(f"v29 status: {payload['status']}")
-        return 0 if payload["status"] == "ready_after_human_canary" else 1
-    if args.command == "v29-supervisor":
-        payload = v29_supervisor(root, args)
-        print(f"v29 status: {payload['status']}")
-        return 0 if payload["status"] == "ready_after_human_canary" else 1
-    if args.command == "v30-contract":
-        v30_contract(root); return 0
-    if args.command == "v30-preflight":
-        payload = v30_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v30-artifact-build":
-        v30_artifact_build(root); return 0
-    if args.command == "v30-gate":
-        payload = v30_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v30-audit":
-        v30_audit(root); return 0
-    if args.command == "v30-verifier":
-        payload = v30_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v30-recovery":
-        v30_recovery(root); return 0
-    if args.command == "v30-status":
-        payload = v30_status(root)
-        print(f"v30 status: {payload['status']}")
-        return 0 if payload["status"] == "ready_after_human_canary" else 1
-    if args.command == "v30-supervisor":
-        payload = v30_supervisor(root, args)
-        print(f"v30 status: {payload['status']}")
-        return 0 if payload["status"] == "ready_after_human_canary" else 1
-    if args.command == "v31-contract":
-        v31_contract(root); return 0
-    if args.command == "v31-preflight":
-        payload = v31_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v31-artifact-build":
-        v31_artifact_build(root); return 0
-    if args.command == "v31-gate":
-        payload = v31_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v31-audit":
-        v31_audit(root); return 0
-    if args.command == "v31-verifier":
-        payload = v31_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v31-recovery":
-        v31_recovery(root); return 0
-    if args.command == "v31-status":
-        payload = v31_status(root)
-        print(f"v31 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v31-supervisor":
-        payload = v31_supervisor(root, args)
-        print(f"v31 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v32-contract":
-        v32_contract(root); return 0
-    if args.command == "v32-preflight":
-        payload = v32_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v32-artifact-build":
-        v32_artifact_build(root); return 0
-    if args.command == "v32-gate":
-        payload = v32_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v32-audit":
-        v32_audit(root); return 0
-    if args.command == "v32-verifier":
-        payload = v32_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v32-recovery":
-        v32_recovery(root); return 0
-    if args.command == "v32-status":
-        payload = v32_status(root)
-        print(f"v32 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v32-supervisor":
-        payload = v32_supervisor(root, args)
-        print(f"v32 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v33-contract":
-        v33_contract(root); return 0
-    if args.command == "v33-preflight":
-        payload = v33_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v33-artifact-build":
-        v33_artifact_build(root); return 0
-    if args.command == "v33-gate":
-        payload = v33_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v33-audit":
-        v33_audit(root); return 0
-    if args.command == "v33-verifier":
-        payload = v33_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v33-recovery":
-        v33_recovery(root); return 0
-    if args.command == "v33-status":
-        payload = v33_status(root)
-        print(f"v33 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v33-supervisor":
-        payload = v33_supervisor(root, args)
-        print(f"v33 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v34-contract":
-        v34_contract(root); return 0
-    if args.command == "v34-preflight":
-        payload = v34_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v34-artifact-build":
-        v34_artifact_build(root); return 0
-    if args.command == "v34-gate":
-        payload = v34_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v34-audit":
-        v34_audit(root); return 0
-    if args.command == "v34-verifier":
-        payload = v34_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v34-recovery":
-        v34_recovery(root); return 0
-    if args.command == "v34-status":
-        payload = v34_status(root)
-        print(f"v34 status: {payload['status']}")
-        return 0 if payload["status"] == "ready_after_human_canary" else 1
-    if args.command == "v34-supervisor":
-        payload = v34_supervisor(root, args)
-        print(f"v34 status: {payload['status']}")
-        return 0 if payload["status"] == "ready_after_human_canary" else 1
-    if args.command == "v35-contract":
-        v35_contract(root); return 0
-    if args.command == "v35-preflight":
-        payload = v35_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v35-artifact-build":
-        v35_artifact_build(root); return 0
-    if args.command == "v35-gate":
-        payload = v35_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v35-audit":
-        v35_audit(root); return 0
-    if args.command == "v35-verifier":
-        payload = v35_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v35-recovery":
-        v35_recovery(root); return 0
-    if args.command == "v35-status":
-        payload = v35_status(root)
-        print(f"v35 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v35-supervisor":
-        payload = v35_supervisor(root, args)
-        print(f"v35 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v36-contract":
-        v36_contract(root); return 0
-    if args.command == "v36-preflight":
-        payload = v36_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v36-artifact-build":
-        v36_artifact_build(root); return 0
-    if args.command == "v36-gate":
-        payload = v36_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v36-audit":
-        v36_audit(root); return 0
-    if args.command == "v36-verifier":
-        payload = v36_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v36-recovery":
-        v36_recovery(root); return 0
-    if args.command == "v36-status":
-        payload = v36_status(root)
-        print(f"v36 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v36-supervisor":
-        payload = v36_supervisor(root, args)
-        print(f"v36 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v37-contract":
-        v37_contract(root); return 0
-    if args.command == "v37-preflight":
-        payload = v37_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v37-artifact-build":
-        v37_artifact_build(root); return 0
-    if args.command == "v37-gate":
-        payload = v37_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v37-audit":
-        v37_audit(root); return 0
-    if args.command == "v37-verifier":
-        payload = v37_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v37-recovery":
-        v37_recovery(root); return 0
-    if args.command == "v37-status":
-        payload = v37_status(root)
-        print(f"v37 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v37-supervisor":
-        payload = v37_supervisor(root, args)
-        print(f"v37 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v38-contract":
-        v38_contract(root); return 0
-    if args.command == "v38-preflight":
-        payload = v38_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v38-artifact-build":
-        v38_artifact_build(root); return 0
-    if args.command == "v38-gate":
-        payload = v38_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v38-audit":
-        v38_audit(root); return 0
-    if args.command == "v38-verifier":
-        payload = v38_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v38-recovery":
-        v38_recovery(root); return 0
-    if args.command == "v38-status":
-        payload = v38_status(root)
-        print(f"v38 status: {payload['status']}")
-        return 0 if payload["status"] == "ready_after_human_canary" else 1
-    if args.command == "v38-supervisor":
-        payload = v38_supervisor(root, args)
-        print(f"v38 status: {payload['status']}")
-        return 0 if payload["status"] == "ready_after_human_canary" else 1
-    if args.command == "v39-contract":
-        v39_contract(root); return 0
-    if args.command == "v39-preflight":
-        payload = v39_preflight(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v39-artifact-build":
-        v39_artifact_build(root); return 0
-    if args.command == "v39-gate":
-        payload = v39_gate(root, args); return 0 if not payload["blockers"] else 1
-    if args.command == "v39-audit":
-        v39_audit(root); return 0
-    if args.command == "v39-verifier":
-        payload = v39_verifier(root); return 0 if not payload["blockers"] else 1
-    if args.command == "v39-recovery":
-        v39_recovery(root); return 0
-    if args.command == "v39-status":
-        payload = v39_status(root)
-        print(f"v39 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v39-supervisor":
-        payload = v39_supervisor(root, args)
-        print(f"v39 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
-    if args.command == "v61-mainline-acceptance":
-        payload = v61_mainline_acceptance(root)
-        print(f"v61 mainline acceptance: {payload['status']}")
-        return 0 if payload["status"] == "accepted" else 1
-    if args.command == "v61-capability-truth-audit":
-        payload = v61_capability_truth_audit(root)
-        print(f"v61 capability truth audit: {payload['status']}")
-        return 0 if payload["status"] == "pass" else 1
-    if args.command == "v61-operator-command-catalog":
-        payload = v61_operator_command_catalog(root)
-        print(f"v61 operator command catalog: {payload['status']}")
-        return 0
-    if args.command == "v61-golden-path-build":
-        payload = v61_golden_path_build(root)
-        print(f"v61 golden path build: {payload['status']}")
-        return 0
-    if args.command == "v61-golden-path-status":
-        path = root / ".autospec/reports/v61-golden-path-status.json"
-        payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else v61_golden_path_build(root)
-        print(f"v61 golden path status: {payload['status']}")
-        return 0 if payload["status"] == "written" else 1
-    if args.command == "v61-release-candidate-pack":
-        payload = v61_release_candidate_pack(root)
-        print(f"v61 release candidate pack: {payload['status']}")
-        return 0
-    if args.command == "v61-postmerge-validation":
-        v61_ensure_status_chain(root)
-        payload = v61_postmerge_validation(root)
-        print(f"v61 postmerge validation: {payload['status']}")
-        return 0 if payload["status"] == "pass" else 1
-    if args.command == "v61-human-approval-boundary-audit":
-        payload = v61_human_approval_boundary_audit(root)
-        print(f"v61 human approval boundary audit: {payload['status']}")
-        return 0 if payload["status"] == "pass" else 1
-    if args.command == "v61-remote-write-boundary-audit":
-        payload = v61_remote_write_boundary_audit(root)
-        print(f"v61 remote write boundary audit: {payload['status']}")
-        return 0 if payload["status"] == "pass" else 1
-    if args.command == "v61-status":
-        if not (root / ".autospec/reports/autonomy-v61-status.json").exists():
-            v61_run_all(root)
-        payload = v61_status(root)
-        print(f"v61 status: {payload['status']}")
-        return 0 if payload["status"] == "ready" else 1
+    legacy_result = handle_legacy_version_command(root, args)
+    if legacy_result is not None:
+        return legacy_result
+    v61_result = handle_v61_command(root, args)
+    if v61_result is not None:
+        return v61_result
     generic_result = handle_generic_command(root, args)
     if generic_result is not None:
         return generic_result
