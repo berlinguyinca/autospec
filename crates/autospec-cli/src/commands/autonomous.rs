@@ -1587,7 +1587,8 @@ fn format_duration(minutes: i64) -> String {
     } else if minutes % 60 == 0 {
         format!("{} hours", minutes / 60)
     } else {
-        format!("{:.1} hours", minutes as f64 / 60.0)
+        let tenths = (minutes * 10 + 30) / 60;
+        format!("{}.{} hours", tenths / 10, tenths % 10)
     }
 }
 
