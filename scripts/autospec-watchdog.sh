@@ -504,14 +504,15 @@ worktree_for_branch() {
     '
 }
 
-processes_in_worktree() {
+processes_in_worktree_with_proc() {
     wt="$1"
-    [ -n "$wt" ] && [ -d "$wt" ] || { printf '0'; return 0; }
-    [ -d /proc ] || { printf '0'; return 0; }
+    proc_dir="${AUTOSPEC_WATCHDOG_PROC_DIR:-/proc}"
+    [ "${AUTOSPEC_WATCHDOG_DISABLE_PROC:-0}" != "1" ] || { printf '0'; return 0; }
+    [ -d "$proc_dir" ] || { printf '0'; return 0; }
     count=0
-    for cwd_link in /proc/[0-9]*/cwd; do
+    for cwd_link in "$proc_dir"/[0-9]*/cwd; do
         [ -e "$cwd_link" ] || continue
-        pid="${cwd_link#/proc/}"
+        pid="${cwd_link#"$proc_dir"/}"
         pid="${pid%/cwd}"
         [ "$pid" != "$$" ] || continue
         cwd="$(readlink "$cwd_link" 2>/dev/null || true)"
@@ -520,6 +521,32 @@ processes_in_worktree() {
         esac
     done
     printf '%s' "$count"
+}
+
+processes_in_worktree_with_lsof() {
+    wt="$1"
+    command -v lsof >/dev/null 2>&1 || { printf '0'; return 0; }
+    count=0
+    while IFS= read -r pid; do
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        [ "$pid" != "$$" ] || continue
+        count=$((count + 1))
+    done <<EOF
+$(lsof -t +D "$wt" 2>/dev/null || true)
+EOF
+    printf '%s' "$count"
+}
+
+processes_in_worktree() {
+    wt="$1"
+    [ -n "$wt" ] && [ -d "$wt" ] || { printf '0'; return 0; }
+    count="$(processes_in_worktree_with_proc "$wt")"
+    case "$count" in *[!0-9]*|'') count=0 ;; esac
+    if [ "$count" -gt 0 ]; then
+        printf '%s' "$count"
+        return 0
+    fi
+    processes_in_worktree_with_lsof "$wt"
 }
 
 note_live_owner_no_heartbeat() {
