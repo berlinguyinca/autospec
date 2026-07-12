@@ -24,7 +24,6 @@ struct Options {
     log_path: String,
     max_cycles: String,
     budget_tokens: String,
-    budget_hours: String,
     budget_issues: String,
     no_digest: bool,
     stop_mode: StopMode,
@@ -34,7 +33,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             raw_args: Vec::new(),
-            subcommand: "status".to_string(),
+            subcommand: "start".to_string(),
             repo: "unknown".to_string(),
             repo_dir: ".".to_string(),
             pid: String::new(),
@@ -50,7 +49,6 @@ impl Default for Options {
             log_path: String::new(),
             max_cycles: String::new(),
             budget_tokens: String::new(),
-            budget_hours: String::new(),
             budget_issues: String::new(),
             no_digest: false,
             stop_mode: StopMode::Graceful,
@@ -74,7 +72,7 @@ impl StopMode {
 }
 
 pub fn run(args: &[String]) -> Result<(), String> {
-    if args.is_empty() || args.iter().any(|arg| arg == "--help" || arg == "-h") {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
         return Ok(());
     }
@@ -164,10 +162,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--budget-hours" => {
                 index += 1;
-                options.budget_hours = args
+                let _ = args
                     .get(index)
-                    .cloned()
                     .ok_or_else(|| "--budget-hours requires a value".to_string())?;
+                return Err(
+                    "--budget-hours is not supported until the Rust conductor owns wall-time enforcement"
+                        .to_string(),
+                );
             }
             "--budget-issues" => {
                 index += 1;
@@ -248,6 +249,7 @@ fn start(options: Options) -> Result<(), String> {
         .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
     fs::create_dir_all(&layout.log_dir)
         .map_err(|error| format!("cannot create {}: {error}", layout.log_dir.display()))?;
+    prepare_start_scope(&layout, &options)?;
     write_launch_json(&layout, &options, &commands)?;
 
     let conductor = spawn_unit(
@@ -256,6 +258,7 @@ fn start(options: Options) -> Result<(), String> {
         &options.repo_dir,
         &layout.state_dir,
         &layout.log_dir,
+        log_override_for("conductor", &options),
     )?;
     let (monitor, supervisor) = if companions_enabled() {
         (
@@ -265,6 +268,7 @@ fn start(options: Options) -> Result<(), String> {
                 &options.repo_dir,
                 &layout.state_dir,
                 &layout.log_dir,
+                log_override_for("monitor", &options),
             )?,
             spawn_unit(
                 "supervisor",
@@ -272,6 +276,7 @@ fn start(options: Options) -> Result<(), String> {
                 &options.repo_dir,
                 &layout.state_dir,
                 &layout.log_dir,
+                log_override_for("supervisor", &options),
             )?,
         )
     } else {
@@ -443,12 +448,14 @@ fn restart(options: Options) -> Result<(), String> {
         .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
     fs::create_dir_all(&layout.log_dir)
         .map_err(|error| format!("cannot create {}: {error}", layout.log_dir.display()))?;
+    write_launch_json(&layout, &options, &commands)?;
     let conductor = spawn_unit(
         "conductor",
         &commands.conductor,
         &options.repo_dir,
         &layout.state_dir,
         &layout.log_dir,
+        log_override_for("conductor", &options),
     )?;
     let (monitor, supervisor) = if companions_enabled() {
         (
@@ -458,6 +465,7 @@ fn restart(options: Options) -> Result<(), String> {
                 &options.repo_dir,
                 &layout.state_dir,
                 &layout.log_dir,
+                log_override_for("monitor", &options),
             )?,
             spawn_unit(
                 "supervisor",
@@ -465,6 +473,7 @@ fn restart(options: Options) -> Result<(), String> {
                 &options.repo_dir,
                 &layout.state_dir,
                 &layout.log_dir,
+                log_override_for("supervisor", &options),
             )?,
         )
     } else {
@@ -807,8 +816,15 @@ fn spawn_unit(
     repo_dir: &str,
     state_dir: &Path,
     log_dir: &Path,
+    log_override: Option<&str>,
 ) -> Result<UnitRecord, String> {
-    let logpath = log_dir.join(format!("autospec-autonomous-{name}.log"));
+    let logpath = log_override
+        .map(PathBuf::from)
+        .unwrap_or_else(|| log_dir.join(format!("autospec-autonomous-{name}.log")));
+    if let Some(parent) = logpath.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    }
     let log = File::create(&logpath)
         .map_err(|error| format!("cannot create {}: {error}", logpath.display()))?;
     let err_log = log
@@ -835,6 +851,41 @@ fn spawn_unit(
         logpath,
         logpath_file,
     })
+}
+
+fn prepare_start_scope(layout: &RunLayout, options: &Options) -> Result<(), String> {
+    let live_units = ["conductor", "monitor", "supervisor"]
+        .into_iter()
+        .map(|name| (name, read_unit(name, &layout.state_dir)))
+        .filter(|(_, unit)| unit.running)
+        .collect::<Vec<_>>();
+    if live_units.is_empty() {
+        return Ok(());
+    }
+    if !options.force {
+        let live = live_units
+            .iter()
+            .map(|(name, unit)| format!("{name}:{}", unit.pid))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "autonomous conductor already running for {} ({live}); use restart or --force",
+            layout.repo
+        ));
+    }
+    for (_, unit) in live_units {
+        let _ = terminate_pid(&unit.pid);
+    }
+    wait_for_scope_stopped(&layout.state_dir);
+    Ok(())
+}
+
+fn log_override_for<'a>(name: &str, options: &'a Options) -> Option<&'a str> {
+    if name == "conductor" && !options.log_path.is_empty() {
+        Some(options.log_path.as_str())
+    } else {
+        None
+    }
 }
 
 fn empty_unit(name: &str, state_dir: &Path, log_dir: &Path) -> UnitRecord {
@@ -886,7 +937,7 @@ fn write_launch_json(
 ) -> Result<(), String> {
     let path = layout.state_dir.join("launch.json");
     let body = format!(
-        "{{\"argv\":{},\"repo\":\"{}\",\"repo_dir\":\"{}\",\"scope\":\"{}\",\"conductor_cmd\":\"{}\",\"monitor_cmd\":\"{}\",\"supervisor_cmd\":\"{}\",\"max_cycles\":\"{}\",\"budget_tokens\":\"{}\",\"budget_hours\":\"{}\",\"budget_issues\":\"{}\",\"no_digest\":{},\"poll_interval_sec\":\"{}\"}}\n",
+        "{{\"argv\":{},\"repo\":\"{}\",\"repo_dir\":\"{}\",\"scope\":\"{}\",\"conductor_cmd\":\"{}\",\"monitor_cmd\":\"{}\",\"supervisor_cmd\":\"{}\",\"max_cycles\":\"{}\",\"budget_tokens\":\"{}\",\"budget_issues\":\"{}\",\"no_digest\":{},\"poll_interval_sec\":\"{}\"}}\n",
         json_string_array(&options.raw_args),
         json_escape(&layout.repo),
         json_escape(&options.repo_dir),
@@ -896,7 +947,6 @@ fn write_launch_json(
         json_escape(&commands.supervisor),
         json_escape(&options.max_cycles),
         json_escape(&options.budget_tokens),
-        json_escape(&options.budget_hours),
         json_escape(&options.budget_issues),
         options.no_digest,
         options.interval_sec
@@ -1786,6 +1836,6 @@ fn json_string_array(values: &[String]) -> String {
 
 fn print_help() {
     println!(
-        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|monitor|supervise|status] [OPTIONS]"
+        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground] [OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
     );
 }

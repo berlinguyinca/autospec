@@ -61,6 +61,27 @@ fn autonomous_start_dry_run_includes_monitor_and_supervisor_companions() {
 }
 
 #[test]
+fn autonomous_bare_command_defaults_to_start() {
+    let output = autospec()
+        .args([
+            "autonomous",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            "/tmp/autospec",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("autospec autonomous runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"subcommand\":\"start\""));
+    assert!(stdout.contains("\"status\":\"dry-run\""));
+}
+
+#[test]
 fn autonomous_supervise_once_json_reports_observer_status() {
     let output = autospec()
         .args([
@@ -829,8 +850,6 @@ fn autonomous_start_records_argv_and_passthrough_options_in_launch_provenance() 
             "3",
             "--budget-tokens",
             "1000",
-            "--budget-hours",
-            "2",
             "--budget-issues",
             "4",
             "--no-digest",
@@ -857,7 +876,6 @@ fn autonomous_start_records_argv_and_passthrough_options_in_launch_provenance() 
     assert!(launch.contains("\"--max-cycles\""));
     assert!(launch.contains("\"max_cycles\":\"3\""));
     assert!(launch.contains("\"budget_tokens\":\"1000\""));
-    assert!(launch.contains("\"budget_hours\":\"2\""));
     assert!(launch.contains("\"budget_issues\":\"4\""));
     assert!(launch.contains("\"no_digest\":true"));
     assert!(launch.contains("\"poll_interval_sec\":\"15\""));
@@ -1001,6 +1019,144 @@ fn autonomous_monitor_and_supervise_accept_shell_compatibility_options() {
 }
 
 #[test]
+fn autonomous_start_rejects_unsupported_budget_hours() {
+    let output = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            "/tmp/autospec",
+            "--budget-hours",
+            "2",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("autospec autonomous start runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("--budget-hours is not supported"));
+}
+
+#[test]
+fn autonomous_start_uses_explicit_conductor_log_path() {
+    let temp = temp_dir("autospec-autonomous-explicit-log");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let repo_dir = temp.join("repo");
+    let explicit_log = temp.join("custom").join("conductor.log");
+    make_git_repo(&repo_dir, None);
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--log",
+            explicit_log.to_str().unwrap(),
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
+        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
+        .output()
+        .expect("autospec autonomous start runs");
+    let scope = operator_dir.join("berlinguyinca_autospec");
+
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(scope.join("conductor.logpath"))
+            .expect("logpath")
+            .trim(),
+        explicit_log.to_str().unwrap()
+    );
+    assert!(explicit_log.exists());
+    cleanup_pids(&scope);
+}
+
+#[test]
+fn autonomous_start_refuses_duplicate_conductor_without_force() {
+    let temp = temp_dir("autospec-autonomous-duplicate");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let repo_dir = temp.join("repo");
+    make_git_repo(&repo_dir, None);
+    start_sleeping_autonomous(&operator_dir, &log_dir, &repo_dir, "berlinguyinca/autospec");
+    let scope = operator_dir.join("berlinguyinca_autospec");
+    let original = read_pid(&scope, "conductor");
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
+        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
+        .output()
+        .expect("autospec autonomous start runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("already running"));
+    assert_eq!(read_pid(&scope, "conductor"), original);
+    cleanup_pids(&scope);
+}
+
+#[test]
+fn autonomous_start_force_replaces_existing_conductor() {
+    let temp = temp_dir("autospec-autonomous-force");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let repo_dir = temp.join("repo");
+    make_git_repo(&repo_dir, None);
+    start_sleeping_autonomous(&operator_dir, &log_dir, &repo_dir, "berlinguyinca/autospec");
+    let scope = operator_dir.join("berlinguyinca_autospec");
+    let original = read_pid(&scope, "conductor");
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--force",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
+        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
+        .output()
+        .expect("autospec autonomous start runs");
+    let replacement = read_pid(&scope, "conductor");
+
+    assert!(output.status.success());
+    assert_ne!(original, replacement);
+    assert!(!process_is_alive(&original));
+    assert!(process_is_alive(&replacement));
+    cleanup_pids(&scope);
+}
+
+#[test]
 fn autonomous_logs_falls_back_to_newest_legacy_flat_log() {
     let temp = temp_dir("autospec-autonomous-legacy-log");
     let operator_dir = temp.join("operator");
@@ -1132,6 +1288,8 @@ fn autonomous_restart_replaces_existing_target_companions() {
             "berlinguyinca/autospec",
             "--repo-dir",
             repo_dir.to_str().unwrap(),
+            "--max-cycles",
+            "7",
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
@@ -1149,6 +1307,8 @@ fn autonomous_restart_replaces_existing_target_companions() {
     assert_ne!(old_conductor, new_conductor);
     assert!(!process_is_alive(&old_conductor));
     assert!(process_is_alive(&new_conductor));
+    let launch = std::fs::read_to_string(scope.join("launch.json")).expect("launch json");
+    assert!(launch.contains("\"max_cycles\":\"7\""));
 
     cleanup_pids(&scope);
 }

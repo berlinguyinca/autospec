@@ -354,7 +354,6 @@ bats suite mocks as a subprocess.
 ```
 /autospec-autonomous [--max-cycles N] \
     [--budget-tokens N] \
-    [--budget-hours N] \
     [--budget-issues N] \
     [--dry-run] \
     [--no-digest] \
@@ -369,7 +368,6 @@ autospec-autonomous start [--max-cycles N] [--dry-run] [--no-digest] [--poll-int
 
 - `--max-cycles N` — outer loop cycle cap. Default unlimited; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
 - `--budget-tokens N` — lifetime token ceiling (sets `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS`). Default 50M; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
-- `--budget-hours N` — wall-time budget. Default unlimited; recorded in Rust `launch.json`.
 - `--budget-issues N` — lifetime issue ceiling. Default unlimited; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
 - `--dry-run` — go through the waterfall steps but do not invoke `/autospec-run` or merge; log what would happen.
 - `--no-digest` — skip daily digest writes; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
