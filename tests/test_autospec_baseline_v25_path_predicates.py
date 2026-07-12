@@ -24,6 +24,23 @@ def test_rel_uses_path_relative_posix_form(tmp_path):
 
     assert module.rel(tmp_path, nested) == "docs/operators/guide.md"
 
+
+def test_state_for_spec_uses_table_rules_for_text_and_name_markers(tmp_path):
+    module = load_baseline_module()
+    cases = {
+        "deprecated.md": ("# Spec\n\nThis plan is active.\n", "superseded"),
+        "feature.md": ("# Spec\n\nValidated acceptance evidence exists.\n", "validated"),
+        "later.md": ("# Spec\n\nDeferred beyond MVP.\n", "deferred"),
+        "experiment.md": ("# Spec\n\nExploratory notes.\n", "experimental"),
+        "new.md": ("# Spec\n\nTemplate scaffold.\n", "scaffolded"),
+        "ordinary.md": ("# Spec\n\nReady to ship.\n", "implemented"),
+    }
+
+    for name, (body, expected) in cases.items():
+        path = tmp_path / name
+        path.write_text(body, encoding="utf-8")
+        assert module.state_for_spec(path) == expected
+
 def test_documentation_coverage_uses_path_tokens_not_substrings(tmp_path):
     module = load_baseline_module()
     docs = tmp_path / "docs"

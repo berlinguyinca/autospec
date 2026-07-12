@@ -144,14 +144,18 @@ def safety_payload() -> dict:
     }
 
 
+def spec_state_rule_matches(path: Path, text: str, text_markers: tuple[str, ...], name_markers: tuple[str, ...]) -> bool:
+    text_match = any(
+        text_has_phrase(text, marker) if " " in marker else text_has_token(text, marker)
+        for marker in text_markers
+    )
+    return text_match or path_name_has_token(path, *name_markers)
+
+
 def state_for_spec(path: Path) -> str:
     text = read_text(path).lower()
     for state, text_markers, name_markers in SPEC_STATE_RULES:
-        text_match = any(
-            text_has_phrase(text, marker) if " " in marker else text_has_token(text, marker)
-            for marker in text_markers
-        )
-        if text_match or path_name_has_token(path, *name_markers):
+        if spec_state_rule_matches(path, text, text_markers, name_markers):
             return state
     return "implemented"
 
