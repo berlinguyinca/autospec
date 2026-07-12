@@ -7,7 +7,7 @@ use crate::spec::is_valid_spec_id;
 use json::{JsonParser, JsonValue};
 use storage::{FileState, StatePaths};
 
-mod json;
+pub(crate) mod json;
 mod storage;
 
 const STATE_SCHEMA_VERSION: u64 = 1;

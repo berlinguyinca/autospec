@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
-pub(super) enum JsonValue {
+pub(crate) enum JsonValue {
     Null,
     Number(u64),
     String(String),
@@ -10,35 +10,35 @@ pub(super) enum JsonValue {
 }
 
 impl JsonValue {
-    pub(super) fn into_object(self, context: &str) -> Result<BTreeMap<String, Self>, String> {
+    pub(crate) fn into_object(self, context: &str) -> Result<BTreeMap<String, Self>, String> {
         match self {
             Self::Object(value) => Ok(value),
             _ => Err(format!("{context} must be a JSON object")),
         }
     }
 
-    pub(super) fn into_array(self, context: &str) -> Result<Vec<Self>, String> {
+    pub(crate) fn into_array(self, context: &str) -> Result<Vec<Self>, String> {
         match self {
             Self::Array(value) => Ok(value),
             _ => Err(format!("{context} must be a JSON array")),
         }
     }
 
-    pub(super) fn into_number(self, context: &str) -> Result<u64, String> {
+    pub(crate) fn into_number(self, context: &str) -> Result<u64, String> {
         match self {
             Self::Number(value) => Ok(value),
             _ => Err(format!("{context} must be a JSON number")),
         }
     }
 
-    pub(super) fn into_string(self, context: &str) -> Result<String, String> {
+    pub(crate) fn into_string(self, context: &str) -> Result<String, String> {
         match self {
             Self::String(value) => Ok(value),
             _ => Err(format!("{context} must be a JSON string")),
         }
     }
 
-    pub(super) fn into_optional_string(self, context: &str) -> Result<Option<String>, String> {
+    pub(crate) fn into_optional_string(self, context: &str) -> Result<Option<String>, String> {
         match self {
             Self::Null => Ok(None),
             Self::String(value) => Ok(Some(value)),
@@ -47,17 +47,17 @@ impl JsonValue {
     }
 }
 
-pub(super) struct JsonParser<'a> {
+pub(crate) struct JsonParser<'a> {
     input: &'a str,
     index: usize,
 }
 
 impl<'a> JsonParser<'a> {
-    pub(super) fn new(input: &'a str) -> Self {
+    pub(crate) fn new(input: &'a str) -> Self {
         Self { input, index: 0 }
     }
 
-    pub(super) fn parse(mut self) -> Result<JsonValue, String> {
+    pub(crate) fn parse(mut self) -> Result<JsonValue, String> {
         let value = self.parse_value()?;
         self.skip_whitespace();
         if self.index != self.input.len() {

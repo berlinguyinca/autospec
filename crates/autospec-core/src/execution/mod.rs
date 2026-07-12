@@ -1,4 +1,7 @@
 pub mod queue;
 pub mod report;
 
-pub use queue::{ExecutionQueue, FailureKind, QueueEntry, QueueStatus};
+pub use queue::{
+    ExecutionQueue, FailureKind, QueueEntry, QueueStatus, QueueValidationResult,
+    QueueValidationStatus,
+};
