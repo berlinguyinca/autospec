@@ -1,3 +1,4 @@
+pub mod autonomous;
 pub mod benchmark;
 pub mod doctor;
 pub mod growth_report;
@@ -14,6 +15,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("init", "Initialize AutoSpec metadata"),
     ("doctor", "Check the Rust core workspace"),
     ("status", "Summarize local AutoSpec state"),
+    ("autonomous", "Plan and supervise autonomous conductor runs"),
     ("plan", "Inspect a generated spec package"),
     ("validate", "Run configured validation gates"),
     ("run", "Execute the spec queue"),
@@ -41,6 +43,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             "init" => init::run(rest),
             "doctor" => doctor::run(rest),
             "status" => status::run(rest),
+            "autonomous" => autonomous::run(rest),
             "plan" => plan::run(rest),
             "validate" => validate::run(rest),
             "run" => run::run(rest),

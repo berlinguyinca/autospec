@@ -57,7 +57,7 @@ If the feature-request argument matches the regex `^\s*stop(\s+--\w+)*\s*$` (cas
    ```bash
    autospec-autonomous stop "$@"
    ```
-2. Honor `--graceful` and `--immediate` by writing the target project's scoped stop sentinel under `~/.autospec/autonomous-operator/<repo-scope>/stop.flag`; running iterations finish at the next conductor boundary without signaling another repository's conductor.
+2. Honor `--graceful` and `--immediate` by writing the shell-compatible stop sentinel at `${AUTOSPEC_STOP_FLAG_FILE:-$HOME/.autospec/stop.flag}`. Graceful stop leaves the conductor to finish the current issue/cycle boundary while stopping the companion monitor/supervisor; immediate stop also terminates the recorded conductor PID.
 3. Print the stop summary and exit. Do not enter the autonomous pipeline.
 
 ## Operator commands and monitoring
@@ -68,22 +68,38 @@ or after `. "$HOME/.autospec/env"`:
 
 | Command | Purpose |
 |---------|---------|
-| `autospec-autonomous [start]` | Start the detached conductor. |
-| `autospec-autonomous list` | Enumerate repo-scoped conductors with PID, liveness, log path, state, heartbeat, and launch provenance. |
+| `autospec-autonomous [start]` | Start the detached conductor plus its default monitor/supervisor companions. |
+| `autospec-autonomous-start` | Start the Rust lifecycle launcher directly. |
+| `autospec-autonomous-list` | Enumerate repo-scoped conductors with PID, liveness, log path, and companion metadata. |
 | `autospec-autonomous-status` | Print PID, log path, conductor state, spend ledger, and recent log tail; pass `--all --json` to enumerate all conductors. |
-| `autospec-autonomous-timeline` | Print a chronological plain-English activity report plus queue forecast, ETA, and item timing from the conductor log. |
+| `autospec-autonomous-timeline` | Print a chronological activity report from the recorded conductor log; shell fallback still owns the richest forecast view. |
 | `autospec-autonomous-monitor` | Reprint the timeline/report on an interval. Default every 300 seconds. |
-| `autospec-autonomous-logs` | Print the current conductor log tail. |
-| `autospec-autonomous-watch` | Follow the current conductor log. |
+| `autospec-autonomous-supervise` | Run the deterministic supervisor observer loop. Default every 300 seconds. |
+| `autospec-autonomous-logs` | Print the current conductor log tail from recorded `conductor.logpath`. |
+| `autospec-autonomous-watch` | Follow the current conductor log; pass `--once` for bounded test/report mode. |
+| `autospec-autonomous-cleanup` | Remove dead PID/logpath metadata for one repo scope without signaling live processes. |
 | `autospec-autonomous-stop --graceful` | Request stop after the current issue/cycle boundary. |
 | `autospec-autonomous-stop --immediate` | Request immediate stop at the next major boundary. |
 | `autospec-autonomous-restart` | Stop through the sentinel path, then launch a new conductor. |
 
-All wrappers delegate to `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh`.
+Lifecycle/reporting wrappers (`start`, `status`, `list`, `timeline`, `monitor`,
+`supervise`, `logs`, `watch`, `cleanup`, `stop`, `restart`, plus bare
+`autospec-autonomous`) try `autospec autonomous ...` first when the Rust CLI is
+installed, then fall back to
+`${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh`.
 The launcher records PID, stop, and log metadata under
 `~/.autospec/autonomous-operator/<repo-scope>/`, keeps logs under
-`~/.autospec/logs/<repo-scope>/`, and uses `autospec-autonomous-run-drain.sh` as
-the safe Tier-1 drain command. `<repo-scope>` is derived from `--repo OWNER/REPO`,
+`~/.autospec/logs/<repo-scope>/`, and starts the recurring monitor and supervisor
+companions by default. The built-in supervisor is deterministic and observer-only:
+it emits one-line health summaries, reports `action=conductor-not-running` when
+its watched conductor PID has exited, reports `action=stale-metadata` when the
+recorded conductor PID is dead, and must not become a second conductor.
+`AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD` may override that built-in command with a
+richer observer, but supervisor startup remains automatic. Companion metadata
+lives beside the conductor metadata as
+`monitor.pid` / `monitor.logpath` and `supervisor.pid` / `supervisor.logpath`.
+The conductor uses `autospec-autonomous-run-drain.sh` as the safe Tier-1 drain
+command. `<repo-scope>` is derived from `--repo OWNER/REPO`,
 from the target checkout's GitHub remote, or from the repo directory path as a
 fallback, so one repository's live conductor does not block or receive stop/log
 commands for another repository. The
@@ -93,12 +109,19 @@ drain command invokes:
 omx exec --cd "$AUTOSPEC_REPO_DIR" --dangerously-bypass-approvals-and-sandbox '$autospec-run'
 ```
 
-Use `autospec-autonomous status --json` for monitoring integrations; its payload
-includes `state_status` when the conductor has written terminal or running state.
-Use `autospec-autonomous list --json` or `autospec-autonomous status --all --json`
-for fleet visibility across `~/.autospec/autonomous-operator/*/conductor.pid`; each
-row includes repo slug, PID liveness, log path, state/park/heartbeat metadata, and
-launch provenance from `launch.json`.
+Use `autospec-autonomous-status --json` for monitoring integrations; its unit
+payloads include PID/log metadata plus `stale_pid` and `metadata_only` so dead
+PID files are visible instead of being mistaken for a clean stopped state. The
+Rust status path also reports `state_status`, `heartbeat_at`, `last_cycle`, and
+the spend ledger when the matching state/spend files are present. Use
+`autospec-autonomous-cleanup --json` to remove dead PID/logpath metadata for one
+repo scope without signaling live processes. Use `autospec-autonomous-list --json`
+or `autospec-autonomous-status --all --json` for fleet visibility across
+`~/.autospec/autonomous-operator/*/conductor.pid`; each row includes repo slug,
+PID liveness, log path, state/park/heartbeat metadata, companion metadata, and
+launch provenance when `launch.json` is present. Rust `logs` falls back to the
+newest legacy flat `~/.autospec/logs/autospec-autonomous-*.log` when scoped
+`conductor.logpath` metadata is missing.
 Use
 `autospec-autonomous timeline --lines N` when an operator needs a human-readable
 sequence such as `4:30 am - implemented feature X` and `4:45 am - started
@@ -194,7 +217,7 @@ Drain `auto-implement` issues from the repository backlog to `main` via `/autosp
 This is the primary merge loop body.
 
 **Single cycle:**
-1. **Worktree assert** — `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert` MUST exit 0. Non-zero → emit `code_health` identifier, quarantine that lane, notify asynchronously, and continue to the next safe candidate.
+1. **Worktree assert** — `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert --branch-pattern 'feat/*'` MUST exit 0 before any implementation lane edits or commits. Non-zero → emit `code_health` identifier, quarantine that lane, notify asynchronously, and continue to the next safe candidate. A direct `main` branch implementation lane is a guideline violation; normal validated PR merges into `main` are allowed.
 2. **Tier-0 poll** — read control channel before any issue is picked.
 3. **Pick next issue** — select the highest-priority/value `auto-implement` issue not already in flight (respecting `autospec:priority` directives). If none, record dry observability and cascade to Tier 1.5; never park or ask because the backlog is empty.
 4. **Pre-merge gate** — run `autospec-autonomy-gate.sh` (qa+secaudit when available). If missing or fenced → emit `code_health:autonomous_gate_missing`, quarantine/file `autospec:needs-human`, halt only that merge lane, and continue.
@@ -348,13 +371,36 @@ Equivalent installed shell command:
 autospec-autonomous start [--max-cycles N] [--dry-run] [--no-digest] [--poll-interval-sec N]
 ```
 
-- `--max-cycles N` — outer loop cycle cap. Default unlimited.
-- `--budget-tokens N` — lifetime token ceiling (sets `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS`). Default 50M.
-- `--budget-hours N` — wall-time budget. Default unlimited.
-- `--budget-issues N` — lifetime issue ceiling. Default unlimited.
+- `--max-cycles N` — outer loop cycle cap. Default unlimited; recorded in Rust `launch.json`.
+- `--budget-tokens N` — lifetime token ceiling (sets `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS`). Default 50M; recorded in Rust `launch.json`.
+- `--budget-hours N` — wall-time budget. Default unlimited; recorded in Rust `launch.json`.
+- `--budget-issues N` — lifetime issue ceiling. Default unlimited; recorded in Rust `launch.json`.
 - `--dry-run` — go through the waterfall steps but do not invoke `/autospec-run` or merge; log what would happen.
-- `--no-digest` — skip daily digest writes.
-- `--poll-interval-sec N` — cycle polling interval in seconds. Default 60.
+- `--no-digest` — skip daily digest writes; recorded in Rust `launch.json`.
+- `--poll-interval-sec N` — cycle polling interval in seconds. Default 60; aliases the Rust lifecycle interval.
+- `AUTOSPEC_AUTONOMOUS_COMPANIONS=0` — emergency/test opt-out for the default monitor/supervisor companion startup.
+- `AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD` — override supervisor command to start beside the monitor for the same repo scope.
+
+Rust migration ownership:
+
+- **Rust-owned lifecycle/reporting:** `start`, `status`, `list`, `logs`, `watch`,
+  `timeline`, `monitor`, `supervise`, `cleanup`, `stop`, and `restart` wrappers
+  route Rust-first with shell fallback.
+- **Rust-owned foreground shim:** `start` now launches the conductor through
+  `autospec autonomous run-foreground`; that Rust shim delegates to the existing
+  shell conductor backend.
+- **Shell-owned conductor body:** the waterfall implementation still lives behind
+  `scripts/autospec-autonomous.sh run-foreground`. Migrate that backend last,
+  after Rust can call the same gates/drain scripts with parity tests.
+- **Timeline parity:** Rust `timeline` now owns chronological summaries,
+  coordinator forecast rows, heartbeat-active issue reconciliation, and item
+  timing rows. Keep shell fallback until the remaining edge cases are fixture
+  backed.
+- **Tracked overlap:** this migration intentionally advances the open Rust
+  runtime consolidation epic #1861, autonomous status visibility #1813, monitor
+  observability #1809, restart stop-flag cleanup #1821, and conductor
+  operability #1599. Do not duplicate those as new issues; extend them or close
+  them when the matching acceptance criteria are fully satisfied.
 
 Tier-1 drain watchdog controls:
 
@@ -401,6 +447,7 @@ Trio edits use `derive-trio.sh --in-place` + `gen-skill-goldens.sh`; never hand-
 - **All enabled tiers dry or below value floor** → idle-rescan with exhausted tiers and best score named; notify asynchronously; re-arm resume heartbeat.
 - **Control-channel read error** → log `code_health:autonomous_control_channel_error`; treat as no-op for that cycle; continue.
 - **Single-instance lock conflict** — reuses `autospec-resume` staleness thresholds (300s/10800s). A live lock blocks a second conductor. A stale lock (heartbeat older than threshold) is reclaimable by the fresh process.
+- **Monitor/supervisor companion start failure** → warn and continue the conductor; observer failure is not a conductor failure. A configured supervisor command must remain observer-only and must not become a second conductor.
 
 ## Primary smoke test
 

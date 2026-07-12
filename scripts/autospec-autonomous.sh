@@ -12,6 +12,10 @@ LOGPATH_FILE=""
 STOP_FLAG_FILE=""
 DEFAULT_LOG_ROOT="${AUTOSPEC_AUTONOMOUS_LOG_DIR:-$HOME/.autospec/logs}"
 DEFAULT_LOG_DIR=""
+MONITOR_PID_FILE=""
+MONITOR_LOGPATH_FILE=""
+SUPERVISOR_PID_FILE=""
+SUPERVISOR_LOGPATH_FILE=""
 
 ORIGINAL_ARGV=("$@")
 
@@ -25,6 +29,8 @@ FOREGROUND=0
 LOG_OVERRIDE=0
 MONITOR_INTERVAL=300
 MONITOR_ITERATIONS=0
+AUTOSPEC_AUTONOMOUS_COMPANIONS="${AUTOSPEC_AUTONOMOUS_COMPANIONS:-1}"
+AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD="${AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD:-}"
 CONDUCTOR_MAX_CYCLES="${CONDUCTOR_MAX_CYCLES:-}"
 CONDUCTOR_POLL_INTERVAL="${CONDUCTOR_POLL_INTERVAL:-}"
 CONDUCTOR_DRY_RUN="${CONDUCTOR_DRY_RUN:-0}"
@@ -34,7 +40,7 @@ AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES="${AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES:-}"
 
 usage() {
     cat <<'EOF'
-Usage: autospec-autonomous [start|list|status|timeline|monitor|logs|watch|stop|restart] [options]
+Usage: autospec-autonomous [start|list|status|timeline|monitor|supervise|logs|watch|stop|restart] [options]
 
 Commands:
   start      Start the detached autonomous conductor (default).
@@ -42,6 +48,7 @@ Commands:
   status     Print PID, log path, conductor state, and spend ledger summary. Use --all for list JSON.
   timeline   Print a chronological plain-English activity report.
   monitor    Print the timeline/report repeatedly; default interval is 300 seconds.
+  supervise  Run the deterministic supervisor observer loop; default interval is 300 seconds.
   logs       Print the current conductor log tail.
   watch      Follow the current conductor log.
   stop       Write the autospec stop sentinel for a running conductor.
@@ -65,6 +72,8 @@ Options:
   --all                   With status, enumerate all conductor operator dirs.
   --foreground            Run in the current shell instead of detaching.
   --force                 Replace stale PID metadata or restart a live process.
+  AUTOSPEC_AUTONOMOUS_COMPANIONS=0 disables default monitor/supervisor startup.
+  AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD overrides the built-in supervisor command.
   --graceful              Stop after the current iteration (default).
   --immediate             Request immediate stop at the next boundary.
 EOF
@@ -83,6 +92,12 @@ json_escape() {
     printf '"'
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
     printf '"'
+}
+
+shell_quote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
 }
 
 is_pid_alive() {
@@ -175,6 +190,10 @@ configure_scope_paths() {
     STATE_DIR="${STATE_ROOT%/}/$_scope"
     PID_FILE="${AUTOSPEC_AUTONOMOUS_PID_FILE:-$STATE_DIR/conductor.pid}"
     LOGPATH_FILE="${AUTOSPEC_AUTONOMOUS_LOGPATH_FILE:-$STATE_DIR/conductor.logpath}"
+    MONITOR_PID_FILE="${AUTOSPEC_AUTONOMOUS_MONITOR_PID_FILE:-$STATE_DIR/monitor.pid}"
+    MONITOR_LOGPATH_FILE="${AUTOSPEC_AUTONOMOUS_MONITOR_LOGPATH_FILE:-$STATE_DIR/monitor.logpath}"
+    SUPERVISOR_PID_FILE="${AUTOSPEC_AUTONOMOUS_SUPERVISOR_PID_FILE:-$STATE_DIR/supervisor.pid}"
+    SUPERVISOR_LOGPATH_FILE="${AUTOSPEC_AUTONOMOUS_SUPERVISOR_LOGPATH_FILE:-$STATE_DIR/supervisor.logpath}"
     STOP_FLAG_FILE="${AUTOSPEC_STOP_FLAG_FILE:-$STATE_DIR/stop.flag}"
     DEFAULT_LOG_DIR="${DEFAULT_LOG_ROOT%/}/$_scope"
 }
@@ -935,6 +954,87 @@ ensure_not_running() {
     fi
 }
 
+spawn_background_command() {
+    _label="$1"
+    _command="$2"
+    _log="$3"
+    _repo_dir="$4"
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$_label" "$_log" "$_repo_dir" "$_command" <<'PY'
+import os, subprocess, sys
+label, log_path, repo_dir, command = sys.argv[1:5]
+env = os.environ.copy()
+env["AUTOSPEC_REPO_DIR"] = repo_dir
+log = open(log_path, "ab", buffering=0)
+p = subprocess.Popen(
+    command,
+    cwd=repo_dir,
+    env=env,
+    stdout=log,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+    shell=True,
+)
+print(p.pid)
+PY
+    else
+        AUTOSPEC_REPO_DIR="$_repo_dir" \
+            nohup sh -c "$_command" >"$_log" 2>&1 &
+        printf '%s\n' "$!"
+    fi
+}
+
+start_companion_process() {
+    _label="$1"
+    _command="$2"
+    _pid_file="$3"
+    _logpath_file="$4"
+    _log="$5"
+    _repo_dir="$6"
+
+    _existing_pid=""
+    [ -f "$_pid_file" ] && _existing_pid="$(tr -d '[:space:]' < "$_pid_file" || true)"
+    if is_pid_alive "$_existing_pid"; then
+        info "  $_label pid: $_existing_pid (already running)"
+        return 0
+    fi
+
+    _pid="$(spawn_background_command "$_label" "$_command" "$_log" "$_repo_dir" 2>>"$_log" || true)"
+    if [ -z "$_pid" ]; then
+        printf 'autospec-autonomous: warning: failed to start %s companion\n' "$_label" >&2
+        return 0
+    fi
+    printf '%s\n' "$_pid" > "$_pid_file"
+    printf '%s\n' "$_log" > "$_logpath_file"
+    info "  $_label pid: $_pid"
+    info "  $_label log: $_log"
+}
+
+start_default_companions() {
+    [ "$AUTOSPEC_AUTONOMOUS_COMPANIONS" = "0" ] && return 0
+
+    _repo_dir="$1"
+    _repo="$2"
+    _interval="${AUTOSPEC_AUTONOMOUS_MONITOR_INTERVAL:-300}"
+    _monitor_log="$DEFAULT_LOG_DIR/autospec-autonomous-monitor.log"
+    _monitor_cmd="$(shell_quote "$0") monitor --repo-dir $(shell_quote "$_repo_dir") --interval-sec $(shell_quote "$_interval")"
+    if [ -n "$_repo" ]; then
+        _monitor_cmd="$_monitor_cmd --repo $(shell_quote "$_repo")"
+    fi
+    start_companion_process "monitor" "$_monitor_cmd" "$MONITOR_PID_FILE" "$MONITOR_LOGPATH_FILE" "$_monitor_log" "$_repo_dir"
+
+    _supervisor_log="$DEFAULT_LOG_DIR/autospec-autonomous-supervisor.log"
+    _supervisor_cmd="${AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD:-}"
+    if [ -z "$_supervisor_cmd" ]; then
+        _supervisor_cmd="$(shell_quote "$0") supervise --repo-dir $(shell_quote "$_repo_dir") --interval-sec $(shell_quote "$_interval")"
+        if [ -n "$_repo" ]; then
+            _supervisor_cmd="$_supervisor_cmd --repo $(shell_quote "$_repo")"
+        fi
+    fi
+    start_companion_process "supervisor" "$_supervisor_cmd" "$SUPERVISOR_PID_FILE" "$SUPERVISOR_LOGPATH_FILE" "$_supervisor_log" "$_repo_dir"
+}
+
 start_foreground() {
     export AUTOSPEC_REPO_DIR="${AUTOSPEC_REPO_DIR:-$DEFAULT_REPO_DIR}"
     export CONDUCTOR_SCRIPTS_DIR="${CONDUCTOR_SCRIPTS_DIR:-$SCRIPT_DIR}"
@@ -1043,6 +1143,7 @@ PY
     info "autospec-autonomous started"
     info "  pid: $_pid"
     info "  log: $_log"
+    start_default_companions "$_repo_dir" "$_repo"
 }
 
 show_logs() {
@@ -1087,9 +1188,27 @@ monitor_report() {
     done
 }
 
+supervise_report() {
+    _iteration=0
+    while :; do
+        _iteration=$((_iteration + 1))
+        _repo="${CONDUCTOR_REPO:-$(detect_repo_slug)}"
+        _pid="$(read_scoped_pid || true)"
+        _state="stopped"
+        if is_pid_alive "$_pid"; then
+            _state="running"
+        fi
+        printf 'autospec-supervise: ok repo=%s conductor=%s pid=%s action=none\n' "${_repo:-unknown}" "$_state" "${_pid:-}"
+        if [ "$MONITOR_ITERATIONS" -gt 0 ] && [ "$_iteration" -ge "$MONITOR_ITERATIONS" ]; then
+            break
+        fi
+        sleep "$MONITOR_INTERVAL"
+    done
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        start|list|status|timeline|monitor|logs|watch|stop|restart|run-foreground)
+        start|list|status|timeline|monitor|supervise|logs|watch|stop|restart|run-foreground)
             ACTION="$1"
             ;;
         --max-cycles)
@@ -1215,6 +1334,9 @@ case "$ACTION" in
         ;;
     monitor)
         monitor_report
+        ;;
+    supervise)
+        supervise_report
         ;;
     logs)
         show_logs
