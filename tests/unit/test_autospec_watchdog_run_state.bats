@@ -576,6 +576,29 @@ SH
     ! grep -q -- '--add-label auto-implement' "$CALLS"
 }
 
+
+@test "issue 1845: stale heartbeat and active issue worktree process is not reclaimed" {
+    export WORKER_LIVENESS_HOSTNAME="thishost"
+    export AUTOSPEC_WATCHDOG_RECLAIM_SECS=300
+    export AUTOSPEC_WATCHDOG_STALE_SECS=10
+    branch="feat/1845-watchdog-run-state-reclaim"
+    stale="$(date -u -v-90M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '90 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')"
+    state_comment_obj_with_branch 1845 expand_start "$stale" "thishost:me:shell:999999" "$branch" | jq -s '.' > "$COMMENTS"
+    start_validate_process_in_issue_worktree "$branch"
+    write_hb 1845 tests_started 5400
+    export ISSUE_LIST="$TEST_TMP/issue-list.txt"
+    : > "$ISSUE_LIST"
+
+    run bash -c "cd "$LOCAL_REPO" && bash "$WATCHDOG""
+    stop_validate_process
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reclaimed=0"* ]]
+    [ -f "$(HB_DIR_FOR)/1845.json" ]
+    grep -q 'in-progress-by-bot' "$LABELS"
+    ! grep -q -- '--add-label auto-implement' "$CALLS"
+}
+
 @test "issue 1845: lsof fallback detects active worktree process when proc is unavailable" {
     export WORKER_LIVENESS_HOSTNAME="thishost"
     export AUTOSPEC_WATCHDOG_RECLAIM_SECS=300
@@ -590,11 +613,12 @@ SH
 set -eu
 printf 'lsof %s
 ' "$*" >> "${CALLS:?}"
-[ "$1" = "-t" ]
-[ "$2" = "+D" ]
-[ "$3" = "${ISSUE_WORKTREE:?}" ]
-printf '%s
-' "${VALIDATE_PID:?}"
+[ "$1" = "-w" ]
+[ "$2" = "-Fn" ]
+[ "$3" = "-d" ]
+[ "$4" = "cwd" ]
+wt_real="$(cd "${ISSUE_WORKTREE:?}" && pwd -P)"
+printf 'p%s\nn%s\n' "${VALIDATE_PID:?}" "$wt_real"
 SH
     chmod +x "$TEST_TMP/bin/lsof"
 
@@ -604,7 +628,7 @@ SH
     [ "$status" -eq 0 ]
     [[ "$output" == *"reclaimed=0"* ]]
     [[ "$output" == *"live_owner_no_heartbeat=1"* ]]
-    grep -q "lsof -t +D $ISSUE_WORKTREE" "$CALLS"
+    grep -q "lsof -w -Fn -d cwd" "$CALLS"
     grep -q 'in-progress-by-bot' "$LABELS"
     ! grep -q -- '--add-label auto-implement' "$CALLS"
 }

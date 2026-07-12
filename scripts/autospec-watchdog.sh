@@ -509,6 +509,7 @@ processes_in_worktree_with_proc() {
     proc_dir="${AUTOSPEC_WATCHDOG_PROC_DIR:-/proc}"
     [ "${AUTOSPEC_WATCHDOG_DISABLE_PROC:-0}" != "1" ] || { printf '0'; return 0; }
     [ -d "$proc_dir" ] || { printf '0'; return 0; }
+    wt_real="$(cd "$wt" 2>/dev/null && pwd -P)" || { printf '0'; return 0; }
     count=0
     for cwd_link in "$proc_dir"/[0-9]*/cwd; do
         [ -e "$cwd_link" ] || continue
@@ -517,7 +518,7 @@ processes_in_worktree_with_proc() {
         [ "$pid" != "$$" ] || continue
         cwd="$(readlink "$cwd_link" 2>/dev/null || true)"
         case "$cwd" in
-            "$wt"|"$wt"/*) count=$((count + 1)) ;;
+            "$wt_real"|"$wt_real"/*) count=$((count + 1)) ;;
         esac
     done
     printf '%s' "$count"
@@ -526,15 +527,18 @@ processes_in_worktree_with_proc() {
 processes_in_worktree_with_lsof() {
     wt="$1"
     command -v lsof >/dev/null 2>&1 || { printf '0'; return 0; }
-    count=0
-    while IFS= read -r pid; do
-        case "$pid" in ''|*[!0-9]*) continue ;; esac
-        [ "$pid" != "$$" ] || continue
-        count=$((count + 1))
-    done <<EOF
-$(lsof -t +D "$wt" 2>/dev/null || true)
-EOF
-    printf '%s' "$count"
+    wt_real="$(cd "$wt" 2>/dev/null && pwd -P)" || { printf '0'; return 0; }
+    # Inspect cwd entries directly and filter paths ourselves. Avoid recursive
+    # `lsof +D`, which walks the whole worktree and can be slow, and avoid broad
+    # ps/grep command-line matching, which can self-match the watchdog process.
+    lsof -w -Fn -d cwd 2>/dev/null | awk -v prefix="$wt_real" -v self="$$" '
+      /^p/ { pid=substr($0, 2); next }
+      /^n/ {
+        path=substr($0, 2)
+        if (pid != "" && pid != self && (path == prefix || index(path, prefix "/") == 1)) seen[pid]=1
+      }
+      END { for (pid in seen) count++; printf "%s", count + 0 }
+    '
 }
 
 processes_in_worktree() {
@@ -561,6 +565,14 @@ active_local_worktree_process_count() {
     wt="$(worktree_for_branch "$branch")"
     [ -n "$wt" ] || { printf '0'; return 0; }
     processes_in_worktree "$wt"
+}
+
+pr_is_open() {
+    pr="$1"
+    [ -n "$pr" ] || return 1
+    # shellcheck disable=SC2086
+    state="$(gh pr view "$pr" $REPO_ARGS --json state --jq .state 2>/dev/null || true)"
+    [ "$state" = "OPEN" ]
 }
 
 # Return the lowest-numbered open PR whose body links to the issue with a
@@ -616,8 +628,9 @@ reclaim_decision() {
     rd_json="$(printf '%s\n' "$rd_body" | extract_run_state_json)"
     rd_state="$(printf '%s\n' "$rd_json" | jq -r '.state // .step // empty' 2>/dev/null || true)"
     rd_worker="$(printf '%s\n' "$rd_json" | jq -r '.worker_id // empty' 2>/dev/null || true)"
-    rd_updated="$(printf '%s\n' "$rd_json" | jq -r '.updated_at // empty' 2>/dev/null || true)"
     rd_branch="$(printf '%s\n' "$rd_json" | jq -r '.branch // empty' 2>/dev/null || true)"
+    rd_pr="$(printf '%s\n' "$rd_json" | jq -r '.pr // empty' 2>/dev/null || true)"
+    rd_updated="$(printf '%s\n' "$rd_json" | jq -r '.updated_at // empty' 2>/dev/null || true)"
 
     case "$rd_state" in
         ''|released|failed)
@@ -627,7 +640,8 @@ reclaim_decision() {
     esac
 
     # F2 — same-host PID-liveness short-circuit.
-    case "$(worker_liveness "$rd_worker")" in
+    wl="$(worker_liveness "$rd_worker")"
+    case "$wl" in
         alive)
             printf 'hold'      # provably-live same-host owner — never reclaim
             return 0
@@ -646,12 +660,10 @@ reclaim_decision() {
         return 0
     fi
 
-    case "$(worker_liveness "$rd_worker")" in
-        dead)
-            printf 'reclaim'   # provably-dead same-host owner — safe to reclaim
-            return 0
-            ;;
-    esac
+    if [ "$wl" = "dead" ]; then
+        printf 'reclaim'       # provably-dead same-host owner and no local worktree process
+        return 0
+    fi
 
     # F1 — cross-host / unknown: fall back to GitHub `updated_at` freshness.
     rd_epoch="$(iso_to_epoch "$rd_updated")"
@@ -775,14 +787,6 @@ for hb in "$WATCHDOG_DIR"/*.json; do
     fi
 done
 
-pr_is_open() {
-    pr="$1"
-    [ -n "$pr" ] || return 1
-    # shellcheck disable=SC2086
-    state="$(gh pr view "$pr" $REPO_ARGS --json state --jq .state 2>/dev/null || true)"
-    [ "$state" = "OPEN" ]
-}
-
 reconcile_run_state_comments() {
     # shellcheck disable=SC2086
     issue_numbers="$(gh issue list $REPO_ARGS \
@@ -830,9 +834,10 @@ reconcile_run_state_comments() {
         fi
 
         if [ "$step" = "claimed" ] && [ "$age" -ge "$WATCHDOG_CLAIMED_TIMEOUT_SECS" ]; then
-            # Reuse the heartbeat reclaim decision so no-heartbeat run-state
-            # reconciliation also honors same-host PID and active-worktree
-            # process evidence.
+            # Missing-heartbeat reconciliation uses the same GitHub-authority +
+            # same-host PID + local-worktree liveness gate as heartbeat-triggered
+            # reclaim. A stale run-state comment is only the trigger, not proof
+            # that the owner is dead.
             decision="$(reclaim_decision "$issue" "$WATCHDOG_CLAIMED_TIMEOUT_SECS")"
             [ "$decision" = "hold_live_owner_no_heartbeat" ] && live_owner_no_heartbeat=$((live_owner_no_heartbeat + 1))
             if [ "$decision" != "reclaim" ]; then
