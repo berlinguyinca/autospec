@@ -10,6 +10,8 @@ The Rust CLI is additive. Existing `/autospec-*` skills and shell scripts remain
 | `autospec status --json` | yes | local status stub |
 | `autospec plan --json` | yes | package inspection stub |
 | `autospec validate --json` | yes | validation stub pointing to shell gates |
+| `autospec runtime classify <path> --json` | yes | implemented R0-R4 ownership classification for one repository path |
+| `autospec runtime audit --json` | yes | implemented read-only R0-R4 inventory; it neither migrates nor executes candidates |
 | `autospec run` | no | documented stub, exits non-zero |
 | `autospec resume` | no | documented stub, exits non-zero |
 | `autospec report --json` | yes | report stub |

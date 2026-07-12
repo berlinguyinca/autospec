@@ -1,5 +1,7 @@
 use autospec_core::runtime_policy::classify_path;
 
+mod audit;
+
 pub fn run(args: &[String]) -> Result<(), String> {
     match args {
         [command, path] if command == "classify" => {
@@ -10,6 +12,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             print_classification(path, true);
             Ok(())
         }
+        [command, rest @ ..] if command == "audit" => audit::run(rest),
         [flag] if flag == "--help" || flag == "-h" => {
             print_help();
             Ok(())
@@ -46,7 +49,7 @@ fn print_classification(path: &str, json: bool) {
 
 fn print_help() {
     println!(
-        "autospec runtime\n\nUSAGE:\n    autospec runtime classify <PATH> [--json]\n\nCOMMANDS:\n    classify       Classify a repository path by runtime ownership policy"
+        "autospec runtime\n\nUSAGE:\n    autospec runtime classify <PATH> [--json]\n    autospec runtime audit [--root PATH] [--json]\n\nCOMMANDS:\n    classify       Classify a repository path by runtime ownership policy\n    audit          List platform files grouped by runtime migration class"
     );
 }
 
