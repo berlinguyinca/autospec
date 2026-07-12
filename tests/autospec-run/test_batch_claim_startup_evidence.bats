@@ -131,6 +131,9 @@ write_issue_list() {
 }
 
 run_list_ready() {
+    # The autospec-run orchestrator may export AUTOSPEC_RUN_ONLY_ISSUES for the
+    # live queue; this fixture must exercise all synthetic issues regardless.
+    unset AUTOSPEC_RUN_ONLY_ISSUES
     PATH="$MOCK_BIN:$PATH" \
     AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=3 \
     AUTOSPEC_HEARTBEAT_DIR="$TMPDIR_BATS/heartbeats" \

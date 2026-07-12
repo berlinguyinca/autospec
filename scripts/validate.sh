@@ -2777,10 +2777,15 @@ check_autospec_parallel_dispatch_contract() {
     bash -n "$helper" || fail "$helper: bash syntax error"
     bats_file="tests/autospec-run/test_parallel_dispatch.bats"
     [ -f "$bats_file" ] || fail "$bats_file: bats coverage missing"
+    startup_bats_file="tests/autospec-run/test_batch_claim_startup_evidence.bats"
+    [ -f "$startup_bats_file" ] || fail "$startup_bats_file: startup-evidence bats coverage missing"
     if command -v bats >/dev/null 2>&1; then
         info "  running: $bats_file"
         bats "$bats_file" >/tmp/validate-parallel-dispatch.log 2>&1 \
             || { cat /tmp/validate-parallel-dispatch.log >&2; fail "$bats_file: failed"; }
+        info "  running: $startup_bats_file"
+        (unset AUTOSPEC_RUN_ONLY_ISSUES; bats "$startup_bats_file") >/tmp/validate-batch-claim-startup-evidence.log 2>&1 \
+            || { cat /tmp/validate-batch-claim-startup-evidence.log >&2; fail "$startup_bats_file: failed"; }
     fi
 }
 
