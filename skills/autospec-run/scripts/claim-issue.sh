@@ -5,6 +5,7 @@ set -eu
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 RUN_STATE="$SCRIPT_DIR/run-state.sh"
+HEARTBEAT_WRITE="$SCRIPT_DIR/heartbeat-write.sh"
 SAFETY_GATE="$SCRIPT_DIR/issue-safety-gate.sh"
 [ -f "$SAFETY_GATE" ] || {
     printf 'claim-issue: missing issue safety gate helper: %s\n' "$SAFETY_GATE" >&2
@@ -115,6 +116,40 @@ create_claim_comment() {
     gh issue comment "$issue" --repo "$repo" --body-file "$body_file" >/dev/null
 }
 
+startup_heartbeat_file() {
+    heartbeat_base="${AUTOSPEC_HEARTBEAT_DIR:-${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autospec/process-heartbeats}}"
+    slug="$(printf '%s' "$repo" | sed 's#/#__#')"
+    printf '%s/%s/%s.json\n' "$heartbeat_base" "$slug" "$issue"
+}
+
+write_startup_heartbeat() {
+    if [ -x "$HEARTBEAT_WRITE" ]; then
+        "$HEARTBEAT_WRITE" \
+            --issue "$issue" \
+            --repo "$repo" \
+            --step claimed \
+            --branch "$branch" >/dev/null
+        return
+    fi
+
+    target_file="$(startup_heartbeat_file)"
+    mkdir -p "$(dirname "$target_file")"
+    now_ts="$(date -u +%s)"
+    printf '{"issue":"%s","branch":"%s","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' \
+        "$issue" "$branch" "$now_ts" "$repo" > "$target_file"
+}
+
+cleanup_startup_heartbeat() {
+    rm -f "$(startup_heartbeat_file)" 2>/dev/null || true
+}
+
+cleanup_failed_claim() {
+    cleanup_startup_heartbeat
+    gh issue edit "$issue" --repo "$repo" \
+        --remove-label in-progress-by-bot \
+        --add-label auto-implement >/dev/null 2>&1 || true
+}
+
 usage() {
     cat <<'EOF'
 Usage: claim-issue.sh --issue <N> [--repo owner/repo] [--worker-id <id>] [--branch <branch>]
@@ -175,8 +210,15 @@ if ! printf '%s\n' "$safety_gate_result" | jq -e '.ok == true' >/dev/null 2>&1; 
     exit 2
 fi
 
+if ! write_startup_heartbeat; then
+    jq -n --argjson issue "$issue" --arg repo "$repo" --arg reason "heartbeat_write_failed" \
+        '{claimed:false, issue:$issue, repo:$repo, reason:$reason}'
+    exit 2
+fi
+
 gh label create in-progress-by-bot --repo "$repo" --color ededed --force >/dev/null 2>&1 || true
 if ! gh issue edit "$issue" --repo "$repo" --remove-label auto-implement --add-label in-progress-by-bot >/dev/null; then
+    cleanup_startup_heartbeat
     jq -n --argjson issue "$issue" --arg repo "$repo" --arg reason "label_mutation_failed" \
         '{claimed:false, issue:$issue, repo:$repo, reason:$reason}'
     exit 2
@@ -233,6 +275,7 @@ if [ -n "$lowest_owner" ] && [ "$lowest_owner" != "$worker_id" ]; then
         if [ -n "$own_comment_id" ] && [ "$own_comment_id" != "null" ]; then
             gh api "repos/$repo/issues/comments/$own_comment_id" -X DELETE >/dev/null 2>&1 || true
         fi
+        cleanup_startup_heartbeat
         printf 'claim-issue: claim lost (issue %s owned by %s, lock fresh)\n' "$issue" "$lowest_owner" >&2
         jq -n \
             --argjson issue "$issue" \
@@ -249,16 +292,26 @@ if [ -n "$lowest_owner" ] && [ "$lowest_owner" != "$worker_id" ]; then
 fi
 
 if [ -n "$reclaiming" ] || [ "$lowest_owner" = "$worker_id" ]; then
-    "$RUN_STATE" upsert \
+    if ! "$RUN_STATE" upsert \
         --issue "$issue" \
         --repo "$repo" \
         --worker-id "$worker_id" \
         --state claimed \
         --step claimed \
         --branch "$branch" \
-        --ttl-seconds "$reclaim_secs" >/dev/null
+        --ttl-seconds "$reclaim_secs" >/dev/null; then
+        cleanup_failed_claim
+        jq -n --argjson issue "$issue" --arg repo "$repo" --arg reason "run_state_upsert_failed" \
+            '{claimed:false, issue:$issue, repo:$repo, reason:$reason}'
+        exit 2
+    fi
 else
-    create_claim_comment "$repo" "$issue" "$worker_id" "$branch" "$reclaim_secs"
+    if ! create_claim_comment "$repo" "$issue" "$worker_id" "$branch" "$reclaim_secs"; then
+        cleanup_failed_claim
+        jq -n --argjson issue "$issue" --arg repo "$repo" --arg reason "run_state_create_failed" \
+            '{claimed:false, issue:$issue, repo:$repo, reason:$reason}'
+        exit 2
+    fi
 fi
 
 verified_owner=""
@@ -283,6 +336,7 @@ while [ "$confirm_read" -le "$claim_confirm_reads" ]; do
         if [ -n "$own_comment_id" ] && [ "$own_comment_id" != "null" ]; then
             gh api "repos/$repo/issues/comments/$own_comment_id" -X DELETE >/dev/null 2>&1 || true
         fi
+        cleanup_startup_heartbeat
         printf 'claim-issue: claim lost (issue %s owned by %s)\n' "$issue" "$verified_owner" >&2
         jq -n \
             --argjson issue "$issue" \
@@ -298,6 +352,7 @@ while [ "$confirm_read" -le "$claim_confirm_reads" ]; do
         if [ -n "$own_comment_id" ] && [ "$own_comment_id" != "null" ]; then
             gh api "repos/$repo/issues/comments/$own_comment_id" -X DELETE >/dev/null 2>&1 || true
         fi
+        cleanup_startup_heartbeat
         jq -n \
             --argjson issue "$issue" \
             --arg repo "$repo" \
