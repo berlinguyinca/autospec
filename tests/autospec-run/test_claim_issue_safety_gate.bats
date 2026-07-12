@@ -7,6 +7,7 @@ setup() {
     MOCK_BIN="$FIXTURE_DIR/bin"
     mkdir -p "$MOCK_BIN"
     : > "$FIXTURE_DIR/edit.log"
+    : > "$FIXTURE_DIR/comment.log"
 
     cat > "$MOCK_BIN/gh" <<MOCKEOF
 #!/usr/bin/env bash
@@ -31,7 +32,14 @@ case "\$sub" in
       printf 'heartbeat_present_at_edit=no\n' >> "\$FIXTURE_DIR/edit.log"
     fi
     printf '%s\n' "\$*" >> "\$FIXTURE_DIR/edit.log"
-    exit 1
+    exit "\${ISSUE_EDIT_FAIL:-1}"
+    ;;
+  "issue comment")
+    printf '%s\n' "\$*" >> "\$FIXTURE_DIR/comment.log"
+    if [ "\${ISSUE_COMMENT_FAIL:-0}" = "1" ]; then
+      exit 1
+    fi
+    printf 'https://example.test/comment/1\n'
     ;;
   "repo view")
     printf 'test/repo\n'
@@ -147,6 +155,7 @@ $block
 EOF
 )"
         : > "$FIXTURE_DIR/edit.log"
+    : > "$FIXTURE_DIR/comment.log"
         write_issue "$body" '[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
 
         run run_claim
@@ -303,7 +312,7 @@ EOF
     grep -q -- "--remove-label auto-implement --add-label in-progress-by-bot" "$FIXTURE_DIR/edit.log"
 }
 
-@test "claim writes startup heartbeat before adding in-progress label" {
+@test "claim removes startup heartbeat when label mutation fails" {
     write_issue "$(safe_block)" '[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
     export AUTOSPEC_HEARTBEAT_DIR="$FIXTURE_DIR/heartbeats"
 
@@ -311,6 +320,20 @@ EOF
 
     [ "$status" -eq 2 ]
     [ "$(echo "$output" | jq -r '.reason')" = "label_mutation_failed" ]
-    [ -f "$FIXTURE_DIR/heartbeats/test__repo/700.json" ]
+    [ ! -f "$FIXTURE_DIR/heartbeats/test__repo/700.json" ]
     grep -q 'heartbeat_present_at_edit=yes' "$FIXTURE_DIR/edit.log"
+}
+
+@test "claim restores labels and removes heartbeat when run-state comment creation fails" {
+    write_issue "$(safe_block)" '[{"name":"auto-implement"},{"name":"safety:reviewed"}]'
+    export AUTOSPEC_HEARTBEAT_DIR="$FIXTURE_DIR/heartbeats"
+
+    ISSUE_EDIT_FAIL=0 ISSUE_COMMENT_FAIL=1 run run_claim
+
+    [ "$status" -eq 2 ]
+    [ "$(echo "$output" | jq -r '.reason')" = "run_state_create_failed" ]
+    [ ! -f "$FIXTURE_DIR/heartbeats/test__repo/700.json" ]
+    grep -q -- "--remove-label auto-implement --add-label in-progress-by-bot" "$FIXTURE_DIR/edit.log"
+    grep -q -- "--remove-label in-progress-by-bot --add-label auto-implement" "$FIXTURE_DIR/edit.log"
+    grep -q -- "--body-file" "$FIXTURE_DIR/comment.log"
 }

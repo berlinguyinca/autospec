@@ -37,10 +37,12 @@ elif [ -f "$HOME/.autospec/scripts/autospec-runtime-config.sh" ]; then
     . "$HOME/.autospec/scripts/autospec-runtime-config.sh"
 fi
 
-if command -v autospec_runtime_repo_workers >/dev/null 2>&1; then
+if [ -n "${AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS:-}" ]; then
+    max_repo_workers="$AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS"
+elif command -v autospec_runtime_repo_workers >/dev/null 2>&1; then
     max_repo_workers="$(autospec_runtime_repo_workers)"
 else
-    max_repo_workers="${AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS:-0}"
+    max_repo_workers=0
 fi
 
 while [ "$#" -gt 0 ]; do
@@ -254,7 +256,9 @@ issue_heartbeat_exists() {
 issue_run_state() {
     issue_number="$1"
     [ -x "$RUN_STATE" ] || return 0
-    "$RUN_STATE" read --issue "$issue_number" --repo "$repo" 2>/dev/null
+    state_output="$({ "$RUN_STATE" read --issue "$issue_number" --repo "$repo"; } 2>/dev/null)" || return 1
+    [ -n "$state_output" ] || return 1
+    printf '%s\n' "$state_output"
 }
 
 branch_ref_exists() {
