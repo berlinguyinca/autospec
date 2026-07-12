@@ -190,6 +190,7 @@ def test_legacy_version_commands_use_table_dispatch(tmp_path, monkeypatch, capsy
     assert calls[8][2] == (SimpleNamespace(command="v26-supervisor"),)
     assert capsys.readouterr().out == "v26 status: ready_after_human_canary\nv26 status: ready_after_human_canary\n"
     assert module.handle_legacy_version_command(tmp_path, SimpleNamespace(command="v40-contract")) is None
+    assert module.handle_legacy_version_command(tmp_path, SimpleNamespace(command="v026-contract")) is None
 
 
 def test_v61_commands_use_dispatch_table(tmp_path, monkeypatch, capsys):

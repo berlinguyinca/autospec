@@ -5574,10 +5574,11 @@ def handle_legacy_version_command(root: Path, args) -> int | None:
     m = re.fullmatch(rf"v(\d+)-({actions})", args.command)
     if not m:
         return None
-    version = int(m.group(1))
+    version_text = m.group(1)
+    version = int(version_text)
     action = m.group(2)
     ready_status = LEGACY_VERSION_READY_STATUS.get(version)
-    if ready_status is None:
+    if ready_status is None or version_text != str(version):
         return None
     handler = globals()[f"v{version}_{action.replace('-', '_')}"]
     if action in {"gate", "supervisor"}:
