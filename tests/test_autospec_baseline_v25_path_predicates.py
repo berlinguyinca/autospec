@@ -40,3 +40,21 @@ def test_test_matrix_uses_filename_tokens_not_substrings(tmp_path):
 
     assert payload["subsystems"]["smoke"] == []
     assert payload["subsystems"]["regression"] == []
+
+
+def test_generic_artifact_build_uses_registry_and_preserves_v40_v54_artifacts(tmp_path):
+    module = load_baseline_module()
+
+    assert set(module.GENERIC_ARTIFACT_BUILDERS) == set(range(40, 61))
+
+    module.generic_artifact_build(tmp_path, 40)
+    v40_root = tmp_path / ".autospec" / "autonomy" / "v40" / "autonomy-v40-ci-local-fix-simulation"
+    assert (v40_root / "local-fix-simulation.json").exists()
+    assert (v40_root / "disposable-fix" / "src" / "ci_fix_marker.txt").read_text(encoding="utf-8") == "autospec v40 local CI fix simulation\n"
+    assert (v40_root / "update-plan.md").read_text(encoding="utf-8").startswith("# V40 Update Plan")
+
+    module.generic_artifact_build(tmp_path, 54)
+    v54_root = tmp_path / ".autospec" / "autonomy" / "v54" / "autonomy-v54-portfolio-planning"
+    assert (v54_root / "portfolio-inventory.json").exists()
+    assert (v54_root / "candidate-ranking.md").read_text(encoding="utf-8").startswith("# V54 Candidate Ranking")
+    assert (v54_root / "shared-rule-report.json").exists()
