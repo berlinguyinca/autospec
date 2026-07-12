@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 from types import SimpleNamespace
 from pathlib import Path
@@ -252,4 +253,39 @@ def test_v61_commands_use_dispatch_table(tmp_path, monkeypatch, capsys):
     assert [call[0] for call in calls] == list(expected)
     assert all(call[1] == tmp_path and call[2] == call[0] for call in calls)
     assert module.handle_v61_command(tmp_path, SimpleNamespace(command="v62-status")) is None
+    assert capsys.readouterr().out == "".join(f"{command}: ok\n" for command in expected)
+
+
+def test_exact_commands_use_dispatch_table(tmp_path, monkeypatch, capsys):
+    module = load_baseline_module()
+    expected = (
+        "spec-coverage",
+        "release-validation",
+        "baseline-validation",
+        "v25-status",
+    )
+
+    assert tuple(module.EXACT_COMMAND_DISPATCHERS) == expected
+
+    calls = []
+    for command in expected:
+        def handler(root, args, command=command):
+            calls.append((command, root, args.command))
+            print(f"{command}: ok")
+            return 0
+
+        monkeypatch.setitem(module.EXACT_COMMAND_DISPATCHERS, command, handler)
+
+    for command in expected:
+        assert module.handle_exact_command(tmp_path, SimpleNamespace(command=command)) == 0
+
+    module_source = MODULE_PATH.read_text(encoding="utf-8")
+    module_ast = ast.parse(module_source)
+    main_source = ast.get_source_segment(module_source, module_ast.body[-2])
+    assert main_source is not None
+    assert "handle_exact_command(root, args)" in main_source
+    assert 'args.command == "spec-coverage"' not in main_source
+    assert 'args.command == "v26-' not in main_source
+    assert [call[0] for call in calls] == list(expected)
+    assert all(call[1] == tmp_path and call[2] == call[0] for call in calls)
     assert capsys.readouterr().out == "".join(f"{command}: ok\n" for command in expected)

@@ -5680,6 +5680,57 @@ def handle_v61_command(root: Path, args) -> int | None:
     return None if handler is None else handler(root, args)
 
 
+def _core_spec_coverage_command(root: Path, args) -> int:
+    spec_coverage(root)
+    print("Spec Inventory: PASS")
+    return 0
+
+
+def _core_release_validation_command(root: Path, args) -> int:
+    build_baseline(root)
+    release_validation(root)
+    print("Release Validation: PASS")
+    return 0
+
+
+def _core_baseline_validation_command(root: Path, args) -> int:
+    payload = baseline_validation(root)
+    for label in (
+        "Repository Audit",
+        "Spec Inventory",
+        "Dependency Graph",
+        "Documentation",
+        "CLI",
+        "Tests",
+        "Performance Baseline",
+        "Quality Baseline",
+        "Release Validation",
+    ):
+        print(f"{label}: PASS")
+    print(f"V25_BASELINE_READY={'true' if payload['V25_BASELINE_READY'] else 'false'}")
+    return 0 if payload["V25_BASELINE_READY"] else 1
+
+
+def _core_v25_status_command(root: Path, args) -> int:
+    status = v25_status(root)
+    print(f"v25 status: {status['status']}")
+    print(f"V25_BASELINE_READY={'true' if status['V25_BASELINE_READY'] else 'false'}")
+    return 0 if status["V25_BASELINE_READY"] else 1
+
+
+EXACT_COMMAND_DISPATCHERS = {
+    "spec-coverage": _core_spec_coverage_command,
+    "release-validation": _core_release_validation_command,
+    "baseline-validation": _core_baseline_validation_command,
+    "v25-status": _core_v25_status_command,
+}
+
+
+def handle_exact_command(root: Path, args) -> int | None:
+    handler = EXACT_COMMAND_DISPATCHERS.get(args.command)
+    return None if handler is None else handler(root, args)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", default=".")
@@ -5701,33 +5752,10 @@ def main() -> int:
     parser.add_argument("--approval-capsule", default="")
     args = parser.parse_args()
     root = Path(args.repo_root).resolve()
-    if args.command == "spec-coverage":
-        spec_coverage(root)
-        print("Spec Inventory: PASS")
-        return 0
-    if args.command == "release-validation":
-        build_baseline(root)
-        release_validation(root)
-        print("Release Validation: PASS")
-        return 0
-    if args.command == "baseline-validation":
-        payload = baseline_validation(root)
-        print("Repository Audit: PASS")
-        print("Spec Inventory: PASS")
-        print("Dependency Graph: PASS")
-        print("Documentation: PASS")
-        print("CLI: PASS")
-        print("Tests: PASS")
-        print("Performance Baseline: PASS")
-        print("Quality Baseline: PASS")
-        print("Release Validation: PASS")
-        print(f"V25_BASELINE_READY={'true' if payload['V25_BASELINE_READY'] else 'false'}")
-        return 0 if payload["V25_BASELINE_READY"] else 1
-    if args.command == "v25-status":
-        status = v25_status(root)
-        print(f"v25 status: {status['status']}")
-        print(f"V25_BASELINE_READY={'true' if status['V25_BASELINE_READY'] else 'false'}")
-        return 0 if status["V25_BASELINE_READY"] else 1
+
+    exact_result = handle_exact_command(root, args)
+    if exact_result is not None:
+        return exact_result
     legacy_result = handle_legacy_version_command(root, args)
     if legacy_result is not None:
         return legacy_result
