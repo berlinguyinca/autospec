@@ -111,6 +111,23 @@ _run_derive_check_in_scratch() {
     [ ! -f "$SCRATCH/fail.out" ]
 }
 
+@test "check_derive_trio_consistency: fails clearly when derive-trio.sh is missing" {
+    mkdir -p "$SCRATCH/scripts"
+    awk '/^check_derive_trio_consistency\(\) \{/{p=1} p{print} p&&/^\}/{exit}' \
+        "$VALIDATE" > "$SCRATCH/fn.sh"
+    run bash -c '
+        set +e
+        cd "$1"
+        fail() { printf "validate: FAIL — %s\n" "$*" >&2; exit 1; }
+        info() { printf "validate: %s\n" "$*"; }
+        discover_skills() { :; }
+        . "$1/fn.sh"
+        check_derive_trio_consistency
+    ' _ "$SCRATCH"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"scripts/derive-trio.sh: missing"* ]]
+}
+
 @test "check_derive_trio_consistency: fails with the fix command when a codex mirror drifts" {
     mkdir -p "$SCRATCH/skills" "$SCRATCH/scripts"
     cp -R "$REPO_ROOT/skills/autospec-explore" "$SCRATCH/skills/autospec-explore"
