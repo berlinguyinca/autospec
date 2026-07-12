@@ -141,6 +141,33 @@ assert not any(
 PY
 }
 
+@test "generic_gate is table-driven and no longer dogfood-allowlisted" {
+  python3 - "$REPO_ROOT/scripts/autospec-baseline-v25.py" "$REPO_ROOT/tests/dogfood/allowlist/qa-brute-force-sweep.json" <<'PY'
+import ast
+import json
+import sys
+from pathlib import Path
+
+source_path = Path(sys.argv[1])
+allowlist_path = Path(sys.argv[2])
+module = ast.parse(source_path.read_text(encoding="utf-8"))
+generic_gate = next(
+    node for node in module.body
+    if isinstance(node, ast.FunctionDef) and node.name == "generic_gate"
+)
+branch_count = sum(isinstance(node, ast.If) for node in ast.walk(generic_gate))
+assert branch_count <= 4, f"generic_gate still has {branch_count} explicit if branches"
+
+entries = json.loads(allowlist_path.read_text(encoding="utf-8"))
+assert not any(
+    entry.get("file") == "scripts/autospec-baseline-v25.py"
+    and entry.get("function") == "generic_gate"
+    and entry.get("rule_id") == "REPEATED_STRUCTURE_AS_CODE"
+    for entry in entries
+), "generic_gate REPEATED_STRUCTURE_AS_CODE dogfood allowlist entry remains"
+PY
+}
+
 @test "v25 dependency graph is acyclic and release validation has no blockers" {
   bash "$TEST_TMP/repo/scripts/autospec-baseline-validation.sh" --repo-root "$TEST_TMP/repo" >/dev/null
   python3 - "$TEST_TMP/repo/.autospec/reports/dependency-validation.json" "$TEST_TMP/repo/.autospec/reports/release-validation.json" <<'PY'

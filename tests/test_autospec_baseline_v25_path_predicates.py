@@ -1,4 +1,5 @@
 import importlib.util
+from types import SimpleNamespace
 from pathlib import Path
 
 
@@ -58,3 +59,44 @@ def test_generic_artifact_build_uses_registry_and_preserves_v40_v54_artifacts(tm
     assert (v54_root / "portfolio-inventory.json").exists()
     assert (v54_root / "candidate-ranking.md").read_text(encoding="utf-8").startswith("# V54 Candidate Ranking")
     assert (v54_root / "shared-rule-report.json").exists()
+
+
+def test_generic_gate_preserves_forbidden_flag_blockers(tmp_path):
+    module = load_baseline_module()
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/feat/generic-gate-test\n", encoding="utf-8")
+    previous_status = tmp_path / ".autospec" / "reports" / "autonomy-v40-status.json"
+    previous_status.parent.mkdir(parents=True)
+    previous_status.write_text(
+        '{"status":"ready","phase_goal_satisfied":true}\n',
+        encoding="utf-8",
+    )
+    args = SimpleNamespace(
+        allow_network=True,
+        execute_real_github_write=True,
+        allow_git_push=True,
+        allow_github_pr=True,
+        allow_merge=True,
+        allow_auto_merge=True,
+        allow_approval=True,
+        allow_self_approval=True,
+        allow_default_branch_push=True,
+        allow_force_push=True,
+        allow_tag_push=True,
+    )
+
+    payload = module.generic_gate(tmp_path, 41, args)
+
+    assert payload["status"] == "blocked_forbidden_operation:network_not_allowed"
+    assert payload["blockers"] == sorted(
+        [
+            "blocked_forbidden_operation:network_not_allowed",
+            "blocked_forbidden_operation:github_write_requested",
+            "blocked_forbidden_operation:merge_requested",
+            "blocked_forbidden_operation:approval_requested",
+            "blocked_forbidden_operation:default_branch_push_requested",
+            "blocked_forbidden_operation:force_push_requested",
+            "blocked_forbidden_operation:tag_push_requested",
+        ]
+    )
+    assert payload["real_write_allowed"] is False
