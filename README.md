@@ -155,10 +155,16 @@ Prerequisites:
 Optional but useful: `bats`, `ajv`, `yq`, and browser automation tools for deeper
 validation.
 
-Install the latest `main` version:
+Install the latest `main` version on macOS/Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash
+```
+
+On Windows, run the PowerShell bootstrap from PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.ps1 | iex
 ```
 
 Or install from a checkout when developing AutoSpec itself:
@@ -184,10 +190,16 @@ When the generated issues are ready:
 
 ## Install
 
-For day-to-day use, install the latest `main` version:
+For day-to-day use, install the latest `main` version on macOS/Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh | bash
+```
+
+On Windows, run the PowerShell bootstrap from PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.ps1 | iex
 ```
 
 From a local checkout:
