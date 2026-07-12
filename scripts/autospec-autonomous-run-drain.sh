@@ -31,14 +31,14 @@ if ! command -v omx >/dev/null 2>&1; then
 fi
 
 stat_size() {
-    stat -f '%z' /dev/fd/1 2>/dev/null || stat -c '%s' /dev/fd/1 2>/dev/null || printf ''
+    stat -c '%s' /dev/fd/1 2>/dev/null || stat -f '%z' /dev/fd/1 2>/dev/null || printf ''
 }
 
 stat_file_signature() {
     _file="$1"
     [ -f "$_file" ] || return 0
-    _size="$(stat -f '%z' "$_file" 2>/dev/null || stat -c '%s' "$_file" 2>/dev/null || printf '')"
-    _mtime="$(stat -f '%m' "$_file" 2>/dev/null || stat -c '%Y' "$_file" 2>/dev/null || printf '')"
+    _size="$(stat -c '%s' "$_file" 2>/dev/null || stat -f '%z' "$_file" 2>/dev/null || printf '')"
+    _mtime="$(stat -c '%Y' "$_file" 2>/dev/null || stat -f '%m' "$_file" 2>/dev/null || printf '')"
     printf '%s:%s:%s\n' "$_file" "$_size" "$_mtime"
 }
 

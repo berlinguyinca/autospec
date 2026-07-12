@@ -124,13 +124,19 @@ _install_common_stubs() {
 # list-ready mock: ready/batch carry the given comma-separated issue numbers.
 _install_list_ready() {
   local numbers_csv="$1"
+  _install_list_ready_ready_batch "$numbers_csv" "$numbers_csv"
+}
+
+_install_list_ready_ready_batch() {
+  local ready_csv="$1"
+  local batch_csv="$2"
   cat > "$FAKE_SCRIPTS/list-ready-issues.sh" <<EOF
 #!/usr/bin/env bash
 jq -cn '{
-  ready: ([$numbers_csv] | map({number: .})),
+  ready: ([$ready_csv] | map({number: .})),
   blocked: [], claimed: [], conflicts: [],
   worker_cap: {max_repo_workers: 0, active_count: 0, remaining: 0, reached: false},
-  batch: ([$numbers_csv] | map({number: .}))
+  batch: ([$batch_csv] | map({number: .}))
 }'
 EOF
   chmod +x "$FAKE_SCRIPTS/list-ready-issues.sh"
@@ -201,6 +207,20 @@ _run_cycle() {
     CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
     CONDUCTOR_REPO='test-owner/test-repo' \
     CONDUCTOR_MAX_CYCLES=1 \
+    CONDUCTOR_POLL_INTERVAL=0 \
+    CONDUCTOR_DRY_RUN=0 \
+    CONDUCTOR_NO_DIGEST=1 \
+    autospec_conductor_run
+  " 2>&1
+}
+
+_run_cycles() {
+  local cycles="$1"
+  run bash -c "
+    . '$LOOP_LIB'
+    CONDUCTOR_SCRIPTS_DIR='$FAKE_SCRIPTS' \
+    CONDUCTOR_REPO='test-owner/test-repo' \
+    CONDUCTOR_MAX_CYCLES='$cycles' \
     CONDUCTOR_POLL_INTERVAL=0 \
     CONDUCTOR_DRY_RUN=0 \
     CONDUCTOR_NO_DIGEST=1 \
@@ -366,6 +386,71 @@ _run_cycle() {
   [ "$status" -eq 0 ]
   # Self issue must not be dispatched anywhere (fail closed, never to parent).
   ! grep -q 'issues=101' "$RUN_CMD_LOG"
+}
+
+@test "repeated integration mode conflict: self issue cools down and spend is not incremented" {
+  _install_common_stubs
+  _install_provenance
+  _install_list_ready "1867"
+
+  local spend_log="$TEST_TMP/spend.log"
+  _install_stub "autonomous-spend-ledger.sh" \
+    "case \"\${1:-}\" in add) printf '%s\n' \"\$*\" >> '$spend_log';; check) printf 'continue\n';; *) exit 0;; esac"
+
+  _install_stub "autonomous-integration-branch.sh" \
+    "case \"\${1:-}\" in
+       ensure)
+         mkdir -p '$(dirname "$MODE_FILE")'
+         printf '{\"branch\":\"autospec/explore/2026-07-09-auto-vqt89j572511\"}\n' > '$MODE_FILE'
+         printf 'code_health:integration_mode_conflict existing_branch=autospec/explore/2026-07-09-auto-vqt89j572511 existing_kind=<none> requested_branch=autospec/autonomous-main\n' >&2
+         exit 6
+         ;;
+       status)
+         printf '{\"accumulated_pr_count\":0,\"age_days\":0,\"diff_lines\":0}\n'
+         ;;
+       *) exit 0 ;;
+     esac"
+
+  _run_cycles 5
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'code_health:integration_mode_conflict' || true)" -eq 1 ]
+  [[ "$output" == *"integration branch unavailable (rc=6) — parking self batch (issues: 1867)"* ]]
+  [[ "$output" == *"integration conflict cooldown"* ]]
+  ! grep -q 'issues=1867' "$RUN_CMD_LOG"
+  if [ -f "$spend_log" ]; then
+    ! grep -q -- '--issues 1' "$spend_log"
+  fi
+  grep -q '^requested_branch=autospec/autonomous-main$' "$TEST_TMP/.autospec/integration-conflict-cooldown"
+  grep -q '^existing_branch=autospec/explore/2026-07-09-auto-vqt89j572511$' "$TEST_TMP/.autospec/integration-conflict-cooldown"
+  grep -q '^existing_kind=<none>$' "$TEST_TMP/.autospec/integration-conflict-cooldown"
+}
+
+@test "integration mode conflict cooldown falls through to next ready issue" {
+  _install_common_stubs
+  _install_provenance
+  _install_list_ready_ready_batch "1867,2001" "1867"
+
+  _install_stub "autonomous-integration-branch.sh" \
+    "case \"\${1:-}\" in
+       ensure)
+         mkdir -p '$(dirname "$MODE_FILE")'
+         printf '{\"branch\":\"autospec/explore/2026-07-09-auto-vqt89j572511\"}\n' > '$MODE_FILE'
+         printf 'code_health:integration_mode_conflict existing_branch=autospec/explore/2026-07-09-auto-vqt89j572511 existing_kind=<none> requested_branch=autospec/autonomous-main\n' >&2
+         exit 6
+         ;;
+       status)
+         printf '{\"accumulated_pr_count\":0,\"age_days\":0,\"diff_lines\":0}\n'
+         ;;
+       *) exit 0 ;;
+     esac"
+
+  _run_cycles 2
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'code_health:integration_mode_conflict' || true)" -eq 1 ]
+  grep -q '^issues=2001 kind=none$' "$RUN_CMD_LOG"
+  ! grep -q 'issues=1867' "$RUN_CMD_LOG"
 }
 
 # ── 6. Back-compat: split inactive without the two scripts ────────────────────
