@@ -1,4 +1,7 @@
 pub mod agent;
+pub mod autonomous {
+    pub mod audit;
+}
 pub mod claim;
 pub mod error;
 pub mod evidence;
