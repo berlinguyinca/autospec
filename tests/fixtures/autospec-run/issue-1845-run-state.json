@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "repo": "testorg/testrepo",
+  "issue": 1845,
+  "worker_id": "thishost:me:shell:999999",
+  "state": "tests_started",
+  "branch": "feat/1845-watchdog-run-state-reclaim",
+  "pr": "",
+  "step": "tests_started",
+  "paths": [],
+  "claimed_at": "2026-07-11T20:51:35Z",
+  "updated_at": "2026-07-11T20:51:35Z",
+  "ttl_seconds": 300
+}
