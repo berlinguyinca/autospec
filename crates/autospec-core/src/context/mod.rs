@@ -86,11 +86,11 @@ impl ContextMonitorEngine {
         self.classify_percent(pct)
     }
 
-    /// Classify already-normalized usage percentage (`0.0` to `1.0`).
+    /// Classify already-normalized usage percentage (`0` to `100`).
     ///
     /// The only rollover path is Normal → Compacted → Rolled; even a direct climb
     /// to 80% first emits `compact`, matching the Python engine invariant.
-    pub fn classify_percent(&mut self, pct: f64) -> Vec<ContextAction> {
+    pub fn classify_percent(&mut self, pct: u8) -> Vec<ContextAction> {
         match self.state {
             ContextState::Normal => self.classify_normal(pct),
             ContextState::Compacted => self.classify_compacted(pct),
@@ -98,28 +98,28 @@ impl ContextMonitorEngine {
         }
     }
 
-    fn classify_normal(&mut self, pct: f64) -> Vec<ContextAction> {
-        if pct < 0.50 {
+    fn classify_normal(&mut self, pct: u8) -> Vec<ContextAction> {
+        if pct < 50 {
             return Vec::new();
         }
         self.state = ContextState::Compacted;
         compact_actions()
     }
 
-    fn classify_compacted(&mut self, pct: f64) -> Vec<ContextAction> {
-        if pct >= 0.80 {
+    fn classify_compacted(&mut self, pct: u8) -> Vec<ContextAction> {
+        if pct >= 80 {
             self.state = ContextState::Rolled;
             return rollover_actions();
         }
-        if pct < 0.30 {
+        if pct < 30 {
             self.state = ContextState::Normal;
             return reset_actions("reset:compacted->normal");
         }
         Vec::new()
     }
 
-    fn classify_rolled(&mut self, pct: f64) -> Vec<ContextAction> {
-        if pct >= 0.30 {
+    fn classify_rolled(&mut self, pct: u8) -> Vec<ContextAction> {
+        if pct >= 30 {
             return Vec::new();
         }
         self.state = ContextState::Normal;
@@ -127,11 +127,11 @@ impl ContextMonitorEngine {
     }
 }
 
-fn usage_percent(used_tokens: u64, max_tokens: u64) -> f64 {
+fn usage_percent(used_tokens: u64, max_tokens: u64) -> u8 {
     if max_tokens == 0 {
-        0.0
+        0
     } else {
-        used_tokens as f64 / max_tokens as f64
+        ((used_tokens.saturating_mul(100)) / max_tokens).min(100) as u8
     }
 }
 
