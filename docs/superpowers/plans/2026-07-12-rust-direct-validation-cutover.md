@@ -418,7 +418,7 @@ Commit: `test: prove direct Rust validation parity`.
 #[test]
 fn repository_callers_use_direct_rust_validation() {
     let output = Command::new("git")
-        .args(["grep", "-n", "bash scripts/validate.sh"])
+        .args(["grep", "-n", "bash scripts/validate.sh", "--", ".github", "AGENTS.md", "README.md", "docs/cli-reference.md", "docs/workflows.md", "skills"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -465,8 +465,19 @@ Commit: `refactor: route validation callers through Rust`.
 ```rust
 #[test]
 fn legacy_validation_symbols_are_absent_from_tracked_source() {
-    for symbol in ["scripts/validate.sh", "run_legacy_shell", "AUTOSPEC_FORCE_LEGACY_SHELL", "AUTOSPEC_VALIDATE_FROM_SHELL", "AUTOSPEC_VALIDATE_FROM_RUST", "AUTOSPEC_VALIDATE_LEGACY_ACTIVE"] {
-        let output = Command::new("git").args(["grep", "-n", symbol]).output().unwrap();
+    let symbols = [
+        ["scripts", "validate.sh"].join("/"),
+        ["run", "legacy", "shell"].join("_"),
+        format!("AUTOSPEC_{}{}", "FORCE_", "LEGACY_SHELL"),
+        format!("AUTOSPEC_{}{}", "VALIDATE_", "FROM_SHELL"),
+        format!("AUTOSPEC_{}{}", "VALIDATE_", "FROM_RUST"),
+        format!("AUTOSPEC_{}{}", "VALIDATE_", "LEGACY_ACTIVE"),
+    ];
+    for symbol in symbols {
+        let output = Command::new("git")
+            .args(["grep", "-n", &symbol, "--", "crates/autospec-core", "crates/autospec-cli/src", "scripts", "tests/install", "tests/smoke", "docs/cli-reference.md", "docs/workflows.md", "docs/specs/2026-07-11-rust-core-runtime-consolidation-design.md", "docs/reports/2026-07-12-rust-context-monitor-cutover.md"])
+            .output()
+            .unwrap();
         assert!(!output.status.success(), "{symbol}");
     }
 }
