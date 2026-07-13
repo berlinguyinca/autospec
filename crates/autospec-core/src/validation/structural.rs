@@ -15,6 +15,7 @@ impl StructuralValidator {
             StructuralCheck::TrioLockstep => Self::validate_trio_lockstep(root),
             StructuralCheck::DuoLockstep => Self::validate_duo_lockstep(root),
             StructuralCheck::RequiredTrioFiles => Self::validate_required_trio_files(root),
+            StructuralCheck::FlagSentinelDocs => Self::validate_flag_sentinel_docs(root),
             StructuralCheck::StopMode => Self::validate_stop_mode_sections(root),
             StructuralCheck::KeywordRouting => Self::validate_keyword_routing_section(root),
             StructuralCheck::GapRemediation => Self::validate_gap_remediation_sections(root),
@@ -104,6 +105,44 @@ impl StructuralValidator {
             }
         }
         Ok(())
+    }
+
+    pub fn validate_flag_sentinel_docs(root: &Path) -> Result<(), String> {
+        let documentation = root.join("docs/FLAGS.md");
+        if !documentation.is_file() {
+            return Err("docs/FLAGS.md: missing flag-file reference".to_string());
+        }
+        let documentation = read(&documentation)?;
+        let mut flags = BTreeSet::new();
+
+        for source_root in ["scripts", "skills", "packages", "crates"] {
+            let source_root = root.join(source_root);
+            if !source_root.is_dir() {
+                continue;
+            }
+            for path in files_under(&source_root)? {
+                if has_ignored_flag_scan_component(root, &path) {
+                    continue;
+                }
+                let Ok(contents) = read(&path) else {
+                    continue;
+                };
+                flags.extend(sentinel_flags(&contents));
+            }
+        }
+
+        let missing = flags
+            .into_iter()
+            .filter(|flag| !documentation.contains(flag))
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "docs/FLAGS.md: missing sentinel flag(s): {}",
+                missing.join(" ")
+            ))
+        }
     }
 
     pub fn validate_policy_sections(root: &Path) -> Result<(), String> {
@@ -608,6 +647,47 @@ fn files_under(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     }
     files.sort();
     Ok(files)
+}
+
+fn has_ignored_flag_scan_component(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .map(|relative| {
+            relative.components().any(|component| {
+                matches!(
+                    component.as_os_str().to_str(),
+                    Some(".git" | "__pycache__" | "node_modules" | "target" | "tests")
+                )
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn sentinel_flags(document: &str) -> BTreeSet<String> {
+    let mut flags = BTreeSet::new();
+    let bytes = document.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_alphanumeric() {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < bytes.len() && is_flag_token_byte(bytes[index]) {
+            index += 1;
+        }
+        let candidate = &document[start..index];
+        if candidate.ends_with(".flag") {
+            flags.insert(candidate.to_string());
+        }
+    }
+
+    flags
+}
+
+fn is_flag_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
 }
 
 fn autospec_script_references(document: &str) -> Vec<String> {

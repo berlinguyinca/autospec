@@ -172,3 +172,18 @@ fn shared_script_install_contract_reports_the_autospec_design_anchor() {
         "check_shared_script_install: autospec-design references a shared helper but does not install into ~/.autospec/scripts"
     );
 }
+
+#[test]
+fn flag_sentinel_docs_contract_requires_every_runtime_flag_to_be_documented() {
+    StructuralValidator::validate_flag_sentinel_docs(&fixture("flag-sentinel-docs"))
+        .expect("every runtime sentinel flag is documented");
+
+    let failure =
+        StructuralValidator::validate_flag_sentinel_docs(&fixture("flag-sentinel-docs-missing"))
+            .expect_err("an undocumented runtime sentinel flag fails");
+
+    assert_eq!(
+        failure,
+        "docs/FLAGS.md: missing sentinel flag(s): second.flag"
+    );
+}

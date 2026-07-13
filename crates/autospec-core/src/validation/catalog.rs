@@ -20,6 +20,7 @@ impl ValidationCheck {
             "check_bash_syntax" => CheckOwner::ExternalBatch(ExternalCheck::BashSyntax),
             "check_frontmatter" => CheckOwner::ExternalBatch(ExternalCheck::Frontmatter),
             "check_required_files" => CheckOwner::RustNative(StructuralCheck::RequiredTrioFiles),
+            "check_flag_sentinel_docs" => CheckOwner::RustNative(StructuralCheck::FlagSentinelDocs),
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)
@@ -78,6 +79,7 @@ pub enum StructuralCheck {
     TrioLockstep,
     DuoLockstep,
     RequiredTrioFiles,
+    FlagSentinelDocs,
     StopMode,
     KeywordRouting,
     GapRemediation,

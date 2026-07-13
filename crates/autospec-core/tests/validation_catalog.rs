@@ -42,6 +42,20 @@ fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
 }
 
 #[test]
+fn catalog_assigns_flag_sentinel_docs_to_a_rust_owner() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_flag_sentinel_docs")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::RustNative(StructuralCheck::FlagSentinelDocs))
+    );
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![
