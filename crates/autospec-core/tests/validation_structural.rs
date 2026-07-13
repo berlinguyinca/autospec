@@ -60,6 +60,24 @@ fn structural_dispatch_runs_exactly_the_requested_owner() {
 }
 
 #[test]
+fn startup_preflight_contract_accepts_markers_and_canonical_blocks() {
+    StructuralValidator::validate_startup_preflight(&fixture("startup-preflight"))
+        .expect("startup preflight fixture passes");
+}
+
+#[test]
+fn startup_preflight_contract_reports_a_divergent_trio_block() {
+    let failure =
+        StructuralValidator::validate_startup_preflight(&fixture("startup-preflight-divergent"))
+            .expect_err("divergent startup block fails");
+
+    assert_eq!(
+        failure,
+        "skills/autospec/codex/prompt.md preflight body diverges from canonical"
+    );
+}
+
+#[test]
 fn named_skill_policy_sections_pass_when_every_member_has_the_required_heading() {
     StructuralValidator::validate_policy_sections(&fixture("policy-sections"))
         .expect("policy section fixture passes");

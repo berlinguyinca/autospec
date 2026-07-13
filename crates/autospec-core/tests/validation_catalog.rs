@@ -116,3 +116,17 @@ fn catalog_assigns_shared_script_install_to_a_rust_owner() {
         ))
     );
 }
+
+#[test]
+fn catalog_assigns_startup_preflight_to_a_rust_owner() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_startup_preflight")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::RustNative(StructuralCheck::StartupPreflight))
+    );
+}

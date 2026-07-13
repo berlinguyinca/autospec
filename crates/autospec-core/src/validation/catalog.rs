@@ -38,6 +38,7 @@ impl ValidationCheck {
             "check_shared_script_install" => {
                 CheckOwner::RustNative(StructuralCheck::SharedScriptInstall)
             }
+            "check_startup_preflight" => CheckOwner::RustNative(StructuralCheck::StartupPreflight),
             _ => CheckOwner::RustNative(StructuralCheck::CatalogSlot),
         };
         Self {
@@ -76,6 +77,7 @@ pub enum StructuralCheck {
     SelfUpdateDuo,
     CodexSkillsInstall,
     SharedScriptInstall,
+    StartupPreflight,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
