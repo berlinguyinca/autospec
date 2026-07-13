@@ -83,3 +83,21 @@ MD
 
     [ "$status" -eq 0 ]
 }
+
+@test "check_flag_sentinel_docs ignores ignored cache artifacts containing flag-like bytes" {
+    TREE="$(new_flag_doc_tree)"
+    printf '| `missing-sentinel.flag` | Fixture missing sentinel. | test |\n' >> "$TREE/docs/FLAGS.md"
+    mkdir -p "$TREE/packages/pkg/__pycache__"
+    printf 'compiled-cache ghost-cache.flag bytes\n' > "$TREE/packages/pkg/__pycache__/module.pyc"
+    printf '__pycache__/\n' > "$TREE/.gitignore"
+    (
+        cd "$TREE"
+        git init -q
+        git add .gitignore docs scripts
+    )
+
+    run bash -c "$(declare -f extract_flag_doc_func); $(declare -f run_flag_doc_check_in_tree); VALIDATE='$VALIDATE'; run_flag_doc_check_in_tree '$TREE'"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"ghost-cache.flag"* ]]
+}
