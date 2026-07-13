@@ -1,0 +1,28 @@
+# Rust validation cutover catalog baseline
+
+Date: 2026-07-12
+Source: `scripts/validate.sh` at `5fdc31f9`
+
+## Frozen catalog
+
+The version-1 catalog contains **148** uniquely named `check_*` gates. Its canonical
+order is the declaration order in `scripts/validate.sh`, which is the only complete,
+stable ordering that includes every named gate. The ordered IDs are checked in at
+`crates/autospec-cli/tests/fixtures/validation-cutover/catalog-v1.json`.
+
+`ValidationCatalog::standard()` has one deliberately non-executable catalog slot per
+frozen ID. Every entry is currently required and non-independent; mode selection,
+parallelism, direct Rust structural implementations, and explicit external commands are
+reserved for later cutover tasks.
+
+## Baseline verification
+
+- RED: `cargo test -p autospec-core --test validation_catalog catalog_has_one_owner_slot_for_every_frozen_gate -- --exact` failed before implementation because the catalog type and fixture were absent.
+- GREEN: `cargo test -p autospec-core --test validation_catalog -- --nocapture` verifies fixture parity and rejects empty or duplicate catalog IDs.
+
+## Scope boundary
+
+This baseline does not execute validation, invoke a shell, define tool commands, or
+remove legacy validation code. The shell's runtime includes dynamic per-skill discovery;
+future planning work must map that dynamic execution behavior onto these frozen IDs
+without changing their catalog order.
