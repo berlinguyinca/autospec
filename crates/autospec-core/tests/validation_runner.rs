@@ -2,8 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use autospec_core::validation::{
-    CheckModes, CheckOwner, CheckResult, ExternalCheck, StructuralCheck, ToolCommand,
-    ValidationCatalog, ValidationCheck, ValidationExecutionReport, ValidationRunner,
+    CheckModes, CheckOwner, CheckReachability, CheckResult, ExternalCheck, StructuralCheck,
+    ToolCommand, ValidationCatalog, ValidationCheck, ValidationExecutionReport, ValidationRunner,
 };
 
 #[test]
@@ -125,6 +125,7 @@ fn runner_executes_rust_owners_in_catalog_order_and_fails_unimplemented_slots() 
             required: true,
             independent: false,
             modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
             owner: CheckOwner::RustNative(StructuralCheck::TrioLockstep),
         },
         ValidationCheck {
@@ -132,6 +133,7 @@ fn runner_executes_rust_owners_in_catalog_order_and_fails_unimplemented_slots() 
             required: true,
             independent: false,
             modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
             owner: CheckOwner::RustNative(StructuralCheck::CatalogSlot),
         },
     ]);
@@ -159,6 +161,7 @@ fn runner_aggregates_typed_derive_trio_commands() {
         required: true,
         independent: false,
         modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
         owner: CheckOwner::ExternalBatch(ExternalCheck::DeriveTrioConsistency),
     }]);
 
@@ -176,6 +179,7 @@ fn runner_aggregates_typed_bash_syntax_commands() {
         required: true,
         independent: false,
         modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
         owner: CheckOwner::ExternalBatch(ExternalCheck::BashSyntax),
     }]);
 
@@ -193,6 +197,7 @@ fn runner_validates_frontmatter_for_each_discovered_trio_member() {
         required: true,
         independent: false,
         modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
         owner: CheckOwner::ExternalBatch(ExternalCheck::Frontmatter),
     }]);
 
@@ -210,6 +215,7 @@ fn runner_rejects_empty_trio_frontmatter() {
         required: true,
         independent: false,
         modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
         owner: CheckOwner::ExternalBatch(ExternalCheck::Frontmatter),
     }]);
 
@@ -226,6 +232,7 @@ fn runner_rejects_blank_only_trio_frontmatter() {
         required: true,
         independent: false,
         modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
         owner: CheckOwner::ExternalBatch(ExternalCheck::Frontmatter),
     }]);
 
@@ -242,6 +249,7 @@ fn runner_executes_the_gap_miner_contract_as_a_typed_batch() {
         required: true,
         independent: false,
         modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
         owner: CheckOwner::ExternalBatch(ExternalCheck::GapMinerContract),
     }]);
 

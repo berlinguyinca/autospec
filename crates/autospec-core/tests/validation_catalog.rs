@@ -1,5 +1,8 @@
+use std::collections::BTreeSet;
+
 use autospec_core::validation::{
-    CheckOwner, ExternalCheck, StructuralCheck, ValidationCatalog, ValidationCheck,
+    CheckOwner, CheckReachability, ExternalCheck, StructuralCheck, ValidationCatalog,
+    ValidationCheck,
 };
 
 const FROZEN_CATALOG: &str = include_str!(concat!(
@@ -26,6 +29,39 @@ fn catalog_has_one_owner_slot_for_every_frozen_gate() {
 
     assert_eq!(catalog.ids(), frozen_catalog_ids());
     assert!(catalog.validate().is_ok());
+}
+
+#[test]
+fn catalog_records_legacy_execution_reachability_without_expanding_it() {
+    let catalog = ValidationCatalog::standard();
+    let calls = catalog.legacy_top_level_calls();
+
+    assert_eq!(calls.len(), 138);
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 133);
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_lockstep")
+            .map(|check| check.reachability),
+        Some(CheckReachability::InternalComponent)
+    );
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_architecture_fitness_engine")
+            .map(|check| check.reachability),
+        Some(CheckReachability::LegacyUnreachable)
+    );
+    assert!(calls.contains(&"check_bash_syntax"));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|&&id| id == "check_bash_syntax")
+            .count(),
+        2
+    );
 }
 
 #[test]

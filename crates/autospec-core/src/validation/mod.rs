@@ -22,7 +22,9 @@ impl ValidationStatus {
     }
 }
 
-pub use catalog::{CheckModes, CheckOwner, StructuralCheck, ValidationCatalog, ValidationCheck};
+pub use catalog::{
+    CheckModes, CheckOwner, CheckReachability, StructuralCheck, ValidationCatalog, ValidationCheck,
+};
 pub use command::ToolCommand;
 pub use external::ExternalCheck;
 pub use options::{Jobs, ValidationOptions};
