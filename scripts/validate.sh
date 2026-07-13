@@ -17,38 +17,6 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 AUTOSPEC_VALIDATE_LEGACY_ACTIVE_AT_ENTRY="${AUTOSPEC_VALIDATE_LEGACY_ACTIVE:-0}"
 
-autospec_delegate_validate_to_rust() {
-    if [ "${AUTOSPEC_FORCE_LEGACY_SHELL:-}" = 1 ]; then
-        printf 'validate: legacy shell path forced by AUTOSPEC_FORCE_LEGACY_SHELL=1 (issue #1861)\n' >&2
-        return 0
-    fi
-    if [ "${AUTOSPEC_VALIDATE_LEGACY_ACTIVE:-}" = 1 ]; then
-        return 0
-    fi
-    if [ "${AUTOSPEC_VALIDATE_FROM_RUST:-}" = 1 ]; then
-        return 0
-    fi
-
-    _autospec_bin=""
-    if [ -n "${AUTOSPEC_RUST_VALIDATE_BIN:-}" ] && [ -x "$AUTOSPEC_RUST_VALIDATE_BIN" ]; then
-        _autospec_bin="$AUTOSPEC_RUST_VALIDATE_BIN"
-    elif [ -x "$REPO_ROOT/target/debug/autospec" ]; then
-        _autospec_bin="$REPO_ROOT/target/debug/autospec"
-    else
-        _autospec_bin="$(command -v autospec 2>/dev/null || true)"
-    fi
-
-    if [ -z "$_autospec_bin" ]; then
-        printf 'validate: Rust validate wrapper unavailable; using legacy shell fallback (issue #1861)\n' >&2
-        return 0
-    fi
-
-    AUTOSPEC_VALIDATE_FROM_SHELL=1 exec "$_autospec_bin" validate "$@"
-}
-
-autospec_delegate_validate_to_rust "$@"
-export AUTOSPEC_VALIDATE_LEGACY_ACTIVE=1
-
 # ── Fast mode ────────────────────────────────────────────────────────────────
 # `--no-bats` / `--fast` skips the bats SUITES (the slow part, ~minutes) while
 # still running every structural check (lock-step, goldens, frontmatter, named
