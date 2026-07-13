@@ -401,6 +401,23 @@ fn runner_rejects_bash_help_without_a_usage_line() {
     assert_eq!(report.results[0].spawn_count, 2);
 }
 
+#[test]
+fn runner_checks_supersession_contract_with_direct_bash_and_bats_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_supersession_contract",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::SupersessionContract),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("supersession-contract"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!((2..=3).contains(&report.results[0].spawn_count));
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")

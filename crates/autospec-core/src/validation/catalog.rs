@@ -136,6 +136,9 @@ impl ValidationCheck {
             "check_usage_limit_helper" => CheckOwner::ExternalBatch(ExternalCheck::BashHelpUsage(
                 "scripts/autospec-usage-limit.sh",
             )),
+            "check_supersession_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::SupersessionContract)
+            }
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }

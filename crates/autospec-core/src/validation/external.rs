@@ -17,6 +17,7 @@ pub enum ExternalCheck {
     BatsSuite(&'static str),
     ReviewerReuseLens,
     BashHelpUsage(&'static str),
+    SupersessionContract,
 }
 
 impl ExternalCheck {
@@ -33,6 +34,7 @@ impl ExternalCheck {
             Self::BatsSuite(suite) => run_bats_suite(id, required, root, suite),
             Self::ReviewerReuseLens => run_reviewer_reuse_lens(id, required, root),
             Self::BashHelpUsage(script) => run_bash_help_usage(id, required, root, script),
+            Self::SupersessionContract => run_supersession_contract(id, required, root),
         }
     }
 }
@@ -409,6 +411,46 @@ fn run_bash_help_usage(id: &str, required: bool, root: &Path, script: &str) -> C
     aggregate(id, required, vec![syntax, help])
 }
 
+fn run_supersession_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPT: &str = "scripts/resolve-spec-supersession.sh";
+    const SUITE: &str = "tests/resolve-spec-supersession.bats";
+    for skill in ["autospec-define", "autospec-qa", "autospec-release"] {
+        for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+            let relative = format!("skills/{skill}/{member}");
+            let path = root.join(&relative);
+            if !has_line_prefix(&path, "## Spec supersession (recency)") {
+                return failure(
+                    id,
+                    required,
+                    &format!("{skill}: {member} missing '## Spec supersession (recency)' section"),
+                );
+            }
+            if !contains(&path, "resolve-spec-supersession.sh") {
+                return failure(
+                    id,
+                    required,
+                    &format!(
+                        "{skill}: {member} missing reference to scripts/resolve-spec-supersession.sh"
+                    ),
+                );
+            }
+        }
+    }
+    if !root.join(SUITE).is_file() {
+        return failure(
+            id,
+            required,
+            "tests/resolve-spec-supersession.bats: bats coverage missing",
+        );
+    }
+    let helper = run_bash_help_usage(id, required, root, SCRIPT);
+    if helper.is_failure() {
+        return helper;
+    }
+    let bats = run_bats_suite(id, required, root, SUITE);
+    aggregate(id, required, vec![helper, bats])
+}
+
 fn trio_directories(root: &Path) -> Vec<PathBuf> {
     let skills_root = root.join("skills");
     let Ok(entries) = fs::read_dir(skills_root) else {
@@ -515,6 +557,13 @@ fn has_usage_line(stdout: &[u8]) -> bool {
     String::from_utf8_lossy(stdout)
         .lines()
         .any(|line| line.starts_with("Usage:"))
+}
+
+fn has_line_prefix(path: &Path, expected: &str) -> bool {
+    path.is_file()
+        && fs::read_to_string(path)
+            .map(|document| document.lines().any(|line| line.starts_with(expected)))
+            .unwrap_or(false)
 }
 
 fn contains(path: &Path, expected: &str) -> bool {
