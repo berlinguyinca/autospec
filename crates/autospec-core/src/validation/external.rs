@@ -33,6 +33,7 @@ pub enum ExternalCheck {
     AutospecExploreImplementerBase,
     AutospecExploreResearchersDeterministic,
     AutospecExploreResearchersLlm,
+    AutospecExploreSpecialistsDiscovery,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -90,6 +91,9 @@ impl ExternalCheck {
             }
             Self::AutospecExploreResearchersLlm => {
                 run_autospec_explore_researchers_llm(id, required, root)
+            }
+            Self::AutospecExploreSpecialistsDiscovery => {
+                run_autospec_explore_specialists_discovery(id, required, root)
             }
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
@@ -1134,6 +1138,66 @@ fn run_autospec_explore_researchers_llm(id: &str, required: bool, root: &Path) -
         ],
     );
     aggregate(id, required, vec![scripts, bats])
+}
+
+fn run_autospec_explore_specialists_discovery(
+    id: &str,
+    required: bool,
+    root: &Path,
+) -> CheckResult {
+    const SCAN: &str = "scripts/explore-specialist-scan.sh";
+    const SCHEMA: &str = "schemas/autospec-explore-specialists.schema.json";
+    const SUITE: &str = "tests/explore/test_explore_specialists.bats";
+
+    let scripts = run_required_bash_scripts(id, required, root, &[(SCAN, true)]);
+    if scripts.is_failure() {
+        return scripts;
+    }
+    if !root.join(SCHEMA).is_file() {
+        return aggregate(
+            id,
+            required,
+            vec![
+                scripts,
+                failure(
+                    id,
+                    required,
+                    "schemas/autospec-explore-specialists.schema.json: specialists roster schema missing",
+                ),
+            ],
+        );
+    }
+
+    let mut results = vec![scripts];
+    if program_on_path("jq") {
+        let check = ToolCommand::new(
+            "jq",
+            [
+                "-e",
+                ".properties.domains and .properties.suggested_specialists",
+                SCHEMA,
+            ],
+        )
+        .expect("specialist schema jq validation uses static direct arguments")
+        .execute_in(id, required, root);
+        let failed = check.is_failure();
+        results.push(check);
+        if failed {
+            return aggregate(id, required, results);
+        }
+    }
+    if program_on_path("ajv") {
+        let check = ToolCommand::new("ajv", ["compile", "-s", SCHEMA, "--spec=draft2020"])
+            .expect("specialist schema ajv validation uses static direct arguments")
+            .execute_in(id, required, root);
+        let failed = check.is_failure();
+        results.push(check);
+        if failed {
+            return aggregate(id, required, results);
+        }
+    }
+    results.push(run_bats_suites(id, required, root, &[SUITE]));
+    aggregate(id, required, results)
 }
 
 fn run_required_bash_scripts(

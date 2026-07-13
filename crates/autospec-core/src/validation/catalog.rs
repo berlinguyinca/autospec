@@ -184,6 +184,9 @@ impl ValidationCheck {
             "check_autospec_explore_researchers_llm" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreResearchersLlm)
             }
+            "check_autospec_explore_specialists_discovery" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreSpecialistsDiscovery)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }
