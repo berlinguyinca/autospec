@@ -118,6 +118,13 @@ dedicated config keys.
 | `AUTOSPEC_HARNESS_DISPATCHER` | auto-detected | Force a harness dispatcher (claude/opencode/codex). |
 | `AUTOSPEC_NO_GUARDIAN` | (unset) | Disable the guardian RULE_ID pass (not recommended). |
 
+## Automation lifecycle toggles
+| Var | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_NO_AUTOMERGE_SPEC` | `0` | Set to `1` to skip admin auto-merge for spec PRs; the skill pauses for a manual merge before continuing. |
+| `AUTOSPEC_NO_SELF_UPDATE` | `0` | Set to `1` to skip the once-per-24h startup self-update preflight for multi-harness skills. |
+| `AUTOSPEC_PR_ADVISORY_CHECKS` | `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS` or `^$` | Regex for PR check names/contexts treated as advisory during auto-merge; matching checks may be pending or failing once local validation is green. |
+
 ## Testing & QA
 | Var | Default | Effect |
 |---|---|---|
@@ -131,6 +138,12 @@ dedicated config keys.
 | Var | Default | Effect |
 |---|---|---|
 | `AUTOSPEC_RESUME_COMMAND` | derived | Command the usage-limit supervisor relaunches on reset. |
+
+## Memory management
+| Var | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_COMPRESS_THRESHOLD` | `5000` | LOC threshold passed to `mempalace-compress.sh`; below the threshold compression is a no-op. |
+| `AUTOSPEC_MINE_PR_HISTORY` | `0` | Set to `1` to enable bandwidth-heavy PR history mining during `auto-init-memory.sh`; off by default. |
 
 ## Security (autospec-secaudit)
 | Var | Default | Effect |
