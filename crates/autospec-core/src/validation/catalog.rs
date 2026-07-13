@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use super::command::ToolCommand;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationCheck {
     pub id: &'static str,
     pub required: bool,
@@ -26,7 +28,7 @@ pub enum CheckModes {
     CatalogSlot,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckOwner {
     RustNative(StructuralCheck),
     External(ToolCommand),
@@ -34,11 +36,6 @@ pub enum CheckOwner {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructuralCheck {
-    CatalogSlot,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolCommand {
     CatalogSlot,
 }
 
