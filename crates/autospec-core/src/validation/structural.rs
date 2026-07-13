@@ -27,6 +27,12 @@ impl StructuralValidator {
             }
             StructuralCheck::AutospecListenFiles => Self::validate_autospec_listen_files(root),
             StructuralCheck::ExamplesDirectory => Self::validate_examples_directory(root),
+            StructuralCheck::GovernanceHeadings => Self::validate_governance_headings(root),
+            StructuralCheck::StlDesignGuardrails => {
+                Self::validate_autospec_stl_design_guardrails(root)
+            }
+            StructuralCheck::ExistingSpecMode => Self::validate_existing_spec_mode(root),
+            StructuralCheck::DocsAmendmentPresence => Self::validate_docs_amendment_presence(root),
             StructuralCheck::StopMode => Self::validate_stop_mode_sections(root),
             StructuralCheck::KeywordRouting => Self::validate_keyword_routing_section(root),
             StructuralCheck::GapRemediation => Self::validate_gap_remediation_sections(root),
@@ -404,6 +410,140 @@ impl StructuralValidator {
             if !examples.join(member).is_file() {
                 return Err(format!("examples/{member}: required file missing"));
             }
+        }
+        Ok(())
+    }
+
+    pub fn validate_governance_headings(root: &Path) -> Result<(), String> {
+        let agents = root.join("AGENTS.md");
+        if !agents.is_file() {
+            return Err("AGENTS.md: file missing at repo root".to_string());
+        }
+        let agents_document = read(&agents)?;
+        for heading in [
+            "## Anti-loop guardrails",
+            "## Listener-filed issues lifecycle",
+        ] {
+            if !agents_document
+                .lines()
+                .any(|line| line.starts_with(heading))
+            {
+                return Err(format!("AGENTS.md: missing '{heading}' heading"));
+            }
+        }
+
+        for (file, references) in [
+            ("README.md", ["autospec-listen", "autospec-story"]),
+            ("SKILLS.md", ["autospec-listen", "autospec-story"]),
+        ] {
+            let path = root.join(file);
+            if !path.is_file() {
+                return Err(format!("{file}: file missing at repo root"));
+            }
+            let document = read(&path)?;
+            for reference in references {
+                if !document.contains(reference) {
+                    return Err(format!("{file}: missing '{reference}' reference"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_autospec_stl_design_guardrails(root: &Path) -> Result<(), String> {
+        for member in ["SKILL.md", "opencode/agent.md", "codex/prompt.md"] {
+            let path = root.join("skills/autospec").join(member);
+            let display = format!("skills/autospec/{member}");
+            let document = read(&path).unwrap_or_default();
+            for (required, diagnostic) in [
+                (
+                    "## Physical STL / CAD design guardrails",
+                    "physical STL/CAD design guardrails section",
+                ),
+                (
+                    "at least 5 mm of free working clearance",
+                    "5 mm fitting/tool clearance rule",
+                ),
+                (
+                    "at least 5 mm of continuous plastic margin",
+                    "5 mm gasket plastic margin rule",
+                ),
+                (
+                    "relief valves, vents, restriction",
+                    "low-flow vacuum no-restrictor rule",
+                ),
+                (
+                    "gas/fluid/vacuum/dust-flow simulation",
+                    "sealed/flowing simulation rule",
+                ),
+                (
+                    "visual QA from at least 16 angles",
+                    "16-angle visual QA rule",
+                ),
+                (
+                    "Regenerate from a clean build directory",
+                    "clean-build regeneration rule",
+                ),
+            ] {
+                if !document.contains(required) {
+                    return Err(format!("{display} missing {diagnostic}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_existing_spec_mode(root: &Path) -> Result<(), String> {
+        for skill in ["autospec", "autospec-split", "autospec-define"] {
+            for member in ["SKILL.md", "opencode/agent.md", "codex/prompt.md"] {
+                let path = root.join("skills").join(skill).join(member);
+                let display = format!("skills/{skill}/{member}");
+                let document = read(&path).unwrap_or_default();
+                if !document
+                    .lines()
+                    .any(|line| line.starts_with("## Existing spec mode"))
+                {
+                    return Err(format!("{display} missing '## Existing spec mode' section"));
+                }
+                if !document.contains("git cat-file -e origin/main:<spec-path>")
+                    && !document.contains("git cat-file -e <base>:<spec-path>")
+                {
+                    return Err(format!(
+                        "{display} missing selected-spec verification (git cat-file -e <base>|origin/main:<spec-path>)"
+                    ));
+                }
+                if !document.contains("If Existing spec mode is active") {
+                    return Err(format!("{display} missing Phase 3 selected-spec handoff"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_docs_amendment_presence(root: &Path) -> Result<(), String> {
+        for (path, failure) in [
+            (
+                "docs/USER_MANUAL.md",
+                "docs/USER_MANUAL.md: missing — run reverse-engineer.sh + gen-docs-from-spec.mjs to regenerate",
+            ),
+            (
+                "llms.txt",
+                "llms.txt: missing — run gen-llms-txt.sh --repo-root . to regenerate",
+            ),
+            (
+                "docs/.llm-manifest.json",
+                "docs/.llm-manifest.json: missing — run gen-llm-manifest.mjs to regenerate",
+            ),
+        ] {
+            if !root.join(path).is_file() {
+                return Err(failure.to_string());
+            }
+        }
+
+        let path = root.join("skills/autospec-test/SKILL.md");
+        let document = read(&path).unwrap_or_default().to_ascii_lowercase();
+        if !contains_docs_drift_note(&document) {
+            return Err("skills/autospec-test/SKILL.md: missing Stage 2.5 drift-gate composition note (docs amendment §10)".to_string());
         }
         Ok(())
     }
@@ -982,6 +1122,23 @@ fn sentinel_flags(document: &str) -> BTreeSet<String> {
 
 fn is_flag_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+}
+
+fn contains_docs_drift_note(document: &str) -> bool {
+    let drift_gate = document.match_indices("drift").any(|(index, _)| {
+        let remainder = &document[index + "drift".len()..];
+        remainder.len() >= 5 && remainder.as_bytes()[1..].starts_with(b"gate")
+    });
+    let doc_before_drift = document
+        .find("doc")
+        .zip(document.rfind("drift"))
+        .is_some_and(|(doc, drift)| doc <= drift);
+    let drift_before_stage = document
+        .find("drift")
+        .zip(document.rfind("stage 2.5"))
+        .is_some_and(|(drift, stage)| drift <= stage);
+
+    drift_gate || document.contains("check-doc-drift") || doc_before_drift || drift_before_stage
 }
 
 fn autospec_script_references(document: &str) -> Vec<String> {

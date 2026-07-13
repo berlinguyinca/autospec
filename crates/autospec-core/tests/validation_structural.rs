@@ -228,3 +228,25 @@ fn repository_presence_and_subagent_policy_contracts_have_direct_owners() {
 
     assert_eq!(failure, "examples/README.md: required file missing");
 }
+
+#[test]
+fn documentation_and_skill_contracts_preserve_their_required_literals() {
+    let root = fixture("documentation-contracts");
+
+    StructuralValidator::validate_governance_headings(&root).expect("governance headings pass");
+    StructuralValidator::validate_autospec_stl_design_guardrails(&root)
+        .expect("CAD guardrails pass");
+    StructuralValidator::validate_existing_spec_mode(&root).expect("existing spec mode passes");
+    StructuralValidator::validate_docs_amendment_presence(&root)
+        .expect("documentation amendment files pass");
+
+    let failure = StructuralValidator::validate_docs_amendment_presence(&fixture(
+        "documentation-contracts-missing-llms",
+    ))
+    .expect_err("missing generated llms index fails");
+
+    assert_eq!(
+        failure,
+        "llms.txt: missing — run gen-llms-txt.sh --repo-root . to regenerate"
+    );
+}

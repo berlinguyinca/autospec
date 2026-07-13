@@ -38,6 +38,16 @@ impl ValidationCheck {
                 CheckOwner::RustNative(StructuralCheck::AutospecListenFiles)
             }
             "check_examples_dir" => CheckOwner::RustNative(StructuralCheck::ExamplesDirectory),
+            "check_governance_headings" => {
+                CheckOwner::RustNative(StructuralCheck::GovernanceHeadings)
+            }
+            "check_autospec_stl_design_guardrails" => {
+                CheckOwner::RustNative(StructuralCheck::StlDesignGuardrails)
+            }
+            "check_existing_spec_mode" => CheckOwner::RustNative(StructuralCheck::ExistingSpecMode),
+            "check_docs_amendment_presence" => {
+                CheckOwner::RustNative(StructuralCheck::DocsAmendmentPresence)
+            }
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)
@@ -104,6 +114,10 @@ pub enum StructuralCheck {
     AgentsMdSubagentMatrix,
     AutospecListenFiles,
     ExamplesDirectory,
+    GovernanceHeadings,
+    StlDesignGuardrails,
+    ExistingSpecMode,
+    DocsAmendmentPresence,
     StopMode,
     KeywordRouting,
     GapRemediation,
