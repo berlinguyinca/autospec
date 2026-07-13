@@ -22,15 +22,15 @@ reserved for later cutover tasks.
 ## Execution reachability
 
 The catalog is intentionally broader than the shell's top-level execution sequence.
-The legacy `main` invokes **132** unique top-level gates in **136** ordered call
-occurrences. Sixteen definitions are
-internal components: ten dynamic per-skill helpers (`check_lockstep`,
-`check_frontmatter`, syntax, required-file, self-update, and metadata helpers) plus
+The legacy `main` invokes **133** unique top-level gates in **138** ordered call
+occurrences. Fifteen definitions are
+internal components: nine dynamic per-skill helpers (`check_lockstep`,
+`check_frontmatter`, required-file, self-update, and metadata helpers) plus
 six aggregating components (`team_personality_*`, `autospec_resume_structure`,
 `autospec_supervisor_structure`, and `fab_container_dockerfile`).
 `check_architecture_fitness_engine` is defined but never invoked. The direct Rust
 catalog must keep all 149 symbols for ownership audit, but its executable plan must
-select only the 136 top-level call occurrences.
+select only the 138 top-level call occurrences.
 
 ## Baseline verification
 
