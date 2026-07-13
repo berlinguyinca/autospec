@@ -91,6 +91,27 @@ impl ValidationCheck {
             "check_autospec_harmonize_contract" => {
                 CheckOwner::RustNative(StructuralCheck::AutospecHarmonize)
             }
+            "check_autospec_autonomous_skill_contract" => {
+                CheckOwner::RustNative(StructuralCheck::AutospecAutonomousSkill)
+            }
+            "check_autospec_explore_userspace_roster_contract" => {
+                CheckOwner::RustNative(StructuralCheck::AutospecExploreUserspaceRoster)
+            }
+            "check_autospec_autonomous_tier4_discovery_contract" => {
+                CheckOwner::RustNative(StructuralCheck::AutospecAutonomousTier4Discovery)
+            }
+            "check_team_personality_selection_contract" => {
+                CheckOwner::RustNative(StructuralCheck::TeamPersonalitySelection)
+            }
+            "check_team_personality_issue_template_contract" => {
+                CheckOwner::RustNative(StructuralCheck::TeamPersonalityIssueTemplate)
+            }
+            "check_team_personality_phase4_and_docs_contract" => {
+                CheckOwner::RustNative(StructuralCheck::TeamPersonalityPhase4AndDocs)
+            }
+            "check_team_personality_contract" => {
+                CheckOwner::RustNative(StructuralCheck::TeamPersonality)
+            }
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)
@@ -192,6 +213,13 @@ pub enum StructuralCheck {
     MermaidDocumentation,
     QaDocumentationGate,
     AutospecHarmonize,
+    AutospecAutonomousSkill,
+    AutospecExploreUserspaceRoster,
+    AutospecAutonomousTier4Discovery,
+    TeamPersonalitySelection,
+    TeamPersonalityIssueTemplate,
+    TeamPersonalityPhase4AndDocs,
+    TeamPersonality,
     StopMode,
     KeywordRouting,
     GapRemediation,

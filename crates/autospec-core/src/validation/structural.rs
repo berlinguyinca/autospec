@@ -56,6 +56,25 @@ impl StructuralValidator {
             }
             StructuralCheck::QaDocumentationGate => Self::validate_qa_documentation_gate(root),
             StructuralCheck::AutospecHarmonize => Self::validate_autospec_harmonize_contract(root),
+            StructuralCheck::AutospecAutonomousSkill => {
+                Self::validate_autospec_autonomous_skill_contract(root)
+            }
+            StructuralCheck::AutospecExploreUserspaceRoster => {
+                Self::validate_autospec_explore_userspace_roster_contract(root)
+            }
+            StructuralCheck::AutospecAutonomousTier4Discovery => {
+                Self::validate_autospec_autonomous_tier4_discovery_contract(root)
+            }
+            StructuralCheck::TeamPersonalitySelection => {
+                Self::validate_team_personality_selection_contract(root)
+            }
+            StructuralCheck::TeamPersonalityIssueTemplate => {
+                Self::validate_team_personality_issue_template_contract(root)
+            }
+            StructuralCheck::TeamPersonalityPhase4AndDocs => {
+                Self::validate_team_personality_phase4_and_docs_contract(root)
+            }
+            StructuralCheck::TeamPersonality => Self::validate_team_personality_contract(root),
             StructuralCheck::StopMode => Self::validate_stop_mode_sections(root),
             StructuralCheck::KeywordRouting => Self::validate_keyword_routing_section(root),
             StructuralCheck::GapRemediation => Self::validate_gap_remediation_sections(root),
@@ -960,6 +979,294 @@ impl StructuralValidator {
         Ok(())
     }
 
+    pub fn validate_autospec_autonomous_skill_contract(root: &Path) -> Result<(), String> {
+        for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+            let display = format!("skills/autospec-autonomous/{member}");
+            let path = root.join(&display);
+            for (required, label) in [
+                ("Self-update mode", "'## Self-update mode' section"),
+                ("Stop mode", "'## Stop mode' section"),
+                (
+                    "Required capabilities",
+                    "'## Required capabilities & harness adapter' section",
+                ),
+                ("Harness detection", "'## Harness detection' section"),
+                (
+                    "Phase-1 waterfall contract",
+                    "'## Phase-1 waterfall contract' section",
+                ),
+                ("Tier 0", "Tier 0 (control channel) in Phase-1 waterfall"),
+                ("Tier 1", "Tier 1 (backlog→main) in Phase-1 waterfall"),
+                (
+                    "Tier 1.5",
+                    "Tier 1.5 open-issue promotion in never-idle waterfall",
+                ),
+                ("Tier 2", "Tier 2 local discovery in never-idle waterfall"),
+                (
+                    "Tier 3",
+                    "Tier 3 architecture/test-coverage improvement in never-idle waterfall",
+                ),
+                (
+                    "Tier 4",
+                    "Tier 4 internet/operator discovery in never-idle waterfall",
+                ),
+                (
+                    "parks only when",
+                    "named park-only conditions for never-idle waterfall",
+                ),
+            ] {
+                require_content(&path, required, format!("{display}: missing {label}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_autospec_explore_userspace_roster_contract(root: &Path) -> Result<(), String> {
+        for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+            let display = format!("skills/autospec-explore/{member}");
+            let path = root.join(&display);
+            let document = read(&path).unwrap_or_default();
+            if !document.contains("--no-userspace") {
+                return Err(format!(
+                    "{display}: missing '--no-userspace' flag (parity with --no-internet)"
+                ));
+            }
+            for (source, weight) in [
+                ("userspace-usage", "0.6"),
+                ("userspace-env", "0.5"),
+                ("userspace-corpus", "0.5"),
+            ] {
+                if !has_same_line_pair(&document, source, weight) {
+                    return Err(format!(
+                        "{display}: {source} source must be weighted {weight}"
+                    ));
+                }
+            }
+            if !document.to_ascii_lowercase().contains("untrusted") {
+                return Err(format!(
+                    "{display}: userspace roster must state the untrusted-DATA trust boundary"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_autospec_autonomous_tier4_discovery_contract(
+        root: &Path,
+    ) -> Result<(), String> {
+        for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+            let display = format!("skills/autospec-autonomous/{member}");
+            let path = root.join(&display);
+            let document = read(&path).unwrap_or_default();
+            for (required, failure) in [
+                (
+                    "/autospec-explore --once",
+                    "Tier 4 must invoke '/autospec-explore --once' discovery",
+                ),
+                (
+                    "internet-forums",
+                    "Tier 4 must name the internet-forums discovery source",
+                ),
+                (
+                    "userspace-usage",
+                    "Tier 4 must name the userspace-usage discovery source",
+                ),
+                (
+                    "userspace-env",
+                    "Tier 4 must name the userspace-env discovery source",
+                ),
+                (
+                    "userspace-corpus",
+                    "Tier 4 must name the userspace-corpus discovery source",
+                ),
+                (
+                    "discovery.enabled",
+                    "Tier 4 must gate on discovery.enabled config",
+                ),
+                ("--no-userspace", "Tier 4 must cite the --no-userspace flag"),
+                ("--no-internet", "Tier 4 must cite the --no-internet flag"),
+            ] {
+                if !document.contains(required) {
+                    return Err(format!("{display}: {failure}"));
+                }
+            }
+            let lower = document.to_ascii_lowercase();
+            for (matches, failure) in [
+                (
+                    lower.contains("normal readiness gate"),
+                    "Tier 4 must drain candidates via the normal readiness gate",
+                ),
+                (
+                    lower.lines().any(|line| {
+                        line.contains("never merges to")
+                            && line.contains("main")
+                            && line.contains("directly")
+                            || line.contains("never merged directly")
+                            || line.contains("never direct-merge")
+                    }),
+                    "Tier 4 must state candidates never merge to main directly",
+                ),
+                (
+                    lower.contains("untrusted"),
+                    "Tier 4 must state the untrusted-DATA trust boundary",
+                ),
+                (
+                    lower.contains("accumulate"),
+                    "Tier 4 must state trend memory accumulates across idle cycles",
+                ),
+            ] {
+                if !matches {
+                    return Err(format!("{display}: {failure}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_team_personality_selection_contract(root: &Path) -> Result<(), String> {
+        for skill in ["autospec", "autospec-define"] {
+            let display = format!("skills/{skill}/SKILL.md");
+            let path = root.join(&display);
+            for (required, failure) in [
+                (
+                    "## Team personality selection",
+                    "Team personality selection section",
+                ),
+                ("past specs", "past-spec inference input"),
+                ("confidence is low", "low-confidence ask rule"),
+                (
+                    "five starter combinations",
+                    "five starter combinations rule",
+                ),
+                (
+                    "Core product engineering",
+                    "Core product engineering starter team",
+                ),
+                ("Security-sensitive", "Security-sensitive starter team"),
+                ("Team personality", "Team personality issue/spec section"),
+                (
+                    "Review counter-team",
+                    "Review counter-team issue/spec section",
+                ),
+                (
+                    "challenge likely blind spots",
+                    "counter-team blind-spot directive",
+                ),
+            ] {
+                require_content(&path, required, format!("{display}: missing {failure}"))?;
+            }
+            let has_critical_improvement = read(&path)
+                .map(|document| {
+                    document
+                        .to_ascii_lowercase()
+                        .contains("critical improvement")
+                })
+                .unwrap_or(false);
+            if !has_critical_improvement {
+                return Err(format!(
+                    "{display}: missing critical improvement self-question checkpoint"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_team_personality_issue_template_contract(root: &Path) -> Result<(), String> {
+        const TEMPLATE_GATE: &str = "body should already contain `## Files to read first`, `## Implementation scope`, `## Team personality`, and `## Review counter-team`";
+        for skill in ["autospec", "autospec-define", "autospec-split"] {
+            let display = format!("skills/{skill}/SKILL.md");
+            let path = root.join(&display);
+            for (required, failure) in [
+                (
+                    "- **Team personality**",
+                    "Team personality child issue section",
+                ),
+                (
+                    "- **Review counter-team**",
+                    "Review counter-team child issue section",
+                ),
+                (TEMPLATE_GATE, "Phase 3.5 team-lens template gate"),
+            ] {
+                require_content(&path, required, format!("{display}: missing {failure}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_team_personality_phase4_and_docs_contract(root: &Path) -> Result<(), String> {
+        for skill in ["autospec", "autospec-run"] {
+            let display = format!("skills/{skill}/SKILL.md");
+            let path = root.join(&display);
+            for (required, failure) in [
+                (
+                    "## Team personality as execution lens",
+                    "Phase 4 team personality execution lens",
+                ),
+                (
+                    "## Review counter-team as review lens",
+                    "Phase 4 review counter-team lens",
+                ),
+                (
+                    "Critical self-question before LGTM",
+                    "Phase 4 critical self-question before LGTM",
+                ),
+            ] {
+                require_content(&path, required, format!("{display}: missing {failure}"))?;
+            }
+        }
+        for (path, required, failure) in [
+            (
+                "scripts/gen-issue-skeleton.sh",
+                "team_personality",
+                "scripts/gen-issue-skeleton.sh missing team_personality input",
+            ),
+            (
+                "scripts/gen-issue-skeleton.sh",
+                "review_counter_team",
+                "scripts/gen-issue-skeleton.sh missing review_counter_team input",
+            ),
+            (
+                "scripts/gen-reviewer-prompt.sh",
+                "--issue-body",
+                "scripts/gen-reviewer-prompt.sh missing --issue-body support",
+            ),
+            (
+                "skills/autospec-run/SKILL.md",
+                "--issue-body \"/tmp/issue-<ISSUE>-body.md\"",
+                "skills/autospec-run/SKILL.md reviewer prompt does not pass issue body",
+            ),
+            (
+                "docs/API_REFERENCE.md",
+                "team_personality",
+                "docs/API_REFERENCE.md missing gen-issue-skeleton team_personality schema",
+            ),
+            (
+                "docs/API_REFERENCE.md",
+                "review_counter_team",
+                "docs/API_REFERENCE.md missing gen-issue-skeleton review_counter_team schema",
+            ),
+            (
+                "skills/autospec/README.md",
+                "Team personality",
+                "skills/autospec/README.md missing Team personality docs",
+            ),
+            (
+                "skills/autospec-define/README.md",
+                "Review counter-team",
+                "skills/autospec-define/README.md missing Review counter-team docs",
+            ),
+        ] {
+            require_content(&root.join(path), required, failure.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_team_personality_contract(root: &Path) -> Result<(), String> {
+        Self::validate_team_personality_selection_contract(root)?;
+        Self::validate_team_personality_issue_template_contract(root)?;
+        Self::validate_team_personality_phase4_and_docs_contract(root)
+    }
+
     pub fn validate_policy_sections(root: &Path) -> Result<(), String> {
         Self::validate_stop_mode_sections(root)?;
         Self::validate_gap_remediation_sections(root)?;
@@ -1445,6 +1752,12 @@ fn require_any_content<const N: usize>(
     } else {
         Err(failure)
     }
+}
+
+fn has_same_line_pair(document: &str, first: &str, second: &str) -> bool {
+    document
+        .lines()
+        .any(|line| line.contains(first) && line.contains(second))
 }
 
 fn referenced_shared_helpers(root: &Path, skill_dir: &Path) -> Result<BTreeSet<String>, String> {

@@ -371,6 +371,52 @@ fn catalog_assigns_static_documentation_contracts_to_rust_owners() {
 }
 
 #[test]
+fn catalog_assigns_autonomous_and_team_policy_contracts_to_rust_owners() {
+    let catalog = ValidationCatalog::standard();
+
+    for (id, owner) in [
+        (
+            "check_autospec_autonomous_skill_contract",
+            StructuralCheck::AutospecAutonomousSkill,
+        ),
+        (
+            "check_autospec_explore_userspace_roster_contract",
+            StructuralCheck::AutospecExploreUserspaceRoster,
+        ),
+        (
+            "check_autospec_autonomous_tier4_discovery_contract",
+            StructuralCheck::AutospecAutonomousTier4Discovery,
+        ),
+        (
+            "check_team_personality_selection_contract",
+            StructuralCheck::TeamPersonalitySelection,
+        ),
+        (
+            "check_team_personality_issue_template_contract",
+            StructuralCheck::TeamPersonalityIssueTemplate,
+        ),
+        (
+            "check_team_personality_phase4_and_docs_contract",
+            StructuralCheck::TeamPersonalityPhase4AndDocs,
+        ),
+        (
+            "check_team_personality_contract",
+            StructuralCheck::TeamPersonality,
+        ),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::RustNative(owner)),
+            "{id} must have a direct Rust owner"
+        );
+    }
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![

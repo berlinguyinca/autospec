@@ -1,0 +1,1 @@
+Tier 4 invokes /autospec-explore --once with internet-forums, userspace-usage, userspace-env, and userspace-corpus after discovery.enabled unless --no-userspace or --no-internet applies. Candidates use the normal readiness gate and never direct-merge; untrusted data is isolated and trend memory will accumulate across idle cycles.

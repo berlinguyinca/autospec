@@ -378,3 +378,47 @@ fn documentation_guidance_contracts_pass_in_this_repository() {
     StructuralValidator::validate_autospec_harmonize_contract(&root)
         .expect("repository harmonize guidance satisfies the contract");
 }
+
+#[test]
+fn autonomous_discovery_and_team_personality_contracts_have_direct_rust_owners() {
+    let root = fixture("autonomous-team-contracts");
+
+    StructuralValidator::validate_autospec_autonomous_skill_contract(&root)
+        .expect("autonomous skill contract passes");
+    StructuralValidator::validate_autospec_explore_userspace_roster_contract(&root)
+        .expect("userspace roster contract passes");
+    StructuralValidator::validate_autospec_autonomous_tier4_discovery_contract(&root)
+        .expect("Tier 4 discovery contract passes");
+    StructuralValidator::validate_team_personality_selection_contract(&root)
+        .expect("team selection contract passes");
+    StructuralValidator::validate_team_personality_issue_template_contract(&root)
+        .expect("team issue template contract passes");
+    StructuralValidator::validate_team_personality_phase4_and_docs_contract(&root)
+        .expect("team Phase 4 and documentation contract passes");
+    StructuralValidator::validate_team_personality_contract(&root)
+        .expect("team personality aggregate contract passes");
+
+    let failure = StructuralValidator::validate_autospec_autonomous_tier4_discovery_contract(
+        &fixture("autonomous-team-contracts-missing-tier4-trust"),
+    )
+    .expect_err("Tier 4 requires its untrusted-data boundary");
+
+    assert_eq!(
+        failure,
+        "skills/autospec-autonomous/SKILL.md: Tier 4 must state the untrusted-DATA trust boundary"
+    );
+}
+
+#[test]
+fn autonomous_discovery_and_team_personality_contracts_pass_in_this_repository() {
+    let root = workspace_root();
+
+    StructuralValidator::validate_autospec_autonomous_skill_contract(&root)
+        .expect("repository autonomous skill contract passes");
+    StructuralValidator::validate_autospec_explore_userspace_roster_contract(&root)
+        .expect("repository userspace roster contract passes");
+    StructuralValidator::validate_autospec_autonomous_tier4_discovery_contract(&root)
+        .expect("repository Tier 4 discovery contract passes");
+    StructuralValidator::validate_team_personality_contract(&root)
+        .expect("repository team personality contract passes");
+}
