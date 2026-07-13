@@ -133,6 +133,9 @@ impl ValidationCheck {
             "check_ship_completeness" => {
                 CheckOwner::ExternalBatch(ExternalCheck::BatsSuite("tests/ship-completeness.bats"))
             }
+            "check_usage_limit_helper" => CheckOwner::ExternalBatch(ExternalCheck::BashHelpUsage(
+                "scripts/autospec-usage-limit.sh",
+            )),
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }

@@ -16,6 +16,7 @@ pub enum ExternalCheck {
     ReleaseVerdictScript,
     BatsSuite(&'static str),
     ReviewerReuseLens,
+    BashHelpUsage(&'static str),
 }
 
 impl ExternalCheck {
@@ -31,6 +32,7 @@ impl ExternalCheck {
             Self::ReleaseVerdictScript => run_release_verdict_script(id, required, root),
             Self::BatsSuite(suite) => run_bats_suite(id, required, root, suite),
             Self::ReviewerReuseLens => run_reviewer_reuse_lens(id, required, root),
+            Self::BashHelpUsage(script) => run_bash_help_usage(id, required, root, script),
         }
     }
 }
@@ -378,6 +380,35 @@ fn run_reviewer_reuse_lens(id: &str, required: bool, root: &Path) -> CheckResult
     run_bats_suite(id, required, root, SUITE)
 }
 
+fn run_bash_help_usage(id: &str, required: bool, root: &Path, script: &str) -> CheckResult {
+    let path = root.join(script);
+    if !path.is_file() {
+        return failure(id, required, &format!("{script}: file missing"));
+    }
+    if !is_executable(&path) {
+        return failure(id, required, &format!("{script}: file not executable"));
+    }
+
+    let syntax = ToolCommand::new("bash", ["-n", script])
+        .expect("bash syntax command is a direct argument vector")
+        .execute_in(id, required, root);
+    if syntax.is_failure() {
+        return aggregate(id, required, vec![syntax]);
+    }
+
+    let captured = ToolCommand::new("bash", [script, "--help"])
+        .expect("bash help command is a direct argument vector")
+        .execute_in_capturing(id, required, root);
+    let mut help = captured.result;
+    if help.is_success() && !has_usage_line(&captured.stdout) {
+        const MESSAGE: &str = "--help did not print a 'Usage:' line";
+        help.exit_code = Some(1);
+        help.stderr_bytes += MESSAGE.len();
+        help.output_digest = output_digest(&captured.stdout, MESSAGE.as_bytes());
+    }
+    aggregate(id, required, vec![syntax, help])
+}
+
 fn trio_directories(root: &Path) -> Vec<PathBuf> {
     let skills_root = root.join("skills");
     let Ok(entries) = fs::read_dir(skills_root) else {
@@ -478,6 +509,12 @@ fn program_on_path(program: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths).any(|directory| directory.join(program).is_file())
     })
+}
+
+fn has_usage_line(stdout: &[u8]) -> bool {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .any(|line| line.starts_with("Usage:"))
 }
 
 fn contains(path: &Path, expected: &str) -> bool {

@@ -11,6 +11,11 @@ pub struct ToolCommand {
     args: Vec<OsString>,
 }
 
+pub(crate) struct CapturedCheckResult {
+    pub result: CheckResult,
+    pub stdout: Vec<u8>,
+}
+
 impl ToolCommand {
     pub fn new<P, I, A>(program: P, args: I) -> Result<Self, String>
     where
@@ -57,6 +62,15 @@ impl ToolCommand {
     }
 
     pub fn execute_in(&self, id: impl Into<String>, required: bool, root: &Path) -> CheckResult {
+        self.execute_in_capturing(id, required, root).result
+    }
+
+    pub(crate) fn execute_in_capturing(
+        &self,
+        id: impl Into<String>,
+        required: bool,
+        root: &Path,
+    ) -> CapturedCheckResult {
         let id = id.into();
         let started = Instant::now();
         let output = Command::new(&self.program)
@@ -66,25 +80,35 @@ impl ToolCommand {
         let elapsed_ms = started.elapsed().as_millis();
 
         match output {
-            Ok(output) => CheckResult {
-                id,
-                required,
-                exit_code: output.status.code(),
-                elapsed_ms,
-                spawn_count: 1,
-                stdout_bytes: output.stdout.len(),
-                stderr_bytes: output.stderr.len(),
-                output_digest: output_digest(&output.stdout, &output.stderr),
-            },
-            Err(_) => CheckResult {
-                id,
-                required,
-                exit_code: None,
-                elapsed_ms,
-                spawn_count: 0,
-                stdout_bytes: 0,
-                stderr_bytes: 0,
-                output_digest: output_digest(&[], &[]),
+            Ok(output) => {
+                let stdout = output.stdout;
+                let stderr = output.stderr;
+                CapturedCheckResult {
+                    result: CheckResult {
+                        id,
+                        required,
+                        exit_code: output.status.code(),
+                        elapsed_ms,
+                        spawn_count: 1,
+                        stdout_bytes: stdout.len(),
+                        stderr_bytes: stderr.len(),
+                        output_digest: output_digest(&stdout, &stderr),
+                    },
+                    stdout,
+                }
+            }
+            Err(_) => CapturedCheckResult {
+                result: CheckResult {
+                    id,
+                    required,
+                    exit_code: None,
+                    elapsed_ms,
+                    spawn_count: 0,
+                    stdout_bytes: 0,
+                    stderr_bytes: 0,
+                    output_digest: output_digest(&[], &[]),
+                },
+                stdout: Vec::new(),
             },
         }
     }

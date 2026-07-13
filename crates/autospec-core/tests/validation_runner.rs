@@ -363,6 +363,44 @@ fn runner_checks_reviewer_reuse_policy_before_running_its_bats_suite() {
     assert!(report.results[0].spawn_count <= 1);
 }
 
+#[test]
+fn runner_checks_bash_help_with_direct_argument_vectors() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_usage_limit_helper",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::BashHelpUsage(
+            "scripts/autospec-usage-limit.sh",
+        )),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("bash-help-usage"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 2);
+}
+
+#[test]
+fn runner_rejects_bash_help_without_a_usage_line() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_usage_limit_helper",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::BashHelpUsage(
+            "scripts/autospec-usage-limit.sh",
+        )),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("bash-help-no-usage"));
+
+    assert_eq!(report.results[0].exit_code, Some(1));
+    assert_eq!(report.results[0].spawn_count, 2);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")
