@@ -754,6 +754,23 @@ fn runner_checks_explore_worktree_assert_contract_without_the_shell_harness() {
 }
 
 #[test]
+fn runner_checks_explore_spec_first_contract_with_direct_bash_and_bats_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_autospec_explore_spec_first_contract",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreSpecFirst),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("explore-spec-first"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!((1..=3).contains(&report.results[0].spawn_count));
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

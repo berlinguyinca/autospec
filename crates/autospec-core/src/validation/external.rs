@@ -36,6 +36,7 @@ pub enum ExternalCheck {
     AutospecExploreSpecialistsDiscovery,
     AutospecExploreStage2Intersect,
     ExploreTrioWorktreeAssert,
+    AutospecExploreSpecFirst,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -101,6 +102,7 @@ impl ExternalCheck {
                 run_autospec_explore_stage2_intersect(id, required, root)
             }
             Self::ExploreTrioWorktreeAssert => run_explore_trio_worktree_assert(id, required, root),
+            Self::AutospecExploreSpecFirst => run_autospec_explore_spec_first(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -1417,6 +1419,71 @@ fn run_explore_trio_worktree_assert(id: &str, required: bool, root: &Path) -> Ch
     run_bats_suites(id, required, root, &[SUITE])
 }
 
+fn run_autospec_explore_spec_first(id: &str, required: bool, root: &Path) -> CheckResult {
+    const ORCHESTRATOR: &str = "scripts/autospec-explore.sh";
+    const SUITES: &[&str] = &[
+        "tests/explore/test_explore_spec_first_filing.bats",
+        "tests/explore/test_explore_define_fallback.bats",
+    ];
+
+    let orchestrator = root.join(ORCHESTRATOR);
+    if !orchestrator.is_file() {
+        return failure(
+            id,
+            required,
+            "scripts/autospec-explore.sh: orchestrator missing",
+        );
+    }
+    let syntax = ToolCommand::new("bash", ["-n", ORCHESTRATOR])
+        .expect("Explore spec-first syntax validation is a direct argument vector")
+        .execute_in(id, required, root);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    let static_failure = [
+        (
+            contains(&orchestrator, "gen-explore-round-spec.sh"),
+            "scripts/autospec-explore.sh: must invoke scripts/gen-explore-round-spec.sh to render the round spec (#1102)",
+        ),
+        (
+            has_same_line_ordered_tokens(&orchestrator, &["docs/specs/", "explore-", "round-"]),
+            "scripts/autospec-explore.sh: must materialize docs/specs/<date>-explore-<slug>-round-<N>-design.md (#1102)",
+        ),
+        (
+            contains(&orchestrator, "git commit"),
+            "scripts/autospec-explore.sh: must commit the round spec before filing (#1102)",
+        ),
+        (
+            has_same_line_ordered_tokens(&orchestrator, &["git push ", "origin", "HEAD:$SANDBOX_BRANCH"]),
+            "scripts/autospec-explore.sh: must push the round spec to the sandbox branch (HEAD:$SANDBOX_BRANCH) before decompose (#1102)",
+        ),
+        (
+            contains(&orchestrator, "/autospec-define"),
+            "scripts/autospec-explore.sh: round filing must decompose via /autospec-define (#1102)",
+        ),
+        (
+            contains(&orchestrator, "--base $SANDBOX_BRANCH"),
+            "scripts/autospec-explore.sh: decompose must pass --base $SANDBOX_BRANCH (never main) (#1102)",
+        ),
+        (
+            contains(&orchestrator, "code_health:explore_define_unavailable"),
+            "scripts/autospec-explore.sh: missing fallback log token code_health:explore_define_unavailable (#1102)",
+        ),
+        (
+            contains(&orchestrator, "_explore_raw_file_round"),
+            "scripts/autospec-explore.sh: must retain raw filing as the never-stall fallback (#1102)",
+        ),
+    ]
+    .into_iter()
+    .find_map(|(valid, message)| (!valid).then_some(message));
+    if let Some(message) = static_failure {
+        return aggregate(id, required, vec![syntax, failure(id, required, message)]);
+    }
+
+    let bats = run_bats_suites(id, required, root, SUITES);
+    aggregate(id, required, vec![syntax, bats])
+}
+
 fn run_required_bash_scripts(
     id: &str,
     required: bool,
@@ -2635,6 +2702,23 @@ fn has_same_line_tokens(path: &Path, first: &str, second: &str) -> bool {
             document
                 .lines()
                 .any(|line| line.contains(first) && line.contains(second))
+        })
+        .unwrap_or(false)
+}
+
+fn has_same_line_ordered_tokens(path: &Path, tokens: &[&str]) -> bool {
+    fs::read_to_string(path)
+        .map(|document| {
+            document.lines().any(|line| {
+                tokens
+                    .iter()
+                    .try_fold(0, |offset, token| {
+                        line[offset..]
+                            .find(token)
+                            .map(|index| offset + index + token.len())
+                    })
+                    .is_some()
+            })
         })
         .unwrap_or(false)
 }

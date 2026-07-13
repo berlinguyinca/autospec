@@ -193,6 +193,9 @@ impl ValidationCheck {
             "check_explore_trio_worktree_assert" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ExploreTrioWorktreeAssert)
             }
+            "check_autospec_explore_spec_first_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreSpecFirst)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }
