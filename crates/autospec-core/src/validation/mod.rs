@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod command;
 pub mod options;
 pub mod results;
+pub mod structural;
 
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -38,6 +39,7 @@ pub use results::{
     CheckResult, ValidationAggregate, ValidationExecutionAggregate, ValidationExecutionReport,
     ValidationObservation, ValidationReport,
 };
+pub use structural::StructuralValidator;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationResult {

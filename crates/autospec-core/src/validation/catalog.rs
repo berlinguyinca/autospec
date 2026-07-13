@@ -12,13 +12,19 @@ pub struct ValidationCheck {
 }
 
 impl ValidationCheck {
-    pub const fn catalog_entry(id: &'static str) -> Self {
+    pub fn catalog_entry(id: &'static str) -> Self {
+        let owner = match id {
+            "check_lockstep" => CheckOwner::RustNative(StructuralCheck::TrioLockstep),
+            "check_lockstep_duo" => CheckOwner::RustNative(StructuralCheck::DuoLockstep),
+            "check_required_files" => CheckOwner::RustNative(StructuralCheck::RequiredTrioFiles),
+            _ => CheckOwner::RustNative(StructuralCheck::CatalogSlot),
+        };
         Self {
             id,
             required: true,
             independent: false,
             modes: CheckModes::CatalogSlot,
-            owner: CheckOwner::RustNative(StructuralCheck::CatalogSlot),
+            owner,
         }
     }
 }
@@ -37,6 +43,9 @@ pub enum CheckOwner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructuralCheck {
     CatalogSlot,
+    TrioLockstep,
+    DuoLockstep,
+    RequiredTrioFiles,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
