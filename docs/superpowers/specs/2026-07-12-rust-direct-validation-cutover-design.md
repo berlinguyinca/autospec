@@ -34,6 +34,12 @@ explicit pending-executor error until the Rust runner is installed. The remainin
 cutover work is to move all 149 gates to direct owners, wire that runner, and delete
 the shell body.
 
+The frozen 149-name catalog is a definition audit, not the legacy execution list.
+The shell invokes 142 top-level checks. Six named helpers execute only through an
+aggregating top-level check, and `check_architecture_fitness_engine` is defined but
+never invoked. Direct execution must retain all 149 symbols for ownership auditing
+without publishing duplicate results or introducing the unreachable gate.
+
 ## Decisions
 
 1. `autospec validate` becomes the only supported command. `scripts/validate.sh` is
@@ -44,9 +50,11 @@ the shell body.
    `--json`. Unknown options and missing option values fail non-zero with a clear
    diagnostic.
 3. Validation checks are represented as typed Rust definitions. A definition declares
-   its stable ID, requiredness, input selection, execution mode, and deterministic
-   display order. Execution modes are Rust-native checks and explicit external-tool
-   invocations. Arbitrary `sh -c` commands are not allowed.
+   its stable ID, requiredness, input selection, execution mode, reachability, and
+   deterministic display order. Reachability is `top_level`, `internal_component`, or
+   `legacy_unreachable`; only top-level checks emit executor results. Execution modes
+   are Rust-native checks and explicit external-tool invocations. Arbitrary `sh -c`
+   commands are not allowed.
 4. Rust-native checks replace pure shell logic such as skill discovery, lock-step
    comparison, required-file checks, and deterministic text/content assertions.
    Typed external-tool checks invoke the existing explicit command and arguments
@@ -79,15 +87,19 @@ plan, executes it, renders text or JSON, and returns non-zero if required checks
 fail.
 
 The check catalog is split by ownership: structural Rust checks, explicit external
-tool checks, and the affected-path selector. The scheduler receives a set of
-independent checks and a worker count, records results by check ID, and renders only
-after all selected checks settle. This separates portable validation semantics from
-the platform tools each check intentionally calls.
+tool checks, and the affected-path selector. It also records whether a check was
+directly reachable from the legacy `main`, an internal helper, or an unreachable
+definition. The scheduler receives selected top-level checks and a worker count,
+records results by check ID, and renders only after all selected checks settle. An
+aggregator may reuse an internal component procedure but does not emit that component
+as a second top-level result. This separates portable validation semantics from the
+platform tools each check intentionally calls.
 
 ## Migration sequence
 
 1. Freeze the current shell behavior in a fixture corpus and check manifest. Capture
-   every public option mode, selected check order, failure mapping, output metadata,
+   all named definitions, their top-level/internal/unreachable reachability, every
+   public option mode, selected check order, failure mapping, output metadata,
    process count, and elapsed time.
 2. Add the typed Rust check and result model, then implement option parsing and a
    no-shell executor for the structural lock-step group. Tests begin red and prove
@@ -111,8 +123,9 @@ the platform tools each check intentionally calls.
   every selected check.
 - The fixture corpus proves equal check selection/order and required-failure outcome
   for legacy and Rust full, fast, scoped, and parallel cases before removal.
-- Every existing validation check has a Rust-native or typed external-tool owner; the
-  manifest rejects missing or duplicate check IDs.
+- Every one of the 149 frozen validation symbols has a Rust-native or typed
+  external-tool owner; the manifest rejects missing or duplicate check IDs, and the
+  executable plan contains only the 142 legacy top-level checks.
 - `scripts/validate.sh`, `run_legacy_shell`, `AUTOSPEC_FORCE_LEGACY_SHELL`,
   `AUTOSPEC_VALIDATE_FROM_SHELL`, `AUTOSPEC_VALIDATE_FROM_RUST`, and
   `AUTOSPEC_VALIDATE_LEGACY_ACTIVE` no longer exist in tracked source, docs, or tests.
@@ -122,8 +135,10 @@ the platform tools each check intentionally calls.
 
 ## Risks and controls
 
-- **Dropped gate:** A checked-in manifest derived from the current 149 check IDs
-  blocks deletion until every ID has an explicit Rust-native or external-tool owner.
+- **Dropped or expanded gate:** A checked-in manifest derived from the current 149
+  check IDs blocks deletion until every ID has an explicit Rust-native or external-
+  tool owner, while reachability metadata prevents duplicate helper execution and
+  prevents the unreachable architecture-fitness definition from becoming a new gate.
 - **Shell-injection regression:** External checks use `Command` program and argument
   vectors only; the executor rejects a command string.
 - **Parallel nondeterminism:** Results are sorted by stable check ID and concurrency

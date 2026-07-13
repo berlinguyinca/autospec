@@ -266,7 +266,9 @@ Commit: `feat: run structural validation in Rust`.
 
 **Consumes:** frozen catalog and execution primitives.
 
-**Produces:** one non-shell owner for all 149 frozen IDs.
+**Produces:** one non-shell owner for all 149 frozen IDs plus reachability metadata
+that distinguishes the 142 top-level checks from six internal components and one
+legacy-unreachable definition.
 
 - [ ] **Step 1: Write failing owner-coverage tests.**
 
@@ -284,6 +286,13 @@ fn missing_required_tool_is_a_required_failure_not_a_skip() {
     assert!(result.required);
     assert_eq!(result.exit_code, None);
 }
+
+#[test]
+fn executable_plan_keeps_legacy_reachability_without_expanding_it() {
+    let plan = ValidationPlan::build(&ValidationCatalog::standard(), full_options()).unwrap();
+    assert_eq!(plan.ids().len(), 142);
+    assert!(!plan.ids().contains(&"check_architecture_fitness_engine"));
+}
 ```
 
 - [ ] **Step 2: Verify RED.**
@@ -297,8 +306,8 @@ Expected: FAIL until every frozen ID has a direct owner.
 Convert shell text checks to reusable Rust predicates (`file_contains`,
 `all_members_contain`, `literal_sequence`, and `required_files`). Convert existing
 Bats, Python, Cargo, Node, Bash-syntax, and standalone helper invocations to literal
-`ToolCommand` program/argument definitions. Preserve original requiredness and do not
-silently omit a gate.
+`ToolCommand` program/argument definitions. Preserve original requiredness, record
+each symbol's legacy reachability, and do not silently omit a gate.
 
 - [ ] **Step 4: Verify GREEN and commit.**
 
@@ -346,7 +355,8 @@ Expected: FAIL because direct plan construction and scheduling do not exist.
 
 - [ ] **Step 3: Implement deterministic planning.**
 
-Use repository Git input for `--changed` and `--since`, add always-run checks, resolve
+Use repository Git input for `--changed` and `--since`, select only top-level entries,
+add always-run checks, resolve
 `--jobs auto` to CPU minus two with a minimum of one, run only independent entries in
 parallel, and sort every completed result by catalog index before rendering.
 
