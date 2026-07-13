@@ -17,6 +17,8 @@ fn tool_commands_reject_shell_execution_shapes() {
         ToolCommand::new("env", ["VALIDATION_MODE=safe", "bash", "-c", "echo unsafe"],).is_err()
     );
     assert!(ToolCommand::new("env", ["-i", "bash", "-c", "echo unsafe"]).is_err());
+    assert!(ToolCommand::new("env", ["-a", "safe-argv0", "bash", "-c", "echo unsafe"],).is_err());
+    assert!(ToolCommand::new("env", ["-ia", "safe-argv0", "bash", "-c", "echo unsafe"],).is_err());
 }
 
 #[test]

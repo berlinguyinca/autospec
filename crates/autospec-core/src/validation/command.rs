@@ -162,9 +162,9 @@ fn is_environment_split_string_option(argument: &str) -> bool {
 fn environment_option_consumes_next_argument(argument: &str) -> bool {
     matches!(
         argument,
-        "-C" | "-P" | "-u" | "--argv0" | "--chdir" | "--unset"
+        "-a" | "-C" | "-P" | "-u" | "--argv0" | "--chdir" | "--unset"
     ) || argument.strip_prefix('-').is_some_and(|options| {
-        !options.starts_with('-') && matches!(options.chars().last(), Some('C' | 'P' | 'u'))
+        !options.starts_with('-') && matches!(options.chars().last(), Some('a' | 'C' | 'P' | 'u'))
     })
 }
 
