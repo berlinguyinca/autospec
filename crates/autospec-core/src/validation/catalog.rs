@@ -76,6 +76,9 @@ impl ValidationCheck {
             "check_autospec_sweep_config_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecSweepConfig)
             }
+            "check_agents_md_git_hygiene" => {
+                CheckOwner::RustNative(StructuralCheck::AgentsMdGitHygiene)
+            }
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)
@@ -172,6 +175,7 @@ pub enum StructuralCheck {
     AutospecRunRegressionReviewLockstep,
     Phase1BoundedContext,
     FleetGuiSubcommandLockstep,
+    AgentsMdGitHygiene,
     StopMode,
     KeywordRouting,
     GapRemediation,

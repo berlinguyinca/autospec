@@ -49,6 +49,7 @@ impl StructuralValidator {
             StructuralCheck::FleetGuiSubcommandLockstep => {
                 Self::validate_fleet_gui_subcommand_lockstep(root)
             }
+            StructuralCheck::AgentsMdGitHygiene => Self::validate_agents_md_git_hygiene(root),
             StructuralCheck::StopMode => Self::validate_stop_mode_sections(root),
             StructuralCheck::KeywordRouting => Self::validate_keyword_routing_section(root),
             StructuralCheck::GapRemediation => Self::validate_gap_remediation_sections(root),
@@ -702,6 +703,61 @@ impl StructuralValidator {
                 return Err(format!(
                     "fleet-gui lockstep: '{NEEDLE}' missing in {display}"
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_agents_md_git_hygiene(root: &Path) -> Result<(), String> {
+        let path = root.join("AGENTS.md");
+        if !path.is_file() {
+            return Err("AGENTS.md missing at repo root".to_string());
+        }
+        let document = read(&path)?;
+        if !document
+            .lines()
+            .any(|line| line == "## Git hygiene (agents)")
+        {
+            return Err(
+                "AGENTS.md missing '## Git hygiene (agents)' section (issue #962 §D5)".to_string(),
+            );
+        }
+        for (matches, failure) in [
+            (
+                document.contains("Fetch-before-branch")
+                    || document.contains("fetch-before-branch"),
+                "AGENTS.md git hygiene section missing fetch-before-branch rule (§D5)",
+            ),
+            (
+                document.contains("primary checkout"),
+                "AGENTS.md git hygiene section missing primary-checkout read-only rule (§D5)",
+            ),
+            (
+                document.contains("fresh-or-verified-clean")
+                    || document.contains("Fresh-or-verified-clean"),
+                "AGENTS.md git hygiene section missing fresh-or-verified-clean worktrees rule (§D5)",
+            ),
+            (
+                document.contains("git worktree remove"),
+                "AGENTS.md git hygiene section missing 'git worktree remove' cleanup rule (§D5)",
+            ),
+            (
+                document.contains("git worktree prune"),
+                "AGENTS.md git hygiene section missing 'git worktree prune' cleanup rule (§D5)",
+            ),
+            (
+                document.contains("open-pr")
+                    || document.contains("branch-only")
+                    || document.contains("fresh"),
+                "AGENTS.md git hygiene section missing PR-aware ladder states (§D5)",
+            ),
+            (
+                document.contains("worktree-guard.sh"),
+                "AGENTS.md git hygiene section missing pointer to worktree-guard.sh (§D5)",
+            ),
+        ] {
+            if !matches {
+                return Err(failure.to_string());
             }
         }
         Ok(())

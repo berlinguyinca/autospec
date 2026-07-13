@@ -311,6 +311,20 @@ fn catalog_assigns_autospec_sweep_config_to_a_typed_external_batch() {
 }
 
 #[test]
+fn catalog_assigns_agents_git_hygiene_to_a_rust_owner() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_agents_md_git_hygiene")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::RustNative(StructuralCheck::AgentsMdGitHygiene))
+    );
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![

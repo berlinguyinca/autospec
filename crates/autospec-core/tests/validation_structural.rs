@@ -308,3 +308,19 @@ fn bounded_context_and_fleet_gui_contracts_are_checked_without_shells() {
         "skills/autospec-define/codex/prompt.md missing context-overflow fallback directive"
     );
 }
+
+#[test]
+fn agents_git_hygiene_contract_requires_every_policy_anchor() {
+    StructuralValidator::validate_agents_md_git_hygiene(&fixture("agents-git-hygiene"))
+        .expect("git hygiene policy anchors pass");
+
+    let failure = StructuralValidator::validate_agents_md_git_hygiene(&fixture(
+        "agents-git-hygiene-missing-prune",
+    ))
+    .expect_err("missing worktree prune policy fails");
+
+    assert_eq!(
+        failure,
+        "AGENTS.md git hygiene section missing 'git worktree prune' cleanup rule (§D5)"
+    );
+}
