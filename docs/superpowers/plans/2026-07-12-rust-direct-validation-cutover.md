@@ -160,7 +160,9 @@ Commit: `feat: model direct validation commands safely`.
 **Consumes:** Tasks 1-2.
 
 **Produces:** `ValidationOptions { fast, changed_base, since, jobs, json }` without a
-shell handoff.
+shell handoff. Until Task 6 wires the runner, execution-capable options return the
+explicit non-zero error `direct Rust validation executor is not installed` rather
+than attempting the removed fallback; planning and shadow-report modes remain usable.
 
 - [ ] **Step 1: Write failing public-option tests.**
 
@@ -187,18 +189,20 @@ Run: `cargo test -p autospec-core --test validation_options -- --nocapture`
 
 Expected: FAIL because the options API does not exist.
 
-- [ ] **Step 3: Implement parser and direct CLI dispatch.**
+- [ ] **Step 3: Implement parser and pre-executor CLI dispatch.**
 
 Support `--fast`/`--no-bats`, `--changed[=<base>]`, `--since <ref>`,
 `--jobs[=<count>|auto]`, `--json`, `--path`, and `--shadow-results`. Remove
 `run_legacy_shell`, `is_shadow_results_command`, and all environment-based execution
-branches from the Rust CLI.
+branches from the Rust CLI. Route execution-capable options to the exact pending-
+executor error above; Task 6 replaces that branch with `ValidationRunner::run`.
 
 - [ ] **Step 4: Verify GREEN and commit.**
 
 Run: `cargo test -p autospec-core --test validation_options && cargo test -p autospec-cli --test cli_commands validate_ -- --nocapture`
 
-Expected: PASS; direct execution options no longer direct callers to a shell script.
+Expected: PASS; direct execution options no longer direct callers to a shell script and
+instead report the exact pending-executor error.
 
 Commit: `feat: parse direct Rust validation options`.
 
