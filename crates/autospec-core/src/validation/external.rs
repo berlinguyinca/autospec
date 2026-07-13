@@ -27,6 +27,8 @@ pub enum ExternalCheck {
     AutospecFabContract,
     GroomingContract,
     MutationAndNegativePath,
+    LintImplementationHelpers,
+    LintIssueHelpers,
 }
 
 impl ExternalCheck {
@@ -53,6 +55,8 @@ impl ExternalCheck {
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
             Self::GroomingContract => run_grooming_contract(id, required, root),
             Self::MutationAndNegativePath => run_mutation_and_negative_path(id, required, root),
+            Self::LintImplementationHelpers => run_lint_implementation_helpers(id, required, root),
+            Self::LintIssueHelpers => run_lint_issue_helpers(id, required, root),
         }
     }
 }
@@ -376,6 +380,18 @@ fn run_bats_suites(id: &str, required: bool, root: &Path, suites: &[&str]) -> Ch
         ToolCommand::new("bats", [*suite]).expect("Bats validation has a static suite path")
     });
     run_commands(id, required, root, commands)
+}
+
+fn run_bats_suites_if_available(
+    id: &str,
+    required: bool,
+    root: &Path,
+    suites: &[&str],
+) -> CheckResult {
+    if !program_on_path("bats") {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+    run_bats_suites(id, required, root, suites)
 }
 
 fn run_bats_directory(id: &str, required: bool, root: &Path, directory: &str) -> CheckResult {
@@ -783,6 +799,165 @@ fn run_mutation_and_negative_path(id: &str, required: bool, root: &Path) -> Chec
         }
     }
     run_commands(id, required, root, commands)
+}
+
+fn run_lint_implementation_helpers(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPT: &str = "scripts/lint-implementation.sh";
+    let path = root.join(SCRIPT);
+    if !path.is_file() {
+        return failure(id, required, "scripts/lint-implementation.sh: file missing");
+    }
+
+    let syntax = ToolCommand::new("bash", ["-n", SCRIPT])
+        .expect("lint-implementation syntax check is a direct argument vector")
+        .execute_in(id, required, root);
+    if syntax.is_failure() {
+        return syntax;
+    }
+
+    let help = ToolCommand::new("bash", [SCRIPT, "--help"])
+        .expect("lint-implementation help is a direct argument vector")
+        .execute_in_capturing(id, required, root);
+    if help.result.is_failure() {
+        return aggregate(id, required, vec![syntax, help.result]);
+    }
+
+    let output = String::from_utf8_lossy(&help.stdout);
+    for rule_id in [
+        "OUT_OF_SCOPE",
+        "MISSING_TEST",
+        "COMPLEXITY",
+        "SECURITY",
+        "TODO_LEFT",
+        "MOCK_DB",
+        "DOC_OUT_OF_SYNC",
+        "HALLUCINATED_API",
+        "DUPLICATE_CODE",
+        "INVENTED_CONFIG",
+    ] {
+        if !output.contains(rule_id) {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    help.result,
+                    failure(
+                        id,
+                        required,
+                        &format!(
+                            "scripts/lint-implementation.sh --help missing RULE_ID: {rule_id}"
+                        ),
+                    ),
+                ],
+            );
+        }
+    }
+    aggregate(id, required, vec![syntax, help.result])
+}
+
+fn run_lint_issue_helpers(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPT: &str = "scripts/lint-issue.sh";
+    const FIXTURES: &str = "tests/fixtures/issue-quality";
+    let path = root.join(SCRIPT);
+    if !path.is_file() {
+        return failure(id, required, "scripts/lint-issue.sh: file missing");
+    }
+
+    let syntax = ToolCommand::new("bash", ["-n", SCRIPT])
+        .expect("lint-issue syntax check is a direct argument vector")
+        .execute_in(id, required, root);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    let help = ToolCommand::new("bash", [SCRIPT, "--help"])
+        .expect("lint-issue help is a direct argument vector")
+        .execute_in_capturing(id, required, root);
+    if help.result.is_failure() {
+        return aggregate(id, required, vec![syntax, help.result]);
+    }
+    if !has_usage_line(&help.stdout) {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                help.result,
+                failure(
+                    id,
+                    required,
+                    "scripts/lint-issue.sh --help did not print a 'Usage:' line",
+                ),
+            ],
+        );
+    }
+
+    let fixture_directory = root.join(FIXTURES);
+    if !fixture_directory.is_dir() {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                help.result,
+                failure(
+                    id,
+                    required,
+                    "tests/fixtures/issue-quality/: directory missing",
+                ),
+            ],
+        );
+    }
+    if !fixture_directory.join("good.md").is_file() {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                help.result,
+                failure(
+                    id,
+                    required,
+                    "tests/fixtures/issue-quality/good.md: fixture missing",
+                ),
+            ],
+        );
+    }
+    let bad_count = fs::read_dir(&fixture_directory)
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("bad-") && name.ends_with(".md"))
+        })
+        .count();
+    if bad_count < 4 {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                help.result,
+                failure(
+                    id,
+                    required,
+                    &format!(
+                        "tests/fixtures/issue-quality/: need >=4 bad-*.md fixtures, found {bad_count}"
+                    ),
+                ),
+            ],
+        );
+    }
+
+    let bats = run_bats_suites_if_available(
+        id,
+        required,
+        root,
+        &["tests/unit/test_lint_issue_safety.bats"],
+    );
+    aggregate(id, required, vec![syntax, help.result, bats])
 }
 
 fn run_fab_container_dockerfile(id: &str, required: bool, root: &Path) -> CheckResult {

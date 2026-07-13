@@ -168,6 +168,12 @@ impl ValidationCheck {
             "check_mutation_and_negative_path" => {
                 CheckOwner::ExternalBatch(ExternalCheck::MutationAndNegativePath)
             }
+            "check_lint_implementation_helpers" => {
+                CheckOwner::ExternalBatch(ExternalCheck::LintImplementationHelpers)
+            }
+            "check_lint_issue_helpers" => {
+                CheckOwner::ExternalBatch(ExternalCheck::LintIssueHelpers)
+            }
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }

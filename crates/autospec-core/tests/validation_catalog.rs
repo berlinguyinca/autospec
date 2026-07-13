@@ -141,6 +141,28 @@ fn catalog_assigns_per_skill_model_contracts_to_rust_owners() {
         )),
         "check_mutation_and_negative_path must have a typed external owner"
     );
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_lint_implementation_helpers")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(
+            ExternalCheck::LintImplementationHelpers
+        )),
+        "check_lint_implementation_helpers must have a typed external owner"
+    );
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_lint_issue_helpers")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(ExternalCheck::LintIssueHelpers)),
+        "check_lint_issue_helpers must have a typed external owner"
+    );
 }
 
 #[test]

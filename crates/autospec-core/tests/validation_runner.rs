@@ -567,6 +567,41 @@ fn runner_runs_the_optional_mutation_gate_with_direct_processes() {
     assert_eq!(report.results[0].spawn_count, 4);
 }
 
+#[test]
+fn runner_checks_lint_implementation_help_for_every_rule_id() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_lint_implementation_helpers",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::LintImplementationHelpers),
+    }]);
+
+    let report =
+        ValidationRunner::run(&catalog, &validation_fixture("lint-implementation-helpers"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 2);
+}
+
+#[test]
+fn runner_checks_lint_issue_fixtures_and_its_direct_bats_suite() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_lint_issue_helpers",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::LintIssueHelpers),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("lint-issue-helpers"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 3);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")
