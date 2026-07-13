@@ -176,3 +176,17 @@ fn catalog_assigns_frontmatter_to_a_typed_external_batch() {
         Some(&CheckOwner::ExternalBatch(ExternalCheck::Frontmatter))
     );
 }
+
+#[test]
+fn catalog_assigns_gap_miner_contract_to_a_typed_external_batch() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_autospec_gap_miner_contract")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(ExternalCheck::GapMinerContract))
+    );
+}

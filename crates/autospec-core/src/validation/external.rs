@@ -9,6 +9,7 @@ pub enum ExternalCheck {
     BashSyntax,
     DeriveTrioConsistency,
     Frontmatter,
+    GapMinerContract,
 }
 
 impl ExternalCheck {
@@ -17,6 +18,7 @@ impl ExternalCheck {
             Self::BashSyntax => run_bash_syntax(id, required, root),
             Self::DeriveTrioConsistency => run_derive_trio_consistency(id, required, root),
             Self::Frontmatter => run_frontmatter(id, required, root),
+            Self::GapMinerContract => run_gap_miner_contract(id, required, root),
         }
     }
 }
@@ -51,6 +53,24 @@ fn run_bash_syntax_targets(
     for target in targets {
         let command = ToolCommand::new("bash", ["-n", target.as_str()])
             .expect("bash syntax validation has no command-string argument");
+        let result = command.execute_in(id, required, root);
+        let failed = result.is_failure();
+        results.push(result);
+        if failed {
+            break;
+        }
+    }
+    aggregate(id, required, results)
+}
+
+fn run_commands(
+    id: &str,
+    required: bool,
+    root: &Path,
+    commands: impl IntoIterator<Item = ToolCommand>,
+) -> CheckResult {
+    let mut results = Vec::new();
+    for command in commands {
         let result = command.execute_in(id, required, root);
         let failed = result.is_failure();
         results.push(result);
@@ -137,6 +157,53 @@ fn run_derive_trio_consistency(id: &str, required: bool, root: &Path) -> CheckRe
     }
 
     aggregate(id, required, results)
+}
+
+fn run_gap_miner_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    let miner = root.join("scripts/autospec-gap-miner.sh");
+    if !is_executable(&miner) {
+        return failure(
+            id,
+            required,
+            "scripts/autospec-gap-miner.sh missing or not executable",
+        );
+    }
+    if !root.join("docs/memory/autospec-gap-ledger.md").is_file() {
+        return failure(id, required, "docs/memory/autospec-gap-ledger.md missing");
+    }
+    for (member, diagnostic) in [
+        (
+            "SKILL.md",
+            "autospec-run SKILL.md missing gap miner closeout invocation",
+        ),
+        (
+            "codex/prompt.md",
+            "autospec-run codex prompt missing gap miner closeout invocation",
+        ),
+        (
+            "opencode/agent.md",
+            "autospec-run opencode agent missing gap miner closeout invocation",
+        ),
+    ] {
+        if !contains(
+            &root.join("skills/autospec-run").join(member),
+            "autospec-gap-miner.sh",
+        ) {
+            return failure(id, required, diagnostic);
+        }
+    }
+
+    let test = root.join("tests/validate-autospec-gap-miner.sh");
+    if !test.is_file() {
+        return failure(id, required, "tests/validate-autospec-gap-miner.sh missing");
+    }
+    let commands = [
+        ToolCommand::new("bash", ["-n", "scripts/autospec-gap-miner.sh"])
+            .expect("bash syntax command is a direct argument vector"),
+        ToolCommand::new("bash", ["tests/validate-autospec-gap-miner.sh"])
+            .expect("gap-miner test command is a direct argument vector"),
+    ];
+    run_commands(id, required, root, commands)
 }
 
 fn trio_directories(root: &Path) -> Vec<PathBuf> {
@@ -239,6 +306,28 @@ fn program_on_path(program: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths).any(|directory| directory.join(program).is_file())
     })
+}
+
+fn contains(path: &Path, expected: &str) -> bool {
+    path.is_file()
+        && fs::read_to_string(path)
+            .map(|document| document.contains(expected))
+            .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.is_file()
+        && fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
 }
 
 const PYTHON_FRONTMATTER_CHECK: &str = r#"import sys

@@ -235,6 +235,22 @@ fn runner_rejects_blank_only_trio_frontmatter() {
     assert_eq!(report.results[0].spawn_count, 0);
 }
 
+#[test]
+fn runner_executes_the_gap_miner_contract_as_a_typed_batch() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_autospec_gap_miner_contract",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::GapMinerContract),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("gap-miner"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 2);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")

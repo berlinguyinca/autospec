@@ -44,6 +44,9 @@ impl ValidationCheck {
             "check_derive_trio_consistency" => {
                 CheckOwner::ExternalBatch(ExternalCheck::DeriveTrioConsistency)
             }
+            "check_autospec_gap_miner_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::GapMinerContract)
+            }
             "check_startup_preflight" => CheckOwner::RustNative(StructuralCheck::StartupPreflight),
             _ => CheckOwner::RustNative(StructuralCheck::CatalogSlot),
         };
