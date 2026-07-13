@@ -43,6 +43,14 @@ fn tool_commands_execute_explicit_arguments_from_the_repository_root() {
 }
 
 #[test]
+fn tool_commands_can_target_the_validation_root() {
+    let command = ToolCommand::new(env!("CARGO"), ["--version"]).expect("safe command");
+    let target_root = PathBuf::from("/tmp/autospec-validation-root");
+
+    assert_eq!(command.working_directory_for(&target_root), target_root);
+}
+
+#[test]
 fn missing_programs_are_non_success_typed_results() {
     let command = ToolCommand::new("autospec-task-two-missing-program", ["--version"])
         .expect("safe missing command definition");

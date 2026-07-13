@@ -20,7 +20,7 @@ impl ValidationRunner {
     fn run_check(check: &ValidationCheck, root: &Path) -> CheckResult {
         match &check.owner {
             CheckOwner::RustNative(owner) => Self::run_structural(check, *owner, root),
-            CheckOwner::External(command) => command.execute(check.id, check.required),
+            CheckOwner::External(command) => command.execute_in(check.id, check.required, root),
         }
     }
 

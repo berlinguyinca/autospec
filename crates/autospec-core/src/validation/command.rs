@@ -48,12 +48,20 @@ impl ToolCommand {
         repository_root()
     }
 
+    pub fn working_directory_for(&self, root: &Path) -> PathBuf {
+        root.to_path_buf()
+    }
+
     pub fn execute(&self, id: impl Into<String>, required: bool) -> CheckResult {
+        self.execute_in(id, required, &self.working_directory())
+    }
+
+    pub fn execute_in(&self, id: impl Into<String>, required: bool, root: &Path) -> CheckResult {
         let id = id.into();
         let started = Instant::now();
         let output = Command::new(&self.program)
             .args(&self.args)
-            .current_dir(self.working_directory())
+            .current_dir(self.working_directory_for(root))
             .output();
         let elapsed_ms = started.elapsed().as_millis();
 
