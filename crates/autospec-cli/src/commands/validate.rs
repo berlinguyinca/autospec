@@ -1,10 +1,19 @@
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
 use autospec_core::validation::affected::AffectedSet;
+use autospec_core::validation::{ValidationAggregate, ValidationReport, ValidationStatus};
+
+#[derive(Debug)]
+enum Mode {
+    Planning { paths: Vec<String> },
+    ShadowResults(PathBuf),
+}
 
 #[derive(Debug)]
 struct Options {
-    paths: Vec<String>,
+    mode: Mode,
     json: bool,
 }
 
@@ -13,22 +22,49 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .ok()
         .as_deref()
         == Some("1")
+        && !is_shadow_results_command(args)
     {
         return run_legacy_shell(args);
     }
 
     let options = parse_options(args)?;
-    let affected = AffectedSet::from_paths(&options.paths);
-    if options.json {
-        render_json(&affected);
-    } else {
-        render_text(&affected);
+    match options.mode {
+        Mode::Planning { paths } => {
+            let affected = AffectedSet::from_paths(&paths);
+            if options.json {
+                render_json(&affected);
+            } else {
+                render_text(&affected);
+            }
+        }
+        Mode::ShadowResults(path) => {
+            let document = fs::read_to_string(&path).map_err(|error| {
+                format!(
+                    "failed to read captured validation results {}: {error}",
+                    path.display()
+                )
+            })?;
+            let aggregate = ValidationReport::from_json(&document)?.aggregate()?;
+            if options.json {
+                render_shadow_json(&aggregate);
+            } else {
+                render_shadow_text(&aggregate);
+            }
+            if aggregate.status == ValidationStatus::Failed {
+                return Err("captured validation results failed required checks".to_string());
+            }
+        }
     }
     Ok(())
 }
 
+fn is_shadow_results_command(args: &[String]) -> bool {
+    args.iter().any(|argument| argument == "--shadow-results")
+}
+
 fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut paths = Vec::new();
+    let mut shadow_results = None;
     let mut json = false;
     let mut index = 0;
 
@@ -36,12 +72,31 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         match args[index].as_str() {
             "--json" => json = true,
             "--path" => {
+                if shadow_results.is_some() {
+                    return Err(
+                        "autospec validate --path cannot be combined with --shadow-results"
+                            .to_string(),
+                    );
+                }
                 index += 1;
                 let path = args
                     .get(index)
                     .filter(|path| !path.is_empty() && !path.starts_with("--"))
                     .ok_or_else(|| "autospec validate --path requires a path".to_string())?;
                 paths.push(path.clone());
+            }
+            "--shadow-results" => {
+                if !paths.is_empty() || shadow_results.is_some() {
+                    return Err("autospec validate accepts only one mode".to_string());
+                }
+                index += 1;
+                let path = args
+                    .get(index)
+                    .filter(|path| !path.is_empty() && !path.starts_with("--"))
+                    .ok_or_else(|| {
+                        "autospec validate --shadow-results requires a path".to_string()
+                    })?;
+                shadow_results = Some(PathBuf::from(path));
             }
             option => {
                 return Err(format!(
@@ -52,7 +107,10 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         index += 1;
     }
 
-    Ok(Options { paths, json })
+    let mode = shadow_results
+        .map(Mode::ShadowResults)
+        .unwrap_or(Mode::Planning { paths });
+    Ok(Options { mode, json })
 }
 
 fn render_text(affected: &AffectedSet) {
@@ -81,6 +139,25 @@ fn render_json(affected: &AffectedSet) {
         .join(",");
     println!(
         "{{\"command\":\"validate\",\"mode\":\"planning\",\"changed_paths\":{changed_paths},\"checks\":[{checks}]}}"
+    );
+}
+
+fn render_shadow_json(aggregate: &ValidationAggregate) {
+    println!(
+        "{{\"command\":\"validate\",\"mode\":\"shadow-results\",\"aggregate\":{}}}",
+        aggregate.to_json()
+    );
+}
+
+fn render_shadow_text(aggregate: &ValidationAggregate) {
+    println!(
+        "AutoSpec validation shadow: status={} total={} passed={} failed={} required_failed={} optional_failed={}; no commands were run",
+        aggregate.status.as_str(),
+        aggregate.total,
+        aggregate.passed,
+        aggregate.failed,
+        aggregate.required_failed,
+        aggregate.optional_failed
     );
 }
 

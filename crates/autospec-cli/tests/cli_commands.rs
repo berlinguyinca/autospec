@@ -326,6 +326,114 @@ fn validate_directs_shell_execution_options_to_the_legacy_wrapper() {
 }
 
 #[test]
+fn validate_shadow_results_aggregates_captured_shell_outcomes_without_execution() {
+    let fixture = workspace_root()
+        .join("crates/autospec-cli/tests/fixtures/validation-results/legacy-fast-passed.json");
+    let expected = std::fs::read_to_string(workspace_root().join(
+        "crates/autospec-cli/tests/fixtures/validation-results/legacy-fast-passed.aggregate.json",
+    ))
+    .expect("expected aggregate fixture is readable")
+    .trim()
+    .to_string();
+    let output = autospec()
+        .args([
+            "validate",
+            "--shadow-results",
+            fixture.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("shadow validation starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("\"mode\":\"shadow-results\""));
+    assert!(stdout.contains(&expected));
+}
+
+#[test]
+fn validate_shadow_results_preserves_a_required_failure_exit() {
+    let fixture = workspace_root()
+        .join("crates/autospec-cli/tests/fixtures/validation-results/legacy-required-failed.json");
+    let output = autospec()
+        .args([
+            "validate",
+            "--shadow-results",
+            fixture.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("failing shadow validation starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(!output.status.success());
+    assert!(stdout.contains("\"status\":\"failed\""));
+    assert!(stdout.contains("\"required_failed\":1"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("captured validation results failed"));
+}
+
+#[test]
+fn validate_shadow_results_rejects_an_empty_capture() {
+    let fixture = workspace_root()
+        .join("crates/autospec-cli/tests/fixtures/validation-results/legacy-empty.json");
+    let output = autospec()
+        .args([
+            "validate",
+            "--shadow-results",
+            fixture.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("validate command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("at least one observation"));
+}
+
+#[test]
+fn validate_shadow_results_never_reenters_the_legacy_shell() {
+    let root = temp_dir("validate-shadow-no-legacy-shell");
+    let scripts = root.join("scripts");
+    let log = root.join("legacy-shell.log");
+    std::fs::create_dir_all(&scripts).expect("scripts directory");
+    std::fs::write(
+        scripts.join("validate.sh"),
+        "#!/usr/bin/env bash\nset -eu\nprintf 'legacy shell ran\\n' > \"$AUTOSPEC_VALIDATE_TEST_LOG\"\n",
+    )
+    .expect("legacy shell fixture");
+    let fixture = workspace_root()
+        .join("crates/autospec-cli/tests/fixtures/validation-results/legacy-fast-passed.json");
+
+    let output = autospec()
+        .args([
+            "validate",
+            "--shadow-results",
+            fixture.to_str().expect("fixture path"),
+            "--json",
+        ])
+        .current_dir(&root)
+        .env("AUTOSPEC_VALIDATE_FROM_SHELL", "1")
+        .env("AUTOSPEC_VALIDATE_TEST_LOG", &log)
+        .output()
+        .expect("shadow aggregation runs");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"mode\":\"shadow-results\""));
+    assert!(
+        !log.exists(),
+        "shadow aggregation must not execute validate.sh"
+    );
+}
+
+#[test]
 fn init_persists_explicit_spec_state_without_running_work() {
     let root = temp_dir("autospec-init");
     let output = autospec()

@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 #[derive(Debug)]
 pub(crate) enum JsonValue {
     Null,
+    Bool(bool),
     Number(String),
     String(String),
     Array(Vec<JsonValue>),
@@ -30,6 +31,13 @@ impl JsonValue {
                 .parse::<u64>()
                 .map_err(|_| format!("{context} must be a non-negative JSON number")),
             _ => Err(format!("{context} must be a JSON number")),
+        }
+    }
+
+    pub(crate) fn into_bool(self, context: &str) -> Result<bool, String> {
+        match self {
+            Self::Bool(value) => Ok(value),
+            _ => Err(format!("{context} must be a JSON boolean")),
         }
     }
 
@@ -84,6 +92,8 @@ impl<'a> JsonParser<'a> {
             Some(b'[') => self.parse_array(),
             Some(b'"') => self.parse_string().map(JsonValue::String),
             Some(b'n') => self.parse_null(),
+            Some(b't') => self.parse_true(),
+            Some(b'f') => self.parse_false(),
             Some(byte) if byte == b'-' || byte.is_ascii_digit() => self.parse_number(),
             Some(_) => Err(format!("unexpected JSON token at byte {}", self.index)),
             None => Err("unexpected end of JSON input".to_string()),
@@ -136,6 +146,16 @@ impl<'a> JsonParser<'a> {
     fn parse_null(&mut self) -> Result<JsonValue, String> {
         self.consume_literal("null")?;
         Ok(JsonValue::Null)
+    }
+
+    fn parse_true(&mut self) -> Result<JsonValue, String> {
+        self.consume_literal("true")?;
+        Ok(JsonValue::Bool(true))
+    }
+
+    fn parse_false(&mut self) -> Result<JsonValue, String> {
+        self.consume_literal("false")?;
+        Ok(JsonValue::Bool(false))
     }
 
     fn parse_number(&mut self) -> Result<JsonValue, String> {

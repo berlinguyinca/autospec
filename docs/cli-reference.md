@@ -10,6 +10,7 @@ The Rust CLI is additive. Existing `/autospec-*` skills and shell scripts remain
 | `autospec status --json` | yes | persisted local spec-lifecycle counts |
 | `autospec plan [--input <package-dir>] [--json]` | yes | read-only inspection of generated spec metadata |
 | `autospec validate [--path <changed-path>]... [--json]` | yes | read-only affected-check planner; shell wrapper remains the executor |
+| `autospec validate --shadow-results <captured-results.json> [--json]` | yes | aggregates captured shell outcomes without executing commands; returns non-zero when a required captured result failed |
 | `autospec runtime classify <path> --json` | yes | implemented R0-R4 ownership classification for one repository path |
 | `autospec runtime audit --json` | yes | implemented read-only R0-R4 inventory; it neither migrates nor executes candidates |
 | `autospec run --run <id> --spec <id>... [--json]` | yes | creates a local persisted queue only; it does not launch an agent or validation command |
@@ -22,6 +23,12 @@ The Rust CLI is additive. Existing `/autospec-*` skills and shell scripts remain
 
 `autospec plan` only reads and parses Markdown from one generated package. It does not
 execute validation, calculate an execution order, or report persisted lifecycle state.
+
+`autospec validate --shadow-results` accepts the strict schema-1 captured-result shape used
+by `crates/autospec-cli/tests/fixtures/validation-results/`: each row supplies a unique name,
+Boolean `required`, and signed `exit_code`. Rust computes the pass/fail aggregate only; it never
+spawns the captured command. The compatibility wrapper still delegates all real validation to
+`scripts/validate.sh` until a full fixture-backed cutover is approved.
 
 `autospec run` is deliberately a state-management command, not an execution engine. Queue
 creation requires an explicit run ID and one or more spec IDs. Result ingestion requires a

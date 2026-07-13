@@ -1,4 +1,5 @@
 pub mod affected;
+pub mod results;
 
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -17,6 +18,17 @@ pub enum ValidationStatus {
     Passed,
     Failed,
 }
+
+impl ValidationStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+pub use results::{ValidationAggregate, ValidationObservation, ValidationReport};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationResult {

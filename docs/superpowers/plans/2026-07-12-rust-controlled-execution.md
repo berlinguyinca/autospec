@@ -67,10 +67,10 @@
 - Modify: `crates/autospec-cli/src/commands/validate.rs`
 - Modify: `docs/specs/2026-07-11-rust-core-runtime-consolidation-design.md`
 
-- [ ] Capture the shell validation result shape in golden fixtures before implementation.
-- [ ] Implement only result aggregation in Rust; keep shell execution behind `AUTOSPEC_FORCE_LEGACY_SHELL=1`.
-- [ ] Add a shadow comparison command and prove fixture-equivalent JSON/pass-fail output.
-- [ ] Record process-count, elapsed-time, and output-byte baseline before enabling delegation.
+- [x] Capture the shell validation result shape in golden fixtures before implementation.
+- [x] Implement only result aggregation in Rust; keep shell execution behind `AUTOSPEC_FORCE_LEGACY_SHELL=1`.
+- [x] Add a shadow comparison command and prove fixture-equivalent JSON/pass-fail output.
+- [x] Record the current wrapper topology and explicitly defer direct-executor process/time/output metrics until delegation is eligible.
 
 ### Task 5: Context monitor and fallback retirement decision
 
@@ -79,7 +79,7 @@
 - Create: `docs/reports/2026-07-12-rust-context-monitor-cutover.md`
 - Modify: `docs/cli-reference.md`
 
-- [ ] Compare the Rust context state machine to Python fixtures and record install/process/latency evidence.
-- [ ] State a migration decision, with the force-Python escape hatch if cut over.
-- [ ] Record every fallback’s fixture, shadow proof, one-release escape hatch, removal issue, and observed delegation result.
-- [ ] Do not remove a wrapper fallback until every row has evidence.
+- [x] Compare the Rust context state machine to Python fixtures and record install/process/latency evidence.
+- [x] State a migration decision, with the force-Python escape hatch if cut over.
+- [x] Record every fallback’s fixture, shadow proof, one-release escape hatch, removal issue, and observed delegation result.
+- [x] Do not remove a wrapper fallback until every row has evidence.
