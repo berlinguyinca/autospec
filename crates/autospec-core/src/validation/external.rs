@@ -31,6 +31,8 @@ pub enum ExternalCheck {
     WatchdogWorktreeGc,
     BlockExpansion,
     AutospecExploreImplementerBase,
+    AutospecExploreResearchersDeterministic,
+    AutospecExploreResearchersLlm,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -82,6 +84,12 @@ impl ExternalCheck {
             Self::BlockExpansion => run_block_expansion(id, required, root),
             Self::AutospecExploreImplementerBase => {
                 run_autospec_explore_implementer_base(id, required, root)
+            }
+            Self::AutospecExploreResearchersDeterministic => {
+                run_autospec_explore_researchers_deterministic(id, required, root)
+            }
+            Self::AutospecExploreResearchersLlm => {
+                run_autospec_explore_researchers_llm(id, required, root)
             }
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
@@ -1068,6 +1076,101 @@ fn run_autospec_explore_implementer_base(id: &str, required: bool, root: &Path) 
     }
 
     run_bats_suites(id, required, root, &[SUITE])
+}
+
+fn run_autospec_explore_researchers_deterministic(
+    id: &str,
+    required: bool,
+    root: &Path,
+) -> CheckResult {
+    let scripts = run_required_bash_scripts(
+        id,
+        required,
+        root,
+        &[
+            ("scripts/explore-research-cycle.sh", true),
+            ("scripts/explore-research/spec-vs-code.sh", true),
+            ("scripts/explore-research/prior-reports.sh", true),
+            ("scripts/explore-research/codebase-signals.sh", true),
+            ("scripts/explore-research/open-issues.sh", true),
+        ],
+    );
+    if scripts.is_failure() {
+        return scripts;
+    }
+    let bats = run_bats_suites(
+        id,
+        required,
+        root,
+        &[
+            "tests/explore/test_explore_researchers.bats",
+            "tests/explore/test_explore_research_cycle.bats",
+        ],
+    );
+    aggregate(id, required, vec![scripts, bats])
+}
+
+fn run_autospec_explore_researchers_llm(id: &str, required: bool, root: &Path) -> CheckResult {
+    let scripts = run_required_bash_scripts(
+        id,
+        required,
+        root,
+        &[
+            ("scripts/lib/explore-internet-safety.sh", false),
+            ("scripts/explore-research/source-analysis.sh", true),
+            ("scripts/explore-research/internet.sh", true),
+        ],
+    );
+    if scripts.is_failure() {
+        return scripts;
+    }
+    let bats = run_bats_suites(
+        id,
+        required,
+        root,
+        &[
+            "tests/explore/test_explore_researchers_llm.bats",
+            "tests/explore/test_explore_internet_safety.bats",
+        ],
+    );
+    aggregate(id, required, vec![scripts, bats])
+}
+
+fn run_required_bash_scripts(
+    id: &str,
+    required: bool,
+    root: &Path,
+    scripts: &[(&str, bool)],
+) -> CheckResult {
+    let mut results = Vec::new();
+    for (script, executable) in scripts {
+        let path = root.join(script);
+        if !path.is_file() {
+            results.push(failure(
+                id,
+                required,
+                &format!("{script}: required file missing"),
+            ));
+            return aggregate(id, required, results);
+        }
+        if *executable && !is_executable(&path) {
+            results.push(failure(
+                id,
+                required,
+                &format!("{script}: file not executable"),
+            ));
+            return aggregate(id, required, results);
+        }
+        let syntax = ToolCommand::new("bash", ["-n", *script])
+            .expect("required Bash validation uses a direct argument vector")
+            .execute_in(id, required, root);
+        let failed = syntax.is_failure();
+        results.push(syntax);
+        if failed {
+            return aggregate(id, required, results);
+        }
+    }
+    aggregate(id, required, results)
 }
 
 fn run_autospec_sweep_area_contract(id: &str, required: bool, root: &Path) -> CheckResult {

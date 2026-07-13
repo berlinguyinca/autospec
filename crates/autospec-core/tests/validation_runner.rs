@@ -664,6 +664,42 @@ fn runner_checks_explore_implementer_base_with_direct_bats_coverage() {
 }
 
 #[test]
+fn runner_checks_explore_researcher_contracts_with_direct_bash_and_bats_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![
+        ValidationCheck {
+            id: "check_autospec_explore_researchers_deterministic",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(
+                ExternalCheck::AutospecExploreResearchersDeterministic,
+            ),
+        },
+        ValidationCheck {
+            id: "check_autospec_explore_researchers_llm",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreResearchersLlm),
+        },
+    ]);
+
+    let report = ValidationRunner::run(
+        &catalog,
+        &validation_fixture("explore-researcher-contracts"),
+    );
+
+    assert!(report
+        .results
+        .iter()
+        .all(|result| result.exit_code == Some(0)));
+    assert!((5..=7).contains(&report.results[0].spawn_count));
+    assert!((3..=5).contains(&report.results[1].spawn_count));
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

@@ -178,6 +178,12 @@ impl ValidationCheck {
             "check_autospec_explore_implementer_base" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreImplementerBase)
             }
+            "check_autospec_explore_researchers_deterministic" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreResearchersDeterministic)
+            }
+            "check_autospec_explore_researchers_llm" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreResearchersLlm)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }
