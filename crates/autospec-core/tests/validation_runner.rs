@@ -452,6 +452,23 @@ fn runner_checks_optional_database_module_install_contract_before_bats() {
     assert!(report.results[0].spawn_count <= 1);
 }
 
+#[test]
+fn runner_runs_a_sorted_bats_directory_without_shell_globbing() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_persona_suite",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::BatsDirectory("tests/persona")),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("bats-directory"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!(report.results[0].spawn_count <= 1);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")

@@ -20,6 +20,7 @@ pub enum ExternalCheck {
     SupersessionContract,
     RunSummaryContract,
     DbModuleInstall,
+    BatsDirectory(&'static str),
 }
 
 impl ExternalCheck {
@@ -39,6 +40,7 @@ impl ExternalCheck {
             Self::SupersessionContract => run_supersession_contract(id, required, root),
             Self::RunSummaryContract => run_run_summary_contract(id, required, root),
             Self::DbModuleInstall => run_db_module_install(id, required, root),
+            Self::BatsDirectory(directory) => run_bats_directory(id, required, root, directory),
         }
     }
 }
@@ -355,6 +357,38 @@ fn run_bats_suite(id: &str, required: bool, root: &Path, suite: &str) -> CheckRe
     ToolCommand::new("bats", [suite])
         .expect("Bats validation has a static suite path")
         .execute_in(id, required, root)
+}
+
+fn run_bats_directory(id: &str, required: bool, root: &Path, directory: &str) -> CheckResult {
+    if !program_on_path("bats") {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+    let directory_path = root.join(directory);
+    let mut suites = fs::read_dir(&directory_path)
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "bats")
+        })
+        .map(|path| relative_path(root, &path))
+        .collect::<Vec<_>>();
+    suites.sort();
+    if suites.is_empty() {
+        return failure(
+            id,
+            required,
+            &format!("{directory}/*.bats: no integration tests found"),
+        );
+    }
+    let commands = suites.into_iter().map(|suite| {
+        ToolCommand::new("bats", [suite.as_str()])
+            .expect("Bats validation has a static discovered suite path")
+    });
+    run_commands(id, required, root, commands)
 }
 
 fn run_reviewer_reuse_lens(id: &str, required: bool, root: &Path) -> CheckResult {

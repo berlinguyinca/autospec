@@ -143,6 +143,15 @@ impl ValidationCheck {
                 CheckOwner::ExternalBatch(ExternalCheck::RunSummaryContract)
             }
             "check_db_module_install" => CheckOwner::ExternalBatch(ExternalCheck::DbModuleInstall),
+            "check_autonomous_phase2_suite" => {
+                CheckOwner::ExternalBatch(ExternalCheck::BatsDirectory("tests/autonomous"))
+            }
+            "check_persona_suite" => {
+                CheckOwner::ExternalBatch(ExternalCheck::BatsDirectory("tests/persona"))
+            }
+            "check_reuse_lens_suite" => {
+                CheckOwner::ExternalBatch(ExternalCheck::BatsDirectory("tests/reuse-lens"))
+            }
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }

@@ -605,6 +605,24 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
         Some(&CheckOwner::ExternalBatch(ExternalCheck::DbModuleInstall)),
         "check_db_module_install must have a typed external owner"
     );
+
+    for (id, directory) in [
+        ("check_autonomous_phase2_suite", "tests/autonomous"),
+        ("check_persona_suite", "tests/persona"),
+        ("check_reuse_lens_suite", "tests/reuse-lens"),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::ExternalBatch(ExternalCheck::BatsDirectory(
+                directory
+            ))),
+            "{id} must have a typed Bats directory owner"
+        );
+    }
 }
 
 #[test]
