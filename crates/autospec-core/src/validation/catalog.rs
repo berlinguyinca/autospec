@@ -21,6 +21,13 @@ impl ValidationCheck {
             "check_frontmatter" => CheckOwner::ExternalBatch(ExternalCheck::Frontmatter),
             "check_required_files" => CheckOwner::RustNative(StructuralCheck::RequiredTrioFiles),
             "check_flag_sentinel_docs" => CheckOwner::RustNative(StructuralCheck::FlagSentinelDocs),
+            "check_subagent_model_tier" => {
+                CheckOwner::RustNative(StructuralCheck::SubagentModelTier)
+            }
+            "check_harness_detection_block" => {
+                CheckOwner::RustNative(StructuralCheck::HarnessDetection)
+            }
+            "check_monitor_batch_exit" => CheckOwner::RustNative(StructuralCheck::MonitorBatchExit),
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)
@@ -80,6 +87,9 @@ pub enum StructuralCheck {
     DuoLockstep,
     RequiredTrioFiles,
     FlagSentinelDocs,
+    SubagentModelTier,
+    HarnessDetection,
+    MonitorBatchExit,
     StopMode,
     KeywordRouting,
     GapRemediation,

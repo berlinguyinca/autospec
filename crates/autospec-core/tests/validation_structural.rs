@@ -187,3 +187,24 @@ fn flag_sentinel_docs_contract_requires_every_runtime_flag_to_be_documented() {
         "docs/FLAGS.md: missing sentinel flag(s): second.flag"
     );
 }
+
+#[test]
+fn per_skill_model_and_monitor_contracts_validate_multi_harness_skills() {
+    let root = fixture("skill-model-contracts");
+
+    StructuralValidator::validate_subagent_model_tiers(&root).expect("model-tier directives pass");
+    StructuralValidator::validate_harness_detection_blocks(&root)
+        .expect("harness detection block passes");
+    StructuralValidator::validate_monitor_batch_exits(&root)
+        .expect("monitor batch exit contract passes");
+
+    let failure = StructuralValidator::validate_harness_detection_blocks(&fixture(
+        "skill-model-contracts-missing-silently",
+    ))
+    .expect_err("harness fallback wording is required");
+
+    assert_eq!(
+        failure,
+        "autospec: ## Harness detection section present but missing 'silently' fallback reference"
+    );
+}

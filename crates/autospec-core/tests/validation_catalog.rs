@@ -56,6 +56,36 @@ fn catalog_assigns_flag_sentinel_docs_to_a_rust_owner() {
 }
 
 #[test]
+fn catalog_assigns_per_skill_model_contracts_to_rust_owners() {
+    let catalog = ValidationCatalog::standard();
+
+    for (id, owner) in [
+        (
+            "check_subagent_model_tier",
+            StructuralCheck::SubagentModelTier,
+        ),
+        (
+            "check_harness_detection_block",
+            StructuralCheck::HarnessDetection,
+        ),
+        (
+            "check_monitor_batch_exit",
+            StructuralCheck::MonitorBatchExit,
+        ),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::RustNative(owner)),
+            "{id} must have a direct Rust owner"
+        );
+    }
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![

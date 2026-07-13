@@ -16,6 +16,9 @@ impl StructuralValidator {
             StructuralCheck::DuoLockstep => Self::validate_duo_lockstep(root),
             StructuralCheck::RequiredTrioFiles => Self::validate_required_trio_files(root),
             StructuralCheck::FlagSentinelDocs => Self::validate_flag_sentinel_docs(root),
+            StructuralCheck::SubagentModelTier => Self::validate_subagent_model_tiers(root),
+            StructuralCheck::HarnessDetection => Self::validate_harness_detection_blocks(root),
+            StructuralCheck::MonitorBatchExit => Self::validate_monitor_batch_exits(root),
             StructuralCheck::StopMode => Self::validate_stop_mode_sections(root),
             StructuralCheck::KeywordRouting => Self::validate_keyword_routing_section(root),
             StructuralCheck::GapRemediation => Self::validate_gap_remediation_sections(root),
@@ -143,6 +146,125 @@ impl StructuralValidator {
                 missing.join(" ")
             ))
         }
+    }
+
+    pub fn validate_subagent_model_tiers(root: &Path) -> Result<(), String> {
+        for skill_dir in trio_skill_directories(root)? {
+            let name = skill_name(&skill_dir)?;
+            let document = read(&skill_dir.join("SKILL.md"))?;
+            let tier_directives = document
+                .lines()
+                .filter(|line| line.contains("**Model tier:**"))
+                .collect::<Vec<_>>();
+            if tier_directives.is_empty() {
+                return Err(format!(
+                    "{name}: SKILL.md missing '**Model tier:**' directive on at least one subagent dispatch"
+                ));
+            }
+            if !document
+                .lines()
+                .any(|line| line.starts_with("| Subagent model tier "))
+                && !document.contains("<!-- autospec-block:harness-adapter -->")
+            {
+                return Err(format!(
+                    "{name}: SKILL.md harness-adapter table missing 'Subagent model tier' row"
+                ));
+            }
+            if tier_directives.iter().any(|line| {
+                !line.contains("Tier A (spec work)")
+                    && !line.contains("Tier B (implementation work)")
+                    && !line.contains("TIER_A")
+                    && !line.contains("TIER_B")
+            }) {
+                return Err(format!(
+                    "{name}: SKILL.md has '**Model tier:**' directive(s) without 'Tier A (spec work)', 'Tier B (implementation work)', or TIER_A/TIER_B label"
+                ));
+            }
+            if document.contains("TIER_A") || document.contains("TIER_B") {
+                continue;
+            }
+
+            let Some((expected_a, expected_b)) = legacy_tier_counts(&name) else {
+                continue;
+            };
+            let a_count = tier_directives
+                .iter()
+                .filter(|line| line.contains("Tier A (spec work)"))
+                .count();
+            let b_count = tier_directives
+                .iter()
+                .filter(|line| line.contains("Tier B (implementation work)"))
+                .count();
+            if a_count != expected_a {
+                return Err(format!(
+                    "{name}: expected {expected_a} Tier-A dispatches, found {a_count}"
+                ));
+            }
+            if b_count != expected_b {
+                return Err(format!(
+                    "{name}: expected {expected_b} Tier-B dispatches, found {b_count}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_harness_detection_blocks(root: &Path) -> Result<(), String> {
+        for skill_dir in trio_skill_directories(root)? {
+            let name = skill_name(&skill_dir)?;
+            let document = read(&skill_dir.join("SKILL.md"))?;
+            if !document.contains("## Harness detection") {
+                return Err(format!(
+                    "{name}: missing ## Harness detection section (required; defines TIER_A/TIER_B)"
+                ));
+            }
+            if !document.contains("TIER_A") {
+                return Err(format!(
+                    "{name}: ## Harness detection section present but missing TIER_A reference"
+                ));
+            }
+            if !document.contains("TIER_B") {
+                return Err(format!(
+                    "{name}: ## Harness detection section present but missing TIER_B reference"
+                ));
+            }
+            if !document.to_ascii_lowercase().contains("silently") {
+                return Err(format!(
+                    "{name}: ## Harness detection section present but missing 'silently' fallback reference"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_monitor_batch_exits(root: &Path) -> Result<(), String> {
+        for skill_dir in trio_skill_directories(root)? {
+            let document = read(&skill_dir.join("SKILL.md"))?;
+            if !document
+                .lines()
+                .any(|line| line == "## Phase 4 — Background autonomous monitor")
+            {
+                continue;
+            }
+            let name = skill_name(&skill_dir)?;
+            let missing = [
+                "batch_issue_count",
+                "AUTOSPEC_BATCH_SIZE",
+                "batch-done.json",
+                "BATCH_COMPLETE",
+                "ALL_DONE",
+            ]
+            .into_iter()
+            .filter(|required| !document.contains(required))
+            .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "{name}: monitor batch-exit missing: {}",
+                    missing.join(" ")
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn validate_policy_sections(root: &Path) -> Result<(), String> {
@@ -549,6 +671,37 @@ fn skill_directories(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
         .collect::<Vec<_>>();
     skill_dirs.sort();
     Ok(skill_dirs)
+}
+
+fn trio_skill_directories(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    skill_directories(root).map(|skill_dirs| {
+        skill_dirs
+            .into_iter()
+            .filter(|skill_dir| {
+                skill_dir.join("SKILL.md").is_file()
+                    && skill_dir.join("opencode/agent.md").is_file()
+                    && skill_dir.join("codex/prompt.md").is_file()
+            })
+            .collect()
+    })
+}
+
+fn skill_name(skill_dir: &Path) -> Result<String, String> {
+    skill_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or_else(|| format!("invalid skill directory {}", skill_dir.display()))
+}
+
+fn legacy_tier_counts(name: &str) -> Option<(usize, usize)> {
+    match name {
+        "autospec" => Some((4, 2)),
+        "autospec-define" | "autospec-split" => Some((3, 0)),
+        "autospec-run" => Some((2, 3)),
+        "autospec-classify" | "autospec-story" => Some((1, 0)),
+        "autospec-design" => Some((2, 0)),
+        _ => None,
+    }
 }
 
 fn require_update_flag(name: &str, installer: &Path) -> Result<(), String> {

@@ -1,0 +1,1 @@
+Model contract fixture.
