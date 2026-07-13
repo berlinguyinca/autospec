@@ -68,10 +68,6 @@ fn print_help() {
     println!("\nOPTIONS:\n    -h, --help       Print help");
 }
 
-fn json_status(command: &str, status: &str) {
-    println!("{{\"command\":\"{command}\",\"status\":\"{status}\"}}");
-}
-
 fn not_implemented(command: &str) -> Result<(), String> {
     Err(format!("autospec {command} is not yet implemented"))
 }

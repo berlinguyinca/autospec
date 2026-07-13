@@ -240,6 +240,92 @@ fn plan_rejects_an_unknown_option() {
 }
 
 #[test]
+fn validate_json_plans_rust_checks_for_changed_rust_sources() {
+    let output = autospec()
+        .args([
+            "validate",
+            "--path",
+            "crates/autospec-core/src/state/mod.rs",
+            "--json",
+        ])
+        .output()
+        .expect("validate command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"command\":\"validate\""));
+    assert!(stdout.contains("\"mode\":\"planning\""));
+    assert!(stdout.contains("\"changed_paths\":[\"crates/autospec-core/src/state/mod.rs\"]"));
+    assert!(stdout.contains("\"name\":\"rust:lint\""));
+    assert!(!stdout.contains("\"status\":\"ok\""));
+}
+
+#[test]
+fn validate_rejects_a_path_flag_without_a_path() {
+    let output = autospec()
+        .args(["validate", "--path"])
+        .output()
+        .expect("validate command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--path requires a path"));
+}
+
+#[test]
+fn validate_rejects_an_empty_path() {
+    let output = autospec()
+        .args(["validate", "--path", ""])
+        .output()
+        .expect("validate command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--path requires a path"));
+}
+
+#[test]
+fn validate_shell_handoff_preserves_legacy_execution_guards() {
+    let root = temp_dir("autospec-validate-shell");
+    let scripts = root.join("scripts");
+    let log = root.join("handoff.log");
+    std::fs::create_dir_all(&scripts).expect("scripts directory");
+    std::fs::write(
+        scripts.join("validate.sh"),
+        "#!/usr/bin/env bash\nset -eu\nprintf '%s\\n' \"$*\" > \"$AUTOSPEC_VALIDATE_TEST_LOG\"\nprintf '%s\\n' \"$AUTOSPEC_FORCE_LEGACY_SHELL\" >> \"$AUTOSPEC_VALIDATE_TEST_LOG\"\nprintf '%s\\n' \"$AUTOSPEC_VALIDATE_FROM_RUST\" >> \"$AUTOSPEC_VALIDATE_TEST_LOG\"\n",
+    )
+    .expect("validation fixture");
+
+    let output = autospec()
+        .args(["validate", "--fast"])
+        .current_dir(&root)
+        .env("AUTOSPEC_VALIDATE_FROM_SHELL", "1")
+        .env("AUTOSPEC_VALIDATE_TEST_LOG", &log)
+        .output()
+        .expect("validate command runs");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(log).expect("handoff log"),
+        "--fast\n1\n1\n"
+    );
+}
+
+#[test]
+fn validate_directs_shell_execution_options_to_the_legacy_wrapper() {
+    let output = autospec()
+        .args(["validate", "--fast"])
+        .output()
+        .expect("validate command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("use bash scripts/validate.sh for execution"));
+}
+
+#[test]
 fn autonomous_start_dry_run_includes_monitor_and_supervisor_companions() {
     let output = autospec()
         .args([

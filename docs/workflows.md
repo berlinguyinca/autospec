@@ -33,7 +33,7 @@ The V66 queue layer builds on that state with ordered entries, attempts, failure
 
 ## Rust CLI
 
-The `autospec` Rust binary exposes the V62+ command surface while preserving the skill-first workflow. `doctor`, `status`, `plan`, `validate`, `report`, `showcase`, and `growth-report` support `--json`. Mutating commands that are not wired yet, such as `init`, `run`, `resume`, and `benchmark`, exit non-zero with an explicit `not yet implemented` message.
+The `autospec` Rust binary exposes the V62+ command surface while preserving the skill-first workflow. `doctor`, `status`, `plan`, `validate`, `report`, `showcase`, and `growth-report` support `--json`. Direct `autospec validate [--path <changed-path>]...` is a read-only affected-check planner; `scripts/validate.sh` remains the executor for shell options such as `--fast`. Mutating commands that are not wired yet, such as `init`, `run`, `resume`, and `benchmark`, exit non-zero with an explicit `not yet implemented` message.
 
 See [`docs/cli-reference.md`](cli-reference.md) for the command table.
 
