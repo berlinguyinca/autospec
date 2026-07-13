@@ -79,6 +79,7 @@ impl StructuralValidator {
                 Self::validate_autospec_release_contract(root)
             }
             StructuralCheck::QaVerdictContract => Self::validate_qa_verdict_contract(root),
+            StructuralCheck::BruteForceRuleIds => Self::validate_brute_force_rule_ids(root),
             StructuralCheck::CloseoutContract => Self::validate_closeout_contract(root),
             StructuralCheck::Phase4GuardianBlockLockstep => {
                 Self::validate_phase4_guardian_block_lockstep(root)
@@ -1391,6 +1392,54 @@ impl StructuralValidator {
         Ok(())
     }
 
+    pub fn validate_brute_force_rule_ids(root: &Path) -> Result<(), String> {
+        for rule_id in ["STRING_MATCH_DOMAIN_LOGIC", "REPEATED_STRUCTURE_AS_CODE"] {
+            if !contains(&root.join("AGENTS.md"), rule_id) {
+                return Err(format!("AGENTS.md missing {rule_id} in RULE_ID table"));
+            }
+            for relative in [
+                "skills/autospec-run/SKILL.md",
+                "skills/autospec-run/codex/prompt.md",
+                "skills/autospec-run/opencode/agent.md",
+                "skills/autospec-qa/SKILL.md",
+                "skills/autospec-qa/codex/prompt.md",
+                "skills/autospec-qa/opencode/agent.md",
+            ] {
+                if !contains(&root.join(relative), rule_id) {
+                    return Err(format!(
+                        "{relative} missing {rule_id} (issue #637 lockstep)"
+                    ));
+                }
+            }
+        }
+        for relative in [
+            "skills/autospec-qa/SKILL.md",
+            "skills/autospec-qa/codex/prompt.md",
+            "skills/autospec-qa/opencode/agent.md",
+        ] {
+            let path = root.join(relative);
+            let has_sweep_heading = read(&path)
+                .map(|document| {
+                    document
+                        .lines()
+                        .any(|line| line.starts_with("## Brute-force string heuristics sweep"))
+                })
+                .unwrap_or(false);
+            if !has_sweep_heading {
+                return Err(format!(
+                    "{relative} missing '## Brute-force string heuristics sweep' section (issue #637)"
+                ));
+            }
+        }
+        if !is_executable(&root.join("scripts/qa-brute-force-sweep.sh")) {
+            return Err(
+                "scripts/qa-brute-force-sweep.sh missing or not executable (issue #637)"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn validate_closeout_contract(root: &Path) -> Result<(), String> {
         for (relative, required) in [
             ("AGENTS.md", "AGENTS.md missing at repo root"),
@@ -2458,6 +2507,21 @@ fn contains(path: &Path, expected: &str) -> bool {
         && read(path)
             .map(|document| document.contains(expected))
             .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.is_file()
+        && fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn startup_preflight_body(document: &str) -> String {

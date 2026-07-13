@@ -118,6 +118,12 @@ impl ValidationCheck {
             "check_qa_verdict_contract" => {
                 CheckOwner::RustNative(StructuralCheck::QaVerdictContract)
             }
+            "check_release_verdict_script" => {
+                CheckOwner::ExternalBatch(ExternalCheck::ReleaseVerdictScript)
+            }
+            "check_brute_force_rule_ids" => {
+                CheckOwner::RustNative(StructuralCheck::BruteForceRuleIds)
+            }
             "check_closeout_contract" => CheckOwner::RustNative(StructuralCheck::CloseoutContract),
             "check_phase4_guardian_block_lockstep" => {
                 CheckOwner::RustNative(StructuralCheck::Phase4GuardianBlockLockstep)
@@ -259,6 +265,7 @@ pub enum StructuralCheck {
     TeamPersonality,
     AutospecReleaseContract,
     QaVerdictContract,
+    BruteForceRuleIds,
     CloseoutContract,
     Phase4GuardianBlockLockstep,
     Phase4IssueStartSummary,

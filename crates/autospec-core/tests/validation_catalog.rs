@@ -502,6 +502,34 @@ fn catalog_assigns_release_and_qa_verdict_contracts_to_rust_owners() {
 }
 
 #[test]
+fn catalog_assigns_release_support_gates_to_typed_external_batches() {
+    let catalog = ValidationCatalog::standard();
+    let (id, owner) = (
+        "check_release_verdict_script",
+        ExternalCheck::ReleaseVerdictScript,
+    );
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == id)
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(owner)),
+        "{id} must have a typed external owner"
+    );
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_brute_force_rule_ids")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::RustNative(StructuralCheck::BruteForceRuleIds)),
+        "check_brute_force_rule_ids must have a direct Rust owner"
+    );
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![

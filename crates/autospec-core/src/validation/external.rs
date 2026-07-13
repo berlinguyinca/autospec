@@ -13,6 +13,7 @@ pub enum ExternalCheck {
     GapMinerContract,
     GeneratedYamlParse,
     AutospecSweepConfig,
+    ReleaseVerdictScript,
 }
 
 impl ExternalCheck {
@@ -25,6 +26,7 @@ impl ExternalCheck {
             Self::GapMinerContract => run_gap_miner_contract(id, required, root),
             Self::GeneratedYamlParse => run_generated_yaml_parse(id, required, root),
             Self::AutospecSweepConfig => run_autospec_sweep_config(id, required, root),
+            Self::ReleaseVerdictScript => run_release_verdict_script(id, required, root),
         }
     }
 }
@@ -285,6 +287,50 @@ fn run_autospec_sweep_config(id: &str, required: bool, root: &Path) -> CheckResu
         }
     }
     run_bash_syntax_targets(id, required, root, targets)
+}
+
+fn run_release_verdict_script(id: &str, required: bool, root: &Path) -> CheckResult {
+    let script = root.join("scripts/compute-release-verdict.sh");
+    let bats = root.join("tests/compute-release-verdict.bats");
+    if !script.is_file() {
+        return failure(
+            id,
+            required,
+            "scripts/compute-release-verdict.sh: required file missing",
+        );
+    }
+    if !is_executable(&script) {
+        return failure(
+            id,
+            required,
+            "scripts/compute-release-verdict.sh: must be executable",
+        );
+    }
+    if !bats.is_file() {
+        return failure(
+            id,
+            required,
+            "tests/compute-release-verdict.bats: required file missing",
+        );
+    }
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let relative = format!("skills/autospec-release/{member}");
+        if !contains(&root.join(&relative), "compute-release-verdict.sh") {
+            return failure(
+                id,
+                required,
+                &format!("{relative}: missing reference to scripts/compute-release-verdict.sh"),
+            );
+        }
+    }
+
+    let commands = [
+        ToolCommand::new("bash", ["-n", "scripts/compute-release-verdict.sh"])
+            .expect("bash syntax command is a direct argument vector"),
+        ToolCommand::new("bats", ["tests/compute-release-verdict.bats"])
+            .expect("Bats validation has a static test-file argument"),
+    ];
+    run_commands(id, required, root, commands)
 }
 
 fn trio_directories(root: &Path) -> Vec<PathBuf> {

@@ -310,6 +310,23 @@ fn runner_checks_autospec_sweep_config_with_explicit_bash_syntax_commands() {
     assert_eq!(report.results[0].spawn_count, 3);
 }
 
+#[test]
+fn runner_checks_release_verdict_with_direct_bash_and_bats_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_release_verdict_script",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::ReleaseVerdictScript),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("release-verdict-script"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 2);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")

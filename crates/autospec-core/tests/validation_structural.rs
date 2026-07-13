@@ -514,6 +514,8 @@ fn release_and_qa_verdict_contracts_have_direct_rust_owners() {
         .expect("release readiness wrapper contract passes");
     StructuralValidator::validate_qa_verdict_contract(&root)
         .expect("QA verdict artifact contract passes");
+    StructuralValidator::validate_brute_force_rule_ids(&fixture("brute-force-rule-ids"))
+        .expect("RULE_ID lockstep and sweep-script contract pass");
 
     let failure = StructuralValidator::validate_qa_verdict_contract(&fixture(
         "release-qa-contracts-missing-benchmark-category",
