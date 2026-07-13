@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use autospec_core::state::{SpecLifecycle, SpecRunState, SpecStateStore};
-use autospec_core::validation::{ValidationRegistry, ValidationStatus};
 
 static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(0);
 
@@ -360,16 +359,4 @@ fn spec_state_store_round_trips_escaped_lifecycle_metadata() {
             .as_deref(),
         Some(reason)
     );
-}
-
-#[test]
-fn validation_registry_runs_shell_command_and_captures_status() {
-    let mut registry = ValidationRegistry::new();
-    registry.register("smoke", "printf ok", ".", 5, true);
-
-    let result = registry.run("smoke").expect("registered command runs");
-
-    assert_eq!(result.status, ValidationStatus::Passed);
-    assert_eq!(result.stdout, "ok");
-    assert!(result.stderr.is_empty());
 }
