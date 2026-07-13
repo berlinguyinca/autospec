@@ -18,6 +18,9 @@ impl ValidationCheck {
             "check_lockstep_duo" => CheckOwner::RustNative(StructuralCheck::DuoLockstep),
             "check_required_files" => CheckOwner::RustNative(StructuralCheck::RequiredTrioFiles),
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
+            "check_keyword_routing_section" => {
+                CheckOwner::RustNative(StructuralCheck::KeywordRouting)
+            }
             "check_gap_remediation_section" => {
                 CheckOwner::RustNative(StructuralCheck::GapRemediation)
             }
@@ -59,6 +62,7 @@ pub enum StructuralCheck {
     DuoLockstep,
     RequiredTrioFiles,
     StopMode,
+    KeywordRouting,
     GapRemediation,
     ReviewRemediation,
     EnforcementDefaults,

@@ -103,6 +103,103 @@ impl StructuralValidator {
         require_section(root, "autospec-secaudit", "## Enforcement defaults")
     }
 
+    pub fn validate_keyword_routing_section(root: &Path) -> Result<(), String> {
+        let skill_dir = root.join("skills/autospec-listen");
+        if !skill_dir.is_dir() {
+            return Ok(());
+        }
+
+        let name = "autospec-listen";
+        for member in ["SKILL.md", "opencode/agent.md", "codex/prompt.md"] {
+            let path = skill_dir.join(member);
+            require_line_prefix(
+                &path,
+                "## Keyword auto-routing",
+                format!("{name}: {member} missing '## Keyword auto-routing' section"),
+            )?;
+            require_content(
+                &path,
+                "/autospec-explore",
+                format!("{name}: {member} missing explore -> /autospec-explore verb-map row"),
+            )?;
+            require_content(
+                &path,
+                "explore-confirm",
+                format!("{name}: {member} missing 'explore-confirm' gate literal"),
+            )?;
+            require_content(
+                &path,
+                "| `fix`",
+                format!("{name}: {member} missing 'fix' -> /autospec verb-map row"),
+            )?;
+            require_content(
+                &path,
+                "post_approval_execution_ready",
+                format!("{name}: {member} missing post-approval execution-ready routing contract"),
+            )?;
+            require_content(
+                &path,
+                "AUTOSPEC_LISTENER_AUTO_IMPLEMENT_OPEN",
+                format!("{name}: {member} missing auto-implement open-count routing hint"),
+            )?;
+            require_content(
+                &path,
+                "plan_exit_ready",
+                format!("{name}: {member} missing completed Plan-mode handoff route"),
+            )?;
+            require_content(
+                &path,
+                "AUTOSPEC_LISTENER_PLAN_EXIT_READY",
+                format!("{name}: {member} missing Plan-exit-ready state hint"),
+            )?;
+        }
+
+        let matcher = root.join("scripts/listener-match.sh");
+        require_content(
+            &matcher,
+            "explore-confirm",
+            "scripts/listener-match.sh missing 'explore-confirm' gate literal (classifier/trio drift)".to_string(),
+        )?;
+        require_content(
+            &matcher,
+            "autospec fix imperative",
+            "scripts/listener-match.sh missing 'fix' imperative route (classifier/trio drift)"
+                .to_string(),
+        )?;
+        require_content(
+            &matcher,
+            "post_approval_execution_ready",
+            "scripts/listener-match.sh missing post-approval execution-ready route (issue #1461)"
+                .to_string(),
+        )?;
+        require_content(
+            &matcher,
+            "plan_exit_ready",
+            "scripts/listener-match.sh missing completed Plan-mode handoff route (issue #1462)"
+                .to_string(),
+        )?;
+
+        let bats = root.join("skills/autospec-shared/tests/unit/listener-match.bats");
+        require_content(
+            &bats,
+            "post-approval: open auto-implement issues route to autospec-run",
+            "listener-match.bats missing post-approval open auto-implement route coverage (issue #1461)"
+                .to_string(),
+        )?;
+        require_content(
+            &bats,
+            "plan-exit: completed saved implementation plan routes to autospec autonomous",
+            "listener-match.bats missing completed Plan-mode handoff coverage (issue #1462)"
+                .to_string(),
+        )?;
+        require_content(
+            &bats,
+            "plan-exit: destructive action gate does not route",
+            "listener-match.bats missing Plan-exit destructive-action gate coverage (issue #1462)"
+                .to_string(),
+        )
+    }
+
     fn validate_skill(root: &Path, skill_dir: &Path) -> Result<(), String> {
         let skill = skill_dir.join("SKILL.md");
         let codex = skill_dir.join("codex/prompt.md");
@@ -219,6 +316,30 @@ fn require_update_flag(name: &str, installer: &Path) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("{name}: install.sh missing --update flag handling"))
+    }
+}
+
+fn require_content(path: &Path, expected: &str, failure: String) -> Result<(), String> {
+    let matches = path.is_file()
+        && read(path)
+            .map(|document| document.contains(expected))
+            .unwrap_or(false);
+    if matches {
+        Ok(())
+    } else {
+        Err(failure)
+    }
+}
+
+fn require_line_prefix(path: &Path, expected: &str, failure: String) -> Result<(), String> {
+    let matches = path.is_file()
+        && read(path)
+            .map(|document| document.lines().any(|line| line.starts_with(expected)))
+            .unwrap_or(false);
+    if matches {
+        Ok(())
+    } else {
+        Err(failure)
     }
 }
 

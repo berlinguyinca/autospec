@@ -67,3 +67,22 @@ fn self_update_sections_report_a_missing_update_flag() {
         "autospec: install.sh missing --update flag handling"
     );
 }
+
+#[test]
+fn keyword_routing_contract_passes_when_trio_and_classifier_literals_match() {
+    StructuralValidator::validate_keyword_routing_section(&fixture("keyword-routing"))
+        .expect("keyword-routing fixture passes");
+}
+
+#[test]
+fn keyword_routing_contract_reports_the_missing_trio_literal() {
+    let failure = StructuralValidator::validate_keyword_routing_section(&fixture(
+        "keyword-routing-missing-literal",
+    ))
+    .expect_err("missing trio literal fails");
+
+    assert_eq!(
+        failure,
+        "autospec-listen: codex/prompt.md missing completed Plan-mode handoff route"
+    );
+}

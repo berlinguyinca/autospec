@@ -72,3 +72,17 @@ fn catalog_assigns_self_update_gates_to_rust_owners() {
         Some(&CheckOwner::RustNative(StructuralCheck::SelfUpdateDuo))
     );
 }
+
+#[test]
+fn catalog_assigns_keyword_routing_to_a_rust_owner() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_keyword_routing_section")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::RustNative(StructuralCheck::KeywordRouting))
+    );
+}
