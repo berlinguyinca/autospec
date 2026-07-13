@@ -1,6 +1,7 @@
 pub mod affected;
 pub mod catalog;
 pub mod command;
+pub mod options;
 pub mod results;
 
 use std::collections::BTreeMap;
@@ -32,6 +33,7 @@ impl ValidationStatus {
 
 pub use catalog::{CheckModes, CheckOwner, StructuralCheck, ValidationCatalog, ValidationCheck};
 pub use command::ToolCommand;
+pub use options::{Jobs, ValidationOptions};
 pub use results::{
     CheckResult, ValidationAggregate, ValidationExecutionAggregate, ValidationExecutionReport,
     ValidationObservation, ValidationReport,

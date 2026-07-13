@@ -283,7 +283,39 @@ fn validate_rejects_an_empty_path() {
 }
 
 #[test]
-fn validate_shell_handoff_preserves_legacy_execution_guards() {
+fn validate_execution_options_return_the_pending_rust_executor_error() {
+    for args in [
+        vec!["validate", "--fast"],
+        vec!["validate", "--no-bats"],
+        vec!["validate", "--changed"],
+        vec!["validate", "--changed=origin/main"],
+        vec!["validate", "--since", "origin/main"],
+        vec!["validate", "--jobs"],
+        vec!["validate", "--jobs=4"],
+        vec!["validate", "--jobs", "4"],
+        vec!["validate", "--jobs=auto"],
+        vec!["validate", "--jobs", "auto"],
+    ] {
+        let output = autospec()
+            .args(&args)
+            .output()
+            .expect("validate command starts");
+
+        assert!(
+            !output.status.success(),
+            "args={args:?} stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr).trim(),
+            "direct Rust validation executor is not installed",
+            "args={args:?}"
+        );
+    }
+}
+
+#[test]
+fn validate_ignores_the_removed_legacy_shell_environment() {
     let root = temp_dir("autospec-validate-shell");
     let scripts = root.join("scripts");
     let log = root.join("handoff.log");
@@ -302,27 +334,12 @@ fn validate_shell_handoff_preserves_legacy_execution_guards() {
         .output()
         .expect("validate command runs");
 
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        std::fs::read_to_string(log).expect("handoff log"),
-        "--fast\n1\n1\n"
-    );
-}
-
-#[test]
-fn validate_directs_shell_execution_options_to_the_legacy_wrapper() {
-    let output = autospec()
-        .args(["validate", "--fast"])
-        .output()
-        .expect("validate command starts");
-
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("use bash scripts/validate.sh for execution"));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).trim(),
+        "direct Rust validation executor is not installed"
+    );
+    assert!(!log.exists(), "validate must not execute validate.sh");
 }
 
 #[test]
@@ -395,7 +412,7 @@ fn validate_shadow_results_rejects_an_empty_capture() {
 }
 
 #[test]
-fn validate_shadow_results_never_reenters_the_legacy_shell() {
+fn validate_shadow_results_never_executes_a_local_validate_script() {
     let root = temp_dir("validate-shadow-no-legacy-shell");
     let scripts = root.join("scripts");
     let log = root.join("legacy-shell.log");
@@ -416,7 +433,6 @@ fn validate_shadow_results_never_reenters_the_legacy_shell() {
             "--json",
         ])
         .current_dir(&root)
-        .env("AUTOSPEC_VALIDATE_FROM_SHELL", "1")
         .env("AUTOSPEC_VALIDATE_TEST_LOG", &log)
         .output()
         .expect("shadow aggregation runs");

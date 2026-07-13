@@ -1,116 +1,45 @@
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 use autospec_core::validation::affected::AffectedSet;
-use autospec_core::validation::{ValidationAggregate, ValidationReport, ValidationStatus};
-
-#[derive(Debug)]
-enum Mode {
-    Planning { paths: Vec<String> },
-    ShadowResults(PathBuf),
-}
-
-#[derive(Debug)]
-struct Options {
-    mode: Mode,
-    json: bool,
-}
+use autospec_core::validation::{
+    ValidationAggregate, ValidationOptions, ValidationReport, ValidationStatus,
+};
 
 pub fn run(args: &[String]) -> Result<(), String> {
-    if std::env::var("AUTOSPEC_VALIDATE_FROM_SHELL")
-        .ok()
-        .as_deref()
-        == Some("1")
-        && !is_shadow_results_command(args)
-    {
-        return run_legacy_shell(args);
+    let options = ValidationOptions::parse(args)?;
+    if let Some(path) = options.shadow_results.as_ref() {
+        render_shadow_results(path, options.json)
+    } else if options.requests_execution() {
+        Err("direct Rust validation executor is not installed".to_string())
+    } else {
+        let affected = AffectedSet::from_paths(&options.paths);
+        if options.json {
+            render_json(&affected);
+        } else {
+            render_text(&affected);
+        }
+        Ok(())
     }
+}
 
-    let options = parse_options(args)?;
-    match options.mode {
-        Mode::Planning { paths } => {
-            let affected = AffectedSet::from_paths(&paths);
-            if options.json {
-                render_json(&affected);
-            } else {
-                render_text(&affected);
-            }
-        }
-        Mode::ShadowResults(path) => {
-            let document = fs::read_to_string(&path).map_err(|error| {
-                format!(
-                    "failed to read captured validation results {}: {error}",
-                    path.display()
-                )
-            })?;
-            let aggregate = ValidationReport::from_json(&document)?.aggregate()?;
-            if options.json {
-                render_shadow_json(&aggregate);
-            } else {
-                render_shadow_text(&aggregate);
-            }
-            if aggregate.status == ValidationStatus::Failed {
-                return Err("captured validation results failed required checks".to_string());
-            }
-        }
+fn render_shadow_results(path: &PathBuf, json: bool) -> Result<(), String> {
+    let document = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read captured validation results {}: {error}",
+            path.display()
+        )
+    })?;
+    let aggregate = ValidationReport::from_json(&document)?.aggregate()?;
+    if json {
+        render_shadow_json(&aggregate);
+    } else {
+        render_shadow_text(&aggregate);
+    }
+    if aggregate.status == ValidationStatus::Failed {
+        return Err("captured validation results failed required checks".to_string());
     }
     Ok(())
-}
-
-fn is_shadow_results_command(args: &[String]) -> bool {
-    args.iter().any(|argument| argument == "--shadow-results")
-}
-
-fn parse_options(args: &[String]) -> Result<Options, String> {
-    let mut paths = Vec::new();
-    let mut shadow_results = None;
-    let mut json = false;
-    let mut index = 0;
-
-    while index < args.len() {
-        match args[index].as_str() {
-            "--json" => json = true,
-            "--path" => {
-                if shadow_results.is_some() {
-                    return Err(
-                        "autospec validate --path cannot be combined with --shadow-results"
-                            .to_string(),
-                    );
-                }
-                index += 1;
-                let path = args
-                    .get(index)
-                    .filter(|path| !path.is_empty() && !path.starts_with("--"))
-                    .ok_or_else(|| "autospec validate --path requires a path".to_string())?;
-                paths.push(path.clone());
-            }
-            "--shadow-results" => {
-                if !paths.is_empty() || shadow_results.is_some() {
-                    return Err("autospec validate accepts only one mode".to_string());
-                }
-                index += 1;
-                let path = args
-                    .get(index)
-                    .filter(|path| !path.is_empty() && !path.starts_with("--"))
-                    .ok_or_else(|| {
-                        "autospec validate --shadow-results requires a path".to_string()
-                    })?;
-                shadow_results = Some(PathBuf::from(path));
-            }
-            option => {
-                return Err(format!(
-                    "unknown autospec validate option: {option}; use bash scripts/validate.sh for execution"
-                ));
-            }
-        }
-        index += 1;
-    }
-
-    let mode = shadow_results
-        .map(Mode::ShadowResults)
-        .unwrap_or(Mode::Planning { paths });
-    Ok(Options { mode, json })
 }
 
 fn render_text(affected: &AffectedSet) {
@@ -186,26 +115,4 @@ fn escape_json(value: &str) -> String {
         }
     }
     escaped
-}
-
-fn run_legacy_shell(args: &[String]) -> Result<(), String> {
-    let status = Command::new("bash")
-        .arg("scripts/validate.sh")
-        .args(args)
-        .env("AUTOSPEC_FORCE_LEGACY_SHELL", "1")
-        .env("AUTOSPEC_VALIDATE_FROM_RUST", "1")
-        .status()
-        .map_err(|error| format!("failed to run legacy shell validation: {error}"))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "legacy shell validation failed with status {}",
-            status
-                .code()
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "signal".to_string())
-        ))
-    }
 }
