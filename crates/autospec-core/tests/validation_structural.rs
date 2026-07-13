@@ -208,3 +208,23 @@ fn per_skill_model_and_monitor_contracts_validate_multi_harness_skills() {
         "autospec: ## Harness detection section present but missing 'silently' fallback reference"
     );
 }
+
+#[test]
+fn repository_presence_and_subagent_policy_contracts_have_direct_owners() {
+    let root = fixture("presence-contracts");
+
+    StructuralValidator::validate_agents_md_subagent_section(&root)
+        .expect("two-tier subsection headings pass");
+    StructuralValidator::validate_agents_md_subagent_matrix(&root)
+        .expect("decision matrix and skill reference pass");
+    StructuralValidator::validate_autospec_listen_files(&root)
+        .expect("listener package files pass");
+    StructuralValidator::validate_examples_directory(&root).expect("examples directory passes");
+
+    let failure = StructuralValidator::validate_examples_directory(&fixture(
+        "presence-contracts-missing-example",
+    ))
+    .expect_err("a missing canonical example fails");
+
+    assert_eq!(failure, "examples/README.md: required file missing");
+}

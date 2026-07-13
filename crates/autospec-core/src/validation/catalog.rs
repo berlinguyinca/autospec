@@ -28,6 +28,16 @@ impl ValidationCheck {
                 CheckOwner::RustNative(StructuralCheck::HarnessDetection)
             }
             "check_monitor_batch_exit" => CheckOwner::RustNative(StructuralCheck::MonitorBatchExit),
+            "check_agents_md_subagent_section" => {
+                CheckOwner::RustNative(StructuralCheck::AgentsMdSubagentSection)
+            }
+            "check_agents_md_subagent_matrix" => {
+                CheckOwner::RustNative(StructuralCheck::AgentsMdSubagentMatrix)
+            }
+            "check_autospec_listen_files" => {
+                CheckOwner::RustNative(StructuralCheck::AutospecListenFiles)
+            }
+            "check_examples_dir" => CheckOwner::RustNative(StructuralCheck::ExamplesDirectory),
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)
@@ -90,6 +100,10 @@ pub enum StructuralCheck {
     SubagentModelTier,
     HarnessDetection,
     MonitorBatchExit,
+    AgentsMdSubagentSection,
+    AgentsMdSubagentMatrix,
+    AutospecListenFiles,
+    ExamplesDirectory,
     StopMode,
     KeywordRouting,
     GapRemediation,

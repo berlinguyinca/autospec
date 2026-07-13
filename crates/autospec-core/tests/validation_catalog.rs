@@ -86,6 +86,37 @@ fn catalog_assigns_per_skill_model_contracts_to_rust_owners() {
 }
 
 #[test]
+fn catalog_assigns_repository_presence_contracts_to_rust_owners() {
+    let catalog = ValidationCatalog::standard();
+
+    for (id, owner) in [
+        (
+            "check_agents_md_subagent_section",
+            StructuralCheck::AgentsMdSubagentSection,
+        ),
+        (
+            "check_agents_md_subagent_matrix",
+            StructuralCheck::AgentsMdSubagentMatrix,
+        ),
+        (
+            "check_autospec_listen_files",
+            StructuralCheck::AutospecListenFiles,
+        ),
+        ("check_examples_dir", StructuralCheck::ExamplesDirectory),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::RustNative(owner)),
+            "{id} must have a direct Rust owner"
+        );
+    }
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![

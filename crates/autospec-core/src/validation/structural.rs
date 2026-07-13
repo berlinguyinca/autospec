@@ -19,6 +19,14 @@ impl StructuralValidator {
             StructuralCheck::SubagentModelTier => Self::validate_subagent_model_tiers(root),
             StructuralCheck::HarnessDetection => Self::validate_harness_detection_blocks(root),
             StructuralCheck::MonitorBatchExit => Self::validate_monitor_batch_exits(root),
+            StructuralCheck::AgentsMdSubagentSection => {
+                Self::validate_agents_md_subagent_section(root)
+            }
+            StructuralCheck::AgentsMdSubagentMatrix => {
+                Self::validate_agents_md_subagent_matrix(root)
+            }
+            StructuralCheck::AutospecListenFiles => Self::validate_autospec_listen_files(root),
+            StructuralCheck::ExamplesDirectory => Self::validate_examples_directory(root),
             StructuralCheck::StopMode => Self::validate_stop_mode_sections(root),
             StructuralCheck::KeywordRouting => Self::validate_keyword_routing_section(root),
             StructuralCheck::GapRemediation => Self::validate_gap_remediation_sections(root),
@@ -262,6 +270,139 @@ impl StructuralValidator {
                     "{name}: monitor batch-exit missing: {}",
                     missing.join(" ")
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_agents_md_subagent_section(root: &Path) -> Result<(), String> {
+        let agents = root.join("AGENTS.md");
+        if !agents.is_file() {
+            return Err("AGENTS.md missing at repo root".to_string());
+        }
+        let document = read(&agents)?;
+        for (heading, failure) in [
+            (
+                "## Subagent model selection (two-tier, cost-aware)",
+                "AGENTS.md missing '## Subagent model selection (two-tier, cost-aware)' section",
+            ),
+            (
+                "### Tier A — Specification work",
+                "AGENTS.md missing '### Tier A — Specification work' subheading",
+            ),
+            (
+                "### Tier B — Implementation work",
+                "AGENTS.md missing '### Tier B — Implementation work' subheading",
+            ),
+        ] {
+            if !document.lines().any(|line| line == heading) {
+                return Err(failure.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_agents_md_subagent_matrix(root: &Path) -> Result<(), String> {
+        let agents = root.join("AGENTS.md");
+        if !agents.is_file() {
+            return Err("AGENTS.md missing at repo root".to_string());
+        }
+        let document = read(&agents)?;
+        if !document
+            .lines()
+            .any(|line| line == "## Subagent vs inline decision matrix")
+        {
+            return Err(
+                "AGENTS.md missing '## Subagent vs inline decision matrix' section".to_string(),
+            );
+        }
+        for anchor in [
+            "Read-only exploration across many files",
+            "2+ independent tasks with disjoint scopes",
+            "Single-purpose long-running work",
+            "Risky / quarantine-worthy work",
+            "Orchestration / decision-making",
+            "One-shot tool calls",
+            "Short edits (1-3 file modifications)",
+            "Routing / control flow",
+            "Multi-area fan-out",
+        ] {
+            if !document.contains(anchor) {
+                return Err(format!(
+                    "AGENTS.md decision matrix missing work-shape row: '{anchor}'"
+                ));
+            }
+        }
+
+        for skill_dir in skill_directories(root)? {
+            if !skill_name(&skill_dir)?.starts_with("autospec") {
+                continue;
+            }
+            for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+                let path = skill_dir.join(member);
+                if !path.is_file() {
+                    continue;
+                }
+                let content = read(&path)?;
+                if !content
+                    .lines()
+                    .any(|line| line.starts_with("## Required capabilities & harness adapter"))
+                {
+                    continue;
+                }
+                if content.contains("<!-- autospec-block:harness-adapter-core -->") {
+                    continue;
+                }
+                let display = display_path(root, &path)?;
+                if !content
+                    .lines()
+                    .any(|line| line.starts_with("| Subagent dispatch policy"))
+                {
+                    return Err(format!(
+                        "{display}: Required-capabilities table missing 'Subagent dispatch policy' row"
+                    ));
+                }
+                if !content.contains("per AGENTS.md decision matrix") {
+                    return Err(format!(
+                        "{display}: dispatch-policy row missing 'per AGENTS.md decision matrix' reference"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_autospec_listen_files(root: &Path) -> Result<(), String> {
+        let listen_dir = root.join("skills/autospec-listen");
+        if !listen_dir.is_dir() {
+            return Err("skills/autospec-listen: directory missing".to_string());
+        }
+        for member in [
+            "SKILL.md",
+            "install.sh",
+            "uninstall.sh",
+            "opencode/agent.md",
+            "codex/prompt.md",
+            "references/trigger-keywords.md",
+            "README.md",
+        ] {
+            if !listen_dir.join(member).is_file() {
+                return Err(format!(
+                    "skills/autospec-listen/{member}: required file missing"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_examples_directory(root: &Path) -> Result<(), String> {
+        let examples = root.join("examples");
+        if !examples.is_dir() {
+            return Err("examples/: directory missing".to_string());
+        }
+        for member in ["model-profiles.yml", "project-map.yml", "README.md"] {
+            if !examples.join(member).is_file() {
+                return Err(format!("examples/{member}: required file missing"));
             }
         }
         Ok(())
