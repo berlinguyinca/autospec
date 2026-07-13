@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 #[derive(Debug)]
 pub(crate) enum JsonValue {
     Null,
-    Number(u64),
+    Number(String),
     String(String),
     Array(Vec<JsonValue>),
     Object(BTreeMap<String, JsonValue>),
@@ -26,7 +26,18 @@ impl JsonValue {
 
     pub(crate) fn into_number(self, context: &str) -> Result<u64, String> {
         match self {
-            Self::Number(value) => Ok(value),
+            Self::Number(value) => value
+                .parse::<u64>()
+                .map_err(|_| format!("{context} must be a non-negative JSON number")),
+            _ => Err(format!("{context} must be a JSON number")),
+        }
+    }
+
+    pub(crate) fn into_signed_number(self, context: &str) -> Result<i64, String> {
+        match self {
+            Self::Number(value) => value
+                .parse::<i64>()
+                .map_err(|_| format!("{context} must be a signed JSON number")),
             _ => Err(format!("{context} must be a JSON number")),
         }
     }
@@ -73,7 +84,7 @@ impl<'a> JsonParser<'a> {
             Some(b'[') => self.parse_array(),
             Some(b'"') => self.parse_string().map(JsonValue::String),
             Some(b'n') => self.parse_null(),
-            Some(byte) if byte.is_ascii_digit() => self.parse_number(),
+            Some(byte) if byte == b'-' || byte.is_ascii_digit() => self.parse_number(),
             Some(_) => Err(format!("unexpected JSON token at byte {}", self.index)),
             None => Err("unexpected end of JSON input".to_string()),
         }
@@ -129,19 +140,19 @@ impl<'a> JsonParser<'a> {
 
     fn parse_number(&mut self) -> Result<JsonValue, String> {
         let start = self.index;
+        self.consume_byte(b'-');
         if self.consume_byte(b'0') {
             if self.peek_byte().is_some_and(|byte| byte.is_ascii_digit()) {
                 return Err(format!("leading zero in JSON number at byte {start}"));
             }
-        } else {
+        } else if self.peek_byte().is_some_and(|byte| byte.is_ascii_digit()) {
             while self.peek_byte().is_some_and(|byte| byte.is_ascii_digit()) {
                 self.index += 1;
             }
+        } else {
+            return Err(format!("invalid JSON number at byte {start}"));
         }
-        let number = self.input[start..self.index]
-            .parse::<u64>()
-            .map_err(|error| format!("invalid JSON number at byte {start}: {error}"))?;
-        Ok(JsonValue::Number(number))
+        Ok(JsonValue::Number(self.input[start..self.index].to_string()))
     }
 
     fn parse_string(&mut self) -> Result<String, String> {

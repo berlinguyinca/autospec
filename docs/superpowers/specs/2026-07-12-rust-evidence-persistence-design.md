@@ -1,7 +1,7 @@
 # Rust Evidence Persistence Design
 
 **Date:** 2026-07-12
-**Status:** approved for implementation
+**Status:** implemented
 **Depends on:** [Rust Spec-State Persistence Design](2026-07-12-rust-spec-state-persistence-design.md), [Rust Execution-Queue Persistence Design](2026-07-12-rust-execution-queue-persistence-design.md)
 
 ## Goal
@@ -13,6 +13,8 @@ Persist local Rust evidence bundles at `.autospec/evidence/<run-id>/bundle.json`
 This slice makes the existing `EvidenceBundle` schema-versioned, timestamped, deterministic, and durable. It validates run IDs and artifact paths, writes through a recovery file, and loads a named bundle only when the document is structurally valid. It does not run validation commands, invoke agents, upload artifacts, or enable CLI execution.
 
 Each command record stores its command, exit code, stdout path, stderr path, and capture timestamp. Artifact and log paths must be relative, normalized paths beneath `.autospec/evidence/<run-id>/`; the loader rejects traversal, absolute paths, duplicate artifacts, and mismatched run IDs.
+
+On platforms where the standard library cannot synchronize directories, durable saves fail explicitly instead of claiming crash-safe persistence.
 
 ## Acceptance criteria
 

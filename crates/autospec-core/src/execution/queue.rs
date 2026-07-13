@@ -578,8 +578,10 @@ fn optional_string(value: JsonValue, name: &str) -> Result<Option<String>, Strin
 fn optional_number(value: JsonValue, name: &str) -> Result<Option<u64>, String> {
     match value {
         JsonValue::Null => Ok(None),
-        JsonValue::Number(value) => Ok(Some(value)),
-        _ => Err(format!("{name} must be a JSON number or null")),
+        value => value
+            .into_number(name)
+            .map(Some)
+            .map_err(|_| format!("{name} must be a JSON number or null")),
     }
 }
 fn take(

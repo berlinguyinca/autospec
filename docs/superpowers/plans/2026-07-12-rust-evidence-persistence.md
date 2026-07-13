@@ -13,19 +13,19 @@
 
 ### Task 1: Add failing persistence and safety tests
 
-- [ ] Add temporary-root test support to `crates/autospec-core/tests/evidence_bundle.rs`.
-- [ ] Add red tests for round-trip, recovery, primary precedence, path traversal, run mismatch, duplicates, and escaped control characters.
-- [ ] Confirm `cargo test -p autospec-core --test evidence_bundle` fails before production changes.
+- [x] Add temporary-root test support to `crates/autospec-core/tests/evidence_bundle.rs`.
+- [x] Add red tests for round-trip, recovery, primary precedence, path traversal, run mismatch, duplicates, and escaped control characters.
+- [x] Confirm `cargo test -p autospec-core --test evidence_bundle` fails before production changes.
 
 ### Task 2: Implement durable evidence bundles
 
-- [ ] Add timestamped evidence command records and versioned bundle JSON in `crates/autospec-core/src/evidence/mod.rs`.
-- [ ] Validate run IDs and all artifact/log paths at write and read boundaries.
-- [ ] Persist under `.autospec/evidence/<run-id>/bundle.json` with temporary-file recovery and primary-wins loading.
-- [ ] Keep release-report behavior compatible while correcting JSON control-character escaping.
+- [x] Add timestamped evidence command records and versioned bundle JSON in `crates/autospec-core/src/evidence/mod.rs`.
+- [x] Validate run IDs and all artifact/log paths at write and read boundaries.
+- [x] Persist under `.autospec/evidence/<run-id>/bundle.json` with temporary-file recovery and primary-wins loading.
+- [x] Keep release-report behavior compatible while correcting JSON control-character escaping.
 
 ### Task 3: Verify and checkpoint
 
-- [ ] Run focused evidence, workspace, format, clippy, and fast repository checks.
-- [ ] Independently review persistence and path-safety semantics.
-- [ ] Commit with a conventional Lore-format message.
+- [x] Run focused evidence, workspace, format, clippy, and fast repository checks.
+- [x] Independently review persistence and path-safety semantics.
+- [x] Commit with a conventional Lore-format message.
