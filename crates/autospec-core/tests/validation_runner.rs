@@ -435,6 +435,23 @@ fn runner_checks_run_summary_contract_with_direct_bash_and_bats_commands() {
     assert!((2..=3).contains(&report.results[0].spawn_count));
 }
 
+#[test]
+fn runner_checks_optional_database_module_install_contract_before_bats() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_db_module_install",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::DbModuleInstall),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("db-module-install"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!(report.results[0].spawn_count <= 1);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")

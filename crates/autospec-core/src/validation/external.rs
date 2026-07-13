@@ -19,6 +19,7 @@ pub enum ExternalCheck {
     BashHelpUsage(&'static str),
     SupersessionContract,
     RunSummaryContract,
+    DbModuleInstall,
 }
 
 impl ExternalCheck {
@@ -37,6 +38,7 @@ impl ExternalCheck {
             Self::BashHelpUsage(script) => run_bash_help_usage(id, required, root, script),
             Self::SupersessionContract => run_supersession_contract(id, required, root),
             Self::RunSummaryContract => run_run_summary_contract(id, required, root),
+            Self::DbModuleInstall => run_db_module_install(id, required, root),
         }
     }
 }
@@ -494,6 +496,35 @@ fn run_run_summary_contract(id: &str, required: bool, root: &Path) -> CheckResul
     }
     let bats = run_bats_suite(id, required, root, SUITE);
     aggregate(id, required, vec![helper, bats])
+}
+
+fn run_db_module_install(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SUITE: &str = "tests/unit/install-db-module.bats";
+    if !root.join(SUITE).is_file() {
+        return failure(
+            id,
+            required,
+            "tests/unit/install-db-module.bats: bats coverage missing (issue #1777)",
+        );
+    }
+    if !contains(&root.join("install.sh"), "maybe_prompt_db_module") {
+        return failure(
+            id,
+            required,
+            "install.sh missing maybe_prompt_db_module (issue #1777)",
+        );
+    }
+    if !contains(
+        &root.join("install.sh"),
+        "Install the optional database telemetry module (autospec-db)? [y/N]",
+    ) {
+        return failure(
+            id,
+            required,
+            "install.sh missing autospec-db prompt text (issue #1777)",
+        );
+    }
+    run_bats_suite(id, required, root, SUITE)
 }
 
 fn trio_directories(root: &Path) -> Vec<PathBuf> {

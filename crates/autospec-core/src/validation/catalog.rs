@@ -142,6 +142,7 @@ impl ValidationCheck {
             "check_autospec_run_summary_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::RunSummaryContract)
             }
+            "check_db_module_install" => CheckOwner::ExternalBatch(ExternalCheck::DbModuleInstall),
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }

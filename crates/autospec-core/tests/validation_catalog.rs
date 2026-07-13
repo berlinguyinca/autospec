@@ -595,6 +595,16 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
         )),
         "check_autospec_run_summary_contract must have a typed external owner"
     );
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_db_module_install")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(ExternalCheck::DbModuleInstall)),
+        "check_db_module_install must have a typed external owner"
+    );
 }
 
 #[test]
