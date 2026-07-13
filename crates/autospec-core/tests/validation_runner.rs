@@ -486,6 +486,23 @@ fn runner_checks_upgrade_skill_tokens_before_its_bats_directory() {
     assert!(report.results[0].spawn_count <= 1);
 }
 
+#[test]
+fn runner_checks_fab_skill_tokens_before_its_bats_directory() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_autospec_fab_contract",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::AutospecFabContract),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("autospec-fab-contract"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!((2..=3).contains(&report.results[0].spawn_count));
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")

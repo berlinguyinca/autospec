@@ -22,6 +22,7 @@ pub enum ExternalCheck {
     DbModuleInstall,
     BatsDirectory(&'static str),
     AutospecUpgradeContract,
+    AutospecFabContract,
 }
 
 impl ExternalCheck {
@@ -43,6 +44,7 @@ impl ExternalCheck {
             Self::DbModuleInstall => run_db_module_install(id, required, root),
             Self::BatsDirectory(directory) => run_bats_directory(id, required, root, directory),
             Self::AutospecUpgradeContract => run_autospec_upgrade_contract(id, required, root),
+            Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
         }
     }
 }
@@ -597,6 +599,86 @@ fn run_autospec_upgrade_contract(id: &str, required: bool, root: &Path) -> Check
     }
 
     run_bats_directory(id, required, root, "skills/autospec-upgrade/tests")
+}
+
+fn run_autospec_fab_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SKILL: &str = "skills/autospec-fab";
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let relative = format!("{SKILL}/{member}");
+        let path = root.join(&relative);
+        if !path.is_file() {
+            return failure(
+                id,
+                required,
+                &format!("{relative}: required trio file missing (issue #1218)"),
+            );
+        }
+
+        let document = fs::read_to_string(&path).unwrap_or_default();
+        for token in [
+            "release-gate",
+            "watertight",
+            "gasket",
+            "vacuum",
+            "FreeCAD",
+            "STL",
+        ] {
+            if !document.contains(token) {
+                return failure(
+                    id,
+                    required,
+                    &format!("{relative}: missing fab token `{token}` (issue #1218)"),
+                );
+            }
+        }
+    }
+
+    let bats = run_bats_directory(id, required, root, "skills/autospec-fab/tests");
+    if bats.is_failure() {
+        return bats;
+    }
+    aggregate(
+        id,
+        required,
+        vec![bats, run_fab_container_dockerfile(id, required, root)],
+    )
+}
+
+fn run_fab_container_dockerfile(id: &str, required: bool, root: &Path) -> CheckResult {
+    const DOCKERFILE: &str = "skills/autospec-fab/docker/Dockerfile";
+    const LINT: &str = "scripts/lint-fab-dockerfile.sh";
+    if !root.join(DOCKERFILE).is_file() {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+    if !root.join(LINT).is_file() {
+        return failure(
+            id,
+            required,
+            "scripts/lint-fab-dockerfile.sh: pin-lint script missing (issue #1300)",
+        );
+    }
+    for required_path in [
+        DOCKERFILE,
+        "skills/autospec-fab/docker/requirements.txt",
+        "skills/autospec-fab/docker/wrappers/ccx_safety_wrapper.py",
+        "skills/autospec-fab/docker/wrappers/foam_cfd_reduce.py",
+    ] {
+        if !root.join(required_path).is_file() {
+            return failure(
+                id,
+                required,
+                &format!("{required_path}: required container file missing (issue #1300)"),
+            );
+        }
+    }
+
+    let commands = [
+        ToolCommand::new("bash", ["-n", LINT])
+            .expect("fab pin lint syntax check is a direct argument vector"),
+        ToolCommand::new("bash", [LINT, DOCKERFILE])
+            .expect("fab pin lint execution is a direct argument vector"),
+    ];
+    run_commands(id, required, root, commands)
 }
 
 fn trio_directories(root: &Path) -> Vec<PathBuf> {

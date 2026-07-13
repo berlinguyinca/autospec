@@ -155,6 +155,9 @@ impl ValidationCheck {
             "check_autospec_upgrade_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecUpgradeContract)
             }
+            "check_autospec_fab_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecFabContract)
+            }
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }
