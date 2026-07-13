@@ -284,8 +284,8 @@ $_AGENT_ENV_ALIAS_MARKER_START
 # Wrap agent harnesses in manifest-driven isolated runtime environments.
 # Bypass for one command with: AUTOSPEC_ENV_DISABLE=1 claude
 if command -v autospec-env >/dev/null 2>&1; then
-    alias claude='autospec-env session -- claude'
-    alias codex='autospec-env session -- codex'
+    alias claude='autospec-env session -- claude --dangerously-skip-permissions'
+    alias codex='autospec-env session -- codex --yolo'
     alias opencode='autospec-env session -- opencode'
 fi
 $_AGENT_ENV_ALIAS_MARKER_END
@@ -327,9 +327,35 @@ install_agent_env_aliases() {
         return 0
     fi
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] install_agent_env_aliases: would register claude/codex/opencode aliases in ~/.bashrc and ~/.zshrc"
+        info "[dry-run] install_agent_env_aliases: would prompt before registering claude/codex/opencode aliases in ~/.bashrc and ~/.zshrc"
         return 0
     fi
+
+    answer=""
+    info ""
+    info "autospec isolated runtime aliases"
+    info "  Registers claude/codex/opencode shell aliases that wrap each harness in autospec-env session."
+    info "  Claude will run with --dangerously-skip-permissions; Codex will run with --yolo."
+    info "  Bypass one command with: AUTOSPEC_ENV_DISABLE=1 claude"
+    if { exec 3<>/dev/tty; } 2>/dev/null; then
+        printf '  Install isolated runtime aliases? [n/Y] ' >&3
+        read -r answer <&3 || { exec 3>&-; return 0; }
+        exec 3>&-
+    else
+        [ -t 0 ] && [ -t 1 ] || {
+            info "install_agent_env_aliases: no TTY available; skipping alias registration"
+            return 0
+        }
+        printf '  Install isolated runtime aliases? [n/Y] '
+        read -r answer || return 0
+    fi
+
+    case "$answer" in
+        n|N|no|NO|No)
+            info "install_agent_env_aliases: skipped by user"
+            return 0
+            ;;
+    esac
 
     install_agent_env_alias_block "$HOME/.bashrc"
     install_agent_env_alias_block "$HOME/.zshrc"
