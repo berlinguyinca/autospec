@@ -28,6 +28,7 @@ pub enum ExternalCheck {
     AutospecUpgradeContract,
     ClaimGuardContract,
     ClaimCasGuard,
+    WatchdogWorktreeGc,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -75,6 +76,7 @@ impl ExternalCheck {
             Self::AutospecUpgradeContract => run_autospec_upgrade_contract(id, required, root),
             Self::ClaimGuardContract => run_claim_guard_contract(id, required, root),
             Self::ClaimCasGuard => run_claim_cas_guard(id, required, root),
+            Self::WatchdogWorktreeGc => run_watchdog_worktree_gc(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -809,6 +811,65 @@ fn run_claim_cas_guard(id: &str, required: bool, root: &Path) -> CheckResult {
     }
 
     run_bats_suites(id, required, root, SUITES)
+}
+
+fn run_watchdog_worktree_gc(id: &str, required: bool, root: &Path) -> CheckResult {
+    const WATCHDOG: &str = "scripts/autospec-watchdog.sh";
+    const SUITE: &str = "tests/resume/test_watchdog_gc.bats";
+
+    let watchdog = root.join(WATCHDOG);
+    if !watchdog.is_file() {
+        return failure(id, required, "scripts/autospec-watchdog.sh: missing");
+    }
+    let syntax = ToolCommand::new("bash", ["-n", WATCHDOG])
+        .expect("watchdog syntax validation is a direct argument vector")
+        .execute_in(id, required, root);
+    if syntax.is_failure() {
+        return syntax;
+    }
+
+    let Ok(document) = fs::read_to_string(&watchdog) else {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                failure(
+                    id,
+                    required,
+                    "scripts/autospec-watchdog.sh: unable to read watchdog contract",
+                ),
+            ],
+        );
+    };
+    let failure_message = if !document.contains("gc_orphaned_worktrees()") {
+        Some("scripts/autospec-watchdog.sh must define gc_orphaned_worktrees() (issue #883)")
+    } else if !document
+        .lines()
+        .any(|line| matches!(line, "gc_orphaned_worktrees" | "    gc_orphaned_worktrees"))
+    {
+        Some("scripts/autospec-watchdog.sh must invoke gc_orphaned_worktrees once per cycle (issue #883)")
+    } else if !document.contains("git worktree remove --force") {
+        Some("scripts/autospec-watchdog.sh GC must prune via 'git worktree remove --force' (issue #883)")
+    } else if document
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .any(contains_rm_rf)
+    {
+        Some("scripts/autospec-watchdog.sh must never 'rm -rf' a worktree path; use 'git worktree remove --force' (issue #883)")
+    } else if !document.contains("log --not --remotes") {
+        Some("scripts/autospec-watchdog.sh GC must gate on 'git -C <wt> log --not --remotes' for un-pushed commits (issue #883)")
+    } else if !root.join(SUITE).is_file() {
+        Some("tests/resume/test_watchdog_gc.bats: GC bats fixture missing (issue #883)")
+    } else {
+        None
+    };
+    if let Some(message) = failure_message {
+        return aggregate(id, required, vec![syntax, failure(id, required, message)]);
+    }
+
+    let bats = run_bats_suites(id, required, root, &[SUITE]);
+    aggregate(id, required, vec![syntax, bats])
 }
 
 fn run_autospec_sweep_area_contract(id: &str, required: bool, root: &Path) -> CheckResult {
@@ -1978,6 +2039,19 @@ fn contains_unguarded_claim_swap(path: &Path) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+fn contains_rm_rf(line: &str) -> bool {
+    let mut remaining = line;
+    while let Some(index) = remaining.find("rm") {
+        let suffix = &remaining[index + "rm".len()..];
+        let trimmed = suffix.trim_start_matches(char::is_whitespace);
+        if trimmed.len() < suffix.len() && trimmed.starts_with("-rf") {
+            return true;
+        }
+        remaining = suffix;
+    }
+    false
 }
 
 fn contains(path: &Path, expected: &str) -> bool {

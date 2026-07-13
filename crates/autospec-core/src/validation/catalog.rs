@@ -171,6 +171,9 @@ impl ValidationCheck {
                 CheckOwner::ExternalBatch(ExternalCheck::ClaimGuardContract)
             }
             "check_claim_cas_guard" => CheckOwner::ExternalBatch(ExternalCheck::ClaimCasGuard),
+            "check_watchdog_worktree_gc" => {
+                CheckOwner::ExternalBatch(ExternalCheck::WatchdogWorktreeGc)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

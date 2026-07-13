@@ -576,6 +576,40 @@ fn runner_checks_claim_cas_simulation_coverage_with_direct_bats_commands() {
 }
 
 #[test]
+fn runner_rejects_watchdog_gc_that_deletes_worktrees_with_rm_rf() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_watchdog_worktree_gc",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::WatchdogWorktreeGc),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("watchdog-gc-rm-rf"));
+
+    assert_eq!(report.results[0].exit_code, Some(1));
+    assert_eq!(report.results[0].spawn_count, 1);
+}
+
+#[test]
+fn runner_checks_watchdog_gc_contract_with_direct_bash_and_bats_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_watchdog_worktree_gc",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::WatchdogWorktreeGc),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("watchdog-gc"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!((1..=2).contains(&report.results[0].spawn_count));
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",
