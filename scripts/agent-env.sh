@@ -22,6 +22,7 @@ missing_manifest() {
 usage() {
     cat <<'EOF'
 Usage:
+  agent-env init [--repo PATH] [--manifest agent|autospec] [--force]
   agent-env up [--repo PATH] [--mode MODE]
   agent-env status [--repo PATH] [--mode MODE]
   agent-env down [--repo PATH] [--mode MODE]
@@ -181,6 +182,44 @@ shell_quote() {
     printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+runtime_manifest_target() {
+    repo="$1"
+    kind="$2"
+    case "$kind" in
+        agent)
+            printf '%s/.agent-runtime.yml\n' "$repo"
+            ;;
+        autospec)
+            printf '%s/.autospec/runtime.yml\n' "$repo"
+            ;;
+        *)
+            die "unknown manifest kind: $kind"
+            ;;
+    esac
+}
+
+write_runtime_manifest() {
+    target="$1"
+    manifest_name="$2"
+    mkdir -p "$(dirname "$target")"
+    cat > "$target" <<YAML
+version: 1
+name: $manifest_name
+default_mode: local
+modes:
+  local:
+    command: sh -c 'true'
+    down: sh -c 'true'
+ports:
+  frontend:
+    env: AGENT_FRONTEND_PORT
+    default: dynamic
+public_url_env:
+  - AUTOSPEC_PUBLIC_URL
+  - AGENT_PUBLIC_URL
+YAML
+}
+
 write_env_file() {
     env_file="$1"
     {
@@ -198,6 +237,23 @@ write_env_file() {
             printf 'export %s=%s\n' "$key" "$(shell_quote "$value")"
         done
     } > "$env_file"
+}
+
+init_runtime_manifest() {
+    repo="$1"
+    manifest_kind="$2"
+    force="$3"
+    repo="$(repo_realpath "$repo")"
+    existing="$(find_manifest_path "$repo" 2>/dev/null || true)"
+    target="$(runtime_manifest_target "$repo" "$manifest_kind")"
+    if [ -n "$existing" ] && [ "$force" != "1" ]; then
+        printf 'agent-env: runtime manifest already exists: %s\n' "$existing" >&2
+        return 4
+    fi
+    manifest_name="$(basename "$repo" | slugify)"
+    [ -n "$manifest_name" ] || manifest_name="agent_env"
+    write_runtime_manifest "$target" "$manifest_name"
+    printf 'agent-env: created %s\n' "$target"
 }
 
 print_env() {
@@ -295,6 +351,32 @@ cmd_up() {
     print_env
 }
 
+cmd_init() {
+    manifest_kind="agent"
+    force=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --repo)
+                [ "$#" -ge 2 ] || die "missing value for --repo"
+                REPO="$2"; shift 2 ;;
+            --repo=*)
+                REPO="${1#--repo=}"; shift ;;
+            --manifest)
+                [ "$#" -ge 2 ] || die "missing value for --manifest"
+                manifest_kind="$2"; shift 2 ;;
+            --manifest=*)
+                manifest_kind="${1#--manifest=}"; shift ;;
+            --force)
+                force=1; shift ;;
+            -*)
+                die "unknown option: $1" ;;
+            *)
+                die "unexpected init argument: $1" ;;
+        esac
+    done
+    init_runtime_manifest "$REPO" "$manifest_kind" "$force"
+}
+
 cmd_status() {
     parse_common_args "$@"
     load_context
@@ -369,9 +451,30 @@ cmd_session() {
     [ "$#" -gt 0 ] || die "session requires a command after --"
 
     AGENT_ENV_REPO="$(repo_realpath "$REPO")"
-    if [ "${AUTOSPEC_ENV_DISABLE:-0}" = "1" ] || ! find_manifest_path "$AGENT_ENV_REPO" >/dev/null 2>&1; then
+    if [ "${AUTOSPEC_ENV_DISABLE:-0}" = "1" ]; then
         (cd "$AGENT_ENV_REPO" && "$@")
         exit "$?"
+    fi
+    if ! find_manifest_path "$AGENT_ENV_REPO" >/dev/null 2>&1; then
+        if [ "${AUTOSPEC_ENV_AUTO_INIT:-0}" = "1" ]; then
+            init_runtime_manifest "$AGENT_ENV_REPO" agent 0 >/dev/null
+        elif { exec 3<>/dev/tty; } 2>/dev/null; then
+            printf 'agent-env: no runtime manifest found. Create .agent-runtime.yml for this repo? [y/N] ' >&3
+            read -r answer <&3 || answer=""
+            exec 3>&-
+            case "$answer" in
+                y|Y|yes|YES|Yes)
+                    init_runtime_manifest "$AGENT_ENV_REPO" agent 0 >/dev/null
+                    ;;
+                *)
+                    (cd "$AGENT_ENV_REPO" && "$@")
+                    exit "$?"
+                    ;;
+            esac
+        else
+            (cd "$AGENT_ENV_REPO" && "$@")
+            exit "$?"
+        fi
     fi
 
     load_context
@@ -409,6 +512,7 @@ cmd_session() {
 }
 
 case "$COMMAND" in
+    init) cmd_init "$@" ;;
     up) cmd_up "$@" ;;
     status) cmd_status "$@" ;;
     down) cmd_down "$@" ;;
