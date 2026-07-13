@@ -27,6 +27,7 @@
 #   AUTOSPEC_INSTALL_DB=1|0  force install/update or skip the optional autospec-db module.
 #   AUTOSPEC_SKIP_SYSTEM_TOOLS=1  skip best-effort CLI dependency installs.
 #   AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1  skip peer ecosystem bootstrap.
+#   AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1  skip claude/codex/opencode runtime aliases.
 #
 # Exits non-zero on any sub-installer failure; reports per-pair status.
 
@@ -272,6 +273,67 @@ install_agent_env_commands() {
         write_agent_env_wrapper "$autospec_bin_dir/$command"
     done
     info "install_agent_env_commands: installed agent-env/autospec-env wrappers in $autospec_bin_dir"
+}
+
+_AGENT_ENV_ALIAS_MARKER_START="# >>> autospec isolated runtime aliases >>>"
+_AGENT_ENV_ALIAS_MARKER_END="# <<< autospec isolated runtime aliases <<<"
+
+agent_env_alias_block() {
+    cat <<EOF
+$_AGENT_ENV_ALIAS_MARKER_START
+# Wrap agent harnesses in manifest-driven isolated runtime environments.
+# Bypass for one command with: AUTOSPEC_ENV_DISABLE=1 claude
+if command -v autospec-env >/dev/null 2>&1; then
+    alias claude='autospec-env session -- claude'
+    alias codex='autospec-env session -- codex'
+    alias opencode='autospec-env session -- opencode'
+fi
+$_AGENT_ENV_ALIAS_MARKER_END
+EOF
+}
+
+install_agent_env_alias_block() {
+    rc="$1"
+    block_file="$(mktemp)"
+    tmp_file="$(mktemp)"
+    agent_env_alias_block > "$block_file"
+    [ -f "$rc" ] || touch "$rc"
+    if grep -qF "$_AGENT_ENV_ALIAS_MARKER_START" "$rc"; then
+        awk -v s="$_AGENT_ENV_ALIAS_MARKER_START" -v e="$_AGENT_ENV_ALIAS_MARKER_END" -v bf="$block_file" '
+            $0 == s {
+                while ((getline line < bf) > 0) print line
+                close(bf)
+                in_block=1
+                next
+            }
+            $0 == e { in_block=0; next }
+            !in_block { print }
+            END { if (in_block) print e }
+        ' "$rc" > "$tmp_file"
+    else
+        cat "$rc" > "$tmp_file"
+        {
+            [ -s "$tmp_file" ] && echo ""
+            cat "$block_file"
+        } >> "$tmp_file"
+    fi
+    mv "$tmp_file" "$rc"
+    rm -f "$block_file"
+}
+
+install_agent_env_aliases() {
+    if [ "${AUTOSPEC_SKIP_AGENT_ENV_ALIASES:-0}" = "1" ]; then
+        info "install_agent_env_aliases: skipped by AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] install_agent_env_aliases: would register claude/codex/opencode aliases in ~/.bashrc and ~/.zshrc"
+        return 0
+    fi
+
+    install_agent_env_alias_block "$HOME/.bashrc"
+    install_agent_env_alias_block "$HOME/.zshrc"
+    info "install_agent_env_aliases: registered claude/codex/opencode runtime aliases in ~/.bashrc and ~/.zshrc"
 }
 
 write_scanner_shim() {
@@ -1467,6 +1529,7 @@ copy_schemas
 ensure_autospec_bin_path
 install_autonomous_operator_commands
 install_agent_env_commands
+install_agent_env_aliases
 install_scanner_shims
 ensure_system_tools
 bootstrap_peer_ecosystems

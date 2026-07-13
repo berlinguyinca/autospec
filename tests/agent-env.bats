@@ -117,6 +117,30 @@ YAML
   echo "$output" | grep -Eq '^sample-app-[A-Za-z0-9_.-]+ http://127\.0\.0\.1:[0-9]+$'
 }
 
+@test "session provisions env for a command and tears it down after exit" {
+  repo="$TEST_TMP/repo"
+  mkdir -p "$repo"
+  write_manifest "$repo"
+
+  run bash "$BIN" session --repo "$repo" -- sh -c 'printf "%s %s" "$AGENT_ENV_ID" "$AUTOSPEC_PUBLIC_URL" > session.txt'
+
+  [ "$status" -eq 0 ]
+  grep -Eq '^sample-app-[A-Za-z0-9_.-]+ http://127\.0\.0\.1:[0-9]+$' "$repo/session.txt"
+  [ "$(cat "$repo/down.txt")" = "down" ]
+  [ ! -d "$AGENT_ENV_STATE_ROOT"/sample-app-* ]
+}
+
+@test "session passes through when no runtime manifest exists" {
+  repo="$TEST_TMP/no-manifest"
+  mkdir -p "$repo"
+
+  run bash "$BIN" session --repo "$repo" -- sh -c 'printf passthrough > passthrough.txt'
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$repo/passthrough.txt")" = "passthrough" ]
+  ! echo "$output" | grep -q "no runtime manifest"
+}
+
 @test "down runs the selected mode teardown command" {
   repo="$TEST_TMP/repo"
   mkdir -p "$repo"

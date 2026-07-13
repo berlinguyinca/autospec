@@ -26,6 +26,7 @@ Usage:
   agent-env status [--repo PATH] [--mode MODE]
   agent-env down [--repo PATH] [--mode MODE]
   agent-env exec [--repo PATH] [--mode MODE] -- COMMAND [ARGS...]
+  agent-env session [--repo PATH] [--mode MODE] [--keep-alive] -- COMMAND [ARGS...]
 
 Reads .autospec/runtime.yml or .agent-runtime.yml and exports a per-repo
 runtime environment with dynamic ports, AUTOSPEC_PUBLIC_URL, and AGENT_PUBLIC_URL.
@@ -63,12 +64,20 @@ repo_realpath() {
 
 manifest_path() {
     repo="$1"
+    if find_manifest_path "$repo"; then
+        return 0
+    fi
+    missing_manifest "$repo"
+}
+
+find_manifest_path() {
+    repo="$1"
     if [ -f "$repo/.autospec/runtime.yml" ]; then
         printf '%s\n' "$repo/.autospec/runtime.yml"
     elif [ -f "$repo/.agent-runtime.yml" ]; then
         printf '%s\n' "$repo/.agent-runtime.yml"
     else
-        missing_manifest "$repo"
+        return 1
     fi
 }
 
@@ -251,9 +260,12 @@ run_manifest_command() {
     (cd "$AGENT_ENV_REPO" && sh -c "$cmd")
 }
 
-cmd_up() {
-    parse_common_args "$@"
-    load_context
+start_current_env() {
+    if [ -f "$AGENT_ENV_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$AGENT_ENV_FILE"
+        return 0
+    fi
     prepare_env
     if run_manifest_command command; then
         :
@@ -262,6 +274,24 @@ cmd_up() {
         [ "$rc" -eq 3 ] && die "mode '$AGENT_ENV_MODE' has no command in $AGENT_ENV_MANIFEST"
         exit "$rc"
     fi
+}
+
+down_current_env() {
+    if [ -f "$AGENT_ENV_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$AGENT_ENV_FILE"
+    fi
+    run_manifest_command down || {
+        rc=$?
+        [ "$rc" -eq 3 ] || exit "$rc"
+    }
+    rm -rf "$AGENT_ENV_DIR"
+}
+
+cmd_up() {
+    parse_common_args "$@"
+    load_context
+    start_current_env
     print_env
 }
 
@@ -280,15 +310,7 @@ cmd_status() {
 cmd_down() {
     parse_common_args "$@"
     load_context
-    if [ -f "$AGENT_ENV_FILE" ]; then
-        # shellcheck disable=SC1090
-        . "$AGENT_ENV_FILE"
-    fi
-    run_manifest_command down || {
-        rc=$?
-        [ "$rc" -eq 3 ] || exit "$rc"
-    }
-    rm -rf "$AGENT_ENV_DIR"
+    down_current_env
 }
 
 cmd_exec() {
@@ -315,20 +337,75 @@ cmd_exec() {
     done
     [ "$#" -gt 0 ] || die "exec requires a command after --"
     load_context
-    if [ ! -f "$AGENT_ENV_FILE" ]; then
-        prepare_env
-        if run_manifest_command command; then
-            :
-        else
-            rc=$?
-            [ "$rc" -eq 3 ] && die "mode '$AGENT_ENV_MODE' has no command in $AGENT_ENV_MANIFEST"
-            exit "$rc"
-        fi
-    else
-        # shellcheck disable=SC1090
-        . "$AGENT_ENV_FILE"
-    fi
+    start_current_env
     (cd "$AGENT_ENV_REPO" && "$@")
+}
+
+cmd_session() {
+    keep_alive="${AUTOSPEC_ENV_KEEP_ALIVE:-0}"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --repo)
+                [ "$#" -ge 2 ] || die "missing value for --repo"
+                REPO="$2"; shift 2 ;;
+            --repo=*)
+                REPO="${1#--repo=}"; shift ;;
+            --mode)
+                [ "$#" -ge 2 ] || die "missing value for --mode"
+                MODE="$2"; shift 2 ;;
+            --mode=*)
+                MODE="${1#--mode=}"; shift ;;
+            --keep-alive)
+                keep_alive=1; shift ;;
+            --)
+                shift
+                break ;;
+            -*)
+                die "unknown option: $1" ;;
+            *)
+                break ;;
+        esac
+    done
+    [ "$#" -gt 0 ] || die "session requires a command after --"
+
+    AGENT_ENV_REPO="$(repo_realpath "$REPO")"
+    if [ "${AUTOSPEC_ENV_DISABLE:-0}" = "1" ] || ! find_manifest_path "$AGENT_ENV_REPO" >/dev/null 2>&1; then
+        (cd "$AGENT_ENV_REPO" && "$@")
+        exit "$?"
+    fi
+
+    load_context
+    start_current_env
+
+    session_dir="$AGENT_ENV_DIR/sessions"
+    mkdir -p "$session_dir"
+    session_file="$session_dir/$$"
+    {
+        printf 'pid=%s\n' "$$"
+        printf 'command=%s\n' "$*"
+        printf 'started_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+    } > "$session_file"
+
+    child_pid=""
+    cleanup() {
+        rc="${1:-0}"
+        rm -f "$session_file"
+        if [ "$keep_alive" != "1" ]; then
+            down_current_env
+        fi
+        exit "$rc"
+    }
+    trap 'if [ -n "$child_pid" ]; then kill "$child_pid" 2>/dev/null || true; fi; cleanup 130' INT
+    trap 'if [ -n "$child_pid" ]; then kill "$child_pid" 2>/dev/null || true; fi; cleanup 143' TERM
+
+    set +e
+    (cd "$AGENT_ENV_REPO" && "$@") &
+    child_pid=$!
+    wait "$child_pid"
+    rc=$?
+    child_pid=""
+    set -e
+    cleanup "$rc"
 }
 
 case "$COMMAND" in
@@ -336,6 +413,7 @@ case "$COMMAND" in
     status) cmd_status "$@" ;;
     down) cmd_down "$@" ;;
     exec) cmd_exec "$@" ;;
+    session) cmd_session "$@" ;;
     -h|--help|help|"") usage ;;
     *) die "unknown command: $COMMAND" ;;
 esac
