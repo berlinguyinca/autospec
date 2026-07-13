@@ -30,6 +30,25 @@ fn missing_trio_required_file_reports_the_skill_and_file() {
 }
 
 #[test]
+fn trio_lockstep_and_required_files_have_separate_owners() {
+    StructuralValidator::validate_trio_lockstep(&fixture("missing-trio-file"))
+        .expect("a missing installer does not make matching trio bodies drift");
+
+    let failure = StructuralValidator::validate_required_trio_files(&fixture("missing-trio-file"))
+        .expect_err("the required-files owner reports the missing installer");
+
+    assert_eq!(failure, "skills/trio: missing required file uninstall.sh");
+}
+
+#[test]
+fn trio_and_duo_lockstep_owners_validate_their_respective_harnesses() {
+    StructuralValidator::validate_trio_lockstep(&fixture("valid-skill"))
+        .expect("matching trio passes its owner");
+    StructuralValidator::validate_duo_lockstep(&fixture("valid-skill"))
+        .expect("matching duo passes its owner");
+}
+
+#[test]
 fn named_skill_policy_sections_pass_when_every_member_has_the_required_heading() {
     StructuralValidator::validate_policy_sections(&fixture("policy-sections"))
         .expect("policy section fixture passes");

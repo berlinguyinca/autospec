@@ -6,21 +6,77 @@ pub struct StructuralValidator;
 
 impl StructuralValidator {
     pub fn validate_root(root: &Path) -> Result<(), String> {
-        let skills_root = root.join("skills");
-        if !skills_root.exists() {
-            return Ok(());
+        Self::validate_required_trio_files(root)?;
+        Self::validate_trio_lockstep(root)?;
+        Self::validate_duo_lockstep(root)
+    }
+
+    pub fn validate_trio_lockstep(root: &Path) -> Result<(), String> {
+        for skill_dir in skill_directories(root)? {
+            let skill = skill_dir.join("SKILL.md");
+            let codex = skill_dir.join("codex/prompt.md");
+            let opencode = skill_dir.join("opencode/agent.md");
+            if !skill.is_file() || !codex.is_file() || !opencode.is_file() {
+                continue;
+            }
+
+            let relative = display_path(root, &skill_dir)?;
+            let skill_body = strip_frontmatter(&read(&skill)?);
+            if skill_body != read(&codex)? {
+                return Err(format!(
+                    "{relative}/codex/prompt.md: body diverges from {relative}/SKILL.md"
+                ));
+            }
+            if skill_body != strip_frontmatter(&read(&opencode)?) {
+                return Err(format!(
+                    "{relative}/opencode/agent.md: body diverges from {relative}/SKILL.md"
+                ));
+            }
         }
+        Ok(())
+    }
 
-        let mut skill_dirs = fs::read_dir(&skills_root)
-            .map_err(|error| format!("failed to read {}: {error}", skills_root.display()))?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.is_dir())
-            .collect::<Vec<_>>();
-        skill_dirs.sort();
+    pub fn validate_duo_lockstep(root: &Path) -> Result<(), String> {
+        for skill_dir in skill_directories(root)? {
+            let skill = skill_dir.join("SKILL.md");
+            let codex = skill_dir.join("codex/prompt.md");
+            if !skill.is_file() || !codex.is_file() || skill_dir.join("opencode/agent.md").is_file()
+            {
+                continue;
+            }
 
-        for skill_dir in skill_dirs {
-            Self::validate_skill(root, &skill_dir)?;
+            let relative = display_path(root, &skill_dir)?;
+            if strip_frontmatter(&read(&skill)?) != read(&codex)? {
+                return Err(format!(
+                    "{relative}/codex/prompt.md: body diverges from {relative}/SKILL.md"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_required_trio_files(root: &Path) -> Result<(), String> {
+        for skill_dir in skill_directories(root)? {
+            if !skill_dir.join("SKILL.md").is_file()
+                || !skill_dir.join("codex/prompt.md").is_file()
+                || !skill_dir.join("opencode/agent.md").is_file()
+            {
+                continue;
+            }
+
+            let relative = display_path(root, &skill_dir)?;
+            for required in [
+                "SKILL.md",
+                "README.md",
+                "install.sh",
+                "uninstall.sh",
+                "opencode/agent.md",
+                "codex/prompt.md",
+            ] {
+                if !skill_dir.join(required).is_file() {
+                    return Err(format!("{relative}: missing required file {required}"));
+                }
+            }
         }
         Ok(())
     }
@@ -278,51 +334,6 @@ impl StructuralValidator {
         Ok(())
     }
 
-    fn validate_skill(root: &Path, skill_dir: &Path) -> Result<(), String> {
-        let skill = skill_dir.join("SKILL.md");
-        let codex = skill_dir.join("codex/prompt.md");
-        if !skill.is_file() || !codex.is_file() {
-            return Ok(());
-        }
-
-        let relative = display_path(root, skill_dir)?;
-        let skill_body = strip_frontmatter(&read(&skill)?);
-        let codex_body = read(&codex)?;
-        let opencode = skill_dir.join("opencode/agent.md");
-
-        if opencode.is_file() {
-            for required in [
-                "SKILL.md",
-                "README.md",
-                "install.sh",
-                "uninstall.sh",
-                "opencode/agent.md",
-                "codex/prompt.md",
-            ] {
-                if !skill_dir.join(required).is_file() {
-                    return Err(format!("{relative}: missing required file {required}"));
-                }
-            }
-
-            if skill_body != codex_body {
-                return Err(format!(
-                    "{relative}/codex/prompt.md: body diverges from {relative}/SKILL.md"
-                ));
-            }
-            if skill_body != strip_frontmatter(&read(&opencode)?) {
-                return Err(format!(
-                    "{relative}/opencode/agent.md: body diverges from {relative}/SKILL.md"
-                ));
-            }
-        } else if skill_body != codex_body {
-            return Err(format!(
-                "{relative}/codex/prompt.md: body diverges from {relative}/SKILL.md"
-            ));
-        }
-
-        Ok(())
-    }
-
     fn validate_trio_self_update(name: &str, skill_dir: &Path) -> Result<(), String> {
         for member in ["SKILL.md", "opencode/agent.md", "codex/prompt.md"] {
             let path = skill_dir.join(member);
@@ -385,6 +396,22 @@ fn require_section(root: &Path, skill: &str, section: &str) -> Result<(), String
         }
     }
     Ok(())
+}
+
+fn skill_directories(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let skills_root = root.join("skills");
+    if !skills_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut skill_dirs = fs::read_dir(&skills_root)
+        .map_err(|error| format!("failed to read {}: {error}", skills_root.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    skill_dirs.sort();
+    Ok(skill_dirs)
 }
 
 fn require_update_flag(name: &str, installer: &Path) -> Result<(), String> {
