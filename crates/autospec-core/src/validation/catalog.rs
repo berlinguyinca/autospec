@@ -190,6 +190,9 @@ impl ValidationCheck {
             "check_autospec_explore_stage2_intersect_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreStage2Intersect)
             }
+            "check_explore_trio_worktree_assert" => {
+                CheckOwner::ExternalBatch(ExternalCheck::ExploreTrioWorktreeAssert)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

@@ -35,6 +35,7 @@ pub enum ExternalCheck {
     AutospecExploreResearchersLlm,
     AutospecExploreSpecialistsDiscovery,
     AutospecExploreStage2Intersect,
+    ExploreTrioWorktreeAssert,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -99,6 +100,7 @@ impl ExternalCheck {
             Self::AutospecExploreStage2Intersect => {
                 run_autospec_explore_stage2_intersect(id, required, root)
             }
+            Self::ExploreTrioWorktreeAssert => run_explore_trio_worktree_assert(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -1338,6 +1340,83 @@ fn run_autospec_explore_stage2_intersect(id: &str, required: bool, root: &Path) 
     prefilter
 }
 
+fn run_explore_trio_worktree_assert(id: &str, required: bool, root: &Path) -> CheckResult {
+    const TRIO: &[&str] = &[
+        "skills/autospec-explore/SKILL.md",
+        "skills/autospec-explore/codex/prompt.md",
+        "skills/autospec-explore/opencode/agent.md",
+    ];
+    const SUITE: &str = "tests/explore/test_explore_worktree_assert.bats";
+
+    let mut sections = Vec::new();
+    for trio in TRIO {
+        let path = root.join(trio);
+        if !path.is_file() {
+            return failure(
+                id,
+                required,
+                &format!("{trio}: required adapter file missing"),
+            );
+        }
+        if !contains(&path, "worktree-guard.sh assert") {
+            return failure(
+                id,
+                required,
+                &format!("{trio}: missing worktree-guard.sh assert before sandbox commit (D4)"),
+            );
+        }
+        if !contains(&path, "MUST exit 0") {
+            return failure(
+                id,
+                required,
+                &format!("{trio}: assert gate must carry MUST-exit-0 wording (D4)"),
+            );
+        }
+        if !contains_case_insensitive(&path, "primary checkout") {
+            return failure(
+                id,
+                required,
+                &format!("{trio}: missing primary-checkout hard rule (D4)"),
+            );
+        }
+        let Some(section) = inclusive_section(
+            &path,
+            "## Sandbox branch contract",
+            "## Research cycle contract",
+        ) else {
+            return failure(
+                id,
+                required,
+                &format!("{trio}: Sandbox branch contract section missing"),
+            );
+        };
+        sections.push(section);
+    }
+    if sections[0].is_empty() {
+        return failure(
+            id,
+            required,
+            "SKILL.md: Sandbox branch contract section missing",
+        );
+    }
+    if sections[0] != sections[1] {
+        return failure(
+            id,
+            required,
+            "explore-trio: SKILL.md vs codex/prompt.md Sandbox branch contract differs (lock-step violation)",
+        );
+    }
+    if sections[0] != sections[2] {
+        return failure(
+            id,
+            required,
+            "explore-trio: SKILL.md vs opencode/agent.md Sandbox branch contract differs (lock-step violation)",
+        );
+    }
+
+    run_bats_suites(id, required, root, &[SUITE])
+}
+
 fn run_required_bash_scripts(
     id: &str,
     required: bool,
@@ -2558,6 +2637,20 @@ fn has_same_line_tokens(path: &Path, first: &str, second: &str) -> bool {
                 .any(|line| line.contains(first) && line.contains(second))
         })
         .unwrap_or(false)
+}
+
+fn inclusive_section(path: &Path, start_heading: &str, end_heading: &str) -> Option<String> {
+    let document = fs::read_to_string(path).ok()?;
+    let lines = document.lines().collect::<Vec<_>>();
+    let start = lines
+        .iter()
+        .position(|line| line.starts_with(start_heading))?;
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(index, line)| line.starts_with(end_heading).then_some(index))?;
+    Some(lines[start..=end].join("\n"))
 }
 
 fn contains_case_insensitive(path: &Path, expected: &str) -> bool {

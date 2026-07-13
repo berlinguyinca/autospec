@@ -737,6 +737,23 @@ fn runner_checks_explore_stage2_intersect_contract_with_direct_bash_syntax() {
 }
 
 #[test]
+fn runner_checks_explore_worktree_assert_contract_without_the_shell_harness() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_explore_trio_worktree_assert",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::ExploreTrioWorktreeAssert),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("explore-worktree-assert"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!(report.results[0].spawn_count <= 1);
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",
