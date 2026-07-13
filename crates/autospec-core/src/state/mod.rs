@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
@@ -202,6 +202,84 @@ impl SpecStateStore {
                 }
             }
         }
+    }
+
+    pub fn initialize_if_absent(
+        root: impl AsRef<Path>,
+        records: impl IntoIterator<Item = SpecLifecycle>,
+    ) -> Result<Self, String> {
+        let mut store = Self::new();
+        for lifecycle in records {
+            store.insert(lifecycle)?;
+        }
+        let rendered = store.to_json()?;
+        let paths = StatePaths::new(root.as_ref());
+        if paths.primary.exists() || paths.temporary.exists() {
+            return Err("autospec init refuses to overwrite existing spec state".to_string());
+        }
+
+        let autospec_was_missing = !paths.autospec_directory.exists();
+        let state_was_missing = !paths.directory.exists();
+        fs::create_dir_all(&paths.directory).map_err(|error| {
+            format!(
+                "failed to create spec state directory {}: {error}",
+                paths.directory.display()
+            )
+        })?;
+        storage::sync_created_directories(&paths, autospec_was_missing, state_was_missing)?;
+
+        let mut temporary = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&paths.temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err("autospec init refuses to overwrite existing spec state".to_string())
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to create initialization state file {}: {error}",
+                    paths.temporary.display()
+                ))
+            }
+        };
+        temporary.write_all(rendered.as_bytes()).map_err(|error| {
+            format!(
+                "failed to write initialization state file {}: {error}",
+                paths.temporary.display()
+            )
+        })?;
+        temporary.sync_all().map_err(|error| {
+            format!(
+                "failed to synchronize initialization state file {}: {error}",
+                paths.temporary.display()
+            )
+        })?;
+        drop(temporary);
+
+        match fs::hard_link(&paths.temporary, &paths.primary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(&paths.temporary);
+                return Err("autospec init refuses to overwrite existing spec state".to_string());
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to atomically initialize spec state {}: {error}",
+                    paths.primary.display()
+                ))
+            }
+        }
+        storage::sync_directory(&paths.directory)?;
+        fs::remove_file(&paths.temporary).map_err(|error| {
+            format!(
+                "failed to finalize initialization state file {}: {error}",
+                paths.temporary.display()
+            )
+        })?;
+        storage::sync_directory(&paths.directory)?;
+        Ok(store)
     }
 
     pub fn save(&self, root: impl AsRef<Path>) -> Result<(), String> {

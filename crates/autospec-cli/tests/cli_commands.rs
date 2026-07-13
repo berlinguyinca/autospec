@@ -326,6 +326,78 @@ fn validate_directs_shell_execution_options_to_the_legacy_wrapper() {
 }
 
 #[test]
+fn init_persists_explicit_spec_state_without_running_work() {
+    let root = temp_dir("autospec-init");
+    let output = autospec()
+        .args(["init", "--spec", "v62-rust-core-workspace", "--json"])
+        .current_dir(&root)
+        .output()
+        .expect("init command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("\"command\":\"init\""));
+    assert!(stdout.contains("\"status\":\"initialized\""));
+    assert!(stdout.contains("\"spec_count\":1"));
+    assert!(root.join(".autospec/state/specs.json").exists());
+}
+
+#[test]
+fn init_requires_at_least_one_explicit_spec() {
+    let output = autospec()
+        .arg("init")
+        .output()
+        .expect("init command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("at least one --spec"));
+}
+
+#[test]
+fn init_refuses_to_overwrite_existing_spec_state() {
+    let root = temp_dir("autospec-init-existing");
+    let first = autospec()
+        .args(["init", "--spec", "v62-rust-core-workspace"])
+        .current_dir(&root)
+        .output()
+        .expect("first init runs");
+    assert!(first.status.success());
+
+    let second = autospec()
+        .args(["init", "--spec", "v63-spec-metadata-parser"])
+        .current_dir(&root)
+        .output()
+        .expect("second init starts");
+
+    assert!(!second.status.success());
+    assert!(String::from_utf8_lossy(&second.stderr).contains("refuses to overwrite"));
+}
+
+#[test]
+fn init_refuses_an_existing_empty_primary_or_recovery_state_file() {
+    for name in ["specs.json", "specs.json.tmp"] {
+        let root = temp_dir(&format!("autospec-init-{name}"));
+        let state = root.join(".autospec/state");
+        std::fs::create_dir_all(&state).expect("state directory");
+        std::fs::write(state.join(name), "{\"schema\":1,\"specs\":[]}")
+            .expect("existing state document");
+
+        let output = autospec()
+            .args(["init", "--spec", "v62-rust-core-workspace"])
+            .current_dir(&root)
+            .output()
+            .expect("init starts");
+
+        assert!(!output.status.success(), "{name} must block initialization");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("refuses to overwrite"));
+    }
+}
+
+#[test]
 fn autonomous_start_dry_run_includes_monitor_and_supervisor_companions() {
     let output = autospec()
         .args([
@@ -1845,7 +1917,7 @@ fn doctor_readiness_json_reports_workflow_safety() {
 
 #[test]
 fn cli_commands_unimplemented_mutating_commands_are_explicit() {
-    for command in ["init", "run", "resume", "benchmark"] {
+    for command in ["run", "resume", "benchmark"] {
         let output = autospec().arg(command).output().expect("autospec runs");
         let stderr = String::from_utf8_lossy(&output.stderr);
 

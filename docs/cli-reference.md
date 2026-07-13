@@ -4,7 +4,7 @@ The Rust CLI is additive. Existing `/autospec-*` skills and shell scripts remain
 
 | Command | JSON | Status |
 | --- | --- | --- |
-| `autospec init` | no | documented stub, exits non-zero |
+| `autospec init --spec <id> [--spec <id>]... [--json]` | yes | initialize persisted planned state without executing work; refuses existing state |
 | `autospec doctor --json` | yes | implemented |
 | `autospec doctor --readiness --json` | yes | implemented target-repo readiness report |
 | `autospec status --json` | yes | persisted local spec-lifecycle counts |
