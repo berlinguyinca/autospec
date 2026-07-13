@@ -533,6 +533,23 @@ fn runner_executes_per_skill_validators_with_direct_argument_vectors() {
     assert!(report.results.iter().all(|result| result.spawn_count == 2));
 }
 
+#[test]
+fn runner_requires_and_runs_the_complete_grooming_suite_batch() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_grooming_contract",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::GroomingContract),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("grooming-contract"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 11);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")

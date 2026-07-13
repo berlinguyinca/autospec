@@ -25,6 +25,7 @@ pub enum ExternalCheck {
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
+    GroomingContract,
 }
 
 impl ExternalCheck {
@@ -49,6 +50,7 @@ impl ExternalCheck {
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
+            Self::GroomingContract => run_grooming_contract(id, required, root),
         }
     }
 }
@@ -356,15 +358,22 @@ fn run_release_verdict_script(id: &str, required: bool, root: &Path) -> CheckRes
 }
 
 fn run_bats_suite(id: &str, required: bool, root: &Path, suite: &str) -> CheckResult {
-    if !root.join(suite).is_file() {
-        return failure(id, required, &format!("{suite}: bats coverage missing"));
+    run_bats_suites(id, required, root, &[suite])
+}
+
+fn run_bats_suites(id: &str, required: bool, root: &Path, suites: &[&str]) -> CheckResult {
+    for suite in suites {
+        if !root.join(suite).is_file() {
+            return failure(id, required, &format!("{suite}: bats coverage missing"));
+        }
     }
     if !program_on_path("bats") {
         return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
     }
-    ToolCommand::new("bats", [suite])
-        .expect("Bats validation has a static suite path")
-        .execute_in(id, required, root)
+    let commands = suites.iter().map(|suite| {
+        ToolCommand::new("bats", [*suite]).expect("Bats validation has a static suite path")
+    });
+    run_commands(id, required, root, commands)
 }
 
 fn run_bats_directory(id: &str, required: bool, root: &Path, directory: &str) -> CheckResult {
@@ -729,6 +738,23 @@ fn run_autospec_fab_contract(id: &str, required: bool, root: &Path) -> CheckResu
         required,
         vec![bats, run_fab_container_dockerfile(id, required, root)],
     )
+}
+
+fn run_grooming_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SUITES: &[&str] = &[
+        "tests/autospec/list-groomable.bats",
+        "tests/autospec/promote-eligibility.bats",
+        "tests/autospec/groom-validate.bats",
+        "tests/autospec/groom-fill.bats",
+        "tests/autospec/apply-safety-review.bats",
+        "tests/autospec/groom-reconcile.bats",
+        "tests/autospec/autonomous-promote-open-issues.bats",
+        "tests/autospec/test_loop_grooming.bats",
+        "skills/autospec-shared/tests/grooming-config.bats",
+        "skills/autospec-shared/tests/unit/grooming-govern.bats",
+        "skills/autospec-shared/tests/unit/grooming-observe.bats",
+    ];
+    run_bats_suites(id, required, root, SUITES)
 }
 
 fn run_fab_container_dockerfile(id: &str, required: bool, root: &Path) -> CheckResult {

@@ -119,6 +119,16 @@ fn catalog_assigns_per_skill_model_contracts_to_rust_owners() {
             "{id} must have a direct Rust owner"
         );
     }
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_grooming_contract")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(ExternalCheck::GroomingContract)),
+        "check_grooming_contract must have a typed external owner"
+    );
 }
 
 #[test]
