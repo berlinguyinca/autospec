@@ -67,6 +67,9 @@ impl ValidationCheck {
             "check_fleet_gui_subcommand_lockstep" => {
                 CheckOwner::RustNative(StructuralCheck::FleetGuiSubcommandLockstep)
             }
+            "check_autospec_fleet_scripts" => {
+                CheckOwner::ExternalBatch(ExternalCheck::FleetScripts)
+            }
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)

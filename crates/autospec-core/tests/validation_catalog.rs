@@ -265,6 +265,20 @@ fn catalog_assigns_bounded_context_and_fleet_gui_contracts_to_rust_owners() {
 }
 
 #[test]
+fn catalog_assigns_fleet_scripts_to_a_typed_external_batch() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_autospec_fleet_scripts")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(ExternalCheck::FleetScripts))
+    );
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![

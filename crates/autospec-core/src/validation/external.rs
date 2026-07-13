@@ -8,6 +8,7 @@ use super::results::{output_digest, CheckResult};
 pub enum ExternalCheck {
     BashSyntax,
     DeriveTrioConsistency,
+    FleetScripts,
     Frontmatter,
     GapMinerContract,
 }
@@ -17,6 +18,7 @@ impl ExternalCheck {
         match self {
             Self::BashSyntax => run_bash_syntax(id, required, root),
             Self::DeriveTrioConsistency => run_derive_trio_consistency(id, required, root),
+            Self::FleetScripts => run_fleet_scripts(id, required, root),
             Self::Frontmatter => run_frontmatter(id, required, root),
             Self::GapMinerContract => run_gap_miner_contract(id, required, root),
         }
@@ -157,6 +159,19 @@ fn run_derive_trio_consistency(id: &str, required: bool, root: &Path) -> CheckRe
     }
 
     aggregate(id, required, results)
+}
+
+fn run_fleet_scripts(id: &str, required: bool, root: &Path) -> CheckResult {
+    let targets = ["fleet-lib.sh", "fleet-init.sh", "fleet-config-lint.sh"]
+        .into_iter()
+        .map(|name| format!("skills/autospec-fleet/scripts/{name}"))
+        .collect::<Vec<_>>();
+    for target in &targets {
+        if !root.join(target).is_file() {
+            return failure(id, required, &format!("{target}: required file missing"));
+        }
+    }
+    run_bash_syntax_targets(id, required, root, targets)
 }
 
 fn run_gap_miner_contract(id: &str, required: bool, root: &Path) -> CheckResult {
