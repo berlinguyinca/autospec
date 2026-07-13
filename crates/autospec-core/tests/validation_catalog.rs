@@ -100,3 +100,19 @@ fn catalog_assigns_codex_skills_install_to_a_rust_owner() {
         Some(&CheckOwner::RustNative(StructuralCheck::CodexSkillsInstall))
     );
 }
+
+#[test]
+fn catalog_assigns_shared_script_install_to_a_rust_owner() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_shared_script_install")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::RustNative(
+            StructuralCheck::SharedScriptInstall
+        ))
+    );
+}

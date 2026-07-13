@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -234,6 +235,49 @@ impl StructuralValidator {
         Ok(())
     }
 
+    pub fn validate_shared_script_install(root: &Path) -> Result<(), String> {
+        let skills_root = root.join("skills");
+        if !skills_root.is_dir() {
+            return Ok(());
+        }
+
+        let design_dir = skills_root.join("autospec-design");
+        if !referenced_shared_helpers(root, &design_dir)?.is_empty()
+            && !contains(&design_dir.join("install.sh"), ".autospec/scripts")
+        {
+            return Err(
+                "check_shared_script_install: autospec-design references a shared helper but does not install into ~/.autospec/scripts"
+                    .to_string(),
+            );
+        }
+
+        let mut installers = fs::read_dir(&skills_root)
+            .map_err(|error| format!("failed to read {}: {error}", skills_root.display()))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("install.sh"))
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        installers.sort();
+
+        for installer in installers {
+            let skill_dir = installer
+                .parent()
+                .expect("an install.sh path always has its skill directory");
+            if referenced_shared_helpers(root, skill_dir)?.is_empty()
+                || contains(&installer, ".autospec/scripts")
+            {
+                continue;
+            }
+
+            let display = display_path(root, &installer)?;
+            return Err(format!(
+                "{display} references shared runtime helper(s) but does not install into ~/.autospec/scripts"
+            ));
+        }
+
+        Ok(())
+    }
+
     fn validate_skill(root: &Path, skill_dir: &Path) -> Result<(), String> {
         let skill = skill_dir.join("SKILL.md");
         let codex = skill_dir.join("codex/prompt.md");
@@ -391,6 +435,89 @@ fn require_any_content<const N: usize>(
     } else {
         Err(failure)
     }
+}
+
+fn referenced_shared_helpers(root: &Path, skill_dir: &Path) -> Result<BTreeSet<String>, String> {
+    let mut helpers = BTreeSet::new();
+    if !skill_dir.is_dir() {
+        return Ok(helpers);
+    }
+
+    for path in files_under(skill_dir)? {
+        let Ok(document) = read(&path) else {
+            continue;
+        };
+        for helper in autospec_script_references(&document) {
+            if skill_dir.join("scripts").join(&helper).is_file() {
+                continue;
+            }
+            if root.join("scripts").join(&helper).is_file()
+                || root
+                    .join("skills/autospec-shared/scripts")
+                    .join(&helper)
+                    .is_file()
+            {
+                helpers.insert(helper);
+            }
+        }
+    }
+
+    Ok(helpers)
+}
+
+fn files_under(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut files = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| format!("failed to read {}: {error}", directory.display()))?
+            .filter_map(Result::ok)
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn autospec_script_references(document: &str) -> Vec<String> {
+    const PREFIX: &str = "${AUTOSPEC_SCRIPTS_DIR";
+    let mut references = Vec::new();
+    let mut remaining = document;
+
+    while let Some(start) = remaining.find(PREFIX) {
+        let after_prefix = &remaining[start + PREFIX.len()..];
+        let Some(end) = after_prefix.find('}') else {
+            break;
+        };
+        let after_variable = &after_prefix[end + 1..];
+        if let Some(path) = after_variable.strip_prefix('/') {
+            let helper = path
+                .chars()
+                .take_while(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+                })
+                .collect::<String>();
+            if !helper.is_empty() {
+                references.push(helper);
+            }
+        }
+        remaining = after_variable;
+    }
+
+    references
+}
+
+fn contains(path: &Path, expected: &str) -> bool {
+    path.is_file()
+        && read(path)
+            .map(|document| document.contains(expected))
+            .unwrap_or(false)
 }
 
 fn read(path: &Path) -> Result<String, String> {

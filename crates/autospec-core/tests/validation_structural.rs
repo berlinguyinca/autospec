@@ -105,3 +105,22 @@ fn codex_skills_install_contract_reports_a_missing_registry_destination() {
         "skills/autospec-design/install.sh missing Codex skills-dir install (skills/$SKILL_NAME/SKILL.md)"
     );
 }
+
+#[test]
+fn shared_script_install_contract_requires_only_shared_runtime_helpers() {
+    StructuralValidator::validate_shared_script_install(&fixture("shared-script-install"))
+        .expect("shared helper fixture passes");
+}
+
+#[test]
+fn shared_script_install_contract_reports_the_autospec_design_anchor() {
+    let failure = StructuralValidator::validate_shared_script_install(&fixture(
+        "shared-script-install-autospec-design-missing-runtime",
+    ))
+    .expect_err("autospec-design must install a referenced shared helper");
+
+    assert_eq!(
+        failure,
+        "check_shared_script_install: autospec-design references a shared helper but does not install into ~/.autospec/scripts"
+    );
+}
