@@ -175,6 +175,9 @@ impl ValidationCheck {
                 CheckOwner::ExternalBatch(ExternalCheck::WatchdogWorktreeGc)
             }
             "check_block_expansion" => CheckOwner::ExternalBatch(ExternalCheck::BlockExpansion),
+            "check_autospec_explore_implementer_base" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreImplementerBase)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

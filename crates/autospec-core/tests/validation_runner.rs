@@ -644,6 +644,26 @@ fn runner_reports_block_expansion_golden_mismatches_after_hashing() {
 }
 
 #[test]
+fn runner_checks_explore_implementer_base_with_direct_bats_coverage() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_autospec_explore_implementer_base",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreImplementerBase),
+    }]);
+
+    let report = ValidationRunner::run(
+        &catalog,
+        &validation_fixture("explore-implementer-base-contract"),
+    );
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!(report.results[0].spawn_count <= 1);
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

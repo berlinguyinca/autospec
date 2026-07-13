@@ -30,6 +30,7 @@ pub enum ExternalCheck {
     ClaimCasGuard,
     WatchdogWorktreeGc,
     BlockExpansion,
+    AutospecExploreImplementerBase,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -79,6 +80,9 @@ impl ExternalCheck {
             Self::ClaimCasGuard => run_claim_cas_guard(id, required, root),
             Self::WatchdogWorktreeGc => run_watchdog_worktree_gc(id, required, root),
             Self::BlockExpansion => run_block_expansion(id, required, root),
+            Self::AutospecExploreImplementerBase => {
+                run_autospec_explore_implementer_base(id, required, root)
+            }
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -1000,6 +1004,70 @@ fn block_expansion_result(
             + failure_message.as_ref().map_or(0, |message| message.len()),
         output_digest(&digest_input, &[]),
     )
+}
+
+fn run_autospec_explore_implementer_base(id: &str, required: bool, root: &Path) -> CheckResult {
+    const IMPLEMENTER: &str = "skills/autospec-run/prompts/phase4-implementer.md";
+    const TRIO: &[&str] = &[
+        "skills/autospec-run/SKILL.md",
+        "skills/autospec-run/codex/prompt.md",
+        "skills/autospec-run/opencode/agent.md",
+    ];
+    const SUITE: &str = "tests/explore/test_explore_implementer_base.bats";
+
+    let implementer = root.join(IMPLEMENTER);
+    if !implementer.is_file() {
+        return failure(
+            id,
+            required,
+            "skills/autospec-run/prompts/phase4-implementer.md: required file missing",
+        );
+    }
+    for (token, message) in [
+        (
+            ".autospec/explore-mode.json",
+            "missing .autospec/explore-mode.json reference",
+        ),
+        (
+            "EXPLORE_BASE",
+            "missing EXPLORE_BASE sandbox-base resolution",
+        ),
+        (
+            "gh pr create --base \"$EXPLORE_BASE\"",
+            "missing 'gh pr create --base \"$EXPLORE_BASE\"' snippet",
+        ),
+        (
+            "code_health:explore_main_merge_refused",
+            "missing code_health:explore_main_merge_refused refusal identifier",
+        ),
+    ] {
+        if !contains(&implementer, token) {
+            return failure(id, required, &format!("{IMPLEMENTER} {message}"));
+        }
+    }
+    for trio in TRIO {
+        let path = root.join(trio);
+        for (token, message) in [
+            (
+                ".autospec/explore-mode.json",
+                "missing .autospec/explore-mode.json reference (lockstep)",
+            ),
+            (
+                "phase4-implementer.md",
+                "missing reference to phase4-implementer.md (lockstep)",
+            ),
+            (
+                "code_health:explore_main_merge_refused",
+                "missing code_health:explore_main_merge_refused (lockstep)",
+            ),
+        ] {
+            if !contains(&path, token) {
+                return failure(id, required, &format!("{trio} {message}"));
+            }
+        }
+    }
+
+    run_bats_suites(id, required, root, &[SUITE])
 }
 
 fn run_autospec_sweep_area_contract(id: &str, required: bool, root: &Path) -> CheckResult {
