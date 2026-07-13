@@ -37,6 +37,7 @@ pub enum ExternalCheck {
     AutospecExploreStage2Intersect,
     ExploreTrioWorktreeAssert,
     AutospecExploreSpecFirst,
+    AutospecExploreQaGate,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -103,6 +104,7 @@ impl ExternalCheck {
             }
             Self::ExploreTrioWorktreeAssert => run_explore_trio_worktree_assert(id, required, root),
             Self::AutospecExploreSpecFirst => run_autospec_explore_spec_first(id, required, root),
+            Self::AutospecExploreQaGate => run_autospec_explore_qa_gate(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -1473,6 +1475,52 @@ fn run_autospec_explore_spec_first(id: &str, required: bool, root: &Path) -> Che
             contains(&orchestrator, "_explore_raw_file_round"),
             "scripts/autospec-explore.sh: must retain raw filing as the never-stall fallback (#1102)",
         ),
+    ]
+    .into_iter()
+    .find_map(|(valid, message)| (!valid).then_some(message));
+    if let Some(message) = static_failure {
+        return aggregate(id, required, vec![syntax, failure(id, required, message)]);
+    }
+
+    let bats = run_bats_suites(id, required, root, SUITES);
+    aggregate(id, required, vec![syntax, bats])
+}
+
+fn run_autospec_explore_qa_gate(id: &str, required: bool, root: &Path) -> CheckResult {
+    const ORCHESTRATOR: &str = "scripts/autospec-explore.sh";
+    const RUNNER: &str = "scripts/explore-qa-gate.sh";
+    const SUITES: &[&str] = &[
+        "tests/explore/test_explore_qa_gate_promotion.bats",
+        "tests/explore/test_explore_qa_gate_e2e.bats",
+    ];
+
+    let orchestrator = root.join(ORCHESTRATOR);
+    if !orchestrator.is_file() {
+        return failure(
+            id,
+            required,
+            "scripts/autospec-explore.sh: orchestrator missing",
+        );
+    }
+    let syntax = ToolCommand::new("bash", ["-n", ORCHESTRATOR])
+        .expect("Explore QA gate syntax validation is a direct argument vector")
+        .execute_in(id, required, root);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    let static_failure = [
+        (contains(&orchestrator, "--qa-gate)"), "scripts/autospec-explore.sh: must parse --qa-gate (#1114)"),
+        (contains(&orchestrator, "--qa-gate-pass-on-partial)"), "scripts/autospec-explore.sh: must parse --qa-gate-pass-on-partial (#1114)"),
+        (contains(&orchestrator, "explore-qa-gate.sh"), "scripts/autospec-explore.sh: must invoke scripts/explore-qa-gate.sh (#1114)"),
+        (contains(&orchestrator, "To merge sandbox into main"), "scripts/autospec-explore.sh: must retain the merge-instructions promotion block (#1114)"),
+        (contains(&orchestrator, "Promotion WITHHELD"), "scripts/autospec-explore.sh: must withhold the merge block on a blocking verdict (#1114)"),
+        (contains(&orchestrator, "sandbox QA:"), "scripts/autospec-explore.sh: must annotate the promotion output with the sandbox QA verdict (#1114)"),
+        (contains(&orchestrator, "no QA config"), "scripts/autospec-explore.sh: skipped verdict must carry the no-config annotation (#1114)"),
+        (contains(&orchestrator, "code_health:explore_qa_gate_failed"), "scripts/autospec-explore.sh: must emit code_health:explore_qa_gate_failed on a blocking verdict (#1114)"),
+        (contains(&root.join(RUNNER), "code_health:explore_qa_gate_skipped_no_config"), "scripts/explore-qa-gate.sh: must emit code_health:explore_qa_gate_skipped_no_config (#1113/#1114)"),
+        (contains(&orchestrator, "sandbox_head_sha"), "scripts/autospec-explore.sh: must warn when the sandbox advances past the gate sandbox_head_sha (#1114)"),
+        (has_same_line_ordered_tokens(&orchestrator, &["QA_GATE", "-eq 0"]), "scripts/autospec-explore.sh: must guard the default-off byte-unchanged promotion path (#1114)"),
+        (contains(&orchestrator, "qa_gate_verdict"), "scripts/autospec-explore.sh: must record the gate verdict in .autospec/explore-loop.json (#1114)"),
     ]
     .into_iter()
     .find_map(|(valid, message)| (!valid).then_some(message));

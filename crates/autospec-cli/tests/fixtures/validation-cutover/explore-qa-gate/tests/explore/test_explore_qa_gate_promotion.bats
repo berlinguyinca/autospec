@@ -1,0 +1,1 @@
+@test "promotion fixture" { true; }
