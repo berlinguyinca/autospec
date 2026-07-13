@@ -50,6 +50,7 @@ impl StructuralValidator {
                 Self::validate_fleet_gui_subcommand_lockstep(root)
             }
             StructuralCheck::AgentsMdGitHygiene => Self::validate_agents_md_git_hygiene(root),
+            StructuralCheck::PaletteSingleSource => Self::validate_palette_single_source(root),
             StructuralCheck::StopMode => Self::validate_stop_mode_sections(root),
             StructuralCheck::KeywordRouting => Self::validate_keyword_routing_section(root),
             StructuralCheck::GapRemediation => Self::validate_gap_remediation_sections(root),
@@ -763,6 +764,42 @@ impl StructuralValidator {
         Ok(())
     }
 
+    pub fn validate_palette_single_source(root: &Path) -> Result<(), String> {
+        let doc_style = root.join("skills/autospec-doc/scripts/doc-style.mjs");
+        let doc_style_test = root.join("skills/autospec-doc/tests/doc-style.test.mjs");
+        if !doc_style.is_file() {
+            return Err("skills/autospec-doc/scripts/doc-style.mjs: file missing".to_string());
+        }
+        let hexes = hex_values(&read(&doc_style)?);
+        if hexes.is_empty() {
+            return Err("skills/autospec-doc/scripts/doc-style.mjs: no hex values found — palette single-source check cannot run".to_string());
+        }
+
+        for path in files_under(root)? {
+            if !matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("mjs" | "sh")
+            ) || path == doc_style
+                || path == doc_style_test
+                || is_palette_excluded(root, &path)
+            {
+                continue;
+            }
+            let Ok(document) = read(&path) else {
+                continue;
+            };
+            let display = display_path(root, &path)?;
+            for hex in &hexes {
+                if document.contains(hex) {
+                    return Err(format!(
+                        "palette single-source violation: {display} contains palette hex {hex}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_policy_sections(root: &Path) -> Result<(), String> {
         Self::validate_stop_mode_sections(root)?;
         Self::validate_gap_remediation_sections(root)?;
@@ -1309,6 +1346,37 @@ fn has_ignored_flag_scan_component(root: &Path, path: &Path) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+fn is_palette_excluded(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .map(|relative| {
+            let components = relative.components().collect::<Vec<_>>();
+            components
+                .iter()
+                .any(|component| component.as_os_str() == ".git")
+                || components.windows(2).any(|components| {
+                    components[0].as_os_str() == ".claude"
+                        && components[1].as_os_str() == "worktrees"
+                })
+        })
+        .unwrap_or(false)
+}
+
+fn hex_values(document: &str) -> BTreeSet<String> {
+    let bytes = document.as_bytes();
+    let mut hexes = BTreeSet::new();
+
+    for index in 0..bytes.len().saturating_sub(6) {
+        if bytes[index] == b'#'
+            && bytes[index + 1..index + 7]
+                .iter()
+                .all(u8::is_ascii_hexdigit)
+        {
+            hexes.insert(document[index..index + 7].to_string());
+        }
+    }
+    hexes
 }
 
 fn sentinel_flags(document: &str) -> BTreeSet<String> {

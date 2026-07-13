@@ -325,6 +325,22 @@ fn catalog_assigns_agents_git_hygiene_to_a_rust_owner() {
 }
 
 #[test]
+fn catalog_assigns_palette_single_source_to_a_rust_owner() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_palette_single_source")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::RustNative(
+            StructuralCheck::PaletteSingleSource
+        ))
+    );
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![

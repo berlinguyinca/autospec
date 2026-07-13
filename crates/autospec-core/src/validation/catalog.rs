@@ -79,6 +79,9 @@ impl ValidationCheck {
             "check_agents_md_git_hygiene" => {
                 CheckOwner::RustNative(StructuralCheck::AgentsMdGitHygiene)
             }
+            "check_palette_single_source" => {
+                CheckOwner::RustNative(StructuralCheck::PaletteSingleSource)
+            }
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)
@@ -176,6 +179,7 @@ pub enum StructuralCheck {
     Phase1BoundedContext,
     FleetGuiSubcommandLockstep,
     AgentsMdGitHygiene,
+    PaletteSingleSource,
     StopMode,
     KeywordRouting,
     GapRemediation,

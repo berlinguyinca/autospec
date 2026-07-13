@@ -324,3 +324,19 @@ fn agents_git_hygiene_contract_requires_every_policy_anchor() {
         "AGENTS.md git hygiene section missing 'git worktree prune' cleanup rule (§D5)"
     );
 }
+
+#[test]
+fn palette_single_source_contract_rejects_hardcoded_palette_values_outside_doc_style() {
+    StructuralValidator::validate_palette_single_source(&fixture("palette-single-source"))
+        .expect("palette values are limited to the source of truth");
+
+    let failure = StructuralValidator::validate_palette_single_source(&fixture(
+        "palette-single-source-duplicate",
+    ))
+    .expect_err("a duplicate palette color in a shell file fails");
+
+    assert_eq!(
+        failure,
+        "palette single-source violation: scripts/duplicate.sh contains palette hex #aabbcc"
+    );
+}
