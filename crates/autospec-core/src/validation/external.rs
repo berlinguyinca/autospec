@@ -13,6 +13,7 @@ pub enum ExternalCheck {
     GapMinerContract,
     GeneratedYamlParse,
     AutospecSweepConfig,
+    AutospecSweepAreaContract,
     ReleaseVerdictScript,
     BatsSuite(&'static str),
     ReviewerReuseLens,
@@ -50,6 +51,7 @@ impl ExternalCheck {
             Self::GapMinerContract => run_gap_miner_contract(id, required, root),
             Self::GeneratedYamlParse => run_generated_yaml_parse(id, required, root),
             Self::AutospecSweepConfig => run_autospec_sweep_config(id, required, root),
+            Self::AutospecSweepAreaContract => run_autospec_sweep_area_contract(id, required, root),
             Self::ReleaseVerdictScript => run_release_verdict_script(id, required, root),
             Self::BatsSuite(suite) => run_bats_suite(id, required, root, suite),
             Self::ReviewerReuseLens => run_reviewer_reuse_lens(id, required, root),
@@ -699,6 +701,102 @@ fn run_autospec_upgrade_contract(id: &str, required: bool, root: &Path) -> Check
     }
 
     run_bats_directory(id, required, root, "skills/autospec-upgrade/tests")
+}
+
+fn run_autospec_sweep_area_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const AREAS_DIRECTORY: &str = "skills/autospec-sweep/areas";
+    const DISPATCHER: &str = "scripts/sweep-area-dispatch.sh";
+    const DEPENDENCY_RESEARCHER: &str = "scripts/explore-research/dependency-health.sh";
+    const SUITE: &str = "tests/sweep/test_sweep_area_dispatch.bats";
+
+    if !root.join(AREAS_DIRECTORY).is_dir() {
+        return failure(
+            id,
+            required,
+            "skills/autospec-sweep/areas: required directory missing",
+        );
+    }
+    for area in [
+        "spec-vs-code-drift",
+        "docs-drift",
+        "code-health",
+        "dependency-health",
+    ] {
+        let relative = format!("{AREAS_DIRECTORY}/{area}.md");
+        if !root.join(&relative).is_file() {
+            return failure(
+                id,
+                required,
+                &format!("{relative}: required area file missing"),
+            );
+        }
+    }
+
+    let mut results = Vec::new();
+    for (script, missing_message) in [
+        (DISPATCHER, "required dispatcher missing"),
+        (DEPENDENCY_RESEARCHER, "required researcher missing"),
+    ] {
+        if !root.join(script).is_file() {
+            results.push(failure(
+                id,
+                required,
+                &format!("{script}: {missing_message}"),
+            ));
+            return aggregate(id, required, results);
+        }
+
+        let syntax = ToolCommand::new("bash", ["-n", script])
+            .expect("sweep-area shell syntax validation is a direct argument vector")
+            .execute_in(id, required, root);
+        let failed = syntax.is_failure();
+        results.push(syntax);
+        if failed {
+            return aggregate(id, required, results);
+        }
+    }
+
+    for adapter in [
+        "skills/autospec-sweep/SKILL.md",
+        "skills/autospec-sweep/codex/prompt.md",
+        "skills/autospec-sweep/opencode/agent.md",
+    ] {
+        let path = root.join(adapter);
+        if !has_line_prefix(&path, "## Parallel area dispatch") {
+            results.push(failure(
+                id,
+                required,
+                &format!("{adapter}: missing '## Parallel area dispatch' section"),
+            ));
+            return aggregate(id, required, results);
+        }
+        for area in [
+            "spec-vs-code-drift",
+            "docs-drift",
+            "code-health",
+            "dependency-health",
+        ] {
+            if !contains(&path, area) {
+                results.push(failure(
+                    id,
+                    required,
+                    &format!("{adapter}: missing area reference '{area}'"),
+                ));
+                return aggregate(id, required, results);
+            }
+        }
+        if !contains(&path, "sweep-area-dispatch.sh") {
+            results.push(failure(
+                id,
+                required,
+                &format!("{adapter}: missing reference to scripts/sweep-area-dispatch.sh"),
+            ));
+            return aggregate(id, required, results);
+        }
+    }
+
+    results.push(run_bats_suite(id, required, root, SUITE));
+    aggregate(id, required, results)
 }
 
 fn run_skill_validator(id: &str, required: bool, root: &Path, skill: &str) -> CheckResult {

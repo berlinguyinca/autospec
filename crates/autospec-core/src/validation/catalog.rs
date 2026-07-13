@@ -76,6 +76,9 @@ impl ValidationCheck {
             "check_autospec_sweep_config_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecSweepConfig)
             }
+            "check_autospec_sweep_area_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecSweepAreaContract)
+            }
             "check_agents_md_git_hygiene" => {
                 CheckOwner::RustNative(StructuralCheck::AgentsMdGitHygiene)
             }

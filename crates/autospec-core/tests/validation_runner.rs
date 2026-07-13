@@ -487,6 +487,26 @@ fn runner_checks_upgrade_skill_tokens_before_its_bats_directory() {
 }
 
 #[test]
+fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_autospec_sweep_area_contract",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::AutospecSweepAreaContract),
+    }]);
+
+    let report = ValidationRunner::run(
+        &catalog,
+        &validation_fixture("autospec-sweep-area-contract"),
+    );
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!((2..=3).contains(&report.results[0].spawn_count));
+}
+
+#[test]
 fn runner_checks_fab_skill_tokens_before_its_bats_directory() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_fab_contract",

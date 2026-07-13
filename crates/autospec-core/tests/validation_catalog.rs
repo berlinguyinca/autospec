@@ -727,6 +727,18 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
         catalog
             .checks()
             .iter()
+            .find(|check| check.id == "check_autospec_sweep_area_contract")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(
+            ExternalCheck::AutospecSweepAreaContract
+        )),
+        "check_autospec_sweep_area_contract must have a typed external owner"
+    );
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
             .find(|check| check.id == "check_autospec_fab_contract")
             .map(|check| &check.owner),
         Some(&CheckOwner::ExternalBatch(
