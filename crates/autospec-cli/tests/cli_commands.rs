@@ -77,6 +77,169 @@ fn report_json_renders_a_release_summary_from_persisted_state() {
 }
 
 #[test]
+fn plan_json_inspects_an_input_package_in_stable_path_order() {
+    let package = temp_dir("autospec-plan");
+    let specs = package.join("specs");
+    std::fs::create_dir_all(&specs).expect("spec package directory");
+    std::fs::write(
+        specs.join("a-first.md"),
+        "# Alpha\n\n## Version\n\nV9\n\n## Objective\n\nInspect alpha.\n",
+    )
+    .expect("first spec");
+    std::fs::write(
+        specs.join("z-second.md"),
+        "# Beta\n\n## Version\n\nV8\n\n## Objective\n\nInspect beta.\n",
+    )
+    .expect("second spec");
+
+    let output = autospec()
+        .args(["plan", "--input", package.to_str().unwrap(), "--json"])
+        .output()
+        .expect("plan command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("\"command\":\"plan\""));
+    assert!(stdout.contains("\"spec_count\":2"));
+    let alpha = stdout.find("\"id\":\"v9-alpha\"").expect("alpha spec");
+    let beta = stdout.find("\"id\":\"v8-beta\"").expect("beta spec");
+    assert!(alpha < beta, "specs should retain sorted source-path order");
+}
+
+#[test]
+fn plan_text_lists_specs_from_an_input_package() {
+    let package = temp_dir("autospec-plan-text");
+    let specs = package.join("specs");
+    std::fs::create_dir_all(&specs).expect("spec package directory");
+    std::fs::write(
+        specs.join("one.md"),
+        "# Text Spec\n\n## Version\n\nV9\n\n## Objective\n\nRender text.\n",
+    )
+    .expect("spec");
+
+    let output = autospec()
+        .args(["plan", "--input", package.to_str().unwrap()])
+        .output()
+        .expect("plan command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("AutoSpec plan: 1 generated spec(s)"));
+    assert!(stdout.contains("v9-text-spec"));
+}
+
+#[test]
+fn plan_rejects_a_missing_input_package() {
+    let missing_package = temp_dir("autospec-plan-missing").join("missing-package");
+    let output = autospec()
+        .args(["plan", "--input", missing_package.to_str().unwrap()])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("package directory"));
+}
+
+#[test]
+fn plan_rejects_an_input_without_specs() {
+    let package = temp_dir("autospec-plan-empty");
+    let output = autospec()
+        .args(["plan", "--input", package.to_str().unwrap()])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("specs directory"));
+}
+
+#[test]
+fn plan_rejects_an_input_with_no_markdown_specs() {
+    let package = temp_dir("autospec-plan-no-specs");
+    std::fs::create_dir_all(package.join("specs")).expect("specs directory");
+
+    let output = autospec()
+        .args(["plan", "--input", package.to_str().unwrap()])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no generated specs"));
+}
+
+#[test]
+fn plan_rejects_a_malformed_generated_spec() {
+    let package = temp_dir("autospec-plan-malformed");
+    let specs = package.join("specs");
+    std::fs::create_dir_all(&specs).expect("specs directory");
+    std::fs::write(
+        specs.join("missing-objective.md"),
+        "# Incomplete\n\n## Version\n\nV9\n",
+    )
+    .expect("malformed spec");
+
+    let output = autospec()
+        .args(["plan", "--input", package.to_str().unwrap()])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not parse"));
+}
+
+#[test]
+fn plan_defaults_to_the_canonical_v62_package() {
+    let output = autospec()
+        .args(["plan", "--json"])
+        .current_dir(workspace_root())
+        .output()
+        .expect("plan command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"command\":\"plan\""));
+    assert!(stdout.contains("v62-final-platform"));
+    assert!(stdout.contains("\"spec_count\":14"));
+    assert!(stdout.contains("\"id\":\"v62-rust-core-workspace\""));
+}
+
+#[test]
+fn plan_rejects_an_input_flag_without_a_package_path() {
+    let output = autospec()
+        .args(["plan", "--input"])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--input requires a path"));
+}
+
+#[test]
+fn plan_rejects_an_option_as_an_input_path() {
+    let output = autospec()
+        .args(["plan", "--input", "--json"])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--input requires a path"));
+}
+
+#[test]
+fn plan_rejects_an_unknown_option() {
+    let output = autospec()
+        .args(["plan", "--not-an-option"])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown autospec plan option"));
+}
+
+#[test]
 fn autonomous_start_dry_run_includes_monitor_and_supervisor_companions() {
     let output = autospec()
         .args([
@@ -1427,6 +1590,7 @@ fn cli_commands_json_modes_emit_json() {
     ] {
         let output = autospec()
             .args([command, "--json"])
+            .current_dir(workspace_root())
             .output()
             .unwrap_or_else(|error| panic!("{command} runs: {error}"));
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1534,6 +1698,13 @@ fn temp_dir(prefix: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     dir
+}
+
+fn workspace_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root")
 }
 
 fn cleanup_pids(scope: &std::path::Path) {
