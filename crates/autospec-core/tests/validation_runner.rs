@@ -11,20 +11,19 @@ fn tool_commands_reject_shell_execution_shapes() {
     assert!(ToolCommand::new("bash", ["--command", "echo unsafe"]).is_err());
     assert!(ToolCommand::new("bash", ["--command=echo unsafe"]).is_err());
     assert!(ToolCommand::new("fish", ["-c", "echo unsafe"]).is_err());
-    assert!(ToolCommand::new("env", ["bash", "-c", "echo unsafe"]).is_err());
-    assert!(ToolCommand::new("env", ["--", "bash", "-c", "echo unsafe"]).is_err());
-    assert!(
-        ToolCommand::new("env", ["VALIDATION_MODE=safe", "bash", "-c", "echo unsafe"],).is_err()
-    );
-    assert!(ToolCommand::new("env", ["-i", "bash", "-c", "echo unsafe"]).is_err());
-    assert!(ToolCommand::new("env", ["-a", "safe-argv0", "bash", "-c", "echo unsafe"],).is_err());
-    assert!(ToolCommand::new("env", ["-ia", "safe-argv0", "bash", "-c", "echo unsafe"],).is_err());
 }
 
 #[test]
 fn tool_commands_allow_non_executing_shell_flags() {
     assert!(ToolCommand::new("bash", ["-n", "scripts/validate.sh"]).is_ok());
-    assert!(ToolCommand::new("env", ["CARGO_TERM_COLOR=never", "cargo", "--version"]).is_ok());
+}
+
+#[test]
+fn tool_commands_reject_launcher_executables() {
+    assert!(ToolCommand::new("env", ["bash", "-c", "echo unsafe"]).is_err());
+    assert!(ToolCommand::new("env", ["-a", "ARG", "bash", "-c", "echo unsafe"]).is_err());
+    assert!(ToolCommand::new("env", ["-ia", "ARG", "bash", "-c", "echo unsafe"]).is_err());
+    assert!(ToolCommand::new("env", ["CARGO_TERM_COLOR=never", "cargo", "--version"]).is_err());
 }
 
 #[test]

@@ -24,6 +24,9 @@ impl ToolCommand {
         if program.as_os_str().is_empty() {
             return Err("validation tool command program must not be empty".to_string());
         }
+        if is_launcher_executable(&program) {
+            return Err("validation tool commands must not use launcher executables".to_string());
+        }
         if invokes_shell_command_string(&program, &args) {
             return Err(
                 "validation tool commands must not execute shell command strings".to_string(),
@@ -80,12 +83,11 @@ impl ToolCommand {
 }
 
 fn invokes_shell_command_string(program: &Path, args: &[OsString]) -> bool {
-    (is_shell_interpreter(program)
+    is_shell_interpreter(program)
         && args
             .iter()
             .filter_map(|argument| argument.to_str())
-            .any(is_shell_command_argument))
-        || (is_environment_launcher(program) && environment_launcher_invokes_shell(args))
+            .any(is_shell_command_argument)
 }
 
 fn is_shell_interpreter(program: &Path) -> bool {
@@ -95,77 +97,8 @@ fn is_shell_interpreter(program: &Path) -> bool {
     )
 }
 
-fn is_environment_launcher(program: &Path) -> bool {
+fn is_launcher_executable(program: &Path) -> bool {
     program.file_name().and_then(OsStr::to_str) == Some("env")
-}
-
-fn environment_launcher_invokes_shell(args: &[OsString]) -> bool {
-    match environment_launcher_command(args) {
-        EnvironmentLauncherCommand::Command(program, command_args) => {
-            invokes_shell_command_string(Path::new(program), command_args)
-        }
-        EnvironmentLauncherCommand::SplitString => true,
-        EnvironmentLauncherCommand::None => false,
-    }
-}
-
-enum EnvironmentLauncherCommand<'a> {
-    Command(&'a OsStr, &'a [OsString]),
-    SplitString,
-    None,
-}
-
-fn environment_launcher_command(args: &[OsString]) -> EnvironmentLauncherCommand<'_> {
-    let mut index = 0;
-
-    while let Some(argument) = args.get(index) {
-        let Some(argument_text) = argument.to_str() else {
-            return EnvironmentLauncherCommand::None;
-        };
-
-        if argument_text == "--" {
-            return args
-                .get(index + 1)
-                .map(|program| {
-                    EnvironmentLauncherCommand::Command(program.as_os_str(), &args[index + 2..])
-                })
-                .unwrap_or(EnvironmentLauncherCommand::None);
-        }
-        if is_environment_split_string_option(argument_text) {
-            return EnvironmentLauncherCommand::SplitString;
-        }
-        if argument_text.starts_with('-') {
-            index += usize::from(environment_option_consumes_next_argument(argument_text));
-            index += 1;
-            continue;
-        }
-        if argument_text.contains('=') {
-            index += 1;
-            continue;
-        }
-        return EnvironmentLauncherCommand::Command(argument.as_os_str(), &args[index + 1..]);
-    }
-
-    EnvironmentLauncherCommand::None
-}
-
-fn is_environment_split_string_option(argument: &str) -> bool {
-    argument == "-S"
-        || argument.starts_with("-S")
-        || argument == "--split-string"
-        || argument.starts_with("--split-string=")
-        || argument
-            .strip_prefix('-')
-            .is_some_and(|options| !options.starts_with('-') && options.contains('S'))
-}
-
-fn environment_option_consumes_next_argument(argument: &str) -> bool {
-    matches!(
-        argument,
-        "-a" | "-C" | "-P" | "-u" | "--argv0" | "--chdir" | "--unset"
-    ) || argument.strip_prefix('-').is_some_and(|options| {
-        !options.starts_with('-') && matches!(options.chars().last(), Some('a' | 'C' | 'P' | 'u'))
-    })
 }
 
 fn is_shell_command_argument(argument: &str) -> bool {
