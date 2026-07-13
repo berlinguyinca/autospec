@@ -31,6 +31,55 @@ impl StructuralValidator {
         Self::validate_enforcement_defaults_sections(root)
     }
 
+    pub fn validate_self_update_sections(root: &Path) -> Result<(), String> {
+        Self::validate_trio_self_update_sections(root)?;
+        Self::validate_duo_self_update_sections(root)
+    }
+
+    pub fn validate_trio_self_update_sections(root: &Path) -> Result<(), String> {
+        Self::validate_self_update_sections_by_kind(root, true)
+    }
+
+    pub fn validate_duo_self_update_sections(root: &Path) -> Result<(), String> {
+        Self::validate_self_update_sections_by_kind(root, false)
+    }
+
+    fn validate_self_update_sections_by_kind(root: &Path, expect_trio: bool) -> Result<(), String> {
+        let skills_root = root.join("skills");
+        if !skills_root.exists() {
+            return Ok(());
+        }
+
+        let mut skill_dirs = fs::read_dir(&skills_root)
+            .map_err(|error| format!("failed to read {}: {error}", skills_root.display()))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        skill_dirs.sort();
+
+        for skill_dir in skill_dirs {
+            let skill = skill_dir.join("SKILL.md");
+            let codex = skill_dir.join("codex/prompt.md");
+            if !skill.is_file() || !codex.is_file() {
+                continue;
+            }
+
+            let name = skill_dir
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .ok_or_else(|| format!("invalid skill directory {}", skill_dir.display()))?;
+            let opencode = skill_dir.join("opencode/agent.md");
+            if opencode.is_file() && expect_trio {
+                Self::validate_trio_self_update(&name, &skill_dir)?;
+            } else if !opencode.is_file() && !expect_trio {
+                Self::validate_duo_self_update(&name, &skill_dir)?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn validate_stop_mode_sections(root: &Path) -> Result<(), String> {
         for skill in ["autospec", "autospec-run", "autospec-stop"] {
             require_section(root, skill, "## Stop mode")?;
@@ -98,6 +147,50 @@ impl StructuralValidator {
 
         Ok(())
     }
+
+    fn validate_trio_self_update(name: &str, skill_dir: &Path) -> Result<(), String> {
+        for member in ["SKILL.md", "opencode/agent.md", "codex/prompt.md"] {
+            let path = skill_dir.join(member);
+            let has_self_update = path.is_file()
+                && read(&path).map(|document| {
+                    document.lines().any(|line| {
+                        line.starts_with("## Self-update mode")
+                            || line.contains("autospec-block:startup-self-update")
+                    })
+                })?;
+            if !has_self_update {
+                return Err(format!(
+                    "{name}: {member} missing '## Self-update mode' section or autospec-block:startup-self-update marker"
+                ));
+            }
+        }
+
+        require_update_flag(name, &skill_dir.join("install.sh"))
+    }
+
+    fn validate_duo_self_update(name: &str, skill_dir: &Path) -> Result<(), String> {
+        for member in ["SKILL.md", "codex/prompt.md"] {
+            let path = skill_dir.join(member);
+            let has_self_update = path.is_file()
+                && read(&path).map(|document| {
+                    document.lines().any(|line| {
+                        line.starts_with("## Self-update")
+                            || line.contains("autospec-block:startup-self-update")
+                    })
+                })?;
+            if !has_self_update {
+                return Err(format!(
+                    "{name}: {member} missing '## Self-update' section or autospec-block:startup-self-update marker"
+                ));
+            }
+        }
+
+        let installer = skill_dir.join("install.sh");
+        if installer.is_file() {
+            require_update_flag(name, &installer)?;
+        }
+        Ok(())
+    }
 }
 
 fn require_section(root: &Path, skill: &str, section: &str) -> Result<(), String> {
@@ -117,6 +210,16 @@ fn require_section(root: &Path, skill: &str, section: &str) -> Result<(), String
         }
     }
     Ok(())
+}
+
+fn require_update_flag(name: &str, installer: &Path) -> Result<(), String> {
+    let has_update_flag =
+        installer.is_file() && read(installer).map(|document| document.contains("--update"))?;
+    if has_update_flag {
+        Ok(())
+    } else {
+        Err(format!("{name}: install.sh missing --update flag handling"))
+    }
 }
 
 fn read(path: &Path) -> Result<String, String> {

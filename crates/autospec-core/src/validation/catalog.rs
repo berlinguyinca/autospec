@@ -27,6 +27,8 @@ impl ValidationCheck {
             "check_enforcement_defaults_section" => {
                 CheckOwner::RustNative(StructuralCheck::EnforcementDefaults)
             }
+            "check_self_update" => CheckOwner::RustNative(StructuralCheck::SelfUpdateTrio),
+            "check_self_update_duo" => CheckOwner::RustNative(StructuralCheck::SelfUpdateDuo),
             _ => CheckOwner::RustNative(StructuralCheck::CatalogSlot),
         };
         Self {
@@ -60,6 +62,8 @@ pub enum StructuralCheck {
     GapRemediation,
     ReviewRemediation,
     EnforcementDefaults,
+    SelfUpdateTrio,
+    SelfUpdateDuo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,4 +1,4 @@
-use autospec_core::validation::{ValidationCatalog, ValidationCheck};
+use autospec_core::validation::{CheckOwner, StructuralCheck, ValidationCatalog, ValidationCheck};
 
 const FROZEN_CATALOG: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -41,4 +41,26 @@ fn catalog_rejects_empty_and_duplicate_ids() {
 
     assert!(empty.validate().is_err());
     assert!(duplicate.validate().is_err());
+}
+
+#[test]
+fn catalog_assigns_self_update_gates_to_rust_owners() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_self_update")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::RustNative(StructuralCheck::SelfUpdateTrio))
+    );
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_self_update_duo")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::RustNative(StructuralCheck::SelfUpdateDuo))
+    );
 }

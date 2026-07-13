@@ -45,3 +45,25 @@ fn named_skill_policy_sections_report_the_missing_member_heading() {
         "skills/autospec-run/codex/prompt.md: missing '## Stop mode' section"
     );
 }
+
+#[test]
+fn self_update_sections_accept_trio_and_duo_forms() {
+    StructuralValidator::validate_self_update_sections(&fixture("self-update"))
+        .expect("trio and duo self-update fixtures pass");
+    StructuralValidator::validate_trio_self_update_sections(&fixture("self-update"))
+        .expect("trio self-update fixture passes independently");
+    StructuralValidator::validate_duo_self_update_sections(&fixture("self-update"))
+        .expect("duo self-update fixture passes independently");
+}
+
+#[test]
+fn self_update_sections_report_a_missing_update_flag() {
+    let failure =
+        StructuralValidator::validate_self_update_sections(&fixture("self-update-missing-flag"))
+            .expect_err("trio install flag is required");
+
+    assert_eq!(
+        failure,
+        "autospec: install.sh missing --update flag handling"
+    );
+}
