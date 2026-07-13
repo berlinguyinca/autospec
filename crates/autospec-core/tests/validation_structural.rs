@@ -28,3 +28,20 @@ fn missing_trio_required_file_reports_the_skill_and_file() {
 
     assert_eq!(failure, "skills/trio: missing required file uninstall.sh");
 }
+
+#[test]
+fn named_skill_policy_sections_pass_when_every_member_has_the_required_heading() {
+    StructuralValidator::validate_policy_sections(&fixture("policy-sections"))
+        .expect("policy section fixture passes");
+}
+
+#[test]
+fn named_skill_policy_sections_report_the_missing_member_heading() {
+    let failure = StructuralValidator::validate_policy_sections(&fixture("missing-policy-section"))
+        .expect_err("missing policy section fails");
+
+    assert_eq!(
+        failure,
+        "skills/autospec-run/codex/prompt.md: missing '## Stop mode' section"
+    );
+}

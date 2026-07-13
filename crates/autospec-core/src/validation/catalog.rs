@@ -17,6 +17,16 @@ impl ValidationCheck {
             "check_lockstep" => CheckOwner::RustNative(StructuralCheck::TrioLockstep),
             "check_lockstep_duo" => CheckOwner::RustNative(StructuralCheck::DuoLockstep),
             "check_required_files" => CheckOwner::RustNative(StructuralCheck::RequiredTrioFiles),
+            "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
+            "check_gap_remediation_section" => {
+                CheckOwner::RustNative(StructuralCheck::GapRemediation)
+            }
+            "check_review_remediation_section" => {
+                CheckOwner::RustNative(StructuralCheck::ReviewRemediation)
+            }
+            "check_enforcement_defaults_section" => {
+                CheckOwner::RustNative(StructuralCheck::EnforcementDefaults)
+            }
             _ => CheckOwner::RustNative(StructuralCheck::CatalogSlot),
         };
         Self {
@@ -46,6 +56,10 @@ pub enum StructuralCheck {
     TrioLockstep,
     DuoLockstep,
     RequiredTrioFiles,
+    StopMode,
+    GapRemediation,
+    ReviewRemediation,
+    EnforcementDefaults,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

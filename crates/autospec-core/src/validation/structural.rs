@@ -24,6 +24,36 @@ impl StructuralValidator {
         Ok(())
     }
 
+    pub fn validate_policy_sections(root: &Path) -> Result<(), String> {
+        Self::validate_stop_mode_sections(root)?;
+        Self::validate_gap_remediation_sections(root)?;
+        Self::validate_review_remediation_sections(root)?;
+        Self::validate_enforcement_defaults_sections(root)
+    }
+
+    pub fn validate_stop_mode_sections(root: &Path) -> Result<(), String> {
+        for skill in ["autospec", "autospec-run", "autospec-stop"] {
+            require_section(root, skill, "## Stop mode")?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_gap_remediation_sections(root: &Path) -> Result<(), String> {
+        require_section(
+            root,
+            "autospec-run",
+            "## Phase 5.5 — End-of-run gap remediation",
+        )
+    }
+
+    pub fn validate_review_remediation_sections(root: &Path) -> Result<(), String> {
+        require_section(root, "autospec-review", "## Remediation mode")
+    }
+
+    pub fn validate_enforcement_defaults_sections(root: &Path) -> Result<(), String> {
+        require_section(root, "autospec-secaudit", "## Enforcement defaults")
+    }
+
     fn validate_skill(root: &Path, skill_dir: &Path) -> Result<(), String> {
         let skill = skill_dir.join("SKILL.md");
         let codex = skill_dir.join("codex/prompt.md");
@@ -68,6 +98,25 @@ impl StructuralValidator {
 
         Ok(())
     }
+}
+
+fn require_section(root: &Path, skill: &str, section: &str) -> Result<(), String> {
+    let skill_dir = root.join("skills").join(skill);
+    if !skill_dir.is_dir() {
+        return Ok(());
+    }
+
+    for member in ["SKILL.md", "opencode/agent.md", "codex/prompt.md"] {
+        let path = skill_dir.join(member);
+        let has_section = path.is_file()
+            && read(&path).map(|document| document.lines().any(|line| line == section))?;
+        if !has_section {
+            return Err(format!(
+                "skills/{skill}/{member}: missing '{section}' section"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn read(path: &Path) -> Result<String, String> {
