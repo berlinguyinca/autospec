@@ -21,6 +21,7 @@ pub enum ExternalCheck {
     RunSummaryContract,
     DbModuleInstall,
     BatsDirectory(&'static str),
+    AutospecUpgradeContract,
 }
 
 impl ExternalCheck {
@@ -41,6 +42,7 @@ impl ExternalCheck {
             Self::RunSummaryContract => run_run_summary_contract(id, required, root),
             Self::DbModuleInstall => run_db_module_install(id, required, root),
             Self::BatsDirectory(directory) => run_bats_directory(id, required, root, directory),
+            Self::AutospecUpgradeContract => run_autospec_upgrade_contract(id, required, root),
         }
     }
 }
@@ -559,6 +561,42 @@ fn run_db_module_install(id: &str, required: bool, root: &Path) -> CheckResult {
         );
     }
     run_bats_suite(id, required, root, SUITE)
+}
+
+fn run_autospec_upgrade_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SKILL: &str = "skills/autospec-upgrade";
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let relative = format!("{SKILL}/{member}");
+        let path = root.join(&relative);
+        if !path.is_file() {
+            return failure(
+                id,
+                required,
+                &format!("{relative}: required trio file missing (issue #1211)"),
+            );
+        }
+
+        let document = fs::read_to_string(&path)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        for token in [
+            "detect",
+            "behavior-lock",
+            "mutation",
+            "codemod",
+            "orchestrat",
+        ] {
+            if !document.contains(token) {
+                return failure(
+                    id,
+                    required,
+                    &format!("{relative}: missing upgrade-pipeline token `{token}` (issue #1211)"),
+                );
+            }
+        }
+    }
+
+    run_bats_directory(id, required, root, "skills/autospec-upgrade/tests")
 }
 
 fn trio_directories(root: &Path) -> Vec<PathBuf> {

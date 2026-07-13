@@ -623,6 +623,18 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
             "{id} must have a typed Bats directory owner"
         );
     }
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_autospec_upgrade_contract")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(
+            ExternalCheck::AutospecUpgradeContract
+        )),
+        "check_autospec_upgrade_contract must have a typed external owner"
+    );
 }
 
 #[test]

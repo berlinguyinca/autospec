@@ -152,6 +152,9 @@ impl ValidationCheck {
             "check_reuse_lens_suite" => {
                 CheckOwner::ExternalBatch(ExternalCheck::BatsDirectory("tests/reuse-lens"))
             }
+            "check_autospec_upgrade_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecUpgradeContract)
+            }
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }
