@@ -14,6 +14,9 @@ pub enum ExternalCheck {
     GeneratedYamlParse,
     AutospecSweepConfig,
     AutospecSweepAreaContract,
+    AutospecQaClusterContract,
+    AutospecQaBugClassContract,
+    LoopHandoffHarnessAwareness,
     ReleaseVerdictScript,
     BatsSuite(&'static str),
     ReviewerReuseLens,
@@ -53,6 +56,13 @@ impl ExternalCheck {
             Self::GeneratedYamlParse => run_generated_yaml_parse(id, required, root),
             Self::AutospecSweepConfig => run_autospec_sweep_config(id, required, root),
             Self::AutospecSweepAreaContract => run_autospec_sweep_area_contract(id, required, root),
+            Self::AutospecQaClusterContract => run_autospec_qa_cluster_contract(id, required, root),
+            Self::AutospecQaBugClassContract => {
+                run_autospec_qa_bug_class_contract(id, required, root)
+            }
+            Self::LoopHandoffHarnessAwareness => {
+                run_loop_handoff_harness_awareness(id, required, root)
+            }
             Self::ReleaseVerdictScript => run_release_verdict_script(id, required, root),
             Self::BatsSuite(suite) => run_bats_suite(id, required, root, suite),
             Self::ReviewerReuseLens => run_reviewer_reuse_lens(id, required, root),
@@ -848,6 +858,202 @@ fn run_autospec_sweep_area_contract(id: &str, required: bool, root: &Path) -> Ch
 
     results.push(run_bats_suite(id, required, root, SUITE));
     aggregate(id, required, results)
+}
+
+fn run_autospec_qa_cluster_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const CLUSTERS_DIRECTORY: &str = "skills/autospec-qa/clusters";
+    const DISPATCHER: &str = "scripts/qa-cluster-dispatch.sh";
+    const TRIO: &[&str] = &[
+        "skills/autospec-qa/SKILL.md",
+        "skills/autospec-qa/codex/prompt.md",
+        "skills/autospec-qa/opencode/agent.md",
+    ];
+    const SUITE: &str = "tests/qa/test_qa_cluster_dispatch.bats";
+
+    if !root.join(CLUSTERS_DIRECTORY).is_dir() {
+        return failure(
+            id,
+            required,
+            "skills/autospec-qa/clusters: missing cluster directory (issue #730)",
+        );
+    }
+    for cluster in [
+        "spec-traceability",
+        "functional-coverage",
+        "backend-integration",
+        "reliability-contract",
+        "legacy-and-cleanup",
+        "benchmark-and-outsourcing",
+        "accessibility-and-responsive",
+        "production-incidents",
+    ] {
+        let path = format!("{CLUSTERS_DIRECTORY}/{cluster}.md");
+        if !root.join(&path).is_file() {
+            return failure(
+                id,
+                required,
+                &format!("{path}: missing cluster file (issue #730)"),
+            );
+        }
+    }
+
+    let dispatcher = root.join(DISPATCHER);
+    if !dispatcher.is_file() {
+        return failure(
+            id,
+            required,
+            "scripts/qa-cluster-dispatch.sh: missing (issue #730)",
+        );
+    }
+    if !is_executable(&dispatcher) {
+        return failure(
+            id,
+            required,
+            "scripts/qa-cluster-dispatch.sh: not executable (issue #730)",
+        );
+    }
+    for trio in TRIO {
+        let path = root.join(trio);
+        if !contains(&path, "qa-cluster-dispatch.sh") {
+            return failure(
+                id,
+                required,
+                &format!("{trio}: missing reference to qa-cluster-dispatch.sh (issue #730)"),
+            );
+        }
+        if !contains(&path, "skills/autospec-qa/clusters/") {
+            return failure(
+                id,
+                required,
+                &format!("{trio}: missing reference to clusters/ directory (issue #730)"),
+            );
+        }
+    }
+    if !root.join(SUITE).is_file() {
+        return failure(
+            id,
+            required,
+            "tests/qa/test_qa_cluster_dispatch.bats: missing (issue #730)",
+        );
+    }
+
+    ToolCommand::new("bash", ["-n", DISPATCHER])
+        .expect("QA cluster dispatcher syntax validation is a direct argument vector")
+        .execute_in(id, required, root)
+}
+
+fn run_autospec_qa_bug_class_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const HELPER: &str = "scripts/qa-bug-class-sweep.sh";
+    const HEAL_LOOP: &str = "scripts/qa-heal-loop.sh";
+    const TRIO: &[&str] = &[
+        "skills/autospec-qa/SKILL.md",
+        "skills/autospec-qa/codex/prompt.md",
+        "skills/autospec-qa/opencode/agent.md",
+    ];
+    const SUITE: &str = "tests/qa/test_qa_bug_class_sweep.bats";
+
+    let helper = root.join(HELPER);
+    if !helper.is_file() {
+        return failure(
+            id,
+            required,
+            "scripts/qa-bug-class-sweep.sh: missing (issue #737)",
+        );
+    }
+    if !is_executable(&helper) {
+        return failure(
+            id,
+            required,
+            "scripts/qa-bug-class-sweep.sh: not executable (issue #737)",
+        );
+    }
+    for trio in TRIO {
+        let path = root.join(trio);
+        for (token, description) in [
+            (
+                "qa-bug-class-sweep.sh",
+                "reference to qa-bug-class-sweep.sh",
+            ),
+            ("parent_fingerprint", "parent_fingerprint contract"),
+            (
+                "AUTOSPEC_QA_BUG_CLASS_MIN_CONFIDENCE",
+                "confidence-threshold env var",
+            ),
+        ] {
+            if !contains(&path, token) {
+                return failure(
+                    id,
+                    required,
+                    &format!("{trio}: missing {description} (issue #737)"),
+                );
+            }
+        }
+    }
+    if !contains(&root.join(HEAL_LOOP), "parent_fingerprint") {
+        return failure(
+            id,
+            required,
+            "scripts/qa-heal-loop.sh: must group by parent_fingerprint (issue #737)",
+        );
+    }
+    if !root.join(SUITE).is_file() {
+        return failure(
+            id,
+            required,
+            "tests/qa/test_qa_bug_class_sweep.bats: missing (issue #737)",
+        );
+    }
+
+    ToolCommand::new("bash", ["-n", HELPER])
+        .expect("QA bug-class helper syntax validation is a direct argument vector")
+        .execute_in(id, required, root)
+}
+
+fn run_loop_handoff_harness_awareness(id: &str, required: bool, root: &Path) -> CheckResult {
+    const HELPER: &str = "scripts/lib/autospec-harness-detect.sh";
+    const CONSUMERS: &[&str] = &[
+        "scripts/refine-prompt.sh",
+        "scripts/autospec-continue.sh",
+        "scripts/qa-heal-loop.sh",
+        "scripts/refine-prompt-lens-llm.sh",
+    ];
+    const SUITES: &[&str] = &[
+        "tests/lib/test_autospec_harness_detect.bats",
+        "tests/refine/test_refine_loop_codex.bats",
+    ];
+
+    let helper = root.join(HELPER);
+    if !helper.is_file() {
+        return failure(
+            id,
+            required,
+            "scripts/lib/autospec-harness-detect.sh: missing — required for harness-aware loop handoff",
+        );
+    }
+    for consumer in CONSUMERS {
+        let path = root.join(consumer);
+        if !path.is_file() {
+            return failure(id, required, &format!("{consumer}: missing"));
+        }
+        if !contains(&path, "lib/autospec-harness-detect.sh") {
+            return failure(
+                id,
+                required,
+                &format!(
+                    "{consumer}: must source scripts/lib/autospec-harness-detect.sh (issue #723)"
+                ),
+            );
+        }
+    }
+    for suite in SUITES {
+        if !root.join(suite).is_file() {
+            return failure(id, required, &format!("{suite}: missing (issue #723)"));
+        }
+    }
+
+    ToolCommand::new("bash", ["-n", HELPER])
+        .expect("harness detector syntax validation is a direct argument vector")
+        .execute_in(id, required, root)
 }
 
 fn run_skill_validator(id: &str, required: bool, root: &Path, skill: &str) -> CheckResult {

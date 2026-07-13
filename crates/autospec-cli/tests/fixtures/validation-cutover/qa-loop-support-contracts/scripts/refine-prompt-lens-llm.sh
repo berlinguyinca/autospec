@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/lib/autospec-harness-detect.sh"

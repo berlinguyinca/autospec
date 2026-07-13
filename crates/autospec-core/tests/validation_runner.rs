@@ -504,6 +504,44 @@ fn runner_checks_claim_guard_script_and_required_bats_suites_directly() {
 }
 
 #[test]
+fn runner_checks_qa_and_loop_support_contracts_without_the_shell_harness() {
+    let catalog = ValidationCatalog::from_checks(vec![
+        ValidationCheck {
+            id: "check_autospec_qa_cluster_contract",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::AutospecQaClusterContract),
+        },
+        ValidationCheck {
+            id: "check_autospec_qa_bug_class_contract",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::AutospecQaBugClassContract),
+        },
+        ValidationCheck {
+            id: "check_loop_handoff_harness_awareness",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::LoopHandoffHarnessAwareness),
+        },
+    ]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("qa-loop-support-contracts"));
+
+    assert!(report
+        .results
+        .iter()
+        .all(|result| result.exit_code == Some(0)));
+    assert!(report.results.iter().all(|result| result.spawn_count == 1));
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

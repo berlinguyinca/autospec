@@ -79,6 +79,15 @@ impl ValidationCheck {
             "check_autospec_sweep_area_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecSweepAreaContract)
             }
+            "check_autospec_qa_cluster_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecQaClusterContract)
+            }
+            "check_autospec_qa_bug_class_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecQaBugClassContract)
+            }
+            "check_loop_handoff_harness_awareness" => {
+                CheckOwner::ExternalBatch(ExternalCheck::LoopHandoffHarnessAwareness)
+            }
             "check_agents_md_git_hygiene" => {
                 CheckOwner::RustNative(StructuralCheck::AgentsMdGitHygiene)
             }
