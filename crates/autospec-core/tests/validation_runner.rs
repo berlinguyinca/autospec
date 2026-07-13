@@ -711,6 +711,23 @@ fn runner_keeps_token_baseline_freshness_as_a_warn_only_check() {
     assert_eq!(report.results[0].spawn_count, 1);
 }
 
+#[test]
+fn runner_owns_the_legacy_unreachable_architecture_fitness_contract() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_architecture_fitness_engine",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::LegacyUnreachable,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::ArchitectureFitnessEngine),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("architecture-fitness"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 3);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")

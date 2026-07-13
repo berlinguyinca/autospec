@@ -190,6 +190,10 @@ fn catalog_assigns_per_skill_model_contracts_to_rust_owners() {
             "check_token_baseline_fresh",
             ExternalCheck::TokenBaselineFresh,
         ),
+        (
+            "check_architecture_fitness_engine",
+            ExternalCheck::ArchitectureFitnessEngine,
+        ),
     ] {
         assert_eq!(
             catalog

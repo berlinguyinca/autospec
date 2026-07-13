@@ -193,6 +193,9 @@ impl ValidationCheck {
             "check_token_baseline_fresh" => {
                 CheckOwner::ExternalBatch(ExternalCheck::TokenBaselineFresh)
             }
+            "check_architecture_fitness_engine" => {
+                CheckOwner::ExternalBatch(ExternalCheck::ArchitectureFitnessEngine)
+            }
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }

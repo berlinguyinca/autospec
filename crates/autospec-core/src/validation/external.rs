@@ -36,6 +36,7 @@ pub enum ExternalCheck {
     PerformanceWorkstream,
     UxUiWorkstream,
     TokenBaselineFresh,
+    ArchitectureFitnessEngine,
 }
 
 impl ExternalCheck {
@@ -71,6 +72,7 @@ impl ExternalCheck {
             Self::PerformanceWorkstream => run_performance_workstream(id, required, root),
             Self::UxUiWorkstream => run_ux_ui_workstream(id, required, root),
             Self::TokenBaselineFresh => run_token_baseline_fresh(id, required, root),
+            Self::ArchitectureFitnessEngine => run_architecture_fitness_engine(id, required, root),
         }
     }
 }
@@ -433,6 +435,37 @@ fn run_bats_directory(id: &str, required: bool, root: &Path, directory: &str) ->
             &format!("{directory}/*.bats: no integration tests found"),
         );
     }
+    let commands = suites.into_iter().map(|suite| {
+        ToolCommand::new("bats", [suite.as_str()])
+            .expect("Bats validation has a static discovered suite path")
+    });
+    run_commands(id, required, root, commands)
+}
+
+fn run_bats_directory_allow_empty_if_available(
+    id: &str,
+    required: bool,
+    root: &Path,
+    directory: &str,
+) -> CheckResult {
+    if !program_on_path("bats") {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+    let Ok(entries) = fs::read_dir(root.join(directory)) else {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    };
+    let mut suites = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "bats")
+        })
+        .map(|path| relative_path(root, &path))
+        .collect::<Vec<_>>();
+    suites.sort();
     let commands = suites.into_iter().map(|suite| {
         ToolCommand::new("bats", [suite.as_str()])
             .expect("Bats validation has a static discovered suite path")
@@ -1260,6 +1293,54 @@ fn run_token_baseline_fresh(id: &str, required: bool, root: &Path) -> CheckResul
         captured.result.stderr_bytes,
         captured.result.output_digest,
     )
+}
+
+fn run_architecture_fitness_engine(id: &str, required: bool, root: &Path) -> CheckResult {
+    const RUNNER: &str = "scripts/architecture-fitness.sh";
+    const REGISTRY: &str = ".autospec/architecture-fitness.yml";
+    if !root.join(RUNNER).is_file() {
+        return failure(
+            id,
+            required,
+            "scripts/architecture-fitness.sh: required architecture fitness runner missing (issue #1533)",
+        );
+    }
+    let registry = root.join(REGISTRY);
+    if !registry.is_file() {
+        return failure(
+            id,
+            required,
+            ".autospec/architecture-fitness.yml: required architecture fitness registry missing (issue #1533)",
+        );
+    }
+    let document = fs::read_to_string(&registry).unwrap_or_default();
+    for anchor in ["fitness_functions:", "threshold:", "gate: true"] {
+        if !document.contains(anchor) {
+            return failure(
+                id,
+                required,
+                &format!(".autospec/architecture-fitness.yml: missing `{anchor}`"),
+            );
+        }
+    }
+
+    let checks = [
+        ToolCommand::new("bash", ["-n", RUNNER])
+            .expect("architecture fitness syntax check is a direct argument vector"),
+        ToolCommand::new("bash", [RUNNER, "run", "--registry", REGISTRY])
+            .expect("architecture fitness execution is a direct argument vector"),
+    ];
+    let checks = run_commands(id, required, root, checks);
+    if checks.is_failure() {
+        return checks;
+    }
+    let bats = run_bats_directory_allow_empty_if_available(
+        id,
+        required,
+        root,
+        "tests/architecture-fitness",
+    );
+    aggregate(id, required, vec![checks, bats])
 }
 
 fn baseline_table(path: &Path) -> String {
