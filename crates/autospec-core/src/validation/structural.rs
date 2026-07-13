@@ -75,6 +75,10 @@ impl StructuralValidator {
                 Self::validate_team_personality_phase4_and_docs_contract(root)
             }
             StructuralCheck::TeamPersonality => Self::validate_team_personality_contract(root),
+            StructuralCheck::AutospecReleaseContract => {
+                Self::validate_autospec_release_contract(root)
+            }
+            StructuralCheck::QaVerdictContract => Self::validate_qa_verdict_contract(root),
             StructuralCheck::CloseoutContract => Self::validate_closeout_contract(root),
             StructuralCheck::Phase4GuardianBlockLockstep => {
                 Self::validate_phase4_guardian_block_lockstep(root)
@@ -1292,6 +1296,99 @@ impl StructuralValidator {
         Self::validate_team_personality_selection_contract(root)?;
         Self::validate_team_personality_issue_template_contract(root)?;
         Self::validate_team_personality_phase4_and_docs_contract(root)
+    }
+
+    pub fn validate_autospec_release_contract(root: &Path) -> Result<(), String> {
+        let skill_relative = "skills/autospec-release/SKILL.md";
+        let skill = root.join(skill_relative);
+        if !skill.is_file() {
+            return Err(format!("{skill_relative}: required file missing"));
+        }
+        let release_readme = root.join("skills/autospec-release/README.md");
+        if !release_readme.is_file() {
+            return Err("skills/autospec-release/README.md: required file missing".to_string());
+        }
+
+        require_line_prefix(
+            &skill,
+            "## Release pipeline",
+            format!("{skill_relative}: missing release pipeline section"),
+        )?;
+        for (required, failure) in [
+            ("/autospec-sweep", "missing autospec-sweep stage"),
+            ("/autospec-review", "missing autospec-review stage"),
+            ("/autospec-run", "missing autospec-run stage"),
+            ("/autospec-test", "missing autospec-test stage"),
+            ("/autospec-qa", "missing autospec-qa stage"),
+            (
+                "validate-qa-artifacts.sh",
+                "missing QA artifact validation helper",
+            ),
+            (
+                "PASS`, `PARTIAL`, or `FAIL`",
+                "missing explicit release verdict vocabulary",
+            ),
+        ] {
+            require_content(&skill, required, format!("{skill_relative}: {failure}"))?;
+        }
+        require_line_prefix(
+            &skill,
+            "## Legacy cleanup prompt",
+            format!("{skill_relative}: missing legacy cleanup prompt"),
+        )?;
+        let readme = root.join("README.md");
+        require_content(
+            &readme,
+            "autospec-release",
+            "README.md: missing autospec-release getting-started entry".to_string(),
+        )?;
+        require_content(
+            &readme,
+            "Getting Started",
+            "README.md: missing getting-started skill guide".to_string(),
+        )
+    }
+
+    pub fn validate_qa_verdict_contract(root: &Path) -> Result<(), String> {
+        for relative in [
+            "skills/autospec-qa/SKILL.md",
+            "skills/autospec-qa/codex/prompt.md",
+            "skills/autospec-qa/opencode/agent.md",
+        ] {
+            let path = root.join(relative);
+            for (required, failure) in [
+                (
+                    ".autospec/qa-verdict.json",
+                    "missing reference to .autospec/qa-verdict.json",
+                ),
+                (
+                    "live_app_proof",
+                    "missing live_app_proof field in verdict schema",
+                ),
+                (
+                    "outsourced_implementation",
+                    "missing outsourced_implementation in category enum",
+                ),
+                (
+                    "benchmark_overfit",
+                    "missing benchmark_overfit in category enum",
+                ),
+            ] {
+                require_content(&path, required, format!("{relative}: {failure}"))?;
+            }
+        }
+        for relative in [
+            "skills/autospec-release/SKILL.md",
+            "skills/autospec-release/codex/prompt.md",
+            "skills/autospec-release/opencode/agent.md",
+        ] {
+            require_content(
+                &root.join(relative),
+                "outsourced_implementation",
+                format!("{relative}: missing outsourced_implementation remediation branch"),
+            )?;
+        }
+        Ok(())
     }
 
     pub fn validate_closeout_contract(root: &Path) -> Result<(), String> {

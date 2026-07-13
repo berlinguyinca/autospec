@@ -112,6 +112,12 @@ impl ValidationCheck {
             "check_team_personality_contract" => {
                 CheckOwner::RustNative(StructuralCheck::TeamPersonality)
             }
+            "check_autospec_release_contract" => {
+                CheckOwner::RustNative(StructuralCheck::AutospecReleaseContract)
+            }
+            "check_qa_verdict_contract" => {
+                CheckOwner::RustNative(StructuralCheck::QaVerdictContract)
+            }
             "check_closeout_contract" => CheckOwner::RustNative(StructuralCheck::CloseoutContract),
             "check_phase4_guardian_block_lockstep" => {
                 CheckOwner::RustNative(StructuralCheck::Phase4GuardianBlockLockstep)
@@ -251,6 +257,8 @@ pub enum StructuralCheck {
     TeamPersonalityIssueTemplate,
     TeamPersonalityPhase4AndDocs,
     TeamPersonality,
+    AutospecReleaseContract,
+    QaVerdictContract,
     CloseoutContract,
     Phase4GuardianBlockLockstep,
     Phase4IssueStartSummary,

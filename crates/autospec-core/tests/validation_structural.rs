@@ -505,3 +505,33 @@ fn phase4_static_policy_contracts_pass_in_this_repository() {
     StructuralValidator::validate_docs_drift_gate_regen_conditional_parity(&root)
         .expect("repository docs drift conditional parity passes");
 }
+
+#[test]
+fn release_and_qa_verdict_contracts_have_direct_rust_owners() {
+    let root = fixture("release-qa-contracts");
+
+    StructuralValidator::validate_autospec_release_contract(&root)
+        .expect("release readiness wrapper contract passes");
+    StructuralValidator::validate_qa_verdict_contract(&root)
+        .expect("QA verdict artifact contract passes");
+
+    let failure = StructuralValidator::validate_qa_verdict_contract(&fixture(
+        "release-qa-contracts-missing-benchmark-category",
+    ))
+    .expect_err("the benchmark category stays release-blocking");
+
+    assert_eq!(
+        failure,
+        "skills/autospec-qa/SKILL.md: missing benchmark_overfit in category enum"
+    );
+}
+
+#[test]
+fn release_and_qa_verdict_contracts_pass_in_this_repository() {
+    let root = workspace_root();
+
+    StructuralValidator::validate_autospec_release_contract(&root)
+        .expect("repository release readiness wrapper contract passes");
+    StructuralValidator::validate_qa_verdict_contract(&root)
+        .expect("repository QA verdict artifact contract passes");
+}
