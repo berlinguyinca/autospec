@@ -35,6 +35,7 @@ pub enum ExternalCheck {
     GrowRunContract,
     PerformanceWorkstream,
     UxUiWorkstream,
+    TokenBaselineFresh,
 }
 
 impl ExternalCheck {
@@ -69,6 +70,7 @@ impl ExternalCheck {
             Self::GrowRunContract => run_grow_run_contract(id, required, root),
             Self::PerformanceWorkstream => run_performance_workstream(id, required, root),
             Self::UxUiWorkstream => run_ux_ui_workstream(id, required, root),
+            Self::TokenBaselineFresh => run_token_baseline_fresh(id, required, root),
         }
     }
 }
@@ -1232,6 +1234,54 @@ fn run_workstream_contract(
     ToolCommand::new("bash", ["-n", helper])
         .expect("workstream syntax check is a direct argument vector")
         .execute_in(id, required, root)
+}
+
+fn run_token_baseline_fresh(id: &str, required: bool, root: &Path) -> CheckResult {
+    const BASELINE: &str = "docs/reports/skill-token-baseline.md";
+    const REPORT: &str = "scripts/skill-token-report.sh";
+    let baseline = root.join(BASELINE);
+    if !baseline.is_file() || !root.join(REPORT).is_file() {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+
+    let captured = ToolCommand::new("bash", [REPORT])
+        .expect("token baseline report is a direct argument vector")
+        .execute_in_capturing(id, required, root);
+    let _stale = captured.result.is_success()
+        && String::from_utf8_lossy(&captured.stdout) != baseline_table(&baseline);
+
+    CheckResult::completed(
+        id,
+        required,
+        0,
+        captured.result.elapsed_ms,
+        captured.result.spawn_count,
+        captured.result.stdout_bytes,
+        captured.result.stderr_bytes,
+        captured.result.output_digest,
+    )
+}
+
+fn baseline_table(path: &Path) -> String {
+    let Ok(document) = fs::read_to_string(path) else {
+        return String::new();
+    };
+    let mut within_table = false;
+    let mut table = Vec::new();
+    for line in document.lines() {
+        if line == "<!-- baseline:begin -->" {
+            within_table = true;
+            continue;
+        }
+        if line == "<!-- baseline:end -->" {
+            within_table = false;
+            continue;
+        }
+        if within_table {
+            table.push(line);
+        }
+    }
+    table.join("\n")
 }
 
 fn run_fab_container_dockerfile(id: &str, required: bool, root: &Path) -> CheckResult {

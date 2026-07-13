@@ -186,6 +186,10 @@ fn catalog_assigns_per_skill_model_contracts_to_rust_owners() {
             "check_ux_ui_workstream_contract",
             ExternalCheck::UxUiWorkstream,
         ),
+        (
+            "check_token_baseline_fresh",
+            ExternalCheck::TokenBaselineFresh,
+        ),
     ] {
         assert_eq!(
             catalog

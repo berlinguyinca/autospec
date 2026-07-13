@@ -190,6 +190,9 @@ impl ValidationCheck {
             "check_ux_ui_workstream_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::UxUiWorkstream)
             }
+            "check_token_baseline_fresh" => {
+                CheckOwner::ExternalBatch(ExternalCheck::TokenBaselineFresh)
+            }
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }
