@@ -162,3 +162,17 @@ fn catalog_assigns_bash_syntax_to_a_typed_external_batch() {
         Some(&CheckOwner::ExternalBatch(ExternalCheck::BashSyntax))
     );
 }
+
+#[test]
+fn catalog_assigns_frontmatter_to_a_typed_external_batch() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_frontmatter")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(ExternalCheck::Frontmatter))
+    );
+}

@@ -8,6 +8,7 @@ use super::results::{output_digest, CheckResult};
 pub enum ExternalCheck {
     BashSyntax,
     DeriveTrioConsistency,
+    Frontmatter,
 }
 
 impl ExternalCheck {
@@ -15,6 +16,7 @@ impl ExternalCheck {
         match self {
             Self::BashSyntax => run_bash_syntax(id, required, root),
             Self::DeriveTrioConsistency => run_derive_trio_consistency(id, required, root),
+            Self::Frontmatter => run_frontmatter(id, required, root),
         }
     }
 }
@@ -56,6 +58,58 @@ fn run_bash_syntax_targets(
             break;
         }
     }
+    aggregate(id, required, results)
+}
+
+fn run_frontmatter(id: &str, required: bool, root: &Path) -> CheckResult {
+    let python_available = program_on_path("python3");
+    let mut results = Vec::new();
+
+    for skill_dir in trio_directories(root) {
+        for member in ["SKILL.md", "opencode/agent.md"] {
+            let path = skill_dir.join(member);
+            let relative = relative_path(root, &path);
+            let Ok(document) = fs::read_to_string(&path) else {
+                results.push(failure(
+                    id,
+                    required,
+                    &format!("{relative}: missing frontmatter"),
+                ));
+                return aggregate(id, required, results);
+            };
+            let Some(frontmatter) = frontmatter_body(&document) else {
+                results.push(failure(
+                    id,
+                    required,
+                    &format!("{relative}: missing or empty frontmatter"),
+                ));
+                return aggregate(id, required, results);
+            };
+
+            let result = if python_available {
+                ToolCommand::new(
+                    "python3",
+                    ["-c", PYTHON_FRONTMATTER_CHECK, relative.as_str()],
+                )
+                .expect("the Python frontmatter check has static source and file arguments")
+                .execute_in(id, required, root)
+            } else if has_frontmatter_key(&frontmatter) {
+                CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]))
+            } else {
+                failure(
+                    id,
+                    required,
+                    &format!("{relative}: frontmatter does not look like key: value pairs"),
+                )
+            };
+            let failed = result.is_failure();
+            results.push(result);
+            if failed {
+                return aggregate(id, required, results);
+            }
+        }
+    }
+
     aggregate(id, required, results)
 }
 
@@ -149,6 +203,65 @@ fn relative_path(root: &Path, path: &Path) -> String {
         .to_string_lossy()
         .replace('\\', "/")
 }
+
+fn frontmatter_body(document: &str) -> Option<String> {
+    let mut separators = 0;
+    let mut body = String::new();
+    for line in document.split_inclusive('\n') {
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            separators += 1;
+            if separators == 2 {
+                break;
+            }
+            continue;
+        }
+        if separators == 1 {
+            body.push_str(line);
+        }
+    }
+    (separators >= 2 && !body.trim_end_matches(['\r', '\n']).is_empty()).then_some(body)
+}
+
+fn has_frontmatter_key(document: &str) -> bool {
+    document.lines().any(|line| {
+        let candidate = line.trim_start_matches(char::is_whitespace);
+        let key_length = candidate
+            .chars()
+            .take_while(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+            })
+            .count();
+        key_length > 0 && candidate[key_length..].starts_with(':')
+    })
+}
+
+fn program_on_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|directory| directory.join(program).is_file())
+    })
+}
+
+const PYTHON_FRONTMATTER_CHECK: &str = r#"import sys
+try:
+    import yaml
+except ImportError:
+    raise SystemExit(0)
+document = open(sys.argv[1], encoding="utf-8").read()
+separators = 0
+body = []
+for line in document.splitlines(True):
+    if line.rstrip("\r\n") == "---":
+        separators += 1
+        if separators == 2:
+            break
+        continue
+    if separators == 1:
+        body.append(line)
+try:
+    yaml.safe_load("".join(body))
+except Exception:
+    raise SystemExit(1)
+"#;
 
 #[cfg(test)]
 mod tests {

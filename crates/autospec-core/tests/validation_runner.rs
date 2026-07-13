@@ -186,6 +186,55 @@ fn runner_aggregates_typed_bash_syntax_commands() {
     assert_eq!(report.results[0].spawn_count, 2);
 }
 
+#[test]
+fn runner_validates_frontmatter_for_each_discovered_trio_member() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_frontmatter",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::Frontmatter),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("frontmatter"));
+
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 2);
+}
+
+#[test]
+fn runner_rejects_empty_trio_frontmatter() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_frontmatter",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::Frontmatter),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("frontmatter-empty"));
+
+    assert_eq!(report.results[0].exit_code, Some(1));
+    assert_eq!(report.results[0].spawn_count, 0);
+}
+
+#[test]
+fn runner_rejects_blank_only_trio_frontmatter() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_frontmatter",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::Frontmatter),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("frontmatter-blank"));
+
+    assert_eq!(report.results[0].exit_code, Some(1));
+    assert_eq!(report.results[0].spawn_count, 0);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")
