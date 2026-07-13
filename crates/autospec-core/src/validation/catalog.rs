@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use super::command::ToolCommand;
+use super::external::ExternalCheck;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationCheck {
@@ -38,6 +39,9 @@ impl ValidationCheck {
             "check_shared_script_install" => {
                 CheckOwner::RustNative(StructuralCheck::SharedScriptInstall)
             }
+            "check_derive_trio_consistency" => {
+                CheckOwner::ExternalBatch(ExternalCheck::DeriveTrioConsistency)
+            }
             "check_startup_preflight" => CheckOwner::RustNative(StructuralCheck::StartupPreflight),
             _ => CheckOwner::RustNative(StructuralCheck::CatalogSlot),
         };
@@ -60,6 +64,7 @@ pub enum CheckModes {
 pub enum CheckOwner {
     RustNative(StructuralCheck),
     External(ToolCommand),
+    ExternalBatch(ExternalCheck),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

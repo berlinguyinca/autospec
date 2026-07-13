@@ -1,4 +1,6 @@
-use autospec_core::validation::{CheckOwner, StructuralCheck, ValidationCatalog, ValidationCheck};
+use autospec_core::validation::{
+    CheckOwner, ExternalCheck, StructuralCheck, ValidationCatalog, ValidationCheck,
+};
 
 const FROZEN_CATALOG: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -128,5 +130,21 @@ fn catalog_assigns_startup_preflight_to_a_rust_owner() {
             .find(|check| check.id == "check_startup_preflight")
             .map(|check| &check.owner),
         Some(&CheckOwner::RustNative(StructuralCheck::StartupPreflight))
+    );
+}
+
+#[test]
+fn catalog_assigns_derive_trio_to_a_typed_external_batch() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_derive_trio_consistency")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(
+            ExternalCheck::DeriveTrioConsistency
+        ))
     );
 }

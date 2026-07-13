@@ -1,6 +1,7 @@
 pub mod affected;
 pub mod catalog;
 pub mod command;
+pub mod external;
 pub mod options;
 pub mod results;
 pub mod runner;
@@ -23,6 +24,7 @@ impl ValidationStatus {
 
 pub use catalog::{CheckModes, CheckOwner, StructuralCheck, ValidationCatalog, ValidationCheck};
 pub use command::ToolCommand;
+pub use external::ExternalCheck;
 pub use options::{Jobs, ValidationOptions};
 pub use results::{
     CheckResult, ValidationAggregate, ValidationExecutionAggregate, ValidationExecutionReport,

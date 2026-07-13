@@ -21,6 +21,7 @@ impl ValidationRunner {
         match &check.owner {
             CheckOwner::RustNative(owner) => Self::run_structural(check, *owner, root),
             CheckOwner::External(command) => command.execute_in(check.id, check.required, root),
+            CheckOwner::ExternalBatch(batch) => batch.run(check.id, check.required, root),
         }
     }
 

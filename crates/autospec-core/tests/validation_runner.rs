@@ -2,8 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use autospec_core::validation::{
-    CheckModes, CheckOwner, CheckResult, StructuralCheck, ToolCommand, ValidationCatalog,
-    ValidationCheck, ValidationExecutionReport, ValidationRunner,
+    CheckModes, CheckOwner, CheckResult, ExternalCheck, StructuralCheck, ToolCommand,
+    ValidationCatalog, ValidationCheck, ValidationExecutionReport, ValidationRunner,
 };
 
 #[test]
@@ -150,6 +150,23 @@ fn runner_executes_rust_owners_in_catalog_order_and_fails_unimplemented_slots() 
     assert_eq!(report.results[0].spawn_count, 0);
     assert_eq!(report.results[1].exit_code, Some(1));
     assert!(report.results[1].stderr_bytes > 0);
+}
+
+#[test]
+fn runner_aggregates_typed_derive_trio_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_derive_trio_consistency",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::DeriveTrioConsistency),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("derive-trio"));
+
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 2);
 }
 
 fn repository_root() -> PathBuf {
