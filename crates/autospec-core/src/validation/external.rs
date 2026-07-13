@@ -27,6 +27,7 @@ pub enum ExternalCheck {
     BatsDirectory(&'static str),
     AutospecUpgradeContract,
     ClaimGuardContract,
+    ClaimCasGuard,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -73,6 +74,7 @@ impl ExternalCheck {
             Self::BatsDirectory(directory) => run_bats_directory(id, required, root, directory),
             Self::AutospecUpgradeContract => run_autospec_upgrade_contract(id, required, root),
             Self::ClaimGuardContract => run_claim_guard_contract(id, required, root),
+            Self::ClaimCasGuard => run_claim_cas_guard(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -762,6 +764,51 @@ fn run_claim_guard_contract(id: &str, required: bool, root: &Path) -> CheckResul
 
     let bats = run_bats_suites(id, required, root, SUITES);
     aggregate(id, required, vec![syntax, bats])
+}
+
+fn run_claim_cas_guard(id: &str, required: bool, root: &Path) -> CheckResult {
+    const TRIO: &[&str] = &[
+        "skills/autospec-run/SKILL.md",
+        "skills/autospec-run/opencode/agent.md",
+        "skills/autospec-run/codex/prompt.md",
+    ];
+    const FIXTURE: &str = "tests/fixtures/gh-mock/gh";
+    const SUITES: &[&str] = &[
+        "tests/unit/test_autospec_claim_id_tiebreak.bats",
+        "tests/unit/test_autospec_stale_lease_reclaim.bats",
+    ];
+
+    for trio in TRIO {
+        let path = root.join(trio);
+        if !path.is_file() {
+            return failure(id, required, &format!("{trio}: required file missing"));
+        }
+        if !contains(&path, "claim-issue.sh") {
+            return failure(
+                id,
+                required,
+                &format!("{trio}: claim section missing reference to claim-issue.sh (issue #871)"),
+            );
+        }
+        if contains_unguarded_claim_swap(&path) {
+            return failure(
+                id,
+                required,
+                &format!(
+                    "{trio}: unguarded check-then-act 'gh issue edit --add-label in-progress-by-bot' outside the claim-issue.sh CAS path (issue #871)"
+                ),
+            );
+        }
+    }
+    if !root.join(FIXTURE).is_file() {
+        return failure(
+            id,
+            required,
+            "tests/fixtures/gh-mock/gh: PATH-shadow mocked-gh fixture missing (issue #871)",
+        );
+    }
+
+    run_bats_suites(id, required, root, SUITES)
 }
 
 fn run_autospec_sweep_area_contract(id: &str, required: bool, root: &Path) -> CheckResult {
@@ -1918,6 +1965,19 @@ fn has_line_prefix(path: &Path, expected: &str) -> bool {
         && fs::read_to_string(path)
             .map(|document| document.lines().any(|line| line.starts_with(expected)))
             .unwrap_or(false)
+}
+
+fn contains_unguarded_claim_swap(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .map(|document| {
+            document.lines().any(|line| {
+                line.find("gh issue edit ").is_some_and(|index| {
+                    line[index..].contains("--add-label in-progress-by-bot")
+                        && !line.contains("claim-issue.sh")
+                })
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn contains(path: &Path, expected: &str) -> bool {

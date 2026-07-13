@@ -542,6 +542,40 @@ fn runner_checks_qa_and_loop_support_contracts_without_the_shell_harness() {
 }
 
 #[test]
+fn runner_rejects_an_unguarded_claim_label_swap_without_the_shell_harness() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_claim_cas_guard",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::ClaimCasGuard),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("claim-cas-guard-unguarded"));
+
+    assert_eq!(report.results[0].exit_code, Some(1));
+    assert_eq!(report.results[0].spawn_count, 0);
+}
+
+#[test]
+fn runner_checks_claim_cas_simulation_coverage_with_direct_bats_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_claim_cas_guard",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::ClaimCasGuard),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("claim-cas-guard"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!(report.results[0].spawn_count <= 2);
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",
