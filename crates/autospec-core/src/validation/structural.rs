@@ -37,6 +37,12 @@ impl StructuralValidator {
             StructuralCheck::AutospecReviewTierADirectives => {
                 Self::validate_autospec_review_tier_a_directives(root)
             }
+            StructuralCheck::AutospecRunPrioritySortLockstep => {
+                Self::validate_autospec_run_priority_sort_lockstep(root)
+            }
+            StructuralCheck::AutospecRunRegressionReviewLockstep => {
+                Self::validate_autospec_run_regression_review_lockstep(root)
+            }
             StructuralCheck::StopMode => Self::validate_stop_mode_sections(root),
             StructuralCheck::KeywordRouting => Self::validate_keyword_routing_section(root),
             StructuralCheck::GapRemediation => Self::validate_gap_remediation_sections(root),
@@ -589,6 +595,54 @@ impl StructuralValidator {
             return Err(format!(
                 "expected ≥2 'Tier A (spec work)' directives in autospec-review/SKILL.md, found {count}"
             ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_autospec_run_priority_sort_lockstep(root: &Path) -> Result<(), String> {
+        let skill = root.join("skills/autospec-run/SKILL.md");
+        let opencode = root.join("skills/autospec-run/opencode/agent.md");
+        let codex = root.join("skills/autospec-run/codex/prompt.md");
+        let expected = priority_sort_excerpt(&strip_frontmatter(&read(&skill)?));
+
+        if expected != priority_sort_excerpt(&strip_frontmatter(&read(&opencode)?)) {
+            return Err("priority sort lockstep (opencode)".to_string());
+        }
+        if expected != priority_sort_excerpt(&strip_first_blank_line(&read(&codex)?)) {
+            return Err("priority sort lockstep (codex)".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn validate_autospec_run_regression_review_lockstep(root: &Path) -> Result<(), String> {
+        for member in ["SKILL.md", "opencode/agent.md", "codex/prompt.md"] {
+            let path = root.join("skills/autospec-run").join(member);
+            let display = format!("skills/autospec-run/{member}");
+            let document = read(&path).unwrap_or_default();
+            if document.contains("dispatch a second `TIER_A` subagent") {
+                return Err(format!(
+                    "second TIER_A regression meta-review dispatch still present in {display} (should be folded into reviewer brief)"
+                ));
+            }
+            for (required, failure) in [
+                ("reviewer-lessons.md", "reviewer-lessons write-path missing"),
+                (
+                    "would the reviewer have caught the original gap",
+                    "folded regression gap-check missing",
+                ),
+                (
+                    "AUTOSPEC_REVIEWER_TIER",
+                    "AUTOSPEC_REVIEWER_TIER env hatch missing",
+                ),
+                (
+                    "`TIER_B` for ALL issues",
+                    "reviewer Tier-B-for-all-issues directive missing",
+                ),
+            ] {
+                if !document.contains(required) {
+                    return Err(format!("{failure} in {display}"));
+                }
+            }
         }
         Ok(())
     }
@@ -1274,4 +1328,23 @@ fn strip_frontmatter(document: &str) -> String {
         }
     }
     body
+}
+
+fn priority_sort_excerpt(document: &str) -> String {
+    let lines = document.lines().collect::<Vec<_>>();
+    let Some(start) = lines
+        .iter()
+        .position(|line| line.contains("Queue priority sort"))
+    else {
+        return String::new();
+    };
+    lines[start..lines.len().min(start + 9)].join("\n")
+}
+
+fn strip_first_blank_line(document: &str) -> String {
+    document
+        .strip_prefix("\n")
+        .or_else(|| document.strip_prefix("\r\n"))
+        .unwrap_or(document)
+        .to_string()
 }

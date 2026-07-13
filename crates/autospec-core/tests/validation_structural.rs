@@ -270,3 +270,23 @@ fn autospec_review_contract_requires_a_complete_lockstep_trio_and_two_tier_a_dir
         "expected ≥2 'Tier A (spec work)' directives in autospec-review/SKILL.md, found 1"
     );
 }
+
+#[test]
+fn autospec_run_review_contracts_lock_the_priority_and_folded_regression_guidance() {
+    let root = fixture("autospec-run-review-contracts");
+
+    StructuralValidator::validate_autospec_run_priority_sort_lockstep(&root)
+        .expect("priority sort excerpts match");
+    StructuralValidator::validate_autospec_run_regression_review_lockstep(&root)
+        .expect("folded reviewer guidance passes");
+
+    let failure = StructuralValidator::validate_autospec_run_regression_review_lockstep(&fixture(
+        "autospec-run-review-contracts-second-tier-a",
+    ))
+    .expect_err("a second Tier A reviewer dispatch is forbidden");
+
+    assert_eq!(
+        failure,
+        "second TIER_A regression meta-review dispatch still present in skills/autospec-run/SKILL.md (should be folded into reviewer brief)"
+    );
+}

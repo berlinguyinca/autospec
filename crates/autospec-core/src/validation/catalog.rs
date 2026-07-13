@@ -54,6 +54,12 @@ impl ValidationCheck {
             "check_autospec_review_tier_a_directives" => {
                 CheckOwner::RustNative(StructuralCheck::AutospecReviewTierADirectives)
             }
+            "check_autospec_run_priority_sort_lockstep" => {
+                CheckOwner::RustNative(StructuralCheck::AutospecRunPrioritySortLockstep)
+            }
+            "check_autospec_run_regression_review_lockstep" => {
+                CheckOwner::RustNative(StructuralCheck::AutospecRunRegressionReviewLockstep)
+            }
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)
@@ -126,6 +132,8 @@ pub enum StructuralCheck {
     DocsAmendmentPresence,
     AutospecReviewSkill,
     AutospecReviewTierADirectives,
+    AutospecRunPrioritySortLockstep,
+    AutospecRunRegressionReviewLockstep,
     StopMode,
     KeywordRouting,
     GapRemediation,

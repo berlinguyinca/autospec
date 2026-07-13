@@ -177,6 +177,32 @@ fn catalog_assigns_autospec_review_contracts_to_rust_owners() {
 }
 
 #[test]
+fn catalog_assigns_autospec_run_review_contracts_to_rust_owners() {
+    let catalog = ValidationCatalog::standard();
+
+    for (id, owner) in [
+        (
+            "check_autospec_run_priority_sort_lockstep",
+            StructuralCheck::AutospecRunPrioritySortLockstep,
+        ),
+        (
+            "check_autospec_run_regression_review_lockstep",
+            StructuralCheck::AutospecRunRegressionReviewLockstep,
+        ),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::RustNative(owner)),
+            "{id} must have a direct Rust owner"
+        );
+    }
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![
