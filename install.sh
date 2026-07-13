@@ -250,6 +250,30 @@ install_autonomous_operator_commands() {
     info "install_autonomous_operator_commands: installed autonomous command wrappers in $autospec_bin_dir"
 }
 
+write_agent_env_wrapper() {
+    target="$1"
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'set -eu'
+        printf '%s\n' 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/agent-env.sh" "$@"'
+    } > "$target"
+    chmod +x "$target"
+}
+
+install_agent_env_commands() {
+    autospec_bin_dir="$HOME/.autospec/bin"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] install_agent_env_commands: would install agent-env/autospec-env wrappers in $autospec_bin_dir"
+        return 0
+    fi
+
+    mkdir -p "$autospec_bin_dir"
+    for command in agent-env autospec-env; do
+        write_agent_env_wrapper "$autospec_bin_dir/$command"
+    done
+    info "install_agent_env_commands: installed agent-env/autospec-env wrappers in $autospec_bin_dir"
+}
+
 write_scanner_shim() {
     target="$1"
     skill="$2"
@@ -1442,6 +1466,7 @@ copy_runtime_skill_scripts
 copy_schemas
 ensure_autospec_bin_path
 install_autonomous_operator_commands
+install_agent_env_commands
 install_scanner_shims
 ensure_system_tools
 bootstrap_peer_ecosystems
