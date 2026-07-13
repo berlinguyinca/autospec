@@ -26,6 +26,7 @@ pub enum ExternalCheck {
     AutospecPlaywrightSkill,
     AutospecFabContract,
     GroomingContract,
+    MutationAndNegativePath,
 }
 
 impl ExternalCheck {
@@ -51,6 +52,7 @@ impl ExternalCheck {
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
             Self::GroomingContract => run_grooming_contract(id, required, root),
+            Self::MutationAndNegativePath => run_mutation_and_negative_path(id, required, root),
         }
     }
 }
@@ -755,6 +757,32 @@ fn run_grooming_contract(id: &str, required: bool, root: &Path) -> CheckResult {
         "skills/autospec-shared/tests/unit/grooming-observe.bats",
     ];
     run_bats_suites(id, required, root, SUITES)
+}
+
+fn run_mutation_and_negative_path(id: &str, required: bool, root: &Path) -> CheckResult {
+    let mut commands = Vec::new();
+    const NEGATIVE_PATH_LINT: &str = "scripts/check-negative-path-pairs.sh";
+    if root.join(NEGATIVE_PATH_LINT).is_file() {
+        commands.push(
+            ToolCommand::new("bash", [NEGATIVE_PATH_LINT])
+                .expect("negative-path lint execution is a direct argument vector"),
+        );
+    }
+    if program_on_path("bats") {
+        for suite in [
+            "tests/run-mutation-test.bats",
+            "tests/mutation-adapters.bats",
+            "tests/bash-mutate.bats",
+        ] {
+            if root.join(suite).is_file() {
+                commands.push(
+                    ToolCommand::new("bats", [suite])
+                        .expect("mutation Bats execution is a direct argument vector"),
+                );
+            }
+        }
+    }
+    run_commands(id, required, root, commands)
 }
 
 fn run_fab_container_dockerfile(id: &str, required: bool, root: &Path) -> CheckResult {

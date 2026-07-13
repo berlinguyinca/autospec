@@ -550,6 +550,23 @@ fn runner_requires_and_runs_the_complete_grooming_suite_batch() {
     assert_eq!(report.results[0].spawn_count, 11);
 }
 
+#[test]
+fn runner_runs_the_optional_mutation_gate_with_direct_processes() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_mutation_and_negative_path",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::MutationAndNegativePath),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("mutation-negative-path"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 4);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")
