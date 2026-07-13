@@ -647,6 +647,27 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
         )),
         "check_autospec_fab_contract must have a typed external owner"
     );
+
+    for (id, owner) in [
+        (
+            "check_autospec_test_skill_present",
+            ExternalCheck::AutospecTestSkill,
+        ),
+        (
+            "check_autospec_playwright_skill_present",
+            ExternalCheck::AutospecPlaywrightSkill,
+        ),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::ExternalBatch(owner)),
+            "{id} must have a typed external owner"
+        );
+    }
 }
 
 #[test]

@@ -22,6 +22,8 @@ pub enum ExternalCheck {
     DbModuleInstall,
     BatsDirectory(&'static str),
     AutospecUpgradeContract,
+    AutospecTestSkill,
+    AutospecPlaywrightSkill,
     AutospecFabContract,
 }
 
@@ -44,6 +46,8 @@ impl ExternalCheck {
             Self::DbModuleInstall => run_db_module_install(id, required, root),
             Self::BatsDirectory(directory) => run_bats_directory(id, required, root, directory),
             Self::AutospecUpgradeContract => run_autospec_upgrade_contract(id, required, root),
+            Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
+            Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
         }
     }
@@ -599,6 +603,89 @@ fn run_autospec_upgrade_contract(id: &str, required: bool, root: &Path) -> Check
     }
 
     run_bats_directory(id, required, root, "skills/autospec-upgrade/tests")
+}
+
+fn run_skill_validator(id: &str, required: bool, root: &Path, skill: &str) -> CheckResult {
+    let skill_directory = format!("skills/{skill}");
+    let validator = format!("{skill_directory}/validate.sh");
+    if !root.join(&skill_directory).is_dir() {
+        return failure(
+            id,
+            required,
+            &format!("{skill_directory}: directory missing"),
+        );
+    }
+    for member in ["SKILL.md", "codex/prompt.md"] {
+        let relative = format!("{skill_directory}/{member}");
+        if !root.join(&relative).is_file() {
+            return failure(id, required, &format!("{relative}: required file missing"));
+        }
+    }
+    if !root.join(&validator).is_file() {
+        return failure(
+            id,
+            required,
+            &format!("{validator}: per-skill validate.sh missing"),
+        );
+    }
+
+    let commands = [
+        ToolCommand::new("bash", ["-n", validator.as_str()])
+            .expect("per-skill syntax validation is a direct argument vector"),
+        ToolCommand::new("bash", [validator.as_str()])
+            .expect("per-skill validator execution is a direct argument vector"),
+    ];
+    run_commands(id, required, root, commands)
+}
+
+fn run_autospec_playwright_skill(id: &str, required: bool, root: &Path) -> CheckResult {
+    let validator = run_skill_validator(id, required, root, "autospec-playwright");
+    if validator.is_failure() {
+        return validator;
+    }
+
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let relative = format!("skills/autospec-playwright/{member}");
+        let path = root.join(&relative);
+        if !path.is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    validator,
+                    failure(
+                        id,
+                        required,
+                        &format!("{relative}: required Playwright adapter body missing"),
+                    ),
+                ],
+            );
+        }
+
+        let document = fs::read_to_string(&path).unwrap_or_default();
+        for anchor in [
+            "## Loaded-data dashboard evidence",
+            "at least one loaded-data assertion",
+            "/loading|skeleton|empty/i",
+            "after catch-all mocks",
+        ] {
+            if !document.contains(anchor) {
+                return aggregate(
+                    id,
+                    required,
+                    vec![
+                        validator,
+                        failure(
+                            id,
+                            required,
+                            &format!("{relative}: missing Playwright evidence anchor `{anchor}`"),
+                        ),
+                    ],
+                );
+            }
+        }
+    }
+    validator
 }
 
 fn run_autospec_fab_contract(id: &str, required: bool, root: &Path) -> CheckResult {

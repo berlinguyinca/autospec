@@ -503,6 +503,36 @@ fn runner_checks_fab_skill_tokens_before_its_bats_directory() {
     assert!((2..=3).contains(&report.results[0].spawn_count));
 }
 
+#[test]
+fn runner_executes_per_skill_validators_with_direct_argument_vectors() {
+    let catalog = ValidationCatalog::from_checks(vec![
+        ValidationCheck {
+            id: "check_autospec_test_skill_present",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill),
+        },
+        ValidationCheck {
+            id: "check_autospec_playwright_skill_present",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::AutospecPlaywrightSkill),
+        },
+    ]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("autospec-skill-validators"));
+
+    assert!(report
+        .results
+        .iter()
+        .all(|result| result.exit_code == Some(0)));
+    assert!(report.results.iter().all(|result| result.spawn_count == 2));
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")
