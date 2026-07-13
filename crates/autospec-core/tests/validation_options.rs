@@ -39,3 +39,15 @@ fn options_reject_path_and_shadow_results_in_either_order() {
             .is_err()
     );
 }
+
+#[test]
+fn options_remove_only_the_option_prefix_from_assigned_values() {
+    let options =
+        ValidationOptions::parse(["--changed=--changed=origin/main"]).expect("changed base parses");
+
+    assert_eq!(
+        options.changed_base.as_deref(),
+        Some("--changed=origin/main")
+    );
+    assert!(ValidationOptions::parse(["--jobs=--jobs=4"]).is_err());
+}

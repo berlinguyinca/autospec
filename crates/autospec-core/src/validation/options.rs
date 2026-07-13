@@ -81,7 +81,9 @@ impl ValidationOptions {
                     )?));
                 }
                 _ if argument.starts_with("--changed=") => {
-                    let base = argument.trim_start_matches("--changed=");
+                    let base = argument
+                        .strip_prefix("--changed=")
+                        .expect("changed option prefix matched");
                     if base.is_empty() {
                         return Err("autospec validate --changed requires a base".to_string());
                     }
@@ -89,7 +91,9 @@ impl ValidationOptions {
                     options.execution_requested = true;
                 }
                 _ if argument.starts_with("--jobs=") => {
-                    let jobs = argument.trim_start_matches("--jobs=");
+                    let jobs = argument
+                        .strip_prefix("--jobs=")
+                        .expect("jobs option prefix matched");
                     options.jobs = parse_jobs(Some(jobs))?;
                     options.execution_requested = true;
                 }
