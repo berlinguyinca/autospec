@@ -8,6 +8,10 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 #[test]
 fn matching_trio_and_duo_skill_bodies_pass_without_external_processes() {
     StructuralValidator::validate_root(&fixture("valid-skill")).expect("valid fixtures pass");
@@ -339,4 +343,38 @@ fn palette_single_source_contract_rejects_hardcoded_palette_values_outside_doc_s
         failure,
         "palette single-source violation: scripts/duplicate.sh contains palette hex #aabbcc"
     );
+}
+
+#[test]
+fn documentation_guidance_contracts_preserve_mermaid_qa_and_harmonize_requirements() {
+    let root = fixture("static-skill-contracts");
+
+    StructuralValidator::validate_mermaid_documentation_contract(&root)
+        .expect("Mermaid guidance is present in every required adapter");
+    StructuralValidator::validate_qa_documentation_gate(&root)
+        .expect("QA documentation gate is present in every adapter");
+    StructuralValidator::validate_autospec_harmonize_contract(&root)
+        .expect("harmonize stages and handoff are present in every adapter");
+
+    let failure = StructuralValidator::validate_autospec_harmonize_contract(&fixture(
+        "static-skill-contracts-missing-harmonize-stage",
+    ))
+    .expect_err("a missing harmonize stage fails");
+
+    assert_eq!(
+        failure,
+        "skills/autospec-harmonize/SKILL.md: missing stage label 'pick'"
+    );
+}
+
+#[test]
+fn documentation_guidance_contracts_pass_in_this_repository() {
+    let root = workspace_root();
+
+    StructuralValidator::validate_mermaid_documentation_contract(&root)
+        .expect("repository Mermaid guidance satisfies the contract");
+    StructuralValidator::validate_qa_documentation_gate(&root)
+        .expect("repository QA documentation gate satisfies the contract");
+    StructuralValidator::validate_autospec_harmonize_contract(&root)
+        .expect("repository harmonize guidance satisfies the contract");
 }

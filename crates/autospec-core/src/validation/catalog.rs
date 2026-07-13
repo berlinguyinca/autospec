@@ -82,6 +82,15 @@ impl ValidationCheck {
             "check_palette_single_source" => {
                 CheckOwner::RustNative(StructuralCheck::PaletteSingleSource)
             }
+            "check_mermaid_documentation_contract" => {
+                CheckOwner::RustNative(StructuralCheck::MermaidDocumentation)
+            }
+            "check_qa_documentation_gate" => {
+                CheckOwner::RustNative(StructuralCheck::QaDocumentationGate)
+            }
+            "check_autospec_harmonize_contract" => {
+                CheckOwner::RustNative(StructuralCheck::AutospecHarmonize)
+            }
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)
@@ -180,6 +189,9 @@ pub enum StructuralCheck {
     FleetGuiSubcommandLockstep,
     AgentsMdGitHygiene,
     PaletteSingleSource,
+    MermaidDocumentation,
+    QaDocumentationGate,
+    AutospecHarmonize,
     StopMode,
     KeywordRouting,
     GapRemediation,

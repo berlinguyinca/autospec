@@ -51,6 +51,11 @@ impl StructuralValidator {
             }
             StructuralCheck::AgentsMdGitHygiene => Self::validate_agents_md_git_hygiene(root),
             StructuralCheck::PaletteSingleSource => Self::validate_palette_single_source(root),
+            StructuralCheck::MermaidDocumentation => {
+                Self::validate_mermaid_documentation_contract(root)
+            }
+            StructuralCheck::QaDocumentationGate => Self::validate_qa_documentation_gate(root),
+            StructuralCheck::AutospecHarmonize => Self::validate_autospec_harmonize_contract(root),
             StructuralCheck::StopMode => Self::validate_stop_mode_sections(root),
             StructuralCheck::KeywordRouting => Self::validate_keyword_routing_section(root),
             StructuralCheck::GapRemediation => Self::validate_gap_remediation_sections(root),
@@ -795,6 +800,161 @@ impl StructuralValidator {
                         "palette single-source violation: {display} contains palette hex {hex}"
                     ));
                 }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_mermaid_documentation_contract(root: &Path) -> Result<(), String> {
+        const GENERAL_REQUIREMENTS: [(&str, &str); 8] = [
+            (
+                "Documentation visualization",
+                "Documentation visualization contract",
+            ),
+            (
+                "Mermaid diagrams and charts where acceptable",
+                "Mermaid diagrams/charts wording",
+            ),
+            (
+                "queues, routers, state machines, data flow, control flow, algorithms,",
+                "concrete Mermaid candidate list",
+            ),
+            (
+                "architecture boundaries, timelines",
+                "Mermaid architecture/timeline candidate",
+            ),
+            (
+                "roadmaps, or metric trends",
+                "Mermaid roadmap/metric candidate",
+            ),
+            ("flowchart, sequence", "Mermaid flowchart/sequence taxonomy"),
+            (
+                "Gantt, timeline, journey, quadrant",
+                "Mermaid chart taxonomy",
+            ),
+            (
+                "Sankey, XY, pie, kanban",
+                "Mermaid metric/work-queue taxonomy",
+            ),
+        ];
+        const DOC_REQUIREMENTS: [(&str, &str); 12] = [
+            ("## Mermaid diagrams", "Mermaid diagrams section"),
+            ("docs/assets/diagrams", "diagram asset destination"),
+            (
+                "Mermaid diagrams and charts where",
+                "Mermaid diagrams/charts generation wording",
+            ),
+            (
+                "queue, router, state machine,",
+                "doc-generation Mermaid candidate list",
+            ),
+            (
+                "data flow, control flow, algorithm",
+                "doc-generation Mermaid flow/algorithm candidate",
+            ),
+            (
+                "algorithm, architecture boundary",
+                "doc-generation Mermaid architecture-boundary candidate",
+            ),
+            (
+                "roadmap, or metric trend",
+                "doc-generation Mermaid roadmap/metric candidate",
+            ),
+            ("`flowchart`", "Mermaid flowchart type guidance"),
+            ("`gantt` or `timeline`", "Mermaid roadmap chart guidance"),
+            ("`sankey`", "Mermaid weighted-flow chart guidance"),
+            ("`xychart` or `pie`", "Mermaid metric chart guidance"),
+            ("`kanban`", "Mermaid work-queue chart guidance"),
+        ];
+
+        for skill in ["autospec", "autospec-define"] {
+            for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+                let display = format!("skills/{skill}/{member}");
+                let path = root.join(&display);
+                for (required, label) in GENERAL_REQUIREMENTS {
+                    require_content(&path, required, format!("{display}: missing {label}"))?;
+                }
+            }
+        }
+
+        for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+            let display = format!("skills/autospec-doc/{member}");
+            let path = root.join(&display);
+            for (required, label) in DOC_REQUIREMENTS {
+                require_content(&path, required, format!("{display}: missing {label}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_qa_documentation_gate(root: &Path) -> Result<(), String> {
+        for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+            let display = format!("skills/autospec-qa/{member}");
+            let path = root.join(&display);
+            for (required, label) in [
+                ("## Documentation gate", "'## Documentation gate' section"),
+                (
+                    "doc-orchestrator.mjs --full",
+                    "doc-orchestrator.mjs --full reference",
+                ),
+                ("verify-examples.mjs", "verify-examples.mjs reference"),
+                (
+                    "check-doc-drift.sh --working-tree",
+                    "check-doc-drift.sh --working-tree reference",
+                ),
+                (
+                    "orchestrator exits 2",
+                    "graceful skip on orchestrator exit 2",
+                ),
+            ] {
+                require_content(&path, required, format!("{display}: missing {label}"))?;
+            }
+            let has_auto_regenerate_contract = read(&path)
+                .map(|document| {
+                    document.lines().any(|line| {
+                        line.contains("auto_regenerate") && line.contains("NOT consulted")
+                    })
+                })
+                .unwrap_or(false);
+            if !has_auto_regenerate_contract {
+                return Err(format!(
+                    "{display}: missing auto_regenerate NOT-consulted contract"
+                ));
+            }
+        }
+
+        let bats = root.join("tests/qa/test_qa_documentation_gate.bats");
+        if bats.is_file() {
+            Ok(())
+        } else {
+            Err("tests/qa/test_qa_documentation_gate.bats: bats coverage missing".to_string())
+        }
+    }
+
+    pub fn validate_autospec_harmonize_contract(root: &Path) -> Result<(), String> {
+        for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+            let display = format!("skills/autospec-harmonize/{member}");
+            let path = root.join(&display);
+            for stage in [
+                "discover",
+                "generalize",
+                "variants",
+                "preview",
+                "pick",
+                "gen-migration-spec",
+            ] {
+                require_content(
+                    &path,
+                    stage,
+                    format!("{display}: missing stage label '{stage}'"),
+                )?;
+            }
+            for (required, label) in [
+                ("--no-live-preview", "'--no-live-preview'"),
+                ("AskUserQuestion", "'AskUserQuestion' pick gate reference"),
+                ("/autospec-define", "'/autospec-define' handoff"),
+            ] {
+                require_content(&path, required, format!("{display}: missing {label}"))?;
             }
         }
         Ok(())

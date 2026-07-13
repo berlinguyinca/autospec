@@ -341,6 +341,36 @@ fn catalog_assigns_palette_single_source_to_a_rust_owner() {
 }
 
 #[test]
+fn catalog_assigns_static_documentation_contracts_to_rust_owners() {
+    let catalog = ValidationCatalog::standard();
+
+    for (id, owner) in [
+        (
+            "check_mermaid_documentation_contract",
+            StructuralCheck::MermaidDocumentation,
+        ),
+        (
+            "check_qa_documentation_gate",
+            StructuralCheck::QaDocumentationGate,
+        ),
+        (
+            "check_autospec_harmonize_contract",
+            StructuralCheck::AutospecHarmonize,
+        ),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::RustNative(owner)),
+            "{id} must have a direct Rust owner"
+        );
+    }
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![
