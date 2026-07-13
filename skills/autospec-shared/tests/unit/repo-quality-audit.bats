@@ -290,6 +290,35 @@ EOF
     jq -e '.findings[] | select(.probe=="maintainability-hotspot" and .file=="src/app/maintained/source.ts")' "$OUT_JSON"
 }
 
+
+@test "audit skips git history lookups for files below maintainability thresholds" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    mkdir -p "$REPO/src/cold" "$TEST_TMP/bin"
+    for i in $(seq 1 25); do
+        echo "export const cold$i = $i;" > "$REPO/src/cold/file$i.ts"
+    done
+    cat > "$TEST_TMP/bin/git" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "rev-parse --is-inside-work-tree") exit 0 ;;
+  "status --porcelain") exit 0 ;;
+  log*src/cold/*) echo "unexpected git log for cold file: $*" >> "$GIT_LOG_MARKER"; exit 0 ;;
+  log*) exit 0 ;;
+esac
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/git"
+    export GIT_LOG_MARKER="$TEST_TMP/git-log-marker"
+    export PATH="$TEST_TMP/bin:$PATH"
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    [ ! -e "$GIT_LOG_MARKER" ]
+    run jq -e '.findings[] | select(.probe=="maintainability-hotspot" and (.file | startswith("src/cold/")))' "$OUT_JSON"
+    [ "$status" -ne 0 ]
+}
+
 @test "audit ranks newer denser test-backed maintainability hotspots first" {
     OUT_JSON="$TEST_TMP/audit.json"
     OUT_MD="$TEST_TMP/audit.md"
