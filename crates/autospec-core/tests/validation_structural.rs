@@ -422,3 +422,86 @@ fn autonomous_discovery_and_team_personality_contracts_pass_in_this_repository()
     StructuralValidator::validate_team_personality_contract(&root)
         .expect("repository team personality contract passes");
 }
+
+#[test]
+fn phase4_static_policy_contracts_have_direct_rust_owners() {
+    let root = fixture("phase4-static-contracts");
+
+    StructuralValidator::validate_closeout_contract(&root).expect("closeout contract passes");
+    StructuralValidator::validate_phase4_guardian_block_lockstep(&root)
+        .expect("guardian blocks are in lockstep");
+    StructuralValidator::validate_phase4_issue_start_summary(&root)
+        .expect("issue-start summaries pass");
+    StructuralValidator::validate_phase4_immediate_next_issue_pickup(&root)
+        .expect("immediate queue pickup passes");
+    StructuralValidator::validate_autospec_run_continuation_contract(&root)
+        .expect("continuation contract passes");
+    StructuralValidator::validate_autospec_run_codex_bounded_handoff(&root)
+        .expect("bounded handoff contract passes");
+    StructuralValidator::validate_phase4_adaptive_retry(&root).expect("adaptive retry passes");
+    StructuralValidator::validate_phase4_full_test_suite_gate(&root)
+        .expect("full-suite gate passes");
+    StructuralValidator::validate_data_scope_review_lens(&root).expect("data-scope lens passes");
+    StructuralValidator::validate_phase4_cost_epic_parity_lockstep(&root)
+        .expect("cost epic parity passes");
+    StructuralValidator::validate_docs_drift_gate_regen_conditional_parity(&root)
+        .expect("docs drift conditional parity passes");
+
+    let failure = StructuralValidator::validate_autospec_run_codex_bounded_handoff(&fixture(
+        "phase4-static-contracts-missing-bounded-handoff",
+    ))
+    .expect_err("an inherited full-history handoff is forbidden");
+
+    assert_eq!(
+        failure,
+        "skills/autospec-run/SKILL.md still directs Codex native subagents to fork/inherit the parent context"
+    );
+
+    let failure = StructuralValidator::validate_autospec_run_continuation_contract(&fixture(
+        "phase4-static-contracts-missing-run-adapter",
+    ))
+    .expect_err("every legacy run adapter is mandatory");
+
+    assert_eq!(
+        failure,
+        "skills/autospec-run/codex/prompt.md: required file missing"
+    );
+
+    let failure = StructuralValidator::validate_phase4_guardian_block_lockstep(&fixture(
+        "phase4-static-contracts-unmatched-guardian-end",
+    ))
+    .expect_err("a marker imbalance must not become a valid guardian block");
+
+    assert_eq!(
+        failure,
+        "guardian lockstep: no guardian block found in skills/autospec/SKILL.md"
+    );
+}
+
+#[test]
+fn phase4_static_policy_contracts_pass_in_this_repository() {
+    let root = workspace_root();
+
+    StructuralValidator::validate_closeout_contract(&root)
+        .expect("repository closeout contract passes");
+    StructuralValidator::validate_phase4_guardian_block_lockstep(&root)
+        .expect("repository guardian blocks are in lockstep");
+    StructuralValidator::validate_phase4_issue_start_summary(&root)
+        .expect("repository issue-start summaries pass");
+    StructuralValidator::validate_phase4_immediate_next_issue_pickup(&root)
+        .expect("repository immediate queue pickup passes");
+    StructuralValidator::validate_autospec_run_continuation_contract(&root)
+        .expect("repository continuation contract passes");
+    StructuralValidator::validate_autospec_run_codex_bounded_handoff(&root)
+        .expect("repository bounded handoff contract passes");
+    StructuralValidator::validate_phase4_adaptive_retry(&root)
+        .expect("repository adaptive retry passes");
+    StructuralValidator::validate_phase4_full_test_suite_gate(&root)
+        .expect("repository full-suite gate passes");
+    StructuralValidator::validate_data_scope_review_lens(&root)
+        .expect("repository data-scope lens passes");
+    StructuralValidator::validate_phase4_cost_epic_parity_lockstep(&root)
+        .expect("repository cost epic parity passes");
+    StructuralValidator::validate_docs_drift_gate_regen_conditional_parity(&root)
+        .expect("repository docs drift conditional parity passes");
+}

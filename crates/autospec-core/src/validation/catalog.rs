@@ -112,6 +112,37 @@ impl ValidationCheck {
             "check_team_personality_contract" => {
                 CheckOwner::RustNative(StructuralCheck::TeamPersonality)
             }
+            "check_closeout_contract" => CheckOwner::RustNative(StructuralCheck::CloseoutContract),
+            "check_phase4_guardian_block_lockstep" => {
+                CheckOwner::RustNative(StructuralCheck::Phase4GuardianBlockLockstep)
+            }
+            "check_phase4_issue_start_summary" => {
+                CheckOwner::RustNative(StructuralCheck::Phase4IssueStartSummary)
+            }
+            "check_phase4_immediate_next_issue_pickup" => {
+                CheckOwner::RustNative(StructuralCheck::Phase4ImmediateNextIssuePickup)
+            }
+            "check_autospec_run_continuation_contract" => {
+                CheckOwner::RustNative(StructuralCheck::AutospecRunContinuation)
+            }
+            "check_autospec_run_codex_bounded_handoff" => {
+                CheckOwner::RustNative(StructuralCheck::AutospecRunCodexBoundedHandoff)
+            }
+            "check_phase4_adaptive_retry" => {
+                CheckOwner::RustNative(StructuralCheck::Phase4AdaptiveRetry)
+            }
+            "check_phase4_full_test_suite_gate" => {
+                CheckOwner::RustNative(StructuralCheck::Phase4FullTestSuite)
+            }
+            "check_data_scope_review_lens" => {
+                CheckOwner::RustNative(StructuralCheck::DataScopeReviewLens)
+            }
+            "check_phase4_cost_epic_parity_lockstep" => {
+                CheckOwner::RustNative(StructuralCheck::Phase4CostEpicParity)
+            }
+            "check_docs_drift_gate_regen_conditional_parity" => {
+                CheckOwner::RustNative(StructuralCheck::DocsDriftGateRegenConditionalParity)
+            }
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)
@@ -220,6 +251,17 @@ pub enum StructuralCheck {
     TeamPersonalityIssueTemplate,
     TeamPersonalityPhase4AndDocs,
     TeamPersonality,
+    CloseoutContract,
+    Phase4GuardianBlockLockstep,
+    Phase4IssueStartSummary,
+    Phase4ImmediateNextIssuePickup,
+    AutospecRunContinuation,
+    AutospecRunCodexBoundedHandoff,
+    Phase4AdaptiveRetry,
+    Phase4FullTestSuite,
+    DataScopeReviewLens,
+    Phase4CostEpicParity,
+    DocsDriftGateRegenConditionalParity,
     StopMode,
     KeywordRouting,
     GapRemediation,

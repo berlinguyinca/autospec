@@ -417,6 +417,65 @@ fn catalog_assigns_autonomous_and_team_policy_contracts_to_rust_owners() {
 }
 
 #[test]
+fn catalog_assigns_phase4_static_policy_contracts_to_rust_owners() {
+    let catalog = ValidationCatalog::standard();
+
+    for (id, owner) in [
+        ("check_closeout_contract", StructuralCheck::CloseoutContract),
+        (
+            "check_phase4_guardian_block_lockstep",
+            StructuralCheck::Phase4GuardianBlockLockstep,
+        ),
+        (
+            "check_phase4_issue_start_summary",
+            StructuralCheck::Phase4IssueStartSummary,
+        ),
+        (
+            "check_phase4_immediate_next_issue_pickup",
+            StructuralCheck::Phase4ImmediateNextIssuePickup,
+        ),
+        (
+            "check_autospec_run_continuation_contract",
+            StructuralCheck::AutospecRunContinuation,
+        ),
+        (
+            "check_autospec_run_codex_bounded_handoff",
+            StructuralCheck::AutospecRunCodexBoundedHandoff,
+        ),
+        (
+            "check_phase4_adaptive_retry",
+            StructuralCheck::Phase4AdaptiveRetry,
+        ),
+        (
+            "check_phase4_full_test_suite_gate",
+            StructuralCheck::Phase4FullTestSuite,
+        ),
+        (
+            "check_data_scope_review_lens",
+            StructuralCheck::DataScopeReviewLens,
+        ),
+        (
+            "check_phase4_cost_epic_parity_lockstep",
+            StructuralCheck::Phase4CostEpicParity,
+        ),
+        (
+            "check_docs_drift_gate_regen_conditional_parity",
+            StructuralCheck::DocsDriftGateRegenConditionalParity,
+        ),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::RustNative(owner)),
+            "{id} must have a direct Rust owner"
+        );
+    }
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![

@@ -75,6 +75,33 @@ impl StructuralValidator {
                 Self::validate_team_personality_phase4_and_docs_contract(root)
             }
             StructuralCheck::TeamPersonality => Self::validate_team_personality_contract(root),
+            StructuralCheck::CloseoutContract => Self::validate_closeout_contract(root),
+            StructuralCheck::Phase4GuardianBlockLockstep => {
+                Self::validate_phase4_guardian_block_lockstep(root)
+            }
+            StructuralCheck::Phase4IssueStartSummary => {
+                Self::validate_phase4_issue_start_summary(root)
+            }
+            StructuralCheck::Phase4ImmediateNextIssuePickup => {
+                Self::validate_phase4_immediate_next_issue_pickup(root)
+            }
+            StructuralCheck::AutospecRunContinuation => {
+                Self::validate_autospec_run_continuation_contract(root)
+            }
+            StructuralCheck::AutospecRunCodexBoundedHandoff => {
+                Self::validate_autospec_run_codex_bounded_handoff(root)
+            }
+            StructuralCheck::Phase4AdaptiveRetry => Self::validate_phase4_adaptive_retry(root),
+            StructuralCheck::Phase4FullTestSuite => {
+                Self::validate_phase4_full_test_suite_gate(root)
+            }
+            StructuralCheck::DataScopeReviewLens => Self::validate_data_scope_review_lens(root),
+            StructuralCheck::Phase4CostEpicParity => {
+                Self::validate_phase4_cost_epic_parity_lockstep(root)
+            }
+            StructuralCheck::DocsDriftGateRegenConditionalParity => {
+                Self::validate_docs_drift_gate_regen_conditional_parity(root)
+            }
             StructuralCheck::StopMode => Self::validate_stop_mode_sections(root),
             StructuralCheck::KeywordRouting => Self::validate_keyword_routing_section(root),
             StructuralCheck::GapRemediation => Self::validate_gap_remediation_sections(root),
@@ -1267,6 +1294,328 @@ impl StructuralValidator {
         Self::validate_team_personality_phase4_and_docs_contract(root)
     }
 
+    pub fn validate_closeout_contract(root: &Path) -> Result<(), String> {
+        for (relative, required) in [
+            ("AGENTS.md", "AGENTS.md missing at repo root"),
+            (
+                "skills/autospec-run/prompts/implementer-contract.md",
+                "skills/autospec-run/prompts/implementer-contract.md: file missing",
+            ),
+        ] {
+            if !root.join(relative).is_file() {
+                return Err(required.to_string());
+            }
+        }
+        let agents = root.join("AGENTS.md");
+        let contract = root.join("skills/autospec-run/prompts/implementer-contract.md");
+        for (path, relative, requirements) in [
+            (
+                &agents,
+                "AGENTS.md",
+                [
+                    "## Closeout report contract",
+                    "### Consumer contract",
+                    "[verified]",
+                    "[assumed]",
+                    "[couldnt-verify]",
+                    "[likely-wrong]",
+                    "Before/after",
+                    "One likely hidden failure",
+                    "runtime proof, not",
+                    "static`/build-only",
+                ],
+            ),
+            (
+                &contract,
+                "skills/autospec-run/prompts/implementer-contract.md",
+                [
+                    "## Closeout report",
+                    "Closeout evidence:",
+                    "[verified]",
+                    "[assumed]",
+                    "[couldnt-verify]",
+                    "[likely-wrong]",
+                    "Before/after",
+                    "One likely hidden failure",
+                    "runtime proof, not",
+                    "static`/build-only",
+                ],
+            ),
+        ] {
+            let document = read(path)?;
+            for required in requirements {
+                if !document.contains(required) {
+                    return Err(format!(
+                        "{relative}: closeout contract missing required anchor: {required}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_phase4_guardian_block_lockstep(root: &Path) -> Result<(), String> {
+        let canonical_relative = "skills/autospec/SKILL.md";
+        let canonical_path = root.join(canonical_relative);
+        if !canonical_path.is_file() {
+            return Err(format!("guardian lockstep: {canonical_relative} missing"));
+        }
+        let canonical = guardian_block(&read(&canonical_path)?);
+        if canonical.is_empty() {
+            return Err(format!(
+                "guardian lockstep: no guardian block found in {canonical_relative}"
+            ));
+        }
+        for relative in [
+            "skills/autospec/codex/prompt.md",
+            "skills/autospec/opencode/agent.md",
+            "skills/autospec-run/SKILL.md",
+            "skills/autospec-run/codex/prompt.md",
+            "skills/autospec-run/opencode/agent.md",
+        ] {
+            let path = root.join(relative);
+            if !path.is_file() {
+                return Err(format!("guardian lockstep: {relative} missing"));
+            }
+            if guardian_block(&read(&path)?) != canonical {
+                return Err(format!(
+                    "guardian lockstep: {relative} guardian block diverges from {canonical_relative}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_phase4_issue_start_summary(root: &Path) -> Result<(), String> {
+        require_literal_contract(
+            root,
+            &PHASE4_ADAPTER_FILES,
+            &[
+                ("Issue start summary", "Issue start summary directive"),
+                (
+                    "[monitor] starting #$ISSUE:",
+                    "[monitor] starting issue summary line",
+                ),
+                ("[monitor] goal:", "[monitor] goal summary line"),
+                ("[monitor] smoke:", "[monitor] smoke summary line"),
+                ("[monitor] scope:", "[monitor] scope summary line"),
+            ],
+        )
+    }
+
+    pub fn validate_phase4_immediate_next_issue_pickup(root: &Path) -> Result<(), String> {
+        require_literal_contract(
+            root,
+            &PHASE4_ADAPTER_FILES,
+            &[
+                (
+                    "Immediate next-issue pickup: NO SLEEP after process(ISSUE)",
+                    "immediate next-issue pickup directive",
+                ),
+                (
+                    "fresh queue scan can pick any issue unblocked",
+                    "fresh queue scan/unblocked issue rationale",
+                ),
+            ],
+        )
+    }
+
+    pub fn validate_autospec_run_continuation_contract(root: &Path) -> Result<(), String> {
+        require_literal_contract(
+            root,
+            &AUTOSPEC_RUN_ADAPTER_FILES,
+            &[
+                (
+                    "BATCH_COMPLETE is a continuation signal, not a terminal state",
+                    "BATCH_COMPLETE continuation contract",
+                ),
+                (
+                    "reasoning:deep may reduce a single monitor batch to one issue",
+                    "reasoning:deep single-monitor-batch wording",
+                ),
+                (
+                    "the orchestrator MUST relaunch automatically until ALL_DONE",
+                    "automatic relaunch-until-ALL_DONE directive",
+                ),
+                (
+                    "Never tell the operator to rerun `/autospec-run` after BATCH_COMPLETE",
+                    "no-manual-rerun directive",
+                ),
+            ],
+        )
+    }
+
+    pub fn validate_autospec_run_codex_bounded_handoff(root: &Path) -> Result<(), String> {
+        for relative in AUTOSPEC_RUN_ADAPTER_FILES {
+            let path = root.join(relative);
+            if !path.is_file() {
+                return Err(format!("{relative}: required file missing"));
+            }
+            let document = read(&path)?;
+            if !document.contains("Codex native subagents with explicit `agent_type`, `model`, or `reasoning_effort` MUST use a bounded handoff, not a full-history fork") {
+                return Err(format!("{relative} missing Codex bounded handoff directive"));
+            }
+            if document.contains(
+                "for Codex native subagents, fork/inherit the current conversation context",
+            ) {
+                return Err(format!("{relative} still directs Codex native subagents to fork/inherit the parent context"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_phase4_adaptive_retry(root: &Path) -> Result<(), String> {
+        require_literal_contract(
+            root,
+            &AUTOSPEC_RUN_ADAPTER_FILES,
+            &[
+                ("RETRY-LOOP:begin", "RETRY-LOOP:begin marker"),
+                ("MAX_IMPL_RETRIES", "MAX_IMPL_RETRIES variable"),
+                ("directive_context", "directive_context variable"),
+                ("Retry attempt", "'Retry attempt' findings block"),
+                (
+                    "Implementer hit max retries; manual intervention needed",
+                    "manual-intervention exhaustion comment",
+                ),
+                ("auto-implement-active", "lock-label release on exhaustion"),
+            ],
+        )
+    }
+
+    pub fn validate_phase4_full_test_suite_gate(root: &Path) -> Result<(), String> {
+        require_literal_contract(
+            root,
+            &PHASE4_ADAPTER_FILES,
+            &[
+                ("Full test suite gate", "Full test suite gate section"),
+                (
+                    "AUTOSPEC_FULL_TEST_COMMAND",
+                    "AUTOSPEC_FULL_TEST_COMMAND override",
+                ),
+                ("scripts/validate.sh", "scripts/validate.sh fallback command"),
+                (
+                    "If the full suite fails, fix the failure, recommit, rerun the full suite, and repeat",
+                    "fix/recommit/rerun failure loop",
+                ),
+                ("Do NOT dispatch LGTM review", "pre-review block on failing full suite"),
+                (
+                    "Do NOT run `gh pr merge`",
+                    "pre-merge block on failing full suite",
+                ),
+                (
+                    "Record the exact full-suite command and passing output summary",
+                    "verification evidence requirement",
+                ),
+            ],
+        )
+    }
+
+    pub fn validate_data_scope_review_lens(root: &Path) -> Result<(), String> {
+        require_literal_contract(
+            root,
+            &PHASE4_ADAPTER_FILES,
+            &[
+                ("data-scope invariant lens", "data-scope invariant lens"),
+                (
+                    "empty optional filters reject unless documented",
+                    "empty optional filter rejection requirement",
+                ),
+                (
+                    "unsupported-filter",
+                    "unsupported-filter evidence requirement",
+                ),
+                ("empty-filter", "empty-filter evidence requirement"),
+                ("job-only", "job-only evidence requirement"),
+                ("sample-only", "sample-only evidence requirement"),
+                ("job+sample", "job+sample evidence requirement"),
+            ],
+        )
+    }
+
+    pub fn validate_phase4_cost_epic_parity_lockstep(root: &Path) -> Result<(), String> {
+        for relative in PHASE4_ADAPTER_FILES {
+            let document = read(&root.join(relative)).unwrap_or_default();
+            if document.contains("AUTOSPEC_BATCH_SIZE:-3") {
+                return Err(format!(
+                    "{relative} still defaults AUTOSPEC_BATCH_SIZE to 3 (D2 requires :-1)"
+                ));
+            }
+            if batch_size_default_three(&document) {
+                return Err(format!(
+                    "{relative} still states batch 'default 3' prose (D2 requires 1)"
+                ));
+            }
+            for (required, failure) in [
+                (
+                    "AUTOSPEC_BATCH_SIZE:-1",
+                    "AUTOSPEC_BATCH_SIZE:-1 default (D2 batch=1)",
+                ),
+                (
+                    "Fresh-subagent-per-issue (canonical Phase 4 path, formerly single-agent absorbed-discipline)",
+                    "fresh-subagent-per-issue canonical prose (D2)",
+                ),
+                (
+                    "The orchestrator NEVER implements in its own context",
+                    "'orchestrator NEVER implements in its own context' (D2)",
+                ),
+                (
+                    "the default is 1 (one issue per subagent)",
+                    "'default is 1 (one issue per subagent)' (D2)",
+                ),
+                (
+                    "reasoning:deep` force-to-1 rule is retained",
+                    "reasoning:deep force-to-1 retention (D2)",
+                ),
+                ("<!-- token-report:begin -->", "token-report:begin marker (D1)"),
+                ("<!-- token-report:end -->", "token-report:end marker (D1)"),
+                ("post-token-report.sh", "post-token-report.sh invocation (D1)"),
+            ] {
+                if !document.contains(required) {
+                    return Err(format!("{relative} missing {failure}"));
+                }
+            }
+            if !token_report_is_pinned(&document) {
+                return Err(format!(
+                    "{relative}: token-report:begin not at pinned slot (must follow admin-merge SUCCESS step 8, precede FAILURE step 9 / batch-done) (D1)"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_docs_drift_gate_regen_conditional_parity(root: &Path) -> Result<(), String> {
+        require_literal_contract(
+            root,
+            &PHASE4_ADAPTER_FILES,
+            &[
+                (
+                    "_REGEN",
+                    "_REGEN gate variable (D2b auto_regenerate conditional)",
+                ),
+                (
+                    "resolveAutoRegenerate",
+                    "resolveAutoRegenerate import in gate block (D2b)",
+                ),
+                (
+                    "docs: regeneration skipped (auto_regenerate=false)",
+                    "OFF-path log 'docs: regeneration skipped (auto_regenerate=false)' (D2b)",
+                ),
+                (
+                    "<!-- docs-drift-gate:begin -->",
+                    "docs-drift-gate:begin marker (D2b)",
+                ),
+                (
+                    "<!-- docs-drift-gate:end -->",
+                    "docs-drift-gate:end marker (D2b)",
+                ),
+                (
+                    "doc-orchestrator.mjs",
+                    "doc-orchestrator.mjs inside gate (D2b regenerate path must be preserved)",
+                ),
+            ],
+        )
+    }
+
     pub fn validate_policy_sections(root: &Path) -> Result<(), String> {
         Self::validate_stop_mode_sections(root)?;
         Self::validate_gap_remediation_sections(root)?;
@@ -1724,6 +2073,88 @@ fn require_content(path: &Path, expected: &str, failure: String) -> Result<(), S
     } else {
         Err(failure)
     }
+}
+
+const PHASE4_ADAPTER_FILES: [&str; 6] = [
+    "skills/autospec/SKILL.md",
+    "skills/autospec/codex/prompt.md",
+    "skills/autospec/opencode/agent.md",
+    "skills/autospec-run/SKILL.md",
+    "skills/autospec-run/codex/prompt.md",
+    "skills/autospec-run/opencode/agent.md",
+];
+
+const AUTOSPEC_RUN_ADAPTER_FILES: [&str; 3] = [
+    "skills/autospec-run/SKILL.md",
+    "skills/autospec-run/codex/prompt.md",
+    "skills/autospec-run/opencode/agent.md",
+];
+
+fn require_literal_contract(
+    root: &Path,
+    files: &[&str],
+    requirements: &[(&str, &str)],
+) -> Result<(), String> {
+    for relative in files {
+        let path = root.join(relative);
+        if !path.is_file() {
+            return Err(format!("{relative}: required file missing"));
+        }
+        let document = read(&path)?;
+        for (required, failure) in requirements {
+            if !document.contains(required) {
+                return Err(format!("{relative} missing {failure}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn guardian_block(document: &str) -> String {
+    let mut depth = 0i32;
+    let mut lines = Vec::new();
+    for line in document.lines() {
+        if line.contains("<!-- guardian-block:begin -->") {
+            depth += 1;
+            if depth == 1 {
+                continue;
+            }
+        }
+        if line.contains("<!-- guardian-block:end -->") {
+            if depth == 1 {
+                depth = 0;
+                continue;
+            }
+            depth -= 1;
+        }
+        if depth >= 1 {
+            lines.push(line);
+        }
+    }
+    lines.join("\n")
+}
+
+fn batch_size_default_three(document: &str) -> bool {
+    document.lines().any(|line| {
+        line.contains("AUTOSPEC_BATCH_SIZE` issues")
+            && (line.contains("default 3") || line.contains("default: 3"))
+    })
+}
+
+fn token_report_is_pinned(document: &str) -> bool {
+    let mut after_success = false;
+    for line in document.lines() {
+        if line.starts_with("8. SUCCESS") || line.contains("> 8. SUCCESS") {
+            after_success = true;
+        }
+        if line.starts_with("9. FAILURE") || line.contains("> 9. FAILURE") {
+            after_success = false;
+        }
+        if after_success && line.contains("token-report:begin") {
+            return true;
+        }
+    }
+    false
 }
 
 fn require_line_prefix(path: &Path, expected: &str, failure: String) -> Result<(), String> {
