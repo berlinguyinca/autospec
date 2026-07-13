@@ -267,8 +267,8 @@ Commit: `feat: run structural validation in Rust`.
 **Consumes:** frozen catalog and execution primitives.
 
 **Produces:** one non-shell owner for all 149 frozen IDs plus reachability metadata
-that distinguishes the 142 top-level checks from six internal components and one
-legacy-unreachable definition.
+that distinguishes 136 ordered calls of 132 unique top-level checks from sixteen
+internal components and one legacy-unreachable definition.
 
 - [ ] **Step 1: Write failing owner-coverage tests.**
 
@@ -290,7 +290,8 @@ fn missing_required_tool_is_a_required_failure_not_a_skip() {
 #[test]
 fn executable_plan_keeps_legacy_reachability_without_expanding_it() {
     let plan = ValidationPlan::build(&ValidationCatalog::standard(), full_options()).unwrap();
-    assert_eq!(plan.ids().len(), 142);
+    assert_eq!(plan.ids().len(), 136);
+    assert_eq!(plan.unique_ids().len(), 132);
     assert!(!plan.ids().contains(&"check_architecture_fitness_engine"));
 }
 ```

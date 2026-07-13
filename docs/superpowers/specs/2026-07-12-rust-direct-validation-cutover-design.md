@@ -35,10 +35,12 @@ cutover work is to move all 149 gates to direct owners, wire that runner, and de
 the shell body.
 
 The frozen 149-name catalog is a definition audit, not the legacy execution list.
-The shell invokes 142 top-level checks. Six named helpers execute only through an
-aggregating top-level check, and `check_architecture_fitness_engine` is defined but
-never invoked. Direct execution must retain all 149 symbols for ownership auditing
-without publishing duplicate results or introducing the unreachable gate.
+The shell invokes 132 unique top-level checks in 136 ordered call occurrences (four
+top-level calls are intentionally repeated). Sixteen named helpers execute through
+per-skill or aggregating top-level checks, and `check_architecture_fitness_engine` is
+defined but never invoked. Direct execution must retain all 149 symbols for ownership
+auditing, preserve repeated top-level occurrences, and avoid introducing the
+unreachable gate.
 
 ## Decisions
 
@@ -52,9 +54,10 @@ without publishing duplicate results or introducing the unreachable gate.
 3. Validation checks are represented as typed Rust definitions. A definition declares
    its stable ID, requiredness, input selection, execution mode, reachability, and
    deterministic display order. Reachability is `top_level`, `internal_component`, or
-   `legacy_unreachable`; only top-level checks emit executor results. Execution modes
-   are Rust-native checks and explicit external-tool invocations. Arbitrary `sh -c`
-   commands are not allowed.
+   `legacy_unreachable`; only top-level checks emit executor results. An executable
+   plan also records an occurrence index so repeated top-level calls remain distinct.
+   Execution modes are Rust-native checks and explicit external-tool invocations.
+   Arbitrary `sh -c` commands are not allowed.
 4. Rust-native checks replace pure shell logic such as skill discovery, lock-step
    comparison, required-file checks, and deterministic text/content assertions.
    Typed external-tool checks invoke the existing explicit command and arguments
@@ -125,7 +128,8 @@ platform tools each check intentionally calls.
   for legacy and Rust full, fast, scoped, and parallel cases before removal.
 - Every one of the 149 frozen validation symbols has a Rust-native or typed
   external-tool owner; the manifest rejects missing or duplicate check IDs, and the
-  executable plan contains only the 142 legacy top-level checks.
+  executable plan contains only the 136 ordered invocations of the 132 unique legacy
+  top-level checks.
 - `scripts/validate.sh`, `run_legacy_shell`, `AUTOSPEC_FORCE_LEGACY_SHELL`,
   `AUTOSPEC_VALIDATE_FROM_SHELL`, `AUTOSPEC_VALIDATE_FROM_RUST`, and
   `AUTOSPEC_VALIDATE_LEGACY_ACTIVE` no longer exist in tracked source, docs, or tests.
