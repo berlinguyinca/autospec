@@ -117,6 +117,59 @@ YAML
   echo "$output" | grep -Eq '^sample-app-[A-Za-z0-9_.-]+ http://127\.0\.0\.1:[0-9]+$'
 }
 
+@test "init creates a conservative agent runtime manifest" {
+  repo="$TEST_TMP/init-repo"
+  mkdir -p "$repo"
+
+  run bash "$BIN" init --repo "$repo"
+
+  [ "$status" -eq 0 ]
+  [ -f "$repo/.agent-runtime.yml" ]
+  grep -q '^version: 1$' "$repo/.agent-runtime.yml"
+  grep -q '^name: init-repo$' "$repo/.agent-runtime.yml"
+  grep -q '^default_mode: local$' "$repo/.agent-runtime.yml"
+  grep -q 'command: sh -c '\''true'\''' "$repo/.agent-runtime.yml"
+  grep -q 'down: sh -c '\''true'\''' "$repo/.agent-runtime.yml"
+  grep -q 'env: AGENT_FRONTEND_PORT' "$repo/.agent-runtime.yml"
+  grep -q 'AUTOSPEC_PUBLIC_URL' "$repo/.agent-runtime.yml"
+  grep -q "created $repo/.agent-runtime.yml" <<< "$output"
+}
+
+@test "init refuses to overwrite an existing runtime manifest without force" {
+  repo="$TEST_TMP/init-existing"
+  mkdir -p "$repo"
+  printf 'custom\n' > "$repo/.agent-runtime.yml"
+
+  run bash "$BIN" init --repo "$repo"
+
+  [ "$status" -eq 4 ]
+  [ "$(cat "$repo/.agent-runtime.yml")" = "custom" ]
+  echo "$output" | grep -q "runtime manifest already exists"
+}
+
+@test "init force overwrites an existing runtime manifest" {
+  repo="$TEST_TMP/init-force"
+  mkdir -p "$repo"
+  printf 'custom\n' > "$repo/.agent-runtime.yml"
+
+  run bash "$BIN" init --repo "$repo" --force
+
+  [ "$status" -eq 0 ]
+  grep -q '^version: 1$' "$repo/.agent-runtime.yml"
+  ! grep -q '^custom$' "$repo/.agent-runtime.yml"
+}
+
+@test "init can create an autospec runtime manifest" {
+  repo="$TEST_TMP/init-autospec"
+  mkdir -p "$repo"
+
+  run bash "$BIN" init --repo "$repo" --manifest autospec
+
+  [ "$status" -eq 0 ]
+  [ -f "$repo/.autospec/runtime.yml" ]
+  grep -q '^name: init-autospec$' "$repo/.autospec/runtime.yml"
+}
+
 @test "session provisions env for a command and tears it down after exit" {
   repo="$TEST_TMP/repo"
   mkdir -p "$repo"
@@ -138,7 +191,19 @@ YAML
 
   [ "$status" -eq 0 ]
   [ "$(cat "$repo/passthrough.txt")" = "passthrough" ]
+  [ ! -f "$repo/.agent-runtime.yml" ]
   ! echo "$output" | grep -q "no runtime manifest"
+}
+
+@test "session auto-init can create a manifest before provisioning" {
+  repo="$TEST_TMP/session-init"
+  mkdir -p "$repo"
+
+  AUTOSPEC_ENV_AUTO_INIT=1 run bash "$BIN" session --repo "$repo" -- sh -c 'printf "%s" "$AUTOSPEC_PUBLIC_URL" > initialized-url.txt'
+
+  [ "$status" -eq 0 ]
+  [ -f "$repo/.agent-runtime.yml" ]
+  grep -Eq '^http://127\.0\.0\.1:[0-9]+$' "$repo/initialized-url.txt"
 }
 
 @test "down runs the selected mode teardown command" {
