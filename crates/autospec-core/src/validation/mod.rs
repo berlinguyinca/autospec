@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod command;
 pub mod options;
 pub mod results;
+pub mod runner;
 pub mod structural;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,4 +28,5 @@ pub use results::{
     CheckResult, ValidationAggregate, ValidationExecutionAggregate, ValidationExecutionReport,
     ValidationObservation, ValidationReport,
 };
+pub use runner::ValidationRunner;
 pub use structural::StructuralValidator;

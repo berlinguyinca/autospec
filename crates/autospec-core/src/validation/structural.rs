@@ -2,9 +2,33 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+use super::catalog::StructuralCheck;
+
 pub struct StructuralValidator;
 
 impl StructuralValidator {
+    pub fn run(check: StructuralCheck, root: &Path) -> Result<(), String> {
+        match check {
+            StructuralCheck::CatalogSlot => {
+                Err("validation structural owner is not implemented".to_string())
+            }
+            StructuralCheck::TrioLockstep => Self::validate_trio_lockstep(root),
+            StructuralCheck::DuoLockstep => Self::validate_duo_lockstep(root),
+            StructuralCheck::RequiredTrioFiles => Self::validate_required_trio_files(root),
+            StructuralCheck::StopMode => Self::validate_stop_mode_sections(root),
+            StructuralCheck::KeywordRouting => Self::validate_keyword_routing_section(root),
+            StructuralCheck::GapRemediation => Self::validate_gap_remediation_sections(root),
+            StructuralCheck::ReviewRemediation => Self::validate_review_remediation_sections(root),
+            StructuralCheck::EnforcementDefaults => {
+                Self::validate_enforcement_defaults_sections(root)
+            }
+            StructuralCheck::SelfUpdateTrio => Self::validate_trio_self_update_sections(root),
+            StructuralCheck::SelfUpdateDuo => Self::validate_duo_self_update_sections(root),
+            StructuralCheck::CodexSkillsInstall => Self::validate_codex_skills_install(root),
+            StructuralCheck::SharedScriptInstall => Self::validate_shared_script_install(root),
+        }
+    }
+
     pub fn validate_root(root: &Path) -> Result<(), String> {
         Self::validate_required_trio_files(root)?;
         Self::validate_trio_lockstep(root)?;

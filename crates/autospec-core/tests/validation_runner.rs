@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::PathBuf;
 
-use autospec_core::validation::{CheckResult, ToolCommand, ValidationExecutionReport};
+use autospec_core::validation::{
+    CheckModes, CheckOwner, CheckResult, StructuralCheck, ToolCommand, ValidationCatalog,
+    ValidationCheck, ValidationExecutionReport, ValidationRunner,
+};
 
 #[test]
 fn tool_commands_reject_shell_execution_shapes() {
@@ -106,7 +109,48 @@ fn execution_report_aggregates_required_failures_as_schema_two() {
         .contains("\"results\""));
 }
 
+#[test]
+fn runner_executes_rust_owners_in_catalog_order_and_fails_unimplemented_slots() {
+    let catalog = ValidationCatalog::from_checks(vec![
+        ValidationCheck {
+            id: "check_lockstep",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            owner: CheckOwner::RustNative(StructuralCheck::TrioLockstep),
+        },
+        ValidationCheck {
+            id: "check_unported",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            owner: CheckOwner::RustNative(StructuralCheck::CatalogSlot),
+        },
+    ]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("valid-skill"));
+
+    assert_eq!(
+        report
+            .results
+            .iter()
+            .map(|result| result.id.as_str())
+            .collect::<Vec<_>>(),
+        ["check_lockstep", "check_unported"]
+    );
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 0);
+    assert_eq!(report.results[1].exit_code, Some(1));
+    assert!(report.results[1].stderr_bytes > 0);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")
+}
+
+fn validation_fixture(name: &str) -> PathBuf {
+    repository_root()
+        .join("crates/autospec-cli/tests/fixtures/validation-cutover")
+        .join(name)
 }

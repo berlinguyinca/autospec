@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use autospec_core::validation::StructuralValidator;
+use autospec_core::validation::{StructuralCheck, StructuralValidator};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -46,6 +46,17 @@ fn trio_and_duo_lockstep_owners_validate_their_respective_harnesses() {
         .expect("matching trio passes its owner");
     StructuralValidator::validate_duo_lockstep(&fixture("valid-skill"))
         .expect("matching duo passes its owner");
+}
+
+#[test]
+fn structural_dispatch_runs_exactly_the_requested_owner() {
+    StructuralValidator::run(StructuralCheck::TrioLockstep, &fixture("valid-skill"))
+        .expect("trio owner passes through the dispatcher");
+
+    let failure = StructuralValidator::run(StructuralCheck::CatalogSlot, &fixture("valid-skill"))
+        .expect_err("unported catalog slots are not silently treated as valid");
+
+    assert_eq!(failure, "validation structural owner is not implemented");
 }
 
 #[test]
