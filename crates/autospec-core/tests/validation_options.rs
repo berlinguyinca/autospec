@@ -16,9 +16,24 @@ fn options_accept_aliases_default_scope_and_auto_parallelism() {
         .expect("validation options parse");
 
     assert!(options.fast);
-    assert_eq!(options.changed_base.as_deref(), Some("origin/main"));
+    assert_eq!(options.changed_base.as_deref(), Some("v1"));
     assert_eq!(options.since.as_deref(), Some("v1"));
     assert_eq!(options.jobs, Jobs::Auto);
+}
+
+#[test]
+fn options_preserve_the_last_explicit_scope_base() {
+    let since_then_changed =
+        ValidationOptions::parse(["--since", "v1", "--changed"]).expect("validation options parse");
+    let changed_then_explicit =
+        ValidationOptions::parse(["--changed", "--since", "v1", "--changed=origin/main"])
+            .expect("validation options parse");
+
+    assert_eq!(since_then_changed.changed_base.as_deref(), Some("v1"));
+    assert_eq!(
+        changed_then_explicit.changed_base.as_deref(),
+        Some("origin/main")
+    );
 }
 
 #[test]

@@ -52,12 +52,15 @@ impl ValidationOptions {
                     options.execution_requested = true;
                 }
                 "--changed" => {
-                    options.changed_base = Some(DEFAULT_CHANGED_BASE.to_string());
+                    if options.changed_base.is_none() {
+                        options.changed_base = Some(DEFAULT_CHANGED_BASE.to_string());
+                    }
                     options.execution_requested = true;
                 }
                 "--since" => {
-                    options.since =
-                        Some(required_value(&arguments, &mut index, "--since", "a ref")?);
+                    let reference = required_value(&arguments, &mut index, "--since", "a ref")?;
+                    options.changed_base = Some(reference.clone());
+                    options.since = Some(reference);
                     options.execution_requested = true;
                 }
                 "--jobs" => {
