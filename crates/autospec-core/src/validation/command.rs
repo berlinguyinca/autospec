@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::time::Instant;
 
 use super::results::{output_digest, CheckResult};
@@ -88,40 +89,81 @@ impl ToolCommand {
             .envs(self.environment.iter().map(|(key, value)| (key, value)))
             .current_dir(self.working_directory_for(root))
             .output();
-        let elapsed_ms = started.elapsed().as_millis();
 
-        match output {
-            Ok(output) => {
-                let stdout = output.stdout;
-                let stderr = output.stderr;
-                CapturedCheckResult {
-                    result: CheckResult {
-                        id,
-                        required,
-                        exit_code: output.status.code(),
-                        elapsed_ms,
-                        spawn_count: 1,
-                        stdout_bytes: stdout.len(),
-                        stderr_bytes: stderr.len(),
-                        output_digest: output_digest(&stdout, &stderr),
-                    },
-                    stdout,
+        captured_result(id, required, started, output)
+    }
+
+    pub(crate) fn execute_in_with_stdin_capturing(
+        &self,
+        id: impl Into<String>,
+        required: bool,
+        root: &Path,
+        stdin_bytes: &[u8],
+    ) -> CapturedCheckResult {
+        let id = id.into();
+        let started = Instant::now();
+        let mut command = Command::new(&self.program);
+        command
+            .args(&self.args)
+            .envs(self.environment.iter().map(|(key, value)| (key, value)))
+            .current_dir(self.working_directory_for(root))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let output = match command.spawn() {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(stdin_bytes);
                 }
+                child.wait_with_output()
             }
-            Err(_) => CapturedCheckResult {
+            Err(error) => Err(error),
+        };
+
+        captured_result(id, required, started, output)
+    }
+}
+
+fn captured_result(
+    id: String,
+    required: bool,
+    started: Instant,
+    output: std::io::Result<Output>,
+) -> CapturedCheckResult {
+    let elapsed_ms = started.elapsed().as_millis();
+
+    match output {
+        Ok(output) => {
+            let stdout = output.stdout;
+            let stderr = output.stderr;
+            CapturedCheckResult {
                 result: CheckResult {
                     id,
                     required,
-                    exit_code: None,
+                    exit_code: output.status.code(),
                     elapsed_ms,
-                    spawn_count: 0,
-                    stdout_bytes: 0,
-                    stderr_bytes: 0,
-                    output_digest: output_digest(&[], &[]),
+                    spawn_count: 1,
+                    stdout_bytes: stdout.len(),
+                    stderr_bytes: stderr.len(),
+                    output_digest: output_digest(&stdout, &stderr),
                 },
-                stdout: Vec::new(),
-            },
+                stdout,
+            }
         }
+        Err(_) => CapturedCheckResult {
+            result: CheckResult {
+                id,
+                required,
+                exit_code: None,
+                elapsed_ms,
+                spawn_count: 0,
+                stdout_bytes: 0,
+                stderr_bytes: 0,
+                output_digest: output_digest(&[], &[]),
+            },
+            stdout: Vec::new(),
+        },
     }
 }
 

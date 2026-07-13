@@ -29,6 +29,7 @@ pub enum ExternalCheck {
     ClaimGuardContract,
     ClaimCasGuard,
     WatchdogWorktreeGc,
+    BlockExpansion,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -77,6 +78,7 @@ impl ExternalCheck {
             Self::ClaimGuardContract => run_claim_guard_contract(id, required, root),
             Self::ClaimCasGuard => run_claim_cas_guard(id, required, root),
             Self::WatchdogWorktreeGc => run_watchdog_worktree_gc(id, required, root),
+            Self::BlockExpansion => run_block_expansion(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -870,6 +872,134 @@ fn run_watchdog_worktree_gc(id: &str, required: bool, root: &Path) -> CheckResul
 
     let bats = run_bats_suites(id, required, root, &[SUITE]);
     aggregate(id, required, vec![syntax, bats])
+}
+
+fn run_block_expansion(id: &str, required: bool, root: &Path) -> CheckResult {
+    const EXPANDER: &str = "scripts/expand-skill-blocks.sh";
+    const GOLDEN_DIRECTORY: &str = "tests/fixtures/skill-goldens";
+    const MEMBERS: &[(&str, &str)] = &[
+        ("SKILL.md", "SKILL.md"),
+        ("codex/prompt.md", "codex.prompt.md"),
+        ("opencode/agent.md", "opencode.agent.md"),
+    ];
+
+    if !root.join(EXPANDER).is_file() {
+        return failure(
+            id,
+            required,
+            "check_block_expansion: scripts/expand-skill-blocks.sh missing (fail closed)",
+        );
+    }
+
+    let mut skill_directories = fs::read_dir(root.join("skills"))
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    skill_directories.sort();
+
+    let mut commands = Vec::new();
+    let mut mismatches = Vec::new();
+    for skill_directory in skill_directories {
+        let Some(skill) = skill_directory.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        for (member, suffix) in MEMBERS {
+            let source = skill_directory.join(member);
+            if !source.is_file() {
+                continue;
+            }
+            let golden_relative = format!("{GOLDEN_DIRECTORY}/{skill}.{suffix}.sha256");
+            let golden = root.join(&golden_relative);
+            if !golden.is_file() {
+                if *suffix == "SKILL.md" {
+                    return block_expansion_result(
+                        id,
+                        required,
+                        commands,
+                        Some(format!(
+                            "check_block_expansion: no golden for {skill} ({golden_relative} missing — fail closed)"
+                        )),
+                    );
+                }
+                if contains(&source, "<!-- autospec-block:") {
+                    return block_expansion_result(
+                        id,
+                        required,
+                        commands,
+                        Some(format!(
+                            "check_block_expansion: markered member {} has no golden ({golden_relative} missing — fail closed)",
+                            relative_path(root, &source)
+                        )),
+                    );
+                }
+                continue;
+            }
+
+            let expected = fs::read_to_string(&golden)
+                .unwrap_or_default()
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            let source_relative = relative_path(root, &source);
+            let expanded = ToolCommand::new("bash", [EXPANDER, source_relative.as_str()])
+                .expect("block expansion uses static direct argument vectors")
+                .execute_in_capturing(id, required, root);
+            let hashed = ToolCommand::new("shasum", ["-a", "256"])
+                .expect("SHA-256 hashing uses static direct argument vectors")
+                .execute_in_with_stdin_capturing(id, required, root, &expanded.stdout);
+            let got = String::from_utf8_lossy(&hashed.stdout)
+                .split_ascii_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            commands.push(expanded.result);
+            commands.push(hashed.result);
+
+            if got != expected {
+                mismatches.push(format!("{skill}.{suffix}"));
+            }
+        }
+    }
+
+    let failure = (!mismatches.is_empty()).then(|| {
+        format!(
+            "check_block_expansion: sha256 mismatch for members: {}",
+            mismatches.join(" ")
+        )
+    });
+    block_expansion_result(id, required, commands, failure)
+}
+
+fn block_expansion_result(
+    id: &str,
+    required: bool,
+    commands: Vec<CheckResult>,
+    failure_message: Option<String>,
+) -> CheckResult {
+    let mut digest_input = commands
+        .iter()
+        .flat_map(|result| result.output_digest.bytes().chain(std::iter::once(b'\n')))
+        .collect::<Vec<_>>();
+    if let Some(message) = &failure_message {
+        digest_input.extend_from_slice(message.as_bytes());
+    }
+
+    CheckResult::completed(
+        id,
+        required,
+        i32::from(failure_message.is_some()),
+        commands.iter().map(|result| result.elapsed_ms).sum(),
+        commands.iter().map(|result| result.spawn_count).sum(),
+        commands.iter().map(|result| result.stdout_bytes).sum(),
+        commands
+            .iter()
+            .map(|result| result.stderr_bytes)
+            .sum::<usize>()
+            + failure_message.as_ref().map_or(0, |message| message.len()),
+        output_digest(&digest_input, &[]),
+    )
 }
 
 fn run_autospec_sweep_area_contract(id: &str, required: bool, root: &Path) -> CheckResult {

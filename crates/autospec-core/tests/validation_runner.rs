@@ -610,6 +610,40 @@ fn runner_checks_watchdog_gc_contract_with_direct_bash_and_bats_commands() {
 }
 
 #[test]
+fn runner_hashes_expanded_skill_members_without_a_shell_pipeline() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_block_expansion",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::BlockExpansion),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("block-expansion"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 6);
+}
+
+#[test]
+fn runner_reports_block_expansion_golden_mismatches_after_hashing() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_block_expansion",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::BlockExpansion),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("block-expansion-mismatch"));
+
+    assert_eq!(report.results[0].exit_code, Some(1));
+    assert_eq!(report.results[0].spawn_count, 2);
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",
