@@ -61,6 +61,12 @@ impl ValidationCheck {
             "check_autospec_run_regression_review_lockstep" => {
                 CheckOwner::RustNative(StructuralCheck::AutospecRunRegressionReviewLockstep)
             }
+            "check_phase1_bounded_context_contract" => {
+                CheckOwner::RustNative(StructuralCheck::Phase1BoundedContext)
+            }
+            "check_fleet_gui_subcommand_lockstep" => {
+                CheckOwner::RustNative(StructuralCheck::FleetGuiSubcommandLockstep)
+            }
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)
@@ -155,6 +161,8 @@ pub enum StructuralCheck {
     AutospecReviewTierADirectives,
     AutospecRunPrioritySortLockstep,
     AutospecRunRegressionReviewLockstep,
+    Phase1BoundedContext,
+    FleetGuiSubcommandLockstep,
     StopMode,
     KeywordRouting,
     GapRemediation,

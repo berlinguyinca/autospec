@@ -290,3 +290,21 @@ fn autospec_run_review_contracts_lock_the_priority_and_folded_regression_guidanc
         "second TIER_A regression meta-review dispatch still present in skills/autospec-run/SKILL.md (should be folded into reviewer brief)"
     );
 }
+
+#[test]
+fn bounded_context_and_fleet_gui_contracts_are_checked_without_shells() {
+    StructuralValidator::validate_phase1_bounded_context_contract(&fixture("phase1-bounded"))
+        .expect("all Phase 1 adapters carry bounded-context guidance");
+    StructuralValidator::validate_fleet_gui_subcommand_lockstep(&fixture("fleet-gui"))
+        .expect("fleet GUI route is present in every adapter");
+
+    let failure = StructuralValidator::validate_phase1_bounded_context_contract(&fixture(
+        "phase1-bounded-missing-fallback",
+    ))
+    .expect_err("missing context-overflow fallback fails");
+
+    assert_eq!(
+        failure,
+        "skills/autospec-define/codex/prompt.md missing context-overflow fallback directive"
+    );
+}

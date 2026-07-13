@@ -43,6 +43,12 @@ impl StructuralValidator {
             StructuralCheck::AutospecRunRegressionReviewLockstep => {
                 Self::validate_autospec_run_regression_review_lockstep(root)
             }
+            StructuralCheck::Phase1BoundedContext => {
+                Self::validate_phase1_bounded_context_contract(root)
+            }
+            StructuralCheck::FleetGuiSubcommandLockstep => {
+                Self::validate_fleet_gui_subcommand_lockstep(root)
+            }
             StructuralCheck::StopMode => Self::validate_stop_mode_sections(root),
             StructuralCheck::KeywordRouting => Self::validate_keyword_routing_section(root),
             StructuralCheck::GapRemediation => Self::validate_gap_remediation_sections(root),
@@ -642,6 +648,60 @@ impl StructuralValidator {
                 if !document.contains(required) {
                     return Err(format!("{failure} in {display}"));
                 }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_phase1_bounded_context_contract(root: &Path) -> Result<(), String> {
+        for member in [
+            "skills/autospec/SKILL.md",
+            "skills/autospec/codex/prompt.md",
+            "skills/autospec/opencode/agent.md",
+            "skills/autospec-define/SKILL.md",
+            "skills/autospec-define/codex/prompt.md",
+            "skills/autospec-define/opencode/agent.md",
+        ] {
+            let document = read(&root.join(member)).unwrap_or_default();
+            for (required, failure) in [
+                (
+                    "Phase 1 bounded-context rule",
+                    "missing Phase 1 bounded-context rule",
+                ),
+                (
+                    "Do NOT fork, inherit, or compact the full parent conversation",
+                    "allows inherited parent conversation in Phase 1",
+                ),
+                (
+                    "fork_context=false",
+                    "missing Codex fresh-context directive",
+                ),
+                (
+                    "context window or remote compact failure",
+                    "missing context-overflow fallback directive",
+                ),
+                (
+                    "bounded local read-only `rg`/file-read investigation",
+                    "missing bounded local fallback directive",
+                ),
+            ] {
+                if !document.contains(required) {
+                    return Err(format!("{member} {failure}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_fleet_gui_subcommand_lockstep(root: &Path) -> Result<(), String> {
+        const NEEDLE: &str = "/autospec-fleet gui";
+        for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+            let path = root.join("skills/autospec-fleet").join(member);
+            let display = format!("skills/autospec-fleet/{member}");
+            if !contains(&path, NEEDLE) {
+                return Err(format!(
+                    "fleet-gui lockstep: '{NEEDLE}' missing in {display}"
+                ));
             }
         }
         Ok(())
