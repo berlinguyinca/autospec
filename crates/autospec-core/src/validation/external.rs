@@ -18,6 +18,7 @@ pub enum ExternalCheck {
     ReviewerReuseLens,
     BashHelpUsage(&'static str),
     SupersessionContract,
+    RunSummaryContract,
 }
 
 impl ExternalCheck {
@@ -35,6 +36,7 @@ impl ExternalCheck {
             Self::ReviewerReuseLens => run_reviewer_reuse_lens(id, required, root),
             Self::BashHelpUsage(script) => run_bash_help_usage(id, required, root, script),
             Self::SupersessionContract => run_supersession_contract(id, required, root),
+            Self::RunSummaryContract => run_run_summary_contract(id, required, root),
         }
     }
 }
@@ -444,6 +446,49 @@ fn run_supersession_contract(id: &str, required: bool, root: &Path) -> CheckResu
         );
     }
     let helper = run_bash_help_usage(id, required, root, SCRIPT);
+    if helper.is_failure() {
+        return helper;
+    }
+    let bats = run_bats_suite(id, required, root, SUITE);
+    aggregate(id, required, vec![helper, bats])
+}
+
+fn run_run_summary_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const HELPER: &str = "scripts/autospec-write-run-summary.sh";
+    const SUITE: &str = "tests/autospec/test_run_summary.bats";
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let relative = format!("skills/autospec/{member}");
+        let path = root.join(&relative);
+        if !path.is_file() {
+            return failure(id, required, &format!("{relative}: required file missing"));
+        }
+        for (required_literal, diagnostic) in [
+            (
+                ".autospec/run-summary.md",
+                "Phase 6 missing .autospec/run-summary.md write directive",
+            ),
+            (
+                "autospec-write-run-summary.sh",
+                "Phase 6 missing autospec-write-run-summary.sh invocation",
+            ),
+            (
+                "(none — converged)",
+                "Phase 6 missing canonical convergence sentinel",
+            ),
+        ] {
+            if !contains(&path, required_literal) {
+                return failure(id, required, &format!("{relative}: {diagnostic}"));
+            }
+        }
+    }
+    if !root.join(SUITE).is_file() {
+        return failure(
+            id,
+            required,
+            "tests/autospec/test_run_summary.bats: bats coverage missing",
+        );
+    }
+    let helper = run_bash_help_usage(id, required, root, HELPER);
     if helper.is_failure() {
         return helper;
     }
