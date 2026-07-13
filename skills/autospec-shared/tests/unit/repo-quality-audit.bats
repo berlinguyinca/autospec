@@ -754,3 +754,24 @@ EOF
     jq -e '.runtime.node.status == "configured but failing"' "$OUT_JSON"
     jq -e '.findings[] | select(.dedupe_key=="runtime-engine:node-version" and (.body | contains(">=20 <23")))' "$OUT_JSON"
 }
+
+@test "audit large-file probe handles spaces and prunes generated state" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    rm -rf "$REPO/src" "$REPO/tests"
+    mkdir -p "$REPO/src/assets/next steps" "$REPO/.autospec/refinements/next-steps" "$REPO/dist"
+    python3 - <<PY
+from pathlib import Path
+Path('$REPO/src/assets/next steps/large artifact.txt').write_text('a' * 530000)
+Path('$REPO/.autospec/refinements/next-steps/generated report.md').write_text('b' * 530000)
+Path('$REPO/dist/bundle.js').write_text('c' * 530000)
+PY
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"No such file"* ]]
+    [[ "$output" != *"integer expression expected"* ]]
+    jq -e '.findings[] | select(.probe=="large-files" and .file=="src/assets/next steps/large artifact.txt")' "$OUT_JSON"
+    run jq -e '.findings[] | select(.probe=="large-files" and (.file | startswith(".autospec/") or startswith("dist/")))' "$OUT_JSON"
+    [ "$status" -ne 0 ]
+}

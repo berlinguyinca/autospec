@@ -1194,16 +1194,18 @@ fi
 # Probe: large files.
 while IFS= read -r f; do
   [ -n "$f" ] || continue
-  size="$(wc -c < "$f" | tr -d ' ')"
-  if [ "$size" -gt 512000 ]; then
-    rel="$(rel_path "$f")"
-    add_finding "large-files" "app-follow-up" "low" "$rel" 0 \
-      "large repository file" \
-      "File is larger than 512 KiB and may indicate generated or bundled content checked into source." \
-      "large-files:$rel"
-  fi
+  rel="$(rel_path "$f")"
+  add_finding "large-files" "app-follow-up" "low" "$rel" 0 \
+    "large repository file" \
+    "File is larger than 512 KiB and may indicate generated or bundled content checked into source." \
+    "large-files:$rel"
 done <<EOF
-$(find "$REPO" \( -path "$REPO/.git" -o -path "$REPO/node_modules" \) -prune -o -type f -print)
+$(find "$REPO" \
+  \( -path "$REPO/.git" -o -path "$REPO/node_modules" -o -path "$REPO/.autospec" \
+    -o -path "$REPO/dist" -o -path "$REPO/build" -o -path "$REPO/coverage" \
+    -o -path "$REPO/.angular" -o -path "$REPO/.next" -o -path "$REPO/out" \
+    -o -path "$REPO/vendor" -o -path "$REPO/public/build" \) -prune -o \
+  -type f -size +512k -print)
 EOF
 
 ndjson_to_array() {
