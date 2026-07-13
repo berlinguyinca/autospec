@@ -70,6 +70,9 @@ impl ValidationCheck {
             "check_autospec_fleet_scripts" => {
                 CheckOwner::ExternalBatch(ExternalCheck::FleetScripts)
             }
+            "check_generated_yaml_parse" => {
+                CheckOwner::ExternalBatch(ExternalCheck::GeneratedYamlParse)
+            }
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)

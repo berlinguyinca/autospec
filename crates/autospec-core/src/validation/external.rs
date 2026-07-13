@@ -11,6 +11,7 @@ pub enum ExternalCheck {
     FleetScripts,
     Frontmatter,
     GapMinerContract,
+    GeneratedYamlParse,
 }
 
 impl ExternalCheck {
@@ -21,6 +22,7 @@ impl ExternalCheck {
             Self::FleetScripts => run_fleet_scripts(id, required, root),
             Self::Frontmatter => run_frontmatter(id, required, root),
             Self::GapMinerContract => run_gap_miner_contract(id, required, root),
+            Self::GeneratedYamlParse => run_generated_yaml_parse(id, required, root),
         }
     }
 }
@@ -221,6 +223,12 @@ fn run_gap_miner_contract(id: &str, required: bool, root: &Path) -> CheckResult 
     run_commands(id, required, root, commands)
 }
 
+fn run_generated_yaml_parse(id: &str, required: bool, root: &Path) -> CheckResult {
+    ToolCommand::new("python3", ["-c", PYTHON_GENERATED_YAML_CHECK])
+        .expect("generated YAML validation has static Python source")
+        .execute_in(id, required, root)
+}
+
 fn trio_directories(root: &Path) -> Vec<PathBuf> {
     let skills_root = root.join("skills");
     let Ok(entries) = fs::read_dir(skills_root) else {
@@ -364,6 +372,27 @@ for line in document.splitlines(True):
 try:
     yaml.safe_load("".join(body))
 except Exception:
+    raise SystemExit(1)
+"#;
+
+const PYTHON_GENERATED_YAML_CHECK: &str = r#"import pathlib
+import sys
+try:
+    import yaml
+except Exception as exc:
+    print(f"PyYAML unavailable: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+failures = []
+root = pathlib.Path(".autospec")
+if root.exists():
+    for path in sorted(list(root.rglob("*.yml")) + list(root.rglob("*.yaml"))):
+        try:
+            with path.open(encoding="utf-8") as handle:
+                yaml.safe_load(handle)
+        except Exception as exc:
+            failures.append(f"{path}: {exc}")
+if failures:
+    print("\n".join(failures), file=sys.stderr)
     raise SystemExit(1)
 "#;
 
