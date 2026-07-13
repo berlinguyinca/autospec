@@ -118,6 +118,7 @@ const STANDARD_CHECK_IDS: &[&str] = &[
     "check_bash_syntax",
     "check_frontmatter",
     "check_required_files",
+    "check_flag_sentinel_docs",
     "check_derive_trio_consistency",
     "check_stop_mode_section",
     "check_keyword_routing_section",

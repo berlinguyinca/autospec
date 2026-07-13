@@ -5,10 +5,14 @@ Source: `scripts/validate.sh` at `5fdc31f9`
 
 ## Frozen catalog
 
-The version-1 catalog contains **148** uniquely named `check_*` gates. Its canonical
+The version-1 catalog contains **149** uniquely named `check_*` gates. Its canonical
 order is the declaration order in `scripts/validate.sh`, which is the only complete,
 stable ordering that includes every named gate. The ordered IDs are checked in at
 `crates/autospec-cli/tests/fixtures/validation-cutover/catalog-v1.json`.
+
+The initial inventory omitted the live `check_flag_sentinel_docs` gate. A complete
+definition-versus-catalog audit on 2026-07-12 restored it immediately after
+`check_required_files`, matching its declaration order in the legacy executor.
 
 `ValidationCatalog::standard()` has one deliberately non-executable catalog slot per
 frozen ID. Every entry is currently required and non-independent; mode selection,

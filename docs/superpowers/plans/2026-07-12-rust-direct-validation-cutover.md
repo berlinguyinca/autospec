@@ -46,7 +46,7 @@
 - Create: `crates/autospec-cli/tests/fixtures/validation-cutover/catalog-v1.json`
 - Create: `docs/reports/2026-07-12-validation-cutover-baseline.md`
 
-**Consumes:** the 148 `check_*` gates in `scripts/validate.sh`.
+**Consumes:** the 149 `check_*` gates in `scripts/validate.sh`.
 
 **Produces:** a checked-in, ordered catalog with one owner slot for every existing gate.
 
@@ -266,7 +266,7 @@ Commit: `feat: run structural validation in Rust`.
 
 **Consumes:** frozen catalog and execution primitives.
 
-**Produces:** one non-shell owner for all 148 frozen IDs.
+**Produces:** one non-shell owner for all 149 frozen IDs.
 
 - [ ] **Step 1: Write failing owner-coverage tests.**
 

@@ -26,12 +26,13 @@ telemetry, daemon lifecycle, and session integration.
 
 ## Current state
 
-`scripts/validate.sh` is a 5,419-line executor with 148 named checks. It currently
-delegates to `autospec validate`, which immediately returns to the shell through
-`run_legacy_shell`. The Rust CLI only supports affected-check planning and captured
-result aggregation. `AUTOSPEC_FORCE_LEGACY_SHELL`, `AUTOSPEC_VALIDATE_FROM_SHELL`,
-`AUTOSPEC_VALIDATE_FROM_RUST`, and `AUTOSPEC_VALIDATE_LEGACY_ACTIVE` exist only to
-prevent recursion in that bridge.
+`scripts/validate.sh` is a 5,419-line executor with 149 named checks. It currently
+owns its legacy shell body directly; the previous recursive Rust-to-shell handoff has
+already been removed. The Rust CLI supports affected-check planning, captured-result
+aggregation, and direct option parsing, while execution-capable options return an
+explicit pending-executor error until the Rust runner is installed. The remaining
+cutover work is to move all 149 gates to direct owners, wire that runner, and delete
+the shell body.
 
 ## Decisions
 
@@ -121,7 +122,7 @@ the platform tools each check intentionally calls.
 
 ## Risks and controls
 
-- **Dropped gate:** A checked-in manifest derived from the current 148 check IDs
+- **Dropped gate:** A checked-in manifest derived from the current 149 check IDs
   blocks deletion until every ID has an explicit Rust-native or external-tool owner.
 - **Shell-injection regression:** External checks use `Command` program and argument
   vectors only; the executor rejects a command string.

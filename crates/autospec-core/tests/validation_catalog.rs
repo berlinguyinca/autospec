@@ -28,7 +28,15 @@ fn catalog_has_one_owner_slot_for_every_frozen_gate() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 148);
+    assert_eq!(frozen_catalog_ids().len(), 149);
+}
+
+#[test]
+fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
+    let ids = frozen_catalog_ids();
+
+    assert_eq!(ids.len(), 149);
+    assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 
 #[test]
