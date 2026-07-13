@@ -527,6 +527,37 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
         Some(&CheckOwner::RustNative(StructuralCheck::BruteForceRuleIds)),
         "check_brute_force_rule_ids must have a direct Rust owner"
     );
+
+    for (id, suite) in [
+        (
+            "check_lint_heredoc_handling",
+            "tests/lint/test_complexity_heredoc.bats",
+        ),
+        (
+            "check_lint_reuse_triage",
+            "tests/lint/test_reuse_triage.bats",
+        ),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(suite))),
+            "{id} must have a typed Bats owner"
+        );
+    }
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_reviewer_reuse_lens")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)),
+        "check_reviewer_reuse_lens must have a typed external owner"
+    );
 }
 
 #[test]

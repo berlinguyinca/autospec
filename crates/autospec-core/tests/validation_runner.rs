@@ -327,6 +327,42 @@ fn runner_checks_release_verdict_with_direct_bash_and_bats_commands() {
     assert_eq!(report.results[0].spawn_count, 2);
 }
 
+#[test]
+fn runner_skips_missing_bats_but_uses_a_direct_bats_command_when_available() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_lint_heredoc_handling",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
+            "tests/compute-release-verdict.bats",
+        )),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("release-verdict-script"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!(report.results[0].spawn_count <= 1);
+}
+
+#[test]
+fn runner_checks_reviewer_reuse_policy_before_running_its_bats_suite() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_reviewer_reuse_lens",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("reviewer-reuse-lens"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!(report.results[0].spawn_count <= 1);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")

@@ -124,6 +124,15 @@ impl ValidationCheck {
             "check_brute_force_rule_ids" => {
                 CheckOwner::RustNative(StructuralCheck::BruteForceRuleIds)
             }
+            "check_lint_heredoc_handling" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
+                "tests/lint/test_complexity_heredoc.bats",
+            )),
+            "check_lint_reuse_triage" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
+                "tests/lint/test_reuse_triage.bats",
+            )),
+            "check_reviewer_reuse_lens" => {
+                CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
+            }
             "check_closeout_contract" => CheckOwner::RustNative(StructuralCheck::CloseoutContract),
             "check_phase4_guardian_block_lockstep" => {
                 CheckOwner::RustNative(StructuralCheck::Phase4GuardianBlockLockstep)

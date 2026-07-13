@@ -14,6 +14,8 @@ pub enum ExternalCheck {
     GeneratedYamlParse,
     AutospecSweepConfig,
     ReleaseVerdictScript,
+    BatsSuite(&'static str),
+    ReviewerReuseLens,
 }
 
 impl ExternalCheck {
@@ -27,6 +29,8 @@ impl ExternalCheck {
             Self::GeneratedYamlParse => run_generated_yaml_parse(id, required, root),
             Self::AutospecSweepConfig => run_autospec_sweep_config(id, required, root),
             Self::ReleaseVerdictScript => run_release_verdict_script(id, required, root),
+            Self::BatsSuite(suite) => run_bats_suite(id, required, root, suite),
+            Self::ReviewerReuseLens => run_reviewer_reuse_lens(id, required, root),
         }
     }
 }
@@ -331,6 +335,47 @@ fn run_release_verdict_script(id: &str, required: bool, root: &Path) -> CheckRes
             .expect("Bats validation has a static test-file argument"),
     ];
     run_commands(id, required, root, commands)
+}
+
+fn run_bats_suite(id: &str, required: bool, root: &Path, suite: &str) -> CheckResult {
+    if !root.join(suite).is_file() {
+        return failure(id, required, &format!("{suite}: bats coverage missing"));
+    }
+    if !program_on_path("bats") {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+    ToolCommand::new("bats", [suite])
+        .expect("Bats validation has a static suite path")
+        .execute_in(id, required, root)
+}
+
+fn run_reviewer_reuse_lens(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SUITE: &str = "tests/reviewer/test_reuse_lens.bats";
+    if !root.join(SUITE).is_file() {
+        return failure(
+            id,
+            required,
+            "tests/reviewer/test_reuse_lens.bats: bats coverage missing (issue #1440)",
+        );
+    }
+    if !contains(
+        &root.join("scripts/gen-reviewer-prompt.sh"),
+        "--reuse-flags",
+    ) {
+        return failure(
+            id,
+            required,
+            "scripts/gen-reviewer-prompt.sh missing --reuse-flags support (issue #1440)",
+        );
+    }
+    if !contains(&root.join("skills/autospec-run/SKILL.md"), "--reuse-flags") {
+        return failure(
+            id,
+            required,
+            "skills/autospec-run/SKILL.md does not pass --reuse-flags to gen-reviewer-prompt.sh (issue #1440)",
+        );
+    }
+    run_bats_suite(id, required, root, SUITE)
 }
 
 fn trio_directories(root: &Path) -> Vec<PathBuf> {
