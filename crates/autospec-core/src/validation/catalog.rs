@@ -17,6 +17,7 @@ impl ValidationCheck {
         let owner = match id {
             "check_lockstep" => CheckOwner::RustNative(StructuralCheck::TrioLockstep),
             "check_lockstep_duo" => CheckOwner::RustNative(StructuralCheck::DuoLockstep),
+            "check_bash_syntax" => CheckOwner::ExternalBatch(ExternalCheck::BashSyntax),
             "check_required_files" => CheckOwner::RustNative(StructuralCheck::RequiredTrioFiles),
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {

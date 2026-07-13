@@ -169,6 +169,23 @@ fn runner_aggregates_typed_derive_trio_commands() {
     assert_eq!(report.results[0].spawn_count, 2);
 }
 
+#[test]
+fn runner_aggregates_typed_bash_syntax_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_bash_syntax",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::BashSyntax),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("valid-skill"));
+
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 2);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")

@@ -148,3 +148,17 @@ fn catalog_assigns_derive_trio_to_a_typed_external_batch() {
         ))
     );
 }
+
+#[test]
+fn catalog_assigns_bash_syntax_to_a_typed_external_batch() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_bash_syntax")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(ExternalCheck::BashSyntax))
+    );
+}

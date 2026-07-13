@@ -6,15 +6,57 @@ use super::results::{output_digest, CheckResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalCheck {
+    BashSyntax,
     DeriveTrioConsistency,
 }
 
 impl ExternalCheck {
     pub fn run(&self, id: &str, required: bool, root: &Path) -> CheckResult {
         match self {
+            Self::BashSyntax => run_bash_syntax(id, required, root),
             Self::DeriveTrioConsistency => run_derive_trio_consistency(id, required, root),
         }
     }
+}
+
+fn run_bash_syntax(id: &str, required: bool, root: &Path) -> CheckResult {
+    let mut targets = Vec::new();
+    for skill_dir in trio_directories(root) {
+        for script in ["install.sh", "uninstall.sh"] {
+            let path = skill_dir.join(script);
+            if path.is_file() {
+                targets.push(relative_path(root, &path));
+            }
+        }
+    }
+    for script in ["install.sh", "uninstall.sh"] {
+        let path = root.join(script);
+        if path.is_file() {
+            targets.push(script.to_string());
+        }
+    }
+
+    run_bash_syntax_targets(id, required, root, targets)
+}
+
+fn run_bash_syntax_targets(
+    id: &str,
+    required: bool,
+    root: &Path,
+    targets: Vec<String>,
+) -> CheckResult {
+    let mut results = Vec::new();
+    for target in targets {
+        let command = ToolCommand::new("bash", ["-n", target.as_str()])
+            .expect("bash syntax validation has no command-string argument");
+        let result = command.execute_in(id, required, root);
+        let failed = result.is_failure();
+        results.push(result);
+        if failed {
+            break;
+        }
+    }
+    aggregate(id, required, results)
 }
 
 fn run_derive_trio_consistency(id: &str, required: bool, root: &Path) -> CheckResult {
