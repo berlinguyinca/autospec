@@ -865,7 +865,23 @@ inline label-swap path below.
 >    ```
 >    <!-- worktree-ladder:end -->
 >    On the `open-pr` path the verification bar EQUALS fresh work — full tests + the standard review loop, never a blind merge. Cleanup is identical for every path: after the merge is confirmed (or on terminal failure), `git worktree remove` the linked worktree and `git worktree prune`; never delete un-pushed work before merge.
-> 1a. **Claim the edit surface (claim-guard), nested inside the issue claim.** After the `worktree-guard.sh assert` gate passes and BEFORE the first file edit, take a fine-grained lease on the skill(s)/paths this issue will touch so a concurrent session in another worktree cannot stomp the same trio+golden surface. This is the inner layer of the three-layer caller pattern (worktree-guard → claim-guard scan → claim-guard acquire); it composes with — and sits inside — the issue-level lease you already hold. Set `TARGETS` to the space-separated skill names and/or repo-relative paths the issue's **Files touched** lists.
+> 1a. **Isolated runtime provisioning.** After entering the issue worktree and passing `worktree-guard.sh assert`, check for `.autospec/runtime.yml` or `.agent-runtime.yml`. If either exists, provision through the shared broker before starting any dev server, E2E server, database, Docker Compose stack, or browser evidence run. Never hand-pick fixed ports in a repo with a runtime manifest. Source the emitted env file so `AUTOSPEC_PUBLIC_URL`, `AGENT_PUBLIC_URL`, `AGENT_FRONTEND_PORT`, `AGENT_BACKEND_PORT`, and `COMPOSE_PROJECT_NAME` flow into tests and subcommands. Use `AUTOSPEC_PUBLIC_URL` as the canonical browser/QA URL instead of `localhost:3000`, `localhost:4200`, or `localhost:5173`.
+>    <!-- agent-env-provision:begin -->
+>    ```bash
+>    if [ -f ".autospec/runtime.yml" ] || [ -f ".agent-runtime.yml" ]; then
+>      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/agent-env.sh" up --repo "$PWD" --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" > .autospec-agent-env.out
+>      AGENT_ENV_FILE=$(sed -n 's/^AGENT_ENV_FILE=//p' .autospec-agent-env.out | tail -n 1)
+>      if [ -n "$AGENT_ENV_FILE" ] && [ -f "$AGENT_ENV_FILE" ]; then
+>        . "$AGENT_ENV_FILE"
+>      else
+>        echo "agent-env did not emit a usable AGENT_ENV_FILE" >&2
+>        exit 1
+>      fi
+>      echo "[runtime] isolated environment: ${AUTOSPEC_PUBLIC_URL:-$AGENT_PUBLIC_URL}"
+>    fi
+>    ```
+>    <!-- agent-env-provision:end -->
+> 1b. **Claim the edit surface (claim-guard), nested inside the issue claim.** After the `worktree-guard.sh assert` gate passes and BEFORE the first file edit, take a fine-grained lease on the skill(s)/paths this issue will touch so a concurrent session in another worktree cannot stomp the same trio+golden surface. This is the inner layer of the three-layer caller pattern (worktree-guard → claim-guard scan → claim-guard acquire); it composes with — and sits inside — the issue-level lease you already hold. Set `TARGETS` to the space-separated skill names and/or repo-relative paths the issue's **Files touched** lists.
 >    <!-- claim-guard-acquire:begin -->
 >    ```bash
 >    TARGETS="<space-separated skills/paths from the issue's Files touched>"
@@ -1315,7 +1331,7 @@ inline label-swap path below.
 > 9. FAILURE (loop exhausted): comment failure on issue, swap label `in-progress-by-bot` → `auto-implement`, `gh pr close <PR> --delete-branch`.
 >    Fire the terminal failure notification: `case "$_notify_fired" in *:failed:*) ;; *) _notify_fired="${_notify_fired}:failed:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: failed" "Implementation failed on {repo}" || true ;; esac`
 >    Cleanup single-fetch body temp file on terminal failure: `rm -f "/tmp/issue-<ISSUE>-body.md" || true`
-> 10. Cleanup: cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force
+> 10. Cleanup: if `.autospec/runtime.yml` or `.agent-runtime.yml` exists in the issue worktree, run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/agent-env.sh" down --repo /tmp/wt-<BRANCH> --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" || true`; then `cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force`
 > 11. Report: PR number, outcome, one-paragraph summary.
 >
 > Hard rules: NEVER push to main, force-push, bypass hooks, or touch the umbrella issue. gh CLI only.
