@@ -196,6 +196,7 @@ impl ValidationCheck {
             "check_architecture_fitness_engine" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ArchitectureFitnessEngine)
             }
+            "check_phase4_tests" => CheckOwner::ExternalBatch(ExternalCheck::Phase4TestSuites),
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }

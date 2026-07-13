@@ -728,6 +728,23 @@ fn runner_owns_the_legacy_unreachable_architecture_fitness_contract() {
     assert_eq!(report.results[0].spawn_count, 3);
 }
 
+#[test]
+fn runner_runs_phase4_and_docs_shell_tests_with_a_typed_fleet_environment() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_phase4_tests",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::Phase4TestSuites),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("phase4-tests"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 3);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")

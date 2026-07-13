@@ -194,6 +194,7 @@ fn catalog_assigns_per_skill_model_contracts_to_rust_owners() {
             "check_architecture_fitness_engine",
             ExternalCheck::ArchitectureFitnessEngine,
         ),
+        ("check_phase4_tests", ExternalCheck::Phase4TestSuites),
     ] {
         assert_eq!(
             catalog

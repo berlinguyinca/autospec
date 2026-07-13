@@ -9,6 +9,7 @@ use super::results::{output_digest, CheckResult};
 pub struct ToolCommand {
     program: PathBuf,
     args: Vec<OsString>,
+    environment: Vec<(OsString, OsString)>,
 }
 
 pub(crate) struct CapturedCheckResult {
@@ -38,7 +39,16 @@ impl ToolCommand {
             );
         }
 
-        Ok(Self { program, args })
+        Ok(Self {
+            program,
+            args,
+            environment: Vec::new(),
+        })
+    }
+
+    pub fn with_env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.environment.push((key.into(), value.into()));
+        self
     }
 
     pub fn program(&self) -> &Path {
@@ -75,6 +85,7 @@ impl ToolCommand {
         let started = Instant::now();
         let output = Command::new(&self.program)
             .args(&self.args)
+            .envs(self.environment.iter().map(|(key, value)| (key, value)))
             .current_dir(self.working_directory_for(root))
             .output();
         let elapsed_ms = started.elapsed().as_millis();

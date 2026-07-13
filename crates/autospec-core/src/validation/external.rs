@@ -37,6 +37,7 @@ pub enum ExternalCheck {
     UxUiWorkstream,
     TokenBaselineFresh,
     ArchitectureFitnessEngine,
+    Phase4TestSuites,
 }
 
 impl ExternalCheck {
@@ -73,6 +74,7 @@ impl ExternalCheck {
             Self::UxUiWorkstream => run_ux_ui_workstream(id, required, root),
             Self::TokenBaselineFresh => run_token_baseline_fresh(id, required, root),
             Self::ArchitectureFitnessEngine => run_architecture_fitness_engine(id, required, root),
+            Self::Phase4TestSuites => run_phase4_test_suites(id, required, root),
         }
     }
 }
@@ -469,6 +471,26 @@ fn run_bats_directory_allow_empty_if_available(
     let commands = suites.into_iter().map(|suite| {
         ToolCommand::new("bats", [suite.as_str()])
             .expect("Bats validation has a static discovered suite path")
+    });
+    run_commands(id, required, root, commands)
+}
+
+fn run_bash_directory(id: &str, required: bool, root: &Path, directory: &str) -> CheckResult {
+    let Ok(entries) = fs::read_dir(root.join(directory)) else {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    };
+    let mut scripts = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file() && path.extension().is_some_and(|extension| extension == "sh")
+        })
+        .map(|path| relative_path(root, &path))
+        .collect::<Vec<_>>();
+    scripts.sort();
+    let commands = scripts.into_iter().map(|script| {
+        ToolCommand::new("bash", [script.as_str()])
+            .expect("self-contained shell test has a direct argument vector")
     });
     run_commands(id, required, root, commands)
 }
@@ -1341,6 +1363,32 @@ fn run_architecture_fitness_engine(id: &str, required: bool, root: &Path) -> Che
         "tests/architecture-fitness",
     );
     aggregate(id, required, vec![checks, bats])
+}
+
+fn run_phase4_test_suites(id: &str, required: bool, root: &Path) -> CheckResult {
+    let phase4 = run_bash_directory(id, required, root, "tests/phase4");
+    if phase4.is_failure() {
+        return phase4;
+    }
+    let documentation = run_bash_directory(id, required, root, "tests/docs");
+    if documentation.is_failure() {
+        return aggregate(id, required, vec![phase4, documentation]);
+    }
+
+    const FLEET_SUITE: &str = "tests/e2e/test_autospec_fleet_dry_run.bats";
+    let fleet = if root.join(FLEET_SUITE).is_file() && root.join("tests/fixtures/fleet").is_dir() {
+        if program_on_path("bats") {
+            ToolCommand::new("bats", [FLEET_SUITE])
+                .expect("fleet dry-run Bats suite is a direct argument vector")
+                .with_env("AUTOSPEC_FLEET_LIVE_E2E", "0")
+                .execute_in(id, required, root)
+        } else {
+            CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]))
+        }
+    } else {
+        CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]))
+    };
+    aggregate(id, required, vec![phase4, documentation, fleet])
 }
 
 fn baseline_table(path: &Path) -> String {
