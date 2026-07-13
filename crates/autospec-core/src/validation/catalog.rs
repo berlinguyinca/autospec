@@ -130,6 +130,9 @@ impl ValidationCheck {
             "check_lint_reuse_triage" => CheckOwner::ExternalBatch(ExternalCheck::BatsSuite(
                 "tests/lint/test_reuse_triage.bats",
             )),
+            "check_ship_completeness" => {
+                CheckOwner::ExternalBatch(ExternalCheck::BatsSuite("tests/ship-completeness.bats"))
+            }
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }

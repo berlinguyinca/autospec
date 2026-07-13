@@ -537,6 +537,7 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
             "check_lint_reuse_triage",
             "tests/lint/test_reuse_triage.bats",
         ),
+        ("check_ship_completeness", "tests/ship-completeness.bats"),
     ] {
         assert_eq!(
             catalog
