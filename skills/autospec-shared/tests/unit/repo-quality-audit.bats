@@ -290,6 +290,35 @@ EOF
     jq -e '.findings[] | select(.probe=="maintainability-hotspot" and .file=="src/app/maintained/source.ts")' "$OUT_JSON"
 }
 
+
+@test "audit skips git history lookups for files below maintainability thresholds" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    mkdir -p "$REPO/src/cold" "$TEST_TMP/bin"
+    for i in $(seq 1 25); do
+        echo "export const cold$i = $i;" > "$REPO/src/cold/file$i.ts"
+    done
+    cat > "$TEST_TMP/bin/git" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "rev-parse --is-inside-work-tree") exit 0 ;;
+  "status --porcelain") exit 0 ;;
+  log*src/cold/*) echo "unexpected git log for cold file: $*" >> "$GIT_LOG_MARKER"; exit 0 ;;
+  log*) exit 0 ;;
+esac
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/git"
+    export GIT_LOG_MARKER="$TEST_TMP/git-log-marker"
+    export PATH="$TEST_TMP/bin:$PATH"
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    [ ! -e "$GIT_LOG_MARKER" ]
+    run jq -e '.findings[] | select(.probe=="maintainability-hotspot" and (.file | startswith("src/cold/")))' "$OUT_JSON"
+    [ "$status" -ne 0 ]
+}
+
 @test "audit ranks newer denser test-backed maintainability hotspots first" {
     OUT_JSON="$TEST_TMP/audit.json"
     OUT_MD="$TEST_TMP/audit.md"
@@ -724,4 +753,25 @@ EOF
     [ "$status" -eq 0 ]
     jq -e '.runtime.node.status == "configured but failing"' "$OUT_JSON"
     jq -e '.findings[] | select(.dedupe_key=="runtime-engine:node-version" and (.body | contains(">=20 <23")))' "$OUT_JSON"
+}
+
+@test "audit large-file probe handles spaces and prunes generated state" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    rm -rf "$REPO/src" "$REPO/tests"
+    mkdir -p "$REPO/src/assets/next steps" "$REPO/.autospec/refinements/next-steps" "$REPO/dist"
+    python3 - <<PY
+from pathlib import Path
+Path('$REPO/src/assets/next steps/large artifact.txt').write_text('a' * 530000)
+Path('$REPO/.autospec/refinements/next-steps/generated report.md').write_text('b' * 530000)
+Path('$REPO/dist/bundle.js').write_text('c' * 530000)
+PY
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"No such file"* ]]
+    [[ "$output" != *"integer expression expected"* ]]
+    jq -e '.findings[] | select(.probe=="large-files" and .file=="src/assets/next steps/large artifact.txt")' "$OUT_JSON"
+    run jq -e '.findings[] | select(.probe=="large-files" and (.file | startswith(".autospec/") or startswith("dist/")))' "$OUT_JSON"
+    [ "$status" -ne 0 ]
 }

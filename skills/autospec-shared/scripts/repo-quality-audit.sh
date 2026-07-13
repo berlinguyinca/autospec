@@ -824,6 +824,40 @@ scan_text_files() {
 	    -print
 }
 
+scan_text_file_metrics() {
+  find "$REPO" \
+    \( -path "$REPO/.git" -o -path "$REPO/node_modules" -o -path "$REPO/.autospec" \
+      -o -path "$REPO/dist" -o -path "$REPO/build" -o -path "$REPO/coverage" \
+      -o -path "$REPO/.angular" -o -path "$REPO/.next" -o -path "$REPO/out" \
+      -o -path "$REPO/vendor" -o -path "$REPO/public/build" \) -prune -o \
+    -type f \( -name '*.js' -o -name '*.jsx' -o -name '*.ts' -o -name '*.tsx' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.html' -o -name '*.vue' -o -name '*.svelte' -o -name '*.py' -o -name '*.sh' \) \
+    -exec awk '
+      function emit_summary() {
+        if (current != "") {
+          print "summary\t" current "\t" (lines + 0) "\t" (focus_count + 0) "\t" (focus_line + 0) "\t" (any_count + 0) "\t" (any_line + 0) "\t" (debug_count + 0) "\t" (debug_line + 0) "\t" (eslint_count + 0) "\t" (eslint_line + 0) "\t" (ts_ignore_count + 0) "\t" (ts_ignore_line + 0)
+        }
+      }
+      function reset_file() {
+        lines=0; focus_count=0; focus_line=0; any_count=0; any_line=0; debug_count=0; debug_line=0; eslint_count=0; eslint_line=0; ts_ignore_count=0; ts_ignore_line=0
+      }
+      FILENAME != current {
+        emit_summary()
+        current=FILENAME
+        reset_file()
+      }
+      {
+        lines=FNR
+        if ($0 ~ /localStorage|sessionStorage|document[.]cookie/) print "storage\t" FILENAME "\t" FNR "\t" $0
+        if ($0 ~ /(^|[^[:alnum:]_])(describe|it|test)[.](only|skip)([^[:alnum:]_]|$)|@skip|[.]skip[(]/) { focus_count++; if (!focus_line) focus_line=FNR }
+        if ($0 ~ /(^|[^[:alnum:]_])as any([^[:alnum:]_]|$)|: *any([^[:alnum:]_]|$)|<any>/) { any_count++; if (!any_line) any_line=FNR }
+        if ($0 ~ /(^|[^[:alnum:]_])console[.](log|debug|warn|error)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])debugger([^[:alnum:]_]|$)/) { debug_count++; if (!debug_line) debug_line=FNR }
+        if ($0 ~ /eslint-disable/) { eslint_count++; if (!eslint_line) eslint_line=FNR }
+        if ($0 ~ /@ts-ignore|@ts-expect-error/) { ts_ignore_count++; if (!ts_ignore_line) ts_ignore_line=FNR }
+      }
+      END { emit_summary() }
+    ' {} +
+}
+
 sensitive_storage_term() {
   line="$1"
   printf '%s\n' "$line" | grep -Eio 'x-api-key|access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|token|secret|password|credential|authorization|bearer|auth|user[_-]?groups?|groups?' | head -1 || true
@@ -917,6 +951,12 @@ maintainability_threshold() {
 
 validate_quality_audit_config
 
+THRESHOLD_LINES="$(maintainability_threshold "large_file_lines" "AUTOSPEC_QUALITY_AUDIT_LARGE_FILE_LINES" "800")"
+THRESHOLD_ANY="$(maintainability_threshold "any_threshold" "AUTOSPEC_QUALITY_AUDIT_ANY_THRESHOLD" "10")"
+THRESHOLD_DEBUG="$(maintainability_threshold "debug_threshold" "AUTOSPEC_QUALITY_AUDIT_DEBUG_THRESHOLD" "5")"
+THRESHOLD_DISABLED="$(maintainability_threshold "disabled_test_threshold" "AUTOSPEC_QUALITY_AUDIT_DISABLED_TEST_THRESHOLD" "1")"
+THRESHOLD_DISABLE="$(maintainability_threshold "disable_comment_threshold" "AUTOSPEC_QUALITY_AUDIT_DISABLE_COMMENT_THRESHOLD" "1")"
+
 TEST_FILE_EXTENSIONS=".spec.ts .spec.tsx .test.ts .test.tsx .spec.js .test.js"
 
 test_signal_for() {
@@ -945,17 +985,12 @@ cap_score_component() {
 
 record_hotspot_metrics() {
   rel="$1"; lines="$2"; kind="$3"; any_count="$4"; debug_count="$5"; disabled_count="$6"; eslint_count="$7"; ts_ignore_count="$8"; recent_touch="$9"; test_signal="${10}"
-  threshold_lines="$(maintainability_threshold "large_file_lines" "AUTOSPEC_QUALITY_AUDIT_LARGE_FILE_LINES" "800")"
-  threshold_any="$(maintainability_threshold "any_threshold" "AUTOSPEC_QUALITY_AUDIT_ANY_THRESHOLD" "10")"
-  threshold_debug="$(maintainability_threshold "debug_threshold" "AUTOSPEC_QUALITY_AUDIT_DEBUG_THRESHOLD" "5")"
-  threshold_disabled="$(maintainability_threshold "disabled_test_threshold" "AUTOSPEC_QUALITY_AUDIT_DISABLED_TEST_THRESHOLD" "1")"
-  threshold_disable="$(maintainability_threshold "disable_comment_threshold" "AUTOSPEC_QUALITY_AUDIT_DISABLE_COMMENT_THRESHOLD" "1")"
-  if [ "$lines" -lt "$threshold_lines" ] \
-    && [ "$any_count" -lt "$threshold_any" ] \
-    && [ "$debug_count" -lt "$threshold_debug" ] \
-    && [ "$disabled_count" -lt "$threshold_disabled" ] \
-    && [ "$eslint_count" -lt "$threshold_disable" ] \
-    && [ "$ts_ignore_count" -lt "$threshold_disable" ]; then
+  if [ "$lines" -lt "$THRESHOLD_LINES" ] \
+    && [ "$any_count" -lt "$THRESHOLD_ANY" ] \
+    && [ "$debug_count" -lt "$THRESHOLD_DEBUG" ] \
+    && [ "$disabled_count" -lt "$THRESHOLD_DISABLED" ] \
+    && [ "$eslint_count" -lt "$THRESHOLD_DISABLE" ] \
+    && [ "$ts_ignore_count" -lt "$THRESHOLD_DISABLE" ]; then
     return 0
   fi
   [ "$lines" -gt 0 ] || lines=1
@@ -1069,79 +1104,70 @@ if [ "$template_count" -gt 0 ] && [ ! -d "$REPO/tests" ]; then
 fi
 
 # Probe: security-sensitive storage, focused/skipped tests, any usage, debug logging.
-while IFS= read -r f; do
-  [ -n "$f" ] || continue
-  rel="$(rel_path "$f")"
-  lines="$(wc -l < "$f" | tr -d ' ')"
+METRICS_TSV="$TMP_DIR/text-file-metrics.tsv"
+scan_text_file_metrics > "$METRICS_TSV"
+while IFS="$(printf '\t')" read -r tag file line_no line_text; do
+  [ "$tag" = "storage" ] || continue
+  rel="$(rel_path "$file")"
+  storage_api="$(storage_api_for_line "$line_text")"
+  sensitive_term="$(sensitive_storage_term "$line_text")"
+  storage_key="$(storage_key_for_line "$line_text")"
+  if [ -z "$sensitive_term" ] && [ -n "$storage_key" ]; then
+    sensitive_term="$(sensitive_storage_term "$storage_key")"
+  fi
+  [ -n "$storage_api" ] || continue
+  [ -n "$sensitive_term" ] || continue
+  excerpt="$(printf '%s' "$line_text" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | cut -c1-240)"
+  add_sensitive_storage_finding "$rel" "${line_no:-0}" "$storage_api" "$sensitive_term" "$storage_key" "$excerpt"
+done < "$METRICS_TSV"
+
+while IFS="$(printf '\t')" read -r tag file lines disabled_count focus_first_line any_count any_first_line debug_count debug_first_line eslint_count eslint_first_line ts_ignore_count ts_ignore_first_line; do
+  [ "$tag" = "summary" ] || continue
+  [ -n "$file" ] || continue
+  rel="$(rel_path "$file")"
   kind="$(file_kind_for "$rel")"
-  while IFS= read -r storage_hit; do
-    [ -n "$storage_hit" ] || continue
-    line_no="$(printf '%s\n' "$storage_hit" | cut -d: -f1)"
-    line_text="$(printf '%s\n' "$storage_hit" | cut -d: -f2-)"
-    storage_api="$(storage_api_for_line "$line_text")"
-    sensitive_term="$(sensitive_storage_term "$line_text")"
-    storage_key="$(storage_key_for_line "$line_text")"
-    if [ -z "$sensitive_term" ] && [ -n "$storage_key" ]; then
-      sensitive_term="$(sensitive_storage_term "$storage_key")"
-    fi
-    [ -n "$storage_api" ] || continue
-    [ -n "$sensitive_term" ] || continue
-    excerpt="$(printf '%s' "$line_text" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | cut -c1-240)"
-    add_sensitive_storage_finding "$rel" "${line_no:-0}" "$storage_api" "$sensitive_term" "$storage_key" "$excerpt"
-  done <<EOF
-$(grep -nE 'localStorage|sessionStorage|document\.cookie' "$f" 2>/dev/null || true)
-EOF
-  focus_hits="$(grep -nE '\b(describe|it|test)\.(only|skip)\b|@skip|\.skip\(' "$f" 2>/dev/null || true)"
-  disabled_count="$(printf '%s\n' "$focus_hits" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
-  if [ -n "$focus_hits" ]; then
-    first_line="$(printf '%s\n' "$focus_hits" | head -1 | cut -d: -f1)"
-    add_finding "focused-skipped-tests" "app-follow-up" "medium" "$rel" "${first_line:-0}" \
+  if [ "$disabled_count" -gt 0 ]; then
+    add_finding "focused-skipped-tests" "app-follow-up" "medium" "$rel" "${focus_first_line:-0}" \
       "focused test markers present" \
       "Focused or skipped tests can hide regressions from autospec verification." \
       "focused-skipped-tests:$rel"
   fi
-  any_hits="$(grep -nE '\bas any\b|: *any\b|<any>' "$f" 2>/dev/null || true)"
-  any_count="$(printf '%s\n' "$any_hits" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
-  if [ -n "$any_hits" ]; then
-    first_line="$(printf '%s\n' "$any_hits" | head -1 | cut -d: -f1)"
-    add_finding "any-usage" "app-follow-up" "low" "$rel" "${first_line:-0}" \
+  if [ "$any_count" -gt 0 ]; then
+    add_finding "any-usage" "app-follow-up" "low" "$rel" "${any_first_line:-0}" \
       "TypeScript any usage" \
       "The audit found an explicit any usage that weakens static verification." \
       "any-usage:$rel"
   fi
-  debug_hits="$(grep -nE '\b(console\.(log|debug|warn|error)|debugger)\b' "$f" 2>/dev/null || true)"
-  debug_count="$(printf '%s\n' "$debug_hits" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
-  if [ -n "$debug_hits" ]; then
-    first_line="$(printf '%s\n' "$debug_hits" | head -1 | cut -d: -f1)"
-    add_finding "debug-logging-hotspots" "app-follow-up" "low" "$rel" "${first_line:-0}" \
+  if [ "$debug_count" -gt 0 ]; then
+    add_finding "debug-logging-hotspots" "app-follow-up" "low" "$rel" "${debug_first_line:-0}" \
       "debug logging hotspot" \
       "Debug logging or debugger statements remain in application code." \
       "debug-logging-hotspots:$rel"
   fi
-  eslint_hits="$(grep -nE 'eslint-disable' "$f" 2>/dev/null || true)"
-  eslint_count="$(printf '%s\n' "$eslint_hits" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
-  if [ -n "$eslint_hits" ]; then
-    first_line="$(printf '%s\n' "$eslint_hits" | head -1 | cut -d: -f1)"
-    add_finding "eslint-disable-usage" "app-follow-up" "medium" "$rel" "${first_line:-0}" \
+  if [ "$eslint_count" -gt 0 ]; then
+    add_finding "eslint-disable-usage" "app-follow-up" "medium" "$rel" "${eslint_first_line:-0}" \
       "eslint-disable usage" \
       "eslint-disable comments can hide maintainability and correctness regressions from static checks." \
       "eslint-disable:$rel"
   fi
-  ts_ignore_hits="$(grep -nE '@ts-ignore|@ts-expect-error' "$f" 2>/dev/null || true)"
-  ts_ignore_count="$(printf '%s\n' "$ts_ignore_hits" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
-  if [ -n "$ts_ignore_hits" ]; then
-    first_line="$(printf '%s\n' "$ts_ignore_hits" | head -1 | cut -d: -f1)"
-    add_finding "ts-ignore-usage" "app-follow-up" "medium" "$rel" "${first_line:-0}" \
+  if [ "$ts_ignore_count" -gt 0 ]; then
+    add_finding "ts-ignore-usage" "app-follow-up" "medium" "$rel" "${ts_ignore_first_line:-0}" \
       "TypeScript suppression usage" \
       "@ts-ignore or @ts-expect-error suppressions should be justified and reduced during bounded cleanup." \
       "ts-ignore:$rel"
   fi
+  if [ "$lines" -lt "$THRESHOLD_LINES" ] \
+    && [ "$any_count" -lt "$THRESHOLD_ANY" ] \
+    && [ "$debug_count" -lt "$THRESHOLD_DEBUG" ] \
+    && [ "$disabled_count" -lt "$THRESHOLD_DISABLED" ] \
+    && [ "$eslint_count" -lt "$THRESHOLD_DISABLE" ] \
+    && [ "$ts_ignore_count" -lt "$THRESHOLD_DISABLE" ]; then
+    continue
+  fi
   recent_touch="$(recent_touch_for "$rel")"
   test_signal="$(test_signal_for "$rel" "$kind")"
   record_hotspot_metrics "$rel" "$lines" "$kind" "$any_count" "$debug_count" "$disabled_count" "$eslint_count" "$ts_ignore_count" "$recent_touch" "$test_signal"
-done <<EOF
-$(scan_text_files)
-EOF
+done < "$METRICS_TSV"
 
 if [ -s "$HOTSPOTS_ND" ]; then
   rank=0
@@ -1168,16 +1194,18 @@ fi
 # Probe: large files.
 while IFS= read -r f; do
   [ -n "$f" ] || continue
-  size="$(wc -c < "$f" | tr -d ' ')"
-  if [ "$size" -gt 512000 ]; then
-    rel="$(rel_path "$f")"
-    add_finding "large-files" "app-follow-up" "low" "$rel" 0 \
-      "large repository file" \
-      "File is larger than 512 KiB and may indicate generated or bundled content checked into source." \
-      "large-files:$rel"
-  fi
+  rel="$(rel_path "$f")"
+  add_finding "large-files" "app-follow-up" "low" "$rel" 0 \
+    "large repository file" \
+    "File is larger than 512 KiB and may indicate generated or bundled content checked into source." \
+    "large-files:$rel"
 done <<EOF
-$(find "$REPO" \( -path "$REPO/.git" -o -path "$REPO/node_modules" \) -prune -o -type f -print)
+$(find "$REPO" \
+  \( -path "$REPO/.git" -o -path "$REPO/node_modules" -o -path "$REPO/.autospec" \
+    -o -path "$REPO/dist" -o -path "$REPO/build" -o -path "$REPO/coverage" \
+    -o -path "$REPO/.angular" -o -path "$REPO/.next" -o -path "$REPO/out" \
+    -o -path "$REPO/vendor" -o -path "$REPO/public/build" \) -prune -o \
+  -type f -size +512k -print)
 EOF
 
 ndjson_to_array() {
@@ -1270,25 +1298,21 @@ if [ "$issue_policy_permits" -eq 1 ]; then
 fi
 ndjson_to_array "$ISSUES_ND" > "$ISSUES_JSON"
 
-issue_keys="$(jq -r '.[].dedupe_key' "$ISSUES_JSON" | sed 's/[.[\*^$()+?{}|]/\\&/g' | paste -sd'|' - || true)"
-finding_count="$(jq 'length' "$FINDINGS_JSON")"
-i=0
-while [ "$i" -lt "$finding_count" ]; do
-  finding="$(jq -c ".[$i]" "$FINDINGS_JSON")"
-  i=$((i + 1))
-  key="$(printf '%s' "$finding" | jq -r '.dedupe_key')"
-  probe="$(printf '%s' "$finding" | jq -r '.probe')"
-  file="$(printf '%s' "$finding" | jq -r '.file')"
-  if coalesced_by_hotspot "$probe" "$file" && [ -n "$issue_keys" ] && printf 'maintainability-hotspot:%s\n' "$file" | grep -E "^($issue_keys)$" >/dev/null 2>&1; then
-    continue
-  fi
-  if [ -n "$issue_keys" ] && printf '%s\n' "$key" | grep -E "^($issue_keys)$" >/dev/null 2>&1; then
-    continue
-  fi
-  risk="$(printf '%s' "$finding" | jq -r '"Unfiled " + .classification + ": " + .title + " (" + .dedupe_key + ")"')"
-  jq -cn --arg risk "$risk" '$risk' >> "$RISKS_ND"
-done
-ndjson_to_array "$RISKS_ND" > "$RISKS_JSON"
+jq --slurpfile issues "$ISSUES_JSON" --rawfile hotspot_keys "$HOTSPOT_KEYS" '
+  ($issues[0] | map(.dedupe_key)) as $issue_keys
+  | ($hotspot_keys | split("\n") | map(select(length > 0))) as $hotspot_keys
+  | [ .[]
+      | select((.dedupe_key as $key | ($issue_keys | index($key)) | not))
+      | select(
+          if (.probe == "any-usage" or .probe == "debug-logging-hotspots" or .probe == "focused-skipped-tests" or .probe == "eslint-disable-usage" or .probe == "ts-ignore-usage") then
+            (("maintainability-hotspot:" + .file) as $hotspot_key | ($issue_keys | index($hotspot_key)) | not)
+          else
+            true
+          end
+        )
+      | "Unfiled " + .classification + ": " + .title + " (" + .dedupe_key + ")"
+    ]
+' "$FINDINGS_JSON" > "$RISKS_JSON"
 
 total_findings="$(jq 'length' "$FINDINGS_JSON")"
 suppressed_findings="$(jq 'length' "$SUPPRESSED_JSON")"
