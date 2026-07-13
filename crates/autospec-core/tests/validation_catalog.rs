@@ -173,6 +173,11 @@ fn catalog_assigns_per_skill_model_contracts_to_rust_owners() {
             "check_define_spec_worktree_routing",
             ExternalCheck::DefineSpecWorktreeRouting,
         ),
+        (
+            "check_run_groom_preflight_contract",
+            ExternalCheck::RunGroomPreflightContract,
+        ),
+        ("check_grow_run_contract", ExternalCheck::GrowRunContract),
     ] {
         assert_eq!(
             catalog

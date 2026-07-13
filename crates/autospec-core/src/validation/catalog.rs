@@ -180,6 +180,10 @@ impl ValidationCheck {
             "check_define_spec_worktree_routing" => {
                 CheckOwner::ExternalBatch(ExternalCheck::DefineSpecWorktreeRouting)
             }
+            "check_run_groom_preflight_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::RunGroomPreflightContract)
+            }
+            "check_grow_run_contract" => CheckOwner::ExternalBatch(ExternalCheck::GrowRunContract),
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }

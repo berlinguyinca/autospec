@@ -31,6 +31,8 @@ pub enum ExternalCheck {
     LintIssueHelpers,
     Phase4CiStatusCompare,
     DefineSpecWorktreeRouting,
+    RunGroomPreflightContract,
+    GrowRunContract,
 }
 
 impl ExternalCheck {
@@ -61,6 +63,8 @@ impl ExternalCheck {
             Self::LintIssueHelpers => run_lint_issue_helpers(id, required, root),
             Self::Phase4CiStatusCompare => run_phase4_ci_status_compare(id, required, root),
             Self::DefineSpecWorktreeRouting => run_define_spec_worktree_routing(id, required, root),
+            Self::RunGroomPreflightContract => run_groom_preflight_contract(id, required, root),
+            Self::GrowRunContract => run_grow_run_contract(id, required, root),
         }
     }
 }
@@ -1036,6 +1040,71 @@ fn run_define_spec_worktree_routing(id: &str, required: bool, root: &Path) -> Ch
     ToolCommand::new("bash", [SMOKE_TEST])
         .expect("define-spec worktree smoke test is a direct argument vector")
         .execute_in(id, required, root)
+}
+
+fn run_groom_preflight_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const HELPER: &str = "skills/autospec-run/scripts/run-groom-preflight.sh";
+    const SUITE: &str = "tests/unit/test_run_groom_preflight.bats";
+    let helper = root.join(HELPER);
+    if !helper.is_file() {
+        return failure(
+            id,
+            required,
+            "skills/autospec-run/scripts/run-groom-preflight.sh: missing",
+        );
+    }
+    if !root.join(SUITE).is_file() {
+        return failure(
+            id,
+            required,
+            "tests/unit/test_run_groom_preflight.bats: missing",
+        );
+    }
+    let skill = root.join("skills/autospec-run/SKILL.md");
+    let document = fs::read_to_string(&skill).unwrap_or_default();
+    for anchor in ["Backlog grooming preflight", "double gate", "no discovery"] {
+        if !document.contains(anchor) {
+            return failure(
+                id,
+                required,
+                &format!("skills/autospec-run/SKILL.md: missing {anchor} prose"),
+            );
+        }
+    }
+
+    let syntax = ToolCommand::new("bash", ["-n", HELPER])
+        .expect("groom preflight syntax check is a direct argument vector")
+        .execute_in(id, required, root);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    let bats = run_bats_suites_if_available(id, required, root, &[SUITE]);
+    aggregate(id, required, vec![syntax, bats])
+}
+
+fn run_grow_run_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SKILL: &str = "skills/autospec-grow-run/SKILL.md";
+    let path = root.join(SKILL);
+    if !path.is_file() {
+        return failure(id, required, "skills/autospec-grow-run/SKILL.md: missing");
+    }
+    let document = fs::read_to_string(&path).unwrap_or_default();
+    for anchor in [
+        "**Model tier:**",
+        "## Self-update mode",
+        "## R1 — Artifact drain",
+        "## R2 — Outbound",
+        "## R4 — Measure",
+    ] {
+        if !document.contains(anchor) {
+            return failure(
+                id,
+                required,
+                &format!("skills/autospec-grow-run/SKILL.md: missing {anchor}"),
+            );
+        }
+    }
+    run_bats_suites_if_available(id, required, root, &["tests/autospec-grow-run/smoke.bats"])
 }
 
 fn run_fab_container_dockerfile(id: &str, required: bool, root: &Path) -> CheckResult {

@@ -633,6 +633,37 @@ fn runner_executes_ci_status_and_define_worktree_smoke_contracts_directly() {
     assert_eq!(report.results[1].spawn_count, 1);
 }
 
+#[test]
+fn runner_checks_groom_preflight_and_grow_run_contracts_directly() {
+    let catalog = ValidationCatalog::from_checks(vec![
+        ValidationCheck {
+            id: "check_run_groom_preflight_contract",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::RunGroomPreflightContract),
+        },
+        ValidationCheck {
+            id: "check_grow_run_contract",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::GrowRunContract),
+        },
+    ]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("growth-groom-contracts"));
+
+    assert!(report
+        .results
+        .iter()
+        .all(|result| result.exit_code == Some(0)));
+    assert_eq!(report.results[0].spawn_count, 2);
+    assert_eq!(report.results[1].spawn_count, 1);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")
