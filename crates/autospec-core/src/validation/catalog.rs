@@ -73,6 +73,9 @@ impl ValidationCheck {
             "check_generated_yaml_parse" => {
                 CheckOwner::ExternalBatch(ExternalCheck::GeneratedYamlParse)
             }
+            "check_autospec_sweep_config_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecSweepConfig)
+            }
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)

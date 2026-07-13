@@ -12,6 +12,7 @@ pub enum ExternalCheck {
     Frontmatter,
     GapMinerContract,
     GeneratedYamlParse,
+    AutospecSweepConfig,
 }
 
 impl ExternalCheck {
@@ -23,6 +24,7 @@ impl ExternalCheck {
             Self::Frontmatter => run_frontmatter(id, required, root),
             Self::GapMinerContract => run_gap_miner_contract(id, required, root),
             Self::GeneratedYamlParse => run_generated_yaml_parse(id, required, root),
+            Self::AutospecSweepConfig => run_autospec_sweep_config(id, required, root),
         }
     }
 }
@@ -227,6 +229,62 @@ fn run_generated_yaml_parse(id: &str, required: bool, root: &Path) -> CheckResul
     ToolCommand::new("python3", ["-c", PYTHON_GENERATED_YAML_CHECK])
         .expect("generated YAML validation has static Python source")
         .execute_in(id, required, root)
+}
+
+fn run_autospec_sweep_config(id: &str, required: bool, root: &Path) -> CheckResult {
+    let skill_dir = root.join("skills/autospec-sweep");
+    if !skill_dir.is_dir() {
+        return failure(id, required, "skills/autospec-sweep: directory missing");
+    }
+    let targets = ["wizard.sh", "run.sh", "review.sh"]
+        .into_iter()
+        .map(|name| format!("skills/autospec-sweep/scripts/{name}"))
+        .collect::<Vec<_>>();
+    for target in &targets {
+        if !root.join(target).is_file() {
+            return failure(id, required, &format!("{target}: required file missing"));
+        }
+    }
+    if !root.join("schemas/autospec-config.schema.json").is_file() {
+        return failure(
+            id,
+            required,
+            "schemas/autospec-config.schema.json: required file missing",
+        );
+    }
+    if !contains(&skill_dir.join("SKILL.md"), ".autospec/autospec.yml") {
+        return failure(
+            id,
+            required,
+            "skills/autospec-sweep/SKILL.md missing .autospec/autospec.yml contract",
+        );
+    }
+    if !contains(&skill_dir.join("SKILL.md"), "continuous improvement") {
+        return failure(
+            id,
+            required,
+            "skills/autospec-sweep/SKILL.md missing continuous improvement contract",
+        );
+    }
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let path = root.join("skills/autospec").join(member);
+        let display = format!("skills/autospec/{member}");
+        if !contains(&path, ".autospec/autospec.yml") {
+            return failure(
+                id,
+                required,
+                &format!("{display} missing autospec.yml first-run preflight"),
+            );
+        }
+        if !contains(&path, "/autospec-sweep init") {
+            return failure(
+                id,
+                required,
+                &format!("{display} missing /autospec-sweep init first-run route"),
+            );
+        }
+    }
+    run_bash_syntax_targets(id, required, root, targets)
 }
 
 fn trio_directories(root: &Path) -> Vec<PathBuf> {

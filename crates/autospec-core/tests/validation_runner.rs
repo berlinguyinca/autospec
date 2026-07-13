@@ -293,6 +293,23 @@ fn runner_parses_generated_yaml_through_a_typed_python_command() {
     assert_eq!(report.results[0].spawn_count, 1);
 }
 
+#[test]
+fn runner_checks_autospec_sweep_config_with_explicit_bash_syntax_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_autospec_sweep_config_contract",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::AutospecSweepConfig),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("autospec-sweep-config"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 3);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")
