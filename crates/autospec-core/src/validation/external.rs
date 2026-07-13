@@ -34,6 +34,7 @@ pub enum ExternalCheck {
     AutospecExploreResearchersDeterministic,
     AutospecExploreResearchersLlm,
     AutospecExploreSpecialistsDiscovery,
+    AutospecExploreStage2Intersect,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -94,6 +95,9 @@ impl ExternalCheck {
             }
             Self::AutospecExploreSpecialistsDiscovery => {
                 run_autospec_explore_specialists_discovery(id, required, root)
+            }
+            Self::AutospecExploreStage2Intersect => {
+                run_autospec_explore_stage2_intersect(id, required, root)
             }
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
@@ -1198,6 +1202,140 @@ fn run_autospec_explore_specialists_discovery(
     }
     results.push(run_bats_suites(id, required, root, &[SUITE]));
     aggregate(id, required, results)
+}
+
+fn run_autospec_explore_stage2_intersect(id: &str, required: bool, root: &Path) -> CheckResult {
+    const PREFILTER: &str = "skills/autospec-shared/scripts/discovery-intersect-prefilter.sh";
+    const SCHEMA: &str = "schemas/autospec-explore-proposal.schema.json";
+    const TRIO: &[&str] = &[
+        "skills/autospec-explore/SKILL.md",
+        "skills/autospec-explore/codex/prompt.md",
+        "skills/autospec-explore/opencode/agent.md",
+    ];
+
+    let prefilter = run_required_bash_scripts(id, required, root, &[(PREFILTER, true)]);
+    if prefilter.is_failure() {
+        return prefilter;
+    }
+    if !root.join(SCHEMA).is_file() {
+        return aggregate(
+            id,
+            required,
+            vec![
+                prefilter,
+                failure(
+                    id,
+                    required,
+                    "schemas/autospec-explore-proposal.schema.json: existing explore candidate schema missing",
+                ),
+            ],
+        );
+    }
+    for trio in TRIO {
+        let path = root.join(trio);
+        if !path.is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    prefilter,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: required adapter file missing"),
+                    ),
+                ],
+            );
+        }
+        if !has_heading_prefix(&path, "## Stage-2 intersect") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    prefilter,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: missing '## Stage-2 intersect' section"),
+                    ),
+                ],
+            );
+        }
+        if !contains(&path, "internet-forums") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    prefilter,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: missing internet-forums Stage-2 discovery source"),
+                    ),
+                ],
+            );
+        }
+        if !has_same_line_tokens(&path, "internet-forums", "0.4") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    prefilter,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: internet-forums source must be weighted 0.4"),
+                    ),
+                ],
+            );
+        }
+        if !contains(&path, "discovery-intersect-prefilter.sh") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    prefilter,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: Stage-2 must cite discovery-intersect-prefilter.sh"),
+                    ),
+                ],
+            );
+        }
+        if !contains_case_insensitive(&path, "repo-domain derivation") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    prefilter,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: Stage-2 must reuse the existing repo-domain derivation"),
+                    ),
+                ],
+            );
+        }
+        if !contains(&path, "autospec-explore-proposal.schema.json") {
+            return aggregate(id, required, vec![prefilter, failure(id, required, &format!("{trio}: Stage-2 must emit the existing explore candidate schema (cite, not redefine)"))]);
+        }
+        if !contains_case_insensitive(&path, "untrusted") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    prefilter,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: Stage-2 must state the untrusted-DATA trust boundary"),
+                    ),
+                ],
+            );
+        }
+    }
+    prefilter
 }
 
 fn run_required_bash_scripts(
@@ -2402,6 +2540,32 @@ fn contains_unguarded_claim_swap(path: &Path) -> bool {
                         && !line.contains("claim-issue.sh")
                 })
             })
+        })
+        .unwrap_or(false)
+}
+
+fn has_heading_prefix(path: &Path, expected: &str) -> bool {
+    fs::read_to_string(path)
+        .map(|document| document.lines().any(|line| line.starts_with(expected)))
+        .unwrap_or(false)
+}
+
+fn has_same_line_tokens(path: &Path, first: &str, second: &str) -> bool {
+    fs::read_to_string(path)
+        .map(|document| {
+            document
+                .lines()
+                .any(|line| line.contains(first) && line.contains(second))
+        })
+        .unwrap_or(false)
+}
+
+fn contains_case_insensitive(path: &Path, expected: &str) -> bool {
+    fs::read_to_string(path)
+        .map(|document| {
+            document
+                .to_ascii_lowercase()
+                .contains(&expected.to_ascii_lowercase())
         })
         .unwrap_or(false)
 }

@@ -187,6 +187,9 @@ impl ValidationCheck {
             "check_autospec_explore_specialists_discovery" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreSpecialistsDiscovery)
             }
+            "check_autospec_explore_stage2_intersect_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreStage2Intersect)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

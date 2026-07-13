@@ -924,6 +924,23 @@ fn catalog_assigns_explore_specialist_discovery_to_a_typed_external_batch() {
 }
 
 #[test]
+fn catalog_assigns_explore_stage2_intersect_to_a_typed_external_batch() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_autospec_explore_stage2_intersect_contract")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(
+            ExternalCheck::AutospecExploreStage2Intersect
+        )),
+        "check_autospec_explore_stage2_intersect_contract must have a typed external owner"
+    );
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![
