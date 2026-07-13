@@ -86,3 +86,22 @@ fn keyword_routing_contract_reports_the_missing_trio_literal() {
         "autospec-listen: codex/prompt.md missing completed Plan-mode handoff route"
     );
 }
+
+#[test]
+fn codex_skills_install_contract_accepts_registry_and_legacy_destinations() {
+    StructuralValidator::validate_codex_skills_install(&fixture("codex-skills-install"))
+        .expect("installer fixture passes");
+}
+
+#[test]
+fn codex_skills_install_contract_reports_a_missing_registry_destination() {
+    let failure = StructuralValidator::validate_codex_skills_install(&fixture(
+        "codex-skills-install-missing-registry",
+    ))
+    .expect_err("missing Codex registry destination fails");
+
+    assert_eq!(
+        failure,
+        "skills/autospec-design/install.sh missing Codex skills-dir install (skills/$SKILL_NAME/SKILL.md)"
+    );
+}

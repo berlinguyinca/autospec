@@ -32,6 +32,9 @@ impl ValidationCheck {
             }
             "check_self_update" => CheckOwner::RustNative(StructuralCheck::SelfUpdateTrio),
             "check_self_update_duo" => CheckOwner::RustNative(StructuralCheck::SelfUpdateDuo),
+            "check_codex_skills_install" => {
+                CheckOwner::RustNative(StructuralCheck::CodexSkillsInstall)
+            }
             _ => CheckOwner::RustNative(StructuralCheck::CatalogSlot),
         };
         Self {
@@ -68,6 +71,7 @@ pub enum StructuralCheck {
     EnforcementDefaults,
     SelfUpdateTrio,
     SelfUpdateDuo,
+    CodexSkillsInstall,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

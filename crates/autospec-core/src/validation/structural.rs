@@ -200,6 +200,40 @@ impl StructuralValidator {
         )
     }
 
+    pub fn validate_codex_skills_install(root: &Path) -> Result<(), String> {
+        let skills_root = root.join("skills");
+        let required_installer = skills_root.join("autospec-design/install.sh");
+        if !required_installer.is_file() {
+            return Err(
+                "check_codex_skills_install: skills/autospec-design/install.sh missing".to_string(),
+            );
+        }
+
+        let mut installers = fs::read_dir(&skills_root)
+            .map_err(|error| format!("failed to read {}: {error}", skills_root.display()))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("install.sh"))
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        installers.sort();
+
+        for installer in installers {
+            let display = display_path(root, &installer)?;
+            require_content(
+                &installer,
+                "skills/$SKILL_NAME/SKILL.md",
+                format!("{display} missing Codex skills-dir install (skills/$SKILL_NAME/SKILL.md)"),
+            )?;
+            require_any_content(
+                &installer,
+                ["prompts/$SKILL_NAME.md", "CODEX_DEST"],
+                format!("{display} missing legacy Codex prompts-file install"),
+            )?;
+        }
+
+        Ok(())
+    }
+
     fn validate_skill(root: &Path, skill_dir: &Path) -> Result<(), String> {
         let skill = skill_dir.join("SKILL.md");
         let codex = skill_dir.join("codex/prompt.md");
@@ -335,6 +369,22 @@ fn require_line_prefix(path: &Path, expected: &str, failure: String) -> Result<(
     let matches = path.is_file()
         && read(path)
             .map(|document| document.lines().any(|line| line.starts_with(expected)))
+            .unwrap_or(false);
+    if matches {
+        Ok(())
+    } else {
+        Err(failure)
+    }
+}
+
+fn require_any_content<const N: usize>(
+    path: &Path,
+    expected: [&str; N],
+    failure: String,
+) -> Result<(), String> {
+    let matches = path.is_file()
+        && read(path)
+            .map(|document| expected.iter().any(|expected| document.contains(expected)))
             .unwrap_or(false);
     if matches {
         Ok(())
