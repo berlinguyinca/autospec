@@ -174,6 +174,12 @@ impl ValidationCheck {
             "check_lint_issue_helpers" => {
                 CheckOwner::ExternalBatch(ExternalCheck::LintIssueHelpers)
             }
+            "check_phase4_ci_status_compare" => {
+                CheckOwner::ExternalBatch(ExternalCheck::Phase4CiStatusCompare)
+            }
+            "check_define_spec_worktree_routing" => {
+                CheckOwner::ExternalBatch(ExternalCheck::DefineSpecWorktreeRouting)
+            }
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }

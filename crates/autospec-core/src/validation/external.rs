@@ -29,6 +29,8 @@ pub enum ExternalCheck {
     MutationAndNegativePath,
     LintImplementationHelpers,
     LintIssueHelpers,
+    Phase4CiStatusCompare,
+    DefineSpecWorktreeRouting,
 }
 
 impl ExternalCheck {
@@ -57,6 +59,8 @@ impl ExternalCheck {
             Self::MutationAndNegativePath => run_mutation_and_negative_path(id, required, root),
             Self::LintImplementationHelpers => run_lint_implementation_helpers(id, required, root),
             Self::LintIssueHelpers => run_lint_issue_helpers(id, required, root),
+            Self::Phase4CiStatusCompare => run_phase4_ci_status_compare(id, required, root),
+            Self::DefineSpecWorktreeRouting => run_define_spec_worktree_routing(id, required, root),
         }
     }
 }
@@ -958,6 +962,80 @@ fn run_lint_issue_helpers(id: &str, required: bool, root: &Path) -> CheckResult 
         &["tests/unit/test_lint_issue_safety.bats"],
     );
     aggregate(id, required, vec![syntax, help.result, bats])
+}
+
+fn run_phase4_ci_status_compare(id: &str, required: bool, root: &Path) -> CheckResult {
+    const HELPER: &str = "scripts/ci-status-compare.sh";
+    const SMOKE_TEST: &str = "tests/smoke/ci-status-compare.sh";
+    if !is_executable(&root.join(HELPER)) {
+        return failure(
+            id,
+            required,
+            "scripts/ci-status-compare.sh: required executable missing",
+        );
+    }
+    if !root.join(SMOKE_TEST).is_file() {
+        return failure(
+            id,
+            required,
+            "tests/smoke/ci-status-compare.sh: required smoke test missing",
+        );
+    }
+    let commands = [
+        ToolCommand::new("bash", ["-n", HELPER])
+            .expect("CI status helper syntax check is a direct argument vector"),
+        ToolCommand::new("bash", ["-n", SMOKE_TEST])
+            .expect("CI status smoke syntax check is a direct argument vector"),
+        ToolCommand::new("bash", [SMOKE_TEST])
+            .expect("CI status smoke execution is a direct argument vector"),
+    ];
+    run_commands(id, required, root, commands)
+}
+
+fn run_define_spec_worktree_routing(id: &str, required: bool, root: &Path) -> CheckResult {
+    const ADAPTERS: &[&str] = &[
+        "skills/autospec-define/SKILL.md",
+        "skills/autospec-define/codex/prompt.md",
+        "skills/autospec-define/opencode/agent.md",
+    ];
+    const ANCHORS: &[&str] = &[
+        "worktree-guard.sh",
+        "/tmp/wt-spec-",
+        "MUST exit 0 before any edit",
+        "resolve-branch",
+        "define-spec-pr:begin",
+        "define-spec-pr:end",
+        "git worktree remove",
+        "git worktree prune",
+    ];
+    for adapter in ADAPTERS {
+        let path = root.join(adapter);
+        if !path.is_file() {
+            return failure(id, required, &format!("{adapter}: required file missing"));
+        }
+        let document = fs::read_to_string(&path).unwrap_or_default();
+        for anchor in ANCHORS {
+            if !document.contains(anchor) {
+                return failure(
+                    id,
+                    required,
+                    &format!("{adapter}: missing worktree-routing anchor `{anchor}`"),
+                );
+            }
+        }
+    }
+
+    const SMOKE_TEST: &str = "tests/phase4/test_define_spec_worktree.sh";
+    if !root.join(SMOKE_TEST).is_file() {
+        return failure(
+            id,
+            required,
+            "tests/phase4/test_define_spec_worktree.sh: required smoke test missing",
+        );
+    }
+    ToolCommand::new("bash", [SMOKE_TEST])
+        .expect("define-spec worktree smoke test is a direct argument vector")
+        .execute_in(id, required, root)
 }
 
 fn run_fab_container_dockerfile(id: &str, required: bool, root: &Path) -> CheckResult {

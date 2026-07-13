@@ -163,6 +163,27 @@ fn catalog_assigns_per_skill_model_contracts_to_rust_owners() {
         Some(&CheckOwner::ExternalBatch(ExternalCheck::LintIssueHelpers)),
         "check_lint_issue_helpers must have a typed external owner"
     );
+
+    for (id, owner) in [
+        (
+            "check_phase4_ci_status_compare",
+            ExternalCheck::Phase4CiStatusCompare,
+        ),
+        (
+            "check_define_spec_worktree_routing",
+            ExternalCheck::DefineSpecWorktreeRouting,
+        ),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::ExternalBatch(owner)),
+            "{id} must have a typed external owner"
+        );
+    }
 }
 
 #[test]

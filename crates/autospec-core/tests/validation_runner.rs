@@ -602,6 +602,37 @@ fn runner_checks_lint_issue_fixtures_and_its_direct_bats_suite() {
     assert_eq!(report.results[0].spawn_count, 3);
 }
 
+#[test]
+fn runner_executes_ci_status_and_define_worktree_smoke_contracts_directly() {
+    let catalog = ValidationCatalog::from_checks(vec![
+        ValidationCheck {
+            id: "check_phase4_ci_status_compare",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::Phase4CiStatusCompare),
+        },
+        ValidationCheck {
+            id: "check_define_spec_worktree_routing",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::DefineSpecWorktreeRouting),
+        },
+    ]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("phase4-script-contracts"));
+
+    assert!(report
+        .results
+        .iter()
+        .all(|result| result.exit_code == Some(0)));
+    assert_eq!(report.results[0].spawn_count, 3);
+    assert_eq!(report.results[1].spawn_count, 1);
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")
