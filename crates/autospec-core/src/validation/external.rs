@@ -23,6 +23,7 @@ pub enum ExternalCheck {
     DbModuleInstall,
     BatsDirectory(&'static str),
     AutospecUpgradeContract,
+    ClaimGuardContract,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -61,6 +62,7 @@ impl ExternalCheck {
             Self::DbModuleInstall => run_db_module_install(id, required, root),
             Self::BatsDirectory(directory) => run_bats_directory(id, required, root, directory),
             Self::AutospecUpgradeContract => run_autospec_upgrade_contract(id, required, root),
+            Self::ClaimGuardContract => run_claim_guard_contract(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -701,6 +703,55 @@ fn run_autospec_upgrade_contract(id: &str, required: bool, root: &Path) -> Check
     }
 
     run_bats_directory(id, required, root, "skills/autospec-upgrade/tests")
+}
+
+fn run_claim_guard_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const GUARD: &str = "scripts/claim-guard.sh";
+    const SUITES: &[&str] = &[
+        "tests/test_claim_guard_overlap.bats",
+        "tests/test_claim_guard_stale_reclaim.bats",
+        "tests/test_claim_guard_degrade.bats",
+    ];
+
+    let guard = root.join(GUARD);
+    if !guard.is_file() {
+        return failure(
+            id,
+            required,
+            "scripts/claim-guard.sh: file missing (issue #1066)",
+        );
+    }
+    if !is_executable(&guard) {
+        return failure(
+            id,
+            required,
+            "scripts/claim-guard.sh: file not executable (issue #1066)",
+        );
+    }
+
+    let syntax = ToolCommand::new("bash", ["-n", GUARD])
+        .expect("claim-guard syntax validation is a direct argument vector")
+        .execute_in(id, required, root);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    if !has_line_prefix(&guard, "        scan)") {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                failure(
+                    id,
+                    required,
+                    "scripts/claim-guard.sh: 'scan' subcommand missing from dispatch (issue #1066)",
+                ),
+            ],
+        );
+    }
+
+    let bats = run_bats_suites(id, required, root, SUITES);
+    aggregate(id, required, vec![syntax, bats])
 }
 
 fn run_autospec_sweep_area_contract(id: &str, required: bool, root: &Path) -> CheckResult {

@@ -770,6 +770,23 @@ fn catalog_assigns_release_support_gates_to_typed_external_batches() {
 }
 
 #[test]
+fn catalog_assigns_claim_guard_contract_to_a_typed_external_batch() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_claim_guard_contract")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(
+            ExternalCheck::ClaimGuardContract
+        )),
+        "check_claim_guard_contract must have a typed external owner"
+    );
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![

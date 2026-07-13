@@ -158,6 +158,9 @@ impl ValidationCheck {
             "check_autospec_upgrade_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecUpgradeContract)
             }
+            "check_claim_guard_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::ClaimGuardContract)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }
