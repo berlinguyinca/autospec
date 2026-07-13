@@ -398,6 +398,151 @@ fn init_refuses_an_existing_empty_primary_or_recovery_state_file() {
 }
 
 #[test]
+fn run_creates_a_local_queue_without_executing_work_and_refuses_existing_runs() {
+    let root = temp_dir("autospec-run-create");
+    let first = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-create",
+            "--spec",
+            "v67-agent-integration-contracts",
+            "--json",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("run command starts");
+    let stdout = String::from_utf8_lossy(&first.stdout);
+
+    assert!(
+        first.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(stdout.contains("\"command\":\"run\""));
+    assert!(stdout.contains("\"mode\":\"create\""));
+    assert!(stdout.contains("\"status\":\"created\""));
+    assert!(root
+        .join(".autospec/runs/run-cli-create/queue.json")
+        .exists());
+
+    let repeated = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-create",
+            "--spec",
+            "v67-agent-integration-contracts",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("repeated run starts");
+
+    assert!(!repeated.status.success());
+    assert!(String::from_utf8_lossy(&repeated.stderr).contains("already exists"));
+}
+
+#[test]
+fn run_ingests_an_explicit_agent_result_without_launching_an_agent_or_validation() {
+    let root = temp_dir("autospec-run-ingest");
+    let created = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-ingest",
+            "--spec",
+            "v67-agent-integration-contracts",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("queue creation starts");
+    assert!(created.status.success());
+    let input = root.join("agent-result.json");
+    std::fs::write(
+        &input,
+        "{\"result\":\"implemented\",\"files_changed\":[],\"validation\":\"cargo test --workspace: exit 0\",\"blockers\":[],\"handoff\":\"ready\"}",
+    )
+    .expect("agent result fixture is written");
+
+    let output = autospec()
+        .args([
+            "run",
+            "--ingest",
+            input.to_str().unwrap(),
+            "--run",
+            "run-cli-ingest",
+            "--spec",
+            "v67-agent-integration-contracts",
+            "--result-id",
+            "result-1",
+            "--outcome",
+            "passed",
+            "--json",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("result ingestion starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("\"mode\":\"ingest\""));
+    assert!(stdout.contains("\"outcome\":\"passed\""));
+    assert!(root
+        .join(".autospec/runs/run-cli-ingest/agent-results/v67-agent-integration-contracts/result-1.json")
+        .exists());
+    let queue = std::fs::read_to_string(root.join(".autospec/runs/run-cli-ingest/queue.json"))
+        .expect("updated queue is readable");
+    assert!(queue.contains("\"status\":\"passed\""));
+    assert!(queue.contains("\"agent_result_ids\":[\"result-1\"]"));
+}
+
+#[test]
+fn resume_reports_the_latest_incomplete_queue_and_errors_when_none_exists() {
+    let root = temp_dir("autospec-resume");
+    let missing = autospec()
+        .args(["resume", "--json"])
+        .current_dir(&root)
+        .output()
+        .expect("empty resume starts");
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("no incomplete run"));
+
+    let created = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-resume",
+            "--spec",
+            "v67-agent-integration-contracts",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("queue creation starts");
+    assert!(created.status.success());
+
+    let resumed = autospec()
+        .args(["resume", "--json"])
+        .current_dir(&root)
+        .output()
+        .expect("resume command starts");
+    let stdout = String::from_utf8_lossy(&resumed.stdout);
+
+    assert!(
+        resumed.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(stdout.contains("\"command\":\"resume\""));
+    assert!(stdout.contains("\"run_id\":\"run-cli-resume\""));
+    assert!(stdout.contains("\"spec_id\":\"v67-agent-integration-contracts\""));
+    assert!(stdout.contains("\"entry_status\":\"pending\""));
+}
+
+#[test]
 fn autonomous_start_dry_run_includes_monitor_and_supervisor_companions() {
     let output = autospec()
         .args([
@@ -1916,15 +2061,17 @@ fn doctor_readiness_json_reports_workflow_safety() {
 }
 
 #[test]
-fn cli_commands_unimplemented_mutating_commands_are_explicit() {
-    for command in ["run", "resume", "benchmark"] {
+fn cli_commands_require_explicit_input_or_report_the_remaining_stub() {
+    for command in ["run", "resume"] {
         let output = autospec().arg(command).output().expect("autospec runs");
-        let stderr = String::from_utf8_lossy(&output.stderr);
 
         assert!(
             !output.status.success(),
             "{command} should not silently succeed"
         );
-        assert!(stderr.contains("not yet implemented"));
     }
+
+    let benchmark = autospec().arg("benchmark").output().expect("autospec runs");
+    assert!(!benchmark.status.success());
+    assert!(String::from_utf8_lossy(&benchmark.stderr).contains("not yet implemented"));
 }

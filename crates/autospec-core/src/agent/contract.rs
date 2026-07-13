@@ -1,3 +1,7 @@
+use std::collections::BTreeMap;
+
+use crate::state::json::{JsonParser, JsonValue};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentTask {
     pub spec_id: String,
@@ -55,6 +59,37 @@ impl AgentResult {
             escape_json(&self.handoff)
         )
     }
+
+    pub fn from_json(document: &str) -> Result<Self, String> {
+        Self::from_json_value(JsonParser::new(document).parse()?)
+    }
+
+    pub(crate) fn from_json_value(value: JsonValue) -> Result<Self, String> {
+        let mut object = value.into_object("agent result")?;
+        require_keys(
+            &object,
+            [
+                "result",
+                "files_changed",
+                "validation",
+                "blockers",
+                "handoff",
+            ]
+            .as_slice(),
+            "agent result",
+        )?;
+        Ok(Self {
+            result: take(&mut object, "result", "agent result")?.into_string("result")?,
+            files_changed: string_array(
+                take(&mut object, "files_changed", "agent result")?,
+                "files_changed",
+            )?,
+            validation: take(&mut object, "validation", "agent result")?
+                .into_string("validation")?,
+            blockers: string_array(take(&mut object, "blockers", "agent result")?, "blockers")?,
+            handoff: take(&mut object, "handoff", "agent result")?.into_string("handoff")?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,7 +102,8 @@ impl SafeModePolicy {
         if self.allow_destructive {
             return Ok(());
         }
-        let text = task.instructions.to_ascii_lowercase();
+        let text =
+            format!("{}\n{}", task.instructions, task.validation_command).to_ascii_lowercase();
         let checks = [
             (
                 "destructive git",
@@ -119,8 +155,52 @@ fn json_array(values: &[String]) -> String {
 }
 
 fn escape_json(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\u{0C}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                escaped.push_str(&format!("\\u{:04x}", character as u32))
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn string_array(value: JsonValue, context: &str) -> Result<Vec<String>, String> {
     value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
+        .into_array(context)?
+        .into_iter()
+        .map(|value| value.into_string(context))
+        .collect()
+}
+
+fn take(
+    object: &mut BTreeMap<String, JsonValue>,
+    key: &str,
+    context: &str,
+) -> Result<JsonValue, String> {
+    object
+        .remove(key)
+        .ok_or_else(|| format!("missing {key} in {context}"))
+}
+
+fn require_keys(
+    object: &BTreeMap<String, JsonValue>,
+    expected: &[&str],
+    context: &str,
+) -> Result<(), String> {
+    for key in object.keys() {
+        if !expected.contains(&key.as_str()) {
+            return Err(format!("unknown key {key} in {context}"));
+        }
+    }
+    Ok(())
 }
