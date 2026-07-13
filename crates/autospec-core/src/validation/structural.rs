@@ -33,6 +33,10 @@ impl StructuralValidator {
             }
             StructuralCheck::ExistingSpecMode => Self::validate_existing_spec_mode(root),
             StructuralCheck::DocsAmendmentPresence => Self::validate_docs_amendment_presence(root),
+            StructuralCheck::AutospecReviewSkill => Self::validate_autospec_review_skill(root),
+            StructuralCheck::AutospecReviewTierADirectives => {
+                Self::validate_autospec_review_tier_a_directives(root)
+            }
             StructuralCheck::StopMode => Self::validate_stop_mode_sections(root),
             StructuralCheck::KeywordRouting => Self::validate_keyword_routing_section(root),
             StructuralCheck::GapRemediation => Self::validate_gap_remediation_sections(root),
@@ -544,6 +548,47 @@ impl StructuralValidator {
         let document = read(&path).unwrap_or_default().to_ascii_lowercase();
         if !contains_docs_drift_note(&document) {
             return Err("skills/autospec-test/SKILL.md: missing Stage 2.5 drift-gate composition note (docs amendment §10)".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn validate_autospec_review_skill(root: &Path) -> Result<(), String> {
+        let skill = root.join("skills/autospec-review/SKILL.md");
+        let opencode = root.join("skills/autospec-review/opencode/agent.md");
+        let codex = root.join("skills/autospec-review/codex/prompt.md");
+        for (path, display) in [
+            (&skill, "skills/autospec-review/SKILL.md"),
+            (&opencode, "skills/autospec-review/opencode/agent.md"),
+            (&codex, "skills/autospec-review/codex/prompt.md"),
+        ] {
+            if !path.is_file() {
+                return Err(format!("{display} missing"));
+            }
+        }
+
+        let skill_body = strip_frontmatter(&read(&skill)?);
+        if skill_body != strip_frontmatter(&read(&opencode)?) {
+            return Err("autospec-review opencode lockstep".to_string());
+        }
+        if skill_body != read(&codex)? {
+            return Err("autospec-review codex lockstep".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn validate_autospec_review_tier_a_directives(root: &Path) -> Result<(), String> {
+        let path = root.join("skills/autospec-review/SKILL.md");
+        let document = read(&path).unwrap_or_default();
+        let count = document.matches("Tier A (spec work)").count();
+        if count == 0 {
+            return Err(
+                "missing 'Tier A (spec work)' directive in autospec-review/SKILL.md".to_string(),
+            );
+        }
+        if count < 2 {
+            return Err(format!(
+                "expected ≥2 'Tier A (spec work)' directives in autospec-review/SKILL.md, found {count}"
+            ));
         }
         Ok(())
     }

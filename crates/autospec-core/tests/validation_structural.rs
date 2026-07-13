@@ -250,3 +250,23 @@ fn documentation_and_skill_contracts_preserve_their_required_literals() {
         "llms.txt: missing — run gen-llms-txt.sh --repo-root . to regenerate"
     );
 }
+
+#[test]
+fn autospec_review_contract_requires_a_complete_lockstep_trio_and_two_tier_a_directives() {
+    StructuralValidator::validate_autospec_review_skill(&fixture("review-skill-contract"))
+        .expect("complete review trio stays in lockstep");
+    StructuralValidator::validate_autospec_review_tier_a_directives(&fixture(
+        "review-skill-contract",
+    ))
+    .expect("two Tier A directives pass");
+
+    let failure = StructuralValidator::validate_autospec_review_tier_a_directives(&fixture(
+        "review-skill-contract-one-tier-a",
+    ))
+    .expect_err("one Tier A directive does not satisfy the contract");
+
+    assert_eq!(
+        failure,
+        "expected ≥2 'Tier A (spec work)' directives in autospec-review/SKILL.md, found 1"
+    );
+}

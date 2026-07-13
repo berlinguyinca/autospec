@@ -48,6 +48,12 @@ impl ValidationCheck {
             "check_docs_amendment_presence" => {
                 CheckOwner::RustNative(StructuralCheck::DocsAmendmentPresence)
             }
+            "check_autospec_review_skill_present" => {
+                CheckOwner::RustNative(StructuralCheck::AutospecReviewSkill)
+            }
+            "check_autospec_review_tier_a_directives" => {
+                CheckOwner::RustNative(StructuralCheck::AutospecReviewTierADirectives)
+            }
             "check_stop_mode_section" => CheckOwner::RustNative(StructuralCheck::StopMode),
             "check_keyword_routing_section" => {
                 CheckOwner::RustNative(StructuralCheck::KeywordRouting)
@@ -118,6 +124,8 @@ pub enum StructuralCheck {
     StlDesignGuardrails,
     ExistingSpecMode,
     DocsAmendmentPresence,
+    AutospecReviewSkill,
+    AutospecReviewTierADirectives,
     StopMode,
     KeywordRouting,
     GapRemediation,
