@@ -664,6 +664,36 @@ fn runner_checks_groom_preflight_and_grow_run_contracts_directly() {
     assert_eq!(report.results[1].spawn_count, 1);
 }
 
+#[test]
+fn runner_checks_performance_and_ux_workstream_contracts_directly() {
+    let catalog = ValidationCatalog::from_checks(vec![
+        ValidationCheck {
+            id: "check_performance_workstream_contract",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::PerformanceWorkstream),
+        },
+        ValidationCheck {
+            id: "check_ux_ui_workstream_contract",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::UxUiWorkstream),
+        },
+    ]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("workstream-contracts"));
+
+    assert!(report
+        .results
+        .iter()
+        .all(|result| result.exit_code == Some(0)));
+    assert!(report.results.iter().all(|result| result.spawn_count == 1));
+}
+
 fn repository_root() -> PathBuf {
     fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .expect("workspace root resolves")

@@ -178,6 +178,14 @@ fn catalog_assigns_per_skill_model_contracts_to_rust_owners() {
             ExternalCheck::RunGroomPreflightContract,
         ),
         ("check_grow_run_contract", ExternalCheck::GrowRunContract),
+        (
+            "check_performance_workstream_contract",
+            ExternalCheck::PerformanceWorkstream,
+        ),
+        (
+            "check_ux_ui_workstream_contract",
+            ExternalCheck::UxUiWorkstream,
+        ),
     ] {
         assert_eq!(
             catalog

@@ -184,6 +184,12 @@ impl ValidationCheck {
                 CheckOwner::ExternalBatch(ExternalCheck::RunGroomPreflightContract)
             }
             "check_grow_run_contract" => CheckOwner::ExternalBatch(ExternalCheck::GrowRunContract),
+            "check_performance_workstream_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::PerformanceWorkstream)
+            }
+            "check_ux_ui_workstream_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::UxUiWorkstream)
+            }
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }

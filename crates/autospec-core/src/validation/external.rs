@@ -33,6 +33,8 @@ pub enum ExternalCheck {
     DefineSpecWorktreeRouting,
     RunGroomPreflightContract,
     GrowRunContract,
+    PerformanceWorkstream,
+    UxUiWorkstream,
 }
 
 impl ExternalCheck {
@@ -65,6 +67,8 @@ impl ExternalCheck {
             Self::DefineSpecWorktreeRouting => run_define_spec_worktree_routing(id, required, root),
             Self::RunGroomPreflightContract => run_groom_preflight_contract(id, required, root),
             Self::GrowRunContract => run_grow_run_contract(id, required, root),
+            Self::PerformanceWorkstream => run_performance_workstream(id, required, root),
+            Self::UxUiWorkstream => run_ux_ui_workstream(id, required, root),
         }
     }
 }
@@ -1105,6 +1109,129 @@ fn run_grow_run_contract(id: &str, required: bool, root: &Path) -> CheckResult {
         }
     }
     run_bats_suites_if_available(id, required, root, &["tests/autospec-grow-run/smoke.bats"])
+}
+
+fn run_performance_workstream(id: &str, required: bool, root: &Path) -> CheckResult {
+    const CONTRACT: WorkstreamContract = WorkstreamContract {
+        helper: "scripts/performance-workstream.sh",
+        runbook: "docs/runbooks/performance-workstream.md",
+        bats_file: "tests/autonomous/test_performance_workstream.bats",
+        helper_anchors: &[
+            "record-benchmark",
+            "propose-regression-issue",
+            "optimization-report",
+            "fast-path-guard",
+        ],
+        runbook_anchors: &["<50ms"],
+        workflow: None,
+    };
+    run_workstream_contract(id, required, root, &CONTRACT)
+}
+
+fn run_ux_ui_workstream(id: &str, required: bool, root: &Path) -> CheckResult {
+    const CONTRACT: WorkstreamContract = WorkstreamContract {
+        helper: "scripts/ux-ui-workstream.sh",
+        runbook: "docs/runbooks/ux-ui-workstream.md",
+        bats_file: "tests/autonomous/test_ux_ui_workstream.bats",
+        helper_anchors: &[
+            "record-snapshot",
+            "propose-regression-issue",
+            "improvement-report",
+            "validate-design-doc",
+        ],
+        runbook_anchors: &[
+            "LCP <= 2.5s",
+            "INP <= 200ms",
+            "CLS <= 0.1",
+            "web.dev Web Vitals",
+            "Lighthouse CI",
+            "Nielsen Norman Group heuristics",
+            "HEART",
+            "light",
+            "dark",
+        ],
+        workflow: Some((
+            ".github/workflows/ux-ui-workstream.yml",
+            "ux-ui-workstream.sh gate",
+        )),
+    };
+    run_workstream_contract(id, required, root, &CONTRACT)
+}
+
+struct WorkstreamContract {
+    helper: &'static str,
+    runbook: &'static str,
+    bats_file: &'static str,
+    helper_anchors: &'static [&'static str],
+    runbook_anchors: &'static [&'static str],
+    workflow: Option<(&'static str, &'static str)>,
+}
+
+fn run_workstream_contract(
+    id: &str,
+    required: bool,
+    root: &Path,
+    contract: &WorkstreamContract,
+) -> CheckResult {
+    let WorkstreamContract {
+        helper,
+        runbook,
+        bats_file,
+        helper_anchors,
+        runbook_anchors,
+        workflow,
+    } = contract;
+    let helper_path = root.join(helper);
+    if !is_executable(&helper_path) {
+        return failure(
+            id,
+            required,
+            &format!("{helper}: missing or not executable"),
+        );
+    }
+    let helper_document = fs::read_to_string(&helper_path).unwrap_or_default();
+    for anchor in *helper_anchors {
+        if !helper_document.contains(anchor) {
+            return failure(
+                id,
+                required,
+                &format!("{helper}: missing `{anchor}` command"),
+            );
+        }
+    }
+    let runbook_path = root.join(runbook);
+    if !runbook_path.is_file() {
+        return failure(id, required, &format!("{runbook}: missing runbook"));
+    }
+    let runbook_document = fs::read_to_string(&runbook_path).unwrap_or_default();
+    for anchor in *runbook_anchors {
+        if !runbook_document.contains(anchor) {
+            return failure(
+                id,
+                required,
+                &format!("{runbook}: missing `{anchor}` guidance"),
+            );
+        }
+    }
+    if !root.join(bats_file).is_file() {
+        return failure(id, required, &format!("{bats_file}: missing bats coverage"));
+    }
+    if let Some((workflow, anchor)) = workflow {
+        let workflow_path = root.join(workflow);
+        if !workflow_path.is_file() {
+            return failure(id, required, &format!("{workflow}: missing PR workflow"));
+        }
+        if !contains(&workflow_path, anchor) {
+            return failure(
+                id,
+                required,
+                &format!("{workflow}: missing deterministic gate invocation"),
+            );
+        }
+    }
+    ToolCommand::new("bash", ["-n", helper])
+        .expect("workstream syntax check is a direct argument vector")
+        .execute_in(id, required, root)
 }
 
 fn run_fab_container_dockerfile(id: &str, required: bool, root: &Path) -> CheckResult {
