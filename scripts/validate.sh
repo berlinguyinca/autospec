@@ -257,6 +257,63 @@ check_required_files() {
     done
 }
 
+check_flag_sentinel_docs() {
+    info "flag sentinel docs: used *.flag files documented in docs/FLAGS.md"
+    [ -f docs/FLAGS.md ] || fail "docs/FLAGS.md: missing flag-file reference"
+
+    flags_file="$(mktemp)"
+    missing_file="$(mktemp)"
+    python3 - "$flags_file" <<'PY'
+import pathlib
+import re
+import subprocess
+import sys
+
+out = pathlib.Path(sys.argv[1])
+roots = [pathlib.Path(p) for p in ("scripts", "skills", "packages", "crates") if pathlib.Path(p).exists()]
+token = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_.-]*\.flag)(?![A-Za-z0-9_.-])")
+skip_parts = {".git", "__pycache__", "node_modules", "target", "tests"}
+flags = set()
+
+try:
+    listed = subprocess.check_output(
+        ["git", "ls-files", "--", "scripts", "skills", "packages", "crates"],
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).splitlines()
+    paths = [pathlib.Path(p) for p in listed if p]
+except (OSError, subprocess.CalledProcessError):
+    paths = []
+
+if not paths:
+    paths = [path for root in roots for path in root.rglob("*")]
+
+for path in paths:
+    if not path.is_file():
+        continue
+    if any(part in skip_parts for part in path.parts):
+        continue
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        continue
+    flags.update(match.group(1) for match in token.finditer(text))
+
+out.write_text("\n".join(sorted(flags)) + ("\n" if flags else ""), encoding="utf-8")
+PY
+
+    while IFS= read -r flag; do
+        [ -n "$flag" ] || continue
+        grep -Fq "$flag" docs/FLAGS.md || printf '%s\n' "$flag" >> "$missing_file"
+    done < "$flags_file"
+
+    if [ -s "$missing_file" ]; then
+        fail "docs/FLAGS.md: missing sentinel flag(s): $(tr '\n' ' ' < "$missing_file" | sed 's/ *$//')"
+    fi
+
+    rm -f "$flags_file" "$missing_file"
+}
+
 # Derive-trio drift gate (trio-derivation Phase 2, decomposition children C+E).
 # This ADOPTS scripts/derive-trio.sh --check as the canonical trio-drift
 # mechanism: for every multi-harness skill under skills/, the committed
@@ -3306,6 +3363,7 @@ main() {
     check_startup_preflight
     check_stop_mode_section
     check_keyword_routing_section
+    check_flag_sentinel_docs
     check_gap_remediation_section
     check_autospec_gap_miner_contract
     check_review_remediation_section

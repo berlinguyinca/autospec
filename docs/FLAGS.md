@@ -19,6 +19,7 @@ rm    ~/.autospec/no-secaudit.flag     # clear
 | `no-secaudit.flag` | Skips the post-batch security sweep dimension (Phase 5.5). | operator |
 | `no-test.flag` | Skips the test step (use only when tests are run elsewhere). | operator |
 | `no-heal.flag` | Disables the autospec self-heal loop. | operator |
+| `no-auto-rollover.flag` | Disables the Codex context rollover monitor kill-switch when present. | operator |
 | `qa-no-heal.flag` | Disables the autospec-qa self-heal loop specifically. | operator |
 | `qa-heal-stop.flag` | Stops an in-progress autospec-qa heal loop after the current round. | `/autospec-qa` stop path |
 | `refine-loop-stop.flag` | Stops an in-progress `/autospec-refine --continue` loop. | `/autospec-refine` stop path |
