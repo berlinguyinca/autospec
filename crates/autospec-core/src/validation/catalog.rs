@@ -248,6 +248,16 @@ impl ValidationCheck {
             "check_autospec_parallel_dispatch_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecParallelDispatch)
             }
+            "check_growth_shared_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::GrowthShared)
+            }
+            "check_growth_candidate_pipeline_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::GrowthCandidatePipeline)
+            }
+            "check_grow_run_pipeline_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::GrowRunPipeline)
+            }
+            "check_db_telemetry_contract" => CheckOwner::ExternalBatch(ExternalCheck::DbTelemetry),
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

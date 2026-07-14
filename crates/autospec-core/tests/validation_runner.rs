@@ -1095,6 +1095,57 @@ fn tool_commands_can_remove_a_previously_configured_environment_variable() {
 }
 
 #[test]
+fn runner_checks_growth_and_telemetry_contracts_with_typed_batches() {
+    for (id, owner, fixture, minimum_spawns, maximum_spawns) in [
+        (
+            "check_growth_shared_contract",
+            ExternalCheck::GrowthShared,
+            "growth-shared",
+            7,
+            14,
+        ),
+        (
+            "check_growth_candidate_pipeline_contract",
+            ExternalCheck::GrowthCandidatePipeline,
+            "growth-candidate-pipeline",
+            4,
+            9,
+        ),
+        (
+            "check_grow_run_pipeline_contract",
+            ExternalCheck::GrowRunPipeline,
+            "grow-run-pipeline",
+            8,
+            14,
+        ),
+        (
+            "check_db_telemetry_contract",
+            ExternalCheck::DbTelemetry,
+            "db-telemetry",
+            1,
+            4,
+        ),
+    ] {
+        let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+            id,
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(owner),
+        }]);
+
+        let report = ValidationRunner::run(&catalog, &validation_fixture(fixture));
+
+        assert_eq!(report.results[0].exit_code, Some(0), "{id}");
+        assert!(
+            (minimum_spawns..=maximum_spawns).contains(&report.results[0].spawn_count),
+            "{id}"
+        );
+    }
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

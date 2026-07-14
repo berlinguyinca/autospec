@@ -55,6 +55,10 @@ pub enum ExternalCheck {
     AutospecAutonomousContract,
     DogfoodDetectors,
     AutospecParallelDispatch,
+    GrowthShared,
+    GrowthCandidatePipeline,
+    GrowRunPipeline,
+    DbTelemetry,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -145,6 +149,10 @@ impl ExternalCheck {
             }
             Self::DogfoodDetectors => run_dogfood_detectors(id, required, root),
             Self::AutospecParallelDispatch => run_autospec_parallel_dispatch(id, required, root),
+            Self::GrowthShared => run_growth_shared(id, required, root),
+            Self::GrowthCandidatePipeline => run_growth_candidate_pipeline(id, required, root),
+            Self::GrowRunPipeline => run_grow_run_pipeline(id, required, root),
+            Self::DbTelemetry => run_db_telemetry(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -3056,6 +3064,112 @@ fn run_autospec_parallel_dispatch(id: &str, required: bool, root: &Path) -> Chec
                 .without_env("AUTOSPEC_RUN_ONLY_ISSUES"),
         ],
     );
+    aggregate(id, required, vec![syntax, bats])
+}
+
+fn run_growth_shared(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPTS: &[&str] = &[
+        "skills/autospec-shared/scripts/validate-growth-config.sh",
+        "skills/autospec-shared/scripts/growth-ethics-blocklist.sh",
+        "skills/autospec-shared/scripts/growth-ethics-precheck.sh",
+        "skills/autospec-shared/scripts/growth-ledger.sh",
+        "skills/autospec-shared/scripts/growth-source-weights.sh",
+        "skills/autospec-shared/scripts/growth-measure.sh",
+        "skills/autospec-shared/scripts/growth-measure-due.sh",
+    ];
+    const SUITES: &[&str] = &[
+        "tests/unit/growth-config-validate.bats",
+        "tests/unit/growth-ethics-blocklist.bats",
+        "tests/unit/growth-ethics-precheck.bats",
+        "tests/unit/growth-ledger.bats",
+        "tests/unit/growth-source-weights.bats",
+        "tests/unit/growth-measure.bats",
+        "tests/unit/growth-measure-due.bats",
+    ];
+    run_scripts_with_optional_bats(id, required, root, SCRIPTS, SUITES)
+}
+
+fn run_growth_candidate_pipeline(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPTS: &[&str] = &[
+        "skills/autospec-shared/scripts/validate-growth-candidate.sh",
+        "skills/autospec-shared/scripts/growth-candidate-dedup.sh",
+        "skills/autospec-shared/scripts/growth-candidate-rank.sh",
+        "skills/autospec-shared/scripts/growth-candidate-verify.sh",
+    ];
+    const SUITES: &[&str] = &[
+        "tests/unit/growth-candidate-validate.bats",
+        "tests/unit/growth-candidate-dedup.bats",
+        "tests/unit/growth-candidate-rank.bats",
+        "tests/unit/growth-candidate-verify.bats",
+        "tests/unit/growth-candidate-pipeline-integration.bats",
+    ];
+    run_scripts_with_optional_bats(id, required, root, SCRIPTS, SUITES)
+}
+
+fn run_grow_run_pipeline(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPTS: &[&str] = &[
+        "skills/autospec-shared/scripts/validate-outbound-draft.sh",
+        "skills/autospec-shared/scripts/growth-content-quality-precheck.sh",
+        "skills/autospec-shared/scripts/growth-outbound-queue.sh",
+        "skills/autospec-shared/scripts/growth-attribute.sh",
+        "skills/autospec-shared/scripts/growth-adapter-github.sh",
+        "skills/autospec-shared/scripts/growth-adapter-analytics.sh",
+        "skills/autospec-shared/scripts/growth-adapter-gsc.sh",
+        "skills/autospec-shared/scripts/growth-adapter-rank.sh",
+    ];
+    const SUITES: &[&str] = &[
+        "tests/unit/validate-outbound-draft.bats",
+        "tests/unit/growth-content-quality-precheck.bats",
+        "tests/unit/growth-outbound-queue.bats",
+        "tests/unit/growth-adapters.bats",
+        "tests/unit/growth-attribute.bats",
+        "tests/unit/growth-measure.bats",
+    ];
+    run_scripts_with_optional_bats(id, required, root, SCRIPTS, SUITES)
+}
+
+fn run_db_telemetry(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPT: &str = "skills/autospec-shared/scripts/emit-event.sh";
+    const REQUIRED_FILES: &[&str] = &[
+        "tests/unit/emit-event-wiring.bats",
+        "skills/autospec-db-doctor/scripts/db-doctor.sh",
+        "tests/unit/autospec-db-doctor.bats",
+    ];
+    const SUITES: &[&str] = &[
+        "tests/unit/emit-event.bats",
+        "tests/unit/emit-event-wiring.bats",
+        "tests/unit/autospec-db-doctor.bats",
+    ];
+
+    for file in REQUIRED_FILES {
+        if !root.join(file).is_file() {
+            return failure(id, required, &format!("{file}: required file missing"));
+        }
+    }
+    let syntax = run_required_bash_scripts(id, required, root, &[(SCRIPT, false)]);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    let bats = run_bats_suites_if_available(id, required, root, SUITES);
+    aggregate(id, required, vec![syntax, bats])
+}
+
+fn run_scripts_with_optional_bats(
+    id: &str,
+    required: bool,
+    root: &Path,
+    scripts: &[&str],
+    suites: &[&str],
+) -> CheckResult {
+    let scripts = scripts
+        .iter()
+        .map(|script| (*script, false))
+        .collect::<Vec<_>>();
+    let syntax = run_required_bash_scripts(id, required, root, &scripts);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    let bats = run_bats_suites_if_available(id, required, root, suites);
     aggregate(id, required, vec![syntax, bats])
 }
 
