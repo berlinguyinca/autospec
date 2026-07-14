@@ -358,21 +358,30 @@ impl StructuralValidator {
             return Err("AGENTS.md missing at repo root".to_string());
         }
         let document = read(&agents)?;
-        for (heading, failure) in [
+        for (heading, qualified, failure) in [
             (
                 "## Subagent model selection (two-tier, cost-aware)",
+                false,
                 "AGENTS.md missing '## Subagent model selection (two-tier, cost-aware)' section",
             ),
             (
                 "### Tier A — Specification work",
+                true,
                 "AGENTS.md missing '### Tier A — Specification work' subheading",
             ),
             (
                 "### Tier B — Implementation work",
+                true,
                 "AGENTS.md missing '### Tier B — Implementation work' subheading",
             ),
         ] {
-            if !document.lines().any(|line| line == heading) {
+            if !document.lines().any(|line| {
+                if qualified {
+                    line.starts_with(heading)
+                } else {
+                    line == heading
+                }
+            }) {
                 return Err(failure.to_string());
             }
         }
@@ -2139,7 +2148,8 @@ fn require_section(root: &Path, skill: &str, section: &str) -> Result<(), String
     for member in ["SKILL.md", "opencode/agent.md", "codex/prompt.md"] {
         let path = skill_dir.join(member);
         let has_section = path.is_file()
-            && read(&path).map(|document| document.lines().any(|line| line == section))?;
+            && read(&path)
+                .map(|document| document.lines().any(|line| line.starts_with(section)))?;
         if !has_section {
             return Err(format!(
                 "skills/{skill}/{member}: missing '{section}' section"

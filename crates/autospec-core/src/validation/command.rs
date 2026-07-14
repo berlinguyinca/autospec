@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -5,6 +6,26 @@ use std::process::{Command, Output, Stdio};
 use std::time::Instant;
 
 use super::results::{output_digest, CheckResult};
+
+thread_local! {
+    static FAST_VALIDATION_MODE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Restores the validation execution mode when an external batch finishes.
+pub(crate) struct FastValidationModeGuard {
+    previous: bool,
+}
+
+pub(crate) fn enter_fast_validation_mode(fast: bool) -> FastValidationModeGuard {
+    let previous = FAST_VALIDATION_MODE.with(|mode| mode.replace(fast));
+    FastValidationModeGuard { previous }
+}
+
+impl Drop for FastValidationModeGuard {
+    fn drop(&mut self) {
+        FAST_VALIDATION_MODE.with(|mode| mode.set(self.previous));
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCommand {
@@ -95,6 +116,9 @@ impl ToolCommand {
         root: &Path,
     ) -> CapturedCheckResult {
         let id = id.into();
+        if should_skip_bats_in_fast_mode(&self.program) {
+            return skipped_result(id, required);
+        }
         let started = Instant::now();
         let mut command = Command::new(&self.program);
         command
@@ -118,6 +142,9 @@ impl ToolCommand {
         stdin_bytes: &[u8],
     ) -> CapturedCheckResult {
         let id = id.into();
+        if should_skip_bats_in_fast_mode(&self.program) {
+            return skipped_result(id, required);
+        }
         let started = Instant::now();
         let mut command = Command::new(&self.program);
         command
@@ -143,6 +170,18 @@ impl ToolCommand {
         };
 
         captured_result(id, required, started, output)
+    }
+}
+
+fn should_skip_bats_in_fast_mode(program: &Path) -> bool {
+    FAST_VALIDATION_MODE.with(Cell::get)
+        && program.file_name().and_then(OsStr::to_str) == Some("bats")
+}
+
+fn skipped_result(id: String, required: bool) -> CapturedCheckResult {
+    CapturedCheckResult {
+        result: CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[])),
+        stdout: Vec::new(),
     }
 }
 

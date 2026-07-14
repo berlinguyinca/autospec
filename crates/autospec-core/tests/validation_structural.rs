@@ -229,6 +229,14 @@ fn repository_presence_and_subagent_policy_contracts_have_direct_owners() {
 }
 
 #[test]
+fn policy_section_validators_accept_qualified_headings_used_by_the_repository() {
+    StructuralValidator::validate_review_remediation_sections(&workspace_root())
+        .expect("qualified remediation headings preserve the legacy prefix contract");
+    StructuralValidator::validate_agents_md_subagent_section(&workspace_root())
+        .expect("qualified tier headings preserve the legacy prefix contract");
+}
+
+#[test]
 fn documentation_and_skill_contracts_preserve_their_required_literals() {
     let root = fixture("documentation-contracts");
 

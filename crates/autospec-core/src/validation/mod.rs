@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod command;
 pub mod external;
 pub mod options;
+pub mod plan;
 pub mod results;
 pub mod runner;
 pub mod structural;
@@ -28,6 +29,7 @@ pub use catalog::{
 pub use command::ToolCommand;
 pub use external::ExternalCheck;
 pub use options::{Jobs, ValidationOptions};
+pub use plan::{PlannedValidationCheck, ValidationPlan};
 pub use results::{
     CheckResult, ValidationAggregate, ValidationExecutionAggregate, ValidationExecutionReport,
     ValidationObservation, ValidationReport,

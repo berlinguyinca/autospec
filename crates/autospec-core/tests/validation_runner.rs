@@ -2,8 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use autospec_core::validation::{
-    CheckModes, CheckOwner, CheckReachability, CheckResult, ExternalCheck, StructuralCheck,
-    ToolCommand, ValidationCatalog, ValidationCheck, ValidationExecutionReport, ValidationRunner,
+    CheckModes, CheckOwner, CheckReachability, CheckResult, ExternalCheck, Jobs, StructuralCheck,
+    ToolCommand, ValidationCatalog, ValidationCheck, ValidationExecutionReport, ValidationOptions,
+    ValidationPlan, ValidationRunner,
 };
 
 #[test]
@@ -140,6 +141,106 @@ fn runner_executes_rust_owners_in_catalog_order() {
     );
     assert_eq!(report.results[0].exit_code, Some(0));
     assert_eq!(report.results[0].spawn_count, 0);
+}
+
+#[test]
+fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
+    let catalog = ValidationCatalog::standard();
+    let full = ValidationPlan::build(&catalog, &ValidationOptions::default())
+        .expect("full validation plan builds");
+    let fast = ValidationPlan::build(
+        &catalog,
+        &ValidationOptions::parse(["--fast"]).expect("fast validation options parse"),
+    )
+    .expect("fast validation plan builds");
+
+    assert_eq!(full.ids().len(), 138);
+    assert_eq!(full.unique_ids().len(), 133);
+    assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
+    assert!(full.ids().contains(&"check_python_suites"));
+    assert!(full.ids().contains(&"check_install_tests"));
+    assert!(!fast.ids().contains(&"check_python_suites"));
+    assert!(!fast.ids().contains(&"check_install_tests"));
+    assert!(fast.ids().iter().all(|id| {
+        !matches!(
+            *id,
+            "check_lint_heredoc_handling"
+                | "check_lint_reuse_triage"
+                | "check_ship_completeness"
+                | "check_autonomous_phase2_suite"
+                | "check_persona_suite"
+                | "check_reuse_lens_suite"
+        )
+    }));
+}
+
+#[test]
+fn parallel_direct_plan_keeps_results_in_catalog_order() {
+    let checks = ["first", "second"]
+        .into_iter()
+        .map(|id| ValidationCheck {
+            id,
+            required: true,
+            independent: true,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::RustNative(StructuralCheck::TrioLockstep),
+        })
+        .collect();
+    let plan = ValidationPlan::from_checks(checks, false, Jobs::Fixed(2));
+
+    let report = ValidationRunner::run_plan(&plan, &validation_fixture("valid-skill"));
+
+    assert_eq!(
+        report
+            .results
+            .iter()
+            .map(|result| result.id.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+}
+
+#[test]
+fn direct_plan_preserves_repeated_legacy_check_ids_as_distinct_occurrences() {
+    let checks = ["check_bash_syntax", "check_bash_syntax"]
+        .into_iter()
+        .map(|id| ValidationCheck {
+            id,
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::RustNative(StructuralCheck::TrioLockstep),
+        })
+        .collect();
+    let plan = ValidationPlan::from_checks(checks, false, Jobs::Fixed(1));
+
+    let report = ValidationRunner::run_plan(&plan, &validation_fixture("valid-skill"));
+
+    assert_eq!(report.results.len(), 2);
+    assert!(report.to_json().is_ok());
+}
+
+#[test]
+fn fast_direct_plan_skips_embedded_bats_without_skipping_static_contracts() {
+    let plan = ValidationPlan::from_checks(
+        vec![ValidationCheck {
+            id: "check_autospec_doc_contract",
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(ExternalCheck::AutospecDocContract),
+        }],
+        true,
+        Jobs::Fixed(1),
+    );
+
+    let report = ValidationRunner::run_plan(&plan, &validation_fixture("autospec-doc-contract"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 2);
 }
 
 #[test]

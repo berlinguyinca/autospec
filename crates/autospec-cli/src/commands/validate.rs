@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use autospec_core::validation::affected::AffectedSet;
 use autospec_core::validation::{
-    ValidationAggregate, ValidationOptions, ValidationReport, ValidationStatus,
+    ValidationAggregate, ValidationCatalog, ValidationOptions, ValidationPlan, ValidationReport,
+    ValidationRunner, ValidationStatus,
 };
 
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -11,7 +12,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if let Some(path) = options.shadow_results.as_ref() {
         render_shadow_results(path, options.json)
     } else if options.requests_execution() {
-        Err("direct Rust validation executor is not installed".to_string())
+        run_direct(&options)
     } else {
         let affected = AffectedSet::from_paths(&options.paths);
         if options.json {
@@ -21,6 +22,42 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
         Ok(())
     }
+}
+
+fn run_direct(options: &ValidationOptions) -> Result<(), String> {
+    let root = std::env::current_dir()
+        .map_err(|error| format!("could not determine validation root: {error}"))?;
+    let catalog = ValidationCatalog::standard();
+    let plan = ValidationPlan::build(&catalog, options)?;
+    let report = ValidationRunner::run_plan(&plan, &root);
+    let aggregate = report.aggregate()?;
+
+    if options.json {
+        println!("{}", report.to_json()?);
+    } else {
+        println!(
+            "AutoSpec validation: status={} total={} passed={} failed={} required_failed={} optional_failed={}",
+            aggregate.status.as_str(),
+            aggregate.total,
+            aggregate.passed,
+            aggregate.failed,
+            aggregate.required_failed,
+            aggregate.optional_failed
+        );
+        for result in &report.results {
+            let status = if result.is_success() {
+                "passed"
+            } else {
+                "failed"
+            };
+            println!("- {}: {status}", result.id);
+        }
+    }
+
+    if aggregate.status == ValidationStatus::Failed {
+        return Err("direct Rust validation failed required checks".to_string());
+    }
+    Ok(())
 }
 
 fn render_shadow_results(path: &PathBuf, json: bool) -> Result<(), String> {

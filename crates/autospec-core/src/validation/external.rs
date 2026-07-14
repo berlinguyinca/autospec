@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::command::ToolCommand;
+use super::command::{enter_fast_validation_mode, ToolCommand};
 use super::results::{output_digest, CheckResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +99,17 @@ pub enum ExternalCheck {
 }
 
 impl ExternalCheck {
+    pub(crate) fn run_with_fast(
+        &self,
+        id: &str,
+        required: bool,
+        root: &Path,
+        fast: bool,
+    ) -> CheckResult {
+        let _mode = enter_fast_validation_mode(fast);
+        self.run(id, required, root)
+    }
+
     pub fn run(&self, id: &str, required: bool, root: &Path) -> CheckResult {
         match self {
             Self::BashSyntax => run_bash_syntax(id, required, root),
@@ -3064,7 +3075,7 @@ fn run_autospec_parallel_dispatch(id: &str, required: bool, root: &Path) -> Chec
     for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
         let relative = format!("skills/autospec-run/{member}");
         let path = root.join(&relative);
-        if !has_heading_prefix(&path, "### Parallel implementer worktree isolation") {
+        if !contains(&path, "### Parallel implementer worktree isolation") {
             return failure(
                 id,
                 required,

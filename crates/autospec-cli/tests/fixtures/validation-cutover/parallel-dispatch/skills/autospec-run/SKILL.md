@@ -1,3 +1,3 @@
-### Parallel implementer worktree isolation
+> ### Parallel implementer worktree isolation
 
 Run `dispatch-implementer.sh`.

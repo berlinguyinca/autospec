@@ -123,13 +123,9 @@ impl ValidationExecutionReport {
         if self.results.is_empty() {
             return Err("validation execution report must contain at least one result".to_string());
         }
-        let mut ids = BTreeSet::new();
         for result in &self.results {
-            if result.id.trim().is_empty() || !ids.insert(&result.id) {
-                return Err(format!(
-                    "validation execution result ID is empty or duplicated: {}",
-                    result.id
-                ));
+            if result.id.trim().is_empty() {
+                return Err("validation execution result ID must not be empty".to_string());
             }
         }
         Ok(())

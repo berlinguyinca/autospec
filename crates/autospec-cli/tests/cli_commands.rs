@@ -283,39 +283,7 @@ fn validate_rejects_an_empty_path() {
 }
 
 #[test]
-fn validate_execution_options_return_the_pending_rust_executor_error() {
-    for args in [
-        vec!["validate", "--fast"],
-        vec!["validate", "--no-bats"],
-        vec!["validate", "--changed"],
-        vec!["validate", "--changed=origin/main"],
-        vec!["validate", "--since", "origin/main"],
-        vec!["validate", "--jobs"],
-        vec!["validate", "--jobs=4"],
-        vec!["validate", "--jobs", "4"],
-        vec!["validate", "--jobs=auto"],
-        vec!["validate", "--jobs", "auto"],
-    ] {
-        let output = autospec()
-            .args(&args)
-            .output()
-            .expect("validate command starts");
-
-        assert!(
-            !output.status.success(),
-            "args={args:?} stderr={}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr).trim(),
-            "direct Rust validation executor is not installed",
-            "args={args:?}"
-        );
-    }
-}
-
-#[test]
-fn validate_ignores_the_removed_legacy_shell_environment() {
+fn validate_executes_the_direct_plan_without_a_legacy_shell_handoff() {
     let root = temp_dir("autospec-validate-shell");
     let scripts = root.join("scripts");
     let log = root.join("handoff.log");
@@ -327,18 +295,22 @@ fn validate_ignores_the_removed_legacy_shell_environment() {
     .expect("validation fixture");
 
     let output = autospec()
-        .args(["validate", "--fast"])
+        .args(["validate", "--fast", "--json"])
         .current_dir(&root)
         .env("AUTOSPEC_VALIDATE_FROM_SHELL", "1")
         .env("AUTOSPEC_VALIDATE_TEST_LOG", &log)
         .output()
         .expect("validate command runs");
 
-    assert!(!output.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr).trim(),
-        "direct Rust validation executor is not installed"
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "an incomplete repository must fail"
     );
+    assert!(stdout.contains("\"schema\":2"));
+    assert!(stdout.contains("\"results\":["));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("direct Rust validation failed"));
     assert!(!log.exists(), "validate must not execute validate.sh");
 }
 
@@ -2010,7 +1982,6 @@ fn cli_commands_json_modes_emit_json() {
         "doctor",
         "status",
         "plan",
-        "validate",
         "report",
         "showcase",
         "growth-report",

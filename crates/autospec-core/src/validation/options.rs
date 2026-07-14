@@ -115,7 +115,7 @@ impl ValidationOptions {
     }
 
     pub fn requests_execution(&self) -> bool {
-        self.execution_requested
+        self.execution_requested || self.paths.is_empty()
     }
 }
 
