@@ -49,6 +49,7 @@ pub enum ExternalCheck {
     QaHealLoopContract,
     QualityDifferential,
     ReleaseAreaContract,
+    ReleaseWorktreeAssert,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -131,6 +132,7 @@ impl ExternalCheck {
             Self::QaHealLoopContract => run_qa_heal_loop_contract(id, required, root),
             Self::QualityDifferential => run_quality_differential(id, required, root),
             Self::ReleaseAreaContract => run_release_area_contract(id, required, root),
+            Self::ReleaseWorktreeAssert => run_release_worktree_assert(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2702,6 +2704,66 @@ fn run_release_area_contract(id: &str, required: bool, root: &Path) -> CheckResu
         );
     }
     aggregate(id, required, results)
+}
+
+fn run_release_worktree_assert(id: &str, required: bool, root: &Path) -> CheckResult {
+    const TRIO: &[&str] = &[
+        "skills/autospec-release/SKILL.md",
+        "skills/autospec-release/codex/prompt.md",
+        "skills/autospec-release/opencode/agent.md",
+    ];
+    const SUITE: &str = "tests/release/test_release_worktree_assert.bats";
+
+    let mut expected_block = None;
+    for trio in TRIO {
+        let path = root.join(trio);
+        if !path.is_file() {
+            return failure(id, required, &format!("{trio}: required file missing"));
+        }
+        for anchor in [
+            "## Worktree guard (commit gate)",
+            "worktree-guard.sh assert",
+            "MUST exit 0",
+            "worktree-assert:begin",
+            "worktree-assert:end",
+            "git worktree remove",
+            "git worktree prune",
+        ] {
+            if !contains(&path, anchor) {
+                return failure(id, required, &format!("{trio}: missing {anchor} contract"));
+            }
+        }
+        if !contains_case_insensitive(&path, "primary checkout") {
+            return failure(
+                id,
+                required,
+                &format!("{trio}: missing primary-checkout hard rule"),
+            );
+        }
+        let Some(block) = inclusive_section(
+            &path,
+            "<!-- worktree-assert:begin -->",
+            "<!-- worktree-assert:end -->",
+        ) else {
+            return failure(
+                id,
+                required,
+                &format!("{trio}: missing worktree assertion block"),
+            );
+        };
+        if let Some(expected) = &expected_block {
+            if block != *expected {
+                return failure(id, required, "release worktree assertion blocks differ");
+            }
+        } else {
+            expected_block = Some(block);
+        }
+    }
+
+    if program_on_path("bats") && root.join(SUITE).is_file() {
+        return run_bats_suites(id, required, root, &[SUITE]);
+    }
+    CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]))
 }
 
 fn run_required_bash_scripts(

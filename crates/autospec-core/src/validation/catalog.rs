@@ -232,6 +232,9 @@ impl ValidationCheck {
             "check_autospec_release_area_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReleaseAreaContract)
             }
+            "check_release_trio_worktree_assert" => {
+                CheckOwner::ExternalBatch(ExternalCheck::ReleaseWorktreeAssert)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

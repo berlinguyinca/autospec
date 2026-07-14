@@ -976,6 +976,23 @@ fn runner_checks_release_area_contract_with_direct_bash_and_bats_commands() {
 }
 
 #[test]
+fn runner_checks_release_worktree_assert_contract_with_direct_bats_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_release_trio_worktree_assert",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::ReleaseWorktreeAssert),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("release-worktree-assert"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!((0..=1).contains(&report.results[0].spawn_count));
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",
