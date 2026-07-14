@@ -59,6 +59,7 @@ pub enum ExternalCheck {
     GrowthCandidatePipeline,
     GrowRunPipeline,
     DbTelemetry,
+    WorktreeLadderAssertParity,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -153,6 +154,9 @@ impl ExternalCheck {
             Self::GrowthCandidatePipeline => run_growth_candidate_pipeline(id, required, root),
             Self::GrowRunPipeline => run_grow_run_pipeline(id, required, root),
             Self::DbTelemetry => run_db_telemetry(id, required, root),
+            Self::WorktreeLadderAssertParity => {
+                run_worktree_ladder_assert_parity(id, required, root)
+            }
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -3154,6 +3158,83 @@ fn run_db_telemetry(id: &str, required: bool, root: &Path) -> CheckResult {
     aggregate(id, required, vec![syntax, bats])
 }
 
+fn run_worktree_ladder_assert_parity(id: &str, required: bool, root: &Path) -> CheckResult {
+    const TRIO_MEMBERS: &[&str] = &["SKILL.md", "codex/prompt.md", "opencode/agent.md"];
+    const REQUIRED_TOKENS: &[&str] = &[
+        "worktree-guard.sh resolve-branch",
+        "open-pr",
+        "branch-only",
+        "adopt",
+        "worktree-guard.sh assert",
+        "MUST exit 0",
+        "git worktree remove",
+        "git worktree prune",
+    ];
+
+    let mut targets = Vec::new();
+    for skill in ["autospec", "autospec-run"] {
+        for member in TRIO_MEMBERS {
+            targets.push(format!("skills/{skill}/{member}"));
+        }
+    }
+    targets.push("skills/autospec-run/prompts/phase4-implementer.md".to_string());
+
+    for relative in &targets {
+        let path = root.join(relative);
+        if !path.is_file() {
+            return failure(id, required, &format!("{relative}: required file missing"));
+        }
+        for token in REQUIRED_TOKENS {
+            if !contains(&path, token) {
+                return failure(id, required, &format!("{relative}: missing {token}"));
+            }
+        }
+        if !contains_word(&path, "fresh") {
+            return failure(
+                id,
+                required,
+                &format!("{relative}: missing fresh ladder state"),
+            );
+        }
+        if !contains_case_insensitive(&path, "skip implementation") {
+            return failure(
+                id,
+                required,
+                &format!("{relative}: missing skip implementation"),
+            );
+        }
+        if !contains_case_insensitive(&path, "primary checkout") {
+            return failure(
+                id,
+                required,
+                &format!("{relative}: missing primary checkout rule"),
+            );
+        }
+    }
+
+    let mut results = Vec::new();
+    for relative in ["skills/autospec/SKILL.md", "skills/autospec-run/SKILL.md"] {
+        let path = root.join(relative);
+        let Some(block) = worktree_ladder_block(&path) else {
+            return aggregate(
+                id,
+                required,
+                vec![failure(
+                    id,
+                    required,
+                    &format!("{relative}: missing worktree-ladder sentinel block"),
+                )],
+            );
+        };
+        let syntax = ToolCommand::new("bash", ["-n", "-"])
+            .expect("worktree ladder syntax uses a direct Bash argument vector")
+            .execute_in_with_stdin_capturing(id, required, root, block.as_bytes())
+            .result;
+        results.push(syntax);
+    }
+    aggregate(id, required, results)
+}
+
 fn run_scripts_with_optional_bats(
     id: &str,
     required: bool,
@@ -4434,6 +4515,43 @@ fn contains_case_insensitive(path: &Path, expected: &str) -> bool {
                 .contains(&expected.to_ascii_lowercase())
         })
         .unwrap_or(false)
+}
+
+fn contains_word(path: &Path, expected: &str) -> bool {
+    fs::read_to_string(path)
+        .map(|document| {
+            document.match_indices(expected).any(|(index, _)| {
+                let before = document[..index].chars().next_back();
+                let after = document[index + expected.len()..].chars().next();
+                let is_word =
+                    |character: char| character.is_ascii_alphanumeric() || character == '_';
+                !before.is_some_and(is_word) && !after.is_some_and(is_word)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn worktree_ladder_block(path: &Path) -> Option<String> {
+    let document = fs::read_to_string(path).ok()?;
+    let mut collecting = false;
+    let mut lines = Vec::new();
+    for line in document.lines() {
+        if line.contains("worktree-ladder:begin") {
+            collecting = true;
+            continue;
+        }
+        if line.contains("worktree-ladder:end") {
+            break;
+        }
+        if collecting {
+            lines.push(
+                line.strip_prefix("> ")
+                    .or_else(|| line.strip_prefix('>'))
+                    .unwrap_or(line),
+            );
+        }
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 fn contains_stale_researcher_count(path: &Path) -> bool {

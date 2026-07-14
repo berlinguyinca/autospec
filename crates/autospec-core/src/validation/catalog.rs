@@ -258,6 +258,9 @@ impl ValidationCheck {
                 CheckOwner::ExternalBatch(ExternalCheck::GrowRunPipeline)
             }
             "check_db_telemetry_contract" => CheckOwner::ExternalBatch(ExternalCheck::DbTelemetry),
+            "check_worktree_ladder_assert_parity" => {
+                CheckOwner::ExternalBatch(ExternalCheck::WorktreeLadderAssertParity)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

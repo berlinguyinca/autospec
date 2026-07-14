@@ -1146,6 +1146,23 @@ fn runner_checks_growth_and_telemetry_contracts_with_typed_batches() {
 }
 
 #[test]
+fn runner_checks_worktree_ladder_parity_with_typed_stdin_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_worktree_ladder_assert_parity",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::WorktreeLadderAssertParity),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("worktree-ladder"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 2);
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",
