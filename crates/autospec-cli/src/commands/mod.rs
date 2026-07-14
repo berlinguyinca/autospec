@@ -12,6 +12,34 @@ pub mod showcase;
 pub mod status;
 pub mod validate;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandFailure {
+    pub message: String,
+    pub exit_code: i32,
+}
+
+impl CommandFailure {
+    pub fn diagnostic(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            exit_code: 2,
+        }
+    }
+
+    pub fn status(message: impl Into<String>, exit_code: i32) -> Self {
+        Self {
+            message: message.into(),
+            exit_code,
+        }
+    }
+}
+
+impl std::fmt::Display for CommandFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
 const COMMANDS: &[(&str, &str)] = &[
     ("init", "Initialize AutoSpec metadata"),
     ("doctor", "Check the Rust core workspace"),
@@ -31,7 +59,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ),
 ];
 
-pub fn run(args: Vec<String>) -> Result<(), String> {
+pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
     match args.as_slice() {
         [] => {
             print_help();
@@ -42,20 +70,22 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             Ok(())
         }
         [command, rest @ ..] => match command.as_str() {
-            "init" => init::run(rest),
-            "doctor" => doctor::run(rest),
-            "status" => status::run(rest),
-            "autonomous" => autonomous::run(rest),
-            "plan" => plan::run(rest),
-            "validate" => validate::run(rest),
-            "run" => run::run(rest),
+            "init" => init::run(rest).map_err(CommandFailure::diagnostic),
+            "doctor" => doctor::run(rest).map_err(CommandFailure::diagnostic),
+            "status" => status::run(rest).map_err(CommandFailure::diagnostic),
+            "autonomous" => autonomous::run(rest).map_err(CommandFailure::diagnostic),
+            "plan" => plan::run(rest).map_err(CommandFailure::diagnostic),
+            "validate" => validate::run(rest).map_err(CommandFailure::diagnostic),
+            "run" => run::run(rest).map_err(CommandFailure::diagnostic),
             "runtime" => runtime::run(rest),
-            "resume" => resume::run(rest),
-            "report" => report::run(rest),
-            "showcase" => showcase::run(rest),
-            "benchmark" => benchmark::run(rest),
-            "growth-report" => growth_report::run(rest),
-            _ => Err(format!("unknown autospec command: {command}")),
+            "resume" => resume::run(rest).map_err(CommandFailure::diagnostic),
+            "report" => report::run(rest).map_err(CommandFailure::diagnostic),
+            "showcase" => showcase::run(rest).map_err(CommandFailure::diagnostic),
+            "benchmark" => benchmark::run(rest).map_err(CommandFailure::diagnostic),
+            "growth-report" => growth_report::run(rest).map_err(CommandFailure::diagnostic),
+            _ => Err(CommandFailure::diagnostic(format!(
+                "unknown autospec command: {command}"
+            ))),
         },
     }
 }

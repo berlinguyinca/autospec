@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static NEXT_RUNTIME_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
 fn autospec() -> Command {
     Command::new(env!("CARGO_BIN_EXE_autospec"))
@@ -7,6 +10,229 @@ fn autospec() -> Command {
 
 fn audit_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/runtime-audit")
+}
+
+struct RuntimeFixture {
+    root: PathBuf,
+    state_root: PathBuf,
+}
+
+impl RuntimeFixture {
+    fn new(command: &str, down: &str) -> Self {
+        let suffix = NEXT_RUNTIME_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "autospec-runtime-cli-{}-{suffix}",
+            std::process::id()
+        ));
+        let state_root = root.join("state");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".autospec")).expect("create runtime manifest directory");
+        std::fs::write(
+            root.join(".autospec/runtime.yml"),
+            format!(
+                "version: 1\nname: sample-app\ndefault_mode: local\nmodes:\n  local:\n    command: {command}\n    down: {down}\n"
+            ),
+        )
+        .expect("write runtime manifest");
+        Self { root, state_root }
+    }
+
+    fn command(&self) -> Command {
+        let mut command = autospec();
+        command.env("AGENT_ENV_STATE_ROOT", &self.state_root);
+        command
+    }
+}
+
+impl Drop for RuntimeFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn runtime_env_up_preserves_manifest_command_exit_status() {
+    let fixture = RuntimeFixture::new("sh -c 'exit 42'", "sh -c 'true'");
+
+    let output = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "up",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+        ])
+        .output()
+        .expect("runtime env up starts");
+
+    assert_eq!(output.status.code(), Some(42));
+}
+
+#[test]
+fn runtime_env_up_reports_a_mode_without_a_command() {
+    let fixture = RuntimeFixture::new("", "sh -c 'true'");
+
+    let output = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "up",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+        ])
+        .output()
+        .expect("runtime env up starts");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("has no command"));
+    assert!(std::fs::read_dir(&fixture.state_root)
+        .expect("state directory was created before command validation")
+        .next()
+        .is_some());
+}
+
+#[test]
+fn runtime_env_rejects_malformed_options_before_creating_state() {
+    let fixture = RuntimeFixture::new("sh -c 'true'", "sh -c 'true'");
+
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "up", "--repo", "--mode"])
+        .output()
+        .expect("runtime env up starts");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--repo requires a path"));
+    assert!(!fixture.state_root.exists());
+}
+
+#[test]
+fn runtime_env_status_reports_inactive_environment_with_exit_three() {
+    let fixture = RuntimeFixture::new("sh -c 'true'", "sh -c 'true'");
+
+    let output = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "status",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+        ])
+        .output()
+        .expect("runtime env status starts");
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no active environment"));
+}
+
+#[test]
+fn runtime_env_up_prints_the_legacy_protocol_and_reuses_existing_state() {
+    let fixture = RuntimeFixture::new(
+        "sh -c 'test ! -e started.txt || exit 41; printf started > started.txt'",
+        "sh -c 'true'",
+    );
+
+    let first = fixture
+        .command()
+        .args(["runtime", "env", "up"])
+        .arg(format!(
+            "--repo={}",
+            fixture.root.to_str().expect("fixture path is UTF-8")
+        ))
+        .output()
+        .expect("first runtime env up starts");
+    assert!(
+        first.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("started.txt")).unwrap(),
+        "started"
+    );
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+    let expected_prefixes = [
+        "AGENT_ENV_ID=sample-app-",
+        "AGENT_ENV_MODE=local",
+        "AGENT_ENV_REPO=",
+        "AGENT_ENV_FILE=",
+        "AGENT_FRONTEND_PORT=",
+        "AGENT_BACKEND_PORT=",
+        "AGENT_PUBLIC_URL=http://127.0.0.1:",
+        "AUTOSPEC_PUBLIC_URL=http://127.0.0.1:",
+        "COMPOSE_PROJECT_NAME=agent_sample_app_",
+    ];
+    assert_eq!(first_stdout.lines().count(), expected_prefixes.len());
+    for (line, prefix) in first_stdout.lines().zip(expected_prefixes) {
+        assert!(
+            line.starts_with(prefix),
+            "expected {prefix:?}, got {line:?}"
+        );
+    }
+
+    let second = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "up",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+        ])
+        .output()
+        .expect("second runtime env up starts");
+    assert!(
+        second.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(first.stdout, second.stdout);
+}
+
+#[test]
+fn runtime_env_down_is_idempotent_after_state_cleanup() {
+    let fixture = RuntimeFixture::new("sh -c 'true'", "sh -c 'printf down > down.txt'");
+    let up = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "up",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+        ])
+        .output()
+        .expect("runtime env up starts");
+    assert!(up.status.success());
+
+    for _ in 0..2 {
+        let down = fixture
+            .command()
+            .args([
+                "runtime",
+                "env",
+                "down",
+                "--repo",
+                fixture.root.to_str().expect("fixture path is UTF-8"),
+            ])
+            .output()
+            .expect("runtime env down starts");
+        assert!(
+            down.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&down.stderr)
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("down.txt")).unwrap(),
+        "down"
+    );
+    assert!(std::fs::read_dir(&fixture.state_root)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(true));
 }
 
 #[test]

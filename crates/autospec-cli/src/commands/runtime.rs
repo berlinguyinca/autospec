@@ -1,8 +1,11 @@
 use autospec_core::runtime_policy::classify_path;
 
-mod audit;
+use crate::commands::CommandFailure;
 
-pub fn run(args: &[String]) -> Result<(), String> {
+mod audit;
+mod env;
+
+pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     match args {
         [command, path] if command == "classify" => {
             print_classification(path, false);
@@ -12,13 +15,20 @@ pub fn run(args: &[String]) -> Result<(), String> {
             print_classification(path, true);
             Ok(())
         }
-        [command, rest @ ..] if command == "audit" => audit::run(rest),
+        [command, rest @ ..] if command == "audit" => {
+            audit::run(rest).map_err(CommandFailure::diagnostic)
+        }
+        [command, rest @ ..] if command == "env" => env::run(rest),
         [flag] if flag == "--help" || flag == "-h" => {
             print_help();
             Ok(())
         }
-        [] => Err("autospec runtime requires a subcommand".to_string()),
-        [command, ..] => Err(format!("unknown autospec runtime command: {command}")),
+        [] => Err(CommandFailure::diagnostic(
+            "autospec runtime requires a subcommand",
+        )),
+        [command, ..] => Err(CommandFailure::diagnostic(format!(
+            "unknown autospec runtime command: {command}"
+        ))),
     }
 }
 
@@ -49,7 +59,7 @@ fn print_classification(path: &str, json: bool) {
 
 fn print_help() {
     println!(
-        "autospec runtime\n\nUSAGE:\n    autospec runtime classify <PATH> [--json]\n    autospec runtime audit [--root PATH] [--json]\n\nCOMMANDS:\n    classify       Classify a repository path by runtime ownership policy\n    audit          List platform files grouped by runtime migration class"
+        "autospec runtime\n\nUSAGE:\n    autospec runtime classify <PATH> [--json]\n    autospec runtime audit [--root PATH] [--json]\n    autospec runtime env up|status|down [--repo PATH] [--mode MODE]\n\nCOMMANDS:\n    classify       Classify a repository path by runtime ownership policy\n    audit          List platform files grouped by runtime migration class\n    env            Manage isolated runtime environment state"
     );
 }
 
