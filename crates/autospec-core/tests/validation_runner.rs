@@ -1027,6 +1027,23 @@ fn runner_checks_repo_quality_audit_with_direct_bash_and_bats_commands() {
 }
 
 #[test]
+fn runner_checks_autonomous_mode_contract_with_direct_bash_and_bats_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_autospec_autonomous_contract",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::AutospecAutonomousContract),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("autonomous-mode"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!((2..=3).contains(&report.results[0].spawn_count));
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

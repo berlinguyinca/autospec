@@ -241,6 +241,9 @@ impl ValidationCheck {
             "check_repo_quality_audit_loop" => {
                 CheckOwner::ExternalBatch(ExternalCheck::RepoQualityAudit)
             }
+            "check_autospec_autonomous_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecAutonomousContract)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

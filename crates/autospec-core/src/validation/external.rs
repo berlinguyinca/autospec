@@ -52,6 +52,7 @@ pub enum ExternalCheck {
     ReleaseWorktreeAssert,
     FabContainerPinLint,
     RepoQualityAudit,
+    AutospecAutonomousContract,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -137,6 +138,9 @@ impl ExternalCheck {
             Self::ReleaseWorktreeAssert => run_release_worktree_assert(id, required, root),
             Self::FabContainerPinLint => run_fab_container_pin_lint(id, required, root),
             Self::RepoQualityAudit => run_repo_quality_audit(id, required, root),
+            Self::AutospecAutonomousContract => {
+                run_autospec_autonomous_contract(id, required, root)
+            }
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2866,6 +2870,66 @@ fn run_repo_quality_audit(id: &str, required: bool, root: &Path) -> CheckResult 
     }
     let bats = run_bats_suites_if_available(id, required, root, SUITES);
     aggregate(id, required, vec![audit, bats])
+}
+
+fn run_autospec_autonomous_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SKILLS: &[&str] = &[
+        "autospec",
+        "autospec-listen",
+        "autospec-define",
+        "autospec-run",
+    ];
+    const MEMBERS: &[&str] = &["SKILL.md", "codex/prompt.md", "opencode/agent.md"];
+    const GATE: &str = "scripts/autospec-autonomy-gate.sh";
+    const SUITE: &str = "tests/autospec/test_autonomous.bats";
+
+    for skill in SKILLS {
+        for member in MEMBERS {
+            let relative = format!("skills/{skill}/{member}");
+            let path = root.join(&relative);
+            if !path.is_file() {
+                return failure(
+                    id,
+                    required,
+                    &format!("{relative}: required adapter file missing"),
+                );
+            }
+            if !has_heading_prefix(&path, "## Autonomous mode") {
+                return failure(
+                    id,
+                    required,
+                    &format!("{relative}: missing Autonomous mode section"),
+                );
+            }
+            if *skill == "autospec" {
+                for heading in [
+                    "### Autonomous spec drafting",
+                    "### Safety guardrails (autonomous)",
+                ] {
+                    if !has_heading_prefix(&path, heading) {
+                        return failure(
+                            id,
+                            required,
+                            &format!("{relative}: missing {heading} section"),
+                        );
+                    }
+                }
+                if !contains(&path, "autospec-autonomy-gate.sh") {
+                    return failure(
+                        id,
+                        required,
+                        &format!("{relative}: missing autonomy gate reference"),
+                    );
+                }
+            }
+        }
+    }
+    let help = run_bash_help_usage(id, required, root, GATE);
+    if help.is_failure() {
+        return help;
+    }
+    let bats = run_bats_suites(id, required, root, &[SUITE]);
+    aggregate(id, required, vec![help, bats])
 }
 
 fn run_required_bash_scripts(
