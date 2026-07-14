@@ -874,6 +874,23 @@ fn runner_checks_qa_deployment_contract_with_typed_tool_commands() {
 }
 
 #[test]
+fn runner_checks_qa_verify_first_contract_with_direct_bash_and_bats_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_qa_verify_first_discipline",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::QaVerifyFirstDiscipline),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("qa-verify-first"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!((3..=5).contains(&report.results[0].spawn_count));
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

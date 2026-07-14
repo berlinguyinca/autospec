@@ -214,6 +214,9 @@ impl ValidationCheck {
             "check_qa_deploy_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::QaDeployContract)
             }
+            "check_qa_verify_first_discipline" => {
+                CheckOwner::ExternalBatch(ExternalCheck::QaVerifyFirstDiscipline)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

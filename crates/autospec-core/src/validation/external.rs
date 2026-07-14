@@ -43,6 +43,7 @@ pub enum ExternalCheck {
     AutospecExploreDiscovery,
     AutospecQaContract,
     QaDeployContract,
+    QaVerifyFirstDiscipline,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -119,6 +120,7 @@ impl ExternalCheck {
             Self::AutospecExploreDiscovery => run_autospec_explore_discovery(id, required, root),
             Self::AutospecQaContract => run_autospec_qa_contract(id, required, root),
             Self::QaDeployContract => run_qa_deploy_contract(id, required, root),
+            Self::QaVerifyFirstDiscipline => run_qa_verify_first_discipline(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2210,6 +2212,95 @@ fn run_qa_deploy_contract(id: &str, required: bool, root: &Path) -> CheckResult 
         results.push(ajv);
     }
     results.push(run_bats_suites(id, required, root, &[SUITE]));
+    aggregate(id, required, results)
+}
+
+fn run_qa_verify_first_discipline(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPTS: &[(&str, bool)] = &[
+        ("scripts/qa-verify-finding.sh", true),
+        ("scripts/qa-cluster-coverage.sh", true),
+        ("scripts/qa-finding-filter.sh", true),
+    ];
+    const TRIO: &[&str] = &[
+        "skills/autospec-qa/SKILL.md",
+        "skills/autospec-qa/codex/prompt.md",
+        "skills/autospec-qa/opencode/agent.md",
+    ];
+    const SUITES: &[&str] = &[
+        "tests/qa/test_verify_first.bats",
+        "tests/qa/test_finding_filter.bats",
+    ];
+
+    let scripts = run_required_bash_scripts(id, required, root, SCRIPTS);
+    if scripts.is_failure() {
+        return scripts;
+    }
+    for trio in TRIO {
+        let path = root.join(trio);
+        if !path.is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    scripts,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: required adapter file missing"),
+                    ),
+                ],
+            );
+        }
+        for heading in ["## Verify-first discipline", "## Cluster sizing"] {
+            if !has_heading_prefix(&path, heading) {
+                return aggregate(
+                    id,
+                    required,
+                    vec![
+                        scripts,
+                        failure(
+                            id,
+                            required,
+                            &format!("{trio}: missing '{heading}' section"),
+                        ),
+                    ],
+                );
+            }
+        }
+        for anchor in [
+            "qa-verify-finding.sh",
+            "qa-cluster-coverage.sh",
+            "qa-finding-filter.sh",
+            "AUTOSPEC_QA_STRICT=1",
+        ] {
+            if !contains(&path, anchor) {
+                return aggregate(
+                    id,
+                    required,
+                    vec![
+                        scripts,
+                        failure(id, required, &format!("{trio}: missing {anchor} rule")),
+                    ],
+                );
+            }
+        }
+    }
+
+    let mut results = vec![scripts];
+    if program_on_path("bats") {
+        for suite in SUITES {
+            if root.join(suite).is_file() {
+                let bats = ToolCommand::new("bats", [*suite])
+                    .expect("optional QA Bats suite uses a static argument")
+                    .execute_in(id, required, root);
+                let failed = bats.is_failure();
+                results.push(bats);
+                if failed {
+                    return aggregate(id, required, results);
+                }
+            }
+        }
+    }
     aggregate(id, required, results)
 }
 
