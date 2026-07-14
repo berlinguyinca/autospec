@@ -45,6 +45,7 @@ pub enum ExternalCheck {
     QaDeployContract,
     QaVerifyFirstDiscipline,
     QaExhaustivenessContract,
+    QaIncidentContract,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -123,6 +124,7 @@ impl ExternalCheck {
             Self::QaDeployContract => run_qa_deploy_contract(id, required, root),
             Self::QaVerifyFirstDiscipline => run_qa_verify_first_discipline(id, required, root),
             Self::QaExhaustivenessContract => run_qa_exhaustiveness_contract(id, required, root),
+            Self::QaIncidentContract => run_qa_incident_contract(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2380,6 +2382,100 @@ fn run_qa_exhaustiveness_contract(id: &str, required: bool, root: &Path) -> Chec
                     ],
                 );
             }
+        }
+    }
+    let bats = run_bats_suites(id, required, root, &[SUITE]);
+    aggregate(id, required, vec![script, bats])
+}
+
+fn run_qa_incident_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPT: &str = "scripts/qa-incident-check.sh";
+    const SCHEMA: &str = "schemas/autospec-production-incidents.schema.json";
+    const SUITE: &str = "tests/qa/test_incident_check.bats";
+    const TRIO: &[&str] = &[
+        "skills/autospec-qa/SKILL.md",
+        "skills/autospec-qa/codex/prompt.md",
+        "skills/autospec-qa/opencode/agent.md",
+    ];
+
+    let script = run_required_bash_scripts(id, required, root, &[(SCRIPT, true)]);
+    if script.is_failure() {
+        return script;
+    }
+    for required_path in [SCHEMA, SUITE] {
+        if !root.join(required_path).is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    script,
+                    failure(
+                        id,
+                        required,
+                        &format!("{required_path}: required file missing"),
+                    ),
+                ],
+            );
+        }
+    }
+    for trio in TRIO {
+        let path = root.join(trio);
+        if !path.is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    script,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: required adapter file missing"),
+                    ),
+                ],
+            );
+        }
+        if !has_heading_prefix(&path, "## Production incident regression check") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    script,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: missing incident regression heading"),
+                    ),
+                ],
+            );
+        }
+        for anchor in [
+            "qa-incident-check.sh",
+            ".autospec/production-incidents.json",
+        ] {
+            if !contains(&path, anchor) {
+                return aggregate(
+                    id,
+                    required,
+                    vec![
+                        script,
+                        failure(id, required, &format!("{trio}: missing {anchor} reference")),
+                    ],
+                );
+            }
+        }
+        if !contains_case_insensitive(&path, "never silently delete") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    script,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: missing never-silently-delete rule"),
+                    ),
+                ],
+            );
         }
     }
     let bats = run_bats_suites(id, required, root, &[SUITE]);

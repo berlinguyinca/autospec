@@ -220,6 +220,9 @@ impl ValidationCheck {
             "check_qa_exhaustiveness_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::QaExhaustivenessContract)
             }
+            "check_qa_incident_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::QaIncidentContract)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }
