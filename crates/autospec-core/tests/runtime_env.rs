@@ -58,6 +58,33 @@ fn manifest_prefers_autospec_path_and_preserves_mode_order() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn context_keeps_the_selected_manifest_path_when_it_is_a_symlink() {
+    let fixture = TempRepo::with_files(&[("manifest-source.yml", VALID_AUTOSPEC_MANIFEST)]);
+    let manifest_dir = fixture.path().join(".autospec");
+    std::fs::create_dir_all(&manifest_dir).expect("create manifest directory");
+    let selected_path = manifest_dir.join("runtime.yml");
+    std::os::unix::fs::symlink("../manifest-source.yml", &selected_path)
+        .expect("create manifest symlink");
+
+    let manifest = RuntimeManifest::read_from_repo(fixture.path()).expect("manifest reads");
+    let context = RuntimeContext::new(
+        manifest,
+        fixture.path(),
+        "auto",
+        &fixture.path().join("state"),
+    )
+    .expect("context builds");
+    let state = RuntimeState::from_context(&context, 41001, 41002);
+    let expected_path = std::fs::canonicalize(fixture.path())
+        .expect("canonical repo")
+        .join(".autospec/runtime.yml");
+
+    assert_eq!(context.manifest.path(), expected_path);
+    assert_eq!(state.value("AGENT_ENV_MANIFEST"), expected_path.to_str());
+}
+
 #[test]
 fn manifest_rejects_lowercase_environment_names() {
     let error =

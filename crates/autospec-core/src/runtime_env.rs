@@ -274,15 +274,17 @@ impl RuntimeContext {
         requested_mode: &str,
         state_root: &Path,
     ) -> Result<Self, RuntimeEnvError> {
+        let manifest_relative_path = manifest.path().strip_prefix(repo).map_err(|_| {
+            RuntimeEnvError::new(format!(
+                "runtime manifest {} is not inside repo {}",
+                manifest.path().display(),
+                repo.display()
+            ))
+        })?;
         let repo = std::fs::canonicalize(repo).map_err(|error| {
             RuntimeEnvError::new(format!("repo does not exist: {} ({error})", repo.display()))
         })?;
-        manifest.path = std::fs::canonicalize(manifest.path()).map_err(|error| {
-            RuntimeEnvError::new(format!(
-                "could not canonicalize runtime manifest {}: {error}",
-                manifest.path().display()
-            ))
-        })?;
+        manifest.path = repo.join(manifest_relative_path);
         let mode = manifest.selected_mode(requested_mode)?.clone();
         let slug = slugify(&manifest.name_or_repo_basename(&repo));
         let name = if slug.is_empty() { "agent_env" } else { &slug };
