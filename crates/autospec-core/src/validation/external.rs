@@ -38,6 +38,7 @@ pub enum ExternalCheck {
     ExploreTrioWorktreeAssert,
     AutospecExploreSpecFirst,
     AutospecExploreQaGate,
+    AutospecExploreStyleNormalization,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -105,6 +106,9 @@ impl ExternalCheck {
             Self::ExploreTrioWorktreeAssert => run_explore_trio_worktree_assert(id, required, root),
             Self::AutospecExploreSpecFirst => run_autospec_explore_spec_first(id, required, root),
             Self::AutospecExploreQaGate => run_autospec_explore_qa_gate(id, required, root),
+            Self::AutospecExploreStyleNormalization => {
+                run_autospec_explore_style_normalization(id, required, root)
+            }
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -1530,6 +1534,114 @@ fn run_autospec_explore_qa_gate(id: &str, required: bool, root: &Path) -> CheckR
 
     let bats = run_bats_suites(id, required, root, SUITES);
     aggregate(id, required, vec![syntax, bats])
+}
+
+fn run_autospec_explore_style_normalization(id: &str, required: bool, root: &Path) -> CheckResult {
+    const RESEARCHER: &str = "scripts/explore-research/style-normalization.sh";
+    const TRIO: &[&str] = &[
+        "skills/autospec-explore/SKILL.md",
+        "skills/autospec-explore/codex/prompt.md",
+        "skills/autospec-explore/opencode/agent.md",
+    ];
+    const SUITE: &str = "tests/explore/test_explore_style_normalization.bats";
+
+    let researcher = run_required_bash_scripts(id, required, root, &[(RESEARCHER, true)]);
+    if researcher.is_failure() {
+        return researcher;
+    }
+    let static_checks = [
+        (
+            RESEARCHER,
+            "AUTOSPEC_EXPLORE_STYLE_PROOF_CMD",
+            "missing AUTOSPEC_EXPLORE_STYLE_PROOF_CMD invocation seam",
+        ),
+        (
+            RESEARCHER,
+            "AUTOSPEC_STYLE_PROOF_DIR",
+            "missing AUTOSPEC_STYLE_PROOF_DIR artifact directory contract",
+        ),
+        (
+            RESEARCHER,
+            "best-effort",
+            "generic dispatcher fallback must be documented as best-effort",
+        ),
+        (
+            "scripts/autospec-explore.sh",
+            "style-normalization",
+            "default RESEARCH_SOURCES missing style-normalization",
+        ),
+        (
+            "scripts/explore-research-cycle.sh",
+            "style-normalization",
+            "default source roster/weights missing style-normalization",
+        ),
+        (
+            "skills/autospec-shared/scripts/explore-source-weights.sh",
+            "style-normalization",
+            "canonical priors missing style-normalization",
+        ),
+    ];
+    for (path, token, message) in static_checks {
+        if !contains(&root.join(path), token) {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    researcher,
+                    failure(id, required, &format!("{path}: {message}")),
+                ],
+            );
+        }
+    }
+    for trio in TRIO {
+        let path = root.join(trio);
+        if !path.is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    researcher,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: required adapter file missing"),
+                    ),
+                ],
+            );
+        }
+        for (token, message) in [
+            (
+                "style-normalization",
+                "missing style-normalization discovery researcher",
+            ),
+            (
+                "Playwright",
+                "missing Playwright auto-generation requirement",
+            ),
+            ("screenshot", "missing screenshot evidence requirement"),
+            (
+                "AUTOSPEC_EXPLORE_STYLE_PROOF_CMD",
+                "missing AUTOSPEC_EXPLORE_STYLE_PROOF_CMD proof seam",
+            ),
+            (
+                "best-effort fallback",
+                "missing best-effort fallback boundary",
+            ),
+        ] {
+            if !contains(&path, token) {
+                return aggregate(
+                    id,
+                    required,
+                    vec![
+                        researcher,
+                        failure(id, required, &format!("{trio}: {message}")),
+                    ],
+                );
+            }
+        }
+    }
+    let bats = run_bats_suites(id, required, root, &[SUITE]);
+    aggregate(id, required, vec![researcher, bats])
 }
 
 fn run_required_bash_scripts(

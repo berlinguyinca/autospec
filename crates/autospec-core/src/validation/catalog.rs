@@ -199,6 +199,9 @@ impl ValidationCheck {
             "check_autospec_explore_qa_gate_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreQaGate)
             }
+            "check_autospec_explore_style_normalization_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreStyleNormalization)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }
