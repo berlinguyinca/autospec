@@ -47,6 +47,7 @@ pub enum ExternalCheck {
     QaExhaustivenessContract,
     QaIncidentContract,
     QaHealLoopContract,
+    QualityDifferential,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -127,6 +128,7 @@ impl ExternalCheck {
             Self::QaExhaustivenessContract => run_qa_exhaustiveness_contract(id, required, root),
             Self::QaIncidentContract => run_qa_incident_contract(id, required, root),
             Self::QaHealLoopContract => run_qa_heal_loop_contract(id, required, root),
+            Self::QualityDifferential => run_quality_differential(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2590,6 +2592,48 @@ fn run_qa_heal_loop_contract(id: &str, required: bool, root: &Path) -> CheckResu
     }
     let bats = run_bats_suites(id, required, root, SUITES);
     aggregate(id, required, vec![scripts, bats])
+}
+
+fn run_quality_differential(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPT: &str = "scripts/quality-differential.sh";
+    const SUITE: &str = "tests/quality-differential.bats";
+    const FIXTURES: &str = "tests/fixtures/quality-diff/refine-lenses";
+
+    let script = run_required_bash_scripts(id, required, root, &[(SCRIPT, false)]);
+    if script.is_failure() {
+        return script;
+    }
+    if !root.join(SUITE).is_file() {
+        return aggregate(
+            id,
+            required,
+            vec![
+                script,
+                failure(id, required, &format!("{SUITE}: bats coverage missing")),
+            ],
+        );
+    }
+    let fixture_count = fs::read_dir(root.join(FIXTURES))
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .filter(|entry| entry.path().join("assert.sh").is_file())
+        .count();
+    if fixture_count < 3 {
+        return aggregate(
+            id,
+            required,
+            vec![
+                script,
+                failure(
+                    id,
+                    required,
+                    &format!("{FIXTURES}: need >=3 fixtures with assert.sh (got {fixture_count})"),
+                ),
+            ],
+        );
+    }
+    let bats = run_bats_suites(id, required, root, &[SUITE]);
+    aggregate(id, required, vec![script, bats])
 }
 
 fn run_required_bash_scripts(
