@@ -54,6 +54,7 @@ pub enum ExternalCheck {
     RepoQualityAudit,
     AutospecAutonomousContract,
     DogfoodDetectors,
+    AutospecParallelDispatch,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -143,6 +144,7 @@ impl ExternalCheck {
                 run_autospec_autonomous_contract(id, required, root)
             }
             Self::DogfoodDetectors => run_dogfood_detectors(id, required, root),
+            Self::AutospecParallelDispatch => run_autospec_parallel_dispatch(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2994,6 +2996,67 @@ fn run_dogfood_detectors(id: &str, required: bool, root: &Path) -> CheckResult {
         run_bats_suites(id, required, root, &existing_suites)
     };
     aggregate(id, required, vec![syntax, driver, bats])
+}
+
+fn run_autospec_parallel_dispatch(id: &str, required: bool, root: &Path) -> CheckResult {
+    const HELPER: &str = "scripts/dispatch-implementer.sh";
+    const SUITES: &[&str] = &[
+        "tests/autospec-run/test_parallel_dispatch.bats",
+        "tests/autospec-run/test_batch_claim_startup_evidence.bats",
+    ];
+
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let relative = format!("skills/autospec-run/{member}");
+        let path = root.join(&relative);
+        if !has_heading_prefix(&path, "### Parallel implementer worktree isolation") {
+            return failure(
+                id,
+                required,
+                &format!("{relative}: missing Parallel implementer worktree isolation subsection"),
+            );
+        }
+        if !contains(&path, "dispatch-implementer.sh") {
+            return failure(
+                id,
+                required,
+                &format!("{relative}: missing dispatch-implementer.sh reference"),
+            );
+        }
+    }
+
+    let syntax = run_required_bash_scripts(id, required, root, &[(HELPER, true)]);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    for suite in SUITES {
+        if !root.join(suite).is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(id, required, &format!("{suite}: bats coverage missing")),
+                ],
+            );
+        }
+    }
+    if !program_on_path("bats") {
+        return syntax;
+    }
+
+    let bats = run_commands(
+        id,
+        required,
+        root,
+        [
+            ToolCommand::new("bats", [SUITES[0]])
+                .expect("parallel-dispatch Bats suite uses a static path"),
+            ToolCommand::new("bats", [SUITES[1]])
+                .expect("startup-evidence Bats suite uses a static path")
+                .without_env("AUTOSPEC_RUN_ONLY_ISSUES"),
+        ],
+    );
+    aggregate(id, required, vec![syntax, bats])
 }
 
 fn run_required_bash_scripts(

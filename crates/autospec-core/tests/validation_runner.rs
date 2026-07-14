@@ -1061,6 +1061,40 @@ fn runner_checks_dogfood_detectors_with_direct_bash_and_bats_commands() {
 }
 
 #[test]
+fn runner_checks_parallel_dispatch_with_direct_bash_and_bats_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_autospec_parallel_dispatch_contract",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::AutospecParallelDispatch),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("parallel-dispatch"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!((1..=3).contains(&report.results[0].spawn_count));
+}
+
+#[test]
+fn tool_commands_can_remove_a_previously_configured_environment_variable() {
+    let command = ToolCommand::new("bash", ["command-env-check.sh"])
+        .expect("fixture command uses direct arguments")
+        .with_env("AUTOSPEC_VALIDATION_ENV_CHECK", "configured")
+        .without_env("AUTOSPEC_VALIDATION_ENV_CHECK");
+
+    let result = command.execute_in(
+        "check_environment_removal",
+        true,
+        &validation_fixture("valid-skill"),
+    );
+
+    assert_eq!(result.exit_code, Some(0));
+    assert_eq!(result.spawn_count, 1);
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

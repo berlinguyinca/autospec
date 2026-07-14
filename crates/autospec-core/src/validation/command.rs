@@ -11,6 +11,7 @@ pub struct ToolCommand {
     program: PathBuf,
     args: Vec<OsString>,
     environment: Vec<(OsString, OsString)>,
+    removed_environment: Vec<OsString>,
 }
 
 pub(crate) struct CapturedCheckResult {
@@ -44,11 +45,22 @@ impl ToolCommand {
             program,
             args,
             environment: Vec::new(),
+            removed_environment: Vec::new(),
         })
     }
 
     pub fn with_env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
-        self.environment.push((key.into(), value.into()));
+        let key = key.into();
+        self.removed_environment.retain(|removed| removed != &key);
+        self.environment.push((key, value.into()));
+        self
+    }
+
+    pub fn without_env(mut self, key: impl Into<OsString>) -> Self {
+        let key = key.into();
+        self.environment
+            .retain(|(configured, _)| configured != &key);
+        self.removed_environment.push(key);
         self
     }
 
@@ -84,9 +96,14 @@ impl ToolCommand {
     ) -> CapturedCheckResult {
         let id = id.into();
         let started = Instant::now();
-        let output = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .args(&self.args)
-            .envs(self.environment.iter().map(|(key, value)| (key, value)))
+            .envs(self.environment.iter().map(|(key, value)| (key, value)));
+        for key in &self.removed_environment {
+            command.env_remove(key);
+        }
+        let output = command
             .current_dir(self.working_directory_for(root))
             .output();
 
@@ -105,7 +122,11 @@ impl ToolCommand {
         let mut command = Command::new(&self.program);
         command
             .args(&self.args)
-            .envs(self.environment.iter().map(|(key, value)| (key, value)))
+            .envs(self.environment.iter().map(|(key, value)| (key, value)));
+        for key in &self.removed_environment {
+            command.env_remove(key);
+        }
+        command
             .current_dir(self.working_directory_for(root))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

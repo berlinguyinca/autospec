@@ -1258,6 +1258,23 @@ fn catalog_assigns_dogfood_detectors_to_a_typed_external_batch() {
 }
 
 #[test]
+fn catalog_assigns_parallel_dispatch_contract_to_a_typed_external_batch() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_autospec_parallel_dispatch_contract")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(
+            ExternalCheck::AutospecParallelDispatch
+        )),
+        "check_autospec_parallel_dispatch_contract must have a typed external owner"
+    );
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![
