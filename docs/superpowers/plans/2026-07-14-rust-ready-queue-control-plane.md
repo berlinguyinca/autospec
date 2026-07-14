@@ -115,7 +115,7 @@ Run: `cargo test -p autospec-core --test ready_queue --test claim_safety`
 
 Expected: PASS, including dependency heading scoping, epics, tracker back-edges, cycles, linked PR error/open cases, safety failures, active/batch conflicts, worker cap, serialized first candidate, and issue-number filtering.
 
-- [ ] **Step 6: Commit the pure planner**
+- [x] **Step 6: Commit the pure planner**
 
 ```bash
 git add crates/autospec-core/src/coordination crates/autospec-core/src/lib.rs crates/autospec-core/src/claim/mod.rs crates/autospec-core/tests/ready_queue.rs crates/autospec-core/tests/claim_safety.rs
@@ -135,7 +135,7 @@ git commit -m "feat: model ready queue policy in Rust"
 - Consumes: `plan_ready_queue`, `autospec claim state reconcile-linked-pr`, and `autospec claim state recover-stale-startup`.
 - Produces: `autospec queue ready [--repo OWNER/REPO] [--batch-size N] [--only-issues N ...]` with a single JSON document and exit `0`; option/remote errors exit `2`.
 
-- [ ] **Step 1: Write failing mocked-`gh` command tests**
+- [x] **Step 1: Write failing mocked-`gh` command tests**
 
 ```rust
 #[test]
@@ -149,13 +149,13 @@ fn queue_ready_emits_the_legacy_top_level_shape() {
 }
 ```
 
-- [ ] **Step 2: Run the new tests to verify they fail**
+- [x] **Step 2: Run the new tests to verify they fail**
 
 Run: `cargo test -p autospec-cli --test queue_commands`
 
 Expected: FAIL because `autospec queue` is not routed.
 
-- [ ] **Step 3: Implement direct `gh` adapters without shell interpolation**
+- [x] **Step 3: Implement direct `gh` adapters without shell interpolation**
 
 ```rust
 Command::new("gh")
@@ -165,7 +165,7 @@ Command::new("gh")
 
 Parse remote JSON strictly, query only dependency targets, and make a failed or malformed `gh pr list` become the per-candidate reason `linked_pr_evidence_unavailable` rather than selecting a candidate optimistically.
 
-- [ ] **Step 4: Implement `claim state recover-stale-startup` before the queue planner runs**
+- [x] **Step 4: Implement `claim state recover-stale-startup` before the queue planner runs**
 
 ```text
 autospec claim state recover-stale-startup --issue <N> --repo OWNER/REPO [--timeout-seconds 300]
@@ -173,7 +173,7 @@ autospec claim state recover-stale-startup --issue <N> --repo OWNER/REPO [--time
 
 This command must retain the active claim when there is a heartbeat, a local/remote branch, a PR, a fresh server timestamp, unreadable state, or failed GitHub mutation. It may remove `in-progress-by-bot`, add `auto-implement`, and clear the state only after the stale/no-evidence predicate passes; if clear fails, restore the active label and return a non-zero status. The queue command reconciles linked PRs first, then invokes recovery once per active issue, then re-reads active issues before applying the worker cap.
 
-- [ ] **Step 5: Run focused CLI tests**
+- [x] **Step 5: Run focused CLI tests**
 
 Run: `cargo test -p autospec-cli --test queue_commands --test claim_commands`
 

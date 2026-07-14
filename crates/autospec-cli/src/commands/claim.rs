@@ -42,6 +42,7 @@ fn run_state(args: &[String]) -> Result<(), CommandFailure> {
         [command, rest @ ..] if command == "upsert" => upsert(rest),
         [command, rest @ ..] if command == "clear" => clear(rest),
         [command, rest @ ..] if command == "reconcile-linked-pr" => reconcile_linked_pr(rest),
+        [command, rest @ ..] if command == "recover-stale-startup" => recover_stale_startup(rest),
         [command, ..] => Err(CommandFailure::diagnostic(format!(
             "unknown autospec claim state command: {command}"
         ))),
@@ -351,6 +352,103 @@ fn clear(args: &[String]) -> Result<(), CommandFailure> {
         None => infer_repo()?,
     };
     let comments = list_comments(&repo, options.issue)?;
+    clear_marked_state(&repo, &comments)?;
+    emit_claim_telemetry("session.terminal", &repo, options.issue, "");
+    Ok(())
+}
+
+fn recover_stale_startup(args: &[String]) -> Result<(), CommandFailure> {
+    let options = parse_recover_options(args)?;
+    let repo = match options.repo {
+        Some(repo) => repo,
+        None => infer_repo()?,
+    };
+    let outcome = recover_stale_startup_record(&repo, options.issue, options.timeout_seconds)?;
+    print_recovery_result(outcome.recovered, options.issue, &repo, &outcome.reason);
+    Ok(())
+}
+
+pub(crate) fn recover_active_issue(
+    repo: &str,
+    issue: u64,
+    timeout_seconds: u64,
+) -> Result<bool, CommandFailure> {
+    recover_stale_startup_record(repo, issue, timeout_seconds).map(|outcome| outcome.recovered)
+}
+
+struct RecoveryOutcome {
+    recovered: bool,
+    reason: String,
+}
+
+fn recover_stale_startup_record(
+    repo: &str,
+    issue: u64,
+    timeout_seconds: u64,
+) -> Result<RecoveryOutcome, CommandFailure> {
+    let comments = list_comments(repo, issue)?;
+    let Some(selected) = select_run_state(&comments, repo, issue) else {
+        return Ok(RecoveryOutcome {
+            recovered: false,
+            reason: "missing_run_state".to_string(),
+        });
+    };
+    if !selected.record.pr.is_empty() {
+        return Ok(RecoveryOutcome {
+            recovered: false,
+            reason: "claim_has_pr".to_string(),
+        });
+    }
+    if startup_heartbeat_exists(repo, issue)
+        || branch_ref_exists(&selected.record.branch)
+        || !server_lease_is_stale(&selected.server_updated_at, timeout_seconds)
+    {
+        return Ok(RecoveryOutcome {
+            recovered: false,
+            reason: "claim_evidence_or_fresh_state".to_string(),
+        });
+    }
+    let release_labels = [
+        "issue".to_string(),
+        "edit".to_string(),
+        issue.to_string(),
+        "--repo".to_string(),
+        repo.to_string(),
+        "--remove-label".to_string(),
+        "in-progress-by-bot".to_string(),
+        "--add-label".to_string(),
+        "auto-implement".to_string(),
+    ];
+    run_gh_with_retry(&release_labels, "release stale startup claim labels")?;
+    if let Err(error) = clear_marked_state(repo, &comments) {
+        let restore_labels = [
+            "issue".to_string(),
+            "edit".to_string(),
+            issue.to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+            "--remove-label".to_string(),
+            "auto-implement".to_string(),
+            "--add-label".to_string(),
+            "in-progress-by-bot".to_string(),
+        ];
+        let _ = run_gh_with_retry(
+            &restore_labels,
+            "restore active label after stale recovery failure",
+        );
+        return Err(error);
+    }
+    emit_claim_telemetry("session.terminal", repo, issue, "stale_startup_released");
+    Ok(RecoveryOutcome {
+        recovered: true,
+        reason: "released_stale_startup_claim".to_string(),
+    })
+}
+
+fn clear_marked_state(
+    repo: &str,
+    comments: &[autospec_core::claim::RemoteComment],
+) -> Result<(), CommandFailure> {
     for comment in comments.iter().filter(|comment| {
         comment
             .body
@@ -359,9 +457,8 @@ fn clear(args: &[String]) -> Result<(), CommandFailure> {
                 .body
                 .contains(autospec_core::claim::RUN_STATE_END_MARKER)
     }) {
-        delete_comment(&repo, comment.id)?;
+        delete_comment(repo, comment.id)?;
     }
-    emit_claim_telemetry("session.terminal", &repo, options.issue, "");
     Ok(())
 }
 
@@ -371,39 +468,63 @@ fn reconcile_linked_pr(args: &[String]) -> Result<(), CommandFailure> {
         Some(repo) => repo,
         None => infer_repo()?,
     };
-    let comments = list_comments(&repo, options.issue)?;
-    let Some(selected) = select_run_state(&comments, &repo, options.issue) else {
-        print_reconcile_result(false, options.issue, &repo, None, "missing_run_state");
-        return Ok(());
+    let outcome = reconcile_linked_pr_record(&repo, options.issue, options.worker_id.as_deref())?;
+    print_reconcile_result(
+        outcome.reconciled,
+        options.issue,
+        &repo,
+        outcome.pr.as_deref(),
+        &outcome.reason,
+    );
+    Ok(())
+}
+
+pub(crate) fn reconcile_active_issue(repo: &str, issue: u64) -> Result<(), CommandFailure> {
+    let _ = reconcile_linked_pr_record(repo, issue, None)?;
+    Ok(())
+}
+
+struct ReconcileOutcome {
+    reconciled: bool,
+    pr: Option<String>,
+    reason: String,
+}
+
+fn reconcile_linked_pr_record(
+    repo: &str,
+    issue: u64,
+    worker_id: Option<&str>,
+) -> Result<ReconcileOutcome, CommandFailure> {
+    let comments = list_comments(repo, issue)?;
+    let Some(selected) = select_run_state(&comments, repo, issue) else {
+        return Ok(ReconcileOutcome {
+            reconciled: false,
+            pr: None,
+            reason: "missing_run_state".to_string(),
+        });
     };
     if !selected.record.pr.is_empty() {
-        print_reconcile_result(
-            false,
-            options.issue,
-            &repo,
-            Some(&selected.record.pr),
-            "pr_already_recorded",
-        );
-        return Ok(());
+        return Ok(ReconcileOutcome {
+            reconciled: false,
+            pr: Some(selected.record.pr),
+            reason: "pr_already_recorded".to_string(),
+        });
     }
-    let pull_requests = list_open_pull_requests(&repo)?;
-    let Some(pull_request) = find_reconcilable_pull_request(&pull_requests, options.issue) else {
-        print_reconcile_result(
-            false,
-            options.issue,
-            &repo,
-            None,
-            "no_linked_pr_with_one_closeout",
-        );
-        return Ok(());
+    let pull_requests = list_open_pull_requests(repo)?;
+    let Some(pull_request) = find_reconcilable_pull_request(&pull_requests, issue) else {
+        return Ok(ReconcileOutcome {
+            reconciled: false,
+            pr: None,
+            reason: "no_linked_pr_with_one_closeout".to_string(),
+        });
     };
     let mut record = selected.record;
-    record.worker_id = options.worker_id.unwrap_or(record.worker_id);
+    record.worker_id = worker_id.map_or(record.worker_id, ToOwned::to_owned);
     record.state = "claimed".to_string();
     record.step = "post_pr_handoff_failed".to_string();
     record.pr = pull_request.number.to_string();
     record.updated_at = utc_now_iso()?;
-    upsert_record(&repo, &comments, &record)?;
+    upsert_record(repo, &comments, &record)?;
 
     let marker = format!(
         "<!-- autospec-linked-pr-run-state-reconcile:pr:{} -->",
@@ -415,18 +536,15 @@ fn reconcile_linked_pr(args: &[String]) -> Result<(), CommandFailure> {
     {
         let body = format!(
             "{marker}\nAutospec run-state reconciliation found linked PR #{} with one Closeout report while issue #{} was still in `claimed` state with no recorded PR. Resume post-PR handoff from PR #{}: run review/merge gates or comment the blocking gate failure, then release or merge the claim.",
-            pull_request.number, options.issue, pull_request.number
+            pull_request.number, issue, pull_request.number
         );
-        create_comment(&repo, options.issue, &body)?;
+        create_comment(repo, issue, &body)?;
     }
-    print_reconcile_result(
-        true,
-        options.issue,
-        &repo,
-        Some(&pull_request.number.to_string()),
-        "",
-    );
-    Ok(())
+    Ok(ReconcileOutcome {
+        reconciled: true,
+        pr: Some(pull_request.number.to_string()),
+        reason: String::new(),
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -453,6 +571,13 @@ struct ReconcileOptions {
     issue: u64,
     repo: Option<String>,
     worker_id: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RecoverOptions {
+    issue: u64,
+    repo: Option<String>,
+    timeout_seconds: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -512,6 +637,69 @@ fn parse_read_options(args: &[String]) -> Result<ReadOptions, CommandFailure> {
     }
     let issue = issue.ok_or_else(|| CommandFailure::diagnostic("--issue is required"))?;
     Ok(ReadOptions { issue, repo })
+}
+
+fn parse_recover_options(args: &[String]) -> Result<RecoverOptions, CommandFailure> {
+    let mut issue = None;
+    let mut repo = None;
+    let mut timeout_seconds = 300;
+    let mut timeout_seen = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--issue" => {
+                let value = argument_value(args, &mut index, "--issue")?;
+                let parsed = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| {
+                        CommandFailure::diagnostic("--issue must be a positive integer")
+                    })?;
+                if issue.replace(parsed).is_some() {
+                    return Err(CommandFailure::diagnostic(
+                        "--issue accepts exactly one issue number",
+                    ));
+                }
+            }
+            "--repo" => {
+                let value = argument_value(args, &mut index, "--repo")?;
+                if repo.replace(value).is_some() {
+                    return Err(CommandFailure::diagnostic(
+                        "--repo accepts exactly one repository",
+                    ));
+                }
+            }
+            "--timeout-seconds" => {
+                let value = argument_value(args, &mut index, "--timeout-seconds")?;
+                let parsed = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| {
+                        CommandFailure::diagnostic("--timeout-seconds must be a positive integer")
+                    })?;
+                if timeout_seen {
+                    return Err(CommandFailure::diagnostic(
+                        "--timeout-seconds accepts exactly one value",
+                    ));
+                }
+                timeout_seen = true;
+                timeout_seconds = parsed;
+            }
+            option => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown autospec claim state recover-stale-startup option: {option}"
+                )));
+            }
+        }
+        index += 1;
+    }
+    Ok(RecoverOptions {
+        issue: issue.ok_or_else(|| CommandFailure::diagnostic("--issue is required"))?,
+        repo,
+        timeout_seconds,
+    })
 }
 
 fn parse_upsert_options(args: &[String]) -> Result<UpsertOptions, CommandFailure> {
@@ -1115,6 +1303,40 @@ fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {
         .join("process-heartbeats"))
 }
 
+fn startup_heartbeat_exists(repo: &str, issue: u64) -> bool {
+    heartbeat_root().is_ok_and(|root| {
+        root.join(repo.replace('/', "__"))
+            .join(format!("{issue}.json"))
+            .is_file()
+    })
+}
+
+fn branch_ref_exists(branch: &str) -> bool {
+    if branch.trim().is_empty() {
+        return false;
+    }
+    for reference in [
+        format!("refs/heads/{branch}"),
+        format!("refs/remotes/origin/{branch}"),
+    ] {
+        match Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", &reference])
+            .status()
+        {
+            Ok(status) if status.success() => return true,
+            Ok(_) => {}
+            Err(_) => return true,
+        }
+    }
+    match Command::new("git")
+        .args(["ls-remote", "--heads", "origin", branch])
+        .output()
+    {
+        Ok(output) if output.status.success() => !output.stdout.is_empty(),
+        Ok(_) | Err(_) => true,
+    }
+}
+
 fn cleanup_own_marked_comments(
     repo: &str,
     issue: u64,
@@ -1327,6 +1549,14 @@ fn print_reconcile_result(
     );
 }
 
+fn print_recovery_result(recovered: bool, issue: u64, repo: &str, reason: &str) {
+    println!(
+        "{{\"recovered\":{recovered},\"issue\":{issue},\"repo\":\"{}\",\"reason\":\"{}\"}}",
+        json_escape(repo),
+        json_escape(reason),
+    );
+}
+
 fn json_escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -1400,6 +1630,6 @@ fn print_help() {
 
 fn print_state_help() {
     println!(
-        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim state clear --issue <N> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> [--repo OWNER/REPO] [--worker-id ID]\n\nCOMMANDS:\n    read                  Read the lowest-ID authoritative run-state comment\n    upsert                Patch or create the lowest-ID authoritative run-state comment\n    clear                 Delete marked run-state comments\n    reconcile-linked-pr   Record a linked PR before post-PR handoff recovery"
+        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim state clear --issue <N> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> [--repo OWNER/REPO] [--worker-id ID]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the lowest-ID authoritative run-state comment\n    upsert                 Patch or create the lowest-ID authoritative run-state comment\n    clear                  Delete marked run-state comments\n    reconcile-linked-pr    Record a linked PR before post-PR handoff recovery\n    recover-stale-startup  Release only an evidenceless stale startup claim"
     );
 }

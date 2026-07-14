@@ -211,6 +211,88 @@ fn claim_state_clear_deletes_every_marked_comment_without_touching_unmarked_hist
 }
 
 #[test]
+fn claim_state_recover_stale_startup_releases_only_an_old_evidenceless_claim() {
+    let fixture = temp_dir("autospec-claim-recover-stale");
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    write_executable(
+        &bin.join("gh"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_COMMENTS\"; fi\n",
+    );
+    let comments = r#"[{"id":100,"updated_at":"2000-01-01T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2000-01-01T00:00:00Z\",\"updated_at\":\"2000-01-01T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}]"#;
+
+    let output = autospec()
+        .args([
+            "claim",
+            "state",
+            "recover-stale-startup",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--timeout-seconds",
+            "300",
+        ])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_COMMENTS", comments)
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .env("AUTOSPEC_HEARTBEAT_DIR", fixture.join("heartbeats"))
+        .output()
+        .expect("autospec claim stale recovery starts");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"recovered\":true"));
+    let calls = std::fs::read_to_string(log).expect("gh call log");
+    let labels = calls
+        .find("issue\nedit\n42\n--repo\ntestorg/testrepo\n--remove-label\nin-progress-by-bot\n--add-label\nauto-implement")
+        .expect("label release");
+    let clear = calls
+        .find("repos/testorg/testrepo/issues/comments/100\n-X\nDELETE")
+        .expect("state clear");
+    assert!(labels < clear);
+}
+
+#[test]
+fn claim_state_recover_stale_startup_preserves_a_fresh_claim_without_label_mutation() {
+    let fixture = temp_dir("autospec-claim-recover-fresh");
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    write_executable(
+        &bin.join("gh"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_COMMENTS\"; fi\n",
+    );
+    let comments = r#"[{"id":100,"updated_at":"2999-01-01T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2999-01-01T00:00:00Z\",\"updated_at\":\"2999-01-01T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}]"#;
+
+    let output = autospec()
+        .args([
+            "claim",
+            "state",
+            "recover-stale-startup",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--timeout-seconds",
+            "300",
+        ])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_COMMENTS", comments)
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_HEARTBEAT_DIR", fixture.join("heartbeats"))
+        .output()
+        .expect("autospec claim stale recovery starts");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"recovered\":false"));
+    let calls = std::fs::read_to_string(log).expect("gh call log");
+    assert!(!calls.contains("issue\nedit"));
+    assert!(!calls.contains("\n-X\nDELETE"));
+}
+
+#[test]
 fn claim_state_reconcile_records_a_linked_pr_before_posting_one_handoff_blocker() {
     let fixture = temp_dir("autospec-claim-state-reconcile");
     let bin = fixture.join("bin");

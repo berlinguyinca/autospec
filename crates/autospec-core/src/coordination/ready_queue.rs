@@ -470,18 +470,33 @@ fn references_issue(body: &str, issue: u64) -> bool {
 }
 
 fn contains_issue_reference(text: &str, verb: &str, issue: &str) -> bool {
-    let needle = format!("{verb} #{issue}");
     let mut start = 0;
-    while let Some(offset) = text[start..].find(&needle) {
+    while let Some(offset) = text[start..].find(verb) {
         let index = start + offset;
         let before = text[..index].chars().next_back();
-        let after = text[index + needle.len()..].chars().next();
-        if before.is_none_or(|character| !character.is_ascii_alphanumeric())
+        let mut reference_start = index + verb.len();
+        while text
+            .as_bytes()
+            .get(reference_start)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            reference_start += 1;
+        }
+        let has_whitespace = reference_start > index + verb.len();
+        let issue_start = reference_start + 1;
+        let has_issue = text.as_bytes().get(reference_start) == Some(&b'#')
+            && text[issue_start..].starts_with(issue);
+        let after = has_issue
+            .then_some(issue_start + issue.len())
+            .and_then(|end| text[end..].chars().next());
+        if has_whitespace
+            && has_issue
+            && before.is_none_or(|character| !character.is_ascii_alphanumeric())
             && after.is_none_or(|character| !character.is_ascii_digit())
         {
             return true;
         }
-        start = index + needle.len();
+        start = index + verb.len();
     }
     false
 }

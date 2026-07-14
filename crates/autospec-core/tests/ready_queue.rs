@@ -142,6 +142,25 @@ fn blocks_open_linked_pull_requests_with_nonterminal_checks() {
 }
 
 #[test]
+fn recognizes_linked_pr_closures_with_flexible_whitespace() {
+    let mut input = ready_input(vec![issue(
+        402,
+        "## Implementation outline\n\n- edit `src/a.rs`\n",
+        &["auto-implement", "safety:reviewed"],
+    )]);
+    input.pull_requests = PullRequestEvidence::Available(vec![RemotePullRequest::open(
+        901,
+        "Resolves    #402",
+        vec![RemotePullRequestCheck::in_progress("tests")],
+    )]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.blocked[0].reason.as_deref(), Some("linked_pr_open"));
+    assert_eq!(plan.blocked[0].linked_pr, Some(901));
+}
+
+#[test]
 fn detects_active_and_same_batch_path_conflicts_before_selecting_a_batch() {
     let mut input = ready_input(vec![
         issue(
