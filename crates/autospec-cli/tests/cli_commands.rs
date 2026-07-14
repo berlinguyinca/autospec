@@ -1,4 +1,5 @@
-use std::process::{Command, Stdio};
+use std::io::Write;
+use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn autospec() -> Command {
@@ -31,6 +32,7 @@ fn cli_commands_help_lists_required_commands() {
         help_command_names(&stdout),
         [
             "init",
+            "lint",
             "doctor",
             "status",
             "autonomous",
@@ -45,6 +47,118 @@ fn cli_commands_help_lists_required_commands() {
             "growth-report",
         ]
     );
+}
+
+#[test]
+fn lint_issue_file_reports_text_findings_to_stderr() {
+    let body = issue_body(
+        "improve the issue body.",
+        "- [ ] `cargo test issue_lint` passes.",
+        "cargo test issue_lint",
+    );
+    let path = write_issue_body("autospec-lint-issue-text", &body);
+
+    let output = autospec()
+        .args(["lint", "issue", path.to_str().unwrap()])
+        .output()
+        .expect("autospec lint issue runs");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "GOAL_VAGUE: Bare vague verb 'improve' used without a concrete object (path, backtick term, number, or UPPER_SNAKE label)\n"
+    );
+}
+
+#[test]
+fn lint_issue_json_writes_ordered_findings_to_stdout() {
+    let body = issue_body(
+        "improve the issue should be clear.",
+        "- [ ] `cargo test issue_lint` passes.",
+        "cargo test issue_lint",
+    );
+    let path = write_issue_body("autospec-lint-issue-json", &body);
+
+    let output = autospec()
+        .args(["lint", "issue", "--json", path.to_str().unwrap()])
+        .output()
+        .expect("autospec lint issue runs");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "[\n  {\"rule\":\"GOAL_VAGUE\",\"description\":\"Bare vague verb 'improve' used without a concrete object (path, backtick term, number, or UPPER_SNAKE label)\"},\n  {\"rule\":\"GOAL_HEDGE\",\"description\":\"Hedging word 'should' found in Goal section; state the outcome flatly\"}\n]\n"
+    );
+}
+
+#[test]
+fn lint_issue_reads_stdin_when_body_path_is_dash() {
+    let body = issue_body(
+        "improve the issue body.",
+        "- [ ] `cargo test issue_lint` passes.",
+        "cargo test issue_lint",
+    );
+
+    let output = autospec_with_stdin(["lint", "issue", "-"], &body);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("GOAL_VAGUE: "));
+}
+
+#[test]
+fn lint_issue_help_exits_successfully_without_diagnostics() {
+    let output = autospec()
+        .args(["lint", "issue", "--help"])
+        .output()
+        .expect("autospec lint issue help runs");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("USAGE:\n    autospec lint issue [--json] <BODY_PATH>"));
+}
+
+#[test]
+fn lint_issue_rejects_malformed_options() {
+    let output = autospec()
+        .args(["lint", "issue", "--unsupported"])
+        .output()
+        .expect("autospec lint issue starts");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "unknown autospec lint issue option: --unsupported\n"
+    );
+}
+
+#[test]
+fn lint_issue_caps_the_exit_status_without_dropping_findings() {
+    let ac = std::iter::once("- [ ] `cargo test issue_lint` passes.".to_string())
+        .chain((1..=65).map(|index| format!("prose criterion {index}")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = issue_body(
+        "Add `lint_issue_body` parity fixtures.",
+        &ac,
+        "cargo test issue_lint",
+    );
+    let path = write_issue_body("autospec-lint-issue-cap", &body);
+
+    let output = autospec()
+        .args(["lint", "issue", path.to_str().unwrap()])
+        .output()
+        .expect("autospec lint issue runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(64));
+    assert!(output.stdout.is_empty());
+    assert_eq!(stderr.lines().count(), 65);
+    assert!(stderr.lines().all(|line| line.starts_with("AC_PROSE: ")));
 }
 
 #[test]
@@ -2101,6 +2215,35 @@ fn process_is_alive(pid: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+fn issue_body(goal: &str, acceptance_criteria: &str, smoke: &str) -> String {
+    format!(
+        "## Goal\n{goal}\n\n## Files to read first\n- crates/autospec-core/src/lib.rs\n\n## Implementation outline\n1. Implement the policy.\n\n## Tests required\n- `cargo test -p autospec-core --test issue_lint`\n\n## Dependencies\nnone\n\n## Files touched\n- crates/autospec-core/src/lint/mod.rs\n\n## Acceptance criteria\n{acceptance_criteria}\n\n## Verification\n\n### Primary smoke test (inner loop)\n\n```bash\n{smoke}\n```\n"
+    )
+}
+
+fn write_issue_body(prefix: &str, body: &str) -> std::path::PathBuf {
+    let path = temp_dir(prefix).join("issue.md");
+    std::fs::write(&path, body).expect("issue fixture");
+    path
+}
+
+fn autospec_with_stdin<const N: usize>(args: [&str; N], input: &str) -> Output {
+    let mut child = autospec()
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("autospec lint issue starts");
+    child
+        .stdin
+        .as_mut()
+        .expect("autospec stdin is piped")
+        .write_all(input.as_bytes())
+        .expect("issue body writes to stdin");
+    child.wait_with_output().expect("autospec lint issue exits")
 }
 
 fn temp_dir(prefix: &str) -> std::path::PathBuf {

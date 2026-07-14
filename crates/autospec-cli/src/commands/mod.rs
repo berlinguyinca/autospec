@@ -3,6 +3,7 @@ pub mod benchmark;
 pub mod doctor;
 pub mod growth_report;
 pub mod init;
+pub mod lint;
 pub mod plan;
 pub mod report;
 pub mod resume;
@@ -42,6 +43,7 @@ impl std::fmt::Display for CommandFailure {
 
 const COMMANDS: &[(&str, &str)] = &[
     ("init", "Initialize AutoSpec metadata"),
+    ("lint", "Lint issue and implementation policy inputs"),
     ("doctor", "Check the Rust core workspace"),
     ("status", "Summarize local AutoSpec state"),
     ("autonomous", "Plan and supervise autonomous conductor runs"),
@@ -71,6 +73,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
         }
         [command, rest @ ..] => match command.as_str() {
             "init" => init::run(rest).map_err(CommandFailure::diagnostic),
+            "lint" => lint::run(rest),
             "doctor" => doctor::run(rest).map_err(CommandFailure::diagnostic),
             "status" => status::run(rest).map_err(CommandFailure::diagnostic),
             "autonomous" => autonomous::run(rest).map_err(CommandFailure::diagnostic),
