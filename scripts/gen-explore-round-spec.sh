@@ -150,7 +150,7 @@ render_spec() {
         printf '### Acceptance\n\n'
         printf -- '- [ ] Implement: %s\n' "$title"
         printf -- '- [ ] Tests pass for the changed files.\n'
-        printf -- '- [ ] `bash scripts/validate.sh` exits 0.\n'
+        printf -- '- [ ] `autospec validate` exits 0.\n'
         printf '\n'
 
         i=$((i + 1))

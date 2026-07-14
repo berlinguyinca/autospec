@@ -154,7 +154,7 @@ JSON
   run jq -r '.issues[0].source_gap.capability' "$TEST_TMPDIR/repo/.autospec/reports/issue-plan.json"
   [ "$output" = "testing" ]
   grep -q '## Acceptance criteria' "$TEST_TMPDIR/repo/.autospec/backlog/issues/001-test-add-baseline-testing-evidence.md"
-  grep -q 'bash scripts/validate.sh' "$TEST_TMPDIR/repo/.autospec/backlog/issues/001-test-add-baseline-testing-evidence.md"
+  grep -q 'autospec validate' "$TEST_TMPDIR/repo/.autospec/backlog/issues/001-test-add-baseline-testing-evidence.md"
 }
 
 @test "issue planner is idempotent and clears stale generated drafts" {

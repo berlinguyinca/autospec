@@ -65,7 +65,7 @@ Bring public documentation in line with the Rust CLI and final platform behavior
 
 ```bash
 bash scripts/validate-launch-readiness.sh
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 ## Expected Outputs

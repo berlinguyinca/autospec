@@ -51,7 +51,7 @@ Create an idiomatic Rust workspace for the AutoSpec core without deleting valida
 - [ ] `cargo fmt --check` passes.
 - [ ] `cargo clippy --all-targets --all-features` passes.
 - [ ] `cargo test --all` passes.
-- [ ] Existing `bash scripts/validate.sh --fast` still passes.
+- [ ] Existing `autospec validate --fast` still passes.
 
 ## Validation Commands
 
@@ -59,7 +59,7 @@ Create an idiomatic Rust workspace for the AutoSpec core without deleting valida
 cargo fmt --check
 cargo clippy --all-targets --all-features
 cargo test --all
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 ## Expected Outputs

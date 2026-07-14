@@ -87,7 +87,7 @@ queue drains (ALL_DONE)
 
 - **`gap-remediation-loop.sh` bats:** dedupe vs open issue; dedupe vs active `docs:drift`; round-cap enforcement; convergence early-exit; skip-flag honored; malformed/empty JSON handled.
 - **`/autospec-review` remediation-mode bats:** emits valid gap JSON schema; the evaluate-findings filter drops a seeded false-positive; a seeded broad-dimension defect surfaces as a gap.
-- **Lockstep:** `scripts/validate.sh` gains named-section checks for the new SKILL.md sections across both the `autospec-run` and `autospec-review` trios (per `feedback_validate_sh_lockstep_checks.md`).
+- **Lockstep:** `autospec validate` gains named-section checks for the new SKILL.md sections across both the `autospec-run` and `autospec-review` trios (per `feedback_validate_sh_lockstep_checks.md`).
 
 ## Out of scope
 

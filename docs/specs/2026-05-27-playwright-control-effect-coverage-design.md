@@ -134,7 +134,7 @@ Extend autospec-test Stage 2/Stage 2.5 rather than creating a separate skill:
 ## Primary Smoke Test
 
 ```bash
-bash scripts/validate.sh
+autospec validate
 ```
 
 ## Implementation Slices

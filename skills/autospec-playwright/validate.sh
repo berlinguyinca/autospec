@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # validate.sh — per-skill structural lint for autospec-playwright.
-# Called by the repo-level scripts/validate.sh check_autospec_playwright_skill_present.
+# Called by the direct Rust validation check_autospec_playwright_skill_present gate.
 # Also runnable standalone from the skill directory or the repo root.
 #
 # Exits 0 on success, 1 on first failure.

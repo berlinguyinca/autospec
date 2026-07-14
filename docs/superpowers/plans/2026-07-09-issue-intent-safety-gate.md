@@ -35,7 +35,7 @@
 - Modify `skills/autospec-define/SKILL.md`, `skills/autospec-define/codex/prompt.md`, `skills/autospec-define/opencode/agent.md`: same Phase 3 and Phase 3.5 text as `autospec`.
 - Modify `skills/autospec-classify/SKILL.md`, `skills/autospec-classify/codex/prompt.md`, `skills/autospec-classify/opencode/agent.md`: standalone classification quarantine behavior.
 - Modify `skills/autospec-run/SKILL.md`, `skills/autospec-run/codex/prompt.md`, `skills/autospec-run/opencode/agent.md`: fail-closed claim check.
-- Modify `scripts/validate.sh`: run the new Bats suite in the existing validation harness.
+- Modify `autospec validate`: run the new Bats suite in the existing validation harness.
 - Modify `docs/API_REFERENCE.md`, `docs/CONFIG_REFERENCE.md`, and `docs/USER_MANUAL.md`: document script, YAML, labels, and operator recovery.
 
 ---
@@ -710,7 +710,7 @@ Run:
 
 ```bash
 bats tests/unit/test_phase3_lint_integration.bats
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 Expected: both commands exit 0.
@@ -796,7 +796,7 @@ Run:
 
 ```bash
 bats tests/autospec-run/test_list_ready_issues.bats
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 Expected: both commands exit 0.
@@ -875,7 +875,7 @@ Run:
 
 ```bash
 bats tests/unit/test_phase3_lint_integration.bats
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 Expected: both commands exit 0.
@@ -998,7 +998,7 @@ Run:
 
 ```bash
 bats tests/unit/test_phase3_lint_integration.bats
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 Expected: both commands exit 0.
@@ -1015,7 +1015,7 @@ git commit -m "docs: document issue intent safety quarantine"
 ### Task 7: Full Validation and Release Readiness
 
 **Files:**
-- Modify: `scripts/validate.sh`
+- Modify: `autospec validate`
 - Review only: all files changed by Tasks 1-6
 
 **Interfaces:**
@@ -1024,7 +1024,7 @@ git commit -m "docs: document issue intent safety quarantine"
 
 - [ ] **Step 1: Wire new Bats suite into validation**
 
-Find the existing Bats invocation section in `scripts/validate.sh` and add:
+Find the existing Bats invocation section in `autospec validate` and add:
 
 ```bash
 bats tests/unit/test_lint_issue_safety.bats
@@ -1050,7 +1050,7 @@ Expected: all commands exit 0.
 Run:
 
 ```bash
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 Expected: exit 0.
@@ -1060,7 +1060,7 @@ Expected: exit 0.
 Run:
 
 ```bash
-bash scripts/validate.sh
+autospec validate
 ```
 
 Expected: exit 0. If Bats is missing, `validate.sh` skips Bats by design; report that exact condition in the final summary.
@@ -1068,7 +1068,7 @@ Expected: exit 0. If Bats is missing, `validate.sh` skips Bats by design; report
 - [ ] **Step 5: Commit Task 7**
 
 ```bash
-git add scripts/validate.sh
+git add autospec validate
 git commit -m "test: validate issue intent safety gate"
 ```
 

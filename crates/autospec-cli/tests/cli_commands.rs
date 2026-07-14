@@ -1,4 +1,7 @@
-use std::process::{Command, Stdio};
+use std::io::Write;
+use std::os::unix::fs::symlink;
+use std::os::unix::fs::PermissionsExt;
+use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn autospec() -> Command {
@@ -31,6 +34,7 @@ fn cli_commands_help_lists_required_commands() {
         help_command_names(&stdout),
         [
             "init",
+            "lint",
             "doctor",
             "status",
             "autonomous",
@@ -45,6 +49,1154 @@ fn cli_commands_help_lists_required_commands() {
             "growth-report",
         ]
     );
+}
+
+#[test]
+fn lint_issue_file_reports_text_findings_to_stderr() {
+    let body = issue_body(
+        "improve the issue body.",
+        "- [ ] `cargo test issue_lint` passes.",
+        "cargo test issue_lint",
+    );
+    let path = write_issue_body("autospec-lint-issue-text", &body);
+
+    let output = autospec()
+        .args(["lint", "issue", path.to_str().unwrap()])
+        .output()
+        .expect("autospec lint issue runs");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "GOAL_VAGUE: Bare vague verb 'improve' used without a concrete object (path, backtick term, number, or UPPER_SNAKE label)\n"
+    );
+}
+
+#[test]
+fn lint_issue_json_writes_ordered_findings_to_stdout() {
+    let body = issue_body(
+        "improve the issue should be clear.",
+        "- [ ] `cargo test issue_lint` passes.",
+        "cargo test issue_lint",
+    );
+    let path = write_issue_body("autospec-lint-issue-json", &body);
+
+    let output = autospec()
+        .args(["lint", "issue", "--json", path.to_str().unwrap()])
+        .output()
+        .expect("autospec lint issue runs");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "[\n  {\"rule\":\"GOAL_VAGUE\",\"description\":\"Bare vague verb 'improve' used without a concrete object (path, backtick term, number, or UPPER_SNAKE label)\"},\n  {\"rule\":\"GOAL_HEDGE\",\"description\":\"Hedging word 'should' found in Goal section; state the outcome flatly\"}\n]\n"
+    );
+}
+
+#[test]
+fn lint_issue_reads_stdin_when_body_path_is_dash() {
+    let body = issue_body(
+        "improve the issue body.",
+        "- [ ] `cargo test issue_lint` passes.",
+        "cargo test issue_lint",
+    );
+
+    let output = autospec_with_stdin(["lint", "issue", "-"], &body);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("GOAL_VAGUE: "));
+}
+
+#[test]
+fn lint_issue_help_exits_successfully_without_diagnostics() {
+    let output = autospec()
+        .args(["lint", "issue", "--help"])
+        .output()
+        .expect("autospec lint issue help runs");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("USAGE:\n    autospec lint issue [--json] <BODY_PATH>"));
+}
+
+#[test]
+fn lint_issue_rejects_malformed_options() {
+    let output = autospec()
+        .args(["lint", "issue", "--unsupported"])
+        .output()
+        .expect("autospec lint issue starts");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "unknown autospec lint issue option: --unsupported\n"
+    );
+}
+
+#[test]
+fn lint_issue_caps_the_exit_status_without_dropping_findings() {
+    let ac = std::iter::once("- [ ] `cargo test issue_lint` passes.".to_string())
+        .chain((1..=65).map(|index| format!("prose criterion {index}")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = issue_body(
+        "Add `lint_issue_body` parity fixtures.",
+        &ac,
+        "cargo test issue_lint",
+    );
+    let path = write_issue_body("autospec-lint-issue-cap", &body);
+
+    let output = autospec()
+        .args(["lint", "issue", path.to_str().unwrap()])
+        .output()
+        .expect("autospec lint issue runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(64));
+    assert!(output.stdout.is_empty());
+    assert_eq!(stderr.lines().count(), 65);
+    assert!(stderr.lines().all(|line| line.starts_with("AC_PROSE: ")));
+}
+
+#[test]
+fn lint_implementation_reads_an_offline_diff_file_and_streams_findings() {
+    let diff = write_implementation_diff(
+        "autospec-lint-implementation-diff-file",
+        &new_diff("scripts/policy.sh", &["eval(input)"]),
+    );
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .output()
+        .expect("autospec lint implementation runs");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "SECURITY:scripts/policy.sh:2: eval() usage — potential code injection\n"
+    );
+}
+
+#[test]
+fn lint_implementation_pre_commit_reads_only_staged_diff_and_enables_both_test_gates() {
+    let fixture = temp_dir("autospec-lint-implementation-pre-commit");
+    let log = fixture.join("git.log");
+    let staged_diff = format!(
+        "{}{}",
+        new_diff(
+            "tests/unit/test_vacuous.bats",
+            &["grep -qv 'bad' result.txt || true"],
+        ),
+        new_diff(
+            "tests/unit/test_density.bats",
+            &["@test \"density\" {", "  echo no assertion", "}"],
+        )
+    );
+    let bin = fake_bin(
+        &fixture,
+        Some(&format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AUTOSPEC_LINT_COMMAND_LOG\"\nprintf '%s' {}\n",
+            shell_single_quote(&staged_diff)
+        )),
+        None,
+    );
+
+    let output = autospec()
+        .args(["lint", "implementation", "--pre-commit", "--staged"])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_LINT_COMMAND_LOG", &log)
+        .output()
+        .expect("pre-commit lint runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stderr.is_empty());
+    assert_eq!(std::fs::read_to_string(log).unwrap(), "diff\n--cached\n");
+    assert!(stdout.contains("VACUOUS_GREP_INVERSE_OR_TRUE:"));
+    assert!(!stdout.contains("VACUOUS_OR_TRUE:"));
+    assert!(stdout.contains("VACUOUS_NO_ASSERT:"));
+    assert!(stdout.contains("ASSERTION_DENSITY:"));
+}
+
+#[test]
+fn lint_implementation_fetches_pr_then_issue_with_direct_gh_arguments() {
+    let fixture = temp_dir("autospec-lint-implementation-pr-issue");
+    let log = fixture.join("gh.log");
+    let diff = new_diff("scripts/policy.sh", &["eval(input)"]);
+    let bin = fake_bin(
+        &fixture,
+        None,
+        Some(&format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_LINT_COMMAND_LOG\"\nif [ \"$1\" = pr ]; then\n  printf '%s' {}\nelif [ \"$1\" = issue ]; then\n  printf '%s\\n' 'Guardian: skip-SECURITY # reviewed fixture'\nelse\n  exit 19\nfi\n",
+            shell_single_quote(&diff)
+        )),
+    );
+
+    let output = autospec()
+        .args(["lint", "implementation", "17", "--issue", "29"])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_LINT_COMMAND_LOG", &log)
+        .output()
+        .expect("PR lint runs");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap(),
+        "pr\ndiff\n17\nissue\nview\n29\n--json\nbody\n--jq\n.body\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "INFO:SECURITY:scripts/policy.sh:2: eval() usage — potential code injection\n"
+    );
+}
+
+#[test]
+fn lint_implementation_directives_reformat_errors_without_changing_exit_status() {
+    let diff = write_implementation_diff(
+        "autospec-lint-implementation-directives",
+        &new_diff("scripts/policy.sh", &["eval(input)"]),
+    );
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--directives",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .output()
+        .expect("directive lint runs");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Fix SECURITY: Remove the flagged pattern: never hardcode secrets, never bypass git hooks or use destructive resets, validate all inputs.\n"
+    );
+}
+
+#[test]
+fn lint_implementation_opt_in_test_gates_do_not_require_pre_commit_mode() {
+    let vacuous = write_implementation_diff(
+        "autospec-lint-implementation-vacuous",
+        &new_diff(
+            "tests/unit/test_vacuous.bats",
+            &["grep -qv 'bad' result.txt || true"],
+        ),
+    );
+    let density = write_implementation_diff(
+        "autospec-lint-implementation-density",
+        &new_diff(
+            "tests/unit/test_density.bats",
+            &["@test \"density\" {", "  echo no assertion", "}"],
+        ),
+    );
+
+    let vacuous_output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--vacuous-assertions",
+            "--diff-file",
+            vacuous.to_str().unwrap(),
+        ])
+        .output()
+        .expect("vacuous assertion lint runs");
+    let density_output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--assertion-density",
+            "--diff-file",
+            density.to_str().unwrap(),
+        ])
+        .output()
+        .expect("assertion density lint runs");
+
+    assert_eq!(vacuous_output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&vacuous_output.stdout).contains("VACUOUS_GREP_INVERSE_OR_TRUE:")
+    );
+    assert!(!String::from_utf8_lossy(&vacuous_output.stdout).contains("VACUOUS_OR_TRUE:"));
+    assert_eq!(density_output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&density_output.stdout).contains("ASSERTION_DENSITY:"));
+}
+
+#[test]
+fn lint_implementation_rejects_mutually_exclusive_diff_sources() {
+    let diff = write_implementation_diff(
+        "autospec-lint-implementation-exclusive",
+        &new_diff("scripts/policy.sh", &["eval(input)"]),
+    );
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "17",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .output()
+        .expect("mutually-exclusive inputs are rejected");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "autospec lint implementation: --diff-file and <PR> are mutually exclusive\n"
+    );
+}
+
+#[test]
+fn lint_implementation_surfaces_a_nonzero_gh_diff_response() {
+    let fixture = temp_dir("autospec-lint-implementation-gh-error");
+    let bin = fake_bin(
+        &fixture,
+        None,
+        Some("#!/bin/sh\nprintf '%s\\n' 'authentication required' >&2\nexit 17\n"),
+    );
+
+    let output = autospec()
+        .args(["lint", "implementation", "17"])
+        .env("PATH", path_with(&bin))
+        .output()
+        .expect("remote lint exits");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "autospec lint implementation: gh pr diff 17 failed: authentication required\n"
+    );
+}
+
+#[test]
+fn lint_implementation_reports_no_staged_changes_without_loading_an_issue() {
+    let fixture = temp_dir("autospec-lint-implementation-empty-staged");
+    let log = fixture.join("commands.log");
+    let bin = fake_bin(
+        &fixture,
+        Some("#!/bin/sh\nprintf '%s\\n' \"git:$*\" >> \"$AUTOSPEC_LINT_COMMAND_LOG\"\n"),
+        Some("#!/bin/sh\nprintf '%s\\n' \"gh:$*\" >> \"$AUTOSPEC_LINT_COMMAND_LOG\"\nexit 99\n"),
+    );
+
+    let output = autospec()
+        .args(["lint", "implementation", "--staged", "--issue", "29"])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_LINT_COMMAND_LOG", &log)
+        .output()
+        .expect("staged lint runs");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "autospec lint implementation: no staged changes found\n"
+    );
+    assert_eq!(std::fs::read_to_string(log).unwrap(), "git:diff --cached\n");
+}
+
+#[test]
+fn lint_implementation_caps_a_large_finding_set_at_64() {
+    let diff = large_finding_diff();
+    let path = write_implementation_diff("autospec-lint-implementation-cap", &diff);
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--vacuous-assertions",
+            "--diff-file",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("large implementation lint runs");
+
+    assert_eq!(output.status.code(), Some(64));
+    assert!(output.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&output.stdout).lines().count() > 64);
+}
+
+#[test]
+fn lint_implementation_preserves_the_scope_explosion_exit_from_the_core() {
+    let diff = write_implementation_diff(
+        "autospec-lint-implementation-scope-explosion",
+        &new_diff(
+            "scripts/policy.sh",
+            &[
+                "eval(input)",
+                "# TODO aggregate cap",
+                "command --new-policy enabled",
+            ],
+        ),
+    );
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .env("AUTOSPEC_LINT_IMPLEMENTATION_TEST_HARD_CAP", "2")
+        .output()
+        .expect("scope explosion lint runs");
+
+    assert_eq!(output.status.code(), Some(200));
+    assert!(output.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("OUT_OF_SCOPE:-:-: too many findings — likely scope explosion"));
+}
+
+#[test]
+fn lint_implementation_does_not_follow_symlinked_diff_paths_outside_the_repository() {
+    let root = temp_dir("autospec-lint-implementation-symlink-root");
+    let outside = temp_dir("autospec-lint-implementation-symlink-outside");
+    std::fs::write(outside.join("secret.py"), "line\n".repeat(401)).expect("outside snapshot");
+    symlink(&outside, root.join("linked")).expect("in-repository link");
+    let diff = root.join("change.diff");
+    std::fs::write(&diff, new_diff("linked/secret.py", &["pass"])).expect("diff fixture");
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("symlinked diff lint runs");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn lint_implementation_reuse_lens_ignores_hidden_ignored_and_non_shell_evidence() {
+    let root = temp_dir("autospec-lint-implementation-reuse-evidence");
+    make_git_repo(&root, None);
+    std::fs::create_dir_all(root.join("scripts")).expect("scripts directory");
+    std::fs::create_dir_all(root.join("ignored")).expect("ignored directory");
+    std::fs::create_dir_all(root.join(".hidden")).expect("hidden directory");
+    std::fs::create_dir_all(root.join("nested/generated")).expect("nested ignored directory");
+    std::fs::create_dir_all(root.join("ignored-by-ignore")).expect("ignore directory");
+    std::fs::create_dir_all(root.join("ignored-by-rgignore")).expect("rgignore directory");
+    std::fs::write(root.join(".gitignore"), "ignored/\n*.py[cod]\n").expect("gitignore");
+    std::fs::write(root.join(".ignore"), "ignored-by-ignore/\n").expect("ignore");
+    std::fs::write(root.join(".rgignore"), "ignored-by-rgignore/\n").expect("rgignore");
+    std::fs::write(root.join("nested/.gitignore"), "generated/\n").expect("nested gitignore");
+    std::fs::write(root.join("scripts/helper.txt"), "parse_config() { :; }\n")
+        .expect("non-shell helper");
+    std::fs::write(
+        root.join("ignored/helper.sh"),
+        "parse_config() { :; }\nsession-manager\n",
+    )
+    .expect("ignored shell helper");
+    std::fs::write(
+        root.join(".hidden/helper.sh"),
+        "parse_config() { :; }\nsession-manager\n",
+    )
+    .expect("hidden shell helper");
+    std::fs::write(
+        root.join("nested/generated/helper.sh"),
+        "parse_config() { :; }\nsession-manager\n",
+    )
+    .expect("nested ignored shell helper");
+    std::fs::write(
+        root.join("ignored-by-ignore/helper.sh"),
+        "parse_config() { :; }\nsession-manager\n",
+    )
+    .expect("ignore shell helper");
+    std::fs::write(
+        root.join("ignored-by-rgignore/helper.sh"),
+        "parse_config() { :; }\nsession-manager\n",
+    )
+    .expect("rgignore shell helper");
+    std::fs::write(root.join("reference.pyc"), "session-manager\n")
+        .expect("character-class ignored reference");
+    let diff = root.join("change.diff");
+    std::fs::write(
+        &diff,
+        format!(
+            "{}{}",
+            new_diff("scripts/new-loader.sh", &["parse_config() { :; }"]),
+            new_diff("src/session-manager.rs", &["pub struct SessionManager;"]),
+        ),
+    )
+    .expect("reuse diff fixture");
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .current_dir(&root)
+        .env("AUTOSPEC_REUSE_LENS", "1")
+        .output()
+        .expect("reuse lint runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    assert!(!stdout.contains("REINVENT_REPO_UTIL:"));
+    assert!(stdout.contains("NEW_ABSTRACTION_SINGLE_CALLER:src/session-manager.rs:-:"));
+    assert!(stdout.contains("has 0 external caller(s)"));
+}
+
+#[test]
+fn lint_implementation_reuse_lens_excludes_an_in_repo_diff_from_abstraction_callers() {
+    let root = temp_dir("autospec-lint-implementation-in-repo-diff");
+    make_git_repo(&root, None);
+    std::fs::create_dir_all(root.join("src")).expect("source directory");
+    std::fs::write(root.join("src/consumer.rs"), "// session-manager\n").expect("real caller");
+    let diff = root.join("change.diff");
+    std::fs::write(
+        &diff,
+        new_diff("src/session-manager.rs", &["pub struct SessionManager;"]),
+    )
+    .expect("diff fixture");
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .current_dir(&root)
+        .env("AUTOSPEC_REUSE_LENS", "1")
+        .output()
+        .expect("reuse lint runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    assert!(stdout.contains("NEW_ABSTRACTION_SINGLE_CALLER:src/session-manager.rs:-:"));
+    assert!(stdout.contains("has 1 external caller(s)"));
+}
+
+#[test]
+fn status_json_reports_persisted_lifecycle_counts() {
+    let output = autospec()
+        .args(["status", "--json"])
+        .output()
+        .expect("status command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"command\":\"status\""));
+    assert!(stdout.contains("\"specs\":{"));
+    assert!(stdout.contains("\"planned\":"));
+    assert!(stdout.contains("\"superseded\":"));
+}
+
+#[test]
+fn report_json_renders_a_release_summary_from_persisted_state() {
+    let output = autospec()
+        .args(["report", "--json"])
+        .output()
+        .expect("report command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"version\":\"current\""));
+    assert!(stdout.contains("\"passed\":"));
+    assert!(stdout.contains("\"superseded\":"));
+}
+
+#[test]
+fn plan_json_inspects_an_input_package_in_stable_path_order() {
+    let package = temp_dir("autospec-plan");
+    let specs = package.join("specs");
+    std::fs::create_dir_all(&specs).expect("spec package directory");
+    std::fs::write(
+        specs.join("a-first.md"),
+        "# Alpha\n\n## Version\n\nV9\n\n## Objective\n\nInspect alpha.\n",
+    )
+    .expect("first spec");
+    std::fs::write(
+        specs.join("z-second.md"),
+        "# Beta\n\n## Version\n\nV8\n\n## Objective\n\nInspect beta.\n",
+    )
+    .expect("second spec");
+
+    let output = autospec()
+        .args(["plan", "--input", package.to_str().unwrap(), "--json"])
+        .output()
+        .expect("plan command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("\"command\":\"plan\""));
+    assert!(stdout.contains("\"spec_count\":2"));
+    let alpha = stdout.find("\"id\":\"v9-alpha\"").expect("alpha spec");
+    let beta = stdout.find("\"id\":\"v8-beta\"").expect("beta spec");
+    assert!(alpha < beta, "specs should retain sorted source-path order");
+}
+
+#[test]
+fn plan_text_lists_specs_from_an_input_package() {
+    let package = temp_dir("autospec-plan-text");
+    let specs = package.join("specs");
+    std::fs::create_dir_all(&specs).expect("spec package directory");
+    std::fs::write(
+        specs.join("one.md"),
+        "# Text Spec\n\n## Version\n\nV9\n\n## Objective\n\nRender text.\n",
+    )
+    .expect("spec");
+
+    let output = autospec()
+        .args(["plan", "--input", package.to_str().unwrap()])
+        .output()
+        .expect("plan command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("AutoSpec plan: 1 generated spec(s)"));
+    assert!(stdout.contains("v9-text-spec"));
+}
+
+#[test]
+fn plan_rejects_a_missing_input_package() {
+    let missing_package = temp_dir("autospec-plan-missing").join("missing-package");
+    let output = autospec()
+        .args(["plan", "--input", missing_package.to_str().unwrap()])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("package directory"));
+}
+
+#[test]
+fn plan_rejects_an_input_without_specs() {
+    let package = temp_dir("autospec-plan-empty");
+    let output = autospec()
+        .args(["plan", "--input", package.to_str().unwrap()])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("specs directory"));
+}
+
+#[test]
+fn plan_rejects_an_input_with_no_markdown_specs() {
+    let package = temp_dir("autospec-plan-no-specs");
+    std::fs::create_dir_all(package.join("specs")).expect("specs directory");
+
+    let output = autospec()
+        .args(["plan", "--input", package.to_str().unwrap()])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no generated specs"));
+}
+
+#[test]
+fn plan_rejects_a_malformed_generated_spec() {
+    let package = temp_dir("autospec-plan-malformed");
+    let specs = package.join("specs");
+    std::fs::create_dir_all(&specs).expect("specs directory");
+    std::fs::write(
+        specs.join("missing-objective.md"),
+        "# Incomplete\n\n## Version\n\nV9\n",
+    )
+    .expect("malformed spec");
+
+    let output = autospec()
+        .args(["plan", "--input", package.to_str().unwrap()])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not parse"));
+}
+
+#[test]
+fn plan_defaults_to_the_canonical_v62_package() {
+    let output = autospec()
+        .args(["plan", "--json"])
+        .current_dir(workspace_root())
+        .output()
+        .expect("plan command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"command\":\"plan\""));
+    assert!(stdout.contains("v62-final-platform"));
+    assert!(stdout.contains("\"spec_count\":14"));
+    assert!(stdout.contains("\"id\":\"v62-rust-core-workspace\""));
+}
+
+#[test]
+fn plan_rejects_an_input_flag_without_a_package_path() {
+    let output = autospec()
+        .args(["plan", "--input"])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--input requires a path"));
+}
+
+#[test]
+fn plan_rejects_an_option_as_an_input_path() {
+    let output = autospec()
+        .args(["plan", "--input", "--json"])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--input requires a path"));
+}
+
+#[test]
+fn plan_rejects_an_unknown_option() {
+    let output = autospec()
+        .args(["plan", "--not-an-option"])
+        .output()
+        .expect("plan command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown autospec plan option"));
+}
+
+#[test]
+fn validate_json_plans_rust_checks_for_changed_rust_sources() {
+    let output = autospec()
+        .args([
+            "validate",
+            "--path",
+            "crates/autospec-core/src/state/mod.rs",
+            "--json",
+        ])
+        .output()
+        .expect("validate command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"command\":\"validate\""));
+    assert!(stdout.contains("\"mode\":\"planning\""));
+    assert!(stdout.contains("\"changed_paths\":[\"crates/autospec-core/src/state/mod.rs\"]"));
+    assert!(stdout.contains("\"name\":\"rust:lint\""));
+    assert!(!stdout.contains("\"status\":\"ok\""));
+}
+
+#[test]
+fn validate_rejects_a_path_flag_without_a_path() {
+    let output = autospec()
+        .args(["validate", "--path"])
+        .output()
+        .expect("validate command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--path requires a path"));
+}
+
+#[test]
+fn validate_rejects_an_empty_path() {
+    let output = autospec()
+        .args(["validate", "--path", ""])
+        .output()
+        .expect("validate command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--path requires a path"));
+}
+
+#[test]
+fn validate_executes_the_direct_plan_without_a_legacy_shell_handoff() {
+    let root = temp_dir("autospec-validate-shell");
+    let scripts = root.join("scripts");
+    let log = root.join("handoff.log");
+    std::fs::create_dir_all(&scripts).expect("scripts directory");
+    std::fs::write(
+        scripts.join("unexpected-handoff.sh"),
+        "#!/usr/bin/env bash\nexit 1\n",
+    )
+    .expect("validation fixture");
+
+    let output = autospec()
+        .args(["validate", "--fast", "--json"])
+        .current_dir(&root)
+        .env("AUTOSPEC_VALIDATE_TEST_LOG", &log)
+        .output()
+        .expect("validate command runs");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "an incomplete repository must fail"
+    );
+    assert!(stdout.contains("\"schema\":2"));
+    assert!(stdout.contains("\"results\":["));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("direct Rust validation failed"));
+    assert!(!log.exists(), "validate must not execute a shell handoff");
+}
+
+#[test]
+fn validate_rejects_a_scoped_run_when_git_cannot_resolve_its_base() {
+    let output = autospec()
+        .args([
+            "validate",
+            "--fast",
+            "--changed=refs/heads/autospec-missing-validation-base",
+        ])
+        .output()
+        .expect("validate command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("could not resolve changed paths from git base"));
+}
+
+#[test]
+fn validate_shadow_results_aggregates_captured_shell_outcomes_without_execution() {
+    let fixture = workspace_root()
+        .join("crates/autospec-cli/tests/fixtures/validation-results/legacy-fast-passed.json");
+    let expected = std::fs::read_to_string(workspace_root().join(
+        "crates/autospec-cli/tests/fixtures/validation-results/legacy-fast-passed.aggregate.json",
+    ))
+    .expect("expected aggregate fixture is readable")
+    .trim()
+    .to_string();
+    let output = autospec()
+        .args([
+            "validate",
+            "--shadow-results",
+            fixture.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("shadow validation starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("\"mode\":\"shadow-results\""));
+    assert!(stdout.contains(&expected));
+}
+
+#[test]
+fn validate_shadow_results_preserves_a_required_failure_exit() {
+    let fixture = workspace_root()
+        .join("crates/autospec-cli/tests/fixtures/validation-results/legacy-required-failed.json");
+    let output = autospec()
+        .args([
+            "validate",
+            "--shadow-results",
+            fixture.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("failing shadow validation starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(!output.status.success());
+    assert!(stdout.contains("\"status\":\"failed\""));
+    assert!(stdout.contains("\"required_failed\":1"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("captured validation results failed"));
+}
+
+#[test]
+fn validate_shadow_results_rejects_an_empty_capture() {
+    let fixture = workspace_root()
+        .join("crates/autospec-cli/tests/fixtures/validation-results/legacy-empty.json");
+    let output = autospec()
+        .args([
+            "validate",
+            "--shadow-results",
+            fixture.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("validate command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("at least one observation"));
+}
+
+#[test]
+fn validate_shadow_results_never_executes_a_local_validate_script() {
+    let root = temp_dir("validate-shadow-no-legacy-shell");
+    let scripts = root.join("scripts");
+    let log = root.join("legacy-shell.log");
+    std::fs::create_dir_all(&scripts).expect("scripts directory");
+    std::fs::write(
+        scripts.join("validate.sh"),
+        "#!/usr/bin/env bash\nset -eu\nprintf 'legacy shell ran\\n' > \"$AUTOSPEC_VALIDATE_TEST_LOG\"\n",
+    )
+    .expect("legacy shell fixture");
+    let fixture = workspace_root()
+        .join("crates/autospec-cli/tests/fixtures/validation-results/legacy-fast-passed.json");
+
+    let output = autospec()
+        .args([
+            "validate",
+            "--shadow-results",
+            fixture.to_str().expect("fixture path"),
+            "--json",
+        ])
+        .current_dir(&root)
+        .env("AUTOSPEC_VALIDATE_TEST_LOG", &log)
+        .output()
+        .expect("shadow aggregation runs");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"mode\":\"shadow-results\""));
+    assert!(
+        !log.exists(),
+        "shadow aggregation must not execute validate.sh"
+    );
+}
+
+#[test]
+fn init_persists_explicit_spec_state_without_running_work() {
+    let root = temp_dir("autospec-init");
+    let output = autospec()
+        .args(["init", "--spec", "v62-rust-core-workspace", "--json"])
+        .current_dir(&root)
+        .output()
+        .expect("init command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("\"command\":\"init\""));
+    assert!(stdout.contains("\"status\":\"initialized\""));
+    assert!(stdout.contains("\"spec_count\":1"));
+    assert!(root.join(".autospec/state/specs.json").exists());
+}
+
+#[test]
+fn init_requires_at_least_one_explicit_spec() {
+    let output = autospec()
+        .arg("init")
+        .output()
+        .expect("init command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("at least one --spec"));
+}
+
+#[test]
+fn init_refuses_to_overwrite_existing_spec_state() {
+    let root = temp_dir("autospec-init-existing");
+    let first = autospec()
+        .args(["init", "--spec", "v62-rust-core-workspace"])
+        .current_dir(&root)
+        .output()
+        .expect("first init runs");
+    assert!(first.status.success());
+
+    let second = autospec()
+        .args(["init", "--spec", "v63-spec-metadata-parser"])
+        .current_dir(&root)
+        .output()
+        .expect("second init starts");
+
+    assert!(!second.status.success());
+    assert!(String::from_utf8_lossy(&second.stderr).contains("refuses to overwrite"));
+}
+
+#[test]
+fn init_refuses_an_existing_empty_primary_or_recovery_state_file() {
+    for name in ["specs.json", "specs.json.tmp"] {
+        let root = temp_dir(&format!("autospec-init-{name}"));
+        let state = root.join(".autospec/state");
+        std::fs::create_dir_all(&state).expect("state directory");
+        std::fs::write(state.join(name), "{\"schema\":1,\"specs\":[]}")
+            .expect("existing state document");
+
+        let output = autospec()
+            .args(["init", "--spec", "v62-rust-core-workspace"])
+            .current_dir(&root)
+            .output()
+            .expect("init starts");
+
+        assert!(!output.status.success(), "{name} must block initialization");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("refuses to overwrite"));
+    }
+}
+
+#[test]
+fn run_creates_a_local_queue_without_executing_work_and_refuses_existing_runs() {
+    let root = temp_dir("autospec-run-create");
+    let first = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-create",
+            "--spec",
+            "v67-agent-integration-contracts",
+            "--json",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("run command starts");
+    let stdout = String::from_utf8_lossy(&first.stdout);
+
+    assert!(
+        first.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(stdout.contains("\"command\":\"run\""));
+    assert!(stdout.contains("\"mode\":\"create\""));
+    assert!(stdout.contains("\"status\":\"created\""));
+    assert!(root
+        .join(".autospec/runs/run-cli-create/queue.json")
+        .exists());
+
+    let repeated = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-create",
+            "--spec",
+            "v67-agent-integration-contracts",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("repeated run starts");
+
+    assert!(!repeated.status.success());
+    assert!(String::from_utf8_lossy(&repeated.stderr).contains("already exists"));
+}
+
+#[test]
+fn run_ingests_an_explicit_agent_result_without_launching_an_agent_or_validation() {
+    let root = temp_dir("autospec-run-ingest");
+    let created = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-ingest",
+            "--spec",
+            "v67-agent-integration-contracts",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("queue creation starts");
+    assert!(created.status.success());
+    let input = root.join("agent-result.json");
+    std::fs::write(
+        &input,
+        "{\"result\":\"implemented\",\"files_changed\":[],\"validation\":\"cargo test --workspace: exit 0\",\"blockers\":[],\"handoff\":\"ready\"}",
+    )
+    .expect("agent result fixture is written");
+
+    let output = autospec()
+        .args([
+            "run",
+            "--ingest",
+            input.to_str().unwrap(),
+            "--run",
+            "run-cli-ingest",
+            "--spec",
+            "v67-agent-integration-contracts",
+            "--result-id",
+            "result-1",
+            "--outcome",
+            "passed",
+            "--json",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("result ingestion starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("\"mode\":\"ingest\""));
+    assert!(stdout.contains("\"outcome\":\"passed\""));
+    assert!(root
+        .join(".autospec/runs/run-cli-ingest/agent-results/v67-agent-integration-contracts/result-1.json")
+        .exists());
+    let queue = std::fs::read_to_string(root.join(".autospec/runs/run-cli-ingest/queue.json"))
+        .expect("updated queue is readable");
+    assert!(queue.contains("\"status\":\"passed\""));
+    assert!(queue.contains("\"agent_result_ids\":[\"result-1\"]"));
+}
+
+#[test]
+fn resume_reports_the_latest_incomplete_queue_and_errors_when_none_exists() {
+    let root = temp_dir("autospec-resume");
+    let missing = autospec()
+        .args(["resume", "--json"])
+        .current_dir(&root)
+        .output()
+        .expect("empty resume starts");
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("no incomplete run"));
+
+    let created = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-resume",
+            "--spec",
+            "v67-agent-integration-contracts",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("queue creation starts");
+    assert!(created.status.success());
+
+    let resumed = autospec()
+        .args(["resume", "--json"])
+        .current_dir(&root)
+        .output()
+        .expect("resume command starts");
+    let stdout = String::from_utf8_lossy(&resumed.stdout);
+
+    assert!(
+        resumed.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(stdout.contains("\"command\":\"resume\""));
+    assert!(stdout.contains("\"run_id\":\"run-cli-resume\""));
+    assert!(stdout.contains("\"spec_id\":\"v67-agent-integration-contracts\""));
+    assert!(stdout.contains("\"entry_status\":\"pending\""));
 }
 
 #[test]
@@ -1391,13 +2543,13 @@ fn cli_commands_json_modes_emit_json() {
         "doctor",
         "status",
         "plan",
-        "validate",
         "report",
         "showcase",
         "growth-report",
     ] {
         let output = autospec()
             .args([command, "--json"])
+            .current_dir(workspace_root())
             .output()
             .unwrap_or_else(|error| panic!("{command} runs: {error}"));
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1497,6 +2649,107 @@ fn process_is_alive(pid: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn issue_body(goal: &str, acceptance_criteria: &str, smoke: &str) -> String {
+    format!(
+        "## Goal\n{goal}\n\n## Files to read first\n- crates/autospec-core/src/lib.rs\n\n## Implementation outline\n1. Implement the policy.\n\n## Tests required\n- `cargo test -p autospec-core --test issue_lint`\n\n## Dependencies\nnone\n\n## Files touched\n- crates/autospec-core/src/lint/mod.rs\n\n## Acceptance criteria\n{acceptance_criteria}\n\n## Verification\n\n### Primary smoke test (inner loop)\n\n```bash\n{smoke}\n```\n"
+    )
+}
+
+fn write_issue_body(prefix: &str, body: &str) -> std::path::PathBuf {
+    let path = temp_dir(prefix).join("issue.md");
+    std::fs::write(&path, body).expect("issue fixture");
+    path
+}
+
+fn new_diff(path: &str, lines: &[&str]) -> String {
+    let additions = lines
+        .iter()
+        .map(|line| format!("+{line}\n"))
+        .collect::<String>();
+    format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n{additions}",
+        lines.len()
+    )
+}
+
+fn write_implementation_diff(prefix: &str, diff: &str) -> std::path::PathBuf {
+    let path = temp_dir(prefix).join("change.diff");
+    std::fs::write(&path, diff).expect("implementation diff fixture");
+    path
+}
+
+fn large_finding_diff() -> String {
+    let security = vec!["eval(input)"; 15];
+    let todos = vec!["# TODO deferred"; 15];
+    let nested = vec!["                    if nested {"; 15];
+    let vacuous = vec!["grep -qv 'bad' result.txt || true"; 15];
+    let tautologies = vec!["expect(true).toBe(true);"; 15];
+    let mocks = vec!["let database = mock(database);"; 15];
+    format!(
+        "{}{}{}{}{}{}",
+        new_diff("scripts/security.sh", &security),
+        new_diff("scripts/todos.sh", &todos),
+        new_diff("scripts/deeply_nested.sh", &nested),
+        new_diff("tests/unit/test_vacuous.bats", &vacuous),
+        new_diff("tests/unit/test_tautology.js", &tautologies),
+        new_diff("tests/unit/db_test.rs", &mocks),
+    )
+}
+
+fn fake_bin(
+    fixture: &std::path::Path,
+    git_program: Option<&str>,
+    gh_program: Option<&str>,
+) -> std::path::PathBuf {
+    let bin = fixture.join("bin");
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    if let Some(program) = git_program {
+        write_executable(&bin.join("git"), program);
+    }
+    if let Some(program) = gh_program {
+        write_executable(&bin.join("gh"), program);
+    }
+    bin
+}
+
+fn write_executable(path: &std::path::Path, contents: &str) {
+    std::fs::write(path, contents).expect("fake command");
+    let mut permissions = std::fs::metadata(path)
+        .expect("fake command metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("fake command permissions");
+}
+
+fn path_with(bin: &std::path::Path) -> String {
+    format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").expect("test PATH is set")
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\\"'\\\"'"))
+}
+
+fn autospec_with_stdin<const N: usize>(args: [&str; N], input: &str) -> Output {
+    let mut child = autospec()
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("autospec lint issue starts");
+    child
+        .stdin
+        .as_mut()
+        .expect("autospec stdin is piped")
+        .write_all(input.as_bytes())
+        .expect("issue body writes to stdin");
+    child.wait_with_output().expect("autospec lint issue exits")
+}
+
 fn temp_dir(prefix: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1505,6 +2758,13 @@ fn temp_dir(prefix: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     dir
+}
+
+fn workspace_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root")
 }
 
 fn cleanup_pids(scope: &std::path::Path) {
@@ -1558,15 +2818,17 @@ fn doctor_readiness_json_reports_workflow_safety() {
 }
 
 #[test]
-fn cli_commands_unimplemented_mutating_commands_are_explicit() {
-    for command in ["init", "run", "resume", "benchmark"] {
+fn cli_commands_require_explicit_input_or_report_the_remaining_stub() {
+    for command in ["run", "resume"] {
         let output = autospec().arg(command).output().expect("autospec runs");
-        let stderr = String::from_utf8_lossy(&output.stderr);
 
         assert!(
             !output.status.success(),
             "{command} should not silently succeed"
         );
-        assert!(stderr.contains("not yet implemented"));
     }
+
+    let benchmark = autospec().arg("benchmark").output().expect("autospec runs");
+    assert!(!benchmark.status.success());
+    assert!(String::from_utf8_lossy(&benchmark.stderr).contains("not yet implemented"));
 }

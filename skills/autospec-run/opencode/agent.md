@@ -869,12 +869,12 @@ inline label-swap path below.
 >    <!-- agent-env-provision:begin -->
 >    ```bash
 >    if [ -f ".autospec/runtime.yml" ] || [ -f ".agent-runtime.yml" ]; then
->      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/agent-env.sh" up --repo "$PWD" --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" > .autospec-agent-env.out
+>      autospec runtime env up --repo "$PWD" --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" > .autospec-agent-env.out
 >      AGENT_ENV_FILE=$(sed -n 's/^AGENT_ENV_FILE=//p' .autospec-agent-env.out | tail -n 1)
 >      if [ -n "$AGENT_ENV_FILE" ] && [ -f "$AGENT_ENV_FILE" ]; then
 >        . "$AGENT_ENV_FILE"
 >      else
->        echo "agent-env did not emit a usable AGENT_ENV_FILE" >&2
+>        echo "autospec runtime env did not emit a usable AGENT_ENV_FILE" >&2
 >        exit 1
 >      fi
 >      echo "[runtime] isolated environment: ${AUTOSPEC_PUBLIC_URL:-$AGENT_PUBLIC_URL}"
@@ -899,7 +899,7 @@ inline label-swap path below.
 > 3. **Full test suite gate.** Run the target repo's full validation/test suite, not only the Primary smoke test. Command resolution order:
 >    1. If `AUTOSPEC_FULL_TEST_COMMAND` is set, run `bash -lc "$AUTOSPEC_FULL_TEST_COMMAND"`.
 >    2. Else run every command listed under the issue's **Operator/full verification** section.
->    3. Else run the repo-standard full suite: `bash scripts/validate.sh` when present; otherwise use the ecosystem default (`npm test`, `pytest`, `go test ./...`, `cargo test`, `mvn test`, etc.).
+>    3. Else run the repo-standard full suite: `autospec validate` when present; otherwise use the ecosystem default (`npm test`, `pytest`, `go test ./...`, `cargo test`, `mvn test`, etc.).
 >    If the full suite fails, fix the failure, recommit, rerun the full suite, and repeat. Do NOT dispatch LGTM review while the full suite is failing. Do NOT run `gh pr merge` while the full suite is failing. Record the exact full-suite command and passing output summary in the PR comment or final report.
 >    Once the suite first passes, fire the transition notification: `case "$_notify_fired" in *:tests_passed:*) ;; *) _notify_fired="${_notify_fired}:tests_passed:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: tests_passed" "Full suite green on {repo}" || true ;; esac`
 > 3a. **autospec-test gate** (run when `skills/autospec-test/scripts/run-gate.sh` exists in the repo): invoke the gate against the PR's target repo root. Handle exit codes per spec §7a/§7b:
@@ -1258,7 +1258,7 @@ inline label-swap path below.
 >    fi
 >    # Mandatory final local proof after the branch is current with main.
 >    # Run the **Full test suite gate** here using the same command resolution order
->    # (`AUTOSPEC_FULL_TEST_COMMAND`, Operator/full verification, then `bash scripts/validate.sh` fallback).
+>    # (`AUTOSPEC_FULL_TEST_COMMAND`, Operator/full verification, then `autospec validate` fallback).
 >    # If it fails, fix the failure, recommit, push, rerun the full suite and review, and do NOT run `gh pr merge`.
 >    #
 >    # Final quality gate (pre-merge, fail-closed): after the full suite passes and
@@ -1331,7 +1331,7 @@ inline label-swap path below.
 > 9. FAILURE (loop exhausted): comment failure on issue, swap label `in-progress-by-bot` → `auto-implement`, `gh pr close <PR> --delete-branch`.
 >    Fire the terminal failure notification: `case "$_notify_fired" in *:failed:*) ;; *) _notify_fired="${_notify_fired}:failed:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: failed" "Implementation failed on {repo}" || true ;; esac`
 >    Cleanup single-fetch body temp file on terminal failure: `rm -f "/tmp/issue-<ISSUE>-body.md" || true`
-> 10. Cleanup: if `.autospec/runtime.yml` or `.agent-runtime.yml` exists in the issue worktree, run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/agent-env.sh" down --repo /tmp/wt-<BRANCH> --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" || true`; then `cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force`
+> 10. Cleanup: if `.autospec/runtime.yml` or `.agent-runtime.yml` exists in the issue worktree, run `autospec runtime env down --repo /tmp/wt-<BRANCH> --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" || true`; then `cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force`
 > 11. Report: PR number, outcome, one-paragraph summary.
 >
 > Hard rules: NEVER push to main, force-push, bypass hooks, or touch the umbrella issue. gh CLI only.

@@ -1,0 +1,1 @@
+@test "cycle fixture" { true; }

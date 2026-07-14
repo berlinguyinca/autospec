@@ -262,7 +262,7 @@ No global flock, no GitHub-side coordination issue.
 
 - **bats-core** for shell unit + smoke tests. Install via the dev
   bootstrap script (see §6.5).
-- **`scripts/validate.sh`** stays for static checks (lock-step body,
+- **`autospec validate`** stays for static checks (lock-step body,
   bash -n, frontmatter parse, AGENTS.md governance headings). Extend it
   to also check: (a) the new `autospec-listen` skill exists with required
   files, (b) `examples/` directory exists with required files, (c) trigger
@@ -319,7 +319,7 @@ locally and committing the diff.
 
 `scripts/dev-bootstrap.sh` (new) installs `bats-core` (via brew/apt/npm
 detection), confirms `gh`, `jq`, `python3` are available, and prints a
-`make test` analogue: `bats tests/unit tests/smoke && scripts/validate.sh`.
+`make test` analogue: `bats tests/unit tests/smoke && autospec validate`.
 Add a note in CONTRIBUTING.md.
 
 ### 6.6 CI
@@ -327,7 +327,7 @@ Add a note in CONTRIBUTING.md.
 `.github/workflows/validate.yml` (new):
 
 - Triggers: `push`, `pull_request`.
-- Runs: `bash scripts/dev-bootstrap.sh`, `bash scripts/validate.sh`,
+- Runs: `bash scripts/dev-bootstrap.sh`, `autospec validate`,
   `bats tests/unit tests/smoke`.
 - Target: <60s wall time.
 
@@ -354,7 +354,7 @@ Add a note in CONTRIBUTING.md.
 | `docs/runbooks/needs-classify-sweep.md` | Create — sample crontab + manual command | Doc issue |
 | `examples/README.md` | Create — explains both YAML files | Doc issue |
 
-Validation: `scripts/validate.sh` MUST grep for the new headings in
+Validation: `autospec validate` MUST grep for the new headings in
 `AGENTS.md` and the `autospec-listen` row in `README.md` + `SKILLS.md`.
 
 ## 8. Acceptance criteria for the whole effort
@@ -362,7 +362,7 @@ Validation: `scripts/validate.sh` MUST grep for the new headings in
 - [ ] `skills/autospec-listen/` exists with all 7 files (SKILL.md,
   README.md, install.sh, uninstall.sh, opencode/agent.md, codex/prompt.md,
   references/trigger-keywords.md).
-- [ ] `scripts/validate.sh` passes after the changes.
+- [ ] `autospec validate` passes after the changes.
 - [ ] `bats tests/unit tests/smoke` passes locally and in CI.
 - [ ] The opt-in `tests/e2e/` job passes when triggered with the `e2e`
   label.

@@ -153,7 +153,7 @@ Real-services rule: no mocking the contract loader/runner logic. The **deploy co
 
 `tests/qa/test_qa_deploy.bats` (10 fixtures, per #694 AC): (1) absent contract → no-op exit 0, no `deploy:` key; (2) simple deploy → ordered `stages_run` + durations + target_env; (3) forbidden URL in command → exit 3 `forbidden_target`, zero stages run; (4) prod pattern → exit 3 `prod_pattern`; (5) clone stage missing `max_records` → exit 3 `missing_records_cap`; (6) health check fails after retry → exit 1 `qa_deploy_failed`; (7) teardown `warn` → no verdict change; (8) teardown `fail` → `PASS`→`PARTIAL`; (9) `--skip-teardown` → skipped, `teardown_run:false`; (10) synthetic end-to-end → `deploy:` block matches expected JSON. (bats memory: write any stub-served readiness file to a real temp file before any `[ -f ]`.)
 
-`scripts/validate.sh` gains `check_qa_deploy_contract()` (mirroring `check_closeout_contract`): trio lockstep for the new `## Deployment contract` section (`check_lockstep`/`check_lockstep_duo`); `qa-deploy-runner.sh` exists + executable + `bash -n` clean; `schemas/autospec-qa-deploy.schema.json` valid (ajv compile); runs the bats. Trio prose + goldens are **one atomic change** (memory): edit `SKILL.md`, then `derive-trio.sh --in-place` + `gen-skill-goldens.sh` in the same child.
+`autospec validate` gains `check_qa_deploy_contract()` (mirroring `check_closeout_contract`): trio lockstep for the new `## Deployment contract` section (`check_lockstep`/`check_lockstep_duo`); `qa-deploy-runner.sh` exists + executable + `bash -n` clean; `schemas/autospec-qa-deploy.schema.json` valid (ajv compile); runs the bats. Trio prose + goldens are **one atomic change** (memory): edit `SKILL.md`, then `derive-trio.sh --in-place` + `gen-skill-goldens.sh` in the same child.
 
 ## File pointers
 
@@ -163,7 +163,7 @@ Real-services rule: no mocking the contract loader/runner logic. The **deploy co
 - `skills/autospec-test/scripts/run-gate.sh` — contract-gates-pipeline + exit-code (0/1/2) convention.
 - `scripts/qa-finding-filter.sh` — atomic `.tmp`+`mv` verdict rewrite.
 - `skills/autospec-test/tests/fixtures/repos/minimal-valid/.autospec/test.yml` — declarative-yml fixture style.
-- `scripts/validate.sh` (`check_closeout_contract`, `check_lockstep`, `check_derive_trio_consistency`) — check-function shape.
+- `autospec validate` (`check_closeout_contract`, `check_lockstep`, `check_derive_trio_consistency`) — check-function shape.
 - `schemas/autospec-*.schema.json` — schema-file precedent for the new `autospec-qa-deploy.schema.json`.
 
 ## Decomposition hint (3-5 small auto-implement children)

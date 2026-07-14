@@ -193,7 +193,7 @@ Skill ships the trio (`SKILL.md` + `opencode/agent.md` + `codex/prompt.md`),
 byte-identical below adapter headers, plus `install.sh` / `uninstall.sh` /
 `README.md`. New scripts are harness-neutral. Trio prose and regenerated
 test/fixture/skill-goldens land as **one atomic change** (lock-step rule). A
-`check_autospec_harmonize_contract` gate is added to `scripts/validate.sh`.
+`check_autospec_harmonize_contract` gate is added to `autospec validate`.
 
 ## Testing
 

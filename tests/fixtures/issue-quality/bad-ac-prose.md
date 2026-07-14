@@ -5,7 +5,7 @@ Add `scripts/lint-issue.sh` that exits non-zero when an issue body fails the §3
 ## Files to read first
 
 - scripts/lint-issue.sh
-- scripts/validate.sh
+- autospec validate
 
 ## Implementation outline
 

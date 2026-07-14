@@ -1,4 +1,6 @@
-use autospec_core::runtime_policy::{classify_path, Runtime, RuntimeClass};
+use autospec_core::runtime_policy::{
+    classify_path, is_supported_runtime_path, Runtime, RuntimeClass,
+};
 
 #[test]
 fn runtime_policy_covers_r0_to_r4_variants() {
@@ -17,8 +19,8 @@ fn runtime_policy_covers_r0_to_r4_variants() {
 }
 
 #[test]
-fn runtime_policy_marks_validation_shell_as_r1() {
-    let verdict = classify_path("scripts/validate.sh");
+fn runtime_policy_marks_stateful_shell_helpers_as_r1() {
+    let verdict = classify_path("scripts/lint-issue.sh");
 
     assert_eq!(verdict.runtime, Runtime::Shell);
     assert_eq!(verdict.class, RuntimeClass::R1);
@@ -51,4 +53,13 @@ fn runtime_policy_defaults_unknown_helpers_to_r2() {
 
     assert_eq!(verdict.runtime, Runtime::Unknown);
     assert_eq!(verdict.class, RuntimeClass::R2);
+}
+
+#[test]
+fn runtime_policy_exposes_the_runtime_paths_supported_by_the_classifier() {
+    assert!(is_supported_runtime_path(
+        "skills/autospec-run/tests/watchdog_claim_timeout.bats"
+    ));
+    assert!(is_supported_runtime_path("packages/example/go.mod"));
+    assert!(!is_supported_runtime_path("docs/specs/example.md"));
 }

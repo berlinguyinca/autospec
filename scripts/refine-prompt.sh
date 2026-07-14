@@ -801,7 +801,7 @@ lens_clarity_ac() {
     body+=$'\n\n## Acceptance criteria (autospec-refine clarity-ac lens)\n'
     body+=$'- [ ] Implementation matches the disambiguated prompt above.\n'
     body+=$'- [ ] Tests cover happy path + at least one adversarial scenario.\n'
-    body+=$'- [ ] `bash scripts/validate.sh` passes locally.\n'
+    body+=$'- [ ] `autospec validate` passes locally.\n'
     body+=$'- [ ] PR description names the test command operators should run.\n'
     printf '%s' "$body"
 }

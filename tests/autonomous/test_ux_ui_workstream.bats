@@ -92,10 +92,13 @@ JSONL
     [[ "$output" == *"design doc validated"* ]]
 }
 
-@test "validate.sh wires the UX/UI workstream helper, runbook, CI gate, and bats suite" {
-    grep -q '^check_ux_ui_workstream_contract()' "$REPO_ROOT/scripts/validate.sh"
-    grep -q 'ux-ui-workstream\.sh' "$REPO_ROOT/scripts/validate.sh"
-    grep -q 'tests/autonomous/test_ux_ui_workstream\.bats' "$REPO_ROOT/scripts/validate.sh"
-    grep -q 'ux-ui-workstream\.yml' "$REPO_ROOT/scripts/validate.sh"
+@test "direct Rust validation wires the UX/UI workstream helper, runbook, CI gate, and bats suite" {
+    catalog="$REPO_ROOT/crates/autospec-core/src/validation/catalog.rs"
+    owner="$REPO_ROOT/crates/autospec-core/src/validation/external.rs"
+    grep -q '"check_ux_ui_workstream_contract"' "$catalog"
+    grep -q 'ExternalCheck::UxUiWorkstream' "$catalog"
+    grep -q 'ux-ui-workstream\.sh' "$owner"
+    grep -q 'tests/autonomous/test_ux_ui_workstream\.bats' "$owner"
+    grep -q 'ux-ui-workstream\.yml' "$owner"
     [ -f "$REPO_ROOT/docs/runbooks/ux-ui-workstream.md" ]
 }

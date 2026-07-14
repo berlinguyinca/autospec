@@ -6,7 +6,7 @@ pass without arming the loop. It is kept in **lockstep** with
 `docs/specs/2026-06-15-autospec-explore-discovery-enhance.md` — both describe
 the same five discovery tracks, the adversarial verify stage, and pattern
 synthesis. When you change one, change the other (enforced by
-`check_autospec_explore_discovery_contract` in `scripts/validate.sh`).
+`check_autospec_explore_discovery_contract` in `autospec validate`).
 
 ## How to run
 

@@ -52,7 +52,7 @@ Model spec lifecycle and run validation gates consistently.
 
 ```bash
 cargo test --all spec_state validation_registry
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 ## Expected Outputs

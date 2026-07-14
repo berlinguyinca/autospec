@@ -2,7 +2,7 @@
 //
 // Single source of truth for the light-blue palette preset.
 // ALL six hex constants live ONLY here — no other file may hardcode them.
-// scripts/validate.sh enforces single-source via check_palette_single_source().
+// autospec validate enforces single-source via check_palette_single_source().
 //
 // Exports:
 //   PALETTE          — { background, primary, secondary, accent, line, text }

@@ -136,7 +136,7 @@ helpers live under `skills/autospec-upgrade/scripts/` and install into
 
 ## Acceptance criteria
 - [ ] `skills/autospec-upgrade/` exists with trio (SKILL.md + codex/prompt.md + opencode/agent.md byte-identical bodies), install.sh, uninstall.sh, README.md, and a passing `validate.sh`.
-- [ ] `bash scripts/validate.sh` exits 0 (trio lockstep + goldens for autospec-upgrade pass).
+- [ ] `autospec validate` exits 0 (trio lockstep + goldens for autospec-upgrade pass).
 - [ ] `upgrade-detect.sh` emits valid JSON identifying framework, version, package manager, runners, monorepo, and `has_tests` for each fixture repo.
 - [ ] `compute-upgrade-steps.sh` never emits a step that skips an Angular major version (test asserts a 20→23 plan is 21,22,23).
 - [ ] `behavior-lock.sh` refuses (`exit != 0`) to proceed when behavior is not locked or the mutation baseline is absent.

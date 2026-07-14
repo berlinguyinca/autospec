@@ -174,7 +174,7 @@ Immediately before `gh pr create`, then before `gh pr merge`:
    return `CLOSED` via `gh issue view <N> --json state --jq .state`. If any dep
    is not merged, do NOT open the PR; comment which dep blocks and exit.
 2. **Full test suite gate:** the repo's full validation/test suite (default
-   `bash scripts/validate.sh`, override `AUTOSPEC_FULL_TEST_COMMAND`) MUST pass
+   `autospec validate`, override `AUTOSPEC_FULL_TEST_COMMAND`) MUST pass
    before LGTM review and again immediately before admin-merge. A failing suite
    blocks both review and merge — fix, recommit, rerun, repeat. Record the exact
    command and passing summary as merge evidence.

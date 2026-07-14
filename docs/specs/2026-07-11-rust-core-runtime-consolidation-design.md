@@ -2,13 +2,23 @@
 
 ## Validate Wrapper Fallback
 
-`scripts/validate.sh` now attempts `autospec validate` before entering the
+`autospec validate` now attempts `autospec validate` before entering the
 legacy shell body. The Rust command re-enters the shell with
-`AUTOSPEC_FORCE_LEGACY_SHELL=1` while validation logic is still being ported.
+`direct Rust validation=1` while validation logic is still being ported.
 
 The temporary fallback is tied to epic #1861. Remove it only after the remaining
 runtime consolidation issues have moved the selected validation paths into Rust
 and the shell wrapper is reduced to a thin compatibility entrypoint.
+
+### Shadow aggregation gate
+
+`autospec validate --shadow-results <captured-results.json> --json` is the first
+non-executing R1 parity surface. It parses a schema-1 list of named validation outcomes
+(`required` plus signed `exit_code`) and emits a deterministic aggregate without launching a
+command. A required captured failure keeps the CLI non-zero. The shell wrapper remains the only
+executor; this shadow mode locks the future result contract before delegation. The fixtures and
+cutover evidence are recorded in
+[`docs/reports/2026-07-12-rust-context-monitor-cutover.md`](../reports/2026-07-12-rust-context-monitor-cutover.md).
 
 ## Rust Context Monitor API
 
@@ -27,6 +37,10 @@ above 80% emits `handoff`, `clear`, and `resume` in that order, and usage below
 30% resets `Compacted` or `Rolled` state back to `Normal` via a `noop` action
 with a diagnostic payload. Rust callers must execute returned actions outside
 the core crate; the core module only classifies usage and mutates local state.
+
+The 2026-07-12 cutover decision is to retain the Python driver. The Rust module is state-machine
+parity only and does not implement the Python adapters, hook installation, injection, handoff,
+telemetry, or daemon lifecycle. See the same cutover report for the required future gates.
 
 ## Watchdog Linked PR Liveness
 

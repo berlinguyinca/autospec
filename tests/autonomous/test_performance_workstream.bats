@@ -85,9 +85,12 @@ JSONL
     [[ "$output" == *"FAST_PATH_BUDGET_BREACH:execution_fast_path:51.0ms>50.0ms"* ]]
 }
 
-@test "validate.sh wires the performance workstream script, runbook, and bats suite" {
-    grep -q '^check_performance_workstream_contract()' "$REPO_ROOT/scripts/validate.sh"
-    grep -q 'performance-workstream\.sh' "$REPO_ROOT/scripts/validate.sh"
-    grep -q 'tests/autonomous/test_performance_workstream\.bats' "$REPO_ROOT/scripts/validate.sh"
+@test "direct Rust validation wires the performance workstream script, runbook, and bats suite" {
+    catalog="$REPO_ROOT/crates/autospec-core/src/validation/catalog.rs"
+    owner="$REPO_ROOT/crates/autospec-core/src/validation/external.rs"
+    grep -q '"check_performance_workstream_contract"' "$catalog"
+    grep -q 'ExternalCheck::PerformanceWorkstream' "$catalog"
+    grep -q 'performance-workstream\.sh' "$owner"
+    grep -q 'tests/autonomous/test_performance_workstream\.bats' "$owner"
     [ -f "$REPO_ROOT/docs/runbooks/performance-workstream.md" ]
 }

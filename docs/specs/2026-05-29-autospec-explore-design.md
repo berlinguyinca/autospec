@@ -298,7 +298,7 @@ To discard:
 - Loop driver from PR #712 reused; termination identical to the other
   three loop-enabled skills.
 - Usage-limit supervisor arms correctly on quota pause.
-- `scripts/validate.sh` gains `check_autospec_explore_contract()`
+- `autospec validate` gains `check_autospec_explore_contract()`
   enforcing trio lockstep + 6 researchers present + sandbox isolation
   documented + bats suite.
 - All bats fixtures pass.
@@ -326,7 +326,7 @@ Aiming for 5 children plus an umbrella.
 5. **Issue E — orchestrator + loop integration + validate gate + e2e**:
    `scripts/autospec-explore.sh` ties everything to
    `scripts/lib/autospec-loop.sh` (PR #712). `check_autospec_explore_contract()`
-   in `scripts/validate.sh`. End-to-end bats. Depends on A+B+C+D.
+   in `autospec validate`. End-to-end bats. Depends on A+B+C+D.
    Files: 3.
 
 Total: 5 children + 1 umbrella.

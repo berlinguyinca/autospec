@@ -88,7 +88,7 @@ copy_public_launch_files() {
   printf 'AUTOSPEC_PUBLIC_LAUNCH_READY=true\n' > "$TMP_REPO/.autospec/releases/launch-candidate.md"
   printf 'final launch readiness\n' > "$TMP_REPO/.autospec/reports/final-launch-readiness.md"
   printf 'V74 Final Release Candidate\nAUTOSPEC_PUBLIC_LAUNCH_READY=true\n' > "$TMP_REPO/.autospec/releases/final-release-candidate.md"
-  printf 'Final Platform Evidence\nbash scripts/validate.sh\n' > "$TMP_REPO/.autospec/reports/final-platform-evidence.md"
+  printf 'Final Platform Evidence\nautospec validate\n' > "$TMP_REPO/.autospec/reports/final-platform-evidence.md"
   printf 'handoff\n' > "$TMP_REPO/.autospec/handoff/codex-final-handoff.md"
   printf 'release checklist\n' > "$TMP_REPO/docs/release-checklist.md"
   printf 'public launch checklist\n' > "$TMP_REPO/docs/public-launch-checklist.md"
@@ -140,7 +140,7 @@ EOF
   "head_sha": "older-sha",
   "evidence_status": "historical_stale_not_current_launch_evidence",
   "superseded_by": [
-    "bash scripts/validate.sh --fast",
+    "autospec validate --fast",
     "bash scripts/validate-public-launch-readiness.sh"
   ]
 }

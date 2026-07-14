@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # tests/unit/test_monitor_batch_exit.bats — verify check_monitor_batch_exit()
-# in scripts/validate.sh detects missing/present batch self-termination logic.
+# in autospec validate detects missing/present batch self-termination logic.
 #
 # Five cases per spec docs/specs/2026-05-07-monitor-session-reset-design.md:
 #   1. SKILL.md with all required batch-exit tokens passes
@@ -11,7 +11,7 @@
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    VALIDATE="$REPO_ROOT/scripts/validate.sh"
+    VALIDATE="$REPO_ROOT/autospec validate"
     SCRATCH="$(mktemp -d)"
     export SCRATCH REPO_ROOT VALIDATE
 

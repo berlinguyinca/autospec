@@ -62,13 +62,13 @@ MD
 {"version":1,"processed_issue_id":"001-fix-report-formatting","classification":"$classification","code_change_eligible":true,"classification_reasons":["fixture"]}
 JSON
   cat > "$repo/.autospec/reports/worker-validation-plan.json" <<'JSON'
-{"version":1,"focused_validation":["bats tests/unit/test_example.bats"],"full_validation":["bash scripts/validate.sh"],"skipped_validation":[],"validation_failures":[]}
+{"version":1,"focused_validation":["bats tests/unit/test_example.bats"],"full_validation":["autospec validate"],"skipped_validation":[],"validation_failures":[]}
 JSON
   if [ "$validation_status" = "missing" ]; then
     rm -f "$repo/.autospec/reports/worker-validation.json"
   else
     cat > "$repo/.autospec/reports/worker-validation.json" <<JSON
-{"version":1,"focused":[{"command":"bats tests/unit/test_example.bats","exit_code":0}],"full":[{"command":"bash scripts/validate.sh","exit_code":0}],"skipped":[],"status":"$validation_status"}
+{"version":1,"focused":[{"command":"bats tests/unit/test_example.bats","exit_code":0}],"full":[{"command":"autospec validate","exit_code":0}],"skipped":[],"status":"$validation_status"}
 JSON
   fi
   cat > "$repo/.autospec/reports/worker-diff-review.json" <<JSON

@@ -123,7 +123,7 @@ PASS:
 
 - [ ] `bash scripts/lint-issue.sh tests/fixtures/issue-quality/good.md` exits 0.
 - [ ] `grep -c '^- \[ \]' tests/fixtures/issue-quality/bad-ac.md` returns >= 3.
-- [ ] `scripts/validate.sh` exits 0.
+- [ ] `autospec validate` exits 0.
 ```
 
 FAIL — subjective:
@@ -325,7 +325,7 @@ Per AGENTS.md (validation in lieu of code tests; real services; no mocks).
 - `skills/autospec-define/SKILL.md` lock-step (same two greps).
 - `skills/autospec-classify/SKILL.md` audit step mentions both.
 
-### 7.3 Validator extension (`scripts/validate.sh`)
+### 7.3 Validator extension (`autospec validate`)
 
 Add `check_lint_issue_helpers` (mirroring `check_self_update`):
 - `bash -n scripts/lint-issue.sh` passes.
@@ -356,7 +356,7 @@ EPIC umbrella: **Add issue-quality gate to autospec workflow**.
 | 2 | Golden fixtures: `tests/fixtures/issue-quality/{good,bad-goal,bad-ac}.md` (3 files) | 3 | 1 |
 | 3 | Golden fixtures: `bad-smoke.md` + `bad-multiple.md` + `bad-ac-too-long.md` (3 files) | 3 | 1 |
 | 4 | Bats unit tests `tests/unit/test_lint_issue.bats` | 1 | 2, 3 |
-| 5 | Extend `scripts/validate.sh` with `check_lint_issue_helpers` | 1 | 1 |
+| 5 | Extend `autospec validate` with `check_lint_issue_helpers` | 1 | 1 |
 | 6 | Wire **adaptive** pre-filing lint loop (MAX_LINT_RETRIES=5 + directive mapping table) into `autospec` Phase 3 trio | 3 (trio) | 1 |
 | 7 | Wire adaptive pre-filing lint loop into `autospec-define` Phase 3 trio (lock-step copy of #6) | 3 (trio) | 6 |
 | 8 | Wire post-filing audit into `autospec` Phase 3.5 trio | 3 (trio) | 1 |

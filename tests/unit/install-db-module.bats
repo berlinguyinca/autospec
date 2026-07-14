@@ -135,11 +135,11 @@ write_db_prompt_runner() {
     [[ "$output" == *"autospec-db installer failed; continuing"* ]]
 }
 
-@test "install-db-module: prompt text and validate hook are wired" {
+@test "install-db-module: prompt text and direct validation owner are wired" {
     grep -qF 'Install the optional database telemetry module (autospec-db)? [y/N]' "$INSTALL_SH"
     grep -q 'maybe_prompt_db_module' "$INSTALL_SH"
-    grep -q 'check_db_module_install' "$REPO_ROOT/scripts/validate.sh"
-    grep -q 'tests/unit/install-db-module.bats' "$REPO_ROOT/scripts/validate.sh"
+    grep -q '"check_db_module_install"' "$REPO_ROOT/crates/autospec-core/src/validation/catalog.rs"
+    grep -q 'tests/unit/install-db-module.bats' "$REPO_ROOT/crates/autospec-core/src/validation/external.rs"
 }
 
 @test "install-db-module: yaml db_module=never yields no fetch and no question" {

@@ -249,7 +249,7 @@ Edit one skill trio and regenerate its goldens in one commit.
 
 ## Acceptance criteria
 
-- [ ] `bash scripts/validate.sh` exits 0.
+- [ ] `autospec validate` exits 0.
 
 ## Verification
 

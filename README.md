@@ -172,7 +172,7 @@ Or install from a checkout when developing AutoSpec itself:
 ```bash
 git clone https://github.com/berlinguyinca/autospec.git
 cd autospec
-bash scripts/validate.sh --fast
+autospec validate --fast
 bash install.sh --skill all --harness all
 ```
 

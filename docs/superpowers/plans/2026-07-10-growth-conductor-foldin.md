@@ -29,7 +29,7 @@ Modified:
 - `scripts/autonomous-waterfall.sh` — three growth actions + args + capability gate.
 - `scripts/lib/autospec-loop.sh` — three dispatch branches + growth detection + flag threading.
 - `skills/autospec-autonomous/SKILL.md` (+ trio + goldens) — document the growth tiers.
-- `scripts/validate.sh` — extend the conductor/waterfall check for the growth-tier contract.
+- `autospec validate` — extend the conductor/waterfall check for the growth-tier contract.
 - Test files under `tests/` for the waterfall growth cases and loop dispatch.
 
 No new skills, no new conductor scripts.
@@ -459,7 +459,7 @@ git commit -m "feat(conductor): growth dispatch branches + capability detection 
 
 **Files:**
 - Modify: `skills/autospec-autonomous/SKILL.md` (+ trio + goldens)
-- Modify: `scripts/validate.sh`
+- Modify: `autospec validate`
 - Test: the full gate + a growth-disabled regression assertion.
 
 **Interfaces:**
@@ -480,7 +480,7 @@ Confirm goldens changed + lock-step exit 0.
 
 - [ ] **Step 3: Wire validate.sh**
 
-Find the existing conductor/waterfall check in `scripts/validate.sh` (grep for `autonomous-waterfall` / `check_conductor` / `test_conductor`). Add `bash -n` for the edited scripts and register the two new bats suites (`tests/autonomous/test_waterfall_growth.bats`, `tests/autonomous/test_loop_growth_dispatch.bats`, `tests/unit/growth-measure-due.bats`) in `main`'s run list (gate-atomicity). Mirror the exact helper names the file already uses.
+Find the existing conductor/waterfall check in `autospec validate` (grep for `autonomous-waterfall` / `check_conductor` / `test_conductor`). Add `bash -n` for the edited scripts and register the two new bats suites (`tests/autonomous/test_waterfall_growth.bats`, `tests/autonomous/test_loop_growth_dispatch.bats`, `tests/unit/growth-measure-due.bats`) in `main`'s run list (gate-atomicity). Mirror the exact helper names the file already uses.
 
 - [ ] **Step 4: Regression assertion (growth-disabled = unchanged)**
 
@@ -497,7 +497,7 @@ Confirm the Task-4 regression test (`growth disabled: never emits a growth actio
 
 Run:
 ```bash
-scripts/validate.sh            # expect: validate: OK — all validation checks passed.
+autospec validate            # expect: validate: OK — all validation checks passed.
 TH="$(mktemp -d)"; HOME="$TH" bash install.sh --hook-mode claude >/dev/null 2>&1 && echo root-ok; rm -rf "$TH"
 ```
 Expected: `validate: OK …` and `root-ok` (no new skill pair; existing pairs unaffected).
@@ -505,7 +505,7 @@ Expected: `validate: OK …` and `root-ok` (no new skill pair; existing pairs un
 - [ ] **Step 6: Commit**
 
 ```bash
-git add skills/autospec-autonomous/SKILL.md skills/autospec-autonomous/codex/prompt.md skills/autospec-autonomous/opencode/agent.md tests/fixtures/skill-goldens/autospec-autonomous.* scripts/validate.sh
+git add skills/autospec-autonomous/SKILL.md skills/autospec-autonomous/codex/prompt.md skills/autospec-autonomous/opencode/agent.md tests/fixtures/skill-goldens/autospec-autonomous.* autospec validate
 git commit -m "docs(conductor): document growth tiers + validate wiring + regression guard"
 ```
 

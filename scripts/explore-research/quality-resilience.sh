@@ -4,7 +4,7 @@
 # Four QA lenses:
 #   (a) test files vs their SUT — flags self-consistent fixtures built with the
 #       SUT's own derivation expression and assertion-free tests;
-#   (b) each claimed invariant in validate.sh/SKILL prose vs whether a test AND
+#   (b) each direct Rust validation check vs whether a test AND
 #       a guard exist;
 #   (c) kill-mid-run / non-idempotent / shared-lock / partial-state hazards;
 #   (d) LLM steps that should be deterministic + disproportionate-token phases.
@@ -39,12 +39,12 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
         | head -n 200 > "$test_tmp" || true
 fi
 
-# Collect validate.sh claim lines.
+# Collect direct validation check ids.
 validate_tmp="$(mktemp -t qr-validate.XXXXXX)"
 trap 'rm -f "$test_tmp" "$validate_tmp"' EXIT
 
-if [ -f "scripts/validate.sh" ]; then
-    grep -n 'check_\|assert\|must\|require\|ensure' scripts/validate.sh 2>/dev/null \
+if [ -f "crates/autospec-core/src/validation/catalog.rs" ]; then
+    grep -n -E '"check_[a-z0-9_]+"' crates/autospec-core/src/validation/catalog.rs 2>/dev/null \
         | head -n 100 > "$validate_tmp" || true
 fi
 
@@ -180,39 +180,43 @@ else:
             gap_check={"kind": "present", "needle": "@test", "haystack": tf},
         )
 
-# ── Lens (b): validate.sh invariants without matching test ─────────────────
+# ── Lens (b): direct validation checks without matching test ───────────────
 try:
     with open(validate_path, "r", encoding="utf-8", errors="ignore") as fh:
         validate_lines = fh.readlines()
 except FileNotFoundError:
     validate_lines = []
 
-check_fn_pat = re.compile(r'^(?:\d+:)?\s*(check_\w+)\s*\(\s*\)')
+check_id_pat = re.compile(r'"(check_\w+)"')
+seen_check_ids = set()
 for i, line in enumerate(validate_lines, start=1):
-    m = check_fn_pat.match(line)
+    m = check_id_pat.search(line)
     if not m:
         continue
-    fn_name = m.group(1)
-    # Heuristic: look for a bats @test that references this function name.
+    check_id = m.group(1)
+    if check_id in seen_check_ids:
+        continue
+    seen_check_ids.add(check_id)
+    # Heuristic: look for a bats @test that references this direct check id.
     found_test = False
     for tf in test_files:
         if not os.path.isfile(tf):
             continue
         try:
             tcontent = open(tf, "r", encoding="utf-8", errors="ignore").read()
-            if fn_name in tcontent:
+            if check_id in tcontent:
                 found_test = True
                 break
         except Exception:
             continue
     if not found_test:
         add(
-            f"test: add bats coverage for validate.sh:{fn_name}",
-            f"validate.sh defines {fn_name} (line {i}) but no bats test references it — the invariant is untested.",
+            f"test: add coverage for direct validation check {check_id}",
+            f"validation/catalog.rs declares {check_id} (line {i}) but no bats test references it — the invariant is untested.",
             complexity="small",
             confidence=0.7,
             severity="correctness",
-            named_consumer="/autospec-run validate gate; /autospec-sweep",
+            named_consumer="/autospec-run direct validation; /autospec-sweep",
         )
 
 # ── Lens (c): kill-mid-run / partial-state / shared-lock hazards ───────────

@@ -52,7 +52,7 @@ read_changed_files() {
 is_immutable_verifier_path() {
     case "$1" in
         tests/*|*/tests/*|test/*|*/test/*) return 0 ;;
-        scripts/validate.sh|scripts/lint-issue.sh|scripts/lint-implementation.sh|scripts/verify-*|tests/verify-*|tests/fixtures/*) return 0 ;;
+        crates/autospec-core/src/validation/*|scripts/lint-issue.sh|scripts/lint-implementation.sh|scripts/verify-*|tests/verify-*|tests/fixtures/*) return 0 ;;
         skills/*/tests/*|schemas/eval-*|eval/*|evals/*|benchmarks/*) return 0 ;;
         *) return 1 ;;
     esac

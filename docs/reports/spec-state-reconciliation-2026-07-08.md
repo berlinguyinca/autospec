@@ -16,7 +16,7 @@ validation tests.
 
 - `bash scripts/validate-public-launch-readiness.sh`: passed with
   `AUTOSPEC_PUBLIC_LAUNCH_READY=true`.
-- `bash scripts/validate.sh`: passed with
+- `autospec validate`: passed with
   `validate: OK -- all validation checks passed.`
 - `bash scripts/skill-token-report.sh --update-baseline`: refreshed the stale
   skill token baseline after validation emitted a warn-only staleness note.

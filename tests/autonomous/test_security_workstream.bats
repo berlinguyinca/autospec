@@ -30,6 +30,106 @@ RS
     grep -q '"severity_rank"' "$WORK/ranked.jsonl"
 }
 
+@test "rank: detects Rust unsafe syntax without flagging prose or command payloads" {
+    : > "$WORK/raw.jsonl"
+    mkdir -p "$WORK/src"
+    printf '%s\n' 'const NOTE: &str = "unsafe operations require review";' > "$WORK/src/prose.rs"
+    printf '%s\n' 'let command = "echo unsafe";' > "$WORK/src/command.rs"
+    printf '%s\n' 'let payload = "unsafe {";' > "$WORK/src/string-payload.rs"
+    printf '%s\n' 'const RAW: &str = r#"unsafe {"#;' > "$WORK/src/raw-string-payload.rs"
+    printf '%s\n' '// unsafe fn documentation only' > "$WORK/src/comment.rs"
+    printf '%s\n' 'fn read(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' > "$WORK/src/unsafe.rs"
+    printf '%s\n' 'unsafe' '{' '    external_call();' '}' > "$WORK/src/multiline.rs"
+    printf '%s\n' 'unsafe /* FFI boundary */ {' '    external_call();' '}' > "$WORK/src/comment-separated.rs"
+    printf '%s\n' '#[unsafe(no_mangle)]' 'pub extern "C" fn exported() {}' > "$WORK/src/unsafe-attribute.rs"
+    printf '%s\n' '// autospec:unsafe-reviewed: security review #2004; invariant: the FFI boundary accepts only a fixed signal number.' 'unsafe { external_call(); }' > "$WORK/src/reviewed.rs"
+    printf '%s\n' '// autospec:unsafe-reviewed: security review #2004' 'unsafe { external_call(); }' > "$WORK/src/missing-invariant.rs"
+    printf '%s\n' '// autospec:unsafe-reviewed: security review #2004; invariant: arbitrary code is safe.' 'unsafe { reviewed(); } unsafe { unreviewed(); }' > "$WORK/src/multiple.rs"
+    mkdir -p "$WORK/crates/autospec-cli/src/commands/runtime"
+    cat > "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
+#[cfg(unix)]
+extern "C" {
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}
+
+fn install_signal_handlers() {
+    RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
+    unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
+    }
+}
+RS
+
+    run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/ranked.jsonl"
+    [ "$status" -eq 0 ]
+    unsafe_count="$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/ranked.jsonl")"
+    [ "$unsafe_count" -eq 8 ]
+    jq -e 'select(.dimension == "unsafe" and .file == "src/unsafe.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/multiline.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/comment-separated.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/unsafe-attribute.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/missing-invariant.rs" and .line == 2)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/reviewed.rs" and .line == 2)' "$WORK/ranked.jsonl" >/dev/null
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "src/multiple.rs")] | length' "$WORK/ranked.jsonl")" -eq 2 ]
+    ! jq -e 'select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")' "$WORK/ranked.jsonl" >/dev/null
+
+    cat >> "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
+
+fn duplicated_signal_registration() {
+    unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
+    }
+}
+RS
+    run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/duplicated.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")] | length' "$WORK/duplicated.jsonl")" -eq 2 ]
+
+    cat > "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
+const DECLARATION: &str = r#"extern "C" {
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}"#;
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "abort"]
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}
+
+fn install_signal_handlers() {
+    RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
+    unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
+    }
+}
+RS
+    run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/spoofed.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")] | length' "$WORK/spoofed.jsonl")" -eq 1 ]
+
+    cat > "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
+#[link(name = "m")]
+#[cfg(unix)]
+extern "C" {
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}
+
+fn install_signal_handlers() {
+    RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
+    unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
+    }
+}
+RS
+    run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/attributed.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")] | length' "$WORK/attributed.jsonl")" -eq 1 ]
+}
+
 @test "issue filing: high-severity findings produce lint-clean remediation issues" {
     cat > "$WORK/ranked.jsonl" <<'JSONL'
 {"gap_id":"G1","dimension":"secrets","severity":"must-fix","priority":"P0","severity_rank":100,"exploitability":5,"exposure":5,"file":"app/config.env","line":3,"title":"Hardcoded API token","body":"Remove the token and rotate the credential.","dedupe_key":"sec-secret","remediation":"Remove the committed token, rotate it, and add a regression scan."}
@@ -85,8 +185,10 @@ JSON
     [[ "$output" == *"security verifier gate passed"* ]]
 }
 
-@test "validate.sh already gates the autonomous security workstream suite" {
-    grep -q 'tests/autonomous/\*.bats' "$REPO_ROOT/scripts/validate.sh"
+@test "direct Rust validation gates the autonomous security workstream suite" {
+    catalog="$REPO_ROOT/crates/autospec-core/src/validation/catalog.rs"
+    grep -q '"check_autonomous_phase2_suite"' "$catalog"
+    grep -q 'BatsDirectory("tests/autonomous")' "$catalog"
     [ -f "$REPO_ROOT/tests/autonomous/test_security_workstream.bats" ]
     grep -q 'schedule:' "$REPO_ROOT/.github/workflows/security-workstream.yml"
     grep -q 'pull_request:' "$REPO_ROOT/.github/workflows/security-workstream.yml"

@@ -15,4 +15,4 @@ When editing prose inside SKILL.md files, validate.sh enforces named-content che
 
 **Why:** These checks catch partial migrations and ensure the installed skill files work as documented.
 
-**How to apply:** Before finalizing any edit to skill prose that renames a section heading or removes a specific phrase, run `bash scripts/validate.sh` first. If it fails, either keep the old phrase in the new text OR update the corresponding check in validate.sh. Prefer updating validate.sh to accept both old and new formats (using `grep -qE "old|new"`) to avoid breaking CI during transitions.
+**How to apply:** Before finalizing any edit to skill prose that renames a section heading or removes a specific phrase, run `autospec validate` first. If it fails, either keep the old phrase in the new text OR update the corresponding check in validate.sh. Prefer updating validate.sh to accept both old and new formats (using `grep -qE "old|new"`) to avoid breaking CI during transitions.

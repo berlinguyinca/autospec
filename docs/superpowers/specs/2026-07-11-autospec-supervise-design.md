@@ -341,7 +341,7 @@ Fix `<specific autonomous behavior>` so `autospec-autonomous` makes forward prog
 
 - [ ] `tests/autonomous/<specific-test>.bats` reproduces this failure signature.
 - [ ] `scripts/<affected-helper>.sh` or `skills/autospec-autonomous/**` handles the failure deterministically.
-- [ ] `bash scripts/validate.sh --changed` passes.
+- [ ] `autospec validate --changed` passes.
 - [ ] Running `autospec-autonomous status --json` after restart shows progress or intentional park.
 - [ ] The supervisor signature `<sha256>` does not reappear after one monitor interval.
 
@@ -451,7 +451,7 @@ The wrappers stay thin and dispatch to scripts.
 - `tests/autonomous/test_supervise_restart_boundary.bats`
 - `tests/autonomous/test_scope_review.bats`
 
-Validation must be wired into `scripts/validate.sh --changed`.
+Validation must be wired into `autospec validate --changed`.
 
 ## Acceptance Criteria
 
@@ -473,7 +473,7 @@ Validation must be wired into `scripts/validate.sh --changed`.
 - A landed supervisor-filed fix triggers autospec update and waits for
   `claimed=0` before restart.
 - Normal monitor polling uses no LLM calls.
-- `bash scripts/validate.sh --changed` passes.
+- `autospec validate --changed` passes.
 
 ## Approved Prompt
 

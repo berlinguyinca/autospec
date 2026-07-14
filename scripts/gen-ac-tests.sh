@@ -135,7 +135,7 @@ make_assertion() {
   elif printf '%s' "$lower" | grep -q 'npm test'; then
     printf '  run npm test\n  [ "$status" -eq 0 ]'
   elif printf '%s' "$lower" | grep -q 'validate\.sh'; then
-    printf '  run bash scripts/validate.sh\n  [ "$status" -eq 0 ]'
+    printf '  run autospec validate\n  [ "$status" -eq 0 ]'
   elif printf '%s' "$lower" | grep -q 'pytest'; then
     printf '  run pytest\n  [ "$status" -eq 0 ]'
   else

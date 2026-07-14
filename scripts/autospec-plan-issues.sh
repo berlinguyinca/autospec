@@ -157,8 +157,8 @@ def tests_required(category):
 
 def validation_for(category):
     if category == "web":
-        return "bash scripts/validate.sh && bats tests/unit tests/smoke"
-    return "bash scripts/validate.sh"
+        return "autospec validate && bats tests/unit tests/smoke"
+    return "autospec validate"
 
 
 def issue_from_gap(number, gap, constitutional=None):

@@ -3,10 +3,23 @@
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
-@test "install.sh exposes agent-env and autospec-env command wrappers" {
+@test "install.sh builds and atomically installs the Rust runtime broker" {
+  grep -q '^install_autospec_runtime_binary()' "$REPO_ROOT/install.sh"
+  grep -qF 'cargo build --release -p autospec-cli' "$REPO_ROOT/install.sh"
+  grep -qF 'runtime_source="$REPO_ROOT/target/release/autospec"' "$REPO_ROOT/install.sh"
+  grep -qF 'runtime_target="$HOME/.autospec/bin/autospec"' "$REPO_ROOT/install.sh"
+  grep -qF 'runtime_temporary="$(mktemp "$autospec_bin_dir/.autospec.XXXXXX")"' "$REPO_ROOT/install.sh"
+  grep -qF 'mv "$runtime_temporary" "$runtime_target"' "$REPO_ROOT/install.sh"
+  grep -qF '[dry-run] install_autospec_runtime_binary: cargo build --release -p autospec-cli (from $REPO_ROOT)' "$REPO_ROOT/install.sh"
+  grep -qF '[dry-run] install_autospec_runtime_binary: install $REPO_ROOT/target/release/autospec -> $HOME/.autospec/bin/autospec' "$REPO_ROOT/install.sh"
+  grep -q '^install_autospec_runtime_binary$' "$REPO_ROOT/install.sh"
+}
+
+@test "install.sh exposes Rust-backed agent-env and autospec-env command wrappers" {
   grep -q 'install_agent_env_commands' "$REPO_ROOT/install.sh"
   grep -q 'for command in agent-env autospec-env' "$REPO_ROOT/install.sh"
-  grep -q 'agent-env.sh" "$@"' "$REPO_ROOT/install.sh"
+  grep -qF 'exec "${AUTOSPEC_BIN:-$HOME/.autospec/bin/autospec}" runtime env "$@"' "$REPO_ROOT/install.sh"
+  ! grep -q 'agent-env.sh' "$REPO_ROOT/install.sh"
   grep -q '^install_agent_env_commands$' "$REPO_ROOT/install.sh"
 }
 

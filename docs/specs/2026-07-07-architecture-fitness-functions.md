@@ -23,7 +23,7 @@ Sources:
 - `--emit-issues <dir>` writes an `auto-implement` issue body containing the
   breached metric, threshold, and exact locations. `--file-issues` additionally
   attempts `gh issue create` from that generated body.
-- `scripts/validate.sh` runs the gate and the Bats contract suite, so the default
+- `autospec validate` runs the gate and the Bats contract suite, so the default
   merge validation blocks regressions.
 - `.github/workflows/architecture-fitness.yml` runs the same gate on pull requests
   and pushes to `main`.

@@ -777,6 +777,6 @@ makes promotion contingent on a sandbox-HEAD QA verdict.
 ### Primary smoke test
 
 ```
-bash scripts/validate.sh
+autospec validate
 bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-sandbox.sh --slug smoke-test
 ```

@@ -52,7 +52,7 @@ Build deterministic dependency graph validation and execution ordering for specs
 
 ```bash
 cargo test --all dependency_graph
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 ## Expected Outputs

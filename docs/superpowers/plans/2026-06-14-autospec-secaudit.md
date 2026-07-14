@@ -26,7 +26,7 @@
 | `skills/autospec-secaudit/{install.sh,uninstall.sh,README.md}` (create) | Mirror sibling skill scaffolding. |
 | `skills/autospec-run/prompts/phase4-implementer.md` (modify) | Wire the gate + remediation loop into Phase 4 before merge. |
 | `skills/autospec-run/prompts/implementer-contract.md` (modify) | Extend the `SECURITY` directive row. |
-| `scripts/validate.sh` (modify) | Add named-content checks for the new trio. |
+| `autospec validate` (modify) | Add named-content checks for the new trio. |
 
 **Lock-step note:** `validate.sh check_lockstep()` byte-diffs `SKILL.md` body against `codex/prompt.md` and against `opencode/agent.md` body. Every trio file must also carry a `## Stop mode` heading (enforced by validate.sh). The `codex/prompt.md` file is the SKILL.md body with a **leading blank line** — preserve it.
 
@@ -874,7 +874,7 @@ awk 'f{print} /<!-- BODY START -->/{f=1}' skills/autospec-secaudit/SKILL.md > sk
 Run: `sed -n '1,3p' skills/autospec-secaudit/codex/prompt.md`
 Expected: line 1 blank, line 2 `## Self-update mode`.
 
-> If `strip_body` in `scripts/validate.sh` differs (e.g. it also strips the `<!-- BODY START -->` differently), match its exact transform. Inspect with: `grep -n 'strip_body' scripts/validate.sh` and read the function.
+> If `strip_body` in `autospec validate` differs (e.g. it also strips the `<!-- BODY START -->` differently), match its exact transform. Inspect with: `grep -n 'strip_body' autospec validate` and read the function.
 
 - [ ] **Step 3: Commit**
 
@@ -918,7 +918,7 @@ chmod +x skills/autospec-secaudit/install.sh skills/autospec-secaudit/uninstall.
 
 - [ ] **Step 4: Run lock-step validation**
 
-Run: `bash scripts/validate.sh 2>&1 | grep -iE 'secaudit|lockstep|FAIL|PASS' | head`
+Run: `autospec validate 2>&1 | grep -iE 'secaudit|lockstep|FAIL|PASS' | head`
 Expected: no `secaudit ... diverges` failures. Fix body/marker mismatches until the trio passes lock-step.
 
 - [ ] **Step 5: Commit**
@@ -933,11 +933,11 @@ git commit -m "feat(secaudit): add opencode agent + install/uninstall/README sca
 ## Task 10: validate.sh named-content checks for the new trio
 
 **Files:**
-- Modify: `scripts/validate.sh`
+- Modify: `autospec validate`
 
 - [ ] **Step 1: Read the existing named-content check pattern**
 
-Run: `sed -n '118,160p' scripts/validate.sh`
+Run: `sed -n '118,160p' autospec validate`
 Expected: shows the `## Stop mode` / `## Keyword auto-routing` invariant loops (the pattern to copy).
 
 - [ ] **Step 2: Add a secaudit invariant block**
@@ -959,13 +959,13 @@ fi
 
 - [ ] **Step 3: Run validate.sh**
 
-Run: `bash scripts/validate.sh`
+Run: `autospec validate`
 Expected: PASS (exit 0); the new trio passes lock-step + the new named check.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add scripts/validate.sh
+git add autospec validate
 git commit -m "test(secaudit): validate.sh named-content check for enforcement-defaults section"
 ```
 
@@ -1073,7 +1073,7 @@ Expected: all PASS.
 
 - [ ] **Step 4: Run validate.sh end-to-end**
 
-Run: `bash scripts/validate.sh`
+Run: `autospec validate`
 Expected: exit 0.
 
 - [ ] **Step 5: Commit**

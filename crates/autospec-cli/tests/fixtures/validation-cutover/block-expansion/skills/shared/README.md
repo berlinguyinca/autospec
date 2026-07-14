@@ -1,0 +1,1 @@
+Non-trio directory fixture.

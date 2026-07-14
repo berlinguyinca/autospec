@@ -434,11 +434,11 @@ for proposal in data.get("proposals", []) or []:
         "## Acceptance criteria",
         f"- [ ] The PR references `{title[:55]}` in its closeout artifacts.",
         "- [ ] The implementation cites `Adversarial verify` evidence before editing.",
-        "- [ ] `bash scripts/validate.sh` passes after the change.",
+        "- [ ] `autospec validate` passes after the change.",
         "",
         "### Primary smoke test (inner loop)",
         "```bash",
-        "bash scripts/validate.sh",
+        "autospec validate",
         "```",
     ])
     candidates.append({

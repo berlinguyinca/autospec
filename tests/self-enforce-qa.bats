@@ -5,7 +5,7 @@ SCRIPT="${BATS_TEST_DIRNAME}/../scripts/self-enforce-qa.sh"
 FIXTURES_DIR="${BATS_TEST_DIRNAME}/fixtures/self-enforce"
 REAL_REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
 
-# self-enforce-qa.sh's QA chain runs the REAL ~13-minute `scripts/validate.sh`
+# self-enforce-qa.sh's QA chain runs the REAL ~13-minute `autospec validate`
 # as step 2 (self-enforce-qa.sh:131). Every test that invokes the chain against
 # a diff therefore took ~13min EACH — running unbounded under a directory sweep
 # (`bats -r`, CI) it looks like a hang and freezes the runner (epic #1280 bats
@@ -19,8 +19,8 @@ _fast_repo_root() {
   d="$(mktemp -d -t self-enforce-root-XXXXXX)"
   mkdir -p "$d/scripts"
   cp "$REAL_REPO_ROOT/scripts/lint-implementation.sh" "$d/scripts/lint-implementation.sh"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/scripts/validate.sh"
-  chmod +x "$d/scripts/validate.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/autospec validate"
+  chmod +x "$d/autospec validate"
   printf '%s' "$d"
 }
 
@@ -153,7 +153,7 @@ EOF
 
 # The autospec-self-enforce GitHub Actions workflow was deliberately removed
 # in #481 (commit 21d4f52, "chore: disable GitHub Actions / CI") when CI was
-# disabled repo-wide; local pre-commit hooks + on-demand scripts/validate.sh
+# disabled repo-wide; local pre-commit hooks + on-demand autospec validate
 # now carry self-enforcement. This asserts the workflow stays absent so the
 # stale existence/trigger/path-filter assertions can never silently re-appear.
 @test "autospec-self-enforce workflow is intentionally absent (CI disabled in #481)" {

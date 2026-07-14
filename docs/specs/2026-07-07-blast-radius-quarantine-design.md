@@ -31,5 +31,5 @@ because incorrect changes can move capital or bypass risk limits.
 
 `tests/autonomous/test_blast_radius_quarantine.bats` covers low-risk
 classification, configured trading-risk matches, premerge quarantine provenance,
-and same-cycle runnable-candidate selection. `scripts/validate.sh` gates this
+and same-cycle runnable-candidate selection. `autospec validate` gates this
 suite and static registry/option checks under `check_blast_radius_quarantine_contract`.

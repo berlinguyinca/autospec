@@ -37,19 +37,19 @@ fn readiness_report() -> String {
         })
         .unwrap_or(false);
     let autospec_config = std::path::Path::new(".autospec/autospec.yml").exists();
-    let validate_script = std::path::Path::new("scripts/validate.sh").exists();
+    let direct_validation = true;
 
     let define = git_repo && github_remote;
-    let run = define && autospec_config && validate_script;
+    let run = define && autospec_config && direct_validation;
     let autonomous = run && std::path::Path::new("scripts/lib/autospec-loop.sh").exists();
 
     format!(
-        "{{\"command\":\"doctor\",\"mode\":\"readiness\",\"status\":\"{}\",\"checks\":{{\"git_repo\":{},\"github_remote\":{},\"autospec_config\":{},\"validate_script\":{}}},\"workflow_recommendations\":{{\"define\":\"{}\",\"run\":\"{}\",\"autonomous\":\"{}\"}}}}",
+        "{{\"command\":\"doctor\",\"mode\":\"readiness\",\"status\":\"{}\",\"checks\":{{\"git_repo\":{},\"github_remote\":{},\"autospec_config\":{},\"direct_validation\":{}}},\"workflow_recommendations\":{{\"define\":\"{}\",\"run\":\"{}\",\"autonomous\":\"{}\"}}}}",
         if define { "ok" } else { "blocked" },
         git_repo,
         github_remote,
         autospec_config,
-        validate_script,
+        direct_validation,
         if define { "safe" } else { "blocked:no-github-repo" },
         if run { "safe" } else { "blocked:missing-config-or-validation" },
         if autonomous { "safe" } else { "blocked:missing-autonomous-loop" },

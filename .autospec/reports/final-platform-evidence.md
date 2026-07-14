@@ -35,7 +35,7 @@ bats tests/launch/test_launch_readiness.bats
 bats tests/launch/test_v62_rust_workspace.bats
 bash scripts/demo-recording.sh
 bash scripts/validate-public-launch-readiness.sh
-bash scripts/validate.sh
+autospec validate
 ```
 
 ## Validation Result

@@ -12,7 +12,7 @@ The V61 launch-readiness pass treats V60 as feature-complete and focuses on exte
 
 Planned validation evidence:
 
-- `bash scripts/validate.sh`
+- `autospec validate`
 - `bats tests/launch/test_launch_readiness.bats`
 - `bash scripts/validate-launch-readiness.sh`
 - Release/QA gate probes where local prerequisites are available
@@ -40,4 +40,3 @@ Planned validation evidence:
 - Demo materials are safe to run without external side effects.
 - Launch copy exists for GitHub, Reddit, Hacker News, LinkedIn, and X.
 - A deterministic launch-readiness script verifies required artifacts.
-

@@ -4,22 +4,22 @@
 
 **Goal:** After an autospec run drains its `auto-implement` queue, automatically broad-review the shipped work, filter false positives, file every surviving gap as an `auto-implement` issue, and re-run the implementation loop to close them — bounded by a configurable round cap.
 
-**Architecture:** Extend `/autospec-review` with a `--remediation` + `--emit-gaps <path>` mode (Approach A from the spec) that emits a machine-readable gap JSON. A new deterministic `gap-remediation-loop.sh` reads that JSON, dedupes against open issues + `docs:drift` self-heal, and files survivors. `/autospec-run` gains a bounded **Phase 5.5** (replacing the report-only post-batch audit) that drives review → file → monitor-drain → re-review until convergence or `AUTOSPEC_GAP_MAX_ROUNDS` (default 2). All SKILL.md edits propagate across the lock-step trio (SKILL.md + codex/prompt.md + opencode/agent.md) for both the `autospec-run` and `autospec-review` skills, with `scripts/validate.sh` gaining named-section checks.
+**Architecture:** Extend `/autospec-review` with a `--remediation` + `--emit-gaps <path>` mode (Approach A from the spec) that emits a machine-readable gap JSON. A new deterministic `gap-remediation-loop.sh` reads that JSON, dedupes against open issues + `docs:drift` self-heal, and files survivors. `/autospec-run` gains a bounded **Phase 5.5** (replacing the report-only post-batch audit) that drives review → file → monitor-drain → re-review until convergence or `AUTOSPEC_GAP_MAX_ROUNDS` (default 2). All SKILL.md edits propagate across the lock-step trio (SKILL.md + codex/prompt.md + opencode/agent.md) for both the `autospec-run` and `autospec-review` skills, with `autospec validate` gaining named-section checks.
 
-**Tech Stack:** Bash 3.2+ (shared scripts), `gh` CLI (GitHub), `jq` (JSON), `bats` 1.13 (unit tests), markdown SKILL/prompt/agent trio files, `scripts/validate.sh` lock-step harness.
+**Tech Stack:** Bash 3.2+ (shared scripts), `gh` CLI (GitHub), `jq` (JSON), `bats` 1.13 (unit tests), markdown SKILL/prompt/agent trio files, `autospec validate` lock-step harness.
 
 ---
 
 ## Lock-step trio rule (READ BEFORE ANY SKILL.md EDIT)
 
-`scripts/validate.sh` `check_lockstep()` (validate.sh:55-67) byte-diffs the **body** of every `skills/<skill>/SKILL.md` against its `codex/prompt.md` and `opencode/agent.md` siblings. The "body" is computed by `strip_body()` = `awk '/^---$/{c++; next} c>=2'` (everything AFTER the second `---` line).
+`autospec validate` `check_lockstep()` (validate.sh:55-67) byte-diffs the **body** of every `skills/<skill>/SKILL.md` against its `codex/prompt.md` and `opencode/agent.md` siblings. The "body" is computed by `strip_body()` = `awk '/^---$/{c++; next} c>=2'` (everything AFTER the second `---` line).
 
 Therefore **every prose/markdown edit to a SKILL.md body MUST be applied byte-identically to all three trio files.** The two skills touched here have DIFFERENT head conventions — verify the exact bytes already present before editing:
 
 - **`skills/autospec-run/`**: `SKILL.md` opens with YAML frontmatter (`---\nname: ...\n---`). `codex/prompt.md` opens with ONE leading blank line then `# autospec-run workflow (harness-neutral)` (NO `<!-- BODY START -->` marker for this skill). `opencode/agent.md` opens with `---\ndescription: ...\nmode: primary\n---` then the body.
 - **`skills/autospec-review/`**: `SKILL.md` has YAML frontmatter. `codex/prompt.md` opens with ONE leading blank line then `<!-- BODY START -->` then the body. `opencode/agent.md` opens with `---\ndescription / mode: primary\n---` then `<!-- BODY START -->` then the body.
 
-After editing any trio, the canonical verification is `bash scripts/validate.sh` (it will print `lock-step: <skill>` and fail with a `diff` if bodies diverge). Run it after every trio-touching task.
+After editing any trio, the canonical verification is `autospec validate` (it will print `lock-step: <skill>` and fail with a `diff` if bodies diverge). Run it after every trio-touching task.
 
 ## File Structure
 
@@ -31,7 +31,7 @@ After editing any trio, the canonical verification is `bash scripts/validate.sh`
 - **Create** `skills/autospec-shared/scripts/run-batch-start.sh` — tiny write/read helper for `~/.autospec/.run-batch-start` (UTC ISO run-start timestamp).
 - **Modify** `skills/autospec-run/SKILL.md` + `codex/prompt.md` + `opencode/agent.md` — add BATCH_START capture to the run-start section; replace the `## Post-batch audit` section with `## Phase 5.5 — End-of-run gap remediation`.
 - **Modify** `skills/autospec-review/SKILL.md` + `codex/prompt.md` + `opencode/agent.md` — add `--remediation` + `--emit-gaps` flags, broad-dimension review prose, false-positive filter step, gap-JSON emission contract.
-- **Modify** `scripts/validate.sh` — clone `check_stop_mode_section()` into two new named-section checks; register at the call site.
+- **Modify** `autospec validate` — clone `check_stop_mode_section()` into two new named-section checks; register at the call site.
 
 ---
 
@@ -221,7 +221,7 @@ In `skills/autospec-run/opencode/agent.md`, insert the SAME markdown block immed
 
 - [ ] **Step 7: Run the lock-step validator to verify the trio is in sync**
 
-Run: `bash scripts/validate.sh`
+Run: `autospec validate`
 Expected: prints `validate: lock-step: autospec-run` with no diff, and ends `validate: OK — all validation checks passed.`
 
 - [ ] **Step 8: Commit**
@@ -1038,7 +1038,7 @@ In `skills/autospec-review/opencode/agent.md`: add the same two CLI-flag rows af
 
 - [ ] **Step 8: Run the lock-step validator**
 
-Run: `bash scripts/validate.sh`
+Run: `autospec validate`
 Expected: prints `autospec-review opencode lockstep` / `autospec-review codex lockstep` checks passing (`check_autospec_review_skill_present`), and `autospec-review Tier A directives` passing (`check_autospec_review_tier_a_directives` requires ≥2 `Tier A (spec work)` directives; the review SKILL.md already has 2, and Step 6 adds a third — still ≥2). Ends `validate: OK — all validation checks passed.`
 
 - [ ] **Step 9: Commit**
@@ -1115,7 +1115,7 @@ In `skills/autospec-run/opencode/agent.md`, delete the block from `## Post-batch
 
 - [ ] **Step 4: Run the lock-step validator**
 
-Run: `bash scripts/validate.sh`
+Run: `autospec validate`
 Expected: `validate: lock-step: autospec-run` passes with no diff. Note: this will still pass `check_subagent_model_tier` for autospec-run because the replacement adds no new `**Model tier:**` directive (the per-skill count for autospec-run stays A=2, B=3). Ends `validate: OK — all validation checks passed.`
 
 - [ ] **Step 5: Commit**
@@ -1134,11 +1134,11 @@ git commit -m "feat(run): Phase 5.5 bounded end-of-run gap-remediation loop"
 Clone `check_stop_mode_section()` (validate.sh:123-135) into two new cross-trio section checks — one asserting the autospec-run trio carries `## Phase 5.5 — End-of-run gap remediation`, one asserting the autospec-review trio carries `## Remediation mode`. Register both at the call site near `check_stop_mode_section` (validate.sh:636).
 
 **Files:**
-- Modify: `scripts/validate.sh` (add two functions after `check_stop_mode_section`; add two calls in `main()`)
+- Modify: `autospec validate` (add two functions after `check_stop_mode_section`; add two calls in `main()`)
 
 - [ ] **Step 1: Add the two check functions**
 
-In `scripts/validate.sh`, immediately after the closing `}` of `check_stop_mode_section()` (line 133), insert these two functions:
+In `autospec validate`, immediately after the closing `}` of `check_stop_mode_section()` (line 133), insert these two functions:
 
 ```bash
 # Phase 5.5 gap-remediation section invariant: the autospec-run trio must carry
@@ -1170,7 +1170,7 @@ check_review_remediation_section() {
 
 - [ ] **Step 2: Register the two checks in main()**
 
-In `scripts/validate.sh`, find the call `check_stop_mode_section` inside `main()` (line 636) and add the two new calls immediately after it:
+In `autospec validate`, find the call `check_stop_mode_section` inside `main()` (line 636) and add the two new calls immediately after it:
 
 ```bash
     check_stop_mode_section
@@ -1180,29 +1180,29 @@ In `scripts/validate.sh`, find the call `check_stop_mode_section` inside `main()
 
 - [ ] **Step 3: Run validate to verify the new checks pass against the work from Tasks 4–5**
 
-Run: `bash scripts/validate.sh`
+Run: `autospec validate`
 Expected: prints `validate: gap-remediation section: autospec-run` and `validate: remediation-mode section: autospec-review`, then ends `validate: OK — all validation checks passed.`
 
 - [ ] **Step 4: Negative-check the new guard catches drift (sanity, then revert)**
 
 ```bash
-cp scripts/validate.sh /tmp/validate.sh.bak
+cp autospec validate /tmp/validate.sh.bak
 # Temporarily break the assertion target to prove the guard fires:
 perl -0pi -e 's/## Phase 5.5 — End-of-run gap remediation/## Phase 5.5 — TYPO/' skills/autospec-run/SKILL.md
-bash scripts/validate.sh; echo "exit=$?"
+autospec validate; echo "exit=$?"
 ```
 Expected: FAILS with `autospec-run: SKILL.md missing '## Phase 5.5 — End-of-run gap remediation' section` (and a nonzero exit). Then revert:
 
 ```bash
 perl -0pi -e 's/## Phase 5.5 — TYPO/## Phase 5.5 — End-of-run gap remediation/' skills/autospec-run/SKILL.md
-bash scripts/validate.sh; echo "exit=$?"
+autospec validate; echo "exit=$?"
 ```
 Expected: `validate: OK — all validation checks passed.` and `exit=0`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/validate.sh
+git add autospec validate
 git commit -m "test(validate): named-section checks for Phase 5.5 + remediation mode"
 ```
 
@@ -1216,7 +1216,7 @@ Confirm the whole change set passes the repository validation harness and every 
 
 - [ ] **Step 1: Run the full repository validator**
 
-Run: `bash scripts/validate.sh`
+Run: `autospec validate`
 Expected: a stream of `validate: ...` lines ending with `validate: OK — all validation checks passed.` and exit code 0.
 
 - [ ] **Step 2: Run the new shared-script bats suites together**

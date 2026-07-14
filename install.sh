@@ -251,12 +251,50 @@ install_autonomous_operator_commands() {
     info "install_autonomous_operator_commands: installed autonomous command wrappers in $autospec_bin_dir"
 }
 
+install_autospec_runtime_binary() {
+    runtime_source="$REPO_ROOT/target/release/autospec"
+    runtime_target="$HOME/.autospec/bin/autospec"
+    autospec_bin_dir="$HOME/.autospec/bin"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] install_autospec_runtime_binary: cargo build --release -p autospec-cli (from $REPO_ROOT)"
+        info "[dry-run] install_autospec_runtime_binary: install $REPO_ROOT/target/release/autospec -> $HOME/.autospec/bin/autospec"
+        return 0
+    fi
+
+    info "install_autospec_runtime_binary: building autospec-cli release binary"
+    (
+        cd "$REPO_ROOT"
+        cargo build --release -p autospec-cli
+    )
+    if [ ! -f "$runtime_source" ]; then
+        err "install_autospec_runtime_binary: build did not produce $runtime_source"
+        return 1
+    fi
+
+    mkdir -p "$autospec_bin_dir"
+    runtime_temporary="$(mktemp "$autospec_bin_dir/.autospec.XXXXXX")"
+    if ! cp "$runtime_source" "$runtime_temporary"; then
+        rm -f "$runtime_temporary"
+        return 1
+    fi
+    if ! chmod +x "$runtime_temporary"; then
+        rm -f "$runtime_temporary"
+        return 1
+    fi
+    if ! mv "$runtime_temporary" "$runtime_target"; then
+        rm -f "$runtime_temporary"
+        return 1
+    fi
+    info "install_autospec_runtime_binary: installed $runtime_target"
+}
+
 write_agent_env_wrapper() {
     target="$1"
     {
         printf '%s\n' '#!/usr/bin/env bash'
         printf '%s\n' 'set -eu'
-        printf '%s\n' 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/agent-env.sh" "$@"'
+        printf '%s\n' 'exec "${AUTOSPEC_BIN:-$HOME/.autospec/bin/autospec}" runtime env "$@"'
     } > "$target"
     chmod +x "$target"
 }
@@ -1177,6 +1215,13 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# Hook-only setup owns just the Claude configuration file; it must not trigger
+# the full installer or require an available Rust toolchain.
+if [ "$HOOK_MODE_ARG" = "claude" ]; then
+    install_hook_mode_claude
+    exit 0
+fi
+
 # Validate --skill against the auto-discovered ALL_SKILLS list (#705 follow-up).
 # Previously the validator carried its own hardcoded skill names; the
 # discovery from #705 fixed `ALL_SKILLS=` but the validator still rejected
@@ -1554,6 +1599,7 @@ copy_runtime_skill_scripts
 copy_schemas
 ensure_autospec_bin_path
 install_autonomous_operator_commands
+install_autospec_runtime_binary
 install_agent_env_commands
 install_agent_env_aliases
 install_scanner_shims
@@ -1667,10 +1713,6 @@ if [ "$failures" -gt 0 ]; then
 fi
 if [ "$DISABLE_AUTO_ROLLOVER" -eq 1 ]; then
     remove_rollover_block
-    exit 0
-fi
-if [ "$HOOK_MODE_ARG" = "claude" ]; then
-    install_hook_mode_claude
     exit 0
 fi
 prompt_user_for_auto_rollover

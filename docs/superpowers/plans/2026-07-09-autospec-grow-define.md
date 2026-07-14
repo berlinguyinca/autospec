@@ -389,7 +389,7 @@ git commit -m "feat: /autospec-grow-define trio skill (lens roster + pipeline or
 
 **Files:**
 - Create: `tests/autospec-grow-define/smoke.bats`
-- Modify: `scripts/validate.sh` (add `check_grow_define_contract` + register)
+- Modify: `autospec validate` (add `check_grow_define_contract` + register)
 
 **Interfaces:**
 - Consumes: Tasks 1–3 outputs.
@@ -494,22 +494,22 @@ check_grow_define_contract() {
 
 - [ ] **Step 4: Register the check**
 
-Add `check_grow_define_contract` to `main`'s run list immediately after `check_growth_candidate_pipeline_contract` (find via `grep -n "check_growth_candidate_pipeline_contract" scripts/validate.sh`).
+Add `check_grow_define_contract` to `main`'s run list immediately after `check_growth_candidate_pipeline_contract` (find via `grep -n "check_growth_candidate_pipeline_contract" autospec validate`).
 
 - [ ] **Step 5: Verify (do NOT run full validate.sh here — controller runs it in a clean worktree)**
 
 ```bash
-bash -n scripts/validate.sh
+bash -n autospec validate
 scripts/derive-trio.sh skills/autospec-grow-define --check
 bats tests/unit/grow-define-pipeline.bats tests/unit/grow-define-file-issues.bats tests/autospec-grow-define/smoke.bats
-grep -n "check_grow_define_contract" scripts/validate.sh   # must show 2 lines
+grep -n "check_grow_define_contract" autospec validate   # must show 2 lines
 ```
 Expected: all green; 2 grep hits.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tests/autospec-grow-define/smoke.bats scripts/validate.sh
+git add tests/autospec-grow-define/smoke.bats autospec validate
 git commit -m "test: grow-define smoke + structural/lock-step contract in validate.sh"
 ```
 

@@ -1,0 +1,1 @@
+@test "specialists fixture" { true; }

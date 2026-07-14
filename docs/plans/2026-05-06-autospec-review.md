@@ -48,7 +48,7 @@ skills/autospec-run/SKILL.md                        # +queue priority sort
                                                     # +Phase 6 post-batch trigger
 skills/autospec-run/opencode/agent.md               # lock-step copy
 skills/autospec-run/codex/prompt.md                 # lock-step copy
-scripts/validate.sh                                 # +4 new check_* functions
+autospec validate                                 # +4 new check_* functions
 SKILLS.md                                           # +autospec-review row
 README.md                                           # +9th-skill mention in suite
 ```
@@ -2199,15 +2199,15 @@ git commit -m "test(autospec-run): lock-step bats for priority sort + regression
 
 ---
 
-## Task 23: Extend scripts/validate.sh with 4 new checks
+## Task 23: Extend autospec validate with 4 new checks
 
 **Files:**
-- Modify: `scripts/validate.sh`
+- Modify: `autospec validate`
 
 - [ ] **Step 1: Locate the existing check_* function pattern**
 
 ```bash
-grep -n "^check_" scripts/validate.sh | head
+grep -n "^check_" autospec validate | head
 ```
 
 - [ ] **Step 2: Append four new functions**
@@ -2270,13 +2270,13 @@ check_autospec_review_tier_a_directives
 - [ ] **Step 4: Run validate.sh — expect ALL PASS**
 
 ```bash
-bash scripts/validate.sh
+autospec validate
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/validate.sh
+git add autospec validate
 git commit -m "feat(validate): autospec-review and autospec-run regression checks"
 ```
 
@@ -2320,7 +2320,7 @@ git commit -m "docs: register autospec-review in SKILLS.md and README"
 - [ ] **Step 1: Run all validation in one go**
 
 ```bash
-bash scripts/validate.sh && bats tests/*.bats && pytest tests/test_autospec_review.py -v
+autospec validate && bats tests/*.bats && pytest tests/test_autospec_review.py -v
 ```
 
 Expected: all green. Any failure means the task that introduced the

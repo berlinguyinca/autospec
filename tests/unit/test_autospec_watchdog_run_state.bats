@@ -410,12 +410,12 @@ start_validate_process_in_issue_worktree() {
     git -C "$LOCAL_REPO" commit -q -m initial
     git -C "$LOCAL_REPO" worktree add -q -b "$branch" "$ISSUE_WORKTREE"
     mkdir -p "$ISSUE_WORKTREE/scripts"
-    cat > "$ISSUE_WORKTREE/scripts/validate.sh" <<'SH'
+    cat > "$ISSUE_WORKTREE/autospec validate" <<'SH'
 #!/usr/bin/env bash
 exec sleep 120
 SH
-    chmod +x "$ISSUE_WORKTREE/scripts/validate.sh"
-    bash -c 'cd "$1" && exec bash scripts/validate.sh' sh "$ISSUE_WORKTREE" >/dev/null 2>&1 &
+    chmod +x "$ISSUE_WORKTREE/autospec validate"
+    bash -c 'cd "$1" && exec autospec validate' sh "$ISSUE_WORKTREE" >/dev/null 2>&1 &
     VALIDATE_PID="$!"
     export VALIDATE_PID
 }

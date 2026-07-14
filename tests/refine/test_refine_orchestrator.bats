@@ -18,7 +18,7 @@ setup() {
 # AGENTS
 
 Follow lockstep across SKILL.md, codex/prompt.md, and opencode/agent.md.
-Run scripts/validate.sh before merge. Touch scripts/refine-prompt.sh
+Run autospec validate before merge. Touch scripts/refine-prompt.sh
 carefully. See docs/specs/2026-05-28-foo.md.
 EOF
     cat > "$REPO_ROOT/docs/specs/2026-05-28-foo.md" <<'EOF'

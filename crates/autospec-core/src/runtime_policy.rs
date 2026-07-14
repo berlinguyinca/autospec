@@ -123,6 +123,10 @@ pub fn classify_path(path: &str) -> RuntimePolicyVerdict {
     )
 }
 
+pub fn is_supported_runtime_path(path: &str) -> bool {
+    !matches!(runtime_for_path(&path.replace('\\', "/")), Runtime::Unknown)
+}
+
 fn runtime_for_path(path: &str) -> Runtime {
     if path.ends_with(".rs") || path.contains("/crates/") || path.starts_with("crates/") {
         Runtime::Rust

@@ -50,7 +50,7 @@ fixture-proven evidence instead of intuition.
   45 lines/~233 words × 20 skills (~4,660 words; ×3 lockstep copies ≈ 14k
   words on disk). `## Required capabilities & harness adapter` table (17L) +
   `Subagent dispatch policy` row × 24 skills (×3 lockstep).
-- **No shared-include mechanism exists**; `scripts/validate.sh` (~40 gates)
+- **No shared-include mechanism exists**; `autospec validate` (~40 gates)
   ENFORCES the duplication byte-identically (`check_self_update`,
   `check_startup_preflight`, `check_lockstep`,
   `check_agents_md_subagent_matrix`).
@@ -115,7 +115,7 @@ Replace the duplicated blocks with markers across skills, one sweep child per
 block class: (a) startup-self-update (20 skills × trio), (b) harness-adapter
 table + dispatch-policy row (24 skills × trio). Mechanical-sweep precedent:
 #1012. Each sweep's AC is the golden-hash gate going green for every touched
-skill plus `scripts/validate.sh` exit 0.
+skill plus `autospec validate` exit 0.
 
 ### D4 — Quality-differential harness (the boilerplate guard)
 `scripts/quality-differential.sh --step <name> --fixtures <dir>`: for a
@@ -171,7 +171,7 @@ TDD; real files, no mocks. bats under `tests/`.
   lands literally); golden-gate test red/green pair (negative-path pair per
   mutation-testing discipline).
 - D3 sweeps: golden hashes green for every converted skill; full
-  `scripts/validate.sh` green; ship-completeness probe green.
+  `autospec validate` green; ship-completeness probe green.
 - D4: harness self-test with a synthetic step (one passing, one canned-string
   failing fixture); refine-lens fixtures recorded from real lens runs.
 - D5: bats — `auto` mode invokes LLM path (mocked binary PATH-shim per
@@ -204,7 +204,7 @@ TDD; real files, no mocks. bats under `tests/`.
 - [ ] `bash scripts/skill-token-report.sh` exits 0; one row per skill; integer word+token counts
 - [ ] `docs/reports/llm-touchpoint-decision-table.md` covers all 7 touchpoints with fixture paths
 - [ ] every determinization keeps an env escalation hatch (`grep -r AUTOSPEC_REFINE_LENS_MODE`)
-- [ ] `bash scripts/validate.sh` exits 0 at every merge (lockstep + new golden gate)
+- [ ] `autospec validate` exits 0 at every merge (lockstep + new golden gate)
 - [ ] `bash scripts/quality-differential.sh --step refine-lenses` documents the failing verdict
 - [ ] expanded SKILL.md output hash == pre-conversion golden for all D3-converted skills
 - [ ] no child issue body >400 words; ≤3 authored files per child (sweeps exempt per #1012 precedent)

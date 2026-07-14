@@ -30,6 +30,6 @@ setup() {
 }
 
 @test "validate.sh includes autospec-sweep in generated-skill invariants" {
-  grep -q 'autospec-sweep' "$REPO_ROOT/scripts/validate.sh"
-  grep -q 'check_autospec_sweep_config_contract' "$REPO_ROOT/scripts/validate.sh"
+  grep -q 'autospec-sweep' "$REPO_ROOT/autospec validate"
+  grep -q 'check_autospec_sweep_config_contract' "$REPO_ROOT/autospec validate"
 }

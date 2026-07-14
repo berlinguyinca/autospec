@@ -106,10 +106,9 @@ fn push_rule(
 }
 
 fn is_shared_input(path: &str) -> bool {
-    matches!(
-        path,
-        "AGENTS.md" | "scripts/validate.sh" | "scripts/expand-skill-blocks.sh"
-    ) || path.starts_with("scripts/lib/")
+    matches!(path, "AGENTS.md" | "scripts/expand-skill-blocks.sh")
+        || path.starts_with("scripts/lib/")
+        || path.starts_with("crates/autospec-core/src/validation/")
 }
 
 fn skill_name_for_path(path: &str) -> Option<&str> {

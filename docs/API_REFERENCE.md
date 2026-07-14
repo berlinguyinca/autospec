@@ -554,10 +554,10 @@ Extends the Phase 4 self-heal loop classifier with doc-drift categories:
 `failing_doc_drift`, `missing_doc_scope`, `failing_visual_stale`, `failing_ai_review_stale`,
 `failing_manifest_stale`.
 
-## Validation (`scripts/validate.sh`)
+## Validation (`autospec validate`)
 
 <!-- autospec-doc-scope:
-  src: ["scripts/validate.sh"]
+  src: ["autospec validate"]
   reason: "Operator reference for validate.sh checks"
   mismatch_action: warn
   generated: true
@@ -566,7 +566,7 @@ Extends the Phase 4 self-heal loop classifier with doc-drift categories:
 Repository-wide invariant checker. Run before every PR merge.
 
 ```
-Usage: bash scripts/validate.sh
+Usage: autospec validate
 ```
 
 Exit: 0 = all checks pass, non-zero = first failure with diagnostic.

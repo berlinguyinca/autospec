@@ -175,9 +175,9 @@ The loop never stalls and never silently drops proposals.
       drift-checks explore's own shipped features (loop closed).
 - [ ] explore + define/split trios document the change and pass `check_lockstep`
       + regenerated sha256 goldens.
-- [ ] `scripts/validate.sh` gains
+- [ ] `autospec validate` gains
       `check_autospec_explore_spec_first_contract()`; all new bats pass;
-      `bash scripts/validate.sh` is green.
+      `autospec validate` is green.
 
 ## Decomposition into child issues
 

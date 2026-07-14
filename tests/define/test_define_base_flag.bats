@@ -15,7 +15,7 @@ SPLIT_SKILL="${BATS_TEST_DIRNAME}/../../skills/autospec-split/SKILL.md"
 SPLIT_CODEX="${BATS_TEST_DIRNAME}/../../skills/autospec-split/codex/prompt.md"
 SPLIT_OPENCODE="${BATS_TEST_DIRNAME}/../../skills/autospec-split/opencode/agent.md"
 
-# strip_body mirrors scripts/validate.sh: body is everything after the 2nd `---`.
+# strip_body mirrors autospec validate: body is everything after the 2nd `---`.
 strip_body() {
   awk '/^---$/{c++; next} c>=2' "$1"
 }

@@ -11,7 +11,7 @@
       "Public launch gate prints AUTOSPEC_PUBLIC_LAUNCH_READY=true",
       "Stale QA verdict is superseded or regenerated"
     ],
-    "validation_command": "bash scripts/validate.sh && bash scripts/validate-public-launch-readiness.sh"
+    "validation_command": "autospec validate && bash scripts/validate-public-launch-readiness.sh"
   },
   {
     "id": "v62-rust-core-workspace",
@@ -71,7 +71,7 @@
     "status": "completed",
     "priority": 6,
     "acceptance_criteria": ["Codex/Claude/Fable/generic handoff prompts exist", "Agent outputs normalize to one schema", "Safe mode blocks destructive operations"],
-    "validation_command": "cargo test --all agent_contracts && bash scripts/validate.sh --fast"
+    "validation_command": "cargo test --all agent_contracts && autospec validate --fast"
   },
   {
     "id": "v68-evidence-release-reporting",
@@ -101,7 +101,7 @@
     "status": "completed",
     "priority": 9,
     "acceptance_criteria": ["CLI reference exists", "Docs match commands", "Known limitations and safety docs are current"],
-    "validation_command": "bash scripts/validate-launch-readiness.sh && bash scripts/validate.sh --fast"
+    "validation_command": "bash scripts/validate-launch-readiness.sh && autospec validate --fast"
   },
   {
     "id": "v71-demo-launch-assets",
@@ -155,6 +155,6 @@
     "status": "completed",
     "priority": 13,
     "acceptance_criteria": ["All gates pass", "Release candidate report exists", "AUTOSPEC_PUBLIC_LAUNCH_READY=true"],
-    "validation_command": "cargo fmt --check && cargo clippy --all-targets --all-features && cargo test --all && bash scripts/validate.sh && bash scripts/validate-public-launch-readiness.sh"
+    "validation_command": "cargo fmt --check && cargo clippy --all-targets --all-features && cargo test --all && autospec validate && bash scripts/validate-public-launch-readiness.sh"
   }
 ]

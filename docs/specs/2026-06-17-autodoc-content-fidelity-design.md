@@ -41,8 +41,8 @@ all fixed scripts+tests only (no SKILL.md/trio change):
 - [ ] `reverse-routing` maps source files to docs; no `#L1 -> ` identity lines.
 - [ ] `fillManifest(manifest, pages, { repoRoot })` populates `public_api` from real exports; non-exported symbols excluded.
 - [ ] `generateLlmsFull` stays byte-identical across runs on the same input.
-- [ ] `node --test skills/autospec-doc/tests/gen-llms-full.test.mjs` passes; `bash scripts/validate.sh` exits 0.
+- [ ] `node --test skills/autospec-doc/tests/gen-llms-full.test.mjs` passes; `autospec validate` exits 0.
 
 ## Verification
 - Primary: `node --test skills/autospec-doc/tests/gen-llms-full.test.mjs`
-- Full: `bash scripts/validate.sh` + a regenerated preview showing prose descriptions, source→doc routing, and populated `public_api`.
+- Full: `autospec validate` + a regenerated preview showing prose descriptions, source→doc routing, and populated `public_api`.

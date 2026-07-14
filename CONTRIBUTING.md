@@ -18,7 +18,7 @@ Avoid opening a first PR that adds broad autonomy, new dependencies, or large pr
 git clone https://github.com/berlinguyinca/autospec.git
 cd autospec
 bash scripts/dev-bootstrap.sh
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 Optional tools such as `bats`, `ajv`, `yq`, `gh`, and browser automation unlock deeper validation.
@@ -42,21 +42,21 @@ skills/<name>/codex/prompt.md
 skills/<name>/opencode/agent.md
 ```
 
-When editing a multi-harness skill, keep the bodies identical except for frontmatter. `scripts/validate.sh` enforces this.
+When editing a multi-harness skill, keep the bodies identical except for frontmatter. `autospec validate` enforces this.
 
 ## Validation
 
 Run the relevant focused test first, then the repo validator:
 
 ```bash
-bash scripts/validate.sh --fast
+autospec validate --fast
 bash scripts/validate-launch-readiness.sh
 ```
 
 Before a release or broad workflow change, run:
 
 ```bash
-bash scripts/validate.sh
+autospec validate
 ```
 
 E2E tests may create throwaway GitHub resources and should only run with credentials that are safe for that purpose.
@@ -68,4 +68,3 @@ E2E tests may create throwaway GitHub resources and should only run with credent
 - Call out likely hidden failure.
 - Keep unrelated cleanup out of the PR.
 - For docs-only changes, still run the launch-readiness or docs-relevant validator.
-

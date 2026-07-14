@@ -5,7 +5,7 @@ Add `scripts/lint-issue.sh`. It exits non-zero when an issue body fails the §3 
 ## Files to read first
 
 - scripts/lint-issue.sh
-- scripts/validate.sh
+- autospec validate
 
 ## Implementation outline
 
@@ -28,7 +28,7 @@ Depends on issue #152
 ## Acceptance criteria
 
 - [ ] `bash scripts/lint-issue.sh tests/fixtures/issue-quality/good.md` exits 0.
-- [ ] `scripts/validate.sh` exits 0 after adding the fixture files.
+- [ ] `autospec validate` exits 0 after adding the fixture files.
 - [ ] `grep -c GOAL_VAGUE` returns 0 for this file.
 
 ## Verification

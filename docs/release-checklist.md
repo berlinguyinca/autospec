@@ -2,8 +2,8 @@
 
 Use this before tagging or announcing an AutoSpec release.
 
-- [ ] `bash scripts/validate.sh` passes.
-- [ ] `bash scripts/validate.sh --fast` passes for quick local smoke.
+- [ ] `autospec validate` passes.
+- [ ] `autospec validate --fast` passes for quick local smoke.
 - [ ] `bash scripts/validate-launch-readiness.sh` passes.
 - [ ] `bash scripts/validate-public-launch-readiness.sh` passes.
 - [ ] `cargo run --bin autospec -- --help` lists only commands documented in `docs/cli-reference.md`.

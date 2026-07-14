@@ -37,7 +37,7 @@ it drives any CAD-as-code project through a `.autospec/fab.yml` contract.
 `install.sh`/`uninstall.sh`/`README.md`; `autospec-block` startup-self-update +
 harness-adapter. Encodes the STL Modeling Rules (below), the change workflow, and
 the release-gate contract. Validated by `check_autospec_fab_contract` in
-`scripts/validate.sh`, which also runs the fab bats/test suite + a dogfood model.
+`autospec validate`, which also runs the fab bats/test suite + a dogfood model.
 
 ### `.autospec/fab.yml` contract (per target repo)
 Declares: generator entrypoint (default `rm -rf build && .venv/bin/python

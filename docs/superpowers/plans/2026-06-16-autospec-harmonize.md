@@ -487,7 +487,7 @@ const raw = await page.$$eval('*', els => els.map(el => {
 **Files:**
 - Create: `skills/autospec-harmonize/SKILL.md`, `opencode/agent.md`, `codex/prompt.md`, `install.sh`, `uninstall.sh`, `README.md`
 - Modify: `install.sh` (usage-comment skill list only — `ALL_SKILLS` auto-discovers)
-- Test: lock-step + frontmatter checks in `scripts/validate.sh` (run the whole validator)
+- Test: lock-step + frontmatter checks in `autospec validate` (run the whole validator)
 
 **Interfaces:**
 - Consumes: `harmonize.sh` + stage scripts (Tasks 4–10).
@@ -497,7 +497,7 @@ const raw = await page.$$eval('*', els => els.map(el => {
 
 - [ ] **Step 2:** Derive `opencode/agent.md` and `codex/prompt.md` byte-identical below the adapter headers (lock-step). Write `install.sh`/`uninstall.sh` mirroring `autospec-loop`'s, listing the new `scripts/*` runtime files for `${AUTOSPEC_SCRIPTS_DIR}` placement. Write `README.md`.
 
-- [ ] **Step 3: Run** `bash scripts/validate.sh` → expect only the not-yet-added `check_autospec_harmonize_contract` to be absent (added in Task 13); lock-step + frontmatter PASS.
+- [ ] **Step 3: Run** `autospec validate` → expect only the not-yet-added `check_autospec_harmonize_contract` to be absent (added in Task 13); lock-step + frontmatter PASS.
 
 - [ ] **Step 4: Commit** — `git commit -m "feat(harmonize): skill trio + installer/uninstaller/README"`
 
@@ -507,12 +507,12 @@ const raw = await page.$$eval('*', els => els.map(el => {
 
 **Files:**
 - Modify: `README.md` (Skills catalog row + token-cost table row), `SKILLS.md` (index entry)
-- Test: governance assertions in `scripts/validate.sh`
+- Test: governance assertions in `autospec validate`
 
 **Interfaces:** none new.
 
 - [ ] **Step 1:** Add `autospec-harmonize` to the README "Docs and design" skills table and the `SKILLS.md` index (path + trigger + keywords), matching the existing format.
-- [ ] **Step 2: Run** `bash scripts/validate.sh` governance checks → PASS (README/SKILLS still satisfy their grep assertions).
+- [ ] **Step 2: Run** `autospec validate` governance checks → PASS (README/SKILLS still satisfy their grep assertions).
 - [ ] **Step 3: Commit** — `git commit -m "docs(harmonize): add skill to README catalog + SKILLS index"`
 
 ---
@@ -520,16 +520,16 @@ const raw = await page.$$eval('*', els => els.map(el => {
 ### Task 13: `validate.sh` contract gate + goldens (atomic)
 
 **Files:**
-- Modify: `scripts/validate.sh` (add `check_autospec_harmonize_contract` + register it)
+- Modify: `autospec validate` (add `check_autospec_harmonize_contract` + register it)
 - Modify/Create: `tests/fixtures/skill-goldens/*` (regenerated)
-- Test: `bash scripts/validate.sh`
+- Test: `autospec validate`
 
 **Interfaces:** none new.
 
 - [ ] **Step 1:** Add `check_autospec_harmonize_contract()` asserting: the trio names the 6 stages, `--no-live-preview` is documented, the pick gate is present, and the migration-spec handoff to `/autospec-define` exists in all three trio files. Register it in the run list.
-- [ ] **Step 2: Run** `bash scripts/validate.sh` → expect FAIL pointing at goldens drift.
+- [ ] **Step 2: Run** `autospec validate` → expect FAIL pointing at goldens drift.
 - [ ] **Step 3:** Regenerate goldens: `bash tests/refresh-goldens.sh` (per the skill-golden derivation workflow — trio prose + goldens in one commit).
-- [ ] **Step 4: Run** `bash scripts/validate.sh && bats tests/harmonize` → all PASS.
+- [ ] **Step 4: Run** `autospec validate && bats tests/harmonize` → all PASS.
 - [ ] **Step 5: Commit** — `git commit -m "feat(harmonize): validate contract gate + regenerate skill goldens"`
 
 ---

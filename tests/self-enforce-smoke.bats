@@ -21,7 +21,7 @@ teardown() {
     rm -rf "$TMP_DIR" "${FAST_ROOT:-}"
 }
 
-# self-enforce-qa.sh's QA chain runs the REAL ~13-minute scripts/validate.sh as
+# self-enforce-qa.sh's QA chain runs the REAL ~13-minute autospec validate as
 # step 2 (self-enforce-qa.sh:131), so cases 1-2 below — which invoke the chain
 # against a bad diff — each took ~13min and froze any directory-sweeping runner
 # (epic #1280 bats hang sweep). This stub REPO_ROOT keeps the REAL
@@ -33,8 +33,8 @@ _fast_repo_root() {
     FAST_ROOT="$(mktemp -d -t self-enforce-smoke-root-XXXXXX)"
     mkdir -p "$FAST_ROOT/scripts"
     cp "$REAL_REPO_ROOT/scripts/lint-implementation.sh" "$FAST_ROOT/scripts/lint-implementation.sh"
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$FAST_ROOT/scripts/validate.sh"
-    chmod +x "$FAST_ROOT/scripts/validate.sh"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$FAST_ROOT/autospec validate"
+    chmod +x "$FAST_ROOT/autospec validate"
     printf '%s' "$FAST_ROOT"
 }
 

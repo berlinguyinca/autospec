@@ -167,7 +167,7 @@ no DSN and no db.env → zero binary invocations (the optionality proof); db.env
 present with DSN unset → binary IS invoked (the bootstrap-independence proof);
 binary absent → exit 0;
 each chokepoint passes the mapped kind + fields; DSN never appears in any output. New
-suites must be registered in a `scripts/validate.sh` check_* gate (enumerated, not
+suites must be registered in a `autospec validate` check_* gate (enumerated, not
 globbed). autospec-db repo: Go unit tests (spool locking, payload construction,
 config parsing, env fallback chain) + integration tests against a real dockerized
 Postgres in CI (migrations parity incl. shell-era `schema_migrations` rows, ingest
@@ -247,7 +247,7 @@ plugin, mirroring the existing `maybe_prompt_star` prompt discipline exactly
    `$HOME`: absent+decline → no fetch; absent+yes → installer invoked;
    installed+`--update` → installer invoked without prompt; `AUTOSPEC_INSTALL_DB=0`
    → untouched; non-TTY + no env → silent skip; installer failure → autospec
-   install still exits 0. Register the suite in a `scripts/validate.sh`
+   install still exits 0. Register the suite in a `autospec validate`
    check_* gate (enumerated, not globbed).
 
 ## Decomposition hints

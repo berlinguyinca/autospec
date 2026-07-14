@@ -526,7 +526,7 @@ checks write a real temp file first (`feedback_bash32_process_sub_test_file`).
   conductor; stale-heartbeat lock is reclaimable but a live one is not; resume
   restores waterfall position; per-issue failure cap → `autospec:needs-human`;
   main red → Tier-1 merges halt, sandbox tiers continue; ledger consulted/fed.
-- `scripts/validate.sh` — trio goldens regenerated;
+- `autospec validate` — trio goldens regenerated;
   `check_autospec_autonomous_contract` gate added.
 
 ## Decomposition — phase-structured (post-review)

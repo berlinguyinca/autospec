@@ -276,8 +276,8 @@ def extract_paths(text):
 
 def test_paths(paths, text):
     candidates = [path for path in paths if path.startswith("tests/") or path.endswith(".bats") or "/test_" in path or path.endswith(".test.js")]
-    if "bash scripts/validate.sh" in text:
-        candidates.append("bash scripts/validate.sh")
+    if "autospec validate" in text:
+        candidates.append("autospec validate")
     return sorted(dict.fromkeys(candidates))
 
 
@@ -334,7 +334,7 @@ def forbidden_matches(path, patterns):
 def validation_plan(test_candidates, commands):
     focused = []
     for path in test_candidates:
-        if path == "bash scripts/validate.sh":
+        if path == "autospec validate":
             continue
         if path.endswith(".bats"):
             focused.append(f"bats {path}")
@@ -342,7 +342,7 @@ def validation_plan(test_candidates, commands):
     if commands.get("test"):
         full.append(str(commands["test"]))
     elif os.path.isfile(os.path.join(repo_root, "scripts", "validate.sh")):
-        full.append("bash scripts/validate.sh")
+        full.append("autospec validate")
     skipped = []
     if not focused:
         skipped.append("No focused validation command was inferable from the issue.")

@@ -217,7 +217,7 @@ A retrieval index over the repo's docs (consuming F5's clean corpus), continuous
 15. F7 guardrails: immutable verifier / blast-radius quarantine / rollback / separation. ↔ #1543 (#1544–#1547)
 16. F8 environment-agnostic config + capability detection.
 17. Trio + goldens: `derive-trio.sh --in-place` regenerates SKILL.md mirrors; `gen-skill-goldens.sh`; reconcile R1–R5 in SKILL.md + phase docs.
-18. **Phase 5.5 audit** — verify no target-repo specifics leaked; every tier emits a measured signal; no blocking prompt remains; `scripts/validate.sh` green.
+18. **Phase 5.5 audit** — verify no target-repo specifics leaked; every tier emits a measured signal; no blocking prompt remains; `autospec validate` green.
 
 ## Tests
 
@@ -249,5 +249,4 @@ A retrieval index over the repo's docs (consuming F5's clean corpus), continuous
   mitigated by config-driven blast-radius quarantine + auto-rollback; (d) environment coupling —
   mitigated by F8 capability detection + Phase-5.5 leak audit.
 - **On merge:** regenerate the trio + goldens; update SKILL.md Phase-1 contract to the
-  never-idle/never-ask semantics; `scripts/validate.sh` must pass.
-
+  never-idle/never-ask semantics; `autospec validate` must pass.

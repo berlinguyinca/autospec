@@ -84,7 +84,7 @@ setup() {
 
 @test "autonomous: in-scope files pass guardrail" {
   run bash "$GATE" --check out-of-scope \
-    --files "scripts/autospec-autonomy-gate.sh scripts/validate.sh" \
+    --files "scripts/autospec-autonomy-gate.sh scripts/autospec-digital-twin.py" \
     --scope "scripts/"
   [ "$status" -eq 0 ]
 }

@@ -12,20 +12,20 @@ This audit compares the merged control-plane child issues (#1611–#1621) agains
 
 | Spec MVP acceptance item | Evidence checked | Status | Decision |
 | --- | --- | --- | --- |
-| `autospec-control-plane bootstrap --dry-run` prints the two repo scaffolds without creating GitHub repos. | `tests/control-plane-bootstrap.bats`; `tests/control-plane-observatory.bats` | Pass | Covered by existing tests and `scripts/validate.sh`. |
-| `autospec-control-plane bootstrap --confirm` creates or updates `autospec-governance` and `autospec-observatory`. | `tests/control-plane-confirm.bats` | Pass after remediation | Test existed but was not in `scripts/validate.sh`; added to validation gate. |
-| `autospec-governance` contains policy/rule YAML, schemas, fixtures, docs, and a test command that passes. | `tests/control-plane-governance.bats` | Pass | Covered by existing tests and `scripts/validate.sh`. |
+| `autospec-control-plane bootstrap --dry-run` prints the two repo scaffolds without creating GitHub repos. | `tests/control-plane-bootstrap.bats`; `tests/control-plane-observatory.bats` | Pass | Covered by existing tests and `autospec validate`. |
+| `autospec-control-plane bootstrap --confirm` creates or updates `autospec-governance` and `autospec-observatory`. | `tests/control-plane-confirm.bats` | Pass after remediation | Test existed but was not in `autospec validate`; added to validation gate. |
+| `autospec-governance` contains policy/rule YAML, schemas, fixtures, docs, and a test command that passes. | `tests/control-plane-governance.bats` | Pass | Covered by existing tests and `autospec validate`. |
 | `autospec-observatory` starts locally with Postgres and a web UI. | `tests/control-plane-observatory.bats`; generated `docker-compose.yml`; generated `apps/web` scaffold | Partial MVP scaffold | Dry-run scaffold is covered. Live Docker startup remains operator/manual evidence because the generated companion repo is not materialized in this repo. |
-| `POST /v1/events/batch` accepts scoped API-key authenticated event batches. | `tests/control-plane-events.bats`; `tests/control-plane-observatory-auth.bats`; `tests/integration/control-plane-events.bats` | Pass after remediation | Integration wrapper existed but was not in `scripts/validate.sh`; added to validation gate. |
+| `POST /v1/events/batch` accepts scoped API-key authenticated event batches. | `tests/control-plane-events.bats`; `tests/control-plane-observatory-auth.bats`; `tests/integration/control-plane-events.bats` | Pass after remediation | Integration wrapper existed but was not in `autospec validate`; added to validation gate. |
 | The observatory stores runs, events, workers, projects, repositories, and costs in Postgres. | `tests/control-plane-observatory-auth.bats`; `tests/control-plane-reports.bats` | Pass | Migrations and report fields are generated and validated. |
-| The web UI shows fleet, timeline, work item, blockers, workers, policy decision, and cost/duration/outcome views with 10-second polling. | `tests/control-plane-ui.bats`; `tests/smoke/control-plane-ui.bats`; `tests/control-plane-reports.bats` | Pass | Covered by existing tests and `scripts/validate.sh`. |
-| The web UI shows a per-run progress bar and progress detail panel with current item, queue counts, elapsed time, ETA, planned next step, and stale/error state. | `tests/control-plane-ui.bats`; `tests/smoke/control-plane-ui.bats` | Pass | Covered by existing tests and `scripts/validate.sh`. |
-| `GET /v1/runs/:id/progress` returns the latest progress snapshot and updates from `ProgressUpdated` plus existing run/work-item events. | `tests/control-plane-observatory-auth.bats`; `tests/control-plane-events.bats` | Pass | Covered by existing tests and `scripts/validate.sh`. |
-| Autospec emits structured events to a local outbox and flushes them when configured. | `tests/observatory-outbox.bats`; `docs/runbooks/OBSERVATORY.md` | Pass | Covered by existing tests and `scripts/validate.sh`. |
-| Autospec continues working when the observatory is offline. | `AUTOSPEC_OBSERVATORY_OFFLINE=1 bash tests/observatory-outbox.bats`; `tests/control-plane-dogfood.bats` | Pass after remediation | Outbox test was covered; dogfood offline replay existed but was not in `scripts/validate.sh`; added to validation gate. |
-| Privacy-tier enforcement rejects over-shared events both client-side and server-side. | `tests/policy-resolution.bats`; generated auth/API-key tier contracts | Pass after remediation | Test existed but was not in `scripts/validate.sh`; added to validation gate. Server-side generated scaffold remains a contract-level dry-run, not a deployed service proof. |
+| The web UI shows fleet, timeline, work item, blockers, workers, policy decision, and cost/duration/outcome views with 10-second polling. | `tests/control-plane-ui.bats`; `tests/smoke/control-plane-ui.bats`; `tests/control-plane-reports.bats` | Pass | Covered by existing tests and `autospec validate`. |
+| The web UI shows a per-run progress bar and progress detail panel with current item, queue counts, elapsed time, ETA, planned next step, and stale/error state. | `tests/control-plane-ui.bats`; `tests/smoke/control-plane-ui.bats` | Pass | Covered by existing tests and `autospec validate`. |
+| `GET /v1/runs/:id/progress` returns the latest progress snapshot and updates from `ProgressUpdated` plus existing run/work-item events. | `tests/control-plane-observatory-auth.bats`; `tests/control-plane-events.bats` | Pass | Covered by existing tests and `autospec validate`. |
+| Autospec emits structured events to a local outbox and flushes them when configured. | `tests/observatory-outbox.bats`; `docs/runbooks/OBSERVATORY.md` | Pass | Covered by existing tests and `autospec validate`. |
+| Autospec continues working when the observatory is offline. | `AUTOSPEC_OBSERVATORY_OFFLINE=1 bash tests/observatory-outbox.bats`; `tests/control-plane-dogfood.bats` | Pass after remediation | Outbox test was covered; dogfood offline replay existed but was not in `autospec validate`; added to validation gate. |
+| Privacy-tier enforcement rejects over-shared events both client-side and server-side. | `tests/policy-resolution.bats`; generated auth/API-key tier contracts | Pass after remediation | Test existed but was not in `autospec validate`; added to validation gate. Server-side generated scaffold remains a contract-level dry-run, not a deployed service proof. |
 | Project classification is visible and filterable in the observatory UI. | `tests/control-plane-governance.bats`; `tests/control-plane-reports.bats` | Pass | Covered by generated policy packs and report filters. |
-| A dogfood run against `berlinguyinca/autospec` produces a run timeline and cost report in the observatory. | `tests/control-plane-dogfood.bats`; `docs/runbooks/CONTROL_PLANE_DOGFOOD.md` | Pass after remediation | Dogfood smoke existed but was not in `scripts/validate.sh`; added to validation gate. |
+| A dogfood run against `berlinguyinca/autospec` produces a run timeline and cost report in the observatory. | `tests/control-plane-dogfood.bats`; `docs/runbooks/CONTROL_PLANE_DOGFOOD.md` | Pass after remediation | Dogfood smoke existed but was not in `autospec validate`; added to validation gate. |
 
 ## Child issue validation coverage
 
@@ -35,17 +35,17 @@ This audit compares the merged control-plane child issues (#1611–#1621) agains
 | #1612 | `bash tests/control-plane-governance.bats` | Covered before audit. |
 | #1613 | `bash tests/control-plane-observatory.bats` | Covered before audit. |
 | #1614 | `bash tests/control-plane-observatory-auth.bats` | Covered before audit. |
-| #1615 | `bash tests/control-plane-events.bats` plus integration wrapper | Integration wrapper added to `scripts/validate.sh`. |
+| #1615 | `bash tests/control-plane-events.bats` plus integration wrapper | Integration wrapper added to `autospec validate`. |
 | #1616 | `bash tests/control-plane-ui.bats` plus smoke wrapper | Covered before audit. |
 | #1617 | `bash tests/control-plane-reports.bats` plus integration wrapper | Covered before audit. |
 | #1618 | `AUTOSPEC_OBSERVATORY_OFFLINE=1 bash tests/observatory-outbox.bats` | Covered before audit. |
-| #1619 | `bash tests/policy-resolution.bats` | Added to `scripts/validate.sh`. |
-| #1620 | `bash tests/control-plane-confirm.bats` | Added to `scripts/validate.sh`. |
-| #1621 | `bash tests/control-plane-dogfood.bats` | Added to `scripts/validate.sh`. |
+| #1619 | `bash tests/policy-resolution.bats` | Added to `autospec validate`. |
+| #1620 | `bash tests/control-plane-confirm.bats` | Added to `autospec validate`. |
+| #1621 | `bash tests/control-plane-dogfood.bats` | Added to `autospec validate`. |
 
 ## Remediation performed
 
-- `scripts/validate.sh` now requires and runs the missing control-plane policy/privacy, confirm-bootstrap, dogfood, and event-integration Bats suites.
+- `autospec validate` now requires and runs the missing control-plane policy/privacy, confirm-bootstrap, dogfood, and event-integration Bats suites.
 - No generated companion-repo runtime implementation was broadened in this audit.
 
 ## Follow-up decisions
@@ -71,5 +71,5 @@ AUTOSPEC_OBSERVATORY_OFFLINE=1 bash tests/observatory-outbox.bats
 bash tests/policy-resolution.bats
 bash tests/control-plane-confirm.bats
 bash tests/control-plane-dogfood.bats
-bash scripts/validate.sh
+autospec validate
 ```

@@ -158,7 +158,7 @@ subprocesses. No gitignored fixtures; bats `[ -f ]` writes a real temp file firs
   finding blocks; missing secaudit → halt.
 - `tests/autonomous/test_usage_governor.bats` — observable-% parks at 90%; tally
   fallback parks at 90% of lifetime tokens.
-- `scripts/validate.sh` — trio goldens regenerated; explore + autonomous contract
+- `autospec validate` — trio goldens regenerated; explore + autonomous contract
   gates extended.
 
 ## Self-review

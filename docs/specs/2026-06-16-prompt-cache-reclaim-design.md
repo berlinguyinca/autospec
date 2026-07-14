@@ -101,7 +101,7 @@ skills/autospec-run/prompts/reviewer-contract.md   (NEW — mirrors implementer-
 - [ ] Reviewer prefix token count drops ≥50% on the fixture; prefix byte-stable
       across two differing-issue dispatches.
 - [ ] No `autospec-run`/`autospec-define` trio file edited in Phase 1.
-- [ ] `bash scripts/validate.sh` green; reviewer/bundle bats pass.
+- [ ] `autospec validate` green; reviewer/bundle bats pass.
 
 ## Decomposition into child issues
 

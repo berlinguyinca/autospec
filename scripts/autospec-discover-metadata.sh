@@ -203,9 +203,9 @@ def discover_commands(files):
             if re.search(rf"^{re.escape(target)}\s*:", text, re.M):
                 commands.append(f"make {target}")
                 evidence.append("Makefile")
-    if "scripts/validate.sh" in files:
-        commands.append("bash scripts/validate.sh")
-        evidence.append("scripts/validate.sh")
+    if "crates/autospec-core/src/validation/catalog.rs" in files:
+        commands.append("autospec validate")
+        evidence.append("crates/autospec-core/src/validation/catalog.rs")
     return fact(sorted(dict.fromkeys(commands)), 0.75 if commands else 0.0, evidence or ["no build/test commands inferred"])
 
 
