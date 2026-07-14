@@ -1,4 +1,6 @@
 use std::io::Write;
+use std::os::unix::fs::symlink;
+use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -159,6 +161,436 @@ fn lint_issue_caps_the_exit_status_without_dropping_findings() {
     assert!(output.stdout.is_empty());
     assert_eq!(stderr.lines().count(), 65);
     assert!(stderr.lines().all(|line| line.starts_with("AC_PROSE: ")));
+}
+
+#[test]
+fn lint_implementation_reads_an_offline_diff_file_and_streams_findings() {
+    let diff = write_implementation_diff(
+        "autospec-lint-implementation-diff-file",
+        &new_diff("scripts/policy.sh", &["eval(input)"]),
+    );
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .output()
+        .expect("autospec lint implementation runs");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "SECURITY:scripts/policy.sh:2: eval() usage — potential code injection\n"
+    );
+}
+
+#[test]
+fn lint_implementation_pre_commit_reads_only_staged_diff_and_enables_both_test_gates() {
+    let fixture = temp_dir("autospec-lint-implementation-pre-commit");
+    let log = fixture.join("git.log");
+    let staged_diff = format!(
+        "{}{}",
+        new_diff(
+            "tests/unit/test_vacuous.bats",
+            &["grep -qv 'bad' result.txt || true"],
+        ),
+        new_diff(
+            "tests/unit/test_density.bats",
+            &["@test \"density\" {", "  echo no assertion", "}"],
+        )
+    );
+    let bin = fake_bin(
+        &fixture,
+        Some(&format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AUTOSPEC_LINT_COMMAND_LOG\"\nprintf '%s' {}\n",
+            shell_single_quote(&staged_diff)
+        )),
+        None,
+    );
+
+    let output = autospec()
+        .args(["lint", "implementation", "--pre-commit", "--staged"])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_LINT_COMMAND_LOG", &log)
+        .output()
+        .expect("pre-commit lint runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stderr.is_empty());
+    assert_eq!(std::fs::read_to_string(log).unwrap(), "diff\n--cached\n");
+    assert!(stdout.contains("VACUOUS_GREP_INVERSE_OR_TRUE:"));
+    assert!(!stdout.contains("VACUOUS_OR_TRUE:"));
+    assert!(stdout.contains("VACUOUS_NO_ASSERT:"));
+    assert!(stdout.contains("ASSERTION_DENSITY:"));
+}
+
+#[test]
+fn lint_implementation_fetches_pr_then_issue_with_direct_gh_arguments() {
+    let fixture = temp_dir("autospec-lint-implementation-pr-issue");
+    let log = fixture.join("gh.log");
+    let diff = new_diff("scripts/policy.sh", &["eval(input)"]);
+    let bin = fake_bin(
+        &fixture,
+        None,
+        Some(&format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_LINT_COMMAND_LOG\"\nif [ \"$1\" = pr ]; then\n  printf '%s' {}\nelif [ \"$1\" = issue ]; then\n  printf '%s\\n' 'Guardian: skip-SECURITY # reviewed fixture'\nelse\n  exit 19\nfi\n",
+            shell_single_quote(&diff)
+        )),
+    );
+
+    let output = autospec()
+        .args(["lint", "implementation", "17", "--issue", "29"])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_LINT_COMMAND_LOG", &log)
+        .output()
+        .expect("PR lint runs");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap(),
+        "pr\ndiff\n17\nissue\nview\n29\n--json\nbody\n--jq\n.body\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "INFO:SECURITY:scripts/policy.sh:2: eval() usage — potential code injection\n"
+    );
+}
+
+#[test]
+fn lint_implementation_directives_reformat_errors_without_changing_exit_status() {
+    let diff = write_implementation_diff(
+        "autospec-lint-implementation-directives",
+        &new_diff("scripts/policy.sh", &["eval(input)"]),
+    );
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--directives",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .output()
+        .expect("directive lint runs");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Fix SECURITY: Remove the flagged pattern: never hardcode secrets, never bypass git hooks or use destructive resets, validate all inputs.\n"
+    );
+}
+
+#[test]
+fn lint_implementation_opt_in_test_gates_do_not_require_pre_commit_mode() {
+    let vacuous = write_implementation_diff(
+        "autospec-lint-implementation-vacuous",
+        &new_diff(
+            "tests/unit/test_vacuous.bats",
+            &["grep -qv 'bad' result.txt || true"],
+        ),
+    );
+    let density = write_implementation_diff(
+        "autospec-lint-implementation-density",
+        &new_diff(
+            "tests/unit/test_density.bats",
+            &["@test \"density\" {", "  echo no assertion", "}"],
+        ),
+    );
+
+    let vacuous_output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--vacuous-assertions",
+            "--diff-file",
+            vacuous.to_str().unwrap(),
+        ])
+        .output()
+        .expect("vacuous assertion lint runs");
+    let density_output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--assertion-density",
+            "--diff-file",
+            density.to_str().unwrap(),
+        ])
+        .output()
+        .expect("assertion density lint runs");
+
+    assert_eq!(vacuous_output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&vacuous_output.stdout).contains("VACUOUS_GREP_INVERSE_OR_TRUE:")
+    );
+    assert!(!String::from_utf8_lossy(&vacuous_output.stdout).contains("VACUOUS_OR_TRUE:"));
+    assert_eq!(density_output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&density_output.stdout).contains("ASSERTION_DENSITY:"));
+}
+
+#[test]
+fn lint_implementation_rejects_mutually_exclusive_diff_sources() {
+    let diff = write_implementation_diff(
+        "autospec-lint-implementation-exclusive",
+        &new_diff("scripts/policy.sh", &["eval(input)"]),
+    );
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "17",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .output()
+        .expect("mutually-exclusive inputs are rejected");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "autospec lint implementation: --diff-file and <PR> are mutually exclusive\n"
+    );
+}
+
+#[test]
+fn lint_implementation_surfaces_a_nonzero_gh_diff_response() {
+    let fixture = temp_dir("autospec-lint-implementation-gh-error");
+    let bin = fake_bin(
+        &fixture,
+        None,
+        Some("#!/bin/sh\nprintf '%s\\n' 'authentication required' >&2\nexit 17\n"),
+    );
+
+    let output = autospec()
+        .args(["lint", "implementation", "17"])
+        .env("PATH", path_with(&bin))
+        .output()
+        .expect("remote lint exits");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "autospec lint implementation: gh pr diff 17 failed: authentication required\n"
+    );
+}
+
+#[test]
+fn lint_implementation_reports_no_staged_changes_without_loading_an_issue() {
+    let fixture = temp_dir("autospec-lint-implementation-empty-staged");
+    let log = fixture.join("commands.log");
+    let bin = fake_bin(
+        &fixture,
+        Some("#!/bin/sh\nprintf '%s\\n' \"git:$*\" >> \"$AUTOSPEC_LINT_COMMAND_LOG\"\n"),
+        Some("#!/bin/sh\nprintf '%s\\n' \"gh:$*\" >> \"$AUTOSPEC_LINT_COMMAND_LOG\"\nexit 99\n"),
+    );
+
+    let output = autospec()
+        .args(["lint", "implementation", "--staged", "--issue", "29"])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_LINT_COMMAND_LOG", &log)
+        .output()
+        .expect("staged lint runs");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "autospec lint implementation: no staged changes found\n"
+    );
+    assert_eq!(std::fs::read_to_string(log).unwrap(), "git:diff --cached\n");
+}
+
+#[test]
+fn lint_implementation_caps_a_large_finding_set_at_64() {
+    let diff = large_finding_diff();
+    let path = write_implementation_diff("autospec-lint-implementation-cap", &diff);
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--vacuous-assertions",
+            "--diff-file",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("large implementation lint runs");
+
+    assert_eq!(output.status.code(), Some(64));
+    assert!(output.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&output.stdout).lines().count() > 64);
+}
+
+#[test]
+fn lint_implementation_preserves_the_scope_explosion_exit_from_the_core() {
+    let diff = write_implementation_diff(
+        "autospec-lint-implementation-scope-explosion",
+        &new_diff(
+            "scripts/policy.sh",
+            &[
+                "eval(input)",
+                "# TODO aggregate cap",
+                "command --new-policy enabled",
+            ],
+        ),
+    );
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .env("AUTOSPEC_LINT_IMPLEMENTATION_TEST_HARD_CAP", "2")
+        .output()
+        .expect("scope explosion lint runs");
+
+    assert_eq!(output.status.code(), Some(200));
+    assert!(output.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("OUT_OF_SCOPE:-:-: too many findings — likely scope explosion"));
+}
+
+#[test]
+fn lint_implementation_does_not_follow_symlinked_diff_paths_outside_the_repository() {
+    let root = temp_dir("autospec-lint-implementation-symlink-root");
+    let outside = temp_dir("autospec-lint-implementation-symlink-outside");
+    std::fs::write(outside.join("secret.py"), "line\n".repeat(401)).expect("outside snapshot");
+    symlink(&outside, root.join("linked")).expect("in-repository link");
+    let diff = root.join("change.diff");
+    std::fs::write(&diff, new_diff("linked/secret.py", &["pass"])).expect("diff fixture");
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("symlinked diff lint runs");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn lint_implementation_reuse_lens_ignores_hidden_ignored_and_non_shell_evidence() {
+    let root = temp_dir("autospec-lint-implementation-reuse-evidence");
+    make_git_repo(&root, None);
+    std::fs::create_dir_all(root.join("scripts")).expect("scripts directory");
+    std::fs::create_dir_all(root.join("ignored")).expect("ignored directory");
+    std::fs::create_dir_all(root.join(".hidden")).expect("hidden directory");
+    std::fs::create_dir_all(root.join("nested/generated")).expect("nested ignored directory");
+    std::fs::create_dir_all(root.join("ignored-by-ignore")).expect("ignore directory");
+    std::fs::create_dir_all(root.join("ignored-by-rgignore")).expect("rgignore directory");
+    std::fs::write(root.join(".gitignore"), "ignored/\n*.py[cod]\n").expect("gitignore");
+    std::fs::write(root.join(".ignore"), "ignored-by-ignore/\n").expect("ignore");
+    std::fs::write(root.join(".rgignore"), "ignored-by-rgignore/\n").expect("rgignore");
+    std::fs::write(root.join("nested/.gitignore"), "generated/\n").expect("nested gitignore");
+    std::fs::write(root.join("scripts/helper.txt"), "parse_config() { :; }\n")
+        .expect("non-shell helper");
+    std::fs::write(
+        root.join("ignored/helper.sh"),
+        "parse_config() { :; }\nsession-manager\n",
+    )
+    .expect("ignored shell helper");
+    std::fs::write(
+        root.join(".hidden/helper.sh"),
+        "parse_config() { :; }\nsession-manager\n",
+    )
+    .expect("hidden shell helper");
+    std::fs::write(
+        root.join("nested/generated/helper.sh"),
+        "parse_config() { :; }\nsession-manager\n",
+    )
+    .expect("nested ignored shell helper");
+    std::fs::write(
+        root.join("ignored-by-ignore/helper.sh"),
+        "parse_config() { :; }\nsession-manager\n",
+    )
+    .expect("ignore shell helper");
+    std::fs::write(
+        root.join("ignored-by-rgignore/helper.sh"),
+        "parse_config() { :; }\nsession-manager\n",
+    )
+    .expect("rgignore shell helper");
+    std::fs::write(root.join("reference.pyc"), "session-manager\n")
+        .expect("character-class ignored reference");
+    let diff = root.join("change.diff");
+    std::fs::write(
+        &diff,
+        format!(
+            "{}{}",
+            new_diff("scripts/new-loader.sh", &["parse_config() { :; }"]),
+            new_diff("src/session-manager.rs", &["pub struct SessionManager;"]),
+        ),
+    )
+    .expect("reuse diff fixture");
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .current_dir(&root)
+        .env("AUTOSPEC_REUSE_LENS", "1")
+        .output()
+        .expect("reuse lint runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    assert!(!stdout.contains("REINVENT_REPO_UTIL:"));
+    assert!(stdout.contains("NEW_ABSTRACTION_SINGLE_CALLER:src/session-manager.rs:-:"));
+    assert!(stdout.contains("has 0 external caller(s)"));
+}
+
+#[test]
+fn lint_implementation_reuse_lens_excludes_an_in_repo_diff_from_abstraction_callers() {
+    let root = temp_dir("autospec-lint-implementation-in-repo-diff");
+    make_git_repo(&root, None);
+    std::fs::create_dir_all(root.join("src")).expect("source directory");
+    std::fs::write(root.join("src/consumer.rs"), "// session-manager\n").expect("real caller");
+    let diff = root.join("change.diff");
+    std::fs::write(
+        &diff,
+        new_diff("src/session-manager.rs", &["pub struct SessionManager;"]),
+    )
+    .expect("diff fixture");
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation",
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .current_dir(&root)
+        .env("AUTOSPEC_REUSE_LENS", "1")
+        .output()
+        .expect("reuse lint runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    assert!(stdout.contains("NEW_ABSTRACTION_SINGLE_CALLER:src/session-manager.rs:-:"));
+    assert!(stdout.contains("has 1 external caller(s)"));
 }
 
 #[test]
@@ -2227,6 +2659,78 @@ fn write_issue_body(prefix: &str, body: &str) -> std::path::PathBuf {
     let path = temp_dir(prefix).join("issue.md");
     std::fs::write(&path, body).expect("issue fixture");
     path
+}
+
+fn new_diff(path: &str, lines: &[&str]) -> String {
+    let additions = lines
+        .iter()
+        .map(|line| format!("+{line}\n"))
+        .collect::<String>();
+    format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n{additions}",
+        lines.len()
+    )
+}
+
+fn write_implementation_diff(prefix: &str, diff: &str) -> std::path::PathBuf {
+    let path = temp_dir(prefix).join("change.diff");
+    std::fs::write(&path, diff).expect("implementation diff fixture");
+    path
+}
+
+fn large_finding_diff() -> String {
+    let security = vec!["eval(input)"; 15];
+    let todos = vec!["# TODO deferred"; 15];
+    let nested = vec!["                    if nested {"; 15];
+    let vacuous = vec!["grep -qv 'bad' result.txt || true"; 15];
+    let tautologies = vec!["expect(true).toBe(true);"; 15];
+    let mocks = vec!["let database = mock(database);"; 15];
+    format!(
+        "{}{}{}{}{}{}",
+        new_diff("scripts/security.sh", &security),
+        new_diff("scripts/todos.sh", &todos),
+        new_diff("scripts/deeply_nested.sh", &nested),
+        new_diff("tests/unit/test_vacuous.bats", &vacuous),
+        new_diff("tests/unit/test_tautology.js", &tautologies),
+        new_diff("tests/unit/db_test.rs", &mocks),
+    )
+}
+
+fn fake_bin(
+    fixture: &std::path::Path,
+    git_program: Option<&str>,
+    gh_program: Option<&str>,
+) -> std::path::PathBuf {
+    let bin = fixture.join("bin");
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    if let Some(program) = git_program {
+        write_executable(&bin.join("git"), program);
+    }
+    if let Some(program) = gh_program {
+        write_executable(&bin.join("gh"), program);
+    }
+    bin
+}
+
+fn write_executable(path: &std::path::Path, contents: &str) {
+    std::fs::write(path, contents).expect("fake command");
+    let mut permissions = std::fs::metadata(path)
+        .expect("fake command metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("fake command permissions");
+}
+
+fn path_with(bin: &std::path::Path) -> String {
+    format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").expect("test PATH is set")
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\\"'\\\"'"))
 }
 
 fn autospec_with_stdin<const N: usize>(args: [&str; N], input: &str) -> Output {
