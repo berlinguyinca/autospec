@@ -70,6 +70,8 @@ pub enum ExternalCheck {
     AutospecResumeContract,
     ImplementerContract,
     ReviewerContract,
+    ConductorWiringContract,
+    AutonomyGuardrailsFoundation,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -181,6 +183,10 @@ impl ExternalCheck {
             Self::AutospecResumeContract => run_autospec_resume_contract(id, required, root),
             Self::ImplementerContract => run_implementer_contract(id, required, root),
             Self::ReviewerContract => run_reviewer_contract(id, required, root),
+            Self::ConductorWiringContract => run_conductor_wiring_contract(id, required, root),
+            Self::AutonomyGuardrailsFoundation => {
+                run_autonomy_guardrails_foundation(id, required, root)
+            }
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -3854,6 +3860,129 @@ fn run_reviewer_contract(id: &str, required: bool, root: &Path) -> CheckResult {
     captured.result
 }
 
+fn run_conductor_wiring_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const LOOP: &str = "scripts/lib/autospec-loop.sh";
+    const WATERFALL: &str = "scripts/autonomous-waterfall.sh";
+    const SUITE: &str = "tests/autospec/test_conductor_wiring.bats";
+    let syntax =
+        run_required_bash_scripts(id, required, root, &[(LOOP, false), (WATERFALL, false)]);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    let loop_file = root.join(LOOP);
+    if !has_line_prefix(&loop_file, "autospec_conductor_run()") {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                failure(id, required, "loop driver: missing autospec_conductor_run"),
+            ],
+        );
+    }
+    for alternatives in [
+        &["autonomous-premerge-gate", "premerge.gate", "premerge_gate"][..],
+        &["autonomous-spend-ledger", "spend.ledger", "spend_ledger"][..],
+        &["autonomous-resilience", "resilience"][..],
+        &["digest", "autonomous-digest"][..],
+        &[
+            "autonomous-control-channel",
+            "control.channel",
+            "control_ch",
+        ][..],
+        &["autonomous-waterfall", "waterfall"][..],
+    ] {
+        if !contains_any(&loop_file, alternatives) {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(id, required, "loop driver: missing conductor wiring"),
+                ],
+            );
+        }
+    }
+    for suite in [
+        "tests/autonomous/test_waterfall_growth.bats",
+        "tests/autonomous/test_loop_growth_dispatch.bats",
+    ] {
+        if !root.join(suite).is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(id, required, &format!("{suite}: coverage missing")),
+                ],
+            );
+        }
+    }
+    let skill = root.join("skills/autospec-autonomous/SKILL.md");
+    if !contains_any(&skill, &["autospec_conductor_run", "autospec-loop.sh"]) {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                failure(
+                    id,
+                    required,
+                    "autonomous skill: missing conductor reference",
+                ),
+            ],
+        );
+    }
+    let bats = run_bats_suites(id, required, root, &[SUITE]);
+    aggregate(id, required, vec![syntax, bats])
+}
+
+fn run_autonomy_guardrails_foundation(id: &str, required: bool, root: &Path) -> CheckResult {
+    const GUARDRAILS: &str = "scripts/autonomous-guardrails.sh";
+    const SUITE: &str = "tests/autonomous/test_guardrails_foundation.bats";
+    let syntax = run_required_bash_scripts(id, required, root, &[(GUARDRAILS, true)]);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    for (relative, token) in [
+        ("scripts/autonomous-premerge-gate.sh", "diff-guard"),
+        ("scripts/autonomous-premerge-gate.sh", "blast-radius"),
+        ("scripts/autonomous-premerge-gate.sh", "provenance"),
+        ("scripts/autonomous-resilience.sh", "post-merge-health"),
+        ("scripts/autonomous-resilience.sh", "audit-log"),
+        ("scripts/autonomous-resilience.sh", "FOLLOWUP_ISSUE"),
+        (
+            "skills/autospec-autonomous/install.sh",
+            "autonomous-guardrails.sh",
+        ),
+        (
+            "skills/autospec-autonomous/uninstall.sh",
+            "autonomous-guardrails.sh",
+        ),
+        (
+            "docs/specs/2026-07-07-autonomy-guardrails-foundation-design.md",
+            "Skalse",
+        ),
+        (
+            "docs/specs/2026-07-07-autonomy-guardrails-foundation-design.md",
+            "specification gaming",
+        ),
+    ] {
+        if !contains(&root.join(relative), token) {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(id, required, &format!("{relative}: missing {token}")),
+                ],
+            );
+        }
+    }
+    let bats = run_bats_suites(id, required, root, &[SUITE]);
+    aggregate(id, required, vec![syntax, bats])
+}
+
 fn prompt_contract_rule_ids(
     id: &str,
     required: bool,
@@ -3988,6 +4117,10 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
+}
+
+fn contains_any(path: &Path, expected: &[&str]) -> bool {
+    expected.iter().any(|token| contains(path, token))
 }
 
 fn run_optional_jsonschema_checks(

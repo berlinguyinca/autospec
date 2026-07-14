@@ -1303,6 +1303,43 @@ fn runner_checks_prompt_contracts_with_captured_typed_output() {
 }
 
 #[test]
+fn runner_checks_autonomy_wiring_contracts_with_direct_bash_and_bats() {
+    for (id, owner, fixture, minimum_spawns, maximum_spawns) in [
+        (
+            "check_conductor_wiring_contract",
+            ExternalCheck::ConductorWiringContract,
+            "conductor-wiring",
+            2,
+            3,
+        ),
+        (
+            "check_autonomy_guardrails_foundation",
+            ExternalCheck::AutonomyGuardrailsFoundation,
+            "autonomy-guardrails",
+            1,
+            2,
+        ),
+    ] {
+        let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+            id,
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(owner),
+        }]);
+
+        let report = ValidationRunner::run(&catalog, &validation_fixture(fixture));
+
+        assert_eq!(report.results[0].exit_code, Some(0), "{id}");
+        assert!(
+            (minimum_spawns..=maximum_spawns).contains(&report.results[0].spawn_count),
+            "{id}"
+        );
+    }
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

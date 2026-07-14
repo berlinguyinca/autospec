@@ -289,6 +289,12 @@ impl ValidationCheck {
                 CheckOwner::ExternalBatch(ExternalCheck::ImplementerContract)
             }
             "check_reviewer_contract" => CheckOwner::ExternalBatch(ExternalCheck::ReviewerContract),
+            "check_conductor_wiring_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::ConductorWiringContract)
+            }
+            "check_autonomy_guardrails_foundation" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutonomyGuardrailsFoundation)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

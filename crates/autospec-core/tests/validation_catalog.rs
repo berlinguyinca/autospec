@@ -1429,6 +1429,32 @@ fn catalog_assigns_prompt_contracts_to_typed_external_batches() {
 }
 
 #[test]
+fn catalog_assigns_autonomy_wiring_contracts_to_typed_external_batches() {
+    let catalog = ValidationCatalog::standard();
+
+    for (id, owner) in [
+        (
+            "check_conductor_wiring_contract",
+            ExternalCheck::ConductorWiringContract,
+        ),
+        (
+            "check_autonomy_guardrails_foundation",
+            ExternalCheck::AutonomyGuardrailsFoundation,
+        ),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::ExternalBatch(owner)),
+            "{id} must have a typed external owner"
+        );
+    }
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![
