@@ -1470,6 +1470,32 @@ fn catalog_assigns_python_suites_to_a_typed_external_batch() {
 }
 
 #[test]
+fn catalog_assigns_growth_and_documentation_contracts_to_typed_external_batches() {
+    let catalog = ValidationCatalog::standard();
+
+    for (id, owner) in [
+        (
+            "check_grow_define_contract",
+            ExternalCheck::GrowDefineContract,
+        ),
+        (
+            "check_autospec_doc_contract",
+            ExternalCheck::AutospecDocContract,
+        ),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::ExternalBatch(owner)),
+            "{id} must have a typed external owner"
+        );
+    }
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![

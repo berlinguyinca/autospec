@@ -1357,6 +1357,38 @@ fn runner_checks_python_suites_with_a_typed_pytest_command() {
 }
 
 #[test]
+fn runner_checks_growth_and_documentation_contracts_with_typed_tool_batches() {
+    for (id, owner, fixture, expected_spawns) in [
+        (
+            "check_grow_define_contract",
+            ExternalCheck::GrowDefineContract,
+            "grow-define-contract",
+            8,
+        ),
+        (
+            "check_autospec_doc_contract",
+            ExternalCheck::AutospecDocContract,
+            "autospec-doc-contract",
+            3,
+        ),
+    ] {
+        let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+            id,
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(owner),
+        }]);
+
+        let report = ValidationRunner::run(&catalog, &validation_fixture(fixture));
+
+        assert_eq!(report.results[0].exit_code, Some(0), "{id}");
+        assert_eq!(report.results[0].spawn_count, expected_spawns, "{id}");
+    }
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

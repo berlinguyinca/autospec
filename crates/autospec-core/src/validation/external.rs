@@ -1,5 +1,7 @@
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::command::ToolCommand;
 use super::results::{output_digest, CheckResult};
@@ -73,6 +75,8 @@ pub enum ExternalCheck {
     ConductorWiringContract,
     AutonomyGuardrailsFoundation,
     PythonSuites,
+    GrowDefineContract,
+    AutospecDocContract,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -189,6 +193,8 @@ impl ExternalCheck {
                 run_autonomy_guardrails_foundation(id, required, root)
             }
             Self::PythonSuites => run_python_suites(id, required, root),
+            Self::GrowDefineContract => run_grow_define_contract(id, required, root),
+            Self::AutospecDocContract => run_autospec_doc_contract(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -3892,6 +3898,247 @@ fn run_python_suites(id: &str, required: bool, root: &Path) -> CheckResult {
     .with_env("PYTHONPATH", "packages/autospec_context_monitor")
     .execute_in(id, required, root);
     aggregate(id, required, vec![availability, suites])
+}
+
+fn run_grow_define_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SKILL: &str = "skills/autospec-grow-define";
+    const DERIVE_TRIO: &str = "scripts/derive-trio.sh";
+    const SCRIPTS: &[&str] = &[
+        "skills/autospec-shared/scripts/grow-define-pipeline.sh",
+        "skills/autospec-shared/scripts/grow-define-file-issues.sh",
+    ];
+    const SUITES: &[&str] = &[
+        "tests/unit/grow-define-pipeline.bats",
+        "tests/unit/grow-define-file-issues.bats",
+        "tests/unit/filing-origin-self-explore-growth.bats",
+        "tests/unit/qa-filing-origin-self.bats",
+        "tests/autospec-grow-define/smoke.bats",
+    ];
+
+    let syntax = run_required_bash_scripts(
+        id,
+        required,
+        root,
+        &SCRIPTS
+            .iter()
+            .map(|script| (*script, false))
+            .collect::<Vec<_>>(),
+    );
+    if syntax.is_failure() {
+        return syntax;
+    }
+
+    let derive_path = root.join(DERIVE_TRIO);
+    if !is_executable(&derive_path) {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                failure(
+                    id,
+                    required,
+                    "scripts/derive-trio.sh missing or not executable",
+                ),
+            ],
+        );
+    }
+    let derived = ToolCommand::new(DERIVE_TRIO, [SKILL, "--check"])
+        .expect("derive-trio uses direct static arguments")
+        .execute_in(id, required, root);
+    if derived.is_failure() {
+        return aggregate(id, required, vec![syntax, derived]);
+    }
+
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let path = root.join(SKILL).join(member);
+        if !path.is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    derived,
+                    failure(id, required, &format!("{SKILL}/{member}: missing")),
+                ],
+            );
+        }
+        for heading in ["## Self-update mode", "## Lens roster"] {
+            if !has_heading_prefix(&path, heading) {
+                return aggregate(
+                    id,
+                    required,
+                    vec![
+                        syntax,
+                        derived,
+                        failure(
+                            id,
+                            required,
+                            &format!("{SKILL}/{member}: missing {heading}"),
+                        ),
+                    ],
+                );
+            }
+        }
+        if !contains(&path, "**Model tier:**") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    derived,
+                    failure(
+                        id,
+                        required,
+                        &format!("{SKILL}/{member}: missing **Model tier:** directive"),
+                    ),
+                ],
+            );
+        }
+    }
+    let skill = root.join(SKILL).join("SKILL.md");
+    for lens in [
+        "technical-seo",
+        "keyword-gap",
+        "content-opportunity",
+        "community",
+        "directory",
+        "backlink",
+    ] {
+        if !contains(&skill, lens) {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    derived,
+                    failure(
+                        id,
+                        required,
+                        &format!("{SKILL}/SKILL.md: lens {lens} not named in roster"),
+                    ),
+                ],
+            );
+        }
+    }
+
+    let bats = run_bats_suites_if_available(id, required, root, SUITES);
+    aggregate(id, required, vec![syntax, derived, bats])
+}
+
+fn run_autospec_doc_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SKILL: &str = "skills/autospec-doc";
+    const ORCHESTRATOR: &str = "skills/autospec-doc/scripts/doc-orchestrator.mjs";
+    const SUITE: &str = "skills/autospec-doc/tests/doc-orchestrator.bats";
+
+    if !root.join(SKILL).is_dir() {
+        return failure(id, required, "skills/autospec-doc: directory missing");
+    }
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let path = root.join(SKILL).join(member);
+        if !path.is_file() {
+            return failure(
+                id,
+                required,
+                &format!("{SKILL}/{member}: required file missing"),
+            );
+        }
+        if !has_heading_prefix(&path, "## Subcommand contract") {
+            return failure(
+                id,
+                required,
+                &format!("{SKILL}/{member} missing '## Subcommand contract' section"),
+            );
+        }
+        for subcommand in ["--full", "--audit", "--audience"] {
+            if !contains(&path, subcommand) {
+                return failure(
+                    id,
+                    required,
+                    &format!("{SKILL}/{member} missing {subcommand} subcommand"),
+                );
+            }
+        }
+        if !contains(&path, "/autospec-doc init") && !contains(&path, "`init`") {
+            return failure(
+                id,
+                required,
+                &format!("{SKILL}/{member} missing init subcommand"),
+            );
+        }
+        for anchor in [
+            "worktree-guard.sh assert",
+            "MUST exit 0",
+            "doc-regen-assert:begin",
+        ] {
+            if !contains(&path, anchor) {
+                return failure(id, required, &format!("{SKILL}/{member}: missing {anchor}"));
+            }
+        }
+    }
+    let orchestrator = root.join(ORCHESTRATOR);
+    if !orchestrator.is_file() {
+        return failure(
+            id,
+            required,
+            &format!("{ORCHESTRATOR}: orchestrator stub missing"),
+        );
+    }
+
+    let mut results = Vec::new();
+    if program_on_path("node") {
+        let syntax = ToolCommand::new("node", ["--check", ORCHESTRATOR])
+            .expect("Node syntax validation uses direct static arguments")
+            .execute_in(id, required, root);
+        if syntax.is_failure() {
+            return syntax;
+        }
+        results.push(syntax);
+
+        let gate_directory = match doc_contract_gate_directory() {
+            Ok(directory) => directory,
+            Err(error) => return aggregate(id, required, vec![failure(id, required, &error)]),
+        };
+        let gate = ToolCommand::new(
+            "node",
+            vec![orchestrator.into_os_string(), OsString::from("--full")],
+        )
+        .expect("documentation gate uses direct static arguments")
+        .execute_in(id, required, &gate_directory);
+        let _ = fs::remove_dir_all(&gate_directory);
+        if gate.exit_code != Some(2) {
+            results.push(gate);
+            results.push(failure(
+                id,
+                required,
+                "doc orchestrator: non-init subcommand with no documentation config must exit 2",
+            ));
+            return aggregate(id, required, results);
+        }
+        results.push(CheckResult {
+            exit_code: Some(0),
+            ..gate
+        });
+    }
+
+    let bats = run_bats_suites(id, required, root, &[SUITE]);
+    results.push(bats);
+    aggregate(id, required, results)
+}
+
+fn doc_contract_gate_directory() -> Result<PathBuf, String> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("doc orchestrator: clock unavailable: {error}"))?
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "autospec-doc-contract-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).map_err(|error| {
+        format!("doc orchestrator: could not create isolated config-gate directory: {error}")
+    })?;
+    Ok(directory)
 }
 
 fn run_conductor_wiring_contract(id: &str, required: bool, root: &Path) -> CheckResult {

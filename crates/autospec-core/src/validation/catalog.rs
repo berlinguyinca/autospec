@@ -400,6 +400,12 @@ impl ValidationCheck {
                 CheckOwner::ExternalBatch(ExternalCheck::GapMinerContract)
             }
             "check_startup_preflight" => CheckOwner::RustNative(StructuralCheck::StartupPreflight),
+            "check_grow_define_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::GrowDefineContract)
+            }
+            "check_autospec_doc_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecDocContract)
+            }
             _ => CheckOwner::RustNative(StructuralCheck::CatalogSlot),
         };
         Self {
