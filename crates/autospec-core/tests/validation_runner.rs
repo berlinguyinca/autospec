@@ -1044,6 +1044,23 @@ fn runner_checks_autonomous_mode_contract_with_direct_bash_and_bats_commands() {
 }
 
 #[test]
+fn runner_checks_dogfood_detectors_with_direct_bash_and_bats_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_dogfood_detectors",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::DogfoodDetectors),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("dogfood-detectors"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert!((4..=6).contains(&report.results[0].spawn_count));
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

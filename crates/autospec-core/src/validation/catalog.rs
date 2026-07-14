@@ -244,6 +244,7 @@ impl ValidationCheck {
             "check_autospec_autonomous_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecAutonomousContract)
             }
+            "check_dogfood_detectors" => CheckOwner::ExternalBatch(ExternalCheck::DogfoodDetectors),
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

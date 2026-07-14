@@ -53,6 +53,7 @@ pub enum ExternalCheck {
     FabContainerPinLint,
     RepoQualityAudit,
     AutospecAutonomousContract,
+    DogfoodDetectors,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -141,6 +142,7 @@ impl ExternalCheck {
             Self::AutospecAutonomousContract => {
                 run_autospec_autonomous_contract(id, required, root)
             }
+            Self::DogfoodDetectors => run_dogfood_detectors(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2930,6 +2932,68 @@ fn run_autospec_autonomous_contract(id: &str, required: bool, root: &Path) -> Ch
     }
     let bats = run_bats_suites(id, required, root, &[SUITE]);
     aggregate(id, required, vec![help, bats])
+}
+
+fn run_dogfood_detectors(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPTS: &[(&str, bool)] = &[
+        ("scripts/dogfood-detectors.sh", true),
+        ("scripts/dogfood-adapter-doc-drift.sh", true),
+        ("scripts/dogfood-adapter-lint.sh", true),
+    ];
+    const OPTIONAL_SUITES: &[&str] = &[
+        "tests/dogfood/test_driver.bats",
+        "tests/dogfood/test_adapter_layer.bats",
+    ];
+
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let relative = format!("skills/autospec-qa/{member}");
+        let path = root.join(&relative);
+        if !has_heading_prefix(&path, "## Dogfood detectors driver") {
+            return failure(
+                id,
+                required,
+                &format!("{relative}: missing Dogfood detectors driver section"),
+            );
+        }
+        if !contains(&path, "dogfood-detectors.sh") {
+            return failure(
+                id,
+                required,
+                &format!("{relative}: missing reference to dogfood-detectors.sh"),
+            );
+        }
+    }
+    let registry = root.join(".autospec/dogfood.yml");
+    if !registry.is_file() || !has_line_prefix(&registry, "adapters:") {
+        return failure(
+            id,
+            required,
+            ".autospec/dogfood.yml: missing adapters schema",
+        );
+    }
+
+    let syntax = run_required_bash_scripts(id, required, root, SCRIPTS);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    let driver = ToolCommand::new("bash", ["scripts/dogfood-detectors.sh"])
+        .expect("dogfood driver uses a direct Bash argument vector")
+        .execute_in(id, required, root);
+    if driver.is_failure() {
+        return aggregate(id, required, vec![syntax, driver]);
+    }
+
+    let existing_suites = OPTIONAL_SUITES
+        .iter()
+        .copied()
+        .filter(|suite| root.join(suite).is_file())
+        .collect::<Vec<_>>();
+    let bats = if existing_suites.is_empty() || !program_on_path("bats") {
+        CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]))
+    } else {
+        run_bats_suites(id, required, root, &existing_suites)
+    };
+    aggregate(id, required, vec![syntax, driver, bats])
 }
 
 fn run_required_bash_scripts(
