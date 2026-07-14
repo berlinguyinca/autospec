@@ -21,6 +21,8 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec runtime env down [--repo <path>] [--mode <mode>]` | no | runs the selected optional teardown command and removes its state after successful teardown |
 | `autospec runtime env exec [--repo <path>] [--mode <mode>] -- <command> [args...]` | no | provisions or reuses state, then runs one direct child with the runtime environment |
 | `autospec runtime env session [--repo <path>] [--mode <mode>] [--keep-alive] -- <command> [args...]` | no | runs one direct child with lifecycle cleanup, manifest auto-init/bypass controls, and Unix interruption cleanup |
+| `autospec claim state read\|upsert\|clear\|reconcile-linked-pr ...` | yes | manages the schema-1 GitHub run-state comment using lowest-comment-ID selection |
+| `autospec claim acquire\|release ...` | yes | applies the typed safety gate, heartbeat/label ordering, lease CAS, and terminal release transitions |
 | `autospec run --run <id> --spec <id>... [--json]` | yes | creates a local persisted queue only; it does not launch an agent or validation command |
 | `autospec run --ingest <agent-result.json> --run <id> --spec <id> --result-id <id> --outcome <passed\|failed\|blocked> [--failure-kind <kind>] [--retry-limit <n>] [--json]` | yes | validates and records an explicit local agent result; it does not launch an agent or validation command |
 | `autospec resume [--json]` | yes | reports the newest incomplete local queue and its next entry; it does not execute it |
@@ -49,3 +51,13 @@ current queue position. Use `/autospec-run` for the existing agent-execution wor
 
 For the v1 runtime-manifest grammar, state behavior, child-command semantics, and cleanup
 procedure, see [Agent runtime manifests](runbooks/agent-runtime-manifest.md).
+
+`autospec claim state` is the Rust-owned transport and codec for the existing GitHub
+run-state comment protocol. `read` fails closed when the lowest marked comment is malformed
+or bound to a different issue; `upsert` patches that lowest comment and removes higher-ID
+duplicates; `clear` removes only marked run-state comments; and `reconcile-linked-pr` records
+one eligible linked PR before posting the idempotent post-PR handoff reminder. `acquire` validates
+the current issue safety review before it writes a startup heartbeat and moves labels, then uses
+the lowest GitHub comment ID plus a server-side timestamp to decide the lease. `release` writes
+terminal merge evidence before state and label transitions. Legacy script entrypoints remain only
+as compatibility surfaces until every caller is redirected to this command family.

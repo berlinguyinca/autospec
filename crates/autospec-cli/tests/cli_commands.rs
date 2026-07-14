@@ -35,6 +35,7 @@ fn cli_commands_help_lists_required_commands() {
         [
             "init",
             "lint",
+            "claim",
             "doctor",
             "status",
             "autonomous",

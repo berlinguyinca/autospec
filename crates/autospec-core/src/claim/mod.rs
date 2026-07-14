@@ -106,3 +106,835 @@ impl ClaimRunState {
         }
     }
 }
+use std::collections::BTreeMap;
+
+use crate::state::json::{JsonParser, JsonValue};
+
+pub const RUN_STATE_BEGIN_MARKER: &str = "<!-- autospec-run-state:begin -->";
+pub const RUN_STATE_END_MARKER: &str = "<!-- autospec-run-state:end -->";
+pub const RUN_TERMINAL_BEGIN_MARKER: &str = "<!-- autospec-run-terminal:begin -->";
+pub const RUN_TERMINAL_END_MARKER: &str = "<!-- autospec-run-terminal:end -->";
+const SAFETY_BEGIN_MARKER: &str = "<!-- autospec-safety:begin -->";
+const SAFETY_END_MARKER: &str = "<!-- autospec-safety:end -->";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimSafetyInput {
+    pub labels: Vec<String>,
+    pub title: String,
+    pub body: String,
+    pub author: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimIssueSnapshot {
+    pub labels: Vec<String>,
+    pub title: String,
+    pub body: String,
+    pub author: String,
+}
+
+impl ClaimIssueSnapshot {
+    pub fn safety_input(&self) -> ClaimSafetyInput {
+        ClaimSafetyInput::new(
+            self.labels.clone(),
+            self.title.clone(),
+            self.body.clone(),
+            self.author.clone(),
+        )
+    }
+}
+
+pub fn parse_claim_issue_json(input: &str) -> Result<ClaimIssueSnapshot, String> {
+    let mut object = JsonParser::new(input)
+        .parse()?
+        .into_object("GitHub claim issue")?;
+    require_only_keys(&object, &["labels", "title", "body", "author"])?;
+    let labels = take_required(&mut object, "labels")?
+        .into_array("GitHub claim issue labels")?
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| value.into_string(&format!("GitHub claim issue labels[{index}]")))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ClaimIssueSnapshot {
+        labels,
+        title: take_optional_string(&mut object, "title", "GitHub claim issue")?
+            .unwrap_or_default(),
+        body: take_optional_string(&mut object, "body", "GitHub claim issue")?.unwrap_or_default(),
+        author: take_optional_string(&mut object, "author", "GitHub claim issue")?
+            .unwrap_or_default(),
+    })
+}
+
+impl ClaimSafetyInput {
+    pub fn new(
+        labels: Vec<String>,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        author: impl Into<String>,
+    ) -> Self {
+        Self {
+            labels,
+            title: title.into(),
+            body: body.into(),
+            author: author.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimSafetyDecision {
+    pub allowed: bool,
+    pub reason: &'static str,
+}
+
+impl ClaimSafetyDecision {
+    fn pass() -> Self {
+        Self {
+            allowed: true,
+            reason: "pass",
+        }
+    }
+
+    fn reject(reason: &'static str) -> Self {
+        Self {
+            allowed: false,
+            reason,
+        }
+    }
+}
+
+/// Evaluate the fail-closed claim safety contract without executing a script or
+/// trusting generated metadata. This deliberately checks the current issue
+/// title/body after validating the exact reviewed marker block.
+pub fn evaluate_claim_safety(input: &ClaimSafetyInput) -> ClaimSafetyDecision {
+    let labels = input
+        .labels
+        .iter()
+        .map(|label| label.as_str())
+        .collect::<Vec<_>>();
+    if labels.contains(&"security:quarantined") {
+        return ClaimSafetyDecision::reject("security_quarantined");
+    }
+    if !labels.contains(&"safety:reviewed") {
+        return ClaimSafetyDecision::reject("missing_safety_reviewed");
+    }
+    if input.body.matches(SAFETY_BEGIN_MARKER).count() != 1
+        || input.body.matches(SAFETY_END_MARKER).count() != 1
+    {
+        return ClaimSafetyDecision::reject("invalid_safety_markers");
+    }
+    let Some(begin) = input.body.find(SAFETY_BEGIN_MARKER) else {
+        return ClaimSafetyDecision::reject("invalid_safety_markers");
+    };
+    let Some(end) = input.body.find(SAFETY_END_MARKER) else {
+        return ClaimSafetyDecision::reject("invalid_safety_markers");
+    };
+    if begin >= end {
+        return ClaimSafetyDecision::reject("invalid_safety_markers");
+    }
+
+    let prefix = &input.body[..begin];
+    let Some((heading_start, heading_end)) = last_safety_heading(prefix) else {
+        return ClaimSafetyDecision::reject("missing_safety_review_heading");
+    };
+    if prefix[heading_end..]
+        .lines()
+        .any(|line| !line.trim().is_empty())
+    {
+        return ClaimSafetyDecision::reject("unexpected_safety_review_preamble");
+    }
+    let block_start = begin + SAFETY_BEGIN_MARKER.len();
+    let block = &input.body[block_start..end];
+    let lines = block
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines
+        .iter()
+        .any(|line| !line.starts_with("- **decision:**"))
+    {
+        return ClaimSafetyDecision::reject("unexpected_safety_block_content");
+    }
+    if lines.len() != 1 {
+        return ClaimSafetyDecision::reject("missing_safety_pass");
+    }
+    if lines[0] != "- **decision:** `SAFETY_PASS`" {
+        return ClaimSafetyDecision::reject("non_pass_safety_decision");
+    }
+
+    let after_end = end + SAFETY_END_MARKER.len();
+    let body_without_review = format!(
+        "{}{}",
+        &input.body[..heading_start],
+        &input.body[after_end..]
+    );
+    let scan = format!(
+        "{}\n{}",
+        input.title,
+        strip_guardian_skips(&body_without_review)
+    );
+    let intent = evaluate_issue_intent(&scan, &input.author);
+    if intent.blocking {
+        return ClaimSafetyDecision::reject("current_body_safety_block");
+    }
+    if intent.ambiguous {
+        return ClaimSafetyDecision::reject("current_body_safety_ambiguous");
+    }
+    ClaimSafetyDecision::pass()
+}
+
+#[derive(Debug, Default)]
+struct IssueIntent {
+    blocking: bool,
+    ambiguous: bool,
+}
+
+/// This is the Rust authority for the built-in issue-intent policy.  The
+/// policy intentionally uses bounded, line-local checks where the shell
+/// implementation used bounded regular expressions: a CI noun followed by a
+/// present-tense "skips" is descriptive prose, not a request to bypass CI.
+fn evaluate_issue_intent(text: &str, actor: &str) -> IssueIntent {
+    let lower = text.to_ascii_lowercase();
+    let mut intent = IssueIntent {
+        blocking: contains_production_destruction(&lower)
+            || contains_secret_exfiltration(&lower)
+            || contains_credential_printing(&lower)
+            || contains_instruction_bypass(&lower)
+            || contains_ci_or_review_bypass(&lower)
+            || contains_auth_backdoor(&lower)
+            || lower.contains("rm -rf /")
+            || (lower.contains("curl") && (lower.contains("| sh") || lower.contains("| bash"))),
+        ambiguous: contains_vague_data_cleanup(&lower)
+            || contains_weakened_security(&lower)
+            || contains_any(
+                &lower,
+                &[
+                    "production",
+                    "prod",
+                    "billing",
+                    "payments",
+                    "migration",
+                    "terraform",
+                    "iam",
+                    "kms",
+                ],
+            ),
+    };
+
+    if is_trusted_test_reset(&lower, actor) && !intent.blocking {
+        // The legacy policy lets the configured repo owner perform a documented
+        // local/test reset. It only removes the two ambiguity signals the reset
+        // necessarily contains; never-bypass findings stay blocking above.
+        intent.ambiguous = false;
+    }
+    intent
+}
+
+fn last_safety_heading(prefix: &str) -> Option<(usize, usize)> {
+    let mut offset = 0;
+    let mut heading = None;
+    for line in prefix.split_inclusive('\n') {
+        let text = line.trim_end_matches(['\r', '\n']);
+        if text.starts_with("## ") {
+            heading = (text.trim() == "## Safety review").then_some((offset, offset + line.len()));
+        }
+        offset += line.len();
+    }
+    if !prefix.ends_with('\n') {
+        let last_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+        let last = &prefix[last_start..];
+        if last.starts_with("## ") {
+            heading = (last.trim() == "## Safety review").then_some((last_start, prefix.len()));
+        }
+    }
+    heading
+}
+
+fn strip_guardian_skips(body: &str) -> String {
+    body.lines()
+        .filter(|line| !line.trim_start().starts_with("Guardian: skip-"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn contains_production_destruction(text: &str) -> bool {
+    text.lines().any(|line| {
+        let delete_production = ordered_contains(line, "delete", "production");
+        let drop_production_database =
+            ordered_contains(line, "drop", "prod") && ordered_contains(line, "prod", "database");
+        delete_production || drop_production_database
+    })
+}
+
+fn contains_secret_exfiltration(text: &str) -> bool {
+    (contains_any(text, &["dump", "print", "exfiltrate", "send"]) && text.contains("secret"))
+        || contains_any(text, &["aws token", "github token", "stripe token"])
+}
+
+fn contains_credential_printing(text: &str) -> bool {
+    let subject = [
+        "credential",
+        "password",
+        "api key",
+        "api-key",
+        "private key",
+        "private-key",
+        "token",
+    ];
+    let action = ["print", "dump", "log", "write", "show", "expose", "send"];
+    (contains_any(text, &subject) && contains_any(text, &action))
+        || (contains_any(text, &subject)
+            && contains_any(
+                text,
+                &["to the log", "to log", "to console", "to stdout", "in logs"],
+            ))
+}
+
+fn contains_instruction_bypass(text: &str) -> bool {
+    [
+        "ignore previous instructions",
+        "ignore all previous instructions",
+        "ignore system instructions",
+        "ignore all system instructions",
+        "ignore developer instructions",
+        "ignore all developer instructions",
+        "ignore agent instructions",
+        "ignore all agent instructions",
+        "bypass ci",
+        "bypass tests",
+        "bypass hooks",
+        "bypass review",
+        "bypass guardian",
+    ]
+    .iter()
+    .any(|pattern| text.contains(pattern))
+}
+
+fn contains_ci_or_review_bypass(text: &str) -> bool {
+    const NOUNS: &[&str] = &["ci", "check", "test", "hook", "review", "guardian"];
+    const VERBS: &[&str] = &["disable", "turn off", "remove", "skip"];
+    const NOUN_FIRST_VERBS: &[&str] = &[
+        "disable",
+        "disabled",
+        "turn off",
+        "turned off",
+        "remove",
+        "removed",
+        "skip",
+        "skipped",
+        "bypass",
+        "bypassed",
+        "ignore",
+        "ignored",
+        "suppress",
+        "suppressed",
+    ];
+    text.lines().any(|line| {
+        // Corresponds to the verb→noun regex arm.
+        VERBS.iter().any(|verb| {
+            NOUNS
+                .iter()
+                .any(|noun| ordered_contains_word(line, verb, noun))
+        })
+            // Corresponds to the noun→verb arm. Do not include present-tense
+            // "skips"/"disables"/"removes": that is the #1799 false-positive
+            // shape the bounded legacy rule deliberately excluded.
+            || NOUNS.iter().any(|noun| {
+                NOUN_FIRST_VERBS
+                    .iter()
+                    .any(|verb| ordered_contains_word(line, noun, verb))
+            })
+    })
+}
+
+fn contains_auth_backdoor(text: &str) -> bool {
+    let subject = ["auth", "login", "password", "token", "admin"];
+    (contains_any(text, &subject) && contains_any(text, &["backdoor", "bypass"]))
+        || contains_any(text, &["magic token", "magic password", "magic login"])
+}
+
+fn contains_vague_data_cleanup(text: &str) -> bool {
+    [
+        "clean data",
+        "clean old data",
+        "clean bad data",
+        "clean stale data",
+    ]
+    .iter()
+    .any(|pattern| text.contains(pattern))
+}
+
+fn contains_weakened_security(text: &str) -> bool {
+    text.lines().any(|line| {
+        ["relax", "disable", "remove"].iter().any(|verb| {
+            ["security", "auth", "audit", "logging"]
+                .iter()
+                .any(|noun| ordered_contains(line, verb, noun))
+        })
+    })
+}
+
+fn is_trusted_test_reset(text: &str, actor: &str) -> bool {
+    if actor != "berlinguyinca" {
+        return false;
+    }
+    let reset = ["delete", "reset", "repopulate"].iter().any(|verb| {
+        (ordered_contains(text, verb, "test") && ordered_contains(text, "test", "database"))
+            || (ordered_contains(text, "test database", verb))
+    });
+    let scoped = contains_any(text, &["test", "local", "fixture", "dev"])
+        && (text.contains("production out of scope") || text.contains("production, staging"));
+    reset && scoped
+}
+
+fn ordered_contains(text: &str, first: &str, second: &str) -> bool {
+    text.find(first)
+        .and_then(|index| text[index + first.len()..].find(second))
+        .is_some()
+}
+
+fn ordered_contains_word(text: &str, first: &str, second: &str) -> bool {
+    word_positions(text, first).into_iter().any(|first_index| {
+        word_positions(&text[first_index + first.len()..], second)
+            .into_iter()
+            .next()
+            .is_some()
+    })
+}
+
+fn word_positions(text: &str, word: &str) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut offset = 0;
+    while let Some(found) = text[offset..].find(word) {
+        let index = offset + found;
+        let before = text[..index].chars().next_back();
+        let after = text[index + word.len()..].chars().next();
+        if before.is_none_or(|character| !character.is_ascii_alphanumeric() && character != '_')
+            && after.is_none_or(|character| !character.is_ascii_alphanumeric() && character != '_')
+        {
+            positions.push(index);
+        }
+        offset = index + word.len();
+    }
+    positions
+}
+
+fn contains_any(text: &str, values: &[&str]) -> bool {
+    values.iter().any(|value| text.contains(value))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteComment {
+    pub id: u64,
+    pub body: String,
+    pub updated_at: String,
+}
+
+impl RemoteComment {
+    pub fn new(id: u64, body: impl Into<String>, updated_at: impl Into<String>) -> Self {
+        Self {
+            id,
+            body: body.into(),
+            updated_at: updated_at.into(),
+        }
+    }
+}
+
+/// Parse the deliberately projected `gh api` comment payload.
+///
+/// Callers request only `id`, `body`, and `updated_at`, so accepting any other
+/// key would make the remote-input boundary depend on an undocumented GitHub
+/// shape. Null body/timestamp values preserve the shell protocol's empty-value
+/// behavior and remain non-authoritative when the marked state is parsed.
+pub fn parse_remote_comments_json(input: &str) -> Result<Vec<RemoteComment>, String> {
+    JsonParser::new(input)
+        .parse()?
+        .into_array("GitHub issue comments")?
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let context = format!("GitHub issue comments[{index}]");
+            let mut object = value.into_object(&context)?;
+            require_only_keys(&object, &["id", "body", "updated_at"])?;
+            let id = take_required(&mut object, "id")?.into_number(&format!("{context} id"))?;
+            let body = take_optional_string(&mut object, "body", &context)?.unwrap_or_default();
+            let updated_at =
+                take_optional_string(&mut object, "updated_at", &context)?.unwrap_or_default();
+            Ok(RemoteComment::new(id, body, updated_at))
+        })
+        .collect()
+}
+
+/// Normalize the legacy `--paths` argument without depending on a shell JSON
+/// parser. JSON arrays preserve paths verbatim; CSV input is trimmed and drops
+/// empty entries, matching the former run-state helper.
+pub fn parse_paths_argument(input: &str) -> Result<Vec<String>, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+    if input.starts_with('[') {
+        return JsonParser::new(input)
+            .parse()?
+            .into_array("run-state paths")?
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| value.into_string(&format!("run-state paths[{index}]")))
+            .collect();
+    }
+    Ok(input
+        .split(',')
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenPullRequest {
+    pub number: u64,
+    pub body: String,
+}
+
+pub fn parse_open_pull_requests_json(input: &str) -> Result<Vec<OpenPullRequest>, String> {
+    JsonParser::new(input)
+        .parse()?
+        .into_array("GitHub open pull requests")?
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let context = format!("GitHub open pull requests[{index}]");
+            let mut object = value.into_object(&context)?;
+            require_only_keys(&object, &["number", "body"])?;
+            Ok(OpenPullRequest {
+                number: take_required(&mut object, "number")?
+                    .into_number(&format!("{context} number"))?,
+                body: take_optional_string(&mut object, "body", &context)?.unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+pub fn find_reconcilable_pull_request(
+    pull_requests: &[OpenPullRequest],
+    issue: u64,
+) -> Option<&OpenPullRequest> {
+    pull_requests
+        .iter()
+        .filter(|pull_request| {
+            closes_issue(&pull_request.body, issue) && closeout_count(&pull_request.body) == 1
+        })
+        .min_by_key(|pull_request| pull_request.number)
+}
+
+fn closes_issue(body: &str, issue: u64) -> bool {
+    let body = body.to_ascii_lowercase();
+    let issue = format!("#{issue}");
+    [
+        "close", "closed", "closes", "fix", "fixed", "fixes", "resolve", "resolved", "resolves",
+    ]
+    .iter()
+    .any(|verb| contains_closing_reference(&body, verb, &issue))
+}
+
+fn contains_closing_reference(body: &str, verb: &str, issue: &str) -> bool {
+    let mut start = 0;
+    while let Some(found) = body[start..].find(verb) {
+        let index = start + found;
+        let before = body[..index].chars().next_back();
+        let after_verb = index + verb.len();
+        if before.is_none_or(|character| !character.is_ascii_alphanumeric()) {
+            let suffix = &body[after_verb..];
+            let whitespace = suffix.len() - suffix.trim_start().len();
+            let reference = &suffix[whitespace..];
+            if let Some(after_issue) = reference.strip_prefix(issue) {
+                if after_issue
+                    .chars()
+                    .next()
+                    .is_none_or(|character| !character.is_ascii_digit())
+                {
+                    return true;
+                }
+            }
+        }
+        start = after_verb;
+    }
+    false
+}
+
+fn closeout_count(body: &str) -> usize {
+    body.lines()
+        .filter(|line| line.trim().eq_ignore_ascii_case("## Closeout report"))
+        .count()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunStateRecord {
+    pub repo: String,
+    pub issue: u64,
+    pub worker_id: String,
+    pub state: String,
+    pub branch: String,
+    pub pr: String,
+    pub step: String,
+    pub paths: Vec<String>,
+    pub claimed_at: String,
+    pub updated_at: String,
+    pub ttl_seconds: u64,
+}
+
+impl RunStateRecord {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        repo: impl Into<String>,
+        issue: u64,
+        worker_id: impl Into<String>,
+        state: impl Into<String>,
+        branch: impl Into<String>,
+        pr: impl Into<String>,
+        step: impl Into<String>,
+        paths: Vec<String>,
+        claimed_at: impl Into<String>,
+        updated_at: impl Into<String>,
+        ttl_seconds: u64,
+    ) -> Self {
+        Self {
+            repo: repo.into(),
+            issue,
+            worker_id: worker_id.into(),
+            state: state.into(),
+            branch: branch.into(),
+            pr: pr.into(),
+            step: step.into(),
+            paths,
+            claimed_at: claimed_at.into(),
+            updated_at: updated_at.into(),
+            ttl_seconds,
+        }
+    }
+
+    pub fn parse_json(input: &str) -> Result<Self, String> {
+        let value = JsonParser::new(input).parse()?;
+        let mut object = value.into_object("run-state record")?;
+        require_only_keys(
+            &object,
+            &[
+                "schema",
+                "repo",
+                "issue",
+                "worker_id",
+                "state",
+                "branch",
+                "pr",
+                "step",
+                "paths",
+                "claimed_at",
+                "updated_at",
+                "ttl_seconds",
+            ],
+        )?;
+        let schema = take_required(&mut object, "schema")?.into_number("run-state schema")?;
+        if schema != 1 {
+            return Err(format!("unsupported run-state schema: {schema}"));
+        }
+        let paths = match object.remove("paths") {
+            None | Some(JsonValue::Null) => Vec::new(),
+            Some(value) => value
+                .into_array("run-state paths")?
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| value.into_string(&format!("run-state paths[{index}]")))
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        let state = take_required(&mut object, "state")?.into_string("run-state state")?;
+        let claimed_at =
+            take_required(&mut object, "claimed_at")?.into_string("run-state claimed_at")?;
+        let record = Self {
+            repo: take_required(&mut object, "repo")?.into_string("run-state repo")?,
+            issue: take_required(&mut object, "issue")?.into_number("run-state issue")?,
+            worker_id: take_required(&mut object, "worker_id")?
+                .into_string("run-state worker_id")?,
+            step: take_optional_string(&mut object, "step", "run-state record")?
+                .unwrap_or_else(|| state.clone()),
+            branch: take_optional_string(&mut object, "branch", "run-state record")?
+                .unwrap_or_default(),
+            pr: take_optional_string(&mut object, "pr", "run-state record")?.unwrap_or_default(),
+            state,
+            paths,
+            updated_at: take_optional_string(&mut object, "updated_at", "run-state record")?
+                .unwrap_or_else(|| claimed_at.clone()),
+            claimed_at,
+            ttl_seconds: match object.remove("ttl_seconds") {
+                None | Some(JsonValue::Null) => 10_800,
+                Some(value) => value.into_number("run-state ttl_seconds")?,
+            },
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"schema\":1,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"state\":\"{}\",\"branch\":\"{}\",\"pr\":\"{}\",\"step\":\"{}\",\"paths\":[{}],\"claimed_at\":\"{}\",\"updated_at\":\"{}\",\"ttl_seconds\":{}}}",
+            escape_json(&self.repo),
+            self.issue,
+            escape_json(&self.worker_id),
+            escape_json(&self.state),
+            escape_json(&self.branch),
+            escape_json(&self.pr),
+            escape_json(&self.step),
+            self.paths
+                .iter()
+                .map(|path| format!("\"{}\"", escape_json(path)))
+                .collect::<Vec<_>>()
+                .join(","),
+            escape_json(&self.claimed_at),
+            escape_json(&self.updated_at),
+            self.ttl_seconds,
+        )
+    }
+
+    pub fn to_marked_comment(&self) -> String {
+        format!(
+            "{RUN_STATE_BEGIN_MARKER}\n{}\n{RUN_STATE_END_MARKER}",
+            self.to_json()
+        )
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("repo", &self.repo),
+            ("worker_id", &self.worker_id),
+            ("state", &self.state),
+            ("claimed_at", &self.claimed_at),
+            ("updated_at", &self.updated_at),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("run-state {name} must not be empty"));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedRunState {
+    pub comment_id: u64,
+    pub server_updated_at: String,
+    pub record: RunStateRecord,
+}
+
+/// Select the deterministic CAS owner from untrusted GitHub comments.
+///
+/// The lowest numeric marked-comment ID is authoritative even when it is
+/// malformed or bound to another issue. In those cases this returns `None`
+/// rather than selecting a higher comment and silently stealing a lease.
+pub fn select_run_state(
+    comments: &[RemoteComment],
+    repo: &str,
+    issue: u64,
+) -> Option<SelectedRunState> {
+    let comment = lowest_marked_comment(comments)?;
+    let record = parse_marked_record(&comment.body).ok()?;
+    if record.repo != repo || record.issue != issue {
+        return None;
+    }
+    Some(SelectedRunState {
+        comment_id: comment.id,
+        server_updated_at: comment.updated_at.clone(),
+        record,
+    })
+}
+
+/// Return the sole CAS linearization point even if its embedded record is
+/// malformed. Upsert must patch that comment rather than create a higher-ID
+/// competitor, while reads fail closed through `select_run_state`.
+pub fn lowest_marked_comment(comments: &[RemoteComment]) -> Option<&RemoteComment> {
+    comments
+        .iter()
+        .filter(|comment| {
+            comment.body.contains(RUN_STATE_BEGIN_MARKER)
+                && comment.body.contains(RUN_STATE_END_MARKER)
+        })
+        .min_by_key(|comment| comment.id)
+}
+
+fn parse_marked_record(body: &str) -> Result<RunStateRecord, String> {
+    let (_, after_begin) = body
+        .split_once(RUN_STATE_BEGIN_MARKER)
+        .ok_or_else(|| "missing run-state begin marker".to_string())?;
+    let (record, _) = after_begin
+        .split_once(RUN_STATE_END_MARKER)
+        .ok_or_else(|| "missing run-state end marker".to_string())?;
+    RunStateRecord::parse_json(record.trim())
+}
+
+pub fn parse_run_state_comment(body: &str) -> Result<RunStateRecord, String> {
+    parse_marked_record(body)
+}
+
+/// Return true only for a syntactically valid terminal record that explicitly
+/// records a merged state. This avoids letting whitespace, prose, or a forged
+/// JSON fragment bypass the terminal-claim protection.
+pub fn terminal_merged_comment_exists(comments: &[RemoteComment]) -> bool {
+    comments.iter().any(|comment| {
+        let Some((_, after_begin)) = comment.body.split_once(RUN_TERMINAL_BEGIN_MARKER) else {
+            return false;
+        };
+        let Some((payload, _)) = after_begin.split_once(RUN_TERMINAL_END_MARKER) else {
+            return false;
+        };
+        let Ok(mut object) = JsonParser::new(payload.trim())
+            .parse()
+            .and_then(|value| value.into_object("run terminal record"))
+        else {
+            return false;
+        };
+        matches!(object.remove("state"), Some(JsonValue::String(state)) if state == "merged")
+    })
+}
+
+fn take_required(object: &mut BTreeMap<String, JsonValue>, key: &str) -> Result<JsonValue, String> {
+    object
+        .remove(key)
+        .ok_or_else(|| format!("run-state record missing required key: {key}"))
+}
+
+fn take_optional_string(
+    object: &mut BTreeMap<String, JsonValue>,
+    key: &str,
+    context: &str,
+) -> Result<Option<String>, String> {
+    match object.remove(key) {
+        None | Some(JsonValue::Null) => Ok(None),
+        Some(JsonValue::String(value)) => Ok(Some(value)),
+        Some(_) => Err(format!("{context} {key} must be a JSON string or null")),
+    }
+}
+
+fn require_only_keys(object: &BTreeMap<String, JsonValue>, allowed: &[&str]) -> Result<(), String> {
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!("unknown run-state record key: {key}"));
+        }
+    }
+    Ok(())
+}
+
+fn escape_json(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|character| match character {
+            '"' => "\\\"".chars().collect::<Vec<_>>(),
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            '\n' => "\\n".chars().collect::<Vec<_>>(),
+            '\r' => "\\r".chars().collect::<Vec<_>>(),
+            '\t' => "\\t".chars().collect::<Vec<_>>(),
+            character if character.is_control() => format!("\\u{:04x}", character as u32)
+                .chars()
+                .collect::<Vec<_>>(),
+            character => vec![character],
+        })
+        .collect()
+}
