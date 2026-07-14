@@ -25,8 +25,8 @@
 - [x] Add strict core models for schema-1 comment envelopes, marker extraction, issue binding, lowest-ID selection, and stable JSON rendering.
 - [x] Add `autospec claim state` CLI operations with a typed `gh` adapter and integration fixtures for duplicate ordering, retry, foreign-repository state, and reconciliation.
 - [x] Add `autospec claim acquire|release` with TDD coverage for safety gate refusal, fresh/stale leases, lost-race self-cleanup, terminal merge, and label/heartbeat ordering.
-- [ ] Convert the three legacy scripts to one-line `autospec claim` launchers, update direct callers and lock-step skill documentation, then remove their embedded implementations.
-- [ ] Run the focused Rust and Bats parity suites, full workspace tests/clippy/format, `autospec validate`, and a runtime audit proving the three scripts are no longer R1 authorities.
+- [x] Convert direct callers and lock-step skill documentation to `autospec claim`, then delete the three legacy scripts and remove their installer entries.
+- [x] Run the focused Rust and Bats parity suites, full workspace tests/clippy/format, `autospec validate`, and a runtime audit proving the three scripts are absent.
 
 ## Acceptance evidence
 

@@ -28,7 +28,7 @@ labels_json() {
 
 force_owner() {
     if [ -n "${AUTOSPEC_TEST_FORCE_OWNER:-}" ]; then
-        sed "s/\"worker_id\": \"[^\"]*\"/\"worker_id\": \"${AUTOSPEC_TEST_FORCE_OWNER}\"/"
+        sed "s/\"worker_id\":[[:space:]]*\"[^\"]*\"/\"worker_id\":\"${AUTOSPEC_TEST_FORCE_OWNER}\"/"
     else
         cat
     fi
@@ -72,21 +72,26 @@ if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
     exit 0
 fi
 if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
-    body_file=""
+    body=""
     while [ "$#" -gt 0 ]; do
-        case "$1" in --body-file) body_file="$2"; shift 2 ;; *) shift ;; esac
+        case "$1" in
+            --body-file) body="$(cat "$2")"; shift 2 ;;
+            --body) body="$2"; shift 2 ;;
+            *) shift ;;
+        esac
     done
-    body="$(force_owner < "$body_file")"
+    body="$(printf '%s\n' "$body" | force_owner)"
     jq --argjson id "${AUTOSPEC_TEST_NEXT_ID:-200}" --arg body "$body" \
-        '. + [{id: $id, body: $body}]' "$comments" > "$comments.tmp"
+        '. + [{id: $id, body: $body, updated_at:"2026-07-14T00:00:00Z"}]' "$comments" > "$comments.tmp"
     mv "$comments.tmp" "$comments"; exit 0
 fi
 if [ "$1" = "api" ]; then
-    method=""; body_file=""; url="$2"; shift 2
+    method=""; body=""; url="$2"; shift 2
     while [ "$#" -gt 0 ]; do
         case "$1" in
             -X) method="$2"; shift 2 ;;
-            -F) case "$2" in body=@*) body_file="${2#body=@}" ;; esac; shift 2 ;;
+            -F) case "$2" in body=@*) body="$(cat "${2#body=@}")" ;; esac; shift 2 ;;
+            -f) case "$2" in body=*) body="${2#body=}" ;; esac; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -96,9 +101,9 @@ if [ "$1" = "api" ]; then
     fi
     case "$method" in
         PATCH)
-            body="$(force_owner < "$body_file")"
+            body="$(printf '%s\n' "$body" | force_owner)"
             jq --argjson id "$id" --arg body "$body" \
-                'map(if .id == $id then .body = $body else . end)' "$comments" > "$comments.tmp"
+                'map(if .id == $id then .body = $body | .updated_at = "2026-07-14T00:00:00Z" else . end)' "$comments" > "$comments.tmp"
             mv "$comments.tmp" "$comments" ;;
         DELETE)
             jq --argjson id "$id" 'map(select(.id != $id))' "$comments" > "$comments.tmp"

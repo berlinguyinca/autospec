@@ -49,16 +49,14 @@ teardown() {
 }
 
 # ── chokepoint: scripts/autospec-run-registry.sh (issue #1772) ──────────────
-# ── chokepoint: skills/autospec-run/scripts/run-state.sh (issue #1772) ──────
+# ── chokepoint: autospec claim state (issue #1772) ─────────────────────────
 #
-# Both helpers resolve the shim at ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/emit-event.sh
-# (the installed-runtime path from the shared contract), so these cases stage
-# a copy of the real shim under a per-test AUTOSPEC_SCRIPTS_DIR and PATH-shim
-# the autospec-db binary the shim dispatches to — never a real binary, never
-# a live database.
+# The registry resolves the shell shim; Rust claim-state telemetry resolves
+# `autospec-db` directly. These cases PATH-shim the binary so no test can reach
+# a real database.
 
 REGISTRY="$REPO_ROOT/scripts/autospec-run-registry.sh"
-RUN_STATE="$REPO_ROOT/skills/autospec-run/scripts/run-state.sh"
+AUTOSPEC="$REPO_ROOT/target/debug/autospec"
 
 # _enable_emit stages the shim under a fresh AUTOSPEC_SCRIPTS_DIR and puts the
 # autospec-db stub on PATH + sets a DSN so the shim's guards both pass.
@@ -70,7 +68,7 @@ _enable_emit() {
   export AUTOSPEC_DB_DSN="postgresql://autospec_test:secret@127.0.0.1:5432/autospec?sslmode=require"
 }
 
-# _install_gh_stub installs a minimal `gh` stub on PATH for run-state.sh,
+# _install_gh_stub installs a minimal `gh` stub on PATH for Rust claim state,
 # mirroring the idiom in tests/unit/test_autospec_run_state.bats: an
 # in-memory comments.json backs `gh issue comment` / `gh api ... -X PATCH|DELETE`.
 _install_gh_stub() {
@@ -87,28 +85,33 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
 fi
 
 if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
-  body_file=""
+  body=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --body-file) body_file="$2"; shift 2 ;;
+      --body-file) body="$(cat "$2")"; shift 2 ;;
+      --body) body="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
-  jq --arg body "$(cat "$body_file")" '. + [{id: 1, body: $body}]' "$comments" > "$comments.tmp"
+  jq --arg body "$body" '. + [{id: 1, body: $body, updated_at:"2026-07-14T00:00:00Z"}]' "$comments" > "$comments.tmp"
   mv "$comments.tmp" "$comments"
   exit 0
 fi
 
 if [ "$1" = "api" ]; then
   method=""
-  body_file=""
+  body=""
   url="$2"
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -X) method="$2"; shift 2 ;;
       -F)
-        case "$2" in body=@*) body_file="${2#body=@}" ;; esac
+        case "$2" in body=@*) body="$(cat "${2#body=@}")" ;; esac
+        shift 2
+        ;;
+      -f)
+        case "$2" in body=*) body="${2#body=}" ;; esac
         shift 2
         ;;
       *) shift ;;
@@ -121,8 +124,8 @@ if [ "$1" = "api" ]; then
   fi
   case "$method" in
     PATCH)
-      jq --argjson id "$id" --arg body "$(cat "$body_file")" \
-        'map(if .id == $id then .body = $body else . end)' "$comments" > "$comments.tmp"
+      jq --argjson id "$id" --arg body "$body" \
+        'map(if .id == $id then .body = $body | .updated_at = "2026-07-14T00:00:00Z" else . end)' "$comments" > "$comments.tmp"
       mv "$comments.tmp" "$comments"
       ;;
     DELETE)
@@ -176,11 +179,11 @@ SH
   [[ "$enabled_output" == *"/o__n.json" ]]
 }
 
-@test "run-state upsert with no prior state comment emits session.started" {
+@test "claim state upsert with no prior state comment emits session.started" {
   _enable_emit
   _install_gh_stub
 
-  run bash "$RUN_STATE" upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed
+  run "$AUTOSPEC" claim state upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed
   [ "$status" -eq 0 ]
 
   [ -f "$BIN_LOG" ]
@@ -191,13 +194,13 @@ SH
   [[ "$output" == *"issue=42"* ]]
 }
 
-@test "run-state upsert over an existing state comment emits session.step" {
+@test "claim state upsert over an existing state comment emits session.step" {
   _enable_emit
   _install_gh_stub
 
-  bash "$RUN_STATE" upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed >/dev/null
+  "$AUTOSPEC" claim state upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed >/dev/null
   : > "$BIN_LOG"   # only assert on the SECOND upsert's emit
-  run bash "$RUN_STATE" upsert --issue 42 --repo o/n --worker-id worker-a --state worktree_ready --step worktree_ready
+  run "$AUTOSPEC" claim state upsert --issue 42 --repo o/n --worker-id worker-a --state worktree_ready --step worktree_ready
   [ "$status" -eq 0 ]
 
   [ "$(wc -l < "$BIN_LOG" | tr -d ' ')" -eq 1 ]
@@ -205,13 +208,13 @@ SH
   [[ "$output" == *"emit session.step"* ]]
 }
 
-@test "run-state clear emits session.terminal" {
+@test "claim state clear emits session.terminal" {
   _enable_emit
   _install_gh_stub
 
-  bash "$RUN_STATE" upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed >/dev/null
+  "$AUTOSPEC" claim state upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed >/dev/null
   : > "$BIN_LOG"   # only assert on clear's emit
-  run bash "$RUN_STATE" clear --issue 42 --repo o/n
+  run "$AUTOSPEC" claim state clear --issue 42 --repo o/n
   [ "$status" -eq 0 ]
 
   [ "$(wc -l < "$BIN_LOG" | tr -d ' ')" -eq 1 ]
@@ -234,14 +237,14 @@ SH
   [ ! -s "$BIN_LOG" ]
 }
 
-@test "unset AUTOSPEC_DB_DSN yields 0 emit-binary calls from run-state upsert" {
+@test "unset AUTOSPEC_DB_DSN yields 0 emit-binary calls from claim state upsert" {
   mkdir -p "$TMP/scripts"
   cp "$SHIM" "$TMP/scripts/emit-event.sh"
   export AUTOSPEC_SCRIPTS_DIR="$TMP/scripts"
   export PATH="$TMP/bin:$PATH"
   _install_gh_stub
 
-  run bash "$RUN_STATE" upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed
+  run "$AUTOSPEC" claim state upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed
   [ "$status" -eq 0 ]
   [ ! -s "$BIN_LOG" ]
 }
@@ -252,7 +255,7 @@ SH
   export AUTOSPEC_ACTIVE_RUNS_DIR="$TMP/active-runs-dsn-leak"
 
   bash "$REGISTRY" write --repo o/n --repo-dir /abs/checkout --harness claude --command "echo hi" --host h1 >/dev/null
-  bash "$RUN_STATE" upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed >/dev/null
+  "$AUTOSPEC" claim state upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed >/dev/null
 
   run cat "$BIN_LOG"
   [[ "$output" != *"postgresql://"* ]]
@@ -867,9 +870,6 @@ claim
 feature.described
 heartbeat
 session.parked
-session.started
-session.step
-session.terminal
 KINDS
 
   run diff -u "$expected" "$actual"
@@ -884,9 +884,6 @@ claim|emit claim
 feature.described|emit feature\.described
 heartbeat|emit heartbeat
 session.parked|emit session.parked
-session.started|emit session.started
-session.step|emit session.step
-session.terminal|emit session.terminal
 PATTERNS
 
   cut -d '|' -f 1 "$TMP/kind-coverage-patterns.txt" | sort -u > "$TMP/kind-coverage-kinds.txt"
@@ -900,7 +897,7 @@ PATTERNS
 }
 
 @test "integration audit: telemetry shim and chokepoints never invoke psql" {
-  run bash -c "grep -RIn --include='*.sh' '^[^#]*\bpsql\b' '$REPO_ROOT/skills/autospec-shared/scripts/emit-event.sh' '$REPO_ROOT/scripts/autospec-run-registry.sh' '$REPO_ROOT/skills/autospec-run/scripts/run-state.sh' '$REPO_ROOT/skills/autospec-shared/scripts/explore-ledger.sh' '$REPO_ROOT/skills/autospec-shared/scripts/growth-ledger.sh' '$REPO_ROOT/scripts/claim-guard.sh' '$REPO_ROOT/skills/autospec-shared/scripts/grow-define-file-issues.sh' '$REPO_ROOT/scripts/autonomous-usage-governor.sh' '$REPO_ROOT/scripts/autospec-stop-check.sh'"
+  run bash -c "grep -RIn --include='*.sh' '^[^#]*\bpsql\b' '$REPO_ROOT/skills/autospec-shared/scripts/emit-event.sh' '$REPO_ROOT/scripts/autospec-run-registry.sh' '$REPO_ROOT/skills/autospec-shared/scripts/explore-ledger.sh' '$REPO_ROOT/skills/autospec-shared/scripts/growth-ledger.sh' '$REPO_ROOT/scripts/claim-guard.sh' '$REPO_ROOT/skills/autospec-shared/scripts/grow-define-file-issues.sh' '$REPO_ROOT/scripts/autonomous-usage-governor.sh' '$REPO_ROOT/scripts/autospec-stop-check.sh'"
   [ "$status" -eq 1 ]
   [ -z "$output" ]
 }

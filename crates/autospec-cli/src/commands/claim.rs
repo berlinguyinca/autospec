@@ -123,7 +123,7 @@ fn acquire(args: &[String]) -> Result<(), CommandFailure> {
     }
     let safety = autospec_core::claim::evaluate_claim_safety(&issue.safety_input());
     if !safety.allowed {
-        return unavailable_claim(options.issue, &repo, Some(&worker_id), "safety_gate_failed");
+        return unavailable_safety_claim(options.issue, &repo, &worker_id, safety.reason);
     }
     if write_startup_heartbeat(&repo, options.issue, &options.branch).is_err() {
         return unavailable_claim(
@@ -225,12 +225,12 @@ fn acquire(args: &[String]) -> Result<(), CommandFailure> {
             "auto-implement".to_string(),
         ];
         let _ = run_gh_with_retry(&restore, "restore claim label after state failure");
-        return unavailable_claim(
-            options.issue,
-            &repo,
-            Some(&worker_id),
-            "run_state_upsert_failed",
-        );
+        let reason = if lowest_marked_comment(&comments).is_some() {
+            "run_state_upsert_failed"
+        } else {
+            "run_state_create_failed"
+        };
+        return unavailable_claim(options.issue, &repo, Some(&worker_id), reason);
     }
 
     for confirmation in 0..claim_confirm_reads() {
@@ -305,6 +305,16 @@ fn upsert(args: &[String]) -> Result<(), CommandFailure> {
         options.ttl_seconds,
     );
     upsert_record(&repo, &comments, &record)?;
+    emit_claim_telemetry(
+        if lowest_marked_comment(&comments).is_some() {
+            "session.step"
+        } else {
+            "session.started"
+        },
+        &repo,
+        options.issue,
+        &record.step,
+    );
     println!("{}", record.to_json());
     Ok(())
 }
@@ -351,6 +361,7 @@ fn clear(args: &[String]) -> Result<(), CommandFailure> {
     }) {
         delete_comment(&repo, comment.id)?;
     }
+    emit_claim_telemetry("session.terminal", &repo, options.issue, "");
     Ok(())
 }
 
@@ -1159,6 +1170,48 @@ fn sleep_claim_settle_interval() {
     }
 }
 
+/// Keep telemetry strictly observational: state transitions never depend on
+/// the optional autospec-db binary, its configuration, or its exit status.
+fn emit_claim_telemetry(kind: &str, repo: &str, issue: u64, step: &str) {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let configured = std::env::var("AUTOSPEC_DB_DSN")
+        .ok()
+        .is_some_and(|value| !value.is_empty())
+        || home
+            .as_ref()
+            .is_some_and(|path| path.join(".autospec/db.env").is_file());
+    if !configured {
+        return;
+    }
+
+    let binary = if program_on_path("autospec-db") {
+        std::path::PathBuf::from("autospec-db")
+    } else if let Some(path) = home
+        .as_ref()
+        .map(|path| path.join(".autospec/bin/autospec-db"))
+        .filter(|path| path.is_file())
+    {
+        path
+    } else {
+        return;
+    };
+    let _ = Command::new(binary)
+        .args([
+            "emit",
+            kind,
+            &format!("repo={repo}"),
+            &format!("issue={issue}"),
+            &format!("step={step}"),
+        ])
+        .status();
+}
+
+fn program_on_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|directory| directory.join(program).is_file())
+    })
+}
+
 fn server_lease_is_stale(server_timestamp: &str, ttl_seconds: u64) -> bool {
     let Some(updated_at) = parse_iso_timestamp(server_timestamp) else {
         return false;
@@ -1305,6 +1358,21 @@ fn unavailable_claim(
         "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\"{worker_id},\"reason\":\"{}\"}}",
         json_escape(repo),
         json_escape(reason),
+    );
+    Err(CommandFailure::status(String::new(), 2))
+}
+
+fn unavailable_safety_claim(
+    issue: u64,
+    repo: &str,
+    worker_id: &str,
+    safety_reason: &str,
+) -> Result<(), CommandFailure> {
+    println!(
+        "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"reason\":\"safety_gate_failed\",\"safety_gate\":{{\"ok\":false,\"reason\":\"{}\"}}}}",
+        json_escape(repo),
+        json_escape(worker_id),
+        json_escape(safety_reason),
     );
     Err(CommandFailure::status(String::new(), 2))
 }

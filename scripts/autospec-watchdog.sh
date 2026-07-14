@@ -451,12 +451,12 @@ fi
 # `autospec-run-state` comment plus same-host PID-liveness are authoritative.
 
 # Fetch the run-state comment body for an issue (the marked comment written by
-# claim-issue.sh / release-issue.sh). Defined before the main loop so the
+# `autospec claim acquire` / `autospec claim release`). Defined before the main loop so the
 # heartbeat path can consult it. Empty when absent (no marked comment).
 # Exits non-zero on gh API failure so the caller can treat that as fail-safe.
 run_state_body_for_issue() {
     issue="$1"
-    # Pick the CAS-authoritative marked comment: run-state.sh keeps the
+    # Pick the CAS-authoritative marked comment: autospec claim state keeps the
     # lowest-id (oldest) comment as the single owner and deletes losers, so in a
     # transient duplicate window we mirror that by sorting marked comments oldest
     # -first (createdAt, then id) and taking the first — never an arbitrary

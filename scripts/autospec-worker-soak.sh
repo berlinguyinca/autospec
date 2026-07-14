@@ -7,8 +7,8 @@ usage() {
     cat <<'EOF'
 Usage: autospec-worker-soak.sh --workers N --issues N [--keep]
 
-Runs a local fixture-only concurrency soak against the real autospec-run
-claim/release helpers. No GitHub network calls are made.
+Runs a local fixture-only concurrency soak against the Rust `autospec claim`
+control plane. No GitHub network calls are made.
 EOF
 }
 
@@ -38,10 +38,11 @@ case "$issues" in *[!0-9]*|'') die "--issues must be a positive integer" ;; esac
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
-CLAIM="$REPO_ROOT/skills/autospec-run/scripts/claim-issue.sh"
-RELEASE="$REPO_ROOT/skills/autospec-run/scripts/release-issue.sh"
-[ -x "$CLAIM" ] || die "claim helper missing: $CLAIM"
-[ -x "$RELEASE" ] || die "release helper missing: $RELEASE"
+AUTOSPEC_CLAIM_BIN="${AUTOSPEC_BIN:-}"
+if [ -z "$AUTOSPEC_CLAIM_BIN" ] && [ -x "$REPO_ROOT/target/debug/autospec" ]; then
+    AUTOSPEC_CLAIM_BIN="$REPO_ROOT/target/debug/autospec"
+fi
+[ -n "$AUTOSPEC_CLAIM_BIN" ] || AUTOSPEC_CLAIM_BIN="autospec"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/autospec-worker-soak.XXXXXX")"
 cleanup() {
@@ -66,6 +67,7 @@ while [ "$i" -le "$issues" ]; do
     {
         printf 'auto-implement\n'
         printf 'ctx:32k\n'
+        printf 'safety:reviewed\n'
     } > "$tmp/issues/$i/labels.txt"
     printf '[]\n' > "$tmp/issues/$i/comments.json"
     i=$((i + 1))
@@ -91,6 +93,10 @@ with_lock() {
     trap 'rmdir "$lock" 2>/dev/null || true' EXIT
 }
 
+now_iso() {
+    date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
 if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
     printf 'testorg/testrepo\n'
     exit 0
@@ -102,7 +108,15 @@ fi
 
 if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
     issue="$3"
-    cat "$(issue_dir "$issue")/labels.txt"
+    jq -Rn '
+        [inputs | select(length > 0)] as $labels |
+        {
+          labels:$labels,
+          body:"## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n",
+          title:"Autospec soak issue",
+          author:"autospec-soak"
+        }
+    ' < "$(issue_dir "$issue")/labels.txt"
     exit 0
 fi
 
@@ -145,20 +159,18 @@ if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
     issue="$3"
     dir="$(issue_dir "$issue")"
     shift 3
-    body_file=""
+    body=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --body-file) body_file="$2"; shift 2 ;;
+            --body) body="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
-    [ -n "$body_file" ] || exit 1
     with_lock "$root"
     id="$(cat "$root/next-id")"
     printf '%s\n' "$((id + 1))" > "$root/next-id"
-    body="$(cat "$body_file")"
-    jq --argjson id "$id" --arg body "$body" \
-        '. + [{id:$id, updated_at:"2026-01-01T00:00:00Z", body:$body}]' \
+    jq --argjson id "$id" --arg body "$body" --arg updated_at "$(now_iso)" \
+        '. + [{id:$id, updated_at:$updated_at, body:$body}]' \
         "$dir/comments.json" > "$dir/comments.tmp"
     mv "$dir/comments.tmp" "$dir/comments.json"
     exit 0
@@ -168,11 +180,11 @@ if [ "$1" = "api" ]; then
     url="$2"
     shift 2
     method=""
-    body_file=""
+    body=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             -X) method="$2"; shift 2 ;;
-            -F) case "$2" in body=@*) body_file="${2#body=@}" ;; esac; shift 2 ;;
+            -f) case "$2" in body=*) body="${2#body=}" ;; esac; shift 2 ;;
             --jq) shift 2 ;;
             *) shift ;;
         esac
@@ -191,9 +203,8 @@ if [ "$1" = "api" ]; then
                     with_lock "$root"
                     case "$method" in
                         PATCH)
-                            body="$(cat "$body_file")"
-                            jq --argjson id "$id" --arg body "$body" \
-                                'map(if .id == $id then .body = $body else . end)' \
+                            jq --argjson id "$id" --arg body "$body" --arg updated_at "$(now_iso)" \
+                                'map(if .id == $id then .body = $body | .updated_at = $updated_at else . end)' \
                                 "$dir/comments.json" > "$dir/comments.tmp"
                             mv "$dir/comments.tmp" "$dir/comments.json"
                             ;;
@@ -224,16 +235,20 @@ worker_loop() {
             PATH="$tmp/bin:$PATH" \
             AUTOSPEC_SOAK_ROOT="$tmp" \
             AUTOSPEC_SOAK_CALLS="$calls" \
-            AUTOSPEC_GH_API_RETRY_SLEEP=0 \
+            AUTOSPEC_HEARTBEAT_DIR="$tmp/heartbeats" \
+            AUTOSPEC_CLAIM_RETRY_SLEEP_MS=0 \
+            AUTOSPEC_CLAIM_CONFIRM_READS=1 \
+            AUTOSPEC_CLAIM_SETTLE_MILLIS=0 \
             AUTOSPEC_CLAIM_LEASE_SECONDS=60 \
-            bash "$CLAIM" --issue "$issue" --repo testorg/testrepo --worker-id "$wid" --branch "soak-$issue" >/dev/null 2>&1; then
+            "$AUTOSPEC_CLAIM_BIN" claim acquire --issue "$issue" --repo testorg/testrepo --worker-id "$wid" --branch "soak-$issue" >/dev/null 2>&1; then
             printf '%s\t%s\n' "$wid" "$issue" >> "$claims"
             AUTOSPEC_WORKER_ID="$wid" \
                 PATH="$tmp/bin:$PATH" \
                 AUTOSPEC_SOAK_ROOT="$tmp" \
                 AUTOSPEC_SOAK_CALLS="$calls" \
-                AUTOSPEC_GH_API_RETRY_SLEEP=0 \
-                bash "$RELEASE" --issue "$issue" --repo testorg/testrepo --worker-id "$wid" --state merged --branch "soak-$issue" --pr "$issue" >/dev/null 2>&1 || true
+                AUTOSPEC_HEARTBEAT_DIR="$tmp/heartbeats" \
+                AUTOSPEC_CLAIM_RETRY_SLEEP_MS=0 \
+                "$AUTOSPEC_CLAIM_BIN" claim release --issue "$issue" --repo testorg/testrepo --worker-id "$wid" --state merged --branch "soak-$issue" --pr "$issue" >/dev/null 2>&1 || true
         fi
         issue=$((issue + 1))
     done

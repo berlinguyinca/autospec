@@ -245,7 +245,7 @@ Stale issue with captured work in an open PR.
 
 ## Implementation outline
 
-- edit `scripts/claim-issue.sh`
+- edit `crates/autospec-cli/src/commands/claim.rs`
 EOF
 )"
     write_auto_issue 1859 "batch claims atomic worker startup" "$body"

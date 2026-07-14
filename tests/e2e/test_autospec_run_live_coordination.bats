@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # tests/e2e/test_autospec_run_live_coordination.bats — opt-in live GitHub
-# coordination test for distributed autospec-run helpers.
+# coordination test for the distributed Rust autospec claim control plane.
 #
 # This test creates a throwaway public GitHub repo, seeds a small autospec-run
 # queue, and validates the real GitHub label/comment path. It is skipped unless
@@ -9,9 +9,7 @@
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     LIST_READY="$REPO_ROOT/skills/autospec-run/scripts/list-ready-issues.sh"
-    CLAIM="$REPO_ROOT/skills/autospec-run/scripts/claim-issue.sh"
-    RELEASE="$REPO_ROOT/skills/autospec-run/scripts/release-issue.sh"
-    RUN_STATE="$REPO_ROOT/skills/autospec-run/scripts/run-state.sh"
+    AUTOSPEC="$REPO_ROOT/target/debug/autospec"
 
     if [ "${AUTOSPEC_RUN_LIVE_COORDINATION_E2E:-0}" != "1" ]; then
         skip "set AUTOSPEC_RUN_LIVE_COORDINATION_E2E=1 to run live GitHub coordination e2e"
@@ -38,6 +36,7 @@ setup() {
 
     gh label create auto-implement --repo "$THROWAWAY_REPO" --color 0e8a16 --force >/dev/null
     gh label create in-progress-by-bot --repo "$THROWAWAY_REPO" --color ededed --force >/dev/null
+    gh label create safety:reviewed --repo "$THROWAWAY_REPO" --color ededed --force >/dev/null
 }
 
 teardown() {
@@ -61,6 +60,12 @@ Exercise live distributed autospec-run coordination for \`$path\`.
 
 ## Dependencies
 ${dep:-None}
+
+## Safety review
+
+<!-- autospec-safety:begin -->
+- **decision:** `SAFETY_PASS`
+<!-- autospec-safety:end -->
 EOF
 }
 
@@ -70,7 +75,7 @@ create_issue() {
     dep="${3:-}"
     body_file="$TEST_TMP/body-${title// /-}.md"
     issue_body "$path" "$dep" > "$body_file"
-    url="$(gh issue create --repo "$THROWAWAY_REPO" --title "$title" --body-file "$body_file" --label auto-implement)"
+    url="$(gh issue create --repo "$THROWAWAY_REPO" --title "$title" --body-file "$body_file" --label auto-implement --label safety:reviewed)"
     printf '%s\n' "${url##*/}"
 }
 
@@ -112,7 +117,7 @@ claim_async() {
     status_file="$TEST_TMP/claim-${issue}-${worker}.status"
     (
         set +e
-        bash "$CLAIM" --repo "$THROWAWAY_REPO" --issue "$issue" --worker-id "$worker" > "$out" 2>&1
+        "$AUTOSPEC" claim acquire --repo "$THROWAWAY_REPO" --issue "$issue" --worker-id "$worker" > "$out" 2>&1
         printf '%s\n' "$?" > "$status_file"
     ) &
 }
@@ -145,7 +150,7 @@ claim_async() {
     echo "$labels_a" | grep -Fx in-progress-by-bot >/dev/null
     echo "$labels_c" | grep -Fx in-progress-by-bot >/dev/null
 
-    bash "$RELEASE" --repo "$THROWAWAY_REPO" --issue "$issue_a" --worker-id worker-a >/dev/null
+    "$AUTOSPEC" claim release --repo "$THROWAWAY_REPO" --issue "$issue_a" --worker-id worker-a >/dev/null
     wait_for_label "$issue_a" auto-implement
 
     claim_async "$issue_a" race-a
@@ -156,7 +161,7 @@ claim_async() {
     success_count="$(printf '%s\n%s\n' "$status_a" "$status_b" | grep -c '^0$' || true)"
     [ "$success_count" = "1" ]
 
-    owner="$(bash "$RUN_STATE" read --repo "$THROWAWAY_REPO" --issue "$issue_a" | jq -r '.worker_id')"
+    owner="$("$AUTOSPEC" claim state read --repo "$THROWAWAY_REPO" --issue "$issue_a" | jq -r '.worker_id')"
     case "$owner" in
         race-a|race-b) ;;
         *) printf 'unexpected owner: %s\n' "$owner"; return 1 ;;

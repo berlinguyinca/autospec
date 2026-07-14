@@ -1,1 +1,1 @@
-claim-issue.sh
+autospec claim acquire

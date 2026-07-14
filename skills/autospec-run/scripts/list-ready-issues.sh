@@ -21,7 +21,10 @@ batch_size=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SAFETY_GATE="$SCRIPT_DIR/issue-safety-gate.sh"
-RUN_STATE="$SCRIPT_DIR/run-state.sh"
+AUTOSPEC_CLAIM_BIN="${AUTOSPEC_BIN:-autospec}"
+if [ -z "${AUTOSPEC_BIN:-}" ] && [ -x "$SCRIPT_DIR/../../../target/debug/autospec" ]; then
+    AUTOSPEC_CLAIM_BIN="$SCRIPT_DIR/../../../target/debug/autospec"
+fi
 HEARTBEAT_READ="$SCRIPT_DIR/heartbeat-read.sh"
 [ -f "$SAFETY_GATE" ] || die "missing issue safety gate helper: $SAFETY_GATE"
 # shellcheck source=/dev/null
@@ -255,8 +258,7 @@ issue_heartbeat_exists() {
 
 issue_run_state() {
     issue_number="$1"
-    [ -x "$RUN_STATE" ] || return 0
-    state_output="$({ "$RUN_STATE" read --issue "$issue_number" --repo "$repo"; } 2>/dev/null)" || return 1
+    state_output="$({ "$AUTOSPEC_CLAIM_BIN" claim state read --issue "$issue_number" --repo "$repo"; } 2>/dev/null)" || return 1
     [ -n "$state_output" ] || return 1
     printf '%s\n' "$state_output"
 }
@@ -329,13 +331,11 @@ release_startup_claim_if_stale() {
         --add-label auto-implement >/dev/null 2>&1; then
         return 1
     fi
-    if [ -x "$RUN_STATE" ]; then
-        if ! "$RUN_STATE" clear --issue "$issue_number" --repo "$repo" >/dev/null 2>&1; then
-            gh issue edit "$issue_number" --repo "$repo" \
-                --remove-label auto-implement \
-                --add-label in-progress-by-bot >/dev/null 2>&1 || true
-            return 1
-        fi
+    if ! "$AUTOSPEC_CLAIM_BIN" claim state clear --issue "$issue_number" --repo "$repo" >/dev/null 2>&1; then
+        gh issue edit "$issue_number" --repo "$repo" \
+            --remove-label auto-implement \
+            --add-label in-progress-by-bot >/dev/null 2>&1 || true
+        return 1
     fi
     release_startup_claim_result="released"
     return 0
@@ -389,11 +389,9 @@ issue_list in-progress-by-bot > "$ACTIVE_FILE"
 # a linked PR but crashed before recording `.pr`, the issue otherwise remains
 # in-progress forever with run-state step=claimed/pr="". This helper records the
 # linked PR and posts one actionable post-PR handoff blocker without relabeling.
-if [ -x "$RUN_STATE" ]; then
-    for active_issue in $(jq -r '.[].number' "$ACTIVE_FILE"); do
-        "$RUN_STATE" reconcile-linked-pr --issue "$active_issue" --repo "$repo" >/dev/null 2>&1 || true
-    done
-fi
+for active_issue in $(jq -r '.[].number' "$ACTIVE_FILE"); do
+    "$AUTOSPEC_CLAIM_BIN" claim state reconcile-linked-pr --issue "$active_issue" --repo "$repo" >/dev/null 2>&1 || true
+done
 filter_active_startup_claims
 active_count="$(jq 'length' "$ACTIVE_FILE")"
 if [ "$max_repo_workers" -gt 0 ]; then

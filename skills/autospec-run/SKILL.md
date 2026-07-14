@@ -82,9 +82,9 @@ instead of making the operator hand-parse heartbeat JSON.
   stale claims, conflicts, and the next safe batch, then exit without claiming.
 - `--max-parallel-safe` — print the next safe parallel batch from
   `list-ready-issues.sh` and exit without claiming.
-- `--claim <issue>` — attempt a deterministic claim via `claim-issue.sh` and
-  exit with that helper's status (`0` claimed, `2` already claimed/skipped).
-- `--release <issue>` — release a distributed claim via `release-issue.sh`.
+- `--claim <issue>` — attempt a deterministic claim via `autospec claim acquire`
+  and exit with that command's status (`0` claimed, `2` already claimed/skipped).
+- `--release <issue>` — release a distributed claim via `autospec claim release`.
 
 ### Auto-init `~/.autospec/model-profiles.yml`
 
@@ -459,11 +459,8 @@ repo:
 
 ```bash
 COORD_LIST="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/list-ready-issues.sh"
-COORD_CLAIM="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-issue.sh"
-COORD_RELEASE="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/release-issue.sh"
 [ -x "$COORD_LIST" ] || COORD_LIST="skills/autospec-run/scripts/list-ready-issues.sh"
-[ -x "$COORD_CLAIM" ] || COORD_CLAIM="skills/autospec-run/scripts/claim-issue.sh"
-[ -x "$COORD_RELEASE" ] || COORD_RELEASE="skills/autospec-run/scripts/release-issue.sh"
+AUTOSPEC_CLAIM_BIN="${AUTOSPEC_BIN:-autospec}"
 ```
 
 If `--coordination-status` is active, run `list-ready-issues.sh --repo {repo}
@@ -472,29 +469,26 @@ If `--coordination-status` is active, run `list-ready-issues.sh --repo {repo}
 
 During the normal monitor loop:
 
-> **Issue intent safety claim gate.** Before claiming an `auto-implement` issue:
->
-> 1. Read labels and body with `gh issue view ISSUE --json labels,body,title,author`.
-> 2. If labels include `security:quarantined`, comment `Refusing to process: issue is security-quarantined.` and skip the issue.
-> 3. If labels do not include `safety:reviewed`, comment `Refusing to process: missing safety:reviewed label. Run /autospec-classify.` and skip the issue.
-> 4. If the body lacks exactly one marker-delimited `## Safety review` block with both `<!-- autospec-safety:begin -->` and `<!-- autospec-safety:end -->`, or the current marker-delimited block does not have exactly one decision line equal to `- **decision:** \`SAFETY_PASS\``, comment `Refusing to process: missing passing Safety review block. Run /autospec-classify.` and skip the issue.
-> 5. Only after these checks pass may the monitor remove `auto-implement` and add `in-progress-by-bot`.
+> **Issue intent safety claim gate.** `autospec claim acquire` reads the current
+> labels and issue body, validates the reviewed Safety review block, performs the
+> label transition, and confirms the lowest-ID run-state comment. The monitor
+> never reimplements that safety or lease transition with `gh issue edit`.
 
 1. Run `list-ready-issues.sh --repo {repo} --batch-size "$effective_batch_size"`
    after watchdog reconciliation and profile filtering.
 2. Use `.ready[0].number` as the next issue candidate.
-3. Claim it through `claim-issue.sh --issue "$ISSUE" --repo {repo}
+3. Claim it through `autospec claim acquire --issue "$ISSUE" --repo {repo}
    --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" --branch "<BRANCH>"`.
 4. Treat claim exit `2` as a normal lost-race or conflict outcome: refresh the
    queue and try another candidate without failing the batch.
-5. On failure, stop, or retry exhaustion, call `release-issue.sh` before
+5. On failure, stop, or retry exhaustion, call `autospec claim release` before
    returning `auto-implement` to the queue.
 
-The GitHub `autospec-run-state` comment written by these helpers is the
+The GitHub `autospec-run-state` comment written by the Rust control plane is the
 cross-workstation source of truth. Local process heartbeat files remain useful
 for same-host progress and compatibility, but they are not authoritative across
-machines. If any coordinator helper is unavailable, fall back to the existing
-inline label-swap path below.
+machines. If the Rust command is unavailable, fail the monitor start visibly;
+do not fall back to an inline label-swap path.
 
 >   all_open = [open auto-implement issues, sorted ascending by issue number]
 >   candidates = [all_open issues whose Depends-on deps are all CLOSED, sorted ascending]
@@ -589,12 +583,12 @@ inline label-swap path below.
 >   fi
 >   echo "[monitor] effective_batch_size=$effective_batch_size (next issue reasoning: $_next_reasoning)"
 >   ISSUE = ready[0]
->   # Atomic claim: claim-issue.sh is the SOLE claim path. It performs the
+>   # Atomic claim: autospec claim acquire is the SOLE claim path. It performs the
 >   # check-and-swap (auto-implement -> in-progress-by-bot) atomically with a
 >   # read-back verification, so the hot loop NEVER re-implements the inline
 >   # label swap. Multiple monitors can race the same candidate; exactly one
 >   # wins (exit 0), the rest lose (non-zero) and skip to the next candidate.
->   claim_json="$("$COORD_CLAIM" --issue "$ISSUE" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-$(hostname):${USER:-unknown}:monitor:$$}" --branch "${BRANCH:-}")" && claim_rc=0 || claim_rc=$?
+>   claim_json="$("$AUTOSPEC_CLAIM_BIN" claim acquire --issue "$ISSUE" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-$(hostname):${USER:-unknown}:monitor:$$}" --branch "${BRANCH:-}")" && claim_rc=0 || claim_rc=$?
 >   # exit 1 = hard usage error (never a race signal); exit 2 = lost race.
 >   # Split them: a misconfigured claim (rc 1 or any other non-2 non-zero) must
 >   # surface an operator-visible WARN, not masquerade as a silently-dropped
@@ -605,13 +599,13 @@ inline label-swap path below.
 >     ready=($READY_REMOVE)
 >     continue
 >   elif [ "$claim_rc" -ne 0 ]; then
->     echo "[monitor] WARN: claim hard error for #$ISSUE (rc=$claim_rc) — usage/config error, NOT a lost race; skipping. Check claim-issue.sh invocation." >&2
+>     echo "[monitor] WARN: claim hard error for #$ISSUE (rc=$claim_rc) — usage/config error, NOT a lost race; skipping. Check autospec claim acquire invocation." >&2
 >     READY_REMOVE=$(printf "%s\n%s" "$READY_REMOVE" "$ISSUE" | grep -v "^${ISSUE}$" || true)
 >     ready=($READY_REMOVE)
 >     continue
 >   fi
 >   # exit 0 only: this monitor now owns #$ISSUE (label already swapped to
->   # in-progress-by-bot by claim-issue.sh) -> heartbeat write -> process(ISSUE).
+>   # in-progress-by-bot by autospec claim acquire) -> heartbeat write -> process(ISSUE).
 >   _hb_slug="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")"
 >   mkdir -p "$HOME/.autospec/process-heartbeats/$_hb_slug"
 >   printf '{"issue":"%s","branch":"","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' "$ISSUE" "$(date -u +%s)" "{repo}" > "$HOME/.autospec/process-heartbeats/$_hb_slug/$ISSUE.json"
@@ -1305,7 +1299,7 @@ inline label-swap path below.
 >      fi
 >    fi
 >    gh pr merge <PR> --admin --squash --delete-branch
->    "$COORD_RELEASE" --issue "<ISSUE>" --repo {repo} \
+>    "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} \
 >      --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" \
 >      --state merged --branch "<BRANCH>" --pr "<PR>" || true
 >    case "$_notify_fired" in *:merged:*) ;; *) _notify_fired="${_notify_fired}:merged:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: merged" "PR #<PR> merged on {repo}" || true ;; esac
@@ -1350,7 +1344,7 @@ If your harness lacks background delegation: open a separate terminal/tmux pane,
 
 autospec-run is designed for concurrent operation across separate harness sessions (e.g., two Claude Code sessions in different terminals, or two Codex CLI processes). Each session runs an independent monitor. Three layers enforce safety:
 
-1. **Atomic claim** — `claim-issue.sh` check-and-swaps `auto-implement → in-progress-by-bot` plus writes an `autospec-run-state` GitHub comment. The **GitHub comment is the cross-machine source of truth**, not the local heartbeat.
+1. **Atomic claim** — `autospec claim acquire` check-and-swaps `auto-implement → in-progress-by-bot` plus writes an `autospec-run-state` GitHub comment. The **GitHub comment is the cross-machine source of truth**, not the local heartbeat.
 2. **Worktree isolation** — each issue gets its own `/tmp/wt-<branch>` so two workers never share a worktree.
 3. **Per-session lock** — the session-lock (see above) ensures a single harness session never runs two concurrent monitors; separate sessions run independently by design.
 
@@ -1372,9 +1366,9 @@ Each session derives its own `AUTOSPEC_WORKER_ID` if not overridden; the default
 |---|---|---|
 | `AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS` | `0` (disabled) | Repo-wide active-worker cap. When active `in-progress-by-bot` issues meet the cap, `list-ready-issues.sh` returns an empty `.batch` while still reporting `.ready`. Use this to throttle one workstation or a cluster. |
 | `AUTOSPEC_RUN_ONLY_ISSUES` | unset (unconstrained) | Space-separated issue-number allowlist. When set and non-empty, `list-ready-issues.sh` scopes `.ready`/`.blocked`/`.batch` to only those issue numbers — set by the autonomous conductor's dispatch-time provenance split so the operator and self-originated batches each drain their own subset. Unset or empty keeps the full-queue scan. |
-| `AUTOSPEC_CLAIM_LEASE_SECONDS` | `10800` | Cross-machine claim lease TTL written into the GitHub run-state comment and used by `claim-issue.sh` stale-reclaim decisions. |
+| `AUTOSPEC_CLAIM_LEASE_SECONDS` | `10800` | Cross-machine claim lease TTL written into the GitHub run-state comment and used by `autospec claim acquire` stale-reclaim decisions. |
 | `AUTOSPEC_CLAIM_SETTLE_SECONDS` | `0.2` | Short post-upsert readback delay so simultaneous comment creates converge before a worker reports claim success. |
-| `AUTOSPEC_CLAIM_CONFIRM_READS` | `5` | Number of settled lowest-lock readbacks required before `claim-issue.sh` reports claim success. |
+| `AUTOSPEC_CLAIM_CONFIRM_READS` | `5` | Number of settled lowest-lock readbacks required before `autospec claim acquire` reports claim success. |
 | `AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS` | `1800` | Minimum age before a `claimed` heartbeat triggers the GitHub cross-check. Set higher (e.g., `3600`) for hosts with slow worktree setup. |
 | `AUTOSPEC_WATCHDOG_RECLAIM_SECS` | `10800` | Legacy fallback for claim lease age when `AUTOSPEC_CLAIM_LEASE_SECONDS` is unset; also used by watchdog stale cleanup. |
 | `AUTOSPEC_WATCHDOG_STALE_SECS` | `1800` | Age at which a heartbeat is considered stale for nudging. |

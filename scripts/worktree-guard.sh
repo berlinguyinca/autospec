@@ -25,7 +25,7 @@
 # resolve-branch JSON: {"state":"open-pr"|"branch-only"|"fresh","pr":N|null}.
 #
 # Conventions: set -eu (no pipefail — we branch on subcommand exits explicitly);
-# usage()/die() helpers per release-issue.sh style; no RETURN traps; if/then/fi
+# usage()/die() helpers follow the runtime-script conventions; no RETURN traps; if/then/fi
 # for one-sided conditionals under set -e (repo gotchas).
 
 set -eu

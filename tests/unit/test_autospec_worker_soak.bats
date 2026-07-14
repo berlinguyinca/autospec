@@ -42,6 +42,28 @@ setup() {
     [ "$output" = "0" ]
 }
 
+@test "fixture soak routes acquire and release through AUTOSPEC_BIN" {
+    export AUTOSPEC_CALLS="$BATS_TEST_TMPDIR/autospec-calls.log"
+    export AUTOSPEC_REAL_BIN="$REPO_ROOT/target/debug/autospec"
+    export AUTOSPEC_BIN="$BATS_TEST_TMPDIR/autospec"
+    : > "$AUTOSPEC_CALLS"
+    cat > "$AUTOSPEC_BIN" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$AUTOSPEC_CALLS"
+exec "$AUTOSPEC_REAL_BIN" "$@"
+EOF
+    chmod +x "$AUTOSPEC_BIN"
+
+    run bash "$SCRIPT" --workers 2 --issues 2
+
+    [ "$status" -eq 0 ]
+    run grep -F 'claim acquire ' "$AUTOSPEC_CALLS"
+    [ "$status" -eq 0 ]
+    run grep -F 'claim release ' "$AUTOSPEC_CALLS"
+    [ "$status" -eq 0 ]
+}
+
 @test "fixture soak: invalid worker count exits 2" {
     run bash "$SCRIPT" --workers 0 --issues 2
 

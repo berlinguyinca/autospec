@@ -912,11 +912,11 @@ fn run_claim_cas_guard(id: &str, required: bool, root: &Path) -> CheckResult {
         if !path.is_file() {
             return failure(id, required, &format!("{trio}: required file missing"));
         }
-        if !contains(&path, "claim-issue.sh") {
+        if !contains(&path, "autospec claim acquire") {
             return failure(
                 id,
                 required,
-                &format!("{trio}: claim section missing reference to claim-issue.sh (issue #871)"),
+                &format!("{trio}: claim section missing reference to autospec claim acquire (issue #871)"),
             );
         }
         if contains_unguarded_claim_swap(&path) {
@@ -924,7 +924,7 @@ fn run_claim_cas_guard(id: &str, required: bool, root: &Path) -> CheckResult {
                 id,
                 required,
                 &format!(
-                    "{trio}: unguarded check-then-act 'gh issue edit --add-label in-progress-by-bot' outside the claim-issue.sh CAS path (issue #871)"
+                    "{trio}: unguarded check-then-act 'gh issue edit --add-label in-progress-by-bot' bypasses autospec claim acquire (issue #871)"
                 ),
             );
         }
@@ -3698,7 +3698,7 @@ fn run_autospec_resume_contract(id: &str, required: bool, root: &Path) -> CheckR
         return aggregate(id, required, vec![structure, supervisor]);
     }
     let scan = root.join("skills/autospec-resume/scripts/resume-scan.sh");
-    if contains(&scan, "run-state.sh") && (contains(&scan, "upsert") || contains(&scan, "clear"))
+    if contains(&scan, "claim state") && (contains(&scan, "upsert") || contains(&scan, "clear"))
         || contains(&scan, "gh issue comment")
     {
         return aggregate(
@@ -5982,7 +5982,7 @@ fn contains_unguarded_claim_swap(path: &Path) -> bool {
             document.lines().any(|line| {
                 line.find("gh issue edit ").is_some_and(|index| {
                     line[index..].contains("--add-label in-progress-by-bot")
-                        && !line.contains("claim-issue.sh")
+                        && !line.contains("autospec claim acquire")
                 })
             })
         })

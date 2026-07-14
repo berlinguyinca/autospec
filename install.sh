@@ -1370,13 +1370,11 @@ copy_runtime_skill_scripts() {
     runtime_skill_scripts="\
 skills/autospec-run/scripts/autospec-run-session-lock.sh::autospec-run-session-lock.sh \
 skills/autospec-run/scripts/autospec-run-status.sh::autospec-run-status.sh \
-skills/autospec-run/scripts/claim-issue.sh::claim-issue.sh \
 skills/autospec-run/scripts/invoke-review.sh::invoke-review.sh \
 skills/autospec-run/scripts/fab-completeness.sh::fab-completeness.sh \
 skills/autospec-run/scripts/fab-route.sh::fab-route.sh \
 skills/autospec-run/scripts/list-ready-issues.sh::list-ready-issues.sh \
 skills/autospec-run/scripts/post-token-report.sh::post-token-report.sh \
-skills/autospec-run/scripts/release-issue.sh::release-issue.sh \
 skills/autospec-run/scripts/run-groom-preflight.sh::run-groom-preflight.sh \
 skills/autospec-resume/scripts/resume-scan.sh::resume-scan.sh \
 skills/autospec-doc/scripts/doc-orchestrator-entry.mjs::doc-orchestrator.mjs \
