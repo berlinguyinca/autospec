@@ -118,25 +118,15 @@ fn execution_report_aggregates_required_failures_as_schema_two() {
 }
 
 #[test]
-fn runner_executes_rust_owners_in_catalog_order_and_fails_unimplemented_slots() {
-    let catalog = ValidationCatalog::from_checks(vec![
-        ValidationCheck {
-            id: "check_lockstep",
-            required: true,
-            independent: false,
-            modes: CheckModes::CatalogSlot,
-            reachability: CheckReachability::TopLevel,
-            owner: CheckOwner::RustNative(StructuralCheck::TrioLockstep),
-        },
-        ValidationCheck {
-            id: "check_unported",
-            required: true,
-            independent: false,
-            modes: CheckModes::CatalogSlot,
-            reachability: CheckReachability::TopLevel,
-            owner: CheckOwner::RustNative(StructuralCheck::CatalogSlot),
-        },
-    ]);
+fn runner_executes_rust_owners_in_catalog_order() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_lockstep",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::RustNative(StructuralCheck::TrioLockstep),
+    }]);
 
     let report = ValidationRunner::run(&catalog, &validation_fixture("valid-skill"));
 
@@ -146,12 +136,10 @@ fn runner_executes_rust_owners_in_catalog_order_and_fails_unimplemented_slots() 
             .iter()
             .map(|result| result.id.as_str())
             .collect::<Vec<_>>(),
-        ["check_lockstep", "check_unported"]
+        ["check_lockstep"]
     );
     assert_eq!(report.results[0].exit_code, Some(0));
     assert_eq!(report.results[0].spawn_count, 0);
-    assert_eq!(report.results[1].exit_code, Some(1));
-    assert!(report.results[1].stderr_bytes > 0);
 }
 
 #[test]
@@ -1386,6 +1374,58 @@ fn runner_checks_growth_and_documentation_contracts_with_typed_tool_batches() {
         assert_eq!(report.results[0].exit_code, Some(0), "{id}");
         assert_eq!(report.results[0].spawn_count, expected_spawns, "{id}");
     }
+}
+
+#[test]
+fn runner_checks_constitution_and_install_contracts_with_typed_tool_batches() {
+    for (id, owner, fixture, expected_spawns) in [
+        (
+            "check_constitution_validation_contract",
+            ExternalCheck::ConstitutionValidation,
+            "constitution-validation",
+            50,
+        ),
+        (
+            "check_install_tests",
+            ExternalCheck::InstallTests,
+            "install-tests",
+            1,
+        ),
+    ] {
+        let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+            id,
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(owner),
+        }]);
+
+        let report = ValidationRunner::run(&catalog, &validation_fixture(fixture));
+
+        assert_eq!(report.results[0].exit_code, Some(0), "{id}");
+        assert_eq!(report.results[0].spawn_count, expected_spawns, "{id}");
+    }
+}
+
+#[test]
+fn runner_checks_control_plane_bootstrap_with_typed_tool_batches() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_control_plane_bootstrap_contract",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::ControlPlaneBootstrap),
+    }]);
+
+    let report = ValidationRunner::run(
+        &catalog,
+        &validation_fixture("control-plane-bootstrap-contract"),
+    );
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 22);
 }
 
 #[test]

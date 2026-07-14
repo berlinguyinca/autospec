@@ -406,7 +406,14 @@ impl ValidationCheck {
             "check_autospec_doc_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecDocContract)
             }
-            _ => CheckOwner::RustNative(StructuralCheck::CatalogSlot),
+            "check_constitution_validation_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::ConstitutionValidation)
+            }
+            "check_install_tests" => CheckOwner::ExternalBatch(ExternalCheck::InstallTests),
+            "check_control_plane_bootstrap_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::ControlPlaneBootstrap)
+            }
+            unknown => panic!("frozen validation catalog check has no direct owner: {unknown}"),
         };
         Self {
             id,
@@ -452,7 +459,6 @@ pub enum CheckOwner {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructuralCheck {
-    CatalogSlot,
     TrioLockstep,
     DuoLockstep,
     RequiredTrioFiles,

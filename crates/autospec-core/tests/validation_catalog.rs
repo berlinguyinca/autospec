@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use autospec_core::validation::{
-    CheckOwner, CheckReachability, ExternalCheck, StructuralCheck, ValidationCatalog,
+    CheckModes, CheckOwner, CheckReachability, ExternalCheck, StructuralCheck, ValidationCatalog,
     ValidationCheck,
 };
 
@@ -1496,12 +1496,54 @@ fn catalog_assigns_growth_and_documentation_contracts_to_typed_external_batches(
 }
 
 #[test]
+fn catalog_assigns_final_legacy_contracts_to_typed_external_batches() {
+    let catalog = ValidationCatalog::standard();
+
+    for (id, owner) in [
+        (
+            "check_constitution_validation_contract",
+            ExternalCheck::ConstitutionValidation,
+        ),
+        ("check_install_tests", ExternalCheck::InstallTests),
+        (
+            "check_control_plane_bootstrap_contract",
+            ExternalCheck::ControlPlaneBootstrap,
+        ),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::ExternalBatch(owner)),
+            "{id} must have a typed external owner"
+        );
+    }
+}
+
+#[test]
+fn standard_catalog_owner_mapping_is_total() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(catalog.checks().len(), catalog.ids().len());
+    catalog
+        .validate()
+        .expect("every frozen catalog check has a direct owner");
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
-    let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
-    let duplicate = ValidationCatalog::from_checks(vec![
-        ValidationCheck::catalog_entry("check_once"),
-        ValidationCheck::catalog_entry("check_once"),
-    ]);
+    let entry = |id| ValidationCheck {
+        id,
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::RustNative(StructuralCheck::TrioLockstep),
+    };
+    let empty = ValidationCatalog::from_checks(vec![entry("")]);
+    let duplicate = ValidationCatalog::from_checks(vec![entry("check_once"), entry("check_once")]);
 
     assert!(empty.validate().is_err());
     assert!(duplicate.validate().is_err());

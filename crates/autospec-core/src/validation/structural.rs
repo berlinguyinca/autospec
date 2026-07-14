@@ -9,9 +9,6 @@ pub struct StructuralValidator;
 impl StructuralValidator {
     pub fn run(check: StructuralCheck, root: &Path) -> Result<(), String> {
         match check {
-            StructuralCheck::CatalogSlot => {
-                Err("validation structural owner is not implemented".to_string())
-            }
             StructuralCheck::TrioLockstep => Self::validate_trio_lockstep(root),
             StructuralCheck::DuoLockstep => Self::validate_duo_lockstep(root),
             StructuralCheck::RequiredTrioFiles => Self::validate_required_trio_files(root),

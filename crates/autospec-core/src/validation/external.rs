@@ -77,6 +77,9 @@ pub enum ExternalCheck {
     PythonSuites,
     GrowDefineContract,
     AutospecDocContract,
+    ConstitutionValidation,
+    InstallTests,
+    ControlPlaneBootstrap,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -195,6 +198,9 @@ impl ExternalCheck {
             Self::PythonSuites => run_python_suites(id, required, root),
             Self::GrowDefineContract => run_grow_define_contract(id, required, root),
             Self::AutospecDocContract => run_autospec_doc_contract(id, required, root),
+            Self::ConstitutionValidation => run_constitution_validation(id, required, root),
+            Self::InstallTests => run_install_tests(id, required, root),
+            Self::ControlPlaneBootstrap => run_control_plane_bootstrap(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -4139,6 +4145,302 @@ fn doc_contract_gate_directory() -> Result<PathBuf, String> {
         format!("doc orchestrator: could not create isolated config-gate directory: {error}")
     })?;
     Ok(directory)
+}
+
+fn run_constitution_validation(id: &str, required: bool, root: &Path) -> CheckResult {
+    const PYTHON_SCRIPTS: &[&str] = &[
+        "scripts/autospec-constitution-rules.py",
+        "scripts/autospec-digital-twin.py",
+    ];
+    const BASH_SCRIPTS: &[&str] = &[
+        "scripts/autospec-constitution-validate.sh",
+        "scripts/autospec-baseline-compose.sh",
+        "scripts/autospec-discover-metadata.sh",
+        "scripts/autospec-baseline-gap.sh",
+        "scripts/autospec-constitutional-gap.sh",
+        "scripts/autospec-plan-issues.sh",
+        "scripts/autospec-bot-state-init.sh",
+        "scripts/autospec-autonomy-dry-run.sh",
+        "scripts/autospec-ensure-labels.sh",
+        "scripts/autospec-publish-issues.sh",
+        "scripts/autospec-sync-published-issues.sh",
+        "scripts/autospec-worker-v1.sh",
+        "scripts/autospec-verify-worker-pr.sh",
+        "scripts/autospec-promote-pr.sh",
+        "scripts/autospec-plan-remediation.sh",
+        "scripts/autospec-worker-one.sh",
+        "scripts/autospec-publish-stuck.sh",
+        "scripts/autospec-sync-guidance.sh",
+        "scripts/autospec-supervisor-cycle.sh",
+        "scripts/autospec-autonomy-status.sh",
+        "scripts/autospec-supervisor-loop.sh",
+        "scripts/autospec-autonomy-budget.sh",
+        "scripts/autospec-repeated-failures.sh",
+        "scripts/autospec-resume.sh",
+        "scripts/autospec-guide-issue.sh",
+        "scripts/autospec-build-digital-twin.sh",
+        "scripts/autospec-impact-analysis.sh",
+        "scripts/autospec-metadata-drift.sh",
+        "scripts/autospec-extract-constitution-rules.sh",
+        "scripts/autospec-check-rules.sh",
+        "scripts/autospec-constitutional-gap-v1.sh",
+        "scripts/autospec-constitution-audit.sh",
+        "scripts/autospec-load-policy-sources.sh",
+        "scripts/autospec-validate-policy-sources.sh",
+        "scripts/autospec-lock-policy-sources.sh",
+        "scripts/autospec-policy-compatibility.sh",
+    ];
+    const SUITES: &[&str] = &[
+        "tests/unit/test_constitution_validation.bats",
+        "tests/unit/test_baseline_composition.bats",
+        "tests/unit/test_repository_intelligence.bats",
+        "tests/unit/test_issue_planning.bats",
+        "tests/unit/test_github_publishing.bats",
+        "tests/unit/test_worker_v1.bats",
+        "tests/unit/test_verifier_v0.bats",
+        "tests/unit/test_autonomy_pipeline.bats",
+        "tests/unit/test_local_autonomy_control.bats",
+        "tests/unit/test_digital_twin.bats",
+        "tests/unit/test_constitution_rules.bats",
+        "tests/unit/test_policy_sources_v2.bats",
+    ];
+
+    for script in PYTHON_SCRIPTS {
+        let path = root.join(script);
+        if !path.is_file() {
+            return failure(id, required, &format!("{script}: required file missing"));
+        }
+        if !is_executable(&path) {
+            return failure(id, required, &format!("{script}: not executable"));
+        }
+    }
+    let syntax = run_required_bash_scripts(
+        id,
+        required,
+        root,
+        &BASH_SCRIPTS
+            .iter()
+            .map(|script| (*script, true))
+            .collect::<Vec<_>>(),
+    );
+    if syntax.is_failure() {
+        return syntax;
+    }
+    let python = run_commands(
+        id,
+        required,
+        root,
+        [
+            ToolCommand::new("python3", ["-m", "py_compile", PYTHON_SCRIPTS[1]])
+                .expect("Python compilation uses direct static arguments"),
+            ToolCommand::new("python3", ["-m", "py_compile", PYTHON_SCRIPTS[0]])
+                .expect("Python compilation uses direct static arguments"),
+        ],
+    );
+    if python.is_failure() {
+        return aggregate(id, required, vec![syntax, python]);
+    }
+    let bats = run_bats_suites(id, required, root, SUITES);
+    aggregate(id, required, vec![syntax, python, bats])
+}
+
+fn run_install_tests(id: &str, required: bool, root: &Path) -> CheckResult {
+    let configured_pattern = std::env::var("AUTOSPEC_VALIDATE_INSTALL_TEST_GLOB")
+        .ok()
+        .filter(|pattern| !pattern.is_empty());
+    if !root.join("tests/install").is_dir() && configured_pattern.is_none() {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+
+    let patterns = configured_pattern
+        .as_deref()
+        .unwrap_or("tests/install/*.sh")
+        .split_whitespace();
+    let mut tests = patterns
+        .flat_map(|pattern| expand_install_test_pattern(root, pattern))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    tests.sort();
+    tests.dedup();
+
+    let commands = tests.into_iter().map(|test| {
+        ToolCommand::new("bash", vec![test.into_os_string()])
+            .expect("install tests use direct test-file arguments")
+    });
+    run_commands(id, required, root, commands)
+}
+
+fn run_control_plane_bootstrap(id: &str, required: bool, root: &Path) -> CheckResult {
+    const HELPER: &str = "scripts/autospec-control-plane.sh";
+    const EVENT_HELPER: &str = "scripts/autospec-observatory-events.sh";
+    const RENDERERS: &[&str] = &[
+        "scripts/lib/autospec-control-plane-render.sh",
+        "scripts/lib/autospec-control-plane-observatory-render.sh",
+        "scripts/lib/autospec-control-plane-observatory-events-render.sh",
+        "scripts/lib/autospec-control-plane-observatory-ui-render.sh",
+        "scripts/lib/autospec-control-plane-observatory-reports-render.sh",
+    ];
+    const SUITES: &[&str] = &[
+        "tests/control-plane-bootstrap.bats",
+        "tests/control-plane-governance.bats",
+        "tests/control-plane-observatory.bats",
+        "tests/control-plane-observatory-auth.bats",
+        "tests/control-plane-events.bats",
+        "tests/control-plane-ui.bats",
+        "tests/integration/control-plane-events.bats",
+        "tests/control-plane-reports.bats",
+        "tests/integration/control-plane-reports.bats",
+        "tests/smoke/control-plane-ui.bats",
+        "tests/observatory-outbox.bats",
+        "tests/policy-resolution.bats",
+        "tests/control-plane-confirm.bats",
+        "tests/control-plane-dogfood.bats",
+    ];
+
+    let mut syntax_targets = RENDERERS
+        .iter()
+        .map(|renderer| (*renderer, false))
+        .collect::<Vec<_>>();
+    syntax_targets.insert(0, (HELPER, true));
+    syntax_targets.push((EVENT_HELPER, true));
+    let syntax = run_required_bash_scripts(id, required, root, &syntax_targets);
+    if syntax.is_failure() {
+        return syntax;
+    }
+
+    let help = ToolCommand::new("bash", [HELPER, "--help"])
+        .expect("control-plane help uses direct static arguments")
+        .execute_in_capturing(id, required, root);
+    if help.result.is_failure() {
+        return aggregate(id, required, vec![syntax, help.result]);
+    }
+    if !contains_bytes(&help.stdout, b"bootstrap --dry-run") {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                help.result,
+                failure(
+                    id,
+                    required,
+                    "scripts/autospec-control-plane.sh --help must document bootstrap --dry-run",
+                ),
+            ],
+        );
+    }
+    for (document, anchor) in [
+        (
+            "docs/companion-repositories.md",
+            "Control Plane Governance Dry Run",
+        ),
+        (
+            "docs/runbooks/OBSERVATORY.md",
+            ".autospec/observatory/outbox/<run-id>.jsonl",
+        ),
+    ] {
+        let path = root.join(document);
+        if !path.is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    help.result,
+                    failure(id, required, &format!("{document}: required file missing")),
+                ],
+            );
+        }
+        if !contains(&path, anchor) {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    help.result,
+                    failure(id, required, &format!("{document}: missing {anchor}")),
+                ],
+            );
+        }
+    }
+    for suite in SUITES {
+        if !root.join(suite).is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    help.result,
+                    failure(id, required, &format!("{suite}: bats coverage missing")),
+                ],
+            );
+        }
+    }
+    if !program_on_path("bats") {
+        return aggregate(id, required, vec![syntax, help.result]);
+    }
+    let suites = SUITES.iter().map(|suite| {
+        let command = ToolCommand::new("bash", [*suite])
+            .expect("control-plane suites use direct test-file arguments");
+        if *suite == "tests/observatory-outbox.bats" {
+            command.with_env("AUTOSPEC_OBSERVATORY_OFFLINE", "1")
+        } else {
+            command
+        }
+    });
+    let suites = run_commands(id, required, root, suites);
+    aggregate(id, required, vec![syntax, help.result, suites])
+}
+
+fn expand_install_test_pattern(root: &Path, pattern: &str) -> Vec<PathBuf> {
+    let configured = Path::new(pattern);
+    let path = if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        root.join(configured)
+    };
+    let Some(name_pattern) = path.file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
+    };
+    if !name_pattern.contains('*') {
+        return vec![path.to_path_buf()];
+    }
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut matches = fs::read_dir(directory)
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .map(|entry| entry.path())
+        .filter(|candidate| {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| wildcard_filename_matches(name_pattern, name))
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches
+}
+
+fn wildcard_filename_matches(pattern: &str, candidate: &str) -> bool {
+    let mut remainder = candidate;
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or_default();
+    if !remainder.starts_with(first) {
+        return false;
+    }
+    remainder = &remainder[first.len()..];
+    let suffix = parts.next_back().unwrap_or_default();
+    if !remainder.ends_with(suffix) {
+        return false;
+    }
+    remainder = &remainder[..remainder.len() - suffix.len()];
+    for part in parts {
+        let Some(index) = remainder.find(part) else {
+            return false;
+        };
+        remainder = &remainder[index + part.len()..];
+    }
+    true
 }
 
 fn run_conductor_wiring_contract(id: &str, required: bool, root: &Path) -> CheckResult {
