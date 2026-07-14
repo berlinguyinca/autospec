@@ -267,6 +267,15 @@ impl ValidationCheck {
             "check_phase4_final_quality_gate" => {
                 CheckOwner::ExternalBatch(ExternalCheck::Phase4FinalQualityGate)
             }
+            "check_autospec_refine_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecRefineContract)
+            }
+            "check_autospec_continue_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecContinueContract)
+            }
+            "check_autospec_loop_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecLoopContract)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

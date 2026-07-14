@@ -62,6 +62,9 @@ pub enum ExternalCheck {
     WorktreeLadderAssertParity,
     Phase4SingleAgentDiscipline,
     Phase4FinalQualityGate,
+    AutospecRefineContract,
+    AutospecContinueContract,
+    AutospecLoopContract,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -163,6 +166,9 @@ impl ExternalCheck {
                 run_phase4_single_agent_discipline(id, required, root)
             }
             Self::Phase4FinalQualityGate => run_phase4_final_quality_gate(id, required, root),
+            Self::AutospecRefineContract => run_autospec_refine_contract(id, required, root),
+            Self::AutospecContinueContract => run_autospec_continue_contract(id, required, root),
+            Self::AutospecLoopContract => run_autospec_loop_contract(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -3305,6 +3311,278 @@ fn run_phase4_final_quality_gate(id: &str, required: bool, root: &Path) -> Check
         }
     }
     run_bats_suites(id, required, root, &[SUITE])
+}
+
+fn run_autospec_refine_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPTS: &[(&str, bool)] = &[
+        ("scripts/refine-prompt.sh", true),
+        ("scripts/lib/extract-matchers.sh", false),
+        ("scripts/refine-prompt-lens-llm.sh", true),
+        ("scripts/refine-render-overview.sh", true),
+    ];
+    const SCHEMAS: &[&str] = &[
+        "schemas/autospec-refinement.schema.json",
+        "schemas/autospec-refinement-loop.schema.json",
+    ];
+
+    let syntax = run_required_bash_scripts(id, required, root, SCRIPTS);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    for schema in SCHEMAS {
+        if !root.join(schema).is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(id, required, &format!("{schema}: file missing")),
+                ],
+            );
+        }
+    }
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let relative = format!("skills/autospec-refine/{member}");
+        if !root.join(&relative).is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(id, required, &format!("{relative}: file missing")),
+                ],
+            );
+        }
+    }
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let relative = format!("skills/autospec/{member}");
+        if !contains(&root.join(&relative), "canonical `## Next steps` section") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(
+                        id,
+                        required,
+                        &format!("{relative}: missing canonical Next steps directive"),
+                    ),
+                ],
+            );
+        }
+    }
+
+    let schema = run_optional_jsonschema_checks(id, required, root, SCHEMAS);
+    if schema.is_failure() {
+        return aggregate(id, required, vec![syntax, schema]);
+    }
+    let bats =
+        run_matching_bats_suites_if_available(id, required, root, "tests/refine", "test_refine_");
+    aggregate(id, required, vec![syntax, schema, bats])
+}
+
+fn run_autospec_continue_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPTS: &[(&str, bool)] = &[
+        ("scripts/autospec-continue.sh", true),
+        ("scripts/extract-conversational-recommendation.sh", true),
+        ("scripts/lib/extract-matchers.sh", false),
+    ];
+    for member in ["SKILL.md", "codex/prompt.md"] {
+        let relative = format!("skills/autospec-continue/{member}");
+        if !root.join(&relative).is_file() {
+            return failure(id, required, &format!("{relative}: file missing"));
+        }
+    }
+    let syntax = run_required_bash_scripts(id, required, root, SCRIPTS);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let relative = format!("skills/autospec-continue/{member}");
+        let path = root.join(&relative);
+        if !path.is_file() {
+            continue;
+        }
+        for token in [
+            "## Continuous loop mode",
+            "--no-loop",
+            "continue-no-loop.flag",
+        ] {
+            if !contains(&path, token) {
+                return aggregate(
+                    id,
+                    required,
+                    vec![
+                        syntax,
+                        failure(id, required, &format!("{relative}: missing {token}")),
+                    ],
+                );
+            }
+        }
+    }
+    let main = root.join("scripts/autospec-continue.sh");
+    for token in [
+        "--no-loop|--once",
+        "continue-no-loop.flag",
+        "autospec_loop_run",
+    ] {
+        if !contains(&main, token) {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(
+                        id,
+                        required,
+                        &format!("scripts/autospec-continue.sh: missing {token}"),
+                    ),
+                ],
+            );
+        }
+    }
+    let bats = run_matching_bats_suites_if_available(
+        id,
+        required,
+        root,
+        "tests/continue",
+        "test_continue_",
+    );
+    aggregate(id, required, vec![syntax, bats])
+}
+
+fn run_autospec_loop_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const LIBRARY: &str = "scripts/lib/autospec-loop.sh";
+    const SUITE: &str = "tests/autospec/test_autospec_loop.bats";
+    let syntax = run_required_bash_scripts(id, required, root, &[(LIBRARY, false)]);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    for token in ["autospec_loop_run()", "autospec_loop_harvest_next_prompt()"] {
+        if !contains(&root.join(LIBRARY), token) {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(id, required, &format!("{LIBRARY}: missing {token}")),
+                ],
+            );
+        }
+    }
+    for script in ["scripts/refine-prompt.sh", "scripts/autospec-continue.sh"] {
+        if !contains(&root.join(script), "lib/autospec-loop.sh") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(
+                        id,
+                        required,
+                        &format!("{script}: missing loop library source"),
+                    ),
+                ],
+            );
+        }
+    }
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let relative = format!("skills/autospec/{member}");
+        let path = root.join(&relative);
+        if !path.is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(id, required, &format!("{relative}: file missing")),
+                ],
+            );
+        }
+        for token in ["## Continuous loop mode (--loop)", "evidence_based_stop"] {
+            if !contains(&path, token) {
+                return aggregate(
+                    id,
+                    required,
+                    vec![
+                        syntax,
+                        failure(id, required, &format!("{relative}: missing {token}")),
+                    ],
+                );
+            }
+        }
+        if !contains(&path, "autospec_loop_run") && !contains(&path, "lib/autospec-loop.sh") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(
+                        id,
+                        required,
+                        &format!("{relative}: missing loop driver reference"),
+                    ),
+                ],
+            );
+        }
+    }
+    let bats = run_bats_suites(id, required, root, &[SUITE]);
+    aggregate(id, required, vec![syntax, bats])
+}
+
+fn run_optional_jsonschema_checks(
+    id: &str,
+    required: bool,
+    root: &Path,
+    schemas: &[&str],
+) -> CheckResult {
+    if !program_on_path("python3") {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+    const CHECK: &str = r#"import json, sys
+try:
+    import jsonschema
+except ImportError:
+    sys.exit(0)
+with open(sys.argv[1]) as file:
+    schema = json.load(file)
+jsonschema.Draft202012Validator.check_schema(schema)"#;
+    let commands = schemas.iter().map(|schema| {
+        ToolCommand::new("python3", ["-c", CHECK, *schema])
+            .expect("JSON Schema validation uses a direct Python argument vector")
+    });
+    run_commands(id, required, root, commands)
+}
+
+fn run_matching_bats_suites_if_available(
+    id: &str,
+    required: bool,
+    root: &Path,
+    directory: &str,
+    prefix: &str,
+) -> CheckResult {
+    if !program_on_path("bats") {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+    let mut suites = fs::read_dir(root.join(directory))
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(prefix) && name.ends_with(".bats"))
+        })
+        .map(|path| relative_path(root, &path))
+        .collect::<Vec<_>>();
+    suites.sort();
+    if suites.is_empty() {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+    let suite_refs = suites.iter().map(String::as_str).collect::<Vec<_>>();
+    run_bats_suites(id, required, root, &suite_refs)
 }
 
 fn run_scripts_with_optional_bats(
