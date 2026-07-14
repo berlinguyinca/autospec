@@ -11,9 +11,9 @@
 ## Contract to preserve
 
 - Issue lint accepts `--json` and a body path (including `-` for stdin), emits the existing RULE_IDs and deterministic order, and exits with the blocking-finding count capped at `64`.
-- Implementation lint preserves `PR --issue N`, `--diff-file PATH`, `--pre-commit --staged`, `--directives`, and `--vacuous-assertions`; it emits existing `RULE_ID: detail` / `INFO:RULE_ID: detail` records and keeps exit `200` for scope explosion.
-- The deterministic implementation rules are `OUT_OF_SCOPE`, `MISSING_TEST`, `COMPLEXITY`, `SECURITY`, `TODO_LEFT`, `MOCK_DB`, `DOC_OUT_OF_SYNC`, the six `VACUOUS_*` rules, `REINVENT_REPO_UTIL`, `NEW_DEP_UNJUSTIFIED`, and `NEW_ABSTRACTION_SINGLE_CALLER`.
-- Existing `Guardian: skip-RULE_ID # reason` and same-line/previous-line `linter:allow-RULE_ID reason` semantics remain exact; malformed or reason-less opt-outs do not suppress a finding.
+- Implementation lint preserves `PR --issue N`, `--diff-file PATH`, `--pre-commit --staged`, `--directives`, `--vacuous-assertions`, and `--assertion-density`; it emits existing `RULE_ID: detail` / `INFO:RULE_ID: detail` records and keeps exit `200` for scope explosion.
+- The deterministic implementation rules are `OUT_OF_SCOPE`, `MISSING_TEST`, `COMPLEXITY`, `SECURITY`, `TODO_LEFT`, `MOCK_DB`, `DOC_OUT_OF_SYNC`, the six `VACUOUS_*` rules, `ASSERTION_DENSITY`, `REINVENT_REPO_UTIL`, `NEW_DEP_UNJUSTIFIED`, and `NEW_ABSTRACTION_SINGLE_CALLER`.
+- Existing `Guardian: skip-RULE_ID # reason` behavior and the executable shell's rule-specific same-line/previous-line `linter:allow-RULE_ID reason` behavior remain exact; malformed or reason-less opt-outs do not suppress a finding. The broader documentation mismatch is not silently changed during this parity migration.
 - `gh` and `git` calls use direct argument vectors, retain stderr diagnostics, and never run untrusted input through a shell. Offline diff-file and staged modes remain usable without GitHub credentials.
 - No generated installer or prompt may retain a live `lint-issue.sh` / `lint-implementation.sh` invocation after cutover. Historical migration documents and intentional negative-reachability assertions may mention the deleted names only under a narrow test allowlist.
 
@@ -21,7 +21,7 @@
 
 - Expand: `crates/autospec-core/src/lint/mod.rs` — stable finding model, issue parser, diff model, pure deterministic detectors, suppressions, JSON/text renderers.
 - Create: `crates/autospec-core/src/lint/diff.rs` — unified-diff parser and file/hunk model, with no subprocess access.
-- Create: `crates/autospec-core/src/lint/implementation.rs` — implementation policy rules and directive mapping.
+- Create: `crates/autospec-core/src/lint/implementation.rs` — implementation policy rules, directive mapping, and injected post-change repository snapshots.
 - Expand: `crates/autospec-core/tests/issue_lint.rs` — every issue RULE_ID, order, JSON, stdin-equivalent body fixtures.
 - Create: `crates/autospec-core/tests/implementation_lint.rs` — minimal synthetic diff/issue bodies covering every implementation RULE_ID and suppression form.
 - Create: `crates/autospec-cli/src/commands/lint.rs` — `autospec lint issue|implementation` option parsing, direct GitHub/Git adapters, exit mapping.
@@ -105,7 +105,7 @@ git commit -m "feat: expose Rust issue lint command"
 
 - [ ] **Step 1: Add focused failing pure-core tests.**
 
-Use inline unified diffs and issue bodies to cover every implementation rule, finding cap, rule order, `Guardian: skip-*`, `linter:allow-*`, directive text, heredoc complexity, and a clean fixture. Test the scanner against real added lines only; deleted/context lines must not generate a finding.
+Use inline unified diffs, issue bodies, and explicit post-change repository snapshots to cover every implementation rule, including `ASSERTION_DENSITY`, finding cap, rule order, `Guardian: skip-*`, executable rule-specific `linter:allow-*`, directive text, heredoc complexity, and a clean fixture. Test the scanner against real added lines only; deleted/context lines must not generate a finding. Add separate pre-commit-mode fixtures proving it enables both vacuous and assertion-density checks.
 
 - [ ] **Step 2: Confirm RED.**
 
@@ -115,7 +115,7 @@ Expected: compilation/test failures identify the absent diff model and detectors
 
 - [ ] **Step 3: Implement the pure detector engine.**
 
-Parse unified diffs into paths, added lines, and hunks before evaluating policy. Keep detection deterministic and bounded: no LLM behavior, no subprocesses, and no broad source scans inside core. Pass a supplied repository-index abstraction to the three reuse/dependency detectors so the CLI adapter controls I/O.
+Parse unified diffs into paths, added lines, and hunks before evaluating policy. Keep detection deterministic and bounded: no LLM behavior, no subprocesses, and no broad source scans inside core. Pass a supplied repository-index abstraction and post-change file snapshots to the reuse/dependency and whole-file complexity detectors so the CLI adapter controls I/O. Model the shell's current full-file thresholds and Python-specific function checks from supplied content; do not silently drop a detector because its shell version called another tool.
 
 - [ ] **Step 4: Verify pure and existing fixture coverage.**
 
@@ -137,7 +137,7 @@ git commit -m "feat: move implementation policy detectors into Rust"
 
 - [ ] **Step 1: Add failing end-to-end CLI tests.**
 
-Cover `--diff-file`, `--pre-commit --staged`, `PR --issue N`, `--directives`, `--vacuous-assertions`, invalid mutually-exclusive input, a nonzero `gh` response, no staged changes, exact `64` cap, and scope-explosion exit `200`.
+Cover `--diff-file`, `--pre-commit --staged`, `PR --issue N`, `--directives`, `--vacuous-assertions`, `--assertion-density`, invalid mutually-exclusive input, a nonzero `gh` response, no staged changes, exact `64` cap, and scope-explosion exit `200`.
 
 - [ ] **Step 2: Confirm RED.**
 
