@@ -1320,6 +1320,32 @@ fn catalog_assigns_worktree_ladder_parity_to_a_typed_external_batch() {
 }
 
 #[test]
+fn catalog_assigns_phase4_policy_gates_to_typed_external_batches() {
+    let catalog = ValidationCatalog::standard();
+
+    for (id, owner) in [
+        (
+            "check_phase4_single_agent_discipline",
+            ExternalCheck::Phase4SingleAgentDiscipline,
+        ),
+        (
+            "check_phase4_final_quality_gate",
+            ExternalCheck::Phase4FinalQualityGate,
+        ),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::ExternalBatch(owner)),
+            "{id} must have a typed external owner"
+        );
+    }
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![

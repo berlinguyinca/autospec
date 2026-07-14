@@ -1163,6 +1163,36 @@ fn runner_checks_worktree_ladder_parity_with_typed_stdin_commands() {
 }
 
 #[test]
+fn runner_checks_phase4_policy_gates_with_direct_bats_commands() {
+    for (id, owner, fixture) in [
+        (
+            "check_phase4_single_agent_discipline",
+            ExternalCheck::Phase4SingleAgentDiscipline,
+            "phase4-single-agent",
+        ),
+        (
+            "check_phase4_final_quality_gate",
+            ExternalCheck::Phase4FinalQualityGate,
+            "phase4-final-quality",
+        ),
+    ] {
+        let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+            id,
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(owner),
+        }]);
+
+        let report = ValidationRunner::run(&catalog, &validation_fixture(fixture));
+
+        assert_eq!(report.results[0].exit_code, Some(0), "{id}");
+        assert!((0..=1).contains(&report.results[0].spawn_count), "{id}");
+    }
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

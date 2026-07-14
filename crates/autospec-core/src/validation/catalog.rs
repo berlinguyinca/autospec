@@ -261,6 +261,12 @@ impl ValidationCheck {
             "check_worktree_ladder_assert_parity" => {
                 CheckOwner::ExternalBatch(ExternalCheck::WorktreeLadderAssertParity)
             }
+            "check_phase4_single_agent_discipline" => {
+                CheckOwner::ExternalBatch(ExternalCheck::Phase4SingleAgentDiscipline)
+            }
+            "check_phase4_final_quality_gate" => {
+                CheckOwner::ExternalBatch(ExternalCheck::Phase4FinalQualityGate)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

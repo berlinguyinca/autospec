@@ -60,6 +60,8 @@ pub enum ExternalCheck {
     GrowRunPipeline,
     DbTelemetry,
     WorktreeLadderAssertParity,
+    Phase4SingleAgentDiscipline,
+    Phase4FinalQualityGate,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -157,6 +159,10 @@ impl ExternalCheck {
             Self::WorktreeLadderAssertParity => {
                 run_worktree_ladder_assert_parity(id, required, root)
             }
+            Self::Phase4SingleAgentDiscipline => {
+                run_phase4_single_agent_discipline(id, required, root)
+            }
+            Self::Phase4FinalQualityGate => run_phase4_final_quality_gate(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -3233,6 +3239,72 @@ fn run_worktree_ladder_assert_parity(id: &str, required: bool, root: &Path) -> C
         results.push(syntax);
     }
     aggregate(id, required, results)
+}
+
+fn run_phase4_single_agent_discipline(id: &str, required: bool, root: &Path) -> CheckResult {
+    const CANONICAL: &str =
+        "Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool";
+    const SUITE: &str = "tests/phase4/test_single_agent_discipline.bats";
+
+    for skill in ["autospec-run", "autospec"] {
+        for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+            let relative = format!("skills/{skill}/{member}");
+            let path = root.join(&relative);
+            for token in [
+                CANONICAL,
+                "single-agent absorbed-discipline",
+                "top-level agents launched directly by the main session orchestrator",
+            ] {
+                if !contains(&path, token) {
+                    return failure(id, required, &format!("{relative}: missing {token}"));
+                }
+            }
+            for retired in [
+                "process(ISSUE)   # foreground subagent",
+                "dispatches a **foreground subagent**",
+            ] {
+                if contains(&path, retired) {
+                    return failure(
+                        id,
+                        required,
+                        &format!("{relative}: contains retired {retired}"),
+                    );
+                }
+            }
+        }
+    }
+
+    let prompt = root.join("skills/autospec-run/prompts/phase4-implementer.md");
+    for token in ["single-agent", CANONICAL] {
+        if !contains(&prompt, token) {
+            return failure(
+                id,
+                required,
+                &format!("skills/autospec-run/prompts/phase4-implementer.md: missing {token}"),
+            );
+        }
+    }
+    run_bats_suites(id, required, root, &[SUITE])
+}
+
+fn run_phase4_final_quality_gate(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SUITE: &str = "tests/unit/test_final_quality_gate.bats";
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let relative = format!("skills/autospec-run/{member}");
+        let path = root.join(&relative);
+        for token in [
+            "Final quality gate",
+            "cargo clippy --workspace --all-targets -- -D warnings",
+            "FINAL_QUALITY_GATE_FAILED",
+            "`crate`, `file`, `line`, and `rule` fields",
+            "Do NOT run `gh pr merge` while the final quality gate is failing",
+        ] {
+            if !contains(&path, token) {
+                return failure(id, required, &format!("{relative}: missing {token}"));
+            }
+        }
+    }
+    run_bats_suites(id, required, root, &[SUITE])
 }
 
 fn run_scripts_with_optional_bats(
