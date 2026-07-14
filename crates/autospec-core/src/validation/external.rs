@@ -39,6 +39,7 @@ pub enum ExternalCheck {
     AutospecExploreSpecFirst,
     AutospecExploreQaGate,
     AutospecExploreStyleNormalization,
+    AutospecExploreOrchestrator,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -108,6 +109,9 @@ impl ExternalCheck {
             Self::AutospecExploreQaGate => run_autospec_explore_qa_gate(id, required, root),
             Self::AutospecExploreStyleNormalization => {
                 run_autospec_explore_style_normalization(id, required, root)
+            }
+            Self::AutospecExploreOrchestrator => {
+                run_autospec_explore_orchestrator(id, required, root)
             }
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
@@ -1642,6 +1646,117 @@ fn run_autospec_explore_style_normalization(id: &str, required: bool, root: &Pat
     }
     let bats = run_bats_suites(id, required, root, &[SUITE]);
     aggregate(id, required, vec![researcher, bats])
+}
+
+fn run_autospec_explore_orchestrator(id: &str, required: bool, root: &Path) -> CheckResult {
+    const ORCHESTRATOR: &str = "scripts/autospec-explore.sh";
+    const REMAINING_SCRIPTS: &[(&str, bool)] = &[
+        ("scripts/explore-research/spec-vs-code.sh", true),
+        ("scripts/explore-research/prior-reports.sh", true),
+        ("scripts/explore-research/codebase-signals.sh", true),
+        ("scripts/explore-research/open-issues.sh", true),
+        ("scripts/explore-research/source-analysis.sh", true),
+        ("scripts/explore-research/internet.sh", true),
+        ("scripts/explore-sandbox.sh", true),
+        ("scripts/explore-research-cycle.sh", true),
+        (ORCHESTRATOR, true),
+    ];
+    const TRIO: &[&str] = &[
+        "skills/autospec-explore/SKILL.md",
+        "skills/autospec-explore/codex/prompt.md",
+        "skills/autospec-explore/opencode/agent.md",
+    ];
+    const SUITE: &str = "tests/explore/test_explore_e2e.bats";
+
+    let initial_syntax = run_required_bash_scripts(id, required, root, &[(ORCHESTRATOR, true)]);
+    if initial_syntax.is_failure() {
+        return initial_syntax;
+    }
+
+    let orchestrator = root.join(ORCHESTRATOR);
+    for (token, message) in [
+        (
+            "lib/autospec-loop.sh",
+            "must source scripts/lib/autospec-loop.sh",
+        ),
+        (
+            "lib/autospec-harness-detect.sh",
+            "must source scripts/lib/autospec-harness-detect.sh",
+        ),
+        (
+            "explore-sandbox.sh",
+            "must invoke scripts/explore-sandbox.sh",
+        ),
+        (
+            "explore-research-cycle.sh",
+            "must invoke scripts/explore-research-cycle.sh",
+        ),
+        (
+            "explore-stop.flag",
+            "must check ~/.autospec/explore-stop.flag operator escape",
+        ),
+        (
+            "explore-summary.md",
+            "must write .autospec/explore-summary.md",
+        ),
+        (
+            "explore-loop.json",
+            "must write .autospec/explore-loop.json",
+        ),
+    ] {
+        if !contains(&orchestrator, token) {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    initial_syntax,
+                    failure(id, required, &format!("{ORCHESTRATOR}: {message}")),
+                ],
+            );
+        }
+    }
+
+    let remaining_scripts = run_required_bash_scripts(id, required, root, REMAINING_SCRIPTS);
+    if remaining_scripts.is_failure() {
+        return aggregate(id, required, vec![initial_syntax, remaining_scripts]);
+    }
+
+    for trio in TRIO {
+        let path = root.join(trio);
+        if !path.is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    initial_syntax,
+                    remaining_scripts,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: required adapter file missing"),
+                    ),
+                ],
+            );
+        }
+        if !contains(&path, "lib/autospec-loop.sh") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    initial_syntax,
+                    remaining_scripts,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: adapter must reference scripts/lib/autospec-loop.sh"),
+                    ),
+                ],
+            );
+        }
+    }
+
+    let bats = run_bats_suites(id, required, root, &[SUITE]);
+    aggregate(id, required, vec![initial_syntax, remaining_scripts, bats])
 }
 
 fn run_required_bash_scripts(
