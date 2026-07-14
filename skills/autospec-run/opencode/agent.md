@@ -869,12 +869,12 @@ inline label-swap path below.
 >    <!-- agent-env-provision:begin -->
 >    ```bash
 >    if [ -f ".autospec/runtime.yml" ] || [ -f ".agent-runtime.yml" ]; then
->      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/agent-env.sh" up --repo "$PWD" --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" > .autospec-agent-env.out
+>      autospec runtime env up --repo "$PWD" --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" > .autospec-agent-env.out
 >      AGENT_ENV_FILE=$(sed -n 's/^AGENT_ENV_FILE=//p' .autospec-agent-env.out | tail -n 1)
 >      if [ -n "$AGENT_ENV_FILE" ] && [ -f "$AGENT_ENV_FILE" ]; then
 >        . "$AGENT_ENV_FILE"
 >      else
->        echo "agent-env did not emit a usable AGENT_ENV_FILE" >&2
+>        echo "autospec runtime env did not emit a usable AGENT_ENV_FILE" >&2
 >        exit 1
 >      fi
 >      echo "[runtime] isolated environment: ${AUTOSPEC_PUBLIC_URL:-$AGENT_PUBLIC_URL}"
@@ -1331,7 +1331,7 @@ inline label-swap path below.
 > 9. FAILURE (loop exhausted): comment failure on issue, swap label `in-progress-by-bot` → `auto-implement`, `gh pr close <PR> --delete-branch`.
 >    Fire the terminal failure notification: `case "$_notify_fired" in *:failed:*) ;; *) _notify_fired="${_notify_fired}:failed:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: failed" "Implementation failed on {repo}" || true ;; esac`
 >    Cleanup single-fetch body temp file on terminal failure: `rm -f "/tmp/issue-<ISSUE>-body.md" || true`
-> 10. Cleanup: if `.autospec/runtime.yml` or `.agent-runtime.yml` exists in the issue worktree, run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/agent-env.sh" down --repo /tmp/wt-<BRANCH> --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" || true`; then `cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force`
+> 10. Cleanup: if `.autospec/runtime.yml` or `.agent-runtime.yml` exists in the issue worktree, run `autospec runtime env down --repo /tmp/wt-<BRANCH> --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" || true`; then `cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force`
 > 11. Report: PR number, outcome, one-paragraph summary.
 >
 > Hard rules: NEVER push to main, force-push, bypass hooks, or touch the umbrella issue. gh CLI only.

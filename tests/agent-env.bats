@@ -2,7 +2,11 @@
 # tests/agent-env.bats — isolated runtime broker coverage
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
-BIN="$REPO_ROOT/scripts/agent-env.sh"
+BIN="$REPO_ROOT/target/debug/autospec"
+
+setup_file() {
+  (cd "$REPO_ROOT" && cargo build -q -p autospec-cli)
+}
 
 setup() {
   TEST_TMP="$(mktemp -d)"
@@ -46,7 +50,7 @@ YAML
   repo="$TEST_TMP/no-manifest"
   mkdir -p "$repo"
 
-  run bash "$BIN" up --repo "$repo"
+  run "$BIN" runtime env up --repo "$repo"
 
   [ "$status" -eq 2 ]
   echo "$output" | grep -q "no runtime manifest"
@@ -57,7 +61,7 @@ YAML
   mkdir -p "$repo"
   write_manifest "$repo"
 
-  run bash "$BIN" up --repo "$repo"
+  run "$BIN" runtime env up --repo "$repo"
 
   [ "$status" -eq 0 ]
   [ -f "$repo/seen.txt" ]
@@ -78,7 +82,7 @@ YAML
   mkdir -p "$repo"
   write_manifest "$repo"
 
-  run bash "$BIN" up --repo "$repo" --mode ro-remote
+  run "$BIN" runtime env up --repo "$repo" --mode ro-remote
 
   [ "$status" -eq 0 ]
   [ "$(cat "$repo/ro.txt")" = "ro-remote" ]
@@ -100,7 +104,7 @@ ports:
     default: dynamic
 YAML
 
-  run bash "$BIN" up --repo "$repo"
+  run "$BIN" runtime env up --repo "$repo"
 
   [ "$status" -eq 42 ]
 }
@@ -109,9 +113,9 @@ YAML
   repo="$TEST_TMP/repo"
   mkdir -p "$repo"
   write_manifest "$repo"
-  bash "$BIN" up --repo "$repo" >/dev/null
+  "$BIN" runtime env up --repo "$repo" >/dev/null
 
-  run bash "$BIN" exec --repo "$repo" -- sh -c 'printf "%s %s" "$AGENT_ENV_ID" "$AUTOSPEC_PUBLIC_URL"'
+  run "$BIN" runtime env exec --repo "$repo" -- sh -c 'printf "%s %s" "$AGENT_ENV_ID" "$AUTOSPEC_PUBLIC_URL"'
 
   [ "$status" -eq 0 ]
   echo "$output" | grep -Eq '^sample-app-[A-Za-z0-9_.-]+ http://127\.0\.0\.1:[0-9]+$'
@@ -121,7 +125,7 @@ YAML
   repo="$TEST_TMP/init-repo"
   mkdir -p "$repo"
 
-  run bash "$BIN" init --repo "$repo"
+  run "$BIN" runtime env init --repo "$repo"
 
   [ "$status" -eq 0 ]
   [ -f "$repo/.agent-runtime.yml" ]
@@ -141,7 +145,7 @@ YAML
   mkdir -p "$repo"
   printf 'custom\n' > "$repo/.agent-runtime.yml"
 
-  run bash "$BIN" init --repo "$repo"
+  run "$BIN" runtime env init --repo "$repo"
 
   [ "$status" -eq 4 ]
   [ "$(cat "$repo/.agent-runtime.yml")" = "custom" ]
@@ -153,7 +157,7 @@ YAML
   mkdir -p "$repo"
   printf 'custom\n' > "$repo/.agent-runtime.yml"
 
-  run bash "$BIN" init --repo "$repo" --force
+  run "$BIN" runtime env init --repo "$repo" --force
 
   [ "$status" -eq 0 ]
   grep -q '^version: 1$' "$repo/.agent-runtime.yml"
@@ -164,7 +168,7 @@ YAML
   repo="$TEST_TMP/init-autospec"
   mkdir -p "$repo"
 
-  run bash "$BIN" init --repo "$repo" --manifest autospec
+  run "$BIN" runtime env init --repo "$repo" --manifest autospec
 
   [ "$status" -eq 0 ]
   [ -f "$repo/.autospec/runtime.yml" ]
@@ -176,7 +180,7 @@ YAML
   mkdir -p "$repo"
   write_manifest "$repo"
 
-  run bash "$BIN" session --repo "$repo" -- sh -c 'printf "%s %s" "$AGENT_ENV_ID" "$AUTOSPEC_PUBLIC_URL" > session.txt'
+  run "$BIN" runtime env session --repo "$repo" -- sh -c 'printf "%s %s" "$AGENT_ENV_ID" "$AUTOSPEC_PUBLIC_URL" > session.txt'
 
   [ "$status" -eq 0 ]
   grep -Eq '^sample-app-[A-Za-z0-9_.-]+ http://127\.0\.0\.1:[0-9]+$' "$repo/session.txt"
@@ -188,7 +192,7 @@ YAML
   repo="$TEST_TMP/no-manifest"
   mkdir -p "$repo"
 
-  run bash "$BIN" session --repo "$repo" -- sh -c 'printf passthrough > passthrough.txt'
+  run "$BIN" runtime env session --repo "$repo" -- sh -c 'printf passthrough > passthrough.txt'
 
   [ "$status" -eq 0 ]
   [ "$(cat "$repo/passthrough.txt")" = "passthrough" ]
@@ -200,7 +204,7 @@ YAML
   repo="$TEST_TMP/session-init"
   mkdir -p "$repo"
 
-  AUTOSPEC_ENV_AUTO_INIT=1 run bash "$BIN" session --repo "$repo" -- sh -c 'printf "%s" "$AUTOSPEC_PUBLIC_URL" > initialized-url.txt'
+  AUTOSPEC_ENV_AUTO_INIT=1 run "$BIN" runtime env session --repo "$repo" -- sh -c 'printf "%s" "$AUTOSPEC_PUBLIC_URL" > initialized-url.txt'
 
   [ "$status" -eq 0 ]
   [ -f "$repo/.agent-runtime.yml" ]
@@ -211,9 +215,9 @@ YAML
   repo="$TEST_TMP/repo"
   mkdir -p "$repo"
   write_manifest "$repo"
-  bash "$BIN" up --repo "$repo" >/dev/null
+  "$BIN" runtime env up --repo "$repo" >/dev/null
 
-  run bash "$BIN" down --repo "$repo"
+  run "$BIN" runtime env down --repo "$repo"
 
   [ "$status" -eq 0 ]
   [ "$(cat "$repo/down.txt")" = "down" ]
