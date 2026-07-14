@@ -1,0 +1,7 @@
+Feature delta
+External
+Quality & resilience
+Dogfooding
+Self-leverage
+Pattern synthesis
+check_autospec_explore_discovery_contract

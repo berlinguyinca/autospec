@@ -40,6 +40,7 @@ pub enum ExternalCheck {
     AutospecExploreQaGate,
     AutospecExploreStyleNormalization,
     AutospecExploreOrchestrator,
+    AutospecExploreDiscovery,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -113,6 +114,7 @@ impl ExternalCheck {
             Self::AutospecExploreOrchestrator => {
                 run_autospec_explore_orchestrator(id, required, root)
             }
+            Self::AutospecExploreDiscovery => run_autospec_explore_discovery(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -1759,6 +1761,274 @@ fn run_autospec_explore_orchestrator(id: &str, required: bool, root: &Path) -> C
     aggregate(id, required, vec![initial_syntax, remaining_scripts, bats])
 }
 
+fn run_autospec_explore_discovery(id: &str, required: bool, root: &Path) -> CheckResult {
+    const RESEARCHERS: &[(&str, bool)] = &[
+        ("scripts/explore-research/quality-resilience.sh", true),
+        ("scripts/explore-research/dogfooding.sh", true),
+        ("scripts/explore-research/self-leverage.sh", true),
+    ];
+    const AGGREGATOR: &str = "scripts/explore-research-cycle.sh";
+    const PROPOSAL_SCHEMA: &str = "schemas/autospec-explore-proposal.schema.json";
+    const SPECIALIST_SCHEMA: &str = "schemas/autospec-explore-specialists.schema.json";
+    const SPECIALIST_SCAN: &str = "scripts/explore-specialist-scan.sh";
+    const TRIO: &[&str] = &[
+        "skills/autospec-explore/SKILL.md",
+        "skills/autospec-explore/codex/prompt.md",
+        "skills/autospec-explore/opencode/agent.md",
+    ];
+    const RUNBOOK: &str = "docs/runbooks/discovery-sweep.md";
+    const SPEC: &str = "docs/specs/2026-06-15-autospec-explore-discovery-enhance.md";
+    const SUITES: &[&str] = &[
+        "tests/explore/test_explore_quality_resilience.bats",
+        "tests/explore/test_explore_dogfooding.bats",
+        "tests/explore/test_explore_self_leverage.bats",
+        "tests/explore/test_explore_verify_stage.bats",
+        "tests/explore/test_explore_severity_roi.bats",
+        "tests/explore/test_explore_specialists.bats",
+    ];
+
+    let researchers = run_required_bash_scripts(id, required, root, RESEARCHERS);
+    if researchers.is_failure() {
+        return researchers;
+    }
+    let mut results = vec![researchers];
+    let dogfooding = root.join("scripts/explore-research/dogfooding.sh");
+    if !contains(&dogfooding, "AUTOSPEC_STATE_DIR") {
+        results.push(failure(
+            id,
+            required,
+            "scripts/explore-research/dogfooding.sh: must read ${AUTOSPEC_STATE_DIR:-$HOME/.autospec}",
+        ));
+        return aggregate(id, required, results);
+    }
+
+    let aggregator = run_required_bash_scripts(id, required, root, &[(AGGREGATOR, false)]);
+    if aggregator.is_failure() {
+        results.push(aggregator);
+        return aggregate(id, required, results);
+    }
+    results.push(aggregator);
+    let aggregator_path = root.join(AGGREGATOR);
+    for (token, message) in [
+        (
+            "proposals_after_verify",
+            "missing verify-stage counter proposals_after_verify",
+        ),
+        ("proposals_refuted", "missing proposals_refuted counter"),
+        (
+            "proposals_after_roi",
+            "missing ROI-gate counter proposals_after_roi",
+        ),
+        (
+            "structural_fixes",
+            "missing pattern-synthesis counter structural_fixes",
+        ),
+    ] {
+        if !contains(&aggregator_path, token) {
+            results.push(failure(id, required, &format!("{AGGREGATOR}: {message}")));
+            return aggregate(id, required, results);
+        }
+    }
+    if !contains_case_insensitive(&aggregator_path, "severity") {
+        results.push(failure(
+            id,
+            required,
+            "scripts/explore-research-cycle.sh: missing severity-first ranking logic",
+        ));
+        return aggregate(id, required, results);
+    }
+
+    for (schema, token, message) in [
+        (
+            PROPOSAL_SCHEMA,
+            "silent-wrong",
+            "severity enum must include silent-wrong (load-bearing rank head)",
+        ),
+        (
+            PROPOSAL_SCHEMA,
+            "named_consumer",
+            "missing named_consumer ROI field",
+        ),
+        (
+            SPECIALIST_SCHEMA,
+            "suggested_specialists",
+            "missing suggested_specialists roster field",
+        ),
+    ] {
+        let path = root.join(schema);
+        if !path.is_file() {
+            results.push(failure(
+                id,
+                required,
+                &format!("{schema}: required schema missing"),
+            ));
+            return aggregate(id, required, results);
+        }
+        if !contains(&path, token) {
+            results.push(failure(id, required, &format!("{schema}: {message}")));
+            return aggregate(id, required, results);
+        }
+    }
+
+    let specialist_scan =
+        run_required_bash_scripts(id, required, root, &[(SPECIALIST_SCAN, false)]);
+    if specialist_scan.is_failure() {
+        results.push(specialist_scan);
+        return aggregate(id, required, results);
+    }
+    results.push(specialist_scan);
+
+    for trio in TRIO {
+        let path = root.join(trio);
+        if !path.is_file() {
+            results.push(failure(
+                id,
+                required,
+                &format!("{trio}: required adapter file missing"),
+            ));
+            return aggregate(id, required, results);
+        }
+        for heading in ["## Discovery enhancement", "## Domain-specialist roster"] {
+            if !has_heading_prefix(&path, heading) {
+                results.push(failure(
+                    id,
+                    required,
+                    &format!("{trio}: missing '{heading}' section"),
+                ));
+                return aggregate(id, required, results);
+            }
+        }
+        for researcher in ["quality-resilience", "dogfooding", "self-leverage"] {
+            if !contains(&path, researcher) {
+                results.push(failure(
+                    id,
+                    required,
+                    &format!("{trio}: missing discovery researcher reference '{researcher}'"),
+                ));
+                return aggregate(id, required, results);
+            }
+        }
+        if !has_same_line_ordered_tokens(
+            &path,
+            &[
+                "dedup",
+                "gap-confirm",
+                "verify",
+                "ROI",
+                "pattern-synthesis",
+                "severity-first rank",
+            ],
+        ) {
+            results.push(failure(
+                id,
+                required,
+                &format!("{trio}: missing aggregator stage order"),
+            ));
+            return aggregate(id, required, results);
+        }
+        for severity in [
+            "silent-wrong",
+            "correctness",
+            "stability",
+            "operability",
+            "feature",
+            "nicety",
+        ] {
+            if !contains(&path, severity) {
+                results.push(failure(
+                    id,
+                    required,
+                    &format!("{trio}: missing severity band '{severity}'"),
+                ));
+                return aggregate(id, required, results);
+            }
+        }
+        for flag in ["--specialists-mode", "--num-specialists"] {
+            if !contains(&path, flag) {
+                results.push(failure(
+                    id,
+                    required,
+                    &format!("{trio}: missing specialist flag '{flag}'"),
+                ));
+                return aggregate(id, required, results);
+            }
+        }
+        if !contains(&path, "7 universal") {
+            results.push(failure(
+                id,
+                required,
+                &format!("{trio}: missing '7 universal' researcher accounting"),
+            ));
+            return aggregate(id, required, results);
+        }
+        if contains_stale_researcher_count(&path) {
+            results.push(failure(
+                id,
+                required,
+                &format!("{trio}: stale '6 researchers' count still present (must be 7 universal)"),
+            ));
+            return aggregate(id, required, results);
+        }
+    }
+
+    for document in [RUNBOOK, SPEC] {
+        if !root.join(document).is_file() {
+            results.push(failure(
+                id,
+                required,
+                &format!(
+                    "{document}: required {} missing",
+                    if document == RUNBOOK {
+                        "runbook"
+                    } else {
+                        "source spec"
+                    }
+                ),
+            ));
+            return aggregate(id, required, results);
+        }
+        for track in [
+            "Feature delta",
+            "External",
+            "Quality & resilience",
+            "Dogfooding",
+            "Self-leverage",
+        ] {
+            if !contains(&root.join(document), track) {
+                results.push(failure(
+                    id,
+                    required,
+                    &format!("{document}: missing discovery track '{track}'"),
+                ));
+                return aggregate(id, required, results);
+            }
+        }
+        if !contains_case_insensitive(&root.join(document), "pattern synthesis") {
+            results.push(failure(
+                id,
+                required,
+                &format!("{document}: missing pattern-synthesis stage"),
+            ));
+            return aggregate(id, required, results);
+        }
+    }
+    if !contains(
+        &root.join(RUNBOOK),
+        "check_autospec_explore_discovery_contract",
+    ) {
+        results.push(failure(
+            id,
+            required,
+            "docs/runbooks/discovery-sweep.md: must cite check_autospec_explore_discovery_contract as the lock-step enforcer",
+        ));
+        return aggregate(id, required, results);
+    }
+
+    let bats = run_bats_suites(id, required, root, SUITES);
+    results.push(bats);
+    aggregate(id, required, results)
+}
+
 fn run_required_bash_scripts(
     id: &str,
     required: bool,
@@ -3022,6 +3292,23 @@ fn contains_case_insensitive(path: &Path, expected: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn contains_stale_researcher_count(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .map(|document| {
+            document.contains("each of the 6")
+                || document.match_indices("6 researchers").any(|(index, _)| {
+                    let before = document[..index].chars().next_back();
+                    let after = document[index + "6 researchers".len()..].chars().next();
+                    !before.is_some_and(|character| {
+                        character.is_ascii_alphanumeric() || character == '_'
+                    }) && !after.is_some_and(|character| {
+                        character.is_ascii_alphanumeric() || character == '_'
+                    })
+                })
+        })
+        .unwrap_or(false)
+}
+
 fn contains_rm_rf(line: &str) -> bool {
     let mut remaining = line;
     while let Some(index) = remaining.find("rm") {
@@ -3123,5 +3410,22 @@ mod tests {
 
         assert_eq!(result.exit_code, None);
         assert!(result.is_failure());
+    }
+
+    #[test]
+    fn stale_researcher_count_matches_the_legacy_word_boundary_contract() {
+        let path = std::env::temp_dir().join(format!(
+            "autospec-stale-researcher-count-{}",
+            std::process::id()
+        ));
+
+        fs::write(&path, "6 researchers").expect("temporary fixture writes");
+        assert!(contains_stale_researcher_count(&path));
+        fs::write(&path, "16 researchers").expect("temporary fixture rewrites");
+        assert!(!contains_stale_researcher_count(&path));
+        fs::write(&path, "each of the 6 sources").expect("temporary fixture rewrites");
+        assert!(contains_stale_researcher_count(&path));
+
+        fs::remove_file(path).expect("temporary fixture removes");
     }
 }

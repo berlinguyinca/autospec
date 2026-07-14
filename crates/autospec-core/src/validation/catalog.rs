@@ -205,6 +205,9 @@ impl ValidationCheck {
             "check_autospec_explore_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreOrchestrator)
             }
+            "check_autospec_explore_discovery_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecExploreDiscovery)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }
