@@ -132,7 +132,8 @@ YAML
   grep -q 'down: sh -c '\''true'\''' "$repo/.agent-runtime.yml"
   grep -q 'env: AGENT_FRONTEND_PORT' "$repo/.agent-runtime.yml"
   grep -q 'AUTOSPEC_PUBLIC_URL' "$repo/.agent-runtime.yml"
-  grep -q "created $repo/.agent-runtime.yml" <<< "$output"
+  canonical_repo="$(cd "$repo" && pwd -P)"
+  grep -q "created $canonical_repo/.agent-runtime.yml" <<< "$output"
 }
 
 @test "init refuses to overwrite an existing runtime manifest without force" {

@@ -1,0 +1,158 @@
+use autospec_core::runtime_env::{RuntimeContext, RuntimeManifest, RuntimeState};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static NEXT_TEMP_REPO: AtomicUsize = AtomicUsize::new(0);
+
+struct TempRepo {
+    root: PathBuf,
+}
+
+impl TempRepo {
+    fn with_files(files: &[(&str, &str)]) -> Self {
+        let suffix = NEXT_TEMP_REPO.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "autospec-runtime-env-{}-{suffix}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for (relative, content) in files {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().expect("fixture file has parent"))
+                .expect("create fixture parent");
+            std::fs::write(path, content).expect("write fixture file");
+        }
+        Self { root }
+    }
+
+    fn path(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for TempRepo {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+const VALID_AUTOSPEC_MANIFEST: &str = "version: 1\nname: sample-app\ndefault_mode: e2e-local-db\nmodes:\n  e2e-local-db:\n    env:\n      E2E_USE_HARNESS: \"1\"\n      QUOTED_VALUE: \"it's-safe\"\n    command: sh -c 'true'\n";
+const VALID_AGENT_MANIFEST: &str = "version: 1\nname: fallback\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'true'\n";
+
+#[test]
+fn manifest_prefers_autospec_path_and_preserves_mode_order() {
+    let fixture = TempRepo::with_files(&[
+        (".autospec/runtime.yml", VALID_AUTOSPEC_MANIFEST),
+        (".agent-runtime.yml", VALID_AGENT_MANIFEST),
+    ]);
+
+    let manifest = RuntimeManifest::read_from_repo(fixture.path()).expect("manifest reads");
+
+    assert_eq!(
+        manifest.path(),
+        fixture.path().join(".autospec/runtime.yml")
+    );
+    assert_eq!(
+        manifest.selected_mode("auto").expect("default mode").name(),
+        "e2e-local-db"
+    );
+}
+
+#[test]
+fn manifest_rejects_lowercase_environment_names() {
+    let error =
+        RuntimeManifest::parse("version: 1\nmodes:\n  local:\n    env:\n      lowercase_port: 1\n")
+            .expect_err("invalid environment key is rejected");
+
+    assert!(error.to_string().contains("invalid environment name"));
+}
+
+#[test]
+fn manifest_uses_first_declared_mode_when_default_is_absent() {
+    let manifest = RuntimeManifest::parse(
+        "version: 1\nname: ordered\nmodes:\n  first:\n    command: sh -c 'true'\n  second:\n    command: sh -c 'true'\n",
+    )
+    .expect("manifest parses");
+
+    assert_eq!(
+        manifest.selected_mode("auto").expect("first mode").name(),
+        "first"
+    );
+}
+
+#[test]
+fn manifest_rejects_unknown_versions_and_duplicate_mode_names() {
+    let version_error =
+        RuntimeManifest::parse("version: 2\nmodes:\n  local:\n    command: sh -c 'true'\n")
+            .expect_err("unsupported version is rejected");
+    assert!(version_error
+        .to_string()
+        .contains("unsupported runtime manifest version"));
+
+    let duplicate_error = RuntimeManifest::parse(
+        "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n  local:\n    command: sh -c 'true'\n",
+    )
+    .expect_err("duplicate mode is rejected");
+    assert!(duplicate_error
+        .to_string()
+        .contains("duplicate runtime mode"));
+}
+
+#[test]
+fn context_and_state_round_trip_the_shell_environment_contract() {
+    let fixture = TempRepo::with_files(&[(".autospec/runtime.yml", VALID_AUTOSPEC_MANIFEST)]);
+    let manifest = RuntimeManifest::read_from_repo(fixture.path()).expect("manifest reads");
+    let state_root = fixture.path().join("state");
+    let context =
+        RuntimeContext::new(manifest, fixture.path(), "auto", &state_root).expect("context builds");
+    let state = RuntimeState::from_context(&context, 41001, 41002);
+
+    let rendered = state.render_env_file();
+
+    assert!(rendered.contains("export AGENT_ENV_ID='sample-app-"));
+    assert!(rendered.contains("export AGENT_ENV_MANIFEST='"));
+    assert!(!rendered.contains("export AGENT_ENV_FILE="));
+    assert!(rendered.contains("export AGENT_FRONTEND_PORT='41001'"));
+    assert!(rendered.contains("export AGENT_BACKEND_PORT='41002'"));
+    assert!(rendered.contains("export AUTOSPEC_PUBLIC_URL='http://127.0.0.1:41001'"));
+    assert!(rendered.contains("export QUOTED_VALUE='it'\\''s-safe'"));
+    assert_eq!(
+        RuntimeState::from_env_file(&rendered).expect("state parses"),
+        state
+    );
+}
+
+#[test]
+fn state_uses_the_shell_compose_slug_rules() {
+    let fixture = TempRepo::with_files(&[(
+        ".autospec/runtime.yml",
+        "version: 1\nname: A-_B\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'true'\n",
+    )]);
+    let manifest = RuntimeManifest::read_from_repo(fixture.path()).expect("manifest reads");
+    let context = RuntimeContext::new(
+        manifest,
+        fixture.path(),
+        "auto",
+        &fixture.path().join("state"),
+    )
+    .expect("context builds");
+    let state = RuntimeState::from_context(&context, 41001, 41002);
+
+    assert!(state
+        .value("COMPOSE_PROJECT_NAME")
+        .expect("compose project name")
+        .starts_with("agent_a_b_"));
+}
+
+#[test]
+fn environment_state_rejects_incomplete_or_executable_env_files() {
+    let error = RuntimeState::from_env_file("export AGENT_ENV_ID='only-one'\n")
+        .expect_err("incomplete state cannot load");
+    assert!(error
+        .to_string()
+        .contains("missing required environment value"));
+
+    let error = RuntimeState::from_env_file("source ./unsafe\n")
+        .expect_err("state files are data, not shell programs");
+    assert!(error.to_string().contains("invalid environment file line"));
+}
