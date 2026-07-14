@@ -15,7 +15,7 @@
 - Direct child commands use `Command` argument vectors; only trusted manifest `command` and `down` strings retain `sh -c` because that is the v1 manifest language.
 - Update every multi-harness autospec-run body in lock-step before committing.
 - Do not retain `scripts/agent-env.sh` after the final reachability gate; thin installer launchers may invoke only the installed `autospec` binary.
-- Use `cargo run -q -p autospec-cli -- validate --fast`, never the deleted `scripts/validate.sh` command.
+- Use `cargo run -q -p autospec-cli -- validate --fast` as the sole validation entry point.
 
 ---
 
