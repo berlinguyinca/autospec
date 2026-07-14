@@ -4,6 +4,7 @@ pub mod autonomous {
 }
 pub mod claim;
 pub mod context;
+pub mod coordination;
 pub mod error;
 pub mod evidence;
 pub mod execution;

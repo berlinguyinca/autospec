@@ -1,0 +1,757 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::claim::{evaluate_claim_safety, ClaimSafetyInput};
+use crate::state::json::{JsonParser, JsonValue};
+
+const SERIAL_LABELS: &[&str] = &[
+    "reasoning:deep",
+    "priority:high",
+    "regression",
+    "audit",
+    "release",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteIssue {
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub labels: Vec<String>,
+    pub author: String,
+    pub closed: bool,
+}
+
+impl RemoteIssue {
+    pub fn open(
+        number: u64,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        labels: Vec<String>,
+        author: impl Into<String>,
+    ) -> Self {
+        Self {
+            number,
+            title: title.into(),
+            body: body.into(),
+            labels,
+            author: author.into(),
+            closed: false,
+        }
+    }
+
+    pub fn closed(
+        number: u64,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        labels: Vec<String>,
+        author: impl Into<String>,
+    ) -> Self {
+        Self {
+            closed: true,
+            ..Self::open(number, title, body, labels, author)
+        }
+    }
+
+    fn has_label(&self, label: &str) -> bool {
+        self.labels.iter().any(|candidate| candidate == label)
+    }
+
+    fn safety_input(&self) -> ClaimSafetyInput {
+        ClaimSafetyInput::new(
+            self.labels.clone(),
+            self.title.clone(),
+            self.body.clone(),
+            self.author.clone(),
+        )
+    }
+}
+
+pub fn parse_remote_issue_list_json(input: &str) -> Result<Vec<RemoteIssue>, String> {
+    JsonParser::new(input)
+        .parse()?
+        .into_array("GitHub queue issue list")?
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            parse_issue(value, &format!("GitHub queue issue list[{index}]"), None)
+        })
+        .collect()
+}
+
+pub fn parse_dependency_issue_json(input: &str, number: u64) -> Result<RemoteIssue, String> {
+    parse_issue(
+        JsonParser::new(input).parse()?,
+        "GitHub queue dependency issue",
+        Some(number),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemotePullRequestCheck {
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+}
+
+impl RemotePullRequestCheck {
+    pub fn in_progress(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: "IN_PROGRESS".to_string(),
+            conclusion: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemotePullRequest {
+    pub number: u64,
+    pub open: bool,
+    pub body: String,
+    pub checks: Vec<RemotePullRequestCheck>,
+}
+
+impl RemotePullRequest {
+    pub fn open(number: u64, body: impl Into<String>, checks: Vec<RemotePullRequestCheck>) -> Self {
+        Self {
+            number,
+            open: true,
+            body: body.into(),
+            checks,
+        }
+    }
+}
+
+pub fn parse_remote_pull_requests_json(input: &str) -> Result<Vec<RemotePullRequest>, String> {
+    JsonParser::new(input)
+        .parse()?
+        .into_array("GitHub queue pull request list")?
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let context = format!("GitHub queue pull request list[{index}]");
+            let mut object = value.into_object(&context)?;
+            reject_unknown_keys(
+                &object,
+                &["number", "state", "body", "statusCheckRollup"],
+                &context,
+            )?;
+            let number = take_required(&mut object, "number", &context)?
+                .into_number(&format!("{context}.number"))?;
+            let state = take_optional_string(&mut object, "state", &context)?
+                .unwrap_or_else(|| "OPEN".to_string());
+            let body = take_optional_string(&mut object, "body", &context)?.unwrap_or_default();
+            let checks = take_optional(&mut object, "statusCheckRollup")
+                .unwrap_or(JsonValue::Array(Vec::new()))
+                .into_array(&format!("{context}.statusCheckRollup"))?
+                .into_iter()
+                .enumerate()
+                .map(|(check_index, value)| {
+                    let check_context = format!("{context}.statusCheckRollup[{check_index}]");
+                    let mut check = value.into_object(&check_context)?;
+                    reject_unknown_keys(&check, &["name", "status", "conclusion"], &check_context)?;
+                    Ok(RemotePullRequestCheck {
+                        name: take_optional_string(&mut check, "name", &check_context)?
+                            .unwrap_or_default(),
+                        status: take_optional_string(&mut check, "status", &check_context)?
+                            .unwrap_or_default(),
+                        conclusion: take_optional_string(&mut check, "conclusion", &check_context)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(RemotePullRequest {
+                number,
+                open: state.eq_ignore_ascii_case("OPEN"),
+                body,
+                checks,
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullRequestEvidence {
+    Available(Vec<RemotePullRequest>),
+    Unavailable(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuePolicy {
+    pub batch_size: usize,
+    pub max_repo_workers: usize,
+    pub only_issues: BTreeSet<u64>,
+    pub non_blocking_dependency_labels: BTreeSet<String>,
+}
+
+impl QueuePolicy {
+    pub fn new(batch_size: usize, max_repo_workers: usize) -> Self {
+        Self {
+            batch_size: batch_size.max(1),
+            max_repo_workers,
+            only_issues: BTreeSet::new(),
+            non_blocking_dependency_labels: ["epic".to_string(), "umbrella".to_string()]
+                .into_iter()
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyQueueInput {
+    pub candidates: Vec<RemoteIssue>,
+    pub active: Vec<RemoteIssue>,
+    pub dependencies: BTreeMap<u64, RemoteIssue>,
+    pub pull_requests: PullRequestEvidence,
+    pub policy: QueuePolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonBlockingReference {
+    pub issue: u64,
+    pub reason: String,
+    pub cycle: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafetyGate {
+    pub ok: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueIssueView {
+    pub issue: RemoteIssue,
+    pub reason: Option<String>,
+    pub blocked_label: Option<String>,
+    pub safety_gate: Option<SafetyGate>,
+    pub linked_pr: Option<u64>,
+    pub unmet_dependencies: Vec<u64>,
+    pub cycle_dependencies: Vec<u64>,
+    pub non_blocking_refs: Vec<NonBlockingReference>,
+    pub conflicts_with: Option<u64>,
+    pub path: Option<String>,
+    pub paths: Vec<String>,
+    pub serialization_reasons: Vec<String>,
+    pub parallel_safe: Option<bool>,
+}
+
+impl QueueIssueView {
+    fn plain(issue: RemoteIssue) -> Self {
+        Self {
+            issue,
+            reason: None,
+            blocked_label: None,
+            safety_gate: None,
+            linked_pr: None,
+            unmet_dependencies: Vec::new(),
+            cycle_dependencies: Vec::new(),
+            non_blocking_refs: Vec::new(),
+            conflicts_with: None,
+            path: None,
+            paths: Vec::new(),
+            serialization_reasons: Vec::new(),
+            parallel_safe: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerCap {
+    pub max_repo_workers: usize,
+    pub active_count: usize,
+    pub remaining: usize,
+    pub reached: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyQueuePlan {
+    pub ready: Vec<QueueIssueView>,
+    pub blocked: Vec<QueueIssueView>,
+    pub claimed: Vec<RemoteIssue>,
+    pub conflicts: Vec<QueueIssueView>,
+    pub worker_cap: WorkerCap,
+    pub batch: Vec<QueueIssueView>,
+}
+
+impl ReadyQueuePlan {
+    pub fn ready_numbers(&self) -> Vec<u64> {
+        self.ready.iter().map(|view| view.issue.number).collect()
+    }
+
+    pub fn batch_numbers(&self) -> Vec<u64> {
+        self.batch.iter().map(|view| view.issue.number).collect()
+    }
+}
+
+pub fn plan_ready_queue(input: &ReadyQueueInput) -> ReadyQueuePlan {
+    let mut known = input.dependencies.clone();
+    for issue in &input.candidates {
+        known.insert(issue.number, issue.clone());
+    }
+    let mut active = input.active.clone();
+    active.sort_by_key(|issue| issue.number);
+    let active_paths = active
+        .iter()
+        .map(|issue| (issue.number, extract_paths(&issue.body)))
+        .collect::<Vec<_>>();
+    let mut candidates = input.candidates.clone();
+    candidates.sort_by_key(|issue| issue.number);
+    let worker_cap = worker_cap(&input.policy, active.len());
+    let effective_batch_size = if worker_cap.reached {
+        0
+    } else if input.policy.max_repo_workers > 0 {
+        input.policy.batch_size.min(worker_cap.remaining)
+    } else {
+        input.policy.batch_size
+    };
+
+    let mut ready: Vec<QueueIssueView> = Vec::new();
+    let mut blocked: Vec<QueueIssueView> = Vec::new();
+    let mut conflicts: Vec<QueueIssueView> = Vec::new();
+    for issue in candidates {
+        if !input.policy.only_issues.is_empty() && !input.policy.only_issues.contains(&issue.number)
+        {
+            continue;
+        }
+        let mut view = QueueIssueView::plain(issue);
+        if view.issue.has_label("autospec:needs-human") {
+            view.reason = Some("autospec_needs_human".to_string());
+            view.blocked_label = Some("autospec:needs-human".to_string());
+            blocked.push(view);
+            continue;
+        }
+        let safety = evaluate_claim_safety(&view.issue.safety_input());
+        if !safety.allowed {
+            view.reason = Some("safety_gate_failed".to_string());
+            view.safety_gate = Some(SafetyGate {
+                ok: false,
+                reason: safety.reason.to_string(),
+            });
+            blocked.push(view);
+            continue;
+        }
+        match linked_pr_with_nonterminal_checks(&input.pull_requests, view.issue.number) {
+            LinkedPr::Unavailable => {
+                view.reason = Some("linked_pr_evidence_unavailable".to_string());
+                blocked.push(view);
+                continue;
+            }
+            LinkedPr::Open(number) => {
+                view.reason = Some("linked_pr_open".to_string());
+                view.linked_pr = Some(number);
+                blocked.push(view);
+                continue;
+            }
+            LinkedPr::None => {}
+        }
+
+        let (unmet_dependencies, cycle_dependencies, non_blocking_refs) =
+            evaluate_dependencies(&view.issue, &known, &input.policy);
+        if !unmet_dependencies.is_empty() {
+            view.reason = Some(
+                if cycle_dependencies.is_empty() {
+                    "blocked_dependencies"
+                } else {
+                    "blocked_cycle"
+                }
+                .to_string(),
+            );
+            view.unmet_dependencies = unmet_dependencies;
+            view.cycle_dependencies = cycle_dependencies;
+            view.non_blocking_refs = non_blocking_refs;
+            blocked.push(view);
+            continue;
+        }
+
+        view.paths = extract_paths(&view.issue.body);
+        view.non_blocking_refs = non_blocking_refs;
+        if let Some((number, path)) = first_path_conflict(&view.paths, &active_paths) {
+            view.reason = Some("path_conflict".to_string());
+            view.conflicts_with = Some(number);
+            view.path = Some(path);
+            conflicts.push(view);
+            continue;
+        }
+        if let Some((number, path)) = first_path_conflict(
+            &view.paths,
+            &ready
+                .iter()
+                .map(|ready| (ready.issue.number, ready.paths.clone()))
+                .collect::<Vec<_>>(),
+        ) {
+            view.reason = Some("batch_path_conflict".to_string());
+            view.conflicts_with = Some(number);
+            view.path = Some(path);
+            conflicts.push(view);
+            continue;
+        }
+        view.serialization_reasons = serialization_reasons(&view.issue);
+        view.parallel_safe = Some(view.serialization_reasons.is_empty());
+        ready.push(view);
+    }
+
+    let batch = if effective_batch_size == 0 {
+        Vec::new()
+    } else if ready
+        .first()
+        .is_some_and(|issue| issue.parallel_safe == Some(false))
+    {
+        ready.first().cloned().into_iter().collect()
+    } else {
+        ready
+            .iter()
+            .filter(|issue| issue.parallel_safe != Some(false))
+            .take(effective_batch_size)
+            .cloned()
+            .collect()
+    };
+    ReadyQueuePlan {
+        ready,
+        blocked,
+        claimed: active,
+        conflicts,
+        worker_cap,
+        batch,
+    }
+}
+
+fn worker_cap(policy: &QueuePolicy, active_count: usize) -> WorkerCap {
+    let remaining = if policy.max_repo_workers == 0 {
+        policy.batch_size
+    } else {
+        policy.max_repo_workers.saturating_sub(active_count)
+    };
+    WorkerCap {
+        max_repo_workers: policy.max_repo_workers,
+        active_count,
+        remaining,
+        reached: policy.max_repo_workers > 0 && active_count >= policy.max_repo_workers,
+    }
+}
+
+enum LinkedPr {
+    None,
+    Open(u64),
+    Unavailable,
+}
+
+fn linked_pr_with_nonterminal_checks(evidence: &PullRequestEvidence, issue: u64) -> LinkedPr {
+    let PullRequestEvidence::Available(pull_requests) = evidence else {
+        return LinkedPr::Unavailable;
+    };
+    let mut matching = pull_requests
+        .iter()
+        .filter(|pull_request| {
+            pull_request.open
+                && references_issue(&pull_request.body, issue)
+                && (pull_request.checks.is_empty()
+                    || pull_request.checks.iter().any(|check| {
+                        !check.status.eq_ignore_ascii_case("COMPLETED")
+                            || check.conclusion.is_none()
+                    }))
+        })
+        .map(|pull_request| pull_request.number)
+        .collect::<Vec<_>>();
+    matching.sort_unstable();
+    matching
+        .into_iter()
+        .next()
+        .map_or(LinkedPr::None, LinkedPr::Open)
+}
+
+fn references_issue(body: &str, issue: u64) -> bool {
+    let lower = body.to_ascii_lowercase();
+    let issue = issue.to_string();
+    [
+        "close", "closed", "closes", "fix", "fixed", "fixes", "resolve", "resolved", "resolves",
+    ]
+    .iter()
+    .any(|verb| contains_issue_reference(&lower, verb, &issue))
+}
+
+fn contains_issue_reference(text: &str, verb: &str, issue: &str) -> bool {
+    let needle = format!("{verb} #{issue}");
+    let mut start = 0;
+    while let Some(offset) = text[start..].find(&needle) {
+        let index = start + offset;
+        let before = text[..index].chars().next_back();
+        let after = text[index + needle.len()..].chars().next();
+        if before.is_none_or(|character| !character.is_ascii_alphanumeric())
+            && after.is_none_or(|character| !character.is_ascii_digit())
+        {
+            return true;
+        }
+        start = index + needle.len();
+    }
+    false
+}
+
+fn evaluate_dependencies(
+    issue: &RemoteIssue,
+    known: &BTreeMap<u64, RemoteIssue>,
+    policy: &QueuePolicy,
+) -> (Vec<u64>, Vec<u64>, Vec<NonBlockingReference>) {
+    let mut unmet = Vec::new();
+    let mut cycles = Vec::new();
+    let mut refs = Vec::new();
+    for dependency in dependency_numbers(&issue.body) {
+        let target = known.get(&dependency).cloned().unwrap_or_else(|| {
+            RemoteIssue::open(
+                dependency,
+                format!("issue-{dependency}"),
+                "",
+                Vec::new(),
+                "",
+            )
+        });
+        if target.closed {
+            continue;
+        }
+        if target.labels.iter().any(|label| {
+            policy
+                .non_blocking_dependency_labels
+                .contains(&label.to_ascii_lowercase())
+        }) {
+            refs.push(NonBlockingReference {
+                issue: dependency,
+                reason: "epic_label".to_string(),
+                cycle: false,
+            });
+            continue;
+        }
+        if target_tracks_issue(&target.body, issue.number) {
+            refs.push(NonBlockingReference {
+                issue: dependency,
+                reason: "children_back_edge".to_string(),
+                cycle: true,
+            });
+            continue;
+        }
+        if dependency_reaches(&target, issue.number, known, &mut BTreeSet::new()) {
+            cycles.push(dependency);
+        }
+        unmet.push(dependency);
+    }
+    (unmet, cycles, refs)
+}
+
+fn dependency_reaches(
+    issue: &RemoteIssue,
+    target: u64,
+    known: &BTreeMap<u64, RemoteIssue>,
+    seen: &mut BTreeSet<u64>,
+) -> bool {
+    if !seen.insert(issue.number) {
+        return false;
+    }
+    dependency_numbers(&issue.body)
+        .into_iter()
+        .any(|dependency| {
+            dependency == target
+                || known
+                    .get(&dependency)
+                    .is_some_and(|next| dependency_reaches(next, target, known, seen))
+        })
+}
+
+pub fn dependency_numbers(body: &str) -> Vec<u64> {
+    let section = markdown_section(body, "Dependencies");
+    let mut dependencies = BTreeSet::new();
+    for line in section.lines() {
+        let lower = line.to_ascii_lowercase();
+        let mut cursor = 0;
+        while let Some(offset) = lower[cursor..].find("depends on") {
+            let mut candidate = &line[cursor + offset + "depends on".len()..];
+            candidate = candidate.trim_start();
+            if candidate.to_ascii_lowercase().starts_with("issue") {
+                candidate = candidate["issue".len()..].trim_start();
+            }
+            candidate = candidate.strip_prefix('#').unwrap_or(candidate);
+            let digits = candidate
+                .chars()
+                .take_while(|character| character.is_ascii_digit())
+                .collect::<String>();
+            if let Ok(dependency) = digits.parse::<u64>() {
+                dependencies.insert(dependency);
+            }
+            cursor += offset + "depends on".len();
+        }
+    }
+    dependencies.into_iter().collect()
+}
+
+fn target_tracks_issue(body: &str, dependent: u64) -> bool {
+    let section = markdown_sections(
+        body,
+        &["children", "child issues", "tasks", "task list", "subtasks"],
+    );
+    let needle = format!("#{dependent}");
+    section.lines().any(|line| {
+        let trimmed = line.trim_start();
+        let list_item = trimmed.starts_with("- ") || trimmed.starts_with("* ");
+        let at_boundary = trimmed.find(&needle).is_some_and(|index| {
+            trimmed[index + needle.len()..]
+                .chars()
+                .next()
+                .is_none_or(|character| !character.is_ascii_digit())
+        });
+        list_item && at_boundary
+    })
+}
+
+fn extract_paths(body: &str) -> Vec<String> {
+    let section = markdown_section(body, "Implementation outline");
+    let mut paths = BTreeSet::new();
+    let mut cursor = 0;
+    while let Some(start) = section[cursor..].find('`') {
+        let start = cursor + start + 1;
+        let Some(end) = section[start..].find('`') else {
+            break;
+        };
+        let path = &section[start..start + end];
+        if path.contains('/') && !path.chars().any(char::is_whitespace) {
+            paths.insert(path.to_string());
+        }
+        cursor = start + end + 1;
+    }
+    paths.into_iter().collect()
+}
+
+fn first_path_conflict(
+    candidate: &[String],
+    others: &[(u64, Vec<String>)],
+) -> Option<(u64, String)> {
+    for (number, paths) in others {
+        for path in candidate {
+            if paths.binary_search(path).is_ok() || paths.iter().any(|other| other == path) {
+                return Some((*number, path.clone()));
+            }
+        }
+    }
+    None
+}
+
+fn serialization_reasons(issue: &RemoteIssue) -> Vec<String> {
+    SERIAL_LABELS
+        .iter()
+        .filter(|label| issue.labels.iter().any(|current| current == **label))
+        .map(|label| (*label).to_string())
+        .collect()
+}
+
+fn markdown_section<'a>(body: &'a str, name: &str) -> &'a str {
+    markdown_sections(body, &[name])
+}
+
+fn markdown_sections<'a>(body: &'a str, names: &[&str]) -> &'a str {
+    let mut start = None;
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let text = line.trim_end_matches(['\r', '\n']);
+        if let Some(section_start) = start {
+            if text.starts_with("## ") {
+                return &body[section_start..offset];
+            }
+        } else if let Some(heading) = text.strip_prefix("## ") {
+            let heading = heading.trim().to_ascii_lowercase();
+            if names
+                .iter()
+                .any(|name| heading == name.to_ascii_lowercase())
+            {
+                start = Some(offset + line.len());
+            }
+        }
+        offset += line.len();
+    }
+    start.map_or("", |section_start| &body[section_start..])
+}
+
+fn parse_issue(
+    value: JsonValue,
+    context: &str,
+    fallback_number: Option<u64>,
+) -> Result<RemoteIssue, String> {
+    let mut object = value.into_object(context)?;
+    reject_unknown_keys(
+        &object,
+        &["number", "title", "body", "labels", "author", "state"],
+        context,
+    )?;
+    let number = match take_optional(&mut object, "number") {
+        Some(value) => value.into_number(&format!("{context}.number"))?,
+        None => fallback_number.ok_or_else(|| format!("{context}.number is required"))?,
+    };
+    let labels = take_optional(&mut object, "labels")
+        .unwrap_or(JsonValue::Array(Vec::new()))
+        .into_array(&format!("{context}.labels"))?
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| parse_label(value, &format!("{context}.labels[{index}]")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let author = match take_optional(&mut object, "author") {
+        None | Some(JsonValue::Null) => String::new(),
+        Some(value) => {
+            let mut author = value.into_object(&format!("{context}.author"))?;
+            reject_unknown_keys(&author, &["login"], &format!("{context}.author"))?;
+            take_optional_string(&mut author, "login", &format!("{context}.author"))?
+                .unwrap_or_default()
+        }
+    };
+    let state =
+        take_optional_string(&mut object, "state", context)?.unwrap_or_else(|| "OPEN".to_string());
+    Ok(RemoteIssue {
+        number,
+        title: take_optional_string(&mut object, "title", context)?.unwrap_or_default(),
+        body: take_optional_string(&mut object, "body", context)?.unwrap_or_default(),
+        labels,
+        author,
+        closed: state.eq_ignore_ascii_case("CLOSED"),
+    })
+}
+
+fn parse_label(value: JsonValue, context: &str) -> Result<String, String> {
+    match value {
+        JsonValue::String(label) => Ok(label),
+        JsonValue::Object(mut label) => {
+            reject_unknown_keys(&label, &["name"], context)?;
+            take_required(&mut label, "name", context)?.into_string(&format!("{context}.name"))
+        }
+        _ => Err(format!("{context} must be a label object or string")),
+    }
+}
+
+fn take_required(
+    object: &mut BTreeMap<String, JsonValue>,
+    key: &str,
+    context: &str,
+) -> Result<JsonValue, String> {
+    object
+        .remove(key)
+        .ok_or_else(|| format!("{context}.{key} is required"))
+}
+
+fn take_optional(object: &mut BTreeMap<String, JsonValue>, key: &str) -> Option<JsonValue> {
+    object.remove(key)
+}
+
+fn take_optional_string(
+    object: &mut BTreeMap<String, JsonValue>,
+    key: &str,
+    context: &str,
+) -> Result<Option<String>, String> {
+    match take_optional(object, key) {
+        None | Some(JsonValue::Null) => Ok(None),
+        Some(value) => value.into_string(&format!("{context}.{key}")).map(Some),
+    }
+}
+
+fn reject_unknown_keys(
+    object: &BTreeMap<String, JsonValue>,
+    allowed: &[&str],
+    context: &str,
+) -> Result<(), String> {
+    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(format!("{context} contains unknown key: {key}"));
+    }
+    Ok(())
+}
