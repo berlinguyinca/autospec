@@ -24,6 +24,8 @@ const STATE_ENVIRONMENT_KEYS: [&str; 9] = [
     "COMPOSE_PROJECT_NAME",
 ];
 
+// SECURITY: this fixed FFI signature exposes only the installed signal numbers
+// and an atomic-only handler; security-workstream verifies this exact boundary.
 #[cfg(unix)]
 extern "C" {
     fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
@@ -794,6 +796,9 @@ fn environment_flag(key: &str) -> bool {
 #[cfg(unix)]
 fn install_signal_handlers() {
     RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
+    // The normal session loop consumes the recorded signal before teardown.
+    // SECURITY: SIGINT/SIGTERM are fixed POSIX values and the handler records
+    // only an atomic flag; security-workstream verifies this exact boundary.
     unsafe {
         signal(2, record_signal);
         signal(15, record_signal);

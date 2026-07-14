@@ -42,15 +42,92 @@ RS
     printf '%s\n' 'unsafe' '{' '    external_call();' '}' > "$WORK/src/multiline.rs"
     printf '%s\n' 'unsafe /* FFI boundary */ {' '    external_call();' '}' > "$WORK/src/comment-separated.rs"
     printf '%s\n' '#[unsafe(no_mangle)]' 'pub extern "C" fn exported() {}' > "$WORK/src/unsafe-attribute.rs"
+    printf '%s\n' '// autospec:unsafe-reviewed: security review #2004; invariant: the FFI boundary accepts only a fixed signal number.' 'unsafe { external_call(); }' > "$WORK/src/reviewed.rs"
+    printf '%s\n' '// autospec:unsafe-reviewed: security review #2004' 'unsafe { external_call(); }' > "$WORK/src/missing-invariant.rs"
+    printf '%s\n' '// autospec:unsafe-reviewed: security review #2004; invariant: arbitrary code is safe.' 'unsafe { reviewed(); } unsafe { unreviewed(); }' > "$WORK/src/multiple.rs"
+    mkdir -p "$WORK/crates/autospec-cli/src/commands/runtime"
+    cat > "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
+#[cfg(unix)]
+extern "C" {
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}
+
+fn install_signal_handlers() {
+    RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
+    unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
+    }
+}
+RS
 
     run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/ranked.jsonl"
     [ "$status" -eq 0 ]
     unsafe_count="$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/ranked.jsonl")"
-    [ "$unsafe_count" -eq 4 ]
+    [ "$unsafe_count" -eq 8 ]
     jq -e 'select(.dimension == "unsafe" and .file == "src/unsafe.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
     jq -e 'select(.dimension == "unsafe" and .file == "src/multiline.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
     jq -e 'select(.dimension == "unsafe" and .file == "src/comment-separated.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
     jq -e 'select(.dimension == "unsafe" and .file == "src/unsafe-attribute.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/missing-invariant.rs" and .line == 2)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/reviewed.rs" and .line == 2)' "$WORK/ranked.jsonl" >/dev/null
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "src/multiple.rs")] | length' "$WORK/ranked.jsonl")" -eq 2 ]
+    ! jq -e 'select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")' "$WORK/ranked.jsonl" >/dev/null
+
+    cat >> "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
+
+fn duplicated_signal_registration() {
+    unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
+    }
+}
+RS
+    run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/duplicated.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")] | length' "$WORK/duplicated.jsonl")" -eq 2 ]
+
+    cat > "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
+const DECLARATION: &str = r#"extern "C" {
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}"#;
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "abort"]
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}
+
+fn install_signal_handlers() {
+    RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
+    unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
+    }
+}
+RS
+    run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/spoofed.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")] | length' "$WORK/spoofed.jsonl")" -eq 1 ]
+
+    cat > "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
+#[link(name = "m")]
+#[cfg(unix)]
+extern "C" {
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}
+
+fn install_signal_handlers() {
+    RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
+    unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
+    }
+}
+RS
+    run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/attributed.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")] | length' "$WORK/attributed.jsonl")" -eq 1 ]
 }
 
 @test "issue filing: high-severity findings produce lint-clean remediation issues" {

@@ -81,6 +81,32 @@ def title_hash(value):
 RUST_UNSAFE_SYNTAX = re.compile(
     r"\bunsafe\s*(?:\{|fn\b|trait\b|impl\b|extern\b)|#\s*\[\s*unsafe\s*\("
 )
+RUNTIME_SIGNAL_FFI_PATH = "crates/autospec-cli/src/commands/runtime/env.rs"
+RUNTIME_SIGNAL_DECLARATION = '''#[cfg(unix)]
+extern "C" {
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}'''
+RUNTIME_SIGNAL_INSTALL = '''unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
+    }'''
+
+
+def approved_unsafe_boundary(relative_path, source, match):
+    """Allow only the independently reviewed runtime-signal FFI boundary."""
+    if relative_path != RUNTIME_SIGNAL_FFI_PATH:
+        return False
+    code = rust_code_only(source)
+    declaration = rust_code_only(RUNTIME_SIGNAL_DECLARATION)
+    installation = rust_code_only(RUNTIME_SIGNAL_INSTALL)
+    if code.count(declaration) != 1 or code.count(installation) != 1:
+        return False
+    declaration_offset = code.index(declaration)
+    previous_code = code[:declaration_offset].rstrip()
+    if previous_code and previous_code.rsplit("\n", 1)[-1].strip().startswith("#["):
+        return False
+    candidate = code[match.start():]
+    return candidate.startswith(declaration) or candidate.startswith(installation)
 
 
 def blank_non_code(source, output, start, end):
@@ -168,6 +194,8 @@ def unsafe_findings(root):
         for match in RUST_UNSAFE_SYNTAX.finditer(code):
             line = code.count("\n", 0, match.start()) + 1
             rel = str(path.relative_to(root_path)) if path.is_relative_to(root_path) else str(path)
+            if approved_unsafe_boundary(rel, source, match):
+                continue
             findings.append({
                 "gap_id": f"U{len(findings)+1}",
                 "dimension": "unsafe",

@@ -1215,6 +1215,13 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# Hook-only setup owns just the Claude configuration file; it must not trigger
+# the full installer or require an available Rust toolchain.
+if [ "$HOOK_MODE_ARG" = "claude" ]; then
+    install_hook_mode_claude
+    exit 0
+fi
+
 # Validate --skill against the auto-discovered ALL_SKILLS list (#705 follow-up).
 # Previously the validator carried its own hardcoded skill names; the
 # discovery from #705 fixed `ALL_SKILLS=` but the validator still rejected
@@ -1706,10 +1713,6 @@ if [ "$failures" -gt 0 ]; then
 fi
 if [ "$DISABLE_AUTO_ROLLOVER" -eq 1 ]; then
     remove_rollover_block
-    exit 0
-fi
-if [ "$HOOK_MODE_ARG" = "claude" ]; then
-    install_hook_mode_claude
     exit 0
 fi
 prompt_user_for_auto_rollover

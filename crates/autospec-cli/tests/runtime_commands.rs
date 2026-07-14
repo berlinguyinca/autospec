@@ -488,8 +488,13 @@ fn runtime_env_session_auto_initializes_and_keeps_state_when_requested() {
 }
 
 #[cfg(unix)]
-extern "C" {
-    fn kill(pid: i32, signal: i32) -> i32;
+fn send_signal(pid: u32, signal: i32) {
+    let status = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
+        .status()
+        .expect("kill command starts");
+    assert!(status.success(), "kill command succeeds");
 }
 
 #[cfg(unix)]
@@ -517,7 +522,7 @@ fn runtime_env_session_tears_down_after_sigterm() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(fixture.has_session_record(), "session record was created");
-    assert_eq!(unsafe { kill(session.id() as i32, 15) }, 0);
+    send_signal(session.id(), 15);
     let output = session.wait_with_output().expect("session process exits");
 
     assert_eq!(output.status.code(), Some(143));
@@ -557,7 +562,7 @@ fn runtime_env_session_signal_exit_takes_precedence_over_failed_teardown() {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(fixture.has_session_record(), "session record was created");
-        assert_eq!(unsafe { kill(session.id() as i32, signal) }, 0);
+        send_signal(session.id(), signal);
         let output = session.wait_with_output().expect("session process exits");
 
         assert_eq!(output.status.code(), Some(expected_exit));
