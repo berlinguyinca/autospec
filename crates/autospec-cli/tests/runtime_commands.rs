@@ -18,7 +18,7 @@ struct RuntimeFixture {
 }
 
 impl RuntimeFixture {
-    fn new(command: &str, down: &str) -> Self {
+    fn empty() -> Self {
         let suffix = NEXT_RUNTIME_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "autospec-runtime-cli-{}-{suffix}",
@@ -26,15 +26,22 @@ impl RuntimeFixture {
         ));
         let state_root = root.join("state");
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join(".autospec")).expect("create runtime manifest directory");
+        std::fs::create_dir_all(&root).expect("create runtime fixture root");
+        Self { root, state_root }
+    }
+
+    fn new(command: &str, down: &str) -> Self {
+        let fixture = Self::empty();
+        std::fs::create_dir_all(fixture.root.join(".autospec"))
+            .expect("create runtime manifest directory");
         std::fs::write(
-            root.join(".autospec/runtime.yml"),
+            fixture.root.join(".autospec/runtime.yml"),
             format!(
                 "version: 1\nname: sample-app\ndefault_mode: local\nmodes:\n  local:\n    command: {command}\n    down: {down}\n"
             ),
         )
         .expect("write runtime manifest");
-        Self { root, state_root }
+        fixture
     }
 
     fn command(&self) -> Command {
@@ -48,6 +55,98 @@ impl Drop for RuntimeFixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn runtime_env_init_writes_and_protects_the_conservative_manifest() {
+    let fixture = RuntimeFixture::empty();
+    let output = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "init",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+        ])
+        .output()
+        .expect("runtime env init starts");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest = fixture.root.join(".agent-runtime.yml");
+    let name = fixture
+        .root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .expect("fixture basename");
+    assert_eq!(
+        std::fs::read_to_string(&manifest).expect("agent manifest exists"),
+        format!(
+            "version: 1\nname: {name}\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'true'\nports:\n  frontend:\n    env: AGENT_FRONTEND_PORT\n    default: dynamic\npublic_url_env:\n  - AUTOSPEC_PUBLIC_URL\n  - AGENT_PUBLIC_URL\n"
+        )
+    );
+    let protected = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "init",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+        ])
+        .output()
+        .expect("second runtime env init starts");
+    assert_eq!(protected.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&protected.stderr).contains("already exists"));
+}
+
+#[test]
+fn runtime_env_exec_runs_a_direct_child_in_the_provisioned_environment() {
+    let fixture = RuntimeFixture::new("sh -c 'true'", "sh -c 'true'");
+    let output = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "exec",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+            "--",
+            "sh",
+            "-c",
+            "printf '%s|%s' \"$AGENT_ENV_ID\" \"$AUTOSPEC_PUBLIC_URL\" > exec.txt",
+        ])
+        .output()
+        .expect("runtime env exec starts");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let child_output =
+        std::fs::read_to_string(fixture.root.join("exec.txt")).expect("direct child output");
+    let (environment_id, public_url) = child_output
+        .split_once('|')
+        .expect("direct child output has both values");
+    assert!(environment_id.starts_with("sample-app-"));
+    assert!(public_url.starts_with("http://127.0.0.1:"));
+    let status = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "status",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+        ])
+        .output()
+        .expect("runtime env status starts");
+    assert!(status.status.success());
 }
 
 #[test]
