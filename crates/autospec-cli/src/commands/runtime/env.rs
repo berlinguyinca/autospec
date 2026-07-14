@@ -698,13 +698,17 @@ fn run_session_command(
     #[cfg(unix)]
     install_signal_handlers();
 
-    let mut child = spawn_direct_command(command, &context.repo, Some((context, state)))?;
     let session_file = match write_session_record(context, command) {
         Ok(path) => path,
         Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
             let _ = teardown(context, Some(state));
+            return Err(error);
+        }
+    };
+    let mut child = match spawn_direct_command(command, &context.repo, Some((context, state))) {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = cleanup_session(context, state, &session_file, true);
             return Err(error);
         }
     };

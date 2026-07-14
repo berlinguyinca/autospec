@@ -207,6 +207,64 @@ fn runtime_env_session_cleans_state_after_child_completion() {
 }
 
 #[test]
+fn runtime_env_session_writes_its_record_before_starting_the_child() {
+    let fixture = RuntimeFixture::new("sh -c 'true'", "sh -c 'true'");
+    let output = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "session",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+            "--",
+            "sh",
+            "-c",
+            "if find \"$AGENT_ENV_STATE_ROOT\" -path '*/sessions/*' -type f -print -quit | grep -q .; then printf present > record-order.txt; else printf missing > record-order.txt; fi",
+        ])
+        .output()
+        .expect("runtime env session starts");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("record-order.txt")).expect("child order marker"),
+        "present"
+    );
+}
+
+#[test]
+fn runtime_env_session_cleans_up_when_its_child_cannot_start() {
+    let fixture = RuntimeFixture::new("sh -c 'true'", "sh -c 'printf down > down.txt'");
+    let output = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "session",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+            "--",
+            "autospec-runtime-command-that-does-not-exist",
+        ])
+        .output()
+        .expect("runtime env session reports child spawn failure");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!fixture.has_session_record());
+    assert!(std::fs::read_dir(&fixture.state_root)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(true));
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("down.txt")).expect("teardown ran"),
+        "down"
+    );
+}
+
+#[test]
 fn runtime_env_session_bypasses_a_manifest_when_disabled() {
     let fixture = RuntimeFixture::new("sh -c 'exit 41'", "sh -c 'exit 42'");
     let output = fixture
