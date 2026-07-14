@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -767,4 +768,63 @@ fn runtime_audit_does_not_follow_a_symlinked_platform_root() {
     std::fs::remove_dir_all(&temporary).expect("remove temporary fixture");
     assert!(output.status.success());
     assert!(!stdout.contains("secret.py"));
+}
+
+#[test]
+fn legacy_agent_env_authority_is_absent() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("workspace root")
+        .to_path_buf();
+    let tracked = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().expect("workspace path is UTF-8"),
+            "ls-files",
+        ])
+        .output()
+        .expect("git lists tracked source paths");
+    assert!(
+        tracked.status.success(),
+        "git ls-files failed: {}",
+        String::from_utf8_lossy(&tracked.stderr)
+    );
+
+    let legacy_filename = ["agent-env", ".sh"].concat();
+    let legacy_path = format!("scripts/{legacy_filename}");
+    let approved_history_documents = [
+        "docs/superpowers/plans/2026-07-14-rust-runtime-broker.md",
+        "docs/superpowers/specs/2026-07-14-rust-control-plane-completion-design.md",
+    ];
+    let mut live_references = Vec::new();
+    for path in String::from_utf8_lossy(&tracked.stdout).lines() {
+        if approved_history_documents.contains(&path) || path == legacy_path {
+            continue;
+        }
+        let source = fs::read(root.join(path))
+            .unwrap_or_else(|error| panic!("read tracked source {path}: {error}"));
+        let source = String::from_utf8_lossy(&source);
+        for (line_number, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let is_negative_test_assertion =
+                path.starts_with("tests/") && trimmed.starts_with("! grep");
+            if line.contains(&legacy_filename)
+                && !trimmed.starts_with('#')
+                && !is_negative_test_assertion
+            {
+                live_references.push(format!("{path}:{}", line_number + 1));
+            }
+        }
+    }
+
+    assert!(
+        !root.join(&legacy_path).exists(),
+        "legacy authority remains at {legacy_path}"
+    );
+    assert!(
+        live_references.is_empty(),
+        "live references to {legacy_filename}: {}",
+        live_references.join(", ")
+    );
 }

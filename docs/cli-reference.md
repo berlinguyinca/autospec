@@ -1,6 +1,8 @@
 # CLI Reference
 
-The Rust CLI is additive. Existing `/autospec-*` skills and shell scripts remain the operational surface while V62+ commands mature.
+The Rust CLI is additive. Runtime environment management is implemented by the
+Rust command family below; existing `/autospec-*` skills and unrelated shell
+scripts remain operational surfaces while V62+ commands mature.
 
 | Command | JSON | Status |
 | --- | --- | --- |
@@ -13,6 +15,12 @@ The Rust CLI is additive. Existing `/autospec-*` skills and shell scripts remain
 | `autospec validate --shadow-results <captured-results.json> [--json]` | yes | aggregates captured shell outcomes without executing commands; returns non-zero when a required captured result failed |
 | `autospec runtime classify <path> --json` | yes | implemented R0-R4 ownership classification for one repository path |
 | `autospec runtime audit --json` | yes | implemented read-only R0-R4 inventory; it neither migrates nor executes candidates |
+| `autospec runtime env init [--repo <path>] [--manifest agent\|autospec] [--force]` | no | creates a conservative v1 runtime manifest; refuses an existing manifest without `--force` |
+| `autospec runtime env up [--repo <path>] [--mode <mode>]` | no | provisions or reuses the selected environment, runs its manifest command on first provision, and prints the sourceable environment protocol |
+| `autospec runtime env status [--repo <path>] [--mode <mode>]` | no | prints a provisioned environment or returns status `3` when it is inactive |
+| `autospec runtime env down [--repo <path>] [--mode <mode>]` | no | runs the selected optional teardown command and removes its state after successful teardown |
+| `autospec runtime env exec [--repo <path>] [--mode <mode>] -- <command> [args...]` | no | provisions or reuses state, then runs one direct child with the runtime environment |
+| `autospec runtime env session [--repo <path>] [--mode <mode>] [--keep-alive] -- <command> [args...]` | no | runs one direct child with lifecycle cleanup, manifest auto-init/bypass controls, and Unix interruption cleanup |
 | `autospec run --run <id> --spec <id>... [--json]` | yes | creates a local persisted queue only; it does not launch an agent or validation command |
 | `autospec run --ingest <agent-result.json> --run <id> --spec <id> --result-id <id> --outcome <passed\|failed\|blocked> [--failure-kind <kind>] [--retry-limit <n>] [--json]` | yes | validates and records an explicit local agent result; it does not launch an agent or validation command |
 | `autospec resume [--json]` | yes | reports the newest incomplete local queue and its next entry; it does not execute it |
@@ -38,3 +46,6 @@ result ID; `failed` also requires `--failure-kind` (`validation`, `environment`,
 `.autospec/runs/<run-id>/agent-results/<spec-id>/<result-id>.json`, so a retry can safely
 replay the same result ID without consuming another queue attempt. `resume` only reports the
 current queue position. Use `/autospec-run` for the existing agent-execution workflow.
+
+For the v1 runtime-manifest grammar, state behavior, child-command semantics, and cleanup
+procedure, see [Agent runtime manifests](runbooks/agent-runtime-manifest.md).
