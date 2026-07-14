@@ -1376,6 +1376,36 @@ fn catalog_assigns_refine_continue_and_loop_contracts_to_typed_external_batches(
 }
 
 #[test]
+fn catalog_assigns_resume_contract_components_to_typed_external_batches() {
+    let catalog = ValidationCatalog::standard();
+
+    for (id, owner) in [
+        (
+            "check_autospec_resume_structure",
+            ExternalCheck::AutospecResumeStructure,
+        ),
+        (
+            "check_autospec_supervisor_structure",
+            ExternalCheck::AutospecSupervisorStructure,
+        ),
+        (
+            "check_autospec_resume_contract",
+            ExternalCheck::AutospecResumeContract,
+        ),
+    ] {
+        assert_eq!(
+            catalog
+                .checks()
+                .iter()
+                .find(|check| check.id == id)
+                .map(|check| &check.owner),
+            Some(&CheckOwner::ExternalBatch(owner)),
+            "{id} must have a typed external owner"
+        );
+    }
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![

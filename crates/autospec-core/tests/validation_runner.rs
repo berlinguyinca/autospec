@@ -1237,6 +1237,47 @@ fn runner_checks_refine_continue_and_loop_contracts_with_typed_batches() {
 }
 
 #[test]
+fn runner_checks_resume_contract_components_with_typed_batches() {
+    for (id, owner, minimum_spawns, maximum_spawns) in [
+        (
+            "check_autospec_resume_structure",
+            ExternalCheck::AutospecResumeStructure,
+            3,
+            3,
+        ),
+        (
+            "check_autospec_supervisor_structure",
+            ExternalCheck::AutospecSupervisorStructure,
+            2,
+            2,
+        ),
+        (
+            "check_autospec_resume_contract",
+            ExternalCheck::AutospecResumeContract,
+            6,
+            7,
+        ),
+    ] {
+        let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+            id,
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(owner),
+        }]);
+
+        let report = ValidationRunner::run(&catalog, &validation_fixture("autospec-resume"));
+
+        assert_eq!(report.results[0].exit_code, Some(0), "{id}");
+        assert!(
+            (minimum_spawns..=maximum_spawns).contains(&report.results[0].spawn_count),
+            "{id}"
+        );
+    }
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

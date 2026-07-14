@@ -276,6 +276,15 @@ impl ValidationCheck {
             "check_autospec_loop_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecLoopContract)
             }
+            "check_autospec_resume_structure" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecResumeStructure)
+            }
+            "check_autospec_supervisor_structure" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecSupervisorStructure)
+            }
+            "check_autospec_resume_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::AutospecResumeContract)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

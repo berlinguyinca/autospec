@@ -1,0 +1,1 @@
+autospec-run-registry.sh

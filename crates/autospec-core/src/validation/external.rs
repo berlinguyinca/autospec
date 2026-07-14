@@ -65,6 +65,9 @@ pub enum ExternalCheck {
     AutospecRefineContract,
     AutospecContinueContract,
     AutospecLoopContract,
+    AutospecResumeStructure,
+    AutospecSupervisorStructure,
+    AutospecResumeContract,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -169,6 +172,11 @@ impl ExternalCheck {
             Self::AutospecRefineContract => run_autospec_refine_contract(id, required, root),
             Self::AutospecContinueContract => run_autospec_continue_contract(id, required, root),
             Self::AutospecLoopContract => run_autospec_loop_contract(id, required, root),
+            Self::AutospecResumeStructure => run_autospec_resume_structure(id, required, root),
+            Self::AutospecSupervisorStructure => {
+                run_autospec_supervisor_structure(id, required, root)
+            }
+            Self::AutospecResumeContract => run_autospec_resume_contract(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -3530,6 +3538,225 @@ fn run_autospec_loop_contract(id: &str, required: bool, root: &Path) -> CheckRes
     aggregate(id, required, vec![syntax, bats])
 }
 
+fn run_autospec_resume_structure(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SKILL: &str = "skills/autospec-resume";
+    const MEMBERS: &[&str] = &[
+        "SKILL.md",
+        "README.md",
+        "install.sh",
+        "uninstall.sh",
+        "validate.sh",
+        "opencode/agent.md",
+        "codex/prompt.md",
+        "scripts/resume-scan.sh",
+        "scripts/resume-attempts.sh",
+    ];
+    const SCRIPTS: &[(&str, bool)] = &[
+        ("skills/autospec-resume/scripts/resume-scan.sh", true),
+        ("skills/autospec-resume/scripts/resume-attempts.sh", true),
+        ("scripts/autospec-run-registry.sh", true),
+    ];
+    if !root.join(SKILL).is_dir() {
+        return failure(
+            id,
+            required,
+            "skills/autospec-resume: skill directory missing",
+        );
+    }
+    for member in MEMBERS {
+        let relative = format!("{SKILL}/{member}");
+        if !root.join(&relative).is_file() {
+            return failure(id, required, &format!("{relative}: required file missing"));
+        }
+    }
+    let skill_file = root.join("skills/autospec-resume/SKILL.md");
+    let valid_startup = (has_heading_prefix(&skill_file, "## Startup self-update")
+        && contains(&skill_file, "SKILL_NAME=autospec-resume"))
+        || contains(
+            &skill_file,
+            "autospec-block:startup-self-update SKILL_NAME=autospec-resume",
+        );
+    if !valid_startup {
+        return failure(
+            id,
+            required,
+            "skills/autospec-resume/SKILL.md: missing compatible startup self-update section",
+        );
+    }
+    for token in [
+        "## Harness detection",
+        "## Required capabilities & harness adapter",
+        "Subagent model tier",
+    ] {
+        if !contains(&skill_file, token) {
+            return failure(
+                id,
+                required,
+                &format!("skills/autospec-resume/SKILL.md: missing {token}"),
+            );
+        }
+    }
+    run_required_bash_scripts(id, required, root, SCRIPTS)
+}
+
+fn run_autospec_supervisor_structure(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SUPERVISOR: &str = "scripts/autospec-supervisor.sh";
+    const INSTALLER: &str = "scripts/autospec-supervisor-install.sh";
+    let syntax =
+        run_required_bash_scripts(id, required, root, &[(SUPERVISOR, true), (INSTALLER, true)]);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    let supervisor = root.join(SUPERVISOR);
+    if !contains(&supervisor, "resume-scan.sh") {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                failure(id, required, "supervisor: missing resume-scan delegation"),
+            ],
+        );
+    }
+    if contains_unsafe_supervisor_eval(&supervisor) {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                failure(id, required, "supervisor: unsafe resume command eval"),
+            ],
+        );
+    }
+    if !contains(&supervisor, "confirm_open_run") && !contains(&supervisor, "in-progress-by-bot") {
+        return aggregate(
+            id,
+            required,
+            vec![
+                syntax,
+                failure(id, required, "supervisor: missing open-run confirmation"),
+            ],
+        );
+    }
+    let installer = root.join(INSTALLER);
+    for token in [
+        "launchd",
+        "systemd",
+        "@reboot",
+        "install)",
+        "uninstall)",
+        "status)",
+    ] {
+        if !contains(&installer, token) {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(id, required, &format!("installer: missing {token}")),
+                ],
+            );
+        }
+    }
+    syntax
+}
+
+fn run_autospec_resume_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    let structure = run_autospec_resume_structure(id, required, root);
+    if structure.is_failure() {
+        return structure;
+    }
+    let supervisor = run_autospec_supervisor_structure(id, required, root);
+    if supervisor.is_failure() {
+        return aggregate(id, required, vec![structure, supervisor]);
+    }
+    let scan = root.join("skills/autospec-resume/scripts/resume-scan.sh");
+    if contains(&scan, "run-state.sh") && (contains(&scan, "upsert") || contains(&scan, "clear"))
+        || contains(&scan, "gh issue comment")
+    {
+        return aggregate(
+            id,
+            required,
+            vec![
+                structure,
+                supervisor,
+                failure(
+                    id,
+                    required,
+                    "resume scan must not mutate the durable run state",
+                ),
+            ],
+        );
+    }
+    if !contains(&scan, "updated_at") {
+        return aggregate(
+            id,
+            required,
+            vec![
+                structure,
+                supervisor,
+                failure(id, required, "resume scan: missing updated_at"),
+            ],
+        );
+    }
+    if !contains(
+        &root.join("skills/autospec-run/scripts/heartbeat-write.sh"),
+        "\"host\"",
+    ) {
+        return aggregate(
+            id,
+            required,
+            vec![
+                structure,
+                supervisor,
+                failure(id, required, "heartbeat write: missing host field"),
+            ],
+        );
+    }
+    for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+        let relative = format!("skills/autospec-run/{member}");
+        if !contains(&root.join(&relative), "autospec-run-registry.sh") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    structure,
+                    supervisor,
+                    failure(
+                        id,
+                        required,
+                        &format!("{relative}: missing registry wiring"),
+                    ),
+                ],
+            );
+        }
+    }
+    let validate = ToolCommand::new("bash", ["skills/autospec-resume/validate.sh"])
+        .expect("resume skill validation uses a direct Bash argument vector")
+        .execute_in(id, required, root);
+    if validate.is_failure() {
+        return aggregate(id, required, vec![structure, supervisor, validate]);
+    }
+    if !root.join("tests/resume").is_dir() {
+        return aggregate(
+            id,
+            required,
+            vec![
+                structure,
+                supervisor,
+                validate,
+                failure(
+                    id,
+                    required,
+                    "tests/resume: bats coverage directory missing",
+                ),
+            ],
+        );
+    }
+    let bats = run_matching_bats_suites_if_available(id, required, root, "tests/resume", "");
+    aggregate(id, required, vec![structure, supervisor, validate, bats])
+}
+
 fn run_optional_jsonschema_checks(
     id: &str,
     required: bool,
@@ -4876,6 +5103,18 @@ fn contains_word(path: &Path, expected: &str) -> bool {
                 let is_word =
                     |character: char| character.is_ascii_alphanumeric() || character == '_';
                 !before.is_some_and(is_word) && !after.is_some_and(is_word)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn contains_unsafe_supervisor_eval(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .map(|document| {
+            document.lines().any(|line| {
+                line.contains("eval")
+                    && line.contains('"')
+                    && (line.contains("$(resume_command") || line.contains("$(reg"))
             })
         })
         .unwrap_or(false)
