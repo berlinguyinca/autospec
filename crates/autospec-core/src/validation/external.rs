@@ -41,6 +41,7 @@ pub enum ExternalCheck {
     AutospecExploreStyleNormalization,
     AutospecExploreOrchestrator,
     AutospecExploreDiscovery,
+    AutospecQaContract,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -115,6 +116,7 @@ impl ExternalCheck {
                 run_autospec_explore_orchestrator(id, required, root)
             }
             Self::AutospecExploreDiscovery => run_autospec_explore_discovery(id, required, root),
+            Self::AutospecQaContract => run_autospec_qa_contract(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2027,6 +2029,96 @@ fn run_autospec_explore_discovery(id: &str, required: bool, root: &Path) -> Chec
     let bats = run_bats_suites(id, required, root, SUITES);
     results.push(bats);
     aggregate(id, required, results)
+}
+
+fn run_autospec_qa_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SKILL: &str = "skills/autospec-qa/SKILL.md";
+    const SCHEMAS: &[&str] = &[
+        "schemas/autospec-proof-matrix.schema.json",
+        "schemas/autospec-reliability.schema.json",
+        "schemas/autospec-control-intent-ledger.schema.json",
+        "schemas/autospec-mutation-proof.schema.json",
+        "schemas/autospec-canary-results.schema.json",
+    ];
+    const VALIDATOR: &str = "scripts/validate-qa-artifacts.sh";
+
+    let skill = root.join(SKILL);
+    if !skill.is_file() {
+        return failure(
+            id,
+            required,
+            "skills/autospec-qa/SKILL.md: required file missing",
+        );
+    }
+    for heading in [
+        "## No-mock deployed smoke blocker handling",
+        "## Presentational control classification",
+        "## User input element intent prompt",
+        "## Live backend blocker triage prompt",
+        "## Proof artifact requirements",
+        "## Generated app reliability contract prompt",
+        "## Control intent ledger prompt",
+        "## Duplicate-code guardian prompt",
+        "## Mutation and breakage proof prompt",
+        "## Post-merge deployed canary prompt",
+        "## No-mock minimum coverage prompt",
+        "## New code intent gate",
+        "## Artifact freshness gate",
+        "## Evidence provenance gate",
+        "## Console and network error gate",
+        "## Spec contradiction detector",
+        "## Data lifecycle proof",
+        "## Observability contract",
+        "## Flake quarantine rule",
+        "## Reliability exhaustion loop",
+        "## Legacy removal and spec cleanup gate",
+    ] {
+        if !has_heading_prefix(&skill, heading) {
+            return failure(id, required, &format!("{SKILL}: missing {heading} section"));
+        }
+    }
+    for anchor in [
+        "must be `PARTIAL`",
+        "environment setup issue/task",
+        "operator-blocker line with the exact missing configuration",
+        "Never print secret values",
+        "route-specific worker/handler failure",
+        ".autospec/proof-matrix.json",
+        ".autospec/reliability.yml",
+        ".autospec/control-intent-ledger.json",
+        ".autospec/mutation-proof.json",
+        ".autospec/canary-results.json",
+        "Do not populate deprecated caches",
+    ] {
+        if !contains(&skill, anchor) {
+            return failure(
+                id,
+                required,
+                &format!("{SKILL}: missing {anchor} requirement"),
+            );
+        }
+    }
+    for schema in SCHEMAS {
+        if !root.join(schema).is_file() {
+            return failure(
+                id,
+                required,
+                &format!("{schema}: QA artifact schema missing"),
+            );
+        }
+    }
+    if !contains(
+        &root.join("schemas/autospec-reliability.schema.json"),
+        "deprecated_surfaces",
+    ) {
+        return failure(
+            id,
+            required,
+            "schemas/autospec-reliability.schema.json: missing deprecated_surfaces contract",
+        );
+    }
+
+    run_required_bash_scripts(id, required, root, &[(VALIDATOR, true)])
 }
 
 fn run_required_bash_scripts(
