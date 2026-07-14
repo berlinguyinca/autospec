@@ -44,6 +44,7 @@ pub enum ExternalCheck {
     AutospecQaContract,
     QaDeployContract,
     QaVerifyFirstDiscipline,
+    QaExhaustivenessContract,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -121,6 +122,7 @@ impl ExternalCheck {
             Self::AutospecQaContract => run_autospec_qa_contract(id, required, root),
             Self::QaDeployContract => run_qa_deploy_contract(id, required, root),
             Self::QaVerifyFirstDiscipline => run_qa_verify_first_discipline(id, required, root),
+            Self::QaExhaustivenessContract => run_qa_exhaustiveness_contract(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2302,6 +2304,86 @@ fn run_qa_verify_first_discipline(id: &str, required: bool, root: &Path) -> Chec
         }
     }
     aggregate(id, required, results)
+}
+
+fn run_qa_exhaustiveness_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const SCRIPT: &str = "scripts/qa-exhaustiveness-check.sh";
+    const SUITE: &str = "tests/qa/test_exhaustiveness.bats";
+    const TRIO: &[&str] = &[
+        "skills/autospec-qa/SKILL.md",
+        "skills/autospec-qa/codex/prompt.md",
+        "skills/autospec-qa/opencode/agent.md",
+    ];
+
+    let script = run_required_bash_scripts(id, required, root, &[(SCRIPT, true)]);
+    if script.is_failure() {
+        return script;
+    }
+    if !root.join(SUITE).is_file() {
+        return aggregate(
+            id,
+            required,
+            vec![
+                script,
+                failure(id, required, &format!("{SUITE}: bats coverage missing")),
+            ],
+        );
+    }
+    for trio in TRIO {
+        let path = root.join(trio);
+        if !path.is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    script,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: required adapter file missing"),
+                    ),
+                ],
+            );
+        }
+        if !has_heading_prefix(&path, "## Exhaustiveness flags") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    script,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: missing '## Exhaustiveness flags' section"),
+                    ),
+                ],
+            );
+        }
+        for anchor in [
+            "qa-exhaustiveness-check.sh",
+            "--every-spec-row",
+            "--mutation-each",
+            "--no-mock-each",
+            "--exhaustive",
+        ] {
+            if !contains(&path, anchor) {
+                return aggregate(
+                    id,
+                    required,
+                    vec![
+                        script,
+                        failure(
+                            id,
+                            required,
+                            &format!("{trio}: missing {anchor} documentation"),
+                        ),
+                    ],
+                );
+            }
+        }
+    }
+    let bats = run_bats_suites(id, required, root, &[SUITE]);
+    aggregate(id, required, vec![script, bats])
 }
 
 fn run_required_bash_scripts(
