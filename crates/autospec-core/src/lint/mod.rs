@@ -1,5 +1,15 @@
 //! Deterministic issue-body lint rules shared with the shell autospec linter.
 
+pub mod diff;
+pub mod implementation;
+
+pub use diff::{parse_unified_diff, DiffFile, DiffHunk, DiffLine, DiffLineKind, UnifiedDiff};
+pub use implementation::{
+    directive_for, lint_implementation, ImplementationLintContext, ImplementationLintFinding,
+    ImplementationLintOptions, ImplementationLintResult, ImplementationLintRule,
+    ImplementationLintSeverity, RepositoryIndex,
+};
+
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
