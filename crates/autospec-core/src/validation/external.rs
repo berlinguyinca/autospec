@@ -48,6 +48,7 @@ pub enum ExternalCheck {
     QaIncidentContract,
     QaHealLoopContract,
     QualityDifferential,
+    ReleaseAreaContract,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -129,6 +130,7 @@ impl ExternalCheck {
             Self::QaIncidentContract => run_qa_incident_contract(id, required, root),
             Self::QaHealLoopContract => run_qa_heal_loop_contract(id, required, root),
             Self::QualityDifferential => run_quality_differential(id, required, root),
+            Self::ReleaseAreaContract => run_release_area_contract(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2634,6 +2636,72 @@ fn run_quality_differential(id: &str, required: bool, root: &Path) -> CheckResul
     }
     let bats = run_bats_suites(id, required, root, &[SUITE]);
     aggregate(id, required, vec![script, bats])
+}
+
+fn run_release_area_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const AREAS: &[&str] = &[
+        "spec-completeness",
+        "docs-freshness",
+        "implementation-completeness",
+        "test-coverage",
+        "qa-artifact-integrity",
+        "legacy-cleanup",
+    ];
+    const DIRECTORY: &str = "skills/autospec-release/areas";
+    const SCRIPT: &str = "scripts/release-area-dispatch.sh";
+    const TRIO: &[&str] = &[
+        "skills/autospec-release/SKILL.md",
+        "skills/autospec-release/codex/prompt.md",
+        "skills/autospec-release/opencode/agent.md",
+    ];
+    const SUITE: &str = "tests/release/test_release_area_dispatch.bats";
+
+    if !root.join(DIRECTORY).is_dir() {
+        return failure(
+            id,
+            required,
+            "skills/autospec-release/areas: directory missing",
+        );
+    }
+    for area in AREAS {
+        let path = root.join(DIRECTORY).join(format!("{area}.md"));
+        if !path.is_file() {
+            return failure(
+                id,
+                required,
+                &format!("{}: required area file missing", path.display()),
+            );
+        }
+    }
+    let script = run_required_bash_scripts(id, required, root, &[(SCRIPT, true)]);
+    if script.is_failure() {
+        return script;
+    }
+    for trio in TRIO {
+        if !contains(&root.join(trio), "release-area-dispatch.sh") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    script,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: missing release-area-dispatch reference"),
+                    ),
+                ],
+            );
+        }
+    }
+    let mut results = vec![script];
+    if program_on_path("bats") && root.join(SUITE).is_file() {
+        results.push(
+            ToolCommand::new("bats", [SUITE])
+                .expect("release area Bats suite uses a static argument")
+                .execute_in(id, required, root),
+        );
+    }
+    aggregate(id, required, results)
 }
 
 fn run_required_bash_scripts(

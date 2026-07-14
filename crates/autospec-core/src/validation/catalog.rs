@@ -229,6 +229,9 @@ impl ValidationCheck {
             "check_quality_differential" => {
                 CheckOwner::ExternalBatch(ExternalCheck::QualityDifferential)
             }
+            "check_autospec_release_area_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::ReleaseAreaContract)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }
