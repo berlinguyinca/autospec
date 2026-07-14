@@ -223,6 +223,9 @@ impl ValidationCheck {
             "check_qa_incident_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::QaIncidentContract)
             }
+            "check_qa_heal_loop_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::QaHealLoopContract)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

@@ -46,6 +46,7 @@ pub enum ExternalCheck {
     QaVerifyFirstDiscipline,
     QaExhaustivenessContract,
     QaIncidentContract,
+    QaHealLoopContract,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -125,6 +126,7 @@ impl ExternalCheck {
             Self::QaVerifyFirstDiscipline => run_qa_verify_first_discipline(id, required, root),
             Self::QaExhaustivenessContract => run_qa_exhaustiveness_contract(id, required, root),
             Self::QaIncidentContract => run_qa_incident_contract(id, required, root),
+            Self::QaHealLoopContract => run_qa_heal_loop_contract(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2480,6 +2482,114 @@ fn run_qa_incident_contract(id: &str, required: bool, root: &Path) -> CheckResul
     }
     let bats = run_bats_suites(id, required, root, &[SUITE]);
     aggregate(id, required, vec![script, bats])
+}
+
+fn run_qa_heal_loop_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const HEAL: &str = "scripts/qa-heal-loop.sh";
+    const FINDING_TO_ISSUE: &str = "scripts/qa-finding-to-issue.sh";
+    const TRIO: &[&str] = &[
+        "skills/autospec-qa/SKILL.md",
+        "skills/autospec-qa/codex/prompt.md",
+        "skills/autospec-qa/opencode/agent.md",
+    ];
+    const SUITES: &[&str] = &[
+        "tests/qa/test_qa_heal_default.bats",
+        "tests/qa/test_heal_loop.bats",
+    ];
+
+    let scripts = run_required_bash_scripts(
+        id,
+        required,
+        root,
+        &[(HEAL, true), (FINDING_TO_ISSUE, true)],
+    );
+    if scripts.is_failure() {
+        return scripts;
+    }
+    for suite in SUITES {
+        if !root.join(suite).is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    scripts,
+                    failure(id, required, &format!("{suite}: bats coverage missing")),
+                ],
+            );
+        }
+    }
+    for trio in TRIO {
+        let path = root.join(trio);
+        if !path.is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    scripts,
+                    failure(
+                        id,
+                        required,
+                        &format!("{trio}: required adapter file missing"),
+                    ),
+                ],
+            );
+        }
+        for heading in ["## Self-healing loop", "## --no-heal opt-out"] {
+            if !has_heading_prefix(&path, heading) {
+                return aggregate(
+                    id,
+                    required,
+                    vec![
+                        scripts,
+                        failure(id, required, &format!("{trio}: missing {heading} section")),
+                    ],
+                );
+            }
+        }
+        for anchor in [
+            "qa-heal-loop.sh",
+            "qa-finding-to-issue.sh",
+            "oscillation_detected",
+            "AUTOSPEC_HEAL_MAX_ROUNDS",
+            "default-on",
+            "--single-pass",
+            "qa-no-heal.flag",
+            "lib/autospec-loop.sh",
+            "qa-heal-summary.md",
+            "evidence_based_stop",
+        ] {
+            if !contains(&path, anchor) {
+                return aggregate(
+                    id,
+                    required,
+                    vec![
+                        scripts,
+                        failure(id, required, &format!("{trio}: missing {anchor} contract")),
+                    ],
+                );
+            }
+        }
+    }
+    let heal = root.join(HEAL);
+    for anchor in [
+        "lib/autospec-loop.sh",
+        "--single-pass",
+        "qa-no-heal.flag",
+        "qa-heal-summary.md",
+    ] {
+        if !contains(&heal, anchor) {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    scripts,
+                    failure(id, required, &format!("{HEAL}: missing {anchor} contract")),
+                ],
+            );
+        }
+    }
+    let bats = run_bats_suites(id, required, root, SUITES);
+    aggregate(id, required, vec![scripts, bats])
 }
 
 fn run_required_bash_scripts(
