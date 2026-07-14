@@ -226,7 +226,7 @@ git add crates/autospec-cli/src/main.rs crates/autospec-cli/src/commands/mod.rs 
 git commit -m "feat: add Rust runtime environment lifecycle commands"
 ```
 
-## Task 3: Complete `init|exec|session` without shell authority
+## Task 3: Add `init|exec` without session lifecycle
 
 **Files:**
 - Modify: `crates/autospec-cli/src/commands/runtime/env.rs`
@@ -235,33 +235,77 @@ git commit -m "feat: add Rust runtime environment lifecycle commands"
 
 **Interfaces:**
 - Consumes: the lifecycle operations from Task 2.
-- Produces: all six documented public subcommands and normal-exit session cleanup.
+- Produces: `init` and `exec` with the legacy manifest and direct-child contract.
 
-- [ ] **Step 1: Add failing tests for init protection, direct exec, session bypass, auto-init, and cleanup**
+- [ ] **Step 1: Add failing tests for init protection and direct exec**
 
 ```rust
 #[test]
-fn runtime_env_session_removes_state_after_child_completion() {
+fn runtime_env_exec_runs_a_direct_child_in_the_provisioned_environment() {
     let fixture = runtime_fixture("sh -c 'true'");
-    let state_root = fixture.join("state");
-    let output = autospec().env("AGENT_ENV_STATE_ROOT", &state_root).args(["runtime", "env", "session", "--repo", fixture.to_str().unwrap(), "--", "sh", "-c", "exit 0"]).output().unwrap();
+    let output = autospec().args(["runtime", "env", "exec", "--repo", fixture.to_str().unwrap(), "--", "sh", "-c", "test -n \"$AGENT_ENV_ID\""]).output().unwrap();
     assert!(output.status.success());
-    let status = autospec().env("AGENT_ENV_STATE_ROOT", &state_root).args(["runtime", "env", "status", "--repo", fixture.to_str().unwrap()]).output().unwrap();
-    assert_eq!(status.status.code(), Some(3));
 }
 ```
 
 - [ ] **Step 2: Run the focused session tests and confirm the intended red failure**
 
-Run: `cargo test -p autospec-cli --test runtime_commands runtime_env_session -- --nocapture`
+Run: `cargo test -p autospec-cli --test runtime_commands runtime_env_init -- --nocapture && cargo test -p autospec-cli --test runtime_commands runtime_env_exec -- --nocapture`
 
-Expected: failures because `session` is not implemented.
+Expected: failures because `init` and `exec` are not implemented.
 
 - [ ] **Step 3: Implement the remaining subcommands**
 
-`init` writes the exact conservative v1 manifest, refuses an existing selected manifest with exit `4`, and supports only `agent|autospec`. `exec` provisions/reuses state and launches its trailing command with direct argument vectors in the canonical repository. `session` bypasses when `AUTOSPEC_ENV_DISABLE=1`, passes through unchanged when no manifest exists, auto-initializes only when `AUTOSPEC_ENV_AUTO_INIT=1`, records a session file while the child is running, and removes it plus tears down after normal child completion unless `--keep-alive` or `AUTOSPEC_ENV_KEEP_ALIVE=1` is set. Keep child exit codes unchanged.
+`init` writes the exact conservative v1 manifest, refuses an existing selected manifest with exit `4`, and supports only `agent|autospec`. `exec` provisions/reuses state and launches its trailing command with direct argument vectors in the canonical repository. Both commands preserve caller values and child exit codes.
 
-For Unix interruption, define the no-dependency local binding and handler in `env.rs`:
+- [ ] **Step 4: Run all focused broker tests**
+
+Run: `cargo test -p autospec-core --test runtime_env && cargo test -p autospec-cli --test runtime_commands runtime_env_init -- --nocapture && cargo test -p autospec-cli --test runtime_commands runtime_env_exec -- --nocapture`
+
+Expected: `init` and `exec` preserve their documented manifest, direct-child, state, output, and exit behavior.
+
+- [ ] **Step 5: Commit the complete broker**
+
+```bash
+git add crates/autospec-core/tests/runtime_env.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/tests/runtime_commands.rs
+git commit -m "feat: add Rust runtime initialization and exec"
+```
+
+## Task 4: Add `session` lifecycle and signal cleanup
+
+**Files:**
+- Modify: `crates/autospec-cli/src/commands/runtime/env.rs`
+- Modify: `crates/autospec-cli/tests/runtime_commands.rs`
+
+**Interfaces:**
+- Consumes: `init`, `up`, and `down` from Tasks 2–3.
+- Produces: `autospec runtime env session [--repo PATH] [--mode MODE] [--keep-alive] -- COMMAND [ARGS...]`.
+
+- [ ] **Step 1: Add failing tests for session bypass, auto-init, normal cleanup, keep-alive, and Unix interruption**
+
+```rust
+#[test]
+fn runtime_env_session_cleans_state_after_child_completion() {
+    let fixture = runtime_fixture("sh -c 'printf down > down.txt'");
+    let state_root = fixture.join("state");
+    let output = autospec().env("AGENT_ENV_STATE_ROOT", &state_root).args(["runtime", "env", "session", "--repo", fixture.to_str().unwrap(), "--", "sh", "-c", "exit 0"]).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(std::fs::read_to_string(fixture.join("down.txt")).unwrap(), "down");
+    assert_eq!(autospec().env("AGENT_ENV_STATE_ROOT", &state_root).args(["runtime", "env", "status", "--repo", fixture.to_str().unwrap()]).output().unwrap().status.code(), Some(3));
+}
+```
+
+- [ ] **Step 2: Run session tests and verify they fail**
+
+Run: `cargo test -p autospec-cli --test runtime_commands runtime_env_session -- --nocapture`
+
+Expected: `runtime env session` is rejected as unknown.
+
+- [ ] **Step 3: Implement session and the no-dependency Unix signal boundary**
+
+`session` bypasses with `AUTOSPEC_ENV_DISABLE=1`, passes through unchanged without a manifest, auto-initializes only with `AUTOSPEC_ENV_AUTO_INIT=1`, records a session file while its direct child runs, and tears down on normal completion unless `--keep-alive` or `AUTOSPEC_ENV_KEEP_ALIVE=1` is set. Preserve the child exit code.
+
+Implement this Unix-only signal registration boundary in `env.rs` without a crate dependency:
 
 ```rust
 #[cfg(unix)]
@@ -272,22 +316,22 @@ static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
 extern "C" fn record_signal(signal: i32) { RECEIVED_SIGNAL.store(signal, Ordering::Relaxed); }
 ```
 
-Register only signals `2` and `15` before waiting for the direct child. The handler does not allocate, print, execute a command, or mutate files. The parent observes the flag, terminates the child, removes the session record, runs teardown, and exits `130`/`143`. Test this with a spawned sleep child and an explicit signal only on Unix.
+Register only `2` and `15`; the handler only records the signal. Parent Rust code terminates the child, removes the session file, runs `down`, and exits `130`/`143`. Add a Unix-only sleep-child regression that sends `SIGTERM` and checks no session state remains.
 
-- [ ] **Step 4: Run all focused broker tests**
+- [ ] **Step 4: Run session verification**
 
-Run: `cargo test -p autospec-core --test runtime_env && cargo test -p autospec-cli --test runtime_commands runtime_env_ -- --nocapture`
+Run: `cargo test -p autospec-cli --test runtime_commands runtime_env_session -- --nocapture && cargo test --workspace`
 
-Expected: all six commands preserve their documented state, output, and exit behavior.
+Expected: normal, bypass, auto-init, keep-alive, and Unix interruption tests pass with no leaked state.
 
-- [ ] **Step 5: Commit the complete broker**
+- [ ] **Step 5: Commit session lifecycle**
 
 ```bash
-git add crates/autospec-core/tests/runtime_env.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/tests/runtime_commands.rs
-git commit -m "feat: complete Rust isolated runtime broker"
+git add crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/tests/runtime_commands.rs
+git commit -m "feat: add Rust runtime session lifecycle"
 ```
 
-## Task 4: Build/install the Rust binary and replace live callers
+## Task 5: Build/install the Rust binary and replace live callers
 
 **Files:**
 - Modify: `install.sh`
@@ -299,7 +343,7 @@ git commit -m "feat: complete Rust isolated runtime broker"
 - Modify: `skills/autospec-run/opencode/agent.md`
 
 **Interfaces:**
-- Consumes: installed `~/.autospec/bin/autospec` and the Task 3 command family.
+- Consumes: installed `~/.autospec/bin/autospec` and the complete Task 3–4 command family.
 - Produces: `agent-env` and `autospec-env` aliases that execute `autospec runtime env` and no direct legacy script references.
 
 - [ ] **Step 1: Add failing installer and prompt-contract tests**
@@ -335,7 +379,7 @@ git add install.sh tests/agent-env.bats tests/agent-env-install.bats tests/autos
 git commit -m "refactor: route isolated runtime callers through Rust"
 ```
 
-## Task 5: Delete the shell broker and prove it is unreachable
+## Task 6: Delete the shell broker and prove it is unreachable
 
 **Files:**
 - Delete: `scripts/agent-env.sh`
@@ -355,7 +399,7 @@ Add a Rust integration test that reads tracked source paths and fails if `script
 
 Run: `cargo test -p autospec-cli --test runtime_commands legacy_agent_env_authority_is_absent -- --exact`
 
-Expected: failure naming `scripts/agent-env.sh` and one or more remaining live references if Task 4 missed any.
+Expected: failure naming `scripts/agent-env.sh` and one or more remaining live references if Task 5 missed any.
 
 - [ ] **Step 3: Delete the authority and document the Rust contract**
 
