@@ -85,8 +85,10 @@ JSON
     [[ "$output" == *"security verifier gate passed"* ]]
 }
 
-@test "validate.sh already gates the autonomous security workstream suite" {
-    grep -q 'tests/autonomous/\*.bats' "$REPO_ROOT/scripts/validate.sh"
+@test "direct Rust validation gates the autonomous security workstream suite" {
+    catalog="$REPO_ROOT/crates/autospec-core/src/validation/catalog.rs"
+    grep -q '"check_autonomous_phase2_suite"' "$catalog"
+    grep -q 'BatsDirectory("tests/autonomous")' "$catalog"
     [ -f "$REPO_ROOT/tests/autonomous/test_security_workstream.bats" ]
     grep -q 'schedule:' "$REPO_ROOT/.github/workflows/security-workstream.yml"
     grep -q 'pull_request:' "$REPO_ROOT/.github/workflows/security-workstream.yml"

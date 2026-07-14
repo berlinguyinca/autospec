@@ -11,7 +11,7 @@ Issue start summary
 Immediate next-issue pickup: NO SLEEP after process(ISSUE)
 fresh queue scan can pick any issue unblocked
 
-Full test suite gate AUTOSPEC_FULL_TEST_COMMAND scripts/validate.sh
+Full test suite gate AUTOSPEC_FULL_TEST_COMMAND autospec validate
 If the full suite fails, fix the failure, recommit, rerun the full suite, and repeat
 Do NOT dispatch LGTM review
 Do NOT run `gh pr merge`

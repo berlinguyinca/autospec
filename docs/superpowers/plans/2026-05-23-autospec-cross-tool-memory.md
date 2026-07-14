@@ -249,7 +249,7 @@ bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/auto-init-memory.sh"
 
 - [ ] **M4.4** Write bats test asserting:
   - Every autospec-*/SKILL.md contains exactly one occurrence of the auto-init line
-  - Lockstep validation (`bash scripts/validate.sh`) exits 0
+  - Lockstep validation (`autospec validate`) exits 0
 
 - [ ] **M4.5** Run bats + validate.sh; both must pass.
 

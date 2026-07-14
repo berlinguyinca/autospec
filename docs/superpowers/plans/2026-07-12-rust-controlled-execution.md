@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - No new dependencies, remote writes, agent spawning, shell execution, or validation execution.
-- Keep `scripts/validate.sh` as the R1 validation executor until fixture parity proves a Rust result aggregator.
+- Keep `autospec validate` as the R1 validation executor until fixture parity proves a Rust result aggregator.
 - Bind every result to explicit `run_id` and `spec_id`; do not derive either from free-form agent JSON.
 - Bind every ingestion to an explicit safe `result_id`; persist canonical result envelopes under `.autospec/runs/<run-id>/agent-results/<spec-id>/<result-id>.json` using temporary-file recovery.
 - Apply a result to a queue entry at most once by recording its `result_id`; replaying the same result after a crash must not consume another retry.
@@ -68,7 +68,7 @@
 - Modify: `docs/specs/2026-07-11-rust-core-runtime-consolidation-design.md`
 
 - [x] Capture the shell validation result shape in golden fixtures before implementation.
-- [x] Implement only result aggregation in Rust; keep shell execution behind `AUTOSPEC_FORCE_LEGACY_SHELL=1`.
+- [x] Implement only result aggregation in Rust; keep shell execution behind `direct Rust validation=1`.
 - [x] Add a shadow comparison command and prove fixture-equivalent JSON/pass-fail output.
 - [x] Record the current wrapper topology and explicitly defer direct-executor process/time/output metrics until delegation is eligible.
 

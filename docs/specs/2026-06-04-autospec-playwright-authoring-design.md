@@ -58,7 +58,7 @@ Two deliverables, zero duplicated machinery:
    NO authoring machinery. It: detects/initializes `.autospec/test.yml`
    (`e2e.authoring` + `e2e.reset` blocks), then invokes the autospec-test
    authoring stage below, then prints the coverage report. Registered in the
-   root `scripts/validate.sh` skill arrays and `install.sh` usage strings.
+   root `autospec validate` skill arrays and `install.sh` usage strings.
 2. **autospec-test "Stage 2A — disciplined authoring"** — a new stage between
    Stage 1 (unit gate) and Stage 2 (E2E gate) in
    `skills/autospec-test/SKILL.md`, gated on `e2e.authoring.enabled`. All new

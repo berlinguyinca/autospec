@@ -12,7 +12,7 @@
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
-    VALIDATE="$REPO_ROOT/scripts/validate.sh"
+    VALIDATE="$REPO_ROOT/autospec validate"
     EXPANDER="$REPO_ROOT/scripts/expand-skill-blocks.sh"
     GOLDEN_DIR="$REPO_ROOT/tests/fixtures/skill-goldens"
     TMP="$(mktemp -d)"

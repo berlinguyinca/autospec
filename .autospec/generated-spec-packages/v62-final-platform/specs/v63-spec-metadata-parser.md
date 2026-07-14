@@ -53,7 +53,7 @@ Implement the core model for loading markdown specs into structured metadata.
 
 ```bash
 cargo test --all spec_parser
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 ## Expected Outputs

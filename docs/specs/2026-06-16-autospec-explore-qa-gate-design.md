@@ -187,8 +187,8 @@ verify-first filter.
 - [ ] Explore trio (SKILL.md + codex/prompt.md + opencode/agent.md) documents
       `--qa-gate` + the promotion-readiness contract, passes `check_lockstep`,
       and the 3 autospec-explore goldens are regenerated **in the same commit**.
-- [ ] `scripts/validate.sh` gains `check_autospec_explore_qa_gate_contract()`;
-      all new bats pass; `bash scripts/validate.sh` is green.
+- [ ] `autospec validate` gains `check_autospec_explore_qa_gate_contract()`;
+      all new bats pass; `autospec validate` is green.
 
 ## Decomposition into child issues
 

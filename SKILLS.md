@@ -9,7 +9,7 @@ Every AutoSpec capability is a skill under [`skills/`](skills). Each skill has:
 
 The lock-step rule keeps `SKILL.md`, `opencode/agent.md`, and
 `codex/prompt.md` behavior identical except for frontmatter. Run
-[`scripts/validate.sh`](scripts/validate.sh) after editing any skill docs or
+[`autospec validate`](autospec validate) after editing any skill docs or
 skill bodies.
 
 ## How To Choose A Skill
@@ -364,4 +364,4 @@ operator control.
    `codex/prompt.md` must differ only in frontmatter.
 3. Add or update the skill README.
 4. Update this guide and any README workflow table affected by the change.
-5. Run `bash scripts/validate.sh`.
+5. Run `autospec validate`.

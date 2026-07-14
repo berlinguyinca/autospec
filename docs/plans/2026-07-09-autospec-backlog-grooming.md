@@ -338,7 +338,7 @@ git commit -m "feat(grooming): self-governance ratchet (observe + govern) mirror
 
 - [ ] **Step 3: Write implementation** — Refactor the candidate loop: resolve policy via `grooming-config.sh` (drop the `AUTOSPEC_PROMOTE_OPEN_ISSUES_APPLY` requirement; keep an env override seam for tests); source candidates from `list-groomable.sh` (adds unlabeled + needs-template classes) instead of the raw `needs-classify`-only query; per candidate run safety → classify → eligibility → route; gate `needs-template` promotion on `grooming-govern.sh show` active set; post audit comments; keep the report-only path (`policy off`/no-apply → dry JSON, no mutation). Preserve back-compat of the output envelope.
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `bats tests/autospec/autonomous-promote-open-issues.bats` — Expected: PASS. Then `bash scripts/validate.sh`.
+- [ ] **Step 4: Run test to verify it passes** — Run: `bats tests/autospec/autonomous-promote-open-issues.bats` — Expected: PASS. Then `autospec validate`.
 
 - [ ] **Step 5: Commit**
 
@@ -365,7 +365,7 @@ git commit -m "feat(grooming): orchestrate safety→classify→eligibility→pro
 
 - [ ] **Step 3: Write implementation** — At the Tier-1.5 branch, keep the existing `_promote_cmd` path but (a) pass policy through, (b) after the promoter returns, append the telemetry record and (policy=auto) run the observe→govern tick. Add the prose grooming-contract block (documented steps the loop follows for `needs-template` candidates). Honor bash 3.2/`set -eu` (the conductor already runs under it — reuse the `if/then/else` rc-capture pattern #1625 established).
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `bats tests/autospec/test_conductor_wiring.bats` then `bash scripts/validate.sh`.
+- [ ] **Step 4: Run test to verify it passes** — Run: `bats tests/autospec/test_conductor_wiring.bats` then `autospec validate`.
 
 - [ ] **Step 5: Commit**
 
@@ -390,7 +390,7 @@ git commit -m "feat(grooming): wire grooming pipeline + govern tick into Tier-1.
 - [ ] **Step 1: Write the failing test** — schema test: a valid `grooming:` block passes; `policy: bogus` fails; negative budget fails.
 - [ ] **Step 2: Run test to verify it fails** — Expected: FAIL.
 - [ ] **Step 3: Write implementation** — add the `grooming:` section to the schema/validator (mirror `continuous_improvement`/`improvement_budget`); add a commented `grooming:` block to `.autospec/autospec.yml` with the defaults; if SKILL.md prose is edited to document the tier, run derive-trio + gen-skill-goldens and stage all trio + golden outputs (a prose-only trio commit fails `validate.sh` closed).
-- [ ] **Step 4: Run test to verify it passes** — Run the schema test, then `bash scripts/validate.sh` (must be fully green, including `check_derive_trio_consistency` if the trio was touched).
+- [ ] **Step 4: Run test to verify it passes** — Run the schema test, then `autospec validate` (must be fully green, including `check_derive_trio_consistency` if the trio was touched).
 - [ ] **Step 5: Commit**
 
 ```bash

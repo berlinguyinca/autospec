@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 use autospec_core::validation::affected::AffectedSet;
 use autospec_core::validation::{
@@ -28,7 +29,13 @@ fn run_direct(options: &ValidationOptions) -> Result<(), String> {
     let root = std::env::current_dir()
         .map_err(|error| format!("could not determine validation root: {error}"))?;
     let catalog = ValidationCatalog::standard();
-    let plan = ValidationPlan::build(&catalog, options)?;
+    let plan = match options.changed_base.as_deref() {
+        Some(base) => {
+            let changed_paths = changed_paths_from_git(&root, base)?;
+            ValidationPlan::build_with_changed_paths(&catalog, options, changed_paths)?
+        }
+        None => ValidationPlan::build(&catalog, options)?,
+    };
     let report = ValidationRunner::run_plan(&plan, &root);
     let aggregate = report.aggregate()?;
 
@@ -58,6 +65,31 @@ fn run_direct(options: &ValidationOptions) -> Result<(), String> {
         return Err("direct Rust validation failed required checks".to_string());
     }
     Ok(())
+}
+
+fn changed_paths_from_git(root: &std::path::Path, base: &str) -> Result<Vec<String>, String> {
+    for range in [format!("{base}...HEAD"), base.to_string()] {
+        let output = Command::new("git")
+            .args(["diff", "--name-only", &range])
+            .current_dir(root)
+            .output()
+            .map_err(|error| format!("could not read changed files from git: {error}"))?;
+        if !output.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|error| format!("git returned non-UTF-8 changed paths: {error}"))?;
+        return Ok(stdout
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(ToOwned::to_owned)
+            .collect());
+    }
+
+    Err(format!(
+        "autospec validate could not resolve changed paths from git base {base}"
+    ))
 }
 
 fn render_shadow_results(path: &PathBuf, json: bool) -> Result<(), String> {

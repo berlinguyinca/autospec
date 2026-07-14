@@ -189,21 +189,4 @@ grep -q '"running":false' /tmp/autospec-autonomous-status.json || {
     exit 1
 }
 
-FAKE_AUTOSPEC_BIN="$(mktemp -d -t autospec-rust-validate.XXXXXX)"
-cat > "$FAKE_AUTOSPEC_BIN/autospec" <<'FAKE'
-#!/usr/bin/env bash
-set -eu
-printf 'unexpected Rust validation delegation\n' > "$AUTOSPEC_VALIDATE_DELEGATION_LOG"
-FAKE
-chmod +x "$FAKE_AUTOSPEC_BIN/autospec"
-AUTOSPEC_VALIDATE_DELEGATION_LOG="$TEST_HOME/validate-delegation.log" \
-AUTOSPEC_RUST_VALIDATE_BIN="$FAKE_AUTOSPEC_BIN/autospec" \
-bash "$SCRIPT_DIR/scripts/validate.sh" --fast >/tmp/autospec-validate-delegation.out 2>&1
-
-if [ -e "$TEST_HOME/validate-delegation.log" ]; then
-    echo "FAIL: scripts/validate.sh delegated validation to Rust before a direct executor exists"
-    cat /tmp/autospec-validate-delegation.out
-    exit 1
-fi
-
 echo "PASS"

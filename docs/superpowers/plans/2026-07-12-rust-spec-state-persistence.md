@@ -68,7 +68,7 @@
 - [x] Run `cargo test --workspace`.
 - [x] Run `cargo fmt --all --check`.
 - [x] Run `cargo clippy --workspace --all-targets -- -D warnings`.
-- [x] Run `bash scripts/validate.sh --fast`.
+- [x] Run `autospec validate --fast`.
 - [x] Run the full validation script; the unchanged `/usr/bin/bash` fixture assumption fails on this macOS host before bridge execution.
 - [x] Obtain an independent code review, fix verified findings, and repeat the affected checks.
 - [x] Commit with a conventional Lore-format message explaining why queue/resume needs durable validated lifecycle state first.

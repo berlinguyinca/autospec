@@ -20,7 +20,7 @@ RETRY-LOOP:begin MAX_IMPL_RETRIES directive_context Retry attempt
 Implementer hit max retries; manual intervention needed
 auto-implement-active
 
-Full test suite gate AUTOSPEC_FULL_TEST_COMMAND scripts/validate.sh
+Full test suite gate AUTOSPEC_FULL_TEST_COMMAND autospec validate
 If the full suite fails, fix the failure, recommit, rerun the full suite, and repeat
 Do NOT dispatch LGTM review
 Do NOT run `gh pr merge`

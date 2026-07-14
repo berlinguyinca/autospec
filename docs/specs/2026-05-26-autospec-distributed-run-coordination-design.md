@@ -210,5 +210,5 @@ Verification commands:
 ```bash
 bats tests/heartbeat.bats
 bats tests/unit/test_autospec_distributed_coordination.bats
-bash scripts/validate.sh
+autospec validate
 ```

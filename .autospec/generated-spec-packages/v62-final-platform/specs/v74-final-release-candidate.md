@@ -61,7 +61,7 @@ Produce the final release candidate and public launch proof.
 - [ ] `cargo fmt --check` passes.
 - [ ] `cargo clippy --all-targets --all-features` passes.
 - [ ] `cargo test --all` passes.
-- [ ] `bash scripts/validate.sh` passes.
+- [ ] `autospec validate` passes.
 - [ ] `bash scripts/validate-public-launch-readiness.sh` prints `AUTOSPEC_PUBLIC_LAUNCH_READY=true`.
 - [ ] Final handoff includes exact launch command sequence.
 
@@ -71,7 +71,7 @@ Produce the final release candidate and public launch proof.
 cargo fmt --check
 cargo clippy --all-targets --all-features
 cargo test --all
-bash scripts/validate.sh
+autospec validate
 bash scripts/validate-public-launch-readiness.sh
 ```
 

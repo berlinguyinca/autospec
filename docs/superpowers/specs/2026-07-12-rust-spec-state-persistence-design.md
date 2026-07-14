@@ -52,7 +52,7 @@ The store document is schema version 1:
 - A malformed primary file without a valid recovery file fails; it never becomes an empty store.
 - Store validation rejects missing deferred reasons, invalid or duplicate IDs, and unknown/self supersession references.
 - Existing lifecycle transition tests continue to pass.
-- `cargo test --workspace`, `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `bash scripts/validate.sh --fast` pass.
+- `cargo test --workspace`, `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `autospec validate --fast` pass.
 
 ## Non-goals and follow-up
 

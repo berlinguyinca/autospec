@@ -139,7 +139,7 @@ EOF
     rm -f "$TMP/bin/omx"
     ln -sf /usr/bin/dirname "$TMP/bin/dirname"
     # Ensure omx is genuinely unavailable even on developer hosts with /usr/bin/omx or /bin/omx.
-    run env PATH="$TMP/bin" /usr/bin/bash "$BRIDGE" --once
+    run env PATH="$TMP/bin" /bin/bash "$BRIDGE" --once
     [ "$status" -eq 0 ]
     line="$(printf '%s\n' "$output" | grep '"filed"' | tail -1)"
     echo "$line" | jq -e '.dry == true' >/dev/null

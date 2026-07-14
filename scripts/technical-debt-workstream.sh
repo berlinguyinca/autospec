@@ -295,7 +295,7 @@ def advisory_issue(row, priority):
     manifest = row.get("manifest") or row.get("file") or "dependency manifest"
     title = row.get("title") or "dependency advisory"
     active_text = "active exploit" if active else "no active exploit flag"
-    test_cmd = row.get("test_cmd") or "bash scripts/validate.sh"
+    test_cmd = row.get("test_cmd") or "autospec validate"
     return issue_header(f"Patch {cve} in `{pkg}`", "auto-implement, dependency, cve, security") + f"""## Goal
 
 Patch `{pkg}` for `{cve}` in `{manifest}` to the fixed version `{fixed}`.

@@ -463,5 +463,5 @@ Trio edits use `derive-trio.sh --in-place` + `gen-skill-goldens.sh`; never hand-
 ## Primary smoke test
 
 ```bash
-bash scripts/validate.sh
+autospec validate
 ```

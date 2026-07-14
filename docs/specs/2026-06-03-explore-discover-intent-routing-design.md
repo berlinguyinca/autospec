@@ -114,7 +114,7 @@ opt-out and a `gate` field for pre-route checks.
 
 ## Validation
 
-- Extend `check_keyword_routing_section()` in `scripts/validate.sh` (lines
+- Extend `check_keyword_routing_section()` in `autospec validate` (lines
   139-147) to also assert the trio contains the explore→`autospec-explore`
   verb-map row and the `explore-confirm` gate semantics (grep across all three
   trio files).

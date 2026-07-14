@@ -15,7 +15,7 @@ project:
       - 'github-cli'
       - 'multi-harness-skill'
     commands:
-      test: 'bash scripts/validate.sh && bats tests/unit tests/smoke'
+      test: 'autospec validate && bats tests/unit tests/smoke'
       e2e: 'GH_CONFIG_DIR="$(mktemp -d)" E2E=0 AUTOSPEC_RUN_LIVE_COORDINATION_E2E=0 bats tests/e2e'
       deploy: 'true'
   questions:

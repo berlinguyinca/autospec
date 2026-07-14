@@ -13,7 +13,7 @@ AutoSpec has the V25, V60, and V61 launch artifacts in place. Final public launc
 | V25 baseline | Ready | `.autospec/baselines/v25-baseline.json`, `.autospec/releases/v25.md` |
 | V60 release candidate | Ready | `.autospec/releases/v60.md`, `docs/reports/v60-final-report.md` |
 | V61 launch readiness | Ready | `scripts/validate-launch-readiness.sh` |
-| Public launch readiness | Ready | Full `bash scripts/validate.sh` passed in a local checkout on 2026-07-03 |
+| Public launch readiness | Ready | Full `autospec validate` passed in a local checkout on 2026-07-03 |
 
 ## Validation Summary
 
@@ -22,8 +22,8 @@ AutoSpec has the V25, V60, and V61 launch artifacts in place. Final public launc
 - Focused launch Bats: pass.
 - Target-repo setup docs gate: pass.
 - QA artifact schemas: pass with optional artifacts missing.
-- Structural repo validation: `bash scripts/validate.sh --fast` pass.
-- Full repo validation: `bash scripts/validate.sh` pass (local checkout, 2026-07-03 — "OK — all validation checks passed").
+- Structural repo validation: `autospec validate --fast` pass.
+- Full repo validation: `autospec validate` pass (local checkout, 2026-07-03 — "OK — all validation checks passed").
 - Historical QA verdict: stale relative to current HEAD and retained only as historical evidence.
 
 ## Remaining Blockers

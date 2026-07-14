@@ -245,8 +245,8 @@ emit_memory() {
 emit_lockstep() {
   printf '## Lockstep rules\n\n'
   printf 'All SKILL.md edits must be byte-identically mirrored to codex/prompt.md and opencode/agent.md.\n'
-  printf 'Run scripts/validate.sh to confirm lockstep compliance before every push.\n'
-  printf 'Renaming any prose section heading in SKILL.md requires updating scripts/validate.sh named-content checks.\n'
+  printf 'Run autospec validate to confirm lockstep compliance before every push.\n'
+  printf 'Renaming any prose section heading in SKILL.md requires updating the direct Rust validation catalog.\n'
   printf '\n'
 }
 

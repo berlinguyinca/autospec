@@ -1644,7 +1644,7 @@ impl StructuralValidator {
                     "AUTOSPEC_FULL_TEST_COMMAND",
                     "AUTOSPEC_FULL_TEST_COMMAND override",
                 ),
-                ("scripts/validate.sh", "scripts/validate.sh fallback command"),
+                ("autospec validate", "direct Rust validation command"),
                 (
                     "If the full suite fails, fix the failure, recommit, rerun the full suite, and repeat",
                     "fix/recommit/rerun failure loop",

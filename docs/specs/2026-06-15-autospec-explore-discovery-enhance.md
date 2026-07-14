@@ -263,7 +263,7 @@ reference the three new researchers + verify stage are derived from. A
 ### The five discovery tracks (lockstep anchor)
 
 The runbook and this spec describe the **same five discovery tracks**; the
-`check_autospec_explore_discovery_contract` gate in `scripts/validate.sh`
+`check_autospec_explore_discovery_contract` gate in `autospec validate`
 asserts both documents name all five (plus the verify stage and pattern
 synthesis):
 
@@ -320,7 +320,7 @@ synthesis):
       as this spec.
 - [ ] The outcome ledger records per-source refutation rate and down-weights
       high-refutation sources.
-- [ ] `scripts/validate.sh` gains `check_autospec_explore_discovery_contract()`
+- [ ] `autospec validate` gains `check_autospec_explore_discovery_contract()`
       enforcing: three new researchers present + bash-valid; aggregator stages
       present; proposal schema present; trio lockstep on the new sections;
       runbook↔spec track lockstep; new bats suites run green.
@@ -339,7 +339,7 @@ synthesis):
       unchanged.
 - [ ] The trio prose baseline is corrected to **7 universal researchers**
       (the stale "6" is gone) and documents the specialist roster mechanism.
-- [ ] All new bats fixtures pass; `bash scripts/validate.sh` is green.
+- [ ] All new bats fixtures pass; `autospec validate` is green.
 
 ## Decomposition into child issues
 
@@ -383,4 +383,3 @@ carries it forward into the full roster prose.)
 - Auto-filing structural-fix proposals as epics with child issues (v1 files a
   single issue per structural fix).
 ```
-

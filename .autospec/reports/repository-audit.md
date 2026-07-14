@@ -24,4 +24,4 @@ No `Cargo.toml` or `*.rs` files were found in the checkout used for this histori
 ## Current Blockers
 
 - Historical `.autospec/qa-verdict.json` is stale relative to HEAD.
-- Full, non-fast `bash scripts/validate.sh` was previously interrupted; `bash scripts/validate.sh --fast` passed during this pass.
+- Full, non-fast `autospec validate` was previously interrupted; `autospec validate --fast` passed during this pass.

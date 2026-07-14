@@ -78,7 +78,7 @@ Why: the bash-hook advisory is harness-environmental and won't go away; it must 
 - Third launch (with lock-step instructions + explicit anti-wait-for-CI directive): merged #294, #295, #296 cleanly; claimed #297 but exited before implementing. Fourth dispatch of #297 as a direct foreground agent succeeded.
 
 **Two new mitigations to add to every SKILL.md process(ISSUE) dispatch:**
-1. **Lock-step sync instruction.** For any issue touching a SKILL.md file: *"After editing SKILL.md, you MUST also update codex/prompt.md (raw body, no frontmatter) and opencode/agent.md (keep its frontmatter, replace body) to match. Run `bash scripts/validate.sh` to verify before committing."* Without this, Sonnet discovers the lock-step rule mid-work and exits.
+1. **Lock-step sync instruction.** For any issue touching a SKILL.md file: *"After editing SKILL.md, you MUST also update codex/prompt.md (raw body, no frontmatter) and opencode/agent.md (keep its frontmatter, replace body) to match. Run `autospec validate` to verify before committing."* Without this, Sonnet discovers the lock-step rule mid-work and exits.
 2. **Single-issue claim.** Outer-loop monitor must claim ONE issue at a time. Add to monitor prompt: *"Claim only the current ISSUE before dispatching process(). Do NOT pre-claim other issues from the ready set. Re-enter the loop after each process() returns to re-compute the ready set."*
 
 How to apply: all 6 mitigations (#1–#2 new, #1–#4 from prior sessions) should be pre-emptively included in every monitor launch. The lock-step instruction is particularly important for any queue that includes SKILL.md edits.

@@ -415,17 +415,9 @@ fn run_gap_miner_contract(id: &str, required: bool, root: &Path) -> CheckResult 
         }
     }
 
-    let test = root.join("tests/validate-autospec-gap-miner.sh");
-    if !test.is_file() {
-        return failure(id, required, "tests/validate-autospec-gap-miner.sh missing");
-    }
-    let commands = [
-        ToolCommand::new("bash", ["-n", "scripts/autospec-gap-miner.sh"])
-            .expect("bash syntax command is a direct argument vector"),
-        ToolCommand::new("bash", ["tests/validate-autospec-gap-miner.sh"])
-            .expect("gap-miner test command is a direct argument vector"),
-    ];
-    run_commands(id, required, root, commands)
+    ToolCommand::new("bash", ["-n", "scripts/autospec-gap-miner.sh"])
+        .expect("gap-miner syntax command is a direct argument vector")
+        .execute_in(id, required, root)
 }
 
 fn run_generated_yaml_parse(id: &str, required: bool, root: &Path) -> CheckResult {

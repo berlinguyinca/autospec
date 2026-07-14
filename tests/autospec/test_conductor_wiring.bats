@@ -270,7 +270,7 @@ _install_stub() {
     > "$HOME/.autospec/autonomous-operator/test-owner_test-repo/stop.flag"
 
   local run_log="$TEST_TMP/run.log"
-  export AUTOSPEC_RUN_CMD="printf 'lint-implementation.sh 1898 --issue 1886\nscripts/validate.sh\n' >> '$run_log'"
+  export AUTOSPEC_RUN_CMD="printf 'lint-implementation.sh 1898 --issue 1886\nautospec validate\n' >> '$run_log'"
 
   run bash -c "
     . '$LOOP_LIB'
@@ -290,7 +290,7 @@ _install_stub() {
   [ ! -f "$gate_log" ]
   if [ -f "$run_log" ]; then
     ! grep -q 'lint-implementation.sh 1898 --issue 1886' "$run_log"
-    ! grep -q 'scripts/validate.sh' "$run_log"
+    ! grep -q 'autospec validate' "$run_log"
   fi
   grep -q 'state:stopped:operator:stop-flag:cycle-0' "$resilience_log"
 

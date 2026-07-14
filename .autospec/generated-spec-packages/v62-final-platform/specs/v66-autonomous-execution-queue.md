@@ -57,7 +57,7 @@ Add a resumable execution queue for ordered specs.
 
 ```bash
 cargo test --all execution_queue
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 ## Expected Outputs

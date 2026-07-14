@@ -32,5 +32,5 @@ mentally collapse whitespace / trim / lowercase, and if the result is
 exactly `<keyword>`, enter <mode>." Add a one-line "do NOT shell out the
 user's request" warning so future maintainers don't re-introduce the bug.
 The lock-step trio (SKILL.md, codex/prompt.md, opencode/agent.md) must
-receive byte-identical edits — `scripts/validate.sh`'s `check_lockstep`
+receive byte-identical edits — `autospec validate`'s `check_lockstep`
 diffs them and fails on drift.

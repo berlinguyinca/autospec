@@ -18,19 +18,19 @@ Add `.autospec/autospec.yml` schema validation for `constitution` and `baselines
 
 - `docs/specs/2026-06-27-constitution-baseline-integration.md`
 - `.autospec/autospec.yml`
-- `scripts/validate.sh`
+- `autospec validate`
 
 ## Files touched
 
 - `schemas/autospec-state/constitution-baseline.schema.json`
-- `scripts/validate.sh`
+- `autospec validate`
 - `tests/unit/test_constitution_config_schema.bats`
 
 ## Implementation outline
 
 - Add schema fields for `constitution.source` and `baselines.sources`.
 - Reject duplicate `baselines.sources[].id` values.
-- Wire the schema check into `scripts/validate.sh`.
+- Wire the schema check into `autospec validate`.
 
 ## Tests required
 
@@ -294,12 +294,12 @@ Add `autospec-constitution-validate.sh` gate for config, sources, lockfile, and 
 
 - `docs/specs/2026-06-27-constitution-baseline-integration.md`
 - `scripts/autospec-constitution-validate.sh`
-- `scripts/validate.sh`
+- `autospec validate`
 
 ## Files touched
 
 - `scripts/autospec-constitution-validate.sh`
-- `scripts/validate.sh`
+- `autospec validate`
 - `tests/unit/test_constitution_validation.bats`
 
 ## Implementation outline
@@ -448,7 +448,7 @@ Configure this repo to consume locked `autospec-constitution` and `autospec-base
 
 ## Tests required
 
-- `bash scripts/validate.sh`
+- `autospec validate`
 
 ## Acceptance criteria
 
@@ -465,5 +465,5 @@ Depends on issue #9
 ### Primary smoke test (inner loop)
 
 ```bash
-bash scripts/validate.sh
+autospec validate
 ```

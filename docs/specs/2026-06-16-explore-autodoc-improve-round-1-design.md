@@ -133,7 +133,7 @@ Acceptance criteria:
 - Per-audience `llms-full-<audience>.txt` splits (future, once A–E land).
 
 ## Verification
-- `bash scripts/validate.sh` stays green (lockstep trio + goldens regenerated for
+- `autospec validate` stays green (lockstep trio + goldens regenerated for
   any `SKILL.md` prose touched).
 - New unit tests under `skills/autospec-doc/tests/` for each track.
 - A smoke generation against a fixture repo shows all six new section types,

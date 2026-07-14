@@ -57,5 +57,5 @@
 
 - [ ] Document durable queue/resume-model behavior and the still-non-executing CLI boundary.
 - [ ] Run `cargo test --workspace`, `cargo fmt --all --check`, and `cargo clippy --workspace --all-targets -- -D warnings`.
-- [ ] Run `bash scripts/validate.sh --fast` and independently review the diff.
+- [ ] Run `autospec validate --fast` and independently review the diff.
 - [ ] Commit with a conventional Lore-format message before starting agent ingestion or CLI wiring.

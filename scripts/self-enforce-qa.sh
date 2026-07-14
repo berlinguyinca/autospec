@@ -123,19 +123,14 @@ else
   printf 'WARN: lint-implementation.sh not found at %s — skipping lint step\n' "$LINT_SCRIPT" >&2
 fi
 
-# Step 2: validate.sh (lockstep + structural checks)
-VALIDATE_SCRIPT="$REPO_ROOT/scripts/validate.sh"
-if [ -f "$VALIDATE_SCRIPT" ]; then
-  validate_out=""
-  validate_exit=0
-  validate_out=$(bash "$VALIDATE_SCRIPT" 2>&1) || validate_exit=$?
-  if [ "$validate_exit" -ne 0 ]; then
-    BLOCKING=$((BLOCKING + 1))
-    FINDINGS="${FINDINGS}VALIDATE_FAIL:-:-: scripts/validate.sh exited ${validate_exit}
+# Step 2: direct Rust validation (lockstep + structural checks)
+validate_out=""
+validate_exit=0
+validate_out=$(autospec validate 2>&1) || validate_exit=$?
+if [ "$validate_exit" -ne 0 ]; then
+  BLOCKING=$((BLOCKING + 1))
+  FINDINGS="${FINDINGS}VALIDATE_FAIL:-:-: autospec validate exited ${validate_exit}
 "
-  fi
-else
-  printf 'WARN: validate.sh not found at %s — skipping validate step\n' "$VALIDATE_SCRIPT" >&2
 fi
 
 # ── emit summary ──────────────────────────────────────────────────────────────

@@ -24,7 +24,7 @@ Then file the highest-ROI refactor issue:
 bash scripts/technical-debt-workstream.sh propose-refactor-issue \
   --hotspots .autospec/debt/hotspots.jsonl \
   --out .autospec/debt/issues \
-  --test-cmd 'bash scripts/validate.sh'
+  --test-cmd 'autospec validate'
 ```
 
 ## Dead-code removal proposals
@@ -36,7 +36,7 @@ coverage-guided analysis, or `cargo-udeps` into the helper:
 bash scripts/technical-debt-workstream.sh propose-dead-code-removal \
   --symbols .autospec/debt/dead-code.jsonl \
   --out .autospec/debt/issues \
-  --test-cmd 'bash scripts/validate.sh'
+  --test-cmd 'autospec validate'
 ```
 
 Symbols referenced only from `tests/` are treated as dead. The generated issue

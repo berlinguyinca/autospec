@@ -10,7 +10,7 @@ Finish the remaining Rust-runtime consolidation through small, parity-proven cut
 
 ## Context and evidence
 
-This is not a whole-repository language rewrite. `docs/architecture.md` defines Rust as the home for platform primitives while skill and wrapper surfaces remain compatible. The original #1861 workstream issues (#1862 through #1869) are closed, but the epic remains open because `scripts/validate.sh` still delegates to Rust only to re-enter its legacy shell implementation. The completion work must therefore target runtime ownership and observed parity rather than counting `.sh` files.
+This is not a whole-repository language rewrite. `docs/architecture.md` defines Rust as the home for platform primitives while skill and wrapper surfaces remain compatible. The original #1861 workstream issues (#1862 through #1869) are closed, but the epic remains open because `autospec validate` still delegates to Rust only to re-enter its legacy shell implementation. The completion work must therefore target runtime ownership and observed parity rather than counting `.sh` files.
 
 The first migration tranche is present in `crates/autospec-core`: runtime-policy classification, validation affected-path routing, lint fixtures, autonomous auditing, claim leases, and the context-monitor engine. The remaining durable-core backlog is state/queue/evidence persistence, core-backed read-only commands, controlled run/resume execution, agent-result ingestion, and retirement of legacy fallbacks after an observation and shadow period.
 
@@ -55,7 +55,7 @@ Fix the existing `clippy::field-reassign-with-default` failure in the autonomous
 - `autospec runtime audit --root <missing>` fails with a clear error.
 - `docs/cli-reference.md` documents the new audit command and its read-only behavior.
 - `cargo test --workspace`, `cargo fmt --check`, and `cargo clippy --workspace --all-targets -- -D warnings` pass.
-- `bash scripts/validate.sh --fast` passes through the compatibility wrapper.
+- `autospec validate --fast` passes through the compatibility wrapper.
 
 ## Risks and mitigations
 

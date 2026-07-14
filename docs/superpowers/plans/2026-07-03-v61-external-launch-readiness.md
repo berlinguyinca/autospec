@@ -6,7 +6,7 @@
 
 **Architecture:** V61 is a documentation and release-readiness layer over the existing shell-validated repository. It adds public-facing docs, community files, demo assets, launch copy, a deterministic launch-readiness validator, and a final V60 report while preserving existing behavior.
 
-**Tech Stack:** Markdown, Bash, Bats, Mermaid, existing `scripts/validate.sh` validation harness.
+**Tech Stack:** Markdown, Bash, Bats, Mermaid, existing `autospec validate` validation harness.
 
 ## Global Constraints
 
@@ -26,7 +26,7 @@
 - Consumes: Existing validation scripts and test output.
 - Produces: A human-readable V60 state report referenced by launch docs.
 
-- [ ] Run `scripts/validate.sh`.
+- [ ] Run `autospec validate`.
 - [ ] Run focused spec/release gates available in the repo, including QA artifact and release verdict scripts where prerequisites exist.
 - [ ] Record pass/fail status and constraints in `docs/reports/v60-final-report.md`.
 
@@ -109,4 +109,3 @@
 - [ ] Confirm the test fails before the script exists.
 - [ ] Implement the script with deterministic file/content checks.
 - [ ] Run the focused Bats test, then run the full validation suite and the launch validator.
-

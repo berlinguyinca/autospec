@@ -19,8 +19,8 @@ fn runtime_policy_covers_r0_to_r4_variants() {
 }
 
 #[test]
-fn runtime_policy_marks_validation_shell_as_r1() {
-    let verdict = classify_path("scripts/validate.sh");
+fn runtime_policy_marks_stateful_shell_helpers_as_r1() {
+    let verdict = classify_path("scripts/lint-issue.sh");
 
     assert_eq!(verdict.runtime, Runtime::Shell);
     assert_eq!(verdict.class, RuntimeClass::R1);

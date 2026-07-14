@@ -162,7 +162,7 @@ allowlist is enforced in `refine-prompt.sh`.
 prompt → per-round headings with diff blocks → final prompt → handoff record.
 
 A JSON schema lives at `schemas/autospec-refinement.schema.json` and is
-validated by `scripts/validate.sh`.
+validated by `autospec validate`.
 
 ## Error handling
 
@@ -201,7 +201,7 @@ validated by `scripts/validate.sh`.
 - `scripts/refine-prompt.sh` exists, executable, `bash -n` clean.
 - `scripts/refine-render-overview.sh` exists, executable, `bash -n` clean.
 - `schemas/autospec-refinement.schema.json` exists and is JSON-schema valid.
-- `scripts/validate.sh` gains `check_autospec_refine_contract()` enforcing
+- `autospec validate` gains `check_autospec_refine_contract()` enforcing
   lockstep + script presence + schema presence + bats suite.
 - Bats fixtures pass (`tests/refine/test_refine_*.bats`).
 - End-to-end: `bash scripts/refine-prompt.sh "fix login button" --rounds 3
@@ -331,7 +331,7 @@ Aiming for 4 children plus an umbrella, sized per the small-LLM rule.
    Depends on B. Files: 3.
 4. **Issue D — handoff + validate.sh wiring + e2e**: handoff plumbing
    (`--autonomous` / `--interactive` / `--dry-run`) inside `refine-prompt.sh`,
-   `check_autospec_refine_contract()` in `scripts/validate.sh`, and the
+   `check_autospec_refine_contract()` in `autospec validate`, and the
    `tests/refine/test_refine_handoff.bats` suite. Depends on A+B+C. Files: 2.
 5. **Issue E — continuous-iteration mode (`--continue`)**: report-harvest
    logic in `refine-prompt.sh`, canonical `## Next steps` section format

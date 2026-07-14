@@ -289,15 +289,14 @@ fn validate_executes_the_direct_plan_without_a_legacy_shell_handoff() {
     let log = root.join("handoff.log");
     std::fs::create_dir_all(&scripts).expect("scripts directory");
     std::fs::write(
-        scripts.join("validate.sh"),
-        "#!/usr/bin/env bash\nset -eu\nprintf '%s\\n' \"$*\" > \"$AUTOSPEC_VALIDATE_TEST_LOG\"\nprintf '%s\\n' \"$AUTOSPEC_FORCE_LEGACY_SHELL\" >> \"$AUTOSPEC_VALIDATE_TEST_LOG\"\nprintf '%s\\n' \"$AUTOSPEC_VALIDATE_FROM_RUST\" >> \"$AUTOSPEC_VALIDATE_TEST_LOG\"\n",
+        scripts.join("unexpected-handoff.sh"),
+        "#!/usr/bin/env bash\nexit 1\n",
     )
     .expect("validation fixture");
 
     let output = autospec()
         .args(["validate", "--fast", "--json"])
         .current_dir(&root)
-        .env("AUTOSPEC_VALIDATE_FROM_SHELL", "1")
         .env("AUTOSPEC_VALIDATE_TEST_LOG", &log)
         .output()
         .expect("validate command runs");
@@ -311,7 +310,23 @@ fn validate_executes_the_direct_plan_without_a_legacy_shell_handoff() {
     assert!(stdout.contains("\"schema\":2"));
     assert!(stdout.contains("\"results\":["));
     assert!(String::from_utf8_lossy(&output.stderr).contains("direct Rust validation failed"));
-    assert!(!log.exists(), "validate must not execute validate.sh");
+    assert!(!log.exists(), "validate must not execute a shell handoff");
+}
+
+#[test]
+fn validate_rejects_a_scoped_run_when_git_cannot_resolve_its_base() {
+    let output = autospec()
+        .args([
+            "validate",
+            "--fast",
+            "--changed=refs/heads/autospec-missing-validation-base",
+        ])
+        .output()
+        .expect("validate command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("could not resolve changed paths from git base"));
 }
 
 #[test]

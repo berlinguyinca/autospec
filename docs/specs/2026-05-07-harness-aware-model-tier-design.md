@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07  
 **Status:** Draft  
-**Scope:** `skills/autospec/SKILL.md`, `skills/autospec-run/SKILL.md`, `skills/autospec-define/SKILL.md`, `skills/autospec-classify/SKILL.md`, `skills/autospec-review/SKILL.md`, `AGENTS.md`, `scripts/validate.sh`
+**Scope:** `skills/autospec/SKILL.md`, `skills/autospec-run/SKILL.md`, `skills/autospec-define/SKILL.md`, `skills/autospec-classify/SKILL.md`, `skills/autospec-review/SKILL.md`, `AGENTS.md`, `autospec validate`
 
 ---
 
@@ -117,7 +117,7 @@ Call `check_harness_detection_block` from the main validation loop alongside the
 | `skills/autospec-define/SKILL.md` | Add `## Harness detection` block; replace 4 tier briefs |
 | `skills/autospec-classify/SKILL.md` | Add `## Harness detection` block; replace 1 tier brief |
 | `skills/autospec-review/SKILL.md` | Add `## Harness detection` block; replace 1 tier brief |
-| `scripts/validate.sh` | Add `check_harness_detection_block()`; update `check_subagent_model_tier()` to accept both formats |
+| `autospec validate` | Add `check_harness_detection_block()`; update `check_subagent_model_tier()` to accept both formats |
 
 ---
 
@@ -147,7 +147,7 @@ All child issues carry `auto-implement`. Issues are ordered by dependency.
 
 - [ ] Each of the 5 SKILL.md files contains a `## Harness detection` section with `TIER_A`, `TIER_B`, and the fallback rule.
 - [ ] No SKILL.md file contains the legacy string `Claude Code: \`sonnet\`; Codex:` in a `> **Model tier:**` blockquote.
-- [ ] `scripts/validate.sh` run passes with exit 0 against all 5 updated SKILL.md files.
-- [ ] `scripts/validate.sh` run passes with exit 0 against a SKILL.md that still uses the old verbose format (backward-compatible acceptance in `check_subagent_model_tier()`).
+- [ ] `autospec validate` run passes with exit 0 against all 5 updated SKILL.md files.
+- [ ] `autospec validate` run passes with exit 0 against a SKILL.md that still uses the old verbose format (backward-compatible acceptance in `check_subagent_model_tier()`).
 - [ ] AGENTS.md contains a `### Harness detection protocol` subsection under `## Subagent model selection`.
 - [ ] The existing `check_subagent_model_tier()` validation in `validate.sh` still passes (heading-level check unchanged).

@@ -112,7 +112,7 @@ Operator verification for the full local stack should record:
 Run the repository gate after changing the dogfood script or docs:
 
 ```bash
-bash scripts/validate.sh
+autospec validate
 ```
 
 The focused dogfood smoke remains:

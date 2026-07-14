@@ -221,4 +221,4 @@ and correct for this feature; plan review turnaround accordingly.
 - [ ] Roll-up comment posting is idempotent across a simulated crash/resume.
 - [ ] `promote` (trusted actor) merges the roll-up and resets the branch; `discard` closes
       and comments; untrusted `promote` is refused.
-- [ ] All new bats suites pass; `bash scripts/validate.sh` passes.
+- [ ] All new bats suites pass; `autospec validate` passes.

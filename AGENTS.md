@@ -142,7 +142,7 @@ from `main` at most once per 24 hours (fail-open: any network or install error l
 `WARN:` line and continues). Set `AUTOSPEC_NO_SELF_UPDATE=1` to skip. The canonical
 bash block lives in `skills/autospec/SKILL.md` (`## Startup self-update` section) and
 is mirrored byte-identically (modulo `SKILL_NAME=`) across all multi-harness skill trios.
-`scripts/validate.sh` (`check_startup_preflight`) enforces byte-identity.
+`autospec validate` (`check_startup_preflight`) enforces byte-identity.
 
 ## Small-LLM target
 
@@ -252,7 +252,7 @@ tradeoff across the skill family.
 
 Each skill's `## Required capabilities & harness adapter` table carries a
 **Subagent dispatch policy** row pointing back to this matrix; the
-`scripts/validate.sh::check_agents_md_subagent_matrix` gate enforces lockstep
+`autospec validate::check_agents_md_subagent_matrix` gate enforces lockstep
 across every adapter trio.
 
 ## Implementation-quality contract
@@ -363,7 +363,7 @@ appended to the PR body and printed to the monitor log. It is the structured,
 result-first summary the merge-gate and the done-challenge consume as *evidence*.
 Keep it terse: a tight body, long only where a claim genuinely needs it.
 
-Required fields (exact field names are gated by `scripts/validate.sh`):
+Required fields (exact field names are gated by `autospec validate`):
 
 - **Result** — one line, outcome first (what shipped), not a narration of the
   agent's own process. Open with the result, not "I'll" / "Let me".

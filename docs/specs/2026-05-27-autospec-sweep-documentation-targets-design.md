@@ -59,7 +59,7 @@ gap-remediation can file one small issue per missing audience/scope target.
 
 Unit tests cover wizard defaults, schema acceptance, and review output for both
 missing documentation files and missing scope metadata. Standard repo validation
-continues to run `scripts/validate.sh`, the sweep config tests, the sweep runner
+continues to run `autospec validate`, the sweep config tests, the sweep runner
 tests, and schema compilation.
 
 ## Out Of Scope

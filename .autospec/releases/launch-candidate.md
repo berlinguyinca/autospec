@@ -19,7 +19,7 @@ Date: 2026-07-06
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features`
 - `cargo test --all`
-- `bash scripts/validate.sh`
+- `autospec validate`
 - `bats tests/launch/test_launch_readiness.bats`
 - `bash scripts/demo-recording.sh`
 

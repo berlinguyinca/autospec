@@ -34,7 +34,7 @@ None.
 
 ## Implementation Steps
 
-1. Run `bash scripts/validate.sh` in an environment that can create git worktrees.
+1. Run `autospec validate` in an environment that can create git worktrees.
 2. If `tests/autospec-run/test_parallel_dispatch.bats` still fails, fix `scripts/dispatch-implementer.sh`, `scripts/worktree-guard.sh`, or the test fixture.
 3. Regenerate or supersede stale QA verdict evidence so current HEAD is represented.
 4. Change launch candidate and final report gate from false to true only after full validation passes.
@@ -42,7 +42,7 @@ None.
 
 ## Acceptance Criteria
 
-- [ ] `bash scripts/validate.sh` exits 0.
+- [ ] `autospec validate` exits 0.
 - [ ] `bash scripts/validate-public-launch-readiness.sh` prints `AUTOSPEC_PUBLIC_LAUNCH_READY=true`.
 - [ ] Stale QA verdict is not used as current launch evidence.
 - [ ] Handoff file documents any remaining non-blocking warnings.
@@ -50,7 +50,7 @@ None.
 ## Validation Commands
 
 ```bash
-bash scripts/validate.sh
+autospec validate
 bash scripts/validate-public-launch-readiness.sh
 ```
 

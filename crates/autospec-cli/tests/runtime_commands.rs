@@ -10,15 +10,15 @@ fn audit_fixture() -> PathBuf {
 }
 
 #[test]
-fn runtime_commands_json_reports_r1_for_validation_script() {
+fn runtime_commands_json_reports_r1_for_stateful_shell_helpers() {
     let output = autospec()
-        .args(["runtime", "classify", "scripts/validate.sh", "--json"])
+        .args(["runtime", "classify", "scripts/lint-issue.sh", "--json"])
         .output()
         .expect("autospec runtime classify runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    assert!(stdout.contains("\"path\":\"scripts/validate.sh\""));
+    assert!(stdout.contains("\"path\":\"scripts/lint-issue.sh\""));
     assert!(stdout.contains("\"runtime\":\"shell\""));
     assert!(stdout.contains("\"class\":\"R1\""));
     assert!(stdout.contains("\"stateful platform behavior belongs in Rust core\""));
@@ -27,14 +27,14 @@ fn runtime_commands_json_reports_r1_for_validation_script() {
 #[test]
 fn runtime_commands_text_reports_one_line_with_class_and_path() {
     let output = autospec()
-        .args(["runtime", "classify", "scripts/validate.sh"])
+        .args(["runtime", "classify", "scripts/lint-issue.sh"])
         .output()
         .expect("autospec runtime classify runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
     assert_eq!(stdout.lines().count(), 1);
-    assert!(stdout.starts_with("R1 scripts/validate.sh "));
+    assert!(stdout.starts_with("R1 scripts/lint-issue.sh "));
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn runtime_audit_json_groups_platform_files_and_skips_build_output() {
     );
     assert!(stdout.contains("\"command\":\"runtime audit\""));
     assert!(stdout.contains(
-        "\"R1\":[\"scripts/validate.sh\",\"skills/autospec-run/tests/watchdog_claim_timeout.bats\"]"
+        "\"R1\":[\"scripts/lint-issue.sh\",\"skills/autospec-run/tests/watchdog_claim_timeout.bats\"]"
     ));
     assert!(stdout.contains("\"R2\":[\"packages/example/go.mod\"]"));
     assert!(stdout.contains("\"R4\":[\"skills/autospec-fab/scripts/mesh.py\"]"));

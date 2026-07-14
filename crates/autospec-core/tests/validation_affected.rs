@@ -1,10 +1,13 @@
 use autospec_core::validation::affected::AffectedSet;
 
 #[test]
-fn validation_affected_routes_validate_script_to_always_run() {
-    let affected = AffectedSet::from_paths(["scripts/validate.sh"]);
+fn validation_affected_routes_direct_validation_sources_to_always_run() {
+    let affected = AffectedSet::from_paths(["crates/autospec-core/src/validation/plan.rs"]);
 
-    assert_eq!(affected.changed_paths, vec!["scripts/validate.sh"]);
+    assert_eq!(
+        affected.changed_paths,
+        vec!["crates/autospec-core/src/validation/plan.rs"]
+    );
     assert!(affected.includes_check("always-run"));
     assert_eq!(affected.rules.len(), 1);
 }

@@ -58,7 +58,7 @@ Make dangerous behavior visible, gated, and auditable.
 
 ```bash
 cargo test --all safety
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 ## Expected Outputs

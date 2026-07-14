@@ -94,7 +94,7 @@ non-strip transform — capture it as a small declared template, not ad-hoc seds
       `check_block_expansion`'s expander.
 - [ ] `tests/derive-trio.bats` asserts `--check` passes for EVERY existing
       `skills/*/` trio (generator already byte-matches today's mirrors).
-- [ ] `tests/gen-skill-goldens.bats` passes; `bash scripts/validate.sh` green.
+- [ ] `tests/gen-skill-goldens.bats` passes; `autospec validate` green.
 - [ ] NO existing trio file, `validate.sh`, or `autospec-define` is edited in
       Phase 1 (deferred to Phase 2).
 

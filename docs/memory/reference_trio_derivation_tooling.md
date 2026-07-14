@@ -19,7 +19,7 @@ automated — stop hand-copying the mirrors and hand-hashing goldens:
 3. `bash scripts/gen-skill-goldens.sh <name>` — regenerates the
    `tests/fixtures/skill-goldens/<name>.*.sha256` (the `expand-skill-blocks.sh |
    shasum` one-liner, automated).
-4. `scripts/validate.sh` now runs `check_derive_trio_consistency()` — on drift
+4. `autospec validate` now runs `check_derive_trio_consistency()` — on drift
    it fails NAMING the skill + the exact fix command. The transform is exact:
    `--check` passed for all 24 trios with zero divergence at ship time.
 

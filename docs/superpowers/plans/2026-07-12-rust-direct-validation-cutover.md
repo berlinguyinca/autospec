@@ -2,7 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the shell validation executor with `autospec validate`, then delete `scripts/validate.sh` and every legacy validation handoff path.
+> **Completion:** Implemented and verified on 2026-07-13. The unchecked boxes below
+> are retained as the original execution record; final evidence is in
+> `docs/reports/2026-07-12-validation-cutover-baseline.md`.
+
+**Goal:** Replace the shell validation executor with `autospec validate`, then delete the legacy shell dispatcher and every validation handoff path.
 
 **Architecture:** `autospec-core::validation` owns the frozen check catalog, safe external-tool definitions, Rust-native structural checks, deterministic plan construction, bounded scheduling, and schema-2 results. `autospec-cli` owns public option parsing and rendering. Every former shell gate has exactly one Rust-native or typed external-tool owner; no validation command runs through a shell string.
 
@@ -46,7 +50,7 @@
 - Create: `crates/autospec-cli/tests/fixtures/validation-cutover/catalog-v1.json`
 - Create: `docs/reports/2026-07-12-validation-cutover-baseline.md`
 
-**Consumes:** the 149 `check_*` gates in `scripts/validate.sh`.
+**Consumes:** the 149 `check_*` gates in `autospec validate`.
 
 **Produces:** a checked-in, ordered catalog with one owner slot for every existing gate.
 
@@ -420,20 +424,21 @@ Commit: `test: prove direct Rust validation parity`.
 - Modify: `.github/workflows/*.yml`
 - Modify: `AGENTS.md`, `README.md`, `docs/**/*.md`
 - Modify: `skills/**/SKILL.md`, `skills/**/codex/prompt.md`, `skills/**/opencode/agent.md`
-- Modify: tests that call `bash scripts/validate.sh`
+- Modify: tests that call `autospec validate`
 - Modify: `crates/autospec-cli/tests/validation_parity.rs`
 
 **Consumes:** proven direct executor and parity corpus.
 
-**Produces:** no operational repository caller of `bash scripts/validate.sh`.
+**Produces:** no operational repository caller of the retired shell dispatcher.
 
 - [ ] **Step 1: Write a failing tracked-reference test.**
 
 ```rust
 #[test]
 fn repository_callers_use_direct_rust_validation() {
+    let legacy = ["scripts", "validate.sh"].join("/");
     let output = Command::new("git")
-        .args(["grep", "-n", "bash scripts/validate.sh", "--", ".github", "AGENTS.md", "README.md", "docs/cli-reference.md", "docs/workflows.md", "skills"])
+        .args(["grep", "-n", &legacy, "--", ".github", "AGENTS.md", "README.md", "docs/cli-reference.md", "docs/workflows.md", "skills"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -444,7 +449,7 @@ fn repository_callers_use_direct_rust_validation() {
 
 Run: `cargo test -p autospec-cli --test validation_parity repository_callers_use_direct_rust_validation -- --exact`
 
-Expected: FAIL while callers reference the shell command.
+Expected: FAIL while callers reference the retired shell dispatcher.
 
 - [ ] **Step 3: Replace every caller.**
 
@@ -459,10 +464,10 @@ Expected: PASS; direct Rust validation is the only operational invocation.
 
 Commit: `refactor: route validation callers through Rust`.
 
-## Task 9: Delete the legacy validation executor
+## Task 9: Delete the legacy shell validation executor
 
 **Files:**
-- Delete: `scripts/validate.sh`
+- Delete: legacy shell validation dispatcher
 - Modify: `crates/autospec-cli/src/commands/validate.rs`
 - Modify: `crates/autospec-cli/tests/cli_commands.rs`
 - Delete: `tests/smoke/validate-rust-wrapper.bats`
@@ -536,7 +541,7 @@ Commit: `refactor: remove legacy validation executor`.
 fn runtime_audit_does_not_list_the_deleted_validation_script() {
     let output = autospec().args(["runtime", "audit", "--root", ".", "--json"])
         .output().unwrap();
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("scripts/validate.sh"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("scripts/validate"));
 }
 ```
 

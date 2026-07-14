@@ -70,7 +70,7 @@ let output = autospec()
     .expect("runtime audit runs");
 assert!(output.status.success());
 let stdout = String::from_utf8_lossy(&output.stdout);
-assert!(stdout.contains("\\\"R1\\\":[\\\"scripts/validate.sh\\\"]"));
+assert!(stdout.contains("\\\"R1\\\":[\\\"autospec validate\\\"]"));
 assert!(!stdout.contains("target/ignored.rs"));
 ```
 
@@ -143,7 +143,7 @@ Expected: PASS.
 
 **Files:**
 - Modify: `docs/cli-reference.md`
-- Test: `scripts/validate.sh`
+- Test: `autospec validate`
 
 **Interfaces:**
 - Consumes: documented read-only `autospec runtime audit` command.
@@ -157,7 +157,7 @@ Expected: PASS.
 
 - [x] **Step 2: Verify the full repository contract**
 
-Run: `bash scripts/validate.sh --fast`
+Run: `autospec validate --fast`
 
 Expected: `validate: OK -- all validation checks passed.`
 

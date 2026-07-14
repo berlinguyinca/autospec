@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07  
 **Status:** Draft  
-**Scope:** `skills/autospec-run/SKILL.md`, `skills/autospec/SKILL.md` (Phase 4), `scripts/validate.sh`, `tests/`
+**Scope:** `skills/autospec-run/SKILL.md`, `skills/autospec/SKILL.md` (Phase 4), `autospec validate`, `tests/`
 
 ---
 
@@ -130,7 +130,7 @@ Values ≤ 0 or unset default to 3.
 | `skills/autospec-run/opencode/agent.md` | Lock-step sync with SKILL.md body |
 | `skills/autospec/codex/prompt.md` | Lock-step sync with SKILL.md body |
 | `skills/autospec/opencode/agent.md` | Lock-step sync with SKILL.md body |
-| `scripts/validate.sh` | Add `check_monitor_batch_exit()` function + call in per-skill validation loop |
+| `autospec validate` | Add `check_monitor_batch_exit()` function + call in per-skill validation loop |
 | `tests/unit/test_monitor_batch_exit.bats` | New bats test file (see §6) |
 
 ---

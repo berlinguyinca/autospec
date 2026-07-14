@@ -214,16 +214,12 @@ run_ledger() {
     [ "$status" -eq 0 ]
 }
 
-# ── validate.sh gate ─────────────────────────────────────────────────────────
+# ── direct Rust validation owner ─────────────────────────────────────────────
 
-@test "validate.sh: check_reuse_lens_suite function exists in validate.sh" {
-    grep -q 'check_reuse_lens_suite' "$REPO_ROOT/scripts/validate.sh"
-}
-
-@test "validate.sh: check_reuse_lens_suite is called from main()" {
-    # Extract the main() function body and confirm the call is present.
-    awk '/^main\(\)/{f=1} f{print} /^}$/{if(f) exit}' \
-        "$REPO_ROOT/scripts/validate.sh" | grep -q 'check_reuse_lens_suite'
+@test "direct Rust validation registers the reuse-lens suite" {
+    catalog="$REPO_ROOT/crates/autospec-core/src/validation/catalog.rs"
+    grep -q '"check_reuse_lens_suite"' "$catalog"
+    grep -q 'BatsDirectory("tests/reuse-lens")' "$catalog"
 }
 
 # ── wire-in: conductor references interrogation-ledger.sh ────────────────────

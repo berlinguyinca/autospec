@@ -42,10 +42,10 @@ future `/autospec-resume`, `/autospec-sweep`, …) keeps the pattern.
    Just: detect harness, parse args, dispatch helper, print stdout.
 4. **Lock-step trio still applies** — the new skill ships with the trio
    (SKILL.md + opencode/agent.md + codex/prompt.md) byte-identical
-   bodies, validated by `scripts/validate.sh check_lockstep`. No
+   bodies, validated by `autospec validate check_lockstep`. No
    exceptions.
 5. **Validator addition** — every new skill should grow a corresponding
-   `check_required_files` entry in `scripts/validate.sh` so the trio
+   `check_required_files` entry in `autospec validate` so the trio
    scaffold can't silently rot.
 6. **Documentation pattern** — README.md gets a new row in the skill
    table; AGENTS.md gets a `## <Capability> authority` heading

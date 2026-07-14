@@ -8,7 +8,7 @@ Complete the remaining platform work after V61 so AutoSpec is usable, demoable, 
 
 - V25 baseline files exist under `.autospec/baselines/` and `.autospec/releases/`.
 - V60 and V61 reports exist, and the public launch gate currently passes.
-- `bash scripts/validate.sh --fast` and `bash scripts/validate-public-launch-readiness.sh` passed during V61 evidence preparation.
+- `autospec validate --fast` and `bash scripts/validate-public-launch-readiness.sh` passed during V61 evidence preparation.
 - `.autospec/qa-verdict.json` is historical stale evidence, not current launch proof.
 - V62-V73 Rust core, CLI, docs, demo, safety, evidence, and growth surfaces exist in this checkout.
 - V61 docs, demo, community files, and marketing materials remain part of the launch surface.
@@ -49,7 +49,7 @@ Complete the remaining platform work after V61 so AutoSpec is usable, demoable, 
 Every spec must run its own validation command plus:
 
 ```bash
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 Before V74 completion, run:
@@ -58,7 +58,7 @@ Before V74 completion, run:
 cargo fmt --check
 cargo clippy --all-targets --all-features
 cargo test --all
-bash scripts/validate.sh
+autospec validate
 bash scripts/validate-public-launch-readiness.sh
 ```
 

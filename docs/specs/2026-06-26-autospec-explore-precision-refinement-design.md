@@ -153,7 +153,7 @@ noise.
 - `tests/explore/test_explore_researchers.bats` (extend) — source-analysis reads
   full file & emits gap_check; self-leverage ignores `*.md`; quality-resilience
   recognizes native bats assertions & collapses.
-- `bash scripts/validate.sh` green (lockstep trio + goldens + schema checks).
+- `autospec validate` green (lockstep trio + goldens + schema checks).
 
 ### 7. Scope guard (YAGNI)
 

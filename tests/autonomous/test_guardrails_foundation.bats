@@ -61,7 +61,7 @@ teardown() {
     changed="$TMP/changed.txt"
     cat > "$changed" <<'FILES'
 tests/autonomous/test_premerge_gate.bats
-scripts/validate.sh
+crates/autospec-core/src/validation/catalog.rs
 scripts/autonomous-premerge-gate.sh
 FILES
 
@@ -71,7 +71,7 @@ FILES
     printf '%s\n' "$output" | grep -q '^DECISION:block$'
     printf '%s\n' "$output" | grep -q 'immutable_verifier_modified'
     printf '%s\n' "$output" | grep -q 'tests/autonomous/test_premerge_gate.bats'
-    printf '%s\n' "$output" | grep -q 'scripts/validate.sh'
+    printf '%s\n' "$output" | grep -q 'crates/autospec-core/src/validation/catalog.rs'
 }
 
 @test "premerge gate quarantines high-risk fenced blast-radius paths before QA" {

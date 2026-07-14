@@ -14,7 +14,7 @@
 
 | Action | Path | What changes |
 |---|---|---|
-| Modify | `scripts/validate.sh` | Add `check_monitor_batch_exit()` function + call it in main loop |
+| Modify | `autospec validate` | Add `check_monitor_batch_exit()` function + call it in main loop |
 | Create | `tests/unit/test_monitor_batch_exit.bats` | 5 bats tests covering batch-done.json protocol |
 | Modify | `skills/autospec-run/SKILL.md` | Orchestrator relaunch loop + monitor outer loop batch logic |
 | Modify | `skills/autospec-run/codex/prompt.md` | Lock-step sync (body = SKILL.md body stripped of frontmatter) |
@@ -28,19 +28,19 @@
 ## Task 1: Add `check_monitor_batch_exit()` to validate.sh
 
 **Files:**
-- Modify: `scripts/validate.sh`
+- Modify: `autospec validate`
 
 - [ ] **Step 1: Find the insertion point in validate.sh**
 
 Run:
 ```bash
-grep -n "^check_harness_detection_block\|^check_subagent_model_tier\|^main(" scripts/validate.sh | head -10
+grep -n "^check_harness_detection_block\|^check_subagent_model_tier\|^main(" autospec validate | head -10
 ```
 Expected: line numbers for existing check functions and the main call loop.
 
 - [ ] **Step 2: Add the function after `check_harness_detection_block`**
 
-Insert this function in `scripts/validate.sh` immediately after the closing `}` of `check_harness_detection_block`:
+Insert this function in `autospec validate` immediately after the closing `}` of `check_harness_detection_block`:
 
 ```bash
 check_monitor_batch_exit() {
@@ -75,14 +75,14 @@ check_monitor_batch_exit "$skill_dir/SKILL.md"
 - [ ] **Step 4: Verify validate.sh is parseable**
 
 ```bash
-bash -n scripts/validate.sh
+bash -n autospec validate
 ```
 Expected: no output (no syntax errors).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/validate.sh
+git add autospec validate
 git commit -m "feat(validate): add check_monitor_batch_exit() for batch self-termination"
 ```
 
@@ -99,11 +99,11 @@ git commit -m "feat(validate): add check_monitor_batch_exit() for batch self-ter
 cat > tests/unit/test_monitor_batch_exit.bats << 'BATS'
 #!/usr/bin/env bats
 # tests/unit/test_monitor_batch_exit.bats — verify check_monitor_batch_exit()
-# in scripts/validate.sh detects missing/present batch self-termination logic.
+# in autospec validate detects missing/present batch self-termination logic.
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    VALIDATE="$REPO_ROOT/scripts/validate.sh"
+    VALIDATE="$REPO_ROOT/autospec validate"
     SCRATCH="$(mktemp -d)"
     export SCRATCH REPO_ROOT VALIDATE
 
@@ -318,7 +318,7 @@ Replace with:
 - [ ] **Step 6: Verify validate.sh now passes on autospec-run SKILL.md**
 
 ```bash
-bash scripts/validate.sh 2>&1 | grep -E "FAIL|PASS|monitor-batch"
+autospec validate 2>&1 | grep -E "FAIL|PASS|monitor-batch"
 ```
 Expected: `monitor-batch-exit: autospec-run` line (PASS); no FAIL for autospec-run.
 
@@ -366,7 +366,7 @@ awk 'BEGIN{f=0} /^---/{f++; print; if(f==2) exit} f>0{print}' \
 - [ ] **Step 4: Run validate.sh to confirm lock-step passes**
 
 ```bash
-bash scripts/validate.sh 2>&1 | grep -E "lock-step|FAIL"
+autospec validate 2>&1 | grep -E "lock-step|FAIL"
 ```
 Expected: no FAIL; `lock-step: autospec-run` printed.
 
@@ -400,7 +400,7 @@ Apply the same five substitutions from Task 3 at the lines found above.
 - [ ] **Step 2: Verify validate.sh passes for autospec**
 
 ```bash
-bash scripts/validate.sh 2>&1 | grep -E "FAIL|monitor-batch"
+autospec validate 2>&1 | grep -E "FAIL|monitor-batch"
 ```
 Expected: `monitor-batch-exit: autospec` printed; no FAIL.
 
@@ -428,7 +428,7 @@ awk 'BEGIN{f=0} /^---/{f++; print; if(f==2) exit} f>0{print}' \
 - [ ] **Step 5: Validate lock-step for autospec**
 
 ```bash
-bash scripts/validate.sh 2>&1 | grep -E "lock-step|FAIL"
+autospec validate 2>&1 | grep -E "lock-step|FAIL"
 ```
 Expected: `lock-step: autospec` printed; no FAIL.
 
@@ -455,7 +455,7 @@ Expected: all 5 tests PASS.
 - [ ] **Step 2: Run the full validate.sh**
 
 ```bash
-bash scripts/validate.sh
+autospec validate
 ```
 Expected: exit 0; no FAIL lines; `monitor-batch-exit: autospec` and `monitor-batch-exit: autospec-run` both printed.
 

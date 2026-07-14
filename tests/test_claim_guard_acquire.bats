@@ -74,7 +74,7 @@ teardown() {
 
 # ---------------------------------------------------------------------------
 @test "a non-skill path resolves to a path:<glob> claim" {
-    run bash "$GUARD" acquire "scripts/validate.sh"
+    run bash "$GUARD" acquire "autospec validate"
     [ "$status" -eq 0 ]
     # exactly one claim json exists, and its key is path:...
     claim_file="$(ls "${CLAIM_ROOT}"/*.json)"

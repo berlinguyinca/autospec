@@ -36,10 +36,10 @@ one release and provide that exact force-Python escape hatch before any default 
 
 | Fallback | Fixture/shadow proof | Current escape hatch | Removal issue | Delegation result |
 | --- | --- | --- | --- | --- |
-| `scripts/validate.sh` legacy executor | `legacy-fast-passed.json` and `legacy-required-failed.json`; Rust shadow aggregation is covered by `validate_shadow_results_*` CLI tests | `AUTOSPEC_FORCE_LEGACY_SHELL=1` | #1861 remains open | Rust parses and aggregates only captured results; all real validation still re-enters the shell |
+| `autospec validate` legacy executor | `legacy-fast-passed.json` and `legacy-required-failed.json`; Rust shadow aggregation is covered by `validate_shadow_results_*` CLI tests | `direct Rust validation=1` | #1861 remains open | Rust parses and aggregates only captured results; all real validation still re-enters the shell |
 
-For execution-capable options, the current wrapper topology is `bash scripts/validate.sh` →
-`autospec validate` → `bash scripts/validate.sh` with `AUTOSPEC_FORCE_LEGACY_SHELL=1`.
+For execution-capable options, the current wrapper topology is `autospec validate` →
+`autospec validate` → `autospec validate` with `direct Rust validation=1`.
 `--shadow-results` is intentionally exempt from that re-entry: it aggregates a pre-captured file
 without invoking the shell. The execution path deliberately has no direct-Rust baseline yet:
 process count, elapsed time, and output-byte comparisons are **not delegation-ready** until the

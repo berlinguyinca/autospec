@@ -61,7 +61,7 @@ YAML
 }
 
 @test "validate.sh wires the architecture fitness gate and test suite" {
-    grep -q '^check_architecture_fitness_engine()' "$REPO_ROOT/scripts/validate.sh"
-    grep -q 'tests/architecture-fitness/.*\.bats' "$REPO_ROOT/scripts/validate.sh"
-    grep -q 'architecture-fitness.sh run' "$REPO_ROOT/scripts/validate.sh"
+    grep -q '^check_architecture_fitness_engine()' "$REPO_ROOT/autospec validate"
+    grep -q 'tests/architecture-fitness/.*\.bats' "$REPO_ROOT/autospec validate"
+    grep -q 'architecture-fitness.sh run' "$REPO_ROOT/autospec validate"
 }

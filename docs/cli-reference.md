@@ -28,7 +28,7 @@ execute validation, calculate an execution order, or report persisted lifecycle 
 by `crates/autospec-cli/tests/fixtures/validation-results/`: each row supplies a unique name,
 Boolean `required`, and signed `exit_code`. Rust computes the pass/fail aggregate only; it never
 spawns the captured command. The compatibility wrapper still delegates all real validation to
-`scripts/validate.sh` until a full fixture-backed cutover is approved.
+`autospec validate` until a full fixture-backed cutover is approved.
 
 `autospec run` is deliberately a state-management command, not an execution engine. Queue
 creation requires an explicit run ID and one or more spec IDs. Result ingestion requires a

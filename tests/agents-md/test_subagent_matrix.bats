@@ -40,7 +40,7 @@ setup() {
   pushd "$tmp" >/dev/null
   run bash -c '
     set +e
-    source scripts/validate.sh 2>/dev/null
+    source autospec validate 2>/dev/null
     check_agents_md_subagent_matrix
   '
   popd >/dev/null
@@ -57,7 +57,7 @@ setup() {
       grep -q '^## Required capabilities & harness adapter' "$f" || continue
       # Accept EITHER the literal dispatch row OR the harness-adapter-core block
       # marker (the marker is single-sourced and expands to that exact row at
-      # install time). Mirrors scripts/validate.sh check_agents_md_subagent_matrix
+      # install time). Mirrors autospec validate check_agents_md_subagent_matrix
       # so the raw-grep test and the validator agree on what satisfies the gate.
       if grep -q -F '<!-- autospec-block:harness-adapter-core -->' "$f"; then
         continue

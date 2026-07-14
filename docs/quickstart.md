@@ -18,7 +18,7 @@ Optional but useful: `bats`, `ajv`, `yq`, and browser automation tools for deepe
 ```bash
 git clone https://github.com/berlinguyinca/autospec.git
 cd autospec
-bash scripts/validate.sh --fast
+autospec validate --fast
 bash install.sh --skill all --harness all
 ```
 
@@ -72,7 +72,7 @@ For release readiness:
 ## Validate This Repository
 
 ```bash
-bash scripts/validate.sh
+autospec validate
 bash scripts/validate-launch-readiness.sh
 bash scripts/validate-public-launch-readiness.sh
 ```

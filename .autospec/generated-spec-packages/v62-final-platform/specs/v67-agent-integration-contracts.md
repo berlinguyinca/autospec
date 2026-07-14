@@ -57,7 +57,7 @@ Normalize handoff and result handling across Codex, Claude Code, Fable, and gene
 
 ```bash
 cargo test --all agent_contracts
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 ## Expected Outputs

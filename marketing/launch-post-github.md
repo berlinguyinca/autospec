@@ -9,7 +9,7 @@ What to try first:
 ```bash
 git clone https://github.com/berlinguyinca/autospec.git
 cd autospec
-bash scripts/validate.sh --fast
+autospec validate --fast
 bash scripts/demo-recording.sh
 cargo run --quiet --bin autospec -- doctor --json
 ```

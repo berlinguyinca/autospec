@@ -22,7 +22,7 @@ AutoSpec has completed the V61 recovery through V74 final release-candidate slic
 cargo fmt --check
 cargo clippy --all-targets --all-features
 cargo test --all
-bash scripts/validate.sh
+autospec validate
 bash scripts/validate-public-launch-readiness.sh
 ```
 
@@ -33,7 +33,7 @@ bash scripts/validate-public-launch-readiness.sh
 - `cargo test --all`: passed.
 - `bats tests/launch/test_launch_readiness.bats`: passed.
 - `bash scripts/demo-recording.sh`: passed.
-- `bash scripts/validate.sh`: passed with `validate: OK — all validation checks passed.`
+- `autospec validate`: passed with `validate: OK — all validation checks passed.`
 - `bash scripts/validate-public-launch-readiness.sh`: passed with `AUTOSPEC_PUBLIC_LAUNCH_READY=true`.
 
 ## Current Gate

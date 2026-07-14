@@ -19,7 +19,7 @@ fn tool_commands_reject_shell_execution_shapes() {
 
 #[test]
 fn tool_commands_allow_non_executing_shell_flags() {
-    assert!(ToolCommand::new("bash", ["-n", "scripts/validate.sh"]).is_ok());
+    assert!(ToolCommand::new("bash", ["-n", "scripts/lint-issue.sh"]).is_ok());
 }
 
 #[test]
@@ -172,6 +172,28 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
                 | "check_reuse_lens_suite"
         )
     }));
+}
+
+#[test]
+fn scoped_direct_plan_records_git_inputs_without_skipping_fail_safe_global_checks() {
+    let catalog = ValidationCatalog::standard();
+    let options =
+        ValidationOptions::parse(["--changed=HEAD"]).expect("scoped validation options parse");
+    let full = ValidationPlan::build(&catalog, &ValidationOptions::default())
+        .expect("full direct plan builds");
+    let scoped = ValidationPlan::build_with_changed_paths(
+        &catalog,
+        &options,
+        ["skills/autospec-run/SKILL.md"],
+    )
+    .expect("scoped direct plan builds");
+
+    assert_eq!(scoped.changed_base(), Some("HEAD"));
+    assert_eq!(
+        scoped.changed_paths(),
+        &["skills/autospec-run/SKILL.md".to_string()]
+    );
+    assert_eq!(scoped.ids(), full.ids());
 }
 
 #[test]
@@ -345,7 +367,7 @@ fn runner_executes_the_gap_miner_contract_as_a_typed_batch() {
     let report = ValidationRunner::run(&catalog, &validation_fixture("gap-miner"));
 
     assert_eq!(report.results[0].exit_code, Some(0));
-    assert_eq!(report.results[0].spawn_count, 2);
+    assert_eq!(report.results[0].spawn_count, 1);
 }
 
 #[test]

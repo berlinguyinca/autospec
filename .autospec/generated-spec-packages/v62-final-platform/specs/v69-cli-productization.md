@@ -62,7 +62,7 @@ Required commands:
 ```bash
 cargo test --all cli_commands
 cargo run --bin autospec -- --help
-bash scripts/validate.sh --fast
+autospec validate --fast
 ```
 
 ## Expected Outputs

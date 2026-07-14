@@ -833,10 +833,10 @@ Extends the Phase 4 self-heal loop classifier with doc-drift categories:
 `failing_doc_drift`, `missing_doc_scope`, `failing_visual_stale`, `failing_ai_review_stale`,
 `failing_manifest_stale`.
 
-## Validation (`scripts/validate.sh`)
+## Validation (`autospec validate`)
 
 <!-- autospec-doc-scope:
-  src: ["scripts/validate.sh"]
+  src: ["autospec validate"]
   reason: "Operator reference for validate.sh checks"
   mismatch_action: warn
   generated: true
@@ -845,7 +845,7 @@ Extends the Phase 4 self-heal loop classifier with doc-drift categories:
 Repository-wide invariant checker. Run before every PR merge.
 
 ```
-Usage: bash scripts/validate.sh
+Usage: autospec validate
 ```
 
 Exit: 0 = all checks pass, non-zero = first failure with diagnostic.
@@ -948,7 +948,7 @@ Every multi-harness skill ships three trio files:
   frontmatter, body only).
 
 The lock-step rule: **the body of all three files must be byte-identical
-after frontmatter is stripped.** `scripts/validate.sh` enforces this by
+after frontmatter is stripped.** `autospec validate` enforces this by
 diffing `awk '/^---$/{c++; next} c>=2'` (a frontmatter stripper) of
 each pair. Only frontmatter differs across the trio; the body — the
 actual prompt the model sees — is the same string everywhere. This is
@@ -988,7 +988,7 @@ the current top GPT model instead of moving the work back into the main
 session. The orchestrator itself stays at the user's invoked model, and
 the retried subagent must preserve the parent context.
 
-Per-skill counts (validated by `scripts/validate.sh`):
+Per-skill counts (validated by `autospec validate`):
 
 | Skill | Tier-A dispatches | Tier-B dispatches |
 |---|---|---|
@@ -1319,7 +1319,7 @@ beyond the counter file, so it is unit-testable.
 - [ ] With `~/.autospec/explore-on-drain.flag` present and cycles < cap, prints `chain`.
 - [ ] At cap, prints `stop` and does not increment past cap.
 - [ ] `tests/explore-on-drain.bats` passes.
-- [ ] `scripts/validate.sh` passes (trio goldens regenerated).
+- [ ] `autospec validate` passes (trio goldens regenerated).
 
 ---
 

@@ -117,5 +117,5 @@ Acceptance criteria:
 - `bats skills/autospec-shared/tests/unit/autospec-run-status.bats`
 - `bash -n skills/autospec-run/scripts/autospec-run-status.sh`
 - `bash scripts/validate-public-launch-readiness.sh`
-- `bash scripts/validate.sh` before merge because status helpers are installed
+- `autospec validate` before merge because status helpers are installed
   across the autospec runtime.

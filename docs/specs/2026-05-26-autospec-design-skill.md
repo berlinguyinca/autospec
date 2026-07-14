@@ -241,7 +241,7 @@ asserts every expected destination is reported.
 
 ## Lockstep + validate.sh wiring
 
-The following surfaces in `scripts/validate.sh` enumerate skills by name and
+The following surfaces in `autospec validate` enumerate skills by name and
 must include `autospec-design`:
 
 1. Line ~206 — `check_startup_preflight()` loop.

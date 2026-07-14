@@ -858,7 +858,7 @@ git commit -m "feat: growth measurement-adapter normalization seam"
 ### Task 7: Wire the foundation into `validate.sh`
 
 **Files:**
-- Modify: `scripts/validate.sh` (add a `check_growth_shared_contract` function + register it in the run list). If the repo's validation entrypoint differs, locate it via `grep -rl "check_lockstep\|check_derive_trio_consistency" scripts/` and add there.
+- Modify: `autospec validate` (add a `check_growth_shared_contract` function + register it in the run list). If the repo's validation entrypoint differs, locate it via `grep -rl "check_lockstep\|check_derive_trio_consistency" scripts/` and add there.
 - Test: the check itself IS the test (runs the six bats files); no separate bats.
 
 **Interfaces:**
@@ -869,7 +869,7 @@ git commit -m "feat: growth measurement-adapter normalization seam"
 
 Run:
 ```bash
-grep -rn "check_lockstep\|check_derive_trio_consistency\|^run_check\|CHECKS=" scripts/validate.sh | head -30
+grep -rn "check_lockstep\|check_derive_trio_consistency\|^run_check\|CHECKS=" autospec validate | head -30
 ```
 Expected: shows how existing `check_*` functions are declared and invoked (a run list or sequential calls near the bottom). Note the exact idiom.
 
@@ -911,15 +911,15 @@ Add `check_growth_shared_contract` alongside the other check invocations at the 
 
 Run:
 ```bash
-bash -c 'source scripts/validate.sh; check_growth_shared_contract'   # if functions are sourceable
-bash scripts/validate.sh                                              # full run
+bash -c 'source autospec validate; check_growth_shared_contract'   # if functions are sourceable
+autospec validate                                              # full run
 ```
 Expected: `growth-shared contract` section PASSes; overall validation still green.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/validate.sh
+git add autospec validate
 git commit -m "test: wire growth-shared contract into validate.sh"
 ```
 

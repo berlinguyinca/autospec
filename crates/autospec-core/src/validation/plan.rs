@@ -15,11 +15,26 @@ pub struct ValidationPlan {
     checks: Vec<PlannedValidationCheck>,
     fast: bool,
     jobs: Jobs,
+    changed_base: Option<String>,
+    changed_paths: Vec<String>,
 }
 
 impl ValidationPlan {
     pub fn build(catalog: &ValidationCatalog, options: &ValidationOptions) -> Result<Self, String> {
+        Self::build_with_changed_paths(catalog, options, std::iter::empty::<&str>())
+    }
+
+    pub fn build_with_changed_paths(
+        catalog: &ValidationCatalog,
+        options: &ValidationOptions,
+        changed_paths: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Self, String> {
         catalog.validate()?;
+        let changed_paths = changed_paths
+            .into_iter()
+            .map(|path| path.as_ref().replace('\\', "/"))
+            .filter(|path| !path.is_empty())
+            .collect::<Vec<_>>();
         let mut checks = Vec::new();
         for id in catalog.legacy_top_level_calls() {
             let check = catalog
@@ -41,6 +56,8 @@ impl ValidationPlan {
             checks,
             fast: options.fast,
             jobs: options.jobs.clone(),
+            changed_base: options.changed_base.clone(),
+            changed_paths,
         })
     }
 
@@ -56,6 +73,8 @@ impl ValidationPlan {
                 .collect(),
             fast,
             jobs,
+            changed_base: None,
+            changed_paths: Vec::new(),
         }
     }
 
@@ -73,6 +92,14 @@ impl ValidationPlan {
 
     pub fn fast(&self) -> bool {
         self.fast
+    }
+
+    pub fn changed_base(&self) -> Option<&str> {
+        self.changed_base.as_deref()
+    }
+
+    pub fn changed_paths(&self) -> &[String] {
+        &self.changed_paths
     }
 
     pub fn parallelism(&self) -> usize {

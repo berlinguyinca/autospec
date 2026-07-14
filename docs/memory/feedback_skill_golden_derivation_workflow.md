@@ -8,7 +8,7 @@ metadata:
 ---
 
 When adding or editing an autospec multi-harness skill, two coupled gates in
-`scripts/validate.sh` must both pass:
+`autospec validate` must both pass:
 
 1. **Lock-step (raw):** `strip_body(SKILL.md)` (= `awk '/^---$/{c++;next} c>=2'`)
    must byte-equal `codex/prompt.md`, and equal `strip_body(opencode/agent.md)`.

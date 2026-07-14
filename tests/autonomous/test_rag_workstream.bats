@@ -96,9 +96,10 @@ JSON
     [[ "$output" == *"rag design doc validated"* ]]
 }
 
-@test "validate.sh auto-globs the RAG workstream bats suite and required artifacts exist" {
-    grep -q 'tests/autonomous/\*.bats' "$REPO_ROOT/scripts/validate.sh"
-    grep -q 'check_autonomous_phase2_suite' "$REPO_ROOT/scripts/validate.sh"
+@test "direct Rust validation owns the RAG workstream bats suite and required artifacts" {
+    catalog="$REPO_ROOT/crates/autospec-core/src/validation/catalog.rs"
+    grep -q '"check_autonomous_phase2_suite"' "$catalog"
+    grep -q 'BatsDirectory("tests/autonomous")' "$catalog"
     [ -f "$REPO_ROOT/.autospec/rag-workstream/config.json" ]
     [ -x "$REPO_ROOT/scripts/rag-workstream.sh" ]
     [ -f "$REPO_ROOT/docs/runbooks/rag-documentation-database.md" ]
@@ -305,4 +306,3 @@ assert multi["metrics"]["recall_at_k"] > multi["baseline_metrics"]["recall_at_k"
 assert set(multi["results"][:2]) == {"install-target", "configure-target"}, multi
 PY
 }
-

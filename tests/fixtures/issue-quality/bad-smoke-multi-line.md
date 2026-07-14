@@ -5,7 +5,7 @@ Add `scripts/lint-issue.sh` that exits non-zero when an issue body fails the §3
 ## Acceptance criteria
 
 - [ ] `bash scripts/lint-issue.sh tests/fixtures/issue-quality/good.md` exits 0.
-- [ ] `scripts/validate.sh` exits 0.
+- [ ] `autospec validate` exits 0.
 
 ## Verification
 

@@ -226,7 +226,7 @@ rails.
 After changing config or sweep behavior, verify:
 
 ```bash
-bash scripts/validate.sh
+autospec validate
 bats tests/unit/test_autospec_sweep_config.bats
 bats tests/unit/test_autospec_sweep_run.bats
 ajv compile -s schemas/autospec-config.schema.json --spec=draft2020

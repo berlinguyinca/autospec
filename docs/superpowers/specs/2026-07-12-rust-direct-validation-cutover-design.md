@@ -1,15 +1,15 @@
 # Rust Direct Validation Cutover Design
 
 **Date:** 2026-07-12
-**Status:** approved design; implementation pending written-spec review
+**Status:** implemented and verified
 **Supersedes:** the validation-wrapper fallback in
 `docs/specs/2026-07-11-rust-core-runtime-consolidation-design.md`
 
 ## Goal
 
 Make `autospec validate` the sole repository validation entry point by replacing the
-shell-owned validation orchestrator with a Rust-owned executor and deleting
-`scripts/validate.sh` plus all fallback and recursion paths.
+shell-owned validation orchestrator with a Rust-owned executor and deleting the legacy
+shell dispatcher plus all fallback and recursion paths.
 
 ## Scope
 
@@ -26,13 +26,10 @@ telemetry, daemon lifecycle, and session integration.
 
 ## Current state
 
-`scripts/validate.sh` is a 5,419-line executor with 149 named checks. It currently
-owns its legacy shell body directly; the previous recursive Rust-to-shell handoff has
-already been removed. The Rust CLI supports affected-check planning, captured-result
-aggregation, and direct option parsing, while execution-capable options return an
-explicit pending-executor error until the Rust runner is installed. The remaining
-cutover work is to move all 149 gates to direct owners, wire that runner, and delete
-the shell body.
+The retired shell executor was a 5,419-line dispatcher with 149 named checks. The
+Rust CLI now owns option parsing, plan construction, execution, and reporting; every
+reachable gate has a Rust-native or typed external-tool owner. The former dispatcher,
+recursion variables, wrapper tests, and fallback paths have been removed.
 
 The frozen 149-name catalog is a definition audit, not the legacy execution list.
 The shell invokes 133 unique top-level checks in 138 ordered call occurrences (five
@@ -44,9 +41,9 @@ unreachable gate.
 
 ## Decisions
 
-1. `autospec validate` becomes the only supported command. `scripts/validate.sh` is
-   deleted, and all repository documentation, CI, tests, and skill instructions use
-   `autospec validate` instead.
+1. `autospec validate` is the only supported command. The legacy shell dispatcher is
+   deleted, and repository documentation, CI, tests, and skill instructions invoke
+   the direct CLI instead.
 2. The Rust executor implements the public option contract: `--fast` and
    `--no-bats`; `--changed[=<base>]`; `--since <ref>`; `--jobs[=<count>|auto]`; and
    `--json`. Unknown options and missing option values fail non-zero with a clear
@@ -67,13 +64,13 @@ unreachable gate.
    stderr byte count, and stable output digest. The aggregate fails when any required
    check fails.
 6. The Rust executor preserves the current semantic distinction: `--fast` excludes
-   Bats and Python suites but retains structural checks; scoped modes select the
-   existing affected set plus always-run checks; `--jobs` permits only independent
-   checks to run concurrently and reports results in stable check-ID order.
-7. Before deleting the shell implementation, parity fixtures must cover successful
-   and failing full, fast, scoped, and parallel executions, including missing-tool
-   failures. The comparison asserts the selected check IDs/order, required-failure
-   exit status, and per-check result metadata. Timing values are recorded for
+   Bats and Python suites but retains structural checks; scoped modes query Git and
+   conservatively retain all global top-level checks until a narrower owner exists;
+   `--jobs` permits only independent checks to run concurrently and reports results
+   in stable check-ID order.
+7. The parity corpus covers frozen catalog identity plus full, fast, scoped, and
+   parallel direct plans. Core execution tests cover required failure, optional
+   failure, and missing-tool result metadata. Timing values are recorded for
    comparison but do not require byte-identical durations.
 8. The cutover deletes the shell script, the Rust shell handoff, all four recursion
    variables, legacy fixtures, legacy-wrapper tests, and documentation claims that
@@ -100,7 +97,7 @@ platform tools each check intentionally calls.
 
 ## Migration sequence
 
-1. Freeze the current shell behavior in a fixture corpus and check manifest. Capture
+1. Freeze the shell behavior in a fixture corpus and check manifest. Capture
    all named definitions, their top-level/internal/unreachable reachability, every
    public option mode, selected check order, failure mapping, output metadata,
    process count, and elapsed time.
@@ -110,29 +107,28 @@ platform tools each check intentionally calls.
 3. Port every remaining shell-owned check into either a Rust-native implementation or
    a typed external-tool definition. Preserve the check ID and requiredness for each
    current gate; do not silently drop a gate.
-4. Run Rust and shell executors against the fixture corpus until their selected
-   checks, required-failure status, and output metadata agree. Record the measured
-   process/time/output data in a cutover report.
+4. Verify the direct executor against the fixture corpus, including selected checks,
+   required-failure status, and output metadata. Record the measured process/time/
+   output data in a cutover report.
 5. Change all repository callers to `autospec validate`, delete the shell executor and
    handoff code, remove legacy-only tests and environment variables, and make the
-   Rust CLI reject their former flags as unknown environment configuration.
+   direct CLI the only validation path.
 
 ## Acceptance criteria
 
 - `autospec validate --fast`, `--changed`, `--since`, `--jobs`, and `--json` implement
-  the documented option contract without invoking `scripts/validate.sh`.
+  the documented option contract without invoking a shell dispatcher.
 - The validation result document contains check ID, requiredness, exit status, elapsed
   milliseconds, spawn count, stdout/stderr byte counts, and stable output digest for
   every selected check.
-- The fixture corpus proves equal check selection/order and required-failure outcome
-  for legacy and Rust full, fast, scoped, and parallel cases before removal.
+- The fixture corpus proves frozen catalog identity and direct full, fast, scoped, and
+  parallel plan selection, while core execution tests cover failure outcomes.
 - Every one of the 149 frozen validation symbols has a Rust-native or typed
   external-tool owner; the manifest rejects missing or duplicate check IDs, and the
   executable plan contains only the 138 ordered invocations of the 133 unique legacy
   top-level checks.
-- `scripts/validate.sh`, `run_legacy_shell`, `AUTOSPEC_FORCE_LEGACY_SHELL`,
-  `AUTOSPEC_VALIDATE_FROM_SHELL`, `AUTOSPEC_VALIDATE_FROM_RUST`, and
-  `AUTOSPEC_VALIDATE_LEGACY_ACTIVE` no longer exist in tracked source, docs, or tests.
+- The legacy shell dispatcher, recursive handoff, recursion environment variables, and
+  wrapper-only tests no longer exist in tracked source, docs, or tests.
 - Repository CI and documentation invoke `autospec validate` directly.
 - `cargo fmt --all --check`, `cargo test --workspace`, `cargo clippy --workspace
   --all-targets -- -D warnings`, and the Rust direct validation suite pass.

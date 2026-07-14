@@ -71,7 +71,7 @@ baselines:
   overrides:
     validation:
       commands:
-        test: bash scripts/validate.sh
+        test: autospec validate
 ```
 
 ### Source fields

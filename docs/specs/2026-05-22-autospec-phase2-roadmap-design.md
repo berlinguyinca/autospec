@@ -41,7 +41,7 @@ Phases 6, 7, 9, 10 are heavy enough to warrant their own design specs (filed via
 **Fix:** add a duo-mode to `check_lockstep()`: when `opencode/agent.md` is absent but the other two are present, still byte-diff SKILL.md ↔ codex/prompt.md (after frontmatter stripping).
 
 **Implementation outline:**
-- `scripts/validate.sh`: extend `check_lockstep()` with the duo branch
+- `autospec validate`: extend `check_lockstep()` with the duo branch
 - bats coverage: trio-pass, duo-pass, duo-divergence-fail fixtures
 
 **Acceptance:** the divergence that PR #412 review caught manually is now caught by validate.sh.

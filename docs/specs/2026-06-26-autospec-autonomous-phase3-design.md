@@ -257,7 +257,7 @@ if/then/fi; jq `capture()`/`==` not `test()`; no RETURN traps.
 - `tests/persona/test_persona_skill.bats` — ≤50-question cap; resume from
   `next_batch`; calibration-agreement % computed over multiple-choice only; answers
   file shape.
-- `scripts/validate.sh` — new `tests/autonomous/*` auto-globbed; **new
+- `autospec validate` — new `tests/autonomous/*` auto-globbed; **new
   `check_persona_suite` gates `tests/persona/*`**; `/autospec-persona` trio goldens
   regenerated; `check_derive_trio_consistency` passes.
 

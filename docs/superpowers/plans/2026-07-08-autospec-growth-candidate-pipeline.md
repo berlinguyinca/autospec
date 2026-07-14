@@ -548,7 +548,7 @@ git commit -m "feat: fail-closed candidate verify-harness (records refutations)"
 
 **Files:**
 - Create: `tests/unit/growth-candidate-pipeline-integration.bats`
-- Modify: `scripts/validate.sh` (add `check_growth_candidate_pipeline_contract` + register it)
+- Modify: `autospec validate` (add `check_growth_candidate_pipeline_contract` + register it)
 
 **Interfaces:**
 - Consumes: all four scripts from Tasks 1–4 + `growth-ledger.sh`.
@@ -614,7 +614,7 @@ Expected: PASS (Tasks 1–4 already implemented). If it fails, the defect is in 
 
 - [ ] **Step 3: Add the validate.sh check function**
 
-Locate the idiom first: `grep -n "check_growth_shared_contract" scripts/validate.sh`. Add `check_growth_candidate_pipeline_contract` immediately after `check_growth_shared_contract`'s definition, matching its structure exactly:
+Locate the idiom first: `grep -n "check_growth_shared_contract" autospec validate`. Add `check_growth_candidate_pipeline_contract` immediately after `check_growth_shared_contract`'s definition, matching its structure exactly:
 
 ```bash
 check_growth_candidate_pipeline_contract() {
@@ -644,25 +644,25 @@ check_growth_candidate_pipeline_contract() {
 
 - [ ] **Step 4: Register the check in `main`'s run list**
 
-Add `check_growth_candidate_pipeline_contract` on the line immediately after `check_growth_shared_contract` in `main`'s run list (find it: `grep -n "check_growth_shared_contract" scripts/validate.sh` — the occurrence inside the run list, not the function definition).
+Add `check_growth_candidate_pipeline_contract` on the line immediately after `check_growth_shared_contract` in `main`'s run list (find it: `grep -n "check_growth_shared_contract" autospec validate` — the occurrence inside the run list, not the function definition).
 
 - [ ] **Step 5: Verify the check and the full suite**
 
 ```bash
-bash -n scripts/validate.sh
+bash -n autospec validate
 # run the new suites directly to confirm green:
 bats tests/unit/growth-candidate-validate.bats tests/unit/growth-candidate-dedup.bats \
      tests/unit/growth-candidate-rank.bats tests/unit/growth-candidate-verify.bats \
      tests/unit/growth-candidate-pipeline-integration.bats
 # full suite (slow) — run in a clean checkout you are not mutating:
-bash scripts/validate.sh
+autospec validate
 ```
-Expected: new suites all pass; `bash scripts/validate.sh` ends `OK — all validation checks passed`. **Do not switch/delete branches while this background run is in flight** (it corrupts the working tree mid-run).
+Expected: new suites all pass; `autospec validate` ends `OK — all validation checks passed`. **Do not switch/delete branches while this background run is in flight** (it corrupts the working tree mid-run).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tests/unit/growth-candidate-pipeline-integration.bats scripts/validate.sh
+git add tests/unit/growth-candidate-pipeline-integration.bats autospec validate
 git commit -m "test: wire growth candidate-pipeline contract into validate.sh"
 ```
 

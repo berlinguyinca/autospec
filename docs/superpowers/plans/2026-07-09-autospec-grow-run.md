@@ -39,7 +39,7 @@ New files:
 
 Modified files:
 - `skills/autospec-shared/scripts/growth-measure.sh` — add `analytics` + `rank` normalize cases (+ its bats).
-- `scripts/validate.sh` — add `check_grow_run_pipeline_contract` + `check_grow_run_contract`, register in `main`.
+- `autospec validate` — add `check_grow_run_pipeline_contract` + `check_grow_run_contract`, register in `main`.
 - Root installer/uninstaller skill lists (register `autospec-grow-run`).
 
 ---
@@ -775,7 +775,7 @@ Model this skill's structure on `skills/autospec-grow-define/SKILL.md` (same rep
 
 - [ ] **Step 1: Write the failing structural test first**
 
-Add to `scripts/validate.sh` a check (fuller wiring is Task 8; here just the named-content asserts so the skill has a target). Create a temporary check invocation to drive authoring:
+Add to `autospec validate` a check (fuller wiring is Task 8; here just the named-content asserts so the skill has a target). Create a temporary check invocation to drive authoring:
 
 Run (expected FAIL — file absent):
 ```bash
@@ -845,12 +845,12 @@ git commit -m "feat(grow-run): /autospec-grow-run trio skill (R0-R4 orchestratio
 **Files:**
 - Create: `skills/autospec-grow-run/install.sh`, `skills/autospec-grow-run/uninstall.sh`
 - Create: `tests/autospec-grow-run/smoke.bats`
-- Modify: `scripts/validate.sh`
+- Modify: `autospec validate`
 - Modify: root installer/uninstaller skill lists
 
 **Interfaces:**
 - Consumes: Tasks 1–7 outputs.
-- Produces: green `scripts/validate.sh` and a registered, standalone-installable skill.
+- Produces: green `autospec validate` and a registered, standalone-installable skill.
 
 - [ ] **Step 1: Write the install.sh (copy autospec-grow-define/install.sh)**
 
@@ -917,7 +917,7 @@ Expected: PASS (4/4).
 
 - [ ] **Step 5: Wire validate.sh**
 
-In `scripts/validate.sh`, add two functions (model them on `check_grow_define_contract` / `check_growth_candidate_pipeline_contract` already in the file) and register them in `main`'s run list:
+In `autospec validate`, add two functions (model them on `check_grow_define_contract` / `check_growth_candidate_pipeline_contract` already in the file) and register them in `main`'s run list:
 
 ```bash
 check_grow_run_pipeline_contract() {
@@ -958,7 +958,7 @@ Add `autospec-grow-run` to the root `install.sh` / `uninstall.sh` skill-discover
 
 - [ ] **Step 7: Run the full gate**
 
-Run: `scripts/validate.sh`
+Run: `autospec validate`
 Expected: `validate: OK — all validation checks passed.`
 Also verify the root install still passes with a temp HOME:
 ```bash
@@ -969,7 +969,7 @@ Expected: `root-install ok` and, in the output, `pairs OK (0 failed)`.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add scripts/validate.sh skills/autospec-grow-run/install.sh skills/autospec-grow-run/uninstall.sh tests/autospec-grow-run/smoke.bats install.sh uninstall.sh
+git add autospec validate skills/autospec-grow-run/install.sh skills/autospec-grow-run/uninstall.sh tests/autospec-grow-run/smoke.bats install.sh uninstall.sh
 git commit -m "feat(grow-run): validate wiring + smoke test + installer registration"
 ```
 
@@ -993,5 +993,5 @@ git commit -m "feat(grow-run): validate wiring + smoke test + installer registra
 
 - Tasks 1–6 are independent deterministic scripts; Task 7 depends on 1–6 existing; Task 8 depends on all.
 - Reuse, don't duplicate: cadence and FTC disclosure already live in `growth-ethics-precheck.sh` (`--cadence`, `--disclosure`). Do not write new cadence/disclosure scripts.
-- Before Task 8's validate wiring, READ the neighbours of `check_grow_define_contract` in `scripts/validate.sh` and mirror the exact helper names and `main` registration idiom — the snippets above are illustrative, not verbatim guarantees of the file's local API.
+- Before Task 8's validate wiring, READ the neighbours of `check_grow_define_contract` in `autospec validate` and mirror the exact helper names and `main` registration idiom — the snippets above are illustrative, not verbatim guarantees of the file's local API.
 - Any touch to `SKILL.md` after Task 7 requires re-running `derive-trio.sh --in-place` + `gen-skill-goldens.sh` in the same task (validate fails closed otherwise).

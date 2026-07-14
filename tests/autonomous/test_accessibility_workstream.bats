@@ -88,7 +88,9 @@ JSONL
     [ "$status" -eq 0 ]
     [[ "$output" == *"accessibility design doc validated"* ]]
 
-    grep -q 'tests/autonomous/\*.bats' "$REPO_ROOT/scripts/validate.sh"
+    catalog="$REPO_ROOT/crates/autospec-core/src/validation/catalog.rs"
+    grep -q '"check_autonomous_phase2_suite"' "$catalog"
+    grep -q 'BatsDirectory("tests/autonomous")' "$catalog"
     [ -f "$REPO_ROOT/tests/autonomous/test_accessibility_workstream.bats" ]
     [ -f "$REPO_ROOT/.github/workflows/accessibility-workstream.yml" ]
     grep -q 'privacy/cookie UX' "$REPO_ROOT/docs/runbooks/accessibility-workstream.md"

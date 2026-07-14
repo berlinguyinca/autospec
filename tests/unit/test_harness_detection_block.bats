@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # tests/unit/test_harness_detection_block.bats — exercise check_harness_detection_block()
-# and the updated check_subagent_model_tier() in scripts/validate.sh.
+# and the updated check_subagent_model_tier() in autospec validate.
 #
 # Four cases per issue #293:
 #   1. Old verbose tier brief format passes check_subagent_model_tier
@@ -10,7 +10,7 @@
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    VALIDATE="$REPO_ROOT/scripts/validate.sh"
+    VALIDATE="$REPO_ROOT/autospec validate"
     SCRATCH="$(mktemp -d)"
     export SCRATCH REPO_ROOT VALIDATE
 

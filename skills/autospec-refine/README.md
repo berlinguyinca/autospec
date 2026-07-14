@@ -69,7 +69,7 @@ Four registered lenses, applied in order one per round:
 - `.autospec/refinements/<slug>-<ts>.json` — structured per-round record.
 - `.autospec/refinements/<slug>-<ts>.md` — human-readable report.
 - `schemas/autospec-refinement.schema.json` — schema validated by
-  `scripts/validate.sh`.
+  `autospec validate`.
 
 For continuous mode:
 

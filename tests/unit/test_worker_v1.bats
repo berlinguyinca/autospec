@@ -86,7 +86,7 @@ autonomy:
 project:
   findings:
     commands:
-      test: "bash scripts/validate.sh"
+      test: "autospec validate"
 YAML
 }
 

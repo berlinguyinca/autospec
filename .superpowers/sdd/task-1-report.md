@@ -3,7 +3,7 @@
 ## Status
 
 Complete. The cutover baseline has a checked-in ordered catalog for all 148 named
-`check_*` gates in `scripts/validate.sh`.
+`check_*` gates in `autospec validate`.
 
 ## Commit
 
@@ -25,7 +25,7 @@ Complete. The cutover baseline has a checked-in ordered catalog for all 148 name
 ## Scope and concerns
 
 Only the Task 1 module export, catalog model, catalog test, frozen fixture, and
-baseline report were changed. The catalog preserves `scripts/validate.sh`
+baseline report were changed. The catalog preserves `autospec validate`
 declaration order because it is the only complete order across all named gates.
 The current shell executor also has dynamic per-skill discovery; this task deliberately
 does not plan or execute that behavior. Catalog slots are non-executable placeholders

@@ -65,7 +65,3 @@ setup() {
     [ "$gate_line" -lt "$merge_line" ]
   done
 }
-
-@test "repository validate.sh registers the final quality gate suite" {
-  grep -q 'tests/unit/test_final_quality_gate.bats' "$REPO_ROOT/scripts/validate.sh"
-}

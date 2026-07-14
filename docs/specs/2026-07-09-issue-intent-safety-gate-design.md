@@ -226,7 +226,7 @@ Required fixtures:
 
 Required validation updates:
 
-- `scripts/validate.sh` runs the new safety linter tests.
+- `autospec validate` runs the new safety linter tests.
 - `schemas/autospec-config.schema.json` accepts `safety.issue_intent_gate`.
 - Lock-step skill bodies are updated for `autospec`, `autospec-define`,
   `autospec-classify`, and `autospec-run`.

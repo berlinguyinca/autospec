@@ -14,7 +14,7 @@
 - **Fail-closed everywhere:** any pipeline error, codex-absent/error, validate-fail, or gh-failure must NEVER cause a promotion and must NEVER count a sample as `clean`. When in doubt: hold for human / leave unresolved.
 - **`clean` is provably positive only:** closed-as-completed + ≥1 merged closing PR + no `escalate:human` + no `groom:rejected`. Everything else resolved → its non-clean outcome; never-closed → `unresolved` (outcome stays null, uncounted).
 - **No DB/external mocks:** codex via `AUTOSPEC_GROOM_FILL_BIN`, gh via a `AUTOSPEC_GH_BIN`-style stub or PATH shim, sub-scripts via their existing `AUTOSPEC_*_SCRIPT`/`_BIN` seams.
-- **validate gates by explicit name:** every new `.bats` suite MUST be registered in `check_grooming_contract` in `scripts/validate.sh`, ordered before `check_ship_completeness`. A suite that isn't registered never runs in validate.
+- **validate gates by explicit name:** every new `.bats` suite MUST be registered in `check_grooming_contract` in `autospec validate`, ordered before `check_ship_completeness`. A suite that isn't registered never runs in validate.
 - **Atomic writes:** telemetry/state rewrites use `tmp` + `mv` (never in-place edit under a concurrent reader).
 - **Reused v1 interfaces (verbatim):**
   - `groom-validate.sh <body-file>` → rc0 `{"ok":true}`, rc1 `{"ok":false,"findings":[...]}`. Override linter via `AUTOSPEC_LINT_ISSUE_BIN`.
@@ -318,9 +318,9 @@ fail "attempts-exhausted"
 
 - [ ] **Step 4: Run to verify pass** — `bats tests/autospec/groom-fill.bats` → all pass.
 
-- [ ] **Step 5: Register in validate** — add `tests/autospec/groom-fill.bats` to `check_grooming_contract` in `scripts/validate.sh` (mirror the existing per-suite `"tests/autospec/…"` lines, and bump the "seven grooming bats suites" wording). Run `bash scripts/validate.sh 2>&1 | grep -i groom-fill` to confirm it appears in the run.
+- [ ] **Step 5: Register in validate** — add `tests/autospec/groom-fill.bats` to `check_grooming_contract` in `autospec validate` (mirror the existing per-suite `"tests/autospec/…"` lines, and bump the "seven grooming bats suites" wording). Run `autospec validate 2>&1 | grep -i groom-fill` to confirm it appears in the run.
 
-- [ ] **Step 6: Commit** — `git add scripts/groom-fill.sh tests/autospec/groom-fill.bats scripts/validate.sh && git commit -m "feat(grooming): groom-fill.sh — codex exec template-fill + adaptive retry"`
+- [ ] **Step 6: Commit** — `git add scripts/groom-fill.sh tests/autospec/groom-fill.bats autospec validate && git commit -m "feat(grooming): groom-fill.sh — codex exec template-fill + adaptive retry"`
 
 ---
 
@@ -515,9 +515,9 @@ exit 0
 
 - [ ] **Step 4: Run to verify pass** — `bats tests/autospec/groom-reconcile.bats` → all pass.
 
-- [ ] **Step 5: Register in validate** — add `tests/autospec/groom-reconcile.bats` to `check_grooming_contract`. Confirm via `bash scripts/validate.sh 2>&1 | grep -i groom-reconcile`.
+- [ ] **Step 5: Register in validate** — add `tests/autospec/groom-reconcile.bats` to `check_grooming_contract`. Confirm via `autospec validate 2>&1 | grep -i groom-reconcile`.
 
-- [ ] **Step 6: Commit** — `git add scripts/groom-reconcile.sh tests/autospec/groom-reconcile.bats scripts/validate.sh && git commit -m "feat(grooming): groom-reconcile.sh — stamp real outcomes from gh (fail-closed)"`
+- [ ] **Step 6: Commit** — `git add scripts/groom-reconcile.sh tests/autospec/groom-reconcile.bats autospec validate && git commit -m "feat(grooming): groom-reconcile.sh — stamp real outcomes from gh (fail-closed)"`
 
 ---
 
@@ -812,16 +812,16 @@ Update the block's explanatory comment: it no longer says outcomes are "enriched
 
 - [ ] **Step 6: Run to verify pass** — `bats tests/autospec/test_loop_grooming.bats` → all pass.
 
-- [ ] **Step 7: Register in validate** — add `tests/autospec/test_loop_grooming.bats` to `check_grooming_contract`. Confirm via `bash scripts/validate.sh 2>&1 | grep -i test_loop_grooming`.
+- [ ] **Step 7: Register in validate** — add `tests/autospec/test_loop_grooming.bats` to `check_grooming_contract`. Confirm via `autospec validate 2>&1 | grep -i test_loop_grooming`.
 
-- [ ] **Step 8: Commit** — `git add scripts/lib/autospec-loop.sh tests/autospec/test_loop_grooming.bats scripts/validate.sh && git commit -m "feat(grooming): loop reconcile pass + template-groom telemetry + canary_floor gate"`
+- [ ] **Step 8: Commit** — `git add scripts/lib/autospec-loop.sh tests/autospec/test_loop_grooming.bats autospec validate && git commit -m "feat(grooming): loop reconcile pass + template-groom telemetry + canary_floor gate"`
 
 ---
 
 ### Task 7: End-to-end grooming contract + docs
 
 **Files:**
-- Modify: `scripts/validate.sh` (`check_grooming_contract` — confirm all suites registered, ordered before `check_ship_completeness`)
+- Modify: `autospec validate` (`check_grooming_contract` — confirm all suites registered, ordered before `check_ship_completeness`)
 - Modify: any `docs/` grooming reference if v1 added one (describe the canary→auto lifecycle + `groom:proposed`/`groom:rejected` human signals)
 - Test: run the full grooming contract inside validate
 
@@ -829,7 +829,7 @@ Update the block's explanatory comment: it no longer says outcomes are "enriched
 
 - [ ] **Step 2: Verify ordering** — confirm `check_grooming_contract` is invoked BEFORE `check_ship_completeness` in validate's main sequence (fail() exits, so a later check never runs).
 
-- [ ] **Step 3: Run the grooming contract** — `bash scripts/validate.sh 2>&1 | tee /tmp/val.log`; confirm every grooming suite prints a "running:" line and passes. Parse validate's OWN final status line (a backgrounded run's wrapper exit masks the real result).
+- [ ] **Step 3: Run the grooming contract** — `autospec validate 2>&1 | tee /tmp/val.log`; confirm every grooming suite prints a "running:" line and passes. Parse validate's OWN final status line (a backgrounded run's wrapper exit masks the real result).
 
 - [ ] **Step 4: Update docs** — if v1 shipped a grooming reference doc, add the canary lifecycle: seed→`groom:proposed`→(human adds `auto-implement` | `groom:rejected`)→reconcile→graduation. Note `canary_floor` and the retract-to-canary failure mode.
 

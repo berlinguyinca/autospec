@@ -16,7 +16,7 @@ bash scripts/validate-public-launch-readiness.sh
 cargo fmt --check
 cargo clippy --all-targets --all-features
 cargo test --all
-bash scripts/validate.sh
+autospec validate
 ```
 
 ## Notes For Gert

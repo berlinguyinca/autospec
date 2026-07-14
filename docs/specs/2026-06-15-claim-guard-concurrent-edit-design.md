@@ -198,7 +198,7 @@ bash scripts/claim-guard.sh release $TARGETS
       given targets.
 - [ ] autospec-run Phase 4 acquires/releases claims around its edit step,
       refreshing on the existing heartbeat tick, nested inside the issue claim.
-- [ ] `scripts/validate.sh` gains `check_claim_guard_contract()` (script present
+- [ ] `autospec validate` gains `check_claim_guard_contract()` (script present
       + bash-valid + bats suite green); all bats fixtures pass.
 
 ## Decomposition into child issues
