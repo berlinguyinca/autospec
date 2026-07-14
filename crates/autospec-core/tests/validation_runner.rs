@@ -1278,6 +1278,31 @@ fn runner_checks_resume_contract_components_with_typed_batches() {
 }
 
 #[test]
+fn runner_checks_prompt_contracts_with_captured_typed_output() {
+    for (id, owner) in [
+        (
+            "check_implementer_contract",
+            ExternalCheck::ImplementerContract,
+        ),
+        ("check_reviewer_contract", ExternalCheck::ReviewerContract),
+    ] {
+        let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+            id,
+            required: true,
+            independent: false,
+            modes: CheckModes::CatalogSlot,
+            reachability: CheckReachability::TopLevel,
+            owner: CheckOwner::ExternalBatch(owner),
+        }]);
+
+        let report = ValidationRunner::run(&catalog, &validation_fixture("prompt-contracts"));
+
+        assert_eq!(report.results[0].exit_code, Some(0), "{id}");
+        assert_eq!(report.results[0].spawn_count, 1, "{id}");
+    }
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

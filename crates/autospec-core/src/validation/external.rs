@@ -68,6 +68,8 @@ pub enum ExternalCheck {
     AutospecResumeStructure,
     AutospecSupervisorStructure,
     AutospecResumeContract,
+    ImplementerContract,
+    ReviewerContract,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -177,6 +179,8 @@ impl ExternalCheck {
                 run_autospec_supervisor_structure(id, required, root)
             }
             Self::AutospecResumeContract => run_autospec_resume_contract(id, required, root),
+            Self::ImplementerContract => run_implementer_contract(id, required, root),
+            Self::ReviewerContract => run_reviewer_contract(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -3755,6 +3759,235 @@ fn run_autospec_resume_contract(id: &str, required: bool, root: &Path) -> CheckR
     }
     let bats = run_matching_bats_suites_if_available(id, required, root, "tests/resume", "");
     aggregate(id, required, vec![structure, supervisor, validate, bats])
+}
+
+fn run_implementer_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const CONTRACT: &str = "skills/autospec-run/prompts/implementer-contract.md";
+    const BUNDLER: &str = "skills/autospec-shared/scripts/bundle-static-context.sh";
+    let contract = root.join(CONTRACT);
+    let rule_ids = match prompt_contract_rule_ids(id, required, root, &contract) {
+        Ok(rule_ids) => rule_ids,
+        Err(result) => return result,
+    };
+    let bundler = root.join(BUNDLER);
+    for token in ["implementer-contract.md", "IMPLEMENTER_CONTRACT"] {
+        if !contains(&bundler, token) {
+            return failure(id, required, &format!("{BUNDLER}: missing {token}"));
+        }
+    }
+    let captured = bundled_prompt(id, required, root, "implementer");
+    if captured.result.is_failure() {
+        return captured.result;
+    }
+    if contains_bytes(&captured.stdout, b"SKILL.md (implementer role)") {
+        return captured_failure(
+            captured.result,
+            &captured.stdout,
+            "bundler: implementer output still injects the SKILL.md prefix",
+        );
+    }
+    if rule_ids.is_empty() {
+        return captured_failure(
+            captured.result,
+            &captured.stdout,
+            "AGENTS.md: RULE_ID table yielded no RULE_IDs",
+        );
+    }
+    captured.result
+}
+
+fn run_reviewer_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const CONTRACT: &str = "skills/autospec-run/prompts/reviewer-contract.md";
+    const BUNDLER: &str = "skills/autospec-shared/scripts/bundle-static-context.sh";
+    let contract = root.join(CONTRACT);
+    if let Err(result) = prompt_contract_rule_ids(id, required, root, &contract) {
+        return result;
+    }
+    let bundler = root.join(BUNDLER);
+    if !contains(&bundler, "REVIEWER_CONTRACT") {
+        return failure(
+            id,
+            required,
+            "bundler: missing REVIEWER_CONTRACT injection variable",
+        );
+    }
+    let captured = bundled_prompt(id, required, root, "reviewer");
+    if captured.result.is_failure() {
+        return captured.result;
+    }
+    if contains_bytes(&captured.stdout, b"SKILL.md (reviewer role)") {
+        return captured_failure(
+            captured.result,
+            &captured.stdout,
+            "bundler: reviewer output still injects the SKILL.md prefix",
+        );
+    }
+    let output = String::from_utf8_lossy(&captured.stdout);
+    if output
+        .lines()
+        .filter(|line| line.starts_with("### RULE_ID table"))
+        .count()
+        != 1
+    {
+        return captured_failure(
+            captured.result,
+            &captured.stdout,
+            "bundler: reviewer output must contain exactly one RULE_ID table",
+        );
+    }
+    for rule_id in [
+        "HALLUCINATED_API",
+        "DUPLICATE_CODE",
+        "STRING_MATCH_DOMAIN_LOGIC",
+        "REPEATED_STRUCTURE_AS_CODE",
+        "DOC_OUT_OF_SYNC",
+        "INVENTED_CONFIG",
+    ] {
+        if !output.contains(rule_id) {
+            return captured_failure(
+                captured.result,
+                &captured.stdout,
+                &format!("bundler: reviewer output missing {rule_id}"),
+            );
+        }
+    }
+    captured.result
+}
+
+fn prompt_contract_rule_ids(
+    id: &str,
+    required: bool,
+    root: &Path,
+    contract: &Path,
+) -> Result<Vec<String>, CheckResult> {
+    if !contract.is_file() {
+        return Err(failure(
+            id,
+            required,
+            &format!("{}: file missing", relative_path(root, contract)),
+        ));
+    }
+    let content = match fs::read_to_string(contract) {
+        Ok(content) => content,
+        Err(_) => {
+            return Err(failure(
+                id,
+                required,
+                &format!("{}: unreadable", relative_path(root, contract)),
+            ))
+        }
+    };
+    if content.len() > 24_576 {
+        return Err(failure(
+            id,
+            required,
+            &format!("{}: exceeds 24KB budget", relative_path(root, contract)),
+        ));
+    }
+    if content
+        .lines()
+        .filter(|line| line.starts_with("### RULE_ID table"))
+        .count()
+        != 1
+    {
+        return Err(failure(
+            id,
+            required,
+            &format!(
+                "{}: expected exactly one RULE_ID table header",
+                relative_path(root, contract)
+            ),
+        ));
+    }
+    let agents = root.join("AGENTS.md");
+    let rule_ids = rule_ids_from_agents(&agents);
+    if rule_ids.is_empty() {
+        return Err(failure(
+            id,
+            required,
+            "AGENTS.md: RULE_ID table yielded no RULE_IDs",
+        ));
+    }
+    for rule_id in &rule_ids {
+        if !content.contains(rule_id) {
+            return Err(failure(
+                id,
+                required,
+                &format!(
+                    "{}: RULE_ID {rule_id} missing from contract",
+                    relative_path(root, contract)
+                ),
+            ));
+        }
+    }
+    Ok(rule_ids)
+}
+
+fn rule_ids_from_agents(path: &Path) -> Vec<String> {
+    let Ok(content) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut in_table = false;
+    let mut rule_ids = Vec::new();
+    for line in content.lines() {
+        if line.starts_with("### RULE_ID table") {
+            in_table = true;
+            continue;
+        }
+        if in_table && (line.starts_with("### ") || line.starts_with("## ")) {
+            break;
+        }
+        if in_table && line.starts_with("| `") {
+            if let Some(rule_id) = line[3..].split('`').next() {
+                if !rule_id.is_empty()
+                    && rule_id
+                        .chars()
+                        .all(|character| character.is_ascii_uppercase() || character == '_')
+                {
+                    rule_ids.push(rule_id.to_string());
+                }
+            }
+        }
+    }
+    rule_ids.sort();
+    rule_ids.dedup();
+    rule_ids
+}
+
+fn bundled_prompt(
+    id: &str,
+    required: bool,
+    root: &Path,
+    role: &str,
+) -> super::command::CapturedCheckResult {
+    ToolCommand::new(
+        "bash",
+        [
+            "skills/autospec-shared/scripts/bundle-static-context.sh",
+            "--role",
+            role,
+            "--issue-labels",
+            "ctx:120k",
+        ],
+    )
+    .expect("bundler invocation uses a direct Bash argument vector")
+    .with_env("AUTOSPEC_REPO_ROOT", root.as_os_str())
+    .with_env("AUTOSPEC_MEMORY_DIR", "/nonexistent-memory-dir")
+    .with_env("AUTOSPEC_MANIFEST", "/nonexistent-manifest.yml")
+    .execute_in_capturing(id, required, root)
+}
+
+fn captured_failure(mut result: CheckResult, stdout: &[u8], message: &str) -> CheckResult {
+    result.exit_code = Some(1);
+    result.stderr_bytes += message.len();
+    result.output_digest = output_digest(stdout, message.as_bytes());
+    result
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 fn run_optional_jsonschema_checks(

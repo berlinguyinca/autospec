@@ -285,6 +285,10 @@ impl ValidationCheck {
             "check_autospec_resume_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecResumeContract)
             }
+            "check_implementer_contract" => {
+                CheckOwner::ExternalBatch(ExternalCheck::ImplementerContract)
+            }
+            "check_reviewer_contract" => CheckOwner::ExternalBatch(ExternalCheck::ReviewerContract),
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }
