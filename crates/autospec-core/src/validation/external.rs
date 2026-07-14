@@ -42,6 +42,7 @@ pub enum ExternalCheck {
     AutospecExploreOrchestrator,
     AutospecExploreDiscovery,
     AutospecQaContract,
+    QaDeployContract,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -117,6 +118,7 @@ impl ExternalCheck {
             }
             Self::AutospecExploreDiscovery => run_autospec_explore_discovery(id, required, root),
             Self::AutospecQaContract => run_autospec_qa_contract(id, required, root),
+            Self::QaDeployContract => run_qa_deploy_contract(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2119,6 +2121,96 @@ fn run_autospec_qa_contract(id: &str, required: bool, root: &Path) -> CheckResul
     }
 
     run_required_bash_scripts(id, required, root, &[(VALIDATOR, true)])
+}
+
+fn run_qa_deploy_contract(id: &str, required: bool, root: &Path) -> CheckResult {
+    const TRIO: &[&str] = &[
+        "skills/autospec-qa/SKILL.md",
+        "skills/autospec-qa/codex/prompt.md",
+        "skills/autospec-qa/opencode/agent.md",
+    ];
+    const RUNNER: &str = "scripts/qa-deploy-runner.sh";
+    const SCHEMA: &str = "schemas/autospec-qa-deploy.schema.json";
+    const SUITE: &str = "tests/qa/test_qa_deploy.bats";
+
+    for trio in TRIO {
+        let path = root.join(trio);
+        if !path.is_file() {
+            return failure(id, required, &format!("{trio}: required trio file missing"));
+        }
+        if !has_heading_prefix(&path, "## Deployment contract") {
+            return failure(
+                id,
+                required,
+                &format!("{trio}: missing '## Deployment contract' section"),
+            );
+        }
+        for anchor in [
+            ".autospec/qa-deploy.yml",
+            "qa-deploy-runner.sh",
+            "before any cluster",
+            "qa_deploy_forbidden_target",
+            "qa_deploy_prod_pattern",
+            "qa_deploy_missing_records_cap",
+            "code_health:qa_deploy_failed",
+            "code_health:qa_deploy_invalid_contract",
+            "deploy:",
+            "head_sha_deployed",
+            "--skip-teardown",
+            "byte-for-byte today",
+        ] {
+            if !contains(&path, anchor) {
+                return failure(
+                    id,
+                    required,
+                    &format!("{trio}: deployment contract missing required anchor: {anchor}"),
+                );
+            }
+        }
+    }
+
+    let runner = run_required_bash_scripts(id, required, root, &[(RUNNER, true)]);
+    if runner.is_failure() {
+        return runner;
+    }
+    if !root.join(SCHEMA).is_file() {
+        return aggregate(
+            id,
+            required,
+            vec![
+                runner,
+                failure(
+                    id,
+                    required,
+                    "schemas/autospec-qa-deploy.schema.json: qa-deploy contract schema missing",
+                ),
+            ],
+        );
+    }
+
+    let mut results = vec![runner];
+    if program_on_path("jq") {
+        let jq = ToolCommand::new("jq", ["empty", SCHEMA])
+            .expect("QA deploy JSON validation uses direct arguments")
+            .execute_in(id, required, root);
+        if jq.is_failure() {
+            results.push(jq);
+            return aggregate(id, required, results);
+        }
+        results.push(jq);
+    }
+    if program_on_path("ajv") {
+        let ajv = ToolCommand::new("ajv", ["compile", "-s", SCHEMA, "--spec=draft2020"])
+            .expect("QA deploy schema compilation uses direct arguments")
+            .execute_in(id, required, root);
+        if ajv.is_failure() {
+            results.push(ajv);
+            return aggregate(id, required, results);
+        }
+        results.push(ajv);
+    }
+    results.push(run_bats_suites(id, required, root, &[SUITE]));
+    aggregate(id, required, results)
 }
 
 fn run_required_bash_scripts(
