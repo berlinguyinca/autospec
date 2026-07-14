@@ -993,6 +993,23 @@ fn runner_checks_release_worktree_assert_contract_with_direct_bats_commands() {
 }
 
 #[test]
+fn runner_checks_fab_container_pin_lint_with_direct_bash_commands() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_fab_container_dockerfile",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::FabContainerPinLint),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("fab-container-pin-lint"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 2);
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

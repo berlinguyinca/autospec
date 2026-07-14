@@ -50,6 +50,7 @@ pub enum ExternalCheck {
     QualityDifferential,
     ReleaseAreaContract,
     ReleaseWorktreeAssert,
+    FabContainerPinLint,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -133,6 +134,7 @@ impl ExternalCheck {
             Self::QualityDifferential => run_quality_differential(id, required, root),
             Self::ReleaseAreaContract => run_release_area_contract(id, required, root),
             Self::ReleaseWorktreeAssert => run_release_worktree_assert(id, required, root),
+            Self::FabContainerPinLint => run_fab_container_pin_lint(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2764,6 +2766,44 @@ fn run_release_worktree_assert(id: &str, required: bool, root: &Path) -> CheckRe
         return run_bats_suites(id, required, root, &[SUITE]);
     }
     CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]))
+}
+
+fn run_fab_container_pin_lint(id: &str, required: bool, root: &Path) -> CheckResult {
+    const DOCKERFILE: &str = "skills/autospec-fab/docker/Dockerfile";
+    const LINT: &str = "scripts/lint-fab-dockerfile.sh";
+
+    if !root.join(DOCKERFILE).is_file() {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
+    let syntax = run_required_bash_scripts(id, required, root, &[(LINT, false)]);
+    if syntax.is_failure() {
+        return syntax;
+    }
+    for file in [
+        DOCKERFILE,
+        "skills/autospec-fab/docker/requirements.txt",
+        "skills/autospec-fab/docker/wrappers/ccx_safety_wrapper.py",
+        "skills/autospec-fab/docker/wrappers/foam_cfd_reduce.py",
+    ] {
+        if !root.join(file).is_file() {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    syntax,
+                    failure(
+                        id,
+                        required,
+                        &format!("{file}: required container file missing"),
+                    ),
+                ],
+            );
+        }
+    }
+    let lint = ToolCommand::new("bash", [LINT, DOCKERFILE])
+        .expect("fab pin lint uses a direct Bash argument vector")
+        .execute_in(id, required, root);
+    aggregate(id, required, vec![syntax, lint])
 }
 
 fn run_required_bash_scripts(

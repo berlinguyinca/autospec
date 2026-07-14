@@ -235,6 +235,9 @@ impl ValidationCheck {
             "check_release_trio_worktree_assert" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReleaseWorktreeAssert)
             }
+            "check_fab_container_dockerfile" => {
+                CheckOwner::ExternalBatch(ExternalCheck::FabContainerPinLint)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }
