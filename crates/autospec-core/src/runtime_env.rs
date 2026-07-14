@@ -387,6 +387,24 @@ impl RuntimeState {
             .find(|(candidate, _)| candidate == key)
             .map(|(_, value)| value.as_str())
     }
+
+    pub fn replace_existing_value(
+        &mut self,
+        key: &str,
+        value: impl Into<String>,
+    ) -> Result<(), RuntimeEnvError> {
+        let Some((_, existing_value)) = self
+            .values
+            .iter_mut()
+            .find(|(candidate, _)| candidate == key)
+        else {
+            return Err(RuntimeEnvError::new(format!(
+                "missing runtime environment value: {key}"
+            )));
+        };
+        *existing_value = value.into();
+        Ok(())
+    }
 }
 
 fn split_mapping(content: &str) -> Option<(&str, &str)> {

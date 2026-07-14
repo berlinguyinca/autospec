@@ -124,7 +124,7 @@ fn up(options: Options) -> Result<(), CommandFailure> {
             context.environment_dir.display()
         ))
     })?;
-    let state = RuntimeState::from_context(&context, free_port()?, free_port()?);
+    let state = state_from_context(&context)?;
     write_state(&context, &state)?;
     let command = context
         .mode
@@ -213,6 +213,63 @@ fn free_port() -> Result<u16, CommandFailure> {
         .map_err(|error| {
             CommandFailure::diagnostic(format!("could not read runtime port: {error}"))
         })
+}
+
+fn state_from_context(context: &RuntimeContext) -> Result<RuntimeState, CommandFailure> {
+    let frontend_override = caller_override("AGENT_FRONTEND_PORT");
+    let backend_override = caller_override("AGENT_BACKEND_PORT");
+    let mut state = RuntimeState::from_context(
+        context,
+        if frontend_override.is_some() {
+            0
+        } else {
+            free_port()?
+        },
+        if backend_override.is_some() {
+            0
+        } else {
+            free_port()?
+        },
+    );
+    if let Some(value) = frontend_override {
+        replace_state_value(&mut state, "AGENT_FRONTEND_PORT", value)?;
+    }
+    if let Some(value) = backend_override {
+        replace_state_value(&mut state, "AGENT_BACKEND_PORT", value)?;
+    }
+
+    let public_url = caller_override("AGENT_PUBLIC_URL").unwrap_or_else(|| {
+        format!(
+            "http://127.0.0.1:{}",
+            state
+                .value("AGENT_FRONTEND_PORT")
+                .expect("new runtime state includes the frontend port")
+        )
+    });
+    replace_state_value(&mut state, "AGENT_PUBLIC_URL", public_url.clone())?;
+    replace_state_value(
+        &mut state,
+        "AUTOSPEC_PUBLIC_URL",
+        caller_override("AUTOSPEC_PUBLIC_URL").unwrap_or(public_url),
+    )?;
+    if let Some(value) = caller_override("COMPOSE_PROJECT_NAME") {
+        replace_state_value(&mut state, "COMPOSE_PROJECT_NAME", value)?;
+    }
+    Ok(state)
+}
+
+fn caller_override(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|value| !value.is_empty())
+}
+
+fn replace_state_value(
+    state: &mut RuntimeState,
+    key: &str,
+    value: String,
+) -> Result<(), CommandFailure> {
+    state
+        .replace_existing_value(key, value)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))
 }
 
 fn write_state(context: &RuntimeContext, state: &RuntimeState) -> Result<(), CommandFailure> {

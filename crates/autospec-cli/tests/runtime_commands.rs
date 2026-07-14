@@ -70,6 +70,61 @@ fn runtime_env_up_preserves_manifest_command_exit_status() {
 }
 
 #[test]
+fn runtime_env_up_preserves_caller_overrides_in_state_output_and_child() {
+    let fixture = RuntimeFixture::new(
+        "sh -c 'printf \"%s|%s|%s|%s|%s\\n\" \"$AGENT_FRONTEND_PORT\" \"$AGENT_BACKEND_PORT\" \"$AGENT_PUBLIC_URL\" \"$AUTOSPEC_PUBLIC_URL\" \"$COMPOSE_PROJECT_NAME\" > overrides.txt'",
+        "sh -c 'true'",
+    );
+    let overrides = [
+        ("AGENT_FRONTEND_PORT", "45101"),
+        ("AGENT_BACKEND_PORT", "45102"),
+        ("AGENT_PUBLIC_URL", "http://override.test:45101"),
+        ("AUTOSPEC_PUBLIC_URL", "https://autospec.example.test"),
+        ("COMPOSE_PROJECT_NAME", "caller_compose"),
+    ];
+
+    let mut command = fixture.command();
+    command.args([
+        "runtime",
+        "env",
+        "up",
+        "--repo",
+        fixture.root.to_str().expect("fixture path is UTF-8"),
+    ]);
+    for (key, value) in overrides {
+        command.env(key, value);
+    }
+    let output = command.output().expect("runtime env up starts");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let protocol = String::from_utf8_lossy(&output.stdout);
+    for (key, value) in overrides {
+        assert!(protocol
+            .lines()
+            .any(|line| line == format!("{key}={value}")));
+    }
+    let state_file = std::fs::read_dir(&fixture.state_root)
+        .expect("state root exists")
+        .next()
+        .expect("one environment exists")
+        .expect("state directory entry")
+        .path()
+        .join("env");
+    let state = std::fs::read_to_string(state_file).expect("read state file");
+    for (key, value) in overrides {
+        assert!(state.contains(&format!("export {key}='{value}'")));
+    }
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("overrides.txt")).expect("read child output"),
+        "45101|45102|http://override.test:45101|https://autospec.example.test|caller_compose\n"
+    );
+}
+
+#[test]
 fn runtime_env_up_reports_a_mode_without_a_command() {
     let fixture = RuntimeFixture::new("", "sh -c 'true'");
 
