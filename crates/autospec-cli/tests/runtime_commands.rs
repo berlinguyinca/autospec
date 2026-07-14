@@ -49,6 +49,21 @@ impl RuntimeFixture {
         command.env("AGENT_ENV_STATE_ROOT", &self.state_root);
         command
     }
+
+    fn has_session_record(&self) -> bool {
+        std::fs::read_dir(&self.state_root)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                std::fs::read_dir(entry.path().join("sessions"))
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .any(|record| record.is_ok())
+            })
+    }
 }
 
 impl Drop for RuntimeFixture {
@@ -147,6 +162,200 @@ fn runtime_env_exec_runs_a_direct_child_in_the_provisioned_environment() {
         .output()
         .expect("runtime env status starts");
     assert!(status.status.success());
+}
+
+#[test]
+fn runtime_env_session_cleans_state_after_child_completion() {
+    let fixture = RuntimeFixture::new("sh -c 'true'", "sh -c 'printf down > down.txt'");
+    let output = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "session",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ])
+        .output()
+        .expect("runtime env session starts");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("down.txt")).expect("teardown ran"),
+        "down"
+    );
+    let status = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "status",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+        ])
+        .output()
+        .expect("runtime env status starts");
+    assert_eq!(status.status.code(), Some(3));
+}
+
+#[test]
+fn runtime_env_session_bypasses_a_manifest_when_disabled() {
+    let fixture = RuntimeFixture::new("sh -c 'exit 41'", "sh -c 'exit 42'");
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_ENV_DISABLE", "1")
+        .args([
+            "runtime",
+            "env",
+            "session",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+            "--",
+            "sh",
+            "-c",
+            "pwd > bypass.txt",
+        ])
+        .output()
+        .expect("disabled runtime env session starts");
+
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("bypass.txt"))
+            .expect("bypass child output")
+            .trim(),
+        std::fs::canonicalize(&fixture.root)
+            .expect("canonical fixture root")
+            .to_str()
+            .expect("fixture path is UTF-8")
+    );
+    assert!(!fixture.state_root.exists());
+}
+
+#[test]
+fn runtime_env_session_passes_through_without_a_manifest() {
+    let fixture = RuntimeFixture::empty();
+    let output = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "session",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+            "--",
+            "sh",
+            "-c",
+            "printf pass-through > direct.txt",
+        ])
+        .output()
+        .expect("no-manifest runtime env session starts");
+
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("direct.txt")).expect("direct child output"),
+        "pass-through"
+    );
+    assert!(!fixture.root.join(".agent-runtime.yml").exists());
+    assert!(!fixture.state_root.exists());
+}
+
+#[test]
+fn runtime_env_session_auto_initializes_and_keeps_state_when_requested() {
+    let fixture = RuntimeFixture::empty();
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_ENV_AUTO_INIT", "1")
+        .env("AUTOSPEC_ENV_KEEP_ALIVE", "1")
+        .args([
+            "runtime",
+            "env",
+            "session",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+            "--",
+            "sh",
+            "-c",
+            "test -f .agent-runtime.yml && printf auto > auto-init.txt",
+        ])
+        .output()
+        .expect("auto-init runtime env session starts");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fixture.root.join(".agent-runtime.yml").is_file());
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("auto-init.txt"))
+            .expect("auto-init child output"),
+        "auto"
+    );
+    let status = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "status",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+        ])
+        .output()
+        .expect("runtime env status starts");
+    assert!(status.status.success());
+    assert!(!fixture.has_session_record());
+}
+
+#[cfg(unix)]
+extern "C" {
+    fn kill(pid: i32, signal: i32) -> i32;
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_env_session_tears_down_after_sigterm() {
+    use std::time::{Duration, Instant};
+
+    let fixture = RuntimeFixture::new("sh -c 'true'", "sh -c 'printf down > down.txt'");
+    let session = fixture
+        .command()
+        .args([
+            "runtime",
+            "env",
+            "session",
+            "--repo",
+            fixture.root.to_str().expect("fixture path is UTF-8"),
+            "--",
+            "sleep",
+            "30",
+        ])
+        .spawn()
+        .expect("runtime env session starts");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fixture.has_session_record() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(fixture.has_session_record(), "session record was created");
+    assert_eq!(unsafe { kill(session.id() as i32, 15) }, 0);
+    let output = session.wait_with_output().expect("session process exits");
+
+    assert_eq!(output.status.code(), Some(143));
+    assert!(!fixture.has_session_record());
+    assert!(std::fs::read_dir(&fixture.state_root)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(true));
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("down.txt")).expect("teardown ran"),
+        "down"
+    );
 }
 
 #[test]
