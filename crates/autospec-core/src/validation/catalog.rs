@@ -295,6 +295,7 @@ impl ValidationCheck {
             "check_autonomy_guardrails_foundation" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutonomyGuardrailsFoundation)
             }
+            "check_python_suites" => CheckOwner::ExternalBatch(ExternalCheck::PythonSuites),
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

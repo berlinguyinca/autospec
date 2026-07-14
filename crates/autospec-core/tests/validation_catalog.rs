@@ -1455,6 +1455,21 @@ fn catalog_assigns_autonomy_wiring_contracts_to_typed_external_batches() {
 }
 
 #[test]
+fn catalog_assigns_python_suites_to_a_typed_external_batch() {
+    let catalog = ValidationCatalog::standard();
+
+    assert_eq!(
+        catalog
+            .checks()
+            .iter()
+            .find(|check| check.id == "check_python_suites")
+            .map(|check| &check.owner),
+        Some(&CheckOwner::ExternalBatch(ExternalCheck::PythonSuites)),
+        "check_python_suites must have a typed external owner"
+    );
+}
+
+#[test]
 fn catalog_rejects_empty_and_duplicate_ids() {
     let empty = ValidationCatalog::from_checks(vec![ValidationCheck::catalog_entry("")]);
     let duplicate = ValidationCatalog::from_checks(vec![

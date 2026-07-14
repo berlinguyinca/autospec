@@ -1340,6 +1340,23 @@ fn runner_checks_autonomy_wiring_contracts_with_direct_bash_and_bats() {
 }
 
 #[test]
+fn runner_checks_python_suites_with_a_typed_pytest_command() {
+    let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
+        id: "check_python_suites",
+        required: true,
+        independent: false,
+        modes: CheckModes::CatalogSlot,
+        reachability: CheckReachability::TopLevel,
+        owner: CheckOwner::ExternalBatch(ExternalCheck::PythonSuites),
+    }]);
+
+    let report = ValidationRunner::run(&catalog, &validation_fixture("python-suites"));
+
+    assert_eq!(report.results[0].exit_code, Some(0));
+    assert_eq!(report.results[0].spawn_count, 2);
+}
+
+#[test]
 fn runner_checks_sweep_area_contract_with_direct_syntax_and_bats_commands() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_sweep_area_contract",

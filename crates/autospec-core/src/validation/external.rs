@@ -72,6 +72,7 @@ pub enum ExternalCheck {
     ReviewerContract,
     ConductorWiringContract,
     AutonomyGuardrailsFoundation,
+    PythonSuites,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -187,6 +188,7 @@ impl ExternalCheck {
             Self::AutonomyGuardrailsFoundation => {
                 run_autonomy_guardrails_foundation(id, required, root)
             }
+            Self::PythonSuites => run_python_suites(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -3858,6 +3860,38 @@ fn run_reviewer_contract(id: &str, required: bool, root: &Path) -> CheckResult {
         }
     }
     captured.result
+}
+
+fn run_python_suites(id: &str, required: bool, root: &Path) -> CheckResult {
+    if !program_on_path("python3") {
+        return failure(
+            id,
+            required,
+            "python suites: python3 unavailable; cannot gate context-monitor suites",
+        );
+    }
+    let availability = ToolCommand::new("python3", ["-m", "pytest", "--version"])
+        .expect("pytest availability uses a direct Python argument vector")
+        .execute_in(id, required, root);
+    if availability.is_failure() {
+        return availability;
+    }
+    let suites = ToolCommand::new(
+        "python3",
+        [
+            "-m",
+            "pytest",
+            "packages",
+            "tests",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+    )
+    .expect("pytest suites use a direct Python argument vector")
+    .with_env("PYTHONPATH", "packages/autospec_context_monitor")
+    .execute_in(id, required, root);
+    aggregate(id, required, vec![availability, suites])
 }
 
 fn run_conductor_wiring_contract(id: &str, required: bool, root: &Path) -> CheckResult {
