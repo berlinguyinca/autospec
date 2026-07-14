@@ -13,6 +13,7 @@
 - Add no dependencies; the manifest parser implements only the documented v1 mapping/list/scalar subset already accepted by the shell broker.
 - Preserve `.autospec/runtime.yml` precedence over `.agent-runtime.yml`, canonical repository paths, POSIX `cksum` environment IDs, ordered output, existing exit statuses, and sourceable `export KEY='value'` env files.
 - Direct child commands use `Command` argument vectors; only trusted manifest `command` and `down` strings retain `sh -c` because that is the v1 manifest language.
+- On Unix, `session` uses a local no-dependency FFI binding only to register `SIGINT` (`2`) and `SIGTERM` (`15`) handlers that record the signal in an atomic flag; normal Rust code performs child termination, state cleanup, teardown, and exit-code mapping outside the handler.
 - Update every multi-harness autospec-run body in lock-step before committing.
 - Do not retain `scripts/agent-env.sh` after the final reachability gate; thin installer launchers may invoke only the installed `autospec` binary.
 - Use `cargo run -q -p autospec-cli -- validate --fast` as the sole validation entry point.
@@ -260,7 +261,18 @@ Expected: failures because `session` is not implemented.
 
 `init` writes the exact conservative v1 manifest, refuses an existing selected manifest with exit `4`, and supports only `agent|autospec`. `exec` provisions/reuses state and launches its trailing command with direct argument vectors in the canonical repository. `session` bypasses when `AUTOSPEC_ENV_DISABLE=1`, passes through unchanged when no manifest exists, auto-initializes only when `AUTOSPEC_ENV_AUTO_INIT=1`, records a session file while the child is running, and removes it plus tears down after normal child completion unless `--keep-alive` or `AUTOSPEC_ENV_KEEP_ALIVE=1` is set. Keep child exit codes unchanged.
 
-For Unix interruption, install a minimal signal handler that only records `SIGINT`/`SIGTERM` in an atomic flag; the parent then terminates the direct child, removes the session record, runs teardown, and exits `130`/`143`. Test this with a spawned sleep child and an explicit signal only on Unix.
+For Unix interruption, define the no-dependency local binding and handler in `env.rs`:
+
+```rust
+#[cfg(unix)]
+extern "C" { fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize; }
+#[cfg(unix)]
+static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
+#[cfg(unix)]
+extern "C" fn record_signal(signal: i32) { RECEIVED_SIGNAL.store(signal, Ordering::Relaxed); }
+```
+
+Register only signals `2` and `15` before waiting for the direct child. The handler does not allocate, print, execute a command, or mutate files. The parent observes the flag, terminates the child, removes the session record, runs teardown, and exits `130`/`143`. Test this with a spawned sleep child and an explicit signal only on Unix.
 
 - [ ] **Step 4: Run all focused broker tests**
 
