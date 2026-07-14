@@ -25,6 +25,7 @@
 - Modify: `crates/autospec-core/src/lib.rs` — export `runtime_env`.
 - Create: `crates/autospec-core/tests/runtime_env.rs` — parser, precedence, identity, escaping, and state tests.
 - Create: `crates/autospec-cli/src/commands/runtime/env.rs` — all six runtime broker subcommands and typed process/file adapters.
+- Modify: `crates/autospec-core/src/runtime_env.rs` — explicit replacement of generated state values with caller-supplied legacy environment overrides.
 - Modify: `crates/autospec-cli/src/commands/runtime.rs` — dispatch `runtime env` without changing classify/audit behavior.
 - Modify: `crates/autospec-cli/src/commands/mod.rs`, `crates/autospec-cli/src/main.rs` — preserve explicit child exit statuses instead of flattening them to exit `2`.
 - Modify: `crates/autospec-cli/tests/runtime_commands.rs` — CLI behavior and exit-code integration tests.
@@ -146,6 +147,7 @@ git commit -m "feat: model isolated runtime manifests in Rust"
 ## Task 2: Add typed CLI outcomes and `up|status|down`
 
 **Files:**
+- Modify: `crates/autospec-core/src/runtime_env.rs`
 - Create: `crates/autospec-cli/src/commands/runtime/env.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime.rs`
 - Modify: `crates/autospec-cli/src/commands/mod.rs`
@@ -154,7 +156,7 @@ git commit -m "feat: model isolated runtime manifests in Rust"
 
 **Interfaces:**
 - Consumes: `RuntimeManifest`, `RuntimeContext`, and `RuntimeState` from Task 1.
-- Produces: `CommandFailure { message: String, exit_code: i32 }` and `autospec runtime env up|status|down`.
+- Produces: `RuntimeState::replace_existing_value(&mut self, key: &str, value: String) -> Result<(), RuntimeEnvError>`, `CommandFailure { message: String, exit_code: i32 }`, and `autospec runtime env up|status|down`.
 - Later tasks rely on: `run(args) -> Result<(), CommandFailure>` and `env::run(args) -> Result<(), CommandFailure>`.
 
 - [ ] **Step 1: Add failing CLI tests for output, state reuse, inactive status, and a child exit of 42**
@@ -208,7 +210,7 @@ impl CommandFailure {
 }
 ```
 
-Map existing `Result<(), String>` command results with `CommandFailure::diagnostic` at the top-level dispatcher, and make `main` exit `error.exit_code`. In `env.rs`, parse both split and equals option forms; reject malformed options before state changes. `up` writes the state/env file before running a trusted manifest `command`; if a state file already exists, parse and reuse it without rerunning the command. `status` reads and prints an existing state file or returns `3`. `down` runs optional trusted `down` first, preserves a nonzero child exit, and removes state only after successful/no-op teardown.
+Map existing `Result<(), String>` command results with `CommandFailure::diagnostic` at the top-level dispatcher, and make `main` exit `error.exit_code`. In `env.rs`, parse both split and equals option forms; reject malformed options before state changes. `up` writes the state/env file before running a trusted manifest `command`; if a state file already exists, parse and reuse it without rerunning the command. Before a new state is written, use `RuntimeState::replace_existing_value` to preserve non-empty caller values for `AGENT_FRONTEND_PORT`, `AGENT_BACKEND_PORT`, `AGENT_PUBLIC_URL`, `AUTOSPEC_PUBLIC_URL`, and `COMPOSE_PROJECT_NAME`. `status` reads and prints an existing state file or returns `3`. `down` runs optional trusted `down` first, preserves a nonzero child exit, and removes state only after successful/no-op teardown.
 
 - [ ] **Step 4: Run broker and existing runtime tests**
 
