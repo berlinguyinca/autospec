@@ -43,7 +43,7 @@ fitness_functions:
     gate: true
     threshold: 0
     paths:
-      - crates/autospec-core/**/*.rs
+      - crates/autospec-core/src/**/*.rs
       - crates/autospec-core/Cargo.toml
     pattern: 'autospec[-_]cli'
     metric: core_to_cli_dependency_occurrences

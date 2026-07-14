@@ -30,6 +30,29 @@ RS
     grep -q '"severity_rank"' "$WORK/ranked.jsonl"
 }
 
+@test "rank: detects Rust unsafe syntax without flagging prose or command payloads" {
+    : > "$WORK/raw.jsonl"
+    mkdir -p "$WORK/src"
+    printf '%s\n' 'const NOTE: &str = "unsafe operations require review";' > "$WORK/src/prose.rs"
+    printf '%s\n' 'let command = "echo unsafe";' > "$WORK/src/command.rs"
+    printf '%s\n' 'let payload = "unsafe {";' > "$WORK/src/string-payload.rs"
+    printf '%s\n' 'const RAW: &str = r#"unsafe {"#;' > "$WORK/src/raw-string-payload.rs"
+    printf '%s\n' '// unsafe fn documentation only' > "$WORK/src/comment.rs"
+    printf '%s\n' 'fn read(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' > "$WORK/src/unsafe.rs"
+    printf '%s\n' 'unsafe' '{' '    external_call();' '}' > "$WORK/src/multiline.rs"
+    printf '%s\n' 'unsafe /* FFI boundary */ {' '    external_call();' '}' > "$WORK/src/comment-separated.rs"
+    printf '%s\n' '#[unsafe(no_mangle)]' 'pub extern "C" fn exported() {}' > "$WORK/src/unsafe-attribute.rs"
+
+    run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/ranked.jsonl"
+    [ "$status" -eq 0 ]
+    unsafe_count="$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/ranked.jsonl")"
+    [ "$unsafe_count" -eq 4 ]
+    jq -e 'select(.dimension == "unsafe" and .file == "src/unsafe.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/multiline.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/comment-separated.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/unsafe-attribute.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
+}
+
 @test "issue filing: high-severity findings produce lint-clean remediation issues" {
     cat > "$WORK/ranked.jsonl" <<'JSONL'
 {"gap_id":"G1","dimension":"secrets","severity":"must-fix","priority":"P0","severity_rank":100,"exploitability":5,"exposure":5,"file":"app/config.env","line":3,"title":"Hardcoded API token","body":"Remove the token and rotate the credential.","dedupe_key":"sec-secret","remediation":"Remove the committed token, rotate it, and add a regression scan."}

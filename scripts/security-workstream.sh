@@ -78,31 +78,106 @@ def title_hash(value):
     return "sec-" + hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
 
 
+RUST_UNSAFE_SYNTAX = re.compile(
+    r"\bunsafe\s*(?:\{|fn\b|trait\b|impl\b|extern\b)|#\s*\[\s*unsafe\s*\("
+)
+
+
+def blank_non_code(source, output, start, end):
+    for index in range(start, end):
+        output[index] = "\n" if source[index] == "\n" else " "
+
+
+def raw_string_end(source, start):
+    if start and (source[start - 1].isalnum() or source[start - 1] == "_"):
+        return None
+    prefix = 2 if source.startswith("br", start) else 1 if source.startswith("r", start) else 0
+    if not prefix:
+        return None
+    quote = start + prefix
+    while quote < len(source) and source[quote] == "#":
+        quote += 1
+    if quote >= len(source) or source[quote] != '"':
+        return None
+    terminator = '"' + source[start + prefix:quote]
+    end = source.find(terminator, quote + 1)
+    return len(source) if end < 0 else end + len(terminator)
+
+
+def rust_code_only(source):
+    output = list(source)
+    index = 0
+    while index < len(source):
+        if source.startswith("//", index):
+            end = source.find("\n", index)
+            end = len(source) if end < 0 else end
+            blank_non_code(source, output, index, end)
+            index = end
+            continue
+        if source.startswith("/*", index):
+            end = index + 2
+            depth = 1
+            while end < len(source) and depth:
+                if source.startswith("/*", end):
+                    depth += 1
+                    end += 2
+                elif source.startswith("*/", end):
+                    depth -= 1
+                    end += 2
+                else:
+                    end += 1
+            blank_non_code(source, output, index, end)
+            index = end
+            continue
+        end = raw_string_end(source, index)
+        if end is not None:
+            blank_non_code(source, output, index, end)
+            index = end
+            continue
+        if source[index] == '"':
+            end = index + 1
+            while end < len(source):
+                if source[end] == "\\":
+                    end += 2
+                elif source[end] == '"':
+                    end += 1
+                    break
+                else:
+                    end += 1
+            blank_non_code(source, output, index, min(end, len(source)))
+            index = end
+            continue
+        index += 1
+    return "".join(output)
+
+
 def unsafe_findings(root):
     root_path = Path(root or ".")
     findings = []
     for path in root_path.rglob("*"):
         if not path.is_file() or ".git" in path.parts:
             continue
-        if path.suffix not in {".rs", ".c", ".cc", ".cpp", ".h", ".hpp"}:
+        if path.suffix != ".rs":
             continue
         try:
             lines = path.read_text(errors="ignore").splitlines()
         except OSError:
             continue
-        for idx, line in enumerate(lines, 1):
-            if re.search(r"\bunsafe\b", line):
-                rel = str(path.relative_to(root_path)) if path.is_relative_to(root_path) else str(path)
-                findings.append({
-                    "gap_id": f"U{len(findings)+1}",
-                    "dimension": "unsafe",
-                    "severity": "must-fix",
-                    "file": rel,
-                    "line": idx,
-                    "title": "Unsafe code requires security review",
-                    "body": "Unsafe code was detected. Replace it with a safe primitive or document an independent security review and invariant proof.",
-                    "dedupe_key": title_hash(f"unsafe:{rel}:{idx}"),
-                })
+        source = "\n".join(lines)
+        code = rust_code_only(source)
+        for match in RUST_UNSAFE_SYNTAX.finditer(code):
+            line = code.count("\n", 0, match.start()) + 1
+            rel = str(path.relative_to(root_path)) if path.is_relative_to(root_path) else str(path)
+            findings.append({
+                "gap_id": f"U{len(findings)+1}",
+                "dimension": "unsafe",
+                "severity": "must-fix",
+                "file": rel,
+                "line": line,
+                "title": "Unsafe code requires security review",
+                "body": "Unsafe code was detected. Replace it with a safe primitive or document an independent security review and invariant proof.",
+                "dedupe_key": title_hash(f"unsafe:{rel}:{line}"),
+            })
     return findings
 
 

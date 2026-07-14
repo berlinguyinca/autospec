@@ -30,6 +30,31 @@ setup() {
     echo "$output" | jq -e '.results[] | select(.id=="financial_no_f64" and .gate==true and .threshold != null)' >/dev/null
 }
 
+@test "core-to-CLI direction ignores core test fixture paths" {
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/crates/autospec-core/src" "$scratch/crates/autospec-core/tests"
+    : > "$scratch/crates/autospec-core/src/lib.rs"
+    printf '%s\n' '// fixture stored beside core tests: autospec-cli' > "$scratch/crates/autospec-core/tests/fixture.rs"
+    cp "$REGISTRY" "$scratch/registry.yml"
+
+    run bash "$FITNESS" run --registry "$scratch/registry.yml" --repo "$scratch" --json
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.results[] | select(.id=="rust_core_cli_direction" and .observed==0)' >/dev/null
+
+    printf '%s\n' '// autospec-cli must not appear in core production source' > "$scratch/crates/autospec-core/src/leak.rs"
+    run bash "$FITNESS" run --registry "$scratch/registry.yml" --repo "$scratch" --json
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.results[] | select(.id=="rust_core_cli_direction" and .observed==1 and .locations[0].path=="crates/autospec-core/src/leak.rs")' >/dev/null
+    rm "$scratch/crates/autospec-core/src/leak.rs"
+
+    printf '%s\n' 'autospec-cli = "0.1"' > "$scratch/crates/autospec-core/Cargo.toml"
+    run bash "$FITNESS" run --registry "$scratch/registry.yml" --repo "$scratch" --json
+    [ "$status" -ne 0 ]
+    echo "$output" | jq -e '.results[] | select(.id=="rust_core_cli_direction" and .observed==1 and .locations[0].path=="crates/autospec-core/Cargo.toml")' >/dev/null
+
+    rm -rf "$scratch"
+}
+
 @test "breach produces auto-implement issue body with metric and location" {
     scratch="$(mktemp -d)"
     mkdir -p "$scratch/src"
@@ -60,8 +85,12 @@ YAML
     rm -rf "$scratch"
 }
 
-@test "validate.sh wires the architecture fitness gate and test suite" {
-    grep -q '^check_architecture_fitness_engine()' "$REPO_ROOT/autospec validate"
-    grep -q 'tests/architecture-fitness/.*\.bats' "$REPO_ROOT/autospec validate"
-    grep -q 'architecture-fitness.sh run' "$REPO_ROOT/autospec validate"
+@test "direct Rust validation owns the architecture fitness gate and test suite" {
+    catalog="$REPO_ROOT/crates/autospec-core/src/validation/catalog.rs"
+    external="$REPO_ROOT/crates/autospec-core/src/validation/external.rs"
+    grep -q 'ArchitectureFitnessEngine' "$catalog"
+    grep -q 'tests/architecture-fitness' "$external"
+    grep -q 'scripts/architecture-fitness.sh' "$external"
+    rg -U -q '"check_architecture_fitness_engine" => \{\s+CheckOwner::ExternalBatch\(ExternalCheck::ArchitectureFitnessEngine\)' "$catalog"
+    grep -q 'Self::ArchitectureFitnessEngine => run_architecture_fitness_engine' "$external"
 }
