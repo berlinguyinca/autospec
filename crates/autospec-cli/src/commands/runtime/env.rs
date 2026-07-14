@@ -520,7 +520,7 @@ fn slugify(value: &str) -> String {
 }
 
 fn state_root() -> Result<PathBuf, CommandFailure> {
-    if let Some(root) = std::env::var_os("AGENT_ENV_STATE_ROOT") {
+    if let Some(root) = std::env::var_os("AGENT_ENV_STATE_ROOT").filter(|root| !root.is_empty()) {
         return Ok(PathBuf::from(root));
     }
     let home = std::env::var_os("HOME").ok_or_else(|| {
@@ -718,7 +718,7 @@ fn run_session_command(
 
     match result {
         Ok(SessionWait::Interrupted(signal)) => {
-            cleanup?;
+            let _ = cleanup;
             Err(CommandFailure::status(
                 String::new(),
                 if signal == 2 { 130 } else { 143 },

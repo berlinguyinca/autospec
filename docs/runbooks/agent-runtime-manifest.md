@@ -15,8 +15,10 @@ autospec runtime env exec [--repo PATH] [--mode MODE] -- COMMAND [ARGS...]
 autospec runtime env session [--repo PATH] [--mode MODE] [--keep-alive] -- COMMAND [ARGS...]
 ```
 
-All commands default to `--repo .` and `--mode auto`. `init` creates
-`.agent-runtime.yml` by default; use `--manifest autospec` to create
+All commands default to `--repo .`. The environment-selecting commands (`up`,
+`status`, `down`, `exec`, and `session`) default to `--mode auto`; `init` does
+not select a mode. `init` creates `.agent-runtime.yml` by default; use
+`--manifest autospec` to create
 `.autospec/runtime.yml`. It refuses to replace either existing manifest unless `--force`
 is supplied.
 
@@ -25,7 +27,8 @@ is supplied.
 The parser accepts a constrained YAML mapping. It requires at least one mode; if `version`
 is supplied it must be `1`. Scalar values may be single- or double-quoted. Mode environment
 names must be uppercase shell-style names (`[A-Z_][A-Z0-9_]*`) and cannot repeat within a
-mode.
+mode. The broker-owned generated names listed below are reserved and cannot appear in a
+mode's `env` mapping.
 
 ```yaml
 version: 1
@@ -59,8 +62,9 @@ repository/mode pair reuses its state.
 
 ## Generated environment and state
 
-State is stored at `${AGENT_ENV_STATE_ROOT:-$HOME/.autospec/envs}/<environment-id>/env`.
-The file is sourceable POSIX shell syntax. `up` and `status` print the same protocol, including
+State is stored at `${AGENT_ENV_STATE_ROOT:-$HOME/.autospec/envs}/<environment-id>/env`; an
+empty `AGENT_ENV_STATE_ROOT` is treated the same as an unset value. The file is sourceable POSIX
+shell syntax. `up` and `status` print the same protocol, including
 `AGENT_ENV_FILE`, so a caller can load it with:
 
 ```bash
@@ -105,7 +109,9 @@ unchanged.
   exits. Otherwise, normal completion removes the session record and runs teardown.
 
 On Unix, `SIGINT` and `SIGTERM` are recorded by the signal handler; parent code terminates and
-waits for the child, removes the session record, runs teardown, and exits `130` or `143`.
+waits for the child, removes the session record, runs teardown, and exits `130` or `143`. That
+signal status takes precedence if teardown fails; failed teardown leaves its state directory for
+a later `down` retry.
 
 ## Status codes and safe cleanup
 
@@ -117,7 +123,7 @@ waits for the child, removes the session record, runs teardown, and exits `130` 
 | `3` | `status` found no active environment for the selected repository and mode. |
 | `4` | `init` refused to overwrite an existing runtime manifest without `--force`. |
 | `42` | Example preserved child or manifest-command exit: any ordinary nonzero child status is returned unchanged. |
-| `130` / `143` | Unix `session` interrupted by `SIGINT` / `SIGTERM` after parent-side cleanup. |
+| `130` / `143` | Unix `session` interrupted by `SIGINT` / `SIGTERM`; this status wins if teardown also fails. |
 
 Use `autospec runtime env down --repo <path> --mode <mode>` for cleanup. It is safe to repeat:
 missing state is not an error, optional `down` is skipped, and state is removed only after the

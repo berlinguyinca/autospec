@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const REQUIRED_ENVIRONMENT_VALUES: [&str; 9] = [
+const BROKER_OWNED_ENVIRONMENT_KEYS: [&str; 9] = [
     "AGENT_ENV_ID",
     "AGENT_ENV_MODE",
     "AGENT_ENV_REPO",
@@ -175,8 +175,8 @@ impl RuntimeManifest {
                     continue;
                 };
                 match key {
-                    "command" => modes[mode_index].command = Some(value.trim().to_string()),
-                    "down" => modes[mode_index].down = Some(value.trim().to_string()),
+                    "command" => modes[mode_index].command = Some(unquote(value)),
+                    "down" => modes[mode_index].down = Some(unquote(value)),
                     _ => {}
                 }
                 continue;
@@ -190,6 +190,11 @@ impl RuntimeManifest {
                 if !is_valid_environment_name(&key) {
                     return Err(RuntimeEnvError::new(format!(
                         "invalid environment name: {key}"
+                    )));
+                }
+                if BROKER_OWNED_ENVIRONMENT_KEYS.contains(&key.as_str()) {
+                    return Err(RuntimeEnvError::new(format!(
+                        "reserved runtime environment name: {key}"
                     )));
                 }
                 if modes[mode_index]
@@ -371,7 +376,7 @@ impl RuntimeState {
             }
             values.push((key.to_string(), parse_shell_quote(quoted_value)?));
         }
-        for required in REQUIRED_ENVIRONMENT_VALUES {
+        for required in BROKER_OWNED_ENVIRONMENT_KEYS {
             if !seen.contains(required) {
                 return Err(RuntimeEnvError::new(format!(
                     "missing required environment value: {required}"

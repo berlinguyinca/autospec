@@ -59,7 +59,7 @@ fn print_classification(path: &str, json: bool) {
 
 fn print_help() {
     println!(
-        "autospec runtime\n\nUSAGE:\n    autospec runtime classify <PATH> [--json]\n    autospec runtime audit [--root PATH] [--json]\n    autospec runtime env up|status|down [--repo PATH] [--mode MODE]\n\nCOMMANDS:\n    classify       Classify a repository path by runtime ownership policy\n    audit          List platform files grouped by runtime migration class\n    env            Manage isolated runtime environment state"
+        "autospec runtime\n\nUSAGE:\n    autospec runtime classify <PATH> [--json]\n    autospec runtime audit [--root PATH] [--json]\n    autospec runtime env init [--repo PATH] [--manifest agent|autospec] [--force]\n    autospec runtime env up [--repo PATH] [--mode MODE]\n    autospec runtime env status [--repo PATH] [--mode MODE]\n    autospec runtime env down [--repo PATH] [--mode MODE]\n    autospec runtime env exec [--repo PATH] [--mode MODE] -- COMMAND [ARGS...]\n    autospec runtime env session [--repo PATH] [--mode MODE] [--keep-alive] -- COMMAND [ARGS...]\n\nCOMMANDS:\n    classify       Classify a repository path by runtime ownership policy\n    audit          List platform files grouped by runtime migration class\n    env            Manage isolated runtime environment state"
     );
 }
 

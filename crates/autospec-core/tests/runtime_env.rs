@@ -95,6 +95,33 @@ fn manifest_rejects_lowercase_environment_names() {
 }
 
 #[test]
+fn manifest_rejects_broker_owned_environment_names() {
+    for key in [
+        "AGENT_ENV_ID",
+        "AGENT_ENV_MODE",
+        "AGENT_ENV_REPO",
+        "AGENT_ENV_MANIFEST",
+        "AGENT_FRONTEND_PORT",
+        "AGENT_BACKEND_PORT",
+        "AGENT_PUBLIC_URL",
+        "AUTOSPEC_PUBLIC_URL",
+        "COMPOSE_PROJECT_NAME",
+    ] {
+        let error = RuntimeManifest::parse(&format!(
+            "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    env:\n      {key}: override\n"
+        ))
+        .expect_err("broker-owned environment key is rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("reserved runtime environment name"),
+            "unexpected error for {key}: {error}"
+        );
+    }
+}
+
+#[test]
 fn manifest_uses_first_declared_mode_when_default_is_absent() {
     let manifest = RuntimeManifest::parse(
         "version: 1\nname: ordered\nmodes:\n  first:\n    command: sh -c 'true'\n  second:\n    command: sh -c 'true'\n",
