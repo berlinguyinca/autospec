@@ -238,6 +238,9 @@ impl ValidationCheck {
             "check_fab_container_dockerfile" => {
                 CheckOwner::ExternalBatch(ExternalCheck::FabContainerPinLint)
             }
+            "check_repo_quality_audit_loop" => {
+                CheckOwner::ExternalBatch(ExternalCheck::RepoQualityAudit)
+            }
             "check_autospec_test_skill_present" => {
                 CheckOwner::ExternalBatch(ExternalCheck::AutospecTestSkill)
             }

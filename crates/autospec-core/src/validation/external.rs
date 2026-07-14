@@ -51,6 +51,7 @@ pub enum ExternalCheck {
     ReleaseAreaContract,
     ReleaseWorktreeAssert,
     FabContainerPinLint,
+    RepoQualityAudit,
     AutospecTestSkill,
     AutospecPlaywrightSkill,
     AutospecFabContract,
@@ -135,6 +136,7 @@ impl ExternalCheck {
             Self::ReleaseAreaContract => run_release_area_contract(id, required, root),
             Self::ReleaseWorktreeAssert => run_release_worktree_assert(id, required, root),
             Self::FabContainerPinLint => run_fab_container_pin_lint(id, required, root),
+            Self::RepoQualityAudit => run_repo_quality_audit(id, required, root),
             Self::AutospecTestSkill => run_skill_validator(id, required, root, "autospec-test"),
             Self::AutospecPlaywrightSkill => run_autospec_playwright_skill(id, required, root),
             Self::AutospecFabContract => run_autospec_fab_contract(id, required, root),
@@ -2804,6 +2806,66 @@ fn run_fab_container_pin_lint(id: &str, required: bool, root: &Path) -> CheckRes
         .expect("fab pin lint uses a direct Bash argument vector")
         .execute_in(id, required, root);
     aggregate(id, required, vec![syntax, lint])
+}
+
+fn run_repo_quality_audit(id: &str, required: bool, root: &Path) -> CheckResult {
+    const AUDIT: &str = "skills/autospec-shared/scripts/repo-quality-audit.sh";
+    const SUITES: &[&str] = &[
+        "skills/autospec-shared/tests/unit/repo-quality-audit.bats",
+        "tests/autospec/test_quality_audit_summary.bats",
+    ];
+
+    let audit = run_required_bash_scripts(id, required, root, &[(AUDIT, true)]);
+    if audit.is_failure() {
+        return audit;
+    }
+    for skill in [
+        "skills/autospec-run/SKILL.md",
+        "skills/autospec-qa/SKILL.md",
+        "skills/autospec-review/SKILL.md",
+        "skills/autospec-release/SKILL.md",
+    ] {
+        if !contains(&root.join(skill), "repo-quality-audit.sh") {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    audit,
+                    failure(
+                        id,
+                        required,
+                        &format!("{skill}: missing repo quality audit call point"),
+                    ),
+                ],
+            );
+        }
+    }
+    let summary = root.join("scripts/autospec-write-run-summary.sh");
+    for (path, anchor) in [
+        (&summary, "--quality-audit-json"),
+        (&root.join(AUDIT), "verification-contract-drift"),
+        (&root.join(AUDIT), "verification:{"),
+        (&root.join(AUDIT), "runtime:$runtime"),
+        (&summary, "### Verification lanes"),
+        (&summary, "### Runtime and engines"),
+    ] {
+        if !contains(path, anchor) {
+            return aggregate(
+                id,
+                required,
+                vec![
+                    audit,
+                    failure(
+                        id,
+                        required,
+                        &format!("{}: missing {anchor} contract", relative_path(root, path)),
+                    ),
+                ],
+            );
+        }
+    }
+    let bats = run_bats_suites_if_available(id, required, root, SUITES);
+    aggregate(id, required, vec![audit, bats])
 }
 
 fn run_required_bash_scripts(
