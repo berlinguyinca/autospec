@@ -179,7 +179,7 @@ Run: `cargo test -p autospec-cli --test queue_commands --test claim_commands`
 
 Expected: PASS, including root/queue help, malformed options, repo inference, JSON shape, stale recovery preserve/release/rollback, PR reconciliation before worker cap, and direct argument-vector safety.
 
-- [ ] **Step 6: Commit the CLI boundary**
+- [x] **Step 6: Commit the CLI boundary**
 
 ```bash
 git add crates/autospec-cli/src/commands crates/autospec-cli/tests
