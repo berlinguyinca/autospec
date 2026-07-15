@@ -295,11 +295,12 @@ synthesis):
 - `tests/explore/test_explore_severity_roi.bats` — severity-first ordering; a
   no-named-consumer new-source proposal is dropped while a legacy one is kept;
   pattern synthesis collapses a 3-instance class to one structural-fix.
-- `tests/explore/test_explore_specialists.bats` — signal scan detects a seeded
-  domain (e.g. a fixture repo with `ccxt`/`backtrader` deps → trading) and
-  proposes matching specialists; an empty/generic repo yields an empty roster;
-  `--specialists-mode off` runs zero specialists; the ≤16 per-round cap holds;
-  a `specialist:<slug>` proposal flows through verify + ROI like any source.
+- `crates/autospec-core/tests/explore_specialists.rs` and
+  `crates/autospec-cli/tests/explore_commands.rs` — the Rust scanner detects a
+  seeded domain (e.g. a fixture repo with `ccxt`/`backtrader` deps → trading),
+  records file-line evidence, proposes matching specialists, reuses/replaces
+  cache according to `--force`, caps `--num-specialists`, and keeps generic
+  repos on an empty roster.
 
 ## Acceptance
 

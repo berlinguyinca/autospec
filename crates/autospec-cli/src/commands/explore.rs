@@ -4,6 +4,7 @@ use autospec_core::coordination::{
     parse_repository_routing_input_json, plan_repository_routing, CanonicalTarget,
     DoNotFileRepository, RepositoryRoutingReport, RoutedFinding,
 };
+use autospec_core::explore::specialists::{scan_specialists_json, ScanOptions};
 
 use super::CommandFailure;
 
@@ -17,6 +18,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
             Ok(())
         }
         [command, rest @ ..] if command == "repositories" => repositories(rest),
+        [command, rest @ ..] if command == "specialists" => specialists(rest),
         [command, ..] => Err(CommandFailure::diagnostic(format!(
             "unknown autospec explore command: {command}"
         ))),
@@ -45,6 +47,75 @@ fn repositories(args: &[String]) -> Result<(), CommandFailure> {
     let report = plan_repository_routing(&input);
     println!("{}", report_json(&report));
     Ok(())
+}
+
+fn specialists(args: &[String]) -> Result<(), CommandFailure> {
+    if matches!(args, [flag] if flag == "--help" || flag == "-h") {
+        print_specialists_help();
+        return Ok(());
+    }
+    let options = parse_specialist_options(args)?;
+    let repo_dir = options.repo_dir.ok_or_else(|| {
+        CommandFailure::diagnostic("autospec explore specialists requires --repo-dir <path>")
+    })?;
+    let mut scan_options = ScanOptions::new(&repo_dir)
+        .with_num_specialists(options.num_specialists.unwrap_or(3))
+        .force(options.force);
+    // Keep the stored path exactly user-selected but make diagnostics clearer if it is unreadable.
+    if !std::path::Path::new(&repo_dir).is_dir() {
+        return Err(CommandFailure::diagnostic(format!(
+            "autospec explore specialists --repo-dir is not a directory: {repo_dir}"
+        )));
+    }
+    scan_options.repo_dir = std::path::PathBuf::from(&repo_dir);
+    let json = scan_specialists_json(&scan_options).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not scan explore specialists in {repo_dir}: {error}"
+        ))
+    })?;
+    print!("{json}");
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct SpecialistOptions {
+    repo_dir: Option<String>,
+    num_specialists: Option<usize>,
+    force: bool,
+}
+
+fn parse_specialist_options(args: &[String]) -> Result<SpecialistOptions, CommandFailure> {
+    let mut options = SpecialistOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--repo-dir" => {
+                let value = option_value(args, &mut index, "--repo-dir")?;
+                replace_once(&mut options.repo_dir, value, "--repo-dir")?;
+            }
+            "--num-specialists" => {
+                let value = option_value(args, &mut index, "--num-specialists")?;
+                let parsed = value.parse::<usize>().map_err(|_| {
+                    CommandFailure::diagnostic("--num-specialists requires a non-negative integer")
+                })?;
+                if options.num_specialists.replace(parsed).is_some() {
+                    return Err(CommandFailure::diagnostic(
+                        "--num-specialists accepts exactly one value",
+                    ));
+                }
+            }
+            "--force" => options.force = true,
+            option => return unknown_specialist_option(option),
+        }
+        index += 1;
+    }
+    Ok(options)
+}
+
+fn unknown_specialist_option(option: &str) -> Result<SpecialistOptions, CommandFailure> {
+    Err(CommandFailure::diagnostic(format!(
+        "unknown autospec explore specialists option: {option}"
+    )))
 }
 
 #[derive(Debug, Default)]
@@ -108,13 +179,19 @@ fn unknown_repository_option(option: &str) -> Result<RepositoryOptions, CommandF
 
 fn print_help() {
     println!(
-        "autospec explore\n\nUSAGE:\n    autospec explore [COMMAND]\n\nCOMMANDS:\n    repositories    Infer canonical repositories for org-sweep findings\n\nOPTIONS:\n    -h, --help       Print help"
+        "autospec explore\n\nUSAGE:\n    autospec explore [COMMAND]\n\nCOMMANDS:\n    repositories    Infer canonical repositories for org-sweep findings\n    specialists     Discover domain-specialist roster for autospec-explore\n\nOPTIONS:\n    -h, --help       Print help"
     );
 }
 
 fn print_repositories_help() {
     println!(
         "autospec explore repositories\n\nUSAGE:\n    autospec explore repositories --input <PATH>\n\nOPTIONS:\n    --input <PATH>   Read repository evidence JSON\n    -h, --help       Print help"
+    );
+}
+
+fn print_specialists_help() {
+    println!(
+        "autospec explore specialists\n\nUSAGE:\n    autospec explore specialists --repo-dir <PATH> [--num-specialists <N>] [--force]\n\nOPTIONS:\n    --repo-dir <PATH>       Repository directory to scan\n    --num-specialists <N>   Maximum roster size (default 3, cap 6)\n    --force                 Refresh even when a valid cache exists\n    -h, --help              Print help"
     );
 }
 

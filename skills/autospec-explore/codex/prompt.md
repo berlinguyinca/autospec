@@ -583,7 +583,7 @@ repo-evidence-grounded specialists below).
 
 Roster discovery runs once at sandbox creation and is cached:
 
-1. **Deterministic signal scan** (the `explore-specialist-scan.sh` helper, no LLM):
+1. **Deterministic signal scan** (the `autospec explore specialists` command, no LLM):
    repo names (owner/name, remote slug, and top-level project directory),
    dependency manifests, docs (`README*`, `AGENTS.md`, and runbooks), and code paths
    (module, package, script, workflow, and data-directory names) are
@@ -685,7 +685,7 @@ durable cross-repo **trend ledger** (`.autospec/trends/ledger.jsonl`, one
    time**: a trend cited across many threads outranks a one-off.
 2. **Repo-domain intersect (reuse, not new machinery).** Stage 2 reuses
    explore's **existing repo-domain derivation** — the same
-   `explore-specialist-scan.sh` signal scan (dependency manifests, README/
+   `autospec explore specialists` signal scan (dependency manifests, README/
    AGENTS.md keywords, directory taxonomy, domain lexicon) that spawns the
    `specialist:<slug>` personas — to intersect the prefiltered trend signals
    against THIS repo's domain + concrete gaps. A prefiltered signal becomes a

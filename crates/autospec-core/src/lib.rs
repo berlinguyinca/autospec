@@ -9,6 +9,7 @@ pub mod coordination;
 pub mod error;
 pub mod evidence;
 pub mod execution;
+pub mod explore;
 pub mod graph;
 pub mod growth;
 pub mod lint;
