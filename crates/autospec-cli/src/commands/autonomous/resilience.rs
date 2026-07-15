@@ -129,17 +129,14 @@ impl ResilienceStore {
             self.write_state(state)
                 .map_err(|_| ResilienceReject::MalformedState)?;
         }
-        let lease = stored_state.map(|stored| {
+        let lease = stored_state.and_then(|stored| {
             let state = stored.0;
-            let known_same_host = !self.host.is_empty()
-                && state
-                    .lock_host
-                    .as_deref()
-                    .is_some_and(|host| !host.is_empty() && host == self.host);
-            let dead_same_host_pid = state
-                .lock_pid
-                .filter(|_| known_same_host)
-                .is_some_and(pid_is_dead);
+            let lock_pid = state.lock_pid?;
+            let known_same_host = state
+                .lock_host
+                .as_deref()
+                .is_some_and(|host| same_known_host(host, &self.host));
+            let dead_same_host_pid = known_same_host && pid_is_dead(lock_pid);
             let input = match state.heartbeat_at {
                 Some(heartbeat_at) => {
                     let age = now_secs().saturating_sub(heartbeat_at);
@@ -154,7 +151,7 @@ impl ResilienceStore {
                     dead_same_host_pid,
                 ),
             };
-            decide_conductor_lease(input)
+            Some(decide_conductor_lease(input))
         });
         Ok(ResilienceAdmission {
             failure_count,
@@ -247,18 +244,14 @@ impl DecisionOptions {
         Ok(Self {
             repo: repo.ok_or_else(|| "autonomous resilience requires --repo".to_string())?,
             issue,
-            usage_cap: usage_cap.unwrap_or_else(|| {
-                env::var("AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS")
-                    .ok()
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(0)
-            }),
-            issue_cap: issue_cap.unwrap_or_else(|| {
-                env::var("AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES")
-                    .ok()
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(0)
-            }),
+            usage_cap: match usage_cap {
+                Some(value) => value,
+                None => env_budget("AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS")?,
+            },
+            issue_cap: match issue_cap {
+                Some(value) => value,
+                None => env_budget("AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES")?,
+            },
         })
     }
 }
@@ -347,13 +340,19 @@ struct Spend {
 impl Spend {
     fn parse(raw: &str) -> Result<Self, ResilienceReject> {
         let mut fields = parse_json_object(raw).map_err(|_| ResilienceReject::MalformedSpend)?;
+        let schema = number_field(&mut fields, "schema")
+            .map_err(|_| ResilienceReject::MalformedSpend)?
+            .ok_or(ResilienceReject::MalformedSpend)?;
+        if schema != 1 {
+            return Err(ResilienceReject::MalformedSpend);
+        }
         Ok(Self {
             tokens: number_field(&mut fields, "tokens")
                 .map_err(|_| ResilienceReject::MalformedSpend)?
-                .unwrap_or(0),
+                .ok_or(ResilienceReject::MalformedSpend)?,
             issues: number_field(&mut fields, "issues")
                 .map_err(|_| ResilienceReject::MalformedSpend)?
-                .unwrap_or(0),
+                .ok_or(ResilienceReject::MalformedSpend)?,
         })
     }
 }
@@ -416,9 +415,7 @@ impl ResilienceState {
 
 fn parse_failures(raw: &str, issue: u64) -> Result<u8, ResilienceReject> {
     let mut fields = parse_json_object(raw).map_err(|_| ResilienceReject::MalformedFailure)?;
-    let recorded_issue = number_field(&mut fields, "issue")
-        .map_err(|_| ResilienceReject::MalformedFailure)?
-        .ok_or(ResilienceReject::MalformedFailure)?;
+    let recorded_issue = failure_issue_field(&mut fields)?;
     if recorded_issue != issue {
         return Err(ResilienceReject::MalformedFailure);
     }
@@ -426,6 +423,35 @@ fn parse_failures(raw: &str, issue: u64) -> Result<u8, ResilienceReject> {
         .map_err(|_| ResilienceReject::MalformedFailure)?
         .ok_or(ResilienceReject::MalformedFailure)?;
     Ok(u8::try_from(failures).unwrap_or(u8::MAX))
+}
+
+fn failure_issue_field(fields: &mut BTreeMap<String, JsonValue>) -> Result<u64, ResilienceReject> {
+    let value = fields
+        .remove("issue")
+        .ok_or(ResilienceReject::MalformedFailure)?;
+    let issue = match value {
+        JsonValue::Number(value) => value
+            .parse::<u64>()
+            .map_err(|_| ResilienceReject::MalformedFailure)?,
+        JsonValue::String(value) => {
+            parse_positive_decimal(&value).ok_or(ResilienceReject::MalformedFailure)?
+        }
+        _ => return Err(ResilienceReject::MalformedFailure),
+    };
+    if issue == 0 {
+        return Err(ResilienceReject::MalformedFailure);
+    }
+    Ok(issue)
+}
+
+fn parse_positive_decimal(value: &str) -> Option<u64> {
+    if value.is_empty()
+        || value.starts_with('0')
+        || !value.bytes().all(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    value.parse().ok()
 }
 
 fn string_field(fields: &mut BTreeMap<String, JsonValue>, key: &str) -> Result<Option<String>, ()> {
@@ -459,6 +485,26 @@ fn env_path(name: &str, suffix: &[&str]) -> PathBuf {
         }
         path
     })
+}
+
+fn env_budget(name: &str) -> Result<u64, String> {
+    match env::var(name) {
+        Ok(value) => value
+            .parse()
+            .map_err(|_| format!("{name} must be a non-negative integer")),
+        Err(env::VarError::NotPresent) => Ok(0),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("{name} must be a non-negative integer")),
+    }
+}
+
+fn same_known_host(recorded: &str, current: &str) -> bool {
+    let recorded = recorded.trim();
+    let current = current.trim();
+    !recorded.is_empty()
+        && !current.is_empty()
+        && !recorded.eq_ignore_ascii_case("unknown")
+        && !current.eq_ignore_ascii_case("unknown")
+        && recorded == current
 }
 
 fn optional_number(value: Option<u64>) -> String {

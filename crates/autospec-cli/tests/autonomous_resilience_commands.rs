@@ -9,7 +9,10 @@ static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[test]
 fn resilience_decide_prefers_canonical_layout_over_legacy_fallbacks() {
     let fixture = ResilienceFixture::new();
-    fixture.write_state("owner__repo", valid_state("owner/repo", "claimed", 1));
+    fixture.write_state(
+        "owner__repo",
+        state_with_lock("owner/repo", "claimed", 1, 1, Some("different-host")),
+    );
     fixture.write_state("owner_repo", valid_state("owner/repo", "running", 1));
 
     let output = fixture.run(&["resilience", "decide", "--repo", "owner/repo"]);
@@ -22,7 +25,10 @@ fn resilience_decide_prefers_canonical_layout_over_legacy_fallbacks() {
 #[test]
 fn resilience_decide_reads_underscore_and_hyphen_compatibility_layouts() {
     let underscore = ResilienceFixture::new();
-    underscore.write_state("owner_repo", valid_state("owner/repo", "running", 1));
+    underscore.write_state(
+        "owner_repo",
+        state_with_lock("owner/repo", "running", 1, 1, Some("different-host")),
+    );
 
     let output = underscore.run(&["resilience", "decide", "--repo", "owner/repo"]);
 
@@ -41,7 +47,10 @@ fn resilience_decide_reads_underscore_and_hyphen_compatibility_layouts() {
     }
 
     let hyphen = ResilienceFixture::new();
-    hyphen.write_state("owner-repo", valid_state("owner/repo", "running", 1));
+    hyphen.write_state(
+        "owner-repo",
+        state_with_lock("owner/repo", "running", 1, 1, Some("different-host")),
+    );
 
     let output = hyphen.run(&["resilience", "decide", "--repo", "owner/repo"]);
 
@@ -80,7 +89,10 @@ fn resilience_decide_rejects_malformed_or_foreign_state_without_a_canonical_writ
 #[test]
 fn resilience_decide_reclaims_expired_leases_at_the_documented_boundaries() {
     let claimed = ResilienceFixture::new();
-    claimed.write_state("owner__repo", valid_state("owner/repo", "claimed", 300));
+    claimed.write_state(
+        "owner__repo",
+        state_with_lock("owner/repo", "claimed", 300, 1, Some("different-host")),
+    );
 
     let output = claimed.run(&["resilience", "decide", "--repo", "owner/repo"]);
 
@@ -91,7 +103,10 @@ fn resilience_decide_reclaims_expired_leases_at_the_documented_boundaries() {
     );
 
     let abandoned = ResilienceFixture::new();
-    abandoned.write_state("owner__repo", valid_state("owner/repo", "running", 10_800));
+    abandoned.write_state(
+        "owner__repo",
+        state_with_lock("owner/repo", "running", 10_800, 1, Some("different-host")),
+    );
 
     let output = abandoned.run(&["resilience", "decide", "--repo", "owner/repo"]);
 
@@ -188,6 +203,113 @@ fn resilience_decide_validates_compatibility_failure_and_spend_before_migrating_
 }
 
 #[test]
+fn resilience_decide_rejects_incomplete_or_incompatible_spend_before_migration() {
+    for (name, spend) in [
+        ("partial", "{\"schema\":1,\"tokens\":0}"),
+        ("null", "{\"schema\":1,\"tokens\":null,\"issues\":0}"),
+        ("missing-schema", "{\"tokens\":0,\"issues\":0}"),
+        ("wrong-schema", "{\"schema\":2,\"tokens\":0,\"issues\":0}"),
+        (
+            "non-numeric-tokens",
+            "{\"schema\":1,\"tokens\":\"0\",\"issues\":0}",
+        ),
+    ] {
+        let fixture = ResilienceFixture::new();
+        fixture.write_state("owner_repo", valid_state("owner/repo", "running", 1));
+        write_file(&fixture.spend_root.join("owner_repo/spend.json"), spend);
+
+        let output = fixture.run(&["resilience", "decide", "--repo", "owner/repo"]);
+
+        assert_eq!(output.status.code(), Some(3), "{name}");
+        assert_eq!(
+            stdout(&output),
+            "{\"decision\":\"reject\",\"reason\":\"malformed_spend\"}\n",
+            "{name}"
+        );
+        assert!(
+            !fixture.canonical_state_path().exists(),
+            "{name} must not migrate state"
+        );
+    }
+}
+
+#[test]
+fn resilience_decide_accepts_legacy_decimal_string_failure_issue_identifier() {
+    let fixture = ResilienceFixture::new();
+    write_file(
+        &fixture
+            .state_root
+            .join("autonomous/owner__repo/issues/41.json"),
+        "{\"issue\":\"41\",\"failures\":3,\"updated_at\":1}",
+    );
+
+    let output = fixture.run(&[
+        "resilience",
+        "decide",
+        "--repo",
+        "owner/repo",
+        "--issue",
+        "41",
+    ]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"reject\",\"reason\":\"failure_cap\"}\n"
+    );
+
+    let mismatch = ResilienceFixture::new();
+    write_file(
+        &mismatch
+            .state_root
+            .join("autonomous/owner__repo/issues/41.json"),
+        "{\"issue\":\"42\",\"failures\":3,\"updated_at\":1}",
+    );
+
+    let output = mismatch.run(&[
+        "resilience",
+        "decide",
+        "--repo",
+        "owner/repo",
+        "--issue",
+        "41",
+    ]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"reject\",\"reason\":\"malformed_failure\"}\n"
+    );
+}
+
+#[test]
+fn resilience_decide_rejects_invalid_environment_budget_before_migration() {
+    for (name, key) in [
+        ("tokens", "AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS"),
+        ("issues", "AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES"),
+    ] {
+        let fixture = ResilienceFixture::new();
+        fixture.write_state("owner_repo", valid_state("owner/repo", "running", 1));
+
+        let output = fixture.run_with_env(
+            key,
+            "invalid",
+            &["resilience", "decide", "--repo", "owner/repo"],
+        );
+
+        assert_eq!(output.status.code(), Some(2), "{name}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(key),
+            "{name} must identify the invalid environment variable"
+        );
+        assert!(
+            !fixture.canonical_state_path().exists(),
+            "{name} must not migrate state"
+        );
+    }
+}
+
+#[test]
 fn resilience_decide_reclaims_only_a_known_same_host_dead_pid() {
     let same_host = ResilienceFixture::new();
     same_host.write_state(
@@ -208,17 +330,32 @@ fn resilience_decide_reclaims_only_a_known_same_host_dead_pid() {
         stdout(&output),
         "{\"decision\":\"reclaim\",\"reason\":\"dead_same_host_pid\"}\n"
     );
+}
 
-    let unknown_host = ResilienceFixture::new();
-    unknown_host.write_state(
+#[test]
+fn resilience_decide_holds_unknown_host_identity_even_when_pid_is_dead() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state(
         "owner__repo",
-        state_with_lock("owner/repo", "running", 1, u32::MAX, Some("")),
+        state_with_lock("owner/repo", "running", 1, u32::MAX, Some("unknown")),
     );
 
-    let output = unknown_host.run_without_host(&["resilience", "decide", "--repo", "owner/repo"]);
+    let output =
+        fixture.run_with_host("unknown", &["resilience", "decide", "--repo", "owner/repo"]);
 
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(stdout(&output), "{\"decision\":\"held\"}\n");
+}
+
+#[test]
+fn resilience_decide_treats_legacy_released_lock_as_available() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state("owner__repo", valid_state("owner/repo", "running", 1));
+
+    let output = fixture.run(&["resilience", "decide", "--repo", "owner/repo"]);
+
+    assert!(output.status.success());
+    assert_eq!(stdout(&output), "{\"decision\":\"available\"}\n");
 }
 
 #[test]
@@ -270,13 +407,21 @@ impl ResilienceFixture {
             .expect("run resilience decision")
     }
 
-    fn run_without_host(&self, args: &[&str]) -> Output {
+    fn run_with_host(&self, host: &str, args: &[&str]) -> Output {
         self.command()
             .args(args)
-            .env_remove("AUTOSPEC_HOST")
-            .env_remove("HOSTNAME")
+            .env("AUTOSPEC_HOST", host)
             .output()
-            .expect("run resilience decision without a host")
+            .expect("run resilience decision with a host")
+    }
+
+    fn run_with_env(&self, key: &str, value: &str, args: &[&str]) -> Output {
+        self.command()
+            .args(args)
+            .env("AUTOSPEC_HOST", "autospec-test-host")
+            .env(key, value)
+            .output()
+            .expect("run resilience decision with an environment override")
     }
 
     fn command(&self) -> Command {
