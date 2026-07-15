@@ -28,7 +28,10 @@ multi-writer arrangement:
 
 Pure policy lives in `autospec-core`; it is deterministic and has no filesystem,
 process, environment, or GitHub dependency. The CLI owns the compatibility
-decoder, path resolution, atomic persistence, and same-host PID probe.
+decoder, path resolution, atomic persistence, and same-host PID probe. The core
+JSON parser is exposed as a narrow no-dependency parsing seam so the CLI does
+not copy a second parser; record-specific decoding stays private to the
+autonomous command tree.
 
 The migration covers these records:
 
@@ -69,6 +72,13 @@ results feed the lifecycle decision before foreground dispatch.
 for path resolution and policy. It accepts an explicit repository and fixture
 state root, emits stable JSON for run, held, reclaimed, malformed, foreign,
 failure-cap, and budget/usage-cap outcomes, and performs no shell invocation.
+
+The compatibility adapter distinguishes the state root from the spend root:
+`AUTOSPEC_STATE_DIR` changes resilience-state lookup only. Unless an explicit
+Rust spend-root override is supplied, spend remains at the legacy
+`$HOME/.autospec/autonomous-spend` location. Omitted lifetime caps preserve the
+legacy 10,000,000 usage-unit and 500 issue defaults; explicit zero disables an
+individual cap and invalid values reject admission.
 
 `start`, `restart`, `status`, and `run-foreground` call the same adapter. Start
 and restart inspect the lease before launch. Status reports canonical-or-fallback

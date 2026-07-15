@@ -25,7 +25,9 @@
 | --- | --- |
 | `crates/autospec-core/src/autonomous_lifecycle.rs` | Pure local conductor lease and capacity decisions. |
 | `crates/autospec-core/tests/autonomous_lifecycle.rs` | Exact boundary and capacity-order tests. |
-| `crates/autospec-cli/src/commands/autonomous/resilience.rs` | Layout paths, record decoding, atomic writer, and diagnostic adapter. |
+| `crates/autospec-cli/src/commands/autonomous/resilience.rs` | Layout paths, atomic writer, lease/cap admission, and diagnostic adapter. |
+| `crates/autospec-cli/src/commands/autonomous/resilience/records.rs` | Strict resilience, failure, and spend record parsing and serialization. |
+| `crates/autospec-core/src/state/{mod.rs,json.rs}` | Narrow public seam for the existing strict parser; no parser duplication. |
 | `crates/autospec-cli/src/commands/autonomous.rs` | Command routing and start/restart/status/foreground integration. |
 | `crates/autospec-cli/tests/autonomous_resilience_commands.rs` | Black-box temporary-root command tests. |
 | `docs/specs/2026-07-15-rust-autonomous-lifecycle.md` | Runtime compatibility contract. |
@@ -110,7 +112,10 @@ git commit -m "feat: model typed autonomous resilience policy"
 
 **Files:**
 - Create: `crates/autospec-cli/src/commands/autonomous/resilience.rs`
+- Create: `crates/autospec-cli/src/commands/autonomous/resilience/records.rs`
 - Modify: `crates/autospec-cli/src/commands/autonomous.rs`
+- Modify: `crates/autospec-core/src/state/mod.rs`
+- Modify: `crates/autospec-core/src/state/json.rs`
 - Create: `crates/autospec-cli/tests/autonomous_resilience_commands.rs`
 
 **Interfaces:**
@@ -169,15 +174,20 @@ impl ResilienceStore {
 }
 ```
 
-Decode only documented resilience, failure, and spend fields. Reuse
-`super::atomic_write`; never call a shell script.
+Decode only documented resilience, failure, and spend fields through the
+existing strict core parser. Keep record decoding in `records.rs`, reuse
+`super::atomic_write`, and never call a shell script. Treat null lock PIDs as
+released, reject zero lock PIDs, never compare empty or `unknown` hosts as local,
+validate every companion record before fallback migration, and accept the
+documented decimal-string failure issue identifier.
 
 - [ ] **Step 4: Verify GREEN and commit**
 
 Run: `cargo test -p autospec-cli --test autonomous_resilience_commands`
 
 Expected: PASS for canonical first, underscore/hyphen fallback, malformed,
-foreign, failure-cap, and capacity precedence cases.
+foreign, failure-cap, capacity precedence, released locks, host safety, strict
+failure/spend records, and no-write migration rejection cases.
 
 ```bash
 git add crates/autospec-cli/src/commands/autonomous.rs crates/autospec-cli/src/commands/autonomous/resilience.rs crates/autospec-cli/tests/autonomous_resilience_commands.rs
