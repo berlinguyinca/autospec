@@ -400,14 +400,45 @@ fn issues_json(issues: &[RemoteIssue]) -> String {
     )
 }
 
+type ViewFieldDispatcher = fn(&QueueIssueView, &mut Vec<String>);
+
+const VIEW_FIELD_DISPATCHERS: &[ViewFieldDispatcher] = &[
+    append_reason_field,
+    append_blocked_label_field,
+    append_safety_gate_field,
+    append_linked_pr_field,
+    append_unmet_dependency_fields,
+    append_cycle_dependency_field,
+    append_conflicts_with_field,
+    append_path_field,
+    append_parallel_safety_fields,
+];
+
 fn view_json(view: &QueueIssueView) -> String {
     let mut fields = issue_fields(&view.issue);
+    for append in view_field_dispatchers() {
+        append(view, &mut fields);
+    }
+    format!("{{{}}}", fields.join(","))
+}
+
+fn view_field_dispatchers() -> &'static [ViewFieldDispatcher] {
+    VIEW_FIELD_DISPATCHERS
+}
+
+fn append_reason_field(view: &QueueIssueView, fields: &mut Vec<String>) {
     if let Some(reason) = &view.reason {
         fields.push(json_field("reason", json_string(reason)));
     }
+}
+
+fn append_blocked_label_field(view: &QueueIssueView, fields: &mut Vec<String>) {
     if let Some(blocked_label) = &view.blocked_label {
         fields.push(json_field("blocked_label", json_string(blocked_label)));
     }
+}
+
+fn append_safety_gate_field(view: &QueueIssueView, fields: &mut Vec<String>) {
     if let Some(safety_gate) = &view.safety_gate {
         fields.push(json_field(
             "safety_gate",
@@ -418,9 +449,15 @@ fn view_json(view: &QueueIssueView) -> String {
             ),
         ));
     }
+}
+
+fn append_linked_pr_field(view: &QueueIssueView, fields: &mut Vec<String>) {
     if let Some(linked_pr) = view.linked_pr {
         fields.push(json_field("linked_pr", linked_pr.to_string()));
     }
+}
+
+fn append_unmet_dependency_fields(view: &QueueIssueView, fields: &mut Vec<String>) {
     if !view.unmet_dependencies.is_empty() {
         fields.push(json_field(
             "unmet_dependencies",
@@ -431,18 +468,30 @@ fn view_json(view: &QueueIssueView) -> String {
             references_json(&view.non_blocking_refs),
         ));
     }
+}
+
+fn append_cycle_dependency_field(view: &QueueIssueView, fields: &mut Vec<String>) {
     if !view.cycle_dependencies.is_empty() {
         fields.push(json_field(
             "cycle_dependencies",
             numbers_json(&view.cycle_dependencies),
         ));
     }
+}
+
+fn append_conflicts_with_field(view: &QueueIssueView, fields: &mut Vec<String>) {
     if let Some(conflicts_with) = view.conflicts_with {
         fields.push(json_field("conflicts_with", conflicts_with.to_string()));
     }
+}
+
+fn append_path_field(view: &QueueIssueView, fields: &mut Vec<String>) {
     if let Some(path) = &view.path {
         fields.push(json_field("path", json_string(path)));
     }
+}
+
+fn append_parallel_safety_fields(view: &QueueIssueView, fields: &mut Vec<String>) {
     if view.parallel_safe.is_some() {
         fields.push(json_field("paths", strings_json(&view.paths)));
         fields.push(json_field(
@@ -458,7 +507,6 @@ fn view_json(view: &QueueIssueView) -> String {
             json_bool(view.parallel_safe == Some(true)).to_string(),
         ));
     }
-    format!("{{{}}}", fields.join(","))
 }
 
 fn issue_json(issue: &RemoteIssue) -> String {

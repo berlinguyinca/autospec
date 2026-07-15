@@ -283,6 +283,29 @@ fn queue_ready_fails_closed_for_an_unsupported_custom_regex() {
 }
 
 #[test]
+fn live_queue_view_json_uses_dispatch_table_for_optional_fields() {
+    let source =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/commands/queue.rs"))
+            .expect("read queue command source");
+    let view_json = source
+        .split("fn view_json")
+        .nth(1)
+        .expect("view_json function exists")
+        .split("fn view_field_dispatchers")
+        .next()
+        .expect("view field dispatcher accessor follows view_json");
+
+    assert!(
+        view_json.contains("view_field_dispatchers"),
+        "view_json should drive optional fields through a named dispatcher table"
+    );
+    assert!(
+        view_json.matches("fields.push(").count() <= 2,
+        "view_json should not reintroduce one fields.push branch per optional field"
+    );
+}
+
+#[test]
 fn live_source_has_no_reference_to_deleted_shell_queue_authorities() {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
