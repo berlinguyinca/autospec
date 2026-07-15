@@ -273,6 +273,93 @@ fn counts_inbound_dependency_references_when_scoring_a_family() {
 }
 
 #[test]
+fn ignores_cross_family_dependency_references_when_selecting_a_canonical_target() {
+    let report = route_repositories(&ExplorationInput {
+        repositories: vec![
+            repository!(
+                "metabolomics-us/go-alpha",
+                "go",
+                false,
+                false,
+                "2026-07-14T00:00:00Z",
+                "",
+                &[],
+                &[],
+                &[],
+            ),
+            repository!(
+                "metabolomics-us/go-beta",
+                "go",
+                false,
+                false,
+                "2026-07-14T00:00:00Z",
+                "",
+                &[],
+                &[],
+                &[],
+            ),
+            repository!(
+                "metabolomics-us/js-consumer",
+                "js",
+                false,
+                false,
+                "2026-07-14T00:00:00Z",
+                "",
+                &[],
+                &[],
+                &["metabolomics-us/go-beta"],
+            ),
+        ],
+        findings: Vec::new(),
+    })
+    .expect("repository evidence routes");
+
+    let go_target = report
+        .canonical_targets
+        .iter()
+        .find(|target| target.family == "go")
+        .expect("go family target");
+    assert_eq!(go_target.repository, "metabolomics-us/go-alpha");
+}
+
+#[test]
+fn lets_a_requested_revival_outrank_an_active_peer() {
+    let report = route_repositories(&ExplorationInput {
+        repositories: vec![
+            repository!(
+                "metabolomics-us/go-active",
+                "go",
+                false,
+                false,
+                "2026-07-13T00:00:00Z",
+                "",
+                &[],
+                &[],
+                &[],
+            ),
+            repository!(
+                "metabolomics-us/go-revival",
+                "go",
+                true,
+                true,
+                "2026-07-14T00:00:00Z",
+                "revived umbrella",
+                &[],
+                &[],
+                &[],
+            ),
+        ],
+        findings: Vec::new(),
+    })
+    .expect("repository evidence routes");
+
+    assert_eq!(
+        report.canonical_targets[0].repository,
+        "metabolomics-us/go-revival"
+    );
+}
+
+#[test]
 fn defers_findings_when_a_family_has_no_eligible_target() {
     let report = route_repositories(&ExplorationInput {
         repositories: vec![repository!(

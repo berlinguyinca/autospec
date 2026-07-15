@@ -212,10 +212,11 @@ pub fn route_repositories(input: &ExplorationInput) -> Result<ExplorationReport,
                     .repositories
                     .iter()
                     .filter(|candidate| {
-                        candidate
-                            .dependency_references
-                            .iter()
-                            .any(|reference| reference == &repository.name)
+                        candidate.family == repository.family
+                            && candidate
+                                .dependency_references
+                                .iter()
+                                .any(|reference| reference == &repository.name)
                     })
                     .count();
                 (
@@ -388,7 +389,7 @@ fn score(repository: &RepositoryEvidence, push_rank: usize, inbound_references: 
     score += repository.module_paths.len() as i64 * MODULE_PATH_WEIGHT;
     score += repository.packages.len() as i64 * PACKAGE_WEIGHT;
     score += inbound_references as i64 * INBOUND_DEPENDENCY_WEIGHT;
-    if repository.archived {
+    if repository.archived && !repository.revival_requested {
         score -= ARCHIVED_PENALTY;
     }
     if repository.revival_requested {
