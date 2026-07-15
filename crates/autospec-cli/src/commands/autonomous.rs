@@ -212,13 +212,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .cloned()
                     .ok_or_else(|| "--log requires a value".to_string())?;
             }
-            "--branch" => {
-                index += 1;
-                options.branch = args
-                    .get(index)
-                    .cloned()
-                    .ok_or_else(|| "--branch requires a value".to_string())?;
-            }
+            "--branch" => options.branch = option_value(args, &mut index, "--branch")?,
             "--all" => options.all = true,
             "--dry-run" => options.dry_run = true,
             "--no-digest" => options.no_digest = true,
@@ -233,6 +227,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
         index += 1;
     }
     Ok(options)
+}
+
+fn option_value(args: &[String], index: &mut usize, name: &str) -> Result<String, String> {
+    *index += 1;
+    args.get(*index)
+        .cloned()
+        .ok_or_else(|| format!("{name} requires a value"))
 }
 
 fn start(options: Options) -> Result<(), String> {
@@ -690,35 +691,14 @@ fn evaluate_main_health(options: Options, print: bool) -> Result<MainlineHealth,
     } else {
         Some(options.branch.as_str())
     };
-    let default_branch = if explicit_branch.is_some() {
-        None
-    } else {
-        match resolve_default_branch(&layout.repo) {
-            Ok(branch) => Some(branch),
-            Err(_) => {
-                let health = MainlineHealth::blocked(
-                    "",
-                    Vec::new(),
-                    MainlineHealthDiagnosticReason::DefaultBranchUnavailable,
-                );
-                return finish_blocked_main_health(&layout, health, print, options.json);
-            }
-        }
-    };
-    let branch = match resolve_health_branch(explicit_branch, default_branch.as_deref()) {
-        Ok(branch) => branch,
-        Err(reason) => {
-            let health = MainlineHealth::blocked("", Vec::new(), reason);
-            persist_mainline_health(&layout, &health)?;
-            if print {
-                print_mainline_health(&layout, &health, options.json);
-            }
-            return Err(
-                "mainline health blocked foreground admission: default-branch-unavailable"
-                    .to_string(),
-            );
-        }
-    };
+    let default_branch = default_health_branch(&layout, explicit_branch, print, options.json)?;
+    let branch =
+        resolve_health_branch(explicit_branch, default_branch.as_deref()).map_err(|reason| {
+            format!(
+                "mainline health blocked foreground admission: {}",
+                reason.as_str()
+            )
+        })?;
 
     let branch_output = gh_output(&["api", &format!("repos/{}/branches/{}", layout.repo, branch)])?;
     if !branch_output.status.success() {
@@ -778,6 +758,28 @@ fn finish_blocked_main_health(
     Err(format!(
         "mainline health blocked foreground admission: {reason}"
     ))
+}
+
+fn default_health_branch(
+    layout: &RunLayout,
+    explicit_branch: Option<&str>,
+    print: bool,
+    json: bool,
+) -> Result<Option<String>, String> {
+    if explicit_branch.is_some() {
+        return Ok(None);
+    }
+    match resolve_default_branch(&layout.repo) {
+        Ok(branch) => Ok(Some(branch)),
+        Err(_) => {
+            let health = MainlineHealth::blocked(
+                "",
+                Vec::new(),
+                MainlineHealthDiagnosticReason::DefaultBranchUnavailable,
+            );
+            finish_blocked_main_health(layout, health, print, json).map(|_| None)
+        }
+    }
 }
 
 fn resolve_default_branch(repo: &str) -> Result<String, String> {
