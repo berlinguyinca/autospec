@@ -1,7 +1,13 @@
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use autospec_core::autonomous::mainline_health::{
+    check_run_evidence, evaluate_health, legacy_status_evidence, resolve_health_branch,
+    CheckEvidence, HealthBranchInput, MainlineHealth, MainlineHealthDiagnostic,
+    MainlineHealthOutcome,
+};
 use std::thread;
 use std::time::Duration;
 
@@ -26,6 +32,7 @@ struct Options {
     budget_tokens: String,
     budget_issues: String,
     no_digest: bool,
+    health_branch: Option<String>,
     stop_mode: StopMode,
 }
 
@@ -51,6 +58,7 @@ impl Default for Options {
             budget_tokens: String::new(),
             budget_issues: String::new(),
             no_digest: false,
+            health_branch: None,
             stop_mode: StopMode::Graceful,
         }
     }
@@ -90,6 +98,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "timeline" => timeline(options),
         "cleanup" => cleanup(options),
         "run-foreground" => run_foreground(options),
+        "main-health" => main_health(options),
         other => Err(format!("unknown autospec autonomous subcommand: {other}")),
     }
 }
@@ -207,6 +216,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--all" => options.all = true,
             "--dry-run" => options.dry_run = true,
             "--no-digest" => options.no_digest = true,
+            "--branch" => options.health_branch = Some(option_value(args, &mut index, "--branch")?),
             "--once" => options.once = true,
             "--json" => options.json = true,
             "--foreground" => options.foreground = true,
@@ -218,6 +228,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
         index += 1;
     }
     Ok(options)
+}
+
+fn option_value(args: &[String], index: &mut usize, option: &str) -> Result<String, String> {
+    *index += 1;
+    args.get(*index)
+        .cloned()
+        .ok_or_else(|| format!("{option} requires a value"))
 }
 
 fn start(options: Options) -> Result<(), String> {
@@ -664,8 +681,188 @@ fn cleanup(options: Options) -> Result<(), String> {
     Ok(())
 }
 
+fn main_health(options: Options) -> Result<(), String> {
+    let layout = RunLayout::new(&options)?;
+    let health = load_main_health(&layout, &options)?;
+    persist_main_health(&layout, &health)?;
+    print_main_health(&layout.repo, &health, options.json);
+    if health.outcome == MainlineHealthOutcome::Halt {
+        return Err(format!(
+            "main-health blocked admission: {}",
+            health.diagnostic.as_str()
+        ));
+    }
+    Ok(())
+}
+
+fn load_main_health(layout: &RunLayout, options: &Options) -> Result<MainlineHealth, String> {
+    let explicit_branch = options.health_branch.clone();
+    let default_branch = if explicit_branch.is_some() {
+        None
+    } else {
+        gh_default_branch(&layout.repo)?
+    };
+    let branch = match resolve_health_branch(&HealthBranchInput {
+        explicit_branch,
+        default_branch,
+    }) {
+        Ok(branch) => branch,
+        Err(diagnostic) => {
+            return Ok(MainlineHealth::diagnostic(
+                "",
+                MainlineHealthOutcome::Halt,
+                diagnostic,
+            ))
+        }
+    };
+
+    if !gh_branch_exists(&layout.repo, &branch.branch) {
+        return Ok(evaluate_health(&branch.branch, false, Vec::new()));
+    }
+
+    let status_raw = match gh_api(&format!(
+        "repos/{}/commits/{}/status",
+        layout.repo, branch.branch
+    )) {
+        Ok(raw) => raw,
+        Err(_) => {
+            return Ok(MainlineHealth::diagnostic(
+                branch.branch,
+                MainlineHealthOutcome::Wait,
+                MainlineHealthDiagnostic::GhApiFailed,
+            ))
+        }
+    };
+    let (state, has_total_count, legacy) = legacy_status_evidence(&status_raw)?;
+    let evidence = if should_read_check_runs(&state, has_total_count, &legacy) {
+        match check_run_evidence_for(&layout.repo, &branch.branch) {
+            Ok(evidence) => evidence,
+            Err(_) => {
+                return Ok(MainlineHealth::diagnostic(
+                    branch.branch,
+                    MainlineHealthOutcome::Wait,
+                    MainlineHealthDiagnostic::CheckRunsApiFailed,
+                ));
+            }
+        }
+    } else {
+        legacy
+    };
+
+    Ok(evaluate_health(&branch.branch, true, evidence))
+}
+
+fn should_read_check_runs(state: &str, has_total_count: bool, legacy: &[CheckEvidence]) -> bool {
+    has_total_count && legacy.is_empty() && (state.is_empty() || state == "pending")
+}
+
+fn check_run_evidence_for(repo: &str, branch: &str) -> Result<Vec<CheckEvidence>, String> {
+    match gh_api(&format!(
+        "repos/{repo}/commits/{branch}/check-runs?per_page=100"
+    )) {
+        Ok(raw) => check_run_evidence(&raw),
+        Err(_) => Err(MainlineHealthDiagnostic::CheckRunsApiFailed
+            .as_str()
+            .to_string()),
+    }
+}
+
+fn gh_default_branch(repo: &str) -> Result<Option<String>, String> {
+    let output = Command::new("gh")
+        .args([
+            "repo",
+            "view",
+            repo,
+            "--json",
+            "defaultBranchRef",
+            "--jq",
+            ".defaultBranchRef.name",
+        ])
+        .output()
+        .map_err(|error| format!("cannot resolve default branch with gh: {error}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(branch))
+    }
+}
+
+fn gh_branch_exists(repo: &str, branch: &str) -> bool {
+    Command::new("gh")
+        .args(["api", &format!("repos/{repo}/branches/{branch}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn gh_api(endpoint: &str) -> Result<String, String> {
+    let output = Command::new("gh")
+        .args(["api", endpoint])
+        .output()
+        .map_err(|error| format!("cannot run gh api {endpoint}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("gh api {endpoint} exited with {}", output.status));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn persist_main_health(layout: &RunLayout, health: &MainlineHealth) -> Result<(), String> {
+    let dir = env_path(
+        "AUTOSPEC_AUTONOMOUS_STATE_DIR",
+        &[".autospec", "autonomous"],
+    )
+    .join(&layout.scope);
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    let path = dir.join("main-health-observations.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    writeln!(file, "{}", health.to_json(&layout.repo))
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))
+}
+
+fn print_main_health(repo: &str, health: &MainlineHealth, json: bool) {
+    if json {
+        println!("{}", health.to_json(repo));
+        return;
+    }
+    println!("DECISION:{}", health.outcome.as_str());
+    println!("REASON:{}", health.diagnostic.as_str());
+    println!("BRANCH:{}", health.branch);
+    for check in &health.evidence {
+        println!(
+            "CHECK:{}:{}:{}:{}",
+            check.name,
+            check.status,
+            check.conclusion.as_deref().unwrap_or(""),
+            if check.required {
+                "required"
+            } else {
+                "advisory"
+            }
+        );
+    }
+}
+
 fn run_foreground(options: Options) -> Result<(), String> {
     let layout = RunLayout::new(&options)?;
+    let health = load_main_health(&layout, &options)?;
+    persist_main_health(&layout, &health)?;
+    if health.outcome != MainlineHealthOutcome::Continue {
+        return Err(format!(
+            "main-health blocked foreground admission before ready issue dispatch: {}",
+            health.diagnostic.as_str()
+        ));
+    }
     let script = if Path::new("scripts/autospec-autonomous.sh").exists() {
         PathBuf::from("scripts/autospec-autonomous.sh")
     } else {
@@ -913,6 +1110,10 @@ fn conductor_passthrough_args(options: &Options) -> Vec<String> {
     }
     if options.no_digest {
         args.push("--no-digest".to_string());
+    }
+    if let Some(branch) = options.health_branch.as_ref() {
+        args.push("--branch".to_string());
+        args.push(branch.clone());
     }
     if options.interval_sec != 300 {
         args.push("--poll-interval-sec".to_string());
@@ -1857,6 +2058,6 @@ fn json_string_array(values: &[String]) -> String {
 
 fn print_help() {
     println!(
-        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground] [OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
+        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
     );
 }

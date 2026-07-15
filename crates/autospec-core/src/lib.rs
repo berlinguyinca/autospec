@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod autonomous {
     pub mod audit;
+    pub mod mainline_health;
 }
 pub mod claim;
 pub mod context;
