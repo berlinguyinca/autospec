@@ -1403,20 +1403,46 @@ fn claim_confirm_reads() -> u64 {
 }
 
 fn sleep_claim_settle_interval() {
-    let millis = std::env::var("AUTOSPEC_CLAIM_SETTLE_MILLIS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .or_else(|| {
-            std::env::var("AUTOSPEC_CLAIM_SETTLE_SECONDS")
-                .ok()
-                .and_then(|value| value.parse::<f64>().ok())
-                .filter(|value| *value >= 0.0)
-                .map(|seconds| (seconds * 1_000.0) as u64)
-        })
-        .unwrap_or(200);
+    let millis = claim_settle_millis(
+        std::env::var("AUTOSPEC_CLAIM_SETTLE_MILLIS")
+            .ok()
+            .as_deref(),
+        std::env::var("AUTOSPEC_CLAIM_SETTLE_SECONDS")
+            .ok()
+            .as_deref(),
+    )
+    .unwrap_or(200);
     if millis > 0 {
         std::thread::sleep(std::time::Duration::from_millis(millis));
     }
+}
+
+fn claim_settle_millis(millis: Option<&str>, seconds: Option<&str>) -> Option<u64> {
+    millis
+        .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| seconds.and_then(decimal_seconds_to_millis))
+}
+
+fn decimal_seconds_to_millis(value: &str) -> Option<u64> {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if (whole.is_empty() && fraction.is_empty())
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let whole_millis = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<u64>().ok()?.checked_mul(1_000)?
+    };
+    let fraction_millis = fraction
+        .bytes()
+        .take(3)
+        .fold(0_u64, |millis, byte| millis * 10 + u64::from(byte - b'0'));
+    let fraction_millis = fraction_millis
+        .checked_mul(10_u64.pow(3_u32.saturating_sub(fraction.len().min(3) as u32)))?;
+    whole_millis.checked_add(fraction_millis)
 }
 
 /// Keep telemetry strictly observational: state transitions never depend on
@@ -1659,4 +1685,23 @@ fn print_state_help() {
     println!(
         "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim state clear --issue <N> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> [--repo OWNER/REPO] [--worker-id ID]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the lowest-ID authoritative run-state comment\n    upsert                 Patch or create the lowest-ID authoritative run-state comment\n    clear                  Delete marked run-state comments\n    reconcile-linked-pr    Record a linked PR before post-PR handoff recovery\n    recover-stale-startup  Release only an evidenceless stale startup claim"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claim_settle_millis;
+
+    #[test]
+    fn claim_settle_millis_preserves_decimal_second_configuration() {
+        assert_eq!(claim_settle_millis(None, Some("0.2")), Some(200));
+        assert_eq!(claim_settle_millis(None, Some("1.2349")), Some(1_234));
+        assert_eq!(claim_settle_millis(None, Some("0")), Some(0));
+    }
+
+    #[test]
+    fn claim_settle_millis_prefers_explicit_milliseconds_and_rejects_invalid_seconds() {
+        assert_eq!(claim_settle_millis(Some("17"), Some("0.2")), Some(17));
+        assert_eq!(claim_settle_millis(None, Some("-0.2")), None);
+        assert_eq!(claim_settle_millis(None, Some("not-a-duration")), None);
+    }
 }
