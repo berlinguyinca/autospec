@@ -100,6 +100,22 @@ fn malformed_cache_is_regenerated() {
     assert!(persisted.contains("\"domains\": ["), "{persisted}");
 }
 
+#[test]
+fn cache_with_optional_generated_at_is_reused() {
+    let repo = temp_repo("generated-at-cache");
+    fs::create_dir_all(repo.join(".autospec")).unwrap();
+    fs::write(
+        repo.join(".autospec/explore-specialists.json"),
+        r#"{"schema_version":1,"generated_at":"2026-07-15T00:00:00Z","domains":[],"suggested_specialists":[{"slug":"cached","persona":"Cached","lens":"reuse","why":"cache","evidence":"cache:1"}]}"#,
+    )
+    .unwrap();
+    fs::write(repo.join("requirements.txt"), "ccxt>=4.0\n").unwrap();
+
+    let roster = scan_specialists(&ScanOptions::new(&repo)).unwrap();
+
+    assert_eq!(roster.suggested_specialists[0].slug, "cached");
+}
+
 fn temp_repo(name: &str) -> std::path::PathBuf {
     let mut path = std::env::temp_dir();
     let nanos = SystemTime::now()
