@@ -222,6 +222,130 @@ fn queue_ready_recovers_an_evidenceless_stale_claim_before_counting_worker_capac
     assert!(labels < clear);
 }
 
+#[test]
+fn queue_ready_applies_configured_trusted_actors_to_safety_review() {
+    let fixture = QueueFixture::new();
+    let policy = fixture.root.join("trusted-actors.yml");
+    fs::write(
+        &policy,
+        "safety:\n  issue_intent_gate:\n    trusted_actors:\n      - login: release-operator\n",
+    )
+    .expect("write trusted-actor policy");
+    fs::write(
+        &fixture.auto,
+        r###"[{"number":21,"title":"Reset test database","body":"## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Goal\n\nDelete the local test database and repopulate it from fixtures.\n\nOnly test, local, and fixture data are in scope. Production is out of scope.\n\n## Implementation outline\n\n- edit `src/reset.rs`\n","labels":[{"name":"auto-implement"},{"name":"safety:reviewed"}],"author":{"login":"release-operator"}}]"###,
+    )
+    .expect("write trusted candidate");
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_CONFIG_FILE", policy)
+        .args(["queue", "ready", "--repo", "test/repo"])
+        .output()
+        .expect("queue command starts");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("\"ready\":[{\"number\":21"),
+        "stdout={}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+}
+
+#[test]
+fn queue_ready_fails_closed_for_an_unsupported_custom_regex() {
+    let fixture = QueueFixture::new();
+    let policy = fixture.root.join("unsupported-regex.yml");
+    fs::write(
+        &policy,
+        "safety:\n  issue_intent_gate:\n    block_patterns:\n      - id: company-secret-policy\n        patterns:\n          - \"(?i)company secret\"\n",
+    )
+    .expect("write unsupported policy");
+    fs::write(
+        &fixture.auto,
+        format!("[{}]", passing_issue(22, "src/a.rs")),
+    )
+    .expect("write candidate fixture");
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_CONFIG_FILE", policy)
+        .args(["queue", "ready", "--repo", "test/repo"])
+        .output()
+        .expect("queue command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported custom regex"));
+}
+
+#[test]
+fn live_source_has_no_reference_to_deleted_shell_queue_authorities() {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("workspace root")
+        .to_path_buf();
+    let removed = [
+        "skills/autospec-run/scripts/list-ready-issues.sh",
+        "skills/autospec-run/scripts/issue-safety-gate.sh",
+        "scripts/lint-issue-safety.sh",
+    ];
+    for path in removed {
+        assert!(
+            !workspace.join(path).exists(),
+            "deleted shell authority still exists: {path}"
+        );
+    }
+
+    let needles = [
+        "list-ready-issues.sh",
+        "issue-safety-gate.sh",
+        "lint-issue-safety.sh",
+    ];
+    for root in ["install.sh", "scripts", "skills", "crates"] {
+        for path in live_source_files(&workspace.join(root)) {
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            for needle in needles {
+                assert!(
+                    !content.contains(needle),
+                    "live source {} still references {needle}",
+                    path.strip_prefix(&workspace).unwrap_or(&path).display(),
+                );
+            }
+        }
+    }
+}
+
+fn live_source_files(path: &std::path::Path) -> Vec<PathBuf> {
+    if path.is_file() {
+        return vec![path.to_path_buf()];
+    }
+    let mut files = Vec::new();
+    for entry in fs::read_dir(path).expect("read source directory") {
+        let entry = entry.expect("read source entry");
+        let name = entry.file_name();
+        if matches!(
+            name.to_str(),
+            Some("tests" | "fixtures" | "target" | "docs")
+        ) {
+            continue;
+        }
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            files.extend(live_source_files(&entry_path));
+        } else if entry_path.is_file() {
+            files.push(entry_path);
+        }
+    }
+    files
+}
+
 fn json_string(value: &str) -> String {
     format!(
         "\"{}\"",

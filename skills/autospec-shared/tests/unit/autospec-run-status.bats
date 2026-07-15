@@ -31,8 +31,8 @@ case "$1 $2" in
 esac
 EOF_GH
     chmod +x "$TMP/status-bin/gh"
-    cat > "$TMP/status-scripts/list-ready-issues.sh"
-    chmod +x "$TMP/status-scripts/list-ready-issues.sh"
+    cat > "$TMP/status-bin/autospec"
+    chmod +x "$TMP/status-bin/autospec"
 }
 
 @test "shows in-flight issues with step and age" {
@@ -87,7 +87,7 @@ cat <<'JSON'
 JSON
 EOF_QUEUE
 
-    run env PATH="$TMP/status-bin:$PATH" bash "$TMP/status-scripts/autospec-run-status.sh" --repo me/repo --json
+    run env PATH="$TMP/status-bin:$PATH" AUTOSPEC_QUEUE_BIN="$TMP/status-bin/autospec" bash "$TMP/status-scripts/autospec-run-status.sh" --repo me/repo --json
 
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq -r '.claimed_without_heartbeat[0].issue')" = "1604" ]
@@ -101,7 +101,7 @@ cat <<'JSON'
 JSON
 EOF_QUEUE
 
-    run env PATH="$TMP/status-bin:$PATH" bash "$TMP/status-scripts/autospec-run-status.sh" --repo me/repo
+    run env PATH="$TMP/status-bin:$PATH" AUTOSPEC_QUEUE_BIN="$TMP/status-bin/autospec" bash "$TMP/status-scripts/autospec-run-status.sh" --repo me/repo
 
     [ "$status" -eq 0 ]
     printf '%s\n' "$output" | grep -q 'claimed without heartbeat (1):'
@@ -120,7 +120,7 @@ EOF_QUEUE
     printf '{"issue":1604,"branch":"feat/issue-1604","step":"implementing","ts":%s,"pr":"","repo":"me/repo","host":"h1"}\n' \
         "$NOW" > "$AUTOSPEC_HEARTBEAT_DIR/me__repo/1604.json"
 
-    run env PATH="$TMP/status-bin:$PATH" bash "$TMP/status-scripts/autospec-run-status.sh" --repo me/repo --json
+    run env PATH="$TMP/status-bin:$PATH" AUTOSPEC_QUEUE_BIN="$TMP/status-bin/autospec" bash "$TMP/status-scripts/autospec-run-status.sh" --repo me/repo --json
 
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq -r '.claimed_without_heartbeat | length')" = "0" ]

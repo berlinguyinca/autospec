@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/apply-safety-review.sh — deterministic issue-intent safety stamper.
 #
-# Runs the safety linter (scripts/lint-issue-safety.sh) against an issue body,
+# Runs the Rust issue-safety linter against an issue body,
 # then either appends a passing `## Safety review` block and stamps
 # `safety:reviewed` (--apply), or quarantines the issue with
 # `security:quarantined` (--apply). Without --apply the script is report-only
@@ -13,12 +13,11 @@
 #       [--title TITLE] [--actor LOGIN] [--apply]
 #
 # Seams:
-#   AUTOSPEC_LINT_ISSUE_SAFETY_BIN — linter binary (default: <script_dir>/lint-issue-safety.sh)
+#   AUTOSPEC_ISSUE_SAFETY_BIN      — autospec binary (default: autospec)
 #   AUTOSPEC_GH_BIN                — gh binary (default: gh)
 set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LINT_BIN="${AUTOSPEC_LINT_ISSUE_SAFETY_BIN:-$SCRIPT_DIR/lint-issue-safety.sh}"
+SAFETY_BIN="${AUTOSPEC_ISSUE_SAFETY_BIN:-${AUTOSPEC_BIN:-autospec}}"
 GH_BIN="${AUTOSPEC_GH_BIN:-gh}"
 
 BEGIN_MARKER='<!-- autospec-safety:begin -->'
@@ -51,7 +50,7 @@ done
 
 # --- 1. Run the linter, capturing stdout + exit code independently. -------
 set +e
-lint_out="$("$LINT_BIN" --json --title "$TITLE" ${ACTOR:+--actor "$ACTOR"} "$BODY_FILE" 2>/dev/null)"
+lint_out="$("$SAFETY_BIN" lint issue safety --json --title "$TITLE" ${ACTOR:+--actor "$ACTOR"} "$BODY_FILE" 2>/dev/null)"
 lint_rc=$?
 set -e
 

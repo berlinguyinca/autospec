@@ -40,7 +40,7 @@ YAML
     run bash "$FLEET_RUN" --dry-run --once \
         --config "$TEST_TMPDIR/fleet.yml" \
         --node-config "$TEST_TMPDIR/fleet-node.yml" \
-        --list-ready-bin "$FIXTURES/mock-list-ready.sh"
+        --queue-bin "$FIXTURES/mock-autospec.sh"
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"fleet:smoke-node:org__repo-a"* ]]

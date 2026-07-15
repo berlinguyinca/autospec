@@ -8,7 +8,6 @@
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    LIST_READY="$REPO_ROOT/skills/autospec-run/scripts/list-ready-issues.sh"
     AUTOSPEC="$REPO_ROOT/target/debug/autospec"
 
     if [ "${AUTOSPEC_RUN_LIVE_COORDINATION_E2E:-0}" != "1" ]; then
@@ -16,6 +15,9 @@ setup() {
     fi
     if ! command -v gh >/dev/null 2>&1; then
         skip "gh CLI not installed"
+    fi
+    if [ ! -x "$AUTOSPEC" ]; then
+        cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
     fi
     if ! gh auth status >/dev/null 2>&1; then
         skip "gh not authenticated (set GH_TOKEN or run gh auth login)"
@@ -129,7 +131,7 @@ claim_async() {
     issue_d="$(create_issue "Coordination D overlap" "skills/shared.sh")"
     wait_for_auto_queue 4
 
-    run bash "$LIST_READY" --repo "$THROWAWAY_REPO" --batch-size 4
+    run "$AUTOSPEC" queue ready --repo "$THROWAWAY_REPO" --batch-size 4
     [ "$status" -eq 0 ]
     planner="$output"
     batch="$(printf '%s\n' "$planner" | jq -r '.batch | map(.number) | join(",")')"

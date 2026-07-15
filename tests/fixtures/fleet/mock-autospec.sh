@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Mock list-ready-issues.sh for autospec-fleet dry-run E2E.
+# Mock autospec queue ready for autospec-fleet dry-run E2E.
 
 set -euo pipefail
 
 fixture_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo=""
+
+if [ "${1:-} ${2:-}" = "queue ready" ]; then
+    shift 2
+fi
 
 while [ $# -gt 0 ]; do
     case "$1" in

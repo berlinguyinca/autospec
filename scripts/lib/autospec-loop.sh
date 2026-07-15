@@ -1311,7 +1311,7 @@ autospec_conductor_run() {
     local _resilience="${_sdir}/autonomous-resilience.sh"
     local _usage_limit="${_sdir}/autospec-usage-limit.sh"
     local _governor="${_sdir}/autonomous-usage-governor.sh"
-    local _list_ready="${AUTOSPEC_LIST_READY_BIN:-}"
+    local _queue_bin="${AUTOSPEC_QUEUE_BIN:-${AUTOSPEC_BIN:-}}"
 
     # ── Ledger wiring (F5) ─────────────────────────────────────────────────────
     # Resolve repo root (parent of scripts/ dir) for ledger data file path.
@@ -1487,11 +1487,11 @@ autospec_conductor_run() {
     if [ -f "${_repo_root}/.autospec/operator-persona.effective.md" ]; then
         _eff_persona="${_repo_root}/.autospec/operator-persona.effective.md"
     fi
-    if [ -z "$_list_ready" ]; then
-        if [ -f "${_sdir}/list-ready-issues.sh" ]; then
-            _list_ready="${_sdir}/list-ready-issues.sh"
-        elif [ -f "${_repo_root}/skills/autospec-run/scripts/list-ready-issues.sh" ]; then
-            _list_ready="${_repo_root}/skills/autospec-run/scripts/list-ready-issues.sh"
+    if [ -z "$_queue_bin" ]; then
+        if [ -x "${_repo_root}/target/debug/autospec" ]; then
+            _queue_bin="${_repo_root}/target/debug/autospec"
+        elif command -v autospec >/dev/null 2>&1; then
+            _queue_bin="$(command -v autospec)"
         fi
     fi
     if [ -f "$_priority_match_sh" ] && [ -f "$_priorities_file" ] \
@@ -1738,7 +1738,7 @@ fi'
         local _ready_count=""
         local _all_blocked_count=0
         local _all_blocked_refs=""
-        if [ -n "$_list_ready" ] && [ -f "$_list_ready" ] && [ -n "$_repo" ]; then
+        if [ -n "$_queue_bin" ] && { [ -x "$_queue_bin" ] || command -v "$_queue_bin" >/dev/null 2>&1; } && [ -n "$_repo" ]; then
             local _queue_json
             local _runtime_config_sh=""
             local _queue_batch_request=""
@@ -1769,7 +1769,7 @@ fi'
             if [ "${_queue_max_workers:-0}" -gt "$_queue_batch_request" ] 2>/dev/null; then
                 _queue_batch_request="${_queue_max_workers:-0}"
             fi
-            _queue_json="$(bash "$_list_ready" --repo "$_repo" --batch-size "$_queue_batch_request" 2>/dev/null || true)"
+            _queue_json="$("$_queue_bin" queue ready --repo "$_repo" --batch-size "$_queue_batch_request" 2>/dev/null || true)"
             if [ -n "$_queue_json" ]; then
                 local _cooldown_parent_branch _cooldown_requested_branch
                 _cooldown_parent_branch="$(_autospec_conductor_default_branch "$_repo")"
@@ -2183,9 +2183,9 @@ fi'
         elif [ "$_tier" = "1" ] && [ "$_action" = "run-backlog" ]; then
             local _skip_tier1_cycle=0
             # Reuse the readiness snapshot already computed in Step 2b (same
-            # list-ready-issues.sh call the waterfall's --backlog-count used) —
+            # autospec queue ready call the waterfall's --backlog-count used) —
             # do not re-query.
-            if [ -n "$_list_ready" ] && [ -f "$_list_ready" ] && [ -n "$_repo" ]; then
+            if [ -n "$_queue_bin" ] && { [ -x "$_queue_bin" ] || command -v "$_queue_bin" >/dev/null 2>&1; } && [ -n "$_repo" ]; then
                 if [ "$_queue_cap_reached" = "true" ]; then
                     printf '[conductor] Tier-1 worker cap reached — skipping drain this cycle\n' >&2
                     _work_done=0

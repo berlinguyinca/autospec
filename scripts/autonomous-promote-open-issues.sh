@@ -6,7 +6,7 @@
 # stitches together the deterministic grooming pipeline (Tasks 1-5):
 #
 #   list-groomable.sh   → candidate set (needs-classify|needs-template|unlabeled)
-#   lint-issue-safety.sh→ per-candidate intent safety gate (PASS|AMBIGUOUS|BLOCK)
+#   autospec lint issue safety → per-candidate intent safety gate (PASS|AMBIGUOUS|BLOCK)
 #   classify-model-fit.sh→ ctx:/reasoning: model-fit labels
 #   promote-eligibility.sh→ eligible|needs-template|epic|hold routing decision
 #   grooming-govern.sh  → self-governance active-gate set (template-promote?)
@@ -64,7 +64,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ── Sub-script paths (injectable seams for CI/test stubs) ──────────────────────
 SHARED_DIR="$SCRIPT_DIR/../skills/autospec-shared/scripts"
 GROOM_LIST="${AUTOSPEC_GROOM_LIST_SCRIPT:-$SCRIPT_DIR/list-groomable.sh}"
-GROOM_SAFETY="${AUTOSPEC_GROOM_SAFETY_SCRIPT:-$SCRIPT_DIR/lint-issue-safety.sh}"
+GROOM_SAFETY_BIN="${AUTOSPEC_GROOM_SAFETY_BIN:-${AUTOSPEC_BIN:-autospec}}"
 GROOM_CLASSIFY="${AUTOSPEC_GROOM_CLASSIFY_SCRIPT:-$SCRIPT_DIR/classify-model-fit.sh}"
 GROOM_ELIGIBILITY="${AUTOSPEC_GROOM_ELIGIBILITY_SCRIPT:-$SCRIPT_DIR/promote-eligibility.sh}"
 GROOM_GOVERN="${AUTOSPEC_GROOM_GOVERN_SCRIPT:-$SHARED_DIR/grooming-govern.sh}"
@@ -321,7 +321,7 @@ while [ "$i" -lt "$cand_count" ]; do
     esac
 
     # ── 1. Safety gate (fail-closed) ─────────────────────────────────────────
-    safety_out="$(bash "$GROOM_SAFETY" --title "$title" "$BODY_FILE" 2>/dev/null || true)"
+    safety_out="$("$GROOM_SAFETY_BIN" lint issue safety --title "$title" "$BODY_FILE" 2>/dev/null || true)"
     safety_decision="$(printf '%s\n' "$safety_out" | grep -Eo 'SAFETY_(PASS|AMBIGUOUS|BLOCK)' | head -1 || true)"
 
     if [ -z "$safety_decision" ]; then

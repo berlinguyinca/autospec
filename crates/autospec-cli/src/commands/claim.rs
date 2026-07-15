@@ -376,6 +376,32 @@ pub(crate) fn recover_active_issue(
     recover_stale_startup_record(repo, issue, timeout_seconds).map(|outcome| outcome.recovered)
 }
 
+/// A newly-created claim without a heartbeat, branch, or PR is kept during its
+/// startup grace period but must not consume a worker slot yet. Read failures
+/// and malformed records remain counted so the queue fails closed.
+pub(crate) fn active_issue_counts_toward_worker_capacity(
+    repo: &str,
+    issue: u64,
+    timeout_seconds: u64,
+) -> Result<bool, CommandFailure> {
+    let comments = list_comments(repo, issue)?;
+    let Some(selected) = select_run_state(&comments, repo, issue) else {
+        return Ok(true);
+    };
+    if !selected.record.pr.is_empty()
+        || startup_heartbeat_exists(repo, issue)
+        || branch_ref_exists(&selected.record.branch)
+    {
+        return Ok(true);
+    }
+    let Some(updated_at) = parse_iso_timestamp(&selected.record.updated_at) else {
+        return Ok(true);
+    };
+    Ok(unix_now()
+        .map(|now| now.saturating_sub(updated_at) > timeout_seconds)
+        .unwrap_or(true))
+}
+
 struct RecoveryOutcome {
     recovered: bool,
     reason: String,
@@ -402,6 +428,7 @@ fn recover_stale_startup_record(
     if startup_heartbeat_exists(repo, issue)
         || branch_ref_exists(&selected.record.branch)
         || !server_lease_is_stale(&selected.server_updated_at, timeout_seconds)
+        || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
     {
         return Ok(RecoveryOutcome {
             recovered: false,

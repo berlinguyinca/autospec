@@ -23,6 +23,7 @@ setup() {
   # Fake scripts directory that holds stub helper scripts.
   FAKE_SCRIPTS="$TEST_TMP/fake-scripts"
   mkdir -p "$FAKE_SCRIPTS"
+  export AUTOSPEC_QUEUE_BIN="$FAKE_SCRIPTS/autospec"
   cp "$REPO_ROOT/scripts/autospec-runtime-config.sh" "$FAKE_SCRIPTS/autospec-runtime-config.sh"
 
   # Fake PATH so every helper call hits our stubs.
@@ -64,6 +65,12 @@ _install_stub() {
   local body="$2"
   printf '#!/usr/bin/env bash\n%s\n' "$body" > "$FAKE_SCRIPTS/$name"
   chmod +x "$FAKE_SCRIPTS/$name"
+}
+
+_install_queue_stub() {
+  local body="$1"
+  _install_stub "autospec" "case \"\${1:-} \${2:-}\" in 'queue ready') shift 2 ;; esac
+$body"
 }
 
 # ── 1. One cycle: waterfall selects Tier 1, gate must emit merge-ok before drain ─
@@ -191,7 +198,7 @@ _install_stub() {
     'exit 0'
   _install_stub "autonomous-waterfall.sh" \
     'printf '"'"'{"tier":1,"action":"run-backlog","reason":"test"}\n'"'"''
-  _install_stub "list-ready-issues.sh" \
+  _install_queue_stub \
     'printf '"'"'{"ready":[],"blocked":[],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'"'"''
 
   local gate_log="$TEST_TMP/gate.log"
@@ -237,9 +244,9 @@ _install_stub() {
   _install_stub "autonomous-waterfall.sh" \
     'printf '"'"'{"tier":1,"action":"run-backlog","reason":"test"}\n'"'"''
 
-  local list_ready_log="$TEST_TMP/list-ready.log"
-  _install_stub "list-ready-issues.sh" \
-    "printf 'list-ready-issues.sh --repo test-owner/test-repo\n' >> '$list_ready_log'; printf '{\"ready\":[{\"number\":1886}],\"blocked\":[],\"claimed\":[],\"conflicts\":[],\"worker_cap\":{\"reached\":false},\"batch\":[{\"number\":1886}]}\n'"
+  local queue_log="$TEST_TMP/queue.log"
+  _install_queue_stub \
+    "printf 'autospec queue ready --repo test-owner/test-repo\n' >> '$queue_log'; printf '{\"ready\":[{\"number\":1886}],\"blocked\":[],\"claimed\":[],\"conflicts\":[],\"worker_cap\":{\"reached\":false},\"batch\":[{\"number\":1886}]}\n'"
 
   local gate_log="$TEST_TMP/gate.log"
   _install_stub "autonomous-premerge-gate.sh" \
@@ -286,7 +293,7 @@ _install_stub() {
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"operator stop flag detected"* ]]
-  [ ! -f "$list_ready_log" ]
+  [ ! -f "$queue_log" ]
   [ ! -f "$gate_log" ]
   if [ -f "$run_log" ]; then
     ! grep -q 'lint-implementation.sh 1898 --issue 1886' "$run_log"
@@ -827,7 +834,7 @@ esac
 EOF
   chmod +x "$FAKE_BIN/gh"
 
-  _install_stub "list-ready-issues.sh" \
+  _install_queue_stub \
     'printf '"'"'{"ready":[],"blocked":[],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'"'"''
 
   cp "$REPO_ROOT/scripts/autonomous-waterfall.sh" "$FAKE_SCRIPTS/autonomous-waterfall.sh"
@@ -941,8 +948,8 @@ esac
 EOF
   chmod +x "$FAKE_BIN/gh"
 
-  # Dependency-aware list-ready-issues.sh: nothing ready, one blocked.
-  _install_stub "list-ready-issues.sh" \
+  # Dependency-aware Rust queue: nothing ready, one blocked.
+  _install_queue_stub \
     'printf '"'"'{"ready":[],"blocked":[{"number":42}],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'"'"''
 
   # waterfall stub: record the args it was invoked with, then behave like the
@@ -1001,7 +1008,7 @@ esac
 EOF
   chmod +x "$FAKE_BIN/gh"
 
-  _install_stub "list-ready-issues.sh" \
+  _install_queue_stub \
     'printf '"'"'{"ready":[],"blocked":[{"number":42}],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'"'"''
 
   cp "$REPO_ROOT/scripts/autonomous-waterfall.sh" "$FAKE_SCRIPTS/autonomous-waterfall.sh"
@@ -1055,7 +1062,7 @@ EOF
   chmod +x "$FAKE_BIN/gh"
 
   _install_stub "autonomous-control-channel.sh" 'exit 0'
-  _install_stub "list-ready-issues.sh" \
+  _install_queue_stub \
     'printf '"'"'{"ready":[],"blocked":[{"number":42,"reason":"blocked_cycle","unmet_dependencies":[7]}],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'"'"''
 
   cp "$REPO_ROOT/scripts/autonomous-waterfall.sh" "$FAKE_SCRIPTS/autonomous-waterfall.sh"
@@ -1104,7 +1111,7 @@ EOF
   chmod +x "$FAKE_BIN/gh"
 
   _install_stub "autonomous-control-channel.sh" 'exit 0'
-  _install_stub "list-ready-issues.sh" \
+  _install_queue_stub \
     'printf '"'"'{"ready":[],"blocked":[{"number":42,"reason":"safety_gate_failed","safety_gate":{"ok":false,"reason":"missing_safety_reviewed"}},{"number":43,"reason":"safety_gate_failed","safety_gate":{"ok":false,"reason":"missing_safety_reviewed"}}],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'"'"''
   _install_stub "autonomous-waterfall.sh" \
     "printf 'waterfall-called\n' >> '$waterfall_log'; printf '{\"tier\":2,\"action\":\"run-explore-once\",\"reason\":\"test\"}\n'"
@@ -1135,11 +1142,11 @@ EOF
   [ ! -f "$waterfall_log" ]
 }
 
-# ── 22. Transient list-ready-issues.sh failure must NOT inject --backlog-count 0
+# ── 22. Transient Rust queue failure must NOT inject --backlog-count 0
 #        (peer-review must-fix #1632): a helper blip must not masquerade as an
 #        empty backlog — omit the flag so the waterfall's own readiness-aware
 #        count (with naive-gh fallback) still runs. ───────────────────────────
-@test "conductor: list-ready-issues.sh failure omits --backlog-count (no forced-0)" {
+@test "conductor: Rust queue failure omits --backlog-count (no forced-0)" {
   _install_stub "autonomous-control-channel.sh" 'exit 0'
 
   cat > "$FAKE_BIN/gh" <<'EOF'
@@ -1153,8 +1160,8 @@ EOF
   chmod +x "$FAKE_BIN/gh"
 
   # Helper fails (transient): exits non-zero, emits nothing parseable.
-  _install_stub "list-ready-issues.sh" \
-    'echo "list-ready: transient error" >&2; exit 1'
+  _install_queue_stub \
+    'echo "queue: transient error" >&2; exit 1'
 
   local waterfall_args_log="$TEST_TMP/waterfall-args.log"
   _install_stub "autonomous-waterfall.sh" \
@@ -1186,12 +1193,12 @@ EOF
   ! grep -q -- '--backlog-count' "$waterfall_args_log"
 }
 
-@test "conductor: asks list-ready-issues for remaining worker-cap batch size" {
+@test "conductor: asks Rust queue for remaining worker-cap batch size" {
   _install_stub "autonomous-control-channel.sh" 'exit 0'
 
-  local list_ready_args_log="$TEST_TMP/list-ready-args.log"
-  _install_stub "list-ready-issues.sh" \
-    "printf '%s\n' \"\$*\" >> '$list_ready_args_log'; printf '{\"ready\":[{\"number\":1},{\"number\":2},{\"number\":3}],\"blocked\":[],\"claimed\":[{\"number\":9}],\"conflicts\":[],\"worker_cap\":{\"max_repo_workers\":3,\"active_count\":1,\"remaining\":2,\"reached\":false},\"batch\":[{\"number\":1},{\"number\":2}]}\n'"
+  local queue_args_log="$TEST_TMP/queue-args.log"
+  _install_queue_stub \
+    "printf '%s\n' \"\$*\" >> '$queue_args_log'; printf '{\"ready\":[{\"number\":1},{\"number\":2},{\"number\":3}],\"blocked\":[],\"claimed\":[{\"number\":9}],\"conflicts\":[],\"worker_cap\":{\"max_repo_workers\":3,\"active_count\":1,\"remaining\":2,\"reached\":false},\"batch\":[{\"number\":1},{\"number\":2}]}\n'"
 
   _install_stub "autonomous-waterfall.sh" \
     'printf '\''{"tier":1,"action":"run-backlog","reason":"test"}\n'\'''
@@ -1216,7 +1223,7 @@ EOF
   " 2>&1
 
   [ "$status" -eq 0 ]
-  grep -q -- '--batch-size 3' "$list_ready_args_log"
+  grep -q -- '--batch-size 3' "$queue_args_log"
 }
 
 @test "conductor: autospec config overrides env for queue batch request" {
@@ -1231,9 +1238,9 @@ autonomous:
     max_concurrent_repo_workers: 4
 YAML
 
-  local list_ready_args_log="$TEST_TMP/list-ready-config-args.log"
-  _install_stub "list-ready-issues.sh" \
-    "printf '%s\n' \"\$*\" >> '$list_ready_args_log'; printf '{\"ready\":[{\"number\":1},{\"number\":2},{\"number\":3},{\"number\":4}],\"blocked\":[],\"claimed\":[],\"conflicts\":[],\"worker_cap\":{\"max_repo_workers\":4,\"active_count\":0,\"remaining\":4,\"reached\":false},\"batch\":[{\"number\":1},{\"number\":2},{\"number\":3},{\"number\":4}]}\n'"
+  local queue_args_log="$TEST_TMP/queue-config-args.log"
+  _install_queue_stub \
+    "printf '%s\n' \"\$*\" >> '$queue_args_log'; printf '{\"ready\":[{\"number\":1},{\"number\":2},{\"number\":3},{\"number\":4}],\"blocked\":[],\"claimed\":[],\"conflicts\":[],\"worker_cap\":{\"max_repo_workers\":4,\"active_count\":0,\"remaining\":4,\"reached\":false},\"batch\":[{\"number\":1},{\"number\":2},{\"number\":3},{\"number\":4}]}\n'"
 
   _install_stub "autonomous-waterfall.sh" \
     'printf '\''{"tier":1,"action":"run-backlog","reason":"test"}\n'\'''
@@ -1260,7 +1267,7 @@ YAML
   " 2>&1
 
   [ "$status" -eq 0 ]
-  grep -q -- '--batch-size 4' "$list_ready_args_log"
+  grep -q -- '--batch-size 4' "$queue_args_log"
 }
 
 # ── 23. Tier 1.5 grooming: telemetry appended per promoted issue ────────────

@@ -39,6 +39,7 @@ setup() {
 
   FAKE_SCRIPTS="$TEST_TMP/fake-scripts"
   mkdir -p "$FAKE_SCRIPTS"
+  export AUTOSPEC_QUEUE_BIN="$FAKE_SCRIPTS/autospec"
   cp "$REPO_ROOT/scripts/autospec-runtime-config.sh" "$FAKE_SCRIPTS/autospec-runtime-config.sh"
 
   FAKE_BIN="$TEST_TMP/fake-bin"
@@ -121,17 +122,18 @@ _install_common_stubs() {
     'printf '\''{"tier":1,"action":"run-backlog","reason":"test"}\n'\'''
 }
 
-# list-ready mock: ready/batch carry the given comma-separated issue numbers.
-_install_list_ready() {
+# Queue mock: ready/batch carry the given comma-separated issue numbers.
+_install_queue() {
   local numbers_csv="$1"
-  _install_list_ready_ready_batch "$numbers_csv" "$numbers_csv"
+  _install_queue_ready_batch "$numbers_csv" "$numbers_csv"
 }
 
-_install_list_ready_ready_batch() {
+_install_queue_ready_batch() {
   local ready_csv="$1"
   local batch_csv="$2"
-  cat > "$FAKE_SCRIPTS/list-ready-issues.sh" <<EOF
+  cat > "$FAKE_SCRIPTS/autospec" <<EOF
 #!/usr/bin/env bash
+shift 2
 jq -cn '{
   ready: ([$ready_csv] | map({number: .})),
   blocked: [], claimed: [], conflicts: [],
@@ -139,7 +141,7 @@ jq -cn '{
   batch: ([$batch_csv] | map({number: .}))
 }'
 EOF
-  chmod +x "$FAKE_SCRIPTS/list-ready-issues.sh"
+  chmod +x "$FAKE_SCRIPTS/autospec"
 }
 
 # provenance mock: issues 1xx -> self, 2xx -> operator, 9xx -> crash (exit 3,
@@ -234,7 +236,7 @@ _run_cycles() {
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101,102"
+  _install_queue "101,102"
 
   _run_cycle
 
@@ -248,7 +250,7 @@ _run_cycles() {
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101"
+  _install_queue "101"
 
   _run_cycle
 
@@ -262,7 +264,7 @@ _run_cycles() {
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101"
+  _install_queue "101"
   export AUTOSPEC_TEST_DEFAULT_BRANCH="trunk"
 
   _run_cycle
@@ -280,7 +282,7 @@ _run_cycles() {
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "201,202"
+  _install_queue "201,202"
   printf '{"branch":"autospec/autonomous-main","base":"main","kind":"integration"}\n' > "$MODE_FILE"
 
   _run_cycle
@@ -296,7 +298,7 @@ _run_cycles() {
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "201"
+  _install_queue "201"
   printf '{"branch":"autospec/explore/2026-07-10-x","base":"main","kind":"explore"}\n' > "$MODE_FILE"
 
   _run_cycle
@@ -313,7 +315,7 @@ _run_cycles() {
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101,202"
+  _install_queue "101,202"
 
   _run_cycle
 
@@ -327,7 +329,7 @@ _run_cycles() {
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101,202"
+  _install_queue "101,202"
 
   _run_cycle
 
@@ -342,7 +344,7 @@ _run_cycles() {
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "901"
+  _install_queue "901"
 
   _run_cycle
 
@@ -356,7 +358,7 @@ _run_cycles() {
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101,202"
+  _install_queue "101,202"
   printf '65\n' > "$TEST_TMP/sync-rc"
 
   _run_cycle
@@ -377,7 +379,7 @@ _run_cycles() {
 @test "ensure failure (non-65): self subset parked, no dispatch onto parent" {
   _install_common_stubs
   _install_provenance
-  _install_list_ready "101"
+  _install_queue "101"
   # ensure fails with the real script's mode-conflict exit code.
   _install_stub "autonomous-integration-branch.sh" 'exit 6'
 
@@ -391,7 +393,7 @@ _run_cycles() {
 @test "repeated integration mode conflict: self issue cools down and spend is not incremented" {
   _install_common_stubs
   _install_provenance
-  _install_list_ready "1867"
+  _install_queue "1867"
 
   local spend_log="$TEST_TMP/spend.log"
   _install_stub "autonomous-spend-ledger.sh" \
@@ -429,7 +431,7 @@ _run_cycles() {
 @test "integration mode conflict cooldown falls through to next ready issue" {
   _install_common_stubs
   _install_provenance
-  _install_list_ready_ready_batch "1867,2001" "1867"
+  _install_queue_ready_batch "1867,2001" "1867"
 
   _install_stub "autonomous-integration-branch.sh" \
     "case \"\${1:-}\" in
@@ -457,7 +459,7 @@ _run_cycles() {
 
 @test "no provenance/integration scripts: single dispatch with no subset filter" {
   _install_common_stubs
-  _install_list_ready "101,202"
+  _install_queue "101,202"
 
   _run_cycle
 

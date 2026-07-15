@@ -4,6 +4,7 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+use autospec_core::claim::{lint_issue_intent_with_trusted_actors, IssueIntentFinding};
 use autospec_core::lint::{
     directive_for, lint_implementation, lint_issue_body, parse_unified_diff,
     ImplementationLintContext, ImplementationLintFinding, ImplementationLintOptions,
@@ -553,6 +554,11 @@ fn abstraction_stem(path: &str) -> Option<String> {
 }
 
 fn run_issue(args: &[String]) -> Result<(), CommandFailure> {
+    if let [command, rest @ ..] = args {
+        if command == "safety" {
+            return run_issue_safety(rest);
+        }
+    }
     if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
         print_issue_help();
         return Ok(());
@@ -575,6 +581,306 @@ fn run_issue(args: &[String]) -> Result<(), CommandFailure> {
             findings.len().min(64) as i32,
         ))
     }
+}
+
+fn run_issue_safety(args: &[String]) -> Result<(), CommandFailure> {
+    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
+        print_issue_safety_help();
+        return Ok(());
+    }
+    let options = parse_issue_safety_options(args)?;
+    let body = read_body(&options.body_path)?;
+    let policy = load_issue_safety_policy(options.config_path.as_deref());
+    let trusted_actors = policy
+        .trusted_actors
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut lint = lint_issue_intent_with_trusted_actors(
+        &options.title,
+        &body,
+        &options.actor,
+        &trusted_actors,
+    );
+    if policy.has_unsupported_pattern {
+        lint.findings.push(IssueIntentFinding {
+            severity: "block",
+            rule_id: "invalid-policy-regex",
+            pattern: "unsupported configured regex",
+        });
+        lint.blocking = true;
+    }
+    let decision = if lint.blocking {
+        "SAFETY_BLOCK"
+    } else if lint.ambiguous {
+        "SAFETY_AMBIGUOUS"
+    } else {
+        "SAFETY_PASS"
+    };
+
+    if options.json {
+        print_issue_safety_json(decision, &lint, &options.actor);
+    } else {
+        println!("{decision}");
+        for finding in &lint.findings {
+            println!(
+                "RULE_ID: {}: {}: matched {}",
+                finding.severity, finding.rule_id, finding.pattern
+            );
+        }
+    }
+
+    match decision {
+        "SAFETY_PASS" => Ok(()),
+        "SAFETY_AMBIGUOUS" => Err(CommandFailure::status(String::new(), 1)),
+        _ => Err(CommandFailure::status(String::new(), 2)),
+    }
+}
+
+struct IssueSafetyOptions {
+    body_path: String,
+    title: String,
+    actor: String,
+    config_path: Option<String>,
+    json: bool,
+}
+
+fn parse_issue_safety_options(args: &[String]) -> Result<IssueSafetyOptions, CommandFailure> {
+    let mut body_path = None;
+    let mut title = None;
+    let mut actor = None;
+    let mut config_path = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => json = true,
+            "--title" => set_once(
+                &mut title,
+                argument_value(args, &mut index, "--title")?,
+                "--title accepts exactly one value",
+            )?,
+            "--actor" => set_once(
+                &mut actor,
+                argument_value(args, &mut index, "--actor")?,
+                "--actor accepts exactly one value",
+            )?,
+            "--config" => set_once(
+                &mut config_path,
+                argument_value(args, &mut index, "--config")?,
+                "--config accepts exactly one value",
+            )?,
+            "--help" | "-h" => {
+                return Err(CommandFailure::diagnostic(
+                    "autospec lint issue safety --help cannot be combined with other arguments",
+                ));
+            }
+            "-" => set_body_path(&mut body_path, &args[index])?,
+            option if option.starts_with('-') => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown autospec lint issue safety option: {option}"
+                )));
+            }
+            path => set_body_path(&mut body_path, path)?,
+        }
+        index += 1;
+    }
+    let Some(body_path) = body_path else {
+        return Err(CommandFailure::diagnostic(
+            "autospec lint issue safety requires a body path",
+        ));
+    };
+    Ok(IssueSafetyOptions {
+        body_path,
+        title: title.unwrap_or_default(),
+        actor: actor.unwrap_or_default(),
+        config_path,
+        json,
+    })
+}
+
+#[derive(Default)]
+pub(crate) struct IssueSafetyPolicy {
+    pub(crate) trusted_actors: Vec<String>,
+    pub(crate) has_unsupported_pattern: bool,
+}
+
+pub(crate) fn load_issue_safety_policy(config_path: Option<&str>) -> IssueSafetyPolicy {
+    let path = config_path.map(PathBuf::from).unwrap_or_else(|| {
+        std::env::var("AUTOSPEC_CONFIG_FILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(".autospec/autospec.yml"))
+    });
+    let Ok(document) = fs::read_to_string(path) else {
+        return default_issue_safety_policy();
+    };
+    parse_issue_safety_policy(&document).unwrap_or_else(default_issue_safety_policy)
+}
+
+fn default_issue_safety_policy() -> IssueSafetyPolicy {
+    IssueSafetyPolicy {
+        trusted_actors: vec!["berlinguyinca".to_string()],
+        has_unsupported_pattern: false,
+    }
+}
+
+fn parse_issue_safety_policy(document: &str) -> Option<IssueSafetyPolicy> {
+    let mut policy = default_issue_safety_policy();
+    let mut gate_indent = None;
+    let mut section_indent = None;
+    let mut pattern_indent = None;
+    let mut trusted_indent = None;
+
+    for raw_line in document.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = raw_line.len() - raw_line.trim_start().len();
+
+        let Some(gate) = gate_indent else {
+            if trimmed == "issue_intent_gate:" {
+                gate_indent = Some(indent);
+            }
+            continue;
+        };
+        if indent <= gate {
+            break;
+        }
+
+        if indent == gate + 2 {
+            section_indent = None;
+            pattern_indent = None;
+            trusted_indent = None;
+            match trimmed {
+                "block_patterns:" | "ambiguous_patterns:" => section_indent = Some(indent),
+                "trusted_actors:" => trusted_indent = Some(indent),
+                _ => {}
+            }
+            continue;
+        }
+
+        if let Some(trusted) = trusted_indent {
+            if indent > trusted && trimmed.starts_with("- login:") {
+                let login = parse_yaml_scalar(trimmed.trim_start_matches("- login:"))?;
+                if !login.is_empty() && !policy.trusted_actors.iter().any(|actor| actor == &login) {
+                    policy.trusted_actors.push(login);
+                }
+            }
+        }
+
+        if let Some(section) = section_indent {
+            if indent <= section {
+                pattern_indent = None;
+                continue;
+            }
+            if trimmed == "patterns:" {
+                pattern_indent = Some(indent);
+                continue;
+            }
+        }
+        if let Some(patterns) = pattern_indent {
+            if indent <= patterns {
+                pattern_indent = None;
+                continue;
+            }
+            if let Some(value) = trimmed.strip_prefix("- ") {
+                let pattern = parse_yaml_scalar(value)?;
+                if !is_builtin_issue_safety_pattern(&pattern) {
+                    policy.has_unsupported_pattern = true;
+                }
+            }
+        }
+    }
+    Some(policy)
+}
+
+fn parse_yaml_scalar(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.starts_with('[') || value.starts_with('{') {
+        return None;
+    }
+    if let Some(value) = value.strip_prefix('"') {
+        let value = value.strip_suffix('"')?;
+        let mut result = String::new();
+        let mut escaped = false;
+        for character in value.chars() {
+            if escaped {
+                match character {
+                    '\\' => result.push('\\'),
+                    '"' => result.push('"'),
+                    'n' => result.push('\n'),
+                    'r' => result.push('\r'),
+                    't' => result.push('\t'),
+                    _ => return None,
+                }
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else {
+                result.push(character);
+            }
+        }
+        return (!escaped).then_some(result);
+    }
+    if let Some(value) = value.strip_prefix('\'') {
+        return value.strip_suffix('\'').map(ToOwned::to_owned);
+    }
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn is_builtin_issue_safety_pattern(pattern: &str) -> bool {
+    matches!(
+        pattern,
+        "(?i)delete .*production"
+            | "(?i)drop .*prod(uction)? .*database"
+            | "(?i)(dump|print|exfiltrate|send).*secret"
+            | "(?i)(aws|github|stripe).*token"
+            | "(?i)(print|dump|log|write|show|expose|send).*(credential|password|api[ -]?key|private[ -]?key|token)"
+            | "(?i)(credential|password|api[ -]?key|private[ -]?key|token).*(to (the )?(log|console|stdout)|in logs?)"
+            | "(?i)ignore (all )?(previous|system|developer|agent) instructions"
+            | "(?i)bypass (ci|tests|hooks|review|guardian)"
+            | "(?i)(disable|turn off|remove|skip)[^.!?\\n]{0,120}(ci|checks?|tests?|hooks?|review|guardian)"
+            | "(?i)(ci|checks?|tests?|hooks?|review|guardian)[^.!?\\n]{0,120}\\b(disabled?|turned? off|removed?|skip(?:ped)?|bypassed?|ignored?|suppressed?)\\b"
+            | "(?i)\\b(auth|login|password|token|admin)[ -]?(backdoor|bypass)\\b"
+            | "(?i)\\b(backdoor|bypass)\\b.*\\b(auth|login|password|token|admin)\\b"
+            | "(?i)\\bmagic (token|password|login)\\b"
+            | "rm -rf /"
+            | "(?i)curl .*\\| *(sh|bash)"
+            | "(?i)clean (old|bad|stale)? ?data"
+            | "(?i)(relax|disable|remove).*security"
+            | "(?i)(relax|disable|remove).*(auth|audit|logging)"
+            | "(?i)(production|prod|billing|payments|migration|terraform|iam|kms)"
+    )
+}
+
+fn print_issue_safety_json(
+    decision: &str,
+    lint: &autospec_core::claim::IssueIntentLint,
+    actor: &str,
+) {
+    let findings = lint
+        .findings
+        .iter()
+        .map(|finding| {
+            format!(
+                "{{\"severity\":\"{}\",\"rule_id\":\"{}\",\"pattern\":\"{}\"}}",
+                finding.severity,
+                finding.rule_id,
+                escape_json(finding.pattern),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    println!(
+        "{{\"decision\":\"{decision}\",\"findings\":[{findings}],\"actor\":{},\"trusted\":{}}}",
+        if actor.is_empty() {
+            "null".to_string()
+        } else {
+            format!("\"{}\"", escape_json(actor))
+        },
+        if lint.trusted { "true" } else { "false" },
+    );
 }
 
 struct IssueOptions {
@@ -683,6 +989,12 @@ fn print_help() {
 fn print_issue_help() {
     println!(
         "autospec lint issue\n\nUSAGE:\n    autospec lint issue [--json] <BODY_PATH>\n\nBODY_PATH:\n    -           Read the issue body from standard input\n\nOPTIONS:\n    --json      Write ordered findings as JSON\n    -h, --help  Print help"
+    );
+}
+
+fn print_issue_safety_help() {
+    println!(
+        "autospec lint issue safety\n\nUSAGE:\n    autospec lint issue safety [--json] [--actor LOGIN] [--title TITLE] [--config PATH] <BODY_PATH>\n\nBODY_PATH:\n    -           Read the issue body from standard input\n\nOPTIONS:\n    --json      Write the safety decision and findings as JSON\n    --actor     Identify the issue author for trusted-reset policy\n    --title     Include the issue title in policy evaluation\n    --config    Load trusted actors; unsupported custom regexes fail closed\n    -h, --help  Print help"
     );
 }
 

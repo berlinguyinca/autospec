@@ -152,19 +152,19 @@ teardown() {
 @test "autospec-run-status hides unclaimed stale heartbeats when queue state is known" {
     mkdir -p "$TEST_TMP/status-bin" "$TEST_TMP/testorg__testrepo"
     cp "$RUN_STATUS" "$TEST_TMP/status-bin/autospec-run-status.sh"
-    cat > "$TEST_TMP/status-bin/list-ready-issues.sh" <<'EOF'
+    cat > "$TEST_TMP/status-bin/autospec" <<'EOF'
 #!/usr/bin/env bash
 cat <<'JSON'
 {"ready":[],"blocked":[],"claimed":[{"number":42,"title":"active"}],"conflicts":[],"batch":[]}
 JSON
 EOF
-    chmod +x "$TEST_TMP/status-bin/autospec-run-status.sh" "$TEST_TMP/status-bin/list-ready-issues.sh"
+    chmod +x "$TEST_TMP/status-bin/autospec-run-status.sh" "$TEST_TMP/status-bin/autospec"
     printf '{"issue":"42","branch":"feat/x","step":"tests_started","ts":100,"pr":"","repo":"testorg/testrepo"}\n' \
         > "$TEST_TMP/testorg__testrepo/42.json"
     printf '{"issue":"99","branch":"feat/old","step":"pr_created","ts":100,"pr":"101","repo":"testorg/testrepo"}\n' \
         > "$TEST_TMP/testorg__testrepo/99.json"
 
-    run bash "$TEST_TMP/status-bin/autospec-run-status.sh" --repo "testorg/testrepo" --json
+    run env AUTOSPEC_QUEUE_BIN="$TEST_TMP/status-bin/autospec" bash "$TEST_TMP/status-bin/autospec-run-status.sh" --repo "testorg/testrepo" --json
     [ "$status" -eq 0 ]
     echo "$output" | grep -q '"issue":42'
     ! echo "$output" | grep -q '"issue":99'

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# tests/unit/test_autospec_linked_pr_reconcile.bats — queue scan reconciles
+# tests/unit/test_autospec_linked_pr_reconcile.bats — Rust queue scan reconciles
 # claimed issues whose linked PR exists but run-state still lacks `.pr`.
 
 write_gh_stub() {
@@ -67,8 +67,10 @@ SH
 
 setup_fixture_paths() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    LIST_READY="$REPO_ROOT/skills/autospec-run/scripts/list-ready-issues.sh"
     AUTOSPEC="$REPO_ROOT/target/debug/autospec"
+    if [ ! -x "$AUTOSPEC" ]; then
+        cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
+    fi
     TEST_TMP="$(mktemp -d)"
     AUTO_JSON="$TEST_TMP/auto.json"
     ACTIVE_JSON="$TEST_TMP/active.json"
@@ -108,8 +110,8 @@ teardown() {
     rm -rf "$TEST_TMP"
 }
 
-@test "list-ready reconciles active claimed issue with linked PR and one Closeout report" {
-    run bash "$LIST_READY" --repo testorg/testrepo --batch-size 1
+@test "queue ready reconciles active claimed issue with linked PR and one Closeout report" {
+    run "$AUTOSPEC" queue ready --repo testorg/testrepo --batch-size 1
 
     [ "$status" -eq 0 ]
     state="$("$AUTOSPEC" claim state read --issue 42 --repo testorg/testrepo)"

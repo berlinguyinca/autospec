@@ -4,11 +4,14 @@ use std::process::{Command, Output};
 
 use autospec_core::coordination::{
     dependency_numbers, parse_dependency_issue_json, parse_remote_issue_list_json,
-    parse_remote_pull_requests_json, plan_ready_queue, PullRequestEvidence, QueueIssueView,
-    QueuePolicy, ReadyQueueInput, ReadyQueuePlan, RemoteIssue,
+    parse_remote_pull_requests_json, plan_ready_queue_with_trusted_actors, PullRequestEvidence,
+    QueueIssueView, QueuePolicy, ReadyQueueInput, ReadyQueuePlan, RemoteIssue,
 };
 
-use super::claim::{reconcile_active_issue, recover_active_issue};
+use super::claim::{
+    active_issue_counts_toward_worker_capacity, reconcile_active_issue, recover_active_issue,
+};
+use super::lint::load_issue_safety_policy;
 use super::CommandFailure;
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -45,19 +48,38 @@ fn ready(args: &[String]) -> Result<(), CommandFailure> {
     for issue in &active {
         let _ = recover_active_issue(&repo, issue.number, 300);
     }
-    active = list_issues(&repo, "in-progress-by-bot")?;
+    active = list_issues(&repo, "in-progress-by-bot")?
+        .into_iter()
+        .filter(|issue| {
+            active_issue_counts_toward_worker_capacity(&repo, issue.number, 300).unwrap_or(true)
+        })
+        .collect();
     let dependencies = load_dependencies(&repo, &candidates);
     let pull_requests = list_pull_requests(&repo);
     let mut policy = QueuePolicy::new(batch_size, max_repo_workers());
     policy.only_issues = only_issues();
     policy.non_blocking_dependency_labels = non_blocking_dependency_labels();
-    let plan = plan_ready_queue(&ReadyQueueInput {
-        candidates,
-        active,
-        dependencies,
-        pull_requests,
-        policy,
-    });
+    let safety_policy = load_issue_safety_policy(None);
+    if safety_policy.has_unsupported_pattern {
+        return Err(CommandFailure::diagnostic(
+            "queue safety policy contains unsupported custom regex",
+        ));
+    }
+    let trusted_actors = safety_policy
+        .trusted_actors
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let plan = plan_ready_queue_with_trusted_actors(
+        &ReadyQueueInput {
+            candidates,
+            active,
+            dependencies,
+            pull_requests,
+            policy,
+        },
+        &trusted_actors,
+    );
     println!("{}", plan_json(&plan));
     Ok(())
 }

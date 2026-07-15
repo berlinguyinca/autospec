@@ -32,6 +32,12 @@ rm -rf "$TEMP_SCRIPTS_DIR"
     exit 1
 }
 
+grep -q 'install_autospec_runtime_binary: installed' /tmp/autospec-install-path.out || {
+    echo "FAIL: installer did not install the Rust autospec runtime"
+    cat /tmp/autospec-install-path.out
+    exit 1
+}
+
 grep -q 'AUTOSPEC_BIN_DIR="$HOME/.autospec/bin"' "$TEST_HOME/.autospec/env" || {
     echo "FAIL: ~/.autospec/env does not export the autospec bin directory"
     cat "$TEST_HOME/.autospec/env"

@@ -414,7 +414,7 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > | `OUTLINE_TOO_LONG` | `SHORTEN: \`## Implementation outline\` exceeds 30 lines; compress signatures or split the issue.` |
 > | `UI_SECTIONS_INCOMPLETE` | `ADD: this is a UI feature — include \`## Design reference\`, \`## Interaction states\`, and \`## UX flows\` (all three).` |
 
-> **Pre-filing safety loop (adaptive, MAX_SAFETY_RETRIES=5):** For each candidate child body, after the issue-quality lint passes and before `gh issue create`, run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue-safety.sh" --title "<candidate title>" /tmp/draft-<slug>.md`. If the exit code is `1` or `2`, append the safety findings to the next generation prompt as cumulative directives:
+> **Pre-filing safety loop (adaptive, MAX_SAFETY_RETRIES=5):** For each candidate child body, after the issue-quality lint passes and before `gh issue create`, run `"${AUTOSPEC_BIN:-autospec}" lint issue safety --title "<candidate title>" /tmp/draft-<slug>.md`. If the exit code is `1` or `2`, append the safety findings to the next generation prompt as cumulative directives:
 >
 > | Finding | Directive appended to next prompt |
 > |---|---|
@@ -536,14 +536,14 @@ labels and patches each body with a `## Model fit` block.
 > ### Issue intent safety gate
 >
 > Before adding or preserving `auto-implement`, run the issue intent safety
-> gate with `lint-issue-safety.sh`:
+> gate with the Rust issue-intent safety command:
 >
 > ```bash
 > _body_file="$(mktemp)"
 > gh issue view <N> --repo {repo} --json body --jq '.body' > "$_body_file"
 > _author="$(gh issue view <N> --repo {repo} --json author --jq '.author.login // empty')"
 > _title="$(gh issue view <N> --repo {repo} --json title --jq '.title')"
-> bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue-safety.sh" \
+> "${AUTOSPEC_BIN:-autospec}" lint issue safety \
 >   --json --actor "$_author" --title "$_title" "$_body_file" > /tmp/safety-<N>.json
 > _safety_status=$?
 > ```

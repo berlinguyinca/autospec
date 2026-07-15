@@ -263,6 +263,26 @@ install_autospec_runtime_binary() {
     fi
 
     info "install_autospec_runtime_binary: building autospec-cli release binary"
+    # Test and automation callers often override HOME to isolate install state.
+    # cargo is normally a rustup shim under the invoking user's ~/.cargo, so
+    # preserve that discovered toolchain location when HOME no longer points
+    # to the account that owns it. Explicit CARGO_HOME/RUSTUP_HOME always win.
+    if [ -z "${CARGO_HOME:-}" ] || [ -z "${RUSTUP_HOME:-}" ]; then
+        cargo_bin="$(command -v cargo 2>/dev/null || true)"
+        case "$cargo_bin" in
+            */.cargo/bin/cargo)
+                rustup_owner_home="${cargo_bin%/.cargo/bin/cargo}"
+                if [ -z "${CARGO_HOME:-}" ] && [ -d "$rustup_owner_home/.cargo" ]; then
+                    CARGO_HOME="$rustup_owner_home/.cargo"
+                    export CARGO_HOME
+                fi
+                if [ -z "${RUSTUP_HOME:-}" ] && [ -d "$rustup_owner_home/.rustup" ]; then
+                    RUSTUP_HOME="$rustup_owner_home/.rustup"
+                    export RUSTUP_HOME
+                fi
+                ;;
+        esac
+    fi
     (
         cd "$REPO_ROOT"
         cargo build --release -p autospec-cli
@@ -1373,7 +1393,6 @@ skills/autospec-run/scripts/autospec-run-status.sh::autospec-run-status.sh \
 skills/autospec-run/scripts/invoke-review.sh::invoke-review.sh \
 skills/autospec-run/scripts/fab-completeness.sh::fab-completeness.sh \
 skills/autospec-run/scripts/fab-route.sh::fab-route.sh \
-skills/autospec-run/scripts/list-ready-issues.sh::list-ready-issues.sh \
 skills/autospec-run/scripts/post-token-report.sh::post-token-report.sh \
 skills/autospec-run/scripts/run-groom-preflight.sh::run-groom-preflight.sh \
 skills/autospec-resume/scripts/resume-scan.sh::resume-scan.sh \

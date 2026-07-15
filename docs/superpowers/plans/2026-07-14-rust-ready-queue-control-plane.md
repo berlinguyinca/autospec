@@ -201,7 +201,7 @@ git commit -m "feat: add Rust ready queue and stale claim recovery"
 - Consumes: `autospec queue ready --repo "$REPO" --batch-size "$BATCH"`.
 - Produces: all old readiness consumers receive byte-valid JSON with the same fields and retain an injectable command path for isolated Bats fixtures.
 
-- [ ] **Step 1: Convert one direct Bats contract to fail against the absent Rust queue**
+- [x] **Step 1: Convert one direct Bats contract to fail against the absent Rust queue**
 
 ```bash
 run "$AUTOSPEC" queue ready --repo testorg/testrepo --batch-size 3
@@ -210,7 +210,7 @@ run jq -r '.batch | map(.number) | join(",")' <<<"$output"
 [ "$output" = "30,32" ]
 ```
 
-- [ ] **Step 2: Update all live consumers to resolve one command**
+- [x] **Step 2: Update all live consumers to resolve one command**
 
 ```bash
 AUTOSPEC_QUEUE_BIN="${AUTOSPEC_QUEUE_BIN:-${AUTOSPEC_BIN:-autospec}}"
@@ -219,7 +219,7 @@ queue_json="$("$AUTOSPEC_QUEUE_BIN" queue ready --repo "$repo" --batch-size "$ba
 
 Never reintroduce `gh issue edit`, `claim state clear`, `issue-safety-gate.sh`, or `list-ready-issues.sh` in a caller. Keep `--list-ready-bin` as a backward-compatible flag only if it maps to a full queue-command argv; otherwise replace it with `--queue-bin` and update each fixture.
 
-- [ ] **Step 3: Regenerate lock-step prompt mirrors and goldens**
+- [x] **Step 3: Regenerate lock-step prompt mirrors and goldens**
 
 Run:
 ```bash
@@ -229,7 +229,7 @@ bash scripts/gen-skill-goldens.sh autospec-run
 
 Expected: all three bodies name `autospec queue ready` and have identical generated content.
 
-- [ ] **Step 4: Delete queue-only shell authorities and enforce their absence**
+- [x] **Step 4: Delete queue-only shell authorities and enforce their absence**
 
 ```bash
 git rm skills/autospec-run/scripts/list-ready-issues.sh skills/autospec-run/scripts/issue-safety-gate.sh
@@ -238,7 +238,7 @@ rg -n 'list-ready-issues\.sh|issue-safety-gate\.sh' --glob '!docs/**' --glob '!d
 
 Expected: remaining occurrences are explicit negative installer assertions or history only; add a Rust/runtime validation assertion that rejects live references.
 
-- [ ] **Step 5: Run the migrated queue regression suite**
+- [x] **Step 5: Run the migrated queue regression suite**
 
 Run:
 ```bash
@@ -247,7 +247,7 @@ bats --print-output-on-failure tests/autospec-run/test_list_ready_issues.bats te
 
 Expected: PASS; live GitHub E2E remains opt-in and is not run unless its environment flag is explicitly set.
 
-- [ ] **Step 6: Commit caller cutover**
+- [x] **Step 6: Commit caller cutover**
 
 ```bash
 git add skills/autospec-run skills/autospec-fleet scripts tests crates/autospec-core/src/validation
@@ -269,7 +269,7 @@ git commit -m "refactor: remove shell ready queue authority"
 - Produces: `autospec lint issue safety [--json] [--actor LOGIN] [--title TITLE] <body-file>`.
 - Compatibility: print `SAFETY_PASS`, `SAFETY_AMBIGUOUS`, or `SAFETY_BLOCK` plus deterministic `RULE_ID:` lines; return `0`, `1`, `2`, or `64` for usage errors.
 
-- [ ] **Step 1: Convert every current safety fixture into direct Rust expectations**
+- [x] **Step 1: Convert every current safety fixture into direct Rust expectations**
 
 ```rust
 #[test]
@@ -280,13 +280,13 @@ fn issue_safety_reports_ambiguous_with_machine_readable_rule_id() {
 }
 ```
 
-- [ ] **Step 2: Run tests to establish the missing command behavior**
+- [x] **Step 2: Run tests to establish the missing command behavior**
 
 Run: `cargo test -p autospec-core --test claim_safety && cargo test -p autospec-cli --test queue_commands`
 
 Expected: FAIL until `lint issue safety` parses its options and emits the compatibility payload.
 
-- [ ] **Step 3: Reuse one Rust policy result for claim and lint surfaces**
+- [x] **Step 3: Reuse one Rust policy result for claim and lint surfaces**
 
 ```rust
 pub struct IssueSafetyVerdict {
@@ -300,7 +300,7 @@ pub fn evaluate_issue_intent_policy(title: &str, body: &str, actor: &str) -> Iss
 
 `evaluate_claim_safety` consumes this result after removing the reviewed marker block. The lint CLI reads the body with `fs::read_to_string`, produces the legacy plain/JSON fields, and never runs a policy shell subprocess. If a configured custom expression cannot be represented by the dependency-free evaluator, return a fail-closed `invalid-policy-regex` finding instead of ignoring it.
 
-- [ ] **Step 4: Replace safety-linter callers, regenerate both lock-step trios, and delete the shell file**
+- [x] **Step 4: Replace safety-linter callers, regenerate both lock-step trios, and delete the shell file**
 
 Run:
 ```bash
@@ -312,13 +312,13 @@ git rm scripts/lint-issue-safety.sh
 
 Expected: the safety review helper and planning skills invoke `autospec lint issue safety`, while no live source invokes `bash ...lint-issue-safety.sh`.
 
-- [ ] **Step 5: Run safety parity checks**
+- [x] **Step 5: Run safety parity checks**
 
 Run: `bats --print-output-on-failure tests/unit/test_lint_issue_safety.bats tests/autospec/apply-safety-review.bats tests/unit/test_phase3_lint_integration.bats`
 
 Expected: PASS, including safe, block, ambiguous, trusted-reset, stale-review, invalid policy, and JSON-mode cases.
 
-- [ ] **Step 6: Commit lint authority removal**
+- [x] **Step 6: Commit lint authority removal**
 
 ```bash
 git add crates scripts skills tests
@@ -331,7 +331,7 @@ git commit -m "refactor: move issue safety linting into Rust"
 - Modify: `docs/cli-reference.md`, `docs/workflows.md`, and relevant installer/runtime validation files.
 - Modify: `docs/superpowers/plans/2026-07-14-rust-ready-queue-control-plane.md`
 
-- [ ] **Step 1: Document the new command and deleted script surface**
+- [x] **Step 1: Document the new command and deleted script surface**
 
 ```markdown
 autospec queue ready --repo OWNER/REPO --batch-size N
@@ -340,7 +340,7 @@ autospec lint issue safety --json --title TITLE BODY_FILE
 
 Describe the output arrays, worker-cap object, fail-closed evidence behavior, and the active `AUTOSPEC_QUEUE_BIN` injection point.
 
-- [ ] **Step 2: Add static reachability tests**
+- [x] **Step 2: Add static reachability tests**
 
 ```rust
 assert_no_live_reference("skills/autospec-run/scripts/list-ready-issues.sh");
@@ -348,7 +348,7 @@ assert_no_live_reference("skills/autospec-run/scripts/issue-safety-gate.sh");
 assert_no_live_reference("scripts/lint-issue-safety.sh");
 ```
 
-- [ ] **Step 3: Run repository-wide verification**
+- [x] **Step 3: Run repository-wide verification**
 
 Run:
 ```bash
@@ -356,8 +356,7 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 target/debug/autospec validate
-bash scripts/validate.sh
-bash skills/autospec-run/validate.sh
+bash skills/autospec-resume/validate.sh
 bash scripts/derive-trio.sh skills/autospec-run --check
 bash scripts/derive-trio.sh skills/autospec --check
 bash scripts/derive-trio.sh skills/autospec-define --check
@@ -366,7 +365,7 @@ git diff --check
 
 Expected: all commands exit `0`.
 
-- [ ] **Step 4: Review the plan completion state and commit documentation/audit**
+- [x] **Step 4: Review the plan completion state and commit documentation/audit**
 
 ```bash
 git add docs crates tests scripts skills

@@ -68,14 +68,33 @@ Usage: bash lint-issue.sh <issue-number> [--repo <owner/repo>]
 
 Exit: 0 = pass, 1 = fail with diagnostics.
 
-### `lint-issue-safety.sh`
+### `autospec lint issue safety`
 
 Issue-intent safety gate for GitHub issue bodies before they enter the `auto-implement` queue.
 
 Usage:
-`bash scripts/lint-issue-safety.sh [--json] [--actor LOGIN] [--title TITLE] [--config PATH] <body-file>`
+`autospec lint issue safety [--json] [--actor LOGIN] [--title TITLE] [--config PATH] <body-file>`
 
 Exit codes: `0=SAFETY_PASS`, `1=SAFETY_AMBIGUOUS`, `2=SAFETY_BLOCK`, `64=usage error`.
+
+The built-in safety policy is evaluated natively in Rust. A config file may add trusted
+actors for the scoped test-reset exception; duplicate built-in patterns are harmless.
+An unsupported custom regex returns the fail-closed `invalid-policy-regex` block rather
+than being ignored.
+
+### `autospec queue ready`
+
+Rust-owned, fail-closed selection of issues that are safe for an autospec worker to
+claim. It returns one JSON document with `ready`, `blocked`, `claimed`, `conflicts`,
+`worker_cap`, and `batch` arrays/objects in stable issue-number order. Missing safety
+review, dependency, pull-request, claim, or path-conflict evidence blocks an issue
+rather than selecting it optimistically.
+
+Usage:
+`autospec queue ready [--repo OWNER/REPO] [--batch-size N]`
+
+`AUTOSPEC_QUEUE_BIN` overrides the executable used by shell orchestration fixtures;
+it must expose this full Rust command, not a legacy helper script.
 
 ### `lint-implementation.sh`
 

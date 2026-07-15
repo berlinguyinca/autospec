@@ -3,7 +3,10 @@
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    SCRIPT="$REPO_ROOT/skills/autospec-run/scripts/list-ready-issues.sh"
+    AUTOSPEC="$REPO_ROOT/target/debug/autospec"
+    if [ ! -x "$AUTOSPEC" ]; then
+        cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
+    fi
     TEST_TMP="$(mktemp -d)"
     AUTO_JSON="$TEST_TMP/auto.json"
     ACTIVE_JSON="$TEST_TMP/active.json"
@@ -46,6 +49,16 @@ if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
   exit 0
 fi
 
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '[]\n'
+  exit 0
+fi
+
+if [ "$1" = "api" ]; then
+  printf '[]\n'
+  exit 0
+fi
+
 exit 1
 SH
     chmod +x "$TEST_TMP/bin/gh"
@@ -78,6 +91,31 @@ None
 EOF
 }
 
+prepare_reviewed_candidates() {
+    local safety
+    safety="$(cat <<'EOF'
+## Safety review
+
+<!-- autospec-safety:begin -->
+- **decision:** `SAFETY_PASS`
+<!-- autospec-safety:end -->
+
+EOF
+)"
+    jq --arg safety "$safety" '
+      map(
+        .body = (if (.body | contains("<!-- autospec-safety:begin -->")) then .body else $safety + .body end)
+        | .labels += (if ([.labels[].name] | index("safety:reviewed")) then [] else [{"name":"safety:reviewed"}] end)
+      )
+    ' "$AUTO_JSON" > "$AUTO_JSON.tmp"
+    mv "$AUTO_JSON.tmp" "$AUTO_JSON"
+}
+
+run_queue() {
+    prepare_reviewed_candidates
+    "$AUTOSPEC" queue ready "$@"
+}
+
 @test "Depends on #1 blocks issue 2" {
     body2="$(cat <<'EOF'
 ## Goal
@@ -93,7 +131,7 @@ EOF
     jq -n --arg body "$body2" '[{number:2,title:"dependent",body:$body,labels:[{name:"auto-implement"}]}]' > "$AUTO_JSON"
     printf '{"1":"OPEN"}\n' > "$STATES_JSON"
 
-    run bash "$SCRIPT" --repo testorg/testrepo
+    run run_queue --repo testorg/testrepo
 
     [ "$status" -eq 0 ]
     planner_output="$output"
@@ -118,7 +156,7 @@ EOF
     jq -n --arg body "$body2" '[{number:2,title:"dependent",body:$body,labels:[{name:"auto-implement"}]}]' > "$AUTO_JSON"
     printf '{"1":"OPEN"}\n' > "$STATES_JSON"
 
-    run bash "$SCRIPT" --repo testorg/testrepo
+    run run_queue --repo testorg/testrepo
 
     [ "$status" -eq 0 ]
     planner_output="$output"
@@ -144,7 +182,7 @@ EOF
     jq -n '{"1":{"state":"OPEN","body":"## Goal\nTrack children.\n","labels":[{"name":"epic"}]}}' > "$ISSUE_VIEWS_JSON"
     printf '{"1":"OPEN"}\n' > "$STATES_JSON"
 
-    run bash "$SCRIPT" --repo testorg/testrepo
+    run run_queue --repo testorg/testrepo
 
     [ "$status" -eq 0 ]
     planner_output="$output"
@@ -174,7 +212,7 @@ EOF
     jq -n '{"1":{"state":"OPEN","body":"## Goal\nImplement sibling.\n","labels":[{"name":"auto-implement"}]}}' > "$ISSUE_VIEWS_JSON"
     printf '{"1":"OPEN"}\n' > "$STATES_JSON"
 
-    run bash "$SCRIPT" --repo testorg/testrepo
+    run run_queue --repo testorg/testrepo
 
     [ "$status" -eq 0 ]
     planner_output="$output"
@@ -215,7 +253,7 @@ EOF
     jq -n --arg body "$body1" '{"1":{"state":"OPEN","body":$body,"labels":[{"name":"auto-implement"}]}}' > "$ISSUE_VIEWS_JSON"
     printf '{"1":"OPEN"}\n' > "$STATES_JSON"
 
-    run bash "$SCRIPT" --repo testorg/testrepo
+    run run_queue --repo testorg/testrepo
 
     [ "$status" -eq 0 ]
     planner_output="$output"
@@ -253,7 +291,7 @@ EOF
     jq -n --arg body "$tracker" '{"1":{"state":"OPEN","body":$body,"labels":[]}}' > "$ISSUE_VIEWS_JSON"
     printf '{"1":"OPEN"}\n' > "$STATES_JSON"
 
-    run bash "$SCRIPT" --repo testorg/testrepo
+    run run_queue --repo testorg/testrepo
 
     [ "$status" -eq 0 ]
     planner_output="$output"
@@ -278,7 +316,7 @@ EOF
         {number:13,title:"d",body:$b4,labels:[{name:"auto-implement"}]}
       ]' > "$AUTO_JSON"
 
-    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=0 run bash "$SCRIPT" --repo testorg/testrepo --batch-size 4
+    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=0 run run_queue --repo testorg/testrepo --batch-size 4
 
     [ "$status" -eq 0 ]
     run bash -c "printf '%s' '$output' | jq -r '.batch | map(.number) | join(\",\")'"
@@ -296,7 +334,7 @@ EOF
     jq -n --arg body "$(body_with_path skills/active.sh)" \
       '[{number:9,title:"active",body:$body,labels:[{name:"in-progress-by-bot"}]}]' > "$ACTIVE_JSON"
 
-    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=1 run bash "$SCRIPT" --repo testorg/testrepo --batch-size 2
+    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=1 run run_queue --repo testorg/testrepo --batch-size 2
 
     [ "$status" -eq 0 ]
     planner_output="$output"
@@ -321,7 +359,7 @@ EOF
     jq -n --arg body "$(body_with_path skills/active.sh)" \
       '[{number:9,title:"active",body:$body,labels:[{name:"in-progress-by-bot"}]}]' > "$ACTIVE_JSON"
 
-    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=2 run bash "$SCRIPT" --repo testorg/testrepo --batch-size 3
+    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=2 run run_queue --repo testorg/testrepo --batch-size 3
 
     [ "$status" -eq 0 ]
     planner_output="$output"
@@ -350,7 +388,7 @@ YAML
 
     AUTOSPEC_CONFIG_FILE="$TEST_TMP/autospec.yml" \
       AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=1 \
-      run bash "$SCRIPT" --repo testorg/testrepo --batch-size 3
+      run run_queue --repo testorg/testrepo --batch-size 3
 
     [ "$status" -eq 0 ]
     planner_output="$output"
@@ -386,7 +424,7 @@ SH
 
     AUTOSPEC_CONFIG_FILE="$TEST_TMP/autospec.yml" \
       AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=1 \
-      run bash "$SCRIPT" --repo testorg/testrepo --batch-size 4
+      run run_queue --repo testorg/testrepo --batch-size 4
 
     [ "$status" -eq 0 ]
     planner_output="$output"
@@ -405,7 +443,7 @@ SH
         {number:41,title:"safe",body:$safe,labels:[{name:"auto-implement"}]}
       ]' > "$AUTO_JSON"
 
-    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=3 run bash "$SCRIPT" --repo testorg/testrepo --batch-size 3
+    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=3 run run_queue --repo testorg/testrepo --batch-size 3
 
     [ "$status" -eq 0 ]
     planner_output="$output"
@@ -425,7 +463,7 @@ SH
     jq -n --arg body "$(body_with_path skills/foo.sh)" \
       '[{number:19,title:"active",body:$body,labels:[{name:"in-progress-by-bot"}]}]' > "$ACTIVE_JSON"
 
-    run bash "$SCRIPT" --repo testorg/testrepo
+    run run_queue --repo testorg/testrepo
 
     [ "$status" -eq 0 ]
     planner_output="$output"
@@ -446,7 +484,7 @@ SH
         {number:32,title:"independent",body:$b3,labels:[{name:"auto-implement"}]}
       ]' > "$AUTO_JSON"
 
-    run bash "$SCRIPT" --repo testorg/testrepo --batch-size 3
+    run run_queue --repo testorg/testrepo --batch-size 3
 
     [ "$status" -eq 0 ]
     planner_output="$output"

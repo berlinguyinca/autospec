@@ -29,7 +29,7 @@ YAML
 }
 
 write_mock_probe() {
-    cat > "$TEST_TMPDIR/list-ready-issues.sh" <<'EOF'
+    cat > "$TEST_TMPDIR/autospec" <<'EOF'
 #!/usr/bin/env bash
 repo=""
 while [ $# -gt 0 ]; do
@@ -48,7 +48,7 @@ case "$repo" in
     ;;
 esac
 EOF
-    chmod +x "$TEST_TMPDIR/list-ready-issues.sh"
+    chmod +x "$TEST_TMPDIR/autospec"
 }
 
 write_mock_stop() {
@@ -65,7 +65,7 @@ EOF
 
     run bash "$FLEET_STATUS" --json \
         --config "$TEST_TMPDIR/fleet.yml" \
-        --list-ready-bin "$TEST_TMPDIR/list-ready-issues.sh"
+        --queue-bin "$TEST_TMPDIR/autospec"
 
     [ "$status" -eq 0 ]
     json="$output"

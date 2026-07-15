@@ -81,7 +81,7 @@ instead of making the operator hand-parse heartbeat JSON.
 - `--coordination-status` — print active workers, claimed issues, blockers,
   stale claims, conflicts, and the next safe batch, then exit without claiming.
 - `--max-parallel-safe` — print the next safe parallel batch from
-  `list-ready-issues.sh` and exit without claiming.
+  `autospec queue ready` and exit without claiming.
 - `--claim <issue>` — attempt a deterministic claim via `autospec claim acquire`
   and exit with that command's status (`0` claimed, `2` already claimed/skipped).
 - `--release <issue>` — release a distributed claim via `autospec claim release`.
@@ -453,17 +453,13 @@ match: `area:fabric` stays `default`), so it is deterministic and testable.
 
 ### Distributed coordinator selection
 
-Before choosing `ready[0]`, prefer the distributed coordinator helpers when they
-exist in `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}` or the checked-out
-repo:
+Before choosing `ready[0]`, resolve the Rust control-plane binary:
 
 ```bash
-COORD_LIST="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/list-ready-issues.sh"
-[ -x "$COORD_LIST" ] || COORD_LIST="skills/autospec-run/scripts/list-ready-issues.sh"
-AUTOSPEC_CLAIM_BIN="${AUTOSPEC_BIN:-autospec}"
+AUTOSPEC_QUEUE_BIN="${AUTOSPEC_QUEUE_BIN:-${AUTOSPEC_BIN:-autospec}}"
 ```
 
-If `--coordination-status` is active, run `list-ready-issues.sh --repo {repo}
+If `--coordination-status` is active, run `autospec queue ready --repo {repo}
 --batch-size "${AUTOSPEC_BATCH_SIZE:-1}"`, print the JSON, and exit. If
 `--max-parallel-safe` is active, print only the `.batch` array and exit.
 
@@ -474,7 +470,7 @@ During the normal monitor loop:
 > label transition, and confirms the lowest-ID run-state comment. The monitor
 > never reimplements that safety or lease transition with `gh issue edit`.
 
-1. Run `list-ready-issues.sh --repo {repo} --batch-size "$effective_batch_size"`
+1. Run `autospec queue ready --repo {repo} --batch-size "$effective_batch_size"`
    after watchdog reconciliation and profile filtering.
 2. Use `.ready[0].number` as the next issue candidate.
 3. Claim it through `autospec claim acquire --issue "$ISSUE" --repo {repo}
@@ -483,6 +479,17 @@ During the normal monitor loop:
    queue and try another candidate without failing the batch.
 5. On failure, stop, or retry exhaustion, call `autospec claim release` before
    returning `auto-implement` to the queue.
+
+### Final safety-stamp contract
+
+Before an issue can enter implementation, its final body must contain both `<!-- autospec-safety:begin -->` and `<!-- autospec-safety:end -->`, with exactly one decision line between them:
+
+```markdown
+- **decision:** `SAFETY_PASS`
+```
+
+Generate that decision through `autospec lint issue safety`; a missing,
+ambiguous, or blocking result must keep the issue out of the queue.
 
 The GitHub `autospec-run-state` comment written by the Rust control plane is the
 cross-workstation source of truth. Local process heartbeat files remain useful
@@ -1364,8 +1371,8 @@ Each session derives its own `AUTOSPEC_WORKER_ID` if not overridden; the default
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS` | `0` (disabled) | Repo-wide active-worker cap. When active `in-progress-by-bot` issues meet the cap, `list-ready-issues.sh` returns an empty `.batch` while still reporting `.ready`. Use this to throttle one workstation or a cluster. |
-| `AUTOSPEC_RUN_ONLY_ISSUES` | unset (unconstrained) | Space-separated issue-number allowlist. When set and non-empty, `list-ready-issues.sh` scopes `.ready`/`.blocked`/`.batch` to only those issue numbers — set by the autonomous conductor's dispatch-time provenance split so the operator and self-originated batches each drain their own subset. Unset or empty keeps the full-queue scan. |
+| `AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS` | `0` (disabled) | Repo-wide active-worker cap. When active `in-progress-by-bot` issues meet the cap, `autospec queue ready` returns an empty `.batch` while still reporting `.ready`. Use this to throttle one workstation or a cluster. |
+| `AUTOSPEC_RUN_ONLY_ISSUES` | unset (unconstrained) | Space-separated issue-number allowlist. When set and non-empty, `autospec queue ready` scopes `.ready`/`.blocked`/`.batch` to only those issue numbers — set by the autonomous conductor's dispatch-time provenance split so the operator and self-originated batches each drain their own subset. Unset or empty keeps the full-queue scan. |
 | `AUTOSPEC_CLAIM_LEASE_SECONDS` | `10800` | Cross-machine claim lease TTL written into the GitHub run-state comment and used by `autospec claim acquire` stale-reclaim decisions. |
 | `AUTOSPEC_CLAIM_SETTLE_SECONDS` | `0.2` | Short post-upsert readback delay so simultaneous comment creates converge before a worker reports claim success. |
 | `AUTOSPEC_CLAIM_CONFIRM_READS` | `5` | Number of settled lowest-lock readbacks required before `autospec claim acquire` reports claim success. |

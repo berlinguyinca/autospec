@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::claim::{evaluate_claim_safety, ClaimSafetyInput};
+use crate::claim::{evaluate_claim_safety_with_trusted_actors, ClaimSafetyInput};
 use crate::state::json::{JsonParser, JsonValue};
 
 const SERIAL_LABELS: &[&str] = &[
@@ -284,6 +284,15 @@ impl ReadyQueuePlan {
 }
 
 pub fn plan_ready_queue(input: &ReadyQueueInput) -> ReadyQueuePlan {
+    plan_ready_queue_with_trusted_actors(input, &["berlinguyinca"])
+}
+
+/// Plan a ready queue with the configured trusted actors used by the current
+/// issue-intent policy. The planner stays pure: the CLI owns config loading.
+pub fn plan_ready_queue_with_trusted_actors(
+    input: &ReadyQueueInput,
+    trusted_actors: &[&str],
+) -> ReadyQueuePlan {
     let mut known = input.dependencies.clone();
     for issue in &input.candidates {
         known.insert(issue.number, issue.clone());
@@ -320,7 +329,8 @@ pub fn plan_ready_queue(input: &ReadyQueueInput) -> ReadyQueuePlan {
             blocked.push(view);
             continue;
         }
-        let safety = evaluate_claim_safety(&view.issue.safety_input());
+        let safety =
+            evaluate_claim_safety_with_trusted_actors(&view.issue.safety_input(), trusted_actors);
         if !safety.allowed {
             view.reason = Some("safety_gate_failed".to_string());
             view.safety_gate = Some(SafetyGate {

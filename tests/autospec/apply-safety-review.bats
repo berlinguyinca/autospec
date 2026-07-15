@@ -1,7 +1,10 @@
 setup() {
   SUT="${BATS_TEST_DIRNAME}/../../scripts/apply-safety-review.sh"   # tests/autospec/ → repo/scripts/
-  GATE_SH="${BATS_TEST_DIRNAME}/../../skills/autospec-run/scripts/issue-safety-gate.sh"
-  REAL_LINT="${BATS_TEST_DIRNAME}/../../scripts/lint-issue-safety.sh"
+  REPO_ROOT="${BATS_TEST_DIRNAME}/../.."
+  AUTOSPEC="$REPO_ROOT/target/debug/autospec"
+  if [ ! -x "$AUTOSPEC" ]; then
+    cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
+  fi
   BIN_DIR="$BATS_TEST_TMPDIR/bin"; mkdir -p "$BIN_DIR"
   GH_LOG="$BATS_TEST_TMPDIR/gh.log"; : > "$GH_LOG"
   GH_BODY="$BATS_TEST_TMPDIR/gh-body.txt"
@@ -40,7 +43,7 @@ SH
   write_lint_stub '{"decision":"SAFETY_PASS","findings":[],"actor":"berlinguyinca","trusted":false}' 0
   printf 'fix: guard the loop; expected no crash\n' > "$BODY_FILE"
 
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 42 --repo o/r --body-file "$BODY_FILE" --title T --actor berlinguyinca --apply
   [ "$status" -eq 0 ]
@@ -64,7 +67,7 @@ SH
   write_lint_stub '{"decision":"SAFETY_PASS","findings":[],"actor":"berlinguyinca","trusted":false}' 0
   printf 'fix: guard the loop; expected no crash\n' > "$BODY_FILE"
 
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 42 --repo o/r --body-file "$BODY_FILE" --title T --actor berlinguyinca --apply
   [ "$status" -eq 0 ]
@@ -85,10 +88,7 @@ issue = {
 open(out_path, "w", encoding="utf-8").write(json.dumps(issue))
 PY
 
-  run env AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../../scripts" bash -c '
-    source "'"$GATE_SH"'"
-    cat "'"$BATS_TEST_TMPDIR"'/issue.json" | autospec_issue_safety_gate_passes
-  '
+  run "$AUTOSPEC" lint issue safety --json --title T --actor berlinguyinca "$GH_BODY"
   [ "$status" -eq 0 ]
 }
 
@@ -96,7 +96,7 @@ PY
   write_lint_stub '{"decision":"SAFETY_AMBIGUOUS","findings":[{"severity":"ambiguous","rule_id":"vague-data-cleanup","pattern":"x"}],"actor":"someone","trusted":false}' 1
   printf 'clean old data please\n' > "$BODY_FILE"
 
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 7 --repo o/r --body-file "$BODY_FILE" --title T --actor someone --apply
   [ "$status" -ne 0 ]
@@ -113,13 +113,13 @@ PY
   write_lint_stub '{"decision":"SAFETY_PASS","findings":[],"actor":"berlinguyinca","trusted":false}' 0
   printf 'fix: guard the loop; expected no crash\n' > "$BODY_FILE"
 
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 42 --repo o/r --body-file "$BODY_FILE" --title T --actor berlinguyinca --apply
   [ "$status" -eq 0 ]
   cp "$GH_BODY" "$BATS_TEST_TMPDIR/body2.md"
 
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 42 --repo o/r --body-file "$BATS_TEST_TMPDIR/body2.md" --title T --actor berlinguyinca --apply
   [ "$status" -eq 0 ]
@@ -133,7 +133,7 @@ PY
   write_lint_stub '{"decision":"SAFETY_PASS","findings":[],"actor":"berlinguyinca","trusted":false}' 0
   printf 'fix: guard the loop; expected no crash\n' > "$BODY_FILE"
 
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 42 --repo o/r --body-file "$BODY_FILE" --title T --actor berlinguyinca
   [ "$status" -eq 0 ]
@@ -151,7 +151,7 @@ SH
   chmod +x "$BIN_DIR/lint-garbage"
   printf 'fix: guard the loop; expected no crash\n' > "$BODY_FILE"
 
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-garbage" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-garbage" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 9 --repo o/r --body-file "$BODY_FILE" --title T --actor someone --apply
   [ "$status" -ne 0 ]
@@ -162,7 +162,7 @@ SH
   write_lint_stub '{"decision":"SAFETY_PASS","findings":[],"actor":"liam","trusted":false}' 0
   printf 'fix: guard the loop; expected no crash\n' > "$BODY_FILE"
 
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 42 --repo o/r --body-file "$BODY_FILE" --title T --actor liam --apply
   [ "$status" -eq 0 ]
@@ -183,10 +183,7 @@ issue = {
 open(out_path, "w", encoding="utf-8").write(json.dumps(issue))
 PY
 
-  run env AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../../scripts" bash -c '
-    source "'"$GATE_SH"'"
-    cat "'"$BATS_TEST_TMPDIR"'/issue.json" | autospec_issue_safety_gate_passes
-  '
+  run "$AUTOSPEC" lint issue safety --json --title T --actor liam "$GH_BODY"
   [ "$status" -eq 0 ]
 }
 
@@ -195,7 +192,7 @@ PY
   # with NO following '## ' heading. The gate must still re-lint it and reject.
   write_lint_stub '{"decision":"SAFETY_PASS","findings":[],"actor":"berlinguyinca","trusted":false}' 0
   printf 'fix: guard the loop; expected no crash\n' > "$BODY_FILE"
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 42 --repo o/r --body-file "$BODY_FILE" --title T --actor berlinguyinca --apply
   [ "$status" -eq 0 ]
@@ -211,17 +208,14 @@ issue = {"number": 42, "title": "T", "body": body,
 open(out_path, "w", encoding="utf-8").write(json.dumps(issue))
 PY
 
-  run env AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../../scripts" bash -c '
-    source "'"$GATE_SH"'"
-    cat "'"$BATS_TEST_TMPDIR"'/issue.json" | autospec_issue_safety_gate_passes
-  '
+  run "$AUTOSPEC" lint issue safety --json --title T --actor berlinguyinca "$BATS_TEST_TMPDIR/issue.json"
   [ "$status" -ne 0 ]
 }
 
 @test "reader accepts benign user content appended after the block" {
   write_lint_stub '{"decision":"SAFETY_PASS","findings":[],"actor":"berlinguyinca","trusted":false}' 0
   printf 'fix: guard the loop; expected no crash\n' > "$BODY_FILE"
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 42 --repo o/r --body-file "$BODY_FILE" --title T --actor berlinguyinca --apply
   [ "$status" -eq 0 ]
@@ -236,10 +230,7 @@ issue = {"number": 42, "title": "T", "body": body,
 open(out_path, "w", encoding="utf-8").write(json.dumps(issue))
 PY
 
-  run env AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../../scripts" bash -c '
-    source "'"$GATE_SH"'"
-    cat "'"$BATS_TEST_TMPDIR"'/issue.json" | autospec_issue_safety_gate_passes
-  '
+  run "$AUTOSPEC" lint issue safety --json --title T --actor berlinguyinca "$BATS_TEST_TMPDIR/issue.json"
   [ "$status" -eq 0 ]
 }
 
@@ -250,7 +241,7 @@ PY
   # content-shape-based strip would reopen this hole.
   write_lint_stub '{"decision":"SAFETY_PASS","findings":[],"actor":"berlinguyinca","trusted":false}' 0
   printf 'fix: guard the loop; expected no crash\n' > "$BODY_FILE"
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 42 --repo o/r --body-file "$BODY_FILE" --title T --actor berlinguyinca --apply
   [ "$status" -eq 0 ]
@@ -266,10 +257,7 @@ issue = {"number": 42, "title": "T", "body": body,
 open(out_path, "w", encoding="utf-8").write(json.dumps(issue))
 PY
 
-  run env AUTOSPEC_SCRIPTS_DIR="${BATS_TEST_DIRNAME}/../../scripts" bash -c '
-    source "'"$GATE_SH"'"
-    cat "'"$BATS_TEST_TMPDIR"'/issue.json" | autospec_issue_safety_gate_passes
-  '
+  run "$AUTOSPEC" lint issue safety --json --title T --actor berlinguyinca "$BATS_TEST_TMPDIR/issue.json"
   [ "$status" -ne 0 ]
 }
 
@@ -277,7 +265,7 @@ PY
   write_lint_stub '{"decision":"SAFETY_AMBIGUOUS","findings":[{"severity":"ambiguous","rule_id":"vague-data-cleanup","pattern":"x"}],"actor":"someone","trusted":false}' 1
   printf 'clean old data please\n' > "$BODY_FILE"
 
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 7 --repo o/r --body-file "$BODY_FILE" --title T --actor someone --apply
   [ "$status" -ne 0 ]
@@ -307,7 +295,7 @@ fix: guard the loop; expected no crash
 keep me
 EOF
 
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-stub" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 42 --repo o/r --body-file "$BODY_FILE" --title T --actor berlinguyinca --apply
   [ "$status" -eq 0 ]
@@ -326,7 +314,7 @@ SH
   chmod +x "$BIN_DIR/lint-empty"
   printf 'fix: guard the loop; expected no crash\n' > "$BODY_FILE"
 
-  run env AUTOSPEC_LINT_ISSUE_SAFETY_BIN="$BIN_DIR/lint-empty" \
+  run env AUTOSPEC_ISSUE_SAFETY_BIN="$BIN_DIR/lint-empty" \
           AUTOSPEC_GH_BIN="$BIN_DIR/gh-stub" \
       bash "$SUT" --issue 11 --repo o/r --body-file "$BODY_FILE" --title T --actor someone --apply
   [ "$status" -ne 0 ]

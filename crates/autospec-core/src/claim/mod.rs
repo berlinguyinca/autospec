@@ -207,6 +207,16 @@ impl ClaimSafetyDecision {
 /// trusting generated metadata. This deliberately checks the current issue
 /// title/body after validating the exact reviewed marker block.
 pub fn evaluate_claim_safety(input: &ClaimSafetyInput) -> ClaimSafetyDecision {
+    evaluate_claim_safety_with_trusted_actors(input, &["berlinguyinca"])
+}
+
+/// Evaluate the claim safety contract with configured trusted actors. This is
+/// intentionally limited to the scoped test-reset exception; custom policy
+/// regexes are handled fail-closed by the CLI before a queue is planned.
+pub fn evaluate_claim_safety_with_trusted_actors(
+    input: &ClaimSafetyInput,
+    trusted_actors: &[&str],
+) -> ClaimSafetyDecision {
     let labels = input
         .labels
         .iter()
@@ -274,7 +284,7 @@ pub fn evaluate_claim_safety(input: &ClaimSafetyInput) -> ClaimSafetyDecision {
         input.title,
         strip_guardian_skips(&body_without_review)
     );
-    let intent = evaluate_issue_intent(&scan, &input.author);
+    let intent = evaluate_issue_intent_with_trusted_actors(&scan, &input.author, trusted_actors);
     if intent.blocking {
         return ClaimSafetyDecision::reject("current_body_safety_block");
     }
@@ -290,45 +300,149 @@ struct IssueIntent {
     ambiguous: bool,
 }
 
-/// This is the Rust authority for the built-in issue-intent policy.  The
-/// policy intentionally uses bounded, line-local checks where the shell
-/// implementation used bounded regular expressions: a CI noun followed by a
-/// present-tense "skips" is descriptive prose, not a request to bypass CI.
-fn evaluate_issue_intent(text: &str, actor: &str) -> IssueIntent {
-    let lower = text.to_ascii_lowercase();
-    let mut intent = IssueIntent {
-        blocking: contains_production_destruction(&lower)
-            || contains_secret_exfiltration(&lower)
-            || contains_credential_printing(&lower)
-            || contains_instruction_bypass(&lower)
-            || contains_ci_or_review_bypass(&lower)
-            || contains_auth_backdoor(&lower)
-            || lower.contains("rm -rf /")
-            || (lower.contains("curl") && (lower.contains("| sh") || lower.contains("| bash"))),
-        ambiguous: contains_vague_data_cleanup(&lower)
-            || contains_weakened_security(&lower)
-            || contains_any(
-                &lower,
-                &[
-                    "production",
-                    "prod",
-                    "billing",
-                    "payments",
-                    "migration",
-                    "terraform",
-                    "iam",
-                    "kms",
-                ],
-            ),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueIntentFinding {
+    pub severity: &'static str,
+    pub rule_id: &'static str,
+    pub pattern: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueIntentLint {
+    pub findings: Vec<IssueIntentFinding>,
+    pub blocking: bool,
+    pub ambiguous: bool,
+    pub trusted: bool,
+}
+
+/// Evaluate a draft or persisted issue against the built-in intent policy.
+/// The returned rule IDs are stable CLI data; callers must not infer safety
+/// from prose or reimplement these predicates.
+pub fn lint_issue_intent(title: &str, body: &str, actor: &str) -> IssueIntentLint {
+    lint_issue_intent_with_trusted_actors(title, body, actor, &["berlinguyinca"])
+}
+
+/// Evaluate issue intent with the built-in policy and explicitly configured
+/// trusted actors. Trust can only enable the narrow scoped-test-reset exception;
+/// it never bypasses a blocking rule.
+pub fn lint_issue_intent_with_trusted_actors(
+    title: &str,
+    body: &str,
+    actor: &str,
+    trusted_actors: &[&str],
+) -> IssueIntentLint {
+    let lower = format!("{title}\n{body}").to_ascii_lowercase();
+    let mut findings = Vec::new();
+    let mut add = |severity, rule_id, pattern| {
+        findings.push(IssueIntentFinding {
+            severity,
+            rule_id,
+            pattern,
+        });
     };
 
-    if is_trusted_test_reset(&lower, actor) && !intent.blocking {
-        // The legacy policy lets the configured repo owner perform a documented
-        // local/test reset. It only removes the two ambiguity signals the reset
-        // necessarily contains; never-bypass findings stay blocking above.
-        intent.ambiguous = false;
+    if contains_production_destruction(&lower) {
+        add("block", "production-data-destruction", "delete production");
     }
-    intent
+    if contains_secret_exfiltration(&lower) {
+        add("block", "secret-exfiltration", "secret disclosure");
+    }
+    if contains_credential_printing(&lower) {
+        add("block", "credential-printing", "credential disclosure");
+    }
+    if contains_instruction_bypass(&lower) {
+        add(
+            "block",
+            "instruction-bypass",
+            "instruction or policy bypass",
+        );
+    }
+    if contains_ci_or_review_bypass(&lower) {
+        add("block", "ci-or-review-bypass", "CI or review bypass");
+    }
+    if contains_auth_backdoor(&lower) {
+        add(
+            "block",
+            "auth-backdoor",
+            "authentication backdoor or bypass",
+        );
+    }
+    if lower.contains("rm -rf /")
+        || (lower.contains("curl") && (lower.contains("| sh") || lower.contains("| bash")))
+    {
+        add("block", "destructive-shell", "destructive shell execution");
+    }
+    if contains_vague_data_cleanup(&lower) {
+        add("ambiguous", "vague-data-cleanup", "ambiguous data cleanup");
+    }
+    if contains_weakened_security(&lower) {
+        add(
+            "ambiguous",
+            "weaken-security-control",
+            "weakened security control",
+        );
+    }
+    if contains_any(
+        &lower,
+        &[
+            "production",
+            "prod",
+            "billing",
+            "payments",
+            "migration",
+            "terraform",
+            "iam",
+            "kms",
+        ],
+    ) {
+        add(
+            "ambiguous",
+            "production-or-infra-touch",
+            "production or infrastructure touch",
+        );
+    }
+
+    let trusted_reset = is_trusted_test_reset(&lower, actor, trusted_actors);
+    let blocking = findings.iter().any(|finding| finding.severity == "block");
+    if trusted_reset && !blocking {
+        findings.retain(|finding| {
+            !matches!(
+                finding.rule_id,
+                "vague-data-cleanup" | "production-or-infra-touch"
+            )
+        });
+        findings.push(IssueIntentFinding {
+            severity: "info",
+            rule_id: "trusted:test_data_reset",
+            pattern: "configured trusted actor",
+        });
+    }
+    IssueIntentLint {
+        blocking: findings.iter().any(|finding| finding.severity == "block"),
+        ambiguous: findings
+            .iter()
+            .any(|finding| finding.severity == "ambiguous"),
+        trusted: trusted_reset
+            && findings
+                .iter()
+                .any(|finding| finding.rule_id == "trusted:test_data_reset"),
+        findings,
+    }
+}
+
+/// The Rust authority uses bounded, line-local checks where the shell
+/// implementation used bounded regular expressions: a CI noun followed by a
+/// present-tense "skips" is descriptive prose, not a request to bypass CI.
+fn evaluate_issue_intent_with_trusted_actors(
+    text: &str,
+    actor: &str,
+    trusted_actors: &[&str],
+) -> IssueIntent {
+    let lint = lint_issue_intent_with_trusted_actors("", text, actor, trusted_actors);
+    IssueIntent {
+        blocking: lint.blocking,
+        ambiguous: lint.ambiguous,
+    }
 }
 
 fn last_safety_heading(prefix: &str) -> Option<(usize, usize)> {
@@ -475,16 +589,19 @@ fn contains_weakened_security(text: &str) -> bool {
     })
 }
 
-fn is_trusted_test_reset(text: &str, actor: &str) -> bool {
-    if actor != "berlinguyinca" {
+fn is_trusted_test_reset(text: &str, actor: &str, trusted_actors: &[&str]) -> bool {
+    if !trusted_actors.contains(&actor) {
         return false;
     }
     let reset = ["delete", "reset", "repopulate"].iter().any(|verb| {
         (ordered_contains(text, verb, "test") && ordered_contains(text, "test", "database"))
             || (ordered_contains(text, "test database", verb))
     });
+    let production_out_of_scope = text
+        .lines()
+        .any(|line| ordered_contains(line, "production", "out of scope"));
     let scoped = contains_any(text, &["test", "local", "fixture", "dev"])
-        && (text.contains("production out of scope") || text.contains("production, staging"));
+        && (production_out_of_scope || text.contains("production, staging"));
     reset && scoped
 }
 
