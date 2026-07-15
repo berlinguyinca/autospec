@@ -7,9 +7,9 @@
 duplicate findings to canonical active repositories and defers archived repositories by default.
 
 **Architecture:** A dependency-free `exploration` core owns typed evidence parsing, scoring,
-role inference, duplicate routing, and stable JSON rendering. The CLI is a thin file-input
-adapter. The `autospec-explore` trio documents the command contract identically, retaining no
-legacy runtime path.
+role inference, duplicate routing, audit-score reporting, and stable JSON rendering. The CLI is
+a thin file-input adapter. The `autospec-explore` trio documents the command contract
+identically, retaining no legacy runtime path.
 
 **Tech stack:** Rust standard library and existing in-tree JSON parser; no dependencies.
 
@@ -22,7 +22,10 @@ legacy runtime path.
 - Input is local JSON only; the command must not call the network or mutate repositories.
 - A family with no eligible target defers findings; an archived repository is eligible only when
   `revival_requested` is true.
-- Scores must use every specified evidence field and tie-break by repository name.
+- `revival_requested` requires `archived: true`; `module_paths` and `packages` contain only
+  non-blank, unique entries.
+- Scores must use every specified evidence field and tie-break by repository name. The stable
+  `repository_scores` audit list includes every repository, including penalized archives.
 - Final validation must include `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace`, and `autospec validate --fast`.
 
@@ -42,13 +45,16 @@ legacy runtime path.
 1. Start with failing Rust tests for an active `go-modules`, archived `go-admin`, duplicate
    fingerprint routing, a `revival_requested` exception, and CLI JSON rendering.
 2. Implement public typed input/output models and strict JSON parsing with the existing in-tree
-   parser. Reject unknown keys, duplicate repository names, unknown finding repositories, and
-   invalid dates rather than guessing.
+   parser. Reject unknown keys, duplicate repository names, contradictory revival flags, blank or
+   duplicate module/package evidence, unknown finding repositories, and invalid dates rather
+   than guessing.
 3. Score repository evidence deterministically: archived/revival state, push-recency ranking,
    README presence, module path count, package count, and inbound dependency references. Select
-   one canonical eligible target per family; tie-break by repository name.
+   one canonical eligible target per family; tie-break by repository name. Render every score in
+   `repository_scores` while excluding non-revival archives from canonical selection.
 4. Expose `autospec explore repositories --input <path>`; render stable JSON including
-   `canonical_targets`, `do_not_file_by_default`, `routed_findings`, and deferred findings.
+   `canonical_targets`, `repository_scores`, `do_not_file_by_default`, `routed_findings`, and
+   deferred findings.
 5. Add the same "Rust org-sweep repository routing" section to every explore prompt body. It
    must direct the agent to call the command before filing and use `routed_findings` only.
 6. Run focused tests after each red/green step, then the global validation commands.
@@ -66,4 +72,3 @@ cargo test --workspace
    lock-step prompt bodies, and the requested evidence fields.
 3. Resolve every critical or important finding and re-run affected tests.
 4. Run the global validation commands and include their results in the issue closeout and PR body.
-

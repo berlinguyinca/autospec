@@ -77,7 +77,7 @@ fn explore_repositories_renders_stable_routing_json_from_a_local_input_file() {
     assert!(output.stderr.is_empty());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "{\"canonical_targets\":[{\"family\":\"go\",\"repository\":\"metabolomics-us/go-modules\",\"score\":118}],\"do_not_file_by_default\":[\"metabolomics-us/go-admin\"],\"routed_findings\":[{\"repository\":\"metabolomics-us/go-admin\",\"fingerprint\":\"lint-x\",\"title\":\"Fix lint\",\"canonical_target\":\"metabolomics-us/go-modules\",\"duplicate\":false}],\"deferred_findings\":[]}\n"
+        "{\"canonical_targets\":[{\"family\":\"go\",\"repository\":\"metabolomics-us/go-modules\",\"score\":118}],\"repository_scores\":[{\"repository\":\"metabolomics-us/go-admin\",\"family\":\"go\",\"score\":-1000000},{\"repository\":\"metabolomics-us/go-modules\",\"family\":\"go\",\"score\":118}],\"do_not_file_by_default\":[\"metabolomics-us/go-admin\"],\"routed_findings\":[{\"repository\":\"metabolomics-us/go-admin\",\"fingerprint\":\"lint-x\",\"title\":\"Fix lint\",\"canonical_target\":\"metabolomics-us/go-modules\",\"duplicate\":false}],\"deferred_findings\":[]}\n"
     );
 }
 

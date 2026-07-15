@@ -86,6 +86,13 @@ pub struct CanonicalTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryScore {
+    pub repository: String,
+    pub family: String,
+    pub score: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutedFinding {
     pub repository: String,
     pub fingerprint: String,
@@ -105,6 +112,7 @@ pub struct DeferredFinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplorationReport {
     pub canonical_targets: Vec<CanonicalTarget>,
+    pub repository_scores: Vec<RepositoryScore>,
     pub do_not_file_by_default: Vec<String>,
     pub routed_findings: Vec<RoutedFinding>,
     pub deferred_findings: Vec<DeferredFinding>,
@@ -140,6 +148,19 @@ impl ExplorationReport {
             })
             .collect::<Vec<_>>()
             .join(",");
+        let repository_scores = self
+            .repository_scores
+            .iter()
+            .map(|score| {
+                format!(
+                    "{{\"repository\":\"{}\",\"family\":\"{}\",\"score\":{}}}",
+                    escape_json(&score.repository),
+                    escape_json(&score.family),
+                    score.score
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         let deferred_findings = self
             .deferred_findings
             .iter()
@@ -155,7 +176,7 @@ impl ExplorationReport {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "{{\"canonical_targets\":[{canonical_targets}],\"do_not_file_by_default\":{},\"routed_findings\":[{routed_findings}],\"deferred_findings\":[{deferred_findings}]}}",
+            "{{\"canonical_targets\":[{canonical_targets}],\"repository_scores\":[{repository_scores}],\"do_not_file_by_default\":{},\"routed_findings\":[{routed_findings}],\"deferred_findings\":[{deferred_findings}]}}",
             json_array(&self.do_not_file_by_default)
         )
     }
@@ -195,15 +216,15 @@ pub fn route_repositories(input: &ExplorationInput) -> Result<ExplorationReport,
         .into_iter()
         .collect::<Vec<_>>();
     let mut canonical_targets = Vec::new();
+    let mut repository_scores = Vec::new();
     let mut canonical_by_family = BTreeMap::new();
     for (family, repositories) in &families {
         let timestamps = repositories
             .iter()
             .map(|repository| pushed_at[repository.name.as_str()])
             .collect::<BTreeSet<_>>();
-        let mut candidates = repositories
+        let mut scored_repositories = repositories
             .iter()
-            .filter(|repository| !repository.archived || repository.revival_requested)
             .map(|repository| {
                 let push_rank = timestamps
                     .range(..pushed_at[repository.name.as_str()])
@@ -224,6 +245,18 @@ pub fn route_repositories(input: &ExplorationInput) -> Result<ExplorationReport,
                     score(repository, push_rank, inbound_references),
                 )
             })
+            .collect::<Vec<_>>();
+        scored_repositories.sort_by(|left, right| left.0.name.cmp(&right.0.name));
+        for (repository, score) in &scored_repositories {
+            repository_scores.push(RepositoryScore {
+                repository: repository.name.clone(),
+                family: repository.family.clone(),
+                score: *score,
+            });
+        }
+        let mut candidates = scored_repositories
+            .into_iter()
+            .filter(|(repository, _)| !repository.archived || repository.revival_requested)
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| {
             right
@@ -269,6 +302,7 @@ pub fn route_repositories(input: &ExplorationInput) -> Result<ExplorationReport,
 
     Ok(ExplorationReport {
         canonical_targets,
+        repository_scores,
         do_not_file_by_default,
         routed_findings,
         deferred_findings,
@@ -357,6 +391,14 @@ fn validate_input(input: &ExplorationInput) -> Result<(), String> {
         if !names.insert(repository.name.as_str()) {
             return Err(format!("duplicate repository name: {}", repository.name));
         }
+        if repository.revival_requested && !repository.archived {
+            return Err(format!(
+                "repository evidence {} revival_requested requires archived: true",
+                repository.name
+            ));
+        }
+        validate_distinct_nonempty(&repository.module_paths, "module_paths", &repository.name)?;
+        validate_distinct_nonempty(&repository.packages, "packages", &repository.name)?;
         parse_timestamp(&repository.pushed_at).map_err(|error| {
             format!(
                 "repository evidence {} has invalid pushed_at: {error}",
@@ -375,6 +417,27 @@ fn validate_input(input: &ExplorationInput) -> Result<(), String> {
             return Err(format!(
                 "unknown finding repository: {}",
                 finding.repository
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_distinct_nonempty(
+    values: &[String],
+    field: &str,
+    repository_name: &str,
+) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for value in values {
+        if value.trim().is_empty() {
+            return Err(format!(
+                "repository evidence {repository_name} {field} must not contain blank entries"
+            ));
+        }
+        if !seen.insert(value.as_str()) {
+            return Err(format!(
+                "repository evidence {repository_name} {field} contains duplicate entry: {value}"
             ));
         }
     }
