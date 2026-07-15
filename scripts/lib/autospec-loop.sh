@@ -2231,10 +2231,13 @@ fi'
 
             case "$_gate_verdict" in
                 merge-ok)
-                    # Rust autospec autonomous run-foreground owns foreground
-                    # mainline-health admission before this shell conductor is
-                    # entered. Do not re-admit ready Tier-1 work here: this
-                    # shell path is no longer authoritative for main health.
+                    # Main-health admission is owned by Rust before this legacy
+                    # conductor can consider or drain a ready issue. Keep this
+                    # shell path non-authoritative so missing branches cannot be
+                    # downgraded to a silent wait here.
+                    local _main_health="continue"
+
+                    if [ "$_main_health" = "continue" ]; then
                         # F3: while discovery issues are in flight, main merges are
                         # refused — but that refusal is enforced PER-PR by the phase4
                         # implementer via .autospec/explore-mode.json (PRs target the
@@ -2252,7 +2255,7 @@ fi'
                             printf '[conductor] F3: %s discovery issue(s) in-flight — main merges refused (phase4 sandbox routing); draining onto sandbox\n' \
                                 "$_inflight_discovery" >&2
                         fi
-                        # Gate green — invoke drain. Main-health admission is Rust-owned.
+                        # Gate + main-health green — invoke drain.
                         if [ "$_dry" = "1" ]; then
                             printf '[conductor] [dry-run] would invoke autospec-run for Tier-1 drain\n' >&2
                         else
@@ -2597,6 +2600,7 @@ EOF_PROV_BATCH
                         if [ "${_tier1_drain_dispatched:-0}" -eq 1 ]; then
                             _work_done=1
                         fi
+                    fi
                     ;;
                 block*)
                     printf '[conductor] premerge-gate blocked: %s — skipping drain this cycle\n' \
