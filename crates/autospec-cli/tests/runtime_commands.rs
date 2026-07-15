@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use autospec_core::runtime_policy::{Runtime, RuntimeClass};
+use serde_json::{json, Value};
+
 static NEXT_RUNTIME_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
 fn autospec() -> Command {
@@ -11,6 +14,184 @@ fn autospec() -> Command {
 
 fn audit_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/runtime-audit")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RuntimeClassification {
+    command: String,
+    path: PathBuf,
+    runtime: Runtime,
+    class: RuntimeClass,
+    reasons: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RuntimeClassificationLine {
+    class: RuntimeClass,
+    path: PathBuf,
+    reasons: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RuntimeAudit {
+    command: String,
+    root: PathBuf,
+    r0: Vec<PathBuf>,
+    r1: Vec<PathBuf>,
+    r2: Vec<PathBuf>,
+    r3: Vec<PathBuf>,
+    r4: Vec<PathBuf>,
+}
+
+impl RuntimeAudit {
+    fn add(&mut self, class: RuntimeClass, paths: Vec<PathBuf>) {
+        match class {
+            RuntimeClass::R0 => self.r0 = paths,
+            RuntimeClass::R1 => self.r1 = paths,
+            RuntimeClass::R2 => self.r2 = paths,
+            RuntimeClass::R3 => self.r3 = paths,
+            RuntimeClass::R4 => self.r4 = paths,
+        }
+    }
+
+    fn paths(&self, class: RuntimeClass) -> &[PathBuf] {
+        match class {
+            RuntimeClass::R0 => &self.r0,
+            RuntimeClass::R1 => &self.r1,
+            RuntimeClass::R2 => &self.r2,
+            RuntimeClass::R3 => &self.r3,
+            RuntimeClass::R4 => &self.r4,
+        }
+    }
+
+    fn all_paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.r0
+            .iter()
+            .chain(self.r1.iter())
+            .chain(self.r2.iter())
+            .chain(self.r3.iter())
+            .chain(self.r4.iter())
+    }
+}
+
+fn parse_runtime_classification(stdout: &[u8]) -> RuntimeClassification {
+    let value: Value = serde_json::from_slice(stdout).expect("runtime classify emits JSON");
+    RuntimeClassification {
+        command: json_string(&value, "command").to_owned(),
+        path: PathBuf::from(json_string(&value, "path")),
+        runtime: parse_runtime(json_string(&value, "runtime")),
+        class: parse_runtime_class(json_string(&value, "class")),
+        reasons: value
+            .get("reasons")
+            .and_then(Value::as_array)
+            .expect("runtime classify reasons are an array")
+            .iter()
+            .map(|reason| {
+                reason
+                    .as_str()
+                    .expect("runtime classify reason is a string")
+                    .to_owned()
+            })
+            .collect(),
+    }
+}
+
+fn parse_runtime_classification_line(stdout: &[u8]) -> RuntimeClassificationLine {
+    let stdout = std::str::from_utf8(stdout).expect("runtime classify text is UTF-8");
+    let mut lines = stdout.lines();
+    let line = lines.next().expect("runtime classify text has one line");
+    assert!(lines.next().is_none(), "runtime classify text has one line");
+
+    let mut fields = line.splitn(3, ' ');
+    RuntimeClassificationLine {
+        class: parse_runtime_class(fields.next().expect("classification class")),
+        path: PathBuf::from(fields.next().expect("classification path")),
+        reasons: fields.next().expect("classification reasons").to_owned(),
+    }
+}
+
+fn parse_runtime_audit(stdout: &[u8]) -> RuntimeAudit {
+    let value: Value = serde_json::from_slice(stdout).expect("runtime audit emits JSON");
+    let mut audit = RuntimeAudit {
+        command: json_string(&value, "command").to_owned(),
+        root: PathBuf::from(json_string(&value, "root")),
+        r0: Vec::new(),
+        r1: Vec::new(),
+        r2: Vec::new(),
+        r3: Vec::new(),
+        r4: Vec::new(),
+    };
+
+    for (class, paths) in value
+        .get("classes")
+        .and_then(Value::as_object)
+        .expect("runtime audit classes are an object")
+        .iter()
+    {
+        let paths = paths
+            .as_array()
+            .expect("runtime audit class entry is an array")
+            .iter()
+            .map(|path| PathBuf::from(path.as_str().expect("runtime audit path entry is a string")))
+            .collect();
+        audit.add(parse_runtime_class(class), paths);
+    }
+    audit
+}
+
+fn json_string<'a>(value: &'a Value, key: &str) -> &'a str {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("JSON field {key} is a string"))
+}
+
+fn parse_runtime(value: &str) -> Runtime {
+    match value {
+        "rust" => Runtime::Rust,
+        "shell" => Runtime::Shell,
+        "python" => Runtime::Python,
+        "node" => Runtime::Node,
+        "go" => Runtime::Go,
+        "unknown" => Runtime::Unknown,
+        other => panic!("unknown runtime kind: {other}"),
+    }
+}
+
+fn parse_runtime_class(value: &str) -> RuntimeClass {
+    match value {
+        "R0" => RuntimeClass::R0,
+        "R1" => RuntimeClass::R1,
+        "R2" => RuntimeClass::R2,
+        "R3" => RuntimeClass::R3,
+        "R4" => RuntimeClass::R4,
+        other => panic!("unknown runtime migration class: {other}"),
+    }
+}
+
+#[test]
+fn runtime_command_json_helpers_match_exact_paths() {
+    let output = json!({
+        "command": "runtime classify",
+        "path": "scripts/lint-issue.sh",
+        "runtime": "shell",
+        "class": "R1",
+        "reasons": ["stateful platform behavior belongs in Rust core"],
+    })
+    .to_string();
+
+    let classification = parse_runtime_classification(output.as_bytes());
+
+    assert_eq!(
+        classification,
+        RuntimeClassification {
+            command: "runtime classify".to_string(),
+            path: PathBuf::from("scripts/lint-issue.sh"),
+            runtime: Runtime::Shell,
+            class: RuntimeClass::R1,
+            reasons: vec!["stateful platform behavior belongs in Rust core".to_string()],
+        }
+    );
 }
 
 struct RuntimeFixture {
@@ -834,13 +1015,18 @@ fn runtime_commands_json_reports_r1_for_stateful_shell_helpers() {
         .args(["runtime", "classify", "scripts/lint-issue.sh", "--json"])
         .output()
         .expect("autospec runtime classify runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    assert!(stdout.contains("\"path\":\"scripts/lint-issue.sh\""));
-    assert!(stdout.contains("\"runtime\":\"shell\""));
-    assert!(stdout.contains("\"class\":\"R1\""));
-    assert!(stdout.contains("\"stateful platform behavior belongs in Rust core\""));
+    assert_eq!(
+        parse_runtime_classification(&output.stdout),
+        RuntimeClassification {
+            command: "runtime classify".to_string(),
+            path: PathBuf::from("scripts/lint-issue.sh"),
+            runtime: Runtime::Shell,
+            class: RuntimeClass::R1,
+            reasons: vec!["stateful platform behavior belongs in Rust core".to_string()],
+        }
+    );
 }
 
 #[test]
@@ -849,11 +1035,16 @@ fn runtime_commands_text_reports_one_line_with_class_and_path() {
         .args(["runtime", "classify", "scripts/lint-issue.sh"])
         .output()
         .expect("autospec runtime classify runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    assert_eq!(stdout.lines().count(), 1);
-    assert!(stdout.starts_with("R1 scripts/lint-issue.sh "));
+    assert_eq!(
+        parse_runtime_classification_line(&output.stdout),
+        RuntimeClassificationLine {
+            class: RuntimeClass::R1,
+            path: PathBuf::from("scripts/lint-issue.sh"),
+            reasons: "stateful platform behavior belongs in Rust core".to_string(),
+        }
+    );
 }
 
 #[test]
@@ -862,12 +1053,18 @@ fn runtime_commands_unknown_paths_return_r2_json() {
         .args(["runtime", "classify", "docs/specs/example.md", "--json"])
         .output()
         .expect("autospec runtime classify runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    assert!(stdout.contains("\"path\":\"docs/specs/example.md\""));
-    assert!(stdout.contains("\"runtime\":\"unknown\""));
-    assert!(stdout.contains("\"class\":\"R2\""));
+    assert_eq!(
+        parse_runtime_classification(&output.stdout),
+        RuntimeClassification {
+            command: "runtime classify".to_string(),
+            path: PathBuf::from("docs/specs/example.md"),
+            runtime: Runtime::Unknown,
+            class: RuntimeClass::R2,
+            reasons: vec!["stable helper; add parity fixture before porting".to_string()],
+        }
+    );
 }
 
 #[test]
@@ -882,20 +1079,33 @@ fn runtime_audit_json_groups_platform_files_and_skips_build_output() {
         ])
         .output()
         .expect("autospec runtime audit runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(
         output.status.success(),
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("\"command\":\"runtime audit\""));
-    assert!(stdout.contains(
-        "\"R1\":[\"scripts/lint-issue.sh\",\"skills/autospec-run/tests/watchdog_claim_timeout.bats\"]"
-    ));
-    assert!(stdout.contains("\"R2\":[\"packages/example/go.mod\"]"));
-    assert!(stdout.contains("\"R4\":[\"skills/autospec-fab/scripts/mesh.py\"]"));
-    assert!(!stdout.contains("target/ignored.rs"));
+    let audit = parse_runtime_audit(&output.stdout);
+    assert_eq!(audit.command, "runtime audit");
+    assert_eq!(audit.root, audit_fixture());
+    assert_eq!(
+        audit.paths(RuntimeClass::R1),
+        [
+            PathBuf::from("scripts/lint-issue.sh"),
+            PathBuf::from("skills/autospec-run/tests/watchdog_claim_timeout.bats"),
+        ]
+    );
+    assert_eq!(
+        audit.paths(RuntimeClass::R2),
+        [PathBuf::from("packages/example/go.mod")]
+    );
+    assert_eq!(
+        audit.paths(RuntimeClass::R4),
+        [PathBuf::from("skills/autospec-fab/scripts/mesh.py")]
+    );
+    assert!(!audit
+        .all_paths()
+        .any(|path| path == &PathBuf::from("target/ignored.rs")));
 }
 
 #[test]
@@ -934,11 +1144,12 @@ fn runtime_audit_does_not_follow_a_symlinked_platform_root() {
         ])
         .output()
         .expect("autospec runtime audit runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
 
     std::fs::remove_dir_all(&temporary).expect("remove temporary fixture");
     assert!(output.status.success());
-    assert!(!stdout.contains("secret.py"));
+    assert!(!parse_runtime_audit(&output.stdout)
+        .all_paths()
+        .any(|path| path == &PathBuf::from("scripts/secret.py")));
 }
 
 #[test]
