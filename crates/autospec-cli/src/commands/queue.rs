@@ -2,6 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::process::{Command, Output};
 
+use autospec_core::claim::{
+    evaluate_claim_safety, replace_safety_review_section, ClaimSafetyInput, SafetyReviewDecision,
+    SafetyReviewVerdict,
+};
 use autospec_core::coordination::{
     dependency_numbers, parse_dependency_issue_json, parse_remote_issue_page_json,
     parse_remote_pull_request_page_json, plan_ready_queue_with_trusted_actors, PullRequestEvidence,
@@ -11,7 +15,7 @@ use autospec_core::coordination::{
 use super::claim::{
     active_issue_counts_toward_worker_capacity, reconcile_active_issue, recover_active_issue,
 };
-use super::lint::load_issue_safety_policy;
+use super::lint::{load_issue_safety_policy, review_issue_safety_for_queue};
 use super::CommandFailure;
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -24,10 +28,317 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
             Ok(())
         }
         [command, rest @ ..] if command == "ready" => ready(rest),
+        [command, rest @ ..] if command == "review-safety" => review_safety(rest),
         [command, ..] => Err(CommandFailure::diagnostic(format!(
             "unknown autospec queue command: {command}"
         ))),
     }
+}
+
+#[derive(Debug, Default)]
+struct ReviewSafetyOptions {
+    repo: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Default)]
+struct ReviewSafetyTotals {
+    pass: usize,
+    ambiguous: usize,
+    block: usize,
+    stale: usize,
+    conflicted: usize,
+    skipped: usize,
+}
+
+fn review_safety(args: &[String]) -> Result<(), CommandFailure> {
+    let options = parse_review_safety_options(args)?;
+    let repo = options.repo.map_or_else(infer_repo, Ok)?;
+    let limit = options.limit.unwrap_or(50);
+    let candidates = list_issues(&repo, "auto-implement")?;
+    let mut totals = ReviewSafetyTotals::default();
+    let mut unreviewed = Vec::new();
+    for candidate in candidates {
+        if !reviewable_issue(&candidate) {
+            totals.skipped += 1;
+        } else {
+            unreviewed.push(candidate);
+        }
+    }
+    totals.skipped += unreviewed.len().saturating_sub(limit);
+
+    for candidate in unreviewed.into_iter().take(limit) {
+        let current = read_issue(&repo, candidate.number)?;
+        if !reviewable_issue(&current) {
+            totals.stale += 1;
+            continue;
+        }
+        let verdict = review_issue_safety_for_queue(&issue_safety_input(&current))?;
+        match verdict.decision {
+            SafetyReviewDecision::Pass => {
+                if apply_passing_safety_review(&repo, &current)? {
+                    totals.pass += 1;
+                } else {
+                    totals.conflicted += 1;
+                }
+            }
+            SafetyReviewDecision::Ambiguous => {
+                apply_non_passing_safety_review(&repo, &current, &verdict, "autospec:needs-human")?;
+                totals.ambiguous += 1;
+            }
+            SafetyReviewDecision::Block => {
+                apply_non_passing_safety_review(&repo, &current, &verdict, "security:quarantined")?;
+                totals.block += 1;
+            }
+        }
+    }
+    println!("{}", review_safety_json(&totals));
+    Ok(())
+}
+
+fn parse_review_safety_options(args: &[String]) -> Result<ReviewSafetyOptions, CommandFailure> {
+    let mut options = ReviewSafetyOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--repo" => {
+                let value = next_value(args, &mut index, "--repo")?;
+                if options.repo.replace(value).is_some() {
+                    return Err(CommandFailure::diagnostic(
+                        "--repo accepts exactly one value",
+                    ));
+                }
+            }
+            "--limit" => {
+                let value = next_value(args, &mut index, "--limit")?;
+                let limit = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| {
+                        CommandFailure::diagnostic("--limit must be a positive integer")
+                    })?;
+                if options.limit.replace(limit).is_some() {
+                    return Err(CommandFailure::diagnostic(
+                        "--limit accepts exactly one value",
+                    ));
+                }
+            }
+            "--help" | "-h" => {
+                return Err(CommandFailure::diagnostic(
+                    "--help cannot be combined with queue review-safety options",
+                ));
+            }
+            option => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown autospec queue review-safety option: {option}"
+                )));
+            }
+        }
+        index += 1;
+    }
+    Ok(options)
+}
+
+fn reviewable_issue(issue: &RemoteIssue) -> bool {
+    !issue.closed
+        && issue_has_label(issue, "auto-implement")
+        && !issue_has_label(issue, "safety:reviewed")
+        && !issue_has_label(issue, "autospec:needs-human")
+        && !issue_has_label(issue, "security:quarantined")
+}
+
+fn issue_has_label(issue: &RemoteIssue, label: &str) -> bool {
+    issue.labels.iter().any(|current| current == label)
+}
+
+fn issue_safety_input(issue: &RemoteIssue) -> ClaimSafetyInput {
+    ClaimSafetyInput::new(
+        issue.labels.clone(),
+        issue.title.clone(),
+        issue.body.clone(),
+        issue.author.clone(),
+    )
+}
+
+fn read_issue(repo: &str, number: u64) -> Result<RemoteIssue, CommandFailure> {
+    const ISSUE_FIELDS: &str = "{number, title:(.title // \"\"), body:(.body // \"\"), labels:[.labels[].name], author:{login:(.user.login // \"\")}, state:(.state // \"OPEN\")}";
+    let endpoint = format!("repos/{repo}/issues/{number}");
+    let output = run_gh(&["api", "--method", "GET", &endpoint, "--jq", ISSUE_FIELDS])?;
+    if !output.status.success() {
+        return Err(CommandFailure::diagnostic(format!(
+            "gh issue reread {number} failed: {}",
+            command_error(&output)
+        )));
+    }
+    parse_dependency_issue_json(&String::from_utf8_lossy(&output.stdout), number).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not parse GitHub issue reread {number}: {error}"
+        ))
+    })
+}
+
+fn apply_passing_safety_review(repo: &str, issue: &RemoteIssue) -> Result<bool, CommandFailure> {
+    let body = replace_safety_review_section(&issue.body, SafetyReviewDecision::Pass).map_err(
+        |error| {
+            CommandFailure::diagnostic(format!(
+                "could not replace safety review for issue {}: {error:?}",
+                issue.number
+            ))
+        },
+    )?;
+    update_issue_body(repo, issue.number, &body)?;
+    add_issue_label(repo, issue.number, "safety:reviewed")?;
+    let reread = read_issue(repo, issue.number)?;
+    Ok(reviewable_pass(&reread))
+}
+
+fn reviewable_pass(issue: &RemoteIssue) -> bool {
+    !issue.closed
+        && issue_has_label(issue, "auto-implement")
+        && evaluate_claim_safety(&issue_safety_input(issue)).allowed
+}
+
+fn update_issue_body(repo: &str, number: u64, body: &str) -> Result<(), CommandFailure> {
+    let endpoint = format!("repos/{repo}/issues/{number}");
+    let body_field = format!("body={body}");
+    let output = run_gh(&["api", "--method", "PATCH", &endpoint, "-f", &body_field])?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(CommandFailure::diagnostic(format!(
+            "gh issue body update {number} failed: {}",
+            command_error(&output)
+        )))
+    }
+}
+
+fn apply_non_passing_safety_review(
+    repo: &str,
+    issue: &RemoteIssue,
+    verdict: &SafetyReviewVerdict,
+    label: &str,
+) -> Result<(), CommandFailure> {
+    let decision = safety_decision_name(&verdict.decision);
+    if !has_safety_decision_comment(repo, issue.number, decision)? {
+        post_issue_comment(
+            repo,
+            issue.number,
+            &safety_decision_comment(issue.number, verdict),
+        )?;
+    }
+    add_issue_label(repo, issue.number, label)
+}
+
+fn has_safety_decision_comment(
+    repo: &str,
+    number: u64,
+    decision: &str,
+) -> Result<bool, CommandFailure> {
+    const PAGE_SIZE: usize = 100;
+    const BEGIN_MARKER: &str = "<!-- autospec-safety-decision:begin -->";
+    let mut page = 1usize;
+    loop {
+        let endpoint =
+            format!("repos/{repo}/issues/{number}/comments?per_page={PAGE_SIZE}&page={page}");
+        let fields = format!(
+            "{{raw_count:length,items:[.[] | select((.body // \"\") | contains({})) | {{number:0,title:\"\",body:(.body // \"\"),labels:[],author:{{login:\"\"}},state:\"OPEN\"}}]}}",
+            json_string(BEGIN_MARKER),
+        );
+        let output = run_gh(&["api", "--method", "GET", &endpoint, "--jq", &fields])?;
+        if !output.status.success() {
+            return Err(CommandFailure::diagnostic(format!(
+                "gh safety decision comment page {page} for issue {number} failed: {}",
+                command_error(&output)
+            )));
+        }
+        let comment_page = parse_remote_issue_page_json(&String::from_utf8_lossy(&output.stdout))
+            .map_err(|error| {
+                CommandFailure::diagnostic(format!(
+                    "could not parse GitHub safety decision comment page {page} for issue {number}: {error}"
+                ))
+            })?;
+        if comment_page
+            .issues
+            .iter()
+            .any(|comment| comment.body.contains(decision))
+        {
+            return Ok(true);
+        }
+        if comment_page.raw_count < PAGE_SIZE {
+            return Ok(false);
+        }
+        page = page.checked_add(1).ok_or_else(|| {
+            CommandFailure::diagnostic(format!(
+                "GitHub safety decision comment page number overflowed for issue {number}"
+            ))
+        })?;
+    }
+}
+
+fn post_issue_comment(repo: &str, number: u64, body: &str) -> Result<(), CommandFailure> {
+    let endpoint = format!("repos/{repo}/issues/{number}/comments");
+    let body_field = format!("body={body}");
+    let output = run_gh(&["api", "--method", "POST", &endpoint, "-f", &body_field])?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(CommandFailure::diagnostic(format!(
+            "gh safety decision comment write for issue {number} failed: {}",
+            command_error(&output)
+        )))
+    }
+}
+
+fn add_issue_label(repo: &str, number: u64, label: &str) -> Result<(), CommandFailure> {
+    let endpoint = format!("repos/{repo}/issues/{number}/labels");
+    let label_field = format!("labels[]={label}");
+    let output = run_gh(&["api", "--method", "POST", &endpoint, "-f", &label_field])?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(CommandFailure::diagnostic(format!(
+            "gh safety label {label} write for issue {number} failed: {}",
+            command_error(&output)
+        )))
+    }
+}
+
+fn safety_decision_name(decision: &SafetyReviewDecision) -> &'static str {
+    match decision {
+        SafetyReviewDecision::Pass => "SAFETY_PASS",
+        SafetyReviewDecision::Ambiguous => "SAFETY_AMBIGUOUS",
+        SafetyReviewDecision::Block => "SAFETY_BLOCK",
+    }
+}
+
+fn safety_decision_comment(number: u64, verdict: &SafetyReviewVerdict) -> String {
+    let findings = verdict
+        .findings
+        .iter()
+        .map(|finding| finding.rule_id)
+        .collect::<Vec<_>>();
+    let findings = if findings.is_empty() {
+        "none".to_string()
+    } else {
+        findings.join(", ")
+    };
+    format!(
+        "<!-- autospec-safety-decision:begin -->\n- **issue:** `{number}`\n- **decision:** `{}`\n- **findings:** {findings}\n<!-- autospec-safety-decision:end -->",
+        safety_decision_name(&verdict.decision),
+    )
+}
+
+fn review_safety_json(totals: &ReviewSafetyTotals) -> String {
+    format!(
+        "{{\"pass\":{},\"ambiguous\":{},\"block\":{},\"stale\":{},\"conflicted\":{},\"skipped\":{}}}",
+        totals.pass,
+        totals.ambiguous,
+        totals.block,
+        totals.stale,
+        totals.conflicted,
+        totals.skipped,
+    )
 }
 
 #[derive(Debug, Default)]
@@ -673,6 +984,6 @@ fn json_string(value: &str) -> String {
 
 fn print_help() {
     println!(
-        "autospec queue\n\nUSAGE:\n    autospec queue ready [--repo OWNER/REPO] [--batch-size N]\n\nCOMMANDS:\n    ready    Compute the safe, dependency-aware GitHub issue batch"
+        "autospec queue\n\nUSAGE:\n    autospec queue ready [--repo OWNER/REPO] [--batch-size N]\n    autospec queue review-safety [--repo OWNER/REPO] [--limit N]\n\nCOMMANDS:\n    ready            Compute the safe, dependency-aware GitHub issue batch\n    review-safety    Write bounded Rust safety-review outcomes to GitHub issues"
     );
 }
