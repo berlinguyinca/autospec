@@ -1144,11 +1144,12 @@ fn runtime_audit_does_not_follow_a_symlinked_platform_root() {
         ])
         .output()
         .expect("autospec runtime audit runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
 
     std::fs::remove_dir_all(&temporary).expect("remove temporary fixture");
     assert!(output.status.success());
-    assert!(!stdout.contains("secret.py"));
+    assert!(!parse_runtime_audit(&output.stdout)
+        .all_paths()
+        .any(|path| path == &PathBuf::from("scripts/secret.py")));
 }
 
 #[test]
