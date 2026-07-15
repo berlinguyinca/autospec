@@ -239,6 +239,10 @@ pub(super) fn status(repo: &str) -> Result<Option<ResilienceStatus>, LifecycleAd
 }
 
 pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
+    if matches!(args, [flag] if flag == "--help" || flag == "-h") {
+        print_help();
+        return Ok(());
+    }
     let options = DecisionOptions::parse(args).map_err(CommandFailure::diagnostic)?;
     let store = ResilienceStore::from_env(&options.repo).map_err(CommandFailure::diagnostic)?;
     let admission = match store.admit(options.issue, options.usage_cap, options.issue_cap) {
@@ -266,6 +270,12 @@ pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
             None => emit(Decision::Available),
         },
     }
+}
+
+fn print_help() {
+    println!(
+        "autospec autonomous resilience\n\nUSAGE:\n    autospec autonomous resilience decide --repo OWNER/REPO [--issue N] [--budget-tokens N] [--budget-issues N]\n\nSTATE:\n    Reads owner__repo, then owner_repo, then owner-repo.\n    Writes resilience state only to the canonical owner__repo layout.\n\nOPTIONS:\n    --repo OWNER/REPO    Repository whose resilience state is evaluated\n    --issue N            Optional positive issue number for failure-cap evaluation\n    --budget-tokens N    Non-negative lifetime token limit\n    --budget-issues N    Non-negative lifetime issue limit\n    -h, --help           Print help"
+    );
 }
 
 struct DecisionOptions {

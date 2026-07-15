@@ -25,6 +25,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec claim acquire\|release ...` | yes | applies the typed safety gate, heartbeat/label ordering, lease CAS, and terminal release transitions |
 | `autospec queue ready [--repo OWNER/REPO] [--batch-size N]` | yes | scans every Rust-owned GitHub issue page and returns typed eligibility, gate totals, and scan scope |
 | `autospec queue review-safety --repo OWNER/REPO --limit N [--issue N]` | yes | writes bounded Rust issue-intent safety decisions and reports outcome totals |
+| `autospec autonomous resilience decide --repo OWNER/REPO [--issue N] [--budget-tokens N] [--budget-issues N]` | yes | reads resilient admission state with canonical `owner__repo` writes; it returns one JSON availability, reclaim, hold, park, or reject decision and starts no shell process |
 | `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR` | no | drives one Rust-owned queue/claim cycle and persists a deferred foreground receipt; it launches no implementation agent |
 | `autospec autonomous lifecycle decide --repo OWNER/REPO [--claim-repo OWNER/REPO --claim-issue N --claim-worker ID --claim-branch NAME --claim-state active\|terminal] [--lease-age-sec N] [--stop graceful\|immediate] [--health continue\|wait\|halt] [--budget within\|soft\|hard] [--ready-tier 1\|1.5\|2\|3\|4\|5\|6\|7\|idle]` | yes | evaluates one pure typed lifecycle decision without filesystem, process, GitHub, shell, or `omx` effects |
 | `autospec autonomous executor-result --repo OWNER/REPO --issue N [--worker-id ID --branch NAME --outcome succeeded\|blocked\|retryable ...]` | yes | records either the exact legacy deferred receipt or one strictly validated executor outcome; it never launches work, releases a claim, or merges a PR |
@@ -99,6 +100,23 @@ mutation. Explicit executor-result ingestion is described below. Neither form la
 implementation agent, invokes a shell, script, `omx`, or `/autospec-run`, releases a claim, or
 merges a PR. Detached `autonomous start` and `restart` likewise launch this foreground command as
 a direct Rust child; monitor and supervisor are separate compatibility companions.
+
+`autospec autonomous resilience --help` describes the one supported action and its canonical
+write slug, `owner__repo`. `resilience decide` reads state, per-issue failure, and spend records
+for `owner/repo` in the strict order `owner__repo`, `owner_repo`, then `owner-repo`. The first
+existing record is authoritative: malformed records fail closed instead of falling through, and a
+state record for another repository returns the `foreign_state` rejection. A safe compatibility
+state read may be migrated, but every resilience state write targets only `owner__repo`; neither
+legacy layout is written. The separate `.autospec/autonomous-operator/<scope>/` directory is
+lifecycle-only and never stores resilience compatibility state.
+
+The command prints exactly one JSON decision. `available` and `reclaim` exit `0`; `held` and
+capacity parks exit `20`; malformed, foreign, or failure-cap rejections exit `3`. Claimed leases
+are reclaimable at the inclusive 300-second boundary and all leases at the inclusive 10,800-second
+abandoned boundary (with missing heartbeats and dead same-host PIDs also reclaimable). Capacity is
+also inclusive: a nonzero usage limit is evaluated first, then a nonzero issue limit; `0` disables
+the corresponding limit. This adapter reads and evaluates state only: it does not invoke
+`scripts/autonomous-resilience.sh`, `sh`, or `bash`.
 
 `autospec autonomous lifecycle decide` evaluates the typed repository scope, issue, worker,
 claim branch, lease freshness, stop, ownership, retry, health, budget, waterfall-tier, and

@@ -8,6 +8,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn resilience_help_names_the_canonical_write_slug() {
+    let output = Command::new(env!("CARGO_BIN_EXE_autospec"))
+        .args(["autonomous", "resilience", "--help"])
+        .output()
+        .expect("run help");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("owner__repo"));
+}
+
+#[test]
 fn resilience_decide_prefers_canonical_layout_over_legacy_fallbacks() {
     let fixture = ResilienceFixture::new();
     fixture.write_state(
