@@ -250,22 +250,26 @@ fn scan_identifiers(
     hits: &mut [Vec<FileLineEvidence>],
 ) {
     for value in values {
-        let normalized = normalize(value);
-        for (index, spec) in LEXICON.iter().enumerate() {
-            if matches_any(&normalized, spec.aliases) {
-                let evidence_file = if file.is_empty() {
-                    value.clone()
-                } else {
-                    file.to_string()
-                };
-                record(
-                    &mut hits[index],
-                    evidence_file,
-                    1,
-                    &format!("{source}: {value}"),
-                );
-            }
+        scan_identifier(value, file, source, hits);
+    }
+}
+
+fn scan_identifier(value: &str, file: &str, source: &str, hits: &mut [Vec<FileLineEvidence>]) {
+    let normalized = normalize(value);
+    let evidence_file = identifier_file(file, value);
+    let matched = format!("{source}: {value}");
+    for (index, spec) in LEXICON.iter().enumerate() {
+        if matches_any(&normalized, spec.aliases) {
+            record(&mut hits[index], evidence_file.clone(), 1, &matched);
         }
+    }
+}
+
+fn identifier_file(file: &str, value: &str) -> String {
+    if file.is_empty() {
+        value.to_string()
+    } else {
+        file.to_string()
     }
 }
 
@@ -291,23 +295,28 @@ fn ranked_domains(hits: Vec<Vec<FileLineEvidence>>) -> Vec<DetectedDomain> {
 }
 
 fn fallback_specialists(domains: &[DetectedDomain]) -> Vec<SuggestedSpecialist> {
-    domains
-        .iter()
-        .filter_map(|domain| {
-            let spec = LEXICON.iter().find(|spec| spec.name == domain.name)?;
-            let evidence = domain.evidence.first()?;
-            Some(SuggestedSpecialist {
-                slug: format!("{}-specialist", domain.name),
-                persona: spec.persona.to_string(),
-                lens: spec.lens.to_string(),
-                why: format!(
-                    "Repo signals indicate a {} domain; a specialist lens surfaces domain-specific gaps the universal researchers miss.",
-                    domain.name
-                ),
-                evidence: format!("{}:{} ({})", evidence.file, evidence.line, evidence.r#match),
-            })
-        })
-        .collect()
+    let mut specialists = Vec::new();
+    for domain in domains {
+        if let Some(specialist) = fallback_specialist(domain) {
+            specialists.push(specialist);
+        }
+    }
+    specialists
+}
+
+fn fallback_specialist(domain: &DetectedDomain) -> Option<SuggestedSpecialist> {
+    let spec = LEXICON.iter().find(|spec| spec.name == domain.name)?;
+    let evidence = domain.evidence.first()?;
+    Some(SuggestedSpecialist {
+        slug: format!("{}-specialist", domain.name),
+        persona: spec.persona.to_string(),
+        lens: spec.lens.to_string(),
+        why: format!(
+            "Repo signals indicate a {} domain; a specialist lens surfaces domain-specific gaps the universal researchers miss.",
+            domain.name
+        ),
+        evidence: format!("{}:{} ({})", evidence.file, evidence.line, evidence.r#match),
+    })
 }
 
 fn should_skip_dir(name: &str) -> bool {

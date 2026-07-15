@@ -99,26 +99,29 @@ fn parse_domain(value: JsonValue, context: &str) -> Result<DetectedDomain, Strin
 }
 
 fn parse_evidence(value: JsonValue, context: &str) -> Result<Vec<FileLineEvidence>, String> {
-    value
-        .into_array(&format!("{context}.evidence"))?
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let item_context = format!("{context}.evidence[{index}]");
-            let mut object = value.into_object(&item_context)?;
-            reject_unknown(&object, &["file", "line", "match"], &item_context)?;
-            let line = take_required(&mut object, "line", &item_context)?
-                .into_number(&format!("{item_context}.line"))?;
-            Ok(FileLineEvidence {
-                file: take_required(&mut object, "file", &item_context)?
-                    .into_string(&format!("{item_context}.file"))?,
-                line: usize::try_from(line)
-                    .map_err(|_| format!("{item_context}.line exceeds usize"))?,
-                r#match: take_required(&mut object, "match", &item_context)?
-                    .into_string(&format!("{item_context}.match"))?,
-            })
-        })
-        .collect()
+    let values = value.into_array(&format!("{context}.evidence"))?;
+    let mut evidence = Vec::with_capacity(values.len());
+    for (index, value) in values.into_iter().enumerate() {
+        let item_context = format!("{context}.evidence[{index}]");
+        evidence.push(parse_evidence_item(value, &item_context)?);
+    }
+    Ok(evidence)
+}
+
+fn parse_evidence_item(value: JsonValue, context: &str) -> Result<FileLineEvidence, String> {
+    let mut object = value.into_object(context)?;
+    reject_unknown(&object, &["file", "line", "match"], context)?;
+    let file =
+        take_required(&mut object, "file", context)?.into_string(&format!("{context}.file"))?;
+    let line =
+        take_required(&mut object, "line", context)?.into_number(&format!("{context}.line"))?;
+    let matched =
+        take_required(&mut object, "match", context)?.into_string(&format!("{context}.match"))?;
+    Ok(FileLineEvidence {
+        file,
+        line: usize::try_from(line).map_err(|_| format!("{context}.line exceeds usize"))?,
+        r#match: matched,
+    })
 }
 
 fn parse_specialists(value: JsonValue) -> Result<Vec<SuggestedSpecialist>, String> {
