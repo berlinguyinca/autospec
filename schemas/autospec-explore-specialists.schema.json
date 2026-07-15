@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/berlinguyinca/autospec/schemas/autospec-explore-specialists.schema.json",
   "title": "Autospec explore domain-specialist roster",
-  "description": "The cached domain-specialist roster written to .autospec/explore-specialists.json by the deterministic signal scan (scripts/explore-specialist-scan.sh) plus the one-shot LLM roster proposal. Ranked candidate `domains` carry file:line evidence; `suggested_specialists` are the LLM-derived personas dispatched as source=specialist:<slug>. An empty roster (no domain detected) is valid — a generic repo runs the explore loop unchanged.",
+  "description": "The cached domain-specialist roster written to .autospec/explore-specialists.json by the deterministic signal scan (autospec explore specialists) plus the one-shot LLM roster proposal. Ranked candidate `domains` carry file:line evidence; `suggested_specialists` are the LLM-derived personas dispatched as source=specialist:<slug>. An empty roster (no domain detected) is valid — a generic repo runs the explore loop unchanged.",
   "type": "object",
   "required": ["schema_version", "domains", "suggested_specialists"],
   "additionalProperties": false,

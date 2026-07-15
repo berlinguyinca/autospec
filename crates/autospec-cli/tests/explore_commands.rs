@@ -74,3 +74,77 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&path).expect("temp dir");
     path
 }
+
+#[test]
+fn explore_specialists_emits_schema_one_json_and_persists_cache() {
+    let repo = temp_dir("autospec-explore-specialists-cli");
+    std::fs::write(repo.join("requirements.txt"), "ccxt>=4.0\n").unwrap();
+
+    let output = autospec()
+        .args([
+            "explore",
+            "specialists",
+            "--repo-dir",
+            repo.to_str().unwrap(),
+            "--num-specialists",
+            "6",
+        ])
+        .output()
+        .expect("autospec explore specialists runs");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert!(json["domains"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["name"] == "trading"));
+    assert!(json["suggested_specialists"].as_array().unwrap().len() <= 6);
+    assert!(repo.join(".autospec/explore-specialists.json").is_file());
+}
+
+#[test]
+fn explore_specialists_force_replaces_valid_cached_roster() {
+    let repo = temp_dir("autospec-explore-specialists-force");
+    std::fs::create_dir_all(repo.join(".autospec")).unwrap();
+    std::fs::write(
+        repo.join(".autospec/explore-specialists.json"),
+        r#"{"schema_version":1,"domains":[],"suggested_specialists":[{"slug":"cached","persona":"P","lens":"L","why":"W","evidence":"E"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(repo.join("requirements.txt"), "ccxt>=4.0\n").unwrap();
+
+    let reused = autospec()
+        .args([
+            "explore",
+            "specialists",
+            "--repo-dir",
+            repo.to_str().unwrap(),
+        ])
+        .output()
+        .expect("reuse run");
+    assert!(reused.status.success());
+    let reused_json: serde_json::Value = serde_json::from_slice(&reused.stdout).unwrap();
+    assert_eq!(reused_json["suggested_specialists"][0]["slug"], "cached");
+
+    let forced = autospec()
+        .args([
+            "explore",
+            "specialists",
+            "--repo-dir",
+            repo.to_str().unwrap(),
+            "--force",
+        ])
+        .output()
+        .expect("force run");
+    assert!(forced.status.success());
+    let forced_json: serde_json::Value = serde_json::from_slice(&forced.stdout).unwrap();
+    assert_eq!(
+        forced_json["suggested_specialists"][0]["slug"],
+        "trading-specialist"
+    );
+}

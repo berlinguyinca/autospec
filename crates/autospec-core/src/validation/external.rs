@@ -1268,30 +1268,45 @@ fn run_autospec_explore_specialists_discovery(
     required: bool,
     root: &Path,
 ) -> CheckResult {
-    const SCAN: &str = "scripts/explore-specialist-scan.sh";
     const SCHEMA: &str = "schemas/autospec-explore-specialists.schema.json";
-    const SUITE: &str = "tests/explore/test_explore_specialists.bats";
+    const DELETED_SCAN: &str = "scripts/explore-specialist-scan.sh";
+    const DELETED_SUITE: &str = "tests/explore/test_explore_specialists.bats";
+    const CORE_SOURCE: &str = "crates/autospec-core/src/explore/specialists.rs";
 
-    let scripts = run_required_bash_scripts(id, required, root, &[(SCAN, true)]);
-    if scripts.is_failure() {
-        return scripts;
-    }
-    if !root.join(SCHEMA).is_file() {
-        return aggregate(
+    let mut results = Vec::new();
+    if root.join(DELETED_SCAN).exists() {
+        results.push(failure(
             id,
             required,
-            vec![
-                scripts,
-                failure(
-                    id,
-                    required,
-                    "schemas/autospec-explore-specialists.schema.json: specialists roster schema missing",
-                ),
-            ],
-        );
+            "scripts/explore-specialist-scan.sh: deleted scanner must not be a runtime requirement",
+        ));
+        return aggregate(id, required, results);
+    }
+    if root.join(DELETED_SUITE).exists() {
+        results.push(failure(
+            id,
+            required,
+            "tests/explore/test_explore_specialists.bats: shell specialist coverage must move to Rust tests",
+        ));
+        return aggregate(id, required, results);
+    }
+    if !root.join(CORE_SOURCE).is_file() {
+        results.push(failure(
+            id,
+            required,
+            "crates/autospec-core/src/explore/specialists.rs: Rust specialist scanner missing",
+        ));
+        return aggregate(id, required, results);
+    }
+    if !root.join(SCHEMA).is_file() {
+        results.push(failure(
+            id,
+            required,
+            "schemas/autospec-explore-specialists.schema.json: specialists roster schema missing",
+        ));
+        return aggregate(id, required, results);
     }
 
-    let mut results = vec![scripts];
     if program_on_path("jq") {
         let check = ToolCommand::new(
             "jq",
@@ -1319,7 +1334,6 @@ fn run_autospec_explore_specialists_discovery(
             return aggregate(id, required, results);
         }
     }
-    results.push(run_bats_suites(id, required, root, &[SUITE]));
     aggregate(id, required, results)
 }
 
@@ -1873,7 +1887,6 @@ fn run_autospec_explore_discovery(id: &str, required: bool, root: &Path) -> Chec
     const AGGREGATOR: &str = "scripts/explore-research-cycle.sh";
     const PROPOSAL_SCHEMA: &str = "schemas/autospec-explore-proposal.schema.json";
     const SPECIALIST_SCHEMA: &str = "schemas/autospec-explore-specialists.schema.json";
-    const SPECIALIST_SCAN: &str = "scripts/explore-specialist-scan.sh";
     const TRIO: &[&str] = &[
         "skills/autospec-explore/SKILL.md",
         "skills/autospec-explore/codex/prompt.md",
@@ -1887,7 +1900,6 @@ fn run_autospec_explore_discovery(id: &str, required: bool, root: &Path) -> Chec
         "tests/explore/test_explore_self_leverage.bats",
         "tests/explore/test_explore_verify_stage.bats",
         "tests/explore/test_explore_severity_roi.bats",
-        "tests/explore/test_explore_specialists.bats",
     ];
 
     let researchers = run_required_bash_scripts(id, required, root, RESEARCHERS);
@@ -1972,14 +1984,6 @@ fn run_autospec_explore_discovery(id: &str, required: bool, root: &Path) -> Chec
             return aggregate(id, required, results);
         }
     }
-
-    let specialist_scan =
-        run_required_bash_scripts(id, required, root, &[(SPECIALIST_SCAN, false)]);
-    if specialist_scan.is_failure() {
-        results.push(specialist_scan);
-        return aggregate(id, required, results);
-    }
-    results.push(specialist_scan);
 
     for trio in TRIO {
         let path = root.join(trio);

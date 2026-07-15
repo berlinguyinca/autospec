@@ -811,7 +811,7 @@ fn runner_checks_explore_researcher_contracts_with_direct_bash_and_bats_commands
 }
 
 #[test]
-fn runner_checks_explore_specialist_schema_with_direct_commands() {
+fn runner_checks_explore_specialist_schema_without_shell_scanner_requirement() {
     let catalog = ValidationCatalog::from_checks(vec![ValidationCheck {
         id: "check_autospec_explore_specialists_discovery",
         required: true,
@@ -827,7 +827,7 @@ fn runner_checks_explore_specialist_schema_with_direct_commands() {
     );
 
     assert_eq!(report.results[0].exit_code, Some(0));
-    assert!((1..=4).contains(&report.results[0].spawn_count));
+    assert!(report.results[0].spawn_count <= 2);
 }
 
 #[test]

@@ -586,10 +586,10 @@ fi
 # need no scan.
 case "$SPECIALISTS_MODE" in
     discover|ask)
-        if [ -x "$SCRIPT_DIR/explore-specialist-scan.sh" ]; then
-            AUTOSPEC_NUM_SPECIALISTS="$NUM_SPECIALISTS" \
-                bash "$SCRIPT_DIR/explore-specialist-scan.sh" >/dev/null 2>&1 || true
-        fi
+        autospec explore specialists \
+            --repo-dir "$REPO_ROOT" \
+            --num-specialists "$NUM_SPECIALISTS" \
+            >/dev/null 2>&1 || true
         ;;
 esac
 
