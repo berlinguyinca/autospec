@@ -1337,6 +1337,81 @@ fn run_autospec_explore_specialists_discovery(
     aggregate(id, required, results)
 }
 
+struct Stage2IntersectContract {
+    passes: fn(&Path) -> bool,
+    failure: &'static str,
+}
+
+fn has_stage2_intersect_heading(path: &Path) -> bool {
+    has_heading_prefix(path, "## Stage-2 intersect")
+}
+
+fn has_stage2_internet_forums_source(path: &Path) -> bool {
+    contains(path, "internet-forums")
+}
+
+fn has_stage2_internet_forums_weight(path: &Path) -> bool {
+    has_same_line_tokens(path, "internet-forums", "0.4")
+}
+
+fn cites_stage2_intersect_prefilter(path: &Path) -> bool {
+    contains(path, "discovery-intersect-prefilter.sh")
+}
+
+fn reuses_stage2_repo_domain_derivation(path: &Path) -> bool {
+    contains_case_insensitive(path, "repo-domain derivation")
+}
+
+fn cites_stage2_candidate_schema(path: &Path) -> bool {
+    contains(path, "autospec-explore-proposal.schema.json")
+}
+
+fn states_stage2_untrusted_boundary(path: &Path) -> bool {
+    contains_case_insensitive(path, "untrusted")
+}
+
+const STAGE2_INTERSECT_CONTRACTS: &[Stage2IntersectContract] = &[
+    Stage2IntersectContract {
+        passes: Path::is_file,
+        failure: "required adapter file missing",
+    },
+    Stage2IntersectContract {
+        passes: has_stage2_intersect_heading,
+        failure: "missing '## Stage-2 intersect' section",
+    },
+    Stage2IntersectContract {
+        passes: has_stage2_internet_forums_source,
+        failure: "missing internet-forums Stage-2 discovery source",
+    },
+    Stage2IntersectContract {
+        passes: has_stage2_internet_forums_weight,
+        failure: "internet-forums source must be weighted 0.4",
+    },
+    Stage2IntersectContract {
+        passes: cites_stage2_intersect_prefilter,
+        failure: "Stage-2 must cite discovery-intersect-prefilter.sh",
+    },
+    Stage2IntersectContract {
+        passes: reuses_stage2_repo_domain_derivation,
+        failure: "Stage-2 must reuse the existing repo-domain derivation",
+    },
+    Stage2IntersectContract {
+        passes: cites_stage2_candidate_schema,
+        failure: "Stage-2 must emit the existing explore candidate schema (cite, not redefine)",
+    },
+    Stage2IntersectContract {
+        passes: states_stage2_untrusted_boundary,
+        failure: "Stage-2 must state the untrusted-DATA trust boundary",
+    },
+];
+
+fn stage2_intersect_contract_failure(path: &Path) -> Option<&'static str> {
+    STAGE2_INTERSECT_CONTRACTS
+        .iter()
+        .find(|contract| !(contract.passes)(path))
+        .map(|contract| contract.failure)
+}
+
 fn run_autospec_explore_stage2_intersect(id: &str, required: bool, root: &Path) -> CheckResult {
     const PREFILTER: &str = "skills/autospec-shared/scripts/discovery-intersect-prefilter.sh";
     const SCHEMA: &str = "schemas/autospec-explore-proposal.schema.json";
@@ -1366,104 +1441,13 @@ fn run_autospec_explore_stage2_intersect(id: &str, required: bool, root: &Path) 
     }
     for trio in TRIO {
         let path = root.join(trio);
-        if !path.is_file() {
+        if let Some(message) = stage2_intersect_contract_failure(&path) {
             return aggregate(
                 id,
                 required,
                 vec![
                     prefilter,
-                    failure(
-                        id,
-                        required,
-                        &format!("{trio}: required adapter file missing"),
-                    ),
-                ],
-            );
-        }
-        if !has_heading_prefix(&path, "## Stage-2 intersect") {
-            return aggregate(
-                id,
-                required,
-                vec![
-                    prefilter,
-                    failure(
-                        id,
-                        required,
-                        &format!("{trio}: missing '## Stage-2 intersect' section"),
-                    ),
-                ],
-            );
-        }
-        if !contains(&path, "internet-forums") {
-            return aggregate(
-                id,
-                required,
-                vec![
-                    prefilter,
-                    failure(
-                        id,
-                        required,
-                        &format!("{trio}: missing internet-forums Stage-2 discovery source"),
-                    ),
-                ],
-            );
-        }
-        if !has_same_line_tokens(&path, "internet-forums", "0.4") {
-            return aggregate(
-                id,
-                required,
-                vec![
-                    prefilter,
-                    failure(
-                        id,
-                        required,
-                        &format!("{trio}: internet-forums source must be weighted 0.4"),
-                    ),
-                ],
-            );
-        }
-        if !contains(&path, "discovery-intersect-prefilter.sh") {
-            return aggregate(
-                id,
-                required,
-                vec![
-                    prefilter,
-                    failure(
-                        id,
-                        required,
-                        &format!("{trio}: Stage-2 must cite discovery-intersect-prefilter.sh"),
-                    ),
-                ],
-            );
-        }
-        if !contains_case_insensitive(&path, "repo-domain derivation") {
-            return aggregate(
-                id,
-                required,
-                vec![
-                    prefilter,
-                    failure(
-                        id,
-                        required,
-                        &format!("{trio}: Stage-2 must reuse the existing repo-domain derivation"),
-                    ),
-                ],
-            );
-        }
-        if !contains(&path, "autospec-explore-proposal.schema.json") {
-            return aggregate(id, required, vec![prefilter, failure(id, required, &format!("{trio}: Stage-2 must emit the existing explore candidate schema (cite, not redefine)"))]);
-        }
-        if !contains_case_insensitive(&path, "untrusted") {
-            return aggregate(
-                id,
-                required,
-                vec![
-                    prefilter,
-                    failure(
-                        id,
-                        required,
-                        &format!("{trio}: Stage-2 must state the untrusted-DATA trust boundary"),
-                    ),
+                    failure(id, required, &format!("{trio}: {message}")),
                 ],
             );
         }
