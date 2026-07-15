@@ -3,6 +3,7 @@ pub mod autonomous {
     pub mod audit;
     pub mod mainline_health;
 }
+pub mod autonomous_lifecycle;
 pub mod claim;
 pub mod context;
 pub mod coordination;
