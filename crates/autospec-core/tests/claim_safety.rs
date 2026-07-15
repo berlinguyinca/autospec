@@ -341,3 +341,15 @@ fn reports_deterministic_issue_intent_findings_for_cli_safety_linting() {
         .iter()
         .any(|finding| finding.rule_id == "credential-printing"));
 }
+
+#[test]
+fn intent_lint_ignores_a_guardian_rule_exception_line() {
+    let lint = lint_issue_intent(
+        "Retire a legacy writer",
+        "Guardian: skip-COMPLEXITY # Existing large modules are outside this narrow cutover.",
+        "agent",
+    );
+
+    assert!(!lint.blocking);
+    assert!(lint.findings.is_empty());
+}

@@ -526,7 +526,7 @@ pub fn lint_issue_intent_with_trusted_actors(
     actor: &str,
     trusted_actors: &[&str],
 ) -> IssueIntentLint {
-    let lower = format!("{title}\n{body}").to_ascii_lowercase();
+    let lower = format!("{title}\n{}", strip_guardian_skips(body)).to_ascii_lowercase();
     let mut findings = Vec::new();
     let mut add = |severity, rule_id, pattern| {
         findings.push(IssueIntentFinding {
