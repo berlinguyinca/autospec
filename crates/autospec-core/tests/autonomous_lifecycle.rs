@@ -17,6 +17,10 @@ fn conductor_lease_reclaims_at_boundaries_and_for_dead_local_pid() {
         ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::Abandoned),
     );
     assert_eq!(
+        decide_conductor_lease(ConductorLeaseInput::running(300, false)),
+        ConductorLeaseDecision::Held,
+    );
+    assert_eq!(
         decide_conductor_lease(ConductorLeaseInput::running(1, true)),
         ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::DeadSameHostPid),
     );
@@ -31,6 +35,10 @@ fn capacity_checks_usage_before_issue_and_zero_disables_a_cap() {
     assert_eq!(
         decide_capacity(CapacityInput::new(10, 0, 4, 4)),
         CapacityDecision::IssueCap
+    );
+    assert_eq!(
+        decide_capacity(CapacityInput::new(0, 10, 10_000, 0)),
+        CapacityDecision::WithinCap
     );
 }
 
