@@ -33,7 +33,7 @@ mode's `env` mapping.
 ```yaml
 version: 1
 name: sample-app                 # optional; defaults to the repository basename
-default_mode: local              # optional; defaults to the first declared mode
+default_mode: local              # optional; must name a declared mode; otherwise first declared mode
 modes:
   local:
     command: sh -c 'start-local' # required when provisioning a new environment
@@ -56,9 +56,10 @@ this order:
 2. `.agent-runtime.yml`
 
 An explicit `--mode` wins. With `--mode auto`, the command uses `default_mode`; when that is
-absent it uses the first declared mode. The selected environment has a deterministic ID from
-the canonical repository path, manifest name (or repository basename), and mode, so the same
-repository/mode pair reuses its state.
+absent it uses the first declared mode. A declared `default_mode` that is not present in
+`modes` is rejected while the manifest is parsed. The selected environment has a deterministic
+ID from the canonical repository path, manifest name (or repository basename), and mode, so the
+same repository/mode pair reuses its state.
 
 ## Generated environment and state
 
