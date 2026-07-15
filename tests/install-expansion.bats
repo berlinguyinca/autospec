@@ -345,6 +345,22 @@ EOF
     done
 }
 
+@test "install update removes the retired shell safety writer from an existing runtime" {
+    local scripts_dir="$HOME/.autospec/scripts"
+    local retired="$scripts_dir/apply-safety-review.sh"
+    mkdir -p "$scripts_dir"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$retired"
+    chmod +x "$retired"
+
+    run env \
+        CLAUDE_CONFIG_DIR="$HOME/.claude" \
+        AUTOSPEC_SCRIPTS_DIR="$scripts_dir" \
+        AUTOSPEC_SCHEMAS_DIR="$HOME/.autospec/schemas" \
+        bash "$INSTALL_SH" --skill autospec-classify --harness claude --update
+    [ "$status" -eq 0 ]
+    [ ! -e "$retired" ]
+}
+
 # ─── test 8: NEGATIVE — codex/opencode member expansion failure aborts loudly ─
 # (TOKR1-002 negative pair) If a markered codex/opencode member fails to expand,
 # expand_skill_file must fail closed: non-zero exit, error message, no dest file.

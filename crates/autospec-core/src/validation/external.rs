@@ -5338,7 +5338,6 @@ fn run_grooming_contract(id: &str, required: bool, root: &Path) -> CheckResult {
         "tests/autospec/promote-eligibility.bats",
         "tests/autospec/groom-validate.bats",
         "tests/autospec/groom-fill.bats",
-        "tests/autospec/apply-safety-review.bats",
         "tests/autospec/groom-reconcile.bats",
         "tests/autospec/autonomous-promote-open-issues.bats",
         "tests/autospec/test_loop_grooming.bats",
@@ -5346,7 +5345,82 @@ fn run_grooming_contract(id: &str, required: bool, root: &Path) -> CheckResult {
         "skills/autospec-shared/tests/unit/grooming-govern.bats",
         "skills/autospec-shared/tests/unit/grooming-observe.bats",
     ];
-    run_bats_suites(id, required, root, SUITES)
+    let retired = retired_safety_writer_guard(id, required, root);
+    if retired.is_failure() {
+        return retired;
+    }
+    aggregate(
+        id,
+        required,
+        vec![retired, run_bats_suites(id, required, root, SUITES)],
+    )
+}
+
+fn retired_safety_writer_guard(id: &str, required: bool, root: &Path) -> CheckResult {
+    const RETIRED_SCRIPT: &str = "scripts/apply-safety-review.sh";
+    const RUNTIME_CALLERS: &[&str] = &[
+        "scripts/autonomous-promote-open-issues.sh",
+        "skills/autospec-run/scripts/run-groom-preflight.sh",
+        "scripts/lib/autospec-loop.sh",
+    ];
+    const DIRECT_SAFETY_WRITEBACK_SURFACES: &[&str] = &[
+        "skills/autospec-classify/SKILL.md",
+        "skills/autospec-classify/codex/prompt.md",
+        "skills/autospec-classify/opencode/agent.md",
+        "skills/autospec/SKILL.md",
+        "skills/autospec/codex/prompt.md",
+        "skills/autospec/opencode/agent.md",
+        "skills/autospec-define/SKILL.md",
+        "skills/autospec-define/codex/prompt.md",
+        "skills/autospec-define/opencode/agent.md",
+        "skills/autospec-run/SKILL.md",
+        "skills/autospec-run/codex/prompt.md",
+        "skills/autospec-run/opencode/agent.md",
+        "skills/autospec-explore/SKILL.md",
+        "skills/autospec-explore/codex/prompt.md",
+        "skills/autospec-explore/opencode/agent.md",
+        "scripts/autospec-explore.sh",
+    ];
+    const DIRECT_SAFETY_WRITEBACK_TOKENS: &[&str] = &[
+        "safety:reviewed",
+        "security:quarantined",
+        "autospec-safety:begin",
+        "autospec-safety:end",
+        "autospec:needs-human",
+        "autospec-safety-decision:begin",
+        "autospec-safety-decision:end",
+    ];
+
+    if root.join(RETIRED_SCRIPT).exists() {
+        return failure(
+            id,
+            required,
+            "scripts/apply-safety-review.sh: retired shell safety writer must stay deleted",
+        );
+    }
+    for relative in RUNTIME_CALLERS {
+        if contains(&root.join(relative), "apply-safety-review.sh") {
+            return failure(
+                id,
+                required,
+                &format!("{relative}: references retired shell safety writer"),
+            );
+        }
+    }
+    for relative in DIRECT_SAFETY_WRITEBACK_SURFACES {
+        for token in DIRECT_SAFETY_WRITEBACK_TOKENS {
+            if contains(&root.join(relative), token) {
+                return failure(
+                    id,
+                    required,
+                    &format!(
+                        "{relative}: direct safety writeback token {token:?}; use autospec queue review-safety"
+                    ),
+                );
+            }
+        }
+    }
+    CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]))
 }
 
 fn run_mutation_and_negative_path(id: &str, required: bool, root: &Path) -> CheckResult {
@@ -6364,5 +6438,56 @@ mod tests {
         assert!(contains_stale_researcher_count(&path));
 
         fs::remove_file(path).expect("temporary fixture removes");
+    }
+
+    #[test]
+    fn retired_safety_writer_guard_rejects_the_file_and_all_live_writeback_surfaces() {
+        let root = std::env::temp_dir().join(format!(
+            "autospec-retired-safety-writer-{}",
+            std::process::id()
+        ));
+        let scripts = root.join("scripts");
+        fs::create_dir_all(&scripts).expect("create temporary scripts directory");
+        let retired = scripts.join("apply-safety-review.sh");
+        fs::write(&retired, "#!/usr/bin/env bash\n").expect("write retired script fixture");
+
+        assert!(retired_safety_writer_guard("check", true, &root).is_failure());
+
+        fs::remove_file(&retired).expect("remove retired script fixture");
+        fs::write(
+            scripts.join("autonomous-promote-open-issues.sh"),
+            "bash apply-safety-review.sh\n",
+        )
+        .expect("write live caller fixture");
+
+        assert!(retired_safety_writer_guard("check", true, &root).is_failure());
+
+        fs::remove_file(scripts.join("autonomous-promote-open-issues.sh"))
+            .expect("remove live caller fixture");
+        let prompt = root.join("skills/autospec-classify/SKILL.md");
+        fs::create_dir_all(prompt.parent().expect("skill fixture has parent"))
+            .expect("create temporary skill directory");
+        fs::write(&prompt, "gh issue edit <N> --add-label safety:reviewed\n")
+            .expect("write direct safety writer fixture");
+
+        assert!(retired_safety_writer_guard("check", true, &root).is_failure());
+
+        fs::remove_file(&prompt).expect("remove direct safety writer fixture");
+        let explorer = scripts.join("autospec-explore.sh");
+        fs::write(&explorer, "autospec-safety-decision:begin\n")
+            .expect("write explorer safety writer fixture");
+
+        assert!(retired_safety_writer_guard("check", true, &root).is_failure());
+
+        fs::remove_file(&explorer).expect("remove explorer safety writer fixture");
+        let run_prompt = root.join("skills/autospec-run/codex/prompt.md");
+        fs::create_dir_all(run_prompt.parent().expect("run prompt fixture has parent"))
+            .expect("create run prompt fixture directory");
+        fs::write(&run_prompt, "autospec:needs-human\n")
+            .expect("write run prompt safety writer fixture");
+
+        assert!(retired_safety_writer_guard("check", true, &root).is_failure());
+
+        fs::remove_dir_all(root).expect("remove temporary guard fixture");
     }
 }

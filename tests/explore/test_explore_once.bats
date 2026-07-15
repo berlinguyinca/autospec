@@ -31,13 +31,23 @@ echo "gh $*" >> "$AUTOSPEC_REPO_ROOT/.autospec/gh-calls.log"
 case "$1" in
     issue)
         case "$2" in
-            create) echo "https://github.com/x/y/issues/$RANDOM" ;;
+            create) echo "https://github.com/x/y/issues/42" ;;
             list)   echo '[]' ;;
         esac ;;
 esac
 exit 0
 GHEOF
     chmod +x "$TMP/bin/gh"
+
+    cat > "$TMP/bin/autospec" <<'AUTOSPECEOF'
+#!/usr/bin/env bash
+echo "autospec $*" >> "$AUTOSPEC_REPO_ROOT/.autospec/gh-calls.log"
+if [ "${1:-}" != "queue" ] || [ "${2:-}" != "review-safety" ]; then
+    exit 41
+fi
+printf '%s\n' '{"pass":1,"ambiguous":0,"block":0,"stale":0,"conflicted":0,"skipped":0}'
+AUTOSPECEOF
+    chmod +x "$TMP/bin/autospec"
 
     # Fake drain: records call if invoked (must NOT be called by --once)
     DRAIN_LOG="$TMP/.autospec/drain-calls.log"
@@ -49,6 +59,7 @@ GHEOF
     export SANDBOX_LOG
 
     export PATH="$TMP/bin:$PATH"
+    export GITHUB_REPOSITORY="x/y"
     export AUTOSPEC_RESEARCH_DIR="$TMP/fake-research"
     mkdir -p "$AUTOSPEC_RESEARCH_DIR"
 }
@@ -322,7 +333,7 @@ assert 'Adversarial verify' in cand['body'], cand
 "
 }
 
-@test "--once files candidates with evidence-rich body and model-fit labels" {
+@test "--once files an interim candidate before exact Rust safety review" {
     local proposals='[{"title":"fix: label body gap","evidence":"lib/y.sh:7 failing path","estimated_complexity":"small","confidence":0.7,"source":"spec-vs-code","severity":"feature","named_consumer":"autospec-run","score":0.7}]'
     local cycle_cmd
     cycle_cmd="$(make_cycle_cmd 1 "$proposals")"
@@ -336,14 +347,16 @@ assert 'Adversarial verify' in cand['body'], cand
     [ "$status" -eq 0 ]
 
     grep -q -- '--label auto-implement' "$TMP/.autospec/gh-calls.log"
-    grep -q -- '--label safety:reviewed' "$TMP/.autospec/gh-calls.log"
+    grep -q 'autospec queue review-safety --repo x/y --limit 1 --issue 42' "$TMP/.autospec/gh-calls.log"
+    create_line="$(grep -n 'gh issue create' "$TMP/.autospec/gh-calls.log" | head -1 | cut -d: -f1)"
+    review_line="$(grep -n 'autospec queue review-safety' "$TMP/.autospec/gh-calls.log" | head -1 | cut -d: -f1)"
+    [ "$create_line" -lt "$review_line" ]
     grep -q -- '--label ctx:32k' "$TMP/.autospec/gh-calls.log"
     grep -q -- '--label reasoning:medium' "$TMP/.autospec/gh-calls.log"
     grep -q 'lib/y.sh:7 failing path' "$TMP/.autospec/gh-calls.log"
     grep -q 'Adversarial verify: passed' "$TMP/.autospec/gh-calls.log"
-    grep -q '<!-- autospec-safety:begin -->' "$TMP/.autospec/gh-calls.log"
-    grep -q -- '- \*\*decision:\*\* `SAFETY_PASS`' "$TMP/.autospec/gh-calls.log"
-    grep -q '<!-- autospec-safety:end -->' "$TMP/.autospec/gh-calls.log"
+    ! grep -q -- '--label safety:reviewed' "$TMP/.autospec/gh-calls.log"
+    ! grep -q 'autospec-safety:begin' "$TMP/.autospec/gh-calls.log"
 }
 
 

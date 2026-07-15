@@ -1632,7 +1632,7 @@ fn runner_requires_and_runs_the_complete_grooming_suite_batch() {
     let report = ValidationRunner::run(&catalog, &validation_fixture("grooming-contract"));
 
     assert_eq!(report.results[0].exit_code, Some(0));
-    assert_eq!(report.results[0].spawn_count, 11);
+    assert_eq!(report.results[0].spawn_count, 10);
 }
 
 #[test]

@@ -268,10 +268,16 @@ Behavioural contract:
 2. Runs `explore-research-cycle.sh --stage full` exactly once with the resolved
    `--research-sources` and `--max-issues-per-round`.
 3. Converts verified survivors into `candidates[]` objects containing `title`, evidence-rich `body`, `severity`, `labels` (`auto-implement` + `origin:self` + ctx/reasoning + `explore`), `roi_score`, and `evidence`; `len(candidates)` → `new_candidates`.
-4. Files each surviving proposal via `gh issue create --label auto-implement --label origin:self`,
+4. Files each surviving proposal as an interim candidate via `gh issue create --label auto-implement --label origin:self`,
    first running the idempotent, best-effort `gh label create origin:self --color 8250df --force`
-   guard so the label always exists (label-create failure never aborts filing); the `gh issue create`
-   call itself is also best-effort and never aborts on `gh` failure; counts successes as `filed`.
+   guard so the label always exists (label-create failure never aborts filing). After `gh issue create`
+   returns issue `<N>`, invokes the exact Rust admission command:
+   ```bash
+   "${AUTOSPEC_BIN:-autospec}" queue review-safety --repo {repo} --limit 1 --issue <N>
+   ```
+   Only a JSON `pass: 1` result counts as `filed`; a failure or non-pass remains
+   unclaimable for bounded Rust retry. Prompts and shell paths must not author a
+   safety outcome.
 5. Sets `dry=true` when `new_candidates==0`; sets `reason` accordingly.
 6. Prints the yield JSON (legacy summary keys plus `candidates[]`) to stdout and exits 0.
 
@@ -402,7 +408,13 @@ links it, then decomposes it into linked auto-implement issues. Per round:
 4. **Fallback — never stall**: if the `/autospec-define` handoff is unavailable
    or exits non-zero, log `code_health:explore_define_unavailable`, KEEP the
    already-committed round spec, and fall back to raw filing for that round
-   only. The loop continues; a round never blocks on define availability.
+   only. Each resulting issue `<N>` invokes the exact Rust admission command
+   before it can count as filed:
+   ```bash
+   "${AUTOSPEC_BIN:-autospec}" queue review-safety --repo {repo} --limit 1 --issue <N>
+   ```
+   The loop continues; a round never blocks on define availability, and only
+   JSON `pass: 1` is a filing success.
 
 ## Discovery enhancement (researcher roster + verify/ROI/synthesis stages + severity)
 

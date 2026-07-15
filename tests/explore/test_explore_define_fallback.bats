@@ -45,7 +45,17 @@ fi
 exit 0
 EOF
     chmod +x bin/gh
+cat > bin/autospec <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TMP/safety.log"
+if [ "\${1:-}" != "queue" ] || [ "\${2:-}" != "review-safety" ]; then
+  exit 41
+fi
+printf '%s\n' '{"pass":1,"ambiguous":0,"block":0,"stale":0,"conflicted":0,"skipped":0}'
+EOF
+    chmod +x bin/autospec
     export PATH="$TMP/bin:$PATH"
+    export GITHUB_REPOSITORY="o/r"
 }
 
 teardown() {
@@ -95,6 +105,13 @@ DRIVER
     [ "$status" -eq 0 ]
     grep -q 'issue:create' "$TMP/gh.log"
     grep -q 'auto-implement' "$TMP/gh.log"
+}
+
+@test "raw fallback reviews the newly created issue through Rust" {
+    DEFINE_CMD='exit 7'
+    run _run_filing
+    [ "$status" -eq 0 ]
+    grep -q 'queue review-safety --repo o/r --limit 1 --issue 9001' "$TMP/safety.log"
 }
 
 @test "missing define handoff (empty cmd) also falls back" {

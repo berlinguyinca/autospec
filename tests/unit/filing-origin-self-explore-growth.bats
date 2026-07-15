@@ -24,6 +24,16 @@ setup() {
     mkdir -p "$STUB_DIR"
     export PATH="$STUB_DIR:$PATH"
     export GH_LOG="$TMP/gh.log"
+    export GITHUB_REPOSITORY="berlinguyinca/autospec"
+    cat > "$STUB_DIR/autospec" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_LOG"
+if [ "${1:-}" != "queue" ] || [ "${2:-}" != "review-safety" ]; then
+  exit 41
+fi
+printf '%s\n' '{"pass":1,"ambiguous":0,"block":0,"stale":0,"conflicted":0,"skipped":0}'
+SH
+    chmod +x "$STUB_DIR/autospec"
 }
 
 teardown() {
@@ -86,6 +96,16 @@ DRIVER
     run _run_explore_raw_filing
     [ "$status" -eq 0 ] || { echo "$output"; false; }
     grep -q 'label create origin:self' "$GH_LOG"
+}
+
+@test "explore fallback filing: Rust reviews the exact issue after creation" {
+    _explore_gh_stub
+    run _run_explore_raw_filing
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    grep -q 'queue review-safety --repo berlinguyinca/autospec --limit 1 --issue 321' "$GH_LOG"
+    create_line="$(grep -n 'issue create' "$GH_LOG" | head -1 | cut -d: -f1)"
+    review_line="$(grep -n 'queue review-safety' "$GH_LOG" | head -1 | cut -d: -f1)"
+    [ "$create_line" -lt "$review_line" ]
 }
 
 @test "explore fallback filing: label create failure does not abort filing" {
