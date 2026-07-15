@@ -1,0 +1,14 @@
+{
+  "scripts": {
+    "syntax": "node --check src/index.js",
+    "test:unit": "vitest run --run unit",
+    "test:integration": "vitest run --run integration",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build",
+    "docs": "vitepress build docs"
+  },
+  "devDependencies": {
+    "vitest": "latest"
+  }
+}

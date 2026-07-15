@@ -96,6 +96,7 @@ pub enum ExternalCheck {
     TokenBaselineFresh,
     ArchitectureFitnessEngine,
     Phase4TestSuites,
+    ValidationMatrixSmoke,
 }
 
 impl ExternalCheck {
@@ -228,8 +229,21 @@ impl ExternalCheck {
             Self::TokenBaselineFresh => run_token_baseline_fresh(id, required, root),
             Self::ArchitectureFitnessEngine => run_architecture_fitness_engine(id, required, root),
             Self::Phase4TestSuites => run_phase4_test_suites(id, required, root),
+            Self::ValidationMatrixSmoke => run_validation_matrix_smoke(id, required, root),
         }
     }
+}
+
+fn run_validation_matrix_smoke(id: &str, required: bool, root: &Path) -> CheckResult {
+    run_commands(
+        id,
+        required,
+        root,
+        [
+            ToolCommand::new("bash", ["tests/smoke/validation-matrix.sh"])
+                .expect("validation-matrix smoke is a direct script invocation"),
+        ],
+    )
 }
 
 fn run_bash_syntax(id: &str, required: bool, root: &Path) -> CheckResult {

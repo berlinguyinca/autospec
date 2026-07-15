@@ -117,6 +117,7 @@
     "check_autospec_autonomous_tier4_discovery_contract",
     "check_autospec_explore_style_normalization_contract",
     "check_autospec_explore_discovery_contract",
+    "check_validation_matrix_smoke",
     "check_autospec_explore_spec_first_contract",
     "check_autospec_explore_qa_gate_contract",
     "check_autospec_release_area_contract",

@@ -1,0 +1,6 @@
+[project]
+name = "polyglot"
+dependencies = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

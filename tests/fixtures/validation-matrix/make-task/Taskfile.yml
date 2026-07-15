@@ -1,0 +1,8 @@
+version: '3'
+tasks:
+  docs:
+    cmds:
+      - mdbook build docs
+  lint:
+    cmds:
+      - shellcheck scripts/*.sh

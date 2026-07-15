@@ -338,6 +338,9 @@ impl ValidationCheck {
                 CheckOwner::ExternalBatch(ExternalCheck::ArchitectureFitnessEngine)
             }
             "check_phase4_tests" => CheckOwner::ExternalBatch(ExternalCheck::Phase4TestSuites),
+            "check_validation_matrix_smoke" => {
+                CheckOwner::ExternalBatch(ExternalCheck::ValidationMatrixSmoke)
+            }
             "check_reviewer_reuse_lens" => {
                 CheckOwner::ExternalBatch(ExternalCheck::ReviewerReuseLens)
             }
@@ -663,6 +666,7 @@ const LEGACY_TOP_LEVEL_CALL_IDS: &[&str] = &[
     "check_autospec_explore_contract",
     "check_explore_trio_worktree_assert",
     "check_autospec_explore_discovery_contract",
+    "check_validation_matrix_smoke",
     "check_autospec_explore_stage2_intersect_contract",
     "check_autospec_explore_userspace_roster_contract",
     "check_autospec_autonomous_tier4_discovery_contract",
@@ -826,6 +830,7 @@ const STANDARD_CHECK_IDS: &[&str] = &[
     "check_autospec_autonomous_tier4_discovery_contract",
     "check_autospec_explore_style_normalization_contract",
     "check_autospec_explore_discovery_contract",
+    "check_validation_matrix_smoke",
     "check_autospec_explore_spec_first_contract",
     "check_autospec_explore_qa_gate_contract",
     "check_autospec_release_area_contract",
