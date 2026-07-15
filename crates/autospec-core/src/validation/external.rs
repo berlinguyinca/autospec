@@ -1907,217 +1907,257 @@ fn run_autospec_explore_discovery(id: &str, required: bool, root: &Path) -> Chec
         return aggregate(id, required, results);
     }
     results.push(aggregator);
-    let aggregator_path = root.join(AGGREGATOR);
-    for (token, message) in [
-        (
-            "proposals_after_verify",
-            "missing verify-stage counter proposals_after_verify",
-        ),
-        ("proposals_refuted", "missing proposals_refuted counter"),
-        (
-            "proposals_after_roi",
-            "missing ROI-gate counter proposals_after_roi",
-        ),
-        (
-            "structural_fixes",
-            "missing pattern-synthesis counter structural_fixes",
-        ),
-    ] {
-        if !contains(&aggregator_path, token) {
-            results.push(failure(id, required, &format!("{AGGREGATOR}: {message}")));
-            return aggregate(id, required, results);
-        }
+    const AGGREGATOR_TOKEN_CHECKS: &[DiscoveryTokenCheck] = &[
+        DiscoveryTokenCheck {
+            token: "proposals_after_verify",
+            message: "missing verify-stage counter proposals_after_verify",
+        },
+        DiscoveryTokenCheck {
+            token: "proposals_refuted",
+            message: "missing proposals_refuted counter",
+        },
+        DiscoveryTokenCheck {
+            token: "proposals_after_roi",
+            message: "missing ROI-gate counter proposals_after_roi",
+        },
+        DiscoveryTokenCheck {
+            token: "structural_fixes",
+            message: "missing pattern-synthesis counter structural_fixes",
+        },
+    ];
+    const SCHEMA_TOKEN_CHECKS: &[DiscoveryRequiredFileTokenCheck] = &[
+        DiscoveryRequiredFileTokenCheck {
+            path: PROPOSAL_SCHEMA,
+            missing_label: "schema",
+            token: "silent-wrong",
+            message: "severity enum must include silent-wrong (load-bearing rank head)",
+        },
+        DiscoveryRequiredFileTokenCheck {
+            path: PROPOSAL_SCHEMA,
+            missing_label: "schema",
+            token: "named_consumer",
+            message: "missing named_consumer ROI field",
+        },
+        DiscoveryRequiredFileTokenCheck {
+            path: SPECIALIST_SCHEMA,
+            missing_label: "schema",
+            token: "suggested_specialists",
+            message: "missing suggested_specialists roster field",
+        },
+    ];
+    const DOCUMENT_CHECKS: &[DiscoveryDocumentCheck] = &[
+        DiscoveryDocumentCheck {
+            path: RUNBOOK,
+            missing_label: "runbook",
+        },
+        DiscoveryDocumentCheck {
+            path: SPEC,
+            missing_label: "source spec",
+        },
+    ];
+
+    if let Some(message) = first_missing_discovery_token(root, AGGREGATOR, AGGREGATOR_TOKEN_CHECKS)
+    {
+        return aggregate_discovery_failure(id, required, results, message);
     }
-    if !contains_case_insensitive(&aggregator_path, "severity") {
-        results.push(failure(
+    if !contains_case_insensitive(&root.join(AGGREGATOR), "severity") {
+        return aggregate_discovery_failure(
             id,
             required,
+            results,
             "scripts/explore-research-cycle.sh: missing severity-first ranking logic",
-        ));
-        return aggregate(id, required, results);
+        );
     }
 
-    for (schema, token, message) in [
-        (
-            PROPOSAL_SCHEMA,
-            "silent-wrong",
-            "severity enum must include silent-wrong (load-bearing rank head)",
-        ),
-        (
-            PROPOSAL_SCHEMA,
-            "named_consumer",
-            "missing named_consumer ROI field",
-        ),
-        (
-            SPECIALIST_SCHEMA,
-            "suggested_specialists",
-            "missing suggested_specialists roster field",
-        ),
-    ] {
-        let path = root.join(schema);
-        if !path.is_file() {
-            results.push(failure(
-                id,
-                required,
-                &format!("{schema}: required schema missing"),
-            ));
-            return aggregate(id, required, results);
-        }
-        if !contains(&path, token) {
-            results.push(failure(id, required, &format!("{schema}: {message}")));
-            return aggregate(id, required, results);
-        }
+    if let Some(message) = first_missing_discovery_file_token(root, SCHEMA_TOKEN_CHECKS) {
+        return aggregate_discovery_failure(id, required, results, message);
     }
 
-    for trio in TRIO {
-        let path = root.join(trio);
-        if !path.is_file() {
-            results.push(failure(
-                id,
-                required,
-                &format!("{trio}: required adapter file missing"),
-            ));
-            return aggregate(id, required, results);
-        }
-        for heading in ["## Discovery enhancement", "## Domain-specialist roster"] {
-            if !has_heading_prefix(&path, heading) {
-                results.push(failure(
-                    id,
-                    required,
-                    &format!("{trio}: missing '{heading}' section"),
-                ));
-                return aggregate(id, required, results);
-            }
-        }
-        for researcher in ["quality-resilience", "dogfooding", "self-leverage"] {
-            if !contains(&path, researcher) {
-                results.push(failure(
-                    id,
-                    required,
-                    &format!("{trio}: missing discovery researcher reference '{researcher}'"),
-                ));
-                return aggregate(id, required, results);
-            }
-        }
-        if !has_same_line_ordered_tokens(
-            &path,
-            &[
-                "dedup",
-                "gap-confirm",
-                "verify",
-                "ROI",
-                "pattern-synthesis",
-                "severity-first rank",
-            ],
-        ) {
-            results.push(failure(
-                id,
-                required,
-                &format!("{trio}: missing aggregator stage order"),
-            ));
-            return aggregate(id, required, results);
-        }
-        for severity in [
-            "silent-wrong",
-            "correctness",
-            "stability",
-            "operability",
-            "feature",
-            "nicety",
-        ] {
-            if !contains(&path, severity) {
-                results.push(failure(
-                    id,
-                    required,
-                    &format!("{trio}: missing severity band '{severity}'"),
-                ));
-                return aggregate(id, required, results);
-            }
-        }
-        for flag in ["--specialists-mode", "--num-specialists"] {
-            if !contains(&path, flag) {
-                results.push(failure(
-                    id,
-                    required,
-                    &format!("{trio}: missing specialist flag '{flag}'"),
-                ));
-                return aggregate(id, required, results);
-            }
-        }
-        if !contains(&path, "7 universal") {
-            results.push(failure(
-                id,
-                required,
-                &format!("{trio}: missing '7 universal' researcher accounting"),
-            ));
-            return aggregate(id, required, results);
-        }
-        if contains_stale_researcher_count(&path) {
-            results.push(failure(
-                id,
-                required,
-                &format!("{trio}: stale '6 researchers' count still present (must be 7 universal)"),
-            ));
-            return aggregate(id, required, results);
-        }
+    if let Some(message) = first_missing_discovery_trio_contract(root, TRIO) {
+        return aggregate_discovery_failure(id, required, results, message);
     }
 
-    for document in [RUNBOOK, SPEC] {
-        if !root.join(document).is_file() {
-            results.push(failure(
-                id,
-                required,
-                &format!(
-                    "{document}: required {} missing",
-                    if document == RUNBOOK {
-                        "runbook"
-                    } else {
-                        "source spec"
-                    }
-                ),
-            ));
-            return aggregate(id, required, results);
-        }
-        for track in [
-            "Feature delta",
-            "External",
-            "Quality & resilience",
-            "Dogfooding",
-            "Self-leverage",
-        ] {
-            if !contains(&root.join(document), track) {
-                results.push(failure(
-                    id,
-                    required,
-                    &format!("{document}: missing discovery track '{track}'"),
-                ));
-                return aggregate(id, required, results);
-            }
-        }
-        if !contains_case_insensitive(&root.join(document), "pattern synthesis") {
-            results.push(failure(
-                id,
-                required,
-                &format!("{document}: missing pattern-synthesis stage"),
-            ));
-            return aggregate(id, required, results);
-        }
+    if let Some(message) = first_missing_discovery_document(root, DOCUMENT_CHECKS) {
+        return aggregate_discovery_failure(id, required, results, message);
     }
     if !contains(
         &root.join(RUNBOOK),
         "check_autospec_explore_discovery_contract",
     ) {
-        results.push(failure(
+        return aggregate_discovery_failure(
             id,
             required,
+            results,
             "docs/runbooks/discovery-sweep.md: must cite check_autospec_explore_discovery_contract as the lock-step enforcer",
-        ));
-        return aggregate(id, required, results);
+        );
     }
 
     let bats = run_bats_suites(id, required, root, SUITES);
     results.push(bats);
     aggregate(id, required, results)
+}
+
+struct DiscoveryTokenCheck {
+    token: &'static str,
+    message: &'static str,
+}
+
+struct DiscoveryRequiredFileTokenCheck {
+    path: &'static str,
+    missing_label: &'static str,
+    token: &'static str,
+    message: &'static str,
+}
+
+struct DiscoveryDocumentCheck {
+    path: &'static str,
+    missing_label: &'static str,
+}
+
+fn aggregate_discovery_failure(
+    id: &str,
+    required: bool,
+    mut results: Vec<CheckResult>,
+    message: impl AsRef<str>,
+) -> CheckResult {
+    results.push(failure(id, required, message.as_ref()));
+    aggregate(id, required, results)
+}
+
+fn first_missing_discovery_token(
+    root: &Path,
+    relative_path: &str,
+    checks: &[DiscoveryTokenCheck],
+) -> Option<String> {
+    let path = root.join(relative_path);
+    for check in checks {
+        if !contains(&path, check.token) {
+            return Some(format!("{relative_path}: {}", check.message));
+        }
+    }
+    None
+}
+
+fn first_missing_discovery_file_token(
+    root: &Path,
+    checks: &[DiscoveryRequiredFileTokenCheck],
+) -> Option<String> {
+    for check in checks {
+        let path = root.join(check.path);
+        if !path.is_file() {
+            return Some(format!(
+                "{}: required {} missing",
+                check.path, check.missing_label
+            ));
+        }
+        if !contains(&path, check.token) {
+            return Some(format!("{}: {}", check.path, check.message));
+        }
+    }
+    None
+}
+
+fn first_missing_discovery_trio_contract(root: &Path, trio_paths: &[&str]) -> Option<String> {
+    const HEADINGS: &[&str] = &["## Discovery enhancement", "## Domain-specialist roster"];
+    const RESEARCHERS: &[&str] = &["quality-resilience", "dogfooding", "self-leverage"];
+    const STAGE_ORDER: &[&str] = &[
+        "dedup",
+        "gap-confirm",
+        "verify",
+        "ROI",
+        "pattern-synthesis",
+        "severity-first rank",
+    ];
+    const SEVERITY_BANDS: &[&str] = &[
+        "silent-wrong",
+        "correctness",
+        "stability",
+        "operability",
+        "feature",
+        "nicety",
+    ];
+    const SPECIALIST_FLAGS: &[&str] = &["--specialists-mode", "--num-specialists"];
+
+    for trio in trio_paths {
+        let path = root.join(trio);
+        if !path.is_file() {
+            return Some(format!("{trio}: required adapter file missing"));
+        }
+        for heading in HEADINGS {
+            if !has_heading_prefix(&path, heading) {
+                return Some(format!("{trio}: missing '{heading}' section"));
+            }
+        }
+        for researcher in RESEARCHERS {
+            if !contains(&path, researcher) {
+                return Some(format!(
+                    "{trio}: missing discovery researcher reference '{researcher}'"
+                ));
+            }
+        }
+        if !has_same_line_ordered_tokens(&path, STAGE_ORDER) {
+            return Some(format!("{trio}: missing aggregator stage order"));
+        }
+        for severity in SEVERITY_BANDS {
+            if !contains(&path, severity) {
+                return Some(format!("{trio}: missing severity band '{severity}'"));
+            }
+        }
+        for flag in SPECIALIST_FLAGS {
+            if !contains(&path, flag) {
+                return Some(format!("{trio}: missing specialist flag '{flag}'"));
+            }
+        }
+        if !contains(&path, "7 universal") {
+            return Some(format!(
+                "{trio}: missing '7 universal' researcher accounting"
+            ));
+        }
+        if contains_stale_researcher_count(&path) {
+            return Some(format!(
+                "{trio}: stale '6 researchers' count still present (must be 7 universal)"
+            ));
+        }
+    }
+    None
+}
+
+fn first_missing_discovery_document(
+    root: &Path,
+    documents: &[DiscoveryDocumentCheck],
+) -> Option<String> {
+    const TRACKS: &[&str] = &[
+        "Feature delta",
+        "External",
+        "Quality & resilience",
+        "Dogfooding",
+        "Self-leverage",
+    ];
+
+    for document in documents {
+        let path = root.join(document.path);
+        if !path.is_file() {
+            return Some(format!(
+                "{}: required {} missing",
+                document.path, document.missing_label
+            ));
+        }
+        for track in TRACKS {
+            if !contains(&path, track) {
+                return Some(format!(
+                    "{}: missing discovery track '{}'",
+                    document.path, track
+                ));
+            }
+        }
+        if !contains_case_insensitive(&path, "pattern synthesis") {
+            return Some(format!(
+                "{}: missing pattern-synthesis stage",
+                document.path
+            ));
+        }
+    }
+    None
 }
 
 fn run_autospec_qa_contract(id: &str, required: bool, root: &Path) -> CheckResult {
