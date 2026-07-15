@@ -2670,7 +2670,7 @@ fn strip_first_blank_line(document: &str) -> String {
 mod tests {
     use super::StructuralValidator;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root(name: &str) -> PathBuf {
@@ -2686,7 +2686,7 @@ mod tests {
         root
     }
 
-    fn write_explore_trio(root: &PathBuf, body: &str) {
+    fn write_explore_trio(root: &Path, body: &str) {
         let skill = format!("---\nname: autospec-explore\n---\n{body}");
         let opencode = format!("---\nname: autospec-explore\n---\n{body}");
         fs::write(root.join("skills/autospec-explore/SKILL.md"), skill).expect("skill fixture");

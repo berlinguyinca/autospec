@@ -583,9 +583,11 @@ personas appropriate to it (a trading repo gets `quant-strategy`,
 Roster discovery runs once at sandbox creation and is cached:
 
 1. **Deterministic signal scan** (the `explore-specialist-scan.sh` helper, no LLM):
-   dependency manifests, README/AGENTS.md keywords, directory taxonomy, and a
-   small domain lexicon produce a ranked list of candidate domains with
-   file:line evidence — never a bare guess.
+   repo names (owner/name, remote slug, and top-level project directory),
+   dependency manifests, docs (`README*`, `AGENTS.md`, and runbooks), and code paths
+   (module, package, script, workflow, and data-directory names) are
+   scanned against a small domain lexicon to produce a ranked list of candidate
+   domains with file:line evidence — never a bare guess.
 2. **LLM roster proposal** (one Tier-A dispatch): given the signals, emit
    `{domains[], suggested_specialists[]}`, each specialist carrying
    `{slug, persona, lens, why, evidence}`, capped at `--num-specialists`.
@@ -614,6 +616,35 @@ Guardrails: specialists are **researchers, not implementers** — they only
 propose, and every proposal flows through the same verify → ROI → synthesis →
 severity rank pipeline; a domain persona cannot bypass the skeptic stage. The
 total parallel researcher count is capped at `7 + 4 + ≤6 = ≤17` per round.
+
+### Metabolomics and lab-ops specialist roster
+
+When the deterministic scan sees metabolomics or laboratory-operations evidence
+(for example `mzML`/`mzXML`, `MS/MS`, `LC-MS`, `GC-MS`, `InChI`, `SMILES`,
+`PubChem`, `BinBase`, `MoNA`, `SIRIUS`, `Slurm`, `LIMS`, assay/run queues, or
+instrument/batch directories), the Tier-A roster proposal should include up to
+these five evidence-grounded specialists:
+
+- `ms-data-curator` — checks raw/centroid/profile MS data handling, mzML/mzXML
+  conversion seams, retention-time/mass-tolerance assumptions, and missing QC
+  around peak tables.
+- `chemical-identity-reviewer` — checks InChI/SMILES/CAS/PubChem/HMDB mappings,
+  adduct/salt/stereochemistry handling, and string-match identity shortcuts.
+- `lc-binbase-workflow-analyst` — checks LC-BinBase-style library matching,
+  retention-index/bin drift, batch correction, and export/import contracts.
+- `mona-sirius-integration-reviewer` — checks MoNA/SIRIUS/MS-FINDER-style
+  reference-library and fragmentation workflow assumptions without calling those
+  external services.
+- `hpc-lab-ops-reliability` — checks Slurm/HPC job orchestration, instrument
+  queue recovery, file drops, idempotent reprocessing, and lab-ops observability.
+
+Every proposal emitted by a `specialist:<slug>` researcher MUST include
+`evidence`, `severity`, `consumer` (serialized as `named_consumer` in the
+existing proposal JSON), and a refutable `gap_check`; specialist proposals that
+lack any of those gates are refuted before filing. These proposals still flow
+through the unchanged `dedup → gap-confirm → verify → ROI → pattern-synthesis →
+severity-first rank` spine, so the specialist roster cannot bypass verify, ROI,
+or synthesis gates.
 Discovery degrades gracefully: a generic repo with no detectable domain yields
 an empty roster and the loop runs exactly as today. Specialist personas are
 derived from repo evidence only — no external persona is injected from the
