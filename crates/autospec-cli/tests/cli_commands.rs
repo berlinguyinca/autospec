@@ -1374,23 +1374,13 @@ fn autonomous_main_health_blocks_required_check_failure() {
 }
 
 #[test]
-fn autonomous_run_foreground_stops_before_shell_backend_when_health_branch_is_missing() {
+fn autonomous_run_foreground_stops_before_rust_executor_when_health_branch_is_missing() {
     let temp = temp_dir("autospec-foreground-health-block");
     let repo_dir = temp.join("repo");
     make_git_repo(
         &repo_dir,
         Some("https://github.com/berlinguyinca/autospec.git"),
     );
-    let backend = temp.join("backend.sh");
-    let marker = temp.join("backend-ran");
-    std::fs::write(
-        &backend,
-        format!("#!/bin/sh\ntouch {}\nexit 0\n", marker.display()),
-    )
-    .expect("backend script");
-    let mut permissions = std::fs::metadata(&backend).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&backend, permissions).unwrap();
     let bin = fake_bin(
         &temp,
         None,
@@ -1411,17 +1401,14 @@ fn autonomous_run_foreground_stops_before_shell_backend_when_health_branch_is_mi
             "missing-health",
         ])
         .env("PATH", path_with(&bin))
-        .env("AUTOSPEC_AUTONOMOUS_SCRIPT", &backend)
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", temp.join("operator"))
         .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", temp.join("state"))
         .output()
         .expect("autospec autonomous run-foreground runs");
 
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("branch-not-found"));
-    assert!(
-        !marker.exists(),
-        "shell backend must not run after health diagnostic"
-    );
+    assert!(!temp.join("operator").exists());
 }
 
 #[test]
@@ -1491,7 +1478,7 @@ fn autonomous_start_live_writes_repo_scoped_pid_and_log_metadata() {
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
         .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
@@ -1542,7 +1529,7 @@ fn autonomous_status_json_reports_companion_processes() {
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
         .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
@@ -2090,7 +2077,7 @@ fn autonomous_start_without_repo_uses_git_remote_scope() {
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
         .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
@@ -2119,7 +2106,6 @@ fn autonomous_start_non_git_repo_dir_fails_loud() {
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous start runs");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2150,7 +2136,7 @@ fn autonomous_start_mismatched_repo_warns_but_launches() {
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
         .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
@@ -2243,7 +2229,7 @@ fn autonomous_start_records_argv_and_passthrough_options_in_launch_provenance() 
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
         .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
@@ -2322,8 +2308,8 @@ fn autonomous_start_companion_opt_out_skips_monitor_and_supervisor_processes() {
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
-        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous start runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2448,7 +2434,7 @@ fn autonomous_start_uses_explicit_conductor_log_path() {
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
         .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
@@ -2489,7 +2475,7 @@ fn autonomous_start_refuses_duplicate_conductor_without_force() {
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
         .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
@@ -2526,7 +2512,7 @@ fn autonomous_start_force_replaces_existing_conductor() {
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
         .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
@@ -2678,7 +2664,7 @@ fn autonomous_restart_replaces_existing_target_companions() {
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
         .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
@@ -2719,8 +2705,8 @@ fn autonomous_restart_clears_existing_stop_flag_before_launch() {
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_STOP_FLAG_FILE", &stop_flag)
-        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
         .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
@@ -2778,7 +2764,7 @@ fn start_sleeping_autonomous(
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", operator_dir)
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD", "sleep 20")
+        .env("PATH", hermetic_autonomous_path(operator_dir))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
         .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
@@ -2904,6 +2890,11 @@ fn fake_bin(
         write_executable(&bin.join("gh"), program);
     }
     bin
+}
+
+fn hermetic_autonomous_path(fixture: &std::path::Path) -> String {
+    let bin = fake_bin(fixture, None, Some("#!/bin/sh\nexit 1\n"));
+    path_with(&bin)
 }
 
 fn write_executable(path: &std::path::Path, contents: &str) {

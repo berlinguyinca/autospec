@@ -74,6 +74,15 @@ scan found no work after completion reconciliation, including a rescan after a
 serialized `priority:high` issue. `ALL_DONE` is a queue result only; it never
 authorizes autonomous discovery to stop permanently.
 
+The foreground CLI adapter persists this state under its repository-scoped
+autonomous directory in separate repository and exact-slice files, and does not
+delegate selection or dispatch to a script.
+For the current cutover, its direct Rust `executor-result` child returns only a
+blocked/deferred receipt because a typed implementation-agent protocol has not
+been introduced. The adapter records that receipt before claim reconciliation,
+then leaves the selected issue paused and claimed. It must not requeue or mark
+the issue complete merely because the receipt process exited successfully.
+
 ## Rust CLI
 
 The `autospec` Rust binary exposes the V62+ command surface while preserving the skill-first workflow. `doctor`, `init`, `status`, `plan`, `validate`, `run`, `resume`, `report`, `showcase`, and `growth-report` support `--json`. `autospec init --spec <id>` creates local planned state without executing work. Direct `autospec validate [--path <changed-path>]...` is a read-only affected-check planner, while `autospec validate --shadow-results <file>` aggregates pre-captured results without spawning a command. `autospec validate` remains the executor for shell options such as `--fast`. `run` and `resume` only create, ingest, and inspect local queue state; `benchmark` remains a non-zero stub.

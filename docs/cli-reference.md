@@ -25,6 +25,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec claim acquire\|release ...` | yes | applies the typed safety gate, heartbeat/label ordering, lease CAS, and terminal release transitions |
 | `autospec queue ready [--repo OWNER/REPO] [--batch-size N]` | yes | scans every Rust-owned GitHub issue page and returns typed eligibility, gate totals, and scan scope |
 | `autospec queue review-safety --repo OWNER/REPO --limit N [--issue N]` | yes | writes bounded Rust issue-intent safety decisions and reports outcome totals |
+| `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR` | no | drives one Rust-owned queue/claim cycle and persists a deferred foreground receipt; it launches no implementation agent |
 | `autospec run --run <id> --spec <id>... [--json]` | yes | creates a local persisted queue only; it does not launch an agent or validation command |
 | `autospec run --ingest <agent-result.json> --run <id> --spec <id> --result-id <id> --outcome <passed\|failed\|blocked> [--failure-kind <kind>] [--retry-limit <n>] [--json]` | yes | validates and records an explicit local agent result; it does not launch an agent or validation command |
 | `autospec resume [--json]` | yes | reports the newest incomplete local queue and its next entry; it does not execute it |
@@ -83,3 +84,15 @@ canonical review block, adds `safety:reviewed`, and re-reads the issue through t
 gate. Ambiguous issues receive `autospec:needs-human`; blocking issues receive
 `security:quarantined`; neither becomes reviewed-eligible. Conflicting or malformed remote
 evidence is fail-closed and counted as `conflicted`.
+
+`autospec autonomous run-foreground` is a typed Rust control-plane entrypoint. After mainline
+health admission it performs one bounded queue safety review, selects and claims one ready issue,
+and persists strict conductor state as
+`.autospec/autonomous-operator/<scope>/foreground-conductor-<scope-key>.json`, where the
+scope key distinguishes repository runs from each explicit issue slice. Its internal
+`executor-result` child uses the current Rust executable with an explicit argument vector. That
+child returns only the deferred `awaiting_typed_implementation_executor` receipt: it launches no
+implementation agent, never releases the claim, and never reports implementation success. A later
+foreground invocation retains that paused selected issue until an explicit recovery protocol is
+available. Detached `autonomous start` and `restart` likewise launch this foreground command as a
+direct Rust child; monitor and supervisor are separate compatibility companions.
