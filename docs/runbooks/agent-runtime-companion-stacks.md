@@ -9,9 +9,13 @@ The companion fixtures demonstrate the `lc-binbase-scheduler` profile and the
 ## Rust-owned environment contract
 
 Only `autospec runtime env` parses the manifest and creates the local runtime
-environment. The Rust broker generates these five reserved values; they must
+environment. The Rust broker generates these nine reserved values; they must
 not appear in a mode's `env` mapping:
 
+- `AGENT_ENV_ID`
+- `AGENT_ENV_MODE`
+- `AGENT_ENV_REPO`
+- `AGENT_ENV_MANIFEST`
 - `AGENT_FRONTEND_PORT`
 - `AGENT_BACKEND_PORT`
 - `AGENT_PUBLIC_URL`
