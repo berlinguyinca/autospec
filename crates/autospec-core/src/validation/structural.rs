@@ -59,6 +59,9 @@ impl StructuralValidator {
             StructuralCheck::AutospecExploreUserspaceRoster => {
                 Self::validate_autospec_explore_userspace_roster_contract(root)
             }
+            StructuralCheck::AutospecExploreMetabolomicsRoster => {
+                Self::validate_autospec_explore_metabolomics_roster_contract(root)
+            }
             StructuralCheck::AutospecExploreParallelValidation => {
                 Self::validate_autospec_explore_parallel_validation_contract(root)
             }
@@ -1089,6 +1092,61 @@ impl StructuralValidator {
                 ));
             }
         }
+        Ok(())
+    }
+
+    pub fn validate_autospec_explore_metabolomics_roster_contract(
+        root: &Path,
+    ) -> Result<(), String> {
+        for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+            let display = format!("skills/autospec-explore/{member}");
+            let path = root.join(&display);
+            let document = read(&path).unwrap_or_default();
+            let lower = document.to_ascii_lowercase();
+
+            for (required, label) in [
+                ("repo names", "repo-name signal scan"),
+                ("dependency manifests", "dependency manifest signal scan"),
+                ("docs", "docs signal scan"),
+                ("code paths", "code-path signal scan"),
+                ("ms-data-specialist", "MS data specialist"),
+                ("chemical-ids-specialist", "chemical ID specialist"),
+                ("lc-binbase-specialist", "LC-BinBase specialist"),
+                ("mona-sirius-specialist", "MoNA/SIRIUS specialist"),
+                ("hpc-reliability-specialist", "HPC reliability specialist"),
+                ("gap_check", "refutable gap check field"),
+                ("evidence", "evidence field"),
+                ("severity", "severity field"),
+                ("consumer", "consumer field"),
+                ("verify", "verify gate"),
+                ("roi", "ROI gate"),
+                ("synthesis", "synthesis gate"),
+            ] {
+                if !lower.contains(required) {
+                    return Err(format!("{display}: missing {label}"));
+                }
+            }
+        }
+
+        let scan_display = "scripts/explore-specialist-scan.sh";
+        let scan_path = root.join(scan_display);
+        let scan = read(&scan_path).unwrap_or_default().to_ascii_lowercase();
+        for (required, label) in [
+            ("metabolomics", "metabolomics lexicon"),
+            ("mzml", "MS data token"),
+            ("inchikey", "chemical identifier token"),
+            ("binbase", "LC-BinBase token"),
+            ("mona", "MoNA token"),
+            ("sirius", "SIRIUS token"),
+            ("slurm", "HPC reliability token"),
+            ("repo_name_signals", "repo-name scan evidence"),
+            ("path_signals", "code-path scan evidence"),
+        ] {
+            if !scan.contains(required) {
+                return Err(format!("{scan_display}: missing {label}"));
+            }
+        }
+
         Ok(())
     }
 

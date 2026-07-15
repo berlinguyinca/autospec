@@ -74,9 +74,43 @@ except ValueError:
 stub = os.environ.get("_AUTOSPEC_LLM_STUB", "")
 
 # Small domain lexicon: domain -> (regex of signal tokens, persona, lens).
-# Tokens are matched case-insensitively against manifest deps, README/AGENTS
-# keywords, and directory names. Evidence is always a real file:line.
+# Tokens are matched case-insensitively against repo name signals, dependency
+# manifests, README/AGENTS docs, and code paths. Evidence is always grounded
+# as a file/path + line.
 LEXICON = {
+    "ms-data": {
+        "tokens": r"\b(metabolomics|mzml|mzxml|mzdata|raw[-_ ]?ms|mass[-_ ]?spec(?:trometry)?|"
+                  r"lc[-_ ]?ms|gc[-_ ]?ms|ms1|ms2|ms/ms|centroid|"
+                  r"profile[-_ ]?mode|peak[-_ ]?picking|feature[-_ ]?table)\b",
+        "persona": "MS data specialist",
+        "lens": "raw/centroid/profile MS data handling, peak picking, and feature-table reproducibility",
+    },
+    "chemical-ids": {
+        "tokens": r"\b(inchi|inchikey|smiles|canonical[-_ ]?smiles|pubchem|hmdb|"
+                  r"chebi|lipidmaps|cas[-_ ]?number|adduct|formula|exact[-_ ]?mass)\b",
+        "persona": "Chemical identifiers specialist",
+        "lens": "chemical identifier normalization, adduct/formula ambiguity, and cross-database traceability",
+    },
+    "lc-binbase": {
+        "tokens": r"\b(binbase|retention[-_ ]?index|retention[-_ ]?time|kovats|"
+                  r"lc[-_ ]?bin|gc[-_ ]?bin|alignment[-_ ]?bin|chromatogram|"
+                  r"rt[-_ ]?alignment)\b",
+        "persona": "LC-BinBase specialist",
+        "lens": "LC/GC retention alignment, BinBase-style bins, and chromatographic reproducibility",
+    },
+    "mona-sirius": {
+        "tokens": r"\b(mona|massbank|sirius|csi:fingerid|fingerid|canopus|"
+                  r"gnps|spectral[-_ ]?library|fragmentation[-_ ]?tree|ms2query)\b",
+        "persona": "MoNA/SIRIUS specialist",
+        "lens": "spectral-library search, SIRIUS/CSI:FingerID annotation confidence, and offline fixture boundaries",
+    },
+    "hpc-reliability": {
+        "tokens": r"\b(lab[-_ ]?ops|slurm|sbatch|squeue|snakemake|nextflow|cwl|singularity|"
+                  r"apptainer|hpc|cluster|array[-_ ]?job|job[-_ ]?array|"
+                  r"checkpoint|scratch[-_ ]?space)\b",
+        "persona": "HPC reliability specialist",
+        "lens": "cluster scheduling, retry/checkpoint behavior, scratch-space cleanup, and reproducible lab pipelines",
+    },
     "trading": {
         "tokens": r"\b(ccxt|backtrader|zipline|alpaca|quantlib|ta-lib|talib|"
                   r"backtest(?:ing)?|order[- ]?book|market[- ]?data|ohlcv|"
@@ -118,36 +152,50 @@ LEXICON = {
     },
 }
 
-# Files to scan for signal tokens. Manifests + docs; directory taxonomy is
-# handled separately so we cite the directory entry itself.
+# Files to scan for signal tokens. Manifests + docs are read line-by-line;
+# repo names and code paths are scanned as path evidence below.
 MANIFESTS = [
     "package.json", "requirements.txt", "pyproject.toml", "go.mod",
     "Cargo.toml", "Gemfile", "pom.xml", "build.gradle",
+    "environment.yml", "environment.yaml", "conda.yml", "renv.lock",
+    "DESCRIPTION", "Snakefile", "nextflow.config",
 ]
-DOCS = ["README.md", "AGENTS.md", "README.rst"]
+DOCS = ["README.md", "AGENTS.md", "README.rst", "docs/README.md"]
 
 def rel(path):
     return os.path.relpath(path, root)
 
-# Gather scan targets: explicit manifests/docs at root + any *.csproj anywhere
-# shallow + directory names one level down.
+# Gather scan targets: explicit manifests/docs at root + path evidence from a
+# shallow code-path walk.
 scan_files = []
 for name in MANIFESTS + DOCS:
     p = os.path.join(root, name)
     if os.path.isfile(p):
         scan_files.append(p)
 
-# *.csproj (shallow walk, skip vcs/vendor dirs)
+# Shallow walk, skip vcs/vendor/build dirs. `repo_name_signals` and
+# `path_signals` are named so Rust validation can pin the behavior.
 SKIP_DIRS = {".git", "node_modules", "vendor", ".venv", "venv", "target",
-             "dist", "build", ".autospec"}
+             "dist", "build", ".autospec", "__pycache__"}
+repo_name_signals = [os.path.basename(os.path.abspath(root))]
+path_signals = []
 dir_names = []
 try:
-    for entry in sorted(os.listdir(root)):
-        full = os.path.join(root, entry)
-        if os.path.isdir(full) and entry not in SKIP_DIRS and not entry.startswith("."):
-            dir_names.append(entry)
-        elif os.path.isfile(full) and entry.endswith(".csproj"):
-            scan_files.append(full)
+    for current, dirs, files in os.walk(root):
+        rel_current = os.path.relpath(current, root)
+        depth = 0 if rel_current == "." else rel_current.count(os.sep) + 1
+        dirs[:] = [d for d in sorted(dirs)
+                   if d not in SKIP_DIRS and not d.startswith(".") and depth < 3]
+        if rel_current == ".":
+            for entry in dirs:
+                dir_names.append(entry)
+        for entry in sorted(dirs):
+            path_signals.append(os.path.join(rel_current, entry).replace("./", "") + "/")
+        for entry in sorted(files):
+            rel_file = os.path.join(rel_current, entry).replace("./", "")
+            if entry.endswith(".csproj"):
+                scan_files.append(os.path.join(current, entry))
+            path_signals.append(rel_file)
 except OSError:
     pass
 
@@ -177,14 +225,22 @@ for fpath in scan_files:
     except OSError:
         continue
 
-# Directory taxonomy: a top-level dir whose name matches a domain token is a
-# signal. Cite the directory as file:line (line 0 -> 1 to satisfy schema).
-for d in dir_names:
-    low = d.lower()
+# Repo-name taxonomy: the checkout/repo name itself is useful evidence for
+# domain repos (for example metabolomics-us) but still produces a grounded
+# path citation.
+for name in repo_name_signals:
+    low = name.lower()
     for domain, spec in LEXICON.items():
         if re.search(spec["tokens"], low):
-            # Use the directory path with a sentinel line of 1.
-            record(domain, d + "/", 1, "directory: " + d)
+            record(domain, ".", 1, "repo-name: " + name)
+
+# Code-path taxonomy: directory and file names can reveal domain modules even
+# when manifests/docs are generic. Cite the concrete path with sentinel line 1.
+for path_signal in sorted(set(dir_names + path_signals)):
+    low = path_signal.lower()
+    for domain, spec in LEXICON.items():
+        if re.search(spec["tokens"], low):
+            record(domain, path_signal, 1, "code path: " + path_signal)
 
 # Rank domains by distinct evidence count (score), then name for stability.
 ranked = []
