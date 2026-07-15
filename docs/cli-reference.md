@@ -106,9 +106,10 @@ positive issue number, `--worker-id`, `--branch`, and `--outcome`. Its fields ar
 or repeated flags, or mixed outcome fields, are malformed. `succeeded` requires a positive `--pr`
 and forbids `--reason`; `blocked` and `retryable` require a nonempty `--reason` and forbid `--pr`.
 
-An explicit successful result is accepted only when its worker ID matches the claim owner and its
-branch matches the claim, and its PR remains open, closes the issue, and contains exactly one
-`## Closeout report` heading.
-That evidence records a verified outcome; it is not release or merge authority. JSON exit codes are
+An explicit successful result is accepted only when its worker ID and branch match a fresh,
+nonterminal claim, and its PR remains open, closes the issue, contains exactly one
+`## Closeout report` heading, and has that same branch as its head ref. Rust appends an immutable
+receipt and re-reads the active claim before accepting it; it never patches the shared claim for an
+explicit outcome. That evidence is not release or merge authority. JSON exit codes are
 `0` for accepted success or the legacy deferred receipt, `10` for retryable, `20` for blocked or
 evidence-unavailable, `2` for malformed input, and `3` for ownership lost.
