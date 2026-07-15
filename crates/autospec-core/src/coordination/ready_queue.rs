@@ -263,6 +263,20 @@ pub struct WorkerCap {
     pub reached: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QueueGateCounts {
+    pub open: usize,
+    pub candidate: usize,
+    pub reviewed: usize,
+    pub blocked: usize,
+    pub dependency_blocked: usize,
+    pub linked_pr_blocked: usize,
+    pub path_conflicted: usize,
+    pub ready: usize,
+    pub claimed: usize,
+    pub selected: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadyQueuePlan {
     pub ready: Vec<QueueIssueView>,
@@ -271,6 +285,7 @@ pub struct ReadyQueuePlan {
     pub conflicts: Vec<QueueIssueView>,
     pub worker_cap: WorkerCap,
     pub batch: Vec<QueueIssueView>,
+    pub gate_counts: QueueGateCounts,
 }
 
 impl ReadyQueuePlan {
@@ -293,18 +308,17 @@ pub fn plan_ready_queue_with_trusted_actors(
     input: &ReadyQueueInput,
     trusted_actors: &[&str],
 ) -> ReadyQueuePlan {
+    let candidates = deduplicate_issues(&input.candidates);
+    let open_count = candidates.len();
     let mut known = input.dependencies.clone();
-    for issue in &input.candidates {
+    for issue in &candidates {
         known.insert(issue.number, issue.clone());
     }
-    let mut active = input.active.clone();
-    active.sort_by_key(|issue| issue.number);
+    let active = deduplicate_issues(&input.active);
     let active_paths = active
         .iter()
         .map(|issue| (issue.number, extract_paths(&issue.body)))
         .collect::<Vec<_>>();
-    let mut candidates = input.candidates.clone();
-    candidates.sort_by_key(|issue| issue.number);
     let worker_cap = worker_cap(&input.policy, active.len());
     let effective_batch_size = if worker_cap.reached {
         0
@@ -317,10 +331,16 @@ pub fn plan_ready_queue_with_trusted_actors(
     let mut ready: Vec<QueueIssueView> = Vec::new();
     let mut blocked: Vec<QueueIssueView> = Vec::new();
     let mut conflicts: Vec<QueueIssueView> = Vec::new();
+    let mut candidate_count = 0;
+    let mut reviewed_count = 0;
     for issue in candidates {
         if !input.policy.only_issues.is_empty() && !input.policy.only_issues.contains(&issue.number)
         {
             continue;
+        }
+        candidate_count += 1;
+        if issue.has_label("safety:reviewed") {
+            reviewed_count += 1;
         }
         let mut view = QueueIssueView::plain(issue);
         if view.issue.has_label("needs-classify") {
@@ -426,13 +446,63 @@ pub fn plan_ready_queue_with_trusted_actors(
             .cloned()
             .collect()
     };
-    ReadyQueuePlan {
+    let mut plan = ReadyQueuePlan {
         ready,
         blocked,
         claimed: active,
         conflicts,
         worker_cap,
         batch,
+        gate_counts: QueueGateCounts::default(),
+    };
+    plan.gate_counts = queue_gate_counts(&plan, open_count, candidate_count, reviewed_count);
+    plan
+}
+
+fn deduplicate_issues(issues: &[RemoteIssue]) -> Vec<RemoteIssue> {
+    let mut deduplicated = BTreeMap::new();
+    for issue in issues {
+        deduplicated
+            .entry(issue.number)
+            .or_insert_with(|| issue.clone());
+    }
+    deduplicated.into_values().collect()
+}
+
+fn queue_gate_counts(
+    plan: &ReadyQueuePlan,
+    open: usize,
+    candidate: usize,
+    reviewed: usize,
+) -> QueueGateCounts {
+    QueueGateCounts {
+        open,
+        candidate,
+        reviewed,
+        blocked: plan.blocked.len(),
+        dependency_blocked: plan
+            .blocked
+            .iter()
+            .filter(|view| {
+                matches!(
+                    view.reason.as_deref(),
+                    Some("blocked_dependencies") | Some("blocked_cycle")
+                )
+            })
+            .count(),
+        linked_pr_blocked: plan
+            .blocked
+            .iter()
+            .filter(|view| {
+                view.reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("linked_pr_"))
+            })
+            .count(),
+        path_conflicted: plan.conflicts.len(),
+        ready: plan.ready.len(),
+        claimed: plan.claimed.len(),
+        selected: plan.batch.len(),
     }
 }
 

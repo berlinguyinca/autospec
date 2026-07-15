@@ -286,3 +286,81 @@ fn blocks_classification_drafts_and_requires_the_implementation_label() {
         Some("missing_auto_implement")
     );
 }
+
+#[test]
+fn deduplicates_issue_numbers_before_planning_and_reports_gate_counts() {
+    let mut input = ready_input(vec![
+        issue(
+            800,
+            "## Implementation outline\n\n- edit `src/ready.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            800,
+            "## Implementation outline\n\n- edit `src/duplicate.rs`\n",
+            &["auto-implement", "needs-classify", "safety:reviewed"],
+        ),
+        issue(
+            801,
+            "## Dependencies\n\nDepends on #802\n\n## Implementation outline\n\n- edit `src/dependent.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            803,
+            "## Implementation outline\n\n- edit `src/linked-pr.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            804,
+            "## Implementation outline\n\n- edit `src/active.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+        issue(
+            805,
+            "## Implementation outline\n\n- edit `src/unreviewed.rs`\n",
+            &["auto-implement"],
+        ),
+    ]);
+    input.dependencies.insert(
+        802,
+        RemoteIssue::open(802, "unmerged dependency", "", Vec::new(), "agent"),
+    );
+    input.pull_requests = PullRequestEvidence::Available(vec![RemotePullRequest::open(
+        900,
+        "Fixes #803",
+        vec![RemotePullRequestCheck::in_progress("tests")],
+    )]);
+    input.active = vec![
+        issue(
+            700,
+            "## Implementation outline\n\n- edit `src/active.rs`\n",
+            &["in-progress-by-bot"],
+        ),
+        issue(
+            700,
+            "## Implementation outline\n\n- edit `src/ignored-duplicate.rs`\n",
+            &["in-progress-by-bot"],
+        ),
+    ];
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![800]);
+    assert_eq!(
+        plan.claimed
+            .iter()
+            .map(|issue| issue.number)
+            .collect::<Vec<_>>(),
+        vec![700]
+    );
+    assert_eq!(plan.gate_counts.open, 5);
+    assert_eq!(plan.gate_counts.candidate, 5);
+    assert_eq!(plan.gate_counts.reviewed, 4);
+    assert_eq!(plan.gate_counts.blocked, 3);
+    assert_eq!(plan.gate_counts.dependency_blocked, 1);
+    assert_eq!(plan.gate_counts.linked_pr_blocked, 1);
+    assert_eq!(plan.gate_counts.path_conflicted, 1);
+    assert_eq!(plan.gate_counts.ready, 1);
+    assert_eq!(plan.gate_counts.claimed, 1);
+    assert_eq!(plan.gate_counts.selected, 1);
+}
