@@ -1,4 +1,11 @@
 mod ready_queue;
+mod repositories;
+
+pub use repositories::{
+    parse_repository_routing_input_json, plan_repository_routing, CanonicalTarget,
+    DoNotFileRepository, RepositoryEvidence, RepositoryFinding, RepositoryRoutingInput,
+    RepositoryRoutingReport, RoutedFinding,
+};
 
 pub use ready_queue::{
     dependency_numbers, parse_dependency_issue_json, parse_remote_issue_list_json,
