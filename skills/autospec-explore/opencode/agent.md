@@ -537,6 +537,30 @@ verification yield. The outcome ledger additionally records per-source
 **refutation rate** from the verify stage and down-weights chronically-refuted
 sources automatically.
 
+## Explore validation (bounded parallel attribution)
+
+Explore validation is a portfolio evidence sweep, not a serial blocker. It
+runs repository or module validation commands with bounded parallel validation,
+a per-command timeout, and a global sweep budget. The scheduler keeps a capped
+worker pool active until the queue or global budget is exhausted; when one
+module reaches `timeout`, at least 2 other queued module validations continue
+and can complete independently.
+
+Command selection is conservative: queue only repositories or modules with a
+known validation command, and classify everything else instead of inventing a
+runtime path. The result `status` vocabulary is exactly `pass`, `fail`,
+`timeout`, `skipped-no-command`, `skipped-repo-class`, or
+`dependency-missing`. In this Rust validation cutover, repo-local structural
+verification uses `autospec validate --fast`; do not restore retired
+legacy shell validator paths as runtime implementation.
+
+Every summary row records attribution evidence: `command`, `cwd`, `duration`,
+`status`, and `first_diagnostic_lines` (the first useful stderr/stdout lines).
+Timeout and dependency failures are evidence, not crashes: they consume only
+that command's timeout budget, preserve their diagnostics, and leave the
+parallel queue available for the remaining modules until the global sweep
+budget ends.
+
 The `style-normalization` researcher is opt-in by `--research-sources
 style-normalization` and auto-enabled by prompts that ask to normalize styling,
 unify the look and feel, harmonize UI, or clean up SPA/webapp visual drift. In

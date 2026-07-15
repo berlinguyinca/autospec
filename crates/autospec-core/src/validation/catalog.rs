@@ -109,6 +109,9 @@ impl ValidationCheck {
             "check_autospec_explore_userspace_roster_contract" => {
                 CheckOwner::RustNative(StructuralCheck::AutospecExploreUserspaceRoster)
             }
+            "check_autospec_explore_parallel_validation_contract" => {
+                CheckOwner::RustNative(StructuralCheck::AutospecExploreParallelValidation)
+            }
             "check_autospec_autonomous_tier4_discovery_contract" => {
                 CheckOwner::RustNative(StructuralCheck::AutospecAutonomousTier4Discovery)
             }
@@ -490,6 +493,7 @@ pub enum StructuralCheck {
     AutospecHarmonize,
     AutospecAutonomousSkill,
     AutospecExploreUserspaceRoster,
+    AutospecExploreParallelValidation,
     AutospecAutonomousTier4Discovery,
     TeamPersonalitySelection,
     TeamPersonalityIssueTemplate,
@@ -669,6 +673,7 @@ const LEGACY_TOP_LEVEL_CALL_IDS: &[&str] = &[
     "check_validation_matrix_smoke",
     "check_autospec_explore_stage2_intersect_contract",
     "check_autospec_explore_userspace_roster_contract",
+    "check_autospec_explore_parallel_validation_contract",
     "check_autospec_autonomous_tier4_discovery_contract",
     "check_autospec_explore_style_normalization_contract",
     "check_autospec_explore_spec_first_contract",
@@ -827,6 +832,7 @@ const STANDARD_CHECK_IDS: &[&str] = &[
     "check_explore_trio_worktree_assert",
     "check_autospec_explore_stage2_intersect_contract",
     "check_autospec_explore_userspace_roster_contract",
+    "check_autospec_explore_parallel_validation_contract",
     "check_autospec_autonomous_tier4_discovery_contract",
     "check_autospec_explore_style_normalization_contract",
     "check_autospec_explore_discovery_contract",

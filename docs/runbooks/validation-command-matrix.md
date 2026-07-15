@@ -28,4 +28,4 @@ Repository validation runs this contract through the Rust entry point:
 autospec validate --fast
 ```
 
-The legacy `scripts/validate.sh` dispatcher is intentionally not restored.
+The retired shell validation dispatcher is intentionally not restored.
