@@ -74,3 +74,69 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&path).expect("temp dir");
     path
 }
+
+#[test]
+fn explore_specialists_emits_json_and_persists_cache_for_temp_repo() {
+    let repo = temp_dir("autospec-explore-specialists-repo");
+    std::fs::write(repo.join("README.md"), "ccxt trading order book\n").unwrap();
+
+    let output = autospec()
+        .args([
+            "explore",
+            "specialists",
+            "--repo-dir",
+            repo.to_str().unwrap(),
+            "--num-specialists",
+            "1",
+        ])
+        .output()
+        .expect("autospec explore specialists runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed["schema_version"], 1);
+    assert_eq!(parsed["suggested_specialists"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".autospec/explore-specialists.json")).unwrap(),
+        stdout
+    );
+}
+
+#[test]
+fn explore_specialists_force_refreshes_existing_cache() {
+    let repo = temp_dir("autospec-explore-specialists-force-repo");
+    std::fs::write(repo.join("README.md"), "ccxt trading order book\n").unwrap();
+    std::fs::create_dir_all(repo.join(".autospec")).unwrap();
+    std::fs::write(
+        repo.join(".autospec/explore-specialists.json"),
+        "{\"schema_version\":1,\"domains\":[],\"suggested_specialists\":[]}",
+    )
+    .unwrap();
+
+    let output = autospec()
+        .args([
+            "explore",
+            "specialists",
+            "--repo-dir",
+            repo.to_str().unwrap(),
+            "--num-specialists",
+            "3",
+            "--force",
+        ])
+        .output()
+        .expect("autospec explore specialists --force runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("trading-specialist"));
+}

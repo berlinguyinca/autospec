@@ -586,9 +586,18 @@ fi
 # need no scan.
 case "$SPECIALISTS_MODE" in
     discover|ask)
-        if [ -x "$SCRIPT_DIR/explore-specialist-scan.sh" ]; then
-            AUTOSPEC_NUM_SPECIALISTS="$NUM_SPECIALISTS" \
-                bash "$SCRIPT_DIR/explore-specialist-scan.sh" >/dev/null 2>&1 || true
+        _autospec_bin="${AUTOSPEC_BIN:-}"
+        if [ -z "$_autospec_bin" ] && [ -x "$SCRIPT_DIR/../target/debug/autospec" ]; then
+            _autospec_bin="$SCRIPT_DIR/../target/debug/autospec"
+        fi
+        if [ -n "$_autospec_bin" ]; then
+            "$_autospec_bin" explore specialists \
+                --repo-dir "$REPO_ROOT" \
+                --num-specialists "$NUM_SPECIALISTS" >/dev/null 2>&1 || true
+        elif command -v cargo >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/../Cargo.toml" ]; then
+            cargo run -q --manifest-path "$SCRIPT_DIR/../Cargo.toml" -p autospec-cli -- explore specialists \
+                --repo-dir "$REPO_ROOT" \
+                --num-specialists "$NUM_SPECIALISTS" >/dev/null 2>&1 || true
         fi
         ;;
 esac

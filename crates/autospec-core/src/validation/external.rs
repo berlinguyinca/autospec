@@ -1268,30 +1268,17 @@ fn run_autospec_explore_specialists_discovery(
     required: bool,
     root: &Path,
 ) -> CheckResult {
-    const SCAN: &str = "scripts/explore-specialist-scan.sh";
     const SCHEMA: &str = "schemas/autospec-explore-specialists.schema.json";
-    const SUITE: &str = "tests/explore/test_explore_specialists.bats";
 
-    let scripts = run_required_bash_scripts(id, required, root, &[(SCAN, true)]);
-    if scripts.is_failure() {
-        return scripts;
-    }
     if !root.join(SCHEMA).is_file() {
-        return aggregate(
+        return failure(
             id,
             required,
-            vec![
-                scripts,
-                failure(
-                    id,
-                    required,
-                    "schemas/autospec-explore-specialists.schema.json: specialists roster schema missing",
-                ),
-            ],
+            "schemas/autospec-explore-specialists.schema.json: specialists roster schema missing",
         );
     }
 
-    let mut results = vec![scripts];
+    let mut results = Vec::new();
     if program_on_path("jq") {
         let check = ToolCommand::new(
             "jq",
@@ -1319,7 +1306,9 @@ fn run_autospec_explore_specialists_discovery(
             return aggregate(id, required, results);
         }
     }
-    results.push(run_bats_suites(id, required, root, &[SUITE]));
+    if results.is_empty() {
+        return CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]));
+    }
     aggregate(id, required, results)
 }
 
@@ -1873,7 +1862,6 @@ fn run_autospec_explore_discovery(id: &str, required: bool, root: &Path) -> Chec
     const AGGREGATOR: &str = "scripts/explore-research-cycle.sh";
     const PROPOSAL_SCHEMA: &str = "schemas/autospec-explore-proposal.schema.json";
     const SPECIALIST_SCHEMA: &str = "schemas/autospec-explore-specialists.schema.json";
-    const SPECIALIST_SCAN: &str = "scripts/explore-specialist-scan.sh";
     const TRIO: &[&str] = &[
         "skills/autospec-explore/SKILL.md",
         "skills/autospec-explore/codex/prompt.md",
@@ -1972,14 +1960,6 @@ fn run_autospec_explore_discovery(id: &str, required: bool, root: &Path) -> Chec
             return aggregate(id, required, results);
         }
     }
-
-    let specialist_scan =
-        run_required_bash_scripts(id, required, root, &[(SPECIALIST_SCAN, false)]);
-    if specialist_scan.is_failure() {
-        results.push(specialist_scan);
-        return aggregate(id, required, results);
-    }
-    results.push(specialist_scan);
 
     for trio in TRIO {
         let path = root.join(trio);
