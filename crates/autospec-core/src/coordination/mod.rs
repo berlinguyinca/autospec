@@ -1,5 +1,10 @@
+mod conductor;
 mod ready_queue;
 mod repositories;
+
+pub use conductor::{
+    ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
+};
 
 pub use repositories::{
     parse_repository_routing_input_json, plan_repository_routing, CanonicalTarget,

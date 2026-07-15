@@ -58,6 +58,22 @@ bounded set of interim issues, so a transient review failure remains recoverable
 `AUTOSPEC_GROOM_SAFETY_BIN` is a test-injection seam only; production resolves
 the Rust `autospec` binary through `AUTOSPEC_BIN` or `PATH`.
 
+## Rust Autonomous Conductor
+
+The Rust conductor is a pure persisted control-plane state machine. Its phases
+are `scan`, `review`, `select`, `claim`, `dispatch`, `dispatch_recorded`,
+`retry`, `paused`, `slice_complete`, and `all_done`. It retains its repository,
+queue scope, selected issue, serialization reasons, retry count, recorded
+outcome, pause reason, and terminal reason in a schema-versioned state value.
+It launches no process, mutates no GitHub state, and chooses no shell backend.
+
+`SLICE_COMPLETE` means a constrained (`slice`) scan found no remaining work. It
+does not establish repository completion, so the caller must discard that
+constraint and perform a repository scan. `ALL_DONE` means a repository-scoped
+scan found no work after completion reconciliation, including a rescan after a
+serialized `priority:high` issue. `ALL_DONE` is a queue result only; it never
+authorizes autonomous discovery to stop permanently.
+
 ## Rust CLI
 
 The `autospec` Rust binary exposes the V62+ command surface while preserving the skill-first workflow. `doctor`, `init`, `status`, `plan`, `validate`, `run`, `resume`, `report`, `showcase`, and `growth-report` support `--json`. `autospec init --spec <id>` creates local planned state without executing work. Direct `autospec validate [--path <changed-path>]...` is a read-only affected-check planner, while `autospec validate --shadow-results <file>` aggregates pre-captured results without spawning a command. `autospec validate` remains the executor for shell options such as `--fast`. `run` and `resume` only create, ingest, and inspect local queue state; `benchmark` remains a non-zero stub.
