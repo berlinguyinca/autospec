@@ -114,7 +114,6 @@
     "check_explore_trio_worktree_assert",
     "check_autospec_explore_stage2_intersect_contract",
     "check_autospec_explore_userspace_roster_contract",
-    "check_autospec_explore_metabolomics_roster_contract",
     "check_autospec_explore_parallel_validation_contract",
     "check_autospec_autonomous_tier4_discovery_contract",
     "check_autospec_explore_style_normalization_contract",

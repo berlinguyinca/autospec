@@ -36,8 +36,8 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
     let catalog = ValidationCatalog::standard();
     let calls = catalog.legacy_top_level_calls();
 
-    assert_eq!(calls.len(), 141);
-    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 136);
+    assert_eq!(calls.len(), 140);
+    assert_eq!(calls.iter().copied().collect::<BTreeSet<_>>().len(), 135);
     assert_eq!(
         catalog
             .checks()
@@ -66,14 +66,14 @@ fn catalog_records_legacy_execution_reachability_without_expanding_it() {
 
 #[test]
 fn frozen_catalog_contains_every_named_shell_gate() {
-    assert_eq!(frozen_catalog_ids().len(), 152);
+    assert_eq!(frozen_catalog_ids().len(), 151);
 }
 
 #[test]
 fn frozen_catalog_keeps_the_flag_sentinel_docs_gate_in_declaration_order() {
     let ids = frozen_catalog_ids();
 
-    assert_eq!(ids.len(), 152);
+    assert_eq!(ids.len(), 151);
     assert_eq!(ids[5], "check_flag_sentinel_docs");
 }
 

@@ -420,8 +420,6 @@ fn autonomous_discovery_and_team_personality_contracts_pass_in_this_repository()
         .expect("repository autonomous skill contract passes");
     StructuralValidator::validate_autospec_explore_userspace_roster_contract(&root)
         .expect("repository userspace roster contract passes");
-    StructuralValidator::validate_autospec_explore_metabolomics_roster_contract(&root)
-        .expect("repository metabolomics roster contract passes");
     StructuralValidator::validate_autospec_autonomous_tier4_discovery_contract(&root)
         .expect("repository Tier 4 discovery contract passes");
     StructuralValidator::validate_team_personality_contract(&root)
