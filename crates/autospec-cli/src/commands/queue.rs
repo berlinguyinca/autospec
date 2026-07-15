@@ -148,20 +148,24 @@ fn parse_review_safety_options(args: &[String]) -> Result<ReviewSafetyOptions, C
         match args[index].as_str() {
             "--repo" => set_review_repo(&mut options, args, &mut index)?,
             "--limit" => set_review_limit(&mut options, args, &mut index)?,
-            "--help" | "-h" => {
-                return Err(CommandFailure::diagnostic(
-                    "--help cannot be combined with queue review-safety options",
-                ));
-            }
-            option => {
-                return Err(CommandFailure::diagnostic(format!(
-                    "unknown autospec queue review-safety option: {option}"
-                )));
-            }
+            "--help" | "-h" => return review_safety_help_error(),
+            option => return unknown_review_safety_option(option),
         }
         index += 1;
     }
     Ok(options)
+}
+
+fn review_safety_help_error() -> Result<ReviewSafetyOptions, CommandFailure> {
+    Err(CommandFailure::diagnostic(
+        "--help cannot be combined with queue review-safety options",
+    ))
+}
+
+fn unknown_review_safety_option(option: &str) -> Result<ReviewSafetyOptions, CommandFailure> {
+    Err(CommandFailure::diagnostic(format!(
+        "unknown autospec queue review-safety option: {option}"
+    )))
 }
 
 fn set_review_repo(
@@ -311,12 +315,7 @@ fn has_safety_decision_comment(
                 command_error(&output)
             )));
         }
-        let comment_page = parse_remote_issue_page_json(&String::from_utf8_lossy(&output.stdout))
-            .map_err(|error| {
-                CommandFailure::diagnostic(format!(
-                    "could not parse GitHub safety decision comment page {page} for issue {number}: {error}"
-                ))
-            })?;
+        let comment_page = parse_safety_decision_comment_page(&output.stdout, page, number)?;
         if comment_page
             .issues
             .iter()
@@ -333,6 +332,18 @@ fn has_safety_decision_comment(
             ))
         })?;
     }
+}
+
+fn parse_safety_decision_comment_page(
+    stdout: &[u8],
+    page: usize,
+    number: u64,
+) -> Result<autospec_core::coordination::RemoteIssuePage, CommandFailure> {
+    parse_remote_issue_page_json(&String::from_utf8_lossy(stdout)).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not parse GitHub safety decision comment page {page} for issue {number}: {error}"
+        ))
+    })
 }
 
 fn post_issue_comment(repo: &str, number: u64, body: &str) -> Result<(), CommandFailure> {
