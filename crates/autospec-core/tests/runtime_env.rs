@@ -150,6 +150,48 @@ fn manifest_rejects_default_mode_that_is_not_declared() {
 }
 
 #[test]
+fn companion_runtime_manifest_fixtures_parse_and_select_defaults() {
+    for (source, expected_mode) in [
+        (
+            include_str!("../../../tests/fixtures/runtime-manifests/lc-binbase-scheduler.yml"),
+            "playwright-local",
+        ),
+        (
+            include_str!("../../../tests/fixtures/runtime-manifests/companion-stack.yml"),
+            "go-modules",
+        ),
+    ] {
+        let manifest = RuntimeManifest::parse(source).expect("fixture parses");
+        assert_eq!(
+            manifest.selected_mode("auto").expect("default mode").name(),
+            expected_mode
+        );
+    }
+}
+
+#[test]
+fn companion_runbook_lists_every_broker_owned_environment_key() {
+    let runbook = include_str!("../../../docs/runbooks/agent-runtime-companion-stacks.md");
+
+    for key in [
+        "AGENT_ENV_ID",
+        "AGENT_ENV_MODE",
+        "AGENT_ENV_REPO",
+        "AGENT_ENV_MANIFEST",
+        "AGENT_FRONTEND_PORT",
+        "AGENT_BACKEND_PORT",
+        "AGENT_PUBLIC_URL",
+        "AUTOSPEC_PUBLIC_URL",
+        "COMPOSE_PROJECT_NAME",
+    ] {
+        assert!(
+            runbook.contains(key),
+            "runbook omits broker-owned key {key}"
+        );
+    }
+}
+
+#[test]
 fn manifest_rejects_unknown_versions_and_duplicate_mode_names() {
     let version_error =
         RuntimeManifest::parse("version: 2\nmodes:\n  local:\n    command: sh -c 'true'\n")
