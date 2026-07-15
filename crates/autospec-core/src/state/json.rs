@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
-pub(crate) enum JsonValue {
+pub enum JsonValue {
     Null,
     Bool(bool),
     Number(String),
@@ -11,7 +11,7 @@ pub(crate) enum JsonValue {
 }
 
 impl JsonValue {
-    pub(crate) fn into_object(self, context: &str) -> Result<BTreeMap<String, Self>, String> {
+    pub fn into_object(self, context: &str) -> Result<BTreeMap<String, Self>, String> {
         match self {
             Self::Object(value) => Ok(value),
             _ => Err(format!("{context} must be a JSON object")),
@@ -25,7 +25,7 @@ impl JsonValue {
         }
     }
 
-    pub(crate) fn into_number(self, context: &str) -> Result<u64, String> {
+    pub fn into_number(self, context: &str) -> Result<u64, String> {
         match self {
             Self::Number(value) => value
                 .parse::<u64>()
@@ -50,7 +50,7 @@ impl JsonValue {
         }
     }
 
-    pub(crate) fn into_string(self, context: &str) -> Result<String, String> {
+    pub fn into_string(self, context: &str) -> Result<String, String> {
         match self {
             Self::String(value) => Ok(value),
             _ => Err(format!("{context} must be a JSON string")),
@@ -66,17 +66,17 @@ impl JsonValue {
     }
 }
 
-pub(crate) struct JsonParser<'a> {
+pub struct JsonParser<'a> {
     input: &'a str,
     index: usize,
 }
 
 impl<'a> JsonParser<'a> {
-    pub(crate) fn new(input: &'a str) -> Self {
+    pub fn new(input: &'a str) -> Self {
         Self { input, index: 0 }
     }
 
-    pub(crate) fn parse(mut self) -> Result<JsonValue, String> {
+    pub fn parse(mut self) -> Result<JsonValue, String> {
         let value = self.parse_value()?;
         self.skip_whitespace();
         if self.index != self.input.len() {

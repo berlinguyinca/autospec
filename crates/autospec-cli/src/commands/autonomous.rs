@@ -23,6 +23,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{claim, queue, CommandFailure};
 
+mod resilience;
+
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
 const DEFERRED_EXECUTOR_REASON: &str = "awaiting_typed_implementation_executor";
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -98,6 +100,9 @@ impl StopMode {
 }
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
+    if args.first().is_some_and(|arg| arg == "resilience") {
+        return resilience::run(&args[1..]);
+    }
     if args.first().is_some_and(|arg| arg == "executor-result") {
         return executor_result(args);
     }
