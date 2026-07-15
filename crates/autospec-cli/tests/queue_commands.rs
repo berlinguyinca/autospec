@@ -283,6 +283,30 @@ fn queue_ready_fails_closed_for_an_unsupported_custom_regex() {
 }
 
 #[test]
+fn queue_ready_reports_a_classification_draft_as_blocked() {
+    let fixture = QueueFixture::new();
+    fs::write(
+        &fixture.auto,
+        r###"[{"number":23,"title":"draft","body":"## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Implementation outline\n\n- edit `src/draft.rs`\n","labels":[{"name":"auto-implement"},{"name":"needs-classify"},{"name":"safety:reviewed"}],"author":{"login":"agent"}}]"###,
+    )
+    .expect("write draft fixture");
+
+    let output = fixture
+        .command()
+        .args(["queue", "ready", "--repo", "test/repo"])
+        .output()
+        .expect("queue command starts");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"ready\":[]"), "stdout={stdout}");
+    assert!(
+        stdout.contains("\"reason\":\"needs_classify\""),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
 fn live_queue_view_json_uses_dispatch_table_for_optional_fields() {
     let source =
         fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/commands/queue.rs"))

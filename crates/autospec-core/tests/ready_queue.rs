@@ -251,3 +251,38 @@ fn blocks_unreviewed_and_needs_human_candidates_before_other_planning() {
         Some("autospec_needs_human")
     );
 }
+
+#[test]
+fn blocks_classification_drafts_and_requires_the_implementation_label() {
+    let input = ready_input(vec![
+        issue(
+            702,
+            "## Implementation outline\n\n- edit `src/draft.rs`\n",
+            &["auto-implement", "needs-classify", "safety:reviewed"],
+        ),
+        issue(
+            703,
+            "## Implementation outline\n\n- edit `src/unlabeled.rs`\n",
+            &["safety:reviewed"],
+        ),
+        issue(
+            704,
+            "## Implementation outline\n\n- edit `src/promoted.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![704]);
+    assert_eq!(plan.batch_numbers(), vec![704]);
+    assert_eq!(plan.blocked[0].reason.as_deref(), Some("needs_classify"));
+    assert_eq!(
+        plan.blocked[0].blocked_label.as_deref(),
+        Some("needs-classify")
+    );
+    assert_eq!(
+        plan.blocked[1].reason.as_deref(),
+        Some("missing_auto_implement")
+    );
+}
