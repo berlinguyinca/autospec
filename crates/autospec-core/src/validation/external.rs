@@ -2917,24 +2917,100 @@ fn run_fab_container_pin_lint(id: &str, required: bool, root: &Path) -> CheckRes
     aggregate(id, required, vec![syntax, lint])
 }
 
+#[derive(Clone, Copy)]
+enum RepoQualityFailureMessage {
+    SkillCallPoint,
+    AnchorContract,
+}
+
+const REPO_QUALITY_AUDIT: &str = "skills/autospec-shared/scripts/repo-quality-audit.sh";
+const REPO_QUALITY_CONTRACTS: &[(&str, &str, RepoQualityFailureMessage)] = &[
+    (
+        "skills/autospec-run/SKILL.md",
+        "repo-quality-audit.sh",
+        RepoQualityFailureMessage::SkillCallPoint,
+    ),
+    (
+        "skills/autospec-qa/SKILL.md",
+        "repo-quality-audit.sh",
+        RepoQualityFailureMessage::SkillCallPoint,
+    ),
+    (
+        "skills/autospec-review/SKILL.md",
+        "repo-quality-audit.sh",
+        RepoQualityFailureMessage::SkillCallPoint,
+    ),
+    (
+        "skills/autospec-release/SKILL.md",
+        "repo-quality-audit.sh",
+        RepoQualityFailureMessage::SkillCallPoint,
+    ),
+    (
+        "scripts/autospec-write-run-summary.sh",
+        "--quality-audit-json",
+        RepoQualityFailureMessage::AnchorContract,
+    ),
+    (
+        REPO_QUALITY_AUDIT,
+        "verification-contract-drift",
+        RepoQualityFailureMessage::AnchorContract,
+    ),
+    (
+        REPO_QUALITY_AUDIT,
+        "verification:{",
+        RepoQualityFailureMessage::AnchorContract,
+    ),
+    (
+        REPO_QUALITY_AUDIT,
+        "runtime:$runtime",
+        RepoQualityFailureMessage::AnchorContract,
+    ),
+    (
+        "scripts/autospec-write-run-summary.sh",
+        "### Verification lanes",
+        RepoQualityFailureMessage::AnchorContract,
+    ),
+    (
+        "scripts/autospec-write-run-summary.sh",
+        "### Runtime and engines",
+        RepoQualityFailureMessage::AnchorContract,
+    ),
+];
+
+fn repo_quality_failure_message(
+    root: &Path,
+    path: &Path,
+    anchor: &str,
+    message: RepoQualityFailureMessage,
+) -> String {
+    let mut rendered = relative_path(root, path);
+    match message {
+        RepoQualityFailureMessage::SkillCallPoint => {
+            rendered.push_str(": missing repo quality audit call point");
+        }
+        RepoQualityFailureMessage::AnchorContract => {
+            rendered.push_str(": missing ");
+            rendered.push_str(anchor);
+            rendered.push_str(" contract");
+        }
+    }
+    rendered
+}
+
 fn run_repo_quality_audit(id: &str, required: bool, root: &Path) -> CheckResult {
-    const AUDIT: &str = "skills/autospec-shared/scripts/repo-quality-audit.sh";
     const SUITES: &[&str] = &[
         "skills/autospec-shared/tests/unit/repo-quality-audit.bats",
         "tests/autospec/test_quality_audit_summary.bats",
     ];
 
-    let audit = run_required_bash_scripts(id, required, root, &[(AUDIT, true)]);
+    let audit = run_required_bash_scripts(id, required, root, &[(REPO_QUALITY_AUDIT, true)]);
     if audit.is_failure() {
         return audit;
     }
-    for skill in [
-        "skills/autospec-run/SKILL.md",
-        "skills/autospec-qa/SKILL.md",
-        "skills/autospec-review/SKILL.md",
-        "skills/autospec-release/SKILL.md",
-    ] {
-        if !contains(&root.join(skill), "repo-quality-audit.sh") {
+
+    for &(relative, anchor, message) in REPO_QUALITY_CONTRACTS {
+        let path = root.join(relative);
+        if !contains(&path, anchor) {
             return aggregate(
                 id,
                 required,
@@ -2943,31 +3019,7 @@ fn run_repo_quality_audit(id: &str, required: bool, root: &Path) -> CheckResult 
                     failure(
                         id,
                         required,
-                        &format!("{skill}: missing repo quality audit call point"),
-                    ),
-                ],
-            );
-        }
-    }
-    let summary = root.join("scripts/autospec-write-run-summary.sh");
-    for (path, anchor) in [
-        (&summary, "--quality-audit-json"),
-        (&root.join(AUDIT), "verification-contract-drift"),
-        (&root.join(AUDIT), "verification:{"),
-        (&root.join(AUDIT), "runtime:$runtime"),
-        (&summary, "### Verification lanes"),
-        (&summary, "### Runtime and engines"),
-    ] {
-        if !contains(path, anchor) {
-            return aggregate(
-                id,
-                required,
-                vec![
-                    audit,
-                    failure(
-                        id,
-                        required,
-                        &format!("{}: missing {anchor} contract", relative_path(root, path)),
+                        &repo_quality_failure_message(root, &path, anchor, message),
                     ),
                 ],
             );
