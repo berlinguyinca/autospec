@@ -58,5 +58,11 @@
     "function": "run_with_fast",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "This is a file-scoped heuristic false positive: validation dispatch uses typed enum variants and direct process commands, not substring-derived domain meaning."
+  },
+  {
+    "file": "crates/autospec-core/src/validation/structural.rs",
+    "function": "run",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "The structural validator scans static skill text for required contract vocabulary; it does not encode runtime domain meaning from free-form names."
   }
 ]

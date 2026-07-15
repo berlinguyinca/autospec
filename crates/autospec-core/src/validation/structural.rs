@@ -59,6 +59,9 @@ impl StructuralValidator {
             StructuralCheck::AutospecExploreUserspaceRoster => {
                 Self::validate_autospec_explore_userspace_roster_contract(root)
             }
+            StructuralCheck::AutospecExploreParallelValidation => {
+                Self::validate_autospec_explore_parallel_validation_contract(root)
+            }
             StructuralCheck::AutospecAutonomousTier4Discovery => {
                 Self::validate_autospec_autonomous_tier4_discovery_contract(root)
             }
@@ -1083,6 +1086,64 @@ impl StructuralValidator {
             if !document.to_ascii_lowercase().contains("untrusted") {
                 return Err(format!(
                     "{display}: userspace roster must state the untrusted-DATA trust boundary"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_autospec_explore_parallel_validation_contract(
+        root: &Path,
+    ) -> Result<(), String> {
+        for member in ["SKILL.md", "codex/prompt.md", "opencode/agent.md"] {
+            let display = format!("skills/autospec-explore/{member}");
+            let path = root.join(&display);
+            let document = read(&path).unwrap_or_default();
+            let lower = document.to_ascii_lowercase();
+
+            for (required, failure) in [
+                (
+                    "bounded parallel validation",
+                    "missing bounded parallel validation directive",
+                ),
+                ("per-command timeout", "missing per-command timeout directive"),
+                ("global sweep budget", "missing global sweep budget directive"),
+                (
+                    "2 other queued module validations",
+                    "missing evidence that one timeout does not block at least 2 queued validations",
+                ),
+            ] {
+                if !lower.contains(required) {
+                    return Err(format!("{display}: {failure}"));
+                }
+            }
+
+            for status in [
+                "pass",
+                "fail",
+                "timeout",
+                "skipped-no-command",
+                "skipped-repo-class",
+                "dependency-missing",
+            ] {
+                if !document.contains(status) {
+                    return Err(format!(
+                        "{display}: missing explore validation status '{status}'"
+                    ));
+                }
+            }
+
+            for field in ["command", "cwd", "duration", "status"] {
+                if !document.contains(&format!("`{field}`")) {
+                    return Err(format!("{display}: summary output must record `{field}`"));
+                }
+            }
+
+            if !document.contains("first_diagnostic_lines")
+                && !lower.contains("first diagnostic lines")
+            {
+                return Err(format!(
+                    "{display}: summary output must record first diagnostic lines"
                 ));
             }
         }
@@ -2603,4 +2664,78 @@ fn strip_first_blank_line(document: &str) -> String {
         .or_else(|| document.strip_prefix("\r\n"))
         .unwrap_or(document)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StructuralValidator;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("autospec-{name}-{nonce}"));
+        fs::create_dir_all(root.join("skills/autospec-explore/codex"))
+            .expect("codex mirror directory");
+        fs::create_dir_all(root.join("skills/autospec-explore/opencode"))
+            .expect("opencode mirror directory");
+        root
+    }
+
+    fn write_explore_trio(root: &Path, body: &str) {
+        let skill = format!("---\nname: autospec-explore\n---\n{body}");
+        let opencode = format!("---\nname: autospec-explore\n---\n{body}");
+        fs::write(root.join("skills/autospec-explore/SKILL.md"), skill).expect("skill fixture");
+        fs::write(root.join("skills/autospec-explore/codex/prompt.md"), body)
+            .expect("codex fixture");
+        fs::write(
+            root.join("skills/autospec-explore/opencode/agent.md"),
+            opencode,
+        )
+        .expect("opencode fixture");
+    }
+
+    #[test]
+    fn explore_parallel_validation_contract_rejects_missing_timeout_attribution() {
+        let root = temp_root("explore-validation-missing");
+        write_explore_trio(
+            &root,
+            "## Explore validation\n\nRun bounded parallel validation when convenient.\n",
+        );
+
+        let error =
+            StructuralValidator::validate_autospec_explore_parallel_validation_contract(&root)
+                .expect_err("missing bounded parallel validation contract must fail");
+
+        assert!(
+            error.contains("per-command timeout"),
+            "unexpected validation error: {error}"
+        );
+    }
+
+    #[test]
+    fn explore_parallel_validation_contract_accepts_timeout_attribution_vocabulary() {
+        let root = temp_root("explore-validation-present");
+        write_explore_trio(
+            &root,
+            r#"## Explore validation
+
+Explore validation runs with bounded parallel validation, a per-command timeout,
+and a global sweep budget. At least 2 other queued module validations continue
+when one module times out.
+
+Each summary row records `command`, `cwd`, `duration`, `status`, and
+`first_diagnostic_lines`. The only valid status vocabulary is `pass`, `fail`,
+`timeout`, `skipped-no-command`, `skipped-repo-class`, and
+`dependency-missing`.
+"#,
+        );
+
+        StructuralValidator::validate_autospec_explore_parallel_validation_contract(&root)
+            .expect("complete bounded validation contract passes");
+    }
 }
