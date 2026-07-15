@@ -1,3 +1,4 @@
+use autospec_core::claim::RunStateRecord;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,6 +34,11 @@ fn path_with(bin: &std::path::Path) -> String {
     )
 }
 
+fn claim_run_state(stdout: &[u8]) -> RunStateRecord {
+    let text = std::str::from_utf8(stdout).expect("claim state stdout is UTF-8");
+    RunStateRecord::parse_json(text.trim()).expect("claim state stdout is a run-state JSON object")
+}
+
 #[test]
 fn claim_state_read_selects_the_lowest_marked_github_comment() {
     let fixture = temp_dir("autospec-claim-state-read");
@@ -64,9 +70,8 @@ fn claim_state_read_selects_the_lowest_marked_github_comment() {
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"worker_id\":\"worker-a\""));
-    assert!(!stdout.contains("\"worker_id\":\"worker-b\""));
+    let state = claim_run_state(&output.stdout);
+    assert_eq!(state.worker_id, "worker-a");
 }
 
 #[test]
@@ -113,10 +118,10 @@ fn claim_state_upsert_patches_the_lowest_comment_and_deletes_higher_duplicates()
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"worker_id\":\"worker-c\""));
-    assert!(stdout.contains("\"ttl_seconds\":7200"));
-    assert!(stdout.contains("\"claimed_at\":\"2026-07-14T00:00:00Z\""));
+    let state = claim_run_state(&output.stdout);
+    assert_eq!(state.worker_id, "worker-c");
+    assert_eq!(state.ttl_seconds, 7200);
+    assert_eq!(state.claimed_at, "2026-07-14T00:00:00Z");
     let calls = std::fs::read_to_string(log).expect("gh call log");
     assert!(calls.contains("repos/testorg/testrepo/issues/comments/100\n-X\nPATCH"));
     assert!(calls.contains("repos/testorg/testrepo/issues/comments/101\n-X\nDELETE"));
