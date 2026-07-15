@@ -617,6 +617,13 @@ fn lint_implementation_reuse_lens_excludes_an_in_repo_diff_from_abstraction_call
 
 #[test]
 fn status_json_reports_persisted_lifecycle_counts() {
+    const EXPECTED_STATUS_JSON_FIELDS: &[&str] = &[
+        "\"command\":\"status\"",
+        "\"specs\":{",
+        "\"planned\":",
+        "\"superseded\":",
+    ];
+
     let output = autospec()
         .args(["status", "--json"])
         .output()
@@ -624,12 +631,7 @@ fn status_json_reports_persisted_lifecycle_counts() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    for expected in [
-        "\"command\":\"status\"",
-        "\"specs\":{",
-        "\"planned\":",
-        "\"superseded\":",
-    ] {
+    for expected in EXPECTED_STATUS_JSON_FIELDS {
         assert!(stdout.contains(expected), "missing {expected} in {stdout}");
     }
 }
