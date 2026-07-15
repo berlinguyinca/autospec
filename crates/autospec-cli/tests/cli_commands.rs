@@ -624,10 +624,14 @@ fn status_json_reports_persisted_lifecycle_counts() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    assert!(stdout.contains("\"command\":\"status\""));
-    assert!(stdout.contains("\"specs\":{"));
-    assert!(stdout.contains("\"planned\":"));
-    assert!(stdout.contains("\"superseded\":"));
+    for expected in [
+        "\"command\":\"status\"",
+        "\"specs\":{",
+        "\"planned\":",
+        "\"superseded\":",
+    ] {
+        assert!(stdout.contains(expected), "missing {expected} in {stdout}");
+    }
 }
 
 #[test]
