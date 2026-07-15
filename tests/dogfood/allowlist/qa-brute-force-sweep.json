@@ -1,7 +1,7 @@
 [
   {
     "file": "crates/autospec-cli/src/commands/queue.rs",
-    "function": "list_issues",
+    "function": "read_issue",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
     "justification": "The GitHub query is one fixed argument vector; the heuristic counts its JSON projection punctuation as repeated branches despite no repeated control flow."
   },
