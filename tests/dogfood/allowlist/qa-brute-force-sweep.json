@@ -18,12 +18,6 @@
     "justification": "This test-only command factory and its assertion fixtures contain command-output strings, not domain representation logic."
   },
   {
-    "file": "crates/autospec-core/src/lint/implementation.rs",
-    "function": "scan_added_complexity",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "The linter deliberately handles distinct heredoc, shell-function, and indentation states; the heuristic conflates those state transitions with duplicate branch structure."
-  },
-  {
     "file": "crates/autospec-cli/tests/cli_commands.rs",
     "function": "autospec",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
