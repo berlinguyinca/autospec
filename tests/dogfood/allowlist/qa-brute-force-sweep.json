@@ -1,11 +1,5 @@
 [
   {
-    "file": "crates/autospec-cli/src/commands/lint.rs",
-    "function": "shell_function_names",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "The iterator's parser stages intentionally distinguish shell declaration forms; the Rust-only branch-shape heuristic mistakes chained extraction guards for repeated operational branches."
-  },
-  {
     "file": "crates/autospec-cli/src/commands/queue.rs",
     "function": "list_issues",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",

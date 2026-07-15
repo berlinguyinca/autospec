@@ -510,15 +510,31 @@ fn ripgrep_paths<const N: usize>(root: &Path, arguments: [&str; N]) -> Option<Ve
     })
 }
 
+struct ShellFunctionForm {
+    prefix: &'static str,
+    accepted_rest_prefixes: &'static [&'static str],
+}
+
+const SHELL_FUNCTION_FORMS: &[ShellFunctionForm] = &[
+    ShellFunctionForm {
+        prefix: "function ",
+        accepted_rest_prefixes: &[],
+    },
+    ShellFunctionForm {
+        prefix: "",
+        accepted_rest_prefixes: &["{", "()"],
+    },
+];
+
 fn shell_function_names(contents: &str) -> Vec<String> {
-    contents
-        .lines()
-        .filter_map(|line| {
+    contents.lines().filter_map(shell_function_name).collect()
+}
+
+fn shell_function_name(line: &str) -> Option<String> {
+    let line = line.trim_start();
+    SHELL_FUNCTION_FORMS.iter().find_map(|form| {
+        line.strip_prefix(form.prefix).and_then(|line| {
             let line = line.trim_start();
-            let (line, requires_parentheses) = line
-                .strip_prefix("function ")
-                .map(|line| (line, false))
-                .unwrap_or((line, true));
             let name = line
                 .chars()
                 .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
@@ -527,15 +543,19 @@ fn shell_function_names(contents: &str) -> Vec<String> {
                 return None;
             }
             let rest = &line[name.len()..];
-            if (!requires_parentheses || rest.trim_start().starts_with('{'))
-                || rest.trim_start().starts_with("()")
+            let rest = rest.trim_start();
+            if form.accepted_rest_prefixes.is_empty()
+                || form
+                    .accepted_rest_prefixes
+                    .iter()
+                    .any(|prefix| rest.starts_with(prefix))
             {
                 Some(name)
             } else {
                 None
             }
         })
-        .collect()
+    })
 }
 
 fn abstraction_stem(path: &str) -> Option<String> {
@@ -1002,4 +1022,45 @@ fn print_implementation_help() {
     println!(
         "autospec lint implementation\n\nUSAGE:\n    autospec lint implementation <PR> [--issue <N>] [OPTIONS]\n    autospec lint implementation --diff-file <PATH> [OPTIONS]\n    autospec lint implementation --pre-commit --staged [OPTIONS]\n\nINPUTS:\n    <PR>                         Read a pull-request diff with `gh pr diff`\n    --diff-file <PATH>           Read an offline unified-diff file\n    --staged                      Read `git diff --cached`\n\nOPTIONS:\n    --issue <N>                  Read Guardian skip directives for a remote PR only\n    --pre-commit                 Enable vacuous and assertion-density checks; implies --staged\n    --directives                 Render `Fix RULE_ID: ...` records\n    --vacuous-assertions         Enable VACUOUS_* checks\n    --assertion-density          Enable ASSERTION_DENSITY checks\n    -h, --help                   Print help\n\nEXIT STATUS:\n    0                            No blocking findings\n    1                            Input or remote-command failure\n    1..64                        Blocking-finding count, capped at 64\n    200                          Scope explosion"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_function_names;
+
+    #[test]
+    fn shell_function_names_preserves_current_shell_declaration_forms() {
+        let script = r#"
+            function legacy_style {
+              :
+            }
+            function compact_style{
+              :
+            }
+            modern_style() {
+              :
+            }
+            spaced_modern_style () {
+              :
+            }
+            bare_brace_style {
+              :
+            }
+            bare_name_style {
+              :
+            }
+        "#;
+
+        assert_eq!(
+            shell_function_names(script),
+            [
+                "legacy_style",
+                "compact_style",
+                "modern_style",
+                "spaced_modern_style",
+                "bare_brace_style",
+                "bare_name_style",
+            ]
+        );
+    }
 }
