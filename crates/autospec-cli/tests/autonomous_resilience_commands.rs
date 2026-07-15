@@ -180,6 +180,54 @@ fn resilience_decide_parks_at_failure_cap_and_usage_precedes_issue_cap() {
 }
 
 #[test]
+fn resilience_decide_reads_the_legacy_spend_root_despite_a_state_root_override() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_default_spend("owner__repo", 10, 0);
+
+    let output = fixture.run_without_spend_override(&[
+        "resilience",
+        "decide",
+        "--repo",
+        "owner/repo",
+        "--budget-tokens",
+        "10",
+        "--budget-issues",
+        "1",
+    ]);
+
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"park\",\"reason\":\"usage_cap\"}\n"
+    );
+}
+
+#[test]
+fn resilience_decide_uses_legacy_lifetime_caps_when_environment_is_unset() {
+    let usage = ResilienceFixture::new();
+    usage.write_spend("owner__repo", 10_000_000, 0);
+
+    let output = usage.run(&["resilience", "decide", "--repo", "owner/repo"]);
+
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"park\",\"reason\":\"usage_cap\"}\n"
+    );
+
+    let issues = ResilienceFixture::new();
+    issues.write_spend("owner__repo", 0, 500);
+
+    let output = issues.run(&["resilience", "decide", "--repo", "owner/repo"]);
+
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"park\",\"reason\":\"issue_cap\"}\n"
+    );
+}
+
+#[test]
 fn resilience_decide_validates_compatibility_failure_and_spend_before_migrating_state() {
     let malformed_failure = ResilienceFixture::new();
     malformed_failure.write_state("owner_repo", valid_state("owner/repo", "running", 1));
@@ -436,6 +484,18 @@ impl ResilienceFixture {
             .expect("run resilience decision with a host")
     }
 
+    fn run_without_spend_override(&self, args: &[&str]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_autospec"));
+        command
+            .arg("autonomous")
+            .env("AUTOSPEC_STATE_DIR", &self.state_root)
+            .env("AUTOSPEC_HOST", "autospec-test-host")
+            .env("HOME", &self.root)
+            .args(args)
+            .output()
+            .expect("run resilience decision without a spend override")
+    }
+
     fn run_with_env(&self, key: &str, value: &str, args: &[&str]) -> Output {
         self.command()
             .args(args)
@@ -483,8 +543,21 @@ impl ResilienceFixture {
     }
 
     fn write_spend(&self, slug: &str, tokens: u64, issues: u64) {
+        self.write_spend_at(&self.spend_root, slug, tokens, issues);
+    }
+
+    fn write_default_spend(&self, slug: &str, tokens: u64, issues: u64) {
+        self.write_spend_at(
+            &self.root.join(".autospec/autonomous-spend"),
+            slug,
+            tokens,
+            issues,
+        );
+    }
+
+    fn write_spend_at(&self, root: &Path, slug: &str, tokens: u64, issues: u64) {
         write_file(
-            &self.spend_root.join(slug).join("spend.json"),
+            &root.join(slug).join("spend.json"),
             &format!("{{\"schema\":1,\"tokens\":{tokens},\"issues\":{issues},\"parked\":false}}"),
         );
     }

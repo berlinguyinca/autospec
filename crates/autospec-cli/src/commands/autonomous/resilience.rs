@@ -15,6 +15,9 @@ mod records;
 
 use records::{parse_failures, ResilienceReject, ResilienceState, Spend};
 
+const DEFAULT_LIFETIME_TOKENS: u64 = 10_000_000;
+const DEFAULT_LIFETIME_ISSUES: u64 = 500;
+
 struct ResilienceStore {
     scope: RepositoryScope,
     state_root: PathBuf,
@@ -32,7 +35,7 @@ impl ResilienceStore {
         let state_base = env_path("AUTOSPEC_STATE_DIR", &[".autospec"]);
         let spend_root = env::var("AUTOSPEC_AUTONOMOUS_SPEND_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| state_base.join("autonomous-spend"));
+            .unwrap_or_else(|_| home_path(&[".autospec", "autonomous-spend"]));
         Ok(Self {
             scope,
             state_root: state_base.join("autonomous"),
@@ -231,11 +234,17 @@ impl DecisionOptions {
             issue,
             usage_cap: match usage_cap {
                 Some(value) => value,
-                None => env_budget("AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS")?,
+                None => env_budget(
+                    "AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS",
+                    DEFAULT_LIFETIME_TOKENS,
+                )?,
             },
             issue_cap: match issue_cap {
                 Some(value) => value,
-                None => env_budget("AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES")?,
+                None => env_budget(
+                    "AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES",
+                    DEFAULT_LIFETIME_ISSUES,
+                )?,
             },
         })
     }
@@ -317,23 +326,27 @@ fn reclaim_name(reason: ConductorLeaseReclaim) -> &'static str {
 }
 
 fn env_path(name: &str, suffix: &[&str]) -> PathBuf {
-    env::var(name).map(PathBuf::from).unwrap_or_else(|_| {
-        let mut path = env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."));
-        for component in suffix {
-            path.push(component);
-        }
-        path
-    })
+    env::var(name)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home_path(suffix))
 }
 
-fn env_budget(name: &str) -> Result<u64, String> {
+fn home_path(suffix: &[&str]) -> PathBuf {
+    let mut path = env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    for component in suffix {
+        path.push(component);
+    }
+    path
+}
+
+fn env_budget(name: &str, default: u64) -> Result<u64, String> {
     match env::var(name) {
         Ok(value) => value
             .parse()
             .map_err(|_| format!("{name} must be a non-negative integer")),
-        Err(env::VarError::NotPresent) => Ok(0),
+        Err(env::VarError::NotPresent) => Ok(default),
         Err(env::VarError::NotUnicode(_)) => Err(format!("{name} must be a non-negative integer")),
     }
 }
