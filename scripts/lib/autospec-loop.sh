@@ -2231,43 +2231,13 @@ fi'
 
             case "$_gate_verdict" in
                 merge-ok)
-                    # ── Main-health gate (spec Phase-1 invariant: red main → halt
-                    # Tier-1 merges).  Never drain onto a red main.  Poll
-                    # autonomous-resilience.sh main-health and honor its DECISION:
-                    #   continue  → proceed with drain
-                    #   wait      → skip drain this cycle (re-poll next cycle)
-                    #   halt      → stop Tier-1 merges, notify, exit loop
-                    # Indeterminate/absent (no resilience or no repo) → proceed:
-                    # the deterministic conservatism (pending on gh failure) lives
-                    # in autonomous-resilience.sh main-health itself.
+                    # Main-health admission is owned by Rust before this legacy
+                    # conductor can consider or drain a ready issue. Keep this
+                    # shell path non-authoritative so missing branches cannot be
+                    # downgraded to a silent wait here.
                     local _main_health="continue"
-                    if [ -f "$_resilience" ] && [ -n "$_repo" ]; then
-                        local _mh_out
-                        _mh_out="$(bash "$_resilience" main-health \
-                            --repo "$_repo" 2>/dev/null || true)"
-                        local _mh_decision
-                        _mh_decision="$(printf '%s' "$_mh_out" \
-                            | grep '^DECISION:' | head -1 \
-                            | sed 's/^DECISION://' || true)"
-                        if [ -n "$_mh_decision" ]; then
-                            _main_health="$_mh_decision"
-                        fi
-                    fi
 
-                    if [ "$_main_health" = "halt" ]; then
-                        printf '[conductor] HALT: main-health red — halting Tier-1 merges\n' >&2
-                        if [ -n "$_notify_sh" ]; then
-                            bash "$_notify_sh" "autospec-autonomous" \
-                                "conductor halted: main branch CI red — Tier-1 merges stopped" || true
-                        fi
-                        _stop_reason="main-health:red"
-                        break
-                    fi
-
-                    if [ "$_main_health" = "wait" ]; then
-                        printf '[conductor] main-health pending — skipping drain this cycle\n' >&2
-                        _dry_cycles=$((_dry_cycles + 1))
-                    else
+                    if [ "$_main_health" = "continue" ]; then
                         # F3: while discovery issues are in flight, main merges are
                         # refused — but that refusal is enforced PER-PR by the phase4
                         # implementer via .autospec/explore-mode.json (PRs target the
