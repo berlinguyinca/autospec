@@ -3,11 +3,13 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use autospec_core::claim::{
-    find_reconcilable_pull_request, lowest_marked_comment, parse_claim_issue_json,
-    parse_open_pull_requests_json, parse_paths_argument, parse_remote_comments_json,
-    parse_run_state_comment, select_run_state, terminal_merged_comment_exists, RunStateRecord,
-    RUN_TERMINAL_BEGIN_MARKER, RUN_TERMINAL_END_MARKER,
+    find_reconcilable_pull_request, is_reconcilable_pull_request, lowest_marked_comment,
+    parse_claim_issue_json, parse_open_pull_requests_json, parse_paths_argument,
+    parse_remote_comments_json, parse_run_state_comment, select_run_state,
+    terminal_merged_comment_exists, RunStateRecord, RUN_TERMINAL_BEGIN_MARKER,
+    RUN_TERMINAL_END_MARKER,
 };
+use autospec_core::coordination::ConductorOutcome;
 
 use super::lint::claim_safety_with_config;
 use super::CommandFailure;
@@ -535,6 +537,25 @@ pub(crate) fn reconcile_active_issue(repo: &str, issue: u64) -> Result<(), Comma
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutorResultRecord {
+    Recorded,
+    EvidenceUnavailable,
+    OwnershipLost,
+}
+
+pub(crate) fn record_executor_result(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    outcome: &ConductorOutcome,
+    pull_request: Option<u64>,
+) -> Result<ExecutorResultRecord, CommandFailure> {
+    let step = executor_result_step(outcome);
+    record_executor_result_with_step(repo, issue, worker_id, branch, outcome, pull_request, step)
+}
+
 pub(crate) fn record_executor_outcome(
     repo: &str,
     issue: u64,
@@ -547,51 +568,92 @@ pub(crate) fn record_executor_outcome(
             "executor outcome must not be empty",
         ));
     }
-    let comments = list_comments(repo, issue)?;
-    let selected = select_run_state(&comments, repo, issue).ok_or_else(|| {
-        CommandFailure::diagnostic("claim ownership changed before executor outcome")
-    })?;
-    require_executor_claim_owner(&selected.record, worker_id, branch)?;
-    let now = utc_now_iso()?;
-    let claimed_at = selected.record.claimed_at;
-    let record = RunStateRecord::new(
+    match record_executor_result_with_step(
         repo,
         issue,
         worker_id,
-        "claimed",
         branch,
-        "",
+        &ConductorOutcome::Blocked(outcome.to_string()),
+        None,
         outcome,
-        Vec::new(),
-        claimed_at,
-        now,
-        claim_ttl_seconds(),
-    );
-    upsert_record(repo, &comments, &record)?;
-    let confirmed_comments = list_comments(repo, issue)?;
-    let confirmed = select_run_state(&confirmed_comments, repo, issue).ok_or_else(|| {
-        CommandFailure::diagnostic("claim ownership changed after executor outcome")
-    })?;
-    require_executor_claim_owner(&confirmed.record, worker_id, branch)?;
-    if confirmed.record.step != outcome {
-        return Err(CommandFailure::diagnostic(
-            "claim outcome changed while recording executor outcome",
-        ));
+    )? {
+        ExecutorResultRecord::Recorded => Ok(()),
+        ExecutorResultRecord::EvidenceUnavailable => Err(CommandFailure::diagnostic(
+            "executor outcome evidence became unavailable",
+        )),
+        ExecutorResultRecord::OwnershipLost => Err(CommandFailure::diagnostic(
+            "claim ownership changed while recording executor outcome",
+        )),
     }
-    Ok(())
 }
 
-fn require_executor_claim_owner(
-    record: &RunStateRecord,
+fn record_executor_result_with_step(
+    repo: &str,
+    issue: u64,
     worker_id: &str,
     branch: &str,
-) -> Result<(), CommandFailure> {
-    if record.worker_id != worker_id || record.branch != branch || record.state != "claimed" {
-        return Err(CommandFailure::diagnostic(
-            "claim ownership changed while recording executor outcome",
-        ));
+    outcome: &ConductorOutcome,
+    pull_request: Option<u64>,
+    step: &str,
+) -> Result<ExecutorResultRecord, CommandFailure> {
+    let comments = list_comments(repo, issue)?;
+    let Some(selected) = select_run_state(&comments, repo, issue) else {
+        return Ok(ExecutorResultRecord::OwnershipLost);
+    };
+    if !has_executor_claim_owner(&selected.record, worker_id, branch) {
+        return Ok(ExecutorResultRecord::OwnershipLost);
     }
-    Ok(())
+
+    let verified_pr = match outcome {
+        ConductorOutcome::Succeeded => {
+            let Some(pull_request) = pull_request else {
+                return Ok(ExecutorResultRecord::EvidenceUnavailable);
+            };
+            let pull_requests = list_open_pull_requests(repo)?;
+            if !pull_requests.iter().any(|candidate| {
+                candidate.number == pull_request && is_reconcilable_pull_request(candidate, issue)
+            }) {
+                return Ok(ExecutorResultRecord::EvidenceUnavailable);
+            }
+            pull_request.to_string()
+        }
+        ConductorOutcome::Blocked(_) | ConductorOutcome::Retryable(_) => {
+            if pull_request.is_some() {
+                return Ok(ExecutorResultRecord::EvidenceUnavailable);
+            }
+            selected.record.pr.clone()
+        }
+    };
+
+    let mut record = selected.record;
+    record.state = "claimed".to_string();
+    record.step = step.to_string();
+    record.pr = verified_pr.clone();
+    record.updated_at = utc_now_iso()?;
+    upsert_record(repo, &comments, &record)?;
+    let confirmed_comments = list_comments(repo, issue)?;
+    let Some(confirmed) = select_run_state(&confirmed_comments, repo, issue) else {
+        return Ok(ExecutorResultRecord::OwnershipLost);
+    };
+    if !has_executor_claim_owner(&confirmed.record, worker_id, branch)
+        || confirmed.record.step != step
+        || confirmed.record.pr != verified_pr
+    {
+        return Ok(ExecutorResultRecord::OwnershipLost);
+    }
+    Ok(ExecutorResultRecord::Recorded)
+}
+
+fn has_executor_claim_owner(record: &RunStateRecord, worker_id: &str, branch: &str) -> bool {
+    record.worker_id == worker_id && record.branch == branch && record.state == "claimed"
+}
+
+fn executor_result_step(outcome: &ConductorOutcome) -> &'static str {
+    match outcome {
+        ConductorOutcome::Succeeded => "executor_succeeded",
+        ConductorOutcome::Blocked(_) => "executor_blocked",
+        ConductorOutcome::Retryable(_) => "executor_retryable",
+    }
 }
 
 struct ReconcileOutcome {

@@ -988,10 +988,12 @@ pub fn find_reconcilable_pull_request(
 ) -> Option<&OpenPullRequest> {
     pull_requests
         .iter()
-        .filter(|pull_request| {
-            closes_issue(&pull_request.body, issue) && closeout_count(&pull_request.body) == 1
-        })
+        .filter(|pull_request| is_reconcilable_pull_request(pull_request, issue))
         .min_by_key(|pull_request| pull_request.number)
+}
+
+pub fn is_reconcilable_pull_request(pull_request: &OpenPullRequest, issue: u64) -> bool {
+    closes_issue(&pull_request.body, issue) && closeout_count(&pull_request.body) == 1
 }
 
 fn closes_issue(body: &str, issue: u64) -> bool {

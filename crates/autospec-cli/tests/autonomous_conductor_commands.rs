@@ -1,3 +1,4 @@
+use autospec_core::claim::{parse_remote_comments_json, select_run_state, RunStateRecord};
 use autospec_core::coordination::{ConductorOutcome, ConductorPhase, ConductorState};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -230,12 +231,276 @@ fn executor_result_emits_the_typed_deferred_receipt() {
     );
 }
 
+#[test]
+fn executor_result_records_an_owner_verified_blocked_outcome() {
+    let fixture = ForegroundFixture::new();
+    fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+
+    let output = fixture
+        .configured_command()
+        .args([
+            "autonomous",
+            "executor-result",
+            "--repo",
+            "test/repo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "rust-foreground-conductor-1",
+            "--branch",
+            "autonomous/issue-42",
+            "--outcome",
+            "blocked",
+            "--reason",
+            "waiting-for-review",
+        ])
+        .output()
+        .expect("record blocked executor result");
+
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"status\":\"blocked\",\"repo\":\"test/repo\",\"issue\":42,\"outcome\":\"blocked\",\"reason\":\"waiting-for-review\"}\n"
+    );
+    let record = fixture.claim_record();
+    assert_eq!(record.state, "claimed");
+    assert_eq!(record.worker_id, "rust-foreground-conductor-1");
+    assert_eq!(record.branch, "autonomous/issue-42");
+    assert_eq!(record.step, "executor_blocked");
+}
+
+#[test]
+fn executor_result_rejects_malformed_protocol_input_without_mutating_claim_state() {
+    let fixture = ForegroundFixture::new();
+    fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+    let before = fs::read_to_string(&fixture.comments).expect("read initial comments");
+
+    for args in [
+        vec!["autonomous", "executor-result", "--repo", "test/repo"],
+        vec!["autonomous", "executor-result", "--issue", "42"],
+        vec![
+            "autonomous",
+            "executor-result",
+            "--repo",
+            "test/repo",
+            "--issue",
+            "42",
+            "--repo",
+            "test/repo",
+        ],
+        vec![
+            "autonomous",
+            "executor-result",
+            "--repo",
+            "test/repo",
+            "--issue",
+            "42",
+            "--unexpected",
+            "value",
+        ],
+        vec![
+            "autonomous",
+            "executor-result",
+            "--repo",
+            "test/repo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "rust-foreground-conductor-1",
+            "--branch",
+            "autonomous/issue-42",
+            "--outcome",
+            "blocked",
+            "--pr",
+            "17",
+            "--reason",
+            "waiting-for-review",
+        ],
+    ] {
+        let output = fixture
+            .configured_command()
+            .args(args)
+            .output()
+            .expect("run malformed executor result");
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&output.stdout).starts_with("{\"status\":\"malformed\""),
+            "stdout={}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.comments).expect("read comments after malformed input"),
+            before
+        );
+    }
+}
+
+#[test]
+fn executor_result_rejects_foreign_worker_or_branch_without_mutating_claim_state() {
+    let fixture = ForegroundFixture::new();
+    fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+    let before = fs::read_to_string(&fixture.comments).expect("read initial comments");
+
+    for (worker_id, branch) in [
+        ("foreign-worker", "autonomous/issue-42"),
+        ("rust-foreground-conductor-1", "foreign/issue-42"),
+    ] {
+        let output = fixture
+            .configured_command()
+            .args([
+                "autonomous",
+                "executor-result",
+                "--repo",
+                "test/repo",
+                "--issue",
+                "42",
+                "--worker-id",
+                worker_id,
+                "--branch",
+                branch,
+                "--outcome",
+                "blocked",
+                "--reason",
+                "waiting-for-review",
+            ])
+            .output()
+            .expect("record foreign executor result");
+
+        assert_eq!(output.status.code(), Some(3));
+        assert!(
+            String::from_utf8_lossy(&output.stdout).starts_with("{\"status\":\"ownership_lost\""),
+            "stdout={}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.comments).expect("read comments after ownership loss"),
+            before
+        );
+    }
+}
+
+#[test]
+fn executor_result_rejects_success_without_exactly_one_closeout_report() {
+    let fixture = ForegroundFixture::new();
+    fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+    fixture.set_open_pull_requests(r#"[{"number":17,"body":"Closes #42"}]"#);
+    let before = fs::read_to_string(&fixture.comments).expect("read initial comments");
+
+    let output = fixture
+        .configured_command()
+        .args([
+            "autonomous",
+            "executor-result",
+            "--repo",
+            "test/repo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "rust-foreground-conductor-1",
+            "--branch",
+            "autonomous/issue-42",
+            "--outcome",
+            "succeeded",
+            "--pr",
+            "17",
+        ])
+        .output()
+        .expect("record unverified success");
+
+    assert_eq!(output.status.code(), Some(20));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with("{\"status\":\"blocked\""),
+        "stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        fs::read_to_string(&fixture.comments).expect("read comments after unverified success"),
+        before
+    );
+}
+
+#[test]
+fn executor_result_accepts_a_claim_owner_success_with_linked_closeout_evidence() {
+    let fixture = ForegroundFixture::new();
+    fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+    fixture.set_open_pull_requests(
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped"}]"#,
+    );
+
+    let output = fixture
+        .configured_command()
+        .args([
+            "autonomous",
+            "executor-result",
+            "--repo",
+            "test/repo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "rust-foreground-conductor-1",
+            "--branch",
+            "autonomous/issue-42",
+            "--outcome",
+            "succeeded",
+            "--pr",
+            "17",
+        ])
+        .output()
+        .expect("record verified success");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"status\":\"accepted\",\"repo\":\"test/repo\",\"issue\":42,\"outcome\":\"succeeded\",\"pr\":17}\n"
+    );
+    let record = fixture.claim_record();
+    assert_eq!(record.state, "claimed");
+    assert_eq!(record.step, "executor_succeeded");
+    assert_eq!(record.pr, "17");
+}
+
+#[test]
+fn executor_result_records_an_owner_verified_retryable_outcome() {
+    let fixture = ForegroundFixture::new();
+    fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+
+    let output = fixture
+        .configured_command()
+        .args([
+            "autonomous",
+            "executor-result",
+            "--repo",
+            "test/repo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "rust-foreground-conductor-1",
+            "--branch",
+            "autonomous/issue-42",
+            "--outcome",
+            "retryable",
+            "--reason",
+            "transient-network-error",
+        ])
+        .output()
+        .expect("record retryable executor result");
+
+    assert_eq!(output.status.code(), Some(10));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"status\":\"retryable\",\"repo\":\"test/repo\",\"issue\":42,\"outcome\":\"retryable\",\"reason\":\"transient-network-error\"}\n"
+    );
+    assert_eq!(fixture.claim_record().step, "executor_retryable");
+}
+
 struct ForegroundFixture {
     root: PathBuf,
     repo_dir: PathBuf,
     bin: PathBuf,
     mode: PathBuf,
     comments: PathBuf,
+    pull_requests: PathBuf,
     calls: PathBuf,
     operator: PathBuf,
     health: PathBuf,
@@ -249,6 +514,7 @@ impl ForegroundFixture {
         let bin = root.join("bin");
         let mode = root.join("mode");
         let comments = root.join("comments.json");
+        let pull_requests = root.join("pull-requests.json");
         let calls = root.join("gh.log");
         let operator = root.join("operator");
         let health = root.join("health");
@@ -257,6 +523,7 @@ impl ForegroundFixture {
         fs::create_dir_all(&bin).expect("create fake bin");
         fs::write(&mode, "unreviewed\n").expect("write mode");
         fs::write(&comments, "[]\n").expect("write comments");
+        fs::write(&pull_requests, "[]\n").expect("write pull requests");
         write_executable(
             &bin.join("gh"),
             r####"#!/bin/sh
@@ -327,7 +594,7 @@ if [ "$1" = issue ] && [ "$2" = comment ]; then
   mv "$AUTOSPEC_FOREGROUND_COMMENTS.tmp" "$AUTOSPEC_FOREGROUND_COMMENTS"
   exit 0
 fi
-if [ "$1" = pr ] && [ "$2" = list ]; then printf '[]\n'; exit 0; fi
+if [ "$1" = pr ] && [ "$2" = list ]; then cat "$AUTOSPEC_FOREGROUND_PULL_REQUESTS"; exit 0; fi
 printf 'unexpected gh invocation: %s\n' "$*" >&2
 exit 1
 "####,
@@ -338,6 +605,7 @@ exit 1
             bin,
             mode,
             comments,
+            pull_requests,
             calls,
             operator,
             health,
@@ -367,6 +635,7 @@ exit 1
             .env("PATH", path_with(&self.bin))
             .env("AUTOSPEC_FOREGROUND_MODE", &self.mode)
             .env("AUTOSPEC_FOREGROUND_COMMENTS", &self.comments)
+            .env("AUTOSPEC_FOREGROUND_PULL_REQUESTS", &self.pull_requests)
             .env("AUTOSPEC_FOREGROUND_CALLS", &self.calls)
             .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator)
             .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &self.health)
@@ -403,6 +672,44 @@ exit 1
 
     fn run_foreground(&self) -> std::process::Output {
         self.command().output().expect("run foreground")
+    }
+
+    fn seed_claim(&self, worker_id: &str, branch: &str) {
+        let record = RunStateRecord::new(
+            "test/repo",
+            42,
+            worker_id,
+            "claimed",
+            branch,
+            "",
+            "claimed",
+            Vec::new(),
+            "2026-07-15T00:00:00Z",
+            "2026-07-15T00:00:00Z",
+            10_800,
+        );
+        fs::write(
+            &self.comments,
+            format!(
+                "[{{\"id\":100,\"updated_at\":\"2026-07-15T00:00:00Z\",\"body\":{:?}}}]\n",
+                record.to_marked_comment()
+            ),
+        )
+        .expect("seed claimed run-state comment");
+    }
+
+    fn set_open_pull_requests(&self, pull_requests: &str) {
+        fs::write(&self.pull_requests, pull_requests).expect("write open pull requests");
+    }
+
+    fn claim_record(&self) -> RunStateRecord {
+        let comments = parse_remote_comments_json(
+            &fs::read_to_string(&self.comments).expect("read claimed run-state comments"),
+        )
+        .expect("parse claimed run-state comments");
+        select_run_state(&comments, "test/repo", 42)
+            .expect("select claimed run-state")
+            .record
     }
 
     fn state_path(&self) -> PathBuf {
@@ -457,7 +764,7 @@ fn path_with(bin: &Path) -> String {
 }
 
 fn wait_for_file_contents(path: &Path, expected: &str) {
-    for _ in 0..100 {
+    for _ in 0..300 {
         if fs::read_to_string(path).is_ok_and(|contents| contents.contains(expected)) {
             return;
         }

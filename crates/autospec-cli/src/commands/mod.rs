@@ -84,7 +84,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "doctor" => doctor::run(rest).map_err(CommandFailure::diagnostic),
             "explore" => explore::run(rest),
             "status" => status::run(rest).map_err(CommandFailure::diagnostic),
-            "autonomous" => autonomous::run(rest).map_err(CommandFailure::diagnostic),
+            "autonomous" => autonomous::run(rest),
             "plan" => plan::run(rest).map_err(CommandFailure::diagnostic),
             "validate" => validate::run(rest).map_err(CommandFailure::diagnostic),
             "run" => run::run(rest).map_err(CommandFailure::diagnostic),
