@@ -168,6 +168,32 @@ assert not any(
 PY
 }
 
+@test "run_repo_quality_audit is table-driven and no longer dogfood-allowlisted" {
+  python3 - "$REPO_ROOT/crates/autospec-core/src/validation/external.rs" "$REPO_ROOT/tests/dogfood/allowlist/qa-brute-force-sweep.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source_path = Path(sys.argv[1])
+allowlist_path = Path(sys.argv[2])
+source = source_path.read_text(encoding="utf-8")
+start = source.index("fn run_repo_quality_audit(")
+end = source.index("\nfn run_autospec_autonomous_contract(", start)
+function_source = source[start:end]
+
+assert "REPO_QUALITY_CONTRACTS" in function_source, "repo-quality checks should be table-dispatched"
+assert function_source.count("return aggregate(") <= 1, "repo-quality audit still repeats failure branches"
+
+entries = json.loads(allowlist_path.read_text(encoding="utf-8"))
+assert not any(
+    entry.get("file") == "crates/autospec-core/src/validation/external.rs"
+    and entry.get("function") == "run_repo_quality_audit"
+    and entry.get("rule_id") == "REPEATED_STRUCTURE_AS_CODE"
+    for entry in entries
+), "run_repo_quality_audit REPEATED_STRUCTURE_AS_CODE dogfood allowlist entry remains"
+PY
+}
+
 @test "v25 dependency graph is acyclic and release validation has no blockers" {
   bash "$TEST_TMP/repo/scripts/autospec-baseline-validation.sh" --repo-root "$TEST_TMP/repo" >/dev/null
   python3 - "$TEST_TMP/repo/.autospec/reports/dependency-validation.json" "$TEST_TMP/repo/.autospec/reports/release-validation.json" <<'PY'
