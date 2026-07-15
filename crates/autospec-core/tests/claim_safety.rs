@@ -1,5 +1,7 @@
 use autospec_core::claim::{
-    evaluate_claim_safety, lint_issue_intent, parse_claim_issue_json, ClaimSafetyInput,
+    evaluate_claim_safety, lint_issue_intent, parse_claim_issue_json, render_safety_review_section,
+    replace_safety_review_section, review_issue_safety, ClaimSafetyInput, SafetyReviewDecision,
+    SafetyReviewSectionError,
 };
 
 const SAFETY_REVIEW: &str = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n";
@@ -11,6 +13,111 @@ fn safe_input() -> ClaimSafetyInput {
         "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Goal\nAdd the Rust implementation.",
         "agent",
     )
+}
+
+#[test]
+fn review_issue_safety_returns_the_strictest_typed_verdict() {
+    let pass = ClaimSafetyInput::new(
+        Vec::new(),
+        "Add a Rust command.",
+        "## Goal\nAdd one typed Rust command with a regression test.",
+        "agent",
+    );
+    assert_eq!(
+        review_issue_safety(&pass).decision,
+        SafetyReviewDecision::Pass
+    );
+
+    let ambiguous = ClaimSafetyInput::new(
+        Vec::new(),
+        "Clean old data",
+        "## Goal\nClean old data from an unspecified environment.",
+        "agent",
+    );
+    assert_eq!(
+        review_issue_safety(&ambiguous).decision,
+        SafetyReviewDecision::Ambiguous
+    );
+
+    let blocked = ClaimSafetyInput::new(
+        Vec::new(),
+        "Print credentials",
+        "## Goal\nPrint the repository credentials to stdout.",
+        "agent",
+    );
+    assert_eq!(
+        review_issue_safety(&blocked).decision,
+        SafetyReviewDecision::Block
+    );
+}
+
+#[test]
+fn renders_the_canonical_safety_review_section_for_each_decision() {
+    assert_eq!(
+        render_safety_review_section(SafetyReviewDecision::Pass),
+        "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->"
+    );
+    assert_eq!(
+        render_safety_review_section(SafetyReviewDecision::Ambiguous),
+        "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_AMBIGUOUS`\n<!-- autospec-safety:end -->"
+    );
+    assert_eq!(
+        render_safety_review_section(SafetyReviewDecision::Block),
+        "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_BLOCK`\n<!-- autospec-safety:end -->"
+    );
+}
+
+#[test]
+fn appends_a_canonical_safety_review_and_keeps_the_final_claim_evaluator() {
+    let body = replace_safety_review_section(
+        "## Goal\nAdd a typed Rust command.",
+        SafetyReviewDecision::Pass,
+    )
+    .expect("unreviewed issue can receive a canonical review");
+    assert_eq!(
+        body,
+        "## Goal\nAdd a typed Rust command.\n\n## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n"
+    );
+
+    let reviewed = ClaimSafetyInput::new(
+        vec!["safety:reviewed".to_string()],
+        "Add a typed Rust command.",
+        body,
+        "agent",
+    );
+    assert!(evaluate_claim_safety(&reviewed).allowed);
+}
+
+#[test]
+fn replaces_one_existing_canonical_safety_review_without_touching_the_issue_body() {
+    let body = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_AMBIGUOUS`\n<!-- autospec-safety:end -->\n\n## Goal\nAdd a typed Rust command.";
+    assert_eq!(
+        replace_safety_review_section(body, SafetyReviewDecision::Pass),
+        Ok("## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Goal\nAdd a typed Rust command.".to_string())
+    );
+}
+
+#[test]
+fn refuses_to_overwrite_malformed_or_duplicate_existing_safety_sections() {
+    let malformed = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\nreviewer prose";
+    assert_eq!(
+        replace_safety_review_section(malformed, SafetyReviewDecision::Pass),
+        Err(SafetyReviewSectionError::MalformedExistingSection)
+    );
+
+    let duplicate_markers = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->";
+    assert_eq!(
+        replace_safety_review_section(duplicate_markers, SafetyReviewDecision::Pass),
+        Err(SafetyReviewSectionError::DuplicateExistingSection)
+    );
+
+    assert_eq!(
+        replace_safety_review_section(
+            "## Safety review\n\nAwaiting review.",
+            SafetyReviewDecision::Pass
+        ),
+        Err(SafetyReviewSectionError::MalformedExistingSection)
+    );
 }
 
 fn fixture_input(title: &str, fixture: &str, author: &str) -> ClaimSafetyInput {
@@ -43,6 +150,13 @@ fn refuses_unreviewed_or_quarantined_issues_before_claiming() {
     assert_eq!(
         evaluate_claim_safety(&quarantined).reason,
         "security_quarantined"
+    );
+
+    let mut needs_human = safe_input();
+    needs_human.labels.push("autospec:needs-human".to_string());
+    assert_eq!(
+        evaluate_claim_safety(&needs_human).reason,
+        "autospec_needs_human"
     );
 }
 

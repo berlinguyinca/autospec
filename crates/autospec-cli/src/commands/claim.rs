@@ -9,6 +9,7 @@ use autospec_core::claim::{
     RUN_TERMINAL_BEGIN_MARKER, RUN_TERMINAL_END_MARKER,
 };
 
+use super::lint::claim_safety_with_config;
 use super::CommandFailure;
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -122,7 +123,7 @@ fn acquire(args: &[String]) -> Result<(), CommandFailure> {
     if !issue.labels.iter().any(|label| label == "auto-implement") {
         return unavailable_claim(options.issue, &repo, Some(&worker_id), "not_auto_implement");
     }
-    let safety = autospec_core::claim::evaluate_claim_safety(&issue.safety_input());
+    let safety = claim_safety_with_config(&issue.safety_input())?;
     if !safety.allowed {
         return unavailable_safety_claim(options.issue, &repo, &worker_id, safety.reason);
     }

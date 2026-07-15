@@ -106,7 +106,7 @@ impl ClaimRunState {
         }
     }
 }
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt, ops::Range};
 
 use crate::state::json::{JsonParser, JsonValue};
 
@@ -181,6 +181,198 @@ impl ClaimSafetyInput {
     }
 }
 
+/// The only decision tokens that may be persisted in a safety-review marker.
+///
+/// The token is deliberately separate from queue eligibility: a pass may be
+/// marked as reviewed, while ambiguous and blocked reviews require their own
+/// human or quarantine handling in the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafetyReviewDecision {
+    Pass,
+    Ambiguous,
+    Block,
+}
+
+impl SafetyReviewDecision {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Pass => "SAFETY_PASS",
+            Self::Ambiguous => "SAFETY_AMBIGUOUS",
+            Self::Block => "SAFETY_BLOCK",
+        }
+    }
+}
+
+/// A typed result of applying the current Rust issue-intent policy.
+///
+/// Findings are retained so the GitHub boundary can report the exact policy
+/// evidence without parsing rendered Markdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafetyReviewVerdict {
+    pub decision: SafetyReviewDecision,
+    pub findings: Vec<IssueIntentFinding>,
+}
+
+/// Errors returned instead of overwriting pre-existing safety-review evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafetyReviewSectionError {
+    MalformedExistingSection,
+    DuplicateExistingSection,
+}
+
+impl SafetyReviewSectionError {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MalformedExistingSection => "malformed_existing_safety_review",
+            Self::DuplicateExistingSection => "duplicate_existing_safety_review",
+        }
+    }
+}
+
+impl fmt::Display for SafetyReviewSectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::error::Error for SafetyReviewSectionError {}
+
+/// Evaluate an issue under the default trusted-actor policy and return the
+/// strictest typed safety decision.
+pub fn review_issue_safety(input: &ClaimSafetyInput) -> SafetyReviewVerdict {
+    review_issue_safety_with_trusted_actors(input, &["berlinguyinca"])
+}
+
+/// Evaluate an issue under explicitly configured trusted actors.
+///
+/// A blocking finding always wins over ambiguous findings. The narrow trusted
+/// test-reset exception remains owned by `lint_issue_intent_with_trusted_actors`.
+pub fn review_issue_safety_with_trusted_actors(
+    input: &ClaimSafetyInput,
+    trusted_actors: &[&str],
+) -> SafetyReviewVerdict {
+    let lint = lint_issue_intent_with_trusted_actors(
+        &input.title,
+        &input.body,
+        &input.author,
+        trusted_actors,
+    );
+    let decision = if lint.blocking {
+        SafetyReviewDecision::Block
+    } else if lint.ambiguous {
+        SafetyReviewDecision::Ambiguous
+    } else {
+        SafetyReviewDecision::Pass
+    };
+    SafetyReviewVerdict {
+        decision,
+        findings: lint.findings,
+    }
+}
+
+/// Render exactly the Markdown section accepted by the Rust claim-safety
+/// evaluator, using the supplied typed decision token.
+pub fn render_safety_review_section(decision: SafetyReviewDecision) -> String {
+    format!(
+        "## Safety review\n\n{SAFETY_BEGIN_MARKER}\n- **decision:** `{}`\n{SAFETY_END_MARKER}",
+        decision.token()
+    )
+}
+
+/// Append a canonical safety review when no review evidence exists, or replace
+/// the one existing canonical section. Any malformed or duplicate prior review
+/// is an error: callers must not silently overwrite potentially conflicting
+/// audit evidence.
+pub fn replace_safety_review_section(
+    body: &str,
+    decision: SafetyReviewDecision,
+) -> Result<String, SafetyReviewSectionError> {
+    let replacement = render_safety_review_section(decision);
+    match canonical_safety_review_bounds(body)? {
+        Some(bounds) => Ok(format!(
+            "{}{}{}",
+            &body[..bounds.start],
+            replacement,
+            &body[bounds.end..]
+        )),
+        None if body.trim().is_empty() => Ok(format!("{replacement}\n")),
+        None => Ok(format!("{}\n\n{replacement}\n", body.trim_end())),
+    }
+}
+
+fn canonical_safety_review_bounds(
+    body: &str,
+) -> Result<Option<Range<usize>>, SafetyReviewSectionError> {
+    let heading_positions = safety_review_heading_positions(body);
+    let begin_count = body.matches(SAFETY_BEGIN_MARKER).count();
+    let end_count = body.matches(SAFETY_END_MARKER).count();
+
+    if heading_positions.is_empty() && begin_count == 0 && end_count == 0 {
+        return Ok(None);
+    }
+    if heading_positions.len() > 1 || begin_count > 1 || end_count > 1 {
+        return Err(SafetyReviewSectionError::DuplicateExistingSection);
+    }
+    if heading_positions.len() != 1 || begin_count != 1 || end_count != 1 {
+        return Err(SafetyReviewSectionError::MalformedExistingSection);
+    }
+
+    let heading_start = heading_positions[0];
+    let begin = body
+        .find(SAFETY_BEGIN_MARKER)
+        .expect("counted one safety begin marker");
+    let end = body
+        .find(SAFETY_END_MARKER)
+        .expect("counted one safety end marker");
+    if begin <= heading_start || end <= begin {
+        return Err(SafetyReviewSectionError::MalformedExistingSection);
+    }
+
+    let section_end = end + SAFETY_END_MARKER.len();
+    let section = &body[heading_start..section_end];
+    let is_canonical = [
+        SafetyReviewDecision::Pass,
+        SafetyReviewDecision::Ambiguous,
+        SafetyReviewDecision::Block,
+    ]
+    .into_iter()
+    .any(|decision| section == render_safety_review_section(decision));
+    if !is_canonical {
+        return Err(SafetyReviewSectionError::MalformedExistingSection);
+    }
+    let post_section_end = section_end
+        + next_markdown_heading_offset(&body[section_end..]).unwrap_or(body.len() - section_end);
+    let post_section = &body[section_end..post_section_end];
+    if !post_section.trim().is_empty() {
+        return Err(SafetyReviewSectionError::MalformedExistingSection);
+    }
+    Ok(Some(heading_start..section_end))
+}
+
+fn safety_review_heading_positions(body: &str) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let text = line.trim_end_matches('\n');
+        if text.trim() == "## Safety review" {
+            positions.push(offset);
+        }
+        offset += line.len();
+    }
+    positions
+}
+
+fn next_markdown_heading_offset(body: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        if line.starts_with("## ") {
+            return Some(offset);
+        }
+        offset += line.len();
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimSafetyDecision {
     pub allowed: bool,
@@ -224,6 +416,9 @@ pub fn evaluate_claim_safety_with_trusted_actors(
         .collect::<Vec<_>>();
     if labels.contains(&"security:quarantined") {
         return ClaimSafetyDecision::reject("security_quarantined");
+    }
+    if labels.contains(&"autospec:needs-human") {
+        return ClaimSafetyDecision::reject("autospec_needs_human");
     }
     if !labels.contains(&"safety:reviewed") {
         return ClaimSafetyDecision::reject("missing_safety_reviewed");

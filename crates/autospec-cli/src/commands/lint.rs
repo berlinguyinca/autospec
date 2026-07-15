@@ -4,7 +4,11 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-use autospec_core::claim::{lint_issue_intent_with_trusted_actors, IssueIntentFinding};
+use autospec_core::claim::{
+    evaluate_claim_safety_with_trusted_actors, lint_issue_intent_with_trusted_actors,
+    review_issue_safety_with_trusted_actors, ClaimSafetyDecision, ClaimSafetyInput,
+    IssueIntentFinding, SafetyReviewVerdict,
+};
 use autospec_core::lint::{
     directive_for, lint_implementation, lint_issue_body, parse_unified_diff,
     ImplementationLintContext, ImplementationLintFinding, ImplementationLintOptions,
@@ -735,6 +739,50 @@ pub(crate) fn load_issue_safety_policy(config_path: Option<&str>) -> IssueSafety
         return default_issue_safety_policy();
     };
     parse_issue_safety_policy(&document).unwrap_or_else(default_issue_safety_policy)
+}
+
+pub(crate) fn review_issue_safety_for_queue(
+    input: &ClaimSafetyInput,
+) -> Result<SafetyReviewVerdict, CommandFailure> {
+    let trusted_actors = configured_safety_trusted_actors()?;
+    let trusted_actors = trusted_actors
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    Ok(review_issue_safety_with_trusted_actors(
+        input,
+        &trusted_actors,
+    ))
+}
+
+pub(crate) fn confirm_issue_safety_for_queue(
+    input: &ClaimSafetyInput,
+) -> Result<bool, CommandFailure> {
+    Ok(claim_safety_with_config(input)?.allowed)
+}
+
+pub(crate) fn claim_safety_with_config(
+    input: &ClaimSafetyInput,
+) -> Result<ClaimSafetyDecision, CommandFailure> {
+    let trusted_actors = configured_safety_trusted_actors()?;
+    let trusted_actors = trusted_actors
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    Ok(evaluate_claim_safety_with_trusted_actors(
+        input,
+        &trusted_actors,
+    ))
+}
+
+fn configured_safety_trusted_actors() -> Result<Vec<String>, CommandFailure> {
+    let policy = load_issue_safety_policy(None);
+    if policy.has_unsupported_pattern {
+        return Err(CommandFailure::diagnostic(
+            "issue safety policy contains unsupported custom regex",
+        ));
+    }
+    Ok(policy.trusted_actors)
 }
 
 fn default_issue_safety_policy() -> IssueSafetyPolicy {

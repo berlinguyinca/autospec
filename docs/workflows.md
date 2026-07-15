@@ -45,6 +45,11 @@ later evidence page fails closed. A `scan_scope` of
 `slice` means `AUTOSPEC_RUN_ONLY_ISSUES` constrained the selection; only a `repository` scan can
 supply whole-queue completion evidence.
 
+`autospec queue review-safety --repo OWNER/REPO --limit N` is the bounded Rust writeback pass
+for unreviewed open queue work. It writes a canonical passing block only after a typed re-read,
+labels ambiguity as `autospec:needs-human`, quarantines blocking intent, and reports every
+mutation or fail-closed conflict as structured totals.
+
 ## Rust CLI
 
 The `autospec` Rust binary exposes the V62+ command surface while preserving the skill-first workflow. `doctor`, `init`, `status`, `plan`, `validate`, `run`, `resume`, `report`, `showcase`, and `growth-report` support `--json`. `autospec init --spec <id>` creates local planned state without executing work. Direct `autospec validate [--path <changed-path>]...` is a read-only affected-check planner, while `autospec validate --shadow-results <file>` aggregates pre-captured results without spawning a command. `autospec validate` remains the executor for shell options such as `--fast`. `run` and `resume` only create, ingest, and inspect local queue state; `benchmark` remains a non-zero stub.
