@@ -26,6 +26,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec queue ready [--repo OWNER/REPO] [--batch-size N]` | yes | scans every Rust-owned GitHub issue page and returns typed eligibility, gate totals, and scan scope |
 | `autospec queue review-safety --repo OWNER/REPO --limit N [--issue N]` | yes | writes bounded Rust issue-intent safety decisions and reports outcome totals |
 | `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR` | no | drives one Rust-owned queue/claim cycle and persists a deferred foreground receipt; it launches no implementation agent |
+| `autospec autonomous lifecycle decide --repo OWNER/REPO [--claim-repo OWNER/REPO --claim-issue N --claim-worker ID --claim-branch NAME --claim-state active\|terminal] [--lease-age-sec N] [--stop graceful\|immediate] [--health continue\|wait\|halt] [--budget within\|soft\|hard] [--ready-tier 1\|1.5\|2\|3\|4\|5\|6\|7\|idle]` | yes | evaluates one pure typed lifecycle decision without filesystem, process, GitHub, shell, or `omx` effects |
 | `autospec autonomous executor-result --repo OWNER/REPO --issue N [--worker-id ID --branch NAME --outcome succeeded\|blocked\|retryable ...]` | yes | records either the exact legacy deferred receipt or one strictly validated executor outcome; it never launches work, releases a claim, or merges a PR |
 | `autospec run --run <id> --spec <id>... [--json]` | yes | creates a local persisted queue only; it does not launch an agent or validation command |
 | `autospec run --ingest <agent-result.json> --run <id> --spec <id> --result-id <id> --outcome <passed\|failed\|blocked> [--failure-kind <kind>] [--retry-limit <n>] [--json]` | yes | validates and records an explicit local agent result; it does not launch an agent or validation command |
@@ -98,6 +99,22 @@ mutation. Explicit executor-result ingestion is described below. Neither form la
 implementation agent, invokes a shell, script, `omx`, or `/autospec-run`, releases a claim, or
 merges a PR. Detached `autonomous start` and `restart` likewise launch this foreground command as
 a direct Rust child; monitor and supervisor are separate compatibility companions.
+
+`autospec autonomous lifecycle decide` evaluates the typed repository scope, issue, worker,
+claim branch, lease freshness, stop, ownership, retry, health, budget, waterfall-tier, and
+idle-rescan policy without any side effects. A claim requires its complete typed identity
+(`--claim-repo`, `--claim-issue`, `--claim-worker`, and `--claim-branch`); `--claim-state
+terminal` and lease ages above 10,800 seconds have distinct non-executable decisions. `--repo`
+is required. It emits exactly one JSON decision: `run` exits `0`, `stop` and `park` exit `20`,
+claim or scope rejection (including malformed observed claim state) exits `3`, and malformed
+flags exit `2`. `start`, `restart`,
+`run-foreground`, and `stop` write the same collision-safe atomic schema-1
+`.autospec/autonomous-operator/<scope>/lifecycle.json` decision record. Start and restart
+launch conductor, monitor, and supervisor as direct Rust executable-plus-argument-vector
+children; they do not accept command-string companion overrides or use `sh -c`. Foreground
+reads a stop flag or stored stop record before health or queue work, returns the same JSON
+decision and exit class for health parks, and preflights the observed GitHub claim before any
+claim label, heartbeat, or run-state mutation.
 
 `autospec autonomous executor-result` emits one JSON result and has two deliberately distinct
 forms. The bare compatibility form is exactly `--repo OWNER/REPO --issue N`: it is the successful
