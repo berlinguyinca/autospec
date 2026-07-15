@@ -417,6 +417,9 @@ pub fn evaluate_claim_safety_with_trusted_actors(
     if labels.contains(&"security:quarantined") {
         return ClaimSafetyDecision::reject("security_quarantined");
     }
+    if labels.contains(&"autospec:needs-human") {
+        return ClaimSafetyDecision::reject("autospec_needs_human");
+    }
     if !labels.contains(&"safety:reviewed") {
         return ClaimSafetyDecision::reject("missing_safety_reviewed");
     }

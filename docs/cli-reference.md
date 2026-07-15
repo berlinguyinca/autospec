@@ -24,6 +24,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec claim state read\|upsert\|clear\|reconcile-linked-pr ...` | yes | manages the schema-1 GitHub run-state comment using lowest-comment-ID selection |
 | `autospec claim acquire\|release ...` | yes | applies the typed safety gate, heartbeat/label ordering, lease CAS, and terminal release transitions |
 | `autospec queue ready [--repo OWNER/REPO] [--batch-size N]` | yes | scans every Rust-owned GitHub issue page and returns typed eligibility, gate totals, and scan scope |
+| `autospec queue review-safety --repo OWNER/REPO --limit N` | yes | writes bounded Rust issue-intent safety decisions and reports outcome totals |
 | `autospec run --run <id> --spec <id>... [--json]` | yes | creates a local persisted queue only; it does not launch an agent or validation command |
 | `autospec run --ingest <agent-result.json> --run <id> --spec <id> --result-id <id> --outcome <passed\|failed\|blocked> [--failure-kind <kind>] [--retry-limit <n>] [--json]` | yes | validates and records an explicit local agent result; it does not launch an agent or validation command |
 | `autospec resume [--json]` | yes | reports the newest incomplete local queue and its next entry; it does not execute it |
@@ -72,3 +73,11 @@ blocked, dependency-blocked, linked-PR-blocked, path-conflicted, ready, claimed,
 issues. `scan_scope` is `repository` for a full scan and `slice` when
 `AUTOSPEC_RUN_ONLY_ISSUES` constrains the result, so callers cannot mistake a completed slice for
 whole-queue completion.
+
+`autospec queue review-safety --repo OWNER/REPO --limit N` requires a positive bound and scans
+only unreviewed open `auto-implement` issues. It emits
+`pass`, `ambiguous`, `block`, `stale`, `conflicted`, and `skipped` totals. A pass writes one
+canonical review block, adds `safety:reviewed`, and re-reads the issue through the typed claim
+gate. Ambiguous issues receive `autospec:needs-human`; blocking issues receive
+`security:quarantined`; neither becomes reviewed-eligible. Conflicting or malformed remote
+evidence is fail-closed and counted as `conflicted`.

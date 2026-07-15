@@ -174,6 +174,24 @@ impl Drop for SafetyReviewFixture {
 }
 
 #[test]
+fn review_safety_requires_an_explicit_limit() {
+    let fixture = SafetyReviewFixture::new();
+
+    let output = fixture
+        .command()
+        .args(["queue", "review-safety", "--repo", "test/repo"])
+        .output()
+        .expect("review command starts");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--limit is required"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn review_safety_rejects_a_zero_limit() {
     let fixture = SafetyReviewFixture::new();
 
@@ -255,10 +273,165 @@ fn review_safety_passes_an_issue_only_after_a_typed_reread() {
         calls.contains("POST\nrepos/test/repo/issues/1/labels"),
         "calls={calls}"
     );
+    assert!(calls.contains("labels[]=safety:reviewed"), "calls={calls}");
+    assert!(calls.contains("SAFETY_PASS"), "calls={calls}");
     assert!(
         calls.matches("repos/test/repo/issues/1").count() >= 3,
         "calls={calls}"
     );
+}
+
+#[test]
+fn review_safety_preserves_a_concurrent_human_hold_as_a_conflict() {
+    let fixture = SafetyReviewFixture::new();
+    fixture.write_issue(
+        1,
+        "Add a Rust command.",
+        "## Goal\nAdd one typed Rust command with a regression test.",
+        &["auto-implement"],
+    );
+    let reviewed_body = "## Goal\nAdd one typed Rust command with a regression test.\n\n## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n";
+    fs::write(
+        &fixture.patched_issue,
+        issue_json(1, "Add a Rust command.", reviewed_body, &["auto-implement"]),
+    )
+    .expect("write patched issue");
+    fs::write(
+        &fixture.reviewed_issue,
+        issue_json(
+            1,
+            "Add a Rust command.",
+            reviewed_body,
+            &["auto-implement", "safety:reviewed", "autospec:needs-human"],
+        ),
+    )
+    .expect("write held reread issue");
+
+    let output = fixture
+        .command()
+        .args([
+            "queue",
+            "review-safety",
+            "--repo",
+            "test/repo",
+            "--limit",
+            "1",
+        ])
+        .output()
+        .expect("review command starts");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"pass\":0"), "stdout={stdout}");
+    assert!(stdout.contains("\"conflicted\":1"), "stdout={stdout}");
+}
+
+#[test]
+fn review_safety_counts_malformed_rereads_as_conflicts_without_writeback() {
+    let fixture = SafetyReviewFixture::new();
+    fixture.write_issue(
+        1,
+        "Add a Rust command.",
+        "## Goal\nAdd one typed Rust command with a regression test.",
+        &["auto-implement"],
+    );
+    fs::write(&fixture.current_issue, "not JSON\n").expect("write malformed reread");
+
+    let output = fixture
+        .command()
+        .args([
+            "queue",
+            "review-safety",
+            "--repo",
+            "test/repo",
+            "--limit",
+            "1",
+        ])
+        .output()
+        .expect("review command starts");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"conflicted\":1"));
+    let calls = fs::read_to_string(&fixture.calls).expect("read gh calls");
+    assert!(!calls.contains("PATCH"), "calls={calls}");
+    assert!(!calls.contains("/labels"), "calls={calls}");
+}
+
+#[test]
+fn review_safety_counts_invalid_reviewed_evidence_as_a_conflict() {
+    let fixture = SafetyReviewFixture::new();
+    fixture.write_issue(
+        1,
+        "Add a Rust command.",
+        "## Goal\nAdd one typed Rust command with a regression test.",
+        &["auto-implement", "safety:reviewed"],
+    );
+
+    let output = fixture
+        .command()
+        .args([
+            "queue",
+            "review-safety",
+            "--repo",
+            "test/repo",
+            "--limit",
+            "1",
+        ])
+        .output()
+        .expect("review command starts");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"conflicted\":1"), "stdout={stdout}");
+    assert!(stdout.contains("\"skipped\":0"), "stdout={stdout}");
+    let calls = fs::read_to_string(&fixture.calls).expect("read gh calls");
+    assert!(!calls.contains("PATCH"), "calls={calls}");
+    assert!(!calls.contains("/labels"), "calls={calls}");
+}
+
+#[test]
+fn review_safety_skips_classification_drafts() {
+    let fixture = SafetyReviewFixture::new();
+    fixture.write_issue(
+        1,
+        "Add a Rust command.",
+        "## Goal\nAdd one typed Rust command with a regression test.",
+        &["auto-implement", "needs-classify"],
+    );
+
+    let output = fixture
+        .command()
+        .args([
+            "queue",
+            "review-safety",
+            "--repo",
+            "test/repo",
+            "--limit",
+            "1",
+        ])
+        .output()
+        .expect("review command starts");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"skipped\":1"));
+    let calls = fs::read_to_string(&fixture.calls).expect("read gh calls");
+    assert!(!calls.contains("\nPOST\n"), "calls={calls}");
 }
 
 #[test]
@@ -342,6 +515,11 @@ fn review_safety_marks_an_ambiguous_issue_once_without_reviewed_eligibility() {
         calls.contains("POST\nrepos/test/repo/issues/2/labels"),
         "calls={calls}"
     );
+    assert!(
+        calls.contains("labels[]=autospec:needs-human"),
+        "calls={calls}"
+    );
+    assert!(calls.contains("SAFETY_AMBIGUOUS"), "calls={calls}");
     assert!(!calls.contains("safety:reviewed"), "calls={calls}");
 }
 
@@ -391,6 +569,11 @@ fn review_safety_quarantines_a_blocked_issue_without_reviewed_eligibility() {
         calls.contains("POST\nrepos/test/repo/issues/3/labels"),
         "calls={calls}"
     );
+    assert!(
+        calls.contains("labels[]=security:quarantined"),
+        "calls={calls}"
+    );
+    assert!(calls.contains("SAFETY_BLOCK"), "calls={calls}");
     assert!(!calls.contains("safety:reviewed"), "calls={calls}");
 }
 

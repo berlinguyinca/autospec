@@ -3,8 +3,7 @@ use std::fs;
 use std::process::{Command, Output};
 
 use autospec_core::claim::{
-    evaluate_claim_safety, replace_safety_review_section, ClaimSafetyInput, SafetyReviewDecision,
-    SafetyReviewVerdict,
+    replace_safety_review_section, ClaimSafetyInput, SafetyReviewDecision, SafetyReviewVerdict,
 };
 use autospec_core::coordination::{
     dependency_numbers, parse_dependency_issue_json, parse_remote_issue_page_json,
@@ -15,7 +14,9 @@ use autospec_core::coordination::{
 use super::claim::{
     active_issue_counts_toward_worker_capacity, reconcile_active_issue, recover_active_issue,
 };
-use super::lint::{load_issue_safety_policy, review_issue_safety_for_queue};
+use super::lint::{
+    confirm_issue_safety_for_queue, load_issue_safety_policy, review_issue_safety_for_queue,
+};
 use super::CommandFailure;
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -51,49 +52,93 @@ struct ReviewSafetyTotals {
     skipped: usize,
 }
 
+enum ReviewSafetyOutcome {
+    Pass,
+    Ambiguous,
+    Block,
+    Stale,
+    Conflicted,
+    Skipped,
+}
+
 fn review_safety(args: &[String]) -> Result<(), CommandFailure> {
     let options = parse_review_safety_options(args)?;
     let repo = options.repo.map_or_else(infer_repo, Ok)?;
-    let limit = options.limit.unwrap_or(50);
-    let candidates = list_issues(&repo, "auto-implement")?;
-    let mut totals = ReviewSafetyTotals::default();
-    let mut unreviewed = Vec::new();
+    let limit = options
+        .limit
+        .ok_or_else(|| CommandFailure::diagnostic("--limit is required"))?;
+    let (mut totals, candidates) =
+        review_safety_candidates(list_issues(&repo, "auto-implement")?, limit)?;
     for candidate in candidates {
-        if !reviewable_issue(&candidate) {
-            totals.skipped += 1;
-        } else {
-            unreviewed.push(candidate);
-        }
-    }
-    totals.skipped += unreviewed.len().saturating_sub(limit);
-
-    for candidate in unreviewed.into_iter().take(limit) {
-        let current = read_issue(&repo, candidate.number)?;
-        if !reviewable_issue(&current) {
-            totals.stale += 1;
-            continue;
-        }
-        let verdict = review_issue_safety_for_queue(&issue_safety_input(&current))?;
-        match verdict.decision {
-            SafetyReviewDecision::Pass => {
-                if apply_passing_safety_review(&repo, &current)? {
-                    totals.pass += 1;
-                } else {
-                    totals.conflicted += 1;
-                }
-            }
-            SafetyReviewDecision::Ambiguous => {
-                apply_non_passing_safety_review(&repo, &current, &verdict, "autospec:needs-human")?;
-                totals.ambiguous += 1;
-            }
-            SafetyReviewDecision::Block => {
-                apply_non_passing_safety_review(&repo, &current, &verdict, "security:quarantined")?;
-                totals.block += 1;
-            }
+        let outcome = review_safety_candidate(&repo, &candidate).unwrap_or_else(|error| {
+            eprintln!(
+                "queue safety conflict for issue {}: {error}",
+                candidate.number
+            );
+            ReviewSafetyOutcome::Conflicted
+        });
+        match outcome {
+            ReviewSafetyOutcome::Pass => totals.pass += 1,
+            ReviewSafetyOutcome::Ambiguous => totals.ambiguous += 1,
+            ReviewSafetyOutcome::Block => totals.block += 1,
+            ReviewSafetyOutcome::Stale => totals.stale += 1,
+            ReviewSafetyOutcome::Conflicted => totals.conflicted += 1,
+            ReviewSafetyOutcome::Skipped => totals.skipped += 1,
         }
     }
     println!("{}", review_safety_json(&totals));
     Ok(())
+}
+
+fn review_safety_candidates(
+    candidates: Vec<RemoteIssue>,
+    limit: usize,
+) -> Result<(ReviewSafetyTotals, Vec<RemoteIssue>), CommandFailure> {
+    let mut totals = ReviewSafetyTotals::default();
+    let mut unreviewed = Vec::new();
+    for candidate in candidates {
+        if reviewable_issue(&candidate)
+            && !confirm_issue_safety_for_queue(&issue_safety_input(&candidate))?
+        {
+            unreviewed.push(candidate);
+        } else {
+            totals.skipped += 1;
+        }
+    }
+    totals.skipped += unreviewed.len().saturating_sub(limit);
+    unreviewed.truncate(limit);
+    Ok((totals, unreviewed))
+}
+
+fn review_safety_candidate(
+    repo: &str,
+    candidate: &RemoteIssue,
+) -> Result<ReviewSafetyOutcome, CommandFailure> {
+    let current = read_issue(repo, candidate.number)?;
+    if !reviewable_issue(&current) {
+        return Ok(ReviewSafetyOutcome::Stale);
+    }
+    if confirm_issue_safety_for_queue(&issue_safety_input(&current))? {
+        return Ok(ReviewSafetyOutcome::Skipped);
+    }
+    if issue_has_label(&current, "safety:reviewed") {
+        return Ok(ReviewSafetyOutcome::Conflicted);
+    }
+    let verdict = review_issue_safety_for_queue(&issue_safety_input(&current))?;
+    match verdict.decision {
+        SafetyReviewDecision::Pass if apply_passing_safety_review(repo, &current)? => {
+            Ok(ReviewSafetyOutcome::Pass)
+        }
+        SafetyReviewDecision::Pass => Ok(ReviewSafetyOutcome::Conflicted),
+        SafetyReviewDecision::Ambiguous => {
+            apply_non_passing_safety_review(repo, &current, &verdict, "autospec:needs-human")?;
+            Ok(ReviewSafetyOutcome::Ambiguous)
+        }
+        SafetyReviewDecision::Block => {
+            apply_non_passing_safety_review(repo, &current, &verdict, "security:quarantined")?;
+            Ok(ReviewSafetyOutcome::Block)
+        }
+    }
 }
 
 fn parse_review_safety_options(args: &[String]) -> Result<ReviewSafetyOptions, CommandFailure> {
@@ -143,7 +188,7 @@ fn parse_review_safety_options(args: &[String]) -> Result<ReviewSafetyOptions, C
 fn reviewable_issue(issue: &RemoteIssue) -> bool {
     !issue.closed
         && issue_has_label(issue, "auto-implement")
-        && !issue_has_label(issue, "safety:reviewed")
+        && !issue_has_label(issue, "needs-classify")
         && !issue_has_label(issue, "autospec:needs-human")
         && !issue_has_label(issue, "security:quarantined")
 }
@@ -190,13 +235,13 @@ fn apply_passing_safety_review(repo: &str, issue: &RemoteIssue) -> Result<bool, 
     update_issue_body(repo, issue.number, &body)?;
     add_issue_label(repo, issue.number, "safety:reviewed")?;
     let reread = read_issue(repo, issue.number)?;
-    Ok(reviewable_pass(&reread))
+    reviewable_pass(&reread)
 }
 
-fn reviewable_pass(issue: &RemoteIssue) -> bool {
-    !issue.closed
+fn reviewable_pass(issue: &RemoteIssue) -> Result<bool, CommandFailure> {
+    Ok(!issue.closed
         && issue_has_label(issue, "auto-implement")
-        && evaluate_claim_safety(&issue_safety_input(issue)).allowed
+        && confirm_issue_safety_for_queue(&issue_safety_input(issue))?)
 }
 
 fn update_issue_body(repo: &str, number: u64, body: &str) -> Result<(), CommandFailure> {

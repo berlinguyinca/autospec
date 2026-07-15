@@ -151,6 +151,13 @@ fn refuses_unreviewed_or_quarantined_issues_before_claiming() {
         evaluate_claim_safety(&quarantined).reason,
         "security_quarantined"
     );
+
+    let mut needs_human = safe_input();
+    needs_human.labels.push("autospec:needs-human".to_string());
+    assert_eq!(
+        evaluate_claim_safety(&needs_human).reason,
+        "autospec_needs_human"
+    );
 }
 
 #[test]
