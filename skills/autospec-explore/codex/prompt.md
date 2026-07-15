@@ -584,8 +584,10 @@ repo-evidence-grounded specialists below).
 Roster discovery runs once at sandbox creation and is cached:
 
 1. **Deterministic signal scan** (the `explore-specialist-scan.sh` helper, no LLM):
-   repo names, dependency manifests, README/AGENTS.md docs, directory taxonomy,
-   code paths, and a small domain lexicon produce a ranked list of candidate
+   repo names (owner/name, remote slug, and top-level project directory),
+   dependency manifests, docs (`README*`, `AGENTS.md`, and runbooks), and code paths
+   (module, package, script, workflow, and data-directory names) are
+   scanned against a small domain lexicon to produce a ranked list of candidate
    domains with file:line evidence — never a bare guess.
 2. **LLM roster proposal** (one Tier-A dispatch): given the signals, emit
    `{domains[], suggested_specialists[]}`, each specialist carrying
@@ -594,15 +596,19 @@ Roster discovery runs once at sandbox creation and is cached:
    (schema `schemas/autospec-explore-specialists.schema.json`) and reused on
    every subsequent round (idempotent, like the sandbox state).
 
-### Metabolomics and lab-ops roster discovery
+### Metabolomics and lab-ops specialist roster
 
-For metabolomics and lab-ops repositories, roster discovery MUST scan only
-repo-local evidence from **repo names**, **dependency manifests**, **docs**, and
-**code paths**. It MUST NOT call MoNA, SIRIUS, BinBase, Slurm, or any external
-API during discovery; those names are offline signal tokens and specialist
-lenses only. When the signal scan finds matching evidence, it can propose these
-repo-evidence-grounded specialists (subject to `--num-specialists` and the
-existing per-round cap):
+When the deterministic scan sees metabolomics or laboratory-operations evidence
+(for example `mzML`/`mzXML`, `MS/MS`, `LC-MS`, `GC-MS`, `InChI`, `InChIKey`,
+`SMILES`, `PubChem`, `HMDB`, `BinBase`, `MoNA`, `SIRIUS`, `Slurm`, `LIMS`,
+assay/run queues, or instrument/batch directories), it MUST use only repo-local
+evidence from repo names, dependency manifests, docs, and code paths. It MUST
+NOT call MoNA, SIRIUS, BinBase, Slurm, or any external API during discovery;
+those names are offline signal tokens and specialist lenses only.
+
+The deterministic fallback roster uses these five specialist slugs when matching
+evidence is present (subject to `--num-specialists` and the existing per-round
+cap):
 
 - `ms-data-specialist` — MS data files and pipeline semantics (`mzML`, `mzXML`,
   raw/profile/centroid mode, MS1/MS2, LC-MS/GC-MS, peak picking, feature tables).
@@ -617,14 +623,19 @@ existing per-round cap):
   `sbatch`, Snakemake, Nextflow, Singularity/Apptainer, job arrays, scratch
   space, checkpointing).
 
-Every proposal emitted by a metabolomics/lab-ops specialist MUST satisfy the
-extended proposal contract before downstream aggregation: non-empty `evidence`,
-`severity`, `named_consumer` (the consumer field used by the ROI gate), and a
-refutable `gap_check` object whenever the proposal claims a missing file, test,
-doc, or behavior. These specialists are still just researchers: their proposals
-flow through the same mandatory `dedup → gap-confirm → adversarial verify → ROI
-→ pattern-synthesis → severity-first rank` gates as every other specialist
-source, and a domain persona cannot bypass verify, ROI, or synthesis.
+A Tier-A roster proposal may present more specific personas for the same five
+lenses, including `ms-data-curator`, `chemical-identity-reviewer`,
+`lc-binbase-workflow-analyst`, `mona-sirius-integration-reviewer`, and
+`hpc-lab-ops-reliability`; those aliases are documentation for operator-facing
+review personas, not a separate bypass path.
+
+Every proposal emitted by a `specialist:<slug>` researcher MUST include
+`evidence`, `severity`, `consumer` (serialized as `named_consumer` in the
+existing proposal JSON), and a refutable `gap_check`; specialist proposals that
+lack any of those gates are refuted before filing. These proposals still flow
+through the unchanged `dedup → gap-confirm → adversarial verify → ROI →
+pattern-synthesis → severity-first rank` spine, so the specialist roster cannot
+bypass verify, ROI, or synthesis gates.
 
 Operator selection is controlled by `--specialists-mode`:
 
