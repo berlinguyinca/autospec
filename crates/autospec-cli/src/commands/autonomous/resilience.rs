@@ -24,10 +24,21 @@ struct ResilienceStore {
     spend_root: PathBuf,
     host: String,
 }
-struct ResilienceAdmission {
+pub(super) struct ResilienceAdmission {
     pub failure_count: u8,
     pub capacity: CapacityDecision,
     pub lease: Option<ConductorLeaseDecision>,
+}
+
+pub(super) struct ResilienceStatus {
+    pub status: String,
+    pub heartbeat_at: Option<u64>,
+    pub last_cycle: String,
+}
+
+pub(super) enum LifecycleAdmissionError {
+    Reject(&'static str),
+    Diagnostic(String),
 }
 impl ResilienceStore {
     fn from_env(repo: &str) -> Result<Self, String> {
@@ -59,6 +70,37 @@ impl ResilienceStore {
                         return Err(ResilienceReject::ForeignState);
                     }
                     return Ok(Some((state, candidate_index > 0)));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(ResilienceReject::MalformedState),
+            }
+        }
+        Ok(None)
+    }
+
+    fn read_status(&self) -> Result<Option<ResilienceStatus>, ResilienceReject> {
+        for path in self.candidates(&self.state_root, "state.json") {
+            match fs::read_to_string(&path) {
+                Ok(raw) => {
+                    let state = records::StatusState::parse(&raw)
+                        .map_err(|_| ResilienceReject::MalformedState)?;
+                    if state
+                        .repo
+                        .as_deref()
+                        .is_some_and(|repo| repo != self.scope.as_str())
+                    {
+                        return Err(ResilienceReject::ForeignState);
+                    }
+                    let last_cycle = state
+                        .cycle
+                        .map(|cycle| cycle.to_string())
+                        .or_else(|| trailing_cycle(&state.status))
+                        .unwrap_or_default();
+                    return Ok(Some(ResilienceStatus {
+                        status: state.status,
+                        heartbeat_at: state.heartbeat_at,
+                        last_cycle,
+                    }));
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(_) => return Err(ResilienceReject::MalformedState),
@@ -165,6 +207,35 @@ impl ResilienceStore {
             root.join(hyphen).join(leaf),
         ]
     }
+}
+
+pub(super) fn admit_lifecycle(
+    repo: &str,
+    issue: Option<u64>,
+    budget_tokens: Option<&str>,
+    budget_issues: Option<&str>,
+) -> Result<ResilienceAdmission, LifecycleAdmissionError> {
+    let store = ResilienceStore::from_env(repo).map_err(LifecycleAdmissionError::Diagnostic)?;
+    let usage_cap = lifecycle_budget(
+        budget_tokens,
+        "AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS",
+        DEFAULT_LIFETIME_TOKENS,
+    )?;
+    let issue_cap = lifecycle_budget(
+        budget_issues,
+        "AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES",
+        DEFAULT_LIFETIME_ISSUES,
+    )?;
+    store
+        .admit(issue, usage_cap, issue_cap)
+        .map_err(|reject| LifecycleAdmissionError::Reject(reject.reason()))
+}
+
+pub(super) fn status(repo: &str) -> Result<Option<ResilienceStatus>, LifecycleAdmissionError> {
+    let store = ResilienceStore::from_env(repo).map_err(LifecycleAdmissionError::Diagnostic)?;
+    store
+        .read_status()
+        .map_err(|reject| LifecycleAdmissionError::Reject(reject.reason()))
 }
 
 pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -349,6 +420,28 @@ fn env_budget(name: &str, default: u64) -> Result<u64, String> {
         Err(env::VarError::NotPresent) => Ok(default),
         Err(env::VarError::NotUnicode(_)) => Err(format!("{name} must be a non-negative integer")),
     }
+}
+
+fn lifecycle_budget(
+    override_value: Option<&str>,
+    environment: &str,
+    default: u64,
+) -> Result<u64, LifecycleAdmissionError> {
+    match override_value.filter(|value| !value.is_empty()) {
+        Some(value) => value.parse().map_err(|_| {
+            LifecycleAdmissionError::Diagnostic(format!(
+                "{environment} must be a non-negative integer"
+            ))
+        }),
+        None => env_budget(environment, default).map_err(LifecycleAdmissionError::Diagnostic),
+    }
+}
+
+fn trailing_cycle(status: &str) -> Option<String> {
+    let suffix = status.rsplit(':').next()?;
+    let digits = suffix.strip_prefix("cycle-")?;
+    (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| suffix.to_string())
 }
 
 fn same_known_host(recorded: &str, current: &str) -> bool {

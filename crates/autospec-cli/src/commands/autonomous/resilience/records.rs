@@ -59,6 +59,25 @@ pub(super) struct ResilienceState {
     pub(super) lock_acquired_at: Option<u64>,
 }
 
+pub(super) struct StatusState {
+    pub(super) repo: Option<String>,
+    pub(super) status: String,
+    pub(super) heartbeat_at: Option<u64>,
+    pub(super) cycle: Option<u64>,
+}
+
+impl StatusState {
+    pub(super) fn parse(raw: &str) -> Result<Self, ()> {
+        let mut fields = parse_json_object(raw)?;
+        Ok(Self {
+            repo: string_field(&mut fields, "repo")?,
+            status: string_field(&mut fields, "status")?.ok_or(())?,
+            heartbeat_at: number_field(&mut fields, "heartbeat_at")?,
+            cycle: number_field(&mut fields, "cycle")?,
+        })
+    }
+}
+
 impl ResilienceState {
     pub(super) fn parse(raw: &str) -> Result<Self, ()> {
         let mut fields = parse_json_object(raw)?;

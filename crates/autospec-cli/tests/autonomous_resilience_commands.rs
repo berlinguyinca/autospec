@@ -428,6 +428,133 @@ fn resilience_decide_treats_legacy_released_lock_as_available() {
 }
 
 #[test]
+fn autonomous_start_rejects_unsafe_resilience_state_before_operator_writes() {
+    for (name, state, reason) in [
+        (
+            "foreign",
+            valid_state("other/repo", "running", 1),
+            "foreign_state",
+        ),
+        ("malformed", "{not-json}".to_string(), "malformed_state"),
+    ] {
+        let fixture = ResilienceFixture::new();
+        fixture.write_state("owner__repo", state);
+
+        let output = fixture.run_autonomous(&["start", "--repo", "owner/repo"]);
+
+        assert_eq!(output.status.code(), Some(3), "{name}");
+        assert_eq!(
+            stdout(&output),
+            format!("{{\"decision\":\"reject\",\"reason\":\"{reason}\"}}\n"),
+            "{name}"
+        );
+        assert!(
+            !fixture.operator_lifecycle_path().exists(),
+            "{name} must not create an operator lifecycle record"
+        );
+    }
+}
+
+#[test]
+fn autonomous_restart_rejects_unsafe_resilience_state_without_clearing_stop() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state("owner__repo", valid_state("other/repo", "running", 1));
+    let stop_flag = fixture.operator_stop_flag_path();
+    write_file(&stop_flag, "graceful\noperator@test\n");
+    let before = fs::read_to_string(&stop_flag).expect("read stop flag before restart");
+
+    let output = fixture.run_autonomous(&["restart", "--repo", "owner/repo"]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"reject\",\"reason\":\"foreign_state\"}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&stop_flag).expect("read stop flag after restart"),
+        before
+    );
+    assert!(!fixture.operator_lifecycle_path().exists());
+}
+
+#[test]
+fn autonomous_foreground_rejects_failure_cap_before_dispatch() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_failures("owner__repo", 42, 3);
+
+    let output =
+        fixture.run_autonomous(&["run-foreground", "--repo", "owner/repo", "--issue", "42"]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"reject\",\"reason\":\"failure_cap\"}\n"
+    );
+    assert!(!fixture.operator_lifecycle_path().exists());
+    assert!(!fixture.foreground_state_path().exists());
+}
+
+#[test]
+fn autonomous_foreground_parks_capacity_before_dispatch() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_spend("owner__repo", 10, 0);
+
+    let output = fixture.run_autonomous(&[
+        "run-foreground",
+        "--repo",
+        "owner/repo",
+        "--budget-tokens",
+        "10",
+        "--budget-issues",
+        "1",
+    ]);
+
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"park\",\"reason\":\"budget_hard_cap\"}\n"
+    );
+    assert!(!fixture.operator_lifecycle_path().exists());
+    assert!(!fixture.foreground_state_path().exists());
+}
+
+#[test]
+fn autonomous_start_parks_a_held_resilience_lease_without_operator_writes() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state(
+        "owner__repo",
+        state_with_lock("owner/repo", "running", 1, 1, Some("different-host")),
+    );
+
+    let output = fixture.run_autonomous(&["start", "--repo", "owner/repo"]);
+
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"park\",\"reason\":\"conductor_lease_held\"}\n"
+    );
+    assert!(!fixture.operator_lifecycle_path().exists());
+}
+
+#[test]
+fn autonomous_status_reads_legacy_cycle_suffix_without_writing() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state(
+        "owner_repo",
+        valid_state("owner/repo", "running:cycle-9", 1),
+    );
+
+    let output = fixture.run_autonomous(&["status", "--repo", "owner/repo", "--json"]);
+
+    assert!(output.status.success());
+    let body = stdout(&output);
+    assert!(body.contains("\"state_status\":\"running:cycle-9\""));
+    assert!(body.contains("\"last_cycle\":\"cycle-9\""));
+    assert!(!fixture.canonical_state_path().exists());
+    assert!(!fixture.operator_lifecycle_path().exists());
+}
+
+#[test]
 fn resilience_source_keeps_shell_resilience_authority_out_of_rust() {
     let source = fs::read_to_string(
         workspace_root().join("crates/autospec-cli/src/commands/autonomous/resilience.rs"),
@@ -450,6 +577,8 @@ struct ResilienceFixture {
     root: PathBuf,
     state_root: PathBuf,
     spend_root: PathBuf,
+    operator_root: PathBuf,
+    repo_dir: PathBuf,
 }
 
 impl ResilienceFixture {
@@ -461,11 +590,15 @@ impl ResilienceFixture {
             sequence
         ));
         fs::create_dir_all(&root).expect("create fixture root");
-        Self {
+        let fixture = Self {
             state_root: root.join("state"),
             spend_root: root.join("spend"),
+            operator_root: root.join("operator"),
+            repo_dir: root.join("repo"),
             root,
-        }
+        };
+        fixture.initialize_git_remote();
+        fixture
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -511,12 +644,60 @@ impl ResilienceFixture {
             .arg("autonomous")
             .env("AUTOSPEC_STATE_DIR", &self.state_root)
             .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", &self.spend_root)
+            .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator_root)
             .env("HOME", &self.root);
         command
     }
 
+    fn run_autonomous(&self, args: &[&str]) -> Output {
+        self.command()
+            .args(args)
+            .arg("--repo-dir")
+            .arg(&self.repo_dir)
+            .env("AUTOSPEC_HOST", "autospec-test-host")
+            .output()
+            .expect("run autonomous command")
+    }
+
+    fn initialize_git_remote(&self) {
+        let init = Command::new("git")
+            .args([
+                "init",
+                "-q",
+                self.repo_dir.to_str().expect("repo directory"),
+            ])
+            .output()
+            .expect("initialize fixture repository");
+        assert!(init.status.success());
+        let remote = Command::new("git")
+            .args([
+                "-C",
+                self.repo_dir.to_str().expect("repo directory"),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ])
+            .output()
+            .expect("set fixture remote");
+        assert!(remote.status.success());
+    }
+
     fn canonical_state_path(&self) -> PathBuf {
         self.state_path("owner__repo")
+    }
+
+    fn operator_lifecycle_path(&self) -> PathBuf {
+        self.operator_root.join("owner_repo/lifecycle.json")
+    }
+
+    fn operator_stop_flag_path(&self) -> PathBuf {
+        self.operator_root.join("owner_repo/stop.flag")
+    }
+
+    fn foreground_state_path(&self) -> PathBuf {
+        self.operator_root
+            .join("owner_repo/foreground-conductor-repository.json")
     }
 
     fn state_path(&self, slug: &str) -> PathBuf {
