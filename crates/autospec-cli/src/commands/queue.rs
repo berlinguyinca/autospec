@@ -3,8 +3,8 @@ use std::fs;
 use std::process::{Command, Output};
 
 use autospec_core::coordination::{
-    dependency_numbers, parse_dependency_issue_json, parse_remote_issue_list_json,
-    parse_remote_pull_requests_json, plan_ready_queue_with_trusted_actors, PullRequestEvidence,
+    dependency_numbers, parse_dependency_issue_json, parse_remote_issue_page_json,
+    parse_remote_pull_request_page_json, plan_ready_queue_with_trusted_actors, PullRequestEvidence,
     QueueIssueView, QueuePolicy, ReadyQueueInput, ReadyQueuePlan, RemoteIssue,
 };
 
@@ -171,7 +171,7 @@ fn infer_repo() -> Result<String, CommandFailure> {
 
 fn list_issues(repo: &str, label: &str) -> Result<Vec<RemoteIssue>, CommandFailure> {
     const PAGE_SIZE: usize = 100;
-    const ISSUE_FIELDS: &str = "[.[] | select(.pull_request == null) | {number, title:(.title // \"\"), body:(.body // \"\"), labels:[.labels[].name], author:{login:(.user.login // \"\")}}]";
+    const ISSUE_FIELDS: &str = "{raw_count:length, items:[.[] | select(.pull_request == null) | {number, title:(.title // \"\"), body:(.body // \"\"), labels:[.labels[].name], author:{login:(.user.login // \"\")}}]}";
 
     let mut issues = Vec::new();
     let mut page = 1usize;
@@ -186,14 +186,14 @@ fn list_issues(repo: &str, label: &str) -> Result<Vec<RemoteIssue>, CommandFailu
                 command_error(&output)
             )));
         }
-        let page_issues = parse_remote_issue_list_json(&String::from_utf8_lossy(&output.stdout))
+        let issue_page = parse_remote_issue_page_json(&String::from_utf8_lossy(&output.stdout))
             .map_err(|error| {
                 CommandFailure::diagnostic(format!(
                     "could not parse GitHub {label} issue page {page}: {error}"
                 ))
             })?;
-        let is_last_page = page_issues.len() < PAGE_SIZE;
-        issues.extend(page_issues);
+        let is_last_page = issue_page.raw_count < PAGE_SIZE;
+        issues.extend(issue_page.issues);
         if is_last_page {
             return Ok(issues);
         }
@@ -244,29 +244,65 @@ fn load_dependency(repo: &str, number: u64) -> Option<RemoteIssue> {
 }
 
 fn list_pull_requests(repo: &str) -> PullRequestEvidence {
-    let output = match run_gh(&[
-        "pr",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        "open",
-        "--limit",
-        "100",
-        "--json",
-        "number,state,body,statusCheckRollup",
-        "--jq",
-        "[.[] | {number, state:(.state // \"OPEN\"), body:(.body // \"\"), statusCheckRollup:[(.statusCheckRollup // [])[] | {name, status, conclusion}]}]",
-    ]) {
-        Ok(output) => output,
-        Err(error) => return PullRequestEvidence::Unavailable(error.message),
+    const PULL_REQUEST_QUERY: &str = "query($owner:String!,$name:String!,$endCursor:String){repository(owner:$owner,name:$name){pullRequests(first:100,after:$endCursor,states:OPEN){nodes{number state body statusCheckRollup{contexts(first:100){totalCount nodes{__typename ... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}} pageInfo{hasNextPage endCursor}}}}";
+    const PULL_REQUEST_FIELDS: &str = "{items:[.data.repository.pullRequests.nodes[] | {number, state:(.state // \"OPEN\"), body:(.body // \"\"), statusCheckRollup:([(.statusCheckRollup.contexts.nodes // [])[] | if .__typename == \"CheckRun\" then {name:(.name // \"\"), status:(.status // \"\"), conclusion} else {name:(.context // \"\"), status:(if (.state == \"PENDING\" or .state == \"EXPECTED\") then \"IN_PROGRESS\" else \"COMPLETED\" end), conclusion:(if (.state == \"PENDING\" or .state == \"EXPECTED\") then null else .state end)} end] + if ((.statusCheckRollup.contexts.totalCount // 0) > ((.statusCheckRollup.contexts.nodes // []) | length)) then [{name:\"incomplete check evidence\",status:\"IN_PROGRESS\",conclusion:null}] else [] end)}], page_info:{has_next_page:.data.repository.pullRequests.pageInfo.hasNextPage, end_cursor:.data.repository.pullRequests.pageInfo.endCursor}}";
+
+    let Some((owner, name)) = repo.split_once('/') else {
+        return PullRequestEvidence::Unavailable(format!(
+            "GitHub repository must use OWNER/REPO form: {repo}"
+        ));
     };
-    if !output.status.success() {
-        return PullRequestEvidence::Unavailable(command_error(&output));
+    if owner.is_empty() || name.is_empty() || name.contains('/') {
+        return PullRequestEvidence::Unavailable(format!(
+            "GitHub repository must use OWNER/REPO form: {repo}"
+        ));
     }
-    parse_remote_pull_requests_json(&String::from_utf8_lossy(&output.stdout))
-        .map(PullRequestEvidence::Available)
-        .unwrap_or_else(PullRequestEvidence::Unavailable)
+
+    let mut pull_requests = Vec::new();
+    let mut cursor = None;
+    loop {
+        let mut arguments = vec![
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("query={PULL_REQUEST_QUERY}"),
+            "-f".to_string(),
+            format!("owner={owner}"),
+            "-f".to_string(),
+            format!("name={name}"),
+            "--jq".to_string(),
+            PULL_REQUEST_FIELDS.to_string(),
+        ];
+        if let Some(cursor) = &cursor {
+            arguments.push("-f".to_string());
+            arguments.push(format!("endCursor={cursor}"));
+        }
+        let argument_refs = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = match run_gh(&argument_refs) {
+            Ok(output) => output,
+            Err(error) => return PullRequestEvidence::Unavailable(error.message),
+        };
+        if !output.status.success() {
+            return PullRequestEvidence::Unavailable(format!(
+                "gh pull request page failed: {}",
+                command_error(&output)
+            ));
+        }
+        let pull_request_page =
+            match parse_remote_pull_request_page_json(&String::from_utf8_lossy(&output.stdout)) {
+                Ok(page) => page,
+                Err(error) => {
+                    return PullRequestEvidence::Unavailable(format!(
+                        "could not parse GitHub pull request page: {error}"
+                    ));
+                }
+            };
+        pull_requests.extend(pull_request_page.pull_requests);
+        if !pull_request_page.has_next_page {
+            return PullRequestEvidence::Available(pull_requests);
+        }
+        cursor = pull_request_page.end_cursor;
+    }
 }
 
 fn run_gh(arguments: &[&str]) -> Result<Output, CommandFailure> {

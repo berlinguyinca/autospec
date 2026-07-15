@@ -11,6 +11,7 @@ struct QueueFixture {
     auto_page_two: PathBuf,
     active: PathBuf,
     pull_requests: PathBuf,
+    pull_requests_page_two: PathBuf,
     comments: PathBuf,
     calls: PathBuf,
 }
@@ -28,22 +29,40 @@ impl QueueFixture {
         let auto_page_two = root.join("auto-page-two.json");
         let active = root.join("active.json");
         let pull_requests = root.join("pull-requests.json");
+        let pull_requests_page_two = root.join("pull-requests-page-two.json");
         let comments = root.join("comments.json");
         let calls = root.join("gh.log");
         fs::write(&auto, "[]\n").expect("write empty candidates");
         fs::write(&auto_page_two, "[]\n").expect("write empty second candidate page");
         fs::write(&active, "[]\n").expect("write empty active issues");
-        fs::write(&pull_requests, "[]\n").expect("write empty pull requests");
+        fs::write(&pull_requests, pull_request_page(Vec::new(), false, None))
+            .expect("write empty pull requests");
+        fs::write(
+            &pull_requests_page_two,
+            pull_request_page(Vec::new(), false, None),
+        )
+        .expect("write empty second pull request page");
         fs::write(&comments, "[]\n").expect("write empty comments");
         fs::write(
             root.join("bin/gh"),
             r#"#!/usr/bin/env sh
 set -eu
 printf '%s\n' "$@" >> "$AUTOSPEC_QUEUE_CALLS"
+if [ "$1" = api ] && [ "$2" = graphql ]; then
+  cursor=""
+  for value in "$@"; do
+    case "$value" in endCursor=*) cursor="$value" ;; esac
+  done
+  case "$cursor" in
+    "") cat "$AUTOSPEC_QUEUE_PRS" ;;
+    *) cat "$AUTOSPEC_QUEUE_PRS_PAGE_TWO" ;;
+  esac
+  exit 0
+fi
 if [ "$1" = api ] && [ "$2" != repos/test/repo/issues/99/comments ]; then
   endpoint=""
   for value in "$@"; do
-    case "$value" in repos/*/issues?*) endpoint="$value" ;; esac
+    case "$value" in repos/*/issues?*|repos/*/pulls?*) endpoint="$value" ;; esac
   done
   case "$endpoint" in
     *labels=auto-implement*\&page=1) cat "$AUTOSPEC_QUEUE_AUTO" ;;
@@ -102,6 +121,7 @@ exit 1
             auto_page_two,
             active,
             pull_requests,
+            pull_requests_page_two,
             comments,
             calls,
         }
@@ -121,6 +141,7 @@ exit 1
             .env("AUTOSPEC_QUEUE_AUTO_PAGE_TWO", &self.auto_page_two)
             .env("AUTOSPEC_QUEUE_ACTIVE", &self.active)
             .env("AUTOSPEC_QUEUE_PRS", &self.pull_requests)
+            .env("AUTOSPEC_QUEUE_PRS_PAGE_TWO", &self.pull_requests_page_two)
             .env("AUTOSPEC_QUEUE_COMMENTS", &self.comments)
             .env("AUTOSPEC_QUEUE_CALLS", &self.calls)
             .env("AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS", "0")
@@ -149,6 +170,43 @@ fn issues_json(numbers: std::ops::RangeInclusive<u64>) -> String {
             .map(|number| passing_issue(number, "crates/autospec-cli/src/commands/queue.rs"))
             .collect::<Vec<_>>()
             .join(",")
+    )
+}
+
+fn issue_page(raw_count: usize, numbers: std::ops::RangeInclusive<u64>) -> String {
+    format!(
+        "{{\"raw_count\":{raw_count},\"items\":[{}]}}",
+        numbers
+            .map(|number| passing_issue(number, "crates/autospec-cli/src/commands/queue.rs"))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn pull_request(number: u64, body: &str) -> String {
+    pull_request_with_checks(number, body, "[]")
+}
+
+fn pull_request_with_checks(number: u64, body: &str, checks: &str) -> String {
+    format!(
+        "{{\"number\":{number},\"state\":\"OPEN\",\"body\":{},\"statusCheckRollup\":{checks}}}",
+        json_string(body),
+    )
+}
+
+fn pull_requests_json(numbers: std::ops::RangeInclusive<u64>) -> Vec<String> {
+    numbers
+        .map(|number| pull_request(number, "no linked issue"))
+        .collect::<Vec<_>>()
+}
+
+fn pull_request_page(items: Vec<String>, has_next_page: bool, end_cursor: Option<&str>) -> String {
+    format!(
+        "{{\"items\":[{}],\"page_info\":{{\"has_next_page\":{has_next_page},\"end_cursor\":{}}}}}",
+        items.join(","),
+        end_cursor
+            .map(json_string)
+            .unwrap_or_else(|| "null".to_string()),
     )
 }
 
@@ -205,6 +263,99 @@ fn queue_ready_follows_every_github_page() {
     let calls = fs::read_to_string(&fixture.calls).expect("read gh calls");
     assert!(calls
         .contains("repos/test/repo/issues?state=open&labels=auto-implement&per_page=100&page=2"));
+}
+
+#[test]
+fn queue_ready_keeps_paging_after_a_raw_page_contains_a_pull_request() {
+    let fixture = QueueFixture::new();
+    fs::write(&fixture.auto, issue_page(100, 1..=99)).expect("write filtered first page");
+    fs::write(&fixture.auto_page_two, issue_page(1, 201..=201))
+        .expect("write filtered second page");
+
+    let output = fixture
+        .command()
+        .args(["queue", "ready", "--repo", "test/repo"])
+        .output()
+        .expect("queue command starts");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"number\":201"));
+    let calls = fs::read_to_string(&fixture.calls).expect("read gh calls");
+    assert!(calls
+        .contains("repos/test/repo/issues?state=open&labels=auto-implement&per_page=100&page=2"));
+}
+
+#[test]
+fn queue_ready_scans_linked_pull_requests_beyond_the_first_page() {
+    let fixture = QueueFixture::new();
+    fs::write(
+        &fixture.auto,
+        format!("[{}]", passing_issue(201, "src/queue.rs")),
+    )
+    .expect("write candidate");
+    fs::write(
+        &fixture.pull_requests,
+        pull_request_page(pull_requests_json(1..=100), true, Some("cursor-100")),
+    )
+    .expect("write first pull request page");
+    fs::write(
+        &fixture.pull_requests_page_two,
+        pull_request_page(vec![pull_request(201, "Closes #201")], false, None),
+    )
+    .expect("write second pull request page");
+
+    let output = fixture
+        .command()
+        .args(["queue", "ready", "--repo", "test/repo"])
+        .output()
+        .expect("queue command starts");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let calls = fs::read_to_string(&fixture.calls).expect("read gh calls");
+    assert!(
+        stdout.contains("\"reason\":\"linked_pr_open\""),
+        "stdout={stdout}\ncalls={calls}"
+    );
+    assert!(calls.contains("api\ngraphql"));
+    assert!(calls.contains("endCursor=cursor-100"));
+}
+
+#[test]
+fn queue_ready_preserves_completed_linked_pull_request_checks() {
+    let fixture = QueueFixture::new();
+    fs::write(
+        &fixture.auto,
+        format!("[{}]", passing_issue(202, "src/queue.rs")),
+    )
+    .expect("write candidate");
+    fs::write(
+        &fixture.pull_requests,
+        pull_request_page(
+            vec![pull_request_with_checks(
+                202,
+                "Fixes #202",
+                r#"[{"name":"tests","status":"COMPLETED","conclusion":"SUCCESS"}]"#,
+            )],
+            false,
+            None,
+        ),
+    )
+    .expect("write completed pull request page");
+
+    let output = fixture
+        .command()
+        .args(["queue", "ready", "--repo", "test/repo"])
+        .output()
+        .expect("queue command starts");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"ready\":[{\"number\":202"),
+        "stdout={stdout}"
+    );
+    assert!(!stdout.contains("linked_pr_open"), "stdout={stdout}");
 }
 
 #[test]

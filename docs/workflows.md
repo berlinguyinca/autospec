@@ -38,9 +38,12 @@ release transitions. The next step redirects every live caller to this one comma
 deleting the former shell authorities.
 
 The Rust ready queue is `autospec queue ready`. It scans every GitHub page for open
-`auto-implement` work and active claims, deduplicates unstable page results, and reports typed
-gate totals. A `scan_scope` of `slice` means `AUTOSPEC_RUN_ONLY_ISSUES` constrained the selection;
-only a `repository` scan can supply whole-queue completion evidence.
+`auto-implement` work and active claims, retains raw issue-page cardinality before excluding
+pull-request records, cursor-paginates linked pull-request evidence, preserves check snapshots,
+deduplicates unstable page results, and reports typed gate totals. A malformed or incomplete
+later evidence page fails closed. A `scan_scope` of
+`slice` means `AUTOSPEC_RUN_ONLY_ISSUES` constrained the selection; only a `repository` scan can
+supply whole-queue completion evidence.
 
 ## Rust CLI
 

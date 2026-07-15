@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use autospec_core::coordination::{
-    plan_ready_queue, PullRequestEvidence, QueuePolicy, ReadyQueueInput, RemoteIssue,
-    RemotePullRequest, RemotePullRequestCheck,
+    parse_remote_pull_request_page_json, plan_ready_queue, PullRequestEvidence, QueuePolicy,
+    ReadyQueueInput, RemoteIssue, RemotePullRequest, RemotePullRequestCheck,
 };
 
 const SAFETY_REVIEW: &str = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n";
@@ -25,6 +25,26 @@ fn ready_input(candidates: Vec<RemoteIssue>) -> ReadyQueueInput {
         pull_requests: PullRequestEvidence::Available(Vec::new()),
         policy: QueuePolicy::new(3, 0),
     }
+}
+
+#[test]
+fn parses_cursor_paged_pull_request_evidence_and_rejects_a_missing_cursor() {
+    let page = parse_remote_pull_request_page_json(
+        r#"{"items":[{"number":900,"state":"OPEN","body":"Fixes #400","statusCheckRollup":[{"name":"tests","status":"COMPLETED","conclusion":"SUCCESS"}]}],"page_info":{"has_next_page":true,"end_cursor":"cursor-900"}}"#,
+    )
+    .expect("parse paged pull request evidence");
+
+    assert!(page.has_next_page);
+    assert_eq!(page.end_cursor.as_deref(), Some("cursor-900"));
+    assert_eq!(page.pull_requests[0].number, 900);
+    assert_eq!(
+        page.pull_requests[0].checks[0].conclusion.as_deref(),
+        Some("SUCCESS")
+    );
+    assert!(parse_remote_pull_request_page_json(
+        r#"{"items":[],"page_info":{"has_next_page":true,"end_cursor":null}}"#
+    )
+    .is_err());
 }
 
 #[test]

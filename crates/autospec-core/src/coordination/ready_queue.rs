@@ -66,10 +66,49 @@ impl RemoteIssue {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteIssuePage {
+    pub issues: Vec<RemoteIssue>,
+    pub raw_count: usize,
+}
+
 pub fn parse_remote_issue_list_json(input: &str) -> Result<Vec<RemoteIssue>, String> {
-    JsonParser::new(input)
+    let values = JsonParser::new(input)
         .parse()?
-        .into_array("GitHub queue issue list")?
+        .into_array("GitHub queue issue list")?;
+    parse_remote_issues(values)
+}
+
+pub fn parse_remote_issue_page_json(input: &str) -> Result<RemoteIssuePage, String> {
+    let value = JsonParser::new(input).parse()?;
+    match value {
+        JsonValue::Array(values) => {
+            let raw_count = values.len();
+            Ok(RemoteIssuePage {
+                issues: parse_remote_issues(values)?,
+                raw_count,
+            })
+        }
+        JsonValue::Object(mut object) => {
+            const CONTEXT: &str = "GitHub queue issue page";
+            reject_unknown_keys(&object, &["raw_count", "items"], CONTEXT)?;
+            let raw_count = take_required(&mut object, "raw_count", CONTEXT)?
+                .into_number(&format!("{CONTEXT}.raw_count"))?;
+            let raw_count = usize::try_from(raw_count)
+                .map_err(|_| format!("{CONTEXT}.raw_count exceeds this platform"))?;
+            let values = take_required(&mut object, "items", CONTEXT)?
+                .into_array(&format!("{CONTEXT}.items"))?;
+            Ok(RemoteIssuePage {
+                issues: parse_remote_issues(values)?,
+                raw_count,
+            })
+        }
+        _ => Err("GitHub queue issue page must be an array or object".to_string()),
+    }
+}
+
+fn parse_remote_issues(values: Vec<JsonValue>) -> Result<Vec<RemoteIssue>, String> {
+    values
         .into_iter()
         .enumerate()
         .map(|(index, value)| {
@@ -122,10 +161,69 @@ impl RemotePullRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemotePullRequestPage {
+    pub pull_requests: Vec<RemotePullRequest>,
+    pub has_next_page: bool,
+    pub end_cursor: Option<String>,
+}
+
 pub fn parse_remote_pull_requests_json(input: &str) -> Result<Vec<RemotePullRequest>, String> {
-    JsonParser::new(input)
+    let values = JsonParser::new(input)
         .parse()?
-        .into_array("GitHub queue pull request list")?
+        .into_array("GitHub queue pull request list")?;
+    parse_remote_pull_requests(values)
+}
+
+pub fn parse_remote_pull_request_page_json(input: &str) -> Result<RemotePullRequestPage, String> {
+    let value = JsonParser::new(input).parse()?;
+    match value {
+        JsonValue::Array(values) => Ok(RemotePullRequestPage {
+            pull_requests: parse_remote_pull_requests(values)?,
+            has_next_page: false,
+            end_cursor: None,
+        }),
+        JsonValue::Object(mut object) => {
+            const CONTEXT: &str = "GitHub queue pull request page";
+            reject_unknown_keys(&object, &["items", "page_info"], CONTEXT)?;
+            let values = take_required(&mut object, "items", CONTEXT)?
+                .into_array(&format!("{CONTEXT}.items"))?;
+            let mut page_info = take_required(&mut object, "page_info", CONTEXT)?
+                .into_object(&format!("{CONTEXT}.page_info"))?;
+            reject_unknown_keys(
+                &page_info,
+                &["has_next_page", "end_cursor"],
+                &format!("{CONTEXT}.page_info"),
+            )?;
+            let has_next_page = take_required(
+                &mut page_info,
+                "has_next_page",
+                &format!("{CONTEXT}.page_info"),
+            )?
+            .into_bool(&format!("{CONTEXT}.page_info.has_next_page"))?;
+            let end_cursor = take_required(
+                &mut page_info,
+                "end_cursor",
+                &format!("{CONTEXT}.page_info"),
+            )?
+            .into_optional_string(&format!("{CONTEXT}.page_info.end_cursor"))?;
+            if has_next_page && end_cursor.is_none() {
+                return Err(format!(
+                    "{CONTEXT}.page_info.end_cursor is required when another page exists"
+                ));
+            }
+            Ok(RemotePullRequestPage {
+                pull_requests: parse_remote_pull_requests(values)?,
+                has_next_page,
+                end_cursor,
+            })
+        }
+        _ => Err("GitHub queue pull request page must be an array or object".to_string()),
+    }
+}
+
+fn parse_remote_pull_requests(values: Vec<JsonValue>) -> Result<Vec<RemotePullRequest>, String> {
+    values
         .into_iter()
         .enumerate()
         .map(|(index, value)| {

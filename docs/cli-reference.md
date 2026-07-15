@@ -64,7 +64,10 @@ terminal merge evidence before state and label transitions. Legacy script entryp
 as compatibility surfaces until every caller is redirected to this command family.
 
 `autospec queue ready` follows every GitHub REST page for open `auto-implement` work and active
-claims. Its JSON includes a stable `gate_counts` object for discovered, candidate, reviewed,
+claims, counts raw issue-page records before filtering pull requests, and cursor-paginates linked
+pull-request evidence while preserving check snapshots. A malformed or incomplete later evidence
+page blocks selection rather than shortening the scan. Its JSON includes a stable `gate_counts`
+object for discovered, candidate, reviewed,
 blocked, dependency-blocked, linked-PR-blocked, path-conflicted, ready, claimed, and selected
 issues. `scan_scope` is `repository` for a full scan and `slice` when
 `AUTOSPEC_RUN_ONLY_ISSUES` constrains the result, so callers cannot mistake a completed slice for
