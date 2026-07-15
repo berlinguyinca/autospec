@@ -17,11 +17,29 @@ fn help_command_names(help: &str) -> Vec<&str> {
         .collect()
 }
 
+fn help_usage_invocation(help: &str) -> Option<&str> {
+    help.lines()
+        .skip_while(|line| line.trim() != "USAGE:")
+        .skip(1)
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+}
+
 #[test]
 fn help_command_table_parser_returns_command_column_only() {
     let help = "COMMANDS:\n    init           Initialize AutoSpec metadata\n    growth-report  Render metrics\n\nOPTIONS:\n    -h, --help       Print help\n";
 
     assert_eq!(help_command_names(help), ["init", "growth-report"]);
+}
+
+#[test]
+fn help_usage_parser_returns_first_usage_invocation() {
+    let help = "USAGE:\n    autospec lint issue [--json] <BODY_PATH>\n\nOPTIONS:\n    -h, --help       Print help\n";
+
+    assert_eq!(
+        help_usage_invocation(help),
+        Some("autospec lint issue [--json] <BODY_PATH>")
+    );
 }
 
 #[test]
@@ -121,8 +139,10 @@ fn lint_issue_help_exits_successfully_without_diagnostics() {
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    assert!(String::from_utf8_lossy(&output.stdout)
-        .contains("USAGE:\n    autospec lint issue [--json] <BODY_PATH>"));
+    assert_eq!(
+        help_usage_invocation(&String::from_utf8_lossy(&output.stdout)),
+        Some("autospec lint issue [--json] <BODY_PATH>")
+    );
 }
 
 #[test]
