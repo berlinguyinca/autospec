@@ -13,7 +13,10 @@ fn resilience_help_names_the_canonical_write_slug() {
         .args(["autonomous", "resilience", "--help"])
         .output()
         .expect("run help");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("owner__repo"));
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("resilience decide"));
+    assert!(help.contains("owner__repo"));
 }
 
 #[test]
