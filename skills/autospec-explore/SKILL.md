@@ -89,6 +89,20 @@ Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B"
 
 ## Architecture
 
+## Rust org-sweep repository routing
+
+Before filing any finding from an organization sweep, write the checked-in
+repository evidence JSON and run:
+
+```bash
+autospec explore repositories --input <path>
+```
+
+Use only `routed_findings` from that command to choose a filing target. File a
+non-duplicate finding against its `canonical_target`; do not file entries marked
+`duplicate`. Keep `deferred_findings` out of the filing queue until a family has
+an eligible target. Do not recreate the retired shell or Python org-sweep path.
+
 ```
 /autospec-explore "<prompt>"
         │

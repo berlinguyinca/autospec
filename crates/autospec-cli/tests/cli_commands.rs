@@ -36,6 +36,7 @@ fn cli_commands_help_lists_required_commands() {
             "init",
             "lint",
             "claim",
+            "explore",
             "queue",
             "doctor",
             "status",
@@ -50,6 +51,33 @@ fn cli_commands_help_lists_required_commands() {
             "benchmark",
             "growth-report",
         ]
+    );
+}
+
+#[test]
+fn explore_repositories_renders_stable_routing_json_from_a_local_input_file() {
+    let input = temp_dir("autospec-explore-repositories").join("repositories.json");
+    std::fs::write(
+        &input,
+        r#"{"repositories":[{"name":"metabolomics-us/go-modules","family":"go","archived":false,"revival_requested":false,"pushed_at":"2026-07-14T00:00:00Z","readme":"active umbrella","module_paths":["example.com/go-modules"],"packages":["admin"],"dependency_references":[]},{"name":"metabolomics-us/go-admin","family":"go","archived":true,"revival_requested":false,"pushed_at":"2025-01-01T00:00:00Z","readme":"","module_paths":[],"packages":[],"dependency_references":[]}],"findings":[{"repository":"metabolomics-us/go-admin","fingerprint":"lint-x","title":"Fix lint"}]}"#,
+    )
+    .expect("exploration input");
+
+    let output = autospec()
+        .args([
+            "explore",
+            "repositories",
+            "--input",
+            input.to_str().expect("UTF-8 input path"),
+        ])
+        .output()
+        .expect("autospec explore repositories runs");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"canonical_targets\":[{\"family\":\"go\",\"repository\":\"metabolomics-us/go-modules\",\"score\":118}],\"do_not_file_by_default\":[\"metabolomics-us/go-admin\"],\"routed_findings\":[{\"repository\":\"metabolomics-us/go-admin\",\"fingerprint\":\"lint-x\",\"title\":\"Fix lint\",\"canonical_target\":\"metabolomics-us/go-modules\",\"duplicate\":false}],\"deferred_findings\":[]}\n"
     );
 }
 

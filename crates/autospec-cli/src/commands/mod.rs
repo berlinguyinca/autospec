@@ -2,6 +2,7 @@ pub mod autonomous;
 pub mod benchmark;
 pub mod claim;
 pub mod doctor;
+pub mod explore;
 pub mod growth_report;
 pub mod init;
 pub mod lint;
@@ -47,6 +48,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("init", "Initialize AutoSpec metadata"),
     ("lint", "Lint issue and implementation policy inputs"),
     ("claim", "Manage GitHub-backed issue claim state"),
+    (
+        "explore",
+        "Route organization findings to canonical repositories",
+    ),
     ("queue", "Compute the safe GitHub issue queue"),
     ("doctor", "Check the Rust core workspace"),
     ("status", "Summarize local AutoSpec state"),
@@ -79,6 +84,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "init" => init::run(rest).map_err(CommandFailure::diagnostic),
             "lint" => lint::run(rest),
             "claim" => claim::run(rest),
+            "explore" => explore::run(rest),
             "queue" => queue::run(rest),
             "doctor" => doctor::run(rest).map_err(CommandFailure::diagnostic),
             "status" => status::run(rest).map_err(CommandFailure::diagnostic),
