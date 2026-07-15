@@ -188,6 +188,18 @@ fn flag_sentinel_docs_contract_requires_every_runtime_flag_to_be_documented() {
 }
 
 #[test]
+fn flag_sentinel_docs_requires_exact_flag_tokens_not_substrings() {
+    let failure =
+        StructuralValidator::validate_flag_sentinel_docs(&fixture("flag-sentinel-docs-substring"))
+            .expect_err("a different flag containing the name must not document the required flag");
+
+    assert_eq!(
+        failure,
+        "docs/FLAGS.md: missing sentinel flag(s): second.flag"
+    );
+}
+
+#[test]
 fn per_skill_model_and_monitor_contracts_validate_multi_harness_skills() {
     let root = fixture("skill-model-contracts");
 
