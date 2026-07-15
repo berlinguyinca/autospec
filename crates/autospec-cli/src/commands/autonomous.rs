@@ -369,41 +369,42 @@ fn parse_lifecycle_tier(value: &str) -> Result<LifecycleTier, String> {
 }
 
 fn emit_lifecycle_decision(decision: LifecycleDecision) -> Result<(), CommandFailure> {
-    let (body, exit_code) = match decision {
-        LifecycleDecision::Run { tier } => (
-            format!(
-                "{{\"decision\":\"run\",\"tier\":\"{}\"}}",
-                lifecycle_tier_name(tier)
-            ),
-            0,
-        ),
-        LifecycleDecision::Stop { mode } => (
-            format!(
-                "{{\"decision\":\"stop\",\"mode\":\"{}\"}}",
-                lifecycle_stop_name(mode)
-            ),
-            20,
-        ),
-        LifecycleDecision::Park { reason } => (
-            format!(
-                "{{\"decision\":\"park\",\"reason\":\"{}\"}}",
-                lifecycle_park_name(reason)
-            ),
-            20,
-        ),
-        LifecycleDecision::Reject(reason) => (
-            format!(
-                "{{\"decision\":\"reject\",\"reason\":\"{}\"}}",
-                lifecycle_reject_name(reason)
-            ),
-            3,
-        ),
-    };
+    let body = lifecycle_decision_json(&decision);
+    let exit_code = lifecycle_decision_exit_code(&decision);
     println!("{body}");
     if exit_code == 0 {
         Ok(())
     } else {
         Err(CommandFailure::status(String::new(), exit_code))
+    }
+}
+
+fn lifecycle_decision_json(decision: &LifecycleDecision) -> String {
+    match decision {
+        LifecycleDecision::Run { tier } => format!(
+            "{{\"decision\":\"run\",\"tier\":\"{}\"}}",
+            lifecycle_tier_name(*tier)
+        ),
+        LifecycleDecision::Stop { mode } => format!(
+            "{{\"decision\":\"stop\",\"mode\":\"{}\"}}",
+            lifecycle_stop_name(*mode)
+        ),
+        LifecycleDecision::Park { reason } => format!(
+            "{{\"decision\":\"park\",\"reason\":\"{}\"}}",
+            lifecycle_park_name(*reason)
+        ),
+        LifecycleDecision::Reject(reason) => format!(
+            "{{\"decision\":\"reject\",\"reason\":\"{}\"}}",
+            lifecycle_reject_name(*reason)
+        ),
+    }
+}
+
+fn lifecycle_decision_exit_code(decision: &LifecycleDecision) -> i32 {
+    match decision {
+        LifecycleDecision::Run { .. } => 0,
+        LifecycleDecision::Stop { .. } | LifecycleDecision::Park { .. } => 20,
+        LifecycleDecision::Reject(_) => 3,
     }
 }
 
@@ -467,14 +468,14 @@ fn start(options: Options) -> Result<(), String> {
                 json_escape(&options.repo),
                 json_escape(&options.repo_dir),
                 json_escape(&foreground.display()),
-                json_escape(&commands.monitor),
-                json_escape(&commands.supervisor)
+                json_escape(&commands.monitor.display()),
+                json_escape(&commands.supervisor.display())
             );
         } else {
             println!("autospec autonomous start: dry-run");
             println!("conductor: {}", foreground.display());
-            println!("monitor: {}", commands.monitor);
-            println!("supervisor: {}", commands.supervisor);
+            println!("monitor: {}", commands.monitor.display());
+            println!("supervisor: {}", commands.supervisor.display());
         }
         return Ok(());
     }
@@ -491,10 +492,11 @@ fn start(options: Options) -> Result<(), String> {
         .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
     fs::create_dir_all(&layout.log_dir)
         .map_err(|error| format!("cannot create {}: {error}", layout.log_dir.display()))?;
+    admit_lifecycle_start(&layout)?;
     prepare_start_scope(&layout, &options)?;
     write_launch_json(&layout, &options, &foreground, &commands)?;
 
-    let conductor = spawn_foreground_unit(
+    let conductor = spawn_unit(
         "conductor",
         &foreground,
         &options.repo_dir,
@@ -643,6 +645,12 @@ fn status(options: Options) -> Result<(), String> {
 fn stop(options: Options) -> Result<(), String> {
     let layout = RunLayout::new(&options)?;
     let stop_flag = write_stop_flag(&layout, options.stop_mode)?;
+    persist_lifecycle_decision(
+        &layout,
+        &LifecycleDecision::Stop {
+            mode: lifecycle_stop_mode(options.stop_mode),
+        },
+    )?;
     let mut stopped = 0;
     let units: &[&str] = match options.stop_mode {
         StopMode::Graceful => &["supervisor", "monitor"],
@@ -692,8 +700,9 @@ fn restart(options: Options) -> Result<(), String> {
         .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
     fs::create_dir_all(&layout.log_dir)
         .map_err(|error| format!("cannot create {}: {error}", layout.log_dir.display()))?;
+    admit_lifecycle_start(&layout)?;
     write_launch_json(&layout, &options, &foreground, &commands)?;
-    let conductor = spawn_foreground_unit(
+    let conductor = spawn_unit(
         "conductor",
         &foreground,
         &options.repo_dir,
@@ -1087,6 +1096,11 @@ fn run_foreground(options: Options) -> Result<(), String> {
     let layout = RunLayout::new(&options)?;
     let health = load_main_health(&layout, &options)?;
     persist_main_health(&layout, &health)?;
+    let lifecycle = decide_lifecycle(
+        &LifecycleInput::ready(layout.repo.clone())
+            .with_health(lifecycle_health(health.outcome.clone())),
+    );
+    persist_lifecycle_decision(&layout, &lifecycle)?;
     if health.outcome != MainlineHealthOutcome::Continue {
         return Err(format!(
             "main-health blocked foreground admission before ready issue dispatch: {}",
@@ -1117,6 +1131,14 @@ fn run_foreground(options: Options) -> Result<(), String> {
     let state = dispatch_foreground(&layout, &options.repo_dir, &state_path, state, selected)?;
     println!("{}", state.to_json());
     Ok(())
+}
+
+fn lifecycle_health(outcome: MainlineHealthOutcome) -> LifecycleHealth {
+    match outcome {
+        MainlineHealthOutcome::Continue => LifecycleHealth::Continue,
+        MainlineHealthOutcome::Wait => LifecycleHealth::Wait,
+        MainlineHealthOutcome::Halt => LifecycleHealth::Halt,
+    }
 }
 
 fn foreground_state_is_retained(state: &ConductorState) -> bool {
@@ -1623,6 +1645,45 @@ fn persist_foreground_state(path: &Path, state: &ConductorState) -> Result<(), S
         .map_err(|error| format!("cannot finalize {}: {error}", path.display()))
 }
 
+fn admit_lifecycle_start(layout: &RunLayout) -> Result<(), String> {
+    let decision = decide_lifecycle(&LifecycleInput::ready(layout.repo.clone()));
+    persist_lifecycle_decision(layout, &decision)?;
+    if matches!(decision, LifecycleDecision::Run { .. }) {
+        Ok(())
+    } else {
+        Err(format!(
+            "autonomous lifecycle rejected start: {}",
+            lifecycle_decision_json(&decision)
+        ))
+    }
+}
+
+fn persist_lifecycle_decision(
+    layout: &RunLayout,
+    decision: &LifecycleDecision,
+) -> Result<(), String> {
+    fs::create_dir_all(&layout.state_dir)
+        .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
+    let path = layout.state_dir.join("lifecycle.json");
+    let temporary = path.with_extension("json.tmp");
+    let body = format!(
+        "{{\"version\":1,\"repo\":\"{}\",\"result\":{}}}\n",
+        json_escape(&layout.repo),
+        lifecycle_decision_json(decision)
+    );
+    fs::write(&temporary, body)
+        .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
+    fs::rename(&temporary, &path)
+        .map_err(|error| format!("cannot finalize {}: {error}", path.display()))
+}
+
+fn lifecycle_stop_mode(mode: StopMode) -> LifecycleStopMode {
+    match mode {
+        StopMode::Graceful => LifecycleStopMode::Graceful,
+        StopMode::Immediate => LifecycleStopMode::Immediate,
+    }
+}
+
 fn foreground_scope() -> ConductorScope {
     if std::env::var("AUTOSPEC_RUN_ONLY_ISSUES").is_ok_and(|value| !value.trim().is_empty()) {
         ConductorScope::Slice
@@ -1637,8 +1698,8 @@ fn command_error(error: super::CommandFailure) -> String {
 
 #[derive(Debug, Clone)]
 struct LaunchCommands {
-    monitor: String,
-    supervisor: String,
+    monitor: ForegroundCommand,
+    supervisor: ForegroundCommand,
 }
 
 #[derive(Debug, Clone)]
@@ -1653,6 +1714,12 @@ impl ForegroundCommand {
             .chain(self.args.iter().cloned())
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    fn argv_json(&self) -> String {
+        let mut argv = vec![self.program.display().to_string()];
+        argv.extend(self.args.iter().cloned());
+        json_string_array(&argv)
     }
 }
 
@@ -1723,23 +1790,26 @@ impl RunLayout {
 }
 
 fn launch_commands(options: &Options) -> Result<LaunchCommands, String> {
-    let exe = std::env::current_exe()
-        .map_err(|error| format!("cannot resolve current executable: {error}"))?;
-    let exe = shell_word(&exe.display().to_string());
-    let repo = shell_word(&options.repo);
-    let repo_dir = shell_word(&options.repo_dir);
-    let interval = options.interval_sec;
-
-    let monitor = std::env::var("AUTOSPEC_AUTONOMOUS_MONITOR_CMD").unwrap_or_else(|_| {
-        format!("{exe} autonomous monitor --repo {repo} --repo-dir {repo_dir} --interval-sec {interval}")
-    });
-    let supervisor = std::env::var("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD").unwrap_or_else(|_| {
-        format!("{exe} autonomous supervise --repo {repo} --repo-dir {repo_dir} --interval-sec {interval}")
-    });
-
     Ok(LaunchCommands {
-        monitor,
-        supervisor,
+        monitor: companion_command(options, "monitor")?,
+        supervisor: companion_command(options, "supervise")?,
+    })
+}
+
+fn companion_command(options: &Options, subcommand: &str) -> Result<ForegroundCommand, String> {
+    Ok(ForegroundCommand {
+        program: std::env::current_exe()
+            .map_err(|error| format!("cannot resolve autonomous executable: {error}"))?,
+        args: vec![
+            "autonomous".to_string(),
+            subcommand.to_string(),
+            "--repo".to_string(),
+            options.repo.clone(),
+            "--repo-dir".to_string(),
+            options.repo_dir.clone(),
+            "--interval-sec".to_string(),
+            options.interval_sec.to_string(),
+        ],
     })
 }
 
@@ -1761,49 +1831,6 @@ fn foreground_command(options: &Options) -> Result<ForegroundCommand, String> {
 }
 
 fn spawn_unit(
-    name: &str,
-    command: &str,
-    repo_dir: &str,
-    state_dir: &Path,
-    log_dir: &Path,
-    log_override: Option<&str>,
-) -> Result<UnitRecord, String> {
-    let logpath = log_override
-        .map(PathBuf::from)
-        .unwrap_or_else(|| log_dir.join(format!("autospec-autonomous-{name}.log")));
-    if let Some(parent) = logpath.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
-    }
-    let log = File::create(&logpath)
-        .map_err(|error| format!("cannot create {}: {error}", logpath.display()))?;
-    let err_log = log
-        .try_clone()
-        .map_err(|error| format!("cannot clone {}: {error}", logpath.display()))?;
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(repo_dir)
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(err_log))
-        .spawn()
-        .map_err(|error| format!("cannot spawn {name} command `{command}`: {error}"))?;
-    let pid = child.id().to_string();
-    let pid_file = state_dir.join(format!("{name}.pid"));
-    let logpath_file = state_dir.join(format!("{name}.logpath"));
-    fs::write(&pid_file, format!("{pid}\n"))
-        .map_err(|error| format!("cannot write {}: {error}", pid_file.display()))?;
-    fs::write(&logpath_file, format!("{}\n", logpath.display()))
-        .map_err(|error| format!("cannot write {}: {error}", logpath_file.display()))?;
-    Ok(UnitRecord {
-        pid,
-        pid_file,
-        logpath,
-        logpath_file,
-    })
-}
-
-fn spawn_foreground_unit(
     name: &str,
     command: &ForegroundCommand,
     repo_dir: &str,
@@ -1934,14 +1961,14 @@ fn write_launch_json(
 ) -> Result<(), String> {
     let path = layout.state_dir.join("launch.json");
     let body = format!(
-        "{{\"argv\":{},\"repo\":\"{}\",\"repo_dir\":\"{}\",\"scope\":\"{}\",\"conductor_cmd\":\"{}\",\"monitor_cmd\":\"{}\",\"supervisor_cmd\":\"{}\",\"max_cycles\":\"{}\",\"budget_tokens\":\"{}\",\"budget_issues\":\"{}\",\"no_digest\":{},\"poll_interval_sec\":\"{}\"}}\n",
+        "{{\"argv\":{},\"repo\":\"{}\",\"repo_dir\":\"{}\",\"scope\":\"{}\",\"conductor_argv\":{},\"monitor_argv\":{},\"supervisor_argv\":{},\"max_cycles\":\"{}\",\"budget_tokens\":\"{}\",\"budget_issues\":\"{}\",\"no_digest\":{},\"poll_interval_sec\":\"{}\"}}\n",
         json_string_array(&options.raw_args),
         json_escape(&layout.repo),
         json_escape(&options.repo_dir),
         json_escape(&layout.scope),
-        json_escape(&foreground.display()),
-        json_escape(&commands.monitor),
-        json_escape(&commands.supervisor),
+        foreground.argv_json(),
+        commands.monitor.argv_json(),
+        commands.supervisor.argv_json(),
         json_escape(&options.max_cycles),
         json_escape(&options.budget_tokens),
         json_escape(&options.budget_issues),
@@ -2822,17 +2849,6 @@ fn write_stop_flag(layout: &RunLayout, mode: StopMode) -> Result<PathBuf, String
     )
     .map_err(|error| format!("cannot write {}: {error}", flag.display()))?;
     Ok(flag)
-}
-
-fn shell_word(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
 }
 
 fn json_escape(value: &str) -> String {

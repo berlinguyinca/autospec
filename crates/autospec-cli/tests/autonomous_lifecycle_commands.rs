@@ -1,4 +1,12 @@
 use std::process::Command;
+use std::{fs, path::Path};
+
+fn workspace_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root")
+}
 
 fn lifecycle(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_autospec"))
@@ -95,4 +103,22 @@ fn lifecycle_decide_rejects_malformed_and_repeated_flags() {
     ]);
     assert_eq!(repeated.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&repeated.stderr).contains("--ready-tier"));
+}
+
+#[test]
+fn autonomous_launch_source_has_no_shell_or_command_override_authority() {
+    let source =
+        fs::read_to_string(workspace_root().join("crates/autospec-cli/src/commands/autonomous.rs"))
+            .expect("read autonomous command source");
+
+    for forbidden in [
+        "Command::new(\"sh\")",
+        "AUTOSPEC_AUTONOMOUS_MONITOR_CMD",
+        "AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "autonomous launch retains legacy authority: {forbidden}"
+        );
+    }
 }

@@ -2165,6 +2165,11 @@ fn autonomous_start_writes_launch_provenance_and_list_reports_it() {
     assert!(std::fs::read_to_string(&launch)
         .expect("launch json")
         .contains("\"repo\":\"berlinguyinca/autospec\""));
+    let lifecycle = scope.join("lifecycle.json");
+    assert!(lifecycle.exists(), "missing {}", lifecycle.display());
+    assert!(std::fs::read_to_string(&lifecycle)
+        .expect("lifecycle json")
+        .contains("\"decision\":\"run\""));
 
     let output = autospec()
         .args(["autonomous", "list", "--json"])
