@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - The Rust control plane and `autospec runtime env` are the only runtime-manifest implementation authority.
-- Do not add, restore, or invoke `scripts/agent-env.sh`, Bats, Python, a shell YAML parser, or a second manifest model.
+- Do not add or invoke shell, Bats, Python, alternate-parser, or second-manifest-model authority.
 - Fixtures contain no credentials, hosts, connection strings, provisioning, migration, deletion, deployment, or shell execution.
 - Do not place `AGENT_FRONTEND_PORT`, `AGENT_BACKEND_PORT`, `AGENT_PUBLIC_URL`, `AUTOSPEC_PUBLIC_URL`, or `COMPOSE_PROJECT_NAME` in `modes.*.env`.
 
