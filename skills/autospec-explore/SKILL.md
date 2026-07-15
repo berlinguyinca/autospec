@@ -582,7 +582,8 @@ The universal + discovery researchers are domain-agnostic. On top of them the
 skill detects the repo's domain(s) and runs a dynamic roster of specialist
 personas appropriate to it (a trading repo gets `quant-strategy`,
 `market-risk`, `exchange-integration`; a healthcare app gets
-`hipaa-compliance`, `clinical-safety`).
+`hipaa-compliance`, `clinical-safety`; a metabolomics/lab-ops repo gets the
+repo-evidence-grounded specialists below).
 
 Roster discovery runs once at sandbox creation and is cached:
 
@@ -598,6 +599,47 @@ Roster discovery runs once at sandbox creation and is cached:
 3. The roster is written to `.autospec/explore-specialists.json`
    (schema `schemas/autospec-explore-specialists.schema.json`) and reused on
    every subsequent round (idempotent, like the sandbox state).
+
+### Metabolomics and lab-ops specialist roster
+
+When the deterministic scan sees metabolomics or laboratory-operations evidence
+(for example `mzML`/`mzXML`, `MS/MS`, `LC-MS`, `GC-MS`, `InChI`, `InChIKey`,
+`SMILES`, `PubChem`, `HMDB`, `BinBase`, `MoNA`, `SIRIUS`, `Slurm`, `LIMS`,
+assay/run queues, or instrument/batch directories), it MUST use only repo-local
+evidence from repo names, dependency manifests, docs, and code paths. It MUST
+NOT call MoNA, SIRIUS, BinBase, Slurm, or any external API during discovery;
+those names are offline signal tokens and specialist lenses only.
+
+The deterministic fallback roster uses these five specialist slugs when matching
+evidence is present (subject to `--num-specialists` and the existing per-round
+cap):
+
+- `ms-data-specialist` — MS data files and pipeline semantics (`mzML`, `mzXML`,
+  raw/profile/centroid mode, MS1/MS2, LC-MS/GC-MS, peak picking, feature tables).
+- `chemical-ids-specialist` — chemical identifiers and normalization (`InChI`,
+  `InChIKey`, `SMILES`, PubChem/HMDB/ChEBI/LIPID MAPS, formulas, adducts).
+- `lc-binbase-specialist` — LC/GC retention alignment and BinBase-style bins
+  (`BinBase`, retention time/index, chromatograms, RT alignment).
+- `mona-sirius-specialist` — offline spectral-library and annotation workflows
+  (`MoNA`, `MassBank`, `SIRIUS`, `CSI:FingerID`, `CANOPUS`, GNPS); discovery
+  cites local repo evidence only and never queries those services.
+- `hpc-reliability-specialist` — lab pipeline reliability on clusters (`Slurm`,
+  `sbatch`, Snakemake, Nextflow, Singularity/Apptainer, job arrays, scratch
+  space, checkpointing).
+
+A Tier-A roster proposal may present more specific personas for the same five
+lenses, including `ms-data-curator`, `chemical-identity-reviewer`,
+`lc-binbase-workflow-analyst`, `mona-sirius-integration-reviewer`, and
+`hpc-lab-ops-reliability`; those aliases are documentation for operator-facing
+review personas, not a separate bypass path.
+
+Every proposal emitted by a `specialist:<slug>` researcher MUST include
+`evidence`, `severity`, `consumer` (serialized as `named_consumer` in the
+existing proposal JSON), and a refutable `gap_check`; specialist proposals that
+lack any of those gates are refuted before filing. These proposals still flow
+through the unchanged `dedup → gap-confirm → adversarial verify → ROI →
+pattern-synthesis → severity-first rank` spine, so the specialist roster cannot
+bypass verify, ROI, or synthesis gates.
 
 Operator selection is controlled by `--specialists-mode`:
 
@@ -620,35 +662,6 @@ Guardrails: specialists are **researchers, not implementers** — they only
 propose, and every proposal flows through the same verify → ROI → synthesis →
 severity rank pipeline; a domain persona cannot bypass the skeptic stage. The
 total parallel researcher count is capped at `7 + 4 + ≤6 = ≤17` per round.
-
-### Metabolomics and lab-ops specialist roster
-
-When the deterministic scan sees metabolomics or laboratory-operations evidence
-(for example `mzML`/`mzXML`, `MS/MS`, `LC-MS`, `GC-MS`, `InChI`, `SMILES`,
-`PubChem`, `BinBase`, `MoNA`, `SIRIUS`, `Slurm`, `LIMS`, assay/run queues, or
-instrument/batch directories), the Tier-A roster proposal should include up to
-these five evidence-grounded specialists:
-
-- `ms-data-curator` — checks raw/centroid/profile MS data handling, mzML/mzXML
-  conversion seams, retention-time/mass-tolerance assumptions, and missing QC
-  around peak tables.
-- `chemical-identity-reviewer` — checks InChI/SMILES/CAS/PubChem/HMDB mappings,
-  adduct/salt/stereochemistry handling, and string-match identity shortcuts.
-- `lc-binbase-workflow-analyst` — checks LC-BinBase-style library matching,
-  retention-index/bin drift, batch correction, and export/import contracts.
-- `mona-sirius-integration-reviewer` — checks MoNA/SIRIUS/MS-FINDER-style
-  reference-library and fragmentation workflow assumptions without calling those
-  external services.
-- `hpc-lab-ops-reliability` — checks Slurm/HPC job orchestration, instrument
-  queue recovery, file drops, idempotent reprocessing, and lab-ops observability.
-
-Every proposal emitted by a `specialist:<slug>` researcher MUST include
-`evidence`, `severity`, `consumer` (serialized as `named_consumer` in the
-existing proposal JSON), and a refutable `gap_check`; specialist proposals that
-lack any of those gates are refuted before filing. These proposals still flow
-through the unchanged `dedup → gap-confirm → verify → ROI → pattern-synthesis →
-severity-first rank` spine, so the specialist roster cannot bypass verify, ROI,
-or synthesis gates.
 Discovery degrades gracefully: a generic repo with no detectable domain yields
 an empty roster and the loop runs exactly as today. Specialist personas are
 derived from repo evidence only — no external persona is injected from the
