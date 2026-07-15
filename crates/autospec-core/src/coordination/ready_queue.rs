@@ -323,6 +323,17 @@ pub fn plan_ready_queue_with_trusted_actors(
             continue;
         }
         let mut view = QueueIssueView::plain(issue);
+        if view.issue.has_label("needs-classify") {
+            view.reason = Some("needs_classify".to_string());
+            view.blocked_label = Some("needs-classify".to_string());
+            blocked.push(view);
+            continue;
+        }
+        if !view.issue.has_label("auto-implement") {
+            view.reason = Some("missing_auto_implement".to_string());
+            blocked.push(view);
+            continue;
+        }
         if view.issue.has_label("autospec:needs-human") {
             view.reason = Some("autospec_needs_human".to_string());
             view.blocked_label = Some("autospec:needs-human".to_string());
