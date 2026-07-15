@@ -47,7 +47,7 @@ Every result writes one compact JSON object to stdout. Exit codes are stable:
 | --- | --- | --- |
 | `accepted` | 0 | verified successful evidence was recorded, or the legacy deferred compatibility receipt was emitted |
 | `retryable` | 10 | owner-verified retryable result was recorded and the claim remains held |
-| `blocked` | 20 | owner-verified blocked result was recorded, or success evidence was unavailable and no claim changed |
+| `blocked` | 20 | owner-verified blocked result was recorded; success evidence was unavailable; or receipt creation/confirmation failed, leaving only unconfirmed/inert evidence and no claim change |
 | `malformed` | 2 | protocol validation failed before GitHub mutation |
 | `ownership_lost` | 3 | worker, branch, or claim state no longer matches; no claim changed |
 

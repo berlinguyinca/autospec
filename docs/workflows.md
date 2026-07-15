@@ -93,7 +93,10 @@ claim; it does not patch, release, or merge the claim or PR. The
 JSON exit contract is `0` for accepted or
 legacy deferred, `10` retryable, `20` blocked or evidence-unavailable, `2`
 malformed, and `3` ownership lost. This control-plane command does not launch an
-agent or invoke a shell, script, `omx`, or `/autospec-run`.
+agent or invoke a shell, script, `omx`, or `/autospec-run`. A blocked
+`result_recording_failed` means evidence creation or confirmation failed; any
+receipt is unconfirmed/inert, the claim is unchanged, and it is not a recorded
+executor-blocked outcome.
 
 ## Rust CLI
 

@@ -113,3 +113,6 @@ receipt and re-reads the active claim before accepting it; it never patches the 
 explicit outcome. That evidence is not release or merge authority. JSON exit codes are
 `0` for accepted success or the legacy deferred receipt, `10` for retryable, `20` for blocked or
 evidence-unavailable, `2` for malformed input, and `3` for ownership lost.
+`result_recording_failed` is also a blocked (`20`) reason: evidence creation or confirmation
+failed, so any receipt is unconfirmed/inert, the shared claim is unchanged, and callers must not
+treat it as a recorded executor-blocked outcome.
