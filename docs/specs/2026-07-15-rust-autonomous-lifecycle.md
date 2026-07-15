@@ -28,9 +28,9 @@ Malformed input, scope mismatch, stale lease, terminal claim, or ownership misma
 
 The module does not preserve shell command strings. `autonomous.rs` remains the side-effect boundary and starts native foreground operation directly. It must preserve process-group termination behavior and make `start`, `restart`, `stop`, `status`, and `run-foreground` consume the same lifecycle contract.
 
-During cutover the CLI reads both legacy repository layouts: the `owner__repo` resilience layout and the single-underscore operator layout. It writes one versioned canonical contract, so an existing heartbeat, lease, or stop sentinel is not lost. Lease acquisition must be atomic; the legacy read-then-overwrite lock race is not preserved.
+This first cutover writes schema-1 lifecycle decisions in the existing single-underscore operator layout and removes Rust command-string launch authority. The next resilience cutover must read both that layout and the legacy `owner__repo` state before deleting shell files; it must make lease acquisition atomic rather than preserving the shell read-then-overwrite race.
 
-The legacy 300-second and 10,800-second stale thresholds, per-issue failure cap of three, scoped stop semantics, and the current budget accounting unit remain explicit inputs. Post-merge rollback is a typed action, but is not claimed to be an automatically invoked legacy-loop behavior.
+The typed policy exposes the 300-second stale lease threshold, the 10,800-second abandoned-lease threshold, and the per-issue failure cap of three as explicit constants. Durable compatibility reads, per-issue failure persistence, budget-ledger migration, and automatic rollback invocation remain follow-on work. Post-merge rollback is a typed action, but is not claimed to be an automatically invoked legacy-loop behavior.
 
 ## Errors and exits
 

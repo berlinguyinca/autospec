@@ -1096,17 +1096,17 @@ fn run_foreground(options: Options) -> Result<(), String> {
     let layout = RunLayout::new(&options)?;
     let health = load_main_health(&layout, &options)?;
     persist_main_health(&layout, &health)?;
-    let lifecycle = decide_lifecycle(
-        &LifecycleInput::ready(layout.repo.clone())
-            .with_health(lifecycle_health(health.outcome.clone())),
-    );
-    persist_lifecycle_decision(&layout, &lifecycle)?;
     if health.outcome != MainlineHealthOutcome::Continue {
         return Err(format!(
             "main-health blocked foreground admission before ready issue dispatch: {}",
             health.diagnostic.as_str()
         ));
     }
+    let lifecycle = decide_lifecycle(
+        &LifecycleInput::ready(layout.repo.clone())
+            .with_health(lifecycle_health(health.outcome.clone())),
+    );
+    persist_lifecycle_decision(&layout, &lifecycle)?;
     let scope = foreground_scope();
     let state_path = foreground_state_path(&layout, scope);
     let state = load_foreground_state(&state_path, &layout, scope)?;
@@ -2085,7 +2085,13 @@ fn terminate_pid(pid: &str) -> bool {
         return false;
     }
     let _ = Command::new("kill").arg(pid).status();
-    !process_alive(pid)
+    for _ in 0..20 {
+        if !process_alive(pid) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    false
 }
 
 fn wait_for_scope_stopped(state_dir: &Path) {
