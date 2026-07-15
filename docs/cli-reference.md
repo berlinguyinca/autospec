@@ -23,6 +23,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec runtime env session [--repo <path>] [--mode <mode>] [--keep-alive] -- <command> [args...]` | no | runs one direct child with lifecycle cleanup, manifest auto-init/bypass controls, and Unix interruption cleanup |
 | `autospec claim state read\|upsert\|clear\|reconcile-linked-pr ...` | yes | manages the schema-1 GitHub run-state comment using lowest-comment-ID selection |
 | `autospec claim acquire\|release ...` | yes | applies the typed safety gate, heartbeat/label ordering, lease CAS, and terminal release transitions |
+| `autospec queue ready [--repo OWNER/REPO] [--batch-size N]` | yes | scans every Rust-owned GitHub issue page and returns typed eligibility, gate totals, and scan scope |
 | `autospec run --run <id> --spec <id>... [--json]` | yes | creates a local persisted queue only; it does not launch an agent or validation command |
 | `autospec run --ingest <agent-result.json> --run <id> --spec <id> --result-id <id> --outcome <passed\|failed\|blocked> [--failure-kind <kind>] [--retry-limit <n>] [--json]` | yes | validates and records an explicit local agent result; it does not launch an agent or validation command |
 | `autospec resume [--json]` | yes | reports the newest incomplete local queue and its next entry; it does not execute it |
@@ -61,3 +62,10 @@ the current issue safety review before it writes a startup heartbeat and moves l
 the lowest GitHub comment ID plus a server-side timestamp to decide the lease. `release` writes
 terminal merge evidence before state and label transitions. Legacy script entrypoints remain only
 as compatibility surfaces until every caller is redirected to this command family.
+
+`autospec queue ready` follows every GitHub REST page for open `auto-implement` work and active
+claims. Its JSON includes a stable `gate_counts` object for discovered, candidate, reviewed,
+blocked, dependency-blocked, linked-PR-blocked, path-conflicted, ready, claimed, and selected
+issues. `scan_scope` is `repository` for a full scan and `slice` when
+`AUTOSPEC_RUN_ONLY_ISSUES` constrains the result, so callers cannot mistake a completed slice for
+whole-queue completion.

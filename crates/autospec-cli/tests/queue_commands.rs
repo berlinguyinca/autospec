@@ -8,6 +8,7 @@ static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 struct QueueFixture {
     root: PathBuf,
     auto: PathBuf,
+    auto_page_two: PathBuf,
     active: PathBuf,
     pull_requests: PathBuf,
     comments: PathBuf,
@@ -24,11 +25,13 @@ impl QueueFixture {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("bin")).expect("create fixture bin");
         let auto = root.join("auto.json");
+        let auto_page_two = root.join("auto-page-two.json");
         let active = root.join("active.json");
         let pull_requests = root.join("pull-requests.json");
         let comments = root.join("comments.json");
         let calls = root.join("gh.log");
         fs::write(&auto, "[]\n").expect("write empty candidates");
+        fs::write(&auto_page_two, "[]\n").expect("write empty second candidate page");
         fs::write(&active, "[]\n").expect("write empty active issues");
         fs::write(&pull_requests, "[]\n").expect("write empty pull requests");
         fs::write(&comments, "[]\n").expect("write empty comments");
@@ -37,6 +40,19 @@ impl QueueFixture {
             r#"#!/usr/bin/env sh
 set -eu
 printf '%s\n' "$@" >> "$AUTOSPEC_QUEUE_CALLS"
+if [ "$1" = api ] && [ "$2" != repos/test/repo/issues/99/comments ]; then
+  endpoint=""
+  for value in "$@"; do
+    case "$value" in repos/*/issues?*) endpoint="$value" ;; esac
+  done
+  case "$endpoint" in
+    *labels=auto-implement*\&page=1) cat "$AUTOSPEC_QUEUE_AUTO" ;;
+    *labels=auto-implement*\&page=2) cat "$AUTOSPEC_QUEUE_AUTO_PAGE_TWO" ;;
+    *labels=in-progress-by-bot*\&page=1) cat "$AUTOSPEC_QUEUE_ACTIVE" ;;
+    *) printf '[]\n' ;;
+  esac
+  exit 0
+fi
 if [ "$1" = issue ] && [ "$2" = list ]; then
   label=""
   while [ "$#" -gt 0 ]; do
@@ -83,6 +99,7 @@ exit 1
         Self {
             root,
             auto,
+            auto_page_two,
             active,
             pull_requests,
             comments,
@@ -101,6 +118,7 @@ exit 1
             .current_dir(&self.root)
             .env("PATH", path)
             .env("AUTOSPEC_QUEUE_AUTO", &self.auto)
+            .env("AUTOSPEC_QUEUE_AUTO_PAGE_TWO", &self.auto_page_two)
             .env("AUTOSPEC_QUEUE_ACTIVE", &self.active)
             .env("AUTOSPEC_QUEUE_PRS", &self.pull_requests)
             .env("AUTOSPEC_QUEUE_COMMENTS", &self.comments)
@@ -121,6 +139,16 @@ impl Drop for QueueFixture {
 fn passing_issue(number: u64, path: &str) -> String {
     format!(
         r###"{{"number":{number},"title":"issue-{number}","body":"## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Implementation outline\n\n- edit `{path}`\n","labels":[{{"name":"auto-implement"}},{{"name":"safety:reviewed"}}],"author":{{"login":"agent"}}}}"###
+    )
+}
+
+fn issues_json(numbers: std::ops::RangeInclusive<u64>) -> String {
+    format!(
+        "[{}]",
+        numbers
+            .map(|number| passing_issue(number, "crates/autospec-cli/src/commands/queue.rs"))
+            .collect::<Vec<_>>()
+            .join(",")
     )
 }
 
@@ -151,13 +179,75 @@ fn queue_ready_emits_the_legacy_top_level_shape_in_number_order() {
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         format!(
-            r#"{{"ready":[{{"number":11,"title":"issue-11","body":{},"labels":[{{"name":"auto-implement"}},{{"name":"safety:reviewed"}}],"author":{{"login":"agent"}},"paths":["src/a.rs"],"non_blocking_refs":[],"serialization_reasons":[],"parallel_safe":true}},{{"number":12,"title":"issue-12","body":{},"labels":[{{"name":"auto-implement"}},{{"name":"safety:reviewed"}}],"author":{{"login":"agent"}},"paths":["src/b.rs"],"non_blocking_refs":[],"serialization_reasons":[],"parallel_safe":true}}],"blocked":[],"claimed":[],"conflicts":[],"worker_cap":{{"max_repo_workers":0,"active_count":0,"remaining":2,"reached":false}},"batch":[{{"number":11,"title":"issue-11","body":{},"labels":[{{"name":"auto-implement"}},{{"name":"safety:reviewed"}}],"author":{{"login":"agent"}},"paths":["src/a.rs"],"non_blocking_refs":[],"serialization_reasons":[],"parallel_safe":true}},{{"number":12,"title":"issue-12","body":{},"labels":[{{"name":"auto-implement"}},{{"name":"safety:reviewed"}}],"author":{{"login":"agent"}},"paths":["src/b.rs"],"non_blocking_refs":[],"serialization_reasons":[],"parallel_safe":true}}]}}"#,
+            r#"{{"ready":[{{"number":11,"title":"issue-11","body":{},"labels":[{{"name":"auto-implement"}},{{"name":"safety:reviewed"}}],"author":{{"login":"agent"}},"paths":["src/a.rs"],"non_blocking_refs":[],"serialization_reasons":[],"parallel_safe":true}},{{"number":12,"title":"issue-12","body":{},"labels":[{{"name":"auto-implement"}},{{"name":"safety:reviewed"}}],"author":{{"login":"agent"}},"paths":["src/b.rs"],"non_blocking_refs":[],"serialization_reasons":[],"parallel_safe":true}}],"blocked":[],"claimed":[],"conflicts":[],"gate_counts":{{"open":2,"candidate":2,"reviewed":2,"blocked":0,"dependency_blocked":0,"linked_pr_blocked":0,"path_conflicted":0,"ready":2,"claimed":0,"selected":2}},"scan_scope":"repository","worker_cap":{{"max_repo_workers":0,"active_count":0,"remaining":2,"reached":false}},"batch":[{{"number":11,"title":"issue-11","body":{},"labels":[{{"name":"auto-implement"}},{{"name":"safety:reviewed"}}],"author":{{"login":"agent"}},"paths":["src/a.rs"],"non_blocking_refs":[],"serialization_reasons":[],"parallel_safe":true}},{{"number":12,"title":"issue-12","body":{},"labels":[{{"name":"auto-implement"}},{{"name":"safety:reviewed"}}],"author":{{"login":"agent"}},"paths":["src/b.rs"],"non_blocking_refs":[],"serialization_reasons":[],"parallel_safe":true}}]}}"#,
             json_string("## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Implementation outline\n\n- edit `src/a.rs`\n"),
             json_string("## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Implementation outline\n\n- edit `src/b.rs`\n"),
             json_string("## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Implementation outline\n\n- edit `src/a.rs`\n"),
             json_string("## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Implementation outline\n\n- edit `src/b.rs`\n"),
         ) + "\n"
     );
+}
+
+#[test]
+fn queue_ready_follows_every_github_page() {
+    let fixture = QueueFixture::new();
+    fs::write(&fixture.auto, issues_json(1..=100)).expect("write first page");
+    fs::write(&fixture.auto_page_two, issues_json(101..=201)).expect("write second page");
+
+    let output = fixture
+        .command()
+        .args(["queue", "ready", "--repo", "test/repo"])
+        .output()
+        .expect("queue command starts");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"number\":201"));
+    let calls = fs::read_to_string(&fixture.calls).expect("read gh calls");
+    assert!(calls
+        .contains("repos/test/repo/issues?state=open&labels=auto-implement&per_page=100&page=2"));
+}
+
+#[test]
+fn queue_ready_fails_closed_when_a_later_github_page_is_malformed() {
+    let fixture = QueueFixture::new();
+    fs::write(&fixture.auto, issues_json(1..=100)).expect("write first page");
+    fs::write(&fixture.auto_page_two, "{not json\n").expect("write malformed second page");
+
+    let output = fixture
+        .command()
+        .args(["queue", "ready", "--repo", "test/repo"])
+        .output()
+        .expect("queue command starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("could not parse GitHub auto-implement issue page 2"));
+}
+
+#[test]
+fn queue_ready_marks_an_allowlist_as_slice_scoped() {
+    let fixture = QueueFixture::new();
+    fs::write(
+        &fixture.auto,
+        format!(
+            "[{},{}]",
+            passing_issue(1, "src/one.rs"),
+            passing_issue(2, "src/two.rs")
+        ),
+    )
+    .expect("write candidates");
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_RUN_ONLY_ISSUES", "2")
+        .args(["queue", "ready", "--repo", "test/repo"])
+        .output()
+        .expect("queue command starts");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"scan_scope\":\"slice\""));
+    assert!(stdout.contains("\"open\":2,\"candidate\":1"));
 }
 
 #[test]
