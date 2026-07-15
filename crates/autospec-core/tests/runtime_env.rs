@@ -135,6 +135,21 @@ fn manifest_uses_first_declared_mode_when_default_is_absent() {
 }
 
 #[test]
+fn manifest_rejects_default_mode_that_is_not_declared() {
+    let error = RuntimeManifest::parse(
+        "version: 1\ndefault_mode: missing\nmodes:\n  local:\n    command: sh -c 'true'\n",
+    )
+    .expect_err("missing declared default mode is rejected during parsing");
+
+    assert!(
+        error
+            .to_string()
+            .contains("default runtime mode is not declared"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn manifest_rejects_unknown_versions_and_duplicate_mode_names() {
     let version_error =
         RuntimeManifest::parse("version: 2\nmodes:\n  local:\n    command: sh -c 'true'\n")

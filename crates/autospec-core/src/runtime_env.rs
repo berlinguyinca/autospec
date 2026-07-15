@@ -1,8 +1,11 @@
 use std::collections::BTreeSet;
-use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+mod manifest;
+
+pub use manifest::{RuntimeEnvError, RuntimeManifest, RuntimeMode};
 
 const BROKER_OWNED_ENVIRONMENT_KEYS: [&str; 9] = [
     "AGENT_ENV_ID",
@@ -15,252 +18,6 @@ const BROKER_OWNED_ENVIRONMENT_KEYS: [&str; 9] = [
     "AUTOSPEC_PUBLIC_URL",
     "COMPOSE_PROJECT_NAME",
 ];
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeEnvError {
-    message: String,
-}
-
-impl RuntimeEnvError {
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl fmt::Display for RuntimeEnvError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for RuntimeEnvError {}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeMode {
-    name: String,
-    command: Option<String>,
-    down: Option<String>,
-    env: Vec<(String, String)>,
-}
-
-impl RuntimeMode {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn command(&self) -> Option<&str> {
-        self.command.as_deref()
-    }
-
-    pub fn down(&self) -> Option<&str> {
-        self.down.as_deref()
-    }
-
-    pub fn env(&self) -> &[(String, String)] {
-        &self.env
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeManifest {
-    path: PathBuf,
-    name: Option<String>,
-    default_mode: Option<String>,
-    modes: Vec<RuntimeMode>,
-}
-
-impl RuntimeManifest {
-    pub fn read_from_repo(repo: &Path) -> Result<Self, RuntimeEnvError> {
-        let autospec_path = repo.join(".autospec/runtime.yml");
-        let agent_path = repo.join(".agent-runtime.yml");
-        let path = if autospec_path.is_file() {
-            autospec_path
-        } else if agent_path.is_file() {
-            agent_path
-        } else {
-            return Err(RuntimeEnvError::new(format!(
-                "no runtime manifest found in {} (.autospec/runtime.yml or .agent-runtime.yml)",
-                repo.display()
-            )));
-        };
-        let source = std::fs::read_to_string(&path).map_err(|error| {
-            RuntimeEnvError::new(format!(
-                "could not read runtime manifest {}: {error}",
-                path.display()
-            ))
-        })?;
-        let mut manifest = Self::parse(&source)?;
-        manifest.path = path;
-        Ok(manifest)
-    }
-
-    pub fn parse(source: &str) -> Result<Self, RuntimeEnvError> {
-        let mut version = None;
-        let mut name = None;
-        let mut default_mode = None;
-        let mut modes = Vec::new();
-        let mut in_modes = false;
-        let mut current_mode = None;
-        let mut in_env = false;
-
-        for (index, raw_line) in source.lines().enumerate() {
-            let line_number = index + 1;
-            if raw_line.trim().is_empty() || raw_line.trim_start().starts_with('#') {
-                continue;
-            }
-            let indent = raw_line.len() - raw_line.trim_start_matches(' ').len();
-            let content = raw_line.trim();
-
-            if indent == 0 {
-                current_mode = None;
-                in_env = false;
-                in_modes = content == "modes:";
-                if in_modes {
-                    continue;
-                }
-                let Some((key, value)) = split_mapping(content) else {
-                    continue;
-                };
-                match key {
-                    "version" => version = Some(unquote(value)),
-                    "name" => name = Some(unquote(value)),
-                    "default_mode" => default_mode = Some(unquote(value)),
-                    _ => {}
-                }
-                continue;
-            }
-
-            if !in_modes {
-                continue;
-            }
-
-            if indent == 2 && content.ends_with(':') {
-                let mode_name = content.trim_end_matches(':').trim().to_string();
-                if mode_name.is_empty() {
-                    return Err(RuntimeEnvError::new(format!(
-                        "empty runtime mode at line {line_number}"
-                    )));
-                }
-                if modes
-                    .iter()
-                    .any(|mode: &RuntimeMode| mode.name == mode_name)
-                {
-                    return Err(RuntimeEnvError::new(format!(
-                        "duplicate runtime mode: {mode_name}"
-                    )));
-                }
-                modes.push(RuntimeMode {
-                    name: mode_name,
-                    command: None,
-                    down: None,
-                    env: Vec::new(),
-                });
-                current_mode = Some(modes.len() - 1);
-                in_env = false;
-                continue;
-            }
-
-            let Some(mode_index) = current_mode else {
-                continue;
-            };
-            if indent == 4 {
-                if content == "env:" {
-                    in_env = true;
-                    continue;
-                }
-                in_env = false;
-                let Some((key, value)) = split_mapping(content) else {
-                    continue;
-                };
-                match key {
-                    "command" => modes[mode_index].command = Some(unquote(value)),
-                    "down" => modes[mode_index].down = Some(unquote(value)),
-                    _ => {}
-                }
-                continue;
-            }
-
-            if indent == 6 && in_env {
-                let Some((key, value)) = split_mapping(content) else {
-                    continue;
-                };
-                let key = key.trim().to_string();
-                if !is_valid_environment_name(&key) {
-                    return Err(RuntimeEnvError::new(format!(
-                        "invalid environment name: {key}"
-                    )));
-                }
-                if BROKER_OWNED_ENVIRONMENT_KEYS.contains(&key.as_str()) {
-                    return Err(RuntimeEnvError::new(format!(
-                        "reserved runtime environment name: {key}"
-                    )));
-                }
-                if modes[mode_index]
-                    .env
-                    .iter()
-                    .any(|(existing, _)| existing == &key)
-                {
-                    return Err(RuntimeEnvError::new(format!(
-                        "duplicate environment name: {key}"
-                    )));
-                }
-                modes[mode_index].env.push((key, unquote(value)));
-            }
-        }
-
-        if let Some(version) = version {
-            if version != "1" {
-                return Err(RuntimeEnvError::new(format!(
-                    "unsupported runtime manifest version: {version}"
-                )));
-            }
-        }
-        if modes.is_empty() {
-            return Err(RuntimeEnvError::new("runtime manifest has no modes"));
-        }
-
-        Ok(Self {
-            path: PathBuf::new(),
-            name,
-            default_mode,
-            modes,
-        })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn selected_mode(&self, requested_mode: &str) -> Result<&RuntimeMode, RuntimeEnvError> {
-        let selected_name = if requested_mode == "auto" {
-            self.default_mode
-                .as_deref()
-                .or_else(|| self.modes.first().map(RuntimeMode::name))
-        } else {
-            Some(requested_mode)
-        };
-        let Some(selected_name) = selected_name else {
-            return Err(RuntimeEnvError::new(
-                "runtime manifest has no selectable mode",
-            ));
-        };
-        self.modes
-            .iter()
-            .find(|mode| mode.name == selected_name)
-            .ok_or_else(|| RuntimeEnvError::new(format!("unknown runtime mode: {selected_name}")))
-    }
-
-    fn name_or_repo_basename(&self, repo: &Path) -> String {
-        self.name.clone().unwrap_or_else(|| {
-            repo.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("agent_env")
-                .to_string()
-        })
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeContext {
@@ -293,7 +50,7 @@ impl RuntimeContext {
         let mode = manifest.selected_mode(requested_mode)?.clone();
         let slug = slugify(&manifest.name_or_repo_basename(&repo));
         let name = if slug.is_empty() { "agent_env" } else { &slug };
-        let checksum = cksum(&format!("{}:{}", repo.display(), mode.name))?;
+        let checksum = cksum(&format!("{}:{}", repo.display(), mode.name()))?;
         let environment_id = format!("{name}-{checksum}");
         let environment_dir = state_root.join(&environment_id);
         let env_file = environment_dir.join("env");
@@ -338,7 +95,7 @@ impl RuntimeState {
             ("AUTOSPEC_PUBLIC_URL".to_string(), public_url),
             ("COMPOSE_PROJECT_NAME".to_string(), compose_project_name),
         ];
-        values.extend(context.mode.env.iter().cloned());
+        values.extend(context.mode.env().iter().cloned());
         Self { values }
     }
 
@@ -409,23 +166,6 @@ impl RuntimeState {
         };
         *existing_value = value.into();
         Ok(())
-    }
-}
-
-fn split_mapping(content: &str) -> Option<(&str, &str)> {
-    let (key, value) = content.split_once(':')?;
-    Some((key.trim(), value.trim()))
-}
-
-fn unquote(value: &str) -> String {
-    let value = value.trim();
-    if value.len() >= 2
-        && ((value.starts_with('\"') && value.ends_with('\"'))
-            || (value.starts_with('\'') && value.ends_with('\'')))
-    {
-        value[1..value.len() - 1].to_string()
-    } else {
-        value.to_string()
     }
 }
 
