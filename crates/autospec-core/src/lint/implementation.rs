@@ -498,32 +498,18 @@ fn scan_added_complexity(file: &DiffFile, collector: &mut FindingCollector) {
         if let Some(marker) = heredoc_marker(&line.content) {
             heredoc = Some(marker);
         }
+        let mut shell_loc_candidates = [None, None];
         if let Some(name) = shell_function_name(&line.content) {
-            if let Some((previous, start, loc)) =
-                shell_function.take().filter(|(_, _, loc)| *loc > 50)
-            {
-                collector.emit(
-                    ImplementationLintRule::Complexity,
-                    &file.path,
-                    Some(start),
-                    format!("function '{previous}' is {loc} LOC (threshold: 50)"),
-                );
-            }
+            shell_loc_candidates[0] = shell_function.take();
             shell_function = Some((name, number.unwrap_or(0), 0));
         } else if let Some((name, start, loc)) = &mut shell_function {
             *loc += 1;
             if line.content.trim() == "}" {
-                if *loc > 50 {
-                    collector.emit(
-                        ImplementationLintRule::Complexity,
-                        &file.path,
-                        Some(*start),
-                        format!("function '{name}' is {loc} LOC (threshold: 50)"),
-                    );
-                }
+                shell_loc_candidates[1] = Some((name.clone(), *start, *loc));
                 shell_function = None;
             }
         }
+        emit_shell_function_loc_findings(file, collector, shell_loc_candidates);
         let leading = line.content.len() - line.content.trim_start_matches(' ').len();
         if !file.path.ends_with(".py") && leading / 4 > 4 {
             collector.emit(
@@ -534,7 +520,19 @@ fn scan_added_complexity(file: &DiffFile, collector: &mut FindingCollector) {
             );
         }
     }
-    if let Some((name, start, loc)) = shell_function.filter(|(_, _, loc)| *loc > 50) {
+    emit_shell_function_loc_findings(file, collector, [shell_function, None]);
+}
+
+fn emit_shell_function_loc_findings(
+    file: &DiffFile,
+    collector: &mut FindingCollector,
+    candidates: [Option<(String, usize, usize)>; 2],
+) {
+    for (name, start, loc) in candidates
+        .into_iter()
+        .flatten()
+        .filter(|(_, _, loc)| *loc > 50)
+    {
         collector.emit(
             ImplementationLintRule::Complexity,
             &file.path,
