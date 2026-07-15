@@ -146,29 +146,8 @@ fn parse_review_safety_options(args: &[String]) -> Result<ReviewSafetyOptions, C
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "--repo" => {
-                let value = next_value(args, &mut index, "--repo")?;
-                if options.repo.replace(value).is_some() {
-                    return Err(CommandFailure::diagnostic(
-                        "--repo accepts exactly one value",
-                    ));
-                }
-            }
-            "--limit" => {
-                let value = next_value(args, &mut index, "--limit")?;
-                let limit = value
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|value| *value > 0)
-                    .ok_or_else(|| {
-                        CommandFailure::diagnostic("--limit must be a positive integer")
-                    })?;
-                if options.limit.replace(limit).is_some() {
-                    return Err(CommandFailure::diagnostic(
-                        "--limit accepts exactly one value",
-                    ));
-                }
-            }
+            "--repo" => set_review_repo(&mut options, args, &mut index)?,
+            "--limit" => set_review_limit(&mut options, args, &mut index)?,
             "--help" | "-h" => {
                 return Err(CommandFailure::diagnostic(
                     "--help cannot be combined with queue review-safety options",
@@ -183,6 +162,41 @@ fn parse_review_safety_options(args: &[String]) -> Result<ReviewSafetyOptions, C
         index += 1;
     }
     Ok(options)
+}
+
+fn set_review_repo(
+    options: &mut ReviewSafetyOptions,
+    args: &[String],
+    index: &mut usize,
+) -> Result<(), CommandFailure> {
+    let value = next_value(args, index, "--repo")?;
+    if options.repo.is_some() {
+        return Err(CommandFailure::diagnostic(
+            "--repo accepts exactly one value",
+        ));
+    }
+    options.repo = Some(value);
+    Ok(())
+}
+
+fn set_review_limit(
+    options: &mut ReviewSafetyOptions,
+    args: &[String],
+    index: &mut usize,
+) -> Result<(), CommandFailure> {
+    let value = next_value(args, index, "--limit")?;
+    let limit = value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| CommandFailure::diagnostic("--limit must be a positive integer"))?;
+    if options.limit.is_some() {
+        return Err(CommandFailure::diagnostic(
+            "--limit accepts exactly one value",
+        ));
+    }
+    options.limit = Some(limit);
+    Ok(())
 }
 
 fn reviewable_issue(issue: &RemoteIssue) -> bool {
