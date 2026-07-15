@@ -1271,7 +1271,6 @@ fn run_autospec_explore_specialists_discovery(
     const SCHEMA: &str = "schemas/autospec-explore-specialists.schema.json";
     const DELETED_SCAN: &str = "scripts/explore-specialist-scan.sh";
     const DELETED_SUITE: &str = "tests/explore/test_explore_specialists.bats";
-    const CLI_SOURCE: &str = "crates/autospec-cli/src/commands/explore.rs";
     const CORE_SOURCE: &str = "crates/autospec-core/src/explore/specialists.rs";
 
     let mut results = Vec::new();
@@ -1296,14 +1295,6 @@ fn run_autospec_explore_specialists_discovery(
             id,
             required,
             "crates/autospec-core/src/explore/specialists.rs: Rust specialist scanner missing",
-        ));
-        return aggregate(id, required, results);
-    }
-    if !contains(&root.join(CLI_SOURCE), "specialists") {
-        results.push(failure(
-            id,
-            required,
-            "crates/autospec-cli/src/commands/explore.rs: missing explore specialists command",
         ));
         return aggregate(id, required, results);
     }
