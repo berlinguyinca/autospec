@@ -12,13 +12,21 @@ pub(crate) fn parse_roster_json(input: &str) -> Result<SpecialistRoster, String>
         .into_object("specialist roster")?;
     reject_unknown(
         &root,
-        &["schema_version", "domains", "suggested_specialists"],
+        &[
+            "schema_version",
+            "generated_at",
+            "domains",
+            "suggested_specialists",
+        ],
         "specialist roster",
     )?;
     let schema_version = take_required(&mut root, "schema_version", "specialist roster")?
         .into_number("specialist roster.schema_version")?;
     if schema_version != 1 {
         return Err("specialist roster.schema_version must equal 1".to_string());
+    }
+    if let Some(generated_at) = root.remove("generated_at") {
+        generated_at.into_string("specialist roster.generated_at")?;
     }
     Ok(SpecialistRoster {
         schema_version: 1,
@@ -41,12 +49,13 @@ pub(crate) fn parse_proposal_specialists(input: &str) -> Option<Vec<SuggestedSpe
             .ok()?,
         _ => return None,
     };
+    let proposal_was_empty = candidates.is_empty();
     let specialists = candidates
         .into_iter()
-        .filter_map(|value| parse_specialist(value, "proposal specialist").ok())
+        .filter_map(|value| parse_specialist(value, "proposal specialist", false).ok())
         .filter_map(normalize_specialist)
         .collect::<Vec<_>>();
-    (!specialists.is_empty()).then_some(specialists)
+    (proposal_was_empty || !specialists.is_empty()).then_some(specialists)
 }
 
 impl SpecialistRoster {
@@ -90,9 +99,15 @@ fn parse_domain(value: JsonValue, context: &str) -> Result<DetectedDomain, Strin
     reject_unknown(&object, &["name", "score", "evidence"], context)?;
     let score =
         take_required(&mut object, "score", context)?.into_number(&format!("{context}.score"))?;
+    if score == 0 {
+        return Err(format!("{context}.score must be at least 1"));
+    }
+    let name = non_empty(
+        take_required(&mut object, "name", context)?.into_string(&format!("{context}.name"))?,
+        &format!("{context}.name"),
+    )?;
     Ok(DetectedDomain {
-        name: take_required(&mut object, "name", context)?
-            .into_string(&format!("{context}.name"))?,
+        name,
         score: usize::try_from(score).map_err(|_| format!("{context}.score exceeds usize"))?,
         evidence: parse_evidence(take_required(&mut object, "evidence", context)?, context)?,
     })
@@ -104,6 +119,9 @@ fn parse_evidence(value: JsonValue, context: &str) -> Result<Vec<FileLineEvidenc
     for (index, value) in values.into_iter().enumerate() {
         let item_context = format!("{context}.evidence[{index}]");
         evidence.push(parse_evidence_item(value, &item_context)?);
+    }
+    if evidence.is_empty() {
+        return Err(format!("{context}.evidence must not be empty"));
     }
     Ok(evidence)
 }
@@ -117,10 +135,13 @@ fn parse_evidence_item(value: JsonValue, context: &str) -> Result<FileLineEviden
         take_required(&mut object, "line", context)?.into_number(&format!("{context}.line"))?;
     let matched =
         take_required(&mut object, "match", context)?.into_string(&format!("{context}.match"))?;
+    if line == 0 {
+        return Err(format!("{context}.line must be at least 1"));
+    }
     Ok(FileLineEvidence {
-        file,
+        file: non_empty(file, &format!("{context}.file"))?,
         line: usize::try_from(line).map_err(|_| format!("{context}.line exceeds usize"))?,
-        r#match: matched,
+        r#match: non_empty(matched, &format!("{context}.match"))?,
     })
 }
 
@@ -133,29 +154,58 @@ fn parse_specialists(value: JsonValue) -> Result<Vec<SuggestedSpecialist>, Strin
             parse_specialist(
                 value,
                 &format!("specialist roster.suggested_specialists[{index}]"),
+                true,
             )
         })
         .collect()
 }
 
-fn parse_specialist(value: JsonValue, context: &str) -> Result<SuggestedSpecialist, String> {
+fn parse_specialist(
+    value: JsonValue,
+    context: &str,
+    require_canonical_slug: bool,
+) -> Result<SuggestedSpecialist, String> {
     let mut object = value.into_object(context)?;
     reject_unknown(
         &object,
         &["slug", "persona", "lens", "why", "evidence"],
         context,
     )?;
+    let slug =
+        take_required(&mut object, "slug", context)?.into_string(&format!("{context}.slug"))?;
+    if require_canonical_slug && normalized_slug(&slug).as_deref() != Some(slug.as_str()) {
+        return Err(format!(
+            "{context}.slug must be a lowercase kebab-case slug"
+        ));
+    }
     Ok(SuggestedSpecialist {
-        slug: take_required(&mut object, "slug", context)?
-            .into_string(&format!("{context}.slug"))?,
-        persona: take_required(&mut object, "persona", context)?
-            .into_string(&format!("{context}.persona"))?,
-        lens: take_required(&mut object, "lens", context)?
-            .into_string(&format!("{context}.lens"))?,
-        why: take_required(&mut object, "why", context)?.into_string(&format!("{context}.why"))?,
-        evidence: take_required(&mut object, "evidence", context)?
-            .into_string(&format!("{context}.evidence"))?,
+        slug,
+        persona: non_empty(
+            take_required(&mut object, "persona", context)?
+                .into_string(&format!("{context}.persona"))?,
+            &format!("{context}.persona"),
+        )?,
+        lens: non_empty(
+            take_required(&mut object, "lens", context)?.into_string(&format!("{context}.lens"))?,
+            &format!("{context}.lens"),
+        )?,
+        why: non_empty(
+            take_required(&mut object, "why", context)?.into_string(&format!("{context}.why"))?,
+            &format!("{context}.why"),
+        )?,
+        evidence: non_empty(
+            take_required(&mut object, "evidence", context)?
+                .into_string(&format!("{context}.evidence"))?,
+            &format!("{context}.evidence"),
+        )?,
     })
+}
+
+fn non_empty(value: String, context: &str) -> Result<String, String> {
+    if value.is_empty() {
+        return Err(format!("{context} must not be empty"));
+    }
+    Ok(value)
 }
 
 fn normalize_specialist(mut specialist: SuggestedSpecialist) -> Option<SuggestedSpecialist> {
@@ -271,4 +321,60 @@ fn json_string(value: &str) -> String {
     }
     escaped.push('"');
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_roster_json;
+
+    const VALID_ROSTER: &str = r#"{
+        "schema_version": 1,
+        "domains": [{
+            "name": "trading",
+            "score": 1,
+            "evidence": [{"file": "requirements.txt", "line": 1, "match": "ccxt"}]
+        }],
+        "suggested_specialists": [{
+            "slug": "trading-specialist",
+            "persona": "Trading specialist",
+            "lens": "risk",
+            "why": "dependency",
+            "evidence": "requirements.txt:1"
+        }]
+    }"#;
+
+    #[test]
+    fn rejects_values_that_violate_roster_schema_constraints() {
+        let invalid_rosters = [
+            VALID_ROSTER.replace("\"name\": \"trading\"", "\"name\": \"\""),
+            VALID_ROSTER.replace("\"score\": 1", "\"score\": 0"),
+            VALID_ROSTER.replace(
+                "[{\"file\": \"requirements.txt\", \"line\": 1, \"match\": \"ccxt\"}]",
+                "[]",
+            ),
+            VALID_ROSTER.replace("\"file\": \"requirements.txt\"", "\"file\": \"\""),
+            VALID_ROSTER.replace("\"line\": 1", "\"line\": 0"),
+            VALID_ROSTER.replace("\"match\": \"ccxt\"", "\"match\": \"\""),
+            VALID_ROSTER.replace("\"slug\": \"trading-specialist\"", "\"slug\": \"Bad slug\""),
+            VALID_ROSTER.replace("\"persona\": \"Trading specialist\"", "\"persona\": \"\""),
+            VALID_ROSTER.replace("\"lens\": \"risk\"", "\"lens\": \"\""),
+            VALID_ROSTER.replace("\"why\": \"dependency\"", "\"why\": \"\""),
+            VALID_ROSTER.replace("\"evidence\": \"requirements.txt:1\"", "\"evidence\": \"\""),
+        ];
+
+        for roster in invalid_rosters {
+            assert!(parse_roster_json(&roster).is_err(), "roster={roster}");
+        }
+    }
+
+    #[test]
+    fn accepts_optional_generated_at() {
+        let roster = VALID_ROSTER.replacen(
+            "\"domains\"",
+            "\"generated_at\": \"2026-07-15T00:00:00Z\",\n        \"domains\"",
+            1,
+        );
+
+        parse_roster_json(&roster).unwrap();
+    }
 }

@@ -205,3 +205,26 @@ fn explore_specialists_proposal_input_overrides_fallback() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+#[test]
+fn explore_specialists_empty_proposal_suppresses_fallback() {
+    let repo = temp_dir("autospec-explore-specialists-empty-proposal");
+    std::fs::write(repo.join("requirements.txt"), "ccxt>=4.0\n").unwrap();
+
+    let output = autospec()
+        .args([
+            "explore",
+            "specialists",
+            "--repo-dir",
+            repo.to_str().unwrap(),
+            "--force",
+        ])
+        .env("AUTOSPEC_SPECIALIST_LLM_STUB_OUTPUT", "[]")
+        .output()
+        .expect("empty proposal run");
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json["domains"].as_array().unwrap().len() > 0);
+    assert!(json["suggested_specialists"].as_array().unwrap().is_empty());
+}
