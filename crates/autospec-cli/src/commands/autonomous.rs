@@ -8,8 +8,16 @@ use autospec_core::autonomous::mainline_health::{
     CheckEvidence, HealthBranchInput, MainlineHealth, MainlineHealthDiagnostic,
     MainlineHealthOutcome,
 };
+use autospec_core::coordination::{
+    ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
+};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use super::{claim, queue};
+
+const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
+const DEFERRED_EXECUTOR_REASON: &str = "awaiting_typed_implementation_executor";
 
 #[derive(Debug, Clone)]
 struct Options {
@@ -33,6 +41,7 @@ struct Options {
     budget_issues: String,
     no_digest: bool,
     health_branch: Option<String>,
+    issue: Option<u64>,
     stop_mode: StopMode,
 }
 
@@ -59,6 +68,7 @@ impl Default for Options {
             budget_issues: String::new(),
             no_digest: false,
             health_branch: None,
+            issue: None,
             stop_mode: StopMode::Graceful,
         }
     }
@@ -98,6 +108,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "timeline" => timeline(options),
         "cleanup" => cleanup(options),
         "run-foreground" => run_foreground(options),
+        "executor-result" => executor_result(options),
         "main-health" => main_health(options),
         other => Err(format!("unknown autospec autonomous subcommand: {other}")),
     }
@@ -217,6 +228,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--dry-run" => options.dry_run = true,
             "--no-digest" => options.no_digest = true,
             "--branch" => options.health_branch = Some(option_value(args, &mut index, "--branch")?),
+            "--issue" => {
+                let issue = option_value(args, &mut index, "--issue")?
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| "--issue must be a positive integer".to_string())?;
+                if options.issue.replace(issue).is_some() {
+                    return Err("--issue accepts exactly one issue number".to_string());
+                }
+            }
             "--once" => options.once = true,
             "--json" => options.json = true,
             "--foreground" => options.foreground = true,
@@ -238,21 +259,21 @@ fn option_value(args: &[String], index: &mut usize, option: &str) -> Result<Stri
 }
 
 fn start(options: Options) -> Result<(), String> {
-    let commands = launch_commands(&options)?;
-
     if options.dry_run {
+        let commands = launch_commands(&options)?;
+        let foreground = foreground_command(&options)?;
         if options.json {
             println!(
                 "{{\"command\":\"autonomous\",\"subcommand\":\"start\",\"status\":\"dry-run\",\"repo\":\"{}\",\"repo_dir\":\"{}\",\"conductor\":\"{}\",\"companions\":{{\"monitor\":\"{}\",\"supervisor\":\"{}\"}}}}",
                 json_escape(&options.repo),
                 json_escape(&options.repo_dir),
-                json_escape(&commands.conductor),
+                json_escape(&foreground.display()),
                 json_escape(&commands.monitor),
                 json_escape(&commands.supervisor)
             );
         } else {
             println!("autospec autonomous start: dry-run");
-            println!("conductor: {}", commands.conductor);
+            println!("conductor: {}", foreground.display());
             println!("monitor: {}", commands.monitor);
             println!("supervisor: {}", commands.supervisor);
         }
@@ -264,16 +285,19 @@ fn start(options: Options) -> Result<(), String> {
         return run_foreground(options);
     }
     let layout = RunLayout::new(&options)?;
+    let options = options_with_resolved_repo(options, &layout);
+    let commands = launch_commands(&options)?;
+    let foreground = foreground_command(&options)?;
     fs::create_dir_all(&layout.state_dir)
         .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
     fs::create_dir_all(&layout.log_dir)
         .map_err(|error| format!("cannot create {}: {error}", layout.log_dir.display()))?;
     prepare_start_scope(&layout, &options)?;
-    write_launch_json(&layout, &options, &commands)?;
+    write_launch_json(&layout, &options, &foreground, &commands)?;
 
-    let conductor = spawn_unit(
+    let conductor = spawn_foreground_unit(
         "conductor",
-        &commands.conductor,
+        &foreground,
         &options.repo_dir,
         &layout.state_dir,
         &layout.log_dir,
@@ -453,6 +477,7 @@ fn restart(options: Options) -> Result<(), String> {
     validate_repo_dir(&options)?;
     let stop_options = options.clone();
     let layout = RunLayout::new(&options)?;
+    let options = options_with_resolved_repo(options, &layout);
     let mut stopped = 0;
     for name in ["supervisor", "monitor", "conductor"] {
         let unit = read_unit(name, &layout.state_dir);
@@ -463,14 +488,15 @@ fn restart(options: Options) -> Result<(), String> {
     wait_for_scope_stopped(&layout.state_dir);
     clear_stop_flag(&layout)?;
     let commands = launch_commands(&options)?;
+    let foreground = foreground_command(&options)?;
     fs::create_dir_all(&layout.state_dir)
         .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
     fs::create_dir_all(&layout.log_dir)
         .map_err(|error| format!("cannot create {}: {error}", layout.log_dir.display()))?;
-    write_launch_json(&layout, &options, &commands)?;
-    let conductor = spawn_unit(
+    write_launch_json(&layout, &options, &foreground, &commands)?;
+    let conductor = spawn_foreground_unit(
         "conductor",
-        &commands.conductor,
+        &foreground,
         &options.repo_dir,
         &layout.state_dir,
         &layout.log_dir,
@@ -514,6 +540,11 @@ fn restart(options: Options) -> Result<(), String> {
         println!("autospec autonomous restarted");
     }
     Ok(())
+}
+
+fn options_with_resolved_repo(mut options: Options, layout: &RunLayout) -> Options {
+    options.repo = layout.repo.clone();
+    options
 }
 
 fn list(options: Options) -> Result<(), String> {
@@ -863,49 +894,329 @@ fn run_foreground(options: Options) -> Result<(), String> {
             health.diagnostic.as_str()
         ));
     }
-    let script = if Path::new("scripts/autospec-autonomous.sh").exists() {
-        PathBuf::from("scripts/autospec-autonomous.sh")
-    } else {
-        env_path(
-            "AUTOSPEC_AUTONOMOUS_SCRIPT",
-            &[".autospec", "scripts", "autospec-autonomous.sh"],
-        )
-    };
-    if !script.exists() {
+    let scope = foreground_scope();
+    let state_path = foreground_state_path(&layout, scope);
+    let state = load_foreground_state(&state_path, &layout, scope)?;
+    if foreground_state_is_retained(&state) {
+        println!("{}", state.to_json());
+        return Ok(());
+    }
+    if state.phase() != ConductorPhase::Scan {
         return Err(format!(
-            "missing shell conductor backend: {}",
-            script.display()
+            "foreground conductor requires recovery from {:?}",
+            state.phase()
         ));
     }
-    let mut command = Command::new("bash");
-    command
-        .arg(script)
-        .arg("run-foreground")
-        .arg("--repo")
-        .arg(&options.repo)
-        .arg("--repo-dir")
-        .arg(&options.repo_dir);
-    for arg in conductor_passthrough_args(&options) {
-        command.arg(arg);
+
+    let Some(state) = scan_foreground(&layout, &state_path, state)? else {
+        return Ok(());
+    };
+    let state = review_foreground(&layout, &state_path, state)?;
+    let Some((state, selected)) = select_foreground(&layout, &state_path, state)? else {
+        return Ok(());
+    };
+    let state = dispatch_foreground(&layout, &options.repo_dir, &state_path, state, selected)?;
+    println!("{}", state.to_json());
+    Ok(())
+}
+
+fn foreground_state_is_retained(state: &ConductorState) -> bool {
+    matches!(
+        state.phase(),
+        ConductorPhase::Paused | ConductorPhase::SliceComplete | ConductorPhase::AllDone
+    )
+}
+
+#[derive(Debug, Clone)]
+struct ForegroundSelection {
+    issue: u64,
+    serialization_reasons: Vec<String>,
+}
+
+fn scan_foreground(
+    layout: &RunLayout,
+    state_path: &Path,
+    state: ConductorState,
+) -> Result<Option<ConductorState>, String> {
+    let initial_plan = queue::ready_plan_for(&layout.repo, 1).map_err(command_error)?;
+    if initial_plan.gate_counts.candidate == 0 {
+        let state = state
+            .transition(ConductorEvent::ScanEmpty)
+            .map_err(|error| format!("cannot record empty foreground scan: {error}"))?;
+        persist_foreground_state(state_path, &state)?;
+        println!("{}", state.to_json());
+        return Ok(None);
     }
-    if std::env::var("AUTOSPEC_STOP_FLAG_FILE").is_err() {
-        command.env("AUTOSPEC_STOP_FLAG_FILE", stop_flag_path(&layout));
+    let state = state
+        .transition(ConductorEvent::ScanFoundWork)
+        .map_err(|error| format!("cannot record foreground scan: {error}"))?;
+    persist_foreground_state(state_path, &state)?;
+    Ok(Some(state))
+}
+
+fn review_foreground(
+    layout: &RunLayout,
+    state_path: &Path,
+    state: ConductorState,
+) -> Result<ConductorState, String> {
+    queue::review_safety_for_repo(&layout.repo, 1, None).map_err(command_error)?;
+    let state = state
+        .transition(ConductorEvent::SafetyReviewed)
+        .map_err(|error| format!("cannot record foreground safety review: {error}"))?;
+    persist_foreground_state(state_path, &state)?;
+    Ok(state)
+}
+
+fn select_foreground(
+    layout: &RunLayout,
+    state_path: &Path,
+    state: ConductorState,
+) -> Result<Option<(ConductorState, ForegroundSelection)>, String> {
+    let ready = queue::ready_plan_for(&layout.repo, 1).map_err(command_error)?;
+    let Some(selected) = ready.batch.first() else {
+        let state = state
+            .transition(ConductorEvent::Pause {
+                reason: "no_ready_issue_after_review".to_string(),
+            })
+            .map_err(|error| format!("cannot pause foreground conductor: {error}"))?;
+        persist_foreground_state(state_path, &state)?;
+        println!("{}", state.to_json());
+        return Ok(None);
+    };
+    let selection = ForegroundSelection {
+        issue: selected.issue.number,
+        serialization_reasons: selected.serialization_reasons.clone(),
+    };
+    let state = state
+        .transition(ConductorEvent::Selected {
+            issue: selection.issue,
+            serialization_reasons: selection.serialization_reasons.clone(),
+        })
+        .map_err(|error| format!("cannot select foreground issue: {error}"))?;
+    persist_foreground_state(state_path, &state)?;
+    Ok(Some((state, selection)))
+}
+
+fn dispatch_foreground(
+    layout: &RunLayout,
+    repo_dir: &str,
+    state_path: &Path,
+    state: ConductorState,
+    selection: ForegroundSelection,
+) -> Result<ConductorState, String> {
+    let branch = format!("autonomous/issue-{}", selection.issue);
+    let worker_id = foreground_worker_id()?;
+    let lease = claim::acquire_for_conductor(&layout.repo, selection.issue, &worker_id, &branch)
+        .map_err(command_error)?;
+    let state = state
+        .transition(ConductorEvent::Claimed)
+        .map_err(|error| format!("cannot record foreground claim: {error}"))?;
+    persist_foreground_state(state_path, &state)?;
+
+    let receipt = ExecutorRequest::for_selected(layout, repo_dir, selection.issue)
+        .map_or_else(|_| ExecutorReceipt::failed(), |request| request.run());
+    let state = state
+        .transition(ConductorEvent::DispatchRecorded {
+            outcome: receipt.outcome.clone(),
+        })
+        .map_err(|error| format!("cannot record executor receipt: {error}"))?;
+    persist_foreground_state(state_path, &state)?;
+    claim::record_executor_outcome(
+        &lease.repo,
+        lease.issue,
+        &lease.worker_id,
+        &lease.branch,
+        &receipt.claim_step,
+    )
+    .map_err(command_error)?;
+    claim::reconcile_active_issue(&lease.repo, lease.issue).map_err(command_error)?;
+    Ok(state)
+}
+
+fn foreground_worker_id() -> Result<String, String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("cannot generate foreground worker id: {error}"))?
+        .as_nanos();
+    Ok(format!(
+        "{FOREGROUND_WORKER_PREFIX}-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+fn executor_result(options: Options) -> Result<(), String> {
+    let issue = options
+        .issue
+        .ok_or_else(|| "executor-result requires --issue".to_string())?;
+    if options.repo.trim().is_empty() || options.repo == "unknown" {
+        return Err("executor-result requires --repo".to_string());
     }
-    let status = command
-        .status()
-        .map_err(|error| format!("cannot launch foreground conductor backend: {error}"))?;
-    if status.success() {
-        Ok(())
+    println!("{}", executor_receipt_json(&options.repo, issue));
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ExecutorRequest {
+    program: PathBuf,
+    args: Vec<String>,
+    current_dir: PathBuf,
+    repo: String,
+    issue: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ExecutorReceipt {
+    outcome: ConductorOutcome,
+    claim_step: String,
+}
+
+impl ExecutorRequest {
+    fn for_selected(layout: &RunLayout, repo_dir: &str, issue: u64) -> Result<Self, String> {
+        Ok(Self {
+            program: std::env::current_exe()
+                .map_err(|error| format!("cannot resolve Rust executor program: {error}"))?,
+            args: vec![
+                "autonomous".to_string(),
+                "executor-result".to_string(),
+                "--repo".to_string(),
+                layout.repo.clone(),
+                "--issue".to_string(),
+                issue.to_string(),
+            ],
+            current_dir: PathBuf::from(repo_dir),
+            repo: layout.repo.clone(),
+            issue,
+        })
+    }
+
+    fn run(&self) -> ExecutorReceipt {
+        let output = Command::new(&self.program)
+            .args(&self.args)
+            .current_dir(&self.current_dir)
+            .output();
+        let expected = executor_receipt_json(&self.repo, self.issue);
+        if output.is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected
+        }) {
+            ExecutorReceipt {
+                outcome: ConductorOutcome::Blocked(DEFERRED_EXECUTOR_REASON.to_string()),
+                claim_step: "executor_deferred".to_string(),
+            }
+        } else {
+            ExecutorReceipt::failed()
+        }
+    }
+}
+
+impl ExecutorReceipt {
+    fn failed() -> Self {
+        Self {
+            outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+            claim_step: "executor_receipt_failed".to_string(),
+        }
+    }
+}
+
+fn executor_receipt_json(repo: &str, issue: u64) -> String {
+    format!(
+        "{{\"repo\":\"{}\",\"issue\":{},\"outcome\":\"blocked\",\"reason\":\"{}\"}}",
+        json_escape(repo),
+        issue,
+        DEFERRED_EXECUTOR_REASON,
+    )
+}
+
+fn foreground_state_path(layout: &RunLayout, scope: ConductorScope) -> PathBuf {
+    layout.state_dir.join(format!(
+        "foreground-conductor-{}.json",
+        foreground_scope_key(scope)
+    ))
+}
+
+fn foreground_scope_key(scope: ConductorScope) -> String {
+    match scope {
+        ConductorScope::Repository => "repository".to_string(),
+        ConductorScope::Slice => {
+            let selected = std::env::var("AUTOSPEC_RUN_ONLY_ISSUES").unwrap_or_default();
+            format!(
+                "slice-{}",
+                selected
+                    .bytes()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            )
+        }
+    }
+}
+
+fn load_foreground_state(
+    path: &Path,
+    layout: &RunLayout,
+    scope: ConductorScope,
+) -> Result<ConductorState, String> {
+    match fs::read_to_string(path) {
+        Ok(source) => {
+            let state = ConductorState::parse_json(&source)
+                .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
+            if state.repo() != layout.repo || state.scope() != scope {
+                return Err(format!(
+                    "foreground state {} does not match repository and scope",
+                    path.display()
+                ));
+            }
+            Ok(state)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            ConductorState::new(layout.repo.clone(), scope, 3)
+        }
+        Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+    }
+}
+
+fn persist_foreground_state(path: &Path, state: &ConductorState) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("cannot resolve parent for {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, format!("{}\n", state.to_json()))
+        .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
+    fs::rename(&temporary, path)
+        .map_err(|error| format!("cannot finalize {}: {error}", path.display()))
+}
+
+fn foreground_scope() -> ConductorScope {
+    if std::env::var("AUTOSPEC_RUN_ONLY_ISSUES").is_ok_and(|value| !value.trim().is_empty()) {
+        ConductorScope::Slice
     } else {
-        Err(format!("foreground conductor backend exited with {status}"))
+        ConductorScope::Repository
     }
+}
+
+fn command_error(error: super::CommandFailure) -> String {
+    error.message
 }
 
 #[derive(Debug, Clone)]
 struct LaunchCommands {
-    conductor: String,
     monitor: String,
     supervisor: String,
+}
+
+#[derive(Debug, Clone)]
+struct ForegroundCommand {
+    program: PathBuf,
+    args: Vec<String>,
+}
+
+impl ForegroundCommand {
+    fn display(&self) -> String {
+        std::iter::once(self.program.display().to_string())
+            .chain(self.args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -982,19 +1293,6 @@ fn launch_commands(options: &Options) -> Result<LaunchCommands, String> {
     let repo_dir = shell_word(&options.repo_dir);
     let interval = options.interval_sec;
 
-    let conductor = std::env::var("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD").unwrap_or_else(|_| {
-        let passthrough = conductor_passthrough_args(options)
-            .into_iter()
-            .map(|arg| shell_word(&arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let suffix = if passthrough.is_empty() {
-            String::new()
-        } else {
-            format!(" {passthrough}")
-        };
-        format!("{exe} autonomous run-foreground --repo {repo} --repo-dir {repo_dir}{suffix}")
-    });
     let monitor = std::env::var("AUTOSPEC_AUTONOMOUS_MONITOR_CMD").unwrap_or_else(|_| {
         format!("{exe} autonomous monitor --repo {repo} --repo-dir {repo_dir} --interval-sec {interval}")
     });
@@ -1003,9 +1301,25 @@ fn launch_commands(options: &Options) -> Result<LaunchCommands, String> {
     });
 
     Ok(LaunchCommands {
-        conductor,
         monitor,
         supervisor,
+    })
+}
+
+fn foreground_command(options: &Options) -> Result<ForegroundCommand, String> {
+    let mut args = vec![
+        "autonomous".to_string(),
+        "run-foreground".to_string(),
+        "--repo".to_string(),
+        options.repo.clone(),
+        "--repo-dir".to_string(),
+        options.repo_dir.clone(),
+    ];
+    args.extend(conductor_passthrough_args(options));
+    Ok(ForegroundCommand {
+        program: std::env::current_exe()
+            .map_err(|error| format!("cannot resolve foreground conductor program: {error}"))?,
+        args,
     })
 }
 
@@ -1037,6 +1351,48 @@ fn spawn_unit(
         .stderr(Stdio::from(err_log))
         .spawn()
         .map_err(|error| format!("cannot spawn {name} command `{command}`: {error}"))?;
+    let pid = child.id().to_string();
+    let pid_file = state_dir.join(format!("{name}.pid"));
+    let logpath_file = state_dir.join(format!("{name}.logpath"));
+    fs::write(&pid_file, format!("{pid}\n"))
+        .map_err(|error| format!("cannot write {}: {error}", pid_file.display()))?;
+    fs::write(&logpath_file, format!("{}\n", logpath.display()))
+        .map_err(|error| format!("cannot write {}: {error}", logpath_file.display()))?;
+    Ok(UnitRecord {
+        pid,
+        pid_file,
+        logpath,
+        logpath_file,
+    })
+}
+
+fn spawn_foreground_unit(
+    name: &str,
+    command: &ForegroundCommand,
+    repo_dir: &str,
+    state_dir: &Path,
+    log_dir: &Path,
+    log_override: Option<&str>,
+) -> Result<UnitRecord, String> {
+    let logpath = log_override
+        .map(PathBuf::from)
+        .unwrap_or_else(|| log_dir.join(format!("autospec-autonomous-{name}.log")));
+    if let Some(parent) = logpath.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    }
+    let log = File::create(&logpath)
+        .map_err(|error| format!("cannot create {}: {error}", logpath.display()))?;
+    let err_log = log
+        .try_clone()
+        .map_err(|error| format!("cannot clone {}: {error}", logpath.display()))?;
+    let child = Command::new(&command.program)
+        .args(&command.args)
+        .current_dir(repo_dir)
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err_log))
+        .spawn()
+        .map_err(|error| format!("cannot spawn {name} command: {error}"))?;
     let pid = child.id().to_string();
     let pid_file = state_dir.join(format!("{name}.pid"));
     let logpath_file = state_dir.join(format!("{name}.logpath"));
@@ -1136,6 +1492,7 @@ fn conductor_passthrough_args(options: &Options) -> Vec<String> {
 fn write_launch_json(
     layout: &RunLayout,
     options: &Options,
+    foreground: &ForegroundCommand,
     commands: &LaunchCommands,
 ) -> Result<(), String> {
     let path = layout.state_dir.join("launch.json");
@@ -1145,7 +1502,7 @@ fn write_launch_json(
         json_escape(&layout.repo),
         json_escape(&options.repo_dir),
         json_escape(&layout.scope),
-        json_escape(&commands.conductor),
+        json_escape(&foreground.display()),
         json_escape(&commands.monitor),
         json_escape(&commands.supervisor),
         json_escape(&options.max_cycles),
@@ -2054,6 +2411,40 @@ fn json_string_array(values: &[String]) -> String {
         .map(|value| format!("\"{}\"", json_escape(value)))
         .collect::<Vec<_>>();
     format!("[{}]", items.join(","))
+}
+
+#[cfg(test)]
+mod foreground_tests {
+    use super::*;
+
+    #[test]
+    fn executor_launch_failure_becomes_a_blocked_receipt() {
+        let request = ExecutorRequest {
+            program: PathBuf::from("/definitely-not-an-autospec-executor"),
+            args: Vec::new(),
+            current_dir: std::env::temp_dir(),
+            repo: "test/repo".to_string(),
+            issue: 42,
+        };
+
+        let receipt = request.run();
+
+        assert_eq!(
+            receipt.outcome,
+            ConductorOutcome::Blocked("executor_receipt_failed".to_string())
+        );
+        assert_eq!(receipt.claim_step, "executor_receipt_failed");
+    }
+
+    #[test]
+    fn completed_slice_state_is_retained_on_a_fresh_foreground_invocation() {
+        let state = ConductorState::new("test/repo", ConductorScope::Slice, 3)
+            .expect("state")
+            .transition(ConductorEvent::ScanEmpty)
+            .expect("slice complete");
+
+        assert!(foreground_state_is_retained(&state));
+    }
 }
 
 fn print_help() {

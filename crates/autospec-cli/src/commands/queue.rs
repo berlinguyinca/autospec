@@ -44,7 +44,7 @@ struct ReviewSafetyOptions {
 }
 
 #[derive(Debug, Default)]
-struct ReviewSafetyTotals {
+pub(crate) struct ReviewSafetyTotals {
     pass: usize,
     ambiguous: usize,
     block: usize,
@@ -68,10 +68,20 @@ fn review_safety(args: &[String]) -> Result<(), CommandFailure> {
     let limit = options
         .limit
         .ok_or_else(|| CommandFailure::diagnostic("--limit is required"))?;
-    let issues = review_safety_issues(&repo, options.issue)?;
+    let totals = review_safety_for_repo(&repo, limit, options.issue)?;
+    println!("{}", review_safety_json(&totals));
+    Ok(())
+}
+
+pub(crate) fn review_safety_for_repo(
+    repo: &str,
+    limit: usize,
+    issue: Option<u64>,
+) -> Result<ReviewSafetyTotals, CommandFailure> {
+    let issues = review_safety_issues(repo, issue)?;
     let (mut totals, candidates) = review_safety_candidates(issues, limit)?;
     for candidate in candidates {
-        let outcome = review_safety_candidate(&repo, &candidate).unwrap_or_else(|error| {
+        let outcome = review_safety_candidate(repo, &candidate).unwrap_or_else(|error| {
             eprintln!(
                 "queue safety conflict for issue {}: {error}",
                 candidate.number
@@ -87,8 +97,7 @@ fn review_safety(args: &[String]) -> Result<(), CommandFailure> {
             ReviewSafetyOutcome::Skipped => totals.skipped += 1,
         }
     }
-    println!("{}", review_safety_json(&totals));
-    Ok(())
+    Ok(totals)
 }
 
 fn review_safety_issues(
@@ -453,22 +462,32 @@ fn ready(args: &[String]) -> Result<(), CommandFailure> {
     let options = parse_ready_options(args)?;
     let repo = options.repo.map_or_else(infer_repo, Ok)?;
     let batch_size = options.batch_size.unwrap_or_else(default_batch_size);
-    let candidates = list_issues(&repo, "auto-implement")?;
-    let mut active = list_issues(&repo, "in-progress-by-bot")?;
+    let plan = ready_plan_for(&repo, batch_size)?;
+    let constrained = !only_issues().is_empty();
+    println!("{}", plan_json(&plan, constrained));
+    Ok(())
+}
+
+pub(crate) fn ready_plan_for(
+    repo: &str,
+    batch_size: usize,
+) -> Result<ReadyQueuePlan, CommandFailure> {
+    let candidates = list_issues(repo, "auto-implement")?;
+    let mut active = list_issues(repo, "in-progress-by-bot")?;
     for issue in &active {
-        let _ = reconcile_active_issue(&repo, issue.number);
+        let _ = reconcile_active_issue(repo, issue.number);
     }
     for issue in &active {
-        let _ = recover_active_issue(&repo, issue.number, 300);
+        let _ = recover_active_issue(repo, issue.number, 300);
     }
-    active = list_issues(&repo, "in-progress-by-bot")?
+    active = list_issues(repo, "in-progress-by-bot")?
         .into_iter()
         .filter(|issue| {
-            active_issue_counts_toward_worker_capacity(&repo, issue.number, 300).unwrap_or(true)
+            active_issue_counts_toward_worker_capacity(repo, issue.number, 300).unwrap_or(true)
         })
         .collect();
-    let dependencies = load_dependencies(&repo, &candidates);
-    let pull_requests = list_pull_requests(&repo);
+    let dependencies = load_dependencies(repo, &candidates);
+    let pull_requests = list_pull_requests(repo);
     let only_issues = only_issues();
     let mut policy = QueuePolicy::new(batch_size, max_repo_workers());
     policy.only_issues = only_issues.clone();
@@ -484,7 +503,7 @@ fn ready(args: &[String]) -> Result<(), CommandFailure> {
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let plan = plan_ready_queue_with_trusted_actors(
+    Ok(plan_ready_queue_with_trusted_actors(
         &ReadyQueueInput {
             candidates,
             active,
@@ -493,9 +512,7 @@ fn ready(args: &[String]) -> Result<(), CommandFailure> {
             policy,
         },
         &trusted_actors,
-    );
-    println!("{}", plan_json(&plan, !only_issues.is_empty()));
-    Ok(())
+    ))
 }
 
 fn parse_ready_options(args: &[String]) -> Result<ReadyOptions, CommandFailure> {

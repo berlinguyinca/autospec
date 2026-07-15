@@ -113,7 +113,32 @@ fn release(args: &[String]) -> Result<(), CommandFailure> {
 }
 
 fn acquire(args: &[String]) -> Result<(), CommandFailure> {
-    let options = parse_acquire_options(args)?;
+    let lease = acquire_record(parse_acquire_options(args)?)?;
+    println!(
+        "{{\"claimed\":true,\"issue\":{},\"repo\":\"{}\",\"worker_id\":\"{}\",\"branch\":\"{}\"}}",
+        lease.issue,
+        json_escape(&lease.repo),
+        json_escape(&lease.worker_id),
+        json_escape(&lease.branch),
+    );
+    Ok(())
+}
+
+pub(crate) fn acquire_for_conductor(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+) -> Result<ClaimLease, CommandFailure> {
+    acquire_record(AcquireOptions {
+        issue,
+        repo: Some(repo.to_string()),
+        worker_id: Some(worker_id.to_string()),
+        branch: branch.to_string(),
+    })
+}
+
+fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, CommandFailure> {
     let repo = match options.repo {
         Some(repo) => repo,
         None => infer_repo()?,
@@ -259,14 +284,12 @@ fn acquire(args: &[String]) -> Result<(), CommandFailure> {
             return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
         }
     }
-    println!(
-        "{{\"claimed\":true,\"issue\":{},\"repo\":\"{}\",\"worker_id\":\"{}\",\"branch\":\"{}\"}}",
-        options.issue,
-        json_escape(&repo),
-        json_escape(&worker_id),
-        json_escape(&options.branch),
-    );
-    Ok(())
+    Ok(ClaimLease {
+        issue: options.issue,
+        repo,
+        worker_id,
+        branch: options.branch,
+    })
 }
 
 fn read(args: &[String]) -> Result<(), CommandFailure> {
@@ -512,6 +535,65 @@ pub(crate) fn reconcile_active_issue(repo: &str, issue: u64) -> Result<(), Comma
     Ok(())
 }
 
+pub(crate) fn record_executor_outcome(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    outcome: &str,
+) -> Result<(), CommandFailure> {
+    if outcome.trim().is_empty() {
+        return Err(CommandFailure::diagnostic(
+            "executor outcome must not be empty",
+        ));
+    }
+    let comments = list_comments(repo, issue)?;
+    let selected = select_run_state(&comments, repo, issue).ok_or_else(|| {
+        CommandFailure::diagnostic("claim ownership changed before executor outcome")
+    })?;
+    require_executor_claim_owner(&selected.record, worker_id, branch)?;
+    let now = utc_now_iso()?;
+    let claimed_at = selected.record.claimed_at;
+    let record = RunStateRecord::new(
+        repo,
+        issue,
+        worker_id,
+        "claimed",
+        branch,
+        "",
+        outcome,
+        Vec::new(),
+        claimed_at,
+        now,
+        claim_ttl_seconds(),
+    );
+    upsert_record(repo, &comments, &record)?;
+    let confirmed_comments = list_comments(repo, issue)?;
+    let confirmed = select_run_state(&confirmed_comments, repo, issue).ok_or_else(|| {
+        CommandFailure::diagnostic("claim ownership changed after executor outcome")
+    })?;
+    require_executor_claim_owner(&confirmed.record, worker_id, branch)?;
+    if confirmed.record.step != outcome {
+        return Err(CommandFailure::diagnostic(
+            "claim outcome changed while recording executor outcome",
+        ));
+    }
+    Ok(())
+}
+
+fn require_executor_claim_owner(
+    record: &RunStateRecord,
+    worker_id: &str,
+    branch: &str,
+) -> Result<(), CommandFailure> {
+    if record.worker_id != worker_id || record.branch != branch || record.state != "claimed" {
+        return Err(CommandFailure::diagnostic(
+            "claim ownership changed while recording executor outcome",
+        ));
+    }
+    Ok(())
+}
+
 struct ReconcileOutcome {
     reconciled: bool,
     pr: Option<String>,
@@ -624,6 +706,14 @@ struct AcquireOptions {
     repo: Option<String>,
     worker_id: Option<String>,
     branch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClaimLease {
+    pub issue: u64,
+    pub repo: String,
+    pub worker_id: String,
+    pub branch: String,
 }
 
 fn parse_read_options(args: &[String]) -> Result<ReadOptions, CommandFailure> {
@@ -1629,12 +1719,12 @@ fn json_escape(value: &str) -> String {
     escaped
 }
 
-fn unavailable_claim(
+fn unavailable_claim<T>(
     issue: u64,
     repo: &str,
     worker_id: Option<&str>,
     reason: &str,
-) -> Result<(), CommandFailure> {
+) -> Result<T, CommandFailure> {
     let worker_id = worker_id
         .map(|value| format!(",\"worker_id\":\"{}\"", json_escape(value)))
         .unwrap_or_default();
@@ -1646,12 +1736,12 @@ fn unavailable_claim(
     Err(CommandFailure::status(String::new(), 2))
 }
 
-fn unavailable_safety_claim(
+fn unavailable_safety_claim<T>(
     issue: u64,
     repo: &str,
     worker_id: &str,
     safety_reason: &str,
-) -> Result<(), CommandFailure> {
+) -> Result<T, CommandFailure> {
     println!(
         "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"reason\":\"safety_gate_failed\",\"safety_gate\":{{\"ok\":false,\"reason\":\"{}\"}}}}",
         json_escape(repo),
@@ -1661,12 +1751,12 @@ fn unavailable_safety_claim(
     Err(CommandFailure::status(String::new(), 2))
 }
 
-fn unavailable_claim_with_observed_owner(
+fn unavailable_claim_with_observed_owner<T>(
     issue: u64,
     repo: &str,
     worker_id: &str,
     observed_owner: &str,
-) -> Result<(), CommandFailure> {
+) -> Result<T, CommandFailure> {
     println!(
         "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"reason\":\"claim_lost\",\"observed_owner\":\"{}\"}}",
         json_escape(repo),
