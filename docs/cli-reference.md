@@ -26,6 +26,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec queue ready [--repo OWNER/REPO] [--batch-size N]` | yes | scans every Rust-owned GitHub issue page and returns typed eligibility, gate totals, and scan scope |
 | `autospec queue review-safety --repo OWNER/REPO --limit N [--issue N]` | yes | writes bounded Rust issue-intent safety decisions and reports outcome totals |
 | `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR` | no | drives one Rust-owned queue/claim cycle and persists a deferred foreground receipt; it launches no implementation agent |
+| `autospec autonomous executor-result --repo OWNER/REPO --issue N [--worker-id ID --branch NAME --outcome succeeded\|blocked\|retryable ...]` | yes | records either the exact legacy deferred receipt or one strictly validated executor outcome; it never launches work, releases a claim, or merges a PR |
 | `autospec run --run <id> --spec <id>... [--json]` | yes | creates a local persisted queue only; it does not launch an agent or validation command |
 | `autospec run --ingest <agent-result.json> --run <id> --spec <id> --result-id <id> --outcome <passed\|failed\|blocked> [--failure-kind <kind>] [--retry-limit <n>] [--json]` | yes | validates and records an explicit local agent result; it does not launch an agent or validation command |
 | `autospec resume [--json]` | yes | reports the newest incomplete local queue and its next entry; it does not execute it |
@@ -91,8 +92,23 @@ and persists strict conductor state as
 `.autospec/autonomous-operator/<scope>/foreground-conductor-<scope-key>.json`, where the
 scope key distinguishes repository runs from each explicit issue slice. Its internal
 `executor-result` child uses the current Rust executable with an explicit argument vector. That
-child returns only the deferred `awaiting_typed_implementation_executor` receipt: it launches no
-implementation agent, never releases the claim, and never reports implementation success. A later
-foreground invocation retains that paused selected issue until an explicit recovery protocol is
-available. Detached `autonomous start` and `restart` likewise launch this foreground command as a
-direct Rust child; monitor and supervisor are separate compatibility companions.
+bare child invocation, `executor-result --repo OWNER/REPO --issue N`, returns only the exact
+successful deferred `awaiting_typed_implementation_executor` receipt. It performs no claim
+mutation. Explicit executor-result ingestion is described below. Neither form launches an
+implementation agent, invokes a shell, script, `omx`, or `/autospec-run`, releases a claim, or
+merges a PR. Detached `autonomous start` and `restart` likewise launch this foreground command as
+a direct Rust child; monitor and supervisor are separate compatibility companions.
+
+`autospec autonomous executor-result` emits one JSON result and has two deliberately distinct
+forms. The bare compatibility form is exactly `--repo OWNER/REPO --issue N`: it is the successful
+legacy deferred receipt above and exits `0`. An explicit result must include a repository, a
+positive issue number, `--worker-id`, `--branch`, and `--outcome`. Its fields are strict: unknown
+or repeated flags, or mixed outcome fields, are malformed. `succeeded` requires a positive `--pr`
+and forbids `--reason`; `blocked` and `retryable` require a nonempty `--reason` and forbid `--pr`.
+
+An explicit successful result is accepted only when its worker ID matches the claim owner and its
+branch matches the claim, and its PR remains open, closes the issue, and contains exactly one
+`## Closeout report` heading.
+That evidence records a verified outcome; it is not release or merge authority. JSON exit codes are
+`0` for accepted success or the legacy deferred receipt, `10` for retryable, `20` for blocked or
+evidence-unavailable, `2` for malformed input, and `3` for ownership lost.

@@ -5,4 +5,4 @@
 - `--branch BRANCH` is an explicit override and is resolved before repository default-branch metadata.
 - Without `--branch`, the CLI resolves the default branch from GitHub metadata and does not silently fall back to `main`.
 - Observations are appended under the repo-scoped autonomous state as `main-health-observations.jsonl` with branch, outcome, diagnostic, and check evidence.
-- `autospec autonomous run-foreground` calls this Rust admission gate before entering the legacy shell conductor so missing branches or failed/pending checks cannot dispatch ready work.
+- `autospec autonomous run-foreground` calls this Rust admission gate before entering its bounded Rust conductor cycle, so missing branches or failed/pending checks cannot dispatch ready work.
