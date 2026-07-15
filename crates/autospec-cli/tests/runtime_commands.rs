@@ -254,6 +254,43 @@ impl Drop for RuntimeFixture {
     }
 }
 
+enum RuntimeEnvCommand {
+    Init,
+    Up,
+    Status,
+    Down,
+    Exec,
+    Session,
+}
+
+impl RuntimeEnvCommand {
+    const ALL: [Self; 6] = [
+        Self::Init,
+        Self::Up,
+        Self::Status,
+        Self::Down,
+        Self::Exec,
+        Self::Session,
+    ];
+
+    fn usage(&self) -> &'static str {
+        match self {
+            Self::Init => {
+                "autospec runtime env init [--repo PATH] [--manifest agent|autospec] [--force]"
+            }
+            Self::Up => "autospec runtime env up [--repo PATH] [--mode MODE]",
+            Self::Status => "autospec runtime env status [--repo PATH] [--mode MODE]",
+            Self::Down => "autospec runtime env down [--repo PATH] [--mode MODE]",
+            Self::Exec => {
+                "autospec runtime env exec [--repo PATH] [--mode MODE] -- COMMAND [ARGS...]"
+            }
+            Self::Session => {
+                "autospec runtime env session [--repo PATH] [--mode MODE] [--keep-alive] -- COMMAND [ARGS...]"
+            }
+        }
+    }
+}
+
 #[test]
 fn runtime_env_init_writes_and_protects_the_conservative_manifest() {
     let fixture = RuntimeFixture::empty();
@@ -310,14 +347,18 @@ fn runtime_parent_help_lists_the_complete_environment_command_family() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    assert!(stdout
-        .contains("autospec runtime env init [--repo PATH] [--manifest agent|autospec] [--force]"));
-    assert!(stdout.contains("autospec runtime env up [--repo PATH] [--mode MODE]"));
-    assert!(stdout.contains("autospec runtime env status [--repo PATH] [--mode MODE]"));
-    assert!(stdout.contains("autospec runtime env down [--repo PATH] [--mode MODE]"));
-    assert!(stdout
-        .contains("autospec runtime env exec [--repo PATH] [--mode MODE] -- COMMAND [ARGS...]"));
-    assert!(stdout.contains("autospec runtime env session [--repo PATH] [--mode MODE] [--keep-alive] -- COMMAND [ARGS...]"));
+    let usage_lines: Vec<&str> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    for command in RuntimeEnvCommand::ALL {
+        assert!(
+            usage_lines.iter().any(|line| *line == command.usage()),
+            "missing runtime env usage line {:?} in:\n{stdout}",
+            command.usage()
+        );
+    }
 }
 
 #[test]
