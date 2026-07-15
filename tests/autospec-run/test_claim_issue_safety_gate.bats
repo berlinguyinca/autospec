@@ -2,7 +2,7 @@
 
 setup() {
     REPO_ROOT="$(git rev-parse --show-toplevel)"
-    SCRIPT="$REPO_ROOT/skills/autospec-run/scripts/claim-issue.sh"
+    AUTOSPEC="$REPO_ROOT/target/debug/autospec"
     FIXTURE_DIR="$(mktemp -d)"
     MOCK_BIN="$FIXTURE_DIR/bin"
     mkdir -p "$MOCK_BIN"
@@ -17,7 +17,12 @@ sub="\${1:-} \${2:-}"
 case "\$sub" in
   "issue view")
     if printf '%s\n' "\$@" | grep -q -- "--jq"; then
-      jq -r '.labels[].name' "\$FIXTURE_DIR/issue.json"
+      jq_expr=""
+      shift 2
+      while [ "\$#" -gt 0 ]; do
+        case "\$1" in --jq) jq_expr="\$2"; shift 2 ;; *) shift ;; esac
+      done
+      jq -c "\$jq_expr" "\$FIXTURE_DIR/issue.json"
     else
       cat "\$FIXTURE_DIR/issue.json"
     fi
@@ -76,7 +81,7 @@ write_issue() {
 
 run_claim() {
     PATH="$MOCK_BIN:$PATH" AUTOSPEC_HEARTBEAT_DIR="${AUTOSPEC_HEARTBEAT_DIR:-$FIXTURE_DIR/heartbeats}" AUTOSPEC_CLAIM_CONFIRM_READS=1 AUTOSPEC_CLAIM_SETTLE_SECONDS=0 \
-      bash "$SCRIPT" --issue 700 --repo test/repo --worker-id worker-a --branch feat/test
+      "$AUTOSPEC" claim acquire --issue 700 --repo test/repo --worker-id worker-a --branch feat/test
 }
 
 @test "claim refuses security-quarantined issue before label mutation" {
@@ -335,5 +340,5 @@ EOF
     [ ! -f "$FIXTURE_DIR/heartbeats/test__repo/700.json" ]
     grep -q -- "--remove-label auto-implement --add-label in-progress-by-bot" "$FIXTURE_DIR/edit.log"
     grep -q -- "--remove-label in-progress-by-bot --add-label auto-implement" "$FIXTURE_DIR/edit.log"
-    grep -q -- "--body-file" "$FIXTURE_DIR/comment.log"
+    grep -q -- "--body" "$FIXTURE_DIR/comment.log"
 }

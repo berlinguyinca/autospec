@@ -75,7 +75,7 @@ pub fn classify_path(path: &str) -> RuntimePolicyVerdict {
             normalized,
             runtime,
             RuntimeClass::R0,
-            vec!["shell wrapper or install entrypoint".to_string()],
+            vec!["shell wrapper, install entrypoint, or Rust compatibility launcher".to_string()],
         );
     }
 

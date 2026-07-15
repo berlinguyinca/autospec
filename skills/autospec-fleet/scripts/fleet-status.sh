@@ -9,11 +9,11 @@ source "$script_dir/fleet-lib.sh"
 
 config="autospec-fleet.yml"
 json_output=0
-list_ready_bin="${AUTOSPEC_FLEET_LIST_READY:-}"
+queue_bin="${AUTOSPEC_FLEET_QUEUE_BIN:-${AUTOSPEC_QUEUE_BIN:-${AUTOSPEC_BIN:-}}}"
 
 usage() {
     cat <<'EOF'
-Usage: fleet-status.sh [--config PATH] [--json] [--list-ready-bin PATH]
+Usage: fleet-status.sh [--config PATH] [--json] [--queue-bin PATH]
 EOF
 }
 
@@ -27,8 +27,8 @@ while [ $# -gt 0 ]; do
         --config) shift; [ $# -gt 0 ] || fail "--config requires a path"; config="$1" ;;
         --config=*) config="${1#--config=}" ;;
         --json) json_output=1 ;;
-        --list-ready-bin) shift; [ $# -gt 0 ] || fail "--list-ready-bin requires a path"; list_ready_bin="$1" ;;
-        --list-ready-bin=*) list_ready_bin="${1#--list-ready-bin=}" ;;
+        --queue-bin) shift; [ $# -gt 0 ] || fail "--queue-bin requires a path"; queue_bin="$1" ;;
+        --queue-bin=*) queue_bin="${1#--queue-bin=}" ;;
         -h|--help) usage; exit 0 ;;
         *) fail "unknown argument: $1" ;;
     esac
@@ -36,11 +36,14 @@ while [ $# -gt 0 ]; do
 done
 
 [ -f "$config" ] || fail "config not found: $config"
-if [ -z "$list_ready_bin" ]; then
-    list_ready_bin="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/list-ready-issues.sh"
+if [ -z "$queue_bin" ] && [ -x "$repo_root/target/debug/autospec" ]; then
+    queue_bin="$repo_root/target/debug/autospec"
 fi
-[ -x "$list_ready_bin" ] || list_ready_bin="$repo_root/skills/autospec-run/scripts/list-ready-issues.sh"
-[ -x "$list_ready_bin" ] || fail "list-ready-issues.sh not found or not executable"
+if [ -z "$queue_bin" ] && command -v autospec >/dev/null 2>&1; then
+    queue_bin="$(command -v autospec)"
+fi
+[ -n "$queue_bin" ] && { [ -x "$queue_bin" ] || command -v "$queue_bin" >/dev/null 2>&1; } \
+    || fail "autospec queue binary not found or not executable"
 
 bash "$script_dir/fleet-config-lint.sh" --config "$config" >/dev/null
 command -v jq >/dev/null 2>&1 || fail "jq is required"
@@ -56,7 +59,7 @@ while [ "$idx" -lt "$repo_count" ]; do
     normalized="$(normalize_repo_url "$repo_url")"
     checkout_path="$(repo_checkout_path "$workspace" "$normalized")"
     if [ "$enabled" = "true" ]; then
-        probe_json="$("$list_ready_bin" --repo "$normalized" --batch-size 1)"
+        probe_json="$("$queue_bin" queue ready --repo "$normalized" --batch-size 1)"
     else
         probe_json='{"ready":[],"blocked":[],"claimed":[],"conflicts":[],"batch":[]}'
     fi

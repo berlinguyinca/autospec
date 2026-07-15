@@ -69,8 +69,8 @@ The shared queue is GitHub Issues:
 - A single marked `autospec-run-state` issue comment records worker identity,
   step, branch, PR, owned paths, and TTL.
 
-Before selecting work, the monitor uses `list-ready-issues.sh` to exclude issues
-with open dependencies or path conflicts. It then uses `claim-issue.sh` to swap
+Before selecting work, the monitor uses `autospec queue ready` to exclude issues
+with open dependencies or path conflicts. It then uses `autospec claim acquire` to swap
 labels, write run-state, and verify that the same worker still owns the state
 comment. Lost claims are treated as normal races, not failures. The watchdog
 reclaims stale GitHub run-state in addition to same-host heartbeat files.

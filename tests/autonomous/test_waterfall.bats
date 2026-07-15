@@ -332,11 +332,11 @@ EOF
 # ─── Defense-in-depth: standalone readiness-aware backlog_count (#1632) ───────
 # When BACKLOG_COUNT_INJECT is not supplied (waterfall invoked standalone),
 # the naive `gh` open-auto-implement count must NOT gate Tier-1 by itself —
-# the waterfall must consult list-ready-issues.sh (dependency-aware) and use
+# the waterfall must consult autospec queue ready (dependency-aware) and use
 # ready+batch as backlog_count, falling back to the naive gh count only when
-# list-ready-issues.sh is unavailable.
+# the Rust queue is unavailable.
 
-@test "defense-in-depth: no --backlog-count, naive gh count > 0 but list-ready-issues.sh reports all-blocked -> advances past Tier 1" {
+@test "defense-in-depth: no --backlog-count, naive gh count > 0 but Rust queue reports all-blocked -> advances past Tier 1" {
     # Naive gh count would be 1 (misleading — this must NOT pin Tier 1).
     cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -345,13 +345,13 @@ exit 0
 EOF
     chmod +x "$TMP/bin/gh"
 
-    # Dependency-aware list-ready-issues.sh: nothing ready, one blocked.
-    cat > "$TMP/bin/list-ready-issues.sh" <<'EOF'
+    # Dependency-aware Rust queue: nothing ready, one blocked.
+    cat > "$TMP/bin/autospec" <<'EOF'
 #!/usr/bin/env bash
 printf '{"ready":[],"blocked":[{"number":42}],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'
 EOF
-    chmod +x "$TMP/bin/list-ready-issues.sh"
-    export AUTOSPEC_LIST_READY_BIN="$TMP/bin/list-ready-issues.sh"
+    chmod +x "$TMP/bin/autospec"
+    export AUTOSPEC_QUEUE_BIN="$TMP/bin/autospec"
 
     run bash "$SCRIPT" --repo "owner/repo" --dry-cycles 2 --open-issue-count 0
     [ "$status" -eq 0 ]
@@ -360,15 +360,15 @@ EOF
     [[ "$output" != *'"tier":1,'* ]]
 }
 
-@test "defense-in-depth: list-ready-issues.sh unavailable falls back to naive gh count" {
+@test "defense-in-depth: Rust queue unavailable falls back to naive gh count" {
     cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '1\n'
 exit 0
 EOF
     chmod +x "$TMP/bin/gh"
-    unset AUTOSPEC_LIST_READY_BIN
-    rm -f "$TMP/bin/list-ready-issues.sh"
+    unset AUTOSPEC_QUEUE_BIN
+    rm -f "$TMP/bin/autospec"
 
     run bash "$SCRIPT" --repo "owner/repo" --dry-cycles 2
     [ "$status" -eq 0 ]
@@ -379,7 +379,7 @@ EOF
 
 # ─── Worker-cap-reached is treated as dry, not as ready backlog (#1632) ───────
 
-@test "worker-cap-reached: list-ready-issues.sh reports ready issues but worker cap reached -> treated as dry" {
+@test "worker-cap-reached: Rust queue reports ready issues but worker cap reached -> treated as dry" {
     cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '3\n'
@@ -387,12 +387,12 @@ exit 0
 EOF
     chmod +x "$TMP/bin/gh"
 
-    cat > "$TMP/bin/list-ready-issues.sh" <<'EOF'
+    cat > "$TMP/bin/autospec" <<'EOF'
 #!/usr/bin/env bash
 printf '{"ready":[{"number":1},{"number":2}],"blocked":[],"claimed":[],"conflicts":[],"worker_cap":{"reached":true},"batch":[]}\n'
 EOF
-    chmod +x "$TMP/bin/list-ready-issues.sh"
-    export AUTOSPEC_LIST_READY_BIN="$TMP/bin/list-ready-issues.sh"
+    chmod +x "$TMP/bin/autospec"
+    export AUTOSPEC_QUEUE_BIN="$TMP/bin/autospec"
 
     run bash "$SCRIPT" --repo "owner/repo" --dry-cycles 2 --open-issue-count 0
     [ "$status" -eq 0 ]

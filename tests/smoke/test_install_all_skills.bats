@@ -11,6 +11,11 @@ setup() {
     UNINSTALL="$REPO_ROOT/uninstall.sh"
 
     # Per-test fake HOME to keep the real env untouched.
+    # Keep the host Rust toolchain discoverable: install.sh now builds the
+    # autospec runtime binary as part of a real installation.
+    ORIGINAL_HOME="$HOME"
+    export RUSTUP_HOME="${RUSTUP_HOME:-$ORIGINAL_HOME/.rustup}"
+    export CARGO_HOME="${CARGO_HOME:-$ORIGINAL_HOME/.cargo}"
     FAKE_HOME="$(mktemp -d)"
     export HOME="$FAKE_HOME"
     export CLAUDE_CONFIG_DIR="$FAKE_HOME/.claude"
@@ -18,7 +23,7 @@ setup() {
     export CODEX_HOME="$FAKE_HOME/.codex"
 
     SKILLS="autospec autospec-release autospec-split autospec-define autospec-run autospec-classify autospec-listen autospec-story autospec-stop autospec-sweep autospec-design autospec-fleet autospec-qa"
-    HELPERS="autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh autospec-sweep-wizard.sh autospec-sweep-run.sh autospec-sweep-review.sh run-state.sh list-ready-issues.sh claim-issue.sh release-issue.sh"
+    HELPERS="autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh autospec-sweep-wizard.sh autospec-sweep-run.sh autospec-sweep-review.sh"
 }
 
 teardown() {

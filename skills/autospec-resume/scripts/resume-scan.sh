@@ -16,7 +16,7 @@
 #     Otherwise assume a live/slow worker elsewhere and do NOT steal.
 #   - Idempotency / NO second lock: this script NEVER writes a run-state comment
 #     and adds NO new lock. The relaunched monitor claims through the EXISTING
-#     GitHub CAS lock (run-state.sh, lowest-comment-id wins). Two concurrent
+#     GitHub CAS lock (`autospec claim state read`, lowest-comment-id wins). Two concurrent
 #     resumes therefore converge to exactly one claim at the existing CAS.
 #   - Cross-host: --resume-partial re-attaches /tmp/wt-<branch> only when the
 #     heartbeat host == $(hostname). Cross-host or missing host MUST
@@ -35,7 +35,7 @@
 #
 # Environment:
 #   AUTOSPEC_STATE_DIR              base for stop.flag (default: ~/.autospec)
-#   AUTOSPEC_RUN_STATE_SH          path to run-state.sh (auto-resolved)
+#   AUTOSPEC_BIN                   path to the Rust autospec command (default: autospec)
 #   AUTOSPEC_HEARTBEAT_READ_SH     path to heartbeat-read.sh (auto-resolved)
 #   AUTOSPEC_RUN_REGISTRY_SH       path to autospec-run-registry.sh (auto-resolved)
 #   AUTOSPEC_RESUME_ATTEMPTS_SH    path to resume-attempts.sh (auto-resolved)
@@ -66,9 +66,11 @@ resolve_helper() {
     printf ''
 }
 
-RUN_STATE_SH="$(resolve_helper "${AUTOSPEC_RUN_STATE_SH:-}" \
-    "$SCRIPT_DIR/../../autospec-run/scripts/run-state.sh" \
-    "$STATE_DIR/scripts/run-state.sh")"
+AUTOSPEC_CLAIM_BIN="${AUTOSPEC_BIN:-}"
+if [ -z "$AUTOSPEC_CLAIM_BIN" ] && [ -x "$SCRIPT_DIR/../../../target/debug/autospec" ]; then
+    AUTOSPEC_CLAIM_BIN="$SCRIPT_DIR/../../../target/debug/autospec"
+fi
+[ -n "$AUTOSPEC_CLAIM_BIN" ] || AUTOSPEC_CLAIM_BIN="autospec"
 HEARTBEAT_READ_SH="$(resolve_helper "${AUTOSPEC_HEARTBEAT_READ_SH:-}" \
     "$SCRIPT_DIR/../../autospec-run/scripts/heartbeat-read.sh" \
     "$STATE_DIR/scripts/heartbeat-read.sh")"
@@ -175,9 +177,7 @@ for issue in $in_progress; do
 
     # Run-state (durable, cross-machine): must exist; gives SERVER updated_at.
     rs=""
-    if [ -n "$RUN_STATE_SH" ]; then
-        rs="$(bash "$RUN_STATE_SH" read --issue "$issue" --repo "$REPO" 2>/dev/null || true)"
-    fi
+    rs="$("$AUTOSPEC_CLAIM_BIN" claim state read --issue "$issue" --repo "$REPO" 2>/dev/null || true)"
     [ -n "$rs" ] || continue   # no durable run-state -> not a resumable claim
 
     saw_in_progress_nonterminal=1

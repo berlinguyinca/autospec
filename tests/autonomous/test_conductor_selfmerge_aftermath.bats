@@ -45,6 +45,7 @@ setup() {
 
   FAKE_SCRIPTS="$TEST_TMP/fake-scripts"
   mkdir -p "$FAKE_SCRIPTS"
+  export AUTOSPEC_QUEUE_BIN="$FAKE_SCRIPTS/autospec"
   cp "$REPO_ROOT/scripts/autospec-runtime-config.sh" "$FAKE_SCRIPTS/autospec-runtime-config.sh"
 
   FAKE_BIN="$TEST_TMP/fake-bin"
@@ -125,10 +126,11 @@ _install_common_stubs() {
     'printf '\''{"tier":1,"action":"run-backlog","reason":"test"}\n'\'''
 }
 
-_install_list_ready() {
+_install_queue() {
   local numbers_csv="$1"
-  cat > "$FAKE_SCRIPTS/list-ready-issues.sh" <<EOF
+  cat > "$FAKE_SCRIPTS/autospec" <<EOF
 #!/usr/bin/env bash
+shift 2
 jq -cn '{
   ready: ([$numbers_csv] | map({number: .})),
   blocked: [], claimed: [], conflicts: [],
@@ -136,7 +138,7 @@ jq -cn '{
   batch: ([$numbers_csv] | map({number: .}))
 }'
 EOF
-  chmod +x "$FAKE_SCRIPTS/list-ready-issues.sh"
+  chmod +x "$FAKE_SCRIPTS/autospec"
 }
 
 # provenance mock: issues 1xx -> self, 2xx -> operator.
@@ -215,7 +217,7 @@ _run_cycle() {
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101"
+  _install_queue "101"
   printf '{"issue":101,"pr":501,"outcome":"merged","self_originated":true}\n' > "$OUTCOME_FILE"
 
   _run_cycle
@@ -233,7 +235,7 @@ _run_cycle() {
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101"
+  _install_queue "101"
   printf '{"issue":101,"pr":501,"outcome":"merged","self_originated":true}\n' > "$OUTCOME_FILE"
 
   _run_cycle
@@ -245,7 +247,7 @@ _run_cycle() {
 @test "rollup-update nonzero exit (non-rollup-red failure) still parks self-originated tiers" {
   _install_common_stubs
   _install_provenance
-  _install_list_ready "101"
+  _install_queue "101"
   printf '{"issue":101,"pr":501,"outcome":"merged","self_originated":true}\n' > "$OUTCOME_FILE"
 
   cat > "$FAKE_SCRIPTS/autonomous-integration-branch.sh" <<EOF
@@ -282,7 +284,7 @@ EOF
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101"
+  _install_queue "101"
   printf '{"issue":101,"pr":501,"outcome":"merged","self_originated":true}\n' > "$OUTCOME_FILE"
   : > "$TEST_TMP/rollup-red"
 
@@ -298,7 +300,7 @@ EOF
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101,202"
+  _install_queue "101,202"
   printf '{"reason":"rollup_red"}\n' > "$PAUSE_FILE"
 
   _run_cycle
@@ -316,7 +318,7 @@ EOF
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101,202"
+  _install_queue "101,202"
   printf '{"branch":"autospec/autonomous-main","rollup_pr":{"number":9,"state":"OPEN"},"accumulated_pr_count":21,"age_days":1,"diff_lines":10}\n' \
     > "$TEST_TMP/status-json"
 
@@ -333,7 +335,7 @@ EOF
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101"
+  _install_queue "101"
   printf '{"branch":"autospec/autonomous-main","rollup_pr":{"number":null,"state":null},"accumulated_pr_count":2,"age_days":1,"diff_lines":10}\n' \
     > "$TEST_TMP/status-json"
 
@@ -349,7 +351,7 @@ EOF
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101"
+  _install_queue "101"
   printf '{"issue":101,"pr":501,"outcome":"merged","self_originated":true}\n' > "$OUTCOME_FILE"
 
   # First sync call (dispatch-time ensure+sync) succeeds; the aftermath's
@@ -397,7 +399,7 @@ EOF
   _install_common_stubs
   _install_provenance
   _install_intbranch
-  _install_list_ready "101"
+  _install_queue "101"
 
   _run_cycle
 

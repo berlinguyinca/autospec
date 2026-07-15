@@ -116,14 +116,14 @@ Prepend the output block (if non-empty) to your working context. This surfaces l
 
 ### Issue intent safety gate
 
-Before adding or preserving `auto-implement`, run the issue intent safety gate with `lint-issue-safety.sh`:
+Before adding or preserving `auto-implement`, run the Rust issue-intent safety gate:
 
 ```bash
 _body_file="$(mktemp)"
 gh issue view <N> --repo {repo} --json body --jq '.body' > "$_body_file"
 _author="$(gh issue view <N> --repo {repo} --json author --jq '.author.login // empty')"
 _title="$(gh issue view <N> --repo {repo} --json title --jq '.title')"
-bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue-safety.sh" \
+"${AUTOSPEC_BIN:-autospec}" lint issue safety \
   --json --actor "$_author" --title "$_title" "$_body_file" > /tmp/safety-<N>.json
 _safety_status=$?
 ```

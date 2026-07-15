@@ -31,6 +31,12 @@ The lifecycle store persists a schema-versioned document at `.autospec/state/spe
 
 The V66 queue layer builds on that state with ordered entries, attempts, failure classification, blocked-spec handoff markdown, and final run-report summaries. Its local run model persists under `.autospec/runs/<run-id>/queue.json` and can select the newest incomplete valid run. `autospec run --run <id> --spec <id>` creates that local queue only. `autospec run --ingest <agent-result.json> ...` accepts a strict agent-result document plus an explicit typed outcome, persists it under an append-only result ID, and updates the matching queue entry exactly once. `autospec resume` reports the newest incomplete queue and its next entry. None of these commands launches an agent, invokes a shell, or runs validation; `/autospec-run` remains the operational execution workflow.
 
+The Rust claim-control-plane cutover now owns `autospec claim`: strict parsing and rendering of
+schema-1 GitHub run-state comments, lowest-comment-ID selection, duplicate collapse, linked-PR
+reconciliation, typed safety eligibility, heartbeat/label ordering, lease CAS, and terminal
+release transitions. The next step redirects every live caller to this one command family before
+deleting the former shell authorities.
+
 ## Rust CLI
 
 The `autospec` Rust binary exposes the V62+ command surface while preserving the skill-first workflow. `doctor`, `init`, `status`, `plan`, `validate`, `run`, `resume`, `report`, `showcase`, and `growth-report` support `--json`. `autospec init --spec <id>` creates local planned state without executing work. Direct `autospec validate [--path <changed-path>]...` is a read-only affected-check planner, while `autospec validate --shadow-results <file>` aggregates pre-captured results without spawning a command. `autospec validate` remains the executor for shell options such as `--fast`. `run` and `resume` only create, ingest, and inspect local queue state; `benchmark` remains a non-zero stub.

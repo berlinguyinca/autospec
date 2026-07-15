@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # tests/autospec-run/test_list_ready_issues.bats — regression contract for
-# issue #1663: list-ready-issues.sh must scope dependency extraction to the
+# issue #1663: autospec queue ready must scope dependency extraction to the
 # "## Dependencies" section so that prose of the form "#B depends on #A"
 # anywhere else in the body (e.g. a "## Shared contracts" sequencing note)
 # is NEVER misread as a real dependency edge.
@@ -9,7 +9,7 @@
 # "## Shared contracts" block, which injected a phantom dependency on #1654
 # into all 13 children (including #1654 onto itself), deadlocking the queue.
 #
-# These tests exercise the real script end-to-end with a mocked `gh` binary
+# These tests exercise the real Rust queue end-to-end with a mocked `gh` binary
 # (PATH-prepend, mirroring tests/autospec-run/test_parallel_dispatch.bats):
 #   - `gh issue list --label auto-implement`     -> the candidate fixture
 #   - `gh issue list --label in-progress-by-bot` -> [] (no active workers)
@@ -17,7 +17,10 @@
 
 setup() {
     REPO_ROOT="$(git rev-parse --show-toplevel)"
-    SCRIPT="$REPO_ROOT/skills/autospec-run/scripts/list-ready-issues.sh"
+    AUTOSPEC="$REPO_ROOT/target/debug/autospec"
+    if [ ! -x "$AUTOSPEC" ]; then
+        cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
+    fi
     FIXTURE_DIR="$(mktemp -d)"
     MOCK_BIN="$FIXTURE_DIR/bin"
     mkdir -p "$MOCK_BIN"
@@ -84,9 +87,9 @@ teardown() {
     rm -rf "$FIXTURE_DIR"
 }
 
-# Run the script against the current auto.json fixture; echoes JSON stdout only.
+# Run the Rust queue against the current auto.json fixture; echoes JSON stdout only.
 run_list_ready() {
-    PATH="$MOCK_BIN:$PATH" bash "$SCRIPT" --repo "test/repo" --batch-size 10 2>/dev/null
+    PATH="$MOCK_BIN:$PATH" "$AUTOSPEC" queue ready --repo "test/repo" --batch-size 10 2>/dev/null
 }
 
 safe_body() {
@@ -245,7 +248,7 @@ Stale issue with captured work in an open PR.
 
 ## Implementation outline
 
-- edit `scripts/claim-issue.sh`
+- edit `crates/autospec-cli/src/commands/claim.rs`
 EOF
 )"
     write_auto_issue 1859 "batch claims atomic worker startup" "$body"
@@ -626,7 +629,7 @@ Parked issue must wait for operator handling.
 
 ## Implementation outline
 
-- edit `scripts/list-ready-issues.sh`
+- edit `crates/autospec-cli/src/commands/queue.rs`
 BODY
 )"
     labels='[{"name":"auto-implement"},{"name":"safety:reviewed"},{"name":"autospec:needs-human"}]'

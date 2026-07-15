@@ -166,26 +166,26 @@ fi
 backlog_count=0
 if [ -n "$BACKLOG_COUNT_INJECT" ]; then
     # Primary path (#1632): the caller (lib/autospec-loop.sh) already computed
-    # the dependency-aware ready count via list-ready-issues.sh — trust it.
+    # the dependency-aware ready count via autospec queue ready — trust it.
     backlog_count="$BACKLOG_COUNT_INJECT"
 else
     # Defense-in-depth (#1632): no injected count — this is a standalone
     # invocation (tests, other callers). Prefer the dependency-aware
-    # list-ready-issues.sh (ready+batch) over the naive open-issue-count `gh`
+    # Rust queue (ready+batch) over the naive open-issue-count `gh`
     # query, so a fully-blocked backlog yields backlog_count=0 here too — one
     # readiness definition, matching the drain. Fall back to the naive `gh`
-    # count only when list-ready-issues.sh is unavailable.
-    _list_ready_bin="${AUTOSPEC_LIST_READY_BIN:-}"
-    if [ -z "$_list_ready_bin" ]; then
+    # count only when the Rust queue command is unavailable.
+    _queue_bin="${AUTOSPEC_QUEUE_BIN:-${AUTOSPEC_BIN:-}}"
+    if [ -z "$_queue_bin" ]; then
         _wf_dir="$(cd "$(dirname "$0")" && pwd)"
-        if [ -x "$_wf_dir/list-ready-issues.sh" ]; then
-            _list_ready_bin="$_wf_dir/list-ready-issues.sh"
-        elif [ -x "$_wf_dir/../skills/autospec-run/scripts/list-ready-issues.sh" ]; then
-            _list_ready_bin="$_wf_dir/../skills/autospec-run/scripts/list-ready-issues.sh"
+        if [ -x "$_wf_dir/../target/debug/autospec" ]; then
+            _queue_bin="$_wf_dir/../target/debug/autospec"
+        elif command -v autospec >/dev/null 2>&1; then
+            _queue_bin="$(command -v autospec)"
         fi
     fi
-    if [ -n "$_list_ready_bin" ] && [ -x "$_list_ready_bin" ] && [ -n "$REPO" ]; then
-        _ready_json="$(bash "$_list_ready_bin" --repo "$REPO" --batch-size 1 2>/dev/null)"
+    if [ -n "$_queue_bin" ] && { [ -x "$_queue_bin" ] || command -v "$_queue_bin" >/dev/null 2>&1; } && [ -n "$REPO" ]; then
+        _ready_json="$("$_queue_bin" queue ready --repo "$REPO" --batch-size 1 2>/dev/null)"
         backlog_count="$(printf '%s' "$_ready_json" \
             | jq -r 'if (.worker_cap.reached // false) then 0 else ((.ready|length) + (.batch|length)) end' \
               2>/dev/null)"

@@ -92,7 +92,7 @@ dedicated config keys.
 
 ## Issue intent safety
 
-`safety.issue_intent_gate` configures deterministic issue screening. Missing or invalid config falls back to conservative built-in defaults. `block_patterns` and `ambiguous_patterns` add regex rules. `trusted_actors` can pass scoped test/dev cleanup but cannot bypass secret exfiltration, production data destruction, instruction bypass, backdoors, or CI/review bypass.
+`safety.issue_intent_gate` configures deterministic issue screening. Missing or invalid config falls back to conservative built-in defaults. The built-in policy is evaluated natively in Rust: duplicate built-in entries are accepted, while a custom regex that the dependency-free evaluator cannot represent fails closed with `invalid-policy-regex` rather than being ignored. `trusted_actors` can pass scoped test/dev cleanup but cannot bypass secret exfiltration, production data destruction, instruction bypass, backdoors, or CI/review bypass.
 
 ## Core paths & repo
 | Var | Default | Effect |

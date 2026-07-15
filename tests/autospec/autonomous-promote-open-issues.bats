@@ -50,7 +50,7 @@ SH
   export AUTOSPEC_GROOM_GOVERN_SCRIPT="$TMP/bin/govern.sh"
 
   # ── safety + eligibility stubs are per-test (below) ─────────────────────────
-  mk_safety() { printf '#!/usr/bin/env bash\nprintf %%s\\\\n "%s"\n' "$1" > "$TMP/bin/safety.sh"; chmod +x "$TMP/bin/safety.sh"; export AUTOSPEC_GROOM_SAFETY_SCRIPT="$TMP/bin/safety.sh"; }
+  mk_safety() { printf '#!/usr/bin/env bash\nprintf %%s\\\\n "%s"\n' "$1" > "$TMP/bin/safety.sh"; chmod +x "$TMP/bin/safety.sh"; export AUTOSPEC_GROOM_SAFETY_BIN="$TMP/bin/safety.sh"; }
   mk_elig() { printf '#!/usr/bin/env bash\nprintf %%s\\\\n %s\n' "'{\"decision\":\"$1\",\"reason\":\"stub\"}'" > "$TMP/bin/elig.sh"; chmod +x "$TMP/bin/elig.sh"; export AUTOSPEC_GROOM_ELIGIBILITY_SCRIPT="$TMP/bin/elig.sh"; }
   # groom-fill stub seam: mk_fill ok → {"ok":true,"body":...}; mk_fill fail → {"ok":false,"reason":...}
   mk_fill() {

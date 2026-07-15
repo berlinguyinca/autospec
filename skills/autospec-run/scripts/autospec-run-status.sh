@@ -123,17 +123,19 @@ if [ -n "$repo" ]; then
   fi
 fi
 
-# Queue counts (best-effort; needs gh + list-ready-issues.sh, resolved
-# defensively as a sibling then via AUTOSPEC_SCRIPTS_DIR). Degrade to nulls.
+# Queue counts (best-effort; needs gh + the Rust queue command). Degrade to nulls.
 queue='{"ready":null,"blocked":null,"claimed":null}'
 queue_full='{"ready":[],"blocked":[],"claimed":[],"conflicts":[],"batch":[]}'
 queue_known=0
-queue_bin=""
-for _c in "$SCRIPT_DIR/list-ready-issues.sh" "${AUTOSPEC_SCRIPTS_DIR:-}/list-ready-issues.sh"; do
-  [ -n "$_c" ] && [ -f "$_c" ] && { queue_bin="$_c"; break; }
-done
+queue_bin="${AUTOSPEC_QUEUE_BIN:-${AUTOSPEC_BIN:-}}"
+if [ -z "$queue_bin" ] && [ -x "$SCRIPT_DIR/../../../target/debug/autospec" ]; then
+  queue_bin="$SCRIPT_DIR/../../../target/debug/autospec"
+fi
+if [ -z "$queue_bin" ] && command -v autospec >/dev/null 2>&1; then
+  queue_bin="$(command -v autospec)"
+fi
 if [ -n "$queue_bin" ] && command -v gh >/dev/null 2>&1; then
-  q="$(bash "$queue_bin" ${REPO_ARG:+--repo "$REPO_ARG"} 2>/dev/null)"
+  q="$("$queue_bin" queue ready ${REPO_ARG:+--repo "$REPO_ARG"} 2>/dev/null)"
   if [ -n "$q" ]; then
     queue_full="$(printf '%s' "$q" | jq '{ready:(.ready // []),blocked:(.blocked // []),claimed:(.claimed // []),conflicts:(.conflicts // []),batch:(.batch // [])}' 2>/dev/null)"
     [ -n "$queue_full" ] || queue_full='{"ready":[],"blocked":[],"claimed":[],"conflicts":[],"batch":[]}'

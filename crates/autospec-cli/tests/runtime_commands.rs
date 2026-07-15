@@ -966,10 +966,11 @@ fn legacy_agent_env_authority_is_absent() {
     let legacy_path = format!("scripts/{legacy_filename}");
     let mut live_references = Vec::new();
     for path in String::from_utf8_lossy(&tracked.stdout).lines() {
-        if path == legacy_path {
+        let source_path = root.join(path);
+        if path == legacy_path || !source_path.is_file() {
             continue;
         }
-        let source = fs::read(root.join(path))
+        let source = fs::read(&source_path)
             .unwrap_or_else(|error| panic!("read tracked source {path}: {error}"));
         let source = String::from_utf8_lossy(&source);
         for (line_number, line) in source.lines().enumerate() {

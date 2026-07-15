@@ -90,12 +90,12 @@ first_char="$(od -An -tx1 -N1 "$CODEX_PROMPT" | tr -d ' \n')"
 
 # ── 5. resume-scan.sh writes no run-state comment / adds no new lock ──────────
 info "checking resume-scan.sh adds no second lock"
-if grep -E 'run-state\.sh[^[:alnum:]]*upsert|run-state\.sh[^[:alnum:]]*clear|gh issue comment' \
+if grep -E 'autospec[[:space:]]+claim[[:space:]]+state[[:space:]]+(upsert|clear)|gh issue comment' \
         "$SKILL_DIR/scripts/resume-scan.sh"; then
     fail "resume-scan.sh must NOT write a run-state comment or add a lock (found a mutation call)"
 fi
-grep -q 'run-state.sh read\|run-state.sh" read\|RUN_STATE_SH" read' "$SKILL_DIR/scripts/resume-scan.sh" \
-    || fail "resume-scan.sh must READ run-state (reuse the existing CAS), never re-implement it"
+grep -q 'claim state read' "$SKILL_DIR/scripts/resume-scan.sh" \
+    || fail "resume-scan.sh must READ run-state through autospec claim, never re-implement it"
 
 # ── 6. bash -n on all scripts ─────────────────────────────────────────────────
 info "checking bash -n on all scripts"

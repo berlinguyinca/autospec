@@ -95,6 +95,16 @@ printf 'SAFETY_PASS\n'
 EOF
     chmod +x "$TMP/bin/groom-safety.sh"
 
+    # The promotion orchestration test owns queue routing, not the separate
+    # final-body stamping workflow. Stub that already-covered boundary so this
+    # fixture exercises the Rust pre-routing safety command without depending
+    # on an installed control-plane binary.
+    cat > "$TMP/bin/groom-apply-safety.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$TMP/bin/groom-apply-safety.sh"
+
     cat > "$TMP/bin/groom-classify.sh" <<'EOF'
 #!/usr/bin/env bash
 printf '{"ctx":"64k","reasoning":"medium"}\n'
@@ -118,7 +128,8 @@ EOF
     chmod +x "$TMP/bin/groom-config.sh"
 
     export AUTOSPEC_GROOM_LIST_SCRIPT="$TMP/bin/groom-list.sh"
-    export AUTOSPEC_GROOM_SAFETY_SCRIPT="$TMP/bin/groom-safety.sh"
+    export AUTOSPEC_GROOM_SAFETY_BIN="$TMP/bin/groom-safety.sh"
+    export AUTOSPEC_GROOM_APPLY_SAFETY_SCRIPT="$TMP/bin/groom-apply-safety.sh"
     export AUTOSPEC_GROOM_CLASSIFY_SCRIPT="$TMP/bin/groom-classify.sh"
     export AUTOSPEC_GROOM_ELIGIBILITY_SCRIPT="$TMP/bin/groom-eligibility.sh"
     export AUTOSPEC_GROOM_CONFIG_SCRIPT="$TMP/bin/groom-config.sh"

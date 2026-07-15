@@ -88,7 +88,7 @@ setup() {
         ! grep -q 'proceed to `gh issue create` as normal' "$file"
         grep -q "Pre-filing safety loop" "$file"
         grep -q "MAX_SAFETY_RETRIES=5" "$file"
-        grep -q "lint-issue-safety.sh" "$file"
+        grep -q 'lint issue safety' "$file"
         grep -q "skip that child" "$file"
         grep -q 'after the issue-quality lint passes and before `gh issue create`' "$file"
     done
@@ -141,7 +141,7 @@ setup() {
         "$REPO_ROOT/skills/autospec-define/SKILL.md"
     do
         grep -q "Issue intent safety gate" "$file"
-        grep -q "scripts/lint-issue-safety.sh" "$file"
+        grep -q 'lint issue safety' "$file"
         grep -q "security:quarantined" "$file"
         grep -q "safety:reviewed" "$file"
         grep -q "<!-- autospec-safety:begin -->" "$file"
@@ -210,11 +210,12 @@ setup() {
     done
 
     grep -q "both \`<!-- autospec-safety:begin -->\` and \`<!-- autospec-safety:end -->\`" "$REPO_ROOT/skills/autospec-run/SKILL.md"
-    grep -Fq 'exactly one decision line equal to `- **decision:** \`SAFETY_PASS\``' "$REPO_ROOT/skills/autospec-run/SKILL.md"
+    grep -Fq 'exactly one decision line between them:' "$REPO_ROOT/skills/autospec-run/SKILL.md"
+    grep -Fq -- '- **decision:** `SAFETY_PASS`' "$REPO_ROOT/skills/autospec-run/SKILL.md"
 }
 
 @test "docs mention issue intent safety gate" {
-    grep -q "lint-issue-safety.sh" "$REPO_ROOT/docs/API_REFERENCE.md"
+    grep -q "lint issue safety" "$REPO_ROOT/docs/API_REFERENCE.md"
     grep -q "issue_intent_gate" "$REPO_ROOT/docs/CONFIG_REFERENCE.md"
     grep -q "security:quarantined" "$REPO_ROOT/docs/USER_MANUAL.md"
 }

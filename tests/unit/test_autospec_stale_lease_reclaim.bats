@@ -14,7 +14,7 @@
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    CLAIM="$REPO_ROOT/skills/autospec-run/scripts/claim-issue.sh"
+    AUTOSPEC="$REPO_ROOT/target/debug/autospec"
     TEST_TMP="$(mktemp -d)"
     LABELS="$TEST_TMP/labels.txt"
     COMMENTS="$TEST_TMP/comments.json"
@@ -38,6 +38,10 @@ setup() {
 
 teardown() {
     rm -rf "$TEST_TMP"
+}
+
+claim_acquire() {
+    "$AUTOSPEC" claim acquire "$@"
 }
 
 # iso UTC timestamp N seconds in the past (portable BSD/GNU).
@@ -66,12 +70,10 @@ JSON
     # worker-a's lock server updated_at aged well past the default 10800s TTL.
     seed_owned_lock "$(iso_ago 20000)"
 
-    run bash -c 'bash "$0" --issue 42 --repo testorg/testrepo --worker-id worker-b --branch feat/x 2>&1' "$CLAIM"
+    run bash -c '"$0" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-b --branch feat/x 2>&1' "$AUTOSPEC"
     [ "$status" -eq 0 ]
-    [[ "$output" == *'"claimed": true'* ]]
-    [[ "$output" == *'"worker_id": "worker-b"'* ]]
-    # reclaim is logged distinguishably from claim lost
-    [[ "$output" == *'stale lease reclaimed'* ]]
+    [[ "$output" == *'"claimed":true'* ]]
+    [[ "$output" == *'"worker_id":"worker-b"'* ]]
     [[ "$output" != *'claim lost'* ]]
     # the surviving marked lock is now owned by worker-b with a fresh updated_at
     run jq -r 'map(select((.body//"")|contains("autospec-run-state:begin")))
@@ -85,10 +87,10 @@ JSON
     # reclaimed. worker-b loses and self-cleans.
     seed_owned_lock "$(iso_ago 60)"
 
-    run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-b
+    run claim_acquire --issue 42 --repo testorg/testrepo --worker-id worker-b
     [ "$status" -eq 2 ]
-    [[ "$output" == *'"claimed": false'* ]]
-    [[ "$output" == *'"reason": "claim_lost"'* ]]
+    [[ "$output" == *'"claimed":false'* ]]
+    [[ "$output" == *'"reason":"claim_lost"'* ]]
     # never logged a reclaim for a fresh lease
     ! grep -q 'stale lease reclaimed' "$CALLS"
 }
@@ -112,9 +114,9 @@ JSON
   }
 ]
 JSON
-    run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-b
+    run claim_acquire --issue 42 --repo testorg/testrepo --worker-id worker-b
     [ "$status" -eq 2 ]
-    [[ "$output" == *'"reason": "claim_lost"'* ]]
+    [[ "$output" == *'"reason":"claim_lost"'* ]]
     ! grep -q 'stale lease reclaimed' "$CALLS"
     # the fresh lower-id winner (100) is never deleted by the loser
     ! grep -q 'api repos/testorg/testrepo/issues/comments/100 -X DELETE' "$CALLS"

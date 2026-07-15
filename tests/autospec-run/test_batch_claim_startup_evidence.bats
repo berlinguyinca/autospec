@@ -4,7 +4,10 @@
 
 setup() {
     REPO_ROOT="$(git rev-parse --show-toplevel)"
-    SCRIPT="$REPO_ROOT/skills/autospec-run/scripts/list-ready-issues.sh"
+    AUTOSPEC="$REPO_ROOT/target/debug/autospec"
+    if [ ! -x "$AUTOSPEC" ]; then
+        cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
+    fi
     FIXTURE="$REPO_ROOT/tests/fixtures/autospec-run/issue-1858-run-state.json"
     TMPDIR_BATS="$(mktemp -d)"
     MOCK_BIN="$TMPDIR_BATS/bin"
@@ -15,6 +18,7 @@ setup() {
 
     write_issue_list > "$TMPDIR_BATS/auto.json"
     jq -n --arg body "$(safe_body)" '[{number:1858,title:"startup failed",body:$body,labels:[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]}]' > "$TMPDIR_BATS/active.json"
+    cp "$TMPDIR_BATS/active.json" "$TMPDIR_BATS/active-original.json"
 
     write_git_mock
     write_gh_mock
@@ -68,6 +72,10 @@ case "\$sub" in
     if [ "\${ISSUE_EDIT_FAIL:-0}" = "1" ]; then
       exit 1
     fi
+    case "\$*" in
+      *"--remove-label in-progress-by-bot --add-label auto-implement"*) printf '[]\n' > "\$TMPDIR_BATS/active.json" ;;
+      *"--remove-label auto-implement --add-label in-progress-by-bot"*) cp "\$TMPDIR_BATS/active-original.json" "\$TMPDIR_BATS/active.json" ;;
+    esac
     exit 0
     ;;
   "repo view")
@@ -137,7 +145,7 @@ run_list_ready() {
     PATH="$MOCK_BIN:$PATH" \
     AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=3 \
     AUTOSPEC_HEARTBEAT_DIR="$TMPDIR_BATS/heartbeats" \
-      bash "$SCRIPT" --repo test/repo --batch-size 3
+      "$AUTOSPEC" queue ready --repo test/repo --batch-size 3
 }
 
 @test "batch size 3 ignores and requeues startup-failed second worker with no heartbeat or branch" {
