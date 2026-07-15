@@ -222,9 +222,10 @@ impl StructuralValidator {
             }
         }
 
+        let documented_flags = sentinel_flags(&documentation);
         let missing = flags
             .into_iter()
-            .filter(|flag| !documentation.contains(flag))
+            .filter(|flag| !documented_flags.contains(flag))
             .collect::<Vec<_>>();
         if missing.is_empty() {
             Ok(())
