@@ -91,19 +91,13 @@ EOF
 
     cat > "$TMP/bin/groom-safety.sh" <<'EOF'
 #!/usr/bin/env bash
-printf 'SAFETY_PASS\n'
+printf '%s\n' "autospec $*" >> "$GH_LOG"
+if [ "${1:-}" != "queue" ] || [ "${2:-}" != "review-safety" ]; then
+  exit 41
+fi
+printf '%s\n' '{"pass":1,"ambiguous":0,"block":0,"stale":0,"conflicted":0,"skipped":0}'
 EOF
     chmod +x "$TMP/bin/groom-safety.sh"
-
-    # The promotion orchestration test owns queue routing, not the separate
-    # final-body stamping workflow. Stub that already-covered boundary so this
-    # fixture exercises the Rust pre-routing safety command without depending
-    # on an installed control-plane binary.
-    cat > "$TMP/bin/groom-apply-safety.sh" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-    chmod +x "$TMP/bin/groom-apply-safety.sh"
 
     cat > "$TMP/bin/groom-classify.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -129,7 +123,6 @@ EOF
 
     export AUTOSPEC_GROOM_LIST_SCRIPT="$TMP/bin/groom-list.sh"
     export AUTOSPEC_GROOM_SAFETY_BIN="$TMP/bin/groom-safety.sh"
-    export AUTOSPEC_GROOM_APPLY_SAFETY_SCRIPT="$TMP/bin/groom-apply-safety.sh"
     export AUTOSPEC_GROOM_CLASSIFY_SCRIPT="$TMP/bin/groom-classify.sh"
     export AUTOSPEC_GROOM_ELIGIBILITY_SCRIPT="$TMP/bin/groom-eligibility.sh"
     export AUTOSPEC_GROOM_CONFIG_SCRIPT="$TMP/bin/groom-config.sh"
@@ -191,6 +184,10 @@ teardown() {
     # A ctx:* and reasoning:* label were applied (not coupled to a specific tier).
     grep -E 'issue edit 101 .*--add-label' "$GH_LOG" | grep -q 'ctx:'
     grep -E 'issue edit 101 .*--add-label' "$GH_LOG" | grep -q 'reasoning:'
+    grep -q 'autospec queue review-safety --repo owner/repo --limit 1 --issue 101' "$GH_LOG"
+    auto_line="$(grep -n 'issue edit 101 .*auto-implement' "$GH_LOG" | head -1 | cut -d: -f1)"
+    review_line="$(grep -n 'autospec queue review-safety --repo owner/repo --limit 1 --issue 101' "$GH_LOG" | head -1 | cut -d: -f1)"
+    [ "$auto_line" -lt "$review_line" ]
 }
 
 # ── Selector exclusions ────────────────────────────────────────────────────────

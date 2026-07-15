@@ -269,6 +269,18 @@ Maps repo slugs to local paths. See `examples/project-map.yml`.
 | `ctx:32k` / `ctx:64k` / `ctx:120k` | Model context budget hint |
 | `reasoning:standard` / `reasoning:deep` | Reasoning tier hint |
 
+### Rust safety review
+
+After an issue receives `auto-implement`, run
+`autospec queue review-safety --repo OWNER/REPO --limit 1 --issue N` to review that exact issue.
+Only Rust writes the safety decision, labels, and review block: a pass adds `safety:reviewed`, while
+an ambiguous or blocking result remains unclaimable under `autospec:needs-human` or
+`security:quarantined`.
+
+Automated filers first add interim `auto-implement` and then call that exact Rust
+command; they never create the safety result themselves. Applied grooming retries
+a bounded set of interim issues on the next cycle when a review command fails.
+
 ## Docs amendment
 
 <!-- autospec-doc-scope:

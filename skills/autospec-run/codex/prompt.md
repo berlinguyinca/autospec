@@ -477,14 +477,18 @@ During the normal monitor loop:
 
 ### Final safety-stamp contract
 
-Before an issue can enter implementation, its final body must contain both `<!-- autospec-safety:begin -->` and `<!-- autospec-safety:end -->`, with exactly one decision line between them:
+`autospec queue review-safety` is the only automatic writer of issue-intent
+safety outcomes. After an admission surface persists its final issue body and
+adds interim `auto-implement`, it must invoke the exact target:
 
-```markdown
-- **decision:** `SAFETY_PASS`
+```bash
+autospec queue review-safety --repo {repo} --limit 1 --issue <N>
 ```
 
-Generate that decision through `autospec lint issue safety`; a missing,
-ambiguous, or blocking result must keep the issue out of the queue.
+Only the command's `pass: 1` total admits that invocation. The ready queue and
+claim command consume Rust's typed passing evidence and refuse a missing,
+ambiguous, or blocking result. They never reconstruct, stamp, or replace a
+safety decision with `gh` commands or `lint issue safety` output.
 
 The GitHub `autospec-run-state` comment written by the Rust control plane is the
 cross-workstation source of truth. Local process heartbeat files remain useful

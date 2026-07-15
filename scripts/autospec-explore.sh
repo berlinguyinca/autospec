@@ -386,7 +386,6 @@ for proposal in data.get("proposals", []) or []:
     reasoning = reasoning_label(severity, complexity)
     labels = [
         "auto-implement",
-        "safety:reviewed",
         ctx,
         reasoning,
         "explore",
@@ -413,19 +412,6 @@ for proposal in data.get("proposals", []) or []:
         "## Verification",
         "Adversarial verify: passed before filing by the explore research-cycle finalize gate.",
         "ROI gate: passed (candidate survived severity-first rank).",
-        "",
-        "## Safety review",
-        "",
-        "<!-- autospec-safety:begin -->",
-        "- **decision:** `SAFETY_PASS`",
-        "<!-- autospec-safety:end -->",
-        "",
-        "- **actor:** `autospec-explore`",
-        "- **trust:** `autonomous-verified-discovery`",
-        "- **matched rules:** `explore-adversarial-verify`",
-        "- **reason:** Candidate passed the explore finalize gate before filing; autospec-run re-lints the current body before claiming.",
-        "",
-        f"*Auto-reviewed by issue intent safety gate on {__import__('datetime').datetime.utcnow().strftime('%Y-%m-%d')}.*",
         "",
         "## Model fit",
         f"- {ctx}",
@@ -490,15 +476,49 @@ except Exception:
     _once_filed=0
     if [ "$_once_new" -gt 0 ] && [ -f "$_once_candidates" ] && command -v gh >/dev/null 2>&1; then
         _once_filed="$(python3 - "$_once_candidates" <<'PY'
-import json, subprocess, sys
+import json, os, subprocess, sys
 try:
     candidates = json.load(open(sys.argv[1]))
 except Exception:
     candidates = []
 count = 0
+
+def rust_safety_pass(issue_url):
+    issue_number = str(issue_url or "").strip().rstrip("/").rsplit("/", 1)[-1]
+    if not issue_number.isdigit() or int(issue_number) <= 0:
+        return False
+    repo = str(os.environ.get("GITHUB_REPOSITORY", "")).strip()
+    if not repo:
+        repo_lookup = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        repo = repo_lookup.stdout.strip()
+    if not repo:
+        return False
+    review = subprocess.run(
+        [
+            os.environ.get("AUTOSPEC_BIN", "autospec"),
+            "queue", "review-safety", "--repo", repo,
+            "--limit", "1", "--issue", issue_number,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if review.returncode != 0:
+        return False
+    try:
+        return int(json.loads(review.stdout).get("pass", 0)) == 1
+    except Exception:
+        return False
+
 label_meta = {
     "auto-implement": ("0e8a16", "Autospec autonomous implementation issue"),
-    "safety:reviewed": ("0e8a16", "Issue intent passed autospec safety review"),
     "ctx:32k": ("5319e7", "Small-context implementation fit"),
     "ctx:64k": ("5319e7", "Medium-context implementation fit"),
     "ctx:120k": ("5319e7", "Large-context implementation fit"),
@@ -530,8 +550,15 @@ for candidate in candidates:
         if label:
             cmd.extend(["--label", label])
     try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        count += 1
+        created = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=True,
+        )
+        if rust_safety_pass(created.stdout):
+            count += 1
     except Exception:
         pass
 print(count)
@@ -752,6 +779,23 @@ invoke_drain() {
 }
 
 # >>> explore-spec-first-filing >>>  (issue #1102 — extracted for bats coverage)
+# Review a newly filed interim issue through the Rust-only safety authority.
+# Returns success only when that exact review reports one newly admitted pass.
+_explore_review_exact_issue() {
+    local issue_num="$1" repo review_out review_pass
+    case "$issue_num" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    repo="${GITHUB_REPOSITORY:-}"
+    if [ -z "$repo" ]; then
+        repo="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)" || return 1
+    fi
+    [ -n "$repo" ] || return 1
+    review_out="$("${AUTOSPEC_BIN:-autospec}" queue review-safety --repo "$repo" --limit 1 --issue "$issue_num" 2>/dev/null)" || return 1
+    review_pass="$(printf '%s' "$review_out" | jq -r '.pass // 0' 2>/dev/null)" || return 1
+    [ "$review_pass" = "1" ]
+}
+
 # Raw per-round filing: turn the ranked proposals into bare auto-implement
 # issues via `gh issue create`. Used as the FALLBACK path only, when the
 # spec-first /autospec-define handoff is unavailable or fails. Reads the
@@ -805,12 +849,16 @@ $marker"
             issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement --label origin:self)" || issue_url=""
         fi
         [ -z "$issue_url" ] && continue
-        issues_filed=$((issues_filed + 1))
         # Extract trailing issue number from the returned URL.
         issue_num="$(printf '%s' "$issue_url" | sed -E 's#.*/([0-9]+)[[:space:]]*$#\1#')"
         case "$issue_num" in
             ''|*[!0-9]*) issue_num=0 ;;
         esac
+        if ! _explore_review_exact_issue "$issue_num"; then
+            echo "code_health:explore_rust_safety_unconfirmed issue=${issue_num:-unknown}" >&2
+            continue
+        fi
+        issues_filed=$((issues_filed + 1))
         # Record a pending ledger entry for the filed issue (best-effort).
         if [ "$issue_num" -gt 0 ]; then
             filed_issue_nums="$filed_issue_nums $issue_num"

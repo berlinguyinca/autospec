@@ -87,6 +87,21 @@ fn implementation_lint_reports_scope_and_missing_test_requirements() {
 }
 
 #[test]
+fn implementation_lint_reads_outline_after_multiple_prior_sections() {
+    let issue = "## Goal\nAdd coverage.\n\n## Context\nKeep the issue contract explicit.\n\n## Files to read first\n- `src/allowed.rs`\n\n## Implementation scope\n- Update the implementation.\n\n## Implementation outline\n- Update `src/allowed.rs`.\n\n## Tests required\n- `cargo test -p autospec-core --test implementation_lint`\n";
+    let diff = new_file("src/allowed.rs", &["pub fn covered() {}"]);
+
+    let result = lint(
+        &diff,
+        Some(issue),
+        &TestRepository::default(),
+        ImplementationLintOptions::default(),
+    );
+
+    assert!(!rules(&result).contains(&"OUT_OF_SCOPE"));
+}
+
+#[test]
 fn implementation_lint_reports_complexity_security_todo_mock_and_docs() {
     let deeply_nested = "                    if nested {";
     let diff = format!(

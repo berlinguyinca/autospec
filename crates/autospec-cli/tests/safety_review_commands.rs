@@ -43,6 +43,67 @@ fn review_safety_rejects_a_zero_limit() {
 }
 
 #[test]
+fn review_safety_targets_the_admitted_issue_without_listing_the_queue() {
+    let fixture = SafetyReviewFixture::new();
+    let body = "## Goal\nAdd one typed Rust command with a regression test.";
+    let reviewed_body = format!(
+        "{body}\n\n## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n"
+    );
+    fixture.write_issue(1, "Add a Rust command.", body, &["auto-implement"]);
+    fs::write(
+        &fixture.patched_issue,
+        issue_json(
+            1,
+            "Add a Rust command.",
+            &reviewed_body,
+            &["auto-implement"],
+        ),
+    )
+    .expect("write patched issue");
+    fs::write(
+        &fixture.reviewed_issue,
+        issue_json(
+            1,
+            "Add a Rust command.",
+            &reviewed_body,
+            &["auto-implement", "safety:reviewed"],
+        ),
+    )
+    .expect("write reviewed issue");
+
+    let output = fixture
+        .command()
+        .args([
+            "queue",
+            "review-safety",
+            "--repo",
+            "test/repo",
+            "--limit",
+            "1",
+            "--issue",
+            "1",
+        ])
+        .output()
+        .expect("review command starts");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"pass\":1"));
+    let calls = fs::read_to_string(&fixture.calls).expect("read gh calls");
+    assert!(
+        !calls.contains("repos/test/repo/issues?"),
+        "exact review must not scan the queue: {calls}"
+    );
+    assert!(
+        calls.contains("repos/test/repo/issues/1"),
+        "exact review must reread the admitted issue: {calls}"
+    );
+}
+
+#[test]
 fn review_safety_passes_an_issue_only_after_a_typed_reread() {
     let fixture = SafetyReviewFixture::new();
     let body = "## Goal\nAdd one typed Rust command with a regression test.";

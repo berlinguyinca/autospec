@@ -134,20 +134,20 @@ setup() {
     [ "$COUNT" -eq 3 ]
 }
 
-@test "autospec classify prompts require issue intent safety gate before auto-implement" {
-    for file in \
-        "$REPO_ROOT/skills/autospec-classify/SKILL.md" \
-        "$REPO_ROOT/skills/autospec/SKILL.md" \
-        "$REPO_ROOT/skills/autospec-define/SKILL.md"
-    do
-        grep -q "Issue intent safety gate" "$file"
-        grep -q 'lint issue safety' "$file"
-        grep -q "security:quarantined" "$file"
-        grep -q "safety:reviewed" "$file"
-        grep -q "<!-- autospec-safety:begin -->" "$file"
-        grep -q "<!-- autospec-safety:end -->" "$file"
-        grep -q "remove-label auto-implement" "$file"
-        grep -q "remove-label needs-classify" "$file"
+@test "phase 3.5 prompts delegate each automatic safety decision to exact Rust review" {
+    for skill in autospec-classify autospec autospec-define; do
+        "$REPO_ROOT/scripts/derive-trio.sh" "$REPO_ROOT/skills/$skill" --check
+        for file in \
+            "$REPO_ROOT/skills/$skill/SKILL.md" \
+            "$REPO_ROOT/skills/$skill/codex/prompt.md" \
+            "$REPO_ROOT/skills/$skill/opencode/agent.md"
+        do
+            grep -Fq 'queue review-safety --repo {repo} --limit 1 --issue <N>' "$file"
+            ! grep -Fq 'safety:reviewed' "$file"
+            ! grep -Fq 'security:quarantined' "$file"
+            ! grep -Fq 'autospec-safety:begin' "$file"
+            ! grep -Fq 'autospec-safety:end' "$file"
+        done
     done
 }
 
@@ -183,35 +183,41 @@ setup() {
         "$REPO_ROOT/skills/autospec-define/SKILL.md"
 }
 
-@test "classification prompts include Tier A semantic safety review" {
-    for file in "$REPO_ROOT/skills/autospec-classify/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md" "$REPO_ROOT/skills/autospec-define/SKILL.md"; do
-        grep -q "Tier A semantic safety reviewer" "$file"
-        grep -q "SAFETY_AMBIGUOUS" "$file"
-        grep -q "SAFETY_BLOCK" "$file"
+@test "classification prompts keep pre-filing safety feedback separate from Rust writeback" {
+    for file in "$REPO_ROOT/skills/autospec/SKILL.md" "$REPO_ROOT/skills/autospec-define/SKILL.md"; do
+        grep -Fq 'Pre-filing safety loop' "$file"
+        grep -Fq 'lint issue safety' "$file"
     done
 }
 
-@test "safety review templates put passing decision inside marker block" {
-    for file in "$REPO_ROOT/skills/autospec-classify/SKILL.md" "$REPO_ROOT/skills/autospec/SKILL.md" "$REPO_ROOT/skills/autospec-define/SKILL.md"; do
-        awk '
-          /^[>[:space:]]*<!-- autospec-safety:begin -->[[:space:]]*$/ { in_block=1; next }
-          /^[>[:space:]]*<!-- autospec-safety:end -->[[:space:]]*$/ { if (in_block && found) ok=1; in_block=0; next }
-          in_block && /SAFETY_PASS/ { found=1 }
-          in_block && /actor|trust|matched rules|reason|Auto-reviewed/ { bad=1 }
-          END { exit(ok && !bad ? 0 : 1) }
-        ' "$file"
-
-        awk '
-          /^[>[:space:]]*<!-- autospec-safety:begin -->[[:space:]]*$/ { in_block=1; count=0; next }
-          /^[>[:space:]]*<!-- autospec-safety:end -->[[:space:]]*$/ { if (in_block && count == 1) ok=1; in_block=0; next }
-          in_block && NF { count++ }
-          END { exit(ok ? 0 : 1) }
-        ' "$file"
+@test "autospec-run identifies the Rust queue command as the only safety writer" {
+    for file in \
+        "$REPO_ROOT/skills/autospec-run/SKILL.md" \
+        "$REPO_ROOT/skills/autospec-run/codex/prompt.md" \
+        "$REPO_ROOT/skills/autospec-run/opencode/agent.md"
+    do
+        grep -Fq 'queue review-safety' "$file"
+        grep -Fq 'only automatic writer' "$file"
+        ! grep -Fq 'Generate that decision through `autospec lint issue safety`' "$file"
     done
+}
 
-    grep -q "both \`<!-- autospec-safety:begin -->\` and \`<!-- autospec-safety:end -->\`" "$REPO_ROOT/skills/autospec-run/SKILL.md"
-    grep -Fq 'exactly one decision line between them:' "$REPO_ROOT/skills/autospec-run/SKILL.md"
-    grep -Fq -- '- **decision:** `SAFETY_PASS`' "$REPO_ROOT/skills/autospec-run/SKILL.md"
+@test "autospec-explore prompts require exact Rust safety review before filing success" {
+    "$REPO_ROOT/scripts/derive-trio.sh" "$REPO_ROOT/skills/autospec-explore" --check
+    for file in \
+        "$REPO_ROOT/skills/autospec-explore/SKILL.md" \
+        "$REPO_ROOT/skills/autospec-explore/codex/prompt.md" \
+        "$REPO_ROOT/skills/autospec-explore/opencode/agent.md"
+    do
+        grep -Fq 'queue review-safety --repo {repo} --limit 1 --issue <N>' "$file"
+        ! grep -Fq 'safety:reviewed' "$file"
+        ! grep -Fq 'security:quarantined' "$file"
+        ! grep -Fq 'autospec-safety:begin' "$file"
+        ! grep -Fq 'autospec-safety:end' "$file"
+        ! grep -Fq 'autospec:needs-human' "$file"
+        ! grep -Fq 'autospec-safety-decision:begin' "$file"
+        ! grep -Fq 'autospec-safety-decision:end' "$file"
+    done
 }
 
 @test "docs mention issue intent safety gate" {

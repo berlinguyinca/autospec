@@ -6,7 +6,7 @@
 # stitches together the deterministic grooming pipeline (Tasks 1-5):
 #
 #   list-groomable.sh   → candidate set (needs-classify|needs-template|unlabeled)
-#   autospec lint issue safety → per-candidate intent safety gate (PASS|AMBIGUOUS|BLOCK)
+#   autospec queue review-safety → exact Rust-owned issue-intent writeback
 #   classify-model-fit.sh→ ctx:/reasoning: model-fit labels
 #   promote-eligibility.sh→ eligible|needs-template|epic|hold routing decision
 #   grooming-govern.sh  → self-governance active-gate set (template-promote?)
@@ -14,16 +14,14 @@
 #
 # Per candidate (SAFETY-CRITICAL — fail-closed everywhere; a pipeline error must
 # never cause a promotion):
-#   1. safety gate: AMBIGUOUS/BLOCK → security:quarantined + audit + STOP issue;
-#      only PASS proceeds. Any indeterminate/error → skip (never promote).
-#   2. classify (unlabeled/needs-classify): add ctx:/reasoning:, drop needs-classify.
-#   3. eligibility:
+#   1. classify (unlabeled/needs-classify): add ctx:/reasoning:, drop needs-classify.
+#   2. eligibility:
 #        eligible       → promote now (add auto-implement, drop needs-autospec-template)
 #        needs-template → deterministic codex template-fill (groom-fill.sh), then:
 #                           fill fails        → hold:needs-human (fail-closed)
 #                           template-promote ∈ govern active set (graduated)
-#                                             → auto: apply filled body,
-#                                               add auto-implement, drop needs-autospec-template
+#                                             → auto: apply filled body, add interim
+#                                               auto-implement, then Rust safety review
 #                           else (seed)       → canary: apply filled body,
 #                                               add groom:proposed (human approves via
 #                                               auto-implement / rejects via groom:rejected),
@@ -32,7 +30,10 @@
 #                         skipped (already-groomed) before any decision (no re-fill).
 #        epic           → route:split (do NOT decompose here)
 #        hold / error   → hold:needs-human
-#   4. every mutation posts an audit comment stating decision + reason.
+#   3. Rust safety writeback runs only after `auto-implement` is added. The
+#      ready queue blocks the interim issue until a typed Rust pass adds
+#      `safety:reviewed`; ambiguous and blocking outcomes remain unclaimable.
+#   4. every non-safety routing mutation posts an audit comment stating decision + reason.
 #
 # POLICY GATE (replaces the old AUTOSPEC_PROMOTE_OPEN_ISSUES_APPLY double-env-gate):
 # mutations happen ONLY when `--apply` is passed AND grooming policy ∈ auto|on.
@@ -62,6 +63,9 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ── Sub-script paths (injectable seams for CI/test stubs) ──────────────────────
+# GROOM_SAFETY_BIN is test-only injection; production resolves the Rust autospec
+# binary through AUTOSPEC_BIN or PATH. Its typed JSON gate prevents test stubs
+# from becoming shell safety authorities.
 SHARED_DIR="$SCRIPT_DIR/../skills/autospec-shared/scripts"
 GROOM_LIST="${AUTOSPEC_GROOM_LIST_SCRIPT:-$SCRIPT_DIR/list-groomable.sh}"
 GROOM_SAFETY_BIN="${AUTOSPEC_GROOM_SAFETY_BIN:-${AUTOSPEC_BIN:-autospec}}"
@@ -70,7 +74,6 @@ GROOM_ELIGIBILITY="${AUTOSPEC_GROOM_ELIGIBILITY_SCRIPT:-$SCRIPT_DIR/promote-elig
 GROOM_GOVERN="${AUTOSPEC_GROOM_GOVERN_SCRIPT:-$SHARED_DIR/grooming-govern.sh}"
 GROOM_CONFIG="${AUTOSPEC_GROOM_CONFIG_SCRIPT:-$SHARED_DIR/grooming-config.sh}"
 GROOM_FILL="${AUTOSPEC_GROOM_FILL_SCRIPT:-$SCRIPT_DIR/groom-fill.sh}"
-GROOM_APPLY_SAFETY="${AUTOSPEC_GROOM_APPLY_SAFETY_SCRIPT:-$SCRIPT_DIR/apply-safety-review.sh}"
 
 usage() {
     cat <<'EOF'
@@ -186,6 +189,15 @@ emit_json() {
           quarantined:$quarantined[0], routed:$routed[0], reason:$reason}'
 }
 
+# ── Retry bounded interim Rust reviews before selecting new candidates ─────────
+# list-groomable deliberately excludes auto-implement issues, so a transient
+# review failure would otherwise strand an interim issue forever. Rust still
+# owns every resulting mutation; this merely asks it to revisit at most one
+# grooming budget of existing candidates before this cycle handles new work.
+if [ "$apply_enabled" = "1" ]; then
+    "$GROOM_SAFETY_BIN" queue review-safety --repo "$repo" --limit "$budget" >/dev/null 2>&1 || true
+fi
+
 # ── Fetch candidate set from the deterministic selector ───────────────────────
 list_json="$(bash "$GROOM_LIST" --repo "$repo" --budget "$budget" 2>/dev/null || printf '')"
 if [ -z "$list_json" ]; then
@@ -248,16 +260,102 @@ finalize_ready() {
             ;;
     esac
 
-    # 2. Safety-stamp on the FINAL body (fail-closed: non-PASS → quarantine, return 1).
-    #    apply-safety-review itself writes safety:reviewed + block (PASS) or
-    #    security:quarantined + strips queue labels (non-PASS).
-    fr_safe_rc=0
-    bash "$GROOM_APPLY_SAFETY" --issue "$fr_num" --repo "$repo" \
-        --body-file "$fr_body" --title "$title" --actor "$author" --apply >/dev/null 2>&1 || fr_safe_rc=$?
-    if [ "$fr_safe_rc" -ne 0 ]; then
+    # 2. Persist the exact final body before Rust evaluates it. This is a normal
+    #    grooming write; Rust exclusively owns safety decisions and their labels.
+    gh issue edit "$fr_num" --repo "$repo" --body-file "$fr_body" >/dev/null 2>&1
+}
+
+review_admitted_issue() {
+    # $1 = issue number. Queue admission comes first so Rust can evaluate the
+    # exact candidate. A merely admitted issue is still unclaimable until Rust
+    # writes a passing `safety:reviewed` label and re-reads the issue.
+    rai_num="$1"
+    rai_out="$("$GROOM_SAFETY_BIN" queue review-safety --repo "$repo" --limit 1 --issue "$rai_num" 2>/dev/null || printf '')"
+    rai_pass="$(printf '%s' "$rai_out" | jq -r '.pass // 0' 2>/dev/null || printf '0')"
+    if [ "$rai_pass" = "1" ]; then
+        rust_safety_result="pass"
+        return 0
+    fi
+    rai_block="$(printf '%s' "$rai_out" | jq -r '.block // 0' 2>/dev/null || printf '0')"
+    if [ "$rai_block" = "1" ]; then
+        rust_safety_result="block"
         return 1
     fi
-    return 0
+    rust_safety_result="hold"
+    return 1
+}
+
+record_rust_safety_result() {
+    # The Rust command owns GitHub safety mutations. The groomer only preserves
+    # its structured outcome in this local reporting envelope.
+    rrs_num="$1"
+    if [ "${rust_safety_result:-hold}" = "block" ]; then
+        record_quarantine "$rrs_num" "rust-safety-block"
+    else
+        record_held "$rrs_num" "rust-safety-review"
+    fi
+}
+
+admit_with_rust_safety() {
+    # $1 = issue number, $2 = final body file, $3 = existing labels csv.
+    aws_num="$1"; aws_body="$2"; aws_labels="$3"
+    rust_safety_result="hold"
+    finalize_ready "$aws_num" "$aws_body" "$aws_labels" || return 1
+    ensure_label "auto-implement"
+    gh issue edit "$aws_num" --repo "$repo" \
+        --add-label "auto-implement" \
+        --remove-label "needs-autospec-template" >/dev/null 2>&1 || return 1
+    review_admitted_issue "$aws_num"
+}
+
+route_template_candidate() {
+    # $1 = issue number, $2 = existing labels, $3 = eligibility reason.
+    rtc_num="$1"; rtc_labels="$2"; rtc_reason="$3"
+    rtc_active="$(bash "$GROOM_GOVERN" show 2>/dev/null | jq -r '.active // [] | join(" ")' 2>/dev/null || printf '')"
+    rtc_fill="$(bash "$GROOM_FILL" --issue "$rtc_num" --repo "$repo" 2>/dev/null || printf '')"
+    rtc_ok="$(printf '%s' "$rtc_fill" | jq -r '.ok // false' 2>/dev/null || printf 'false')"
+    if [ "$rtc_ok" != "true" ]; then
+        rtc_failure="$(printf '%s' "$rtc_fill" | jq -r '.reason // "fill-error"' 2>/dev/null || printf 'fill-error')"
+        ensure_label "hold:needs-human"
+        gh issue edit "$rtc_num" --repo "$repo" --add-label "hold:needs-human" >/dev/null 2>&1 || true
+        audit_comment "$rtc_num" "grooming: codex template-fill unavailable/failed (${rtc_failure}) — held for human (${rtc_reason})."
+        record_held "$rtc_num" "needs-template:fill-${rtc_failure}"
+        return 0
+    fi
+
+    rtc_body="$(printf '%s' "$rtc_fill" | jq -r '.body' 2>/dev/null || printf '')"
+    if [ -z "$rtc_body" ] || [ "$rtc_body" = "null" ]; then
+        ensure_label "hold:needs-human"
+        gh issue edit "$rtc_num" --repo "$repo" --add-label "hold:needs-human" >/dev/null 2>&1 || true
+        audit_comment "$rtc_num" "grooming: codex template-fill returned an empty body — held for human (${rtc_reason})."
+        record_held "$rtc_num" "needs-template:fill-empty-body"
+        return 0
+    fi
+
+    rtc_file="$(mktemp "${TMPDIR:-/tmp}/groom-body.XXXXXX")"
+    printf '%s' "$rtc_body" > "$rtc_file"
+    case " $rtc_active " in
+        *" template-promote "*)
+            if admit_with_rust_safety "$rtc_num" "$rtc_file" "$rtc_labels"; then
+                audit_comment "$rtc_num" "grooming: auto-template-groomed — template-promote gate active (${rtc_reason})."
+                promoted_nums="${promoted_nums}${promoted_nums:+ }${rtc_num}"
+                record_routed "$rtc_num" "groom-auto" "needs-template:${rtc_reason}"
+            else
+                record_rust_safety_result "$rtc_num"
+            fi
+            ;;
+        *)
+            if finalize_ready "$rtc_num" "$rtc_file" "$rtc_labels"; then
+                ensure_label "groom:proposed"
+                gh issue edit "$rtc_num" --repo "$repo" --add-label "groom:proposed" --remove-label "needs-autospec-template" >/dev/null 2>&1 || true
+                audit_comment "$rtc_num" "grooming: template drafted for human approval (canary) — approve by adding auto-implement, reject with groom:rejected (${rtc_reason})."
+                record_routed "$rtc_num" "groom-canary" "needs-template:${rtc_reason}"
+            else
+                record_held "$rtc_num" "final-body-write"
+            fi
+            ;;
+    esac
+    rm -f "$rtc_file"
 }
 
 # ── Report-only path: mutate nothing, list candidates as report-only ──────────
@@ -306,7 +404,6 @@ while [ "$i" -lt "$cand_count" ]; do
     title="$(printf '%s' "$detail" | jq -r '.title // ""' 2>/dev/null || printf '')"
     body="$(printf '%s' "$detail" | jq -r '.body // ""' 2>/dev/null || printf '')"
     labels_csv="$(printf '%s' "$detail" | jq -r '[.labels[]?.name] | join(",")' 2>/dev/null || printf '')"
-    author="$(printf '%s' "$detail" | jq -r '.author.login // ""' 2>/dev/null || printf '')"
     printf '%s' "$body" > "$BODY_FILE"
 
     # ── 0. Already-groomed skip (before any decision → no re-fill) ────────────
@@ -320,28 +417,7 @@ while [ "$i" -lt "$cand_count" ]; do
             ;;
     esac
 
-    # ── 1. Safety gate (fail-closed) ─────────────────────────────────────────
-    safety_out="$("$GROOM_SAFETY_BIN" lint issue safety --title "$title" "$BODY_FILE" 2>/dev/null || true)"
-    safety_decision="$(printf '%s\n' "$safety_out" | grep -Eo 'SAFETY_(PASS|AMBIGUOUS|BLOCK)' | head -1 || true)"
-
-    if [ -z "$safety_decision" ]; then
-        # Indeterminate safety output → never promote; skip (no quarantine on a
-        # transient error to avoid mass-quarantine from a pipeline bug).
-        record_skip "$num" "safety-indeterminate"
-        continue
-    fi
-    if [ "$safety_decision" != "SAFETY_PASS" ]; then
-        ensure_label "security:quarantined"
-        gh issue edit "$num" --repo "$repo" \
-            --add-label "security:quarantined" \
-            --remove-label "auto-implement,needs-classify,needs-autospec-template" \
-            >/dev/null 2>&1 || true
-        audit_comment "$num" "grooming: quarantined — safety gate returned ${safety_decision}. Removed queue labels; requires human review."
-        record_quarantine "$num" "safety:${safety_decision}"
-        continue
-    fi
-
-    # ── 2. Eligibility routing (fail-closed to hold) ─────────────────────────
+    # ── 1. Eligibility routing (fail-closed to hold) ─────────────────────────
     elig_json="$(bash "$GROOM_ELIGIBILITY" "$BODY_FILE" --labels "$labels_csv" --repo "$repo" --title "$title" 2>/dev/null || printf '{"decision":"hold","reason":"eligibility-error"}')"
     decision="$(printf '%s' "$elig_json" | jq -r '.decision // "hold"' 2>/dev/null || printf 'hold')"
     ereason="$(printf '%s' "$elig_json" | jq -r '.reason // ""' 2>/dev/null || printf '')"
@@ -349,15 +425,10 @@ while [ "$i" -lt "$cand_count" ]; do
 
     case "$decision" in
         eligible)
-            if ! finalize_ready "$num" "$BODY_FILE" "$labels_csv"; then
-                audit_comment "$num" "grooming: final-body safety gate did not pass (quarantined or stamp error) — not promoted."
-                record_quarantine "$num" "safety:final-body"
+            if ! admit_with_rust_safety "$num" "$BODY_FILE" "$labels_csv"; then
+                record_rust_safety_result "$num"
                 continue
             fi
-            ensure_label "auto-implement"
-            gh issue edit "$num" --repo "$repo" \
-                --add-label "auto-implement" \
-                --remove-label "needs-autospec-template" >/dev/null 2>&1 || true
             audit_comment "$num" "grooming: promoted to auto-implement — eligible (${ereason})."
             promoted_nums="${promoted_nums}${promoted_nums:+ }${num}"
             ;;
@@ -366,61 +437,7 @@ while [ "$i" -lt "$cand_count" ]; do
             # then route by the govern ratchet: canary (seed) proposes for a human;
             # auto (graduated: template-promote active) queues straight into
             # auto-implement. Fail-closed: any fill failure holds for a human.
-            active="$(bash "$GROOM_GOVERN" show 2>/dev/null | jq -r '.active // [] | join(" ")' 2>/dev/null || printf '')"
-            fill_out="$(bash "$GROOM_FILL" --issue "$num" --repo "$repo" 2>/dev/null || printf '')"
-            fill_ok="$(printf '%s' "$fill_out" | jq -r '.ok // false' 2>/dev/null || printf 'false')"
-            if [ "$fill_ok" != "true" ]; then
-                freason="$(printf '%s' "$fill_out" | jq -r '.reason // "fill-error"' 2>/dev/null || printf 'fill-error')"
-                ensure_label "hold:needs-human"
-                gh issue edit "$num" --repo "$repo" \
-                    --add-label "hold:needs-human" >/dev/null 2>&1 || true
-                audit_comment "$num" "grooming: codex template-fill unavailable/failed (${freason}) — held for human (${ereason})."
-                record_held "$num" "needs-template:fill-${freason}"
-            else
-                fbody="$(printf '%s' "$fill_out" | jq -r '.body' 2>/dev/null || printf '')"
-                if [ -z "$fbody" ] || [ "$fbody" = "null" ]; then
-                    # Defense-in-depth: a contract-violating fill (ok:true with
-                    # no/null body) must never reach auto-implement or overwrite
-                    # the issue body — hold for a human instead.
-                    ensure_label "hold:needs-human"
-                    gh issue edit "$num" --repo "$repo" \
-                        --add-label "hold:needs-human" >/dev/null 2>&1 || true
-                    audit_comment "$num" "grooming: codex template-fill returned an empty body — held for human (${ereason})."
-                    record_held "$num" "needs-template:fill-empty-body"
-                else
-                    bf="$(mktemp "${TMPDIR:-/tmp}/groom-body.XXXXXX")"
-                    printf '%s' "$fbody" > "$bf"
-                    if ! finalize_ready "$num" "$bf" "$labels_csv"; then
-                        audit_comment "$num" "grooming: final-body safety gate did not pass (quarantined or stamp error) — not promoted."
-                        record_quarantine "$num" "safety:final-body"
-                        rm -f "$bf"
-                        bf=""
-                        continue
-                    fi
-                    case " $active " in
-                        *" template-promote "*)
-                            # Graduated → auto: filled body queued straight into auto-implement.
-                            ensure_label "auto-implement"
-                            gh issue edit "$num" --repo "$repo" \
-                                --add-label "auto-implement" \
-                                --remove-label "needs-autospec-template" >/dev/null 2>&1 || true
-                            audit_comment "$num" "grooming: auto-template-groomed — template-promote gate active (${ereason})."
-                            record_routed "$num" "groom-auto" "needs-template:${ereason}"
-                            ;;
-                        *)
-                            # Seed → canary: filled body proposed for human approval.
-                            ensure_label "groom:proposed"
-                            gh issue edit "$num" --repo "$repo" \
-                                --add-label "groom:proposed" \
-                                --remove-label "needs-autospec-template" >/dev/null 2>&1 || true
-                            audit_comment "$num" "grooming: template drafted for human approval (canary) — approve by adding auto-implement, reject with groom:rejected (${ereason})."
-                            record_routed "$num" "groom-canary" "needs-template:${ereason}"
-                            ;;
-                    esac
-                    rm -f "$bf"
-                    bf=""
-                fi
-            fi
+            route_template_candidate "$num" "$labels_csv" "$ereason"
             ;;
         epic)
             ensure_label "route:split"

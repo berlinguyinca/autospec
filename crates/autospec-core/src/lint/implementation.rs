@@ -331,9 +331,10 @@ fn detect_out_of_scope(
     issue_body: Option<&str>,
     collector: &mut FindingCollector,
 ) {
-    let Some(outline) = issue_body
-        .and_then(|body| section(body, &["Implementation outline", "Implementation scope"]))
-    else {
+    let Some(outline) = issue_body.and_then(|body| {
+        section(body, &["Implementation outline"])
+            .or_else(|| section(body, &["Implementation scope"]))
+    }) else {
         return;
     };
     let allowed = path_tokens(outline);

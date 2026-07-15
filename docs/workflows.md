@@ -45,10 +45,18 @@ later evidence page fails closed. A `scan_scope` of
 `slice` means `AUTOSPEC_RUN_ONLY_ISSUES` constrained the selection; only a `repository` scan can
 supply whole-queue completion evidence.
 
-`autospec queue review-safety --repo OWNER/REPO --limit N` is the bounded Rust writeback pass
-for unreviewed open queue work. It writes a canonical passing block only after a typed re-read,
+`autospec queue review-safety --repo OWNER/REPO --limit N [--issue N]` is the bounded Rust
+writeback pass for unreviewed open queue work. `--issue N` targets the newly admitted issue
+without relying on queue-list ordering. It writes a canonical passing block only after a typed re-read,
 labels ambiguity as `autospec:needs-human`, quarantines blocking intent, and reports every
 mutation or fail-closed conflict as structured totals.
+
+Admission surfaces may only persist ordinary issue metadata and add interim
+`auto-implement`; they must then call the exact Rust review command and must not
+write a safety outcome themselves. Each applied grooming cycle also retries a
+bounded set of interim issues, so a transient review failure remains recoverable.
+`AUTOSPEC_GROOM_SAFETY_BIN` is a test-injection seam only; production resolves
+the Rust `autospec` binary through `AUTOSPEC_BIN` or `PATH`.
 
 ## Rust CLI
 

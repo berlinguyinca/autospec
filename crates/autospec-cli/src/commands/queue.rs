@@ -40,6 +40,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
 struct ReviewSafetyOptions {
     repo: Option<String>,
     limit: Option<usize>,
+    issue: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -67,8 +68,8 @@ fn review_safety(args: &[String]) -> Result<(), CommandFailure> {
     let limit = options
         .limit
         .ok_or_else(|| CommandFailure::diagnostic("--limit is required"))?;
-    let (mut totals, candidates) =
-        review_safety_candidates(list_issues(&repo, "auto-implement")?, limit)?;
+    let issues = review_safety_issues(&repo, options.issue)?;
+    let (mut totals, candidates) = review_safety_candidates(issues, limit)?;
     for candidate in candidates {
         let outcome = review_safety_candidate(&repo, &candidate).unwrap_or_else(|error| {
             eprintln!(
@@ -88,6 +89,16 @@ fn review_safety(args: &[String]) -> Result<(), CommandFailure> {
     }
     println!("{}", review_safety_json(&totals));
     Ok(())
+}
+
+fn review_safety_issues(
+    repo: &str,
+    issue: Option<u64>,
+) -> Result<Vec<RemoteIssue>, CommandFailure> {
+    match issue {
+        Some(number) => Ok(vec![read_issue(repo, number)?]),
+        None => list_issues(repo, "auto-implement"),
+    }
 }
 
 fn review_safety_candidates(
@@ -148,12 +159,33 @@ fn parse_review_safety_options(args: &[String]) -> Result<ReviewSafetyOptions, C
         match args[index].as_str() {
             "--repo" => set_review_repo(&mut options, args, &mut index)?,
             "--limit" => set_review_limit(&mut options, args, &mut index)?,
+            "--issue" => set_review_issue(&mut options, args, &mut index)?,
             "--help" | "-h" => return review_safety_help_error(),
             option => return unknown_review_safety_option(option),
         }
         index += 1;
     }
     Ok(options)
+}
+
+fn set_review_issue(
+    options: &mut ReviewSafetyOptions,
+    args: &[String],
+    index: &mut usize,
+) -> Result<(), CommandFailure> {
+    let value = next_value(args, index, "--issue")?;
+    let issue = value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| CommandFailure::diagnostic("--issue must be a positive integer"))?;
+    if options.issue.is_some() {
+        return Err(CommandFailure::diagnostic(
+            "--issue accepts exactly one value",
+        ));
+    }
+    options.issue = Some(issue);
+    Ok(())
 }
 
 fn review_safety_help_error() -> Result<ReviewSafetyOptions, CommandFailure> {
@@ -1054,6 +1086,6 @@ fn json_string(value: &str) -> String {
 
 fn print_help() {
     println!(
-        "autospec queue\n\nUSAGE:\n    autospec queue ready [--repo OWNER/REPO] [--batch-size N]\n    autospec queue review-safety [--repo OWNER/REPO] [--limit N]\n\nCOMMANDS:\n    ready            Compute the safe, dependency-aware GitHub issue batch\n    review-safety    Write bounded Rust safety-review outcomes to GitHub issues"
+        "autospec queue\n\nUSAGE:\n    autospec queue ready [--repo OWNER/REPO] [--batch-size N]\n    autospec queue review-safety [--repo OWNER/REPO] [--limit N] [--issue N]\n\nCOMMANDS:\n    ready            Compute the safe, dependency-aware GitHub issue batch\n    review-safety    Write bounded Rust safety-review outcomes to GitHub issues"
     );
 }

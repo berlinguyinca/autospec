@@ -1366,6 +1366,16 @@ copy_repo_scripts() {
             cp "$f" "$autospec_scripts_dir/"
         done
     done
+    # Explicitly remove retired runtime authority on update. A glob copy alone
+    # cannot delete files that disappeared from the checkout, leaving an old
+    # shell safety writer available to installed callers after the Rust cutover.
+    retired_safety_writer="$autospec_scripts_dir/apply-safety-review.sh"
+    if [ -e "$retired_safety_writer" ]; then
+        rm -f "$retired_safety_writer" || {
+            warn "copy_repo_scripts: could not remove retired safety writer"
+            return 1
+        }
+    fi
     # Restore +x on shell scripts and mjs files (cp may strip bits on some platforms).
     find "$autospec_scripts_dir" -maxdepth 1 \( -name '*.sh' -o -name '*.mjs' \) -exec chmod +x {} \;
     info "copy_repo_scripts: copied repo-root scripts to $autospec_scripts_dir/"

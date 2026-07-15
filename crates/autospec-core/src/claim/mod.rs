@@ -526,7 +526,7 @@ pub fn lint_issue_intent_with_trusted_actors(
     actor: &str,
     trusted_actors: &[&str],
 ) -> IssueIntentLint {
-    let lower = format!("{title}\n{body}").to_ascii_lowercase();
+    let lower = format!("{title}\n{}", strip_guardian_skips(body)).to_ascii_lowercase();
     let mut findings = Vec::new();
     let mut add = |severity, rule_id, pattern| {
         findings.push(IssueIntentFinding {
@@ -662,9 +662,63 @@ fn last_safety_heading(prefix: &str) -> Option<(usize, usize)> {
 
 fn strip_guardian_skips(body: &str) -> String {
     body.lines()
-        .filter(|line| !line.trim_start().starts_with("Guardian: skip-"))
+        .map(|line| guardian_skip_reason(line).unwrap_or(line))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn guardian_skip_reason(line: &str) -> Option<&str> {
+    const RULE_IDS: &[&str] = &[
+        "OUT_OF_SCOPE",
+        "MISSING_TEST",
+        "COMPLEXITY",
+        "SECURITY",
+        "TODO_LEFT",
+        "MOCK_DB",
+        "HALLUCINATED_API",
+        "DUPLICATE_CODE",
+        "STRING_MATCH_DOMAIN_LOGIC",
+        "REPEATED_STRUCTURE_AS_CODE",
+        "DOC_OUT_OF_SYNC",
+        "INVENTED_CONFIG",
+        "VACUOUS_GREP_INVERSE_OR_TRUE",
+        "VACUOUS_OR_TRUE",
+        "VACUOUS_TAUTOLOGY",
+        "VACUOUS_AC_STUB",
+        "VACUOUS_EMPTY_TEST",
+        "VACUOUS_NO_ASSERT",
+        "ASSERTION_DENSITY",
+        "REINVENT_REPO_UTIL",
+        "NEW_DEP_UNJUSTIFIED",
+        "NEW_ABSTRACTION_SINGLE_CALLER",
+    ];
+
+    let tail = line.strip_prefix("Guardian:")?;
+    if !tail.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let (rules, reason) = tail.trim_start().split_once('#')?;
+    if !reason.starts_with(char::is_whitespace) || !rules.ends_with(char::is_whitespace) {
+        return None;
+    }
+    let reason = reason.trim_start_matches(char::is_whitespace);
+    if reason.chars().count() < 2 {
+        return None;
+    }
+    let rules = rules
+        .trim_end()
+        .split(',')
+        .enumerate()
+        .map(|(index, rule)| {
+            let rule = if index == 0 { rule } else { rule.trim_start() };
+            if rule.chars().any(char::is_whitespace) {
+                return None;
+            }
+            rule.strip_prefix("skip-")
+                .filter(|rule| RULE_IDS.contains(rule))
+        });
+    rules.collect::<Option<Vec<_>>>()?;
+    Some(reason)
 }
 
 fn contains_production_destruction(text: &str) -> bool {
