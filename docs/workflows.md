@@ -37,6 +37,14 @@ reconciliation, typed safety eligibility, heartbeat/label ordering, lease CAS, a
 release transitions. The next step redirects every live caller to this one command family before
 deleting the former shell authorities.
 
+The Rust ready queue is `autospec queue ready`. It scans every GitHub page for open
+`auto-implement` work and active claims, retains raw issue-page cardinality before excluding
+pull-request records, cursor-paginates linked pull-request evidence, preserves check snapshots,
+deduplicates unstable page results, and reports typed gate totals. A malformed or incomplete
+later evidence page fails closed. A `scan_scope` of
+`slice` means `AUTOSPEC_RUN_ONLY_ISSUES` constrained the selection; only a `repository` scan can
+supply whole-queue completion evidence.
+
 ## Rust CLI
 
 The `autospec` Rust binary exposes the V62+ command surface while preserving the skill-first workflow. `doctor`, `init`, `status`, `plan`, `validate`, `run`, `resume`, `report`, `showcase`, and `growth-report` support `--json`. `autospec init --spec <id>` creates local planned state without executing work. Direct `autospec validate [--path <changed-path>]...` is a read-only affected-check planner, while `autospec validate --shadow-results <file>` aggregates pre-captured results without spawning a command. `autospec validate` remains the executor for shell options such as `--fast`. `run` and `resume` only create, ingest, and inspect local queue state; `benchmark` remains a non-zero stub.

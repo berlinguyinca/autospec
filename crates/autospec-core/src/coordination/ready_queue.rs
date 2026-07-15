@@ -66,10 +66,49 @@ impl RemoteIssue {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteIssuePage {
+    pub issues: Vec<RemoteIssue>,
+    pub raw_count: usize,
+}
+
 pub fn parse_remote_issue_list_json(input: &str) -> Result<Vec<RemoteIssue>, String> {
-    JsonParser::new(input)
+    let values = JsonParser::new(input)
         .parse()?
-        .into_array("GitHub queue issue list")?
+        .into_array("GitHub queue issue list")?;
+    parse_remote_issues(values)
+}
+
+pub fn parse_remote_issue_page_json(input: &str) -> Result<RemoteIssuePage, String> {
+    let value = JsonParser::new(input).parse()?;
+    match value {
+        JsonValue::Array(values) => {
+            let raw_count = values.len();
+            Ok(RemoteIssuePage {
+                issues: parse_remote_issues(values)?,
+                raw_count,
+            })
+        }
+        JsonValue::Object(mut object) => {
+            const CONTEXT: &str = "GitHub queue issue page";
+            reject_unknown_keys(&object, &["raw_count", "items"], CONTEXT)?;
+            let raw_count = take_required(&mut object, "raw_count", CONTEXT)?
+                .into_number(&format!("{CONTEXT}.raw_count"))?;
+            let raw_count = usize::try_from(raw_count)
+                .map_err(|_| format!("{CONTEXT}.raw_count exceeds this platform"))?;
+            let values = take_required(&mut object, "items", CONTEXT)?
+                .into_array(&format!("{CONTEXT}.items"))?;
+            Ok(RemoteIssuePage {
+                issues: parse_remote_issues(values)?,
+                raw_count,
+            })
+        }
+        _ => Err("GitHub queue issue page must be an array or object".to_string()),
+    }
+}
+
+fn parse_remote_issues(values: Vec<JsonValue>) -> Result<Vec<RemoteIssue>, String> {
+    values
         .into_iter()
         .enumerate()
         .map(|(index, value)| {
@@ -122,10 +161,69 @@ impl RemotePullRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemotePullRequestPage {
+    pub pull_requests: Vec<RemotePullRequest>,
+    pub has_next_page: bool,
+    pub end_cursor: Option<String>,
+}
+
 pub fn parse_remote_pull_requests_json(input: &str) -> Result<Vec<RemotePullRequest>, String> {
-    JsonParser::new(input)
+    let values = JsonParser::new(input)
         .parse()?
-        .into_array("GitHub queue pull request list")?
+        .into_array("GitHub queue pull request list")?;
+    parse_remote_pull_requests(values)
+}
+
+pub fn parse_remote_pull_request_page_json(input: &str) -> Result<RemotePullRequestPage, String> {
+    let value = JsonParser::new(input).parse()?;
+    match value {
+        JsonValue::Array(values) => Ok(RemotePullRequestPage {
+            pull_requests: parse_remote_pull_requests(values)?,
+            has_next_page: false,
+            end_cursor: None,
+        }),
+        JsonValue::Object(mut object) => {
+            const CONTEXT: &str = "GitHub queue pull request page";
+            reject_unknown_keys(&object, &["items", "page_info"], CONTEXT)?;
+            let values = take_required(&mut object, "items", CONTEXT)?
+                .into_array(&format!("{CONTEXT}.items"))?;
+            let mut page_info = take_required(&mut object, "page_info", CONTEXT)?
+                .into_object(&format!("{CONTEXT}.page_info"))?;
+            reject_unknown_keys(
+                &page_info,
+                &["has_next_page", "end_cursor"],
+                &format!("{CONTEXT}.page_info"),
+            )?;
+            let has_next_page = take_required(
+                &mut page_info,
+                "has_next_page",
+                &format!("{CONTEXT}.page_info"),
+            )?
+            .into_bool(&format!("{CONTEXT}.page_info.has_next_page"))?;
+            let end_cursor = take_required(
+                &mut page_info,
+                "end_cursor",
+                &format!("{CONTEXT}.page_info"),
+            )?
+            .into_optional_string(&format!("{CONTEXT}.page_info.end_cursor"))?;
+            if has_next_page && end_cursor.is_none() {
+                return Err(format!(
+                    "{CONTEXT}.page_info.end_cursor is required when another page exists"
+                ));
+            }
+            Ok(RemotePullRequestPage {
+                pull_requests: parse_remote_pull_requests(values)?,
+                has_next_page,
+                end_cursor,
+            })
+        }
+        _ => Err("GitHub queue pull request page must be an array or object".to_string()),
+    }
+}
+
+fn parse_remote_pull_requests(values: Vec<JsonValue>) -> Result<Vec<RemotePullRequest>, String> {
+    values
         .into_iter()
         .enumerate()
         .map(|(index, value)| {
@@ -263,6 +361,20 @@ pub struct WorkerCap {
     pub reached: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QueueGateCounts {
+    pub open: usize,
+    pub candidate: usize,
+    pub reviewed: usize,
+    pub blocked: usize,
+    pub dependency_blocked: usize,
+    pub linked_pr_blocked: usize,
+    pub path_conflicted: usize,
+    pub ready: usize,
+    pub claimed: usize,
+    pub selected: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadyQueuePlan {
     pub ready: Vec<QueueIssueView>,
@@ -271,6 +383,7 @@ pub struct ReadyQueuePlan {
     pub conflicts: Vec<QueueIssueView>,
     pub worker_cap: WorkerCap,
     pub batch: Vec<QueueIssueView>,
+    pub gate_counts: QueueGateCounts,
 }
 
 impl ReadyQueuePlan {
@@ -293,18 +406,17 @@ pub fn plan_ready_queue_with_trusted_actors(
     input: &ReadyQueueInput,
     trusted_actors: &[&str],
 ) -> ReadyQueuePlan {
+    let candidates = deduplicate_issues(&input.candidates);
+    let open_count = candidates.len();
     let mut known = input.dependencies.clone();
-    for issue in &input.candidates {
+    for issue in &candidates {
         known.insert(issue.number, issue.clone());
     }
-    let mut active = input.active.clone();
-    active.sort_by_key(|issue| issue.number);
+    let active = deduplicate_issues(&input.active);
     let active_paths = active
         .iter()
         .map(|issue| (issue.number, extract_paths(&issue.body)))
         .collect::<Vec<_>>();
-    let mut candidates = input.candidates.clone();
-    candidates.sort_by_key(|issue| issue.number);
     let worker_cap = worker_cap(&input.policy, active.len());
     let effective_batch_size = if worker_cap.reached {
         0
@@ -317,10 +429,16 @@ pub fn plan_ready_queue_with_trusted_actors(
     let mut ready: Vec<QueueIssueView> = Vec::new();
     let mut blocked: Vec<QueueIssueView> = Vec::new();
     let mut conflicts: Vec<QueueIssueView> = Vec::new();
+    let mut candidate_count = 0;
+    let mut reviewed_count = 0;
     for issue in candidates {
         if !input.policy.only_issues.is_empty() && !input.policy.only_issues.contains(&issue.number)
         {
             continue;
+        }
+        candidate_count += 1;
+        if issue.has_label("safety:reviewed") {
+            reviewed_count += 1;
         }
         let mut view = QueueIssueView::plain(issue);
         if view.issue.has_label("needs-classify") {
@@ -426,13 +544,63 @@ pub fn plan_ready_queue_with_trusted_actors(
             .cloned()
             .collect()
     };
-    ReadyQueuePlan {
+    let mut plan = ReadyQueuePlan {
         ready,
         blocked,
         claimed: active,
         conflicts,
         worker_cap,
         batch,
+        gate_counts: QueueGateCounts::default(),
+    };
+    plan.gate_counts = queue_gate_counts(&plan, open_count, candidate_count, reviewed_count);
+    plan
+}
+
+fn deduplicate_issues(issues: &[RemoteIssue]) -> Vec<RemoteIssue> {
+    let mut deduplicated = BTreeMap::new();
+    for issue in issues {
+        deduplicated
+            .entry(issue.number)
+            .or_insert_with(|| issue.clone());
+    }
+    deduplicated.into_values().collect()
+}
+
+fn queue_gate_counts(
+    plan: &ReadyQueuePlan,
+    open: usize,
+    candidate: usize,
+    reviewed: usize,
+) -> QueueGateCounts {
+    QueueGateCounts {
+        open,
+        candidate,
+        reviewed,
+        blocked: plan.blocked.len(),
+        dependency_blocked: plan
+            .blocked
+            .iter()
+            .filter(|view| {
+                matches!(
+                    view.reason.as_deref(),
+                    Some("blocked_dependencies") | Some("blocked_cycle")
+                )
+            })
+            .count(),
+        linked_pr_blocked: plan
+            .blocked
+            .iter()
+            .filter(|view| {
+                view.reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("linked_pr_"))
+            })
+            .count(),
+        path_conflicted: plan.conflicts.len(),
+        ready: plan.ready.len(),
+        claimed: plan.claimed.len(),
+        selected: plan.batch.len(),
     }
 }
 

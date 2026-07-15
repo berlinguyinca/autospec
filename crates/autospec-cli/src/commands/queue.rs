@@ -3,8 +3,8 @@ use std::fs;
 use std::process::{Command, Output};
 
 use autospec_core::coordination::{
-    dependency_numbers, parse_dependency_issue_json, parse_remote_issue_list_json,
-    parse_remote_pull_requests_json, plan_ready_queue_with_trusted_actors, PullRequestEvidence,
+    dependency_numbers, parse_dependency_issue_json, parse_remote_issue_page_json,
+    parse_remote_pull_request_page_json, plan_ready_queue_with_trusted_actors, PullRequestEvidence,
     QueueIssueView, QueuePolicy, ReadyQueueInput, ReadyQueuePlan, RemoteIssue,
 };
 
@@ -56,8 +56,9 @@ fn ready(args: &[String]) -> Result<(), CommandFailure> {
         .collect();
     let dependencies = load_dependencies(&repo, &candidates);
     let pull_requests = list_pull_requests(&repo);
+    let only_issues = only_issues();
     let mut policy = QueuePolicy::new(batch_size, max_repo_workers());
-    policy.only_issues = only_issues();
+    policy.only_issues = only_issues.clone();
     policy.non_blocking_dependency_labels = non_blocking_dependency_labels();
     let safety_policy = load_issue_safety_policy(None);
     if safety_policy.has_unsupported_pattern {
@@ -80,7 +81,7 @@ fn ready(args: &[String]) -> Result<(), CommandFailure> {
         },
         &trusted_actors,
     );
-    println!("{}", plan_json(&plan));
+    println!("{}", plan_json(&plan, !only_issues.is_empty()));
     Ok(())
 }
 
@@ -169,33 +170,37 @@ fn infer_repo() -> Result<String, CommandFailure> {
 }
 
 fn list_issues(repo: &str, label: &str) -> Result<Vec<RemoteIssue>, CommandFailure> {
-    let output = run_gh(&[
-        "issue",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        "open",
-        "--label",
-        label,
-        "--limit",
-        "200",
-        "--json",
-        "number,title,body,labels,author",
-        "--jq",
-        "[.[] | {number, title:(.title // \"\"), body:(.body // \"\"), labels:[.labels[].name], author:{login:(.author.login // \"\")}}]",
-    ])?;
-    if !output.status.success() {
-        return Err(CommandFailure::diagnostic(format!(
-            "gh issue list for {label} failed: {}",
-            command_error(&output)
-        )));
+    const PAGE_SIZE: usize = 100;
+    const ISSUE_FIELDS: &str = "{raw_count:length, items:[.[] | select(.pull_request == null) | {number, title:(.title // \"\"), body:(.body // \"\"), labels:[.labels[].name], author:{login:(.user.login // \"\")}}]}";
+
+    let mut issues = Vec::new();
+    let mut page = 1usize;
+    loop {
+        let endpoint = format!(
+            "repos/{repo}/issues?state=open&labels={label}&per_page={PAGE_SIZE}&page={page}"
+        );
+        let output = run_gh(&["api", "--method", "GET", &endpoint, "--jq", ISSUE_FIELDS])?;
+        if !output.status.success() {
+            return Err(CommandFailure::diagnostic(format!(
+                "gh issue page {page} for {label} failed: {}",
+                command_error(&output)
+            )));
+        }
+        let issue_page = parse_remote_issue_page_json(&String::from_utf8_lossy(&output.stdout))
+            .map_err(|error| {
+                CommandFailure::diagnostic(format!(
+                    "could not parse GitHub {label} issue page {page}: {error}"
+                ))
+            })?;
+        let is_last_page = issue_page.raw_count < PAGE_SIZE;
+        issues.extend(issue_page.issues);
+        if is_last_page {
+            return Ok(issues);
+        }
+        page = page.checked_add(1).ok_or_else(|| {
+            CommandFailure::diagnostic(format!("GitHub {label} issue page number overflowed"))
+        })?;
     }
-    parse_remote_issue_list_json(&String::from_utf8_lossy(&output.stdout)).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "could not parse GitHub {label} issue list: {error}"
-        ))
-    })
 }
 
 fn load_dependencies(repo: &str, candidates: &[RemoteIssue]) -> BTreeMap<u64, RemoteIssue> {
@@ -239,29 +244,65 @@ fn load_dependency(repo: &str, number: u64) -> Option<RemoteIssue> {
 }
 
 fn list_pull_requests(repo: &str) -> PullRequestEvidence {
-    let output = match run_gh(&[
-        "pr",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        "open",
-        "--limit",
-        "100",
-        "--json",
-        "number,state,body,statusCheckRollup",
-        "--jq",
-        "[.[] | {number, state:(.state // \"OPEN\"), body:(.body // \"\"), statusCheckRollup:[(.statusCheckRollup // [])[] | {name, status, conclusion}]}]",
-    ]) {
-        Ok(output) => output,
-        Err(error) => return PullRequestEvidence::Unavailable(error.message),
+    const PULL_REQUEST_QUERY: &str = "query($owner:String!,$name:String!,$endCursor:String){repository(owner:$owner,name:$name){pullRequests(first:100,after:$endCursor,states:OPEN){nodes{number state body statusCheckRollup{contexts(first:100){totalCount nodes{__typename ... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}} pageInfo{hasNextPage endCursor}}}}";
+    const PULL_REQUEST_FIELDS: &str = "{items:[.data.repository.pullRequests.nodes[] | {number, state:(.state // \"OPEN\"), body:(.body // \"\"), statusCheckRollup:([(.statusCheckRollup.contexts.nodes // [])[] | if .__typename == \"CheckRun\" then {name:(.name // \"\"), status:(.status // \"\"), conclusion} else {name:(.context // \"\"), status:(if (.state == \"PENDING\" or .state == \"EXPECTED\") then \"IN_PROGRESS\" else \"COMPLETED\" end), conclusion:(if (.state == \"PENDING\" or .state == \"EXPECTED\") then null else .state end)} end] + if ((.statusCheckRollup.contexts.totalCount // 0) > ((.statusCheckRollup.contexts.nodes // []) | length)) then [{name:\"incomplete check evidence\",status:\"IN_PROGRESS\",conclusion:null}] else [] end)}], page_info:{has_next_page:.data.repository.pullRequests.pageInfo.hasNextPage, end_cursor:.data.repository.pullRequests.pageInfo.endCursor}}";
+
+    let Some((owner, name)) = repo.split_once('/') else {
+        return PullRequestEvidence::Unavailable(format!(
+            "GitHub repository must use OWNER/REPO form: {repo}"
+        ));
     };
-    if !output.status.success() {
-        return PullRequestEvidence::Unavailable(command_error(&output));
+    if owner.is_empty() || name.is_empty() || name.contains('/') {
+        return PullRequestEvidence::Unavailable(format!(
+            "GitHub repository must use OWNER/REPO form: {repo}"
+        ));
     }
-    parse_remote_pull_requests_json(&String::from_utf8_lossy(&output.stdout))
-        .map(PullRequestEvidence::Available)
-        .unwrap_or_else(PullRequestEvidence::Unavailable)
+
+    let mut pull_requests = Vec::new();
+    let mut cursor = None;
+    loop {
+        let mut arguments = vec![
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("query={PULL_REQUEST_QUERY}"),
+            "-f".to_string(),
+            format!("owner={owner}"),
+            "-f".to_string(),
+            format!("name={name}"),
+            "--jq".to_string(),
+            PULL_REQUEST_FIELDS.to_string(),
+        ];
+        if let Some(cursor) = &cursor {
+            arguments.push("-f".to_string());
+            arguments.push(format!("endCursor={cursor}"));
+        }
+        let argument_refs = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = match run_gh(&argument_refs) {
+            Ok(output) => output,
+            Err(error) => return PullRequestEvidence::Unavailable(error.message),
+        };
+        if !output.status.success() {
+            return PullRequestEvidence::Unavailable(format!(
+                "gh pull request page failed: {}",
+                command_error(&output)
+            ));
+        }
+        let pull_request_page =
+            match parse_remote_pull_request_page_json(&String::from_utf8_lossy(&output.stdout)) {
+                Ok(page) => page,
+                Err(error) => {
+                    return PullRequestEvidence::Unavailable(format!(
+                        "could not parse GitHub pull request page: {error}"
+                    ));
+                }
+            };
+        pull_requests.extend(pull_request_page.pull_requests);
+        if !pull_request_page.has_next_page {
+            return PullRequestEvidence::Available(pull_requests);
+        }
+        cursor = pull_request_page.end_cursor;
+    }
 }
 
 fn run_gh(arguments: &[&str]) -> Result<Output, CommandFailure> {
@@ -371,18 +412,37 @@ fn discovered_workers() -> usize {
     1
 }
 
-fn plan_json(plan: &ReadyQueuePlan) -> String {
+fn plan_json(plan: &ReadyQueuePlan, constrained: bool) -> String {
     format!(
-        "{{\"ready\":{},\"blocked\":{},\"claimed\":{},\"conflicts\":{},\"worker_cap\":{{\"max_repo_workers\":{},\"active_count\":{},\"remaining\":{},\"reached\":{}}},\"batch\":{}}}",
+        "{{\"ready\":{},\"blocked\":{},\"claimed\":{},\"conflicts\":{},\"gate_counts\":{},\"scan_scope\":{},\"worker_cap\":{{\"max_repo_workers\":{},\"active_count\":{},\"remaining\":{},\"reached\":{}}},\"batch\":{}}}",
         views_json(&plan.ready),
         views_json(&plan.blocked),
         issues_json(&plan.claimed),
         views_json(&plan.conflicts),
+        gate_counts_json(plan),
+        json_string(if constrained { "slice" } else { "repository" }),
         plan.worker_cap.max_repo_workers,
         plan.worker_cap.active_count,
         plan.worker_cap.remaining,
         json_bool(plan.worker_cap.reached),
         views_json(&plan.batch),
+    )
+}
+
+fn gate_counts_json(plan: &ReadyQueuePlan) -> String {
+    let counts = &plan.gate_counts;
+    format!(
+        "{{\"open\":{},\"candidate\":{},\"reviewed\":{},\"blocked\":{},\"dependency_blocked\":{},\"linked_pr_blocked\":{},\"path_conflicted\":{},\"ready\":{},\"claimed\":{},\"selected\":{}}}",
+        counts.open,
+        counts.candidate,
+        counts.reviewed,
+        counts.blocked,
+        counts.dependency_blocked,
+        counts.linked_pr_blocked,
+        counts.path_conflicted,
+        counts.ready,
+        counts.claimed,
+        counts.selected,
     )
 }
 
