@@ -1,0 +1,9 @@
+version: 1
+name: lc-binbase-scheduler
+default_mode: playwright-local
+modes:
+  playwright-local:
+    command: npm run dev
+    env:
+      E2E_USE_HARNESS: "1"
+      RUNTIME_PROFILE: scheduler-playwright
