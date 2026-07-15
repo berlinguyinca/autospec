@@ -355,6 +355,18 @@ fn intent_lint_ignores_a_guardian_rule_exception_line() {
 }
 
 #[test]
+fn intent_lint_ignores_a_documented_semantic_guardian_rule() {
+    let lint = lint_issue_intent(
+        "Retire a legacy writer",
+        "Guardian: skip-HALLUCINATED_API # The symbol is defined upstream.",
+        "agent",
+    );
+
+    assert!(!lint.blocking);
+    assert!(lint.findings.is_empty());
+}
+
+#[test]
 fn intent_lint_scans_guardian_exception_justification() {
     let lint = lint_issue_intent(
         "Retire a legacy writer",
