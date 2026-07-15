@@ -2,6 +2,7 @@ pub mod autonomous;
 pub mod benchmark;
 pub mod claim;
 pub mod doctor;
+pub mod explore;
 pub mod growth_report;
 pub mod init;
 pub mod lint;
@@ -81,6 +82,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
             "claim" => claim::run(rest),
             "queue" => queue::run(rest),
             "doctor" => doctor::run(rest).map_err(CommandFailure::diagnostic),
+            "explore" => explore::run(rest),
             "status" => status::run(rest).map_err(CommandFailure::diagnostic),
             "autonomous" => autonomous::run(rest).map_err(CommandFailure::diagnostic),
             "plan" => plan::run(rest).map_err(CommandFailure::diagnostic),
