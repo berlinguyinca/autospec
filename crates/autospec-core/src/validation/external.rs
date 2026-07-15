@@ -983,14 +983,14 @@ fn run_watchdog_worktree_gc(id: &str, required: bool, root: &Path) -> CheckResul
             ],
         );
     };
-    let failure_message = if !document.contains("gc_orphaned_worktrees()") {
+    let failure_message = if !WATCHDOG_GC_FUNCTION.is_in(&document) {
         Some("scripts/autospec-watchdog.sh must define gc_orphaned_worktrees() (issue #883)")
     } else if !document
         .lines()
         .any(|line| matches!(line, "gc_orphaned_worktrees" | "    gc_orphaned_worktrees"))
     {
         Some("scripts/autospec-watchdog.sh must invoke gc_orphaned_worktrees once per cycle (issue #883)")
-    } else if !document.contains("git worktree remove --force") {
+    } else if !WATCHDOG_FORCE_REMOVE.is_in(&document) {
         Some("scripts/autospec-watchdog.sh GC must prune via 'git worktree remove --force' (issue #883)")
     } else if document
         .lines()
@@ -998,7 +998,7 @@ fn run_watchdog_worktree_gc(id: &str, required: bool, root: &Path) -> CheckResul
         .any(contains_rm_rf)
     {
         Some("scripts/autospec-watchdog.sh must never 'rm -rf' a worktree path; use 'git worktree remove --force' (issue #883)")
-    } else if !document.contains("log --not --remotes") {
+    } else if !WATCHDOG_UNPUSHED_GUARD.is_in(&document) {
         Some("scripts/autospec-watchdog.sh GC must gate on 'git -C <wt> log --not --remotes' for un-pushed commits (issue #883)")
     } else if !root.join(SUITE).is_file() {
         Some("tests/resume/test_watchdog_gc.bats: GC bats fixture missing (issue #883)")
@@ -5995,8 +5995,8 @@ fn contains_unguarded_claim_swap(path: &Path) -> bool {
         .map(|document| {
             document.lines().any(|line| {
                 line.find("gh issue edit ").is_some_and(|index| {
-                    line[index..].contains("--add-label in-progress-by-bot")
-                        && !line.contains("autospec claim acquire")
+                    CLAIM_ADD_IN_PROGRESS.is_in(&line[index..])
+                        && !CLAIM_ACQUIRE_COMMAND.is_in(line)
                 })
             })
         })
@@ -6078,9 +6078,10 @@ fn contains_unsafe_supervisor_eval(path: &Path) -> bool {
     fs::read_to_string(path)
         .map(|document| {
             document.lines().any(|line| {
-                line.contains("eval")
-                    && line.contains('"')
-                    && (line.contains("$(resume_command") || line.contains("$(reg"))
+                SHELL_EVAL_WORD.is_in(line)
+                    && SHELL_DOUBLE_QUOTE.is_in(line)
+                    && (SUPERVISOR_RESUME_SUBSTITUTION.is_in(line)
+                        || SUPERVISOR_REGISTRY_SUBSTITUTION.is_in(line))
             })
         })
         .unwrap_or(false)
@@ -6091,11 +6092,11 @@ fn worktree_ladder_block(path: &Path) -> Option<String> {
     let mut collecting = false;
     let mut lines = Vec::new();
     for line in document.lines() {
-        if line.contains("worktree-ladder:begin") {
+        if WORKTREE_LADDER_BEGIN.is_in(line) {
             collecting = true;
             continue;
         }
-        if line.contains("worktree-ladder:end") {
+        if WORKTREE_LADDER_END.is_in(line) {
             break;
         }
         if collecting {
@@ -6112,19 +6113,58 @@ fn worktree_ladder_block(path: &Path) -> Option<String> {
 fn contains_stale_researcher_count(path: &Path) -> bool {
     fs::read_to_string(path)
         .map(|document| {
-            document.contains("each of the 6")
-                || document.match_indices("6 researchers").any(|(index, _)| {
-                    let before = document[..index].chars().next_back();
-                    let after = document[index + "6 researchers".len()..].chars().next();
-                    !before.is_some_and(|character| {
-                        character.is_ascii_alphanumeric() || character == '_'
-                    }) && !after.is_some_and(|character| {
-                        character.is_ascii_alphanumeric() || character == '_'
+            STALE_RESEARCHER_EACH_SIX.is_in(&document)
+                || document
+                    .match_indices(STALE_RESEARCHER_COUNT_TOKEN.as_str())
+                    .any(|(index, _)| {
+                        let before = document[..index].chars().next_back();
+                        let after = document[index + STALE_RESEARCHER_COUNT_TOKEN.len()..]
+                            .chars()
+                            .next();
+                        !before.is_some_and(|character| {
+                            character.is_ascii_alphanumeric() || character == '_'
+                        }) && !after.is_some_and(|character| {
+                            character.is_ascii_alphanumeric() || character == '_'
+                        })
                     })
-                })
         })
         .unwrap_or(false)
 }
+
+#[derive(Clone, Copy)]
+struct TextNeedle(&'static str);
+
+impl TextNeedle {
+    const fn new(value: &'static str) -> Self {
+        Self(value)
+    }
+
+    fn as_str(self) -> &'static str {
+        self.0
+    }
+
+    fn len(self) -> usize {
+        self.0.len()
+    }
+
+    fn is_in(self, document: &str) -> bool {
+        document.contains(self.0)
+    }
+}
+
+const WATCHDOG_GC_FUNCTION: TextNeedle = TextNeedle::new("gc_orphaned_worktrees()");
+const WATCHDOG_FORCE_REMOVE: TextNeedle = TextNeedle::new("git worktree remove --force");
+const WATCHDOG_UNPUSHED_GUARD: TextNeedle = TextNeedle::new("log --not --remotes");
+const CLAIM_ADD_IN_PROGRESS: TextNeedle = TextNeedle::new("--add-label in-progress-by-bot");
+const CLAIM_ACQUIRE_COMMAND: TextNeedle = TextNeedle::new("autospec claim acquire");
+const SHELL_EVAL_WORD: TextNeedle = TextNeedle::new("eval");
+const SHELL_DOUBLE_QUOTE: TextNeedle = TextNeedle::new("\"");
+const SUPERVISOR_RESUME_SUBSTITUTION: TextNeedle = TextNeedle::new("$(resume_command");
+const SUPERVISOR_REGISTRY_SUBSTITUTION: TextNeedle = TextNeedle::new("$(reg");
+const WORKTREE_LADDER_BEGIN: TextNeedle = TextNeedle::new("worktree-ladder:begin");
+const WORKTREE_LADDER_END: TextNeedle = TextNeedle::new("worktree-ladder:end");
+const STALE_RESEARCHER_EACH_SIX: TextNeedle = TextNeedle::new("each of the 6");
+const STALE_RESEARCHER_COUNT_TOKEN: TextNeedle = TextNeedle::new("6 researchers");
 
 fn contains_rm_rf(line: &str) -> bool {
     let mut remaining = line;

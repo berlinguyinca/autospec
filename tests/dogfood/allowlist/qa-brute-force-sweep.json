@@ -42,12 +42,6 @@
     "justification": "The checker preserves individual missing-anchor diagnostics for separate runtime surfaces; the heuristic treats the short validation loops as duplicate branches."
   },
   {
-    "file": "crates/autospec-core/src/validation/external.rs",
-    "function": "run_with_fast",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This is a file-scoped heuristic false positive: validation dispatch uses typed enum variants and direct process commands, not substring-derived domain meaning."
-  },
-  {
     "file": "crates/autospec-core/src/validation/structural.rs",
     "function": "run",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
