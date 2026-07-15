@@ -308,6 +308,56 @@ admit_with_rust_safety() {
     review_admitted_issue "$aws_num"
 }
 
+route_template_candidate() {
+    # $1 = issue number, $2 = existing labels, $3 = eligibility reason.
+    rtc_num="$1"; rtc_labels="$2"; rtc_reason="$3"
+    rtc_active="$(bash "$GROOM_GOVERN" show 2>/dev/null | jq -r '.active // [] | join(" ")' 2>/dev/null || printf '')"
+    rtc_fill="$(bash "$GROOM_FILL" --issue "$rtc_num" --repo "$repo" 2>/dev/null || printf '')"
+    rtc_ok="$(printf '%s' "$rtc_fill" | jq -r '.ok // false' 2>/dev/null || printf 'false')"
+    if [ "$rtc_ok" != "true" ]; then
+        rtc_failure="$(printf '%s' "$rtc_fill" | jq -r '.reason // "fill-error"' 2>/dev/null || printf 'fill-error')"
+        ensure_label "hold:needs-human"
+        gh issue edit "$rtc_num" --repo "$repo" --add-label "hold:needs-human" >/dev/null 2>&1 || true
+        audit_comment "$rtc_num" "grooming: codex template-fill unavailable/failed (${rtc_failure}) — held for human (${rtc_reason})."
+        record_held "$rtc_num" "needs-template:fill-${rtc_failure}"
+        return 0
+    fi
+
+    rtc_body="$(printf '%s' "$rtc_fill" | jq -r '.body' 2>/dev/null || printf '')"
+    if [ -z "$rtc_body" ] || [ "$rtc_body" = "null" ]; then
+        ensure_label "hold:needs-human"
+        gh issue edit "$rtc_num" --repo "$repo" --add-label "hold:needs-human" >/dev/null 2>&1 || true
+        audit_comment "$rtc_num" "grooming: codex template-fill returned an empty body — held for human (${rtc_reason})."
+        record_held "$rtc_num" "needs-template:fill-empty-body"
+        return 0
+    fi
+
+    rtc_file="$(mktemp "${TMPDIR:-/tmp}/groom-body.XXXXXX")"
+    printf '%s' "$rtc_body" > "$rtc_file"
+    case " $rtc_active " in
+        *" template-promote "*)
+            if admit_with_rust_safety "$rtc_num" "$rtc_file" "$rtc_labels"; then
+                audit_comment "$rtc_num" "grooming: auto-template-groomed — template-promote gate active (${rtc_reason})."
+                promoted_nums="${promoted_nums}${promoted_nums:+ }${rtc_num}"
+                record_routed "$rtc_num" "groom-auto" "needs-template:${rtc_reason}"
+            else
+                record_rust_safety_result "$rtc_num"
+            fi
+            ;;
+        *)
+            if finalize_ready "$rtc_num" "$rtc_file" "$rtc_labels"; then
+                ensure_label "groom:proposed"
+                gh issue edit "$rtc_num" --repo "$repo" --add-label "groom:proposed" --remove-label "needs-autospec-template" >/dev/null 2>&1 || true
+                audit_comment "$rtc_num" "grooming: template drafted for human approval (canary) — approve by adding auto-implement, reject with groom:rejected (${rtc_reason})."
+                record_routed "$rtc_num" "groom-canary" "needs-template:${rtc_reason}"
+            else
+                record_held "$rtc_num" "final-body-write"
+            fi
+            ;;
+    esac
+    rm -f "$rtc_file"
+}
+
 # ── Report-only path: mutate nothing, list candidates as report-only ──────────
 if [ "$apply_enabled" != "1" ]; then
     i=0
@@ -387,63 +437,7 @@ while [ "$i" -lt "$cand_count" ]; do
             # then route by the govern ratchet: canary (seed) proposes for a human;
             # auto (graduated: template-promote active) queues straight into
             # auto-implement. Fail-closed: any fill failure holds for a human.
-            active="$(bash "$GROOM_GOVERN" show 2>/dev/null | jq -r '.active // [] | join(" ")' 2>/dev/null || printf '')"
-            fill_out="$(bash "$GROOM_FILL" --issue "$num" --repo "$repo" 2>/dev/null || printf '')"
-            fill_ok="$(printf '%s' "$fill_out" | jq -r '.ok // false' 2>/dev/null || printf 'false')"
-            if [ "$fill_ok" != "true" ]; then
-                freason="$(printf '%s' "$fill_out" | jq -r '.reason // "fill-error"' 2>/dev/null || printf 'fill-error')"
-                ensure_label "hold:needs-human"
-                gh issue edit "$num" --repo "$repo" \
-                    --add-label "hold:needs-human" >/dev/null 2>&1 || true
-                audit_comment "$num" "grooming: codex template-fill unavailable/failed (${freason}) — held for human (${ereason})."
-                record_held "$num" "needs-template:fill-${freason}"
-            else
-                fbody="$(printf '%s' "$fill_out" | jq -r '.body' 2>/dev/null || printf '')"
-                if [ -z "$fbody" ] || [ "$fbody" = "null" ]; then
-                    # Defense-in-depth: a contract-violating fill (ok:true with
-                    # no/null body) must never reach auto-implement or overwrite
-                    # the issue body — hold for a human instead.
-                    ensure_label "hold:needs-human"
-                    gh issue edit "$num" --repo "$repo" \
-                        --add-label "hold:needs-human" >/dev/null 2>&1 || true
-                    audit_comment "$num" "grooming: codex template-fill returned an empty body — held for human (${ereason})."
-                    record_held "$num" "needs-template:fill-empty-body"
-                else
-                    bf="$(mktemp "${TMPDIR:-/tmp}/groom-body.XXXXXX")"
-                    printf '%s' "$fbody" > "$bf"
-                    case " $active " in
-                        *" template-promote "*)
-                            # Graduated → auto: filled body queued straight into auto-implement.
-                            if ! admit_with_rust_safety "$num" "$bf" "$labels_csv"; then
-                                record_rust_safety_result "$num"
-                                rm -f "$bf"
-                                bf=""
-                                continue
-                            fi
-                            audit_comment "$num" "grooming: auto-template-groomed — template-promote gate active (${ereason})."
-                            promoted_nums="${promoted_nums}${promoted_nums:+ }${num}"
-                            record_routed "$num" "groom-auto" "needs-template:${ereason}"
-                            ;;
-                        *)
-                            # Seed → canary: filled body proposed for human approval.
-                            if ! finalize_ready "$num" "$bf" "$labels_csv"; then
-                                record_held "$num" "final-body-write"
-                                rm -f "$bf"
-                                bf=""
-                                continue
-                            fi
-                            ensure_label "groom:proposed"
-                            gh issue edit "$num" --repo "$repo" \
-                                --add-label "groom:proposed" \
-                                --remove-label "needs-autospec-template" >/dev/null 2>&1 || true
-                            audit_comment "$num" "grooming: template drafted for human approval (canary) — approve by adding auto-implement, reject with groom:rejected (${ereason})."
-                            record_routed "$num" "groom-canary" "needs-template:${ereason}"
-                            ;;
-                    esac
-                    rm -f "$bf"
-                    bf=""
-                fi
-            fi
+            route_template_candidate "$num" "$labels_csv" "$ereason"
             ;;
         epic)
             ensure_label "route:split"

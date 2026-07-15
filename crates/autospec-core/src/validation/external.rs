@@ -5407,18 +5407,22 @@ fn retired_safety_writer_guard(id: &str, required: bool, root: &Path) -> CheckRe
             );
         }
     }
-    for relative in DIRECT_SAFETY_WRITEBACK_SURFACES {
-        for token in DIRECT_SAFETY_WRITEBACK_TOKENS {
-            if contains(&root.join(relative), token) {
-                return failure(
-                    id,
-                    required,
-                    &format!(
-                        "{relative}: direct safety writeback token {token:?}; use autospec queue review-safety"
-                    ),
-                );
-            }
-        }
+    if let Some((relative, token)) = DIRECT_SAFETY_WRITEBACK_SURFACES
+        .iter()
+        .find_map(|relative| {
+            DIRECT_SAFETY_WRITEBACK_TOKENS
+                .iter()
+                .find(|token| contains(&root.join(relative), token))
+                .map(|token| (*relative, *token))
+        })
+    {
+        return failure(
+            id,
+            required,
+            &format!(
+                "{relative}: direct safety writeback token {token:?}; use autospec queue review-safety"
+            ),
+        );
     }
     CheckResult::completed(id, required, 0, 0, 0, 0, 0, output_digest(&[], &[]))
 }
