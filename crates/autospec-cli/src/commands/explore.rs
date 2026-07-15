@@ -95,14 +95,8 @@ fn parse_specialist_options(args: &[String]) -> Result<SpecialistOptions, Comman
             }
             "--num-specialists" => {
                 let value = option_value(args, &mut index, "--num-specialists")?;
-                let parsed = value.parse::<usize>().map_err(|_| {
-                    CommandFailure::diagnostic("--num-specialists requires a non-negative integer")
-                })?;
-                if options.num_specialists.replace(parsed).is_some() {
-                    return Err(CommandFailure::diagnostic(
-                        "--num-specialists accepts exactly one value",
-                    ));
-                }
+                let parsed = parse_specialist_limit(value)?;
+                replace_once(&mut options.num_specialists, parsed, "--num-specialists")?;
             }
             "--force" => options.force = true,
             option => return unknown_specialist_option(option),
@@ -116,6 +110,12 @@ fn unknown_specialist_option(option: &str) -> Result<SpecialistOptions, CommandF
     Err(CommandFailure::diagnostic(format!(
         "unknown autospec explore specialists option: {option}"
     )))
+}
+
+fn parse_specialist_limit(value: String) -> Result<usize, CommandFailure> {
+    value.parse::<usize>().map_err(|_| {
+        CommandFailure::diagnostic("--num-specialists requires a non-negative integer")
+    })
 }
 
 #[derive(Debug, Default)]
@@ -158,11 +158,7 @@ fn option_value(
     Ok(value.clone())
 }
 
-fn replace_once(
-    target: &mut Option<String>,
-    value: String,
-    option: &str,
-) -> Result<(), CommandFailure> {
+fn replace_once<T>(target: &mut Option<T>, value: T, option: &str) -> Result<(), CommandFailure> {
     if target.replace(value).is_some() {
         return Err(CommandFailure::diagnostic(format!(
             "{option} accepts exactly one value"
