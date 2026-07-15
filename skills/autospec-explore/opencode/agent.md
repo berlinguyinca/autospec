@@ -224,6 +224,37 @@ integration (E), and the `check_autospec_explore_contract` gate in `validate.sh`
   `AUTOSPEC_EXPLORE_ONCE_OUT` (path to write JSON) and
   `AUTOSPEC_EXPLORE_ONCE_SOURCES` as env vars.
 
+## Repository sweep canonicalization
+
+Org-sweep and duplicate-repository research MUST use the Rust control-plane
+command before filing issues:
+
+```bash
+autospec explore repositories --input <repository-evidence.json>
+```
+
+The input is a JSON object with `repositories[]` and optional `findings[]`:
+
+- `repositories[].name` — canonical `owner/name` identifier.
+- `repositories[].archived` — GitHub archived flag.
+- `repositories[].pushed_at` — latest push timestamp, or `null`.
+- `repositories[].readme` — sanitized README text or summary.
+- `repositories[].module_paths` — module/import paths observed in the repo.
+- `repositories[].packages` — package names published or owned by the repo.
+- `repositories[].dependency_references` — repository names referenced by deps,
+  README migration notes, package metadata, or module ownership evidence.
+- `repositories[].revival_requested` — explicit operator/project request to file
+  against an archived repository despite the default archive suppression.
+- `findings[].repository`, `fingerprint`, `title`, and `evidence` — proposed
+  filing targets from the sweep. Equal fingerprints are deduped after routing.
+
+The command emits JSON containing `canonical_targets`,
+`do_not_file_by_default`, and `routed_findings`. Researchers and aggregators use
+`routed_findings[].target_repository` as the filing repo. Any repository listed
+in `do_not_file_by_default` is skipped unless `revival_requested` is true in
+the input evidence. This replaces historical shell/Python org-sweep heuristics;
+do not add shell or Python routing for this path.
+
 ## Single-cycle mode (`--once`)
 
 `--once` is the seam that prevents the two-perpetual-loops hazard when the
