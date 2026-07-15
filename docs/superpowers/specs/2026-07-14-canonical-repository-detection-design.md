@@ -1,7 +1,7 @@
 # Canonical repository detection design
 
-**Issue:** #1483  
-**Status:** approved by the operator's standing "do all" instruction  
+**Issue:** #1483
+**Status:** approved by the operator's standing "do all" instruction
 **Decision:** add a typed Rust command; do not revive the retired shell org-sweep path.
 
 ## Problem
