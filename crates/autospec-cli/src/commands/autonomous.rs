@@ -8,6 +8,11 @@ use autospec_core::autonomous::mainline_health::{
     CheckEvidence, HealthBranchInput, MainlineHealth, MainlineHealthDiagnostic,
     MainlineHealthOutcome,
 };
+use autospec_core::autonomous_lifecycle::{
+    decide as decide_lifecycle, Budget as LifecycleBudget, Health as LifecycleHealth,
+    LifecycleDecision, LifecycleInput, LifecycleReject, LifecycleTier,
+    ParkReason as LifecycleParkReason, StopMode as LifecycleStopMode,
+};
 use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
 };
@@ -92,6 +97,9 @@ impl StopMode {
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     if args.first().is_some_and(|arg| arg == "executor-result") {
         return executor_result(args);
+    }
+    if args.first().is_some_and(|arg| arg == "lifecycle") {
+        return lifecycle(args);
     }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
@@ -252,6 +260,194 @@ fn parse(args: &[String]) -> Result<Options, String> {
         index += 1;
     }
     Ok(options)
+}
+
+fn lifecycle(args: &[String]) -> Result<(), CommandFailure> {
+    let input = parse_lifecycle_input(args).map_err(CommandFailure::diagnostic)?;
+    emit_lifecycle_decision(decide_lifecycle(&input))
+}
+
+fn parse_lifecycle_input(args: &[String]) -> Result<LifecycleInput, String> {
+    if args.get(1).map(String::as_str) != Some("decide") {
+        return Err("autonomous lifecycle requires the decide action".to_string());
+    }
+
+    let mut repo = None;
+    let mut claim_repo = None;
+    let mut lease_age_secs = None;
+    let mut stop = None;
+    let mut health = None;
+    let mut budget = None;
+    let mut ready_tier = None;
+    let mut index = 2;
+
+    while index < args.len() {
+        let flag = &args[index];
+        let value = executor_result_option_value(args, &mut index, flag)?;
+        match flag.as_str() {
+            "--repo" => set_executor_result_value(&mut repo, value, "--repo")?,
+            "--claim-repo" => set_executor_result_value(&mut claim_repo, value, "--claim-repo")?,
+            "--lease-age-sec" => {
+                let value = value
+                    .parse::<u64>()
+                    .map_err(|_| "--lease-age-sec must be a non-negative integer".to_string())?;
+                if lease_age_secs.replace(value).is_some() {
+                    return Err("--lease-age-sec may be specified only once".to_string());
+                }
+            }
+            "--stop" => set_executor_result_value(&mut stop, value, "--stop")?,
+            "--health" => set_executor_result_value(&mut health, value, "--health")?,
+            "--budget" => set_executor_result_value(&mut budget, value, "--budget")?,
+            "--ready-tier" => set_executor_result_value(&mut ready_tier, value, "--ready-tier")?,
+            unknown => return Err(format!("unknown autonomous lifecycle option: {unknown}")),
+        }
+        index += 1;
+    }
+
+    let repo = repo.ok_or_else(|| "autonomous lifecycle requires --repo".to_string())?;
+    let mut input = LifecycleInput::ready(repo);
+    if let Some(claim_repo) = claim_repo {
+        input = input.with_claim_repo(claim_repo);
+    }
+    if let Some(lease_age_secs) = lease_age_secs {
+        input = input.with_lease_age_secs(lease_age_secs);
+    }
+    if let Some(stop) = stop {
+        input = input.with_stop(parse_lifecycle_stop(&stop)?);
+    }
+    if let Some(health) = health {
+        input = input.with_health(parse_lifecycle_health(&health)?);
+    }
+    if let Some(budget) = budget {
+        input = input.with_budget(parse_lifecycle_budget(&budget)?);
+    }
+    if let Some(tier) = ready_tier {
+        input = input.with_tier(parse_lifecycle_tier(&tier)?);
+    }
+    Ok(input)
+}
+
+fn parse_lifecycle_stop(value: &str) -> Result<LifecycleStopMode, String> {
+    match value {
+        "graceful" => Ok(LifecycleStopMode::Graceful),
+        "immediate" => Ok(LifecycleStopMode::Immediate),
+        _ => Err("--stop must be graceful or immediate".to_string()),
+    }
+}
+
+fn parse_lifecycle_health(value: &str) -> Result<LifecycleHealth, String> {
+    match value {
+        "continue" => Ok(LifecycleHealth::Continue),
+        "wait" => Ok(LifecycleHealth::Wait),
+        "halt" => Ok(LifecycleHealth::Halt),
+        _ => Err("--health must be continue, wait, or halt".to_string()),
+    }
+}
+
+fn parse_lifecycle_budget(value: &str) -> Result<LifecycleBudget, String> {
+    match value {
+        "within" => Ok(LifecycleBudget::WithinCap),
+        "soft" => Ok(LifecycleBudget::SoftCap),
+        "hard" => Ok(LifecycleBudget::HardCap),
+        _ => Err("--budget must be within, soft, or hard".to_string()),
+    }
+}
+
+fn parse_lifecycle_tier(value: &str) -> Result<LifecycleTier, String> {
+    match value {
+        "1" => Ok(LifecycleTier::Tier1),
+        "1.5" => Ok(LifecycleTier::Tier15),
+        "2" => Ok(LifecycleTier::Tier2),
+        "3" => Ok(LifecycleTier::Tier3),
+        "4" => Ok(LifecycleTier::Tier4),
+        "5" => Ok(LifecycleTier::Tier5),
+        "6" => Ok(LifecycleTier::Tier6),
+        "7" => Ok(LifecycleTier::Tier7),
+        "idle" => Ok(LifecycleTier::Idle),
+        _ => Err("--ready-tier must be 1, 1.5, 2, 3, 4, 5, 6, 7, or idle".to_string()),
+    }
+}
+
+fn emit_lifecycle_decision(decision: LifecycleDecision) -> Result<(), CommandFailure> {
+    let (body, exit_code) = match decision {
+        LifecycleDecision::Run { tier } => (
+            format!(
+                "{{\"decision\":\"run\",\"tier\":\"{}\"}}",
+                lifecycle_tier_name(tier)
+            ),
+            0,
+        ),
+        LifecycleDecision::Stop { mode } => (
+            format!(
+                "{{\"decision\":\"stop\",\"mode\":\"{}\"}}",
+                lifecycle_stop_name(mode)
+            ),
+            20,
+        ),
+        LifecycleDecision::Park { reason } => (
+            format!(
+                "{{\"decision\":\"park\",\"reason\":\"{}\"}}",
+                lifecycle_park_name(reason)
+            ),
+            20,
+        ),
+        LifecycleDecision::Reject(reason) => (
+            format!(
+                "{{\"decision\":\"reject\",\"reason\":\"{}\"}}",
+                lifecycle_reject_name(reason)
+            ),
+            3,
+        ),
+    };
+    println!("{body}");
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        Err(CommandFailure::status(String::new(), exit_code))
+    }
+}
+
+fn lifecycle_tier_name(tier: LifecycleTier) -> &'static str {
+    match tier {
+        LifecycleTier::Tier1 => "1",
+        LifecycleTier::Tier15 => "1.5",
+        LifecycleTier::Tier2 => "2",
+        LifecycleTier::Tier3 => "3",
+        LifecycleTier::Tier4 => "4",
+        LifecycleTier::Tier5 => "5",
+        LifecycleTier::Tier6 => "6",
+        LifecycleTier::Tier7 => "7",
+        LifecycleTier::Idle => "idle",
+    }
+}
+
+fn lifecycle_stop_name(mode: LifecycleStopMode) -> &'static str {
+    match mode {
+        LifecycleStopMode::Graceful => "graceful",
+        LifecycleStopMode::Immediate => "immediate",
+    }
+}
+
+fn lifecycle_park_name(reason: LifecycleParkReason) -> &'static str {
+    match reason {
+        LifecycleParkReason::HumanGate => "human_gate",
+        LifecycleParkReason::HealthWait => "health_wait",
+        LifecycleParkReason::HealthHalt => "health_halt",
+        LifecycleParkReason::BudgetSoftCap => "budget_soft_cap",
+        LifecycleParkReason::BudgetHardCap => "budget_hard_cap",
+        LifecycleParkReason::IdleRescan => "idle_rescan",
+    }
+}
+
+fn lifecycle_reject_name(reason: LifecycleReject) -> &'static str {
+    match reason {
+        LifecycleReject::InvalidScope => "invalid_scope",
+        LifecycleReject::CrossScopeClaim => "cross_scope_claim",
+        LifecycleReject::StaleLease => "stale_lease",
+        LifecycleReject::TerminalClaim => "terminal_claim",
+        LifecycleReject::OwnershipMismatch => "ownership_mismatch",
+        LifecycleReject::FailureCap => "failure_cap",
+    }
 }
 
 fn option_value(args: &[String], index: &mut usize, option: &str) -> Result<String, String> {
