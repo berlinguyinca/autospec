@@ -148,3 +148,60 @@ fn explore_specialists_force_replaces_valid_cached_roster() {
         "trading-specialist"
     );
 }
+
+#[test]
+fn explore_specialists_caps_cached_roster() {
+    let repo = temp_dir("autospec-explore-specialists-cached-cap");
+    std::fs::create_dir_all(repo.join(".autospec")).unwrap();
+    std::fs::write(
+        repo.join(".autospec/explore-specialists.json"),
+        r#"{"schema_version":1,"domains":[],"suggested_specialists":[{"slug":"one","persona":"P","lens":"L","why":"W","evidence":"E"},{"slug":"two","persona":"P","lens":"L","why":"W","evidence":"E"},{"slug":"three","persona":"P","lens":"L","why":"W","evidence":"E"},{"slug":"four","persona":"P","lens":"L","why":"W","evidence":"E"},{"slug":"five","persona":"P","lens":"L","why":"W","evidence":"E"},{"slug":"six","persona":"P","lens":"L","why":"W","evidence":"E"}]}"#,
+    )
+    .unwrap();
+
+    let output = autospec()
+        .args([
+            "explore",
+            "specialists",
+            "--repo-dir",
+            repo.to_str().unwrap(),
+            "--num-specialists",
+            "1",
+        ])
+        .output()
+        .expect("cached cap run");
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["suggested_specialists"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn explore_specialists_proposal_input_overrides_fallback() {
+    let repo = temp_dir("autospec-explore-specialists-proposal-input");
+    std::fs::write(repo.join("requirements.txt"), "ccxt>=4.0\n").unwrap();
+
+    let output = autospec()
+        .args([
+            "explore",
+            "specialists",
+            "--repo-dir",
+            repo.to_str().unwrap(),
+            "--force",
+        ])
+        .env(
+            "AUTOSPEC_SPECIALIST_LLM_STUB_OUTPUT",
+            r#"{"suggested_specialists":[{"slug":"Market Risk","persona":"Market risk quant","lens":"VaR and drawdown limits","why":"trading deps present","evidence":"requirements.txt:1 ccxt"}]}"#,
+        )
+        .output()
+        .expect("proposal-input run");
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json["suggested_specialists"][0]["slug"],
+        "market-risk",
+        "stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
