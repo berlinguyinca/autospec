@@ -77,11 +77,26 @@ authorizes autonomous discovery to stop permanently.
 The foreground CLI adapter persists this state under its repository-scoped
 autonomous directory in separate repository and exact-slice files, and does not
 delegate selection or dispatch to a script.
-For the current cutover, its direct Rust `executor-result` child returns only a
-blocked/deferred receipt because a typed implementation-agent protocol has not
-been introduced. The adapter records that receipt before claim reconciliation,
-then leaves the selected issue paused and claimed. It must not requeue or mark
-the issue complete merely because the receipt process exited successfully.
+Its bare Rust `executor-result --repo OWNER/REPO --issue N` child remains the
+exact successful deferred receipt: it makes no claim mutation and leaves the
+selected issue paused and claimed. It must not requeue or mark the issue complete
+merely because that receipt process exited successfully.
+
+An explicit `executor-result` is strict Rust input: it requires repository,
+positive issue, worker ID, branch, and outcome. `succeeded` also requires a
+positive PR and no reason; `blocked` and `retryable` require a nonempty reason
+and no PR. Unknown, repeated, or mixed fields are malformed. Success is accepted
+only if the worker ID and branch match a fresh, nonterminal claim, and the PR is
+open, closes the issue, has exactly one `## Closeout report`, and uses that same
+branch as its head ref. The command appends immutable evidence and re-checks the
+claim; it does not patch, release, or merge the claim or PR. The
+JSON exit contract is `0` for accepted or
+legacy deferred, `10` retryable, `20` blocked or evidence-unavailable, `2`
+malformed, and `3` ownership lost. This control-plane command does not launch an
+agent or invoke a shell, script, `omx`, or `/autospec-run`. A blocked
+`result_recording_failed` means evidence creation or confirmation failed; any
+receipt is unconfirmed/inert, the claim is unchanged, and it is not a recorded
+executor-blocked outcome.
 
 ## Rust CLI
 

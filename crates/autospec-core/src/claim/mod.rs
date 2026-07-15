@@ -114,6 +114,8 @@ pub const RUN_STATE_BEGIN_MARKER: &str = "<!-- autospec-run-state:begin -->";
 pub const RUN_STATE_END_MARKER: &str = "<!-- autospec-run-state:end -->";
 pub const RUN_TERMINAL_BEGIN_MARKER: &str = "<!-- autospec-run-terminal:begin -->";
 pub const RUN_TERMINAL_END_MARKER: &str = "<!-- autospec-run-terminal:end -->";
+pub const EXECUTOR_RESULT_BEGIN_MARKER: &str = "<!-- autospec-executor-result:begin -->";
+pub const EXECUTOR_RESULT_END_MARKER: &str = "<!-- autospec-executor-result:end -->";
 const SAFETY_BEGIN_MARKER: &str = "<!-- autospec-safety:begin -->";
 const SAFETY_END_MARKER: &str = "<!-- autospec-safety:end -->";
 
@@ -961,6 +963,7 @@ pub fn parse_paths_argument(input: &str) -> Result<Vec<String>, String> {
 pub struct OpenPullRequest {
     pub number: u64,
     pub body: String,
+    pub head_ref_name: String,
 }
 
 pub fn parse_open_pull_requests_json(input: &str) -> Result<Vec<OpenPullRequest>, String> {
@@ -972,11 +975,13 @@ pub fn parse_open_pull_requests_json(input: &str) -> Result<Vec<OpenPullRequest>
         .map(|(index, value)| {
             let context = format!("GitHub open pull requests[{index}]");
             let mut object = value.into_object(&context)?;
-            require_only_keys(&object, &["number", "body"])?;
+            require_only_keys(&object, &["number", "body", "headRefName"])?;
             Ok(OpenPullRequest {
                 number: take_required(&mut object, "number")?
                     .into_number(&format!("{context} number"))?,
                 body: take_optional_string(&mut object, "body", &context)?.unwrap_or_default(),
+                head_ref_name: take_optional_string(&mut object, "headRefName", &context)?
+                    .unwrap_or_default(),
             })
         })
         .collect()
@@ -988,10 +993,169 @@ pub fn find_reconcilable_pull_request(
 ) -> Option<&OpenPullRequest> {
     pull_requests
         .iter()
-        .filter(|pull_request| {
-            closes_issue(&pull_request.body, issue) && closeout_count(&pull_request.body) == 1
-        })
+        .filter(|pull_request| is_reconcilable_pull_request(pull_request, issue))
         .min_by_key(|pull_request| pull_request.number)
+}
+
+pub fn is_reconcilable_pull_request(pull_request: &OpenPullRequest, issue: u64) -> bool {
+    closes_issue(&pull_request.body, issue) && closeout_count(&pull_request.body) == 1
+}
+
+pub fn is_executor_result_pull_request(
+    pull_request: &OpenPullRequest,
+    issue: u64,
+    branch: &str,
+) -> bool {
+    is_reconcilable_pull_request(pull_request, issue) && pull_request.head_ref_name == branch
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutorResultEvidence {
+    pub repo: String,
+    pub issue: u64,
+    pub worker_id: String,
+    pub branch: String,
+    pub outcome: String,
+    pub pr: Option<u64>,
+    pub step: String,
+    pub receipt_id: String,
+}
+
+impl ExecutorResultEvidence {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        repo: impl Into<String>,
+        issue: u64,
+        worker_id: impl Into<String>,
+        branch: impl Into<String>,
+        outcome: impl Into<String>,
+        pr: Option<u64>,
+        step: impl Into<String>,
+        receipt_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            repo: repo.into(),
+            issue,
+            worker_id: worker_id.into(),
+            branch: branch.into(),
+            outcome: outcome.into(),
+            pr,
+            step: step.into(),
+            receipt_id: receipt_id.into(),
+        }
+    }
+
+    pub fn to_marked_comment(&self) -> String {
+        format!(
+            "{EXECUTOR_RESULT_BEGIN_MARKER}\n{}\n{EXECUTOR_RESULT_END_MARKER}",
+            self.to_json()
+        )
+    }
+
+    fn to_json(&self) -> String {
+        let pr = self
+            .pr
+            .map_or_else(|| "null".to_string(), |pr| pr.to_string());
+        format!(
+            "{{\"schema\":1,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"branch\":\"{}\",\"outcome\":\"{}\",\"pr\":{},\"step\":\"{}\",\"receipt_id\":\"{}\"}}",
+            escape_json(&self.repo),
+            self.issue,
+            escape_json(&self.worker_id),
+            escape_json(&self.branch),
+            escape_json(&self.outcome),
+            pr,
+            escape_json(&self.step),
+            escape_json(&self.receipt_id),
+        )
+    }
+
+    fn parse_json(input: &str) -> Result<Self, String> {
+        let mut object = JsonParser::new(input)
+            .parse()?
+            .into_object("executor result evidence")?;
+        require_only_keys(
+            &object,
+            &[
+                "schema",
+                "repo",
+                "issue",
+                "worker_id",
+                "branch",
+                "outcome",
+                "pr",
+                "step",
+                "receipt_id",
+            ],
+        )?;
+        let schema = take_required(&mut object, "schema")?.into_number("executor result schema")?;
+        if schema != 1 {
+            return Err(format!("unsupported executor result schema: {schema}"));
+        }
+        let pr = match object.remove("pr") {
+            Some(JsonValue::Null) => None,
+            Some(value) => Some(value.into_number("executor result pr")?),
+            None => return Err("executor result evidence missing required key: pr".to_string()),
+        };
+        let evidence = Self {
+            repo: take_required(&mut object, "repo")?.into_string("executor result repo")?,
+            issue: take_required(&mut object, "issue")?.into_number("executor result issue")?,
+            worker_id: take_required(&mut object, "worker_id")?
+                .into_string("executor result worker_id")?,
+            branch: take_required(&mut object, "branch")?.into_string("executor result branch")?,
+            outcome: take_required(&mut object, "outcome")?
+                .into_string("executor result outcome")?,
+            pr,
+            step: take_required(&mut object, "step")?.into_string("executor result step")?,
+            receipt_id: take_required(&mut object, "receipt_id")?
+                .into_string("executor result receipt_id")?,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.issue == 0 {
+            return Err("executor result issue must be positive".to_string());
+        }
+        for (name, value) in [
+            ("repo", &self.repo),
+            ("worker_id", &self.worker_id),
+            ("branch", &self.branch),
+            ("outcome", &self.outcome),
+            ("step", &self.step),
+            ("receipt_id", &self.receipt_id),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("executor result {name} must not be empty"));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn executor_result_evidence_exists(
+    comments: &[RemoteComment],
+    expected: &ExecutorResultEvidence,
+) -> bool {
+    comments.iter().any(|comment| {
+        parse_executor_result_evidence_comment(&comment.body)
+            .is_ok_and(|evidence| evidence == *expected)
+    })
+}
+
+fn parse_executor_result_evidence_comment(body: &str) -> Result<ExecutorResultEvidence, String> {
+    if body.matches(EXECUTOR_RESULT_BEGIN_MARKER).count() != 1
+        || body.matches(EXECUTOR_RESULT_END_MARKER).count() != 1
+    {
+        return Err("executor result evidence markers must occur exactly once".to_string());
+    }
+    let (_, after_begin) = body
+        .split_once(EXECUTOR_RESULT_BEGIN_MARKER)
+        .ok_or_else(|| "missing executor result evidence begin marker".to_string())?;
+    let (payload, _) = after_begin
+        .split_once(EXECUTOR_RESULT_END_MARKER)
+        .ok_or_else(|| "missing executor result evidence end marker".to_string())?;
+    ExecutorResultEvidence::parse_json(payload.trim())
 }
 
 fn closes_issue(body: &str, issue: u64) -> bool {

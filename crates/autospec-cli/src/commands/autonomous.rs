@@ -14,7 +14,7 @@ use autospec_core::coordination::{
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{claim, queue};
+use super::{claim, queue, CommandFailure};
 
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
 const DEFERRED_EXECUTOR_REASON: &str = "awaiting_typed_implementation_executor";
@@ -89,12 +89,15 @@ impl StopMode {
     }
 }
 
-pub fn run(args: &[String]) -> Result<(), String> {
+pub fn run(args: &[String]) -> Result<(), CommandFailure> {
+    if args.first().is_some_and(|arg| arg == "executor-result") {
+        return executor_result(args);
+    }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
         return Ok(());
     }
-    let options = parse(args)?;
+    let options = parse(args).map_err(CommandFailure::diagnostic)?;
     match options.subcommand.as_str() {
         "start" => start(options),
         "monitor" => monitor(options),
@@ -108,10 +111,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "timeline" => timeline(options),
         "cleanup" => cleanup(options),
         "run-foreground" => run_foreground(options),
-        "executor-result" => executor_result(options),
         "main-health" => main_health(options),
         other => Err(format!("unknown autospec autonomous subcommand: {other}")),
     }
+    .map_err(CommandFailure::diagnostic)
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -1044,15 +1047,253 @@ fn foreground_worker_id() -> Result<String, String> {
     ))
 }
 
-fn executor_result(options: Options) -> Result<(), String> {
-    let issue = options
-        .issue
-        .ok_or_else(|| "executor-result requires --issue".to_string())?;
-    if options.repo.trim().is_empty() || options.repo == "unknown" {
+fn executor_result(args: &[String]) -> Result<(), CommandFailure> {
+    let input = match parse_executor_result_input(args) {
+        Ok(ExecutorResultInvocation::Deferred { repo, issue }) => {
+            println!("{}", executor_receipt_json(&repo, issue));
+            return Ok(());
+        }
+        Ok(ExecutorResultInvocation::Explicit(input)) => input,
+        Err(reason) => return emit_executor_protocol("malformed", None, None, Some(&reason), 2),
+    };
+
+    let recorded = match claim::record_executor_result(
+        &input.repo,
+        input.issue,
+        &input.worker_id,
+        &input.branch,
+        &input.outcome,
+        input.pr,
+    ) {
+        Ok(recorded) => recorded,
+        Err(_) => {
+            return emit_executor_protocol(
+                "blocked",
+                Some(&input),
+                None,
+                Some("result_recording_failed"),
+                20,
+            );
+        }
+    };
+
+    match recorded {
+        claim::ExecutorResultRecord::Recorded => match &input.outcome {
+            ConductorOutcome::Succeeded => {
+                emit_executor_protocol("accepted", Some(&input), input.pr, None, 0)
+            }
+            ConductorOutcome::Blocked(_) => {
+                emit_executor_protocol("blocked", Some(&input), None, input.reason.as_deref(), 20)
+            }
+            ConductorOutcome::Retryable(_) => {
+                emit_executor_protocol("retryable", Some(&input), None, input.reason.as_deref(), 10)
+            }
+        },
+        claim::ExecutorResultRecord::EvidenceUnavailable => emit_executor_protocol(
+            "blocked",
+            Some(&input),
+            None,
+            Some("success_evidence_unavailable"),
+            20,
+        ),
+        claim::ExecutorResultRecord::OwnershipLost => emit_executor_protocol(
+            "ownership_lost",
+            Some(&input),
+            None,
+            Some("claim_ownership_lost"),
+            3,
+        ),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ExecutorResultInput {
+    repo: String,
+    issue: u64,
+    worker_id: String,
+    branch: String,
+    outcome: ConductorOutcome,
+    pr: Option<u64>,
+    reason: Option<String>,
+}
+
+impl ExecutorResultInput {
+    fn outcome_name(&self) -> &'static str {
+        match self.outcome {
+            ConductorOutcome::Succeeded => "succeeded",
+            ConductorOutcome::Blocked(_) => "blocked",
+            ConductorOutcome::Retryable(_) => "retryable",
+        }
+    }
+}
+
+enum ExecutorResultInvocation {
+    Deferred { repo: String, issue: u64 },
+    Explicit(ExecutorResultInput),
+}
+
+fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocation, String> {
+    let mut repo = None;
+    let mut issue = None;
+    let mut worker_id = None;
+    let mut branch = None;
+    let mut outcome = None;
+    let mut pr = None;
+    let mut reason = None;
+    let mut index = 1;
+
+    while index < args.len() {
+        let flag = &args[index];
+        let value = executor_result_option_value(args, &mut index, flag)?;
+        match flag.as_str() {
+            "--repo" => set_executor_result_value(&mut repo, value, "--repo")?,
+            "--issue" => set_executor_result_number(&mut issue, value, "--issue")?,
+            "--worker-id" => set_executor_result_value(&mut worker_id, value, "--worker-id")?,
+            "--branch" => set_executor_result_value(&mut branch, value, "--branch")?,
+            "--outcome" => set_executor_result_value(&mut outcome, value, "--outcome")?,
+            "--pr" => set_executor_result_number(&mut pr, value, "--pr")?,
+            "--reason" => set_executor_result_value(&mut reason, value, "--reason")?,
+            unknown => return Err(format!("unknown executor-result option: {unknown}")),
+        }
+        index += 1;
+    }
+
+    let has_explicit_field = worker_id.is_some()
+        || branch.is_some()
+        || outcome.is_some()
+        || pr.is_some()
+        || reason.is_some();
+    if !has_explicit_field {
+        return match (repo, issue) {
+            (Some(repo), Some(issue)) if repo != "unknown" => {
+                Ok(ExecutorResultInvocation::Deferred { repo, issue })
+            }
+            _ => Err("executor-result deferred receipt requires --repo and --issue".to_string()),
+        };
+    }
+
+    let repo = repo.ok_or_else(|| "executor-result requires --repo".to_string())?;
+    if repo == "unknown" {
         return Err("executor-result requires --repo".to_string());
     }
-    println!("{}", executor_receipt_json(&options.repo, issue));
+    let issue = issue.ok_or_else(|| "executor-result requires --issue".to_string())?;
+    let worker_id = worker_id.ok_or_else(|| "executor-result requires --worker-id".to_string())?;
+    let branch = branch.ok_or_else(|| "executor-result requires --branch".to_string())?;
+    let outcome = outcome.ok_or_else(|| "executor-result requires --outcome".to_string())?;
+    let (outcome, pr, reason) = match outcome.as_str() {
+        "succeeded" if pr.is_some() && reason.is_none() => (ConductorOutcome::Succeeded, pr, None),
+        "blocked" if pr.is_none() => {
+            let reason =
+                reason.ok_or_else(|| "blocked executor-result requires --reason".to_string())?;
+            (
+                ConductorOutcome::Blocked(reason.clone()),
+                None,
+                Some(reason),
+            )
+        }
+        "retryable" if pr.is_none() => {
+            let reason =
+                reason.ok_or_else(|| "retryable executor-result requires --reason".to_string())?;
+            (
+                ConductorOutcome::Retryable(reason.clone()),
+                None,
+                Some(reason),
+            )
+        }
+        "succeeded" => {
+            return Err("succeeded executor-result requires --pr and rejects --reason".to_string())
+        }
+        "blocked" | "retryable" => {
+            return Err(
+                "blocked and retryable executor-results require --reason and reject --pr"
+                    .to_string(),
+            )
+        }
+        _ => {
+            return Err(
+                "executor-result --outcome must be succeeded, blocked, or retryable".to_string(),
+            )
+        }
+    };
+
+    Ok(ExecutorResultInvocation::Explicit(ExecutorResultInput {
+        repo,
+        issue,
+        worker_id,
+        branch,
+        outcome,
+        pr,
+        reason,
+    }))
+}
+
+fn executor_result_option_value(
+    args: &[String],
+    index: &mut usize,
+    flag: &str,
+) -> Result<String, String> {
+    *index += 1;
+    let value = args
+        .get(*index)
+        .ok_or_else(|| format!("{flag} requires a value"))?;
+    if value.trim().is_empty() || value.starts_with("--") {
+        return Err(format!("{flag} requires a non-empty value"));
+    }
+    Ok(value.clone())
+}
+
+fn set_executor_result_value(
+    field: &mut Option<String>,
+    value: String,
+    flag: &str,
+) -> Result<(), String> {
+    if field.replace(value).is_some() {
+        return Err(format!("{flag} may be specified only once"));
+    }
     Ok(())
+}
+
+fn set_executor_result_number(
+    field: &mut Option<u64>,
+    value: String,
+    flag: &str,
+) -> Result<(), String> {
+    let value = value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("{flag} must be a positive integer"))?;
+    if field.replace(value).is_some() {
+        return Err(format!("{flag} may be specified only once"));
+    }
+    Ok(())
+}
+
+fn emit_executor_protocol(
+    status: &str,
+    input: Option<&ExecutorResultInput>,
+    pr: Option<u64>,
+    reason: Option<&str>,
+    exit_code: i32,
+) -> Result<(), CommandFailure> {
+    let mut fields = vec![format!("\"status\":\"{}\"", json_escape(status))];
+    if let Some(input) = input {
+        fields.push(format!("\"repo\":\"{}\"", json_escape(&input.repo)));
+        fields.push(format!("\"issue\":{}", input.issue));
+        fields.push(format!("\"outcome\":\"{}\"", input.outcome_name()));
+    }
+    if let Some(pr) = pr {
+        fields.push(format!("\"pr\":{pr}"));
+    }
+    if let Some(reason) = reason {
+        fields.push(format!("\"reason\":\"{}\"", json_escape(reason)));
+    }
+    println!("{{{}}}", fields.join(","));
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        Err(CommandFailure::status(String::new(), exit_code))
+    }
 }
 
 #[derive(Debug, Clone)]
