@@ -604,10 +604,14 @@ fn status_json_reports_persisted_lifecycle_counts() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    assert!(stdout.contains("\"command\":\"status\""));
-    assert!(stdout.contains("\"specs\":{"));
-    assert!(stdout.contains("\"planned\":"));
-    assert!(stdout.contains("\"superseded\":"));
+    for expected in [
+        "\"command\":\"status\"",
+        "\"specs\":{",
+        "\"planned\":",
+        "\"superseded\":",
+    ] {
+        assert!(stdout.contains(expected), "missing {expected} in {stdout}");
+    }
 }
 
 #[test]
@@ -1251,6 +1255,215 @@ fn autonomous_bare_command_defaults_to_start() {
     assert!(output.status.success());
     assert!(stdout.contains("\"subcommand\":\"start\""));
     assert!(stdout.contains("\"status\":\"dry-run\""));
+}
+
+#[test]
+fn autonomous_main_health_reports_branch_not_found_from_fake_gh() {
+    let temp = temp_dir("autospec-autonomous-main-health-missing");
+    let operator_dir = temp.join("operator");
+    let bin = fake_bin(
+        &temp,
+        None,
+        Some(
+            r#"#!/bin/sh
+if [ "$1 $2" = "repo view" ]; then
+  printf '{"defaultBranchRef":{"name":"trunk"}}\n'
+  exit 0
+fi
+if [ "$1 $2" = "api repos/berlinguyinca/autospec/branches/trunk" ]; then
+  printf 'not found\n' >&2
+  exit 1
+fi
+printf 'unexpected gh: %s\n' "$*" >&2
+exit 99
+"#,
+        ),
+    );
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "main-health",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--json",
+        ])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &operator_dir)
+        .output()
+        .expect("autospec autonomous main-health runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stdout.contains("\"subcommand\":\"main-health\""));
+    assert!(stdout.contains("\"branch\":\"trunk\""));
+    assert!(stdout.contains("\"outcome\":\"blocked\""));
+    assert!(stdout.contains("\"diagnostic_reason\":\"branch-not-found\""));
+    assert!(!stdout.contains("wait"));
+    let state = std::fs::read_to_string(
+        operator_dir
+            .join("berlinguyinca_autospec")
+            .join("mainline-health.json"),
+    )
+    .expect("mainline health state is written");
+    assert!(state.contains("\"branch\":\"trunk\""));
+    assert!(state.contains("\"diagnostic_reason\":\"branch-not-found\""));
+}
+
+#[test]
+fn autonomous_main_health_uses_explicit_branch_before_default_branch() {
+    let temp = temp_dir("autospec-autonomous-main-health-explicit");
+    let log = temp.join("gh.log");
+    let operator_dir = temp.join("operator");
+    let bin = fake_bin(
+        &temp,
+        None,
+        Some(&format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> {}
+if [ "$1 $2" = "api repos/berlinguyinca/autospec/branches/release" ]; then
+  printf '{{"name":"release","commit":{{"sha":"abc123"}}}}\n'
+  exit 0
+fi
+if [ "$1 $2" = "api repos/berlinguyinca/autospec/commits/abc123/check-runs" ]; then
+  printf '{{"check_runs":[]}}\n'
+  exit 0
+fi
+printf 'unexpected gh: %s\n' "$*" >&2
+exit 99
+"#,
+            shell_single_quote(log.to_str().unwrap())
+        )),
+    );
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "main-health",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--branch",
+            "release",
+            "--json",
+        ])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &operator_dir)
+        .output()
+        .expect("autospec autonomous main-health runs");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = std::fs::read_to_string(log).expect("gh log");
+    assert!(calls.contains("api repos/berlinguyinca/autospec/branches/release"));
+    assert!(!calls.contains("repo view"));
+}
+
+#[test]
+fn autonomous_main_health_blocks_failed_required_check() {
+    let temp = temp_dir("autospec-autonomous-main-health-check");
+    let operator_dir = temp.join("operator");
+    let bin = fake_bin(
+        &temp,
+        None,
+        Some(
+            r#"#!/bin/sh
+if [ "$1 $2" = "repo view" ]; then
+  printf '{"defaultBranchRef":{"name":"main"}}\n'
+  exit 0
+fi
+if [ "$1 $2" = "api repos/berlinguyinca/autospec/branches/main" ]; then
+  printf '{"name":"main","commit":{"sha":"abc123"}}\n'
+  exit 0
+fi
+if [ "$1 $2" = "api repos/berlinguyinca/autospec/commits/abc123/check-runs" ]; then
+  printf '{"check_runs":[{"name":"ci","status":"completed","conclusion":"failure"}]}\n'
+  exit 0
+fi
+printf 'unexpected gh: %s\n' "$*" >&2
+exit 99
+"#,
+        ),
+    );
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "main-health",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--json",
+        ])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &operator_dir)
+        .output()
+        .expect("autospec autonomous main-health runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stdout.contains("\"outcome\":\"blocked\""));
+    assert!(stdout.contains("\"diagnostic_reason\":\"required-check-failed\""));
+}
+
+#[test]
+fn autonomous_run_foreground_stops_before_shell_backend_when_main_health_blocks() {
+    let temp = temp_dir("autospec-autonomous-main-health-admission");
+    let repo_dir = temp.join("repo");
+    let operator_dir = temp.join("operator");
+    make_git_repo(&repo_dir, None);
+    let shell_backend = repo_dir.join("scripts").join("autospec-autonomous.sh");
+    std::fs::create_dir_all(shell_backend.parent().unwrap()).expect("scripts dir");
+    write_executable(
+        &shell_backend,
+        "#!/bin/sh\nprintf 'legacy shell should not run\\n' >&2\nexit 42\n",
+    );
+    let bin = fake_bin(
+        &temp,
+        None,
+        Some(
+            r#"#!/bin/sh
+if [ "$1 $2" = "repo view" ]; then
+  printf '{"defaultBranchRef":{"name":"missing"}}\n'
+  exit 0
+fi
+if [ "$1 $2" = "api repos/berlinguyinca/autospec/branches/missing" ]; then
+  printf 'not found\n' >&2
+  exit 1
+fi
+printf 'unexpected gh: %s\n' "$*" >&2
+exit 99
+"#,
+        ),
+    );
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "run-foreground",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--json",
+        ])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &operator_dir)
+        .current_dir(&repo_dir)
+        .output()
+        .expect("autospec autonomous run-foreground runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(2));
+    let state = std::fs::read_to_string(
+        operator_dir
+            .join("berlinguyinca_autospec")
+            .join("mainline-health.json"),
+    )
+    .expect("mainline health state is written");
+    assert!(state.contains("\"diagnostic_reason\":\"branch-not-found\""));
+    assert!(!stderr.contains("legacy shell should not run"));
 }
 
 #[test]

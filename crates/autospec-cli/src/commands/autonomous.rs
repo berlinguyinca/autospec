@@ -1,9 +1,14 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use autospec_core::autonomous::mainline_health::{
+    classify_required_checks, resolve_health_branch, MainlineHealth, MainlineHealthCheckEvidence,
+    MainlineHealthDiagnosticReason,
+};
 
 #[derive(Debug, Clone)]
 struct Options {
@@ -26,6 +31,7 @@ struct Options {
     budget_tokens: String,
     budget_issues: String,
     no_digest: bool,
+    branch: String,
     stop_mode: StopMode,
 }
 
@@ -51,6 +57,7 @@ impl Default for Options {
             budget_tokens: String::new(),
             budget_issues: String::new(),
             no_digest: false,
+            branch: String::new(),
             stop_mode: StopMode::Graceful,
         }
     }
@@ -90,6 +97,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "timeline" => timeline(options),
         "cleanup" => cleanup(options),
         "run-foreground" => run_foreground(options),
+        "main-health" => main_health(options).map(|_| ()),
         other => Err(format!("unknown autospec autonomous subcommand: {other}")),
     }
 }
@@ -203,6 +211,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .get(index)
                     .cloned()
                     .ok_or_else(|| "--log requires a value".to_string())?;
+            }
+            "--branch" => {
+                index += 1;
+                options.branch = args
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| "--branch requires a value".to_string())?;
             }
             "--all" => options.all = true,
             "--dry-run" => options.dry_run = true,
@@ -664,8 +679,207 @@ fn cleanup(options: Options) -> Result<(), String> {
     Ok(())
 }
 
+fn main_health(options: Options) -> Result<MainlineHealth, String> {
+    evaluate_main_health(options, true)
+}
+
+fn evaluate_main_health(options: Options, print: bool) -> Result<MainlineHealth, String> {
+    let layout = RunLayout::new(&options)?;
+    let explicit_branch = if options.branch.trim().is_empty() {
+        None
+    } else {
+        Some(options.branch.as_str())
+    };
+    let default_branch = if explicit_branch.is_some() {
+        None
+    } else {
+        match resolve_default_branch(&layout.repo) {
+            Ok(branch) => Some(branch),
+            Err(_) => {
+                let health = MainlineHealth::blocked(
+                    "",
+                    Vec::new(),
+                    MainlineHealthDiagnosticReason::DefaultBranchUnavailable,
+                );
+                return finish_blocked_main_health(&layout, health, print, options.json);
+            }
+        }
+    };
+    let branch = match resolve_health_branch(explicit_branch, default_branch.as_deref()) {
+        Ok(branch) => branch,
+        Err(reason) => {
+            let health = MainlineHealth::blocked("", Vec::new(), reason);
+            persist_mainline_health(&layout, &health)?;
+            if print {
+                print_mainline_health(&layout, &health, options.json);
+            }
+            return Err(
+                "mainline health blocked foreground admission: default-branch-unavailable"
+                    .to_string(),
+            );
+        }
+    };
+
+    let branch_output = gh_output(&["api", &format!("repos/{}/branches/{}", layout.repo, branch)])?;
+    if !branch_output.status.success() {
+        let health = MainlineHealth::blocked(
+            branch,
+            Vec::new(),
+            MainlineHealthDiagnosticReason::BranchNotFound,
+        );
+        return finish_blocked_main_health(&layout, health, print, options.json);
+    }
+    let branch_json = String::from_utf8_lossy(&branch_output.stdout);
+    let sha = extract_json_string(&branch_json, "sha").unwrap_or_default();
+    let checks = if sha.is_empty() {
+        Vec::new()
+    } else {
+        let checks_output = gh_output(&[
+            "api",
+            &format!("repos/{}/commits/{}/check-runs", layout.repo, sha),
+        ])?;
+        if checks_output.status.success() {
+            parse_check_evidence(&String::from_utf8_lossy(&checks_output.stdout))
+        } else {
+            let health = MainlineHealth::blocked(
+                branch,
+                Vec::new(),
+                MainlineHealthDiagnosticReason::GithubUnavailable,
+            );
+            return finish_blocked_main_health(&layout, health, print, options.json);
+        }
+    };
+    let health = classify_required_checks(branch, checks);
+    persist_mainline_health(&layout, &health)?;
+    if print {
+        print_mainline_health(&layout, &health, options.json);
+    }
+    if health.outcome.is_blocked() {
+        return finish_blocked_main_health(&layout, health, print, options.json);
+    }
+    Ok(health)
+}
+
+fn finish_blocked_main_health(
+    layout: &RunLayout,
+    health: MainlineHealth,
+    print: bool,
+    json: bool,
+) -> Result<MainlineHealth, String> {
+    persist_mainline_health(layout, &health)?;
+    if print {
+        print_mainline_health(layout, &health, json);
+    }
+    let reason = health
+        .diagnostic_reason
+        .as_ref()
+        .map(MainlineHealthDiagnosticReason::as_str)
+        .unwrap_or("unknown");
+    Err(format!(
+        "mainline health blocked foreground admission: {reason}"
+    ))
+}
+
+fn resolve_default_branch(repo: &str) -> Result<String, String> {
+    let output = gh_output(&["repo", "view", repo, "--json", "defaultBranchRef"])?;
+    if !output.status.success() {
+        return Err("github default branch metadata unavailable".to_string());
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    extract_json_string(&raw, "name").ok_or_else(|| "default branch unavailable".to_string())
+}
+
+fn gh_output(args: &[&str]) -> Result<Output, String> {
+    Command::new("gh")
+        .args(args)
+        .output()
+        .map_err(|error| format!("cannot run gh {}: {error}", args.join(" ")))
+}
+
+fn parse_check_evidence(raw: &str) -> Vec<MainlineHealthCheckEvidence> {
+    json_object_strings(raw)
+        .into_iter()
+        .filter(|object| object.contains("\"status\"") || object.contains("\"conclusion\""))
+        .map(|object| MainlineHealthCheckEvidence {
+            name: extract_json_string(&object, "name").unwrap_or_default(),
+            status: extract_json_string(&object, "status").unwrap_or_default(),
+            conclusion: extract_json_string(&object, "conclusion").unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn persist_mainline_health(layout: &RunLayout, health: &MainlineHealth) -> Result<(), String> {
+    let state_dir = env_path(
+        "AUTOSPEC_AUTONOMOUS_STATE_DIR",
+        &[".autospec", "autonomous"],
+    )
+    .join(&layout.scope);
+    fs::create_dir_all(&state_dir)
+        .map_err(|error| format!("cannot create {}: {error}", state_dir.display()))?;
+    let path = state_dir.join("mainline-health.json");
+    fs::write(&path, mainline_health_json(layout, health))
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))
+}
+
+fn print_mainline_health(layout: &RunLayout, health: &MainlineHealth, json: bool) {
+    if json {
+        print!("{}", mainline_health_json(layout, health));
+    } else if let Some(reason) = health.diagnostic_reason.as_ref() {
+        println!(
+            "autospec autonomous main-health: {} branch={} reason={}",
+            health.outcome.as_str(),
+            health.branch,
+            reason.as_str()
+        );
+    } else {
+        println!(
+            "autospec autonomous main-health: {} branch={}",
+            health.outcome.as_str(),
+            health.branch
+        );
+    }
+}
+
+fn mainline_health_json(layout: &RunLayout, health: &MainlineHealth) -> String {
+    let checks = health
+        .checks
+        .iter()
+        .map(|check| {
+            format!(
+                "{{\"name\":\"{}\",\"status\":\"{}\",\"conclusion\":\"{}\"}}",
+                json_escape(&check.name),
+                json_escape(&check.status),
+                json_escape(&check.conclusion)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let reason = health
+        .diagnostic_reason
+        .as_ref()
+        .map(MainlineHealthDiagnosticReason::as_str)
+        .unwrap_or("");
+    format!(
+        "{{\"command\":\"autonomous\",\"subcommand\":\"main-health\",\"repo\":\"{}\",\"branch\":\"{}\",\"outcome\":\"{}\",\"diagnostic_reason\":\"{}\",\"observed_at\":{},\"checks\":[{}]}}\n",
+        json_escape(&layout.repo),
+        json_escape(&health.branch),
+        health.outcome.as_str(),
+        json_escape(reason),
+        unix_timestamp(),
+        checks
+    )
+}
+
+fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 fn run_foreground(options: Options) -> Result<(), String> {
     let layout = RunLayout::new(&options)?;
+    let _health = evaluate_main_health(options.clone(), false)?;
     let script = if Path::new("scripts/autospec-autonomous.sh").exists() {
         PathBuf::from("scripts/autospec-autonomous.sh")
     } else {
@@ -1857,6 +2071,6 @@ fn json_string_array(values: &[String]) -> String {
 
 fn print_help() {
     println!(
-        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground] [OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
+        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --branch BRANCH\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
     );
 }

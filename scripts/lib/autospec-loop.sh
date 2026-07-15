@@ -2231,43 +2231,10 @@ fi'
 
             case "$_gate_verdict" in
                 merge-ok)
-                    # ── Main-health gate (spec Phase-1 invariant: red main → halt
-                    # Tier-1 merges).  Never drain onto a red main.  Poll
-                    # autonomous-resilience.sh main-health and honor its DECISION:
-                    #   continue  → proceed with drain
-                    #   wait      → skip drain this cycle (re-poll next cycle)
-                    #   halt      → stop Tier-1 merges, notify, exit loop
-                    # Indeterminate/absent (no resilience or no repo) → proceed:
-                    # the deterministic conservatism (pending on gh failure) lives
-                    # in autonomous-resilience.sh main-health itself.
-                    local _main_health="continue"
-                    if [ -f "$_resilience" ] && [ -n "$_repo" ]; then
-                        local _mh_out
-                        _mh_out="$(bash "$_resilience" main-health \
-                            --repo "$_repo" 2>/dev/null || true)"
-                        local _mh_decision
-                        _mh_decision="$(printf '%s' "$_mh_out" \
-                            | grep '^DECISION:' | head -1 \
-                            | sed 's/^DECISION://' || true)"
-                        if [ -n "$_mh_decision" ]; then
-                            _main_health="$_mh_decision"
-                        fi
-                    fi
-
-                    if [ "$_main_health" = "halt" ]; then
-                        printf '[conductor] HALT: main-health red — halting Tier-1 merges\n' >&2
-                        if [ -n "$_notify_sh" ]; then
-                            bash "$_notify_sh" "autospec-autonomous" \
-                                "conductor halted: main branch CI red — Tier-1 merges stopped" || true
-                        fi
-                        _stop_reason="main-health:red"
-                        break
-                    fi
-
-                    if [ "$_main_health" = "wait" ]; then
-                        printf '[conductor] main-health pending — skipping drain this cycle\n' >&2
-                        _dry_cycles=$((_dry_cycles + 1))
-                    else
+                    # Rust autospec autonomous run-foreground owns foreground
+                    # mainline-health admission before this shell conductor is
+                    # entered. Do not re-admit ready Tier-1 work here: this
+                    # shell path is no longer authoritative for main health.
                         # F3: while discovery issues are in flight, main merges are
                         # refused — but that refusal is enforced PER-PR by the phase4
                         # implementer via .autospec/explore-mode.json (PRs target the
@@ -2285,7 +2252,7 @@ fi'
                             printf '[conductor] F3: %s discovery issue(s) in-flight — main merges refused (phase4 sandbox routing); draining onto sandbox\n' \
                                 "$_inflight_discovery" >&2
                         fi
-                        # Gate + main-health green — invoke drain.
+                        # Gate green — invoke drain. Main-health admission is Rust-owned.
                         if [ "$_dry" = "1" ]; then
                             printf '[conductor] [dry-run] would invoke autospec-run for Tier-1 drain\n' >&2
                         else
@@ -2630,7 +2597,6 @@ EOF_PROV_BATCH
                         if [ "${_tier1_drain_dispatched:-0}" -eq 1 ]; then
                             _work_done=1
                         fi
-                    fi
                     ;;
                 block*)
                     printf '[conductor] premerge-gate blocked: %s — skipping drain this cycle\n' \
