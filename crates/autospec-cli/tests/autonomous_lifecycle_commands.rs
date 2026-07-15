@@ -48,11 +48,65 @@ fn lifecycle_decide_returns_nonzero_json_for_stop_and_claim_rejection() {
         "{\"decision\":\"stop\",\"mode\":\"immediate\"}\n"
     );
 
-    let rejected = lifecycle(&["--repo", "test/repo", "--claim-repo", "other/repo"]);
+    let rejected = lifecycle(&[
+        "--repo",
+        "test/repo",
+        "--claim-repo",
+        "other/repo",
+        "--claim-issue",
+        "41",
+        "--claim-worker",
+        "worker-a",
+        "--claim-branch",
+        "autonomous/issue-41",
+    ]);
     assert_eq!(rejected.status.code(), Some(3));
     assert_eq!(
         String::from_utf8_lossy(&rejected.stdout),
         "{\"decision\":\"reject\",\"reason\":\"cross_scope_claim\"}\n"
+    );
+}
+
+#[test]
+fn lifecycle_decide_rejects_typed_terminal_and_abandoned_claims() {
+    let terminal = lifecycle(&[
+        "--repo",
+        "test/repo",
+        "--claim-repo",
+        "test/repo",
+        "--claim-issue",
+        "41",
+        "--claim-worker",
+        "worker-a",
+        "--claim-branch",
+        "autonomous/issue-41",
+        "--claim-state",
+        "terminal",
+    ]);
+    assert_eq!(terminal.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8_lossy(&terminal.stdout),
+        "{\"decision\":\"reject\",\"reason\":\"terminal_claim\"}\n"
+    );
+
+    let abandoned = lifecycle(&[
+        "--repo",
+        "test/repo",
+        "--claim-repo",
+        "test/repo",
+        "--claim-issue",
+        "41",
+        "--claim-worker",
+        "worker-a",
+        "--claim-branch",
+        "autonomous/issue-41",
+        "--lease-age-sec",
+        "10801",
+    ]);
+    assert_eq!(abandoned.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8_lossy(&abandoned.stdout),
+        "{\"decision\":\"reject\",\"reason\":\"abandoned_lease\"}\n"
     );
 }
 

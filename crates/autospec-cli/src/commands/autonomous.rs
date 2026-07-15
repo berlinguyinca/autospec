@@ -2,6 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use autospec_core::autonomous::mainline_health::{
     check_run_evidence, evaluate_health, legacy_status_evidence, resolve_health_branch,
@@ -9,9 +10,10 @@ use autospec_core::autonomous::mainline_health::{
     MainlineHealthOutcome,
 };
 use autospec_core::autonomous_lifecycle::{
-    decide as decide_lifecycle, Budget as LifecycleBudget, Health as LifecycleHealth,
-    LifecycleDecision, LifecycleInput, LifecycleReject, LifecycleTier,
-    ParkReason as LifecycleParkReason, StopMode as LifecycleStopMode,
+    decide as decide_lifecycle, Budget as LifecycleBudget, ClaimBranch, ClaimContext,
+    Health as LifecycleHealth, IssueNumber, LeaseFreshness, LifecycleDecision, LifecycleInput,
+    LifecycleRecord, LifecycleReject, LifecycleTier, LifecycleTransition,
+    ParkReason as LifecycleParkReason, RepositoryScope, StopMode as LifecycleStopMode, WorkerId,
 };
 use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
@@ -23,6 +25,7 @@ use super::{claim, queue, CommandFailure};
 
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
 const DEFERRED_EXECUTOR_REASON: &str = "awaiting_typed_implementation_executor";
+static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 struct Options {
@@ -106,6 +109,11 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         return Ok(());
     }
     let options = parse(args).map_err(CommandFailure::diagnostic)?;
+    if options.subcommand == "run-foreground"
+        || (options.subcommand == "start" && options.foreground)
+    {
+        return run_foreground(options);
+    }
     match options.subcommand.as_str() {
         "start" => start(options),
         "monitor" => monitor(options),
@@ -118,7 +126,6 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         "watch" => watch(options),
         "timeline" => timeline(options),
         "cleanup" => cleanup(options),
-        "run-foreground" => run_foreground(options),
         "main-health" => main_health(options),
         other => Err(format!("unknown autospec autonomous subcommand: {other}")),
     }
@@ -274,6 +281,10 @@ fn parse_lifecycle_input(args: &[String]) -> Result<LifecycleInput, String> {
 
     let mut repo = None;
     let mut claim_repo = None;
+    let mut claim_issue = None;
+    let mut claim_worker = None;
+    let mut claim_branch = None;
+    let mut claim_state = None;
     let mut lease_age_secs = None;
     let mut stop = None;
     let mut health = None;
@@ -287,6 +298,16 @@ fn parse_lifecycle_input(args: &[String]) -> Result<LifecycleInput, String> {
         match flag.as_str() {
             "--repo" => set_executor_result_value(&mut repo, value, "--repo")?,
             "--claim-repo" => set_executor_result_value(&mut claim_repo, value, "--claim-repo")?,
+            "--claim-issue" => {
+                set_executor_result_number(&mut claim_issue, value, "--claim-issue")?
+            }
+            "--claim-worker" => {
+                set_executor_result_value(&mut claim_worker, value, "--claim-worker")?
+            }
+            "--claim-branch" => {
+                set_executor_result_value(&mut claim_branch, value, "--claim-branch")?
+            }
+            "--claim-state" => set_executor_result_value(&mut claim_state, value, "--claim-state")?,
             "--lease-age-sec" => {
                 let value = value
                     .parse::<u64>()
@@ -305,11 +326,41 @@ fn parse_lifecycle_input(args: &[String]) -> Result<LifecycleInput, String> {
     }
 
     let repo = repo.ok_or_else(|| "autonomous lifecycle requires --repo".to_string())?;
-    let mut input = LifecycleInput::ready(repo);
-    if let Some(claim_repo) = claim_repo {
-        input = input.with_claim_repo(claim_repo);
-    }
-    if let Some(lease_age_secs) = lease_age_secs {
+    let scope = parse_lifecycle_scope(&repo, "--repo")?;
+    let lease = lease_age_secs
+        .map(LeaseFreshness::from_age_secs)
+        .unwrap_or(LeaseFreshness::Fresh);
+    let mut input = LifecycleInput::from_scope(scope);
+    let has_claim_input = claim_repo.is_some()
+        || claim_issue.is_some()
+        || claim_worker.is_some()
+        || claim_branch.is_some()
+        || claim_state.is_some();
+    if has_claim_input {
+        let claim_scope = parse_lifecycle_scope(
+            &claim_repo.ok_or_else(|| "claim input requires --claim-repo".to_string())?,
+            "--claim-repo",
+        )?;
+        let issue = IssueNumber::new(
+            claim_issue.ok_or_else(|| "claim input requires --claim-issue".to_string())?,
+        )
+        .ok_or_else(|| "--claim-issue must be a positive integer".to_string())?;
+        let worker_value =
+            claim_worker.ok_or_else(|| "claim input requires --claim-worker".to_string())?;
+        let worker = WorkerId::try_from(worker_value.as_str())
+            .map_err(|reason| format!("--claim-worker {reason}"))?;
+        let branch_value =
+            claim_branch.ok_or_else(|| "claim input requires --claim-branch".to_string())?;
+        let branch = ClaimBranch::try_from(branch_value.as_str())
+            .map_err(|reason| format!("--claim-branch {reason}"))?;
+        let state = claim_state.unwrap_or_else(|| "active".to_string());
+        let claim = match state.as_str() {
+            "active" => ClaimContext::active(claim_scope, issue, worker, branch, lease),
+            "terminal" => ClaimContext::terminal(claim_scope, issue, worker, branch),
+            _ => return Err("--claim-state must be active or terminal".to_string()),
+        };
+        input = input.with_claim(claim);
+    } else if let Some(lease_age_secs) = lease_age_secs {
         input = input.with_lease_age_secs(lease_age_secs);
     }
     if let Some(stop) = stop {
@@ -325,6 +376,10 @@ fn parse_lifecycle_input(args: &[String]) -> Result<LifecycleInput, String> {
         input = input.with_tier(parse_lifecycle_tier(&tier)?);
     }
     Ok(input)
+}
+
+fn parse_lifecycle_scope(value: &str, flag: &str) -> Result<RepositoryScope, String> {
+    RepositoryScope::try_from(value).map_err(|reason| format!("{flag} {reason}"))
 }
 
 fn parse_lifecycle_stop(value: &str) -> Result<LifecycleStopMode, String> {
@@ -443,8 +498,10 @@ fn lifecycle_park_name(reason: LifecycleParkReason) -> &'static str {
 fn lifecycle_reject_name(reason: LifecycleReject) -> &'static str {
     match reason {
         LifecycleReject::InvalidScope => "invalid_scope",
+        LifecycleReject::MalformedClaim => "malformed_claim",
         LifecycleReject::CrossScopeClaim => "cross_scope_claim",
         LifecycleReject::StaleLease => "stale_lease",
+        LifecycleReject::AbandonedLease => "abandoned_lease",
         LifecycleReject::TerminalClaim => "terminal_claim",
         LifecycleReject::OwnershipMismatch => "ownership_mismatch",
         LifecycleReject::FailureCap => "failure_cap",
@@ -481,18 +538,16 @@ fn start(options: Options) -> Result<(), String> {
     }
 
     validate_repo_dir(&options)?;
-    if options.foreground {
-        return run_foreground(options);
-    }
     let layout = RunLayout::new(&options)?;
     let options = options_with_resolved_repo(options, &layout);
+    let lifecycle = admit_lifecycle_start(&layout, LifecycleTransition::Start)?;
     let commands = launch_commands(&options)?;
     let foreground = foreground_command(&options)?;
     fs::create_dir_all(&layout.state_dir)
         .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
     fs::create_dir_all(&layout.log_dir)
         .map_err(|error| format!("cannot create {}: {error}", layout.log_dir.display()))?;
-    admit_lifecycle_start(&layout)?;
+    persist_lifecycle_decision(&layout, &lifecycle)?;
     prepare_start_scope(&layout, &options)?;
     write_launch_json(&layout, &options, &foreground, &commands)?;
 
@@ -685,6 +740,14 @@ fn restart(options: Options) -> Result<(), String> {
     let stop_options = options.clone();
     let layout = RunLayout::new(&options)?;
     let options = options_with_resolved_repo(options, &layout);
+    let lifecycle = admit_lifecycle_start(&layout, LifecycleTransition::Restart)?;
+    let commands = launch_commands(&options)?;
+    let foreground = foreground_command(&options)?;
+    fs::create_dir_all(&layout.state_dir)
+        .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
+    fs::create_dir_all(&layout.log_dir)
+        .map_err(|error| format!("cannot create {}: {error}", layout.log_dir.display()))?;
+    persist_lifecycle_decision(&layout, &lifecycle)?;
     let mut stopped = 0;
     for name in ["supervisor", "monitor", "conductor"] {
         let unit = read_unit(name, &layout.state_dir);
@@ -694,13 +757,6 @@ fn restart(options: Options) -> Result<(), String> {
     }
     wait_for_scope_stopped(&layout.state_dir);
     clear_stop_flag(&layout)?;
-    let commands = launch_commands(&options)?;
-    let foreground = foreground_command(&options)?;
-    fs::create_dir_all(&layout.state_dir)
-        .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
-    fs::create_dir_all(&layout.log_dir)
-        .map_err(|error| format!("cannot create {}: {error}", layout.log_dir.display()))?;
-    admit_lifecycle_start(&layout)?;
     write_launch_json(&layout, &options, &foreground, &commands)?;
     let conductor = spawn_unit(
         "conductor",
@@ -1092,40 +1148,67 @@ fn print_main_health(repo: &str, health: &MainlineHealth, json: bool) {
     }
 }
 
-fn run_foreground(options: Options) -> Result<(), String> {
-    let layout = RunLayout::new(&options)?;
-    let health = load_main_health(&layout, &options)?;
-    persist_main_health(&layout, &health)?;
-    if health.outcome != MainlineHealthOutcome::Continue {
-        return Err(format!(
-            "main-health blocked foreground admission before ready issue dispatch: {}",
-            health.diagnostic.as_str()
-        ));
+fn run_foreground(options: Options) -> Result<(), CommandFailure> {
+    let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
+    let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
+        CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
+    })?;
+    if let Some(mode) = persisted_stop_mode(&layout).map_err(CommandFailure::diagnostic)? {
+        let lifecycle = decide_lifecycle(
+            &LifecycleInput::from_scope(scope)
+                .with_transition(LifecycleTransition::Foreground)
+                .with_stop(mode),
+        );
+        fs::create_dir_all(&layout.state_dir).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "cannot create {}: {error}",
+                layout.state_dir.display()
+            ))
+        })?;
+        persist_lifecycle_decision(&layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
+        return emit_lifecycle_decision(lifecycle);
     }
-    let lifecycle = decide_lifecycle(
-        &LifecycleInput::ready(layout.repo.clone())
-            .with_health(lifecycle_health(health.outcome.clone())),
-    );
-    persist_lifecycle_decision(&layout, &lifecycle)?;
+    let health = load_main_health(&layout, &options).map_err(CommandFailure::diagnostic)?;
+    let input = LifecycleInput::from_scope(scope)
+        .with_transition(LifecycleTransition::Foreground)
+        .with_health(lifecycle_health(health.outcome.clone()));
+    let lifecycle = decide_lifecycle(&input);
+    fs::create_dir_all(&layout.state_dir).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "cannot create {}: {error}",
+            layout.state_dir.display()
+        ))
+    })?;
+    persist_main_health(&layout, &health).map_err(CommandFailure::diagnostic)?;
+    persist_lifecycle_decision(&layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
+    if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
+        return emit_lifecycle_decision(lifecycle);
+    }
     let scope = foreground_scope();
     let state_path = foreground_state_path(&layout, scope);
-    let state = load_foreground_state(&state_path, &layout, scope)?;
+    let state =
+        load_foreground_state(&state_path, &layout, scope).map_err(CommandFailure::diagnostic)?;
     if foreground_state_is_retained(&state) {
         println!("{}", state.to_json());
         return Ok(());
     }
     if state.phase() != ConductorPhase::Scan {
-        return Err(format!(
+        return Err(CommandFailure::diagnostic(format!(
             "foreground conductor requires recovery from {:?}",
             state.phase()
-        ));
+        )));
     }
 
-    let Some(state) = scan_foreground(&layout, &state_path, state)? else {
+    let Some(state) =
+        scan_foreground(&layout, &state_path, state).map_err(CommandFailure::diagnostic)?
+    else {
         return Ok(());
     };
-    let state = review_foreground(&layout, &state_path, state)?;
-    let Some((state, selected)) = select_foreground(&layout, &state_path, state)? else {
+    let state =
+        review_foreground(&layout, &state_path, state).map_err(CommandFailure::diagnostic)?;
+    let Some((state, selected)) =
+        select_foreground(&layout, &state_path, state).map_err(CommandFailure::diagnostic)?
+    else {
         return Ok(());
     };
     let state = dispatch_foreground(&layout, &options.repo_dir, &state_path, state, selected)?;
@@ -1224,15 +1307,38 @@ fn dispatch_foreground(
     state_path: &Path,
     state: ConductorState,
     selection: ForegroundSelection,
-) -> Result<ConductorState, String> {
+) -> Result<ConductorState, CommandFailure> {
     let branch = format!("autonomous/issue-{}", selection.issue);
-    let worker_id = foreground_worker_id()?;
-    let lease = claim::acquire_for_conductor(&layout.repo, selection.issue, &worker_id, &branch)
-        .map_err(command_error)?;
-    let state = state
-        .transition(ConductorEvent::Claimed)
-        .map_err(|error| format!("cannot record foreground claim: {error}"))?;
-    persist_foreground_state(state_path, &state)?;
+    let worker_id = foreground_worker_id().map_err(CommandFailure::diagnostic)?;
+    let claim_evidence =
+        claim::lifecycle_claim_evidence(&layout.repo, selection.issue, &worker_id, &branch)?;
+    let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
+        CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
+    })?;
+    let worker = WorkerId::try_from(worker_id.as_str()).map_err(|reason| {
+        CommandFailure::diagnostic(format!("autonomous lifecycle invalid worker: {reason}"))
+    })?;
+    let claim_branch = ClaimBranch::try_from(branch.as_str()).map_err(|reason| {
+        CommandFailure::diagnostic(format!("autonomous lifecycle invalid branch: {reason}"))
+    })?;
+    let lifecycle = decide_lifecycle(
+        &LifecycleInput::from_scope(scope)
+            .with_transition(LifecycleTransition::Foreground)
+            .with_claim_evidence(claim_evidence)
+            .with_expected_claim(worker, claim_branch),
+    );
+    if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
+        persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
+        let exit_code = lifecycle_decision_exit_code(&lifecycle);
+        println!("{}", lifecycle_decision_json(&lifecycle));
+        return Err(CommandFailure::status(String::new(), exit_code));
+    }
+    persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
+    let lease = claim::acquire_for_conductor(&layout.repo, selection.issue, &worker_id, &branch)?;
+    let state = state.transition(ConductorEvent::Claimed).map_err(|error| {
+        CommandFailure::diagnostic(format!("cannot record foreground claim: {error}"))
+    })?;
+    persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
 
     let receipt = ExecutorRequest::for_selected(layout, repo_dir, selection.issue)
         .map_or_else(|_| ExecutorReceipt::failed(), |request| request.run());
@@ -1240,17 +1346,18 @@ fn dispatch_foreground(
         .transition(ConductorEvent::DispatchRecorded {
             outcome: receipt.outcome.clone(),
         })
-        .map_err(|error| format!("cannot record executor receipt: {error}"))?;
-    persist_foreground_state(state_path, &state)?;
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("cannot record executor receipt: {error}"))
+        })?;
+    persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
     claim::record_executor_outcome(
         &lease.repo,
         lease.issue,
         &lease.worker_id,
         &lease.branch,
         &receipt.claim_step,
-    )
-    .map_err(command_error)?;
-    claim::reconcile_active_issue(&lease.repo, lease.issue).map_err(command_error)?;
+    )?;
+    claim::reconcile_active_issue(&lease.repo, lease.issue)?;
     Ok(state)
 }
 
@@ -1638,23 +1745,54 @@ fn persist_foreground_state(path: &Path, state: &ConductorState) -> Result<(), S
         .ok_or_else(|| format!("cannot resolve parent for {}", path.display()))?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, format!("{}\n", state.to_json()))
-        .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
-    fs::rename(&temporary, path)
-        .map_err(|error| format!("cannot finalize {}: {error}", path.display()))
+    atomic_write(path, &format!("{}\n", state.to_json()))
 }
 
-fn admit_lifecycle_start(layout: &RunLayout) -> Result<(), String> {
-    let decision = decide_lifecycle(&LifecycleInput::ready(layout.repo.clone()));
-    persist_lifecycle_decision(layout, &decision)?;
+fn admit_lifecycle_start(
+    layout: &RunLayout,
+    transition: LifecycleTransition,
+) -> Result<LifecycleDecision, String> {
+    let scope = RepositoryScope::try_from(layout.repo.as_str())
+        .map_err(|reason| format!("autonomous lifecycle invalid repo: {reason}"))?;
+    let mut input = LifecycleInput::from_scope(scope).with_transition(transition);
+    if let Some(mode) = persisted_stop_mode(layout)? {
+        input = input.with_stop(mode);
+    }
+    let decision = decide_lifecycle(&input);
     if matches!(decision, LifecycleDecision::Run { .. }) {
-        Ok(())
+        Ok(decision)
     } else {
         Err(format!(
             "autonomous lifecycle rejected start: {}",
             lifecycle_decision_json(&decision)
         ))
+    }
+}
+
+fn persisted_stop_mode(layout: &RunLayout) -> Result<Option<LifecycleStopMode>, String> {
+    if let Some(mode) = read_stop_mode(layout)? {
+        return Ok(Some(mode));
+    }
+    let Some(record) = read_lifecycle_record(layout)? else {
+        return Ok(None);
+    };
+    if record.scope.as_str() != layout.repo {
+        return Err("persisted lifecycle record belongs to another repository".to_string());
+    }
+    Ok(match record.decision {
+        LifecycleDecision::Stop { mode } => Some(mode),
+        _ => None,
+    })
+}
+
+fn read_lifecycle_record(layout: &RunLayout) -> Result<Option<LifecycleRecord>, String> {
+    let path = layout.state_dir.join("lifecycle.json");
+    match fs::read_to_string(&path) {
+        Ok(raw) => LifecycleRecord::parse_json(&raw)
+            .map(Some)
+            .map_err(|error| format!("cannot parse {}: {error}", path.display())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot read {}: {error}", path.display())),
     }
 }
 
@@ -1665,16 +1803,46 @@ fn persist_lifecycle_decision(
     fs::create_dir_all(&layout.state_dir)
         .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
     let path = layout.state_dir.join("lifecycle.json");
-    let temporary = path.with_extension("json.tmp");
     let body = format!(
         "{{\"version\":1,\"repo\":\"{}\",\"result\":{}}}\n",
         json_escape(&layout.repo),
         lifecycle_decision_json(decision)
     );
-    fs::write(&temporary, body)
-        .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
-    fs::rename(&temporary, &path)
-        .map_err(|error| format!("cannot finalize {}: {error}", path.display()))
+    atomic_write(&path, &body)
+}
+
+fn atomic_temporary_path(path: &Path) -> PathBuf {
+    let sequence = ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("autospec-state");
+    path.with_file_name(format!(
+        ".{filename}.{}.{}.tmp",
+        std::process::id(),
+        sequence
+    ))
+}
+
+fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
+    let temporary = atomic_temporary_path(path);
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|error| format!("cannot create {}: {error}", temporary.display()))?;
+    let write_result = (|| {
+        file.write_all(contents.as_bytes())
+            .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
+        file.sync_all()
+            .map_err(|error| format!("cannot sync {}: {error}", temporary.display()))?;
+        fs::rename(&temporary, path)
+            .map_err(|error| format!("cannot finalize {}: {error}", path.display()))
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result
 }
 
 fn lifecycle_stop_mode(mode: StopMode) -> LifecycleStopMode {
@@ -2808,6 +2976,27 @@ fn stop_flag_path(layout: &RunLayout) -> PathBuf {
         .unwrap_or_else(|_| layout.state_dir.join("stop.flag"))
 }
 
+fn read_stop_mode(layout: &RunLayout) -> Result<Option<LifecycleStopMode>, String> {
+    let path = stop_flag_path(layout);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    let mode = raw
+        .lines()
+        .next()
+        .ok_or_else(|| format!("cannot parse {}: missing stop mode", path.display()))?;
+    match mode {
+        "graceful" => Ok(Some(LifecycleStopMode::Graceful)),
+        "immediate" => Ok(Some(LifecycleStopMode::Immediate)),
+        _ => Err(format!(
+            "cannot parse {}: invalid stop mode",
+            path.display()
+        )),
+    }
+}
+
 fn clear_stop_flag(layout: &RunLayout) -> Result<(), String> {
     let flag = stop_flag_path(layout);
     if flag.exists() {
@@ -2877,6 +3066,13 @@ mod foreground_tests {
     use super::*;
 
     #[test]
+    fn lifecycle_atomic_temp_paths_are_unique_per_write() {
+        let path = Path::new("/tmp/lifecycle.json");
+
+        assert_ne!(atomic_temporary_path(path), atomic_temporary_path(path));
+    }
+
+    #[test]
     fn executor_launch_failure_becomes_a_blocked_receipt() {
         let request = ExecutorRequest {
             program: PathBuf::from("/definitely-not-an-autospec-executor"),
@@ -2908,6 +3104,6 @@ mod foreground_tests {
 
 fn print_help() {
     println!(
-        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
+        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
     );
 }

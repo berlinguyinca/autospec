@@ -1406,9 +1406,57 @@ fn autonomous_run_foreground_stops_before_rust_executor_when_health_branch_is_mi
         .output()
         .expect("autospec autonomous run-foreground runs");
 
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("branch-not-found"));
-    assert!(!temp.join("operator").exists());
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"decision\":\"park\",\"reason\":\"health_halt\"}\n"
+    );
+    let lifecycle = temp.join("operator/berlinguyinca_autospec/lifecycle.json");
+    assert!(lifecycle.exists(), "missing {}", lifecycle.display());
+    assert!(std::fs::read_to_string(lifecycle)
+        .expect("lifecycle record")
+        .contains("\"reason\":\"health_halt\""));
+}
+
+#[test]
+fn autonomous_foreground_stop_precedes_health_and_dispatch() {
+    let temp = temp_dir("autospec-foreground-stop-precedence");
+    let repo_dir = temp.join("repo");
+    make_git_repo(
+        &repo_dir,
+        Some("https://github.com/berlinguyinca/autospec.git"),
+    );
+    let stop_flag = temp.join("stop.flag");
+    let gh_log = temp.join("gh.log");
+    std::fs::write(&stop_flag, "graceful\noperator\n").expect("stop flag");
+    let bin = fake_bin(
+        &temp,
+        None,
+        Some("#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_GH_LOG\"\nexit 19\n"),
+    );
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "run-foreground",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+        ])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_GH_LOG", &gh_log)
+        .env("AUTOSPEC_STOP_FLAG_FILE", &stop_flag)
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", temp.join("operator"))
+        .output()
+        .expect("autospec autonomous run-foreground runs");
+
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"decision\":\"stop\",\"mode\":\"graceful\"}\n"
+    );
+    assert!(!gh_log.exists(), "stop must preempt health and dispatch");
 }
 
 #[test]

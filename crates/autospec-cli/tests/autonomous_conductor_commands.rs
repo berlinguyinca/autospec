@@ -135,6 +135,49 @@ fn foreground_fails_closed_when_executor_outcome_loses_its_claim() {
 }
 
 #[test]
+fn foreground_rejects_a_terminal_run_state_before_claim_mutation() {
+    let fixture = ForegroundFixture::new();
+    fixture.seed_claim_state(
+        "foreign-worker",
+        "autonomous/issue-42",
+        "merged",
+        &fresh_iso_timestamp(),
+    );
+
+    let output = fixture.run_foreground();
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"decision\":\"reject\",\"reason\":\"terminal_claim\"}\n"
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
+    assert!(
+        !calls.contains("issue\nedit\n42"),
+        "terminal state must be rejected before claim label mutation"
+    );
+}
+
+#[test]
+fn foreground_rejects_malformed_run_state_before_claim_mutation() {
+    let fixture = ForegroundFixture::new();
+    fixture.seed_malformed_claim();
+
+    let output = fixture.run_foreground();
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"decision\":\"reject\",\"reason\":\"malformed_claim\"}\n"
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
+    assert!(
+        !calls.contains("issue\nedit\n42"),
+        "malformed state must be rejected before claim label mutation"
+    );
+}
+
+#[test]
 fn detached_start_resolves_the_repository_before_launching_foreground() {
     let fixture = ForegroundFixture::new();
     fixture.initialize_git_remote();
@@ -203,9 +246,13 @@ fn foreground_stops_before_executor_when_main_health_blocks() {
         .output()
         .expect("run");
 
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("branch-not-found"));
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"decision\":\"park\",\"reason\":\"health_halt\"}\n"
+    );
     assert!(!fixture.state_path().exists());
+    assert!(fixture.operator.join("test_repo/lifecycle.json").exists());
     assert!(!fs::read_to_string(&fixture.calls)
         .expect("read GitHub calls")
         .contains("executor_deferred"));
@@ -864,11 +911,15 @@ exit 1
     }
 
     fn seed_claim_at(&self, worker_id: &str, branch: &str, updated_at: &str) {
+        self.seed_claim_state(worker_id, branch, "claimed", updated_at);
+    }
+
+    fn seed_claim_state(&self, worker_id: &str, branch: &str, state: &str, updated_at: &str) {
         let record = RunStateRecord::new(
             "test/repo",
             42,
             worker_id,
-            "claimed",
+            state,
             branch,
             "",
             "claimed",
@@ -886,6 +937,19 @@ exit 1
             ),
         )
         .expect("seed claimed run-state comment");
+    }
+
+    fn seed_malformed_claim(&self) {
+        let body = "<!-- autospec-run-state:begin -->\nnot-json\n<!-- autospec-run-state:end -->";
+        fs::write(
+            &self.comments,
+            format!(
+                "[{{\"id\":100,\"updated_at\":\"{}\",\"body\":{:?}}}]\n",
+                fresh_iso_timestamp(),
+                body
+            ),
+        )
+        .expect("seed malformed run-state comment");
     }
 
     fn set_open_pull_requests(&self, pull_requests: &str) {

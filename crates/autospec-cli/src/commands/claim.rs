@@ -3,6 +3,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use autospec_core::autonomous_lifecycle::{
+    ClaimBranch, ClaimContext, ClaimEvidence, IssueNumber, LeaseFreshness, RepositoryScope,
+    WorkerId, ABANDONED_LEASE_SECS, STALE_LEASE_SECS,
+};
 use autospec_core::claim::{
     executor_result_evidence_exists, find_reconcilable_pull_request,
     is_executor_result_pull_request, is_reconcilable_pull_request, lowest_marked_comment,
@@ -142,6 +146,85 @@ pub(crate) fn acquire_for_conductor(
         worker_id: Some(worker_id.to_string()),
         branch: branch.to_string(),
     })
+}
+
+/// Read the claim linearization point before the autonomous conductor mutates
+/// labels, heartbeats, or comments. The lifecycle policy receives the observed
+/// owner rather than a synthetic claim request, so it can reject terminal,
+/// foreign, stale, and abandoned state before acquisition has side effects.
+pub(crate) fn lifecycle_claim_evidence(
+    repo: &str,
+    issue: u64,
+    requested_worker: &str,
+    requested_branch: &str,
+) -> Result<ClaimEvidence, CommandFailure> {
+    let scope = RepositoryScope::try_from(repo)
+        .map_err(|reason| CommandFailure::diagnostic(format!("invalid claim repo: {reason}")))?;
+    let issue =
+        IssueNumber::new(issue).ok_or_else(|| CommandFailure::diagnostic("invalid claim issue"))?;
+    let requested_worker = WorkerId::try_from(requested_worker).map_err(|reason| {
+        CommandFailure::diagnostic(format!("invalid requested worker: {reason}"))
+    })?;
+    let requested_branch = ClaimBranch::try_from(requested_branch).map_err(|reason| {
+        CommandFailure::diagnostic(format!("invalid requested branch: {reason}"))
+    })?;
+    let comments = list_comments(repo, issue.get())?;
+    if terminal_merged_exists(&comments) {
+        return Ok(ClaimEvidence::Observed(ClaimContext::terminal(
+            scope,
+            issue,
+            requested_worker,
+            requested_branch,
+        )));
+    }
+    let Some(selected) = select_run_state(&comments, repo, issue.get()) else {
+        return if lowest_marked_comment(&comments).is_some() {
+            Ok(ClaimEvidence::Malformed)
+        } else {
+            Ok(ClaimEvidence::Observed(ClaimContext::active(
+                scope,
+                issue,
+                requested_worker,
+                requested_branch,
+                LeaseFreshness::Fresh,
+            )))
+        };
+    };
+    let worker = WorkerId::try_from(selected.record.worker_id.as_str()).map_err(|reason| {
+        CommandFailure::diagnostic(format!("invalid recorded claim worker: {reason}"))
+    })?;
+    let branch = ClaimBranch::try_from(selected.record.branch.as_str()).map_err(|reason| {
+        CommandFailure::diagnostic(format!("invalid recorded claim branch: {reason}"))
+    })?;
+    if selected.record.state == "merged" {
+        return Ok(ClaimEvidence::Observed(ClaimContext::terminal(
+            scope, issue, worker, branch,
+        )));
+    }
+    Ok(ClaimEvidence::Observed(ClaimContext::active(
+        scope,
+        issue,
+        worker,
+        branch,
+        lifecycle_lease_freshness(&selected.server_updated_at),
+    )))
+}
+
+fn lifecycle_lease_freshness(server_timestamp: &str) -> LeaseFreshness {
+    let Some(updated_at) = parse_iso_timestamp(server_timestamp) else {
+        return LeaseFreshness::Stale;
+    };
+    let Ok(now) = unix_now() else {
+        return LeaseFreshness::Stale;
+    };
+    let age = now.saturating_sub(updated_at);
+    if age > ABANDONED_LEASE_SECS {
+        LeaseFreshness::Abandoned
+    } else if age > STALE_LEASE_SECS {
+        LeaseFreshness::Stale
+    } else {
+        LeaseFreshness::Fresh
+    }
 }
 
 fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, CommandFailure> {

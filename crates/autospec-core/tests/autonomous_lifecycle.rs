@@ -1,6 +1,7 @@
 use autospec_core::autonomous_lifecycle::{
-    decide, Budget, Health, LifecycleDecision, LifecycleInput, LifecycleReject, LifecycleTier,
-    ParkReason, StopMode, ABANDONED_LEASE_SECS, ISSUE_FAILURE_CAP, STALE_LEASE_SECS,
+    decide, Budget, ClaimBranch, ClaimContext, ClaimEvidence, Health, IssueNumber, LeaseFreshness,
+    LifecycleDecision, LifecycleInput, LifecycleReject, LifecycleTier, ParkReason, RepositoryScope,
+    StopMode, WorkerId, ABANDONED_LEASE_SECS, ISSUE_FAILURE_CAP, STALE_LEASE_SECS,
 };
 
 #[test]
@@ -33,11 +34,54 @@ fn stale_and_cross_scope_claims_are_non_executable() {
     );
     assert_eq!(
         decide(&LifecycleInput::ready("owner/repo").with_lease_age_secs(ABANDONED_LEASE_SECS + 1),),
-        LifecycleDecision::Reject(LifecycleReject::StaleLease)
+        LifecycleDecision::Reject(LifecycleReject::AbandonedLease)
+    );
+    let claim = ClaimContext::active(
+        RepositoryScope::try_from("other/repo").expect("scope"),
+        IssueNumber::new(41).expect("issue"),
+        WorkerId::try_from("worker-a").expect("worker"),
+        ClaimBranch::try_from("autonomous/issue-41").expect("branch"),
+        LeaseFreshness::Fresh,
     );
     assert_eq!(
-        decide(&LifecycleInput::ready("owner/repo").with_claim_repo("other/repo")),
+        decide(&LifecycleInput::ready("owner/repo").with_claim(claim)),
         LifecycleDecision::Reject(LifecycleReject::CrossScopeClaim)
+    );
+}
+
+#[test]
+fn typed_claim_identity_distinguishes_abandoned_leases_and_owner_mismatches() {
+    let scope = RepositoryScope::try_from("owner/repo").expect("scope");
+    let worker = WorkerId::try_from("worker-a").expect("worker");
+    let branch = ClaimBranch::try_from("autonomous/issue-41").expect("branch");
+    let claim = ClaimContext::active(
+        scope.clone(),
+        IssueNumber::new(41).expect("issue"),
+        worker.clone(),
+        branch.clone(),
+        LeaseFreshness::from_age_secs(ABANDONED_LEASE_SECS + 1),
+    );
+
+    assert_eq!(claim.lease_freshness(), LeaseFreshness::Abandoned);
+    assert_eq!(
+        decide(&LifecycleInput::from_scope(scope.clone()).with_claim(claim)),
+        LifecycleDecision::Reject(LifecycleReject::AbandonedLease)
+    );
+
+    let fresh_claim = ClaimContext::active(
+        scope.clone(),
+        IssueNumber::new(41).expect("issue"),
+        worker,
+        branch.clone(),
+        LeaseFreshness::Fresh,
+    );
+    assert_eq!(
+        decide(
+            &LifecycleInput::from_scope(scope)
+                .with_claim(fresh_claim)
+                .with_expected_claim(WorkerId::try_from("worker-b").expect("worker"), branch,),
+        ),
+        LifecycleDecision::Reject(LifecycleReject::OwnershipMismatch)
     );
 }
 
@@ -101,12 +145,32 @@ fn human_health_and_budget_gates_precede_work() {
 
 #[test]
 fn terminal_ownership_and_failure_cap_claims_are_rejected() {
+    let scope = RepositoryScope::try_from("owner/repo").expect("scope");
+    let worker = WorkerId::try_from("worker-a").expect("worker");
+    let branch = ClaimBranch::try_from("autonomous/issue-41").expect("branch");
     assert_eq!(
-        decide(&LifecycleInput::ready("owner/repo").with_terminal_claim()),
+        decide(
+            &LifecycleInput::from_scope(scope.clone()).with_claim(ClaimContext::terminal(
+                scope.clone(),
+                IssueNumber::new(41).expect("issue"),
+                worker.clone(),
+                branch.clone(),
+            ))
+        ),
         LifecycleDecision::Reject(LifecycleReject::TerminalClaim)
     );
     assert_eq!(
-        decide(&LifecycleInput::ready("owner/repo").with_ownership_mismatch()),
+        decide(
+            &LifecycleInput::from_scope(scope.clone())
+                .with_claim(ClaimContext::active(
+                    scope.clone(),
+                    IssueNumber::new(41).expect("issue"),
+                    worker,
+                    branch.clone(),
+                    LeaseFreshness::Fresh,
+                ))
+                .with_expected_claim(WorkerId::try_from("worker-b").expect("worker"), branch,),
+        ),
         LifecycleDecision::Reject(LifecycleReject::OwnershipMismatch)
     );
     assert_eq!(
@@ -126,5 +190,13 @@ fn malformed_scope_is_rejected_after_stop_precedence() {
     assert_eq!(
         decide(&LifecycleInput::ready("owner")),
         LifecycleDecision::Reject(LifecycleReject::InvalidScope)
+    );
+}
+
+#[test]
+fn malformed_claim_evidence_is_non_executable() {
+    assert_eq!(
+        decide(&LifecycleInput::ready("owner/repo").with_claim_evidence(ClaimEvidence::Malformed)),
+        LifecycleDecision::Reject(LifecycleReject::MalformedClaim)
     );
 }
