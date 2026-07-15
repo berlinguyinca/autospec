@@ -438,7 +438,7 @@ fn lifecycle_budget(
 }
 
 fn trailing_cycle(status: &str) -> Option<String> {
-    let suffix = status.rsplit(':').next()?;
+    let suffix = status.strip_prefix("running:")?;
     let digits = suffix.strip_prefix("cycle-")?;
     (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
         .then(|| suffix.to_string())

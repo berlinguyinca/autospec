@@ -1251,14 +1251,6 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
             }
         }
     }
-    fs::create_dir_all(&layout.state_dir).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "cannot create {}: {error}",
-            layout.state_dir.display()
-        ))
-    })?;
-    persist_main_health(&layout, &health).map_err(CommandFailure::diagnostic)?;
-    persist_lifecycle_decision(&layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
     let scope = foreground_scope();
     let state_path = foreground_state_path(&layout, scope);
     let state =
@@ -1274,18 +1266,24 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
         )));
     }
 
-    let Some(state) =
-        scan_foreground(&layout, &state_path, state).map_err(CommandFailure::diagnostic)?
-    else {
+    let (state, found_work) =
+        scan_foreground(&layout, state).map_err(CommandFailure::diagnostic)?;
+    if !found_work {
+        persist_foreground_admission(&layout, &health, &lifecycle)?;
+        persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
+        println!("{}", state.to_json());
+        return Ok(());
+    }
+    let state = review_foreground(&layout, state).map_err(CommandFailure::diagnostic)?;
+    let (state, selected) = select_foreground(&layout, &options, state)?;
+    let Some(selected) = selected else {
+        persist_foreground_admission(&layout, &health, &lifecycle)?;
+        persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
+        println!("{}", state.to_json());
         return Ok(());
     };
-    let state =
-        review_foreground(&layout, &state_path, state).map_err(CommandFailure::diagnostic)?;
-    let Some((state, selected)) =
-        select_foreground(&layout, &state_path, state).map_err(CommandFailure::diagnostic)?
-    else {
-        return Ok(());
-    };
+    persist_foreground_admission(&layout, &health, &lifecycle)?;
+    persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
     let state = dispatch_foreground(&layout, &options, &state_path, state, selected)?;
     println!("{}", state.to_json());
     Ok(())
@@ -1314,23 +1312,19 @@ struct ForegroundSelection {
 
 fn scan_foreground(
     layout: &RunLayout,
-    state_path: &Path,
     state: ConductorState,
-) -> Result<Option<ConductorState>, String> {
+) -> Result<(ConductorState, bool), String> {
     let initial_plan = queue::ready_plan_for(&layout.repo, 1).map_err(command_error)?;
     if initial_plan.gate_counts.candidate == 0 {
         let state = state
             .transition(ConductorEvent::ScanEmpty)
             .map_err(|error| format!("cannot record empty foreground scan: {error}"))?;
-        persist_foreground_state(state_path, &state)?;
-        println!("{}", state.to_json());
-        return Ok(None);
+        return Ok((state, false));
     }
     let state = state
         .transition(ConductorEvent::ScanFoundWork)
         .map_err(|error| format!("cannot record foreground scan: {error}"))?;
-    persist_foreground_state(state_path, &state)?;
-    Ok(Some(state))
+    Ok((state, true))
 }
 
 fn preview_foreground_issue(layout: &RunLayout) -> Result<Option<u64>, CommandFailure> {
@@ -1340,47 +1334,57 @@ fn preview_foreground_issue(layout: &RunLayout) -> Result<Option<u64>, CommandFa
     Ok(ready.batch.first().map(|issue| issue.issue.number))
 }
 
-fn review_foreground(
-    layout: &RunLayout,
-    state_path: &Path,
-    state: ConductorState,
-) -> Result<ConductorState, String> {
+fn review_foreground(layout: &RunLayout, state: ConductorState) -> Result<ConductorState, String> {
     queue::review_safety_for_repo(&layout.repo, 1, None).map_err(command_error)?;
     let state = state
         .transition(ConductorEvent::SafetyReviewed)
         .map_err(|error| format!("cannot record foreground safety review: {error}"))?;
-    persist_foreground_state(state_path, &state)?;
     Ok(state)
 }
 
 fn select_foreground(
     layout: &RunLayout,
-    state_path: &Path,
+    options: &Options,
     state: ConductorState,
-) -> Result<Option<(ConductorState, ForegroundSelection)>, String> {
-    let ready = queue::ready_plan_for(&layout.repo, 1).map_err(command_error)?;
+) -> Result<(ConductorState, Option<ForegroundSelection>), CommandFailure> {
+    let ready = queue::ready_plan_for(&layout.repo, 1)
+        .map_err(command_error)
+        .map_err(CommandFailure::diagnostic)?;
     let Some(selected) = ready.batch.first() else {
         let state = state
             .transition(ConductorEvent::Pause {
                 reason: "no_ready_issue_after_review".to_string(),
             })
-            .map_err(|error| format!("cannot pause foreground conductor: {error}"))?;
-        persist_foreground_state(state_path, &state)?;
-        println!("{}", state.to_json());
-        return Ok(None);
+            .map_err(|error| {
+                CommandFailure::diagnostic(format!("cannot pause foreground conductor: {error}"))
+            })?;
+        return Ok((state, None));
     };
     let selection = ForegroundSelection {
         issue: selected.issue.number,
         serialization_reasons: selected.serialization_reasons.clone(),
     };
+    let admission = resilience_admission_for_issue(layout, options, Some(selection.issue))?;
+    let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
+        CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
+    })?;
+    let input = lifecycle_input_with_resilience(
+        LifecycleInput::from_scope(scope).with_transition(LifecycleTransition::Foreground),
+        &admission,
+    )?;
+    let lifecycle = decide_lifecycle(&input);
+    if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
+        return Err(lifecycle_non_run(&lifecycle));
+    }
     let state = state
         .transition(ConductorEvent::Selected {
             issue: selection.issue,
             serialization_reasons: selection.serialization_reasons.clone(),
         })
-        .map_err(|error| format!("cannot select foreground issue: {error}"))?;
-    persist_foreground_state(state_path, &state)?;
-    Ok(Some((state, selection)))
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("cannot select foreground issue: {error}"))
+        })?;
+    Ok((state, Some(selection)))
 }
 
 fn dispatch_foreground(
@@ -1838,16 +1842,28 @@ fn admit_lifecycle_start(
     options: &Options,
     transition: LifecycleTransition,
 ) -> Result<LifecycleDecision, CommandFailure> {
-    let admission = resilience_admission_for_issue(layout, options, options.issue)?;
     let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
     })?;
+    if matches!(transition, LifecycleTransition::Start) {
+        if let Some(mode) = persisted_stop_mode(layout).map_err(CommandFailure::diagnostic)? {
+            let decision = decide_lifecycle(
+                &LifecycleInput::from_scope(scope)
+                    .with_transition(transition)
+                    .with_stop(mode),
+            );
+            return Err(lifecycle_non_run(&decision));
+        }
+    }
+    let admission = resilience_admission_for_issue(layout, options, options.issue)?;
     let mut input = lifecycle_input_with_resilience(
         LifecycleInput::from_scope(scope).with_transition(transition),
         &admission,
     )?;
-    if let Some(mode) = persisted_stop_mode(layout).map_err(CommandFailure::diagnostic)? {
-        input = input.with_stop(mode);
+    if !matches!(transition, LifecycleTransition::Start) {
+        if let Some(mode) = persisted_stop_mode(layout).map_err(CommandFailure::diagnostic)? {
+            input = input.with_stop(mode);
+        }
     }
     let decision = decide_lifecycle(&input);
     if matches!(decision, LifecycleDecision::Run { .. }) {
@@ -1855,6 +1871,21 @@ fn admit_lifecycle_start(
     } else {
         Err(lifecycle_non_run(&decision))
     }
+}
+
+fn persist_foreground_admission(
+    layout: &RunLayout,
+    health: &MainlineHealth,
+    lifecycle: &LifecycleDecision,
+) -> Result<(), CommandFailure> {
+    fs::create_dir_all(&layout.state_dir).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "cannot create {}: {error}",
+            layout.state_dir.display()
+        ))
+    })?;
+    persist_main_health(layout, health).map_err(CommandFailure::diagnostic)?;
+    persist_lifecycle_decision(layout, lifecycle).map_err(CommandFailure::diagnostic)
 }
 
 fn resilience_admission_for_issue(

@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -456,6 +457,25 @@ fn autonomous_start_rejects_unsafe_resilience_state_before_operator_writes() {
 }
 
 #[test]
+fn autonomous_start_prefers_a_persisted_stop_over_foreign_resilience_state() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state("owner__repo", valid_state("other/repo", "running", 1));
+    write_file(
+        &fixture.operator_stop_flag_path(),
+        "immediate\noperator@test\n",
+    );
+
+    let output = fixture.run_autonomous(&["start", "--repo", "owner/repo"]);
+
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"stop\",\"mode\":\"immediate\"}\n"
+    );
+    assert!(!fixture.operator_lifecycle_path().exists());
+}
+
+#[test]
 fn autonomous_restart_rejects_unsafe_resilience_state_without_clearing_stop() {
     let fixture = ResilienceFixture::new();
     fixture.write_state("owner__repo", valid_state("other/repo", "running", 1));
@@ -475,6 +495,27 @@ fn autonomous_restart_rejects_unsafe_resilience_state_without_clearing_stop() {
         before
     );
     assert!(!fixture.operator_lifecycle_path().exists());
+}
+
+#[test]
+fn autonomous_foreground_does_not_persist_when_final_selection_hits_failure_cap() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_failures("owner__repo", 43, 3);
+
+    let output = fixture.run_foreground_with_changed_selection();
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"reject\",\"reason\":\"failure_cap\"}\n"
+    );
+    assert!(!fixture.operator_lifecycle_path().exists());
+    assert!(!fixture.foreground_state_path().exists());
 }
 
 #[test]
@@ -552,6 +593,34 @@ fn autonomous_status_reads_legacy_cycle_suffix_without_writing() {
     assert!(body.contains("\"last_cycle\":\"cycle-9\""));
     assert!(!fixture.canonical_state_path().exists());
     assert!(!fixture.operator_lifecycle_path().exists());
+}
+
+#[test]
+fn autonomous_status_ignores_non_running_cycle_suffix() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state("owner_repo", valid_state("owner/repo", "paused:cycle-9", 1));
+
+    let output = fixture.run_autonomous(&["status", "--repo", "owner/repo", "--json"]);
+
+    assert!(output.status.success());
+    assert!(stdout(&output).contains("\"last_cycle\":\"\""));
+}
+
+#[test]
+fn autonomous_status_prefers_an_explicit_cycle_over_running_suffix() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state(
+        "owner_repo",
+        format!(
+            "{{\"repo\":\"owner/repo\",\"status\":\"running:cycle-9\",\"heartbeat_at\":{},\"cycle\":44}}",
+            now_secs()
+        ),
+    );
+
+    let output = fixture.run_autonomous(&["status", "--repo", "owner/repo", "--json"]);
+
+    assert!(output.status.success());
+    assert!(stdout(&output).contains("\"last_cycle\":\"44\""));
 }
 
 #[test]
@@ -657,6 +726,86 @@ impl ResilienceFixture {
             .env("AUTOSPEC_HOST", "autospec-test-host")
             .output()
             .expect("run autonomous command")
+    }
+
+    fn run_foreground_with_changed_selection(&self) -> Output {
+        let bin = self.root.join("bin");
+        let counter = self.root.join("ready-count");
+        fs::create_dir_all(&bin).expect("create fake bin");
+        fs::write(&counter, "0\n").expect("write ready counter");
+        write_executable(
+            &bin.join("gh"),
+            r####"#!/bin/sh
+set -eu
+
+endpoint=""
+for value in "$@"; do
+  case "$value" in repos/*) endpoint="$value" ;; esac
+done
+
+issue() {
+  printf '%s\n' "{\"number\":$1,\"title\":\"Safe issue\",\"body\":\"## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\",\"labels\":[\"auto-implement\",\"safety:reviewed\"],\"author\":{\"login\":\"berlinguyinca\"}}"
+}
+
+if [ "$1" = api ] && [ "$2" = graphql ]; then
+  printf '%s\n' '{"items":[],"page_info":{"has_next_page":false,"end_cursor":null}}'
+  exit 0
+fi
+
+case "$endpoint" in
+  repos/owner/repo/branches/main)
+    printf '%s\n' '{}'
+    ;;
+  repos/owner/repo/commits/main/status)
+    printf '%s\n' '{"state":"success","total_count":1,"statuses":[{"context":"ci","state":"success"}]}'
+    ;;
+  repos/owner/repo/issues/*/comments?*)
+    printf '%s\n' '{"raw_count":0,"items":[]}'
+    ;;
+  repos/owner/repo/issues/*/comments)
+    printf '%s\n' '[]'
+    ;;
+  *labels=auto-implement*)
+    if [ "$(cat "$AUTOSPEC_RESILIENCE_READY_COUNTER")" = 0 ]; then
+      printf '1\n' > "$AUTOSPEC_RESILIENCE_READY_COUNTER"
+      issue 42
+    else
+      issue 43
+    fi | {
+      printf '%s' '{"raw_count":1,"items":['
+      cat
+      printf '%s\n' ']}'
+    }
+    ;;
+  *labels=in-progress-by-bot*)
+    printf '%s\n' '{"raw_count":0,"items":[]}'
+    ;;
+  '')
+    printf 'unexpected gh invocation: %s\n' "$*" >&2
+    exit 1
+    ;;
+  *)
+    printf 'unexpected gh endpoint: %s\n' "$endpoint" >&2
+    exit 1
+    ;;
+esac
+"####,
+        );
+        self.command()
+            .args([
+                "run-foreground",
+                "--repo",
+                "owner/repo",
+                "--branch",
+                "main",
+                "--repo-dir",
+            ])
+            .arg(&self.repo_dir)
+            .env("AUTOSPEC_HOST", "autospec-test-host")
+            .env("AUTOSPEC_RESILIENCE_READY_COUNTER", counter)
+            .env("PATH", path_with(&bin))
+            .output()
+            .expect("run foreground with changing selection")
     }
 
     fn initialize_git_remote(&self) {
@@ -779,6 +928,19 @@ fn now_secs() -> u64 {
 fn write_file(path: &Path, contents: &str) {
     fs::create_dir_all(path.parent().expect("parent directory")).expect("create parent directory");
     fs::write(path, contents).expect("write fixture state");
+}
+
+fn write_executable(path: &Path, contents: &str) {
+    fs::write(path, contents).expect("write fake executable");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make fake executable");
+}
+
+fn path_with(bin: &Path) -> String {
+    format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").expect("PATH is set")
+    )
 }
 
 fn stdout(output: &Output) -> String {
