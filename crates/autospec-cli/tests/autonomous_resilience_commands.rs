@@ -87,6 +87,27 @@ fn resilience_decide_rejects_malformed_or_foreign_state_without_a_canonical_writ
 }
 
 #[test]
+fn resilience_decide_rejects_zero_lock_pid_without_a_canonical_write() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state(
+        "owner_repo",
+        format!(
+            "{{\"repo\":\"owner/repo\",\"slug\":\"owner__repo\",\"status\":\"running\",\"host\":\"autospec-test-host\",\"session\":\"test\",\"heartbeat_at\":{},\"lock_pid\":0,\"lock_host\":\"autospec-test-host\",\"lock_session\":null,\"lock_acquired_at\":null}}",
+            now_secs()
+        ),
+    );
+
+    let output = fixture.run(&["resilience", "decide", "--repo", "owner/repo"]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"reject\",\"reason\":\"malformed_state\"}\n"
+    );
+    assert!(!fixture.canonical_state_path().exists());
+}
+
+#[test]
 fn resilience_decide_reclaims_expired_leases_at_the_documented_boundaries() {
     let claimed = ResilienceFixture::new();
     claimed.write_state(

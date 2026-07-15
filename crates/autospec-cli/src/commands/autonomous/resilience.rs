@@ -1,48 +1,33 @@
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::CommandFailure;
 use autospec_core::autonomous_lifecycle::{
     decide as decide_lifecycle, decide_capacity, decide_conductor_lease, CapacityDecision,
     CapacityInput, ConductorLeaseDecision, ConductorLeaseInput, ConductorLeaseReclaim,
     LifecycleDecision, LifecycleInput, LifecycleReject, RepositoryScope,
 };
-use autospec_core::state::json::{JsonParser, JsonValue};
 
-use super::CommandFailure;
-pub(super) struct ResilienceStore {
+mod records;
+
+use records::{parse_failures, ResilienceReject, ResilienceState, Spend};
+
+struct ResilienceStore {
     scope: RepositoryScope,
     state_root: PathBuf,
     spend_root: PathBuf,
     host: String,
 }
-pub(super) struct ResilienceAdmission {
+struct ResilienceAdmission {
     pub failure_count: u8,
     pub capacity: CapacityDecision,
     pub lease: Option<ConductorLeaseDecision>,
 }
-#[derive(Debug)]
-pub(super) enum ResilienceReject {
-    MalformedState,
-    ForeignState,
-    MalformedFailure,
-    MalformedSpend,
-}
-impl ResilienceReject {
-    pub(super) fn reason(&self) -> &'static str {
-        match self {
-            Self::MalformedState => "malformed_state",
-            Self::ForeignState => "foreign_state",
-            Self::MalformedFailure => "malformed_failure",
-            Self::MalformedSpend => "malformed_spend",
-        }
-    }
-}
 impl ResilienceStore {
-    pub(super) fn from_env(repo: &str) -> Result<Self, String> {
+    fn from_env(repo: &str) -> Result<Self, String> {
         let scope = RepositoryScope::try_from(repo).map_err(|reason| format!("--repo {reason}"))?;
         let state_base = env_path("AUTOSPEC_STATE_DIR", &[".autospec"]);
         let spend_root = env::var("AUTOSPEC_AUTONOMOUS_SPEND_DIR")
@@ -57,7 +42,7 @@ impl ResilienceStore {
                 .unwrap_or_default(),
         })
     }
-    pub(super) fn read_state(&self) -> Result<Option<(ResilienceState, bool)>, ResilienceReject> {
+    fn read_state(&self) -> Result<Option<(ResilienceState, bool)>, ResilienceReject> {
         for (candidate_index, path) in self
             .candidates(&self.state_root, "state.json")
             .into_iter()
@@ -78,7 +63,7 @@ impl ResilienceStore {
         }
         Ok(None)
     }
-    pub(super) fn read_failures(&self, issue: Option<u64>) -> Result<u8, ResilienceReject> {
+    fn read_failures(&self, issue: Option<u64>) -> Result<u8, ResilienceReject> {
         let Some(issue) = issue else {
             return Ok(0);
         };
@@ -102,7 +87,7 @@ impl ResilienceStore {
         Ok(Spend::default())
     }
 
-    pub(super) fn write_state(&self, value: &ResilienceState) -> Result<(), String> {
+    fn write_state(&self, value: &ResilienceState) -> Result<(), String> {
         let [canonical, ..] = self.slugs();
         let path = self.state_root.join(&canonical).join("state.json");
         fs::create_dir_all(path.parent().expect("state path has a parent"))
@@ -110,7 +95,7 @@ impl ResilienceStore {
         super::atomic_write(&path, &value.to_json(&canonical))
     }
 
-    pub(super) fn admit(
+    fn admit(
         &self,
         issue: Option<u64>,
         usage_cap: u64,
@@ -331,150 +316,6 @@ fn reclaim_name(reason: ConductorLeaseReclaim) -> &'static str {
     }
 }
 
-#[derive(Default)]
-struct Spend {
-    tokens: u64,
-    issues: u64,
-}
-
-impl Spend {
-    fn parse(raw: &str) -> Result<Self, ResilienceReject> {
-        let mut fields = parse_json_object(raw).map_err(|_| ResilienceReject::MalformedSpend)?;
-        let schema = number_field(&mut fields, "schema")
-            .map_err(|_| ResilienceReject::MalformedSpend)?
-            .ok_or(ResilienceReject::MalformedSpend)?;
-        if schema != 1 {
-            return Err(ResilienceReject::MalformedSpend);
-        }
-        Ok(Self {
-            tokens: number_field(&mut fields, "tokens")
-                .map_err(|_| ResilienceReject::MalformedSpend)?
-                .ok_or(ResilienceReject::MalformedSpend)?,
-            issues: number_field(&mut fields, "issues")
-                .map_err(|_| ResilienceReject::MalformedSpend)?
-                .ok_or(ResilienceReject::MalformedSpend)?,
-        })
-    }
-}
-
-pub(super) struct ResilienceState {
-    repo: String,
-    status: String,
-    host: Option<String>,
-    session: Option<String>,
-    heartbeat_at: Option<u64>,
-    lock_pid: Option<u32>,
-    lock_host: Option<String>,
-    lock_session: Option<String>,
-    lock_acquired_at: Option<u64>,
-}
-
-impl ResilienceState {
-    fn parse(raw: &str) -> Result<Self, ()> {
-        let mut fields = parse_json_object(raw)?;
-        let repo = string_field(&mut fields, "repo")?.ok_or(())?;
-        let status = string_field(&mut fields, "status")?.ok_or(())?;
-        let host = string_field(&mut fields, "host")?;
-        let session = string_field(&mut fields, "session")?;
-        let heartbeat_at = number_field(&mut fields, "heartbeat_at")?;
-        let lock_pid = number_field(&mut fields, "lock_pid")?
-            .map(|pid| u32::try_from(pid).map_err(|_| ()))
-            .transpose()?;
-        let lock_host = string_field(&mut fields, "lock_host")?;
-        let lock_session = string_field(&mut fields, "lock_session")?;
-        let lock_acquired_at = number_field(&mut fields, "lock_acquired_at")?;
-        Ok(Self {
-            repo,
-            status,
-            host,
-            session,
-            heartbeat_at,
-            lock_pid,
-            lock_host,
-            lock_session,
-            lock_acquired_at,
-        })
-    }
-
-    fn to_json(&self, slug: &str) -> String {
-        format!(
-            "{{\"repo\":\"{}\",\"slug\":\"{}\",\"status\":\"{}\",\"host\":{},\"session\":{},\"heartbeat_at\":{},\"lock_pid\":{},\"lock_host\":{},\"lock_session\":{},\"lock_acquired_at\":{}}}\n",
-            super::json_escape(&self.repo),
-            super::json_escape(slug),
-            super::json_escape(&self.status),
-            optional_json_string(self.host.as_deref()),
-            optional_json_string(self.session.as_deref()),
-            optional_number(self.heartbeat_at),
-            optional_number(self.lock_pid.map(u64::from)),
-            optional_json_string(self.lock_host.as_deref()),
-            optional_json_string(self.lock_session.as_deref()),
-            optional_number(self.lock_acquired_at),
-        )
-    }
-}
-
-fn parse_failures(raw: &str, issue: u64) -> Result<u8, ResilienceReject> {
-    let mut fields = parse_json_object(raw).map_err(|_| ResilienceReject::MalformedFailure)?;
-    let recorded_issue = failure_issue_field(&mut fields)?;
-    if recorded_issue != issue {
-        return Err(ResilienceReject::MalformedFailure);
-    }
-    let failures = number_field(&mut fields, "failures")
-        .map_err(|_| ResilienceReject::MalformedFailure)?
-        .ok_or(ResilienceReject::MalformedFailure)?;
-    Ok(u8::try_from(failures).unwrap_or(u8::MAX))
-}
-
-fn failure_issue_field(fields: &mut BTreeMap<String, JsonValue>) -> Result<u64, ResilienceReject> {
-    let value = fields
-        .remove("issue")
-        .ok_or(ResilienceReject::MalformedFailure)?;
-    let issue = match value {
-        JsonValue::Number(value) => value
-            .parse::<u64>()
-            .map_err(|_| ResilienceReject::MalformedFailure)?,
-        JsonValue::String(value) => {
-            parse_positive_decimal(&value).ok_or(ResilienceReject::MalformedFailure)?
-        }
-        _ => return Err(ResilienceReject::MalformedFailure),
-    };
-    if issue == 0 {
-        return Err(ResilienceReject::MalformedFailure);
-    }
-    Ok(issue)
-}
-
-fn parse_positive_decimal(value: &str) -> Option<u64> {
-    if value.is_empty()
-        || value.starts_with('0')
-        || !value.bytes().all(|character| character.is_ascii_digit())
-    {
-        return None;
-    }
-    value.parse().ok()
-}
-
-fn string_field(fields: &mut BTreeMap<String, JsonValue>, key: &str) -> Result<Option<String>, ()> {
-    match fields.remove(key) {
-        None | Some(JsonValue::Null) => Ok(None),
-        Some(value) => value.into_string(key).map(Some).map_err(|_| ()),
-    }
-}
-
-fn number_field(fields: &mut BTreeMap<String, JsonValue>, key: &str) -> Result<Option<u64>, ()> {
-    match fields.remove(key) {
-        None | Some(JsonValue::Null) => Ok(None),
-        Some(value) => value.into_number(key).map(Some).map_err(|_| ()),
-    }
-}
-
-fn parse_json_object(input: &str) -> Result<BTreeMap<String, JsonValue>, ()> {
-    JsonParser::new(input)
-        .parse()
-        .and_then(|value| value.into_object("resilience record"))
-        .map_err(|_| ())
-}
-
 fn env_path(name: &str, suffix: &[&str]) -> PathBuf {
     env::var(name).map(PathBuf::from).unwrap_or_else(|_| {
         let mut path = env::var("HOME")
@@ -505,18 +346,6 @@ fn same_known_host(recorded: &str, current: &str) -> bool {
         && !recorded.eq_ignore_ascii_case("unknown")
         && !current.eq_ignore_ascii_case("unknown")
         && recorded == current
-}
-
-fn optional_number(value: Option<u64>) -> String {
-    value
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "null".to_string())
-}
-
-fn optional_json_string(value: Option<&str>) -> String {
-    value
-        .map(|value| format!("\"{}\"", super::json_escape(value)))
-        .unwrap_or_else(|| "null".to_string())
 }
 
 fn now_secs() -> u64 {
