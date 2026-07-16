@@ -874,6 +874,7 @@ exit 1
             .env("AUTOSPEC_FOREGROUND_CALLS", &self.calls)
             .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator)
             .env("AUTOSPEC_STATE_DIR", &self.state)
+            .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", self.root.join("spend"))
             .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &self.health)
             .env("AUTOSPEC_HEARTBEAT_DIR", &self.heartbeats)
             .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
