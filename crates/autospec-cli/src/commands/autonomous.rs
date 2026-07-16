@@ -556,61 +556,15 @@ fn start(options: Options) -> Result<(), CommandFailure> {
     validate_repo_dir(&options).map_err(CommandFailure::diagnostic)?;
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let options = options_with_resolved_repo(options, &layout);
-    let lifecycle = admit_lifecycle_start(&layout, &options, LifecycleTransition::Start)?;
-    let commands = launch_commands(&options).map_err(CommandFailure::diagnostic)?;
-    let foreground = foreground_command(&options).map_err(CommandFailure::diagnostic)?;
-    fs::create_dir_all(&layout.state_dir).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "cannot create {}: {error}",
-            layout.state_dir.display()
-        ))
-    })?;
-    fs::create_dir_all(&layout.log_dir).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "cannot create {}: {error}",
-            layout.log_dir.display()
-        ))
-    })?;
-    persist_lifecycle_decision(&layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
-    prepare_start_scope(&layout, &options).map_err(CommandFailure::diagnostic)?;
-    write_launch_json(&layout, &options, &foreground, &commands)
-        .map_err(CommandFailure::diagnostic)?;
-
-    let conductor = spawn_unit(
-        "conductor",
-        &foreground,
-        &options.repo_dir,
-        &layout.state_dir,
-        &layout.log_dir,
-        log_override_for("conductor", &options),
-    )
-    .map_err(CommandFailure::diagnostic)?;
-    let (monitor, supervisor) = if companions_enabled() {
-        (
-            spawn_unit(
-                "monitor",
-                &commands.monitor,
-                &options.repo_dir,
-                &layout.state_dir,
-                &layout.log_dir,
-                log_override_for("monitor", &options),
-            )
-            .map_err(CommandFailure::diagnostic)?,
-            spawn_unit(
-                "supervisor",
-                &commands.supervisor,
-                &options.repo_dir,
-                &layout.state_dir,
-                &layout.log_dir,
-                log_override_for("supervisor", &options),
-            )
-            .map_err(CommandFailure::diagnostic)?,
-        )
-    } else {
-        (
-            empty_unit("monitor", &layout.state_dir, &layout.log_dir),
-            empty_unit("supervisor", &layout.state_dir, &layout.log_dir),
-        )
+    let (lifecycle, lease) =
+        acquire_lifecycle_start(&layout, &options, LifecycleTransition::Start)?;
+    let launched = start_after_lease(&layout, &options, &lifecycle, &lease);
+    let (conductor, monitor, supervisor) = match launched {
+        Ok(units) => units,
+        Err(error) => {
+            release_launch_lease(&layout.repo, &lease)?;
+            return Err(error);
+        }
     };
 
     if options.json {
@@ -628,6 +582,64 @@ fn start(options: Options) -> Result<(), CommandFailure> {
         println!("monitor pid: {}", monitor.pid);
         println!("supervisor pid: {}", supervisor.pid);
     }
+    Ok(())
+}
+
+fn start_after_lease(
+    layout: &RunLayout,
+    options: &Options,
+    lifecycle: &LifecycleDecision,
+    lease: &resilience::ConductorLease,
+) -> Result<(UnitRecord, UnitRecord, UnitRecord), CommandFailure> {
+    let commands = launch_commands(options).map_err(CommandFailure::diagnostic)?;
+    let foreground = foreground_command(options).map_err(CommandFailure::diagnostic)?;
+    create_launch_directories(layout)?;
+    prepare_start_scope(layout, options).map_err(CommandFailure::diagnostic)?;
+    persist_lifecycle_decision(layout, lifecycle).map_err(CommandFailure::diagnostic)?;
+    write_launch_json(layout, options, &foreground, &commands)
+        .map_err(CommandFailure::diagnostic)?;
+    launch_units(layout, options, &foreground, &commands, lease)
+}
+
+fn restart_after_lease(
+    layout: &RunLayout,
+    options: &Options,
+    lifecycle: &LifecycleDecision,
+    lease: &resilience::ConductorLease,
+) -> Result<(usize, UnitRecord, UnitRecord, UnitRecord), CommandFailure> {
+    let commands = launch_commands(options).map_err(CommandFailure::diagnostic)?;
+    let foreground = foreground_command(options).map_err(CommandFailure::diagnostic)?;
+    create_launch_directories(layout)?;
+    persist_lifecycle_decision(layout, lifecycle).map_err(CommandFailure::diagnostic)?;
+    let mut stopped = 0;
+    for name in ["supervisor", "monitor", "conductor"] {
+        let unit = read_unit(name, &layout.state_dir);
+        if unit.running && terminate_pid(&unit.pid) {
+            stopped += 1;
+        }
+    }
+    wait_for_scope_stopped(&layout.state_dir);
+    clear_stop_flag(layout).map_err(CommandFailure::diagnostic)?;
+    write_launch_json(layout, options, &foreground, &commands)
+        .map_err(CommandFailure::diagnostic)?;
+    let (conductor, monitor, supervisor) =
+        launch_units(layout, options, &foreground, &commands, lease)?;
+    Ok((stopped, conductor, monitor, supervisor))
+}
+
+fn create_launch_directories(layout: &RunLayout) -> Result<(), CommandFailure> {
+    fs::create_dir_all(&layout.state_dir).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "cannot create {}: {error}",
+            layout.state_dir.display()
+        ))
+    })?;
+    fs::create_dir_all(&layout.log_dir).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "cannot create {}: {error}",
+            layout.log_dir.display()
+        ))
+    })?;
     Ok(())
 }
 
@@ -778,68 +790,15 @@ fn restart(options: Options) -> Result<(), CommandFailure> {
     let stop_options = options.clone();
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let options = options_with_resolved_repo(options, &layout);
-    let lifecycle = admit_lifecycle_start(&layout, &options, LifecycleTransition::Restart)?;
-    let commands = launch_commands(&options).map_err(CommandFailure::diagnostic)?;
-    let foreground = foreground_command(&options).map_err(CommandFailure::diagnostic)?;
-    fs::create_dir_all(&layout.state_dir).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "cannot create {}: {error}",
-            layout.state_dir.display()
-        ))
-    })?;
-    fs::create_dir_all(&layout.log_dir).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "cannot create {}: {error}",
-            layout.log_dir.display()
-        ))
-    })?;
-    persist_lifecycle_decision(&layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
-    let mut stopped = 0;
-    for name in ["supervisor", "monitor", "conductor"] {
-        let unit = read_unit(name, &layout.state_dir);
-        if unit.running && terminate_pid(&unit.pid) {
-            stopped += 1;
+    let (lifecycle, lease) =
+        acquire_lifecycle_start(&layout, &options, LifecycleTransition::Restart)?;
+    let launched = restart_after_lease(&layout, &options, &lifecycle, &lease);
+    let (stopped, conductor, monitor, supervisor) = match launched {
+        Ok(units) => units,
+        Err(error) => {
+            release_launch_lease(&layout.repo, &lease)?;
+            return Err(error);
         }
-    }
-    wait_for_scope_stopped(&layout.state_dir);
-    clear_stop_flag(&layout).map_err(CommandFailure::diagnostic)?;
-    write_launch_json(&layout, &options, &foreground, &commands)
-        .map_err(CommandFailure::diagnostic)?;
-    let conductor = spawn_unit(
-        "conductor",
-        &foreground,
-        &options.repo_dir,
-        &layout.state_dir,
-        &layout.log_dir,
-        log_override_for("conductor", &options),
-    )
-    .map_err(CommandFailure::diagnostic)?;
-    let (monitor, supervisor) = if companions_enabled() {
-        (
-            spawn_unit(
-                "monitor",
-                &commands.monitor,
-                &options.repo_dir,
-                &layout.state_dir,
-                &layout.log_dir,
-                log_override_for("monitor", &options),
-            )
-            .map_err(CommandFailure::diagnostic)?,
-            spawn_unit(
-                "supervisor",
-                &commands.supervisor,
-                &options.repo_dir,
-                &layout.state_dir,
-                &layout.log_dir,
-                log_override_for("supervisor", &options),
-            )
-            .map_err(CommandFailure::diagnostic)?,
-        )
-    } else {
-        (
-            empty_unit("monitor", &layout.state_dir, &layout.log_dir),
-            empty_unit("supervisor", &layout.state_dir, &layout.log_dir),
-        )
     };
     if stop_options.json {
         println!(
@@ -1209,26 +1168,86 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
                 .with_transition(LifecycleTransition::Foreground)
                 .with_stop(mode),
         );
-        fs::create_dir_all(&layout.state_dir).map_err(|error| {
-            CommandFailure::diagnostic(format!(
-                "cannot create {}: {error}",
-                layout.state_dir.display()
-            ))
-        })?;
-        persist_lifecycle_decision(&layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
         return emit_lifecycle_decision(lifecycle);
     }
 
-    let admission = resilience_admission_for_issue(&layout, &options, options.issue)?;
+    let (lease, admission) = acquire_foreground_lease(&layout, &options, scope.clone())?;
+    let result = run_foreground_with_lease(&layout, &options, scope, &lease, admission);
+    match release_launch_lease(&layout.repo, &lease) {
+        Ok(()) => result,
+        Err(error) => Err(error),
+    }
+}
+
+fn acquire_foreground_lease(
+    layout: &RunLayout,
+    options: &Options,
+    scope: RepositoryScope,
+) -> Result<(resilience::ConductorLease, resilience::ResilienceAdmission), CommandFailure> {
+    let (lease, admission) = match std::env::var("AUTOSPEC_CONDUCTOR_LEASE_TOKEN") {
+        Ok(token) => {
+            let lease = resilience::adopt_lifecycle(&layout.repo, &token)
+                .map_err(resilience_lease_error)?;
+            let admission = resilience::admit_owned_lifecycle(
+                &layout.repo,
+                &lease,
+                options.issue,
+                options.budget_tokens,
+                options.budget_issues,
+            )
+            .map_err(resilience_lease_error)?;
+            (lease, admission)
+        }
+        Err(std::env::VarError::NotPresent) => match resilience::acquire_lifecycle(
+            &layout.repo,
+            options.issue,
+            options.budget_tokens,
+            options.budget_issues,
+        ) {
+            Ok((admission, lease)) => (lease, admission),
+            Err(resilience::LifecycleLeaseError::Policy(admission)) => {
+                let decision = lifecycle_decision_with_admission(
+                    scope,
+                    LifecycleTransition::Foreground,
+                    None,
+                    &admission,
+                )?;
+                return Err(lifecycle_non_run(&decision));
+            }
+            Err(error) => return Err(resilience_lease_error(error)),
+        },
+        Err(std::env::VarError::NotUnicode(_)) => return Err(resilience_token_mismatch()),
+    };
+    let lifecycle = lifecycle_decision_with_admission(
+        scope,
+        LifecycleTransition::Foreground,
+        None,
+        &admission,
+    )?;
+    if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
+        release_launch_lease(&layout.repo, &lease)?;
+        return Err(lifecycle_non_run(&lifecycle));
+    }
+    Ok((lease, admission))
+}
+
+fn run_foreground_with_lease(
+    layout: &RunLayout,
+    options: &Options,
+    scope: RepositoryScope,
+    lease: &resilience::ConductorLease,
+    admission: resilience::ResilienceAdmission,
+) -> Result<(), CommandFailure> {
     let mut input = lifecycle_input_with_resilience(
         LifecycleInput::from_scope(scope.clone()).with_transition(LifecycleTransition::Foreground),
         &admission,
     )?;
     let preflight = decide_lifecycle(&input);
     if !matches!(preflight, LifecycleDecision::Run { .. }) {
+        persist_lifecycle_decision(layout, &preflight).map_err(CommandFailure::diagnostic)?;
         return Err(lifecycle_non_run(&preflight));
     }
-    let health = load_main_health(&layout, &options).map_err(CommandFailure::diagnostic)?;
+    let health = load_main_health(layout, options).map_err(CommandFailure::diagnostic)?;
     input = input.with_health(lifecycle_health(health.outcome.clone()));
     let mut lifecycle = decide_lifecycle(&input);
     if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
@@ -1238,13 +1257,14 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
                 layout.state_dir.display()
             ))
         })?;
-        persist_main_health(&layout, &health).map_err(CommandFailure::diagnostic)?;
-        persist_lifecycle_decision(&layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
+        persist_main_health(layout, &health).map_err(CommandFailure::diagnostic)?;
+        persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
         return emit_lifecycle_decision(lifecycle);
     }
     if options.issue.is_none() {
-        if let Some(issue) = preview_foreground_issue(&layout)? {
-            let admission = resilience_admission_for_issue(&layout, &options, Some(issue))?;
+        if let Some(issue) = preview_foreground_issue(layout)? {
+            let admission =
+                resilience_admission_for_issue(layout, options, Some(issue), Some(lease))?;
             input = lifecycle_input_with_resilience(
                 LifecycleInput::from_scope(scope)
                     .with_transition(LifecycleTransition::Foreground)
@@ -1258,9 +1278,9 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
         }
     }
     let scope = foreground_scope();
-    let state_path = foreground_state_path(&layout, scope);
+    let state_path = foreground_state_path(layout, scope);
     let state =
-        load_foreground_state(&state_path, &layout, scope).map_err(CommandFailure::diagnostic)?;
+        load_foreground_state(&state_path, layout, scope).map_err(CommandFailure::diagnostic)?;
     if foreground_state_is_retained(&state) {
         println!("{}", state.to_json());
         return Ok(());
@@ -1272,25 +1292,24 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
         )));
     }
 
-    let (state, found_work) =
-        scan_foreground(&layout, state).map_err(CommandFailure::diagnostic)?;
+    let (state, found_work) = scan_foreground(layout, state).map_err(CommandFailure::diagnostic)?;
     if !found_work {
-        persist_foreground_admission(&layout, &health, &lifecycle)?;
+        persist_foreground_admission(layout, &health, &lifecycle)?;
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
         println!("{}", state.to_json());
         return Ok(());
     }
-    let state = review_foreground(&layout, state).map_err(CommandFailure::diagnostic)?;
-    let (state, selected) = select_foreground(&layout, &options, state)?;
+    let state = review_foreground(layout, state).map_err(CommandFailure::diagnostic)?;
+    let (state, selected) = select_foreground(layout, options, lease, state)?;
     let Some(selected) = selected else {
-        persist_foreground_admission(&layout, &health, &lifecycle)?;
+        persist_foreground_admission(layout, &health, &lifecycle)?;
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
         println!("{}", state.to_json());
         return Ok(());
     };
-    persist_foreground_admission(&layout, &health, &lifecycle)?;
+    persist_foreground_admission(layout, &health, &lifecycle)?;
     persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
-    let state = dispatch_foreground(&layout, &options, &state_path, state, selected)?;
+    let state = dispatch_foreground(layout, options, lease, &state_path, state, selected)?;
     println!("{}", state.to_json());
     Ok(())
 }
@@ -1351,6 +1370,7 @@ fn review_foreground(layout: &RunLayout, state: ConductorState) -> Result<Conduc
 fn select_foreground(
     layout: &RunLayout,
     options: &Options,
+    lease: &resilience::ConductorLease,
     state: ConductorState,
 ) -> Result<(ConductorState, Option<ForegroundSelection>), CommandFailure> {
     let ready = queue::ready_plan_for(&layout.repo, 1)
@@ -1370,7 +1390,8 @@ fn select_foreground(
         issue: selected.issue.number,
         serialization_reasons: selected.serialization_reasons.clone(),
     };
-    let admission = resilience_admission_for_issue(layout, options, Some(selection.issue))?;
+    let admission =
+        resilience_admission_for_issue(layout, options, Some(selection.issue), Some(lease))?;
     let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
     })?;
@@ -1396,11 +1417,13 @@ fn select_foreground(
 fn dispatch_foreground(
     layout: &RunLayout,
     options: &Options,
+    lease: &resilience::ConductorLease,
     state_path: &Path,
     state: ConductorState,
     selection: ForegroundSelection,
 ) -> Result<ConductorState, CommandFailure> {
-    let admission = resilience_admission_for_issue(layout, options, Some(selection.issue))?;
+    let admission =
+        resilience_admission_for_issue(layout, options, Some(selection.issue), Some(lease))?;
     let branch = format!("autonomous/issue-{}", selection.issue);
     let worker_id = foreground_worker_id().map_err(CommandFailure::diagnostic)?;
     let claim_evidence =
@@ -1843,16 +1866,17 @@ fn persist_foreground_state(path: &Path, state: &ConductorState) -> Result<(), S
     atomic_write(path, &format!("{}\n", state.to_json()))
 }
 
-fn admit_lifecycle_start(
+fn acquire_lifecycle_start(
     layout: &RunLayout,
     options: &Options,
     transition: LifecycleTransition,
-) -> Result<LifecycleDecision, CommandFailure> {
+) -> Result<(LifecycleDecision, resilience::ConductorLease), CommandFailure> {
     let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
     })?;
+    let stored_stop = persisted_stop_mode(layout).map_err(CommandFailure::diagnostic)?;
     if matches!(transition, LifecycleTransition::Start) {
-        if let Some(mode) = persisted_stop_mode(layout).map_err(CommandFailure::diagnostic)? {
+        if let Some(mode) = stored_stop {
             let decision = decide_lifecycle(
                 &LifecycleInput::from_scope(scope)
                     .with_transition(transition)
@@ -1861,22 +1885,45 @@ fn admit_lifecycle_start(
             return Err(lifecycle_non_run(&decision));
         }
     }
-    let admission = resilience_admission_for_issue(layout, options, options.issue)?;
+    let (admission, lease) = match resilience::acquire_lifecycle(
+        &layout.repo,
+        options.issue,
+        options.budget_tokens,
+        options.budget_issues,
+    ) {
+        Ok(acquired) => acquired,
+        Err(resilience::LifecycleLeaseError::Policy(admission)) => {
+            let decision =
+                lifecycle_decision_with_admission(scope, transition, stored_stop, &admission)?;
+            return Err(lifecycle_non_run(&decision));
+        }
+        Err(error) => return Err(resilience_lease_error(error)),
+    };
+    let decision = lifecycle_decision_with_admission(scope, transition, stored_stop, &admission)?;
+    if !matches!(decision, LifecycleDecision::Run { .. }) {
+        release_launch_lease(&layout.repo, &lease)?;
+        return Err(lifecycle_non_run(&decision));
+    }
+    Ok((decision, lease))
+}
+
+fn lifecycle_decision_with_admission(
+    scope: RepositoryScope,
+    transition: LifecycleTransition,
+    stored_stop: Option<LifecycleStopMode>,
+    admission: &resilience::ResilienceAdmission,
+) -> Result<LifecycleDecision, CommandFailure> {
     let mut input = lifecycle_input_with_resilience(
         LifecycleInput::from_scope(scope).with_transition(transition),
-        &admission,
+        admission,
     )?;
     if !matches!(transition, LifecycleTransition::Start) {
-        if let Some(mode) = persisted_stop_mode(layout).map_err(CommandFailure::diagnostic)? {
+        if let Some(mode) = stored_stop {
             input = input.with_stop(mode);
         }
     }
     let decision = decide_lifecycle(&input);
-    if matches!(decision, LifecycleDecision::Run { .. }) {
-        Ok(decision)
-    } else {
-        Err(lifecycle_non_run(&decision))
-    }
+    Ok(decision)
 }
 
 fn persist_foreground_admission(
@@ -1898,14 +1945,25 @@ fn resilience_admission_for_issue(
     layout: &RunLayout,
     options: &Options,
     issue: Option<u64>,
+    lease: Option<&resilience::ConductorLease>,
 ) -> Result<resilience::ResilienceAdmission, CommandFailure> {
-    resilience::admit_lifecycle(
-        &layout.repo,
-        issue,
-        options.budget_tokens,
-        options.budget_issues,
-    )
-    .map_err(resilience_admission_error)
+    match lease {
+        Some(lease) => resilience::admit_owned_lifecycle(
+            &layout.repo,
+            lease,
+            issue,
+            options.budget_tokens,
+            options.budget_issues,
+        )
+        .map_err(resilience_lease_error),
+        None => resilience::admit_lifecycle(
+            &layout.repo,
+            issue,
+            options.budget_tokens,
+            options.budget_issues,
+        )
+        .map_err(resilience_admission_error),
+    }
 }
 
 fn lifecycle_input_with_resilience(
@@ -1933,6 +1991,18 @@ fn resilience_admission_error(error: resilience::LifecycleAdmissionError) -> Com
     }
 }
 
+fn resilience_lease_error(error: resilience::LifecycleLeaseError) -> CommandFailure {
+    match error {
+        resilience::LifecycleLeaseError::Reject(reason) => resilience_reject(reason),
+        resilience::LifecycleLeaseError::Diagnostic(message) => CommandFailure::diagnostic(message),
+        resilience::LifecycleLeaseError::Held => resilience_lease_held(),
+        resilience::LifecycleLeaseError::TokenMismatch => resilience_token_mismatch(),
+        resilience::LifecycleLeaseError::Policy(_) => CommandFailure::diagnostic(
+            "resilience lease policy must be resolved before lifecycle ownership".to_string(),
+        ),
+    }
+}
+
 fn resilience_reject(reason: &str) -> CommandFailure {
     println!("{{\"decision\":\"reject\",\"reason\":\"{reason}\"}}");
     CommandFailure::status(String::new(), 3)
@@ -1941,6 +2011,18 @@ fn resilience_reject(reason: &str) -> CommandFailure {
 fn resilience_lease_held() -> CommandFailure {
     println!("{{\"decision\":\"park\",\"reason\":\"conductor_lease_held\"}}");
     CommandFailure::status(String::new(), 20)
+}
+
+fn resilience_token_mismatch() -> CommandFailure {
+    println!("{{\"decision\":\"reject\",\"reason\":\"conductor_lease_token_mismatch\"}}");
+    CommandFailure::status(String::new(), 3)
+}
+
+fn release_launch_lease(
+    repo: &str,
+    lease: &resilience::ConductorLease,
+) -> Result<(), CommandFailure> {
+    resilience::release_lifecycle(repo, lease).map_err(resilience_lease_error)
 }
 
 fn persisted_stop_mode(layout: &RunLayout) -> Result<Option<LifecycleStopMode>, String> {
@@ -2179,6 +2261,7 @@ fn spawn_unit(
     state_dir: &Path,
     log_dir: &Path,
     log_override: Option<&str>,
+    lease_token: Option<&str>,
 ) -> Result<UnitRecord, String> {
     let logpath = log_override
         .map(PathBuf::from)
@@ -2192,26 +2275,96 @@ fn spawn_unit(
     let err_log = log
         .try_clone()
         .map_err(|error| format!("cannot clone {}: {error}", logpath.display()))?;
-    let child = Command::new(&command.program)
+    let mut process = Command::new(&command.program);
+    process
         .args(&command.args)
         .current_dir(repo_dir)
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(err_log))
+        .stderr(Stdio::from(err_log));
+    if let Some(token) = lease_token {
+        process.env("AUTOSPEC_CONDUCTOR_LEASE_TOKEN", token);
+    }
+    let mut child = process
         .spawn()
         .map_err(|error| format!("cannot spawn {name} command: {error}"))?;
     let pid = child.id().to_string();
     let pid_file = state_dir.join(format!("{name}.pid"));
     let logpath_file = state_dir.join(format!("{name}.logpath"));
-    fs::write(&pid_file, format!("{pid}\n"))
-        .map_err(|error| format!("cannot write {}: {error}", pid_file.display()))?;
-    fs::write(&logpath_file, format!("{}\n", logpath.display()))
-        .map_err(|error| format!("cannot write {}: {error}", logpath_file.display()))?;
+    if let Err(error) = fs::write(&pid_file, format!("{pid}\n")) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("cannot write {}: {error}", pid_file.display()));
+    }
+    if let Err(error) = fs::write(&logpath_file, format!("{}\n", logpath.display())) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("cannot write {}: {error}", logpath_file.display()));
+    }
     Ok(UnitRecord {
         pid,
         pid_file,
         logpath,
         logpath_file,
     })
+}
+
+fn launch_units(
+    layout: &RunLayout,
+    options: &Options,
+    foreground: &ForegroundCommand,
+    commands: &LaunchCommands,
+    lease: &resilience::ConductorLease,
+) -> Result<(UnitRecord, UnitRecord, UnitRecord), CommandFailure> {
+    let conductor = spawn_unit(
+        "conductor",
+        foreground,
+        &options.repo_dir,
+        &layout.state_dir,
+        &layout.log_dir,
+        log_override_for("conductor", options),
+        Some(lease.token()),
+    )
+    .map_err(CommandFailure::diagnostic)?;
+    if !companions_enabled() {
+        return Ok((
+            conductor,
+            empty_unit("monitor", &layout.state_dir, &layout.log_dir),
+            empty_unit("supervisor", &layout.state_dir, &layout.log_dir),
+        ));
+    }
+
+    let monitor = match spawn_unit(
+        "monitor",
+        &commands.monitor,
+        &options.repo_dir,
+        &layout.state_dir,
+        &layout.log_dir,
+        log_override_for("monitor", options),
+        None,
+    ) {
+        Ok(unit) => unit,
+        Err(error) => {
+            let _ = terminate_pid(&conductor.pid);
+            return Err(CommandFailure::diagnostic(error));
+        }
+    };
+    let supervisor = match spawn_unit(
+        "supervisor",
+        &commands.supervisor,
+        &options.repo_dir,
+        &layout.state_dir,
+        &layout.log_dir,
+        log_override_for("supervisor", options),
+        None,
+    ) {
+        Ok(unit) => unit,
+        Err(error) => {
+            let _ = terminate_pid(&monitor.pid);
+            let _ = terminate_pid(&conductor.pid);
+            return Err(CommandFailure::diagnostic(error));
+        }
+    };
+    Ok((conductor, monitor, supervisor))
 }
 
 fn prepare_start_scope(layout: &RunLayout, options: &Options) -> Result<(), String> {

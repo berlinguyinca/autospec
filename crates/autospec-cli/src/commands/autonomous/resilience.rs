@@ -43,15 +43,28 @@ pub(super) enum LifecycleAdmissionError {
     Diagnostic(String),
 }
 
-#[allow(dead_code)] // Task 3 wires these adapter-private capabilities into lifecycle commands.
-struct ConductorLease {
+pub(super) struct ConductorLease {
     token: String,
     generation: u64,
+}
+
+impl ConductorLease {
+    pub(super) fn token(&self) -> &str {
+        &self.token
+    }
 }
 
 #[allow(dead_code)] // Transaction-only outcomes are consumed by Task 3's lifecycle adapter.
 enum StoreError {
     Reject(ResilienceReject),
+    Diagnostic(String),
+    Held,
+    TokenMismatch,
+    Policy(ResilienceAdmission),
+}
+
+pub(super) enum LifecycleLeaseError {
+    Reject(&'static str),
     Diagnostic(String),
     Held,
     TokenMismatch,
@@ -251,7 +264,6 @@ impl ResilienceStore {
             .map(|(admission, _)| admission)
     }
 
-    #[allow(dead_code)] // Task 3 owns command lifecycle integration.
     fn acquire(
         &self,
         issue: Option<u64>,
@@ -283,7 +295,6 @@ impl ResilienceStore {
         Ok((admission, lease))
     }
 
-    #[allow(dead_code)] // Task 3 owns command lifecycle integration.
     fn adopt(&self, token: &str) -> Result<ConductorLease, StoreError> {
         let _transaction = LeaseTransaction::try_open(&self.lock_path())?;
         let Some((mut state, _)) = self.read_state()? else {
@@ -311,7 +322,6 @@ impl ResilienceStore {
         })
     }
 
-    #[allow(dead_code)] // Task 3 owns command lifecycle integration.
     fn release(&self, lease: &ConductorLease) -> Result<(), StoreError> {
         let _transaction = LeaseTransaction::try_open(&self.lock_path())?;
         let Some((mut state, _)) = self.read_state()? else {
@@ -358,6 +368,24 @@ impl ResilienceStore {
             },
             stored_state,
         ))
+    }
+
+    fn admit_owned(
+        &self,
+        lease: &ConductorLease,
+        issue: Option<u64>,
+        usage_cap: u64,
+        issue_cap: u64,
+    ) -> Result<ResilienceAdmission, StoreError> {
+        let (mut admission, stored_state) = self.read_admission(issue, usage_cap, issue_cap)?;
+        let Some((state, _)) = stored_state else {
+            return Err(StoreError::TokenMismatch);
+        };
+        if !state_matches_lease(&state, lease) {
+            return Err(StoreError::TokenMismatch);
+        }
+        admission.lease = None;
+        Ok(admission)
     }
 
     fn admission_can_claim(&self, admission: &ResilienceAdmission) -> bool {
@@ -445,13 +473,11 @@ fn conductor_lease_decision(
     Some(decide_conductor_lease(input))
 }
 
-#[allow(dead_code)] // Called only by transaction release.
 fn state_matches_lease(state: &ResilienceState, lease: &ConductorLease) -> bool {
     state.lease_token.as_deref() == Some(lease.token.as_str())
         && state.lease_generation == Some(lease.generation)
 }
 
-#[allow(dead_code)] // Called only by transaction acquisition.
 fn lease_token() -> String {
     let sequence = LEASE_TOKEN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!("{}-{}-{sequence}", std::process::id(), now_nanos())
@@ -477,6 +503,71 @@ pub(super) fn admit_lifecycle(
     store
         .admit(issue, usage_cap, issue_cap)
         .map_err(store_error_to_lifecycle_error)
+}
+
+pub(super) fn acquire_lifecycle(
+    repo: &str,
+    issue: Option<u64>,
+    budget_tokens: Option<u64>,
+    budget_issues: Option<u64>,
+) -> Result<(ResilienceAdmission, ConductorLease), LifecycleLeaseError> {
+    let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
+    let usage_cap = lifecycle_budget(
+        budget_tokens,
+        "AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS",
+        DEFAULT_LIFETIME_TOKENS,
+    )
+    .map_err(lifecycle_admission_to_lease_error)?;
+    let issue_cap = lifecycle_budget(
+        budget_issues,
+        "AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES",
+        DEFAULT_LIFETIME_ISSUES,
+    )
+    .map_err(lifecycle_admission_to_lease_error)?;
+    store
+        .acquire(issue, usage_cap, issue_cap)
+        .map_err(store_error_to_lease_error)
+}
+
+pub(super) fn adopt_lifecycle(
+    repo: &str,
+    token: &str,
+) -> Result<ConductorLease, LifecycleLeaseError> {
+    let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
+    store.adopt(token).map_err(store_error_to_lease_error)
+}
+
+pub(super) fn admit_owned_lifecycle(
+    repo: &str,
+    lease: &ConductorLease,
+    issue: Option<u64>,
+    budget_tokens: Option<u64>,
+    budget_issues: Option<u64>,
+) -> Result<ResilienceAdmission, LifecycleLeaseError> {
+    let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
+    let usage_cap = lifecycle_budget(
+        budget_tokens,
+        "AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS",
+        DEFAULT_LIFETIME_TOKENS,
+    )
+    .map_err(lifecycle_admission_to_lease_error)?;
+    let issue_cap = lifecycle_budget(
+        budget_issues,
+        "AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES",
+        DEFAULT_LIFETIME_ISSUES,
+    )
+    .map_err(lifecycle_admission_to_lease_error)?;
+    store
+        .admit_owned(lease, issue, usage_cap, issue_cap)
+        .map_err(store_error_to_lease_error)
+}
+
+pub(super) fn release_lifecycle(
+    repo: &str,
+    lease: &ConductorLease,
+) -> Result<(), LifecycleLeaseError> {
+    let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
+    store.release(lease).map_err(store_error_to_lease_error)
 }
 
 pub(super) fn status(repo: &str) -> Result<Option<ResilienceStatus>, LifecycleAdmissionError> {
@@ -714,6 +805,23 @@ fn store_error_to_lifecycle_error(error: StoreError) -> LifecycleAdmissionError 
         StoreError::Policy(_) => LifecycleAdmissionError::Diagnostic(
             "resilience claim policy is not valid for read-only admission".to_string(),
         ),
+    }
+}
+
+fn lifecycle_admission_to_lease_error(error: LifecycleAdmissionError) -> LifecycleLeaseError {
+    match error {
+        LifecycleAdmissionError::Reject(reason) => LifecycleLeaseError::Reject(reason),
+        LifecycleAdmissionError::Diagnostic(message) => LifecycleLeaseError::Diagnostic(message),
+    }
+}
+
+fn store_error_to_lease_error(error: StoreError) -> LifecycleLeaseError {
+    match error {
+        StoreError::Reject(reject) => LifecycleLeaseError::Reject(reject.reason()),
+        StoreError::Diagnostic(message) => LifecycleLeaseError::Diagnostic(message),
+        StoreError::Held => LifecycleLeaseError::Held,
+        StoreError::TokenMismatch => LifecycleLeaseError::TokenMismatch,
+        StoreError::Policy(admission) => LifecycleLeaseError::Policy(admission),
     }
 }
 

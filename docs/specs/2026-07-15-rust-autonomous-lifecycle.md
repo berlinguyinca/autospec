@@ -38,9 +38,9 @@ The typed policy exposes the 300-second stale lease threshold, the 10,800-second
 adapter for the existing resilience records. For `owner/repo`, it reads every compatible
 record type in this strict order: `owner__repo`, then `owner_repo`, then `owner-repo`.
 The first existing record is authoritative; the adapter does not skip malformed data to
-fall through to a later layout. A successful read from either compatibility layout
-migrates state only to the canonical `owner__repo` layout. All resilience state writes
-are canonical-only; they never write `owner_repo` or `owner-repo`.
+fall through to a later layout. Read-only decisions never migrate compatibility state.
+Acquisition, adoption, and release write only the canonical `owner__repo` record; they
+never write `owner_repo` or `owner-repo`.
 
 Malformed state, failure, or spend records fail closed with a `reject` JSON decision, as
 does a state record bound to a different repository. A rejected admission does not create
@@ -59,9 +59,36 @@ The adapter has no shell resilience authority. It neither invokes
 `scripts/autonomous-resilience.sh` nor starts `sh` or `bash`; it reads typed records and
 emits one JSON decision for its caller.
 
+## Atomic conductor ownership
+
+Before `start` or `restart` creates an operator directory, writes a lifecycle or launch
+record, terminates a unit, or clears a stop flag, it completes read-only repository,
+stored-stop, and lifetime-budget validation and takes a non-blocking exclusive Unix
+transaction at `autonomous/owner__repo/conductor.lease.lock`. The transaction covers
+record read, policy evaluation, and canonical claimed-record replacement. Fresh leases
+remain held; in particular, a held lease parks `restart` before it can signal an existing
+conductor or clear its stop flag. Capacity and failure-cap policy outcomes return their
+existing park or reject decisions without issuing a token or writing a claimed record.
+
+The claimed record carries an opaque lease token and monotonically increasing generation.
+`start` and `restart` pass that token to the native `run-foreground` child only through
+`AUTOSPEC_CONDUCTOR_LEASE_TOKEN` in `Command::env`; the token is never an argument,
+launch JSON field, or log value. If a later child launch fails, Rust terminates any child
+it has already started and releases only its still-matching token.
+
+`run-foreground` gives a persisted stop precedence over token adoption or direct
+acquisition. Otherwise a child atomically adopts its environment token before any
+lifecycle, health, queue, claim, or foreground-state write; a direct invocation acquires
+its own token at that same boundary. A missing, stale, or replaced token exits with the
+`conductor_lease_token_mismatch` rejection before local or GitHub mutation. Once owned,
+the foreground path rechecks admission at final selection and dispatch using its matching
+token, then persists its terminal foreground/lifecycle result before releasing that exact
+token. The local transaction is a shared-filesystem lease, not a remote GitHub lock;
+existing GitHub claim ownership remains the remote mutation arbiter.
+
 ## Errors and exits
 
-The decision endpoint emits JSON. Invalid options or invalid typed values exit with the existing malformed-input class. Ownership, stale, and terminal state are non-executable ownership outcomes. A stop, health, budget, or human gate emits its specific decision rather than falling through to a shell fallback.
+The decision endpoint emits JSON. Invalid options or invalid typed values exit with the existing malformed-input class. Ownership, stale, and terminal state are non-executable ownership outcomes. A stop, health, budget, or human gate emits its specific decision rather than falling through to a shell fallback. Filesystem and transaction failures are diagnostics with exit `2` and no decision JSON; malformed or foreign records and token mismatches are JSON rejects with exit `3`; held leases and parks exit `20`.
 
 ## Testing
 

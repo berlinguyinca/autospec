@@ -3,6 +3,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -609,6 +611,213 @@ fn autonomous_restart_rejects_unsafe_resilience_state_without_clearing_stop() {
         before
     );
     assert!(!fixture.operator_lifecycle_path().exists());
+}
+
+#[test]
+fn fresh_lease_blocks_restart_before_kill_or_stop_clear() {
+    let fixture = ResilienceFixture::new();
+    let mut conductor = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("start dummy conductor");
+    let stop_flag = fixture.operator_stop_flag_path();
+    let state = token_state(
+        "claimed",
+        Some(now_secs()),
+        Some(1),
+        Some("different-host"),
+        Some(now_secs()),
+        Some("fresh-owner-token"),
+        Some(1),
+    );
+    fixture.write_state("owner__repo", state);
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.pid"),
+        &format!("{}\n", conductor.id()),
+    );
+    write_file(&stop_flag, "graceful\noperator@test\n");
+    let stop_before = fs::read_to_string(&stop_flag).expect("read stop before restart");
+
+    let output = fixture.run_autonomous(&["restart", "--repo", "owner/repo"]);
+    let conductor_survived = conductor
+        .try_wait()
+        .expect("inspect dummy conductor")
+        .is_none();
+    let _ = conductor.kill();
+    let _ = conductor.wait();
+
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"park\",\"reason\":\"conductor_lease_held\"}\n"
+    );
+    assert!(
+        conductor_survived,
+        "restart must not signal before it owns a lease"
+    );
+    assert_eq!(
+        fs::read_to_string(&stop_flag).expect("read stop after restart"),
+        stop_before,
+        "restart must not clear a stop flag while the lease is held"
+    );
+    assert!(!fixture.operator_lifecycle_path().exists());
+}
+
+#[test]
+fn autonomous_start_passes_lease_token_only_through_the_child_environment() {
+    let fixture = ResilienceFixture::new();
+    let bin = fixture.root.join("bin");
+    let token_capture = fixture.root.join("child-token");
+    let log_root = fixture.root.join("logs");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+printf '%s' "${AUTOSPEC_CONDUCTOR_LEASE_TOKEN:-}" > "$AUTOSPEC_TEST_CHILD_TOKEN"
+exit 1
+"#,
+    );
+
+    let output = fixture
+        .command()
+        .args(["start", "--repo", "owner/repo", "--repo-dir"])
+        .arg(&fixture.repo_dir)
+        .env("AUTOSPEC_HOST", "autospec-test-host")
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_root)
+        .env("AUTOSPEC_TEST_CHILD_TOKEN", &token_capture)
+        .env("PATH", path_with(&bin))
+        .output()
+        .expect("start native foreground child");
+
+    for _ in 0..80 {
+        if token_capture.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let token = fs::read_to_string(&token_capture).expect("capture child lease token");
+    let launch = fs::read_to_string(fixture.operator_root.join("owner_repo/launch.json"))
+        .expect("read launch metadata");
+    let conductor_log = fs::read_to_string(
+        log_root
+            .join("owner_repo")
+            .join("autospec-autonomous-conductor.log"),
+    )
+    .expect("read foreground log");
+
+    assert!(output.status.success());
+    assert!(
+        !token.is_empty(),
+        "native foreground child must receive its lease token"
+    );
+    assert!(
+        !launch.contains(&token),
+        "lease token must not appear in launch metadata"
+    );
+    assert!(
+        !conductor_log.contains(&token),
+        "lease token must not appear in foreground logs"
+    );
+}
+
+#[test]
+fn malformed_restart_state_rejects_before_process_or_stop_mutation() {
+    let fixture = ResilienceFixture::new();
+    let mut conductor = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("start dummy conductor");
+    let stop_flag = fixture.operator_stop_flag_path();
+    fixture.write_state("owner__repo", "{not-json}");
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.pid"),
+        &format!("{}\n", conductor.id()),
+    );
+    write_file(&stop_flag, "graceful\noperator@test\n");
+    let stop_before = fs::read_to_string(&stop_flag).expect("read stop before restart");
+
+    let output = fixture.run_autonomous(&["restart", "--repo", "owner/repo"]);
+    let conductor_survived = conductor
+        .try_wait()
+        .expect("inspect dummy conductor")
+        .is_none();
+    let _ = conductor.kill();
+    let _ = conductor.wait();
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"reject\",\"reason\":\"malformed_state\"}\n"
+    );
+    assert!(
+        conductor_survived,
+        "restart must reject malformed resilience state before signaling units"
+    );
+    assert_eq!(
+        fs::read_to_string(&stop_flag).expect("read stop after restart"),
+        stop_before,
+        "restart must not clear a stop flag after a malformed-state rejection"
+    );
+    assert!(!fixture.operator_lifecycle_path().exists());
+}
+
+#[test]
+fn delayed_child_with_replaced_token_exits_before_foreground_mutation() {
+    let fixture = ResilienceFixture::new();
+    let bin = fixture.root.join("bin");
+    let github_calls = fixture.root.join("github-calls");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+printf 'called\n' > "$AUTOSPEC_TEST_GITHUB_CALLS"
+exit 1
+"#,
+    );
+    let replacement = token_state(
+        "claimed",
+        Some(now_secs()),
+        Some(1),
+        Some("autospec-test-host"),
+        Some(now_secs()),
+        Some("replacement-owner-token"),
+        Some(2),
+    );
+    fixture.write_state("owner__repo", &replacement);
+
+    let output = fixture
+        .command()
+        .args(["run-foreground", "--repo", "owner/repo", "--repo-dir"])
+        .arg(&fixture.repo_dir)
+        .env("AUTOSPEC_HOST", "autospec-test-host")
+        .env("AUTOSPEC_CONDUCTOR_LEASE_TOKEN", "delayed-child-token")
+        .env("AUTOSPEC_TEST_GITHUB_CALLS", &github_calls)
+        .env("PATH", path_with(&bin))
+        .output()
+        .expect("run delayed foreground child");
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"reject\",\"reason\":\"conductor_lease_token_mismatch\"}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.canonical_state_path()).expect("read replacement lease"),
+        replacement
+    );
+    assert!(
+        !fixture.operator_lifecycle_path().exists(),
+        "a stale child token must not write lifecycle state"
+    );
+    assert!(
+        !fixture.foreground_state_path().exists(),
+        "a stale child token must not write foreground state"
+    );
+    assert!(
+        !github_calls.exists(),
+        "a stale child token must not invoke the GitHub adapter"
+    );
 }
 
 #[test]
