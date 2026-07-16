@@ -7,6 +7,16 @@ use autospec_core::autonomous::waterfall::{sha256_hex, SealedEvidence, TierRecei
 
 use super::WaterfallStoreError;
 
+mod tier2;
+
+pub(super) fn verify_tier2(
+    root: &Path,
+    pass_id: u64,
+    receipt: &TierReceipt,
+) -> Result<(), WaterfallStoreError> {
+    tier2::verify_tier2(root, pass_id, receipt)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(in crate::commands::autonomous) enum Tier1EvidenceArtifact {
     ReadyPage,
@@ -19,10 +29,22 @@ pub(in crate::commands::autonomous) enum Tier15EvidenceArtifact {
     ReadFailure,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::commands::autonomous) enum Tier2EvidenceArtifact {
+    Policy,
+    Collector,
+    Generated,
+    Dedup,
+    Verification,
+    RoiRank,
+    Failure,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) enum WaterfallEvidenceArtifact {
     Tier1(Tier1EvidenceArtifact),
     Tier15(Tier15EvidenceArtifact),
+    Tier2(Tier2EvidenceArtifact),
 }
 
 impl WaterfallEvidenceArtifact {
@@ -30,6 +52,7 @@ impl WaterfallEvidenceArtifact {
         match self {
             Self::Tier1(_) => NoWorkTier::Tier1,
             Self::Tier15(_) => NoWorkTier::Tier1_5,
+            Self::Tier2(_) => NoWorkTier::Tier2,
         }
     }
 
@@ -39,6 +62,13 @@ impl WaterfallEvidenceArtifact {
             Self::Tier1(Tier1EvidenceArtifact::ReadFailure)
             | Self::Tier15(Tier15EvidenceArtifact::ReadFailure) => "read-failure.json",
             Self::Tier15(Tier15EvidenceArtifact::Observation) => "observation.json",
+            Self::Tier2(Tier2EvidenceArtifact::Policy) => "policy.json",
+            Self::Tier2(Tier2EvidenceArtifact::Collector) => "collector.json",
+            Self::Tier2(Tier2EvidenceArtifact::Generated) => "generated.json",
+            Self::Tier2(Tier2EvidenceArtifact::Dedup) => "dedup.json",
+            Self::Tier2(Tier2EvidenceArtifact::Verification) => "verification.json",
+            Self::Tier2(Tier2EvidenceArtifact::RoiRank) => "roi-rank.json",
+            Self::Tier2(Tier2EvidenceArtifact::Failure) => "failure.json",
         }
     }
 

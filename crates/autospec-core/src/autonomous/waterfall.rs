@@ -172,8 +172,20 @@ impl TierReceipt {
         &self.status
     }
 
+    pub fn producer_version(&self) -> &str {
+        &self.producer_version
+    }
+
+    pub fn funnel(&self) -> &FunnelCounts {
+        &self.funnel
+    }
+
     pub fn digest(&self) -> &str {
         &self.digest
+    }
+
+    pub fn evidence(&self) -> &[SealedEvidence] {
+        &self.evidence
     }
 
     pub fn reference(&self) -> String {

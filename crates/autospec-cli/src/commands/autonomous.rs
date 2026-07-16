@@ -33,6 +33,17 @@ mod tier15;
 // Task 2 persists sealed observations but has no foreground caller by design.
 #[allow(dead_code)]
 mod tier15_receipts;
+// Task 3 adds a private Tier 2 persistence seam without foreground wiring.
+#[allow(dead_code)]
+mod tier2;
+#[allow(dead_code)]
+mod tier2_receipts;
+#[cfg(test)]
+mod tier2_receipts_failure_prefix_tests;
+#[cfg(test)]
+mod tier2_receipts_recovery_tests;
+#[cfg(test)]
+mod tier2_receipts_tests;
 mod waterfall;
 mod waterfall_coordinator;
 #[cfg(test)]

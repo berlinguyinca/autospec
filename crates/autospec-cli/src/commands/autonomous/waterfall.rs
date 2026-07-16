@@ -11,7 +11,7 @@ use autospec_core::autonomous::waterfall::{
 mod evidence;
 
 use evidence::WaterfallEvidenceArtifact;
-pub(super) use evidence::{Tier15EvidenceArtifact, Tier1EvidenceArtifact};
+pub(super) use evidence::{Tier15EvidenceArtifact, Tier1EvidenceArtifact, Tier2EvidenceArtifact};
 
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -142,6 +142,28 @@ impl WaterfallStore {
         )
     }
 
+    pub(super) fn persist_tier2_evidence(
+        &self,
+        pass_id: u64,
+        artifact: Tier2EvidenceArtifact,
+        contents: &str,
+    ) -> Result<SealedEvidence, WaterfallStoreError> {
+        evidence::persist(
+            &self.root,
+            pass_id,
+            WaterfallEvidenceArtifact::Tier2(artifact),
+            contents,
+        )
+    }
+
+    pub(super) fn verify_tier2_evidence(
+        &self,
+        pass_id: u64,
+        receipt: &TierReceipt,
+    ) -> Result<(), WaterfallStoreError> {
+        evidence::verify_tier2(&self.root, pass_id, receipt)
+    }
+
     pub(super) fn load_receipt(
         &self,
         pass_id: u64,
@@ -213,14 +235,20 @@ impl WaterfallStore {
                     completed.reference
                 )));
             }
-            if matches!(completed.tier, NoWorkTier::Tier1 | NoWorkTier::Tier1_5) {
-                evidence::verify(
-                    &self.root,
-                    state.next_pass_id(),
-                    evidence::artifact_for_receipt(&receipt)?,
-                    &receipt,
-                )
-                .map_err(state_receipt_error)?;
+            match completed.tier {
+                NoWorkTier::Tier1 | NoWorkTier::Tier1_5 => {
+                    evidence::verify(
+                        &self.root,
+                        state.next_pass_id(),
+                        evidence::artifact_for_receipt(&receipt)?,
+                        &receipt,
+                    )
+                    .map_err(state_receipt_error)?;
+                }
+                NoWorkTier::Tier2 => self
+                    .verify_tier2_evidence(state.next_pass_id(), &receipt)
+                    .map_err(state_receipt_error)?,
+                NoWorkTier::Tier3 | NoWorkTier::Tier4 => {}
             }
         }
         Ok(())
