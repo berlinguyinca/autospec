@@ -1,8 +1,13 @@
 use std::collections::BTreeSet;
 
+mod tier4;
+
+pub use tier4::{Tier4Config, Tier4SourceDescriptor};
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AutonomousConfig {
     pub main_health: MainHealthConfig,
+    pub tier4: Tier4Config,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -161,6 +166,7 @@ impl AutonomousConfig {
             }
         }
 
+        config.tier4 = tier4::parse(source)?;
         Ok(config)
     }
 }

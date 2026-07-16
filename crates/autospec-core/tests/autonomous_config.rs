@@ -41,6 +41,8 @@ another_policy:
 
     assert_eq!(absent, AutonomousConfig::default());
     assert_eq!(unrelated, AutonomousConfig::default());
+    assert!(absent.tier4.sources.is_empty());
+    assert!(unrelated.tier4.sources.is_empty());
 }
 
 #[test]
