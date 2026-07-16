@@ -3,12 +3,13 @@ use std::collections::BTreeSet;
 use crate::autonomous::no_work::IDEATION_CANDIDATE_LIMIT;
 use crate::autonomous::waterfall::FunnelCounts;
 
-use super::{evidence, DISABLED_REASON};
+use super::{evidence, partial::Tier2PartialEvidence, DISABLED_REASON};
 
 pub use crate::explore::specialists::StrictCollectorEvidence;
 
 pub const TIER2_SCHEMA: u64 = 1;
 pub const TIER2_RANK_LIMIT: u64 = IDEATION_CANDIDATE_LIMIT;
+pub const TIER2_NORMALIZATION_VERSION: u64 = 1;
 pub(super) const FIELD_SCALAR_LIMIT: usize = 200;
 pub(super) const REASON_SCALAR_LIMIT: usize = 240;
 
@@ -231,10 +232,11 @@ impl Tier2FailureCode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tier2Failure {
-    pub stage: Tier2Stage,
-    pub code: Tier2FailureCode,
-    pub detail: String,
+    pub(super) stage: Tier2Stage,
+    pub(super) code: Tier2FailureCode,
+    pub(super) detail: String,
     partial: Box<Tier2PartialEvidence>,
+    sealed: bool,
 }
 
 impl Tier2Failure {
@@ -254,6 +256,18 @@ impl Tier2Failure {
         format!("tier2_{}_{}", self.stage.as_str(), self.code.as_str())
     }
 
+    pub fn stage(&self) -> Tier2Stage {
+        self.stage
+    }
+
+    pub fn code(&self) -> Tier2FailureCode {
+        self.code
+    }
+
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
     pub fn partial_evidence(&self) -> &Tier2PartialEvidence {
         &self.partial
     }
@@ -267,9 +281,8 @@ impl Tier2Failure {
             stage,
             code,
             detail: detail.into(),
-            partial: Box::new(Tier2PartialEvidence::None {
-                funnel: zero_funnel(),
-            }),
+            partial: Box::new(Tier2PartialEvidence::none()),
+            sealed: false,
         }
     }
 
@@ -277,46 +290,14 @@ impl Tier2Failure {
         self.partial = Box::new(partial);
         self
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Tier2PartialEvidence {
-    None {
-        funnel: FunnelCounts,
-    },
-    Collector {
-        collector: StrictCollectorEvidence,
-        funnel: FunnelCounts,
-    },
-    Generated {
-        collector: StrictCollectorEvidence,
-        generated: Tier2GeneratedProposals,
-        funnel: FunnelCounts,
-    },
-    Deduplicated {
-        collector: StrictCollectorEvidence,
-        generated: Tier2GeneratedProposals,
-        deduplication: Tier2Deduplication,
-        funnel: FunnelCounts,
-    },
-    Verified {
-        collector: StrictCollectorEvidence,
-        generated: Tier2GeneratedProposals,
-        deduplication: Tier2Deduplication,
-        verification: Tier2VerifierVerdicts,
-        funnel: FunnelCounts,
-    },
-}
+    pub(super) fn seal(mut self) -> Self {
+        self.sealed = true;
+        self
+    }
 
-impl Tier2PartialEvidence {
-    pub fn funnel(&self) -> &FunnelCounts {
-        match self {
-            Self::None { funnel }
-            | Self::Collector { funnel, .. }
-            | Self::Generated { funnel, .. }
-            | Self::Deduplicated { funnel, .. }
-            | Self::Verified { funnel, .. } => funnel,
-        }
+    pub(super) fn is_sealed(&self) -> bool {
+        self.sealed
     }
 }
 
@@ -349,10 +330,14 @@ impl Tier2Evaluation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tier2NotRun {
-    pub reason: String,
+    pub(super) reason: String,
 }
 
 impl Tier2NotRun {
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
     pub(super) fn disabled() -> Self {
         Self {
             reason: DISABLED_REASON.to_string(),
@@ -362,13 +347,13 @@ impl Tier2NotRun {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tier2Observation {
-    pub collector: StrictCollectorEvidence,
-    pub generated: Tier2GeneratedProposals,
-    pub deduplication: Tier2Deduplication,
-    pub verification: Tier2VerifierVerdicts,
-    pub roi: Vec<Tier2RoiDecision>,
-    pub ranked: Vec<Tier2RankedProposal>,
-    pub funnel: FunnelCounts,
+    pub(super) collector: StrictCollectorEvidence,
+    pub(super) generated: Tier2GeneratedProposals,
+    pub(super) deduplication: Tier2Deduplication,
+    pub(super) verification: Tier2VerifierVerdicts,
+    pub(super) roi: Vec<Tier2RoiDecision>,
+    pub(super) ranked: Vec<Tier2RankedProposal>,
+    pub(super) funnel: FunnelCounts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,9 +361,18 @@ pub struct Tier2RoiDecision {
     pub stable_key: String,
     pub source: Tier2Source,
     pub permitted: bool,
+    pub proposal: Tier2Proposal,
+    pub score_numerator: u64,
+    pub complexity_units: u64,
+    pub score_quotient: u64,
+    pub severity_rank: u64,
 }
 
 impl Tier2Observation {
+    pub fn funnel(&self) -> &FunnelCounts {
+        &self.funnel
+    }
+
     pub fn evidence_json(&self) -> String {
         Tier2Evaluation::Complete(self.clone()).evidence_json()
     }
@@ -418,8 +412,4 @@ pub struct Tier2RankedProposal {
 
 pub(super) fn bounded_text(value: &str, limit: usize) -> bool {
     !value.trim().is_empty() && value.chars().count() <= limit
-}
-
-fn zero_funnel() -> FunnelCounts {
-    FunnelCounts::new(0, 0, 0, 0, 0).expect("zero funnel counts are valid")
 }

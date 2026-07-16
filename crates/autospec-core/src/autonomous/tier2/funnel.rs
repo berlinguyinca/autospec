@@ -7,10 +7,11 @@ use super::funnel_validation::{
 use super::model::{
     bounded_text, StrictCollectorEvidence, Tier2CandidateScore, Tier2Deduplication,
     Tier2DeduplicationGroup, Tier2Evaluation, Tier2Failure, Tier2FailureCode,
-    Tier2GeneratedProposals, Tier2Input, Tier2Observation, Tier2PartialEvidence, Tier2Proposal,
-    Tier2RankedProposal, Tier2RoiDecision, Tier2Stage, Tier2StageResult, Tier2Verification,
-    Tier2VerifierVerdicts, FIELD_SCALAR_LIMIT, REASON_SCALAR_LIMIT, TIER2_RANK_LIMIT,
+    Tier2GeneratedProposals, Tier2Input, Tier2Observation, Tier2Proposal, Tier2RankedProposal,
+    Tier2RoiDecision, Tier2Stage, Tier2StageResult, Tier2Verification, Tier2VerifierVerdicts,
+    FIELD_SCALAR_LIMIT, REASON_SCALAR_LIMIT, TIER2_RANK_LIMIT,
 };
+use super::partial::Tier2PartialEvidence;
 use crate::autonomous::waterfall::FunnelCounts;
 
 pub fn evaluate_tier2(input: Tier2Input) -> Result<Tier2Evaluation, Tier2Failure> {
@@ -23,7 +24,9 @@ pub fn evaluate_tier2(input: Tier2Input) -> Result<Tier2Evaluation, Tier2Failure
             generator,
             verifier,
             roi_policy,
-        } => evaluate_enabled(collector, generator, verifier, roi_policy),
+        } => {
+            evaluate_enabled(collector, generator, verifier, roi_policy).map_err(Tier2Failure::seal)
+        }
     }
 }
 
@@ -104,7 +107,7 @@ fn complete<T>(
 ) -> Result<T, Tier2Failure> {
     match result {
         Tier2StageResult::Complete(value) => Ok(value),
-        Tier2StageResult::Failed(error) => Err(checked_failure(error).with_partial(partial)),
+        Tier2StageResult::Failed(error) => Err(checked_failure(error, stage).with_partial(partial)),
         Tier2StageResult::Missing => Err(failure(
             stage,
             Tier2FailureCode::MissingStageResult,
@@ -225,6 +228,11 @@ fn rank(
             stable_key: winner.proposal.stable_key.clone(),
             source: winner.proposal.source,
             permitted: policy.permits(winner.proposal.source),
+            proposal: winner.proposal.clone(),
+            score_numerator: u64::from(winner.proposal.confidence_millis),
+            complexity_units: winner.proposal.complexity.units(),
+            score_quotient: winner.quotient,
+            severity_rank: winner.proposal.severity.rank(),
         })
         .collect::<Vec<_>>();
     let mut approved = survivors
@@ -296,29 +304,20 @@ fn zero_funnel() -> FunnelCounts {
     FunnelCounts::new(0, 0, 0, 0, 0).expect("zero funnel counts are valid")
 }
 fn empty_partial() -> Tier2PartialEvidence {
-    Tier2PartialEvidence::None {
-        funnel: zero_funnel(),
-    }
+    Tier2PartialEvidence::none()
 }
 fn collector_partial(
     collector: &StrictCollectorEvidence,
     funnel: FunnelCounts,
 ) -> Tier2PartialEvidence {
-    Tier2PartialEvidence::Collector {
-        collector: collector.clone(),
-        funnel,
-    }
+    Tier2PartialEvidence::collector(collector.clone(), funnel)
 }
 fn generated_partial(
     collector: &StrictCollectorEvidence,
     generated: &Tier2GeneratedProposals,
     funnel: FunnelCounts,
 ) -> Tier2PartialEvidence {
-    Tier2PartialEvidence::Generated {
-        collector: collector.clone(),
-        generated: generated.clone(),
-        funnel,
-    }
+    Tier2PartialEvidence::generated(collector.clone(), generated.clone(), funnel)
 }
 fn dedup_partial(
     collector: &StrictCollectorEvidence,
@@ -326,12 +325,12 @@ fn dedup_partial(
     deduplication: &Tier2Deduplication,
     funnel: FunnelCounts,
 ) -> Tier2PartialEvidence {
-    Tier2PartialEvidence::Deduplicated {
-        collector: collector.clone(),
-        generated: generated.clone(),
-        deduplication: deduplication.clone(),
+    Tier2PartialEvidence::deduplicated(
+        collector.clone(),
+        generated.clone(),
+        deduplication.clone(),
         funnel,
-    }
+    )
 }
 fn verified_partial(
     collector: &StrictCollectorEvidence,
@@ -340,13 +339,13 @@ fn verified_partial(
     verification: &Tier2VerifierVerdicts,
     funnel: FunnelCounts,
 ) -> Tier2PartialEvidence {
-    Tier2PartialEvidence::Verified {
-        collector: collector.clone(),
-        generated: generated.clone(),
-        deduplication: deduplication.clone(),
-        verification: verification.clone(),
+    Tier2PartialEvidence::verified(
+        collector.clone(),
+        generated.clone(),
+        deduplication.clone(),
+        verification.clone(),
         funnel,
-    }
+    )
 }
 fn winner_order(left: &Tier2Proposal, right: &Tier2Proposal) -> std::cmp::Ordering {
     score(right)
@@ -372,12 +371,13 @@ fn invalid_ranking(detail: impl Into<String>) -> Tier2Failure {
 fn failure(stage: Tier2Stage, code: Tier2FailureCode, detail: impl Into<String>) -> Tier2Failure {
     Tier2Failure::initial(stage, code, detail)
 }
-fn checked_failure(error: Tier2Failure) -> Tier2Failure {
-    if bounded_text(&error.detail, REASON_SCALAR_LIMIT) {
-        error
+fn checked_failure(error: Tier2Failure, stage: Tier2Stage) -> Tier2Failure {
+    let detail = if bounded_text(error.detail(), REASON_SCALAR_LIMIT) {
+        error.detail().to_string()
     } else {
-        failure(error.stage, error.code, "stage failure detail is invalid")
-    }
+        "stage failure detail is invalid".to_string()
+    };
+    failure(stage, error.code(), detail)
 }
 #[derive(Debug, Clone)]
 struct Winner {

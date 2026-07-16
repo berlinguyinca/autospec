@@ -3,10 +3,9 @@ use std::fs;
 use std::path::Path;
 
 use autospec_core::autonomous::tier2::{
-    evaluate_tier2, render_tier2_failure_json, render_tier2_generated_json, Tier2Complexity,
-    Tier2Evaluation, Tier2Failure, Tier2FailureCode, Tier2GeneratedProposals, Tier2Input,
-    Tier2PartialEvidence, Tier2Proposal, Tier2RoiPolicy, Tier2Severity, Tier2Source, Tier2Stage,
-    Tier2StageResult, Tier2Verification, Tier2VerifierVerdicts, DISABLED_REASON,
+    evaluate_tier2, Tier2Complexity, Tier2Evaluation, Tier2Failure, Tier2FailureCode,
+    Tier2GeneratedProposals, Tier2Input, Tier2Proposal, Tier2RoiPolicy, Tier2Severity, Tier2Source,
+    Tier2Stage, Tier2StageResult, Tier2Verification, Tier2VerifierVerdicts, DISABLED_REASON,
 };
 use autospec_core::explore::specialists::{
     DetectedDomain, FileLineEvidence, StrictCollectorEvidence,
@@ -115,9 +114,9 @@ fn stage_validation_returns_failures_before_empty_generator_results() {
     });
 
     let returned = result.expect_err("failed verifier must not become a dry result");
-    assert_eq!(returned.stage, expected.stage);
-    assert_eq!(returned.code, expected.code);
-    assert_eq!(returned.detail, expected.detail);
+    assert_eq!(returned.stage(), expected.stage());
+    assert_eq!(returned.code(), expected.code());
+    assert_eq!(returned.detail(), expected.detail());
     let missing = evaluate_tier2(Tier2Input::Enabled {
         collector: Tier2StageResult::Missing,
         generator: Tier2StageResult::Complete(generated(Vec::new())),
@@ -126,7 +125,7 @@ fn stage_validation_returns_failures_before_empty_generator_results() {
     })
     .expect_err("missing collector must fail closed");
     assert_eq!(
-        (missing.stage, missing.code),
+        (missing.stage(), missing.code()),
         (Tier2Stage::Collector, Tier2FailureCode::MissingStageResult)
     );
 }
@@ -143,7 +142,7 @@ fn collector_and_proposal_validation_fail_closed() {
             roi_policy: Tier2RoiPolicy::v1(),
         })
         .expect_err("wrong collector schema must fail")
-        .stage,
+        .stage(),
         Tier2Stage::Collector
     );
 
@@ -152,7 +151,7 @@ fn collector_and_proposal_validation_fail_closed() {
     let error = evaluate_tier2(enabled(vec![invalid], vec![survives("outside")]))
         .expect_err("proposal evidence must come from the collector");
     assert_eq!(
-        (error.stage, error.code),
+        (error.stage(), error.code()),
         (Tier2Stage::Generator, Tier2FailureCode::InvalidProposal)
     );
 }
@@ -163,11 +162,11 @@ fn empty_complete_generator_is_a_valid_zero_count_observation() {
         evaluate_tier2(enabled(Vec::new(), Vec::new())).expect("empty complete stages");
     let observation = evaluation.observation().expect("complete observation");
 
-    assert_eq!(observation.funnel.observed, 0);
-    assert_eq!(observation.funnel.deduplicated, 0);
-    assert_eq!(observation.funnel.verified, 0);
-    assert_eq!(observation.funnel.roi_approved, 0);
-    assert_eq!(observation.funnel.ranked, 0);
+    assert_eq!(observation.funnel().observed, 0);
+    assert_eq!(observation.funnel().deduplicated, 0);
+    assert_eq!(observation.funnel().verified, 0);
+    assert_eq!(observation.funnel().roi_approved, 0);
+    assert_eq!(observation.funnel().ranked, 0);
 }
 
 #[test]
@@ -186,7 +185,7 @@ fn deduplication_selects_the_stable_best_winner_and_rejects_conflicts() {
     let group = &evaluation
         .observation()
         .expect("observation")
-        .deduplication
+        .deduplication()
         .groups[0];
     assert_eq!(group.winner_key, "alpha");
     assert_eq!(group.candidate_keys, vec!["alpha", "zeta"]);
@@ -196,7 +195,7 @@ fn deduplication_selects_the_stable_best_winner_and_rejects_conflicts() {
     let error = evaluate_tier2(enabled(vec![first, second], vec![survives("alpha")]))
         .expect_err("different consumer makes a duplicate group conflicting");
     assert_eq!(
-        (error.stage, error.code),
+        (error.stage(), error.code()),
         (
             Tier2Stage::Deduplicator,
             Tier2FailureCode::DuplicateConflict
@@ -209,7 +208,7 @@ fn verifier_requires_one_valid_verdict_for_each_winner() {
     let missing = evaluate_tier2(enabled(vec![proposal("one")], Vec::new()))
         .expect_err("missing verdict must fail");
     assert_eq!(
-        (missing.stage, missing.code),
+        (missing.stage(), missing.code()),
         (
             Tier2Stage::Verifier,
             Tier2FailureCode::InvalidVerdictCoverage
@@ -222,7 +221,7 @@ fn verifier_requires_one_valid_verdict_for_each_winner() {
     ))
     .expect_err("duplicate verdict must fail");
     assert_eq!(
-        (duplicate.stage, duplicate.code),
+        (duplicate.stage(), duplicate.code()),
         (
             Tier2Stage::Verifier,
             Tier2FailureCode::InvalidVerdictCoverage
@@ -234,7 +233,10 @@ fn verifier_requires_one_valid_verdict_for_each_winner() {
 fn refutation_roi_and_rank_cap_produce_monotonic_distinct_outcomes() {
     let refuted = evaluate_tier2(enabled(vec![proposal("one")], vec![refutes("one")]))
         .expect("complete refutation observation");
-    assert_eq!(refuted.observation().expect("observation").funnel.ranked, 0);
+    assert_eq!(
+        refuted.observation().expect("observation").funnel().ranked,
+        0
+    );
 
     let mut candidates = (0..6)
         .map(|index| {
@@ -253,16 +255,16 @@ fn refutation_roi_and_rank_cap_produce_monotonic_distinct_outcomes() {
     let cap_observation = cap.observation().expect("observation");
     assert_eq!(
         (
-            cap_observation.funnel.roi_approved,
-            cap_observation.funnel.ranked
+            cap_observation.funnel().roi_approved,
+            cap_observation.funnel().ranked
         ),
         (6, 5)
     );
     assert_eq!(
-        cap_observation.ranked[0].proposal.severity,
+        cap_observation.ranked()[0].proposal.severity,
         Tier2Severity::High
     );
-    assert_eq!(cap_observation.ranked[0].rank, 1);
+    assert_eq!(cap_observation.ranked()[0].rank, 1);
 
     let roi_filtered = evaluate_tier2(Tier2Input::Enabled {
         collector: Tier2StageResult::Complete(collector()),
@@ -275,7 +277,7 @@ fn refutation_roi_and_rank_cap_produce_monotonic_distinct_outcomes() {
         roi_policy: Tier2RoiPolicy::new(BTreeSet::new()),
     })
     .expect("empty injected permission set is a valid ROI policy");
-    let funnel = &roi_filtered.observation().expect("observation").funnel;
+    let funnel = roi_filtered.observation().expect("observation").funnel();
     assert_eq!(
         (funnel.verified, funnel.roi_approved, funnel.ranked),
         (6, 0, 0)
@@ -295,22 +297,23 @@ fn failed_stages_preserve_only_validated_predecessor_evidence() {
     })
     .expect_err("generator failure must retain the validated collector only");
 
-    match error.partial_evidence() {
-        Tier2PartialEvidence::Collector { collector, funnel } => {
-            assert_eq!(collector.collector_version, "strict-local-v1");
-            assert_eq!(funnel.observed, 0);
-        }
-        other => panic!("unexpected partial evidence: {other:?}"),
-    }
+    assert_eq!(error.partial_evidence().funnel().observed, 0);
     let digest = "a".repeat(64);
-    let failure_json = render_tier2_failure_json(&error, Some(&digest))
+    let documents = error.documents().expect("evaluated failure is sealed");
+    let collector_json = documents
+        .collector_json()
+        .expect("validated collector document");
+    assert!(collector_json.contains("strict-local-v1"));
+    let failure_json = documents
+        .failure_json(Some(&digest))
         .expect("generator failure has a predecessor digest");
+    let failure_json = failure_json.expect("failure document");
     assert!(failure_json.contains("\"stage\":\"generator\""));
-    assert!(render_tier2_failure_json(&error, None).is_err());
-
-    let generated_json = render_tier2_generated_json(&generated(vec![proposal("one")]), &digest)
-        .expect("dependent generated document accepts a sealed predecessor digest");
-    assert!(generated_json.contains(&digest));
+    assert!(documents.failure_json(None).is_err());
+    assert!(documents
+        .generated_json(&digest)
+        .expect("valid digest")
+        .is_none());
 }
 
 #[test]
@@ -373,6 +376,7 @@ fn tier2_source_has_no_io_legacy_or_mutation_authority() {
         root.join("src/autonomous/tier2/funnel.rs"),
         root.join("src/autonomous/tier2/funnel_validation.rs"),
         root.join("src/autonomous/tier2/evidence.rs"),
+        root.join("src/autonomous/tier2/partial.rs"),
     ] {
         let contents = fs::read_to_string(&source).expect("read pure Tier 2 source");
         let git_child = ["\"", "g", "h "].concat();
