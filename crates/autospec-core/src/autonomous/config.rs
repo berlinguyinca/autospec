@@ -24,6 +24,7 @@ impl AutonomousConfig {
         let mut saw_branch = false;
         let mut saw_ignore_checks = false;
         let mut list_open = false;
+        let mut ignoring_unrelated_block = false;
 
         for (index, raw_line) in source.lines().enumerate() {
             let line_number = index + 1;
@@ -45,6 +46,12 @@ impl AutonomousConfig {
 
             let indent = line.len() - line.trim_start().len();
             let trimmed = line.trim_start();
+            if indent != 0 && !ignoring_unrelated_block && declares_main_health(trimmed) {
+                return Err(error(
+                    line_number,
+                    "main_health must be a top-level mapping",
+                ));
+            }
             if indent == 0 {
                 in_main_health = false;
                 list_open = false;
@@ -53,9 +60,11 @@ impl AutonomousConfig {
                     if trimmed == "main_health" {
                         return Err(error(line_number, "main_health must be a mapping"));
                     }
+                    ignoring_unrelated_block = true;
                     continue;
                 };
                 if key.trim() != "main_health" {
+                    ignoring_unrelated_block = true;
                     continue;
                 }
                 if saw_main_health {
@@ -66,6 +75,7 @@ impl AutonomousConfig {
                 }
                 saw_main_health = true;
                 in_main_health = true;
+                ignoring_unrelated_block = false;
                 continue;
             }
 
@@ -127,6 +137,13 @@ impl AutonomousConfig {
                             "main_health.ignore_checks entries must be scalar values",
                         ));
                     }
+                    let value = value.trim();
+                    if value.starts_with('-') || has_unquoted_mapping_delimiter(value) {
+                        return Err(error(
+                            line_number,
+                            "main_health.ignore_checks entries must be scalar values",
+                        ));
+                    }
                     let value = parse_scalar(value, line_number)?;
                     if !config.main_health.ignore_checks.insert(value.clone()) {
                         return Err(error(
@@ -148,6 +165,26 @@ impl AutonomousConfig {
     }
 }
 
+fn declares_main_health(value: &str) -> bool {
+    value
+        .split_once(':')
+        .is_some_and(|(key, _)| key.trim() == "main_health")
+        || value == "main_health"
+}
+
+fn has_unquoted_mapping_delimiter(value: &str) -> bool {
+    if matches!(value.as_bytes().first(), Some(b'\'' | b'\"')) {
+        return false;
+    }
+    value.char_indices().any(|(index, character)| {
+        character == ':'
+            && value[index + character.len_utf8()..]
+                .chars()
+                .next()
+                .is_none_or(char::is_whitespace)
+    })
+}
+
 fn parse_scalar(value: &str, line_number: usize) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() {
@@ -160,6 +197,13 @@ fn parse_scalar(value: &str, line_number: usize) -> Result<String, String> {
         return Err(error(
             line_number,
             "main_health values must be scalar strings, not collections or blocks",
+        ));
+    }
+
+    if value.starts_with("- ") || has_unquoted_mapping_delimiter(value) {
+        return Err(error(
+            line_number,
+            "main_health values must be scalar strings, not nested collections or mappings",
         ));
     }
 

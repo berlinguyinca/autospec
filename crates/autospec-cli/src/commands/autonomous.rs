@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use autospec_core::autonomous::config::AutonomousConfig;
 use autospec_core::autonomous::mainline_health::{
-    check_run_evidence, evaluate_health, legacy_status_evidence, resolve_health_branch,
-    CheckEvidence, HealthBranchInput, MainlineHealth, MainlineHealthDiagnostic,
-    MainlineHealthOutcome,
+    apply_ignored_checks, check_run_evidence, evaluate_health, legacy_status_evidence,
+    resolve_health_branch, CheckEvidence, HealthBranchInput, MainlineHealth,
+    MainlineHealthDiagnostic, MainlineHealthOutcome,
 };
 use autospec_core::autonomous_lifecycle::{
     decide as decide_lifecycle, Budget as LifecycleBudget, CapacityDecision, ClaimBranch,
@@ -582,6 +583,7 @@ fn start(options: Options) -> Result<(), CommandFailure> {
     }
 
     validate_repo_dir(&options).map_err(CommandFailure::diagnostic)?;
+    let _config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let options = options_with_resolved_repo(options, &layout);
     let (lifecycle, lease) =
@@ -816,6 +818,7 @@ fn stop(options: Options) -> Result<(), String> {
 
 fn restart(options: Options) -> Result<(), CommandFailure> {
     validate_repo_dir(&options).map_err(CommandFailure::diagnostic)?;
+    let _config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;
     let stop_options = options.clone();
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let options = options_with_resolved_repo(options, &layout);
@@ -1015,8 +1018,9 @@ fn cleanup(options: Options) -> Result<(), String> {
 }
 
 fn main_health(options: Options) -> Result<(), String> {
+    let config = load_autonomous_config(&options.repo_dir)?;
     let layout = RunLayout::new(&options)?;
-    let health = load_main_health(&layout, &options)?;
+    let health = load_main_health(&layout, &options, &config)?;
     persist_main_health(&layout, &health)?;
     print_main_health(&layout.repo, &health, options.json);
     if health.outcome == MainlineHealthOutcome::Halt {
@@ -1028,15 +1032,40 @@ fn main_health(options: Options) -> Result<(), String> {
     Ok(())
 }
 
-fn load_main_health(layout: &RunLayout, options: &Options) -> Result<MainlineHealth, String> {
+fn load_autonomous_config(repo_dir: &str) -> Result<AutonomousConfig, String> {
+    let path = repository_config_path(repo_dir);
+    match fs::read_to_string(&path) {
+        Ok(source) => AutonomousConfig::parse(&source),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(AutonomousConfig::default()),
+        Err(error) => Err(format!(
+            "cannot read autonomous repository config {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn repository_config_path(repo_dir: &str) -> PathBuf {
+    git_top_level(repo_dir)
+        .unwrap_or_else(|| PathBuf::from(repo_dir))
+        .join(".autospec/autonomous.yml")
+}
+
+fn load_main_health(
+    layout: &RunLayout,
+    options: &Options,
+    config: &AutonomousConfig,
+) -> Result<MainlineHealth, String> {
     let explicit_branch = options.health_branch.clone();
-    let default_branch = if explicit_branch.is_some() {
-        None
-    } else {
-        gh_default_branch(&layout.repo)?
-    };
+    let configured_branch = config.main_health.branch.clone();
+    let default_branch =
+        if has_non_empty_branch(&explicit_branch) || has_non_empty_branch(&configured_branch) {
+            None
+        } else {
+            gh_default_branch(&layout.repo)?
+        };
     let branch = match resolve_health_branch(&HealthBranchInput {
         explicit_branch,
+        configured_branch,
         default_branch,
     }) {
         Ok(branch) => branch,
@@ -1082,7 +1111,17 @@ fn load_main_health(layout: &RunLayout, options: &Options) -> Result<MainlineHea
         legacy
     };
 
-    Ok(evaluate_health(&branch.branch, true, evidence))
+    Ok(evaluate_health(
+        &branch.branch,
+        true,
+        apply_ignored_checks(evidence, &config.main_health.ignore_checks),
+    ))
+}
+
+fn has_non_empty_branch(branch: &Option<String>) -> bool {
+    branch
+        .as_deref()
+        .is_some_and(|branch| !branch.trim().is_empty())
 }
 
 fn should_read_check_runs(state: &str, has_total_count: bool, legacy: &[CheckEvidence]) -> bool {
@@ -1192,6 +1231,17 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
     })?;
     let inherited_lease = inherited_foreground_lease(&layout.repo)?;
+    let config = match load_autonomous_config(&options.repo_dir) {
+        Ok(config) => config,
+        Err(error) => {
+            return match inherited_lease.as_ref() {
+                Some(lease) => finish_with_launch_lease(&layout.repo, lease, || {
+                    Err(CommandFailure::diagnostic(error))
+                }),
+                None => Err(CommandFailure::diagnostic(error)),
+            };
+        }
+    };
     let stored_stop = match persisted_stop_mode(&layout) {
         Ok(mode) => mode,
         Err(error) => {
@@ -1225,7 +1275,7 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
 
     let (lease, admission) =
         acquire_foreground_lease(&layout, &options, scope.clone(), inherited_lease)?;
-    let result = run_foreground_with_lease(&layout, &options, scope, &lease, admission);
+    let result = run_foreground_with_lease(&layout, &options, &config, scope, &lease, admission);
     finish_foreground_with_lease(&layout.repo, &lease, result)
 }
 
@@ -1295,6 +1345,7 @@ fn acquire_foreground_lease(
 fn run_foreground_with_lease(
     layout: &RunLayout,
     options: &Options,
+    config: &AutonomousConfig,
     scope: RepositoryScope,
     lease: &resilience::ConductorLease,
     admission: resilience::ResilienceAdmission,
@@ -1308,7 +1359,7 @@ fn run_foreground_with_lease(
         persist_lifecycle_decision(layout, &preflight).map_err(CommandFailure::diagnostic)?;
         return Ok(ForegroundCompletion::Lifecycle(preflight));
     }
-    let health = load_main_health(layout, options).map_err(CommandFailure::diagnostic)?;
+    let health = load_main_health(layout, options, config).map_err(CommandFailure::diagnostic)?;
     input = input.with_health(lifecycle_health(health.outcome.clone()));
     let mut lifecycle = decide_lifecycle(&input);
     if !matches!(lifecycle, LifecycleDecision::Run { .. }) {

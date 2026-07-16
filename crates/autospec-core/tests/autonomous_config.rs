@@ -30,6 +30,8 @@ fn absent_or_unrelated_policy_preserves_default_main_health_configuration() {
         r#"
 growth:
   enabled: true
+  main_health:
+    enabled: true
 another_policy:
   values:
     - ignored
@@ -74,6 +76,23 @@ fn rejects_invalid_relevant_main_health_shapes() {
             "main_health:\n  regex_ignore: ci.*\n",
         ),
         ("malformed indentation", "main_health:\n    branch: main\n"),
+        (
+            "indented main health block",
+            "  main_health:\n    branch: main\n",
+        ),
+        (
+            "nested list entry",
+            "main_health:\n  ignore_checks:\n    - - Unit Tests\n",
+        ),
+        (
+            "mapped list entry",
+            "main_health:\n  ignore_checks:\n    - name: Unit Tests\n",
+        ),
+        (
+            "mapped list entry with terminal separator",
+            "main_health:\n  ignore_checks:\n    - name:\n",
+        ),
+        ("nested branch value", "main_health:\n  branch: - nested\n"),
     ] {
         let error = AutonomousConfig::parse(source).expect_err(&format!("{name} must fail closed"));
         assert!(
