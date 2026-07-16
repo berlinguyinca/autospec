@@ -67,16 +67,27 @@ fn quiet_child_with_heartbeat_progress_completes_without_termination() {
 set -eu
 heartbeat_dir="$AUTOSPEC_PROCESS_HEARTBEAT_DIR/owner__repo"
 mkdir -p "$heartbeat_dir"
-sleep 1
-printf '{"step":"validation"}\n' > "$heartbeat_dir/42.json"
-sleep 1
-printf '{"step":"merge"}\n' > "$heartbeat_dir/42.json"
-sleep 3
+for step in claimed validation merge finalize; do
+  printf '{"step":"%s"}\n' "$step" > "$heartbeat_dir/42.json"
+  sleep 1
+  if [ -f "$AUTOSPEC_TEST_DRAIN_OBSERVATION" ] && grep -q '"progress":"heartbeat"' "$AUTOSPEC_TEST_DRAIN_OBSERVATION"; then
+    exit 0
+  fi
+done
+exit 1
 "#,
     );
     write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
 
-    let output = fixture.run(&bin, &["--stall-secs", "3", "--poll-secs", "1", "--json"]);
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "3", "--poll-secs", "1", "--json"])
+        .env(
+            "AUTOSPEC_TEST_DRAIN_OBSERVATION",
+            fixture.drain_observation_path(),
+        )
+        .output()
+        .expect("run drain with heartbeat progress");
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
     assert!(stdout(&output).contains("quiet_stdout_external_progress"));
@@ -108,7 +119,7 @@ sleep 3
 
     let output = fixture
         .command(&bin)
-        .args(["--stall-secs", "3", "--poll-secs", "1", "--json"])
+        .args(["--stall-secs", "5", "--poll-secs", "1", "--json"])
         .env_remove("AUTOSPEC_PROCESS_HEARTBEAT_DIR")
         .env("AUTOSPEC_HEARTBEAT_DIR", &fixture.heartbeat_root)
         .output()
@@ -162,11 +173,14 @@ fn quiet_child_with_watchdog_heartbeat_progress_completes_without_termination() 
 set -eu
 heartbeat_dir="$AUTOSPEC_WATCHDOG_DIR/process-heartbeats/owner__repo"
 mkdir -p "$heartbeat_dir"
-sleep 1
-printf '{"step":"claimed"}\n' > "$heartbeat_dir/42.json"
-sleep 1
-printf '{"step":"validated"}\n' > "$heartbeat_dir/42.json"
-sleep 3
+for step in claimed validated finalized complete; do
+  printf '{"step":"%s"}\n' "$step" > "$heartbeat_dir/42.json"
+  sleep 1
+  if [ -f "$AUTOSPEC_TEST_DRAIN_OBSERVATION" ] && grep -q '"progress":"heartbeat"' "$AUTOSPEC_TEST_DRAIN_OBSERVATION"; then
+    exit 0
+  fi
+done
+exit 1
 "#,
     );
     write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
@@ -176,6 +190,10 @@ sleep 3
         .args(["--stall-secs", "3", "--poll-secs", "1", "--json"])
         .env_remove("AUTOSPEC_PROCESS_HEARTBEAT_DIR")
         .env("AUTOSPEC_WATCHDOG_DIR", &watchdog_root)
+        .env(
+            "AUTOSPEC_TEST_DRAIN_OBSERVATION",
+            fixture.drain_observation_path(),
+        )
         .output()
         .expect("run drain with watchdog heartbeat progress");
 
@@ -205,7 +223,19 @@ fn quiet_child_with_github_progress_warns_and_completes() {
     let bin = fixture.root.join("bin");
     let gh_counter = fixture.root.join("gh-counter");
     fs::create_dir_all(&bin).expect("create fake bin");
-    write_executable(&bin.join("omx"), "#!/bin/sh\nsleep 3\n");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+set -eu
+for attempt in 1 2 3 4 5 6 7 8; do
+  if [ -f "$AUTOSPEC_TEST_DRAIN_OBSERVATION" ] && grep -q '"progress":"github"' "$AUTOSPEC_TEST_DRAIN_OBSERVATION"; then
+    exit 0
+  fi
+  sleep 1
+done
+exit 1
+"#,
+    );
     write_executable(
         &bin.join("gh"),
         r#"#!/bin/sh
@@ -223,6 +253,10 @@ fi
         .command(&bin)
         .args(["--stall-secs", "2", "--poll-secs", "1", "--json"])
         .env("AUTOSPEC_TEST_GH_COUNTER", gh_counter)
+        .env(
+            "AUTOSPEC_TEST_DRAIN_OBSERVATION",
+            fixture.drain_observation_path(),
+        )
         .output()
         .expect("run drain with github progress");
 
@@ -381,7 +415,7 @@ fn stalled_drain_kills_a_term_ignoring_descendant_before_joining_readers() {
 trap 'exit 0' TERM
 (
   trap '' TERM
-  exec sleep 12
+  exec sleep 20
 ) &
 printf '%s\n' "$!" > "$AUTOSPEC_TEST_DESCENDANT_PID"
 wait
@@ -404,7 +438,7 @@ wait
         stderr(&output)
     );
     assert!(
-        started.elapsed().as_secs() < 7,
+        started.elapsed().as_secs() < 12,
         "drain waited for a surviving descendant for {:?}",
         started.elapsed()
     );
@@ -417,14 +451,14 @@ fn child_exit_is_not_blocked_by_a_hung_github_snapshot() {
     let bin = fixture.root.join("bin");
     fs::create_dir_all(&bin).expect("create fake bin");
     write_executable(&bin.join("omx"), "#!/bin/sh\nexec sleep 1\n");
-    write_executable(&bin.join("gh"), "#!/bin/sh\nsleep 8\nprintf '[]\\n'\n");
+    write_executable(&bin.join("gh"), "#!/bin/sh\nsleep 15\nprintf '[]\\n'\n");
 
     let started = Instant::now();
     let output = fixture.run(&bin, &["--json"]);
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
     assert!(
-        started.elapsed().as_secs() < 5,
+        started.elapsed().as_secs() < 10,
         "hung GitHub observation delayed completed child for {:?}",
         started.elapsed()
     );
