@@ -3,11 +3,12 @@ use std::io;
 use std::path::Path;
 
 use autospec_core::autonomous::no_work::NoWorkTier;
-use autospec_core::autonomous::waterfall::{sha256_hex, SealedEvidence, TierReceipt, TierStatus};
+use autospec_core::autonomous::waterfall::{sha256_hex, SealedEvidence, TierReceipt};
 
 use super::WaterfallStoreError;
 
 mod canonical;
+mod tier1_15;
 mod tier2;
 mod tier3;
 mod tier3_consistency;
@@ -22,6 +23,22 @@ pub(super) fn verify_tier2(
     receipt: &TierReceipt,
 ) -> Result<(), WaterfallStoreError> {
     tier2::verify_tier2(root, pass_id, receipt)
+}
+
+pub(super) fn verify_tier1(
+    root: &Path,
+    pass_id: u64,
+    receipt: &TierReceipt,
+) -> Result<(), WaterfallStoreError> {
+    tier1_15::verify_tier1(root, pass_id, receipt)
+}
+
+pub(super) fn verify_tier15(
+    root: &Path,
+    pass_id: u64,
+    receipt: &TierReceipt,
+) -> Result<(), WaterfallStoreError> {
+    tier1_15::verify_tier15(root, pass_id, receipt)
 }
 
 pub(super) fn verify_tier3(
@@ -267,55 +284,4 @@ fn is_atomic_temporary(name: &str, artifact: &str) -> bool {
         && !counter.is_empty()
         && process.bytes().all(|byte| byte.is_ascii_digit())
         && counter.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-pub(super) fn verify(
-    root: &Path,
-    pass_id: u64,
-    artifact: WaterfallEvidenceArtifact,
-    receipt: &TierReceipt,
-) -> Result<(), WaterfallStoreError> {
-    let reference = artifact.reference(pass_id)?;
-    let path = root.join(&reference);
-    let contents = fs::read_to_string(&path).map_err(|error| {
-        let message = if error.kind() == io::ErrorKind::NotFound {
-            format!("missing sealed waterfall evidence {reference}")
-        } else {
-            format!("cannot read waterfall evidence {}: {error}", path.display())
-        };
-        WaterfallStoreError::InvalidReceipt(message)
-    })?;
-    let digest = sha256_hex(contents.as_bytes());
-    let marker = format!("\"reference\":\"{reference}\",\"digest\":\"{digest}\"");
-    if receipt.to_json().contains(&marker) {
-        Ok(())
-    } else {
-        Err(WaterfallStoreError::InvalidReceipt(
-            "sealed waterfall evidence does not match receipt".to_string(),
-        ))
-    }
-}
-
-pub(super) fn artifact_for_receipt(
-    receipt: &TierReceipt,
-) -> Result<WaterfallEvidenceArtifact, WaterfallStoreError> {
-    match (receipt.tier(), receipt.status()) {
-        (NoWorkTier::Tier1, TierStatus::Exhausted { .. }) => Ok(WaterfallEvidenceArtifact::Tier1(
-            Tier1EvidenceArtifact::ReadyPage,
-        )),
-        (NoWorkTier::Tier1, TierStatus::Failed { .. }) => Ok(WaterfallEvidenceArtifact::Tier1(
-            Tier1EvidenceArtifact::ReadFailure,
-        )),
-        (NoWorkTier::Tier1_5, TierStatus::Exhausted { .. } | TierStatus::Produced { .. }) => Ok(
-            WaterfallEvidenceArtifact::Tier15(Tier15EvidenceArtifact::Observation),
-        ),
-        (NoWorkTier::Tier1_5, TierStatus::Failed { .. }) => Ok(WaterfallEvidenceArtifact::Tier15(
-            Tier15EvidenceArtifact::ReadFailure,
-        )),
-        (tier, status) => Err(WaterfallStoreError::InvalidState(format!(
-            "{} receipt has unexpected {} status",
-            tier.as_str(),
-            status.as_str()
-        ))),
-    }
 }

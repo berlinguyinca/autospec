@@ -63,7 +63,7 @@ pub(super) fn seed_tier_two_cursor(root: &TempRoot) {
         .persist_tier1_evidence(
             1,
             Tier1EvidenceArtifact::ReadyPage,
-            "{\"schema\":1,\"kind\":\"ready_page\"}\n",
+            "{\"schema\":1,\"kind\":\"ready_page\",\"gate_counts\":{\"open\":0,\"candidate\":0,\"reviewed\":0,\"blocked\":0,\"ready\":0,\"claimed\":0,\"selected\":0},\"worker_cap\":{\"active_count\":0,\"remaining\":1,\"reached\":false}}\n",
         )
         .expect("Tier 1 evidence");
     let tier_one = sealed_receipt(
@@ -83,7 +83,7 @@ pub(super) fn seed_tier_two_cursor(root: &TempRoot) {
         .persist_tier15_evidence(
             1,
             Tier15EvidenceArtifact::Observation,
-            "{\"schema\":1,\"kind\":\"tier15_observation\"}\n",
+            "{\"schema\":1,\"kind\":\"tier15_observation\",\"open_observed\":0,\"open_deduplicated\":0,\"closed_observed\":0,\"budget\":0,\"decisions\":[]}\n",
         )
         .expect("Tier 1.5 evidence");
     let tier_fifteen = sealed_receipt(
@@ -107,7 +107,12 @@ fn sealed_receipt(
     funnel: FunnelCounts,
     evidence: Vec<SealedEvidence>,
 ) -> TierReceipt {
-    TierReceipt::new(REPO, 1, tier, "tier2-test", 1, 1, status, funnel, evidence)
+    let producer = match tier {
+        NoWorkTier::Tier1 => "rust-foreground-tier1-v1",
+        NoWorkTier::Tier1_5 => "rust-tier1_5-read-only-v1",
+        _ => "tier2-test",
+    };
+    TierReceipt::new(REPO, 1, tier, producer, 1, 1, status, funnel, evidence)
         .expect("sealed receipt")
 }
 

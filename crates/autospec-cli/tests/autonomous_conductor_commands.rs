@@ -164,7 +164,7 @@ fn foreground_rejects_tampered_tier_one_evidence_during_receipt_replay() {
 
     assert!(!replay.status.success());
     assert!(String::from_utf8_lossy(&replay.stderr)
-        .contains("sealed waterfall evidence does not match receipt"));
+        .contains("early-tier evidence digest does not match its receipt"));
     assert!(
         !fixture.waterfall_state_path().exists(),
         "tampered evidence must not advance the cursor"

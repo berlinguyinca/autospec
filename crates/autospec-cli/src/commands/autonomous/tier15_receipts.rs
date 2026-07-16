@@ -69,20 +69,8 @@ fn existing_receipt(
     else {
         return Ok(None);
     };
-    let artifact = match receipt.status() {
-        TierStatus::Exhausted { .. } | TierStatus::Produced { .. } => {
-            Tier15EvidenceArtifact::Observation
-        }
-        TierStatus::Failed { .. } => Tier15EvidenceArtifact::ReadFailure,
-        status => {
-            return Err(format!(
-                "Tier 1.5 receipt has unexpected {} status during recovery",
-                status.as_str()
-            ))
-        }
-    };
     store
-        .verify_tier15_evidence(state.next_pass_id(), artifact, &receipt)
+        .verify_tier15_evidence(state.next_pass_id(), &receipt)
         .map_err(store_error)?;
     Ok(Some(receipt))
 }
@@ -214,7 +202,7 @@ mod tests {
     use super::{record_tier15, Tier15Progress};
     use crate::commands::autonomous::tier15::{scan_with, IssueState, Tier15Scan};
     use crate::commands::autonomous::waterfall::{
-        StoreAcquisition, Tier15EvidenceArtifact, Tier1EvidenceArtifact, WaterfallStore,
+        StoreAcquisition, Tier1EvidenceArtifact, WaterfallStore,
     };
 
     const REPO: &str = "owner/repo";
@@ -264,7 +252,7 @@ mod tests {
             REPO,
             1,
             NoWorkTier::Tier1,
-            "tier15-test",
+            "rust-foreground-tier1-v1",
             1,
             1,
             TierStatus::Exhausted {
@@ -282,7 +270,7 @@ mod tests {
             .persist_tier1_evidence(
                 1,
                 Tier1EvidenceArtifact::ReadyPage,
-                "{\"schema\":1,\"kind\":\"ready_page\"}\n",
+                "{\"schema\":1,\"kind\":\"ready_page\",\"gate_counts\":{\"open\":0,\"candidate\":0,\"reviewed\":0,\"blocked\":0,\"ready\":0,\"claimed\":0,\"selected\":0},\"worker_cap\":{\"active_count\":0,\"remaining\":1,\"reached\":false}}\n",
             )
             .expect("Tier 1 evidence");
         let receipt = tier_one_receipt(evidence);
@@ -358,7 +346,7 @@ mod tests {
             TierStatus::Produced { count: 1 }
         ));
         store
-            .verify_tier15_evidence(1, Tier15EvidenceArtifact::Observation, &receipt)
+            .verify_tier15_evidence(1, &receipt)
             .expect("receipt evidence");
     }
 
@@ -463,7 +451,7 @@ mod tests {
             .expect("sealed receipt");
         assert!(matches!(receipt.status(), TierStatus::Failed { .. }));
         store
-            .verify_tier15_evidence(1, Tier15EvidenceArtifact::ReadFailure, &receipt)
+            .verify_tier15_evidence(1, &receipt)
             .expect("failure evidence");
         drop(store);
 

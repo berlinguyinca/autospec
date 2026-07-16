@@ -57,6 +57,29 @@ fn malformed_repo_is_rejected_before_state_or_child_creation() {
 }
 
 #[test]
+fn outside_env_artifact_path_is_rejected_before_child_creation() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let launched = fixture.root.join("launched");
+    let outside = fixture.root.join("outside").join("drain.log");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        "#!/bin/sh\nprintf launched > \"$AUTOSPEC_TEST_DRAIN_LAUNCHED\"\n",
+    );
+
+    let output = fixture
+        .command(&bin)
+        .env("AUTOSPEC_TEST_DRAIN_LAUNCHED", &launched)
+        .env("AUTOSPEC_AUTONOMOUS_DRAIN_LOG", &outside)
+        .output()
+        .expect("reject outside drain artifact");
+
+    assert_eq!(output.status.code(), Some(2), "stderr={}", stderr(&output));
+    assert!(!launched.exists(), "validation must precede child creation");
+}
+
+#[test]
 fn quiet_child_with_heartbeat_progress_completes_without_termination() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
@@ -65,7 +88,7 @@ fn quiet_child_with_heartbeat_progress_completes_without_termination() {
         &bin.join("omx"),
         r#"#!/bin/sh
 set -eu
-heartbeat_dir="$AUTOSPEC_PROCESS_HEARTBEAT_DIR/owner__repo"
+heartbeat_dir="$AUTOSPEC_PROCESS_HEARTBEAT_DIR/o5_owner_r4_repo"
 mkdir -p "$heartbeat_dir"
 for step in claimed validation merge finalize; do
   printf '{"step":"%s"}\n' "$step" > "$heartbeat_dir/42.json"
@@ -106,7 +129,7 @@ fn quiet_child_with_claim_heartbeat_progress_completes_without_termination() {
         &bin.join("omx"),
         r#"#!/bin/sh
 set -eu
-heartbeat_dir="$AUTOSPEC_HEARTBEAT_DIR/owner__repo"
+heartbeat_dir="$AUTOSPEC_HEARTBEAT_DIR/o5_owner_r4_repo"
 mkdir -p "$heartbeat_dir"
 sleep 1
 printf '{"step":"claimed"}\n' > "$heartbeat_dir/42.json"
@@ -139,7 +162,7 @@ fn claim_heartbeat_wins_when_process_root_conflicts() {
         &bin.join("omx"),
         r#"#!/bin/sh
 set -eu
-heartbeat_dir="$AUTOSPEC_HEARTBEAT_DIR/owner__repo"
+heartbeat_dir="$AUTOSPEC_HEARTBEAT_DIR/o5_owner_r4_repo"
 mkdir -p "$heartbeat_dir"
 sleep 1
 printf '{"step":"claimed"}\n' > "$heartbeat_dir/42.json"
@@ -171,7 +194,7 @@ fn quiet_child_with_watchdog_heartbeat_progress_completes_without_termination() 
         &bin.join("omx"),
         r#"#!/bin/sh
 set -eu
-heartbeat_dir="$AUTOSPEC_WATCHDOG_DIR/process-heartbeats/owner__repo"
+heartbeat_dir="$AUTOSPEC_WATCHDOG_DIR/process-heartbeats/o5_owner_r4_repo"
 mkdir -p "$heartbeat_dir"
 for step in claimed validated finalized complete; do
   printf '{"step":"%s"}\n' "$step" > "$heartbeat_dir/42.json"
@@ -549,7 +572,7 @@ impl DrainFixture {
 
     fn drain_observation_path(&self) -> PathBuf {
         self.operator_root
-            .join("owner_repo")
+            .join("o5_owner_r4_repo")
             .join("drain-observation.json")
     }
 

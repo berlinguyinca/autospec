@@ -7,7 +7,7 @@ use autospec_core::autonomous::waterfall::{
 };
 use autospec_core::coordination::ReadyQueuePlan;
 
-use super::resilience::ConductorLease;
+use super::resilience::{with_current_lifecycle_lease, ConductorLease};
 use super::waterfall::{
     StoreAcquisition, Tier1EvidenceArtifact, WaterfallStore, WaterfallStoreError,
 };
@@ -36,7 +36,15 @@ pub(super) fn should_start_tier_one(plan: &ReadyQueuePlan) -> bool {
 pub(super) fn record_tier_one(
     state_root: &Path,
     repo: &str,
-    _lease: &ConductorLease,
+    lease: &ConductorLease,
+    evidence: Tier1QueueEvidence<'_>,
+) -> Result<Tier1Progress, String> {
+    with_current_lifecycle_lease(lease, || record_tier_one_fenced(state_root, repo, evidence))
+}
+
+fn record_tier_one_fenced(
+    state_root: &Path,
+    repo: &str,
     evidence: Tier1QueueEvidence<'_>,
 ) -> Result<Tier1Progress, String> {
     let root = state_root.join("waterfall");
@@ -101,18 +109,8 @@ fn existing_tier1_receipt(
     else {
         return Ok(None);
     };
-    let artifact = match receipt.status() {
-        TierStatus::Exhausted { .. } => Tier1EvidenceArtifact::ReadyPage,
-        TierStatus::Failed { .. } => Tier1EvidenceArtifact::ReadFailure,
-        status => {
-            return Err(format!(
-                "Tier 1 receipt has unexpected {} status during recovery",
-                status.as_str()
-            ))
-        }
-    };
     store
-        .verify_tier1_evidence(state.next_pass_id(), artifact, &receipt)
+        .verify_tier1_evidence(state.next_pass_id(), &receipt)
         .map_err(store_error)?;
     Ok(Some(receipt))
 }

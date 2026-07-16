@@ -1658,7 +1658,7 @@ fn terminal_merged_exists(comments: &[autospec_core::claim::RemoteComment]) -> b
 
 fn write_startup_heartbeat(repo: &str, issue: u64, branch: &str) -> Result<(), CommandFailure> {
     let root = heartbeat_root()?;
-    let directory = root.join(repo.replace('/', "__"));
+    let directory = root.join(super::autonomous::drain::repository_progress_key(repo));
     fs::create_dir_all(&directory).map_err(|error| {
         CommandFailure::diagnostic(format!(
             "could not create claim heartbeat directory {}: {error}",
@@ -1681,7 +1681,7 @@ fn cleanup_startup_heartbeat(repo: &str, issue: u64) {
         return;
     };
     let _ = fs::remove_file(
-        root.join(repo.replace('/', "__"))
+        root.join(super::autonomous::drain::repository_progress_key(repo))
             .join(format!("{issue}.json")),
     );
 }
@@ -1707,7 +1707,7 @@ pub(crate) fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {
 
 fn startup_heartbeat_exists(repo: &str, issue: u64) -> bool {
     heartbeat_root().is_ok_and(|root| {
-        root.join(repo.replace('/', "__"))
+        root.join(super::autonomous::drain::repository_progress_key(repo))
             .join(format!("{issue}.json"))
             .is_file()
     })

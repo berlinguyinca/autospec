@@ -414,14 +414,14 @@ fn tier4_closed_dry_results_roll_over_with_full_receipt_audit_history() {
             .persist_tier1_evidence(
                 2,
                 super::waterfall::Tier1EvidenceArtifact::ReadyPage,
-                "{\"schema\":1,\"kind\":\"ready_page\"}\n",
+                "{\"schema\":1,\"kind\":\"ready_page\",\"gate_counts\":{\"open\":0,\"candidate\":0,\"reviewed\":0,\"blocked\":0,\"ready\":0,\"claimed\":0,\"selected\":0},\"worker_cap\":{\"active_count\":0,\"remaining\":1,\"reached\":false}}\n",
             )
             .expect("pass two Tier 1 evidence");
         let tier_one = TierReceipt::new(
             REPO,
             2,
             NoWorkTier::Tier1,
-            "test-tier1-receipt",
+            "rust-foreground-tier1-v1",
             1,
             1,
             TierStatus::Exhausted {

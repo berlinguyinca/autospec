@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -35,10 +35,25 @@ enum GithubOutput {
 }
 
 pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
-    let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
-    RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
+    let mut layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
+    let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("autonomous drain invalid repo: {reason}"))
     })?;
+    let canonical_repo = scope.as_str();
+    if super::git_remote_slug(&options.repo_dir)
+        .is_some_and(|checkout_repo| checkout_repo != canonical_repo)
+    {
+        return Err(CommandFailure::diagnostic(
+            "autonomous drain repo does not match checkout origin".to_string(),
+        ));
+    }
+    let state_root = layout
+        .state_dir
+        .parent()
+        .ok_or_else(|| CommandFailure::diagnostic("drain state root has no parent"))?;
+    layout.state_dir = state_root.join(repository_progress_key(&canonical_repo));
+    layout.scope = repository_progress_key(&canonical_repo);
+    let artifact_paths = artifact_paths(&options.repo_dir)?;
     fs::create_dir_all(&layout.state_dir).map_err(|error| {
         CommandFailure::diagnostic(format!(
             "cannot create {}: {error}",
@@ -53,7 +68,7 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
     let mut last_progress = DrainProgress::None;
     let mut warning_emitted = false;
     let mut heartbeat = heartbeat_signature(&layout.repo);
-    let mut artifact = artifact_signature(&options.repo_dir);
+    let mut artifact = artifact_signature(&artifact_paths);
     let mut github = match github_snapshot(&layout.repo, &mut child)? {
         GithubSnapshot::Available(snapshot) => Some(snapshot),
         GithubSnapshot::ChildExited(status) => {
@@ -74,7 +89,7 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
         let progress = if output_progress.swap(false, Ordering::AcqRel) {
             Some(DrainProgress::ChildOutput)
         } else {
-            let next_artifact = artifact_signature(&options.repo_dir);
+            let next_artifact = artifact_signature(&artifact_paths);
             if next_artifact != artifact {
                 artifact = next_artifact;
                 Some(DrainProgress::Artifact)
@@ -383,30 +398,92 @@ fn heartbeat_dirs(repo: &str) -> Vec<PathBuf> {
     }
     roots
         .into_iter()
-        .flat_map(|root| {
-            ["_", "__", "-"]
-                .into_iter()
-                .map(move |separator| root.join(repo.replace(['/', ':'], separator)))
-        })
+        .map(|root| root.join(repository_progress_key(repo)))
         .collect()
 }
 
-fn artifact_signature(repo_dir: &str) -> String {
-    let mut paths = vec![PathBuf::from(repo_dir).join(".autospec/run-summary.md")];
+fn artifact_paths(repo_dir: &str) -> Result<Vec<PathBuf>, CommandFailure> {
+    let repo_root = fs::canonicalize(repo_dir).map_err(|error| {
+        CommandFailure::diagnostic(format!("cannot resolve drain repository root: {error}"))
+    })?;
+    let mut paths = vec![repo_root.join(".autospec/run-summary.md")];
     for variable in [
         "AUTOSPEC_AUTONOMOUS_DRAIN_LOG",
         "AUTOSPEC_AUTONOMOUS_DRAIN_LOG_FILE",
     ] {
         if let Some(path) = std::env::var_os(variable) {
-            paths.push(PathBuf::from(path));
+            let path = contained_path(&repo_root, &PathBuf::from(path)).ok_or_else(|| {
+                CommandFailure::diagnostic(format!(
+                    "{variable} must remain inside the canonical repository root"
+                ))
+            })?;
+            paths.push(path);
         }
     }
     paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn artifact_signature(paths: &[PathBuf]) -> String {
     paths
         .iter()
         .map(|path| file_signature(path))
         .collect::<Vec<_>>()
         .join("|")
+}
+
+fn contained_path(root: &Path, candidate: &Path) -> Option<PathBuf> {
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    };
+    let normalized = normalize_absolute(&absolute)?;
+    let resolved = resolve_existing_prefix(&normalized)?;
+    resolved.starts_with(root).then_some(resolved)
+}
+
+fn normalize_absolute(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir if normalized.pop() => {}
+            Component::ParentDir => return None,
+        }
+    }
+    normalized.is_absolute().then_some(normalized)
+}
+
+fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        suffix.push(ancestor.file_name()?.to_owned());
+        ancestor = ancestor.parent()?;
+    }
+    let mut resolved = fs::canonicalize(ancestor).ok()?;
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    Some(resolved)
+}
+
+pub(crate) fn repository_progress_key(repo: &str) -> String {
+    let (owner, repository) = repo
+        .split_once('/')
+        .expect("validated repository scope has one separator");
+    format!(
+        "o{}_{}_r{}_{}",
+        owner.len(),
+        owner,
+        repository.len(),
+        repository
+    )
 }
 
 fn file_signature(path: &Path) -> String {
@@ -592,5 +669,20 @@ fn child_exit_code_json(decision: DrainDecision) -> String {
         DrainDecision::Wait
         | DrainDecision::WarnExternalProgress
         | DrainDecision::TerminateStalled => "null".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::heartbeat_dirs;
+
+    #[test]
+    fn repository_aliases_cannot_share_heartbeat_progress_paths() {
+        let first = heartbeat_dirs("owner/repo_name");
+        let second = heartbeat_dirs("owner_repo/name");
+        assert!(
+            first.iter().all(|path| !second.contains(path)),
+            "distinct canonical repositories must not share a progress path"
+        );
     }
 }

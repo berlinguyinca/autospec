@@ -130,15 +130,9 @@ impl WaterfallStore {
     pub(super) fn verify_tier1_evidence(
         &self,
         pass_id: u64,
-        artifact: Tier1EvidenceArtifact,
         receipt: &TierReceipt,
     ) -> Result<(), WaterfallStoreError> {
-        evidence::verify(
-            &self.root,
-            pass_id,
-            WaterfallEvidenceArtifact::Tier1(artifact),
-            receipt,
-        )
+        evidence::verify_tier1(&self.root, pass_id, receipt)
     }
 
     pub(super) fn persist_tier15_evidence(
@@ -158,15 +152,9 @@ impl WaterfallStore {
     pub(super) fn verify_tier15_evidence(
         &self,
         pass_id: u64,
-        artifact: Tier15EvidenceArtifact,
         receipt: &TierReceipt,
     ) -> Result<(), WaterfallStoreError> {
-        evidence::verify(
-            &self.root,
-            pass_id,
-            WaterfallEvidenceArtifact::Tier15(artifact),
-            receipt,
-        )
+        evidence::verify_tier15(&self.root, pass_id, receipt)
     }
 
     pub(super) fn load_receipt(
@@ -254,12 +242,15 @@ impl WaterfallStore {
             }
             match completed.tier {
                 NoWorkTier::Tier1 | NoWorkTier::Tier1_5 => {
-                    evidence::verify(
-                        &self.root,
-                        receipt_pass_id,
-                        evidence::artifact_for_receipt(&receipt)?,
-                        &receipt,
-                    )
+                    match completed.tier {
+                        NoWorkTier::Tier1 => {
+                            evidence::verify_tier1(&self.root, receipt_pass_id, &receipt)
+                        }
+                        NoWorkTier::Tier1_5 => {
+                            evidence::verify_tier15(&self.root, receipt_pass_id, &receipt)
+                        }
+                        _ => unreachable!("closed early-tier match"),
+                    }
                     .map_err(state_receipt_error)?;
                 }
                 NoWorkTier::Tier2 => self

@@ -478,7 +478,7 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"claimed\":true"));
-    assert!(heartbeats.join("testorg__testrepo/42.json").exists());
+    assert!(heartbeats.join("o7_testorg_r8_testrepo/42.json").exists());
     assert!(std::fs::read_to_string(&comments)
         .expect("claim comments")
         .contains("worker-a"));

@@ -51,11 +51,24 @@ pub(super) enum LifecycleAdmissionError {
 pub(super) struct ConductorLease {
     token: String,
     generation: u64,
+    repo: String,
+    state_path: PathBuf,
+    lock_path: PathBuf,
 }
 
 impl ConductorLease {
     pub(super) fn token(&self) -> &str {
         &self.token
+    }
+
+    fn from_store(store: &ResilienceStore, token: String, generation: u64) -> Self {
+        Self {
+            token,
+            generation,
+            repo: store.scope.as_str(),
+            state_path: store.canonical_state_path(),
+            lock_path: store.lock_path(),
+        }
     }
 }
 
@@ -292,10 +305,7 @@ impl ResilienceStore {
             .ok_or_else(|| {
                 StoreError::Diagnostic("cannot advance resilience lease generation".to_string())
             })?;
-        let lease = ConductorLease {
-            token: lease_token(),
-            generation,
-        };
+        let lease = ConductorLease::from_store(self, lease_token(), generation);
         self.write_state(&self.claimed_state(&lease))?;
         Ok((admission, lease))
     }
@@ -321,10 +331,11 @@ impl ResilienceStore {
         state.lock_session = None;
         state.lock_acquired_at = Some(now);
         self.write_state(&state)?;
-        Ok(ConductorLease {
-            token: token.to_string(),
+        Ok(ConductorLease::from_store(
+            self,
+            token.to_string(),
             generation,
-        })
+        ))
     }
 
     fn release(&self, lease: &ConductorLease) -> Result<(), StoreError> {
@@ -573,6 +584,30 @@ pub(super) fn release_lifecycle(
 ) -> Result<(), LifecycleLeaseError> {
     let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
     store.release(lease).map_err(store_error_to_lease_error)
+}
+
+pub(super) fn with_current_lifecycle_lease<T>(
+    lease: &ConductorLease,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    // Global mutation lock order is resilience lease first, then subsystem locks. Holding the
+    // lease transaction across `operation` prevents a reclaim from racing a fenced write.
+    let _transaction =
+        LeaseTransaction::try_open(&lease.lock_path).map_err(|error| match error {
+            StoreError::Held => "resilience lease transaction is held".to_string(),
+            StoreError::Diagnostic(reason) => reason,
+            StoreError::TokenMismatch => "resilience lease token mismatch".to_string(),
+            StoreError::Reject(reject) => reject.reason().to_string(),
+            StoreError::Policy(_) => "resilience lease policy rejected the transaction".to_string(),
+        })?;
+    let raw = fs::read_to_string(&lease.state_path)
+        .map_err(|error| format!("cannot read resilience lease state: {error}"))?;
+    let state = ResilienceState::parse(&raw)
+        .map_err(|_| "resilience lease state is malformed".to_string())?;
+    if state.repo != lease.repo || !state_matches_lease(&state, lease) {
+        return Err("resilience lease token or generation was replaced".to_string());
+    }
+    operation()
 }
 
 pub(super) fn status(repo: &str) -> Result<Option<ResilienceStatus>, LifecycleAdmissionError> {
@@ -891,6 +926,7 @@ fn pid_is_dead(_pid: u32) -> bool {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use autospec_core::coordination::{QueueGateCounts, ReadyQueuePlan, WorkerCap};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
@@ -989,6 +1025,59 @@ mod tests {
             replacement_state
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replaced_lease_cannot_persist_tier_one_waterfall_artifacts() {
+        let root = test_root("waterfall-fencing");
+        let first = test_store(&root);
+        let second = test_store(&root);
+        let (_, stale_lease) = match first.acquire(None, 1, 1) {
+            Ok(value) => value,
+            Err(_) => panic!("first lease"),
+        };
+        let mut stale_state = match first.read_state() {
+            Ok(Some((state, _))) => state,
+            _ => panic!("first lease state"),
+        };
+        stale_state.heartbeat_at = Some(now_secs().saturating_sub(300));
+        if first.write_state(&stale_state).is_err() {
+            panic!("expire first lease");
+        }
+        let (_, replacement) = match second.acquire(None, 1, 1) {
+            Ok(value) => value,
+            Err(_) => panic!("replacement lease"),
+        };
+        assert_ne!(replacement.token, stale_lease.token);
+
+        let plan = ReadyQueuePlan {
+            ready: Vec::new(),
+            blocked: Vec::new(),
+            claimed: Vec::new(),
+            conflicts: Vec::new(),
+            worker_cap: WorkerCap {
+                max_repo_workers: 1,
+                active_count: 0,
+                remaining: 1,
+                reached: false,
+            },
+            batch: Vec::new(),
+            gate_counts: QueueGateCounts::default(),
+        };
+        let waterfall_root = root.join("operator");
+        let result = super::super::waterfall_coordinator::record_tier_one(
+            &waterfall_root,
+            "owner/repo",
+            &stale_lease,
+            super::super::waterfall_coordinator::Tier1QueueEvidence::EmptyPage(&plan),
+        );
+
+        assert!(result.is_err(), "a replaced lease must fail closed");
+        assert!(
+            !waterfall_root.join("waterfall").exists(),
+            "lease validation must precede waterfall lock and artifact creation"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

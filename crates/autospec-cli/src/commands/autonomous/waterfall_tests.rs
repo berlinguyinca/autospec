@@ -51,7 +51,7 @@ fn receipt(status: TierStatus) -> TierReceipt {
         "owner/repo",
         1,
         NoWorkTier::Tier1,
-        "queue-v1",
+        "rust-foreground-tier1-v1",
         10,
         11,
         status,
@@ -66,7 +66,7 @@ fn receipt_with_evidence(status: TierStatus, evidence: SealedEvidence) -> TierRe
         "owner/repo",
         1,
         NoWorkTier::Tier1,
-        "queue-v1",
+        "rust-foreground-tier1-v1",
         10,
         11,
         status,
@@ -84,11 +84,11 @@ fn tier_one_point_five_receipt_with_evidence(
         "owner/repo",
         1,
         NoWorkTier::Tier1_5,
-        "tier15-read-only-v1",
+        "rust-tier1_5-read-only-v1",
         12,
         13,
         status,
-        FunnelCounts::new(3, 2, 2, 1, 1).expect("funnel counts"),
+        FunnelCounts::new(3, 2, 2, 0, 0).expect("funnel counts"),
         vec![evidence],
     )
     .expect("receipt")
@@ -128,7 +128,7 @@ fn store_atomically_replaces_state_without_overwriting_sealed_receipts() {
             .persist_tier1_evidence(
                 1,
                 Tier1EvidenceArtifact::ReadyPage,
-                "{\"schema\":1,\"kind\":\"ready_page\"}\n",
+                "{\"schema\":1,\"kind\":\"ready_page\",\"gate_counts\":{\"open\":0,\"candidate\":0,\"reviewed\":0,\"blocked\":0,\"ready\":0,\"claimed\":0,\"selected\":0},\"worker_cap\":{\"active_count\":0,\"remaining\":1,\"reached\":false}}\n",
             )
             .expect("persist Tier 1 ready-page evidence"),
     );
@@ -141,7 +141,7 @@ fn store_atomically_replaces_state_without_overwriting_sealed_receipts() {
             .persist_tier15_evidence(
                 1,
                 Tier15EvidenceArtifact::Observation,
-                "{\"schema\":1,\"kind\":\"tier15_observation\"}\n",
+                "{\"schema\":1,\"kind\":\"tier15_observation\",\"open_observed\":2,\"open_deduplicated\":1,\"closed_observed\":1,\"budget\":1,\"decisions\":[{\"number\":7,\"classification\":\"unlabeled\",\"decision\":\"held\",\"reason\":\"thin_intent\"}]}\n",
             )
             .expect("persist Tier 1.5 observation evidence"),
     );
@@ -211,7 +211,7 @@ fn store_rejects_a_cursor_when_its_tier_one_evidence_artifact_is_tampered() {
         .persist_tier1_evidence(
             1,
             Tier1EvidenceArtifact::ReadyPage,
-            "{\"schema\":1,\"kind\":\"ready_page\"}\n",
+            "{\"schema\":1,\"kind\":\"ready_page\",\"gate_counts\":{\"open\":0,\"candidate\":0,\"reviewed\":0,\"blocked\":0,\"ready\":0,\"claimed\":0,\"selected\":0},\"worker_cap\":{\"active_count\":0,\"remaining\":1,\"reached\":false}}\n",
         )
         .expect("persist Tier 1 evidence");
     let receipt = receipt_with_evidence(
@@ -236,6 +236,107 @@ fn store_rejects_a_cursor_when_its_tier_one_evidence_artifact_is_tampered() {
     assert!(
         store.load_state().is_err(),
         "a cursor must not trust a receipt whose sealed evidence bytes changed"
+    );
+}
+
+#[test]
+fn store_rejects_self_consistent_tier_one_receipt_with_wrong_producer() {
+    let root = TempRoot::new();
+    let store = acquire(&root);
+    let evidence = store
+        .persist_tier1_evidence(
+            1,
+            Tier1EvidenceArtifact::ReadyPage,
+            "{\"schema\":1,\"kind\":\"ready_page\",\"gate_counts\":{\"open\":0,\"candidate\":0,\"reviewed\":0,\"blocked\":0,\"ready\":0,\"claimed\":0,\"selected\":0},\"worker_cap\":{\"active_count\":0,\"remaining\":1,\"reached\":false}}\n",
+        )
+        .expect("persist canonical Tier 1 evidence");
+    let forged = TierReceipt::new(
+        "owner/repo",
+        1,
+        NoWorkTier::Tier1,
+        "forged-tier1-producer",
+        1,
+        1,
+        TierStatus::Exhausted {
+            reason: DryReason::NoProposalsGenerated,
+        },
+        FunnelCounts::new(0, 0, 0, 0, 0).expect("counts"),
+        vec![evidence],
+    )
+    .expect("self-consistent forged receipt");
+    store
+        .persist_receipt(&forged)
+        .expect("persist forged receipt");
+    let state = WaterfallState::new("owner/repo", 1, NoWorkTier::Tier1)
+        .expect("state")
+        .record_receipt(&forged)
+        .expect("forge advances core cursor");
+
+    assert!(
+        store.persist_state(&state).is_err(),
+        "Tier 1 replay must bind the native producer and evidence semantics"
+    );
+}
+
+#[test]
+fn store_rejects_self_consistent_tier15_funnel_forgery() {
+    let root = TempRoot::new();
+    let store = acquire(&root);
+    let tier_one_evidence = store
+        .persist_tier1_evidence(
+            1,
+            Tier1EvidenceArtifact::ReadyPage,
+            "{\"schema\":1,\"kind\":\"ready_page\",\"gate_counts\":{\"open\":0,\"candidate\":0,\"reviewed\":0,\"blocked\":0,\"ready\":0,\"claimed\":0,\"selected\":0},\"worker_cap\":{\"active_count\":0,\"remaining\":1,\"reached\":false}}\n",
+        )
+        .expect("Tier 1 evidence");
+    let tier_one = TierReceipt::new(
+        "owner/repo",
+        1,
+        NoWorkTier::Tier1,
+        "rust-foreground-tier1-v1",
+        1,
+        1,
+        TierStatus::Exhausted {
+            reason: DryReason::NoProposalsGenerated,
+        },
+        FunnelCounts::new(0, 0, 0, 0, 0).expect("counts"),
+        vec![tier_one_evidence],
+    )
+    .expect("Tier 1 receipt");
+    store.persist_receipt(&tier_one).expect("Tier 1 receipt");
+    let tier15_state = WaterfallState::new("owner/repo", 1, NoWorkTier::Tier1)
+        .expect("state")
+        .record_receipt(&tier_one)
+        .expect("Tier 1.5 state");
+    let observation = store
+        .persist_tier15_evidence(
+            1,
+            Tier15EvidenceArtifact::Observation,
+            "{\"schema\":1,\"kind\":\"tier15_observation\",\"open_observed\":1,\"open_deduplicated\":1,\"closed_observed\":0,\"budget\":1,\"decisions\":[]}\n",
+        )
+        .expect("Tier 1.5 evidence");
+    let forged = TierReceipt::new(
+        "owner/repo",
+        1,
+        NoWorkTier::Tier1_5,
+        "rust-tier1_5-read-only-v1",
+        2,
+        2,
+        TierStatus::Exhausted {
+            reason: DryReason::NoProposalsGenerated,
+        },
+        FunnelCounts::new(0, 0, 0, 0, 0).expect("forged counts"),
+        vec![observation],
+    )
+    .expect("self-consistent forged receipt");
+    store.persist_receipt(&forged).expect("forged receipt");
+    let state = tier15_state
+        .record_receipt(&forged)
+        .expect("forged Tier 1.5 cursor");
+
+    assert!(
+        store.persist_state(&state).is_err(),
+        "Tier 1.5 replay must reconstruct its funnel from canonical evidence"
     );
 }
 
@@ -274,7 +375,7 @@ fn store_rejects_a_cursor_when_tier_one_point_five_evidence_is_tampered() {
         .persist_tier1_evidence(
             1,
             Tier1EvidenceArtifact::ReadyPage,
-            "{\"schema\":1,\"kind\":\"ready_page\"}\n",
+            "{\"schema\":1,\"kind\":\"ready_page\",\"gate_counts\":{\"open\":0,\"candidate\":0,\"reviewed\":0,\"blocked\":0,\"ready\":0,\"claimed\":0,\"selected\":0},\"worker_cap\":{\"active_count\":0,\"remaining\":1,\"reached\":false}}\n",
         )
         .expect("persist Tier 1 evidence");
     let tier_one_receipt = receipt_with_evidence(
@@ -295,7 +396,7 @@ fn store_rejects_a_cursor_when_tier_one_point_five_evidence_is_tampered() {
         .persist_tier15_evidence(
             1,
             Tier15EvidenceArtifact::Observation,
-            "{\"schema\":1,\"kind\":\"tier15_observation\"}\n",
+            "{\"schema\":1,\"kind\":\"tier15_observation\",\"open_observed\":2,\"open_deduplicated\":1,\"closed_observed\":1,\"budget\":1,\"decisions\":[{\"number\":7,\"classification\":\"unlabeled\",\"decision\":\"held\",\"reason\":\"thin_intent\"}]}\n",
         )
         .expect("persist Tier 1.5 evidence");
     let receipt = tier_one_point_five_receipt_with_evidence(

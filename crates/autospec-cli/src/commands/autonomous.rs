@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{claim, queue, CommandFailure};
 
-mod drain;
+pub(crate) mod drain;
 mod resilience;
 // Task 1 owns only the read-only adapter; Task 2 wires its sealed receipt path.
 #[allow(dead_code)]
