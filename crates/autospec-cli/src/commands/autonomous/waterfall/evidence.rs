@@ -180,7 +180,7 @@ pub(super) fn clear_unreferenced_tier4(
     root: &Path,
     pass_id: u64,
 ) -> Result<(), WaterfallStoreError> {
-    for artifact in [
+    let artifacts = [
         Tier4EvidenceArtifact::Policy,
         Tier4EvidenceArtifact::SourcePolicy,
         Tier4EvidenceArtifact::Sources,
@@ -189,7 +189,8 @@ pub(super) fn clear_unreferenced_tier4(
         Tier4EvidenceArtifact::Verification,
         Tier4EvidenceArtifact::RoiRank,
         Tier4EvidenceArtifact::Failure,
-    ] {
+    ];
+    for artifact in artifacts {
         let reference = WaterfallEvidenceArtifact::Tier4(artifact).reference(pass_id)?;
         let path = root.join(reference);
         match fs::remove_file(&path) {
@@ -203,7 +204,69 @@ pub(super) fn clear_unreferenced_tier4(
             }
         }
     }
+    clear_tier4_temporaries(root, pass_id, &artifacts)?;
     Ok(())
+}
+
+fn clear_tier4_temporaries(
+    root: &Path,
+    pass_id: u64,
+    artifacts: &[Tier4EvidenceArtifact],
+) -> Result<(), WaterfallStoreError> {
+    let directory = root.join(format!("waterfall/{pass_id}/tier4"));
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(WaterfallStoreError::Diagnostic(format!(
+                "cannot inspect Tier 4 evidence directory {}: {error}",
+                directory.display()
+            )))
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            WaterfallStoreError::Diagnostic(format!(
+                "cannot inspect Tier 4 evidence entry in {}: {error}",
+                directory.display()
+            ))
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if artifacts.iter().any(|artifact| {
+            is_atomic_temporary(
+                name,
+                WaterfallEvidenceArtifact::Tier4(*artifact).file_name(),
+            )
+        }) {
+            fs::remove_file(entry.path()).map_err(|error| {
+                WaterfallStoreError::Diagnostic(format!(
+                    "cannot clear unreferenced Tier 4 temporary {}: {error}",
+                    entry.path().display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn is_atomic_temporary(name: &str, artifact: &str) -> bool {
+    let prefix = format!(".{artifact}.");
+    let Some(sequence) = name
+        .strip_prefix(&prefix)
+        .and_then(|name| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let Some((process, counter)) = sequence.split_once('.') else {
+        return false;
+    };
+    !process.is_empty()
+        && !counter.is_empty()
+        && process.bytes().all(|byte| byte.is_ascii_digit())
+        && counter.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 pub(super) fn verify(

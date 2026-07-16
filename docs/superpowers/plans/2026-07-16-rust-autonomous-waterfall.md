@@ -53,32 +53,44 @@ conductor tests.
 - [x] Prove foreground performs no shell waterfall invocation, issue edit, or
   comment, and never writes `why-no-work.json` while Tier 1.5–4 are pending.
 
-## Task 4: Port Tier 1.5 native promotion/grooming observation
+## Task 4: Port Tier 1.5 native promotion/grooming observation — foundation complete
 
 **Delivery split:** 4A is a pure core observer and closed decision codec;
 4B is the read-only GitHub adapter plus receipt persistence. No 4B work starts
 until 4A is tested and reviewed.
 
-- [ ] Add a pure `Tier15Input -> Tier15Observation` model with typed
+- [x] Add a pure `Tier15Input -> Tier15Observation` model with typed
   `Produced`, `Skipped`, `Held`, `Quarantined`, and `Routed` decisions. All
   classifications, eligibility outcomes, routes, and skip/hold/quarantine
   reasons are closed enums; duplicate open numbers with different payloads fail
   closed and identical duplicates are deterministic.
-- [ ] Enumerate open and closed non-PR issues with direct read-only GitHub API
+- [x] Enumerate open and closed non-PR issues with direct read-only GitHub API
   requests. Preserve pagination failure, malformed payload, and incomplete
   evidence as `failed`, not exhausted. Never call the existing claim-reconciling
   queue reader or write-capable queue safety command.
-- [ ] Match legacy selection only at the observer boundary: excluded labels,
+- [x] Match legacy selection only at the observer boundary: excluded labels,
   closed fingerprints, already-groomed labels, budget exhaustion, thin or
   ambiguous intent, dependency holds, existing security quarantine, and epic /
   template routing all become evidence records. No label/body/comment/template
   write happens in this task.
-- [ ] Preserve every skip/hold/quarantine/routing reason in a Tier-1.5 receipt.
-- [ ] Keep promotion/body/label mutation outside this observer; a produced
-  candidate returns to normal Rust queue admission.
-- [ ] Test malformed/missing/paginated GitHub data as `failed`, never dry;
+- [x] Preserve every skip/hold/quarantine/routing reason in a Tier-1.5 receipt.
+- [x] Keep promotion/body/label mutation outside this observer; produced
+  candidates retain the Tier 1.5 cursor without queue admission.
+- [ ] Activate normal Rust queue admission only after Tier 1.5 is integrated
+  into the foreground waterfall; no mutation fallback is permitted.
+- [x] Test malformed/missing/paginated GitHub data as `failed`, never dry;
   source/PATH guards must reject shell, legacy promoter/classifier, `gh` write
   verbs, and queue/claim mutation authority.
+
+### Tier 1.5 cutover state
+
+Tier 1.5 pure observation, read-only paginated collection, and sealed receipt
+replay are complete. Commits `9c788344`, `56079e28`, and `db6f3282` provide the
+implemented and reviewed evidence recorded in the Task 4A/4B reports.
+
+Tier 1.5 foreground admission and mutation remain unchecked. Produced
+candidates retain the cursor until a separately reviewed foreground admission
+path exists; the completed foundation does not authorize issue mutation.
 
 ## Task 5: Port Tier 2 local discovery funnel — foundation complete
 

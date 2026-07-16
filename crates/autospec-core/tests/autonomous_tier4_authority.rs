@@ -5,11 +5,17 @@ use std::path::{Path, PathBuf};
 mod guard;
 #[path = "support/tier2_authority_matcher.rs"]
 mod matcher;
+#[path = "support/tier4_authority_scanner.rs"]
+mod scanner;
 
 use guard::assert_no_execution_authority;
 use matcher::{
     code_tokens, contains_path_symbol, contains_qualified_path, has_forbidden_std_module,
     has_module_escape,
+};
+use scanner::{
+    code_without_comments_and_literals, collect_rust_sources, collect_tier4_verifier_sources,
+    production_code,
 };
 
 fn workspace_root() -> PathBuf {
@@ -67,6 +73,14 @@ fn assert_tier4_purity(code: &str, scope: &str, allows_waterfall_store: bool) {
             "{scope} retains direct or aliased HTTP authority: {namespace}"
         );
     }
+    for token in ["http", "https", "Http", "HTTP"] {
+        assert!(
+            !contains_code_token(code, token),
+            "{scope} retains qualified HTTP namespace or facade: {token}"
+        );
+    }
+    // These unqualified names are reserved in Tier 4 because a free call has
+    // no typed local receiver that can distinguish it from HTTP authority.
     for function in ["get", "head", "connect"] {
         assert!(
             !contains_unqualified_call(code, function),
@@ -109,17 +123,6 @@ fn has_raw_byte_type(tokens: &[String]) -> bool {
     false
 }
 
-fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(directory).expect("read Tier 4 module directory") {
-        let path = entry.expect("read Tier 4 module entry").path();
-        if path.is_dir() {
-            collect_rust_sources(&path, sources);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
-            sources.push(path);
-        }
-    }
-}
-
 fn pure_tier4_sources() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources = vec![root.join("src/autonomous/tier4.rs")];
@@ -129,106 +132,116 @@ fn pure_tier4_sources() -> Vec<PathBuf> {
 }
 
 fn production_source(relative: &str) -> String {
-    fs::read_to_string(workspace_root().join(relative))
-        .expect("read Tier 4 production source")
-        .split("\n#[cfg(test)]")
-        .next()
-        .expect("production source before tests")
-        .to_string()
+    production_code(
+        &fs::read_to_string(workspace_root().join(relative))
+            .expect("read Tier 4 production source"),
+        relative,
+    )
 }
 
-fn code_without_comments_and_literals(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut code = String::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if let Some(end) = raw_string_end(bytes, index) {
-            code.push(' ');
-            index = end;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocalIo {
+    None,
+    ReplayRead,
+    EvidenceDelegation,
+}
+
+fn tier4_cli_authority_sources() -> Vec<(String, bool, LocalIo)> {
+    let root = workspace_root();
+    let evidence_root = root.join("crates/autospec-cli/src/commands/autonomous/waterfall/evidence");
+    let mut helpers = Vec::new();
+    collect_tier4_verifier_sources(&evidence_root, &mut helpers);
+    let mut sources = vec![
+        (
+            "crates/autospec-cli/src/commands/autonomous/tier4_receipts.rs".to_string(),
+            true,
+            LocalIo::None,
+        ),
+        (
+            "crates/autospec-cli/src/commands/autonomous/waterfall/evidence.rs".to_string(),
+            false,
+            LocalIo::EvidenceDelegation,
+        ),
+    ];
+    for path in helpers {
+        let relative = path
+            .strip_prefix(&root)
+            .expect("Tier 4 helper in workspace");
+        let file = path.file_name().and_then(|name| name.to_str());
+        let io = if matches!(file, Some("tier4.rs" | "tier4_consistency.rs")) {
+            LocalIo::ReplayRead
+        } else {
+            LocalIo::None
+        };
+        sources.push((relative.to_string_lossy().into_owned(), false, io));
+    }
+    sources.sort_by(|left, right| left.0.cmp(&right.0));
+    sources
+}
+
+fn assert_local_io(code: &str, scope: &str, io: LocalIo) {
+    assert_eq!(
+        contains_path_symbol(code, "fs::read_to_string"),
+        io != LocalIo::None,
+        "{scope} has an invalid replay-read boundary"
+    );
+    let delegation = io == LocalIo::EvidenceDelegation;
+    if delegation {
+        assert!(contains_code_token(code, "atomic_write"));
+        assert!(contains_path_symbol(code, "fs::remove_file"));
+        let tokens = code_tokens(code);
+        for (index, token) in tokens.iter().enumerate() {
+            if token == "remove_file" {
+                assert_eq!(
+                    tokens.get(index.wrapping_sub(1)).map(String::as_str),
+                    Some("::"),
+                    "{scope} aliases its approved local remove operation"
+                );
+            }
+        }
+    }
+    assert_no_direct_file_mutation(code, scope, delegation);
+}
+
+fn assert_no_direct_file_mutation(code: &str, scope: &str, allows_remove_file: bool) {
+    for leaf in [
+        "write",
+        "copy",
+        "hard_link",
+        "create_dir",
+        "remove_dir",
+        "remove_file",
+        "rename",
+    ] {
+        if leaf == "remove_file" && allows_remove_file {
             continue;
         }
-        match bytes[index..] {
-            [b'/', b'/', ..] => {
-                index += 2;
-                while index < bytes.len() && bytes[index] != b'\n' {
-                    index += 1;
-                }
-                code.push(' ');
-            }
-            [b'/', b'*', ..] => {
-                index = block_comment_end(bytes, index + 2);
-                code.push(' ');
-            }
-            [b'"', ..] => {
-                index = quoted_end(bytes, index + 1);
-                code.push(' ');
-            }
-            _ => {
-                code.push(bytes[index] as char);
-                index += 1;
-            }
+        assert!(
+            !contains_code_token(code, leaf),
+            "{scope} retains direct or aliased file mutation authority: {leaf}"
+        );
+    }
+    for mutation in [
+        "fs::write",
+        "fs::copy",
+        "fs::hard_link",
+        "fs::create_dir",
+        "fs::remove_dir",
+        "fs::remove_file",
+        "fs::rename",
+        "File::create",
+        "OpenOptions",
+        "write_all",
+        "set_permissions",
+    ] {
+        if mutation == "fs::remove_file" && allows_remove_file {
+            continue;
         }
+        assert!(
+            !contains_path_symbol(code, mutation) && !contains_code_token(code, mutation),
+            "{scope} retains file mutation authority: {mutation}"
+        );
     }
-    code
-}
-
-fn block_comment_end(bytes: &[u8], mut index: usize) -> usize {
-    let mut depth = 1;
-    while index < bytes.len() && depth > 0 {
-        match bytes[index..] {
-            [b'/', b'*', ..] => {
-                depth += 1;
-                index += 2;
-            }
-            [b'*', b'/', ..] => {
-                depth -= 1;
-                index += 2;
-            }
-            _ => index += 1,
-        }
-    }
-    index
-}
-
-fn quoted_end(bytes: &[u8], mut index: usize) -> usize {
-    while index < bytes.len() {
-        if bytes[index] == b'\\' {
-            index += 2;
-        } else if bytes[index] == b'"' {
-            return index + 1;
-        } else {
-            index += 1;
-        }
-    }
-    index
-}
-
-fn raw_string_end(bytes: &[u8], index: usize) -> Option<usize> {
-    let mut cursor = match bytes.get(index) {
-        Some(b'r') => index + 1,
-        Some(b'b') if bytes.get(index + 1) == Some(&b'r') => index + 2,
-        _ => return None,
-    };
-    let hash_start = cursor;
-    while bytes.get(cursor) == Some(&b'#') {
-        cursor += 1;
-    }
-    if bytes.get(cursor) != Some(&b'"') {
-        return None;
-    }
-    let hashes = cursor - hash_start;
-    cursor += 1;
-    while cursor < bytes.len() {
-        let end = cursor.saturating_add(hashes + 1);
-        if bytes[cursor] == b'"'
-            && end <= bytes.len()
-            && bytes[cursor + 1..end].iter().all(|byte| *byte == b'#')
-        {
-            return Some(end);
-        }
-        cursor += 1;
-    }
-    Some(cursor)
 }
 
 #[test]
@@ -290,6 +303,9 @@ fn authority_guard_rejects_transport_model_facades_and_raw_byte_wrappers() {
         "InferenceGateway::dispatch();",
         "reqwest::Client::new();",
         "use reqwest as facade; facade::get(source);",
+        "crate::http::get(source);",
+        "http::head(source);",
+        "Http::connect(source);",
         "HttpFacade::open(source);",
         "get(source);",
         "type Cache = ReleaseRepository;",
@@ -316,6 +332,49 @@ fn authority_guard_rejects_transport_model_facades_and_raw_byte_wrappers() {
             "Tier 4 guard missed module escape {fixture}"
         );
     }
+    let alias = code_without_comments_and_literals("use std::fs::{write as save}; save(path);");
+    assert!(
+        std::panic::catch_unwind(|| assert_no_direct_file_mutation(&alias, "fixture", false))
+            .is_err(),
+        "Tier 4 guard missed nested file-mutation alias"
+    );
+}
+
+#[test]
+fn authority_source_after_test_module_cannot_evade_scan() {
+    let source =
+        "fn guarded() {}\n#[cfg(test)] mod tests {}\nfn hidden() { crate::http::get(source); }";
+    assert!(
+        std::panic::catch_unwind(|| production_code(source, "fixture")).is_err(),
+        "production authority after a test module evaded the scan"
+    );
+}
+
+#[test]
+fn cli_authority_discovery_finds_future_nested_tier4_helpers() {
+    let root = std::env::temp_dir().join(format!(
+        "autospec-tier4-cli-authority-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("nested/tier4")).expect("create nested verifier tree");
+    fs::write(root.join("nested/tier4_future.rs"), "fn guarded() {}\n")
+        .expect("write future Tier 4 helper");
+    fs::write(root.join("nested/tier4/parser.rs"), "fn guarded() {}\n")
+        .expect("write future nested Tier 4 helper");
+    fs::write(root.join("nested/unrelated.rs"), "fn unrelated() {}\n")
+        .expect("write unrelated helper");
+    let mut sources = Vec::new();
+    collect_tier4_verifier_sources(&root, &mut sources);
+    sources.sort();
+    assert_eq!(
+        sources,
+        [
+            root.join("nested/tier4/parser.rs"),
+            root.join("nested/tier4_future.rs"),
+        ]
+    );
+    fs::remove_dir_all(root).expect("remove nested verifier tree");
 }
 
 #[test]
@@ -335,29 +394,23 @@ fn tier4_cli_boundary_allows_only_disabled_policy_and_local_receipt_replay() {
     }
     assert_tier4_purity(&adapter, "Tier 4 adapter", false);
 
-    for (relative, allows_store, allows_replay_read) in [
-        (
-            "crates/autospec-cli/src/commands/autonomous/tier4_receipts.rs",
-            true,
-            false,
-        ),
-        (
-            "crates/autospec-cli/src/commands/autonomous/waterfall/evidence/tier4.rs",
-            false,
-            true,
-        ),
-        (
-            "crates/autospec-cli/src/commands/autonomous/waterfall/evidence/tier4_consistency.rs",
-            false,
-            true,
-        ),
-        (
-            "crates/autospec-cli/src/commands/autonomous/waterfall/evidence/tier4_shape.rs",
-            false,
-            false,
-        ),
+    let sources = tier4_cli_authority_sources();
+    for required in [
+        "tier4_receipts.rs",
+        "waterfall/evidence.rs",
+        "waterfall/evidence/tier4.rs",
+        "tier4_consistency.rs",
+        "tier4_shape.rs",
     ] {
-        let code = code_without_comments_and_literals(&production_source(relative));
+        assert!(
+            sources
+                .iter()
+                .any(|(source, _, _)| source.ends_with(required)),
+            "Tier 4 CLI authority discovery omitted {required}"
+        );
+    }
+    for (relative, allows_store, io) in sources {
+        let code = code_without_comments_and_literals(&production_source(&relative));
         assert!(!has_module_escape(&code), "{relative} escapes module scope");
         for module in ["env", "process", "net"] {
             assert!(
@@ -365,30 +418,8 @@ fn tier4_cli_boundary_allows_only_disabled_policy_and_local_receipt_replay() {
                 "{relative} retains std::{module} authority"
             );
         }
-        assert_eq!(
-            contains_path_symbol(&code, "fs::read_to_string"),
-            allows_replay_read,
-            "{relative} has an invalid replay-read boundary"
-        );
-        assert_tier4_purity(&code, relative, allows_store);
-        for mutation in [
-            "fs::write",
-            "fs::copy",
-            "fs::hard_link",
-            "fs::create_dir",
-            "fs::remove_dir",
-            "fs::remove_file",
-            "fs::rename",
-            "File::create",
-            "OpenOptions",
-            "write_all",
-            "set_permissions",
-        ] {
-            assert!(
-                !contains_path_symbol(&code, mutation) && !contains_code_token(&code, mutation),
-                "{relative} retains file mutation authority: {mutation}"
-            );
-        }
+        assert_tier4_purity(&code, &relative, allows_store);
+        assert_local_io(&code, &relative, io);
     }
 }
 
@@ -407,6 +438,8 @@ fn cutover_plan_states_tier4_foundation_without_claiming_activation() {
         "Activation requires a trusted typed source policy and policy-aware Tier 1.",
         "This foundation is not a full Rust cutover.",
         "Live retrieval, source activation, foreground wiring, Task 8 ideation, executor/premerge parity, validation/installer migration, and legacy deletion remain unchecked.",
+        "Tier 1.5 pure observation, read-only paginated collection, and sealed receipt replay are complete.",
+        "Tier 1.5 foreground admission and mutation remain unchecked.",
     ] {
         assert!(plan.contains(required), "cutover plan omits: {required}");
     }

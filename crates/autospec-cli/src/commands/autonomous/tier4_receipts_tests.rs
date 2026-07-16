@@ -269,6 +269,13 @@ fn tier4_disabled_policy_seals_only_checked_in_policy_and_retains_cursor() {
     )
     .expect("nonempty Tier 4 configuration parses");
     assert_eq!(config.tier4.sources.len(), 1);
+    let tier4_dir = root.path().join("waterfall/waterfall/1/tier4");
+    fs::create_dir_all(&tier4_dir).expect("create Tier 4 evidence directory");
+    fs::write(
+        tier4_dir.join(".source_policy.json.123.0.tmp"),
+        "unreferenced source policy temporary\n",
+    )
+    .expect("seed unreferenced source evidence");
 
     assert_eq!(
         record_tier4(
@@ -279,6 +286,18 @@ fn tier4_disabled_policy_seals_only_checked_in_policy_and_retains_cursor() {
         .expect("disabled Tier 4 receipt"),
         Tier4Progress::NotRun(DISABLED_REASON.to_string())
     );
+    let mut evidence_files = fs::read_dir(&tier4_dir)
+        .expect("read Tier 4 evidence directory")
+        .map(|entry| {
+            entry
+                .expect("read Tier 4 evidence entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    evidence_files.sort();
+    assert_eq!(evidence_files, ["policy.json"]);
     let store = store(&root);
     let receipt = store
         .load_receipt(1, NoWorkTier::Tier4)
