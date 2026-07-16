@@ -49,11 +49,57 @@ pub(crate) fn production_code(source: &str, scope: &str) -> String {
         return source.to_string();
     };
     let tokens = code_tokens(&code_without_comments_and_literals(tests));
-    assert!(
-        is_terminal_test_module(&tokens),
-        "{scope} has production authority after its test module"
-    );
-    production.to_string()
+    if is_terminal_test_module(&tokens) {
+        return production.to_string();
+    }
+    strip_test_items(source, scope)
+}
+
+fn strip_test_items(source: &str, scope: &str) -> String {
+    let tokens = code_tokens(&code_without_comments_and_literals(source));
+    let attribute = ["#", "[", "cfg", "(", "test", ")", "]"];
+    let mut production = Vec::new();
+    let mut cursor = 0;
+    while cursor < tokens.len() {
+        if !tokens[cursor..].starts_with(&attribute.map(str::to_string)) {
+            production.push(tokens[cursor].clone());
+            cursor += 1;
+            continue;
+        }
+        let item_start = cursor + attribute.len();
+        let item_end = test_item_end(&tokens, item_start);
+        let is_test_module = tokens[item_start..item_end]
+            .windows(2)
+            .any(|window| window == ["mod", "tests"]);
+        assert!(
+            !is_test_module || item_end == tokens.len(),
+            "{scope} has production authority after its test module"
+        );
+        cursor = item_end;
+    }
+    production.join(" ")
+}
+
+fn test_item_end(tokens: &[String], start: usize) -> usize {
+    let open = tokens[start..]
+        .iter()
+        .position(|token| token == "{")
+        .map(|offset| start + offset)
+        .expect("cfg(test) item has a body");
+    let mut depth = 0_u32;
+    for (index, token) in tokens.iter().enumerate().skip(open) {
+        match token.as_str() {
+            "{" => depth += 1,
+            "}" => {
+                depth = depth.checked_sub(1).expect("balanced cfg(test) item");
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated cfg(test) item")
 }
 
 fn is_terminal_test_module(tokens: &[String]) -> bool {

@@ -437,7 +437,7 @@ fn cutover_plan_states_tier2_completion_and_remaining_gates() {
         "Tier 2 strict collection, pure typed funnel, sealed receipt replay, and checked-in disabled policy are complete.",
         "A disabled policy produces `NotRun`, retains Tier 2, and is not a dry result.",
         "Live model activation remains a separate direct-child safety gate.",
-        "Legacy deletion remains blocked on broader native producer, foreground, and parity work.",
+        "Legacy deletion remains blocked on broader native producer activation and parity work.",
     ] {
         assert!(plan.contains(required), "cutover plan omits: {required}");
     }

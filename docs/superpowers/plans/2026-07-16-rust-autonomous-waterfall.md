@@ -113,9 +113,9 @@ a fixed executable and version, direct argv, deadline, capped output, schema
 compatibility, read-only denial, and network-policy proof before the checked-in
 disabled policy can change.
 
-Legacy deletion remains blocked on broader native producer, foreground, and
+Legacy deletion remains blocked on broader native producer activation and
 parity work. This completed foundation does not add a live model runner,
-foreground dispatch, GitHub mutation, or a legacy fallback.
+GitHub mutation, or a legacy fallback.
 
 ## Task 6: Port Tier 3 architecture/debt producer
 
@@ -125,8 +125,9 @@ Tier 3 typed metadata foundation and checked-in disabled receipt policy are
 complete. Metadata-source activation requires a trusted typed metadata source
 and #1602 typed configuration.
 
-Foreground wiring, Tier 4, ideation, and legacy deletion remain separately
-gated. This foundation does not permit legacy deletion.
+Trusted metadata activation, Tier 4 source activation, ideation, and legacy
+deletion remain separately gated. This foundation does not permit legacy
+deletion.
 
 - [x] Define pure architecture, test-coverage, and debt evidence adapters with
   deterministic rule versions, typed failures, sealed receipts, and Rust-only
@@ -142,8 +143,8 @@ gated. This foundation does not permit legacy deletion.
   untrusted evidence storage; no shell or branch/issue mutation.
 - [x] Run the same typed funnel as Tier 2; disabled policy is `not_run`, a
   source error is `failed`, and an exhausted configured source is dry.
-- [ ] Activate a trusted typed source policy only after Tier 1 becomes
-  policy-aware, then wire Tier 4 into the foreground waterfall.
+- [ ] Activate a trusted typed source policy only after direct bounded source
+  retrieval has its own reviewed safety proof; config remains replay trust.
 
 ### Tier 4 cutover state
 
@@ -152,13 +153,36 @@ checked-in disabled policy are complete. A nonempty parsed source configuration
 is data, not activation. It produces the exact disabled `NotRun` receipt, seals
 no source evidence, and retains the Tier 4 cursor.
 
-Activation requires a trusted typed source policy and policy-aware Tier 1.
+Activation requires direct bounded retrieval and a trusted typed source policy.
 Production remains disabled-only until both gates are implemented and tested;
 the existing enabled evaluator and replay fixtures do not authorize retrieval.
 
 This foundation is not a full Rust cutover. Live retrieval, source activation,
-foreground wiring, Task 8 ideation, executor/premerge parity,
-validation/installer migration, and legacy deletion remain unchecked.
+Task 8 ideation, executor/premerge parity, validation/installer migration, and
+legacy deletion remain unchecked.
+
+## Foreground cursor traversal — complete
+
+**Committed:** `f2abc620`, `6c414429`, `02f04ad1`; authority proof follows in
+the Task 4 closeout commit.
+
+- [x] Derive policy-aware replay trust once, fence every later-tier receipt
+  write with the current lifecycle lease, and acquire locks in lease/store order.
+- [x] Resume exactly one current cursor tier on a genuinely empty repository
+  queue while ready work and reached worker capacity retain precedence.
+- [x] Retain pending, produced, failed, blocked, and not-run outcomes without
+  queue admission, claim mutation, executor dispatch, or no-work recording.
+- [ ] Activate Tier 2 model-backed local discovery with reviewed direct-child
+  safety and typed output bounds.
+- [ ] Activate Tier 3 trusted metadata collection through its typed source and
+  #1602 configuration contract.
+- [ ] Activate Tier 4 bounded external retrieval and trusted source policy.
+
+Current production traversal advances through empty Tier 1 and Tier 1.5
+observations, then stops at Tier 2 `NotRun` under the checked-in disabled
+policy. It does not traverse Tier 3 or Tier 4 in production, record a complete
+pass, write `why-no-work.json`, invoke ideation, admit Tier 1.5 candidates,
+dispatch an executor, or call any legacy waterfall.
 
 ## Task 8: Complete pass recording and local ideation
 

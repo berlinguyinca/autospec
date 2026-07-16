@@ -341,9 +341,9 @@ fn cutover_plan_states_tier4_foundation_without_claiming_activation() {
     for required in [
         "Tier 4 typed source policy, pure typed funnel, sealed receipt replay, and checked-in disabled policy are complete.",
         "A nonempty parsed source configuration is data, not activation.",
-        "Activation requires a trusted typed source policy and policy-aware Tier 1.",
+        "Activation requires direct bounded retrieval and a trusted typed source policy.",
         "This foundation is not a full Rust cutover.",
-        "Live retrieval, source activation, foreground wiring, Task 8 ideation, executor/premerge parity, validation/installer migration, and legacy deletion remain unchecked.",
+        "Live retrieval, source activation, Task 8 ideation, executor/premerge parity, validation/installer migration, and legacy deletion remain unchecked.",
         "Tier 1.5 pure observation, read-only paginated collection, and sealed receipt replay are complete.",
         "Tier 1.5 foreground admission and mutation remain unchecked.",
     ] {

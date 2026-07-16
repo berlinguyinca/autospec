@@ -380,7 +380,7 @@ fn cutover_plan_states_tier3_foundation_and_remaining_gates() {
     for required in [
         "Tier 3 typed metadata foundation and checked-in disabled receipt policy are complete.",
         "Metadata-source activation requires a trusted typed metadata source and #1602 typed configuration.",
-        "Foreground wiring, Tier 4, ideation, and legacy deletion remain separately gated.",
+        "Trusted metadata activation, Tier 4 source activation, ideation, and legacy deletion remain separately gated.",
         "This foundation does not permit legacy deletion.",
     ] {
         assert!(plan.contains(required), "cutover plan omits: {required}");
