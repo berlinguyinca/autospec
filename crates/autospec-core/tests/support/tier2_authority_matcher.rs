@@ -39,35 +39,14 @@ pub(crate) fn contains_path_symbol(code: &str, path: &str) -> bool {
 
 pub(crate) fn has_forbidden_std_module(code: &str, module: &str) -> bool {
     let tokens = code_tokens(code);
-    if contains_tokens(&tokens, &["std", "::", module]) {
+    if contains_std_path_component(&tokens, module) {
         return true;
     }
-    for start in 0..tokens.len().saturating_sub(2) {
-        if tokens[start].as_str() == "std"
-            && tokens[start + 1].as_str() == "::"
-            && tokens[start + 2].as_str() == "{"
-        {
-            let mut depth = 1;
-            let mut previous = "{";
-            for token in &tokens[start + 3..] {
-                match token.as_str() {
-                    "{" => depth += 1,
-                    "}" => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    _ if depth == 1 && (previous == "{" || previous == ",") && token == module => {
-                        return true;
-                    }
-                    _ => {}
-                }
-                previous = token;
-            }
-        }
-    }
-    false
+    std_use_tree_contains(&tokens, module)
+}
+
+pub(crate) fn contains_function_call(code: &str, function: &str) -> bool {
+    contains_tokens(&code_tokens(code), &[function, "("])
 }
 
 pub(crate) fn has_module_escape(code: &str) -> bool {
@@ -82,6 +61,52 @@ fn contains_tokens(tokens: &[String], expected: &[&str]) -> bool {
             .map(String::as_str)
             .eq(expected.iter().copied())
     })
+}
+
+fn contains_std_path_component(tokens: &[String], module: &str) -> bool {
+    for start in 0..tokens.len().saturating_sub(2) {
+        if tokens[start].as_str() != "std" || tokens[start + 1].as_str() != "::" {
+            continue;
+        }
+        let mut cursor = start + 2;
+        while cursor < tokens.len() {
+            if tokens[cursor] == module {
+                return true;
+            }
+            if tokens.get(cursor + 1).is_some_and(|token| token == "::") {
+                cursor += 2;
+            } else {
+                break;
+            }
+        }
+    }
+    false
+}
+
+fn std_use_tree_contains(tokens: &[String], module: &str) -> bool {
+    for start in 0..tokens.len().saturating_sub(3) {
+        if tokens[start].as_str() != "use"
+            || tokens[start + 1].as_str() != "std"
+            || tokens[start + 2].as_str() != "::"
+        {
+            continue;
+        }
+        for cursor in start + 3..tokens.len() {
+            let token = tokens[cursor].as_str();
+            if token == ";" {
+                break;
+            }
+            if token == module
+                && matches!(
+                    tokens.get(cursor.wrapping_sub(1)).map(String::as_str),
+                    Some("::" | "{" | ",")
+                )
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn is_identifier_character(character: char) -> bool {

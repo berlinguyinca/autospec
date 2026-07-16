@@ -6,7 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod matcher;
 
 use matcher::{
-    contains_path_symbol, contains_qualified_path, has_forbidden_std_module, has_module_escape,
+    contains_function_call, contains_path_symbol, contains_qualified_path,
+    has_forbidden_std_module, has_module_escape,
 };
 
 fn pure_tier2_sources() -> Vec<PathBuf> {
@@ -174,12 +175,26 @@ fn authority_matcher_ignores_comments_literals_and_identifier_substrings() {
 #[test]
 fn authority_matcher_handles_module_escapes_grouped_imports_and_safe_nouns() {
     let imports = code_without_comments_and_literals(
-        "use std::{fs, env}; use std :: process; let queue = Vec::new();",
+        "use std::{fs, env}; use std :: process; use std::os::unix::fs; \
+         use std::{os::{unix::fs}}; let queue = Vec::new(); let checkout = 1;",
     );
     assert!(has_forbidden_std_module(&imports, "fs"));
     assert!(has_forbidden_std_module(&imports, "env"));
     assert!(has_forbidden_std_module(&imports, "process"));
+    let nested_imports =
+        code_without_comments_and_literals("use std::os::unix::fs; use std::{os::{unix::fs}};");
+    assert!(has_forbidden_std_module(&nested_imports, "fs"));
     assert!(!contains_qualified_path(&imports, "queue"));
+    assert!(!contains_qualified_path(&imports, "checkout"));
+    assert!(!contains_function_call(&imports, "checkout"));
+    assert!(contains_function_call(
+        &code_without_comments_and_literals("checkout(\"branch\");"),
+        "checkout"
+    ));
+    assert!(contains_qualified_path(
+        &code_without_comments_and_literals("gh::issue::list();"),
+        "gh"
+    ));
     assert!(contains_qualified_path(
         &code_without_comments_and_literals("queue::read();"),
         "queue"
@@ -233,6 +248,7 @@ fn pure_tier2_sources_reject_external_and_mutation_authority() {
             "queue",
             "claim",
             "github",
+            "gh",
             "branch",
             "worktree",
             "issue",
@@ -286,7 +302,6 @@ fn pure_tier2_sources_reject_external_and_mutation_authority() {
             "edit_issue",
             "comment_issue",
             "create_branch",
-            "checkout",
         ] {
             assert!(
                 !contains_code_token(&code, forbidden),
@@ -294,6 +309,11 @@ fn pure_tier2_sources_reject_external_and_mutation_authority() {
                 source.display()
             );
         }
+        assert!(
+            !contains_function_call(&code, "checkout"),
+            "{} retains checkout call authority",
+            source.display()
+        );
     }
     assert!(saw_documents, "guard opaque Tier 2 evidence documents");
     assert!(
@@ -322,6 +342,7 @@ fn strict_collector_source_is_read_only_and_legacy_free() {
         "queue",
         "claim",
         "github",
+        "gh",
         "branch",
         "worktree",
         "issue",
@@ -385,13 +406,16 @@ fn strict_collector_source_is_read_only_and_legacy_free() {
         "edit_issue",
         "comment_issue",
         "create_branch",
-        "checkout",
     ] {
         assert!(
             !contains_code_token(&code, forbidden),
             "strict collector retains prohibited authority: {forbidden}"
         );
     }
+    assert!(
+        !contains_function_call(&code, "checkout"),
+        "strict collector retains checkout call authority"
+    );
     assert!(
         !contains_code_token(&code, "symlink"),
         "strict collector retains symlink creation authority"
