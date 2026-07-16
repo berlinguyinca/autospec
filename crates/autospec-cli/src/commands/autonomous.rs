@@ -27,6 +27,12 @@ use super::{claim, queue, CommandFailure};
 
 mod drain;
 mod resilience;
+// Task 1 owns only the read-only adapter; Task 2 wires its sealed receipt path.
+#[allow(dead_code)]
+mod tier15;
+// Task 2 persists sealed observations but has no foreground caller by design.
+#[allow(dead_code)]
+mod tier15_receipts;
 mod waterfall;
 mod waterfall_coordinator;
 #[cfg(test)]

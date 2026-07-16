@@ -31,6 +31,18 @@ impl Tier15Observation {
         &self.decisions
     }
 
+    pub fn open_observed(&self) -> usize {
+        self.open_observed
+    }
+
+    pub fn open_deduplicated(&self) -> usize {
+        self.open_deduplicated
+    }
+
+    pub fn closed_observed(&self) -> usize {
+        self.closed_observed
+    }
+
     pub fn produced_count(&self) -> usize {
         self.decisions
             .iter()

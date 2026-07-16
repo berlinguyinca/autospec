@@ -217,6 +217,26 @@ fn observer_marks_unselected_candidates_as_budget_exhausted() {
 }
 
 #[test]
+fn observer_exposes_immutable_funnel_snapshot_counts() {
+    let issue = open(
+        1,
+        "Counted once",
+        "fix: retain immutable counts for the sealed Tier 1.5 receipt.",
+        &[],
+    );
+    let observation = observe_tier15(Tier15Input::new(
+        vec![issue.clone(), issue],
+        vec![closed(2, "Closed evidence", "completed")],
+        1,
+    ))
+    .expect("complete evidence produces an observation");
+
+    assert_eq!(observation.open_observed(), 2);
+    assert_eq!(observation.open_deduplicated(), 1);
+    assert_eq!(observation.closed_observed(), 1);
+}
+
+#[test]
 fn observer_produces_explicit_fix_body_despite_typed_title() {
     let observation = observe_tier15(Tier15Input::new(
         vec![open(
