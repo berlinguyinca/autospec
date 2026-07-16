@@ -26,6 +26,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::{claim, queue, CommandFailure};
 
 pub(crate) mod drain;
+// Task 3 wires the closed dispatcher into the foreground cycle.
+#[allow(dead_code)]
+mod foreground_waterfall;
+#[cfg(test)]
+mod foreground_waterfall_tests;
 mod resilience;
 // Task 1 owns only the read-only adapter; Task 2 wires its sealed receipt path.
 #[allow(dead_code)]

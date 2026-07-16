@@ -1,0 +1,285 @@
+use std::cell::Cell;
+use std::fs;
+
+use autospec_core::autonomous::config::AutonomousConfig;
+use autospec_core::autonomous::no_work::NoWorkTier;
+use autospec_core::coordination::{QueueGateCounts, ReadyQueuePlan, WorkerCap};
+
+use super::foreground_waterfall::{
+    run_injected, run_one_tier, ForegroundWaterfallProgress, InjectedProgress,
+};
+use super::resilience::acquire_test_lifecycle;
+use super::tier2_receipts_tests::{TempRoot, REPO};
+use super::tier4_receipts_tests::seed_tier_four_cursor;
+use super::waterfall::{StoreAcquisition, WaterfallStore};
+use super::waterfall_coordinator::Tier1QueueEvidence;
+
+const CLOSED_ORDER: [NoWorkTier; 5] = [
+    NoWorkTier::Tier1,
+    NoWorkTier::Tier1_5,
+    NoWorkTier::Tier2,
+    NoWorkTier::Tier3,
+    NoWorkTier::Tier4,
+];
+
+#[test]
+fn driver_runs_only_the_current_tier_and_returns_the_reloaded_cursor() {
+    let fixture = DriverFixture::at(NoWorkTier::Tier1);
+    let (progress, calls) =
+        fixture.run_with_outcomes([(NoWorkTier::Tier1, InjectedProgress::Advanced)]);
+
+    assert_eq!(
+        progress,
+        ForegroundWaterfallProgress::Pending {
+            tier: NoWorkTier::Tier1_5
+        }
+    );
+    assert_eq!(calls, vec![NoWorkTier::Tier1]);
+    assert_eq!(fixture.reloads.get(), 1);
+}
+
+#[test]
+fn driver_retains_pending_produced_failed_blocked_and_not_run() {
+    for outcome in DriverFixture::retained_outcomes() {
+        let fixture = DriverFixture::at(NoWorkTier::Tier2);
+        let expected = outcome.expected_progress(NoWorkTier::Tier2);
+        let (progress, calls) = fixture.run_with_outcomes([(NoWorkTier::Tier2, outcome)]);
+
+        assert_eq!(progress, expected);
+        assert_eq!(calls, vec![NoWorkTier::Tier2]);
+        assert_eq!(fixture.cursor(), NoWorkTier::Tier2);
+        assert_eq!(fixture.reloads.get(), 0);
+    }
+}
+
+#[test]
+fn closed_tier_order_is_exact_and_each_advance_stops_after_one_call() {
+    for (index, tier) in CLOSED_ORDER.into_iter().enumerate() {
+        let fixture = DriverFixture::at(tier);
+        let (progress, calls) = fixture.run_with_outcomes([(tier, InjectedProgress::Advanced)]);
+        let next = CLOSED_ORDER[(index + 1) % CLOSED_ORDER.len()];
+
+        assert_eq!(
+            progress,
+            ForegroundWaterfallProgress::Pending { tier: next }
+        );
+        assert_eq!(calls, vec![tier]);
+        assert_eq!(fixture.cursor(), next);
+    }
+}
+
+#[test]
+fn nonempty_tier4_config_remains_disabled_production_data() {
+    let root = TempRoot::new();
+    seed_tier_four_cursor(&root);
+    let lease = acquire_test_lifecycle(root.path(), REPO).expect("lifecycle lease");
+    let config = configured_tier4();
+    let plan = empty_plan();
+
+    let progress = run_one_tier(
+        root.path(),
+        REPO,
+        &lease,
+        &config,
+        Tier1QueueEvidence::EmptyPage(&plan),
+    )
+    .expect("disabled Tier 4 dispatch");
+
+    assert!(matches!(
+        progress,
+        ForegroundWaterfallProgress::NotRun {
+            tier: NoWorkTier::Tier4,
+            ..
+        }
+    ));
+    assert_eq!(source_fetch_count(&root), 0);
+}
+
+#[test]
+fn waterfall_lock_contention_is_pending_and_never_blocked() {
+    let root = TempRoot::new();
+    let lease = acquire_test_lifecycle(root.path(), REPO).expect("lifecycle lease");
+    let held = match WaterfallStore::acquire(root.path().join("waterfall"), REPO)
+        .expect("waterfall lock")
+    {
+        StoreAcquisition::Acquired(store) => store,
+        StoreAcquisition::Held => panic!("fresh fixture lock is unexpectedly held"),
+    };
+    let plan = empty_plan();
+
+    let progress = run_one_tier(
+        root.path(),
+        REPO,
+        &lease,
+        &AutonomousConfig::default(),
+        Tier1QueueEvidence::EmptyPage(&plan),
+    )
+    .expect("contended dispatch");
+
+    assert_eq!(
+        progress,
+        ForegroundWaterfallProgress::Pending {
+            tier: NoWorkTier::Tier1
+        }
+    );
+    drop(held);
+}
+
+#[test]
+fn dispatcher_has_no_no_work_ideation_or_execution_authority() {
+    let source = include_str!("foreground_waterfall.rs");
+    let production = source
+        .split("\n#[cfg(test)]")
+        .next()
+        .expect("production source");
+
+    assert!(production.contains("TIER15_OBSERVATION_BUDGET: usize = 5"));
+    let dispatch = production
+        .split("fn dispatch_tier")
+        .nth(1)
+        .expect("tier dispatcher")
+        .split("fn finish_progress")
+        .next()
+        .expect("dispatcher body");
+    assert!(!dispatch.contains("Blocked"));
+    for forbidden in [
+        "why_no_work",
+        "ideat",
+        "queue::",
+        "claim::",
+        "executor",
+        "std::process",
+        "Command",
+        "bash",
+        "sh -c",
+        "repo_root",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "dispatcher retains prohibited authority: {forbidden}"
+        );
+    }
+}
+
+struct DriverFixture {
+    cursor: Cell<NoWorkTier>,
+    reloads: Cell<usize>,
+}
+
+impl DriverFixture {
+    fn at(tier: NoWorkTier) -> Self {
+        Self {
+            cursor: Cell::new(tier),
+            reloads: Cell::new(0),
+        }
+    }
+
+    fn retained_outcomes() -> Vec<InjectedProgress> {
+        vec![
+            InjectedProgress::Pending,
+            InjectedProgress::Produced(2),
+            InjectedProgress::Failed("producer failed".to_string()),
+            InjectedProgress::Blocked("policy blocked".to_string()),
+            InjectedProgress::NotRun("producer disabled".to_string()),
+        ]
+    }
+
+    fn run_with_outcomes<const N: usize>(
+        &self,
+        outcomes: [(NoWorkTier, InjectedProgress); N],
+    ) -> (ForegroundWaterfallProgress, Vec<NoWorkTier>) {
+        let outcomes = Vec::from(outcomes);
+        let mut calls = Vec::new();
+        let current = self.cursor.get();
+        let progress = run_injected(
+            current,
+            |tier| {
+                calls.push(tier);
+                outcomes
+                    .iter()
+                    .find(|(expected, _)| *expected == tier)
+                    .map(|(_, outcome)| outcome.clone())
+                    .ok_or_else(|| format!("unexpected tier {tier:?}"))
+            },
+            || {
+                self.reloads.set(self.reloads.get() + 1);
+                let next = next_tier(current);
+                self.cursor.set(next);
+                Ok(next)
+            },
+        )
+        .expect("injected dispatch");
+        (progress, calls)
+    }
+
+    fn cursor(&self) -> NoWorkTier {
+        self.cursor.get()
+    }
+}
+
+impl InjectedProgress {
+    fn expected_progress(&self, tier: NoWorkTier) -> ForegroundWaterfallProgress {
+        match self {
+            Self::Pending => ForegroundWaterfallProgress::Pending { tier },
+            Self::Advanced => unreachable!("advanced reloads the cursor"),
+            Self::Produced(count) => ForegroundWaterfallProgress::Produced {
+                tier,
+                count: *count,
+            },
+            Self::Failed(reason) => ForegroundWaterfallProgress::Failed {
+                tier,
+                reason: reason.clone(),
+            },
+            Self::Blocked(reason) => ForegroundWaterfallProgress::Blocked {
+                tier,
+                reason: reason.clone(),
+            },
+            Self::NotRun(reason) => ForegroundWaterfallProgress::NotRun {
+                tier,
+                reason: reason.clone(),
+            },
+        }
+    }
+}
+
+fn next_tier(tier: NoWorkTier) -> NoWorkTier {
+    match tier {
+        NoWorkTier::Tier1 => NoWorkTier::Tier1_5,
+        NoWorkTier::Tier1_5 => NoWorkTier::Tier2,
+        NoWorkTier::Tier2 => NoWorkTier::Tier3,
+        NoWorkTier::Tier3 => NoWorkTier::Tier4,
+        NoWorkTier::Tier4 => NoWorkTier::Tier1,
+    }
+}
+
+fn configured_tier4() -> AutonomousConfig {
+    AutonomousConfig::parse(
+        "tier4:\n  sources:\n    - id: alpha\n      host: alpha.example.test\n      path: /facts\n      max_bytes: 1024\n      deadline_millis: 1000\n",
+    )
+    .expect("configured Tier 4")
+}
+
+fn empty_plan() -> ReadyQueuePlan {
+    ReadyQueuePlan {
+        ready: Vec::new(),
+        blocked: Vec::new(),
+        claimed: Vec::new(),
+        conflicts: Vec::new(),
+        worker_cap: WorkerCap {
+            max_repo_workers: 1,
+            active_count: 0,
+            remaining: 1,
+            reached: false,
+        },
+        batch: Vec::new(),
+        gate_counts: QueueGateCounts::default(),
+    }
+}
+
+fn source_fetch_count(root: &TempRoot) -> usize {
+    let tier4 = root.path().join("waterfall/1/tier4");
+    ["source-policy.json", "sources.json"]
+        .into_iter()
+        .filter(|name| fs::metadata(tier4.join(name)).is_ok())
+        .count()
+}
