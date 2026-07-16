@@ -22,6 +22,9 @@
 - `NoMetadataFindings` is a new closed `DryReason` variant; update the
   no-work codec's fixed reason-count shape and exact-key tests with the core
   contract rather than aliasing it to a proposal-stage dry reason.
+- Bump no-work state writes to schema two; accept and migrate only exact
+  schema-one five-reason counts by adding zero `NoMetadataFindings`, then
+  re-emit schema two. Schema-two requires all six exact keys.
 - Produced evidence is planning-only and never mutates GitHub or dispatches work.
 - A failed Tier 3 receipt has the all-zero funnel `(0,0,0,0,0)`; its ordered
   prefix artifacts carry the only validated partial facts.
@@ -89,6 +92,11 @@ Extend the closed no-work `DryReason` set with
 `NoMetadataFindings` / `"no_metadata_findings"`, including codec count arrays,
 strict exact-key parsing, and its focused state round-trip test. This is the
 only dry outcome a complete empty Tier 3 metadata scan may produce.
+
+Version the persistent no-work state from schema one to schema two: preserve
+valid exact schema-one states by adding zero metadata findings during parse,
+re-emit schema two, and reject malformed schema-one or any unsupported schema.
+Test both migration and exact-key rejection alongside the new reason.
 
 Define `Tier3Stage::as_str`, `Tier3FailureCode::{as_str,parse}`, and
 `Tier3Failure::status_reason` as a closed, round-trippable
@@ -180,6 +188,12 @@ The generic core `WaterfallState` already advances a valid exhausted Tier 3
 receipt, so do not widen core cursor logic. Add CLI `WaterfallStore`
 `persist_tier3_evidence` / `verify_tier3_evidence` siblings to Tier 2 and its
 `NoWorkTier::Tier3` replay branch instead.
+
+Although generic core `WaterfallState::record_receipt` advances any validated
+current-tier receipt, the CLI must reject completed Tier 3 state receipts unless
+they are exactly `Exhausted(NoMetadataFindings)`. Add forged-state tests for
+`NotRun`, `Produced`, `Failed`, and every other exhausted reason, so those
+terminal results cannot advance the Tier 3 cursor by hand-edited state.
 
 - [ ] **Step 4: Implement the disabled adapter and coordinator**
 

@@ -74,7 +74,11 @@ inference.
 adapters completed successfully and the sealed ranked set is empty. It is not
 interchangeable with `NoProposalsGenerated`, which belongs to proposal
 generation; its addition updates the no-work reason codec and its exact-key
-state-count tests together with the Tier 3 core.
+state-count tests together with the Tier 3 core. Because reason counts are a
+persistent exact-key state artifact, writers bump the no-work schema to two;
+readers accept only exact schema-one five-reason state (defaulting the new
+count to zero) or exact schema-two six-reason state, and always re-emit schema
+two. Malformed schema-one count objects and every other schema remain rejected.
 
 `Tier3Failure` carries only validated predecessor evidence: no predecessor for
 architecture; architecture before coverage; architecture and coverage before
@@ -127,6 +131,14 @@ receipt and leaves the cursor unchanged. `Produced` findings are planning
 evidence only; they never create issues, labels, claims, branches, PRs, or
 implementation work.
 
+Generic `WaterfallState` records an already-validated receipt without knowing
+Tier 3's producer semantics. Therefore the CLI Tier 3 coordinator records a
+receipt into completed state only for `Exhausted(NoMetadataFindings)`, and its
+state-receipt verifier rejects a completed Tier 3 receipt with `NotRun`,
+`Produced`, `Failed`, or any other exhausted reason. This prevents a forged
+state file from advancing Tier 3 through a terminal result that must retain its
+cursor.
+
 `failure.json` has exactly `schema`, `kind`, `predecessor_digest`, `stage`,
 `code`, `status_reason`, `detail`, and `funnel`. Its stage/code/status reason
 must round-trip through the closed core grammar, its bounded detail must be
@@ -154,11 +166,12 @@ legacy code. Those remain separately gated work.
 
 - Core tests prove closed stage precedence, validation, deterministic dedup and
   rank order, partial failure prefixes, count invariants, canonical documents,
-  and no authority leaks.
+  exact no-work schema-one migration/schema-two rewrite, and no authority leaks.
 - CLI tests prove disabled, exhausted, produced, and every failure cursor rule;
   evidence-before-receipt-before-cursor ordering; replay and tamper rejection;
   exact artifact references; malformed policy/status/funnel rejection; and no
-  direct process/network/GitHub/queue action.
+  direct process/network/GitHub/queue action. Forged completed Tier 3 state
+  receipts with any non-`NoMetadataFindings` terminal status are rejected.
 - Formatting, scoped clippy, package tests, native fast validation, and
   `git diff --check` pass. Every new Tier 3 source or test file stays at 450
   lines or fewer.
