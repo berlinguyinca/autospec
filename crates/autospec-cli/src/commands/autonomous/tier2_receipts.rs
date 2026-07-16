@@ -347,3 +347,68 @@ fn store_error(error: WaterfallStoreError) -> String {
         | WaterfallStoreError::InvalidState(reason) => reason,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn receipt_coordinator_keeps_only_local_persistence_authority() {
+        let source = include_str!("tier2_receipts.rs");
+        let production = source
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("production source before module tests");
+        assert!(
+            production.contains("WaterfallStore"),
+            "Tier 2 coordinator owns the local waterfall persistence boundary"
+        );
+        let gh_cli = ["\"", "g", "h "].concat();
+        for forbidden in [
+            "std::env",
+            "std::process",
+            "std::net",
+            "Command",
+            "AUTOSPEC_SPECIALIST_LLM_STUB_OUTPUT",
+            "scan_specialists",
+            "load_or_derive",
+            "autospec-explore",
+            "bash",
+            "zsh",
+            "sh -c",
+            "omx",
+            "curl",
+            gh_cli.as_str(),
+            "github",
+            "queue",
+            "claim",
+            "label",
+            "branch",
+            "worktree",
+            "pull_request",
+            "pull request",
+            "pr create",
+            "issue create",
+            "issue edit",
+            "issue comment",
+            "auto-implement",
+            "run_foreground",
+            "scan_foreground",
+            "ConductorEvent",
+            "legacy",
+            "dispatch",
+            "ExecutorRequest",
+            "\"POST\"",
+            "\"PATCH\"",
+            "\"PUT\"",
+            "\"DELETE\"",
+            "graphql",
+            "pr edit",
+            "pr comment",
+            "pr merge",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "Tier 2 receipt coordinator retains prohibited authority: {forbidden}"
+            );
+        }
+    }
+}

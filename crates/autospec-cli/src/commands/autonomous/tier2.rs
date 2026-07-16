@@ -108,4 +108,68 @@ mod tests {
         assert_eq!(failure.status_reason(), "tier2_collector_read_file");
         assert!(failure.documents().is_some());
     }
+
+    #[test]
+    fn disabled_policy_adapter_has_no_execution_or_mutation_authority() {
+        let source = include_str!("tier2.rs");
+        let production = source
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("production source before module tests");
+        assert_eq!(
+            production
+                .matches("Tier2Input::DisabledByCheckedInPolicy")
+                .count(),
+            1,
+            "checked-in policy remains the sole production scan entry point"
+        );
+        let gh_cli = ["\"", "g", "h "].concat();
+        for forbidden in [
+            "std::env",
+            "std::process",
+            "std::net",
+            "Command",
+            "AUTOSPEC_SPECIALIST_LLM_STUB_OUTPUT",
+            "scan_specialists",
+            "load_or_derive",
+            "autospec-explore",
+            "bash",
+            "zsh",
+            "sh -c",
+            "omx",
+            "curl",
+            gh_cli.as_str(),
+            "github",
+            "queue",
+            "claim",
+            "label",
+            "branch",
+            "worktree",
+            "pull_request",
+            "pull request",
+            "pr create",
+            "issue create",
+            "issue edit",
+            "issue comment",
+            "auto-implement",
+            "WaterfallStore",
+            "run_foreground",
+            "scan_foreground",
+            "dispatch",
+            "ExecutorRequest",
+            "\"POST\"",
+            "\"PATCH\"",
+            "\"PUT\"",
+            "\"DELETE\"",
+            "graphql",
+            "pr edit",
+            "pr comment",
+            "pr merge",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "Tier 2 disabled-policy adapter retains prohibited authority: {forbidden}"
+            );
+        }
+    }
 }

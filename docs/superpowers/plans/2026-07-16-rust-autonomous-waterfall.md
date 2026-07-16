@@ -80,15 +80,30 @@ until 4A is tested and reviewed.
   source/PATH guards must reject shell, legacy promoter/classifier, `gh` write
   verbs, and queue/claim mutation authority.
 
-## Task 5: Port Tier 2 local discovery funnel
+## Task 5: Port Tier 2 local discovery funnel — foundation complete
 
-- [ ] Implement a deterministic local-signal collection adapter using existing
+- [x] Implement a deterministic local-signal collection adapter using existing
   Rust specialist evidence.
-- [ ] Add typed proposal, deduplication, adversarial verification, ROI, and
+- [x] Add typed proposal, deduplication, adversarial verification, ROI, and
   rank receipts; persist each input/output reference.
-- [ ] Separate proposal production from any GitHub filing and prove produced
+- [x] Separate proposal production from any GitHub filing and prove produced
   proposals do not receive `auto-implement` labels.
-- [ ] Treat every incomplete stage as `failed` or `not_run`, never dry.
+- [x] Treat every incomplete stage as `failed` or `not_run`, never dry.
+
+### Tier 2 cutover state
+
+Tier 2 strict collection, pure typed funnel, sealed receipt replay, and
+checked-in disabled policy are complete. A disabled policy produces `NotRun`,
+retains Tier 2, and is not a dry result.
+
+Live model activation remains a separate direct-child safety gate. It requires
+a fixed executable and version, direct argv, deadline, capped output, schema
+compatibility, read-only denial, and network-policy proof before the checked-in
+disabled policy can change.
+
+Legacy deletion remains blocked on broader native producer, foreground, and
+parity work. This completed foundation does not add a live model runner,
+foreground dispatch, GitHub mutation, or a legacy fallback.
 
 ## Task 6: Port Tier 3 architecture/debt producer
 
