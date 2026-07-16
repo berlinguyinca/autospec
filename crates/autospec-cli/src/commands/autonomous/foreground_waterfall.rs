@@ -5,7 +5,7 @@ use autospec_core::autonomous::config::AutonomousConfig;
 use autospec_core::autonomous::no_work::NoWorkTier;
 use autospec_core::autonomous::waterfall::WaterfallState;
 
-use super::resilience::ConductorLease;
+use super::resilience::{with_current_lifecycle_lease, ConductorLease};
 use super::tier15;
 use super::tier15_receipts::{record_tier15_with_lease, Tier15Progress};
 use super::tier2;
@@ -52,7 +52,8 @@ pub(super) fn run_one_tier(
     tier1_evidence: Tier1QueueEvidence<'_>,
 ) -> Result<ForegroundWaterfallProgress, String> {
     let policy = WaterfallPolicy::from_config(config)?;
-    let cursor = read_cursor(state_root, repo, &policy)?;
+    let cursor =
+        with_current_lifecycle_lease(lease, || read_cursor_fenced(state_root, repo, &policy))?;
     if !cursor.trusted {
         return Ok(ForegroundWaterfallProgress::Pending { tier: cursor.tier });
     }
@@ -69,7 +70,10 @@ pub(super) fn run_one_tier(
                 tier1_evidence,
             )
         },
-        || read_cursor(state_root, repo, &policy).map(|cursor| cursor.tier),
+        || {
+            with_current_lifecycle_lease(lease, || read_cursor_fenced(state_root, repo, &policy))
+                .map(|cursor| cursor.tier)
+        },
     )
 }
 
@@ -132,7 +136,7 @@ fn finish_progress(
     })
 }
 
-fn read_cursor(
+fn read_cursor_fenced(
     state_root: &Path,
     repo: &str,
     policy: &WaterfallPolicy,

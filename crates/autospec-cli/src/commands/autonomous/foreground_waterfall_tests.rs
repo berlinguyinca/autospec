@@ -8,7 +8,7 @@ use autospec_core::coordination::{QueueGateCounts, ReadyQueuePlan, WorkerCap};
 use super::foreground_waterfall::{
     run_injected, run_one_tier, ForegroundWaterfallProgress, InjectedProgress,
 };
-use super::resilience::acquire_test_lifecycle;
+use super::resilience::{acquire_test_lifecycle, replace_test_lifecycle_generation};
 use super::tier2_receipts_tests::{TempRoot, REPO};
 use super::tier4_receipts_tests::seed_tier_four_cursor;
 use super::waterfall::{StoreAcquisition, WaterfallStore};
@@ -123,6 +123,30 @@ fn waterfall_lock_contention_is_pending_and_never_blocked() {
         }
     );
     drop(held);
+}
+
+#[test]
+fn stale_lease_cannot_probe_or_create_waterfall_state() {
+    let lease_root = TempRoot::new();
+    let operator_root = TempRoot::new();
+    let lease = acquire_test_lifecycle(lease_root.path(), REPO).expect("lifecycle lease");
+    replace_test_lifecycle_generation(&lease).expect("replace lease generation");
+    let plan = empty_plan();
+
+    let error = run_one_tier(
+        operator_root.path(),
+        REPO,
+        &lease,
+        &AutonomousConfig::default(),
+        Tier1QueueEvidence::EmptyPage(&plan),
+    )
+    .expect_err("stale lease must fail before cursor probing");
+
+    assert!(
+        error.contains("token") || error.contains("generation"),
+        "unexpected stale lease error: {error}"
+    );
+    assert!(!operator_root.path().join("waterfall").exists());
 }
 
 #[test]
