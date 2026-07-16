@@ -107,11 +107,21 @@ foreground dispatch, GitHub mutation, or a legacy fallback.
 
 ## Task 6: Port Tier 3 architecture/debt producer
 
-- [ ] Define portable architecture, test-coverage, and debt evidence adapters
-  based on checked-in project metadata rather than a shell self-improvement loop.
-- [ ] Persist deterministic rule versions and evidence; failures remain typed.
-- [ ] Integrate output into the common TierReceipt funnel and test Rust-only
+### Tier 3 cutover state
+
+Tier 3 typed metadata foundation and checked-in disabled receipt policy are
+complete. Metadata-source activation requires a trusted typed metadata source
+and #1602 typed configuration.
+
+Foreground wiring, Tier 4, ideation, and legacy deletion remain separately
+gated. This foundation does not permit legacy deletion.
+
+- [x] Define pure architecture, test-coverage, and debt evidence adapters with
+  deterministic rule versions, typed failures, sealed receipts, and Rust-only
   authority boundaries.
+- [ ] Activate trusted metadata collection only after the typed source and #1602
+  configuration contract are available; no shell self-improvement loop is a
+  fallback.
 
 ## Task 7: Port Tier 4 explicit external-source producer
 
