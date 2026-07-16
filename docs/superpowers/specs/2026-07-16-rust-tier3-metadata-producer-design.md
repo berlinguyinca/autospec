@@ -1,6 +1,6 @@
 # Rust Tier 3 Metadata Producer Design
 
-**Parent design:** `docs/superpowers/specs/2026-07-16-rust-autonomous-waterfall-design.md`  
+**Parent design:** `docs/superpowers/specs/2026-07-16-rust-autonomous-waterfall-design.md`
 **Scope:** #1872 Task 6 foundation only
 
 ## Goal
@@ -63,7 +63,8 @@ keys, and count overflow. It canonicalizes only already-validated evidence.
 
 Findings deduplicate by `(kind, rule_id, path, line, message)`, rank by
 severity ascending, rule ID ascending, path ascending, line ascending, then
-message ascending, and cap at ten. A completed empty set is valid. Funnel
+message ascending, then kind ascending (`Architecture`, `Coverage`, `Debt`),
+and cap at ten. A completed empty set is valid. Funnel
 counts are `observed >= deduplicated >= verified >= roi_approved >= ranked`;
 Tier 3 uses `verified == roi_approved == deduplicated`, while `ranked` may be
 smaller only because of the fixed cap. It has no model verifier or ROI

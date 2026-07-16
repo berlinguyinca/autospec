@@ -124,7 +124,7 @@ fn parse_finding(value: &JsonValue) -> Result<Finding, WaterfallStoreError> {
 fn has_duplicate_identity(rows: &[Finding]) -> bool {
     let mut identities = BTreeSet::new();
     rows.iter()
-        .any(|row| !identities.insert((row.kind, &row.rule, &row.path, row.line)))
+        .any(|row| !identities.insert((row.kind, &row.rule, &row.path, row.line, &row.message)))
 }
 
 fn sort_deduplicated(rows: &mut [Finding]) {
@@ -147,6 +147,7 @@ fn sort_ranked(rows: &mut [Finding]) {
             &left.path,
             left.line,
             &left.message,
+            left.kind,
         )
             .cmp(&(
                 right.severity,
@@ -154,6 +155,7 @@ fn sort_ranked(rows: &mut [Finding]) {
                 &right.path,
                 right.line,
                 &right.message,
+                right.kind,
             ))
     });
 }

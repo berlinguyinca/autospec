@@ -203,7 +203,7 @@ fn invalid_fields_wrong_kind_and_noncanonical_stage_records_fail_closed() {
 }
 
 #[test]
-fn duplicate_and_conflicting_finding_keys_are_rejected() {
+fn duplicate_finding_rows_and_full_identity_severity_conflicts_are_rejected() {
     let row = finding(
         Tier3FindingKind::Architecture,
         Tier3Severity::Medium,
@@ -222,19 +222,47 @@ fn duplicate_and_conflicting_finding_keys_are_rejected() {
         "architecture.conflict",
         "src/lib.rs",
         3,
+        "same message",
+    );
+    let second = finding(
+        Tier3FindingKind::Architecture,
+        Tier3Severity::Low,
+        "architecture.conflict",
+        "src/lib.rs",
+        3,
+        "same message",
+    );
+    let error = evaluate_tier3(enabled(vec![first, second], Vec::new(), Vec::new()))
+        .expect_err("one full finding identity cannot have conflicting severity");
+    assert_eq!(error.code(), Tier3FailureCode::DuplicateConflict);
+}
+
+#[test]
+fn findings_with_distinct_messages_are_distinct_facts() {
+    let first = finding(
+        Tier3FindingKind::Architecture,
+        Tier3Severity::High,
+        "architecture.context",
+        "src/lib.rs",
+        3,
         "first message",
     );
     let second = finding(
         Tier3FindingKind::Architecture,
         Tier3Severity::High,
-        "architecture.conflict",
+        "architecture.context",
         "src/lib.rs",
         3,
         "second message",
     );
-    let error = evaluate_tier3(enabled(vec![first, second], Vec::new(), Vec::new()))
-        .expect_err("one finding key cannot have conflicting evidence");
-    assert_eq!(error.code(), Tier3FailureCode::DuplicateConflict);
+
+    let evaluation = evaluate_tier3(enabled(vec![first, second], Vec::new(), Vec::new()))
+        .expect("message-distinct findings are separate facts");
+    let observation = evaluation.observation().expect("complete observation");
+    assert_eq!(observation.funnel().deduplicated, 2);
+    assert_eq!(observation.ranked().len(), 2);
+    assert_eq!(observation.ranked()[0].message, "first message");
+    assert_eq!(observation.ranked()[1].message, "second message");
 }
 
 #[test]

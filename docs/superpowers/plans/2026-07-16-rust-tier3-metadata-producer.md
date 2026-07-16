@@ -78,8 +78,8 @@ Add `pub mod tier3;` to the inline autonomous module. Define closed stages
 `Architecture`, `Coverage`, `Debt`, and `Ranking`; kinds, severities, failure
 codes, stage results, adapter evidence, findings,
 partial evidence, evaluation, and opaque document view. Validate sorted unique
-stage records and rank by `(severity, rule_id, path, line, message)`, capped at
-ten. Bind injected failure stages to their enclosing slot and preserve only
+stage records and rank by `(severity, rule_id, path, line, message, kind)`,
+capped at ten. Bind injected failure stages to their enclosing slot and preserve only
 validated predecessors.
 
 ```rust

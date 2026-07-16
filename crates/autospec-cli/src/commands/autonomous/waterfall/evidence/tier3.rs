@@ -193,7 +193,7 @@ fn validate_adapter(
         let value = finding_object(finding, kind)?;
         if prior
             .as_ref()
-            .is_some_and(|previous: &(u64, String, String, u64, String)| value <= *previous)
+            .is_some_and(|previous: &(u64, String, String, u64, String, u64)| value <= *previous)
         {
             return invalid("Tier 3 adapter findings are not canonical");
         }
@@ -247,7 +247,7 @@ fn validate_findings(
         let value = finding_object(finding, "any")?;
         if prior
             .as_ref()
-            .is_some_and(|previous: &(u64, String, String, u64, String)| value <= *previous)
+            .is_some_and(|previous: &(u64, String, String, u64, String, u64)| value <= *previous)
         {
             return invalid("Tier 3 ranked findings are not canonical");
         }
@@ -297,7 +297,7 @@ fn matches_terminal_status(receipt: &TierReceipt) -> bool {
 fn finding_object(
     finding: &JsonValue,
     expected_kind: &str,
-) -> Result<(u64, String, String, u64, String), WaterfallStoreError> {
+) -> Result<(u64, String, String, u64, String, u64), WaterfallStoreError> {
     let JsonValue::Object(object) = finding else {
         return invalid("Tier 3 finding must be an object");
     };
@@ -307,9 +307,8 @@ fn finding_object(
     ) {
         return invalid("Tier 3 finding has unexpected keys");
     }
-    let kind = string(object, "kind")
-        .filter(|value| matches!(*value, "architecture" | "coverage" | "debt"));
-    if kind.is_none() || (expected_kind != "any" && kind != Some(expected_kind)) {
+    let kind = string(object, "kind").and_then(kind_rank);
+    if kind.is_none() || (expected_kind != "any" && string(object, "kind") != Some(expected_kind)) {
         return invalid("Tier 3 finding kind is invalid");
     }
     let severity = match string(object, "severity") {
@@ -343,23 +342,24 @@ fn finding_object(
         path.to_string(),
         line,
         message.to_string(),
+        kind.expect("validated Tier 3 finding kind"),
     ))
 }
 
 fn deduplicated_order(
     finding: &JsonValue,
 ) -> Result<(u64, String, String, u64, String), WaterfallStoreError> {
-    let (_, rule, path, line, message) = finding_object(finding, "any")?;
-    let JsonValue::Object(object) = finding else {
-        return invalid("Tier 3 finding must be an object");
-    };
-    let kind = match string(object, "kind") {
-        Some("architecture") => 0,
-        Some("coverage") => 1,
-        Some("debt") => 2,
-        _ => return invalid("Tier 3 finding kind is invalid"),
-    };
+    let (_, rule, path, line, message, kind) = finding_object(finding, "any")?;
     Ok((kind, rule, path, line, message))
+}
+
+fn kind_rank(kind: &str) -> Option<u64> {
+    match kind {
+        "architecture" => Some(0),
+        "coverage" => Some(1),
+        "debt" => Some(2),
+        _ => None,
+    }
 }
 
 fn exact_keys(object: &BTreeMap<String, JsonValue>, required: &[&str]) -> bool {

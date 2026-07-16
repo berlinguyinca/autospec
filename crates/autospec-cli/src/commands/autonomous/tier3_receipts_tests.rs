@@ -176,6 +176,67 @@ fn tier3_valid_cross_adapter_dedup_order_does_not_need_rank_order() {
 }
 
 #[test]
+fn tier3_equal_rank_tuples_across_kinds_replay_in_kind_order() {
+    let architecture = finding();
+    let coverage = Tier3Finding {
+        kind: Tier3FindingKind::Coverage,
+        severity: architecture.severity,
+        rule_id: architecture.rule_id.clone(),
+        path: architecture.path.clone(),
+        line: architecture.line,
+        message: architecture.message.clone(),
+    };
+    let debt = Tier3Finding {
+        kind: Tier3FindingKind::Debt,
+        severity: architecture.severity,
+        rule_id: architecture.rule_id.clone(),
+        path: architecture.path.clone(),
+        line: architecture.line,
+        message: architecture.message.clone(),
+    };
+    let root = TempRoot::new();
+    seed_tier_three_cursor(&root);
+
+    assert_eq!(
+        record_tier3(
+            root.path(),
+            REPO,
+            Tier3Scan::Complete(observation_parts(
+                vec![architecture],
+                vec![coverage],
+                vec![debt],
+            ))
+        )
+        .expect("equal rank tuples must persist"),
+        Tier3Progress::Produced(3)
+    );
+    let receipt = store(&root)
+        .load_receipt(1, NoWorkTier::Tier3)
+        .expect("receipt")
+        .expect("sealed receipt");
+    let findings = std::fs::read_to_string(
+        root.path()
+            .join("waterfall")
+            .join(&receipt.evidence()[3].reference),
+    )
+    .expect("findings evidence");
+    let ranked = findings
+        .split_once("\"ranked\":")
+        .expect("ranked findings")
+        .1;
+    let architecture_index = ranked
+        .find("\"kind\":\"architecture\"")
+        .expect("architecture");
+    let coverage_index = ranked.find("\"kind\":\"coverage\"").expect("coverage");
+    let debt_index = ranked.find("\"kind\":\"debt\"").expect("debt");
+    assert!(architecture_index < coverage_index && coverage_index < debt_index);
+    assert_eq!(
+        record_tier3(root.path(), REPO, Tier3Scan::NotRun).expect("sealed replay"),
+        Tier3Progress::Produced(3)
+    );
+}
+
+#[test]
 fn tier3_receipts_accept_core_rendered_escaped_finding_text() {
     let mut escaped = finding();
     escaped.message = "quoted \"finding\"\nwith a control marker \u{001b}".to_string();

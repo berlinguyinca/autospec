@@ -146,6 +146,27 @@ fn production_source(relative: &str) -> String {
         .to_string()
 }
 
+fn tier3_receipt_verifier_sources() -> [(&'static str, bool); 4] {
+    [
+        (
+            "crates/autospec-cli/src/commands/autonomous/waterfall/evidence/tier3.rs",
+            true,
+        ),
+        (
+            "crates/autospec-cli/src/commands/autonomous/waterfall/evidence/tier3_consistency.rs",
+            true,
+        ),
+        (
+            "crates/autospec-cli/src/commands/autonomous/waterfall/evidence/tier3_shape.rs",
+            false,
+        ),
+        (
+            "crates/autospec-cli/src/commands/autonomous/waterfall/evidence/canonical.rs",
+            false,
+        ),
+    ]
+}
+
 #[test]
 fn recursive_source_discovery_finds_nested_rust_modules() {
     let root = temporary_module_root();
@@ -305,36 +326,45 @@ fn tier3_receipt_coordinator_has_only_local_store_persistence() {
 }
 
 #[test]
-fn tier3_receipt_verifier_is_read_only_and_keeps_shared_helpers() {
-    let code = code_without_comments_and_literals(&production_source(
-        "crates/autospec-cli/src/commands/autonomous/waterfall/evidence/tier3.rs",
-    ));
-    assert!(contains_path_symbol(&code, "fs::read_to_string"));
-    assert!(contains_qualified_path(&code, "canonical"));
-    assert!(!has_module_escape(&code));
-    for module in ["env", "process", "net"] {
-        assert!(!has_forbidden_std_module(&code, module));
-    }
-    assert_no_execution_authority(&code, "Tier 3 receipt verifier", false);
-    for mutation in [
-        "fs::write",
-        "fs::copy",
-        "fs::hard_link",
-        "fs::create_dir",
-        "fs::remove_",
-        "fs::rename",
-        "File::create",
-        "OpenOptions",
-        "write_all",
-        "write_fmt",
-        "set_permissions",
-        "symlink_file",
-        "symlink_dir",
-    ] {
-        assert!(
-            !contains_path_symbol(&code, mutation) && !contains_code_token(&code, mutation),
-            "Tier 3 receipt verifier retains file mutation authority: {mutation}"
+fn tier3_receipt_verifier_helpers_are_read_only_and_exhaustively_guarded() {
+    for (relative, allows_replay_read) in tier3_receipt_verifier_sources() {
+        let code = code_without_comments_and_literals(&production_source(relative));
+        assert_eq!(
+            contains_path_symbol(&code, "fs::read_to_string"),
+            allows_replay_read,
+            "{relative} has an invalid replay-read boundary"
         );
+        assert!(
+            !has_module_escape(&code),
+            "{relative} escapes verifier scope"
+        );
+        for module in ["env", "process", "net"] {
+            assert!(
+                !has_forbidden_std_module(&code, module),
+                "{relative} retains std::{module} authority"
+            );
+        }
+        assert_no_execution_authority(&code, relative, false);
+        for mutation in [
+            "fs::write",
+            "fs::copy",
+            "fs::hard_link",
+            "fs::create_dir",
+            "fs::remove_",
+            "fs::rename",
+            "File::create",
+            "OpenOptions",
+            "write_all",
+            "write_fmt",
+            "set_permissions",
+            "symlink_file",
+            "symlink_dir",
+        ] {
+            assert!(
+                !contains_path_symbol(&code, mutation) && !contains_code_token(&code, mutation),
+                "{relative} retains file mutation authority: {mutation}"
+            );
+        }
     }
 }
 

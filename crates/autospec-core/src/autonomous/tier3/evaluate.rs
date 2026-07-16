@@ -229,22 +229,24 @@ fn checked_count(value: usize) -> Result<u64, Tier3Failure> {
     })
 }
 
-fn finding_order(finding: &Tier3Finding) -> (u64, String, String, u64, String) {
+fn finding_order(finding: &Tier3Finding) -> (u64, String, String, u64, String, Tier3FindingKind) {
     (
         finding.severity.rank(),
         finding.rule_id.clone(),
         finding.path.clone(),
         finding.line,
         finding.message.clone(),
+        finding.kind,
     )
 }
 
-fn finding_identity(finding: &Tier3Finding) -> (Tier3FindingKind, String, String, u64) {
+fn finding_identity(finding: &Tier3Finding) -> (Tier3FindingKind, String, String, u64, String) {
     (
         finding.kind,
         finding.rule_id.clone(),
         finding.path.clone(),
         finding.line,
+        finding.message.clone(),
     )
 }
 
