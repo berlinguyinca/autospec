@@ -1466,9 +1466,15 @@ fn run_foreground_with_lease(
 
     let waterfall_policy = waterfall_policy::WaterfallPolicy::from_config(config)
         .map_err(CommandFailure::diagnostic)?;
-    let (state, found_work) =
-        scan_foreground(layout, lease, &waterfall_policy, state, initial_plan)
-            .map_err(CommandFailure::diagnostic)?;
+    let (state, found_work) = scan_foreground(
+        layout,
+        lease,
+        config,
+        &waterfall_policy,
+        state,
+        initial_plan,
+    )
+    .map_err(CommandFailure::diagnostic)?;
     if !found_work {
         persist_foreground_admission(layout, &health, &lifecycle)?;
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
@@ -1558,6 +1564,7 @@ enum ForegroundDispatchResult {
 fn scan_foreground(
     layout: &RunLayout,
     lease: &resilience::ConductorLease,
+    config: &AutonomousConfig,
     policy: &waterfall_policy::WaterfallPolicy,
     state: ConductorState,
     initial_plan: Result<autospec_core::coordination::ReadyQueuePlan, String>,
@@ -1583,16 +1590,23 @@ fn scan_foreground(
     };
     if initial_plan.gate_counts.candidate == 0 {
         if state.scope() == ConductorScope::Repository {
-            match waterfall_coordinator::record_tier_one(
+            if !waterfall_coordinator::should_start_tier_one(&initial_plan) {
+                return Ok((state, false));
+            }
+            match foreground_waterfall::run_one_tier(
                 &layout.state_dir,
                 &layout.repo,
                 lease,
-                policy,
+                config,
                 waterfall_coordinator::Tier1QueueEvidence::EmptyPage(&initial_plan),
             )? {
-                waterfall_coordinator::Tier1Progress::Advanced
-                | waterfall_coordinator::Tier1Progress::Pending => return Ok((state, false)),
-                waterfall_coordinator::Tier1Progress::Failed(reason) => return Err(reason),
+                foreground_waterfall::ForegroundWaterfallProgress::Pending { .. }
+                | foreground_waterfall::ForegroundWaterfallProgress::Produced { .. }
+                | foreground_waterfall::ForegroundWaterfallProgress::Failed { .. }
+                | foreground_waterfall::ForegroundWaterfallProgress::Blocked { .. }
+                | foreground_waterfall::ForegroundWaterfallProgress::NotRun { .. } => {
+                    return Ok((state, false));
+                }
             }
         }
         let state = state
