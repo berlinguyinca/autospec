@@ -229,7 +229,7 @@ cargo run -q -p autospec-cli -- validate --fast
 
 Expected: all commands pass.
 
-- [ ] **Step 5: Commit the guard and docs**
+- [x] **Step 5: Commit the guard and docs**
 
 ```bash
 git add crates/autospec-cli/tests/autonomous_drain_commands.rs docs/cli-reference.md docs/superpowers/specs/2026-07-16-rust-autonomous-drain-design.md
