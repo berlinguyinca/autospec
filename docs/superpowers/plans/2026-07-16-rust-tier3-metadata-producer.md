@@ -63,8 +63,9 @@ Expected: FAIL because `autonomous::tier3` does not exist.
 
 - [ ] **Step 3: Define the closed model and evaluator**
 
-Add `pub mod tier3;` to the inline autonomous module. Define closed stages,
-kinds, severities, failure codes, stage results, adapter evidence, findings,
+Add `pub mod tier3;` to the inline autonomous module. Define closed stages
+`Architecture`, `Coverage`, `Debt`, and `Ranking`; kinds, severities, failure
+codes, stage results, adapter evidence, findings,
 partial evidence, evaluation, and opaque document view. Validate sorted unique
 stage records and rank by `(severity, rule_id, path, line, message)`, capped at
 ten. Bind injected failure stages to their enclosing slot and preserve only
@@ -111,6 +112,8 @@ focused core proof.
 - Create: `crates/autospec-cli/src/commands/autonomous/tier3_receipts.rs`
 - Modify: `crates/autospec-cli/src/commands/autonomous/waterfall.rs`
 - Modify: `crates/autospec-cli/src/commands/autonomous/waterfall/evidence.rs`
+- Modify: `crates/autospec-cli/src/commands/autonomous/waterfall/evidence/tier2/canonical.rs`
+- Create: `crates/autospec-cli/src/commands/autonomous/waterfall/evidence/canonical.rs`
 - Create: `crates/autospec-cli/src/commands/autonomous/waterfall/evidence/tier3.rs`
 - Create: focused Tier 3 receipt/recovery test modules as needed
 

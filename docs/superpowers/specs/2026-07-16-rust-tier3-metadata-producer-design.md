@@ -65,12 +65,13 @@ Findings deduplicate by `(kind, rule_id, path, line, message)`, rank by
 severity ascending, rule ID ascending, path ascending, line ascending, then
 message ascending, and cap at ten. A completed empty set is valid. Funnel
 counts are `observed >= deduplicated >= verified >= roi_approved >= ranked`;
-Tier 3 uses `verified == roi_approved == ranked == deduplicated` because it has
-no model verifier or ROI inference.
+Tier 3 uses `verified == roi_approved == deduplicated`, while `ranked` may be
+smaller only because of the fixed cap. It has no model verifier or ROI
+inference.
 
 `Tier3Failure` carries only validated predecessor evidence: no predecessor for
 architecture; architecture before coverage; architecture and coverage before
-debt; and all three before ranking. An opaque, evaluator-derived
+debt; and all three before the closed `Ranking` stage. An opaque, evaluator-derived
 `Tier3EvidenceDocuments` is the only public document-rendering surface. Raw
 adapter structs cannot be serialized as sealed evidence.
 
