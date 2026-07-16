@@ -8,6 +8,7 @@ pub mod autonomous {
     pub mod tier15;
     pub mod tier2;
     pub mod tier3;
+    pub mod tier4;
     pub mod waterfall;
 }
 pub mod autonomous_lifecycle;
