@@ -38,12 +38,23 @@ mod tier15_receipts;
 mod tier2;
 #[allow(dead_code)]
 mod tier2_receipts;
+// Tier 3 remains disabled in production until a typed metadata package exists.
 #[cfg(test)]
 mod tier2_receipts_failure_prefix_tests;
 #[cfg(test)]
 mod tier2_receipts_recovery_tests;
 #[cfg(test)]
 mod tier2_receipts_tests;
+#[allow(dead_code)]
+mod tier3;
+#[allow(dead_code)]
+mod tier3_receipts;
+#[cfg(test)]
+mod tier3_receipts_failure_prefix_tests;
+#[cfg(test)]
+mod tier3_receipts_recovery_tests;
+#[cfg(test)]
+mod tier3_receipts_tests;
 mod waterfall;
 mod waterfall_coordinator;
 #[cfg(test)]

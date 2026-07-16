@@ -8,9 +8,7 @@ use autospec_core::autonomous::waterfall::{sha256_hex, FunnelCounts, TierReceipt
 use autospec_core::state::json::{JsonParser, JsonValue};
 
 use super::super::WaterfallStoreError;
-use super::{Tier2EvidenceArtifact, WaterfallEvidenceArtifact};
-
-mod canonical;
+use super::{canonical, Tier2EvidenceArtifact, WaterfallEvidenceArtifact};
 
 const DISABLED_PRODUCER: &str = "rust-tier2-disabled-policy-v1";
 const DISABLED_POLICY: &str = "{\"schema\":1,\"kind\":\"tier2_policy\",\"mode\":\"disabled\",\"reason\":\"tier2_local_discovery_disabled_by_policy\",\"policy_source\":\"checked_in\"}\n";

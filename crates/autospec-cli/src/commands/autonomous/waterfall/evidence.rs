@@ -7,7 +7,11 @@ use autospec_core::autonomous::waterfall::{sha256_hex, SealedEvidence, TierRecei
 
 use super::WaterfallStoreError;
 
+mod canonical;
 mod tier2;
+mod tier3;
+mod tier3_consistency;
+mod tier3_shape;
 
 pub(super) fn verify_tier2(
     root: &Path,
@@ -15,6 +19,14 @@ pub(super) fn verify_tier2(
     receipt: &TierReceipt,
 ) -> Result<(), WaterfallStoreError> {
     tier2::verify_tier2(root, pass_id, receipt)
+}
+
+pub(super) fn verify_tier3(
+    root: &Path,
+    pass_id: u64,
+    receipt: &TierReceipt,
+) -> Result<(), WaterfallStoreError> {
+    tier3::verify_tier3(root, pass_id, receipt)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -40,11 +52,22 @@ pub(in crate::commands::autonomous) enum Tier2EvidenceArtifact {
     Failure,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::commands::autonomous) enum Tier3EvidenceArtifact {
+    Policy,
+    Architecture,
+    Coverage,
+    Debt,
+    Findings,
+    Failure,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) enum WaterfallEvidenceArtifact {
     Tier1(Tier1EvidenceArtifact),
     Tier15(Tier15EvidenceArtifact),
     Tier2(Tier2EvidenceArtifact),
+    Tier3(Tier3EvidenceArtifact),
 }
 
 impl WaterfallEvidenceArtifact {
@@ -53,6 +76,7 @@ impl WaterfallEvidenceArtifact {
             Self::Tier1(_) => NoWorkTier::Tier1,
             Self::Tier15(_) => NoWorkTier::Tier1_5,
             Self::Tier2(_) => NoWorkTier::Tier2,
+            Self::Tier3(_) => NoWorkTier::Tier3,
         }
     }
 
@@ -69,6 +93,12 @@ impl WaterfallEvidenceArtifact {
             Self::Tier2(Tier2EvidenceArtifact::Verification) => "verification.json",
             Self::Tier2(Tier2EvidenceArtifact::RoiRank) => "roi-rank.json",
             Self::Tier2(Tier2EvidenceArtifact::Failure) => "failure.json",
+            Self::Tier3(Tier3EvidenceArtifact::Policy) => "policy.json",
+            Self::Tier3(Tier3EvidenceArtifact::Architecture) => "architecture.json",
+            Self::Tier3(Tier3EvidenceArtifact::Coverage) => "coverage.json",
+            Self::Tier3(Tier3EvidenceArtifact::Debt) => "debt.json",
+            Self::Tier3(Tier3EvidenceArtifact::Findings) => "findings.json",
+            Self::Tier3(Tier3EvidenceArtifact::Failure) => "failure.json",
         }
     }
 

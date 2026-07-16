@@ -11,7 +11,9 @@ use autospec_core::autonomous::waterfall::{
 mod evidence;
 
 use evidence::WaterfallEvidenceArtifact;
-pub(super) use evidence::{Tier15EvidenceArtifact, Tier1EvidenceArtifact, Tier2EvidenceArtifact};
+pub(super) use evidence::{
+    Tier15EvidenceArtifact, Tier1EvidenceArtifact, Tier2EvidenceArtifact, Tier3EvidenceArtifact,
+};
 
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -164,6 +166,28 @@ impl WaterfallStore {
         evidence::verify_tier2(&self.root, pass_id, receipt)
     }
 
+    pub(super) fn persist_tier3_evidence(
+        &self,
+        pass_id: u64,
+        artifact: Tier3EvidenceArtifact,
+        contents: &str,
+    ) -> Result<SealedEvidence, WaterfallStoreError> {
+        evidence::persist(
+            &self.root,
+            pass_id,
+            WaterfallEvidenceArtifact::Tier3(artifact),
+            contents,
+        )
+    }
+
+    pub(super) fn verify_tier3_evidence(
+        &self,
+        pass_id: u64,
+        receipt: &TierReceipt,
+    ) -> Result<(), WaterfallStoreError> {
+        evidence::verify_tier3(&self.root, pass_id, receipt)
+    }
+
     pub(super) fn load_receipt(
         &self,
         pass_id: u64,
@@ -248,7 +272,23 @@ impl WaterfallStore {
                 NoWorkTier::Tier2 => self
                     .verify_tier2_evidence(state.next_pass_id(), &receipt)
                     .map_err(state_receipt_error)?,
-                NoWorkTier::Tier3 | NoWorkTier::Tier4 => {}
+                NoWorkTier::Tier3 => {
+                    if !matches!(
+                        receipt.status(),
+                        autospec_core::autonomous::waterfall::TierStatus::Exhausted {
+                            reason:
+                                autospec_core::autonomous::no_work::DryReason::NoMetadataFindings
+                        }
+                    ) {
+                        return Err(WaterfallStoreError::InvalidState(
+                            "completed Tier 3 receipt must be exhausted no_metadata_findings"
+                                .to_string(),
+                        ));
+                    }
+                    self.verify_tier3_evidence(state.next_pass_id(), &receipt)
+                        .map_err(state_receipt_error)?;
+                }
+                NoWorkTier::Tier4 => {}
             }
         }
         Ok(())
