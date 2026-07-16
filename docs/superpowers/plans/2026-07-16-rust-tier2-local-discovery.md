@@ -156,6 +156,19 @@ let score_quotient = proposal.confidence_millis as u64 / proposal.complexity.uni
 
 `DisabledByCheckedInPolicy` returns only the exact `NotRun` reason. A stage failure stays typed; never replace it with an empty proposal list. `Tier2RoiPolicy` contains the permitted closed source set; the checked-in V1 value permits `StrictLocalSpecialist`, while an empty injected policy proves the non-heuristic `RoiFiltered` path. Render schema-one one-line JSON from typed validated data only.
 
+When evaluation fails after a predecessor has completed, `Tier2Failure` retains a
+validated `Tier2PartialEvidence` bundle containing only the completed predecessor
+stages. Its closed failure-stage spelling is `collector`, `generator`,
+`deduplicator`, `verifier`, or `roi_rank`; the status reason is always
+`tier2_<stage>_<code>`. A collector failure has no predecessor bundle; generator
+has collector; deduplicator has collector and generated; verifier has collector,
+generated, and dedup; roi-rank has collector, generated, dedup, and verification.
+The core exposes pure canonical renderers for those stage documents and for
+`failure.json`; dependent renderers accept the already-sealed predecessor digest
+as an argument. They must not seal, store, or otherwise acquire CLI authority.
+This preserves `evaluate_tier2(...) -> Result<Tier2Evaluation, Tier2Failure>`
+while allowing the receipt layer to preserve completed evidence on failure.
+
 - [ ] **Step 5: Run the pure funnel proof**
 
 Run: `cargo test -p autospec-core --test autonomous_tier2`
@@ -175,6 +188,23 @@ git commit -m "feat: model the native Tier 2 discovery funnel"
 Use Lore trailers prohibiting a lexicon hit from becoming defect proof.
 
 ### Task 3: Seal Tier 2 evidence and receipt recovery
+
+**Ratified receipt contract:** Tier 2 documents use schema one and canonical
+one-line JSON ending in a newline. `policy.json` is the only reference for a
+checked-in disabled `NotRun`. A completed `Exhausted` or `Produced` receipt has
+exactly, and in order, `collector.json`, `generated.json`, `dedup.json`,
+`verification.json`, and `roi-rank.json`. A failed collector has `failure.json`;
+a failed generator adds `collector.json` first; a failed deduplicator adds
+`collector.json`, `generated.json`; a failed verifier adds `collector.json`,
+`generated.json`, `dedup.json`; and a failed `roi_rank` adds those four completed
+stage documents before `failure.json`. Each dependent document embeds the sealed
+digest of its immediate predecessor. `failure.json` embeds its closed stage,
+code, exact status reason, bounded detail, and funnel counts. Recovery rejects
+missing, duplicate, unexpected, or misordered *receipt references*, digest
+mismatches, and invalid stage links. It does not reject unreferenced files on
+disk left by an interrupted pre-receipt persistence attempt. A failure to persist
+or replay a required document creates no replacement receipt and leaves the
+cursor unchanged.
 
 **Files:**
 
@@ -227,7 +257,7 @@ pub(super) fn record_tier2(state_root: &Path, repo: &str, scan: Tier2Scan)
     -> Result<Tier2Progress, String>;
 ```
 
-The only production construction is `Tier2Input::DisabledByCheckedInPolicy`; tests inject `Complete` and `Failed`. Persist artifacts in dependency order, then receipt, then call `WaterfallState::record_receipt` only for `Exhausted`. Replay verifies artifacts before returning the original result.
+The only production construction is `Tier2Input::DisabledByCheckedInPolicy`; tests inject `Complete` and `Failed`. `Tier2Failure` supplies the validated partial evidence described above; do not reconstruct completed stage artifacts from unchecked raw input. Persist artifacts in dependency order, then receipt, then call `WaterfallState::record_receipt` only for `Exhausted`. Replay verifies artifacts before returning the original result.
 
 - [ ] **Step 5: Run the focused CLI recovery proof**
 
