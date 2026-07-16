@@ -58,7 +58,14 @@ fn disabled_policy_is_exact_and_has_no_observation() {
     let evaluation = evaluate_tier3(Tier3Input::DisabledByCheckedInPolicy).expect("policy result");
 
     assert_eq!(evaluation.observation(), None);
-    assert_eq!(evaluation.not_run_reason(), Some(DISABLED_REASON));
+    assert_eq!(
+        DISABLED_REASON,
+        "tier3_metadata_disabled_by_checked_in_policy"
+    );
+    assert_eq!(
+        evaluation.not_run_reason(),
+        Some("tier3_metadata_disabled_by_checked_in_policy")
+    );
 }
 
 #[test]
@@ -308,21 +315,27 @@ fn sealed_documents_have_canonical_kinds_and_predecessor_rules() {
         documents.architecture_json().expect("architecture document"),
         "{\"schema\":1,\"kind\":\"tier3_architecture\",\"adapter_version\":\"test-architecture-adapter\",\"rule_version\":\"rules-v1\",\"findings\":[{\"kind\":\"architecture\",\"severity\":\"high\",\"rule_id\":\"architecture.boundary\",\"path\":\"src/lib.rs\",\"line\":5,\"message\":\"architecture boundary is unsealed\"}]}\n"
     );
-    assert!(documents
+    assert_eq!(
+        documents
         .coverage_json(&digest)
         .expect("sealed coverage digest")
-        .expect("coverage document")
-        .contains("\"kind\":\"tier3_coverage\""));
-    assert!(documents
+        .expect("coverage document"),
+        "{\"schema\":1,\"kind\":\"tier3_coverage\",\"predecessor_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"adapter_version\":\"test-coverage-adapter\",\"rule_version\":\"rules-v1\",\"findings\":[{\"kind\":\"coverage\",\"severity\":\"medium\",\"rule_id\":\"coverage.branch\",\"path\":\"tests/lib.rs\",\"line\":8,\"message\":\"branch lacks direct coverage\"}]}\n"
+    );
+    assert_eq!(
+        documents
         .debt_json(&digest)
         .expect("sealed debt digest")
-        .expect("debt document")
-        .contains("\"predecessor_digest\":\""));
-    assert!(documents
+        .expect("debt document"),
+        "{\"schema\":1,\"kind\":\"tier3_debt\",\"predecessor_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"adapter_version\":\"test-debt-adapter\",\"rule_version\":\"rules-v1\",\"findings\":[{\"kind\":\"debt\",\"severity\":\"low\",\"rule_id\":\"debt.duplicate\",\"path\":\"src/lib.rs\",\"line\":9,\"message\":\"duplicate control flow\"}]}\n"
+    );
+    assert_eq!(
+        documents
         .findings_json(&digest)
         .expect("sealed findings digest")
-        .expect("findings document")
-        .contains("\"kind\":\"tier3_findings\""));
+        .expect("findings document"),
+        "{\"schema\":1,\"kind\":\"tier3_findings\",\"predecessor_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"rank_limit\":10,\"funnel\":{\"observed\":3,\"deduplicated\":3,\"verified\":3,\"roi_approved\":3,\"ranked\":3},\"deduplicated\":[{\"kind\":\"architecture\",\"severity\":\"high\",\"rule_id\":\"architecture.boundary\",\"path\":\"src/lib.rs\",\"line\":5,\"message\":\"architecture boundary is unsealed\"},{\"kind\":\"coverage\",\"severity\":\"medium\",\"rule_id\":\"coverage.branch\",\"path\":\"tests/lib.rs\",\"line\":8,\"message\":\"branch lacks direct coverage\"},{\"kind\":\"debt\",\"severity\":\"low\",\"rule_id\":\"debt.duplicate\",\"path\":\"src/lib.rs\",\"line\":9,\"message\":\"duplicate control flow\"}],\"ranked\":[{\"kind\":\"architecture\",\"severity\":\"high\",\"rule_id\":\"architecture.boundary\",\"path\":\"src/lib.rs\",\"line\":5,\"message\":\"architecture boundary is unsealed\"},{\"kind\":\"coverage\",\"severity\":\"medium\",\"rule_id\":\"coverage.branch\",\"path\":\"tests/lib.rs\",\"line\":8,\"message\":\"branch lacks direct coverage\"},{\"kind\":\"debt\",\"severity\":\"low\",\"rule_id\":\"debt.duplicate\",\"path\":\"src/lib.rs\",\"line\":9,\"message\":\"duplicate control flow\"}]}\n"
+    );
 
     let failure = evaluate_tier3(Tier3Input::Enabled {
         architecture: Tier3StageResult::Complete(evidence(
@@ -340,11 +353,13 @@ fn sealed_documents_have_canonical_kinds_and_predecessor_rules() {
     assert!(documents.architecture_json().is_some());
     assert!(documents.coverage_json(&digest).expect("digest").is_none());
     assert!(documents.failure_json(None).is_err());
-    assert!(documents
+    assert_eq!(
+        documents
         .failure_json(Some(&digest))
         .expect("coverage failure predecessor")
-        .expect("failure document")
-        .contains("\"stage\":\"coverage\""));
+        .expect("failure document"),
+        "{\"schema\":1,\"kind\":\"tier3_failure\",\"predecessor_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"stage\":\"coverage\",\"code\":\"invalid_adapter_evidence\",\"status_reason\":\"tier3_coverage_invalid_adapter_evidence\",\"detail\":\"typed stage failure\",\"funnel\":{\"observed\":0,\"deduplicated\":0,\"verified\":0,\"roi_approved\":0,\"ranked\":0}}\n"
+    );
 }
 
 #[test]
