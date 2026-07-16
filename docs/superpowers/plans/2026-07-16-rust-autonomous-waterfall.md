@@ -39,21 +39,46 @@ conductor tests.
 
 - [ ] Start a pass only after the current Rust ready queue is empty and a
   conductor lease is held.
+- [ ] Intercept the repository-scope empty queue at `scan_foreground` before
+  `ConductorEvent::ScanEmpty`; retain `Scan` rather than terminal `AllDone`.
+  Slice-empty, active-claim, and worker-cap-empty observations must not start
+  a repository pass.
 - [ ] Persist a Tier-1 receipt from typed queue evidence. Queue read errors are
   `failed`; an empty page is the appropriate exhausted observation.
+- [ ] Persist the receipt before cursor advance. A replayed receipt advances
+  the existing pass idempotently; a cursor at `tier1_5` returns pending and
+  does not start another pass. Never invoke `NoWorkState::record` here.
 - [ ] Resume deterministically after an interrupted pass; never run a second
   independent loop or change claim ownership.
-- [ ] Prove foreground performs no shell waterfall invocation and never writes
-  `why-no-work.json` while any later tier is `not_run`.
+- [ ] Prove foreground performs no shell waterfall invocation, issue edit, or
+  comment, and never writes `why-no-work.json` while Tier 1.5–4 are pending.
 
 ## Task 4: Port Tier 1.5 native promotion/grooming observation
 
-- [ ] Implement read-only issue enumeration, closed eligibility/classification
-  evidence, deduplication, and governance decisions in Rust.
+**Delivery split:** 4A is a pure core observer and closed decision codec;
+4B is the read-only GitHub adapter plus receipt persistence. No 4B work starts
+until 4A is tested and reviewed.
+
+- [ ] Add a pure `Tier15Input -> Tier15Observation` model with typed
+  `Produced`, `Skipped`, `Held`, `Quarantined`, and `Routed` decisions. All
+  classifications, eligibility outcomes, routes, and skip/hold/quarantine
+  reasons are closed enums; duplicate open numbers with different payloads fail
+  closed and identical duplicates are deterministic.
+- [ ] Enumerate open and closed non-PR issues with direct read-only GitHub API
+  requests. Preserve pagination failure, malformed payload, and incomplete
+  evidence as `failed`, not exhausted. Never call the existing claim-reconciling
+  queue reader or write-capable queue safety command.
+- [ ] Match legacy selection only at the observer boundary: excluded labels,
+  closed fingerprints, already-groomed labels, budget exhaustion, thin or
+  ambiguous intent, dependency holds, existing security quarantine, and epic /
+  template routing all become evidence records. No label/body/comment/template
+  write happens in this task.
 - [ ] Preserve every skip/hold/quarantine/routing reason in a Tier-1.5 receipt.
 - [ ] Keep promotion/body/label mutation outside this observer; a produced
   candidate returns to normal Rust queue admission.
-- [ ] Test malformed/missing GitHub data as `failed`, never dry.
+- [ ] Test malformed/missing/paginated GitHub data as `failed`, never dry;
+  source/PATH guards must reject shell, legacy promoter/classifier, `gh` write
+  verbs, and queue/claim mutation authority.
 
 ## Task 5: Port Tier 2 local discovery funnel
 
