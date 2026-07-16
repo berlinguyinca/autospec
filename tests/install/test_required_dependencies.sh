@@ -10,11 +10,6 @@ ORIGINAL_PATH="$PATH"
 failures=0
 
 cleanup() {
-    if [ -f "$TMP_DIR/runtime-backup" ]; then
-        cp "$TMP_DIR/runtime-backup" "$ROOT/target/release/autospec"
-    elif [ "${CREATED_RUNTIME:-0}" = "1" ]; then
-        rm -f "$ROOT/target/release/autospec"
-    fi
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT INT TERM
@@ -128,31 +123,85 @@ case "$no_sudo_output" in
     *) fail "required failure did not explain the unavailable sudo path" ;;
 esac
 
-# Make every core command available while keeping all harnesses absent. Real
-# Cargo exercises the actual build boundary; all network-facing commands are
-# inert local shims.
-for tool in git curl python3 gh jq; do
+# Make the non-Python core commands available while keeping all harnesses
+# absent. Cargo writes to a temporary target directory so this test can run in
+# parallel with real builds.
+for tool in git curl gh jq; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$ISOLATED_BIN/$tool"
     chmod +x "$ISOLATED_BIN/$tool"
 done
-if [ -f "$ROOT/target/release/autospec" ]; then
-    cp "$ROOT/target/release/autospec" "$TMP_DIR/runtime-backup"
-else
-    CREATED_RUNTIME=1
-fi
+TEST_CARGO_TARGET_DIR="$TMP_DIR/cargo-target"
 cat > "$ISOLATED_BIN/cargo" <<SHIM
 #!/usr/bin/env bash
-mkdir -p "$ROOT/target/release"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$ROOT/target/release/autospec"
-chmod +x "$ROOT/target/release/autospec"
+mkdir -p "$TEST_CARGO_TARGET_DIR/release"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_CARGO_TARGET_DIR/release/autospec"
+chmod +x "$TEST_CARGO_TARGET_DIR/release/autospec"
 exit 0
 SHIM
 chmod +x "$ISOLATED_BIN/cargo"
+cat > "$ISOLATED_BIN/codex" <<'SHIM'
+#!/usr/bin/env bash
+exit 0
+SHIM
+chmod +x "$ISOLATED_BIN/codex"
+
+# WinGet updates the persistent Windows PATH, not the already-running Git Bash
+# process. Simulate Python landing outside the original PATH and require the
+# same installer process to import the refreshed PATH and expose python3.
+WINDOWS_HOME="$TMP_DIR/windows-home"
+WINDOWS_BIN="$TMP_DIR/windows-bin"
+mkdir -p "$WINDOWS_HOME" "$WINDOWS_BIN"
+cat > "$ISOLATED_BIN/winget" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in
+    *Python.Python.3.12*)
+        printf '#!/usr/bin/env bash\nexit 0\n' > "$WINDOWS_BIN/python"
+        chmod +x "$WINDOWS_BIN/python"
+        ;;
+esac
+exit 0
+SHIM
+cat > "$ISOLATED_BIN/powershell.exe" <<'SHIM'
+#!/usr/bin/env bash
+printf 'C:\\Program Files\\Python\r\n'
+SHIM
+cat > "$ISOLATED_BIN/cygpath" <<SHIM
+#!/usr/bin/env bash
+printf '%s\n' "$WINDOWS_BIN"
+SHIM
+chmod +x "$ISOLATED_BIN/winget" "$ISOLATED_BIN/powershell.exe" "$ISOLATED_BIN/cygpath"
+
+set +e
+windows_output=$(HOME="$WINDOWS_HOME" PATH="$ISOLATED_BIN" \
+    CARGO_TARGET_DIR="$TEST_CARGO_TARGET_DIR" \
+    AUTOSPEC_REQUIRED_SYSTEM_TOOLS=python3 \
+    AUTOSPEC_SYSTEM_TOOLS=true \
+    AUTOSPEC_HARNESS_TOOLS=codex \
+    AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
+    AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1 \
+    AUTOSPEC_NO_DB_PROMPT=1 \
+    AUTOSPEC_NO_STAR_PROMPT=1 \
+    TURBO_REPO_DIR="$TMP_DIR/windows-turbo" \
+    bash "$ROOT/install.sh" --skill autospec --harness codex 2>&1)
+windows_status=$?
+set -e
+if [ "$windows_status" -ne 0 ]; then
+    fail "WinGet-installed Python was not discovered in the same Git Bash process: $windows_output"
+fi
+if [ ! -x "$WINDOWS_HOME/.autospec/bin/python3" ]; then
+    fail "WinGet-installed Python did not receive a local python3 command alias"
+fi
+rm -f "$ISOLATED_BIN/winget" "$ISOLATED_BIN/powershell.exe" "$ISOLATED_BIN/cygpath"
+rm -f "$ISOLATED_BIN/codex"
+
+printf '#!/usr/bin/env bash\nexit 0\n' > "$ISOLATED_BIN/python3"
+chmod +x "$ISOLATED_BIN/python3"
 EVAL_MARKER="$TMP_DIR/eval-marker"
 MALICIOUS_TOOL="\$(touch\${IFS}$EVAL_MARKER)"
 
 set +e
 harness_output=$(HOME="$FAKE_HOME" PATH="$ISOLATED_BIN" \
+    CARGO_TARGET_DIR="$TEST_CARGO_TARGET_DIR" \
     AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
     AUTOSPEC_SYSTEM_TOOLS="$MALICIOUS_TOOL" \
     AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
@@ -181,6 +230,7 @@ SHIM
 chmod +x "$ISOLATED_BIN/codex"
 set +e
 success_output=$(HOME="$FAKE_HOME" PATH="$ISOLATED_BIN" \
+    CARGO_TARGET_DIR="$TEST_CARGO_TARGET_DIR" \
     AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
     AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
     AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1 \

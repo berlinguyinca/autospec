@@ -258,13 +258,14 @@ install_autonomous_operator_commands() {
 }
 
 install_autospec_runtime_binary() {
-    runtime_source="$REPO_ROOT/target/release/autospec"
+    cargo_target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+    runtime_source="$cargo_target_dir/release/autospec"
     runtime_target="$HOME/.autospec/bin/autospec"
     autospec_bin_dir="$HOME/.autospec/bin"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] install_autospec_runtime_binary: cargo build --release -p autospec-cli (from $REPO_ROOT)"
-        info "[dry-run] install_autospec_runtime_binary: install $REPO_ROOT/target/release/autospec -> $HOME/.autospec/bin/autospec"
+        info "[dry-run] install_autospec_runtime_binary: install $runtime_source -> $HOME/.autospec/bin/autospec"
         return 0
     fi
 
@@ -563,6 +564,25 @@ record_dependency() {
 }
 
 refresh_dependency_path() {
+    windows_path=""
+    windows_shell=""
+    for windows_shell_candidate in powershell.exe pwsh.exe; do
+        if command_present "$windows_shell_candidate"; then
+            windows_shell="$windows_shell_candidate"
+            break
+        fi
+    done
+    if [ -n "$windows_shell" ] && command_present cygpath; then
+        windows_path="$($windows_shell -NoProfile -NonInteractive -Command \
+            '$machine = [Environment]::GetEnvironmentVariable("Path", "Machine"); $user = [Environment]::GetEnvironmentVariable("Path", "User"); @($machine, $user) -join ";"' \
+            2>/dev/null | tr -d '\r' || true)"
+        if [ -n "$windows_path" ]; then
+            windows_unix_path="$(cygpath --unix --path "$windows_path" 2>/dev/null || true)"
+            if [ -n "$windows_unix_path" ]; then
+                PATH="$windows_unix_path:$PATH"
+            fi
+        fi
+    fi
     for dependency_bin in "$HOME/.cargo/bin" "$HOME/.autospec/bin"; do
         [ -d "$dependency_bin" ] || continue
         case ":$PATH:" in
@@ -572,6 +592,24 @@ refresh_dependency_path() {
     done
     export PATH
     hash -r 2>/dev/null || true
+}
+
+ensure_python3_alias() {
+    command_present python3 && return 0
+    command_present python || return 0
+    python -c 'import sys; raise SystemExit(sys.version_info.major != 3)' >/dev/null 2>&1 || return 0
+
+    python3_alias_dir="$HOME/.autospec/bin"
+    python3_alias="$python3_alias_dir/python3"
+    mkdir -p "$python3_alias_dir"
+    python3_alias_tmp="$(mktemp "$python3_alias_dir/.python3.XXXXXX")"
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'exec python "$@"'
+    } > "$python3_alias_tmp"
+    chmod +x "$python3_alias_tmp"
+    mv "$python3_alias_tmp" "$python3_alias"
+    refresh_dependency_path
 }
 
 attempt_tool_install() {
@@ -585,6 +623,9 @@ attempt_tool_install() {
     if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" != "1" ] && [ -f "$ENSURE_TOOL_SCRIPT" ]; then
         bash "$ENSURE_TOOL_SCRIPT" "$tool" || true
         refresh_dependency_path
+        if [ "$tool" = "python3" ]; then
+            ensure_python3_alias
+        fi
     fi
     if command_present "$tool"; then
         record_dependency DEPENDENCIES_INSTALLED "$tool"
