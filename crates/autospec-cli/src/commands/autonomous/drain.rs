@@ -40,9 +40,12 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
         CommandFailure::diagnostic(format!("autonomous drain invalid repo: {reason}"))
     })?;
     let canonical_repo = scope.as_str();
-    if super::git_remote_slug(&options.repo_dir)
-        .is_some_and(|checkout_repo| checkout_repo != canonical_repo)
-    {
+    let checkout_repo = super::git_remote_slug(&options.repo_dir).ok_or_else(|| {
+        CommandFailure::diagnostic(
+            "autonomous drain requires a supported GitHub origin for repository identity",
+        )
+    })?;
+    if checkout_repo != canonical_repo {
         return Err(CommandFailure::diagnostic(
             "autonomous drain repo does not match checkout origin".to_string(),
         ));

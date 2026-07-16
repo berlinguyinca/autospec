@@ -57,6 +57,73 @@ fn malformed_repo_is_rejected_before_state_or_child_creation() {
 }
 
 #[test]
+fn missing_origin_is_rejected_before_state_or_child_creation() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let launched = fixture.root.join("launched");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        "#!/bin/sh\nprintf launched > \"$AUTOSPEC_TEST_DRAIN_LAUNCHED\"\n",
+    );
+    let removed = Command::new("git")
+        .args([
+            "-C",
+            fixture.repo_dir.to_str().expect("repo dir"),
+            "remote",
+            "remove",
+            "origin",
+        ])
+        .output()
+        .expect("remove origin");
+    assert!(removed.status.success());
+
+    let output = fixture
+        .command(&bin)
+        .env("AUTOSPEC_TEST_DRAIN_LAUNCHED", &launched)
+        .output()
+        .expect("reject missing origin");
+
+    assert_eq!(output.status.code(), Some(2), "stderr={}", stderr(&output));
+    assert!(!launched.exists());
+    assert!(!fixture.operator_root.exists());
+}
+
+#[test]
+fn unsupported_origin_is_rejected_before_state_or_child_creation() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let launched = fixture.root.join("launched");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        "#!/bin/sh\nprintf launched > \"$AUTOSPEC_TEST_DRAIN_LAUNCHED\"\n",
+    );
+    let changed = Command::new("git")
+        .args([
+            "-C",
+            fixture.repo_dir.to_str().expect("repo dir"),
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.com/owner/repo.git",
+        ])
+        .output()
+        .expect("replace origin");
+    assert!(changed.status.success());
+
+    let output = fixture
+        .command(&bin)
+        .env("AUTOSPEC_TEST_DRAIN_LAUNCHED", &launched)
+        .output()
+        .expect("reject unsupported origin");
+
+    assert_eq!(output.status.code(), Some(2), "stderr={}", stderr(&output));
+    assert!(!launched.exists());
+    assert!(!fixture.operator_root.exists());
+}
+
+#[test]
 fn outside_env_artifact_path_is_rejected_before_child_creation() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
