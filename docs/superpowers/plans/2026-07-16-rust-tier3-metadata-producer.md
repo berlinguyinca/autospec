@@ -23,6 +23,8 @@
   no-work codec's fixed reason-count shape and exact-key tests with the core
   contract rather than aliasing it to a proposal-stage dry reason.
 - Produced evidence is planning-only and never mutates GitHub or dispatches work.
+- A failed Tier 3 receipt has the all-zero funnel `(0,0,0,0,0)`; its ordered
+  prefix artifacts carry the only validated partial facts.
 
 ---
 
@@ -88,6 +90,13 @@ Extend the closed no-work `DryReason` set with
 strict exact-key parsing, and its focused state round-trip test. This is the
 only dry outcome a complete empty Tier 3 metadata scan may produce.
 
+Define `Tier3Stage::as_str`, `Tier3FailureCode::{as_str,parse}`, and
+`Tier3Failure::status_reason` as a closed, round-trippable
+`tier3_<stage>_<code>` grammar. The code set must cover missing input, invalid
+adapter/finding evidence, wrong kind, noncanonical order, duplicate conflict,
+invalid ranking, and count overflow. Failure documents retain predecessor
+artifacts; their receipt funnel is always zero.
+
 - [ ] **Step 4: Render opaque canonical documents**
 
 Expose documents only from an evaluated observation or sealed failure. Render
@@ -120,13 +129,12 @@ focused core proof.
 
 **Files:**
 
-- Modify: `crates/autospec-core/src/autonomous/waterfall.rs`
 - Modify: `crates/autospec-cli/src/commands/autonomous.rs`
 - Create: `crates/autospec-cli/src/commands/autonomous/tier3.rs`
 - Create: `crates/autospec-cli/src/commands/autonomous/tier3_receipts.rs`
 - Modify: `crates/autospec-cli/src/commands/autonomous/waterfall.rs`
 - Modify: `crates/autospec-cli/src/commands/autonomous/waterfall/evidence.rs`
-- Modify: `crates/autospec-cli/src/commands/autonomous/waterfall/evidence/tier2/canonical.rs`
+- Delete: `crates/autospec-cli/src/commands/autonomous/waterfall/evidence/tier2/canonical.rs`
 - Create: `crates/autospec-cli/src/commands/autonomous/waterfall/evidence/canonical.rs`
 - Create: `crates/autospec-cli/src/commands/autonomous/waterfall/evidence/tier3.rs`
 - Create: focused Tier 3 receipt/recovery test modules as needed
@@ -143,6 +151,9 @@ Seed a valid Tier 3 cursor after Tier 1, Tier 1.5, and Tier 2 exhausted
 receipts. Cover policy-only NotRun, empty complete evidence advancing Tier 4,
 produced and failed outcomes retaining Tier 3, every exact failure prefix,
 replay before cursor write, and tampered/missing/extra/misordered evidence.
+Also reject malformed `tier3_<stage>_<code>` status strings, nonzero failed
+funnels, and any disabled receipt differing from the exact V1 producer, policy
+document, zero funnel, or sole policy artifact.
 
 ```rust
 assert_eq!(record_tier3(root.path(), REPO, Tier3Scan::NotRun)?,
@@ -164,6 +175,11 @@ canonical lexical JSON checks. Require exact ordered references, strict keys,
 digest/link validation, bounded failure detail, stage-appropriate funnels, and
 terminal status/funnel consistency. Extend state receipt verification for
 completed Tier 3 receipts.
+
+The generic core `WaterfallState` already advances a valid exhausted Tier 3
+receipt, so do not widen core cursor logic. Add CLI `WaterfallStore`
+`persist_tier3_evidence` / `verify_tier3_evidence` siblings to Tier 2 and its
+`NoWorkTier::Tier3` replay branch instead.
 
 - [ ] **Step 4: Implement the disabled adapter and coordinator**
 
@@ -187,8 +203,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit sealed receipts**
 
 ```bash
-git add crates/autospec-core/src/autonomous/waterfall.rs \
-  crates/autospec-cli/src/commands/autonomous.rs \
+git add crates/autospec-cli/src/commands/autonomous.rs \
   crates/autospec-cli/src/commands/autonomous/tier3.rs \
   crates/autospec-cli/src/commands/autonomous/tier3_receipts.rs \
   crates/autospec-cli/src/commands/autonomous/waterfall.rs \

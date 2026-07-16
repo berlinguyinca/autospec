@@ -82,6 +82,16 @@ debt; and all three before the closed `Ranking` stage. An opaque, evaluator-deri
 `Tier3EvidenceDocuments` is the only public document-rendering surface. Raw
 adapter structs cannot be serialized as sealed evidence.
 
+Failure status reasons are closed and round-trip exactly as
+`tier3_<stage>_<code>`. `Tier3Stage::{Architecture,Coverage,Debt,Ranking}`
+renders as `architecture`, `coverage`, `debt`, or `ranking`. The closed failure
+codes cover missing stage input, invalid adapter/finding evidence, wrong finding
+kind, noncanonical order, duplicate conflict, invalid ranking, and count
+overflow; each code has an exact snake-case representation and parser. A
+failure's receipt funnel is always `(0,0,0,0,0)`: prefix artifacts retain
+validated partial facts, while funnel counts describe only a completed merged
+evaluation.
+
 ## CLI receipts and replay
 
 Tier 3 artifacts live below `waterfall/<pass>/tier3/`:
@@ -117,6 +127,17 @@ receipt and leaves the cursor unchanged. `Produced` findings are planning
 evidence only; they never create issues, labels, claims, branches, PRs, or
 implementation work.
 
+`failure.json` has exactly `schema`, `kind`, `predecessor_digest`, `stage`,
+`code`, `status_reason`, `detail`, and `funnel`. Its stage/code/status reason
+must round-trip through the closed core grammar, its bounded detail must be
+nonblank, and its all-zero funnel must equal the failed receipt. The disabled
+receipt is also exact: producer `rust-tier3-disabled-policy-v1`, zero funnel,
+only `policy.json`, and this literal document:
+
+```json
+{"schema":1,"kind":"tier3_policy","mode":"disabled","reason":"tier3_metadata_disabled_by_checked_in_policy","policy_source":"checked_in"}
+```
+
 ## Activation boundary
 
 V1 production constructs only `DisabledByCheckedInPolicy`. A later activation
@@ -136,7 +157,8 @@ legacy code. Those remain separately gated work.
   and no authority leaks.
 - CLI tests prove disabled, exhausted, produced, and every failure cursor rule;
   evidence-before-receipt-before-cursor ordering; replay and tamper rejection;
-  exact artifact references; and no direct process/network/GitHub/queue action.
+  exact artifact references; malformed policy/status/funnel rejection; and no
+  direct process/network/GitHub/queue action.
 - Formatting, scoped clippy, package tests, native fast validation, and
   `git diff --check` pass. Every new Tier 3 source or test file stays at 450
   lines or fewer.
