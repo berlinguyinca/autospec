@@ -25,9 +25,15 @@
   },
   {
     "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
-    "function": "new",
+    "function": "executor_result_rejects_malformed_protocol_input_without_mutating_claim_state",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "This fixture's shell response table models independent fake GitHub endpoints for an end-to-end CLI regression; it is test data, not production dispatch logic."
+    "justification": "This test supplies malformed CLI argument matrices; its repeated fixture rows are data, not production dispatch logic."
+  },
+  {
+    "file": "crates/autospec-cli/tests/autonomous_resilience_commands.rs",
+    "function": "resilience_help_names_the_canonical_write_slug",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This help-text regression checks documented CLI wording; its substring assertions do not encode domain representation logic."
   },
   {
     "file": "crates/autospec-cli/tests/runtime_commands.rs",

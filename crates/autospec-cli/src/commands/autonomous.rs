@@ -728,15 +728,16 @@ fn status(options: Options) -> Result<(), CommandFailure> {
             last_cycle: state.last_cycle,
         })
         .unwrap_or_else(|| read_state_metadata(&layout));
-    let spend = read_spend_json();
+    let spend = resilience::spend_status(&layout.repo).map_err(resilience_admission_error)?;
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_status\":\"{}\",\"heartbeat_at\":{},\"last_cycle\":\"{}\",\"spend\":{},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_status\":\"{}\",\"heartbeat_at\":{},\"last_cycle\":\"{}\",\"spend\":{{\"tokens\":{},\"issues\":{}}},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
             json_escape(&layout.repo),
             json_escape(&state.status),
             state.heartbeat_at,
             json_escape(&state.last_cycle),
-            spend,
+            spend.tokens,
+            spend.issues,
             unit_status_json(&conductor),
             unit_status_json(&monitor),
             unit_status_json(&supervisor)
@@ -1162,43 +1163,69 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
     let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
     })?;
-    if let Some(mode) = persisted_stop_mode(&layout).map_err(CommandFailure::diagnostic)? {
+    let inherited_lease = inherited_foreground_lease(&layout.repo)?;
+    let stored_stop = match persisted_stop_mode(&layout) {
+        Ok(mode) => mode,
+        Err(error) => {
+            return match inherited_lease.as_ref() {
+                Some(lease) => finish_with_launch_lease(&layout.repo, lease, || {
+                    Err(CommandFailure::diagnostic(error))
+                }),
+                None => Err(CommandFailure::diagnostic(error)),
+            };
+        }
+    };
+    if let Some(mode) = stored_stop {
         let lifecycle = decide_lifecycle(
             &LifecycleInput::from_scope(scope)
                 .with_transition(LifecycleTransition::Foreground)
                 .with_stop(mode),
         );
-        return emit_lifecycle_decision(lifecycle);
+        let persisted =
+            persist_lifecycle_decision(&layout, &lifecycle).map_err(CommandFailure::diagnostic);
+        return match inherited_lease.as_ref() {
+            Some(lease) => finish_with_launch_lease(&layout.repo, lease, || {
+                persisted?;
+                emit_lifecycle_decision(lifecycle)
+            }),
+            None => {
+                persisted?;
+                emit_lifecycle_decision(lifecycle)
+            }
+        };
     }
 
-    let (lease, admission) = acquire_foreground_lease(&layout, &options, scope.clone())?;
+    let (lease, admission) =
+        acquire_foreground_lease(&layout, &options, scope.clone(), inherited_lease)?;
     let result = run_foreground_with_lease(&layout, &options, scope, &lease, admission);
-    match release_launch_lease(&layout.repo, &lease) {
-        Ok(()) => result,
-        Err(error) => Err(error),
-    }
+    finish_foreground_with_lease(&layout.repo, &lease, result)
 }
 
 fn acquire_foreground_lease(
     layout: &RunLayout,
     options: &Options,
     scope: RepositoryScope,
+    inherited_lease: Option<resilience::ConductorLease>,
 ) -> Result<(resilience::ConductorLease, resilience::ResilienceAdmission), CommandFailure> {
-    let (lease, admission) = match std::env::var("AUTOSPEC_CONDUCTOR_LEASE_TOKEN") {
-        Ok(token) => {
-            let lease = resilience::adopt_lifecycle(&layout.repo, &token)
-                .map_err(resilience_lease_error)?;
-            let admission = resilience::admit_owned_lifecycle(
+    let (lease, admission) = match inherited_lease {
+        Some(lease) => {
+            let admission = match resilience::admit_owned_lifecycle(
                 &layout.repo,
                 &lease,
                 options.issue,
                 options.budget_tokens,
                 options.budget_issues,
-            )
-            .map_err(resilience_lease_error)?;
+            ) {
+                Ok(admission) => admission,
+                Err(error) => {
+                    return finish_with_launch_lease(&layout.repo, &lease, || {
+                        Err(resilience_lease_error(error))
+                    })
+                }
+            };
             (lease, admission)
         }
-        Err(std::env::VarError::NotPresent) => match resilience::acquire_lifecycle(
+        None => match resilience::acquire_lifecycle(
             &layout.repo,
             options.issue,
             options.budget_tokens,
@@ -1216,17 +1243,23 @@ fn acquire_foreground_lease(
             }
             Err(error) => return Err(resilience_lease_error(error)),
         },
-        Err(std::env::VarError::NotUnicode(_)) => return Err(resilience_token_mismatch()),
     };
-    let lifecycle = lifecycle_decision_with_admission(
+    let lifecycle = match lifecycle_decision_with_admission(
         scope,
         LifecycleTransition::Foreground,
         None,
         &admission,
-    )?;
+    ) {
+        Ok(lifecycle) => lifecycle,
+        Err(error) => return finish_with_launch_lease(&layout.repo, &lease, || Err(error)),
+    };
     if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
-        release_launch_lease(&layout.repo, &lease)?;
-        return Err(lifecycle_non_run(&lifecycle));
+        let persisted =
+            persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic);
+        return finish_with_launch_lease(&layout.repo, &lease, || {
+            persisted?;
+            Err(lifecycle_non_run(&lifecycle))
+        });
     }
     Ok((lease, admission))
 }
@@ -1237,15 +1270,15 @@ fn run_foreground_with_lease(
     scope: RepositoryScope,
     lease: &resilience::ConductorLease,
     admission: resilience::ResilienceAdmission,
-) -> Result<(), CommandFailure> {
-    let mut input = lifecycle_input_with_resilience(
+) -> Result<ForegroundCompletion, ForegroundFailure> {
+    let mut input = foreground_lifecycle_input_with_resilience(
         LifecycleInput::from_scope(scope.clone()).with_transition(LifecycleTransition::Foreground),
         &admission,
     )?;
     let preflight = decide_lifecycle(&input);
     if !matches!(preflight, LifecycleDecision::Run { .. }) {
         persist_lifecycle_decision(layout, &preflight).map_err(CommandFailure::diagnostic)?;
-        return Err(lifecycle_non_run(&preflight));
+        return Ok(ForegroundCompletion::Lifecycle(preflight));
     }
     let health = load_main_health(layout, options).map_err(CommandFailure::diagnostic)?;
     input = input.with_health(lifecycle_health(health.outcome.clone()));
@@ -1259,13 +1292,13 @@ fn run_foreground_with_lease(
         })?;
         persist_main_health(layout, &health).map_err(CommandFailure::diagnostic)?;
         persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
-        return emit_lifecycle_decision(lifecycle);
+        return Ok(ForegroundCompletion::Lifecycle(lifecycle));
     }
     if options.issue.is_none() {
         if let Some(issue) = preview_foreground_issue(layout)? {
             let admission =
                 resilience_admission_for_issue(layout, options, Some(issue), Some(lease))?;
-            input = lifecycle_input_with_resilience(
+            input = foreground_lifecycle_input_with_resilience(
                 LifecycleInput::from_scope(scope)
                     .with_transition(LifecycleTransition::Foreground)
                     .with_health(lifecycle_health(health.outcome.clone())),
@@ -1273,7 +1306,9 @@ fn run_foreground_with_lease(
             )?;
             lifecycle = decide_lifecycle(&input);
             if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
-                return Err(lifecycle_non_run(&lifecycle));
+                persist_lifecycle_decision(layout, &lifecycle)
+                    .map_err(CommandFailure::diagnostic)?;
+                return Ok(ForegroundCompletion::Lifecycle(lifecycle));
             }
         }
     }
@@ -1282,36 +1317,43 @@ fn run_foreground_with_lease(
     let state =
         load_foreground_state(&state_path, layout, scope).map_err(CommandFailure::diagnostic)?;
     if foreground_state_is_retained(&state) {
-        println!("{}", state.to_json());
-        return Ok(());
+        return Ok(ForegroundCompletion::State(state));
     }
     if state.phase() != ConductorPhase::Scan {
         return Err(CommandFailure::diagnostic(format!(
             "foreground conductor requires recovery from {:?}",
             state.phase()
-        )));
+        ))
+        .into());
     }
 
     let (state, found_work) = scan_foreground(layout, state).map_err(CommandFailure::diagnostic)?;
     if !found_work {
         persist_foreground_admission(layout, &health, &lifecycle)?;
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
-        println!("{}", state.to_json());
-        return Ok(());
+        return Ok(ForegroundCompletion::State(state));
     }
     let state = review_foreground(layout, state).map_err(CommandFailure::diagnostic)?;
-    let (state, selected) = select_foreground(layout, options, lease, state)?;
+    let selection = select_foreground(layout, options, lease, state)?;
+    let (state, selected) = match selection {
+        ForegroundSelectionResult::Lifecycle(lifecycle) => {
+            return Ok(ForegroundCompletion::Lifecycle(lifecycle));
+        }
+        ForegroundSelectionResult::State(state, selected) => (state, selected),
+    };
     let Some(selected) = selected else {
         persist_foreground_admission(layout, &health, &lifecycle)?;
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
-        println!("{}", state.to_json());
-        return Ok(());
+        return Ok(ForegroundCompletion::State(state));
     };
     persist_foreground_admission(layout, &health, &lifecycle)?;
     persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
-    let state = dispatch_foreground(layout, options, lease, &state_path, state, selected)?;
-    println!("{}", state.to_json());
-    Ok(())
+    match dispatch_foreground(layout, options, lease, &state_path, state, selected)? {
+        ForegroundDispatchResult::State(state) => Ok(ForegroundCompletion::State(state)),
+        ForegroundDispatchResult::Lifecycle(lifecycle) => {
+            Ok(ForegroundCompletion::Lifecycle(lifecycle))
+        }
+    }
 }
 
 fn lifecycle_health(outcome: MainlineHealthOutcome) -> LifecycleHealth {
@@ -1333,6 +1375,43 @@ fn foreground_state_is_retained(state: &ConductorState) -> bool {
 struct ForegroundSelection {
     issue: u64,
     serialization_reasons: Vec<String>,
+}
+
+enum ForegroundCompletion {
+    State(ConductorState),
+    Lifecycle(LifecycleDecision),
+}
+
+enum ForegroundFailure {
+    Diagnostic(CommandFailure),
+    Deferred { json: String, exit_code: i32 },
+}
+
+impl From<CommandFailure> for ForegroundFailure {
+    fn from(error: CommandFailure) -> Self {
+        Self::Diagnostic(error)
+    }
+}
+
+impl From<claim::ConductorClaimError> for ForegroundFailure {
+    fn from(error: claim::ConductorClaimError) -> Self {
+        match error {
+            claim::ConductorClaimError::Diagnostic(error) => Self::Diagnostic(error),
+            claim::ConductorClaimError::Deferred { json, exit_code } => {
+                Self::Deferred { json, exit_code }
+            }
+        }
+    }
+}
+
+enum ForegroundSelectionResult {
+    State(ConductorState, Option<ForegroundSelection>),
+    Lifecycle(LifecycleDecision),
+}
+
+enum ForegroundDispatchResult {
+    State(ConductorState),
+    Lifecycle(LifecycleDecision),
 }
 
 fn scan_foreground(
@@ -1372,7 +1451,7 @@ fn select_foreground(
     options: &Options,
     lease: &resilience::ConductorLease,
     state: ConductorState,
-) -> Result<(ConductorState, Option<ForegroundSelection>), CommandFailure> {
+) -> Result<ForegroundSelectionResult, ForegroundFailure> {
     let ready = queue::ready_plan_for(&layout.repo, 1)
         .map_err(command_error)
         .map_err(CommandFailure::diagnostic)?;
@@ -1384,7 +1463,7 @@ fn select_foreground(
             .map_err(|error| {
                 CommandFailure::diagnostic(format!("cannot pause foreground conductor: {error}"))
             })?;
-        return Ok((state, None));
+        return Ok(ForegroundSelectionResult::State(state, None));
     };
     let selection = ForegroundSelection {
         issue: selected.issue.number,
@@ -1395,14 +1474,14 @@ fn select_foreground(
     let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
     })?;
-    let input = lifecycle_input_with_resilience(
+    let input = foreground_lifecycle_input_with_resilience(
         LifecycleInput::from_scope(scope).with_transition(LifecycleTransition::Foreground),
         &admission,
     )?;
     let lifecycle = decide_lifecycle(&input);
     if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
         persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
-        return Err(lifecycle_non_run(&lifecycle));
+        return Ok(ForegroundSelectionResult::Lifecycle(lifecycle));
     }
     let state = state
         .transition(ConductorEvent::Selected {
@@ -1412,7 +1491,7 @@ fn select_foreground(
         .map_err(|error| {
             CommandFailure::diagnostic(format!("cannot select foreground issue: {error}"))
         })?;
-    Ok((state, Some(selection)))
+    Ok(ForegroundSelectionResult::State(state, Some(selection)))
 }
 
 fn dispatch_foreground(
@@ -1422,7 +1501,7 @@ fn dispatch_foreground(
     state_path: &Path,
     state: ConductorState,
     selection: ForegroundSelection,
-) -> Result<ConductorState, CommandFailure> {
+) -> Result<ForegroundDispatchResult, ForegroundFailure> {
     let admission =
         resilience_admission_for_issue(layout, options, Some(selection.issue), Some(lease))?;
     let branch = format!("autonomous/issue-{}", selection.issue);
@@ -1438,7 +1517,7 @@ fn dispatch_foreground(
     let claim_branch = ClaimBranch::try_from(branch.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid branch: {reason}"))
     })?;
-    let input = lifecycle_input_with_resilience(
+    let input = foreground_lifecycle_input_with_resilience(
         LifecycleInput::from_scope(scope)
             .with_transition(LifecycleTransition::Foreground)
             .with_claim_evidence(claim_evidence)
@@ -1448,9 +1527,7 @@ fn dispatch_foreground(
     let lifecycle = decide_lifecycle(&input);
     if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
         persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
-        let exit_code = lifecycle_decision_exit_code(&lifecycle);
-        println!("{}", lifecycle_decision_json(&lifecycle));
-        return Err(CommandFailure::status(String::new(), exit_code));
+        return Ok(ForegroundDispatchResult::Lifecycle(lifecycle));
     }
     persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
     let lease = claim::acquire_for_conductor(&layout.repo, selection.issue, &worker_id, &branch)?;
@@ -1477,7 +1554,7 @@ fn dispatch_foreground(
         &receipt.claim_step,
     )?;
     claim::reconcile_active_issue(&lease.repo, lease.issue)?;
-    Ok(state)
+    Ok(ForegroundDispatchResult::State(state))
 }
 
 fn foreground_worker_id() -> Result<String, String> {
@@ -1947,7 +2024,7 @@ fn resilience_admission_for_issue(
     options: &Options,
     issue: Option<u64>,
     lease: Option<&resilience::ConductorLease>,
-) -> Result<resilience::ResilienceAdmission, CommandFailure> {
+) -> Result<resilience::ResilienceAdmission, ForegroundFailure> {
     match lease {
         Some(lease) => resilience::admit_owned_lifecycle(
             &layout.repo,
@@ -1956,15 +2033,28 @@ fn resilience_admission_for_issue(
             options.budget_tokens,
             options.budget_issues,
         )
-        .map_err(resilience_lease_error),
+        .map_err(foreground_resilience_lease_error),
         None => resilience::admit_lifecycle(
             &layout.repo,
             issue,
             options.budget_tokens,
             options.budget_issues,
         )
-        .map_err(resilience_admission_error),
+        .map_err(foreground_resilience_admission_error),
     }
+}
+
+fn foreground_lifecycle_input_with_resilience(
+    input: LifecycleInput,
+    admission: &resilience::ResilienceAdmission,
+) -> Result<LifecycleInput, ForegroundFailure> {
+    if matches!(admission.lease, Some(ConductorLeaseDecision::Held)) {
+        return Err(ForegroundFailure::Deferred {
+            json: resilience_lease_held_json(),
+            exit_code: 20,
+        });
+    }
+    Ok(lifecycle_input_from_admission(input, admission))
 }
 
 fn lifecycle_input_with_resilience(
@@ -1974,13 +2064,20 @@ fn lifecycle_input_with_resilience(
     if matches!(admission.lease, Some(ConductorLeaseDecision::Held)) {
         return Err(resilience_lease_held());
     }
+    Ok(lifecycle_input_from_admission(input, admission))
+}
+
+fn lifecycle_input_from_admission(
+    input: LifecycleInput,
+    admission: &resilience::ResilienceAdmission,
+) -> LifecycleInput {
     let budget = match admission.capacity {
         CapacityDecision::WithinCap => LifecycleBudget::WithinCap,
         CapacityDecision::UsageCap | CapacityDecision::IssueCap => LifecycleBudget::HardCap,
     };
-    Ok(input
+    input
         .with_failure_count(admission.failure_count)
-        .with_budget(budget))
+        .with_budget(budget)
 }
 
 fn resilience_admission_error(error: resilience::LifecycleAdmissionError) -> CommandFailure {
@@ -1988,6 +2085,20 @@ fn resilience_admission_error(error: resilience::LifecycleAdmissionError) -> Com
         resilience::LifecycleAdmissionError::Reject(reason) => resilience_reject(reason),
         resilience::LifecycleAdmissionError::Diagnostic(message) => {
             CommandFailure::diagnostic(message)
+        }
+    }
+}
+
+fn foreground_resilience_admission_error(
+    error: resilience::LifecycleAdmissionError,
+) -> ForegroundFailure {
+    match error {
+        resilience::LifecycleAdmissionError::Reject(reason) => ForegroundFailure::Deferred {
+            json: resilience_reject_json(reason),
+            exit_code: 3,
+        },
+        resilience::LifecycleAdmissionError::Diagnostic(message) => {
+            ForegroundFailure::Diagnostic(CommandFailure::diagnostic(message))
         }
     }
 }
@@ -2004,26 +2115,121 @@ fn resilience_lease_error(error: resilience::LifecycleLeaseError) -> CommandFail
     }
 }
 
+fn foreground_resilience_lease_error(error: resilience::LifecycleLeaseError) -> ForegroundFailure {
+    match error {
+        resilience::LifecycleLeaseError::Reject(reason) => ForegroundFailure::Deferred {
+            json: resilience_reject_json(reason),
+            exit_code: 3,
+        },
+        resilience::LifecycleLeaseError::Diagnostic(message) => {
+            ForegroundFailure::Diagnostic(CommandFailure::diagnostic(message))
+        }
+        resilience::LifecycleLeaseError::Held => ForegroundFailure::Deferred {
+            json: resilience_lease_held_json(),
+            exit_code: 20,
+        },
+        resilience::LifecycleLeaseError::TokenMismatch => ForegroundFailure::Deferred {
+            json: resilience_token_mismatch_json(),
+            exit_code: 3,
+        },
+        resilience::LifecycleLeaseError::Policy(_) => {
+            ForegroundFailure::Diagnostic(CommandFailure::diagnostic(
+                "resilience lease policy must be resolved before lifecycle ownership".to_string(),
+            ))
+        }
+    }
+}
+
 fn resilience_reject(reason: &str) -> CommandFailure {
-    println!("{{\"decision\":\"reject\",\"reason\":\"{reason}\"}}");
+    println!("{}", resilience_reject_json(reason));
     CommandFailure::status(String::new(), 3)
 }
 
 fn resilience_lease_held() -> CommandFailure {
-    println!("{{\"decision\":\"park\",\"reason\":\"conductor_lease_held\"}}");
+    println!("{}", resilience_lease_held_json());
     CommandFailure::status(String::new(), 20)
 }
 
 fn resilience_token_mismatch() -> CommandFailure {
-    println!("{{\"decision\":\"reject\",\"reason\":\"conductor_lease_token_mismatch\"}}");
+    println!("{}", resilience_token_mismatch_json());
     CommandFailure::status(String::new(), 3)
+}
+
+fn resilience_reject_json(reason: &str) -> String {
+    format!("{{\"decision\":\"reject\",\"reason\":\"{reason}\"}}")
+}
+
+fn resilience_lease_held_json() -> String {
+    "{\"decision\":\"park\",\"reason\":\"conductor_lease_held\"}".to_string()
+}
+
+fn resilience_token_mismatch_json() -> String {
+    "{\"decision\":\"reject\",\"reason\":\"conductor_lease_token_mismatch\"}".to_string()
 }
 
 fn release_launch_lease(
     repo: &str,
     lease: &resilience::ConductorLease,
 ) -> Result<(), CommandFailure> {
-    resilience::release_lifecycle(repo, lease).map_err(resilience_lease_error)
+    resilience::release_lifecycle(repo, lease).map_err(release_lease_error)
+}
+
+fn release_lease_error(error: resilience::LifecycleLeaseError) -> CommandFailure {
+    let reason = match error {
+        resilience::LifecycleLeaseError::Reject(reason) => {
+            format!("release rejected: {reason}")
+        }
+        resilience::LifecycleLeaseError::Diagnostic(message) => message,
+        resilience::LifecycleLeaseError::Held => "lease transaction is held".to_string(),
+        resilience::LifecycleLeaseError::TokenMismatch => "lease token mismatch".to_string(),
+        resilience::LifecycleLeaseError::Policy(_) => {
+            "release cannot resolve lifecycle policy".to_string()
+        }
+    };
+    CommandFailure::diagnostic(format!("cannot release conductor lease: {reason}"))
+}
+
+fn inherited_foreground_lease(
+    repo: &str,
+) -> Result<Option<resilience::ConductorLease>, CommandFailure> {
+    match std::env::var("AUTOSPEC_CONDUCTOR_LEASE_TOKEN") {
+        Ok(token) => resilience::adopt_lifecycle(repo, &token)
+            .map(Some)
+            .map_err(resilience_lease_error),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(resilience_token_mismatch()),
+    }
+}
+
+fn finish_with_launch_lease<T>(
+    repo: &str,
+    lease: &resilience::ConductorLease,
+    result: impl FnOnce() -> Result<T, CommandFailure>,
+) -> Result<T, CommandFailure> {
+    match release_launch_lease(repo, lease) {
+        Ok(()) => result(),
+        Err(error) => Err(error),
+    }
+}
+
+fn finish_foreground_with_lease(
+    repo: &str,
+    lease: &resilience::ConductorLease,
+    result: Result<ForegroundCompletion, ForegroundFailure>,
+) -> Result<(), CommandFailure> {
+    release_launch_lease(repo, lease)?;
+    match result {
+        Ok(ForegroundCompletion::State(state)) => {
+            println!("{}", state.to_json());
+            Ok(())
+        }
+        Ok(ForegroundCompletion::Lifecycle(lifecycle)) => emit_lifecycle_decision(lifecycle),
+        Err(ForegroundFailure::Diagnostic(error)) => Err(error),
+        Err(ForegroundFailure::Deferred { json, exit_code }) => {
+            println!("{json}");
+            Err(CommandFailure::status(String::new(), exit_code))
+        }
+    }
 }
 
 fn persisted_stop_mode(layout: &RunLayout) -> Result<Option<LifecycleStopMode>, String> {
@@ -2659,20 +2865,6 @@ fn read_state_metadata(layout: &RunLayout) -> StateMetadata {
         status: extract_json_string(&raw, "status").unwrap_or_default(),
         heartbeat_at: extract_json_number(&raw, "heartbeat_at").unwrap_or_else(|| "null".into()),
         last_cycle: extract_json_number(&raw, "cycle").unwrap_or_default(),
-    }
-}
-
-fn read_spend_json() -> String {
-    let path = env_path(
-        "AUTOSPEC_AUTONOMOUS_SPEND_FILE",
-        &[".autospec", "autonomous-spend.json"],
-    );
-    let raw = fs::read_to_string(path).unwrap_or_default();
-    let spend = raw.trim();
-    if spend.starts_with(JSON_OBJECT_START) {
-        spend.to_string()
-    } else {
-        EMPTY_JSON_OBJECT.to_string()
     }
 }
 

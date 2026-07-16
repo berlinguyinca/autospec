@@ -130,11 +130,16 @@ launch passes the token only in `AUTOSPEC_CONDUCTOR_LEASE_TOKEN` through `Comman
 arguments, launch JSON, or logs. A launch failure terminates already-started children and releases
 only the matching lease.
 
-Foreground first honors a persisted stop, then atomically adopts that environment token (or,
-when absent, acquires its own) before lifecycle, health, queue, claim, or foreground-state work.
-`conductor_lease_token_mismatch` is a reject (`3`) before any local or GitHub mutation. Matching
-ownership is rechecked for final selection and dispatch, preserving their admission gates; terminal
-foreground work releases only its exact matching token. I/O and transaction failures are
+Foreground first honors a persisted stop for executable work. When a launcher supplied a token, it
+first adopts that token solely to gain matching release authority, then releases it before returning
+the persisted-stop or a pre-admission diagnostic. Otherwise it atomically adopts the environment
+token (or, when absent, acquires its own) before lifecycle, health, queue, claim, or foreground-state
+work. `conductor_lease_token_mismatch` is a reject (`3`) before any local or GitHub mutation.
+Matching ownership is rechecked for final selection and dispatch, preserving their admission gates;
+terminal foreground work persists its decision before releasing only its exact matching token.
+`autonomous status --json` reports the same scoped
+`AUTOSPEC_AUTONOMOUS_SPEND_DIR/<owner__repo>/spend.json` ledger used by admission, not the retired
+global spend file. I/O and transaction failures are
 diagnostics (`2`) with no decision JSON, while malformed/foreign records and token fencing are
 JSON rejects (`3`). The local lease coordinates only the shared filesystem; GitHub claim ownership
 remains the remote mutation arbiter.

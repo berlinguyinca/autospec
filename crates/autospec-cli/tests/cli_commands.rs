@@ -1631,7 +1631,12 @@ fn autonomous_status_json_reports_state_heartbeat_and_spend_metadata() {
         .join("berlinguyinca_autospec");
     std::fs::create_dir_all(&scope).expect("scope dir");
     std::fs::create_dir_all(&state_scope).expect("state scope");
-    std::fs::create_dir_all(home.join(".autospec")).expect("home autospec");
+    std::fs::create_dir_all(
+        home.join(".autospec")
+            .join("autonomous-spend")
+            .join("berlinguyinca__autospec"),
+    )
+    .expect("scoped spend dir");
     std::fs::write(scope.join("conductor.pid"), "999999\n").expect("pid");
     std::fs::write(
         state_scope.join("state.json"),
@@ -1639,8 +1644,11 @@ fn autonomous_status_json_reports_state_heartbeat_and_spend_metadata() {
     )
     .expect("state");
     std::fs::write(
-        home.join(".autospec").join("autonomous-spend.json"),
-        "{\"tokens\":1234,\"issues\":5}\n",
+        home.join(".autospec")
+            .join("autonomous-spend")
+            .join("berlinguyinca__autospec")
+            .join("spend.json"),
+        "{\"schema\":1,\"tokens\":1234,\"issues\":5}\n",
     )
     .expect("spend");
 
@@ -1665,6 +1673,45 @@ fn autonomous_status_json_reports_state_heartbeat_and_spend_metadata() {
     assert!(stdout.contains("\"last_cycle\":\"42\""));
     assert!(stdout.contains("\"spend\""));
     assert!(stdout.contains("\"tokens\":1234"));
+}
+
+#[test]
+fn autonomous_status_reports_the_repo_scoped_resilience_spend_ledger() {
+    let temp = temp_dir("autospec-autonomous-scoped-spend-status");
+    let scoped_spend = temp
+        .join("spend")
+        .join("berlinguyinca__autospec")
+        .join("spend.json");
+    let legacy_spend = temp.join("legacy-spend.json");
+    std::fs::create_dir_all(scoped_spend.parent().expect("scoped spend parent"))
+        .expect("create scoped spend parent");
+    std::fs::write(&scoped_spend, "{\"schema\":1,\"tokens\":9,\"issues\":2}\n")
+        .expect("scoped spend");
+    std::fs::write(&legacy_spend, "{\"tokens\":1234,\"issues\":5}\n").expect("legacy spend");
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "status",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--json",
+        ])
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_FILE", &legacy_spend)
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", temp.join("operator"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", temp.join("logs"))
+        .output()
+        .expect("autospec autonomous status runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"spend\":{\"tokens\":9,\"issues\":2}"));
+    assert!(
+        !stdout.contains("1234"),
+        "status must not display the legacy global spend file when policy uses a scoped ledger"
+    );
 }
 
 #[test]

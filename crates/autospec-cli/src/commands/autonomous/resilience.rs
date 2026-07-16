@@ -38,6 +38,11 @@ pub(super) struct ResilienceStatus {
     pub last_cycle: String,
 }
 
+pub(super) struct ResilienceSpend {
+    pub tokens: u64,
+    pub issues: u64,
+}
+
 pub(super) enum LifecycleAdmissionError {
     Reject(&'static str),
     Diagnostic(String),
@@ -573,6 +578,15 @@ pub(super) fn release_lifecycle(
 pub(super) fn status(repo: &str) -> Result<Option<ResilienceStatus>, LifecycleAdmissionError> {
     let store = ResilienceStore::from_env(repo).map_err(LifecycleAdmissionError::Diagnostic)?;
     store.read_status().map_err(store_error_to_lifecycle_error)
+}
+
+pub(super) fn spend_status(repo: &str) -> Result<ResilienceSpend, LifecycleAdmissionError> {
+    let store = ResilienceStore::from_env(repo).map_err(LifecycleAdmissionError::Diagnostic)?;
+    let spend = store.read_spend().map_err(store_error_to_lifecycle_error)?;
+    Ok(ResilienceSpend {
+        tokens: spend.tokens,
+        issues: spend.issues,
+    })
 }
 
 pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {

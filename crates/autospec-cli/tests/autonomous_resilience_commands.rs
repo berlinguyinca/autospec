@@ -1,7 +1,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -592,6 +592,436 @@ fn autonomous_start_prefers_a_persisted_stop_over_foreign_resilience_state() {
 }
 
 #[test]
+fn autonomous_foreground_releases_an_adopted_lease_when_a_stop_is_persisted() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state(
+        "owner__repo",
+        token_state(
+            "claimed",
+            Some(now_secs()),
+            Some(42),
+            Some("autospec-test-host"),
+            Some(now_secs()),
+            Some("parent-lease-token"),
+            Some(1),
+        ),
+    );
+    write_file(
+        &fixture.operator_stop_flag_path(),
+        "graceful\noperator@test\n",
+    );
+
+    let output = fixture
+        .command()
+        .args(["run-foreground", "--repo", "owner/repo"])
+        .env("AUTOSPEC_CONDUCTOR_LEASE_TOKEN", "parent-lease-token")
+        .output()
+        .expect("run stopped foreground child");
+
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"stop\",\"mode\":\"graceful\"}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.operator_lifecycle_path()).expect("read terminal lifecycle"),
+        "{\"version\":1,\"repo\":\"owner/repo\",\"result\":{\"decision\":\"stop\",\"mode\":\"graceful\"}}\n"
+    );
+    assert!(
+        fs::read_to_string(fixture.canonical_state_path())
+            .expect("read released conductor lease")
+            .contains("\"status\":\"released\""),
+        "a stopped child must release its inherited lease token"
+    );
+}
+
+#[test]
+fn autonomous_foreground_releases_an_adopted_lease_when_the_stop_record_is_invalid() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state(
+        "owner__repo",
+        token_state(
+            "claimed",
+            Some(now_secs()),
+            Some(42),
+            Some("autospec-test-host"),
+            Some(now_secs()),
+            Some("parent-lease-token"),
+            Some(1),
+        ),
+    );
+    write_file(
+        &fixture.operator_stop_flag_path(),
+        "unknown\noperator@test\n",
+    );
+
+    let output = fixture
+        .command()
+        .args(["run-foreground", "--repo", "owner/repo"])
+        .env("AUTOSPEC_CONDUCTOR_LEASE_TOKEN", "parent-lease-token")
+        .output()
+        .expect("run foreground child with invalid stop record");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stdout(&output).is_empty());
+    assert!(
+        fs::read_to_string(fixture.canonical_state_path())
+            .expect("read released conductor lease")
+            .contains("\"status\":\"released\""),
+        "a stop-record diagnostic must release the inherited lease token"
+    );
+}
+
+#[test]
+fn autonomous_foreground_releases_an_adopted_lease_after_admission_diagnostic() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state(
+        "owner__repo",
+        token_state(
+            "claimed",
+            Some(now_secs()),
+            Some(42),
+            Some("autospec-test-host"),
+            Some(now_secs()),
+            Some("parent-lease-token"),
+            Some(1),
+        ),
+    );
+    fs::create_dir_all(
+        fixture
+            .state_root
+            .join("autonomous/owner__repo/issues/42.json"),
+    )
+    .expect("create unreadable failure record path");
+
+    let output = fixture
+        .command()
+        .args(["run-foreground", "--repo", "owner/repo", "--issue", "42"])
+        .env("AUTOSPEC_CONDUCTOR_LEASE_TOKEN", "parent-lease-token")
+        .output()
+        .expect("run malformed-admission foreground child");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stdout(&output).is_empty());
+    assert!(
+        fs::read_to_string(fixture.canonical_state_path())
+            .expect("read released conductor lease")
+            .contains("\"status\":\"released\""),
+        "an admission diagnostic must release the inherited lease token"
+    );
+}
+
+#[test]
+fn autonomous_foreground_persists_an_inherited_lease_rejection_before_release() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state(
+        "owner__repo",
+        token_state(
+            "claimed",
+            Some(now_secs()),
+            Some(42),
+            Some("autospec-test-host"),
+            Some(now_secs()),
+            Some("parent-lease-token"),
+            Some(1),
+        ),
+    );
+    fixture.write_failures("owner__repo", 42, 3);
+
+    let output = fixture
+        .command()
+        .args(["run-foreground", "--repo", "owner/repo", "--issue", "42"])
+        .env("AUTOSPEC_CONDUCTOR_LEASE_TOKEN", "parent-lease-token")
+        .output()
+        .expect("run inherited failure-capped foreground child");
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"reject\",\"reason\":\"failure_cap\"}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.operator_lifecycle_path()).expect("read terminal lifecycle"),
+        "{\"version\":1,\"repo\":\"owner/repo\",\"result\":{\"decision\":\"reject\",\"reason\":\"failure_cap\"}}\n"
+    );
+    assert!(
+        fs::read_to_string(fixture.canonical_state_path())
+            .expect("read released conductor lease")
+            .contains("\"status\":\"released\""),
+        "the inherited lease must release after terminal lifecycle persistence"
+    );
+}
+
+#[test]
+fn autonomous_foreground_release_diagnostic_emits_no_decision_json() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state(
+        "owner__repo",
+        token_state(
+            "claimed",
+            Some(now_secs()),
+            Some(42),
+            Some("autospec-test-host"),
+            Some(now_secs()),
+            Some("parent-lease-token"),
+            Some(1),
+        ),
+    );
+    let stop_flag = fixture.operator_stop_flag_path();
+    fs::create_dir_all(stop_flag.parent().expect("stop flag parent"))
+        .expect("create stop flag parent");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&stop_flag)
+            .status()
+            .expect("create stop fifo")
+            .success(),
+        "create stop fifo"
+    );
+    let state_dir = fixture
+        .canonical_state_path()
+        .parent()
+        .expect("canonical state parent")
+        .to_path_buf();
+    let child = fixture
+        .command()
+        .args(["run-foreground", "--repo", "owner/repo"])
+        .env("AUTOSPEC_CONDUCTOR_LEASE_TOKEN", "parent-lease-token")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start foreground child with release failure");
+    let adopted_pid = child.id();
+    for _ in 0..80 {
+        if fs::read_to_string(fixture.canonical_state_path())
+            .map(|state| state.contains(&format!("\"lock_pid\":{adopted_pid}")))
+            .unwrap_or(false)
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        fs::read_to_string(fixture.canonical_state_path())
+            .expect("read adopted conductor lease")
+            .contains(&format!("\"lock_pid\":{adopted_pid}")),
+        "the child must adopt before its stop read blocks"
+    );
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o555))
+        .expect("make state directory read-only");
+
+    fs::write(&stop_flag, "graceful\noperator@test\n").expect("unblock stop read");
+    let output = child
+        .wait_with_output()
+        .expect("wait for foreground child with release failure");
+
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o755))
+        .expect("restore state directory permissions");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stdout(&output).is_empty(),
+        "a release diagnostic must not follow a printed decision"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot create"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn autonomous_foreground_token_replacement_during_release_emits_no_decision_json() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state(
+        "owner__repo",
+        token_state(
+            "claimed",
+            Some(now_secs()),
+            Some(42),
+            Some("autospec-test-host"),
+            Some(now_secs()),
+            Some("parent-lease-token"),
+            Some(1),
+        ),
+    );
+    let stop_flag = fixture.operator_stop_flag_path();
+    fs::create_dir_all(stop_flag.parent().expect("stop flag parent"))
+        .expect("create stop flag parent");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&stop_flag)
+            .status()
+            .expect("create stop fifo")
+            .success(),
+        "create stop fifo"
+    );
+    let child = fixture
+        .command()
+        .args(["run-foreground", "--repo", "owner/repo"])
+        .env("AUTOSPEC_CONDUCTOR_LEASE_TOKEN", "parent-lease-token")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start foreground child with a replaceable lease");
+    let adopted_pid = child.id();
+    for _ in 0..80 {
+        if fs::read_to_string(fixture.canonical_state_path())
+            .map(|state| state.contains(&format!("\"lock_pid\":{adopted_pid}")))
+            .unwrap_or(false)
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        fs::read_to_string(fixture.canonical_state_path())
+            .expect("read adopted conductor lease")
+            .contains(&format!("\"lock_pid\":{adopted_pid}")),
+        "the child must adopt before its stop read blocks"
+    );
+    let replacement = token_state(
+        "claimed",
+        Some(now_secs()),
+        Some(1),
+        Some("autospec-test-host"),
+        Some(now_secs()),
+        Some("replacement-owner-token"),
+        Some(2),
+    );
+    fixture.write_state("owner__repo", &replacement);
+
+    fs::write(&stop_flag, "graceful\noperator@test\n").expect("unblock stop read");
+    let output = child
+        .wait_with_output()
+        .expect("wait for foreground child with replaced lease");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stdout(&output).is_empty(),
+        "a failed release must not render a token-mismatch decision"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot release conductor lease"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.canonical_state_path()).expect("read replacement lease"),
+        replacement
+    );
+}
+
+#[test]
+fn autonomous_foreground_midrun_rejection_emits_no_decision_json_when_release_fails() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_failures("owner__repo", 43, 3);
+    let final_selection_ready = fixture.root.join("final-selection-ready");
+    let state_dir = fixture
+        .canonical_state_path()
+        .parent()
+        .expect("canonical state parent")
+        .to_path_buf();
+    let child = fixture
+        .foreground_with_changed_selection_command()
+        .env(
+            "AUTOSPEC_RESILIENCE_FINAL_SELECTION_READY",
+            &final_selection_ready,
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start foreground child with mid-run release failure");
+    for _ in 0..80 {
+        if final_selection_ready.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        final_selection_ready.exists(),
+        "foreground command must acquire its lease before final selection waits"
+    );
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o555))
+        .expect("make state directory read-only");
+    let output = child
+        .wait_with_output()
+        .expect("wait for foreground child with release failure");
+
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o755))
+        .expect("restore state directory permissions");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stdout(&output).is_empty(),
+        "a failed release must suppress a mid-run terminal decision"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot create"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn concurrent_foreground_command_parks_while_the_first_command_owns_the_lease() {
+    let fixture = ResilienceFixture::new();
+    let bin = fixture.root.join("bin");
+    let entered = fixture.root.join("first-foreground-entered");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+touch "$AUTOSPEC_TEST_FOREGROUND_ENTERED"
+sleep 2
+exit 1
+"#,
+    );
+
+    let mut first = fixture.command();
+    let mut first = first
+        .args(["run-foreground", "--repo", "owner/repo", "--repo-dir"])
+        .arg(&fixture.repo_dir)
+        .env("AUTOSPEC_HOST", "autospec-test-host")
+        .env("AUTOSPEC_TEST_FOREGROUND_ENTERED", &entered)
+        .env("PATH", path_with(&bin))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start first foreground command");
+    for _ in 0..80 {
+        if entered.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        entered.exists(),
+        "first foreground command must hold the lease"
+    );
+
+    let second = fixture
+        .command()
+        .args(["run-foreground", "--repo", "owner/repo", "--repo-dir"])
+        .arg(&fixture.repo_dir)
+        .env("AUTOSPEC_HOST", "autospec-test-host")
+        .env("PATH", path_with(&bin))
+        .output()
+        .expect("run competing foreground command");
+
+    assert_eq!(second.status.code(), Some(20));
+    assert_eq!(
+        stdout(&second),
+        "{\"decision\":\"park\",\"reason\":\"conductor_lease_held\"}\n"
+    );
+    assert!(!first.wait().expect("wait for first foreground").success());
+    assert!(
+        fs::read_to_string(fixture.canonical_state_path())
+            .expect("read released conductor lease")
+            .contains("\"status\":\"released\""),
+        "the first command must release its lease after its terminal diagnostic"
+    );
+}
+
+#[test]
 fn autonomous_restart_rejects_unsafe_resilience_state_without_clearing_stop() {
     let fixture = ResilienceFixture::new();
     fixture.write_state("owner__repo", valid_state("other/repo", "running", 1));
@@ -851,6 +1281,35 @@ fn autonomous_foreground_persists_terminal_lifecycle_before_releasing_lease_when
     assert!(
         !fixture.foreground_state_path().exists(),
         "final-selection rejection must not claim or dispatch the issue"
+    );
+}
+
+#[test]
+fn autonomous_foreground_persists_initial_preview_rejection_before_releasing_lease() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_failures("owner__repo", 42, 3);
+
+    let output = fixture.run_foreground_with_changed_selection();
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"reject\",\"reason\":\"failure_cap\"}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.operator_lifecycle_path()).expect("read terminal lifecycle"),
+        "{\"version\":1,\"repo\":\"owner/repo\",\"result\":{\"decision\":\"reject\",\"reason\":\"failure_cap\"}}\n"
+    );
+    assert!(
+        fs::read_to_string(fixture.canonical_state_path())
+            .expect("read released conductor lease")
+            .contains("\"status\":\"released\""),
+        "the owned lease must release only after terminal lifecycle persistence"
     );
 }
 
@@ -1154,7 +1613,7 @@ impl ResilienceFixture {
             .expect("run autonomous command")
     }
 
-    fn run_foreground_with_changed_selection(&self) -> Output {
+    fn foreground_with_changed_selection_command(&self) -> Command {
         let bin = self.root.join("bin");
         let counter = self.root.join("ready-count");
         fs::create_dir_all(&bin).expect("create fake bin");
@@ -1196,6 +1655,10 @@ case "$endpoint" in
       printf '1\n' > "$AUTOSPEC_RESILIENCE_READY_COUNTER"
       issue 42
     else
+      if [ -n "${AUTOSPEC_RESILIENCE_FINAL_SELECTION_READY:-}" ]; then
+        : > "$AUTOSPEC_RESILIENCE_FINAL_SELECTION_READY"
+        sleep 2
+      fi
       issue 43
     fi | {
       printf '%s' '{"raw_count":1,"items":['
@@ -1217,7 +1680,8 @@ case "$endpoint" in
 esac
 "####,
         );
-        self.command()
+        let mut command = self.command();
+        command
             .args([
                 "run-foreground",
                 "--repo",
@@ -1229,7 +1693,12 @@ esac
             .arg(&self.repo_dir)
             .env("AUTOSPEC_HOST", "autospec-test-host")
             .env("AUTOSPEC_RESILIENCE_READY_COUNTER", counter)
-            .env("PATH", path_with(&bin))
+            .env("PATH", path_with(&bin));
+        command
+    }
+
+    fn run_foreground_with_changed_selection(&self) -> Output {
+        self.foreground_with_changed_selection_command()
             .output()
             .expect("run foreground with changing selection")
     }

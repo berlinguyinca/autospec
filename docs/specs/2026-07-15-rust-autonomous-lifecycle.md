@@ -76,14 +76,18 @@ The claimed record carries an opaque lease token and monotonically increasing ge
 launch JSON field, or log value. If a later child launch fails, Rust terminates any child
 it has already started and releases only its still-matching token.
 
-`run-foreground` gives a persisted stop precedence over token adoption or direct
-acquisition. Otherwise a child atomically adopts its environment token before any
-lifecycle, health, queue, claim, or foreground-state write; a direct invocation acquires
-its own token at that same boundary. A missing, stale, or replaced token exits with the
+`run-foreground` gives a persisted stop precedence over executable work. A child first
+adopts a supplied environment token solely to establish release authority, then releases
+that exact token before returning any persisted-stop or pre-admission diagnostic. Otherwise
+it atomically adopts its environment token before lifecycle, health, queue, claim, or
+foreground-state write; a direct invocation acquires its own token at that same boundary.
+A missing, stale, or replaced token exits with the
 `conductor_lease_token_mismatch` rejection before local or GitHub mutation. Once owned,
 the foreground path rechecks admission at final selection and dispatch using its matching
-token, then persists its terminal foreground/lifecycle result before releasing that exact
-token. The local transaction is a shared-filesystem lease, not a remote GitHub lock;
+token, then persists every terminal foreground/lifecycle result before releasing that exact
+token. `autonomous status --json` reads spend from the same scoped
+`AUTOSPEC_AUTONOMOUS_SPEND_DIR/<owner__repo>/spend.json` ledger as admission. The local
+transaction is a shared-filesystem lease, not a remote GitHub lock;
 existing GitHub claim ownership remains the remote mutation arbiter.
 
 ## Errors and exits

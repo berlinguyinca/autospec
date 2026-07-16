@@ -36,7 +36,9 @@ than weakening safety.
 - Filesystem reads or canonical migration/acquisition writes that fail for an
   I/O reason remain diagnostics with exit 2 and no decision JSON.
 - Status uses the same required `repo` identity validation as admission; a
-  repository-less record is malformed and a mismatched record is foreign.
+  repository-less record is malformed and a mismatched record is foreign. Its
+  reported spend is the same scoped `AUTOSPEC_AUTONOMOUS_SPEND_DIR/<owner__repo>/spend.json`
+  ledger used for admission, never the retired global spend file.
 - Omitted lifetime limits retain environment/default behavior. A supplied
   empty, negative, or non-numeric `--budget-tokens` or `--budget-issues`
   value is a diagnostic and never falls back to defaults. Explicit zero is
@@ -48,9 +50,13 @@ than weakening safety.
 
 Black-box tests must prove one of two competing foreground/start operations
 owns the lease while the other exits held before local or GitHub mutation;
-adoption must fence a delayed child after a replacement. They must also prove
-I/O diagnostics are not malformed JSON rejects, status validates its record
-scope, and explicitly blank lifetime flags fail before operator state exists.
+adoption must fence a delayed child after a replacement. A token-bearing child
+must release its matching lease on every post-launch terminal path, including a
+persisted-stop decision and an admission diagnostic, after lifecycle evidence
+has been persisted when applicable. They must also prove I/O diagnostics are
+not malformed JSON rejects, status validates its record scope and reports its
+scoped spend ledger, and explicitly blank lifetime flags fail before operator
+state exists.
 
 ## Non-goals
 
