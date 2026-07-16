@@ -316,8 +316,7 @@ fn terminate_child(child: &mut Child) -> Result<ChildTermination, CommandFailure
             "cannot terminate drain child".to_string(),
         ));
     }
-    if wait_for_process_group_exit(&process_group)? {
-        child.wait().map_err(child_status_error)?;
+    if wait_for_process_group_exit(child, &process_group)? {
         return Ok(ChildTermination::Terminated);
     }
     let status = Command::new("kill")
@@ -332,17 +331,20 @@ fn terminate_child(child: &mut Child) -> Result<ChildTermination, CommandFailure
             "cannot kill drain child".to_string(),
         ));
     }
-    if !wait_for_process_group_exit(&process_group)? {
+    if !wait_for_process_group_exit(child, &process_group)? {
         return Err(CommandFailure::diagnostic(
             "drain child process group did not exit".to_string(),
         ));
     }
-    child.wait().map_err(child_status_error)?;
     Ok(ChildTermination::Terminated)
 }
 
-fn wait_for_process_group_exit(process_group: &str) -> Result<bool, CommandFailure> {
+fn wait_for_process_group_exit(
+    child: &mut Child,
+    process_group: &str,
+) -> Result<bool, CommandFailure> {
     for _ in 0..20 {
+        child.try_wait().map_err(child_status_error)?;
         if !process_group_is_alive(process_group)? {
             return Ok(true);
         }

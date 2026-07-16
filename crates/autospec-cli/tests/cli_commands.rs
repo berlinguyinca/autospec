@@ -1533,8 +1533,6 @@ fn autonomous_start_live_writes_repo_scoped_pid_and_log_metadata() {
         .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
-        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
-        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous start runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1586,8 +1584,6 @@ fn autonomous_status_json_reports_companion_processes() {
         .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
-        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
-        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous start runs");
     assert!(start.status.success());
@@ -2199,8 +2195,6 @@ fn autonomous_start_without_repo_uses_git_remote_scope() {
         .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
-        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
-        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous start runs");
 
@@ -2262,8 +2256,6 @@ fn autonomous_start_mismatched_repo_warns_but_launches() {
         .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
-        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
-        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous start runs");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2366,8 +2358,6 @@ fn autonomous_start_records_argv_and_passthrough_options_in_launch_provenance() 
         .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
-        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
-        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous start runs");
     let launch = std::fs::read_to_string(
@@ -2577,8 +2567,6 @@ fn autonomous_start_uses_explicit_conductor_log_path() {
         .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
-        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
-        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous start runs");
     let scope = operator_dir.join("berlinguyinca_autospec");
@@ -2627,8 +2615,6 @@ fn autonomous_start_rejects_a_fresh_existing_lease_without_force() {
         .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
-        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
-        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous start runs");
 
@@ -2672,8 +2658,6 @@ fn autonomous_start_force_rejects_a_fresh_existing_lease_without_killing_conduct
         .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
-        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
-        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous start runs");
 
@@ -2711,8 +2695,6 @@ fn autonomous_start_force_replaces_unleased_legacy_conductor_metadata() {
         .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
-        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
-        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous start runs");
     let replacement = read_pid(&scope, "conductor");
@@ -2879,8 +2861,6 @@ fn autonomous_restart_rejects_a_fresh_existing_lease_without_killing_conductor_o
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_STOP_FLAG_FILE", &stop_flag)
-        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
-        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous restart runs");
 
@@ -2924,8 +2904,6 @@ fn autonomous_restart_replaces_unleased_legacy_conductor_metadata() {
         .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
-        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
-        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous restart runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2968,8 +2946,6 @@ fn autonomous_restart_clears_existing_stop_flag_before_launch() {
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_STOP_FLAG_FILE", &stop_flag)
-        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
-        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous restart runs");
 
@@ -3059,8 +3035,6 @@ fn start_sleeping_autonomous_with_state(
         )
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", log_dir)
         .env("PATH", hermetic_autonomous_path(operator_dir))
-        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
-        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous start runs");
     assert!(output.status.success());
@@ -3231,7 +3205,11 @@ fn fake_bin(
 }
 
 fn hermetic_autonomous_path(fixture: &std::path::Path) -> String {
-    let bin = fake_bin(fixture, None, Some("#!/bin/sh\nexit 1\n"));
+    let bin = fake_bin(
+        fixture,
+        None,
+        Some("#!/bin/sh\nwhile kill -0 \"$PPID\" 2>/dev/null; do sleep 0.1; done\nexit 1\n"),
+    );
     path_with(&bin)
 }
 
