@@ -150,12 +150,13 @@ chmod +x "$ISOLATED_BIN/codex"
 # same installer process to import the refreshed PATH and expose python3.
 WINDOWS_HOME="$TMP_DIR/windows-home"
 WINDOWS_BIN="$TMP_DIR/windows-bin"
+WINDOWS_FIND_MARKER="$TMP_DIR/windows-find-marker"
 mkdir -p "$WINDOWS_HOME" "$WINDOWS_BIN"
 cat > "$ISOLATED_BIN/winget" <<SHIM
 #!/usr/bin/env bash
 case "\$*" in
     *Python.Python.3.12*)
-        printf '#!/usr/bin/env bash\nexit 0\n' > "$WINDOWS_BIN/python"
+        printf '#!/usr/bin/env bash\n[ "\$(command -v find)" != "$WINDOWS_BIN/find" ] || touch "$WINDOWS_FIND_MARKER"\nexit 0\n' > "$WINDOWS_BIN/python"
         chmod +x "$WINDOWS_BIN/python"
         ;;
 esac
@@ -169,6 +170,12 @@ cat > "$ISOLATED_BIN/cygpath" <<SHIM
 #!/usr/bin/env bash
 printf '%s\n' "$WINDOWS_BIN"
 SHIM
+cat > "$WINDOWS_BIN/find" <<SHIM
+#!/usr/bin/env bash
+touch "$WINDOWS_FIND_MARKER"
+exit 99
+SHIM
+chmod +x "$WINDOWS_BIN/find"
 chmod +x "$ISOLATED_BIN/winget" "$ISOLATED_BIN/powershell.exe" "$ISOLATED_BIN/cygpath"
 
 set +e
@@ -190,6 +197,9 @@ if [ "$windows_status" -ne 0 ]; then
 fi
 if [ ! -x "$WINDOWS_HOME/.autospec/bin/python3" ]; then
     fail "WinGet-installed Python did not receive a local python3 command alias"
+fi
+if [ -e "$WINDOWS_FIND_MARKER" ]; then
+    fail "refreshed Windows PATH shadowed Git Bash's POSIX find command"
 fi
 rm -f "$ISOLATED_BIN/winget" "$ISOLATED_BIN/powershell.exe" "$ISOLATED_BIN/cygpath"
 rm -f "$ISOLATED_BIN/codex"

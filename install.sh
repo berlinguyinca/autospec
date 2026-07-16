@@ -579,7 +579,7 @@ refresh_dependency_path() {
         if [ -n "$windows_path" ]; then
             windows_unix_path="$(cygpath --unix --path "$windows_path" 2>/dev/null || true)"
             if [ -n "$windows_unix_path" ]; then
-                PATH="$windows_unix_path:$PATH"
+                PATH="$PATH:$windows_unix_path"
             fi
         fi
     fi
