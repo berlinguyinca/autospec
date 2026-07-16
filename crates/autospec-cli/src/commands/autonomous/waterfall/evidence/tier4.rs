@@ -28,6 +28,7 @@ pub(super) fn verify_tier4(
     root: &Path,
     pass_id: u64,
     receipt: &TierReceipt,
+    expected_source_policy: Option<&autospec_core::autonomous::tier4::Tier4SourcePolicy>,
 ) -> Result<(), WaterfallStoreError> {
     let expected = artifacts_for(receipt)?;
     if receipt.evidence().len() != expected.len() {
@@ -59,7 +60,12 @@ pub(super) fn verify_tier4(
         receipt.status(),
         TierStatus::Exhausted { .. } | TierStatus::Produced { .. }
     ) {
-        tier4_consistency::verify_completed_facts(root, receipt)?;
+        let expected_source_policy = expected_source_policy.ok_or_else(|| {
+            WaterfallStoreError::InvalidReceipt(
+                "Tier 4 completed evidence requires a trusted source policy".to_string(),
+            )
+        })?;
+        tier4_consistency::verify_completed_facts(root, receipt, expected_source_policy)?;
     }
     Ok(())
 }

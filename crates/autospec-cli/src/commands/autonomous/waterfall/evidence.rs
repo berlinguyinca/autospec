@@ -36,8 +36,9 @@ pub(super) fn verify_tier4(
     root: &Path,
     pass_id: u64,
     receipt: &TierReceipt,
+    expected_source_policy: Option<&autospec_core::autonomous::tier4::Tier4SourcePolicy>,
 ) -> Result<(), WaterfallStoreError> {
-    tier4::verify_tier4(root, pass_id, receipt)
+    tier4::verify_tier4(root, pass_id, receipt, expected_source_policy)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -173,6 +174,36 @@ pub(super) fn persist(
             path.display()
         ))),
     }
+}
+
+pub(super) fn clear_unreferenced_tier4(
+    root: &Path,
+    pass_id: u64,
+) -> Result<(), WaterfallStoreError> {
+    for artifact in [
+        Tier4EvidenceArtifact::Policy,
+        Tier4EvidenceArtifact::SourcePolicy,
+        Tier4EvidenceArtifact::Sources,
+        Tier4EvidenceArtifact::Generated,
+        Tier4EvidenceArtifact::Dedup,
+        Tier4EvidenceArtifact::Verification,
+        Tier4EvidenceArtifact::RoiRank,
+        Tier4EvidenceArtifact::Failure,
+    ] {
+        let reference = WaterfallEvidenceArtifact::Tier4(artifact).reference(pass_id)?;
+        let path = root.join(reference);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(WaterfallStoreError::Diagnostic(format!(
+                    "cannot clear unreferenced Tier 4 evidence {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn verify(

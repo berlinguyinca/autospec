@@ -3,9 +3,10 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use autospec_core::autonomous::no_work::NoWorkTier;
+use autospec_core::autonomous::no_work::{DryReason, NoWorkTier};
+use autospec_core::autonomous::tier4::Tier4SourcePolicy;
 use autospec_core::autonomous::waterfall::{
-    receipt_reference, SealedEvidence, TierReceipt, WaterfallState,
+    receipt_reference, SealedEvidence, TierReceipt, TierStatus, WaterfallState,
 };
 
 mod evidence;
@@ -35,6 +36,7 @@ pub(super) struct WaterfallStore {
     repo: String,
     root: PathBuf,
     state_path: PathBuf,
+    expected_tier4_source_policy: Option<Tier4SourcePolicy>,
     _lock: File,
 }
 
@@ -42,6 +44,26 @@ impl WaterfallStore {
     pub(super) fn acquire(
         root: impl AsRef<Path>,
         repo: impl Into<String>,
+    ) -> Result<StoreAcquisition, WaterfallStoreError> {
+        Self::acquire_with_optional_tier4_source_policy(root, repo, None)
+    }
+
+    pub(in crate::commands::autonomous) fn acquire_with_tier4_source_policy(
+        root: impl AsRef<Path>,
+        repo: impl Into<String>,
+        expected_tier4_source_policy: Tier4SourcePolicy,
+    ) -> Result<StoreAcquisition, WaterfallStoreError> {
+        Self::acquire_with_optional_tier4_source_policy(
+            root,
+            repo,
+            Some(expected_tier4_source_policy),
+        )
+    }
+
+    fn acquire_with_optional_tier4_source_policy(
+        root: impl AsRef<Path>,
+        repo: impl Into<String>,
+        expected_tier4_source_policy: Option<Tier4SourcePolicy>,
     ) -> Result<StoreAcquisition, WaterfallStoreError> {
         let repo = repo.into();
         let root = root.as_ref().to_path_buf();
@@ -57,6 +79,7 @@ impl WaterfallStore {
                 repo,
                 state_path: root.join("waterfall-state.json"),
                 root,
+                expected_tier4_source_policy,
                 _lock: lock,
             })),
             None => Ok(StoreAcquisition::Held),
@@ -201,14 +224,12 @@ impl WaterfallStore {
     }
 
     fn verify_state_receipts(&self, state: &WaterfallState) -> Result<(), WaterfallStoreError> {
-        let receipt_pass_id = if state.current_tier() == NoWorkTier::Tier1
-            && state.next_pass_id() > 1
-            && !state.completed_receipts().is_empty()
-        {
-            state.next_pass_id() - 1
-        } else {
-            state.next_pass_id()
-        };
+        let receipt_pass_id =
+            if state.current_tier() == NoWorkTier::Tier1 && state.next_pass_id() > 1 {
+                state.next_pass_id() - 1
+            } else {
+                state.next_pass_id()
+            };
         for completed in state.completed_receipts() {
             let receipt = self
                 .load_receipt(receipt_pass_id, completed.tier)
@@ -225,6 +246,12 @@ impl WaterfallStore {
                     completed.reference
                 )));
             }
+            if !is_advancing_completed_status(completed.tier, receipt.status()) {
+                return Err(WaterfallStoreError::InvalidState(format!(
+                    "completed {} receipt has a non-advancing exhausted status",
+                    completed.tier.as_str()
+                )));
+            }
             match completed.tier {
                 NoWorkTier::Tier1 | NoWorkTier::Tier1_5 => {
                     evidence::verify(
@@ -239,36 +266,10 @@ impl WaterfallStore {
                     .verify_tier2_evidence(receipt_pass_id, &receipt)
                     .map_err(state_receipt_error)?,
                 NoWorkTier::Tier3 => {
-                    if !matches!(
-                        receipt.status(),
-                        autospec_core::autonomous::waterfall::TierStatus::Exhausted {
-                            reason:
-                                autospec_core::autonomous::no_work::DryReason::NoMetadataFindings
-                        }
-                    ) {
-                        return Err(WaterfallStoreError::InvalidState(
-                            "completed Tier 3 receipt must be exhausted no_metadata_findings"
-                                .to_string(),
-                        ));
-                    }
                     self.verify_tier3_evidence(receipt_pass_id, &receipt)
                         .map_err(state_receipt_error)?;
                 }
                 NoWorkTier::Tier4 => {
-                    if !matches!(
-                        receipt.status(),
-                        autospec_core::autonomous::waterfall::TierStatus::Exhausted {
-                            reason:
-                                autospec_core::autonomous::no_work::DryReason::NoProposalsGenerated
-                                    | autospec_core::autonomous::no_work::DryReason::VerificationRejected
-                                    | autospec_core::autonomous::no_work::DryReason::RoiFiltered
-                        }
-                    ) {
-                        return Err(WaterfallStoreError::InvalidState(
-                            "completed Tier 4 receipt must be an allowed exhausted result"
-                                .to_string(),
-                        ));
-                    }
                     self.verify_tier4_evidence(receipt_pass_id, &receipt)
                         .map_err(state_receipt_error)?;
                 }
@@ -276,6 +277,30 @@ impl WaterfallStore {
         }
         Ok(())
     }
+}
+
+fn is_advancing_completed_status(tier: NoWorkTier, status: &TierStatus) -> bool {
+    matches!(
+        (tier, status),
+        (
+            NoWorkTier::Tier1 | NoWorkTier::Tier1_5,
+            TierStatus::Exhausted {
+                reason: DryReason::NoProposalsGenerated,
+            },
+        ) | (
+            NoWorkTier::Tier2 | NoWorkTier::Tier4,
+            TierStatus::Exhausted {
+                reason: DryReason::NoProposalsGenerated
+                    | DryReason::VerificationRejected
+                    | DryReason::RoiFiltered,
+            },
+        ) | (
+            NoWorkTier::Tier3,
+            TierStatus::Exhausted {
+                reason: DryReason::NoMetadataFindings,
+            },
+        )
+    )
 }
 
 fn state_receipt_error(error: WaterfallStoreError) -> WaterfallStoreError {

@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use autospec_core::autonomous::no_work::{DryReason, NoWorkTier};
 use autospec_core::autonomous::tier4::{
-    Tier4EvidenceDocuments, Tier4Failure, Tier4Observation, DISABLED_REASON,
+    Tier4EvidenceDocuments, Tier4Failure, Tier4Observation, Tier4SourcePolicy, DISABLED_REASON,
 };
 use autospec_core::autonomous::waterfall::{
     FunnelCounts, SealedEvidence, TierReceipt, TierStatus, WaterfallState,
@@ -31,11 +31,37 @@ pub(super) fn record_tier4(
     repo: &str,
     scan: Tier4Scan,
 ) -> Result<Tier4Progress, String> {
-    let store =
-        match WaterfallStore::acquire(state_root.join("waterfall"), repo).map_err(store_error)? {
-            StoreAcquisition::Acquired(store) => store,
-            StoreAcquisition::Held => return Ok(Tier4Progress::Pending),
-        };
+    record_tier4_with_optional_source_policy(state_root, repo, scan, None)
+}
+
+pub(super) fn record_tier4_with_source_policy(
+    state_root: &Path,
+    repo: &str,
+    scan: Tier4Scan,
+    expected_source_policy: Tier4SourcePolicy,
+) -> Result<Tier4Progress, String> {
+    record_tier4_with_optional_source_policy(state_root, repo, scan, Some(expected_source_policy))
+}
+
+fn record_tier4_with_optional_source_policy(
+    state_root: &Path,
+    repo: &str,
+    scan: Tier4Scan,
+    expected_source_policy: Option<Tier4SourcePolicy>,
+) -> Result<Tier4Progress, String> {
+    let store = match expected_source_policy {
+        Some(policy) => WaterfallStore::acquire_with_tier4_source_policy(
+            state_root.join("waterfall"),
+            repo,
+            policy,
+        )
+        .map_err(store_error)?,
+        None => WaterfallStore::acquire(state_root.join("waterfall"), repo).map_err(store_error)?,
+    };
+    let store = match store {
+        StoreAcquisition::Acquired(store) => store,
+        StoreAcquisition::Held => return Ok(Tier4Progress::Pending),
+    };
     let Some(state) = store.load_state().map_err(store_error)? else {
         return Ok(Tier4Progress::Pending);
     };
@@ -45,6 +71,9 @@ pub(super) fn record_tier4(
     if let Some(receipt) = existing_receipt(&store, &state)? {
         return settle_receipt(&store, &state, receipt);
     }
+    store
+        .clear_unreferenced_tier4_evidence(state.next_pass_id())
+        .map_err(store_error)?;
     let receipt = match scan {
         Tier4Scan::NotRun => disabled_receipt(&store, &state)?,
         Tier4Scan::Complete(observation) => observation_receipt(&store, &state, &observation)?,

@@ -335,9 +335,7 @@ impl WaterfallState {
         if self.next_pass_id == 0 {
             return Err("waterfall state next pass id must be positive".to_string());
         }
-        let retained_prior_pass = self.current_tier == NoWorkTier::Tier1
-            && self.next_pass_id > 1
-            && !self.completed_receipts.is_empty();
+        let retained_prior_pass = self.current_tier == NoWorkTier::Tier1 && self.next_pass_id > 1;
         let expected_completed = if retained_prior_pass {
             NoWorkTier::ALL.len()
         } else {

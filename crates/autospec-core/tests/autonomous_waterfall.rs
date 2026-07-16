@@ -107,10 +107,18 @@ fn receipt_schema_rejects_unknown_fields_and_statuses() {
 }
 
 #[test]
+fn later_tier_one_cursor_requires_retained_prior_pass_history() {
+    assert!(
+        WaterfallState::new("owner/repo", 2, NoWorkTier::Tier1).is_err(),
+        "a rollover cursor must retain every prior-pass receipt"
+    );
+}
+
+#[test]
 fn state_preserves_failed_and_not_run_receipts_and_derives_paths() {
     let failed = TierReceipt::new(
         "owner/repo",
-        9,
+        1,
         NoWorkTier::Tier1,
         "queue-v1",
         100,
@@ -124,7 +132,7 @@ fn state_preserves_failed_and_not_run_receipts_and_derives_paths() {
     .expect("failed receipt remains valid");
     let not_run = TierReceipt::new(
         "owner/repo",
-        9,
+        1,
         NoWorkTier::Tier1_5,
         "architecture-v1",
         102,
@@ -136,7 +144,7 @@ fn state_preserves_failed_and_not_run_receipts_and_derives_paths() {
         evidence(),
     )
     .expect("not-run receipt remains valid");
-    let state = WaterfallState::new("owner/repo", 9, NoWorkTier::Tier1)
+    let state = WaterfallState::new("owner/repo", 1, NoWorkTier::Tier1)
         .expect("new state")
         .record_receipt(&failed)
         .expect("failed receipt is retained")
@@ -144,23 +152,23 @@ fn state_preserves_failed_and_not_run_receipts_and_derives_paths() {
         .expect("not-run receipt is retained");
 
     assert_eq!(
-        TierReceipt::parse_json(&failed.to_json(), "owner/repo", 9, NoWorkTier::Tier1)
+        TierReceipt::parse_json(&failed.to_json(), "owner/repo", 1, NoWorkTier::Tier1)
             .expect("failed receipt parses"),
         failed
     );
     assert_eq!(
-        TierReceipt::parse_json(&not_run.to_json(), "owner/repo", 9, NoWorkTier::Tier1_5)
+        TierReceipt::parse_json(&not_run.to_json(), "owner/repo", 1, NoWorkTier::Tier1_5)
             .expect("not-run receipt parses"),
         not_run
     );
     assert_eq!(state.completed_receipts().len(), 2);
     assert_eq!(
         state.completed_receipts()[0].reference,
-        "waterfall/9/tier1.json"
+        "waterfall/1/tier1.json"
     );
     assert_eq!(
         state.completed_receipts()[1].reference,
-        "waterfall/9/tier1_5.json"
+        "waterfall/1/tier1_5.json"
     );
     let json = state.to_json();
     assert_eq!(
@@ -168,7 +176,7 @@ fn state_preserves_failed_and_not_run_receipts_and_derives_paths() {
         state
     );
     assert!(WaterfallState::parse_json(
-        &json.replace("waterfall/9/tier1.json", "waterfall/9/tier4.json"),
+        &json.replace("waterfall/1/tier1.json", "waterfall/1/tier4.json"),
         "owner/repo",
     )
     .expect_err("tampered receipt path fails closed")

@@ -39,3 +39,40 @@ Passed:
 ## Remaining risk
 
 Failure receipts are validated structurally from their sealed partial-evidence prefix because the core API intentionally does not expose construction of a sealed `Tier4Failure` from persisted documents. Completed observations receive the stronger full evaluator replay check.
+
+## Repair pass — retained audit and trusted policy hardening
+
+### Result
+
+Completed Tier 4 rollover history now fails closed unless it retains exactly the five prior-pass receipts with each coordinator's actual advancing exhausted status. Enabled Tier 4 evidence now requires an injected trusted `Tier4SourcePolicy`, and changed retries recover only the known unreferenced Tier 4 artifacts while holding the store lock.
+
+### TDD evidence
+
+- **RED:** clearing `completed_receipts` from a valid Tier 4 rollover state loaded successfully.
+- **GREEN:** core state validation and CLI replay now require all five prior-pass entries whenever the cursor is Tier 1 with a pass greater than one.
+- **RED:** fully rehashed retained receipts with non-advancing Tier 1/1.5/2/3/4 dry statuses were accepted for Tier 1 and Tier 1.5.
+- **GREEN:** replay accepts only the exact advancing exhausted reasons: Tier 1/1.5 `no_proposals_generated`, Tier 2/Tier 4 the three closed discovery reasons, and Tier 3 `no_metadata_findings`.
+- **RED:** a changed trusted retry after an untrusted unsealed attempt failed on conflicting Tier 4 evidence.
+- **GREEN:** lock-held cleanup removes only the eight known Tier 4 artifact paths; an unrelated file survives and the changed retry seals its receipt.
+
+### Changes
+
+- Added an internal typed `WaterfallStore` acquisition seam for the checked-in `Tier4SourcePolicy`; missing policy rejects completed enabled replay and retained completed history, while disabled receipts remain exactly policy-only.
+- Bound completed Tier 4 source-policy evidence to the trusted typed policy and the canonical rendered-evidence replay. A complete, rehashed alternate valid dry chain is rejected under the expected policy.
+- Updated state/store fixtures that formerly modelled a new pass with a pass id greater than one; first-pass fixtures preserve their original test intent without bypassing retained-history rules.
+
+### Repair verification
+
+Passed:
+
+- `cargo test -p autospec-core --test autonomous_tier4` (8 tests)
+- `cargo test -p autospec-core --test autonomous_waterfall` (4 tests)
+- `cargo test -p autospec-cli --bin autospec tier2` (17 tests)
+- `cargo test -p autospec-cli --bin autospec tier3` (16 tests)
+- `cargo test -p autospec-cli --bin autospec tier4` (17 tests)
+- `cargo test -p autospec-cli --bin autospec waterfall` (6 tests)
+- `cargo fmt --check`
+- `cargo clippy -p autospec-cli --bin autospec -- -D warnings`
+- `git diff --check`
+
+The root checkout does not contain `scripts/validate.sh`; Rust tests, formatting, lint, and diff checks are the available verification surface for this change.

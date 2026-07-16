@@ -49,7 +49,7 @@ impl Drop for TempRoot {
 fn receipt(status: TierStatus) -> TierReceipt {
     TierReceipt::new(
         "owner/repo",
-        4,
+        1,
         NoWorkTier::Tier1,
         "queue-v1",
         10,
@@ -64,7 +64,7 @@ fn receipt(status: TierStatus) -> TierReceipt {
 fn receipt_with_evidence(status: TierStatus, evidence: SealedEvidence) -> TierReceipt {
     TierReceipt::new(
         "owner/repo",
-        4,
+        1,
         NoWorkTier::Tier1,
         "queue-v1",
         10,
@@ -82,7 +82,7 @@ fn tier_one_point_five_receipt_with_evidence(
 ) -> TierReceipt {
     TierReceipt::new(
         "owner/repo",
-        4,
+        1,
         NoWorkTier::Tier1_5,
         "tier15-read-only-v1",
         12,
@@ -120,17 +120,17 @@ fn store_atomically_replaces_state_without_overwriting_sealed_receipts() {
     let exhausted = receipt(TierStatus::Exhausted {
         reason: DryReason::NoProposalsGenerated,
     });
-    let failed = receipt_with_evidence(
-        TierStatus::Failed {
-            reason: "queue unavailable".to_string(),
+    let advancing = receipt_with_evidence(
+        TierStatus::Exhausted {
+            reason: DryReason::NoProposalsGenerated,
         },
         store
             .persist_tier1_evidence(
-                4,
-                Tier1EvidenceArtifact::ReadFailure,
-                "{\"schema\":1,\"kind\":\"read_failure\"}\n",
+                1,
+                Tier1EvidenceArtifact::ReadyPage,
+                "{\"schema\":1,\"kind\":\"ready_page\"}\n",
             )
-            .expect("persist Tier 1 failure evidence"),
+            .expect("persist Tier 1 ready-page evidence"),
     );
 
     let tier_one_point_five_exhausted = tier_one_point_five_receipt_with_evidence(
@@ -139,16 +139,18 @@ fn store_atomically_replaces_state_without_overwriting_sealed_receipts() {
         },
         store
             .persist_tier15_evidence(
-                4,
+                1,
                 Tier15EvidenceArtifact::Observation,
                 "{\"schema\":1,\"kind\":\"tier15_observation\"}\n",
             )
             .expect("persist Tier 1.5 observation evidence"),
     );
 
-    store.persist_receipt(&failed).expect("first receipt write");
     store
-        .persist_receipt(&failed)
+        .persist_receipt(&advancing)
+        .expect("first receipt write");
+    store
+        .persist_receipt(&advancing)
         .expect("same sealed receipt is idempotent");
     assert!(
         store.persist_receipt(&exhausted).is_err(),
@@ -157,9 +159,9 @@ fn store_atomically_replaces_state_without_overwriting_sealed_receipts() {
     store
         .persist_receipt(&tier_one_point_five_exhausted)
         .expect("next-tier receipt write");
-    let receipt_path = store.receipt_path(&failed).expect("receipt path");
+    let receipt_path = store.receipt_path(&advancing).expect("receipt path");
     let body = fs::read_to_string(&receipt_path).expect("receipt body");
-    assert!(body.contains("\"kind\":\"failed\""));
+    assert!(body.contains("\"kind\":\"exhausted\""));
     assert!(!receipt_path
         .parent()
         .expect("receipt parent")
@@ -168,10 +170,10 @@ fn store_atomically_replaces_state_without_overwriting_sealed_receipts() {
         .filter_map(Result::ok)
         .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")));
 
-    let first_state = WaterfallState::new("owner/repo", 4, NoWorkTier::Tier1)
+    let first_state = WaterfallState::new("owner/repo", 1, NoWorkTier::Tier1)
         .expect("state")
-        .record_receipt(&failed)
-        .expect("failed receipt is retained");
+        .record_receipt(&advancing)
+        .expect("advancing receipt is retained");
     store
         .persist_state(&first_state)
         .expect("first atomic state write");
@@ -207,7 +209,7 @@ fn store_rejects_a_cursor_when_its_tier_one_evidence_artifact_is_tampered() {
     let store = acquire(&root);
     let evidence = store
         .persist_tier1_evidence(
-            4,
+            1,
             Tier1EvidenceArtifact::ReadyPage,
             "{\"schema\":1,\"kind\":\"ready_page\"}\n",
         )
@@ -219,14 +221,14 @@ fn store_rejects_a_cursor_when_its_tier_one_evidence_artifact_is_tampered() {
         evidence,
     );
     store.persist_receipt(&receipt).expect("persist receipt");
-    let state = WaterfallState::new("owner/repo", 4, NoWorkTier::Tier1)
+    let state = WaterfallState::new("owner/repo", 1, NoWorkTier::Tier1)
         .expect("state")
         .record_receipt(&receipt)
         .expect("advance cursor");
     store.persist_state(&state).expect("persist cursor");
 
     fs::write(
-        root.path().join("waterfall/4/tier1/ready-page.json"),
+        root.path().join("waterfall/1/tier1/ready-page.json"),
         "{\"schema\":1,\"kind\":\"tampered\"}\n",
     )
     .expect("tamper Tier 1 evidence");
@@ -244,14 +246,14 @@ fn store_seals_tier_one_point_five_observation_and_failure_evidence() {
 
     let observation = store
         .persist_tier15_evidence(
-            4,
+            1,
             Tier15EvidenceArtifact::Observation,
             "{\"schema\":1,\"kind\":\"tier15_observation\"}\n",
         )
         .expect("persist Tier 1.5 observation");
     let failure = store
         .persist_tier15_evidence(
-            4,
+            1,
             Tier15EvidenceArtifact::ReadFailure,
             "{\"schema\":1,\"kind\":\"read_failure\"}\n",
         )
@@ -259,9 +261,9 @@ fn store_seals_tier_one_point_five_observation_and_failure_evidence() {
 
     assert_eq!(
         observation.reference,
-        "waterfall/4/tier1_5/observation.json"
+        "waterfall/1/tier1_5/observation.json"
     );
-    assert_eq!(failure.reference, "waterfall/4/tier1_5/read-failure.json");
+    assert_eq!(failure.reference, "waterfall/1/tier1_5/read-failure.json");
 }
 
 #[test]
@@ -270,7 +272,7 @@ fn store_rejects_a_cursor_when_tier_one_point_five_evidence_is_tampered() {
     let store = acquire(&root);
     let tier_one_evidence = store
         .persist_tier1_evidence(
-            4,
+            1,
             Tier1EvidenceArtifact::ReadyPage,
             "{\"schema\":1,\"kind\":\"ready_page\"}\n",
         )
@@ -284,14 +286,14 @@ fn store_rejects_a_cursor_when_tier_one_point_five_evidence_is_tampered() {
     store
         .persist_receipt(&tier_one_receipt)
         .expect("persist Tier 1 receipt");
-    let tier_one_point_five_state = WaterfallState::new("owner/repo", 4, NoWorkTier::Tier1)
+    let tier_one_point_five_state = WaterfallState::new("owner/repo", 1, NoWorkTier::Tier1)
         .expect("state")
         .record_receipt(&tier_one_receipt)
         .expect("advance to Tier 1.5");
 
     let evidence = store
         .persist_tier15_evidence(
-            4,
+            1,
             Tier15EvidenceArtifact::Observation,
             "{\"schema\":1,\"kind\":\"tier15_observation\"}\n",
         )
@@ -311,7 +313,7 @@ fn store_rejects_a_cursor_when_tier_one_point_five_evidence_is_tampered() {
     store.persist_state(&state).expect("persist cursor");
 
     fs::write(
-        root.path().join("waterfall/4/tier1_5/observation.json"),
+        root.path().join("waterfall/1/tier1_5/observation.json"),
         "{\"schema\":1,\"kind\":\"tampered\"}\n",
     )
     .expect("tamper Tier 1.5 evidence");

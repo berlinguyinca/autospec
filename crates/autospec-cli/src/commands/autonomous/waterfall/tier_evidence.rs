@@ -62,11 +62,23 @@ impl WaterfallStore {
         )
     }
 
+    pub(in crate::commands::autonomous) fn clear_unreferenced_tier4_evidence(
+        &self,
+        pass_id: u64,
+    ) -> Result<(), WaterfallStoreError> {
+        evidence::clear_unreferenced_tier4(&self.root, pass_id)
+    }
+
     pub(in crate::commands::autonomous) fn verify_tier4_evidence(
         &self,
         pass_id: u64,
         receipt: &TierReceipt,
     ) -> Result<(), WaterfallStoreError> {
-        evidence::verify_tier4(&self.root, pass_id, receipt)
+        evidence::verify_tier4(
+            &self.root,
+            pass_id,
+            receipt,
+            self.expected_tier4_source_policy.as_ref(),
+        )
     }
 }

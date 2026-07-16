@@ -16,6 +16,7 @@ use super::super::WaterfallStoreError;
 pub(super) fn verify_completed_facts(
     root: &Path,
     receipt: &TierReceipt,
+    expected_source_policy: &Tier4SourcePolicy,
 ) -> Result<(), WaterfallStoreError> {
     if receipt.evidence().len() != 6 {
         return invalid("Tier 4 completed receipt has an invalid evidence shape");
@@ -30,6 +31,9 @@ pub(super) fn verify_completed_facts(
         .map(|document| parse_object(document))
         .collect::<Result<Vec<_>, _>>()?;
     let policy = parse_policy(&parsed[0])?;
+    if &policy != expected_source_policy {
+        return invalid("Tier 4 source policy does not match the trusted checked-in policy");
+    }
     let sources = parse_sources(&parsed[1])?;
     let generated = parse_generated(&parsed[2])?;
     let verifier = parse_verifier(&parsed[4])?;

@@ -6,19 +6,50 @@ use autospec_core::autonomous::waterfall::{sha256_hex, SealedEvidence, TierRecei
 use super::tier2_receipts_tests::{store, TempRoot, REPO};
 use super::tier4::Tier4Scan;
 use super::tier4_receipts::{record_tier4, Tier4Progress};
-use super::tier4_receipts_tests::{produced_observation, seed_tier_four_cursor};
+use super::tier4_receipts_tests::{
+    observation, produced_observation, record_tier4_with_expected_policy, seed_tier_four_cursor,
+    source, tier4_store,
+};
+
+#[test]
+fn changed_retry_clears_only_unreferenced_tier4_artifacts_before_writing() {
+    let root = TempRoot::new();
+    seed_tier_four_cursor(&root);
+    assert!(record_tier4(
+        root.path(),
+        REPO,
+        Tier4Scan::Complete(observation(source(&[]), Vec::new(), Vec::new())),
+    )
+    .is_err());
+
+    let tier4_dir = root.path().join("waterfall/waterfall/1/tier4");
+    assert!(tier4_dir.join("sources.json").exists());
+    assert!(!tier4_dir.join("tier4.json").exists());
+    let unrelated = tier4_dir.join("leave-this-alone.json");
+    fs::write(&unrelated, "unrelated orphan\n").expect("unrelated artifact");
+
+    assert_eq!(
+        record_tier4_with_expected_policy(&root, Tier4Scan::Complete(produced_observation()))
+            .expect("changed retry clears conflicting artifacts"),
+        Tier4Progress::Produced(1)
+    );
+    assert_eq!(
+        fs::read_to_string(&unrelated).expect("unrelated artifact retained"),
+        "unrelated orphan\n"
+    );
+    assert!(tier4_store(&root)
+        .load_receipt(1, NoWorkTier::Tier4)
+        .expect("receipt")
+        .is_some());
+}
 
 #[test]
 fn tier4_replay_rejects_rehashed_nested_key_order_variants() {
     let root = TempRoot::new();
     seed_tier_four_cursor(&root);
     assert_eq!(
-        record_tier4(
-            root.path(),
-            REPO,
-            Tier4Scan::Complete(produced_observation()),
-        )
-        .expect("produced receipt"),
+        record_tier4_with_expected_policy(&root, Tier4Scan::Complete(produced_observation()))
+            .expect("produced receipt"),
         Tier4Progress::Produced(1)
     );
     let receipt_store = store(&root);
@@ -103,12 +134,8 @@ fn tier4_replay_rejects_source_envelopes_outside_the_checked_in_policy() {
     let root = TempRoot::new();
     seed_tier_four_cursor(&root);
     assert_eq!(
-        record_tier4(
-            root.path(),
-            REPO,
-            Tier4Scan::Complete(produced_observation()),
-        )
-        .expect("produced receipt"),
+        record_tier4_with_expected_policy(&root, Tier4Scan::Complete(produced_observation()))
+            .expect("produced receipt"),
         Tier4Progress::Produced(1)
     );
     let receipt_store = store(&root);
@@ -232,12 +259,8 @@ fn assert_receipt_rejected(forge: impl FnOnce(&TierReceipt) -> TierReceipt) {
     let root = TempRoot::new();
     seed_tier_four_cursor(&root);
     assert_eq!(
-        record_tier4(
-            root.path(),
-            REPO,
-            Tier4Scan::Complete(produced_observation()),
-        )
-        .expect("produced receipt"),
+        record_tier4_with_expected_policy(&root, Tier4Scan::Complete(produced_observation()))
+            .expect("produced receipt"),
         Tier4Progress::Produced(1)
     );
     let receipt_store = store(&root);
@@ -259,12 +282,8 @@ fn assert_document_rejected(index: usize, rewrite: impl FnOnce(String) -> String
     let root = TempRoot::new();
     seed_tier_four_cursor(&root);
     assert_eq!(
-        record_tier4(
-            root.path(),
-            REPO,
-            Tier4Scan::Complete(produced_observation()),
-        )
-        .expect("produced receipt"),
+        record_tier4_with_expected_policy(&root, Tier4Scan::Complete(produced_observation()))
+            .expect("produced receipt"),
         Tier4Progress::Produced(1)
     );
     let receipt_store = store(&root);

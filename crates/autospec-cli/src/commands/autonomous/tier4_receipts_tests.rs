@@ -15,7 +15,8 @@ use super::tier3::Tier3Scan;
 use super::tier3_receipts::{record_tier3, Tier3Progress};
 use super::tier3_receipts_tests::{observation as tier3_observation, seed_tier_three_cursor};
 use super::tier4::{disabled_by_checked_in_policy, Tier4Scan};
-use super::tier4_receipts::{record_tier4, Tier4Progress};
+use super::tier4_receipts::{record_tier4, record_tier4_with_source_policy, Tier4Progress};
+use super::waterfall::{StoreAcquisition, WaterfallStore};
 
 pub(super) fn seed_tier_four_cursor(root: &TempRoot) {
     seed_tier_three_cursor(root);
@@ -30,22 +31,62 @@ pub(super) fn seed_tier_four_cursor(root: &TempRoot) {
     );
 }
 
-fn descriptor() -> Tier4SourceDescriptor {
+fn descriptor_for(id: &str) -> Tier4SourceDescriptor {
     Tier4SourceDescriptor {
-        id: "alpha".to_string(),
-        host: "alpha.example.test".to_string(),
+        id: id.to_string(),
+        host: format!("{id}.example.test"),
         path: "/facts".to_string(),
         max_bytes: 1_024,
         deadline_millis: 1_000,
     }
 }
 
+pub(super) fn expected_source_policy() -> Tier4SourcePolicy {
+    Tier4SourcePolicy {
+        schema_version: TIER4_SCHEMA,
+        policy_identity: "checked-in-policy-v1".to_string(),
+        descriptors: vec![descriptor_for("alpha")],
+    }
+}
+
+pub(super) fn record_tier4_with_expected_policy(
+    root: &TempRoot,
+    scan: Tier4Scan,
+) -> Result<Tier4Progress, String> {
+    record_tier4_with_source_policy(root.path(), REPO, scan, expected_source_policy())
+}
+
+pub(super) fn tier4_store(root: &TempRoot) -> WaterfallStore {
+    match WaterfallStore::acquire_with_tier4_source_policy(
+        root.path().join("waterfall"),
+        REPO,
+        expected_source_policy(),
+    )
+    .expect("store acquisition")
+    {
+        StoreAcquisition::Acquired(store) => store,
+        StoreAcquisition::Held => panic!("fresh test root must be unlocked"),
+    }
+}
+
+fn alternate_source_policy() -> Tier4SourcePolicy {
+    Tier4SourcePolicy {
+        schema_version: TIER4_SCHEMA,
+        policy_identity: "alternate-checked-in-policy-v1".to_string(),
+        descriptors: vec![descriptor_for("beta")],
+    }
+}
+
 pub(super) fn source(facts: &[&str]) -> Tier4SourceEnvelope {
+    source_for("alpha", facts)
+}
+
+fn source_for(id: &str, facts: &[&str]) -> Tier4SourceEnvelope {
     Tier4SourceEnvelope {
         schema_version: TIER4_SCHEMA,
         producer_identity: "test-source-adapter".to_string(),
         producer_protocol_version: "v1".to_string(),
-        source_id: "alpha".to_string(),
+        source_id: id.to_string(),
         byte_length: 128,
         body_sha256: "a".repeat(64),
         facts: facts
@@ -75,11 +116,7 @@ pub(super) fn observation(
     verdicts: Vec<Tier4Verification>,
 ) -> Tier4Observation {
     evaluate_tier4(Tier4Input::Enabled {
-        source_policy: Tier4SourcePolicy {
-            schema_version: TIER4_SCHEMA,
-            policy_identity: "checked-in-policy-v1".to_string(),
-            descriptors: vec![descriptor()],
-        },
+        source_policy: expected_source_policy(),
         sources: vec![Tier4StageResult::Complete(source)],
         generated: Tier4StageResult::Complete(Tier4GeneratedCandidates {
             schema_version: TIER4_SCHEMA,
@@ -99,6 +136,30 @@ pub(super) fn observation(
     .observation()
     .cloned()
     .expect("complete observation")
+}
+
+fn alternate_valid_dry_observation() -> Tier4Observation {
+    evaluate_tier4(Tier4Input::Enabled {
+        source_policy: alternate_source_policy(),
+        sources: vec![Tier4StageResult::Complete(source_for("beta", &[]))],
+        generated: Tier4StageResult::Complete(Tier4GeneratedCandidates {
+            schema_version: TIER4_SCHEMA,
+            generator_identity: "test-generator".to_string(),
+            generator_protocol_version: "v1".to_string(),
+            candidates: Vec::new(),
+        }),
+        verifier: Tier4StageResult::Complete(Tier4VerifierVerdicts {
+            schema_version: TIER4_SCHEMA,
+            verifier_identity: "test-verifier".to_string(),
+            verifier_protocol_version: "v1".to_string(),
+            verdicts: Vec::new(),
+        }),
+        roi_policy: Tier4RoiPolicy::v1(),
+    })
+    .expect("alternate valid Tier 4 input")
+    .observation()
+    .cloned()
+    .expect("alternate complete observation")
 }
 
 fn rejected() -> Tier4Verification {
@@ -128,11 +189,7 @@ pub(super) fn generator_failure() -> autospec_core::autonomous::tier4::Tier4Fail
     let mut invalid = candidate();
     invalid.fact_key = "missing-fact".to_string();
     evaluate_tier4(Tier4Input::Enabled {
-        source_policy: Tier4SourcePolicy {
-            schema_version: TIER4_SCHEMA,
-            policy_identity: "checked-in-policy-v1".to_string(),
-            descriptors: vec![descriptor()],
-        },
+        source_policy: expected_source_policy(),
         sources: vec![Tier4StageResult::Complete(source(&["fact-alpha"]))],
         generated: Tier4StageResult::Complete(Tier4GeneratedCandidates {
             schema_version: TIER4_SCHEMA,
@@ -149,6 +206,58 @@ pub(super) fn generator_failure() -> autospec_core::autonomous::tier4::Tier4Fail
         roi_policy: Tier4RoiPolicy::v1(),
     })
     .expect_err("unknown source fact must fail at generation")
+}
+
+#[test]
+fn fully_sealed_alternate_policy_dry_evidence_is_rejected_by_trusted_policy() {
+    let untrusted_root = TempRoot::new();
+    seed_tier_four_cursor(&untrusted_root);
+    assert!(record_tier4(
+        untrusted_root.path(),
+        REPO,
+        Tier4Scan::Complete(observation(source(&[]), Vec::new(), Vec::new())),
+    )
+    .is_err());
+
+    let root = TempRoot::new();
+    seed_tier_four_cursor(&root);
+    assert_eq!(
+        record_tier4_with_source_policy(
+            root.path(),
+            REPO,
+            Tier4Scan::Complete(alternate_valid_dry_observation()),
+            alternate_source_policy(),
+        )
+        .expect("alternate-policy dry receipt"),
+        Tier4Progress::Advanced
+    );
+    let alternate_store = store(&root);
+    assert_eq!(
+        alternate_store
+            .load_receipt(1, NoWorkTier::Tier4)
+            .expect("alternate receipt")
+            .expect("sealed alternate receipt")
+            .evidence()
+            .len(),
+        6,
+        "the alternate policy fixture seals and rehashes the complete dry chain"
+    );
+    assert!(
+        alternate_store.load_state().is_err(),
+        "retained completed Tier 4 history must not replay without trusted policy"
+    );
+    drop(alternate_store);
+    let mismatched_store = match WaterfallStore::acquire_with_tier4_source_policy(
+        root.path().join("waterfall"),
+        REPO,
+        expected_source_policy(),
+    )
+    .expect("store acquisition")
+    {
+        StoreAcquisition::Acquired(store) => store,
+        StoreAcquisition::Held => panic!("fresh test root must be unlocked"),
+    };
+    assert!(mismatched_store.load_state().is_err());
 }
 
 #[test]
@@ -222,10 +331,10 @@ fn tier4_closed_dry_results_roll_over_with_full_receipt_audit_history() {
         let root = TempRoot::new();
         seed_tier_four_cursor(&root);
         assert_eq!(
-            record_tier4(root.path(), REPO, scan).expect("Tier 4 dry receipt"),
+            record_tier4_with_expected_policy(&root, scan).expect("Tier 4 dry receipt"),
             Tier4Progress::Advanced
         );
-        let store = store(&root);
+        let store = tier4_store(&root);
         let state = store.load_state().expect("state").expect("cursor");
         assert_eq!(
             (state.next_pass_id(), state.current_tier()),
