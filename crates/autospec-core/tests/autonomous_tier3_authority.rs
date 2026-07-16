@@ -1,19 +1,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "support/tier2_authority_matcher.rs"]
 mod matcher;
 
 use matcher::{
-    contains_path_symbol, contains_qualified_path, has_forbidden_std_module, has_module_escape,
+    code_tokens, contains_path_symbol, contains_qualified_path, has_forbidden_std_module,
+    has_module_escape,
 };
 
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("workspace root")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn pure_tier3_sources() -> Vec<PathBuf> {
@@ -36,11 +33,7 @@ fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
 }
 
 fn temporary_module_root() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time after epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("autospec-tier3-authority-{nanos}"))
+    std::env::temp_dir().join(format!("autospec-tier3-authority-{}", std::process::id()))
 }
 
 fn code_without_comments_and_literals(source: &str) -> String {
@@ -48,6 +41,11 @@ fn code_without_comments_and_literals(source: &str) -> String {
     let mut code = String::new();
     let mut index = 0;
     while index < bytes.len() {
+        if let Some(end) = raw_string_end(bytes, index) {
+            code.push(' ');
+            index = end;
+            continue;
+        }
         match bytes[index..] {
             [b'/', b'/', ..] => {
                 index += 2;
@@ -104,16 +102,36 @@ fn quoted_end(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
-fn contains_code_token(code: &str, token: &str) -> bool {
-    code.match_indices(token).any(|(offset, _)| {
-        let before = code[..offset].chars().next_back();
-        let after = code[offset + token.len()..].chars().next();
-        !before.is_some_and(is_identifier_character) && !after.is_some_and(is_identifier_character)
-    })
+fn raw_string_end(bytes: &[u8], index: usize) -> Option<usize> {
+    let mut cursor = match bytes.get(index) {
+        Some(b'r') => index + 1,
+        Some(b'b') if bytes.get(index + 1) == Some(&b'r') => index + 2,
+        _ => return None,
+    };
+    let hash_start = cursor;
+    while bytes.get(cursor) == Some(&b'#') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'\"') {
+        return None;
+    }
+    let hashes = cursor - hash_start;
+    cursor += 1;
+    while cursor < bytes.len() {
+        let end = cursor.saturating_add(hashes + 1);
+        if bytes[cursor] == b'\"'
+            && end <= bytes.len()
+            && bytes[cursor + 1..end].iter().all(|byte| *byte == b'#')
+        {
+            return Some(end);
+        }
+        cursor += 1;
+    }
+    Some(cursor)
 }
 
-fn is_identifier_character(character: char) -> bool {
-    character == '_' || character.is_ascii_alphanumeric()
+fn contains_code_token(code: &str, token: &str) -> bool {
+    code_tokens(code).iter().any(|candidate| candidate == token)
 }
 
 fn production_source(relative: &str) -> String {
@@ -168,6 +186,21 @@ fn authority_matcher_rejects_evasions_but_allows_inert_names() {
         &code_without_comments_and_literals("git::checkout(\"branch\");"),
         "git::checkout"
     ));
+    let raw = code_without_comments_and_literals(
+        r##"let note = r#"interior " reqwest::Client"#; use std::fs;"##,
+    );
+    assert!(!contains_path_symbol(&raw, "reqwest::Client"));
+    assert!(has_forbidden_std_module(&raw, "fs"));
+    for fixture in [
+        "WaterfallStore::acquire(); reqwest::Client::new();",
+        "WaterfallStore::acquire(); OtherStore::save();",
+    ] {
+        let fixture = code_without_comments_and_literals(fixture);
+        assert!(std::panic::catch_unwind(|| assert_no_execution_authority(
+            &fixture, "fixture", true
+        ))
+        .is_err());
+    }
     for escape in [
         "#[path = \"../escape.rs\"] mod escaped;",
         "#[cfg_attr(unix, path = \"../escape.rs\")] mod escaped;",
@@ -206,65 +239,12 @@ fn pure_tier3_sources_reject_external_and_mutation_authority() {
                 source.display()
             );
         }
-        for path in [
-            "queue",
-            "claim",
-            "github",
-            "gh",
-            "branch",
-            "worktree",
-            "issue",
-            "label",
-            "pull_request",
-        ] {
-            assert!(
-                !contains_qualified_path(&code, path),
-                "{} retains {path} module authority",
-                source.display()
-            );
-        }
-        for mutation in [
-            "Method::POST",
-            "Method::PATCH",
-            "Method::PUT",
-            "Method::DELETE",
-        ] {
-            assert!(
-                !contains_path_symbol(&code, mutation),
-                "{} retains HTTP mutation authority: {mutation}",
-                source.display()
-            );
-        }
+        assert_no_execution_authority(&code, &source.display().to_string(), false);
         for forbidden in [
-            "Command",
             "WaterfallStore",
             "TierReceipt",
             "TierStatus",
             "WaterfallState",
-            "bash",
-            "zsh",
-            "run_shell",
-            "curl",
-            "legacy",
-            "ModelClient",
-            "ModelRequest",
-            "run_model",
-            "remote",
-            "foreground",
-            "executor",
-            "mutation",
-            "RemoteIssue",
-            "PullRequest",
-            "ExecutorRequest",
-            "ConductorEvent",
-            "run_foreground",
-            "scan_foreground",
-            "add_label",
-            "remove_label",
-            "create_issue",
-            "edit_issue",
-            "comment_issue",
-            "create_branch",
         ] {
             assert!(
                 !contains_code_token(&code, forbidden),
@@ -272,11 +252,6 @@ fn pure_tier3_sources_reject_external_and_mutation_authority() {
                 source.display()
             );
         }
-        assert!(
-            !contains_path_symbol(&code, "git::checkout"),
-            "{} retains git checkout authority",
-            source.display()
-        );
     }
     assert!(saw_documents, "guard opaque Tier 3 evidence documents");
 }
@@ -295,8 +270,7 @@ fn tier3_adapter_is_checked_in_policy_only() {
     for module in ["fs", "io", "path", "env", "process", "net"] {
         assert!(!has_forbidden_std_module(&code, module));
     }
-    assert_no_execution_authority(&code, "Tier 3 adapter");
-    assert!(!contains_code_token(&code, "WaterfallStore"));
+    assert_no_execution_authority(&code, "Tier 3 adapter", false);
 }
 
 #[test]
@@ -309,7 +283,7 @@ fn tier3_receipt_coordinator_has_only_local_store_persistence() {
     for module in ["fs", "io", "env", "process", "net"] {
         assert!(!has_forbidden_std_module(&code, module));
     }
-    assert_no_execution_authority(&code, "Tier 3 receipt coordinator");
+    assert_no_execution_authority(&code, "Tier 3 receipt coordinator", true);
     for forbidden in [
         "OpenOptions",
         "File",
@@ -335,7 +309,7 @@ fn tier3_receipt_verifier_is_read_only_and_keeps_shared_helpers() {
     for module in ["env", "process", "net"] {
         assert!(!has_forbidden_std_module(&code, module));
     }
-    assert_no_execution_authority(&code, "Tier 3 receipt verifier");
+    assert_no_execution_authority(&code, "Tier 3 receipt verifier", false);
     for mutation in [
         "fs::write",
         "fs::copy",
@@ -358,7 +332,7 @@ fn tier3_receipt_verifier_is_read_only_and_keeps_shared_helpers() {
     }
 }
 
-fn assert_no_execution_authority(code: &str, scope: &str) {
+fn assert_no_execution_authority(code: &str, scope: &str, allows_waterfall_store: bool) {
     for path in [
         "queue",
         "claim",
@@ -421,6 +395,36 @@ fn assert_no_execution_authority(code: &str, scope: &str) {
     assert!(
         !contains_path_symbol(code, "git::checkout"),
         "{scope} retains git checkout authority"
+    );
+    for client in [
+        "reqwest::Client",
+        "ureq::Agent",
+        "hyper::Client",
+        "surf::Client",
+        "isahc::HttpClient",
+        "awc::Client",
+    ] {
+        assert!(
+            !contains_path_symbol(code, client),
+            "{scope} retains external remote-client authority: {client}"
+        );
+    }
+    for facade in ["sqlx::Pool", "sled::Db", "rusqlite::Connection"] {
+        assert!(
+            !contains_path_symbol(code, facade),
+            "{scope} retains external persistence authority: {facade}"
+        );
+    }
+    for token in code_tokens(code) {
+        assert!(
+            token == "WaterfallStore" || !(token.ends_with("Client") || token.ends_with("Store")),
+            "{scope} retains external client or second persistence facade: {token}"
+        );
+    }
+    assert_eq!(
+        contains_code_token(code, "WaterfallStore"),
+        allows_waterfall_store,
+        "{scope} has an invalid WaterfallStore boundary"
     );
 }
 
