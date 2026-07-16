@@ -40,6 +40,12 @@ pub(super) enum LifecycleAdmissionError {
     Reject(&'static str),
     Diagnostic(String),
 }
+
+enum StoreError {
+    Reject(ResilienceReject),
+    Diagnostic(String),
+}
+
 impl ResilienceStore {
     fn from_env(repo: &str) -> Result<Self, String> {
         let scope = RepositoryScope::try_from(repo).map_err(|reason| format!("--repo {reason}"))?;
@@ -56,7 +62,7 @@ impl ResilienceStore {
                 .unwrap_or_default(),
         })
     }
-    fn read_state(&self) -> Result<Option<(ResilienceState, bool)>, ResilienceReject> {
+    fn read_state(&self) -> Result<Option<(ResilienceState, bool)>, StoreError> {
         for (candidate_index, path) in self
             .candidates(&self.state_root, "state.json")
             .into_iter()
@@ -65,31 +71,32 @@ impl ResilienceStore {
             match fs::read_to_string(&path) {
                 Ok(raw) => {
                     let state = ResilienceState::parse(&raw)
-                        .map_err(|_| ResilienceReject::MalformedState)?;
+                        .map_err(|_| StoreError::Reject(ResilienceReject::MalformedState))?;
                     if state.repo != self.scope.as_str() {
-                        return Err(ResilienceReject::ForeignState);
+                        return Err(StoreError::Reject(ResilienceReject::ForeignState));
                     }
                     return Ok(Some((state, candidate_index > 0)));
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(_) => return Err(ResilienceReject::MalformedState),
+                Err(error) => {
+                    return Err(StoreError::Diagnostic(format!(
+                        "cannot read resilience state {}: {error}",
+                        path.display()
+                    )))
+                }
             }
         }
         Ok(None)
     }
 
-    fn read_status(&self) -> Result<Option<ResilienceStatus>, ResilienceReject> {
+    fn read_status(&self) -> Result<Option<ResilienceStatus>, StoreError> {
         for path in self.candidates(&self.state_root, "state.json") {
             match fs::read_to_string(&path) {
                 Ok(raw) => {
                     let state = records::StatusState::parse(&raw)
-                        .map_err(|_| ResilienceReject::MalformedState)?;
-                    if state
-                        .repo
-                        .as_deref()
-                        .is_some_and(|repo| repo != self.scope.as_str())
-                    {
-                        return Err(ResilienceReject::ForeignState);
+                        .map_err(|_| StoreError::Reject(ResilienceReject::MalformedState))?;
+                    if state.repo != self.scope.as_str() {
+                        return Err(StoreError::Reject(ResilienceReject::ForeignState));
                     }
                     let last_cycle = state
                         .cycle
@@ -103,41 +110,60 @@ impl ResilienceStore {
                     }));
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(_) => return Err(ResilienceReject::MalformedState),
+                Err(error) => {
+                    return Err(StoreError::Diagnostic(format!(
+                        "cannot read resilience state {}: {error}",
+                        path.display()
+                    )))
+                }
             }
         }
         Ok(None)
     }
-    fn read_failures(&self, issue: Option<u64>) -> Result<u8, ResilienceReject> {
+    fn read_failures(&self, issue: Option<u64>) -> Result<u8, StoreError> {
         let Some(issue) = issue else {
             return Ok(0);
         };
         for path in self.candidates(&self.state_root, &format!("issues/{issue}.json")) {
             match fs::read_to_string(&path) {
-                Ok(raw) => return parse_failures(&raw, issue),
+                Ok(raw) => return parse_failures(&raw, issue).map_err(StoreError::Reject),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(_) => return Err(ResilienceReject::MalformedFailure),
+                Err(error) => {
+                    return Err(StoreError::Diagnostic(format!(
+                        "cannot read resilience failure record {}: {error}",
+                        path.display()
+                    )))
+                }
             }
         }
         Ok(0)
     }
-    fn read_spend(&self) -> Result<Spend, ResilienceReject> {
+    fn read_spend(&self) -> Result<Spend, StoreError> {
         for path in self.candidates(&self.spend_root, "spend.json") {
             match fs::read_to_string(&path) {
-                Ok(raw) => return Spend::parse(&raw),
+                Ok(raw) => return Spend::parse(&raw).map_err(StoreError::Reject),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(_) => return Err(ResilienceReject::MalformedSpend),
+                Err(error) => {
+                    return Err(StoreError::Diagnostic(format!(
+                        "cannot read resilience spend record {}: {error}",
+                        path.display()
+                    )))
+                }
             }
         }
         Ok(Spend::default())
     }
 
-    fn write_state(&self, value: &ResilienceState) -> Result<(), String> {
+    fn write_state(&self, value: &ResilienceState) -> Result<(), StoreError> {
         let [canonical, ..] = self.slugs();
         let path = self.state_root.join(&canonical).join("state.json");
-        fs::create_dir_all(path.parent().expect("state path has a parent"))
-            .map_err(|error| format!("cannot create resilience state directory: {error}"))?;
-        super::atomic_write(&path, &value.to_json(&canonical))
+        fs::create_dir_all(path.parent().expect("state path has a parent")).map_err(|error| {
+            StoreError::Diagnostic(format!(
+                "cannot create resilience state directory {}: {error}",
+                path.parent().expect("state path has a parent").display()
+            ))
+        })?;
+        super::atomic_write(&path, &value.to_json(&canonical)).map_err(StoreError::Diagnostic)
     }
 
     fn admit(
@@ -145,7 +171,7 @@ impl ResilienceStore {
         issue: Option<u64>,
         usage_cap: u64,
         issue_cap: u64,
-    ) -> Result<ResilienceAdmission, ResilienceReject> {
+    ) -> Result<ResilienceAdmission, StoreError> {
         let stored_state = self.read_state()?;
         let failure_count = self.read_failures(issue)?;
         let spend = self.read_spend()?;
@@ -156,8 +182,7 @@ impl ResilienceStore {
             issue_cap,
         ));
         if let Some((state, true)) = stored_state.as_ref() {
-            self.write_state(state)
-                .map_err(|_| ResilienceReject::MalformedState)?;
+            self.write_state(state)?;
         }
         let lease = stored_state.and_then(|stored| {
             let state = stored.0;
@@ -212,8 +237,8 @@ impl ResilienceStore {
 pub(super) fn admit_lifecycle(
     repo: &str,
     issue: Option<u64>,
-    budget_tokens: Option<&str>,
-    budget_issues: Option<&str>,
+    budget_tokens: Option<u64>,
+    budget_issues: Option<u64>,
 ) -> Result<ResilienceAdmission, LifecycleAdmissionError> {
     let store = ResilienceStore::from_env(repo).map_err(LifecycleAdmissionError::Diagnostic)?;
     let usage_cap = lifecycle_budget(
@@ -228,14 +253,12 @@ pub(super) fn admit_lifecycle(
     )?;
     store
         .admit(issue, usage_cap, issue_cap)
-        .map_err(|reject| LifecycleAdmissionError::Reject(reject.reason()))
+        .map_err(store_error_to_lifecycle_error)
 }
 
 pub(super) fn status(repo: &str) -> Result<Option<ResilienceStatus>, LifecycleAdmissionError> {
     let store = ResilienceStore::from_env(repo).map_err(LifecycleAdmissionError::Diagnostic)?;
-    store
-        .read_status()
-        .map_err(|reject| LifecycleAdmissionError::Reject(reject.reason()))
+    store.read_status().map_err(store_error_to_lifecycle_error)
 }
 
 pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -247,7 +270,8 @@ pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
     let store = ResilienceStore::from_env(&options.repo).map_err(CommandFailure::diagnostic)?;
     let admission = match store.admit(options.issue, options.usage_cap, options.issue_cap) {
         Ok(admission) => admission,
-        Err(reject) => return emit(Decision::Reject(reject.reason())),
+        Err(StoreError::Reject(reject)) => return emit(Decision::Reject(reject.reason())),
+        Err(StoreError::Diagnostic(message)) => return Err(CommandFailure::diagnostic(message)),
     };
     if let Some(ConductorLeaseDecision::Held) = admission.lease {
         return emit(Decision::Held);
@@ -433,17 +457,20 @@ fn env_budget(name: &str, default: u64) -> Result<u64, String> {
 }
 
 fn lifecycle_budget(
-    override_value: Option<&str>,
+    override_value: Option<u64>,
     environment: &str,
     default: u64,
 ) -> Result<u64, LifecycleAdmissionError> {
-    match override_value.filter(|value| !value.is_empty()) {
-        Some(value) => value.parse().map_err(|_| {
-            LifecycleAdmissionError::Diagnostic(format!(
-                "{environment} must be a non-negative integer"
-            ))
-        }),
+    match override_value {
+        Some(value) => Ok(value),
         None => env_budget(environment, default).map_err(LifecycleAdmissionError::Diagnostic),
+    }
+}
+
+fn store_error_to_lifecycle_error(error: StoreError) -> LifecycleAdmissionError {
+    match error {
+        StoreError::Reject(reject) => LifecycleAdmissionError::Reject(reject.reason()),
+        StoreError::Diagnostic(message) => LifecycleAdmissionError::Diagnostic(message),
     }
 }
 

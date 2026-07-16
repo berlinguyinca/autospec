@@ -48,8 +48,8 @@ struct Options {
     force: bool,
     log_path: String,
     max_cycles: String,
-    budget_tokens: String,
-    budget_issues: String,
+    budget_tokens: Option<u64>,
+    budget_issues: Option<u64>,
     no_digest: bool,
     health_branch: Option<String>,
     issue: Option<u64>,
@@ -75,8 +75,8 @@ impl Default for Options {
             force: false,
             log_path: String::new(),
             max_cycles: String::new(),
-            budget_tokens: String::new(),
-            budget_issues: String::new(),
+            budget_tokens: None,
+            budget_issues: None,
             no_digest: false,
             health_branch: None,
             issue: None,
@@ -202,10 +202,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--budget-tokens" => {
                 index += 1;
-                options.budget_tokens = args
+                let value = args
                     .get(index)
-                    .cloned()
                     .ok_or_else(|| "--budget-tokens requires a value".to_string())?;
+                options.budget_tokens = Some(parse_lifetime_budget(value, "--budget-tokens")?);
             }
             "--budget-hours" => {
                 index += 1;
@@ -219,10 +219,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--budget-issues" => {
                 index += 1;
-                options.budget_issues = args
+                let value = args
                     .get(index)
-                    .cloned()
                     .ok_or_else(|| "--budget-issues requires a value".to_string())?;
+                options.budget_issues = Some(parse_lifetime_budget(value, "--budget-issues")?);
             }
             "--lines" => {
                 index += 1;
@@ -274,6 +274,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
         index += 1;
     }
     Ok(options)
+}
+
+fn parse_lifetime_budget(value: &str, flag: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("{flag} must be a non-negative integer"))
 }
 
 fn lifecycle(args: &[String]) -> Result<(), CommandFailure> {
@@ -1896,8 +1902,8 @@ fn resilience_admission_for_issue(
     resilience::admit_lifecycle(
         &layout.repo,
         issue,
-        (!options.budget_tokens.is_empty()).then_some(options.budget_tokens.as_str()),
-        (!options.budget_issues.is_empty()).then_some(options.budget_issues.as_str()),
+        options.budget_tokens,
+        options.budget_issues,
     )
     .map_err(resilience_admission_error)
 }
@@ -2275,13 +2281,13 @@ fn conductor_passthrough_args(options: &Options) -> Vec<String> {
         args.push("--poll-interval-sec".to_string());
         args.push(options.interval_sec.to_string());
     }
-    if !options.budget_tokens.is_empty() {
+    if let Some(budget_tokens) = options.budget_tokens {
         args.push("--budget-tokens".to_string());
-        args.push(options.budget_tokens.clone());
+        args.push(budget_tokens.to_string());
     }
-    if !options.budget_issues.is_empty() {
+    if let Some(budget_issues) = options.budget_issues {
         args.push("--budget-issues".to_string());
-        args.push(options.budget_issues.clone());
+        args.push(budget_issues.to_string());
     }
     if options.dry_run {
         args.push("--dry-run".to_string());
@@ -2296,6 +2302,14 @@ fn write_launch_json(
     commands: &LaunchCommands,
 ) -> Result<(), String> {
     let path = layout.state_dir.join("launch.json");
+    let budget_tokens = options
+        .budget_tokens
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let budget_issues = options
+        .budget_issues
+        .map(|value| value.to_string())
+        .unwrap_or_default();
     let body = format!(
         "{{\"argv\":{},\"repo\":\"{}\",\"repo_dir\":\"{}\",\"scope\":\"{}\",\"conductor_argv\":{},\"monitor_argv\":{},\"supervisor_argv\":{},\"max_cycles\":\"{}\",\"budget_tokens\":\"{}\",\"budget_issues\":\"{}\",\"no_digest\":{},\"poll_interval_sec\":\"{}\"}}\n",
         json_string_array(&options.raw_args),
@@ -2306,8 +2320,8 @@ fn write_launch_json(
         commands.monitor.argv_json(),
         commands.supervisor.argv_json(),
         json_escape(&options.max_cycles),
-        json_escape(&options.budget_tokens),
-        json_escape(&options.budget_issues),
+        json_escape(&budget_tokens),
+        json_escape(&budget_issues),
         options.no_digest,
         options.interval_sec
     );

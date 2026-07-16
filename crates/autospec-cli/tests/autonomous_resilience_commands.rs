@@ -100,6 +100,18 @@ fn resilience_decide_rejects_malformed_or_foreign_state_without_a_canonical_writ
 }
 
 #[test]
+fn state_read_io_is_diagnostic_not_malformed_reject() {
+    let fixture = ResilienceFixture::new();
+    fs::create_dir_all(fixture.canonical_state_path()).expect("create state directory");
+
+    let output = fixture.run(&["resilience", "decide", "--repo", "owner/repo"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stdout(&output).is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("resilience state"));
+}
+
+#[test]
 fn resilience_decide_rejects_zero_lock_pid_without_a_canonical_write() {
     let fixture = ResilienceFixture::new();
     fixture.write_state(
@@ -633,6 +645,96 @@ fn autonomous_status_prefers_an_explicit_cycle_over_running_suffix() {
 
     assert!(output.status.success());
     assert!(stdout(&output).contains("\"last_cycle\":\"44\""));
+}
+
+#[test]
+fn status_requires_matching_record_repo() {
+    for (name, state, reason) in [
+        (
+            "missing",
+            format!("{{\"status\":\"running\",\"heartbeat_at\":{}}}", now_secs()),
+            "malformed_state",
+        ),
+        (
+            "foreign",
+            valid_state("other/repo", "running", 1),
+            "foreign_state",
+        ),
+    ] {
+        let fixture = ResilienceFixture::new();
+        fixture.write_state("owner_repo", state);
+
+        let output = fixture.run_autonomous(&["status", "--repo", "owner/repo", "--json"]);
+
+        assert_eq!(output.status.code(), Some(3), "{name}");
+        assert_eq!(
+            stdout(&output),
+            format!("{{\"decision\":\"reject\",\"reason\":\"{reason}\"}}\n"),
+            "{name}"
+        );
+        assert!(
+            !fixture.canonical_state_path().exists(),
+            "{name} must not migrate state"
+        );
+        assert!(
+            !fixture.operator_lifecycle_path().exists(),
+            "{name} must not write operator state"
+        );
+    }
+}
+
+#[test]
+fn empty_supplied_lifetime_budget_is_diagnostic() {
+    for flag in ["--budget-tokens", "--budget-issues"] {
+        for value in ["", "not-a-number", "-1"] {
+            let fixture = ResilienceFixture::new();
+
+            let output = fixture.run_autonomous(&[
+                "start",
+                "--repo",
+                "owner/repo",
+                flag,
+                value,
+                "--dry-run",
+            ]);
+
+            assert_eq!(output.status.code(), Some(2), "{flag}={value:?}");
+            assert!(stdout(&output).is_empty(), "{flag}={value:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(flag),
+                "{flag}={value:?} must identify the supplied flag"
+            );
+            assert!(
+                !fixture.canonical_state_path().exists(),
+                "{flag}={value:?} must not create state"
+            );
+            assert!(
+                !fixture.operator_lifecycle_path().exists(),
+                "{flag}={value:?} must not write operator state"
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_zero_lifetime_budget_remains_valid() {
+    for flag in ["--budget-tokens", "--budget-issues"] {
+        let fixture = ResilienceFixture::new();
+
+        let output =
+            fixture.run_autonomous(&["start", "--repo", "owner/repo", flag, "0", "--dry-run"]);
+
+        assert!(output.status.success(), "{flag}");
+        assert!(stdout(&output).contains("dry-run"), "{flag}");
+        assert!(
+            !fixture.canonical_state_path().exists(),
+            "{flag} must not create state"
+        );
+        assert!(
+            !fixture.operator_lifecycle_path().exists(),
+            "{flag} must not write operator state"
+        );
+    }
 }
 
 #[test]
