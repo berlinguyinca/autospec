@@ -80,7 +80,7 @@ pub(super) fn validate_sources(
 }
 
 pub(super) fn validate_generated(
-    generated: &Tier4GeneratedCandidates,
+    generated: &mut Tier4GeneratedCandidates,
     facts: &BTreeSet<(String, String)>,
 ) -> Result<(), Tier4Failure> {
     if generated.schema_version != TIER4_SCHEMA
@@ -98,9 +98,12 @@ pub(super) fn validate_generated(
     let mut instances = BTreeSet::new();
     for candidate in &generated.candidates {
         let reference = (candidate.source_id.clone(), candidate.fact_key.clone());
-        if !valid_candidate(candidate)
-            || !facts.contains(&reference)
-            || !instances.insert(reference)
+        let instance = (
+            candidate.stable_key.clone(),
+            candidate.source_id.clone(),
+            candidate.fact_key.clone(),
+        );
+        if !valid_candidate(candidate) || !facts.contains(&reference) || !instances.insert(instance)
         {
             return Err(failure(
                 Tier4Stage::Generator,
@@ -109,6 +112,12 @@ pub(super) fn validate_generated(
             ));
         }
     }
+    generated.candidates.sort_by(|left, right| {
+        left.stable_key
+            .cmp(&right.stable_key)
+            .then_with(|| left.source_id.cmp(&right.source_id))
+            .then_with(|| left.fact_key.cmp(&right.fact_key))
+    });
     Ok(())
 }
 
@@ -156,7 +165,7 @@ pub(super) fn deduplicate(
 }
 
 pub(super) fn validate_verifier(
-    verifier: &Tier4VerifierVerdicts,
+    verifier: &mut Tier4VerifierVerdicts,
     expected: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, Tier4Verification>, Tier4Failure> {
     if verifier.schema_version != TIER4_SCHEMA
@@ -197,6 +206,9 @@ pub(super) fn validate_verifier(
             "verdict coverage is incomplete",
         ))
     } else {
+        verifier
+            .verdicts
+            .sort_by(|left, right| left.stable_key().cmp(right.stable_key()));
         Ok(coverage)
     }
 }

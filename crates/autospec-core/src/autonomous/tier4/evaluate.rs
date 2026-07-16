@@ -47,8 +47,8 @@ fn evaluate_enabled(
         .map_err(|error| error.with_partial(policy_partial.clone()))?;
     let sources_partial =
         Tier4PartialEvidence::after_sources(source_policy.clone(), sources.clone(), zero_funnel());
-    let generated = complete_stage(generated, Tier4Stage::Generator, sources_partial.clone())?;
-    validate_generated(&generated, &facts)
+    let mut generated = complete_stage(generated, Tier4Stage::Generator, sources_partial.clone())?;
+    validate_generated(&mut generated, &facts)
         .map_err(|error| error.with_partial(sources_partial.clone()))?;
     let observed = checked_count(generated.candidates.len())
         .map_err(|error| error.with_partial(sources_partial.clone()))?;
@@ -71,13 +71,13 @@ fn evaluate_enabled(
         funnel(observed, deduplicated, 0, 0, 0)
             .map_err(|error| error.with_partial(generated_partial.clone()))?,
     );
-    let verifier = complete_stage(verifier, Tier4Stage::Verifier, dedup_partial.clone())?;
+    let mut verifier = complete_stage(verifier, Tier4Stage::Verifier, dedup_partial.clone())?;
     let expected = deduplication
         .groups
         .iter()
         .map(|group| group.stable_key.clone())
         .collect::<BTreeSet<_>>();
-    let verdicts = validate_verifier(&verifier, &expected)
+    let verdicts = validate_verifier(&mut verifier, &expected)
         .map_err(|error| error.with_partial(dedup_partial.clone()))?;
     let verified = checked_count(
         verdicts

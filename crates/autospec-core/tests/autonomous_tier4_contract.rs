@@ -52,6 +52,28 @@ fn complete() -> autospec_core::autonomous::tier4::Tier4Evaluation {
 fn complete_with_source(
     source: Tier4SourceEnvelope,
 ) -> autospec_core::autonomous::tier4::Tier4Evaluation {
+    complete_with_candidates_and_verdicts(
+        source,
+        vec![Tier4Candidate {
+            stable_key: "upgrade-1-2-3".to_string(),
+            source_id: "release-feed".to_string(),
+            fact_key: "release-1".to_string(),
+            title: "Evaluate version 1.2.3".to_string(),
+            rationale: "sealed source fact reports a release".to_string(),
+        }],
+        vec![Tier4Verification::Accepted {
+            stable_key: "upgrade-1-2-3".to_string(),
+            roi_millis: 900,
+            reason: "benefit exceeds fixed threshold".to_string(),
+        }],
+    )
+}
+
+fn complete_with_candidates_and_verdicts(
+    source: Tier4SourceEnvelope,
+    candidates: Vec<Tier4Candidate>,
+    verdicts: Vec<Tier4Verification>,
+) -> autospec_core::autonomous::tier4::Tier4Evaluation {
     evaluate_tier4(Tier4Input::Enabled {
         source_policy: policy(),
         sources: vec![Tier4StageResult::Complete(source)],
@@ -59,23 +81,13 @@ fn complete_with_source(
             schema_version: TIER4_SCHEMA,
             generator_identity: "typed-generator-v1".to_string(),
             generator_protocol_version: "v1".to_string(),
-            candidates: vec![Tier4Candidate {
-                stable_key: "upgrade-1-2-3".to_string(),
-                source_id: "release-feed".to_string(),
-                fact_key: "release-1".to_string(),
-                title: "Evaluate version 1.2.3".to_string(),
-                rationale: "sealed source fact reports a release".to_string(),
-            }],
+            candidates,
         }),
         verifier: Tier4StageResult::Complete(Tier4VerifierVerdicts {
             schema_version: TIER4_SCHEMA,
             verifier_identity: "typed-verifier-v1".to_string(),
             verifier_protocol_version: "v1".to_string(),
-            verdicts: vec![Tier4Verification::Accepted {
-                stable_key: "upgrade-1-2-3".to_string(),
-                roi_millis: 900,
-                reason: "benefit exceeds fixed threshold".to_string(),
-            }],
+            verdicts,
         }),
         roi_policy: Tier4RoiPolicy::v1(),
     })
@@ -180,6 +192,46 @@ fn source_document_is_canonical_across_equivalent_fact_ordering() {
 
     assert_eq!(ordered_policy, reordered_policy);
     assert_eq!(ordered_sources, reordered_sources);
+}
+
+#[test]
+fn completed_observation_canonicalizes_generated_candidates_and_verdicts() {
+    let first = Tier4Candidate {
+        stable_key: "upgrade-1-2-3".to_string(),
+        source_id: "release-feed".to_string(),
+        fact_key: "release-1".to_string(),
+        title: "Evaluate version 1.2.3".to_string(),
+        rationale: "sealed source fact reports a release".to_string(),
+    };
+    let second = Tier4Candidate {
+        stable_key: "upgrade-1-2-4".to_string(),
+        source_id: "release-feed".to_string(),
+        fact_key: "release-2".to_string(),
+        title: "Evaluate version 1.2.4".to_string(),
+        rationale: "sealed source fact reports a release".to_string(),
+    };
+    let first_verdict = Tier4Verification::Accepted {
+        stable_key: first.stable_key.clone(),
+        roi_millis: 900,
+        reason: "benefit exceeds fixed threshold".to_string(),
+    };
+    let second_verdict = Tier4Verification::Accepted {
+        stable_key: second.stable_key.clone(),
+        roi_millis: 800,
+        reason: "benefit exceeds fixed threshold".to_string(),
+    };
+    let ordered = complete_with_candidates_and_verdicts(
+        source(),
+        vec![first.clone(), second.clone()],
+        vec![first_verdict.clone(), second_verdict.clone()],
+    );
+    let permuted = complete_with_candidates_and_verdicts(
+        source(),
+        vec![second, first],
+        vec![second_verdict, first_verdict],
+    );
+
+    assert_eq!(ordered, permuted, "public observations are canonical");
 }
 
 #[test]

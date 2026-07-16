@@ -281,6 +281,39 @@ fn candidates_must_reference_observed_facts_and_deduplicate_by_matching_semantic
 }
 
 #[test]
+fn candidate_reference_allows_distinct_keys_but_rejects_exact_duplicates() {
+    let shared_fact = source("alpha", &["a"]);
+    let shared = evaluate_tier4(enabled(
+        vec![shared_fact.clone()],
+        vec![
+            candidate("first", "alpha", "a"),
+            candidate("second", "alpha", "a"),
+        ],
+        vec![accepted("first", 900), accepted("second", 800)],
+    ))
+    .expect("distinct stable keys may use the same observed fact");
+    assert_eq!(
+        shared
+            .observation()
+            .expect("completed observation")
+            .funnel()
+            .observed,
+        2
+    );
+
+    let exact = candidate("first", "alpha", "a");
+    assert_failure(
+        evaluate_tier4(enabled(
+            vec![shared_fact],
+            vec![exact.clone(), exact],
+            vec![accepted("first", 900)],
+        )),
+        Tier4Stage::Generator,
+        Tier4FailureCode::InvalidCandidate,
+    );
+}
+
+#[test]
 fn verifier_coverage_and_completed_empty_paths_are_closed() {
     assert_failure(
         evaluate_tier4(enabled(
