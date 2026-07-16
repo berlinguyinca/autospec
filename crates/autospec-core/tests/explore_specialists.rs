@@ -1,7 +1,10 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use autospec_core::explore::specialists::{scan_specialists, ScanOptions};
+use autospec_core::explore::specialists::{
+    collect_strict_domains, scan_specialists, ScanOptions, StrictCollectorErrorCode,
+    StrictCollectorOptions,
+};
 
 #[test]
 fn trading_manifest_records_file_line_evidence_and_ranked_specialist() {
@@ -114,6 +117,168 @@ fn cache_with_optional_generated_at_is_reused() {
     let roster = scan_specialists(&ScanOptions::new(&repo)).unwrap();
 
     assert_eq!(roster.suggested_specialists[0].slug, "cached");
+}
+
+#[test]
+fn strict_collector_is_deterministic_and_ranks_domains_and_evidence() {
+    let repo = temp_repo("trading-strict-order");
+    fs::write(
+        repo.join("README.md"),
+        "ccxt stripe\nccxt oauth\nbacktrader kubernetes\n",
+    )
+    .unwrap();
+    fs::write(repo.join("requirements.txt"), "ccxt>=4\nstripe>=1\n").unwrap();
+
+    let first = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap();
+    let second = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.schema_version, 1);
+    assert_eq!(first.collector_version, "strict-local-v1");
+    assert_eq!(
+        first.canonical_repo_scope,
+        fs::canonicalize(&repo)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/")
+    );
+    assert_eq!(
+        first
+            .domains
+            .iter()
+            .map(|domain| domain.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["trading", "payments", "infra", "security"]
+    );
+    assert_eq!(
+        first.domains[0]
+            .evidence
+            .iter()
+            .map(|evidence| (evidence.file.as_str(), evidence.line))
+            .collect::<Vec<_>>(),
+        vec![
+            (".", 1),
+            ("README.md", 1),
+            ("README.md", 2),
+            ("README.md", 3),
+            ("requirements.txt", 1),
+        ]
+    );
+}
+
+#[test]
+fn strict_collector_accepts_a_valid_zero_domain_snapshot() {
+    let repo = temp_repo("strict-empty");
+    fs::write(
+        repo.join("README.md"),
+        "# Generic widget\nPlain application.\n",
+    )
+    .unwrap();
+
+    let evidence = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap();
+
+    assert!(evidence.domains.is_empty(), "{evidence:?}");
+}
+
+#[test]
+fn strict_collector_rejects_invalid_utf8_in_a_selected_manifest() {
+    let repo = temp_repo("strict-invalid-utf8");
+    fs::write(repo.join("requirements.txt"), [0xff, b'\n']).unwrap();
+
+    let error = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap_err();
+
+    assert_eq!(error.code, StrictCollectorErrorCode::InvalidUtf8);
+    assert!(error.detail.contains("requirements.txt"));
+}
+
+#[test]
+fn strict_collector_rejects_a_selected_input_that_is_not_a_regular_file() {
+    let repo = temp_repo("strict-unreadable");
+    fs::create_dir(repo.join("Cargo.toml")).unwrap();
+
+    let error = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap_err();
+
+    assert_eq!(error.code, StrictCollectorErrorCode::ReadFile);
+    assert!(error.detail.contains("Cargo.toml"));
+}
+
+#[test]
+fn strict_collector_rejects_a_nondefault_depth_policy() {
+    let repo = temp_repo("strict-depth");
+    let mut options = StrictCollectorOptions::new(&repo);
+    options.max_depth = 2;
+
+    let error = collect_strict_domains(&options).unwrap_err();
+
+    assert_eq!(error.code, StrictCollectorErrorCode::InvalidCollectorSchema);
+    assert!(error.detail.contains("max_depth"));
+}
+
+#[cfg(unix)]
+#[test]
+fn strict_collector_rejects_a_root_escaping_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let repo = temp_repo("strict-symlink");
+    let outside = temp_repo("strict-outside");
+    fs::write(outside.join("requirements.txt"), "ccxt>=4\n").unwrap();
+    symlink(
+        outside.join("requirements.txt"),
+        repo.join("requirements.txt"),
+    )
+    .unwrap();
+
+    let error = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap_err();
+
+    assert_eq!(error.code, StrictCollectorErrorCode::PathEscapesRoot);
+    assert!(error.detail.contains("requirements.txt"));
+}
+
+#[test]
+fn strict_collector_caps_evidence_at_eight_rows_per_domain() {
+    let repo = temp_repo("strict-evidence-cap");
+    let document = (1..=12)
+        .map(|line| format!("ccxt signal {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(repo.join("requirements.txt"), document).unwrap();
+
+    let evidence = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap();
+    let trading = evidence
+        .domains
+        .iter()
+        .find(|domain| domain.name == "trading")
+        .expect("trading domain");
+
+    assert_eq!(trading.score, 8);
+    assert_eq!(trading.evidence.len(), 8);
+    assert_eq!(trading.evidence[7].line, 8);
+    assert!(trading
+        .evidence
+        .iter()
+        .all(|item| item.r#match.chars().count() <= 120));
+}
+
+#[test]
+fn strict_collector_ignores_legacy_cache_without_writing_or_environment_authority() {
+    let repo = temp_repo("strict-no-authority");
+    fs::create_dir_all(repo.join(".autospec")).unwrap();
+    let cache = repo.join(".autospec/explore-specialists.json");
+    let cached = r#"{"schema_version":1,"domains":[{"name":"trading","score":1,"evidence":[{"file":"cache","line":1,"match":"ccxt"}]}],"suggested_specialists":[]}"#;
+    fs::write(&cache, cached).unwrap();
+    fs::write(repo.join("README.md"), "Plain generic application.\n").unwrap();
+
+    let evidence = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap();
+    let strict_source = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/explore/specialists/strict.rs"),
+    )
+    .unwrap();
+
+    assert!(evidence.domains.is_empty(), "{evidence:?}");
+    assert_eq!(fs::read_to_string(cache).unwrap(), cached);
+    assert!(!strict_source.contains("std::env"));
+    assert!(!strict_source.contains("AUTOSPEC_SPECIALIST_LLM_STUB_OUTPUT"));
+    assert!(!strict_source.contains("fs::write"));
 }
 
 fn temp_repo(name: &str) -> std::path::PathBuf {
