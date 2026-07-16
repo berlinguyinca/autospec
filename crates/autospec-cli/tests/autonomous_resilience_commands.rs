@@ -36,7 +36,7 @@ fn resilience_decide_prefers_canonical_layout_over_legacy_fallbacks() {
 }
 
 #[test]
-fn resilience_decide_reads_underscore_and_hyphen_compatibility_layouts() {
+fn resilience_decide_reads_underscore_and_hyphen_compatibility_layouts_without_migration() {
     let underscore = ResilienceFixture::new();
     underscore.write_state(
         "owner_repo",
@@ -47,17 +47,7 @@ fn resilience_decide_reads_underscore_and_hyphen_compatibility_layouts() {
 
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(stdout(&output), "{\"decision\":\"held\"}\n");
-    assert!(underscore.canonical_state_path().exists());
-    let canonical = fs::read_to_string(underscore.canonical_state_path()).expect("read migration");
-    for field in [
-        "\"slug\":\"owner__repo\"",
-        "\"host\":\"autospec-test-host\"",
-        "\"session\":\"test\"",
-        "\"lock_session\":null",
-        "\"lock_acquired_at\":null",
-    ] {
-        assert!(canonical.contains(field), "missing migrated field: {field}");
-    }
+    assert!(!underscore.canonical_state_path().exists());
 
     let hyphen = ResilienceFixture::new();
     hyphen.write_state(
@@ -69,7 +59,7 @@ fn resilience_decide_reads_underscore_and_hyphen_compatibility_layouts() {
 
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(stdout(&output), "{\"decision\":\"held\"}\n");
-    assert!(hyphen.canonical_state_path().exists());
+    assert!(!hyphen.canonical_state_path().exists());
 }
 
 #[test]

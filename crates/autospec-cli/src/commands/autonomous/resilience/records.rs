@@ -57,6 +57,8 @@ pub(super) struct ResilienceState {
     pub(super) lock_host: Option<String>,
     pub(super) lock_session: Option<String>,
     pub(super) lock_acquired_at: Option<u64>,
+    pub(super) lease_token: Option<String>,
+    pub(super) lease_generation: Option<u64>,
 }
 
 pub(super) struct StatusState {
@@ -95,6 +97,14 @@ impl ResilienceState {
         let lock_host = string_field(&mut fields, "lock_host")?;
         let lock_session = string_field(&mut fields, "lock_session")?;
         let lock_acquired_at = number_field(&mut fields, "lock_acquired_at")?;
+        let lease_token = string_field(&mut fields, "lease_token")?;
+        let lease_generation = number_field(&mut fields, "lease_generation")?;
+        match (&lease_token, lease_generation) {
+            (Some(token), Some(generation)) if !token.is_empty() && generation > 0 => {}
+            (None, Some(generation)) if generation > 0 && status == "released" => {}
+            (None, None) => {}
+            _ => return Err(()),
+        }
         Ok(Self {
             repo,
             status,
@@ -105,12 +115,14 @@ impl ResilienceState {
             lock_host,
             lock_session,
             lock_acquired_at,
+            lease_token,
+            lease_generation,
         })
     }
 
     pub(super) fn to_json(&self, slug: &str) -> String {
         format!(
-            "{{\"repo\":\"{}\",\"slug\":\"{}\",\"status\":\"{}\",\"host\":{},\"session\":{},\"heartbeat_at\":{},\"lock_pid\":{},\"lock_host\":{},\"lock_session\":{},\"lock_acquired_at\":{}}}\n",
+            "{{\"repo\":\"{}\",\"slug\":\"{}\",\"status\":\"{}\",\"host\":{},\"session\":{},\"heartbeat_at\":{},\"lock_pid\":{},\"lock_host\":{},\"lock_session\":{},\"lock_acquired_at\":{},\"lease_token\":{},\"lease_generation\":{}}}\n",
             super::super::json_escape(&self.repo),
             super::super::json_escape(slug),
             super::super::json_escape(&self.status),
@@ -121,6 +133,8 @@ impl ResilienceState {
             optional_json_string(self.lock_host.as_deref()),
             optional_json_string(self.lock_session.as_deref()),
             optional_number(self.lock_acquired_at),
+            optional_json_string(self.lease_token.as_deref()),
+            optional_number(self.lease_generation),
         )
     }
 }

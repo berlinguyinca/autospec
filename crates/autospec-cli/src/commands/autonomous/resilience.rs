@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::CommandFailure;
@@ -17,6 +18,7 @@ use records::{parse_failures, ResilienceReject, ResilienceState, Spend};
 
 const DEFAULT_LIFETIME_TOKENS: u64 = 10_000_000;
 const DEFAULT_LIFETIME_ISSUES: u64 = 500;
+static LEASE_TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct ResilienceStore {
     scope: RepositoryScope,
@@ -41,9 +43,80 @@ pub(super) enum LifecycleAdmissionError {
     Diagnostic(String),
 }
 
+#[allow(dead_code)] // Task 3 wires these adapter-private capabilities into lifecycle commands.
+struct ConductorLease {
+    token: String,
+    generation: u64,
+}
+
+#[allow(dead_code)] // Transaction-only outcomes are consumed by Task 3's lifecycle adapter.
 enum StoreError {
     Reject(ResilienceReject),
     Diagnostic(String),
+    Held,
+    TokenMismatch,
+    Policy(ResilienceAdmission),
+}
+
+#[allow(dead_code)] // Acquisition/adoption/release are intentionally not public command actions.
+struct LeaseTransaction {
+    _file: fs::File,
+}
+
+#[allow(dead_code)] // Task 3 calls this only through the store transaction primitives.
+impl LeaseTransaction {
+    #[cfg(unix)]
+    fn try_open(path: &Path) -> Result<Self, StoreError> {
+        use std::os::fd::AsRawFd;
+
+        let parent = path.parent().expect("lease lock path has a parent");
+        fs::create_dir_all(parent).map_err(|error| {
+            StoreError::Diagnostic(format!(
+                "cannot create resilience lease directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|error| {
+                StoreError::Diagnostic(format!(
+                    "cannot open resilience lease lock {}: {error}",
+                    path.display()
+                ))
+            })?;
+
+        unsafe extern "C" {
+            fn flock(fd: i32, operation: i32) -> i32;
+        }
+        const LOCK_EX: i32 = 2;
+        const LOCK_NB: i32 = 4;
+        // SAFETY: `file` remains open for the transaction lifetime and `LOCK_EX | LOCK_NB`
+        // is the documented POSIX non-blocking exclusive advisory-lock operation.
+        if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
+            Ok(Self { _file: file })
+        } else {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::WouldBlock {
+                Err(StoreError::Held)
+            } else {
+                Err(StoreError::Diagnostic(format!(
+                    "cannot lock resilience lease {}: {error}",
+                    path.display()
+                )))
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn try_open(_path: &Path) -> Result<Self, StoreError> {
+        Err(StoreError::Diagnostic(
+            "resilience lease transactions require Unix flock support".to_string(),
+        ))
+    }
 }
 
 impl ResilienceStore {
@@ -155,14 +228,14 @@ impl ResilienceStore {
     }
 
     fn write_state(&self, value: &ResilienceState) -> Result<(), StoreError> {
-        let [canonical, ..] = self.slugs();
-        let path = self.state_root.join(&canonical).join("state.json");
+        let path = self.canonical_state_path();
         fs::create_dir_all(path.parent().expect("state path has a parent")).map_err(|error| {
             StoreError::Diagnostic(format!(
                 "cannot create resilience state directory {}: {error}",
                 path.parent().expect("state path has a parent").display()
             ))
         })?;
+        let [canonical, ..] = self.slugs();
         super::atomic_write(&path, &value.to_json(&canonical)).map_err(StoreError::Diagnostic)
     }
 
@@ -172,6 +245,97 @@ impl ResilienceStore {
         usage_cap: u64,
         issue_cap: u64,
     ) -> Result<ResilienceAdmission, StoreError> {
+        self.read_admission(issue, usage_cap, issue_cap)
+            .map(|(admission, _)| admission)
+    }
+
+    #[allow(dead_code)] // Task 3 owns command lifecycle integration.
+    fn acquire(
+        &self,
+        issue: Option<u64>,
+        usage_cap: u64,
+        issue_cap: u64,
+    ) -> Result<(ResilienceAdmission, ConductorLease), StoreError> {
+        let _transaction = LeaseTransaction::try_open(&self.lock_path())?;
+        let (admission, stored_state) = self.read_admission(issue, usage_cap, issue_cap)?;
+        if matches!(admission.lease, Some(ConductorLeaseDecision::Held)) {
+            return Err(StoreError::Held);
+        }
+        if !self.admission_can_claim(&admission) {
+            return Err(StoreError::Policy(admission));
+        }
+
+        let generation = stored_state
+            .as_ref()
+            .and_then(|(state, _)| state.lease_generation)
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| {
+                StoreError::Diagnostic("cannot advance resilience lease generation".to_string())
+            })?;
+        let lease = ConductorLease {
+            token: lease_token(),
+            generation,
+        };
+        self.write_state(&self.claimed_state(&lease))?;
+        Ok((admission, lease))
+    }
+
+    #[allow(dead_code)] // Task 3 owns command lifecycle integration.
+    fn adopt(&self, token: &str) -> Result<ConductorLease, StoreError> {
+        let _transaction = LeaseTransaction::try_open(&self.lock_path())?;
+        let Some((mut state, _)) = self.read_state()? else {
+            return Err(StoreError::TokenMismatch);
+        };
+        let Some(generation) = state.lease_generation else {
+            return Err(StoreError::TokenMismatch);
+        };
+        if state.status != "claimed" || state.lease_token.as_deref() != Some(token) {
+            return Err(StoreError::TokenMismatch);
+        }
+
+        let now = now_secs();
+        state.status = "running".to_string();
+        state.host = Some(self.host.clone());
+        state.heartbeat_at = Some(now);
+        state.lock_pid = Some(std::process::id());
+        state.lock_host = Some(self.host.clone());
+        state.lock_session = None;
+        state.lock_acquired_at = Some(now);
+        self.write_state(&state)?;
+        Ok(ConductorLease {
+            token: token.to_string(),
+            generation,
+        })
+    }
+
+    #[allow(dead_code)] // Task 3 owns command lifecycle integration.
+    fn release(&self, lease: &ConductorLease) -> Result<(), StoreError> {
+        let _transaction = LeaseTransaction::try_open(&self.lock_path())?;
+        let Some((mut state, _)) = self.read_state()? else {
+            return Err(StoreError::TokenMismatch);
+        };
+        if !state_matches_lease(&state, lease) {
+            return Err(StoreError::TokenMismatch);
+        }
+
+        state.status = "released".to_string();
+        state.heartbeat_at = Some(now_secs());
+        state.lock_pid = None;
+        state.lock_host = None;
+        state.lock_session = None;
+        state.lock_acquired_at = None;
+        state.lease_token = None;
+        state.lease_generation = Some(lease.generation);
+        self.write_state(&state)
+    }
+
+    fn read_admission(
+        &self,
+        issue: Option<u64>,
+        usage_cap: u64,
+        issue_cap: u64,
+    ) -> Result<(ResilienceAdmission, Option<(ResilienceState, bool)>), StoreError> {
         let stored_state = self.read_state()?;
         let failure_count = self.read_failures(issue)?;
         let spend = self.read_spend()?;
@@ -181,38 +345,57 @@ impl ResilienceStore {
             spend.issues,
             issue_cap,
         ));
-        if let Some((state, true)) = stored_state.as_ref() {
-            self.write_state(state)?;
-        }
-        let lease = stored_state.and_then(|stored| {
-            let state = stored.0;
-            let lock_pid = state.lock_pid?;
-            let known_same_host = state
-                .lock_host
-                .as_deref()
-                .is_some_and(|host| same_known_host(host, &self.host));
-            let dead_same_host_pid = known_same_host && pid_is_dead(lock_pid);
-            let input = match state.heartbeat_at {
-                Some(heartbeat_at) => {
-                    let age = now_secs().saturating_sub(heartbeat_at);
-                    if state.status == "claimed" {
-                        ConductorLeaseInput::claimed(age, dead_same_host_pid)
-                    } else {
-                        ConductorLeaseInput::running(age, dead_same_host_pid)
-                    }
-                }
-                None => ConductorLeaseInput::missing_heartbeat(
-                    state.status == "claimed",
-                    dead_same_host_pid,
+        let lease = stored_state
+            .as_ref()
+            .and_then(|(state, _)| conductor_lease_decision(state, &self.host));
+        Ok((
+            ResilienceAdmission {
+                failure_count,
+                capacity,
+                lease,
+            },
+            stored_state,
+        ))
+    }
+
+    fn admission_can_claim(&self, admission: &ResilienceAdmission) -> bool {
+        matches!(admission.capacity, CapacityDecision::WithinCap)
+            && !matches!(
+                decide_lifecycle(
+                    &LifecycleInput::from_scope(self.scope.clone())
+                        .with_failure_count(admission.failure_count),
                 ),
-            };
-            Some(decide_conductor_lease(input))
-        });
-        Ok(ResilienceAdmission {
-            failure_count,
-            capacity,
-            lease,
-        })
+                LifecycleDecision::Reject(LifecycleReject::FailureCap)
+            )
+    }
+
+    #[allow(dead_code)] // Called only by the transaction primitives above.
+    fn claimed_state(&self, lease: &ConductorLease) -> ResilienceState {
+        let now = now_secs();
+        ResilienceState {
+            repo: self.scope.as_str(),
+            status: "claimed".to_string(),
+            host: Some(self.host.clone()),
+            session: None,
+            heartbeat_at: Some(now),
+            lock_pid: Some(std::process::id()),
+            lock_host: Some(self.host.clone()),
+            lock_session: None,
+            lock_acquired_at: Some(now),
+            lease_token: Some(lease.token.clone()),
+            lease_generation: Some(lease.generation),
+        }
+    }
+
+    fn canonical_state_path(&self) -> PathBuf {
+        let [canonical, ..] = self.slugs();
+        self.state_root.join(canonical).join("state.json")
+    }
+
+    #[allow(dead_code)] // Called only by the transaction primitives above.
+    fn lock_path(&self) -> PathBuf {
+        self.canonical_state_path()
+            .with_file_name("conductor.lease.lock")
     }
 
     fn slugs(&self) -> [String; 3] {
@@ -232,6 +415,44 @@ impl ResilienceStore {
             root.join(hyphen).join(leaf),
         ]
     }
+}
+
+fn conductor_lease_decision(
+    state: &ResilienceState,
+    current_host: &str,
+) -> Option<ConductorLeaseDecision> {
+    let lock_pid = state.lock_pid?;
+    let known_same_host = state
+        .lock_host
+        .as_deref()
+        .is_some_and(|host| same_known_host(host, current_host));
+    let dead_same_host_pid = known_same_host && pid_is_dead(lock_pid);
+    let input = match state.heartbeat_at {
+        Some(heartbeat_at) => {
+            let age = now_secs().saturating_sub(heartbeat_at);
+            if state.status == "claimed" {
+                ConductorLeaseInput::claimed(age, dead_same_host_pid)
+            } else {
+                ConductorLeaseInput::running(age, dead_same_host_pid)
+            }
+        }
+        None => {
+            ConductorLeaseInput::missing_heartbeat(state.status == "claimed", dead_same_host_pid)
+        }
+    };
+    Some(decide_conductor_lease(input))
+}
+
+#[allow(dead_code)] // Called only by transaction release.
+fn state_matches_lease(state: &ResilienceState, lease: &ConductorLease) -> bool {
+    state.lease_token.as_deref() == Some(lease.token.as_str())
+        && state.lease_generation == Some(lease.generation)
+}
+
+#[allow(dead_code)] // Called only by transaction acquisition.
+fn lease_token() -> String {
+    let sequence = LEASE_TOKEN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}-{sequence}", std::process::id(), now_nanos())
 }
 
 pub(super) fn admit_lifecycle(
@@ -272,6 +493,17 @@ pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
         Ok(admission) => admission,
         Err(StoreError::Reject(reject)) => return emit(Decision::Reject(reject.reason())),
         Err(StoreError::Diagnostic(message)) => return Err(CommandFailure::diagnostic(message)),
+        Err(StoreError::Held) => return emit(Decision::Held),
+        Err(StoreError::TokenMismatch) => {
+            return Err(CommandFailure::diagnostic(
+                "resilience token mismatch is not valid for read-only admission".to_string(),
+            ))
+        }
+        Err(StoreError::Policy(_)) => {
+            return Err(CommandFailure::diagnostic(
+                "resilience claim policy is not valid for read-only admission".to_string(),
+            ))
+        }
     };
     if let Some(ConductorLeaseDecision::Held) = admission.lease {
         return emit(Decision::Held);
@@ -471,6 +703,15 @@ fn store_error_to_lifecycle_error(error: StoreError) -> LifecycleAdmissionError 
     match error {
         StoreError::Reject(reject) => LifecycleAdmissionError::Reject(reject.reason()),
         StoreError::Diagnostic(message) => LifecycleAdmissionError::Diagnostic(message),
+        StoreError::Held => {
+            LifecycleAdmissionError::Diagnostic("resilience lease transaction is held".to_string())
+        }
+        StoreError::TokenMismatch => LifecycleAdmissionError::Diagnostic(
+            "resilience token mismatch is not valid for read-only admission".to_string(),
+        ),
+        StoreError::Policy(_) => LifecycleAdmissionError::Diagnostic(
+            "resilience claim policy is not valid for read-only admission".to_string(),
+        ),
     }
 }
 
@@ -498,6 +739,13 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+fn now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
 #[cfg(unix)]
 fn pid_is_dead(pid: u32) -> bool {
     if pid == 0 || pid > i32::MAX as u32 {
@@ -514,4 +762,187 @@ fn pid_is_dead(pid: u32) -> bool {
 #[cfg(not(unix))]
 fn pid_is_dead(_pid: u32) -> bool {
     false
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    const LEASE_LOCK_TEST_ROOT: &str = "AUTOSPEC_LEASE_LOCK_TEST_ROOT";
+    static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn competing_conductors_hold_one_owner_before_operator_write() {
+        let root = test_root("contention");
+        let lock_root = root.join("lock-holder");
+        let ready = lock_root.join("ready");
+        let release = lock_root.join("release");
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "commands::autonomous::resilience::tests::lease_lock_holder_child",
+                "--nocapture",
+            ])
+            .env(LEASE_LOCK_TEST_ROOT, &lock_root)
+            .spawn()
+            .expect("start lease lock holder");
+
+        wait_for(&ready, "lease lock holder readiness");
+        let contended = test_store(&lock_root).acquire(None, 1, 1);
+        assert!(matches!(contended, Err(StoreError::Held)));
+        assert!(!test_store(&lock_root).canonical_state_path().exists());
+        fs::write(&release, "release\n").expect("release lock holder");
+        assert!(child.wait().expect("wait for lock holder").success());
+
+        let first = test_store(&root);
+        let second = test_store(&root);
+        let (admission, lease) = match first.acquire(None, 1, 1) {
+            Ok(value) => value,
+            Err(_) => panic!("first conductor must acquire the lease"),
+        };
+        assert!(admission.lease.is_none());
+        assert!(matches!(second.acquire(None, 1, 1), Err(StoreError::Held)));
+
+        let state = match first.read_state() {
+            Ok(Some((state, false))) => state,
+            _ => panic!("claimed state must be canonical"),
+        };
+        assert_eq!(state.status, "claimed");
+        assert_eq!(state.lease_token.as_deref(), Some(lease.token.as_str()));
+        assert_eq!(state.lease_generation, Some(lease.generation));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_token_cannot_adopt_or_release_reclaimed_lease() {
+        let root = test_root("fencing");
+        let first = test_store(&root);
+        let second = test_store(&root);
+        let (_, stale_lease) = match first.acquire(None, 1, 1) {
+            Ok(value) => value,
+            Err(_) => panic!("first conductor must acquire the lease"),
+        };
+        let mut stale_state = match first.read_state() {
+            Ok(Some((state, false))) => state,
+            _ => panic!("first acquisition must write canonical state"),
+        };
+        stale_state.heartbeat_at = Some(now_secs().saturating_sub(300));
+        match first.write_state(&stale_state) {
+            Ok(()) => {}
+            Err(_) => panic!("make first lease reclaimable"),
+        }
+
+        let (_, replacement) = match second.acquire(None, 1, 1) {
+            Ok(value) => value,
+            Err(_) => panic!("second conductor must reclaim the stale lease"),
+        };
+        assert_ne!(replacement.token, stale_lease.token);
+        assert_eq!(replacement.generation, stale_lease.generation + 1);
+        let replacement_state =
+            fs::read_to_string(second.canonical_state_path()).expect("read replacement state");
+
+        assert!(matches!(
+            first.adopt(&stale_lease.token),
+            Err(StoreError::TokenMismatch)
+        ));
+        assert_eq!(
+            fs::read_to_string(second.canonical_state_path())
+                .expect("read state after stale adopt"),
+            replacement_state
+        );
+        assert!(matches!(
+            first.release(&stale_lease),
+            Err(StoreError::TokenMismatch)
+        ));
+        assert_eq!(
+            fs::read_to_string(second.canonical_state_path())
+                .expect("read state after stale release"),
+            replacement_state
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn acquisition_does_not_claim_when_core_policy_parks_or_rejects() {
+        let capacity_root = test_root("capacity");
+        let capacity = test_store(&capacity_root);
+        fs::create_dir_all(capacity.spend_root.join("owner__repo")).expect("create spend root");
+        fs::write(
+            capacity.spend_root.join("owner__repo/spend.json"),
+            "{\"schema\":1,\"tokens\":1,\"issues\":0}",
+        )
+        .expect("write spend record");
+        assert!(matches!(
+            capacity.acquire(None, 1, 1),
+            Err(StoreError::Policy(admission)) if matches!(admission.capacity, CapacityDecision::UsageCap)
+        ));
+        assert!(!capacity.canonical_state_path().exists());
+
+        let failure_root = test_root("failure");
+        let failure = test_store(&failure_root);
+        let failure_path = failure.state_root.join("owner__repo/issues/42.json");
+        fs::create_dir_all(failure_path.parent().expect("failure parent"))
+            .expect("create failure root");
+        fs::write(
+            failure_path,
+            "{\"issue\":42,\"failures\":3,\"updated_at\":1}",
+        )
+        .expect("write failure record");
+        assert!(matches!(
+            failure.acquire(Some(42), 1, 1),
+            Err(StoreError::Policy(admission)) if admission.failure_count == 3
+        ));
+        assert!(!failure.canonical_state_path().exists());
+
+        let _ = fs::remove_dir_all(capacity_root);
+        let _ = fs::remove_dir_all(failure_root);
+    }
+
+    #[test]
+    fn lease_lock_holder_child() {
+        let Ok(root) = std::env::var(LEASE_LOCK_TEST_ROOT) else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let store = test_store(&root);
+        let _transaction = match LeaseTransaction::try_open(&store.lock_path()) {
+            Ok(transaction) => transaction,
+            Err(_) => panic!("child must acquire lease transaction lock"),
+        };
+        fs::write(root.join("ready"), "ready\n").expect("mark lock holder ready");
+        wait_for(&root.join("release"), "lease lock holder release");
+    }
+
+    fn test_store(root: &Path) -> ResilienceStore {
+        ResilienceStore {
+            scope: RepositoryScope::try_from("owner/repo").expect("repository scope"),
+            state_root: root.join("state").join("autonomous"),
+            spend_root: root.join("spend"),
+            host: "autospec-test-host".to_string(),
+        }
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "autospec-resilience-lease-{name}-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create test root");
+        root
+    }
+
+    fn wait_for(path: &Path, description: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(path.exists(), "timed out waiting for {description}");
+    }
 }
