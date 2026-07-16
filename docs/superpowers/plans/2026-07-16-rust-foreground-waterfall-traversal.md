@@ -52,8 +52,9 @@ Add focused tests proving:
 fn configured_tier4_rollover_replays_before_next_tier_one_scan() {
     let mut fixture = WaterfallPolicyFixture::completed_tier4();
     let result = fixture.record_empty_tier_one_with_config(fixture.config().clone());
-    assert_eq!(result, Ok(Tier1Progress::Pending));
-    assert_eq!(fixture.cursor(), NoWorkTier::Tier1);
+    assert_eq!(result, Ok(Tier1Progress::Advanced));
+    assert_eq!(fixture.cursor(), NoWorkTier::Tier1_5);
+    assert!(fixture.receipt(2, NoWorkTier::Tier1).is_some());
 }
 
 #[test]

@@ -176,24 +176,40 @@ fn configured_tier4_rollover_replays_before_next_tier_one_scan() {
         Tier1QueueEvidence::EmptyPage(&plan),
     );
 
-    assert_eq!(result, Ok(Tier1Progress::Pending));
+    assert_eq!(result, Ok(Tier1Progress::Advanced));
+    let store = match super::waterfall::WaterfallStore::acquire_with_policy(
+        root.path().join("waterfall"),
+        REPO,
+        &policy,
+    )
+    .expect("policy-aware store")
+    {
+        super::waterfall::StoreAcquisition::Acquired(store) => store,
+        super::waterfall::StoreAcquisition::Held => panic!("test store is not contended"),
+    };
+    let state = store.load_state().expect("state").expect("cursor");
     assert_eq!(
-        match super::waterfall::WaterfallStore::acquire_with_policy(
-            root.path().join("waterfall"),
+        (state.next_pass_id(), state.current_tier()),
+        (2, NoWorkTier::Tier1_5)
+    );
+    assert_eq!(state.completed_receipts().len(), 1);
+    assert_eq!(state.completed_receipts()[0].tier, NoWorkTier::Tier1);
+    assert!(store
+        .load_receipt(2, NoWorkTier::Tier1)
+        .expect("next-pass Tier 1 receipt")
+        .is_some());
+
+    let before_repeat = snapshot(&root);
+    assert_eq!(
+        record_tier_one_unfenced_for_test(
+            root.path(),
             REPO,
             &policy,
-        )
-        .expect("policy-aware store")
-        {
-            super::waterfall::StoreAcquisition::Acquired(store) => store,
-            super::waterfall::StoreAcquisition::Held => panic!("test store is not contended"),
-        }
-        .load_state()
-        .expect("state")
-        .expect("cursor")
-        .current_tier(),
-        NoWorkTier::Tier1
+            Tier1QueueEvidence::EmptyPage(&plan),
+        ),
+        Ok(Tier1Progress::Pending)
     );
+    assert_eq!(snapshot(&root), before_repeat);
 }
 
 #[test]

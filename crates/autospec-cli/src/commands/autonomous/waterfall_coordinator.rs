@@ -63,9 +63,6 @@ fn record_tier_one_fenced(
         .load_state()
         .map_err(store_error)?
         .unwrap_or(WaterfallState::new(repo, 1, NoWorkTier::Tier1)?);
-    if state.current_tier() == NoWorkTier::Tier1 && !state.completed_receipts().is_empty() {
-        return Ok(Tier1Progress::Pending);
-    }
     let existing = existing_tier1_receipt(&store, &state)?;
     if state.current_tier() != NoWorkTier::Tier1 {
         if existing.is_none() {
