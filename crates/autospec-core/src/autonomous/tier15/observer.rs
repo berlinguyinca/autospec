@@ -149,14 +149,14 @@ fn classify_candidate(
             Tier15RouteReason::TemplateRequired,
         );
     }
-    if has_structured_intent(issue) {
-        return route_template(
-            issue.number,
-            classification,
-            Tier15RouteReason::StructuredIntent,
-        );
-    }
     if !has_clear_intent(issue) {
+        if has_structured_intent(issue) {
+            return route_template(
+                issue.number,
+                classification,
+                Tier15RouteReason::StructuredIntent,
+            );
+        }
         return Tier15Decision::Held {
             number: issue.number,
             classification,

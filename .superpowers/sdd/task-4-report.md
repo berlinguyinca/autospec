@@ -14,7 +14,7 @@ CLI, process, GitHub, store, queue, claim, or foreground authority.
 
 - **RED:** `cargo test -p autospec-core --test autonomous_tier15` initially
   failed with unresolved `autospec_core::autonomous::tier15`.
-- **GREEN:** the focused Tier 1.5 observer target passes all nine tests.
+- **GREEN:** the focused Tier 1.5 observer target passes all twelve tests.
 - `cargo test -p autospec-core` passed.
 - `cargo fmt --check` passed.
 - `cargo clippy -p autospec-core --all-targets -- -D warnings` passed.
@@ -49,3 +49,18 @@ CLI, process, GitHub, store, queue, claim, or foreground authority.
 Task 4A deliberately does not enumerate GitHub, persist a receipt, modify the
 waterfall cursor, admit a queue candidate, or mutate an issue. Those concerns
 belong to the separately owned CLI adapter task.
+
+## Follow-up parity correction
+
+An independent review found that structured intent was checked before explicit
+body intent. This diverged from `scripts/promote-eligibility.sh`, which uses
+structured signals only when a `fix:`/`feat:`/repro body signal is absent.
+
+- **RED:** `cargo test -p autospec-core --test autonomous_tier15
+  observer_produces_explicit_fix_body -- --nocapture` failed all three added
+  cases: typed title, acceptance-checkbox, and `## Goal` heading each routed a
+  bounded `fix:` body to `StructuredIntent`.
+- **GREEN:** the same command passes after moving structured routing inside the
+  no-clear-intent branch.
+- The correction changes no authority, evidence shape, receipt, or adapter
+  behavior; it restores only the legacy decision ordering.

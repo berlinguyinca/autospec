@@ -217,6 +217,75 @@ fn observer_marks_unselected_candidates_as_budget_exhausted() {
 }
 
 #[test]
+fn observer_produces_explicit_fix_body_despite_typed_title() {
+    let observation = observe_tier15(Tier15Input::new(
+        vec![open(
+            1,
+            "fix: retain body-intent precedence",
+            "fix: preserve a bounded eligibility decision in `src/tier15.rs`.",
+            &[],
+        )],
+        Vec::new(),
+        1,
+    ))
+    .expect("complete evidence produces an observation");
+
+    assert_eq!(
+        observation.decisions(),
+        &[Tier15Decision::Produced {
+            number: 1,
+            classification: Tier15Classification::Unlabeled,
+        }]
+    );
+}
+
+#[test]
+fn observer_produces_explicit_fix_body_despite_checkbox_structure() {
+    let observation = observe_tier15(Tier15Input::new(
+        vec![open(
+            1,
+            "Retain body-intent precedence",
+            "fix: preserve a bounded eligibility decision in `src/tier15.rs`.\n\n- [ ] Keep the outcome stable.",
+            &[],
+        )],
+        Vec::new(),
+        1,
+    ))
+    .expect("complete evidence produces an observation");
+
+    assert_eq!(
+        observation.decisions(),
+        &[Tier15Decision::Produced {
+            number: 1,
+            classification: Tier15Classification::Unlabeled,
+        }]
+    );
+}
+
+#[test]
+fn observer_produces_explicit_fix_body_despite_goal_heading() {
+    let observation = observe_tier15(Tier15Input::new(
+        vec![open(
+            1,
+            "Retain body-intent precedence",
+            "fix: preserve a bounded eligibility decision in `src/tier15.rs`.\n\n## Goal\n\nKeep the outcome stable.",
+            &[],
+        )],
+        Vec::new(),
+        1,
+    ))
+    .expect("complete evidence produces an observation");
+
+    assert_eq!(
+        observation.decisions(),
+        &[Tier15Decision::Produced {
+            number: 1,
+            classification: Tier15Classification::Unlabeled,
+        }]
+    );
+}
+
+#[test]
 fn observer_rejects_an_invalid_closed_snapshot_and_distinguishes_satisfied_dependencies() {
     let invalid = observe_tier15(Tier15Input::new(
         Vec::new(),
