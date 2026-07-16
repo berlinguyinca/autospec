@@ -400,7 +400,7 @@ printf '[]\n'
 }
 
 #[test]
-fn silent_live_child_is_terminated_after_the_stall_window() {
+fn silent_live_child_is_reaped_before_process_group_liveness_check() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
     let child_pid = fixture.root.join("child-pid");
