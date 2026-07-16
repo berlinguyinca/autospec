@@ -37,8 +37,51 @@ require() {
     fi
 }
 
-require git
 require bash
+
+install_bootstrap_git() {
+    if command -v brew >/dev/null 2>&1; then
+        info "installing git via brew"
+        brew install git
+        return $?
+    fi
+
+    bootstrap_sudo=""
+    if [ "$(id -u 2>/dev/null || printf '1')" != "0" ]; then
+        if command -v sudo >/dev/null 2>&1; then
+            bootstrap_sudo="sudo"
+        else
+            err "git installation requires root privileges, but sudo is not available"
+            return 1
+        fi
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        info "installing git via apt-get"
+        $bootstrap_sudo apt-get install -y git
+    elif command -v dnf >/dev/null 2>&1; then
+        info "installing git via dnf"
+        $bootstrap_sudo dnf install -y git
+    elif command -v yum >/dev/null 2>&1; then
+        info "installing git via yum"
+        $bootstrap_sudo yum install -y git
+    elif command -v pacman >/dev/null 2>&1; then
+        info "installing git via pacman"
+        $bootstrap_sudo pacman -Sy --noconfirm git
+    elif command -v apk >/dev/null 2>&1; then
+        info "installing git via apk"
+        $bootstrap_sudo apk add --no-cache git
+    else
+        err "no supported package manager found for Git (brew/apt-get/dnf/yum/pacman/apk)"
+        return 1
+    fi
+}
+
+if ! command -v git >/dev/null 2>&1; then
+    info "git not found; attempting installation"
+    install_bootstrap_git || true
+fi
+require git
 
 mkdir -p "$AUTOSPEC_HOME"
 
