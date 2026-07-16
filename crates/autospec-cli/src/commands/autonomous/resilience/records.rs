@@ -99,13 +99,7 @@ impl ResilienceState {
         let lock_acquired_at = number_field(&mut fields, "lock_acquired_at")?;
         let lease_token = string_field(&mut fields, "lease_token")?;
         let lease_generation = number_field(&mut fields, "lease_generation")?;
-        match (&lease_token, lease_generation) {
-            (Some(token), Some(generation)) if !token.is_empty() && generation > 0 => {}
-            (None, Some(generation)) if generation > 0 && status == "released" => {}
-            (None, None) => {}
-            _ => return Err(()),
-        }
-        Ok(Self {
+        let state = Self {
             repo,
             status,
             host,
@@ -117,7 +111,9 @@ impl ResilienceState {
             lock_acquired_at,
             lease_token,
             lease_generation,
-        })
+        };
+        state.validate_lease_state()?;
+        Ok(state)
     }
 
     pub(super) fn to_json(&self, slug: &str) -> String {
@@ -136,6 +132,45 @@ impl ResilienceState {
             optional_json_string(self.lease_token.as_deref()),
             optional_number(self.lease_generation),
         )
+    }
+
+    fn validate_lease_state(&self) -> Result<(), ()> {
+        match (self.lease_token.as_deref(), self.lease_generation) {
+            (Some(token), Some(generation))
+                if !token.is_empty()
+                    && generation > 0
+                    && matches!(self.status.as_str(), "claimed" | "running")
+                    && self
+                        .heartbeat_at
+                        .is_some_and(|heartbeat_at| heartbeat_at > 0)
+                    && self.lock_pid.is_some()
+                    && self
+                        .lock_host
+                        .as_deref()
+                        .is_some_and(|host| !host.is_empty())
+                    && self
+                        .lock_session
+                        .as_deref()
+                        .is_none_or(|session| !session.is_empty())
+                    && self
+                        .lock_acquired_at
+                        .is_some_and(|acquired_at| acquired_at > 0) =>
+            {
+                Ok(())
+            }
+            (None, Some(generation))
+                if generation > 0
+                    && self.status == "released"
+                    && self.lock_pid.is_none()
+                    && self.lock_host.is_none()
+                    && self.lock_session.is_none()
+                    && self.lock_acquired_at.is_none() =>
+            {
+                Ok(())
+            }
+            (None, None) => Ok(()),
+            _ => Err(()),
+        }
     }
 }
 

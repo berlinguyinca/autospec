@@ -132,7 +132,9 @@ impl ResilienceStore {
             spend_root,
             host: env::var("AUTOSPEC_HOST")
                 .or_else(|_| env::var("HOSTNAME"))
-                .unwrap_or_default(),
+                .ok()
+                .filter(|host| !host.is_empty())
+                .unwrap_or_else(|| "unknown".to_string()),
         })
     }
     fn read_state(&self) -> Result<Option<(ResilienceState, bool)>, StoreError> {
@@ -864,6 +866,51 @@ mod tests {
                 .expect("read state after stale release"),
             replacement_state
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn matching_token_adopts_and_releases_its_lease() {
+        let root = test_root("adopt-release");
+        let store = test_store(&root);
+        let (_, claimed) = match store.acquire(None, 1, 1) {
+            Ok(value) => value,
+            Err(_) => panic!("acquire claimed lease"),
+        };
+
+        let adopted = match store.adopt(&claimed.token) {
+            Ok(lease) => lease,
+            Err(_) => panic!("adopt matching lease"),
+        };
+        assert_eq!(adopted.token, claimed.token);
+        assert_eq!(adopted.generation, claimed.generation);
+        let running = match store.read_state() {
+            Ok(Some((state, _))) => state,
+            _ => panic!("read adopted state"),
+        };
+        assert_eq!(running.status, "running");
+        assert_eq!(running.lease_token.as_deref(), Some(adopted.token.as_str()));
+        assert_eq!(running.lease_generation, Some(adopted.generation));
+        assert_eq!(running.lock_pid, Some(std::process::id()));
+        assert_eq!(running.lock_host.as_deref(), Some("autospec-test-host"));
+        assert!(running.lock_acquired_at.is_some());
+
+        match store.release(&adopted) {
+            Ok(()) => {}
+            Err(_) => panic!("release matching lease"),
+        }
+        let released = match store.read_state() {
+            Ok(Some((state, _))) => state,
+            _ => panic!("read released state"),
+        };
+        assert_eq!(released.status, "released");
+        assert!(released.lease_token.is_none());
+        assert_eq!(released.lease_generation, Some(adopted.generation));
+        assert!(released.lock_pid.is_none());
+        assert!(released.lock_host.is_none());
+        assert!(released.lock_session.is_none());
+        assert!(released.lock_acquired_at.is_none());
 
         let _ = fs::remove_dir_all(root);
     }

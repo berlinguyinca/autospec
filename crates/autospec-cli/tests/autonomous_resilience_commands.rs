@@ -123,6 +123,106 @@ fn resilience_decide_rejects_zero_lock_pid_without_a_canonical_write() {
 }
 
 #[test]
+fn resilience_decide_rejects_malformed_token_bearing_state_without_writing() {
+    for (name, state) in [
+        (
+            "claimed-without-lock-pid",
+            token_state(
+                "claimed",
+                Some(now_secs()),
+                None,
+                Some("autospec-test-host"),
+                Some(now_secs()),
+                Some("lease-1"),
+                Some(1),
+            ),
+        ),
+        (
+            "running-without-lock-host",
+            token_state(
+                "running",
+                Some(now_secs()),
+                Some(1),
+                None,
+                Some(now_secs()),
+                Some("lease-1"),
+                Some(1),
+            ),
+        ),
+        (
+            "claimed-without-lock-acquired-at",
+            token_state(
+                "claimed",
+                Some(now_secs()),
+                Some(1),
+                Some("autospec-test-host"),
+                None,
+                Some("lease-1"),
+                Some(1),
+            ),
+        ),
+        (
+            "released-with-active-token",
+            token_state(
+                "released",
+                Some(now_secs()),
+                None,
+                None,
+                None,
+                Some("lease-1"),
+                Some(1),
+            ),
+        ),
+        (
+            "released-with-active-lock",
+            token_state(
+                "released",
+                Some(now_secs()),
+                Some(1),
+                Some("autospec-test-host"),
+                Some(now_secs()),
+                None,
+                Some(1),
+            ),
+        ),
+        (
+            "running-without-heartbeat",
+            token_state(
+                "running",
+                None,
+                Some(1),
+                Some("autospec-test-host"),
+                Some(now_secs()),
+                Some("lease-1"),
+                Some(1),
+            ),
+        ),
+    ] {
+        let fixture = ResilienceFixture::new();
+        fixture.write_state("owner_repo", &state);
+        let source_path = fixture.state_path("owner_repo");
+
+        let output = fixture.run(&["resilience", "decide", "--repo", "owner/repo"]);
+
+        assert_eq!(output.status.code(), Some(3), "{name}");
+        assert_eq!(
+            stdout(&output),
+            "{\"decision\":\"reject\",\"reason\":\"malformed_state\"}\n",
+            "{name}"
+        );
+        assert_eq!(
+            fs::read_to_string(source_path).expect("read source state"),
+            state,
+            "{name}"
+        );
+        assert!(
+            !fixture.canonical_state_path().exists(),
+            "{name} must not write canonical state"
+        );
+    }
+}
+
+#[test]
 fn resilience_decide_reclaims_expired_leases_at_the_documented_boundaries() {
     let claimed = ResilienceFixture::new();
     claimed.write_state(
@@ -1019,6 +1119,26 @@ fn state_with_lock(
         "{{\"repo\":\"{repo}\",\"slug\":\"owner__repo\",\"status\":\"{status}\",\"host\":\"autospec-test-host\",\"session\":\"test\",\"heartbeat_at\":{heartbeat_at},\"lock_pid\":{},\"lock_host\":{},\"lock_session\":null,\"lock_acquired_at\":null}}",
         if lock_pid == 0 { "null".to_string() } else { lock_pid.to_string() },
         lock_host.map(|host| format!("\"{host}\"")).unwrap_or_else(|| "null".to_string()),
+    )
+}
+
+fn token_state(
+    status: &str,
+    heartbeat_at: Option<u64>,
+    lock_pid: Option<u32>,
+    lock_host: Option<&str>,
+    lock_acquired_at: Option<u64>,
+    lease_token: Option<&str>,
+    lease_generation: Option<u64>,
+) -> String {
+    format!(
+        "{{\"repo\":\"owner/repo\",\"slug\":\"owner__repo\",\"status\":\"{status}\",\"host\":\"autospec-test-host\",\"session\":\"test\",\"heartbeat_at\":{},\"lock_pid\":{},\"lock_host\":{},\"lock_session\":null,\"lock_acquired_at\":{},\"lease_token\":{},\"lease_generation\":{}}}",
+        heartbeat_at.map(|timestamp| timestamp.to_string()).unwrap_or_else(|| "null".to_string()),
+        lock_pid.map(|pid| pid.to_string()).unwrap_or_else(|| "null".to_string()),
+        lock_host.map(|host| format!("\"{host}\"")).unwrap_or_else(|| "null".to_string()),
+        lock_acquired_at.map(|timestamp| timestamp.to_string()).unwrap_or_else(|| "null".to_string()),
+        lease_token.map(|token| format!("\"{token}\"")).unwrap_or_else(|| "null".to_string()),
+        lease_generation.map(|generation| generation.to_string()).unwrap_or_else(|| "null".to_string()),
     )
 }
 
