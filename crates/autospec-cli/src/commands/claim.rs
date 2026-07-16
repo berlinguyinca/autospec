@@ -22,6 +22,29 @@ use super::CommandFailure;
 
 static EXECUTOR_RESULT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) enum ConductorClaimError {
+    Diagnostic(CommandFailure),
+    Deferred { json: String, exit_code: i32 },
+}
+
+impl From<CommandFailure> for ConductorClaimError {
+    fn from(error: CommandFailure) -> Self {
+        Self::Diagnostic(error)
+    }
+}
+
+impl ConductorClaimError {
+    fn into_command_failure(self) -> CommandFailure {
+        match self {
+            Self::Diagnostic(error) => error,
+            Self::Deferred { json, exit_code } => {
+                println!("{json}");
+                CommandFailure::status(String::new(), exit_code)
+            }
+        }
+    }
+}
+
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     match args {
         [] => Err(CommandFailure::diagnostic(
@@ -123,7 +146,8 @@ fn release(args: &[String]) -> Result<(), CommandFailure> {
 }
 
 fn acquire(args: &[String]) -> Result<(), CommandFailure> {
-    let lease = acquire_record(parse_acquire_options(args)?)?;
+    let lease = acquire_record(parse_acquire_options(args)?)
+        .map_err(ConductorClaimError::into_command_failure)?;
     println!(
         "{{\"claimed\":true,\"issue\":{},\"repo\":\"{}\",\"worker_id\":\"{}\",\"branch\":\"{}\"}}",
         lease.issue,
@@ -139,7 +163,7 @@ pub(crate) fn acquire_for_conductor(
     issue: u64,
     worker_id: &str,
     branch: &str,
-) -> Result<ClaimLease, CommandFailure> {
+) -> Result<ClaimLease, ConductorClaimError> {
     acquire_record(AcquireOptions {
         issue,
         repo: Some(repo.to_string()),
@@ -227,7 +251,7 @@ fn lifecycle_lease_freshness(server_timestamp: &str) -> LeaseFreshness {
     }
 }
 
-fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, CommandFailure> {
+fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimError> {
     let repo = match options.repo {
         Some(repo) => repo,
         None => infer_repo()?,
@@ -1984,16 +2008,18 @@ fn unavailable_claim<T>(
     repo: &str,
     worker_id: Option<&str>,
     reason: &str,
-) -> Result<T, CommandFailure> {
+) -> Result<T, ConductorClaimError> {
     let worker_id = worker_id
         .map(|value| format!(",\"worker_id\":\"{}\"", json_escape(value)))
         .unwrap_or_default();
-    println!(
-        "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\"{worker_id},\"reason\":\"{}\"}}",
-        json_escape(repo),
-        json_escape(reason),
-    );
-    Err(CommandFailure::status(String::new(), 2))
+    Err(ConductorClaimError::Deferred {
+        json: format!(
+            "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\"{worker_id},\"reason\":\"{}\"}}",
+            json_escape(repo),
+            json_escape(reason),
+        ),
+        exit_code: 2,
+    })
 }
 
 fn unavailable_safety_claim<T>(
@@ -2001,14 +2027,16 @@ fn unavailable_safety_claim<T>(
     repo: &str,
     worker_id: &str,
     safety_reason: &str,
-) -> Result<T, CommandFailure> {
-    println!(
-        "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"reason\":\"safety_gate_failed\",\"safety_gate\":{{\"ok\":false,\"reason\":\"{}\"}}}}",
-        json_escape(repo),
-        json_escape(worker_id),
-        json_escape(safety_reason),
-    );
-    Err(CommandFailure::status(String::new(), 2))
+) -> Result<T, ConductorClaimError> {
+    Err(ConductorClaimError::Deferred {
+        json: format!(
+            "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"reason\":\"safety_gate_failed\",\"safety_gate\":{{\"ok\":false,\"reason\":\"{}\"}}}}",
+            json_escape(repo),
+            json_escape(worker_id),
+            json_escape(safety_reason),
+        ),
+        exit_code: 2,
+    })
 }
 
 fn unavailable_claim_with_observed_owner<T>(
@@ -2016,14 +2044,16 @@ fn unavailable_claim_with_observed_owner<T>(
     repo: &str,
     worker_id: &str,
     observed_owner: &str,
-) -> Result<T, CommandFailure> {
-    println!(
-        "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"reason\":\"claim_lost\",\"observed_owner\":\"{}\"}}",
-        json_escape(repo),
-        json_escape(worker_id),
-        json_escape(observed_owner),
-    );
-    Err(CommandFailure::status(String::new(), 2))
+) -> Result<T, ConductorClaimError> {
+    Err(ConductorClaimError::Deferred {
+        json: format!(
+            "{{\"claimed\":false,\"issue\":{issue},\"repo\":\"{}\",\"worker_id\":\"{}\",\"reason\":\"claim_lost\",\"observed_owner\":\"{}\"}}",
+            json_escape(repo),
+            json_escape(worker_id),
+            json_escape(observed_owner),
+        ),
+        exit_code: 2,
+    })
 }
 
 fn print_help() {

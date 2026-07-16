@@ -1402,6 +1402,8 @@ fn autonomous_run_foreground_stops_before_rust_executor_when_health_branch_is_mi
         ])
         .env("PATH", path_with(&bin))
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", temp.join("operator"))
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", temp.join("state"))
         .output()
         .expect("autospec autonomous run-foreground runs");
@@ -1448,6 +1450,8 @@ fn autonomous_foreground_stop_precedes_health_and_dispatch() {
         .env("AUTOSPEC_GH_LOG", &gh_log)
         .env("AUTOSPEC_STOP_FLAG_FILE", &stop_flag)
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", temp.join("operator"))
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .output()
         .expect("autospec autonomous run-foreground runs");
 
@@ -1525,6 +1529,8 @@ fn autonomous_start_live_writes_repo_scoped_pid_and_log_metadata() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
@@ -1576,6 +1582,8 @@ fn autonomous_status_json_reports_companion_processes() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
@@ -1593,6 +1601,8 @@ fn autonomous_status_json_reports_companion_processes() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .output()
         .expect("autospec autonomous status runs");
@@ -1621,16 +1631,24 @@ fn autonomous_status_json_reports_state_heartbeat_and_spend_metadata() {
         .join("berlinguyinca_autospec");
     std::fs::create_dir_all(&scope).expect("scope dir");
     std::fs::create_dir_all(&state_scope).expect("state scope");
-    std::fs::create_dir_all(home.join(".autospec")).expect("home autospec");
+    std::fs::create_dir_all(
+        home.join(".autospec")
+            .join("autonomous-spend")
+            .join("berlinguyinca__autospec"),
+    )
+    .expect("scoped spend dir");
     std::fs::write(scope.join("conductor.pid"), "999999\n").expect("pid");
     std::fs::write(
         state_scope.join("state.json"),
-        "{\"status\":\"parked:usage-limit\",\"heartbeat_at\":1783526400,\"cycle\":42}\n",
+        "{\"repo\":\"berlinguyinca/autospec\",\"status\":\"parked:usage-limit\",\"heartbeat_at\":1783526400,\"cycle\":42}\n",
     )
     .expect("state");
     std::fs::write(
-        home.join(".autospec").join("autonomous-spend.json"),
-        "{\"tokens\":1234,\"issues\":5}\n",
+        home.join(".autospec")
+            .join("autonomous-spend")
+            .join("berlinguyinca__autospec")
+            .join("spend.json"),
+        "{\"schema\":1,\"tokens\":1234,\"issues\":5}\n",
     )
     .expect("spend");
 
@@ -1658,6 +1676,45 @@ fn autonomous_status_json_reports_state_heartbeat_and_spend_metadata() {
 }
 
 #[test]
+fn autonomous_status_reports_the_repo_scoped_resilience_spend_ledger() {
+    let temp = temp_dir("autospec-autonomous-scoped-spend-status");
+    let scoped_spend = temp
+        .join("spend")
+        .join("berlinguyinca__autospec")
+        .join("spend.json");
+    let legacy_spend = temp.join("legacy-spend.json");
+    std::fs::create_dir_all(scoped_spend.parent().expect("scoped spend parent"))
+        .expect("create scoped spend parent");
+    std::fs::write(&scoped_spend, "{\"schema\":1,\"tokens\":9,\"issues\":2}\n")
+        .expect("scoped spend");
+    std::fs::write(&legacy_spend, "{\"tokens\":1234,\"issues\":5}\n").expect("legacy spend");
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "status",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--json",
+        ])
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_FILE", &legacy_spend)
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", temp.join("operator"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", temp.join("logs"))
+        .output()
+        .expect("autospec autonomous status runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"spend\":{\"tokens\":9,\"issues\":2}"));
+    assert!(
+        !stdout.contains("1234"),
+        "status must not display the legacy global spend file when policy uses a scoped ledger"
+    );
+}
+
+#[test]
 fn autonomous_status_all_json_aliases_list_with_conductors_key() {
     let temp = temp_dir("autospec-autonomous-status-all");
     let operator_dir = temp.join("operator");
@@ -1668,6 +1725,8 @@ fn autonomous_status_all_json_aliases_list_with_conductors_key() {
     let output = autospec()
         .args(["autonomous", "status", "--all", "--json"])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .output()
         .expect("autospec autonomous status all runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1711,6 +1770,8 @@ fn autonomous_stop_kills_only_the_target_repo_scope() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("AUTOSPEC_STOP_FLAG_FILE", &stop_flag)
         .output()
@@ -1754,6 +1815,8 @@ fn autonomous_stop_graceful_writes_sentinel_and_leaves_conductor_running() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("AUTOSPEC_STOP_FLAG_FILE", &stop_flag)
         .output()
@@ -1796,6 +1859,8 @@ fn autonomous_list_json_reports_each_repo_scope_with_companions() {
     let output = autospec()
         .args(["autonomous", "list", "--json"])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .output()
         .expect("autospec autonomous list runs");
@@ -1836,6 +1901,8 @@ fn autonomous_status_marks_stale_metadata_for_dead_pids() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .output()
         .expect("autospec autonomous status runs");
@@ -1873,6 +1940,8 @@ fn autonomous_logs_json_reads_recorded_conductor_log_tail() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .output()
         .expect("autospec autonomous logs runs");
@@ -1909,6 +1978,8 @@ fn autonomous_watch_once_reads_recorded_conductor_log_tail() {
             "--once",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .output()
         .expect("autospec autonomous watch runs");
@@ -2124,6 +2195,8 @@ fn autonomous_start_without_repo_uses_git_remote_scope() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
@@ -2153,6 +2226,8 @@ fn autonomous_start_non_git_repo_dir_fails_loud() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .output()
         .expect("autospec autonomous start runs");
@@ -2183,6 +2258,8 @@ fn autonomous_start_mismatched_repo_warns_but_launches() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
@@ -2222,6 +2299,8 @@ fn autonomous_start_writes_launch_provenance_and_list_reports_it() {
     let output = autospec()
         .args(["autonomous", "list", "--json"])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .output()
         .expect("autospec autonomous list runs");
@@ -2244,6 +2323,8 @@ fn autonomous_list_reports_empty_object_for_malformed_launch_json() {
     let output = autospec()
         .args(["autonomous", "list", "--json"])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .output()
         .expect("autospec autonomous list runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2281,6 +2362,8 @@ fn autonomous_start_records_argv_and_passthrough_options_in_launch_provenance() 
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
@@ -2360,6 +2443,8 @@ fn autonomous_start_companion_opt_out_skips_monitor_and_supervisor_processes() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
@@ -2392,6 +2477,8 @@ fn autonomous_stop_defaults_to_repo_scoped_stop_flag() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .output()
         .expect("autospec autonomous stop runs");
@@ -2486,6 +2573,8 @@ fn autonomous_start_uses_explicit_conductor_log_path() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
@@ -2506,13 +2595,20 @@ fn autonomous_start_uses_explicit_conductor_log_path() {
 }
 
 #[test]
-fn autonomous_start_refuses_duplicate_conductor_without_force() {
+fn autonomous_start_rejects_a_fresh_existing_lease_without_force() {
     let temp = temp_dir("autospec-autonomous-duplicate");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
     let repo_dir = temp.join("repo");
+    let state_dir = temp.join("state");
     make_git_repo(&repo_dir, None);
-    start_sleeping_autonomous(&operator_dir, &log_dir, &repo_dir, "berlinguyinca/autospec");
+    start_sleeping_autonomous_with_state(
+        &operator_dir,
+        &log_dir,
+        &repo_dir,
+        "berlinguyinca/autospec",
+        &state_dir,
+    );
     let scope = operator_dir.join("berlinguyinca_autospec");
     let original = read_pid(&scope, "conductor");
 
@@ -2527,28 +2623,36 @@ fn autonomous_start_refuses_duplicate_conductor_without_force() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
         .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
         .output()
         .expect("autospec autonomous start runs");
-    let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(!output.status.success());
-    assert!(stderr.contains("already running"));
+    assert_lease_held(&output);
     assert_eq!(read_pid(&scope, "conductor"), original);
+    assert!(process_is_alive(&original));
     cleanup_pids(&scope);
 }
 
 #[test]
-fn autonomous_start_force_replaces_existing_conductor() {
+fn autonomous_start_force_rejects_a_fresh_existing_lease_without_killing_conductor() {
     let temp = temp_dir("autospec-autonomous-force");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
     let repo_dir = temp.join("repo");
+    let state_dir = temp.join("state");
     make_git_repo(&repo_dir, None);
-    start_sleeping_autonomous(&operator_dir, &log_dir, &repo_dir, "berlinguyinca/autospec");
+    start_sleeping_autonomous_with_state(
+        &operator_dir,
+        &log_dir,
+        &repo_dir,
+        "berlinguyinca/autospec",
+        &state_dir,
+    );
     let scope = operator_dir.join("berlinguyinca_autospec");
     let original = read_pid(&scope, "conductor");
 
@@ -2564,6 +2668,47 @@ fn autonomous_start_force_replaces_existing_conductor() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("PATH", hermetic_autonomous_path(&temp))
+        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
+        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
+        .output()
+        .expect("autospec autonomous start runs");
+
+    assert_lease_held(&output);
+    assert_eq!(read_pid(&scope, "conductor"), original);
+    assert!(process_is_alive(&original));
+    cleanup_pids(&scope);
+}
+
+#[test]
+fn autonomous_start_force_replaces_unleased_legacy_conductor_metadata() {
+    let temp = temp_dir("autospec-autonomous-force-legacy-metadata");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let repo_dir = temp.join("repo");
+    let state_dir = temp.join("state");
+    make_git_repo(&repo_dir, None);
+    let scope = operator_dir.join("berlinguyinca_autospec");
+    let original = seed_unleased_legacy_conductor(&scope);
+    assert!(!fresh_lease_state_path(&state_dir).exists());
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--force",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
@@ -2650,6 +2795,8 @@ fn autonomous_cleanup_removes_dead_metadata_without_killing_live_units() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .output()
         .expect("autospec autonomous cleanup runs");
@@ -2682,6 +2829,8 @@ fn autonomous_supervise_reports_stale_metadata_action_for_dead_recorded_pid() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .output()
         .expect("autospec autonomous supervise runs");
@@ -2692,16 +2841,25 @@ fn autonomous_supervise_reports_stale_metadata_action_for_dead_recorded_pid() {
 }
 
 #[test]
-fn autonomous_restart_replaces_existing_target_companions() {
+fn autonomous_restart_rejects_a_fresh_existing_lease_without_killing_conductor_or_clearing_stop() {
     let temp = temp_dir("autospec-autonomous-restart");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
+    let stop_flag = temp.join("stop.flag");
     let repo_dir = temp.join("repo");
-    std::fs::create_dir_all(&repo_dir).expect("repo dir");
+    let state_dir = temp.join("state");
+    make_git_repo(&repo_dir, None);
 
-    start_sleeping_autonomous(&operator_dir, &log_dir, &repo_dir, "berlinguyinca/autospec");
+    start_sleeping_autonomous_with_state(
+        &operator_dir,
+        &log_dir,
+        &repo_dir,
+        "berlinguyinca/autospec",
+        &state_dir,
+    );
     let scope = operator_dir.join("berlinguyinca_autospec");
     let old_conductor = read_pid(&scope, "conductor");
+    std::fs::write(&stop_flag, "graceful\nexisting\n").expect("stop flag");
 
     let output = autospec()
         .args([
@@ -2716,6 +2874,54 @@ fn autonomous_restart_replaces_existing_target_companions() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("PATH", hermetic_autonomous_path(&temp))
+        .env("AUTOSPEC_STOP_FLAG_FILE", &stop_flag)
+        .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
+        .env("AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD", "sleep 20")
+        .output()
+        .expect("autospec autonomous restart runs");
+
+    assert_lease_held(&output);
+    assert_eq!(read_pid(&scope, "conductor"), old_conductor);
+    assert!(process_is_alive(&old_conductor));
+    assert_eq!(
+        std::fs::read_to_string(&stop_flag).expect("preserved stop flag"),
+        "graceful\nexisting\n"
+    );
+
+    cleanup_pids(&scope);
+}
+
+#[test]
+fn autonomous_restart_replaces_unleased_legacy_conductor_metadata() {
+    let temp = temp_dir("autospec-autonomous-restart-legacy-metadata");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let repo_dir = temp.join("repo");
+    let state_dir = temp.join("state");
+    make_git_repo(&repo_dir, None);
+    let scope = operator_dir.join("berlinguyinca_autospec");
+    let old_conductor = seed_unleased_legacy_conductor(&scope);
+    assert!(!fresh_lease_state_path(&state_dir).exists());
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "restart",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--max-cycles",
+            "7",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
@@ -2757,6 +2963,8 @@ fn autonomous_restart_clears_existing_stop_flag_before_launch() {
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
         .env("PATH", hermetic_autonomous_path(&temp))
         .env("AUTOSPEC_STOP_FLAG_FILE", &stop_flag)
@@ -2796,11 +3004,36 @@ fn cli_commands_json_modes_emit_json() {
     }
 }
 
+fn autonomous_test_state_dir(operator_dir: &std::path::Path) -> std::path::PathBuf {
+    operator_dir
+        .parent()
+        .expect("operator directory belongs to isolated test fixture")
+        .join("state")
+}
+
+fn autonomous_test_spend_dir(operator_dir: &std::path::Path) -> std::path::PathBuf {
+    operator_dir
+        .parent()
+        .expect("operator directory belongs to isolated test fixture")
+        .join("spend")
+}
+
 fn start_sleeping_autonomous(
     operator_dir: &std::path::Path,
     log_dir: &std::path::Path,
     repo_dir: &std::path::Path,
     repo: &str,
+) {
+    let state_dir = autonomous_test_state_dir(operator_dir);
+    start_sleeping_autonomous_with_state(operator_dir, log_dir, repo_dir, repo, &state_dir);
+}
+
+fn start_sleeping_autonomous_with_state(
+    operator_dir: &std::path::Path,
+    log_dir: &std::path::Path,
+    repo_dir: &std::path::Path,
+    repo: &str,
+    state_dir: &std::path::Path,
 ) {
     if !repo_dir.join(".git").exists() {
         make_git_repo(repo_dir, None);
@@ -2816,6 +3049,14 @@ fn start_sleeping_autonomous(
             "--json",
         ])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", operator_dir)
+        .env("AUTOSPEC_STATE_DIR", state_dir)
+        .env(
+            "AUTOSPEC_AUTONOMOUS_SPEND_DIR",
+            state_dir
+                .parent()
+                .expect("state directory belongs to isolated test fixture")
+                .join("spend"),
+        )
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", log_dir)
         .env("PATH", hermetic_autonomous_path(operator_dir))
         .env("AUTOSPEC_AUTONOMOUS_MONITOR_CMD", "sleep 20")
@@ -2859,6 +3100,14 @@ fn autonomous_status(
     let output = autospec()
         .args(["autonomous", "status", "--repo", repo, "--json"])
         .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", operator_dir)
+        .env(
+            "AUTOSPEC_STATE_DIR",
+            autonomous_test_state_dir(operator_dir),
+        )
+        .env(
+            "AUTOSPEC_AUTONOMOUS_SPEND_DIR",
+            autonomous_test_spend_dir(operator_dir),
+        )
         .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", log_dir)
         .output()
         .expect("autospec autonomous status runs");
@@ -2880,6 +3129,42 @@ fn process_is_alive(pid: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+fn assert_lease_held(output: &Output) {
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"decision\":\"park\",\"reason\":\"conductor_lease_held\"}\n"
+    );
+}
+
+fn fresh_lease_state_path(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir
+        .join("autonomous")
+        .join("berlinguyinca__autospec")
+        .join("state.json")
+}
+
+fn seed_unleased_legacy_conductor(scope: &std::path::Path) -> String {
+    std::fs::create_dir_all(scope).expect("legacy conductor scope");
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            "sleep 20 </dev/null >/dev/null 2>&1 & printf '%s\\n' \"$!\"",
+        ])
+        .output()
+        .expect("legacy conductor process");
+    assert!(output.status.success());
+    let pid = String::from_utf8(output.stdout)
+        .expect("legacy conductor pid")
+        .trim()
+        .to_string();
+    std::fs::write(scope.join("conductor.pid"), format!("{pid}\n"))
+        .expect("legacy conductor pid metadata");
+    std::fs::write(scope.join("conductor.logpath"), "legacy-conductor.log\n")
+        .expect("legacy conductor log metadata");
+    pid
 }
 
 fn issue_body(goal: &str, acceptance_criteria: &str, smoke: &str) -> String {

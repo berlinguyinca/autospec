@@ -1,8 +1,46 @@
 use autospec_core::autonomous_lifecycle::{
-    decide, Budget, ClaimBranch, ClaimContext, ClaimEvidence, Health, IssueNumber, LeaseFreshness,
-    LifecycleDecision, LifecycleInput, LifecycleReject, LifecycleTier, ParkReason, RepositoryScope,
-    StopMode, WorkerId, ABANDONED_LEASE_SECS, ISSUE_FAILURE_CAP, STALE_LEASE_SECS,
+    decide, decide_capacity, decide_conductor_lease, Budget, CapacityDecision, CapacityInput,
+    ClaimBranch, ClaimContext, ClaimEvidence, ConductorLeaseDecision, ConductorLeaseInput,
+    ConductorLeaseReclaim, Health, IssueNumber, LeaseFreshness, LifecycleDecision, LifecycleInput,
+    LifecycleReject, LifecycleTier, ParkReason, RepositoryScope, StopMode, WorkerId,
+    ABANDONED_LEASE_SECS, ISSUE_FAILURE_CAP, STALE_LEASE_SECS,
 };
+
+#[test]
+fn conductor_lease_reclaims_at_boundaries_and_for_dead_local_pid() {
+    assert_eq!(
+        decide_conductor_lease(ConductorLeaseInput::claimed(300, false)),
+        ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::ClaimedExpired),
+    );
+    assert_eq!(
+        decide_conductor_lease(ConductorLeaseInput::running(10_800, false)),
+        ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::Abandoned),
+    );
+    assert_eq!(
+        decide_conductor_lease(ConductorLeaseInput::running(300, false)),
+        ConductorLeaseDecision::Held,
+    );
+    assert_eq!(
+        decide_conductor_lease(ConductorLeaseInput::running(1, true)),
+        ConductorLeaseDecision::Reclaim(ConductorLeaseReclaim::DeadSameHostPid),
+    );
+}
+
+#[test]
+fn capacity_checks_usage_before_issue_and_zero_disables_a_cap() {
+    assert_eq!(
+        decide_capacity(CapacityInput::new(10, 10, 4, 4)),
+        CapacityDecision::UsageCap
+    );
+    assert_eq!(
+        decide_capacity(CapacityInput::new(10, 0, 4, 4)),
+        CapacityDecision::IssueCap
+    );
+    assert_eq!(
+        decide_capacity(CapacityInput::new(0, 10, 10_000, 0)),
+        CapacityDecision::WithinCap
+    );
+}
 
 #[test]
 fn stop_precedes_ready_tier_one() {

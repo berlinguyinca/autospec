@@ -25,7 +25,8 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec claim acquire\|release ...` | yes | applies the typed safety gate, heartbeat/label ordering, lease CAS, and terminal release transitions |
 | `autospec queue ready [--repo OWNER/REPO] [--batch-size N]` | yes | scans every Rust-owned GitHub issue page and returns typed eligibility, gate totals, and scan scope |
 | `autospec queue review-safety --repo OWNER/REPO --limit N [--issue N]` | yes | writes bounded Rust issue-intent safety decisions and reports outcome totals |
-| `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR` | no | drives one Rust-owned queue/claim cycle and persists a deferred foreground receipt; it launches no implementation agent |
+| `autospec autonomous resilience decide --repo OWNER/REPO [--issue N] [--budget-tokens N] [--budget-issues N]` | yes | reads resilient admission state without migration; atomic lifecycle ownership writes only canonical `owner__repo` state and starts no shell process |
+| `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR` | no | adopts its fenced native-child token or atomically acquires one before lifecycle, health, queue, claim, or foreground mutation; it launches no implementation agent |
 | `autospec autonomous lifecycle decide --repo OWNER/REPO [--claim-repo OWNER/REPO --claim-issue N --claim-worker ID --claim-branch NAME --claim-state active\|terminal] [--lease-age-sec N] [--stop graceful\|immediate] [--health continue\|wait\|halt] [--budget within\|soft\|hard] [--ready-tier 1\|1.5\|2\|3\|4\|5\|6\|7\|idle]` | yes | evaluates one pure typed lifecycle decision without filesystem, process, GitHub, shell, or `omx` effects |
 | `autospec autonomous executor-result --repo OWNER/REPO --issue N [--worker-id ID --branch NAME --outcome succeeded\|blocked\|retryable ...]` | yes | records either the exact legacy deferred receipt or one strictly validated executor outcome; it never launches work, releases a claim, or merges a PR |
 | `autospec run --run <id> --spec <id>... [--json]` | yes | creates a local persisted queue only; it does not launch an agent or validation command |
@@ -99,6 +100,49 @@ mutation. Explicit executor-result ingestion is described below. Neither form la
 implementation agent, invokes a shell, script, `omx`, or `/autospec-run`, releases a claim, or
 merges a PR. Detached `autonomous start` and `restart` likewise launch this foreground command as
 a direct Rust child; monitor and supervisor are separate compatibility companions.
+
+`autospec autonomous resilience --help` describes the one supported action and its canonical
+write slug, `owner__repo`. `resilience decide` reads state, per-issue failure, and spend records
+for `owner/repo` in the strict order `owner__repo`, `owner_repo`, then `owner-repo`. The first
+existing record is authoritative: malformed records fail closed instead of falling through, and a
+state record for another repository returns the `foreign_state` rejection. Read-only admission
+does not migrate a compatibility layout. Every acquisition, adoption, or release targets only
+`owner__repo`; neither legacy layout is written. The separate
+`.autospec/autonomous-operator/<scope>/` directory is lifecycle-only and never stores resilience
+compatibility state.
+
+The command prints exactly one JSON decision. `available` and `reclaim` exit `0`; `held` and
+capacity parks exit `20`; malformed, foreign, or failure-cap rejections exit `3`. Claimed leases
+are reclaimable at the inclusive 300-second boundary and all leases at the inclusive 10,800-second
+abandoned boundary (with missing heartbeats and dead same-host PIDs also reclaimable). Capacity is
+also inclusive: a nonzero usage limit is evaluated first, then a nonzero issue limit; `0` disables
+the corresponding limit. This adapter reads and evaluates state only: it does not invoke
+`scripts/autonomous-resilience.sh`, `sh`, or `bash`.
+
+`start` and `restart` finish read-only repository, stored-stop, and lifetime-budget validation
+before atomically taking the local non-blocking Unix lease at
+`autonomous/owner__repo/conductor.lease.lock`. Only then may they create operator directories,
+persist lifecycle/launch metadata, terminate a unit, or clear a stop flag. A fresh held lease
+parks with `conductor_lease_held` (`20`), so a held `restart` cannot kill a process or remove a
+stop flag. Capacity/failure policy results retain their park/reject JSON and do not create a
+claimed lease. The opaque claimed token and monotonic generation fence delayed children: native
+launch passes the token only in `AUTOSPEC_CONDUCTOR_LEASE_TOKEN` through `Command::env`, never in
+arguments, launch JSON, or logs. A launch failure terminates already-started children and releases
+only the matching lease.
+
+Foreground first honors a persisted stop for executable work. When a launcher supplied a token, it
+first adopts that token solely to gain matching release authority, then releases it before returning
+the persisted-stop or a pre-admission diagnostic. Otherwise it atomically adopts the environment
+token (or, when absent, acquires its own) before lifecycle, health, queue, claim, or foreground-state
+work. `conductor_lease_token_mismatch` is a reject (`3`) before any local or GitHub mutation.
+Matching ownership is rechecked for final selection and dispatch, preserving their admission gates;
+terminal foreground work persists its decision before releasing only its exact matching token.
+`autonomous status --json` reports the same scoped
+`AUTOSPEC_AUTONOMOUS_SPEND_DIR/<owner__repo>/spend.json` ledger used by admission, not the retired
+global spend file. I/O and transaction failures are
+diagnostics (`2`) with no decision JSON, while malformed/foreign records and token fencing are
+JSON rejects (`3`). The local lease coordinates only the shared filesystem; GitHub claim ownership
+remains the remote mutation arbiter.
 
 `autospec autonomous lifecycle decide` evaluates the typed repository scope, issue, worker,
 claim branch, lease freshness, stop, ownership, retry, health, budget, waterfall-tier, and
